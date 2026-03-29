@@ -517,6 +517,12 @@ void FrameTick(float dt)
             sCamera.x += sinf(sCamera.angle) * moveSpeed;
             sCamera.z += cosf(sCamera.angle) * moveSpeed;
         }
+        // Pitch (I = look down / horizon up, K = look up / horizon down)
+        if (ImGui::IsKeyDown(ImGuiKey_I))
+            sCamera.horizon = std::min(120.0f, sCamera.horizon + 60.0f * dt);
+        if (ImGui::IsKeyDown(ImGuiKey_K))
+            sCamera.horizon = std::max(10.0f, sCamera.horizon - 60.0f * dt);
+
         if (ImGui::IsKeyDown(ImGuiKey_Q))
             sCamera.height = std::max(8.0f, sCamera.height - 40.0f * dt);
         if (ImGui::IsKeyDown(ImGuiKey_E))

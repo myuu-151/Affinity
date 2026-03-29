@@ -80,8 +80,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map)
     float cosA = cosf(-cam.angle);
     float sinA = sinf(-cam.angle);
 
-    // Horizon line — where lambda would go to infinity
-    int horizon = kGBAHeight / 3; // top third is sky
+    // Horizon line — controlled by camera pitch (I/K keys)
+    int horizon = (int)cam.horizon;
 
     for (int y = 0; y < kGBAHeight; y++)
     {

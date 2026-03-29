@@ -28,15 +28,15 @@ static FIXED g_cosf, g_sinf;
 // Mode 7 HBlank interrupt — per-scanline affine update
 // ---------------------------------------------------------------------------
 
-// Horizon scanline — everything above this is sky (backdrop color)
-#define M7_HORIZON 54
+// Horizon scanline — variable for pitch control (A/B buttons)
+static int m7_horizon = 54;
 
 static void m7_hbl(void)
 {
     int vc = REG_VCOUNT;
 
     // Above horizon: disable BG2 so backdrop color (sky) shows
-    if (vc < M7_HORIZON)
+    if (vc < m7_horizon)
     {
         REG_DISPCNT &= ~DCNT_BG2;
         return;
@@ -48,7 +48,7 @@ static void m7_hbl(void)
     REG_DISPCNT |= DCNT_BG2;
 
     // lambda = cam_height / (scanline - horizon)
-    FIXED lam = cam_h * lu_div(vc - M7_HORIZON) >> 12;
+    FIXED lam = cam_h * lu_div(vc - m7_horizon) >> 12;
 
     FIXED lcf = lam * g_cosf >> 8;
     FIXED lsf = lam * g_sinf >> 8;
@@ -187,11 +187,17 @@ int main(void)
             cam_z += (g_cosf * moveSpeed) >> 8;
         }
 
-        // Height
+        // Height (L/R shoulders)
         if (key_is_down(KEY_L) && cam_h > (16 << 8))
             cam_h -= 0x0100;
         if (key_is_down(KEY_R) && cam_h < (200 << 8))
             cam_h += 0x0100;
+
+        // Pitch / orbit (A = look down, B = look up)
+        if (key_is_down(KEY_A) && m7_horizon < 120)
+            m7_horizon += 2;
+        if (key_is_down(KEY_B) && m7_horizon > 10)
+            m7_horizon -= 2;
 
         // Reset
         if (key_hit(KEY_START))
@@ -200,6 +206,7 @@ int main(void)
             cam_z     = 128 << 8;
             cam_h     = 64 << 8;
             cam_angle = 0;
+            m7_horizon = 54;
         }
     }
 

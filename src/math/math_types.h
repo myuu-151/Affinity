@@ -16,6 +16,7 @@ struct Mode7Camera
     float x     = 0.0f;   // world X
     float z     = 0.0f;   // world Z (forward)
     float height = 64.0f; // camera height above ground plane
-    float angle  = 0.0f;  // yaw in radians
-    float fov    = 128.0f; // focal distance D (perspective strength)
+    float angle   = 0.0f;  // yaw in radians
+    float fov     = 128.0f; // focal distance D (perspective strength)
+    float horizon = 54.0f;  // horizon scanline (pitch control)
 };
