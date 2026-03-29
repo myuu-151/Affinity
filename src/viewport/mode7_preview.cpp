@@ -290,6 +290,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         if (fovLambda <= 0.5f) continue;
 
         float lambda = fovLambda / cam.fov;
+        if (lambda < 0.01f) lambda = 0.01f; // prevent overflow when camera is very close
 
         // screenY from lambda = height / (y - horizon) => y = horizon + height / lambda
         int screenY = horizon + (int)((cam.height - sprites[i].y) / lambda);
@@ -370,21 +371,27 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         float dz = camObj->z - cam.z;
 
         float fovLambda = dx * sinA - dz * cosA;
-        if (fovLambda > 1.0f)
+        if (fovLambda > 2.0f)
         {
             float lambda = fovLambda / cam.fov;
+            if (lambda < 0.01f) lambda = 0.01f; // prevent overflow when camera is very close
+
             int screenY = horizon + (int)(cam.height / lambda);
             float sideComponent = dx * cosA + dz * sinA;
             int screenX = 120 + (int)(sideComponent / lambda);
 
-            float fog = lambda / 300.0f;
-            if (fog > 1.0f) fog = 1.0f;
+            // Skip if way off screen
+            if (screenY > -200 && screenY < kGBAHeight + 200 &&
+                screenX > -200 && screenX < kGBAWidth + 200)
+            {
+                float fog = lambda / 300.0f;
+                if (fog > 1.0f) fog = 1.0f;
 
-            float scale = cam.height / lambda;
-            int half = std::max(2, (int)(10.0f * scale / cam.height * 16.0f * camObjScale));
+                float scale = cam.height / lambda;
+                int half = std::max(2, (int)(10.0f * scale / cam.height * 16.0f * camObjScale));
 
-            // Draw at foot position — bright white/cyan
-            DrawSquare(screenX, screenY - half, half, 100, 220, 255, fog);
+                DrawSquare(screenX, screenY - half, half, 100, 220, 255, fog);
+            }
         }
     }
 }

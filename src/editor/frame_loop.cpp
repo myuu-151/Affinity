@@ -69,8 +69,8 @@ enum class EditorMode { Edit, Play };
 enum class SelectedObjType { None, Sprite, Camera };
 static EditorMode sEditorMode = EditorMode::Edit;
 static SelectedObjType sSelectedObjType = SelectedObjType::None;
-static CameraStartObject sCamObj = { 0.0f, 0.0f, 8.0f, 0.0f, 50.0f };
-static float sCamObjEditorScale = 0.3f; // editor-only visual size
+static CameraStartObject sCamObj = { 0.0f, 0.0f, 10.0f, 0.0f, 50.0f };
+static float sCamObjEditorScale = 0.05f; // editor-only visual size
 static Mode7Camera sSavedEditorCam;
 
 // Preferences
