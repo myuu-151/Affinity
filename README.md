@@ -2,7 +2,9 @@
 
 A Game Boy Advance Mode 7 engine with a Windows desktop editor. Design Mode 7 floor planes in a live preview editor, then package directly to a `.gba` ROM.
 
-![Affinity Logo](assets/affinity.png)
+> **This project is in active development.** Features and APIs may change.
+
+<img src="assets/affinity.png" alt="Affinity Logo" width="128">
 
 ## Features
 
