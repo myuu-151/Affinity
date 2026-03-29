@@ -1,4 +1,4 @@
-// Affinity GBA Runtime — Mode 7 floor with D-pad camera
+// Affinity GBA Runtime — Mode 7 floor with D-pad camera + OAM sprites
 // Built with devkitARM + libtonc
 
 #include <tonc.h>
@@ -24,12 +24,37 @@ static FIXED cam_fov;      // focal distance D
 // Precomputed sin/cos for current angle
 static FIXED g_cosf, g_sinf;
 
+// Horizon scanline — variable for pitch control (A/B buttons)
+static int m7_horizon = 54;
+
+// ---------------------------------------------------------------------------
+// Floor sprites — positions in 16.8 fixed-point
+// ---------------------------------------------------------------------------
+
+#define MAX_FLOOR_SPRITES 16
+
+typedef struct {
+    FIXED x;
+    FIXED y;         // height above floor (16.8)
+    FIXED z;
+    u16   palIdx;    // OBJ palette color index
+} FloorSpriteGBA;
+
+static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
+static int g_spriteCount = 0;
+
+// Sprite projection result for sorting
+typedef struct {
+    int screenX;
+    int screenY;
+    int scale;    // 8.8 fixed-point scale (256 = 1x)
+    int depth;    // for sorting (larger = farther)
+    int idx;      // sprite index
+} SpriteProjGBA;
+
 // ---------------------------------------------------------------------------
 // Mode 7 HBlank interrupt — per-scanline affine update
 // ---------------------------------------------------------------------------
-
-// Horizon scanline — variable for pitch control (A/B buttons)
-static int m7_horizon = 54;
 
 static void m7_hbl(void)
 {
@@ -111,6 +136,189 @@ static void load_editor_map(void)
 #endif
 
 // ---------------------------------------------------------------------------
+// OBJ sprite setup — 8x8 diamond shape in OBJ VRAM
+// ---------------------------------------------------------------------------
+
+static void init_obj_sprites(void)
+{
+    // Enable OBJ layer and 1D OBJ mapping
+    REG_DISPCNT |= DCNT_OBJ | DCNT_OBJ_1D;
+
+    // Build an 8x8 diamond tile in OBJ VRAM (4bpp, tile 0)
+    // 4bpp: 2 pixels per byte, 32 bytes per 8x8 tile
+    u32 *tile = (u32*)&tile_mem[4][0];
+    memset(tile, 0, 32);
+
+    // Diamond pattern: palette index 1 for filled pixels
+    // Row 0:    ...X....  (center pixel)
+    // Row 1:    ..XXX...
+    // Row 2:    .XXXXX..
+    // Row 3:    XXXXXXX.
+    // Row 4:    XXXXXXX.
+    // Row 5:    .XXXXX..
+    // Row 6:    ..XXX...
+    // Row 7:    ...X....
+    static const u32 diamond[8] = {
+        0x00010000,  // row 0: pixel 3
+        0x00111000,  // row 1: pixels 2-4
+        0x01111100,  // row 2: pixels 1-5
+        0x11111110,  // row 3: pixels 0-6
+        0x11111110,  // row 4: pixels 0-6
+        0x01111100,  // row 5: pixels 1-5
+        0x00111000,  // row 6: pixels 2-4
+        0x00010000,  // row 7: pixel 3
+    };
+
+    // Write 4bpp tile data (nibble-packed, 4 bytes per row)
+    u8 *tdata = (u8*)&tile_mem[4][0];
+    for (int row = 0; row < 8; row++)
+    {
+        u32 pix = diamond[row];
+        for (int col = 0; col < 4; col++)
+        {
+            u8 lo = (pix >> (col * 8)) & 0xF;
+            u8 hi = (pix >> (col * 8 + 4)) & 0xF;
+            tdata[row * 4 + col] = lo | (hi << 4);
+        }
+    }
+
+    // Set OBJ palette colors (palette 0)
+    pal_obj_mem[0] = 0;                    // transparent
+    pal_obj_mem[1] = RGB15(31, 31, 0);     // yellow (default sprite color)
+    pal_obj_mem[2] = RGB15(31, 8, 8);      // red
+    pal_obj_mem[3] = RGB15(8, 8, 31);      // blue
+    pal_obj_mem[4] = RGB15(8, 31, 8);      // green
+    pal_obj_mem[5] = RGB15(31, 16, 31);    // pink
+
+    // Hide all OBJ initially
+    oam_init(obj_mem, 128);
+}
+
+// Place demo sprites if no editor data
+static void init_demo_sprites(void)
+{
+    // Place a few sprites around the map for testing
+    g_sprites[0].x = 160 << 8;
+    g_sprites[0].y = 0;
+    g_sprites[0].z = 128 << 8;
+    g_sprites[0].palIdx = 1;
+
+    g_sprites[1].x = 96 << 8;
+    g_sprites[1].y = 10 << 8;   // floating
+    g_sprites[1].z = 96 << 8;
+    g_sprites[1].palIdx = 2;
+
+    g_sprites[2].x = 160 << 8;
+    g_sprites[2].y = 0;
+    g_sprites[2].z = 64 << 8;
+    g_sprites[2].palIdx = 3;
+
+    g_sprites[3].x = 64 << 8;
+    g_sprites[3].y = 20 << 8;   // high up
+    g_sprites[3].z = 160 << 8;
+    g_sprites[3].palIdx = 4;
+
+    g_spriteCount = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Project sprites to screen and update OAM
+// ---------------------------------------------------------------------------
+
+static void update_sprites(void)
+{
+    SpriteProjGBA proj[MAX_FLOOR_SPRITES];
+    int projCount = 0;
+    int i, j;
+    SpriteProjGBA tmp;
+
+    for (i = 0; i < g_spriteCount; i++)
+    {
+        // Vector from camera to sprite (in 16.8 fixed-point)
+        FIXED dx = g_sprites[i].x - cam_x;
+        FIXED dz = g_sprites[i].z - cam_z;
+
+        // Rotate into camera space
+        // g_cosf and g_sinf are already >> 4 from lu_cos/lu_sin
+        // camFwd = -dx*sinA - dz*cosA (depth, positive = in front)
+        // camSide = dx*cosA - dz*sinA (horizontal offset)
+        FIXED camFwd  = (-dx * g_sinf - dz * g_cosf) >> 8;
+        FIXED camSide = ( dx * g_cosf - dz * g_sinf) >> 8;
+
+        // Skip if behind camera
+        if (camFwd <= (1 << 8)) continue;
+
+        // Screen Y: horizon + (cam_h - sprite_y) / depth
+        // Sprite Y height shifts it upward on screen
+        FIXED effectiveH = cam_h - g_sprites[i].y;
+        int screenY = m7_horizon + (int)((effectiveH / (camFwd >> 8)));
+
+        // Screen X: 120 + (side * focalLen) / depth
+        // cam_fov acts as focal length — wider spread on screen
+        int screenX = 120 + (int)((camSide * cam_fov) / (camFwd >> 8));
+
+        // Scale: larger when closer. Base size 8px at distance == cam_h
+        int scale = (int)((cam_h << 4) / camFwd);  // 8.8-ish
+
+        // Skip if off-screen
+        if (screenY < -16 || screenY > 168) continue;
+        if (screenX < -32 || screenX > 272) continue;
+        if (scale < 16) continue;  // too small to see
+
+        proj[projCount].screenX = screenX;
+        proj[projCount].screenY = screenY;
+        proj[projCount].scale   = scale;
+        proj[projCount].depth   = camFwd;
+        proj[projCount].idx     = i;
+        projCount++;
+    }
+
+    // Simple bubble sort back-to-front (farthest first gets lowest OAM priority)
+    for (i = 0; i < projCount - 1; i++)
+        for (j = i + 1; j < projCount; j++)
+            if (proj[i].depth < proj[j].depth)
+            {
+                tmp = proj[i];
+                proj[i] = proj[j];
+                proj[j] = tmp;
+            }
+
+    // Update OAM entries
+    for (i = 0; i < projCount && i < 32; i++)
+    {
+        int sx = proj[i].screenX - 4;  // center the 8x8 sprite
+        int sy = proj[i].screenY - 8;  // foot at screen position, draw upward
+
+        // Clamp scale for affine (256 = 1x, smaller = zoom in)
+        // We want: hw_scale = 256 * (base_size / desired_size)
+        // scale is proportional to desired size, so hw_scale = 256*256/scale
+        int hwScale = 256;
+        if (proj[i].scale > 0)
+            hwScale = (256 * 256) / proj[i].scale;
+        if (hwScale < 32) hwScale = 32;    // max 8x zoom
+        if (hwScale > 1024) hwScale = 1024; // min 0.25x
+
+        // Set affine matrix (one per sprite, use affine slot = OAM index)
+        OBJ_AFFINE *oa = &obj_aff_mem[i];
+        oa->pa = hwScale;
+        oa->pb = 0;
+        oa->pc = 0;
+        oa->pd = hwScale;
+
+        // Set OAM attributes
+        obj_mem[i].attr0 = ATTR0_Y(sy & 0xFF) | ATTR0_AFF | ATTR0_SQUARE;
+        obj_mem[i].attr1 = ATTR1_X(sx & 0x1FF) | ATTR1_AFF_ID(i) | ATTR1_SIZE_8;
+        obj_mem[i].attr2 = ATTR2_ID(0) | ATTR2_PRIO(1);
+    }
+
+    // Hide remaining OBJ
+    for (; i < MAX_FLOOR_SPRITES; i++)
+    {
+        obj_mem[i].attr0 = ATTR0_HIDE;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -136,6 +344,13 @@ int main(void)
     load_editor_map();
 #else
     load_checkerboard();
+#endif
+
+    // --- OBJ sprite setup ---
+    init_obj_sprites();
+
+#ifndef AFFINITY_HAS_MAPDATA
+    init_demo_sprites();
 #endif
 
     // --- Camera init ---
@@ -208,6 +423,9 @@ int main(void)
             cam_angle = 0;
             m7_horizon = 54;
         }
+
+        // Project and draw sprites
+        update_sprites();
     }
 
     return 0;

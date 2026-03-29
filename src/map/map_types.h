@@ -33,6 +33,30 @@ struct TilemapLayer
     std::vector<uint16_t> tileIndices; // index into Tileset::tiles
 };
 
+// A sprite object placed on the Mode 7 floor
+struct FloorSprite
+{
+    float x = 0.0f;          // world X
+    float y = 0.0f;          // world Y (height above floor)
+    float z = 0.0f;          // world Z
+    float scale = 1.0f;      // size multiplier (R + drag to adjust)
+    int   spriteId = 0;      // which sprite graphic (index into sprite sheet)
+    uint32_t color = 0xFFFF00FF; // tint color (ABGR) — used for editor preview
+    bool  selected = false;
+};
+
+static constexpr int kMaxFloorSprites = 64; // GBA OAM has 128 slots, reserve half
+
+// Camera start object — the "game camera" position for Play mode
+struct CameraStartObject
+{
+    float x = 0.0f;
+    float z = 0.0f;
+    float height = 64.0f;
+    float angle = 0.0f;
+    float horizon = 54.0f;
+};
+
 // Map data — the floor plane rendered by Mode 7
 struct Mode7Map
 {
