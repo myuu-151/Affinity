@@ -42,6 +42,12 @@ static int sSelectedPalColor = 1;
 static constexpr int kTilesetCols = 16;
 static constexpr int kTilesetRows = 8;
 
+// Preferences
+static float sUiScale = 1.0f;
+static bool  sShowPrefs = false;
+static char  sMgbaPath[512] = "";
+static bool  sMgbaFound = false;
+
 // GBA packaging state
 static bool sPackaging = false;
 static bool sPackageDone = false;
@@ -57,6 +63,29 @@ void FrameInit()
     sCamera.angle  = 0.0f;
     sCamera.fov    = 128.0f;
     Mode7::Init();
+
+    // Load preferences
+    FILE* pf = fopen("affinity_prefs.ini", "r");
+    if (pf)
+    {
+        char line[600];
+        while (fgets(line, sizeof(line), pf))
+        {
+            float fval;
+            char sval[512];
+            if (sscanf(line, "ui_scale=%f", &fval) == 1)
+            {
+                sUiScale = fval;
+                ImGui::GetIO().FontGlobalScale = sUiScale;
+            }
+            else if (sscanf(line, "mgba_path=%511[^\n]", sval) == 1)
+            {
+                strncpy(sMgbaPath, sval, sizeof(sMgbaPath) - 1);
+            }
+        }
+        fclose(pf);
+    }
+
     sInitialized = true;
 }
 
@@ -71,16 +100,18 @@ static void DrawColorBox(ImDrawList* dl, ImVec2 pos, ImVec2 size, uint32_t col, 
         dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), 0x80FFFFFF);
 }
 
+// Helper: get scaled size based on current UI scale
+static float Scaled(float base) { return base * sUiScale; }
+
 // ---- Tab bar (NEXXT-style top tabs) ----
 static void DrawTabBar()
 {
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    float menuH = ImGui::GetFrameHeight(); // main menu bar height
-    float tabH = 28.0f;
+    float tabH = ImGui::GetFrameHeight() + Scaled(6);
 
     ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, vp->WorkPos.y));
     ImGui::SetNextWindowSize(ImVec2(vp->WorkSize.x, tabH));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 2));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Scaled(4), Scaled(2)));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.15f, 0.15f, 0.18f, 1.0f));
@@ -89,7 +120,9 @@ static void DrawTabBar()
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-    auto TabButton = [](const char* label, EditorTab tab) {
+    float btnW = Scaled(80);
+    float btnH = ImGui::GetFrameHeight();
+    auto TabButton = [btnW, btnH](const char* label, EditorTab tab) {
         bool active = (sActiveTab == tab);
         if (active)
         {
@@ -101,7 +134,7 @@ static void DrawTabBar()
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.18f, 0.22f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.65f, 1.0f));
         }
-        if (ImGui::Button(label, ImVec2(80, 22)))
+        if (ImGui::Button(label, ImVec2(btnW, btnH)))
             sActiveTab = tab;
         ImGui::PopStyleColor(2);
         ImGui::SameLine();
@@ -112,7 +145,8 @@ static void DrawTabBar()
     TabButton("Tiles",   EditorTab::Tiles);
 
     // Right-aligned status text
-    ImGui::SameLine(ImGui::GetWindowWidth() - 180);
+    float labelW = ImGui::CalcTextSize("Affinity GBA Engine").x + Scaled(20);
+    ImGui::SameLine(ImGui::GetWindowWidth() - labelW);
     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.55f, 1.0f), "Affinity GBA Engine");
 
     ImGui::End();
@@ -349,7 +383,7 @@ static void DrawStatusBar(ImVec2 pos, ImVec2 size)
 {
     ImGui::SetNextWindowPos(pos);
     ImGui::SetNextWindowSize(size);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 3));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(Scaled(8), Scaled(3)));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.16f, 1.0f));
@@ -441,6 +475,9 @@ void FrameTick(float dt)
                     }).detach();
                 }
             }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Preferences"))
+                sShowPrefs = true;
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Edit"))
@@ -496,13 +533,13 @@ void FrameTick(float dt)
     float totalH = vp->WorkSize.y;
     float topY   = vp->WorkPos.y + menuBarH;
 
-    float tabH     = 28.0f;
-    float statusH  = 24.0f;
+    float tabH     = ImGui::GetFrameHeight() + Scaled(6);
+    float statusH  = ImGui::GetFrameHeight() + Scaled(2);
     float bodyY    = topY + tabH;
     float bodyH    = totalH - menuBarH - tabH - statusH;
 
-    // Right panel width: ~35% of window, min 280
-    float rightW = std::max(280.0f, totalW * 0.35f);
+    // Right panel width: ~35% of window, min 280 scaled
+    float rightW = std::max(Scaled(280), totalW * 0.35f);
     float leftW  = totalW - rightW;
 
     // Right panel split: tileset 35%, tilemap 40%, palette+props 25%
@@ -536,6 +573,115 @@ void FrameTick(float dt)
         ImVec2(vp->WorkPos.x, bodyY + bodyH),
         ImVec2(totalW, statusH));
 
+    // ---- Preferences window ----
+    if (sShowPrefs)
+    {
+        ImGui::SetNextWindowSize(ImVec2(Scaled(400), 0), ImGuiCond_Once);
+        ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+            ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::Begin("Preferences", &sShowPrefs, ImGuiWindowFlags_AlwaysAutoResize);
+
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "General");
+        ImGui::Separator();
+
+        // UI Scale
+        float prevScale = sUiScale;
+        ImGui::SliderFloat("UI Scale", &sUiScale, 0.75f, 2.0f, "%.2f");
+        if (sUiScale != prevScale)
+        {
+            ImGuiIO& io = ImGui::GetIO();
+            io.FontGlobalScale = sUiScale;
+        }
+        if (ImGui::Button("Reset to 1x"))
+        {
+            sUiScale = 1.0f;
+            ImGui::GetIO().FontGlobalScale = 1.0f;
+        }
+
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "mGBA");
+        ImGui::Separator();
+
+        // mGBA path
+        static float sMgbaToastTimer = 0.0f;
+
+        ImGui::InputText("mGBA Path", sMgbaPath, sizeof(sMgbaPath));
+        ImGui::SameLine();
+        if (ImGui::Button("Browse"))
+        {
+            OPENFILENAMEA ofn = {};
+            char path[512] = "";
+            ofn.lStructSize = sizeof(ofn);
+            ofn.lpstrFilter = "Executables\0*.exe\0All Files\0*.*\0";
+            ofn.lpstrFile = path;
+            ofn.nMaxFile = sizeof(path);
+            ofn.lpstrTitle = "Select mGBA executable";
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+            if (GetOpenFileNameA(&ofn))
+            {
+                strncpy(sMgbaPath, path, sizeof(sMgbaPath) - 1);
+            }
+        }
+
+        if (ImGui::Button("Test Connection"))
+        {
+            namespace fs = std::filesystem;
+            fs::path p(sMgbaPath);
+            sMgbaFound = fs::exists(p) &&
+                (p.filename().string().find("mGBA") != std::string::npos ||
+                 p.filename().string().find("mgba") != std::string::npos ||
+                 p.extension() == ".exe");
+            if (sMgbaFound)
+                sMgbaToastTimer = 3.0f;
+        }
+
+        if (sMgbaFound)
+        {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "OK!");
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        static float sPrefsSaveTimer = 0.0f;
+        if (ImGui::Button("Save Preferences"))
+        {
+            FILE* f = fopen("affinity_prefs.ini", "w");
+            if (f)
+            {
+                fprintf(f, "ui_scale=%.2f\n", sUiScale);
+                fprintf(f, "mgba_path=%s\n", sMgbaPath);
+                fclose(f);
+                sPrefsSaveTimer = 2.0f;
+            }
+        }
+        if (sPrefsSaveTimer > 0.0f)
+        {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Saved!");
+            sPrefsSaveTimer -= dt;
+        }
+
+        // Toast notification
+        if (sMgbaToastTimer > 0.0f)
+        {
+            sMgbaToastTimer -= dt;
+            ImVec2 toastPos(vp->WorkPos.x + totalW - 260, bodyY + 10);
+            ImGui::SetNextWindowPos(toastPos);
+            ImGui::SetNextWindowSize(ImVec2(250, 0));
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.15f, 0.35f, 0.15f, 0.95f));
+            ImGui::Begin("##Toast", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing);
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "mGBA connected successfully");
+            ImGui::End();
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::End();
+    }
+
     // ---- Package status popup ----
     if (sPackaging || sPackageDone)
     {
@@ -566,17 +712,30 @@ void FrameTick(float dt)
             ImGui::TextWrapped("%s", sPackageMsg.c_str());
             ImGui::Separator();
 
-            if (ImGui::Button("OK", ImVec2(80, 0)))
+            float btnH = ImGui::GetFrameHeight() * 1.3f;
+            float okW  = std::max(80.0f * sUiScale, ImGui::CalcTextSize("  OK  ").x + 20.0f);
+            if (ImGui::Button("OK", ImVec2(okW, btnH)))
                 sPackageDone = false;
 
             if (sPackageSuccess)
             {
                 ImGui::SameLine();
-                if (ImGui::Button("Open in mGBA", ImVec2(120, 0)))
+                float mgbaW = std::max(140.0f * sUiScale, ImGui::CalcTextSize("  Open in mGBA  ").x + 20.0f);
+                if (ImGui::Button("Open in mGBA", ImVec2(mgbaW, btnH)))
                 {
-                    // Try to launch mGBA with the ROM
-                    std::string cmd = "start \"\" \"" + sPackageOutputPath + "\"";
-                    system(cmd.c_str());
+                    if (sMgbaPath[0])
+                    {
+                        std::string cmd = "\"" + std::string(sMgbaPath) + "\" \"" + sPackageOutputPath + "\"";
+                        STARTUPINFOA si = {}; si.cb = sizeof(si);
+                        PROCESS_INFORMATION pi = {};
+                        CreateProcessA(nullptr, (LPSTR)cmd.c_str(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi);
+                        if (pi.hProcess) { CloseHandle(pi.hProcess); CloseHandle(pi.hThread); }
+                    }
+                    else
+                    {
+                        // Fallback: open with default .gba association
+                        ShellExecuteA(nullptr, "open", sPackageOutputPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    }
                     sPackageDone = false;
                 }
             }

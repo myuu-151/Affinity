@@ -48,6 +48,7 @@ target_link_libraries(AffinityEditor PRIVATE
     gdi32
     user32
     shell32
+    comdlg32
 )
 
 # ImGui docking branch define

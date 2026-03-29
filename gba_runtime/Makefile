@@ -45,7 +45,9 @@ LIBDIRS := $(DEVKITPRO)/libtonc
 #---------------------------------------------------------------------------------
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 
-export OUTPUT   := $(CURDIR)/$(TARGET)
+# Convert CURDIR to MSYS2 path if it has a drive letter (C:/... -> /c/...)
+MSYS_CURDIR := $(shell echo "$(CURDIR)" | sed -e 's|^\([a-zA-Z]\):/|/\L\1/|')
+export OUTPUT   := $(MSYS_CURDIR)/$(TARGET)
 export VPATH    := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir))
 export DEPSDIR  := $(CURDIR)/$(BUILD)
 
