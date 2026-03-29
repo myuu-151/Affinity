@@ -73,9 +73,9 @@ static void SampleFloor(float wx, float wz, const Mode7Map* map,
     }
     else
     {
-        // Checkerboard fallback — 16x16 pixel squares
-        int cx = ((int)floorf(wx / 16.0f)) & 1;
-        int cz = ((int)floorf(wz / 16.0f)) & 1;
+        // Checkerboard fallback — 32-unit squares (matches minimap cells)
+        int cx = ((int)floorf(wx / 32.0f)) & 1;
+        int cz = ((int)floorf(wz / 32.0f)) & 1;
         const uint8_t* col = (cx ^ cz) ? kCheckA : kCheckB;
         r = col[0]; g = col[1]; b = col[2];
     }

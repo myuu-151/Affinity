@@ -499,9 +499,9 @@ static void DrawTilemapPanel(ImVec2 pos, ImVec2 size)
         for (int col = 0; col < mapCols; col++)
         {
             ImVec2 cPos(cursor.x + col * cellW, cursor.y + row * cellH);
-            // Checkerboard pattern as placeholder map content
-            int check = ((col / 4) + (row / 4)) % 2;
-            uint32_t c = check ? 0xFF2A4A2A : 0xFF1A3A1A;
+            // Checkerboard pattern — matches Mode 7 floor (1 cell = 1 checker square)
+            int check = (col + row) % 2;
+            uint32_t c = check ? 0xFF50A050 : 0xFF285028;
             dl->AddRectFilled(cPos, ImVec2(cPos.x + cellW, cPos.y + cellH), c);
         }
     }
