@@ -7,6 +7,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <filesystem>
 #include <thread>
@@ -14,6 +15,7 @@
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#include <commdlg.h>
 #endif
 
 namespace Affinity
@@ -85,6 +87,205 @@ static bool sPackageDone = false;
 static bool sPackageSuccess = false;
 static std::string sPackageMsg;
 static std::string sPackageOutputPath;
+
+// Project file
+static std::string sProjectPath;  // empty = no project loaded
+static bool sProjectDirty = false; // unsaved changes
+
+// ---- Win32 file dialogs ----
+#ifdef _WIN32
+static std::string OpenFileDialog(const char* filter, const char* defaultExt)
+{
+    char path[MAX_PATH] = {};
+    OPENFILENAMEA ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = defaultExt;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+    if (GetOpenFileNameA(&ofn))
+        return std::string(path);
+    return {};
+}
+
+static std::string SaveFileDialog(const char* filter, const char* defaultExt)
+{
+    char path[MAX_PATH] = {};
+    OPENFILENAMEA ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrDefExt = defaultExt;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+    if (GetSaveFileNameA(&ofn))
+        return std::string(path);
+    return {};
+}
+#endif
+
+// ---- Project save/load ----
+static bool SaveProject(const std::string& path)
+{
+    FILE* f = fopen(path.c_str(), "w");
+    if (!f) return false;
+
+    fprintf(f, "[Affinity Project]\n");
+    fprintf(f, "version=1\n\n");
+
+    // Camera start object
+    fprintf(f, "[CameraStart]\n");
+    fprintf(f, "x=%.6f\n", sCamObj.x);
+    fprintf(f, "z=%.6f\n", sCamObj.z);
+    fprintf(f, "height=%.6f\n", sCamObj.height);
+    fprintf(f, "angle=%.6f\n", sCamObj.angle);
+    fprintf(f, "horizon=%.6f\n", sCamObj.horizon);
+    fprintf(f, "icon_scale=%.6f\n\n", sCamObjEditorScale);
+
+    // Editor camera
+    fprintf(f, "[EditorCamera]\n");
+    fprintf(f, "x=%.6f\n", sCamera.x);
+    fprintf(f, "z=%.6f\n", sCamera.z);
+    fprintf(f, "height=%.6f\n", sCamera.height);
+    fprintf(f, "angle=%.6f\n", sCamera.angle);
+    fprintf(f, "fov=%.6f\n", sCamera.fov);
+    fprintf(f, "horizon=%.6f\n\n", sCamera.horizon);
+
+    // Sprites
+    fprintf(f, "[Sprites]\n");
+    fprintf(f, "count=%d\n", sSpriteCount);
+    for (int i = 0; i < sSpriteCount; i++)
+    {
+        const FloorSprite& sp = sSprites[i];
+        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u\n",
+                sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color);
+    }
+    fprintf(f, "\n");
+
+    // Palette
+    fprintf(f, "[Palette]\n");
+    for (int i = 0; i < 16; i++)
+        fprintf(f, "color=%d,%u\n", i, sPalette[i]);
+
+    fclose(f);
+    sProjectPath = path;
+    sProjectDirty = false;
+    return true;
+}
+
+static bool LoadProject(const std::string& path)
+{
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) return false;
+
+    // Reset state before loading
+    sSpriteCount = 0;
+    sSelectedSprite = -1;
+    sSelectedObjType = SelectedObjType::None;
+    sEditorMode = EditorMode::Edit;
+    sCamObj = { 0.0f, 0.0f, 10.0f, 0.0f, 50.0f };
+    sCamObjEditorScale = 0.05f;
+
+    char line[512];
+    char section[64] = {};
+
+    while (fgets(line, sizeof(line), f))
+    {
+        // Strip newline
+        char* nl = strchr(line, '\n');
+        if (nl) *nl = '\0';
+        nl = strchr(line, '\r');
+        if (nl) *nl = '\0';
+
+        // Skip empty/comment
+        if (line[0] == '\0' || line[0] == '#') continue;
+
+        // Section header
+        if (line[0] == '[')
+        {
+            sscanf(line, "[%63[^]]]", section);
+            continue;
+        }
+
+        float fval;
+        int ival;
+        unsigned int uval;
+
+        if (strcmp(section, "CameraStart") == 0)
+        {
+            if (sscanf(line, "x=%f", &fval) == 1) sCamObj.x = fval;
+            else if (sscanf(line, "z=%f", &fval) == 1) sCamObj.z = fval;
+            else if (sscanf(line, "height=%f", &fval) == 1) sCamObj.height = fval;
+            else if (sscanf(line, "angle=%f", &fval) == 1) sCamObj.angle = fval;
+            else if (sscanf(line, "horizon=%f", &fval) == 1) sCamObj.horizon = fval;
+            else if (sscanf(line, "icon_scale=%f", &fval) == 1) sCamObjEditorScale = fval;
+        }
+        else if (strcmp(section, "EditorCamera") == 0)
+        {
+            if (sscanf(line, "x=%f", &fval) == 1) sCamera.x = fval;
+            else if (sscanf(line, "z=%f", &fval) == 1) sCamera.z = fval;
+            else if (sscanf(line, "height=%f", &fval) == 1) sCamera.height = fval;
+            else if (sscanf(line, "angle=%f", &fval) == 1) sCamera.angle = fval;
+            else if (sscanf(line, "fov=%f", &fval) == 1) sCamera.fov = fval;
+            else if (sscanf(line, "horizon=%f", &fval) == 1) sCamera.horizon = fval;
+        }
+        else if (strcmp(section, "Sprites") == 0)
+        {
+            if (sscanf(line, "count=%d", &ival) == 1) { /* just informational */ }
+            else if (sSpriteCount < kMaxFloorSprites)
+            {
+                int sid;
+                float sx, sy, sz, sc;
+                unsigned int col;
+                if (sscanf(line, "sprite=%d,%f,%f,%f,%f,%u", &sid, &sx, &sy, &sz, &sc, &col) == 6)
+                {
+                    FloorSprite& sp = sSprites[sSpriteCount];
+                    sp.spriteId = sid;
+                    sp.x = sx;
+                    sp.y = sy;
+                    sp.z = sz;
+                    sp.scale = sc;
+                    sp.color = col;
+                    sp.selected = false;
+                    sSpriteCount++;
+                }
+            }
+        }
+        else if (strcmp(section, "Palette") == 0)
+        {
+            int idx;
+            if (sscanf(line, "color=%d,%u", &idx, &uval) == 2 && idx >= 0 && idx < 16)
+                sPalette[idx] = uval;
+        }
+    }
+
+    fclose(f);
+    sProjectPath = path;
+    sProjectDirty = false;
+    return true;
+}
+
+static void CloseProject()
+{
+    // Reset all project state to defaults
+    sSpriteCount = 0;
+    sSelectedSprite = -1;
+    sSelectedObjType = SelectedObjType::None;
+    sEditorMode = EditorMode::Edit;
+    sCamObj = { 0.0f, 0.0f, 10.0f, 0.0f, 50.0f };
+    sCamObjEditorScale = 0.05f;
+
+    sCamera.x = 0.0f;
+    sCamera.z = 0.0f;
+    sCamera.height = 64.0f;
+    sCamera.angle = 0.0f;
+    sCamera.fov = 128.0f;
+    sCamera.horizon = 54.0f;
+
+    sProjectPath.clear();
+    sProjectDirty = false;
+}
 
 void FrameInit()
 {
@@ -274,7 +475,7 @@ static void DrawViewport(ImVec2 pos, ImVec2 size)
     // Viewport label overlay
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddText(ImVec2(pos.x + 6, pos.y + 4),
-        0x80FFFFFF, "Mode 7 Preview (WASD + Q/E + R: resize)");
+        0x80FFFFFF, "Mode 7 Preview (WASD + Q/E + I/K)");
 
     ImGui::End();
     ImGui::PopStyleColor();
@@ -712,6 +913,7 @@ static void DrawPalettePanel(ImVec2 pos, ImVec2 size)
     ImGui::DragFloat("H",  &sCamera.height, 0.5f, 8.0f, 256.0f);
     ImGui::SameLine();
     ImGui::SliderAngle("A", &sCamera.angle, -180.0f, 180.0f);
+    ImGui::DragFloat("Pitch", &sCamera.horizon, 0.5f, 10.0f, 120.0f, "%.1f");
     ImGui::PopItemWidth();
 
     ImGui::End();
@@ -732,13 +934,18 @@ static void DrawStatusBar(ImVec2 pos, ImVec2 size)
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
+    // Project name for status bar
+    std::string projLabel = sProjectPath.empty() ? "Untitled" :
+        std::filesystem::path(sProjectPath).stem().string();
+
     if (sEditorMode == EditorMode::Play)
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f),
-            "[PLAY]  WASD: Move  |  Q/E: Height  |  I/K: Pitch  |  Esc: Stop");
+            "[PLAY]  %s  |  WASD: Move  |  Q/E: Height  |  I/K: Pitch  |  Esc: Stop",
+            projLabel.c_str());
     else
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.55f, 1.0f),
-            "[EDIT]  Cam: (%.0f, %.0f) H:%.0f  |  Sprites: %d",
-            sCamera.x, sCamera.z, sCamera.height, sSpriteCount);
+            "[EDIT]  %s  |  Cam: (%.0f, %.0f) H:%.0f  |  Sprites: %d",
+            projLabel.c_str(), sCamera.x, sCamera.z, sCamera.height, sSpriteCount);
 
     ImGui::End();
     ImGui::PopStyleColor();
@@ -749,6 +956,22 @@ void FrameTick(float dt)
 {
     if (!sInitialized) FrameInit();
 
+    // ---- Global hotkeys ----
+    if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S))
+    {
+        if (!sProjectPath.empty())
+            SaveProject(sProjectPath);
+        else
+        {
+#ifdef _WIN32
+            std::string p = SaveFileDialog(
+                "Affinity Project (*.afnproj)\0*.afnproj\0All Files (*.*)\0*.*\0", "afnproj");
+            if (!p.empty())
+                SaveProject(p);
+#endif
+        }
+    }
+
     // ---- Main Menu ----
     float menuBarH = 0.0f;
     if (ImGui::BeginMainMenuBar())
@@ -756,67 +979,45 @@ void FrameTick(float dt)
         menuBarH = ImGui::GetWindowSize().y;
         if (ImGui::BeginMenu("File"))
         {
-            if (ImGui::MenuItem("New Map"))          { /* TODO */ }
-            if (ImGui::MenuItem("Open Map"))         { /* TODO */ }
-            if (ImGui::MenuItem("Save Map"))         { /* TODO */ }
-            ImGui::Separator();
-            if (ImGui::MenuItem("Import Tileset"))   { /* TODO */ }
-            if (ImGui::MenuItem("Export Tileset"))    { /* TODO */ }
-            ImGui::Separator();
-            if (ImGui::MenuItem("Package GBA ROM", nullptr, false, !sPackaging))
+            if (ImGui::MenuItem("New Project"))
             {
-                sPackaging = true;
-                sPackageDone = false;
-                sPackageSuccess = false;
-                sPackageMsg = "Building...";
-
-                // Find gba_runtime relative to exe location
-                namespace fs = std::filesystem;
-                // Get exe directory (not cwd)
-                char exeBuf[MAX_PATH] = {};
-                GetModuleFileNameA(nullptr, exeBuf, MAX_PATH);
-                fs::path exeDir = fs::path(exeBuf).parent_path();
-                fs::path cwdDir = fs::current_path();
-                // Try from both exe dir and cwd
-                fs::path rtDir;
-                for (auto& candidate : {
-                    exeDir / "gba_runtime",
-                    exeDir / ".." / "gba_runtime",
-                    exeDir / ".." / ".." / "gba_runtime",
-                    exeDir / ".." / ".." / ".." / "gba_runtime",
-                    cwdDir / "gba_runtime",
-                    cwdDir / ".." / "gba_runtime",
-                })
-                {
-                    if (fs::exists(candidate / "Makefile"))
-                    { rtDir = fs::canonical(candidate); break; }
-                }
-
-                if (rtDir.empty())
-                {
-                    sPackaging = false;
-                    sPackageDone = true;
-                    sPackageSuccess = false;
-                    sPackageMsg = "Cannot find gba_runtime/Makefile\n\nSearched from:\n  exe: " + exeDir.string() + "\n  cwd: " + cwdDir.string();
-                }
+                CloseProject();
+            }
+            if (ImGui::MenuItem("Open Project..."))
+            {
+#ifdef _WIN32
+                std::string p = OpenFileDialog(
+                    "Affinity Project (*.afnproj)\0*.afnproj\0All Files (*.*)\0*.*\0", "afnproj");
+                if (!p.empty())
+                    LoadProject(p);
+#endif
+            }
+            if (ImGui::MenuItem("Save Project", "Ctrl+S"))
+            {
+                if (!sProjectPath.empty())
+                    SaveProject(sProjectPath);
                 else
                 {
-                    sPackageOutputPath = (rtDir / "affinity.gba").string();
-                    std::string rtDirStr = rtDir.string();
-                    std::string outPath = sPackageOutputPath;
-
-                    // Build on background thread
-                    std::thread([rtDirStr, outPath]() {
-                        std::string err;
-                        bool ok = PackageGBA(rtDirStr, outPath, err);
-                        sPackageSuccess = ok;
-                        sPackageMsg = ok
-                            ? ("ROM saved: " + outPath + "\n\n" + err)
-                            : err;
-                        sPackageDone = true;
-                        sPackaging = false;
-                    }).detach();
+#ifdef _WIN32
+                    std::string p = SaveFileDialog(
+                        "Affinity Project (*.afnproj)\0*.afnproj\0All Files (*.*)\0*.*\0", "afnproj");
+                    if (!p.empty())
+                        SaveProject(p);
+#endif
                 }
+            }
+            if (ImGui::MenuItem("Save Project As..."))
+            {
+#ifdef _WIN32
+                std::string p = SaveFileDialog(
+                    "Affinity Project (*.afnproj)\0*.afnproj\0All Files (*.*)\0*.*\0", "afnproj");
+                if (!p.empty())
+                    SaveProject(p);
+#endif
+            }
+            if (ImGui::MenuItem("Close Project"))
+            {
+                CloseProject();
             }
             ImGui::Separator();
             if (ImGui::MenuItem("Preferences"))
@@ -834,6 +1035,76 @@ void FrameTick(float dt)
             ImGui::MenuItem("Grid Overlay", nullptr, nullptr);
             ImGui::MenuItem("Camera Bounds", nullptr, nullptr);
             ImGui::EndMenu();
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Build", nullptr, false, !sPackaging))
+        {
+            sPackaging = true;
+            sPackageDone = false;
+            sPackageSuccess = false;
+            sPackageMsg = "Building...";
+
+            namespace fs = std::filesystem;
+            char exeBuf[MAX_PATH] = {};
+            GetModuleFileNameA(nullptr, exeBuf, MAX_PATH);
+            fs::path exeDir = fs::path(exeBuf).parent_path();
+            fs::path cwdDir = fs::current_path();
+            fs::path rtDir;
+            for (auto& candidate : {
+                exeDir / "gba_runtime",
+                exeDir / ".." / "gba_runtime",
+                exeDir / ".." / ".." / "gba_runtime",
+                exeDir / ".." / ".." / ".." / "gba_runtime",
+                cwdDir / "gba_runtime",
+                cwdDir / ".." / "gba_runtime",
+            })
+            {
+                if (fs::exists(candidate / "Makefile"))
+                { rtDir = fs::canonical(candidate); break; }
+            }
+
+            if (rtDir.empty())
+            {
+                sPackaging = false;
+                sPackageDone = true;
+                sPackageSuccess = false;
+                sPackageMsg = "Cannot find gba_runtime/Makefile\n\nSearched from:\n  exe: " + exeDir.string() + "\n  cwd: " + cwdDir.string();
+            }
+            else
+            {
+                sPackageOutputPath = (rtDir / "affinity.gba").string();
+                std::string rtDirStr = rtDir.string();
+                std::string outPath = sPackageOutputPath;
+
+                std::vector<GBASpriteExport> exportSprites;
+                for (int i = 0; i < sSpriteCount; i++)
+                {
+                    GBASpriteExport se;
+                    se.x = sSprites[i].x;
+                    se.y = sSprites[i].y;
+                    se.z = sSprites[i].z;
+                    se.scale = sSprites[i].scale;
+                    se.palIdx = (i % 5) + 1;
+                    exportSprites.push_back(se);
+                }
+                GBACameraExport exportCam;
+                exportCam.x = sCamObj.x;
+                exportCam.z = sCamObj.z;
+                exportCam.height = sCamObj.height;
+                exportCam.angle = sCamObj.angle;
+                exportCam.horizon = sCamObj.horizon;
+
+                std::thread([rtDirStr, outPath, exportSprites, exportCam]() {
+                    std::string err;
+                    bool ok = PackageGBA(rtDirStr, outPath, exportSprites, exportCam, err);
+                    sPackageSuccess = ok;
+                    sPackageMsg = ok
+                        ? ("ROM saved: " + outPath + "\n\n" + err)
+                        : err;
+                    sPackageDone = true;
+                    sPackaging = false;
+                }).detach();
+            }
         }
         ImGui::EndMainMenuBar();
     }
@@ -1141,7 +1412,9 @@ void FrameTick(float dt)
                 ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Failed!");
 
             ImGui::Separator();
-            ImGui::TextWrapped("%s", sPackageMsg.c_str());
+            float logH = std::min(300.0f, std::max(80.0f, ImGui::CalcTextSize(sPackageMsg.c_str()).y + 20.0f));
+            ImGui::InputTextMultiline("##buildlog", (char*)sPackageMsg.c_str(), sPackageMsg.size() + 1,
+                ImVec2(-1, logH), ImGuiInputTextFlags_ReadOnly);
             ImGui::Separator();
 
             float btnH = ImGui::GetFrameHeight() * 1.3f;
