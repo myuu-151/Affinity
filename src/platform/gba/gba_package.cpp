@@ -137,25 +137,31 @@ static unsigned short EditorColorToRGB15(uint32_t rgba)
 }
 
 // Convert a sprite frame to 4bpp GBA tile u32 data.
-// For an NxN frame (8,16,32), emits (N/8)*(N/8) tiles, each tile = 8 u32s.
+// Always emits 32x32 (16 tiles), upscaling smaller frames to fill the space.
 // Returns the u32s in row-major tile order for 1D OBJ mapping.
 static std::vector<uint32_t> FrameToGBATiles(const GBASpriteFrameExport& frame)
 {
-    int fSize = frame.width;
-    int tilesPerRow = fSize / 8;
-    int totalTiles = tilesPerRow * tilesPerRow;
-    std::vector<uint32_t> data(totalTiles * 8, 0);
+    const int outSize = 32; // always 32x32 OBJ
+    const int outTilesPerRow = outSize / 8; // 4
+    const int outTotalTiles = outTilesPerRow * outTilesPerRow; // 16
+    std::vector<uint32_t> data(outTotalTiles * 8, 0);
 
-    for (int py = 0; py < fSize; py++)
+    int fSize = frame.width;
+    if (fSize <= 0) return data;
+
+    // Upscale: map each 32x32 output pixel back to source frame pixel
+    for (int oy = 0; oy < outSize; oy++)
     {
-        for (int px = 0; px < fSize; px++)
+        int sy = oy * fSize / outSize;
+        for (int ox = 0; ox < outSize; ox++)
         {
-            uint8_t palIdx = frame.pixels[py * kExportMaxFrameSize + px] & 0xF;
+            int sx = ox * fSize / outSize;
+            uint8_t palIdx = frame.pixels[sy * kExportMaxFrameSize + sx] & 0xF;
             if (palIdx == 0) continue;
 
-            int tileIdx = (py / 8) * tilesPerRow + (px / 8);
-            int lx = px & 7;
-            int ly = py & 7;
+            int tileIdx = (oy / 8) * outTilesPerRow + (ox / 8);
+            int lx = ox & 7;
+            int ly = oy & 7;
             int rowIdx = tileIdx * 8 + ly;
             int bit = lx * 4;
             data[rowIdx] |= ((uint32_t)palIdx << bit);
@@ -199,7 +205,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
     for (size_t ai = 0; ai < assets.size(); ai++)
     {
         const auto& asset = assets[ai];
-        int tilesPerFrame = (asset.baseSize / 8) * (asset.baseSize / 8);
+        int tilesPerFrame = 16; // always 32x32 OBJ (4x4 tiles)
         assetTileStart.push_back((int)allTiles.size() / 8); // tile index
         assetTilesPerFrame.push_back(tilesPerFrame);
 
@@ -258,7 +264,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         {
             f << "    { " << assetTileStart[ai] << ", " << assetTilesPerFrame[ai]
               << ", " << (int)assets[ai].frames.size()
-              << ", " << assets[ai].baseSize
+              << ", " << 32 // always 32x32 OBJ
               << ", " << assets[ai].palBank << " },\n";
         }
         f << "};\n\n";

@@ -84,7 +84,7 @@ enum class EditorMode { Edit, Play };
 enum class SelectedObjType { None, Sprite, Camera };
 static EditorMode sEditorMode = EditorMode::Edit;
 static SelectedObjType sSelectedObjType = SelectedObjType::None;
-static CameraStartObject sCamObj = { 0.0f, 0.0f, 10.0f, 0.0f, 50.0f };
+static CameraStartObject sCamObj = { 0.0f, 0.0f, 8.0f, 0.0f, 60.0f };
 static float sCamObjEditorScale = 0.05f; // editor-only visual size
 static Mode7Camera sSavedEditorCam;
 
@@ -1326,7 +1326,7 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::PushItemWidth(size.x * 0.5f);
         ImGui::DragFloat("X##cam", &sCamObj.x, 1.0f);
         ImGui::DragFloat("Z##cam", &sCamObj.z, 1.0f);
-        ImGui::DragFloat("Height##cam", &sCamObj.height, 0.5f, 8.0f, 256.0f);
+        ImGui::DragFloat("Height##cam", &sCamObj.height, 0.5f, 4.0f, 256.0f);
         ImGui::SliderAngle("Angle##cam", &sCamObj.angle, -180.0f, 180.0f);
         ImGui::DragFloat("Horizon##cam", &sCamObj.horizon, 0.5f, 10.0f, 120.0f);
         ImGui::Separator();
@@ -1341,7 +1341,7 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::DragFloat("X##spr", &sp.x, 1.0f, -kWorldHalf, kWorldHalf);
         ImGui::DragFloat("Y##spr", &sp.y, 0.5f, 0.0f, 200.0f);
         ImGui::DragFloat("Z##spr", &sp.z, 1.0f, -kWorldHalf, kWorldHalf);
-        ImGui::DragFloat("Scale##spr", &sp.scale, 0.01f, 0.1f, 5.0f);
+        ImGui::DragFloat("Scale##spr", &sp.scale, 0.1f, 0.1f, 50.0f);
 
         // Sprite asset link
         {
@@ -1659,7 +1659,7 @@ static void DrawPalettePanel(ImVec2 pos, ImVec2 size)
     ImGui::DragFloat("X",  &sCamera.x, 1.0f);
     ImGui::SameLine();
     ImGui::DragFloat("Z",  &sCamera.z, 1.0f);
-    ImGui::DragFloat("H",  &sCamera.height, 0.5f, 8.0f, 256.0f);
+    ImGui::DragFloat("H",  &sCamera.height, 0.5f, 4.0f, 256.0f);
     ImGui::SameLine();
     ImGui::SliderAngle("A", &sCamera.angle, -180.0f, 180.0f);
     ImGui::DragFloat("Pitch", &sCamera.horizon, 0.5f, 10.0f, 120.0f, "%.1f");
@@ -1932,7 +1932,7 @@ void FrameTick(float dt)
                 sCamera.horizon = std::max(10.0f, sCamera.horizon - 60.0f * dt);
 
             if (ImGui::IsKeyDown(ImGuiKey_Q))
-                sCamera.height = std::max(8.0f, sCamera.height - 40.0f * dt);
+                sCamera.height = std::max(4.0f, sCamera.height - 40.0f * dt);
             if (ImGui::IsKeyDown(ImGuiKey_E))
                 sCamera.height = std::min(256.0f, sCamera.height + 40.0f * dt);
 
@@ -1952,7 +1952,7 @@ void FrameTick(float dt)
                     float dragY = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).y;
                     ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
                     sSprites[sSelectedSprite].scale = std::clamp(
-                        sSprites[sSelectedSprite].scale - dragY * 0.01f, 0.1f, 5.0f);
+                        sSprites[sSelectedSprite].scale - dragY * 0.1f, 0.1f, 50.0f);
                 }
             }
 
@@ -1989,7 +1989,7 @@ void FrameTick(float dt)
             }
 
             if (ImGui::IsKeyDown(ImGuiKey_Q))
-                sCamera.height = std::max(16.0f, sCamera.height - 20.0f * dt);
+                sCamera.height = std::max(4.0f, sCamera.height - 20.0f * dt);
             if (ImGui::IsKeyDown(ImGuiKey_E))
                 sCamera.height = std::min(200.0f, sCamera.height + 20.0f * dt);
 

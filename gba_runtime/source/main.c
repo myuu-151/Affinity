@@ -357,8 +357,6 @@ static void update_sprites(void)
         int sprIdx = proj[i].idx;
         int palBank = g_sprites[sprIdx].palIdx;
         int tileId = 0;
-        int sizeAttr = ATTR1_SIZE_8;
-        int basePx = 8; // base sprite size in pixels
 
 #ifdef AFN_ASSET_COUNT
 #if AFN_ASSET_COUNT > 0
@@ -368,10 +366,6 @@ static void update_sprites(void)
             {
                 tileId = afn_asset_desc[ai][0];
                 palBank = afn_asset_desc[ai][4];
-                int baseSize = afn_asset_desc[ai][3];
-                if (baseSize == 32)      { sizeAttr = ATTR1_SIZE_32; basePx = 32; }
-                else if (baseSize == 16) { sizeAttr = ATTR1_SIZE_16; basePx = 16; }
-                else                     { sizeAttr = ATTR1_SIZE_8;  basePx = 8; }
             }
         }
 #endif
@@ -379,32 +373,28 @@ static void update_sprites(void)
 
         if (palBank > 15) palBank = 1;
 
-        // Derive affine pa directly from fovLambda (depth) and editor scale.
-        // Matches editor formula: halfW = 128 * cam.fov * fs.scale / fovLambda
-        // GBA affine: pa = fovLambda / (4 * sprScale)
+        // All sprites are 32x32 OBJ (padded on export), AFF_DBL = 64x64 canvas
+        // pa = depth / (2 * sprScale) — tuned to match editor appearance
         {
             int sprScale = g_sprites[sprIdx].scale;
             int invScale;
             if (sprScale <= 0) sprScale = 256;
 
-            invScale = proj[i].depth / (4 * sprScale);
-            if (invScale < 128) invScale = 128;    // cap at 2x zoom (fills AFF_DBL canvas)
-            if (invScale > 2048) invScale = 2048;  // min size
+            invScale = (proj[i].depth * 7) / sprScale;
+            if (invScale < 128) invScale = 128;    // cap at 2x zoom (fills 64px canvas)
+            if (invScale > 2048) invScale = 2048;   // min size
 
             obj_aff_mem[affIdx].pa = (s16)invScale;
             obj_aff_mem[affIdx].pb = 0;
             obj_aff_mem[affIdx].pc = 0;
             obj_aff_mem[affIdx].pd = (s16)invScale;
 
-            // Affine sprites use double-size rendering area when ATTR0_AFF_DBL
-            // Center offset: the OBJ position is top-left of the DOUBLE-size canvas
-            // For double-size: canvas = basePx*2, sprite center = basePx
-            int halfCanvas = basePx; // half of double-size canvas
-            int sx = proj[i].screenX - halfCanvas;
-            int sy = proj[i].screenY - halfCanvas;
+            // 32x32 OBJ with AFF_DBL = 64x64 canvas, center offset = 32
+            int sx = proj[i].screenX - 32;
+            int sy = proj[i].screenY - 32;
 
             obj_mem[oamIdx].attr0 = ATTR0_Y(sy & 0xFF) | ATTR0_SQUARE | ATTR0_AFF_DBL;
-            obj_mem[oamIdx].attr1 = ATTR1_X(sx & 0x1FF) | sizeAttr | ATTR1_AFF_ID(affIdx);
+            obj_mem[oamIdx].attr1 = ATTR1_X(sx & 0x1FF) | ATTR1_SIZE_32 | ATTR1_AFF_ID(affIdx);
             obj_mem[oamIdx].attr2 = ATTR2_ID(tileId) | ATTR2_PRIO(0) | ATTR2_PALBANK(palBank);
         }
     }
@@ -659,7 +649,7 @@ int main(void)
         }
 
         // Height (L/R shoulders) — matches editor Q/E speed
-        if (key_is_down(KEY_L) && cam_h > (8 << 8))
+        if (key_is_down(KEY_L) && cam_h > (4 << 8))
             cam_h -= 85;
         if (key_is_down(KEY_R) && cam_h < (256 << 8))
             cam_h += 85;

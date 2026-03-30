@@ -96,7 +96,7 @@ struct FloorSprite
     float x = 0.0f;          // world X
     float y = 0.0f;          // world Y (height above floor)
     float z = 0.0f;          // world Z
-    float scale = 1.0f;      // size multiplier (R + drag to adjust)
+    float scale = 1.0f;      // size multiplier (R + drag to adjust, 1.0 = default)
     int   spriteId = 0;      // which sprite graphic (legacy)
     int   assetIdx = -1;     // index into sprite asset list (-1 = none)
     int   animIdx  = 0;      // which animation to play

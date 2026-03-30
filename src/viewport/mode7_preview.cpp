@@ -387,8 +387,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         uint8_t cg = (fs.color >>  8) & 0xFF;
         uint8_t cb = (fs.color >> 16) & 0xFF;
 
-        int halfW = std::max(2, (int)(8.0f * sp.scale / cam.height * 16.0f * fs.scale));
-        int halfH = std::max(3, (int)(12.0f * sp.scale / cam.height * 16.0f * fs.scale));
+        int halfW = std::max(2, (int)(8.0f * sp.scale / cam.height * 1.6f * fs.scale));
+        int halfH = std::max(3, (int)(12.0f * sp.scale / cam.height * 1.6f * fs.scale));
 
         // Sprite draws upward from its foot position
         int drawCenterY = sp.screenY - halfH;
