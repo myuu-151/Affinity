@@ -389,9 +389,12 @@ static void update_sprites(void)
             obj_aff_mem[affIdx].pc = 0;
             obj_aff_mem[affIdx].pd = (s16)invScale;
 
-            // 32x32 OBJ with AFF_DBL = 64x64 canvas, center offset = 32
+            // 32x32 OBJ with AFF_DBL = 64x64 canvas
+            // Place sprite bottom at screenY (foot on ground)
+            // Visible half-height = 16 * 256 / invScale (from center of canvas)
+            int visHalf = 4096 / invScale;
             int sx = proj[i].screenX - 32;
-            int sy = proj[i].screenY - 32;
+            int sy = proj[i].screenY - 32 - visHalf;
 
             obj_mem[oamIdx].attr0 = ATTR0_Y(sy & 0xFF) | ATTR0_SQUARE | ATTR0_AFF_DBL;
             obj_mem[oamIdx].attr1 = ATTR1_X(sx & 0x1FF) | ATTR1_SIZE_32 | ATTR1_AFF_ID(affIdx);
