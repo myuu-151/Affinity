@@ -388,7 +388,7 @@ static void update_sprites(void)
             if (sprScale <= 0) sprScale = 256;
 
             invScale = proj[i].depth / (4 * sprScale);
-            if (invScale < 32) invScale = 32;     // max 8x zoom
+            if (invScale < 128) invScale = 128;    // cap at 2x zoom (fills AFF_DBL canvas)
             if (invScale > 2048) invScale = 2048;  // min size
 
             obj_aff_mem[affIdx].pa = (s16)invScale;
@@ -659,9 +659,9 @@ int main(void)
         }
 
         // Height (L/R shoulders) — matches editor Q/E speed
-        if (key_is_down(KEY_L) && cam_h > (16 << 8))
+        if (key_is_down(KEY_L) && cam_h > (8 << 8))
             cam_h -= 85;
-        if (key_is_down(KEY_R) && cam_h < (200 << 8))
+        if (key_is_down(KEY_R) && cam_h < (256 << 8))
             cam_h += 85;
 
         // Pitch / orbit (A = look down, B = look up)
