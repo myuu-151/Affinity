@@ -38,6 +38,8 @@ typedef struct {
     FIXED y;         // height above floor (16.8)
     FIXED z;
     u16   palIdx;    // OBJ palette color index
+    s16   assetIdx;  // sprite asset index (-1 = default solid tile)
+    FIXED scale;     // 8.8 fixed-point scale (256 = 1x)
 } FloorSpriteGBA;
 
 static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
@@ -141,46 +143,88 @@ static void load_editor_map(void)
 
 static void init_obj_sprites(void)
 {
+    int i;
     // Enable OBJ layer and 1D OBJ mapping
     REG_DISPCNT |= DCNT_OBJ | DCNT_OBJ_1D;
 
-    // Tile 0: solid 8x8 square (placeholder until sprite editor)
+#ifdef AFN_ASSET_COUNT
+#if AFN_ASSET_COUNT > 0
+    // Copy all asset tile data into OBJ VRAM (charblock 4) in one shot
+    {
+        const u32 *src = afn_all_tiles;
+        u32 *dst = (u32*)tile_mem[4];
+        for (i = 0; i < (int)(AFN_ALL_TILES_LEN / 4); i++)
+            dst[i] = src[i];
+    }
+
+    // Load per-asset palettes into OBJ palette banks
+    // Each asset uses afn_asset_desc[ai][4] as its palette bank
+    for (i = 0; i < AFN_ASSET_COUNT; i++)
+    {
+        int palBank = afn_asset_desc[i][4];
+        const u16 *pal = 0;
+        // Switch on asset index to get the palette pointer
+        switch (i) {
+            case 0: pal = afn_pal0; break;
+#if AFN_ASSET_COUNT > 1
+            case 1: pal = afn_pal1; break;
+#endif
+#if AFN_ASSET_COUNT > 2
+            case 2: pal = afn_pal2; break;
+#endif
+#if AFN_ASSET_COUNT > 3
+            case 3: pal = afn_pal3; break;
+#endif
+#if AFN_ASSET_COUNT > 4
+            case 4: pal = afn_pal4; break;
+#endif
+#if AFN_ASSET_COUNT > 5
+            case 5: pal = afn_pal5; break;
+#endif
+#if AFN_ASSET_COUNT > 6
+            case 6: pal = afn_pal6; break;
+#endif
+#if AFN_ASSET_COUNT > 7
+            case 7: pal = afn_pal7; break;
+#endif
+            default: break;
+        }
+        if (pal)
+        {
+            int c;
+            for (c = 0; c < 16; c++)
+                pal_obj_mem[palBank * 16 + c] = pal[c];
+        }
+    }
+#endif
+#else
+    // No assets — use fallback solid 8x8 tile at tile 0
     {
         u32 *t0 = (u32*)&tile_mem[4][0];
         int k;
         for (k = 0; k < 8; k++) t0[k] = 0x11111111;
     }
+    pal_obj_mem[1*16 + 1] = RGB15(31, 31, 0);
+    pal_obj_mem[2*16 + 1] = RGB15(31, 8, 8);
+    pal_obj_mem[3*16 + 1] = RGB15(8, 8, 31);
+    pal_obj_mem[4*16 + 1] = RGB15(8, 31, 8);
+    pal_obj_mem[5*16 + 1] = RGB15(31, 16, 31);
+#endif
 
-    // Tile 16: small 2x2 dot for minimap icons
+    // Minimap dot tile
     {
+#ifdef AFN_MINIMAP_TILE
+        u32 *dot = (u32*)&tile_mem[4][AFN_MINIMAP_TILE];
+#else
         u32 *dot = (u32*)&tile_mem[4][16];
+#endif
         int k;
         for (k = 0; k < 8; k++) dot[k] = 0;
         dot[0] = 0x00000011;
         dot[1] = 0x00000011;
     }
 
-    // Set OBJ palette banks — each bank has its color at index 1
-    // (the diamond tile uses palette index 1 for filled pixels)
-    // Bank 0: default yellow
-    pal_obj_mem[0*16 + 0] = 0;
-    pal_obj_mem[0*16 + 1] = RGB15(31, 31, 0);
-    // Bank 1: yellow
-    pal_obj_mem[1*16 + 0] = 0;
-    pal_obj_mem[1*16 + 1] = RGB15(31, 31, 0);
-    // Bank 2: red
-    pal_obj_mem[2*16 + 0] = 0;
-    pal_obj_mem[2*16 + 1] = RGB15(31, 8, 8);
-    // Bank 3: blue
-    pal_obj_mem[3*16 + 0] = 0;
-    pal_obj_mem[3*16 + 1] = RGB15(8, 8, 31);
-    // Bank 4: green
-    pal_obj_mem[4*16 + 0] = 0;
-    pal_obj_mem[4*16 + 1] = RGB15(8, 31, 8);
-    // Bank 5: pink
-    pal_obj_mem[5*16 + 0] = 0;
-    pal_obj_mem[5*16 + 1] = RGB15(31, 16, 31);
-    // Bank 6: white (for minimap dots)
+    // Minimap palette bank (bank 6)
     pal_obj_mem[6*16 + 0] = 0;
     pal_obj_mem[6*16 + 1] = RGB15(31, 31, 31);
     pal_obj_mem[6*16 + 2] = RGB15(20, 20, 20);
@@ -198,21 +242,29 @@ static void init_demo_sprites(void)
     g_sprites[0].y = 0;
     g_sprites[0].z = 128 << 8;
     g_sprites[0].palIdx = 1;
+    g_sprites[0].assetIdx = -1;
+    g_sprites[0].scale = 256;
 
     g_sprites[1].x = 96 << 8;
-    g_sprites[1].y = 10 << 8;   // floating
+    g_sprites[1].y = 10 << 8;
     g_sprites[1].z = 96 << 8;
     g_sprites[1].palIdx = 2;
+    g_sprites[1].assetIdx = -1;
+    g_sprites[1].scale = 256;
 
     g_sprites[2].x = 160 << 8;
     g_sprites[2].y = 0;
     g_sprites[2].z = 64 << 8;
     g_sprites[2].palIdx = 3;
+    g_sprites[2].assetIdx = -1;
+    g_sprites[2].scale = 256;
 
     g_sprites[3].x = 64 << 8;
-    g_sprites[3].y = 20 << 8;   // high up
+    g_sprites[3].y = 20 << 8;
     g_sprites[3].z = 160 << 8;
     g_sprites[3].palIdx = 4;
+    g_sprites[3].assetIdx = -1;
+    g_sprites[3].scale = 256;
 
     g_spriteCount = 4;
 }
@@ -227,10 +279,12 @@ static void load_editor_sprites(void)
 
     for (i = 0; i < count; i++)
     {
-        g_sprites[i].x      = afn_sprite_data[i][0];
-        g_sprites[i].y      = afn_sprite_data[i][1];
-        g_sprites[i].z      = afn_sprite_data[i][2];
-        g_sprites[i].palIdx = afn_sprite_data[i][3];
+        g_sprites[i].x        = afn_sprite_data[i][0];
+        g_sprites[i].y        = afn_sprite_data[i][1];
+        g_sprites[i].z        = afn_sprite_data[i][2];
+        g_sprites[i].palIdx   = afn_sprite_data[i][3];
+        g_sprites[i].assetIdx = afn_sprite_data[i][4];
+        g_sprites[i].scale    = afn_sprite_data[i][5];
     }
     g_spriteCount = count;
 }
@@ -294,19 +348,65 @@ static void update_sprites(void)
                 proj[j] = tmp;
             }
 
-    // Render projected sprites as non-affine 8x8 OBJ (slots 16+)
+    // Render projected sprites as affine OBJs with per-sprite scale
+    // OAM slots 16-31 for sprites, affine slots 0-15 for their matrices
     for (i = 0; i < projCount && i < 16; i++)
     {
         int oamIdx = 16 + i;
-        int sx = proj[i].screenX - 4;  // center 8x8 sprite
-        int sy = proj[i].screenY - 4;
+        int affIdx = i;  // affine parameter slot (0-31, we use 0-15)
+        int sprIdx = proj[i].idx;
+        int palBank = g_sprites[sprIdx].palIdx;
+        int tileId = 0;
+        int sizeAttr = ATTR1_SIZE_8;
+        int basePx = 8; // base sprite size in pixels
 
-        int palBank = g_sprites[proj[i].idx].palIdx;
-        if (palBank > 5) palBank = 1;
+#ifdef AFN_ASSET_COUNT
+#if AFN_ASSET_COUNT > 0
+        {
+            int ai = g_sprites[sprIdx].assetIdx;
+            if (ai >= 0 && ai < AFN_ASSET_COUNT)
+            {
+                tileId = afn_asset_desc[ai][0];
+                palBank = afn_asset_desc[ai][4];
+                int baseSize = afn_asset_desc[ai][3];
+                if (baseSize == 32)      { sizeAttr = ATTR1_SIZE_32; basePx = 32; }
+                else if (baseSize == 16) { sizeAttr = ATTR1_SIZE_16; basePx = 16; }
+                else                     { sizeAttr = ATTR1_SIZE_8;  basePx = 8; }
+            }
+        }
+#endif
+#endif
 
-        obj_mem[oamIdx].attr0 = ATTR0_Y(sy & 0xFF) | ATTR0_SQUARE;
-        obj_mem[oamIdx].attr1 = ATTR1_X(sx & 0x1FF) | ATTR1_SIZE_8;
-        obj_mem[oamIdx].attr2 = ATTR2_ID(0) | ATTR2_PRIO(0) | ATTR2_PALBANK(palBank);
+        if (palBank > 15) palBank = 1;
+
+        // Derive affine pa directly from fovLambda (depth) and editor scale.
+        // Matches editor formula: halfW = 128 * cam.fov * fs.scale / fovLambda
+        // GBA affine: pa = fovLambda / (4 * sprScale)
+        {
+            int sprScale = g_sprites[sprIdx].scale;
+            int invScale;
+            if (sprScale <= 0) sprScale = 256;
+
+            invScale = proj[i].depth / (4 * sprScale);
+            if (invScale < 32) invScale = 32;     // max 8x zoom
+            if (invScale > 2048) invScale = 2048;  // min size
+
+            obj_aff_mem[affIdx].pa = (s16)invScale;
+            obj_aff_mem[affIdx].pb = 0;
+            obj_aff_mem[affIdx].pc = 0;
+            obj_aff_mem[affIdx].pd = (s16)invScale;
+
+            // Affine sprites use double-size rendering area when ATTR0_AFF_DBL
+            // Center offset: the OBJ position is top-left of the DOUBLE-size canvas
+            // For double-size: canvas = basePx*2, sprite center = basePx
+            int halfCanvas = basePx; // half of double-size canvas
+            int sx = proj[i].screenX - halfCanvas;
+            int sy = proj[i].screenY - halfCanvas;
+
+            obj_mem[oamIdx].attr0 = ATTR0_Y(sy & 0xFF) | ATTR0_SQUARE | ATTR0_AFF_DBL;
+            obj_mem[oamIdx].attr1 = ATTR1_X(sx & 0x1FF) | sizeAttr | ATTR1_AFF_ID(affIdx);
+            obj_mem[oamIdx].attr2 = ATTR2_ID(tileId) | ATTR2_PRIO(0) | ATTR2_PALBANK(palBank);
+        }
     }
 
     // Hide remaining floor sprite OBJ slots
@@ -412,10 +512,17 @@ static void update_minimap(void)
     if (camMY < MINIMAP_Y) camMY = MINIMAP_Y;
     if (camMY > MINIMAP_Y + MINIMAP_H - 1) camMY = MINIMAP_Y + MINIMAP_H - 1;
 
-    // Use tile 1 (2x2 dot) with palette bank 6 (white) for camera, no affine
-    obj_mem[oamIdx].attr0 = ATTR0_Y(camMY & 0xFF) | ATTR0_SQUARE;
-    obj_mem[oamIdx].attr1 = ATTR1_X(camMX & 0x1FF) | ATTR1_SIZE_8;
-    obj_mem[oamIdx].attr2 = ATTR2_ID(16) | ATTR2_PRIO(0) | ATTR2_PALBANK(6);
+    // Use minimap dot tile with palette bank 6 (white) for camera
+    {
+#ifdef AFN_MINIMAP_TILE
+        int dotTile = AFN_MINIMAP_TILE;
+#else
+        int dotTile = 16;
+#endif
+        obj_mem[oamIdx].attr0 = ATTR0_Y(camMY & 0xFF) | ATTR0_SQUARE;
+        obj_mem[oamIdx].attr1 = ATTR1_X(camMX & 0x1FF) | ATTR1_SIZE_8;
+        obj_mem[oamIdx].attr2 = ATTR2_ID(dotTile) | ATTR2_PRIO(0) | ATTR2_PALBANK(6);
+    }
     oamIdx++;
 
     // Sprite dots on minimap
@@ -431,9 +538,16 @@ static void update_minimap(void)
         int palBank = g_sprites[i].palIdx;
         if (palBank > 5) palBank = 1;
 
-        obj_mem[oamIdx].attr0 = ATTR0_Y(smy & 0xFF) | ATTR0_SQUARE;
-        obj_mem[oamIdx].attr1 = ATTR1_X(smx & 0x1FF) | ATTR1_SIZE_8;
-        obj_mem[oamIdx].attr2 = ATTR2_ID(16) | ATTR2_PRIO(0) | ATTR2_PALBANK(palBank);
+        {
+#ifdef AFN_MINIMAP_TILE
+            int dotTile = AFN_MINIMAP_TILE;
+#else
+            int dotTile = 16;
+#endif
+            obj_mem[oamIdx].attr0 = ATTR0_Y(smy & 0xFF) | ATTR0_SQUARE;
+            obj_mem[oamIdx].attr1 = ATTR1_X(smx & 0x1FF) | ATTR1_SIZE_8;
+            obj_mem[oamIdx].attr2 = ATTR2_ID(dotTile) | ATTR2_PRIO(0) | ATTR2_PALBANK(palBank);
+        }
         oamIdx++;
     }
 

@@ -200,9 +200,58 @@ static void DrawSquare(int cx, int cy, int half, uint8_t cr, uint8_t cg, uint8_t
     }
 }
 
+// Draw a sprite asset frame as a scaled billboard
+static void DrawSpriteFrame(int cx, int cy, int halfW, int halfH,
+                            const SpriteFrame& frame, const uint32_t* palette,
+                            float fogAlpha)
+{
+    int fSize = frame.width;
+    if (fSize <= 0) return;
+
+    // Map frame pixels to screen rect
+    int drawW = halfW * 2;
+    int drawH = halfH * 2;
+    int sx0 = cx - halfW;
+    int sy0 = cy - halfH;
+
+    for (int dy = 0; dy < drawH; dy++)
+    {
+        int sy = sy0 + dy;
+        if (sy < 0 || sy >= kGBAHeight) continue;
+        uint8_t* row = sFrameBuf + sy * kGBAWidth * 3;
+
+        int fy = dy * fSize / drawH;
+        if (fy >= fSize) fy = fSize - 1;
+
+        for (int dx = 0; dx < drawW; dx++)
+        {
+            int sx = sx0 + dx;
+            if (sx < 0 || sx >= kGBAWidth) continue;
+
+            int fx = dx * fSize / drawW;
+            if (fx >= fSize) fx = fSize - 1;
+
+            uint8_t palIdx = frame.pixels[fy * kMaxFrameSize + fx];
+            if (palIdx == 0) continue; // transparent
+
+            uint32_t col = palette[palIdx & 0xF];
+            uint8_t cr = (col >> 0) & 0xFF;
+            uint8_t cg = (col >> 8) & 0xFF;
+            uint8_t cb = (col >> 16) & 0xFF;
+
+            // Fog blend
+            row[sx*3+0] = (uint8_t)(cr*(1-fogAlpha) + kSkyCol[0]*fogAlpha);
+            row[sx*3+1] = (uint8_t)(cg*(1-fogAlpha) + kSkyCol[1]*fogAlpha);
+            row[sx*3+2] = (uint8_t)(cb*(1-fogAlpha) + kSkyCol[2]*fogAlpha);
+        }
+    }
+}
+
 void Render(const Mode7Camera& cam, const Mode7Map* map,
             const FloorSprite* sprites, int spriteCount,
-            const CameraStartObject* camObj, float camObjScale)
+            const CameraStartObject* camObj, float camObjScale,
+            const SpriteAsset* assets, int assetCount,
+            float animTime)
 {
     float cosA = cosf(-cam.angle);
     float sinA = sinf(-cam.angle);
@@ -326,7 +375,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             if (projected[i].depth < projected[j].depth)
                 std::swap(projected[i], projected[j]);
 
-    // Draw each sprite as a diamond billboard and store projection for click-select
+    // Draw each sprite as a diamond billboard (or asset frame) and store projection for click-select
     sLastProjCount = 0;
     for (int i = 0; i < projCount; i++)
     {
@@ -344,7 +393,40 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         // Sprite draws upward from its foot position
         int drawCenterY = sp.screenY - halfH;
 
-        DrawDiamond(sp.screenX, drawCenterY, halfW, halfH, cr, cg, cb, sp.fog);
+        // Check if this sprite has a linked asset with frames
+        bool drewAsset = false;
+        if (fs.assetIdx >= 0 && fs.assetIdx < assetCount && assets)
+        {
+            const SpriteAsset& asset = assets[fs.assetIdx];
+            if (!asset.frames.empty())
+            {
+                // Determine which frame to show (animate if anim linked)
+                int frameIdx = 0;
+                if (fs.animIdx >= 0 && fs.animIdx < (int)asset.anims.size())
+                {
+                    const SpriteAnim& anim = asset.anims[fs.animIdx];
+                    int frameCount = anim.endFrame - anim.startFrame + 1;
+                    if (frameCount > 0 && anim.fps > 0)
+                    {
+                        float frameTime = 1.0f / anim.fps;
+                        int animFrame = (int)(animTime / frameTime) % frameCount;
+                        frameIdx = anim.startFrame + animFrame;
+                    }
+                    else
+                        frameIdx = anim.startFrame;
+                }
+                if (frameIdx >= (int)asset.frames.size())
+                    frameIdx = 0;
+
+                // Make half sizes square for pixel art
+                int halfS = std::max(halfW, halfH);
+                DrawSpriteFrame(sp.screenX, drawCenterY, halfS, halfS,
+                                asset.frames[frameIdx], asset.palette, sp.fog);
+                drewAsset = true;
+            }
+        }
+        if (!drewAsset)
+            DrawDiamond(sp.screenX, drawCenterY, halfW, halfH, cr, cg, cb, sp.fog);
 
         // Selection highlight: bright outline
         if (fs.selected)

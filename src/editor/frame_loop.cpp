@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <filesystem>
 #include <thread>
@@ -17,6 +18,7 @@
 #include <windows.h>
 #include <commdlg.h>
 #endif
+#include <GL/gl.h>
 
 namespace Affinity
 {
@@ -52,6 +54,17 @@ static constexpr float kWorldHalf = kWorldSize * 0.5f; // ±512
 static FloorSprite sSprites[kMaxFloorSprites];
 static int sSpriteCount = 0;
 static int sSelectedSprite = -1;
+
+// Sprite assets
+static std::vector<SpriteAsset> sSpriteAssets;
+static int sSelectedAsset = -1;
+static int sSelectedFrame = 0;
+static int sSelectedAnim  = -1;
+static int sAssetPreviewFrame = 0;
+static float sAssetPreviewTimer = 0.0f;
+static unsigned int sAssetPreviewTex = 0; // GL texture for frame preview
+static int sSpriteEditorPalColor = 1; // current paint color in frame editor
+static float sViewportAnimTime = 0.0f; // animation timer for viewport sprite preview
 
 // Sprite placement colors (cycle through these)
 static const uint32_t kSpriteColors[] = {
@@ -158,8 +171,51 @@ static bool SaveProject(const std::string& path)
     for (int i = 0; i < sSpriteCount; i++)
     {
         const FloorSprite& sp = sSprites[i];
-        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u\n",
-                sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color);
+        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d\n",
+                sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
+                sp.assetIdx, sp.animIdx);
+    }
+    fprintf(f, "\n");
+
+    // Sprite Assets
+    fprintf(f, "[SpriteAssets]\n");
+    fprintf(f, "count=%d\n", (int)sSpriteAssets.size());
+    for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++)
+    {
+        const SpriteAsset& sa = sSpriteAssets[ai];
+        fprintf(f, "asset_begin=%s\n", sa.name.c_str());
+        fprintf(f, "baseSize=%d\n", sa.baseSize);
+        fprintf(f, "palBank=%d\n", sa.palBank);
+        // Palette
+        for (int c = 0; c < 16; c++)
+            fprintf(f, "pal=%d,%u\n", c, sa.palette[c]);
+        // Frames
+        fprintf(f, "frameCount=%d\n", (int)sa.frames.size());
+        for (int fi = 0; fi < (int)sa.frames.size(); fi++)
+        {
+            const SpriteFrame& fr = sa.frames[fi];
+            fprintf(f, "frame=%d,%d", fr.width, fr.height);
+            for (int p = 0; p < fr.height; p++)
+                for (int q = 0; q < fr.width; q++)
+                    fprintf(f, ",%d", fr.pixels[p * kMaxFrameSize + q]);
+            fprintf(f, "\n");
+        }
+        // Animations
+        fprintf(f, "animCount=%d\n", (int)sa.anims.size());
+        for (int ani = 0; ani < (int)sa.anims.size(); ani++)
+        {
+            const SpriteAnim& an = sa.anims[ani];
+            fprintf(f, "anim=%s,%d,%d,%d,%d\n",
+                    an.name.c_str(), an.startFrame, an.endFrame, an.fps, an.loop ? 1 : 0);
+        }
+        // LOD
+        fprintf(f, "lodCount=%d\n", sa.lodCount);
+        for (int li = 0; li < sa.lodCount; li++)
+        {
+            const SpriteLOD& lod = sa.lod[li];
+            fprintf(f, "lod=%d,%d,%d,%.1f\n", lod.size, lod.frameStart, lod.frameCount, lod.maxDist);
+        }
+        fprintf(f, "asset_end\n");
     }
     fprintf(f, "\n");
 
@@ -184,10 +240,12 @@ static bool LoadProject(const std::string& path)
     sSelectedSprite = -1;
     sSelectedObjType = SelectedObjType::None;
     sEditorMode = EditorMode::Edit;
+    sSpriteAssets.clear();
+    sSelectedAsset = -1;
     sCamObj = { 0.0f, 0.0f, 10.0f, 0.0f, 50.0f };
     sCamObjEditorScale = 0.05f;
 
-    char line[512];
+    char line[8192]; // large buffer for frame pixel data lines
     char section[64] = {};
 
     while (fgets(line, sizeof(line), f))
@@ -235,10 +293,11 @@ static bool LoadProject(const std::string& path)
             if (sscanf(line, "count=%d", &ival) == 1) { /* just informational */ }
             else if (sSpriteCount < kMaxFloorSprites)
             {
-                int sid;
+                int sid, aIdx = -1, anIdx = 0;
                 float sx, sy, sz, sc;
                 unsigned int col;
-                if (sscanf(line, "sprite=%d,%f,%f,%f,%f,%u", &sid, &sx, &sy, &sz, &sc, &col) == 6)
+                // Try extended format first (with assetIdx, animIdx)
+                if (sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx) >= 6)
                 {
                     FloorSprite& sp = sSprites[sSpriteCount];
                     sp.spriteId = sid;
@@ -247,9 +306,94 @@ static bool LoadProject(const std::string& path)
                     sp.z = sz;
                     sp.scale = sc;
                     sp.color = col;
+                    sp.assetIdx = aIdx;
+                    sp.animIdx = anIdx;
                     sp.selected = false;
                     sSpriteCount++;
                 }
+            }
+        }
+        else if (strcmp(section, "SpriteAssets") == 0)
+        {
+            // Parse sprite asset blocks
+            if (strncmp(line, "asset_begin=", 12) == 0)
+            {
+                SpriteAsset sa;
+                sa.name = line + 12;
+                sa.frames.clear();
+                sa.anims.clear();
+                sa.lodCount = 0;
+                int lodIdx = 0;
+
+                // Read lines until asset_end
+                while (fgets(line, sizeof(line), f))
+                {
+                    char* enl = strchr(line, '\n'); if (enl) *enl = '\0';
+                    enl = strchr(line, '\r'); if (enl) *enl = '\0';
+                    if (strcmp(line, "asset_end") == 0) break;
+                    if (line[0] == '\0') continue;
+
+                    int iv; unsigned int uv; float fv;
+                    if (sscanf(line, "baseSize=%d", &iv) == 1) sa.baseSize = iv;
+                    else if (sscanf(line, "palBank=%d", &iv) == 1) sa.palBank = iv;
+                    else if (sscanf(line, "pal=%d,%u", &iv, &uv) == 2 && iv >= 0 && iv < 16) sa.palette[iv] = uv;
+                    else if (sscanf(line, "frameCount=%d", &iv) == 1) { /* informational */ }
+                    else if (strncmp(line, "frame=", 6) == 0)
+                    {
+                        SpriteFrame fr;
+                        memset(fr.pixels, 0, sizeof(fr.pixels));
+                        // Parse: frame=w,h,p0,p1,p2,...
+                        const char* p = line + 6;
+                        int w = 0, h = 0;
+                        sscanf(p, "%d,%d", &w, &h);
+                        fr.width = w; fr.height = h;
+                        // Skip past "w,h"
+                        int commas = 0;
+                        while (*p && commas < 2) { if (*p == ',') commas++; p++; }
+                        for (int py = 0; py < h && *p; py++)
+                            for (int px = 0; px < w && *p; px++)
+                            {
+                                int pv = 0;
+                                sscanf(p, "%d", &pv);
+                                fr.pixels[py * kMaxFrameSize + px] = (uint8_t)pv;
+                                // Skip to next comma or end
+                                while (*p && *p != ',') p++;
+                                if (*p == ',') p++;
+                            }
+                        sa.frames.push_back(fr);
+                    }
+                    else if (sscanf(line, "animCount=%d", &iv) == 1) { /* informational */ }
+                    else if (strncmp(line, "anim=", 5) == 0)
+                    {
+                        SpriteAnim an;
+                        char aname[64] = {};
+                        int sf, ef, afps, aloop;
+                        if (sscanf(line + 5, "%63[^,],%d,%d,%d,%d", aname, &sf, &ef, &afps, &aloop) == 5)
+                        {
+                            an.name = aname;
+                            an.startFrame = sf;
+                            an.endFrame = ef;
+                            an.fps = afps;
+                            an.loop = (aloop != 0);
+                            sa.anims.push_back(an);
+                        }
+                    }
+                    else if (sscanf(line, "lodCount=%d", &iv) == 1) { sa.lodCount = iv; lodIdx = 0; }
+                    else if (strncmp(line, "lod=", 4) == 0)
+                    {
+                        int ls, lfs, lfc; float ld;
+                        if (sscanf(line + 4, "%d,%d,%d,%f", &ls, &lfs, &lfc, &ld) == 4
+                            && lodIdx < kMaxSpriteLODs)
+                        {
+                            sa.lod[lodIdx].size = ls;
+                            sa.lod[lodIdx].frameStart = lfs;
+                            sa.lod[lodIdx].frameCount = lfc;
+                            sa.lod[lodIdx].maxDist = ld;
+                            lodIdx++;
+                        }
+                    }
+                }
+                sSpriteAssets.push_back(sa);
             }
         }
         else if (strcmp(section, "Palette") == 0)
@@ -282,6 +426,11 @@ static void CloseProject()
     sCamera.angle = 0.0f;
     sCamera.fov = 128.0f;
     sCamera.horizon = 54.0f;
+
+    sSpriteAssets.clear();
+    sSelectedAsset = -1;
+    sSelectedFrame = 0;
+    sSelectedAnim = -1;
 
     sProjectPath.clear();
     sProjectDirty = false;
@@ -551,6 +700,569 @@ static void DrawTilesetPanel(ImVec2 pos, ImVec2 size)
     ImGui::PopStyleColor(2);
 }
 
+// ---- Sprites Tab: full-screen sprite asset editor ----
+static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
+{
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(size);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.25f, 0.30f, 1.0f));
+    ImGui::Begin("##SpritesTab", nullptr,
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoTitleBar);
+
+    // ---- Left column: Asset List (20% width) ----
+    float colW1 = size.x * 0.20f;
+    float colW2 = size.x * 0.45f;
+    float colW3 = size.x - colW1 - colW2;
+
+    ImGui::BeginChild("##AssetList", ImVec2(colW1, 0), true);
+    ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Sprite Assets");
+    ImGui::Separator();
+
+    for (int i = 0; i < (int)sSpriteAssets.size(); i++)
+    {
+        bool sel = (sSelectedAsset == i);
+        if (ImGui::Selectable(sSpriteAssets[i].name.c_str(), sel))
+        {
+            sSelectedAsset = i;
+            sSelectedFrame = 0;
+            sSelectedAnim = -1;
+            sAssetPreviewFrame = 0;
+            sAssetPreviewTimer = 0.0f;
+        }
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button("+ New", ImVec2(-1, 0)))
+    {
+        SpriteAsset a;
+        char nameBuf[32];
+        snprintf(nameBuf, sizeof(nameBuf), "Sprite_%d", (int)sSpriteAssets.size());
+        a.name = nameBuf;
+        // Default: 1 blank frame, 1 idle anim, 1 LOD tier
+        SpriteFrame f;
+        memset(f.pixels, 0, sizeof(f.pixels));
+        f.width = 8; f.height = 8;
+        a.frames.push_back(f);
+        SpriteAnim anim;
+        anim.name = "idle";
+        anim.startFrame = 0;
+        anim.endFrame = 0;
+        anim.fps = 8;
+        anim.loop = true;
+        a.anims.push_back(anim);
+        a.lod[0].size = 8;
+        a.lod[0].frameStart = 0;
+        a.lod[0].frameCount = 1;
+        a.lod[0].maxDist = 9999.0f;
+        a.lodCount = 1;
+        // Default palette: transparent + white
+        a.palette[0] = 0x00000000;
+        a.palette[1] = 0xFFFFFFFF;
+        sSpriteAssets.push_back(a);
+        sSelectedAsset = (int)sSpriteAssets.size() - 1;
+        sSelectedFrame = 0;
+    }
+    if (sSelectedAsset >= 0 && sSelectedAsset < (int)sSpriteAssets.size())
+    {
+        if (ImGui::Button("Delete", ImVec2(-1, 0)))
+        {
+            sSpriteAssets.erase(sSpriteAssets.begin() + sSelectedAsset);
+            // Fix up FloorSprite references
+            for (int i = 0; i < sSpriteCount; i++)
+            {
+                if (sSprites[i].assetIdx == sSelectedAsset)
+                    sSprites[i].assetIdx = -1;
+                else if (sSprites[i].assetIdx > sSelectedAsset)
+                    sSprites[i].assetIdx--;
+            }
+            if (sSelectedAsset >= (int)sSpriteAssets.size())
+                sSelectedAsset = (int)sSpriteAssets.size() - 1;
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    // ---- Middle column: Frame Editor + Animation Timeline ----
+    ImGui::BeginChild("##FrameEditor", ImVec2(colW2, 0), false);
+
+    if (sSelectedAsset >= 0 && sSelectedAsset < (int)sSpriteAssets.size())
+    {
+        SpriteAsset& asset = sSpriteAssets[sSelectedAsset];
+
+        // Asset name
+        char nameBuf[64];
+        strncpy(nameBuf, asset.name.c_str(), sizeof(nameBuf) - 1);
+        nameBuf[sizeof(nameBuf) - 1] = '\0';
+        ImGui::PushItemWidth(colW2 * 0.5f);
+        if (ImGui::InputText("Name##asset", nameBuf, sizeof(nameBuf)))
+            asset.name = nameBuf;
+        ImGui::PopItemWidth();
+
+        ImGui::SameLine();
+        // Base size selector
+        const char* sizes[] = { "8x8", "16x16", "32x32" };
+        int sizeIdx = (asset.baseSize == 32) ? 2 : (asset.baseSize == 16) ? 1 : 0;
+        ImGui::PushItemWidth(Scaled(80));
+        if (ImGui::Combo("Size##base", &sizeIdx, sizes, 3))
+        {
+            int newSize = (sizeIdx == 2) ? 32 : (sizeIdx == 1) ? 16 : 8;
+            asset.baseSize = newSize;
+            // Resize all frames
+            for (auto& fr : asset.frames)
+            {
+                fr.width = newSize;
+                fr.height = newSize;
+            }
+        }
+        ImGui::PopItemWidth();
+
+        ImGui::Separator();
+
+        // ---- Frame Grid: pixel editor ----
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Frame Editor");
+
+        if (!asset.frames.empty())
+        {
+            if (sSelectedFrame >= (int)asset.frames.size())
+                sSelectedFrame = 0;
+
+            SpriteFrame& frame = asset.frames[sSelectedFrame];
+            int fSize = frame.width;
+
+            // Draw pixel grid
+            float gridAvail = std::min(colW2 - Scaled(20), size.y * 0.5f);
+            float cellSize = gridAvail / (float)fSize;
+            cellSize = std::max(cellSize, 4.0f);
+            float gridPx = cellSize * fSize;
+
+            ImVec2 gridStart = ImGui::GetCursorScreenPos();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            // Draw pixels
+            for (int py = 0; py < fSize; py++)
+            {
+                for (int px = 0; px < fSize; px++)
+                {
+                    uint8_t palIdx = frame.pixels[py * kMaxFrameSize + px];
+                    uint32_t col = asset.palette[palIdx & 0xF];
+                    // Convert RGBA to ABGR for ImGui
+                    uint32_t r = (col >> 0) & 0xFF;
+                    uint32_t g = (col >> 8) & 0xFF;
+                    uint32_t b = (col >> 16) & 0xFF;
+                    uint32_t a = (col >> 24) & 0xFF;
+                    if (palIdx == 0) a = 0; // transparent
+                    uint32_t imCol = (a << 24) | (b << 16) | (g << 8) | r;
+                    if (palIdx == 0)
+                        imCol = 0xFF1A1A1A; // dark bg for transparent
+
+                    ImVec2 p0(gridStart.x + px * cellSize, gridStart.y + py * cellSize);
+                    ImVec2 p1(p0.x + cellSize, p0.y + cellSize);
+                    dl->AddRectFilled(p0, p1, imCol);
+                }
+            }
+
+            // Grid lines
+            for (int i = 0; i <= fSize; i++)
+            {
+                float x = gridStart.x + i * cellSize;
+                float y = gridStart.y + i * cellSize;
+                dl->AddLine(ImVec2(x, gridStart.y), ImVec2(x, gridStart.y + gridPx), 0x40FFFFFF);
+                dl->AddLine(ImVec2(gridStart.x, y), ImVec2(gridStart.x + gridPx, y), 0x40FFFFFF);
+            }
+
+            // Click to paint
+            ImGui::SetCursorScreenPos(gridStart);
+            ImGui::InvisibleButton("##PixelGrid", ImVec2(gridPx, gridPx));
+            if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+            {
+                ImVec2 mouse = ImGui::GetMousePos();
+                int px = (int)((mouse.x - gridStart.x) / cellSize);
+                int py = (int)((mouse.y - gridStart.y) / cellSize);
+                if (px >= 0 && px < fSize && py >= 0 && py < fSize)
+                    frame.pixels[py * kMaxFrameSize + px] = (uint8_t)sSpriteEditorPalColor;
+            }
+            if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Right))
+            {
+                ImVec2 mouse = ImGui::GetMousePos();
+                int px = (int)((mouse.x - gridStart.x) / cellSize);
+                int py = (int)((mouse.y - gridStart.y) / cellSize);
+                if (px >= 0 && px < fSize && py >= 0 && py < fSize)
+                    frame.pixels[py * kMaxFrameSize + px] = 0; // erase to transparent
+            }
+
+            ImGui::SetCursorScreenPos(ImVec2(gridStart.x, gridStart.y + gridPx + 4));
+
+            // Paint color selector (palette row)
+            ImGui::Text("Paint:");
+            ImGui::SameLine();
+            for (int c = 0; c < 16; c++)
+            {
+                ImGui::PushID(c + 1000);
+                uint32_t col = asset.palette[c];
+                uint32_t r = (col >> 0) & 0xFF;
+                uint32_t g = (col >> 8) & 0xFF;
+                uint32_t b = (col >> 16) & 0xFF;
+                ImVec4 cv(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
+                if (c == 0) cv = ImVec4(0.1f, 0.1f, 0.1f, 1.0f); // transparent shown as dark
+
+                bool isSel = (sSpriteEditorPalColor == c);
+                if (isSel)
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Button, cv);
+                    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1, 1, 1, 1));
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f);
+                }
+                else
+                {
+                    ImGui::PushStyleColor(ImGuiCol_Button, cv);
+                    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.3f, 0.3f, 0.3f, 1));
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+                }
+                if (ImGui::Button("##pal", ImVec2(Scaled(16), Scaled(16))))
+                    sSpriteEditorPalColor = c;
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(2);
+                ImGui::SameLine();
+                ImGui::PopID();
+            }
+            ImGui::NewLine();
+
+            // Frame list strip
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Frames (%d)", (int)asset.frames.size());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("+##addframe"))
+            {
+                SpriteFrame nf;
+                memset(nf.pixels, 0, sizeof(nf.pixels));
+                nf.width = asset.baseSize;
+                nf.height = asset.baseSize;
+                asset.frames.push_back(nf);
+            }
+            ImGui::SameLine();
+            if (asset.frames.size() > 1 && ImGui::SmallButton("-##delframe"))
+            {
+                asset.frames.erase(asset.frames.begin() + sSelectedFrame);
+                if (sSelectedFrame >= (int)asset.frames.size())
+                    sSelectedFrame = (int)asset.frames.size() - 1;
+                // Fix anim references
+                for (auto& a : asset.anims)
+                {
+                    if (a.endFrame >= (int)asset.frames.size())
+                        a.endFrame = (int)asset.frames.size() - 1;
+                    if (a.startFrame > a.endFrame)
+                        a.startFrame = a.endFrame;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Dup##dupframe"))
+            {
+                if (sSelectedFrame < (int)asset.frames.size())
+                {
+                    SpriteFrame dup = asset.frames[sSelectedFrame];
+                    asset.frames.insert(asset.frames.begin() + sSelectedFrame + 1, dup);
+                }
+            }
+
+            // Thumbnail strip
+            float thumbSize = Scaled(32);
+            for (int fi = 0; fi < (int)asset.frames.size(); fi++)
+            {
+                ImGui::PushID(fi + 2000);
+                bool fsel = (sSelectedFrame == fi);
+
+                ImVec2 thumbStart = ImGui::GetCursorScreenPos();
+                uint32_t borderCol = fsel ? 0xFFFFFFFF : 0xFF444444;
+                ImDrawList* tdl = ImGui::GetWindowDrawList();
+                tdl->AddRect(thumbStart, ImVec2(thumbStart.x + thumbSize, thumbStart.y + thumbSize), borderCol);
+
+                // Mini preview of frame
+                int fs = asset.frames[fi].width;
+                float thumbCell = thumbSize / (float)fs;
+                for (int ty = 0; ty < fs; ty++)
+                    for (int tx = 0; tx < fs; tx++)
+                    {
+                        uint8_t pi = asset.frames[fi].pixels[ty * kMaxFrameSize + tx];
+                        if (pi == 0) continue;
+                        uint32_t col = asset.palette[pi & 0xF];
+                        uint32_t cr = (col >> 0) & 0xFF;
+                        uint32_t cg = (col >> 8) & 0xFF;
+                        uint32_t cb = (col >> 16) & 0xFF;
+                        uint32_t imCol = 0xFF000000 | (cb << 16) | (cg << 8) | cr;
+                        ImVec2 tp0(thumbStart.x + tx * thumbCell, thumbStart.y + ty * thumbCell);
+                        ImVec2 tp1(tp0.x + thumbCell, tp0.y + thumbCell);
+                        tdl->AddRectFilled(tp0, tp1, imCol);
+                    }
+
+                ImGui::SetCursorScreenPos(thumbStart);
+                if (ImGui::InvisibleButton("##fthumb", ImVec2(thumbSize, thumbSize)))
+                    sSelectedFrame = fi;
+                ImGui::SameLine();
+                ImGui::PopID();
+            }
+            ImGui::NewLine();
+        }
+
+        // ---- Animation Timeline ----
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Animations (%d)", (int)asset.anims.size());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("+##addanim"))
+        {
+            SpriteAnim na;
+            char abuf[32];
+            snprintf(abuf, sizeof(abuf), "anim_%d", (int)asset.anims.size());
+            na.name = abuf;
+            na.startFrame = 0;
+            na.endFrame = std::max(0, (int)asset.frames.size() - 1);
+            na.fps = 8;
+            na.loop = true;
+            asset.anims.push_back(na);
+        }
+
+        for (int ai = 0; ai < (int)asset.anims.size(); ai++)
+        {
+            ImGui::PushID(ai + 3000);
+            SpriteAnim& anim = asset.anims[ai];
+            bool animSel = (sSelectedAnim == ai);
+
+            if (ImGui::Selectable(anim.name.c_str(), animSel, 0, ImVec2(Scaled(80), 0)))
+            {
+                sSelectedAnim = ai;
+                sAssetPreviewFrame = anim.startFrame;
+                sAssetPreviewTimer = 0.0f;
+            }
+            ImGui::SameLine();
+
+            ImGui::PushItemWidth(Scaled(60));
+            char nbuf[32];
+            strncpy(nbuf, anim.name.c_str(), sizeof(nbuf) - 1); nbuf[sizeof(nbuf)-1] = '\0';
+            if (ImGui::InputText("##aname", nbuf, sizeof(nbuf)))
+                anim.name = nbuf;
+            ImGui::PopItemWidth();
+            ImGui::SameLine();
+
+            int maxF = std::max(0, (int)asset.frames.size() - 1);
+            ImGui::PushItemWidth(Scaled(40));
+            ImGui::DragInt("##astart", &anim.startFrame, 1.0f, 0, maxF);
+            ImGui::PopItemWidth();
+            ImGui::SameLine();
+            ImGui::Text("-");
+            ImGui::SameLine();
+            ImGui::PushItemWidth(Scaled(40));
+            ImGui::DragInt("##aend", &anim.endFrame, 1.0f, 0, maxF);
+            ImGui::PopItemWidth();
+            ImGui::SameLine();
+
+            ImGui::PushItemWidth(Scaled(35));
+            ImGui::DragInt("fps##afps", &anim.fps, 1.0f, 1, 30);
+            ImGui::PopItemWidth();
+            ImGui::SameLine();
+
+            ImGui::Checkbox("Loop##aloop", &anim.loop);
+            ImGui::SameLine();
+
+            if (asset.anims.size() > 1 && ImGui::SmallButton("X##delanim"))
+            {
+                asset.anims.erase(asset.anims.begin() + ai);
+                if (sSelectedAnim >= (int)asset.anims.size())
+                    sSelectedAnim = (int)asset.anims.size() - 1;
+                ImGui::PopID();
+                break;
+            }
+
+            ImGui::PopID();
+        }
+
+        // Animated preview (plays selected animation)
+        if (sSelectedAnim >= 0 && sSelectedAnim < (int)asset.anims.size() && !asset.frames.empty())
+        {
+            SpriteAnim& anim = asset.anims[sSelectedAnim];
+            sAssetPreviewTimer += dt;
+            float frameTime = (anim.fps > 0) ? (1.0f / anim.fps) : 0.125f;
+            if (sAssetPreviewTimer >= frameTime)
+            {
+                sAssetPreviewTimer -= frameTime;
+                sAssetPreviewFrame++;
+                if (sAssetPreviewFrame > anim.endFrame)
+                    sAssetPreviewFrame = anim.loop ? anim.startFrame : anim.endFrame;
+            }
+            sAssetPreviewFrame = std::clamp(sAssetPreviewFrame, anim.startFrame, anim.endFrame);
+
+            ImGui::Text("Preview: frame %d", sAssetPreviewFrame);
+            if (sAssetPreviewFrame < (int)asset.frames.size())
+            {
+                SpriteFrame& pf = asset.frames[sAssetPreviewFrame];
+                float prevSize = Scaled(64);
+                float prevCell = prevSize / (float)pf.width;
+                ImVec2 prevStart = ImGui::GetCursorScreenPos();
+                ImDrawList* pdl = ImGui::GetWindowDrawList();
+                pdl->AddRectFilled(prevStart, ImVec2(prevStart.x + prevSize, prevStart.y + prevSize), 0xFF1A1A1A);
+                for (int py = 0; py < pf.width; py++)
+                    for (int px = 0; px < pf.width; px++)
+                    {
+                        uint8_t pi = pf.pixels[py * kMaxFrameSize + px];
+                        if (pi == 0) continue;
+                        uint32_t col = asset.palette[pi & 0xF];
+                        uint32_t cr = (col >> 0) & 0xFF;
+                        uint32_t cg = (col >> 8) & 0xFF;
+                        uint32_t cb = (col >> 16) & 0xFF;
+                        uint32_t imCol = 0xFF000000 | (cb << 16) | (cg << 8) | cr;
+                        ImVec2 pp0(prevStart.x + px * prevCell, prevStart.y + py * prevCell);
+                        ImVec2 pp1(pp0.x + prevCell, pp0.y + prevCell);
+                        pdl->AddRectFilled(pp0, pp1, imCol);
+                    }
+                ImGui::Dummy(ImVec2(prevSize, prevSize));
+            }
+        }
+    }
+    else
+    {
+        ImGui::TextWrapped("Select or create a sprite asset.");
+    }
+
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    // ---- Right column: LOD + Palette Editor + Asset Link ----
+    ImGui::BeginChild("##LODPalette", ImVec2(colW3, 0), true);
+
+    if (sSelectedAsset >= 0 && sSelectedAsset < (int)sSpriteAssets.size())
+    {
+        SpriteAsset& asset = sSpriteAssets[sSelectedAsset];
+
+        // ---- LOD Tiers ----
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "LOD Tiers");
+        ImGui::Separator();
+
+        for (int li = 0; li < asset.lodCount; li++)
+        {
+            ImGui::PushID(li + 4000);
+            SpriteLOD& lod = asset.lod[li];
+
+            const char* lodSizes[] = { "8x8", "16x16", "32x32" };
+            int lodSzIdx = (lod.size == 32) ? 2 : (lod.size == 16) ? 1 : 0;
+            ImGui::PushItemWidth(Scaled(70));
+            if (ImGui::Combo("##lodsize", &lodSzIdx, lodSizes, 3))
+                lod.size = (lodSzIdx == 2) ? 32 : (lodSzIdx == 1) ? 16 : 8;
+            ImGui::PopItemWidth();
+            ImGui::SameLine();
+
+            ImGui::PushItemWidth(Scaled(60));
+            ImGui::DragFloat("dist##lod", &lod.maxDist, 10.0f, 0.0f, 9999.0f, "%.0f");
+            ImGui::PopItemWidth();
+            ImGui::SameLine();
+
+            ImGui::PushItemWidth(Scaled(40));
+            ImGui::DragInt("start##lod", &lod.frameStart, 1.0f, 0, std::max(0, (int)asset.frames.size() - 1));
+            ImGui::PopItemWidth();
+            ImGui::SameLine();
+
+            ImGui::PushItemWidth(Scaled(40));
+            ImGui::DragInt("cnt##lod", &lod.frameCount, 1.0f, 0, (int)asset.frames.size());
+            ImGui::PopItemWidth();
+
+            ImGui::PopID();
+        }
+
+        if (asset.lodCount < kMaxSpriteLODs && ImGui::SmallButton("+##addlod"))
+        {
+            SpriteLOD& nl = asset.lod[asset.lodCount];
+            nl.size = 8;
+            nl.frameStart = 0;
+            nl.frameCount = 1;
+            nl.maxDist = 500.0f;
+            asset.lodCount++;
+        }
+        if (asset.lodCount > 1)
+        {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("-##dellod"))
+                asset.lodCount--;
+        }
+
+        ImGui::Spacing();
+
+        // ---- Palette Editor ----
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Palette (16 colors)");
+        ImGui::Separator();
+
+        ImGui::PushItemWidth(Scaled(50));
+        ImGui::DragInt("Bank##palbank", &asset.palBank, 1.0f, 0, 15);
+        ImGui::PopItemWidth();
+
+        for (int c = 0; c < 16; c++)
+        {
+            ImGui::PushID(c + 5000);
+            uint32_t col = asset.palette[c];
+            float rgba[4] = {
+                ((col >> 0)  & 0xFF) / 255.0f,
+                ((col >> 8)  & 0xFF) / 255.0f,
+                ((col >> 16) & 0xFF) / 255.0f,
+                ((col >> 24) & 0xFF) / 255.0f
+            };
+            char clbl[16];
+            snprintf(clbl, sizeof(clbl), "%d##pcol", c);
+            if (ImGui::ColorEdit4(clbl, rgba,
+                ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_NoAlpha))
+            {
+                asset.palette[c] =
+                    ((uint32_t)(rgba[0] * 255) << 0) |
+                    ((uint32_t)(rgba[1] * 255) << 8) |
+                    ((uint32_t)(rgba[2] * 255) << 16) |
+                    0xFF000000;
+                if (c == 0) asset.palette[c] = 0x00000000; // index 0 always transparent
+            }
+            if ((c & 3) != 3) ImGui::SameLine();
+            ImGui::PopID();
+        }
+
+        ImGui::Spacing();
+
+        // ---- Import Strip ----
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Import");
+        ImGui::Separator();
+
+        ImGui::PushItemWidth(Scaled(50));
+        ImGui::DragInt("Frame W##stripw", &asset.stripFrameW, 1.0f, 1, 256);
+        ImGui::DragInt("Frame H##striph", &asset.stripFrameH, 1.0f, 1, 256);
+        ImGui::PopItemWidth();
+
+        if (!asset.sourceImagePath.empty())
+            ImGui::Text("Source: %s", asset.sourceImagePath.c_str());
+        else
+            ImGui::TextWrapped("No image imported. (TODO: Import PNG strip)");
+
+        ImGui::Spacing();
+
+        // ---- Object Link Info ----
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Linked Objects");
+        ImGui::Separator();
+
+        int linkCount = 0;
+        for (int i = 0; i < sSpriteCount; i++)
+        {
+            if (sSprites[i].assetIdx == sSelectedAsset)
+            {
+                ImGui::Text("  Sprite %d", i);
+                linkCount++;
+            }
+        }
+        if (linkCount == 0)
+            ImGui::TextDisabled("  No objects linked");
+    }
+
+    ImGui::EndChild();
+
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+}
+
 // ---- Right top: Object Editor (replaces Tileset in Edit mode) ----
 static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
 {
@@ -630,6 +1342,43 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::DragFloat("Y##spr", &sp.y, 0.5f, 0.0f, 200.0f);
         ImGui::DragFloat("Z##spr", &sp.z, 1.0f, -kWorldHalf, kWorldHalf);
         ImGui::DragFloat("Scale##spr", &sp.scale, 0.01f, 0.1f, 5.0f);
+
+        // Sprite asset link
+        {
+            const char* preview = (sp.assetIdx >= 0 && sp.assetIdx < (int)sSpriteAssets.size())
+                ? sSpriteAssets[sp.assetIdx].name.c_str() : "(none)";
+            if (ImGui::BeginCombo("Asset##sprlink", preview))
+            {
+                if (ImGui::Selectable("(none)", sp.assetIdx < 0))
+                    sp.assetIdx = -1;
+                for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++)
+                {
+                    bool sel = (sp.assetIdx == ai);
+                    if (ImGui::Selectable(sSpriteAssets[ai].name.c_str(), sel))
+                        sp.assetIdx = ai;
+                }
+                ImGui::EndCombo();
+            }
+        }
+        if (sp.assetIdx >= 0 && sp.assetIdx < (int)sSpriteAssets.size())
+        {
+            SpriteAsset& linkedAsset = sSpriteAssets[sp.assetIdx];
+            if (!linkedAsset.anims.empty())
+            {
+                const char* animPreview = (sp.animIdx >= 0 && sp.animIdx < (int)linkedAsset.anims.size())
+                    ? linkedAsset.anims[sp.animIdx].name.c_str() : "idle";
+                if (ImGui::BeginCombo("Anim##spranimlink", animPreview))
+                {
+                    for (int ai = 0; ai < (int)linkedAsset.anims.size(); ai++)
+                    {
+                        bool sel = (sp.animIdx == ai);
+                        if (ImGui::Selectable(linkedAsset.anims[ai].name.c_str(), sel))
+                            sp.animIdx = ai;
+                    }
+                    ImGui::EndCombo();
+                }
+            }
+        }
         ImGui::PopItemWidth();
 
         // Color presets
@@ -1084,7 +1833,13 @@ void FrameTick(float dt)
                     se.y = sSprites[i].y;
                     se.z = sSprites[i].z;
                     se.scale = sSprites[i].scale;
-                    se.palIdx = (i % 5) + 1;
+                    se.assetIdx = sSprites[i].assetIdx;
+                    se.animIdx = sSprites[i].animIdx;
+                    // Use asset palette bank if linked, otherwise cycle 1-5
+                    if (se.assetIdx >= 0 && se.assetIdx < (int)sSpriteAssets.size())
+                        se.palIdx = sSpriteAssets[se.assetIdx].palBank;
+                    else
+                        se.palIdx = (i % 5) + 1;
                     exportSprites.push_back(se);
                 }
                 GBACameraExport exportCam;
@@ -1094,9 +1849,39 @@ void FrameTick(float dt)
                 exportCam.angle = sCamObj.angle;
                 exportCam.horizon = sCamObj.horizon;
 
-                std::thread([rtDirStr, outPath, exportSprites, exportCam]() {
+                // Collect sprite assets for export
+                std::vector<GBASpriteAssetExport> exportAssets;
+                for (const auto& sa : sSpriteAssets)
+                {
+                    GBASpriteAssetExport ea;
+                    ea.name = sa.name;
+                    ea.baseSize = sa.baseSize;
+                    ea.palBank = sa.palBank;
+                    ea.defaultAnim = sa.defaultAnim;
+                    memcpy(ea.palette, sa.palette, sizeof(ea.palette));
+                    for (const auto& fr : sa.frames)
+                    {
+                        GBASpriteFrameExport ef;
+                        memcpy(ef.pixels, fr.pixels, sizeof(ef.pixels));
+                        ef.width = fr.width;
+                        ef.height = fr.height;
+                        ea.frames.push_back(ef);
+                    }
+                    for (const auto& an : sa.anims)
+                    {
+                        GBASpriteAnimExport ean;
+                        ean.startFrame = an.startFrame;
+                        ean.endFrame = an.endFrame;
+                        ean.fps = an.fps;
+                        ean.loop = an.loop;
+                        ea.anims.push_back(ean);
+                    }
+                    exportAssets.push_back(ea);
+                }
+
+                std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam]() {
                     std::string err;
-                    bool ok = PackageGBA(rtDirStr, outPath, exportSprites, exportCam, err);
+                    bool ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam, err);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
@@ -1222,7 +2007,10 @@ void FrameTick(float dt)
     // ---- Render Mode 7 ----
     // Only show camera object in Edit mode (in Play mode you ARE the camera)
     const CameraStartObject* camObjPtr = (sEditorMode == EditorMode::Edit) ? &sCamObj : nullptr;
-    Mode7::Render(sCamera, nullptr, sSprites, sSpriteCount, camObjPtr, sCamObjEditorScale);
+    sViewportAnimTime += dt;
+    const SpriteAsset* assetsPtr = sSpriteAssets.empty() ? nullptr : sSpriteAssets.data();
+    Mode7::Render(sCamera, nullptr, sSprites, sSpriteCount, camObjPtr, sCamObjEditorScale,
+                  assetsPtr, (int)sSpriteAssets.size(), sViewportAnimTime);
     Mode7::UploadTexture();
 
     // ---- Layout: NEXXT-style fixed panels ----
@@ -1248,29 +2036,37 @@ void FrameTick(float dt)
     // Draw everything
     DrawTabBar();
 
-    // Tab bar positioned at topY
-    // The tab bar positions itself via GetMainViewport WorkPos
-
-    DrawViewport(
-        ImVec2(vp->WorkPos.x, bodyY),
-        ImVec2(leftW, bodyH));
-
-    if (sEditorMode == EditorMode::Edit)
-        DrawObjectEditorPanel(
-            ImVec2(vp->WorkPos.x + leftW, bodyY),
-            ImVec2(rightW, tilesetH));
+    if (sActiveTab == EditorTab::Sprites)
+    {
+        // Sprites tab: full-width sprite asset editor
+        DrawSpritesTab(
+            ImVec2(vp->WorkPos.x, bodyY),
+            ImVec2(totalW, bodyH), dt);
+    }
     else
-        DrawTilesetPanel(
-            ImVec2(vp->WorkPos.x + leftW, bodyY),
-            ImVec2(rightW, tilesetH));
+    {
+        // Map / Tiles tabs: viewport + right panels
+        DrawViewport(
+            ImVec2(vp->WorkPos.x, bodyY),
+            ImVec2(leftW, bodyH));
 
-    DrawTilemapPanel(
-        ImVec2(vp->WorkPos.x + leftW, bodyY + tilesetH),
-        ImVec2(rightW, tilemapH));
+        if (sEditorMode == EditorMode::Edit)
+            DrawObjectEditorPanel(
+                ImVec2(vp->WorkPos.x + leftW, bodyY),
+                ImVec2(rightW, tilesetH));
+        else
+            DrawTilesetPanel(
+                ImVec2(vp->WorkPos.x + leftW, bodyY),
+                ImVec2(rightW, tilesetH));
 
-    DrawPalettePanel(
-        ImVec2(vp->WorkPos.x + leftW, bodyY + tilesetH + tilemapH),
-        ImVec2(rightW, paletteH));
+        DrawTilemapPanel(
+            ImVec2(vp->WorkPos.x + leftW, bodyY + tilesetH),
+            ImVec2(rightW, tilemapH));
+
+        DrawPalettePanel(
+            ImVec2(vp->WorkPos.x + leftW, bodyY + tilesetH + tilemapH),
+            ImVec2(rightW, paletteH));
+    }
 
     DrawStatusBar(
         ImVec2(vp->WorkPos.x, bodyY + bodyH),

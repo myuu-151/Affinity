@@ -127,9 +127,47 @@ static unsigned short EditorAngleToBrad(float radians)
     return (unsigned short)(a / 6.2831853f * 65536.0f);
 }
 
-// Generate mapdata.h with sprite and camera data
+// Convert editor RGBA8 palette color to GBA RGB15
+static unsigned short EditorColorToRGB15(uint32_t rgba)
+{
+    unsigned r = ((rgba >> 0) & 0xFF) >> 3;
+    unsigned g = ((rgba >> 8) & 0xFF) >> 3;
+    unsigned b = ((rgba >> 16) & 0xFF) >> 3;
+    return (unsigned short)(r | (g << 5) | (b << 10));
+}
+
+// Convert a sprite frame to 4bpp GBA tile u32 data.
+// For an NxN frame (8,16,32), emits (N/8)*(N/8) tiles, each tile = 8 u32s.
+// Returns the u32s in row-major tile order for 1D OBJ mapping.
+static std::vector<uint32_t> FrameToGBATiles(const GBASpriteFrameExport& frame)
+{
+    int fSize = frame.width;
+    int tilesPerRow = fSize / 8;
+    int totalTiles = tilesPerRow * tilesPerRow;
+    std::vector<uint32_t> data(totalTiles * 8, 0);
+
+    for (int py = 0; py < fSize; py++)
+    {
+        for (int px = 0; px < fSize; px++)
+        {
+            uint8_t palIdx = frame.pixels[py * kExportMaxFrameSize + px] & 0xF;
+            if (palIdx == 0) continue;
+
+            int tileIdx = (py / 8) * tilesPerRow + (px / 8);
+            int lx = px & 7;
+            int ly = py & 7;
+            int rowIdx = tileIdx * 8 + ly;
+            int bit = lx * 4;
+            data[rowIdx] |= ((uint32_t)palIdx << bit);
+        }
+    }
+    return data;
+}
+
+// Generate mapdata.h with sprite asset tile data, palettes, and camera data
 static bool GenerateMapData(const std::string& runtimeDir,
                             const std::vector<GBASpriteExport>& sprites,
+                            const std::vector<GBASpriteAssetExport>& assets,
                             const GBACameraExport& camera)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
@@ -149,21 +187,99 @@ static bool GenerateMapData(const std::string& runtimeDir,
     f << "#define AFN_CAM_ANGLE " << EditorAngleToBrad(camera.angle) << "\n";
     f << "#define AFN_CAM_HORIZON " << (int)camera.horizon << "\n\n";
 
-    // Sprites
-    f << "// Floor sprites from editor\n";
+    // Sprite assets
+    f << "#define AFN_ASSET_COUNT " << (int)assets.size() << "\n\n";
+
+    // Build one combined tile data array: all assets, all frames, packed contiguously
+    // Each tile = 8 u32s (32 bytes). Tiles packed in 1D OBJ mapping order.
+    std::vector<uint32_t> allTiles;
+    std::vector<int> assetTileStart;
+    std::vector<int> assetTilesPerFrame;
+
+    for (size_t ai = 0; ai < assets.size(); ai++)
+    {
+        const auto& asset = assets[ai];
+        int tilesPerFrame = (asset.baseSize / 8) * (asset.baseSize / 8);
+        assetTileStart.push_back((int)allTiles.size() / 8); // tile index
+        assetTilesPerFrame.push_back(tilesPerFrame);
+
+        for (size_t fi = 0; fi < asset.frames.size(); fi++)
+        {
+            auto td = FrameToGBATiles(asset.frames[fi]);
+            allTiles.insert(allTiles.end(), td.begin(), td.end());
+        }
+    }
+
+    int totalTileCount = (int)allTiles.size() / 8;
+    int minimapTile = totalTileCount; // minimap dot goes right after
+
+    // Emit combined tile data
+    if (!allTiles.empty())
+    {
+        f << "// Combined OBJ tile data (" << totalTileCount << " tiles, "
+          << (int)allTiles.size() * 4 << " bytes)\n";
+        f << "static const u32 afn_all_tiles[" << (int)allTiles.size() << "] = {";
+        for (size_t i = 0; i < allTiles.size(); i++)
+        {
+            if (i % 8 == 0) f << "\n    ";
+            char hex[12];
+            snprintf(hex, sizeof(hex), "0x%08X", allTiles[i]);
+            f << hex;
+            if (i + 1 < allTiles.size()) f << ", ";
+        }
+        f << "\n};\n";
+        f << "#define AFN_ALL_TILES_LEN " << (int)allTiles.size() * 4 << "\n\n";
+    }
+
+    // Emit per-asset palette arrays (16 RGB15 values each)
+    for (size_t ai = 0; ai < assets.size(); ai++)
+    {
+        f << "static const u16 afn_pal" << ai << "[16] = { ";
+        for (int c = 0; c < 16; c++)
+        {
+            char hex[8];
+            snprintf(hex, sizeof(hex), "0x%04X", EditorColorToRGB15(assets[ai].palette[c]));
+            f << hex;
+            if (c < 15) f << ", ";
+        }
+        f << " };\n";
+    }
+    f << "\n";
+
+    // Minimap tile index
+    f << "#define AFN_MINIMAP_TILE " << minimapTile << "\n\n";
+
+    // Asset descriptor table
+    // { tileStart, tilesPerFrame, frameCount, baseSize, palBank }
+    if (!assets.empty())
+    {
+        f << "static const int afn_asset_desc[][5] = {\n";
+        for (size_t ai = 0; ai < assets.size(); ai++)
+        {
+            f << "    { " << assetTileStart[ai] << ", " << assetTilesPerFrame[ai]
+              << ", " << (int)assets[ai].frames.size()
+              << ", " << assets[ai].baseSize
+              << ", " << assets[ai].palBank << " },\n";
+        }
+        f << "};\n\n";
+    }
+
+    // Sprites — includes assetIdx
     f << "#define AFN_SPRITE_COUNT " << (int)sprites.size() << "\n\n";
 
     if (!sprites.empty())
     {
-        f << "static const int afn_sprite_data[][4] = {\n";
-        f << "    // { x_fixed, y_fixed, z_fixed, palIdx }\n";
+        f << "static const int afn_sprite_data[][6] = {\n";
+        f << "    // { x_fixed, y_fixed, z_fixed, palIdx, assetIdx, scale_8_8 }\n";
         for (size_t i = 0; i < sprites.size(); i++)
         {
             int gx = EditorToGBAFixed(sprites[i].x);
             int gy = EditorSpriteYToGBAFixed(sprites[i].y);
             int gz = EditorToGBAFixed(sprites[i].z);
             int pal = sprites[i].palIdx;
-            f << "    { " << gx << ", " << gy << ", " << gz << ", " << pal << " },\n";
+            int aIdx = sprites[i].assetIdx;
+            int scaleFixed = (int)(sprites[i].scale * 256.0f); // 8.8 fixed
+            f << "    { " << gx << ", " << gy << ", " << gz << ", " << pal << ", " << aIdx << ", " << scaleFixed << " },\n";
         }
         f << "};\n";
     }
@@ -176,6 +292,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
 bool PackageGBA(const std::string& runtimeDir,
                 const std::string& outputPath,
                 const std::vector<GBASpriteExport>& sprites,
+                const std::vector<GBASpriteAssetExport>& assets,
                 const GBACameraExport& camera,
                 std::string& errorMsg)
 {
@@ -191,8 +308,8 @@ bool PackageGBA(const std::string& runtimeDir,
         if (pi.hProcess) { WaitForSingleObject(pi.hProcess, 3000); CloseHandle(pi.hProcess); CloseHandle(pi.hThread); }
     }
 
-    // --- Step 1: Generate mapdata.h with sprite/camera data ---
-    if (!GenerateMapData(runtimeDir, sprites, camera))
+    // --- Step 1: Generate mapdata.h with sprite/camera/asset data ---
+    if (!GenerateMapData(runtimeDir, sprites, assets, camera))
     {
         errorMsg = "Failed to write mapdata.h";
         return false;

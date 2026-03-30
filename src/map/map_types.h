@@ -33,6 +33,63 @@ struct TilemapLayer
     std::vector<uint16_t> tileIndices; // index into Tileset::tiles
 };
 
+// ---- Sprite Asset System ----
+// A sprite frame: 4bpp pixel data at a specific size (8, 16, or 32 px square)
+static constexpr int kMaxFrameSize = 32; // max 32x32 pixels
+
+struct SpriteFrame
+{
+    uint8_t pixels[kMaxFrameSize * kMaxFrameSize] = {}; // palette indices 0-15
+    int width  = 8;
+    int height = 8;
+};
+
+// An animation clip: named sequence of frames
+struct SpriteAnim
+{
+    std::string name = "idle";
+    int startFrame = 0;
+    int endFrame   = 0;
+    int fps        = 8;
+    bool loop      = true;
+};
+
+// LOD tier: at what distance to switch to a smaller sprite size
+struct SpriteLOD
+{
+    int   size = 8;         // 8, 16, or 32
+    int   frameStart = 0;   // first frame index for this LOD's tiles
+    int   frameCount = 0;   // number of frames at this LOD
+    float maxDist = 9999.0f; // use this LOD when distance < maxDist
+};
+
+// A sprite asset: defines a sprite type with frames, animations, LOD, palette
+static constexpr int kMaxSpriteAssets = 32;
+static constexpr int kMaxSpriteFrames = 64;
+static constexpr int kMaxSpriteAnims  = 16;
+static constexpr int kMaxSpriteLODs   = 3;
+
+struct SpriteAsset
+{
+    std::string name = "Sprite";
+    uint32_t palette[16] = {};     // 4bpp OBJ palette (16 colors, index 0 = transparent)
+    int palBank = 1;               // GBA OBJ palette bank (0-15)
+
+    std::vector<SpriteFrame> frames;
+    std::vector<SpriteAnim>  anims;
+
+    SpriteLOD lod[kMaxSpriteLODs] = {};
+    int lodCount = 1;              // 1-3 LOD tiers
+
+    int defaultAnim = 0;           // which animation plays by default
+    int baseSize = 8;              // base rendering size (8, 16, 32)
+
+    // Source image path (for re-import)
+    std::string sourceImagePath;
+    int stripFrameW = 0;           // frame width in source strip
+    int stripFrameH = 0;           // frame height in source strip
+};
+
 // A sprite object placed on the Mode 7 floor
 struct FloorSprite
 {
@@ -40,7 +97,9 @@ struct FloorSprite
     float y = 0.0f;          // world Y (height above floor)
     float z = 0.0f;          // world Z
     float scale = 1.0f;      // size multiplier (R + drag to adjust)
-    int   spriteId = 0;      // which sprite graphic (index into sprite sheet)
+    int   spriteId = 0;      // which sprite graphic (legacy)
+    int   assetIdx = -1;     // index into sprite asset list (-1 = none)
+    int   animIdx  = 0;      // which animation to play
     uint32_t color = 0xFFFF00FF; // tint color (ABGR) — used for editor preview
     bool  selected = false;
 };
