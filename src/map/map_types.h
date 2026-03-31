@@ -90,6 +90,22 @@ struct SpriteAsset
     int stripFrameH = 0;           // frame height in source strip
 };
 
+// Object types for Mode 7 scene entities
+enum class SpriteType : int
+{
+    Prop = 0,       // static decoration (trees, signs, rocks)
+    Player,         // player spawn point
+    Enemy,          // hostile NPC
+    NPC,            // friendly/neutral character
+    Trigger,        // invisible zone (events, warps, doors)
+    Waypoint,       // pathfinding/patrol node
+    Count
+};
+
+static const char* const kSpriteTypeNames[] = {
+    "Prop", "Player", "Enemy", "NPC", "Trigger", "Waypoint"
+};
+
 // A sprite object placed on the Mode 7 floor
 struct FloorSprite
 {
@@ -97,6 +113,7 @@ struct FloorSprite
     float y = 0.0f;          // world Y (height above floor)
     float z = 0.0f;          // world Z
     float scale = 1.0f;      // size multiplier (R + drag to adjust, 1.0 = default)
+    SpriteType type = SpriteType::Prop; // object type
     int   spriteId = 0;      // which sprite graphic (legacy)
     int   assetIdx = -1;     // index into sprite asset list (-1 = none)
     int   animIdx  = 0;      // which animation to play

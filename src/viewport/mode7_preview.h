@@ -17,7 +17,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map = nullptr,
             const FloorSprite* sprites = nullptr, int spriteCount = 0,
             const CameraStartObject* camObj = nullptr, float camObjScale = 1.0f,
             const SpriteAsset* assets = nullptr, int assetCount = 0,
-            float animTime = 0.0f);
+            float animTime = 0.0f, bool playing = false);
 
 // Projected sprite screen position (set after Render)
 struct SpriteScreenPos { int screenX, screenY, halfW, halfH, spriteIdx; };

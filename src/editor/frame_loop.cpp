@@ -27,7 +27,7 @@ static Mode7Camera sCamera;
 static bool sInitialized = false;
 
 // Editor mode tabs
-enum class EditorTab { Map, Sprites, Tiles, ThreeD };
+enum class EditorTab { Map, Sprites, Tiles, Skybox, ThreeD };
 static EditorTab sActiveTab = EditorTab::Map;
 
 // Dummy tileset: 16 colors for the palette display
@@ -83,6 +83,10 @@ static constexpr int kNumSpriteColors = sizeof(kSpriteColors) / sizeof(kSpriteCo
 enum class EditorMode { Edit, Play };
 enum class SelectedObjType { None, Sprite, Camera };
 static EditorMode sEditorMode = EditorMode::Edit;
+static float sOrbitAngle = 0.0f;  // play mode: angle from player to camera
+static float sOrbitDist = 60.0f; // play mode: distance from player to camera
+static FloorSprite sSavedPlayerSprite; // saved player state before Play
+static int sSavedPlayerIdx = -1;
 static SelectedObjType sSelectedObjType = SelectedObjType::None;
 static CameraStartObject sCamObj = { 0.0f, 0.0f, 8.0f, 0.0f, 60.0f };
 static float sCamObjEditorScale = 0.05f; // editor-only visual size
@@ -524,6 +528,7 @@ static void DrawTabBar()
     TabButton("Map",     EditorTab::Map);
     TabButton("Sprites", EditorTab::Sprites);
     TabButton("Tiles",   EditorTab::Tiles);
+    TabButton("Skybox",  EditorTab::Skybox);
     TabButton("3D",      EditorTab::ThreeD);
 
     ImGui::SameLine(0, Scaled(20));
@@ -541,6 +546,23 @@ static void DrawTabBar()
             sCamera.height = sCamObj.height;
             sCamera.angle = sCamObj.angle;
             sCamera.horizon = sCamObj.horizon;
+            sOrbitAngle = 0.0f;
+            // Snapshot orbit distance and save player state
+            sOrbitDist = 60.0f;
+            sSavedPlayerIdx = -1;
+            for (int i = 0; i < sSpriteCount; i++)
+            {
+                if (sSprites[i].type == SpriteType::Player)
+                {
+                    sSavedPlayerSprite = sSprites[i];
+                    sSavedPlayerIdx = i;
+                    float dx = sCamObj.x - sSprites[i].x;
+                    float dz = sCamObj.z - sSprites[i].z;
+                    sOrbitDist = sqrtf(dx * dx + dz * dz);
+                    if (sOrbitDist < 10.0f) sOrbitDist = 10.0f;
+                    break;
+                }
+            }
         }
         ImGui::PopStyleColor(2);
     }
@@ -552,6 +574,10 @@ static void DrawTabBar()
         {
             sEditorMode = EditorMode::Edit;
             sCamera = sSavedEditorCam;
+            sOrbitAngle = 0.0f;
+            if (sSavedPlayerIdx >= 0 && sSavedPlayerIdx < sSpriteCount)
+                sSprites[sSavedPlayerIdx] = sSavedPlayerSprite;
+            sSavedPlayerIdx = -1;
         }
         ImGui::PopStyleColor(2);
     }
@@ -1295,7 +1321,8 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
     for (int i = 0; i < sSpriteCount; i++)
     {
         char label[64];
-        snprintf(label, sizeof(label), "Sprite %d", i);
+        const char* typeName = kSpriteTypeNames[(int)sSprites[i].type];
+        snprintf(label, sizeof(label), "%s %d", typeName, i);
         bool sel = (sSelectedObjType == SelectedObjType::Sprite && sSelectedSprite == i);
 
         // Color dot
@@ -1337,8 +1364,18 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
     else if (sSelectedObjType == SelectedObjType::Sprite && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
     {
         FloorSprite& sp = sSprites[sSelectedSprite];
-        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Sprite Properties");
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Object Properties");
         ImGui::PushItemWidth(size.x * 0.5f);
+        if (ImGui::BeginCombo("Type##sprtype", kSpriteTypeNames[(int)sp.type]))
+        {
+            for (int t = 0; t < (int)SpriteType::Count; t++)
+            {
+                bool sel = ((int)sp.type == t);
+                if (ImGui::Selectable(kSpriteTypeNames[t], sel))
+                    sp.type = (SpriteType)t;
+            }
+            ImGui::EndCombo();
+        }
         ImGui::DragFloat("X##spr", &sp.x, 1.0f, -kWorldHalf, kWorldHalf);
         ImGui::DragFloat("Y##spr", &sp.y, 0.5f, 0.0f, 200.0f);
         ImGui::DragFloat("Z##spr", &sp.z, 1.0f, -kWorldHalf, kWorldHalf);
@@ -1419,6 +1456,10 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
 }
 
 // ---- Right middle: Tilemap (top-down minimap) ----
+static float sTilemapZoom = 1.0f;
+static float sTilemapPanX = 0.0f;
+static float sTilemapPanY = 0.0f;
+
 static void DrawTilemapPanel(ImVec2 pos, ImVec2 size)
 {
     ImGui::SetNextWindowPos(pos);
@@ -1427,7 +1468,8 @@ static void DrawTilemapPanel(ImVec2 pos, ImVec2 size)
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.25f, 0.30f, 1.0f));
     ImGui::Begin("##Tilemap", nullptr,
         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Nametable / Tilemap");
     ImGui::Separator();
@@ -1437,13 +1479,50 @@ static void DrawTilemapPanel(ImVec2 pos, ImVec2 size)
 
     // Draw a 32x32 minimap grid
     int mapCols = 32, mapRows = 32;
-    float cellW = std::max(3.0f, (size.x - 24.0f) / (float)mapCols);
-    float cellH = cellW; // square cells
+    float baseCell = std::max(3.0f, (size.x - 24.0f) / (float)mapCols);
 
-    // Clamp rows to fit
+    // Clamp base to fit vertically
     float maxH = size.y - (cursor.y - pos.y) - 30.0f;
-    if (mapRows * cellH > maxH)
-        cellH = cellW = maxH / (float)mapRows;
+    if (mapRows * baseCell > maxH)
+        baseCell = maxH / (float)mapRows;
+
+    // Scroll wheel zoom (scroll up = zoom in)
+    if (ImGui::IsWindowHovered())
+    {
+        float wheel = ImGui::GetIO().MouseWheel;
+        if (wheel != 0.0f)
+        {
+            float oldZoom = sTilemapZoom;
+            sTilemapZoom *= (wheel > 0.0f) ? 1.15f : (1.0f / 1.15f);
+            sTilemapZoom = std::clamp(sTilemapZoom, 0.5f, 5.0f);
+
+            // Zoom toward mouse cursor
+            ImVec2 mouse = ImGui::GetMousePos();
+            float mx = mouse.x - cursor.x - sTilemapPanX;
+            float mz = mouse.y - cursor.y - sTilemapPanY;
+            float ratio = 1.0f - sTilemapZoom / oldZoom;
+            sTilemapPanX += mx * ratio;
+            sTilemapPanY += mz * ratio;
+        }
+
+        // Middle mouse drag to pan
+        if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
+        {
+            ImVec2 delta = ImGui::GetIO().MouseDelta;
+            sTilemapPanX += delta.x;
+            sTilemapPanY += delta.y;
+        }
+    }
+
+    float cellW = baseCell * sTilemapZoom;
+    float cellH = cellW;
+
+    // Apply pan offset and clip drawing to panel
+    ImVec2 clipMin = cursor;
+    ImVec2 clipMax(pos.x + size.x, pos.y + size.y);
+    dl->PushClipRect(clipMin, clipMax, true);
+    cursor.x += sTilemapPanX;
+    cursor.y += sTilemapPanY;
 
     for (int row = 0; row < mapRows; row++)
     {
@@ -1506,31 +1585,60 @@ static void DrawTilemapPanel(ImVec2 pos, ImVec2 size)
                indZ - cosf(sCamera.angle) * arrowLen),
         0xFF4444FF, 2.0f);
 
+    dl->PopClipRect();
+
     // Invisible button over the map for interaction
     ImGui::SetCursorScreenPos(cursor);
     ImGui::InvisibleButton("##MinimapInteract", ImVec2(mapPixW, mapPixH));
 
     if (sEditorMode == EditorMode::Edit)
     {
-        // Right-click on minimap to place sprite
+        // Right-click on minimap to open type picker for placing an object
+        static float sPendingPlaceX = 0.0f;
+        static float sPendingPlaceZ = 0.0f;
         if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && sSpriteCount < kMaxFloorSprites)
         {
             ImVec2 mouse = ImGui::GetMousePos();
             float normX = (mouse.x - cursor.x) / mapPixW;
             float normZ = (mouse.y - cursor.y) / mapPixH;
-            float worldX = (normX - 0.5f) * kWorldSize;
-            float worldZ = (normZ - 0.5f) * kWorldSize;
+            sPendingPlaceX = (normX - 0.5f) * kWorldSize;
+            sPendingPlaceZ = (normZ - 0.5f) * kWorldSize;
+            ImGui::OpenPopup("##PlaceObjectType");
+        }
+        if (ImGui::BeginPopup("##PlaceObjectType"))
+        {
+            ImGui::TextDisabled("Place Object");
+            ImGui::Separator();
+            for (int t = 0; t < (int)SpriteType::Count; t++)
+            {
+                if (ImGui::MenuItem(kSpriteTypeNames[t]))
+                {
+                    FloorSprite& sp = sSprites[sSpriteCount];
+                    sp.scale = 1.0f;
+                    sp.y = 0.0f;
+                    sp.type = (SpriteType)t;
+                    sp.color = kSpriteColors[sSpriteCount % kNumSpriteColors];
+                    sp.selected = false;
 
-            FloorSprite& sp = sSprites[sSpriteCount];
-            sp.x = worldX;
-            sp.z = worldZ;
-            sp.scale = 1.0f;
-            sp.y = 0.0f;
-            sp.color = kSpriteColors[sSpriteCount % kNumSpriteColors];
-            sp.selected = false;
-            sSelectedSprite = sSpriteCount;
-            sSelectedObjType = SelectedObjType::Sprite;
-            sSpriteCount++;
+                    if ((SpriteType)t == SpriteType::Player)
+                    {
+                        // Place in front of camera start object
+                        float dist = 30.0f;
+                        sp.x = sCamObj.x + sinf(sCamObj.angle) * dist;
+                        sp.z = sCamObj.z - cosf(sCamObj.angle) * dist;
+                    }
+                    else
+                    {
+                        sp.x = sPendingPlaceX;
+                        sp.z = sPendingPlaceZ;
+                    }
+
+                    sSelectedSprite = sSpriteCount;
+                    sSelectedObjType = SelectedObjType::Sprite;
+                    sSpriteCount++;
+                }
+            }
+            ImGui::EndPopup();
         }
 
         // Left-click to select nearest object (camera object first, then sprites)
@@ -1905,6 +2013,10 @@ void FrameTick(float dt)
         {
             sEditorMode = EditorMode::Edit;
             sCamera = sSavedEditorCam;
+            sOrbitAngle = 0.0f;
+            if (sSavedPlayerIdx >= 0 && sSavedPlayerIdx < sSpriteCount)
+                sSprites[sSavedPlayerIdx] = sSavedPlayerSprite;
+            sSavedPlayerIdx = -1;
         }
 
         if (sEditorMode == EditorMode::Edit)
@@ -1971,26 +2083,85 @@ void FrameTick(float dt)
         }
         else
         {
-            // ---- PLAY MODE: simulates GBA D-pad ----
-            float moveSpeed = 35.0f * dt;  // ~9 world units at 60fps equivalent
-            float rotSpeed  = 3.0f * dt;   // ~0x200 brads at 60fps
+            // ---- PLAY MODE: third-person orbit camera ----
+            float moveSpeed = 35.0f * dt;
+            float rotSpeed  = 3.0f * dt;
 
-            if (ImGui::IsKeyDown(ImGuiKey_A))
-                sCamera.angle += rotSpeed;
-            if (ImGui::IsKeyDown(ImGuiKey_D))
-                sCamera.angle -= rotSpeed;
-
-            if (ImGui::IsKeyDown(ImGuiKey_W))
+            // Find player sprite
+            int playerIdx = -1;
+            for (int i = 0; i < sSpriteCount; i++)
             {
-                sCamera.x -= sinf(sCamera.angle) * moveSpeed;
-                sCamera.z -= cosf(sCamera.angle) * moveSpeed;
-            }
-            if (ImGui::IsKeyDown(ImGuiKey_S))
-            {
-                sCamera.x += sinf(sCamera.angle) * moveSpeed;
-                sCamera.z += cosf(sCamera.angle) * moveSpeed;
+                if (sSprites[i].type == SpriteType::Player)
+                { playerIdx = i; break; }
             }
 
+            if (playerIdx >= 0)
+            {
+                FloorSprite& player = sSprites[playerIdx];
+
+                // The camera look direction = from camera toward player
+                // Camera view angle = sOrbitAngle + PI (opposite of orbit offset)
+                float viewAngle = sOrbitAngle + 3.14159265f;
+
+                // J/L orbit the camera around the player
+                if (ImGui::IsKeyDown(ImGuiKey_J))
+                    sOrbitAngle += rotSpeed;
+                if (ImGui::IsKeyDown(ImGuiKey_L))
+                    sOrbitAngle -= rotSpeed;
+
+                // WASD moves the player relative to the camera view
+                // Edit mode forward = (-sinA, -cosA), so use viewAngle
+                if (ImGui::IsKeyDown(ImGuiKey_W))
+                {
+                    player.x += sinf(viewAngle) * moveSpeed;
+                    player.z += cosf(viewAngle) * moveSpeed;
+                }
+                if (ImGui::IsKeyDown(ImGuiKey_S))
+                {
+                    player.x -= sinf(viewAngle) * moveSpeed;
+                    player.z -= cosf(viewAngle) * moveSpeed;
+                }
+                if (ImGui::IsKeyDown(ImGuiKey_A))
+                {
+                    player.x += cosf(viewAngle) * moveSpeed;
+                    player.z -= sinf(viewAngle) * moveSpeed;
+                }
+                if (ImGui::IsKeyDown(ImGuiKey_D))
+                {
+                    player.x -= cosf(viewAngle) * moveSpeed;
+                    player.z += sinf(viewAngle) * moveSpeed;
+                }
+
+                // Clamp player to world
+                player.x = std::clamp(player.x, -kWorldHalf, kWorldHalf);
+                player.z = std::clamp(player.z, -kWorldHalf, kWorldHalf);
+
+                // Place camera at orbit offset from player (distance set on Play)
+                sCamera.x = player.x + sinf(sOrbitAngle) * sOrbitDist;
+                sCamera.z = player.z + cosf(sOrbitAngle) * sOrbitDist;
+                // Camera looks from its position toward the player
+                sCamera.angle = sOrbitAngle;
+            }
+            else
+            {
+                // No player sprite — fallback to free camera
+                if (ImGui::IsKeyDown(ImGuiKey_W))
+                {
+                    sCamera.x -= sinf(sCamera.angle) * moveSpeed;
+                    sCamera.z -= cosf(sCamera.angle) * moveSpeed;
+                }
+                if (ImGui::IsKeyDown(ImGuiKey_S))
+                {
+                    sCamera.x += sinf(sCamera.angle) * moveSpeed;
+                    sCamera.z += cosf(sCamera.angle) * moveSpeed;
+                }
+                if (ImGui::IsKeyDown(ImGuiKey_J))
+                    sCamera.angle += rotSpeed;
+                if (ImGui::IsKeyDown(ImGuiKey_L))
+                    sCamera.angle -= rotSpeed;
+            }
+
+            // Q/E height, I/K horizon still work
             if (ImGui::IsKeyDown(ImGuiKey_Q))
                 sCamera.height = std::max(4.0f, sCamera.height - 20.0f * dt);
             if (ImGui::IsKeyDown(ImGuiKey_E))
@@ -2007,13 +2178,16 @@ void FrameTick(float dt)
         sCamera.z = std::clamp(sCamera.z, -kWorldHalf, kWorldHalf);
     }
 
+    // Player position is freely editable — only set on creation, not per-frame
+
     // ---- Render Mode 7 ----
     // Only show camera object in Edit mode (in Play mode you ARE the camera)
     const CameraStartObject* camObjPtr = (sEditorMode == EditorMode::Edit) ? &sCamObj : nullptr;
     sViewportAnimTime += dt;
     const SpriteAsset* assetsPtr = sSpriteAssets.empty() ? nullptr : sSpriteAssets.data();
+    bool isPlaying = (sEditorMode == EditorMode::Play);
     Mode7::Render(sCamera, nullptr, sSprites, sSpriteCount, camObjPtr, sCamObjEditorScale,
-                  assetsPtr, (int)sSpriteAssets.size(), sViewportAnimTime);
+                  assetsPtr, (int)sSpriteAssets.size(), sViewportAnimTime, isPlaying);
     Mode7::UploadTexture();
 
     // ---- Layout: NEXXT-style fixed panels ----
@@ -2039,7 +2213,19 @@ void FrameTick(float dt)
     // Draw everything
     DrawTabBar();
 
-    if (sActiveTab == EditorTab::ThreeD)
+    if (sActiveTab == EditorTab::Skybox)
+    {
+        // Skybox tab: placeholder
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
+        ImGui::SetNextWindowSize(ImVec2(totalW, bodyH));
+        ImGui::Begin("##SkyboxTab", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGui::Text("Skybox Editor — coming soon");
+        ImGui::End();
+    }
+    else if (sActiveTab == EditorTab::ThreeD)
     {
         // 3D tab: placeholder
         ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));

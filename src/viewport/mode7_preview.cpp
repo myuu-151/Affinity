@@ -263,7 +263,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             const FloorSprite* sprites, int spriteCount,
             const CameraStartObject* camObj, float camObjScale,
             const SpriteAsset* assets, int assetCount,
-            float animTime)
+            float animTime, bool playing)
 {
     float cosA = cosf(-cam.angle);
     float sinA = sinf(-cam.angle);
