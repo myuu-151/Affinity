@@ -755,12 +755,12 @@ int main(void)
             g_sprites[player_sprite_idx].x = player_x;
             g_sprites[player_sprite_idx].z = player_z;
 
-            // Place camera at orbit offset from player
+            // Place camera behind the player (opposite of forward direction)
             {
                 FIXED orbSin = lu_sin(orbit_angle) >> 4;
                 FIXED orbCos = lu_cos(orbit_angle) >> 4;
-                cam_x = player_x + ((orbSin * orbit_dist) >> 8);
-                cam_z = player_z - ((orbCos * orbit_dist) >> 8);
+                cam_x = player_x - ((orbSin * orbit_dist) >> 8);
+                cam_z = player_z + ((orbCos * orbit_dist) >> 8);
             }
             cam_angle = orbit_angle;
 
