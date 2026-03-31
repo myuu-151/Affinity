@@ -2213,11 +2213,10 @@ void FrameTick(float dt)
                 if (ImGui::IsKeyDown(ImGuiKey_A)) { inputZ -= 1.0f; }
                 if (ImGui::IsKeyDown(ImGuiKey_D)) { inputZ += 1.0f; }
 
-                bool orbiting = ImGui::IsKeyDown(ImGuiKey_J) || ImGui::IsKeyDown(ImGuiKey_L);
                 bool wasMoving = sPlayerMoving;
                 sPlayerMoving = (inputX != 0.0f || inputZ != 0.0f);
 
-                // J/L orbit — always applies
+                // J/L manual orbit — always applies
                 if (ImGui::IsKeyDown(ImGuiKey_J))
                     sOrbitAngle += rotSpeed;
                 if (ImGui::IsKeyDown(ImGuiKey_L))
@@ -2233,6 +2232,18 @@ void FrameTick(float dt)
                     // Track movement direction relative to camera (for sprite facing)
                     sPlayerMoveAngle = atan2f(inputZ, inputX);
 
+                    // Auto-orbit when strafing (A/D)
+                    // J (GBA L shoulder) doubles orbit, L (GBA R shoulder) slows it
+                    if (inputZ != 0.0f)
+                    {
+                        float autoOrbitSpeed = rotSpeed * 0.4f * inputZ; // left = negative, right = positive
+                        if (ImGui::IsKeyDown(ImGuiKey_J))
+                            autoOrbitSpeed *= 2.0f;  // L shoulder: double orbit speed
+                        else if (ImGui::IsKeyDown(ImGuiKey_L))
+                            autoOrbitSpeed *= 0.25f; // R shoulder: slow down orbit
+                        sOrbitAngle -= autoOrbitSpeed;
+                    }
+
                     // Transform to world space using viewAngle
                     float fwdX = sinf(viewAngle), fwdZ = cosf(viewAngle);
                     float rightX = -cosf(viewAngle), rightZ = sinf(viewAngle);
@@ -2242,8 +2253,6 @@ void FrameTick(float dt)
                 else if (wasMoving)
                 {
                     // Just stopped moving — sync sPlayerMoveAngle so idle doesn't snap
-                    // Idle sprite = sOrbitAngle + sPlayerMoveAngle, should equal the last moving sprite = sPlayerMoveAngle
-                    // So: sPlayerMoveAngle_new = sPlayerMoveAngle_old - sOrbitAngle
                     sPlayerMoveAngle = sPlayerMoveAngle - sOrbitAngle;
                 }
 
