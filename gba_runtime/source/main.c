@@ -1,4 +1,4 @@
-// Affinity GBA Runtime — Mode 7 floor with D-pad camera + OAM sprites
+// Affinity GBA Runtime — Mode 7 floor with orbit camera + OAM sprites
 // Built with devkitARM + libtonc
 
 #include <tonc.h>
@@ -26,6 +26,19 @@ static FIXED g_cosf, g_sinf;
 
 // Horizon scanline — variable for pitch control (A/B buttons)
 static int m7_horizon = 54;
+
+// ---------------------------------------------------------------------------
+// Orbit camera state (used when player sprite exists)
+// ---------------------------------------------------------------------------
+
+static FIXED player_x, player_z;   // player world position (16.8)
+static FIXED player_y;             // player height (16.8)
+static u16   orbit_angle;          // brad angle of camera around player
+static FIXED orbit_dist;           // distance from player (16.8)
+static int   player_sprite_idx = -1;
+static int   player_moving;        // nonzero if D-pad held
+static u16   player_move_angle;    // brad angle of last movement direction
+static int   g_player_dir_tile;    // current direction tile ID for player
 
 // ---------------------------------------------------------------------------
 // Floor sprites — positions in 16.8 fixed-point
@@ -104,18 +117,13 @@ static void m7_hbl(void)
 
 static void load_checkerboard(void)
 {
-    // Affine BGs use 8bpp tiles: 1 byte per pixel, 64 bytes per 8x8 tile
-    // Tile 0: palette index 1 (dark green)
     memset(&tile8_mem[2][0], 1, 64);
-    // Tile 1: palette index 2 (light green)
     memset(&tile8_mem[2][1], 2, 64);
 
-    // Set palette colors (8bpp uses single 256-color palette)
-    pal_bg_mem[0] = RGB15(10, 16, 24);  // backdrop = sky blue
-    pal_bg_mem[1] = RGB15(4, 10, 4);    // dark green
-    pal_bg_mem[2] = RGB15(8, 18, 8);    // light green
+    pal_bg_mem[0] = RGB15(10, 16, 24);
+    pal_bg_mem[1] = RGB15(4, 10, 4);
+    pal_bg_mem[2] = RGB15(8, 18, 8);
 
-    // Affine tilemap: 8-bit entries (just tile index, no flip/palette bits)
     u8 *map = (u8*)se_mem[28];
     for (int y = 0; y < 32; y++)
     {
@@ -138,18 +146,17 @@ static void load_editor_map(void)
 #endif
 
 // ---------------------------------------------------------------------------
-// OBJ sprite setup — 8x8 diamond shape in OBJ VRAM
+// OBJ sprite setup
 // ---------------------------------------------------------------------------
 
 static void init_obj_sprites(void)
 {
     int i;
-    // Enable OBJ layer and 1D OBJ mapping
     REG_DISPCNT |= DCNT_OBJ | DCNT_OBJ_1D;
 
 #ifdef AFN_ASSET_COUNT
 #if AFN_ASSET_COUNT > 0
-    // Copy all asset tile data into OBJ VRAM (charblock 4) in one shot
+    // Copy all asset tile data into OBJ VRAM (charblock 4)
     {
         const u32 *src = afn_all_tiles;
         u32 *dst = (u32*)tile_mem[4];
@@ -158,12 +165,10 @@ static void init_obj_sprites(void)
     }
 
     // Load per-asset palettes into OBJ palette banks
-    // Each asset uses afn_asset_desc[ai][4] as its palette bank
     for (i = 0; i < AFN_ASSET_COUNT; i++)
     {
         int palBank = afn_asset_desc[i][4];
         const u16 *pal = 0;
-        // Switch on asset index to get the palette pointer
         switch (i) {
             case 0: pal = afn_pal0; break;
 #if AFN_ASSET_COUNT > 1
@@ -196,9 +201,19 @@ static void init_obj_sprites(void)
                 pal_obj_mem[palBank * 16 + c] = pal[c];
         }
     }
+
+    // Load player direction palette if present
+#ifdef AFN_PLAYER_DIR_PALBANK
+    {
+        int c;
+        for (c = 0; c < 16; c++)
+            pal_obj_mem[AFN_PLAYER_DIR_PALBANK * 16 + c] = afn_pal_playerdir[c];
+    }
+#endif
+
 #endif
 #else
-    // No assets — use fallback solid 8x8 tile at tile 0
+    // No assets — use fallback solid 8x8 tile
     {
         u32 *t0 = (u32*)&tile_mem[4][0];
         int k;
@@ -230,14 +245,12 @@ static void init_obj_sprites(void)
     pal_obj_mem[6*16 + 2] = RGB15(20, 20, 20);
     pal_obj_mem[6*16 + 3] = RGB15(31, 0, 0);
 
-    // Hide all OBJ initially
     oam_init(obj_mem, 128);
 }
 
 // Place demo sprites if no editor data
 static void init_demo_sprites(void)
 {
-    // Place a few sprites around the map for testing
     g_sprites[0].x = 160 << 8;
     g_sprites[0].y = 0;
     g_sprites[0].z = 128 << 8;
@@ -292,6 +305,30 @@ static void load_editor_sprites(void)
 #endif
 
 // ---------------------------------------------------------------------------
+// Update player direction sprite tile based on movement/orbit angle
+// ---------------------------------------------------------------------------
+
+static void update_player_dir_tile(void)
+{
+#ifdef AFN_PLAYER_DIR_TILE0
+    u16 sprAngle;
+    if (player_moving)
+        sprAngle = player_move_angle;
+    else
+        sprAngle = orbit_angle + player_move_angle;
+
+    // Convert brad angle to direction index (0-7)
+    // Each direction = 8192 brads (65536/8), offset by half-sector
+    int dirIdx = ((sprAngle + 4096) >> 13) & 7;
+
+    // Each frame = 16 tiles (32x32 4bpp)
+    g_player_dir_tile = AFN_PLAYER_DIR_TILE0 + dirIdx * 16;
+#else
+    g_player_dir_tile = 0;
+#endif
+}
+
+// ---------------------------------------------------------------------------
 // Project sprites to screen and update OAM
 // ---------------------------------------------------------------------------
 
@@ -304,28 +341,20 @@ static void update_sprites(void)
 
     for (i = 0; i < g_spriteCount; i++)
     {
-        // Vector from camera to sprite (in fixed-point)
         FIXED dx = g_sprites[i].x - cam_x;
         FIXED dz = g_sprites[i].z - cam_z;
 
-        // Camera-space projection:
-        // depth = dx*sinA - dz*cosA  (along view axis, positive = in front)
-        // side  = dx*cosA + dz*sinA  (perpendicular, positive = right)
         FIXED fovLambda = (dx * g_sinf - dz * g_cosf) >> 8;
         FIXED side      = (dx * g_cosf + dz * g_sinf) >> 8;
 
-        // Skip if behind camera
         if (fovLambda <= 64) continue;
 
-        // Perspective projection using cam_fov as focal distance
         FIXED heightDiff = cam_h - g_sprites[i].y;
         int screenY = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
         int screenX = 120 + (int)((side * cam_fov) / fovLambda);
 
-        // Scale for sizing (larger = closer/bigger)
         int scale = (int)((cam_h * cam_fov) / fovLambda);
 
-        // Skip if off-screen
         if (screenY < -16 || screenY > 168) continue;
         if (screenX < -32 || screenX > 272) continue;
         if (scale < 1) continue;
@@ -338,7 +367,7 @@ static void update_sprites(void)
         projCount++;
     }
 
-    // Simple bubble sort front-to-back (closest first gets lowest OAM index = drawn on top)
+    // Sort front-to-back
     for (i = 0; i < projCount - 1; i++)
         for (j = i + 1; j < projCount; j++)
             if (proj[i].depth > proj[j].depth)
@@ -348,50 +377,55 @@ static void update_sprites(void)
                 proj[j] = tmp;
             }
 
-    // Render projected sprites as affine OBJs with per-sprite scale
-    // OAM slots 16-31 for sprites, affine slots 0-15 for their matrices
+    // Render projected sprites as affine OBJs
     for (i = 0; i < projCount && i < 16; i++)
     {
         int oamIdx = 16 + i;
-        int affIdx = i;  // affine parameter slot (0-31, we use 0-15)
+        int affIdx = i;
         int sprIdx = proj[i].idx;
         int palBank = g_sprites[sprIdx].palIdx;
         int tileId = 0;
 
+        // Check if this is the player sprite with direction tiles
+        if (sprIdx == player_sprite_idx && g_player_dir_tile > 0)
+        {
+            tileId = g_player_dir_tile;
+#ifdef AFN_PLAYER_DIR_PALBANK
+            palBank = AFN_PLAYER_DIR_PALBANK;
+#endif
+        }
+        else
+        {
 #ifdef AFN_ASSET_COUNT
 #if AFN_ASSET_COUNT > 0
-        {
-            int ai = g_sprites[sprIdx].assetIdx;
-            if (ai >= 0 && ai < AFN_ASSET_COUNT)
             {
-                tileId = afn_asset_desc[ai][0];
-                palBank = afn_asset_desc[ai][4];
+                int ai = g_sprites[sprIdx].assetIdx;
+                if (ai >= 0 && ai < AFN_ASSET_COUNT)
+                {
+                    tileId = afn_asset_desc[ai][0];
+                    palBank = afn_asset_desc[ai][4];
+                }
             }
+#endif
+#endif
         }
-#endif
-#endif
 
         if (palBank > 15) palBank = 1;
 
-        // All sprites are 32x32 OBJ (padded on export), AFF_DBL = 64x64 canvas
-        // pa = depth / (2 * sprScale) — tuned to match editor appearance
         {
             int sprScale = g_sprites[sprIdx].scale;
             int invScale;
             if (sprScale <= 0) sprScale = 256;
 
             invScale = (proj[i].depth * 7) / sprScale;
-            if (invScale < 128) invScale = 128;    // cap at 2x zoom (fills 64px canvas)
-            if (invScale > 2048) invScale = 2048;   // min size
+            if (invScale < 128) invScale = 128;
+            if (invScale > 2048) invScale = 2048;
 
             obj_aff_mem[affIdx].pa = (s16)invScale;
             obj_aff_mem[affIdx].pb = 0;
             obj_aff_mem[affIdx].pc = 0;
             obj_aff_mem[affIdx].pd = (s16)invScale;
 
-            // 32x32 OBJ with AFF_DBL = 64x64 canvas
-            // Place sprite bottom at screenY (foot on ground)
-            // Visible half-height = 16 * 256 / invScale (from center of canvas)
             int visHalf = 4096 / invScale;
             int sx = proj[i].screenX - 32;
             int sy = proj[i].screenY - 32 - visHalf;
@@ -410,55 +444,43 @@ static void update_sprites(void)
 }
 
 // ---------------------------------------------------------------------------
-// Minimap — 32x32 pixel grid at bottom-left using BG0 (text mode)
+// Minimap
 // ---------------------------------------------------------------------------
 
-#define MINIMAP_X  4     // screen position (pixels from left)
-#define MINIMAP_Y  124   // screen position (pixels from bottom area)
-#define MINIMAP_W  32    // minimap width in pixels (= 4 tiles)
-#define MINIMAP_H  32    // minimap height in pixels (= 4 tiles)
+#define MINIMAP_X  4
+#define MINIMAP_Y  124
+#define MINIMAP_W  32
+#define MINIMAP_H  32
 
-// Tile indices in charblock 0 for minimap
-#define TILE_MINIMAP_BG    1   // dark background tile
-#define TILE_MINIMAP_GRID  2   // grid line tile (lighter)
-#define TILE_MINIMAP_CAM   3   // camera dot (bright)
+#define TILE_MINIMAP_BG    1
+#define TILE_MINIMAP_GRID  2
+#define TILE_MINIMAP_CAM   3
 
 static void init_minimap(void)
 {
-    // BG0: charblock 0, screenblock 30, text mode, priority 0 (on top)
     REG_BG0CNT = BG_CBB(0) | BG_SBB(30) | BG_4BPP | BG_REG_32x32 | BG_PRIO(0);
 
-    // BG palette for minimap (palette bank 1, indices 16-31)
-    pal_bg_mem[16 + 0] = 0;                    // transparent
-    pal_bg_mem[16 + 1] = RGB15(2, 4, 2);       // dark green (minimap bg)
-    pal_bg_mem[16 + 2] = RGB15(5, 10, 5);      // lighter green (grid lines)
-    pal_bg_mem[16 + 3] = RGB15(31, 31, 31);    // white (camera dot)
+    pal_bg_mem[16 + 0] = 0;
+    pal_bg_mem[16 + 1] = RGB15(2, 4, 2);
+    pal_bg_mem[16 + 2] = RGB15(5, 10, 5);
+    pal_bg_mem[16 + 3] = RGB15(31, 31, 31);
 
-    // Build tiles in charblock 0
-    // Tile 0: already empty (transparent)
-
-    // Tile 1: solid dark background (all pixels = palette index 1)
     {
         u32 *t = (u32*)&tile_mem[0][TILE_MINIMAP_BG];
         int k;
         for (k = 0; k < 8; k++)
-            t[k] = 0x11111111;  // 4bpp: each nibble = palette idx 1
+            t[k] = 0x11111111;
     }
 
-    // Tile 2: grid tile — border pixels are brighter
     {
         u32 *t = (u32*)&tile_mem[0][TILE_MINIMAP_GRID];
         int k;
-        // Row 0: all grid color (top border)
         t[0] = 0x22222222;
-        // Rows 1-6: left pixel grid, rest dark
         for (k = 1; k < 7; k++)
-            t[k] = 0x11111112;  // leftmost pixel = 2, rest = 1
-        // Row 7: all grid color (bottom border)
+            t[k] = 0x11111112;
         t[7] = 0x22222222;
     }
 
-    // Clear BG0 screenblock 30 (all transparent)
     {
         u16 *map = (u16*)se_mem[30];
         int k;
@@ -466,46 +488,35 @@ static void init_minimap(void)
             map[k] = 0;
     }
 
-    // Fill the minimap area (4x4 tiles starting at tile coords for bottom-left)
-    // BG0 scroll will position it. We draw at tile (0,0) to (3,3) and scroll BG0.
     {
         u16 *map = (u16*)se_mem[30];
         int tx, ty;
         for (ty = 0; ty < 4; ty++)
-        {
             for (tx = 0; tx < 4; tx++)
-            {
-                // Use grid tile (has border lines)
                 map[ty * 32 + tx] = TILE_MINIMAP_GRID | SE_PALBANK(1);
-            }
-        }
     }
 
-    // Scroll BG0 so tile (0,0) appears at screen position (MINIMAP_X, MINIMAP_Y)
-    // BG scroll is unsigned 9-bit wrapping, so -N = 512-N
     REG_BG0HOFS = (512 - MINIMAP_X) & 0x1FF;
     REG_BG0VOFS = (512 - MINIMAP_Y) & 0x1FF;
 }
 
-// Update minimap OBJ sprites (camera + floor sprites) using OBJ slots 0-15
 static void update_minimap(void)
 {
     int i;
     int oamIdx = 0;
 
-    // Camera position dot — OBJ slot 0
-    // Map 256x256 tile world to 32x32 minimap pixels
-    // cam_x/cam_z are 16.8 fixed, so >> 8 gives pixel, then >> 3 gives minimap pos
-    int camMX = MINIMAP_X + ((cam_x >> 8) >> 3);  // 256px map / 8 = 32px minimap
-    int camMY = MINIMAP_Y + ((cam_z >> 8) >> 3);
+    // Camera/player position dot
+    FIXED dotX = (player_sprite_idx >= 0) ? player_x : cam_x;
+    FIXED dotZ = (player_sprite_idx >= 0) ? player_z : cam_z;
 
-    // Clamp to minimap bounds
+    int camMX = MINIMAP_X + ((dotX >> 8) >> 3);
+    int camMY = MINIMAP_Y + ((dotZ >> 8) >> 3);
+
     if (camMX < MINIMAP_X) camMX = MINIMAP_X;
     if (camMX > MINIMAP_X + MINIMAP_W - 1) camMX = MINIMAP_X + MINIMAP_W - 1;
     if (camMY < MINIMAP_Y) camMY = MINIMAP_Y;
     if (camMY > MINIMAP_Y + MINIMAP_H - 1) camMY = MINIMAP_Y + MINIMAP_H - 1;
 
-    // Use minimap dot tile with palette bank 6 (white) for camera
     {
 #ifdef AFN_MINIMAP_TILE
         int dotTile = AFN_MINIMAP_TILE;
@@ -518,13 +529,12 @@ static void update_minimap(void)
     }
     oamIdx++;
 
-    // Sprite dots on minimap
     for (i = 0; i < g_spriteCount && oamIdx < 16; i++)
     {
+        if (i == player_sprite_idx) continue; // player already shown as main dot
         int smx = MINIMAP_X + ((g_sprites[i].x >> 8) >> 3);
         int smy = MINIMAP_Y + ((g_sprites[i].z >> 8) >> 3);
 
-        // Skip if outside minimap
         if (smx < MINIMAP_X || smx > MINIMAP_X + MINIMAP_W - 1) continue;
         if (smy < MINIMAP_Y || smy > MINIMAP_Y + MINIMAP_H - 1) continue;
 
@@ -544,7 +554,6 @@ static void update_minimap(void)
         oamIdx++;
     }
 
-    // Hide remaining minimap OBJ slots
     for (; oamIdx < 16; oamIdx++)
     {
         obj_mem[oamIdx].attr0 = ATTR0_HIDE;
@@ -558,13 +567,10 @@ static void update_minimap(void)
 int main(void)
 {
     // --- Video setup ---
-    // Mode 1: BG0/BG1 = text, BG2 = affine (rotation/scaling)
     REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
 
-    // BG2: charblock 2, screenblock 28, 32x32 affine map, 8bpp tiles, wrap
     REG_BG2CNT = BG_CBB(2) | BG_SBB(28) | BG_AFF_32x32 | BG_8BPP;
 
-    // Identity affine (overwritten by HBlank each scanline)
     REG_BG2PA = 0x0100;
     REG_BG2PB = 0;
     REG_BG2PC = 0;
@@ -609,69 +615,211 @@ int main(void)
     cam_fov   = 128;
 #endif
 
+    // --- Orbit camera init ---
+    player_sprite_idx = -1;
+#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
+    player_sprite_idx = AFN_PLAYER_IDX;
+    player_x = g_sprites[AFN_PLAYER_IDX].x;
+    player_z = g_sprites[AFN_PLAYER_IDX].z;
+    player_y = g_sprites[AFN_PLAYER_IDX].y;
+    orbit_angle = AFN_CAM_ANGLE;
+    orbit_dist = AFN_ORBIT_DIST;
+    player_moving = 0;
+    player_move_angle = 0;
+    g_player_dir_tile = 0;
+#ifdef AFN_PLAYER_DIR_TILE0
+    g_player_dir_tile = AFN_PLAYER_DIR_TILE0;
+#endif
+#endif
+
     // Precompute initial sin/cos
     g_cosf = lu_cos(cam_angle) >> 4;
     g_sinf = lu_sin(cam_angle) >> 4;
 
     // --- Set up HBlank interrupt ---
     irq_init(NULL);
-    irq_add(II_VBLANK, NULL);    // needed for VBlankIntrWait()
+    irq_add(II_VBLANK, NULL);
     irq_add(II_HBLANK, m7_hbl);
 
     // --- Main loop ---
     while (1)
     {
         VBlankIntrWait();
-        // Disable BG2 at start of frame so scanlines above horizon show sky
         REG_DISPCNT &= ~DCNT_BG2;
         key_poll();
 
-        FIXED moveSpeed = 37;    // ~35 editor units/s → 8.75 GBA px/s at 60fps
-        int   rotSpeed  = 0x0200;
-
-        // Rotate
-        if (key_is_down(KEY_LEFT))
-            cam_angle -= rotSpeed;
-        if (key_is_down(KEY_RIGHT))
-            cam_angle += rotSpeed;
-
-        // Update sin/cos
-        g_cosf = lu_cos(cam_angle) >> 4;
-        g_sinf = lu_sin(cam_angle) >> 4;
-
-        // Move forward/back
-        if (key_is_down(KEY_UP))
+        if (player_sprite_idx >= 0)
         {
-            cam_x += (g_sinf * moveSpeed) >> 8;
-            cam_z -= (g_cosf * moveSpeed) >> 8;
+            // ============================================================
+            // ORBIT CAMERA MODE — Asterix XXL style
+            // ============================================================
+
+            FIXED moveSpeed = 37;
+            int   rotSpeed  = 0x0200;
+
+            // View angle = orbit_angle + PI (camera looks from orbit pos toward player)
+            u16 viewAngle = orbit_angle + 0x8000;
+            FIXED viewSin = lu_sin(viewAngle) >> 4;
+            FIXED viewCos = lu_cos(viewAngle) >> 4;
+
+            // D-pad = player movement
+            FIXED inputFwd = 0, inputRight = 0;
+            if (key_is_down(KEY_UP))    inputFwd   += 256;
+            if (key_is_down(KEY_DOWN))  inputFwd   -= 256;
+            if (key_is_down(KEY_LEFT))  inputRight -= 256;
+            if (key_is_down(KEY_RIGHT)) inputRight += 256;
+
+            // Normalize diagonal (~0.707)
+            if (inputFwd && inputRight)
+            {
+                inputFwd   = (inputFwd * 181) >> 8;
+                inputRight = (inputRight * 181) >> 8;
+            }
+
+            int wasMoving = player_moving;
+            player_moving = (inputFwd || inputRight);
+
+            // L/R shoulder = manual orbit (always applies)
+            if (key_is_down(KEY_L))
+                orbit_angle += rotSpeed;
+            if (key_is_down(KEY_R))
+                orbit_angle -= rotSpeed;
+
+            if (player_moving)
+            {
+                // Track movement direction for sprite facing (brad atan2)
+                player_move_angle = ArcTan2(inputRight, inputFwd);
+
+                // Auto-orbit when strafing (left/right)
+                if (inputRight)
+                {
+                    // 0.4 * rotSpeed = rotSpeed * 2 / 5
+                    int autoOrbit = (rotSpeed * 2) / 5;
+                    if (inputRight < 0) autoOrbit = -autoOrbit;
+
+                    // L shoulder doubles, R shoulder quarters auto-orbit speed
+                    if (key_is_down(KEY_L))
+                        autoOrbit *= 2;
+                    else if (key_is_down(KEY_R))
+                        autoOrbit >>= 2;
+
+                    orbit_angle -= (s16)autoOrbit;
+                }
+
+                // Move player in world space using view direction
+                FIXED moveFwd   = (inputFwd * moveSpeed) >> 8;
+                FIXED moveRight = (inputRight * moveSpeed) >> 8;
+
+                // Forward = (viewSin, -viewCos) to match existing camera convention
+                // Right = (-viewCos, -viewSin) = perpendicular
+                // The right vector for camera-relative movement:
+                // right = (cos(viewAngle+PI/2), -sin(viewAngle+PI/2)) but in GBA convention
+                // Simpler: right90 sin = cos(view), right90 cos = -sin(view) -> negate for GBA Z
+                FIXED rightSin = lu_cos(viewAngle) >> 4;    // sin(viewAngle + 90deg) = cos(viewAngle)
+                FIXED rightCos = -(lu_sin(viewAngle) >> 4); // cos(viewAngle + 90deg) = -sin(viewAngle)
+
+                player_x += (viewSin * moveFwd + rightSin * moveRight) >> 8;
+                player_z -= (viewCos * moveFwd + rightCos * moveRight) >> 8;
+            }
+            else if (wasMoving)
+            {
+                // Just stopped moving — freeze sprite direction relative to orbit
+                player_move_angle = player_move_angle - orbit_angle;
+            }
+
+            // Clamp player to map bounds
+            if (player_x < 0) player_x = 0;
+            if (player_x > (256 << 8)) player_x = 256 << 8;
+            if (player_z < 0) player_z = 0;
+            if (player_z > (256 << 8)) player_z = 256 << 8;
+
+            // Update sprite position
+            g_sprites[player_sprite_idx].x = player_x;
+            g_sprites[player_sprite_idx].z = player_z;
+
+            // Place camera at orbit offset from player
+            {
+                FIXED orbSin = lu_sin(orbit_angle) >> 4;
+                FIXED orbCos = lu_cos(orbit_angle) >> 4;
+                cam_x = player_x + ((orbSin * orbit_dist) >> 8);
+                cam_z = player_z - ((orbCos * orbit_dist) >> 8);
+            }
+            cam_angle = orbit_angle;
+
+            // Update direction sprite tile
+            update_player_dir_tile();
+
+            // A/B = pitch
+            if (key_is_down(KEY_A) && m7_horizon < 120)
+                m7_horizon += 2;
+            if (key_is_down(KEY_B) && m7_horizon > 10)
+                m7_horizon -= 2;
         }
-        if (key_is_down(KEY_DOWN))
+        else
         {
-            cam_x -= (g_sinf * moveSpeed) >> 8;
-            cam_z += (g_cosf * moveSpeed) >> 8;
+            // ============================================================
+            // FREE CAMERA MODE (no player sprite — original controls)
+            // ============================================================
+
+            FIXED moveSpeed = 37;
+            int   rotSpeed  = 0x0200;
+
+            if (key_is_down(KEY_LEFT))
+                cam_angle -= rotSpeed;
+            if (key_is_down(KEY_RIGHT))
+                cam_angle += rotSpeed;
+
+            if (key_is_down(KEY_UP))
+            {
+                cam_x += (g_sinf * moveSpeed) >> 8;
+                cam_z -= (g_cosf * moveSpeed) >> 8;
+            }
+            if (key_is_down(KEY_DOWN))
+            {
+                cam_x -= (g_sinf * moveSpeed) >> 8;
+                cam_z += (g_cosf * moveSpeed) >> 8;
+            }
+
+            if (key_is_down(KEY_L) && cam_h > (4 << 8))
+                cam_h -= 85;
+            if (key_is_down(KEY_R) && cam_h < (256 << 8))
+                cam_h += 85;
+
+            if (key_is_down(KEY_A) && m7_horizon < 120)
+                m7_horizon += 2;
+            if (key_is_down(KEY_B) && m7_horizon > 10)
+                m7_horizon -= 2;
         }
 
-        // Height (L/R shoulders) — matches editor Q/E speed
-        if (key_is_down(KEY_L) && cam_h > (4 << 8))
-            cam_h -= 85;
-        if (key_is_down(KEY_R) && cam_h < (256 << 8))
-            cam_h += 85;
-
-        // Pitch / orbit (A = look down, B = look up)
-        if (key_is_down(KEY_A) && m7_horizon < 120)
-            m7_horizon += 2;
-        if (key_is_down(KEY_B) && m7_horizon > 10)
-            m7_horizon -= 2;
-
-        // Clamp camera to map bounds (256x256 map, 16.8 fixed-point)
+        // Clamp camera to map bounds
         if (cam_x < 0) cam_x = 0;
         if (cam_x > (256 << 8)) cam_x = 256 << 8;
         if (cam_z < 0) cam_z = 0;
         if (cam_z > (256 << 8)) cam_z = 256 << 8;
 
+        // Update sin/cos for HBlank
+        g_cosf = lu_cos(cam_angle) >> 4;
+        g_sinf = lu_sin(cam_angle) >> 4;
+
         // Reset to start position
         if (key_hit(KEY_START))
         {
+            if (player_sprite_idx >= 0)
+            {
+                // Reset player and orbit
+#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
+                player_x = g_sprites[AFN_PLAYER_IDX].x;
+                player_z = g_sprites[AFN_PLAYER_IDX].z;
+                // Reload original sprite positions
+                load_editor_sprites();
+                player_x = g_sprites[AFN_PLAYER_IDX].x;
+                player_z = g_sprites[AFN_PLAYER_IDX].z;
+                player_y = g_sprites[AFN_PLAYER_IDX].y;
+#endif
+                orbit_angle = AFN_CAM_ANGLE;
+                player_moving = 0;
+                player_move_angle = 0;
+            }
 #ifdef AFFINITY_HAS_SPRITES
             cam_x     = AFN_CAM_X;
             cam_z     = AFN_CAM_Z;
@@ -690,7 +838,7 @@ int main(void)
         // Project and draw sprites
         update_sprites();
 
-        // Update minimap camera/sprite dots
+        // Update minimap
         update_minimap();
     }
 

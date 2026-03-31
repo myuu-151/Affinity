@@ -15,6 +15,14 @@ struct GBASpriteExport
     int   palIdx;       // OBJ palette color index (1-5)
     int   assetIdx;     // sprite asset index (-1 = none/placeholder)
     int   animIdx;      // default animation index
+    int   spriteType;   // SpriteType enum (0=Prop, 1=Player, ...)
+};
+
+// Player direction sprite for GBA export (RGBA8 image)
+struct GBAPlayerDirExport
+{
+    const unsigned char* pixels;  // RGBA8 data (nullptr if empty)
+    int width, height;
 };
 
 // Sprite asset frame for GBA export — 4bpp pixel data
@@ -64,6 +72,8 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBASpriteExport>& sprites,
                 const std::vector<GBASpriteAssetExport>& assets,
                 const GBACameraExport& camera,
+                const GBAPlayerDirExport playerDirs[8],
+                float orbitDist,
                 std::string& errorMsg);
 
 } // namespace Affinity

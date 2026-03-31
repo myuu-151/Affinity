@@ -2166,6 +2166,7 @@ void FrameTick(float dt)
                     se.scale = sSprites[i].scale;
                     se.assetIdx = sSprites[i].assetIdx;
                     se.animIdx = sSprites[i].animIdx;
+                    se.spriteType = (int)sSprites[i].type;
                     // Use asset palette bank if linked, otherwise cycle 1-5
                     if (se.assetIdx >= 0 && se.assetIdx < (int)sSpriteAssets.size())
                         se.palIdx = sSpriteAssets[se.assetIdx].palBank;
@@ -2210,9 +2211,21 @@ void FrameTick(float dt)
                     exportAssets.push_back(ea);
                 }
 
-                std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam]() {
+                // Collect player direction sprites for export
+                GBAPlayerDirExport exportPlayerDirs[8];
+                for (int d = 0; d < 8; d++)
+                {
+                    exportPlayerDirs[d].pixels = sPlayerDirs[d].pixels;
+                    exportPlayerDirs[d].width = sPlayerDirs[d].width;
+                    exportPlayerDirs[d].height = sPlayerDirs[d].height;
+                }
+                float exportOrbitDist = sOrbitDist;
+
+                std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
+                             exportPlayerDirs, exportOrbitDist]() {
                     std::string err;
-                    bool ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam, err);
+                    bool ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
+                                         exportPlayerDirs, exportOrbitDist, err);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
