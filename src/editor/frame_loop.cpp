@@ -934,12 +934,12 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
 
         ImGui::SameLine();
         // Base size selector
-        const char* sizes[] = { "8x8", "16x16", "32x32" };
-        int sizeIdx = (asset.baseSize == 32) ? 2 : (asset.baseSize == 16) ? 1 : 0;
+        const char* sizes[] = { "8x8", "16x16", "32x32", "64x64" };
+        int sizeIdx = (asset.baseSize == 64) ? 3 : (asset.baseSize == 32) ? 2 : (asset.baseSize == 16) ? 1 : 0;
         ImGui::PushItemWidth(Scaled(80));
-        if (ImGui::Combo("Size##base", &sizeIdx, sizes, 3))
+        if (ImGui::Combo("Size##base", &sizeIdx, sizes, 4))
         {
-            int newSize = (sizeIdx == 2) ? 32 : (sizeIdx == 1) ? 16 : 8;
+            int newSize = (sizeIdx == 3) ? 64 : (sizeIdx == 2) ? 32 : (sizeIdx == 1) ? 16 : 8;
             asset.baseSize = newSize;
             // Resize all frames
             for (auto& fr : asset.frames)
@@ -1364,9 +1364,126 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
         ImGui::PopItemWidth();
 
         if (!asset.sourceImagePath.empty())
-            ImGui::Text("Source: %s", asset.sourceImagePath.c_str());
-        else
-            ImGui::TextWrapped("No image imported. (TODO: Import PNG strip)");
+        {
+            std::string fname = std::filesystem::path(asset.sourceImagePath).filename().string();
+            ImGui::Text("Source: %s", fname.c_str());
+        }
+
+#ifdef _WIN32
+        if (ImGui::Button("Import PNG...##importstrip"))
+        {
+            std::string path = OpenFileDialog(
+                "PNG Images\0*.png\0All Files\0*.*\0", "png");
+            if (!path.empty())
+            {
+                int imgW, imgH, channels;
+                unsigned char* imgData = stbi_load(path.c_str(), &imgW, &imgH, &channels, 4);
+                if (imgData)
+                {
+                    asset.sourceImagePath = path;
+
+                    // Auto-detect frame size if not set
+                    if (asset.stripFrameW <= 0) asset.stripFrameW = asset.baseSize;
+                    if (asset.stripFrameH <= 0) asset.stripFrameH = asset.baseSize;
+                    int fw = asset.stripFrameW;
+                    int fh = asset.stripFrameH;
+
+                    // Count frames in the strip (horizontal layout)
+                    int framesX = imgW / fw;
+                    int framesY = imgH / fh;
+                    int totalFrames = framesX * framesY;
+                    if (totalFrames < 1) totalFrames = 1;
+
+                    // Extract unique colors for palette (index 0 = transparent)
+                    // First pass: collect unique colors (skip fully transparent pixels)
+                    uint32_t uniqueColors[16] = {};
+                    int numUnique = 0;
+                    // Index 0 reserved for transparent
+                    asset.palette[0] = 0x00000000;
+
+                    for (int py = 0; py < imgH && numUnique < 15; py++)
+                    {
+                        for (int px = 0; px < imgW && numUnique < 15; px++)
+                        {
+                            const unsigned char* p = imgData + (py * imgW + px) * 4;
+                            if (p[3] < 128) continue; // transparent
+                            uint32_t col = p[0] | (p[1] << 8) | (p[2] << 16) | 0xFF000000;
+                            bool found = false;
+                            for (int c = 0; c < numUnique; c++)
+                            {
+                                if (uniqueColors[c] == col) { found = true; break; }
+                            }
+                            if (!found)
+                            {
+                                uniqueColors[numUnique] = col;
+                                asset.palette[numUnique + 1] = col;
+                                numUnique++;
+                            }
+                        }
+                    }
+
+                    // Slice into frames
+                    asset.frames.clear();
+                    for (int fy = 0; fy < framesY; fy++)
+                    {
+                        for (int fx = 0; fx < framesX; fx++)
+                        {
+                            SpriteFrame frame;
+                            frame.width = asset.baseSize;
+                            frame.height = asset.baseSize;
+                            memset(frame.pixels, 0, sizeof(frame.pixels));
+
+                            for (int py = 0; py < fh && py < asset.baseSize; py++)
+                            {
+                                for (int px = 0; px < fw && px < asset.baseSize; px++)
+                                {
+                                    int srcX = fx * fw + px;
+                                    int srcY = fy * fh + py;
+                                    if (srcX >= imgW || srcY >= imgH) continue;
+
+                                    const unsigned char* p = imgData + (srcY * imgW + srcX) * 4;
+                                    if (p[3] < 128) { frame.pixels[py * kMaxFrameSize + px] = 0; continue; }
+
+                                    uint32_t col = p[0] | (p[1] << 8) | (p[2] << 16) | 0xFF000000;
+                                    // Find closest palette entry
+                                    uint8_t bestIdx = 1;
+                                    int bestDist = INT_MAX;
+                                    for (int c = 0; c < numUnique; c++)
+                                    {
+                                        uint32_t pc = uniqueColors[c];
+                                        int dr = (int)(col & 0xFF) - (int)(pc & 0xFF);
+                                        int dg = (int)((col >> 8) & 0xFF) - (int)((pc >> 8) & 0xFF);
+                                        int db = (int)((col >> 16) & 0xFF) - (int)((pc >> 16) & 0xFF);
+                                        int dist = dr*dr + dg*dg + db*db;
+                                        if (dist < bestDist) { bestDist = dist; bestIdx = (uint8_t)(c + 1); }
+                                    }
+                                    frame.pixels[py * kMaxFrameSize + px] = bestIdx;
+                                }
+                            }
+                            asset.frames.push_back(frame);
+                        }
+                    }
+
+                    // Update anim if empty
+                    if (asset.anims.empty())
+                    {
+                        SpriteAnim anim;
+                        anim.name = "idle";
+                        anim.startFrame = 0;
+                        anim.endFrame = (int)asset.frames.size() - 1;
+                        anim.fps = 8;
+                        anim.loop = true;
+                        asset.anims.push_back(anim);
+                    }
+
+                    sProjectDirty = true;
+                    stbi_image_free(imgData);
+                }
+            }
+        }
+#endif
+        if (asset.sourceImagePath.empty())
+            ImGui::TextDisabled("No image imported.");
 
         ImGui::Spacing();
 
