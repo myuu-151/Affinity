@@ -17,6 +17,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <commdlg.h>
+#include <shobjidl.h>
 #endif
 #include <GL/gl.h>
 
@@ -180,6 +181,37 @@ static std::string SaveFileDialog(const char* filter, const char* defaultExt)
     if (GetSaveFileNameA(&ofn))
         return std::string(path);
     return {};
+}
+static std::string OpenFolderDialog()
+{
+    std::string result;
+    CoInitialize(nullptr);
+    IFileDialog* pfd = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_ALL, IID_IFileDialog, (void**)&pfd)))
+    {
+        DWORD opts;
+        pfd->GetOptions(&opts);
+        pfd->SetOptions(opts | FOS_PICKFOLDERS);
+        if (SUCCEEDED(pfd->Show(nullptr)))
+        {
+            IShellItem* psi = nullptr;
+            if (SUCCEEDED(pfd->GetResult(&psi)))
+            {
+                PWSTR path = nullptr;
+                if (SUCCEEDED(psi->GetDisplayName(SIGDN_FILESYSPATH, &path)))
+                {
+                    char buf[MAX_PATH];
+                    WideCharToMultiByte(CP_UTF8, 0, path, -1, buf, MAX_PATH, nullptr, nullptr);
+                    result = buf;
+                    CoTaskMemFree(path);
+                }
+                psi->Release();
+            }
+        }
+        pfd->Release();
+    }
+    CoUninitialize();
+    return result;
 }
 #endif
 
@@ -2174,23 +2206,26 @@ void FrameTick(float dt)
                 // Camera view angle = sOrbitAngle + PI (opposite of orbit offset)
                 float viewAngle = sOrbitAngle + 3.14159265f;
 
-                // J/L orbit the camera around the player
+                // WASD input
+                float inputX = 0.0f, inputZ = 0.0f;
+                if (ImGui::IsKeyDown(ImGuiKey_W)) { inputX += 1.0f; }
+                if (ImGui::IsKeyDown(ImGuiKey_S)) { inputX -= 1.0f; }
+                if (ImGui::IsKeyDown(ImGuiKey_A)) { inputZ -= 1.0f; }
+                if (ImGui::IsKeyDown(ImGuiKey_D)) { inputZ += 1.0f; }
+
+                bool orbiting = ImGui::IsKeyDown(ImGuiKey_J) || ImGui::IsKeyDown(ImGuiKey_L);
+                bool wasMoving = sPlayerMoving;
+                sPlayerMoving = (inputX != 0.0f || inputZ != 0.0f);
+
+                // J/L orbit — always applies
                 if (ImGui::IsKeyDown(ImGuiKey_J))
                     sOrbitAngle += rotSpeed;
                 if (ImGui::IsKeyDown(ImGuiKey_L))
                     sOrbitAngle -= rotSpeed;
 
-                // WASD moves the player — build input vector for diagonals
-                float inputX = 0.0f, inputZ = 0.0f;
-                if (ImGui::IsKeyDown(ImGuiKey_W)) { inputX += 1.0f; } // forward
-                if (ImGui::IsKeyDown(ImGuiKey_S)) { inputX -= 1.0f; } // back
-                if (ImGui::IsKeyDown(ImGuiKey_A)) { inputZ -= 1.0f; } // left
-                if (ImGui::IsKeyDown(ImGuiKey_D)) { inputZ += 1.0f; } // right
-
-                sPlayerMoving = (inputX != 0.0f || inputZ != 0.0f);
                 if (sPlayerMoving)
                 {
-                    // Normalize diagonal so you don't move faster
+                    // Normalize diagonal
                     float len = sqrtf(inputX * inputX + inputZ * inputZ);
                     inputX /= len;
                     inputZ /= len;
@@ -2203,6 +2238,13 @@ void FrameTick(float dt)
                     float rightX = -cosf(viewAngle), rightZ = sinf(viewAngle);
                     player.x += (fwdX * inputX + rightX * inputZ) * moveSpeed;
                     player.z += (fwdZ * inputX + rightZ * inputZ) * moveSpeed;
+                }
+                else if (wasMoving)
+                {
+                    // Just stopped moving — sync sPlayerMoveAngle so idle doesn't snap
+                    // Idle sprite = sOrbitAngle + sPlayerMoveAngle, should equal the last moving sprite = sPlayerMoveAngle
+                    // So: sPlayerMoveAngle_new = sPlayerMoveAngle_old - sOrbitAngle
+                    sPlayerMoveAngle = sPlayerMoveAngle - sOrbitAngle;
                 }
 
                 // Clamp player to world
@@ -2267,10 +2309,8 @@ void FrameTick(float dt)
         playerDirImages[d].width  = sPlayerDirs[d].width;
         playerDirImages[d].height = sPlayerDirs[d].height;
     }
-    // Sprite direction = orbit angle + movement offset when moving
-    float spriteAngle = sOrbitAngle;
-    if (sPlayerMoving)
-        spriteAngle = sOrbitAngle + sPlayerMoveAngle;
+    // Sprite direction: orbit-based when idle, movement-based when moving
+    float spriteAngle = sPlayerMoving ? sPlayerMoveAngle : sOrbitAngle + sPlayerMoveAngle;
     Mode7::Render(sCamera, nullptr, sSprites, sSpriteCount, camObjPtr, sCamObjEditorScale,
                   assetsPtr, (int)sSpriteAssets.size(), sViewportAnimTime, isPlaying,
                   playerDirImages, spriteAngle);
@@ -2424,6 +2464,15 @@ void FrameTick(float dt)
                         if (!path.empty())
                             LoadPlayerDirImage(dir, path);
                     }
+                    // Right-click to clear slot
+                    if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && sPlayerDirs[dir].pixels)
+                    {
+                        stbi_image_free(sPlayerDirs[dir].pixels);
+                        sPlayerDirs[dir].pixels = nullptr;
+                        if (sPlayerDirs[dir].texture) { glDeleteTextures(1, &sPlayerDirs[dir].texture); sPlayerDirs[dir].texture = 0; }
+                        sPlayerDirs[dir].path.clear();
+                        sPlayerDirs[dir].width = sPlayerDirs[dir].height = 0;
+                    }
                 }
 
                 ImGui::PopID();
@@ -2432,6 +2481,50 @@ void FrameTick(float dt)
 
         ImGui::Spacing();
         ImGui::Separator();
+        ImGui::Spacing();
+
+        // Batch load button
+#ifdef _WIN32
+        if (ImGui::Button("Load Folder..."))
+        {
+            std::string folder = OpenFolderDialog();
+            if (!folder.empty())
+            {
+                // Try to match files: N.png, NE.png, E.png, SE.png, S.png, SW.png, W.png, NW.png
+                // Also try lowercase and common alternates
+                static const char* const altNames[][4] = {
+                    { "N", "n", "forward", "up" },
+                    { "NE", "ne", "rightup", "upright" },
+                    { "E", "e", "right", nullptr },
+                    { "SE", "se", "rightdown", "downright" },
+                    { "S", "s", "backwards", "down" },
+                    { "SW", "sw", "leftdown", "downleft" },
+                    { "W", "w", "left", nullptr },
+                    { "NW", "nw", "leftup", "upleft" },
+                };
+                int loaded = 0;
+                for (int d = 0; d < kPlayerDirCount; d++)
+                {
+                    bool found = false;
+                    for (int a = 0; a < 4 && !found; a++)
+                    {
+                        if (!altNames[d][a]) continue;
+                        std::string tryPath = folder + "\\" + altNames[d][a] + ".png";
+                        if (std::filesystem::exists(tryPath))
+                        {
+                            LoadPlayerDirImage(d, tryPath);
+                            found = true;
+                            loaded++;
+                        }
+                    }
+                }
+            }
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(matches N/NE/E/SE/S/SW/W/NW .png or forward/left/right/etc)");
+#endif
+
+        ImGui::Spacing();
 
         // File paths below grid
         for (int d = 0; d < kPlayerDirCount; d++)
