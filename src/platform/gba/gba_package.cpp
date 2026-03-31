@@ -138,20 +138,60 @@ static unsigned short EditorColorToRGB15(uint32_t rgba)
     return (unsigned short)(r | (g << 5) | (b << 10));
 }
 
+// Snap to nearest valid GBA OBJ size (8, 16, 32, 64)
+static int SnapToOBJSize(int sz)
+{
+    if (sz <= 8)  return 8;
+    if (sz <= 16) return 16;
+    if (sz <= 32) return 32;
+    return 64;
+}
+
 // Convert a sprite frame to 4bpp GBA tile u32 data.
-// Always emits 32x32 (16 tiles), upscaling smaller frames to fill the space.
-// Returns the u32s in row-major tile order for 1D OBJ mapping.
+// Emits tiles at the frame's native size (8/16/32/64), upscaling smaller
+// source frames as needed. Returns u32s in row-major tile order for 1D OBJ mapping.
+//
+// DEBUG: set AFN_DEBUG_TEST_PATTERN to 1 to replace all sprite frames with a
+// colored-quadrant test pattern.
+#define AFN_DEBUG_TEST_PATTERN 0
+
 static std::vector<uint32_t> FrameToGBATiles(const GBASpriteFrameExport& frame)
 {
-    const int outSize = 32; // always 32x32 OBJ
-    const int outTilesPerRow = outSize / 8; // 4
-    const int outTotalTiles = outTilesPerRow * outTilesPerRow; // 16
+    int outSize = SnapToOBJSize(frame.width);
+    const int outTilesPerRow = outSize / 8;
+    const int outTotalTiles = outTilesPerRow * outTilesPerRow;
     std::vector<uint32_t> data(outTotalTiles * 8, 0);
+
+#if AFN_DEBUG_TEST_PATTERN
+    // Diagnostic: 4-quadrant test pattern with border
+    for (int oy = 0; oy < outSize; oy++)
+    {
+        for (int ox = 0; ox < outSize; ox++)
+        {
+            uint8_t palIdx;
+            int half = outSize / 2;
+            if (ox == 0 || ox == outSize - 1 || oy == 0 || oy == outSize - 1)
+                palIdx = 5;  // border
+            else if (oy < half && ox < half) palIdx = 1;
+            else if (oy < half)              palIdx = 2;
+            else if (ox < half)              palIdx = 3;
+            else                              palIdx = 4;
+
+            int tileIdx = (oy / 8) * outTilesPerRow + (ox / 8);
+            int lx = ox & 7;
+            int ly = oy & 7;
+            int rowIdx = tileIdx * 8 + ly;
+            int bit = lx * 4;
+            data[rowIdx] |= ((uint32_t)palIdx << bit);
+        }
+    }
+    return data;
+#endif
 
     int fSize = frame.width;
     if (fSize <= 0) return data;
 
-    // Upscale: map each 32x32 output pixel back to source frame pixel
+    // Map each output pixel back to source frame pixel (upscale if needed)
     for (int oy = 0; oy < outSize; oy++)
     {
         int sy = oy * fSize / outSize;
@@ -349,7 +389,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
     for (size_t ai = 0; ai < assets.size(); ai++)
     {
         const auto& asset = assets[ai];
-        int tilesPerFrame = 16; // always 32x32 OBJ (4x4 tiles)
+        int objSize = SnapToOBJSize(asset.baseSize);
+        int tilesPerRow = objSize / 8;
+        int tilesPerFrame = tilesPerRow * tilesPerRow;
         assetTileStart.push_back((int)allTiles.size() / 8);
         assetTilesPerFrame.push_back(tilesPerFrame);
 
@@ -452,7 +494,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         {
             f << "    { " << assetTileStart[ai] << ", " << assetTilesPerFrame[ai]
               << ", " << (int)assets[ai].frames.size()
-              << ", " << 32
+              << ", " << SnapToOBJSize(assets[ai].baseSize)
               << ", " << assets[ai].palBank << " },\n";
         }
         f << "};\n\n";

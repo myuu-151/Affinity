@@ -26,7 +26,7 @@ struct GBAPlayerDirExport
 };
 
 // Sprite asset frame for GBA export — 4bpp pixel data
-static constexpr int kExportMaxFrameSize = 32;
+static constexpr int kExportMaxFrameSize = 64;
 
 struct GBASpriteFrameExport
 {

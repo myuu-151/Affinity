@@ -328,6 +328,17 @@ static void update_player_dir_tile(void)
 #endif
 }
 
+// Map baseSize to GBA OBJ ATTR1_SIZE bits
+static u16 size_to_attr1(int baseSize)
+{
+    switch (baseSize) {
+        case 8:  return ATTR1_SIZE_8;
+        case 16: return ATTR1_SIZE_16;
+        case 64: return ATTR1_SIZE_64;
+        default: return ATTR1_SIZE_32;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Project sprites to screen and update OAM
 // ---------------------------------------------------------------------------
@@ -355,8 +366,9 @@ static void update_sprites(void)
 
         int scale = (int)((cam_h * cam_fov) / fovLambda);
 
-        if (screenY < -16 || screenY > 168) continue;
-        if (screenX < -32 || screenX > 272) continue;
+        // Use generous culling bounds (64x64 AFF_DBL = 128x128 canvas)
+        if (screenY < -128 || screenY > 288) continue;
+        if (screenX < -128 || screenX > 368) continue;
         if (scale < 1) continue;
 
         proj[projCount].screenX = screenX;
@@ -385,11 +397,13 @@ static void update_sprites(void)
         int sprIdx = proj[i].idx;
         int palBank = g_sprites[sprIdx].palIdx;
         int tileId = 0;
+        int baseSize = 32; // default for player dir sprites
 
         // Check if this is the player sprite with direction tiles
         if (sprIdx == player_sprite_idx && g_player_dir_tile > 0)
         {
             tileId = g_player_dir_tile;
+            baseSize = 32; // player direction sprites are always 32x32
 #ifdef AFN_PLAYER_DIR_PALBANK
             palBank = AFN_PLAYER_DIR_PALBANK;
 #endif
@@ -403,6 +417,7 @@ static void update_sprites(void)
                 if (ai >= 0 && ai < AFN_ASSET_COUNT)
                 {
                     tileId = afn_asset_desc[ai][0];
+                    baseSize = afn_asset_desc[ai][3];
                     palBank = afn_asset_desc[ai][4];
                 }
             }
@@ -415,9 +430,12 @@ static void update_sprites(void)
         {
             int sprScale = g_sprites[sprIdx].scale;
             int invScale;
+            int canvasHalf = baseSize; // AFF_DBL canvas = 2 * baseSize
             if (sprScale <= 0) sprScale = 256;
 
             invScale = (proj[i].depth * 7) / sprScale;
+            // invScale=128 means 2x magnification, which exactly fills the
+            // AFF_DBL canvas (2*baseSize).  Going lower clips the sprite.
             if (invScale < 128) invScale = 128;
             if (invScale > 2048) invScale = 2048;
 
@@ -426,12 +444,12 @@ static void update_sprites(void)
             obj_aff_mem[affIdx].pc = 0;
             obj_aff_mem[affIdx].pd = (s16)invScale;
 
-            int visHalf = 4096 / invScale;
-            int sx = proj[i].screenX - 32;
-            int sy = proj[i].screenY - 32 - visHalf;
+            int visHalf = (baseSize * 128) / invScale;
+            int sx = proj[i].screenX - canvasHalf;
+            int sy = proj[i].screenY - canvasHalf - visHalf;
 
             obj_mem[oamIdx].attr0 = ATTR0_Y(sy & 0xFF) | ATTR0_SQUARE | ATTR0_AFF_DBL;
-            obj_mem[oamIdx].attr1 = ATTR1_X(sx & 0x1FF) | ATTR1_SIZE_32 | ATTR1_AFF_ID(affIdx);
+            obj_mem[oamIdx].attr1 = ATTR1_X(sx & 0x1FF) | size_to_attr1(baseSize) | ATTR1_AFF_ID(affIdx);
             obj_mem[oamIdx].attr2 = ATTR2_ID(tileId) | ATTR2_PRIO(0) | ATTR2_PALBANK(palBank);
         }
     }
