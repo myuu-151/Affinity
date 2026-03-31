@@ -318,8 +318,9 @@ static void update_player_dir_tile(void)
         sprAngle = orbit_angle + player_move_angle;
 
     // Convert brad angle to direction index (0-7)
-    // Each direction = 8192 brads (65536/8), offset by half-sector
-    int dirIdx = ((sprAngle + 4096) >> 13) & 7;
+    // Compute raw index, then mirror L/R to match sprite sheet ordering
+    int rawIdx = ((sprAngle + 0xC000 + 4096) >> 13) & 7;
+    int dirIdx = (8 - rawIdx) & 7;
 
     // Each frame = 16 tiles (32x32 4bpp)
     g_player_dir_tile = AFN_PLAYER_DIR_TILE0 + dirIdx * 16;
@@ -643,7 +644,7 @@ int main(void)
     orbit_angle = AFN_CAM_ANGLE;
     orbit_dist = AFN_ORBIT_DIST;
     player_moving = 0;
-    player_move_angle = 0;
+    player_move_angle = 0x4000; // face away from camera (show back)
     g_player_dir_tile = 0;
 #ifdef AFN_PLAYER_DIR_TILE0
     g_player_dir_tile = AFN_PLAYER_DIR_TILE0;
@@ -675,8 +676,8 @@ int main(void)
             FIXED moveSpeed = 37;
             int   rotSpeed  = 0x0200;
 
-            // View angle = orbit_angle + PI (camera looks from orbit pos toward player)
-            u16 viewAngle = orbit_angle + 0x8000;
+            // View angle = orbit_angle (camera is behind player, looking forward)
+            u16 viewAngle = orbit_angle;
             FIXED viewSin = lu_sin(viewAngle) >> 4;
             FIXED viewCos = lu_cos(viewAngle) >> 4;
 
@@ -707,22 +708,6 @@ int main(void)
             {
                 // Track movement direction for sprite facing (brad atan2)
                 player_move_angle = ArcTan2(inputRight, inputFwd);
-
-                // Auto-orbit when strafing (left/right)
-                if (inputRight)
-                {
-                    // 0.4 * rotSpeed = rotSpeed * 2 / 5
-                    int autoOrbit = (rotSpeed * 2) / 5;
-                    if (inputRight < 0) autoOrbit = -autoOrbit;
-
-                    // L shoulder doubles, R shoulder quarters auto-orbit speed
-                    if (key_is_down(KEY_L))
-                        autoOrbit *= 2;
-                    else if (key_is_down(KEY_R))
-                        autoOrbit >>= 2;
-
-                    orbit_angle -= (s16)autoOrbit;
-                }
 
                 // Move player in world space using view direction
                 FIXED moveFwd   = (inputFwd * moveSpeed) >> 8;
@@ -836,7 +821,7 @@ int main(void)
 #endif
                 orbit_angle = AFN_CAM_ANGLE;
                 player_moving = 0;
-                player_move_angle = 0;
+                player_move_angle = 0x4000; // face away from camera (show back)
             }
 #ifdef AFFINITY_HAS_SPRITES
             cam_x     = AFN_CAM_X;
