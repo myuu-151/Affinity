@@ -94,7 +94,7 @@ static bool  sPlayerMoving = false;   // is the player moving this frame
 static FloorSprite sSavedPlayerSprite; // saved player state before Play
 static int sSavedPlayerIdx = -1;
 static SelectedObjType sSelectedObjType = SelectedObjType::None;
-static CameraStartObject sCamObj = { 0.0f, 0.0f, 8.0f, 0.0f, 60.0f };
+static CameraStartObject sCamObj = { 0.0f, 0.0f, 14.0f, 0.0f, 60.0f };
 static float sCamObjEditorScale = 0.05f; // editor-only visual size
 static Mode7Camera sSavedEditorCam;
 
@@ -328,7 +328,7 @@ static bool LoadProject(const std::string& path)
     sEditorMode = EditorMode::Edit;
     sSpriteAssets.clear();
     sSelectedAsset = -1;
-    sCamObj = { 0.0f, 0.0f, 10.0f, 0.0f, 50.0f };
+    sCamObj = { 0.0f, 0.0f, 14.0f, 0.0f, 60.0f };
     for (int d = 0; d < kPlayerDirCount; d++)
     {
         if (sPlayerDirs[d].pixels) { stbi_image_free(sPlayerDirs[d].pixels); sPlayerDirs[d].pixels = nullptr; }
@@ -523,7 +523,7 @@ static void CloseProject()
     sSelectedSprite = -1;
     sSelectedObjType = SelectedObjType::None;
     sEditorMode = EditorMode::Edit;
-    sCamObj = { 0.0f, 0.0f, 10.0f, 0.0f, 50.0f };
+    sCamObj = { 0.0f, 0.0f, 14.0f, 0.0f, 60.0f };
     sCamObjEditorScale = 0.05f;
 
     sCamera.x = 0.0f;

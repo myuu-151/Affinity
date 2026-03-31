@@ -128,9 +128,9 @@ struct CameraStartObject
 {
     float x = 0.0f;
     float z = 0.0f;
-    float height = 10.0f;
+    float height = 14.0f;
     float angle = 0.0f;
-    float horizon = 50.0f;
+    float horizon = 60.0f;
 };
 
 // Map data — the floor plane rendered by Mode 7

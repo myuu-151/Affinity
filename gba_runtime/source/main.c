@@ -25,7 +25,7 @@ static FIXED cam_fov;      // focal distance D
 static FIXED g_cosf, g_sinf;
 
 // Horizon scanline — variable for pitch control (A/B buttons)
-static int m7_horizon = 54;
+static int m7_horizon = 60;
 
 // ---------------------------------------------------------------------------
 // Orbit camera state (used when player sprite exists)
@@ -361,7 +361,8 @@ static void update_sprites(void)
 
         if (fovLambda <= 64) continue;
 
-        FIXED heightDiff = cam_h - g_sprites[i].y;
+        // Height is in editor scale; XZ is scaled /4 for GBA. Divide by 4 to match.
+        FIXED heightDiff = (cam_h - g_sprites[i].y) >> 2;
         int screenY = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
         int screenX = 120 + (int)((side * cam_fov) / fovLambda);
 
@@ -629,7 +630,7 @@ int main(void)
 #else
     cam_x     = 128 << 8;
     cam_z     = 128 << 8;
-    cam_h     = 64 << 8;
+    cam_h     = 14 << 8;
     cam_angle = 0;
     cam_fov   = 128;
 #endif
@@ -832,9 +833,9 @@ int main(void)
 #else
             cam_x     = 128 << 8;
             cam_z     = 128 << 8;
-            cam_h     = 64 << 8;
+            cam_h     = 14 << 8;
             cam_angle = 0;
-            m7_horizon = 54;
+            m7_horizon = 60;
 #endif
         }
 
