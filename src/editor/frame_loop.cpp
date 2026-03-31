@@ -20,6 +20,9 @@
 #endif
 #include <GL/gl.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 namespace Affinity
 {
 
@@ -27,7 +30,7 @@ static Mode7Camera sCamera;
 static bool sInitialized = false;
 
 // Editor mode tabs
-enum class EditorTab { Map, Sprites, Tiles, Skybox, ThreeD };
+enum class EditorTab { Map, Sprites, Tiles, Skybox, Player, ThreeD };
 static EditorTab sActiveTab = EditorTab::Map;
 
 // Dummy tileset: 16 colors for the palette display
@@ -85,6 +88,8 @@ enum class SelectedObjType { None, Sprite, Camera };
 static EditorMode sEditorMode = EditorMode::Edit;
 static float sOrbitAngle = 0.0f;  // play mode: angle from player to camera
 static float sOrbitDist = 60.0f; // play mode: distance from player to camera
+static float sPlayerMoveAngle = 0.0f; // player movement direction (camera-relative)
+static bool  sPlayerMoving = false;   // is the player moving this frame
 static FloorSprite sSavedPlayerSprite; // saved player state before Play
 static int sSavedPlayerIdx = -1;
 static SelectedObjType sSelectedObjType = SelectedObjType::None;
@@ -104,6 +109,42 @@ static bool sPackageDone = false;
 static bool sPackageSuccess = false;
 static std::string sPackageMsg;
 static std::string sPackageOutputPath;
+
+// Player directional sprites (8 directions: N, NE, E, SE, S, SW, W, NW)
+static constexpr int kPlayerDirCount = 8;
+static const char* const kPlayerDirNames[] = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+struct PlayerDirSprite
+{
+    std::string path;           // PNG file path
+    unsigned char* pixels = nullptr; // RGBA pixel data
+    int width = 0, height = 0;
+    GLuint texture = 0;         // GL texture for preview
+};
+static PlayerDirSprite sPlayerDirs[kPlayerDirCount];
+
+static void LoadPlayerDirImage(int dir, const std::string& filepath)
+{
+    PlayerDirSprite& d = sPlayerDirs[dir];
+    // Free old data
+    if (d.pixels) { stbi_image_free(d.pixels); d.pixels = nullptr; }
+    if (d.texture) { glDeleteTextures(1, &d.texture); d.texture = 0; }
+
+    int w, h, channels;
+    unsigned char* data = stbi_load(filepath.c_str(), &w, &h, &channels, 4);
+    if (!data) return;
+
+    d.path = filepath;
+    d.pixels = data;
+    d.width = w;
+    d.height = h;
+
+    glGenTextures(1, &d.texture);
+    glBindTexture(GL_TEXTURE_2D, d.texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
 
 // Project file
 static std::string sProjectPath;  // empty = no project loaded
@@ -175,9 +216,9 @@ static bool SaveProject(const std::string& path)
     for (int i = 0; i < sSpriteCount; i++)
     {
         const FloorSprite& sp = sSprites[i];
-        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d\n",
+        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d\n",
                 sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
-                sp.assetIdx, sp.animIdx);
+                sp.assetIdx, sp.animIdx, (int)sp.type);
     }
     fprintf(f, "\n");
 
@@ -297,11 +338,12 @@ static bool LoadProject(const std::string& path)
             if (sscanf(line, "count=%d", &ival) == 1) { /* just informational */ }
             else if (sSpriteCount < kMaxFloorSprites)
             {
-                int sid, aIdx = -1, anIdx = 0;
+                int sid, aIdx = -1, anIdx = 0, typeVal = 0;
                 float sx, sy, sz, sc;
                 unsigned int col;
-                // Try extended format first (with assetIdx, animIdx)
-                if (sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx) >= 6)
+                // Try extended format (with assetIdx, animIdx, type)
+                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal);
+                if (matched >= 6)
                 {
                     FloorSprite& sp = sSprites[sSpriteCount];
                     sp.spriteId = sid;
@@ -312,6 +354,8 @@ static bool LoadProject(const std::string& path)
                     sp.color = col;
                     sp.assetIdx = aIdx;
                     sp.animIdx = anIdx;
+                    sp.type = (matched >= 9 && typeVal >= 0 && typeVal < (int)SpriteType::Count)
+                        ? (SpriteType)typeVal : SpriteType::Prop;
                     sp.selected = false;
                     sSpriteCount++;
                 }
@@ -525,10 +569,11 @@ static void DrawTabBar()
         ImGui::SameLine();
     };
 
-    TabButton("Map",     EditorTab::Map);
+    TabButton("Scene",   EditorTab::Map);
     TabButton("Sprites", EditorTab::Sprites);
     TabButton("Tiles",   EditorTab::Tiles);
     TabButton("Skybox",  EditorTab::Skybox);
+    TabButton("Player",  EditorTab::Player);
     TabButton("3D",      EditorTab::ThreeD);
 
     ImGui::SameLine(0, Scaled(20));
@@ -2109,27 +2154,29 @@ void FrameTick(float dt)
                 if (ImGui::IsKeyDown(ImGuiKey_L))
                     sOrbitAngle -= rotSpeed;
 
-                // WASD moves the player relative to the camera view
-                // Edit mode forward = (-sinA, -cosA), so use viewAngle
-                if (ImGui::IsKeyDown(ImGuiKey_W))
+                // WASD moves the player — build input vector for diagonals
+                float inputX = 0.0f, inputZ = 0.0f;
+                if (ImGui::IsKeyDown(ImGuiKey_W)) { inputX += 1.0f; } // forward
+                if (ImGui::IsKeyDown(ImGuiKey_S)) { inputX -= 1.0f; } // back
+                if (ImGui::IsKeyDown(ImGuiKey_A)) { inputZ += 1.0f; } // left
+                if (ImGui::IsKeyDown(ImGuiKey_D)) { inputZ -= 1.0f; } // right
+
+                sPlayerMoving = (inputX != 0.0f || inputZ != 0.0f);
+                if (sPlayerMoving)
                 {
-                    player.x += sinf(viewAngle) * moveSpeed;
-                    player.z += cosf(viewAngle) * moveSpeed;
-                }
-                if (ImGui::IsKeyDown(ImGuiKey_S))
-                {
-                    player.x -= sinf(viewAngle) * moveSpeed;
-                    player.z -= cosf(viewAngle) * moveSpeed;
-                }
-                if (ImGui::IsKeyDown(ImGuiKey_A))
-                {
-                    player.x += cosf(viewAngle) * moveSpeed;
-                    player.z -= sinf(viewAngle) * moveSpeed;
-                }
-                if (ImGui::IsKeyDown(ImGuiKey_D))
-                {
-                    player.x -= cosf(viewAngle) * moveSpeed;
-                    player.z += sinf(viewAngle) * moveSpeed;
+                    // Normalize diagonal so you don't move faster
+                    float len = sqrtf(inputX * inputX + inputZ * inputZ);
+                    inputX /= len;
+                    inputZ /= len;
+
+                    // Track movement direction relative to camera (for sprite facing)
+                    sPlayerMoveAngle = atan2f(-inputZ, inputX);
+
+                    // Transform to world space using viewAngle
+                    float fwdX = sinf(viewAngle), fwdZ = cosf(viewAngle);
+                    float rightX = -cosf(viewAngle), rightZ = sinf(viewAngle);
+                    player.x += (fwdX * inputX + rightX * inputZ) * moveSpeed;
+                    player.z += (fwdZ * inputX + rightZ * inputZ) * moveSpeed;
                 }
 
                 // Clamp player to world
@@ -2186,8 +2233,21 @@ void FrameTick(float dt)
     sViewportAnimTime += dt;
     const SpriteAsset* assetsPtr = sSpriteAssets.empty() ? nullptr : sSpriteAssets.data();
     bool isPlaying = (sEditorMode == EditorMode::Play);
+    // Build player direction image array for renderer
+    Mode7::PlayerDirImage playerDirImages[Mode7::kPlayerDirCount] = {};
+    for (int d = 0; d < Mode7::kPlayerDirCount; d++)
+    {
+        playerDirImages[d].pixels = sPlayerDirs[d].pixels;
+        playerDirImages[d].width  = sPlayerDirs[d].width;
+        playerDirImages[d].height = sPlayerDirs[d].height;
+    }
+    // Sprite direction = orbit angle + movement offset when moving
+    float spriteAngle = sOrbitAngle;
+    if (sPlayerMoving)
+        spriteAngle = sOrbitAngle + sPlayerMoveAngle;
     Mode7::Render(sCamera, nullptr, sSprites, sSpriteCount, camObjPtr, sCamObjEditorScale,
-                  assetsPtr, (int)sSpriteAssets.size(), sViewportAnimTime, isPlaying);
+                  assetsPtr, (int)sSpriteAssets.size(), sViewportAnimTime, isPlaying,
+                  playerDirImages, spriteAngle);
     Mode7::UploadTexture();
 
     // ---- Layout: NEXXT-style fixed panels ----
@@ -2223,6 +2283,142 @@ void FrameTick(float dt)
             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
         ImGui::Text("Skybox Editor — coming soon");
+        ImGui::End();
+    }
+    else if (sActiveTab == EditorTab::Player)
+    {
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
+        ImGui::SetNextWindowSize(ImVec2(totalW, bodyH));
+        ImGui::Begin("##PlayerTab", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Player Directional Sprites");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Layout: 3x3 grid for 8 directions + center preview
+        //   NW  N  NE
+        //   W  [P]  E
+        //   SW  S  SE
+        // Direction indices: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW
+        static const int gridMap[3][3] = {
+            { 7, 0, 1 },   // NW, N, NE
+            { 6, -1, 2 },  // W, center, E
+            { 5, 4, 3 },   // SW, S, SE
+        };
+
+        float cellSz = std::min((totalW - 40.0f) / 3.0f, (bodyH - 80.0f) / 3.0f);
+        cellSz = std::min(cellSz, 180.0f);
+        float previewSz = cellSz - 30.0f;
+        if (previewSz < 32.0f) previewSz = 32.0f;
+
+        float gridW = cellSz * 3.0f;
+        float padX = (totalW - gridW) * 0.5f;
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        for (int row = 0; row < 3; row++)
+        {
+            ImGui::Dummy(ImVec2(0, 0)); // ensure row starts
+            for (int col = 0; col < 3; col++)
+            {
+                int dir = gridMap[row][col];
+
+                // Position each cell using cursor + indent
+                if (col == 0)
+                    ImGui::SetCursorPosX(padX + 2);
+                else
+                    ImGui::SameLine(padX + col * cellSz + 2);
+
+                ImGui::PushID(row * 3 + col);
+
+                ImVec2 cellMin = ImGui::GetCursorScreenPos();
+                ImVec2 cellMax(cellMin.x + cellSz - 4, cellMin.y + cellSz - 4);
+
+                if (dir == -1)
+                {
+                    // Center cell: PLAYER label
+                    ImGui::InvisibleButton("##center", ImVec2(cellSz - 4, cellSz - 4));
+                    dl->AddRectFilled(cellMin, cellMax, 0xFF1A1A2A);
+                    dl->AddRect(cellMin, cellMax, 0xFF555577);
+                    const char* label = "PLAYER";
+                    ImVec2 tsz = ImGui::CalcTextSize(label);
+                    dl->AddText(
+                        ImVec2(cellMin.x + (cellSz - 4 - tsz.x) * 0.5f,
+                               cellMin.y + (cellSz - 4 - tsz.y) * 0.5f),
+                        0xFFFFFFFF, label);
+                }
+                else
+                {
+                    // Direction cell — clickable
+                    bool clicked = ImGui::InvisibleButton("##dirbtn", ImVec2(cellSz - 4, cellSz - 4));
+                    bool hovered = ImGui::IsItemHovered();
+
+                    dl->AddRectFilled(cellMin, cellMax, 0xFF151520);
+                    dl->AddRect(cellMin, cellMax, hovered ? 0xFFFFFFFF : 0xFF444466, 0.0f, 0, hovered ? 2.0f : 1.0f);
+
+                    // Direction label
+                    const char* dirName = kPlayerDirNames[dir];
+                    ImVec2 lsz = ImGui::CalcTextSize(dirName);
+                    dl->AddText(ImVec2(cellMin.x + (cellSz - 4 - lsz.x) * 0.5f, cellMin.y + 4), 0xFFAAAACC, dirName);
+
+                    // Preview image
+                    PlayerDirSprite& pds = sPlayerDirs[dir];
+                    float imgY = cellMin.y + 22.0f;
+                    float imgX = cellMin.x + (cellSz - 4 - previewSz) * 0.5f;
+
+                    if (pds.texture)
+                    {
+                        float aspect = (float)pds.width / (float)pds.height;
+                        float drawW = previewSz, drawH = previewSz;
+                        if (aspect > 1.0f) drawH = previewSz / aspect;
+                        else drawW = previewSz * aspect;
+                        float offX = imgX + (previewSz - drawW) * 0.5f;
+                        float offY = imgY + (previewSz - drawH) * 0.5f;
+                        dl->AddImage((ImTextureID)(uintptr_t)pds.texture,
+                            ImVec2(offX, offY),
+                            ImVec2(offX + drawW, offY + drawH));
+                    }
+                    else
+                    {
+                        const char* empty = "Click to\nassign PNG";
+                        ImVec2 esz = ImGui::CalcTextSize(empty);
+                        dl->AddText(
+                            ImVec2(cellMin.x + (cellSz - 4 - esz.x) * 0.5f,
+                                   imgY + (previewSz - esz.y) * 0.5f),
+                            0xFF666688, empty);
+                    }
+
+                    if (clicked)
+                    {
+                        std::string path = OpenFileDialog(
+                            "PNG Images\0*.png\0All Files\0*.*\0", "png");
+                        if (!path.empty())
+                            LoadPlayerDirImage(dir, path);
+                    }
+                }
+
+                ImGui::PopID();
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        // File paths below grid
+        for (int d = 0; d < kPlayerDirCount; d++)
+        {
+            if (!sPlayerDirs[d].path.empty())
+            {
+                std::string filename = std::filesystem::path(sPlayerDirs[d].path).filename().string();
+                ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.9f, 1.0f), "%s:", kPlayerDirNames[d]);
+                ImGui::SameLine();
+                ImGui::Text("%s", filename.c_str());
+            }
+        }
+
         ImGui::End();
     }
     else if (sActiveTab == EditorTab::ThreeD)

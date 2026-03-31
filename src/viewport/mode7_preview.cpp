@@ -259,11 +259,52 @@ static void DrawSpriteFrame(int cx, int cy, int halfW, int halfH,
     }
 }
 
+// Draw an RGBA image scaled into the framebuffer with alpha transparency
+static void DrawRGBASprite(int cx, int cy, int halfW, int halfH,
+                           const unsigned char* rgba, int imgW, int imgH,
+                           float fogAlpha)
+{
+    if (!rgba || imgW <= 0 || imgH <= 0) return;
+
+    int drawW = halfW * 2;
+    int drawH = halfH * 2;
+    int sx0 = cx - halfW;
+    int sy0 = cy - halfH;
+
+    for (int dy = 0; dy < drawH; dy++)
+    {
+        int sy = sy0 + dy;
+        if (sy < 0 || sy >= kGBAHeight) continue;
+        uint8_t* row = sFrameBuf + sy * kGBAWidth * 3;
+
+        int iy = dy * imgH / drawH;
+        if (iy >= imgH) iy = imgH - 1;
+
+        for (int dx = 0; dx < drawW; dx++)
+        {
+            int sx = sx0 + dx;
+            if (sx < 0 || sx >= kGBAWidth) continue;
+
+            int ix = dx * imgW / drawW;
+            if (ix >= imgW) ix = imgW - 1;
+
+            const unsigned char* px = rgba + (iy * imgW + ix) * 4;
+            if (px[3] < 128) continue; // alpha test
+
+            uint8_t cr = px[0], cg = px[1], cb = px[2];
+            row[sx*3+0] = (uint8_t)(cr*(1-fogAlpha) + kSkyCol[0]*fogAlpha);
+            row[sx*3+1] = (uint8_t)(cg*(1-fogAlpha) + kSkyCol[1]*fogAlpha);
+            row[sx*3+2] = (uint8_t)(cb*(1-fogAlpha) + kSkyCol[2]*fogAlpha);
+        }
+    }
+}
+
 void Render(const Mode7Camera& cam, const Mode7Map* map,
             const FloorSprite* sprites, int spriteCount,
             const CameraStartObject* camObj, float camObjScale,
             const SpriteAsset* assets, int assetCount,
-            float animTime, bool playing)
+            float animTime, bool playing,
+            const PlayerDirImage* playerDirs, float playerOrbitAngle)
 {
     float cosA = cosf(-cam.angle);
     float sinA = sinf(-cam.angle);
@@ -405,9 +446,33 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         // Sprite draws upward from its foot position
         int drawCenterY = sp.screenY - halfH;
 
+        // Check if this is a Player sprite with directional images
+        bool drewSprite = false;
+        if (fs.type == SpriteType::Player && playerDirs)
+        {
+            // Map orbit angle to 8 directions
+            // Normalize angle to [0, 2*PI)
+            float a = playerOrbitAngle;
+            const float PI2 = 6.28318530f;
+            a = fmodf(a, PI2);
+            if (a < 0.0f) a += PI2;
+
+            // Each direction covers PI/4 (45 degrees), offset by half
+            // 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW
+            int dirIdx = ((int)((a + 0.39269908f) / 0.78539816f)) % 8;
+
+            const PlayerDirImage& pdi = playerDirs[dirIdx];
+            if (pdi.pixels && pdi.width > 0 && pdi.height > 0)
+            {
+                int halfS = std::max(halfW, halfH);
+                DrawRGBASprite(sp.screenX, drawCenterY, halfS, halfS,
+                               pdi.pixels, pdi.width, pdi.height, sp.fog);
+                drewSprite = true;
+            }
+        }
+
         // Check if this sprite has a linked asset with frames
-        bool drewAsset = false;
-        if (fs.assetIdx >= 0 && fs.assetIdx < assetCount && assets)
+        if (!drewSprite && fs.assetIdx >= 0 && fs.assetIdx < assetCount && assets)
         {
             const SpriteAsset& asset = assets[fs.assetIdx];
             if (!asset.frames.empty())
@@ -434,10 +499,10 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 int halfS = std::max(halfW, halfH);
                 DrawSpriteFrame(sp.screenX, drawCenterY, halfS, halfS,
                                 asset.frames[frameIdx], asset.palette, sp.fog);
-                drewAsset = true;
+                drewSprite = true;
             }
         }
-        if (!drewAsset)
+        if (!drewSprite)
             DrawDiamond(sp.screenX, drawCenterY, halfW, halfH, cr, cg, cb, sp.fog);
 
         // Selection highlight: bright outline

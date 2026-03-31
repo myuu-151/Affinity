@@ -39,6 +39,7 @@ add_executable(AffinityEditor WIN32
 
 target_include_directories(AffinityEditor PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/thirdparty
 )
 
 target_link_libraries(AffinityEditor PRIVATE

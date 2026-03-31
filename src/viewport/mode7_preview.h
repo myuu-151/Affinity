@@ -12,12 +12,21 @@ namespace Mode7
 // Initialize the preview (creates checkerboard tileset if no map loaded)
 void Init();
 
+// Player directional sprite data for the renderer
+struct PlayerDirImage
+{
+    const unsigned char* pixels; // RGBA8 data (or nullptr if not assigned)
+    int width, height;
+};
+constexpr int kPlayerDirCount = 8;
+
 // Render one frame of Mode 7 into the pixel buffer
 void Render(const Mode7Camera& cam, const Mode7Map* map = nullptr,
             const FloorSprite* sprites = nullptr, int spriteCount = 0,
             const CameraStartObject* camObj = nullptr, float camObjScale = 1.0f,
             const SpriteAsset* assets = nullptr, int assetCount = 0,
-            float animTime = 0.0f, bool playing = false);
+            float animTime = 0.0f, bool playing = false,
+            const PlayerDirImage* playerDirs = nullptr, float playerOrbitAngle = 0.0f);
 
 // Projected sprite screen position (set after Render)
 struct SpriteScreenPos { int screenX, screenY, halfW, halfH, spriteIdx; };
