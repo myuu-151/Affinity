@@ -46,11 +46,17 @@ static void SampleFloor(float wx, float wz, const Mode7Map* map,
 {
     if (map && !map->tileset.tiles.empty())
     {
-        // Map pixel coordinates from world space
-        int px = (int)floorf(wx) & ((map->floor.width * kTileSize) - 1);
-        int py = (int)floorf(wz) & ((map->floor.height * kTileSize) - 1);
-        if (px < 0) px += map->floor.width * kTileSize;
-        if (py < 0) py += map->floor.height * kTileSize;
+        // World bounds match tilemap panel: ±512
+        int mapW = map->floor.width * kTileSize;
+        int mapH = map->floor.height * kTileSize;
+        static constexpr float kHalf = 512.0f;
+        if (wx < -kHalf || wx > kHalf || wz < -kHalf || wz > kHalf)
+        {
+            r = 30; g = 30; b = 35;
+            return;
+        }
+        int px = ((int)floorf(wx) % mapW + mapW) % mapW;
+        int py = ((int)floorf(wz) % mapH + mapH) % mapH;
 
         int tileX = px / kTileSize;
         int tileY = py / kTileSize;
@@ -73,7 +79,13 @@ static void SampleFloor(float wx, float wz, const Mode7Map* map,
     }
     else
     {
-        // Checkerboard fallback — 32-unit squares (matches minimap cells)
+        // Checkerboard fallback — bounded to default world (±512)
+        static constexpr float defHalf = 512.0f;
+        if (wx < -defHalf || wx > defHalf || wz < -defHalf || wz > defHalf)
+        {
+            r = 30; g = 30; b = 35;
+            return;
+        }
         int cx = ((int)floorf(wx / 32.0f)) & 1;
         int cz = ((int)floorf(wz / 32.0f)) & 1;
         const uint8_t* col = (cx ^ cz) ? kCheckA : kCheckB;

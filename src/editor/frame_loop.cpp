@@ -27,7 +27,7 @@ static Mode7Camera sCamera;
 static bool sInitialized = false;
 
 // Editor mode tabs
-enum class EditorTab { Map, Sprites, Tiles };
+enum class EditorTab { Map, Sprites, Tiles, ThreeD };
 static EditorTab sActiveTab = EditorTab::Map;
 
 // Dummy tileset: 16 colors for the palette display
@@ -524,6 +524,7 @@ static void DrawTabBar()
     TabButton("Map",     EditorTab::Map);
     TabButton("Sprites", EditorTab::Sprites);
     TabButton("Tiles",   EditorTab::Tiles);
+    TabButton("3D",      EditorTab::ThreeD);
 
     ImGui::SameLine(0, Scaled(20));
     // Play/Stop button
@@ -1471,7 +1472,9 @@ static void DrawTilemapPanel(ImVec2 pos, ImVec2 size)
         float dotX = cursor.x + sx;
         float dotZ = cursor.y + sz;
         uint32_t col = sSprites[i].color;
-        float r = (i == sSelectedSprite) ? 5.0f : 3.0f;
+        float baseR = 5.0f * sSprites[i].scale;
+        if (baseR < 2.0f) baseR = 2.0f;
+        float r = (i == sSelectedSprite) ? baseR + 2.0f : baseR;
         dl->AddCircleFilled(ImVec2(dotX, dotZ), r, col);
         if (i == sSelectedSprite)
             dl->AddCircle(ImVec2(dotX, dotZ), r + 1.0f, 0xFFFFFFFF, 0, 2.0f);
@@ -2036,7 +2039,19 @@ void FrameTick(float dt)
     // Draw everything
     DrawTabBar();
 
-    if (sActiveTab == EditorTab::Sprites)
+    if (sActiveTab == EditorTab::ThreeD)
+    {
+        // 3D tab: placeholder
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
+        ImGui::SetNextWindowSize(ImVec2(totalW, bodyH));
+        ImGui::Begin("##3DTab", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGui::Text("3D View — coming soon");
+        ImGui::End();
+    }
+    else if (sActiveTab == EditorTab::Sprites)
     {
         // Sprites tab: full-width sprite asset editor
         DrawSpritesTab(
