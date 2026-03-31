@@ -222,6 +222,15 @@ static bool SaveProject(const std::string& path)
     }
     fprintf(f, "\n");
 
+    // Player directional sprites
+    fprintf(f, "[PlayerDirs]\n");
+    for (int d = 0; d < kPlayerDirCount; d++)
+    {
+        if (!sPlayerDirs[d].path.empty())
+            fprintf(f, "dir=%d,%s\n", d, sPlayerDirs[d].path.c_str());
+    }
+    fprintf(f, "\n");
+
     // Sprite Assets
     fprintf(f, "[SpriteAssets]\n");
     fprintf(f, "count=%d\n", (int)sSpriteAssets.size());
@@ -288,6 +297,13 @@ static bool LoadProject(const std::string& path)
     sSpriteAssets.clear();
     sSelectedAsset = -1;
     sCamObj = { 0.0f, 0.0f, 10.0f, 0.0f, 50.0f };
+    for (int d = 0; d < kPlayerDirCount; d++)
+    {
+        if (sPlayerDirs[d].pixels) { stbi_image_free(sPlayerDirs[d].pixels); sPlayerDirs[d].pixels = nullptr; }
+        if (sPlayerDirs[d].texture) { glDeleteTextures(1, &sPlayerDirs[d].texture); sPlayerDirs[d].texture = 0; }
+        sPlayerDirs[d].path.clear();
+        sPlayerDirs[d].width = sPlayerDirs[d].height = 0;
+    }
     sCamObjEditorScale = 0.05f;
 
     char line[8192]; // large buffer for frame pixel data lines
@@ -359,6 +375,16 @@ static bool LoadProject(const std::string& path)
                     sp.selected = false;
                     sSpriteCount++;
                 }
+            }
+        }
+        else if (strcmp(section, "PlayerDirs") == 0)
+        {
+            int dirIdx;
+            char dirPath[512];
+            if (sscanf(line, "dir=%d,%511[^\n]", &dirIdx, dirPath) == 2)
+            {
+                if (dirIdx >= 0 && dirIdx < kPlayerDirCount)
+                    LoadPlayerDirImage(dirIdx, std::string(dirPath));
             }
         }
         else if (strcmp(section, "SpriteAssets") == 0)
@@ -2158,8 +2184,8 @@ void FrameTick(float dt)
                 float inputX = 0.0f, inputZ = 0.0f;
                 if (ImGui::IsKeyDown(ImGuiKey_W)) { inputX += 1.0f; } // forward
                 if (ImGui::IsKeyDown(ImGuiKey_S)) { inputX -= 1.0f; } // back
-                if (ImGui::IsKeyDown(ImGuiKey_A)) { inputZ += 1.0f; } // left
-                if (ImGui::IsKeyDown(ImGuiKey_D)) { inputZ -= 1.0f; } // right
+                if (ImGui::IsKeyDown(ImGuiKey_A)) { inputZ -= 1.0f; } // left
+                if (ImGui::IsKeyDown(ImGuiKey_D)) { inputZ += 1.0f; } // right
 
                 sPlayerMoving = (inputX != 0.0f || inputZ != 0.0f);
                 if (sPlayerMoving)
@@ -2170,7 +2196,7 @@ void FrameTick(float dt)
                     inputZ /= len;
 
                     // Track movement direction relative to camera (for sprite facing)
-                    sPlayerMoveAngle = atan2f(-inputZ, inputX);
+                    sPlayerMoveAngle = atan2f(inputZ, inputX);
 
                     // Transform to world space using viewAngle
                     float fwdX = sinf(viewAngle), fwdZ = cosf(viewAngle);
