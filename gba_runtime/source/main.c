@@ -562,7 +562,7 @@ int main(void)
     REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
 
     // BG2: charblock 2, screenblock 28, 32x32 affine map, 8bpp tiles, wrap
-    REG_BG2CNT = BG_CBB(2) | BG_SBB(28) | BG_AFF_32x32 | BG_8BPP | BG_WRAP;
+    REG_BG2CNT = BG_CBB(2) | BG_SBB(28) | BG_AFF_32x32 | BG_8BPP;
 
     // Identity affine (overwritten by HBlank each scanline)
     REG_BG2PA = 0x0100;
