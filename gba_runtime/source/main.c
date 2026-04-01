@@ -716,6 +716,19 @@ int main(void)
                 // Track movement direction for sprite facing (brad atan2)
                 player_move_angle = ArcTan2(inputRight, inputFwd);
 
+                // Auto-orbit when strafing (LEFT/RIGHT) — 40% of rotSpeed, matching editor
+                if (inputRight)
+                {
+                    int autoOrbit = (rotSpeed * 2 / 5);  // 40% of rotSpeed
+                    if (inputRight > 0)
+                        autoOrbit = -autoOrbit;  // right strafe = clockwise orbit
+                    if (key_is_down(KEY_L))
+                        autoOrbit *= 2;          // L shoulder: double orbit speed
+                    else if (key_is_down(KEY_R))
+                        autoOrbit /= 4;          // R shoulder: slow orbit
+                    orbit_angle += autoOrbit;
+                }
+
                 // Move player in world space using view direction
                 FIXED moveFwd   = (inputFwd * moveSpeed) >> 8;
                 FIXED moveRight = (inputRight * moveSpeed) >> 8;
