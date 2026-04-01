@@ -135,7 +135,7 @@ static void load_checkerboard(void)
     memset(map, 0, 64 * 64);  // default = tile 0 (void/transparent)
     for (int y = 0; y < 32; y++)
         for (int x = 0; x < 32; x++)
-            map[y * 64 + x] = ((x + y) & 1) ? 2 : 1;
+            map[y * 64 + x] = (((x / 2) + (y / 2)) & 1) ? 2 : 1;
 }
 
 #ifdef AFFINITY_HAS_MAPDATA
