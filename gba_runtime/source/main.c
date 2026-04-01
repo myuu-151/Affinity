@@ -117,20 +117,26 @@ static void m7_hbl(void)
 
 static void load_checkerboard(void)
 {
-    pal_bg_mem[0] = RGB15(10, 16, 24);
+    pal_bg_mem[0] = RGB15(4, 10, 4);   // void/out-of-bounds color (dark green)
     pal_bg_mem[1] = RGB15(4, 10, 4);
     pal_bg_mem[2] = RGB15(8, 18, 8);
+    pal_bg_mem[3] = RGB15(6, 14, 6);   // border/edge color
 
-    // Build a single 8x8 tile with internal 4x4 checkerboard pattern
-    // This tiles seamlessly and gives 4x4 pixel checker squares
-    u8 *tile = (u8*)&tile8_mem[2][0];
+    // Tile 0 = solid void (all palette 0)
+    memset(&tile8_mem[2][0], 0, 64);
+
+    // Tile 1 = checkerboard with internal 4x4 pattern
+    u8 *tile = (u8*)&tile8_mem[2][1];
     for (int py = 0; py < 8; py++)
         for (int px = 0; px < 8; px++)
             tile[py * 8 + px] = ((px / 4) + (py / 4)) & 1 ? 2 : 1;
 
-    // Fill entire 64x64 map with the same tile
+    // Fill 64x64 map: checker only within game world (0-32 tiles = 0-256 px)
     u8 *map = (u8*)se_mem[28];
-    memset(map, 0, 64 * 64);
+    memset(map, 0, 64 * 64);  // default = tile 0 (void)
+    for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++)
+            map[y * 64 + x] = 1;  // checker tile within bounds
 }
 
 #ifdef AFFINITY_HAS_MAPDATA
