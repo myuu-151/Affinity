@@ -129,7 +129,7 @@ static void load_checkerboard(void)
     {
         for (int x = 0; x < 32; x++)
         {
-            int check = ((x / 4) + (y / 4)) & 1;
+            int check = ((x / 2) + (y / 2)) & 1;
             map[y * 32 + x] = check ? 1 : 0;
         }
     }
@@ -140,8 +140,13 @@ static void load_editor_map(void)
 {
     memcpy(&tile8_mem[2][0], afn_tiles, afn_tilesLen);
     memcpy(pal_bg_mem, afn_palette, afn_paletteLen);
+    // Tile the 32x32 map into 64x64 (2x2 repeat) to match editor floor density
     u8 *map = (u8*)se_mem[28];
-    memcpy(map, afn_tilemap, afn_tilemapLen);
+    const u8 *src = (const u8*)afn_tilemap;
+    int y, x;
+    for (y = 0; y < 64; y++)
+        for (x = 0; x < 64; x++)
+            map[y * 64 + x] = src[(y & 31) * 32 + (x & 31)];
 }
 #endif
 
@@ -592,7 +597,7 @@ int main(void)
     // --- Video setup ---
     REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
 
-    REG_BG2CNT = BG_CBB(2) | BG_SBB(28) | BG_AFF_32x32 | BG_8BPP;
+    REG_BG2CNT = BG_CBB(2) | BG_SBB(28) | BG_AFF_64x64 | BG_8BPP;
 
     REG_BG2PA = 0x0100;
     REG_BG2PB = 0;
