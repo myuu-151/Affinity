@@ -122,8 +122,8 @@ static void load_checkerboard(void)
     pal_bg_mem[2] = RGB15(8, 18, 8);
     pal_bg_mem[3] = RGB15(2, 6, 2);    // void/out-of-bounds dark green
 
-    // Tile 0 = solid void (all palette index 3 = dark green)
-    memset(&tile8_mem[2][0], 3, 64);
+    // Tile 0 = transparent (palette 0 = backdrop/sky blue)
+    memset(&tile8_mem[2][0], 0, 64);
 
     // Tile 1 = checkerboard with internal 4x4 pattern
     u8 *tile = (u8*)&tile8_mem[2][1];
