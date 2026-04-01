@@ -40,6 +40,7 @@ static int   player_moving;        // nonzero if D-pad held
 static u16   player_move_angle;    // brad angle of last movement direction
 static int   g_player_dir_tile;    // current direction tile ID for player
 static int   auto_orbit_smooth;   // smoothed auto-orbit value (fixed-point)
+static int   manual_orbit_smooth; // smoothed manual orbit value (L/R)
 
 // ---------------------------------------------------------------------------
 // Floor sprites — positions in 16.8 fixed-point
@@ -797,23 +798,22 @@ int main(void)
                 // Track movement direction for sprite facing (brad atan2)
                 player_move_angle = ArcTan2(inputRight, inputFwd);
 
-                // Auto-orbit when strafing (LEFT/RIGHT) — smoothed
+                // Auto-orbit when strafing (LEFT/RIGHT) with drag on release
                 {
                     int autoOrbitTarget = 0;
                     if (inputRight)
                     {
-                        autoOrbitTarget = (rotSpeed / 5);  // 20% of rotSpeed
+                        autoOrbitTarget = (rotSpeed * 2 / 5);  // 40% of rotSpeed
                         if (inputRight < 0)
                             autoOrbitTarget = -autoOrbitTarget;
                         if (key_is_down(KEY_L) || key_is_down(KEY_R))
                             autoOrbitTarget *= 2;
                     }
-                    // Smooth: fast ramp-up (3/4 blend), gentle ease-out (1/4 blend)
-                    if ((autoOrbitTarget > 0 && autoOrbitTarget > auto_orbit_smooth) ||
-                        (autoOrbitTarget < 0 && autoOrbitTarget < auto_orbit_smooth))
-                        auto_orbit_smooth = (auto_orbit_smooth + autoOrbitTarget * 3) >> 2;
+                    // Smooth ease-in and ease-out (matching L/R drag feel)
+                    if (autoOrbitTarget != 0)
+                        auto_orbit_smooth += (autoOrbitTarget - auto_orbit_smooth) >> 2; // ease-in
                     else
-                        auto_orbit_smooth = (auto_orbit_smooth * 3 + autoOrbitTarget) >> 2;
+                        auto_orbit_smooth = (auto_orbit_smooth * 7) >> 3; // ease-out decay
                     orbit_angle += auto_orbit_smooth;
                 }
 

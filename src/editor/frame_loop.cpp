@@ -147,6 +147,7 @@ static float sOrbitDist = 60.0f; // play mode: distance from player to camera
 static float sPlayerMoveAngle = 0.0f; // player movement direction (camera-relative)
 static bool  sPlayerMoving = false;   // is the player moving this frame
 static float sAutoOrbitCurrent = 0.0f; // smoothed auto-orbit speed
+static float sManualOrbitCurrent = 0.0f; // smoothed manual orbit speed (J/L)
 static FloorSprite sSavedPlayerSprite; // saved player state before Play
 static int sSavedPlayerIdx = -1;
 static SelectedObjType sSelectedObjType = SelectedObjType::None;
@@ -2586,20 +2587,21 @@ void FrameTick(float dt)
                     // Track movement direction relative to camera (for sprite facing)
                     sPlayerMoveAngle = atan2f(inputZ, inputX);
 
-                    // Auto-orbit when strafing (A/D) — smoothed
+                    // Auto-orbit when strafing (A/D) with drag on release
                     {
                         float autoOrbitTarget = 0.0f;
                         if (inputZ != 0.0f)
                         {
-                            autoOrbitTarget = rotSpeed * 0.2f * inputZ;
+                            autoOrbitTarget = rotSpeed * 0.4f * inputZ;
                             if (ImGui::IsKeyDown(ImGuiKey_J) || ImGui::IsKeyDown(ImGuiKey_L))
                                 autoOrbitTarget *= 2.0f;
                         }
-                        // Smooth toward target (fast ramp-up, gentle ease-out)
-                        float smoothRate = (fabsf(autoOrbitTarget) > fabsf(sAutoOrbitCurrent)) ? 12.0f : 4.0f;
-                        sAutoOrbitCurrent += (autoOrbitTarget - sAutoOrbitCurrent) * std::min(1.0f, smoothRate * dt);
-                        if (fabsf(sAutoOrbitCurrent) > 0.0001f)
-                            sOrbitAngle -= sAutoOrbitCurrent;
+                        // Smooth ease-in and ease-out (matching L/R drag feel)
+                        if (fabsf(autoOrbitTarget) > 0.001f)
+                            sAutoOrbitCurrent += (autoOrbitTarget - sAutoOrbitCurrent) * std::min(1.0f, 6.0f * dt);
+                        else
+                            sAutoOrbitCurrent *= 0.85f;
+                        sOrbitAngle -= sAutoOrbitCurrent;
                     }
 
                     // Transform to world space using viewAngle
