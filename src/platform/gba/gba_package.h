@@ -52,6 +52,10 @@ struct GBASpriteAssetExport
     std::vector<GBASpriteFrameExport> frames;
     std::vector<GBASpriteAnimExport>  anims;
     int defaultAnim;
+
+    // 8-directional sprite images (RGBA8, like player dirs)
+    bool hasDirections = false;
+    GBAPlayerDirExport dirImages[8] = {};
 };
 
 // Camera start data for GBA export

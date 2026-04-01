@@ -304,7 +304,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             const CameraStartObject* camObj, float camObjScale,
             const SpriteAsset* assets, int assetCount,
             float animTime, bool playing,
-            const PlayerDirImage* playerDirs, float playerOrbitAngle)
+            const PlayerDirImage* playerDirs, float playerOrbitAngle,
+            const AssetDirImages* assetDirImages, int assetDirCount)
 {
     float cosA = cosf(-cam.angle);
     float sinA = sinf(-cam.angle);
@@ -467,6 +468,33 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 int halfS = std::max(halfW, halfH);
                 DrawRGBASprite(sp.screenX, drawCenterY, halfS, halfS,
                                pdi.pixels, pdi.width, pdi.height, sp.fog);
+                drewSprite = true;
+            }
+        }
+
+        // Check if this sprite has a linked asset with directional images
+        if (!drewSprite && fs.assetIdx >= 0 && fs.assetIdx < assetCount && assets
+            && assetDirImages && fs.assetIdx < assetDirCount
+            && assets[fs.assetIdx].hasDirections)
+        {
+            // Compute angle from camera to sprite
+            float dx = fs.x - cam.x;
+            float dz = fs.z - cam.z;
+            float angleToSprite = atan2f(dx, -dz); // angle from camera to sprite
+            float relAngle = angleToSprite - cam.angle; // relative to camera facing
+
+            const float PI2 = 6.28318530f;
+            relAngle = fmodf(relAngle, PI2);
+            if (relAngle < 0.0f) relAngle += PI2;
+
+            int dirIdx = ((int)((relAngle + 0.39269908f) / 0.78539816f)) % 8;
+
+            const PlayerDirImage& adi = assetDirImages[fs.assetIdx].dirs[dirIdx];
+            if (adi.pixels && adi.width > 0 && adi.height > 0)
+            {
+                int halfS = std::max(halfW, halfH);
+                DrawRGBASprite(sp.screenX, drawCenterY, halfS, halfS,
+                               adi.pixels, adi.width, adi.height, sp.fog);
                 drewSprite = true;
             }
         }

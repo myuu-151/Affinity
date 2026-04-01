@@ -20,13 +20,20 @@ struct PlayerDirImage
 };
 constexpr int kPlayerDirCount = 8;
 
+// Per-asset directional sprite images (8 directions each)
+struct AssetDirImages
+{
+    PlayerDirImage dirs[8]; // N, NE, E, SE, S, SW, W, NW
+};
+
 // Render one frame of Mode 7 into the pixel buffer
 void Render(const Mode7Camera& cam, const Mode7Map* map = nullptr,
             const FloorSprite* sprites = nullptr, int spriteCount = 0,
             const CameraStartObject* camObj = nullptr, float camObjScale = 1.0f,
             const SpriteAsset* assets = nullptr, int assetCount = 0,
             float animTime = 0.0f, bool playing = false,
-            const PlayerDirImage* playerDirs = nullptr, float playerOrbitAngle = 0.0f);
+            const PlayerDirImage* playerDirs = nullptr, float playerOrbitAngle = 0.0f,
+            const AssetDirImages* assetDirImages = nullptr, int assetDirCount = 0);
 
 // Projected sprite screen position (set after Render)
 struct SpriteScreenPos { int screenX, screenY, halfW, halfH, spriteIdx; };

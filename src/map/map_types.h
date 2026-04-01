@@ -88,6 +88,11 @@ struct SpriteAsset
     std::string sourceImagePath;
     int stripFrameW = 0;           // frame width in source strip
     int stripFrameH = 0;           // frame height in source strip
+
+    // 8-directional sprite images (N, NE, E, SE, S, SW, W, NW)
+    static constexpr int kDirCount = 8;
+    std::string dirPaths[kDirCount];   // PNG file paths per direction
+    bool hasDirections = false;        // true if any direction image is loaded
 };
 
 // Object types for Mode 7 scene entities

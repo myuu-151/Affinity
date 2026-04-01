@@ -432,6 +432,46 @@ static bool GenerateMapData(const std::string& runtimeDir,
         }
     }
 
+    // Quantize and append per-asset directional sprites (8 directions each)
+    struct AssetDirInfo {
+        bool has;
+        int tile0;
+        int dirSize;
+        int palBank;
+        uint32_t palette[16];
+    };
+    std::vector<AssetDirInfo> assetDirInfos(assets.size());
+
+    for (size_t ai = 0; ai < assets.size(); ai++)
+    {
+        assetDirInfos[ai].has = false;
+        if (!assets[ai].hasDirections) continue;
+
+        // Check if at least one direction image exists
+        bool anyDir = false;
+        for (int d = 0; d < 8; d++)
+            if (assets[ai].dirImages[d].pixels && assets[ai].dirImages[d].width > 0)
+            { anyDir = true; break; }
+        if (!anyDir) continue;
+
+        assetDirInfos[ai].has = true;
+        assetDirInfos[ai].dirSize = 64;
+        assetDirInfos[ai].palBank = assets[ai].palBank; // reuse asset's palette bank
+
+        // Quantize direction images using same function as player
+        QuantizedDirFrame adFrames[8];
+        uint32_t adPalette[16];
+        QuantizePlayerDirSprites(assets[ai].dirImages, adFrames, adPalette);
+        memcpy(assetDirInfos[ai].palette, adPalette, sizeof(adPalette));
+
+        assetDirInfos[ai].tile0 = (int)allTiles.size() / 8;
+        for (int d = 0; d < 8; d++)
+        {
+            auto td = RawPixelsToGBATiles(adFrames[d].pixels, 64);
+            allTiles.insert(allTiles.end(), td.begin(), td.end());
+        }
+    }
+
     int totalTileCount = (int)allTiles.size() / 8;
     int minimapTile = totalTileCount;
 
@@ -485,7 +525,45 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "#define AFN_PLAYER_DIR_TPF " << dirTilesPerFrame << "\n";
         f << "#define AFN_PLAYER_DIR_PALBANK " << playerDirPalBank << "\n";
     }
+    // Per-asset direction palettes (emit for all assets; zeros if no dirs)
+    if (!assets.empty())
+    {
+        for (size_t ai = 0; ai < assets.size(); ai++)
+        {
+            f << "static const u16 afn_pal_assetdir" << ai << "[16] = { ";
+            for (int c = 0; c < 16; c++)
+            {
+                char hex[8];
+                snprintf(hex, sizeof(hex), "0x%04X", EditorColorToRGB15(assetDirInfos[ai].palette[c]));
+                f << hex;
+                if (c < 15) f << ", ";
+            }
+            f << " };\n";
+        }
+    }
     f << "\n";
+
+    // Asset direction descriptor table: { tile0, tilesPerFrame, dirSize, palBank, hasDirs }
+    if (!assets.empty())
+    {
+        f << "#define AFN_HAS_ASSET_DIRS 1\n";
+        f << "static const int afn_asset_dir_desc[][5] = {\n";
+        for (size_t ai = 0; ai < assets.size(); ai++)
+        {
+            if (assetDirInfos[ai].has)
+            {
+                int tpf = (assetDirInfos[ai].dirSize / 8) * (assetDirInfos[ai].dirSize / 8);
+                f << "    { " << assetDirInfos[ai].tile0 << ", " << tpf
+                  << ", " << assetDirInfos[ai].dirSize
+                  << ", " << assetDirInfos[ai].palBank << ", 1 },\n";
+            }
+            else
+            {
+                f << "    { 0, 0, 0, 0, 0 },\n";
+            }
+        }
+        f << "};\n\n";
+    }
 
     // Minimap tile index
     f << "#define AFN_MINIMAP_TILE " << minimapTile << "\n\n";

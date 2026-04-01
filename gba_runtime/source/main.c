@@ -221,6 +221,38 @@ static void init_obj_sprites(void)
     }
 #endif
 
+    // Load per-asset direction palettes if present
+#ifdef AFN_HAS_ASSET_DIRS
+    {
+        int ai;
+        for (ai = 0; ai < AFN_ASSET_COUNT; ai++)
+        {
+            if (!afn_asset_dir_desc[ai][4]) continue; // no directions
+            int adPalBank = afn_asset_dir_desc[ai][3];
+            const u16 *adPal = 0;
+            switch (ai) {
+                case 0: adPal = afn_pal_assetdir0; break;
+#if AFN_ASSET_COUNT > 1
+                case 1: adPal = afn_pal_assetdir1; break;
+#endif
+#if AFN_ASSET_COUNT > 2
+                case 2: adPal = afn_pal_assetdir2; break;
+#endif
+#if AFN_ASSET_COUNT > 3
+                case 3: adPal = afn_pal_assetdir3; break;
+#endif
+                default: break;
+            }
+            if (adPal)
+            {
+                int c;
+                for (c = 0; c < 16; c++)
+                    pal_obj_mem[adPalBank * 16 + c] = adPal[c];
+            }
+        }
+    }
+#endif
+
 #endif
 #else
     // No assets — use fallback solid 8x8 tile
@@ -431,9 +463,30 @@ static void update_sprites(void)
                 int ai = g_sprites[sprIdx].assetIdx;
                 if (ai >= 0 && ai < AFN_ASSET_COUNT)
                 {
-                    tileId = afn_asset_desc[ai][0];
-                    baseSize = afn_asset_desc[ai][3];
-                    palBank = afn_asset_desc[ai][4];
+#ifdef AFN_HAS_ASSET_DIRS
+                    // Check if this asset has directional sprites
+                    if (afn_asset_dir_desc[ai][4])
+                    {
+                        // Compute angle from camera to sprite
+                        FIXED dx = g_sprites[sprIdx].x - cam_x;
+                        FIXED dz = g_sprites[sprIdx].z - cam_z;
+                        // ArcTan2 takes (x, y) and returns brad angle
+                        u16 angleToSprite = ArcTan2(dx >> 4, -(dz >> 4));
+                        u16 relAngle = angleToSprite - cam_angle;
+                        // Map to 8 directions (each 0x2000 = 45 degrees brad)
+                        int dirIdx = ((relAngle + 0x1000) >> 13) & 7;
+                        int adTpf = afn_asset_dir_desc[ai][1];
+                        tileId = afn_asset_dir_desc[ai][0] + dirIdx * adTpf;
+                        baseSize = afn_asset_dir_desc[ai][2];
+                        palBank = afn_asset_dir_desc[ai][3];
+                    }
+                    else
+#endif
+                    {
+                        tileId = afn_asset_desc[ai][0];
+                        baseSize = afn_asset_desc[ai][3];
+                        palBank = afn_asset_desc[ai][4];
+                    }
                 }
             }
 #endif
