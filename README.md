@@ -2,7 +2,7 @@
   <img src="assets/affinity_burst.png" alt="Affinity Logo" width="300">
 </p>
 
-# Affinity Engine
+# Affinity GBA Engine
 A Game Boy Advance Mode 7 engine with a Windows desktop editor. Build affine-scrolling worlds with a live perspective preview, then package directly to a `.gba` ROM.
 
 > **This project is in active development.** Features and APIs may change.
