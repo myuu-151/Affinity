@@ -148,6 +148,7 @@ static float sPlayerMoveAngle = 0.0f; // player movement direction (camera-relat
 static bool  sPlayerMoving = false;   // is the player moving this frame
 static float sAutoOrbitCurrent = 0.0f; // smoothed auto-orbit speed
 static float sManualOrbitCurrent = 0.0f; // smoothed manual orbit speed (J/L)
+static float sPlayerVelX = 0.0f, sPlayerVelZ = 0.0f; // smoothed player velocity
 static FloorSprite sSavedPlayerSprite; // saved player state before Play
 static int sSavedPlayerIdx = -1;
 static SelectedObjType sSelectedObjType = SelectedObjType::None;
@@ -2577,6 +2578,22 @@ void FrameTick(float dt)
                 if (ImGui::IsKeyDown(ImGuiKey_L))
                     sOrbitAngle -= rotSpeed;
 
+                // Auto-orbit when strafing (A/D) with drag on release
+                {
+                    float autoOrbitTarget = 0.0f;
+                    if (inputZ != 0.0f)
+                    {
+                        autoOrbitTarget = rotSpeed * 0.4f * inputZ;
+                        if (ImGui::IsKeyDown(ImGuiKey_J) || ImGui::IsKeyDown(ImGuiKey_L))
+                            autoOrbitTarget *= 2.0f;
+                    }
+                    if (fabsf(autoOrbitTarget) > 0.001f)
+                        sAutoOrbitCurrent += (autoOrbitTarget - sAutoOrbitCurrent) * std::min(1.0f, 6.0f * dt);
+                    else
+                        sAutoOrbitCurrent *= 0.85f;
+                    sOrbitAngle -= sAutoOrbitCurrent;
+                }
+
                 if (sPlayerMoving)
                 {
                     // Normalize diagonal
@@ -2587,23 +2604,6 @@ void FrameTick(float dt)
                     // Track movement direction relative to camera (for sprite facing)
                     sPlayerMoveAngle = atan2f(inputZ, inputX);
 
-                    // Auto-orbit when strafing (A/D) with drag on release
-                    {
-                        float autoOrbitTarget = 0.0f;
-                        if (inputZ != 0.0f)
-                        {
-                            autoOrbitTarget = rotSpeed * 0.4f * inputZ;
-                            if (ImGui::IsKeyDown(ImGuiKey_J) || ImGui::IsKeyDown(ImGuiKey_L))
-                                autoOrbitTarget *= 2.0f;
-                        }
-                        // Smooth ease-in and ease-out (matching L/R drag feel)
-                        if (fabsf(autoOrbitTarget) > 0.001f)
-                            sAutoOrbitCurrent += (autoOrbitTarget - sAutoOrbitCurrent) * std::min(1.0f, 6.0f * dt);
-                        else
-                            sAutoOrbitCurrent *= 0.85f;
-                        sOrbitAngle -= sAutoOrbitCurrent;
-                    }
-
                     // Transform to world space using viewAngle
                     float fwdX = sinf(viewAngle), fwdZ = cosf(viewAngle);
                     float rightX = -cosf(viewAngle), rightZ = sinf(viewAngle);
@@ -2612,7 +2612,6 @@ void FrameTick(float dt)
                 }
                 else if (wasMoving)
                 {
-                    // Just stopped moving — sync sPlayerMoveAngle so idle doesn't snap
                     sPlayerMoveAngle = sPlayerMoveAngle - sOrbitAngle;
                 }
 

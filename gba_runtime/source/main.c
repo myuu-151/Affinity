@@ -41,6 +41,7 @@ static u16   player_move_angle;    // brad angle of last movement direction
 static int   g_player_dir_tile;    // current direction tile ID for player
 static int   auto_orbit_smooth;   // smoothed auto-orbit value (fixed-point)
 static int   manual_orbit_smooth; // smoothed manual orbit value (L/R)
+static FIXED player_vel_x, player_vel_z; // smoothed player velocity
 
 // ---------------------------------------------------------------------------
 // Floor sprites — positions in 16.8 fixed-point
@@ -793,41 +794,35 @@ int main(void)
             if (key_is_down(KEY_R))
                 orbit_angle += rotSpeed;
 
+            // Auto-orbit when strafing (LEFT/RIGHT) with drag on release
+            {
+                int autoOrbitTarget = 0;
+                if (inputRight)
+                {
+                    autoOrbitTarget = (rotSpeed * 2 / 5);  // 40% of rotSpeed
+                    if (inputRight < 0)
+                        autoOrbitTarget = -autoOrbitTarget;
+                    if (key_is_down(KEY_L) || key_is_down(KEY_R))
+                        autoOrbitTarget *= 2;
+                }
+                if (autoOrbitTarget != 0)
+                    auto_orbit_smooth += (autoOrbitTarget - auto_orbit_smooth) >> 2;
+                else
+                    auto_orbit_smooth = (auto_orbit_smooth * 7) >> 3;
+                orbit_angle += auto_orbit_smooth;
+            }
+
             if (player_moving)
             {
                 // Track movement direction for sprite facing (brad atan2)
                 player_move_angle = ArcTan2(inputRight, inputFwd);
 
-                // Auto-orbit when strafing (LEFT/RIGHT) with drag on release
-                {
-                    int autoOrbitTarget = 0;
-                    if (inputRight)
-                    {
-                        autoOrbitTarget = (rotSpeed * 2 / 5);  // 40% of rotSpeed
-                        if (inputRight < 0)
-                            autoOrbitTarget = -autoOrbitTarget;
-                        if (key_is_down(KEY_L) || key_is_down(KEY_R))
-                            autoOrbitTarget *= 2;
-                    }
-                    // Smooth ease-in and ease-out (matching L/R drag feel)
-                    if (autoOrbitTarget != 0)
-                        auto_orbit_smooth += (autoOrbitTarget - auto_orbit_smooth) >> 2; // ease-in
-                    else
-                        auto_orbit_smooth = (auto_orbit_smooth * 7) >> 3; // ease-out decay
-                    orbit_angle += auto_orbit_smooth;
-                }
-
                 // Move player in world space using view direction
                 FIXED moveFwd   = (inputFwd * moveSpeed) >> 8;
                 FIXED moveRight = (inputRight * moveSpeed) >> 8;
 
-                // Forward = (viewSin, -viewCos) to match existing camera convention
-                // Right = (-viewCos, -viewSin) = perpendicular
-                // The right vector for camera-relative movement:
-                // right = (cos(viewAngle+PI/2), -sin(viewAngle+PI/2)) but in GBA convention
-                // Simpler: right90 sin = cos(view), right90 cos = -sin(view) -> negate for GBA Z
-                FIXED rightSin = lu_cos(viewAngle) >> 4;    // sin(viewAngle + 90deg) = cos(viewAngle)
-                FIXED rightCos = -(lu_sin(viewAngle) >> 4); // cos(viewAngle + 90deg) = -sin(viewAngle)
+                FIXED rightSin = lu_cos(viewAngle) >> 4;
+                FIXED rightCos = -(lu_sin(viewAngle) >> 4);
 
                 player_x += (viewSin * moveFwd + rightSin * moveRight) >> 8;
                 player_z -= (viewCos * moveFwd + rightCos * moveRight) >> 8;
