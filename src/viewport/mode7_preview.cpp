@@ -488,9 +488,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             relAngle = fmodf(relAngle, PI2);
             if (relAngle < 0.0f) relAngle += PI2;
 
-            // 4 directions: N(0), E(2), S(4), W(6) — each covers 90°
-            int quadrant = ((int)((relAngle + 0.78539816f) / 1.57079632f)) % 4;
-            int dirIdx = quadrant * 2; // map to 0, 2, 4, 6
+            // 8 directions: N(0), NE(1), E(2), SE(3), S(4), SW(5), W(6), NW(7)
+            int dirIdx = ((int)((relAngle + 0.39269908f) / 0.78539816f)) % 8;
 
             const PlayerDirImage& adi = assetDirImages[fs.assetIdx].dirs[dirIdx];
             if (adi.pixels && adi.width > 0 && adi.height > 0)
