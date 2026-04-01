@@ -117,13 +117,13 @@ static void m7_hbl(void)
 
 static void load_checkerboard(void)
 {
-    pal_bg_mem[0] = RGB15(4, 10, 4);   // void/out-of-bounds color (dark green)
+    pal_bg_mem[0] = RGB15(10, 16, 24);  // backdrop = sky blue
     pal_bg_mem[1] = RGB15(4, 10, 4);
     pal_bg_mem[2] = RGB15(8, 18, 8);
-    pal_bg_mem[3] = RGB15(6, 14, 6);   // border/edge color
+    pal_bg_mem[3] = RGB15(2, 6, 2);    // void/out-of-bounds dark green
 
-    // Tile 0 = solid void (all palette 0)
-    memset(&tile8_mem[2][0], 0, 64);
+    // Tile 0 = solid void (all palette index 3 = dark green)
+    memset(&tile8_mem[2][0], 3, 64);
 
     // Tile 1 = checkerboard with internal 4x4 pattern
     u8 *tile = (u8*)&tile8_mem[2][1];
