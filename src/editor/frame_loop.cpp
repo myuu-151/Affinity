@@ -338,7 +338,7 @@ static bool LoadProject(const std::string& path)
     }
     sCamObjEditorScale = 0.05f;
 
-    char line[8192]; // large buffer for frame pixel data lines
+    char line[32768]; // large buffer for frame pixel data lines (64x64 = ~16KB worst case)
     char section[64] = {};
 
     while (fgets(line, sizeof(line), f))

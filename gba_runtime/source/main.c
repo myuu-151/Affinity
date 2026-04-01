@@ -761,11 +761,6 @@ int main(void)
             // Update direction sprite tile
             update_player_dir_tile();
 
-            // A/B = pitch
-            if (key_is_down(KEY_A) && m7_horizon < 120)
-                m7_horizon += 2;
-            if (key_is_down(KEY_B) && m7_horizon > 10)
-                m7_horizon -= 2;
         }
         else
         {
@@ -797,10 +792,6 @@ int main(void)
             if (key_is_down(KEY_R) && cam_h < (256 << 8))
                 cam_h += 85;
 
-            if (key_is_down(KEY_A) && m7_horizon < 120)
-                m7_horizon += 2;
-            if (key_is_down(KEY_B) && m7_horizon > 10)
-                m7_horizon -= 2;
         }
 
         // Clamp camera to map bounds
