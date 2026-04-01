@@ -125,12 +125,12 @@ static void load_checkerboard(void)
     pal_bg_mem[2] = RGB15(8, 18, 8);
 
     u8 *map = (u8*)se_mem[28];
-    for (int y = 0; y < 32; y++)
+    for (int y = 0; y < 64; y++)
     {
-        for (int x = 0; x < 32; x++)
+        for (int x = 0; x < 64; x++)
         {
-            int check = ((x / 2) + (y / 2)) & 1;
-            map[y * 32 + x] = check ? 1 : 0;
+            int check = (x + y) & 1;
+            map[y * 64 + x] = check ? 1 : 0;
         }
     }
 }
