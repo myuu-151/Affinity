@@ -707,9 +707,9 @@ int main(void)
 
             // L/R shoulder = manual orbit (always applies)
             if (key_is_down(KEY_L))
-                orbit_angle += rotSpeed;
-            if (key_is_down(KEY_R))
                 orbit_angle -= rotSpeed;
+            if (key_is_down(KEY_R))
+                orbit_angle += rotSpeed;
 
             if (player_moving)
             {
