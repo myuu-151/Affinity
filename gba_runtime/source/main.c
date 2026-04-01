@@ -117,22 +117,20 @@ static void m7_hbl(void)
 
 static void load_checkerboard(void)
 {
-    memset(&tile8_mem[2][0], 1, 64);
-    memset(&tile8_mem[2][1], 2, 64);
-
     pal_bg_mem[0] = RGB15(10, 16, 24);
     pal_bg_mem[1] = RGB15(4, 10, 4);
     pal_bg_mem[2] = RGB15(8, 18, 8);
 
+    // Build a single 8x8 tile with internal 4x4 checkerboard pattern
+    // This tiles seamlessly and gives 4x4 pixel checker squares
+    u8 *tile = (u8*)&tile8_mem[2][0];
+    for (int py = 0; py < 8; py++)
+        for (int px = 0; px < 8; px++)
+            tile[py * 8 + px] = ((px / 4) + (py / 4)) & 1 ? 2 : 1;
+
+    // Fill entire 64x64 map with the same tile
     u8 *map = (u8*)se_mem[28];
-    for (int y = 0; y < 64; y++)
-    {
-        for (int x = 0; x < 64; x++)
-        {
-            int check = (x + y) & 1;
-            map[y * 64 + x] = check ? 1 : 0;
-        }
-    }
+    memset(map, 0, 64 * 64);
 }
 
 #ifdef AFFINITY_HAS_MAPDATA
