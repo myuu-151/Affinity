@@ -125,17 +125,27 @@ static void load_checkerboard(void)
     // Tile 0 = transparent (palette 0 = backdrop/sky blue) for out-of-bounds
     memset(&tile8_mem[2][0], 0, 64);
 
-    // Tile 1 = solid color A, Tile 2 = solid color B
-    memset(&tile8_mem[2][1], 1, 64);
-    memset(&tile8_mem[2][2], 2, 64);
+    // Tile 1 and 2: each has internal 4-row halves for seamless 8px checker
+    // Tile 1: top=colorA, bottom=colorB.  Tile 2: top=colorB, bottom=colorA
+    {
+        u8 *t1 = (u8*)&tile8_mem[2][1];
+        u8 *t2 = (u8*)&tile8_mem[2][2];
+        for (int py = 0; py < 8; py++)
+            for (int px = 0; px < 8; px++)
+            {
+                u8 half = (py < 4) ? 1 : 2;
+                t1[py * 8 + px] = half;
+                t2[py * 8 + px] = (half == 1) ? 2 : 1;
+            }
+    }
 
-    // Fill 64x64 map: checker only within game world (0-32 tiles = 0-256 px)
-    // Each 8x8 tile = 8 world pixels = one checker square (matches editor's 32-unit squares / 4)
+    // Fill 64x64 map: alternate tiles every column within game world bounds
+    // Each column alternates A/B vertically via internal halves → 8x8 px checker
     u8 *map = (u8*)se_mem[28];
     memset(map, 0, 64 * 64);  // default = tile 0 (void/transparent)
     for (int y = 0; y < 32; y++)
         for (int x = 0; x < 32; x++)
-            map[y * 64 + x] = (((x / 2) + (y / 2)) & 1) ? 2 : 1;
+            map[y * 64 + x] = (x & 1) ? 2 : 1;
 }
 
 #ifdef AFFINITY_HAS_MAPDATA
