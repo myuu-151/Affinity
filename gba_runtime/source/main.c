@@ -438,7 +438,7 @@ static void update_sprites(void)
             int canvasHalf = baseSize; // AFF_DBL canvas = 2 * baseSize
             if (sprScale <= 0) sprScale = 256;
 
-            invScale = (proj[i].depth * 7) / sprScale;
+            invScale = (proj[i].depth * 14) / sprScale;
             // invScale=128 means 2x magnification, which exactly fills the
             // AFF_DBL canvas (2*baseSize).  Going lower clips the sprite.
             if (invScale < 128) invScale = 128;
