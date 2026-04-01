@@ -5,7 +5,7 @@ A Game Boy Advance Mode 7 engine with a Windows desktop editor. Build affine-scr
 > **This project is in active development.** Features and APIs may change.
 
 <p align="center">
-  <img src="assets/affinity.png" alt="Affinity Logo" width="200">
+  <img src="assets/affinity_burst.png" alt="Affinity Logo" width="200">
 </p>
 
 ## Features
