@@ -322,8 +322,8 @@ static void update_player_dir_tile(void)
     int rawIdx = ((sprAngle + 0xC000 + 4096) >> 13) & 7;
     int dirIdx = (8 - rawIdx) & 7;
 
-    // Each frame = 16 tiles (32x32 4bpp)
-    g_player_dir_tile = AFN_PLAYER_DIR_TILE0 + dirIdx * 16;
+    // Each frame = AFN_PLAYER_DIR_TPF tiles
+    g_player_dir_tile = AFN_PLAYER_DIR_TILE0 + dirIdx * AFN_PLAYER_DIR_TPF;
 #else
     g_player_dir_tile = 0;
 #endif
@@ -361,8 +361,12 @@ static void update_sprites(void)
 
         if (fovLambda <= 64) continue;
 
-        // Height is in editor scale; XZ is scaled /4 for GBA. Divide by 4 to match.
-        FIXED heightDiff = (cam_h - g_sprites[i].y) >> 2;
+        // Cap projection height so close sprites stay on screen
+        // (Mode 7 can't show very close floor, but sprites should still be visible)
+        FIXED proj_h = cam_h;
+        FIXED max_proj_h = (FIXED)((SCREEN_HEIGHT - 10 - m7_horizon) * fovLambda) / cam_fov;
+        if (proj_h > max_proj_h) proj_h = max_proj_h;
+        FIXED heightDiff = proj_h - g_sprites[i].y;
         int screenY = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
         int screenX = 120 + (int)((side * cam_fov) / fovLambda);
 
@@ -405,7 +409,11 @@ static void update_sprites(void)
         if (sprIdx == player_sprite_idx && g_player_dir_tile > 0)
         {
             tileId = g_player_dir_tile;
-            baseSize = 32; // player direction sprites are always 32x32
+#ifdef AFN_PLAYER_DIR_SIZE
+            baseSize = AFN_PLAYER_DIR_SIZE;
+#else
+            baseSize = 32;
+#endif
 #ifdef AFN_PLAYER_DIR_PALBANK
             palBank = AFN_PLAYER_DIR_PALBANK;
 #endif
@@ -435,7 +443,7 @@ static void update_sprites(void)
             int canvasHalf = baseSize; // AFF_DBL canvas = 2 * baseSize
             if (sprScale <= 0) sprScale = 256;
 
-            invScale = (proj[i].depth * 7) / sprScale;
+            invScale = (proj[i].depth * 7 * baseSize) / (sprScale * 32);
             // invScale=128 means 2x magnification, which exactly fills the
             // AFF_DBL canvas (2*baseSize).  Going lower clips the sprite.
             if (invScale < 128) invScale = 128;

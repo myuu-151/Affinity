@@ -216,7 +216,7 @@ static std::vector<uint32_t> FrameToGBATiles(const GBASpriteFrameExport& frame)
 // Builds a shared 15-color palette from all 8 direction images.
 struct QuantizedDirFrame
 {
-    uint8_t pixels[32 * 32]; // palette indices 0-15 (0=transparent)
+    uint8_t pixels[64 * 64]; // palette indices 0-15 (0=transparent)
 };
 
 static void QuantizePlayerDirSprites(
@@ -224,6 +224,7 @@ static void QuantizePlayerDirSprites(
     QuantizedDirFrame outFrames[8],
     uint32_t outPalette[16])
 {
+    const int dirSize = 64; // quantize direction sprites at 64x64
     memset(outPalette, 0, sizeof(uint32_t) * 16);
     for (int i = 0; i < 8; i++)
         memset(outFrames[i].pixels, 0, sizeof(outFrames[i].pixels));
@@ -289,44 +290,43 @@ static void QuantizePlayerDirSprites(
         return bestIdx;
     };
 
-    // Quantize each direction image to 32x32 palette-indexed
+    // Quantize each direction image to 64x64 palette-indexed
     for (int d = 0; d < 8; d++)
     {
         if (!dirs[d].pixels || dirs[d].width <= 0 || dirs[d].height <= 0) continue;
         int srcW = dirs[d].width, srcH = dirs[d].height;
-        for (int oy = 0; oy < 32; oy++)
+        for (int oy = 0; oy < dirSize; oy++)
         {
-            int sy = oy * srcH / 32;
-            for (int ox = 0; ox < 32; ox++)
+            int sy = oy * srcH / dirSize;
+            for (int ox = 0; ox < dirSize; ox++)
             {
-                int sx = ox * srcW / 32;
+                int sx = ox * srcW / dirSize;
                 int idx = (sy * srcW + sx) * 4;
                 if (dirs[d].pixels[idx + 3] < 128) continue;
                 unsigned r = dirs[d].pixels[idx + 0] >> 3;
                 unsigned g = dirs[d].pixels[idx + 1] >> 3;
                 unsigned b = dirs[d].pixels[idx + 2] >> 3;
                 unsigned short c15 = (unsigned short)(r | (g << 5) | (b << 10));
-                outFrames[d].pixels[oy * 32 + ox] = nearestPal(c15);
+                outFrames[d].pixels[oy * dirSize + ox] = nearestPal(c15);
             }
         }
     }
 }
 
-// Convert a raw 32x32 palette-indexed buffer to 4bpp GBA tiles (16 tiles)
-static std::vector<uint32_t> RawPixelsToGBATiles32(const uint8_t pixels[32 * 32])
+// Convert a raw NxN palette-indexed buffer to 4bpp GBA tiles
+static std::vector<uint32_t> RawPixelsToGBATiles(const uint8_t* pixels, int size)
 {
-    const int outSize = 32;
-    const int outTilesPerRow = 4;
-    const int outTotalTiles = 16;
-    std::vector<uint32_t> data(outTotalTiles * 8, 0);
+    const int tilesPerRow = size / 8;
+    const int totalTiles = tilesPerRow * tilesPerRow;
+    std::vector<uint32_t> data(totalTiles * 8, 0);
 
-    for (int oy = 0; oy < outSize; oy++)
+    for (int oy = 0; oy < size; oy++)
     {
-        for (int ox = 0; ox < outSize; ox++)
+        for (int ox = 0; ox < size; ox++)
         {
-            uint8_t palIdx = pixels[oy * 32 + ox] & 0xF;
+            uint8_t palIdx = pixels[oy * size + ox] & 0xF;
             if (palIdx == 0) continue;
-            int tileIdx = (oy / 8) * outTilesPerRow + (ox / 8);
+            int tileIdx = (oy / 8) * tilesPerRow + (ox / 8);
             int lx = ox & 7;
             int ly = oy & 7;
             int rowIdx = tileIdx * 8 + ly;
@@ -402,10 +402,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
         }
     }
 
-    // Quantize and append player direction sprites (8 frames x 16 tiles)
+    // Quantize and append player direction sprites (8 frames x 64 tiles each at 64x64)
     bool hasPlayerDirs = false;
     int playerDirTile0 = 0;
     int playerDirPalBank = 7; // use palette bank 7 for player direction sprites
+    int playerDirSize = 64;   // direction sprite size
     QuantizedDirFrame dirFrames[8];
     uint32_t dirPalette[16];
 
@@ -426,7 +427,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
         for (int d = 0; d < 8; d++)
         {
-            auto td = RawPixelsToGBATiles32(dirFrames[d].pixels);
+            auto td = RawPixelsToGBATiles(dirFrames[d].pixels, playerDirSize);
             allTiles.insert(allTiles.end(), td.begin(), td.end());
         }
     }
@@ -478,7 +479,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
             if (c < 15) f << ", ";
         }
         f << " };\n";
+        int dirTilesPerFrame = (playerDirSize / 8) * (playerDirSize / 8);
         f << "#define AFN_PLAYER_DIR_TILE0 " << playerDirTile0 << "\n";
+        f << "#define AFN_PLAYER_DIR_SIZE " << playerDirSize << "\n";
+        f << "#define AFN_PLAYER_DIR_TPF " << dirTilesPerFrame << "\n";
         f << "#define AFN_PLAYER_DIR_PALBANK " << playerDirPalBank << "\n";
     }
     f << "\n";
