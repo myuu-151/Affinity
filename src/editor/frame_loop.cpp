@@ -2363,14 +2363,13 @@ void FrameTick(float dt)
                     sPlayerMoveAngle = atan2f(inputZ, inputX);
 
                     // Auto-orbit when strafing (A/D)
-                    // J (GBA L shoulder) doubles orbit, L (GBA R shoulder) slows it
+                    // Shoulder buttons double auto-orbit; the net effect is slowdown
+                    // when opposing the strafe, speedup when matching it
                     if (inputZ != 0.0f)
                     {
-                        float autoOrbitSpeed = rotSpeed * 0.4f * inputZ; // left = negative, right = positive
-                        if (ImGui::IsKeyDown(ImGuiKey_J))
-                            autoOrbitSpeed *= 2.0f;  // L shoulder: double orbit speed
-                        else if (ImGui::IsKeyDown(ImGuiKey_L))
-                            autoOrbitSpeed *= 0.25f; // R shoulder: slow down orbit
+                        float autoOrbitSpeed = rotSpeed * 0.4f * inputZ;
+                        if (ImGui::IsKeyDown(ImGuiKey_J) || ImGui::IsKeyDown(ImGuiKey_L))
+                            autoOrbitSpeed *= 2.0f;
                         sOrbitAngle -= autoOrbitSpeed;
                     }
 

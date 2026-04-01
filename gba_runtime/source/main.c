@@ -717,15 +717,15 @@ int main(void)
                 player_move_angle = ArcTan2(inputRight, inputFwd);
 
                 // Auto-orbit when strafing (LEFT/RIGHT) — 40% of rotSpeed, matching editor
+                // Shoulder buttons double auto-orbit; net effect is slowdown
+                // when opposing strafe, speedup when matching it
                 if (inputRight)
                 {
                     int autoOrbit = (rotSpeed * 2 / 5);  // 40% of rotSpeed
                     if (inputRight < 0)
-                        autoOrbit = -autoOrbit;  // left strafe = counter-clockwise orbit
-                    if (key_is_down(KEY_L))
-                        autoOrbit *= 2;          // L shoulder: double orbit speed
-                    else if (key_is_down(KEY_R))
-                        autoOrbit /= 4;          // R shoulder: slow orbit
+                        autoOrbit = -autoOrbit;
+                    if (key_is_down(KEY_L) || key_is_down(KEY_R))
+                        autoOrbit *= 2;
                     orbit_angle += autoOrbit;
                 }
 
