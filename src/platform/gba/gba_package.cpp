@@ -107,17 +107,17 @@ static int EditorToGBAFixed(float editorCoord)
     return (int)(gbaPx * 256.0f);
 }
 
-// Convert editor height to GBA 16.8 fixed-point for floor rendering.
-// This must be height * 256 so the HBlank floor looks correct.
+// Convert editor height to GBA 16.8 fixed-point.
+// Divide by 4 to match XZ coordinate scaling (editor world / 4 = GBA world).
 static int EditorHeightToGBAFixed(float editorH)
 {
-    return (int)(editorH * 256.0f);
+    return (int)((editorH / 4.0f) * 256.0f);
 }
 
 // Convert editor sprite Y to GBA 16.8 fixed-point
 static int EditorSpriteYToGBAFixed(float editorY)
 {
-    return (int)(editorY * 256.0f);
+    return (int)((editorY / 4.0f) * 256.0f);
 }
 
 // Convert editor angle (radians) to GBA brad (0-65535)

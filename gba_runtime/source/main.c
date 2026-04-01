@@ -361,12 +361,7 @@ static void update_sprites(void)
 
         if (fovLambda <= 64) continue;
 
-        // Cap projection height so close sprites stay on screen
-        // (Mode 7 can't show very close floor, but sprites should still be visible)
-        FIXED proj_h = cam_h;
-        FIXED max_proj_h = (FIXED)((SCREEN_HEIGHT - 10 - m7_horizon) * fovLambda) / cam_fov;
-        if (proj_h > max_proj_h) proj_h = max_proj_h;
-        FIXED heightDiff = proj_h - g_sprites[i].y;
+        FIXED heightDiff = cam_h - g_sprites[i].y;
         int screenY = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
         int screenX = 120 + (int)((side * cam_fov) / fovLambda);
 
@@ -443,7 +438,7 @@ static void update_sprites(void)
             int canvasHalf = baseSize; // AFF_DBL canvas = 2 * baseSize
             if (sprScale <= 0) sprScale = 256;
 
-            invScale = (proj[i].depth * 7 * baseSize) / (sprScale * 32);
+            invScale = (proj[i].depth * 7) / sprScale;
             // invScale=128 means 2x magnification, which exactly fills the
             // AFF_DBL canvas (2*baseSize).  Going lower clips the sprite.
             if (invScale < 128) invScale = 128;
