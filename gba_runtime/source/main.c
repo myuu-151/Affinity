@@ -443,6 +443,7 @@ static void update_sprites(void)
         int palBank = g_sprites[sprIdx].palIdx;
         int tileId = 0;
         int baseSize = 32; // default for player dir sprites
+        int scaleSize = 32; // size used for scale calculation (asset's original frame size)
 
         // Check if this is the player sprite with direction tiles
         if (sprIdx == player_sprite_idx && g_player_dir_tile > 0)
@@ -452,6 +453,19 @@ static void update_sprites(void)
             baseSize = AFN_PLAYER_DIR_SIZE;
 #else
             baseSize = 32;
+#endif
+            // Use the player's asset frame size for scaling so direction sprites
+            // (64x64) appear the same on-screen size as the original asset frame
+#if defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+            {
+                int ai = g_sprites[sprIdx].assetIdx;
+                if (ai >= 0 && ai < AFN_ASSET_COUNT)
+                    scaleSize = afn_asset_desc[ai][3];
+                else
+                    scaleSize = baseSize;
+            }
+#else
+            scaleSize = baseSize;
 #endif
 #ifdef AFN_PLAYER_DIR_PALBANK
             palBank = AFN_PLAYER_DIR_PALBANK;
@@ -465,6 +479,8 @@ static void update_sprites(void)
                 int ai = g_sprites[sprIdx].assetIdx;
                 if (ai >= 0 && ai < AFN_ASSET_COUNT)
                 {
+                    // Always get the asset's original frame size for consistent scaling
+                    scaleSize = afn_asset_desc[ai][3];
 #ifdef AFN_HAS_ASSET_DIRS
                     // Check if this asset has directional sprites
                     if (afn_asset_dir_desc[ai][4])
@@ -474,7 +490,7 @@ static void update_sprites(void)
                         FIXED dz = g_sprites[sprIdx].z - cam_z;
                         // ArcTan2 takes (x, y) and returns brad angle
                         u16 angleToSprite = ArcTan2(dx >> 4, -(dz >> 4));
-                        u16 relAngle = -angleToSprite + 0x8000 + 0x4000 + g_sprites[sprIdx].rotation;
+                        u16 relAngle = angleToSprite + 0x4000 - g_sprites[sprIdx].rotation;
                         // Map to 8 directions (each 0x2000 = 45 degrees brad)
                         int dirIdx = ((relAngle + 0x1000) >> 13) & 7;
                         int adTpf = afn_asset_dir_desc[ai][1];
@@ -503,7 +519,9 @@ static void update_sprites(void)
             int canvasHalf = baseSize; // AFF_DBL canvas = 2 * baseSize
             if (sprScale <= 0) sprScale = 256;
 
-            invScale = (proj[i].depth * 14) / sprScale;
+            // Scale based on scaleSize (asset's original frame size) so direction
+            // sprites (64x64) appear the same on-screen size as regular frames (32x32)
+            invScale = (proj[i].depth * 14 * baseSize) / (sprScale * scaleSize);
             // invScale=128 means 2x magnification, which exactly fills the
             // AFF_DBL canvas (2*baseSize).  Going lower clips the sprite.
             if (invScale < 128) invScale = 128;

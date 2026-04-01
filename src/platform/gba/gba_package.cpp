@@ -290,7 +290,7 @@ static void QuantizePlayerDirSprites(
         return bestIdx;
     };
 
-    // Quantize each direction image to 64x64 palette-indexed
+    // Quantize each direction image to dirSize x dirSize palette-indexed
     for (int d = 0; d < 8; d++)
     {
         if (!dirs[d].pixels || dirs[d].width <= 0 || dirs[d].height <= 0) continue;
@@ -456,19 +456,43 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
         assetDirInfos[ai].has = true;
         assetDirInfos[ai].dirSize = 64;
-        assetDirInfos[ai].palBank = assets[ai].palBank; // reuse asset's palette bank
 
-        // Quantize direction images using same function as player
+        // Quantize direction images
         QuantizedDirFrame adFrames[8];
         uint32_t adPalette[16];
         QuantizePlayerDirSprites(assets[ai].dirImages, adFrames, adPalette);
-        memcpy(assetDirInfos[ai].palette, adPalette, sizeof(adPalette));
 
-        assetDirInfos[ai].tile0 = (int)allTiles.size() / 8;
-        for (int d = 0; d < 8; d++)
+        // Check if these direction tiles are identical to player direction tiles
+        // (same sprite sheet used for both player and this asset)
+        bool canSharePlayerTiles = false;
+        if (hasPlayerDirs)
         {
-            auto td = RawPixelsToGBATiles(adFrames[d].pixels, 64);
-            allTiles.insert(allTiles.end(), td.begin(), td.end());
+            canSharePlayerTiles = true;
+            for (int d = 0; d < 8 && canSharePlayerTiles; d++)
+            {
+                if (memcmp(adFrames[d].pixels, dirFrames[d].pixels, 64 * 64) != 0)
+                    canSharePlayerTiles = false;
+            }
+        }
+
+        if (canSharePlayerTiles)
+        {
+            // Reuse player direction tiles and palette — no new tile data needed
+            assetDirInfos[ai].tile0 = playerDirTile0;
+            assetDirInfos[ai].palBank = playerDirPalBank;
+            memcpy(assetDirInfos[ai].palette, dirPalette, sizeof(dirPalette));
+        }
+        else
+        {
+            assetDirInfos[ai].palBank = assets[ai].palBank;
+            memcpy(assetDirInfos[ai].palette, adPalette, sizeof(adPalette));
+
+            assetDirInfos[ai].tile0 = (int)allTiles.size() / 8;
+            for (int d = 0; d < 8; d++)
+            {
+                auto td = RawPixelsToGBATiles(adFrames[d].pixels, 64);
+                allTiles.insert(allTiles.end(), td.begin(), td.end());
+            }
         }
     }
 
