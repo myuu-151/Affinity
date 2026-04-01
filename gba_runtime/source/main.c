@@ -39,6 +39,7 @@ static int   player_sprite_idx = -1;
 static int   player_moving;        // nonzero if D-pad held
 static u16   player_move_angle;    // brad angle of last movement direction
 static int   g_player_dir_tile;    // current direction tile ID for player
+static int   auto_orbit_smooth;   // smoothed auto-orbit value (fixed-point)
 
 // ---------------------------------------------------------------------------
 // Floor sprites — positions in 16.8 fixed-point
@@ -796,17 +797,24 @@ int main(void)
                 // Track movement direction for sprite facing (brad atan2)
                 player_move_angle = ArcTan2(inputRight, inputFwd);
 
-                // Auto-orbit when strafing (LEFT/RIGHT) — 40% of rotSpeed, matching editor
-                // Shoulder buttons double auto-orbit; net effect is slowdown
-                // when opposing strafe, speedup when matching it
-                if (inputRight)
+                // Auto-orbit when strafing (LEFT/RIGHT) — smoothed
                 {
-                    int autoOrbit = (rotSpeed * 2 / 5);  // 40% of rotSpeed
-                    if (inputRight < 0)
-                        autoOrbit = -autoOrbit;
-                    if (key_is_down(KEY_L) || key_is_down(KEY_R))
-                        autoOrbit *= 2;
-                    orbit_angle += autoOrbit;
+                    int autoOrbitTarget = 0;
+                    if (inputRight)
+                    {
+                        autoOrbitTarget = (rotSpeed / 5);  // 20% of rotSpeed
+                        if (inputRight < 0)
+                            autoOrbitTarget = -autoOrbitTarget;
+                        if (key_is_down(KEY_L) || key_is_down(KEY_R))
+                            autoOrbitTarget *= 2;
+                    }
+                    // Smooth: fast ramp-up (3/4 blend), gentle ease-out (1/4 blend)
+                    if ((autoOrbitTarget > 0 && autoOrbitTarget > auto_orbit_smooth) ||
+                        (autoOrbitTarget < 0 && autoOrbitTarget < auto_orbit_smooth))
+                        auto_orbit_smooth = (auto_orbit_smooth + autoOrbitTarget * 3) >> 2;
+                    else
+                        auto_orbit_smooth = (auto_orbit_smooth * 3 + autoOrbitTarget) >> 2;
+                    orbit_angle += auto_orbit_smooth;
                 }
 
                 // Move player in world space using view direction
@@ -840,12 +848,15 @@ int main(void)
             g_sprites[player_sprite_idx].x = player_x;
             g_sprites[player_sprite_idx].z = player_z;
 
-            // Place camera behind the player (opposite of forward direction)
+            // Place camera behind the player with smooth follow
             {
                 FIXED orbSin = lu_sin(orbit_angle) >> 4;
                 FIXED orbCos = lu_cos(orbit_angle) >> 4;
-                cam_x = player_x - ((orbSin * orbit_dist) >> 8);
-                cam_z = player_z + ((orbCos * orbit_dist) >> 8);
+                FIXED targetX = player_x - ((orbSin * orbit_dist) >> 8);
+                FIXED targetZ = player_z + ((orbCos * orbit_dist) >> 8);
+                // Smooth follow: blend 3/8 toward target each frame
+                cam_x += ((targetX - cam_x) * 3) >> 3;
+                cam_z += ((targetZ - cam_z) * 3) >> 3;
             }
             cam_angle = orbit_angle;
 

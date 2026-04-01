@@ -146,6 +146,7 @@ static float sOrbitAngle = 0.0f;  // play mode: angle from player to camera
 static float sOrbitDist = 60.0f; // play mode: distance from player to camera
 static float sPlayerMoveAngle = 0.0f; // player movement direction (camera-relative)
 static bool  sPlayerMoving = false;   // is the player moving this frame
+static float sAutoOrbitCurrent = 0.0f; // smoothed auto-orbit speed
 static FloorSprite sSavedPlayerSprite; // saved player state before Play
 static int sSavedPlayerIdx = -1;
 static SelectedObjType sSelectedObjType = SelectedObjType::None;
@@ -735,6 +736,7 @@ static void DrawTabBar()
             sCamera.angle = sCamObj.angle;
             sCamera.horizon = sCamObj.horizon;
             sOrbitAngle = 0.0f;
+            sAutoOrbitCurrent = 0.0f;
             // Snapshot orbit distance and save player state
             sOrbitDist = 60.0f;
             sSavedPlayerIdx = -1;
@@ -2584,15 +2586,20 @@ void FrameTick(float dt)
                     // Track movement direction relative to camera (for sprite facing)
                     sPlayerMoveAngle = atan2f(inputZ, inputX);
 
-                    // Auto-orbit when strafing (A/D)
-                    // Shoulder buttons double auto-orbit; the net effect is slowdown
-                    // when opposing the strafe, speedup when matching it
-                    if (inputZ != 0.0f)
+                    // Auto-orbit when strafing (A/D) — smoothed
                     {
-                        float autoOrbitSpeed = rotSpeed * 0.4f * inputZ;
-                        if (ImGui::IsKeyDown(ImGuiKey_J) || ImGui::IsKeyDown(ImGuiKey_L))
-                            autoOrbitSpeed *= 2.0f;
-                        sOrbitAngle -= autoOrbitSpeed;
+                        float autoOrbitTarget = 0.0f;
+                        if (inputZ != 0.0f)
+                        {
+                            autoOrbitTarget = rotSpeed * 0.2f * inputZ;
+                            if (ImGui::IsKeyDown(ImGuiKey_J) || ImGui::IsKeyDown(ImGuiKey_L))
+                                autoOrbitTarget *= 2.0f;
+                        }
+                        // Smooth toward target (fast ramp-up, gentle ease-out)
+                        float smoothRate = (fabsf(autoOrbitTarget) > fabsf(sAutoOrbitCurrent)) ? 12.0f : 4.0f;
+                        sAutoOrbitCurrent += (autoOrbitTarget - sAutoOrbitCurrent) * std::min(1.0f, smoothRate * dt);
+                        if (fabsf(sAutoOrbitCurrent) > 0.0001f)
+                            sOrbitAngle -= sAutoOrbitCurrent;
                     }
 
                     // Transform to world space using viewAngle
@@ -2611,11 +2618,15 @@ void FrameTick(float dt)
                 player.x = std::clamp(player.x, -kWorldHalf, kWorldHalf);
                 player.z = std::clamp(player.z, -kWorldHalf, kWorldHalf);
 
-                // Place camera at orbit offset from player (distance set on Play)
-                sCamera.x = player.x + sinf(sOrbitAngle) * sOrbitDist;
-                sCamera.z = player.z + cosf(sOrbitAngle) * sOrbitDist;
-                // Camera looks from its position toward the player
-                sCamera.angle = sOrbitAngle;
+                // Place camera at orbit offset from player with smooth follow
+                {
+                    float targetX = player.x + sinf(sOrbitAngle) * sOrbitDist;
+                    float targetZ = player.z + cosf(sOrbitAngle) * sOrbitDist;
+                    float followRate = std::min(1.0f, 6.0f * dt); // smooth camera lag
+                    sCamera.x += (targetX - sCamera.x) * followRate;
+                    sCamera.z += (targetZ - sCamera.z) * followRate;
+                    sCamera.angle = sOrbitAngle;
+                }
             }
             else
             {
