@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/affinity_burst.png" alt="Affinity Logo" width="200">
+  <img src="assets/affinity_burst.png" alt="Affinity Logo" width="300">
 </p>
 
 # Affinity — GBA Mode 7 Engine
