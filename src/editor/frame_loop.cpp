@@ -2572,11 +2572,19 @@ void FrameTick(float dt)
                 bool wasMoving = sPlayerMoving;
                 sPlayerMoving = (inputX != 0.0f || inputZ != 0.0f);
 
-                // J/L manual orbit — always applies
-                if (ImGui::IsKeyDown(ImGuiKey_J))
-                    sOrbitAngle += rotSpeed;
-                if (ImGui::IsKeyDown(ImGuiKey_L))
-                    sOrbitAngle -= rotSpeed;
+                // J/L manual orbit — smooth ease-in/out on orbit angle
+                {
+                    float manualTarget = 0.0f;
+                    if (ImGui::IsKeyDown(ImGuiKey_J)) manualTarget += rotSpeed;
+                    if (ImGui::IsKeyDown(ImGuiKey_L)) manualTarget -= rotSpeed;
+                    if (fabsf(manualTarget) > 0.001f)
+                        sManualOrbitCurrent += (manualTarget - sManualOrbitCurrent) * std::min(1.0f, 6.0f * dt);
+                    else
+                        sManualOrbitCurrent *= 0.85f;
+                    if (fabsf(sManualOrbitCurrent) < fabsf(rotSpeed * 0.02f))
+                        sManualOrbitCurrent = 0.0f;
+                    sOrbitAngle += sManualOrbitCurrent;
+                }
 
                 // Auto-orbit when strafing (A/D) with drag on release
                 {
@@ -2625,7 +2633,9 @@ void FrameTick(float dt)
                 {
                     float targetX = player.x + sinf(sOrbitAngle) * sOrbitDist;
                     float targetZ = player.z + cosf(sOrbitAngle) * sOrbitDist;
-                    float followRate = std::min(1.0f, 2.5f * dt); // smooth camera lag
+                    // Faster follow during orbit to prevent side drift, slower for WASD drag
+                    bool orbiting = fabsf(sManualOrbitCurrent) > 0.0f;
+                    float followRate = std::min(1.0f, (orbiting ? 12.0f : 2.5f) * dt);
                     float dx = targetX - sCamera.x;
                     float dz = targetZ - sCamera.z;
                     if (fabsf(dx) < 0.1f && fabsf(dz) < 0.1f)
