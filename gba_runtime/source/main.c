@@ -808,7 +808,15 @@ int main(void)
                 if (autoOrbitTarget != 0)
                     auto_orbit_smooth += (autoOrbitTarget - auto_orbit_smooth) >> 2;
                 else
-                    auto_orbit_smooth = (auto_orbit_smooth * 7) >> 3;
+                {
+                    // Decay toward zero (handle negative values correctly)
+                    if (auto_orbit_smooth > 0)
+                        auto_orbit_smooth = (auto_orbit_smooth * 7) >> 3;  // ~0.875 decay
+                    else if (auto_orbit_smooth < 0)
+                        auto_orbit_smooth = -(((-auto_orbit_smooth) * 7) >> 3);
+                }
+                if (auto_orbit_smooth > -8 && auto_orbit_smooth < 8)
+                    auto_orbit_smooth = 0;
                 orbit_angle += auto_orbit_smooth;
             }
 
@@ -850,8 +858,12 @@ int main(void)
                 FIXED targetX = player_x - ((orbSin * orbit_dist) >> 8);
                 FIXED targetZ = player_z + ((orbCos * orbit_dist) >> 8);
                 // Smooth follow: blend 3/8 toward target each frame
-                cam_x += ((targetX - cam_x) * 3) >> 3;
-                cam_z += ((targetZ - cam_z) * 3) >> 3;
+                FIXED ddx = targetX - cam_x;
+                FIXED ddz = targetZ - cam_z;
+                if (ddx > -16 && ddx < 16 && ddz > -16 && ddz < 16)
+                { cam_x = targetX; cam_z = targetZ; }
+                else
+                { cam_x += (ddx * 3) >> 4; cam_z += (ddz * 3) >> 4; }
             }
             cam_angle = orbit_angle;
 

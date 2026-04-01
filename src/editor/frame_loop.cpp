@@ -2591,6 +2591,8 @@ void FrameTick(float dt)
                         sAutoOrbitCurrent += (autoOrbitTarget - sAutoOrbitCurrent) * std::min(1.0f, 6.0f * dt);
                     else
                         sAutoOrbitCurrent *= 0.85f;
+                    if (fabsf(sAutoOrbitCurrent) < fabsf(rotSpeed * 0.02f))
+                        sAutoOrbitCurrent = 0.0f;
                     sOrbitAngle -= sAutoOrbitCurrent;
                 }
 
@@ -2623,9 +2625,13 @@ void FrameTick(float dt)
                 {
                     float targetX = player.x + sinf(sOrbitAngle) * sOrbitDist;
                     float targetZ = player.z + cosf(sOrbitAngle) * sOrbitDist;
-                    float followRate = std::min(1.0f, 6.0f * dt); // smooth camera lag
-                    sCamera.x += (targetX - sCamera.x) * followRate;
-                    sCamera.z += (targetZ - sCamera.z) * followRate;
+                    float followRate = std::min(1.0f, 2.5f * dt); // smooth camera lag
+                    float dx = targetX - sCamera.x;
+                    float dz = targetZ - sCamera.z;
+                    if (fabsf(dx) < 0.1f && fabsf(dz) < 0.1f)
+                    { sCamera.x = targetX; sCamera.z = targetZ; }
+                    else
+                    { sCamera.x += dx * followRate; sCamera.z += dz * followRate; }
                     sCamera.angle = sOrbitAngle;
                 }
             }
