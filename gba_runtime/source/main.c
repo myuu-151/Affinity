@@ -122,21 +122,20 @@ static void load_checkerboard(void)
     pal_bg_mem[2] = RGB15(8, 18, 8);
     pal_bg_mem[3] = RGB15(2, 6, 2);    // void/out-of-bounds dark green
 
-    // Tile 0 = transparent (palette 0 = backdrop/sky blue)
+    // Tile 0 = transparent (palette 0 = backdrop/sky blue) for out-of-bounds
     memset(&tile8_mem[2][0], 0, 64);
 
-    // Tile 1 = checkerboard with internal 4x4 pattern
-    u8 *tile = (u8*)&tile8_mem[2][1];
-    for (int py = 0; py < 8; py++)
-        for (int px = 0; px < 8; px++)
-            tile[py * 8 + px] = ((px / 4) + (py / 4)) & 1 ? 2 : 1;
+    // Tile 1 = solid color A, Tile 2 = solid color B
+    memset(&tile8_mem[2][1], 1, 64);
+    memset(&tile8_mem[2][2], 2, 64);
 
     // Fill 64x64 map: checker only within game world (0-32 tiles = 0-256 px)
+    // Each 8x8 tile = 8 world pixels = one checker square (matches editor's 32-unit squares / 4)
     u8 *map = (u8*)se_mem[28];
-    memset(map, 0, 64 * 64);  // default = tile 0 (void)
+    memset(map, 0, 64 * 64);  // default = tile 0 (void/transparent)
     for (int y = 0; y < 32; y++)
         for (int x = 0; x < 32; x++)
-            map[y * 64 + x] = 1;  // checker tile within bounds
+            map[y * 64 + x] = ((x + y) & 1) ? 2 : 1;
 }
 
 #ifdef AFFINITY_HAS_MAPDATA
