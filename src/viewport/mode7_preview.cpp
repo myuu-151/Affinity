@@ -482,7 +482,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             float dz = fs.z - cam.z;
             float angleToSprite = atan2f(dx, -dz); // angle from camera to sprite
             float rotRad = fs.rotation * 3.14159265f / 180.0f;
-            float relAngle = angleToSprite + 3.14159265f + rotRad; // world-space + sprite rotation
+            float relAngle = angleToSprite + 3.14159265f - rotRad; // world-space + sprite rotation
 
             const float PI2 = 6.28318530f;
             relAngle = fmodf(relAngle, PI2);

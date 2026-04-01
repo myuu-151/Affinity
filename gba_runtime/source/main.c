@@ -474,7 +474,7 @@ static void update_sprites(void)
                         FIXED dz = g_sprites[sprIdx].z - cam_z;
                         // ArcTan2 takes (x, y) and returns brad angle
                         u16 angleToSprite = ArcTan2(dx >> 4, -(dz >> 4));
-                        u16 relAngle = angleToSprite + 0x8000 + g_sprites[sprIdx].rotation;
+                        u16 relAngle = angleToSprite + 0x8000 - g_sprites[sprIdx].rotation;
                         // Map to 8 directions (each 0x2000 = 45 degrees brad)
                         int dirIdx = ((relAngle + 0x1000) >> 13) & 7;
                         int adTpf = afn_asset_dir_desc[ai][1];
