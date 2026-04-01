@@ -720,8 +720,8 @@ int main(void)
                 if (inputRight)
                 {
                     int autoOrbit = (rotSpeed * 2 / 5);  // 40% of rotSpeed
-                    if (inputRight > 0)
-                        autoOrbit = -autoOrbit;  // right strafe = clockwise orbit
+                    if (inputRight < 0)
+                        autoOrbit = -autoOrbit;  // left strafe = counter-clockwise orbit
                     if (key_is_down(KEY_L))
                         autoOrbit *= 2;          // L shoulder: double orbit speed
                     else if (key_is_down(KEY_R))
