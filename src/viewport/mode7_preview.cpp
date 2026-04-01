@@ -482,13 +482,15 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             float dz = fs.z - cam.z;
             float angleToSprite = atan2f(dx, -dz); // angle from camera to sprite
             float rotRad = fs.rotation * 3.14159265f / 180.0f;
-            float relAngle = angleToSprite + 3.14159265f - rotRad; // world-space + sprite rotation
+            float relAngle = angleToSprite + 3.14159265f - rotRad;
 
             const float PI2 = 6.28318530f;
             relAngle = fmodf(relAngle, PI2);
             if (relAngle < 0.0f) relAngle += PI2;
 
-            int dirIdx = ((int)((relAngle + 0.39269908f) / 0.78539816f)) % 8;
+            // 4 directions: N(0), E(2), S(4), W(6) — each covers 90°
+            int quadrant = ((int)((relAngle + 0.78539816f) / 1.57079632f)) % 4;
+            int dirIdx = quadrant * 2; // map to 0, 2, 4, 6
 
             const PlayerDirImage& adi = assetDirImages[fs.assetIdx].dirs[dirIdx];
             if (adi.pixels && adi.width > 0 && adi.height > 0)

@@ -475,8 +475,10 @@ static void update_sprites(void)
                         // ArcTan2 takes (x, y) and returns brad angle
                         u16 angleToSprite = ArcTan2(dx >> 4, -(dz >> 4));
                         u16 relAngle = angleToSprite + 0x8000 - g_sprites[sprIdx].rotation;
-                        // Map to 8 directions (each 0x2000 = 45 degrees brad)
-                        int dirIdx = ((relAngle + 0x1000) >> 13) & 7;
+                        // Map to 4 directions (each 0x4000 = 90 degrees brad)
+                        // N(0), E(2), S(4), W(6)
+                        int quadrant = ((relAngle + 0x2000) >> 14) & 3;
+                        int dirIdx = quadrant * 2;
                         int adTpf = afn_asset_dir_desc[ai][1];
                         tileId = afn_asset_dir_desc[ai][0] + dirIdx * adTpf;
                         baseSize = afn_asset_dir_desc[ai][2];
