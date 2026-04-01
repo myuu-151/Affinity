@@ -118,6 +118,7 @@ struct FloorSprite
     float y = 0.0f;          // world Y (height above floor)
     float z = 0.0f;          // world Z
     float scale = 1.0f;      // size multiplier (R + drag to adjust, 1.0 = default)
+    float rotation = 0.0f;   // world-space facing angle in degrees (0=N, 90=E, 180=S, 270=W)
     SpriteType type = SpriteType::Prop; // object type
     int   spriteId = 0;      // which sprite graphic (legacy)
     int   assetIdx = -1;     // index into sprite asset list (-1 = none)

@@ -303,9 +303,9 @@ static bool SaveProject(const std::string& path)
     for (int i = 0; i < sSpriteCount; i++)
     {
         const FloorSprite& sp = sSprites[i];
-        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d\n",
+        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f\n",
                 sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
-                sp.assetIdx, sp.animIdx, (int)sp.type);
+                sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation);
     }
     fprintf(f, "\n");
 
@@ -453,7 +453,8 @@ static bool LoadProject(const std::string& path)
                 float sx, sy, sz, sc;
                 unsigned int col;
                 // Try extended format (with assetIdx, animIdx, type)
-                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal);
+                float rot = 0.0f;
+                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot);
                 if (matched >= 6)
                 {
                     FloorSprite& sp = sSprites[sSpriteCount];
@@ -467,6 +468,7 @@ static bool LoadProject(const std::string& path)
                     sp.animIdx = anIdx;
                     sp.type = (matched >= 9 && typeVal >= 0 && typeVal < (int)SpriteType::Count)
                         ? (SpriteType)typeVal : SpriteType::Prop;
+                    sp.rotation = (matched >= 10) ? rot : 0.0f;
                     sp.selected = false;
                     sSpriteCount++;
                 }
@@ -1806,6 +1808,7 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::DragFloat("Y##spr", &sp.y, 0.5f, 0.0f, 200.0f);
         ImGui::DragFloat("Z##spr", &sp.z, 1.0f, -kWorldHalf, kWorldHalf);
         ImGui::DragFloat("Scale##spr", &sp.scale, 0.1f, 0.1f, 50.0f);
+        ImGui::DragFloat("Rotation##spr", &sp.rotation, 1.0f, 0.0f, 360.0f, "%.0f deg");
 
         // Sprite asset link
         {
@@ -2370,6 +2373,7 @@ void FrameTick(float dt)
                     se.y = sSprites[i].y;
                     se.z = sSprites[i].z;
                     se.scale = sSprites[i].scale;
+                    se.rotation = sSprites[i].rotation;
                     se.assetIdx = sSprites[i].assetIdx;
                     se.animIdx = sSprites[i].animIdx;
                     se.spriteType = (int)sSprites[i].type;

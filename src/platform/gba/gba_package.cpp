@@ -587,8 +587,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
     if (!sprites.empty())
     {
-        f << "static const int afn_sprite_data[][7] = {\n";
-        f << "    // { x_fixed, y_fixed, z_fixed, palIdx, assetIdx, scale_8_8, spriteType }\n";
+        f << "static const int afn_sprite_data[][8] = {\n";
+        f << "    // { x_fixed, y_fixed, z_fixed, palIdx, assetIdx, scale_8_8, spriteType, rotation_brad }\n";
         for (size_t i = 0; i < sprites.size(); i++)
         {
             int gx = EditorToGBAFixed(sprites[i].x);
@@ -598,8 +598,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
             int aIdx = sprites[i].assetIdx;
             int scaleFixed = (int)(sprites[i].scale * 256.0f);
             int sType = sprites[i].spriteType;
+            // Convert degrees to brad (0-65535): degrees * 65536 / 360
+            int rotBrad = (int)(sprites[i].rotation * 65536.0f / 360.0f) & 0xFFFF;
             f << "    { " << gx << ", " << gy << ", " << gz << ", "
-              << pal << ", " << aIdx << ", " << scaleFixed << ", " << sType << " },\n";
+              << pal << ", " << aIdx << ", " << scaleFixed << ", " << sType << ", " << rotBrad << " },\n";
         }
         f << "};\n";
     }

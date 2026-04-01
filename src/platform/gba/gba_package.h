@@ -12,6 +12,7 @@ struct GBASpriteExport
 {
     float x, y, z;     // world position (editor coords, ±512)
     float scale;
+    float rotation;     // world-space facing angle in degrees
     int   palIdx;       // OBJ palette color index (1-5)
     int   assetIdx;     // sprite asset index (-1 = none/placeholder)
     int   animIdx;      // default animation index

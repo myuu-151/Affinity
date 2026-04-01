@@ -53,6 +53,7 @@ typedef struct {
     u16   palIdx;    // OBJ palette color index
     s16   assetIdx;  // sprite asset index (-1 = default solid tile)
     FIXED scale;     // 8.8 fixed-point scale (256 = 1x)
+    u16   rotation;  // world-space facing angle (brad, 0-65535)
 } FloorSpriteGBA;
 
 static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
@@ -340,6 +341,7 @@ static void load_editor_sprites(void)
         g_sprites[i].palIdx   = afn_sprite_data[i][3];
         g_sprites[i].assetIdx = afn_sprite_data[i][4];
         g_sprites[i].scale    = afn_sprite_data[i][5];
+        g_sprites[i].rotation = (u16)afn_sprite_data[i][7];
     }
     g_spriteCount = count;
 }
@@ -472,7 +474,7 @@ static void update_sprites(void)
                         FIXED dz = g_sprites[sprIdx].z - cam_z;
                         // ArcTan2 takes (x, y) and returns brad angle
                         u16 angleToSprite = ArcTan2(dx >> 4, -(dz >> 4));
-                        u16 relAngle = angleToSprite + 0x8000;
+                        u16 relAngle = angleToSprite + 0x8000 + g_sprites[sprIdx].rotation;
                         // Map to 8 directions (each 0x2000 = 45 degrees brad)
                         int dirIdx = ((relAngle + 0x1000) >> 13) & 7;
                         int adTpf = afn_asset_dir_desc[ai][1];
