@@ -285,6 +285,8 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "height=%.6f\n", sCamObj.height);
     fprintf(f, "angle=%.6f\n", sCamObj.angle);
     fprintf(f, "horizon=%.6f\n", sCamObj.horizon);
+    fprintf(f, "walk_speed=%.1f\n", sCamObj.walkSpeed);
+    fprintf(f, "sprint_speed=%.1f\n", sCamObj.sprintSpeed);
     fprintf(f, "walk_ease_in=%.1f\n", sCamObj.walkEaseIn);
     fprintf(f, "walk_ease_out=%.1f\n", sCamObj.walkEaseOut);
     fprintf(f, "sprint_ease_in=%.1f\n", sCamObj.sprintEaseIn);
@@ -427,6 +429,8 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "height=%f", &fval) == 1) sCamObj.height = fval;
             else if (sscanf(line, "angle=%f", &fval) == 1) sCamObj.angle = fval;
             else if (sscanf(line, "horizon=%f", &fval) == 1) sCamObj.horizon = fval;
+            else if (sscanf(line, "walk_speed=%f", &fval) == 1) sCamObj.walkSpeed = fval;
+            else if (sscanf(line, "sprint_speed=%f", &fval) == 1) sCamObj.sprintSpeed = fval;
             else if (sscanf(line, "walk_ease_in=%f", &fval) == 1) sCamObj.walkEaseIn = fval;
             else if (sscanf(line, "walk_ease_out=%f", &fval) == 1) sCamObj.walkEaseOut = fval;
             else if (sscanf(line, "sprint_ease_in=%f", &fval) == 1) sCamObj.sprintEaseIn = fval;
@@ -2106,6 +2110,10 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::SliderAngle("Angle##cam", &sCamObj.angle, -180.0f, 180.0f);
         ImGui::DragFloat("Horizon##cam", &sCamObj.horizon, 0.5f, 10.0f, 120.0f);
         ImGui::Separator();
+        ImGui::Text("Movement");
+        ImGui::DragFloat("Walk Speed##cam",   &sCamObj.walkSpeed,   0.5f, 5.0f, 100.0f, "%.0f");
+        ImGui::DragFloat("Sprint Speed##cam", &sCamObj.sprintSpeed, 0.5f, 5.0f, 150.0f, "%.0f");
+        ImGui::Separator();
         ImGui::Text("Camera Follow");
         ImGui::DragFloat("Walk Ease In##cam",  &sCamObj.walkEaseIn,  0.5f, 1.0f, 50.0f, "%.0f%%");
         ImGui::DragFloat("Walk Ease Out##cam", &sCamObj.walkEaseOut, 0.5f, 1.0f, 50.0f, "%.0f%%");
@@ -2733,6 +2741,8 @@ void FrameTick(float dt)
                 exportCam.height = sCamObj.height;
                 exportCam.angle = sCamObj.angle;
                 exportCam.horizon = sCamObj.horizon;
+                exportCam.walkSpeed = sCamObj.walkSpeed;
+                exportCam.sprintSpeed = sCamObj.sprintSpeed;
                 exportCam.walkEaseIn = sCamObj.walkEaseIn;
                 exportCam.walkEaseOut = sCamObj.walkEaseOut;
                 exportCam.sprintEaseIn = sCamObj.sprintEaseIn;
@@ -2887,7 +2897,7 @@ void FrameTick(float dt)
         else
         {
             // ---- PLAY MODE: third-person orbit camera ----
-            float moveSpeed = (ImGui::IsKeyDown(ImGuiKey_LeftShift) ? 53.0f : 35.0f) * dt;
+            float moveSpeed = (ImGui::IsKeyDown(ImGuiKey_LeftShift) ? sCamObj.sprintSpeed : sCamObj.walkSpeed) * dt;
             float rotSpeed  = 3.0f * dt;
 
             // Find player sprite

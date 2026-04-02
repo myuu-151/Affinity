@@ -803,7 +803,11 @@ int main(void)
             // ORBIT CAMERA MODE — Asterix XXL style
             // ============================================================
 
+#ifdef AFN_WALK_SPEED
+            FIXED moveSpeed = key_is_down(KEY_B) ? AFN_SPRINT_SPEED : AFN_WALK_SPEED;
+#else
             FIXED moveSpeed = key_is_down(KEY_B) ? 56 : 37;
+#endif
             int   rotSpeed  = 0x0200;
 
             // View angle = orbit_angle (camera is behind player, looking forward)

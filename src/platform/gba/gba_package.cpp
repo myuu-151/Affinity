@@ -266,6 +266,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
     f << "#define AFN_CAM_H     " << EditorHeightToGBAFixed(camera.height) << "\n";
     f << "#define AFN_CAM_ANGLE " << EditorAngleToBrad(camera.angle) << "\n";
     f << "#define AFN_CAM_HORIZON " << (int)camera.horizon << "\n";
+    // Movement speeds (GBA fixed-point, scaled from editor units)
+    // Editor 35 -> GBA 37, so scale factor is ~37/35 = 1.057
+    f << "#define AFN_WALK_SPEED "   << (int)(camera.walkSpeed * 37.0f / 35.0f) << "\n";
+    f << "#define AFN_SPRINT_SPEED " << (int)(camera.sprintSpeed * 37.0f / 35.0f) << "\n";
     // Camera follow ease rates (stored as fixed-point: pct * 256 / 100)
     f << "#define AFN_WALK_EASE_IN "    << (int)(camera.walkEaseIn * 256.0f / 100.0f) << "\n";
     f << "#define AFN_WALK_EASE_OUT "   << (int)(camera.walkEaseOut * 256.0f / 100.0f) << "\n";

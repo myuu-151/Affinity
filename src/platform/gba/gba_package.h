@@ -74,6 +74,8 @@ struct GBACameraExport
     float height;
     float angle;        // radians
     float horizon;
+    float walkSpeed   = 35.0f;
+    float sprintSpeed = 53.0f;
     float walkEaseIn  = 19.0f;
     float walkEaseOut = 19.0f;
     float sprintEaseIn  = 6.0f;
