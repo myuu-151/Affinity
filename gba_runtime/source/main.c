@@ -233,19 +233,6 @@ static void init_obj_sprites(void)
             g_asset_anim_enabled[ai] = 0;
         }
         g_anim_frame_counter = 0;
-
-        // Determine which assets have animation-enabled sprites
-#if defined(AFN_SPRITE_COUNT) && AFN_SPRITE_COUNT > 0
-        {
-            int si;
-            for (si = 0; si < g_spriteCount; si++)
-            {
-                int aidx = g_sprites[si].assetIdx;
-                if (aidx >= 0 && aidx < AFN_ASSET_COUNT && g_sprites[si].animEnabled)
-                    g_asset_anim_enabled[aidx] = 1;
-            }
-        }
-#endif
     }
 #endif
 
@@ -745,6 +732,21 @@ int main(void)
     #ifndef AFFINITY_HAS_MAPDATA
     init_demo_sprites();
     #endif
+#endif
+
+    // Determine which assets have animation-enabled sprites (must be after load_editor_sprites)
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+#if defined(AFN_SPRITE_COUNT) && AFN_SPRITE_COUNT > 0
+    {
+        int si;
+        for (si = 0; si < g_spriteCount; si++)
+        {
+            int aidx = g_sprites[si].assetIdx;
+            if (aidx >= 0 && aidx < AFN_ASSET_COUNT && g_sprites[si].animEnabled)
+                g_asset_anim_enabled[aidx] = 1;
+        }
+    }
+#endif
 #endif
 
     // --- Camera init ---
