@@ -338,7 +338,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
         assetDirInfos[ai].has = true;
         assetDirInfos[ai].setCount = setCount;
         assetDirInfos[ai].dirSize = 64;
-        assetDirInfos[ai].palBank = assets[ai].palBank;
+        // Use source asset's palBank if sharing palette
+        int srcPalAsset = assets[ai].paletteSrc;
+        if (srcPalAsset >= 0 && srcPalAsset < (int)assets.size() && srcPalAsset != (int)ai)
+            assetDirInfos[ai].palBank = assets[srcPalAsset].palBank;
+        else
+            assetDirInfos[ai].palBank = assets[ai].palBank;
 
         // Collect ALL unique colors across ALL sets for shared palette
         struct ColorFreq { unsigned short rgb15; int count; };
@@ -350,53 +355,80 @@ static bool GenerateMapData(const std::string& runtimeDir,
             return (int)colorFreqs.size() - 1;
         };
 
-        for (size_t si = 0; si < assets[ai].dirAnimSets.size(); si++)
-            for (int d = 0; d < 8; d++)
+        // If sharing palette from another asset, collect colors from source asset too
+        // so both assets share the same quantized palette
+        auto collectColorsFromAsset = [&](int assetIdx) {
+            for (size_t si2 = 0; si2 < assets[assetIdx].dirAnimSets.size(); si2++)
+                for (int d = 0; d < 8; d++)
+                {
+                    const auto& img = assets[assetIdx].dirAnimSets[si2].dirImages[d];
+                    if (!img.pixels || img.width <= 0 || img.height <= 0) continue;
+                    for (int y = 0; y < img.height; y++)
+                        for (int x = 0; x < img.width; x++)
+                        {
+                            int idx2 = (y * img.width + x) * 4;
+                            if (img.pixels[idx2 + 3] < 128) continue;
+                            unsigned r2 = img.pixels[idx2 + 0] >> 3;
+                            unsigned g2 = img.pixels[idx2 + 1] >> 3;
+                            unsigned b2 = img.pixels[idx2 + 2] >> 3;
+                            findOrAdd((unsigned short)(r2 | (g2 << 5) | (b2 << 10)));
+                        }
+                }
+        };
+
+        // If sharing palette, use source's colors; otherwise use own
+        if (srcPalAsset >= 0 && srcPalAsset < (int)assets.size() && srcPalAsset != (int)ai
+            && assetDirInfos[srcPalAsset].has)
+        {
+            // Reuse the source asset's palette directly
+            memcpy(assetDirInfos[ai].palette, assetDirInfos[srcPalAsset].palette, sizeof(assetDirInfos[ai].palette));
+            // Rebuild colorFreqs from source palette for nearestPal
+            for (int i = 1; i < 16; i++)
             {
-                const auto& img = assets[ai].dirAnimSets[si].dirImages[d];
-                if (!img.pixels || img.width <= 0 || img.height <= 0) continue;
-                for (int y = 0; y < img.height; y++)
-                    for (int x = 0; x < img.width; x++)
+                uint32_t c = assetDirInfos[srcPalAsset].palette[i];
+                if (c == 0) continue;
+                unsigned r2 = ((c >> 0) & 0xFF) >> 3;
+                unsigned g2 = ((c >> 8) & 0xFF) >> 3;
+                unsigned b2 = ((c >> 16) & 0xFF) >> 3;
+                colorFreqs.push_back({(unsigned short)(r2 | (g2 << 5) | (b2 << 10)), 1});
+            }
+        }
+        else
+        {
+            collectColorsFromAsset((int)ai);
+
+            // Merge to 15 colors (preserve visually distinct colors)
+            while ((int)colorFreqs.size() > 15)
+            {
+                int bestI = 0, bestJ = 1, bestDist = 999999;
+                for (size_t i = 0; i < colorFreqs.size(); i++)
+                    for (size_t j = i + 1; j < colorFreqs.size(); j++)
                     {
-                        int idx = (y * img.width + x) * 4;
-                        if (img.pixels[idx + 3] < 128) continue;
-                        unsigned r = img.pixels[idx + 0] >> 3;
-                        unsigned g = img.pixels[idx + 1] >> 3;
-                        unsigned b = img.pixels[idx + 2] >> 3;
-                        findOrAdd((unsigned short)(r | (g << 5) | (b << 10)));
+                        int dr = (int)(colorFreqs[i].rgb15 & 0x1F) - (int)(colorFreqs[j].rgb15 & 0x1F);
+                        int dg = (int)((colorFreqs[i].rgb15 >> 5) & 0x1F) - (int)((colorFreqs[j].rgb15 >> 5) & 0x1F);
+                        int db = (int)((colorFreqs[i].rgb15 >> 10) & 0x1F) - (int)((colorFreqs[j].rgb15 >> 10) & 0x1F);
+                        int dist = dr*dr + dg*dg + db*db;
+                        if (dist < bestDist) { bestDist = dist; bestI = (int)i; bestJ = (int)j; }
                     }
+                if (colorFreqs[bestI].count < colorFreqs[bestJ].count)
+                    colorFreqs[bestI].rgb15 = colorFreqs[bestJ].rgb15;
+                colorFreqs[bestI].count += colorFreqs[bestJ].count;
+                colorFreqs.erase(colorFreqs.begin() + bestJ);
             }
 
-        // Merge to 15 colors (preserve visually distinct colors)
-        while ((int)colorFreqs.size() > 15)
-        {
-            int bestI = 0, bestJ = 1, bestDist = 999999;
-            for (size_t i = 0; i < colorFreqs.size(); i++)
-                for (size_t j = i + 1; j < colorFreqs.size(); j++)
-                {
-                    int dr = (int)(colorFreqs[i].rgb15 & 0x1F) - (int)(colorFreqs[j].rgb15 & 0x1F);
-                    int dg = (int)((colorFreqs[i].rgb15 >> 5) & 0x1F) - (int)((colorFreqs[j].rgb15 >> 5) & 0x1F);
-                    int db = (int)((colorFreqs[i].rgb15 >> 10) & 0x1F) - (int)((colorFreqs[j].rgb15 >> 10) & 0x1F);
-                    int dist = dr*dr + dg*dg + db*db;
-                    if (dist < bestDist) { bestDist = dist; bestI = (int)i; bestJ = (int)j; }
-                }
-            if (colorFreqs[bestI].count < colorFreqs[bestJ].count)
-                colorFreqs[bestI].rgb15 = colorFreqs[bestJ].rgb15;
-            colorFreqs[bestI].count += colorFreqs[bestJ].count;
-            colorFreqs.erase(colorFreqs.begin() + bestJ);
+            int palCount2 = (int)colorFreqs.size();
+            memset(assetDirInfos[ai].palette, 0, sizeof(assetDirInfos[ai].palette));
+            for (int i = 0; i < palCount2; i++)
+            {
+                unsigned short c = colorFreqs[i].rgb15;
+                unsigned r2 = (c & 0x1F) << 3;
+                unsigned g2 = ((c >> 5) & 0x1F) << 3;
+                unsigned b2 = ((c >> 10) & 0x1F) << 3;
+                assetDirInfos[ai].palette[i + 1] = r2 | (g2 << 8) | (b2 << 16) | 0xFF000000;
+            }
         }
 
         int palCount = (int)colorFreqs.size();
-        memset(assetDirInfos[ai].palette, 0, sizeof(assetDirInfos[ai].palette));
-        for (int i = 0; i < palCount; i++)
-        {
-            unsigned short c = colorFreqs[i].rgb15;
-            unsigned r = (c & 0x1F) << 3;
-            unsigned g = ((c >> 5) & 0x1F) << 3;
-            unsigned b = ((c >> 10) & 0x1F) << 3;
-            assetDirInfos[ai].palette[i + 1] = r | (g << 8) | (b << 16) | 0xFF000000;
-        }
-
         auto nearestPal = [&](unsigned short c15) -> uint8_t {
             int bestDist = 999999;
             uint8_t bestIdx = 1;

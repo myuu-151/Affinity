@@ -63,6 +63,7 @@ struct GBASpriteAssetExport
         GBAPlayerDirExport dirImages[8] = {};
     };
     bool hasDirections = false;
+    int paletteSrc = -1;       // -1 = own palette, >= 0 = share from asset index
     std::vector<DirAnimSetExport> dirAnimSets;
 };
 

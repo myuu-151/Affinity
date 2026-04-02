@@ -316,6 +316,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "asset_begin=%s\n", sa.name.c_str());
         fprintf(f, "baseSize=%d\n", sa.baseSize);
         fprintf(f, "palBank=%d\n", sa.palBank);
+        fprintf(f, "paletteSrc=%d\n", sa.paletteSrc);
         // Palette
         for (int c = 0; c < 16; c++)
             fprintf(f, "pal=%d,%u\n", c, sa.palette[c]);
@@ -491,6 +492,7 @@ static bool LoadProject(const std::string& path)
                     int iv; unsigned int uv; float fv;
                     if (sscanf(line, "baseSize=%d", &iv) == 1) sa.baseSize = iv;
                     else if (sscanf(line, "palBank=%d", &iv) == 1) sa.palBank = iv;
+                    else if (sscanf(line, "paletteSrc=%d", &iv) == 1) sa.paletteSrc = iv;
                     else if (sscanf(line, "pal=%d,%u", &iv, &uv) == 2 && iv >= 0 && iv < 16) sa.palette[iv] = uv;
                     else if (sscanf(line, "frameCount=%d", &iv) == 1) { /* informational */ }
                     else if (strncmp(line, "frame=", 6) == 0)
@@ -1561,9 +1563,48 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
         ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Palette (16 colors)");
         ImGui::Separator();
 
-        ImGui::PushItemWidth(Scaled(50));
-        ImGui::DragInt("Bank##palbank", &asset.palBank, 1.0f, 0, 15);
-        ImGui::PopItemWidth();
+        // Palette source selector
+        {
+            const char* palSrcPreview = (asset.paletteSrc >= 0 && asset.paletteSrc < (int)sSpriteAssets.size()
+                                         && asset.paletteSrc != sSelectedAsset)
+                ? sSpriteAssets[asset.paletteSrc].name.c_str() : "Own";
+            if (ImGui::BeginCombo("Source##palsrc", palSrcPreview))
+            {
+                if (ImGui::Selectable("Own", asset.paletteSrc < 0))
+                    asset.paletteSrc = -1;
+                for (int pi = 0; pi < (int)sSpriteAssets.size(); pi++)
+                {
+                    if (pi == sSelectedAsset) continue; // can't reference self
+                    bool sel = (asset.paletteSrc == pi);
+                    if (ImGui::Selectable(sSpriteAssets[pi].name.c_str(), sel))
+                    {
+                        asset.paletteSrc = pi;
+                        // Copy palette and bank from source
+                        memcpy(asset.palette, sSpriteAssets[pi].palette, sizeof(asset.palette));
+                        asset.palBank = sSpriteAssets[pi].palBank;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
+
+        // If sharing palette, sync from source and show read-only
+        bool palReadOnly = false;
+        if (asset.paletteSrc >= 0 && asset.paletteSrc < (int)sSpriteAssets.size()
+            && asset.paletteSrc != sSelectedAsset)
+        {
+            SpriteAsset& srcAsset = sSpriteAssets[asset.paletteSrc];
+            memcpy(asset.palette, srcAsset.palette, sizeof(asset.palette));
+            asset.palBank = srcAsset.palBank;
+            palReadOnly = true;
+            ImGui::TextDisabled("Shared from %s (bank %d)", srcAsset.name.c_str(), srcAsset.palBank);
+        }
+        else
+        {
+            ImGui::PushItemWidth(Scaled(50));
+            ImGui::DragInt("Bank##palbank", &asset.palBank, 1.0f, 0, 15);
+            ImGui::PopItemWidth();
+        }
 
         for (int c = 0; c < 16; c++)
         {
@@ -1577,7 +1618,13 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             };
             char clbl[16];
             snprintf(clbl, sizeof(clbl), "%d##pcol", c);
-            if (ImGui::ColorEdit4(clbl, rgba,
+            if (palReadOnly)
+            {
+                // Show color swatch but don't allow editing
+                ImGui::ColorButton(clbl, ImVec4(rgba[0], rgba[1], rgba[2], 1.0f),
+                    ImGuiColorEditFlags_NoTooltip, ImVec2(Scaled(16), Scaled(16)));
+            }
+            else if (ImGui::ColorEdit4(clbl, rgba,
                 ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_NoAlpha))
             {
                 asset.palette[c] =
@@ -2526,7 +2573,7 @@ void FrameTick(float dt)
     if (!sInitialized) FrameInit();
 
     // ---- Global hotkeys ----
-    if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S))
+    if (sEditorMode != EditorMode::Play && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S))
     {
         if (!sProjectPath.empty())
             SaveProject(sProjectPath);
@@ -2680,6 +2727,7 @@ void FrameTick(float dt)
                     ea.name = sa.name;
                     ea.baseSize = sa.baseSize;
                     ea.palBank = sa.palBank;
+                    ea.paletteSrc = sa.paletteSrc;
                     ea.defaultAnim = sa.defaultAnim;
                     memcpy(ea.palette, sa.palette, sizeof(ea.palette));
                     for (const auto& fr : sa.frames)

@@ -75,6 +75,7 @@ struct SpriteAsset
     std::string name = "Sprite";
     uint32_t palette[16] = {};     // 4bpp OBJ palette (16 colors, index 0 = transparent)
     int palBank = 1;               // GBA OBJ palette bank (0-15)
+    int paletteSrc = -1;           // -1 = own palette, >= 0 = share palette from asset index
 
     std::vector<SpriteFrame> frames;
     std::vector<SpriteAnim>  anims;
