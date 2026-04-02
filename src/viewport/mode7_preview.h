@@ -33,7 +33,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map = nullptr,
             const SpriteAsset* assets = nullptr, int assetCount = 0,
             float animTime = 0.0f, bool playing = false,
             const PlayerDirImage* playerDirs = nullptr, float playerOrbitAngle = 0.0f,
-            const AssetDirImages* assetDirImages = nullptr, int assetDirCount = 0);
+            const AssetDirImages* assetDirImages = nullptr, int assetDirCount = 0,
+            const AssetDirImages* spriteDirImages = nullptr, int spriteDirCount = 0);
 
 // Projected sprite screen position (set after Render)
 struct SpriteScreenPos { int screenX, screenY, halfW, halfH, spriteIdx; };

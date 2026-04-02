@@ -305,7 +305,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             const SpriteAsset* assets, int assetCount,
             float animTime, bool playing,
             const PlayerDirImage* playerDirs, float playerOrbitAngle,
-            const AssetDirImages* assetDirImages, int assetDirCount)
+            const AssetDirImages* assetDirImages, int assetDirCount,
+            const AssetDirImages* spriteDirImages, int spriteDirCount)
 {
     float cosA = cosf(-cam.angle);
     float sinA = sinf(-cam.angle);
@@ -479,7 +480,10 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 dirIdx = ((int)((relAngle + 0.39269908f) / 0.78539816f)) % 8;
             }
 
-            const PlayerDirImage& adi = assetDirImages[fs.assetIdx].dirs[dirIdx];
+            // Use per-sprite dir images if available, else fall back to per-asset
+            const PlayerDirImage& adi = (spriteDirImages && sp.idx < spriteDirCount)
+                ? spriteDirImages[sp.idx].dirs[dirIdx]
+                : assetDirImages[fs.assetIdx].dirs[dirIdx];
             if (adi.pixels && adi.width > 0 && adi.height > 0)
             {
                 int halfS = std::max(halfW, halfH);

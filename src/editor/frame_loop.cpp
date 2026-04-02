@@ -2096,24 +2096,33 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             SpriteAsset& linkedAsset = sSpriteAssets[sp.assetIdx];
             if (!linkedAsset.anims.empty())
             {
-                // Animation enable toggle
-                ImGui::Checkbox("Animate##spranimenab", &sp.animEnabled);
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Enable animation cycling for this object");
-
-                if (sp.animEnabled)
+                // Animation slots with per-row enable checkbox
+                for (int ai = 0; ai < (int)linkedAsset.anims.size(); ai++)
                 {
-                    // Animation slots — one selectable per asset animation
-                    ImGui::Text("Animations:");
-                    for (int ai = 0; ai < (int)linkedAsset.anims.size(); ai++)
+                    ImGui::PushID(ai + 9000);
+                    bool sel = (sp.animEnabled && sp.animIdx == ai);
+                    char slotLabel[64];
+                    snprintf(slotLabel, sizeof(slotLabel), "%s (frames %d)", linkedAsset.anims[ai].name.c_str(), linkedAsset.anims[ai].endFrame);
+                    if (ImGui::Selectable(slotLabel, sel, 0, ImVec2(ImGui::GetContentRegionAvail().x - Scaled(30), 0)))
                     {
-                        ImGui::PushID(ai + 9000);
-                        bool sel = (sp.animIdx == ai);
-                        char slotLabel[64];
-                        snprintf(slotLabel, sizeof(slotLabel), "%s (frames %d)", linkedAsset.anims[ai].name.c_str(), linkedAsset.anims[ai].endFrame);
-                        if (ImGui::Selectable(slotLabel, sel))
-                            sp.animIdx = ai;
-                        ImGui::PopID();
+                        sp.animIdx = ai;
+                        sp.animEnabled = true;
                     }
+                    ImGui::SameLine();
+                    bool rowEnabled = (sp.animEnabled && sp.animIdx == ai);
+                    if (ImGui::Checkbox("##animrow", &rowEnabled))
+                    {
+                        if (rowEnabled)
+                        {
+                            sp.animIdx = ai;
+                            sp.animEnabled = true;
+                        }
+                        else
+                        {
+                            sp.animEnabled = false;
+                        }
+                    }
+                    ImGui::PopID();
                 }
             }
         }
@@ -2959,28 +2968,42 @@ void FrameTick(float dt)
     bool isPlaying = (sEditorMode == EditorMode::Play);
     // Sprite direction: orbit-based when idle, movement-based when moving
     float spriteAngle = sPlayerMoving ? sPlayerMoveAngle : sOrbitAngle + sPlayerMoveAngle;
-    // Build per-asset direction image arrays for renderer
-    // In Play mode, cycle through animation frames based on movement state
-    // Check which assets have any animation-enabled sprites
-    std::vector<bool> assetAnimEnabled(sSpriteAssets.size(), false);
-    for (int si = 0; si < sSpriteCount; si++)
-    {
-        int aidx = sSprites[si].assetIdx;
-        if (aidx >= 0 && aidx < (int)sSpriteAssets.size() && sSprites[si].animEnabled)
-            assetAnimEnabled[aidx] = true;
-    }
-
+    // Build per-asset direction image arrays (idle fallback)
     std::vector<Mode7::AssetDirImages> assetDirImgs(sSpriteAssets.size());
     for (int ai = 0; ai < (int)sSpriteAssets.size() && ai < (int)sAssetDirSprites.size(); ai++)
     {
         if (sAssetDirSprites[ai].empty()) continue;
-        const SpriteAsset& asset = sSpriteAssets[ai];
-        int dirSetIdx = 0; // default: idle anim, frame 0
+        // Default: idle anim frame 0
+        for (int d = 0; d < 8; d++)
+        {
+            assetDirImgs[ai].dirs[d].pixels = sAssetDirSprites[ai][0][d].pixels;
+            assetDirImgs[ai].dirs[d].width  = sAssetDirSprites[ai][0][d].width;
+            assetDirImgs[ai].dirs[d].height = sAssetDirSprites[ai][0][d].height;
+        }
+    }
 
-        if (isPlaying && assetAnimEnabled[ai] && asset.anims.size() >= 2)
+    // Build per-sprite direction images — each sprite gets its own animation state
+    std::vector<Mode7::AssetDirImages> spriteDirImgs(sSpriteCount);
+    for (int si = 0; si < sSpriteCount; si++)
+    {
+        const FloorSprite& sp = sSprites[si];
+        int ai = sp.assetIdx;
+        if (ai < 0 || ai >= (int)sSpriteAssets.size() || ai >= (int)sAssetDirSprites.size())
+            continue;
+        if (sAssetDirSprites[ai].empty()) continue;
+
+        const SpriteAsset& asset = sSpriteAssets[ai];
+        int dirSetIdx = 0; // default: idle anim frame 0
+
+        if (isPlaying && sp.animEnabled && asset.anims.size() >= 2)
         {
             // Pick animation: idle (0) when still, run (1) when moving
-            int animIdx = (sPlayerMoving && asset.anims.size() > 1) ? 1 : 0;
+            // Only player-type sprites respond to player movement
+            bool useRun = false;
+            if (sp.type == SpriteType::Player)
+                useRun = sPlayerMoving;
+
+            int animIdx = (useRun && asset.anims.size() > 1) ? 1 : 0;
             const SpriteAnim& anim = asset.anims[animIdx];
             int base = GetAnimDirBase(asset, animIdx);
             int frameCount = anim.endFrame;
@@ -2997,15 +3020,16 @@ void FrameTick(float dt)
             dirSetIdx = 0;
         for (int d = 0; d < 8; d++)
         {
-            assetDirImgs[ai].dirs[d].pixels = sAssetDirSprites[ai][dirSetIdx][d].pixels;
-            assetDirImgs[ai].dirs[d].width  = sAssetDirSprites[ai][dirSetIdx][d].width;
-            assetDirImgs[ai].dirs[d].height = sAssetDirSprites[ai][dirSetIdx][d].height;
+            spriteDirImgs[si].dirs[d].pixels = sAssetDirSprites[ai][dirSetIdx][d].pixels;
+            spriteDirImgs[si].dirs[d].width  = sAssetDirSprites[ai][dirSetIdx][d].width;
+            spriteDirImgs[si].dirs[d].height = sAssetDirSprites[ai][dirSetIdx][d].height;
         }
     }
     Mode7::Render(sCamera, nullptr, sSprites, sSpriteCount, camObjPtr, sCamObjEditorScale,
                   assetsPtr, (int)sSpriteAssets.size(), sViewportAnimTime, isPlaying,
                   nullptr, spriteAngle,
-                  assetDirImgs.empty() ? nullptr : assetDirImgs.data(), (int)assetDirImgs.size());
+                  assetDirImgs.empty() ? nullptr : assetDirImgs.data(), (int)assetDirImgs.size(),
+                  spriteDirImgs.empty() ? nullptr : spriteDirImgs.data(), (int)spriteDirImgs.size());
     Mode7::UploadTexture();
 
     // ---- Layout: NEXXT-style fixed panels ----

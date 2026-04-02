@@ -63,6 +63,7 @@ typedef struct {
     FIXED scale;     // 8.8 fixed-point scale (256 = 1x)
     u16   rotation;  // world-space facing angle (brad, 0-65535)
     u8    animEnabled; // 0 = static, 1 = animate
+    u8    spriteType;  // 0=Prop, 1=Player, 2=Enemy, etc.
 } FloorSpriteGBA;
 
 static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
@@ -357,6 +358,7 @@ static void load_editor_sprites(void)
         g_sprites[i].scale       = afn_sprite_data[i][5];
         g_sprites[i].rotation    = (u16)afn_sprite_data[i][7];
         g_sprites[i].animEnabled = (u8)afn_sprite_data[i][8];
+        g_sprites[i].spriteType  = (u8)afn_sprite_data[i][6];
     }
     g_spriteCount = count;
 }
@@ -742,7 +744,8 @@ int main(void)
         for (si = 0; si < g_spriteCount; si++)
         {
             int aidx = g_sprites[si].assetIdx;
-            if (aidx >= 0 && aidx < AFN_ASSET_COUNT && g_sprites[si].animEnabled)
+            if (aidx >= 0 && aidx < AFN_ASSET_COUNT && g_sprites[si].animEnabled
+                && g_sprites[si].spriteType == 1) // 1 = Player
                 g_asset_anim_enabled[aidx] = 1;
         }
     }
