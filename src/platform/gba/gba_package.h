@@ -17,6 +17,7 @@ struct GBASpriteExport
     int   assetIdx;     // sprite asset index (-1 = none/placeholder)
     int   animIdx;      // default animation index
     int   spriteType;   // SpriteType enum (0=Prop, 1=Player, ...)
+    bool  animEnabled;  // false = static, no animation cycling
 };
 
 // Player direction sprite for GBA export (RGBA8 image)

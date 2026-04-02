@@ -301,9 +301,9 @@ static bool SaveProject(const std::string& path)
     for (int i = 0; i < sSpriteCount; i++)
     {
         const FloorSprite& sp = sSprites[i];
-        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f\n",
+        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d\n",
                 sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
-                sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation);
+                sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0);
     }
     fprintf(f, "\n");
 
@@ -437,12 +437,12 @@ static bool LoadProject(const std::string& path)
             if (sscanf(line, "count=%d", &ival) == 1) { /* just informational */ }
             else if (sSpriteCount < kMaxFloorSprites)
             {
-                int sid, aIdx = -1, anIdx = 0, typeVal = 0;
+                int sid, aIdx = -1, anIdx = 0, typeVal = 0, animEn = 1;
                 float sx, sy, sz, sc;
                 unsigned int col;
-                // Try extended format (with assetIdx, animIdx, type)
+                // Try extended format (with assetIdx, animIdx, type, rotation, animEnabled)
                 float rot = 0.0f;
-                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot);
+                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn);
                 if (matched >= 6)
                 {
                     FloorSprite& sp = sSprites[sSpriteCount];
@@ -457,6 +457,7 @@ static bool LoadProject(const std::string& path)
                     sp.type = (matched >= 9 && typeVal >= 0 && typeVal < (int)SpriteType::Count)
                         ? (SpriteType)typeVal : SpriteType::Prop;
                     sp.rotation = (matched >= 10) ? rot : 0.0f;
+                    sp.animEnabled = (matched >= 11) ? (animEn != 0) : true;
                     sp.selected = false;
                     sSpriteCount++;
                 }
@@ -2095,17 +2096,24 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             SpriteAsset& linkedAsset = sSpriteAssets[sp.assetIdx];
             if (!linkedAsset.anims.empty())
             {
-                const char* animPreview = (sp.animIdx >= 0 && sp.animIdx < (int)linkedAsset.anims.size())
-                    ? linkedAsset.anims[sp.animIdx].name.c_str() : "idle";
-                if (ImGui::BeginCombo("Anim##spranimlink", animPreview))
+                // Animation enable toggle
+                ImGui::Checkbox("Animate##spranimenab", &sp.animEnabled);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Enable animation cycling for this object");
+
+                if (sp.animEnabled)
                 {
+                    // Animation slots — one selectable per asset animation
+                    ImGui::Text("Animations:");
                     for (int ai = 0; ai < (int)linkedAsset.anims.size(); ai++)
                     {
+                        ImGui::PushID(ai + 9000);
                         bool sel = (sp.animIdx == ai);
-                        if (ImGui::Selectable(linkedAsset.anims[ai].name.c_str(), sel))
+                        char slotLabel[64];
+                        snprintf(slotLabel, sizeof(slotLabel), "%s (frames %d)", linkedAsset.anims[ai].name.c_str(), linkedAsset.anims[ai].endFrame);
+                        if (ImGui::Selectable(slotLabel, sel))
                             sp.animIdx = ai;
+                        ImGui::PopID();
                     }
-                    ImGui::EndCombo();
                 }
             }
         }
@@ -2639,6 +2647,7 @@ void FrameTick(float dt)
                     se.rotation = sSprites[i].rotation;
                     se.assetIdx = sSprites[i].assetIdx;
                     se.animIdx = sSprites[i].animIdx;
+                    se.animEnabled = sSprites[i].animEnabled;
                     se.spriteType = (int)sSprites[i].type;
                     // Use asset palette bank if linked, otherwise cycle 1-5
                     if (se.assetIdx >= 0 && se.assetIdx < (int)sSpriteAssets.size())
@@ -2952,6 +2961,15 @@ void FrameTick(float dt)
     float spriteAngle = sPlayerMoving ? sPlayerMoveAngle : sOrbitAngle + sPlayerMoveAngle;
     // Build per-asset direction image arrays for renderer
     // In Play mode, cycle through animation frames based on movement state
+    // Check which assets have any animation-enabled sprites
+    std::vector<bool> assetAnimEnabled(sSpriteAssets.size(), false);
+    for (int si = 0; si < sSpriteCount; si++)
+    {
+        int aidx = sSprites[si].assetIdx;
+        if (aidx >= 0 && aidx < (int)sSpriteAssets.size() && sSprites[si].animEnabled)
+            assetAnimEnabled[aidx] = true;
+    }
+
     std::vector<Mode7::AssetDirImages> assetDirImgs(sSpriteAssets.size());
     for (int ai = 0; ai < (int)sSpriteAssets.size() && ai < (int)sAssetDirSprites.size(); ai++)
     {
@@ -2959,7 +2977,7 @@ void FrameTick(float dt)
         const SpriteAsset& asset = sSpriteAssets[ai];
         int dirSetIdx = 0; // default: idle anim, frame 0
 
-        if (isPlaying && asset.anims.size() >= 2)
+        if (isPlaying && assetAnimEnabled[ai] && asset.anims.size() >= 2)
         {
             // Pick animation: idle (0) when still, run (1) when moving
             int animIdx = (sPlayerMoving && asset.anims.size() > 1) ? 1 : 0;

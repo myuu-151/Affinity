@@ -132,6 +132,7 @@ struct FloorSprite
     int   spriteId = 0;      // which sprite graphic (legacy)
     int   assetIdx = -1;     // index into sprite asset list (-1 = none)
     int   animIdx  = 0;      // which animation to play
+    bool  animEnabled = true; // false = static (no animation cycling)
     uint32_t color = 0xFFFF00FF; // tint color (ABGR) — used for editor preview
     bool  selected = false;
 };

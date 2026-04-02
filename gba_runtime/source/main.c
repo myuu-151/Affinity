@@ -44,7 +44,8 @@ static int   auto_orbit_smooth;   // smoothed auto-orbit value (fixed-point)
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
 static int   g_active_dir_set[AFN_ASSET_COUNT]; // currently loaded direction set per asset
 static int   g_anim_frame_counter; // VBlank counter for animation frame cycling
-static int   g_current_anim;       // 0=idle, 1=run
+static int   g_current_anim[AFN_ASSET_COUNT];  // per-asset: 0=idle, 1=run
+static u8    g_asset_anim_enabled[AFN_ASSET_COUNT]; // per-asset: any sprite wants animation?
 #endif
 
 // ---------------------------------------------------------------------------
@@ -61,6 +62,7 @@ typedef struct {
     s16   assetIdx;  // sprite asset index (-1 = default solid tile)
     FIXED scale;     // 8.8 fixed-point scale (256 = 1x)
     u16   rotation;  // world-space facing angle (brad, 0-65535)
+    u8    animEnabled; // 0 = static, 1 = animate
 } FloorSpriteGBA;
 
 static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
@@ -227,9 +229,23 @@ static void init_obj_sprites(void)
         for (ai = 0; ai < AFN_ASSET_COUNT; ai++)
         {
             g_active_dir_set[ai] = -1; // mark as unloaded so switch_dir_anim_set works
+            g_current_anim[ai] = 0;
+            g_asset_anim_enabled[ai] = 0;
         }
         g_anim_frame_counter = 0;
-        g_current_anim = 0;
+
+        // Determine which assets have animation-enabled sprites
+#if defined(AFN_SPRITE_COUNT) && AFN_SPRITE_COUNT > 0
+        {
+            int si;
+            for (si = 0; si < g_spriteCount; si++)
+            {
+                int aidx = g_sprites[si].assetIdx;
+                if (aidx >= 0 && aidx < AFN_ASSET_COUNT && g_sprites[si].animEnabled)
+                    g_asset_anim_enabled[aidx] = 1;
+            }
+        }
+#endif
     }
 #endif
 
@@ -346,13 +362,14 @@ static void load_editor_sprites(void)
 
     for (i = 0; i < count; i++)
     {
-        g_sprites[i].x        = afn_sprite_data[i][0];
-        g_sprites[i].y        = afn_sprite_data[i][1];
-        g_sprites[i].z        = afn_sprite_data[i][2];
-        g_sprites[i].palIdx   = afn_sprite_data[i][3];
-        g_sprites[i].assetIdx = afn_sprite_data[i][4];
-        g_sprites[i].scale    = afn_sprite_data[i][5];
-        g_sprites[i].rotation = (u16)afn_sprite_data[i][7];
+        g_sprites[i].x           = afn_sprite_data[i][0];
+        g_sprites[i].y           = afn_sprite_data[i][1];
+        g_sprites[i].z           = afn_sprite_data[i][2];
+        g_sprites[i].palIdx      = afn_sprite_data[i][3];
+        g_sprites[i].assetIdx    = afn_sprite_data[i][4];
+        g_sprites[i].scale       = afn_sprite_data[i][5];
+        g_sprites[i].rotation    = (u16)afn_sprite_data[i][7];
+        g_sprites[i].animEnabled = (u8)afn_sprite_data[i][8];
     }
     g_spriteCount = count;
 }
@@ -885,27 +902,35 @@ int main(void)
             }
             cam_angle = orbit_angle;
 
-            // DMA cycle direction animation frames based on movement
+            // DMA cycle direction animation frames — per-asset animation control
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
             {
-                int targetAnim = player_moving ? 1 : 0;
-                if (targetAnim != g_current_anim)
-                {
-                    g_current_anim = targetAnim;
-                    g_anim_frame_counter = 0;
-                }
                 g_anim_frame_counter++;
 
                 int ai;
                 for (ai = 0; ai < AFN_ASSET_COUNT; ai++)
                 {
                     if (!afn_asset_dir_desc[ai][4]) continue;
-#ifdef AFN_MAX_ANIMS
-                    if (g_current_anim >= AFN_MAX_ANIMS) continue;
+
+                    // Only animate assets that have animation-enabled sprites
+                    if (!g_asset_anim_enabled[ai])
+                        continue;
+
+                    // Determine target anim for this asset based on player movement
+                    int targetAnim = player_moving ? 1 : 0;
+                    if (targetAnim != g_current_anim[ai])
                     {
-                        int baseSet = afn_anim_desc[ai][g_current_anim][0];
-                        int fc      = afn_anim_desc[ai][g_current_anim][1];
-                        int fps     = afn_anim_desc[ai][g_current_anim][2];
+                        g_current_anim[ai] = targetAnim;
+                        // Reset frame counter on anim switch (per-asset reset would need per-asset counters,
+                        // but shared counter is fine since all animated assets switch together)
+                    }
+
+#ifdef AFN_MAX_ANIMS
+                    if (g_current_anim[ai] >= AFN_MAX_ANIMS) continue;
+                    {
+                        int baseSet = afn_anim_desc[ai][g_current_anim[ai]][0];
+                        int fc      = afn_anim_desc[ai][g_current_anim[ai]][1];
+                        int fps     = afn_anim_desc[ai][g_current_anim[ai]][2];
                         if (fc <= 0) continue;
                         if (fps <= 0) fps = 8;
                         // Compute frame index from VBlank counter (60Hz / fps)
