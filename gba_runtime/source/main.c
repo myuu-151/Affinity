@@ -694,7 +694,7 @@ int main(void)
     // --- Video setup ---
     REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
 
-    REG_BG2CNT = BG_CBB(2) | BG_SBB(28) | BG_AFF_64x64 | BG_8BPP;
+    REG_BG2CNT = BG_CBB(2) | BG_SBB(28) | BG_AFF_64x64 | BG_8BPP | BG_PRIO(2);
 
     REG_BG2PA = 0x0100;
     REG_BG2PB = 0;

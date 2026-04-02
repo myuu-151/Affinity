@@ -300,6 +300,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
         assetTileStart.push_back((int)allTiles.size() / 8);
         assetTilesPerFrame.push_back(tilesPerFrame);
 
+        // Skip static frames for direction-based assets — they use DMA direction tiles
+        // and including them wastes OBJ VRAM (critical when 2+ direction assets fill 32KB)
+        if (asset.hasDirections && !asset.dirAnimSets.empty()) continue;
+
         for (size_t fi = 0; fi < asset.frames.size(); fi++)
         {
             auto td = FrameToGBATiles(asset.frames[fi]);
@@ -496,7 +500,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
     int totalTileCount = (int)allTiles.size() / 8;
     int minimapTile = totalTileCount + dirVramNextTile;
 
-    // Emit combined tile data
+    // Emit combined tile data (always emit even if empty — runtime expects the symbol)
     if (!allTiles.empty())
     {
         f << "// Combined OBJ tile data (" << totalTileCount << " tiles, "
@@ -511,8 +515,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
             if (i + 1 < allTiles.size()) f << ", ";
         }
         f << "\n};\n";
-        f << "#define AFN_ALL_TILES_LEN " << (int)allTiles.size() * 4 << "\n\n";
     }
+    else
+    {
+        f << "// No static OBJ tiles (all assets use direction DMA)\n";
+        f << "static const u32 afn_all_tiles[1] = { 0 };\n";
+    }
+    f << "#define AFN_ALL_TILES_LEN " << (int)allTiles.size() * 4 << "\n\n";
 
     // Emit direction animation ROM tile data (for DMA streaming)
     if (!dirAnimAllTiles.empty())
@@ -644,8 +653,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "};\n\n";
     }
 
-    // Minimap tile index
-    f << "#define AFN_MINIMAP_TILE " << minimapTile << "\n\n";
+    // Minimap tile index (only emit if it fits within 1024-tile OBJ VRAM limit)
+    if (minimapTile < 1024)
+        f << "#define AFN_MINIMAP_TILE " << minimapTile << "\n\n";
 
     // Asset descriptor table
     if (!assets.empty())
