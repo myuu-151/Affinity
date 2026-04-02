@@ -177,6 +177,7 @@ static float sOrbitAngle = 0.0f;  // play mode: angle from player to camera
 static float sOrbitDist = 60.0f; // play mode: distance from player to camera
 static float sPlayerMoveAngle = 0.0f; // player movement direction (camera-relative)
 static bool  sPlayerMoving = false;   // is the player moving this frame
+static bool  sPlayerSprinting = false; // is the player holding sprint
 static float sAutoOrbitCurrent = 0.0f; // smoothed auto-orbit speed
 static float sManualOrbitCurrent = 0.0f; // smoothed manual orbit speed (J/L)
 static float sPlayerVelX = 0.0f, sPlayerVelZ = 0.0f; // smoothed player velocity
@@ -2868,7 +2869,7 @@ void FrameTick(float dt)
         else
         {
             // ---- PLAY MODE: third-person orbit camera ----
-            float moveSpeed = 35.0f * dt;
+            float moveSpeed = (ImGui::IsKeyDown(ImGuiKey_LeftShift) ? 53.0f : 35.0f) * dt;
             float rotSpeed  = 3.0f * dt;
 
             // Find player sprite
@@ -2896,6 +2897,7 @@ void FrameTick(float dt)
 
                 bool wasMoving = sPlayerMoving;
                 sPlayerMoving = (inputX != 0.0f || inputZ != 0.0f);
+                sPlayerSprinting = sPlayerMoving && ImGui::IsKeyDown(ImGuiKey_LeftShift);
 
                 // J/L manual orbit — smooth ease-in/out on orbit angle
                 {
@@ -3045,13 +3047,16 @@ void FrameTick(float dt)
 
         if (isPlaying && sp.animEnabled && asset.anims.size() >= 2)
         {
-            // Pick animation: idle (0) when still, run (1) when moving
+            // Pick animation: idle (0), run (1), sprint (2)
             // Only player-type sprites respond to player movement
-            bool useRun = false;
-            if (sp.type == SpriteType::Player)
-                useRun = sPlayerMoving;
-
-            int animIdx = (useRun && asset.anims.size() > 1) ? 1 : 0;
+            int animIdx = 0;
+            if (sp.type == SpriteType::Player && sPlayerMoving)
+            {
+                if (sPlayerSprinting && asset.anims.size() > 2)
+                    animIdx = 2; // sprint
+                else if (asset.anims.size() > 1)
+                    animIdx = 1; // run
+            }
             const SpriteAnim& anim = asset.anims[animIdx];
             int base = GetAnimDirBase(asset, animIdx);
             int frameCount = anim.endFrame;

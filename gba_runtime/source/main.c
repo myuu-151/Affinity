@@ -44,7 +44,7 @@ static int   auto_orbit_smooth;   // smoothed auto-orbit value (fixed-point)
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
 static int   g_active_dir_set[AFN_ASSET_COUNT]; // currently loaded direction set per asset
 static int   g_anim_frame_counter; // VBlank counter for animation frame cycling
-static int   g_current_anim[AFN_ASSET_COUNT];  // per-asset: 0=idle, 1=run
+static int   g_current_anim[AFN_ASSET_COUNT];  // per-asset: 0=idle, 1=run, 2=sprint
 static u8    g_asset_anim_enabled[AFN_ASSET_COUNT]; // per-asset: any sprite wants animation?
 #endif
 
@@ -803,7 +803,7 @@ int main(void)
             // ORBIT CAMERA MODE — Asterix XXL style
             // ============================================================
 
-            FIXED moveSpeed = 37;
+            FIXED moveSpeed = key_is_down(KEY_B) ? 56 : 37;
             int   rotSpeed  = 0x0200;
 
             // View angle = orbit_angle (camera is behind player, looking forward)
@@ -826,7 +826,6 @@ int main(void)
             }
 
             int wasMoving = player_moving;
-            player_moving = (inputFwd || inputRight);
 
             // L/R shoulder = manual orbit (always applies)
             if (key_is_down(KEY_L))
@@ -859,6 +858,8 @@ int main(void)
                     auto_orbit_smooth = 0;
                 orbit_angle += auto_orbit_smooth;
             }
+
+            player_moving = (inputFwd || inputRight);
 
             if (player_moving)
             {
@@ -897,13 +898,19 @@ int main(void)
                 FIXED orbCos = lu_cos(orbit_angle) >> 4;
                 FIXED targetX = player_x - ((orbSin * orbit_dist) >> 8);
                 FIXED targetZ = player_z + ((orbCos * orbit_dist) >> 8);
-                // Smooth follow: blend 3/8 toward target each frame
+                // Smooth follow: slow ease-in, smooth ease-out
                 FIXED ddx = targetX - cam_x;
                 FIXED ddz = targetZ - cam_z;
-                if (ddx > -16 && ddx < 16 && ddz > -16 && ddz < 16)
+                if (ddx > -8 && ddx < 8 && ddz > -8 && ddz < 8)
                 { cam_x = targetX; cam_z = targetZ; }
                 else
-                { cam_x += (ddx * 3) >> 4; cam_z += (ddz * 3) >> 4; }
+                {
+                    // Ease-out (decelerating): 1/8 blend
+                    // Ease-in (accelerating): 1/16 blend for delayed start
+                    int blend = player_moving ? 4 : 3;  // >>4 = 6%, >>3 = 12%
+                    cam_x += ddx >> blend;
+                    cam_z += ddz >> blend;
+                }
             }
             cam_angle = orbit_angle;
 
@@ -921,13 +928,20 @@ int main(void)
                     if (!g_asset_anim_enabled[ai])
                         continue;
 
-                    // Determine target anim for this asset based on player movement
-                    int targetAnim = player_moving ? 1 : 0;
+                    // Determine target anim: idle(0), run(1), sprint(2)
+                    int targetAnim = 0;
+                    if (player_moving)
+                    {
+                        int maxAnim = AFN_MAX_ANIMS - 1;
+                        if (key_is_down(KEY_B) && maxAnim >= 2)
+                            targetAnim = 2; // sprint
+                        else
+                            targetAnim = 1; // run
+                    }
                     if (targetAnim != g_current_anim[ai])
                     {
                         g_current_anim[ai] = targetAnim;
-                        // Reset frame counter on anim switch (per-asset reset would need per-asset counters,
-                        // but shared counter is fine since all animated assets switch together)
+                        g_anim_frame_counter = 0;
                     }
 
 #ifdef AFN_MAX_ANIMS

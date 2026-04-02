@@ -575,8 +575,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
     // Asset direction descriptor table: { setCount, tpf, dirSize, palBank, hasDirs, vramTile0 }
     if (!assets.empty())
     {
+        int maxDirSets = 0;
+        for (size_t ai = 0; ai < assets.size(); ai++)
+            if (assetDirInfos[ai].has && assetDirInfos[ai].setCount > maxDirSets)
+                maxDirSets = assetDirInfos[ai].setCount;
+        if (maxDirSets < 1) maxDirSets = 1;
         f << "#define AFN_HAS_ASSET_DIRS 1\n";
-        f << "#define AFN_MAX_DIR_SETS 8\n";
+        f << "#define AFN_MAX_DIR_SETS " << maxDirSets << "\n";
         f << "static const int afn_asset_dir_desc[][6] = {\n";
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
@@ -600,13 +605,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
             f << "    { ";
-            for (int si = 0; si < 8; si++)
+            for (int si = 0; si < maxDirSets; si++)
             {
                 if (assetDirInfos[ai].has && si < (int)assetDirInfos[ai].romSetU32Offset.size())
                     f << assetDirInfos[ai].romSetU32Offset[si];
                 else
                     f << -1;
-                if (si < 7) f << ", ";
+                if (si < maxDirSets - 1) f << ", ";
             }
             f << " },\n";
         }
