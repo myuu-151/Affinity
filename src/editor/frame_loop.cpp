@@ -2960,9 +2960,14 @@ void FrameTick(float dt)
                 {
                     float targetX = player.x + sinf(sOrbitAngle) * sOrbitDist;
                     float targetZ = player.z + cosf(sOrbitAngle) * sOrbitDist;
-                    // Faster follow during orbit to prevent side drift, slower for WASD drag
+                    // Normal walk: snappy follow. Sprint: laggy ease-in/out.
                     bool orbiting = fabsf(sManualOrbitCurrent) > 0.0f;
-                    float followRate = std::min(1.0f, (orbiting ? 12.0f : 2.5f) * dt);
+                    float baseRate = orbiting ? 12.0f : 2.5f;
+                    float followRate;
+                    if (sPlayerSprinting)
+                        followRate = std::min(1.0f, (sPlayerMoving ? 1.2f : 2.0f) * dt);
+                    else
+                        followRate = std::min(1.0f, baseRate * dt);
                     float dx = targetX - sCamera.x;
                     float dz = targetZ - sCamera.z;
                     if (fabsf(dx) < 0.1f && fabsf(dz) < 0.1f)

@@ -136,19 +136,19 @@ static void load_checkerboard(void)
     // Tile 0 = transparent (palette 0 = backdrop/sky blue) for out-of-bounds
     memset(&tile8_mem[2][0], 0, 64);
 
-    // Tile 1 = 8x8 tile with internal 4x4 checkerboard sub-squares
-    // This is the best balance: no Mode 7 stripe artifacts, close to editor size
-    u8 *tile = (u8*)&tile8_mem[2][1];
-    for (int py = 0; py < 8; py++)
-        for (int px = 0; px < 8; px++)
-            tile[py * 8 + px] = ((px / 4) + (py / 4)) & 1 ? 2 : 1;
+    // Tile 1 = solid dark, Tile 2 = solid light (full 8x8 each)
+    memset(&tile8_mem[2][1], 1, 64);
+    memset(&tile8_mem[2][2], 2, 64);
 
-    // Fill 64x64 map: checker tile within game world bounds (0-32 tiles)
-    u8 *map = (u8*)se_mem[28];
-    memset(map, 0, 64 * 64);  // default = tile 0 (void/transparent)
-    for (int y = 0; y < 32; y++)
-        for (int x = 0; x < 32; x++)
-            map[y * 64 + x] = 1;
+    // Fill 64x64 map: 2x2 tile checkerboard (each checker = 2x2 tiles = 16x16 px)
+    {
+        u8 *map = (u8*)se_mem[28];
+        int y, x;
+        memset(map, 0, 64 * 64);
+        for (y = 0; y < 32; y++)
+            for (x = 0; x < 32; x++)
+                map[y * 64 + x] = (((x / 2) + (y / 2)) & 1) ? 2 : 1;
+    }
 }
 
 #ifdef AFFINITY_HAS_MAPDATA
@@ -898,18 +898,23 @@ int main(void)
                 FIXED orbCos = lu_cos(orbit_angle) >> 4;
                 FIXED targetX = player_x - ((orbSin * orbit_dist) >> 8);
                 FIXED targetZ = player_z + ((orbCos * orbit_dist) >> 8);
-                // Smooth follow: slow ease-in, smooth ease-out
+                // Smooth follow: normal walk = snappy, sprint = laggy ease-in/out
                 FIXED ddx = targetX - cam_x;
                 FIXED ddz = targetZ - cam_z;
-                if (ddx > -8 && ddx < 8 && ddz > -8 && ddz < 8)
+                if (ddx > -16 && ddx < 16 && ddz > -16 && ddz < 16)
                 { cam_x = targetX; cam_z = targetZ; }
-                else
+                else if (key_is_down(KEY_B))
                 {
-                    // Ease-out (decelerating): 1/8 blend
-                    // Ease-in (accelerating): 1/16 blend for delayed start
-                    int blend = player_moving ? 4 : 3;  // >>4 = 6%, >>3 = 12%
+                    // Sprint: slow ease-in (1/16), smooth ease-out (1/8)
+                    int blend = player_moving ? 4 : 3;
                     cam_x += ddx >> blend;
                     cam_z += ddz >> blend;
+                }
+                else
+                {
+                    // Normal: original snappy follow
+                    cam_x += (ddx * 3) >> 4;
+                    cam_z += (ddz * 3) >> 4;
                 }
             }
             cam_angle = orbit_angle;
