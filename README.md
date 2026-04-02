@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/affinity_burst.png" alt="Affinity Logo" width="300">
+  <img src="assets/affinity_logo.png" alt="Affinity Logo" width="300">
 </p>
 
 # Affinity GBA Engine
