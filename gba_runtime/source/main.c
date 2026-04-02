@@ -482,7 +482,6 @@ static void update_sprites(void)
                 int ai = g_sprites[sprIdx].assetIdx;
                 if (ai >= 0 && ai < AFN_ASSET_COUNT)
                 {
-                    // Always get the asset's original frame size for consistent scaling
                     scaleSize = afn_asset_desc[ai][3];
 #ifdef AFN_HAS_ASSET_DIRS
                     // Check if this asset has directional sprites
@@ -499,6 +498,7 @@ static void update_sprites(void)
                         int adTpf = afn_asset_dir_desc[ai][1];
                         tileId = afn_asset_dir_desc[ai][0] + dirIdx * adTpf;
                         baseSize = afn_asset_dir_desc[ai][2];
+                        scaleSize = baseSize; // use direction size for scaling
                         palBank = afn_asset_dir_desc[ai][3];
                     }
                     else
@@ -515,6 +515,13 @@ static void update_sprites(void)
         }
 
         if (palBank > 15) palBank = 1;
+
+        // Skip sprites with no valid asset (prevents rogue pixels)
+        if (sprIdx != player_sprite_idx && g_sprites[sprIdx].assetIdx < 0)
+        {
+            obj_mem[16 + i].attr0 = ATTR0_HIDE;
+            continue;
+        }
 
         {
             int sprScale = g_sprites[sprIdx].scale;

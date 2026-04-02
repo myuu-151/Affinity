@@ -257,12 +257,29 @@ static void QuantizePlayerDirSprites(
             }
     }
 
-    // Sort by frequency, pick top 15
-    std::sort(colorFreqs.begin(), colorFreqs.end(),
-        [](const ColorFreq& a, const ColorFreq& b) { return a.count > b.count; });
+    // Reduce to 15 colors by merging closest pairs (preserves visually distinct colors)
+    while ((int)colorFreqs.size() > 15)
+    {
+        int bestI = 0, bestJ = 1, bestDist = 999999;
+        for (size_t i = 0; i < colorFreqs.size(); i++)
+        {
+            for (size_t j = i + 1; j < colorFreqs.size(); j++)
+            {
+                int dr = (int)(colorFreqs[i].rgb15 & 0x1F) - (int)(colorFreqs[j].rgb15 & 0x1F);
+                int dg = (int)((colorFreqs[i].rgb15 >> 5) & 0x1F) - (int)((colorFreqs[j].rgb15 >> 5) & 0x1F);
+                int db = (int)((colorFreqs[i].rgb15 >> 10) & 0x1F) - (int)((colorFreqs[j].rgb15 >> 10) & 0x1F);
+                int dist = dr * dr + dg * dg + db * db;
+                if (dist < bestDist) { bestDist = dist; bestI = (int)i; bestJ = (int)j; }
+            }
+        }
+        // Merge j into i (keep the more frequent color's RGB, sum counts)
+        if (colorFreqs[bestI].count < colorFreqs[bestJ].count)
+            colorFreqs[bestI].rgb15 = colorFreqs[bestJ].rgb15;
+        colorFreqs[bestI].count += colorFreqs[bestJ].count;
+        colorFreqs.erase(colorFreqs.begin() + bestJ);
+    }
 
     int palCount = (int)colorFreqs.size();
-    if (palCount > 15) palCount = 15;
 
     // Build palette (index 0 = transparent)
     outPalette[0] = 0;

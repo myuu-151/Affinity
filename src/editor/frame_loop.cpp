@@ -1487,31 +1487,55 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                     if (totalFrames < 1) totalFrames = 1;
 
                     // Extract unique colors for palette (index 0 = transparent)
-                    // First pass: collect unique colors (skip fully transparent pixels)
-                    uint32_t uniqueColors[16] = {};
-                    int numUnique = 0;
-                    // Index 0 reserved for transparent
+                    // Collect ALL unique colors, then merge closest pairs down to 15
                     asset.palette[0] = 0x00000000;
 
-                    for (int py = 0; py < imgH && numUnique < 15; py++)
+                    struct ColorEntry { uint32_t col; int count; };
+                    std::vector<ColorEntry> allColors;
+                    for (int py = 0; py < imgH; py++)
                     {
-                        for (int px = 0; px < imgW && numUnique < 15; px++)
+                        for (int px = 0; px < imgW; px++)
                         {
                             const unsigned char* p = imgData + (py * imgW + px) * 4;
-                            if (p[3] < 128) continue; // transparent
+                            if (p[3] < 128) continue;
                             uint32_t col = p[0] | (p[1] << 8) | (p[2] << 16) | 0xFF000000;
                             bool found = false;
-                            for (int c = 0; c < numUnique; c++)
+                            for (size_t c = 0; c < allColors.size(); c++)
                             {
-                                if (uniqueColors[c] == col) { found = true; break; }
+                                if (allColors[c].col == col) { allColors[c].count++; found = true; break; }
                             }
                             if (!found)
+                                allColors.push_back({col, 1});
+                        }
+                    }
+
+                    // Merge closest color pairs until <= 15 remain
+                    while ((int)allColors.size() > 15)
+                    {
+                        int bestI = 0, bestJ = 1, bestDist = INT_MAX;
+                        for (size_t i = 0; i < allColors.size(); i++)
+                        {
+                            for (size_t j = i + 1; j < allColors.size(); j++)
                             {
-                                uniqueColors[numUnique] = col;
-                                asset.palette[numUnique + 1] = col;
-                                numUnique++;
+                                int dr = (int)(allColors[i].col & 0xFF) - (int)(allColors[j].col & 0xFF);
+                                int dg = (int)((allColors[i].col >> 8) & 0xFF) - (int)((allColors[j].col >> 8) & 0xFF);
+                                int db = (int)((allColors[i].col >> 16) & 0xFF) - (int)((allColors[j].col >> 16) & 0xFF);
+                                int dist = dr*dr + dg*dg + db*db;
+                                if (dist < bestDist) { bestDist = dist; bestI = (int)i; bestJ = (int)j; }
                             }
                         }
+                        if (allColors[bestI].count < allColors[bestJ].count)
+                            allColors[bestI].col = allColors[bestJ].col;
+                        allColors[bestI].count += allColors[bestJ].count;
+                        allColors.erase(allColors.begin() + bestJ);
+                    }
+
+                    uint32_t uniqueColors[16] = {};
+                    int numUnique = (int)allColors.size();
+                    for (int c = 0; c < numUnique; c++)
+                    {
+                        uniqueColors[c] = allColors[c].col;
+                        asset.palette[c + 1] = allColors[c].col;
                     }
 
                     // Slice into frames
