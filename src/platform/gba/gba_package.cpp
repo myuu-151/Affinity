@@ -320,6 +320,12 @@ static void QuantizePlayerDirSprites(
                 int sx = ox * srcW / dirSize;
                 int idx = (sy * srcW + sx) * 4;
                 if (dirs[d].pixels[idx + 3] < 128) continue;
+                // Skip edge pixels to prevent stray anti-aliased artifacts
+                if (ox == 0 || oy == 0 || ox == dirSize - 1 || oy == dirSize - 1)
+                {
+                    // Only keep edge pixel if fully opaque (alpha == 255)
+                    if (dirs[d].pixels[idx + 3] < 255) continue;
+                }
                 unsigned r = dirs[d].pixels[idx + 0] >> 3;
                 unsigned g = dirs[d].pixels[idx + 1] >> 3;
                 unsigned b = dirs[d].pixels[idx + 2] >> 3;
@@ -449,66 +455,154 @@ static bool GenerateMapData(const std::string& runtimeDir,
         }
     }
 
-    // Quantize and append per-asset directional sprites (8 directions each)
+    // Quantize and append per-asset directional sprites (multi-set support)
+    // Set 0's tiles go into allTiles (VRAM init). All sets go into dirAnimAllTiles (ROM for DMA).
     struct AssetDirInfo {
-        bool has;
-        int tile0;
-        int dirSize;
-        int palBank;
-        uint32_t palette[16];
+        bool has = false;
+        int setCount = 0;
+        int dirSize = 64;
+        int palBank = 0;
+        int vramTile0 = 0;
+        uint32_t palette[16] = {};
+        std::vector<int> romSetU32Offset; // u32 index into dirAnimAllTiles per set
     };
     std::vector<AssetDirInfo> assetDirInfos(assets.size());
+    std::vector<uint32_t> dirAnimAllTiles; // ROM data for DMA streaming
 
     for (size_t ai = 0; ai < assets.size(); ai++)
     {
-        assetDirInfos[ai].has = false;
-        if (!assets[ai].hasDirections) continue;
+        if (!assets[ai].hasDirections || assets[ai].dirAnimSets.empty()) continue;
 
-        // Check if at least one direction image exists
+        // Check if any direction image exists across all sets
         bool anyDir = false;
-        for (int d = 0; d < 8; d++)
-            if (assets[ai].dirImages[d].pixels && assets[ai].dirImages[d].width > 0)
-            { anyDir = true; break; }
+        for (size_t si = 0; si < assets[ai].dirAnimSets.size() && !anyDir; si++)
+            for (int d = 0; d < 8; d++)
+                if (assets[ai].dirAnimSets[si].dirImages[d].pixels &&
+                    assets[ai].dirAnimSets[si].dirImages[d].width > 0)
+                { anyDir = true; break; }
         if (!anyDir) continue;
 
+        int setCount = (int)assets[ai].dirAnimSets.size();
         assetDirInfos[ai].has = true;
+        assetDirInfos[ai].setCount = setCount;
         assetDirInfos[ai].dirSize = 64;
+        assetDirInfos[ai].palBank = assets[ai].palBank;
 
-        // Quantize direction images
-        QuantizedDirFrame adFrames[8];
-        uint32_t adPalette[16];
-        QuantizePlayerDirSprites(assets[ai].dirImages, adFrames, adPalette);
+        // Collect ALL unique colors across ALL sets for shared palette
+        struct ColorFreq { unsigned short rgb15; int count; };
+        std::vector<ColorFreq> colorFreqs;
+        auto findOrAdd = [&](unsigned short c15) -> int {
+            for (size_t i = 0; i < colorFreqs.size(); i++)
+                if (colorFreqs[i].rgb15 == c15) { colorFreqs[i].count++; return (int)i; }
+            colorFreqs.push_back({c15, 1});
+            return (int)colorFreqs.size() - 1;
+        };
 
-        // Check if these direction tiles are identical to player direction tiles
-        // (same sprite sheet used for both player and this asset)
-        bool canSharePlayerTiles = false;
-        if (hasPlayerDirs)
-        {
-            canSharePlayerTiles = true;
-            for (int d = 0; d < 8 && canSharePlayerTiles; d++)
-            {
-                if (memcmp(adFrames[d].pixels, dirFrames[d].pixels, 64 * 64) != 0)
-                    canSharePlayerTiles = false;
-            }
-        }
-
-        if (canSharePlayerTiles)
-        {
-            // Reuse player direction tiles and palette — no new tile data needed
-            assetDirInfos[ai].tile0 = playerDirTile0;
-            assetDirInfos[ai].palBank = playerDirPalBank;
-            memcpy(assetDirInfos[ai].palette, dirPalette, sizeof(dirPalette));
-        }
-        else
-        {
-            assetDirInfos[ai].palBank = assets[ai].palBank;
-            memcpy(assetDirInfos[ai].palette, adPalette, sizeof(adPalette));
-
-            assetDirInfos[ai].tile0 = (int)allTiles.size() / 8;
+        for (size_t si = 0; si < assets[ai].dirAnimSets.size(); si++)
             for (int d = 0; d < 8; d++)
             {
-                auto td = RawPixelsToGBATiles(adFrames[d].pixels, 64);
-                allTiles.insert(allTiles.end(), td.begin(), td.end());
+                const auto& img = assets[ai].dirAnimSets[si].dirImages[d];
+                if (!img.pixels || img.width <= 0 || img.height <= 0) continue;
+                for (int y = 0; y < img.height; y++)
+                    for (int x = 0; x < img.width; x++)
+                    {
+                        int idx = (y * img.width + x) * 4;
+                        if (img.pixels[idx + 3] < 128) continue;
+                        unsigned r = img.pixels[idx + 0] >> 3;
+                        unsigned g = img.pixels[idx + 1] >> 3;
+                        unsigned b = img.pixels[idx + 2] >> 3;
+                        findOrAdd((unsigned short)(r | (g << 5) | (b << 10)));
+                    }
+            }
+
+        // Merge to 15 colors (preserve visually distinct colors)
+        while ((int)colorFreqs.size() > 15)
+        {
+            int bestI = 0, bestJ = 1, bestDist = 999999;
+            for (size_t i = 0; i < colorFreqs.size(); i++)
+                for (size_t j = i + 1; j < colorFreqs.size(); j++)
+                {
+                    int dr = (int)(colorFreqs[i].rgb15 & 0x1F) - (int)(colorFreqs[j].rgb15 & 0x1F);
+                    int dg = (int)((colorFreqs[i].rgb15 >> 5) & 0x1F) - (int)((colorFreqs[j].rgb15 >> 5) & 0x1F);
+                    int db = (int)((colorFreqs[i].rgb15 >> 10) & 0x1F) - (int)((colorFreqs[j].rgb15 >> 10) & 0x1F);
+                    int dist = dr*dr + dg*dg + db*db;
+                    if (dist < bestDist) { bestDist = dist; bestI = (int)i; bestJ = (int)j; }
+                }
+            if (colorFreqs[bestI].count < colorFreqs[bestJ].count)
+                colorFreqs[bestI].rgb15 = colorFreqs[bestJ].rgb15;
+            colorFreqs[bestI].count += colorFreqs[bestJ].count;
+            colorFreqs.erase(colorFreqs.begin() + bestJ);
+        }
+
+        int palCount = (int)colorFreqs.size();
+        memset(assetDirInfos[ai].palette, 0, sizeof(assetDirInfos[ai].palette));
+        for (int i = 0; i < palCount; i++)
+        {
+            unsigned short c = colorFreqs[i].rgb15;
+            unsigned r = (c & 0x1F) << 3;
+            unsigned g = ((c >> 5) & 0x1F) << 3;
+            unsigned b = ((c >> 10) & 0x1F) << 3;
+            assetDirInfos[ai].palette[i + 1] = r | (g << 8) | (b << 16) | 0xFF000000;
+        }
+
+        auto nearestPal = [&](unsigned short c15) -> uint8_t {
+            int bestDist = 999999;
+            uint8_t bestIdx = 1;
+            for (int i = 0; i < palCount; i++)
+            {
+                int dr = (int)(c15 & 0x1F) - (int)(colorFreqs[i].rgb15 & 0x1F);
+                int dg = (int)((c15 >> 5) & 0x1F) - (int)((colorFreqs[i].rgb15 >> 5) & 0x1F);
+                int db = (int)((c15 >> 10) & 0x1F) - (int)((colorFreqs[i].rgb15 >> 10) & 0x1F);
+                int dist = dr*dr + dg*dg + db*db;
+                if (dist < bestDist) { bestDist = dist; bestIdx = (uint8_t)(i + 1); }
+            }
+            return bestIdx;
+        };
+
+        // Quantize and tile each set
+        int dirSize = 64;
+        // Share player direction VRAM tiles if player dirs exist (avoids VRAM overflow)
+        if (hasPlayerDirs && playerDirTile0 > 0)
+            assetDirInfos[ai].vramTile0 = playerDirTile0;
+        else
+            assetDirInfos[ai].vramTile0 = (int)allTiles.size() / 8;
+
+        for (int si = 0; si < setCount; si++)
+        {
+            assetDirInfos[ai].romSetU32Offset.push_back((int)dirAnimAllTiles.size());
+
+            for (int d = 0; d < 8; d++)
+            {
+                QuantizedDirFrame qf;
+                memset(qf.pixels, 0, sizeof(qf.pixels));
+
+                const auto& img = assets[ai].dirAnimSets[si].dirImages[d];
+                if (img.pixels && img.width > 0 && img.height > 0)
+                {
+                    for (int oy = 0; oy < dirSize; oy++)
+                    {
+                        int sy = oy * img.height / dirSize;
+                        for (int ox = 0; ox < dirSize; ox++)
+                        {
+                            int sx = ox * img.width / dirSize;
+                            int idx = (sy * img.width + sx) * 4;
+                            if (img.pixels[idx + 3] < 128) continue;
+                            // Skip edge pixels to prevent stray anti-aliased artifacts
+                            if (ox == 0 || oy == 0 || ox == dirSize - 1 || oy == dirSize - 1)
+                            {
+                                if (img.pixels[idx + 3] < 255) continue;
+                            }
+                            unsigned r = img.pixels[idx + 0] >> 3;
+                            unsigned g = img.pixels[idx + 1] >> 3;
+                            unsigned b = img.pixels[idx + 2] >> 3;
+                            qf.pixels[oy * dirSize + ox] = nearestPal(
+                                (unsigned short)(r | (g << 5) | (b << 10)));
+                        }
+                    }
+                }
+
+                auto td = RawPixelsToGBATiles(qf.pixels, dirSize);
+                dirAnimAllTiles.insert(dirAnimAllTiles.end(), td.begin(), td.end());
             }
         }
     }
@@ -532,6 +626,23 @@ static bool GenerateMapData(const std::string& runtimeDir,
         }
         f << "\n};\n";
         f << "#define AFN_ALL_TILES_LEN " << (int)allTiles.size() * 4 << "\n\n";
+    }
+
+    // Emit direction animation ROM tile data (for DMA streaming)
+    if (!dirAnimAllTiles.empty())
+    {
+        f << "// Direction animation tile data — ROM only, DMA'd to VRAM on set change\n";
+        f << "static const u32 afn_dir_anim_tiles[" << (int)dirAnimAllTiles.size() << "] = {";
+        for (size_t i = 0; i < dirAnimAllTiles.size(); i++)
+        {
+            if (i % 8 == 0) f << "\n    ";
+            char hex[12];
+            snprintf(hex, sizeof(hex), "0x%08X", dirAnimAllTiles[i]);
+            f << hex;
+            if (i + 1 < dirAnimAllTiles.size()) f << ", ";
+        }
+        f << "\n};\n";
+        f << "#define AFN_DIR_ANIM_TILES_LEN " << (int)dirAnimAllTiles.size() * 4 << "\n\n";
     }
 
     // Emit per-asset palette arrays
@@ -584,24 +695,43 @@ static bool GenerateMapData(const std::string& runtimeDir,
     }
     f << "\n";
 
-    // Asset direction descriptor table: { tile0, tilesPerFrame, dirSize, palBank, hasDirs }
+    // Asset direction descriptor table: { setCount, tpf, dirSize, palBank, hasDirs, vramTile0 }
     if (!assets.empty())
     {
         f << "#define AFN_HAS_ASSET_DIRS 1\n";
-        f << "static const int afn_asset_dir_desc[][5] = {\n";
+        f << "#define AFN_MAX_DIR_SETS 8\n";
+        f << "static const int afn_asset_dir_desc[][6] = {\n";
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
             if (assetDirInfos[ai].has)
             {
                 int tpf = (assetDirInfos[ai].dirSize / 8) * (assetDirInfos[ai].dirSize / 8);
-                f << "    { " << assetDirInfos[ai].tile0 << ", " << tpf
+                f << "    { " << assetDirInfos[ai].setCount << ", " << tpf
                   << ", " << assetDirInfos[ai].dirSize
-                  << ", " << assetDirInfos[ai].palBank << ", 1 },\n";
+                  << ", " << assetDirInfos[ai].palBank
+                  << ", 1, " << assetDirInfos[ai].vramTile0 << " },\n";
             }
             else
             {
-                f << "    { 0, 0, 0, 0, 0 },\n";
+                f << "    { 0, 0, 0, 0, 0, 0 },\n";
             }
+        }
+        f << "};\n\n";
+
+        // Per-set ROM u32 offsets into afn_dir_anim_tiles
+        f << "static const int afn_dir_set_offsets[][AFN_MAX_DIR_SETS] = {\n";
+        for (size_t ai = 0; ai < assets.size(); ai++)
+        {
+            f << "    { ";
+            for (int si = 0; si < 8; si++)
+            {
+                if (assetDirInfos[ai].has && si < (int)assetDirInfos[ai].romSetU32Offset.size())
+                    f << assetDirInfos[ai].romSetU32Offset[si];
+                else
+                    f << -1;
+                if (si < 7) f << ", ";
+            }
+            f << " },\n";
         }
         f << "};\n\n";
     }

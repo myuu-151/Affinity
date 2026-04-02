@@ -40,8 +40,11 @@ static int   player_moving;        // nonzero if D-pad held
 static u16   player_move_angle;    // brad angle of last movement direction
 static int   g_player_dir_tile;    // current direction tile ID for player
 static int   auto_orbit_smooth;   // smoothed auto-orbit value (fixed-point)
-static int   manual_orbit_smooth; // smoothed manual orbit value (L/R)
-static FIXED player_vel_x, player_vel_z; // smoothed player velocity
+
+// Direction animation set tracking (for DMA streaming)
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+static int   g_active_dir_set[AFN_ASSET_COUNT]; // currently loaded direction set per asset
+#endif
 
 // ---------------------------------------------------------------------------
 // Floor sprites — positions in 16.8 fixed-point
@@ -225,6 +228,17 @@ static void init_obj_sprites(void)
     }
 #endif
 
+    // Init direction animation set tracking — DMA set 0 from ROM at boot
+#if defined(AFN_HAS_ASSET_DIRS) && AFN_ASSET_COUNT > 0
+    {
+        int ai;
+        for (ai = 0; ai < AFN_ASSET_COUNT; ai++)
+        {
+            g_active_dir_set[ai] = -1; // mark as unloaded so switch_dir_anim_set works
+        }
+    }
+#endif
+
     // Load per-asset direction palettes if present
 #ifdef AFN_HAS_ASSET_DIRS
     {
@@ -376,6 +390,36 @@ static void update_player_dir_tile(void)
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// DMA direction animation set switching
+// ---------------------------------------------------------------------------
+
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+static void switch_dir_anim_set(int assetIdx, int newSet)
+{
+    if (assetIdx < 0 || assetIdx >= AFN_ASSET_COUNT) return;
+    if (!afn_asset_dir_desc[assetIdx][4]) return; // no directions
+    int setCount = afn_asset_dir_desc[assetIdx][0];
+    if (newSet < 0 || newSet >= setCount) return;
+    if (g_active_dir_set[assetIdx] == newSet) return; // already loaded
+
+    int tpf = afn_asset_dir_desc[assetIdx][1];       // tiles per direction frame
+    int vramTile0 = afn_asset_dir_desc[assetIdx][5];  // VRAM destination tile index
+    int romOffset = afn_dir_set_offsets[assetIdx][newSet]; // u32 index into ROM array
+    if (romOffset < 0) return;
+
+    // Copy 8 directions * tpf tiles * 32 bytes/tile from ROM to VRAM
+    int wordCount = 8 * tpf * 8; // 8 dirs * tpf tiles * 8 u32s per tile
+    const u32 *src = &afn_dir_anim_tiles[romOffset];
+    u32 *dst = (u32*)&tile_mem[4][vramTile0];
+
+    // Use DMA3 for fast ROM→VRAM copy (runs at ~2 cycles per word)
+    DMA_TRANSFER(dst, src, wordCount, 3, DMA_NOW | DMA_32);
+
+    g_active_dir_set[assetIdx] = newSet;
+}
+#endif
+
 // Map baseSize to GBA OBJ ATTR1_SIZE bits
 static u16 size_to_attr1(int baseSize)
 {
@@ -496,7 +540,8 @@ static void update_sprites(void)
                         // Map to 8 directions (each 0x2000 = 45 degrees brad)
                         int dirIdx = ((relAngle + 0x1000) >> 13) & 7;
                         int adTpf = afn_asset_dir_desc[ai][1];
-                        tileId = afn_asset_dir_desc[ai][0] + dirIdx * adTpf;
+                        int vramTile0 = afn_asset_dir_desc[ai][5];
+                        tileId = vramTile0 + dirIdx * adTpf;
                         baseSize = afn_asset_dir_desc[ai][2];
                         scaleSize = baseSize; // use direction size for scaling
                         palBank = afn_asset_dir_desc[ai][3];
@@ -704,6 +749,18 @@ int main(void)
     // --- OBJ sprite setup ---
     init_obj_sprites();
 
+    // DMA direction animation set 0 from ROM to VRAM at boot
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+    {
+        int ai;
+        for (ai = 0; ai < AFN_ASSET_COUNT; ai++)
+        {
+            if (!afn_asset_dir_desc[ai][4]) continue;
+            switch_dir_anim_set(ai, 0);
+        }
+    }
+#endif
+
     // --- Minimap setup ---
     init_minimap();
 
@@ -876,6 +933,24 @@ int main(void)
 
             // Update direction sprite tile
             update_player_dir_tile();
+
+            // DMA switch direction animation sets based on movement
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+            if (player_moving != wasMoving)
+            {
+                // Switch all assets that have multiple dir sets:
+                // set 0 = idle, set 1 = running (if available)
+                int ai;
+                int targetSet = player_moving ? 1 : 0;
+                for (ai = 0; ai < AFN_ASSET_COUNT; ai++)
+                {
+                    if (!afn_asset_dir_desc[ai][4]) continue;
+                    int setCount = afn_asset_dir_desc[ai][0];
+                    if (targetSet < setCount)
+                        switch_dir_anim_set(ai, targetSet);
+                }
+            }
+#endif
 
         }
         else

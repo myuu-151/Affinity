@@ -89,9 +89,17 @@ struct SpriteAsset
     int stripFrameW = 0;           // frame width in source strip
     int stripFrameH = 0;           // frame height in source strip
 
-    // 8-directional sprite images (N, NE, E, SE, S, SW, W, NW)
+    // 8-directional sprite animation sets (e.g., idle, running)
     static constexpr int kDirCount = 8;
-    std::string dirPaths[kDirCount];   // PNG file paths per direction
+    static constexpr int kMaxDirAnimSets = 8;
+
+    struct DirAnimSet
+    {
+        std::string name = "idle";
+        std::string dirPaths[8]; // PNG file paths per direction
+    };
+
+    std::vector<DirAnimSet> dirAnimSets;
     bool hasDirections = false;        // true if any direction image is loaded
 };
 
