@@ -940,20 +940,33 @@ int main(void)
                     if (!g_asset_anim_enabled[ai])
                         continue;
 
-                    // Determine target anim: idle(0), run(1), sprint(2)
-                    int targetAnim = 0;
-                    if (player_moving)
+                    // Determine target anim by game state mapping
+                    // States: 0=None, 1=Idle, 2=Walk, 3=Run, 4=Sprint
                     {
-                        int maxAnim = AFN_MAX_ANIMS - 1;
-                        if (key_is_down(KEY_B) && maxAnim >= 2)
-                            targetAnim = 2; // sprint
-                        else
-                            targetAnim = 1; // run
-                    }
-                    if (targetAnim != g_current_anim[ai])
-                    {
-                        g_current_anim[ai] = targetAnim;
-                        g_anim_frame_counter = 0;
+                        int desiredState = 1; // Idle
+                        if (player_moving)
+                            desiredState = key_is_down(KEY_B) ? 4 : 2; // Sprint or Walk
+
+                        int targetAnim = 0; // fallback to slot 0
+#ifdef AFN_STATE_COUNT
+                        {
+                            int slot = afn_state_to_anim[ai][desiredState];
+                            if (slot >= 0 && slot < AFN_MAX_ANIMS)
+                                targetAnim = slot;
+                            else
+                            {
+                                // Walk/Run fallback: try Run(3) if Walk(2) missing, vice versa
+                                if (desiredState == 2) slot = afn_state_to_anim[ai][3];
+                                else if (desiredState == 3) slot = afn_state_to_anim[ai][2];
+                                if (slot >= 0 && slot < AFN_MAX_ANIMS) targetAnim = slot;
+                            }
+                        }
+#endif
+                        if (targetAnim != g_current_anim[ai])
+                        {
+                            g_current_anim[ai] = targetAnim;
+                            g_anim_frame_counter = 0;
+                        }
                     }
 
 #ifdef AFN_MAX_ANIMS

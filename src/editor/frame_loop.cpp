@@ -343,8 +343,8 @@ static bool SaveProject(const std::string& path)
         for (int ani = 0; ani < (int)sa.anims.size(); ani++)
         {
             const SpriteAnim& an = sa.anims[ani];
-            fprintf(f, "anim=%s,%d,%d,%d,%d,%.2f\n",
-                    an.name.c_str(), an.startFrame, an.endFrame, an.fps, an.loop ? 1 : 0, an.speed);
+            fprintf(f, "anim=%s,%d,%d,%d,%d,%.2f,%d\n",
+                    an.name.c_str(), an.startFrame, an.endFrame, an.fps, an.loop ? 1 : 0, an.speed, (int)an.gameState);
         }
         // LOD
         fprintf(f, "lodCount=%d\n", sa.lodCount);
@@ -539,7 +539,8 @@ static bool LoadProject(const std::string& path)
                         char aname[64] = {};
                         int sf, ef, afps, aloop;
                         float aspeed = 1.0f;
-                        int nread = sscanf(line + 5, "%63[^,],%d,%d,%d,%d,%f", aname, &sf, &ef, &afps, &aloop, &aspeed);
+                        int agstate = 0;
+                        int nread = sscanf(line + 5, "%63[^,],%d,%d,%d,%d,%f,%d", aname, &sf, &ef, &afps, &aloop, &aspeed, &agstate);
                         if (nread >= 5)
                         {
                             an.name = aname;
@@ -548,6 +549,7 @@ static bool LoadProject(const std::string& path)
                             an.fps = afps;
                             an.loop = (aloop != 0);
                             if (nread >= 6) an.speed = aspeed;
+                            if (nread >= 7) an.gameState = (AnimState)agstate;
                             sa.anims.push_back(an);
                         }
                     }
@@ -1466,6 +1468,15 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             ImGui::DragFloat("##aspeed", &anim.speed, 0.05f, 0.0f, 10.0f, "%.1f");
             ImGui::PopItemWidth();
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Speed");
+            ImGui::SameLine();
+
+            // Game state dropdown
+            ImGui::PushItemWidth(Scaled(55));
+            int gs = (int)anim.gameState;
+            if (ImGui::Combo("##astate", &gs, kAnimStateNames, (int)AnimState::Count))
+                anim.gameState = (AnimState)gs;
+            ImGui::PopItemWidth();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Game State");
             ImGui::SameLine();
 
             if (asset.anims.size() > 1 && ImGui::SmallButton("X##delanim"))
@@ -2775,6 +2786,7 @@ void FrameTick(float dt)
                         ean.fps = an.fps;
                         ean.loop = an.loop;
                         ean.speed = an.speed;
+                        ean.gameState = (int)an.gameState;
                         ea.anims.push_back(ean);
                     }
                     // Asset directional sprite animation sets
@@ -3082,15 +3094,21 @@ void FrameTick(float dt)
 
         if (isPlaying && sp.animEnabled && asset.anims.size() >= 2)
         {
-            // Pick animation: idle (0), run (1), sprint (2)
-            // Only player-type sprites respond to player movement
-            int animIdx = 0;
+            // Pick animation by game state assignment
+            // Determine desired state: Idle, Walk/Run, or Sprint
+            AnimState desiredState = AnimState::Idle;
             if (sp.type == SpriteType::Player && sPlayerMoving)
+                desiredState = sPlayerSprinting ? AnimState::Sprint : AnimState::Walk;
+
+            // Find the best matching anim slot
+            int animIdx = 0; // fallback to slot 0
+            for (int a = 0; a < (int)asset.anims.size(); a++)
             {
-                if (sPlayerSprinting && asset.anims.size() > 2)
-                    animIdx = 2; // sprint
-                else if (asset.anims.size() > 1)
-                    animIdx = 1; // run
+                AnimState as = asset.anims[a].gameState;
+                if (as == desiredState) { animIdx = a; break; }
+                // Walk and Run are interchangeable
+                if (desiredState == AnimState::Walk && as == AnimState::Run) { animIdx = a; break; }
+                if (desiredState == AnimState::Run && as == AnimState::Walk) { animIdx = a; break; }
             }
             const SpriteAnim& anim = asset.anims[animIdx];
             int base = GetAnimDirBase(asset, animIdx);

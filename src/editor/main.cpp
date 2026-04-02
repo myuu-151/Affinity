@@ -13,6 +13,8 @@
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#include <dwmapi.h>
+#pragma comment(lib, "dwmapi.lib")
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
@@ -45,6 +47,10 @@ int main(int, char**)
         HICON iconSmall = (HICON)LoadImageA(hInst, "IDI_ICON1", IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
         if (iconBig)   SendMessage(hwnd, WM_SETICON, ICON_BIG,   (LPARAM)iconBig);
         if (iconSmall) SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)iconSmall);
+
+        // Dark title bar
+        BOOL useDark = TRUE;
+        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &useDark, sizeof(useDark));
     }
 #endif
 

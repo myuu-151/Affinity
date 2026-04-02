@@ -43,6 +43,7 @@ struct GBASpriteAnimExport
     int fps;
     bool loop;
     float speed = 1.0f;
+    int gameState = 0; // 0=None, 1=Idle, 2=Walk, 3=Run, 4=Sprint
 };
 
 // Sprite asset for GBA export — tile data + palette + animations

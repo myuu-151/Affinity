@@ -44,6 +44,21 @@ struct SpriteFrame
     int height = 8;
 };
 
+// Game states that can be assigned to animation slots
+enum class AnimState : int
+{
+    None = 0,   // no game state — manual only
+    Idle,       // plays when not moving
+    Walk,       // plays when moving (no sprint)
+    Run,        // plays when moving (no sprint) — alias for walk
+    Sprint,     // plays when moving + sprint key
+    Count
+};
+
+static const char* const kAnimStateNames[] = {
+    "None", "Idle", "Walk", "Run", "Sprint"
+};
+
 // An animation clip: named sequence of frames
 struct SpriteAnim
 {
@@ -53,6 +68,7 @@ struct SpriteAnim
     int fps        = 8;
     bool loop      = true;
     float speed    = 1.0f;  // playback speed multiplier (0..10, default 1)
+    AnimState gameState = AnimState::None; // which game state triggers this anim
 };
 
 // LOD tier: at what distance to switch to a smaller sprite size

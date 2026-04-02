@@ -665,6 +665,33 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << " },\n";
         }
         f << "};\n\n";
+
+        // State-to-slot mapping: for each asset, map game state -> anim slot index
+        // States: 0=None, 1=Idle, 2=Walk, 3=Run, 4=Sprint
+        f << "#define AFN_STATE_COUNT 5\n";
+        f << "static const int afn_state_to_anim[][AFN_STATE_COUNT] = {\n";
+        for (size_t ai = 0; ai < assets.size(); ai++)
+        {
+            f << "    { ";
+            for (int st = 0; st < 5; st++)
+            {
+                int slot = -1;
+                for (int an = 0; an < (int)assets[ai].anims.size(); an++)
+                {
+                    if (assets[ai].anims[an].gameState == st)
+                    { slot = an; break; }
+                    // Walk(2) and Run(3) are interchangeable
+                    if (st == 2 && assets[ai].anims[an].gameState == 3)
+                    { slot = an; break; }
+                    if (st == 3 && assets[ai].anims[an].gameState == 2)
+                    { slot = an; break; }
+                }
+                f << slot;
+                if (st < 4) f << ", ";
+            }
+            f << " },\n";
+        }
+        f << "};\n\n";
     }
 
     // Minimap tile index (only emit if it fits within 1024-tile OBJ VRAM limit)
