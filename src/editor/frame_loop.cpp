@@ -70,6 +70,9 @@ static float sAssetPreviewTimer = 0.0f;
 static unsigned int sAssetPreviewTex = 0; // GL texture for frame preview
 static int sSpriteEditorPalColor = 1; // current paint color in frame editor
 static float sViewportAnimTime = 0.0f; // animation timer for viewport sprite preview
+static bool  sAnimFramePlaying = false; // play button state for animation frame preview
+static float sAnimFrameTime    = 0.0f; // timer for animation frame preview playback
+static int   sAnimFrameCurrent = 0;    // current frame index during playback
 
 // Per-asset directional sprite images (runtime loaded data)
 struct AssetDirSprite
@@ -197,42 +200,6 @@ static bool sPackageSuccess = false;
 static std::string sPackageMsg;
 static std::string sPackageOutputPath;
 
-// Player directional sprites (8 directions: N, NE, E, SE, S, SW, W, NW)
-static constexpr int kPlayerDirCount = 8;
-static const char* const kPlayerDirNames[] = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
-struct PlayerDirSprite
-{
-    std::string path;           // PNG file path
-    unsigned char* pixels = nullptr; // RGBA pixel data
-    int width = 0, height = 0;
-    GLuint texture = 0;         // GL texture for preview
-};
-static PlayerDirSprite sPlayerDirs[kPlayerDirCount];
-
-static void LoadPlayerDirImage(int dir, const std::string& filepath)
-{
-    PlayerDirSprite& d = sPlayerDirs[dir];
-    // Free old data
-    if (d.pixels) { stbi_image_free(d.pixels); d.pixels = nullptr; }
-    if (d.texture) { glDeleteTextures(1, &d.texture); d.texture = 0; }
-
-    int w, h, channels;
-    unsigned char* data = stbi_load(filepath.c_str(), &w, &h, &channels, 4);
-    if (!data) return;
-
-    d.path = filepath;
-    d.pixels = data;
-    d.width = w;
-    d.height = h;
-
-    glGenTextures(1, &d.texture);
-    glBindTexture(GL_TEXTURE_2D, d.texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-    glBindTexture(GL_TEXTURE_2D, 0);
-}
-
 // Project file
 static std::string sProjectPath;  // empty = no project loaded
 static bool sProjectDirty = false; // unsaved changes
@@ -340,15 +307,6 @@ static bool SaveProject(const std::string& path)
     }
     fprintf(f, "\n");
 
-    // Player directional sprites
-    fprintf(f, "[PlayerDirs]\n");
-    for (int d = 0; d < kPlayerDirCount; d++)
-    {
-        if (!sPlayerDirs[d].path.empty())
-            fprintf(f, "dir=%d,%s\n", d, sPlayerDirs[d].path.c_str());
-    }
-    fprintf(f, "\n");
-
     // Sprite Assets
     fprintf(f, "[SpriteAssets]\n");
     fprintf(f, "count=%d\n", (int)sSpriteAssets.size());
@@ -377,8 +335,8 @@ static bool SaveProject(const std::string& path)
         for (int ani = 0; ani < (int)sa.anims.size(); ani++)
         {
             const SpriteAnim& an = sa.anims[ani];
-            fprintf(f, "anim=%s,%d,%d,%d,%d\n",
-                    an.name.c_str(), an.startFrame, an.endFrame, an.fps, an.loop ? 1 : 0);
+            fprintf(f, "anim=%s,%d,%d,%d,%d,%.2f\n",
+                    an.name.c_str(), an.startFrame, an.endFrame, an.fps, an.loop ? 1 : 0, an.speed);
         }
         // LOD
         fprintf(f, "lodCount=%d\n", sa.lodCount);
@@ -429,13 +387,6 @@ static bool LoadProject(const std::string& path)
     sAssetDirSprites.clear();
     sSelectedAsset = -1;
     sCamObj = { 0.0f, 0.0f, 14.0f, 0.0f, 60.0f };
-    for (int d = 0; d < kPlayerDirCount; d++)
-    {
-        if (sPlayerDirs[d].pixels) { stbi_image_free(sPlayerDirs[d].pixels); sPlayerDirs[d].pixels = nullptr; }
-        if (sPlayerDirs[d].texture) { glDeleteTextures(1, &sPlayerDirs[d].texture); sPlayerDirs[d].texture = 0; }
-        sPlayerDirs[d].path.clear();
-        sPlayerDirs[d].width = sPlayerDirs[d].height = 0;
-    }
     sCamObjEditorScale = 0.05f;
 
     char line[32768]; // large buffer for frame pixel data lines (64x64 = ~16KB worst case)
@@ -513,13 +464,8 @@ static bool LoadProject(const std::string& path)
         }
         else if (strcmp(section, "PlayerDirs") == 0)
         {
-            int dirIdx;
-            char dirPath[512];
-            if (sscanf(line, "dir=%d,%511[^\n]", &dirIdx, dirPath) == 2)
-            {
-                if (dirIdx >= 0 && dirIdx < kPlayerDirCount)
-                    LoadPlayerDirImage(dirIdx, std::string(dirPath));
-            }
+            // Legacy section — player direction sprites now use per-asset direction system.
+            // Skip any entries silently for backward compatibility.
         }
         else if (strcmp(section, "SpriteAssets") == 0)
         {
@@ -576,13 +522,16 @@ static bool LoadProject(const std::string& path)
                         SpriteAnim an;
                         char aname[64] = {};
                         int sf, ef, afps, aloop;
-                        if (sscanf(line + 5, "%63[^,],%d,%d,%d,%d", aname, &sf, &ef, &afps, &aloop) == 5)
+                        float aspeed = 1.0f;
+                        int nread = sscanf(line + 5, "%63[^,],%d,%d,%d,%d,%f", aname, &sf, &ef, &afps, &aloop, &aspeed);
+                        if (nread >= 5)
                         {
                             an.name = aname;
                             an.startFrame = sf;
                             an.endFrame = ef;
                             an.fps = afps;
                             an.loop = (aloop != 0);
+                            if (nread >= 6) an.speed = aspeed;
                             sa.anims.push_back(an);
                         }
                     }
@@ -1108,10 +1057,65 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
 
         ImGui::Separator();
 
-        // ---- Frame Grid: pixel editor ----
+        // ---- Frame Grid: pixel editor / animation preview ----
         ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Frame Editor");
 
-        if (!asset.frames.empty())
+        // Check if we should show animation preview instead of pixel editor
+        bool showAnimPreview = false;
+        GLuint animPreviewTex = 0;
+        int animPreviewW = 0, animPreviewH = 0;
+        if (sAnimFramePlaying && sSelectedAnim >= 0 && sSelectedAnim < (int)asset.anims.size())
+        {
+            const SpriteAnim& selAnim = asset.anims[sSelectedAnim];
+            if (selAnim.endFrame > 0 && sSelectedAsset < (int)sAssetDirSprites.size())
+            {
+                int animBase = GetAnimDirBase(asset, sSelectedAnim);
+                int frameIdx = animBase + sAnimFrameCurrent;
+                // Show N (direction 0) by default
+                if (frameIdx < (int)sAssetDirSprites[sSelectedAsset].size())
+                {
+                    AssetDirSprite& ads = sAssetDirSprites[sSelectedAsset][frameIdx][0];
+                    if (ads.texture)
+                    {
+                        showAnimPreview = true;
+                        animPreviewTex = ads.texture;
+                        animPreviewW = ads.width;
+                        animPreviewH = ads.height;
+                    }
+                }
+            }
+        }
+
+        if (showAnimPreview)
+        {
+            // Show the direction sprite image scaled to fill the editor area
+            float gridAvail = std::min(colW2 - Scaled(20), size.y * 0.5f);
+            float aspect = (float)animPreviewW / (float)animPreviewH;
+            float drawW = gridAvail, drawH = gridAvail;
+            if (aspect > 1.0f) drawH = gridAvail / aspect;
+            else drawW = gridAvail * aspect;
+
+            ImVec2 imgStart = ImGui::GetCursorScreenPos();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            // Dark background
+            dl->AddRectFilled(imgStart, ImVec2(imgStart.x + drawW, imgStart.y + drawH), 0xFF1A1A1A);
+            // Draw the sprite
+            dl->AddImage((ImTextureID)(uintptr_t)animPreviewTex,
+                imgStart, ImVec2(imgStart.x + drawW, imgStart.y + drawH));
+            // Border
+            dl->AddRect(imgStart, ImVec2(imgStart.x + drawW, imgStart.y + drawH), 0xFF44AAFF, 0.0f, 0, 2.0f);
+
+            // Frame label
+            const SpriteAnim& selAnim = asset.anims[sSelectedAnim];
+            char frameLbl[64];
+            snprintf(frameLbl, sizeof(frameLbl), "%s  Frame %d / %d", selAnim.name.c_str(), sAnimFrameCurrent + 1, selAnim.endFrame);
+            ImVec2 lblSz = ImGui::CalcTextSize(frameLbl);
+            dl->AddText(ImVec2(imgStart.x + (drawW - lblSz.x) * 0.5f, imgStart.y + drawH + 4), 0xFFFFFF88, frameLbl);
+
+            ImGui::SetCursorScreenPos(ImVec2(imgStart.x, imgStart.y + drawH + 24));
+        }
+        else if (!asset.frames.empty())
         {
             if (sSelectedFrame >= (int)asset.frames.size())
                 sSelectedFrame = 0;
@@ -1321,7 +1325,10 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             bool animSel = (sSelectedAnim == ai);
 
             if (ImGui::Selectable(anim.name.c_str(), animSel, 0, ImVec2(Scaled(80), 0)))
+            {
+                if (sSelectedAnim != ai) { sAnimFramePlaying = false; sAnimFrameTime = 0.0f; sAnimFrameCurrent = 0; }
                 sSelectedAnim = ai;
+            }
             ImGui::SameLine();
 
             ImGui::PushItemWidth(Scaled(60));
@@ -1438,6 +1445,11 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             ImGui::SameLine();
 
             ImGui::Checkbox("Loop##aloop", &anim.loop);
+            ImGui::SameLine();
+            ImGui::PushItemWidth(Scaled(50));
+            ImGui::DragFloat("##aspeed", &anim.speed, 0.05f, 0.0f, 10.0f, "%.1f");
+            ImGui::PopItemWidth();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Speed");
             ImGui::SameLine();
 
             if (asset.anims.size() > 1 && ImGui::SmallButton("X##delanim"))
@@ -1756,152 +1768,211 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
         ImGui::Spacing();
 
         // ---- Animation Frames (8-direction grids) ----
-        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Animation Frames");
-        ImGui::Separator();
-
-        for (int ai = 0; ai < (int)asset.anims.size(); ai++)
+        // Show ALL frames for the selected animation, with a play button
+        if (sSelectedAnim >= 0 && sSelectedAnim < (int)asset.anims.size())
         {
-            SpriteAnim& anim = asset.anims[ai];
-            if (anim.endFrame <= 0) continue;
+            SpriteAnim& anim = asset.anims[sSelectedAnim];
+            int base = GetAnimDirBase(asset, sSelectedAnim);
 
-            int base = GetAnimDirBase(asset, ai);
-            int dirSetIdx = base + anim.startFrame;
-            EnsureAssetDirSet(sSelectedAsset, dirSetIdx);
+            // Header with play button
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Animation Frames - %s", anim.name.c_str());
+            ImGui::SameLine();
 
-            bool isSelected = (sSelectedAnim == ai);
-            ImGui::PushID(ai + 7000);
+            // Play/Pause button
+            if (anim.endFrame > 1)
+            {
+                if (ImGui::SmallButton(sAnimFramePlaying ? "||##animstop" : ">##animplay"))
+                {
+                    sAnimFramePlaying = !sAnimFramePlaying;
+                    if (sAnimFramePlaying)
+                    {
+                        sAnimFrameTime = 0.0f;
+                        sAnimFrameCurrent = 0;
+                    }
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(sAnimFramePlaying ? "Pause" : "Play");
+            }
 
-            // Header: click to select this animation
-            if (isSelected)
-                ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "%s  %d-%d", anim.name.c_str(), anim.endFrame > 0 ? anim.startFrame + 1 : 0, anim.endFrame);
-            else
-                ImGui::TextDisabled("%s  %d-%d", anim.name.c_str(), anim.endFrame > 0 ? anim.startFrame + 1 : 0, anim.endFrame);
-            if (ImGui::IsItemClicked())
-                sSelectedAnim = ai;
+            ImGui::Separator();
 
+            // Advance playback timer
+            if (sAnimFramePlaying && anim.endFrame > 1)
+            {
+                float dt = ImGui::GetIO().DeltaTime;
+                int fps = anim.fps > 0 ? anim.fps : 8;
+                float effectiveFps = fps * anim.speed;
+                if (effectiveFps > 0.0f)
+                {
+                    sAnimFrameTime += dt;
+                    float frameDur = 1.0f / effectiveFps;
+                    if (sAnimFrameTime >= frameDur)
+                    {
+                        sAnimFrameTime -= frameDur;
+                        sAnimFrameCurrent++;
+                        if (sAnimFrameCurrent >= anim.endFrame)
+                            sAnimFrameCurrent = anim.loop ? 0 : anim.endFrame - 1;
+                    }
+                }
+            }
+
+            // Clamp playback frame
+            if (sAnimFrameCurrent >= anim.endFrame)
+                sAnimFrameCurrent = 0;
+
+            // Show frame indicator when playing
+            if (sAnimFramePlaying && anim.endFrame > 1)
+            {
+                ImGui::Text("Frame %d / %d", sAnimFrameCurrent + 1, anim.endFrame);
+            }
+
+            // Show all frames for this animation
             float dirCellSz = Scaled(52);
             float dirPreviewSz = dirCellSz - 22.0f;
             int dirCols = 4;
 
-            for (int d = 0; d < 8; d++)
+            for (int fi = 0; fi < anim.endFrame; fi++)
             {
-                if (d % dirCols != 0) ImGui::SameLine();
-                ImGui::PushID(d + 5000 + dirSetIdx * 100);
+                int dirSetIdx = base + fi;
+                EnsureAssetDirSet(sSelectedAsset, dirSetIdx);
 
-                ImVec2 cpos = ImGui::GetCursorScreenPos();
-                ImVec2 cmin = cpos;
-                ImVec2 cmax = ImVec2(cpos.x + dirCellSz - 4, cpos.y + dirCellSz - 4);
-                ImDrawList* dl2 = ImGui::GetWindowDrawList();
+                ImGui::PushID(fi + 8000);
 
-                bool clicked = ImGui::InvisibleButton("##adirbtn", ImVec2(dirCellSz - 4, dirCellSz - 4));
-                bool hovered = ImGui::IsItemHovered();
-
-                dl2->AddRectFilled(cmin, cmax, 0xFF151520);
-                dl2->AddRect(cmin, cmax, hovered ? 0xFFFFFFFF : 0xFF444466, 0.0f, 0, hovered ? 2.0f : 1.0f);
-
-                char dirLabel[16];
-                int frameNum = anim.startFrame + 1; // 1-indexed
-                if (frameNum <= 1)
-                    snprintf(dirLabel, sizeof(dirLabel), "%s", kDirNames[d]);
+                // Frame header with highlight for current playback frame
+                bool isPlayFrame = sAnimFramePlaying && (fi == sAnimFrameCurrent);
+                if (isPlayFrame)
+                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "Frame %d", fi + 1);
                 else
-                    snprintf(dirLabel, sizeof(dirLabel), "%s%d", kDirNames[d], frameNum);
-                ImVec2 lsz2 = ImGui::CalcTextSize(dirLabel);
-                dl2->AddText(ImVec2(cmin.x + (dirCellSz - 4 - lsz2.x) * 0.5f, cmin.y + 2), 0xFFAAAACC, dirLabel);
+                    ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.9f, 1.0f), "Frame %d", fi + 1);
 
-                AssetDirSprite& ads = sAssetDirSprites[sSelectedAsset][dirSetIdx][d];
-                if (ads.texture)
+                for (int d = 0; d < 8; d++)
                 {
-                    float aspect = (float)ads.width / (float)ads.height;
-                    float drawW = dirPreviewSz, drawH = dirPreviewSz;
-                    if (aspect > 1.0f) drawH = dirPreviewSz / aspect;
-                    else drawW = dirPreviewSz * aspect;
-                    float imgX = cmin.x + (dirCellSz - 4 - drawW) * 0.5f;
-                    float imgY = cmin.y + 16.0f + (dirPreviewSz - drawH) * 0.5f;
-                    dl2->AddImage((ImTextureID)(uintptr_t)ads.texture,
-                        ImVec2(imgX, imgY), ImVec2(imgX + drawW, imgY + drawH));
-                }
-                else
-                {
-                    const char* emptyTxt = "Click";
-                    ImVec2 esz2 = ImGui::CalcTextSize(emptyTxt);
-                    dl2->AddText(
-                        ImVec2(cmin.x + (dirCellSz - 4 - esz2.x) * 0.5f,
-                               cmin.y + 16.0f + (dirPreviewSz - esz2.y) * 0.5f),
-                        0xFF666688, emptyTxt);
-                }
+                    if (d % dirCols != 0) ImGui::SameLine();
+                    ImGui::PushID(d + 5000 + dirSetIdx * 100);
 
-                if (clicked)
-                {
-                    sSelectedAnim = ai;
-#ifdef _WIN32
-                    std::string path = OpenFileDialog(
-                        "PNG Images\0*.png\0All Files\0*.*\0", "png");
-                    if (!path.empty())
+                    ImVec2 cpos = ImGui::GetCursorScreenPos();
+                    ImVec2 cmin = cpos;
+                    ImVec2 cmax = ImVec2(cpos.x + dirCellSz - 4, cpos.y + dirCellSz - 4);
+                    ImDrawList* dl2 = ImGui::GetWindowDrawList();
+
+                    bool clicked = ImGui::InvisibleButton("##adirbtn", ImVec2(dirCellSz - 4, dirCellSz - 4));
+                    bool hovered = ImGui::IsItemHovered();
+
+                    dl2->AddRectFilled(cmin, cmax, isPlayFrame ? 0xFF202530 : 0xFF151520);
+                    uint32_t borderCol = isPlayFrame ? 0xFF44AAFF : (hovered ? 0xFFFFFFFF : 0xFF444466);
+                    dl2->AddRect(cmin, cmax, borderCol, 0.0f, 0, (isPlayFrame || hovered) ? 2.0f : 1.0f);
+
+                    char dirLabel[16];
+                    int frameNum = fi + 1; // 1-indexed
+                    if (frameNum <= 1)
+                        snprintf(dirLabel, sizeof(dirLabel), "%s", kDirNames[d]);
+                    else
+                        snprintf(dirLabel, sizeof(dirLabel), "%s%d", kDirNames[d], frameNum);
+                    ImVec2 lsz2 = ImGui::CalcTextSize(dirLabel);
+                    dl2->AddText(ImVec2(cmin.x + (dirCellSz - 4 - lsz2.x) * 0.5f, cmin.y + 2), 0xFFAAAACC, dirLabel);
+
+                    AssetDirSprite& ads = sAssetDirSprites[sSelectedAsset][dirSetIdx][d];
+                    if (ads.texture)
                     {
-                        LoadAssetDirImage(sSelectedAsset, dirSetIdx, d, path);
+                        float aspect = (float)ads.width / (float)ads.height;
+                        float drawW = dirPreviewSz, drawH = dirPreviewSz;
+                        if (aspect > 1.0f) drawH = dirPreviewSz / aspect;
+                        else drawW = dirPreviewSz * aspect;
+                        float imgX = cmin.x + (dirCellSz - 4 - drawW) * 0.5f;
+                        float imgY = cmin.y + 16.0f + (dirPreviewSz - drawH) * 0.5f;
+                        dl2->AddImage((ImTextureID)(uintptr_t)ads.texture,
+                            ImVec2(imgX, imgY), ImVec2(imgX + drawW, imgY + drawH));
+                    }
+                    else
+                    {
+                        const char* emptyTxt = "Click";
+                        ImVec2 esz2 = ImGui::CalcTextSize(emptyTxt);
+                        dl2->AddText(
+                            ImVec2(cmin.x + (dirCellSz - 4 - esz2.x) * 0.5f,
+                                   cmin.y + 16.0f + (dirPreviewSz - esz2.y) * 0.5f),
+                            0xFF666688, emptyTxt);
+                    }
+
+                    if (clicked)
+                    {
+#ifdef _WIN32
+                        std::string path = OpenFileDialog(
+                            "PNG Images\0*.png\0All Files\0*.*\0", "png");
+                        if (!path.empty())
+                        {
+                            LoadAssetDirImage(sSelectedAsset, dirSetIdx, d, path);
+                            sProjectDirty = true;
+                        }
+#endif
+                    }
+                    if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && ads.pixels)
+                    {
+                        stbi_image_free(ads.pixels); ads.pixels = nullptr;
+                        if (ads.texture) { glDeleteTextures(1, &ads.texture); ads.texture = 0; }
+                        ads.width = ads.height = 0;
+                        asset.dirAnimSets[dirSetIdx].dirPaths[d].clear();
+                        asset.hasDirections = false;
+                        for (int s2 = 0; s2 < (int)sAssetDirSprites[sSelectedAsset].size(); s2++)
+                            for (int d2 = 0; d2 < 8; d2++)
+                                if (sAssetDirSprites[sSelectedAsset][s2][d2].pixels)
+                                { asset.hasDirections = true; goto done_clear_r; }
+                        done_clear_r:;
                         sProjectDirty = true;
                     }
-#endif
-                }
-                if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && ads.pixels)
-                {
-                    stbi_image_free(ads.pixels); ads.pixels = nullptr;
-                    if (ads.texture) { glDeleteTextures(1, &ads.texture); ads.texture = 0; }
-                    ads.width = ads.height = 0;
-                    asset.dirAnimSets[dirSetIdx].dirPaths[d].clear();
-                    asset.hasDirections = false;
-                    for (int s2 = 0; s2 < (int)sAssetDirSprites[sSelectedAsset].size(); s2++)
-                        for (int d2 = 0; d2 < 8; d2++)
-                            if (sAssetDirSprites[sSelectedAsset][s2][d2].pixels)
-                            { asset.hasDirections = true; goto done_clear_r; }
-                    done_clear_r:;
-                    sProjectDirty = true;
-                }
 
-                ImGui::PopID();
-            }
+                    ImGui::PopID();
+                }
 
 #ifdef _WIN32
-            ImGui::Spacing();
-            if (ImGui::Button("Load Dir Folder...##adf"))
-            {
-                sSelectedAnim = ai;
-                std::string folder = OpenFolderDialog();
-                if (!folder.empty())
+                ImGui::Spacing();
+                if (ImGui::Button("Load Dir Folder...##adf"))
                 {
-                    static const char* const altNames[][4] = {
-                        { "N", "n", "forward", "up" },
-                        { "NE", "ne", "rightup", "upright" },
-                        { "E", "e", "right", nullptr },
-                        { "SE", "se", "rightdown", "downright" },
-                        { "S", "s", "backwards", "down" },
-                        { "SW", "sw", "leftdown", "downleft" },
-                        { "W", "w", "left", nullptr },
-                        { "NW", "nw", "leftup", "upleft" },
-                    };
-                    for (int d = 0; d < 8; d++)
+                    // Set viewFrame to this frame so folder load targets the right set
+                    anim.startFrame = fi;
+                    std::string folder = OpenFolderDialog();
+                    if (!folder.empty())
                     {
-                        for (int a = 0; a < 4; a++)
+                        static const char* const altNames[][4] = {
+                            { "N", "n", "forward", "up" },
+                            { "NE", "ne", "rightup", "upright" },
+                            { "E", "e", "right", nullptr },
+                            { "SE", "se", "rightdown", "downright" },
+                            { "S", "s", "backwards", "down" },
+                            { "SW", "sw", "leftdown", "downleft" },
+                            { "W", "w", "left", nullptr },
+                            { "NW", "nw", "leftup", "upleft" },
+                        };
+                        for (int d = 0; d < 8; d++)
                         {
-                            if (!altNames[d][a]) continue;
-                            std::string tryPath = folder + "\\" + altNames[d][a] + ".png";
-                            if (std::filesystem::exists(tryPath))
+                            for (int a = 0; a < 4; a++)
                             {
-                                LoadAssetDirImage(sSelectedAsset, dirSetIdx, d, tryPath);
-                                sProjectDirty = true;
-                                break;
+                                if (!altNames[d][a]) continue;
+                                std::string tryPath = folder + "\\" + altNames[d][a] + ".png";
+                                if (std::filesystem::exists(tryPath))
+                                {
+                                    LoadAssetDirImage(sSelectedAsset, dirSetIdx, d, tryPath);
+                                    sProjectDirty = true;
+                                    break;
+                                }
                             }
                         }
                     }
                 }
-            }
 #endif
-            ImGui::Spacing();
-            ImGui::PopID();
-        }
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::PopID();
+            }
 
-        if (asset.anims.empty())
-            ImGui::TextDisabled("No animations.");
+            if (anim.endFrame <= 0)
+                ImGui::TextDisabled("No frames. Set frame count in the animation row.");
+        }
+        else
+        {
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Animation Frames");
+            ImGui::Separator();
+            ImGui::TextDisabled("Select an animation.");
+        }
     }
 
     ImGui::EndChild();
@@ -2608,6 +2679,7 @@ void FrameTick(float dt)
                         ean.endFrame = an.endFrame;
                         ean.fps = an.fps;
                         ean.loop = an.loop;
+                        ean.speed = an.speed;
                         ea.anims.push_back(ean);
                     }
                     // Asset directional sprite animation sets
@@ -2632,21 +2704,13 @@ void FrameTick(float dt)
                     exportAssets.push_back(ea);
                 }
 
-                // Collect player direction sprites for export
-                GBAPlayerDirExport exportPlayerDirs[8];
-                for (int d = 0; d < 8; d++)
-                {
-                    exportPlayerDirs[d].pixels = sPlayerDirs[d].pixels;
-                    exportPlayerDirs[d].width = sPlayerDirs[d].width;
-                    exportPlayerDirs[d].height = sPlayerDirs[d].height;
-                }
                 float exportOrbitDist = sOrbitDist;
 
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                             exportPlayerDirs, exportOrbitDist]() {
+                             exportOrbitDist]() {
                     std::string err;
                     bool ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                                         exportPlayerDirs, exportOrbitDist, err);
+                                         exportOrbitDist, err);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
@@ -2884,31 +2948,45 @@ void FrameTick(float dt)
     sViewportAnimTime += dt;
     const SpriteAsset* assetsPtr = sSpriteAssets.empty() ? nullptr : sSpriteAssets.data();
     bool isPlaying = (sEditorMode == EditorMode::Play);
-    // Build player direction image array for renderer
-    Mode7::PlayerDirImage playerDirImages[Mode7::kPlayerDirCount] = {};
-    for (int d = 0; d < Mode7::kPlayerDirCount; d++)
-    {
-        playerDirImages[d].pixels = sPlayerDirs[d].pixels;
-        playerDirImages[d].width  = sPlayerDirs[d].width;
-        playerDirImages[d].height = sPlayerDirs[d].height;
-    }
     // Sprite direction: orbit-based when idle, movement-based when moving
     float spriteAngle = sPlayerMoving ? sPlayerMoveAngle : sOrbitAngle + sPlayerMoveAngle;
-    // Build per-asset direction image arrays for renderer (use set 0 for preview)
+    // Build per-asset direction image arrays for renderer
+    // In Play mode, cycle through animation frames based on movement state
     std::vector<Mode7::AssetDirImages> assetDirImgs(sSpriteAssets.size());
     for (int ai = 0; ai < (int)sSpriteAssets.size() && ai < (int)sAssetDirSprites.size(); ai++)
     {
         if (sAssetDirSprites[ai].empty()) continue;
+        const SpriteAsset& asset = sSpriteAssets[ai];
+        int dirSetIdx = 0; // default: idle anim, frame 0
+
+        if (isPlaying && asset.anims.size() >= 2)
+        {
+            // Pick animation: idle (0) when still, run (1) when moving
+            int animIdx = (sPlayerMoving && asset.anims.size() > 1) ? 1 : 0;
+            const SpriteAnim& anim = asset.anims[animIdx];
+            int base = GetAnimDirBase(asset, animIdx);
+            int frameCount = anim.endFrame;
+            if (frameCount > 0)
+            {
+                int fps = anim.fps > 0 ? anim.fps : 8;
+                float effectiveFps = fps * anim.speed;
+                int frame = effectiveFps > 0.0f ? ((int)(sViewportAnimTime * effectiveFps)) % frameCount : 0;
+                dirSetIdx = base + frame;
+            }
+        }
+
+        if (dirSetIdx >= (int)sAssetDirSprites[ai].size())
+            dirSetIdx = 0;
         for (int d = 0; d < 8; d++)
         {
-            assetDirImgs[ai].dirs[d].pixels = sAssetDirSprites[ai][0][d].pixels;
-            assetDirImgs[ai].dirs[d].width  = sAssetDirSprites[ai][0][d].width;
-            assetDirImgs[ai].dirs[d].height = sAssetDirSprites[ai][0][d].height;
+            assetDirImgs[ai].dirs[d].pixels = sAssetDirSprites[ai][dirSetIdx][d].pixels;
+            assetDirImgs[ai].dirs[d].width  = sAssetDirSprites[ai][dirSetIdx][d].width;
+            assetDirImgs[ai].dirs[d].height = sAssetDirSprites[ai][dirSetIdx][d].height;
         }
     }
     Mode7::Render(sCamera, nullptr, sSprites, sSpriteCount, camObjPtr, sCamObjEditorScale,
                   assetsPtr, (int)sSpriteAssets.size(), sViewportAnimTime, isPlaying,
-                  playerDirImages, spriteAngle,
+                  nullptr, spriteAngle,
                   assetDirImgs.empty() ? nullptr : assetDirImgs.data(), (int)assetDirImgs.size());
     Mode7::UploadTexture();
 
@@ -2956,184 +3034,11 @@ void FrameTick(float dt)
             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Player Directional Sprites");
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Player Settings");
         ImGui::Separator();
         ImGui::Spacing();
-
-        // Layout: 3x3 grid for 8 directions + center preview
-        //   NW  N  NE
-        //   W  [P]  E
-        //   SW  S  SE
-        // Direction indices: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW
-        static const int gridMap[3][3] = {
-            { 7, 0, 1 },   // NW, N, NE
-            { 6, -1, 2 },  // W, center, E
-            { 5, 4, 3 },   // SW, S, SE
-        };
-
-        float cellSz = std::min((totalW - 40.0f) / 3.0f, (bodyH - 80.0f) / 3.0f);
-        cellSz = std::min(cellSz, 180.0f);
-        float previewSz = cellSz - 30.0f;
-        if (previewSz < 32.0f) previewSz = 32.0f;
-
-        float gridW = cellSz * 3.0f;
-        float padX = (totalW - gridW) * 0.5f;
-
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-
-        for (int row = 0; row < 3; row++)
-        {
-            ImGui::Dummy(ImVec2(0, 0)); // ensure row starts
-            for (int col = 0; col < 3; col++)
-            {
-                int dir = gridMap[row][col];
-
-                // Position each cell using cursor + indent
-                if (col == 0)
-                    ImGui::SetCursorPosX(padX + 2);
-                else
-                    ImGui::SameLine(padX + col * cellSz + 2);
-
-                ImGui::PushID(row * 3 + col);
-
-                ImVec2 cellMin = ImGui::GetCursorScreenPos();
-                ImVec2 cellMax(cellMin.x + cellSz - 4, cellMin.y + cellSz - 4);
-
-                if (dir == -1)
-                {
-                    // Center cell: PLAYER label
-                    ImGui::InvisibleButton("##center", ImVec2(cellSz - 4, cellSz - 4));
-                    dl->AddRectFilled(cellMin, cellMax, 0xFF1A1A2A);
-                    dl->AddRect(cellMin, cellMax, 0xFF555577);
-                    const char* label = "PLAYER";
-                    ImVec2 tsz = ImGui::CalcTextSize(label);
-                    dl->AddText(
-                        ImVec2(cellMin.x + (cellSz - 4 - tsz.x) * 0.5f,
-                               cellMin.y + (cellSz - 4 - tsz.y) * 0.5f),
-                        0xFFFFFFFF, label);
-                }
-                else
-                {
-                    // Direction cell — clickable
-                    bool clicked = ImGui::InvisibleButton("##dirbtn", ImVec2(cellSz - 4, cellSz - 4));
-                    bool hovered = ImGui::IsItemHovered();
-
-                    dl->AddRectFilled(cellMin, cellMax, 0xFF151520);
-                    dl->AddRect(cellMin, cellMax, hovered ? 0xFFFFFFFF : 0xFF444466, 0.0f, 0, hovered ? 2.0f : 1.0f);
-
-                    // Direction label
-                    const char* dirName = kPlayerDirNames[dir];
-                    ImVec2 lsz = ImGui::CalcTextSize(dirName);
-                    dl->AddText(ImVec2(cellMin.x + (cellSz - 4 - lsz.x) * 0.5f, cellMin.y + 4), 0xFFAAAACC, dirName);
-
-                    // Preview image
-                    PlayerDirSprite& pds = sPlayerDirs[dir];
-                    float imgY = cellMin.y + 22.0f;
-                    float imgX = cellMin.x + (cellSz - 4 - previewSz) * 0.5f;
-
-                    if (pds.texture)
-                    {
-                        float aspect = (float)pds.width / (float)pds.height;
-                        float drawW = previewSz, drawH = previewSz;
-                        if (aspect > 1.0f) drawH = previewSz / aspect;
-                        else drawW = previewSz * aspect;
-                        float offX = imgX + (previewSz - drawW) * 0.5f;
-                        float offY = imgY + (previewSz - drawH) * 0.5f;
-                        dl->AddImage((ImTextureID)(uintptr_t)pds.texture,
-                            ImVec2(offX, offY),
-                            ImVec2(offX + drawW, offY + drawH));
-                    }
-                    else
-                    {
-                        const char* empty = "Click to\nassign PNG";
-                        ImVec2 esz = ImGui::CalcTextSize(empty);
-                        dl->AddText(
-                            ImVec2(cellMin.x + (cellSz - 4 - esz.x) * 0.5f,
-                                   imgY + (previewSz - esz.y) * 0.5f),
-                            0xFF666688, empty);
-                    }
-
-                    if (clicked)
-                    {
-                        std::string path = OpenFileDialog(
-                            "PNG Images\0*.png\0All Files\0*.*\0", "png");
-                        if (!path.empty())
-                            LoadPlayerDirImage(dir, path);
-                    }
-                    // Right-click to clear slot
-                    if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && sPlayerDirs[dir].pixels)
-                    {
-                        stbi_image_free(sPlayerDirs[dir].pixels);
-                        sPlayerDirs[dir].pixels = nullptr;
-                        if (sPlayerDirs[dir].texture) { glDeleteTextures(1, &sPlayerDirs[dir].texture); sPlayerDirs[dir].texture = 0; }
-                        sPlayerDirs[dir].path.clear();
-                        sPlayerDirs[dir].width = sPlayerDirs[dir].height = 0;
-                    }
-                }
-
-                ImGui::PopID();
-            }
-        }
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        // Batch load button
-#ifdef _WIN32
-        if (ImGui::Button("Load Folder..."))
-        {
-            std::string folder = OpenFolderDialog();
-            if (!folder.empty())
-            {
-                // Try to match files: N.png, NE.png, E.png, SE.png, S.png, SW.png, W.png, NW.png
-                // Also try lowercase and common alternates
-                static const char* const altNames[][4] = {
-                    { "N", "n", "forward", "up" },
-                    { "NE", "ne", "rightup", "upright" },
-                    { "E", "e", "right", nullptr },
-                    { "SE", "se", "rightdown", "downright" },
-                    { "S", "s", "backwards", "down" },
-                    { "SW", "sw", "leftdown", "downleft" },
-                    { "W", "w", "left", nullptr },
-                    { "NW", "nw", "leftup", "upleft" },
-                };
-                int loaded = 0;
-                for (int d = 0; d < kPlayerDirCount; d++)
-                {
-                    bool found = false;
-                    for (int a = 0; a < 4 && !found; a++)
-                    {
-                        if (!altNames[d][a]) continue;
-                        std::string tryPath = folder + "\\" + altNames[d][a] + ".png";
-                        if (std::filesystem::exists(tryPath))
-                        {
-                            LoadPlayerDirImage(d, tryPath);
-                            found = true;
-                            loaded++;
-                        }
-                    }
-                }
-            }
-        }
-        ImGui::SameLine();
-        ImGui::TextDisabled("(matches N/NE/E/SE/S/SW/W/NW .png or forward/left/right/etc)");
-#endif
-
-        ImGui::Spacing();
-
-        // File paths below grid
-        for (int d = 0; d < kPlayerDirCount; d++)
-        {
-            if (!sPlayerDirs[d].path.empty())
-            {
-                std::string filename = std::filesystem::path(sPlayerDirs[d].path).filename().string();
-                ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.9f, 1.0f), "%s:", kPlayerDirNames[d]);
-                ImGui::SameLine();
-                ImGui::Text("%s", filename.c_str());
-            }
-        }
-
+        ImGui::TextWrapped("Player directional sprites are now managed through the per-asset direction system on the Sprites tab. "
+                           "Assign a sprite asset with directions to the Player sprite for directional rendering.");
         ImGui::End();
     }
     else if (sActiveTab == EditorTab::ThreeD)

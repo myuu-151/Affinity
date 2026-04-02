@@ -447,49 +447,37 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         // Sprite draws upward from its foot position
         int drawCenterY = sp.screenY - halfH;
 
-        // Check if this is a Player sprite with directional images
-        bool drewSprite = false;
-        if (fs.type == SpriteType::Player && playerDirs)
-        {
-            // Map orbit angle to 8 directions
-            // Normalize angle to [0, 2*PI)
-            float a = playerOrbitAngle;
-            const float PI2 = 6.28318530f;
-            a = fmodf(a, PI2);
-            if (a < 0.0f) a += PI2;
-
-            // Each direction covers PI/4 (45 degrees), offset by half
-            // 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW
-            int dirIdx = ((int)((a + 0.39269908f) / 0.78539816f)) % 8;
-
-            const PlayerDirImage& pdi = playerDirs[dirIdx];
-            if (pdi.pixels && pdi.width > 0 && pdi.height > 0)
-            {
-                int halfS = std::max(halfW, halfH);
-                DrawRGBASprite(sp.screenX, drawCenterY, halfS, halfS,
-                               pdi.pixels, pdi.width, pdi.height, sp.fog);
-                drewSprite = true;
-            }
-        }
-
         // Check if this sprite has a linked asset with directional images
-        if (!drewSprite && fs.assetIdx >= 0 && fs.assetIdx < assetCount && assets
+        bool drewSprite = false;
+        if (fs.assetIdx >= 0 && fs.assetIdx < assetCount && assets
             && assetDirImages && fs.assetIdx < assetDirCount
             && assets[fs.assetIdx].hasDirections)
         {
-            // Compute angle from camera to sprite
-            float dx = fs.x - cam.x;
-            float dz = fs.z - cam.z;
-            float angleToSprite = atan2f(dx, -dz); // angle from camera to sprite
-            float rotRad = fs.rotation * 3.14159265f / 180.0f;
-            float relAngle = -angleToSprite + 3.14159265f + rotRad;
+            int dirIdx;
+            if (fs.type == SpriteType::Player)
+            {
+                // Player direction: based on movement/orbit angle (same as GBA runtime)
+                float a = playerOrbitAngle;
+                const float PI2 = 6.28318530f;
+                a = fmodf(a, PI2);
+                if (a < 0.0f) a += PI2;
+                dirIdx = ((int)((a + 0.39269908f) / 0.78539816f)) % 8;
+            }
+            else
+            {
+                // Non-player: compute angle from camera to sprite
+                float dx = fs.x - cam.x;
+                float dz = fs.z - cam.z;
+                float angleToSprite = atan2f(dx, -dz);
+                float rotRad = fs.rotation * 3.14159265f / 180.0f;
+                float relAngle = -angleToSprite + 3.14159265f + rotRad;
 
-            const float PI2 = 6.28318530f;
-            relAngle = fmodf(relAngle, PI2);
-            if (relAngle < 0.0f) relAngle += PI2;
+                const float PI2 = 6.28318530f;
+                relAngle = fmodf(relAngle, PI2);
+                if (relAngle < 0.0f) relAngle += PI2;
 
-            // 8 directions: N(0), NE(1), E(2), SE(3), S(4), SW(5), W(6), NW(7)
-            int dirIdx = ((int)((relAngle + 0.39269908f) / 0.78539816f)) % 8;
+                dirIdx = ((int)((relAngle + 0.39269908f) / 0.78539816f)) % 8;
+            }
 
             const PlayerDirImage& adi = assetDirImages[fs.assetIdx].dirs[dirIdx];
             if (adi.pixels && adi.width > 0 && adi.height > 0)

@@ -38,12 +38,13 @@ static FIXED orbit_dist;           // distance from player (16.8)
 static int   player_sprite_idx = -1;
 static int   player_moving;        // nonzero if D-pad held
 static u16   player_move_angle;    // brad angle of last movement direction
-static int   g_player_dir_tile;    // current direction tile ID for player
 static int   auto_orbit_smooth;   // smoothed auto-orbit value (fixed-point)
 
 // Direction animation set tracking (for DMA streaming)
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
 static int   g_active_dir_set[AFN_ASSET_COUNT]; // currently loaded direction set per asset
+static int   g_anim_frame_counter; // VBlank counter for animation frame cycling
+static int   g_current_anim;       // 0=idle, 1=run
 #endif
 
 // ---------------------------------------------------------------------------
@@ -219,15 +220,6 @@ static void init_obj_sprites(void)
         }
     }
 
-    // Load player direction palette if present
-#ifdef AFN_PLAYER_DIR_PALBANK
-    {
-        int c;
-        for (c = 0; c < 16; c++)
-            pal_obj_mem[AFN_PLAYER_DIR_PALBANK * 16 + c] = afn_pal_playerdir[c];
-    }
-#endif
-
     // Init direction animation set tracking — DMA set 0 from ROM at boot
 #if defined(AFN_HAS_ASSET_DIRS) && AFN_ASSET_COUNT > 0
     {
@@ -236,6 +228,8 @@ static void init_obj_sprites(void)
         {
             g_active_dir_set[ai] = -1; // mark as unloaded so switch_dir_anim_set works
         }
+        g_anim_frame_counter = 0;
+        g_current_anim = 0;
     }
 #endif
 
@@ -366,31 +360,6 @@ static void load_editor_sprites(void)
 #endif
 
 // ---------------------------------------------------------------------------
-// Update player direction sprite tile based on movement/orbit angle
-// ---------------------------------------------------------------------------
-
-static void update_player_dir_tile(void)
-{
-#ifdef AFN_PLAYER_DIR_TILE0
-    u16 sprAngle;
-    if (player_moving)
-        sprAngle = player_move_angle;
-    else
-        sprAngle = orbit_angle + player_move_angle;
-
-    // Convert brad angle to direction index (0-7)
-    // Compute raw index, then mirror L/R to match sprite sheet ordering
-    int rawIdx = ((sprAngle + 0xC000 + 4096) >> 13) & 7;
-    int dirIdx = (8 - rawIdx) & 7;
-
-    // Each frame = AFN_PLAYER_DIR_TPF tiles
-    g_player_dir_tile = AFN_PLAYER_DIR_TILE0 + dirIdx * AFN_PLAYER_DIR_TPF;
-#else
-    g_player_dir_tile = 0;
-#endif
-}
-
-// ---------------------------------------------------------------------------
 // DMA direction animation set switching
 // ---------------------------------------------------------------------------
 
@@ -492,33 +461,7 @@ static void update_sprites(void)
         int baseSize = 32; // default for player dir sprites
         int scaleSize = 32; // size used for scale calculation (asset's original frame size)
 
-        // Check if this is the player sprite with direction tiles
-        if (sprIdx == player_sprite_idx && g_player_dir_tile > 0)
-        {
-            tileId = g_player_dir_tile;
-#ifdef AFN_PLAYER_DIR_SIZE
-            baseSize = AFN_PLAYER_DIR_SIZE;
-#else
-            baseSize = 32;
-#endif
-            // Use the player's asset frame size for scaling so direction sprites
-            // (64x64) appear the same on-screen size as the original asset frame
-#if defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
-            {
-                int ai = g_sprites[sprIdx].assetIdx;
-                if (ai >= 0 && ai < AFN_ASSET_COUNT)
-                    scaleSize = afn_asset_desc[ai][3];
-                else
-                    scaleSize = baseSize;
-            }
-#else
-            scaleSize = baseSize;
-#endif
-#ifdef AFN_PLAYER_DIR_PALBANK
-            palBank = AFN_PLAYER_DIR_PALBANK;
-#endif
-        }
-        else
+        // Resolve tile/palette from asset (both player and non-player sprites)
         {
 #ifdef AFN_ASSET_COUNT
 #if AFN_ASSET_COUNT > 0
@@ -531,20 +474,35 @@ static void update_sprites(void)
                     // Check if this asset has directional sprites
                     if (afn_asset_dir_desc[ai][4])
                     {
-                        // Compute angle from camera to sprite
-                        FIXED dx = g_sprites[sprIdx].x - cam_x;
-                        FIXED dz = g_sprites[sprIdx].z - cam_z;
-                        // ArcTan2 takes (x, y) and returns brad angle
-                        u16 angleToSprite = ArcTan2(dx >> 4, -(dz >> 4));
-                        u16 relAngle = angleToSprite + 0x4000 - g_sprites[sprIdx].rotation;
-                        // Map to 8 directions (each 0x2000 = 45 degrees brad)
-                        int dirIdx = ((relAngle + 0x1000) >> 13) & 7;
-                        int adTpf = afn_asset_dir_desc[ai][1];
-                        int vramTile0 = afn_asset_dir_desc[ai][5];
-                        tileId = vramTile0 + dirIdx * adTpf;
-                        baseSize = afn_asset_dir_desc[ai][2];
-                        scaleSize = baseSize; // use direction size for scaling
-                        palBank = afn_asset_dir_desc[ai][3];
+                        int dirIdx;
+                        if (sprIdx == player_sprite_idx)
+                        {
+                            // Player direction: based on movement/orbit angle (NOT camera-to-sprite)
+                            u16 sprAngle;
+                            if (player_moving)
+                                sprAngle = player_move_angle;
+                            else
+                                sprAngle = orbit_angle + player_move_angle;
+                            int rawIdx = ((sprAngle + 0xC000 + 4096) >> 13) & 7;
+                            dirIdx = (8 - rawIdx) & 7;
+                        }
+                        else
+                        {
+                            // Non-player: compute angle from camera to sprite
+                            FIXED dx = g_sprites[sprIdx].x - cam_x;
+                            FIXED dz = g_sprites[sprIdx].z - cam_z;
+                            u16 angleToSprite = ArcTan2(dx >> 4, -(dz >> 4));
+                            u16 relAngle = angleToSprite + 0x4000 - g_sprites[sprIdx].rotation;
+                            dirIdx = ((relAngle + 0x1000) >> 13) & 7;
+                        }
+                        {
+                            int adTpf = afn_asset_dir_desc[ai][1];
+                            int vramTile0 = afn_asset_dir_desc[ai][5];
+                            tileId = vramTile0 + dirIdx * adTpf;
+                            baseSize = afn_asset_dir_desc[ai][2];
+                            scaleSize = baseSize; // use direction size for scaling
+                            palBank = afn_asset_dir_desc[ai][3];
+                        }
                     }
                     else
 #endif
@@ -562,7 +520,7 @@ static void update_sprites(void)
         if (palBank > 15) palBank = 1;
 
         // Skip sprites with no valid asset (prevents rogue pixels)
-        if (sprIdx != player_sprite_idx && g_sprites[sprIdx].assetIdx < 0)
+        if (g_sprites[sprIdx].assetIdx < 0)
         {
             obj_mem[16 + i].attr0 = ATTR0_HIDE;
             continue;
@@ -799,10 +757,6 @@ int main(void)
     orbit_dist = AFN_ORBIT_DIST;
     player_moving = 0;
     player_move_angle = 0x4000; // face away from camera (show back)
-    g_player_dir_tile = 0;
-#ifdef AFN_PLAYER_DIR_TILE0
-    g_player_dir_tile = AFN_PLAYER_DIR_TILE0;
-#endif
 #endif
 
     // Precompute initial sin/cos
@@ -931,23 +885,39 @@ int main(void)
             }
             cam_angle = orbit_angle;
 
-            // Update direction sprite tile
-            update_player_dir_tile();
-
-            // DMA switch direction animation sets based on movement
+            // DMA cycle direction animation frames based on movement
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
-            if (player_moving != wasMoving)
             {
-                // Switch all assets that have multiple dir sets:
-                // set 0 = idle, set 1 = running (if available)
+                int targetAnim = player_moving ? 1 : 0;
+                if (targetAnim != g_current_anim)
+                {
+                    g_current_anim = targetAnim;
+                    g_anim_frame_counter = 0;
+                }
+                g_anim_frame_counter++;
+
                 int ai;
-                int targetSet = player_moving ? 1 : 0;
                 for (ai = 0; ai < AFN_ASSET_COUNT; ai++)
                 {
                     if (!afn_asset_dir_desc[ai][4]) continue;
-                    int setCount = afn_asset_dir_desc[ai][0];
-                    if (targetSet < setCount)
-                        switch_dir_anim_set(ai, targetSet);
+#ifdef AFN_MAX_ANIMS
+                    if (g_current_anim >= AFN_MAX_ANIMS) continue;
+                    {
+                        int baseSet = afn_anim_desc[ai][g_current_anim][0];
+                        int fc      = afn_anim_desc[ai][g_current_anim][1];
+                        int fps     = afn_anim_desc[ai][g_current_anim][2];
+                        if (fc <= 0) continue;
+                        if (fps <= 0) fps = 8;
+                        // Compute frame index from VBlank counter (60Hz / fps)
+                        int framesPerTick = 60 / fps;
+                        if (framesPerTick < 1) framesPerTick = 1;
+                        int frame = (g_anim_frame_counter / framesPerTick) % fc;
+                        int targetSet = baseSet + frame;
+                        int setCount = afn_asset_dir_desc[ai][0];
+                        if (targetSet < setCount)
+                            switch_dir_anim_set(ai, targetSet);
+                    }
+#endif
                 }
             }
 #endif

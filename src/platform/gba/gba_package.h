@@ -41,6 +41,7 @@ struct GBASpriteAnimExport
     int startFrame, endFrame;
     int fps;
     bool loop;
+    float speed = 1.0f;
 };
 
 // Sprite asset for GBA export — tile data + palette + animations
@@ -82,7 +83,6 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBASpriteExport>& sprites,
                 const std::vector<GBASpriteAssetExport>& assets,
                 const GBACameraExport& camera,
-                const GBAPlayerDirExport playerDirs[8],
                 float orbitDist,
                 std::string& errorMsg);
 

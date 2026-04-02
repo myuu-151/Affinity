@@ -52,6 +52,7 @@ struct SpriteAnim
     int endFrame   = 0;
     int fps        = 8;
     bool loop      = true;
+    float speed    = 1.0f;  // playback speed multiplier (0..10, default 1)
 };
 
 // LOD tier: at what distance to switch to a smaller sprite size

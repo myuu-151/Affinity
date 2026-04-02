@@ -219,123 +219,6 @@ struct QuantizedDirFrame
     uint8_t pixels[64 * 64]; // palette indices 0-15 (0=transparent)
 };
 
-static void QuantizePlayerDirSprites(
-    const GBAPlayerDirExport dirs[8],
-    QuantizedDirFrame outFrames[8],
-    uint32_t outPalette[16])
-{
-    const int dirSize = 64; // quantize direction sprites at 64x64
-    memset(outPalette, 0, sizeof(uint32_t) * 16);
-    for (int i = 0; i < 8; i++)
-        memset(outFrames[i].pixels, 0, sizeof(outFrames[i].pixels));
-
-    // Collect unique colors (as RGB15) from all direction images
-    struct ColorFreq { unsigned short rgb15; int count; };
-    std::vector<ColorFreq> colorFreqs;
-
-    auto findOrAdd = [&](unsigned short c15) -> int {
-        for (size_t i = 0; i < colorFreqs.size(); i++)
-            if (colorFreqs[i].rgb15 == c15) { colorFreqs[i].count++; return (int)i; }
-        colorFreqs.push_back({c15, 1});
-        return (int)colorFreqs.size() - 1;
-    };
-
-    for (int d = 0; d < 8; d++)
-    {
-        if (!dirs[d].pixels || dirs[d].width <= 0 || dirs[d].height <= 0) continue;
-        int w = dirs[d].width, h = dirs[d].height;
-        for (int y = 0; y < h; y++)
-            for (int x = 0; x < w; x++)
-            {
-                int idx = (y * w + x) * 4;
-                if (dirs[d].pixels[idx + 3] < 128) continue; // transparent
-                unsigned r = dirs[d].pixels[idx + 0] >> 3;
-                unsigned g = dirs[d].pixels[idx + 1] >> 3;
-                unsigned b = dirs[d].pixels[idx + 2] >> 3;
-                unsigned short c15 = (unsigned short)(r | (g << 5) | (b << 10));
-                findOrAdd(c15);
-            }
-    }
-
-    // Reduce to 15 colors by merging closest pairs (preserves visually distinct colors)
-    while ((int)colorFreqs.size() > 15)
-    {
-        int bestI = 0, bestJ = 1, bestDist = 999999;
-        for (size_t i = 0; i < colorFreqs.size(); i++)
-        {
-            for (size_t j = i + 1; j < colorFreqs.size(); j++)
-            {
-                int dr = (int)(colorFreqs[i].rgb15 & 0x1F) - (int)(colorFreqs[j].rgb15 & 0x1F);
-                int dg = (int)((colorFreqs[i].rgb15 >> 5) & 0x1F) - (int)((colorFreqs[j].rgb15 >> 5) & 0x1F);
-                int db = (int)((colorFreqs[i].rgb15 >> 10) & 0x1F) - (int)((colorFreqs[j].rgb15 >> 10) & 0x1F);
-                int dist = dr * dr + dg * dg + db * db;
-                if (dist < bestDist) { bestDist = dist; bestI = (int)i; bestJ = (int)j; }
-            }
-        }
-        // Merge j into i (keep the more frequent color's RGB, sum counts)
-        if (colorFreqs[bestI].count < colorFreqs[bestJ].count)
-            colorFreqs[bestI].rgb15 = colorFreqs[bestJ].rgb15;
-        colorFreqs[bestI].count += colorFreqs[bestJ].count;
-        colorFreqs.erase(colorFreqs.begin() + bestJ);
-    }
-
-    int palCount = (int)colorFreqs.size();
-
-    // Build palette (index 0 = transparent)
-    outPalette[0] = 0;
-    for (int i = 0; i < palCount; i++)
-    {
-        unsigned short c = colorFreqs[i].rgb15;
-        unsigned r = (c & 0x1F) << 3;
-        unsigned g = ((c >> 5) & 0x1F) << 3;
-        unsigned b = ((c >> 10) & 0x1F) << 3;
-        outPalette[i + 1] = r | (g << 8) | (b << 16) | 0xFF000000;
-    }
-
-    // Nearest palette match helper
-    auto nearestPal = [&](unsigned short c15) -> uint8_t {
-        int bestDist = 999999;
-        uint8_t bestIdx = 1;
-        for (int i = 0; i < palCount; i++)
-        {
-            int dr = (int)(c15 & 0x1F) - (int)(colorFreqs[i].rgb15 & 0x1F);
-            int dg = (int)((c15 >> 5) & 0x1F) - (int)((colorFreqs[i].rgb15 >> 5) & 0x1F);
-            int db = (int)((c15 >> 10) & 0x1F) - (int)((colorFreqs[i].rgb15 >> 10) & 0x1F);
-            int dist = dr * dr + dg * dg + db * db;
-            if (dist < bestDist) { bestDist = dist; bestIdx = (uint8_t)(i + 1); }
-        }
-        return bestIdx;
-    };
-
-    // Quantize each direction image to dirSize x dirSize palette-indexed
-    for (int d = 0; d < 8; d++)
-    {
-        if (!dirs[d].pixels || dirs[d].width <= 0 || dirs[d].height <= 0) continue;
-        int srcW = dirs[d].width, srcH = dirs[d].height;
-        for (int oy = 0; oy < dirSize; oy++)
-        {
-            int sy = oy * srcH / dirSize;
-            for (int ox = 0; ox < dirSize; ox++)
-            {
-                int sx = ox * srcW / dirSize;
-                int idx = (sy * srcW + sx) * 4;
-                if (dirs[d].pixels[idx + 3] < 128) continue;
-                // Skip edge pixels to prevent stray anti-aliased artifacts
-                if (ox == 0 || oy == 0 || ox == dirSize - 1 || oy == dirSize - 1)
-                {
-                    // Only keep edge pixel if fully opaque (alpha == 255)
-                    if (dirs[d].pixels[idx + 3] < 255) continue;
-                }
-                unsigned r = dirs[d].pixels[idx + 0] >> 3;
-                unsigned g = dirs[d].pixels[idx + 1] >> 3;
-                unsigned b = dirs[d].pixels[idx + 2] >> 3;
-                unsigned short c15 = (unsigned short)(r | (g << 5) | (b << 10));
-                outFrames[d].pixels[oy * dirSize + ox] = nearestPal(c15);
-            }
-        }
-    }
-}
-
 // Convert a raw NxN palette-indexed buffer to 4bpp GBA tiles
 static std::vector<uint32_t> RawPixelsToGBATiles(const uint8_t* pixels, int size)
 {
@@ -365,7 +248,6 @@ static bool GenerateMapData(const std::string& runtimeDir,
                             const std::vector<GBASpriteExport>& sprites,
                             const std::vector<GBASpriteAssetExport>& assets,
                             const GBACameraExport& camera,
-                            const GBAPlayerDirExport playerDirs[8],
                             float orbitDist)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
@@ -421,36 +303,6 @@ static bool GenerateMapData(const std::string& runtimeDir,
         for (size_t fi = 0; fi < asset.frames.size(); fi++)
         {
             auto td = FrameToGBATiles(asset.frames[fi]);
-            allTiles.insert(allTiles.end(), td.begin(), td.end());
-        }
-    }
-
-    // Quantize and append player direction sprites (8 frames x 64 tiles each at 64x64)
-    bool hasPlayerDirs = false;
-    int playerDirTile0 = 0;
-    int playerDirPalBank = 7; // use palette bank 7 for player direction sprites
-    int playerDirSize = 64;   // direction sprite size
-    QuantizedDirFrame dirFrames[8];
-    uint32_t dirPalette[16];
-
-    if (playerDirs)
-    {
-        // Check if at least one direction image exists
-        for (int d = 0; d < 8; d++)
-        {
-            if (playerDirs[d].pixels && playerDirs[d].width > 0)
-            { hasPlayerDirs = true; break; }
-        }
-    }
-
-    if (hasPlayerDirs)
-    {
-        QuantizePlayerDirSprites(playerDirs, dirFrames, dirPalette);
-        playerDirTile0 = (int)allTiles.size() / 8;
-
-        for (int d = 0; d < 8; d++)
-        {
-            auto td = RawPixelsToGBATiles(dirFrames[d].pixels, playerDirSize);
             allTiles.insert(allTiles.end(), td.begin(), td.end());
         }
     }
@@ -561,11 +413,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
         // Quantize and tile each set
         int dirSize = 64;
-        // Share player direction VRAM tiles if player dirs exist (avoids VRAM overflow)
-        if (hasPlayerDirs && playerDirTile0 > 0)
-            assetDirInfos[ai].vramTile0 = playerDirTile0;
-        else
-            assetDirInfos[ai].vramTile0 = (int)allTiles.size() / 8;
+        assetDirInfos[ai].vramTile0 = (int)allTiles.size() / 8;
 
         for (int si = 0; si < setCount; si++)
         {
@@ -659,24 +507,6 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << " };\n";
     }
 
-    // Player direction palette
-    if (hasPlayerDirs)
-    {
-        f << "static const u16 afn_pal_playerdir[16] = { ";
-        for (int c = 0; c < 16; c++)
-        {
-            char hex[8];
-            snprintf(hex, sizeof(hex), "0x%04X", EditorColorToRGB15(dirPalette[c]));
-            f << hex;
-            if (c < 15) f << ", ";
-        }
-        f << " };\n";
-        int dirTilesPerFrame = (playerDirSize / 8) * (playerDirSize / 8);
-        f << "#define AFN_PLAYER_DIR_TILE0 " << playerDirTile0 << "\n";
-        f << "#define AFN_PLAYER_DIR_SIZE " << playerDirSize << "\n";
-        f << "#define AFN_PLAYER_DIR_TPF " << dirTilesPerFrame << "\n";
-        f << "#define AFN_PLAYER_DIR_PALBANK " << playerDirPalBank << "\n";
-    }
     // Per-asset direction palettes (emit for all assets; zeros if no dirs)
     if (!assets.empty())
     {
@@ -736,6 +566,46 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "};\n\n";
     }
 
+    // Per-asset animation descriptors: { baseSetIdx, frameCount, fps }
+    // Allows runtime to cycle through direction frames within an animation
+    if (!assets.empty())
+    {
+        int maxAnims = 0;
+        for (size_t ai = 0; ai < assets.size(); ai++)
+            if ((int)assets[ai].anims.size() > maxAnims)
+                maxAnims = (int)assets[ai].anims.size();
+        if (maxAnims < 1) maxAnims = 1;
+        f << "#define AFN_MAX_ANIMS " << maxAnims << "\n";
+        f << "static const int afn_anim_desc[][AFN_MAX_ANIMS][3] = {\n";
+        for (size_t ai = 0; ai < assets.size(); ai++)
+        {
+            f << "    { ";
+            int base = 0;
+            for (int an = 0; an < maxAnims; an++)
+            {
+                if (an < (int)assets[ai].anims.size())
+                {
+                    int fc = assets[ai].anims[an].endFrame;
+                    int fps = assets[ai].anims[an].fps;
+                    if (fps <= 0) fps = 8;
+                    float spd = assets[ai].anims[an].speed;
+                    if (spd <= 0.0f) spd = 1.0f;
+                    int effectiveFps = (int)(fps * spd);
+                    if (effectiveFps < 1) effectiveFps = 1;
+                    f << "{ " << base << ", " << fc << ", " << effectiveFps << " }";
+                    base += fc;
+                }
+                else
+                {
+                    f << "{ 0, 0, 8 }";
+                }
+                if (an < maxAnims - 1) f << ", ";
+            }
+            f << " },\n";
+        }
+        f << "};\n\n";
+    }
+
     // Minimap tile index
     f << "#define AFN_MINIMAP_TILE " << minimapTile << "\n\n";
 
@@ -787,7 +657,6 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBASpriteExport>& sprites,
                 const std::vector<GBASpriteAssetExport>& assets,
                 const GBACameraExport& camera,
-                const GBAPlayerDirExport playerDirs[8],
                 float orbitDist,
                 std::string& errorMsg)
 {
@@ -804,7 +673,7 @@ bool PackageGBA(const std::string& runtimeDir,
     }
 
     // --- Step 1: Generate mapdata.h with sprite/camera/asset/player data ---
-    if (!GenerateMapData(runtimeDir, sprites, assets, camera, playerDirs, orbitDist))
+    if (!GenerateMapData(runtimeDir, sprites, assets, camera, orbitDist))
     {
         errorMsg = "Failed to write mapdata.h";
         return false;
