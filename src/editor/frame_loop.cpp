@@ -285,6 +285,10 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "height=%.6f\n", sCamObj.height);
     fprintf(f, "angle=%.6f\n", sCamObj.angle);
     fprintf(f, "horizon=%.6f\n", sCamObj.horizon);
+    fprintf(f, "walk_ease_in=%.1f\n", sCamObj.walkEaseIn);
+    fprintf(f, "walk_ease_out=%.1f\n", sCamObj.walkEaseOut);
+    fprintf(f, "sprint_ease_in=%.1f\n", sCamObj.sprintEaseIn);
+    fprintf(f, "sprint_ease_out=%.1f\n", sCamObj.sprintEaseOut);
     fprintf(f, "icon_scale=%.6f\n\n", sCamObjEditorScale);
 
     // Editor camera
@@ -423,6 +427,10 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "height=%f", &fval) == 1) sCamObj.height = fval;
             else if (sscanf(line, "angle=%f", &fval) == 1) sCamObj.angle = fval;
             else if (sscanf(line, "horizon=%f", &fval) == 1) sCamObj.horizon = fval;
+            else if (sscanf(line, "walk_ease_in=%f", &fval) == 1) sCamObj.walkEaseIn = fval;
+            else if (sscanf(line, "walk_ease_out=%f", &fval) == 1) sCamObj.walkEaseOut = fval;
+            else if (sscanf(line, "sprint_ease_in=%f", &fval) == 1) sCamObj.sprintEaseIn = fval;
+            else if (sscanf(line, "sprint_ease_out=%f", &fval) == 1) sCamObj.sprintEaseOut = fval;
             else if (sscanf(line, "icon_scale=%f", &fval) == 1) sCamObjEditorScale = fval;
         }
         else if (strcmp(section, "EditorCamera") == 0)
@@ -2098,6 +2106,12 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::SliderAngle("Angle##cam", &sCamObj.angle, -180.0f, 180.0f);
         ImGui::DragFloat("Horizon##cam", &sCamObj.horizon, 0.5f, 10.0f, 120.0f);
         ImGui::Separator();
+        ImGui::Text("Camera Follow");
+        ImGui::DragFloat("Walk Ease In##cam",  &sCamObj.walkEaseIn,  0.5f, 1.0f, 50.0f, "%.0f%%");
+        ImGui::DragFloat("Walk Ease Out##cam", &sCamObj.walkEaseOut, 0.5f, 1.0f, 50.0f, "%.0f%%");
+        ImGui::DragFloat("Sprint Ease In##cam",  &sCamObj.sprintEaseIn,  0.5f, 1.0f, 50.0f, "%.0f%%");
+        ImGui::DragFloat("Sprint Ease Out##cam", &sCamObj.sprintEaseOut, 0.5f, 1.0f, 50.0f, "%.0f%%");
+        ImGui::Separator();
         ImGui::DragFloat("Icon Size##cam", &sCamObjEditorScale, 0.01f, 0.1f, 2.0f, "%.2f");
         ImGui::PopItemWidth();
     }
@@ -2719,6 +2733,10 @@ void FrameTick(float dt)
                 exportCam.height = sCamObj.height;
                 exportCam.angle = sCamObj.angle;
                 exportCam.horizon = sCamObj.horizon;
+                exportCam.walkEaseIn = sCamObj.walkEaseIn;
+                exportCam.walkEaseOut = sCamObj.walkEaseOut;
+                exportCam.sprintEaseIn = sCamObj.sprintEaseIn;
+                exportCam.sprintEaseOut = sCamObj.sprintEaseOut;
 
                 // Collect sprite assets for export
                 std::vector<GBASpriteAssetExport> exportAssets;
@@ -2960,14 +2978,16 @@ void FrameTick(float dt)
                 {
                     float targetX = player.x + sinf(sOrbitAngle) * sOrbitDist;
                     float targetZ = player.z + cosf(sOrbitAngle) * sOrbitDist;
-                    // Normal walk: snappy follow. Sprint: laggy ease-in/out.
+                    // Camera follow using exposed ease values
                     bool orbiting = fabsf(sManualOrbitCurrent) > 0.0f;
-                    float baseRate = orbiting ? 12.0f : 2.5f;
-                    float followRate;
-                    if (sPlayerSprinting)
-                        followRate = std::min(1.0f, (sPlayerMoving ? 1.2f : 2.0f) * dt);
+                    float followPct;
+                    if (orbiting)
+                        followPct = 50.0f; // fast follow during orbit to prevent drift
+                    else if (sPlayerSprinting)
+                        followPct = sPlayerMoving ? sCamObj.sprintEaseIn : sCamObj.sprintEaseOut;
                     else
-                        followRate = std::min(1.0f, baseRate * dt);
+                        followPct = sPlayerMoving ? sCamObj.walkEaseIn : sCamObj.walkEaseOut;
+                    float followRate = std::min(1.0f, (followPct / 100.0f) * 12.0f * dt);
                     float dx = targetX - sCamera.x;
                     float dz = targetZ - sCamera.z;
                     if (fabsf(dx) < 0.1f && fabsf(dz) < 0.1f)

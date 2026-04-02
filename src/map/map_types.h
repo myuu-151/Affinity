@@ -148,6 +148,11 @@ struct CameraStartObject
     float height = 14.0f;
     float angle = 0.0f;
     float horizon = 60.0f;
+    // Camera follow rates (percentage per frame, 1-100)
+    float walkEaseIn  = 19.0f;  // how fast camera catches up when walking
+    float walkEaseOut = 19.0f;  // how fast camera settles when stopping
+    float sprintEaseIn  = 6.0f;  // camera catch-up during sprint
+    float sprintEaseOut = 12.0f; // camera settle after sprint
 };
 
 // Map data — the floor plane rendered by Mode 7

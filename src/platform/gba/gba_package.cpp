@@ -265,7 +265,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
     f << "#define AFN_CAM_Z     " << EditorToGBAFixed(camera.z) << "\n";
     f << "#define AFN_CAM_H     " << EditorHeightToGBAFixed(camera.height) << "\n";
     f << "#define AFN_CAM_ANGLE " << EditorAngleToBrad(camera.angle) << "\n";
-    f << "#define AFN_CAM_HORIZON " << (int)camera.horizon << "\n\n";
+    f << "#define AFN_CAM_HORIZON " << (int)camera.horizon << "\n";
+    // Camera follow ease rates (stored as fixed-point: pct * 256 / 100)
+    f << "#define AFN_WALK_EASE_IN "    << (int)(camera.walkEaseIn * 256.0f / 100.0f) << "\n";
+    f << "#define AFN_WALK_EASE_OUT "   << (int)(camera.walkEaseOut * 256.0f / 100.0f) << "\n";
+    f << "#define AFN_SPRINT_EASE_IN "  << (int)(camera.sprintEaseIn * 256.0f / 100.0f) << "\n";
+    f << "#define AFN_SPRINT_EASE_OUT " << (int)(camera.sprintEaseOut * 256.0f / 100.0f) << "\n\n";
 
     // Find player sprite index
     int playerIdx = -1;

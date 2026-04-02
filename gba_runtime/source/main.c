@@ -898,23 +898,26 @@ int main(void)
                 FIXED orbCos = lu_cos(orbit_angle) >> 4;
                 FIXED targetX = player_x - ((orbSin * orbit_dist) >> 8);
                 FIXED targetZ = player_z + ((orbCos * orbit_dist) >> 8);
-                // Smooth follow: normal walk = snappy, sprint = laggy ease-in/out
+                // Smooth follow using editor-configured ease rates
                 FIXED ddx = targetX - cam_x;
                 FIXED ddz = targetZ - cam_z;
                 if (ddx > -16 && ddx < 16 && ddz > -16 && ddz < 16)
                 { cam_x = targetX; cam_z = targetZ; }
-                else if (key_is_down(KEY_B))
-                {
-                    // Sprint: slow ease-in (1/16), smooth ease-out (1/8)
-                    int blend = player_moving ? 4 : 3;
-                    cam_x += ddx >> blend;
-                    cam_z += ddz >> blend;
-                }
                 else
                 {
-                    // Normal: original snappy follow
+#ifdef AFN_WALK_EASE_IN
+                    int ease;
+                    if (key_is_down(KEY_B))
+                        ease = player_moving ? AFN_SPRINT_EASE_IN : AFN_SPRINT_EASE_OUT;
+                    else
+                        ease = player_moving ? AFN_WALK_EASE_IN : AFN_WALK_EASE_OUT;
+                    // ease is pct*256/100; multiply delta by ease then >>8
+                    cam_x += (ddx * ease) >> 8;
+                    cam_z += (ddz * ease) >> 8;
+#else
                     cam_x += (ddx * 3) >> 4;
                     cam_z += (ddz * 3) >> 4;
+#endif
                 }
             }
             cam_angle = orbit_angle;

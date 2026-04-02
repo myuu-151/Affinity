@@ -74,6 +74,10 @@ struct GBACameraExport
     float height;
     float angle;        // radians
     float horizon;
+    float walkEaseIn  = 19.0f;
+    float walkEaseOut = 19.0f;
+    float sprintEaseIn  = 6.0f;
+    float sprintEaseOut = 12.0f;
 };
 
 // Package the current map into a .gba ROM.
