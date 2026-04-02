@@ -320,6 +320,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
     };
     std::vector<AssetDirInfo> assetDirInfos(assets.size());
     std::vector<uint32_t> dirAnimAllTiles; // ROM data for DMA streaming
+    int dirVramNextTile = 0; // running VRAM tile offset for direction assets
 
     for (size_t ai = 0; ai < assets.size(); ai++)
     {
@@ -445,7 +446,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
         // Quantize and tile each set
         int dirSize = 64;
-        assetDirInfos[ai].vramTile0 = (int)allTiles.size() / 8;
+        // Each asset needs a unique VRAM region for DMA: base + accumulated tiles from previous assets
+        assetDirInfos[ai].vramTile0 = (int)allTiles.size() / 8 + dirVramNextTile;
 
         for (int si = 0; si < setCount; si++)
         {
@@ -485,10 +487,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 dirAnimAllTiles.insert(dirAnimAllTiles.end(), td.begin(), td.end());
             }
         }
+
+        // Advance VRAM offset: reserve space for one set (8 dirs × tpf tiles)
+        int tpf = (dirSize / 8) * (dirSize / 8); // tiles per direction frame
+        dirVramNextTile += 8 * tpf;
     }
 
     int totalTileCount = (int)allTiles.size() / 8;
-    int minimapTile = totalTileCount;
+    int minimapTile = totalTileCount + dirVramNextTile;
 
     // Emit combined tile data
     if (!allTiles.empty())
