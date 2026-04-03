@@ -275,7 +275,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
     f << "#define AFN_WALK_EASE_IN "    << (int)(camera.walkEaseIn * 256.0f / 100.0f) << "\n";
     f << "#define AFN_WALK_EASE_OUT "   << (int)(camera.walkEaseOut * 256.0f / 100.0f) << "\n";
     f << "#define AFN_SPRINT_EASE_IN "  << (int)(camera.sprintEaseIn * 256.0f / 100.0f) << "\n";
-    f << "#define AFN_SPRINT_EASE_OUT " << (int)(camera.sprintEaseOut * 256.0f / 100.0f) << "\n\n";
+    f << "#define AFN_SPRINT_EASE_OUT " << (int)(camera.sprintEaseOut * 256.0f / 100.0f) << "\n";
+    // Draw distance as 16.8 fixed-point (editor units / 4 * 256), 0 = unlimited
+    if (camera.drawDistance > 0.0f)
+        f << "#define AFN_DRAW_DISTANCE " << (int)(camera.drawDistance / 4.0f * 256.0f) << "\n";
+    if (camera.smallTriCull > 0)
+        f << "#define AFN_SMALL_TRI_CULL " << camera.smallTriCull << "\n";
+    f << "\n";
 
     // Find player sprite index
     int playerIdx = -1;
@@ -930,19 +936,20 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "\n};\n\n";
         }
 
-        // Mesh descriptor table: { vertCount, indexCount, colorRGB15, cullMode, lit, sorted }
-        f << "static const int afn_mesh_desc[][6] = {\n";
+        // Mesh descriptor table: { vertCount, indexCount, colorRGB15, cullMode, lit, sorted, halfRes }
+        f << "static const int afn_mesh_desc[][7] = {\n";
         for (size_t mi = 0; mi < meshes.size(); mi++)
         {
             int vc = finalVertCounts[mi];
             int ic = (int)meshes[mi].indices.size();
             int lit = meshes[mi].lit;
             int sorted = 0;
+            int halfRes = meshes[mi].halfRes;
             // Barebones: force unlit and mark as pre-sorted
             if (meshes[mi].exportMode == 2) { lit = 0; sorted = 1; }
             char hex[8];
             snprintf(hex, sizeof(hex), "0x%04X", meshes[mi].colorRGB15);
-            f << "    { " << vc << ", " << ic << ", " << hex << ", " << meshes[mi].cullMode << ", " << lit << ", " << sorted << " },\n";
+            f << "    { " << vc << ", " << ic << ", " << hex << ", " << meshes[mi].cullMode << ", " << lit << ", " << sorted << ", " << halfRes << " },\n";
         }
         f << "};\n\n";
 

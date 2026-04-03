@@ -178,6 +178,7 @@ struct MeshAsset
     CullMode cullMode = CullMode::Back; // backface culling mode
     MeshExportMode exportMode = MeshExportMode::Quality; // export quality
     bool lit = true; // false = unlit (flat color, no shading calc)
+    bool halfRes = false; // true = rasterize every other scanline (2x fill speed)
 };
 
 static constexpr int kMaxMeshAssets = 32;
@@ -218,6 +219,11 @@ struct CameraStartObject
     float walkEaseOut = 19.0f;
     float sprintEaseIn  = 6.0f;
     float sprintEaseOut = 12.0f;
+    // Draw distance (0 = unlimited)
+    float drawDistance = 0.0f;
+    // Performance toggles
+    int smallTriCull = 0;   // min screen-space area to render (0=off)
+    bool skipFloor = false; // skip floor rendering entirely
 };
 
 // Map data — the floor plane rendered by Mode 7

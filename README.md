@@ -3,16 +3,20 @@
 </p>
 
 # Affinity GBA Engine
-A Game Boy Advance Mode 7 engine with a Windows desktop editor. Build affine-scrolling worlds with a live perspective preview, then package directly to a `.gba` ROM.
+A Game Boy Advance 3D engine with a Windows desktop editor. Import OBJ meshes, place objects in a live perspective viewport, and package directly to a `.gba` ROM with software polygon rasterization.
 
 > **This project is in active development.** Features and APIs may change.
 
 ## Features
 
-- **Live Mode 7 Preview** — Software rasterizer matching GBA hardware per-scanline affine math
-- **NEXXT-style Editor** — Tileset, tilemap, and palette panels with a large viewport
+- **Software 3D Renderer** — Flat-shaded polygon rasterizer running on GBA hardware in Mode 4 bitmap
+- **OBJ Mesh Import** — Load .obj files as mesh assets with per-mesh backface culling options
+- **Live Viewport** — Real-time perspective preview matching the GBA's rendering
+- **Blender-style Transform Tools** — G to grab, S to scale, X/Y/Z axis constraints with visual guides
 - **One-Click GBA Packaging** — Builds a `.gba` ROM from the editor via devkitARM
 - **mGBA Integration** — Launch the ROM directly in mGBA from the editor
+- **OAM Sprite Support** — 8-directional animated sprites with LOD, running alongside 3D meshes
+- **Mode 7 Fallback** — HBlank affine floor rendering still available for non-mesh projects
 
 ## Requirements
 
@@ -37,6 +41,13 @@ Run: `build\Debug\AffinityEditor.exe`
 | W/S | Move forward/back |
 | A/D | Rotate left/right |
 | Q/E | Camera height down/up |
+| I/K | Pitch up/down |
+| G | Grab (translate) selected object |
+| S | Scale selected object |
+| X/Y/Z | Constrain to axis (during grab) |
+| R + drag | Resize selected object |
+| Delete | Delete selected object |
+| Right-click viewport | Place new object |
 
 ## GBA Controls
 
@@ -52,13 +63,13 @@ Run: `build\Debug\AffinityEditor.exe`
 ```
 src/
   editor/       — ImGui editor (main loop, frame tick)
-  viewport/     — Mode 7 software rasterizer
-  map/          — Tile/tilemap data types
+  viewport/     — Software 3D rasterizer and Mode 7 preview
+  map/          — Mesh, sprite, and tilemap data types
   math/         — Fixed-point types, camera struct
   platform/gba/ — GBA ROM packaging (invokes devkitARM)
 gba_runtime/
-  source/       — GBA Mode 7 runtime (HBlank ISR, input, tiles)
-  include/      — Generated map data header
+  source/       — GBA runtime (software polygon renderer, OAM sprites, input)
+  include/      — Generated mesh and map data header
 thirdparty/
   glfw/         — Windowing
   imgui/        — UI framework

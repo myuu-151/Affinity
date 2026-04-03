@@ -878,6 +878,96 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
     }
 }
 
+// Half-res rasterizer: draws every other scanline, duplicating each to the row below.
+// Halves the number of afn_hline calls (the main fill bottleneck).
+IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx)
+{
+    int tmp;
+    int totalH, segH;
+    int iy0, iy2, y;
+    int xLong, xShort;
+    int dxLong, dxShort;
+    int left, right;
+
+    if (y0 > y1) { tmp=x0; x0=x1; x1=tmp; tmp=y0; y0=y1; y1=tmp; }
+    if (y0 > y2) { tmp=x0; x0=x2; x2=tmp; tmp=y0; y0=y2; y2=tmp; }
+    if (y1 > y2) { tmp=x1; x1=x2; x2=tmp; tmp=y1; y1=y2; y2=tmp; }
+
+    totalH = y2 - y0;
+    if (totalH <= 0) return;
+
+    dxLong = ((x2 - x0) << 16) / totalH;
+
+    segH = y1 - y0;
+    if (segH > 0)
+    {
+        dxShort = ((x1 - x0) << 16) / segH;
+        xLong = x0 << 16;
+        xShort = x0 << 16;
+
+        iy0 = y0 < 0 ? 0 : y0;
+        if (iy0 > y0)
+        {
+            xLong += dxLong * (iy0 - y0);
+            xShort += dxShort * (iy0 - y0);
+        }
+        /* Align to even scanline */
+        if (iy0 & 1) { xLong += dxLong; xShort += dxShort; iy0++; }
+        iy2 = y1 < 160 ? y1 : 160;
+
+        for (y = iy0; y < iy2; y += 2)
+        {
+            left = xLong >> 16;
+            right = xShort >> 16;
+            if (left > right) { tmp = left; left = right; right = tmp; }
+            if (left < 0) left = 0;
+            if (right > 239) right = 239;
+            if (left <= right)
+            {
+                afn_hline(buf + y * 120, left, right, palIdx);
+                if (y + 1 < 160)
+                    afn_hline(buf + (y + 1) * 120, left, right, palIdx);
+            }
+            xLong += dxLong << 1;
+            xShort += dxShort << 1;
+        }
+    }
+
+    segH = y2 - y1;
+    if (segH > 0)
+    {
+        dxShort = ((x2 - x1) << 16) / segH;
+        xLong = (x0 << 16) + dxLong * (y1 - y0);
+        xShort = x1 << 16;
+
+        iy0 = y1 < 0 ? 0 : y1;
+        if (iy0 > y1)
+        {
+            xLong += dxLong * (iy0 - y1);
+            xShort += dxShort * (iy0 - y1);
+        }
+        if (iy0 & 1) { xLong += dxLong; xShort += dxShort; iy0++; }
+        iy2 = y2 < 160 ? y2 : 159;
+
+        for (y = iy0; y <= iy2; y += 2)
+        {
+            left = xLong >> 16;
+            right = xShort >> 16;
+            if (left > right) { tmp = left; left = right; right = tmp; }
+            if (left < 0) left = 0;
+            if (right > 239) right = 239;
+            if (left <= right)
+            {
+                afn_hline(buf + y * 120, left, right, palIdx);
+                if (y + 1 < 160)
+                    afn_hline(buf + (y + 1) * 120, left, right, palIdx);
+            }
+            xLong += dxLong << 1;
+            xShort += dxShort << 1;
+        }
+    }
+}
+
 // Triangle sort entry for painter's algorithm
 typedef struct { int triIdx; int depth; } TriSort;
 
@@ -887,7 +977,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
     int i;
     for (i = 0; i < g_spriteCount; i++)
     {
-        int mi, vertCount, idxCount, cullMode, meshLit, meshSorted, v, t;
+        int mi, vertCount, idxCount, cullMode, meshLit, meshSorted, meshHalfRes, v, t;
         int anyVisible;
         const s16* verts;
         const s8* norms;
@@ -911,6 +1001,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         cullMode = afn_mesh_desc[mi][3]; // 0=Back, 1=Front, 2=None
         meshLit = afn_mesh_desc[mi][4];  // 0=unlit, 1=lit
         meshSorted = afn_mesh_desc[mi][5]; // 0=unsorted, 1=pre-sorted (skip depth sort)
+        meshHalfRes = afn_mesh_desc[mi][6]; // 0=full, 1=skip every other scanline
 
         // Sprite transform
         cosR = lu_cos(g_sprites[i].rotation) >> 4;
@@ -992,11 +1083,26 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             else if (cullMode == 1 && cross <= 0) continue;  // Front: cull front faces
             // cullMode == 2 (None): no culling, draw all
 
+#ifdef AFN_SMALL_TRI_CULL
+            // Small triangle cull: skip if screen-space area too small
+            {
+                int area = cross < 0 ? -cross : cross;
+                if (area < AFN_SMALL_TRI_CULL) continue;
+            }
+#endif
+
             // Average depth for painter's sort (larger = farther)
-            triOrder[triCount].triIdx = t;
-            triOrder[triCount].depth = (sz[i0] + sz[i1] + sz[i2]);
-            triCount++;
-            if (triCount >= 256) break;
+            {
+                int avgDepth = sz[i0] + sz[i1] + sz[i2];
+#ifdef AFN_DRAW_DISTANCE
+                // Per-triangle draw distance cull (depth is sum of 3 vertices in 16.8)
+                if (avgDepth / 3 > AFN_DRAW_DISTANCE) continue;
+#endif
+                triOrder[triCount].triIdx = t;
+                triOrder[triCount].depth = avgDepth;
+                triCount++;
+                if (triCount >= 256) break;
+            }
         }
 
         // Insertion sort by depth — back to front (farthest first)
@@ -1053,7 +1159,10 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 palIdx = AFN_MESH_PAL_BASE + mi * 8 + 5;
             }
 
-            rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+            if (meshHalfRes)
+                rasterize_tri_half(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+            else
+                rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
         }
     }
 }

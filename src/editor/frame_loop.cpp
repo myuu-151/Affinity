@@ -431,6 +431,9 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "walk_ease_out=%.1f\n", sCamObj.walkEaseOut);
     fprintf(f, "sprint_ease_in=%.1f\n", sCamObj.sprintEaseIn);
     fprintf(f, "sprint_ease_out=%.1f\n", sCamObj.sprintEaseOut);
+    fprintf(f, "draw_distance=%.1f\n", sCamObj.drawDistance);
+    fprintf(f, "small_tri_cull=%d\n", sCamObj.smallTriCull);
+    fprintf(f, "skip_floor=%d\n", sCamObj.skipFloor ? 1 : 0);
     fprintf(f, "icon_scale=%.6f\n\n", sCamObjEditorScale);
 
     // Editor camera
@@ -516,7 +519,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0);
     }
     fprintf(f, "\n");
 
@@ -586,6 +589,9 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "walk_ease_out=%f", &fval) == 1) sCamObj.walkEaseOut = fval;
             else if (sscanf(line, "sprint_ease_in=%f", &fval) == 1) sCamObj.sprintEaseIn = fval;
             else if (sscanf(line, "sprint_ease_out=%f", &fval) == 1) sCamObj.sprintEaseOut = fval;
+            else if (sscanf(line, "draw_distance=%f", &fval) == 1) sCamObj.drawDistance = fval;
+            else if (sscanf(line, "small_tri_cull=%d", &ival) == 1) sCamObj.smallTriCull = ival;
+            else if (sscanf(line, "skip_floor=%d", &ival) == 1) sCamObj.skipFloor = (ival != 0);
             else if (sscanf(line, "icon_scale=%f", &fval) == 1) sCamObjEditorScale = fval;
         }
         else if (strcmp(section, "EditorCamera") == 0)
@@ -774,8 +780,8 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "MeshAssets") == 0)
         {
             char mname[256], mpath[512];
-            int mcull = 0, mexport = 0, mlit = 1;
-            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit);
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0;
+            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres);
             if (matched >= 2)
             {
                 MeshAsset ma;
@@ -787,6 +793,8 @@ static bool LoadProject(const std::string& path)
                     ma.exportMode = (MeshExportMode)mexport;
                 if (matched >= 5)
                     ma.lit = (mlit != 0);
+                if (matched >= 6)
+                    ma.halfRes = (mhalfres != 0);
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -1059,6 +1067,8 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         ImGui::PopItemWidth();
 
         ImGui::Checkbox("Lit##meshLit", &ma.lit);
+        ImGui::SameLine();
+        ImGui::Checkbox("Half-Res##meshHalfRes", &ma.halfRes);
     }
 
     ImGui::Separator();
@@ -2622,6 +2632,13 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::DragFloat("Sprint Ease In##cam",  &sCamObj.sprintEaseIn,  0.5f, 1.0f, 50.0f, "%.0f%%");
         ImGui::DragFloat("Sprint Ease Out##cam", &sCamObj.sprintEaseOut, 0.5f, 1.0f, 50.0f, "%.0f%%");
         ImGui::Separator();
+        ImGui::Text("Rendering");
+        ImGui::DragFloat("Draw Distance##cam", &sCamObj.drawDistance, 1.0f, 0.0f, 2000.0f, "%.0f");
+        ImGui::DragInt("Small Tri Cull##cam", &sCamObj.smallTriCull, 1.0f, 0, 500, "%d");
+        if (sCamObj.smallTriCull > 0)
+            ImGui::TextDisabled("Skip tris with screen area < %d", sCamObj.smallTriCull);
+        ImGui::Checkbox("Skip Floor##cam", &sCamObj.skipFloor);
+        ImGui::Separator();
         ImGui::DragFloat("Icon Size##cam", &sCamObjEditorScale, 0.01f, 0.1f, 2.0f, "%.2f");
         ImGui::PopItemWidth();
     }
@@ -3292,6 +3309,9 @@ void FrameTick(float dt)
                 exportCam.walkEaseOut = sCamObj.walkEaseOut;
                 exportCam.sprintEaseIn = sCamObj.sprintEaseIn;
                 exportCam.sprintEaseOut = sCamObj.sprintEaseOut;
+                exportCam.drawDistance = sCamObj.drawDistance;
+                exportCam.smallTriCull = sCamObj.smallTriCull;
+                exportCam.skipFloor = sCamObj.skipFloor;
 
                 // Collect sprite assets for export
                 std::vector<GBASpriteAssetExport> exportAssets;
@@ -3366,6 +3386,7 @@ void FrameTick(float dt)
                     me.cullMode = (int)ma.cullMode;
                     me.exportMode = (int)ma.exportMode;
                     me.lit = ma.lit ? 1 : 0;
+                    me.halfRes = ma.halfRes ? 1 : 0;
                     exportMeshes.push_back(me);
                 }
 

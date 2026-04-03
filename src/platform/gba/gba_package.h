@@ -82,6 +82,9 @@ struct GBACameraExport
     float walkEaseOut = 19.0f;
     float sprintEaseIn  = 6.0f;
     float sprintEaseOut = 12.0f;
+    float drawDistance  = 0.0f;   // 0 = unlimited
+    int   smallTriCull  = 0;      // min screen-space area to render (0=off)
+    bool  skipFloor     = false;  // skip floor rendering entirely
 };
 
 // Mesh asset for GBA export
@@ -95,6 +98,7 @@ struct GBAMeshExport
     int cullMode = 0;             // 0=Back, 1=Front, 2=None
     int exportMode = 0;           // 0=Quality (no weld), 1=Performance (welded)
     int lit = 1;                  // 1=lit (shaded), 0=unlit (flat color)
+    int halfRes = 0;              // 1=rasterize every other scanline
 };
 
 // Package the current map into a .gba ROM.
