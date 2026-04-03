@@ -1254,6 +1254,17 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 if (!texPath.empty())
                     LoadMeshTexture(texPath, ma);
             }
+            if (ma.glTexID)
+            {
+                if (ImGui::Checkbox("Filtered##meshTexFilter", &ma.texFiltered))
+                {
+                    glBindTexture(GL_TEXTURE_2D, ma.glTexID);
+                    GLint filter = ma.texFiltered ? GL_LINEAR : GL_NEAREST;
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+                    glBindTexture(GL_TEXTURE_2D, 0);
+                }
+            }
         }
     }
 
