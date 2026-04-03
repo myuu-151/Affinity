@@ -935,11 +935,58 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 f << (didWeld ? remappedIdx[i] : mesh.indices[i]);
                 if (i + 1 < ic) f << ", ";
             }
-            f << "\n};\n\n";
+            f << "\n};\n";
+
+            // UV coordinates as 8.8 fixed-point (textured meshes only)
+            if (mesh.textured && !mesh.uvs.empty())
+            {
+                f << "static const s16 afn_mesh" << mi << "_uvs[" << vc * 2 << "] = {";
+                for (int v = 0; v < vc; v++)
+                {
+                    if (v % 4 == 0) f << "\n    ";
+                    // Get UV index (use remapped or original vertex index)
+                    int srcV = v; // for unwelded, vertex indices are 1:1
+                    float u = 0.0f, v2 = 0.0f;
+                    if (srcV * 2 + 1 < (int)mesh.uvs.size())
+                    {
+                        u = mesh.uvs[srcV * 2 + 0];
+                        v2 = mesh.uvs[srcV * 2 + 1];
+                    }
+                    // Convert to 8.8 fixed, multiply by texture size
+                    int fu = (int)(u * mesh.texW * 256.0f);
+                    int fv = (int)((1.0f - v2) * mesh.texH * 256.0f); // flip V (OBJ convention)
+                    f << fu << ", " << fv;
+                    if (v + 1 < vc) f << ", ";
+                }
+                f << "\n};\n";
+
+                // Texture pixel data
+                f << "static const u8 afn_mesh" << mi << "_tex[" << mesh.texW * mesh.texH << "] = {";
+                for (int p = 0; p < mesh.texW * mesh.texH; p++)
+                {
+                    if (p % 16 == 0) f << "\n    ";
+                    f << (int)mesh.texPixels[p];
+                    if (p + 1 < mesh.texW * mesh.texH) f << ", ";
+                }
+                f << "\n};\n";
+            }
+            f << "\n";
         }
 
-        // Mesh descriptor table: { vertCount, indexCount, colorRGB15, cullMode, lit, sorted, halfRes }
-        f << "static const int afn_mesh_desc[][7] = {\n";
+        // Allocate texture palette slots (16 colors each, starting at BG palette index 32)
+        int nextTexPalBase = 32;
+        std::vector<int> texPalBases(meshes.size(), 0);
+        for (size_t mi = 0; mi < meshes.size(); mi++)
+        {
+            if (meshes[mi].textured)
+            {
+                texPalBases[mi] = nextTexPalBase;
+                nextTexPalBase += 16;
+            }
+        }
+
+        // Mesh descriptor table: { vertCount, indexCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase }
+        f << "static const int afn_mesh_desc[][11] = {\n";
         for (size_t mi = 0; mi < meshes.size(); mi++)
         {
             int vc = finalVertCounts[mi];
@@ -947,11 +994,15 @@ static bool GenerateMapData(const std::string& runtimeDir,
             int lit = meshes[mi].lit;
             int sorted = 0;
             int halfRes = meshes[mi].halfRes;
+            int textured = meshes[mi].textured;
+            int texW = meshes[mi].texW;
+            int texShift = 0;
+            { int tw = texW; while (tw > 1) { texShift++; tw >>= 1; } }
             // Barebones: force unlit and mark as pre-sorted
             if (meshes[mi].exportMode == 2) { lit = 0; sorted = 1; }
             char hex[8];
             snprintf(hex, sizeof(hex), "0x%04X", meshes[mi].colorRGB15);
-            f << "    { " << vc << ", " << ic << ", " << hex << ", " << meshes[mi].cullMode << ", " << lit << ", " << sorted << ", " << halfRes << " },\n";
+            f << "    { " << vc << ", " << ic << ", " << hex << ", " << meshes[mi].cullMode << ", " << lit << ", " << sorted << ", " << halfRes << ", " << textured << ", " << texW << ", " << texShift << ", " << texPalBases[mi] << " },\n";
         }
         f << "};\n\n";
 
@@ -978,7 +1029,58 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "afn_mesh" << mi << "_idx";
             if (mi + 1 < meshes.size()) f << ", ";
         }
+        f << " };\n";
+
+        // UV pointer array (NULL for non-textured meshes)
+        f << "static const s16* const afn_mesh_uv_ptrs[] = { ";
+        for (size_t mi = 0; mi < meshes.size(); mi++)
+        {
+            if (meshes[mi].textured)
+                f << "afn_mesh" << mi << "_uvs";
+            else
+                f << "0";
+            if (mi + 1 < meshes.size()) f << ", ";
+        }
+        f << " };\n";
+
+        // Texture pixel pointer array (NULL for non-textured meshes)
+        f << "static const u8* const afn_mesh_tex_ptrs[] = { ";
+        for (size_t mi = 0; mi < meshes.size(); mi++)
+        {
+            if (meshes[mi].textured)
+                f << "afn_mesh" << mi << "_tex";
+            else
+                f << "0";
+            if (mi + 1 < meshes.size()) f << ", ";
+        }
         f << " };\n\n";
+
+        // Texture palettes — emit into a flat array for loading into BG palette
+        {
+            int totalTexPalEntries = 0;
+            for (size_t mi = 0; mi < meshes.size(); mi++)
+                if (meshes[mi].textured) totalTexPalEntries += 16;
+            if (totalTexPalEntries > 0)
+            {
+                f << "#define AFN_TEX_PAL_BASE 32\n";
+                f << "#define AFN_TEX_PAL_COUNT " << totalTexPalEntries << "\n";
+                f << "static const u16 afn_tex_palette[" << totalTexPalEntries << "] = {\n";
+                for (size_t mi = 0; mi < meshes.size(); mi++)
+                {
+                    if (!meshes[mi].textured) continue;
+                    f << "    // Mesh " << mi << " texture palette\n    ";
+                    for (int c = 0; c < 16; c++)
+                    {
+                        char hex[8];
+                        snprintf(hex, sizeof(hex), "0x%04X", meshes[mi].texPalette[c]);
+                        f << hex;
+                        if (c < 15) f << ", ";
+                    }
+                    f << ",\n";
+                }
+                f << "};\n\n";
+            }
+        }
 
         // Mesh shading palette: 8 shades per mesh from dark to base color
         f << "static const u16 afn_mesh_palette[" << (int)meshes.size() * 8 << "] = {\n";

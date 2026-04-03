@@ -1081,6 +1081,145 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
 }
 #endif
 
+// Affine texture-mapped triangle rasterizer
+// UVs are 8.8 fixed-point (pre-scaled to texture dimensions)
+IWRAM_CODE static void rasterize_tri_tex(u16* buf,
+    int x0, int y0, int u0, int v0,
+    int x1, int y1, int u1, int v1,
+    int x2, int y2, int u2, int v2,
+    const u8* tex, int texMask, int texShift, u8 palBase)
+{
+    int tmp;
+    int totalH, segH;
+    int iy0, iy2, y;
+    int xLong, xShort, uLong, uShort, vLong, vShort;
+    int dxLong, dxShort, duLong, duShort, dvLong, dvShort;
+    int left, right, spanW;
+
+    /* Sort by y (carry u,v along) */
+    if (y0 > y1) { tmp=x0;x0=x1;x1=tmp; tmp=y0;y0=y1;y1=tmp; tmp=u0;u0=u1;u1=tmp; tmp=v0;v0=v1;v1=tmp; }
+    if (y0 > y2) { tmp=x0;x0=x2;x2=tmp; tmp=y0;y0=y2;y2=tmp; tmp=u0;u0=u2;u2=tmp; tmp=v0;v0=v2;v2=tmp; }
+    if (y1 > y2) { tmp=x1;x1=x2;x2=tmp; tmp=y1;y1=y2;y2=tmp; tmp=u1;u1=u2;u2=tmp; tmp=v1;v1=v2;v2=tmp; }
+
+    totalH = y2 - y0;
+    if (totalH <= 0) return;
+
+    dxLong = ((x2 - x0) << 16) / totalH;
+    duLong = ((u2 - u0) << 16) / totalH;
+    dvLong = ((v2 - v0) << 16) / totalH;
+
+    /* Upper half */
+    segH = y1 - y0;
+    if (segH > 0)
+    {
+        dxShort = ((x1 - x0) << 16) / segH;
+        duShort = ((u1 - u0) << 16) / segH;
+        dvShort = ((v1 - v0) << 16) / segH;
+        xLong = x0 << 16; xShort = x0 << 16;
+        uLong = u0 << 16; uShort = u0 << 16;
+        vLong = v0 << 16; vShort = v0 << 16;
+
+        iy0 = y0 < 0 ? 0 : y0;
+        if (iy0 > y0)
+        {
+            int skip = iy0 - y0;
+            xLong += dxLong * skip; xShort += dxShort * skip;
+            uLong += duLong * skip; uShort += duShort * skip;
+            vLong += dvLong * skip; vShort += dvShort * skip;
+        }
+        iy2 = y1 < 160 ? y1 : 160;
+
+        for (y = iy0; y < iy2; y++)
+        {
+            int xl = xLong >> 16, xr = xShort >> 16;
+            int ul = uLong >> 16, ur = uShort >> 16;
+            int vl = vLong >> 16, vr = vShort >> 16;
+            if (xl > xr) { tmp=xl;xl=xr;xr=tmp; tmp=ul;ul=ur;ur=tmp; tmp=vl;vl=vr;vr=tmp; }
+            if (xl < 0) { if (xr < 0) goto next_upper; int d = xr - xl; if (d > 0) { ul += (-xl) * (ur - ul) / d; vl += (-xl) * (vr - vl) / d; } xl = 0; }
+            if (xr > 239) xr = 239;
+            spanW = xr - xl;
+            if (spanW >= 0)
+            {
+                u16* row = buf + y * 120;
+                int su = ul << 8, sv = vl << 8; /* 16.8 */
+                int du2 = spanW > 0 ? ((ur - ul) << 8) / spanW : 0;
+                int dv2 = spanW > 0 ? ((vr - vl) << 8) / spanW : 0;
+                int x;
+                for (x = xl; x <= xr; x++)
+                {
+                    int tu = (su >> 8) & texMask;
+                    int tv = (sv >> 8) & texMask;
+                    u8 pi = palBase + tex[(tv << texShift) | tu];
+                    if (x & 1) row[x >> 1] = (row[x >> 1] & 0x00FF) | ((u16)pi << 8);
+                    else       row[x >> 1] = (row[x >> 1] & 0xFF00) | pi;
+                    su += du2; sv += dv2;
+                }
+            }
+            next_upper:
+            xLong += dxLong; xShort += dxShort;
+            uLong += duLong; uShort += duShort;
+            vLong += dvLong; vShort += dvShort;
+        }
+    }
+
+    /* Lower half */
+    segH = y2 - y1;
+    if (segH > 0)
+    {
+        dxShort = ((x2 - x1) << 16) / segH;
+        duShort = ((u2 - u1) << 16) / segH;
+        dvShort = ((v2 - v1) << 16) / segH;
+        xLong = (x0 << 16) + dxLong * (y1 - y0);
+        uLong = (u0 << 16) + duLong * (y1 - y0);
+        vLong = (v0 << 16) + dvLong * (y1 - y0);
+        xShort = x1 << 16;
+        uShort = u1 << 16;
+        vShort = v1 << 16;
+
+        iy0 = y1 < 0 ? 0 : y1;
+        if (iy0 > y1)
+        {
+            int skip = iy0 - y1;
+            xLong += dxLong * skip; xShort += dxShort * skip;
+            uLong += duLong * skip; uShort += duShort * skip;
+            vLong += dvLong * skip; vShort += dvShort * skip;
+        }
+        iy2 = y2 < 160 ? y2 : 159;
+
+        for (y = iy0; y <= iy2; y++)
+        {
+            int xl = xLong >> 16, xr = xShort >> 16;
+            int ul = uLong >> 16, ur = uShort >> 16;
+            int vl = vLong >> 16, vr = vShort >> 16;
+            if (xl > xr) { tmp=xl;xl=xr;xr=tmp; tmp=ul;ul=ur;ur=tmp; tmp=vl;vl=vr;vr=tmp; }
+            if (xl < 0) { if (xr < 0) goto next_lower; int d = xr - xl; if (d > 0) { ul += (-xl) * (ur - ul) / d; vl += (-xl) * (vr - vl) / d; } xl = 0; }
+            if (xr > 239) xr = 239;
+            spanW = xr - xl;
+            if (spanW >= 0)
+            {
+                u16* row = buf + y * 120;
+                int su = ul << 8, sv = vl << 8;
+                int du2 = spanW > 0 ? ((ur - ul) << 8) / spanW : 0;
+                int dv2 = spanW > 0 ? ((vr - vl) << 8) / spanW : 0;
+                int x;
+                for (x = xl; x <= xr; x++)
+                {
+                    int tu = (su >> 8) & texMask;
+                    int tv = (sv >> 8) & texMask;
+                    u8 pi = palBase + tex[(tv << texShift) | tu];
+                    if (x & 1) row[x >> 1] = (row[x >> 1] & 0x00FF) | ((u16)pi << 8);
+                    else       row[x >> 1] = (row[x >> 1] & 0xFF00) | pi;
+                    su += du2; sv += dv2;
+                }
+            }
+            next_lower:
+            xLong += dxLong; xShort += dxShort;
+            uLong += duLong; uShort += duShort;
+            vLong += dvLong; vShort += dvShort;
+        }
+    }
+}
+
 // Triangle sort entry for painter's algorithm
 typedef struct { int triIdx; int depth; } TriSort;
 
@@ -1090,11 +1229,14 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
     int i;
     for (i = 0; i < g_spriteCount; i++)
     {
-        int mi, vertCount, idxCount, cullMode, meshLit, meshSorted, meshHalfRes, v, t;
+        int mi, vertCount, idxCount, cullMode, meshLit, meshSorted, meshHalfRes, meshTextured, v, t;
+        int texW, texShift, texMask, texPalBase;
         int anyVisible;
         const s16* verts;
         const s8* norms;
         const u16* indices;
+        const s16* uvs;
+        const u8* tex;
         FIXED cosR, sinR, sprScale;
         int sx[512], sy[512];
         FIXED sz[512]; // depth per vertex for sorting
@@ -1115,6 +1257,13 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         meshLit = afn_mesh_desc[mi][4];  // 0=unlit, 1=lit
         meshSorted = afn_mesh_desc[mi][5]; // 0=unsorted, 1=pre-sorted (skip depth sort)
         meshHalfRes = afn_mesh_desc[mi][6]; // 0=full, 1=skip every other scanline
+        meshTextured = afn_mesh_desc[mi][7]; // 0=flat, 1=textured
+        texW = afn_mesh_desc[mi][8];
+        texShift = afn_mesh_desc[mi][9];
+        texPalBase = afn_mesh_desc[mi][10];
+        texMask = texW > 0 ? texW - 1 : 0;
+        uvs = afn_mesh_uv_ptrs[mi];
+        tex = afn_mesh_tex_ptrs[mi];
 
         // Sprite transform
         cosR = lu_cos(g_sprites[i].rotation) >> 4;
@@ -1242,50 +1391,60 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             }
         }
 
-        // Draw sorted triangles with flat shading
+        // Draw sorted triangles
         for (t = 0; t < triCount; t++)
         {
             int ti = triOrder[t].triIdx;
             int i0 = indices[ti * 3 + 0];
             int i1 = indices[ti * 3 + 1];
             int i2 = indices[ti * 3 + 2];
-            int nx, ny, nz, rnx, rny, rnz, dot, shade;
-            u8 palIdx;
 
-            if (meshLit)
+            if (meshTextured && uvs && tex)
             {
-                // Face normal (average vertex normals, 0.7 fixed)
-                nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
-                ny = ((int)norms[i0*3+1] + norms[i1*3+1] + norms[i2*3+1]) / 3;
-                nz = ((int)norms[i0*3+2] + norms[i1*3+2] + norms[i2*3+2]) / 3;
-
-                // Rotate normal by sprite rotation
-                rnx = (nx * (cosR >> 4) + nz * (sinR >> 4)) >> 4;
-                rny = ny;
-                rnz = (-nx * (sinR >> 4) + nz * (cosR >> 4)) >> 4;
-
-                // Dot with light direction (0.3, -0.8, 0.5) as fixed ~ (38, -102, 64) in 0.7
-                dot = -(rnx * 38 + rny * (-102) + rnz * 64) >> 7;
-                shade = (dot >> 4) + 3;
-                if (shade < 0) shade = 0;
-                if (shade > 7) shade = 7;
-
-                palIdx = AFN_MESH_PAL_BASE + mi * 8 + shade;
+                // Textured triangle — UVs are 8.8 fixed pre-scaled to texture size
+                rasterize_tri_tex(buf,
+                    sx[i0], sy[i0], uvs[i0*2+0], uvs[i0*2+1],
+                    sx[i1], sy[i1], uvs[i1*2+0], uvs[i1*2+1],
+                    sx[i2], sy[i2], uvs[i2*2+0], uvs[i2*2+1],
+                    tex, texMask, texShift, (u8)texPalBase);
             }
             else
             {
-                // Unlit: use middle shade (flat color, no lighting calc)
-                palIdx = AFN_MESH_PAL_BASE + mi * 8 + 5;
-            }
+                // Flat shaded
+                int nx, ny, nz, rnx, rny, rnz, dot, shade;
+                u8 palIdx;
+
+                if (meshLit)
+                {
+                    nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
+                    ny = ((int)norms[i0*3+1] + norms[i1*3+1] + norms[i2*3+1]) / 3;
+                    nz = ((int)norms[i0*3+2] + norms[i1*3+2] + norms[i2*3+2]) / 3;
+
+                    rnx = (nx * (cosR >> 4) + nz * (sinR >> 4)) >> 4;
+                    rny = ny;
+                    rnz = (-nx * (sinR >> 4) + nz * (cosR >> 4)) >> 4;
+
+                    dot = -(rnx * 38 + rny * (-102) + rnz * 64) >> 7;
+                    shade = (dot >> 4) + 3;
+                    if (shade < 0) shade = 0;
+                    if (shade > 7) shade = 7;
+
+                    palIdx = AFN_MESH_PAL_BASE + mi * 8 + shade;
+                }
+                else
+                {
+                    palIdx = AFN_MESH_PAL_BASE + mi * 8 + 5;
+                }
 
 #ifdef AFN_COVERAGE_BUF
-            rasterize_tri_cov(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+                rasterize_tri_cov(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
 #else
-            if (meshHalfRes)
-                rasterize_tri_half(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
-            else
-                rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+                if (meshHalfRes)
+                    rasterize_tri_half(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+                else
+                    rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
 #endif
+            }
         }
     }
 }
@@ -1332,6 +1491,14 @@ int main(void)
         for (k = 0; k < AFN_MESH_COUNT * 8; k++)
             pal_bg_mem[AFN_MESH_PAL_BASE + k] = afn_mesh_palette[k];
     }
+    // Load texture palettes
+#ifdef AFN_TEX_PAL_COUNT
+    {
+        int k;
+        for (k = 0; k < AFN_TEX_PAL_COUNT; k++)
+            pal_bg_mem[AFN_TEX_PAL_BASE + k] = afn_tex_palette[k];
+    }
+#endif
 #else
     REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
 #endif

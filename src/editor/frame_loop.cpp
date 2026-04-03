@@ -314,8 +314,10 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
     if (!f) return false;
 
     struct V3 { float x, y, z; };
+    struct V2 { float u, v; };
     std::vector<V3> positions;
     std::vector<V3> normals;
+    std::vector<V2> texcoords;
     std::vector<MeshVertex> verts;
     std::vector<uint32_t> idxs;
 
@@ -328,6 +330,12 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
             if (sscanf(line + 2, "%f %f %f", &v.x, &v.y, &v.z) == 3)
                 positions.push_back(v);
         }
+        else if (line[0] == 'v' && line[1] == 't')
+        {
+            V2 tc;
+            if (sscanf(line + 3, "%f %f", &tc.u, &tc.v) >= 2)
+                texcoords.push_back(tc);
+        }
         else if (line[0] == 'v' && line[1] == 'n')
         {
             V3 n;
@@ -337,7 +345,7 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
         else if (line[0] == 'f' && line[1] == ' ')
         {
             // Parse face — supports v, v/vt, v/vt/vn, v//vn
-            int vi[4] = {}, ni[4] = {};
+            int vi[4] = {}, ti[4] = {}, ni[4] = {};
             int count = 0;
             char* p = line + 2;
             while (*p && count < 4)
@@ -350,6 +358,7 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
                 else if (sscanf(p, "%d%n", &v, &nread) >= 1 && nread > 0) {}
                 else break;
                 vi[count] = v;
+                ti[count] = vt;
                 ni[count] = vn;
                 count++;
                 p += nread;
@@ -363,10 +372,13 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
                 for (int fi = 0; fi < 3; fi++)
                 {
                     int pi = vi[face[fi]] - 1;
+                    int tci = ti[face[fi]] - 1;
                     int nni = ni[face[fi]] - 1;
                     MeshVertex mv = {};
                     if (pi >= 0 && pi < (int)positions.size())
                     { mv.px = positions[pi].x; mv.py = positions[pi].y; mv.pz = positions[pi].z; }
+                    if (tci >= 0 && tci < (int)texcoords.size())
+                    { mv.u = texcoords[tci].u; mv.v = texcoords[tci].v; }
                     if (nni >= 0 && nni < (int)normals.size())
                     { mv.nx = normals[nni].x; mv.ny = normals[nni].y; mv.nz = normals[nni].z; }
                     mv.r = mv.g = mv.b = 1.0f;
@@ -406,6 +418,80 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
         if (v.pz > out.boundsMax[2]) out.boundsMax[2] = v.pz;
     }
 
+    return true;
+}
+
+// Load and quantize a texture PNG for a mesh (max 64x64, 16 colors)
+static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh)
+{
+    int w, h, ch;
+    unsigned char* img = stbi_load(path.c_str(), &w, &h, &ch, 4);
+    if (!img) return false;
+
+    // Resize to nearest power-of-2, max 64
+    int tw = 1, th = 1;
+    while (tw < w && tw < 64) tw <<= 1;
+    while (th < h && th < 64) th <<= 1;
+    if (tw > 64) tw = 64;
+    if (th > 64) th = 64;
+
+    // Simple nearest-neighbor resize
+    std::vector<uint32_t> resized(tw * th);
+    for (int y = 0; y < th; y++)
+        for (int x = 0; x < tw; x++)
+        {
+            int sx = x * w / tw;
+            int sy = y * h / th;
+            unsigned char* p = img + (sy * w + sx) * 4;
+            resized[y * tw + x] = p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
+        }
+    stbi_image_free(img);
+
+    // Median-cut quantize to 16 colors
+    // Simple approach: collect unique colors, pick 16 most common
+    struct ColorCount { uint32_t rgb; int count; };
+    std::vector<ColorCount> hist;
+    for (auto px : resized)
+    {
+        uint32_t rgb = px & 0x00FFFFFF;
+        bool found = false;
+        for (auto& hc : hist)
+            if (hc.rgb == rgb) { hc.count++; found = true; break; }
+        if (!found)
+            hist.push_back({ rgb, 1 });
+    }
+    std::sort(hist.begin(), hist.end(), [](const ColorCount& a, const ColorCount& b) { return a.count > b.count; });
+
+    // Build 16-color palette
+    int palCount = (int)hist.size();
+    if (palCount > 16) palCount = 16;
+    uint32_t pal[16] = {};
+    for (int i = 0; i < palCount; i++)
+        pal[i] = hist[i].rgb | 0xFF000000;
+
+    // Map each pixel to nearest palette entry
+    std::vector<uint8_t> indexed(tw * th);
+    for (int i = 0; i < tw * th; i++)
+    {
+        uint32_t px = resized[i] & 0x00FFFFFF;
+        int bestIdx = 0, bestDist = 0x7FFFFFFF;
+        for (int c = 0; c < palCount; c++)
+        {
+            int dr = (int)(px & 0xFF) - (int)(pal[c] & 0xFF);
+            int dg = (int)((px >> 8) & 0xFF) - (int)((pal[c] >> 8) & 0xFF);
+            int db = (int)((px >> 16) & 0xFF) - (int)((pal[c] >> 16) & 0xFF);
+            int dist = dr * dr + dg * dg + db * db;
+            if (dist < bestDist) { bestDist = dist; bestIdx = c; }
+        }
+        indexed[i] = (uint8_t)bestIdx;
+    }
+
+    mesh.texturePath = path;
+    mesh.texW = tw;
+    mesh.texH = th;
+    mesh.texturePixels = std::move(indexed);
+    memcpy(mesh.texturePalette, pal, sizeof(pal));
+    mesh.textured = true;
     return true;
 }
 
@@ -520,7 +606,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%s\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.texturePath.c_str());
     }
     fprintf(f, "\n");
 
@@ -781,9 +867,9 @@ static bool LoadProject(const std::string& path)
         }
         else if (strcmp(section, "MeshAssets") == 0)
         {
-            char mname[256], mpath[512];
-            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0;
-            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres);
+            char mname[256], mpath[512], mtexpath[512] = {};
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0;
+            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%511[^\n]", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, mtexpath);
             if (matched >= 2)
             {
                 MeshAsset ma;
@@ -797,10 +883,15 @@ static bool LoadProject(const std::string& path)
                     ma.lit = (mlit != 0);
                 if (matched >= 6)
                     ma.halfRes = (mhalfres != 0);
+                if (matched >= 7)
+                    ma.textured = (mtextured != 0);
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
                 ma.name = mname; // restore name in case LoadOBJ overwrote it
+                // Reload texture if textured
+                if (ma.textured && matched >= 8 && mtexpath[0])
+                    LoadMeshTexture(std::string(mtexpath), ma);
                 sMeshAssets.push_back(std::move(ma));
             }
         }
@@ -1071,6 +1162,22 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         ImGui::Checkbox("Lit##meshLit", &ma.lit);
         ImGui::SameLine();
         ImGui::Checkbox("Half-Res##meshHalfRes", &ma.halfRes);
+
+        ImGui::Separator();
+        ImGui::Checkbox("Textured##meshTex", &ma.textured);
+        if (ma.textured)
+        {
+            if (ma.texW > 0)
+                ImGui::Text("Tex: %dx%d (%s)", ma.texW, ma.texH, ma.texturePath.c_str());
+            else
+                ImGui::TextDisabled("No texture loaded");
+            if (ImGui::Button("Import Texture##meshTexBtn"))
+            {
+                std::string texPath = OpenFileDialog("PNG Files\0*.png\0All Files\0*.*\0", "png");
+                if (!texPath.empty())
+                    LoadMeshTexture(texPath, ma);
+            }
+        }
     }
 
     ImGui::Separator();
@@ -3385,6 +3492,8 @@ void FrameTick(float dt)
                         me.normals.push_back(v.ny);
                         me.normals.push_back(v.nz);
                         me.objPosIdx.push_back(v.objPosIdx);
+                        me.uvs.push_back(v.u);
+                        me.uvs.push_back(v.v);
                     }
                     me.indices = ma.indices;
                     // Convert sprite color to RGB15 (use magenta as default)
@@ -3393,6 +3502,19 @@ void FrameTick(float dt)
                     me.exportMode = (int)ma.exportMode;
                     me.lit = ma.lit ? 1 : 0;
                     me.halfRes = ma.halfRes ? 1 : 0;
+                    me.textured = ma.textured ? 1 : 0;
+                    me.texW = ma.texW;
+                    me.texH = ma.texH;
+                    me.texPixels = ma.texturePixels;
+                    // Convert texture palette RGBA8 -> RGB15
+                    for (int pi = 0; pi < 16; pi++)
+                    {
+                        uint32_t c = ma.texturePalette[pi];
+                        int r = (c & 0xFF) >> 3;
+                        int g = ((c >> 8) & 0xFF) >> 3;
+                        int b = ((c >> 16) & 0xFF) >> 3;
+                        me.texPalette[pi] = (uint16_t)(r | (g << 5) | (b << 10));
+                    }
                     exportMeshes.push_back(me);
                 }
 

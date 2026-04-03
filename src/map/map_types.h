@@ -144,6 +144,7 @@ struct MeshVertex
     float px, py, pz;   // position
     float nx, ny, nz;   // normal
     float r, g, b;      // vertex color (default white)
+    float u, v;         // texture coordinates (0..1)
     int   objPosIdx = -1; // original OBJ 'v' index (for vertex welding)
 };
 
@@ -179,6 +180,13 @@ struct MeshAsset
     MeshExportMode exportMode = MeshExportMode::Quality; // export quality
     bool lit = true; // false = unlit (flat color, no shading calc)
     bool halfRes = false; // true = rasterize every other scanline (2x fill speed)
+
+    // Texture mapping
+    bool textured = false;                    // true = use texture, false = flat shaded
+    std::string texturePath;                  // source PNG path
+    std::vector<uint8_t> texturePixels;       // quantized indexed pixels (texW * texH)
+    uint32_t texturePalette[16] = {};         // RGBA8 palette for the texture
+    int texW = 0, texH = 0;                  // texture dimensions (power of 2, max 64)
 };
 
 static constexpr int kMaxMeshAssets = 32;
