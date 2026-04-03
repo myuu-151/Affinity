@@ -887,7 +887,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
     int i;
     for (i = 0; i < g_spriteCount; i++)
     {
-        int mi, vertCount, idxCount, cullMode, v, t;
+        int mi, vertCount, idxCount, cullMode, meshLit, meshSorted, v, t;
+        int anyVisible;
         const s16* verts;
         const s8* norms;
         const u16* indices;
@@ -908,6 +909,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         vertCount = afn_mesh_desc[mi][0];
         idxCount = afn_mesh_desc[mi][1];
         cullMode = afn_mesh_desc[mi][3]; // 0=Back, 1=Front, 2=None
+        meshLit = afn_mesh_desc[mi][4];  // 0=unlit, 1=lit
+        meshSorted = afn_mesh_desc[mi][5]; // 0=unsorted, 1=pre-sorted (skip depth sort)
 
         // Sprite transform
         cosR = lu_cos(g_sprites[i].rotation) >> 4;
@@ -956,6 +959,12 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             vis[v] = 1;
         }
 
+        // Whole-mesh screen cull: skip if no vertices are visible
+        anyVisible = 0;
+        for (v = 0; v < vertCount; v++)
+            if (vis[v]) { anyVisible = 1; break; }
+        if (!anyVisible) continue;
+
         // Build triangle list with backface culling
         triCount = 0;
         for (t = 0; t < idxCount / 3; t++)
@@ -991,6 +1000,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         }
 
         // Insertion sort by depth — back to front (farthest first)
+        // Pre-sorted meshes (Barebones) skip this entirely
+        if (!meshSorted)
         {
             int a, b;
             for (a = 1; a < triCount; a++)
@@ -1016,23 +1027,31 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             int nx, ny, nz, rnx, rny, rnz, dot, shade;
             u8 palIdx;
 
-            // Face normal (average vertex normals, 0.7 fixed)
-            nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
-            ny = ((int)norms[i0*3+1] + norms[i1*3+1] + norms[i2*3+1]) / 3;
-            nz = ((int)norms[i0*3+2] + norms[i1*3+2] + norms[i2*3+2]) / 3;
+            if (meshLit)
+            {
+                // Face normal (average vertex normals, 0.7 fixed)
+                nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
+                ny = ((int)norms[i0*3+1] + norms[i1*3+1] + norms[i2*3+1]) / 3;
+                nz = ((int)norms[i0*3+2] + norms[i1*3+2] + norms[i2*3+2]) / 3;
 
-            // Rotate normal by sprite rotation
-            rnx = (nx * (cosR >> 4) + nz * (sinR >> 4)) >> 4;
-            rny = ny;
-            rnz = (-nx * (sinR >> 4) + nz * (cosR >> 4)) >> 4;
+                // Rotate normal by sprite rotation
+                rnx = (nx * (cosR >> 4) + nz * (sinR >> 4)) >> 4;
+                rny = ny;
+                rnz = (-nx * (sinR >> 4) + nz * (cosR >> 4)) >> 4;
 
-            // Dot with light direction (0.3, -0.8, 0.5) as fixed ~ (38, -102, 64) in 0.7
-            dot = -(rnx * 38 + rny * (-102) + rnz * 64) >> 7;
-            shade = (dot >> 4) + 3;
-            if (shade < 0) shade = 0;
-            if (shade > 7) shade = 7;
+                // Dot with light direction (0.3, -0.8, 0.5) as fixed ~ (38, -102, 64) in 0.7
+                dot = -(rnx * 38 + rny * (-102) + rnz * 64) >> 7;
+                shade = (dot >> 4) + 3;
+                if (shade < 0) shade = 0;
+                if (shade > 7) shade = 7;
 
-            palIdx = AFN_MESH_PAL_BASE + mi * 8 + shade;
+                palIdx = AFN_MESH_PAL_BASE + mi * 8 + shade;
+            }
+            else
+            {
+                // Unlit: use middle shade (flat color, no lighting calc)
+                palIdx = AFN_MESH_PAL_BASE + mi * 8 + 5;
+            }
 
             rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
         }

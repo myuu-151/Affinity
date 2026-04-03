@@ -157,6 +157,16 @@ enum class CullMode : int
 
 static const char* const kCullModeNames[] = { "Back", "Front", "None" };
 
+// Export quality mode for mesh rendering
+enum class MeshExportMode : int
+{
+    Quality     = 0,  // per-face normals, no welding (accurate shading, slower)
+    Performance = 1,  // welded vertices, averaged normals (faster, blended shading)
+    Barebones   = 2,  // welded + force unlit + pre-sorted tris (fastest, flat color)
+};
+
+static const char* const kMeshExportModeNames[] = { "Quality", "Performance", "Barebones" };
+
 struct MeshAsset
 {
     std::string name = "Mesh";
@@ -166,6 +176,8 @@ struct MeshAsset
     float boundsMin[3] = {};           // AABB min
     float boundsMax[3] = {};           // AABB max
     CullMode cullMode = CullMode::Back; // backface culling mode
+    MeshExportMode exportMode = MeshExportMode::Quality; // export quality
+    bool lit = true; // false = unlit (flat color, no shading calc)
 };
 
 static constexpr int kMaxMeshAssets = 32;

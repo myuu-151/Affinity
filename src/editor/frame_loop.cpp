@@ -516,7 +516,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0);
     }
     fprintf(f, "\n");
 
@@ -774,8 +774,8 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "MeshAssets") == 0)
         {
             char mname[256], mpath[512];
-            int mcull = 0;
-            int matched = sscanf(line, "mesh=%255[^|]|%511[^|\n]|%d", mname, mpath, &mcull);
+            int mcull = 0, mexport = 0, mlit = 1;
+            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit);
             if (matched >= 2)
             {
                 MeshAsset ma;
@@ -783,6 +783,10 @@ static bool LoadProject(const std::string& path)
                 ma.sourcePath = mpath;
                 if (matched >= 3 && mcull >= 0 && mcull <= 2)
                     ma.cullMode = (CullMode)mcull;
+                if (matched >= 4 && mexport >= 0 && mexport <= 2)
+                    ma.exportMode = (MeshExportMode)mexport;
+                if (matched >= 5)
+                    ma.lit = (mlit != 0);
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -1044,9 +1048,17 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
 
         int cullInt = (int)ma.cullMode;
         ImGui::PushItemWidth(-1);
-        if (ImGui::Combo("##cullMode", &cullInt, kCullModeNames, 3))
+        if (ImGui::Combo("Cull##cullMode", &cullInt, kCullModeNames, 3))
             ma.cullMode = (CullMode)cullInt;
         ImGui::PopItemWidth();
+
+        int exportInt = (int)ma.exportMode;
+        ImGui::PushItemWidth(-1);
+        if (ImGui::Combo("Export##exportMode", &exportInt, kMeshExportModeNames, 3))
+            ma.exportMode = (MeshExportMode)exportInt;
+        ImGui::PopItemWidth();
+
+        ImGui::Checkbox("Lit##meshLit", &ma.lit);
     }
 
     ImGui::Separator();
@@ -3352,6 +3364,8 @@ void FrameTick(float dt)
                     // Convert sprite color to RGB15 (use magenta as default)
                     me.colorRGB15 = 0x7C1F; // magenta
                     me.cullMode = (int)ma.cullMode;
+                    me.exportMode = (int)ma.exportMode;
+                    me.lit = ma.lit ? 1 : 0;
                     exportMeshes.push_back(me);
                 }
 

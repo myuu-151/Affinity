@@ -742,6 +742,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
     // ---- Mesh assets ----
     f << "#define AFN_MESH_COUNT " << (int)meshes.size() << "\n\n";
 
+    // Track final vertex counts per mesh for descriptor table
+    std::vector<int> finalVertCounts(meshes.size(), 0);
+
     if (!meshes.empty())
     {
         // Mesh shading palette base
@@ -750,17 +753,150 @@ static bool GenerateMapData(const std::string& runtimeDir,
         for (size_t mi = 0; mi < meshes.size(); mi++)
         {
             const auto& mesh = meshes[mi];
-            int vc = (int)mesh.positions.size() / 3;
+            int origVc = (int)mesh.positions.size() / 3;
             int ic = (int)mesh.indices.size();
 
+            // Pointers to the vertex/normal/index data we'll actually emit
+            const float* outPos = mesh.positions.data();
+            const float* outNorm = mesh.normals.data();
+            int vc = origVc;
+
+            // Performance/Barebones: weld vertices sharing the same OBJ position index
+            std::vector<float> weldedPos, weldedNorm;
+            std::vector<uint32_t> remappedIdx(ic);
+            bool didWeld = false;
+            bool preSorted = false;
+
+            if (mesh.exportMode >= 1) // Performance or Barebones
+            {
+                std::vector<int> weldedNormCount;
+                std::vector<int> vertRemap(origVc, -1);
+                std::vector<std::pair<int,int>> objIdxToWelded;
+
+                for (int v = 0; v < origVc; v++)
+                {
+                    int objIdx = (v < (int)mesh.objPosIdx.size()) ? mesh.objPosIdx[v] : -1;
+
+                    int found = -1;
+                    if (objIdx >= 0)
+                    {
+                        for (size_t w = 0; w < objIdxToWelded.size(); w++)
+                        {
+                            if (objIdxToWelded[w].first == objIdx)
+                            { found = objIdxToWelded[w].second; break; }
+                        }
+                    }
+
+                    if (found >= 0)
+                    {
+                        weldedNorm[found * 3 + 0] += mesh.normals[v * 3 + 0];
+                        weldedNorm[found * 3 + 1] += mesh.normals[v * 3 + 1];
+                        weldedNorm[found * 3 + 2] += mesh.normals[v * 3 + 2];
+                        weldedNormCount[found]++;
+                        vertRemap[v] = found;
+                    }
+                    else
+                    {
+                        int weldedVc = (int)weldedPos.size() / 3;
+                        vertRemap[v] = weldedVc;
+                        if (objIdx >= 0)
+                            objIdxToWelded.push_back({objIdx, weldedVc});
+                        weldedPos.push_back(mesh.positions[v * 3 + 0]);
+                        weldedPos.push_back(mesh.positions[v * 3 + 1]);
+                        weldedPos.push_back(mesh.positions[v * 3 + 2]);
+                        weldedNorm.push_back(mesh.normals[v * 3 + 0]);
+                        weldedNorm.push_back(mesh.normals[v * 3 + 1]);
+                        weldedNorm.push_back(mesh.normals[v * 3 + 2]);
+                        weldedNormCount.push_back(1);
+                    }
+                }
+
+                // Average and normalize
+                vc = (int)weldedPos.size() / 3;
+                for (int w = 0; w < vc; w++)
+                {
+                    float nx = weldedNorm[w * 3 + 0] / weldedNormCount[w];
+                    float ny = weldedNorm[w * 3 + 1] / weldedNormCount[w];
+                    float nz = weldedNorm[w * 3 + 2] / weldedNormCount[w];
+                    float len = sqrtf(nx * nx + ny * ny + nz * nz);
+                    if (len > 0.0001f) { nx /= len; ny /= len; nz /= len; }
+                    weldedNorm[w * 3 + 0] = nx;
+                    weldedNorm[w * 3 + 1] = ny;
+                    weldedNorm[w * 3 + 2] = nz;
+                }
+
+                // Remap indices
+                for (int i = 0; i < ic; i++)
+                {
+                    int oldIdx = (int)mesh.indices[i];
+                    remappedIdx[i] = (oldIdx < origVc) ? vertRemap[oldIdx] : 0;
+                }
+
+                outPos = weldedPos.data();
+                outNorm = weldedNorm.data();
+                didWeld = true;
+            }
+
+            // Barebones: pre-sort triangles by centroid distance from mesh center (farthest first)
+            // This lets the runtime skip the insertion sort entirely
+            if (mesh.exportMode == 2 && didWeld)
+            {
+                int triCount = ic / 3;
+                struct TriDist { int triIdx; float dist; };
+                std::vector<TriDist> triDists(triCount);
+
+                // Compute mesh center
+                float cx = 0, cy = 0, cz = 0;
+                for (int v = 0; v < vc; v++)
+                {
+                    cx += outPos[v * 3 + 0];
+                    cy += outPos[v * 3 + 1];
+                    cz += outPos[v * 3 + 2];
+                }
+                cx /= vc; cy /= vc; cz /= vc;
+
+                // Compute centroid distance per triangle
+                for (int t = 0; t < triCount; t++)
+                {
+                    int i0 = remappedIdx[t * 3 + 0];
+                    int i1 = remappedIdx[t * 3 + 1];
+                    int i2 = remappedIdx[t * 3 + 2];
+                    float tx = (outPos[i0*3+0] + outPos[i1*3+0] + outPos[i2*3+0]) / 3.0f - cx;
+                    float ty = (outPos[i0*3+1] + outPos[i1*3+1] + outPos[i2*3+1]) / 3.0f - cy;
+                    float tz = (outPos[i0*3+2] + outPos[i1*3+2] + outPos[i2*3+2]) / 3.0f - cz;
+                    triDists[t].triIdx = t;
+                    triDists[t].dist = tx*tx + ty*ty + tz*tz;
+                }
+
+                // Sort farthest first
+                std::sort(triDists.begin(), triDists.end(),
+                    [](const TriDist& a, const TriDist& b) { return a.dist > b.dist; });
+
+                // Rebuild index buffer in sorted order
+                std::vector<uint32_t> sortedIdx(ic);
+                for (int t = 0; t < triCount; t++)
+                {
+                    int src = triDists[t].triIdx;
+                    sortedIdx[t * 3 + 0] = remappedIdx[src * 3 + 0];
+                    sortedIdx[t * 3 + 1] = remappedIdx[src * 3 + 1];
+                    sortedIdx[t * 3 + 2] = remappedIdx[src * 3 + 2];
+                }
+                remappedIdx = std::move(sortedIdx);
+                preSorted = true;
+            }
+
+            finalVertCounts[mi] = vc;
+
             // Vertex positions as 8.8 fixed-point (editor scale / 4 for GBA)
+            if (didWeld)
+                f << "// Mesh " << mi << ": " << origVc << " verts welded to " << vc << "\n";
             f << "static const s16 afn_mesh" << mi << "_verts[" << vc * 3 << "] = {";
             for (int v = 0; v < vc; v++)
             {
                 if (v % 4 == 0) f << "\n    ";
                 for (int c = 0; c < 3; c++)
                 {
-                    int fixed = (int)(mesh.positions[v * 3 + c] / 4.0f * 256.0f);
+                    int fixed = (int)(outPos[v * 3 + c] / 4.0f * 256.0f);
                     f << fixed;
                     if (v * 3 + c + 1 < vc * 3) f << ", ";
                 }
@@ -774,7 +910,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 if (v % 4 == 0) f << "\n    ";
                 for (int c = 0; c < 3; c++)
                 {
-                    int fixed = (int)(mesh.normals[v * 3 + c] * 127.0f);
+                    int fixed = (int)(outNorm[v * 3 + c] * 127.0f);
                     if (fixed > 127) fixed = 127;
                     if (fixed < -128) fixed = -128;
                     f << fixed;
@@ -788,22 +924,25 @@ static bool GenerateMapData(const std::string& runtimeDir,
             for (int i = 0; i < ic; i++)
             {
                 if (i % 12 == 0) f << "\n    ";
-                f << mesh.indices[i];
+                f << (didWeld ? remappedIdx[i] : mesh.indices[i]);
                 if (i + 1 < ic) f << ", ";
             }
             f << "\n};\n\n";
         }
 
-        // Mesh descriptor table: { vertCount, indexCount, colorRGB15, cullMode }
-        // cullMode: 0=Back, 1=Front, 2=None
-        f << "static const int afn_mesh_desc[][4] = {\n";
+        // Mesh descriptor table: { vertCount, indexCount, colorRGB15, cullMode, lit, sorted }
+        f << "static const int afn_mesh_desc[][6] = {\n";
         for (size_t mi = 0; mi < meshes.size(); mi++)
         {
-            int vc = (int)meshes[mi].positions.size() / 3;
+            int vc = finalVertCounts[mi];
             int ic = (int)meshes[mi].indices.size();
+            int lit = meshes[mi].lit;
+            int sorted = 0;
+            // Barebones: force unlit and mark as pre-sorted
+            if (meshes[mi].exportMode == 2) { lit = 0; sorted = 1; }
             char hex[8];
             snprintf(hex, sizeof(hex), "0x%04X", meshes[mi].colorRGB15);
-            f << "    { " << vc << ", " << ic << ", " << hex << ", " << meshes[mi].cullMode << " },\n";
+            f << "    { " << vc << ", " << ic << ", " << hex << ", " << meshes[mi].cullMode << ", " << lit << ", " << sorted << " },\n";
         }
         f << "};\n\n";
 

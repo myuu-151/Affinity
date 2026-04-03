@@ -93,6 +93,8 @@ struct GBAMeshExport
     std::vector<uint32_t> indices;
     uint16_t colorRGB15;          // base color for shading
     int cullMode = 0;             // 0=Back, 1=Front, 2=None
+    int exportMode = 0;           // 0=Quality (no weld), 1=Performance (welded)
+    int lit = 1;                  // 1=lit (shaded), 0=unlit (flat color)
 };
 
 // Package the current map into a .gba ROM.
