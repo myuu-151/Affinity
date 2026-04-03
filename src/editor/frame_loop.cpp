@@ -4452,12 +4452,12 @@ void Render3DViewport()
             if (ma.cullMode == CullMode::Back)
             {
                 glEnable(GL_CULL_FACE);
-                glCullFace(GL_FRONT); // OBJ winding is CW in our pipeline, GL default is CCW front
+                glCullFace(GL_BACK);
             }
             else if (ma.cullMode == CullMode::Front)
             {
                 glEnable(GL_CULL_FACE);
-                glCullFace(GL_BACK);
+                glCullFace(GL_FRONT);
             }
             // CullMode::None — no culling
 
