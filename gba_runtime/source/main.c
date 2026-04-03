@@ -879,6 +879,9 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
     }
 }
 
+// Triangle sort entry for painter's algorithm
+typedef struct { int triIdx; int depth; } TriSort;
+
 // Render all mesh sprites into the bitmap
 IWRAM_CODE static void render_meshes_sw(u16* buf)
 {
@@ -891,7 +894,10 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         const u16* indices;
         FIXED cosR, sinR, sprScale;
         int sx[64], sy[64];
+        FIXED sz[64]; // depth per vertex for sorting
         u8 vis[64];
+        TriSort triOrder[128];
+        int triCount;
 
         if (g_sprites[i].meshIdx < 0 || g_sprites[i].meshIdx >= AFN_MESH_COUNT)
             continue;
@@ -941,6 +947,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 
             if (fovLambda <= 64) { vis[v] = 0; continue; }
 
+            sz[v] = fovLambda; // store depth for painter's sort
+
             heightDiff = cam_h - wy;
             sy[v] = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
             side = (dx * g_cosf + dz * g_sinf) >> 8;
@@ -948,17 +956,55 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             vis[v] = 1;
         }
 
-        // Draw triangles with flat shading
+        // Build triangle list with backface culling
+        triCount = 0;
         for (t = 0; t < idxCount / 3; t++)
         {
             int i0 = indices[t * 3 + 0];
             int i1 = indices[t * 3 + 1];
             int i2 = indices[t * 3 + 2];
-            int nx, ny, nz, rnx, rny, rnz, dot, shade;
-            u8 palIdx;
+            int cross;
 
             if (i0 >= vertCount || i1 >= vertCount || i2 >= vertCount) continue;
             if (!vis[i0] || !vis[i1] || !vis[i2]) continue;
+
+            // Backface culling: screen-space cross product
+            cross = (sx[i1] - sx[i0]) * (sy[i2] - sy[i0])
+                  - (sy[i1] - sy[i0]) * (sx[i2] - sx[i0]);
+            if (cross <= 0) continue;
+
+            // Average depth for painter's sort (larger = farther)
+            triOrder[triCount].triIdx = t;
+            triOrder[triCount].depth = (sz[i0] + sz[i1] + sz[i2]);
+            triCount++;
+            if (triCount >= 128) break;
+        }
+
+        // Insertion sort by depth — back to front (farthest first)
+        {
+            int a, b;
+            for (a = 1; a < triCount; a++)
+            {
+                TriSort tmp = triOrder[a];
+                b = a - 1;
+                while (b >= 0 && triOrder[b].depth < tmp.depth)
+                {
+                    triOrder[b + 1] = triOrder[b];
+                    b--;
+                }
+                triOrder[b + 1] = tmp;
+            }
+        }
+
+        // Draw sorted triangles with flat shading
+        for (t = 0; t < triCount; t++)
+        {
+            int ti = triOrder[t].triIdx;
+            int i0 = indices[ti * 3 + 0];
+            int i1 = indices[ti * 3 + 1];
+            int i2 = indices[ti * 3 + 2];
+            int nx, ny, nz, rnx, rny, rnz, dot, shade;
+            u8 palIdx;
 
             // Face normal (average vertex normals, 0.7 fixed)
             nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
