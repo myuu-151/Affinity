@@ -690,8 +690,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                     if (ma.cullMode != CullMode::None) {
                         float cross = (pSX[i1] - pSX[i0]) * (pSY[i2] - pSY[i0])
                                     - (pSY[i1] - pSY[i0]) * (pSX[i2] - pSX[i0]);
-                        if (ma.cullMode == CullMode::Back  && cross <= 0.0f) continue;
-                        if (ma.cullMode == CullMode::Front && cross >= 0.0f) continue;
+                        if (ma.cullMode == CullMode::Back  && cross >= 0.0f) continue;
+                        if (ma.cullMode == CullMode::Front && cross <= 0.0f) continue;
                     }
 
                     // Face normal for shading (average vertex normals or compute from positions)
@@ -727,8 +727,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                     if (ma.cullMode != CullMode::None) {
                         float cross = (pSX[i1] - pSX[i0]) * (pSY[i2] - pSY[i0])
                                     - (pSY[i1] - pSY[i0]) * (pSX[i2] - pSX[i0]);
-                        if (ma.cullMode == CullMode::Back  && cross <= 0.0f) continue;
-                        if (ma.cullMode == CullMode::Front && cross >= 0.0f) continue;
+                        if (ma.cullMode == CullMode::Back  && cross >= 0.0f) continue;
+                        if (ma.cullMode == CullMode::Front && cross <= 0.0f) continue;
                     }
                     uint8_t wr = (uint8_t)(cr * 0.3f);
                     uint8_t wg = (uint8_t)(cg * 0.3f);
