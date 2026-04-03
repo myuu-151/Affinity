@@ -772,34 +772,31 @@ IWRAM_CODE static void render_floor_sw(u16* buf)
 
 // Fill a horizontal span in Mode 4 bitmap (handles odd-pixel edges + DMA bulk fill)
 #ifdef AFN_COVERAGE_BUF
-// Coverage buffer: 1 bit per pixel, 240x160 = 4800 bytes
-// Stored in EWRAM (not IWRAM — too precious for 4.8KB)
-static u32 g_coverage[240 * 160 / 32];
+// Row-level coverage: track widest covered span per scanline.
+// If a new hline falls entirely within the already-covered span, skip it.
+// Much cheaper than per-pixel — just 2 compares per scanline.
+static s16 g_cov_left[160];   // leftmost covered pixel per row (init 240 = empty)
+static s16 g_cov_right[160];  // rightmost covered pixel per row (init -1 = empty)
 
 static void coverage_clear(void)
 {
-    memset32(g_coverage, 0, sizeof(g_coverage) / 4);
+    int i;
+    for (i = 0; i < 160; i++) { g_cov_left[i] = 240; g_cov_right[i] = -1; }
 }
 
-// Coverage-aware hline: only writes pixels not yet covered, then marks them.
-// Returns early if the entire span is already covered.
+// Coverage-aware hline: skip if fully within already-covered span,
+// otherwise draw with fast bulk fill and widen the covered range.
 IWRAM_CODE static void afn_hline_cov(u16* row, int left, int right, int y, u8 palIdx)
 {
-    int x;
-    int base = y * 240;
-    for (x = left; x <= right; x++)
-    {
-        int bit = base + x;
-        int word = bit >> 5;
-        u32 mask = 1u << (bit & 31);
-        if (g_coverage[word] & mask) continue; // already covered
-        g_coverage[word] |= mask;
-        // Write 8bpp pixel to Mode 4 buffer (packed u16)
-        if (x & 1)
-            row[x >> 1] = (row[x >> 1] & 0x00FF) | ((u16)palIdx << 8);
-        else
-            row[x >> 1] = (row[x >> 1] & 0xFF00) | palIdx;
-    }
+    // Fully covered — skip entirely
+    if (left >= g_cov_left[y] && right <= g_cov_right[y]) return;
+
+    // Draw with the fast bulk hline
+    afn_hline(row, left, right, palIdx);
+
+    // Widen covered span
+    if (left < g_cov_left[y]) g_cov_left[y] = left;
+    if (right > g_cov_right[y]) g_cov_right[y] = right;
 }
 #endif
 
