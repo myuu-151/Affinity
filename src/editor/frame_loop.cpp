@@ -492,6 +492,21 @@ static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh)
     mesh.texturePixels = std::move(indexed);
     memcpy(mesh.texturePalette, pal, sizeof(pal));
     mesh.textured = true;
+
+    // Upload GL texture for editor preview (reconstruct RGBA from indexed + palette)
+    std::vector<uint32_t> rgba(tw * th);
+    for (int i = 0; i < tw * th; i++)
+        rgba[i] = mesh.texturePalette[mesh.texturePixels[i]];
+    if (mesh.glTexID) glDeleteTextures(1, &mesh.glTexID);
+    glGenTextures(1, &mesh.glTexID);
+    glBindTexture(GL_TEXTURE_2D, mesh.glTexID);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+
     return true;
 }
 
@@ -4346,33 +4361,53 @@ void Render3DViewport()
             glRotatef(fs.rotation, 0, 1, 0);
             glScalef(fs.scale, fs.scale, fs.scale);
 
-            glEnable(GL_LIGHTING);
-            glEnable(GL_LIGHT0);
-            float lightDir[] = { 0.3f, 1.0f, 0.5f, 0.0f };
-            float lightAmb[] = { 0.3f, 0.3f, 0.35f, 1.0f };
-            float lightDif[] = { 0.7f, 0.7f, 0.65f, 1.0f };
-            glLightfv(GL_LIGHT0, GL_POSITION, lightDir);
-            glLightfv(GL_LIGHT0, GL_AMBIENT, lightAmb);
-            glLightfv(GL_LIGHT0, GL_DIFFUSE, lightDif);
+            bool useTex = ma.textured && ma.glTexID != 0;
+            if (useTex)
+            {
+                glEnable(GL_TEXTURE_2D);
+                glBindTexture(GL_TEXTURE_2D, ma.glTexID);
+                glColor3f(1, 1, 1);
+            }
+            else
+            {
+                glEnable(GL_LIGHTING);
+                glEnable(GL_LIGHT0);
+                float lightDir[] = { 0.3f, 1.0f, 0.5f, 0.0f };
+                float lightAmb[] = { 0.3f, 0.3f, 0.35f, 1.0f };
+                float lightDif[] = { 0.7f, 0.7f, 0.65f, 1.0f };
+                glLightfv(GL_LIGHT0, GL_POSITION, lightDir);
+                glLightfv(GL_LIGHT0, GL_AMBIENT, lightAmb);
+                glLightfv(GL_LIGHT0, GL_DIFFUSE, lightDif);
 
-            uint8_t cr = (fs.color >> 0) & 0xFF;
-            uint8_t cg = (fs.color >> 8) & 0xFF;
-            uint8_t cb = (fs.color >> 16) & 0xFF;
-            float matDif[] = { cr/255.0f, cg/255.0f, cb/255.0f, 1.0f };
-            glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, matDif);
-            glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, matDif);
+                uint8_t cr = (fs.color >> 0) & 0xFF;
+                uint8_t cg = (fs.color >> 8) & 0xFF;
+                uint8_t cb = (fs.color >> 16) & 0xFF;
+                float matDif[] = { cr/255.0f, cg/255.0f, cb/255.0f, 1.0f };
+                glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, matDif);
+                glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, matDif);
+            }
 
             glBegin(GL_TRIANGLES);
             for (size_t ti = 0; ti < ma.indices.size(); ti++)
             {
                 const MeshVertex& v = ma.vertices[ma.indices[ti]];
+                if (useTex)
+                    glTexCoord2f(v.u, 1.0f - v.v);
                 glNormal3f(v.nx, v.ny, v.nz);
                 glVertex3f(v.px, v.py, v.pz);
             }
             glEnd();
 
-            glDisable(GL_LIGHTING);
-            glDisable(GL_LIGHT0);
+            if (useTex)
+            {
+                glDisable(GL_TEXTURE_2D);
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            else
+            {
+                glDisable(GL_LIGHTING);
+                glDisable(GL_LIGHT0);
+            }
 
             if (fs.selected)
             {

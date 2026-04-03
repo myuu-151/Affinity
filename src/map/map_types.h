@@ -187,6 +187,7 @@ struct MeshAsset
     std::vector<uint8_t> texturePixels;       // quantized indexed pixels (texW * texH)
     uint32_t texturePalette[16] = {};         // RGBA8 palette for the texture
     int texW = 0, texH = 0;                  // texture dimensions (power of 2, max 64)
+    unsigned int glTexID = 0;                 // OpenGL texture for editor preview
 };
 
 static constexpr int kMaxMeshAssets = 32;
