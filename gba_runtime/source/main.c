@@ -771,6 +771,9 @@ IWRAM_CODE static void render_floor_sw(u16* buf)
 }
 
 // Fill a horizontal span in Mode 4 bitmap (handles odd-pixel edges + DMA bulk fill)
+// Forward declaration for coverage-aware hline
+IWRAM_CODE static void afn_hline(u16* row, int left, int right, u8 palIdx);
+
 #ifdef AFN_COVERAGE_BUF
 // Row-level coverage: track widest covered span per scanline.
 // If a new hline falls entirely within the already-covered span, skip it.
