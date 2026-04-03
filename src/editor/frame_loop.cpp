@@ -1394,9 +1394,7 @@ static void DrawTabBar()
 
     TabButton("Scene",   EditorTab::Map);
     TabButton("Sprites", EditorTab::Sprites);
-    TabButton("Tiles",   EditorTab::Tiles);
     TabButton("Skybox",  EditorTab::Skybox);
-    TabButton("Player",  EditorTab::Player);
     TabButton("3D",      EditorTab::ThreeD);
 
     ImGui::SameLine(0, Scaled(20));
