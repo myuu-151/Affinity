@@ -224,6 +224,7 @@ struct CameraStartObject
     // Performance toggles
     int smallTriCull = 0;   // min screen-space area to render (0=off)
     bool skipFloor = false; // skip floor rendering entirely
+    bool coverageBuf = false; // front-to-back with coverage buffer (reduces overdraw)
 };
 
 // Map data — the floor plane rendered by Mode 7

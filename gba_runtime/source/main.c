@@ -771,6 +771,38 @@ IWRAM_CODE static void render_floor_sw(u16* buf)
 }
 
 // Fill a horizontal span in Mode 4 bitmap (handles odd-pixel edges + DMA bulk fill)
+#ifdef AFN_COVERAGE_BUF
+// Coverage buffer: 1 bit per pixel, 240x160 = 4800 bytes
+// Stored in EWRAM (not IWRAM — too precious for 4.8KB)
+static u32 g_coverage[240 * 160 / 32];
+
+static void coverage_clear(void)
+{
+    memset32(g_coverage, 0, sizeof(g_coverage) / 4);
+}
+
+// Coverage-aware hline: only writes pixels not yet covered, then marks them.
+// Returns early if the entire span is already covered.
+IWRAM_CODE static void afn_hline_cov(u16* row, int left, int right, int y, u8 palIdx)
+{
+    int x;
+    int base = y * 240;
+    for (x = left; x <= right; x++)
+    {
+        int bit = base + x;
+        int word = bit >> 5;
+        u32 mask = 1u << (bit & 31);
+        if (g_coverage[word] & mask) continue; // already covered
+        g_coverage[word] |= mask;
+        // Write 8bpp pixel to Mode 4 buffer (packed u16)
+        if (x & 1)
+            row[x >> 1] = (row[x >> 1] & 0x00FF) | ((u16)palIdx << 8);
+        else
+            row[x >> 1] = (row[x >> 1] & 0xFF00) | palIdx;
+    }
+}
+#endif
+
 IWRAM_CODE static void afn_hline(u16* row, int left, int right, u8 palIdx)
 {
     int lx = left, rx = right, count;
@@ -968,6 +1000,87 @@ IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int 
     }
 }
 
+#ifdef AFN_COVERAGE_BUF
+// Coverage-aware rasterizer: skips pixels already drawn by closer triangles.
+// Used with front-to-back sorting to eliminate overdraw.
+IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx)
+{
+    int tmp;
+    int totalH, segH;
+    int iy0, iy2, y;
+    int xLong, xShort;
+    int dxLong, dxShort;
+    int left, right;
+
+    if (y0 > y1) { tmp=x0; x0=x1; x1=tmp; tmp=y0; y0=y1; y1=tmp; }
+    if (y0 > y2) { tmp=x0; x0=x2; x2=tmp; tmp=y0; y0=y2; y2=tmp; }
+    if (y1 > y2) { tmp=x1; x1=x2; x2=tmp; tmp=y1; y1=y2; y2=tmp; }
+
+    totalH = y2 - y0;
+    if (totalH <= 0) return;
+
+    dxLong = ((x2 - x0) << 16) / totalH;
+
+    segH = y1 - y0;
+    if (segH > 0)
+    {
+        dxShort = ((x1 - x0) << 16) / segH;
+        xLong = x0 << 16;
+        xShort = x0 << 16;
+
+        iy0 = y0 < 0 ? 0 : y0;
+        if (iy0 > y0)
+        {
+            xLong += dxLong * (iy0 - y0);
+            xShort += dxShort * (iy0 - y0);
+        }
+        iy2 = y1 < 160 ? y1 : 160;
+
+        for (y = iy0; y < iy2; y++)
+        {
+            left = xLong >> 16;
+            right = xShort >> 16;
+            if (left > right) { tmp = left; left = right; right = tmp; }
+            if (left < 0) left = 0;
+            if (right > 239) right = 239;
+            if (left <= right)
+                afn_hline_cov(buf + y * 120, left, right, y, palIdx);
+            xLong += dxLong;
+            xShort += dxShort;
+        }
+    }
+
+    segH = y2 - y1;
+    if (segH > 0)
+    {
+        dxShort = ((x2 - x1) << 16) / segH;
+        xLong = (x0 << 16) + dxLong * (y1 - y0);
+        xShort = x1 << 16;
+
+        iy0 = y1 < 0 ? 0 : y1;
+        if (iy0 > y1)
+        {
+            xLong += dxLong * (iy0 - y1);
+            xShort += dxShort * (iy0 - y1);
+        }
+        iy2 = y2 < 160 ? y2 : 159;
+
+        for (y = iy0; y <= iy2; y++)
+        {
+            left = xLong >> 16;
+            right = xShort >> 16;
+            if (left > right) { tmp = left; left = right; right = tmp; }
+            if (left < 0) left = 0;
+            if (right > 239) right = 239;
+            if (left <= right)
+                afn_hline_cov(buf + y * 120, left, right, y, palIdx);
+            xLong += dxLong;
+            xShort += dxShort;
+        }
+    }
+}
+#endif
+
 // Triangle sort entry for painter's algorithm
 typedef struct { int triIdx; int depth; } TriSort;
 
@@ -1105,7 +1218,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             }
         }
 
-        // Insertion sort by depth — back to front (farthest first)
+        // Insertion sort by depth
         // Pre-sorted meshes (Barebones) skip this entirely
         if (!meshSorted)
         {
@@ -1114,7 +1227,13 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             {
                 TriSort tmp = triOrder[a];
                 b = a - 1;
+#ifdef AFN_COVERAGE_BUF
+                // Front-to-back (nearest first) — coverage buffer skips overdraw
+                while (b >= 0 && triOrder[b].depth > tmp.depth)
+#else
+                // Back-to-front (farthest first) — painter's algorithm
                 while (b >= 0 && triOrder[b].depth < tmp.depth)
+#endif
                 {
                     triOrder[b + 1] = triOrder[b];
                     b--;
@@ -1159,10 +1278,14 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 palIdx = AFN_MESH_PAL_BASE + mi * 8 + 5;
             }
 
+#ifdef AFN_COVERAGE_BUF
+            rasterize_tri_cov(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+#else
             if (meshHalfRes)
                 rasterize_tri_half(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
             else
                 rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+#endif
         }
     }
 }
@@ -1327,6 +1450,9 @@ int main(void)
                 u32 fill = 0;
                 DMA_TRANSFER(backbuf, &fill, 120 * 160 / 2, 3, DMA_NOW | DMA_32 | DMA_SRC_FIXED);
             }
+#ifdef AFN_COVERAGE_BUF
+            coverage_clear();
+#endif
             render_meshes_sw(backbuf);
         }
 #endif

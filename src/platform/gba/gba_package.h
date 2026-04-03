@@ -85,6 +85,7 @@ struct GBACameraExport
     float drawDistance  = 0.0f;   // 0 = unlimited
     int   smallTriCull  = 0;      // min screen-space area to render (0=off)
     bool  skipFloor     = false;  // skip floor rendering entirely
+    bool  coverageBuf   = false;  // front-to-back rendering with coverage buffer
 };
 
 // Mesh asset for GBA export

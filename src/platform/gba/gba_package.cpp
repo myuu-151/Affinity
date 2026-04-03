@@ -281,6 +281,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "#define AFN_DRAW_DISTANCE " << (int)(camera.drawDistance / 4.0f * 256.0f) << "\n";
     if (camera.smallTriCull > 0)
         f << "#define AFN_SMALL_TRI_CULL " << camera.smallTriCull << "\n";
+    if (camera.coverageBuf)
+        f << "#define AFN_COVERAGE_BUF 1\n";
     f << "\n";
 
     // Find player sprite index

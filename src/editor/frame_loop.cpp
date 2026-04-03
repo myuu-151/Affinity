@@ -434,6 +434,7 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "draw_distance=%.1f\n", sCamObj.drawDistance);
     fprintf(f, "small_tri_cull=%d\n", sCamObj.smallTriCull);
     fprintf(f, "skip_floor=%d\n", sCamObj.skipFloor ? 1 : 0);
+    fprintf(f, "coverage_buf=%d\n", sCamObj.coverageBuf ? 1 : 0);
     fprintf(f, "icon_scale=%.6f\n\n", sCamObjEditorScale);
 
     // Editor camera
@@ -592,6 +593,7 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "draw_distance=%f", &fval) == 1) sCamObj.drawDistance = fval;
             else if (sscanf(line, "small_tri_cull=%d", &ival) == 1) sCamObj.smallTriCull = ival;
             else if (sscanf(line, "skip_floor=%d", &ival) == 1) sCamObj.skipFloor = (ival != 0);
+            else if (sscanf(line, "coverage_buf=%d", &ival) == 1) sCamObj.coverageBuf = (ival != 0);
             else if (sscanf(line, "icon_scale=%f", &fval) == 1) sCamObjEditorScale = fval;
         }
         else if (strcmp(section, "EditorCamera") == 0)
@@ -2638,6 +2640,9 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         if (sCamObj.smallTriCull > 0)
             ImGui::TextDisabled("Skip tris with screen area < %d", sCamObj.smallTriCull);
         ImGui::Checkbox("Skip Floor##cam", &sCamObj.skipFloor);
+        ImGui::Checkbox("Coverage Buffer##cam", &sCamObj.coverageBuf);
+        if (sCamObj.coverageBuf)
+            ImGui::TextDisabled("Front-to-back render, skip covered pixels");
         ImGui::Separator();
         ImGui::DragFloat("Icon Size##cam", &sCamObjEditorScale, 0.01f, 0.1f, 2.0f, "%.2f");
         ImGui::PopItemWidth();
@@ -3312,6 +3317,7 @@ void FrameTick(float dt)
                 exportCam.drawDistance = sCamObj.drawDistance;
                 exportCam.smallTriCull = sCamObj.smallTriCull;
                 exportCam.skipFloor = sCamObj.skipFloor;
+                exportCam.coverageBuf = sCamObj.coverageBuf;
 
                 // Collect sprite assets for export
                 std::vector<GBASpriteAssetExport> exportAssets;
