@@ -771,11 +771,19 @@ static void render_floor_sw(u16* buf)
 }
 
 // Rasterize a flat-shaded triangle into Mode 4 bitmap
-static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx)
+// Uses 16.16 fixed-point edge walking — no division in scanline loop
+IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx)
 {
     int tmp;
-    int totalH, iy0, iy2, y;
-    // Sort by y
+    int totalH, segH;
+    int iy0, iy2, y;
+    int xLong, xShort;
+    int dxLong, dxShort; /* 16.16 fixed-point x step per scanline */
+    int left, right, lx, rx;
+    u16 pair;
+    u16* row;
+
+    /* Sort by y */
     if (y0 > y1) { tmp=x0; x0=x1; x1=tmp; tmp=y0; y0=y1; y1=tmp; }
     if (y0 > y2) { tmp=x0; x0=x2; x2=tmp; tmp=y0; y0=y2; y2=tmp; }
     if (y1 > y2) { tmp=x1; x1=x2; x2=tmp; tmp=y1; y1=y2; y2=tmp; }
@@ -783,67 +791,96 @@ static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, int x2, int 
     totalH = y2 - y0;
     if (totalH <= 0) return;
 
-    iy0 = y0 < 0 ? 0 : y0;
-    iy2 = y2 > 159 ? 159 : y2;
+    /* Long edge slope (16.16 fixed) — one divide total */
+    dxLong = ((x2 - x0) << 16) / totalH;
 
-    for (y = iy0; y <= iy2; y++)
+    /* Upper half: y0 -> y1 */
+    segH = y1 - y0;
+    if (segH > 0)
     {
-        int t_num = y - y0;
-        int xLong = x0 + (x2 - x0) * t_num / totalH;
-        int xShort;
-        int left, right;
-        u16* row;
-        int lx, rx;
-        u16 pair;
+        dxShort = ((x1 - x0) << 16) / segH;
+        xLong = x0 << 16;
+        xShort = x0 << 16;
 
-        if (y < y1)
+        /* Skip rows above screen */
+        iy0 = y0 < 0 ? 0 : y0;
+        if (iy0 > y0)
         {
-            int segH = y1 - y0;
-            xShort = (segH > 0) ? x0 + (x1 - x0) * (y - y0) / segH : x0;
+            xLong += dxLong * (iy0 - y0);
+            xShort += dxShort * (iy0 - y0);
         }
-        else
-        {
-            int segH = y2 - y1;
-            xShort = (segH > 0) ? x1 + (x2 - x1) * (y - y1) / segH : x1;
-        }
+        iy2 = y1 < 160 ? y1 : 160;
 
-        left = xLong < xShort ? xLong : xShort;
-        right = xLong > xShort ? xLong : xShort;
-        if (left < 0) left = 0;
-        if (right > 239) right = 239;
-        if (left > right) continue;
+        for (y = iy0; y < iy2; y++)
+        {
+            left = xLong >> 16;
+            right = xShort >> 16;
+            if (left > right) { tmp = left; left = right; right = tmp; }
+            if (left < 0) left = 0;
+            if (right > 239) right = 239;
 
-        row = buf + y * 120;
+            if (left <= right)
+            {
+                row = buf + y * 120;
+                lx = left;
+                if ((lx & 1) && lx <= right)
+                { row[lx >> 1] = (row[lx >> 1] & 0x00FF) | ((u16)palIdx << 8); lx++; }
+                rx = right;
+                if (!(rx & 1) && rx >= lx)
+                { row[rx >> 1] = (row[rx >> 1] & 0xFF00) | palIdx; rx--; }
+                pair = palIdx | ((u16)palIdx << 8);
+                while (lx <= rx) { row[lx >> 1] = pair; lx += 2; }
+            }
+            xLong += dxLong;
+            xShort += dxShort;
+        }
+    }
 
-        // Fill aligned pairs
-        // Handle odd left pixel
-        lx = left;
-        if ((lx & 1) && lx <= right)
+    /* Lower half: y1 -> y2 */
+    segH = y2 - y1;
+    if (segH > 0)
+    {
+        dxShort = ((x2 - x1) << 16) / segH;
+        /* Long edge continues from where it was at y1 */
+        xLong = (x0 << 16) + dxLong * (y1 - y0);
+        xShort = x1 << 16;
+
+        iy0 = y1 < 0 ? 0 : y1;
+        if (iy0 > y1)
         {
-            int idx = lx >> 1;
-            row[idx] = (row[idx] & 0x00FF) | ((u16)palIdx << 8);
-            lx++;
+            xLong += dxLong * (iy0 - y1);
+            xShort += dxShort * (iy0 - y1);
         }
-        // Handle odd right pixel
-        rx = right;
-        if (!(rx & 1) && rx >= lx)
+        iy2 = y2 < 160 ? y2 : 159;
+
+        for (y = iy0; y <= iy2; y++)
         {
-            int idx = rx >> 1;
-            row[idx] = (row[idx] & 0xFF00) | palIdx;
-            rx--;
-        }
-        // Fill middle as u16 pairs
-        pair = palIdx | ((u16)palIdx << 8);
-        {
-            int wx;
-            for (wx = lx; wx <= rx; wx += 2)
-                row[wx >> 1] = pair;
+            left = xLong >> 16;
+            right = xShort >> 16;
+            if (left > right) { tmp = left; left = right; right = tmp; }
+            if (left < 0) left = 0;
+            if (right > 239) right = 239;
+
+            if (left <= right)
+            {
+                row = buf + y * 120;
+                lx = left;
+                if ((lx & 1) && lx <= right)
+                { row[lx >> 1] = (row[lx >> 1] & 0x00FF) | ((u16)palIdx << 8); lx++; }
+                rx = right;
+                if (!(rx & 1) && rx >= lx)
+                { row[rx >> 1] = (row[rx >> 1] & 0xFF00) | palIdx; rx--; }
+                pair = palIdx | ((u16)palIdx << 8);
+                while (lx <= rx) { row[lx >> 1] = pair; lx += 2; }
+            }
+            xLong += dxLong;
+            xShort += dxShort;
         }
     }
 }
 
 // Render all mesh sprites into the bitmap
-static void render_meshes_sw(u16* buf)
+IWRAM_CODE static void render_meshes_sw(u16* buf)
 {
     int i;
     for (i = 0; i < g_spriteCount; i++)
@@ -1101,9 +1138,12 @@ int main(void)
         // Software render to back buffer
         {
             u16* backbuf = g_page ? (u16*)0x06000000 : (u16*)0x0600A000;
-            render_floor_sw(backbuf);
+            // DMA fill with sky color (palette 0) — fast clear
+            {
+                u32 fill = 0;
+                DMA_TRANSFER(backbuf, &fill, 120 * 160 / 2, 3, DMA_NOW | DMA_32 | DMA_SRC_FIXED);
+            }
             render_meshes_sw(backbuf);
-            render_minimap_bg_sw(backbuf);
         }
 #endif
         VBlankIntrWait();
@@ -1390,8 +1430,10 @@ int main(void)
         // Project and draw sprites
         update_sprites();
 
-        // Update minimap
+        // Update minimap (not in mesh/bitmap mode — no BG0 available)
+#if !defined(AFN_MESH_COUNT) || AFN_MESH_COUNT == 0
         update_minimap();
+#endif
     }
 
     return 0;

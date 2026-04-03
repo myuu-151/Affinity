@@ -297,7 +297,7 @@ static void DrawSquare(int cx, int cy, int half, uint8_t cr, uint8_t cg, uint8_t
         }
     }
     // Direction notch at top center
-    if (cx >= 0 && cx < kGBAWidth && cy - half - 1 >= 0)
+    if (cx >= 0 && cx < kGBAWidth && cy - half - 1 >= 0 && cy - half - 1 < kGBAHeight)
     {
         uint8_t* row = sFrameBuf + (cy - half - 1) * kGBAWidth * 3;
         int nx0 = std::max(0, cx - 1);
@@ -410,55 +410,68 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
     // Horizon line — controlled by camera pitch (I/K keys)
     int horizon = (int)cam.horizon;
 
-    // --- Render floor ---
+    // --- Clear to sky ---
     for (int y = 0; y < kGBAHeight; y++)
     {
         uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
-
-        if (y <= horizon)
-        {
-            // Sky
-            for (int x = 0; x < kGBAWidth; x++)
-            {
-                row[x * 3 + 0] = kSkyCol[0];
-                row[x * 3 + 1] = kSkyCol[1];
-                row[x * 3 + 2] = kSkyCol[2];
-            }
-            continue;
-        }
-
-        // Mode 7 per-scanline math (matches Tonc HBlank ISR)
-        float lambda = cam.height / (float)(y - horizon);
-
-        float lcf = lambda * cosA;
-        float lsf = lambda * sinA;
-
-        float startX = cam.x + (-120.0f * lcf) + (cam.fov * lsf);
-        float startZ = cam.z + (-120.0f * lsf) - (cam.fov * lcf);
-
-        float stepX = lcf;
-        float stepZ = lsf;
-
-        float wx = startX;
-        float wz = startZ;
-
         for (int x = 0; x < kGBAWidth; x++)
         {
-            uint8_t r, g, b;
-            SampleFloor(wx, wz, map, r, g, b);
+            row[x * 3 + 0] = kSkyCol[0];
+            row[x * 3 + 1] = kSkyCol[1];
+            row[x * 3 + 2] = kSkyCol[2];
+        }
+    }
 
-            float fog = lambda / 300.0f;
-            if (fog > 1.0f) fog = 1.0f;
-            r = (uint8_t)(r * (1.0f - fog) + kSkyCol[0] * fog);
-            g = (uint8_t)(g * (1.0f - fog) + kSkyCol[1] * fog);
-            b = (uint8_t)(b * (1.0f - fog) + kSkyCol[2] * fog);
+    // --- Draw ground grid at origin ---
+    {
+        static const float kGridSpacing = 32.0f;
+        static const int kGridLines = 17; // -256 to +256 in steps of 32
+        static const float kGridHalf = 256.0f;
 
-            row[x * 3 + 0] = r;
-            row[x * 3 + 1] = g;
-            row[x * 3 + 2] = b;
+        for (int axis = 0; axis < 2; axis++)
+        {
+            for (int i = 0; i < kGridLines; i++)
+            {
+                float offset = -kGridHalf + i * kGridSpacing;
+                // Draw line as a series of points
+                for (int s = 0; s < 64; s++)
+                {
+                    float t = -kGridHalf + s * (kGridHalf * 2.0f / 63.0f);
+                    float wx = axis == 0 ? t : offset;
+                    float wz = axis == 0 ? offset : t;
 
-            wx += stepX;
-            wz += stepZ;
+                    float dx = wx - cam.x;
+                    float dz = wz - cam.z;
+                    float fovLambda = dx * sinA - dz * cosA;
+                    if (fovLambda <= 0.5f) continue;
+                    float lambda = fovLambda / cam.fov;
+                    if (lambda < 0.01f) lambda = 0.01f;
+
+                    int screenY = horizon + (int)(cam.height / lambda);
+                    float side = dx * cosA + dz * sinA;
+                    int screenX = 120 + (int)(side / lambda);
+
+                    if (screenX < 0 || screenX >= kGBAWidth) continue;
+                    if (screenY < 0 || screenY >= kGBAHeight) continue;
+
+                    float fog = lambda / 300.0f;
+                    if (fog > 0.95f) continue;
+
+                    // Darker line on axes (X=0 or Z=0)
+                    uint8_t gr, gg, gb;
+                    if (i == kGridLines / 2)
+                    { gr = 180; gg = 180; gb = 180; } // center axis = bright
+                    else
+                    { gr = 60; gg = 70; gb = 60; } // regular grid = dim
+
+                    gr = (uint8_t)(gr * (1.0f - fog) + kSkyCol[0] * fog);
+                    gg = (uint8_t)(gg * (1.0f - fog) + kSkyCol[1] * fog);
+                    gb = (uint8_t)(gb * (1.0f - fog) + kSkyCol[2] * fog);
+
+                    uint8_t* px = sFrameBuf + (screenY * kGBAWidth + screenX) * 3;
+                    px[0] = gr; px[1] = gg; px[2] = gb;
+                }
+            }
         }
     }
 
@@ -538,8 +551,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         uint8_t cg = (fs.color >>  8) & 0xFF;
         uint8_t cb = (fs.color >> 16) & 0xFF;
 
-        int halfW = std::max(2, (int)(8.0f * sp.scale / cam.height * 1.6f * fs.scale));
-        int halfH = std::max(3, (int)(12.0f * sp.scale / cam.height * 1.6f * fs.scale));
+        int halfW = std::clamp((int)(8.0f * sp.scale / cam.height * 1.6f * fs.scale), 2, 200);
+        int halfH = std::clamp((int)(12.0f * sp.scale / cam.height * 1.6f * fs.scale), 3, 200);
 
         // Sprite draws upward from its foot position
         int drawCenterY = sp.screenY - halfH;
@@ -755,7 +768,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 if (fog > 1.0f) fog = 1.0f;
 
                 float scale = cam.height / lambda;
-                int half = std::max(2, (int)(10.0f * scale / cam.height * 16.0f * camObjScale));
+                int half = std::clamp((int)(10.0f * scale / cam.height * 16.0f * camObjScale), 2, 200);
 
                 DrawSquare(screenX, screenY - half, half, 100, 220, 255, fog);
             }

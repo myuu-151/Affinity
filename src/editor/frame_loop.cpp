@@ -1263,6 +1263,63 @@ static void DrawViewport(ImVec2 pos, ImVec2 size)
         }
     }
 
+    // Right-click on viewport to place object
+    static float sVPPlaceX = 0.0f;
+    static float sVPPlaceZ = 0.0f;
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && sSpriteCount < kMaxFloorSprites)
+    {
+        ImVec2 mouse = ImGui::GetMousePos();
+        float gbaX = (mouse.x - imgPos.x) / scale;
+        float gbaY = (mouse.y - imgPos.y) / scale;
+
+        // Inverse Mode 7 projection: screen -> world
+        int horizon2 = (int)sCamera.horizon;
+        if (gbaY > horizon2 + 1)
+        {
+            float cosA = cosf(-sCamera.angle);
+            float sinA = sinf(-sCamera.angle);
+            float lambda = sCamera.height / (gbaY - horizon2);
+            float lcf = lambda * cosA;
+            float lsf = lambda * sinA;
+            sVPPlaceX = sCamera.x + (gbaX - 120.0f) * lcf + sCamera.fov * lsf;
+            sVPPlaceZ = sCamera.z + (gbaX - 120.0f) * lsf - sCamera.fov * lcf;
+        }
+        else
+        {
+            // Clicked above horizon — place at camera position
+            sVPPlaceX = sCamera.x;
+            sVPPlaceZ = sCamera.z;
+        }
+        ImGui::OpenPopup("##VPPlaceObject");
+    }
+    if (ImGui::BeginPopup("##VPPlaceObject"))
+    {
+        ImGui::TextDisabled("Place Object");
+        ImGui::Separator();
+        for (int t = 0; t < (int)SpriteType::Count; t++)
+        {
+            if (ImGui::MenuItem(kSpriteTypeNames[t]))
+            {
+                FloorSprite& sp = sSprites[sSpriteCount];
+                sp = FloorSprite();
+                sp.x = sVPPlaceX;
+                sp.z = sVPPlaceZ;
+                sp.y = 0.0f;
+                sp.scale = 1.0f;
+                sp.type = (SpriteType)t;
+                sp.color = kSpriteColors[sSpriteCount % kNumSpriteColors];
+                sp.selected = true;
+
+                if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
+                    sSprites[sSelectedSprite].selected = false;
+                sSelectedSprite = sSpriteCount;
+                sSelectedObjType = SelectedObjType::Sprite;
+                sSpriteCount++;
+            }
+        }
+        ImGui::EndPopup();
+    }
+
     // Viewport label overlay
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddText(ImVec2(pos.x + 6, pos.y + 4),
