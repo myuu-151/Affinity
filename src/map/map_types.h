@@ -144,6 +144,7 @@ struct MeshVertex
     float px, py, pz;   // position
     float nx, ny, nz;   // normal
     float r, g, b;      // vertex color (default white)
+    int   objPosIdx = -1; // original OBJ 'v' index (for vertex welding)
 };
 
 // Backface culling mode for mesh rendering

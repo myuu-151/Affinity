@@ -724,7 +724,7 @@ static inline void m4_plot_buf(u16* buf, int x, int y, u8 palIdx)
 }
 
 // Software render Mode 7 floor into bitmap buffer
-static void render_floor_sw(u16* buf)
+IWRAM_CODE static void render_floor_sw(u16* buf)
 {
     int y, x;
     // Sky fill (palette index 0 = sky blue)
@@ -770,6 +770,29 @@ static void render_floor_sw(u16* buf)
     }
 }
 
+// Fill a horizontal span in Mode 4 bitmap (handles odd-pixel edges + DMA bulk fill)
+IWRAM_CODE static void afn_hline(u16* row, int left, int right, u8 palIdx)
+{
+    int lx = left, rx = right, count;
+    u16 pair;
+    /* Handle odd left pixel */
+    if ((lx & 1) && lx <= rx)
+    { row[lx >> 1] = (row[lx >> 1] & 0x00FF) | ((u16)palIdx << 8); lx++; }
+    /* Handle even right pixel */
+    if (!(rx & 1) && rx >= lx)
+    { row[rx >> 1] = (row[rx >> 1] & 0xFF00) | palIdx; rx--; }
+    /* Bulk fill aligned pairs */
+    count = (rx - lx + 1) >> 1;
+    if (count > 0)
+    {
+        pair = palIdx | ((u16)palIdx << 8);
+        if (count >= 4)
+            memset16(&row[lx >> 1], pair, count);
+        else
+            while (count--) { row[lx >> 1] = pair; lx += 2; }
+    }
+}
+
 // Rasterize a flat-shaded triangle into Mode 4 bitmap
 // Uses 16.16 fixed-point edge walking — no division in scanline loop
 IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx)
@@ -779,9 +802,7 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
     int iy0, iy2, y;
     int xLong, xShort;
     int dxLong, dxShort; /* 16.16 fixed-point x step per scanline */
-    int left, right, lx, rx;
-    u16 pair;
-    u16* row;
+    int left, right;
 
     /* Sort by y */
     if (y0 > y1) { tmp=x0; x0=x1; x1=tmp; tmp=y0; y0=y1; y1=tmp; }
@@ -818,19 +839,8 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
             if (left > right) { tmp = left; left = right; right = tmp; }
             if (left < 0) left = 0;
             if (right > 239) right = 239;
-
             if (left <= right)
-            {
-                row = buf + y * 120;
-                lx = left;
-                if ((lx & 1) && lx <= right)
-                { row[lx >> 1] = (row[lx >> 1] & 0x00FF) | ((u16)palIdx << 8); lx++; }
-                rx = right;
-                if (!(rx & 1) && rx >= lx)
-                { row[rx >> 1] = (row[rx >> 1] & 0xFF00) | palIdx; rx--; }
-                pair = palIdx | ((u16)palIdx << 8);
-                while (lx <= rx) { row[lx >> 1] = pair; lx += 2; }
-            }
+                afn_hline(buf + y * 120, left, right, palIdx);
             xLong += dxLong;
             xShort += dxShort;
         }
@@ -860,19 +870,8 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
             if (left > right) { tmp = left; left = right; right = tmp; }
             if (left < 0) left = 0;
             if (right > 239) right = 239;
-
             if (left <= right)
-            {
-                row = buf + y * 120;
-                lx = left;
-                if ((lx & 1) && lx <= right)
-                { row[lx >> 1] = (row[lx >> 1] & 0x00FF) | ((u16)palIdx << 8); lx++; }
-                rx = right;
-                if (!(rx & 1) && rx >= lx)
-                { row[rx >> 1] = (row[rx >> 1] & 0xFF00) | palIdx; rx--; }
-                pair = palIdx | ((u16)palIdx << 8);
-                while (lx <= rx) { row[lx >> 1] = pair; lx += 2; }
-            }
+                afn_hline(buf + y * 120, left, right, palIdx);
             xLong += dxLong;
             xShort += dxShort;
         }
@@ -893,10 +892,10 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         const s8* norms;
         const u16* indices;
         FIXED cosR, sinR, sprScale;
-        int sx[64], sy[64];
-        FIXED sz[64]; // depth per vertex for sorting
-        u8 vis[64];
-        TriSort triOrder[128];
+        int sx[512], sy[512];
+        FIXED sz[512]; // depth per vertex for sorting
+        u8 vis[512];
+        TriSort triOrder[256];
         int triCount;
 
         if (g_sprites[i].meshIdx < 0 || g_sprites[i].meshIdx >= AFN_MESH_COUNT)
@@ -916,7 +915,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         sprScale = g_sprites[i].scale;
         if (sprScale <= 0) sprScale = 256;
 
-        if (vertCount > 64) vertCount = 64;
+        if (vertCount > 512) vertCount = 512;
 
         for (v = 0; v < vertCount; v++)
         {
@@ -967,20 +966,28 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             int cross;
 
             if (i0 >= vertCount || i1 >= vertCount || i2 >= vertCount) continue;
+            if (i0 == i1 || i1 == i2 || i0 == i2) continue; // degenerate
             if (!vis[i0] || !vis[i1] || !vis[i2]) continue;
+
+            // Screen bounds cull: skip if all 3 vertices fully offscreen
+            if ((sx[i0] < 0 && sx[i1] < 0 && sx[i2] < 0) ||
+                (sx[i0] >= 240 && sx[i1] >= 240 && sx[i2] >= 240) ||
+                (sy[i0] < 0 && sy[i1] < 0 && sy[i2] < 0) ||
+                (sy[i0] >= 160 && sy[i1] >= 160 && sy[i2] >= 160))
+                continue;
 
             // Backface culling: screen-space cross product
             cross = (sx[i1] - sx[i0]) * (sy[i2] - sy[i0])
                   - (sy[i1] - sy[i0]) * (sx[i2] - sx[i0]);
-            if (cullMode == 0 && cross <= 0) continue;      // Back: cull back faces
-            else if (cullMode == 1 && cross >= 0) continue;  // Front: cull front faces
+            if (cullMode == 0 && cross >= 0) continue;      // Back: cull back faces
+            else if (cullMode == 1 && cross <= 0) continue;  // Front: cull front faces
             // cullMode == 2 (None): no culling, draw all
 
             // Average depth for painter's sort (larger = farther)
             triOrder[triCount].triIdx = t;
             triOrder[triCount].depth = (sz[i0] + sz[i1] + sz[i2]);
             triCount++;
-            if (triCount >= 128) break;
+            if (triCount >= 256) break;
         }
 
         // Insertion sort by depth — back to front (farthest first)

@@ -370,6 +370,7 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
                     if (nni >= 0 && nni < (int)normals.size())
                     { mv.nx = normals[nni].x; mv.ny = normals[nni].y; mv.nz = normals[nni].z; }
                     mv.r = mv.g = mv.b = 1.0f;
+                    mv.objPosIdx = pi;
                     idxs.push_back((uint32_t)verts.size());
                     verts.push_back(mv);
                 }
@@ -3345,6 +3346,7 @@ void FrameTick(float dt)
                         me.normals.push_back(v.nx);
                         me.normals.push_back(v.ny);
                         me.normals.push_back(v.nz);
+                        me.objPosIdx.push_back(v.objPosIdx);
                     }
                     me.indices = ma.indices;
                     // Convert sprite color to RGB15 (use magenta as default)
