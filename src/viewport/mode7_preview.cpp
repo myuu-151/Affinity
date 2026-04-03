@@ -231,6 +231,47 @@ static void DrawTriangle(float x0, float y0, float x1, float y1, float x2, float
     }
 }
 
+// Draw a textured triangle with UV interpolation
+static void DrawTriangleTex(float x0, float y0, float u0, float v0,
+                            float x1, float y1, float u1, float v1,
+                            float x2, float y2, float u2, float v2,
+                            const uint8_t* texPixels, const uint32_t* texPal,
+                            int texW, int texH, float fogAlpha)
+{
+    // Barycentric rasterizer — compute bounding box, test each pixel
+    int minX = std::max(0, (int)floorf(std::min({x0, x1, x2})));
+    int maxX = std::min(kGBAWidth - 1, (int)ceilf(std::max({x0, x1, x2})));
+    int minY = std::max(0, (int)floorf(std::min({y0, y1, y2})));
+    int maxY = std::min(kGBAHeight - 1, (int)ceilf(std::max({y0, y1, y2})));
+
+    float denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2);
+    if (fabsf(denom) < 0.001f) return;
+    float invD = 1.0f / denom;
+
+    for (int y = minY; y <= maxY; y++)
+    {
+        uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
+        for (int x = minX; x <= maxX; x++)
+        {
+            float w0 = ((y1 - y2) * (x - x2) + (x2 - x1) * (y - y2)) * invD;
+            float w1 = ((y2 - y0) * (x - x2) + (x0 - x2) * (y - y2)) * invD;
+            float w2 = 1.0f - w0 - w1;
+            if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
+
+            float su = u0 * w0 + u1 * w1 + u2 * w2;
+            float sv = v0 * w0 + v1 * w1 + v2 * w2;
+            int tu = (int)floorf(su * texW) % texW; if (tu < 0) tu += texW;
+            int tv = (int)floorf(sv * texH) % texH; if (tv < 0) tv += texH;
+            uint8_t idx = texPixels[tv * texW + tu];
+            uint32_t c = texPal[idx];
+            uint8_t tr = c & 0xFF, tg = (c >> 8) & 0xFF, tb = (c >> 16) & 0xFF;
+            row[x * 3 + 0] = (uint8_t)(tr * (1 - fogAlpha) + kSkyCol[0] * fogAlpha);
+            row[x * 3 + 1] = (uint8_t)(tg * (1 - fogAlpha) + kSkyCol[1] * fogAlpha);
+            row[x * 3 + 2] = (uint8_t)(tb * (1 - fogAlpha) + kSkyCol[2] * fogAlpha);
+        }
+    }
+}
+
 // Draw a wireframe triangle edge
 static void DrawLine(int ax, int ay, int bx, int by,
                      uint8_t cr, uint8_t cg, uint8_t cb)
@@ -652,10 +693,11 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 // Project all vertices to screen space
                 int nv = (int)ma.vertices.size();
                 // Use dynamic alloc only for large meshes, stack for small
-                float scrX[256], scrY[256];
+                float scrX[256], scrY[256], depth[256];
                 bool  vis[256];
                 float* pSX = (nv <= 256) ? scrX : new float[nv];
                 float* pSY = (nv <= 256) ? scrY : new float[nv];
+                float* pDepth = (nv <= 256) ? depth : new float[nv];
                 bool*  pVis = (nv <= 256) ? vis : new bool[nv];
 
                 for (int v = 0; v < nv; v++)
@@ -669,6 +711,10 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                     float wy = fs.y + ly;
                     float wz = fs.z - lx * sr + lz * cr2;
                     pVis[v] = ProjectPoint(wx, wy, wz, cam, cosA, sinA, pSX[v], pSY[v]);
+                    // View-space depth for sorting
+                    float dx = wx - cam.x;
+                    float dz = wz - cam.z;
+                    pDepth[v] = dx * sinA - dz * cosA;
                 }
 
                 // Simple flat shading: use a directional light
@@ -676,10 +722,23 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 float ll = sqrtf(lightDirX*lightDirX + lightDirY*lightDirY + lightDirZ*lightDirZ);
                 lightDirX /= ll; lightDirY /= ll; lightDirZ /= ll;
 
-                // Draw filled triangles
+                // Sort triangles back-to-front (painter's algorithm)
                 int ntri = (int)ma.indices.size() / 3;
-                for (int t = 0; t < ntri; t++)
+                int sortIdx[512];
+                int* pSort = (ntri <= 512) ? sortIdx : new int[ntri];
+                for (int t = 0; t < ntri; t++) pSort[t] = t;
+                std::sort(pSort, pSort + ntri, [&](int a, int b) {
+                    int a0 = ma.indices[a*3], a1 = ma.indices[a*3+1], a2 = ma.indices[a*3+2];
+                    int b0 = ma.indices[b*3], b1 = ma.indices[b*3+1], b2 = ma.indices[b*3+2];
+                    float da = (pDepth[a0] + pDepth[a1] + pDepth[a2]);
+                    float db = (pDepth[b0] + pDepth[b1] + pDepth[b2]);
+                    return da > db; // back-to-front
+                });
+
+                // Draw filled triangles
+                for (int ti = 0; ti < ntri; ti++)
                 {
+                    int t = pSort[ti];
                     int i0 = ma.indices[t * 3 + 0];
                     int i1 = ma.indices[t * 3 + 1];
                     int i2 = ma.indices[t * 3 + 2];
@@ -706,36 +765,35 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                     float dot = -(rnx * lightDirX + rny * lightDirY + rnz * lightDirZ);
                     float shade = 0.3f + 0.7f * std::max(0.0f, dot); // ambient + diffuse
 
-                    uint8_t tr = (uint8_t)(cr * shade);
-                    uint8_t tg = (uint8_t)(cg * shade);
-                    uint8_t tb = (uint8_t)(cb * shade);
-
-                    DrawTriangle(pSX[i0], pSY[i0], pSX[i1], pSY[i1], pSX[i2], pSY[i2],
-                                 tr, tg, tb, sp.fog);
-                }
-
-                // Draw wireframe edges on top for definition
-                for (int t = 0; t < ntri; t++)
-                {
-                    int i0 = ma.indices[t * 3 + 0];
-                    int i1 = ma.indices[t * 3 + 1];
-                    int i2 = ma.indices[t * 3 + 2];
-                    if (i0 >= nv || i1 >= nv || i2 >= nv) continue;
-                    if (!pVis[i0] || !pVis[i1] || !pVis[i2]) continue;
-
-                    // Match backface culling from fill pass
-                    if (ma.cullMode != CullMode::None) {
-                        float cross = (pSX[i1] - pSX[i0]) * (pSY[i2] - pSY[i0])
-                                    - (pSY[i1] - pSY[i0]) * (pSX[i2] - pSX[i0]);
-                        if (ma.cullMode == CullMode::Back  && cross >= 0.0f) continue;
-                        if (ma.cullMode == CullMode::Front && cross <= 0.0f) continue;
+                    if (ma.textured && !ma.texturePixels.empty() && ma.texW > 0 && ma.texH > 0)
+                    {
+                        DrawTriangleTex(
+                            pSX[i0], pSY[i0], ma.vertices[i0].u, ma.vertices[i0].v,
+                            pSX[i1], pSY[i1], ma.vertices[i1].u, ma.vertices[i1].v,
+                            pSX[i2], pSY[i2], ma.vertices[i2].u, ma.vertices[i2].v,
+                            ma.texturePixels.data(), ma.texturePalette,
+                            ma.texW, ma.texH, sp.fog);
                     }
-                    uint8_t wr = (uint8_t)(cr * 0.3f);
-                    uint8_t wg = (uint8_t)(cg * 0.3f);
-                    uint8_t wb = (uint8_t)(cb * 0.3f);
-                    DrawLine((int)pSX[i0], (int)pSY[i0], (int)pSX[i1], (int)pSY[i1], wr, wg, wb);
-                    DrawLine((int)pSX[i1], (int)pSY[i1], (int)pSX[i2], (int)pSY[i2], wr, wg, wb);
-                    DrawLine((int)pSX[i2], (int)pSY[i2], (int)pSX[i0], (int)pSY[i0], wr, wg, wb);
+                    else
+                    {
+                        uint8_t tr = (uint8_t)(cr * shade);
+                        uint8_t tg = (uint8_t)(cg * shade);
+                        uint8_t tb = (uint8_t)(cb * shade);
+
+                        DrawTriangle(pSX[i0], pSY[i0], pSX[i1], pSY[i1], pSX[i2], pSY[i2],
+                                     tr, tg, tb, sp.fog);
+                    }
+
+                    // Draw wireframe per-triangle in sorted order so front fills occlude back wireframes
+                    if (pVis[i0] && pVis[i1] && pVis[i2])
+                    {
+                        uint8_t wr = (uint8_t)(cr * 0.3f);
+                        uint8_t wg = (uint8_t)(cg * 0.3f);
+                        uint8_t wb = (uint8_t)(cb * 0.3f);
+                        DrawLine((int)pSX[i0], (int)pSY[i0], (int)pSX[i1], (int)pSY[i1], wr, wg, wb);
+                        DrawLine((int)pSX[i1], (int)pSY[i1], (int)pSX[i2], (int)pSY[i2], wr, wg, wb);
+                        DrawLine((int)pSX[i2], (int)pSY[i2], (int)pSX[i0], (int)pSY[i0], wr, wg, wb);
+                    }
                 }
 
                 // Compute screen-space bounding box from projected vertices
@@ -758,7 +816,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                     hasMeshBounds = true;
                 }
 
-                if (nv > 256) { delete[] pSX; delete[] pSY; delete[] pVis; }
+                if (ntri > 512) delete[] pSort;
+                if (nv > 256) { delete[] pSX; delete[] pSY; delete[] pDepth; delete[] pVis; }
                 drewSprite = true;
             }
         }
