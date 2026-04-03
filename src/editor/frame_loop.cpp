@@ -200,6 +200,68 @@ static bool  sScaleMode = false;
 static float sScaleOrig = 1.0f;
 static float sScaleMouseStartY = 0.0f;
 
+// R-drag undo tracking
+static bool sRDragUndoPushed = false;
+
+// ---- Undo system ----
+struct UndoEntry
+{
+    int spriteIdx;
+    float x, y, z, scale, rotation;
+};
+static constexpr int kMaxUndo = 64;
+static UndoEntry sUndoStack[kMaxUndo];
+static int sUndoCount = 0;
+static int sUndoCursor = 0; // points to next write slot; redo goes forward
+
+static void UndoPush(int idx, const FloorSprite& sp)
+{
+    if (sUndoCursor < kMaxUndo)
+    {
+        sUndoStack[sUndoCursor] = { idx, sp.x, sp.y, sp.z, sp.scale, sp.rotation };
+        sUndoCursor++;
+        sUndoCount = sUndoCursor; // discard redo history
+    }
+    else
+    {
+        // Shift stack left by 1
+        for (int i = 0; i < kMaxUndo - 1; i++)
+            sUndoStack[i] = sUndoStack[i + 1];
+        sUndoStack[kMaxUndo - 1] = { idx, sp.x, sp.y, sp.z, sp.scale, sp.rotation };
+        sUndoCount = kMaxUndo;
+    }
+}
+
+static void UndoPop()
+{
+    if (sUndoCursor <= 0) return;
+    sUndoCursor--;
+    UndoEntry& e = sUndoStack[sUndoCursor];
+    if (e.spriteIdx >= 0 && e.spriteIdx < sSpriteCount)
+    {
+        FloorSprite& sp = sSprites[e.spriteIdx];
+        // Save current state for redo before restoring
+        float cx = sp.x, cy = sp.y, cz = sp.z, cs = sp.scale, cr = sp.rotation;
+        sp.x = e.x; sp.y = e.y; sp.z = e.z; sp.scale = e.scale; sp.rotation = e.rotation;
+        // Overwrite the entry with what we just replaced (for redo)
+        e = { e.spriteIdx, cx, cy, cz, cs, cr };
+    }
+}
+
+static void RedoPush()
+{
+    if (sUndoCursor >= sUndoCount) return;
+    UndoEntry& e = sUndoStack[sUndoCursor];
+    if (e.spriteIdx >= 0 && e.spriteIdx < sSpriteCount)
+    {
+        FloorSprite& sp = sSprites[e.spriteIdx];
+        float cx = sp.x, cy = sp.y, cz = sp.z, cs = sp.scale, cr = sp.rotation;
+        sp.x = e.x; sp.y = e.y; sp.z = e.z; sp.scale = e.scale; sp.rotation = e.rotation;
+        e = { e.spriteIdx, cx, cy, cz, cs, cr };
+    }
+    sUndoCursor++;
+}
+
 // Viewport image position/scale — updated each frame for grab mode
 static ImVec2 sVPImgPos;
 static float  sVPImgScale = 1.0f;
@@ -1256,10 +1318,15 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         ImGui::Separator();
         ImGui::PushItemWidth(-1);
         ImGui::DragFloat("X##m3d", &sp.x, 1.0f, -kWorldHalf, kWorldHalf);
+        if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         ImGui::DragFloat("Y##m3d", &sp.y, 0.5f, -200.0f, 200.0f);
+        if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         ImGui::DragFloat("Z##m3d", &sp.z, 1.0f, -kWorldHalf, kWorldHalf);
+        if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         ImGui::DragFloat("Scale##m3d", &sp.scale, 0.1f, 0.01f, 100.0f);
+        if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         ImGui::DragFloat("Rotation##m3d", &sp.rotation, 1.0f, 0.0f, 360.0f, "%.0f deg");
+        if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         ImGui::PopItemWidth();
 
         if (ImGui::Button("Delete##meshObjDel"))
@@ -2785,10 +2852,15 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             ImGui::EndCombo();
         }
         ImGui::DragFloat("X##spr", &sp.x, 1.0f, -kWorldHalf, kWorldHalf);
+        if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         ImGui::DragFloat("Y##spr", &sp.y, 0.5f, 0.0f, 200.0f);
+        if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         ImGui::DragFloat("Z##spr", &sp.z, 1.0f, -kWorldHalf, kWorldHalf);
+        if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         ImGui::DragFloat("Scale##spr", &sp.scale, 0.1f, 0.1f, 50.0f);
+        if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         ImGui::DragFloat("Rotation##spr", &sp.rotation, 1.0f, 0.0f, 360.0f, "%.0f deg");
+        if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
 
         // Sprite asset link
         {
@@ -3353,8 +3425,8 @@ void FrameTick(float dt)
         }
         if (ImGui::BeginMenu("Edit"))
         {
-            if (ImGui::MenuItem("Undo", "Ctrl+Z"))  { /* TODO */ }
-            if (ImGui::MenuItem("Redo", "Ctrl+Y"))   { /* TODO */ }
+            if (ImGui::MenuItem("Undo", "Ctrl+Z", false, sUndoCursor > 0))  UndoPop();
+            if (ImGui::MenuItem("Redo", "Ctrl+Y", false, sUndoCursor < sUndoCount))  RedoPush();
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("View"))
@@ -3609,10 +3681,17 @@ void FrameTick(float dt)
 
             bool wantKeys = !ImGui::GetIO().WantCaptureKeyboard || sGrabMode;
 
+            // Ctrl+Z / Ctrl+Y: undo/redo
+            if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z))
+                UndoPop();
+            if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y))
+                RedoPush();
+
             // G key: enter grab mode (Blender-style translate)
             if (wantKeys && ImGui::IsKeyPressed(ImGuiKey_G) && !sGrabMode && !sScaleMode
                 && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
             {
+                UndoPush(sSelectedSprite, sSprites[sSelectedSprite]);
                 sGrabMode = true;
                 sGrabAxis = 0;
                 sGrabOrigX = sSprites[sSelectedSprite].x;
@@ -3701,6 +3780,7 @@ void FrameTick(float dt)
             if (wantKeys && ImGui::IsKeyPressed(ImGuiKey_S) && !sGrabMode && !sScaleMode
                 && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
             {
+                UndoPush(sSelectedSprite, sSprites[sSelectedSprite]);
                 sScaleMode = true;
                 sScaleOrig = sSprites[sSelectedSprite].scale;
                 sScaleMouseStartY = ImGui::GetMousePos().y;
@@ -3728,12 +3808,19 @@ void FrameTick(float dt)
             {
                 if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))
                 {
+                    if (!sRDragUndoPushed)
+                    {
+                        UndoPush(sSelectedSprite, sSprites[sSelectedSprite]);
+                        sRDragUndoPushed = true;
+                    }
                     float dragY = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).y;
                     ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
                     sSprites[sSelectedSprite].scale = std::clamp(
                         sSprites[sSelectedSprite].scale - dragY * 0.1f, 0.1f, 50.0f);
                 }
             }
+            if (!ImGui::IsKeyDown(ImGuiKey_R) || !ImGui::IsMouseDown(ImGuiMouseButton_Left))
+                sRDragUndoPushed = false;
 
             // Delete selected sprite
             if (ImGui::IsKeyPressed(ImGuiKey_Delete) && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
@@ -4361,6 +4448,19 @@ void Render3DViewport()
             glRotatef(fs.rotation, 0, 1, 0);
             glScalef(fs.scale, fs.scale, fs.scale);
 
+            // Backface culling matching mesh settings
+            if (ma.cullMode == CullMode::Back)
+            {
+                glEnable(GL_CULL_FACE);
+                glCullFace(GL_FRONT); // OBJ winding is CW in our pipeline, GL default is CCW front
+            }
+            else if (ma.cullMode == CullMode::Front)
+            {
+                glEnable(GL_CULL_FACE);
+                glCullFace(GL_BACK);
+            }
+            // CullMode::None — no culling
+
             bool useTex = ma.textured && ma.glTexID != 0;
             if (useTex)
             {
@@ -4427,6 +4527,7 @@ void Render3DViewport()
                 glVertex3f(x0,y0,z1); glVertex3f(x0,y1,z1);
                 glEnd();
             }
+            glDisable(GL_CULL_FACE);
             glPopMatrix();
             continue;
         }
