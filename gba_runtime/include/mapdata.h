@@ -6722,12 +6722,58 @@ static const int afn_asset_desc[][5] = {
     { 0, 1, 1, 8, 1 },
 };
 
-#define AFN_SPRITE_COUNT 2
+#define AFN_SPRITE_COUNT 3
 
-static const int afn_sprite_data[][9] = {
-    // { x_fixed, y_fixed, z_fixed, palIdx, assetIdx, scale_8_8, spriteType, rotation_brad, animEnabled }
-    { 32768, 0, 30848, 1, 0, 102, 1, 0, 1 },
-    { 32768, 0, 24063, 1, 1, 102, 2, 32768, 1 },
+static const int afn_sprite_data[][10] = {
+    // { x_fixed, y_fixed, z_fixed, palIdx, assetIdx, scale_8_8, spriteType, rotation_brad, animEnabled, meshIdx }
+    { 32768, 0, 30848, 1, 0, 102, 1, 0, 1, -1 },
+    { 32768, 0, 24063, 1, 1, 102, 2, 32768, 1, -1 },
+    { 31291, 288, 22536, 3, -1, 1459, 6, 0, 1, 0 },
 };
+#define AFN_MESH_COUNT 1
+
+#define AFN_MESH_PAL_BASE 224
+
+static const s16 afn_mesh0_verts[108] = {
+    -64, 64, 64, -64, -64, -64, -64, -64, 64, -64, 64, -64, 
+    64, -64, -64, -64, -64, -64, 64, 64, -64, 64, -64, 64, 
+    64, -64, -64, 64, 64, 64, -64, -64, 64, 64, -64, 64, 
+    64, -64, -64, -64, -64, 64, -64, -64, -64, -64, 64, -64, 
+    64, 64, 64, 64, 64, -64, -64, 64, 64, -64, 64, -64, 
+    -64, -64, -64, -64, 64, -64, 64, 64, -64, 64, -64, -64, 
+    64, 64, -64, 64, 64, 64, 64, -64, 64, 64, 64, 64, 
+    -64, 64, 64, -64, -64, 64, 64, -64, -64, 64, -64, 64, 
+    -64, -64, 64, -64, 64, -64, -64, 64, 64, 64, 64, 64
+};
+static const s8 afn_mesh0_norms[108] = {
+    -127, 0, 0, -127, 0, 0, -127, 0, 0, 0, 0, -127, 
+    0, 0, -127, 0, 0, -127, 127, 0, 0, 127, 0, 0, 
+    127, 0, 0, 0, 0, 127, 0, 0, 127, 0, 0, 127, 
+    0, -127, 0, 0, -127, 0, 0, -127, 0, 0, 127, 0, 
+    0, 127, 0, 0, 127, 0, -127, 0, 0, -127, 0, 0, 
+    -127, 0, 0, 0, 0, -127, 0, 0, -127, 0, 0, -127, 
+    127, 0, 0, 127, 0, 0, 127, 0, 0, 0, 0, 127, 
+    0, 0, 127, 0, 0, 127, 0, -127, 0, 0, -127, 0, 
+    0, -127, 0, 0, 127, 0, 0, 127, 0, 0, 127, 0
+};
+static const u16 afn_mesh0_idx[36] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 
+    12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 
+    24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35
+};
+
+static const int afn_mesh_desc[][3] = {
+    { 36, 36, 0x7C1F },
+};
+
+static const s16* const afn_mesh_vert_ptrs[] = { afn_mesh0_verts };
+static const s8* const afn_mesh_norm_ptrs[] = { afn_mesh0_norms };
+static const u16* const afn_mesh_idx_ptrs[] = { afn_mesh0_idx };
+
+static const u16 afn_mesh_palette[8] = {
+    // Mesh 0
+    0x0C03, 0x1C07, 0x2C0B, 0x3C0F, 0x4C13, 0x5C17, 0x6C1B, 0x7C1F
+};
+
 
 #endif // MAPDATA_H

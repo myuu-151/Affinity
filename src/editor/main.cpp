@@ -101,6 +101,9 @@ int main(int, char**)
 
         ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
 
+        // Render 3D viewport on top of ImGui (after ImGui draw, before swap)
+        Affinity::Render3DViewport();
+
         glfwSwapBuffers(window);
     }
 

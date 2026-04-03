@@ -248,6 +248,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                             const std::vector<GBASpriteExport>& sprites,
                             const std::vector<GBASpriteAssetExport>& assets,
                             const GBACameraExport& camera,
+                            const std::vector<GBAMeshExport>& meshes,
                             float orbitDist)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
@@ -717,8 +718,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
     if (!sprites.empty())
     {
-        f << "static const int afn_sprite_data[][9] = {\n";
-        f << "    // { x_fixed, y_fixed, z_fixed, palIdx, assetIdx, scale_8_8, spriteType, rotation_brad, animEnabled }\n";
+        f << "static const int afn_sprite_data[][10] = {\n";
+        f << "    // { x_fixed, y_fixed, z_fixed, palIdx, assetIdx, scale_8_8, spriteType, rotation_brad, animEnabled, meshIdx }\n";
         for (size_t i = 0; i < sprites.size(); i++)
         {
             int gx = EditorToGBAFixed(sprites[i].x);
@@ -731,10 +732,128 @@ static bool GenerateMapData(const std::string& runtimeDir,
             // Convert degrees to brad (0-65535): degrees * 65536 / 360
             int rotBrad = (int)(sprites[i].rotation * 65536.0f / 360.0f) & 0xFFFF;
             int animEn = sprites[i].animEnabled ? 1 : 0;
+            int meshIdx2 = sprites[i].meshIdx;
             f << "    { " << gx << ", " << gy << ", " << gz << ", "
-              << pal << ", " << aIdx << ", " << scaleFixed << ", " << sType << ", " << rotBrad << ", " << animEn << " },\n";
+              << pal << ", " << aIdx << ", " << scaleFixed << ", " << sType << ", " << rotBrad << ", " << animEn << ", " << meshIdx2 << " },\n";
         }
         f << "};\n";
+    }
+
+    // ---- Mesh assets ----
+    f << "#define AFN_MESH_COUNT " << (int)meshes.size() << "\n\n";
+
+    if (!meshes.empty())
+    {
+        // Mesh shading palette base
+        f << "#define AFN_MESH_PAL_BASE 224\n\n";
+
+        for (size_t mi = 0; mi < meshes.size(); mi++)
+        {
+            const auto& mesh = meshes[mi];
+            int vc = (int)mesh.positions.size() / 3;
+            int ic = (int)mesh.indices.size();
+
+            // Vertex positions as 8.8 fixed-point (editor scale / 4 for GBA)
+            f << "static const s16 afn_mesh" << mi << "_verts[" << vc * 3 << "] = {";
+            for (int v = 0; v < vc; v++)
+            {
+                if (v % 4 == 0) f << "\n    ";
+                for (int c = 0; c < 3; c++)
+                {
+                    int fixed = (int)(mesh.positions[v * 3 + c] / 4.0f * 256.0f);
+                    f << fixed;
+                    if (v * 3 + c + 1 < vc * 3) f << ", ";
+                }
+            }
+            f << "\n};\n";
+
+            // Vertex normals as 0.7 signed fixed-point (-128 to 127)
+            f << "static const s8 afn_mesh" << mi << "_norms[" << vc * 3 << "] = {";
+            for (int v = 0; v < vc; v++)
+            {
+                if (v % 4 == 0) f << "\n    ";
+                for (int c = 0; c < 3; c++)
+                {
+                    int fixed = (int)(mesh.normals[v * 3 + c] * 127.0f);
+                    if (fixed > 127) fixed = 127;
+                    if (fixed < -128) fixed = -128;
+                    f << fixed;
+                    if (v * 3 + c + 1 < vc * 3) f << ", ";
+                }
+            }
+            f << "\n};\n";
+
+            // Triangle indices
+            f << "static const u16 afn_mesh" << mi << "_idx[" << ic << "] = {";
+            for (int i = 0; i < ic; i++)
+            {
+                if (i % 12 == 0) f << "\n    ";
+                f << mesh.indices[i];
+                if (i + 1 < ic) f << ", ";
+            }
+            f << "\n};\n\n";
+        }
+
+        // Mesh descriptor table: { vertCount, indexCount, colorRGB15 }
+        f << "static const int afn_mesh_desc[][3] = {\n";
+        for (size_t mi = 0; mi < meshes.size(); mi++)
+        {
+            int vc = (int)meshes[mi].positions.size() / 3;
+            int ic = (int)meshes[mi].indices.size();
+            char hex[8];
+            snprintf(hex, sizeof(hex), "0x%04X", meshes[mi].colorRGB15);
+            f << "    { " << vc << ", " << ic << ", " << hex << " },\n";
+        }
+        f << "};\n\n";
+
+        // Pointer arrays for runtime access
+        f << "static const s16* const afn_mesh_vert_ptrs[] = { ";
+        for (size_t mi = 0; mi < meshes.size(); mi++)
+        {
+            f << "afn_mesh" << mi << "_verts";
+            if (mi + 1 < meshes.size()) f << ", ";
+        }
+        f << " };\n";
+
+        f << "static const s8* const afn_mesh_norm_ptrs[] = { ";
+        for (size_t mi = 0; mi < meshes.size(); mi++)
+        {
+            f << "afn_mesh" << mi << "_norms";
+            if (mi + 1 < meshes.size()) f << ", ";
+        }
+        f << " };\n";
+
+        f << "static const u16* const afn_mesh_idx_ptrs[] = { ";
+        for (size_t mi = 0; mi < meshes.size(); mi++)
+        {
+            f << "afn_mesh" << mi << "_idx";
+            if (mi + 1 < meshes.size()) f << ", ";
+        }
+        f << " };\n\n";
+
+        // Mesh shading palette: 8 shades per mesh from dark to base color
+        f << "static const u16 afn_mesh_palette[" << (int)meshes.size() * 8 << "] = {\n";
+        for (size_t mi = 0; mi < meshes.size(); mi++)
+        {
+            unsigned short c = meshes[mi].colorRGB15;
+            unsigned r = c & 0x1F;
+            unsigned g = (c >> 5) & 0x1F;
+            unsigned b = (c >> 10) & 0x1F;
+            f << "    // Mesh " << mi << "\n    ";
+            for (int s = 0; s < 8; s++)
+            {
+                float t = (float)(s + 1) / 8.0f;
+                unsigned sr = (unsigned)(r * t);
+                unsigned sg = (unsigned)(g * t);
+                unsigned sb = (unsigned)(b * t);
+                char hex[8];
+                snprintf(hex, sizeof(hex), "0x%04X", (unsigned short)(sr | (sg << 5) | (sb << 10)));
+                f << hex;
+                if (s < 7 || mi + 1 < meshes.size()) f << ", ";
+            }
+            f << "\n";
+        }
+        f << "};\n\n";
     }
 
     f << "\n#endif // MAPDATA_H\n";
@@ -747,6 +866,7 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBASpriteExport>& sprites,
                 const std::vector<GBASpriteAssetExport>& assets,
                 const GBACameraExport& camera,
+                const std::vector<GBAMeshExport>& meshes,
                 float orbitDist,
                 std::string& errorMsg)
 {
@@ -763,7 +883,7 @@ bool PackageGBA(const std::string& runtimeDir,
     }
 
     // --- Step 1: Generate mapdata.h with sprite/camera/asset/player data ---
-    if (!GenerateMapData(runtimeDir, sprites, assets, camera, orbitDist))
+    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist))
     {
         errorMsg = "Failed to write mapdata.h";
         return false;

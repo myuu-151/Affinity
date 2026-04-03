@@ -18,6 +18,7 @@ struct GBASpriteExport
     int   animIdx;      // default animation index
     int   spriteType;   // SpriteType enum (0=Prop, 1=Player, ...)
     bool  animEnabled;  // false = static, no animation cycling
+    int   meshIdx = -1; // mesh asset index (-1 = none)
 };
 
 // Player direction sprite for GBA export (RGBA8 image)
@@ -83,6 +84,15 @@ struct GBACameraExport
     float sprintEaseOut = 12.0f;
 };
 
+// Mesh asset for GBA export
+struct GBAMeshExport
+{
+    std::vector<float> positions; // px, py, pz per vertex (flat)
+    std::vector<float> normals;   // nx, ny, nz per vertex (flat)
+    std::vector<uint32_t> indices;
+    uint16_t colorRGB15;          // base color for shading
+};
+
 // Package the current map into a .gba ROM.
 // runtimeDir: path to gba_runtime/ directory
 // outputPath: where to write the final .gba
@@ -92,6 +102,7 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBASpriteExport>& sprites,
                 const std::vector<GBASpriteAssetExport>& assets,
                 const GBACameraExport& camera,
+                const std::vector<GBAMeshExport>& meshes,
                 float orbitDist,
                 std::string& errorMsg);
 

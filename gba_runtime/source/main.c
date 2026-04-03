@@ -64,10 +64,15 @@ typedef struct {
     u16   rotation;  // world-space facing angle (brad, 0-65535)
     u8    animEnabled; // 0 = static, 1 = animate
     u8    spriteType;  // 0=Prop, 1=Player, 2=Enemy, etc.
+    s16   meshIdx;     // index into mesh data (-1 = no mesh, use OAM sprite)
 } FloorSpriteGBA;
 
 static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
 static int g_spriteCount = 0;
+
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+static int g_page = 0;
+#endif
 
 // Sprite projection result for sorting
 typedef struct {
@@ -315,6 +320,7 @@ static void init_demo_sprites(void)
     g_sprites[0].palIdx = 1;
     g_sprites[0].assetIdx = -1;
     g_sprites[0].scale = 256;
+    g_sprites[0].meshIdx = -1;
 
     g_sprites[1].x = 96 << 8;
     g_sprites[1].y = 10 << 8;
@@ -322,6 +328,7 @@ static void init_demo_sprites(void)
     g_sprites[1].palIdx = 2;
     g_sprites[1].assetIdx = -1;
     g_sprites[1].scale = 256;
+    g_sprites[1].meshIdx = -1;
 
     g_sprites[2].x = 160 << 8;
     g_sprites[2].y = 0;
@@ -329,6 +336,7 @@ static void init_demo_sprites(void)
     g_sprites[2].palIdx = 3;
     g_sprites[2].assetIdx = -1;
     g_sprites[2].scale = 256;
+    g_sprites[2].meshIdx = -1;
 
     g_sprites[3].x = 64 << 8;
     g_sprites[3].y = 20 << 8;
@@ -336,6 +344,7 @@ static void init_demo_sprites(void)
     g_sprites[3].palIdx = 4;
     g_sprites[3].assetIdx = -1;
     g_sprites[3].scale = 256;
+    g_sprites[3].meshIdx = -1;
 
     g_spriteCount = 4;
 }
@@ -359,6 +368,11 @@ static void load_editor_sprites(void)
         g_sprites[i].rotation    = (u16)afn_sprite_data[i][7];
         g_sprites[i].animEnabled = (u8)afn_sprite_data[i][8];
         g_sprites[i].spriteType  = (u8)afn_sprite_data[i][6];
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+        g_sprites[i].meshIdx     = (s16)afn_sprite_data[i][9];
+#else
+        g_sprites[i].meshIdx     = -1;
+#endif
     }
     g_spriteCount = count;
 }
@@ -419,19 +433,25 @@ static void update_sprites(void)
 
     for (i = 0; i < g_spriteCount; i++)
     {
-        FIXED dx = g_sprites[i].x - cam_x;
-        FIXED dz = g_sprites[i].z - cam_z;
+        FIXED dx, dz, fovLambda, side, heightDiff;
+        int screenY, screenX, scale;
 
-        FIXED fovLambda = (dx * g_sinf - dz * g_cosf) >> 8;
-        FIXED side      = (dx * g_cosf + dz * g_sinf) >> 8;
+        // Skip mesh sprites (rendered into bitmap, not OAM)
+        if (g_sprites[i].meshIdx >= 0) continue;
+
+        dx = g_sprites[i].x - cam_x;
+        dz = g_sprites[i].z - cam_z;
+
+        fovLambda = (dx * g_sinf - dz * g_cosf) >> 8;
+        side      = (dx * g_cosf + dz * g_sinf) >> 8;
 
         if (fovLambda <= 64) continue;
 
-        FIXED heightDiff = cam_h - g_sprites[i].y;
-        int screenY = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
-        int screenX = 120 + (int)((side * cam_fov) / fovLambda);
+        heightDiff = cam_h - g_sprites[i].y;
+        screenY = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
+        screenX = 120 + (int)((side * cam_fov) / fovLambda);
 
-        int scale = (int)((cam_h * cam_fov) / fovLambda);
+        scale = (int)((cam_h * cam_fov) / fovLambda);
 
         // Use generous culling bounds (64x64 AFF_DBL = 128x128 canvas)
         if (screenY < -128 || screenY > 288) continue;
@@ -686,14 +706,293 @@ static void update_minimap(void)
 }
 
 // ---------------------------------------------------------------------------
+// Software 3D mesh rendering (Mode 4 bitmap)
+// ---------------------------------------------------------------------------
+
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+
+// Write a single pixel to Mode 4 framebuffer (handles 16-bit VRAM access)
+static inline void m4_plot_buf(u16* buf, int x, int y, u8 palIdx)
+{
+    int idx;
+    if (x < 0 || x >= 240 || y < 0 || y >= 160) return;
+    idx = y * 120 + (x >> 1);
+    if (x & 1)
+        buf[idx] = (buf[idx] & 0x00FF) | ((u16)palIdx << 8);
+    else
+        buf[idx] = (buf[idx] & 0xFF00) | palIdx;
+}
+
+// Software render Mode 7 floor into bitmap buffer
+static void render_floor_sw(u16* buf)
+{
+    int y, x;
+    // Sky fill (palette index 0 = sky blue)
+    u16 skyPair = 0; // both bytes = palette 0
+    for (y = 0; y < m7_horizon && y < 160; y++)
+    {
+        u16* row = buf + y * 120;
+        for (x = 0; x < 120; x++)
+            row[x] = skyPair;
+    }
+
+    // Floor scanlines
+    for (y = (m7_horizon < 0 ? 0 : m7_horizon); y < 160; y++)
+    {
+        FIXED lam, lcf, lsf, wx, wz;
+        u16* row;
+        int dy = y - m7_horizon;
+        if (dy <= 0) continue;
+
+        lam = (cam_h * lu_div(dy)) >> 12;
+        lcf = (lam * g_cosf) >> 8;
+        lsf = (lam * g_sinf) >> 8;
+
+        wx = cam_x + (-120 * lcf) + (cam_fov * lsf);
+        wz = cam_z + (-120 * lsf) - (cam_fov * lcf);
+
+        row = buf + y * 120;
+        for (x = 0; x < 120; x++)
+        {
+            int cx0, cx1;
+            u8 p0, p1;
+            // Sample two pixels
+            cx0 = ((wx >> 13) ^ (wz >> 13)) & 1;
+            p0 = cx0 ? 2 : 1;
+            wx += lcf; wz += lsf;
+
+            cx1 = ((wx >> 13) ^ (wz >> 13)) & 1;
+            p1 = cx1 ? 2 : 1;
+            wx += lcf; wz += lsf;
+
+            row[x] = p0 | (p1 << 8);
+        }
+    }
+}
+
+// Rasterize a flat-shaded triangle into Mode 4 bitmap
+static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx)
+{
+    int tmp;
+    int totalH, iy0, iy2, y;
+    // Sort by y
+    if (y0 > y1) { tmp=x0; x0=x1; x1=tmp; tmp=y0; y0=y1; y1=tmp; }
+    if (y0 > y2) { tmp=x0; x0=x2; x2=tmp; tmp=y0; y0=y2; y2=tmp; }
+    if (y1 > y2) { tmp=x1; x1=x2; x2=tmp; tmp=y1; y1=y2; y2=tmp; }
+
+    totalH = y2 - y0;
+    if (totalH <= 0) return;
+
+    iy0 = y0 < 0 ? 0 : y0;
+    iy2 = y2 > 159 ? 159 : y2;
+
+    for (y = iy0; y <= iy2; y++)
+    {
+        int t_num = y - y0;
+        int xLong = x0 + (x2 - x0) * t_num / totalH;
+        int xShort;
+        int left, right;
+        u16* row;
+        int lx, rx;
+        u16 pair;
+
+        if (y < y1)
+        {
+            int segH = y1 - y0;
+            xShort = (segH > 0) ? x0 + (x1 - x0) * (y - y0) / segH : x0;
+        }
+        else
+        {
+            int segH = y2 - y1;
+            xShort = (segH > 0) ? x1 + (x2 - x1) * (y - y1) / segH : x1;
+        }
+
+        left = xLong < xShort ? xLong : xShort;
+        right = xLong > xShort ? xLong : xShort;
+        if (left < 0) left = 0;
+        if (right > 239) right = 239;
+        if (left > right) continue;
+
+        row = buf + y * 120;
+
+        // Fill aligned pairs
+        // Handle odd left pixel
+        lx = left;
+        if ((lx & 1) && lx <= right)
+        {
+            int idx = lx >> 1;
+            row[idx] = (row[idx] & 0x00FF) | ((u16)palIdx << 8);
+            lx++;
+        }
+        // Handle odd right pixel
+        rx = right;
+        if (!(rx & 1) && rx >= lx)
+        {
+            int idx = rx >> 1;
+            row[idx] = (row[idx] & 0xFF00) | palIdx;
+            rx--;
+        }
+        // Fill middle as u16 pairs
+        pair = palIdx | ((u16)palIdx << 8);
+        {
+            int wx;
+            for (wx = lx; wx <= rx; wx += 2)
+                row[wx >> 1] = pair;
+        }
+    }
+}
+
+// Render all mesh sprites into the bitmap
+static void render_meshes_sw(u16* buf)
+{
+    int i;
+    for (i = 0; i < g_spriteCount; i++)
+    {
+        int mi, vertCount, idxCount, v, t;
+        const s16* verts;
+        const s8* norms;
+        const u16* indices;
+        FIXED cosR, sinR, sprScale;
+        int sx[64], sy[64];
+        u8 vis[64];
+
+        if (g_sprites[i].meshIdx < 0 || g_sprites[i].meshIdx >= AFN_MESH_COUNT)
+            continue;
+
+        mi = g_sprites[i].meshIdx;
+        verts = afn_mesh_vert_ptrs[mi];
+        norms = afn_mesh_norm_ptrs[mi];
+        indices = afn_mesh_idx_ptrs[mi];
+        vertCount = afn_mesh_desc[mi][0];
+        idxCount = afn_mesh_desc[mi][1];
+
+        // Sprite transform
+        cosR = lu_cos(g_sprites[i].rotation) >> 4;
+        sinR = lu_sin(g_sprites[i].rotation) >> 4;
+        sprScale = g_sprites[i].scale;
+        if (sprScale <= 0) sprScale = 256;
+
+        if (vertCount > 64) vertCount = 64;
+
+        for (v = 0; v < vertCount; v++)
+        {
+            // Local vertex (8.8 fixed)
+            FIXED vx = verts[v * 3 + 0];
+            FIXED vy = verts[v * 3 + 1];
+            FIXED vz = verts[v * 3 + 2];
+            FIXED rx, ry, rz, wx, wy, wz, dx, dz, fovLambda, heightDiff, side;
+
+            // Scale (8.8 * 8.8 >> 8 = 8.8)
+            vx = (vx * sprScale) >> 8;
+            vy = (vy * sprScale) >> 8;
+            vz = (vz * sprScale) >> 8;
+
+            // Rotate around Y axis
+            rx = (vx * cosR + vz * sinR) >> 8;
+            ry = vy;
+            rz = (-vx * sinR + vz * cosR) >> 8;
+
+            // World position
+            wx = g_sprites[i].x + rx;
+            wy = g_sprites[i].y + ry;
+            wz = g_sprites[i].z + rz;
+
+            // Mode 7 projection
+            dx = wx - cam_x;
+            dz = wz - cam_z;
+            fovLambda = (dx * g_sinf - dz * g_cosf) >> 8;
+
+            if (fovLambda <= 64) { vis[v] = 0; continue; }
+
+            heightDiff = cam_h - wy;
+            sy[v] = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
+            side = (dx * g_cosf + dz * g_sinf) >> 8;
+            sx[v] = 120 + (int)((side * cam_fov) / fovLambda);
+            vis[v] = 1;
+        }
+
+        // Draw triangles with flat shading
+        for (t = 0; t < idxCount / 3; t++)
+        {
+            int i0 = indices[t * 3 + 0];
+            int i1 = indices[t * 3 + 1];
+            int i2 = indices[t * 3 + 2];
+            int nx, ny, nz, rnx, rny, rnz, dot, shade;
+            u8 palIdx;
+
+            if (i0 >= vertCount || i1 >= vertCount || i2 >= vertCount) continue;
+            if (!vis[i0] || !vis[i1] || !vis[i2]) continue;
+
+            // Face normal (average vertex normals, 0.7 fixed)
+            nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
+            ny = ((int)norms[i0*3+1] + norms[i1*3+1] + norms[i2*3+1]) / 3;
+            nz = ((int)norms[i0*3+2] + norms[i1*3+2] + norms[i2*3+2]) / 3;
+
+            // Rotate normal by sprite rotation
+            rnx = (nx * (cosR >> 4) + nz * (sinR >> 4)) >> 4;
+            rny = ny;
+            rnz = (-nx * (sinR >> 4) + nz * (cosR >> 4)) >> 4;
+
+            // Dot with light direction (0.3, -0.8, 0.5) as fixed ~ (38, -102, 64) in 0.7
+            dot = -(rnx * 38 + rny * (-102) + rnz * 64) >> 7;
+            shade = (dot >> 4) + 3;
+            if (shade < 0) shade = 0;
+            if (shade > 7) shade = 7;
+
+            palIdx = AFN_MESH_PAL_BASE + mi * 8 + shade;
+
+            rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+        }
+    }
+}
+
+// Draw minimap background into bitmap (since BG0 not available in Mode 4)
+static void render_minimap_bg_sw(u16* buf)
+{
+    int ty, tx;
+    // Draw 32x32 minimap background at (4, 124)
+    for (ty = 0; ty < 32; ty++)
+    {
+        int py = 124 + ty;
+        if (py >= 160) break;
+        for (tx = 0; tx < 32; tx++)
+        {
+            int px = 4 + tx;
+            // Grid lines every 8 pixels
+            u8 col = ((tx & 7) == 0 || (ty & 7) == 0) ? 4 : 3;
+            m4_plot_buf(buf, px, py, col);
+        }
+    }
+}
+
+#endif /* AFN_MESH_COUNT > 0 */
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 int main(void)
 {
     // --- Video setup ---
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+    REG_DISPCNT = DCNT_MODE4 | DCNT_BG2 | DCNT_OBJ | DCNT_OBJ_1D;
+    // Set up BG palette for bitmap rendering
+    pal_bg_mem[0] = RGB15(10, 16, 24);  // sky
+    pal_bg_mem[1] = RGB15(4, 10, 4);    // checker dark
+    pal_bg_mem[2] = RGB15(8, 18, 8);    // checker light
+    pal_bg_mem[3] = RGB15(2, 4, 2);     // minimap bg
+    pal_bg_mem[4] = RGB15(5, 10, 5);    // minimap grid
+    // Load mesh shading palette
+    {
+        int k;
+        for (k = 0; k < AFN_MESH_COUNT * 8; k++)
+            pal_bg_mem[AFN_MESH_PAL_BASE + k] = afn_mesh_palette[k];
+    }
+#else
     REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
+#endif
 
+#if !defined(AFN_MESH_COUNT) || AFN_MESH_COUNT == 0
     REG_BG2CNT = BG_CBB(2) | BG_SBB(28) | BG_AFF_64x64 | BG_8BPP | BG_PRIO(2);
 
     REG_BG2PA = 0x0100;
@@ -709,6 +1008,7 @@ int main(void)
 #else
     load_checkerboard();
 #endif
+#endif /* !AFN_MESH_COUNT */
 
     // --- OBJ sprite setup ---
     init_obj_sprites();
@@ -726,7 +1026,9 @@ int main(void)
 #endif
 
     // --- Minimap setup ---
+#if !defined(AFN_MESH_COUNT) || AFN_MESH_COUNT == 0
     init_minimap();
+#endif
 
 #if defined(AFFINITY_HAS_SPRITES) && AFN_SPRITE_COUNT > 0
     load_editor_sprites();
@@ -788,13 +1090,30 @@ int main(void)
     // --- Set up HBlank interrupt ---
     irq_init(NULL);
     irq_add(II_VBLANK, NULL);
+#if !defined(AFN_MESH_COUNT) || AFN_MESH_COUNT == 0
     irq_add(II_HBLANK, m7_hbl);
+#endif
 
     // --- Main loop ---
     while (1)
     {
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+        // Software render to back buffer
+        {
+            u16* backbuf = g_page ? (u16*)0x06000000 : (u16*)0x0600A000;
+            render_floor_sw(backbuf);
+            render_meshes_sw(backbuf);
+            render_minimap_bg_sw(backbuf);
+        }
+#endif
         VBlankIntrWait();
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+        // Flip page
+        g_page ^= 1;
+        REG_DISPCNT = DCNT_MODE4 | DCNT_BG2 | DCNT_OBJ | DCNT_OBJ_1D | (g_page ? DCNT_PAGE : 0);
+#else
         REG_DISPCNT &= ~DCNT_BG2;
+#endif
         key_poll();
 
         if (player_sprite_idx >= 0)

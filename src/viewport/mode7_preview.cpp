@@ -179,6 +179,101 @@ struct SpriteProj
     int   idx;     // index into sprite array
 };
 
+// Draw a filled triangle into the framebuffer (scanline rasterizer)
+static void DrawTriangle(float x0, float y0, float x1, float y1, float x2, float y2,
+                         uint8_t cr, uint8_t cg, uint8_t cb, float fogAlpha)
+{
+    // Sort vertices by Y
+    if (y0 > y1) { std::swap(x0, x1); std::swap(y0, y1); }
+    if (y0 > y2) { std::swap(x0, x2); std::swap(y0, y2); }
+    if (y1 > y2) { std::swap(x1, x2); std::swap(y1, y2); }
+
+    int iy0 = std::max(0, (int)ceilf(y0));
+    int iy2 = std::min(kGBAHeight - 1, (int)floorf(y2));
+
+    float totalH = y2 - y0;
+    if (totalH < 0.5f) return;
+
+    uint8_t fr = (uint8_t)(cr * (1 - fogAlpha) + kSkyCol[0] * fogAlpha);
+    uint8_t fg = (uint8_t)(cg * (1 - fogAlpha) + kSkyCol[1] * fogAlpha);
+    uint8_t fb = (uint8_t)(cb * (1 - fogAlpha) + kSkyCol[2] * fogAlpha);
+
+    for (int y = iy0; y <= iy2; y++)
+    {
+        float t = (y - y0) / totalH;
+        // Long edge: x0 -> x2
+        float xLong = x0 + (x2 - x0) * t;
+        // Short edges
+        float xShort;
+        if ((float)y < y1)
+        {
+            float segH = y1 - y0;
+            if (segH < 0.5f) xShort = x0;
+            else xShort = x0 + (x1 - x0) * ((y - y0) / segH);
+        }
+        else
+        {
+            float segH = y2 - y1;
+            if (segH < 0.5f) xShort = x1;
+            else xShort = x1 + (x2 - x1) * ((y - y1) / segH);
+        }
+
+        int left = std::max(0, (int)ceilf(std::min(xLong, xShort)));
+        int right = std::min(kGBAWidth - 1, (int)floorf(std::max(xLong, xShort)));
+
+        uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
+        for (int x = left; x <= right; x++)
+        {
+            row[x * 3 + 0] = fr;
+            row[x * 3 + 1] = fg;
+            row[x * 3 + 2] = fb;
+        }
+    }
+}
+
+// Draw a wireframe triangle edge
+static void DrawLine(int ax, int ay, int bx, int by,
+                     uint8_t cr, uint8_t cg, uint8_t cb)
+{
+    int dx = abs(bx - ax), dy = abs(by - ay);
+    int sx = (ax < bx) ? 1 : -1;
+    int sy = (ay < by) ? 1 : -1;
+    int err = dx - dy;
+    for (int steps = 0; steps < 1000; steps++)
+    {
+        if (ax >= 0 && ax < kGBAWidth && ay >= 0 && ay < kGBAHeight)
+        {
+            uint8_t* p = sFrameBuf + (ay * kGBAWidth + ax) * 3;
+            p[0] = cr; p[1] = cg; p[2] = cb;
+        }
+        if (ax == bx && ay == by) break;
+        int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; ax += sx; }
+        if (e2 <  dx) { err += dx; ay += sy; }
+    }
+}
+
+// Project a 3D world-space point to Mode 7 screen space
+// Returns false if behind camera
+static bool ProjectPoint(float wx, float wy, float wz,
+                         const Mode7Camera& cam, float cosA, float sinA,
+                         float& sx, float& sy)
+{
+    float dx = wx - cam.x;
+    float dz = wz - cam.z;
+
+    float fovLambda = dx * sinA - dz * cosA;
+    if (fovLambda <= 0.5f) return false;
+
+    float lambda = fovLambda / cam.fov;
+    if (lambda < 0.01f) lambda = 0.01f;
+
+    sy = cam.horizon + (cam.height - wy) / lambda;
+    float sideComponent = dx * cosA + dz * sinA;
+    sx = 120.0f + sideComponent / lambda;
+    return true;
+}
+
 // Draw a small square (camera icon placeholder)
 static void DrawSquare(int cx, int cy, int half, uint8_t cr, uint8_t cg, uint8_t cb, float fogAlpha)
 {
@@ -306,7 +401,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             float animTime, bool playing,
             const PlayerDirImage* playerDirs, float playerOrbitAngle,
             const AssetDirImages* assetDirImages, int assetDirCount,
-            const AssetDirImages* spriteDirImages, int spriteDirCount)
+            const AssetDirImages* spriteDirImages, int spriteDirCount,
+            const MeshAsset* meshAssets, int meshAssetCount)
 {
     float cosA = cosf(-cam.angle);
     float sinA = sinf(-cam.angle);
@@ -524,6 +620,96 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 drewSprite = true;
             }
         }
+        // Render mesh geometry for Mesh-type sprites
+        if (!drewSprite && fs.type == SpriteType::Mesh
+            && fs.meshIdx >= 0 && fs.meshIdx < meshAssetCount && meshAssets)
+        {
+            const MeshAsset& ma = meshAssets[fs.meshIdx];
+            if (!ma.vertices.empty() && !ma.indices.empty())
+            {
+                float meshScale = fs.scale;
+                float rotRad = fs.rotation * 3.14159265f / 180.0f;
+                float cr2 = cosf(rotRad), sr = sinf(rotRad);
+
+                // Project all vertices to screen space
+                int nv = (int)ma.vertices.size();
+                // Use dynamic alloc only for large meshes, stack for small
+                float scrX[256], scrY[256];
+                bool  vis[256];
+                float* pSX = (nv <= 256) ? scrX : new float[nv];
+                float* pSY = (nv <= 256) ? scrY : new float[nv];
+                bool*  pVis = (nv <= 256) ? vis : new bool[nv];
+
+                for (int v = 0; v < nv; v++)
+                {
+                    const MeshVertex& mv = ma.vertices[v];
+                    // Local -> world: rotate around Y axis, scale, translate
+                    float lx = mv.px * meshScale;
+                    float ly = mv.py * meshScale;
+                    float lz = mv.pz * meshScale;
+                    float wx = fs.x + lx * cr2 + lz * sr;
+                    float wy = fs.y + ly;
+                    float wz = fs.z - lx * sr + lz * cr2;
+                    pVis[v] = ProjectPoint(wx, wy, wz, cam, cosA, sinA, pSX[v], pSY[v]);
+                }
+
+                // Simple flat shading: use a directional light
+                float lightDirX = 0.3f, lightDirY = -0.8f, lightDirZ = 0.5f;
+                float ll = sqrtf(lightDirX*lightDirX + lightDirY*lightDirY + lightDirZ*lightDirZ);
+                lightDirX /= ll; lightDirY /= ll; lightDirZ /= ll;
+
+                // Draw filled triangles
+                int ntri = (int)ma.indices.size() / 3;
+                for (int t = 0; t < ntri; t++)
+                {
+                    int i0 = ma.indices[t * 3 + 0];
+                    int i1 = ma.indices[t * 3 + 1];
+                    int i2 = ma.indices[t * 3 + 2];
+                    if (i0 >= nv || i1 >= nv || i2 >= nv) continue;
+                    if (!pVis[i0] && !pVis[i1] && !pVis[i2]) continue;
+                    // At least one vertex visible — draw
+
+                    // Face normal for shading (average vertex normals or compute from positions)
+                    float nx = (ma.vertices[i0].nx + ma.vertices[i1].nx + ma.vertices[i2].nx) / 3.0f;
+                    float ny = (ma.vertices[i0].ny + ma.vertices[i1].ny + ma.vertices[i2].ny) / 3.0f;
+                    float nz = (ma.vertices[i0].nz + ma.vertices[i1].nz + ma.vertices[i2].nz) / 3.0f;
+                    // Rotate normal by sprite rotation
+                    float rnx = nx * cr2 + nz * sr;
+                    float rny = ny;
+                    float rnz = -nx * sr + nz * cr2;
+
+                    float dot = -(rnx * lightDirX + rny * lightDirY + rnz * lightDirZ);
+                    float shade = 0.3f + 0.7f * std::max(0.0f, dot); // ambient + diffuse
+
+                    uint8_t tr = (uint8_t)(cr * shade);
+                    uint8_t tg = (uint8_t)(cg * shade);
+                    uint8_t tb = (uint8_t)(cb * shade);
+
+                    DrawTriangle(pSX[i0], pSY[i0], pSX[i1], pSY[i1], pSX[i2], pSY[i2],
+                                 tr, tg, tb, sp.fog);
+                }
+
+                // Draw wireframe edges on top for definition
+                for (int t = 0; t < ntri; t++)
+                {
+                    int i0 = ma.indices[t * 3 + 0];
+                    int i1 = ma.indices[t * 3 + 1];
+                    int i2 = ma.indices[t * 3 + 2];
+                    if (i0 >= nv || i1 >= nv || i2 >= nv) continue;
+                    if (!pVis[i0] || !pVis[i1] || !pVis[i2]) continue;
+                    uint8_t wr = (uint8_t)(cr * 0.3f);
+                    uint8_t wg = (uint8_t)(cg * 0.3f);
+                    uint8_t wb = (uint8_t)(cb * 0.3f);
+                    DrawLine((int)pSX[i0], (int)pSY[i0], (int)pSX[i1], (int)pSY[i1], wr, wg, wb);
+                    DrawLine((int)pSX[i1], (int)pSY[i1], (int)pSX[i2], (int)pSY[i2], wr, wg, wb);
+                    DrawLine((int)pSX[i2], (int)pSY[i2], (int)pSX[i0], (int)pSY[i0], wr, wg, wb);
+                }
+
+                if (nv > 256) { delete[] pSX; delete[] pSY; delete[] pVis; }
+                drewSprite = true;
+            }
+        }
+
         if (!drewSprite)
             DrawDiamond(sp.screenX, drawCenterY, halfW, halfH, cr, cg, cb, sp.fog);
 

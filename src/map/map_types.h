@@ -130,12 +130,33 @@ enum class SpriteType : int
     NPC,            // friendly/neutral character
     Trigger,        // invisible zone (events, warps, doors)
     Waypoint,       // pathfinding/patrol node
+    Mesh,           // 3D mesh object
     Count
 };
 
 static const char* const kSpriteTypeNames[] = {
-    "Prop", "Player", "Enemy", "NPC", "Trigger", "Waypoint"
+    "Prop", "Player", "Enemy", "NPC", "Trigger", "Waypoint", "Mesh"
 };
+
+// ---- 3D Mesh Asset System ----
+struct MeshVertex
+{
+    float px, py, pz;   // position
+    float nx, ny, nz;   // normal
+    float r, g, b;      // vertex color (default white)
+};
+
+struct MeshAsset
+{
+    std::string name = "Mesh";
+    std::string sourcePath;            // original .obj file path
+    std::vector<MeshVertex> vertices;  // vertex buffer
+    std::vector<uint32_t>   indices;   // triangle index buffer
+    float boundsMin[3] = {};           // AABB min
+    float boundsMax[3] = {};           // AABB max
+};
+
+static constexpr int kMaxMeshAssets = 32;
 
 // A sprite object placed on the Mode 7 floor
 struct FloorSprite
@@ -148,6 +169,7 @@ struct FloorSprite
     SpriteType type = SpriteType::Prop; // object type
     int   spriteId = 0;      // which sprite graphic (legacy)
     int   assetIdx = -1;     // index into sprite asset list (-1 = none)
+    int   meshIdx  = -1;     // index into mesh asset list (-1 = none, used when type==Mesh)
     int   animIdx  = 0;      // which animation to play
     bool  animEnabled = true; // false = static (no animation cycling)
     uint32_t color = 0xFFFF00FF; // tint color (ABGR) — used for editor preview

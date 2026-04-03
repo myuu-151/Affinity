@@ -205,6 +205,25 @@ static std::string sPackageOutputPath;
 static std::string sProjectPath;  // empty = no project loaded
 static bool sProjectDirty = false; // unsaved changes
 
+// Mesh assets
+static std::vector<MeshAsset> sMeshAssets;
+static int sSelectedMesh = -1;
+
+// ---- 3D View state ----
+static float s3DOrbitYaw   = 0.4f;   // radians
+static float s3DOrbitPitch = 0.6f;   // radians (clamped)
+static float s3DOrbitDist  = 400.0f; // distance from target
+static float s3DTargetX    = 0.0f;   // look-at X
+static float s3DTargetY    = 0.0f;   // look-at Y (up)
+static float s3DTargetZ    = 0.0f;   // look-at Z
+static bool  s3DDragging   = false;
+static bool  s3DPanning    = false;
+static ImVec2 s3DDragStart = {};
+static GLuint s3DFloorTex  = 0;
+static bool  s3DRenderNeeded = false; // set true during FrameTick, consumed by Render3DViewport
+static ImVec2 s3DViewPos = {};        // viewport position for GL rendering
+static ImVec2 s3DViewSize = {};       // viewport size for GL rendering
+
 // ---- Win32 file dialogs ----
 #ifdef _WIN32
 static std::string OpenFileDialog(const char* filter, const char* defaultExt)
@@ -269,6 +288,107 @@ static std::string OpenFolderDialog()
 }
 #endif
 
+// ---- OBJ mesh loader ----
+static bool LoadOBJ(const std::string& path, MeshAsset& out)
+{
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) return false;
+
+    struct V3 { float x, y, z; };
+    std::vector<V3> positions;
+    std::vector<V3> normals;
+    std::vector<MeshVertex> verts;
+    std::vector<uint32_t> idxs;
+
+    char line[512];
+    while (fgets(line, sizeof(line), f))
+    {
+        if (line[0] == 'v' && line[1] == ' ')
+        {
+            V3 v;
+            if (sscanf(line + 2, "%f %f %f", &v.x, &v.y, &v.z) == 3)
+                positions.push_back(v);
+        }
+        else if (line[0] == 'v' && line[1] == 'n')
+        {
+            V3 n;
+            if (sscanf(line + 3, "%f %f %f", &n.x, &n.y, &n.z) == 3)
+                normals.push_back(n);
+        }
+        else if (line[0] == 'f' && line[1] == ' ')
+        {
+            // Parse face — supports v, v/vt, v/vt/vn, v//vn
+            int vi[4] = {}, ni[4] = {};
+            int count = 0;
+            char* p = line + 2;
+            while (*p && count < 4)
+            {
+                int v = 0, vt = 0, vn = 0;
+                int nread = 0;
+                if (sscanf(p, "%d/%d/%d%n", &v, &vt, &vn, &nread) >= 3 && nread > 0) {}
+                else if (sscanf(p, "%d//%d%n", &v, &vn, &nread) >= 2 && nread > 0) {}
+                else if (sscanf(p, "%d/%d%n", &v, &vt, &nread) >= 2 && nread > 0) {}
+                else if (sscanf(p, "%d%n", &v, &nread) >= 1 && nread > 0) {}
+                else break;
+                vi[count] = v;
+                ni[count] = vn;
+                count++;
+                p += nread;
+                while (*p == ' ' || *p == '\t') p++;
+            }
+
+            // Triangulate (fan from first vertex)
+            for (int t = 1; t + 1 < count; t++)
+            {
+                int face[3] = { 0, t, t + 1 };
+                for (int fi = 0; fi < 3; fi++)
+                {
+                    int pi = vi[face[fi]] - 1;
+                    int nni = ni[face[fi]] - 1;
+                    MeshVertex mv = {};
+                    if (pi >= 0 && pi < (int)positions.size())
+                    { mv.px = positions[pi].x; mv.py = positions[pi].y; mv.pz = positions[pi].z; }
+                    if (nni >= 0 && nni < (int)normals.size())
+                    { mv.nx = normals[nni].x; mv.ny = normals[nni].y; mv.nz = normals[nni].z; }
+                    mv.r = mv.g = mv.b = 1.0f;
+                    idxs.push_back((uint32_t)verts.size());
+                    verts.push_back(mv);
+                }
+            }
+        }
+    }
+    fclose(f);
+
+    if (verts.empty()) return false;
+
+    out.vertices = std::move(verts);
+    out.indices = std::move(idxs);
+    out.sourcePath = path;
+
+    // Extract filename as name
+    size_t slash = path.find_last_of("/\\");
+    size_t dot = path.find_last_of('.');
+    if (slash != std::string::npos && dot != std::string::npos && dot > slash)
+        out.name = path.substr(slash + 1, dot - slash - 1);
+    else if (dot != std::string::npos)
+        out.name = path.substr(0, dot);
+
+    // Compute AABB
+    out.boundsMin[0] = out.boundsMin[1] = out.boundsMin[2] = 1e30f;
+    out.boundsMax[0] = out.boundsMax[1] = out.boundsMax[2] = -1e30f;
+    for (const auto& v : out.vertices)
+    {
+        if (v.px < out.boundsMin[0]) out.boundsMin[0] = v.px;
+        if (v.py < out.boundsMin[1]) out.boundsMin[1] = v.py;
+        if (v.pz < out.boundsMin[2]) out.boundsMin[2] = v.pz;
+        if (v.px > out.boundsMax[0]) out.boundsMax[0] = v.px;
+        if (v.py > out.boundsMax[1]) out.boundsMax[1] = v.py;
+        if (v.pz > out.boundsMax[2]) out.boundsMax[2] = v.pz;
+    }
+
+    return true;
+}
+
 // ---- Project save/load ----
 static bool SaveProject(const std::string& path)
 {
@@ -308,9 +428,10 @@ static bool SaveProject(const std::string& path)
     for (int i = 0; i < sSpriteCount; i++)
     {
         const FloorSprite& sp = sSprites[i];
-        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d\n",
+        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d\n",
                 sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
-                sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0);
+                sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0,
+                sp.meshIdx);
     }
     fprintf(f, "\n");
 
@@ -366,6 +487,16 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "diranimset_end\n");
         }
         fprintf(f, "asset_end\n");
+    }
+    fprintf(f, "\n");
+
+    // Mesh assets
+    fprintf(f, "[MeshAssets]\n");
+    fprintf(f, "count=%d\n", (int)sMeshAssets.size());
+    for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
+    {
+        const MeshAsset& ma = sMeshAssets[mi];
+        fprintf(f, "mesh=%s|%s\n", ma.name.c_str(), ma.sourcePath.c_str());
     }
     fprintf(f, "\n");
 
@@ -451,12 +582,12 @@ static bool LoadProject(const std::string& path)
             if (sscanf(line, "count=%d", &ival) == 1) { /* just informational */ }
             else if (sSpriteCount < kMaxFloorSprites)
             {
-                int sid, aIdx = -1, anIdx = 0, typeVal = 0, animEn = 1;
+                int sid, aIdx = -1, anIdx = 0, typeVal = 0, animEn = 1, mIdx = -1;
                 float sx, sy, sz, sc;
                 unsigned int col;
-                // Try extended format (with assetIdx, animIdx, type, rotation, animEnabled)
+                // Try extended format (with assetIdx, animIdx, type, rotation, animEnabled, meshIdx)
                 float rot = 0.0f;
-                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn);
+                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx);
                 if (matched >= 6)
                 {
                     FloorSprite& sp = sSprites[sSpriteCount];
@@ -472,6 +603,7 @@ static bool LoadProject(const std::string& path)
                         ? (SpriteType)typeVal : SpriteType::Prop;
                     sp.rotation = (matched >= 10) ? rot : 0.0f;
                     sp.animEnabled = (matched >= 11) ? (animEn != 0) : true;
+                    sp.meshIdx = (matched >= 12) ? mIdx : -1;
                     sp.selected = false;
                     sSpriteCount++;
                 }
@@ -619,6 +751,21 @@ static bool LoadProject(const std::string& path)
                 }
             }
         }
+        else if (strcmp(section, "MeshAssets") == 0)
+        {
+            char mname[256], mpath[512];
+            if (sscanf(line, "mesh=%255[^|]|%511[^\n]", mname, mpath) == 2)
+            {
+                MeshAsset ma;
+                ma.name = mname;
+                ma.sourcePath = mpath;
+                // Reload from source OBJ
+                if (!ma.sourcePath.empty())
+                    LoadOBJ(ma.sourcePath, ma);
+                ma.name = mname; // restore name in case LoadOBJ overwrote it
+                sMeshAssets.push_back(std::move(ma));
+            }
+        }
         else if (strcmp(section, "Palette") == 0)
         {
             int idx;
@@ -656,6 +803,9 @@ static void CloseProject()
     sSelectedAsset = -1;
     sSelectedFrame = 0;
     sSelectedAnim = -1;
+
+    sMeshAssets.clear();
+    sSelectedMesh = -1;
 
     sProjectPath.clear();
     sProjectDirty = false;
@@ -708,6 +858,248 @@ static void DrawColorBox(ImDrawList* dl, ImVec2 pos, ImVec2 size, uint32_t col, 
 
 // Helper: get scaled size based on current UI scale
 static float Scaled(float base) { return base * sUiScale; }
+
+// ---- 3D View rendering ----
+static void Draw3DView(ImVec2 pos, ImVec2 size)
+{
+    // Side panel width (computed early for viewport sizing)
+    float vpPanelW = std::max(Scaled(240), size.x * 0.22f);
+    float vpAreaW = size.x - vpPanelW;
+
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(ImVec2(vpAreaW, size.y));
+    ImGui::Begin("##3DTab", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoBackground);
+
+    // Handle mouse input for orbit/pan/zoom
+    ImVec2 mpos = ImGui::GetMousePos();
+    bool hovered = (mpos.x >= pos.x && mpos.x < pos.x + vpAreaW &&
+                    mpos.y >= pos.y && mpos.y < pos.y + size.y);
+
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::GetIO().WantCaptureKeyboard)
+    {
+        s3DDragging = true;
+        s3DDragStart = mpos;
+    }
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Middle))
+    {
+        s3DPanning = true;
+        s3DDragStart = mpos;
+    }
+    if (s3DDragging)
+    {
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        {
+            float dx = mpos.x - s3DDragStart.x;
+            float dy = mpos.y - s3DDragStart.y;
+            s3DOrbitYaw   -= dx * 0.005f;
+            s3DOrbitPitch -= dy * 0.005f;
+            if (s3DOrbitPitch < 0.05f) s3DOrbitPitch = 0.05f;
+            if (s3DOrbitPitch > 1.5f)  s3DOrbitPitch = 1.5f;
+            s3DDragStart = mpos;
+        }
+        else
+            s3DDragging = false;
+    }
+    if (s3DPanning)
+    {
+        if (ImGui::IsMouseDown(ImGuiMouseButton_Middle))
+        {
+            float dx = mpos.x - s3DDragStart.x;
+            float dy = mpos.y - s3DDragStart.y;
+            // Pan in camera-local right/up
+            float cy = cosf(s3DOrbitYaw), sy = sinf(s3DOrbitYaw);
+            float rightX = cy, rightZ = -sy;
+            float speed = s3DOrbitDist * 0.002f;
+            s3DTargetX -= rightX * dx * speed;
+            s3DTargetZ -= rightZ * dx * speed;
+            s3DTargetY += dy * speed;
+            s3DDragStart = mpos;
+        }
+        else
+            s3DPanning = false;
+    }
+    if (hovered)
+    {
+        float scroll = ImGui::GetIO().MouseWheel;
+        if (scroll != 0.0f)
+        {
+            s3DOrbitDist *= (1.0f - scroll * 0.1f);
+            if (s3DOrbitDist < 10.0f)  s3DOrbitDist = 10.0f;
+            if (s3DOrbitDist > 2000.0f) s3DOrbitDist = 2000.0f;
+        }
+    }
+
+    // Store viewport rect for post-ImGui GL rendering (exclude side panel)
+    s3DRenderNeeded = true;
+    s3DViewPos = pos;
+    s3DViewSize = ImVec2(vpAreaW, size.y);
+
+    // Overlay info text
+    ImGui::SetCursorPos(ImVec2(8, 8));
+    ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.8f, 0.8f), "LMB: Orbit  |  MMB: Pan  |  Scroll: Zoom");
+
+    ImGui::End();
+
+    // ---- 3D Tab side panel ----
+    ImVec2 panelPos(pos.x + vpAreaW, pos.y);
+    ImVec2 panelSize(vpPanelW, size.y);
+    ImGui::SetNextWindowPos(panelPos);
+    ImGui::SetNextWindowSize(panelSize);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
+    ImGui::Begin("##3DPanel", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+
+    ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "3D Objects");
+    ImGui::Separator();
+
+    // Mesh asset library
+    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.7f, 1.0f), "Mesh Assets");
+    float listH = std::min(Scaled(150), size.y * 0.25f);
+    ImGui::BeginChild("##MeshAssetList", ImVec2(0, listH), true);
+    for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
+    {
+        bool sel = (sSelectedMesh == mi);
+        if (ImGui::Selectable(sMeshAssets[mi].name.c_str(), sel))
+            sSelectedMesh = mi;
+    }
+    ImGui::EndChild();
+
+    if (ImGui::Button("Import OBJ...##3d"))
+    {
+#ifdef _WIN32
+        std::string objPath = OpenFileDialog("OBJ Files\0*.obj\0All Files\0*.*\0", "obj");
+        if (!objPath.empty())
+        {
+            MeshAsset ma;
+            if (LoadOBJ(objPath, ma))
+            {
+                sSelectedMesh = (int)sMeshAssets.size();
+                sMeshAssets.push_back(std::move(ma));
+                sProjectDirty = true;
+            }
+        }
+#endif
+    }
+    ImGui::SameLine();
+    if (sSelectedMesh >= 0 && sSelectedMesh < (int)sMeshAssets.size())
+    {
+        if (ImGui::Button("Delete##meshDel"))
+        {
+            // Remove mesh asset and fix up references
+            for (int i = 0; i < sSpriteCount; i++)
+            {
+                if (sSprites[i].meshIdx == sSelectedMesh)
+                    sSprites[i].meshIdx = -1;
+                else if (sSprites[i].meshIdx > sSelectedMesh)
+                    sSprites[i].meshIdx--;
+            }
+            sMeshAssets.erase(sMeshAssets.begin() + sSelectedMesh);
+            sSelectedMesh = -1;
+            sProjectDirty = true;
+        }
+    }
+
+    // Selected mesh info
+    if (sSelectedMesh >= 0 && sSelectedMesh < (int)sMeshAssets.size())
+    {
+        MeshAsset& ma = sMeshAssets[sSelectedMesh];
+        ImGui::Separator();
+        char nameBuf[256];
+        strncpy(nameBuf, ma.name.c_str(), sizeof(nameBuf) - 1);
+        nameBuf[255] = '\0';
+        ImGui::PushItemWidth(-1);
+        if (ImGui::InputText("##meshName", nameBuf, sizeof(nameBuf)))
+            ma.name = nameBuf;
+        ImGui::PopItemWidth();
+        ImGui::Text("Verts: %d  Tris: %d", (int)ma.vertices.size(), (int)ma.indices.size() / 3);
+    }
+
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Place mesh button
+    if (sSelectedMesh >= 0 && sSelectedMesh < (int)sMeshAssets.size())
+    {
+        if (ImGui::Button("Place Mesh##3dplace", ImVec2(-1, 0)))
+        {
+            if (sSpriteCount < kMaxFloorSprites)
+            {
+                FloorSprite& sp = sSprites[sSpriteCount];
+                sp = FloorSprite{}; // reset to defaults
+                sp.type = SpriteType::Mesh;
+                sp.meshIdx = sSelectedMesh;
+                sp.x = s3DTargetX;
+                sp.y = 0.0f;
+                sp.z = s3DTargetZ;
+                sp.color = kSpriteColors[sSpriteCount % kNumSpriteColors];
+                sp.selected = false;
+                sSelectedSprite = sSpriteCount;
+                sSelectedObjType = SelectedObjType::Sprite;
+                sSpriteCount++;
+                sProjectDirty = true;
+            }
+        }
+    }
+    else
+    {
+        ImGui::TextWrapped("Select a mesh asset above, then click Place Mesh.");
+    }
+
+    // Mesh object list
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.7f, 1.0f), "Placed Meshes");
+    ImGui::BeginChild("##MeshObjList", ImVec2(0, 0), true);
+    for (int i = 0; i < sSpriteCount; i++)
+    {
+        if (sSprites[i].type != SpriteType::Mesh) continue;
+        char label[64];
+        const char* mname = (sSprites[i].meshIdx >= 0 && sSprites[i].meshIdx < (int)sMeshAssets.size())
+            ? sMeshAssets[sSprites[i].meshIdx].name.c_str() : "???";
+        snprintf(label, sizeof(label), "%s [%d]##meshobj%d", mname, i, i);
+        bool sel = (sSelectedSprite == i);
+        if (ImGui::Selectable(label, sel))
+        {
+            if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
+                sSprites[sSelectedSprite].selected = false;
+            sSelectedSprite = i;
+            sSelectedObjType = SelectedObjType::Sprite;
+            sSprites[i].selected = true;
+        }
+    }
+    ImGui::EndChild();
+
+    // Properties for selected mesh object
+    if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount && sSprites[sSelectedSprite].type == SpriteType::Mesh)
+    {
+        FloorSprite& sp = sSprites[sSelectedSprite];
+        ImGui::Separator();
+        ImGui::PushItemWidth(-1);
+        ImGui::DragFloat("X##m3d", &sp.x, 1.0f, -kWorldHalf, kWorldHalf);
+        ImGui::DragFloat("Y##m3d", &sp.y, 0.5f, -200.0f, 200.0f);
+        ImGui::DragFloat("Z##m3d", &sp.z, 1.0f, -kWorldHalf, kWorldHalf);
+        ImGui::DragFloat("Scale##m3d", &sp.scale, 0.1f, 0.01f, 100.0f);
+        ImGui::DragFloat("Rotation##m3d", &sp.rotation, 1.0f, 0.0f, 360.0f, "%.0f deg");
+        ImGui::PopItemWidth();
+
+        if (ImGui::Button("Delete##meshObjDel"))
+        {
+            for (int j = sSelectedSprite; j < sSpriteCount - 1; j++)
+                sSprites[j] = sSprites[j + 1];
+            sSpriteCount--;
+            sSelectedSprite = -1;
+            sSelectedObjType = SelectedObjType::None;
+            sProjectDirty = true;
+        }
+    }
+
+    ImGui::End();
+    ImGui::PopStyleColor();
+}
 
 // ---- Tab bar (NEXXT-style top tabs) ----
 static void DrawTabBar()
@@ -2207,6 +2599,47 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                 }
             }
         }
+        // Mesh asset link (only for Mesh type)
+        if (sp.type == SpriteType::Mesh)
+        {
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.8f, 0.7f, 1.0f, 1.0f), "Mesh");
+            const char* meshPreview = (sp.meshIdx >= 0 && sp.meshIdx < (int)sMeshAssets.size())
+                ? sMeshAssets[sp.meshIdx].name.c_str() : "(none)";
+            if (ImGui::BeginCombo("Mesh##meshlink", meshPreview))
+            {
+                if (ImGui::Selectable("(none)", sp.meshIdx < 0))
+                    sp.meshIdx = -1;
+                for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
+                {
+                    bool msel = (sp.meshIdx == mi);
+                    if (ImGui::Selectable(sMeshAssets[mi].name.c_str(), msel))
+                        sp.meshIdx = mi;
+                }
+                ImGui::EndCombo();
+            }
+            if (ImGui::Button("Import OBJ...##mesh"))
+            {
+#ifdef _WIN32
+                std::string objPath = OpenFileDialog("OBJ Files\0*.obj\0All Files\0*.*\0", "obj");
+                if (!objPath.empty())
+                {
+                    MeshAsset ma;
+                    if (LoadOBJ(objPath, ma))
+                    {
+                        sp.meshIdx = (int)sMeshAssets.size();
+                        sMeshAssets.push_back(std::move(ma));
+                    }
+                }
+#endif
+            }
+            if (sp.meshIdx >= 0 && sp.meshIdx < (int)sMeshAssets.size())
+            {
+                const MeshAsset& ma = sMeshAssets[sp.meshIdx];
+                ImGui::Text("Verts: %d  Tris: %d", (int)ma.vertices.size(), (int)ma.indices.size() / 3);
+            }
+        }
+
         ImGui::PopItemWidth();
 
         // Color presets
@@ -2331,7 +2764,7 @@ static void DrawTilemapPanel(ImVec2 pos, ImVec2 size)
         ImVec2(cursor.x + mapCols * cellW, cursor.y + mapRows * cellH),
         0x60FFFFFF);
 
-    // Draw sprites on minimap
+    // Draw sprites on minimap (skip Mesh objects — they're 3D only)
     float mapPixW = mapCols * cellW;
     float mapPixH = mapRows * cellH;
     for (int i = 0; i < sSpriteCount; i++)
@@ -2605,6 +3038,7 @@ static void DrawStatusBar(ImVec2 pos, ImVec2 size)
 void FrameTick(float dt)
 {
     if (!sInitialized) FrameInit();
+    s3DRenderNeeded = false;
 
     // ---- Global hotkeys ----
     if (sEditorMode != EditorMode::Play && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S))
@@ -2739,6 +3173,7 @@ void FrameTick(float dt)
                     se.animIdx = sSprites[i].animIdx;
                     se.animEnabled = sSprites[i].animEnabled;
                     se.spriteType = (int)sSprites[i].type;
+                    se.meshIdx = sSprites[i].meshIdx;
                     // Use asset palette bank if linked, otherwise cycle 1-5
                     if (se.assetIdx >= 0 && se.assetIdx < (int)sSpriteAssets.size())
                         se.palIdx = sSpriteAssets[se.assetIdx].palBank;
@@ -2811,13 +3246,33 @@ void FrameTick(float dt)
                     exportAssets.push_back(ea);
                 }
 
+                // Collect mesh assets for export
+                std::vector<GBAMeshExport> exportMeshes;
+                for (const auto& ma : sMeshAssets)
+                {
+                    GBAMeshExport me;
+                    for (const auto& v : ma.vertices)
+                    {
+                        me.positions.push_back(v.px);
+                        me.positions.push_back(v.py);
+                        me.positions.push_back(v.pz);
+                        me.normals.push_back(v.nx);
+                        me.normals.push_back(v.ny);
+                        me.normals.push_back(v.nz);
+                    }
+                    me.indices = ma.indices;
+                    // Convert sprite color to RGB15 (use magenta as default)
+                    me.colorRGB15 = 0x7C1F; // magenta
+                    exportMeshes.push_back(me);
+                }
+
                 float exportOrbitDist = sOrbitDist;
 
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                             exportOrbitDist]() {
+                             exportMeshes, exportOrbitDist]() {
                     std::string err;
                     bool ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                                         exportOrbitDist, err);
+                                         exportMeshes, exportOrbitDist, err);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
@@ -3135,7 +3590,8 @@ void FrameTick(float dt)
                   assetsPtr, (int)sSpriteAssets.size(), sViewportAnimTime, isPlaying,
                   nullptr, spriteAngle,
                   assetDirImgs.empty() ? nullptr : assetDirImgs.data(), (int)assetDirImgs.size(),
-                  spriteDirImgs.empty() ? nullptr : spriteDirImgs.data(), (int)spriteDirImgs.size());
+                  spriteDirImgs.empty() ? nullptr : spriteDirImgs.data(), (int)spriteDirImgs.size(),
+                  sMeshAssets.empty() ? nullptr : sMeshAssets.data(), (int)sMeshAssets.size());
     Mode7::UploadTexture();
 
     // ---- Layout: NEXXT-style fixed panels ----
@@ -3191,15 +3647,7 @@ void FrameTick(float dt)
     }
     else if (sActiveTab == EditorTab::ThreeD)
     {
-        // 3D tab: placeholder
-        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
-        ImGui::SetNextWindowSize(ImVec2(totalW, bodyH));
-        ImGui::Begin("##3DTab", nullptr,
-            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
-            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
-        ImGui::Text("3D View — coming soon");
-        ImGui::End();
+        Draw3DView(ImVec2(vp->WorkPos.x, bodyY), ImVec2(totalW, bodyH));
     }
     else if (sActiveTab == EditorTab::Sprites)
     {
@@ -3414,6 +3862,281 @@ void FrameTick(float dt)
 const Mode7Camera& GetCamera()
 {
     return sCamera;
+}
+
+void Render3DViewport()
+{
+    if (!s3DRenderNeeded) return;
+    s3DRenderNeeded = false;
+
+    ImVec2 pos = s3DViewPos;
+    ImVec2 size = s3DViewSize;
+
+    float camX = s3DTargetX + s3DOrbitDist * cosf(s3DOrbitPitch) * sinf(s3DOrbitYaw);
+    float camY = s3DTargetY + s3DOrbitDist * sinf(s3DOrbitPitch);
+    float camZ = s3DTargetZ + s3DOrbitDist * cosf(s3DOrbitPitch) * cosf(s3DOrbitYaw);
+
+    // GL viewport coords (Y is bottom-up in GL)
+    float dispH = ImGui::GetIO().DisplaySize.y;
+    int vpX = (int)pos.x;
+    int vpY = (int)(dispH - pos.y - size.y);
+    int vpW = (int)size.x;
+    int vpH = (int)size.y;
+
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+
+    glViewport(vpX, vpY, vpW, vpH);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(vpX, vpY, vpW, vpH);
+    glClearColor(0.08f, 0.08f, 0.10f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // Perspective projection
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    float aspect = (float)vpW / (float)vpH;
+    float fovY = 45.0f;
+    float nearP = 1.0f, farP = 3000.0f;
+    float top = nearP * tanf(fovY * 3.14159265f / 360.0f);
+    float right = top * aspect;
+    glFrustum(-right, right, -top, top, nearP, farP);
+
+    // Look-at
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    {
+        float fx = s3DTargetX - camX;
+        float fy = s3DTargetY - camY;
+        float fz = s3DTargetZ - camZ;
+        float fLen = sqrtf(fx*fx + fy*fy + fz*fz);
+        if (fLen > 0.0f) { fx /= fLen; fy /= fLen; fz /= fLen; }
+        float sx = -fz, sy = 0.0f, sz = fx;
+        float sLen = sqrtf(sx*sx + sz*sz);
+        if (sLen > 0.0f) { sx /= sLen; sz /= sLen; }
+        float ux = sy*fz - sz*fy;
+        float uy = sz*fx - sx*fz;
+        float uz = sx*fy - sy*fx;
+        float m[16] = {
+            sx,  ux, -fx, 0,
+            sy,  uy, -fy, 0,
+            sz,  uz, -fz, 0,
+            0,   0,   0,  1
+        };
+        glLoadMatrixf(m);
+        glTranslatef(-camX, -camY, -camZ);
+    }
+
+    // ---- Ground grid ----
+    glDisable(GL_TEXTURE_2D);
+    glBegin(GL_LINES);
+    for (int i = -8; i <= 8; i++)
+    {
+        float v = i * 64.0f;
+        if (i == 0) glColor3f(0.35f, 0.35f, 0.40f);
+        else        glColor3f(0.18f, 0.18f, 0.22f);
+        glVertex3f(v, 0, -512.0f); glVertex3f(v, 0, 512.0f);
+        glVertex3f(-512.0f, 0, v); glVertex3f(512.0f, 0, v);
+    }
+    glEnd();
+
+    // World bounds
+    glColor3f(0.4f, 0.25f, 0.25f);
+    glBegin(GL_LINE_LOOP);
+    glVertex3f(-512, 0.1f, -512); glVertex3f(512, 0.1f, -512);
+    glVertex3f(512, 0.1f, 512);   glVertex3f(-512, 0.1f, 512);
+    glEnd();
+
+    // Floor quad
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(0.15f, 0.25f, 0.15f, 0.3f);
+    glBegin(GL_QUADS);
+    glVertex3f(-512, -0.1f, -512); glVertex3f(512, -0.1f, -512);
+    glVertex3f(512, -0.1f, 512);   glVertex3f(-512, -0.1f, 512);
+    glEnd();
+    glDisable(GL_BLEND);
+
+    // ---- Sprites ----
+    for (int i = 0; i < sSpriteCount; i++)
+    {
+        const FloorSprite& fs = sSprites[i];
+        float sx = fs.x, sy = fs.y, sz = fs.z;
+
+        // Mesh objects
+        if (fs.type == SpriteType::Mesh && fs.meshIdx >= 0 && fs.meshIdx < (int)sMeshAssets.size())
+        {
+            const MeshAsset& ma = sMeshAssets[fs.meshIdx];
+            glPushMatrix();
+            glTranslatef(sx, sy, sz);
+            glRotatef(fs.rotation, 0, 1, 0);
+            glScalef(fs.scale, fs.scale, fs.scale);
+
+            glEnable(GL_LIGHTING);
+            glEnable(GL_LIGHT0);
+            float lightDir[] = { 0.3f, 1.0f, 0.5f, 0.0f };
+            float lightAmb[] = { 0.3f, 0.3f, 0.35f, 1.0f };
+            float lightDif[] = { 0.7f, 0.7f, 0.65f, 1.0f };
+            glLightfv(GL_LIGHT0, GL_POSITION, lightDir);
+            glLightfv(GL_LIGHT0, GL_AMBIENT, lightAmb);
+            glLightfv(GL_LIGHT0, GL_DIFFUSE, lightDif);
+
+            uint8_t cr = (fs.color >> 0) & 0xFF;
+            uint8_t cg = (fs.color >> 8) & 0xFF;
+            uint8_t cb = (fs.color >> 16) & 0xFF;
+            float matDif[] = { cr/255.0f, cg/255.0f, cb/255.0f, 1.0f };
+            glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, matDif);
+            glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, matDif);
+
+            glBegin(GL_TRIANGLES);
+            for (size_t ti = 0; ti < ma.indices.size(); ti++)
+            {
+                const MeshVertex& v = ma.vertices[ma.indices[ti]];
+                glNormal3f(v.nx, v.ny, v.nz);
+                glVertex3f(v.px, v.py, v.pz);
+            }
+            glEnd();
+
+            glDisable(GL_LIGHTING);
+            glDisable(GL_LIGHT0);
+
+            if (fs.selected)
+            {
+                glColor3f(1, 1, 1);
+                float x0 = ma.boundsMin[0], y0 = ma.boundsMin[1], z0 = ma.boundsMin[2];
+                float x1 = ma.boundsMax[0], y1 = ma.boundsMax[1], z1 = ma.boundsMax[2];
+                glBegin(GL_LINE_LOOP);
+                glVertex3f(x0,y0,z0); glVertex3f(x1,y0,z0); glVertex3f(x1,y0,z1); glVertex3f(x0,y0,z1);
+                glEnd();
+                glBegin(GL_LINE_LOOP);
+                glVertex3f(x0,y1,z0); glVertex3f(x1,y1,z0); glVertex3f(x1,y1,z1); glVertex3f(x0,y1,z1);
+                glEnd();
+                glBegin(GL_LINES);
+                glVertex3f(x0,y0,z0); glVertex3f(x0,y1,z0);
+                glVertex3f(x1,y0,z0); glVertex3f(x1,y1,z0);
+                glVertex3f(x1,y0,z1); glVertex3f(x1,y1,z1);
+                glVertex3f(x0,y0,z1); glVertex3f(x0,y1,z1);
+                glEnd();
+            }
+            glPopMatrix();
+            continue;
+        }
+
+        // Billboard sprites
+        float h = 16.0f * fs.scale;
+        uint8_t cr = (fs.color >> 0) & 0xFF;
+        uint8_t cg = (fs.color >> 8) & 0xFF;
+        uint8_t cb = (fs.color >> 16) & 0xFF;
+        float r = cr / 255.0f, g = cg / 255.0f, b = cb / 255.0f;
+
+        float dx = camX - sx, dz = camZ - sz;
+        float dist = sqrtf(dx*dx + dz*dz);
+        float bx = 0, bz = 1;
+        if (dist > 0.01f) { bx = -dz / dist; bz = dx / dist; }
+        float hw = h * 0.5f;
+
+        if (fs.selected)
+        {
+            glColor3f(1, 1, 1);
+            glLineWidth(2.0f);
+            glBegin(GL_LINE_LOOP);
+            glVertex3f(sx-bx*hw*1.2f, sy, sz-bz*hw*1.2f);
+            glVertex3f(sx+bx*hw*1.2f, sy, sz+bz*hw*1.2f);
+            glVertex3f(sx+bx*hw*1.2f, sy+h*1.1f, sz+bz*hw*1.2f);
+            glVertex3f(sx-bx*hw*1.2f, sy+h*1.1f, sz-bz*hw*1.2f);
+            glEnd();
+            glLineWidth(1.0f);
+        }
+
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glColor4f(r, g, b, 0.85f);
+        glBegin(GL_QUADS);
+        glVertex3f(sx-bx*hw, sy, sz-bz*hw);
+        glVertex3f(sx+bx*hw, sy, sz+bz*hw);
+        glVertex3f(sx+bx*hw, sy+h, sz+bz*hw);
+        glVertex3f(sx-bx*hw, sy+h, sz-bz*hw);
+        glEnd();
+
+        glColor4f(r*0.5f, g*0.5f, b*0.5f, 1.0f);
+        glBegin(GL_LINE_LOOP);
+        glVertex3f(sx-bx*hw, sy, sz-bz*hw);
+        glVertex3f(sx+bx*hw, sy, sz+bz*hw);
+        glVertex3f(sx+bx*hw, sy+h, sz+bz*hw);
+        glVertex3f(sx-bx*hw, sy+h, sz-bz*hw);
+        glEnd();
+        glDisable(GL_BLEND);
+
+        // Ground shadow
+        glEnable(GL_BLEND);
+        glColor4f(0, 0, 0, 0.3f);
+        glBegin(GL_TRIANGLE_FAN);
+        glVertex3f(sx, 0.05f, sz);
+        for (int a = 0; a <= 16; a++)
+        {
+            float ang = a * 6.28318530f / 16.0f;
+            glVertex3f(sx + cosf(ang)*hw*0.8f, 0.05f, sz + sinf(ang)*hw*0.8f);
+        }
+        glEnd();
+        glDisable(GL_BLEND);
+
+        // Type dot
+        if (fs.type == SpriteType::Player) glColor3f(0.2f, 0.8f, 1.0f);
+        else if (fs.type == SpriteType::Enemy) glColor3f(1.0f, 0.2f, 0.2f);
+        else if (fs.type == SpriteType::NPC) glColor3f(0.2f, 1.0f, 0.4f);
+        else if (fs.type == SpriteType::Trigger) glColor3f(1.0f, 1.0f, 0.2f);
+        else glColor3f(0.6f, 0.6f, 0.6f);
+        glPointSize(6.0f);
+        glBegin(GL_POINTS);
+        glVertex3f(sx, sy + h + 2.0f, sz);
+        glEnd();
+    }
+
+    // ---- Camera start object ----
+    {
+        float cx = sCamObj.x, cz = sCamObj.z;
+        float ch = 8.0f;
+        glColor3f(0.4f, 0.7f, 1.0f);
+        glBegin(GL_QUADS);
+        glVertex3f(cx-3,1,cz-3); glVertex3f(cx+3,1,cz-3); glVertex3f(cx+3,ch,cz-3); glVertex3f(cx-3,ch,cz-3);
+        glVertex3f(cx-3,1,cz+3); glVertex3f(cx+3,1,cz+3); glVertex3f(cx+3,ch,cz+3); glVertex3f(cx-3,ch,cz+3);
+        glVertex3f(cx-3,1,cz-3); glVertex3f(cx-3,1,cz+3); glVertex3f(cx-3,ch,cz+3); glVertex3f(cx-3,ch,cz-3);
+        glVertex3f(cx+3,1,cz-3); glVertex3f(cx+3,1,cz+3); glVertex3f(cx+3,ch,cz+3); glVertex3f(cx+3,ch,cz-3);
+        glVertex3f(cx-3,ch,cz-3); glVertex3f(cx+3,ch,cz-3); glVertex3f(cx+3,ch,cz+3); glVertex3f(cx-3,ch,cz+3);
+        glEnd();
+
+        float dirLen = 15.0f;
+        float ax = cx + sinf(sCamObj.angle) * dirLen;
+        float az = cz - cosf(sCamObj.angle) * dirLen;
+        glColor3f(1.0f, 0.9f, 0.3f);
+        glLineWidth(2.0f);
+        glBegin(GL_LINES);
+        glVertex3f(cx, ch*0.5f, cz); glVertex3f(ax, ch*0.5f, az);
+        glEnd();
+        glLineWidth(1.0f);
+    }
+
+    // ---- Origin axes ----
+    glLineWidth(2.0f);
+    glBegin(GL_LINES);
+    glColor3f(1,0,0); glVertex3f(0,0.2f,0); glVertex3f(30,0.2f,0);
+    glColor3f(0,1,0); glVertex3f(0,0.2f,0); glVertex3f(0,30.2f,0);
+    glColor3f(0,0,1); glVertex3f(0,0.2f,0); glVertex3f(0,0.2f,30);
+    glEnd();
+    glLineWidth(1.0f);
+
+    // Restore
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+    glPopAttrib();
 }
 
 } // namespace Affinity
