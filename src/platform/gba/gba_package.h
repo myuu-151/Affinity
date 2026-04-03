@@ -91,6 +91,7 @@ struct GBAMeshExport
     std::vector<float> normals;   // nx, ny, nz per vertex (flat)
     std::vector<uint32_t> indices;
     uint16_t colorRGB15;          // base color for shading
+    int cullMode = 0;             // 0=Back, 1=Front, 2=None
 };
 
 // Package the current map into a .gba ROM.

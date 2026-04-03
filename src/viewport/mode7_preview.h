@@ -49,6 +49,10 @@ const unsigned char* GetFrameBuffer();
 // Get the OpenGL texture ID (created/updated each frame)
 unsigned int GetTexture();
 
+// Draw an axis guide line through a sprite's position in the framebuffer
+// axis: 'X', 'Y', or 'Z'
+void DrawAxisGuide(const Mode7Camera& cam, float spriteX, float spriteY, float spriteZ, char axis);
+
 // Update the GL texture from the frame buffer
 void UploadTexture();
 

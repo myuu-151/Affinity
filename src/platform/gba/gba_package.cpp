@@ -794,15 +794,16 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "\n};\n\n";
         }
 
-        // Mesh descriptor table: { vertCount, indexCount, colorRGB15 }
-        f << "static const int afn_mesh_desc[][3] = {\n";
+        // Mesh descriptor table: { vertCount, indexCount, colorRGB15, cullMode }
+        // cullMode: 0=Back, 1=Front, 2=None
+        f << "static const int afn_mesh_desc[][4] = {\n";
         for (size_t mi = 0; mi < meshes.size(); mi++)
         {
             int vc = (int)meshes[mi].positions.size() / 3;
             int ic = (int)meshes[mi].indices.size();
             char hex[8];
             snprintf(hex, sizeof(hex), "0x%04X", meshes[mi].colorRGB15);
-            f << "    { " << vc << ", " << ic << ", " << hex << " },\n";
+            f << "    { " << vc << ", " << ic << ", " << hex << ", " << meshes[mi].cullMode << " },\n";
         }
         f << "};\n\n";
 

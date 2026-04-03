@@ -422,54 +422,57 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         }
     }
 
-    // --- Draw ground grid at origin ---
+    // --- Draw ground grid at origin (wireframe lines) ---
     {
         static const float kGridSpacing = 32.0f;
         static const int kGridLines = 17; // -256 to +256 in steps of 32
         static const float kGridHalf = 256.0f;
+        static const int kSegments = 32;  // segments per grid line
 
         for (int axis = 0; axis < 2; axis++)
         {
             for (int i = 0; i < kGridLines; i++)
             {
                 float offset = -kGridHalf + i * kGridSpacing;
-                // Draw line as a series of points
-                for (int s = 0; s < 64; s++)
+                bool isCenter = (i == kGridLines / 2);
+                uint8_t gr = isCenter ? 180 : 60;
+                uint8_t gg = isCenter ? 180 : 70;
+                uint8_t gb = isCenter ? 180 : 60;
+
+                int prevSX = 0, prevSY = 0;
+                bool prevVis = false;
+
+                for (int s = 0; s <= kSegments; s++)
                 {
-                    float t = -kGridHalf + s * (kGridHalf * 2.0f / 63.0f);
+                    float t = -kGridHalf + s * (kGridHalf * 2.0f / kSegments);
                     float wx = axis == 0 ? t : offset;
                     float wz = axis == 0 ? offset : t;
 
-                    float dx = wx - cam.x;
-                    float dz = wz - cam.z;
-                    float fovLambda = dx * sinA - dz * cosA;
-                    if (fovLambda <= 0.5f) continue;
+                    float ddx = wx - cam.x;
+                    float ddz = wz - cam.z;
+                    float fovLambda = ddx * sinA - ddz * cosA;
+                    if (fovLambda <= 0.5f) { prevVis = false; continue; }
                     float lambda = fovLambda / cam.fov;
                     if (lambda < 0.01f) lambda = 0.01f;
 
+                    float fog = lambda / 300.0f;
+                    if (fog > 0.95f) { prevVis = false; continue; }
+
                     int screenY = horizon + (int)(cam.height / lambda);
-                    float side = dx * cosA + dz * sinA;
+                    float side = ddx * cosA + ddz * sinA;
                     int screenX = 120 + (int)(side / lambda);
 
-                    if (screenX < 0 || screenX >= kGBAWidth) continue;
-                    if (screenY < 0 || screenY >= kGBAHeight) continue;
+                    // Fog-blend the color
+                    uint8_t fr = (uint8_t)(gr * (1.0f - fog) + kSkyCol[0] * fog);
+                    uint8_t fg = (uint8_t)(gg * (1.0f - fog) + kSkyCol[1] * fog);
+                    uint8_t fb = (uint8_t)(gb * (1.0f - fog) + kSkyCol[2] * fog);
 
-                    float fog = lambda / 300.0f;
-                    if (fog > 0.95f) continue;
+                    if (prevVis)
+                        DrawLine(prevSX, prevSY, screenX, screenY, fr, fg, fb);
 
-                    // Darker line on axes (X=0 or Z=0)
-                    uint8_t gr, gg, gb;
-                    if (i == kGridLines / 2)
-                    { gr = 180; gg = 180; gb = 180; } // center axis = bright
-                    else
-                    { gr = 60; gg = 70; gb = 60; } // regular grid = dim
-
-                    gr = (uint8_t)(gr * (1.0f - fog) + kSkyCol[0] * fog);
-                    gg = (uint8_t)(gg * (1.0f - fog) + kSkyCol[1] * fog);
-                    gb = (uint8_t)(gb * (1.0f - fog) + kSkyCol[2] * fog);
-
-                    uint8_t* px = sFrameBuf + (screenY * kGBAWidth + screenX) * 3;
-                    px[0] = gr; px[1] = gg; px[2] = gb;
+                    prevSX = screenX;
+                    prevSY = screenY;
+                    prevVis = true;
                 }
             }
         }
@@ -553,6 +556,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
 
         int halfW = std::clamp((int)(8.0f * sp.scale / cam.height * 1.6f * fs.scale), 2, 200);
         int halfH = std::clamp((int)(12.0f * sp.scale / cam.height * 1.6f * fs.scale), 3, 200);
+        int meshSelCX = sp.screenX, meshSelCY = 0;
+        bool hasMeshBounds = false;
 
         // Sprite draws upward from its foot position
         int drawCenterY = sp.screenY - halfH;
@@ -680,7 +685,14 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                     int i2 = ma.indices[t * 3 + 2];
                     if (i0 >= nv || i1 >= nv || i2 >= nv) continue;
                     if (!pVis[i0] && !pVis[i1] && !pVis[i2]) continue;
-                    // At least one vertex visible — draw
+
+                    // Backface culling via screen-space cross product
+                    if (ma.cullMode != CullMode::None) {
+                        float cross = (pSX[i1] - pSX[i0]) * (pSY[i2] - pSY[i0])
+                                    - (pSY[i1] - pSY[i0]) * (pSX[i2] - pSX[i0]);
+                        if (ma.cullMode == CullMode::Back  && cross <= 0.0f) continue;
+                        if (ma.cullMode == CullMode::Front && cross >= 0.0f) continue;
+                    }
 
                     // Face normal for shading (average vertex normals or compute from positions)
                     float nx = (ma.vertices[i0].nx + ma.vertices[i1].nx + ma.vertices[i2].nx) / 3.0f;
@@ -710,12 +722,40 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                     int i2 = ma.indices[t * 3 + 2];
                     if (i0 >= nv || i1 >= nv || i2 >= nv) continue;
                     if (!pVis[i0] || !pVis[i1] || !pVis[i2]) continue;
+
+                    // Match backface culling from fill pass
+                    if (ma.cullMode != CullMode::None) {
+                        float cross = (pSX[i1] - pSX[i0]) * (pSY[i2] - pSY[i0])
+                                    - (pSY[i1] - pSY[i0]) * (pSX[i2] - pSX[i0]);
+                        if (ma.cullMode == CullMode::Back  && cross <= 0.0f) continue;
+                        if (ma.cullMode == CullMode::Front && cross >= 0.0f) continue;
+                    }
                     uint8_t wr = (uint8_t)(cr * 0.3f);
                     uint8_t wg = (uint8_t)(cg * 0.3f);
                     uint8_t wb = (uint8_t)(cb * 0.3f);
                     DrawLine((int)pSX[i0], (int)pSY[i0], (int)pSX[i1], (int)pSY[i1], wr, wg, wb);
                     DrawLine((int)pSX[i1], (int)pSY[i1], (int)pSX[i2], (int)pSY[i2], wr, wg, wb);
                     DrawLine((int)pSX[i2], (int)pSY[i2], (int)pSX[i0], (int)pSY[i0], wr, wg, wb);
+                }
+
+                // Compute screen-space bounding box from projected vertices
+                float minSX = 9999, maxSX = -9999, minSY = 9999, maxSY = -9999;
+                for (int v = 0; v < nv; v++)
+                {
+                    if (!pVis[v]) continue;
+                    if (pSX[v] < minSX) minSX = pSX[v];
+                    if (pSX[v] > maxSX) maxSX = pSX[v];
+                    if (pSY[v] < minSY) minSY = pSY[v];
+                    if (pSY[v] > maxSY) maxSY = pSY[v];
+                }
+                if (maxSX > minSX && maxSY > minSY)
+                {
+                    meshSelCX = (int)((minSX + maxSX) * 0.5f);
+                    meshSelCY = (int)((minSY + maxSY) * 0.5f);
+                    halfW = (int)((maxSX - minSX) * 0.5f) + 2;
+                    halfH = (int)((maxSY - minSY) * 0.5f) + 2;
+                    drawCenterY = meshSelCY;
+                    hasMeshBounds = true;
                 }
 
                 if (nv > 256) { delete[] pSX; delete[] pSY; delete[] pVis; }
@@ -729,14 +769,15 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         // Selection highlight: bright outline
         if (fs.selected)
         {
-            DrawRect(sp.screenX - halfW - 1, drawCenterY - halfH - 1,
+            int selCX = hasMeshBounds ? meshSelCX : sp.screenX;
+            DrawRect(selCX - halfW - 1, drawCenterY - halfH - 1,
                      halfW * 2 + 2, 1, 255, 255, 255);
-            DrawRect(sp.screenX - halfW - 1, drawCenterY + halfH,
+            DrawRect(selCX - halfW - 1, drawCenterY + halfH,
                      halfW * 2 + 2, 1, 255, 255, 255);
         }
 
         // Store for viewport click-to-select
-        sLastProj[sLastProjCount].screenX = sp.screenX;
+        sLastProj[sLastProjCount].screenX = hasMeshBounds ? meshSelCX : sp.screenX;
         sLastProj[sLastProjCount].screenY = drawCenterY;
         sLastProj[sLastProjCount].halfW = halfW;
         sLastProj[sLastProjCount].halfH = halfH;
@@ -790,6 +831,41 @@ const unsigned char* GetFrameBuffer()
 unsigned int GetTexture()
 {
     return sTexture;
+}
+
+void DrawAxisGuide(const Mode7Camera& cam, float spriteX, float spriteY, float spriteZ, char axis)
+{
+    float cosA = cosf(-cam.angle);
+    float sinA = sinf(-cam.angle);
+
+    // Colors: X=red, Y=green, Z=blue
+    uint8_t cr = 0, cg = 0, cb = 0;
+    if (axis == 'X') { cr = 255; cg = 60; cb = 60; }
+    else if (axis == 'Y') { cr = 60; cg = 255; cb = 60; }
+    else if (axis == 'Z') { cr = 60; cg = 60; cb = 255; }
+
+    // Draw a line of sample points along the axis through the sprite's position
+    constexpr float extent = 300.0f;
+    constexpr int steps = 60;
+    float prevSX, prevSY;
+    bool prevVis = false;
+
+    for (int i = 0; i <= steps; i++)
+    {
+        float t = -extent + (2.0f * extent * i) / steps;
+        float wx = spriteX, wy = spriteY, wz = spriteZ;
+        if (axis == 'X') wx += t;
+        else if (axis == 'Y') wy += t;
+        else if (axis == 'Z') wz += t;
+
+        float sx, sy;
+        bool vis = ProjectPoint(wx, wy, wz, cam, cosA, sinA, sx, sy);
+        if (vis && prevVis)
+            DrawLine((int)prevSX, (int)prevSY, (int)sx, (int)sy, cr, cg, cb);
+        prevSX = sx;
+        prevSY = sy;
+        prevVis = vis;
+    }
 }
 
 void UploadTexture()

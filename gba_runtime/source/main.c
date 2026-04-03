@@ -888,7 +888,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
     int i;
     for (i = 0; i < g_spriteCount; i++)
     {
-        int mi, vertCount, idxCount, v, t;
+        int mi, vertCount, idxCount, cullMode, v, t;
         const s16* verts;
         const s8* norms;
         const u16* indices;
@@ -908,6 +908,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         indices = afn_mesh_idx_ptrs[mi];
         vertCount = afn_mesh_desc[mi][0];
         idxCount = afn_mesh_desc[mi][1];
+        cullMode = afn_mesh_desc[mi][3]; // 0=Back, 1=Front, 2=None
 
         // Sprite transform
         cosR = lu_cos(g_sprites[i].rotation) >> 4;
@@ -971,7 +972,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             // Backface culling: screen-space cross product
             cross = (sx[i1] - sx[i0]) * (sy[i2] - sy[i0])
                   - (sy[i1] - sy[i0]) * (sx[i2] - sx[i0]);
-            if (cross <= 0) continue;
+            if (cullMode == 0 && cross <= 0) continue;      // Back: cull back faces
+            else if (cullMode == 1 && cross >= 0) continue;  // Front: cull front faces
+            // cullMode == 2 (None): no culling, draw all
 
             // Average depth for painter's sort (larger = farther)
             triOrder[triCount].triIdx = t;

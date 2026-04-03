@@ -184,6 +184,25 @@ static float sPlayerVelX = 0.0f, sPlayerVelZ = 0.0f; // smoothed player velocity
 static FloorSprite sSavedPlayerSprite; // saved player state before Play
 static int sSavedPlayerIdx = -1;
 static SelectedObjType sSelectedObjType = SelectedObjType::None;
+
+// Active transform axis for viewport gizmo (0=none, 'X','Y','Z','S')
+static char sTransformAxis = 0;
+
+// Grab mode state (G key — Blender-style translate)
+static bool  sGrabMode = false;
+static char  sGrabAxis = 0;        // 0=free XZ, 'X','Y','Z'=constrained
+static float sGrabOrigX, sGrabOrigY, sGrabOrigZ; // for Escape cancel
+static float sGrabStartGbaX, sGrabStartGbaY; // GBA-space mouse pos at grab start
+static float sGrabStartWorldX, sGrabStartWorldZ; // world pos under mouse at grab start
+
+// Scale mode state (S key — mouse Y to scale)
+static bool  sScaleMode = false;
+static float sScaleOrig = 1.0f;
+static float sScaleMouseStartY = 0.0f;
+
+// Viewport image position/scale — updated each frame for grab mode
+static ImVec2 sVPImgPos;
+static float  sVPImgScale = 1.0f;
 static CameraStartObject sCamObj = { 0.0f, 0.0f, 14.0f, 0.0f, 60.0f };
 static float sCamObjEditorScale = 0.05f; // editor-only visual size
 static Mode7Camera sSavedEditorCam;
@@ -496,7 +515,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s\n", ma.name.c_str(), ma.sourcePath.c_str());
+        fprintf(f, "mesh=%s|%s|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode);
     }
     fprintf(f, "\n");
 
@@ -754,11 +773,15 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "MeshAssets") == 0)
         {
             char mname[256], mpath[512];
-            if (sscanf(line, "mesh=%255[^|]|%511[^\n]", mname, mpath) == 2)
+            int mcull = 0;
+            int matched = sscanf(line, "mesh=%255[^|]|%511[^|\n]|%d", mname, mpath, &mcull);
+            if (matched >= 2)
             {
                 MeshAsset ma;
                 ma.name = mname;
                 ma.sourcePath = mpath;
+                if (matched >= 3 && mcull >= 0 && mcull <= 2)
+                    ma.cullMode = (CullMode)mcull;
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -1017,6 +1040,12 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             ma.name = nameBuf;
         ImGui::PopItemWidth();
         ImGui::Text("Verts: %d  Tris: %d", (int)ma.vertices.size(), (int)ma.indices.size() / 3);
+
+        int cullInt = (int)ma.cullMode;
+        ImGui::PushItemWidth(-1);
+        if (ImGui::Combo("##cullMode", &cullInt, kCullModeNames, 3))
+            ma.cullMode = (CullMode)cullInt;
+        ImGui::PopItemWidth();
     }
 
     ImGui::Separator();
@@ -1198,11 +1227,6 @@ static void DrawTabBar()
     }
     ImGui::SameLine();
 
-    // Right-aligned status text
-    float labelW = ImGui::CalcTextSize("Affinity GBA Engine").x + Scaled(20);
-    ImGui::SameLine(ImGui::GetWindowWidth() - labelW);
-    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.55f, 1.0f), "Affinity GBA Engine");
-
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(3);
@@ -1218,7 +1242,8 @@ static void DrawViewport(ImVec2 pos, ImVec2 size)
     ImGui::Begin("##Viewport", nullptr,
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-        ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
     ImVec2 avail = ImGui::GetContentRegionAvail();
     float scale = std::min(avail.x / (float)kGBAWidth, avail.y / (float)kGBAHeight);
@@ -1231,10 +1256,12 @@ static void DrawViewport(ImVec2 pos, ImVec2 size)
     if (offY > 0.0f) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + offY);
 
     ImVec2 imgPos = ImGui::GetCursorScreenPos();
+    sVPImgPos = imgPos;
+    sVPImgScale = scale;
     ImGui::Image((ImTextureID)(intptr_t)Mode7::GetTexture(), ImVec2(w, h));
 
     // Click on sprite in viewport to select it
-    if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsKeyDown(ImGuiKey_R))
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsKeyDown(ImGuiKey_R) && !sGrabMode)
     {
         ImVec2 mouse = ImGui::GetMousePos();
         // Convert mouse pos to GBA framebuffer coordinates
@@ -1258,6 +1285,8 @@ static void DrawViewport(ImVec2 pos, ImVec2 size)
             {
                 sSelectedSprite = proj[i].spriteIdx;
                 sSprites[sSelectedSprite].selected = true;
+                sSelectedObjType = SelectedObjType::Sprite;
+                ImGui::SetWindowFocus(nullptr); // release widget focus so keys work
                 break;
             }
         }
@@ -1323,7 +1352,7 @@ static void DrawViewport(ImVec2 pos, ImVec2 size)
     // Viewport label overlay
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddText(ImVec2(pos.x + 6, pos.y + 4),
-        0x80FFFFFF, "Mode 7 Preview (WASD + Q/E + I/K)");
+        0x80FFFFFF, "Viewport (WASD + Q/E + I/K)");
 
     ImGui::End();
     ImGui::PopStyleColor();
@@ -3320,6 +3349,7 @@ void FrameTick(float dt)
                     me.indices = ma.indices;
                     // Convert sprite color to RGB15 (use magenta as default)
                     me.colorRGB15 = 0x7C1F; // magenta
+                    me.cullMode = (int)ma.cullMode;
                     exportMeshes.push_back(me);
                 }
 
@@ -3362,20 +3392,25 @@ void FrameTick(float dt)
             float moveSpeed = 80.0f * dt;
             float rotSpeed  = 2.0f * dt;
 
-            if (ImGui::IsKeyDown(ImGuiKey_A))
-                sCamera.angle += rotSpeed;
-            if (ImGui::IsKeyDown(ImGuiKey_D))
-                sCamera.angle -= rotSpeed;
+            if (!sGrabMode && !sScaleMode)
+            {
+                if (ImGui::IsKeyDown(ImGuiKey_A))
+                    sCamera.angle += rotSpeed;
+                if (ImGui::IsKeyDown(ImGuiKey_D))
+                    sCamera.angle -= rotSpeed;
 
-            if (ImGui::IsKeyDown(ImGuiKey_W))
-            {
-                sCamera.x -= sinf(sCamera.angle) * moveSpeed;
-                sCamera.z -= cosf(sCamera.angle) * moveSpeed;
-            }
-            if (ImGui::IsKeyDown(ImGuiKey_S))
-            {
-                sCamera.x += sinf(sCamera.angle) * moveSpeed;
-                sCamera.z += cosf(sCamera.angle) * moveSpeed;
+                if (ImGui::IsKeyDown(ImGuiKey_W))
+                {
+                    sCamera.x -= sinf(sCamera.angle) * moveSpeed;
+                    sCamera.z -= cosf(sCamera.angle) * moveSpeed;
+                }
+                bool sKeyUsedForScale = ImGui::IsKeyDown(ImGuiKey_S)
+                    && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount;
+                if (ImGui::IsKeyDown(ImGuiKey_S) && !sKeyUsedForScale)
+                {
+                    sCamera.x += sinf(sCamera.angle) * moveSpeed;
+                    sCamera.z += cosf(sCamera.angle) * moveSpeed;
+                }
             }
 
             if (ImGui::IsKeyDown(ImGuiKey_I))
@@ -3388,12 +3423,124 @@ void FrameTick(float dt)
             if (ImGui::IsKeyDown(ImGuiKey_E))
                 sCamera.height = std::min(256.0f, sCamera.height + 40.0f * dt);
 
-            // G + scroll wheel to adjust selected sprite height
-            if (ImGui::IsKeyDown(ImGuiKey_G) && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
+            // Cancel grab if sprite deselected
+            if (sGrabMode && (sSelectedSprite < 0 || sSelectedSprite >= sSpriteCount))
+                sGrabMode = false;
+
+            bool wantKeys = !ImGui::GetIO().WantCaptureKeyboard || sGrabMode;
+
+            // G key: enter grab mode (Blender-style translate)
+            if (wantKeys && ImGui::IsKeyPressed(ImGuiKey_G) && !sGrabMode && !sScaleMode
+                && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
             {
-                float wheel = ImGui::GetIO().MouseWheel;
-                if (wheel != 0.0f)
-                    sSprites[sSelectedSprite].y = std::max(0.0f, sSprites[sSelectedSprite].y + wheel * 5.0f);
+                sGrabMode = true;
+                sGrabAxis = 0;
+                sGrabOrigX = sSprites[sSelectedSprite].x;
+                sGrabOrigY = sSprites[sSelectedSprite].y;
+                sGrabOrigZ = sSprites[sSelectedSprite].z;
+
+                // Store GBA-space mouse position at grab start
+                ImVec2 mouse = ImGui::GetMousePos();
+                sGrabStartGbaX = (mouse.x - sVPImgPos.x) / sVPImgScale;
+                sGrabStartGbaY = (mouse.y - sVPImgPos.y) / sVPImgScale;
+            }
+
+            // Grab mode active — handle axis constraint, mouse movement, confirm/cancel
+            sTransformAxis = 0;
+            if (sGrabMode && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
+            {
+                FloorSprite& gsp = sSprites[sSelectedSprite];
+
+                // X/Y/Z to constrain axis (resets mouse anchor)
+                auto resetGrabMouse = [&]() {
+                    gsp.x = sGrabOrigX; gsp.y = sGrabOrigY; gsp.z = sGrabOrigZ;
+                    ImVec2 m = ImGui::GetMousePos();
+                    sGrabStartGbaX = (m.x - sVPImgPos.x) / sVPImgScale;
+                    sGrabStartGbaY = (m.y - sVPImgPos.y) / sVPImgScale;
+                };
+                if (ImGui::IsKeyPressed(ImGuiKey_X)) {
+                    sGrabAxis = (sGrabAxis == 'X') ? (char)0 : 'X'; resetGrabMouse();
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_Y)) {
+                    sGrabAxis = (sGrabAxis == 'Y') ? (char)0 : 'Y'; resetGrabMouse();
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_Z)) {
+                    sGrabAxis = (sGrabAxis == 'Z') ? (char)0 : 'Z'; resetGrabMouse();
+                }
+
+                // Show axis gizmo
+                if (sGrabAxis) sTransformAxis = sGrabAxis;
+
+                // Mouse position in GBA coordinates
+                ImVec2 mpos = ImGui::GetMousePos();
+                float gbaX = (mpos.x - sVPImgPos.x) / sVPImgScale;
+                float gbaY = (mpos.y - sVPImgPos.y) / sVPImgScale;
+                float dgbaX = gbaX - sGrabStartGbaX;
+                float dgbaY = gbaY - sGrabStartGbaY;
+
+                // Inverse Mode 7: compute world-space delta from GBA-pixel delta
+                // At the sprite's depth, 1 GBA pixel = (depth / fov) world units laterally
+                float dxw = sGrabOrigX - sCamera.x;
+                float dzw = sGrabOrigZ - sCamera.z;
+                float cosA = cosf(-sCamera.angle), sinA = sinf(-sCamera.angle);
+                float depth = dxw * sinA - dzw * cosA;
+                if (depth < 1.0f) depth = 1.0f;
+                float lateralScale = depth / sCamera.fov;  // world per GBA pixel (horizontal)
+                float verticalScale = lateralScale;         // same ratio for vertical
+
+                // For single-axis constraints, use both mouse axes projected onto that world axis
+                // Camera right vector = (cosA, sinA), camera forward = (-sinA, cosA) in XZ
+                if (sGrabAxis == 'X')
+                    gsp.x = sGrabOrigX + (dgbaX * cosA - dgbaY * sinA) * lateralScale;
+                else if (sGrabAxis == 'Y')
+                    gsp.y = std::max(0.0f, sGrabOrigY - dgbaY * verticalScale);
+                else if (sGrabAxis == 'Z')
+                    gsp.z = sGrabOrigZ + (dgbaX * sinA + dgbaY * cosA) * lateralScale;
+                else
+                {
+                    // Free XZ: GBA X maps to world side, GBA Y maps to world forward
+                    gsp.x = sGrabOrigX + dgbaX * cosA * lateralScale - dgbaY * sinA * lateralScale;
+                    gsp.z = sGrabOrigZ + dgbaX * sinA * lateralScale + dgbaY * cosA * lateralScale;
+                }
+
+                // Left click confirms
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+                    sGrabMode = false;
+
+                // Escape cancels
+                if (ImGui::IsKeyPressed(ImGuiKey_Escape))
+                {
+                    gsp.x = sGrabOrigX;
+                    gsp.y = sGrabOrigY;
+                    gsp.z = sGrabOrigZ;
+                    sGrabMode = false;
+                }
+            }
+
+            // S key: enter scale mode (mouse Y to scale, like G for grab)
+            if (wantKeys && ImGui::IsKeyPressed(ImGuiKey_S) && !sGrabMode && !sScaleMode
+                && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
+            {
+                sScaleMode = true;
+                sScaleOrig = sSprites[sSelectedSprite].scale;
+                sScaleMouseStartY = ImGui::GetMousePos().y;
+            }
+
+            if (sScaleMode && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
+            {
+                sTransformAxis = 'S';
+                float dy = sScaleMouseStartY - ImGui::GetMousePos().y; // up = bigger
+                sSprites[sSelectedSprite].scale = std::clamp(
+                    sScaleOrig + dy * 0.02f, 0.1f, 50.0f);
+
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+                    sScaleMode = false;
+
+                if (ImGui::IsKeyPressed(ImGuiKey_Escape))
+                {
+                    sSprites[sSelectedSprite].scale = sScaleOrig;
+                    sScaleMode = false;
+                }
             }
 
             // R + mouse drag up/down to resize selected sprite
@@ -3649,6 +3796,15 @@ void FrameTick(float dt)
                   assetDirImgs.empty() ? nullptr : assetDirImgs.data(), (int)assetDirImgs.size(),
                   spriteDirImgs.empty() ? nullptr : spriteDirImgs.data(), (int)spriteDirImgs.size(),
                   sMeshAssets.empty() ? nullptr : sMeshAssets.data(), (int)sMeshAssets.size());
+
+    // Draw axis guide line when transforming a selected sprite
+    if (sTransformAxis && sTransformAxis != 'S'
+        && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
+    {
+        const FloorSprite& sp = sSprites[sSelectedSprite];
+        Mode7::DrawAxisGuide(sCamera, sp.x, sp.y, sp.z, sTransformAxis);
+    }
+
     Mode7::UploadTexture();
 
     // ---- Layout: NEXXT-style fixed panels ----
@@ -3715,7 +3871,7 @@ void FrameTick(float dt)
     }
     else
     {
-        // Map / Tiles tabs: viewport + right panels
+        // Map / Tiles tabs: viewport + right panel
         DrawViewport(
             ImVec2(vp->WorkPos.x, bodyY),
             ImVec2(leftW, bodyH));
@@ -3723,19 +3879,11 @@ void FrameTick(float dt)
         if (sEditorMode == EditorMode::Edit)
             DrawObjectEditorPanel(
                 ImVec2(vp->WorkPos.x + leftW, bodyY),
-                ImVec2(rightW, tilesetH));
+                ImVec2(rightW, bodyH));
         else
             DrawTilesetPanel(
                 ImVec2(vp->WorkPos.x + leftW, bodyY),
-                ImVec2(rightW, tilesetH));
-
-        DrawTilemapPanel(
-            ImVec2(vp->WorkPos.x + leftW, bodyY + tilesetH),
-            ImVec2(rightW, tilemapH));
-
-        DrawPalettePanel(
-            ImVec2(vp->WorkPos.x + leftW, bodyY + tilesetH + tilemapH),
-            ImVec2(rightW, paletteH));
+                ImVec2(rightW, bodyH));
     }
 
     DrawStatusBar(

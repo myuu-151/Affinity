@@ -18,8 +18,8 @@
 #define AFN_SPRINT_EASE_OUT 30
 
 // Player sprite index (-1 = none)
-#define AFN_PLAYER_IDX 0
-#define AFN_ORBIT_DIST 1920
+#define AFN_PLAYER_IDX -1
+#define AFN_ORBIT_DIST 3840
 
 #define AFN_ASSET_COUNT 2
 
@@ -6722,13 +6722,11 @@ static const int afn_asset_desc[][5] = {
     { 0, 1, 1, 8, 1 },
 };
 
-#define AFN_SPRITE_COUNT 3
+#define AFN_SPRITE_COUNT 1
 
 static const int afn_sprite_data[][10] = {
     // { x_fixed, y_fixed, z_fixed, palIdx, assetIdx, scale_8_8, spriteType, rotation_brad, animEnabled, meshIdx }
-    { 32768, 0, 30848, 1, 0, 102, 1, 0, 1, -1 },
-    { 32768, 0, 24063, 1, 1, 102, 2, 32768, 1, -1 },
-    { 31291, 288, 22536, 3, -1, 1459, 6, 0, 1, 0 },
+    { 31291, 288, 22536, 1, -1, 1459, 6, 0, 1, 0 },
 };
 #define AFN_MESH_COUNT 1
 
@@ -6762,8 +6760,8 @@ static const u16 afn_mesh0_idx[36] = {
     24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35
 };
 
-static const int afn_mesh_desc[][3] = {
-    { 36, 36, 0x7C1F },
+static const int afn_mesh_desc[][4] = {
+    { 36, 36, 0x7C1F, 1 },
 };
 
 static const s16* const afn_mesh_vert_ptrs[] = { afn_mesh0_verts };

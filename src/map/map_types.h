@@ -146,6 +146,16 @@ struct MeshVertex
     float r, g, b;      // vertex color (default white)
 };
 
+// Backface culling mode for mesh rendering
+enum class CullMode : int
+{
+    Back  = 0,  // cull back faces (default — standard solid mesh)
+    Front = 1,  // cull front faces (inside-out rendering)
+    None  = 2,  // no culling (double-sided, renders both faces)
+};
+
+static const char* const kCullModeNames[] = { "Back", "Front", "None" };
+
 struct MeshAsset
 {
     std::string name = "Mesh";
@@ -154,6 +164,7 @@ struct MeshAsset
     std::vector<uint32_t>   indices;   // triangle index buffer
     float boundsMin[3] = {};           // AABB min
     float boundsMax[3] = {};           // AABB max
+    CullMode cullMode = CullMode::Back; // backface culling mode
 };
 
 static constexpr int kMaxMeshAssets = 32;

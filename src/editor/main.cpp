@@ -29,7 +29,7 @@ int main(int, char**)
         return 1;
     }
 
-    GLFWwindow* window = glfwCreateWindow(1280, 720, "Affinity — GBA Mode 7 Engine", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1280, 720, "Affinity", nullptr, nullptr);
     if (!window)
     {
         fprintf(stderr, "Failed to create window\n");
