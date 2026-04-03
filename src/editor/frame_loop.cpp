@@ -490,12 +490,12 @@ static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh)
     unsigned char* img = stbi_load(path.c_str(), &w, &h, &ch, 4);
     if (!img) return false;
 
-    // Resize to nearest power-of-2, max 64
+    // Resize to nearest power-of-2, max 256
     int tw = 1, th = 1;
-    while (tw < w && tw < 64) tw <<= 1;
-    while (th < h && th < 64) th <<= 1;
-    if (tw > 64) tw = 64;
-    if (th > 64) th = 64;
+    while (tw < w && tw < 256) tw <<= 1;
+    while (th < h && th < 256) th <<= 1;
+    if (tw > 256) tw = 256;
+    if (th > 256) th = 256;
 
     // Simple nearest-neighbor resize
     std::vector<uint32_t> resized(tw * th);
