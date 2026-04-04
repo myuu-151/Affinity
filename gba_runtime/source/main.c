@@ -1383,7 +1383,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             dz = wz - cam_z;
             fovLambda = (dx * g_sinf - dz * g_cosf) >> 8;
 
-            if (fovLambda <= 64) { vis[v] = 0; continue; }
+            // Clamp near plane — screen-span guard catches extreme projections
+            if (fovLambda < 16) fovLambda = 16;
 
             sz[v] = fovLambda; // store depth for painter's sort
 
@@ -1412,7 +1413,6 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 
             if (i0 >= vertCount || i1 >= vertCount || i2 >= vertCount) continue;
             if (i0 == i1 || i1 == i2 || i0 == i2) continue; // degenerate
-            if (!vis[i0] || !vis[i1] || !vis[i2]) continue;
 
             // Screen bounds cull: skip if all 3 vertices fully offscreen
             if ((sx[i0] < 0 && sx[i1] < 0 && sx[i2] < 0) ||
