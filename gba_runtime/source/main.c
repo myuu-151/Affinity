@@ -1420,20 +1420,13 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             fovLambda = (dx * g_sinf - dz * g_cosf) >> 8;
             rawDepth[v] = fovLambda; // store unclamped depth for wireframe
 
-            heightDiff = cam_h - wy;
-            side = (dx * g_cosf + dz * g_sinf) >> 8;
-
-            // Behind-camera fix: mirror the projection so vertices
-            // behind the camera project to the opposite screen side.
-            // This preserves correct winding for backface culling.
-            if (fovLambda < 16) {
-                if (fovLambda < 0) fovLambda = -fovLambda;
-                if (fovLambda < 16) fovLambda = 16;
-                side = -side;
-                heightDiff = -heightDiff;
-            }
+            // Clamp near plane — SLOPE16 rasterizer handles extreme projections
+            if (fovLambda < 16) fovLambda = 16;
 
             sz[v] = fovLambda; // store clamped depth for painter's sort
+
+            heightDiff = cam_h - wy;
+            side = (dx * g_cosf + dz * g_sinf) >> 8;
 
             sy[v] = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
             sx[v] = 120 + (int)((side * cam_fov) / fovLambda);
@@ -1466,13 +1459,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 (sy[i0] >= 160 && sy[i1] >= 160 && sy[i2] >= 160))
                 continue;
 
-            // Backface culling: screen-space cross product (64-bit to avoid overflow
-            // when extreme screen coords are produced by near-plane projection)
-            {
-                long long cross64 = (long long)(sx[i1] - sx[i0]) * (sy[i2] - sy[i0])
-                                  - (long long)(sy[i1] - sy[i0]) * (sx[i2] - sx[i0]);
-                cross = (cross64 > 0) ? 1 : (cross64 < 0) ? -1 : 0;
-            }
+            // Backface culling: screen-space cross product
+            cross = (sx[i1] - sx[i0]) * (sy[i2] - sy[i0])
+                  - (sy[i1] - sy[i0]) * (sx[i2] - sx[i0]);
             if (cullMode == 0 && cross >= 0) continue;      // Back: cull back faces
             else if (cullMode == 1 && cross <= 0) continue;  // Front: cull front faces
             // cullMode == 2 (None): no culling, draw all
