@@ -1397,7 +1397,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             side = (dx * g_cosf + dz * g_sinf) >> 8;
             sx[v] = 120 + (int)((side * cam_fov) / fovLambda);
 
-            vis[v] = 1;
+            vis[v] = (fovLambda > 16) ? 1 : 0; // mark near-plane clamped verts as not visible
         }
 
         // Whole-mesh screen cull: skip if no vertices are visible
@@ -1417,6 +1417,10 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 
             if (i0 >= vertCount || i1 >= vertCount || i2 >= vertCount) continue;
             if (i0 == i1 || i1 == i2 || i0 == i2) continue; // degenerate
+
+            // Skip triangles with near-plane clamped vertices in wireframe/grayscale
+            // (extreme projections cause spider-web line artifacts)
+            if ((meshWireframe || meshGrayscale) && (!vis[i0] || !vis[i1] || !vis[i2])) continue;
 
             // Screen bounds cull: skip if all 3 vertices fully offscreen
             if ((sx[i0] < 0 && sx[i1] < 0 && sx[i2] < 0) ||
