@@ -1982,11 +1982,7 @@ int main(void)
 
         }
 
-        // Clamp camera to map bounds
-        if (cam_x < 0) cam_x = 0;
-        if (cam_x > (256 << 8)) cam_x = 256 << 8;
-        if (cam_z < 0) cam_z = 0;
-        if (cam_z > (256 << 8)) cam_z = 256 << 8;
+        // No camera bounds — free movement
 
         // Update sin/cos for HBlank
         g_cosf = lu_cos(cam_angle) >> 4;
