@@ -1509,11 +1509,14 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 if (shade < 1) shade = 1;
                 if (shade > 7) shade = 7;
                 palIdx = 5 + shade; // grayscale palette at indices 5-12
-                // Draw filled grayscale triangle
-                if (meshHalfRes)
-                    rasterize_tri_half(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
-                else
-                    rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+                // Draw filled grayscale triangle — skip if any vertex is behind camera
+                if (rawDepth[i0] >= WIRE_NEAR_DEPTH && rawDepth[i1] >= WIRE_NEAR_DEPTH && rawDepth[i2] >= WIRE_NEAR_DEPTH)
+                {
+                    if (meshHalfRes)
+                        rasterize_tri_half(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+                    else
+                        rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+                }
                 // Draw wireframe overlay — skip edges to behind-camera vertices
                 if (meshWireframe)
                 {
