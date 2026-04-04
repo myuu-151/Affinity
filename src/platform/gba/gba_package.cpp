@@ -924,6 +924,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 for (int c = 0; c < 3; c++)
                 {
                     int fixed = (int)(outPos[v * 3 + c] / 4.0f * 256.0f);
+                    if (fixed > 32767) fixed = 32767;
+                    else if (fixed < -32768) fixed = -32768;
                     f << fixed;
                     if (v * 3 + c + 1 < vc * 3) f << ", ";
                 }
