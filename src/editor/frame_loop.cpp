@@ -683,7 +683,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%s\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.texturePath.c_str());
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%s|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.texturePath.c_str(), ma.wireframe ? 1 : 0);
     }
     fprintf(f, "\n");
 
@@ -945,8 +945,8 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "MeshAssets") == 0)
         {
             char mname[256], mpath[512], mtexpath[512] = {};
-            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0;
-            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%511[^\n]", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, mtexpath);
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0;
+            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%511[^|\n]|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, mtexpath, &mwireframe);
             if (matched >= 2)
             {
                 MeshAsset ma;
@@ -962,6 +962,8 @@ static bool LoadProject(const std::string& path)
                     ma.halfRes = (mhalfres != 0);
                 if (matched >= 7)
                     ma.textured = (mtextured != 0);
+                if (matched >= 9)
+                    ma.wireframe = (mwireframe != 0);
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -1239,6 +1241,8 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         ImGui::Checkbox("Lit##meshLit", &ma.lit);
         ImGui::SameLine();
         ImGui::Checkbox("Half-Res##meshHalfRes", &ma.halfRes);
+        ImGui::SameLine();
+        ImGui::Checkbox("Wireframe##meshWire", &ma.wireframe);
 
         ImGui::Separator();
         ImGui::Checkbox("Textured##meshTex", &ma.textured);
@@ -3598,6 +3602,7 @@ void FrameTick(float dt)
                     me.exportMode = (int)ma.exportMode;
                     me.lit = ma.lit ? 1 : 0;
                     me.halfRes = ma.halfRes ? 1 : 0;
+                    me.wireframe = ma.wireframe ? 1 : 0;
                     me.textured = ma.textured ? 1 : 0;
                     me.texW = ma.texW;
                     me.texH = ma.texH;

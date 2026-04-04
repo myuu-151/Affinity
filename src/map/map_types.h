@@ -180,6 +180,7 @@ struct MeshAsset
     MeshExportMode exportMode = MeshExportMode::Quality; // export quality
     bool lit = true; // false = unlit (flat color, no shading calc)
     bool halfRes = false; // true = rasterize every other scanline (2x fill speed)
+    bool wireframe = false; // true = grayscale wireframe only (no filled triangles)
 
     // Texture mapping
     bool textured = false;                    // true = use texture, false = flat shaded

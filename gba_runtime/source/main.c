@@ -1081,6 +1081,32 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
 }
 #endif
 
+// Bresenham line for wireframe rendering (8bpp Mode 4)
+IWRAM_CODE static void draw_line(u16* buf, int x0, int y0, int x1, int y1, u8 palIdx)
+{
+    int dx = x1 - x0, dy = y1 - y0;
+    int sx = 1, sy = 1;
+    int steps;
+    if (dx < 0) { dx = -dx; sx = -1; }
+    if (dy < 0) { dy = -dy; sy = -1; }
+    int err = dx - dy;
+    for (steps = 0; steps < 500; steps++)
+    {
+        if ((unsigned)x0 < 240 && (unsigned)y0 < 160)
+        {
+            u16* row = buf + y0 * 120;
+            if (x0 & 1) row[x0 >> 1] = (row[x0 >> 1] & 0x00FF) | ((u16)palIdx << 8);
+            else        row[x0 >> 1] = (row[x0 >> 1] & 0xFF00) | palIdx;
+        }
+        if (x0 == x1 && y0 == y1) break;
+        {
+            int e2 = 2 * err;
+            if (e2 > -dy) { err -= dy; x0 += sx; }
+            if (e2 <  dx) { err += dx; y0 += sy; }
+        }
+    }
+}
+
 // Affine texture-mapped triangle rasterizer
 // UVs are 8.8 fixed-point (pre-scaled to texture dimensions)
 IWRAM_CODE static void rasterize_tri_tex(u16* buf,
@@ -1252,7 +1278,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
     int i;
     for (i = 0; i < g_spriteCount; i++)
     {
-        int mi, vertCount, idxCount, cullMode, meshLit, meshSorted, meshHalfRes, meshTextured, v, t;
+        int mi, vertCount, idxCount, cullMode, meshLit, meshSorted, meshHalfRes, meshTextured, meshWireframe, v, t;
         int texW, texShift, texMask, texPalBase;
         int anyVisible;
         const s16* verts;
@@ -1284,6 +1310,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         texW = afn_mesh_desc[mi][8];
         texShift = afn_mesh_desc[mi][9];
         texPalBase = afn_mesh_desc[mi][10];
+        meshWireframe = afn_mesh_desc[mi][11]; // 0=solid, 1=wireframe
         texMask = texW > 0 ? texW - 1 : 0;
         uvs = afn_mesh_uv_ptrs[mi];
         tex = afn_mesh_tex_ptrs[mi];
@@ -1422,7 +1449,27 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             int i1 = indices[ti * 3 + 1];
             int i2 = indices[ti * 3 + 2];
 
-            if (meshTextured && uvs && tex)
+            if (meshWireframe)
+            {
+                // Grayscale wireframe — compute shade from face normal
+                int nx, ny, nz, rnx, rny, rnz, dot, shade;
+                u8 palIdx;
+                nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
+                ny = ((int)norms[i0*3+1] + norms[i1*3+1] + norms[i2*3+1]) / 3;
+                nz = ((int)norms[i0*3+2] + norms[i1*3+2] + norms[i2*3+2]) / 3;
+                rnx = (nx * (cosR >> 4) + nz * (sinR >> 4)) >> 4;
+                rny = ny;
+                rnz = (-nx * (sinR >> 4) + nz * (cosR >> 4)) >> 4;
+                dot = -(rnx * 38 + rny * (-102) + rnz * 64) >> 7;
+                shade = (dot >> 4) + 3;
+                if (shade < 1) shade = 1;
+                if (shade > 7) shade = 7;
+                palIdx = 5 + shade; // grayscale palette at indices 5-12
+                draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], palIdx);
+                draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+                draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], palIdx);
+            }
+            else if (meshTextured && uvs && tex)
             {
                 // Textured triangle — UVs are 8.8 fixed pre-scaled to texture size
                 rasterize_tri_tex(buf,
@@ -1513,6 +1560,15 @@ int main(void)
         int k;
         for (k = 0; k < AFN_MESH_COUNT * 8; k++)
             pal_bg_mem[AFN_MESH_PAL_BASE + k] = afn_mesh_palette[k];
+    }
+    // Grayscale wireframe palette (indices 5-12)
+    {
+        int k;
+        for (k = 0; k < 8; k++)
+        {
+            int g = k * 31 / 7; // 0 to 31
+            pal_bg_mem[5 + k] = RGB15(g, g, g);
+        }
     }
     // Load texture palettes
 #ifdef AFN_TEX_PAL_COUNT

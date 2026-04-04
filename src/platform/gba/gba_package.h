@@ -100,6 +100,7 @@ struct GBAMeshExport
     int exportMode = 0;           // 0=Quality (no weld), 1=Performance (welded)
     int lit = 1;                  // 1=lit (shaded), 0=unlit (flat color)
     int halfRes = 0;              // 1=rasterize every other scanline
+    int wireframe = 0;            // 1=grayscale wireframe only
     // Texture mapping
     std::vector<float> uvs;       // u, v per vertex (flat, interleaved)
     int textured = 0;             // 1 = textured, 0 = flat shaded

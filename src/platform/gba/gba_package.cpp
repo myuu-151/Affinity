@@ -1004,8 +1004,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
             }
         }
 
-        // Mesh descriptor table: { vertCount, indexCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase }
-        f << "static const int afn_mesh_desc[][11] = {\n";
+        // Mesh descriptor table: { vertCount, indexCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase, wireframe }
+        f << "static const int afn_mesh_desc[][12] = {\n";
         for (size_t mi = 0; mi < meshes.size(); mi++)
         {
             int vc = finalVertCounts[mi];
@@ -1014,6 +1014,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             int sorted = 0;
             int halfRes = meshes[mi].halfRes;
             int textured = meshes[mi].textured;
+            int wireframe = meshes[mi].wireframe;
             int texW = meshes[mi].texW;
             int texShift = 0;
             { int tw = texW; while (tw > 1) { texShift++; tw >>= 1; } }
@@ -1022,7 +1023,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             if (meshes[mi].exportMode == 2) { lit = 0; if (!meshes[mi].textured) sorted = 1; }
             char hex[8];
             snprintf(hex, sizeof(hex), "0x%04X", meshes[mi].colorRGB15);
-            f << "    { " << vc << ", " << ic << ", " << hex << ", " << meshes[mi].cullMode << ", " << lit << ", " << sorted << ", " << halfRes << ", " << textured << ", " << texW << ", " << texShift << ", " << texPalBases[mi] << " },\n";
+            f << "    { " << vc << ", " << ic << ", " << hex << ", " << meshes[mi].cullMode << ", " << lit << ", " << sorted << ", " << halfRes << ", " << textured << ", " << texW << ", " << texShift << ", " << texPalBases[mi] << ", " << wireframe << " },\n";
         }
         f << "};\n\n";
 
