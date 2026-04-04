@@ -1512,9 +1512,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 if (meshWireframe)
                 {
                     u8 edgeIdx = 6; // dark gray wireframe edges
-                    int ok0 = (sz[i0] > 96);
-                    int ok1 = (sz[i1] > 96);
-                    int ok2 = (sz[i2] > 96);
+                    int ok0 = (sz[i0] > 256);
+                    int ok1 = (sz[i1] > 256);
+                    int ok2 = (sz[i2] > 256);
                     if (ok0 && ok1) draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], edgeIdx);
                     if (ok1 && ok2) draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], edgeIdx);
                     if (ok2 && ok0) draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], edgeIdx);
@@ -1538,9 +1538,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 palIdx = 5 + shade; // grayscale palette at indices 5-12
                 // Skip edges where either vertex is too close to camera (unreliable projection)
                 {
-                    int ok0 = (sz[i0] > 96);
-                    int ok1 = (sz[i1] > 96);
-                    int ok2 = (sz[i2] > 96);
+                    int ok0 = (sz[i0] > 256);
+                    int ok1 = (sz[i1] > 256);
+                    int ok2 = (sz[i2] > 256);
                     if (ok0 && ok1) draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], palIdx);
                     if (ok1 && ok2) draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
                     if (ok2 && ok0) draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], palIdx);
