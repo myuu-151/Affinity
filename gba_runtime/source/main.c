@@ -1507,21 +1507,13 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     rasterize_tri_half(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
                 else
                     rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
-                // Draw wireframe overlay — skip if triangle span too large (near-plane artifact)
+                // Draw wireframe overlay on top
                 if (meshWireframe)
                 {
-                    int minX = sx[i0], maxX = sx[i0], minY = sy[i0], maxY = sy[i0];
-                    if (sx[i1] < minX) minX = sx[i1]; if (sx[i1] > maxX) maxX = sx[i1];
-                    if (sx[i2] < minX) minX = sx[i2]; if (sx[i2] > maxX) maxX = sx[i2];
-                    if (sy[i1] < minY) minY = sy[i1]; if (sy[i1] > maxY) maxY = sy[i1];
-                    if (sy[i2] < minY) minY = sy[i2]; if (sy[i2] > maxY) maxY = sy[i2];
-                    if ((maxX - minX) < 400 && (maxY - minY) < 300)
-                    {
-                        u8 edgeIdx = 6;
-                        draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], edgeIdx);
-                        draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], edgeIdx);
-                        draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], edgeIdx);
-                    }
+                    u8 edgeIdx = 6;
+                    draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], edgeIdx);
+                    draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], edgeIdx);
+                    draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], edgeIdx);
                 }
             }
             else if (meshWireframe)
@@ -1541,17 +1533,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 if (shade > 7) shade = 7;
                 palIdx = 5 + shade; // grayscale palette at indices 5-12
                 {
-                    int minX = sx[i0], maxX = sx[i0], minY = sy[i0], maxY = sy[i0];
-                    if (sx[i1] < minX) minX = sx[i1]; if (sx[i1] > maxX) maxX = sx[i1];
-                    if (sx[i2] < minX) minX = sx[i2]; if (sx[i2] > maxX) maxX = sx[i2];
-                    if (sy[i1] < minY) minY = sy[i1]; if (sy[i1] > maxY) maxY = sy[i1];
-                    if (sy[i2] < minY) minY = sy[i2]; if (sy[i2] > maxY) maxY = sy[i2];
-                    if ((maxX - minX) < 400 && (maxY - minY) < 300)
-                    {
-                        draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], palIdx);
-                        draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
-                        draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], palIdx);
-                    }
+                    draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], palIdx);
+                    draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+                    draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], palIdx);
                 }
             }
             else if (meshTextured && uvs && tex)
