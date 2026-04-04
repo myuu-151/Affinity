@@ -839,14 +839,6 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
     int dxLong, dxShort; /* 16.16 fixed-point x step per scanline */
     int left, right;
 
-    /* Clamp coords to prevent x<<16 and slope*skip overflow */
-    if (x0 < -16000) x0 = -16000; if (x0 > 16000) x0 = 16000;
-    if (x1 < -16000) x1 = -16000; if (x1 > 16000) x1 = 16000;
-    if (x2 < -16000) x2 = -16000; if (x2 > 16000) x2 = 16000;
-    if (y0 < -16000) y0 = -16000; if (y0 > 16000) y0 = 16000;
-    if (y1 < -16000) y1 = -16000; if (y1 > 16000) y1 = 16000;
-    if (y2 < -16000) y2 = -16000; if (y2 > 16000) y2 = 16000;
-
     /* Sort by y */
     if (y0 > y1) { tmp=x0; x0=x1; x1=tmp; tmp=y0; y0=y1; y1=tmp; }
     if (y0 > y2) { tmp=x0; x0=x2; x2=tmp; tmp=y0; y0=y2; y2=tmp; }
@@ -863,17 +855,15 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
     if (segH > 0)
     {
         dxShort = SLOPE16(x1 - x0, segH);
-        xLong = x0 << 16;
-        xShort = x0 << 16;
 
-        /* Skip rows above screen */
+        /* Skip rows above screen — use 64-bit to prevent overflow */
         iy0 = y0 < 0 ? 0 : y0;
-        if (iy0 > y0)
-        {
-            xLong += dxLong * (iy0 - y0);
-            xShort += dxShort * (iy0 - y0);
-        }
         iy2 = y1 < 160 ? y1 : 160;
+        {
+            int skip = iy0 - y0;
+            xLong  = (int)((long long)x0 * 65536 + (long long)dxLong  * skip);
+            xShort = (int)((long long)x0 * 65536 + (long long)dxShort * skip);
+        }
 
         for (y = iy0; y < iy2; y++)
         {
@@ -894,17 +884,16 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
     if (segH > 0)
     {
         dxShort = SLOPE16(x2 - x1, segH);
-        /* Long edge continues from where it was at y1 */
-        xLong = (x0 << 16) + dxLong * (y1 - y0);
-        xShort = x1 << 16;
 
+        /* Long edge continues from y0; short starts at x1 — 64-bit init */
         iy0 = y1 < 0 ? 0 : y1;
-        if (iy0 > y1)
-        {
-            xLong += dxLong * (iy0 - y1);
-            xShort += dxShort * (iy0 - y1);
-        }
         iy2 = y2 < 160 ? y2 : 159;
+        {
+            int skipLong  = iy0 - y0;
+            int skipShort = iy0 - y1;
+            xLong  = (int)((long long)x0 * 65536 + (long long)dxLong  * skipLong);
+            xShort = (int)((long long)x1 * 65536 + (long long)dxShort * skipShort);
+        }
 
         for (y = iy0; y <= iy2; y++)
         {
@@ -932,14 +921,6 @@ IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int 
     int dxLong, dxShort;
     int left, right;
 
-    /* Clamp coords to prevent x<<16 and slope*skip overflow */
-    if (x0 < -16000) x0 = -16000; if (x0 > 16000) x0 = 16000;
-    if (x1 < -16000) x1 = -16000; if (x1 > 16000) x1 = 16000;
-    if (x2 < -16000) x2 = -16000; if (x2 > 16000) x2 = 16000;
-    if (y0 < -16000) y0 = -16000; if (y0 > 16000) y0 = 16000;
-    if (y1 < -16000) y1 = -16000; if (y1 > 16000) y1 = 16000;
-    if (y2 < -16000) y2 = -16000; if (y2 > 16000) y2 = 16000;
-
     if (y0 > y1) { tmp=x0; x0=x1; x1=tmp; tmp=y0; y0=y1; y1=tmp; }
     if (y0 > y2) { tmp=x0; x0=x2; x2=tmp; tmp=y0; y0=y2; y2=tmp; }
     if (y1 > y2) { tmp=x1; x1=x2; x2=tmp; tmp=y1; y1=y2; y2=tmp; }
@@ -953,14 +934,12 @@ IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int 
     if (segH > 0)
     {
         dxShort = SLOPE16(x1 - x0, segH);
-        xLong = x0 << 16;
-        xShort = x0 << 16;
 
         iy0 = y0 < 0 ? 0 : y0;
-        if (iy0 > y0)
         {
-            xLong += dxLong * (iy0 - y0);
-            xShort += dxShort * (iy0 - y0);
+            int skip = iy0 - y0;
+            xLong  = (int)((long long)x0 * 65536 + (long long)dxLong  * skip);
+            xShort = (int)((long long)x0 * 65536 + (long long)dxShort * skip);
         }
         /* Align to even scanline */
         if (iy0 & 1) { xLong += dxLong; xShort += dxShort; iy0++; }
@@ -988,14 +967,13 @@ IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int 
     if (segH > 0)
     {
         dxShort = SLOPE16(x2 - x1, segH);
-        xLong = (x0 << 16) + dxLong * (y1 - y0);
-        xShort = x1 << 16;
 
         iy0 = y1 < 0 ? 0 : y1;
-        if (iy0 > y1)
         {
-            xLong += dxLong * (iy0 - y1);
-            xShort += dxShort * (iy0 - y1);
+            int skipLong  = iy0 - y0;
+            int skipShort = iy0 - y1;
+            xLong  = (int)((long long)x0 * 65536 + (long long)dxLong  * skipLong);
+            xShort = (int)((long long)x1 * 65536 + (long long)dxShort * skipShort);
         }
         if (iy0 & 1) { xLong += dxLong; xShort += dxShort; iy0++; }
         iy2 = y2 < 160 ? y2 : 159;
@@ -1044,16 +1022,14 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
     if (segH > 0)
     {
         dxShort = SLOPE16(x1 - x0, segH);
-        xLong = x0 << 16;
-        xShort = x0 << 16;
 
         iy0 = y0 < 0 ? 0 : y0;
-        if (iy0 > y0)
-        {
-            xLong += dxLong * (iy0 - y0);
-            xShort += dxShort * (iy0 - y0);
-        }
         iy2 = y1 < 160 ? y1 : 160;
+        {
+            int skip = iy0 - y0;
+            xLong  = (int)((long long)x0 * 65536 + (long long)dxLong  * skip);
+            xShort = (int)((long long)x0 * 65536 + (long long)dxShort * skip);
+        }
 
         for (y = iy0; y < iy2; y++)
         {
@@ -1073,16 +1049,15 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
     if (segH > 0)
     {
         dxShort = SLOPE16(x2 - x1, segH);
-        xLong = (x0 << 16) + dxLong * (y1 - y0);
-        xShort = x1 << 16;
 
         iy0 = y1 < 0 ? 0 : y1;
-        if (iy0 > y1)
-        {
-            xLong += dxLong * (iy0 - y1);
-            xShort += dxShort * (iy0 - y1);
-        }
         iy2 = y2 < 160 ? y2 : 159;
+        {
+            int skipLong  = iy0 - y0;
+            int skipShort = iy0 - y1;
+            xLong  = (int)((long long)x0 * 65536 + (long long)dxLong  * skipLong);
+            xShort = (int)((long long)x1 * 65536 + (long long)dxShort * skipShort);
+        }
 
         for (y = iy0; y <= iy2; y++)
         {
