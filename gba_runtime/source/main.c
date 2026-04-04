@@ -828,6 +828,15 @@ IWRAM_CODE static void afn_hline(u16* row, int left, int right, u8 palIdx)
 // Safe 16.16 slope: uses 64-bit intermediate to prevent overflow with large coords
 #define SLOPE16(dx, dy) ((int)(((long long)(dx) << 16) / (dy)))
 
+/* Saturating 64-bit to 32-bit cast — clamps to INT32 range instead of wrapping.
+   Prevents rasterizer explosion when near-plane vertices project to extreme coords. */
+static inline int sat32(long long v)
+{
+    if (v >  0x7FFFFFFF) return  0x7FFFFFFF;
+    if (v < -0x80000000LL) return (int)-0x80000000LL;
+    return (int)v;
+}
+
 // Rasterize a flat-shaded triangle into Mode 4 bitmap
 // Uses 16.16 fixed-point edge walking — no division in scanline loop
 IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx)
@@ -863,17 +872,15 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
     if (segH > 0)
     {
         dxShort = SLOPE16(x1 - x0, segH);
-        xLong = x0 << 16;
-        xShort = x0 << 16;
 
-        /* Skip rows above screen */
+        /* Skip rows above screen — sat32 prevents overflow with extreme coords */
         iy0 = y0 < 0 ? 0 : y0;
-        if (iy0 > y0)
-        {
-            xLong += dxLong * (iy0 - y0);
-            xShort += dxShort * (iy0 - y0);
-        }
         iy2 = y1 < 160 ? y1 : 160;
+        {
+            int skip = iy0 - y0;
+            xLong  = sat32((long long)x0 * 65536 + (long long)dxLong  * skip);
+            xShort = sat32((long long)x0 * 65536 + (long long)dxShort * skip);
+        }
 
         for (y = iy0; y < iy2; y++)
         {
@@ -894,15 +901,14 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
     if (segH > 0)
     {
         dxShort = SLOPE16(x2 - x1, segH);
-        /* Long edge continues from where it was at y1 */
-        xLong = (x0 << 16) + dxLong * (y1 - y0);
-        xShort = x1 << 16;
 
         iy0 = y1 < 0 ? 0 : y1;
-        if (iy0 > y1)
+        iy2 = y2 < 160 ? y2 : 159;
         {
-            xLong += dxLong * (iy0 - y1);
-            xShort += dxShort * (iy0 - y1);
+            int skipLong  = iy0 - y0;
+            int skipShort = iy0 - y1;
+            xLong  = sat32((long long)x0 * 65536 + (long long)dxLong  * skipLong);
+            xShort = sat32((long long)x1 * 65536 + (long long)dxShort * skipShort);
         }
         iy2 = y2 < 160 ? y2 : 159;
 
@@ -953,14 +959,12 @@ IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int 
     if (segH > 0)
     {
         dxShort = SLOPE16(x1 - x0, segH);
-        xLong = x0 << 16;
-        xShort = x0 << 16;
 
         iy0 = y0 < 0 ? 0 : y0;
-        if (iy0 > y0)
         {
-            xLong += dxLong * (iy0 - y0);
-            xShort += dxShort * (iy0 - y0);
+            int skip = iy0 - y0;
+            xLong  = sat32((long long)x0 * 65536 + (long long)dxLong  * skip);
+            xShort = sat32((long long)x0 * 65536 + (long long)dxShort * skip);
         }
         /* Align to even scanline */
         if (iy0 & 1) { xLong += dxLong; xShort += dxShort; iy0++; }
@@ -988,14 +992,13 @@ IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int 
     if (segH > 0)
     {
         dxShort = SLOPE16(x2 - x1, segH);
-        xLong = (x0 << 16) + dxLong * (y1 - y0);
-        xShort = x1 << 16;
 
         iy0 = y1 < 0 ? 0 : y1;
-        if (iy0 > y1)
         {
-            xLong += dxLong * (iy0 - y1);
-            xShort += dxShort * (iy0 - y1);
+            int skipLong  = iy0 - y0;
+            int skipShort = iy0 - y1;
+            xLong  = sat32((long long)x0 * 65536 + (long long)dxLong  * skipLong);
+            xShort = sat32((long long)x1 * 65536 + (long long)dxShort * skipShort);
         }
         if (iy0 & 1) { xLong += dxLong; xShort += dxShort; iy0++; }
         iy2 = y2 < 160 ? y2 : 159;
@@ -1044,16 +1047,14 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
     if (segH > 0)
     {
         dxShort = SLOPE16(x1 - x0, segH);
-        xLong = x0 << 16;
-        xShort = x0 << 16;
 
         iy0 = y0 < 0 ? 0 : y0;
-        if (iy0 > y0)
-        {
-            xLong += dxLong * (iy0 - y0);
-            xShort += dxShort * (iy0 - y0);
-        }
         iy2 = y1 < 160 ? y1 : 160;
+        {
+            int skip = iy0 - y0;
+            xLong  = sat32((long long)x0 * 65536 + (long long)dxLong  * skip);
+            xShort = sat32((long long)x0 * 65536 + (long long)dxShort * skip);
+        }
 
         for (y = iy0; y < iy2; y++)
         {
@@ -1073,14 +1074,14 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
     if (segH > 0)
     {
         dxShort = SLOPE16(x2 - x1, segH);
-        xLong = (x0 << 16) + dxLong * (y1 - y0);
-        xShort = x1 << 16;
 
         iy0 = y1 < 0 ? 0 : y1;
-        if (iy0 > y1)
+        iy2 = y2 < 160 ? y2 : 159;
         {
-            xLong += dxLong * (iy0 - y1);
-            xShort += dxShort * (iy0 - y1);
+            int skipLong  = iy0 - y0;
+            int skipShort = iy0 - y1;
+            xLong  = sat32((long long)x0 * 65536 + (long long)dxLong  * skipLong);
+            xShort = sat32((long long)x1 * 65536 + (long long)dxShort * skipShort);
         }
         iy2 = y2 < 160 ? y2 : 159;
 
@@ -1196,17 +1197,15 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
         dxShort = SLOPE16(x1 - x0, segH);
         duShort = SLOPE16(u1 - u0, segH);
         dvShort = SLOPE16(v1 - v0, segH);
-        xLong = x0 << 16; xShort = x0 << 16;
-        uLong = u0 << 16; uShort = u0 << 16;
-        vLong = v0 << 16; vShort = v0 << 16;
-
         iy0 = y0 < 0 ? 0 : y0;
-        if (iy0 > y0)
         {
             int skip = iy0 - y0;
-            xLong += dxLong * skip; xShort += dxShort * skip;
-            uLong += duLong * skip; uShort += duShort * skip;
-            vLong += dvLong * skip; vShort += dvShort * skip;
+            xLong  = sat32((long long)x0 * 65536 + (long long)dxLong  * skip);
+            xShort = sat32((long long)x0 * 65536 + (long long)dxShort * skip);
+            uLong  = sat32((long long)u0 * 65536 + (long long)duLong  * skip);
+            uShort = sat32((long long)u0 * 65536 + (long long)duShort * skip);
+            vLong  = sat32((long long)v0 * 65536 + (long long)dvLong  * skip);
+            vShort = sat32((long long)v0 * 65536 + (long long)dvShort * skip);
         }
         iy2 = y1 < 160 ? y1 : 160;
 
@@ -1263,20 +1262,16 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
         dxShort = SLOPE16(x2 - x1, segH);
         duShort = SLOPE16(u2 - u1, segH);
         dvShort = SLOPE16(v2 - v1, segH);
-        xLong = (x0 << 16) + dxLong * (y1 - y0);
-        uLong = (u0 << 16) + duLong * (y1 - y0);
-        vLong = (v0 << 16) + dvLong * (y1 - y0);
-        xShort = x1 << 16;
-        uShort = u1 << 16;
-        vShort = v1 << 16;
-
         iy0 = y1 < 0 ? 0 : y1;
-        if (iy0 > y1)
         {
-            int skip = iy0 - y1;
-            xLong += dxLong * skip; xShort += dxShort * skip;
-            uLong += duLong * skip; uShort += duShort * skip;
-            vLong += dvLong * skip; vShort += dvShort * skip;
+            int skipLong  = iy0 - y0;
+            int skipShort = iy0 - y1;
+            xLong  = sat32((long long)x0 * 65536 + (long long)dxLong  * skipLong);
+            xShort = sat32((long long)x1 * 65536 + (long long)dxShort * skipShort);
+            uLong  = sat32((long long)u0 * 65536 + (long long)duLong  * skipLong);
+            uShort = sat32((long long)u1 * 65536 + (long long)duShort * skipShort);
+            vLong  = sat32((long long)v0 * 65536 + (long long)dvLong  * skipLong);
+            vShort = sat32((long long)v1 * 65536 + (long long)dvShort * skipShort);
         }
         iy2 = y2 < 160 ? y2 : 159;
 
