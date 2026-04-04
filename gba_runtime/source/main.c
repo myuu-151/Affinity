@@ -1469,16 +1469,34 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             if (behindCount > 0 && clipVert + 2 <= 544 && triCount + 2 < 256)
             {
                 // Clip triangle against near plane.
-                // Interpolate screen coords at clip points using lerp on sx/sy.
-                // This is an approximation (perspective-correct would need view-space interp)
-                // but works well enough for near-plane clipping.
+                // Recompute view-space coords for clipped vertices (no arrays needed,
+                // just recalculate from original vertex data for the 2 endpoints).
+                #define RECOMPUTE_VIEW(vIdx, outSide, outHt) { \
+                    FIXED _vx = (verts[(vIdx)*3+0] * sprScale) >> 8; \
+                    FIXED _vy = (verts[(vIdx)*3+1] * sprScale) >> 8; \
+                    FIXED _vz = (verts[(vIdx)*3+2] * sprScale) >> 8; \
+                    FIXED _rx = (_vx * cosR + _vz * sinR) >> 8; \
+                    FIXED _rz = (-_vx * sinR + _vz * cosR) >> 8; \
+                    FIXED _wx = g_sprites[i].x + _rx; \
+                    FIXED _wy = g_sprites[i].y + _vy; \
+                    FIXED _wz = g_sprites[i].z + _rz; \
+                    FIXED _dx = _wx - cam_x; \
+                    FIXED _dz = _wz - cam_z; \
+                    outSide = (_dx * g_cosf + _dz * g_sinf) >> 8; \
+                    outHt = cam_h - _wy; \
+                }
                 #define CLIP_VERT(vA, vB) { \
                     int cv = clipVert++; \
+                    FIXED sideA, htA, sideB, htB, clipS, clipH; \
                     int tNum = NEAR_CLIP - rawDepth[vA]; \
                     int tDen = rawDepth[vB] - rawDepth[vA]; \
                     if (tDen == 0) tDen = 1; \
-                    sx[cv] = sx[vA] + (int)((long long)(sx[vB] - sx[vA]) * tNum / tDen); \
-                    sy[cv] = sy[vA] + (int)((long long)(sy[vB] - sy[vA]) * tNum / tDen); \
+                    RECOMPUTE_VIEW(vA, sideA, htA); \
+                    RECOMPUTE_VIEW(vB, sideB, htB); \
+                    clipS = sideA + (int)((long long)(sideB - sideA) * tNum / tDen); \
+                    clipH = htA + (int)((long long)(htB - htA) * tNum / tDen); \
+                    sx[cv] = 120 + (int)((clipS * cam_fov) / NEAR_CLIP); \
+                    sy[cv] = m7_horizon + (int)((clipH * cam_fov) / NEAR_CLIP); \
                     rawDepth[cv] = NEAR_CLIP; \
                     sz[cv] = NEAR_CLIP; \
                 }
@@ -1534,6 +1552,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     }
                 }
                 #undef CLIP_VERT
+                #undef RECOMPUTE_VIEW
                 continue; // clipped triangles added, skip normal path
             }
 
