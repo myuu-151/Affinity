@@ -683,7 +683,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%s\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.texturePath.c_str());
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.c_str());
     }
     fprintf(f, "\n");
 
@@ -945,9 +945,14 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "MeshAssets") == 0)
         {
             char mname[256], mpath[512], mtexpath[512] = {};
-            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0;
-            // Try new format: name|path|cull|export|lit|halfres|textured|wireframe|texpath
-            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%511[^\n]", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, mtexpath);
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0;
+            // Try newest format: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath
+            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^\n]", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath);
+            if (matched < 2)
+            {
+                // Try previous format: name|path|cull|export|lit|halfres|textured|wireframe|texpath
+                matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%511[^\n]", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, mtexpath);
+            }
             if (matched < 2)
             {
                 // Try old format: name|path|cull|export|lit|halfres|textured|texpath|wireframe
@@ -970,12 +975,14 @@ static bool LoadProject(const std::string& path)
                     ma.textured = (mtextured != 0);
                 if (matched >= 8)
                     ma.wireframe = (mwireframe != 0);
+                if (matched >= 9)
+                    ma.grayscale = (mgrayscale != 0);
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
                 ma.name = mname; // restore name in case LoadOBJ overwrote it
                 // Reload texture if textured
-                if (ma.textured && matched >= 9 && mtexpath[0])
+                if (ma.textured && matched >= 10 && mtexpath[0])
                     LoadMeshTexture(std::string(mtexpath), ma);
                 sMeshAssets.push_back(std::move(ma));
             }
@@ -1249,6 +1256,8 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         ImGui::Checkbox("Half-Res##meshHalfRes", &ma.halfRes);
         ImGui::SameLine();
         ImGui::Checkbox("Wireframe##meshWire", &ma.wireframe);
+        ImGui::SameLine();
+        ImGui::Checkbox("Grayscale##meshGray", &ma.grayscale);
 
         ImGui::Separator();
         ImGui::Checkbox("Textured##meshTex", &ma.textured);
@@ -3614,6 +3623,7 @@ void FrameTick(float dt)
                     me.lit = ma.lit ? 1 : 0;
                     me.halfRes = ma.halfRes ? 1 : 0;
                     me.wireframe = ma.wireframe ? 1 : 0;
+                    me.grayscale = ma.grayscale ? 1 : 0;
                     me.textured = ma.textured ? 1 : 0;
                     me.texW = ma.texW;
                     me.texH = ma.texH;

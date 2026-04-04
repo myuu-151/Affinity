@@ -1313,7 +1313,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
     int i;
     for (i = 0; i < g_spriteCount; i++)
     {
-        int mi, vertCount, idxCount, cullMode, meshLit, meshSorted, meshHalfRes, meshTextured, meshWireframe, v, t;
+        int mi, vertCount, idxCount, cullMode, meshLit, meshSorted, meshHalfRes, meshTextured, meshWireframe, meshGrayscale, v, t;
         int texW, texShift, texMask, texPalBase;
         int anyVisible;
         const s16* verts;
@@ -1346,6 +1346,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         texShift = afn_mesh_desc[mi][9];
         texPalBase = afn_mesh_desc[mi][10];
         meshWireframe = afn_mesh_desc[mi][11]; // 0=solid, 1=wireframe
+        meshGrayscale = afn_mesh_desc[mi][12]; // 0=normal, 1=grayscale shaded faces
         texMask = texW > 0 ? texW - 1 : 0;
         uvs = afn_mesh_uv_ptrs[mi];
         tex = afn_mesh_tex_ptrs[mi];
@@ -1485,9 +1486,39 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             int i1 = indices[ti * 3 + 1];
             int i2 = indices[ti * 3 + 2];
 
-            if (meshWireframe)
+            if (meshGrayscale)
             {
-                // Grayscale wireframe — compute shade from face normal
+                // Grayscale shaded face — compute shade from face normal
+                int nx, ny, nz, rnx, rny, rnz, dot, shade;
+                u8 palIdx;
+                nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
+                ny = ((int)norms[i0*3+1] + norms[i1*3+1] + norms[i2*3+1]) / 3;
+                nz = ((int)norms[i0*3+2] + norms[i1*3+2] + norms[i2*3+2]) / 3;
+                rnx = (nx * (cosR >> 4) + nz * (sinR >> 4)) >> 4;
+                rny = ny;
+                rnz = (-nx * (sinR >> 4) + nz * (cosR >> 4)) >> 4;
+                dot = -(rnx * 38 + rny * (-102) + rnz * 64) >> 7;
+                shade = (dot >> 4) + 3;
+                if (shade < 1) shade = 1;
+                if (shade > 7) shade = 7;
+                palIdx = 5 + shade; // grayscale palette at indices 5-12
+                // Draw filled grayscale triangle
+                if (meshHalfRes)
+                    rasterize_tri_half(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+                else
+                    rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+                // Draw wireframe overlay on top if wireframe is also enabled
+                if (meshWireframe)
+                {
+                    u8 edgeIdx = (shade <= 3) ? 12 : 5; // dark edges on light faces, light edges on dark
+                    draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], edgeIdx);
+                    draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], edgeIdx);
+                    draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], edgeIdx);
+                }
+            }
+            else if (meshWireframe)
+            {
+                // Wireframe only — shaded lines, no fill
                 int nx, ny, nz, rnx, rny, rnz, dot, shade;
                 u8 palIdx;
                 nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
