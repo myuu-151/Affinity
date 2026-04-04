@@ -449,7 +449,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             const PlayerDirImage* playerDirs, float playerOrbitAngle,
             const AssetDirImages* assetDirImages, int assetDirCount,
             const AssetDirImages* spriteDirImages, int spriteDirCount,
-            const MeshAsset* meshAssets, int meshAssetCount)
+            const MeshAsset* meshAssets, int meshAssetCount,
+            bool mode7Floor)
 {
     float cosA = cosf(-cam.angle);
     float sinA = sinf(-cam.angle);
@@ -457,69 +458,126 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
     // Horizon line — controlled by camera pitch (I/K keys)
     int horizon = (int)cam.horizon;
 
-    // --- Clear to sky ---
-    for (int y = 0; y < kGBAHeight; y++)
+    if (mode7Floor)
     {
-        uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
-        for (int x = 0; x < kGBAWidth; x++)
+        // --- Mode 7 affine floor rendering ---
+        for (int y = 0; y < kGBAHeight; y++)
         {
-            row[x * 3 + 0] = kSkyCol[0];
-            row[x * 3 + 1] = kSkyCol[1];
-            row[x * 3 + 2] = kSkyCol[2];
+            uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
+
+            if (y <= horizon)
+            {
+                // Sky
+                for (int x = 0; x < kGBAWidth; x++)
+                {
+                    row[x * 3 + 0] = kSkyCol[0];
+                    row[x * 3 + 1] = kSkyCol[1];
+                    row[x * 3 + 2] = kSkyCol[2];
+                }
+                continue;
+            }
+
+            // Mode 7 per-scanline math (matches Tonc HBlank ISR)
+            float lambda = cam.height / (float)(y - horizon);
+
+            float lcf = lambda * cosA;
+            float lsf = lambda * sinA;
+
+            float startX = cam.x + (-120.0f * lcf) + (cam.fov * lsf);
+            float startZ = cam.z + (-120.0f * lsf) - (cam.fov * lcf);
+
+            float stepX = lcf;
+            float stepZ = lsf;
+
+            float wx = startX;
+            float wz = startZ;
+
+            for (int x = 0; x < kGBAWidth; x++)
+            {
+                uint8_t r, g, b;
+                SampleFloor(wx, wz, map, r, g, b);
+
+                float fog = lambda / 300.0f;
+                if (fog > 1.0f) fog = 1.0f;
+                r = (uint8_t)(r * (1.0f - fog) + kSkyCol[0] * fog);
+                g = (uint8_t)(g * (1.0f - fog) + kSkyCol[1] * fog);
+                b = (uint8_t)(b * (1.0f - fog) + kSkyCol[2] * fog);
+
+                row[x * 3 + 0] = r;
+                row[x * 3 + 1] = g;
+                row[x * 3 + 2] = b;
+
+                wx += stepX;
+                wz += stepZ;
+            }
         }
     }
-
-    // --- Draw ground grid at origin (wireframe lines) ---
+    else
     {
-        static const float kGridSpacing = 32.0f;
-        static const int kGridLines = 17; // -256 to +256 in steps of 32
-        static const float kGridHalf = 256.0f;
-        static const int kSegments = 32;  // segments per grid line
-
-        for (int axis = 0; axis < 2; axis++)
+        // --- Clear to sky ---
+        for (int y = 0; y < kGBAHeight; y++)
         {
-            for (int i = 0; i < kGridLines; i++)
+            uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
+            for (int x = 0; x < kGBAWidth; x++)
             {
-                float offset = -kGridHalf + i * kGridSpacing;
-                bool isCenter = (i == kGridLines / 2);
-                uint8_t gr = isCenter ? 180 : 60;
-                uint8_t gg = isCenter ? 180 : 70;
-                uint8_t gb = isCenter ? 180 : 60;
+                row[x * 3 + 0] = kSkyCol[0];
+                row[x * 3 + 1] = kSkyCol[1];
+                row[x * 3 + 2] = kSkyCol[2];
+            }
+        }
 
-                int prevSX = 0, prevSY = 0;
-                bool prevVis = false;
+        // --- Draw ground grid at origin (wireframe lines) ---
+        {
+            static const float kGridSpacing = 32.0f;
+            static const int kGridLines = 17; // -256 to +256 in steps of 32
+            static const float kGridHalf = 256.0f;
+            static const int kSegments = 32;  // segments per grid line
 
-                for (int s = 0; s <= kSegments; s++)
+            for (int axis = 0; axis < 2; axis++)
+            {
+                for (int i = 0; i < kGridLines; i++)
                 {
-                    float t = -kGridHalf + s * (kGridHalf * 2.0f / kSegments);
-                    float wx = axis == 0 ? t : offset;
-                    float wz = axis == 0 ? offset : t;
+                    float offset = -kGridHalf + i * kGridSpacing;
+                    bool isCenter = (i == kGridLines / 2);
+                    uint8_t gr = isCenter ? 180 : 60;
+                    uint8_t gg = isCenter ? 180 : 70;
+                    uint8_t gb = isCenter ? 180 : 60;
 
-                    float ddx = wx - cam.x;
-                    float ddz = wz - cam.z;
-                    float fovLambda = ddx * sinA - ddz * cosA;
-                    if (fovLambda <= 0.5f) { prevVis = false; continue; }
-                    float lambda = fovLambda / cam.fov;
-                    if (lambda < 0.01f) lambda = 0.01f;
+                    int prevSX = 0, prevSY = 0;
+                    bool prevVis = false;
 
-                    float fog = lambda / 300.0f;
-                    if (fog > 0.95f) { prevVis = false; continue; }
+                    for (int s = 0; s <= kSegments; s++)
+                    {
+                        float t = -kGridHalf + s * (kGridHalf * 2.0f / kSegments);
+                        float wx = axis == 0 ? t : offset;
+                        float wz = axis == 0 ? offset : t;
 
-                    int screenY = horizon + (int)(cam.height / lambda);
-                    float side = ddx * cosA + ddz * sinA;
-                    int screenX = 120 + (int)(side / lambda);
+                        float ddx = wx - cam.x;
+                        float ddz = wz - cam.z;
+                        float fovLambda = ddx * sinA - ddz * cosA;
+                        if (fovLambda <= 0.5f) { prevVis = false; continue; }
+                        float lambda = fovLambda / cam.fov;
+                        if (lambda < 0.01f) lambda = 0.01f;
 
-                    // Fog-blend the color
-                    uint8_t fr = (uint8_t)(gr * (1.0f - fog) + kSkyCol[0] * fog);
-                    uint8_t fg = (uint8_t)(gg * (1.0f - fog) + kSkyCol[1] * fog);
-                    uint8_t fb = (uint8_t)(gb * (1.0f - fog) + kSkyCol[2] * fog);
+                        float fog = lambda / 300.0f;
+                        if (fog > 0.95f) { prevVis = false; continue; }
 
-                    if (prevVis)
-                        DrawLine(prevSX, prevSY, screenX, screenY, fr, fg, fb);
+                        int screenY = horizon + (int)(cam.height / lambda);
+                        float side = ddx * cosA + ddz * sinA;
+                        int screenX = 120 + (int)(side / lambda);
 
-                    prevSX = screenX;
-                    prevSY = screenY;
-                    prevVis = true;
+                        // Fog-blend the color
+                        uint8_t fr = (uint8_t)(gr * (1.0f - fog) + kSkyCol[0] * fog);
+                        uint8_t fg = (uint8_t)(gg * (1.0f - fog) + kSkyCol[1] * fog);
+                        uint8_t fb = (uint8_t)(gb * (1.0f - fog) + kSkyCol[2] * fog);
+
+                        if (prevVis)
+                            DrawLine(prevSX, prevSY, screenX, screenY, fr, fg, fb);
+
+                        prevSX = screenX;
+                        prevSY = screenY;
+                        prevVis = true;
+                    }
                 }
             }
         }

@@ -1779,7 +1779,9 @@ int main(void)
 #endif
 
     // --- Reciprocal LUT for texture rasterizer ---
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
     init_rcp_table();
+#endif
 
     // --- Minimap setup ---
 #if !defined(AFN_MESH_COUNT) || AFN_MESH_COUNT == 0

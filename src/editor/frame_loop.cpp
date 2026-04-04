@@ -32,7 +32,7 @@ static Mode7Camera sCamera;
 static bool sInitialized = false;
 
 // Editor mode tabs
-enum class EditorTab { Map, Sprites, Tiles, Skybox, Player, ThreeD };
+enum class EditorTab { Map, Sprites, Tiles, Skybox, Player, ThreeD, Mode7 };
 static EditorTab sActiveTab = EditorTab::Map;
 
 // Dummy tileset: 16 colors for the palette display
@@ -1412,6 +1412,8 @@ static void DrawTabBar()
     };
 
     TabButton("Scene",   EditorTab::Map);
+    TabButton("Mode 7",  EditorTab::Mode7);
+    TabButton("Tiles",   EditorTab::Tiles);
     TabButton("Sprites", EditorTab::Sprites);
     TabButton("Skybox",  EditorTab::Skybox);
     TabButton("3D",      EditorTab::ThreeD);
@@ -4092,12 +4094,14 @@ void FrameTick(float dt)
             spriteDirImgs[si].dirs[d].height = sAssetDirSprites[ai][dirSetIdx][d].height;
         }
     }
+    bool useMode7Floor = (sActiveTab == EditorTab::Mode7);
     Mode7::Render(sCamera, nullptr, sSprites, sSpriteCount, camObjPtr, sCamObjEditorScale,
                   assetsPtr, (int)sSpriteAssets.size(), sViewportAnimTime, isPlaying,
                   nullptr, spriteAngle,
                   assetDirImgs.empty() ? nullptr : assetDirImgs.data(), (int)assetDirImgs.size(),
                   spriteDirImgs.empty() ? nullptr : spriteDirImgs.data(), (int)spriteDirImgs.size(),
-                  sMeshAssets.empty() ? nullptr : sMeshAssets.data(), (int)sMeshAssets.size());
+                  sMeshAssets.empty() ? nullptr : sMeshAssets.data(), (int)sMeshAssets.size(),
+                  useMode7Floor);
 
     // Draw axis guide line when transforming a selected sprite
     if (sTransformAxis && sTransformAxis != 'S'
@@ -4132,7 +4136,19 @@ void FrameTick(float dt)
     // Draw everything
     DrawTabBar();
 
-    if (sActiveTab == EditorTab::Skybox)
+    if (sActiveTab == EditorTab::Tiles)
+    {
+        // Tiles tab: placeholder
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
+        ImGui::SetNextWindowSize(ImVec2(totalW, bodyH));
+        ImGui::Begin("##TilesTab", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGui::Text("Tile Editor — coming soon");
+        ImGui::End();
+    }
+    else if (sActiveTab == EditorTab::Skybox)
     {
         // Skybox tab: placeholder
         ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
@@ -4163,6 +4179,30 @@ void FrameTick(float dt)
     else if (sActiveTab == EditorTab::ThreeD)
     {
         Draw3DView(ImVec2(vp->WorkPos.x, bodyY), ImVec2(totalW, bodyH));
+    }
+    else if (sActiveTab == EditorTab::Mode7)
+    {
+        // Mode 7 tab: viewport + tileset/tilemap/palette panels
+        DrawViewport(
+            ImVec2(vp->WorkPos.x, bodyY),
+            ImVec2(leftW, bodyH));
+
+        if (sEditorMode == EditorMode::Edit)
+            DrawObjectEditorPanel(
+                ImVec2(vp->WorkPos.x + leftW, bodyY),
+                ImVec2(rightW, tilesetH));
+        else
+            DrawTilesetPanel(
+                ImVec2(vp->WorkPos.x + leftW, bodyY),
+                ImVec2(rightW, tilesetH));
+
+        DrawTilemapPanel(
+            ImVec2(vp->WorkPos.x + leftW, bodyY + tilesetH),
+            ImVec2(rightW, tilemapH));
+
+        DrawPalettePanel(
+            ImVec2(vp->WorkPos.x + leftW, bodyY + tilesetH + tilemapH),
+            ImVec2(rightW, paletteH));
     }
     else if (sActiveTab == EditorTab::Sprites)
     {
