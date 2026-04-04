@@ -2860,7 +2860,11 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             {
                 bool sel = ((int)sp.type == t);
                 if (ImGui::Selectable(kSpriteTypeNames[t], sel))
+                {
                     sp.type = (SpriteType)t;
+                    if (sp.type != SpriteType::Mesh)
+                        sp.meshIdx = -1; // clear mesh link when changing away from Mesh type
+                }
             }
             ImGui::EndCombo();
         }
@@ -3501,7 +3505,8 @@ void FrameTick(float dt)
                     se.animIdx = sSprites[i].animIdx;
                     se.animEnabled = sSprites[i].animEnabled;
                     se.spriteType = (int)sSprites[i].type;
-                    se.meshIdx = sSprites[i].meshIdx;
+                    // Only Mesh-type sprites get a mesh reference; others force -1
+                    se.meshIdx = (sSprites[i].type == SpriteType::Mesh) ? sSprites[i].meshIdx : -1;
                     // Use asset palette bank if linked, otherwise cycle 1-5
                     if (se.assetIdx >= 0 && se.assetIdx < (int)sSpriteAssets.size())
                         se.palIdx = sSpriteAssets[se.assetIdx].palBank;

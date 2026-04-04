@@ -1359,6 +1359,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             sy[v] = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
             side = (dx * g_cosf + dz * g_sinf) >> 8;
             sx[v] = 120 + (int)((side * cam_fov) / fovLambda);
+
             vis[v] = 1;
         }
 

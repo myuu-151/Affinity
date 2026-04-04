@@ -17,7 +17,6 @@
 #define AFN_SPRINT_EASE_IN 15
 #define AFN_SPRINT_EASE_OUT 30
 #define AFN_DRAW_DISTANCE 55424
-#define AFN_COVERAGE_BUF 1
 
 // Player sprite index (-1 = none)
 #define AFN_PLAYER_IDX -1
@@ -6787,7 +6786,7 @@ static const u16 afn_mesh0_idx[216] = {
 };
 
 static const int afn_mesh_desc[][12] = {
-    { 52, 216, 0x7C1F, 0, 0, 1, 1, 0, 0, 0, 0, 1 },
+    { 52, 216, 0x7C1F, 0, 0, 1, 1, 0, 0, 0, 0, 0 },
 };
 
 static const s16* const afn_mesh_vert_ptrs[] = { afn_mesh0_verts };
