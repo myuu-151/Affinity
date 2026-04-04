@@ -837,6 +837,18 @@ static inline int sat32(long long v)
     return (int)v;
 }
 
+// Reciprocal lookup table: rcp_table[n] = (1 << 16) / n for n=1..240
+// Used to replace per-scanline division with multiply in texture rasterizer
+static u16 rcp_table[241];
+
+static void init_rcp_table(void)
+{
+    int i;
+    rcp_table[0] = 0xFFFF;
+    for (i = 1; i <= 240; i++)
+        rcp_table[i] = (u16)(65536 / i);
+}
+
 // Rasterize a flat-shaded triangle into Mode 4 bitmap
 // Uses 16.16 fixed-point edge walking — no division in scanline loop
 IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx)
@@ -1231,24 +1243,26 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
             int ul = uLong >> 16, ur = uShort >> 16;
             int vl = vLong >> 16, vr = vShort >> 16;
             if (xl > xr) { tmp=xl;xl=xr;xr=tmp; tmp=ul;ul=ur;ur=tmp; tmp=vl;vl=vr;vr=tmp; }
-            if (xl < 0) { if (xr < 0) goto next_upper; int d = xr - xl; if (d > 0) { ul += (-xl) * (ur - ul) / d; vl += (-xl) * (vr - vl) / d; } xl = 0; }
+            if (xl < 0) { if (xr < 0) goto next_upper; int d = xr - xl; if (d > 0 && d <= 240) { int rcp = rcp_table[d]; ul += (int)((long long)(-xl) * (ur - ul) * rcp >> 16); vl += (int)((long long)(-xl) * (vr - vl) * rcp >> 16); } xl = 0; }
             if (xr > 239) xr = 239;
             spanW = xr - xl;
             if (spanW >= 0)
             {
                 u16* row = buf + y * 120;
                 int su = ul << 8, sv = vl << 8;
-                int du2 = spanW > 0 ? ((ur - ul) << 8) / spanW : 0;
-                int dv2 = spanW > 0 ? ((vr - vl) << 8) / spanW : 0;
+                int du2, dv2;
                 int x = xl;
-                /* Odd left pixel — read-modify-write */
+                if (spanW > 0 && spanW <= 240) {
+                    int rcp = rcp_table[spanW];
+                    du2 = ((ur - ul) * rcp) >> 8;
+                    dv2 = ((vr - vl) * rcp) >> 8;
+                } else { du2 = 0; dv2 = 0; }
                 if ((x & 1) && x <= xr)
                 {
                     u8 pi = palBase + tex[( ((sv >> 16) & texMask) << texShift) | ((su >> 16) & texMask)];
                     row[x >> 1] = (row[x >> 1] & 0x00FF) | ((u16)pi << 8);
                     su += du2; sv += dv2; x++;
                 }
-                /* Paired pixels — full 16-bit write */
                 for (; x + 1 <= xr; x += 2)
                 {
                     u8 p0 = palBase + tex[( ((sv >> 16) & texMask) << texShift) | ((su >> 16) & texMask)];
@@ -1257,7 +1271,6 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
                     su += du2; sv += dv2;
                     row[x >> 1] = p0 | ((u16)p1 << 8);
                 }
-                /* Odd right pixel */
                 if (x <= xr)
                 {
                     u8 pi = palBase + tex[( ((sv >> 16) & texMask) << texShift) | ((su >> 16) & texMask)];
@@ -1297,16 +1310,20 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
             int ul = uLong >> 16, ur = uShort >> 16;
             int vl = vLong >> 16, vr = vShort >> 16;
             if (xl > xr) { tmp=xl;xl=xr;xr=tmp; tmp=ul;ul=ur;ur=tmp; tmp=vl;vl=vr;vr=tmp; }
-            if (xl < 0) { if (xr < 0) goto next_lower; int d = xr - xl; if (d > 0) { ul += (-xl) * (ur - ul) / d; vl += (-xl) * (vr - vl) / d; } xl = 0; }
+            if (xl < 0) { if (xr < 0) goto next_lower; int d = xr - xl; if (d > 0 && d <= 240) { int rcp = rcp_table[d]; ul += (int)((long long)(-xl) * (ur - ul) * rcp >> 16); vl += (int)((long long)(-xl) * (vr - vl) * rcp >> 16); } xl = 0; }
             if (xr > 239) xr = 239;
             spanW = xr - xl;
             if (spanW >= 0)
             {
                 u16* row = buf + y * 120;
                 int su = ul << 8, sv = vl << 8;
-                int du2 = spanW > 0 ? ((ur - ul) << 8) / spanW : 0;
-                int dv2 = spanW > 0 ? ((vr - vl) << 8) / spanW : 0;
+                int du2, dv2;
                 int x = xl;
+                if (spanW > 0 && spanW <= 240) {
+                    int rcp = rcp_table[spanW];
+                    du2 = ((ur - ul) * rcp) >> 8;
+                    dv2 = ((vr - vl) * rcp) >> 8;
+                } else { du2 = 0; dv2 = 0; }
                 if ((x & 1) && x <= xr)
                 {
                     u8 pi = palBase + tex[( ((sv >> 16) & texMask) << texShift) | ((su >> 16) & texMask)];
@@ -1724,6 +1741,9 @@ int main(void)
         }
     }
 #endif
+
+    // --- Reciprocal LUT for texture rasterizer ---
+    init_rcp_table();
 
     // --- Minimap setup ---
 #if !defined(AFN_MESH_COUNT) || AFN_MESH_COUNT == 0
