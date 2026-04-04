@@ -1084,6 +1084,9 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
 }
 #endif
 
+// Forward declaration for draw_line (defined below)
+IWRAM_CODE static void draw_line(u16* buf, int x0, int y0, int x1, int y1, u8 palIdx);
+
 // Near-plane clipped wireframe edge drawing.
 // Clips edge to near plane in view space before projecting, preventing spider-web artifacts.
 #define WIRE_NEAR 64
