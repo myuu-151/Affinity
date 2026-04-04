@@ -1489,7 +1489,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 if (sx[i2] < mnx) mnx = sx[i2]; if (sx[i2] > mxx) mxx = sx[i2];
                 if (sy[i1] < mny) mny = sy[i1]; if (sy[i1] > mxy) mxy = sy[i1];
                 if (sy[i2] < mny) mny = sy[i2]; if (sy[i2] > mxy) mxy = sy[i2];
-                if (mxx - mnx > 16384 || mxy - mny > 16384) continue;
+                if (mxx - mnx > 32000 || mxy - mny > 32000) continue;
             }
 
             if (meshWireframe)
