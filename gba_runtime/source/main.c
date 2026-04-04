@@ -1336,7 +1336,7 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
 }
 
 // Triangle sort entry for painter's algorithm
-typedef struct { int i0, i1, i2; int n0, n1, n2; int depth; } TriSort;
+typedef struct { u16 i0, i1, i2, origTri; int depth; } TriSort;
 
 // Near-plane clipping threshold (view-space fovLambda)
 #define NEAR_CLIP 48
@@ -1356,13 +1356,11 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         const s16* uvs;
         const u8* tex;
         FIXED cosR, sinR, sprScale;
-        int sx[576], sy[576];        // extra slots for clipped vertices
-        FIXED sz[576];               // depth per vertex for sorting
-        FIXED rawDepth[576];         // unclamped fovLambda for near-plane check
-        FIXED viewSide[576];         // view-space lateral offset (for clipping interpolation)
-        FIXED viewHt[576];           // view-space height offset (for clipping interpolation)
-        u8 vis[576];
-        TriSort triOrder[384];       // extra capacity for clipped triangles
+        int sx[544], sy[544];        // extra 32 slots for clipped vertices
+        FIXED sz[544];               // depth per vertex for sorting
+        FIXED rawDepth[544];         // unclamped fovLambda for near-plane check
+        u8 vis[512];
+        TriSort triOrder[256];
         int triCount;
         int clipVert;                // next available vertex slot for clipped verts
 
@@ -1434,9 +1432,6 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             heightDiff = cam_h - wy;
             side = (dx * g_cosf + dz * g_sinf) >> 8;
 
-            viewSide[v] = side;
-            viewHt[v] = heightDiff;
-
             sy[v] = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
             sx[v] = 120 + (int)((side * cam_fov) / fovLambda);
 
@@ -1471,22 +1466,21 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 
             if (behindCount == 3) continue; // all behind — skip entirely
 
-            if (behindCount > 0 && clipVert + 2 < 576 && triCount + 2 < 384)
+            if (behindCount > 0 && clipVert + 2 <= 544 && triCount + 2 < 256)
             {
                 // Clip triangle against near plane.
-                // Interpolate view-space coords at clip points, then project.
-                // Macro: create a clipped vertex between vA (behind) and vB (in front)
+                // Interpolate screen coords at clip points using lerp on sx/sy.
+                // This is an approximation (perspective-correct would need view-space interp)
+                // but works well enough for near-plane clipping.
                 #define CLIP_VERT(vA, vB) { \
                     int cv = clipVert++; \
                     int tNum = NEAR_CLIP - rawDepth[vA]; \
                     int tDen = rawDepth[vB] - rawDepth[vA]; \
                     if (tDen == 0) tDen = 1; \
-                    viewSide[cv] = viewSide[vA] + (int)((long long)(viewSide[vB] - viewSide[vA]) * tNum / tDen); \
-                    viewHt[cv] = viewHt[vA] + (int)((long long)(viewHt[vB] - viewHt[vA]) * tNum / tDen); \
+                    sx[cv] = sx[vA] + (int)((long long)(sx[vB] - sx[vA]) * tNum / tDen); \
+                    sy[cv] = sy[vA] + (int)((long long)(sy[vB] - sy[vA]) * tNum / tDen); \
                     rawDepth[cv] = NEAR_CLIP; \
                     sz[cv] = NEAR_CLIP; \
-                    sx[cv] = 120 + (int)((viewSide[cv] * cam_fov) / NEAR_CLIP); \
-                    sy[cv] = m7_horizon + (int)((viewHt[cv] * cam_fov) / NEAR_CLIP); \
                 }
 
                 if (behindCount == 1)
@@ -1499,32 +1493,23 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     c0 = clipVert; CLIP_VERT(iB, iF0);
                     c1 = clipVert; CLIP_VERT(iB, iF1);
                     // Triangle 1: c0, iF0, iF1
-                    cross = (long long)(sx[iF0] - sx[c0]) * (sy[iF1] - sy[c0])
-                          - (long long)(sy[iF0] - sy[c0]) * (sx[iF1] - sx[c0]);
-                    if (!(cullMode == 0 && cross >= 0) && !(cullMode == 1 && cross <= 0))
                     {
                         int avgD = sz[c0] + sz[iF0] + sz[iF1];
                         triOrder[triCount].i0 = c0;
                         triOrder[triCount].i1 = iF0;
                         triOrder[triCount].i2 = iF1;
-                        triOrder[triCount].n0 = i0;
-                        triOrder[triCount].n1 = i1;
-                        triOrder[triCount].n2 = i2;
+                        triOrder[triCount].origTri = t;
                         triOrder[triCount].depth = avgD;
                         triCount++;
                     }
                     // Triangle 2: c0, iF1, c1
-                    cross = (long long)(sx[iF1] - sx[c0]) * (sy[c1] - sy[c0])
-                          - (long long)(sy[iF1] - sy[c0]) * (sx[c1] - sx[c0]);
-                    if (!(cullMode == 0 && cross >= 0) && !(cullMode == 1 && cross <= 0))
+                    if (triCount < 256)
                     {
                         int avgD = sz[c0] + sz[iF1] + sz[c1];
                         triOrder[triCount].i0 = c0;
                         triOrder[triCount].i1 = iF1;
                         triOrder[triCount].i2 = c1;
-                        triOrder[triCount].n0 = i0;
-                        triOrder[triCount].n1 = i1;
-                        triOrder[triCount].n2 = i2;
+                        triOrder[triCount].origTri = t;
                         triOrder[triCount].depth = avgD;
                         triCount++;
                     }
@@ -1538,17 +1523,12 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     else          { iF = i2; iB0 = i0; iB1 = i1; }
                     c0 = clipVert; CLIP_VERT(iB0, iF);
                     c1 = clipVert; CLIP_VERT(iB1, iF);
-                    cross = (long long)(sx[c0] - sx[iF]) * (sy[c1] - sy[iF])
-                          - (long long)(sy[c0] - sy[iF]) * (sx[c1] - sx[iF]);
-                    if (!(cullMode == 0 && cross >= 0) && !(cullMode == 1 && cross <= 0))
                     {
                         int avgD = sz[iF] + sz[c0] + sz[c1];
                         triOrder[triCount].i0 = iF;
                         triOrder[triCount].i1 = c0;
                         triOrder[triCount].i2 = c1;
-                        triOrder[triCount].n0 = i0;
-                        triOrder[triCount].n1 = i1;
-                        triOrder[triCount].n2 = i2;
+                        triOrder[triCount].origTri = t;
                         triOrder[triCount].depth = avgD;
                         triCount++;
                     }
@@ -1591,12 +1571,10 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 triOrder[triCount].i0 = i0;
                 triOrder[triCount].i1 = i1;
                 triOrder[triCount].i2 = i2;
-                triOrder[triCount].n0 = i0;
-                triOrder[triCount].n1 = i1;
-                triOrder[triCount].n2 = i2;
+                triOrder[triCount].origTri = t;
                 triOrder[triCount].depth = avgDepth;
                 triCount++;
-                if (triCount >= 384) break;
+                if (triCount >= 256) break;
             }
         }
 
@@ -1630,9 +1608,10 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             int i0 = triOrder[t].i0;
             int i1 = triOrder[t].i1;
             int i2 = triOrder[t].i2;
-            int n0 = triOrder[t].n0; // original vertex indices for normal lookup
-            int n1 = triOrder[t].n1;
-            int n2 = triOrder[t].n2;
+            int ot = triOrder[t].origTri; // original triangle for normal/UV lookup
+            int n0 = indices[ot * 3 + 0];
+            int n1 = indices[ot * 3 + 1];
+            int n2 = indices[ot * 3 + 2];
 
             if (meshGrayscale)
             {
