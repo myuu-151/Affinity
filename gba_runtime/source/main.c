@@ -1086,8 +1086,8 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
 
 // Clamp a coordinate for wireframe drawing — prevents extreme projections
 // from near-plane vertices while keeping lines visible at all distances
-#define WIRE_CLAMP_X(x) ((x) < -300 ? -300 : (x) > 540 ? 540 : (x))
-#define WIRE_CLAMP_Y(y) ((y) < -200 ? -200 : (y) > 360 ? 360 : (y))
+#define WIRE_CLAMP_X(x) ((x) < -60 ? -60 : (x) > 300 ? 300 : (x))
+#define WIRE_CLAMP_Y(y) ((y) < -40 ? -40 : (y) > 200 ? 200 : (y))
 
 // Cohen-Sutherland line clipping + Bresenham for wireframe (8bpp Mode 4)
 #define CS_LEFT 1
