@@ -1510,7 +1510,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 // Draw wireframe overlay on top if wireframe is also enabled
                 if (meshWireframe)
                 {
-                    u8 edgeIdx = (shade <= 3) ? 12 : 5; // dark edges on light faces, light edges on dark
+                    u8 edgeIdx = 6; // dark gray wireframe edges
                     draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], edgeIdx);
                     draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], edgeIdx);
                     draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], edgeIdx);
