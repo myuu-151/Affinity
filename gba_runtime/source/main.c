@@ -1482,6 +1482,16 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             int i1 = indices[ti * 3 + 1];
             int i2 = indices[ti * 3 + 2];
 
+            // Skip triangles with extreme screen coords (prevents 16.16 fixed-point overflow)
+            {
+                int mnx = sx[i0], mxx = sx[i0], mny = sy[i0], mxy = sy[i0];
+                if (sx[i1] < mnx) mnx = sx[i1]; if (sx[i1] > mxx) mxx = sx[i1];
+                if (sx[i2] < mnx) mnx = sx[i2]; if (sx[i2] > mxx) mxx = sx[i2];
+                if (sy[i1] < mny) mny = sy[i1]; if (sy[i1] > mxy) mxy = sy[i1];
+                if (sy[i2] < mny) mny = sy[i2]; if (sy[i2] > mxy) mxy = sy[i2];
+                if (mxx - mnx > 2048 || mxy - mny > 2048) continue;
+            }
+
             if (meshWireframe)
             {
                 // Grayscale wireframe — compute shade from face normal
