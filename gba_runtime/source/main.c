@@ -1508,13 +1508,16 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 else
                     rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
                 // Draw wireframe overlay on top if wireframe is also enabled
-                // Only draw edges where both endpoints are away from near plane
+                // Skip edges with endpoints far off screen (near-plane projection artifacts)
                 if (meshWireframe)
                 {
                     u8 edgeIdx = 6; // dark gray wireframe edges
-                    if (vis[i0] && vis[i1]) draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], edgeIdx);
-                    if (vis[i1] && vis[i2]) draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], edgeIdx);
-                    if (vis[i2] && vis[i0]) draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], edgeIdx);
+                    int ok0 = (sx[i0] > -512 && sx[i0] < 752 && sy[i0] > -512 && sy[i0] < 672);
+                    int ok1 = (sx[i1] > -512 && sx[i1] < 752 && sy[i1] > -512 && sy[i1] < 672);
+                    int ok2 = (sx[i2] > -512 && sx[i2] < 752 && sy[i2] > -512 && sy[i2] < 672);
+                    if (ok0 && ok1) draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], edgeIdx);
+                    if (ok1 && ok2) draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], edgeIdx);
+                    if (ok2 && ok0) draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], edgeIdx);
                 }
             }
             else if (meshWireframe)
@@ -1533,10 +1536,15 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 if (shade < 1) shade = 1;
                 if (shade > 7) shade = 7;
                 palIdx = 5 + shade; // grayscale palette at indices 5-12
-                // Only draw edges where both endpoints are away from near plane
-                if (vis[i0] && vis[i1]) draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], palIdx);
-                if (vis[i1] && vis[i2]) draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
-                if (vis[i2] && vis[i0]) draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], palIdx);
+                // Skip edges with endpoints far off screen (near-plane projection artifacts)
+                {
+                    int ok0 = (sx[i0] > -512 && sx[i0] < 752 && sy[i0] > -512 && sy[i0] < 672);
+                    int ok1 = (sx[i1] > -512 && sx[i1] < 752 && sy[i1] > -512 && sy[i1] < 672);
+                    int ok2 = (sx[i2] > -512 && sx[i2] < 752 && sy[i2] > -512 && sy[i2] < 672);
+                    if (ok0 && ok1) draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], palIdx);
+                    if (ok1 && ok2) draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+                    if (ok2 && ok0) draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], palIdx);
+                }
             }
             else if (meshTextured && uvs && tex)
             {
