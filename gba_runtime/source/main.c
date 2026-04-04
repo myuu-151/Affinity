@@ -1141,14 +1141,14 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
             if (spanW >= 0)
             {
                 u16* row = buf + y * 120;
-                int su = ul << 8, sv = vl << 8; /* 16.8 */
+                int su = ul << 8, sv = vl << 8;
                 int du2 = spanW > 0 ? ((ur - ul) << 8) / spanW : 0;
                 int dv2 = spanW > 0 ? ((vr - vl) << 8) / spanW : 0;
                 int x;
                 for (x = xl; x <= xr; x++)
                 {
-                    int tu = (su >> 8) & texMask;
-                    int tv = (sv >> 8) & texMask;
+                    int tu = (su >> 16) & texMask;
+                    int tv = (sv >> 16) & texMask;
                     u8 pi = palBase + tex[(tv << texShift) | tu];
                     if (x & 1) row[x >> 1] = (row[x >> 1] & 0x00FF) | ((u16)pi << 8);
                     else       row[x >> 1] = (row[x >> 1] & 0xFF00) | pi;
@@ -1204,8 +1204,8 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
                 int x;
                 for (x = xl; x <= xr; x++)
                 {
-                    int tu = (su >> 8) & texMask;
-                    int tv = (sv >> 8) & texMask;
+                    int tu = (su >> 16) & texMask;
+                    int tv = (sv >> 16) & texMask;
                     u8 pi = palBase + tex[(tv << texShift) | tu];
                     if (x & 1) row[x >> 1] = (row[x >> 1] & 0x00FF) | ((u16)pi << 8);
                     else       row[x >> 1] = (row[x >> 1] & 0xFF00) | pi;
