@@ -1949,7 +1949,11 @@ int main(void)
             // FREE CAMERA MODE (no player sprite — original controls)
             // ============================================================
 
-            FIXED moveSpeed = 37;
+#ifdef AFN_WALK_SPEED
+            FIXED moveSpeed = key_is_down(KEY_B) ? AFN_SPRINT_SPEED : AFN_WALK_SPEED;
+#else
+            FIXED moveSpeed = key_is_down(KEY_B) ? 56 : 37;
+#endif
             int   rotSpeed  = 0x0200;
 
             if (key_is_down(KEY_LEFT))
