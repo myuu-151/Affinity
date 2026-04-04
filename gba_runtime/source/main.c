@@ -1081,18 +1081,50 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
 }
 #endif
 
-// Bresenham line for wireframe rendering (8bpp Mode 4)
+// Cohen-Sutherland line clipping + Bresenham for wireframe (8bpp Mode 4)
+#define CS_LEFT 1
+#define CS_RIGHT 2
+#define CS_BOTTOM 4
+#define CS_TOP 8
+static int cs_code(int x, int y)
+{
+    int c = 0;
+    if (x < 0) c |= CS_LEFT;
+    else if (x >= 240) c |= CS_RIGHT;
+    if (y < 0) c |= CS_TOP;
+    else if (y >= 160) c |= CS_BOTTOM;
+    return c;
+}
+
 IWRAM_CODE static void draw_line(u16* buf, int x0, int y0, int x1, int y1, u8 palIdx)
 {
-    int dx = x1 - x0, dy = y1 - y0;
-    int sx = 1, sy = 1;
-    int steps;
+    int c0, c1, co, x, y;
+    int dx, dy, sx, sy, err, steps;
+
+    // Clip line to screen (0,0)-(239,159)
+    c0 = cs_code(x0, y0);
+    c1 = cs_code(x1, y1);
+    for (;;)
+    {
+        if (!(c0 | c1)) break; // both inside
+        if (c0 & c1) return;   // both outside same side
+        co = c0 ? c0 : c1;
+        if (co & CS_BOTTOM)      { x = x0 + (x1 - x0) * (159 - y0) / (y1 - y0); y = 159; }
+        else if (co & CS_TOP)    { x = x0 + (x1 - x0) * (0 - y0) / (y1 - y0);   y = 0; }
+        else if (co & CS_RIGHT)  { y = y0 + (y1 - y0) * (239 - x0) / (x1 - x0); x = 239; }
+        else                     { y = y0 + (y1 - y0) * (0 - x0) / (x1 - x0);   x = 0; }
+        if (co == c0) { x0 = x; y0 = y; c0 = cs_code(x0, y0); }
+        else          { x1 = x; y1 = y; c1 = cs_code(x1, y1); }
+    }
+
+    // Bresenham
+    dx = x1 - x0; dy = y1 - y0;
+    sx = 1; sy = 1;
     if (dx < 0) { dx = -dx; sx = -1; }
     if (dy < 0) { dy = -dy; sy = -1; }
-    int err = dx - dy;
+    err = dx - dy;
     for (steps = 0; steps < 500; steps++)
     {
-        if ((unsigned)x0 < 240 && (unsigned)y0 < 160)
         {
             u16* row = buf + y0 * 120;
             if (x0 & 1) row[x0 >> 1] = (row[x0 >> 1] & 0x00FF) | ((u16)palIdx << 8);

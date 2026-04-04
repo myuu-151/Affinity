@@ -683,7 +683,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%s|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.texturePath.c_str(), ma.wireframe ? 1 : 0);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%s\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.texturePath.c_str());
     }
     fprintf(f, "\n");
 
@@ -946,7 +946,13 @@ static bool LoadProject(const std::string& path)
         {
             char mname[256], mpath[512], mtexpath[512] = {};
             int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0;
-            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%511[^|\n]|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, mtexpath, &mwireframe);
+            // Try new format: name|path|cull|export|lit|halfres|textured|wireframe|texpath
+            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%511[^\n]", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, mtexpath);
+            if (matched < 2)
+            {
+                // Try old format: name|path|cull|export|lit|halfres|textured|texpath|wireframe
+                matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%511[^|\n]|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, mtexpath, &mwireframe);
+            }
             if (matched >= 2)
             {
                 MeshAsset ma;
@@ -962,14 +968,14 @@ static bool LoadProject(const std::string& path)
                     ma.halfRes = (mhalfres != 0);
                 if (matched >= 7)
                     ma.textured = (mtextured != 0);
-                if (matched >= 9)
+                if (matched >= 8)
                     ma.wireframe = (mwireframe != 0);
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
                 ma.name = mname; // restore name in case LoadOBJ overwrote it
                 // Reload texture if textured
-                if (ma.textured && matched >= 8 && mtexpath[0])
+                if (ma.textured && matched >= 9 && mtexpath[0])
                     LoadMeshTexture(std::string(mtexpath), ma);
                 sMeshAssets.push_back(std::move(ma));
             }
