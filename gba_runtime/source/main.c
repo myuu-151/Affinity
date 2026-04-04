@@ -825,6 +825,9 @@ IWRAM_CODE static void afn_hline(u16* row, int left, int right, u8 palIdx)
     }
 }
 
+// Safe 16.16 slope: uses 64-bit intermediate to prevent overflow with large coords
+#define SLOPE16(dx, dy) ((int)(((long long)(dx) << 16) / (dy)))
+
 // Rasterize a flat-shaded triangle into Mode 4 bitmap
 // Uses 16.16 fixed-point edge walking — no division in scanline loop
 IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx)
@@ -845,13 +848,13 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
     if (totalH <= 0) return;
 
     /* Long edge slope (16.16 fixed) — one divide total */
-    dxLong = ((x2 - x0) << 16) / totalH;
+    dxLong = SLOPE16(x2 - x0, totalH);
 
     /* Upper half: y0 -> y1 */
     segH = y1 - y0;
     if (segH > 0)
     {
-        dxShort = ((x1 - x0) << 16) / segH;
+        dxShort = SLOPE16(x1 - x0, segH);
         xLong = x0 << 16;
         xShort = x0 << 16;
 
@@ -882,7 +885,7 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
     segH = y2 - y1;
     if (segH > 0)
     {
-        dxShort = ((x2 - x1) << 16) / segH;
+        dxShort = SLOPE16(x2 - x1, segH);
         /* Long edge continues from where it was at y1 */
         xLong = (x0 << 16) + dxLong * (y1 - y0);
         xShort = x1 << 16;
@@ -928,12 +931,12 @@ IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int 
     totalH = y2 - y0;
     if (totalH <= 0) return;
 
-    dxLong = ((x2 - x0) << 16) / totalH;
+    dxLong = SLOPE16(x2 - x0, totalH);
 
     segH = y1 - y0;
     if (segH > 0)
     {
-        dxShort = ((x1 - x0) << 16) / segH;
+        dxShort = SLOPE16(x1 - x0, segH);
         xLong = x0 << 16;
         xShort = x0 << 16;
 
@@ -968,7 +971,7 @@ IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int 
     segH = y2 - y1;
     if (segH > 0)
     {
-        dxShort = ((x2 - x1) << 16) / segH;
+        dxShort = SLOPE16(x2 - x1, segH);
         xLong = (x0 << 16) + dxLong * (y1 - y0);
         xShort = x1 << 16;
 
@@ -1019,12 +1022,12 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
     totalH = y2 - y0;
     if (totalH <= 0) return;
 
-    dxLong = ((x2 - x0) << 16) / totalH;
+    dxLong = SLOPE16(x2 - x0, totalH);
 
     segH = y1 - y0;
     if (segH > 0)
     {
-        dxShort = ((x1 - x0) << 16) / segH;
+        dxShort = SLOPE16(x1 - x0, segH);
         xLong = x0 << 16;
         xShort = x0 << 16;
 
@@ -1053,7 +1056,7 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
     segH = y2 - y1;
     if (segH > 0)
     {
-        dxShort = ((x2 - x1) << 16) / segH;
+        dxShort = SLOPE16(x2 - x1, segH);
         xLong = (x0 << 16) + dxLong * (y1 - y0);
         xShort = x1 << 16;
 
@@ -1162,17 +1165,17 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
     totalH = y2 - y0;
     if (totalH <= 0) return;
 
-    dxLong = ((x2 - x0) << 16) / totalH;
-    duLong = ((u2 - u0) << 16) / totalH;
-    dvLong = ((v2 - v0) << 16) / totalH;
+    dxLong = SLOPE16(x2 - x0, totalH);
+    duLong = SLOPE16(u2 - u0, totalH);
+    dvLong = SLOPE16(v2 - v0, totalH);
 
     /* Upper half */
     segH = y1 - y0;
     if (segH > 0)
     {
-        dxShort = ((x1 - x0) << 16) / segH;
-        duShort = ((u1 - u0) << 16) / segH;
-        dvShort = ((v1 - v0) << 16) / segH;
+        dxShort = SLOPE16(x1 - x0, segH);
+        duShort = SLOPE16(u1 - u0, segH);
+        dvShort = SLOPE16(v1 - v0, segH);
         xLong = x0 << 16; xShort = x0 << 16;
         uLong = u0 << 16; uShort = u0 << 16;
         vLong = v0 << 16; vShort = v0 << 16;
@@ -1237,9 +1240,9 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
     segH = y2 - y1;
     if (segH > 0)
     {
-        dxShort = ((x2 - x1) << 16) / segH;
-        duShort = ((u2 - u1) << 16) / segH;
-        dvShort = ((v2 - v1) << 16) / segH;
+        dxShort = SLOPE16(x2 - x1, segH);
+        duShort = SLOPE16(u2 - u1, segH);
+        dvShort = SLOPE16(v2 - v1, segH);
         xLong = (x0 << 16) + dxLong * (y1 - y0);
         uLong = (u0 << 16) + duLong * (y1 - y0);
         vLong = (v0 << 16) + dvLong * (y1 - y0);
@@ -1481,16 +1484,6 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             int i0 = indices[ti * 3 + 0];
             int i1 = indices[ti * 3 + 1];
             int i2 = indices[ti * 3 + 2];
-
-            // Skip triangles with extreme screen coords (prevents 16.16 fixed-point overflow)
-            {
-                int mnx = sx[i0], mxx = sx[i0], mny = sy[i0], mxy = sy[i0];
-                if (sx[i1] < mnx) mnx = sx[i1]; if (sx[i1] > mxx) mxx = sx[i1];
-                if (sx[i2] < mnx) mnx = sx[i2]; if (sx[i2] > mxx) mxx = sx[i2];
-                if (sy[i1] < mny) mny = sy[i1]; if (sy[i1] > mxy) mxy = sy[i1];
-                if (sy[i2] < mny) mny = sy[i2]; if (sy[i2] > mxy) mxy = sy[i2];
-                if (mxx - mnx > 32000 || mxy - mny > 32000) continue;
-            }
 
             if (meshWireframe)
             {
