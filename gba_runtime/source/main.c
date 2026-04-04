@@ -1086,7 +1086,7 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
 
 // Minimum raw fovLambda for wireframe edge drawing — vertices below this
 // are behind/too close to camera and produce extreme projections
-#define WIRE_NEAR_DEPTH 128
+#define WIRE_NEAR_DEPTH 384
 
 // Cohen-Sutherland line clipping + Bresenham for wireframe (8bpp Mode 4)
 #define CS_LEFT 1
