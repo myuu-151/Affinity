@@ -1515,7 +1515,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     if (sx[i2] < minX) minX = sx[i2]; if (sx[i2] > maxX) maxX = sx[i2];
                     if (sy[i1] < minY) minY = sy[i1]; if (sy[i1] > maxY) maxY = sy[i1];
                     if (sy[i2] < minY) minY = sy[i2]; if (sy[i2] > maxY) maxY = sy[i2];
-                    if ((maxX - minX) < 400 && (maxY - minY) < 300)
+                    if ((maxX - minX) < 260 && (maxY - minY) < 180)
                     {
                         u8 edgeIdx = 6;
                         draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], edgeIdx);
@@ -1547,7 +1547,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     if (sx[i2] < minX) minX = sx[i2]; if (sx[i2] > maxX) maxX = sx[i2];
                     if (sy[i1] < minY) minY = sy[i1]; if (sy[i1] > maxY) maxY = sy[i1];
                     if (sy[i2] < minY) minY = sy[i2]; if (sy[i2] > maxY) maxY = sy[i2];
-                    if ((maxX - minX) < 400 && (maxY - minY) < 300)
+                    if ((maxX - minX) < 260 && (maxY - minY) < 180)
                     {
                         draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], palIdx);
                         draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
