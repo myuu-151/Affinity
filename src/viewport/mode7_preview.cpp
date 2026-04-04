@@ -304,7 +304,7 @@ static bool ProjectPoint(float wx, float wy, float wz,
     float dz = wz - cam.z;
 
     float fovLambda = dx * sinA - dz * cosA;
-    if (fovLambda <= 0.5f) return false;
+    if (fovLambda < 0.1f) fovLambda = 0.1f;
 
     float lambda = fovLambda / cam.fov;
     if (lambda < 0.01f) lambda = 0.01f;
@@ -312,6 +312,12 @@ static bool ProjectPoint(float wx, float wy, float wz,
     sy = cam.horizon + (cam.height - wy) / lambda;
     float sideComponent = dx * cosA + dz * sinA;
     sx = 120.0f + sideComponent / lambda;
+
+    // Clamp to prevent extreme values from causing rendering issues
+    if (sx < -8192.0f) sx = -8192.0f;
+    if (sx > 8432.0f) sx = 8432.0f;
+    if (sy < -8192.0f) sy = -8192.0f;
+    if (sy > 8352.0f) sy = 8352.0f;
     return true;
 }
 
@@ -543,8 +549,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
 
         float fovLambda = dx * sinA - dz * cosA;
 
-        // Skip if behind camera (fovLambda must be positive for objects in front)
-        if (fovLambda <= 0.5f) continue;
+        // Clamp near plane instead of culling
+        if (fovLambda < 0.1f) fovLambda = 0.1f;
 
         float lambda = fovLambda / cam.fov;
         if (lambda < 0.01f) lambda = 0.01f; // prevent overflow when camera is very close
