@@ -1084,55 +1084,10 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
 }
 #endif
 
-// Forward declaration for draw_line (defined below)
-IWRAM_CODE static void draw_line(u16* buf, int x0, int y0, int x1, int y1, u8 palIdx);
-
-// Near-plane clipped wireframe edge drawing.
-// Clips edge to near plane in view space before projecting, preventing spider-web artifacts.
-#define WIRE_NEAR 64
-static void draw_wire_edge(u16* buf, int va, int vb,
-    const int* sx, const int* sy, const FIXED* sz,
-    const FIXED* vside, const FIXED* vheight, u8 palIdx)
-{
-    FIXED da = sz[va], db = sz[vb];
-    int x0, y0, x1, y1;
-
-    // Both behind near plane — skip entirely
-    if (da < WIRE_NEAR && db < WIRE_NEAR) return;
-
-    if (da >= WIRE_NEAR && db >= WIRE_NEAR)
-    {
-        // Both in front — draw directly
-        x0 = sx[va]; y0 = sy[va];
-        x1 = sx[vb]; y1 = sy[vb];
-    }
-    else
-    {
-        // One behind — clip to near plane in view space, then project
-        int front, back;
-        FIXED df, dbk, t, clip_side, clip_height;
-        if (da >= WIRE_NEAR) { front = va; back = vb; df = da; dbk = db; }
-        else                 { front = vb; back = va; df = db; dbk = da; }
-
-        // Interpolation factor: where along the edge does depth == WIRE_NEAR?
-        t = ((WIRE_NEAR - dbk) << 8) / (df - dbk); // 0..256 (8.8 fraction)
-        clip_side   = vside[back]   + ((vside[front]   - vside[back])   * t >> 8);
-        clip_height = vheight[back] + ((vheight[front] - vheight[back]) * t >> 8);
-
-        // Project clipped point
-        if (front == va) {
-            x0 = sx[va]; y0 = sy[va];
-            x1 = 120 + (int)((clip_side * cam_fov) / WIRE_NEAR);
-            y1 = m7_horizon + (int)((clip_height * cam_fov) / WIRE_NEAR);
-        } else {
-            x0 = 120 + (int)((clip_side * cam_fov) / WIRE_NEAR);
-            y0 = m7_horizon + (int)((clip_height * cam_fov) / WIRE_NEAR);
-            x1 = sx[vb]; y1 = sy[vb];
-        }
-    }
-
-    draw_line(buf, x0, y0, x1, y1, palIdx);
-}
+// Clamp a coordinate for wireframe drawing — prevents extreme projections
+// from near-plane vertices while keeping lines visible at all distances
+#define WIRE_CLAMP_X(x) ((x) < -300 ? -300 : (x) > 540 ? 540 : (x))
+#define WIRE_CLAMP_Y(y) ((y) < -200 ? -200 : (y) > 360 ? 360 : (y))
 
 // Cohen-Sutherland line clipping + Bresenham for wireframe (8bpp Mode 4)
 #define CS_LEFT 1
@@ -1373,8 +1328,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         const u8* tex;
         FIXED cosR, sinR, sprScale;
         int sx[512], sy[512];
-        FIXED sz[512]; // depth per vertex for sorting (fovLambda)
-        FIXED vside[512], vheight[512]; // view-space values for wireframe near-plane clipping
+        FIXED sz[512]; // depth per vertex for sorting
         u8 vis[512];
         TriSort triOrder[256];
         int triCount;
@@ -1445,8 +1399,6 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 
             heightDiff = cam_h - wy;
             side = (dx * g_cosf + dz * g_sinf) >> 8;
-            vside[v] = side;
-            vheight[v] = heightDiff;
 
             sy[v] = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
             sx[v] = 120 + (int)((side * cam_fov) / fovLambda);
@@ -1561,13 +1513,13 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     rasterize_tri_half(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
                 else
                     rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
-                // Draw wireframe overlay on top (near-plane clipped)
+                // Draw wireframe overlay with clamped endpoints
                 if (meshWireframe)
                 {
                     u8 edgeIdx = 6;
-                    draw_wire_edge(buf, i0, i1, sx, sy, sz, vside, vheight, edgeIdx);
-                    draw_wire_edge(buf, i1, i2, sx, sy, sz, vside, vheight, edgeIdx);
-                    draw_wire_edge(buf, i2, i0, sx, sy, sz, vside, vheight, edgeIdx);
+                    draw_line(buf, WIRE_CLAMP_X(sx[i0]), WIRE_CLAMP_Y(sy[i0]), WIRE_CLAMP_X(sx[i1]), WIRE_CLAMP_Y(sy[i1]), edgeIdx);
+                    draw_line(buf, WIRE_CLAMP_X(sx[i1]), WIRE_CLAMP_Y(sy[i1]), WIRE_CLAMP_X(sx[i2]), WIRE_CLAMP_Y(sy[i2]), edgeIdx);
+                    draw_line(buf, WIRE_CLAMP_X(sx[i2]), WIRE_CLAMP_Y(sy[i2]), WIRE_CLAMP_X(sx[i0]), WIRE_CLAMP_Y(sy[i0]), edgeIdx);
                 }
             }
             else if (meshWireframe)
@@ -1587,9 +1539,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 if (shade > 7) shade = 7;
                 palIdx = 5 + shade; // grayscale palette at indices 5-12
                 {
-                    draw_wire_edge(buf, i0, i1, sx, sy, sz, vside, vheight, palIdx);
-                    draw_wire_edge(buf, i1, i2, sx, sy, sz, vside, vheight, palIdx);
-                    draw_wire_edge(buf, i2, i0, sx, sy, sz, vside, vheight, palIdx);
+                    draw_line(buf, WIRE_CLAMP_X(sx[i0]), WIRE_CLAMP_Y(sy[i0]), WIRE_CLAMP_X(sx[i1]), WIRE_CLAMP_Y(sy[i1]), palIdx);
+                    draw_line(buf, WIRE_CLAMP_X(sx[i1]), WIRE_CLAMP_Y(sy[i1]), WIRE_CLAMP_X(sx[i2]), WIRE_CLAMP_Y(sy[i2]), palIdx);
+                    draw_line(buf, WIRE_CLAMP_X(sx[i2]), WIRE_CLAMP_Y(sy[i2]), WIRE_CLAMP_X(sx[i0]), WIRE_CLAMP_Y(sy[i0]), palIdx);
                 }
             }
             else if (meshTextured && uvs && tex)
