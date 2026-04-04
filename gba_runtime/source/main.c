@@ -1084,10 +1084,9 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
 }
 #endif
 
-// Clamp a coordinate for wireframe drawing — prevents extreme projections
-// from near-plane vertices while keeping lines visible at all distances
-#define WIRE_CLAMP_X(x) ((x) < -60 ? -60 : (x) > 300 ? 300 : (x))
-#define WIRE_CLAMP_Y(y) ((y) < -40 ? -40 : (y) > 200 ? 200 : (y))
+// Minimum raw fovLambda for wireframe edge drawing — vertices below this
+// are behind/too close to camera and produce extreme projections
+#define WIRE_NEAR_DEPTH 48
 
 // Cohen-Sutherland line clipping + Bresenham for wireframe (8bpp Mode 4)
 #define CS_LEFT 1
@@ -1329,6 +1328,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         FIXED cosR, sinR, sprScale;
         int sx[512], sy[512];
         FIXED sz[512]; // depth per vertex for sorting
+        FIXED rawDepth[512]; // unclamped fovLambda for wireframe near-plane check
         u8 vis[512];
         TriSort triOrder[256];
         int triCount;
@@ -1391,11 +1391,12 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             dx = wx - cam_x;
             dz = wz - cam_z;
             fovLambda = (dx * g_sinf - dz * g_cosf) >> 8;
+            rawDepth[v] = fovLambda; // store unclamped depth for wireframe
 
-            // Clamp near plane — screen-span guard catches extreme projections
+            // Clamp near plane — SLOPE16 rasterizer handles extreme projections
             if (fovLambda < 16) fovLambda = 16;
 
-            sz[v] = fovLambda; // store depth for painter's sort
+            sz[v] = fovLambda; // store clamped depth for painter's sort
 
             heightDiff = cam_h - wy;
             side = (dx * g_cosf + dz * g_sinf) >> 8;
@@ -1513,13 +1514,16 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     rasterize_tri_half(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
                 else
                     rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
-                // Draw wireframe overlay with clamped endpoints
+                // Draw wireframe overlay — skip edges to behind-camera vertices
                 if (meshWireframe)
                 {
                     u8 edgeIdx = 6;
-                    draw_line(buf, WIRE_CLAMP_X(sx[i0]), WIRE_CLAMP_Y(sy[i0]), WIRE_CLAMP_X(sx[i1]), WIRE_CLAMP_Y(sy[i1]), edgeIdx);
-                    draw_line(buf, WIRE_CLAMP_X(sx[i1]), WIRE_CLAMP_Y(sy[i1]), WIRE_CLAMP_X(sx[i2]), WIRE_CLAMP_Y(sy[i2]), edgeIdx);
-                    draw_line(buf, WIRE_CLAMP_X(sx[i2]), WIRE_CLAMP_Y(sy[i2]), WIRE_CLAMP_X(sx[i0]), WIRE_CLAMP_Y(sy[i0]), edgeIdx);
+                    int d0 = rawDepth[i0] >= WIRE_NEAR_DEPTH;
+                    int d1 = rawDepth[i1] >= WIRE_NEAR_DEPTH;
+                    int d2 = rawDepth[i2] >= WIRE_NEAR_DEPTH;
+                    if (d0 && d1) draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], edgeIdx);
+                    if (d1 && d2) draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], edgeIdx);
+                    if (d2 && d0) draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], edgeIdx);
                 }
             }
             else if (meshWireframe)
@@ -1539,9 +1543,12 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 if (shade > 7) shade = 7;
                 palIdx = 5 + shade; // grayscale palette at indices 5-12
                 {
-                    draw_line(buf, WIRE_CLAMP_X(sx[i0]), WIRE_CLAMP_Y(sy[i0]), WIRE_CLAMP_X(sx[i1]), WIRE_CLAMP_Y(sy[i1]), palIdx);
-                    draw_line(buf, WIRE_CLAMP_X(sx[i1]), WIRE_CLAMP_Y(sy[i1]), WIRE_CLAMP_X(sx[i2]), WIRE_CLAMP_Y(sy[i2]), palIdx);
-                    draw_line(buf, WIRE_CLAMP_X(sx[i2]), WIRE_CLAMP_Y(sy[i2]), WIRE_CLAMP_X(sx[i0]), WIRE_CLAMP_Y(sy[i0]), palIdx);
+                    int d0 = rawDepth[i0] >= WIRE_NEAR_DEPTH;
+                    int d1 = rawDepth[i1] >= WIRE_NEAR_DEPTH;
+                    int d2 = rawDepth[i2] >= WIRE_NEAR_DEPTH;
+                    if (d0 && d1) draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], palIdx);
+                    if (d1 && d2) draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+                    if (d2 && d0) draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], palIdx);
                 }
             }
             else if (meshTextured && uvs && tex)
