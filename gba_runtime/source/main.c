@@ -1504,6 +1504,11 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             int i1 = indices[ti * 3 + 1];
             int i2 = indices[ti * 3 + 2];
 
+            // Skip fill for triangles with any vertex behind/too close to camera —
+            // extreme projections cause full-screen scanline fills even with sat32
+            if (rawDepth[i0] < WIRE_NEAR_DEPTH || rawDepth[i1] < WIRE_NEAR_DEPTH || rawDepth[i2] < WIRE_NEAR_DEPTH)
+                continue;
+
             if (meshGrayscale)
             {
                 // Grayscale shaded face — compute shade from face normal
