@@ -1201,11 +1201,12 @@ IWRAM_CODE static void draw_line(u16* buf, int x0, int y0, int x1, int y1, u8 pa
 
 // Affine texture-mapped triangle rasterizer
 // UVs are 8.8 fixed-point (pre-scaled to texture dimensions)
+// halfRes: if nonzero, skip every other scanline (2x fill speed)
 IWRAM_CODE static void rasterize_tri_tex(u16* buf,
     int x0, int y0, int u0, int v0,
     int x1, int y1, int u1, int v1,
     int x2, int y2, int u2, int v2,
-    const u8* tex, int texMask, int texShift, u8 palBase)
+    const u8* tex, int texMask, int texShift, u8 palBase, int halfRes)
 {
     int tmp;
     int totalH, segH;
@@ -1247,6 +1248,8 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
 
         for (y = iy0; y < iy2; y++)
         {
+            if (halfRes && (y & 1)) goto next_upper;
+            {
             int xl = xLong >> 16, xr = xShort >> 16;
             int ul = uLong >> 16, ur = uShort >> 16;
             int vl = vLong >> 16, vr = vShort >> 16;
@@ -1285,6 +1288,7 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
                     row[x >> 1] = (row[x >> 1] & 0xFF00) | pi;
                 }
             }
+            }
             next_upper:
             xLong += dxLong; xShort += dxShort;
             uLong += duLong; uShort += duShort;
@@ -1314,6 +1318,8 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
 
         for (y = iy0; y <= iy2; y++)
         {
+            if (halfRes && (y & 1)) goto next_lower;
+            {
             int xl = xLong >> 16, xr = xShort >> 16;
             int ul = uLong >> 16, ur = uShort >> 16;
             int vl = vLong >> 16, vr = vShort >> 16;
@@ -1351,6 +1357,7 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
                     u8 pi = palBase + tex[( ((sv >> 16) & texMask) << texShift) | ((su >> 16) & texMask)];
                     row[x >> 1] = (row[x >> 1] & 0xFF00) | pi;
                 }
+            }
             }
             next_lower:
             xLong += dxLong; xShort += dxShort;
@@ -1611,7 +1618,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     sx[i0], sy[i0], uvs[i0*2+0], uvs[i0*2+1],
                     sx[i1], sy[i1], uvs[i1*2+0], uvs[i1*2+1],
                     sx[i2], sy[i2], uvs[i2*2+0], uvs[i2*2+1],
-                    tex, texMask, texShift, (u8)texPalBase);
+                    tex, texMask, texShift, (u8)texPalBase, meshHalfRes);
             }
             else
             {
