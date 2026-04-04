@@ -770,7 +770,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             int vc = origVc;
 
             // Performance/Barebones: weld vertices sharing the same OBJ position index
-            std::vector<float> weldedPos, weldedNorm;
+            std::vector<float> weldedPos, weldedNorm, weldedUVs;
             std::vector<uint32_t> remappedIdx(ic);
             bool didWeld = false;
             bool preSorted = false;
@@ -779,19 +779,35 @@ static bool GenerateMapData(const std::string& runtimeDir,
             {
                 std::vector<int> weldedNormCount;
                 std::vector<int> vertRemap(origVc, -1);
-                std::vector<std::pair<int,int>> objIdxToWelded;
+                // Store objIdx + UV hash for weld matching
+                struct WeldKey { int objIdx; float u, v; int weldedIdx; };
+                std::vector<WeldKey> weldKeys;
+                bool hasUVs = mesh.textured && !mesh.uvs.empty();
 
                 for (int v = 0; v < origVc; v++)
                 {
                     int objIdx = (v < (int)mesh.objPosIdx.size()) ? mesh.objPosIdx[v] : -1;
+                    float vu = 0.0f, vv = 0.0f;
+                    if (hasUVs && v * 2 + 1 < (int)mesh.uvs.size())
+                    { vu = mesh.uvs[v * 2 + 0]; vv = mesh.uvs[v * 2 + 1]; }
 
                     int found = -1;
                     if (objIdx >= 0)
                     {
-                        for (size_t w = 0; w < objIdxToWelded.size(); w++)
+                        for (size_t w = 0; w < weldKeys.size(); w++)
                         {
-                            if (objIdxToWelded[w].first == objIdx)
-                            { found = objIdxToWelded[w].second; break; }
+                            if (weldKeys[w].objIdx == objIdx)
+                            {
+                                // For textured meshes, only weld if UVs also match
+                                if (hasUVs)
+                                {
+                                    float du = weldKeys[w].u - vu;
+                                    float dv = weldKeys[w].v - vv;
+                                    if (du * du + dv * dv > 0.0001f) continue; // UV mismatch — texture seam
+                                }
+                                found = weldKeys[w].weldedIdx;
+                                break;
+                            }
                         }
                     }
 
@@ -808,7 +824,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         int weldedVc = (int)weldedPos.size() / 3;
                         vertRemap[v] = weldedVc;
                         if (objIdx >= 0)
-                            objIdxToWelded.push_back({objIdx, weldedVc});
+                            weldKeys.push_back({objIdx, vu, vv, weldedVc});
                         weldedPos.push_back(mesh.positions[v * 3 + 0]);
                         weldedPos.push_back(mesh.positions[v * 3 + 1]);
                         weldedPos.push_back(mesh.positions[v * 3 + 2]);
@@ -816,6 +832,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         weldedNorm.push_back(mesh.normals[v * 3 + 1]);
                         weldedNorm.push_back(mesh.normals[v * 3 + 2]);
                         weldedNormCount.push_back(1);
+                        weldedUVs.push_back(vu);
+                        weldedUVs.push_back(vv);
                     }
                 }
 
@@ -843,11 +861,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 outPos = weldedPos.data();
                 outNorm = weldedNorm.data();
                 didWeld = true;
+
             }
 
             // Barebones: pre-sort triangles by centroid distance from mesh center (farthest first)
             // This lets the runtime skip the insertion sort entirely
-            if (mesh.exportMode == 2 && didWeld)
+            if (mesh.exportMode == 2)
             {
                 int triCount = ic / 3;
                 struct TriDist { int triIdx; float dist; };
@@ -940,17 +959,17 @@ static bool GenerateMapData(const std::string& runtimeDir,
             // UV coordinates as 8.8 fixed-point (textured meshes only)
             if (mesh.textured && !mesh.uvs.empty())
             {
+                // Use welded UVs if available, otherwise original
+                const std::vector<float>& uvSrc = (didWeld && !weldedUVs.empty()) ? weldedUVs : mesh.uvs;
                 f << "static const s16 afn_mesh" << mi << "_uvs[" << vc * 2 << "] = {";
                 for (int v = 0; v < vc; v++)
                 {
                     if (v % 4 == 0) f << "\n    ";
-                    // Get UV index (use remapped or original vertex index)
-                    int srcV = v; // for unwelded, vertex indices are 1:1
                     float u = 0.0f, v2 = 0.0f;
-                    if (srcV * 2 + 1 < (int)mesh.uvs.size())
+                    if (v * 2 + 1 < (int)uvSrc.size())
                     {
-                        u = mesh.uvs[srcV * 2 + 0];
-                        v2 = mesh.uvs[srcV * 2 + 1];
+                        u = uvSrc[v * 2 + 0];
+                        v2 = uvSrc[v * 2 + 1];
                     }
                     // Convert to 8.8 fixed, multiply by texture size
                     int fu = (int)(u * mesh.texW * 256.0f);
@@ -998,8 +1017,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
             int texW = meshes[mi].texW;
             int texShift = 0;
             { int tw = texW; while (tw > 1) { texShift++; tw >>= 1; } }
-            // Barebones: force unlit and mark as pre-sorted
-            if (meshes[mi].exportMode == 2) { lit = 0; sorted = 1; }
+            // Barebones: force unlit; mark as pre-sorted only for non-textured
+            // (textured meshes need runtime depth sort since static sort is view-dependent)
+            if (meshes[mi].exportMode == 2) { lit = 0; if (!meshes[mi].textured) sorted = 1; }
             char hex[8];
             snprintf(hex, sizeof(hex), "0x%04X", meshes[mi].colorRGB15);
             f << "    { " << vc << ", " << ic << ", " << hex << ", " << meshes[mi].cullMode << ", " << lit << ", " << sorted << ", " << halfRes << ", " << textured << ", " << texW << ", " << texShift << ", " << texPalBases[mi] << " },\n";

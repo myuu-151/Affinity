@@ -1144,15 +1144,28 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
                 int su = ul << 8, sv = vl << 8;
                 int du2 = spanW > 0 ? ((ur - ul) << 8) / spanW : 0;
                 int dv2 = spanW > 0 ? ((vr - vl) << 8) / spanW : 0;
-                int x;
-                for (x = xl; x <= xr; x++)
+                int x = xl;
+                /* Odd left pixel — read-modify-write */
+                if ((x & 1) && x <= xr)
                 {
-                    int tu = (su >> 16) & texMask;
-                    int tv = (sv >> 16) & texMask;
-                    u8 pi = palBase + tex[(tv << texShift) | tu];
-                    if (x & 1) row[x >> 1] = (row[x >> 1] & 0x00FF) | ((u16)pi << 8);
-                    else       row[x >> 1] = (row[x >> 1] & 0xFF00) | pi;
+                    u8 pi = palBase + tex[( ((sv >> 16) & texMask) << texShift) | ((su >> 16) & texMask)];
+                    row[x >> 1] = (row[x >> 1] & 0x00FF) | ((u16)pi << 8);
+                    su += du2; sv += dv2; x++;
+                }
+                /* Paired pixels — full 16-bit write */
+                for (; x + 1 <= xr; x += 2)
+                {
+                    u8 p0 = palBase + tex[( ((sv >> 16) & texMask) << texShift) | ((su >> 16) & texMask)];
                     su += du2; sv += dv2;
+                    u8 p1 = palBase + tex[( ((sv >> 16) & texMask) << texShift) | ((su >> 16) & texMask)];
+                    su += du2; sv += dv2;
+                    row[x >> 1] = p0 | ((u16)p1 << 8);
+                }
+                /* Odd right pixel */
+                if (x <= xr)
+                {
+                    u8 pi = palBase + tex[( ((sv >> 16) & texMask) << texShift) | ((su >> 16) & texMask)];
+                    row[x >> 1] = (row[x >> 1] & 0xFF00) | pi;
                 }
             }
             next_upper:
@@ -1201,15 +1214,25 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
                 int su = ul << 8, sv = vl << 8;
                 int du2 = spanW > 0 ? ((ur - ul) << 8) / spanW : 0;
                 int dv2 = spanW > 0 ? ((vr - vl) << 8) / spanW : 0;
-                int x;
-                for (x = xl; x <= xr; x++)
+                int x = xl;
+                if ((x & 1) && x <= xr)
                 {
-                    int tu = (su >> 16) & texMask;
-                    int tv = (sv >> 16) & texMask;
-                    u8 pi = palBase + tex[(tv << texShift) | tu];
-                    if (x & 1) row[x >> 1] = (row[x >> 1] & 0x00FF) | ((u16)pi << 8);
-                    else       row[x >> 1] = (row[x >> 1] & 0xFF00) | pi;
+                    u8 pi = palBase + tex[( ((sv >> 16) & texMask) << texShift) | ((su >> 16) & texMask)];
+                    row[x >> 1] = (row[x >> 1] & 0x00FF) | ((u16)pi << 8);
+                    su += du2; sv += dv2; x++;
+                }
+                for (; x + 1 <= xr; x += 2)
+                {
+                    u8 p0 = palBase + tex[( ((sv >> 16) & texMask) << texShift) | ((su >> 16) & texMask)];
                     su += du2; sv += dv2;
+                    u8 p1 = palBase + tex[( ((sv >> 16) & texMask) << texShift) | ((su >> 16) & texMask)];
+                    su += du2; sv += dv2;
+                    row[x >> 1] = p0 | ((u16)p1 << 8);
+                }
+                if (x <= xr)
+                {
+                    u8 pi = palBase + tex[( ((sv >> 16) & texMask) << texShift) | ((su >> 16) & texMask)];
+                    row[x >> 1] = (row[x >> 1] & 0xFF00) | pi;
                 }
             }
             next_lower:
