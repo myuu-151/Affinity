@@ -887,10 +887,13 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
             left = xLong >> 16;
             right = xShort >> 16;
             if (left > right) { tmp = left; left = right; right = tmp; }
-            if (left < 0) left = 0;
-            if (right > 239) right = 239;
-            if (left <= right)
-                afn_hline(buf + y * 120, left, right, palIdx);
+            if (right - left < 512)
+            {
+                if (left < 0) left = 0;
+                if (right > 239) right = 239;
+                if (left <= right)
+                    afn_hline(buf + y * 120, left, right, palIdx);
+            }
             xLong += dxLong;
             xShort += dxShort;
         }
@@ -910,17 +913,19 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
             xLong  = sat32((long long)x0 * 65536 + (long long)dxLong  * skipLong);
             xShort = sat32((long long)x1 * 65536 + (long long)dxShort * skipShort);
         }
-        iy2 = y2 < 160 ? y2 : 159;
 
         for (y = iy0; y <= iy2; y++)
         {
             left = xLong >> 16;
             right = xShort >> 16;
             if (left > right) { tmp = left; left = right; right = tmp; }
-            if (left < 0) left = 0;
-            if (right > 239) right = 239;
-            if (left <= right)
-                afn_hline(buf + y * 120, left, right, palIdx);
+            if (right - left < 512)
+            {
+                if (left < 0) left = 0;
+                if (right > 239) right = 239;
+                if (left <= right)
+                    afn_hline(buf + y * 120, left, right, palIdx);
+            }
             xLong += dxLong;
             xShort += dxShort;
         }
@@ -975,13 +980,16 @@ IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int 
             left = xLong >> 16;
             right = xShort >> 16;
             if (left > right) { tmp = left; left = right; right = tmp; }
-            if (left < 0) left = 0;
-            if (right > 239) right = 239;
-            if (left <= right)
+            if (right - left < 512)
             {
-                afn_hline(buf + y * 120, left, right, palIdx);
-                if (y + 1 < 160)
-                    afn_hline(buf + (y + 1) * 120, left, right, palIdx);
+                if (left < 0) left = 0;
+                if (right > 239) right = 239;
+                if (left <= right)
+                {
+                    afn_hline(buf + y * 120, left, right, palIdx);
+                    if (y + 1 < 160)
+                        afn_hline(buf + (y + 1) * 120, left, right, palIdx);
+                }
             }
             xLong += dxLong << 1;
             xShort += dxShort << 1;
@@ -1008,13 +1016,16 @@ IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int 
             left = xLong >> 16;
             right = xShort >> 16;
             if (left > right) { tmp = left; left = right; right = tmp; }
-            if (left < 0) left = 0;
-            if (right > 239) right = 239;
-            if (left <= right)
+            if (right - left < 512)
             {
-                afn_hline(buf + y * 120, left, right, palIdx);
-                if (y + 1 < 160)
-                    afn_hline(buf + (y + 1) * 120, left, right, palIdx);
+                if (left < 0) left = 0;
+                if (right > 239) right = 239;
+                if (left <= right)
+                {
+                    afn_hline(buf + y * 120, left, right, palIdx);
+                    if (y + 1 < 160)
+                        afn_hline(buf + (y + 1) * 120, left, right, palIdx);
+                }
             }
             xLong += dxLong << 1;
             xShort += dxShort << 1;
@@ -1061,10 +1072,13 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
             left = xLong >> 16;
             right = xShort >> 16;
             if (left > right) { tmp = left; left = right; right = tmp; }
-            if (left < 0) left = 0;
-            if (right > 239) right = 239;
-            if (left <= right)
-                afn_hline_cov(buf + y * 120, left, right, y, palIdx);
+            if (right - left < 512)
+            {
+                if (left < 0) left = 0;
+                if (right > 239) right = 239;
+                if (left <= right)
+                    afn_hline_cov(buf + y * 120, left, right, y, palIdx);
+            }
             xLong += dxLong;
             xShort += dxShort;
         }
@@ -1083,17 +1097,19 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
             xLong  = sat32((long long)x0 * 65536 + (long long)dxLong  * skipLong);
             xShort = sat32((long long)x1 * 65536 + (long long)dxShort * skipShort);
         }
-        iy2 = y2 < 160 ? y2 : 159;
 
         for (y = iy0; y <= iy2; y++)
         {
             left = xLong >> 16;
             right = xShort >> 16;
             if (left > right) { tmp = left; left = right; right = tmp; }
-            if (left < 0) left = 0;
-            if (right > 239) right = 239;
-            if (left <= right)
-                afn_hline_cov(buf + y * 120, left, right, y, palIdx);
+            if (right - left < 512)
+            {
+                if (left < 0) left = 0;
+                if (right > 239) right = 239;
+                if (left <= right)
+                    afn_hline_cov(buf + y * 120, left, right, y, palIdx);
+            }
             xLong += dxLong;
             xShort += dxShort;
         }
@@ -1103,7 +1119,7 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
 
 // Minimum raw fovLambda for wireframe edge drawing — vertices below this
 // are behind/too close to camera and produce extreme projections
-#define WIRE_NEAR_DEPTH 384
+#define WIRE_NEAR_DEPTH 24
 
 // Cohen-Sutherland line clipping + Bresenham for wireframe (8bpp Mode 4)
 #define CS_LEFT 1
@@ -1504,10 +1520,6 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             int i1 = indices[ti * 3 + 1];
             int i2 = indices[ti * 3 + 2];
 
-            // Skip fill for triangles with any vertex behind/too close to camera —
-            // extreme projections cause full-screen scanline fills even with sat32
-            if (rawDepth[i0] < WIRE_NEAR_DEPTH || rawDepth[i1] < WIRE_NEAR_DEPTH || rawDepth[i2] < WIRE_NEAR_DEPTH)
-                continue;
 
             if (meshGrayscale)
             {
