@@ -1339,7 +1339,7 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
 typedef struct { u16 i0, i1, i2, origTri; int depth; } TriSort;
 
 // Near-plane clipping threshold (view-space fovLambda)
-#define NEAR_CLIP 48
+#define NEAR_CLIP 18
 
 // Render all mesh sprites into the bitmap
 IWRAM_CODE static void render_meshes_sw(u16* buf)
