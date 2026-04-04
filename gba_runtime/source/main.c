@@ -24,6 +24,14 @@ static FIXED cam_fov;      // focal distance D
 // Precomputed sin/cos for current angle
 static FIXED g_cosf, g_sinf;
 
+// EWRAM texture cache — ROM reads are 4-8 wait states per byte,
+// EWRAM is 2. Copying textures here gives ~2-4x fill rate boost.
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+#define TEX_CACHE_SIZE 4096 // max total texture data cached (4KB)
+static u8 tex_cache[TEX_CACHE_SIZE];
+static u8* tex_cache_ptrs[AFN_MESH_COUNT];
+#endif
+
 // Horizon scanline — variable for pitch control (A/B buttons)
 static int m7_horizon = 60;
 
@@ -1398,7 +1406,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         meshGrayscale = afn_mesh_desc[mi][12]; // 0=normal, 1=grayscale shaded faces
         texMask = texW > 0 ? texW - 1 : 0;
         uvs = afn_mesh_uv_ptrs[mi];
-        tex = afn_mesh_tex_ptrs[mi];
+        tex = tex_cache_ptrs[mi];
 
         // Sprite transform
         cosR = lu_cos(g_sprites[i].rotation) >> 4;
@@ -1705,6 +1713,27 @@ int main(void)
             pal_bg_mem[AFN_TEX_PAL_BASE + k] = afn_tex_palette[k];
     }
 #endif
+    // Copy mesh textures from ROM to EWRAM for faster pixel reads
+    {
+        int mi2;
+        int offset = 0;
+        for (mi2 = 0; mi2 < AFN_MESH_COUNT; mi2++)
+        {
+            int tw = afn_mesh_desc[mi2][8];
+            int th = tw; // textures are square
+            int sz = tw * th;
+            if (afn_mesh_tex_ptrs[mi2] && sz > 0 && offset + sz <= TEX_CACHE_SIZE)
+            {
+                memcpy(tex_cache + offset, afn_mesh_tex_ptrs[mi2], sz);
+                tex_cache_ptrs[mi2] = tex_cache + offset;
+                offset += sz;
+            }
+            else
+            {
+                tex_cache_ptrs[mi2] = (u8*)afn_mesh_tex_ptrs[mi2]; // fallback to ROM
+            }
+        }
+    }
 #else
     REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
 #endif
