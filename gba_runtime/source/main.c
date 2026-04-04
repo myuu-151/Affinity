@@ -1336,7 +1336,10 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
 }
 
 // Triangle sort entry for painter's algorithm
-typedef struct { int triIdx; int depth; } TriSort;
+typedef struct { int i0, i1, i2; int n0, n1, n2; int depth; } TriSort;
+
+// Near-plane clipping threshold (view-space fovLambda)
+#define NEAR_CLIP 48
 
 // Render all mesh sprites into the bitmap
 IWRAM_CODE static void render_meshes_sw(u16* buf)
@@ -1353,12 +1356,15 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         const s16* uvs;
         const u8* tex;
         FIXED cosR, sinR, sprScale;
-        int sx[512], sy[512];
-        FIXED sz[512]; // depth per vertex for sorting
-        FIXED rawDepth[512]; // unclamped fovLambda for wireframe near-plane check
-        u8 vis[512];
-        TriSort triOrder[256];
+        int sx[576], sy[576];        // extra slots for clipped vertices
+        FIXED sz[576];               // depth per vertex for sorting
+        FIXED rawDepth[576];         // unclamped fovLambda for near-plane check
+        FIXED viewSide[576];         // view-space lateral offset (for clipping interpolation)
+        FIXED viewHt[576];           // view-space height offset (for clipping interpolation)
+        u8 vis[576];
+        TriSort triOrder[384];       // extra capacity for clipped triangles
         int triCount;
+        int clipVert;                // next available vertex slot for clipped verts
 
         if (g_sprites[i].meshIdx < 0 || g_sprites[i].meshIdx >= AFN_MESH_COUNT)
             continue;
@@ -1428,11 +1434,15 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             heightDiff = cam_h - wy;
             side = (dx * g_cosf + dz * g_sinf) >> 8;
 
+            viewSide[v] = side;
+            viewHt[v] = heightDiff;
+
             sy[v] = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
             sx[v] = 120 + (int)((side * cam_fov) / fovLambda);
 
             vis[v] = 1;
         }
+        clipVert = vertCount; // clipped vertices start after original vertices
 
         // Whole-mesh screen cull: skip if no vertices are visible
         anyVisible = 0;
@@ -1440,17 +1450,114 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             if (vis[v]) { anyVisible = 1; break; }
         if (!anyVisible) continue;
 
-        // Build triangle list with backface culling
+        // Build triangle list with near-plane clipping and backface culling
         triCount = 0;
         for (t = 0; t < idxCount / 3; t++)
         {
             int i0 = indices[t * 3 + 0];
             int i1 = indices[t * 3 + 1];
             int i2 = indices[t * 3 + 2];
-            int cross;
+            long long cross;
+            int b0, b1, b2, behindCount;
 
             if (i0 >= vertCount || i1 >= vertCount || i2 >= vertCount) continue;
             if (i0 == i1 || i1 == i2 || i0 == i2) continue; // degenerate
+
+            // Near-plane clipping: check which vertices are behind near plane
+            b0 = rawDepth[i0] < NEAR_CLIP;
+            b1 = rawDepth[i1] < NEAR_CLIP;
+            b2 = rawDepth[i2] < NEAR_CLIP;
+            behindCount = b0 + b1 + b2;
+
+            if (behindCount == 3) continue; // all behind — skip entirely
+
+            if (behindCount > 0 && clipVert + 2 < 576 && triCount + 2 < 384)
+            {
+                // Clip triangle against near plane.
+                // Interpolate view-space coords at clip points, then project.
+                // Macro: create a clipped vertex between vA (behind) and vB (in front)
+                #define CLIP_VERT(vA, vB) { \
+                    int cv = clipVert++; \
+                    int tNum = NEAR_CLIP - rawDepth[vA]; \
+                    int tDen = rawDepth[vB] - rawDepth[vA]; \
+                    if (tDen == 0) tDen = 1; \
+                    viewSide[cv] = viewSide[vA] + (int)((long long)(viewSide[vB] - viewSide[vA]) * tNum / tDen); \
+                    viewHt[cv] = viewHt[vA] + (int)((long long)(viewHt[vB] - viewHt[vA]) * tNum / tDen); \
+                    rawDepth[cv] = NEAR_CLIP; \
+                    sz[cv] = NEAR_CLIP; \
+                    sx[cv] = 120 + (int)((viewSide[cv] * cam_fov) / NEAR_CLIP); \
+                    sy[cv] = m7_horizon + (int)((viewHt[cv] * cam_fov) / NEAR_CLIP); \
+                }
+
+                if (behindCount == 1)
+                {
+                    // 1 behind, 2 in front → clip to quad → 2 triangles
+                    int iB, iF0, iF1, c0, c1;
+                    if (b0)      { iB = i0; iF0 = i1; iF1 = i2; }
+                    else if (b1) { iB = i1; iF0 = i2; iF1 = i0; }
+                    else         { iB = i2; iF0 = i0; iF1 = i1; }
+                    c0 = clipVert; CLIP_VERT(iB, iF0);
+                    c1 = clipVert; CLIP_VERT(iB, iF1);
+                    // Triangle 1: c0, iF0, iF1
+                    cross = (long long)(sx[iF0] - sx[c0]) * (sy[iF1] - sy[c0])
+                          - (long long)(sy[iF0] - sy[c0]) * (sx[iF1] - sx[c0]);
+                    if (!(cullMode == 0 && cross >= 0) && !(cullMode == 1 && cross <= 0))
+                    {
+                        int avgD = sz[c0] + sz[iF0] + sz[iF1];
+                        triOrder[triCount].i0 = c0;
+                        triOrder[triCount].i1 = iF0;
+                        triOrder[triCount].i2 = iF1;
+                        triOrder[triCount].n0 = i0;
+                        triOrder[triCount].n1 = i1;
+                        triOrder[triCount].n2 = i2;
+                        triOrder[triCount].depth = avgD;
+                        triCount++;
+                    }
+                    // Triangle 2: c0, iF1, c1
+                    cross = (long long)(sx[iF1] - sx[c0]) * (sy[c1] - sy[c0])
+                          - (long long)(sy[iF1] - sy[c0]) * (sx[c1] - sx[c0]);
+                    if (!(cullMode == 0 && cross >= 0) && !(cullMode == 1 && cross <= 0))
+                    {
+                        int avgD = sz[c0] + sz[iF1] + sz[c1];
+                        triOrder[triCount].i0 = c0;
+                        triOrder[triCount].i1 = iF1;
+                        triOrder[triCount].i2 = c1;
+                        triOrder[triCount].n0 = i0;
+                        triOrder[triCount].n1 = i1;
+                        triOrder[triCount].n2 = i2;
+                        triOrder[triCount].depth = avgD;
+                        triCount++;
+                    }
+                }
+                else // behindCount == 2
+                {
+                    // 2 behind, 1 in front → clip to 1 triangle
+                    int iF, iB0, iB1, c0, c1;
+                    if (!b0)      { iF = i0; iB0 = i1; iB1 = i2; }
+                    else if (!b1) { iF = i1; iB0 = i2; iB1 = i0; }
+                    else          { iF = i2; iB0 = i0; iB1 = i1; }
+                    c0 = clipVert; CLIP_VERT(iB0, iF);
+                    c1 = clipVert; CLIP_VERT(iB1, iF);
+                    cross = (long long)(sx[c0] - sx[iF]) * (sy[c1] - sy[iF])
+                          - (long long)(sy[c0] - sy[iF]) * (sx[c1] - sx[iF]);
+                    if (!(cullMode == 0 && cross >= 0) && !(cullMode == 1 && cross <= 0))
+                    {
+                        int avgD = sz[iF] + sz[c0] + sz[c1];
+                        triOrder[triCount].i0 = iF;
+                        triOrder[triCount].i1 = c0;
+                        triOrder[triCount].i2 = c1;
+                        triOrder[triCount].n0 = i0;
+                        triOrder[triCount].n1 = i1;
+                        triOrder[triCount].n2 = i2;
+                        triOrder[triCount].depth = avgD;
+                        triCount++;
+                    }
+                }
+                #undef CLIP_VERT
+                continue; // clipped triangles added, skip normal path
+            }
+
+            // Normal path: all vertices in front of near plane
 
             // Screen bounds cull: skip if all 3 vertices fully offscreen
             if ((sx[i0] < 0 && sx[i1] < 0 && sx[i2] < 0) ||
@@ -1459,9 +1566,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 (sy[i0] >= 160 && sy[i1] >= 160 && sy[i2] >= 160))
                 continue;
 
-            // Backface culling: screen-space cross product
-            cross = (sx[i1] - sx[i0]) * (sy[i2] - sy[i0])
-                  - (sy[i1] - sy[i0]) * (sx[i2] - sx[i0]);
+            // Backface culling: screen-space cross product (64-bit for extreme coords)
+            cross = (long long)(sx[i1] - sx[i0]) * (sy[i2] - sy[i0])
+                  - (long long)(sy[i1] - sy[i0]) * (sx[i2] - sx[i0]);
             if (cullMode == 0 && cross >= 0) continue;      // Back: cull back faces
             else if (cullMode == 1 && cross <= 0) continue;  // Front: cull front faces
             // cullMode == 2 (None): no culling, draw all
@@ -1469,7 +1576,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 #ifdef AFN_SMALL_TRI_CULL
             // Small triangle cull: skip if screen-space area too small
             {
-                int area = cross < 0 ? -cross : cross;
+                long long area = cross < 0 ? -cross : cross;
                 if (area < AFN_SMALL_TRI_CULL) continue;
             }
 #endif
@@ -1481,10 +1588,15 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 // Per-triangle draw distance cull (depth is sum of 3 vertices in 16.8)
                 if (avgDepth / 3 > AFN_DRAW_DISTANCE) continue;
 #endif
-                triOrder[triCount].triIdx = t;
+                triOrder[triCount].i0 = i0;
+                triOrder[triCount].i1 = i1;
+                triOrder[triCount].i2 = i2;
+                triOrder[triCount].n0 = i0;
+                triOrder[triCount].n1 = i1;
+                triOrder[triCount].n2 = i2;
                 triOrder[triCount].depth = avgDepth;
                 triCount++;
-                if (triCount >= 256) break;
+                if (triCount >= 384) break;
             }
         }
 
@@ -1515,20 +1627,21 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         // Draw sorted triangles
         for (t = 0; t < triCount; t++)
         {
-            int ti = triOrder[t].triIdx;
-            int i0 = indices[ti * 3 + 0];
-            int i1 = indices[ti * 3 + 1];
-            int i2 = indices[ti * 3 + 2];
-
+            int i0 = triOrder[t].i0;
+            int i1 = triOrder[t].i1;
+            int i2 = triOrder[t].i2;
+            int n0 = triOrder[t].n0; // original vertex indices for normal lookup
+            int n1 = triOrder[t].n1;
+            int n2 = triOrder[t].n2;
 
             if (meshGrayscale)
             {
                 // Grayscale shaded face — compute shade from face normal
                 int nx, ny, nz, rnx, rny, rnz, dot, shade;
                 u8 palIdx;
-                nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
-                ny = ((int)norms[i0*3+1] + norms[i1*3+1] + norms[i2*3+1]) / 3;
-                nz = ((int)norms[i0*3+2] + norms[i1*3+2] + norms[i2*3+2]) / 3;
+                nx = ((int)norms[n0*3+0] + norms[n1*3+0] + norms[n2*3+0]) / 3;
+                ny = ((int)norms[n0*3+1] + norms[n1*3+1] + norms[n2*3+1]) / 3;
+                nz = ((int)norms[n0*3+2] + norms[n1*3+2] + norms[n2*3+2]) / 3;
                 rnx = (nx * (cosR >> 4) + nz * (sinR >> 4)) >> 4;
                 rny = ny;
                 rnz = (-nx * (sinR >> 4) + nz * (cosR >> 4)) >> 4;
@@ -1559,9 +1672,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 // Wireframe only — shaded lines, no fill
                 int nx, ny, nz, rnx, rny, rnz, dot, shade;
                 u8 palIdx;
-                nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
-                ny = ((int)norms[i0*3+1] + norms[i1*3+1] + norms[i2*3+1]) / 3;
-                nz = ((int)norms[i0*3+2] + norms[i1*3+2] + norms[i2*3+2]) / 3;
+                nx = ((int)norms[n0*3+0] + norms[n1*3+0] + norms[n2*3+0]) / 3;
+                ny = ((int)norms[n0*3+1] + norms[n1*3+1] + norms[n2*3+1]) / 3;
+                nz = ((int)norms[n0*3+2] + norms[n1*3+2] + norms[n2*3+2]) / 3;
                 rnx = (nx * (cosR >> 4) + nz * (sinR >> 4)) >> 4;
                 rny = ny;
                 rnz = (-nx * (sinR >> 4) + nz * (cosR >> 4)) >> 4;
@@ -1583,9 +1696,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             {
                 // Textured triangle — UVs are 8.8 fixed pre-scaled to texture size
                 rasterize_tri_tex(buf,
-                    sx[i0], sy[i0], uvs[i0*2+0], uvs[i0*2+1],
-                    sx[i1], sy[i1], uvs[i1*2+0], uvs[i1*2+1],
-                    sx[i2], sy[i2], uvs[i2*2+0], uvs[i2*2+1],
+                    sx[i0], sy[i0], uvs[n0*2+0], uvs[n0*2+1],
+                    sx[i1], sy[i1], uvs[n1*2+0], uvs[n1*2+1],
+                    sx[i2], sy[i2], uvs[n2*2+0], uvs[n2*2+1],
                     tex, texMask, texShift, (u8)texPalBase);
             }
             else
@@ -1596,9 +1709,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 
                 if (meshLit)
                 {
-                    nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
-                    ny = ((int)norms[i0*3+1] + norms[i1*3+1] + norms[i2*3+1]) / 3;
-                    nz = ((int)norms[i0*3+2] + norms[i1*3+2] + norms[i2*3+2]) / 3;
+                    nx = ((int)norms[n0*3+0] + norms[n1*3+0] + norms[n2*3+0]) / 3;
+                    ny = ((int)norms[n0*3+1] + norms[n1*3+1] + norms[n2*3+1]) / 3;
+                    nz = ((int)norms[n0*3+2] + norms[n1*3+2] + norms[n2*3+2]) / 3;
 
                     rnx = (nx * (cosR >> 4) + nz * (sinR >> 4)) >> 4;
                     rny = ny;
