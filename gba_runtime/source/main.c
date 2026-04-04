@@ -839,6 +839,14 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
     int dxLong, dxShort; /* 16.16 fixed-point x step per scanline */
     int left, right;
 
+    /* Clamp coords to prevent x<<16 and slope*skip overflow */
+    if (x0 < -16000) x0 = -16000; if (x0 > 16000) x0 = 16000;
+    if (x1 < -16000) x1 = -16000; if (x1 > 16000) x1 = 16000;
+    if (x2 < -16000) x2 = -16000; if (x2 > 16000) x2 = 16000;
+    if (y0 < -16000) y0 = -16000; if (y0 > 16000) y0 = 16000;
+    if (y1 < -16000) y1 = -16000; if (y1 > 16000) y1 = 16000;
+    if (y2 < -16000) y2 = -16000; if (y2 > 16000) y2 = 16000;
+
     /* Sort by y */
     if (y0 > y1) { tmp=x0; x0=x1; x1=tmp; tmp=y0; y0=y1; y1=tmp; }
     if (y0 > y2) { tmp=x0; x0=x2; x2=tmp; tmp=y0; y0=y2; y2=tmp; }
@@ -923,6 +931,14 @@ IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int 
     int xLong, xShort;
     int dxLong, dxShort;
     int left, right;
+
+    /* Clamp coords to prevent x<<16 and slope*skip overflow */
+    if (x0 < -16000) x0 = -16000; if (x0 > 16000) x0 = 16000;
+    if (x1 < -16000) x1 = -16000; if (x1 > 16000) x1 = 16000;
+    if (x2 < -16000) x2 = -16000; if (x2 > 16000) x2 = 16000;
+    if (y0 < -16000) y0 = -16000; if (y0 > 16000) y0 = 16000;
+    if (y1 < -16000) y1 = -16000; if (y1 > 16000) y1 = 16000;
+    if (y2 < -16000) y2 = -16000; if (y2 > 16000) y2 = 16000;
 
     if (y0 > y1) { tmp=x0; x0=x1; x1=tmp; tmp=y0; y0=y1; y1=tmp; }
     if (y0 > y2) { tmp=x0; x0=x2; x2=tmp; tmp=y0; y0=y2; y2=tmp; }
