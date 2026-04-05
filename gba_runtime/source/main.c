@@ -966,6 +966,19 @@ static void init_rcp_table(void)
         rcp_table[i] = (u16)(65536 / i);
 }
 
+// Reciprocal LUT for division-free slope computation (OpenLara style)
+// divLUT[h] = (1 << 16) / h — replaces costly ARM7 software division
+#define AFN_DIV_LUT_SIZE 512
+static u32 divLUT[AFN_DIV_LUT_SIZE];
+
+static void init_divLUT(void)
+{
+    int i;
+    divLUT[0] = 0;
+    for (i = 1; i < AFN_DIV_LUT_SIZE; i++)
+        divLUT[i] = (1u << 16) / (u32)i;
+}
+
 // Forward declarations for rasterizers (used by viewport clipper)
 IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx);
 IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx);
@@ -1051,126 +1064,91 @@ IWRAM_CODE static void rasterize_tri_clipped(u16* buf, int x0, int y0, int x1, i
     }
 }
 
-// Native quad rasterizer — edge-chain walking, no triangle split.
-// Vertices are sorted by Y, then left/right edges are walked independently.
-// Single rasterizer call per quad, no diagonal seam.
-static void rasterize_quad(u16* buf, int x0, int y0, int x1, int y1,
-                                       int x2, int y2, int x3, int y3, u8 palIdx)
+// OpenLara-style convex polygon rasterizer — edge-chain walking with reciprocal LUT.
+// Vertices must be in polygon winding order. Left chain walks backward (prev),
+// right chain walks forward (next). No triangle splitting, no diagonal seam.
+// Works for triangles, quads, and clipped N-gons (3-8 verts).
+static void rasterize_convex(u16* buf, int* px, int* py, int count, u8 palIdx)
 {
-    // Sort vertices by Y (insertion sort on 4 elements)
-    int vx[4] = {x0,x1,x2,x3}, vy[4] = {y0,y1,y2,y3};
-    int tmp, j;
-    for (int i = 1; i < 4; i++) {
-        int tx = vx[i], ty = vy[i];
-        j = i - 1;
-        while (j >= 0 && vy[j] > ty) { vx[j+1] = vx[j]; vy[j+1] = vy[j]; j--; }
-        vx[j+1] = tx; vy[j+1] = ty;
-    }
+    int i, top, L, R, Lh, Rh, Lx, Rx, Ldx, Rdx, y, h;
 
-    // Clamp to guard band
-    for (int i = 0; i < 4; i++) {
-        if (vx[i] < -16000) vx[i] = -16000; if (vx[i] > 16000) vx[i] = 16000;
-        if (vy[i] < -16000) vy[i] = -16000; if (vy[i] > 16000) vy[i] = 16000;
-    }
+    if (count < 3) return;
 
-    if (vy[3] <= vy[0]) return; // degenerate
+    // Find topmost vertex (minimum Y)
+    top = 0;
+    for (i = 1; i < count; i++)
+        if (py[i] < py[top]) top = i;
 
-    // Determine left/right chains from top vertex.
-    // For a convex quad sorted by Y: top=v[0], bottom=v[3].
-    // Middle vertices v[1],v[2] go to left or right based on cross product.
-    // Left chain: top -> ... -> bottom going leftward
-    // Right chain: top -> ... -> bottom going rightward
-    int leftChain[4], leftCount = 0;
-    int rightChain[4], rightCount = 0;
+    // L walks prev (backward around polygon), R walks next (forward)
+    L = top; R = top;
+    Lh = 0; Rh = 0;
+    Lx = 0; Rx = 0;
+    Ldx = 0; Rdx = 0;
+    y = py[top];
 
-    leftChain[leftCount++] = 0;
-    rightChain[rightCount++] = 0;
-
-    // Determine which side v[1] and v[2] are on using cross product from top to bottom
-    long long dx03 = vx[3] - vx[0], dy03 = vy[3] - vy[0];
-    for (int i = 1; i <= 2; i++) {
-        long long cross = dx03 * (vy[i] - vy[0]) - dy03 * (vx[i] - vx[0]);
-        if (cross <= 0)
-            leftChain[leftCount++] = i;
-        else
-            rightChain[rightCount++] = i;
-    }
-    leftChain[leftCount++] = 3;
-    rightChain[rightCount++] = 3;
-
-    // Walk left and right edge chains, filling scanlines
-    int li = 0, ri = 0; // current edge segment index on each chain
-    int lxF = 0, rxF = 0; // 16.16 fixed-point x positions
-    int ldx = 0, rdx = 0; // 16.16 fixed-point x step per scanline
-    int ly1 = 0, ry1 = 0; // bottom Y of current edge segment
-    int y = vy[0] < 0 ? 0 : vy[0];
-    int yEnd = vy[3] < 160 ? vy[3] : 159;
-
-    // Advance to first left edge
-    while (li + 1 < leftCount) {
-        int a = leftChain[li], b = leftChain[li+1];
-        ly1 = vy[b];
-        if (ly1 > y) {
-            int h = vy[b] - vy[a];
-            ldx = h > 0 ? SLOPE16(vx[b] - vx[a], h) : 0;
-            int skip = y - vy[a];
-            lxF = sat32((long long)vx[a] * 65536 + (long long)ldx * skip);
-            break;
-        }
-        li++;
-    }
-    // Advance to first right edge
-    while (ri + 1 < rightCount) {
-        int a = rightChain[ri], b = rightChain[ri+1];
-        ry1 = vy[b];
-        if (ry1 > y) {
-            int h = vy[b] - vy[a];
-            rdx = h > 0 ? SLOPE16(vx[b] - vx[a], h) : 0;
-            int skip = y - vy[a];
-            rxF = sat32((long long)vx[a] * 65536 + (long long)rdx * skip);
-            break;
-        }
-        ri++;
-    }
-
-    for (; y <= yEnd; y++) {
-        // Advance left edge if needed
-        while (y >= ly1 && li + 1 < leftCount) {
-            li++;
-            if (li + 1 < leftCount) {
-                int a = leftChain[li], b = leftChain[li+1];
-                ly1 = vy[b];
-                int h = vy[b] - vy[a];
-                ldx = h > 0 ? SLOPE16(vx[b] - vx[a], h) : 0;
-                lxF = vx[a] << 16;
+    for (;;)
+    {
+        while (!Lh)
+        {
+            int N = L - 1;
+            if (N < 0) N = count - 1;
+            if (py[N] < py[L]) return; // wrapped past bottom
+            Lh = py[N] - py[L];
+            Lx = px[L] << 16;
+            if (Lh > 1) {
+                u32 inv = (u32)Lh < AFN_DIV_LUT_SIZE ? divLUT[Lh] : ((1u << 16) / (u32)Lh);
+                Ldx = (int)(inv * (u32)(px[N] - px[L]));
             }
-        }
-        // Advance right edge if needed
-        while (y >= ry1 && ri + 1 < rightCount) {
-            ri++;
-            if (ri + 1 < rightCount) {
-                int a = rightChain[ri], b = rightChain[ri+1];
-                ry1 = vy[b];
-                int h = vy[b] - vy[a];
-                rdx = h > 0 ? SLOPE16(vx[b] - vx[a], h) : 0;
-                rxF = vx[a] << 16;
-            }
+            L = N;
         }
 
-        int left = lxF >> 16, right = rxF >> 16;
-        if (left > right) { tmp = left; left = right; right = tmp; }
-        if (right - left < 512) {
-            if (left < 0) left = 0;
-            if (right > 239) right = 239;
-            if (left <= right)
-                afn_hline(buf + y * 120, left, right, palIdx);
+        while (!Rh)
+        {
+            int N = R + 1;
+            if (N >= count) N = 0;
+            if (py[N] < py[R]) return;
+            Rh = py[N] - py[R];
+            Rx = px[R] << 16;
+            if (Rh > 1) {
+                u32 inv = (u32)Rh < AFN_DIV_LUT_SIZE ? divLUT[Rh] : ((1u << 16) / (u32)Rh);
+                Rdx = (int)(inv * (u32)(px[N] - px[R]));
+            }
+            R = N;
         }
-        lxF += ldx;
-        rxF += rdx;
+
+        h = Lh < Rh ? Lh : Rh;
+        Lh -= h;
+        Rh -= h;
+
+        while (h--)
+        {
+            if (y >= 0 && y < 160)
+            {
+                int left = Lx >> 16;
+                int right = Rx >> 16;
+                if (left > right) { int t = left; left = right; right = t; }
+                if (left < 0) left = 0;
+                if (right > 239) right = 239;
+                if (left <= right)
+                    afn_hline(buf + y * 120, left, right, palIdx);
+            }
+            Lx += Ldx;
+            Rx += Rdx;
+            y++;
+        }
     }
 }
 
-// Clip and rasterize a quad (viewport clipping + native quad fill)
+// Native quad rasterizer — wraps rasterize_convex for 4 vertices
+static void rasterize_quad(u16* buf, int x0, int y0, int x1, int y1,
+                                       int x2, int y2, int x3, int y3, u8 palIdx)
+{
+    int px[4] = {x0,x1,x2,x3};
+    int py[4] = {y0,y1,y2,y3};
+    rasterize_convex(buf, px, py, 4, palIdx);
+}
+
+// Clip and rasterize a quad (Sutherland-Hodgman viewport clipping + convex fill)
 static void rasterize_quad_clipped(u16* buf, int x0, int y0, int x1, int y1,
                                                int x2, int y2, int x3, int y3, u8 palIdx)
 {
@@ -1189,12 +1167,8 @@ static void rasterize_quad_clipped(u16* buf, int x0, int y0, int x1, int y1,
     count = clip_edge(tmpX, tmpY, count, polyX, polyY, 1, 159, 1);
     if (count < 3) return;
 
-    {
-        // Fan-triangulate clipped polygon (works for both quads and clipped N-gons)
-        int i;
-        for (i = 1; i < count - 1; i++)
-            rasterize_tri(buf, polyX[0], polyY[0], polyX[i], polyY[i], polyX[i+1], polyY[i+1], palIdx);
-    }
+    // Rasterize clipped convex polygon directly — no fan-triangulation needed
+    rasterize_convex(buf, polyX, polyY, count, palIdx);
 }
 
 // Rasterize a flat-shaded triangle into Mode 4 bitmap
@@ -2453,6 +2427,7 @@ int main(void)
     // --- Reciprocal LUT for texture rasterizer ---
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
     init_rcp_table();
+    init_divLUT();
 #endif
 
     // --- Minimap setup ---
