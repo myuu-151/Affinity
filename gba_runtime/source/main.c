@@ -890,6 +890,10 @@ IWRAM_CODE static void afn_hline_cov(u16* row, int left, int right, int y, u8 pa
 // 240×160 = 38400 pixels. Budget of ~25K allows ~65% screen fill before cutoff.
 #define PIXEL_BUDGET 25000
 static int g_pixels_drawn;
+static int g_halfRes; // when set, rasterize_convex skips odd scanlines + duplicates
+
+// ARM assembly flat-fill: ~3 cy/pixel via VRAM strb trick (defined in hline_fast.s)
+extern void afn_hline_fast(u16* row, int left, int right, u8 palIdx);
 
 IWRAM_CODE static void afn_hline(u16* row, int left, int right, u8 palIdx)
 {
@@ -917,13 +921,43 @@ IWRAM_CODE static void afn_hline(u16* row, int left, int right, u8 palIdx)
 // Near-plane clipping threshold — must be <= projection clamp (16)
 #define CLIP_NEAR_Z 8
 
+// Reciprocal lookup table: rcp_table[n] = (1 << 16) / n for n=1..240
+// Used to replace per-scanline division with multiply in texture rasterizer
+static u16 rcp_table[241];
+
+static void init_rcp_table(void)
+{
+    int i;
+    rcp_table[0] = 0xFFFF;
+    for (i = 1; i <= 240; i++)
+        rcp_table[i] = (u16)(65536 / i);
+}
+
+// Reciprocal LUT for division-free slope computation (OpenLara style)
+// divLUT[h] = (1 << 16) / h — replaces costly ARM7 software division
+#define AFN_DIV_LUT_SIZE 512
+static u32 divLUT[AFN_DIV_LUT_SIZE];
+u32* g_divLUT_ptr; /* global pointer for ASM access — set in init_divLUT */
+
+static void init_divLUT(void)
+{
+    int i;
+    divLUT[0] = 0;
+    for (i = 1; i < AFN_DIV_LUT_SIZE; i++)
+        divLUT[i] = (1u << 16) / (u32)i;
+    g_divLUT_ptr = divLUT;
+}
+
+// Safe 16.16 slope: uses 64-bit intermediate to prevent overflow with large coords
+#define SLOPE16(dx, dy) ((int)(((long long)(dx) << 16) / (dy)))
+
 // Project a view-space vertex to screen coords (clamped to guard band)
 static inline void project_vertex(int side, int height, int depth, int* osx, int* osy)
 {
     int px, py;
     if (depth < 16) depth = 16;
-    px = 120 + (int)((side * cam_fov) / depth);
-    py = m7_horizon + (int)((height * cam_fov) / depth);
+    px = 120 + (side * cam_fov) / depth;
+    py = m7_horizon + (height * cam_fov) / depth;
     if (px < -16000) px = -16000; if (px > 16000) px = 16000;
     if (py < -16000) py = -16000; if (py > 16000) py = 16000;
     *osx = px;
@@ -942,9 +976,6 @@ static inline int near_clip_t(int dA, int dB)
 
 #define LERP16(a, b, t) ((a) + ((int)(((long long)((b) - (a)) * (t)) >> 16)))
 
-// Safe 16.16 slope: uses 64-bit intermediate to prevent overflow with large coords
-#define SLOPE16(dx, dy) ((int)(((long long)(dx) << 16) / (dy)))
-
 /* Saturating 64-bit to 32-bit cast — clamps to INT32 range instead of wrapping.
    Prevents rasterizer explosion when near-plane vertices project to extreme coords. */
 static inline int sat32(long long v)
@@ -952,31 +983,6 @@ static inline int sat32(long long v)
     if (v >  0x7FFFFFFF) return  0x7FFFFFFF;
     if (v < -0x80000000LL) return (int)-0x80000000LL;
     return (int)v;
-}
-
-// Reciprocal lookup table: rcp_table[n] = (1 << 16) / n for n=1..240
-// Used to replace per-scanline division with multiply in texture rasterizer
-static u16 rcp_table[241];
-
-static void init_rcp_table(void)
-{
-    int i;
-    rcp_table[0] = 0xFFFF;
-    for (i = 1; i <= 240; i++)
-        rcp_table[i] = (u16)(65536 / i);
-}
-
-// Reciprocal LUT for division-free slope computation (OpenLara style)
-// divLUT[h] = (1 << 16) / h — replaces costly ARM7 software division
-#define AFN_DIV_LUT_SIZE 512
-static u32 divLUT[AFN_DIV_LUT_SIZE];
-
-static void init_divLUT(void)
-{
-    int i;
-    divLUT[0] = 0;
-    for (i = 1; i < AFN_DIV_LUT_SIZE; i++)
-        divLUT[i] = (1u << 16) / (u32)i;
 }
 
 // Forward declarations for rasterizers (used by viewport clipper)
@@ -1064,10 +1070,6 @@ IWRAM_CODE static void rasterize_tri_clipped(u16* buf, int x0, int y0, int x1, i
     }
 }
 
-// OpenLara-style convex polygon rasterizer — edge-chain walking with reciprocal LUT.
-// Vertices must be in polygon winding order. Left chain walks backward (prev),
-// right chain walks forward (next). No triangle splitting, no diagonal seam.
-// Works for triangles, quads, and clipped N-gons (3-8 verts).
 static void rasterize_convex(u16* buf, int* px, int* py, int count, u8 palIdx)
 {
     int i, top, bot, L, R, Lh, Rh, Lx, Rx, Ldx, Rdx, y, h;
@@ -1075,15 +1077,13 @@ static void rasterize_convex(u16* buf, int* px, int* py, int count, u8 palIdx)
 
     if (count < 3) return;
 
-    // Find topmost and bottommost vertex
     top = 0; bot = 0;
     for (i = 1; i < count; i++) {
         if (py[i] < py[top]) top = i;
         if (py[i] > py[bot]) bot = i;
     }
-    if (py[bot] <= py[top]) return; // degenerate — zero height polygon
+    if (py[bot] <= py[top]) return;
 
-    // L walks prev (backward around polygon), R walks next (forward)
     L = top; R = top;
     Lh = 0; Rh = 0;
     Lx = 0; Rx = 0;
@@ -1129,13 +1129,19 @@ static void rasterize_convex(u16* buf, int* px, int* py, int count, u8 palIdx)
         {
             if (y >= 0 && y < 160)
             {
-                int left = Lx >> 16;
-                int right = Rx >> 16;
-                if (left > right) { int t = left; left = right; right = t; }
-                if (left < 0) left = 0;
-                if (right > 239) right = 239;
-                if (left <= right)
-                    afn_hline(buf + y * 120, left, right, palIdx);
+                if (!g_halfRes || !(y & 1))
+                {
+                    int left = Lx >> 16;
+                    int right = Rx >> 16;
+                    if (left > right) { int t = left; left = right; right = t; }
+                    if (left < 0) left = 0;
+                    if (right > 239) right = 239;
+                    if (left <= right) {
+                        afn_hline(buf + y * 120, left, right, palIdx);
+                        if (g_halfRes && y + 1 < 160)
+                            afn_hline(buf + (y + 1) * 120, left, right, palIdx);
+                    }
+                }
             }
             Lx += Ldx;
             Rx += Rdx;
@@ -2013,8 +2019,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             vSide[v] = side;
             vHeight[v] = heightDiff;
 
-            sy[v] = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
-            sx[v] = 120 + (int)((side * cam_fov) / fovLambda);
+            sy[v] = m7_horizon + (heightDiff * cam_fov) / fovLambda;
+            sx[v] = 120 + (side * cam_fov) / fovLambda;
 
             vis[v] = 1;
         }
@@ -2180,6 +2186,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 anyNear = (rawDepth[i0] < CLIP_NEAR_Z) | (rawDepth[i1] < CLIP_NEAR_Z) | (rawDepth[i2] < CLIP_NEAR_Z);
             }
             lodLevel = meshHalfRes ? 1 : (avgD < 64 ? 2 : (avgD < 192 ? 1 : 0));
+            g_halfRes = (lodLevel >= 1); // enable half-res in rasterize_convex for close faces
 
 
 

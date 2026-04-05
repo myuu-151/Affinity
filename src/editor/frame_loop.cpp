@@ -2,6 +2,7 @@
 #include "../viewport/mode7_preview.h"
 #include "../map/map_types.h"
 #include "../platform/gba/gba_package.h"
+#include "../platform/nds/nds_package.h"
 #include "imgui.h"
 
 #include <array>
@@ -281,6 +282,9 @@ static bool sPackageDone = false;
 static bool sPackageSuccess = false;
 static std::string sPackageMsg;
 static std::string sPackageOutputPath;
+
+enum class BuildTarget { GBA = 0, NDS = 1 };
+static BuildTarget sBuildTarget = BuildTarget::NDS; // default to NDS
 
 // Project file
 static std::string sProjectPath;  // empty = no project loaded
@@ -3506,6 +3510,12 @@ void FrameTick(float dt)
             ImGui::EndMenu();
         }
         ImGui::Separator();
+        if (ImGui::RadioButton("GBA", sBuildTarget == BuildTarget::GBA))
+            sBuildTarget = BuildTarget::GBA;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("NDS", sBuildTarget == BuildTarget::NDS))
+            sBuildTarget = BuildTarget::NDS;
+        ImGui::SameLine();
         if (ImGui::MenuItem("Build", nullptr, false, !sPackaging))
         {
             sPackaging = true;
@@ -3518,16 +3528,14 @@ void FrameTick(float dt)
             GetModuleFileNameA(nullptr, exeBuf, MAX_PATH);
             fs::path exeDir = fs::path(exeBuf).parent_path();
             fs::path cwdDir = fs::current_path();
+
+            const char* rtName = (sBuildTarget == BuildTarget::NDS) ? "nds_runtime" : "gba_runtime";
+            const char* rtExt  = (sBuildTarget == BuildTarget::NDS) ? "affinity.nds" : "affinity.gba";
+
             fs::path rtDir;
-            for (auto& candidate : {
-                exeDir / "gba_runtime",
-                exeDir / ".." / "gba_runtime",
-                exeDir / ".." / ".." / "gba_runtime",
-                exeDir / ".." / ".." / ".." / "gba_runtime",
-                cwdDir / "gba_runtime",
-                cwdDir / ".." / "gba_runtime",
-            })
+            for (auto& base : { exeDir, exeDir / "..", exeDir / ".." / "..", exeDir / ".." / ".." / "..", cwdDir, cwdDir / ".." })
             {
+                fs::path candidate = base / rtName;
                 if (fs::exists(candidate / "Makefile"))
                 { rtDir = fs::canonical(candidate); break; }
             }
@@ -3537,11 +3545,11 @@ void FrameTick(float dt)
                 sPackaging = false;
                 sPackageDone = true;
                 sPackageSuccess = false;
-                sPackageMsg = "Cannot find gba_runtime/Makefile\n\nSearched from:\n  exe: " + exeDir.string() + "\n  cwd: " + cwdDir.string();
+                sPackageMsg = std::string("Cannot find ") + rtName + "/Makefile\n\nSearched from:\n  exe: " + exeDir.string() + "\n  cwd: " + cwdDir.string();
             }
             else
             {
-                sPackageOutputPath = (rtDir / "affinity.gba").string();
+                sPackageOutputPath = (rtDir / rtExt).string();
                 std::string rtDirStr = rtDir.string();
                 std::string outPath = sPackageOutputPath;
 
@@ -3697,12 +3705,18 @@ void FrameTick(float dt)
                 }
 
                 float exportOrbitDist = sOrbitDist;
+                BuildTarget target = sBuildTarget;
 
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                             exportMeshes, exportOrbitDist]() {
+                             exportMeshes, exportOrbitDist, target]() {
                     std::string err;
-                    bool ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                                         exportMeshes, exportOrbitDist, err);
+                    bool ok;
+                    if (target == BuildTarget::NDS)
+                        ok = PackageNDS(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
+                                        exportMeshes, exportOrbitDist, err);
+                    else
+                        ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
+                                        exportMeshes, exportOrbitDist, err);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
@@ -4401,13 +4415,13 @@ void FrameTick(float dt)
         ImGui::SetNextWindowSize(ImVec2(500, 0), ImGuiCond_Always);
         ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
             ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-        ImGui::Begin("GBA Package", nullptr,
+        ImGui::Begin(sBuildTarget == BuildTarget::NDS ? "NDS Package" : "GBA Package", nullptr,
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
             ImGuiWindowFlags_AlwaysAutoResize);
 
         if (sPackaging)
         {
-            ImGui::Text("Building GBA ROM...");
+            ImGui::Text(sBuildTarget == BuildTarget::NDS ? "Building NDS ROM..." : "Building GBA ROM...");
             // Simple spinner
             const char* spinner = "|/-\\";
             static int frame = 0;
@@ -4435,10 +4449,11 @@ void FrameTick(float dt)
             if (sPackageSuccess)
             {
                 ImGui::SameLine();
-                float mgbaW = std::max(140.0f * sUiScale, ImGui::CalcTextSize("  Open in mGBA  ").x + 20.0f);
-                if (ImGui::Button("Open in mGBA", ImVec2(mgbaW, btnH)))
+                const char* openLabel = (sBuildTarget == BuildTarget::NDS) ? "  Open ROM  " : "  Open in mGBA  ";
+                float mgbaW = std::max(140.0f * sUiScale, ImGui::CalcTextSize(openLabel).x + 20.0f);
+                if (ImGui::Button(openLabel, ImVec2(mgbaW, btnH)))
                 {
-                    if (sMgbaPath[0])
+                    if (sBuildTarget == BuildTarget::GBA && sMgbaPath[0])
                     {
                         std::string cmd = "\"" + std::string(sMgbaPath) + "\" \"" + sPackageOutputPath + "\"";
                         STARTUPINFOA si = {}; si.cb = sizeof(si);
@@ -4448,7 +4463,7 @@ void FrameTick(float dt)
                     }
                     else
                     {
-                        // Fallback: open with default .gba association
+                        // Open with default file association (.nds or .gba)
                         ShellExecuteA(nullptr, "open", sPackageOutputPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                     }
                     sPackageDone = false;

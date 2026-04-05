@@ -4,9 +4,9 @@
 #include <vector>
 #include <string>
 
-// GBA screen dimensions
-static constexpr int kGBAWidth  = 240;
-static constexpr int kGBAHeight = 160;
+// Scene viewport dimensions (DS: 256×192)
+static constexpr int kGBAWidth  = 256;
+static constexpr int kGBAHeight = 192;
 
 // Tile constants
 static constexpr int kTileSize = 8;   // 8x8 pixels per tile
