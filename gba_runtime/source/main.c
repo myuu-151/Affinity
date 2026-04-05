@@ -1070,20 +1070,25 @@ IWRAM_CODE static void rasterize_tri_clipped(u16* buf, int x0, int y0, int x1, i
 // Works for triangles, quads, and clipped N-gons (3-8 verts).
 static void rasterize_convex(u16* buf, int* px, int* py, int count, u8 palIdx)
 {
-    int i, top, L, R, Lh, Rh, Lx, Rx, Ldx, Rdx, y, h;
+    int i, top, bot, L, R, Lh, Rh, Lx, Rx, Ldx, Rdx, y, h;
+    int Lsteps, Rsteps;
 
     if (count < 3) return;
 
-    // Find topmost vertex (minimum Y)
-    top = 0;
-    for (i = 1; i < count; i++)
+    // Find topmost and bottommost vertex
+    top = 0; bot = 0;
+    for (i = 1; i < count; i++) {
         if (py[i] < py[top]) top = i;
+        if (py[i] > py[bot]) bot = i;
+    }
+    if (py[bot] <= py[top]) return; // degenerate — zero height polygon
 
     // L walks prev (backward around polygon), R walks next (forward)
     L = top; R = top;
     Lh = 0; Rh = 0;
     Lx = 0; Rx = 0;
     Ldx = 0; Rdx = 0;
+    Lsteps = 0; Rsteps = 0;
     y = py[top];
 
     for (;;)
@@ -1092,7 +1097,7 @@ static void rasterize_convex(u16* buf, int* px, int* py, int count, u8 palIdx)
         {
             int N = L - 1;
             if (N < 0) N = count - 1;
-            if (py[N] < py[L]) return; // wrapped past bottom
+            if (py[N] < py[L] || ++Lsteps > count) return;
             Lh = py[N] - py[L];
             Lx = px[L] << 16;
             if (Lh > 1) {
@@ -1106,7 +1111,7 @@ static void rasterize_convex(u16* buf, int* px, int* py, int count, u8 palIdx)
         {
             int N = R + 1;
             if (N >= count) N = 0;
-            if (py[N] < py[R]) return;
+            if (py[N] < py[R] || ++Rsteps > count) return;
             Rh = py[N] - py[R];
             Rx = px[R] << 16;
             if (Rh > 1) {
