@@ -1217,10 +1217,11 @@ IWRAM_CODE static void draw_line(u16* buf, int x0, int y0, int x1, int y1, u8 pa
 
 // Affine texture-mapped triangle rasterizer
 // UVs are 8.8 fixed-point (pre-scaled to texture dimensions)
+// z params accepted but unused (kept for call-site compatibility)
 IWRAM_CODE static void rasterize_tri_tex(u16* buf,
-    int x0, int y0, int u0, int v0,
-    int x1, int y1, int u1, int v1,
-    int x2, int y2, int u2, int v2,
+    int x0, int y0, int u0, int v0, int z0,
+    int x1, int y1, int u1, int v1, int z1,
+    int x2, int y2, int u2, int v2, int z2,
     const u8* tex, int texMask, int texShift, u8 palBase)
 {
     int tmp;
@@ -1228,7 +1229,8 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
     int iy0, iy2, y;
     int xLong, xShort, uLong, uShort, vLong, vShort;
     int dxLong, dxShort, duLong, duShort, dvLong, dvShort;
-    int left, right, spanW;
+    int spanW;
+    (void)z0; (void)z1; (void)z2;
 
     /* Sort by y (carry u,v along) */
     if (y0 > y1) { tmp=x0;x0=x1;x1=tmp; tmp=y0;y0=y1;y1=tmp; tmp=u0;u0=u1;u1=tmp; tmp=v0;v0=v1;v1=tmp; }
@@ -1385,35 +1387,6 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
             uLong += duLong; uShort += duShort;
             vLong += dvLong; vShort += dvShort;
         }
-    }
-}
-
-// Subdivision wrapper — splits large triangles at midpoints to reduce affine warping.
-// One level of subdivision (1 tri → 4 tris) when any edge exceeds threshold.
-#define SUBDIV_EDGE_THRESHOLD 80
-IWRAM_CODE static void rasterize_tri_tex_subdiv(u16* buf,
-    int x0, int y0, int u0, int v0,
-    int x1, int y1, int u1, int v1,
-    int x2, int y2, int u2, int v2,
-    const u8* tex, int texMask, int texShift, u8 palBase)
-{
-    int dx, dy, e0, e1, e2;
-    dx = x1-x0; dy = y1-y0; e0 = (dx<0?-dx:dx) + (dy<0?-dy:dy);
-    dx = x2-x1; dy = y2-y1; e1 = (dx<0?-dx:dx) + (dy<0?-dy:dy);
-    dx = x0-x2; dy = y0-y2; e2 = (dx<0?-dx:dx) + (dy<0?-dy:dy);
-    if (e0 > SUBDIV_EDGE_THRESHOLD || e1 > SUBDIV_EDGE_THRESHOLD || e2 > SUBDIV_EDGE_THRESHOLD)
-    {
-        int mx01=(x0+x1)>>1, my01=(y0+y1)>>1, mu01=(u0+u1)>>1, mv01=(v0+v1)>>1;
-        int mx12=(x1+x2)>>1, my12=(y1+y2)>>1, mu12=(u1+u2)>>1, mv12=(v1+v2)>>1;
-        int mx20=(x2+x0)>>1, my20=(y2+y0)>>1, mu20=(u2+u0)>>1, mv20=(v2+v0)>>1;
-        rasterize_tri_tex(buf, x0,y0,u0,v0, mx01,my01,mu01,mv01, mx20,my20,mu20,mv20, tex,texMask,texShift,palBase);
-        rasterize_tri_tex(buf, mx01,my01,mu01,mv01, x1,y1,u1,v1, mx12,my12,mu12,mv12, tex,texMask,texShift,palBase);
-        rasterize_tri_tex(buf, mx20,my20,mu20,mv20, mx12,my12,mu12,mv12, x2,y2,u2,v2, tex,texMask,texShift,palBase);
-        rasterize_tri_tex(buf, mx01,my01,mu01,mv01, mx12,my12,mu12,mv12, mx20,my20,mu20,mv20, tex,texMask,texShift,palBase);
-    }
-    else
-    {
-        rasterize_tri_tex(buf, x0,y0,u0,v0, x1,y1,u1,v1, x2,y2,u2,v2, tex,texMask,texShift,palBase);
     }
 }
 
@@ -1663,12 +1636,11 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             }
             else if (meshTextured && uvs && tex)
             {
-                // Textured triangle — UVs are 8.8 fixed pre-scaled to texture size
-                // Uses subdivision wrapper to reduce affine warping on large triangles
-                rasterize_tri_tex_subdiv(buf,
-                    sx[i0], sy[i0], uvs[i0*2+0], uvs[i0*2+1],
-                    sx[i1], sy[i1], uvs[i1*2+0], uvs[i1*2+1],
-                    sx[i2], sy[i2], uvs[i2*2+0], uvs[i2*2+1],
+                // Textured triangle — perspective-correct with per-scanline subdivision
+                rasterize_tri_tex(buf,
+                    sx[i0], sy[i0], uvs[i0*2+0], uvs[i0*2+1], sz[i0],
+                    sx[i1], sy[i1], uvs[i1*2+0], uvs[i1*2+1], sz[i1],
+                    sx[i2], sy[i2], uvs[i2*2+0], uvs[i2*2+1], sz[i2],
                     tex, texMask, texShift, (u8)texPalBase);
             }
             else
