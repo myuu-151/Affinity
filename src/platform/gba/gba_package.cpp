@@ -590,6 +590,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
     }
     f << "\n";
 
+    // In Mode 4 (meshes present), OBJ tiles 0-511 overlap bitmap framebuffer.
+    // Offset all tile IDs by 512 so sprites use accessible VRAM.
+    int tileOffset = meshes.empty() ? 0 : 512;
+
     // Asset direction descriptor table: { setCount, tpf, dirSize, palBank, hasDirs, vramTile0 }
     if (!assets.empty())
     {
@@ -609,7 +613,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 f << "    { " << assetDirInfos[ai].setCount << ", " << tpf
                   << ", " << assetDirInfos[ai].dirSize
                   << ", " << assetDirInfos[ai].palBank
-                  << ", 1, " << assetDirInfos[ai].vramTile0 << " },\n";
+                  << ", 1, " << (assetDirInfos[ai].vramTile0 + tileOffset) << " },\n";
             }
             else
             {
@@ -713,7 +717,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static const int afn_asset_desc[][5] = {\n";
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
-            f << "    { " << assetTileStart[ai] << ", " << assetTilesPerFrame[ai]
+            f << "    { " << (assetTileStart[ai] + tileOffset) << ", " << assetTilesPerFrame[ai]
               << ", " << (int)assets[ai].frames.size()
               << ", " << SnapToOBJSize(assets[ai].baseSize)
               << ", " << assets[ai].palBank << " },\n";

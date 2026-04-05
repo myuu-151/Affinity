@@ -3600,9 +3600,10 @@ void FrameTick(float dt)
                     exportAssets.push_back(ea);
                 }
 
-                // Collect mesh assets for export
+                // Collect mesh assets for export (skip for Mode 7 tab — uses hardware affine floor)
                 std::vector<GBAMeshExport> exportMeshes;
-                for (const auto& ma : sMeshAssets)
+                bool exportMode7 = (sActiveTab == EditorTab::Mode7);
+                if (!exportMode7) for (const auto& ma : sMeshAssets)
                 {
                     GBAMeshExport me;
                     for (const auto& v : ma.vertices)

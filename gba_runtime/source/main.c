@@ -43,6 +43,62 @@ extern void tex_scanline_asm(u16* rp, int pairCount, int su, int sv,
                              int texMask, int texShift, int palBase);
 #endif
 
+// Debug profiling counters
+static int dbg_tex_tris;    // textured triangles this frame
+static int dbg_tex_spans;   // textured scanlines this frame
+static int dbg_tex_pixels;  // textured pixel pairs this frame
+static int dbg_vcount;      // VCOUNT delta (scanlines consumed by render)
+
+// Tiny 4x5 digit font for debug overlay (digits 0-9, packed as 4-bit rows)
+static const u32 dbg_font[10] = {
+    0x69996, // 0
+    0x26227, // 1
+    0x69127, // 2  (top-down: 0110, 1001, 0001, 0010, 0111)
+    0x69196, // 3
+    0x99711, // 4
+    0x78196, // 5
+    0x68996, // 6
+    0x71122, // 7
+    0x69996, // 8  (same as 0 but different middle)
+    0x69716, // 9
+};
+
+// Draw a digit (0-9) at pixel position (px,py) into Mode 4 buffer using palette index ci
+static void dbg_digit(u16* buf, int px, int py, int d, u8 ci)
+{
+    if (d < 0 || d > 9) return;
+    u32 g = dbg_font[d];
+    int row, col;
+    for (row = 0; row < 5; row++) {
+        int bits = (g >> (4 * (4 - row))) & 0xF;
+        int sy = py + row;
+        if (sy < 0 || sy >= 160) continue;
+        u16* r = buf + sy * 120;
+        for (col = 0; col < 4; col++) {
+            if (bits & (8 >> col)) {
+                int sx = px + col;
+                if (sx < 0 || sx >= 240) continue;
+                if (sx & 1)
+                    r[sx >> 1] = (r[sx >> 1] & 0x00FF) | ((u16)ci << 8);
+                else
+                    r[sx >> 1] = (r[sx >> 1] & 0xFF00) | ci;
+            }
+        }
+    }
+}
+
+// Draw an integer (up to 5 digits) at pixel position
+static void dbg_int(u16* buf, int px, int py, int val, u8 ci)
+{
+    char digits[6];
+    int n = 0, v = val < 0 ? -val : val;
+    if (v == 0) { digits[n++] = 0; }
+    else { while (v > 0 && n < 5) { digits[n++] = v % 10; v /= 10; } }
+    int i;
+    for (i = n - 1; i >= 0; i--)
+        dbg_digit(buf, px + (n - 1 - i) * 5, py, digits[i], ci);
+}
+
 // Horizon scanline — variable for pitch control (A/B buttons)
 static int m7_horizon = 60;
 
@@ -1252,6 +1308,10 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
         duShort = SLOPE16(u1 - u0, segH);
         dvShort = SLOPE16(v1 - v0, segH);
         iy0 = y0 < 0 ? 0 : y0;
+        iy2 = y1 < 160 ? y1 : 160;
+
+        /* Align iy0 to even scanline for half-height rendering */
+        iy0 = iy0 & ~1;
         {
             int skip = iy0 - y0;
             xLong  = sat32((long long)x0 * 65536 + (long long)dxLong  * skip);
@@ -1261,29 +1321,51 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
             vLong  = sat32((long long)v0 * 65536 + (long long)dvLong  * skip);
             vShort = sat32((long long)v0 * 65536 + (long long)dvShort * skip);
         }
-        iy2 = y1 < 160 ? y1 : 160;
 
-        for (y = iy0; y < iy2; y++)
+        /* Double-step slopes for skipping every other scanline */
+        int dxLong2 = dxLong << 1, dxShort2 = dxShort << 1;
+        int duLong2 = duLong << 1, duShort2 = duShort << 1;
+        int dvLong2 = dvLong << 1, dvShort2 = dvShort << 1;
+
+        for (y = iy0; y < iy2; y += 2)
         {
             {
             int xl = xLong >> 16, xr = xShort >> 16;
             int ul = uLong >> 16, ur = uShort >> 16;
             int vl = vLong >> 16, vr = vShort >> 16;
             if (xl > xr) { tmp=xl;xl=xr;xr=tmp; tmp=ul;ul=ur;ur=tmp; tmp=vl;vl=vr;vr=tmp; }
-            if (xl < 0) { if (xr < 0) goto next_upper; int d = xr - xl; if (d > 0 && d <= 240) { int rcp = rcp_table[d]; ul += (int)((long long)(-xl) * (ur - ul) * rcp >> 16); vl += (int)((long long)(-xl) * (vr - vl) * rcp >> 16); } xl = 0; }
+            if (xr < 0) goto next_upper;
             if (xr > 239) xr = 239;
+            {
+            /* Compute du/dv from full span BEFORE clipping */
+            int fullSpan = xr - xl;
+            int du2 = 0, dv2 = 0;
+            if (fullSpan > 0) {
+                if (fullSpan <= 240) {
+                    int rcp = rcp_table[fullSpan];
+                    du2 = ((ur - ul) * rcp) >> 8;
+                    dv2 = ((vr - vl) * rcp) >> 8;
+                } else {
+                    du2 = ((ur - ul) << 8) / fullSpan;
+                    dv2 = ((vr - vl) << 8) / fullSpan;
+                }
+            }
+            int su = ul << 8, sv = vl << 8;
+            /* Left clip: advance su/sv forward (2 x 32-bit mul vs 4 x 64-bit) */
+            if (xl < 0) {
+                int skip = -xl;
+                su += (du2 * skip) >> 1;
+                sv += (dv2 * skip) >> 1;
+                xl = 0;
+            }
             spanW = xr - xl;
             if (spanW >= 0)
             {
+                dbg_tex_spans++;
+                dbg_tex_pixels += (spanW + 1) >> 1;
                 u16* row = buf + y * 120;
-                int su = ul << 8, sv = vl << 8;
-                int du2, dv2;
+                int rowOff = (y + 1 < 160) ? 120 : 0;
                 int x = xl;
-                if (spanW > 0 && spanW <= 240) {
-                    int rcp = rcp_table[spanW];
-                    du2 = ((ur - ul) * rcp) >> 8;
-                    dv2 = ((vr - vl) * rcp) >> 8;
-                } else { du2 = 0; dv2 = 0; }
                 {
                 u16* rp = row + (x >> 1);
                 int ti;
@@ -1291,28 +1373,32 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
                 if ((x & 1) && x <= xr)
                 {
                     ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
-                    *rp = (*rp & 0x00FF) | ((u16)(palBase + tex[ti]) << 8);
+                    u16 val = (*rp & 0x00FF) | ((u16)(palBase + tex[ti]) << 8);
+                    *rp = val; *(rp + rowOff) = val;
                     su += du2; sv += dv2; x++; rp = row + (x >> 1);
                 }
                 for (; x + 1 <= xr; x += 2, rp++)
                 {
                     ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
                     u16 px = palBase + tex[ti];
-                    *rp = px | (px << 8);
+                    u16 val = px | (px << 8);
+                    *rp = val; *(rp + rowOff) = val;
                     su += du4; sv += dv4;
                 }
                 if (x <= xr)
                 {
                     ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
-                    *rp = (*rp & 0xFF00) | (palBase + tex[ti]);
+                    u16 val = (*rp & 0xFF00) | (palBase + tex[ti]);
+                    *rp = val; *(rp + rowOff) = val;
                 }
                 }
+            }
             }
             }
             next_upper:
-            xLong += dxLong; xShort += dxShort;
-            uLong += duLong; uShort += duShort;
-            vLong += dvLong; vShort += dvShort;
+            xLong += dxLong2; xShort += dxShort2;
+            uLong += duLong2; uShort += duShort2;
+            vLong += dvLong2; vShort += dvShort2;
         }
     }
 
@@ -1324,6 +1410,7 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
         duShort = SLOPE16(u2 - u1, segH);
         dvShort = SLOPE16(v2 - v1, segH);
         iy0 = y1 < 0 ? 0 : y1;
+        iy0 = iy0 & ~1;
         {
             int skipLong  = iy0 - y0;
             int skipShort = iy0 - y1;
@@ -1336,27 +1423,47 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
         }
         iy2 = y2 < 160 ? y2 : 159;
 
-        for (y = iy0; y <= iy2; y++)
+        int dxLong2 = dxLong << 1, dxShort2 = dxShort << 1;
+        int duLong2 = duLong << 1, duShort2 = duShort << 1;
+        int dvLong2 = dvLong << 1, dvShort2 = dvShort << 1;
+
+        for (y = iy0; y <= iy2; y += 2)
         {
             {
             int xl = xLong >> 16, xr = xShort >> 16;
             int ul = uLong >> 16, ur = uShort >> 16;
             int vl = vLong >> 16, vr = vShort >> 16;
             if (xl > xr) { tmp=xl;xl=xr;xr=tmp; tmp=ul;ul=ur;ur=tmp; tmp=vl;vl=vr;vr=tmp; }
-            if (xl < 0) { if (xr < 0) goto next_lower; int d = xr - xl; if (d > 0 && d <= 240) { int rcp = rcp_table[d]; ul += (int)((long long)(-xl) * (ur - ul) * rcp >> 16); vl += (int)((long long)(-xl) * (vr - vl) * rcp >> 16); } xl = 0; }
+            if (xr < 0) goto next_lower;
             if (xr > 239) xr = 239;
+            {
+            int fullSpan = xr - xl;
+            int du2 = 0, dv2 = 0;
+            if (fullSpan > 0) {
+                if (fullSpan <= 240) {
+                    int rcp = rcp_table[fullSpan];
+                    du2 = ((ur - ul) * rcp) >> 8;
+                    dv2 = ((vr - vl) * rcp) >> 8;
+                } else {
+                    du2 = ((ur - ul) << 8) / fullSpan;
+                    dv2 = ((vr - vl) << 8) / fullSpan;
+                }
+            }
+            int su = ul << 8, sv = vl << 8;
+            if (xl < 0) {
+                int skip = -xl;
+                su += (du2 * skip) >> 1;
+                sv += (dv2 * skip) >> 1;
+                xl = 0;
+            }
             spanW = xr - xl;
             if (spanW >= 0)
             {
+                dbg_tex_spans++;
+                dbg_tex_pixels += (spanW + 1) >> 1;
                 u16* row = buf + y * 120;
-                int su = ul << 8, sv = vl << 8;
-                int du2, dv2;
+                int rowOff = (y + 1 < 160 && y + 1 <= iy2) ? 120 : 0;
                 int x = xl;
-                if (spanW > 0 && spanW <= 240) {
-                    int rcp = rcp_table[spanW];
-                    du2 = ((ur - ul) * rcp) >> 8;
-                    dv2 = ((vr - vl) * rcp) >> 8;
-                } else { du2 = 0; dv2 = 0; }
                 {
                 u16* rp = row + (x >> 1);
                 int ti;
@@ -1364,28 +1471,32 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
                 if ((x & 1) && x <= xr)
                 {
                     ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
-                    *rp = (*rp & 0x00FF) | ((u16)(palBase + tex[ti]) << 8);
+                    u16 val = (*rp & 0x00FF) | ((u16)(palBase + tex[ti]) << 8);
+                    *rp = val; *(rp + rowOff) = val;
                     su += du2; sv += dv2; x++; rp = row + (x >> 1);
                 }
                 for (; x + 1 <= xr; x += 2, rp++)
                 {
                     ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
                     u16 px = palBase + tex[ti];
-                    *rp = px | (px << 8);
+                    u16 val = px | (px << 8);
+                    *rp = val; *(rp + rowOff) = val;
                     su += du4; sv += dv4;
                 }
                 if (x <= xr)
                 {
                     ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
-                    *rp = (*rp & 0xFF00) | (palBase + tex[ti]);
+                    u16 val = (*rp & 0xFF00) | (palBase + tex[ti]);
+                    *rp = val; *(rp + rowOff) = val;
                 }
                 }
+            }
             }
             }
             next_lower:
-            xLong += dxLong; xShort += dxShort;
-            uLong += duLong; uShort += duShort;
-            vLong += dvLong; vShort += dvShort;
+            xLong += dxLong2; xShort += dxShort2;
+            uLong += duLong2; uShort += duShort2;
+            vLong += dvLong2; vShort += dvShort2;
         }
     }
 }
@@ -1636,7 +1747,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             }
             else if (meshTextured && uvs && tex)
             {
-                // Textured triangle — perspective-correct with per-scanline subdivision
+                dbg_tex_tris++;
                 rasterize_tri_tex(buf,
                     sx[i0], sy[i0], uvs[i0*2+0], uvs[i0*2+1], sz[i0],
                     sx[i1], sy[i1], uvs[i1*2+0], uvs[i1*2+1], sz[i1],
@@ -1890,7 +2001,23 @@ int main(void)
 #ifdef AFN_COVERAGE_BUF
             coverage_clear();
 #endif
-            render_meshes_sw(backbuf);
+            dbg_tex_tris = 0;
+            dbg_tex_spans = 0;
+            dbg_tex_pixels = 0;
+            {
+                // Single timer with prescaler=64: 1 tick = 64 cycles, max ~4.2M cycles
+                REG_TM2CNT_H = 0;           // disable
+                REG_TM2CNT_L = 0;           // reload = 0
+                REG_TM2CNT_H = 0x0082;      // enable, prescaler=64
+                render_meshes_sw(backbuf);
+                dbg_vcount = (int)REG_TM2CNT_L;
+                REG_TM2CNT_H = 0;           // disable
+            }
+            // Debug overlay: tris | spans | pixels | Kcycles
+            dbg_int(backbuf, 2, 2, dbg_tex_tris, 1);
+            dbg_int(backbuf, 30, 2, dbg_tex_spans, 1);
+            dbg_int(backbuf, 62, 2, dbg_tex_pixels, 1);
+            dbg_int(backbuf, 102, 2, (dbg_vcount * 64) / 1000, 1); // Kcycles (budget ~280)
         }
 #endif
         VBlankIntrWait();
