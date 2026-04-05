@@ -963,6 +963,91 @@ static void init_rcp_table(void)
         rcp_table[i] = (u16)(65536 / i);
 }
 
+// Forward declarations for rasterizers (used by viewport clipper)
+IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx);
+IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx);
+IWRAM_CODE static void rasterize_tri_quarter(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx);
+
+// Sutherland-Hodgman viewport clipping.
+// Clips a convex polygon against one axis-aligned edge.
+// Returns new vertex count. Max output = inCount + 1.
+static int clip_edge(const int* inX, const int* inY, int inCount,
+                     int* outX, int* outY,
+                     int axis, int limit, int isMax)
+{
+    int out = 0;
+    int i;
+    for (i = 0; i < inCount; i++)
+    {
+        int j = (i + 1 < inCount) ? i + 1 : 0;
+        int ci = axis ? inY[i] : inX[i];
+        int cj = axis ? inY[j] : inX[j];
+        int inI = isMax ? (ci <= limit) : (ci >= limit);
+        int inJ = isMax ? (cj <= limit) : (cj >= limit);
+
+        if (inI) {
+            outX[out] = inX[i];
+            outY[out] = inY[i];
+            out++;
+        }
+        if (inI != inJ) {
+            // Edge crosses boundary — compute intersection
+            int dx = inX[j] - inX[i];
+            int dy = inY[j] - inY[i];
+            int d = (axis ? dy : dx);
+            if (d != 0) {
+                int t = limit - (axis ? inY[i] : inX[i]);
+                outX[out] = axis ? (inX[i] + (int)((long long)dx * t / d)) : limit;
+                outY[out] = axis ? limit : (inY[i] + (int)((long long)dy * t / d));
+            } else {
+                outX[out] = inX[i];
+                outY[out] = inY[i];
+            }
+            out++;
+        }
+    }
+    return out;
+}
+
+// Clip a triangle to the screen (0,0)-(239,159) and rasterize the result.
+// Produces 0-7 vertex polygon, fan-triangulated for rendering.
+// lodLevel: 0=full, 1=half, 2=quarter
+IWRAM_CODE static void rasterize_tri_clipped(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx, int lodLevel)
+{
+    int polyX[8], polyY[8];
+    int tmpX[8], tmpY[8];
+    int count;
+
+    // Start with the triangle
+    polyX[0] = x0; polyY[0] = y0;
+    polyX[1] = x1; polyY[1] = y1;
+    polyX[2] = x2; polyY[2] = y2;
+    count = 3;
+
+    // Clip against all 4 screen edges
+    count = clip_edge(polyX, polyY, count, tmpX, tmpY, 0, 0, 0);     // left (x >= 0)
+    if (count < 3) return;
+    count = clip_edge(tmpX, tmpY, count, polyX, polyY, 0, 239, 1);   // right (x <= 239)
+    if (count < 3) return;
+    count = clip_edge(polyX, polyY, count, tmpX, tmpY, 1, 0, 0);     // top (y >= 0)
+    if (count < 3) return;
+    count = clip_edge(tmpX, tmpY, count, polyX, polyY, 1, 159, 1);   // bottom (y <= 159)
+    if (count < 3) return;
+
+    // Fan-triangulate: vertex 0 is the hub
+    {
+        int i;
+        for (i = 1; i < count - 1; i++) {
+            if (lodLevel >= 2)
+                rasterize_tri_quarter(buf, polyX[0], polyY[0], polyX[i], polyY[i], polyX[i+1], polyY[i+1], palIdx);
+            else if (lodLevel == 1)
+                rasterize_tri_half(buf, polyX[0], polyY[0], polyX[i], polyY[i], polyX[i+1], polyY[i+1], palIdx);
+            else
+                rasterize_tri(buf, polyX[0], polyY[0], polyX[i], polyY[i], polyX[i+1], polyY[i+1], palIdx);
+        }
+    }
+}
+
 // Rasterize a flat-shaded triangle into Mode 4 bitmap
 // Uses 16.16 fixed-point edge walking — no division in scanline loop
 IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx)
@@ -1669,17 +1754,9 @@ static void clip_render_tri_flat(u16* buf,
         project_vertex(s1, h1, d1, &px1, &py1);
         project_vertex(s2, h2, d2, &px2, &py2);
 
-        // Quad (A, 1, 2, B) → 2 triangles
-        if (lodLevel >= 2) {
-            rasterize_tri_quarter(buf, pxA, pyA, px1, py1, px2, py2, palIdx);
-            rasterize_tri_quarter(buf, pxA, pyA, px2, py2, pxB, pyB, palIdx);
-        } else if (lodLevel == 1) {
-            rasterize_tri_half(buf, pxA, pyA, px1, py1, px2, py2, palIdx);
-            rasterize_tri_half(buf, pxA, pyA, px2, py2, pxB, pyB, palIdx);
-        } else {
-            rasterize_tri(buf, pxA, pyA, px1, py1, px2, py2, palIdx);
-            rasterize_tri(buf, pxA, pyA, px2, py2, pxB, pyB, palIdx);
-        }
+        // Quad (A, 1, 2, B) → 2 triangles — viewport clipped
+        rasterize_tri_clipped(buf, pxA, pyA, px1, py1, px2, py2, palIdx, lodLevel);
+        rasterize_tri_clipped(buf, pxA, pyA, px2, py2, pxB, pyB, palIdx, lodLevel);
     } else {
         // 2 behind: make v0 the one in front
         if (d1 >= CLIP_NEAR_Z) {
@@ -1703,13 +1780,8 @@ static void clip_render_tri_flat(u16* buf,
         project_vertex(sA, hA, CLIP_NEAR_Z, &pxA, &pyA);
         project_vertex(sB, hB, CLIP_NEAR_Z, &pxB, &pyB);
 
-        // Single clipped triangle
-        if (lodLevel >= 2)
-            rasterize_tri_quarter(buf, px0, py0, pxA, pyA, pxB, pyB, palIdx);
-        else if (lodLevel == 1)
-            rasterize_tri_half(buf, px0, py0, pxA, pyA, pxB, pyB, palIdx);
-        else
-            rasterize_tri(buf, px0, py0, pxA, pyA, pxB, pyB, palIdx);
+        // Single clipped triangle — viewport clipped
+        rasterize_tri_clipped(buf, px0, py0, pxA, pyA, pxB, pyB, palIdx, lodLevel);
     }
 }
 
@@ -1937,12 +2009,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     clip_render_tri_flat(buf, vSide[i0], vHeight[i0], rawDepth[i0],
                         vSide[i1], vHeight[i1], rawDepth[i1],
                         vSide[i2], vHeight[i2], rawDepth[i2], palIdx, lodLevel);
-                else if (lodLevel >= 2)
-                    rasterize_tri_quarter(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
-                else if (lodLevel == 1)
-                    rasterize_tri_half(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
                 else
-                    rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+                    rasterize_tri_clipped(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx, lodLevel);
                 // Draw wireframe overlay — skip edges to behind-camera vertices
                 if (meshWireframe)
                 {
@@ -2021,12 +2089,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     clip_render_tri_flat(buf, vSide[i0], vHeight[i0], rawDepth[i0],
                         vSide[i1], vHeight[i1], rawDepth[i1],
                         vSide[i2], vHeight[i2], rawDepth[i2], palIdx, lodLevel);
-                else if (lodLevel >= 2)
-                    rasterize_tri_quarter(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
-                else if (lodLevel == 1)
-                    rasterize_tri_half(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
                 else
-                    rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+                    rasterize_tri_clipped(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx, lodLevel);
             }
         }
     }
