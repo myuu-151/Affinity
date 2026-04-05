@@ -748,7 +748,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             && fs.meshIdx >= 0 && fs.meshIdx < meshAssetCount && meshAssets)
         {
             const MeshAsset& ma = meshAssets[fs.meshIdx];
-            if (!ma.vertices.empty() && !ma.indices.empty())
+            if (!ma.vertices.empty() && (!ma.indices.empty() || !ma.quadIndices.empty()))
             {
                 float meshScale = fs.scale;
                 float rotRad = fs.rotation * 3.14159265f / 180.0f;
@@ -786,30 +786,59 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 float ll = sqrtf(lightDirX*lightDirX + lightDirY*lightDirY + lightDirZ*lightDirZ);
                 lightDirX /= ll; lightDirY /= ll; lightDirZ /= ll;
 
-                // Sort triangles back-to-front (painter's algorithm)
-                int ntri = (int)ma.indices.size() / 3;
+                // Build sort list: each entry is a face (tri or quad) with depth
+                // Negative index = quad, positive = tri
+                int nTriFaces = (int)ma.indices.size() / 3;
+                int nQuadFaces = (int)ma.quadIndices.size() / 4;
+                int nFaces = nTriFaces + nQuadFaces;
                 int sortIdx[512];
-                int* pSort = (ntri <= 512) ? sortIdx : new int[ntri];
-                for (int t = 0; t < ntri; t++) pSort[t] = t;
-                std::sort(pSort, pSort + ntri, [&](int a, int b) {
-                    int a0 = ma.indices[a*3], a1 = ma.indices[a*3+1], a2 = ma.indices[a*3+2];
-                    int b0 = ma.indices[b*3], b1 = ma.indices[b*3+1], b2 = ma.indices[b*3+2];
-                    float da = (pDepth[a0] + pDepth[a1] + pDepth[a2]);
-                    float db = (pDepth[b0] + pDepth[b1] + pDepth[b2]);
-                    return da > db; // back-to-front
+                float faceDepth[512];
+                int* pSort = (nFaces <= 512) ? sortIdx : new int[nFaces];
+                float* pFaceDepth = (nFaces <= 512) ? faceDepth : new float[nFaces];
+
+                for (int t = 0; t < nTriFaces; t++)
+                {
+                    int i0 = ma.indices[t*3], i1 = ma.indices[t*3+1], i2 = ma.indices[t*3+2];
+                    pFaceDepth[t] = pDepth[i0] + pDepth[i1] + pDepth[i2];
+                    pSort[t] = t;
+                }
+                for (int q = 0; q < nQuadFaces; q++)
+                {
+                    int i0 = ma.quadIndices[q*4], i1 = ma.quadIndices[q*4+1];
+                    int i2 = ma.quadIndices[q*4+2], i3 = ma.quadIndices[q*4+3];
+                    pFaceDepth[nTriFaces + q] = pDepth[i0] + pDepth[i1] + pDepth[i2] + pDepth[i3];
+                    pSort[nTriFaces + q] = nTriFaces + q;
+                }
+                std::sort(pSort, pSort + nFaces, [&](int a, int b) {
+                    return pFaceDepth[a] > pFaceDepth[b];
                 });
 
-                // Draw filled triangles
-                for (int ti = 0; ti < ntri; ti++)
-                {
-                    int t = pSort[ti];
-                    int i0 = ma.indices[t * 3 + 0];
-                    int i1 = ma.indices[t * 3 + 1];
-                    int i2 = ma.indices[t * 3 + 2];
-                    if (i0 >= nv || i1 >= nv || i2 >= nv) continue;
-                    if (!pVis[i0] && !pVis[i1] && !pVis[i2]) continue;
+                uint8_t wr = (uint8_t)(cr * 0.3f);
+                uint8_t wg = (uint8_t)(cg * 0.3f);
+                uint8_t wb = (uint8_t)(cb * 0.3f);
 
-                    // Backface culling via screen-space cross product
+                for (int fi = 0; fi < nFaces; fi++)
+                {
+                    int f = pSort[fi];
+                    bool isQuad = (f >= nTriFaces);
+
+                    int i0, i1, i2, i3 = 0;
+                    if (isQuad)
+                    {
+                        int q = f - nTriFaces;
+                        i0 = ma.quadIndices[q*4]; i1 = ma.quadIndices[q*4+1];
+                        i2 = ma.quadIndices[q*4+2]; i3 = ma.quadIndices[q*4+3];
+                    }
+                    else
+                    {
+                        i0 = ma.indices[f*3]; i1 = ma.indices[f*3+1]; i2 = ma.indices[f*3+2];
+                    }
+
+                    if (i0 >= nv || i1 >= nv || i2 >= nv) continue;
+                    if (isQuad && i3 >= nv) continue;
+                    if (!pVis[i0] && !pVis[i1] && !pVis[i2] && !(isQuad && pVis[i3])) continue;
+
+                    // Backface culling via screen-space cross product (use first 3 verts)
                     if (ma.cullMode != CullMode::None) {
                         float cross = (pSX[i1] - pSX[i0]) * (pSY[i2] - pSY[i0])
                                     - (pSY[i1] - pSY[i0]) * (pSX[i2] - pSX[i0]);
@@ -817,17 +846,25 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                         if (ma.cullMode == CullMode::Front && cross <= 0.0f) continue;
                     }
 
-                    // Face normal for shading (average vertex normals or compute from positions)
-                    float nx = (ma.vertices[i0].nx + ma.vertices[i1].nx + ma.vertices[i2].nx) / 3.0f;
-                    float ny = (ma.vertices[i0].ny + ma.vertices[i1].ny + ma.vertices[i2].ny) / 3.0f;
-                    float nz = (ma.vertices[i0].nz + ma.vertices[i1].nz + ma.vertices[i2].nz) / 3.0f;
-                    // Rotate normal by sprite rotation
-                    float rnx = nx * cr2 + nz * sr;
-                    float rny = ny;
-                    float rnz = -nx * sr + nz * cr2;
-
+                    // Face normal for shading
+                    float fnx, fny, fnz;
+                    if (isQuad)
+                    {
+                        fnx = (ma.vertices[i0].nx + ma.vertices[i1].nx + ma.vertices[i2].nx + ma.vertices[i3].nx) * 0.25f;
+                        fny = (ma.vertices[i0].ny + ma.vertices[i1].ny + ma.vertices[i2].ny + ma.vertices[i3].ny) * 0.25f;
+                        fnz = (ma.vertices[i0].nz + ma.vertices[i1].nz + ma.vertices[i2].nz + ma.vertices[i3].nz) * 0.25f;
+                    }
+                    else
+                    {
+                        fnx = (ma.vertices[i0].nx + ma.vertices[i1].nx + ma.vertices[i2].nx) / 3.0f;
+                        fny = (ma.vertices[i0].ny + ma.vertices[i1].ny + ma.vertices[i2].ny) / 3.0f;
+                        fnz = (ma.vertices[i0].nz + ma.vertices[i1].nz + ma.vertices[i2].nz) / 3.0f;
+                    }
+                    float rnx = fnx * cr2 + fnz * sr;
+                    float rny = fny;
+                    float rnz = -fnx * sr + fnz * cr2;
                     float dot = -(rnx * lightDirX + rny * lightDirY + rnz * lightDirZ);
-                    float shade = 0.3f + 0.7f * std::max(0.0f, dot); // ambient + diffuse
+                    float shade = 0.3f + 0.7f * std::max(0.0f, dot);
 
                     if (ma.textured && !ma.texturePixels.empty() && ma.texW > 0 && ma.texH > 0)
                     {
@@ -837,28 +874,45 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                             pSX[i2], pSY[i2], ma.vertices[i2].u, ma.vertices[i2].v,
                             ma.texturePixels.data(), ma.texturePalette,
                             ma.texW, ma.texH, sp.fog);
+                        if (isQuad)
+                            DrawTriangleTex(
+                                pSX[i0], pSY[i0], ma.vertices[i0].u, ma.vertices[i0].v,
+                                pSX[i2], pSY[i2], ma.vertices[i2].u, ma.vertices[i2].v,
+                                pSX[i3], pSY[i3], ma.vertices[i3].u, ma.vertices[i3].v,
+                                ma.texturePixels.data(), ma.texturePalette,
+                                ma.texW, ma.texH, sp.fog);
                     }
                     else
                     {
                         uint8_t tr = (uint8_t)(cr * shade);
                         uint8_t tg = (uint8_t)(cg * shade);
                         uint8_t tb = (uint8_t)(cb * shade);
-
                         DrawTriangle(pSX[i0], pSY[i0], pSX[i1], pSY[i1], pSX[i2], pSY[i2],
                                      tr, tg, tb, sp.fog);
+                        if (isQuad)
+                            DrawTriangle(pSX[i0], pSY[i0], pSX[i2], pSY[i2], pSX[i3], pSY[i3],
+                                         tr, tg, tb, sp.fog);
                     }
 
-                    // Draw wireframe per-triangle in sorted order so front fills occlude back wireframes
-                    if (pVis[i0] && pVis[i1] && pVis[i2])
+                    // Wireframe: draw actual face edges (4 for quads, 3 for tris)
+                    if (isQuad)
                     {
-                        uint8_t wr = (uint8_t)(cr * 0.3f);
-                        uint8_t wg = (uint8_t)(cg * 0.3f);
-                        uint8_t wb = (uint8_t)(cb * 0.3f);
-                        DrawLine((int)pSX[i0], (int)pSY[i0], (int)pSX[i1], (int)pSY[i1], wr, wg, wb);
-                        DrawLine((int)pSX[i1], (int)pSY[i1], (int)pSX[i2], (int)pSY[i2], wr, wg, wb);
-                        DrawLine((int)pSX[i2], (int)pSY[i2], (int)pSX[i0], (int)pSY[i0], wr, wg, wb);
+                        if (pVis[i0] && pVis[i1]) DrawLine((int)pSX[i0], (int)pSY[i0], (int)pSX[i1], (int)pSY[i1], wr, wg, wb);
+                        if (pVis[i1] && pVis[i2]) DrawLine((int)pSX[i1], (int)pSY[i1], (int)pSX[i2], (int)pSY[i2], wr, wg, wb);
+                        if (pVis[i2] && pVis[i3]) DrawLine((int)pSX[i2], (int)pSY[i2], (int)pSX[i3], (int)pSY[i3], wr, wg, wb);
+                        if (pVis[i3] && pVis[i0]) DrawLine((int)pSX[i3], (int)pSY[i3], (int)pSX[i0], (int)pSY[i0], wr, wg, wb);
+                    }
+                    else
+                    {
+                        if (pVis[i0] && pVis[i1] && pVis[i2])
+                        {
+                            DrawLine((int)pSX[i0], (int)pSY[i0], (int)pSX[i1], (int)pSY[i1], wr, wg, wb);
+                            DrawLine((int)pSX[i1], (int)pSY[i1], (int)pSX[i2], (int)pSY[i2], wr, wg, wb);
+                            DrawLine((int)pSX[i2], (int)pSY[i2], (int)pSX[i0], (int)pSY[i0], wr, wg, wb);
+                        }
                     }
                 }
+                int ntri = nTriFaces + nQuadFaces * 2; // for cleanup check
 
                 // Compute screen-space bounding box from projected vertices
                 float minSX = 9999, maxSX = -9999, minSY = 9999, maxSY = -9999;
@@ -880,7 +934,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                     hasMeshBounds = true;
                 }
 
-                if (ntri > 512) delete[] pSort;
+                if (nFaces > 512) { delete[] pSort; delete[] pFaceDepth; }
                 if (nv > 256) { delete[] pSX; delete[] pSY; delete[] pDepth; delete[] pVis; }
                 drewSprite = true;
             }

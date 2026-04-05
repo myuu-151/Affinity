@@ -776,13 +776,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
             // Performance/Barebones: weld vertices sharing the same OBJ position index
             std::vector<float> weldedPos, weldedNorm, weldedUVs;
             std::vector<uint32_t> remappedIdx(ic);
+            std::vector<int> vertRemap;
             bool didWeld = false;
             bool preSorted = false;
 
             if (mesh.exportMode >= 1) // Performance or Barebones
             {
                 std::vector<int> weldedNormCount;
-                std::vector<int> vertRemap(origVc, -1);
+                vertRemap.assign(origVc, -1);
                 // Store objIdx + UV hash for weld matching
                 struct WeldKey { int objIdx; float u, v; int weldedIdx; };
                 std::vector<WeldKey> weldKeys;
@@ -962,6 +963,21 @@ static bool GenerateMapData(const std::string& runtimeDir,
             }
             f << "\n};\n";
 
+            // Quad indices
+            int qic = (int)mesh.quadIndices.size();
+            if (qic > 0)
+            {
+                f << "static const u16 afn_mesh" << mi << "_qidx[" << qic << "] = {";
+                for (int i = 0; i < qic; i++)
+                {
+                    if (i % 12 == 0) f << "\n    ";
+                    int qi = (int)mesh.quadIndices[i];
+                    f << (didWeld && qi < origVc ? vertRemap[qi] : qi);
+                    if (i + 1 < qic) f << ", ";
+                }
+                f << "\n};\n";
+            }
+
             // UV coordinates as 8.8 fixed-point (textured meshes only)
             if (mesh.textured && !mesh.uvs.empty())
             {
@@ -1010,12 +1026,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
             }
         }
 
-        // Mesh descriptor table: { vertCount, indexCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase, wireframe, grayscale }
-        f << "static const int afn_mesh_desc[][13] = {\n";
+        // Mesh descriptor table: { vertCount, indexCount, quadIndexCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase, wireframe, grayscale }
+        f << "static const int afn_mesh_desc[][14] = {\n";
         for (size_t mi = 0; mi < meshes.size(); mi++)
         {
             int vc = finalVertCounts[mi];
             int ic = (int)meshes[mi].indices.size();
+            int qic = (int)meshes[mi].quadIndices.size();
             int lit = meshes[mi].lit;
             int sorted = 0;
             int halfRes = meshes[mi].halfRes;
@@ -1025,12 +1042,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
             int texW = meshes[mi].texW;
             int texShift = 0;
             { int tw = texW; while (tw > 1) { texShift++; tw >>= 1; } }
-            // Barebones: force unlit; mark as pre-sorted only for non-textured
-            // (textured meshes need runtime depth sort since static sort is view-dependent)
             if (meshes[mi].exportMode == 2) { lit = 0; if (!meshes[mi].textured) sorted = 1; }
             char hex[8];
             snprintf(hex, sizeof(hex), "0x%04X", meshes[mi].colorRGB15);
-            f << "    { " << vc << ", " << ic << ", " << hex << ", " << meshes[mi].cullMode << ", " << lit << ", " << sorted << ", " << halfRes << ", " << textured << ", " << texW << ", " << texShift << ", " << texPalBases[mi] << ", " << wireframe << ", " << grayscale << " },\n";
+            f << "    { " << vc << ", " << ic << ", " << qic << ", " << hex << ", " << meshes[mi].cullMode << ", " << lit << ", " << sorted << ", " << halfRes << ", " << textured << ", " << texW << ", " << texShift << ", " << texPalBases[mi] << ", " << wireframe << ", " << grayscale << " },\n";
         }
         f << "};\n\n";
 
@@ -1055,6 +1070,17 @@ static bool GenerateMapData(const std::string& runtimeDir,
         for (size_t mi = 0; mi < meshes.size(); mi++)
         {
             f << "afn_mesh" << mi << "_idx";
+            if (mi + 1 < meshes.size()) f << ", ";
+        }
+        f << " };\n";
+
+        f << "static const u16* const afn_mesh_qidx_ptrs[] = { ";
+        for (size_t mi = 0; mi < meshes.size(); mi++)
+        {
+            if (!meshes[mi].quadIndices.empty())
+                f << "afn_mesh" << mi << "_qidx";
+            else
+                f << "0";
             if (mi + 1 < meshes.size()) f << ", ";
         }
         f << " };\n";

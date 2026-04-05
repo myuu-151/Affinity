@@ -22,8 +22,11 @@ arm-none-eabi-gcc $CFLAGS -c $SRC/tex_iwram.c -o tex_iwram.o
 echo "tex_scanline.s"
 arm-none-eabi-gcc $AFLAGS -c $SRC/tex_scanline.s -o tex_scanline.o
 
+echo "hline_fast.s"
+arm-none-eabi-gcc $AFLAGS -c $SRC/hline_fast.s -o hline_fast.o
+
 echo "linking cartridge"
-arm-none-eabi-gcc $LDFLAGS main.o tex_scanline.o tex_iwram.o $LIBS -o affinity.elf
+arm-none-eabi-gcc $LDFLAGS main.o tex_scanline.o hline_fast.o tex_iwram.o $LIBS -o affinity.elf
 arm-none-eabi-objcopy -O binary affinity.elf affinity.gba
 gbafix affinity.gba
 cp affinity.gba ../

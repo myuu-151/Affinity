@@ -382,6 +382,7 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
     std::vector<V2> texcoords;
     std::vector<MeshVertex> verts;
     std::vector<uint32_t> idxs;
+    std::vector<uint32_t> quadIdxs;
 
     char line[512];
     while (fgets(line, sizeof(line), f))
@@ -406,11 +407,11 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
         }
         else if (line[0] == 'f' && line[1] == ' ')
         {
-            // Parse face — supports v, v/vt, v/vt/vn, v//vn
-            int vi[4] = {}, ti[4] = {}, ni[4] = {};
+            // Parse face — supports v, v/vt, v/vt/vn, v//vn (up to 16-gons)
+            int vi[16] = {}, ti[16] = {}, ni[16] = {};
             int count = 0;
             char* p = line + 2;
-            while (*p && count < 4)
+            while (*p && count < 16)
             {
                 int v = 0, vt = 0, vn = 0;
                 int nread = 0;
@@ -427,26 +428,46 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
                 while (*p == ' ' || *p == '\t') p++;
             }
 
-            // Triangulate (fan from first vertex)
-            for (int t = 1; t + 1 < count; t++)
+            // Build face vertices
+            uint32_t faceBaseIdx = (uint32_t)verts.size();
+            for (int fi = 0; fi < count; fi++)
             {
-                int face[3] = { 0, t, t + 1 };
-                for (int fi = 0; fi < 3; fi++)
+                int pi = vi[fi] - 1;
+                int tci = ti[fi] - 1;
+                int nni = ni[fi] - 1;
+                MeshVertex mv = {};
+                if (pi >= 0 && pi < (int)positions.size())
+                { mv.px = positions[pi].x; mv.py = positions[pi].y; mv.pz = positions[pi].z; }
+                if (tci >= 0 && tci < (int)texcoords.size())
+                { mv.u = texcoords[tci].u; mv.v = texcoords[tci].v; }
+                if (nni >= 0 && nni < (int)normals.size())
+                { mv.nx = normals[nni].x; mv.ny = normals[nni].y; mv.nz = normals[nni].z; }
+                mv.r = mv.g = mv.b = 1.0f;
+                mv.objPosIdx = pi;
+                verts.push_back(mv);
+            }
+            // Respect OBJ topology: quads stay quads, tris stay tris
+            if (count == 4)
+            {
+                quadIdxs.push_back(faceBaseIdx);
+                quadIdxs.push_back(faceBaseIdx + 1);
+                quadIdxs.push_back(faceBaseIdx + 2);
+                quadIdxs.push_back(faceBaseIdx + 3);
+            }
+            else if (count == 3)
+            {
+                idxs.push_back(faceBaseIdx);
+                idxs.push_back(faceBaseIdx + 1);
+                idxs.push_back(faceBaseIdx + 2);
+            }
+            else
+            {
+                // N-gons: fan-triangulate
+                for (int t = 1; t + 1 < count; t++)
                 {
-                    int pi = vi[face[fi]] - 1;
-                    int tci = ti[face[fi]] - 1;
-                    int nni = ni[face[fi]] - 1;
-                    MeshVertex mv = {};
-                    if (pi >= 0 && pi < (int)positions.size())
-                    { mv.px = positions[pi].x; mv.py = positions[pi].y; mv.pz = positions[pi].z; }
-                    if (tci >= 0 && tci < (int)texcoords.size())
-                    { mv.u = texcoords[tci].u; mv.v = texcoords[tci].v; }
-                    if (nni >= 0 && nni < (int)normals.size())
-                    { mv.nx = normals[nni].x; mv.ny = normals[nni].y; mv.nz = normals[nni].z; }
-                    mv.r = mv.g = mv.b = 1.0f;
-                    mv.objPosIdx = pi;
-                    idxs.push_back((uint32_t)verts.size());
-                    verts.push_back(mv);
+                    idxs.push_back(faceBaseIdx);
+                    idxs.push_back(faceBaseIdx + t);
+                    idxs.push_back(faceBaseIdx + t + 1);
                 }
             }
         }
@@ -457,6 +478,7 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
 
     out.vertices = std::move(verts);
     out.indices = std::move(idxs);
+    out.quadIndices = std::move(quadIdxs);
     out.sourcePath = path;
 
     // Extract filename as name
@@ -683,7 +705,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.c_str());
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.c_str(), ma.useQuads ? 1 : 0);
     }
     fprintf(f, "\n");
 
@@ -945,9 +967,14 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "MeshAssets") == 0)
         {
             char mname[256], mpath[512], mtexpath[512] = {};
-            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0;
-            // Try newest format: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath
-            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^\n]", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath);
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1;
+            // Try newest format: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath|usequads
+            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads);
+            if (matched < 2)
+            {
+                // Try format without usequads: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath
+                matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^\n]", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath);
+            }
             if (matched < 2)
             {
                 // Try previous format: name|path|cull|export|lit|halfres|textured|wireframe|texpath
@@ -977,12 +1004,14 @@ static bool LoadProject(const std::string& path)
                     ma.wireframe = (mwireframe != 0);
                 if (matched >= 9)
                     ma.grayscale = (mgrayscale != 0);
+                if (matched >= 11)
+                    ma.useQuads = (musequads != 0);
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
                 ma.name = mname; // restore name in case LoadOBJ overwrote it
                 // Reload texture if textured
-                if (ma.textured && matched >= 10 && mtexpath[0])
+                if (ma.textured && mtexpath[0])
                     LoadMeshTexture(std::string(mtexpath), ma);
                 sMeshAssets.push_back(std::move(ma));
             }
@@ -1237,7 +1266,12 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         if (ImGui::InputText("##meshName", nameBuf, sizeof(nameBuf)))
             ma.name = nameBuf;
         ImGui::PopItemWidth();
-        ImGui::Text("Verts: %d  Tris: %d", (int)ma.vertices.size(), (int)ma.indices.size() / 3);
+        { int nTri = (int)ma.indices.size() / 3, nQuad = (int)ma.quadIndices.size() / 4;
+          if (nQuad > 0)
+              ImGui::Text("Verts: %d  Tris: %d  Quads: %d", (int)ma.vertices.size(), nTri, nQuad);
+          else
+              ImGui::Text("Verts: %d  Tris: %d", (int)ma.vertices.size(), nTri);
+        }
 
         int cullInt = (int)ma.cullMode;
         ImGui::PushItemWidth(-1);
@@ -1258,6 +1292,8 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         ImGui::Checkbox("Wireframe##meshWire", &ma.wireframe);
         ImGui::SameLine();
         ImGui::Checkbox("Grayscale##meshGray", &ma.grayscale);
+        if (!ma.quadIndices.empty())
+            ImGui::Checkbox("Use Quads##meshQuad", &ma.useQuads);
 
         ImGui::Separator();
         ImGui::Checkbox("Textured##meshTex", &ma.textured);
@@ -3619,6 +3655,23 @@ void FrameTick(float dt)
                         me.uvs.push_back(v.v);
                     }
                     me.indices = ma.indices;
+                    if (ma.useQuads)
+                    {
+                        me.quadIndices = ma.quadIndices;
+                    }
+                    else
+                    {
+                        // Fan-triangulate quads into the triangle index buffer
+                        for (size_t qi = 0; qi + 4 <= ma.quadIndices.size(); qi += 4)
+                        {
+                            me.indices.push_back(ma.quadIndices[qi + 0]);
+                            me.indices.push_back(ma.quadIndices[qi + 1]);
+                            me.indices.push_back(ma.quadIndices[qi + 2]);
+                            me.indices.push_back(ma.quadIndices[qi + 0]);
+                            me.indices.push_back(ma.quadIndices[qi + 2]);
+                            me.indices.push_back(ma.quadIndices[qi + 3]);
+                        }
+                    }
                     // Convert sprite color to RGB15 (use magenta as default)
                     me.colorRGB15 = 0x7C1F; // magenta
                     me.cullMode = (int)ma.cullMode;
@@ -4563,16 +4616,47 @@ void Render3DViewport()
                 glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, matDif);
             }
 
-            glBegin(GL_TRIANGLES);
-            for (size_t ti = 0; ti < ma.indices.size(); ti++)
+            // Draw triangles
+            if (!ma.indices.empty())
             {
-                const MeshVertex& v = ma.vertices[ma.indices[ti]];
-                if (useTex)
-                    glTexCoord2f(v.u, 1.0f - v.v);
-                glNormal3f(v.nx, v.ny, v.nz);
-                glVertex3f(v.px, v.py, v.pz);
+                glBegin(GL_TRIANGLES);
+                for (size_t ti = 0; ti < ma.indices.size(); ti++)
+                {
+                    const MeshVertex& v = ma.vertices[ma.indices[ti]];
+                    if (useTex)
+                        glTexCoord2f(v.u, 1.0f - v.v);
+                    glNormal3f(v.nx, v.ny, v.nz);
+                    glVertex3f(v.px, v.py, v.pz);
+                }
+                glEnd();
             }
-            glEnd();
+            // Draw quads as fan-triangulated pairs
+            if (!ma.quadIndices.empty())
+            {
+                glBegin(GL_TRIANGLES);
+                for (size_t qi = 0; qi + 4 <= ma.quadIndices.size(); qi += 4)
+                {
+                    const MeshVertex& v0 = ma.vertices[ma.quadIndices[qi]];
+                    const MeshVertex& v1 = ma.vertices[ma.quadIndices[qi+1]];
+                    const MeshVertex& v2 = ma.vertices[ma.quadIndices[qi+2]];
+                    const MeshVertex& v3 = ma.vertices[ma.quadIndices[qi+3]];
+                    // tri 1: v0, v1, v2
+                    if (useTex) glTexCoord2f(v0.u, 1.0f - v0.v);
+                    glNormal3f(v0.nx, v0.ny, v0.nz); glVertex3f(v0.px, v0.py, v0.pz);
+                    if (useTex) glTexCoord2f(v1.u, 1.0f - v1.v);
+                    glNormal3f(v1.nx, v1.ny, v1.nz); glVertex3f(v1.px, v1.py, v1.pz);
+                    if (useTex) glTexCoord2f(v2.u, 1.0f - v2.v);
+                    glNormal3f(v2.nx, v2.ny, v2.nz); glVertex3f(v2.px, v2.py, v2.pz);
+                    // tri 2: v0, v2, v3
+                    if (useTex) glTexCoord2f(v0.u, 1.0f - v0.v);
+                    glNormal3f(v0.nx, v0.ny, v0.nz); glVertex3f(v0.px, v0.py, v0.pz);
+                    if (useTex) glTexCoord2f(v2.u, 1.0f - v2.v);
+                    glNormal3f(v2.nx, v2.ny, v2.nz); glVertex3f(v2.px, v2.py, v2.pz);
+                    if (useTex) glTexCoord2f(v3.u, 1.0f - v3.v);
+                    glNormal3f(v3.nx, v3.ny, v3.nz); glVertex3f(v3.px, v3.py, v3.pz);
+                }
+                glEnd();
+            }
 
             if (useTex)
             {

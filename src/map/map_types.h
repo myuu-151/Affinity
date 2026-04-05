@@ -182,6 +182,11 @@ struct MeshAsset
     bool halfRes = false; // true = rasterize every other scanline (2x fill speed)
     bool wireframe = false; // true = wireframe overlay (draw triangle edges)
     bool grayscale = false; // true = grayscale shaded faces (combine with wireframe for editor look)
+    bool useQuads = true;  // true = export quads natively to GBA, false = fan-triangulate quads
+
+    // Quad index buffer — 4 consecutive indices per quad face from OBJ
+    // OBJ quads are preserved as-is, not force-triangulated
+    std::vector<uint32_t> quadIndices;
 
     // Texture mapping
     bool textured = false;                    // true = use texture, false = flat shaded

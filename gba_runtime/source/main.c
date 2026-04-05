@@ -43,6 +43,9 @@ extern void tex_scanline_asm(u16* rp, int pairCount, int su, int sv,
                              int texMask, int texShift, int palBase);
 #endif
 
+// ARM assembly flat-fill scanline using VRAM strb trick (hline_fast.s, IWRAM)
+extern void afn_hline_fast(u16* row, int left, int right, u8 palIdx);
+
 // Debug profiling counters
 static int dbg_tex_tris;    // textured triangles this frame
 static int dbg_tex_spans;   // textured scanlines this frame
@@ -1048,6 +1051,152 @@ IWRAM_CODE static void rasterize_tri_clipped(u16* buf, int x0, int y0, int x1, i
     }
 }
 
+// Native quad rasterizer — edge-chain walking, no triangle split.
+// Vertices are sorted by Y, then left/right edges are walked independently.
+// Single rasterizer call per quad, no diagonal seam.
+static void rasterize_quad(u16* buf, int x0, int y0, int x1, int y1,
+                                       int x2, int y2, int x3, int y3, u8 palIdx)
+{
+    // Sort vertices by Y (insertion sort on 4 elements)
+    int vx[4] = {x0,x1,x2,x3}, vy[4] = {y0,y1,y2,y3};
+    int tmp, j;
+    for (int i = 1; i < 4; i++) {
+        int tx = vx[i], ty = vy[i];
+        j = i - 1;
+        while (j >= 0 && vy[j] > ty) { vx[j+1] = vx[j]; vy[j+1] = vy[j]; j--; }
+        vx[j+1] = tx; vy[j+1] = ty;
+    }
+
+    // Clamp to guard band
+    for (int i = 0; i < 4; i++) {
+        if (vx[i] < -16000) vx[i] = -16000; if (vx[i] > 16000) vx[i] = 16000;
+        if (vy[i] < -16000) vy[i] = -16000; if (vy[i] > 16000) vy[i] = 16000;
+    }
+
+    if (vy[3] <= vy[0]) return; // degenerate
+
+    // Determine left/right chains from top vertex.
+    // For a convex quad sorted by Y: top=v[0], bottom=v[3].
+    // Middle vertices v[1],v[2] go to left or right based on cross product.
+    // Left chain: top -> ... -> bottom going leftward
+    // Right chain: top -> ... -> bottom going rightward
+    int leftChain[4], leftCount = 0;
+    int rightChain[4], rightCount = 0;
+
+    leftChain[leftCount++] = 0;
+    rightChain[rightCount++] = 0;
+
+    // Determine which side v[1] and v[2] are on using cross product from top to bottom
+    long long dx03 = vx[3] - vx[0], dy03 = vy[3] - vy[0];
+    for (int i = 1; i <= 2; i++) {
+        long long cross = dx03 * (vy[i] - vy[0]) - dy03 * (vx[i] - vx[0]);
+        if (cross <= 0)
+            leftChain[leftCount++] = i;
+        else
+            rightChain[rightCount++] = i;
+    }
+    leftChain[leftCount++] = 3;
+    rightChain[rightCount++] = 3;
+
+    // Walk left and right edge chains, filling scanlines
+    int li = 0, ri = 0; // current edge segment index on each chain
+    int lxF = 0, rxF = 0; // 16.16 fixed-point x positions
+    int ldx = 0, rdx = 0; // 16.16 fixed-point x step per scanline
+    int ly1 = 0, ry1 = 0; // bottom Y of current edge segment
+    int y = vy[0] < 0 ? 0 : vy[0];
+    int yEnd = vy[3] < 160 ? vy[3] : 159;
+
+    // Advance to first left edge
+    while (li + 1 < leftCount) {
+        int a = leftChain[li], b = leftChain[li+1];
+        ly1 = vy[b];
+        if (ly1 > y) {
+            int h = vy[b] - vy[a];
+            ldx = h > 0 ? SLOPE16(vx[b] - vx[a], h) : 0;
+            int skip = y - vy[a];
+            lxF = sat32((long long)vx[a] * 65536 + (long long)ldx * skip);
+            break;
+        }
+        li++;
+    }
+    // Advance to first right edge
+    while (ri + 1 < rightCount) {
+        int a = rightChain[ri], b = rightChain[ri+1];
+        ry1 = vy[b];
+        if (ry1 > y) {
+            int h = vy[b] - vy[a];
+            rdx = h > 0 ? SLOPE16(vx[b] - vx[a], h) : 0;
+            int skip = y - vy[a];
+            rxF = sat32((long long)vx[a] * 65536 + (long long)rdx * skip);
+            break;
+        }
+        ri++;
+    }
+
+    for (; y <= yEnd; y++) {
+        // Advance left edge if needed
+        while (y >= ly1 && li + 1 < leftCount) {
+            li++;
+            if (li + 1 < leftCount) {
+                int a = leftChain[li], b = leftChain[li+1];
+                ly1 = vy[b];
+                int h = vy[b] - vy[a];
+                ldx = h > 0 ? SLOPE16(vx[b] - vx[a], h) : 0;
+                lxF = vx[a] << 16;
+            }
+        }
+        // Advance right edge if needed
+        while (y >= ry1 && ri + 1 < rightCount) {
+            ri++;
+            if (ri + 1 < rightCount) {
+                int a = rightChain[ri], b = rightChain[ri+1];
+                ry1 = vy[b];
+                int h = vy[b] - vy[a];
+                rdx = h > 0 ? SLOPE16(vx[b] - vx[a], h) : 0;
+                rxF = vx[a] << 16;
+            }
+        }
+
+        int left = lxF >> 16, right = rxF >> 16;
+        if (left > right) { tmp = left; left = right; right = tmp; }
+        if (right - left < 512) {
+            if (left < 0) left = 0;
+            if (right > 239) right = 239;
+            if (left <= right)
+                afn_hline(buf + y * 120, left, right, palIdx);
+        }
+        lxF += ldx;
+        rxF += rdx;
+    }
+}
+
+// Clip and rasterize a quad (viewport clipping + native quad fill)
+static void rasterize_quad_clipped(u16* buf, int x0, int y0, int x1, int y1,
+                                               int x2, int y2, int x3, int y3, u8 palIdx)
+{
+    int polyX[10], polyY[10], tmpX[10], tmpY[10];
+    int count;
+    polyX[0]=x0; polyY[0]=y0; polyX[1]=x1; polyY[1]=y1;
+    polyX[2]=x2; polyY[2]=y2; polyX[3]=x3; polyY[3]=y3;
+    count = 4;
+
+    count = clip_edge(polyX, polyY, count, tmpX, tmpY, 0, 0, 0);
+    if (count < 3) return;
+    count = clip_edge(tmpX, tmpY, count, polyX, polyY, 0, 239, 1);
+    if (count < 3) return;
+    count = clip_edge(polyX, polyY, count, tmpX, tmpY, 1, 0, 0);
+    if (count < 3) return;
+    count = clip_edge(tmpX, tmpY, count, polyX, polyY, 1, 159, 1);
+    if (count < 3) return;
+
+    {
+        // Fan-triangulate clipped polygon (works for both quads and clipped N-gons)
+        int i;
+        for (i = 1; i < count - 1; i++)
+            rasterize_tri(buf, polyX[0], polyY[0], polyX[i], polyY[i], polyX[i+1], polyY[i+1], palIdx);
+    }
+}
+
 // Rasterize a flat-shaded triangle into Mode 4 bitmap
 // Uses 16.16 fixed-point edge walking — no division in scanline loop
 IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx)
@@ -1794,12 +1943,13 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
     int i;
     for (i = 0; i < g_spriteCount; i++)
     {
-        int mi, vertCount, idxCount, cullMode, meshLit, meshSorted, meshHalfRes, meshTextured, meshWireframe, meshGrayscale, v, t;
+        int mi, vertCount, idxCount, quadIdxCount, cullMode, meshLit, meshSorted, meshHalfRes, meshTextured, meshWireframe, meshGrayscale, v, t;
         int texW, texShift, texMask, texPalBase;
         int anyVisible;
         const s16* verts;
         const s8* norms;
         const u16* indices;
+        const u16* quadIndices;
         const s16* uvs;
         const u8* tex;
         FIXED cosR, sinR, sprScale;
@@ -1808,7 +1958,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         FIXED rawDepth[512]; // unclamped fovLambda for near-plane clipping
         static FIXED vSide[512], vHeight[512]; // view-space coords for near-plane re-projection
         u8 vis[512];
-        TriSort triOrder[256];
+        static TriSort triOrder[256];
         int triCount;
 
         if (g_sprites[i].meshIdx < 0 || g_sprites[i].meshIdx >= AFN_MESH_COUNT)
@@ -1818,18 +1968,20 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         verts = afn_mesh_vert_ptrs[mi];
         norms = afn_mesh_norm_ptrs[mi];
         indices = afn_mesh_idx_ptrs[mi];
+        quadIndices = afn_mesh_qidx_ptrs[mi];
         vertCount = afn_mesh_desc[mi][0];
         idxCount = afn_mesh_desc[mi][1];
-        cullMode = afn_mesh_desc[mi][3]; // 0=Back, 1=Front, 2=None
-        meshLit = afn_mesh_desc[mi][4];  // 0=unlit, 1=lit
-        meshSorted = afn_mesh_desc[mi][5]; // 0=unsorted, 1=pre-sorted (skip depth sort)
-        meshHalfRes = afn_mesh_desc[mi][6]; // 0=full, 1=skip every other scanline
-        meshTextured = afn_mesh_desc[mi][7]; // 0=flat, 1=textured
-        texW = afn_mesh_desc[mi][8];
-        texShift = afn_mesh_desc[mi][9];
-        texPalBase = afn_mesh_desc[mi][10];
-        meshWireframe = afn_mesh_desc[mi][11]; // 0=solid, 1=wireframe
-        meshGrayscale = afn_mesh_desc[mi][12]; // 0=normal, 1=grayscale shaded faces
+        quadIdxCount = afn_mesh_desc[mi][2];
+        cullMode = afn_mesh_desc[mi][4]; // 0=Back, 1=Front, 2=None
+        meshLit = afn_mesh_desc[mi][5];  // 0=unlit, 1=lit
+        meshSorted = afn_mesh_desc[mi][6]; // 0=unsorted, 1=pre-sorted (skip depth sort)
+        meshHalfRes = afn_mesh_desc[mi][7]; // 0=full, 1=skip every other scanline
+        meshTextured = afn_mesh_desc[mi][8]; // 0=flat, 1=textured
+        texW = afn_mesh_desc[mi][9];
+        texShift = afn_mesh_desc[mi][10];
+        texPalBase = afn_mesh_desc[mi][11];
+        meshWireframe = afn_mesh_desc[mi][12]; // 0=solid, 1=wireframe
+        meshGrayscale = afn_mesh_desc[mi][13]; // 0=normal, 1=grayscale shaded faces
         texMask = texW > 0 ? texW - 1 : 0;
         uvs = afn_mesh_uv_ptrs[mi];
         tex = tex_cache_ptrs[mi];
@@ -1949,6 +2101,53 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             }
         }
 
+        // Build quad list (triIdx with bit 15 set = quad)
+        if (quadIndices && quadIdxCount > 0)
+        {
+            for (t = 0; t < quadIdxCount / 4 && triCount < 256; t++)
+            {
+                int i0 = quadIndices[t * 4 + 0];
+                int i1 = quadIndices[t * 4 + 1];
+                int i2 = quadIndices[t * 4 + 2];
+                int i3 = quadIndices[t * 4 + 3];
+                int cross, anyNearQ;
+
+                if (i0 >= vertCount || i1 >= vertCount || i2 >= vertCount || i3 >= vertCount) continue;
+
+                if (rawDepth[i0] < CLIP_NEAR_Z && rawDepth[i1] < CLIP_NEAR_Z &&
+                    rawDepth[i2] < CLIP_NEAR_Z && rawDepth[i3] < CLIP_NEAR_Z)
+                    continue;
+
+                anyNearQ = (rawDepth[i0] < CLIP_NEAR_Z || rawDepth[i1] < CLIP_NEAR_Z ||
+                            rawDepth[i2] < CLIP_NEAR_Z || rawDepth[i3] < CLIP_NEAR_Z);
+
+                if (!anyNearQ)
+                {
+                    if ((sx[i0] < 0 && sx[i1] < 0 && sx[i2] < 0 && sx[i3] < 0) ||
+                        (sx[i0] >= 240 && sx[i1] >= 240 && sx[i2] >= 240 && sx[i3] >= 240) ||
+                        (sy[i0] < 0 && sy[i1] < 0 && sy[i2] < 0 && sy[i3] < 0) ||
+                        (sy[i0] >= 160 && sy[i1] >= 160 && sy[i2] >= 160 && sy[i3] >= 160))
+                        continue;
+
+                    // Backface cull using first 3 verts
+                    cross = (sx[i1] - sx[i0]) * (sy[i2] - sy[i0])
+                          - (sy[i1] - sy[i0]) * (sx[i2] - sx[i0]);
+                    if (cullMode == 0 && cross >= 0) continue;
+                    else if (cullMode == 1 && cross <= 0) continue;
+                }
+
+                {
+                    int avgDepth = sz[i0] + sz[i1] + sz[i2] + sz[i3];
+#ifdef AFN_DRAW_DISTANCE
+                    if (avgDepth / 4 > AFN_DRAW_DISTANCE) continue;
+#endif
+                    triOrder[triCount].triIdx = t | 0x8000; // bit 15 = quad flag
+                    triOrder[triCount].depth = avgDepth;
+                    triCount++;
+                }
+            }
+        }
+
         // Insertion sort by depth
         // Pre-sorted meshes (Barebones) skip this entirely
         if (!meshSorted)
@@ -1973,18 +2172,34 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             }
         }
 
-        // Draw sorted triangles
+        // Draw sorted faces (tris and quads)
         for (t = 0; t < triCount; t++)
         {
             int ti = triOrder[t].triIdx;
-            int i0 = indices[ti * 3 + 0];
-            int i1 = indices[ti * 3 + 1];
-            int i2 = indices[ti * 3 + 2];
-            // Auto LOD: reduce fill resolution for close geometry
-            // 0=full, 1=half (2x), 2=quarter (4x)
-            int avgD = triOrder[t].depth / 3;
-            int lodLevel = meshHalfRes ? 1 : (avgD < 64 ? 2 : (avgD < 192 ? 1 : 0));
-            int anyNear = (rawDepth[i0] < CLIP_NEAR_Z) | (rawDepth[i1] < CLIP_NEAR_Z) | (rawDepth[i2] < CLIP_NEAR_Z);
+            int isQuad = (ti & 0x8000) != 0;
+            int faceIdx = ti & 0x7FFF;
+            int i0, i1, i2, i3 = 0;
+            int avgD, lodLevel, anyNear;
+
+            if (isQuad)
+            {
+                i0 = quadIndices[faceIdx * 4 + 0];
+                i1 = quadIndices[faceIdx * 4 + 1];
+                i2 = quadIndices[faceIdx * 4 + 2];
+                i3 = quadIndices[faceIdx * 4 + 3];
+                avgD = triOrder[t].depth / 4;
+                anyNear = (rawDepth[i0] < CLIP_NEAR_Z) | (rawDepth[i1] < CLIP_NEAR_Z) |
+                          (rawDepth[i2] < CLIP_NEAR_Z) | (rawDepth[i3] < CLIP_NEAR_Z);
+            }
+            else
+            {
+                i0 = indices[faceIdx * 3 + 0];
+                i1 = indices[faceIdx * 3 + 1];
+                i2 = indices[faceIdx * 3 + 2];
+                avgD = triOrder[t].depth / 3;
+                anyNear = (rawDepth[i0] < CLIP_NEAR_Z) | (rawDepth[i1] < CLIP_NEAR_Z) | (rawDepth[i2] < CLIP_NEAR_Z);
+            }
+            lodLevel = meshHalfRes ? 1 : (avgD < 64 ? 2 : (avgD < 192 ? 1 : 0));
 
 
 
@@ -2004,8 +2219,10 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 if (shade < 1) shade = 1;
                 if (shade > 7) shade = 7;
                 palIdx = 5 + shade; // grayscale palette at indices 5-12
-                // Draw filled grayscale triangle — clip against near plane if needed
-                if (anyNear)
+                // Draw filled grayscale face — clip against near plane if needed
+                if (isQuad && !anyNear)
+                    rasterize_quad_clipped(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], sx[i3], sy[i3], palIdx);
+                else if (anyNear)
                     clip_render_tri_flat(buf, vSide[i0], vHeight[i0], rawDepth[i0],
                         vSide[i1], vHeight[i1], rawDepth[i1],
                         vSide[i2], vHeight[i2], rawDepth[i2], palIdx, lodLevel);
@@ -2021,6 +2238,11 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     if (d0 && d1) draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], edgeIdx);
                     if (d1 && d2) draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], edgeIdx);
                     if (d2 && d0) draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], edgeIdx);
+                    if (isQuad) {
+                        int d3 = rawDepth[i3] >= WIRE_NEAR_DEPTH;
+                        if (d2 && d3) draw_line(buf, sx[i2], sy[i2], sx[i3], sy[i3], edgeIdx);
+                        if (d3 && d0) draw_line(buf, sx[i3], sy[i3], sx[i0], sy[i0], edgeIdx);
+                    }
                 }
             }
             else if (meshWireframe)
@@ -2046,6 +2268,11 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     if (d0 && d1) draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], palIdx);
                     if (d1 && d2) draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
                     if (d2 && d0) draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], palIdx);
+                    if (isQuad) {
+                        int d3 = rawDepth[i3] >= WIRE_NEAR_DEPTH;
+                        if (d2 && d3) draw_line(buf, sx[i2], sy[i2], sx[i3], sy[i3], palIdx);
+                        if (d3 && d0) draw_line(buf, sx[i3], sy[i3], sx[i0], sy[i0], palIdx);
+                    }
                 }
             }
             else if (meshTextured && uvs && tex)
@@ -2056,6 +2283,14 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     sx[i1], sy[i1], uvs[i1*2+0], uvs[i1*2+1], sz[i1],
                     sx[i2], sy[i2], uvs[i2*2+0], uvs[i2*2+1], sz[i2],
                     tex, texMask, texShift, (u8)texPalBase);
+                if (isQuad) {
+                    dbg_tex_tris++;
+                    rasterize_tri_tex(buf,
+                        sx[i0], sy[i0], uvs[i0*2+0], uvs[i0*2+1], sz[i0],
+                        sx[i2], sy[i2], uvs[i2*2+0], uvs[i2*2+1], sz[i2],
+                        sx[i3], sy[i3], uvs[i3*2+0], uvs[i3*2+1], sz[i3],
+                        tex, texMask, texShift, (u8)texPalBase);
+                }
             }
             else
             {
@@ -2085,7 +2320,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     palIdx = AFN_MESH_PAL_BASE + mi * 8 + 5;
                 }
 
-                if (anyNear)
+                if (isQuad && !anyNear)
+                    rasterize_quad_clipped(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], sx[i3], sy[i3], palIdx);
+                else if (anyNear)
                     clip_render_tri_flat(buf, vSide[i0], vHeight[i0], rawDepth[i0],
                         vSide[i1], vHeight[i1], rawDepth[i1],
                         vSide[i2], vHeight[i2], rawDepth[i2], palIdx, lodLevel);
@@ -2161,7 +2398,7 @@ int main(void)
         int offset = 0;
         for (mi2 = 0; mi2 < AFN_MESH_COUNT; mi2++)
         {
-            int tw = afn_mesh_desc[mi2][8];
+            int tw = afn_mesh_desc[mi2][9];
             int th = tw; // textures are square
             int sz = tw * th;
             if (afn_mesh_tex_ptrs[mi2] && sz > 0 && offset + sz <= TEX_CACHE_SIZE)

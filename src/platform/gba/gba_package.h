@@ -94,7 +94,8 @@ struct GBAMeshExport
     std::vector<float> positions; // px, py, pz per vertex (flat)
     std::vector<float> normals;   // nx, ny, nz per vertex (flat)
     std::vector<int>   objPosIdx; // original OBJ 'v' index per vertex (for welding)
-    std::vector<uint32_t> indices;
+    std::vector<uint32_t> indices;      // triangle indices (3 per face)
+    std::vector<uint32_t> quadIndices;  // quad indices (4 per face)
     uint16_t colorRGB15;          // base color for shading
     int cullMode = 0;             // 0=Back, 1=Front, 2=None
     int exportMode = 0;           // 0=Quality (no weld), 1=Performance (welded)
