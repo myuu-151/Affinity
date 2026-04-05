@@ -1836,75 +1836,76 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
     }
 }
 
-// Near-plane clip and render a flat-shaded triangle.
-// Clips against CLIP_NEAR_Z, producing 1 or 2 triangles from the visible portion.
-static void clip_render_tri_flat(u16* buf,
-    int s0, int h0, int d0,
-    int s1, int h1, int d1,
-    int s2, int h2, int d2,
-    u8 palIdx, int lodLevel)
+// Near-plane clip and render a flat-shaded convex polygon (tri or quad).
+// Sutherland-Hodgman clip against CLIP_NEAR_Z in view space, project, then
+// rasterize with rasterize_convex (OpenLara style — no fan-triangulation).
+static void clip_render_poly_flat(u16* buf,
+    const int* sideIn, const int* heightIn, const int* depthIn,
+    int inCount, u8 palIdx)
 {
-    // Count vertices behind near plane
-    int nb = (d0 < CLIP_NEAR_Z) + (d1 < CLIP_NEAR_Z) + (d2 < CLIP_NEAR_Z);
-    int px0, py0, px1, py1, px2, py2, pxA, pyA, pxB, pyB;
-    int tA, tB, sA, hA, sB, hB;
+    int sOut[8], hOut[8], dOut[8];
+    int outCount = 0;
+    int i, j;
 
-    if (nb == 0) return; // shouldn't be called, but safe
-    if (nb == 3) return; // all behind
+    if (inCount < 3) return;
 
-    // Rotate so vertex 0 is the "special" one
-    if (nb == 1) {
-        // 1 behind: make v0 the one behind
-        if (d1 < CLIP_NEAR_Z) {
-            int ts=s0, th=h0, td=d0;
-            s0=s1; h0=h1; d0=d1;
-            s1=s2; h1=h2; d1=d2;
-            s2=ts; h2=th; d2=td;
-        } else if (d2 < CLIP_NEAR_Z) {
-            int ts=s0, th=h0, td=d0;
-            s0=s2; h0=h2; d0=d2;
-            s2=s1; h2=h1; d2=d1;
-            s1=ts; h1=th; d1=td;
+    // Sutherland-Hodgman: clip polygon against near plane (depth >= CLIP_NEAR_Z)
+    for (i = 0; i < inCount; i++)
+    {
+        j = (i + 1 < inCount) ? i + 1 : 0;
+        int inI = depthIn[i] >= CLIP_NEAR_Z;
+        int inJ = depthIn[j] >= CLIP_NEAR_Z;
+
+        if (inI) {
+            sOut[outCount] = sideIn[i];
+            hOut[outCount] = heightIn[i];
+            dOut[outCount] = depthIn[i];
+            outCount++;
         }
-        // Clip edges 0→1 and 0→2
-        tA = near_clip_t(d0, d1);
-        tB = near_clip_t(d0, d2);
-        sA = LERP16(s0, s1, tA); hA = LERP16(h0, h1, tA);
-        sB = LERP16(s0, s2, tB); hB = LERP16(h0, h2, tB);
-
-        project_vertex(sA, hA, CLIP_NEAR_Z, &pxA, &pyA);
-        project_vertex(sB, hB, CLIP_NEAR_Z, &pxB, &pyB);
-        project_vertex(s1, h1, d1, &px1, &py1);
-        project_vertex(s2, h2, d2, &px2, &py2);
-
-        // Quad (A, 1, 2, B) → 2 triangles — viewport clipped
-        rasterize_tri_clipped(buf, pxA, pyA, px1, py1, px2, py2, palIdx, lodLevel);
-        rasterize_tri_clipped(buf, pxA, pyA, px2, py2, pxB, pyB, palIdx, lodLevel);
-    } else {
-        // 2 behind: make v0 the one in front
-        if (d1 >= CLIP_NEAR_Z) {
-            int ts=s0, th=h0, td=d0;
-            s0=s1; h0=h1; d0=d1;
-            s1=s2; h1=h2; d1=d2;
-            s2=ts; h2=th; d2=td;
-        } else if (d2 >= CLIP_NEAR_Z) {
-            int ts=s0, th=h0, td=d0;
-            s0=s2; h0=h2; d0=d2;
-            s2=s1; h2=h1; d2=d1;
-            s1=ts; h1=th; d1=td;
+        if (inI != inJ) {
+            // Edge crosses near plane — interpolate
+            int t = (inI) ? near_clip_t(depthIn[i], depthIn[j])
+                          : near_clip_t(depthIn[j], depthIn[i]);
+            if (inI) {
+                // going from in to out: lerp i → j
+                sOut[outCount] = LERP16(sideIn[i], sideIn[j], t);
+                hOut[outCount] = LERP16(heightIn[i], heightIn[j], t);
+            } else {
+                // going from out to in: lerp j → i (reversed)
+                sOut[outCount] = LERP16(sideIn[j], sideIn[i], t);
+                hOut[outCount] = LERP16(heightIn[j], heightIn[i], t);
+            }
+            dOut[outCount] = CLIP_NEAR_Z;
+            outCount++;
         }
-        // Clip edges 1→0 and 2→0
-        tA = near_clip_t(d1, d0);
-        tB = near_clip_t(d2, d0);
-        sA = LERP16(s1, s0, tA); hA = LERP16(h1, h0, tA);
-        sB = LERP16(s2, s0, tB); hB = LERP16(h2, h0, tB);
+    }
 
-        project_vertex(s0, h0, d0, &px0, &py0);
-        project_vertex(sA, hA, CLIP_NEAR_Z, &pxA, &pyA);
-        project_vertex(sB, hB, CLIP_NEAR_Z, &pxB, &pyB);
+    if (outCount < 3) return;
 
-        // Single clipped triangle — viewport clipped
-        rasterize_tri_clipped(buf, px0, py0, pxA, pyA, pxB, pyB, palIdx, lodLevel);
+    // Project all clipped vertices to screen space
+    {
+        int px[8], py[8];
+        for (i = 0; i < outCount; i++)
+            project_vertex(sOut[i], hOut[i], dOut[i], &px[i], &py[i]);
+
+        // Viewport clip and rasterize the convex polygon directly
+        {
+            int tmpX[10], tmpY[10], polyX[10], polyY[10];
+            int count = outCount;
+            // Copy to polyX/polyY for clipping chain
+            for (i = 0; i < count; i++) { polyX[i] = px[i]; polyY[i] = py[i]; }
+
+            count = clip_edge(polyX, polyY, count, tmpX, tmpY, 0, 0, 0);
+            if (count < 3) return;
+            count = clip_edge(tmpX, tmpY, count, polyX, polyY, 0, 239, 1);
+            if (count < 3) return;
+            count = clip_edge(polyX, polyY, count, tmpX, tmpY, 1, 0, 0);
+            if (count < 3) return;
+            count = clip_edge(tmpX, tmpY, count, polyX, polyY, 1, 159, 1);
+            if (count < 3) return;
+
+            rasterize_convex(buf, polyX, polyY, count, palIdx);
+        }
     }
 }
 
@@ -2196,10 +2197,12 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 // Draw filled grayscale face — clip against near plane if needed
                 if (isQuad && !anyNear)
                     rasterize_quad_clipped(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], sx[i3], sy[i3], palIdx);
-                else if (anyNear)
-                    clip_render_tri_flat(buf, vSide[i0], vHeight[i0], rawDepth[i0],
-                        vSide[i1], vHeight[i1], rawDepth[i1],
-                        vSide[i2], vHeight[i2], rawDepth[i2], palIdx, lodLevel);
+                else if (anyNear) {
+                    int cs[] = {vSide[i0], vSide[i1], vSide[i2], vSide[i3]};
+                    int ch[] = {vHeight[i0], vHeight[i1], vHeight[i2], vHeight[i3]};
+                    int cd[] = {rawDepth[i0], rawDepth[i1], rawDepth[i2], rawDepth[i3]};
+                    clip_render_poly_flat(buf, cs, ch, cd, isQuad ? 4 : 3, palIdx);
+                }
                 else
                     rasterize_tri_clipped(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx, lodLevel);
                 // Draw wireframe overlay — skip edges to behind-camera vertices
@@ -2298,10 +2301,12 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 
                 if (isQuad && !anyNear)
                     rasterize_quad_clipped(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], sx[i3], sy[i3], palIdx);
-                else if (anyNear)
-                    clip_render_tri_flat(buf, vSide[i0], vHeight[i0], rawDepth[i0],
-                        vSide[i1], vHeight[i1], rawDepth[i1],
-                        vSide[i2], vHeight[i2], rawDepth[i2], palIdx, lodLevel);
+                else if (anyNear) {
+                    int cs[] = {vSide[i0], vSide[i1], vSide[i2], vSide[i3]};
+                    int ch[] = {vHeight[i0], vHeight[i1], vHeight[i2], vHeight[i3]};
+                    int cd[] = {rawDepth[i0], rawDepth[i1], rawDepth[i2], rawDepth[i3]};
+                    clip_render_poly_flat(buf, cs, ch, cd, isQuad ? 4 : 3, palIdx);
+                }
                 else
                     rasterize_tri_clipped(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx, lodLevel);
             }
