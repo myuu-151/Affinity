@@ -883,10 +883,16 @@ IWRAM_CODE static void afn_hline_cov(u16* row, int left, int right, int y, u8 pa
 }
 #endif
 
+// Per-frame pixel budget to prevent FPS cliff from overdraw.
+// 240×160 = 38400 pixels. Budget of ~25K allows ~65% screen fill before cutoff.
+#define PIXEL_BUDGET 25000
+static int g_pixels_drawn;
+
 IWRAM_CODE static void afn_hline(u16* row, int left, int right, u8 palIdx)
 {
     int lx = left, rx = right, count;
     u16 pair;
+    g_pixels_drawn += right - left + 1;
     /* Handle odd left pixel */
     if ((lx & 1) && lx <= rx)
     { row[lx >> 1] = (row[lx >> 1] & 0x00FF) | ((u16)palIdx << 8); lx++; }
@@ -904,6 +910,34 @@ IWRAM_CODE static void afn_hline(u16* row, int left, int right, u8 palIdx)
             while (count--) { row[lx >> 1] = pair; lx += 2; }
     }
 }
+
+// Near-plane clipping threshold — must be <= projection clamp (16)
+#define CLIP_NEAR_Z 8
+
+// Project a view-space vertex to screen coords (clamped to guard band)
+static inline void project_vertex(int side, int height, int depth, int* osx, int* osy)
+{
+    int px, py;
+    if (depth < 16) depth = 16;
+    px = 120 + (int)((side * cam_fov) / depth);
+    py = m7_horizon + (int)((height * cam_fov) / depth);
+    if (px < -16000) px = -16000; if (px > 16000) px = 16000;
+    if (py < -16000) py = -16000; if (py > 16000) py = 16000;
+    *osx = px;
+    *osy = py;
+}
+
+// Interpolation factor from vertex A (behind near plane) to vertex B (in front)
+// Returns t in 0.16 fixed-point
+static inline int near_clip_t(int dA, int dB)
+{
+    int num = CLIP_NEAR_Z - dA;
+    int den = dB - dA;
+    if (den == 0) return 0;
+    return (int)(((long long)num << 16) / den);
+}
+
+#define LERP16(a, b, t) ((a) + ((int)(((long long)((b) - (a)) * (t)) >> 16)))
 
 // Safe 16.16 slope: uses 64-bit intermediate to prevent overflow with large coords
 #define SLOPE16(dx, dy) ((int)(((long long)(dx) << 16) / (dy)))
@@ -1121,6 +1155,99 @@ IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int 
             }
             xLong += dxLong << 1;
             xShort += dxShort << 1;
+        }
+    }
+}
+
+// Quarter-res rasterizer: draws every 4th scanline, duplicating to fill.
+// For flat-shaded close-up geometry — 4x less fill, looks identical.
+IWRAM_CODE static void rasterize_tri_quarter(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx)
+{
+    int tmp;
+    int totalH, segH;
+    int iy0, iy2, y;
+    int xLong, xShort;
+    int dxLong, dxShort;
+    int left, right;
+
+    if (x0 < -16000) x0 = -16000; if (x0 > 16000) x0 = 16000;
+    if (x1 < -16000) x1 = -16000; if (x1 > 16000) x1 = 16000;
+    if (x2 < -16000) x2 = -16000; if (x2 > 16000) x2 = 16000;
+    if (y0 < -16000) y0 = -16000; if (y0 > 16000) y0 = 16000;
+    if (y1 < -16000) y1 = -16000; if (y1 > 16000) y1 = 16000;
+    if (y2 < -16000) y2 = -16000; if (y2 > 16000) y2 = 16000;
+
+    if (y0 > y1) { tmp=x0; x0=x1; x1=tmp; tmp=y0; y0=y1; y1=tmp; }
+    if (y0 > y2) { tmp=x0; x0=x2; x2=tmp; tmp=y0; y0=y2; y2=tmp; }
+    if (y1 > y2) { tmp=x1; x1=x2; x2=tmp; tmp=y1; y1=y2; y2=tmp; }
+
+    totalH = y2 - y0;
+    if (totalH <= 0) return;
+
+    dxLong = SLOPE16(x2 - x0, totalH);
+
+    segH = y1 - y0;
+    if (segH > 0)
+    {
+        dxShort = SLOPE16(x1 - x0, segH);
+        iy0 = y0 < 0 ? 0 : y0;
+        {
+            int skip = iy0 - y0;
+            xLong  = sat32((long long)x0 * 65536 + (long long)dxLong  * skip);
+            xShort = sat32((long long)x0 * 65536 + (long long)dxShort * skip);
+        }
+        while (iy0 & 3) { xLong += dxLong; xShort += dxShort; iy0++; }
+        iy2 = y1 < 160 ? y1 : 160;
+
+        for (y = iy0; y < iy2; y += 4)
+        {
+            left = xLong >> 16;
+            right = xShort >> 16;
+            if (left > right) { tmp = left; left = right; right = tmp; }
+            if (right - left < 512)
+            {
+                int r;
+                if (left < 0) left = 0;
+                if (right > 239) right = 239;
+                if (left <= right)
+                    for (r = 0; r < 4 && y + r < 160; r++)
+                        afn_hline(buf + (y + r) * 120, left, right, palIdx);
+            }
+            xLong += dxLong << 2;
+            xShort += dxShort << 2;
+        }
+    }
+
+    segH = y2 - y1;
+    if (segH > 0)
+    {
+        dxShort = SLOPE16(x2 - x1, segH);
+        iy0 = y1 < 0 ? 0 : y1;
+        {
+            int skipLong  = iy0 - y0;
+            int skipShort = iy0 - y1;
+            xLong  = sat32((long long)x0 * 65536 + (long long)dxLong  * skipLong);
+            xShort = sat32((long long)x1 * 65536 + (long long)dxShort * skipShort);
+        }
+        while (iy0 & 3) { xLong += dxLong; xShort += dxShort; iy0++; }
+        iy2 = y2 < 160 ? y2 : 159;
+
+        for (y = iy0; y <= iy2; y += 4)
+        {
+            left = xLong >> 16;
+            right = xShort >> 16;
+            if (left > right) { tmp = left; left = right; right = tmp; }
+            if (right - left < 512)
+            {
+                int r;
+                if (left < 0) left = 0;
+                if (right > 239) right = 239;
+                if (left <= right)
+                    for (r = 0; r < 4 && y + r < 160; r++)
+                        afn_hline(buf + (y + r) * 120, left, right, palIdx);
+            }
+            xLong += dxLong << 2;
+            xShort += dxShort << 2;
         }
     }
 }
@@ -1501,6 +1628,91 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
     }
 }
 
+// Near-plane clip and render a flat-shaded triangle.
+// Clips against CLIP_NEAR_Z, producing 1 or 2 triangles from the visible portion.
+static void clip_render_tri_flat(u16* buf,
+    int s0, int h0, int d0,
+    int s1, int h1, int d1,
+    int s2, int h2, int d2,
+    u8 palIdx, int lodLevel)
+{
+    // Count vertices behind near plane
+    int nb = (d0 < CLIP_NEAR_Z) + (d1 < CLIP_NEAR_Z) + (d2 < CLIP_NEAR_Z);
+    int px0, py0, px1, py1, px2, py2, pxA, pyA, pxB, pyB;
+    int tA, tB, sA, hA, sB, hB;
+
+    if (nb == 0) return; // shouldn't be called, but safe
+    if (nb == 3) return; // all behind
+
+    // Rotate so vertex 0 is the "special" one
+    if (nb == 1) {
+        // 1 behind: make v0 the one behind
+        if (d1 < CLIP_NEAR_Z) {
+            int ts=s0, th=h0, td=d0;
+            s0=s1; h0=h1; d0=d1;
+            s1=s2; h1=h2; d1=d2;
+            s2=ts; h2=th; d2=td;
+        } else if (d2 < CLIP_NEAR_Z) {
+            int ts=s0, th=h0, td=d0;
+            s0=s2; h0=h2; d0=d2;
+            s2=s1; h2=h1; d2=d1;
+            s1=ts; h1=th; d1=td;
+        }
+        // Clip edges 0→1 and 0→2
+        tA = near_clip_t(d0, d1);
+        tB = near_clip_t(d0, d2);
+        sA = LERP16(s0, s1, tA); hA = LERP16(h0, h1, tA);
+        sB = LERP16(s0, s2, tB); hB = LERP16(h0, h2, tB);
+
+        project_vertex(sA, hA, CLIP_NEAR_Z, &pxA, &pyA);
+        project_vertex(sB, hB, CLIP_NEAR_Z, &pxB, &pyB);
+        project_vertex(s1, h1, d1, &px1, &py1);
+        project_vertex(s2, h2, d2, &px2, &py2);
+
+        // Quad (A, 1, 2, B) → 2 triangles
+        if (lodLevel >= 2) {
+            rasterize_tri_quarter(buf, pxA, pyA, px1, py1, px2, py2, palIdx);
+            rasterize_tri_quarter(buf, pxA, pyA, px2, py2, pxB, pyB, palIdx);
+        } else if (lodLevel == 1) {
+            rasterize_tri_half(buf, pxA, pyA, px1, py1, px2, py2, palIdx);
+            rasterize_tri_half(buf, pxA, pyA, px2, py2, pxB, pyB, palIdx);
+        } else {
+            rasterize_tri(buf, pxA, pyA, px1, py1, px2, py2, palIdx);
+            rasterize_tri(buf, pxA, pyA, px2, py2, pxB, pyB, palIdx);
+        }
+    } else {
+        // 2 behind: make v0 the one in front
+        if (d1 >= CLIP_NEAR_Z) {
+            int ts=s0, th=h0, td=d0;
+            s0=s1; h0=h1; d0=d1;
+            s1=s2; h1=h2; d1=d2;
+            s2=ts; h2=th; d2=td;
+        } else if (d2 >= CLIP_NEAR_Z) {
+            int ts=s0, th=h0, td=d0;
+            s0=s2; h0=h2; d0=d2;
+            s2=s1; h2=h1; d2=d1;
+            s1=ts; h1=th; d1=td;
+        }
+        // Clip edges 1→0 and 2→0
+        tA = near_clip_t(d1, d0);
+        tB = near_clip_t(d2, d0);
+        sA = LERP16(s1, s0, tA); hA = LERP16(h1, h0, tA);
+        sB = LERP16(s2, s0, tB); hB = LERP16(h2, h0, tB);
+
+        project_vertex(s0, h0, d0, &px0, &py0);
+        project_vertex(sA, hA, CLIP_NEAR_Z, &pxA, &pyA);
+        project_vertex(sB, hB, CLIP_NEAR_Z, &pxB, &pyB);
+
+        // Single clipped triangle
+        if (lodLevel >= 2)
+            rasterize_tri_quarter(buf, px0, py0, pxA, pyA, pxB, pyB, palIdx);
+        else if (lodLevel == 1)
+            rasterize_tri_half(buf, px0, py0, pxA, pyA, pxB, pyB, palIdx);
+        else
+            rasterize_tri(buf, px0, py0, pxA, pyA, pxB, pyB, palIdx);
+    }
+}
+
 // Triangle sort entry for painter's algorithm
 typedef struct { int triIdx; int depth; } TriSort;
 
@@ -1521,7 +1733,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         FIXED cosR, sinR, sprScale;
         int sx[512], sy[512];
         FIXED sz[512]; // depth per vertex for sorting
-        FIXED rawDepth[512]; // unclamped fovLambda for wireframe near-plane check
+        FIXED rawDepth[512]; // unclamped fovLambda for near-plane clipping
+        static FIXED vSide[512], vHeight[512]; // view-space coords for near-plane re-projection
         u8 vis[512];
         TriSort triOrder[256];
         int triCount;
@@ -1593,6 +1806,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 
             heightDiff = cam_h - wy;
             side = (dx * g_cosf + dz * g_sinf) >> 8;
+            vSide[v] = side;
+            vHeight[v] = heightDiff;
 
             sy[v] = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
             sx[v] = 120 + (int)((side * cam_fov) / fovLambda);
@@ -1618,19 +1833,27 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             if (i0 >= vertCount || i1 >= vertCount || i2 >= vertCount) continue;
             if (i0 == i1 || i1 == i2 || i0 == i2) continue; // degenerate
 
-            // Screen bounds cull: skip if all 3 vertices fully offscreen
-            if ((sx[i0] < 0 && sx[i1] < 0 && sx[i2] < 0) ||
-                (sx[i0] >= 240 && sx[i1] >= 240 && sx[i2] >= 240) ||
-                (sy[i0] < 0 && sy[i1] < 0 && sy[i2] < 0) ||
-                (sy[i0] >= 160 && sy[i1] >= 160 && sy[i2] >= 160))
+            // All behind near plane — skip entirely
+            if (rawDepth[i0] < CLIP_NEAR_Z && rawDepth[i1] < CLIP_NEAR_Z && rawDepth[i2] < CLIP_NEAR_Z)
                 continue;
 
-            // Backface culling: screen-space cross product
-            cross = (sx[i1] - sx[i0]) * (sy[i2] - sy[i0])
-                  - (sy[i1] - sy[i0]) * (sx[i2] - sx[i0]);
-            if (cullMode == 0 && cross >= 0) continue;      // Back: cull back faces
-            else if (cullMode == 1 && cross <= 0) continue;  // Front: cull front faces
-            // cullMode == 2 (None): no culling, draw all
+            // Skip screen-bounds and backface culling for near-plane triangles
+            // (projected coords are unreliable when vertices are behind camera)
+            if (rawDepth[i0] >= CLIP_NEAR_Z && rawDepth[i1] >= CLIP_NEAR_Z && rawDepth[i2] >= CLIP_NEAR_Z)
+            {
+                // Screen bounds cull: skip if all 3 vertices fully offscreen
+                if ((sx[i0] < 0 && sx[i1] < 0 && sx[i2] < 0) ||
+                    (sx[i0] >= 240 && sx[i1] >= 240 && sx[i2] >= 240) ||
+                    (sy[i0] < 0 && sy[i1] < 0 && sy[i2] < 0) ||
+                    (sy[i0] >= 160 && sy[i1] >= 160 && sy[i2] >= 160))
+                    continue;
+
+                // Backface culling: screen-space cross product
+                cross = (sx[i1] - sx[i0]) * (sy[i2] - sy[i0])
+                      - (sy[i1] - sy[i0]) * (sx[i2] - sx[i0]);
+                if (cullMode == 0 && cross >= 0) continue;
+                else if (cullMode == 1 && cross <= 0) continue;
+            }
 
 #ifdef AFN_SMALL_TRI_CULL
             // Small triangle cull: skip if screen-space area too small
@@ -1685,6 +1908,12 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             int i0 = indices[ti * 3 + 0];
             int i1 = indices[ti * 3 + 1];
             int i2 = indices[ti * 3 + 2];
+            // Auto LOD: reduce fill resolution for close geometry
+            // 0=full, 1=half (2x), 2=quarter (4x)
+            int avgD = triOrder[t].depth / 3;
+            int lodLevel = meshHalfRes ? 1 : (avgD < 64 ? 2 : (avgD < 192 ? 1 : 0));
+            int anyNear = (rawDepth[i0] < CLIP_NEAR_Z) | (rawDepth[i1] < CLIP_NEAR_Z) | (rawDepth[i2] < CLIP_NEAR_Z);
+
 
 
             if (meshGrayscale)
@@ -1703,8 +1932,14 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 if (shade < 1) shade = 1;
                 if (shade > 7) shade = 7;
                 palIdx = 5 + shade; // grayscale palette at indices 5-12
-                // Draw filled grayscale triangle (SLOPE16 handles near-plane, same as normal meshes)
-                if (meshHalfRes)
+                // Draw filled grayscale triangle — clip against near plane if needed
+                if (anyNear)
+                    clip_render_tri_flat(buf, vSide[i0], vHeight[i0], rawDepth[i0],
+                        vSide[i1], vHeight[i1], rawDepth[i1],
+                        vSide[i2], vHeight[i2], rawDepth[i2], palIdx, lodLevel);
+                else if (lodLevel >= 2)
+                    rasterize_tri_quarter(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+                else if (lodLevel == 1)
                     rasterize_tri_half(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
                 else
                     rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
@@ -1782,14 +2017,16 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     palIdx = AFN_MESH_PAL_BASE + mi * 8 + 5;
                 }
 
-#ifdef AFN_COVERAGE_BUF
-                rasterize_tri_cov(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
-#else
-                if (meshHalfRes)
+                if (anyNear)
+                    clip_render_tri_flat(buf, vSide[i0], vHeight[i0], rawDepth[i0],
+                        vSide[i1], vHeight[i1], rawDepth[i1],
+                        vSide[i2], vHeight[i2], rawDepth[i2], palIdx, lodLevel);
+                else if (lodLevel >= 2)
+                    rasterize_tri_quarter(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
+                else if (lodLevel == 1)
                     rasterize_tri_half(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
                 else
                     rasterize_tri(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
-#endif
             }
         }
     }
@@ -2003,6 +2240,7 @@ int main(void)
 #endif
             dbg_tex_tris = 0;
             dbg_tex_spans = 0;
+            g_pixels_drawn = 0;
             dbg_tex_pixels = 0;
             {
                 // Single timer with prescaler=64: 1 tick = 64 cycles, max ~4.2M cycles
