@@ -2211,11 +2211,12 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     int d2 = rawDepth[i2] >= WIRE_NEAR_DEPTH;
                     if (d0 && d1) draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], edgeIdx);
                     if (d1 && d2) draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], edgeIdx);
-                    if (d2 && d0) draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], edgeIdx);
                     if (isQuad) {
                         int d3 = rawDepth[i3] >= WIRE_NEAR_DEPTH;
                         if (d2 && d3) draw_line(buf, sx[i2], sy[i2], sx[i3], sy[i3], edgeIdx);
                         if (d3 && d0) draw_line(buf, sx[i3], sy[i3], sx[i0], sy[i0], edgeIdx);
+                    } else {
+                        if (d2 && d0) draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], edgeIdx);
                     }
                 }
             }
@@ -2241,11 +2242,12 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     int d2 = rawDepth[i2] >= WIRE_NEAR_DEPTH;
                     if (d0 && d1) draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], palIdx);
                     if (d1 && d2) draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
-                    if (d2 && d0) draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], palIdx);
                     if (isQuad) {
                         int d3 = rawDepth[i3] >= WIRE_NEAR_DEPTH;
                         if (d2 && d3) draw_line(buf, sx[i2], sy[i2], sx[i3], sy[i3], palIdx);
                         if (d3 && d0) draw_line(buf, sx[i3], sy[i3], sx[i0], sy[i0], palIdx);
+                    } else {
+                        if (d2 && d0) draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], palIdx);
                     }
                 }
             }
