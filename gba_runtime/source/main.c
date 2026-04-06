@@ -1934,6 +1934,7 @@ typedef struct {
     int cullMode, meshLit, meshHalfRes, meshTextured, meshWireframe, meshGrayscale;
     int texW, texShift, texMask, texPalBase;
     int vertCount, idxCount, quadIdxCount;
+    int centerDepth;
 } MeshSlot;
 
 // Global projected vertex arrays — must be in EWRAM (too large for IWRAM)
@@ -2050,6 +2051,13 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             }
         }
 
+        // Mesh center depth (sprite origin projected along camera forward)
+        {
+            FIXED cdx = g_sprites[si].x - cam_x;
+            FIXED cdz = g_sprites[si].z - cam_z;
+            ms->centerDepth = (cdx * g_sinf - cdz * g_cosf) >> 8;
+        }
+
         // Whole-mesh screen cull
         anyVisible = 0;
         for (v = 0; v < vertCount; v++)
@@ -2092,12 +2100,21 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 #endif
 
             {
-                int avgDepth = g_vsz[vb+i0] + g_vsz[vb+i1] + g_vsz[vb+i2];
+                int d0 = g_vsz[vb+i0], d1 = g_vsz[vb+i1], d2 = g_vsz[vb+i2];
+                int maxD = d0 > d1 ? d0 : d1;
+                if (d2 > maxD) maxD = d2;
 #ifdef AFN_DRAW_DISTANCE
-                if (avgDepth / 3 > AFN_DRAW_DISTANCE) continue;
+                if ((d0 + d1 + d2) / 3 > AFN_DRAW_DISTANCE) continue;
 #endif
+                {
+                    int h0 = g_vHeight[vb+i0], h1 = g_vHeight[vb+i1], h2 = g_vHeight[vb+i2];
+                    int hMin = h0, hMax = h0;
+                    if (h1 < hMin) hMin = h1; if (h1 > hMax) hMax = h1;
+                    if (h2 < hMin) hMin = h2; if (h2 > hMax) hMax = h2;
+                    if (hMax - hMin > 512) maxD += (1 << 20); // wall: large Y extent
+                }
                 g_triOrder[totalTris].triIdx = t;
-                g_triOrder[totalTris].depth = avgDepth;
+                g_triOrder[totalTris].depth = maxD;
                 g_triOrder[totalTris].slot = (u8)slotCount;
                 totalTris++;
             }
@@ -2138,12 +2155,23 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 }
 
                 {
-                    int avgDepth = g_vsz[vb+i0] + g_vsz[vb+i1] + g_vsz[vb+i2] + g_vsz[vb+i3];
+                    int d0 = g_vsz[vb+i0], d1 = g_vsz[vb+i1], d2 = g_vsz[vb+i2], d3 = g_vsz[vb+i3];
+                    int maxD = d0 > d1 ? d0 : d1;
+                    if (d2 > maxD) maxD = d2;
+                    if (d3 > maxD) maxD = d3;
 #ifdef AFN_DRAW_DISTANCE
-                    if (avgDepth / 4 > AFN_DRAW_DISTANCE) continue;
+                    if ((d0 + d1 + d2 + d3) / 4 > AFN_DRAW_DISTANCE) continue;
 #endif
+                    {
+                        int h0 = g_vHeight[vb+i0], h1 = g_vHeight[vb+i1], h2 = g_vHeight[vb+i2], h3 = g_vHeight[vb+i3];
+                        int hMin = h0, hMax = h0;
+                        if (h1 < hMin) hMin = h1; if (h1 > hMax) hMax = h1;
+                        if (h2 < hMin) hMin = h2; if (h2 > hMax) hMax = h2;
+                        if (h3 < hMin) hMin = h3; if (h3 > hMax) hMax = h3;
+                        if (hMax - hMin > 512) maxD += (1 << 20); // wall: large Y extent
+                    }
                     g_triOrder[totalTris].triIdx = t | 0x8000;
-                    g_triOrder[totalTris].depth = avgDepth;
+                    g_triOrder[totalTris].depth = maxD;
                     g_triOrder[totalTris].slot = (u8)slotCount;
                     totalTris++;
                 }
@@ -2198,7 +2226,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             i1 = quadIndices[faceIdx * 4 + 1];
             i2 = quadIndices[faceIdx * 4 + 2];
             i3 = quadIndices[faceIdx * 4 + 3];
-            avgD = g_triOrder[t].depth / 4;
+            avgD = (g_vsz[vb+i0] + g_vsz[vb+i1] + g_vsz[vb+i2] + g_vsz[vb+i3]) / 4;
             anyNear = (g_vRawDepth[vb+i0] < CLIP_NEAR_Z) | (g_vRawDepth[vb+i1] < CLIP_NEAR_Z) |
                       (g_vRawDepth[vb+i2] < CLIP_NEAR_Z) | (g_vRawDepth[vb+i3] < CLIP_NEAR_Z);
         }
@@ -2207,7 +2235,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             i0 = indices[faceIdx * 3 + 0];
             i1 = indices[faceIdx * 3 + 1];
             i2 = indices[faceIdx * 3 + 2];
-            avgD = g_triOrder[t].depth / 3;
+            avgD = (g_vsz[vb+i0] + g_vsz[vb+i1] + g_vsz[vb+i2]) / 3;
             anyNear = (g_vRawDepth[vb+i0] < CLIP_NEAR_Z) | (g_vRawDepth[vb+i1] < CLIP_NEAR_Z) | (g_vRawDepth[vb+i2] < CLIP_NEAR_Z);
         }
         lodLevel = ms->meshHalfRes ? 1 : (avgD < 64 ? 2 : (avgD < 192 ? 1 : 0));
