@@ -61,6 +61,7 @@ static float sTmMapZoom = 1.0f;    // tilemap grid zoom
 static float sTmMapPanX = 0.0f;
 static float sTmMapPanY = 0.0f;
 static int sTmTool = 0;            // 0 = draw, 1 = erase, 2 = pick
+static int  sTmDragEdge = 0;       // 0=none, 1=top, 2=bottom, 3=left, 4=right
 
 // World size — supports up to 1024x1024 pixel tilemaps (128x128 tiles)
 static constexpr float kWorldSize = 1024.0f;   // total extent
@@ -1528,7 +1529,7 @@ static void DrawTabBar()
         ImVec4 buildCol = sPackaging ? ImVec4(0.4f, 0.4f, 0.1f, 1.0f) : ImVec4(0.15f, 0.3f, 0.55f, 1.0f);
         ImGui::PushStyleColor(ImGuiCol_Button, buildCol);
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-        const char* buildLabel = sPackaging ? "Building..." : (sBuildTarget == BuildTarget::NDS ? "Build NDS" : "Build GBA");
+        const char* buildLabel = sPackaging ? "Building..." : "Build";
         if (ImGui::Button(buildLabel, ImVec2(btnW * 1.2f, btnH)) && !sPackaging)
             sBuildRequested = true;
         ImGui::PopStyleColor(2);
@@ -3429,10 +3430,10 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             memset(t.pixels, 0, sizeof(t.pixels));
         for (int i = 0; i < 16; i++)
             sTilemapData.tileset.palette[i] = sPalette[i];
-        // Default tilemap: 32x32, all tile 0
-        sTilemapData.floor.width  = 32;
-        sTilemapData.floor.height = 32;
-        sTilemapData.floor.tileIndices.resize(32 * 32, 0);
+        // Default tilemap: 1x1, single tile — drag edges to expand
+        sTilemapData.floor.width  = 1;
+        sTilemapData.floor.height = 1;
+        sTilemapData.floor.tileIndices.resize(1, 0);
     }
 
     Tileset& ts = sTilemapData.tileset;
@@ -3643,7 +3644,7 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
     ImGui::End();
     ImGui::PopStyleColor(2);
 
-    // ======== RIGHT PANEL: tilemap grid ========
+    // ======== RIGHT PANEL: tilemap grid with draggable edges ========
     ImGui::SetNextWindowPos(ImVec2(pos.x + leftW, pos.y));
     ImGui::SetNextWindowSize(ImVec2(rightW, size.y));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.10f, 1.0f));
@@ -3661,30 +3662,6 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
         ImGui::RadioButton("Erase", &sTmTool, 1); ImGui::SameLine();
         ImGui::RadioButton("Pick", &sTmTool, 2);
         ImGui::SameLine(0, 20);
-
-        // Resize tilemap
-        static int sTmNewW = 32, sTmNewH = 32;
-        ImGui::PushItemWidth(50);
-        ImGui::InputInt("##mw", &sTmNewW, 0); ImGui::SameLine();
-        ImGui::Text("x"); ImGui::SameLine();
-        ImGui::InputInt("##mh", &sTmNewH, 0);
-        ImGui::PopItemWidth();
-        ImGui::SameLine();
-        if (ImGui::Button("Resize"))
-        {
-            sTmNewW = std::clamp(sTmNewW, 1, 128);
-            sTmNewH = std::clamp(sTmNewH, 1, 128);
-            std::vector<uint16_t> newMap(sTmNewW * sTmNewH, 0);
-            int copyW = std::min(tm.width, sTmNewW);
-            int copyH = std::min(tm.height, sTmNewH);
-            for (int y = 0; y < copyH; y++)
-                for (int x = 0; x < copyW; x++)
-                    newMap[y * sTmNewW + x] = tm.tileIndices[y * tm.width + x];
-            tm.tileIndices = std::move(newMap);
-            tm.width  = sTmNewW;
-            tm.height = sTmNewH;
-        }
-        ImGui::SameLine();
         if (ImGui::Button("Clear Map"))
             std::fill(tm.tileIndices.begin(), tm.tileIndices.end(), (uint16_t)0);
 
@@ -3694,7 +3671,7 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
         float availW = rightW - 16.0f;
         float availH = size.y - (cursor.y - pos.y) - 8.0f;
 
-        // Zoom + pan
+        // Zoom with scroll wheel
         if (ImGui::IsWindowHovered())
         {
             float wheel = ImGui::GetIO().MouseWheel;
@@ -3702,7 +3679,8 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             {
                 float oldZoom = sTmMapZoom;
                 sTmMapZoom *= (wheel > 0.0f) ? 1.15f : (1.0f / 1.15f);
-                sTmMapZoom = std::clamp(sTmMapZoom, 0.25f, 8.0f);
+                sTmMapZoom = std::clamp(sTmMapZoom, 0.5f, 16.0f);
+                // Zoom toward mouse
                 ImVec2 mouse = ImGui::GetMousePos();
                 float mx = mouse.x - cursor.x - sTmMapPanX;
                 float mz = mouse.y - cursor.y - sTmMapPanY;
@@ -3710,6 +3688,7 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 sTmMapPanX += mx * ratio;
                 sTmMapPanY += mz * ratio;
             }
+            // Middle-mouse pan
             if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
             {
                 ImVec2 delta = ImGui::GetIO().MouseDelta;
@@ -3718,46 +3697,54 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             }
         }
 
-        float baseCell = std::min(availW / (float)tm.width, availH / (float)tm.height);
-        baseCell = std::max(baseCell, 2.0f);
-        float cellSz = baseCell * sTmMapZoom;
+        // Cell size: fixed base of 48px * zoom
+        float cellSz = 48.0f * sTmMapZoom;
+
+        // Center the grid in the available area
+        float gridW = tm.width * cellSz;
+        float gridH = tm.height * cellSz;
+        float ox = cursor.x + (availW - gridW) * 0.5f + sTmMapPanX;
+        float oy = cursor.y + (availH - gridH) * 0.5f + sTmMapPanY;
 
         // Clip to panel
         ImVec2 clipMin = cursor;
         ImVec2 clipMax(pos.x + leftW + rightW, pos.y + size.y);
         dl->PushClipRect(clipMin, clipMax, true);
-        float ox = cursor.x + sTmMapPanX;
-        float oy = cursor.y + sTmMapPanY;
 
-        // Draw tilemap cells
+        // Draw tilemap cells as beveled boxes with white border
+        const float bevel = std::max(2.0f, cellSz * 0.06f);
         for (int ty = 0; ty < tm.height; ty++)
         {
             for (int tx = 0; tx < tm.width; tx++)
             {
-                ImVec2 p0(ox + tx * cellSz, oy + ty * cellSz);
-                ImVec2 p1(p0.x + cellSz, p0.y + cellSz);
+                float x0 = ox + tx * cellSz;
+                float y0 = oy + ty * cellSz;
+                float x1 = x0 + cellSz;
+                float y1 = y0 + cellSz;
 
                 // Skip if off-screen
-                if (p1.x < clipMin.x || p0.x > clipMax.x ||
-                    p1.y < clipMin.y || p0.y > clipMax.y)
+                if (x1 < clipMin.x || x0 > clipMax.x ||
+                    y1 < clipMin.y || y0 > clipMax.y)
                     continue;
 
                 int ti = tm.tileIndices[ty * tm.width + tx];
+                uint32_t fillCol = 0xFF1A1A1A;
+
                 if (ti >= 0 && ti < (int)ts.tiles.size())
                 {
-                    // Render tile: draw each pixel row as colored rectangles
                     const Tile8& tile = ts.tiles[ti];
-                    float pxSz = cellSz / (float)kTileSize;
+                    float pxSz = (cellSz - bevel * 2) / (float)kTileSize;
                     if (pxSz >= 2.0f)
                     {
-                        // Per-pixel rendering when zoomed in enough
+                        // Per-pixel rendering inside the bevel
+                        float ix0 = x0 + bevel, iy0 = y0 + bevel;
                         for (int py = 0; py < kTileSize; py++)
                         {
                             for (int px = 0; px < kTileSize; px++)
                             {
                                 uint8_t ci = tile.pixels[py * kTileSize + px];
                                 uint32_t col = ts.palette[ci & 0xF];
-                                ImVec2 pp0(p0.x + px * pxSz, p0.y + py * pxSz);
+                                ImVec2 pp0(ix0 + px * pxSz, iy0 + py * pxSz);
                                 ImVec2 pp1(pp0.x + pxSz, pp0.y + pxSz);
                                 dl->AddRectFilled(pp0, pp1, col);
                             }
@@ -3765,47 +3752,206 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     }
                     else
                     {
-                        // Zoomed out: just use the dominant color (center pixel)
+                        // Zoomed out: dominant color fill
                         uint8_t ci = tile.pixels[4 * kTileSize + 4];
-                        dl->AddRectFilled(p0, p1, ts.palette[ci & 0xF]);
+                        fillCol = ts.palette[ci & 0xF];
+                        dl->AddRectFilled(ImVec2(x0 + bevel, y0 + bevel),
+                            ImVec2(x1 - bevel, y1 - bevel), fillCol);
                     }
                 }
                 else
                 {
-                    // Empty / invalid tile
-                    dl->AddRectFilled(p0, p1, 0xFF1A1A1A);
+                    dl->AddRectFilled(ImVec2(x0 + bevel, y0 + bevel),
+                        ImVec2(x1 - bevel, y1 - bevel), fillCol);
                 }
 
-                // Grid lines (only when cells are big enough)
-                if (cellSz >= 4.0f)
-                    dl->AddRect(p0, p1, 0x20FFFFFF);
+                // Beveled edge: light top-left, dark bottom-right
+                uint32_t lightEdge = 0x60FFFFFF;
+                uint32_t darkEdge  = 0x60000000;
+                // Top edge (light)
+                dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y0 + bevel), lightEdge);
+                // Left edge (light)
+                dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + bevel, y1), lightEdge);
+                // Bottom edge (dark)
+                dl->AddRectFilled(ImVec2(x0, y1 - bevel), ImVec2(x1, y1), darkEdge);
+                // Right edge (dark)
+                dl->AddRectFilled(ImVec2(x1 - bevel, y0), ImVec2(x1, y1), darkEdge);
+
+                // White border
+                dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), 0xFFFFFFFF);
             }
         }
 
-        // Border around entire tilemap
-        dl->AddRect(ImVec2(ox, oy),
-            ImVec2(ox + tm.width * cellSz, oy + tm.height * cellSz),
-            0x60FFFFFF);
+        // --- Draggable edges to expand/shrink the tilemap ---
+        // Edge hit zones (wider than visual for easy grabbing)
+        float grab = std::max(8.0f, cellSz * 0.3f);
+        float edgeTop    = oy;
+        float edgeBottom = oy + gridH;
+        float edgeLeft   = ox;
+        float edgeRight  = ox + gridW;
+
+        ImVec2 mouse = ImGui::GetMousePos();
+        bool inPanel = (mouse.x >= clipMin.x && mouse.x <= clipMax.x &&
+                        mouse.y >= clipMin.y && mouse.y <= clipMax.y);
+
+        // Detect which edge the mouse is near (for cursor + drag start)
+        int hoverEdge = 0;
+        if (inPanel && sTmDragEdge == 0)
+        {
+            // Top edge zone
+            if (mouse.y >= edgeTop - grab && mouse.y <= edgeTop + grab &&
+                mouse.x >= edgeLeft - grab && mouse.x <= edgeRight + grab)
+                hoverEdge = 1;
+            // Bottom edge zone
+            else if (mouse.y >= edgeBottom - grab && mouse.y <= edgeBottom + grab &&
+                     mouse.x >= edgeLeft - grab && mouse.x <= edgeRight + grab)
+                hoverEdge = 2;
+            // Left edge zone
+            else if (mouse.x >= edgeLeft - grab && mouse.x <= edgeLeft + grab &&
+                     mouse.y >= edgeTop - grab && mouse.y <= edgeBottom + grab)
+                hoverEdge = 3;
+            // Right edge zone
+            else if (mouse.x >= edgeRight - grab && mouse.x <= edgeRight + grab &&
+                     mouse.y >= edgeTop - grab && mouse.y <= edgeBottom + grab)
+                hoverEdge = 4;
+        }
+
+        // Set cursor shape
+        if (hoverEdge == 1 || hoverEdge == 2 || sTmDragEdge == 1 || sTmDragEdge == 2)
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+        else if (hoverEdge == 3 || hoverEdge == 4 || sTmDragEdge == 3 || sTmDragEdge == 4)
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+
+        // Highlight hovered edge
+        if (hoverEdge == 1 || sTmDragEdge == 1) // top
+            dl->AddLine(ImVec2(edgeLeft, edgeTop), ImVec2(edgeRight, edgeTop), 0xFF44AAFF, 3.0f);
+        if (hoverEdge == 2 || sTmDragEdge == 2) // bottom
+            dl->AddLine(ImVec2(edgeLeft, edgeBottom), ImVec2(edgeRight, edgeBottom), 0xFF44AAFF, 3.0f);
+        if (hoverEdge == 3 || sTmDragEdge == 3) // left
+            dl->AddLine(ImVec2(edgeLeft, edgeTop), ImVec2(edgeLeft, edgeBottom), 0xFF44AAFF, 3.0f);
+        if (hoverEdge == 4 || sTmDragEdge == 4) // right
+            dl->AddLine(ImVec2(edgeRight, edgeTop), ImVec2(edgeRight, edgeBottom), 0xFF44AAFF, 3.0f);
 
         dl->PopClipRect();
 
-        // Mouse interaction: draw/erase/pick tiles
+        // Invisible button for mouse interaction
         ImGui::SetCursorScreenPos(cursor);
         ImGui::InvisibleButton("##TmMapGrid", ImVec2(availW, availH));
 
-        if (ImGui::IsItemActive() && (ImGui::IsMouseDown(0)))
+        // --- Edge dragging logic ---
+        // Track cumulative drag distance in pixels to know when to add/remove a row/col
+        static float sDragAccum = 0.0f;
+
+        if (ImGui::IsMouseClicked(0) && hoverEdge != 0)
         {
-            ImVec2 mouse = ImGui::GetMousePos();
+            sTmDragEdge = hoverEdge;
+            sDragAccum = 0.0f;
+        }
+
+        if (sTmDragEdge != 0 && ImGui::IsMouseDown(0))
+        {
+            ImVec2 delta = ImGui::GetIO().MouseDelta;
+            float d = (sTmDragEdge <= 2) ? delta.y : delta.x;
+            sDragAccum += d;
+
+            // Helper lambda to resize tilemap, preserving content
+            auto resizeTilemap = [&](int newW, int newH, int shiftX, int shiftY)
+            {
+                if (newW < 1 || newH < 1 || newW > 128 || newH > 128) return;
+                std::vector<uint16_t> newMap(newW * newH, 0);
+                for (int y = 0; y < tm.height && (y + shiftY) < newH; y++)
+                {
+                    if (y + shiftY < 0) continue;
+                    for (int x = 0; x < tm.width && (x + shiftX) < newW; x++)
+                    {
+                        if (x + shiftX < 0) continue;
+                        newMap[(y + shiftY) * newW + (x + shiftX)] =
+                            tm.tileIndices[y * tm.width + x];
+                    }
+                }
+                tm.tileIndices = std::move(newMap);
+                tm.width = newW;
+                tm.height = newH;
+            };
+
+            float threshold = cellSz;
+            if (threshold < 8.0f) threshold = 8.0f;
+
+            if (sTmDragEdge == 2) // bottom: drag down = add row, drag up = remove
+            {
+                while (sDragAccum >= threshold)
+                {
+                    resizeTilemap(tm.width, tm.height + 1, 0, 0);
+                    sDragAccum -= threshold;
+                }
+                while (sDragAccum <= -threshold && tm.height > 1)
+                {
+                    resizeTilemap(tm.width, tm.height - 1, 0, 0);
+                    sDragAccum += threshold;
+                }
+            }
+            else if (sTmDragEdge == 1) // top: drag up = add row at top, drag down = remove
+            {
+                while (sDragAccum <= -threshold)
+                {
+                    resizeTilemap(tm.width, tm.height + 1, 0, 1);
+                    sTmMapPanY -= cellSz * 0.5f; // shift pan to keep grid visually stable
+                    sDragAccum += threshold;
+                }
+                while (sDragAccum >= threshold && tm.height > 1)
+                {
+                    resizeTilemap(tm.width, tm.height - 1, 0, -1);
+                    sTmMapPanY += cellSz * 0.5f;
+                    sDragAccum -= threshold;
+                }
+            }
+            else if (sTmDragEdge == 4) // right: drag right = add col, drag left = remove
+            {
+                while (sDragAccum >= threshold)
+                {
+                    resizeTilemap(tm.width + 1, tm.height, 0, 0);
+                    sDragAccum -= threshold;
+                }
+                while (sDragAccum <= -threshold && tm.width > 1)
+                {
+                    resizeTilemap(tm.width - 1, tm.height, 0, 0);
+                    sDragAccum += threshold;
+                }
+            }
+            else if (sTmDragEdge == 3) // left: drag left = add col at left, drag right = remove
+            {
+                while (sDragAccum <= -threshold)
+                {
+                    resizeTilemap(tm.width + 1, tm.height, 1, 0);
+                    sTmMapPanX -= cellSz * 0.5f;
+                    sDragAccum += threshold;
+                }
+                while (sDragAccum >= threshold && tm.width > 1)
+                {
+                    resizeTilemap(tm.width - 1, tm.height, -1, 0);
+                    sTmMapPanX += cellSz * 0.5f;
+                    sDragAccum -= threshold;
+                }
+            }
+        }
+        else
+        {
+            sTmDragEdge = 0;
+        }
+
+        // --- Normal tile painting (only when not dragging an edge) ---
+        if (sTmDragEdge == 0 && ImGui::IsItemActive() && ImGui::IsMouseDown(0))
+        {
             int tx = (int)((mouse.x - ox) / cellSz);
             int ty = (int)((mouse.y - oy) / cellSz);
             if (tx >= 0 && tx < tm.width && ty >= 0 && ty < tm.height)
             {
                 int idx = ty * tm.width + tx;
-                if (sTmTool == 0) // Draw
+                if (sTmTool == 0)
                     tm.tileIndices[idx] = (uint16_t)sTmSelectedTile;
-                else if (sTmTool == 1) // Erase
+                else if (sTmTool == 1)
                     tm.tileIndices[idx] = 0;
-                else if (sTmTool == 2) // Pick
+                else if (sTmTool == 2)
                     sTmSelectedTile = tm.tileIndices[idx];
             }
         }

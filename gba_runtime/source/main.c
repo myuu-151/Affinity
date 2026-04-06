@@ -70,9 +70,11 @@ static u16 dbg_fps_timer;   // last timer snapshot
 // 9 = unlit flat color (skip lighting)
 // 10 = coverage buffer (front-to-back, skip occluded scanlines)
 // 11 = EWRAM render (render to EWRAM, DMA to VRAM at VBlank)
-#define PERF_MODE_COUNT 12
+// 12 = ASM rasterizer (use rasterize_convex_asm instead of C version)
+#define PERF_MODE_COUNT 13
 static int perf_mode;
 static int g_ewramRender;  // when set, render to EWRAM then DMA to VRAM
+static int g_useAsmRast = 1;   // use ARM asm convex rasterizer by default
 
 // EWRAM render buffer: 240x160 bytes = 38400 bytes, halfword-aligned
 // Stored as u16[120*160] to match VRAM Mode 4 layout
@@ -904,6 +906,12 @@ static int g_halfRes; // when set, rasterize_convex skips odd scanlines + duplic
 
 // ARM assembly flat-fill: ~3 cy/pixel via VRAM strb trick (defined in hline_fast.s)
 extern void afn_hline_fast(u16* row, int left, int right, u8 palIdx);
+// ARM assembly convex polygon rasterizer (defined in rasterize_convex_asm.s)
+extern void rasterize_convex_asm(u16* buf, int* px, int* py, int count, u8 palIdx);
+// ARM assembly textured convex polygon rasterizer (defined in rasterize_convex_tex_asm.s)
+extern void rasterize_convex_tex_asm(u16* buf, int* px, int* py, int* pu, int* pv,
+                                      int count, const u8* tex, int texMask,
+                                      int texShift, u8 palBase);
 
 IWRAM_CODE static void afn_hline(u16* row, int left, int right, u8 palIdx)
 {
@@ -986,6 +994,49 @@ static inline int sat32(long long v)
 IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx);
 IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx);
 IWRAM_CODE static void rasterize_tri_quarter(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx);
+
+// Sutherland-Hodgman viewport clipping with UV interpolation.
+// Clips a convex polygon against one axis-aligned edge, carrying U/V.
+static int clip_edge_uv(const int* inX, const int* inY, const int* inU, const int* inV,
+                        int inCount, int* outX, int* outY, int* outU, int* outV,
+                        int axis, int limit, int isMax)
+{
+    int out = 0;
+    int i;
+    for (i = 0; i < inCount; i++)
+    {
+        int j = (i + 1 < inCount) ? i + 1 : 0;
+        int ci = axis ? inY[i] : inX[i];
+        int cj = axis ? inY[j] : inX[j];
+        int inI = isMax ? (ci <= limit) : (ci >= limit);
+        int inJ = isMax ? (cj <= limit) : (cj >= limit);
+
+        if (inI) {
+            outX[out] = inX[i]; outY[out] = inY[i];
+            outU[out] = inU[i]; outV[out] = inV[i];
+            out++;
+        }
+        if (inI != inJ) {
+            int dx = inX[j] - inX[i];
+            int dy = inY[j] - inY[i];
+            int du = inU[j] - inU[i];
+            int dv = inV[j] - inV[i];
+            int d = (axis ? dy : dx);
+            if (d != 0) {
+                int t = limit - (axis ? inY[i] : inX[i]);
+                outX[out] = axis ? (inX[i] + (int)((long long)dx * t / d)) : limit;
+                outY[out] = axis ? limit : (inY[i] + (int)((long long)dy * t / d));
+                outU[out] = inU[i] + (int)((long long)du * t / d);
+                outV[out] = inV[i] + (int)((long long)dv * t / d);
+            } else {
+                outX[out] = inX[i]; outY[out] = inY[i];
+                outU[out] = inU[i]; outV[out] = inV[i];
+            }
+            out++;
+        }
+    }
+    return out;
+}
 
 // Sutherland-Hodgman viewport clipping.
 // Clips a convex polygon against one axis-aligned edge.
@@ -1074,6 +1125,9 @@ IWRAM_CODE static void rasterize_convex(u16* buf, int* px, int* py, int count, u
 
     if (count < 3) return;
 
+    rasterize_convex_asm(buf, px, py, count, palIdx);
+    return;
+
     top = 0; bot = 0;
     for (i = 1; i < count; i++) {
         if (py[i] < py[top]) top = i;
@@ -1158,6 +1212,142 @@ IWRAM_CODE static void rasterize_convex(u16* buf, int* px, int* py, int count, u
             }
             Lx += Ldx;
             Rx += Rdx;
+            y++;
+        }
+    }
+}
+
+// Convex polygon textured rasterizer — edge-walking with UV interpolation.
+// Same algorithm as rasterize_convex but carries U/V per edge and calls tex_scanline_asm.
+// UVs are 8.8 fixed-point (pre-scaled to texture dimensions).
+IWRAM_CODE static void rasterize_convex_tex(u16* buf, int* px, int* py, int* pu, int* pv,
+    int count, const u8* tex, int texMask, int texShift, u8 palBase)
+{
+    rasterize_convex_tex_asm(buf, px, py, pu, pv, count, tex, texMask, texShift, palBase);
+    return;
+
+    int i, top, bot, L, R, Lh, Rh, Lx, Rx, Ldx, Rdx, y, h;
+    int Lu, Ru, Lv, Rv, Ldu, Rdu, Ldv, Rdv;
+    int Lsteps, Rsteps;
+
+    if (count < 3) return;
+
+    top = 0; bot = 0;
+    for (i = 1; i < count; i++) {
+        if (py[i] < py[top]) top = i;
+        if (py[i] > py[bot]) bot = i;
+    }
+    if (py[bot] <= py[top]) return;
+
+    L = top; R = top;
+    Lh = 0; Rh = 0;
+    Lx = 0; Rx = 0;
+    Ldx = 0; Rdx = 0;
+    Lu = 0; Ru = 0; Lv = 0; Rv = 0;
+    Ldu = 0; Rdu = 0; Ldv = 0; Rdv = 0;
+    Lsteps = 0; Rsteps = 0;
+    y = py[top];
+
+    for (;;)
+    {
+        while (!Lh)
+        {
+            int N = L - 1;
+            if (N < 0) N = count - 1;
+            if (py[N] < py[L] || ++Lsteps > count) return;
+            Lh = py[N] - py[L];
+            Lx = px[L] << 16;
+            Lu = pu[L] << 16;
+            Lv = pv[L] << 16;
+            if (Lh > 1) {
+                u32 inv = (u32)Lh < AFN_DIV_LUT_SIZE ? divLUT[Lh] : ((1u << 16) / (u32)Lh);
+                Ldx = (int)(inv * (u32)(px[N] - px[L]));
+                Ldu = (int)(inv * (u32)(pu[N] - pu[L]));
+                Ldv = (int)(inv * (u32)(pv[N] - pv[L]));
+            } else {
+                Ldx = 0; Ldu = 0; Ldv = 0;
+            }
+            L = N;
+        }
+
+        while (!Rh)
+        {
+            int N = R + 1;
+            if (N >= count) N = 0;
+            if (py[N] < py[R] || ++Rsteps > count) return;
+            Rh = py[N] - py[R];
+            Rx = px[R] << 16;
+            Ru = pu[R] << 16;
+            Rv = pv[R] << 16;
+            if (Rh > 1) {
+                u32 inv = (u32)Rh < AFN_DIV_LUT_SIZE ? divLUT[Rh] : ((1u << 16) / (u32)Rh);
+                Rdx = (int)(inv * (u32)(px[N] - px[R]));
+                Rdu = (int)(inv * (u32)(pu[N] - pu[R]));
+                Rdv = (int)(inv * (u32)(pv[N] - pv[R]));
+            } else {
+                Rdx = 0; Rdu = 0; Rdv = 0;
+            }
+            R = N;
+        }
+
+        h = Lh < Rh ? Lh : Rh;
+        Lh -= h;
+        Rh -= h;
+
+        while (h--)
+        {
+            if (y >= 0 && y < 160)
+            {
+                int xl = Lx >> 16, xr = Rx >> 16;
+                int ul = Lu >> 16, ur = Ru >> 16;
+                int vl = Lv >> 16, vr = Rv >> 16;
+                int tmp;
+                if (xl > xr) { tmp=xl;xl=xr;xr=tmp; tmp=ul;ul=ur;ur=tmp; tmp=vl;vl=vr;vr=tmp; }
+                if (xr >= 0 && xl < 240)
+                {
+                    if (xr > 239) xr = 239;
+                    int fullSpan = xr - xl;
+                    int du2 = 0, dv2 = 0;
+                    if (fullSpan > 0) {
+                        int rcp = (fullSpan <= 240) ? rcp_table[fullSpan] : (int)(65536 / fullSpan);
+                        du2 = ((ur - ul) * rcp) >> 8;
+                        dv2 = ((vr - vl) * rcp) >> 8;
+                    }
+                    int su = ul << 8, sv = vl << 8;
+                    if (xl < 0) { su += (du2 * (-xl)) >> 1; sv += (dv2 * (-xl)) >> 1; xl = 0; }
+                    int spanW = xr - xl;
+                    if (spanW >= 0)
+                    {
+                        u16* row = buf + y * 120;
+                        int x = xl;
+                        u16* rp = row + (x >> 1);
+                        int ti;
+                        if ((x & 1) && x <= xr) {
+                            ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
+                            u16 val = (*rp & 0x00FF) | ((u16)(palBase + tex[ti]) << 8);
+                            *rp = val;
+                            su += du2; sv += dv2; x++; rp = row + (x >> 1);
+                        }
+                        int pairCount = (xr - x + 1) >> 1;
+                        if (pairCount > 120) pairCount = 120;
+                        if (pairCount > 0) {
+                            int du4 = du2 << 1, dv4 = dv2 << 1;
+                            tex_scanline_asm(rp, pairCount, su, sv, du4, dv4,
+                                             tex, texMask, texShift, palBase, 0);
+                            su += du4 * pairCount; sv += dv4 * pairCount;
+                            x += pairCount * 2; rp += pairCount;
+                        }
+                        if (x <= xr) {
+                            ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
+                            u16 val = (*rp & 0xFF00) | (palBase + tex[ti]);
+                            *rp = val;
+                        }
+                    }
+                }
+            }
+            Lx += Ldx; Rx += Rdx;
+            Lu += Ldu; Ru += Rdu;
+            Lv += Ldv; Rv += Rdv;
             y++;
         }
     }
@@ -1917,6 +2107,39 @@ static void clip_render_poly_flat(u16* buf,
     }
 }
 
+// OpenLara-style textured polygon clip+render.
+// Z is already clamped during projection — no 3D near-plane clip needed.
+// Just 2D screen-space Sutherland-Hodgman with UV interpolation, then rasterize.
+static void clip_render_poly_tex(u16* buf,
+    const int* sx, const int* sy, const int* uIn, const int* vIn,
+    int inCount, const u8* tex, int texMask, int texShift, u8 palBase)
+{
+    int polyX[10], polyY[10], polyU[10], polyV[10];
+    int tmpX[10], tmpY[10], tmpU[10], tmpV[10];
+    int count, i;
+
+    if (inCount < 3) return;
+
+    for (i = 0; i < inCount; i++) {
+        polyX[i] = sx[i]; polyY[i] = sy[i];
+        polyU[i] = uIn[i]; polyV[i] = vIn[i];
+    }
+    count = inCount;
+
+    // Clip against all 4 screen edges, carrying UVs
+    count = clip_edge_uv(polyX, polyY, polyU, polyV, count, tmpX, tmpY, tmpU, tmpV, 0, 0, 0);     // left
+    if (count < 3) return;
+    count = clip_edge_uv(tmpX, tmpY, tmpU, tmpV, count, polyX, polyY, polyU, polyV, 0, 239, 1);   // right
+    if (count < 3) return;
+    count = clip_edge_uv(polyX, polyY, polyU, polyV, count, tmpX, tmpY, tmpU, tmpV, 1, 0, 0);     // top
+    if (count < 3) return;
+    count = clip_edge_uv(tmpX, tmpY, tmpU, tmpV, count, polyX, polyY, polyU, polyV, 1, 159, 1);   // bottom
+    if (count < 3) return;
+
+    rasterize_convex_tex(buf, polyX, polyY, polyU, polyV, count,
+                         tex, texMask, texShift, palBase);
+}
+
 // Triangle sort entry for painter's algorithm (global across all meshes)
 typedef struct { int triIdx; int depth; u8 slot; } TriSort;
 
@@ -2099,20 +2322,13 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 
             {
                 int d0 = g_vsz[vb+i0], d1 = g_vsz[vb+i1], d2 = g_vsz[vb+i2];
-                int maxD = d0 > d1 ? d0 : d1;
-                if (d2 > maxD) maxD = d2;
+                // Skip faces mostly behind camera (all raw depths negative)
+                if (g_vRawDepth[vb+i0] <= 0 && g_vRawDepth[vb+i1] <= 0 && g_vRawDepth[vb+i2] <= 0) continue;
 #ifdef AFN_DRAW_DISTANCE
                 if ((d0 + d1 + d2) / 3 > AFN_DRAW_DISTANCE) continue;
 #endif
-                {
-                    int h0 = g_vHeight[vb+i0], h1 = g_vHeight[vb+i1], h2 = g_vHeight[vb+i2];
-                    int hMin = h0, hMax = h0;
-                    if (h1 < hMin) hMin = h1; if (h1 > hMax) hMax = h1;
-                    if (h2 < hMin) hMin = h2; if (h2 > hMax) hMax = h2;
-                    if (hMax - hMin > 512) maxD += (1 << 20); // wall: large Y extent
-                }
                 g_triOrder[totalTris].triIdx = t;
-                g_triOrder[totalTris].depth = maxD;
+                g_triOrder[totalTris].depth = (d0 + d1 + d2) / 3;
                 g_triOrder[totalTris].slot = (u8)slotCount;
                 totalTris++;
             }
@@ -2154,22 +2370,13 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 
                 {
                     int d0 = g_vsz[vb+i0], d1 = g_vsz[vb+i1], d2 = g_vsz[vb+i2], d3 = g_vsz[vb+i3];
-                    int maxD = d0 > d1 ? d0 : d1;
-                    if (d2 > maxD) maxD = d2;
-                    if (d3 > maxD) maxD = d3;
+                    // Skip faces mostly behind camera (all raw depths negative)
+                    if (g_vRawDepth[vb+i0] <= 0 && g_vRawDepth[vb+i1] <= 0 && g_vRawDepth[vb+i2] <= 0 && g_vRawDepth[vb+i3] <= 0) continue;
 #ifdef AFN_DRAW_DISTANCE
                     if ((d0 + d1 + d2 + d3) / 4 > AFN_DRAW_DISTANCE) continue;
 #endif
-                    {
-                        int h0 = g_vHeight[vb+i0], h1 = g_vHeight[vb+i1], h2 = g_vHeight[vb+i2], h3 = g_vHeight[vb+i3];
-                        int hMin = h0, hMax = h0;
-                        if (h1 < hMin) hMin = h1; if (h1 > hMax) hMax = h1;
-                        if (h2 < hMin) hMin = h2; if (h2 > hMax) hMax = h2;
-                        if (h3 < hMin) hMin = h3; if (h3 > hMax) hMax = h3;
-                        if (hMax - hMin > 512) maxD += (1 << 20); // wall: large Y extent
-                    }
                     g_triOrder[totalTris].triIdx = t | 0x8000;
-                    g_triOrder[totalTris].depth = maxD;
+                    g_triOrder[totalTris].depth = (d0 + d1 + d2 + d3) / 4;
                     g_triOrder[totalTris].slot = (u8)slotCount;
                     totalTris++;
                 }
@@ -2381,19 +2588,24 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         }
         else if (ms->meshTextured && uvs && tex)
         {
-            dbg_tex_tris++;
-            rasterize_tri_tex(buf,
-                g_vsx[vb+i0], g_vsy[vb+i0], uvs[i0*2+0], uvs[i0*2+1], g_vsz[vb+i0],
-                g_vsx[vb+i1], g_vsy[vb+i1], uvs[i1*2+0], uvs[i1*2+1], g_vsz[vb+i1],
-                g_vsx[vb+i2], g_vsy[vb+i2], uvs[i2*2+0], uvs[i2*2+1], g_vsz[vb+i2],
-                tex, ms->texMask, ms->texShift, (u8)ms->texPalBase);
-            if (isQuad) {
-                dbg_tex_tris++;
-                rasterize_tri_tex(buf,
-                    g_vsx[vb+i0], g_vsy[vb+i0], uvs[i0*2+0], uvs[i0*2+1], g_vsz[vb+i0],
-                    g_vsx[vb+i2], g_vsy[vb+i2], uvs[i2*2+0], uvs[i2*2+1], g_vsz[vb+i2],
-                    g_vsx[vb+i3], g_vsy[vb+i3], uvs[i3*2+0], uvs[i3*2+1], g_vsz[vb+i3],
+            if (anyNear) {
+                // OpenLara-style: Z already clamped during projection, just 2D screen clip with UVs
+                int cx[] = {g_vsx[vb+i0], g_vsx[vb+i1], g_vsx[vb+i2], g_vsx[vb+i3]};
+                int cy[] = {g_vsy[vb+i0], g_vsy[vb+i1], g_vsy[vb+i2], g_vsy[vb+i3]};
+                int cu[] = {uvs[i0*2+0], uvs[i1*2+0], uvs[i2*2+0], isQuad ? uvs[i3*2+0] : 0};
+                int cv[] = {uvs[i0*2+1], uvs[i1*2+1], uvs[i2*2+1], isQuad ? uvs[i3*2+1] : 0};
+                clip_render_poly_tex(buf, cx, cy, cu, cv, isQuad ? 4 : 3,
                     tex, ms->texMask, ms->texShift, (u8)ms->texPalBase);
+            } else {
+                dbg_tex_tris++;
+                {
+                    int tpx[] = {g_vsx[vb+i0], g_vsx[vb+i1], g_vsx[vb+i2], g_vsx[vb+i3]};
+                    int tpy[] = {g_vsy[vb+i0], g_vsy[vb+i1], g_vsy[vb+i2], g_vsy[vb+i3]};
+                    int tpu[] = {uvs[i0*2+0], uvs[i1*2+0], uvs[i2*2+0], isQuad ? uvs[i3*2+0] : 0};
+                    int tpv[] = {uvs[i0*2+1], uvs[i1*2+1], uvs[i2*2+1], isQuad ? uvs[i3*2+1] : 0};
+                    rasterize_convex_tex(buf, tpx, tpy, tpu, tpv, isQuad ? 4 : 3,
+                        tex, ms->texMask, ms->texShift, (u8)ms->texPalBase);
+                }
             }
         }
         else
@@ -2895,6 +3107,7 @@ int main(void)
             perf_mode = (perf_mode + 1) % PERF_MODE_COUNT;
             g_coverageOn = (perf_mode == 10);
             g_ewramRender = (perf_mode == 11);
+            g_useAsmRast = (perf_mode == 12);
         }
 
         if (player_sprite_idx >= 0)
@@ -3081,7 +3294,9 @@ int main(void)
             // DMA cycle direction animation frames — per-asset animation control
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
             {
-                g_anim_frame_counter++;
+                // Frame-rate independent: scale animation step by how many 60Hz ticks elapsed
+                // e.g. at 30fps each frame = 2 ticks, at 20fps = 3 ticks
+                g_anim_frame_counter += (dbg_fps > 0) ? (60 / dbg_fps) : 1;
 
                 int ai;
                 for (ai = 0; ai < AFN_ASSET_COUNT; ai++)

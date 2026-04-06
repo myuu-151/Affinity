@@ -28,8 +28,11 @@ arm-none-eabi-gcc $AFLAGS -c $SRC/hline_fast.s -o hline_fast.o
 echo "rasterize_convex_asm.s"
 arm-none-eabi-gcc $AFLAGS -c $SRC/rasterize_convex_asm.s -o rasterize_convex_asm.o
 
+echo "rasterize_convex_tex_asm.s"
+arm-none-eabi-gcc $AFLAGS -c $SRC/rasterize_convex_tex_asm.s -o rasterize_convex_tex_asm.o
+
 echo "linking cartridge"
-arm-none-eabi-gcc $LDFLAGS main.o tex_scanline.o hline_fast.o rasterize_convex_asm.o tex_iwram.o $LIBS -o affinity.elf
+arm-none-eabi-gcc $LDFLAGS main.o tex_scanline.o hline_fast.o rasterize_convex_asm.o rasterize_convex_tex_asm.o tex_iwram.o $LIBS -o affinity.elf
 arm-none-eabi-objcopy -O binary affinity.elf affinity.gba
 gbafix affinity.gba
 cp affinity.gba ../
