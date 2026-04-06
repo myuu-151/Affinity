@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <algorithm>
+#include <utility>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -63,6 +64,39 @@ static float sTmMapPanY = 0.0f;
 static int sTmTool = 0;            // 0 = draw, 1 = erase, 2 = pick
 static int  sTmDragEdge = 0;       // 0=none, 1=top, 2=bottom, 3=left, 4=right
 
+// ---- Tilemap sprite texture cache ----
+static std::vector<unsigned int> sTmSpriteTextures; // GL texture IDs, indexed by sprite asset
+static int sTmSpriteTexCount = 0; // how many we've cached
+
+// ---- Tilemap object system ----
+enum class TmObjType { Player = 0, Enemy, NPC, Door, Chest, SavePoint, Tile, COUNT };
+static const char* sTmObjTypeNames[] = { "Player", "Enemy", "NPC", "Door", "Chest", "Save Point", "Tile" };
+static const uint32_t sTmObjTypeColors[] = {
+    0xFF44FF44, // Player - green
+    0xFF4444FF, // Enemy - red
+    0xFFFFAA44, // NPC - orange
+    0xFF44AAFF, // Door - blue
+    0xFFFFFF44, // Chest - yellow
+    0xFFFF44FF, // Save Point - magenta
+    0xFF888888, // Tile - grey
+};
+
+struct TmObject {
+    TmObjType type = TmObjType::Player;
+    int tileX = 0, tileY = 0;       // position in tile coords (for non-Tile objects)
+    char name[32] = "";
+    int spriteAssetIdx = -1;         // index into sSpriteAssets (-1 = none)
+    // Tile objects: one object covers multiple cells
+    std::vector<std::pair<int,int>> cells; // (tileX,tileY) list — only used when type==Tile
+};
+static std::vector<TmObject> sTmObjects;
+static int sTmSelectedObj = -1;      // selected object index (-1 = none)
+static int sTmDragObj = -1;          // object being dragged (-1 = none)
+static int sTmStampAsset = -1;       // sprite asset index for stamp/paint mode (-1 = off)
+static int sTmStampObj = -1;         // which Tile object we're painting into (-1 = none)
+static int sTmPlaceTX = 0, sTmPlaceTY = 0; // tile coords for popup placement
+static float sTmObjPanelW = 200.0f;  // object panel width
+
 // World size — supports up to 1024x1024 pixel tilemaps (128x128 tiles)
 static constexpr float kWorldSize = 1024.0f;   // total extent
 static constexpr float kWorldHalf = kWorldSize * 0.5f; // ±512
@@ -85,6 +119,38 @@ static float sViewportAnimTime = 0.0f; // animation timer for viewport sprite pr
 static bool  sAnimFramePlaying = false; // play button state for animation frame preview
 static float sAnimFrameTime    = 0.0f; // timer for animation frame preview playback
 static int   sAnimFrameCurrent = 0;    // current frame index during playback
+
+// Rebuild tilemap sprite texture cache from sprite assets
+static void RebuildTmSpriteTextures()
+{
+    for (auto t : sTmSpriteTextures)
+        if (t) glDeleteTextures(1, &t);
+    sTmSpriteTextures.resize(sSpriteAssets.size(), 0);
+    for (int i = 0; i < (int)sSpriteAssets.size(); i++)
+    {
+        const SpriteAsset& sa = sSpriteAssets[i];
+        if (sa.frames.empty()) { sTmSpriteTextures[i] = 0; continue; }
+        const SpriteFrame& frame = sa.frames[0];
+        int fSize = frame.width;
+        std::vector<uint32_t> rgba(fSize * fSize, 0);
+        for (int py = 0; py < fSize; py++)
+            for (int px = 0; px < fSize; px++)
+            {
+                uint8_t palIdx = frame.pixels[py * kMaxFrameSize + px];
+                if (palIdx == 0) continue;
+                uint32_t c = sa.palette[palIdx & 0xF];
+                rgba[py * fSize + px] = c | 0xFF000000;
+            }
+        unsigned int tex = 0;
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fSize, fSize, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        sTmSpriteTextures[i] = tex;
+    }
+    sTmSpriteTexCount = (int)sSpriteAssets.size();
+}
 
 // Per-asset directional sprite images (runtime loaded data)
 struct AssetDirSprite
@@ -729,6 +795,43 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "[Palette]\n");
     for (int i = 0; i < 16; i++)
         fprintf(f, "color=%d,%u\n", i, sPalette[i]);
+    fprintf(f, "\n");
+
+    // Tilemap tab
+    fprintf(f, "[Tilemap]\n");
+    fprintf(f, "width=%d\n", sTilemapData.floor.width);
+    fprintf(f, "height=%d\n", sTilemapData.floor.height);
+    fprintf(f, "zoom=%.4f\n", sTmMapZoom);
+    fprintf(f, "panX=%.2f\n", sTmMapPanX);
+    fprintf(f, "panY=%.2f\n", sTmMapPanY);
+    fprintf(f, "panelW=%.1f\n", sTmObjPanelW);
+    // Tile indices
+    fprintf(f, "tiles=");
+    for (int i = 0; i < (int)sTilemapData.floor.tileIndices.size(); i++)
+    {
+        if (i > 0) fprintf(f, ",");
+        fprintf(f, "%d", sTilemapData.floor.tileIndices[i]);
+    }
+    fprintf(f, "\n");
+    // Objects
+    fprintf(f, "objCount=%d\n", (int)sTmObjects.size());
+    for (int i = 0; i < (int)sTmObjects.size(); i++)
+    {
+        const TmObject& obj = sTmObjects[i];
+        fprintf(f, "obj=%d,%d,%d,%d,%s\n",
+            (int)obj.type, obj.tileX, obj.tileY, obj.spriteAssetIdx, obj.name);
+        // Save cells for Tile objects
+        if (obj.type == TmObjType::Tile && !obj.cells.empty())
+        {
+            fprintf(f, "cells=");
+            for (int c = 0; c < (int)obj.cells.size(); c++)
+            {
+                if (c > 0) fprintf(f, ",");
+                fprintf(f, "%d:%d", obj.cells[c].first, obj.cells[c].second);
+            }
+            fprintf(f, "\n");
+        }
+    }
 
     fclose(f);
     sProjectPath = path;
@@ -742,6 +845,15 @@ static bool LoadProject(const std::string& path)
     if (!f) return false;
 
     // Reset state before loading
+    sTmObjects.clear();
+    sTmSelectedObj = -1;
+    sTmDragObj = -1;
+    sTmStampAsset = -1;
+    sTmStampObj = -1;
+    sTilemapDataInit = false;
+    sTilemapData.floor.width = 1;
+    sTilemapData.floor.height = 1;
+    sTilemapData.floor.tileIndices.assign(1, 0);
     sSpriteCount = 0;
     sSelectedSprite = -1;
     sSelectedObjType = SelectedObjType::None;
@@ -1038,7 +1150,70 @@ static bool LoadProject(const std::string& path)
             if (sscanf(line, "color=%d,%u", &idx, &uval) == 2 && idx >= 0 && idx < 16)
                 sPalette[idx] = uval;
         }
+        else if (strcmp(section, "Tilemap") == 0)
+        {
+            if (sscanf(line, "width=%d", &ival) == 1) sTilemapData.floor.width = ival;
+            else if (sscanf(line, "height=%d", &ival) == 1)
+            {
+                sTilemapData.floor.height = ival;
+                sTilemapData.floor.tileIndices.resize(
+                    sTilemapData.floor.width * sTilemapData.floor.height, 0);
+            }
+            else if (sscanf(line, "zoom=%f", &fval) == 1) sTmMapZoom = fval;
+            else if (sscanf(line, "panX=%f", &fval) == 1) sTmMapPanX = fval;
+            else if (sscanf(line, "panY=%f", &fval) == 1) sTmMapPanY = fval;
+            else if (sscanf(line, "panelW=%f", &fval) == 1) sTmObjPanelW = fval;
+            else if (strncmp(line, "tiles=", 6) == 0)
+            {
+                const char* p = line + 6;
+                int total = sTilemapData.floor.width * sTilemapData.floor.height;
+                for (int i = 0; i < total && *p; i++)
+                {
+                    sTilemapData.floor.tileIndices[i] = (uint16_t)atoi(p);
+                    const char* comma = strchr(p, ',');
+                    if (comma) p = comma + 1; else break;
+                }
+            }
+            else if (sscanf(line, "objCount=%d", &ival) == 1)
+            {
+                sTmObjects.clear();
+                sTmObjects.reserve(ival);
+            }
+            else if (strncmp(line, "obj=", 4) == 0)
+            {
+                TmObject obj;
+                int typeInt = 0;
+                // Parse: type,tileX,tileY,spriteAssetIdx,name
+                char nameBuf[32] = {};
+                if (sscanf(line + 4, "%d,%d,%d,%d,%31[^\n]",
+                    &typeInt, &obj.tileX, &obj.tileY, &obj.spriteAssetIdx, nameBuf) >= 4)
+                {
+                    obj.type = (TmObjType)typeInt;
+                    strncpy(obj.name, nameBuf, sizeof(obj.name) - 1);
+                    sTmObjects.push_back(obj);
+                }
+            }
+            else if (strncmp(line, "cells=", 6) == 0 && !sTmObjects.empty())
+            {
+                // Parse cells for the last-added Tile object: "x:y,x:y,..."
+                TmObject& lastObj = sTmObjects.back();
+                const char* p = line + 6;
+                while (*p)
+                {
+                    int cx, cy;
+                    if (sscanf(p, "%d:%d", &cx, &cy) == 2)
+                        lastObj.cells.push_back({cx, cy});
+                    const char* comma = strchr(p, ',');
+                    if (!comma) break;
+                    p = comma + 1;
+                }
+            }
+        }
     }
+
+    // Mark tilemap as initialized if we loaded data
+    if (sTilemapData.floor.width > 0 && sTilemapData.floor.height > 0)
+        sTilemapDataInit = true;
 
     fclose(f);
     sProjectPath = path;
@@ -3440,236 +3615,155 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
     TilemapLayer& tm = sTilemapData.floor;
     int tileCount = (int)ts.tiles.size();
 
-    // Layout: left panel (tile editor + tileset), right panel (tilemap grid + palette)
-    float leftW = size.x * 0.35f;
-    float rightW = size.x - leftW;
+    // Rebuild sprite textures if asset count changed
+    if ((int)sSpriteAssets.size() != sTmSpriteTexCount)
+        RebuildTmSpriteTextures();
 
     const ImGuiWindowFlags panelFlags =
         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
         ImGuiWindowFlags_NoTitleBar;
 
-    // ======== LEFT PANEL: tile pixel editor + tileset grid ========
+    float objPanelW = sTmObjPanelW;
+
+    // ======== LEFT PANEL: Objects ========
     ImGui::SetNextWindowPos(pos);
-    ImGui::SetNextWindowSize(ImVec2(leftW, size.y));
+    ImGui::SetNextWindowSize(ImVec2(objPanelW, size.y));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.25f, 0.30f, 1.0f));
-    ImGui::Begin("##TmLeft", nullptr, panelFlags);
+    ImGui::Begin("##TmObjPanel", nullptr, panelFlags);
     {
-        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Objects");
 
-        // --- Palette row at top ---
-        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Palette");
+        // Add object button + type selector
+        static int sAddObjType = 0;
+        ImGui::PushItemWidth(objPanelW - 80);
+        ImGui::Combo("##ObjType", &sAddObjType, sTmObjTypeNames, (int)TmObjType::COUNT);
+        ImGui::PopItemWidth();
         ImGui::SameLine();
-        ImGui::TextDisabled("(click to select, double-click to edit)");
+        if (ImGui::Button("Add"))
         {
-            ImVec2 cursor = ImGui::GetCursorScreenPos();
-            float sw = std::max(14.0f, (leftW - 24.0f) / 16.0f);
-            for (int i = 0; i < 16; i++)
-            {
-                ImVec2 sp(cursor.x + i * sw, cursor.y);
-                DrawColorBox(dl, sp, ImVec2(sw - 1, sw - 1),
-                    ts.palette[i], i == sTmPalColor);
-            }
-            ImGui::SetCursorScreenPos(cursor);
-            ImGui::InvisibleButton("##TmPalRow", ImVec2(16 * sw, sw));
-            if (ImGui::IsItemClicked())
-            {
-                float mx = ImGui::GetMousePos().x - cursor.x;
-                sTmPalColor = std::clamp((int)(mx / sw), 0, 15);
-            }
-            // Double-click to open color picker
-            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
-            {
-                float mx = ImGui::GetMousePos().x - cursor.x;
-                sTmPalColor = std::clamp((int)(mx / sw), 0, 15);
-                ImGui::OpenPopup("##TmPalEdit");
-            }
-            ImGui::SetCursorScreenPos(ImVec2(cursor.x, cursor.y + sw + 4));
-        }
-
-        // Palette color picker popup
-        if (ImGui::BeginPopup("##TmPalEdit"))
-        {
-            uint32_t c = ts.palette[sTmPalColor];
-            float col[3] = {
-                ((c >>  0) & 0xFF) / 255.0f,
-                ((c >>  8) & 0xFF) / 255.0f,
-                ((c >> 16) & 0xFF) / 255.0f
-            };
-            if (ImGui::ColorPicker3("##cp", col, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview))
-            {
-                uint8_t r = (uint8_t)(col[0] * 255.0f);
-                uint8_t g = (uint8_t)(col[1] * 255.0f);
-                uint8_t b = (uint8_t)(col[2] * 255.0f);
-                ts.palette[sTmPalColor] = 0xFF000000 | (b << 16) | (g << 8) | r;
-            }
-            ImGui::EndPopup();
+            TmObject obj;
+            obj.type = (TmObjType)sAddObjType;
+            obj.tileX = tm.width / 2;
+            obj.tileY = tm.height / 2;
+            snprintf(obj.name, sizeof(obj.name), "%s %d",
+                sTmObjTypeNames[sAddObjType], (int)sTmObjects.size());
+            sTmObjects.push_back(obj);
+            sTmSelectedObj = (int)sTmObjects.size() - 1;
         }
 
         ImGui::Separator();
 
-        // --- Tile pixel editor ---
-        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Tile Editor");
-        ImGui::SameLine();
-        ImGui::Text("(Tile %d)", sTmSelectedTile);
-
-        if (sTmSelectedTile >= 0 && sTmSelectedTile < tileCount)
+        // Object list
+        ImGui::BeginChild("##ObjList", ImVec2(0, size.y * 0.45f), true);
+        for (int i = 0; i < (int)sTmObjects.size(); i++)
         {
-            Tile8& tile = ts.tiles[sTmSelectedTile];
-            ImVec2 cursor = ImGui::GetCursorScreenPos();
-            float pixSz = std::min((leftW - 24.0f) / (float)kTileSize, size.y * 0.3f / (float)kTileSize);
-            pixSz = std::max(pixSz, 8.0f);
+            TmObject& obj = sTmObjects[i];
+            uint32_t col = sTmObjTypeColors[(int)obj.type];
+            ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(col));
+            bool selected = (i == sTmSelectedObj);
+            char label[64];
+            snprintf(label, sizeof(label), "%s##obj%d", obj.name, i);
+            if (ImGui::Selectable(label, selected))
+                sTmSelectedObj = i;
+            ImGui::PopStyleColor();
+        }
+        ImGui::EndChild();
 
-            for (int py = 0; py < kTileSize; py++)
+        ImGui::Separator();
+
+        // Selected object properties
+        if (sTmSelectedObj >= 0 && sTmSelectedObj < (int)sTmObjects.size())
+        {
+            TmObject& obj = sTmObjects[sTmSelectedObj];
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Properties");
+
+            ImGui::PushItemWidth(objPanelW - 16);
+            ImGui::InputText("Name", obj.name, sizeof(obj.name));
+
+            int typeInt = (int)obj.type;
+            if (ImGui::Combo("Type", &typeInt, sTmObjTypeNames, (int)TmObjType::COUNT))
+                obj.type = (TmObjType)typeInt;
+
+            if (obj.type == TmObjType::Tile)
             {
-                for (int px = 0; px < kTileSize; px++)
+                ImGui::Text("Cells: %d", (int)obj.cells.size());
+                if (ImGui::Button("Paint"))
                 {
-                    uint8_t ci = tile.pixels[py * kTileSize + px];
-                    uint32_t col = ts.palette[ci & 0x0F];
-                    ImVec2 p0(cursor.x + px * pixSz, cursor.y + py * pixSz);
-                    ImVec2 p1(p0.x + pixSz, p0.y + pixSz);
-                    dl->AddRectFilled(p0, p1, col);
-                    dl->AddRect(p0, p1, 0x30FFFFFF);
+                    sTmStampAsset = obj.spriteAssetIdx;
+                    sTmStampObj = sTmSelectedObj;
                 }
+                ImGui::SameLine();
             }
-
-            float gridSz = kTileSize * pixSz;
-            ImGui::SetCursorScreenPos(cursor);
-            ImGui::InvisibleButton("##TilePixEdit", ImVec2(gridSz, gridSz));
-
-            // Paint on click/drag
-            if (ImGui::IsItemActive() && ImGui::IsMouseDown(0))
+            else
             {
-                ImVec2 mouse = ImGui::GetMousePos();
-                int px = (int)((mouse.x - cursor.x) / pixSz);
-                int py = (int)((mouse.y - cursor.y) / pixSz);
-                if (px >= 0 && px < kTileSize && py >= 0 && py < kTileSize)
-                    tile.pixels[py * kTileSize + px] = (uint8_t)sTmPalColor;
+                ImGui::DragInt("Tile X", &obj.tileX, 0.5f, 0, tm.width - 1);
+                ImGui::DragInt("Tile Y", &obj.tileY, 0.5f, 0, tm.height - 1);
             }
-            // Right-click to pick color
-            if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(1))
+            ImGui::PopItemWidth();
+
+            ImGui::Spacing();
+            if (ImGui::Button("Delete"))
             {
-                ImVec2 mouse = ImGui::GetMousePos();
-                int px = (int)((mouse.x - cursor.x) / pixSz);
-                int py = (int)((mouse.y - cursor.y) / pixSz);
-                if (px >= 0 && px < kTileSize && py >= 0 && py < kTileSize)
-                    sTmPalColor = tile.pixels[py * kTileSize + px] & 0x0F;
+                sTmObjects.erase(sTmObjects.begin() + sTmSelectedObj);
+                sTmSelectedObj = std::min(sTmSelectedObj, (int)sTmObjects.size() - 1);
             }
-
-            ImGui::SetCursorScreenPos(ImVec2(cursor.x, cursor.y + gridSz + 4));
-        }
-
-        // --- Fill / Clear buttons ---
-        if (ImGui::Button("Fill Tile"))
-        {
-            if (sTmSelectedTile >= 0 && sTmSelectedTile < tileCount)
-                memset(ts.tiles[sTmSelectedTile].pixels, (uint8_t)sTmPalColor, kTileSize * kTileSize);
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Clear Tile"))
-        {
-            if (sTmSelectedTile >= 0 && sTmSelectedTile < tileCount)
-                memset(ts.tiles[sTmSelectedTile].pixels, 0, kTileSize * kTileSize);
-        }
-
-        ImGui::Separator();
-
-        // --- Tileset grid (select which tile to edit / place) ---
-        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Tileset");
-        ImGui::SameLine();
-        ImGui::Text("(%d tiles)", tileCount);
-        {
-            ImVec2 cursor = ImGui::GetCursorScreenPos();
-            int cols = kTilesetCols;
-            float tSz = std::max(8.0f, (leftW - 24.0f) / (float)cols);
-            int rows = (tileCount + cols - 1) / cols;
-
-            for (int i = 0; i < tileCount; i++)
-            {
-                int r = i / cols, c = i % cols;
-                ImVec2 p0(cursor.x + c * tSz, cursor.y + r * tSz);
-                ImVec2 p1(p0.x + tSz, p0.y + tSz);
-
-                // Draw tile thumbnail: sample 4 corners for a quick preview
-                const Tile8& tile = ts.tiles[i];
-                uint32_t c00 = ts.palette[tile.pixels[0] & 0xF];
-                uint32_t c10 = ts.palette[tile.pixels[kTileSize - 1] & 0xF];
-                uint32_t c01 = ts.palette[tile.pixels[(kTileSize - 1) * kTileSize] & 0xF];
-                uint32_t c11 = ts.palette[tile.pixels[kTileSize * kTileSize - 1] & 0xF];
-                // Approximate with top-left and bottom-right halves
-                ImVec2 mid(p0.x + tSz * 0.5f, p0.y + tSz * 0.5f);
-                dl->AddRectFilled(p0, mid, c00);
-                dl->AddRectFilled(ImVec2(mid.x, p0.y), ImVec2(p1.x, mid.y), c10);
-                dl->AddRectFilled(ImVec2(p0.x, mid.y), ImVec2(mid.x, p1.y), c01);
-                dl->AddRectFilled(mid, p1, c11);
-
-                dl->AddRect(p0, p1, 0x30FFFFFF);
-                if (i == sTmSelectedTile)
-                    dl->AddRect(p0, p1, 0xFFFFFFFF, 0.0f, 0, 2.0f);
-            }
-
-            float gridH = rows * tSz;
-            ImGui::SetCursorScreenPos(cursor);
-            ImGui::InvisibleButton("##TmTilesetGrid", ImVec2(cols * tSz, std::max(gridH, 1.0f)));
-            if (ImGui::IsItemClicked())
-            {
-                ImVec2 mouse = ImGui::GetMousePos();
-                int c = (int)((mouse.x - cursor.x) / tSz);
-                int r = (int)((mouse.y - cursor.y) / tSz);
-                c = std::clamp(c, 0, cols - 1);
-                r = std::clamp(r, 0, rows - 1);
-                int idx = r * cols + c;
-                if (idx < tileCount) sTmSelectedTile = idx;
-            }
-        }
-
-        // Add/remove tile buttons
-        if (ImGui::Button("+ Tile"))
-        {
-            if (tileCount < 256)
-            {
-                ts.tiles.push_back(Tile8{});
-                memset(ts.tiles.back().pixels, 0, sizeof(Tile8::pixels));
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("- Tile") && tileCount > 1)
-        {
-            ts.tiles.pop_back();
-            if (sTmSelectedTile >= (int)ts.tiles.size())
-                sTmSelectedTile = (int)ts.tiles.size() - 1;
         }
     }
     ImGui::End();
     ImGui::PopStyleColor(2);
 
+    // ======== SPLITTER between object panel and grid ========
+    {
+        float splitterW = 6.0f;
+        float splitterX = pos.x + objPanelW - splitterW * 0.5f;
+        ImVec2 splitterMin(splitterX, pos.y);
+        ImVec2 splitterMax(splitterX + splitterW, pos.y + size.y);
+        ImVec2 mouse = ImGui::GetMousePos();
+        bool hovered = (mouse.x >= splitterMin.x && mouse.x <= splitterMax.x &&
+                        mouse.y >= splitterMin.y && mouse.y <= splitterMax.y);
+        static bool sDraggingSplitter = false;
+
+        if (hovered || sDraggingSplitter)
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+
+        if (hovered && ImGui::IsMouseClicked(0))
+            sDraggingSplitter = true;
+
+        if (sDraggingSplitter)
+        {
+            if (ImGui::IsMouseDown(0))
+            {
+                sTmObjPanelW += ImGui::GetIO().MouseDelta.x;
+                sTmObjPanelW = std::clamp(sTmObjPanelW, 120.0f, size.x * 0.5f);
+                objPanelW = sTmObjPanelW;
+            }
+            else
+                sDraggingSplitter = false;
+        }
+
+        // Draw splitter line
+        ImDrawList* fgDl = ImGui::GetForegroundDrawList();
+        uint32_t splCol = (hovered || sDraggingSplitter) ? 0xFF44AAFF : 0x40FFFFFF;
+        fgDl->AddLine(ImVec2(pos.x + objPanelW, pos.y),
+                       ImVec2(pos.x + objPanelW, pos.y + size.y), splCol, 2.0f);
+    }
+
     // ======== RIGHT PANEL: tilemap grid with draggable edges ========
-    ImGui::SetNextWindowPos(ImVec2(pos.x + leftW, pos.y));
-    ImGui::SetNextWindowSize(ImVec2(rightW, size.y));
+    float gridPosX = pos.x + objPanelW;
+    float gridW2 = size.x - objPanelW;
+    ImGui::SetNextWindowPos(ImVec2(gridPosX, pos.y));
+    ImGui::SetNextWindowSize(ImVec2(gridW2, size.y));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.10f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.25f, 0.30f, 1.0f));
     ImGui::Begin("##TmRight", nullptr, panelFlags | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     {
         ImDrawList* dl = ImGui::GetWindowDrawList();
 
-        // Toolbar
-        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Tilemap");
-        ImGui::SameLine();
-        ImGui::Text("(%dx%d)", tm.width, tm.height);
-        ImGui::SameLine(0, 20);
-        ImGui::RadioButton("Draw", &sTmTool, 0); ImGui::SameLine();
-        ImGui::RadioButton("Erase", &sTmTool, 1); ImGui::SameLine();
-        ImGui::RadioButton("Pick", &sTmTool, 2);
-        ImGui::SameLine(0, 20);
-        if (ImGui::Button("Clear Map"))
-            std::fill(tm.tileIndices.begin(), tm.tileIndices.end(), (uint16_t)0);
-
-        ImGui::Separator();
-
-        ImVec2 cursor = ImGui::GetCursorScreenPos();
-        float availW = rightW - 16.0f;
-        float availH = size.y - (cursor.y - pos.y) - 8.0f;
+        ImVec2 cursor = ImVec2(gridPosX, pos.y);
+        float availW = gridW2 - 16.0f;
+        float availH = size.y - 8.0f;
 
         // Zoom with scroll wheel
         if (ImGui::IsWindowHovered())
@@ -3708,11 +3802,11 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
 
         // Clip to panel
         ImVec2 clipMin = cursor;
-        ImVec2 clipMax(pos.x + leftW + rightW, pos.y + size.y);
+        ImVec2 clipMax(pos.x + size.x, pos.y + size.y);
         dl->PushClipRect(clipMin, clipMax, true);
 
-        // Draw tilemap cells as beveled boxes with white border
-        const float bevel = std::max(2.0f, cellSz * 0.06f);
+        // Draw tilemap cells — match window bg, subtle grey grid lines
+        uint32_t gridLineCol = 0x40FFFFFF;   // same as Frame Editor
         for (int ty = 0; ty < tm.height; ty++)
         {
             for (int tx = 0; tx < tm.width; tx++)
@@ -3727,24 +3821,26 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     y1 < clipMin.y || y0 > clipMax.y)
                     continue;
 
-                int ti = tm.tileIndices[ty * tm.width + tx];
-                uint32_t fillCol = 0xFF1A1A1A;
 
+                // Always draw dark grey background first
+                dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), 0xFF1A1A1A);
+
+                // Draw tile content on top (skip transparent/index-0 pixels)
+                int ti = tm.tileIndices[ty * tm.width + tx];
                 if (ti >= 0 && ti < (int)ts.tiles.size())
                 {
                     const Tile8& tile = ts.tiles[ti];
-                    float pxSz = (cellSz - bevel * 2) / (float)kTileSize;
+                    float pxSz = cellSz / (float)kTileSize;
                     if (pxSz >= 2.0f)
                     {
-                        // Per-pixel rendering inside the bevel
-                        float ix0 = x0 + bevel, iy0 = y0 + bevel;
                         for (int py = 0; py < kTileSize; py++)
                         {
                             for (int px = 0; px < kTileSize; px++)
                             {
                                 uint8_t ci = tile.pixels[py * kTileSize + px];
+                                if (ci == 0) continue; // transparent
                                 uint32_t col = ts.palette[ci & 0xF];
-                                ImVec2 pp0(ix0 + px * pxSz, iy0 + py * pxSz);
+                                ImVec2 pp0(x0 + px * pxSz, y0 + py * pxSz);
                                 ImVec2 pp1(pp0.x + pxSz, pp0.y + pxSz);
                                 dl->AddRectFilled(pp0, pp1, col);
                             }
@@ -3752,36 +3848,52 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     }
                     else
                     {
-                        // Zoomed out: dominant color fill
                         uint8_t ci = tile.pixels[4 * kTileSize + 4];
-                        fillCol = ts.palette[ci & 0xF];
-                        dl->AddRectFilled(ImVec2(x0 + bevel, y0 + bevel),
-                            ImVec2(x1 - bevel, y1 - bevel), fillCol);
+                        if (ci != 0)
+                            dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ts.palette[ci & 0xF]);
                     }
                 }
-                else
+
+                // Draw sprite asset frame if any object with a sprite is on this cell
+                for (const auto& obj : sTmObjects)
                 {
-                    dl->AddRectFilled(ImVec2(x0 + bevel, y0 + bevel),
-                        ImVec2(x1 - bevel, y1 - bevel), fillCol);
+                    // Tile objects use cells list; other objects use tileX/tileY
+                    if (obj.type == TmObjType::Tile)
+                    {
+                        if (std::find(obj.cells.begin(), obj.cells.end(), std::make_pair(tx, ty)) == obj.cells.end())
+                            continue;
+                    }
+                    else
+                    {
+                        if (obj.tileX != tx || obj.tileY != ty) continue;
+                    }
+                    if (obj.spriteAssetIdx < 0 || obj.spriteAssetIdx >= (int)sSpriteAssets.size()) continue;
+                    // Use cached GL texture — one quad per cell
+                    if (obj.spriteAssetIdx < (int)sTmSpriteTextures.size() && sTmSpriteTextures[obj.spriteAssetIdx])
+                    {
+                        dl->AddImage((ImTextureID)(uintptr_t)sTmSpriteTextures[obj.spriteAssetIdx],
+                            ImVec2(x0, y0), ImVec2(x1, y1));
+                    }
+                    else
+                    {
+                        // Fallback: colored label if no texture
+                        uint32_t col = sTmObjTypeColors[(int)obj.type];
+                        dl->AddRectFilled(ImVec2(x0 + 2, y0 + 2), ImVec2(x1 - 2, y1 - 2),
+                            (col & 0x00FFFFFF) | 0x40000000);
+                        if (cellSz >= 20.0f)
+                        {
+                            const char* lbl = obj.name[0] ? obj.name : "?";
+                            ImVec2 tsz = ImGui::CalcTextSize(lbl);
+                            dl->AddText(ImVec2(x0 + (cellSz - tsz.x) * 0.5f, y0 + (cellSz - tsz.y) * 0.5f), col, lbl);
+                        }
+                    }
+                    break;
                 }
 
-                // Beveled edge: light top-left, dark bottom-right
-                uint32_t lightEdge = 0x60FFFFFF;
-                uint32_t darkEdge  = 0x60000000;
-                // Top edge (light)
-                dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y0 + bevel), lightEdge);
-                // Left edge (light)
-                dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + bevel, y1), lightEdge);
-                // Bottom edge (dark)
-                dl->AddRectFilled(ImVec2(x0, y1 - bevel), ImVec2(x1, y1), darkEdge);
-                // Right edge (dark)
-                dl->AddRectFilled(ImVec2(x1 - bevel, y0), ImVec2(x1, y1), darkEdge);
-
-                // White border
-                dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), 0xFFFFFFFF);
+                if (sEditorMode != EditorMode::Play)
+                    dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), gridLineCol);
             }
         }
-
         // --- Draggable edges to expand/shrink the tilemap ---
         // Edge hit zones (wider than visual for easy grabbing)
         float grab = std::max(8.0f, cellSz * 0.3f);
@@ -3794,9 +3906,9 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
         bool inPanel = (mouse.x >= clipMin.x && mouse.x <= clipMax.x &&
                         mouse.y >= clipMin.y && mouse.y <= clipMax.y);
 
-        // Detect which edge the mouse is near (for cursor + drag start)
+        // Detect which edge the mouse is near (for cursor + drag start) — edit mode only
         int hoverEdge = 0;
-        if (inPanel && sTmDragEdge == 0)
+        if (sEditorMode != EditorMode::Play && inPanel && sTmDragEdge == 0)
         {
             // Top edge zone
             if (mouse.y >= edgeTop - grab && mouse.y <= edgeTop + grab &&
@@ -3816,21 +3928,68 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 hoverEdge = 4;
         }
 
-        // Set cursor shape
-        if (hoverEdge == 1 || hoverEdge == 2 || sTmDragEdge == 1 || sTmDragEdge == 2)
-            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
-        else if (hoverEdge == 3 || hoverEdge == 4 || sTmDragEdge == 3 || sTmDragEdge == 4)
-            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        // Set cursor shape + highlight edges (edit mode only)
+        if (sEditorMode != EditorMode::Play)
+        {
+            if (hoverEdge == 1 || hoverEdge == 2 || sTmDragEdge == 1 || sTmDragEdge == 2)
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+            else if (hoverEdge == 3 || hoverEdge == 4 || sTmDragEdge == 3 || sTmDragEdge == 4)
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
 
-        // Highlight hovered edge
-        if (hoverEdge == 1 || sTmDragEdge == 1) // top
-            dl->AddLine(ImVec2(edgeLeft, edgeTop), ImVec2(edgeRight, edgeTop), 0xFF44AAFF, 3.0f);
-        if (hoverEdge == 2 || sTmDragEdge == 2) // bottom
-            dl->AddLine(ImVec2(edgeLeft, edgeBottom), ImVec2(edgeRight, edgeBottom), 0xFF44AAFF, 3.0f);
-        if (hoverEdge == 3 || sTmDragEdge == 3) // left
-            dl->AddLine(ImVec2(edgeLeft, edgeTop), ImVec2(edgeLeft, edgeBottom), 0xFF44AAFF, 3.0f);
-        if (hoverEdge == 4 || sTmDragEdge == 4) // right
-            dl->AddLine(ImVec2(edgeRight, edgeTop), ImVec2(edgeRight, edgeBottom), 0xFF44AAFF, 3.0f);
+            if (hoverEdge == 1 || sTmDragEdge == 1)
+                dl->AddLine(ImVec2(edgeLeft, edgeTop), ImVec2(edgeRight, edgeTop), 0xFF44AAFF, 3.0f);
+            if (hoverEdge == 2 || sTmDragEdge == 2)
+                dl->AddLine(ImVec2(edgeLeft, edgeBottom), ImVec2(edgeRight, edgeBottom), 0xFF44AAFF, 3.0f);
+            if (hoverEdge == 3 || sTmDragEdge == 3)
+                dl->AddLine(ImVec2(edgeLeft, edgeTop), ImVec2(edgeLeft, edgeBottom), 0xFF44AAFF, 3.0f);
+            if (hoverEdge == 4 || sTmDragEdge == 4)
+                dl->AddLine(ImVec2(edgeRight, edgeTop), ImVec2(edgeRight, edgeBottom), 0xFF44AAFF, 3.0f);
+        }
+
+        // Draw non-Tile objects on the grid (diamond markers — rendered above tiles, edit mode only)
+        if (sEditorMode != EditorMode::Play)
+        for (int i = 0; i < (int)sTmObjects.size(); i++)
+        {
+            const TmObject& obj = sTmObjects[i];
+            if (obj.type == TmObjType::Tile) continue; // tiles already rendered in cells
+
+            float objX = ox + obj.tileX * cellSz;
+            float objY = oy + obj.tileY * cellSz;
+            uint32_t col = sTmObjTypeColors[(int)obj.type];
+            bool isSel = (i == sTmSelectedObj);
+
+            // Diamond marker centered in the tile
+            float cx = objX + cellSz * 0.5f;
+            float cy = objY + cellSz * 0.5f;
+            float r = cellSz * 0.35f;
+            ImVec2 diamond[4] = {
+                ImVec2(cx, cy - r), ImVec2(cx + r, cy),
+                ImVec2(cx, cy + r), ImVec2(cx - r, cy)
+            };
+            dl->AddConvexPolyFilled(diamond, 4, (col & 0x00FFFFFF) | 0x80000000);
+            dl->AddPolyline(diamond, 4, isSel ? 0xFFFFFFFF : col, ImDrawFlags_Closed, isSel ? 2.5f : 1.5f);
+
+            // Label
+            if (cellSz >= 20.0f)
+            {
+                const char* lbl = obj.name[0] ? obj.name : sTmObjTypeNames[(int)obj.type];
+                ImVec2 textSz = ImGui::CalcTextSize(lbl);
+                dl->AddText(ImVec2(cx - textSz.x * 0.5f, cy + r + 2), col, lbl);
+            }
+        }
+
+        // Stamp mode indicator (edit mode only)
+        if (sEditorMode != EditorMode::Play && sTmStampAsset >= 0 && sTmStampAsset < (int)sSpriteAssets.size())
+        {
+            char stampLbl[64];
+            snprintf(stampLbl, sizeof(stampLbl), "Painting: %s  (Esc to stop, RMB erase)",
+                sSpriteAssets[sTmStampAsset].name.c_str());
+            ImVec2 txtSz = ImGui::CalcTextSize(stampLbl);
+            float lx = clipMin.x + (clipMax.x - clipMin.x - txtSz.x) * 0.5f;
+            float ly = clipMax.y - txtSz.y - 8;
+            dl->AddRectFilled(ImVec2(lx - 6, ly - 2), ImVec2(lx + txtSz.x + 6, ly + txtSz.y + 2), 0xCC000000);
+            dl->AddText(ImVec2(lx, ly), 0xFF44AAFF, stampLbl);
+        }
 
         dl->PopClipRect();
 
@@ -3939,21 +4098,122 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             sTmDragEdge = 0;
         }
 
-        // --- Normal tile painting (only when not dragging an edge) ---
-        if (sTmDragEdge == 0 && ImGui::IsItemActive() && ImGui::IsMouseDown(0))
+        // --- Stamp mode / Object dragging / Tile popup ---
+        bool popupOpen = ImGui::IsPopupOpen("##TmPlaceObj");
+        if (sTmDragEdge == 0 && !popupOpen)
         {
-            int tx = (int)((mouse.x - ox) / cellSz);
-            int ty = (int)((mouse.y - oy) / cellSz);
-            if (tx >= 0 && tx < tm.width && ty >= 0 && ty < tm.height)
+            int hoverTX = (int)std::floor((mouse.x - ox) / cellSz);
+            int hoverTY = (int)std::floor((mouse.y - oy) / cellSz);
+            bool inGrid = (hoverTX >= 0 && hoverTX < tm.width &&
+                           hoverTY >= 0 && hoverTY < tm.height);
+
+            // Cancel stamp mode with Escape
+            if (sTmStampAsset >= 0 && ImGui::IsKeyPressed(ImGuiKey_Escape))
             {
-                int idx = ty * tm.width + tx;
-                if (sTmTool == 0)
-                    tm.tileIndices[idx] = (uint16_t)sTmSelectedTile;
-                else if (sTmTool == 1)
-                    tm.tileIndices[idx] = 0;
-                else if (sTmTool == 2)
-                    sTmSelectedTile = tm.tileIndices[idx];
+                sTmStampAsset = -1;
+                sTmStampObj = -1;
             }
+
+            // Stamp paint mode: left-click adds cells, right-click removes cells
+            if (sTmStampAsset >= 0 && sTmStampObj >= 0 && sTmStampObj < (int)sTmObjects.size() && inGrid)
+            {
+                TmObject& tileObj = sTmObjects[sTmStampObj];
+                auto cellIt = std::find(tileObj.cells.begin(), tileObj.cells.end(), std::make_pair(hoverTX, hoverTY));
+                if (ImGui::IsMouseDown(0) && ImGui::IsItemActive())
+                {
+                    // Add cell if not already present
+                    if (cellIt == tileObj.cells.end())
+                        tileObj.cells.push_back({hoverTX, hoverTY});
+                }
+                else if (ImGui::IsMouseDown(1))
+                {
+                    // Remove cell
+                    if (cellIt != tileObj.cells.end())
+                        tileObj.cells.erase(cellIt);
+                }
+            }
+
+            // Show crosshair cursor in stamp mode
+            if (sTmStampAsset >= 0)
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+            // Check if mouse is over any object (for click-to-grab)
+            int hoveredObj = -1;
+            if (sTmStampAsset < 0 && inGrid && sTmDragObj < 0)
+            {
+                for (int i = (int)sTmObjects.size() - 1; i >= 0; i--)
+                {
+                    if (sTmObjects[i].type == TmObjType::Tile) continue; // tiles aren't dragged
+                    float objCX = ox + sTmObjects[i].tileX * cellSz + cellSz * 0.5f;
+                    float objCY = oy + sTmObjects[i].tileY * cellSz + cellSz * 0.5f;
+                    float r = cellSz * 0.4f;
+                    float dx = mouse.x - objCX, dy = mouse.y - objCY;
+                    if (dx * dx + dy * dy <= r * r) { hoveredObj = i; break; }
+                }
+            }
+
+            // Grab cursor when hovering an object
+            if (sTmStampAsset < 0 && (hoveredObj >= 0 || sTmDragObj >= 0))
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+            // Start dragging on click
+            if (sTmStampAsset < 0 && ImGui::IsMouseClicked(0) && hoveredObj >= 0)
+            {
+                sTmDragObj = hoveredObj;
+                sTmSelectedObj = hoveredObj;
+            }
+
+            // Continue dragging
+            if (sTmDragObj >= 0)
+            {
+                if (ImGui::IsMouseDown(0))
+                {
+                    TmObject& obj = sTmObjects[sTmDragObj];
+                    obj.tileX = std::clamp(hoverTX, 0, tm.width - 1);
+                    obj.tileY = std::clamp(hoverTY, 0, tm.height - 1);
+                }
+                else
+                    sTmDragObj = -1;
+            }
+            // Click empty cell to open sprite instance picker (only when not stamping)
+            else if (sTmStampAsset < 0 && hoveredObj < 0 && inGrid && ImGui::IsMouseClicked(0))
+            {
+                sTmPlaceTX = hoverTX;
+                sTmPlaceTY = hoverTY;
+                ImGui::OpenPopup("##TmPlaceObj");
+            }
+        }
+
+        if (ImGui::BeginPopup("##TmPlaceObj"))
+        {
+            if (sSpriteAssets.empty())
+            {
+                ImGui::TextDisabled("No sprite assets — add some in the Sprites tab");
+            }
+            else
+            {
+                ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Select Sprite");
+                ImGui::Separator();
+                for (int i = 0; i < (int)sSpriteAssets.size(); i++)
+                {
+                    char label[64];
+                    snprintf(label, sizeof(label), "%s##sa%d", sSpriteAssets[i].name.c_str(), i);
+                    if (ImGui::Selectable(label))
+                    {
+                        // Create one Tile object with the clicked cell and enter stamp mode
+                        TmObject obj;
+                        obj.type = TmObjType::Tile;
+                        obj.spriteAssetIdx = i;
+                        obj.cells.push_back({sTmPlaceTX, sTmPlaceTY});
+                        snprintf(obj.name, sizeof(obj.name), "%s", sSpriteAssets[i].name.c_str());
+                        sTmObjects.push_back(obj);
+                        sTmSelectedObj = (int)sTmObjects.size() - 1;
+                        sTmStampAsset = i;
+                        sTmStampObj = sTmSelectedObj;
+                    }
+                }
+            }
+            ImGui::EndPopup();
         }
     }
     ImGui::End();
