@@ -53,22 +53,30 @@ static int dbg_tex_spans;   // textured scanlines this frame
 static int dbg_tex_pixels;  // textured pixel pairs this frame
 static int dbg_vcount;      // VCOUNT delta (scanlines consumed by render)
 static int dbg_fps;         // frames per second
+static int dbg_total_kcy;   // total frame Kcycles
 static int dbg_fps_frames;  // frame counter for FPS measurement
 static u16 dbg_fps_timer;   // last timer snapshot
 
 // Perf mode cycled with SELECT:
-// 0 = default (maxD sort + wall bias + halfRes from mesh setting)
-// 1 = force half-res on all meshes
-// 2 = half-res + aggressive small-face cull (area < 128)
+// 0 = default
+// 1 = floor-only half-res (walls full-res, floors half-res)
+// 2 = floor-only quarter-res (walls full-res, floors quarter-res)
 // 3 = skip floor faces entirely (walls only)
-// 4 = force quarter-res (every 4th scanline)
-// 5 = dynamic draw distance (skip faces beyond avgD > 384)
-// 6 = skip backface-adjacent faces (cull area < 512)
-// 7 = wireframe only (no fill, just edges)
-// 8 = half-res + skip distant faces (> 256)
-// 9 = unlit flat color (skip normal/lighting math)
-#define PERF_MODE_COUNT 10
+// 4 = all half-res
+// 5 = all quarter-res
+// 6 = short draw distance (avgD > 384)
+// 7 = very short draw distance (avgD > 192)
+// 8 = wireframe only
+// 9 = unlit flat color (skip lighting)
+// 10 = coverage buffer (front-to-back, skip occluded scanlines)
+// 11 = EWRAM render (render to EWRAM, DMA to VRAM at VBlank)
+#define PERF_MODE_COUNT 12
 static int perf_mode;
+static int g_ewramRender;  // when set, render to EWRAM then DMA to VRAM
+
+// EWRAM render buffer: 240x160 bytes = 38400 bytes, halfword-aligned
+// Stored as u16[120*160] to match VRAM Mode 4 layout
+EWRAM_DATA static u16 g_ewramBuf[120 * 160];
 
 // Tiny 4x5 digit font for debug overlay (digits 0-9, packed as 4-bit rows)
 static const u32 dbg_font[10] = {
@@ -875,34 +883,18 @@ IWRAM_CODE static void render_floor_sw(u16* buf)
 // Forward declaration for coverage-aware hline
 IWRAM_CODE static void afn_hline(u16* row, int left, int right, u8 palIdx);
 
-#ifdef AFN_COVERAGE_BUF
 // Row-level coverage: track widest covered span per scanline.
 // If a new hline falls entirely within the already-covered span, skip it.
 // Much cheaper than per-pixel — just 2 compares per scanline.
 static s16 g_cov_left[160];   // leftmost covered pixel per row (init 240 = empty)
 static s16 g_cov_right[160];  // rightmost covered pixel per row (init -1 = empty)
+static int g_coverageOn;      // runtime toggle for coverage buffer
 
 static void coverage_clear(void)
 {
     int i;
     for (i = 0; i < 160; i++) { g_cov_left[i] = 240; g_cov_right[i] = -1; }
 }
-
-// Coverage-aware hline: skip if fully within already-covered span,
-// otherwise draw with fast bulk fill and widen the covered range.
-IWRAM_CODE static void afn_hline_cov(u16* row, int left, int right, int y, u8 palIdx)
-{
-    // Fully covered — skip entirely
-    if (left >= g_cov_left[y] && right <= g_cov_right[y]) return;
-
-    // Draw with the fast bulk hline
-    afn_hline(row, left, right, palIdx);
-
-    // Widen covered span
-    if (left < g_cov_left[y]) g_cov_left[y] = left;
-    if (right > g_cov_right[y]) g_cov_right[y] = right;
-}
-#endif
 
 // Per-frame pixel budget to prevent FPS cliff from overdraw.
 // 240×160 = 38400 pixels. Budget of ~25K allows ~65% screen fill before cutoff.
@@ -1142,7 +1134,25 @@ IWRAM_CODE static void rasterize_convex(u16* buf, int* px, int* py, int count, u
                     if (left < 0) left = 0;
                     if (right > 239) right = 239;
                     if (left <= right) {
-                        afn_hline(buf + y * 120, left, right, palIdx);
+                        if (g_coverageOn && g_cov_right[y] >= 0) {
+                            int cl = g_cov_left[y], cr = g_cov_right[y];
+                            if (left >= cl && right <= cr)
+                                goto skip_hline; // fully covered
+                            // Draw only uncovered portions
+                            if (left < cl)
+                                afn_hline(buf + y * 120, left, cl - 1, palIdx);
+                            if (right > cr)
+                                afn_hline(buf + y * 120, cr + 1, right, palIdx);
+                            if (left < cl) g_cov_left[y] = left;
+                            if (right > cr) g_cov_right[y] = right;
+                        } else {
+                            afn_hline(buf + y * 120, left, right, palIdx);
+                            if (g_coverageOn) {
+                                g_cov_left[y] = left;
+                                g_cov_right[y] = right;
+                            }
+                        }
+                        skip_hline:;
                     }
                 }
             }
@@ -2177,11 +2187,11 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         {
             TriSort tmp = g_triOrder[a];
             b = a - 1;
-#ifdef AFN_COVERAGE_BUF
-            while (b >= 0 && g_triOrder[b].depth > tmp.depth)
-#else
-            while (b >= 0 && g_triOrder[b].depth < tmp.depth)
-#endif
+            if (g_coverageOn)
+                while (b >= 0 && g_triOrder[b].depth > tmp.depth)
+                { g_triOrder[b + 1] = g_triOrder[b]; b--; }
+            else
+                while (b >= 0 && g_triOrder[b].depth < tmp.depth)
             {
                 g_triOrder[b + 1] = g_triOrder[b];
                 b--;
@@ -2229,21 +2239,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         lodLevel = ms->meshHalfRes ? 1 : (avgD < 64 ? 2 : (avgD < 192 ? 1 : 0));
 
         // Perf mode overrides
-        if (perf_mode == 1 || perf_mode == 2 || perf_mode == 8)
-            lodLevel = (lodLevel < 1) ? 1 : lodLevel; // force half-res
-        if (perf_mode == 4) lodLevel = 2; // force quarter-res
-        if (perf_mode == 2 || perf_mode == 6) {
-            // Small-face cull: skip faces with tiny screen area
-            int ax = g_vsx[vb+i1] - g_vsx[vb+i0];
-            int ay = g_vsy[vb+i1] - g_vsy[vb+i0];
-            int bx = g_vsx[vb+i2] - g_vsx[vb+i0];
-            int by = g_vsy[vb+i2] - g_vsy[vb+i0];
-            int area = ax * by - ay * bx;
-            if (area < 0) area = -area;
-            if (area < (perf_mode == 6 ? 512 : 128)) continue;
-        }
-        if (perf_mode == 3) {
-            // Skip floor faces (small Y extent = floor)
+        // Classify floor vs wall by vertex height extent
+        {
+            int isFloor = 0;
             int h0 = g_vHeight[vb+i0], h1 = g_vHeight[vb+i1], h2 = g_vHeight[vb+i2];
             int hMin = h0, hMax = h0;
             if (h1 < hMin) hMin = h1; if (h1 > hMax) hMax = h1;
@@ -2252,15 +2250,31 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 int h3 = g_vHeight[vb+i3];
                 if (h3 < hMin) hMin = h3; if (h3 > hMax) hMax = h3;
             }
-            if (hMax - hMin <= 512) continue; // skip floors
+            isFloor = (hMax - hMin <= 512);
+
+            // Mode 1: floor-only half-res
+            if (perf_mode == 1 && isFloor)
+                lodLevel = (lodLevel < 1) ? 1 : lodLevel;
+            // Mode 2: floor-only quarter-res
+            if (perf_mode == 2 && isFloor)
+                lodLevel = 2;
+            // Mode 3: skip floors entirely
+            if (perf_mode == 3 && isFloor) continue;
+            // Mode 4: all half-res
+            if (perf_mode == 4)
+                lodLevel = (lodLevel < 1) ? 1 : lodLevel;
+            // Mode 5: all quarter-res
+            if (perf_mode == 5) lodLevel = 2;
         }
-        if (perf_mode == 5 && avgD > 384) continue; // short draw distance
-        if (perf_mode == 8 && avgD > 256) continue;  // very short draw distance
+        // Mode 6: short draw distance
+        if (perf_mode == 6 && avgD > 384) continue;
+        // Mode 7: very short draw distance
+        if (perf_mode == 7 && avgD > 192) continue;
 
         g_halfRes = (lodLevel >= 1);
 
-        // Mode 7: wireframe only — draw edges and skip fill
-        if (perf_mode == 7) {
+        // Mode 8: wireframe only — draw edges and skip fill
+        if (perf_mode == 8) {
             u8 edgeIdx = ms->meshGrayscale ? 6 : (AFN_MESH_PAL_BASE + mi * 8 + 5);
             int d0v = g_vRawDepth[vb+i0] >= CLIP_NEAR_Z;
             int d1v = g_vRawDepth[vb+i1] >= CLIP_NEAR_Z;
@@ -2802,21 +2816,25 @@ int main(void)
     irq_add(II_HBLANK, m7_hbl);
 #endif
 
+#ifdef AFN_COVERAGE_BUF
+    g_coverageOn = 1;
+    perf_mode = 10; // coverage mode by default when editor enables it
+#endif
+
     // --- Main loop ---
     while (1)
     {
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
         // Software render to back buffer
         {
-            u16* backbuf = g_page ? (u16*)0x06000000 : (u16*)0x0600A000;
+            u16* vramBuf = g_page ? (u16*)0x06000000 : (u16*)0x0600A000;
+            u16* backbuf = g_ewramRender ? g_ewramBuf : vramBuf;
             // DMA fill with sky color (palette 0)
             {
                 static u32 fill = 0;
                 DMA_TRANSFER(backbuf, &fill, 120 * 160 / 2, 3, DMA_NOW | DMA_32 | DMA_SRC_FIXED);
             }
-#ifdef AFN_COVERAGE_BUF
-            coverage_clear();
-#endif
+            if (g_coverageOn) coverage_clear();
             dbg_tex_tris = 0;
             dbg_tex_spans = 0;
             g_pixels_drawn = 0;
@@ -2825,20 +2843,23 @@ int main(void)
                 // Single timer with prescaler=64: 1 tick = 64 cycles, max ~4.2M cycles
                 REG_TM2CNT_H = 0;           // disable
                 REG_TM2CNT_L = 0;           // reload = 0
-                REG_TM2CNT_H = 0x0082;      // enable, prescaler=64
+                REG_TM2CNT_H = 0x0081;      // enable, prescaler=64
                 render_meshes_sw(backbuf);
                 dbg_vcount = (int)REG_TM2CNT_L;
-                REG_TM2CNT_H = 0;           // disable
+                // Keep timer running to measure total frame
             }
-            // Debug overlay: tris | spans | pixels | Kcycles
-            dbg_int(backbuf, 2, 2, dbg_tex_tris, 1);
-            dbg_int(backbuf, 30, 2, dbg_tex_spans, 1);
-            dbg_int(backbuf, 62, 2, dbg_tex_pixels, 1);
-            dbg_int(backbuf, 102, 2, (dbg_vcount * 64) / 1000, 1); // Kcycles (budget ~280)
+            // If EWRAM render, DMA copy to VRAM backbuf
+            if (g_ewramRender)
+                DMA_TRANSFER(vramBuf, g_ewramBuf, 120 * 160 / 2, 3, DMA_NOW | DMA_32);
+            // Debug overlay: render Kcycles | total Kcycles (from last frame)
+            dbg_int(vramBuf, 2, 2, dbg_tex_tris, 1);
+            dbg_int(vramBuf, 30, 2, dbg_tex_spans, 1);
+            dbg_int(vramBuf, 62, 2, (dbg_vcount * 64) / 1000, 1); // render Kcycles
+            dbg_int(vramBuf, 102, 2, dbg_total_kcy, 1); // total Kcycles (prev frame)
             // FPS counter — bottom-right, perf mode — bottom-left
-            dbg_int(backbuf, 240 - 20, 160 - 7, dbg_fps, 1);
+            dbg_int(vramBuf, 240 - 20, 160 - 7, dbg_fps, 1);
             if (perf_mode > 0)
-                dbg_int(backbuf, 2, 160 - 7, perf_mode, 2);
+                dbg_int(vramBuf, 2, 160 - 7, perf_mode, 2);
         }
 #endif
         // FPS measurement: count frames, update every ~1 second using Timer 3
@@ -2853,6 +2874,11 @@ int main(void)
                 dbg_fps_timer = now;
             }
         }
+        // Capture total frame time (timer still running from render start)
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+        dbg_total_kcy = ((int)REG_TM2CNT_L * 64) / 1000; // total Kcycles
+        REG_TM2CNT_H = 0; // stop timer
+#endif
         VBlankIntrWait();
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
         // Flip page
@@ -2867,6 +2893,8 @@ int main(void)
         if (key_hit(KEY_SELECT))
         {
             perf_mode = (perf_mode + 1) % PERF_MODE_COUNT;
+            g_coverageOn = (perf_mode == 10);
+            g_ewramRender = (perf_mode == 11);
         }
 
         if (player_sprite_idx >= 0)

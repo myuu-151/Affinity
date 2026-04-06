@@ -6730,7 +6730,7 @@ static const int afn_sprite_data[][10] = {
     { 32768, 0, 30848, 1, 0, 102, 1, 0, 1, -1 },
     { 32570, 0, 27357, 2, -1, 440, 6, 0, 1, 27 },
 };
-#define AFN_MESH_COUNT 28
+#define AFN_MESH_COUNT 31
 
 #define AFN_MESH_PAL_BASE 224
 
@@ -9102,6 +9102,83 @@ static const u16 afn_mesh27_qidx[52] = {
     13, 12, 21, 18
 };
 
+// Mesh 28: 112 verts welded to 40
+static const s16 afn_mesh28_verts[120] = {
+    2133, 1225, -4213, 2133, 2450, -4213, 2133, 2450, -6294, 2133, 1225, -6294, 
+    2133, 0, 0, -2133, 0, 0, -2133, 0, 2133, 2133, 0, 2133, 
+    -2133, 1225, -6294, -2133, 2450, -6294, 2133, 1225, 0, 2133, 1225, 2133, 
+    2133, 2450, 2133, 2133, 2450, 0, -2133, 0, -4213, 2133, 0, -4213, 
+    2133, 0, -6294, -2133, 0, -6294, -2133, 1225, 0, -2133, 1225, -2133, 
+    -2133, 2450, -2133, -2133, 2450, 0, -2133, 1225, -4213, -2133, 2450, -4213, 
+    2133, 2450, -11017, -2133, 2450, -11017, 2133, 5582, -6294, 2133, 5582, -11017, 
+    -2133, 5582, -11017, -2133, 5582, -6294, -2133, 2450, -16084, -2133, 5582, -16084, 
+    2133, 5582, -16084, 2133, 2450, -16084, -2133, 0, -2133, 2133, 0, -2133, 
+    2133, 1225, -2133, -2133, 1225, 2133, -2133, 2450, 2133, 2133, 2450, -2133
+};
+static const s8 afn_mesh28_norms[120] = {
+    -127, 0, 0, -127, 0, 0, -103, 51, 51, -89, 0, 89, 
+    -89, 89, 0, 89, 89, 0, 89, 89, 0, -89, 89, 0, 
+    89, 0, 89, 103, 51, 51, -127, 0, 0, -127, 0, 0, 
+    -127, 0, 0, -127, 0, 0, 89, 89, 0, -89, 89, 0, 
+    -73, 73, 73, 73, 73, 73, 127, 0, 0, 127, 0, 0, 
+    127, 0, 0, 127, 0, 0, 127, 0, 0, 127, 0, 0, 
+    -89, 89, 0, 89, 89, 0, -127, 0, 0, -127, 0, 0, 
+    127, 0, 0, 127, 0, 0, 89, 89, 0, 127, 0, 0, 
+    -127, 0, 0, -89, 89, 0, 89, 89, 0, -89, 89, 0, 
+    -127, 0, 0, 127, 0, 0, 127, 0, 0, -127, 0, 0
+};
+static const u16 afn_mesh28_idx[0] = {
+};
+static const u16 afn_mesh28_qidx[112] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 3, 2, 9, 
+    10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 
+    22, 8, 9, 23, 9, 2, 24, 25, 24, 2, 26, 27, 
+    9, 25, 28, 29, 28, 25, 30, 31, 24, 27, 32, 33, 
+    25, 24, 33, 30, 14, 17, 8, 22, 5, 34, 19, 18, 
+    4, 7, 11, 10, 17, 16, 3, 8, 15, 0, 3, 16, 
+    35, 4, 10, 36, 6, 5, 18, 37, 37, 18, 21, 38, 
+    36, 10, 13, 39, 35, 34, 5, 4, 35, 36, 0, 15, 
+    34, 14, 22, 19, 19, 22, 23, 20, 34, 35, 15, 14, 
+    36, 39, 1, 0
+};
+
+static const s16 afn_mesh29_verts[24] = {
+    2133, 0, -2133, -2133, 0, -2133, -2133, 0, 2133, 2133, 0, 2133, 
+    -2133, 0, -2133, 2133, 0, -2133, 2133, 0, -6294, -2133, 0, -6294
+};
+static const s8 afn_mesh29_norms[24] = {
+    0, 127, 0, 0, 127, 0, 0, 127, 0, 0, 127, 0, 
+    0, 127, 0, 0, 127, 0, 0, 127, 0, 0, 127, 0
+};
+static const u16 afn_mesh29_idx[0] = {
+};
+static const u16 afn_mesh29_qidx[8] = {
+    0, 1, 2, 3, 4, 5, 6, 7
+};
+
+static const s16 afn_mesh30_verts[72] = {
+    2133, 0, -2133, 2133, 2450, -2133, 2133, 2450, -6294, 2133, 0, -6294, 
+    2133, 0, -2133, -2133, 0, -2133, -2133, 0, 2133, 2133, 0, 2133, 
+    2133, 0, -2133, 2133, 0, 2133, 2133, 2450, 2133, 2133, 2450, -2133, 
+    -2133, 0, -2133, 2133, 0, -2133, 2133, 0, -6294, -2133, 0, -6294, 
+    -2133, 0, 2133, -2133, 0, -2133, -2133, 2450, -2133, -2133, 2450, 2133, 
+    -2133, 0, -2133, -2133, 0, -6294, -2133, 2450, -6294, -2133, 2450, -2133
+};
+static const s8 afn_mesh30_norms[72] = {
+    -127, 0, 0, -127, 0, 0, -127, 0, 0, -127, 0, 0, 
+    0, 127, 0, 0, 127, 0, 0, 127, 0, 0, 127, 0, 
+    -127, 0, 0, -127, 0, 0, -127, 0, 0, -127, 0, 0, 
+    0, 127, 0, 0, 127, 0, 0, 127, 0, 0, 127, 0, 
+    127, 0, 0, 127, 0, 0, 127, 0, 0, 127, 0, 0, 
+    127, 0, 0, 127, 0, 0, 127, 0, 0, 127, 0, 0
+};
+static const u16 afn_mesh30_idx[0] = {
+};
+static const u16 afn_mesh30_qidx[24] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 
+    12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23
+};
+
 static const int afn_mesh_desc[][14] = {
     { 72, 0, 84, 0x7C1F, 0, 0, 0, 1, 1, 32, 5, 32, 0, 0 },
     { 32, 0, 84, 0x7C1F, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0 },
@@ -9131,14 +9208,17 @@ static const int afn_mesh_desc[][14] = {
     { 825, 0, 3072, 0x7C1F, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1 },
     { 221, 0, 768, 0x7C1F, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1 },
     { 22, 0, 52, 0x7C1F, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1 },
+    { 40, 0, 112, 0x7C1F, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1 },
+    { 8, 0, 8, 0x7C1F, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1 },
+    { 24, 0, 24, 0x7C1F, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
 };
 
-static const s16* const afn_mesh_vert_ptrs[] = { afn_mesh0_verts, afn_mesh1_verts, afn_mesh2_verts, afn_mesh3_verts, afn_mesh4_verts, afn_mesh5_verts, afn_mesh6_verts, afn_mesh7_verts, afn_mesh8_verts, afn_mesh9_verts, afn_mesh10_verts, afn_mesh11_verts, afn_mesh12_verts, afn_mesh13_verts, afn_mesh14_verts, afn_mesh15_verts, afn_mesh16_verts, afn_mesh17_verts, afn_mesh18_verts, afn_mesh19_verts, afn_mesh20_verts, afn_mesh21_verts, afn_mesh22_verts, afn_mesh23_verts, afn_mesh24_verts, afn_mesh25_verts, afn_mesh26_verts, afn_mesh27_verts };
-static const s8* const afn_mesh_norm_ptrs[] = { afn_mesh0_norms, afn_mesh1_norms, afn_mesh2_norms, afn_mesh3_norms, afn_mesh4_norms, afn_mesh5_norms, afn_mesh6_norms, afn_mesh7_norms, afn_mesh8_norms, afn_mesh9_norms, afn_mesh10_norms, afn_mesh11_norms, afn_mesh12_norms, afn_mesh13_norms, afn_mesh14_norms, afn_mesh15_norms, afn_mesh16_norms, afn_mesh17_norms, afn_mesh18_norms, afn_mesh19_norms, afn_mesh20_norms, afn_mesh21_norms, afn_mesh22_norms, afn_mesh23_norms, afn_mesh24_norms, afn_mesh25_norms, afn_mesh26_norms, afn_mesh27_norms };
-static const u16* const afn_mesh_idx_ptrs[] = { afn_mesh0_idx, afn_mesh1_idx, afn_mesh2_idx, afn_mesh3_idx, afn_mesh4_idx, afn_mesh5_idx, afn_mesh6_idx, afn_mesh7_idx, afn_mesh8_idx, afn_mesh9_idx, afn_mesh10_idx, afn_mesh11_idx, afn_mesh12_idx, afn_mesh13_idx, afn_mesh14_idx, afn_mesh15_idx, afn_mesh16_idx, afn_mesh17_idx, afn_mesh18_idx, afn_mesh19_idx, afn_mesh20_idx, afn_mesh21_idx, afn_mesh22_idx, afn_mesh23_idx, afn_mesh24_idx, afn_mesh25_idx, afn_mesh26_idx, afn_mesh27_idx };
-static const u16* const afn_mesh_qidx_ptrs[] = { afn_mesh0_qidx, afn_mesh1_qidx, afn_mesh2_qidx, afn_mesh3_qidx, afn_mesh4_qidx, 0, afn_mesh6_qidx, afn_mesh7_qidx, afn_mesh8_qidx, afn_mesh9_qidx, afn_mesh10_qidx, afn_mesh11_qidx, afn_mesh12_qidx, afn_mesh13_qidx, afn_mesh14_qidx, 0, 0, afn_mesh17_qidx, afn_mesh18_qidx, afn_mesh19_qidx, afn_mesh20_qidx, afn_mesh21_qidx, afn_mesh22_qidx, 0, afn_mesh24_qidx, afn_mesh25_qidx, afn_mesh26_qidx, afn_mesh27_qidx };
-static const s16* const afn_mesh_uv_ptrs[] = { afn_mesh0_uvs, 0, afn_mesh2_uvs, afn_mesh3_uvs, afn_mesh4_uvs, 0, afn_mesh6_uvs, afn_mesh7_uvs, afn_mesh8_uvs, 0, afn_mesh10_uvs, 0, 0, 0, 0, 0, 0, afn_mesh17_uvs, afn_mesh18_uvs, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-static const u8* const afn_mesh_tex_ptrs[] = { afn_mesh0_tex, 0, afn_mesh2_tex, afn_mesh3_tex, afn_mesh4_tex, 0, afn_mesh6_tex, afn_mesh7_tex, afn_mesh8_tex, 0, afn_mesh10_tex, 0, 0, 0, 0, 0, 0, afn_mesh17_tex, afn_mesh18_tex, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+static const s16* const afn_mesh_vert_ptrs[] = { afn_mesh0_verts, afn_mesh1_verts, afn_mesh2_verts, afn_mesh3_verts, afn_mesh4_verts, afn_mesh5_verts, afn_mesh6_verts, afn_mesh7_verts, afn_mesh8_verts, afn_mesh9_verts, afn_mesh10_verts, afn_mesh11_verts, afn_mesh12_verts, afn_mesh13_verts, afn_mesh14_verts, afn_mesh15_verts, afn_mesh16_verts, afn_mesh17_verts, afn_mesh18_verts, afn_mesh19_verts, afn_mesh20_verts, afn_mesh21_verts, afn_mesh22_verts, afn_mesh23_verts, afn_mesh24_verts, afn_mesh25_verts, afn_mesh26_verts, afn_mesh27_verts, afn_mesh28_verts, afn_mesh29_verts, afn_mesh30_verts };
+static const s8* const afn_mesh_norm_ptrs[] = { afn_mesh0_norms, afn_mesh1_norms, afn_mesh2_norms, afn_mesh3_norms, afn_mesh4_norms, afn_mesh5_norms, afn_mesh6_norms, afn_mesh7_norms, afn_mesh8_norms, afn_mesh9_norms, afn_mesh10_norms, afn_mesh11_norms, afn_mesh12_norms, afn_mesh13_norms, afn_mesh14_norms, afn_mesh15_norms, afn_mesh16_norms, afn_mesh17_norms, afn_mesh18_norms, afn_mesh19_norms, afn_mesh20_norms, afn_mesh21_norms, afn_mesh22_norms, afn_mesh23_norms, afn_mesh24_norms, afn_mesh25_norms, afn_mesh26_norms, afn_mesh27_norms, afn_mesh28_norms, afn_mesh29_norms, afn_mesh30_norms };
+static const u16* const afn_mesh_idx_ptrs[] = { afn_mesh0_idx, afn_mesh1_idx, afn_mesh2_idx, afn_mesh3_idx, afn_mesh4_idx, afn_mesh5_idx, afn_mesh6_idx, afn_mesh7_idx, afn_mesh8_idx, afn_mesh9_idx, afn_mesh10_idx, afn_mesh11_idx, afn_mesh12_idx, afn_mesh13_idx, afn_mesh14_idx, afn_mesh15_idx, afn_mesh16_idx, afn_mesh17_idx, afn_mesh18_idx, afn_mesh19_idx, afn_mesh20_idx, afn_mesh21_idx, afn_mesh22_idx, afn_mesh23_idx, afn_mesh24_idx, afn_mesh25_idx, afn_mesh26_idx, afn_mesh27_idx, afn_mesh28_idx, afn_mesh29_idx, afn_mesh30_idx };
+static const u16* const afn_mesh_qidx_ptrs[] = { afn_mesh0_qidx, afn_mesh1_qidx, afn_mesh2_qidx, afn_mesh3_qidx, afn_mesh4_qidx, 0, afn_mesh6_qidx, afn_mesh7_qidx, afn_mesh8_qidx, afn_mesh9_qidx, afn_mesh10_qidx, afn_mesh11_qidx, afn_mesh12_qidx, afn_mesh13_qidx, afn_mesh14_qidx, 0, 0, afn_mesh17_qidx, afn_mesh18_qidx, afn_mesh19_qidx, afn_mesh20_qidx, afn_mesh21_qidx, afn_mesh22_qidx, 0, afn_mesh24_qidx, afn_mesh25_qidx, afn_mesh26_qidx, afn_mesh27_qidx, afn_mesh28_qidx, afn_mesh29_qidx, afn_mesh30_qidx };
+static const s16* const afn_mesh_uv_ptrs[] = { afn_mesh0_uvs, 0, afn_mesh2_uvs, afn_mesh3_uvs, afn_mesh4_uvs, 0, afn_mesh6_uvs, afn_mesh7_uvs, afn_mesh8_uvs, 0, afn_mesh10_uvs, 0, 0, 0, 0, 0, 0, afn_mesh17_uvs, afn_mesh18_uvs, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+static const u8* const afn_mesh_tex_ptrs[] = { afn_mesh0_tex, 0, afn_mesh2_tex, afn_mesh3_tex, afn_mesh4_tex, 0, afn_mesh6_tex, afn_mesh7_tex, afn_mesh8_tex, 0, afn_mesh10_tex, 0, 0, 0, 0, 0, 0, afn_mesh17_tex, afn_mesh18_tex, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
 #define AFN_TEX_PAL_BASE 32
 #define AFN_TEX_PAL_COUNT 160
@@ -9165,7 +9245,7 @@ static const u16 afn_tex_palette[160] = {
     0x0665, 0x0E67, 0x12A8, 0x0643, 0x1266, 0x12A8, 0x1668, 0x0A24, 0x0E47, 0x1287, 0x1A6B, 0x1AAA, 0x0A44, 0x0A43, 0x12A7, 0x0E87,
 };
 
-static const u16 afn_mesh_palette[224] = {
+static const u16 afn_mesh_palette[248] = {
     // Mesh 0
     0x0C03, 0x1C07, 0x2C0B, 0x3C0F, 0x4C13, 0x5C17, 0x6C1B, 0x7C1F, 
     // Mesh 1
@@ -9221,6 +9301,12 @@ static const u16 afn_mesh_palette[224] = {
     // Mesh 26
     0x0C03, 0x1C07, 0x2C0B, 0x3C0F, 0x4C13, 0x5C17, 0x6C1B, 0x7C1F, 
     // Mesh 27
+    0x0C03, 0x1C07, 0x2C0B, 0x3C0F, 0x4C13, 0x5C17, 0x6C1B, 0x7C1F, 
+    // Mesh 28
+    0x0C03, 0x1C07, 0x2C0B, 0x3C0F, 0x4C13, 0x5C17, 0x6C1B, 0x7C1F, 
+    // Mesh 29
+    0x0C03, 0x1C07, 0x2C0B, 0x3C0F, 0x4C13, 0x5C17, 0x6C1B, 0x7C1F, 
+    // Mesh 30
     0x0C03, 0x1C07, 0x2C0B, 0x3C0F, 0x4C13, 0x5C17, 0x6C1B, 0x7C1F
 };
 
