@@ -2155,6 +2155,7 @@ typedef struct {
     int cullMode, meshLit, meshHalfRes, meshTextured, meshWireframe, meshGrayscale;
     int texW, texShift, texMask, texPalBase;
     int vertCount, idxCount, quadIdxCount;
+    int drawDist;
     int centerDepth;
 } MeshSlot;
 
@@ -2221,6 +2222,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         ms->texPalBase = afn_mesh_desc[mi][11];
         ms->meshWireframe = afn_mesh_desc[mi][12];
         ms->meshGrayscale = afn_mesh_desc[mi][13];
+        ms->drawDist = afn_mesh_desc[mi][14];
         ms->texMask = ms->texW > 0 ? ms->texW - 1 : 0;
         ms->uvs = afn_mesh_uv_ptrs[mi];
         ms->tex = tex_cache_ptrs[mi];
@@ -2324,8 +2326,10 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 int d0 = g_vsz[vb+i0], d1 = g_vsz[vb+i1], d2 = g_vsz[vb+i2];
                 // Skip faces mostly behind camera (all raw depths negative)
                 if (g_vRawDepth[vb+i0] <= 0 && g_vRawDepth[vb+i1] <= 0 && g_vRawDepth[vb+i2] <= 0) continue;
+                // Per-mesh draw distance (0 = use global)
+                if (ms->drawDist > 0 && (d0 + d1 + d2) / 3 > ms->drawDist) continue;
 #ifdef AFN_DRAW_DISTANCE
-                if ((d0 + d1 + d2) / 3 > AFN_DRAW_DISTANCE) continue;
+                else if (ms->drawDist == 0 && (d0 + d1 + d2) / 3 > AFN_DRAW_DISTANCE) continue;
 #endif
                 g_triOrder[totalTris].triIdx = t;
                 g_triOrder[totalTris].depth = (d0 + d1 + d2) / 3;
@@ -2372,8 +2376,10 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     int d0 = g_vsz[vb+i0], d1 = g_vsz[vb+i1], d2 = g_vsz[vb+i2], d3 = g_vsz[vb+i3];
                     // Skip faces mostly behind camera (all raw depths negative)
                     if (g_vRawDepth[vb+i0] <= 0 && g_vRawDepth[vb+i1] <= 0 && g_vRawDepth[vb+i2] <= 0 && g_vRawDepth[vb+i3] <= 0) continue;
+                    // Per-mesh draw distance (0 = use global)
+                    if (ms->drawDist > 0 && (d0 + d1 + d2 + d3) / 4 > ms->drawDist) continue;
 #ifdef AFN_DRAW_DISTANCE
-                    if ((d0 + d1 + d2 + d3) / 4 > AFN_DRAW_DISTANCE) continue;
+                    else if (ms->drawDist == 0 && (d0 + d1 + d2 + d3) / 4 > AFN_DRAW_DISTANCE) continue;
 #endif
                     g_triOrder[totalTris].triIdx = t | 0x8000;
                     g_triOrder[totalTris].depth = (d0 + d1 + d2 + d3) / 4;
@@ -2688,91 +2694,72 @@ static FIXED player_vy;        // vertical velocity (16.8, negative = falling)
 static int   player_on_ground; // 1 if standing on a floor face
 static FIXED cam_y_smooth;     // smoothed camera Y offset (16.8)
 
-// Squared distance from point (px,pz) to segment (ax,az)-(bx,bz) in XZ.
-// All inputs 16.8 fixed. Returns dist^2 in a shifted space (>>4 per axis).
-static int col_seg_dist2(int px, int pz, int ax, int az, int bx, int bz)
-{
-    int dx = (bx - ax) >> 4, dz = (bz - az) >> 4;
-    int ex = (px - ax) >> 4, ez = (pz - az) >> 4;
-    int dot_ed = ex * dx + ez * dz;
-    int dot_dd = dx * dx + dz * dz;
-    int cx4, cz4;
-    if (dot_dd == 0) {
-        cx4 = ax >> 4; cz4 = az >> 4;
-    } else if (dot_ed <= 0) {
-        cx4 = ax >> 4; cz4 = az >> 4;
-    } else if (dot_ed >= dot_dd) {
-        cx4 = bx >> 4; cz4 = bz >> 4;
-    } else {
-        cx4 = (ax >> 4) + ((int)(((long long)dx * dot_ed) / dot_dd));
-        cz4 = (az >> 4) + ((int)(((long long)dz * dot_ed) / dot_dd));
-    }
-    int rx = (px >> 4) - cx4, rz = (pz >> 4) - cz4;
-    return rx * rx + rz * rz;
-}
-
 // Push player out of wall faces. Modifies *px, *pz in place.
-static void collide_walls(FIXED *px, FIXED *pz, FIXED py)
+// Optimized: plane-distance only (no per-edge segment tests, no 64-bit division).
+IWRAM_CODE static void collide_walls(FIXED *px, FIXED *pz, FIXED py)
 {
-    // Determine which grid cells the player overlaps (center cell + neighbours if near edge)
     int gx = *px >> AFN_COL_GRID_SHIFT;
     int gz = *pz >> AFN_COL_GRID_SHIFT;
     if (gx < 0) gx = 0; if (gx >= AFN_COL_GRID_SIZE) gx = AFN_COL_GRID_SIZE - 1;
     if (gz < 0) gz = 0; if (gz >= AFN_COL_GRID_SIZE) gz = AFN_COL_GRID_SIZE - 1;
 
-    int radius4 = COL_PLAYER_RADIUS >> 4;
-    int radius4_sq = radius4 * radius4;
-
-    // Check the player's cell (could expand to 2x2 for faces near cell borders,
-    // but single cell is fine when PLAYER_RADIUS < cell_size/2)
     int ci = gz * AFN_COL_GRID_SIZE + gx;
     int start = afn_col_grid_start[ci];
     int count = afn_col_grid_count[ci];
     int i;
+    FIXED ppx = *px, ppz = *pz;
 
     for (i = 0; i < count; i++)
     {
         const CollFace *face = &afn_col_faces[afn_col_grid_faces[start + i]];
         if (!(face->flags & 4)) continue; // not a wall
 
-        // Y overlap check
-        int fMinY = face->v0y;
-        if (face->v1y < fMinY) fMinY = face->v1y;
-        if (face->v2y < fMinY) fMinY = face->v2y;
-        int fMaxY = face->v0y;
-        if (face->v1y > fMaxY) fMaxY = face->v1y;
-        if (face->v2y > fMaxY) fMaxY = face->v2y;
+        // Y overlap check (branchless min/max)
+        int y0 = face->v0y, y1 = face->v1y, y2 = face->v2y;
+        int fMinY = y0 < y1 ? y0 : y1; if (y2 < fMinY) fMinY = y2;
+        int fMaxY = y0 > y1 ? y0 : y1; if (y2 > fMaxY) fMaxY = y2;
         if (py + COL_PLAYER_HEIGHT < fMinY || py > fMaxY) continue;
 
-        // Check if player XZ is close to any triangle edge
-        int d0 = col_seg_dist2(*px, *pz, face->v0x, face->v0z, face->v1x, face->v1z);
-        int d1 = col_seg_dist2(*px, *pz, face->v1x, face->v1z, face->v2x, face->v2z);
-        int d2 = col_seg_dist2(*px, *pz, face->v2x, face->v2z, face->v0x, face->v0z);
-        int dMin = d0; if (d1 < dMin) dMin = d1; if (d2 < dMin) dMin = d2;
-        if (dMin >= radius4_sq) continue;
+        // Signed distance to face plane in XZ
+        // face->nx, nz are 8.8 fixed unit normal; (px - v0) is 16.8
+        // Shift inputs >>4 to avoid overflow in 32-bit multiply
+        int dist = (((ppx - face->v0x) >> 4) * face->nx +
+                    ((ppz - face->v0z) >> 4) * face->nz) >> 4;
 
-        // Signed distance to face plane in XZ (16.8 result)
-        int dist = (((long long)(*px - face->v0x) * face->nx +
-                     (long long)(*pz - face->v0z) * face->nz) >> 8);
+        // Only push if within radius (both sides of the plane)
+        int absDist = dist < 0 ? -dist : dist;
+        if (absDist >= COL_PLAYER_RADIUS) continue;
 
-        if (dist > 0 && dist < COL_PLAYER_RADIUS)
+        // Quick XZ AABB check: skip if player is far from face bounding box
         {
-            int push = COL_PLAYER_RADIUS - dist;
-            *px += (face->nx * push) >> 8;
-            *pz += (face->nz * push) >> 8;
+            int fx0 = face->v0x, fx1 = face->v1x, fx2 = face->v2x;
+            int fz0 = face->v0z, fz1 = face->v1z, fz2 = face->v2z;
+            int fMinX = fx0 < fx1 ? fx0 : fx1; if (fx2 < fMinX) fMinX = fx2;
+            int fMaxX = fx0 > fx1 ? fx0 : fx1; if (fx2 > fMaxX) fMaxX = fx2;
+            int fMinZ = fz0 < fz1 ? fz0 : fz1; if (fz2 < fMinZ) fMinZ = fz2;
+            int fMaxZ = fz0 > fz1 ? fz0 : fz1; if (fz2 > fMaxZ) fMaxZ = fz2;
+            int pad = COL_PLAYER_RADIUS;
+            if (ppx < fMinX - pad || ppx > fMaxX + pad ||
+                ppz < fMinZ - pad || ppz > fMaxZ + pad) continue;
         }
-        else if (dist < 0 && dist > -COL_PLAYER_RADIUS)
-        {
-            int push = COL_PLAYER_RADIUS + dist;
-            *px -= (face->nx * push) >> 8;
-            *pz -= (face->nz * push) >> 8;
+
+        int push = COL_PLAYER_RADIUS - absDist;
+        if (dist >= 0) {
+            ppx += (face->nx * push) >> 8;
+            ppz += (face->nz * push) >> 8;
+        } else {
+            ppx -= (face->nx * push) >> 8;
+            ppz -= (face->nz * push) >> 8;
         }
     }
+    *px = ppx;
+    *pz = ppz;
 }
 
 // Find the highest floor below the player. Sets *outY to floor height.
 // Returns 1 if a floor was found, 0 if the player is over empty space.
-static int collide_floor(FIXED px, FIXED pz, FIXED py, FIXED *outY)
+// Optimized: integer cross-product PIT test, no 64-bit division.
+IWRAM_CODE static int collide_floor(FIXED px, FIXED pz, FIXED py, FIXED *outY)
 {
     int gx = px >> AFN_COL_GRID_SHIFT;
     int gz = pz >> AFN_COL_GRID_SHIFT;
@@ -2786,38 +2773,27 @@ static int collide_floor(FIXED px, FIXED pz, FIXED py, FIXED *outY)
     FIXED bestY = 0;
     int found = 0;
     int i;
+    int ppx = px >> 8, ppz = pz >> 8; // work in integer pixels
 
     for (i = 0; i < count; i++)
     {
         const CollFace *face = &afn_col_faces[afn_col_grid_faces[start + i]];
         if (!(face->flags & 1)) continue; // not a floor
 
-        // Point-in-triangle test (XZ, cross product signs)
-        // Shift by 8 to work in integer pixels (avoids overflow)
+        // Point-in-triangle test (XZ, cross product signs) — integer pixels
         int ax = face->v0x >> 8, az = face->v0z >> 8;
         int bx = face->v1x >> 8, bz = face->v1z >> 8;
         int cx = face->v2x >> 8, cz = face->v2z >> 8;
-        int ppx = px >> 8, ppz = pz >> 8;
 
         int c0 = (bx - ax) * (ppz - az) - (bz - az) * (ppx - ax);
         int c1 = (cx - bx) * (ppz - bz) - (cz - bz) * (ppx - bx);
         int c2 = (ax - cx) * (ppz - cz) - (az - cz) * (ppx - cx);
 
         if (!((c0 >= 0 && c1 >= 0 && c2 >= 0) || (c0 <= 0 && c1 <= 0 && c2 <= 0)))
-            continue; // not inside triangle
+            continue;
 
-        // Interpolate Y at player position using barycentric coords
-        // c1 = weight for v0, c2 = weight for v1, c0 = weight for v2
-        int area = c0 + c1 + c2;
-        FIXED floorY;
-        if (area == 0) {
-            floorY = (face->v0y + face->v1y + face->v2y) / 3;
-        } else {
-            // Use 64-bit to avoid overflow: cross values (±256^2) * Y (±65536)
-            floorY = (FIXED)(((long long)c1 * face->v0y +
-                              (long long)c2 * face->v1y +
-                              (long long)c0 * face->v2y) / area);
-        }
+        // Floor height: average of 3 verts (no division — *341>>10 ≈ /3)
+        FIXED floorY = ((face->v0y + face->v1y + face->v2y) * 341) >> 10;
 
         // Accept highest floor that's below player + step threshold
         if (floorY <= py + COL_STEP_HEIGHT)

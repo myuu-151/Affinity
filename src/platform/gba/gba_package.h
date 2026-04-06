@@ -103,6 +103,7 @@ struct GBAMeshExport
     int halfRes = 0;              // 1=rasterize every other scanline
     int wireframe = 0;            // 1=wireframe overlay
     int grayscale = 0;            // 1=grayscale shaded faces
+    float drawDistance = 0.0f;    // per-mesh draw distance (0 = use global/unlimited)
     // Texture mapping
     std::vector<float> uvs;       // u, v per vertex (flat, interleaved)
     int textured = 0;             // 1 = textured, 0 = flat shaded

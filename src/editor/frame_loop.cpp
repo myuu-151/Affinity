@@ -787,7 +787,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.c_str(), ma.useQuads ? 1 : 0);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance);
     }
     fprintf(f, "\n");
 
@@ -1096,8 +1096,9 @@ static bool LoadProject(const std::string& path)
         {
             char mname[256], mpath[512], mtexpath[512] = {};
             int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1;
-            // Try newest format: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath|usequads
-            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads);
+            float mdrawdist = 0.0f;
+            // Try newest format: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath|usequads|drawdist
+            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d|%f", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist);
             if (matched < 2)
             {
                 // Try format without usequads: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath
@@ -1134,6 +1135,8 @@ static bool LoadProject(const std::string& path)
                     ma.grayscale = (mgrayscale != 0);
                 if (matched >= 11)
                     ma.useQuads = (musequads != 0);
+                if (matched >= 12)
+                    ma.drawDistance = mdrawdist;
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -1485,6 +1488,8 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         ImGui::Checkbox("Grayscale##meshGray", &ma.grayscale);
         if (!ma.quadIndices.empty())
             ImGui::Checkbox("Use Quads##meshQuad", &ma.useQuads);
+        ImGui::DragFloat("Draw Distance##mesh", &ma.drawDistance, 1.0f, 0.0f, 2000.0f, "%.0f");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = use global draw distance");
 
         ImGui::Separator();
         ImGui::Checkbox("Textured##meshTex", &ma.textured);
@@ -4537,6 +4542,7 @@ void FrameTick(float dt)
                     me.halfRes = ma.halfRes ? 1 : 0;
                     me.wireframe = ma.wireframe ? 1 : 0;
                     me.grayscale = ma.grayscale ? 1 : 0;
+                    me.drawDistance = ma.drawDistance;
                     me.textured = ma.textured ? 1 : 0;
                     me.texW = ma.texW;
                     me.texH = ma.texH;

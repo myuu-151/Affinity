@@ -335,8 +335,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         }
         f << " };\n";
 
-        // Mesh descriptor: { vertCount, indexCount, quadIdxCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase, wireframe, grayscale }
-        f << "static const int afn_mesh_desc[][14] = {\n";
+        // Mesh descriptor: { vertCount, indexCount, quadIdxCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase, wireframe, grayscale, drawDist }
+        f << "static const int afn_mesh_desc[][15] = {\n";
         for (size_t mi = 0; mi < meshes.size(); mi++)
         {
             const auto& mesh = meshes[mi];
@@ -349,12 +349,16 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             int tw = mesh.texW;
             while (tw > 1) { tw >>= 1; texShift++; }
 
+            int drawDist = 0;
+            if (mesh.drawDistance > 0.0f)
+                drawDist = (int)(mesh.drawDistance / 4.0f * 256.0f);
+
             f << "    { " << vc << ", " << ic << ", " << qic << ", "
               << mesh.colorRGB15 << ", " << mesh.cullMode << ", "
               << mesh.lit << ", 0, " << mesh.halfRes << ", "
               << mesh.textured << ", " << mesh.texW << ", "
               << texShift << ", 0, "
-              << mesh.wireframe << ", " << mesh.grayscale << " },\n";
+              << mesh.wireframe << ", " << mesh.grayscale << ", " << drawDist << " },\n";
         }
         f << "};\n\n";
     }
