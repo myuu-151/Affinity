@@ -1161,6 +1161,193 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "};\n\n";
     }
 
+    // ---- Collision data: pre-baked world-space faces + spatial grid ----
+    {
+        struct CollFaceExp {
+            float v0x, v0z, v1x, v1z, v2x, v2z;
+            float v0y, v1y, v2y;
+            float nx, nz; // XZ-normalized face normal
+            int flags;     // 1=floor, 2=ceiling, 4=wall
+        };
+
+        std::vector<CollFaceExp> collFaces;
+
+        for (size_t si = 0; si < sprites.size(); si++)
+        {
+            if (sprites[si].meshIdx < 0) continue;
+            int mi = sprites[si].meshIdx;
+            if (mi >= (int)meshes.size()) continue;
+
+            const auto& mesh = meshes[mi];
+            const auto& spr = sprites[si];
+
+            float sprScale = spr.scale;
+            float rotRad = spr.rotation * 3.14159265f / 180.0f;
+            float cosR = cosf(rotRad);
+            float sinR = sinf(rotRad);
+
+            // Transform all vertices to world space (editor coords)
+            int vc = (int)mesh.positions.size() / 3;
+            std::vector<float> wp(vc * 3);
+            for (int v = 0; v < vc; v++)
+            {
+                float lx = mesh.positions[v * 3 + 0] * sprScale;
+                float ly = mesh.positions[v * 3 + 1] * sprScale;
+                float lz = mesh.positions[v * 3 + 2] * sprScale;
+                wp[v * 3 + 0] = lx * cosR - lz * sinR + spr.x;
+                wp[v * 3 + 1] = ly + spr.y;
+                wp[v * 3 + 2] = lx * sinR + lz * cosR + spr.z;
+            }
+
+            auto emitTri = [&](int i0, int i1, int i2) {
+                float ax = wp[i0*3], ay = wp[i0*3+1], az = wp[i0*3+2];
+                float bx = wp[i1*3], by = wp[i1*3+1], bz = wp[i1*3+2];
+                float cx = wp[i2*3], cy = wp[i2*3+1], cz = wp[i2*3+2];
+
+                float e1x = bx-ax, e1y = by-ay, e1z = bz-az;
+                float e2x = cx-ax, e2y = cy-ay, e2z = cz-az;
+                float fnx = e1y*e2z - e1z*e2y;
+                float fny = e1z*e2x - e1x*e2z;
+                float fnz = e1x*e2y - e1y*e2x;
+                float len = sqrtf(fnx*fnx + fny*fny + fnz*fnz);
+                if (len < 0.0001f) return;
+                fnx /= len; fny /= len; fnz /= len;
+
+                int flags;
+                if (fny > 0.7f)       flags = 1; // floor
+                else if (fny < -0.7f) flags = 2; // ceiling
+                else                   flags = 4; // wall
+
+                // Re-normalize normal in XZ plane for wall push direction
+                float nxzLen = sqrtf(fnx*fnx + fnz*fnz);
+                float nnx = 0, nnz = 0;
+                if (nxzLen > 0.001f) { nnx = fnx / nxzLen; nnz = fnz / nxzLen; }
+
+                CollFaceExp cf;
+                cf.v0x = ax; cf.v0z = az; cf.v1x = bx; cf.v1z = bz; cf.v2x = cx; cf.v2z = cz;
+                cf.v0y = ay; cf.v1y = by; cf.v2y = cy;
+                cf.nx = nnx; cf.nz = nnz;
+                cf.flags = flags;
+                collFaces.push_back(cf);
+            };
+
+            for (int t = 0; t < (int)mesh.indices.size() / 3; t++)
+                emitTri(mesh.indices[t*3], mesh.indices[t*3+1], mesh.indices[t*3+2]);
+
+            for (int q = 0; q < (int)mesh.quadIndices.size() / 4; q++)
+            {
+                int q0 = mesh.quadIndices[q*4], q1 = mesh.quadIndices[q*4+1];
+                int q2 = mesh.quadIndices[q*4+2], q3 = mesh.quadIndices[q*4+3];
+                emitTri(q0, q1, q2);
+                emitTri(q0, q2, q3);
+            }
+        }
+
+        if (!collFaces.empty())
+        {
+            int totalFaces = (int)collFaces.size();
+            const int GRID_SIZE = 8;
+
+            // Build spatial grid (8x8 over 256x256 GBA pixel map)
+            std::vector<std::vector<int>> gridCells(GRID_SIZE * GRID_SIZE);
+            for (int fi = 0; fi < totalFaces; fi++)
+            {
+                const auto& cf = collFaces[fi];
+                auto toGBAPx = [](float ec) { return (ec + 512.0f) / 4.0f; };
+
+                float minX = std::min({toGBAPx(cf.v0x), toGBAPx(cf.v1x), toGBAPx(cf.v2x)});
+                float maxX = std::max({toGBAPx(cf.v0x), toGBAPx(cf.v1x), toGBAPx(cf.v2x)});
+                float minZ = std::min({toGBAPx(cf.v0z), toGBAPx(cf.v1z), toGBAPx(cf.v2z)});
+                float maxZ = std::max({toGBAPx(cf.v0z), toGBAPx(cf.v1z), toGBAPx(cf.v2z)});
+
+                int cMinX = std::max(0, (int)(minX / 32.0f));
+                int cMaxX = std::min(GRID_SIZE - 1, (int)(maxX / 32.0f));
+                int cMinZ = std::max(0, (int)(minZ / 32.0f));
+                int cMaxZ = std::min(GRID_SIZE - 1, (int)(maxZ / 32.0f));
+
+                for (int gz = cMinZ; gz <= cMaxZ; gz++)
+                    for (int gx = cMinX; gx <= cMaxX; gx++)
+                        gridCells[gz * GRID_SIZE + gx].push_back(fi);
+            }
+
+            // Flatten grid into start/count + face index list
+            std::vector<int> gridStart(GRID_SIZE * GRID_SIZE);
+            std::vector<int> gridCount(GRID_SIZE * GRID_SIZE);
+            std::vector<int> gridFaceList;
+            for (int c = 0; c < GRID_SIZE * GRID_SIZE; c++)
+            {
+                gridStart[c] = (int)gridFaceList.size();
+                gridCount[c] = (int)gridCells[c].size();
+                for (int fi : gridCells[c]) gridFaceList.push_back(fi);
+            }
+
+            // Emit defines
+            f << "// ---- Collision data (" << totalFaces << " faces, "
+              << gridFaceList.size() << " grid refs) ----\n";
+            f << "#define AFN_COL_FACE_COUNT " << totalFaces << "\n";
+            f << "#define AFN_COL_GRID_SIZE 8\n";
+            f << "#define AFN_COL_GRID_SHIFT 13\n\n";
+
+            // CollFace struct
+            f << "typedef struct {\n";
+            f << "    int v0x, v0z, v1x, v1z, v2x, v2z;\n";
+            f << "    int v0y, v1y, v2y;\n";
+            f << "    int nx, nz;\n";
+            f << "    int flags;\n";
+            f << "} CollFace;\n\n";
+
+            // Face array
+            f << "static const CollFace afn_col_faces[" << totalFaces << "] = {\n";
+            for (int fi = 0; fi < totalFaces; fi++)
+            {
+                const auto& cf = collFaces[fi];
+                auto toFx = [](float ec) { return (int)((ec + 512.0f) / 4.0f * 256.0f); };
+                auto toFy = [](float ey) { return (int)(ey / 4.0f * 256.0f); };
+
+                f << "    { "
+                  << toFx(cf.v0x) << "," << toFx(cf.v0z) << ", "
+                  << toFx(cf.v1x) << "," << toFx(cf.v1z) << ", "
+                  << toFx(cf.v2x) << "," << toFx(cf.v2z) << ", "
+                  << toFy(cf.v0y) << "," << toFy(cf.v1y) << "," << toFy(cf.v2y) << ", "
+                  << (int)(cf.nx * 256.0f) << "," << (int)(cf.nz * 256.0f) << ", "
+                  << cf.flags << " },\n";
+            }
+            f << "};\n\n";
+
+            // Grid start/count arrays
+            f << "static const u16 afn_col_grid_start[" << GRID_SIZE * GRID_SIZE << "] = {\n    ";
+            for (int c = 0; c < GRID_SIZE * GRID_SIZE; c++)
+            {
+                f << gridStart[c];
+                if (c + 1 < GRID_SIZE * GRID_SIZE) f << ",";
+                if ((c + 1) % 8 == 0 && c + 1 < GRID_SIZE * GRID_SIZE) f << "\n    ";
+            }
+            f << "\n};\n";
+
+            f << "static const u16 afn_col_grid_count[" << GRID_SIZE * GRID_SIZE << "] = {\n    ";
+            for (int c = 0; c < GRID_SIZE * GRID_SIZE; c++)
+            {
+                f << gridCount[c];
+                if (c + 1 < GRID_SIZE * GRID_SIZE) f << ",";
+                if ((c + 1) % 8 == 0 && c + 1 < GRID_SIZE * GRID_SIZE) f << "\n    ";
+            }
+            f << "\n};\n";
+
+            if (!gridFaceList.empty())
+            {
+                f << "static const u16 afn_col_grid_faces[" << gridFaceList.size() << "] = {\n    ";
+                for (size_t i = 0; i < gridFaceList.size(); i++)
+                {
+                    f << gridFaceList[i];
+                    if (i + 1 < gridFaceList.size()) f << ",";
+                    if ((i + 1) % 16 == 0 && i + 1 < gridFaceList.size()) f << "\n    ";
+                }
+                f << "\n};\n";
+            }
+            f << "\n";
+        }
+    }
+
     f << "\n#endif // MAPDATA_H\n";
     f.close();
     return true;

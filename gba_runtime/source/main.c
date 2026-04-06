@@ -2351,6 +2351,172 @@ static void render_minimap_bg_sw(u16* buf)
 #endif /* AFN_MESH_COUNT > 0 */
 
 // ---------------------------------------------------------------------------
+// Collision — wall blocking + slide, floor height tracking
+// ---------------------------------------------------------------------------
+
+#ifdef AFN_COL_FACE_COUNT
+
+#define COL_PLAYER_RADIUS 768   // 3 pixels (16.8)
+#define COL_PLAYER_HEIGHT 3072  // 12 pixels (16.8)
+#define COL_STEP_HEIGHT   1024  // 4 pixels (16.8)
+#define COL_GRAVITY       24    // ~0.09 pixels/frame^2 (16.8)
+#define COL_TERMINAL_VEL  1536  // 6 pixels/frame max fall speed (16.8)
+#define COL_JUMP_VEL      512   // initial upward velocity on jump (16.8)
+
+static FIXED player_ground_y;  // current floor height under player
+static FIXED player_vy;        // vertical velocity (16.8, negative = falling)
+static int   player_on_ground; // 1 if standing on a floor face
+static FIXED cam_y_smooth;     // smoothed camera Y offset (16.8)
+
+// Squared distance from point (px,pz) to segment (ax,az)-(bx,bz) in XZ.
+// All inputs 16.8 fixed. Returns dist^2 in a shifted space (>>4 per axis).
+static int col_seg_dist2(int px, int pz, int ax, int az, int bx, int bz)
+{
+    int dx = (bx - ax) >> 4, dz = (bz - az) >> 4;
+    int ex = (px - ax) >> 4, ez = (pz - az) >> 4;
+    int dot_ed = ex * dx + ez * dz;
+    int dot_dd = dx * dx + dz * dz;
+    int cx4, cz4;
+    if (dot_dd == 0) {
+        cx4 = ax >> 4; cz4 = az >> 4;
+    } else if (dot_ed <= 0) {
+        cx4 = ax >> 4; cz4 = az >> 4;
+    } else if (dot_ed >= dot_dd) {
+        cx4 = bx >> 4; cz4 = bz >> 4;
+    } else {
+        cx4 = (ax >> 4) + ((int)(((long long)dx * dot_ed) / dot_dd));
+        cz4 = (az >> 4) + ((int)(((long long)dz * dot_ed) / dot_dd));
+    }
+    int rx = (px >> 4) - cx4, rz = (pz >> 4) - cz4;
+    return rx * rx + rz * rz;
+}
+
+// Push player out of wall faces. Modifies *px, *pz in place.
+static void collide_walls(FIXED *px, FIXED *pz, FIXED py)
+{
+    // Determine which grid cells the player overlaps (center cell + neighbours if near edge)
+    int gx = *px >> AFN_COL_GRID_SHIFT;
+    int gz = *pz >> AFN_COL_GRID_SHIFT;
+    if (gx < 0) gx = 0; if (gx >= AFN_COL_GRID_SIZE) gx = AFN_COL_GRID_SIZE - 1;
+    if (gz < 0) gz = 0; if (gz >= AFN_COL_GRID_SIZE) gz = AFN_COL_GRID_SIZE - 1;
+
+    int radius4 = COL_PLAYER_RADIUS >> 4;
+    int radius4_sq = radius4 * radius4;
+
+    // Check the player's cell (could expand to 2x2 for faces near cell borders,
+    // but single cell is fine when PLAYER_RADIUS < cell_size/2)
+    int ci = gz * AFN_COL_GRID_SIZE + gx;
+    int start = afn_col_grid_start[ci];
+    int count = afn_col_grid_count[ci];
+    int i;
+
+    for (i = 0; i < count; i++)
+    {
+        const CollFace *face = &afn_col_faces[afn_col_grid_faces[start + i]];
+        if (!(face->flags & 4)) continue; // not a wall
+
+        // Y overlap check
+        int fMinY = face->v0y;
+        if (face->v1y < fMinY) fMinY = face->v1y;
+        if (face->v2y < fMinY) fMinY = face->v2y;
+        int fMaxY = face->v0y;
+        if (face->v1y > fMaxY) fMaxY = face->v1y;
+        if (face->v2y > fMaxY) fMaxY = face->v2y;
+        if (py + COL_PLAYER_HEIGHT < fMinY || py > fMaxY) continue;
+
+        // Check if player XZ is close to any triangle edge
+        int d0 = col_seg_dist2(*px, *pz, face->v0x, face->v0z, face->v1x, face->v1z);
+        int d1 = col_seg_dist2(*px, *pz, face->v1x, face->v1z, face->v2x, face->v2z);
+        int d2 = col_seg_dist2(*px, *pz, face->v2x, face->v2z, face->v0x, face->v0z);
+        int dMin = d0; if (d1 < dMin) dMin = d1; if (d2 < dMin) dMin = d2;
+        if (dMin >= radius4_sq) continue;
+
+        // Signed distance to face plane in XZ (16.8 result)
+        int dist = (((long long)(*px - face->v0x) * face->nx +
+                     (long long)(*pz - face->v0z) * face->nz) >> 8);
+
+        if (dist > 0 && dist < COL_PLAYER_RADIUS)
+        {
+            int push = COL_PLAYER_RADIUS - dist;
+            *px += (face->nx * push) >> 8;
+            *pz += (face->nz * push) >> 8;
+        }
+        else if (dist < 0 && dist > -COL_PLAYER_RADIUS)
+        {
+            int push = COL_PLAYER_RADIUS + dist;
+            *px -= (face->nx * push) >> 8;
+            *pz -= (face->nz * push) >> 8;
+        }
+    }
+}
+
+// Find the highest floor below the player. Sets *outY to floor height.
+// Returns 1 if a floor was found, 0 if the player is over empty space.
+static int collide_floor(FIXED px, FIXED pz, FIXED py, FIXED *outY)
+{
+    int gx = px >> AFN_COL_GRID_SHIFT;
+    int gz = pz >> AFN_COL_GRID_SHIFT;
+    if (gx < 0) gx = 0; if (gx >= AFN_COL_GRID_SIZE) gx = AFN_COL_GRID_SIZE - 1;
+    if (gz < 0) gz = 0; if (gz >= AFN_COL_GRID_SIZE) gz = AFN_COL_GRID_SIZE - 1;
+
+    int ci = gz * AFN_COL_GRID_SIZE + gx;
+    int start = afn_col_grid_start[ci];
+    int count = afn_col_grid_count[ci];
+
+    FIXED bestY = 0;
+    int found = 0;
+    int i;
+
+    for (i = 0; i < count; i++)
+    {
+        const CollFace *face = &afn_col_faces[afn_col_grid_faces[start + i]];
+        if (!(face->flags & 1)) continue; // not a floor
+
+        // Point-in-triangle test (XZ, cross product signs)
+        // Shift by 8 to work in integer pixels (avoids overflow)
+        int ax = face->v0x >> 8, az = face->v0z >> 8;
+        int bx = face->v1x >> 8, bz = face->v1z >> 8;
+        int cx = face->v2x >> 8, cz = face->v2z >> 8;
+        int ppx = px >> 8, ppz = pz >> 8;
+
+        int c0 = (bx - ax) * (ppz - az) - (bz - az) * (ppx - ax);
+        int c1 = (cx - bx) * (ppz - bz) - (cz - bz) * (ppx - bx);
+        int c2 = (ax - cx) * (ppz - cz) - (az - cz) * (ppx - cx);
+
+        if (!((c0 >= 0 && c1 >= 0 && c2 >= 0) || (c0 <= 0 && c1 <= 0 && c2 <= 0)))
+            continue; // not inside triangle
+
+        // Interpolate Y at player position using barycentric coords
+        // c1 = weight for v0, c2 = weight for v1, c0 = weight for v2
+        int area = c0 + c1 + c2;
+        FIXED floorY;
+        if (area == 0) {
+            floorY = (face->v0y + face->v1y + face->v2y) / 3;
+        } else {
+            // Use 64-bit to avoid overflow: cross values (±256^2) * Y (±65536)
+            floorY = (FIXED)(((long long)c1 * face->v0y +
+                              (long long)c2 * face->v1y +
+                              (long long)c0 * face->v2y) / area);
+        }
+
+        // Accept highest floor that's below player + step threshold
+        if (floorY <= py + COL_STEP_HEIGHT)
+        {
+            if (!found || floorY > bestY)
+            {
+                bestY = floorY;
+                found = 1;
+            }
+        }
+    }
+
+    *outY = bestY;
+    return found;
+}
+
+#endif /* AFN_COL_FACE_COUNT */
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -2508,6 +2674,12 @@ int main(void)
     orbit_dist = AFN_ORBIT_DIST;
     player_moving = 0;
     player_move_angle = 0x4000; // face away from camera (show back)
+#ifdef AFN_COL_FACE_COUNT
+    player_ground_y = 0;
+    player_vy = 0;
+    player_on_ground = 1;
+    cam_y_smooth = 0;
+#endif
 #endif
 
     // Precompute initial sin/cos
@@ -2677,7 +2849,55 @@ int main(void)
                 player_move_angle = player_move_angle - orbit_angle;
             }
 
-            // Clamp player to map bounds
+            // Collision: wall blocking + slide, gravity + floor
+#ifdef AFN_COL_FACE_COUNT
+            collide_walls(&player_x, &player_z, player_y);
+
+            // Jump: A button, only when on ground
+            if (key_hit(KEY_A) && player_on_ground)
+                player_vy = COL_JUMP_VEL;
+
+            // Gravity: accelerate downward, clamp to terminal velocity
+            player_vy -= COL_GRAVITY;
+            if (player_vy < -COL_TERMINAL_VEL) player_vy = -COL_TERMINAL_VEL;
+            player_y += player_vy;
+
+            // Floor check
+            {
+                FIXED floorY;
+                int onFloor = collide_floor(player_x, player_z, player_y, &floorY);
+                if (onFloor && player_y <= floorY)
+                {
+                    // Land on floor
+                    player_y = floorY;
+                    player_vy = 0;
+                    player_on_ground = 1;
+                    player_ground_y = floorY;
+                }
+                else
+                {
+                    // Airborne — no floor beneath, keep falling
+                    player_on_ground = 0;
+                    player_ground_y = player_y;
+                }
+            }
+
+            // Smooth camera Y — lag behind player elevation changes
+            {
+                FIXED target_cam_y = player_y;
+                FIXED dy = target_cam_y - cam_y_smooth;
+                // Faster catch-up when landing (below target), slower when rising
+                if (player_on_ground)
+                    cam_y_smooth += (dy * 96) >> 8;  // ~37% per frame — snappy land
+                else
+                    cam_y_smooth += (dy * 32) >> 8;  // ~12% per frame — floaty air
+                // Snap when close to avoid drift
+                if (dy > -4 && dy < 4) cam_y_smooth = target_cam_y;
+            }
+            cam_h = AFN_CAM_H + cam_y_smooth;
+#endif
+
+            // Clamp player to map bounds (safety net)
             if (player_x < 0) player_x = 0;
             if (player_x > (256 << 8)) player_x = 256 << 8;
             if (player_z < 0) player_z = 0;
@@ -2686,6 +2906,7 @@ int main(void)
             // Update sprite position
             g_sprites[player_sprite_idx].x = player_x;
             g_sprites[player_sprite_idx].z = player_z;
+            g_sprites[player_sprite_idx].y = player_y;
 
             // Place camera behind the player with smooth follow
             {
@@ -2843,6 +3064,12 @@ int main(void)
                 orbit_angle = AFN_CAM_ANGLE;
                 player_moving = 0;
                 player_move_angle = 0x4000; // face away from camera (show back)
+#ifdef AFN_COL_FACE_COUNT
+                player_ground_y = 0;
+                player_vy = 0;
+                player_on_ground = 1;
+                cam_y_smooth = 0;
+#endif
             }
 #ifdef AFFINITY_HAS_SPRITES
             cam_x     = AFN_CAM_X;
