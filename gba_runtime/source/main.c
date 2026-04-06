@@ -39,8 +39,9 @@ static u8* tex_cache_ptrs[AFN_MESH_COUNT];
 
 // ARM assembly textured scanline inner loop (tex_scanline.s, runs in IWRAM)
 extern void tex_scanline_asm(u16* rp, int pairCount, int su, int sv,
-                             int du2, int dv2, const u8* tex,
-                             int texMask, int texShift, int palBase);
+                             int du4, int dv4, const u8* tex,
+                             int texMask, int texShift, int palBase,
+                             int rowOff);
 #endif
 
 // ARM assembly flat-fill scanline using VRAM strb trick (hline_fast.s, IWRAM)
@@ -51,6 +52,9 @@ static int dbg_tex_tris;    // textured triangles this frame
 static int dbg_tex_spans;   // textured scanlines this frame
 static int dbg_tex_pixels;  // textured pixel pairs this frame
 static int dbg_vcount;      // VCOUNT delta (scanlines consumed by render)
+static int dbg_fps;         // frames per second
+static int dbg_fps_frames;  // frame counter for FPS measurement
+static u16 dbg_fps_timer;   // last timer snapshot
 
 // Tiny 4x5 digit font for debug overlay (digits 0-9, packed as 4-bit rows)
 static const u32 dbg_font[10] = {
@@ -950,6 +954,10 @@ static void init_divLUT(void)
 
 // Safe 16.16 slope: uses 64-bit intermediate to prevent overflow with large coords
 #define SLOPE16(dx, dy) ((int)(((long long)(dx) << 16) / (dy)))
+// Fast 16.16 slope via divLUT (32-bit multiply, no division). h must be < AFN_DIV_LUT_SIZE.
+#define SLOPE_DIV(dx, h) ((int)((dx) * (int)divLUT[(h)]))
+// Use divLUT when height fits, else fall back to SLOPE16
+#define SLOPE_AUTO(dx, h) ((h) < AFN_DIV_LUT_SIZE ? SLOPE_DIV(dx, h) : SLOPE16(dx, h))
 
 // Project a view-space vertex to screen coords (clamped to guard band)
 static inline void project_vertex(int side, int height, int depth, int* osx, int* osy)
@@ -1210,13 +1218,13 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
     if (totalH <= 0) return;
 
     /* Long edge slope (16.16 fixed) — one divide total */
-    dxLong = SLOPE16(x2 - x0, totalH);
+    dxLong = SLOPE_AUTO(x2 - x0, totalH);
 
     /* Upper half: y0 -> y1 */
     segH = y1 - y0;
     if (segH > 0)
     {
-        dxShort = SLOPE16(x1 - x0, segH);
+        dxShort = SLOPE_AUTO(x1 - x0, segH);
 
         /* Skip rows above screen — sat32 prevents overflow with extreme coords */
         iy0 = y0 < 0 ? 0 : y0;
@@ -1248,7 +1256,7 @@ IWRAM_CODE static void rasterize_tri(u16* buf, int x0, int y0, int x1, int y1, i
     segH = y2 - y1;
     if (segH > 0)
     {
-        dxShort = SLOPE16(x2 - x1, segH);
+        dxShort = SLOPE_AUTO(x2 - x1, segH);
 
         iy0 = y1 < 0 ? 0 : y1;
         iy2 = y2 < 160 ? y2 : 159;
@@ -1303,12 +1311,12 @@ IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int 
     totalH = y2 - y0;
     if (totalH <= 0) return;
 
-    dxLong = SLOPE16(x2 - x0, totalH);
+    dxLong = SLOPE_AUTO(x2 - x0, totalH);
 
     segH = y1 - y0;
     if (segH > 0)
     {
-        dxShort = SLOPE16(x1 - x0, segH);
+        dxShort = SLOPE_AUTO(x1 - x0, segH);
 
         iy0 = y0 < 0 ? 0 : y0;
         {
@@ -1344,7 +1352,7 @@ IWRAM_CODE static void rasterize_tri_half(u16* buf, int x0, int y0, int x1, int 
     segH = y2 - y1;
     if (segH > 0)
     {
-        dxShort = SLOPE16(x2 - x1, segH);
+        dxShort = SLOPE_AUTO(x2 - x1, segH);
 
         iy0 = y1 < 0 ? 0 : y1;
         {
@@ -1403,12 +1411,12 @@ IWRAM_CODE static void rasterize_tri_quarter(u16* buf, int x0, int y0, int x1, i
     totalH = y2 - y0;
     if (totalH <= 0) return;
 
-    dxLong = SLOPE16(x2 - x0, totalH);
+    dxLong = SLOPE_AUTO(x2 - x0, totalH);
 
     segH = y1 - y0;
     if (segH > 0)
     {
-        dxShort = SLOPE16(x1 - x0, segH);
+        dxShort = SLOPE_AUTO(x1 - x0, segH);
         iy0 = y0 < 0 ? 0 : y0;
         {
             int skip = iy0 - y0;
@@ -1440,7 +1448,7 @@ IWRAM_CODE static void rasterize_tri_quarter(u16* buf, int x0, int y0, int x1, i
     segH = y2 - y1;
     if (segH > 0)
     {
-        dxShort = SLOPE16(x2 - x1, segH);
+        dxShort = SLOPE_AUTO(x2 - x1, segH);
         iy0 = y1 < 0 ? 0 : y1;
         {
             int skipLong  = iy0 - y0;
@@ -1490,12 +1498,12 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
     totalH = y2 - y0;
     if (totalH <= 0) return;
 
-    dxLong = SLOPE16(x2 - x0, totalH);
+    dxLong = SLOPE_AUTO(x2 - x0, totalH);
 
     segH = y1 - y0;
     if (segH > 0)
     {
-        dxShort = SLOPE16(x1 - x0, segH);
+        dxShort = SLOPE_AUTO(x1 - x0, segH);
 
         iy0 = y0 < 0 ? 0 : y0;
         iy2 = y1 < 160 ? y1 : 160;
@@ -1525,7 +1533,7 @@ IWRAM_CODE static void rasterize_tri_cov(u16* buf, int x0, int y0, int x1, int y
     segH = y2 - y1;
     if (segH > 0)
     {
-        dxShort = SLOPE16(x2 - x1, segH);
+        dxShort = SLOPE_AUTO(x2 - x1, segH);
 
         iy0 = y1 < 0 ? 0 : y1;
         iy2 = y2 < 160 ? y2 : 159;
@@ -1617,9 +1625,10 @@ IWRAM_CODE static void draw_line(u16* buf, int x0, int y0, int x1, int y1, u8 pa
     }
 }
 
-// Affine texture-mapped triangle rasterizer
-// UVs are 8.8 fixed-point (pre-scaled to texture dimensions)
-// z params accepted but unused (kept for call-site compatibility)
+// Textured triangle rasterizer — affine UV, half-res with inline row duplication.
+// Uses ARM ASM inner loop with dual row write (~9 cycles/pixel).
+// UVs are 8.8 fixed-point (pre-scaled to texture dimensions).
+// Edge slopes use divLUT multiply (no 64-bit division), OpenLara-style.
 IWRAM_CODE static void rasterize_tri_tex(u16* buf,
     int x0, int y0, int u0, int v0, int z0,
     int x1, int y1, int u1, int v1, int z1,
@@ -1629,9 +1638,11 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
     int tmp;
     int totalH, segH;
     int iy0, iy2, y;
-    int xLong, xShort, uLong, uShort, vLong, vShort;
-    int dxLong, dxShort, duLong, duShort, dvLong, dvShort;
-    int spanW;
+    int xLong, xShort;
+    int dxLong, dxShort;
+    int uL, uS, duL, duS;
+    int vL, vS, dvL, dvS;
+    int inv;
     (void)z0; (void)z1; (void)z2;
 
     /* Sort by y (carry u,v along) */
@@ -1642,210 +1653,197 @@ IWRAM_CODE static void rasterize_tri_tex(u16* buf,
     totalH = y2 - y0;
     if (totalH <= 0) return;
 
-    dxLong = SLOPE16(x2 - x0, totalH);
-    duLong = SLOPE16(u2 - u0, totalH);
-    dvLong = SLOPE16(v2 - v0, totalH);
+    /* divLUT multiply: (dx * (1<<16)/h) = (dx << 16) / h, no 64-bit divide.
+       Fall back to SLOPE16 if height exceeds LUT (extreme off-screen coords). */
+    if (totalH < AFN_DIV_LUT_SIZE) {
+        inv = (int)divLUT[totalH];
+        dxLong = (x2 - x0) * inv;
+        duL    = (u2 - u0) * inv;
+        dvL    = (v2 - v0) * inv;
+    } else {
+        dxLong = SLOPE16(x2 - x0, totalH);
+        duL    = SLOPE16(u2 - u0, totalH);
+        dvL    = SLOPE16(v2 - v0, totalH);
+    }
 
-    /* Upper half */
+    /* ---------- Upper half ---------- */
     segH = y1 - y0;
     if (segH > 0)
     {
-        dxShort = SLOPE16(x1 - x0, segH);
-        duShort = SLOPE16(u1 - u0, segH);
-        dvShort = SLOPE16(v1 - v0, segH);
+        if (segH < AFN_DIV_LUT_SIZE) {
+            inv = (int)divLUT[segH];
+            dxShort = (x1 - x0) * inv;
+            duS     = (u1 - u0) * inv;
+            dvS     = (v1 - v0) * inv;
+        } else {
+            dxShort = SLOPE16(x1 - x0, segH);
+            duS     = SLOPE16(u1 - u0, segH);
+            dvS     = SLOPE16(v1 - v0, segH);
+        }
         iy0 = y0 < 0 ? 0 : y0;
         iy2 = y1 < 160 ? y1 : 160;
-
-        /* Align iy0 to even scanline for half-height rendering */
         iy0 = iy0 & ~1;
         {
             int skip = iy0 - y0;
             xLong  = sat32((long long)x0 * 65536 + (long long)dxLong  * skip);
             xShort = sat32((long long)x0 * 65536 + (long long)dxShort * skip);
-            uLong  = sat32((long long)u0 * 65536 + (long long)duLong  * skip);
-            uShort = sat32((long long)u0 * 65536 + (long long)duShort * skip);
-            vLong  = sat32((long long)v0 * 65536 + (long long)dvLong  * skip);
-            vShort = sat32((long long)v0 * 65536 + (long long)dvShort * skip);
+            uL = sat32((long long)u0 * 65536 + (long long)duL * skip);
+            uS = sat32((long long)u0 * 65536 + (long long)duS * skip);
+            vL = sat32((long long)v0 * 65536 + (long long)dvL * skip);
+            vS = sat32((long long)v0 * 65536 + (long long)dvS * skip);
         }
-
-        /* Double-step slopes for skipping every other scanline */
-        int dxLong2 = dxLong << 1, dxShort2 = dxShort << 1;
-        int duLong2 = duLong << 1, duShort2 = duShort << 1;
-        int dvLong2 = dvLong << 1, dvShort2 = dvShort << 1;
+        int dxL2 = dxLong<<1, dxS2 = dxShort<<1;
+        int duL2 = duL<<1, duS2 = duS<<1;
+        int dvL2 = dvL<<1, dvS2 = dvS<<1;
 
         for (y = iy0; y < iy2; y += 2)
         {
-            {
             int xl = xLong >> 16, xr = xShort >> 16;
-            int ul = uLong >> 16, ur = uShort >> 16;
-            int vl = vLong >> 16, vr = vShort >> 16;
+            int ul = uL >> 16, ur = uS >> 16;
+            int vl = vL >> 16, vr = vS >> 16;
             if (xl > xr) { tmp=xl;xl=xr;xr=tmp; tmp=ul;ul=ur;ur=tmp; tmp=vl;vl=vr;vr=tmp; }
-            if (xr < 0) goto next_upper;
+            if (xr < 0 || xl > 239) goto next_upper;
             if (xr > 239) xr = 239;
             {
-            /* Compute du/dv from full span BEFORE clipping */
             int fullSpan = xr - xl;
             int du2 = 0, dv2 = 0;
             if (fullSpan > 0) {
-                if (fullSpan <= 240) {
-                    int rcp = rcp_table[fullSpan];
-                    du2 = ((ur - ul) * rcp) >> 8;
-                    dv2 = ((vr - vl) * rcp) >> 8;
-                } else {
-                    du2 = ((ur - ul) << 8) / fullSpan;
-                    dv2 = ((vr - vl) << 8) / fullSpan;
-                }
+                int rcp = (fullSpan <= 240) ? rcp_table[fullSpan] : (int)(65536 / fullSpan);
+                du2 = ((ur - ul) * rcp) >> 8;
+                dv2 = ((vr - vl) * rcp) >> 8;
             }
             int su = ul << 8, sv = vl << 8;
-            /* Left clip: advance su/sv forward (2 x 32-bit mul vs 4 x 64-bit) */
-            if (xl < 0) {
-                int skip = -xl;
-                su += (du2 * skip) >> 1;
-                sv += (dv2 * skip) >> 1;
-                xl = 0;
-            }
-            spanW = xr - xl;
+            if (xl < 0) { su += (du2 * (-xl)) >> 1; sv += (dv2 * (-xl)) >> 1; xl = 0; }
+            int spanW = xr - xl;
             if (spanW >= 0)
             {
                 dbg_tex_spans++;
-                dbg_tex_pixels += (spanW + 1) >> 1;
                 u16* row = buf + y * 120;
                 int rowOff = (y + 1 < 160) ? 120 : 0;
                 int x = xl;
-                {
                 u16* rp = row + (x >> 1);
                 int ti;
-                int du4 = du2 << 1, dv4 = dv2 << 1;
-                if ((x & 1) && x <= xr)
-                {
+                if ((x & 1) && x <= xr) {
                     ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
                     u16 val = (*rp & 0x00FF) | ((u16)(palBase + tex[ti]) << 8);
                     *rp = val; *(rp + rowOff) = val;
                     su += du2; sv += dv2; x++; rp = row + (x >> 1);
                 }
-                for (; x + 1 <= xr; x += 2, rp++)
-                {
-                    ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
-                    u16 px = palBase + tex[ti];
-                    u16 val = px | (px << 8);
-                    *rp = val; *(rp + rowOff) = val;
-                    su += du4; sv += dv4;
+                int pairCount = (xr - x + 1) >> 1;
+                if (pairCount > 120) pairCount = 120; /* safety clamp */
+                if (pairCount > 0) {
+                    int du4 = du2 << 1, dv4 = dv2 << 1;
+                    dbg_tex_pixels += pairCount;
+                    tex_scanline_asm(rp, pairCount, su, sv, du4, dv4,
+                                     tex, texMask, texShift, palBase,
+                                     rowOff * 2);
+                    su += du4 * pairCount; sv += dv4 * pairCount;
+                    x += pairCount * 2; rp += pairCount;
                 }
-                if (x <= xr)
-                {
+                if (x <= xr) {
                     ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
                     u16 val = (*rp & 0xFF00) | (palBase + tex[ti]);
                     *rp = val; *(rp + rowOff) = val;
                 }
-                }
-            }
             }
             }
             next_upper:
-            xLong += dxLong2; xShort += dxShort2;
-            uLong += duLong2; uShort += duShort2;
-            vLong += dvLong2; vShort += dvShort2;
+            xLong += dxL2; xShort += dxS2;
+            uL += duL2; uS += duS2;
+            vL += dvL2; vS += dvS2;
         }
     }
 
-    /* Lower half */
+    /* ---------- Lower half ---------- */
     segH = y2 - y1;
     if (segH > 0)
     {
-        dxShort = SLOPE16(x2 - x1, segH);
-        duShort = SLOPE16(u2 - u1, segH);
-        dvShort = SLOPE16(v2 - v1, segH);
+        if (segH < AFN_DIV_LUT_SIZE) {
+            inv = (int)divLUT[segH];
+            dxShort = (x2 - x1) * inv;
+            duS     = (u2 - u1) * inv;
+            dvS     = (v2 - v1) * inv;
+        } else {
+            dxShort = SLOPE16(x2 - x1, segH);
+            duS     = SLOPE16(u2 - u1, segH);
+            dvS     = SLOPE16(v2 - v1, segH);
+        }
         iy0 = y1 < 0 ? 0 : y1;
         iy0 = iy0 & ~1;
         {
-            int skipLong  = iy0 - y0;
-            int skipShort = iy0 - y1;
-            xLong  = sat32((long long)x0 * 65536 + (long long)dxLong  * skipLong);
-            xShort = sat32((long long)x1 * 65536 + (long long)dxShort * skipShort);
-            uLong  = sat32((long long)u0 * 65536 + (long long)duLong  * skipLong);
-            uShort = sat32((long long)u1 * 65536 + (long long)duShort * skipShort);
-            vLong  = sat32((long long)v0 * 65536 + (long long)dvLong  * skipLong);
-            vShort = sat32((long long)v1 * 65536 + (long long)dvShort * skipShort);
+            int skipL = iy0 - y0;
+            int skipS = iy0 - y1;
+            xLong  = sat32((long long)x0 * 65536 + (long long)dxLong  * skipL);
+            xShort = sat32((long long)x1 * 65536 + (long long)dxShort * skipS);
+            uL = sat32((long long)u0 * 65536 + (long long)duL * skipL);
+            uS = sat32((long long)u1 * 65536 + (long long)duS * skipS);
+            vL = sat32((long long)v0 * 65536 + (long long)dvL * skipL);
+            vS = sat32((long long)v1 * 65536 + (long long)dvS * skipS);
         }
         iy2 = y2 < 160 ? y2 : 159;
-
-        int dxLong2 = dxLong << 1, dxShort2 = dxShort << 1;
-        int duLong2 = duLong << 1, duShort2 = duShort << 1;
-        int dvLong2 = dvLong << 1, dvShort2 = dvShort << 1;
+        int dxL2 = dxLong<<1, dxS2 = dxShort<<1;
+        int duL2 = duL<<1, duS2 = duS<<1;
+        int dvL2 = dvL<<1, dvS2 = dvS<<1;
 
         for (y = iy0; y <= iy2; y += 2)
         {
-            {
             int xl = xLong >> 16, xr = xShort >> 16;
-            int ul = uLong >> 16, ur = uShort >> 16;
-            int vl = vLong >> 16, vr = vShort >> 16;
+            int ul = uL >> 16, ur = uS >> 16;
+            int vl = vL >> 16, vr = vS >> 16;
             if (xl > xr) { tmp=xl;xl=xr;xr=tmp; tmp=ul;ul=ur;ur=tmp; tmp=vl;vl=vr;vr=tmp; }
-            if (xr < 0) goto next_lower;
+            if (xr < 0 || xl > 239) goto next_lower;
             if (xr > 239) xr = 239;
             {
             int fullSpan = xr - xl;
             int du2 = 0, dv2 = 0;
             if (fullSpan > 0) {
-                if (fullSpan <= 240) {
-                    int rcp = rcp_table[fullSpan];
-                    du2 = ((ur - ul) * rcp) >> 8;
-                    dv2 = ((vr - vl) * rcp) >> 8;
-                } else {
-                    du2 = ((ur - ul) << 8) / fullSpan;
-                    dv2 = ((vr - vl) << 8) / fullSpan;
-                }
+                int rcp = (fullSpan <= 240) ? rcp_table[fullSpan] : (int)(65536 / fullSpan);
+                du2 = ((ur - ul) * rcp) >> 8;
+                dv2 = ((vr - vl) * rcp) >> 8;
             }
             int su = ul << 8, sv = vl << 8;
-            if (xl < 0) {
-                int skip = -xl;
-                su += (du2 * skip) >> 1;
-                sv += (dv2 * skip) >> 1;
-                xl = 0;
-            }
-            spanW = xr - xl;
+            if (xl < 0) { su += (du2 * (-xl)) >> 1; sv += (dv2 * (-xl)) >> 1; xl = 0; }
+            int spanW = xr - xl;
             if (spanW >= 0)
             {
                 dbg_tex_spans++;
-                dbg_tex_pixels += (spanW + 1) >> 1;
                 u16* row = buf + y * 120;
                 int rowOff = (y + 1 < 160 && y + 1 <= iy2) ? 120 : 0;
                 int x = xl;
-                {
                 u16* rp = row + (x >> 1);
                 int ti;
-                int du4 = du2 << 1, dv4 = dv2 << 1;
-                if ((x & 1) && x <= xr)
-                {
+                if ((x & 1) && x <= xr) {
                     ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
                     u16 val = (*rp & 0x00FF) | ((u16)(palBase + tex[ti]) << 8);
                     *rp = val; *(rp + rowOff) = val;
                     su += du2; sv += dv2; x++; rp = row + (x >> 1);
                 }
-                for (; x + 1 <= xr; x += 2, rp++)
-                {
-                    ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
-                    u16 px = palBase + tex[ti];
-                    u16 val = px | (px << 8);
-                    *rp = val; *(rp + rowOff) = val;
-                    su += du4; sv += dv4;
+                int pairCount = (xr - x + 1) >> 1;
+                if (pairCount > 120) pairCount = 120; /* safety clamp */
+                if (pairCount > 0) {
+                    int du4 = du2 << 1, dv4 = dv2 << 1;
+                    dbg_tex_pixels += pairCount;
+                    tex_scanline_asm(rp, pairCount, su, sv, du4, dv4,
+                                     tex, texMask, texShift, palBase,
+                                     rowOff * 2);
+                    su += du4 * pairCount; sv += dv4 * pairCount;
+                    x += pairCount * 2; rp += pairCount;
                 }
-                if (x <= xr)
-                {
+                if (x <= xr) {
                     ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
                     u16 val = (*rp & 0xFF00) | (palBase + tex[ti]);
                     *rp = val; *(rp + rowOff) = val;
                 }
-                }
-            }
             }
             }
             next_lower:
-            xLong += dxLong2; xShort += dxShort2;
-            uLong += duLong2; uShort += duShort2;
-            vLong += dvLong2; vShort += dvShort2;
+            xLong += dxL2; xShort += dxS2;
+            uL += duL2; uS += duS2;
+            vL += dvL2; vS += dvS2;
         }
     }
 }
+
 
 // Near-plane clip and render a flat-shaded convex polygon (tri or quad).
 // Sutherland-Hodgman clip against CLIP_NEAR_Z in view space, project, then
@@ -2512,6 +2510,14 @@ int main(void)
     g_sinf = lu_sin(cam_angle) >> 4;
 
     // --- Set up HBlank interrupt ---
+    // Start Timer 3 for FPS measurement (prescaler=1024, ~16384 Hz)
+    REG_TM3CNT_H = 0;
+    REG_TM3CNT_L = 0;
+    REG_TM3CNT_H = 0x0083; // enable, prescaler=1024
+    dbg_fps_timer = 0;
+    dbg_fps_frames = 0;
+    dbg_fps = 0;
+
     irq_init(NULL);
     irq_add(II_VBLANK, NULL);
 #if !defined(AFN_MESH_COUNT) || AFN_MESH_COUNT == 0
@@ -2551,8 +2557,22 @@ int main(void)
             dbg_int(backbuf, 30, 2, dbg_tex_spans, 1);
             dbg_int(backbuf, 62, 2, dbg_tex_pixels, 1);
             dbg_int(backbuf, 102, 2, (dbg_vcount * 64) / 1000, 1); // Kcycles (budget ~280)
+            // FPS counter — bottom-right
+            dbg_int(backbuf, 240 - 20, 160 - 7, dbg_fps, 1);
         }
 #endif
+        // FPS measurement: count frames, update every ~1 second using Timer 3
+        // Timer 3: prescaler=1024, ticks at 16384 Hz. 16384 ticks ≈ 1 second.
+        dbg_fps_frames++;
+        {
+            u16 now = REG_TM3CNT_L;
+            u16 elapsed = now - dbg_fps_timer;
+            if (elapsed >= 16384) { // ~1 second
+                dbg_fps = dbg_fps_frames;
+                dbg_fps_frames = 0;
+                dbg_fps_timer = now;
+            }
+        }
         VBlankIntrWait();
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
         // Flip page

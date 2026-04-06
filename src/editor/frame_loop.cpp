@@ -33,7 +33,7 @@ static Mode7Camera sCamera;
 static bool sInitialized = false;
 
 // Editor mode tabs
-enum class EditorTab { Map, Sprites, Tiles, Skybox, Player, ThreeD, Mode7 };
+enum class EditorTab { Map, Sprites, Tiles, Skybox, Player, ThreeD, Mode7, Tilemap };
 static EditorTab sActiveTab = EditorTab::Map;
 
 // Dummy tileset: 16 colors for the palette display
@@ -51,6 +51,16 @@ static int sSelectedPalColor = 1;
 // Dummy tile grid for tileset display (8x16 = 128 tiles)
 static constexpr int kTilesetCols = 16;
 static constexpr int kTilesetRows = 8;
+
+// ---- Tilemap tab state ----
+static Mode7Map sTilemapData;
+static bool sTilemapDataInit = false;
+static int sTmSelectedTile = 0;    // selected tile index in tileset
+static int sTmPalColor = 1;        // selected palette paint color
+static float sTmMapZoom = 1.0f;    // tilemap grid zoom
+static float sTmMapPanX = 0.0f;
+static float sTmMapPanY = 0.0f;
+static int sTmTool = 0;            // 0 = draw, 1 = erase, 2 = pick
 
 // World size — supports up to 1024x1024 pixel tilemaps (128x128 tiles)
 static constexpr float kWorldSize = 1024.0f;   // total extent
@@ -285,6 +295,7 @@ static std::string sPackageOutputPath;
 
 enum class BuildTarget { GBA = 0, NDS = 1 };
 static BuildTarget sBuildTarget = BuildTarget::NDS; // default to NDS
+static bool sBuildRequested = false; // set by toolbar Build button
 
 // Project file
 static std::string sProjectPath;  // empty = no project loaded
@@ -1453,6 +1464,7 @@ static void DrawTabBar()
 
     TabButton("Scene",   EditorTab::Map);
     TabButton("Mode 7",  EditorTab::Mode7);
+    TabButton("Tilemap", EditorTab::Tilemap);
     TabButton("Tiles",   EditorTab::Tiles);
     TabButton("Sprites", EditorTab::Sprites);
     TabButton("Skybox",  EditorTab::Skybox);
@@ -1507,6 +1519,18 @@ static void DrawTabBar()
                 sSprites[sSavedPlayerIdx] = sSavedPlayerSprite;
             sSavedPlayerIdx = -1;
         }
+        ImGui::PopStyleColor(2);
+    }
+    ImGui::SameLine();
+
+    // Build button (triggers GBA/NDS build)
+    {
+        ImVec4 buildCol = sPackaging ? ImVec4(0.4f, 0.4f, 0.1f, 1.0f) : ImVec4(0.15f, 0.3f, 0.55f, 1.0f);
+        ImGui::PushStyleColor(ImGuiCol_Button, buildCol);
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+        const char* buildLabel = sPackaging ? "Building..." : (sBuildTarget == BuildTarget::NDS ? "Build NDS" : "Build GBA");
+        if (ImGui::Button(buildLabel, ImVec2(btnW * 1.2f, btnH)) && !sPackaging)
+            sBuildRequested = true;
         ImGui::PopStyleColor(2);
     }
     ImGui::SameLine();
@@ -3392,6 +3416,404 @@ static void DrawPalettePanel(ImVec2 pos, ImVec2 size)
     ImGui::PopStyleColor(2);
 }
 
+// ---- Tilemap Tab: tile editor + tileset + tilemap grid + palette ----
+static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
+{
+    // Init tilemap data on first use
+    if (!sTilemapDataInit)
+    {
+        sTilemapDataInit = true;
+        // Default tileset: 128 blank tiles + default palette
+        sTilemapData.tileset.tiles.resize(kTilesetCols * kTilesetRows);
+        for (auto& t : sTilemapData.tileset.tiles)
+            memset(t.pixels, 0, sizeof(t.pixels));
+        for (int i = 0; i < 16; i++)
+            sTilemapData.tileset.palette[i] = sPalette[i];
+        // Default tilemap: 32x32, all tile 0
+        sTilemapData.floor.width  = 32;
+        sTilemapData.floor.height = 32;
+        sTilemapData.floor.tileIndices.resize(32 * 32, 0);
+    }
+
+    Tileset& ts = sTilemapData.tileset;
+    TilemapLayer& tm = sTilemapData.floor;
+    int tileCount = (int)ts.tiles.size();
+
+    // Layout: left panel (tile editor + tileset), right panel (tilemap grid + palette)
+    float leftW = size.x * 0.35f;
+    float rightW = size.x - leftW;
+
+    const ImGuiWindowFlags panelFlags =
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
+        ImGuiWindowFlags_NoTitleBar;
+
+    // ======== LEFT PANEL: tile pixel editor + tileset grid ========
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(ImVec2(leftW, size.y));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.25f, 0.30f, 1.0f));
+    ImGui::Begin("##TmLeft", nullptr, panelFlags);
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        // --- Palette row at top ---
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Palette");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(click to select, double-click to edit)");
+        {
+            ImVec2 cursor = ImGui::GetCursorScreenPos();
+            float sw = std::max(14.0f, (leftW - 24.0f) / 16.0f);
+            for (int i = 0; i < 16; i++)
+            {
+                ImVec2 sp(cursor.x + i * sw, cursor.y);
+                DrawColorBox(dl, sp, ImVec2(sw - 1, sw - 1),
+                    ts.palette[i], i == sTmPalColor);
+            }
+            ImGui::SetCursorScreenPos(cursor);
+            ImGui::InvisibleButton("##TmPalRow", ImVec2(16 * sw, sw));
+            if (ImGui::IsItemClicked())
+            {
+                float mx = ImGui::GetMousePos().x - cursor.x;
+                sTmPalColor = std::clamp((int)(mx / sw), 0, 15);
+            }
+            // Double-click to open color picker
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
+            {
+                float mx = ImGui::GetMousePos().x - cursor.x;
+                sTmPalColor = std::clamp((int)(mx / sw), 0, 15);
+                ImGui::OpenPopup("##TmPalEdit");
+            }
+            ImGui::SetCursorScreenPos(ImVec2(cursor.x, cursor.y + sw + 4));
+        }
+
+        // Palette color picker popup
+        if (ImGui::BeginPopup("##TmPalEdit"))
+        {
+            uint32_t c = ts.palette[sTmPalColor];
+            float col[3] = {
+                ((c >>  0) & 0xFF) / 255.0f,
+                ((c >>  8) & 0xFF) / 255.0f,
+                ((c >> 16) & 0xFF) / 255.0f
+            };
+            if (ImGui::ColorPicker3("##cp", col, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview))
+            {
+                uint8_t r = (uint8_t)(col[0] * 255.0f);
+                uint8_t g = (uint8_t)(col[1] * 255.0f);
+                uint8_t b = (uint8_t)(col[2] * 255.0f);
+                ts.palette[sTmPalColor] = 0xFF000000 | (b << 16) | (g << 8) | r;
+            }
+            ImGui::EndPopup();
+        }
+
+        ImGui::Separator();
+
+        // --- Tile pixel editor ---
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Tile Editor");
+        ImGui::SameLine();
+        ImGui::Text("(Tile %d)", sTmSelectedTile);
+
+        if (sTmSelectedTile >= 0 && sTmSelectedTile < tileCount)
+        {
+            Tile8& tile = ts.tiles[sTmSelectedTile];
+            ImVec2 cursor = ImGui::GetCursorScreenPos();
+            float pixSz = std::min((leftW - 24.0f) / (float)kTileSize, size.y * 0.3f / (float)kTileSize);
+            pixSz = std::max(pixSz, 8.0f);
+
+            for (int py = 0; py < kTileSize; py++)
+            {
+                for (int px = 0; px < kTileSize; px++)
+                {
+                    uint8_t ci = tile.pixels[py * kTileSize + px];
+                    uint32_t col = ts.palette[ci & 0x0F];
+                    ImVec2 p0(cursor.x + px * pixSz, cursor.y + py * pixSz);
+                    ImVec2 p1(p0.x + pixSz, p0.y + pixSz);
+                    dl->AddRectFilled(p0, p1, col);
+                    dl->AddRect(p0, p1, 0x30FFFFFF);
+                }
+            }
+
+            float gridSz = kTileSize * pixSz;
+            ImGui::SetCursorScreenPos(cursor);
+            ImGui::InvisibleButton("##TilePixEdit", ImVec2(gridSz, gridSz));
+
+            // Paint on click/drag
+            if (ImGui::IsItemActive() && ImGui::IsMouseDown(0))
+            {
+                ImVec2 mouse = ImGui::GetMousePos();
+                int px = (int)((mouse.x - cursor.x) / pixSz);
+                int py = (int)((mouse.y - cursor.y) / pixSz);
+                if (px >= 0 && px < kTileSize && py >= 0 && py < kTileSize)
+                    tile.pixels[py * kTileSize + px] = (uint8_t)sTmPalColor;
+            }
+            // Right-click to pick color
+            if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(1))
+            {
+                ImVec2 mouse = ImGui::GetMousePos();
+                int px = (int)((mouse.x - cursor.x) / pixSz);
+                int py = (int)((mouse.y - cursor.y) / pixSz);
+                if (px >= 0 && px < kTileSize && py >= 0 && py < kTileSize)
+                    sTmPalColor = tile.pixels[py * kTileSize + px] & 0x0F;
+            }
+
+            ImGui::SetCursorScreenPos(ImVec2(cursor.x, cursor.y + gridSz + 4));
+        }
+
+        // --- Fill / Clear buttons ---
+        if (ImGui::Button("Fill Tile"))
+        {
+            if (sTmSelectedTile >= 0 && sTmSelectedTile < tileCount)
+                memset(ts.tiles[sTmSelectedTile].pixels, (uint8_t)sTmPalColor, kTileSize * kTileSize);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Clear Tile"))
+        {
+            if (sTmSelectedTile >= 0 && sTmSelectedTile < tileCount)
+                memset(ts.tiles[sTmSelectedTile].pixels, 0, kTileSize * kTileSize);
+        }
+
+        ImGui::Separator();
+
+        // --- Tileset grid (select which tile to edit / place) ---
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Tileset");
+        ImGui::SameLine();
+        ImGui::Text("(%d tiles)", tileCount);
+        {
+            ImVec2 cursor = ImGui::GetCursorScreenPos();
+            int cols = kTilesetCols;
+            float tSz = std::max(8.0f, (leftW - 24.0f) / (float)cols);
+            int rows = (tileCount + cols - 1) / cols;
+
+            for (int i = 0; i < tileCount; i++)
+            {
+                int r = i / cols, c = i % cols;
+                ImVec2 p0(cursor.x + c * tSz, cursor.y + r * tSz);
+                ImVec2 p1(p0.x + tSz, p0.y + tSz);
+
+                // Draw tile thumbnail: sample 4 corners for a quick preview
+                const Tile8& tile = ts.tiles[i];
+                uint32_t c00 = ts.palette[tile.pixels[0] & 0xF];
+                uint32_t c10 = ts.palette[tile.pixels[kTileSize - 1] & 0xF];
+                uint32_t c01 = ts.palette[tile.pixels[(kTileSize - 1) * kTileSize] & 0xF];
+                uint32_t c11 = ts.palette[tile.pixels[kTileSize * kTileSize - 1] & 0xF];
+                // Approximate with top-left and bottom-right halves
+                ImVec2 mid(p0.x + tSz * 0.5f, p0.y + tSz * 0.5f);
+                dl->AddRectFilled(p0, mid, c00);
+                dl->AddRectFilled(ImVec2(mid.x, p0.y), ImVec2(p1.x, mid.y), c10);
+                dl->AddRectFilled(ImVec2(p0.x, mid.y), ImVec2(mid.x, p1.y), c01);
+                dl->AddRectFilled(mid, p1, c11);
+
+                dl->AddRect(p0, p1, 0x30FFFFFF);
+                if (i == sTmSelectedTile)
+                    dl->AddRect(p0, p1, 0xFFFFFFFF, 0.0f, 0, 2.0f);
+            }
+
+            float gridH = rows * tSz;
+            ImGui::SetCursorScreenPos(cursor);
+            ImGui::InvisibleButton("##TmTilesetGrid", ImVec2(cols * tSz, std::max(gridH, 1.0f)));
+            if (ImGui::IsItemClicked())
+            {
+                ImVec2 mouse = ImGui::GetMousePos();
+                int c = (int)((mouse.x - cursor.x) / tSz);
+                int r = (int)((mouse.y - cursor.y) / tSz);
+                c = std::clamp(c, 0, cols - 1);
+                r = std::clamp(r, 0, rows - 1);
+                int idx = r * cols + c;
+                if (idx < tileCount) sTmSelectedTile = idx;
+            }
+        }
+
+        // Add/remove tile buttons
+        if (ImGui::Button("+ Tile"))
+        {
+            if (tileCount < 256)
+            {
+                ts.tiles.push_back(Tile8{});
+                memset(ts.tiles.back().pixels, 0, sizeof(Tile8::pixels));
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("- Tile") && tileCount > 1)
+        {
+            ts.tiles.pop_back();
+            if (sTmSelectedTile >= (int)ts.tiles.size())
+                sTmSelectedTile = (int)ts.tiles.size() - 1;
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+
+    // ======== RIGHT PANEL: tilemap grid ========
+    ImGui::SetNextWindowPos(ImVec2(pos.x + leftW, pos.y));
+    ImGui::SetNextWindowSize(ImVec2(rightW, size.y));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.10f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.25f, 0.30f, 1.0f));
+    ImGui::Begin("##TmRight", nullptr, panelFlags | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        // Toolbar
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Tilemap");
+        ImGui::SameLine();
+        ImGui::Text("(%dx%d)", tm.width, tm.height);
+        ImGui::SameLine(0, 20);
+        ImGui::RadioButton("Draw", &sTmTool, 0); ImGui::SameLine();
+        ImGui::RadioButton("Erase", &sTmTool, 1); ImGui::SameLine();
+        ImGui::RadioButton("Pick", &sTmTool, 2);
+        ImGui::SameLine(0, 20);
+
+        // Resize tilemap
+        static int sTmNewW = 32, sTmNewH = 32;
+        ImGui::PushItemWidth(50);
+        ImGui::InputInt("##mw", &sTmNewW, 0); ImGui::SameLine();
+        ImGui::Text("x"); ImGui::SameLine();
+        ImGui::InputInt("##mh", &sTmNewH, 0);
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        if (ImGui::Button("Resize"))
+        {
+            sTmNewW = std::clamp(sTmNewW, 1, 128);
+            sTmNewH = std::clamp(sTmNewH, 1, 128);
+            std::vector<uint16_t> newMap(sTmNewW * sTmNewH, 0);
+            int copyW = std::min(tm.width, sTmNewW);
+            int copyH = std::min(tm.height, sTmNewH);
+            for (int y = 0; y < copyH; y++)
+                for (int x = 0; x < copyW; x++)
+                    newMap[y * sTmNewW + x] = tm.tileIndices[y * tm.width + x];
+            tm.tileIndices = std::move(newMap);
+            tm.width  = sTmNewW;
+            tm.height = sTmNewH;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Clear Map"))
+            std::fill(tm.tileIndices.begin(), tm.tileIndices.end(), (uint16_t)0);
+
+        ImGui::Separator();
+
+        ImVec2 cursor = ImGui::GetCursorScreenPos();
+        float availW = rightW - 16.0f;
+        float availH = size.y - (cursor.y - pos.y) - 8.0f;
+
+        // Zoom + pan
+        if (ImGui::IsWindowHovered())
+        {
+            float wheel = ImGui::GetIO().MouseWheel;
+            if (wheel != 0.0f)
+            {
+                float oldZoom = sTmMapZoom;
+                sTmMapZoom *= (wheel > 0.0f) ? 1.15f : (1.0f / 1.15f);
+                sTmMapZoom = std::clamp(sTmMapZoom, 0.25f, 8.0f);
+                ImVec2 mouse = ImGui::GetMousePos();
+                float mx = mouse.x - cursor.x - sTmMapPanX;
+                float mz = mouse.y - cursor.y - sTmMapPanY;
+                float ratio = 1.0f - sTmMapZoom / oldZoom;
+                sTmMapPanX += mx * ratio;
+                sTmMapPanY += mz * ratio;
+            }
+            if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
+            {
+                ImVec2 delta = ImGui::GetIO().MouseDelta;
+                sTmMapPanX += delta.x;
+                sTmMapPanY += delta.y;
+            }
+        }
+
+        float baseCell = std::min(availW / (float)tm.width, availH / (float)tm.height);
+        baseCell = std::max(baseCell, 2.0f);
+        float cellSz = baseCell * sTmMapZoom;
+
+        // Clip to panel
+        ImVec2 clipMin = cursor;
+        ImVec2 clipMax(pos.x + leftW + rightW, pos.y + size.y);
+        dl->PushClipRect(clipMin, clipMax, true);
+        float ox = cursor.x + sTmMapPanX;
+        float oy = cursor.y + sTmMapPanY;
+
+        // Draw tilemap cells
+        for (int ty = 0; ty < tm.height; ty++)
+        {
+            for (int tx = 0; tx < tm.width; tx++)
+            {
+                ImVec2 p0(ox + tx * cellSz, oy + ty * cellSz);
+                ImVec2 p1(p0.x + cellSz, p0.y + cellSz);
+
+                // Skip if off-screen
+                if (p1.x < clipMin.x || p0.x > clipMax.x ||
+                    p1.y < clipMin.y || p0.y > clipMax.y)
+                    continue;
+
+                int ti = tm.tileIndices[ty * tm.width + tx];
+                if (ti >= 0 && ti < (int)ts.tiles.size())
+                {
+                    // Render tile: draw each pixel row as colored rectangles
+                    const Tile8& tile = ts.tiles[ti];
+                    float pxSz = cellSz / (float)kTileSize;
+                    if (pxSz >= 2.0f)
+                    {
+                        // Per-pixel rendering when zoomed in enough
+                        for (int py = 0; py < kTileSize; py++)
+                        {
+                            for (int px = 0; px < kTileSize; px++)
+                            {
+                                uint8_t ci = tile.pixels[py * kTileSize + px];
+                                uint32_t col = ts.palette[ci & 0xF];
+                                ImVec2 pp0(p0.x + px * pxSz, p0.y + py * pxSz);
+                                ImVec2 pp1(pp0.x + pxSz, pp0.y + pxSz);
+                                dl->AddRectFilled(pp0, pp1, col);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Zoomed out: just use the dominant color (center pixel)
+                        uint8_t ci = tile.pixels[4 * kTileSize + 4];
+                        dl->AddRectFilled(p0, p1, ts.palette[ci & 0xF]);
+                    }
+                }
+                else
+                {
+                    // Empty / invalid tile
+                    dl->AddRectFilled(p0, p1, 0xFF1A1A1A);
+                }
+
+                // Grid lines (only when cells are big enough)
+                if (cellSz >= 4.0f)
+                    dl->AddRect(p0, p1, 0x20FFFFFF);
+            }
+        }
+
+        // Border around entire tilemap
+        dl->AddRect(ImVec2(ox, oy),
+            ImVec2(ox + tm.width * cellSz, oy + tm.height * cellSz),
+            0x60FFFFFF);
+
+        dl->PopClipRect();
+
+        // Mouse interaction: draw/erase/pick tiles
+        ImGui::SetCursorScreenPos(cursor);
+        ImGui::InvisibleButton("##TmMapGrid", ImVec2(availW, availH));
+
+        if (ImGui::IsItemActive() && (ImGui::IsMouseDown(0)))
+        {
+            ImVec2 mouse = ImGui::GetMousePos();
+            int tx = (int)((mouse.x - ox) / cellSz);
+            int ty = (int)((mouse.y - oy) / cellSz);
+            if (tx >= 0 && tx < tm.width && ty >= 0 && ty < tm.height)
+            {
+                int idx = ty * tm.width + tx;
+                if (sTmTool == 0) // Draw
+                    tm.tileIndices[idx] = (uint16_t)sTmSelectedTile;
+                else if (sTmTool == 1) // Erase
+                    tm.tileIndices[idx] = 0;
+                else if (sTmTool == 2) // Pick
+                    sTmSelectedTile = tm.tileIndices[idx];
+            }
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+}
+
 // ---- Bottom status bar ----
 static void DrawStatusBar(ImVec2 pos, ImVec2 size)
 {
@@ -3418,6 +3840,25 @@ static void DrawStatusBar(ImVec2 pos, ImVec2 size)
         ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.55f, 1.0f),
             "[EDIT]  %s  |  Cam: (%.0f, %.0f) H:%.0f  |  Sprites: %d",
             projLabel.c_str(), sCamera.x, sCamera.z, sCamera.height, sSpriteCount);
+
+    // FPS counter (right-aligned)
+    {
+        static float fpsTimer = 0.0f;
+        static int fpsFrames = 0;
+        static float fpsDisplay = 0.0f;
+        fpsTimer += ImGui::GetIO().DeltaTime;
+        fpsFrames++;
+        if (fpsTimer >= 0.5f) {
+            fpsDisplay = fpsFrames / fpsTimer;
+            fpsFrames = 0;
+            fpsTimer = 0.0f;
+        }
+        char fpsBuf[32];
+        snprintf(fpsBuf, sizeof(fpsBuf), "%.0f FPS", fpsDisplay);
+        float textW = ImGui::CalcTextSize(fpsBuf).x;
+        ImGui::SameLine(size.x - textW - Scaled(8));
+        ImGui::TextColored(ImVec4(0.45f, 0.45f, 0.5f, 1.0f), "%s", fpsBuf);
+    }
 
     ImGui::End();
     ImGui::PopStyleColor();
@@ -3516,8 +3957,10 @@ void FrameTick(float dt)
         if (ImGui::RadioButton("NDS", sBuildTarget == BuildTarget::NDS))
             sBuildTarget = BuildTarget::NDS;
         ImGui::SameLine();
-        if (ImGui::MenuItem("Build", nullptr, false, !sPackaging))
+        bool buildFromMenu = ImGui::MenuItem("Build", nullptr, false, !sPackaging);
+        if (buildFromMenu || sBuildRequested)
         {
+            sBuildRequested = false;
             sPackaging = true;
             sPackageDone = false;
             sPackageSuccess = false;
@@ -4204,7 +4647,13 @@ void FrameTick(float dt)
     // Draw everything
     DrawTabBar();
 
-    if (sActiveTab == EditorTab::Tiles)
+    if (sActiveTab == EditorTab::Tilemap)
+    {
+        DrawTilemapTab(
+            ImVec2(vp->WorkPos.x, bodyY),
+            ImVec2(totalW, bodyH));
+    }
+    else if (sActiveTab == EditorTab::Tiles)
     {
         // Tiles tab: placeholder
         ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
