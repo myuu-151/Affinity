@@ -60,11 +60,28 @@ afn_hline_fast:
     movs    r12, r12, lsr #1       @ r12 = pair count (pixels / 2)
     bxeq    lr
 
-.Lfill_loop:
-    strb    r3, [r0], #2           @ VRAM trick: fills 2 pixels     [2cy]
-    subs    r12, r12, #1           @                                [1cy]
-    bne     .Lfill_loop            @                                [3cy taken]
-    @ ~6 cycles per 2 pixels = ~3 cycles/pixel
+    @ Unrolled 8x: handle groups of 8 pairs (16 pixels)
+    subs    r12, r12, #8
+    blt     .Lfill_tail
+.Lfill8:
+    strb    r3, [r0], #2
+    strb    r3, [r0], #2
+    strb    r3, [r0], #2
+    strb    r3, [r0], #2
+    strb    r3, [r0], #2
+    strb    r3, [r0], #2
+    strb    r3, [r0], #2
+    strb    r3, [r0], #2
+    subs    r12, r12, #8
+    bge     .Lfill8
+
+.Lfill_tail:
+    adds    r12, r12, #8           @ restore remaining count
+    bxeq    lr
+.Lfill1:
+    strb    r3, [r0], #2
+    subs    r12, r12, #1
+    bne     .Lfill1
 
     bx      lr
 
