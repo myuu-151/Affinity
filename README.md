@@ -2,28 +2,31 @@
   <img src="assets/affinity_logo.png" alt="Affinity Logo" width="300">
 </p>
 
-# Affinity GBA Engine
-A Game Boy Advance 3D engine with a Windows desktop editor. Import OBJ meshes, place objects in a live perspective viewport, and package directly to a `.gba` ROM with software polygon rasterization.
+# Affinity Engine
+A Game Boy Advance and Nintendo DS 3D engine with a Windows desktop editor. Import OBJ meshes, place objects in a live perspective viewport, and package directly to a `.gba` or `.nds` ROM with software polygon rasterization.
 
 > **This project is in active development.** Features and APIs may change.
 
 ## Features
 
-- **Software 3D Renderer** — Flat-shaded polygon rasterizer running on GBA hardware in Mode 4 bitmap
-- **OBJ Mesh Import** — Load .obj files as mesh assets with per-mesh backface culling options
-- **Live Viewport** — Real-time perspective preview matching the GBA's rendering
+- **Dual Target** — Build for GBA or NDS from the same project
+- **Software 3D Renderer** — Flat-shaded and textured polygon rasterizer with ARM ASM inner loops
+- **OBJ Mesh Import** — Load .obj files with per-mesh culling, draw distance, LOD, and texture mapping
+- **Live Viewport** — Real-time perspective preview matching GBA/NDS rendering
+- **Tilemap Editor** — Draggable grid with sprite tile painting, object placement, and save/load
 - **Blender-style Transform Tools** — G to grab, S to scale, X/Y/Z axis constraints with visual guides
-- **One-Click GBA Packaging** — Builds a `.gba` ROM from the editor via devkitARM
+- **One-Click Packaging** — Builds a `.gba` or `.nds` ROM from the editor via devkitARM
 - **mGBA Integration** — Launch the ROM directly in mGBA from the editor
 - **OAM Sprite Support** — 8-directional animated sprites with LOD, running alongside 3D meshes
-- **Mode 7 Fallback** — HBlank affine floor rendering still available for non-mesh projects
+- **Collision System** — Pre-baked world-space collision with spatial grid, wall slide, floor snapping, and gravity
+- **Mode 7 Floor** — HBlank affine floor rendering for non-mesh projects
 
 ## Requirements
 
 - **Windows 10/11**
 - **Visual Studio 2022+** (MSVC C++17)
 - **CMake 3.16+**
-- **devkitPro** with devkitARM + libtonc (for GBA ROM packaging)
+- **devkitPro** with devkitARM + libtonc (for GBA/NDS ROM packaging)
 
 ## Build
 
@@ -67,9 +70,12 @@ src/
   map/          — Mesh, sprite, and tilemap data types
   math/         — Fixed-point types, camera struct
   platform/gba/ — GBA ROM packaging (invokes devkitARM)
+  platform/nds/ — NDS ROM packaging
 gba_runtime/
   source/       — GBA runtime (software polygon renderer, OAM sprites, input)
   include/      — Generated mesh and map data header
+nds_runtime/
+  source/       — NDS runtime
 thirdparty/
   glfw/         — Windowing
   imgui/        — UI framework
