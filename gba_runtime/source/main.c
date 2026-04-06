@@ -962,10 +962,11 @@ static void init_divLUT(void)
 // Project a view-space vertex to screen coords (clamped to guard band)
 static inline void project_vertex(int side, int height, int depth, int* osx, int* osy)
 {
-    int px, py;
+    int px, py, projScale;
     if (depth < 16) depth = 16;
-    px = 120 + (side * cam_fov) / depth;
-    py = m7_horizon + (height * cam_fov) / depth;
+    projScale = (cam_fov << 12) / depth;
+    px = 120 + ((side * projScale) >> 12);
+    py = m7_horizon + ((height * projScale) >> 12);
     if (px < -16000) px = -16000; if (px > 16000) px = 16000;
     if (py < -16000) py = -16000; if (py > 16000) py = 16000;
     *osx = px;
@@ -2017,8 +2018,12 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             vSide[v] = side;
             vHeight[v] = heightDiff;
 
-            sy[v] = m7_horizon + (heightDiff * cam_fov) / fovLambda;
-            sx[v] = 120 + (side * cam_fov) / fovLambda;
+            /* One division per vertex instead of two */
+            {
+                int projScale = (cam_fov << 12) / fovLambda;
+                sy[v] = m7_horizon + ((heightDiff * projScale) >> 12);
+                sx[v] = 120 + ((side * projScale) >> 12);
+            }
 
             vis[v] = 1;
         }
