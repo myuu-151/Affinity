@@ -1919,124 +1919,145 @@ static void clip_render_poly_flat(u16* buf,
     }
 }
 
-// Triangle sort entry for painter's algorithm
-typedef struct { int triIdx; int depth; } TriSort;
+// Triangle sort entry for painter's algorithm (global across all meshes)
+typedef struct { int triIdx; int depth; u8 slot; } TriSort;
+
+// Per-mesh rendering state for global sort
+typedef struct {
+    int mi, sprIdx, vertBase;
+    const s8* norms;
+    const u16* indices;
+    const u16* quadIndices;
+    const s16* uvs;
+    const u8* tex;
+    FIXED cosR, sinR;
+    int cullMode, meshLit, meshHalfRes, meshTextured, meshWireframe, meshGrayscale;
+    int texW, texShift, texMask, texPalBase;
+    int vertCount, idxCount, quadIdxCount;
+} MeshSlot;
+
+// Global projected vertex arrays — must be in EWRAM (too large for IWRAM)
+#define MAX_GLOBAL_VERTS 2048
+#define MAX_GLOBAL_TRIS  512
+EWRAM_DATA static int g_vsx[MAX_GLOBAL_VERTS];
+EWRAM_DATA static int g_vsy[MAX_GLOBAL_VERTS];
+EWRAM_DATA static FIXED g_vsz[MAX_GLOBAL_VERTS];
+EWRAM_DATA static FIXED g_vRawDepth[MAX_GLOBAL_VERTS];
+EWRAM_DATA static FIXED g_vSide[MAX_GLOBAL_VERTS];
+EWRAM_DATA static FIXED g_vHeight[MAX_GLOBAL_VERTS];
+EWRAM_DATA static TriSort g_triOrder[MAX_GLOBAL_TRIS];
+static MeshSlot g_meshSlots[MAX_FLOOR_SPRITES];
 
 // Render all mesh sprites into the bitmap
 IWRAM_CODE static void render_meshes_sw(u16* buf)
 {
-    int i;
-    for (i = 0; i < g_spriteCount; i++)
+    int si, v, t;
+    int slotCount = 0, totalVerts = 0, totalTris = 0;
+
+    // ---- Phase 1: Project all meshes, build global tri list ----
+    for (si = 0; si < g_spriteCount; si++)
     {
-        int mi, vertCount, idxCount, quadIdxCount, cullMode, meshLit, meshSorted, meshHalfRes, meshTextured, meshWireframe, meshGrayscale, v, t;
-        int texW, texShift, texMask, texPalBase;
-        int anyVisible;
+        MeshSlot *ms;
+        int mi, vertCount, idxCount, quadIdxCount, cullMode;
         const s16* verts;
-        const s8* norms;
         const u16* indices;
         const u16* quadIndices;
-        const s16* uvs;
-        const u8* tex;
         FIXED cosR, sinR, sprScale;
-        int sx[512], sy[512];
-        FIXED sz[512]; // depth per vertex for sorting
-        FIXED rawDepth[512]; // unclamped fovLambda for near-plane clipping
-        static FIXED vSide[512], vHeight[512]; // view-space coords for near-plane re-projection
-        u8 vis[512];
-        static TriSort triOrder[256];
-        int triCount;
+        int vb, anyVisible;
 
-        if (g_sprites[i].meshIdx < 0 || g_sprites[i].meshIdx >= AFN_MESH_COUNT)
+        if (g_sprites[si].meshIdx < 0 || g_sprites[si].meshIdx >= AFN_MESH_COUNT)
             continue;
 
-        mi = g_sprites[i].meshIdx;
+        mi = g_sprites[si].meshIdx;
+        vertCount = afn_mesh_desc[mi][0];
+        if (vertCount > 512) vertCount = 512;
+        if (totalVerts + vertCount > MAX_GLOBAL_VERTS) continue; // overflow guard
+
+        vb = totalVerts; // vertex base for this mesh
+        ms = &g_meshSlots[slotCount];
+        ms->mi = mi;
+        ms->sprIdx = si;
+        ms->vertBase = vb;
+        ms->norms = afn_mesh_norm_ptrs[mi];
         verts = afn_mesh_vert_ptrs[mi];
-        norms = afn_mesh_norm_ptrs[mi];
         indices = afn_mesh_idx_ptrs[mi];
         quadIndices = afn_mesh_qidx_ptrs[mi];
-        vertCount = afn_mesh_desc[mi][0];
+        ms->indices = indices;
+        ms->quadIndices = quadIndices;
+        ms->vertCount = vertCount;
         idxCount = afn_mesh_desc[mi][1];
         quadIdxCount = afn_mesh_desc[mi][2];
-        cullMode = afn_mesh_desc[mi][4]; // 0=Back, 1=Front, 2=None
-        meshLit = afn_mesh_desc[mi][5];  // 0=unlit, 1=lit
-        meshSorted = afn_mesh_desc[mi][6]; // 0=unsorted, 1=pre-sorted (skip depth sort)
-        meshHalfRes = afn_mesh_desc[mi][7]; // 0=full, 1=skip every other scanline
-        meshTextured = afn_mesh_desc[mi][8]; // 0=flat, 1=textured
-        texW = afn_mesh_desc[mi][9];
-        texShift = afn_mesh_desc[mi][10];
-        texPalBase = afn_mesh_desc[mi][11];
-        meshWireframe = afn_mesh_desc[mi][12]; // 0=solid, 1=wireframe
-        meshGrayscale = afn_mesh_desc[mi][13]; // 0=normal, 1=grayscale shaded faces
-        texMask = texW > 0 ? texW - 1 : 0;
-        uvs = afn_mesh_uv_ptrs[mi];
-        tex = tex_cache_ptrs[mi];
+        ms->idxCount = idxCount;
+        ms->quadIdxCount = quadIdxCount;
+        cullMode = afn_mesh_desc[mi][4];
+        ms->cullMode = cullMode;
+        ms->meshLit = afn_mesh_desc[mi][5];
+        ms->meshHalfRes = afn_mesh_desc[mi][7];
+        ms->meshTextured = afn_mesh_desc[mi][8];
+        ms->texW = afn_mesh_desc[mi][9];
+        ms->texShift = afn_mesh_desc[mi][10];
+        ms->texPalBase = afn_mesh_desc[mi][11];
+        ms->meshWireframe = afn_mesh_desc[mi][12];
+        ms->meshGrayscale = afn_mesh_desc[mi][13];
+        ms->texMask = ms->texW > 0 ? ms->texW - 1 : 0;
+        ms->uvs = afn_mesh_uv_ptrs[mi];
+        ms->tex = tex_cache_ptrs[mi];
 
-        // Sprite transform
-        cosR = lu_cos(g_sprites[i].rotation) >> 4;
-        sinR = lu_sin(g_sprites[i].rotation) >> 4;
-        sprScale = g_sprites[i].scale;
+        cosR = lu_cos(g_sprites[si].rotation) >> 4;
+        sinR = lu_sin(g_sprites[si].rotation) >> 4;
+        ms->cosR = cosR;
+        ms->sinR = sinR;
+        sprScale = g_sprites[si].scale;
         if (sprScale <= 0) sprScale = 256;
 
-        if (vertCount > 512) vertCount = 512;
-
+        // Project vertices into global arrays
         for (v = 0; v < vertCount; v++)
         {
-            // Local vertex (8.8 fixed)
             FIXED vx = verts[v * 3 + 0];
             FIXED vy = verts[v * 3 + 1];
             FIXED vz = verts[v * 3 + 2];
             FIXED rx, ry, rz, wx, wy, wz, dx, dz, fovLambda, heightDiff, side;
 
-            // Scale (8.8 * 8.8 >> 8 = 8.8)
             vx = (vx * sprScale) >> 8;
             vy = (vy * sprScale) >> 8;
             vz = (vz * sprScale) >> 8;
 
-            // Rotate around Y axis
             rx = (vx * cosR + vz * sinR) >> 8;
             ry = vy;
             rz = (-vx * sinR + vz * cosR) >> 8;
 
-            // World position
-            wx = g_sprites[i].x + rx;
-            wy = g_sprites[i].y + ry;
-            wz = g_sprites[i].z + rz;
+            wx = g_sprites[si].x + rx;
+            wy = g_sprites[si].y + ry;
+            wz = g_sprites[si].z + rz;
 
-            // Mode 7 projection
             dx = wx - cam_x;
             dz = wz - cam_z;
             fovLambda = (dx * g_sinf - dz * g_cosf) >> 8;
-            rawDepth[v] = fovLambda; // store unclamped depth for wireframe
+            g_vRawDepth[vb + v] = fovLambda;
 
-            // Clamp near plane — SLOPE16 rasterizer handles extreme projections
             if (fovLambda < 16) fovLambda = 16;
-
-            sz[v] = fovLambda; // store clamped depth for painter's sort
+            g_vsz[vb + v] = fovLambda;
 
             heightDiff = cam_h - wy;
             side = (dx * g_cosf + dz * g_sinf) >> 8;
-            vSide[v] = side;
-            vHeight[v] = heightDiff;
+            g_vSide[vb + v] = side;
+            g_vHeight[vb + v] = heightDiff;
 
-            /* One division per vertex instead of two */
             {
                 int projScale = (cam_fov << 12) / fovLambda;
-                sy[v] = m7_horizon + ((heightDiff * projScale) >> 12);
-                sx[v] = 120 + ((side * projScale) >> 12);
+                g_vsy[vb + v] = m7_horizon + ((heightDiff * projScale) >> 12);
+                g_vsx[vb + v] = 120 + ((side * projScale) >> 12);
             }
-
-            vis[v] = 1;
         }
 
-        // Whole-mesh screen cull: skip if no vertices are visible
+        // Whole-mesh screen cull
         anyVisible = 0;
         for (v = 0; v < vertCount; v++)
-            if (vis[v]) { anyVisible = 1; break; }
-        if (!anyVisible) continue;
+            { anyVisible = 1; break; }
+        if (!anyVisible) { continue; }
 
         // Build triangle list with backface culling
-        triCount = 0;
-        for (t = 0; t < idxCount / 3; t++)
+        for (t = 0; t < idxCount / 3 && totalTris < MAX_GLOBAL_TRIS; t++)
         {
             int i0 = indices[t * 3 + 0];
             int i1 = indices[t * 3 + 1];
@@ -2044,56 +2065,48 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             int cross;
 
             if (i0 >= vertCount || i1 >= vertCount || i2 >= vertCount) continue;
-            if (i0 == i1 || i1 == i2 || i0 == i2) continue; // degenerate
+            if (i0 == i1 || i1 == i2 || i0 == i2) continue;
 
-            // All behind near plane — skip entirely
-            if (rawDepth[i0] < CLIP_NEAR_Z && rawDepth[i1] < CLIP_NEAR_Z && rawDepth[i2] < CLIP_NEAR_Z)
+            if (g_vRawDepth[vb+i0] < CLIP_NEAR_Z && g_vRawDepth[vb+i1] < CLIP_NEAR_Z && g_vRawDepth[vb+i2] < CLIP_NEAR_Z)
                 continue;
 
-            // Skip screen-bounds and backface culling for near-plane triangles
-            // (projected coords are unreliable when vertices are behind camera)
-            if (rawDepth[i0] >= CLIP_NEAR_Z && rawDepth[i1] >= CLIP_NEAR_Z && rawDepth[i2] >= CLIP_NEAR_Z)
+            if (g_vRawDepth[vb+i0] >= CLIP_NEAR_Z && g_vRawDepth[vb+i1] >= CLIP_NEAR_Z && g_vRawDepth[vb+i2] >= CLIP_NEAR_Z)
             {
-                // Screen bounds cull: skip if all 3 vertices fully offscreen
-                if ((sx[i0] < 0 && sx[i1] < 0 && sx[i2] < 0) ||
-                    (sx[i0] >= 240 && sx[i1] >= 240 && sx[i2] >= 240) ||
-                    (sy[i0] < 0 && sy[i1] < 0 && sy[i2] < 0) ||
-                    (sy[i0] >= 160 && sy[i1] >= 160 && sy[i2] >= 160))
+                if ((g_vsx[vb+i0] < 0 && g_vsx[vb+i1] < 0 && g_vsx[vb+i2] < 0) ||
+                    (g_vsx[vb+i0] >= 240 && g_vsx[vb+i1] >= 240 && g_vsx[vb+i2] >= 240) ||
+                    (g_vsy[vb+i0] < 0 && g_vsy[vb+i1] < 0 && g_vsy[vb+i2] < 0) ||
+                    (g_vsy[vb+i0] >= 160 && g_vsy[vb+i1] >= 160 && g_vsy[vb+i2] >= 160))
                     continue;
 
-                // Backface culling: screen-space cross product
-                cross = (sx[i1] - sx[i0]) * (sy[i2] - sy[i0])
-                      - (sy[i1] - sy[i0]) * (sx[i2] - sx[i0]);
+                cross = (g_vsx[vb+i1] - g_vsx[vb+i0]) * (g_vsy[vb+i2] - g_vsy[vb+i0])
+                      - (g_vsy[vb+i1] - g_vsy[vb+i0]) * (g_vsx[vb+i2] - g_vsx[vb+i0]);
                 if (cullMode == 0 && cross >= 0) continue;
                 else if (cullMode == 1 && cross <= 0) continue;
             }
 
 #ifdef AFN_SMALL_TRI_CULL
-            // Small triangle cull: skip if screen-space area too small
             {
                 int area = cross < 0 ? -cross : cross;
                 if (area < AFN_SMALL_TRI_CULL) continue;
             }
 #endif
 
-            // Average depth for painter's sort (larger = farther)
             {
-                int avgDepth = sz[i0] + sz[i1] + sz[i2];
+                int avgDepth = g_vsz[vb+i0] + g_vsz[vb+i1] + g_vsz[vb+i2];
 #ifdef AFN_DRAW_DISTANCE
-                // Per-triangle draw distance cull (depth is sum of 3 vertices in 16.8)
                 if (avgDepth / 3 > AFN_DRAW_DISTANCE) continue;
 #endif
-                triOrder[triCount].triIdx = t;
-                triOrder[triCount].depth = avgDepth;
-                triCount++;
-                if (triCount >= 256) break;
+                g_triOrder[totalTris].triIdx = t;
+                g_triOrder[totalTris].depth = avgDepth;
+                g_triOrder[totalTris].slot = (u8)slotCount;
+                totalTris++;
             }
         }
 
-        // Build quad list (triIdx with bit 15 set = quad)
+        // Build quad list
         if (quadIndices && quadIdxCount > 0)
         {
-            for (t = 0; t < quadIdxCount / 4 && triCount < 256; t++)
+            for (t = 0; t < quadIdxCount / 4 && totalTris < MAX_GLOBAL_TRIS; t++)
             {
                 int i0 = quadIndices[t * 4 + 0];
                 int i1 = quadIndices[t * 4 + 1];
@@ -2103,228 +2116,229 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 
                 if (i0 >= vertCount || i1 >= vertCount || i2 >= vertCount || i3 >= vertCount) continue;
 
-                if (rawDepth[i0] < CLIP_NEAR_Z && rawDepth[i1] < CLIP_NEAR_Z &&
-                    rawDepth[i2] < CLIP_NEAR_Z && rawDepth[i3] < CLIP_NEAR_Z)
+                if (g_vRawDepth[vb+i0] < CLIP_NEAR_Z && g_vRawDepth[vb+i1] < CLIP_NEAR_Z &&
+                    g_vRawDepth[vb+i2] < CLIP_NEAR_Z && g_vRawDepth[vb+i3] < CLIP_NEAR_Z)
                     continue;
 
-                anyNearQ = (rawDepth[i0] < CLIP_NEAR_Z || rawDepth[i1] < CLIP_NEAR_Z ||
-                            rawDepth[i2] < CLIP_NEAR_Z || rawDepth[i3] < CLIP_NEAR_Z);
+                anyNearQ = (g_vRawDepth[vb+i0] < CLIP_NEAR_Z || g_vRawDepth[vb+i1] < CLIP_NEAR_Z ||
+                            g_vRawDepth[vb+i2] < CLIP_NEAR_Z || g_vRawDepth[vb+i3] < CLIP_NEAR_Z);
 
                 if (!anyNearQ)
                 {
-                    if ((sx[i0] < 0 && sx[i1] < 0 && sx[i2] < 0 && sx[i3] < 0) ||
-                        (sx[i0] >= 240 && sx[i1] >= 240 && sx[i2] >= 240 && sx[i3] >= 240) ||
-                        (sy[i0] < 0 && sy[i1] < 0 && sy[i2] < 0 && sy[i3] < 0) ||
-                        (sy[i0] >= 160 && sy[i1] >= 160 && sy[i2] >= 160 && sy[i3] >= 160))
+                    if ((g_vsx[vb+i0] < 0 && g_vsx[vb+i1] < 0 && g_vsx[vb+i2] < 0 && g_vsx[vb+i3] < 0) ||
+                        (g_vsx[vb+i0] >= 240 && g_vsx[vb+i1] >= 240 && g_vsx[vb+i2] >= 240 && g_vsx[vb+i3] >= 240) ||
+                        (g_vsy[vb+i0] < 0 && g_vsy[vb+i1] < 0 && g_vsy[vb+i2] < 0 && g_vsy[vb+i3] < 0) ||
+                        (g_vsy[vb+i0] >= 160 && g_vsy[vb+i1] >= 160 && g_vsy[vb+i2] >= 160 && g_vsy[vb+i3] >= 160))
                         continue;
 
-                    // Backface cull using first 3 verts
-                    cross = (sx[i1] - sx[i0]) * (sy[i2] - sy[i0])
-                          - (sy[i1] - sy[i0]) * (sx[i2] - sx[i0]);
+                    cross = (g_vsx[vb+i1] - g_vsx[vb+i0]) * (g_vsy[vb+i2] - g_vsy[vb+i0])
+                          - (g_vsy[vb+i1] - g_vsy[vb+i0]) * (g_vsx[vb+i2] - g_vsx[vb+i0]);
                     if (cullMode == 0 && cross >= 0) continue;
                     else if (cullMode == 1 && cross <= 0) continue;
                 }
 
                 {
-                    int avgDepth = sz[i0] + sz[i1] + sz[i2] + sz[i3];
+                    int avgDepth = g_vsz[vb+i0] + g_vsz[vb+i1] + g_vsz[vb+i2] + g_vsz[vb+i3];
 #ifdef AFN_DRAW_DISTANCE
                     if (avgDepth / 4 > AFN_DRAW_DISTANCE) continue;
 #endif
-                    triOrder[triCount].triIdx = t | 0x8000; // bit 15 = quad flag
-                    triOrder[triCount].depth = avgDepth;
-                    triCount++;
+                    g_triOrder[totalTris].triIdx = t | 0x8000;
+                    g_triOrder[totalTris].depth = avgDepth;
+                    g_triOrder[totalTris].slot = (u8)slotCount;
+                    totalTris++;
                 }
             }
         }
 
-        // Insertion sort by depth
-        // Pre-sorted meshes (Barebones) skip this entirely
-        if (!meshSorted)
+        totalVerts += vertCount;
+        slotCount++;
+    }
+
+    // ---- Phase 2: Global sort — all tris across all meshes ----
+    {
+        int a, b;
+        for (a = 1; a < totalTris; a++)
         {
-            int a, b;
-            for (a = 1; a < triCount; a++)
-            {
-                TriSort tmp = triOrder[a];
-                b = a - 1;
+            TriSort tmp = g_triOrder[a];
+            b = a - 1;
 #ifdef AFN_COVERAGE_BUF
-                // Front-to-back (nearest first) — coverage buffer skips overdraw
-                while (b >= 0 && triOrder[b].depth > tmp.depth)
+            while (b >= 0 && g_triOrder[b].depth > tmp.depth)
 #else
-                // Back-to-front (farthest first) — painter's algorithm
-                while (b >= 0 && triOrder[b].depth < tmp.depth)
+            while (b >= 0 && g_triOrder[b].depth < tmp.depth)
 #endif
-                {
-                    triOrder[b + 1] = triOrder[b];
-                    b--;
-                }
-                triOrder[b + 1] = tmp;
-            }
-        }
-
-        // Draw sorted faces (tris and quads)
-        for (t = 0; t < triCount; t++)
-        {
-            int ti = triOrder[t].triIdx;
-            int isQuad = (ti & 0x8000) != 0;
-            int faceIdx = ti & 0x7FFF;
-            int i0, i1, i2, i3 = 0;
-            int avgD, lodLevel, anyNear;
-
-            if (isQuad)
             {
-                i0 = quadIndices[faceIdx * 4 + 0];
-                i1 = quadIndices[faceIdx * 4 + 1];
-                i2 = quadIndices[faceIdx * 4 + 2];
-                i3 = quadIndices[faceIdx * 4 + 3];
-                avgD = triOrder[t].depth / 4;
-                anyNear = (rawDepth[i0] < CLIP_NEAR_Z) | (rawDepth[i1] < CLIP_NEAR_Z) |
-                          (rawDepth[i2] < CLIP_NEAR_Z) | (rawDepth[i3] < CLIP_NEAR_Z);
+                g_triOrder[b + 1] = g_triOrder[b];
+                b--;
+            }
+            g_triOrder[b + 1] = tmp;
+        }
+    }
+
+    // ---- Phase 3: Render sorted faces ----
+    for (t = 0; t < totalTris; t++)
+    {
+        int ti = g_triOrder[t].triIdx;
+        int isQuad = (ti & 0x8000) != 0;
+        int faceIdx = ti & 0x7FFF;
+        MeshSlot *ms = &g_meshSlots[g_triOrder[t].slot];
+        int vb = ms->vertBase;
+        int i0, i1, i2, i3 = 0;
+        int avgD, lodLevel, anyNear;
+        const s8* norms = ms->norms;
+        const u16* indices = ms->indices;
+        const u16* quadIndices = ms->quadIndices;
+        const s16* uvs = ms->uvs;
+        const u8* tex = ms->tex;
+        FIXED cosR = ms->cosR, sinR = ms->sinR;
+        int mi = ms->mi;
+
+        if (isQuad)
+        {
+            i0 = quadIndices[faceIdx * 4 + 0];
+            i1 = quadIndices[faceIdx * 4 + 1];
+            i2 = quadIndices[faceIdx * 4 + 2];
+            i3 = quadIndices[faceIdx * 4 + 3];
+            avgD = g_triOrder[t].depth / 4;
+            anyNear = (g_vRawDepth[vb+i0] < CLIP_NEAR_Z) | (g_vRawDepth[vb+i1] < CLIP_NEAR_Z) |
+                      (g_vRawDepth[vb+i2] < CLIP_NEAR_Z) | (g_vRawDepth[vb+i3] < CLIP_NEAR_Z);
+        }
+        else
+        {
+            i0 = indices[faceIdx * 3 + 0];
+            i1 = indices[faceIdx * 3 + 1];
+            i2 = indices[faceIdx * 3 + 2];
+            avgD = g_triOrder[t].depth / 3;
+            anyNear = (g_vRawDepth[vb+i0] < CLIP_NEAR_Z) | (g_vRawDepth[vb+i1] < CLIP_NEAR_Z) | (g_vRawDepth[vb+i2] < CLIP_NEAR_Z);
+        }
+        lodLevel = ms->meshHalfRes ? 1 : (avgD < 64 ? 2 : (avgD < 192 ? 1 : 0));
+        g_halfRes = (lodLevel >= 1);
+
+        if (ms->meshGrayscale)
+        {
+            int nx, ny, nz, rnx, rny, rnz, dot, shade;
+            u8 palIdx;
+            nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
+            ny = ((int)norms[i0*3+1] + norms[i1*3+1] + norms[i2*3+1]) / 3;
+            nz = ((int)norms[i0*3+2] + norms[i1*3+2] + norms[i2*3+2]) / 3;
+            rnx = (nx * (cosR >> 4) + nz * (sinR >> 4)) >> 4;
+            rny = ny;
+            rnz = (-nx * (sinR >> 4) + nz * (cosR >> 4)) >> 4;
+            dot = -(rnx * 38 + rny * (-102) + rnz * 64) >> 7;
+            shade = (dot >> 4) + 3;
+            if (shade < 1) shade = 1;
+            if (shade > 7) shade = 7;
+            palIdx = 5 + shade;
+            if (isQuad && !anyNear)
+                rasterize_quad_clipped(buf, g_vsx[vb+i0], g_vsy[vb+i0], g_vsx[vb+i1], g_vsy[vb+i1], g_vsx[vb+i2], g_vsy[vb+i2], g_vsx[vb+i3], g_vsy[vb+i3], palIdx);
+            else if (anyNear) {
+                int cs[] = {g_vSide[vb+i0], g_vSide[vb+i1], g_vSide[vb+i2], g_vSide[vb+i3]};
+                int ch[] = {g_vHeight[vb+i0], g_vHeight[vb+i1], g_vHeight[vb+i2], g_vHeight[vb+i3]};
+                int cd[] = {g_vRawDepth[vb+i0], g_vRawDepth[vb+i1], g_vRawDepth[vb+i2], g_vRawDepth[vb+i3]};
+                clip_render_poly_flat(buf, cs, ch, cd, isQuad ? 4 : 3, palIdx);
             }
             else
+                rasterize_tri_clipped(buf, g_vsx[vb+i0], g_vsy[vb+i0], g_vsx[vb+i1], g_vsy[vb+i1], g_vsx[vb+i2], g_vsy[vb+i2], palIdx, lodLevel);
+            if (ms->meshWireframe)
             {
-                i0 = indices[faceIdx * 3 + 0];
-                i1 = indices[faceIdx * 3 + 1];
-                i2 = indices[faceIdx * 3 + 2];
-                avgD = triOrder[t].depth / 3;
-                anyNear = (rawDepth[i0] < CLIP_NEAR_Z) | (rawDepth[i1] < CLIP_NEAR_Z) | (rawDepth[i2] < CLIP_NEAR_Z);
-            }
-            lodLevel = meshHalfRes ? 1 : (avgD < 64 ? 2 : (avgD < 192 ? 1 : 0));
-            g_halfRes = (lodLevel >= 1); // enable half-res in rasterize_convex for close faces
-
-
-
-            if (meshGrayscale)
-            {
-                // Grayscale shaded face — compute shade from face normal
-                int nx, ny, nz, rnx, rny, rnz, dot, shade;
-                u8 palIdx;
-                nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
-                ny = ((int)norms[i0*3+1] + norms[i1*3+1] + norms[i2*3+1]) / 3;
-                nz = ((int)norms[i0*3+2] + norms[i1*3+2] + norms[i2*3+2]) / 3;
-                rnx = (nx * (cosR >> 4) + nz * (sinR >> 4)) >> 4;
-                rny = ny;
-                rnz = (-nx * (sinR >> 4) + nz * (cosR >> 4)) >> 4;
-                dot = -(rnx * 38 + rny * (-102) + rnz * 64) >> 7;
-                shade = (dot >> 4) + 3;
-                if (shade < 1) shade = 1;
-                if (shade > 7) shade = 7;
-                palIdx = 5 + shade; // grayscale palette at indices 5-12
-                // Draw filled grayscale face — clip against near plane if needed
-                if (isQuad && !anyNear)
-                    rasterize_quad_clipped(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], sx[i3], sy[i3], palIdx);
-                else if (anyNear) {
-                    int cs[] = {vSide[i0], vSide[i1], vSide[i2], vSide[i3]};
-                    int ch[] = {vHeight[i0], vHeight[i1], vHeight[i2], vHeight[i3]};
-                    int cd[] = {rawDepth[i0], rawDepth[i1], rawDepth[i2], rawDepth[i3]};
-                    clip_render_poly_flat(buf, cs, ch, cd, isQuad ? 4 : 3, palIdx);
-                }
-                else
-                    rasterize_tri_clipped(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx, lodLevel);
-                // Draw wireframe overlay — skip edges to behind-camera vertices
-                if (meshWireframe)
-                {
-                    u8 edgeIdx = 6;
-                    int d0 = rawDepth[i0] >= WIRE_NEAR_DEPTH;
-                    int d1 = rawDepth[i1] >= WIRE_NEAR_DEPTH;
-                    int d2 = rawDepth[i2] >= WIRE_NEAR_DEPTH;
-                    if (d0 && d1) draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], edgeIdx);
-                    if (d1 && d2) draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], edgeIdx);
-                    if (isQuad) {
-                        int d3 = rawDepth[i3] >= WIRE_NEAR_DEPTH;
-                        if (d2 && d3) draw_line(buf, sx[i2], sy[i2], sx[i3], sy[i3], edgeIdx);
-                        if (d3 && d0) draw_line(buf, sx[i3], sy[i3], sx[i0], sy[i0], edgeIdx);
-                    } else {
-                        if (d2 && d0) draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], edgeIdx);
-                    }
+                u8 edgeIdx = 6;
+                int d0 = g_vRawDepth[vb+i0] >= WIRE_NEAR_DEPTH;
+                int d1 = g_vRawDepth[vb+i1] >= WIRE_NEAR_DEPTH;
+                int d2 = g_vRawDepth[vb+i2] >= WIRE_NEAR_DEPTH;
+                if (d0 && d1) draw_line(buf, g_vsx[vb+i0], g_vsy[vb+i0], g_vsx[vb+i1], g_vsy[vb+i1], edgeIdx);
+                if (d1 && d2) draw_line(buf, g_vsx[vb+i1], g_vsy[vb+i1], g_vsx[vb+i2], g_vsy[vb+i2], edgeIdx);
+                if (isQuad) {
+                    int d3 = g_vRawDepth[vb+i3] >= WIRE_NEAR_DEPTH;
+                    if (d2 && d3) draw_line(buf, g_vsx[vb+i2], g_vsy[vb+i2], g_vsx[vb+i3], g_vsy[vb+i3], edgeIdx);
+                    if (d3 && d0) draw_line(buf, g_vsx[vb+i3], g_vsy[vb+i3], g_vsx[vb+i0], g_vsy[vb+i0], edgeIdx);
+                } else {
+                    if (d2 && d0) draw_line(buf, g_vsx[vb+i2], g_vsy[vb+i2], g_vsx[vb+i0], g_vsy[vb+i0], edgeIdx);
                 }
             }
-            else if (meshWireframe)
+        }
+        else if (ms->meshWireframe)
+        {
+            int nx, ny, nz, rnx, rny, rnz, dot, shade;
+            u8 palIdx;
+            nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
+            ny = ((int)norms[i0*3+1] + norms[i1*3+1] + norms[i2*3+1]) / 3;
+            nz = ((int)norms[i0*3+2] + norms[i1*3+2] + norms[i2*3+2]) / 3;
+            rnx = (nx * (cosR >> 4) + nz * (sinR >> 4)) >> 4;
+            rny = ny;
+            rnz = (-nx * (sinR >> 4) + nz * (cosR >> 4)) >> 4;
+            dot = -(rnx * 38 + rny * (-102) + rnz * 64) >> 7;
+            shade = (dot >> 4) + 3;
+            if (shade < 1) shade = 1;
+            if (shade > 7) shade = 7;
+            palIdx = 5 + shade;
             {
-                // Wireframe only — shaded lines, no fill
-                int nx, ny, nz, rnx, rny, rnz, dot, shade;
-                u8 palIdx;
-                nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
-                ny = ((int)norms[i0*3+1] + norms[i1*3+1] + norms[i2*3+1]) / 3;
-                nz = ((int)norms[i0*3+2] + norms[i1*3+2] + norms[i2*3+2]) / 3;
-                rnx = (nx * (cosR >> 4) + nz * (sinR >> 4)) >> 4;
-                rny = ny;
-                rnz = (-nx * (sinR >> 4) + nz * (cosR >> 4)) >> 4;
-                dot = -(rnx * 38 + rny * (-102) + rnz * 64) >> 7;
-                shade = (dot >> 4) + 3;
-                if (shade < 1) shade = 1;
-                if (shade > 7) shade = 7;
-                palIdx = 5 + shade; // grayscale palette at indices 5-12
-                {
-                    int d0 = rawDepth[i0] >= WIRE_NEAR_DEPTH;
-                    int d1 = rawDepth[i1] >= WIRE_NEAR_DEPTH;
-                    int d2 = rawDepth[i2] >= WIRE_NEAR_DEPTH;
-                    if (d0 && d1) draw_line(buf, sx[i0], sy[i0], sx[i1], sy[i1], palIdx);
-                    if (d1 && d2) draw_line(buf, sx[i1], sy[i1], sx[i2], sy[i2], palIdx);
-                    if (isQuad) {
-                        int d3 = rawDepth[i3] >= WIRE_NEAR_DEPTH;
-                        if (d2 && d3) draw_line(buf, sx[i2], sy[i2], sx[i3], sy[i3], palIdx);
-                        if (d3 && d0) draw_line(buf, sx[i3], sy[i3], sx[i0], sy[i0], palIdx);
-                    } else {
-                        if (d2 && d0) draw_line(buf, sx[i2], sy[i2], sx[i0], sy[i0], palIdx);
-                    }
+                int d0 = g_vRawDepth[vb+i0] >= WIRE_NEAR_DEPTH;
+                int d1 = g_vRawDepth[vb+i1] >= WIRE_NEAR_DEPTH;
+                int d2 = g_vRawDepth[vb+i2] >= WIRE_NEAR_DEPTH;
+                if (d0 && d1) draw_line(buf, g_vsx[vb+i0], g_vsy[vb+i0], g_vsx[vb+i1], g_vsy[vb+i1], palIdx);
+                if (d1 && d2) draw_line(buf, g_vsx[vb+i1], g_vsy[vb+i1], g_vsx[vb+i2], g_vsy[vb+i2], palIdx);
+                if (isQuad) {
+                    int d3 = g_vRawDepth[vb+i3] >= WIRE_NEAR_DEPTH;
+                    if (d2 && d3) draw_line(buf, g_vsx[vb+i2], g_vsy[vb+i2], g_vsx[vb+i3], g_vsy[vb+i3], palIdx);
+                    if (d3 && d0) draw_line(buf, g_vsx[vb+i3], g_vsy[vb+i3], g_vsx[vb+i0], g_vsy[vb+i0], palIdx);
+                } else {
+                    if (d2 && d0) draw_line(buf, g_vsx[vb+i2], g_vsy[vb+i2], g_vsx[vb+i0], g_vsy[vb+i0], palIdx);
                 }
             }
-            else if (meshTextured && uvs && tex)
-            {
+        }
+        else if (ms->meshTextured && uvs && tex)
+        {
+            dbg_tex_tris++;
+            rasterize_tri_tex(buf,
+                g_vsx[vb+i0], g_vsy[vb+i0], uvs[i0*2+0], uvs[i0*2+1], g_vsz[vb+i0],
+                g_vsx[vb+i1], g_vsy[vb+i1], uvs[i1*2+0], uvs[i1*2+1], g_vsz[vb+i1],
+                g_vsx[vb+i2], g_vsy[vb+i2], uvs[i2*2+0], uvs[i2*2+1], g_vsz[vb+i2],
+                tex, ms->texMask, ms->texShift, (u8)ms->texPalBase);
+            if (isQuad) {
                 dbg_tex_tris++;
                 rasterize_tri_tex(buf,
-                    sx[i0], sy[i0], uvs[i0*2+0], uvs[i0*2+1], sz[i0],
-                    sx[i1], sy[i1], uvs[i1*2+0], uvs[i1*2+1], sz[i1],
-                    sx[i2], sy[i2], uvs[i2*2+0], uvs[i2*2+1], sz[i2],
-                    tex, texMask, texShift, (u8)texPalBase);
-                if (isQuad) {
-                    dbg_tex_tris++;
-                    rasterize_tri_tex(buf,
-                        sx[i0], sy[i0], uvs[i0*2+0], uvs[i0*2+1], sz[i0],
-                        sx[i2], sy[i2], uvs[i2*2+0], uvs[i2*2+1], sz[i2],
-                        sx[i3], sy[i3], uvs[i3*2+0], uvs[i3*2+1], sz[i3],
-                        tex, texMask, texShift, (u8)texPalBase);
-                }
+                    g_vsx[vb+i0], g_vsy[vb+i0], uvs[i0*2+0], uvs[i0*2+1], g_vsz[vb+i0],
+                    g_vsx[vb+i2], g_vsy[vb+i2], uvs[i2*2+0], uvs[i2*2+1], g_vsz[vb+i2],
+                    g_vsx[vb+i3], g_vsy[vb+i3], uvs[i3*2+0], uvs[i3*2+1], g_vsz[vb+i3],
+                    tex, ms->texMask, ms->texShift, (u8)ms->texPalBase);
+            }
+        }
+        else
+        {
+            int nx, ny, nz, rnx, rny, rnz, dot, shade;
+            u8 palIdx;
+
+            if (ms->meshLit)
+            {
+                nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
+                ny = ((int)norms[i0*3+1] + norms[i1*3+1] + norms[i2*3+1]) / 3;
+                nz = ((int)norms[i0*3+2] + norms[i1*3+2] + norms[i2*3+2]) / 3;
+
+                rnx = (nx * (cosR >> 4) + nz * (sinR >> 4)) >> 4;
+                rny = ny;
+                rnz = (-nx * (sinR >> 4) + nz * (cosR >> 4)) >> 4;
+
+                dot = -(rnx * 38 + rny * (-102) + rnz * 64) >> 7;
+                shade = (dot >> 4) + 3;
+                if (shade < 0) shade = 0;
+                if (shade > 7) shade = 7;
+
+                palIdx = AFN_MESH_PAL_BASE + mi * 8 + shade;
             }
             else
             {
-                // Flat shaded
-                int nx, ny, nz, rnx, rny, rnz, dot, shade;
-                u8 palIdx;
-
-                if (meshLit)
-                {
-                    nx = ((int)norms[i0*3+0] + norms[i1*3+0] + norms[i2*3+0]) / 3;
-                    ny = ((int)norms[i0*3+1] + norms[i1*3+1] + norms[i2*3+1]) / 3;
-                    nz = ((int)norms[i0*3+2] + norms[i1*3+2] + norms[i2*3+2]) / 3;
-
-                    rnx = (nx * (cosR >> 4) + nz * (sinR >> 4)) >> 4;
-                    rny = ny;
-                    rnz = (-nx * (sinR >> 4) + nz * (cosR >> 4)) >> 4;
-
-                    dot = -(rnx * 38 + rny * (-102) + rnz * 64) >> 7;
-                    shade = (dot >> 4) + 3;
-                    if (shade < 0) shade = 0;
-                    if (shade > 7) shade = 7;
-
-                    palIdx = AFN_MESH_PAL_BASE + mi * 8 + shade;
-                }
-                else
-                {
-                    palIdx = AFN_MESH_PAL_BASE + mi * 8 + 5;
-                }
-
-                if (isQuad && !anyNear)
-                    rasterize_quad_clipped(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], sx[i3], sy[i3], palIdx);
-                else if (anyNear) {
-                    int cs[] = {vSide[i0], vSide[i1], vSide[i2], vSide[i3]};
-                    int ch[] = {vHeight[i0], vHeight[i1], vHeight[i2], vHeight[i3]};
-                    int cd[] = {rawDepth[i0], rawDepth[i1], rawDepth[i2], rawDepth[i3]};
-                    clip_render_poly_flat(buf, cs, ch, cd, isQuad ? 4 : 3, palIdx);
-                }
-                else
-                    rasterize_tri_clipped(buf, sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2], palIdx, lodLevel);
+                palIdx = AFN_MESH_PAL_BASE + mi * 8 + 5;
             }
+
+            if (isQuad && !anyNear)
+                rasterize_quad_clipped(buf, g_vsx[vb+i0], g_vsy[vb+i0], g_vsx[vb+i1], g_vsy[vb+i1], g_vsx[vb+i2], g_vsy[vb+i2], g_vsx[vb+i3], g_vsy[vb+i3], palIdx);
+            else if (anyNear) {
+                int cs[] = {g_vSide[vb+i0], g_vSide[vb+i1], g_vSide[vb+i2], g_vSide[vb+i3]};
+                int ch[] = {g_vHeight[vb+i0], g_vHeight[vb+i1], g_vHeight[vb+i2], g_vHeight[vb+i3]};
+                int cd[] = {g_vRawDepth[vb+i0], g_vRawDepth[vb+i1], g_vRawDepth[vb+i2], g_vRawDepth[vb+i3]};
+                clip_render_poly_flat(buf, cs, ch, cd, isQuad ? 4 : 3, palIdx);
+            }
+            else
+                rasterize_tri_clipped(buf, g_vsx[vb+i0], g_vsy[vb+i0], g_vsx[vb+i1], g_vsy[vb+i1], g_vsx[vb+i2], g_vsy[vb+i2], palIdx, lodLevel);
         }
     }
 }
@@ -2525,6 +2539,13 @@ int main(void)
     // --- Video setup ---
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
     REG_DISPCNT = DCNT_MODE4 | DCNT_BG2 | DCNT_OBJ | DCNT_OBJ_1D;
+    // BG2 identity transform for Mode 4 bitmap display
+    REG_BG2PA = 0x0100;
+    REG_BG2PB = 0;
+    REG_BG2PC = 0;
+    REG_BG2PD = 0x0100;
+    REG_BG2X  = 0;
+    REG_BG2Y  = 0;
     // Set up BG palette for bitmap rendering
     pal_bg_mem[0] = RGB15(10, 16, 24);  // sky
     pal_bg_mem[1] = RGB15(4, 10, 4);    // checker dark
@@ -2708,9 +2729,9 @@ int main(void)
         // Software render to back buffer
         {
             u16* backbuf = g_page ? (u16*)0x06000000 : (u16*)0x0600A000;
-            // DMA fill with sky color (palette 0) — fast clear
+            // DMA fill with sky color (palette 0)
             {
-                u32 fill = 0;
+                static u32 fill = 0;
                 DMA_TRANSFER(backbuf, &fill, 120 * 160 / 2, 3, DMA_NOW | DMA_32 | DMA_SRC_FIXED);
             }
 #ifdef AFN_COVERAGE_BUF
