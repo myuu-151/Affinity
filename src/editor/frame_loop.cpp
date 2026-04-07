@@ -207,7 +207,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Jump",            0xFF3355AA, 1, 1, 1, 0, {"Force (float)"}, {}, {} },
     { "Walk",            0xFF3355AA, 1, 1, 1, 0, {"Speed (int)"}, {}, {} },
     { "Sprint",          0xFF3355AA, 1, 1, 1, 0, {"Speed (int)"}, {}, {} },
-    { "Orbit Camera",    0xFF3355AA, 1, 1, 1, 0, {"Direction"}, {}, {} },
+    { "Orbit Camera",    0xFF3355AA, 1, 1, 2, 0, {"Direction", "Speed (int)"}, {}, {} },
     { "Play Animation",  0xFF3355AA, 1, 1, 1, 0, {"Anim"}, {}, {} },
     { "Set Gravity",     0xFF3355AA, 1, 1, 1, 0, {"Value (float)"}, {}, {} },
     { "Set Max Fall",    0xFF3355AA, 1, 1, 1, 0, {"Value (float)"}, {}, {} },
