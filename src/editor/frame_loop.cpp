@@ -157,10 +157,14 @@ enum class VsNodeType : int {
     Sprint,         // set sprint speed
     OrbitCamera,    // rotate orbit camera
     PlayAnim,       // play animation on player sprite
-    Value,          // constant number output
+    SetGravity,     // set gravity value
+    SetMaxFall,     // set max fall speed
+    DestroyObject,  // remove sprite/object from scene
+    Integer,        // constant integer output
     Key,            // constant key output (A/B/L/R/etc)
     Direction,      // constant direction output (Left/Right/Up/Down)
     Animation,      // constant animation index output
+    Float,          // constant float output
     Group,          // subgraph containing other nodes
     COUNT
 };
@@ -193,22 +197,26 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Branch",          0xFF885533, 1, 2, 1, 0, {"Condition"}, {}, {"True", "False"} },
     { "Compare Var",     0xFF885533, 0, 0, 2, 1, {"Var Slot", "Value"}, {"Result"}, {} },
     // Actions (orange)
-    { "Move Player",     0xFF3355AA, 1, 1, 2, 0, {"Speed", "Direction"}, {}, {} },
+    { "Move Player",     0xFF3355AA, 1, 1, 1, 0, {"Direction"}, {}, {} },
     { "Look Direction",  0xFF3355AA, 1, 1, 1, 0, {"Direction"}, {}, {} },
-    { "Change Scene",    0xFF3355AA, 1, 1, 1, 0, {"Scene"}, {}, {} },
-    { "Set Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot", "Value"}, {}, {} },
-    { "Add Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot", "Amount"}, {}, {} },
-    { "Play Sound",      0xFF3355AA, 1, 1, 1, 0, {"Sound ID"}, {}, {} },
-    { "Wait",            0xFF3355AA, 1, 1, 1, 0, {"Frames"}, {}, {} },
-    { "Jump",            0xFF3355AA, 1, 1, 1, 0, {"Force"}, {}, {} },
-    { "Walk",            0xFF3355AA, 1, 1, 1, 0, {"Speed"}, {}, {} },
-    { "Sprint",          0xFF3355AA, 1, 1, 1, 0, {"Speed"}, {}, {} },
+    { "Change Scene",    0xFF3355AA, 1, 1, 1, 0, {"Scene (int)"}, {}, {} },
+    { "Set Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot (int)", "Value"}, {}, {} },
+    { "Add Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot (int)", "Amount"}, {}, {} },
+    { "Play Sound",      0xFF3355AA, 1, 1, 1, 0, {"Sound ID (int)"}, {}, {} },
+    { "Wait",            0xFF3355AA, 1, 1, 1, 0, {"Frames (int)"}, {}, {} },
+    { "Jump",            0xFF3355AA, 1, 1, 1, 0, {"Force (float)"}, {}, {} },
+    { "Walk",            0xFF3355AA, 1, 1, 1, 0, {"Speed (int)"}, {}, {} },
+    { "Sprint",          0xFF3355AA, 1, 1, 1, 0, {"Speed (int)"}, {}, {} },
     { "Orbit Camera",    0xFF3355AA, 1, 1, 1, 0, {"Direction"}, {}, {} },
     { "Play Animation",  0xFF3355AA, 1, 1, 1, 0, {"Anim"}, {}, {} },
-    { "Value",           0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
+    { "Set Gravity",     0xFF3355AA, 1, 1, 1, 0, {"Value (float)"}, {}, {} },
+    { "Set Max Fall",    0xFF3355AA, 1, 1, 1, 0, {"Value (float)"}, {}, {} },
+    { "Destroy Object", 0xFF3355AA, 1, 1, 1, 0, {"Object (int)"}, {}, {} },
+    { "Integer",         0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Key",             0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Direction",       0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Animation",       0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
+    { "Float",           0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Group",           0xFF888844, 0, 0, 0, 0, {}, {}, {} },
 };
 
@@ -3611,18 +3619,15 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::SliderAngle("Angle##cam", &sCamObj.angle, -180.0f, 180.0f);
         ImGui::DragFloat("Horizon##cam", &sCamObj.horizon, 0.5f, 10.0f, 120.0f);
         ImGui::Separator();
-        ImGui::Text("Camera Follow");
+        ImGui::Text("Camera Delay");
         ImGui::DragFloat("Walk Ease In##cam",  &sCamObj.walkEaseIn,  0.5f, 1.0f, 50.0f, "%.0f%%");
         ImGui::DragFloat("Walk Ease Out##cam", &sCamObj.walkEaseOut, 0.5f, 1.0f, 50.0f, "%.0f%%");
         ImGui::DragFloat("Sprint Ease In##cam",  &sCamObj.sprintEaseIn,  0.5f, 1.0f, 50.0f, "%.0f%%");
         ImGui::DragFloat("Sprint Ease Out##cam", &sCamObj.sprintEaseOut, 0.5f, 1.0f, 50.0f, "%.0f%%");
         ImGui::Separator();
-        ImGui::Text("Jump");
-        ImGui::DragFloat("Jump Force##cam",     &sCamObj.jumpForce,    0.01f, 0.1f, 10.0f, "%.2f");
-        ImGui::DragFloat("Gravity##cam",        &sCamObj.gravity,      0.005f, 0.01f, 1.0f, "%.3f");
-        ImGui::DragFloat("Max Fall Speed##cam",  &sCamObj.maxFallSpeed, 0.1f, 0.5f, 20.0f, "%.1f");
-        ImGui::DragFloat("Cam Follow (Land)##cam", &sCamObj.jumpCamLand, 0.5f, 1.0f, 100.0f, "%.0f%%");
-        ImGui::DragFloat("Cam Follow (Air)##cam",  &sCamObj.jumpCamAir,  0.5f, 1.0f, 100.0f, "%.0f%%");
+        ImGui::Text("Jump Camera Delay");
+        ImGui::DragFloat("Cam Delay (Land)##cam", &sCamObj.jumpCamLand, 0.5f, 1.0f, 100.0f, "%.0f%%");
+        ImGui::DragFloat("Cam Delay (Air)##cam",  &sCamObj.jumpCamAir,  0.5f, 1.0f, 100.0f, "%.0f%%");
         ImGui::Separator();
         ImGui::Text("Rendering");
         ImGui::DragFloat("Draw Distance##cam", &sCamObj.drawDistance, 1.0f, 0.0f, 2000.0f, "%.0f");
@@ -5954,10 +5959,17 @@ void FrameTick(float dt)
                 const char* sub = nullptr;
                 char subBuf[32] = {};
                 switch (n.type) {
-                case VsNodeType::Value:
+                case VsNodeType::Integer:
                     snprintf(subBuf, sizeof(subBuf), "%d", n.paramInt[0]);
                     sub = subBuf;
                     break;
+                case VsNodeType::Float: {
+                    float fv;
+                    memcpy(&fv, &n.paramInt[0], sizeof(float));
+                    snprintf(subBuf, sizeof(subBuf), "%.3g", fv);
+                    sub = subBuf;
+                    break;
+                }
                 case VsNodeType::Key:
                     if (n.paramInt[0] >= 0 && n.paramInt[0] < kVsKeyCount)
                         sub = sVsKeyNames[n.paramInt[0]];
@@ -6476,11 +6488,11 @@ void FrameTick(float dt)
                 if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
             ImGui::Separator();
             ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.3f, 1.0f), "Actions");
-            for (int t = (int)VsNodeType::MovePlayer; t <= (int)VsNodeType::PlayAnim; t++)
+            for (int t = (int)VsNodeType::MovePlayer; t <= (int)VsNodeType::DestroyObject; t++)
                 if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
             ImGui::Separator();
             ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.8f, 1.0f), "Data");
-            for (int t = (int)VsNodeType::Value; t <= (int)VsNodeType::Animation; t++)
+            for (int t = (int)VsNodeType::Integer; t <= (int)VsNodeType::Float; t++)
                 if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
             ImGui::EndPopup();
         } else {
@@ -6491,7 +6503,7 @@ void FrameTick(float dt)
         // Properties panel overlay — as child window inside canvas (data nodes only)
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
-            if (n.type == VsNodeType::Value || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Group) {
+            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group) {
             const auto& def = sVsNodeDefs[(int)n.type];
             float propW = 260, propH = 180;
             float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -6517,10 +6529,18 @@ void FrameTick(float dt)
                 ImGui::Text("Direction");
                 ImGui::Combo("##Dir", &n.paramInt[0], sVsAxisNames, kVsAxisCount);
                 break;
-            case VsNodeType::Value:
-                ImGui::Text("Value");
+            case VsNodeType::Integer:
+                ImGui::Text("Integer");
                 ImGui::DragInt("##Val", &n.paramInt[0], 0.5f);
                 break;
+            case VsNodeType::Float: {
+                ImGui::Text("Float");
+                float fv;
+                memcpy(&fv, &n.paramInt[0], sizeof(float));
+                if (ImGui::DragFloat("##Flt", &fv, 0.001f, 0.0f, 0.0f, "%.3f"))
+                    memcpy(&n.paramInt[0], &fv, sizeof(float));
+                break;
+            }
             case VsNodeType::Key:
                 ImGui::Text("Key");
                 ImGui::Combo("##Key2", &n.paramInt[0], sVsKeyNames, kVsKeyCount);
