@@ -152,6 +152,9 @@ enum class VsNodeType : int {
     AddVariable,
     PlaySound,
     Wait,
+    Jump,           // player jump
+    SetSpeed,       // set walk/sprint speed
+    OrbitCamera,    // rotate orbit camera
     COUNT
 };
 
@@ -190,6 +193,9 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Add Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot", "Amount"}, {}, {} },
     { "Play Sound",      0xFF3355AA, 1, 1, 1, 0, {"Sound ID"}, {}, {} },
     { "Wait",            0xFF3355AA, 1, 1, 1, 0, {"Frames"}, {}, {} },
+    { "Jump",            0xFF3355AA, 1, 1, 1, 0, {"Force"}, {}, {} },
+    { "Set Speed",       0xFF3355AA, 1, 1, 2, 0, {"Walk", "Sprint"}, {}, {} },
+    { "Orbit Camera",    0xFF3355AA, 1, 1, 1, 0, {"Direction"}, {}, {} },
 };
 
 struct VsNode {
@@ -228,11 +234,12 @@ static bool sVsShowContextMenu = false;
 static ImVec2 sVsContextMenuPos = {};
 
 static constexpr float kVsNodeW = 160.0f;
-static constexpr float kVsHeaderH = 24.0f;
+static constexpr float kVsHeaderH = 30.0f;
 static constexpr float kVsPinSpacing = 20.0f;
 static constexpr float kVsPinRadius = 5.0f;
 
 static float VsNodeHeight(const VsNode& n) {
+    if ((int)n.type < 0 || (int)n.type >= (int)VsNodeType::COUNT) return kVsHeaderH + kVsPinSpacing + 8.0f;
     const auto& def = sVsNodeDefs[(int)n.type];
     int rows = std::max({ def.inExec + def.inData, def.outExec + def.outData, 1 });
     return kVsHeaderH + rows * kVsPinSpacing + 8.0f;
@@ -1986,7 +1993,7 @@ static void DrawTabBar()
     TabButton("Sprites", EditorTab::Sprites);
     TabButton("Skybox",  EditorTab::Skybox);
     TabButton("3D",      EditorTab::ThreeD);
-    TabButton("Events",  EditorTab::Events);
+    TabButton("Nodes",   EditorTab::Events);
 
     ImGui::SameLine(0, Scaled(20));
     // Play/Stop button
@@ -5691,6 +5698,7 @@ void FrameTick(float dt)
 
         for (int ni = 0; ni < (int)sVsNodes.size(); ni++) {
             VsNode& n = sVsNodes[ni];
+            if ((int)n.type < 0 || (int)n.type >= (int)VsNodeType::COUNT) continue;
             const auto& def = sVsNodeDefs[(int)n.type];
             float nw = kVsNodeW * zoom;
             float nh = VsNodeHeight(n) * zoom;
@@ -5712,7 +5720,43 @@ void FrameTick(float dt)
             // Border
             dl->AddRect(nMin, nMax, selected ? 0xFFFFAA44 : 0xFF555566, 6.0f * zoom, 0, selected ? 2.0f : 1.0f);
             // Title
-            dl->AddText(ImVec2(nx + 6 * zoom, ny + 4 * zoom), 0xFFFFFFFF, def.name);
+            dl->AddText(ImVec2(nx + 6 * zoom, ny + 2 * zoom), 0xFFFFFFFF, def.name);
+
+            // Subtitle — show key/param value on the header
+            {
+                const char* sub = nullptr;
+                char subBuf[32] = {};
+                switch (n.type) {
+                case VsNodeType::OnKeyPressed:
+                case VsNodeType::OnKeyReleased:
+                case VsNodeType::OnKeyHeld:
+                    if (n.paramInt[0] >= 0 && n.paramInt[0] < kVsKeyCount)
+                        sub = sVsKeyNames[n.paramInt[0]];
+                    break;
+                case VsNodeType::MovePlayer:
+                    if (n.paramInt[1] >= 0 && n.paramInt[1] < kVsAxisCount)
+                        sub = sVsAxisNames[n.paramInt[1]];
+                    break;
+                case VsNodeType::OrbitCamera:
+                    sub = n.paramInt[0] == 0 ? "Left" : "Right";
+                    break;
+                case VsNodeType::Jump:
+                    snprintf(subBuf, sizeof(subBuf), "Force: %d", n.paramInt[0]);
+                    sub = subBuf;
+                    break;
+                case VsNodeType::SetSpeed:
+                    snprintf(subBuf, sizeof(subBuf), "W:%d S:%d", n.paramInt[0], n.paramInt[1]);
+                    sub = subBuf;
+                    break;
+                case VsNodeType::ChangeScene:
+                    snprintf(subBuf, sizeof(subBuf), "Scene %d", n.paramInt[0]);
+                    sub = subBuf;
+                    break;
+                default: break;
+                }
+                if (sub)
+                    dl->AddText(ImVec2(nx + 6 * zoom, ny + 16 * zoom), 0xFFAADDFF, sub);
+            }
 
             // Draw pins — exec in
             for (int p = 0; p < def.inExec; p++) {
@@ -5765,7 +5809,9 @@ void FrameTick(float dt)
         // Invisible button for canvas interaction
         ImGui::SetCursorScreenPos(canvasOrig);
         ImGui::InvisibleButton("##canvas", canvasSize, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
-        bool canvasHovered = ImGui::IsItemHovered();
+        // Manual bounds check — IsItemHovered fails when ##NodeProps window overlaps
+        bool canvasHovered = (io.MousePos.x >= canvasOrig.x && io.MousePos.x <= canvasOrig.x + canvasSize.x &&
+                              io.MousePos.y >= canvasOrig.y && io.MousePos.y <= canvasOrig.y + canvasSize.y);
 
         // Mouse interactions
         if (canvasHovered) {
@@ -5780,8 +5826,19 @@ void FrameTick(float dt)
                 sVsPanY = (io.MousePos.y - canvasOrig.y) / sVsZoom - my;
             }
 
-            // Left click
-            if (ImGui::IsMouseClicked(0)) {
+            // Check if mouse is over the properties panel (don't deselect if clicking there)
+            bool overPropsPanel = false;
+            if (sVsSelected >= 0) {
+                float propW = 200, propH = 160;
+                ImVec2 propMin(canvasOrig.x + canvasSize.x - propW - 8, canvasOrig.y + canvasSize.y - propH - 8);
+                ImVec2 propMax(propMin.x + propW, propMin.y + propH);
+                if (io.MousePos.x >= propMin.x && io.MousePos.x <= propMax.x &&
+                    io.MousePos.y >= propMin.y && io.MousePos.y <= propMax.y)
+                    overPropsPanel = true;
+            }
+
+            // Left click (use raw input — ImGui::IsMouseClicked may be eaten by other windows)
+            if (io.MouseClicked[0] && !overPropsPanel) {
                 if (hoveredPin.nodeId >= 0) {
                     // Start link drag from pin
                     sVsDraggingLink = true;
@@ -5796,13 +5853,13 @@ void FrameTick(float dt)
             }
 
             // Right click — context menu
-            if (ImGui::IsMouseClicked(1) && hoveredNode < 0) {
+            if (io.MouseClicked[1] && hoveredNode < 0) {
                 sVsShowContextMenu = true;
                 sVsContextMenuPos = io.MousePos;
             }
 
             // Middle drag — pan canvas
-            if (ImGui::IsMouseClicked(2))
+            if (io.MouseClicked[2])
                 sVsDraggingCanvas = true;
         }
 
@@ -5906,30 +5963,41 @@ void FrameTick(float dt)
             ImGui::EndPopup();
         }
 
-        // Properties panel overlay (bottom-right) for selected node
+        // Properties panel overlay (bottom-right) — as child window inside canvas
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
+            if ((int)n.type >= 0 && (int)n.type < (int)VsNodeType::COUNT) {
             const auto& def = sVsNodeDefs[(int)n.type];
-            float propW = 200, propH = 160;
-            ImVec2 propPos(canvasOrig.x + canvasSize.x - propW - 8, canvasOrig.y + canvasSize.y - propH - 8);
-            ImGui::SetNextWindowPos(propPos);
-            ImGui::SetNextWindowSize(ImVec2(propW, propH));
-            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.16f, 0.16f, 0.2f, 0.92f));
-            ImGui::Begin("##NodeProps", nullptr, flags | ImGuiWindowFlags_NoFocusOnAppearing);
+            float propW = 260, propH = 180;
+            float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
+            float nodeScreenY = canvasOrig.y + (n.y + sVsPanY) * zoom + VsNodeHeight(n) * zoom + 4;
+            // Clamp to stay within canvas
+            if (nodeScreenX + propW > canvasOrig.x + canvasSize.x)
+                nodeScreenX = canvasOrig.x + canvasSize.x - propW - 4;
+            if (nodeScreenY + propH > canvasOrig.y + canvasSize.y)
+                nodeScreenY = canvasOrig.y + canvasSize.y - propH - 4;
+            if (nodeScreenX < canvasOrig.x) nodeScreenX = canvasOrig.x + 4;
+            if (nodeScreenY < canvasOrig.y) nodeScreenY = canvasOrig.y + 4;
+            ImVec2 propPos(nodeScreenX, nodeScreenY);
+            ImGui::SetCursorScreenPos(propPos);
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.16f, 0.16f, 0.2f, 0.95f));
+            ImGui::BeginChild("##NodeProps", ImVec2(propW, propH), true);
             ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "%s", def.name);
             ImGui::Separator();
-            ImGui::PushItemWidth(propW - 16);
+            ImGui::PushItemWidth(-1);
 
             switch (n.type) {
             case VsNodeType::OnKeyPressed:
             case VsNodeType::OnKeyReleased:
             case VsNodeType::OnKeyHeld:
-                ImGui::Combo("Key", &n.paramInt[0], sVsKeyNames, kVsKeyCount);
+                ImGui::Text("Key");
+                ImGui::Combo("##Key", &n.paramInt[0], sVsKeyNames, kVsKeyCount);
                 break;
             case VsNodeType::OnCollision: {
+                ImGui::Text("Object");
                 const char* prev = (n.paramInt[0] >= 0 && n.paramInt[0] < (int)sTmObjects.size())
                     ? sTmObjects[n.paramInt[0]].name : "None";
-                if (ImGui::BeginCombo("Object", prev)) {
+                if (ImGui::BeginCombo("##Object", prev)) {
                     for (int oi = 0; oi < (int)sTmObjects.size(); oi++)
                         if (ImGui::Selectable(sTmObjects[oi].name, n.paramInt[0] == oi))
                             n.paramInt[0] = oi;
@@ -5938,16 +6006,20 @@ void FrameTick(float dt)
                 break;
             }
             case VsNodeType::MovePlayer:
-                ImGui::DragInt("Pixels", &n.paramInt[0], 0.5f, 1, 256);
-                ImGui::Combo("Direction", &n.paramInt[1], sVsAxisNames, kVsAxisCount);
+                ImGui::Text("Pixels");
+                ImGui::DragInt("##Pixels", &n.paramInt[0], 0.5f, 1, 256);
+                ImGui::Text("Direction");
+                ImGui::Combo("##Direction", &n.paramInt[1], sVsAxisNames, kVsAxisCount);
                 break;
             case VsNodeType::LookDirection:
-                ImGui::Combo("Direction", &n.paramInt[0], sVsAxisNames, kVsAxisCount);
+                ImGui::Text("Direction");
+                ImGui::Combo("##Direction", &n.paramInt[0], sVsAxisNames, kVsAxisCount);
                 break;
             case VsNodeType::ChangeScene: {
+                ImGui::Text("Scene");
                 const char* prev = (n.paramInt[0] >= 0 && n.paramInt[0] < (int)sTmScenes.size())
                     ? sTmScenes[n.paramInt[0]].name : "None";
-                if (ImGui::BeginCombo("Scene", prev)) {
+                if (ImGui::BeginCombo("##Scene", prev)) {
                     for (int si = 0; si < (int)sTmScenes.size(); si++)
                         if (ImGui::Selectable(sTmScenes[si].name, n.paramInt[0] == si))
                             n.paramInt[0] = si;
@@ -5957,31 +6029,52 @@ void FrameTick(float dt)
             }
             case VsNodeType::SetVariable:
             case VsNodeType::AddVariable:
-                ImGui::DragInt("Var Slot", &n.paramInt[0], 0.5f, 0, 31);
-                ImGui::DragInt("Value", &n.paramInt[1], 0.5f);
+                ImGui::Text("Var Slot");
+                ImGui::DragInt("##VarSlot", &n.paramInt[0], 0.5f, 0, 31);
+                ImGui::Text("Value");
+                ImGui::DragInt("##Value", &n.paramInt[1], 0.5f);
                 break;
             case VsNodeType::CompareVar:
-                ImGui::DragInt("Var Slot", &n.paramInt[0], 0.5f, 0, 31);
-                ImGui::DragInt("Value", &n.paramInt[1], 0.5f);
+                ImGui::Text("Var Slot");
+                ImGui::DragInt("##VarSlot", &n.paramInt[0], 0.5f, 0, 31);
+                ImGui::Text("Value");
+                ImGui::DragInt("##Value", &n.paramInt[1], 0.5f);
                 break;
             case VsNodeType::Branch:
                 ImGui::Text("Condition input");
                 break;
             case VsNodeType::PlaySound:
-                ImGui::DragInt("Sound ID", &n.paramInt[0], 0.5f, 0, 31);
+                ImGui::Text("Sound ID");
+                ImGui::DragInt("##SoundID", &n.paramInt[0], 0.5f, 0, 31);
                 break;
             case VsNodeType::Wait:
-                ImGui::DragInt("Frames", &n.paramInt[0], 0.5f, 1, 600);
+                ImGui::Text("Frames");
+                ImGui::DragInt("##Frames", &n.paramInt[0], 0.5f, 1, 600);
+                break;
+            case VsNodeType::Jump:
+                ImGui::Text("Force");
+                ImGui::DragInt("##Force", &n.paramInt[0], 0.5f, 1, 512);
+                break;
+            case VsNodeType::SetSpeed:
+                ImGui::Text("Walk");
+                ImGui::DragInt("##Walk", &n.paramInt[0], 0.5f, 1, 256);
+                ImGui::Text("Sprint");
+                ImGui::DragInt("##Sprint", &n.paramInt[1], 0.5f, 1, 256);
+                break;
+            case VsNodeType::OrbitCamera:
+                ImGui::Text("Direction");
+                ImGui::Combo("##Direction", &n.paramInt[0], sVsAxisNames, kVsAxisCount);
                 break;
             default: break;
             }
 
             ImGui::PopItemWidth();
-            ImGui::End();
+            ImGui::EndChild();
             ImGui::PopStyleColor();
+            }
         }
 
-        ImGui::End();
+        ImGui::End();       // ##NodeCanvas
         ImGui::PopStyleColor();
     }
     else if (sActiveTab == EditorTab::Mode7)
