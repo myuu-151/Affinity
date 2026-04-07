@@ -160,6 +160,8 @@ enum class VsNodeType : int {
     SetGravity,     // set gravity value
     SetMaxFall,     // set max fall speed
     DestroyObject,  // remove sprite/object from scene
+    AutoOrbit,      // auto-orbit camera when strafing
+    DampenJump,     // reduce upward velocity while A released (variable jump height)
     Integer,        // constant integer output
     Key,            // constant key output (A/B/L/R/etc)
     Direction,      // constant direction output (Left/Right/Up/Down)
@@ -212,6 +214,8 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Set Gravity",     0xFF3355AA, 1, 1, 1, 0, {"Value (float)"}, {}, {} },
     { "Set Max Fall",    0xFF3355AA, 1, 1, 1, 0, {"Value (float)"}, {}, {} },
     { "Destroy Object", 0xFF3355AA, 1, 1, 1, 0, {"Object (int)"}, {}, {} },
+    { "Auto Orbit",     0xFF3355AA, 1, 1, 1, 0, {"Speed (int)"}, {}, {} },
+    { "Dampen Jump",    0xFF3355AA, 1, 1, 1, 0, {"Factor (float)"}, {}, {} },
     { "Integer",         0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Key",             0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Direction",       0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
@@ -1014,6 +1018,8 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "max_fall_speed=%.2f\n", sCamObj.maxFallSpeed);
     fprintf(f, "jump_cam_land=%.1f\n", sCamObj.jumpCamLand);
     fprintf(f, "jump_cam_air=%.1f\n", sCamObj.jumpCamAir);
+    fprintf(f, "auto_orbit_speed=%.1f\n", sCamObj.autoOrbitSpeed);
+    fprintf(f, "jump_dampen=%.2f\n", sCamObj.jumpDampen);
     fprintf(f, "draw_distance=%.1f\n", sCamObj.drawDistance);
     fprintf(f, "small_tri_cull=%d\n", sCamObj.smallTriCull);
     fprintf(f, "skip_floor=%d\n", sCamObj.skipFloor ? 1 : 0);
@@ -1301,6 +1307,8 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "max_fall_speed=%f", &fval) == 1) sCamObj.maxFallSpeed = fval;
             else if (sscanf(line, "jump_cam_land=%f", &fval) == 1) sCamObj.jumpCamLand = fval;
             else if (sscanf(line, "jump_cam_air=%f", &fval) == 1) sCamObj.jumpCamAir = fval;
+            else if (sscanf(line, "auto_orbit_speed=%f", &fval) == 1) sCamObj.autoOrbitSpeed = fval;
+            else if (sscanf(line, "jump_dampen=%f", &fval) == 1) sCamObj.jumpDampen = fval;
             else if (sscanf(line, "draw_distance=%f", &fval) == 1) sCamObj.drawDistance = fval;
             else if (sscanf(line, "small_tri_cull=%d", &ival) == 1) sCamObj.smallTriCull = ival;
             else if (sscanf(line, "skip_floor=%d", &ival) == 1) sCamObj.skipFloor = (ival != 0);
@@ -3629,6 +3637,7 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::DragFloat("Cam Delay (Land)##cam", &sCamObj.jumpCamLand, 0.5f, 1.0f, 100.0f, "%.0f%%");
         ImGui::DragFloat("Cam Delay (Air)##cam",  &sCamObj.jumpCamAir,  0.5f, 1.0f, 100.0f, "%.0f%%");
         ImGui::Separator();
+        ImGui::Separator();
         ImGui::Text("Rendering");
         ImGui::DragFloat("Draw Distance##cam", &sCamObj.drawDistance, 1.0f, 0.0f, 2000.0f, "%.0f");
         ImGui::DragInt("Small Tri Cull##cam", &sCamObj.smallTriCull, 1.0f, 0, 500, "%d");
@@ -5173,6 +5182,8 @@ void FrameTick(float dt)
                 exportCam.maxFallSpeed = sCamObj.maxFallSpeed;
                 exportCam.jumpCamLand = sCamObj.jumpCamLand;
                 exportCam.jumpCamAir = sCamObj.jumpCamAir;
+                exportCam.autoOrbitSpeed = sCamObj.autoOrbitSpeed;
+                exportCam.jumpDampen = sCamObj.jumpDampen;
                 exportCam.drawDistance = sCamObj.drawDistance;
                 exportCam.smallTriCull = sCamObj.smallTriCull;
                 exportCam.skipFloor = sCamObj.skipFloor;
@@ -6488,7 +6499,7 @@ void FrameTick(float dt)
                 if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
             ImGui::Separator();
             ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.3f, 1.0f), "Actions");
-            for (int t = (int)VsNodeType::MovePlayer; t <= (int)VsNodeType::DestroyObject; t++)
+            for (int t = (int)VsNodeType::MovePlayer; t <= (int)VsNodeType::DampenJump; t++)
                 if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
             ImGui::Separator();
             ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.8f, 1.0f), "Data");

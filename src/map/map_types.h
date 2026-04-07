@@ -244,6 +244,10 @@ struct CameraStartObject
     // Jump camera follow
     float jumpCamLand  = 37.0f;  // camera Y catch-up % when grounded
     float jumpCamAir   = 12.0f;  // camera Y catch-up % when airborne
+    // Auto-orbit speed (brads per frame, 0 = disabled)
+    float autoOrbitSpeed = 205.0f;
+    // Jump dampen factor (0-1, applied each frame while A released and rising)
+    float jumpDampen = 0.75f;
     // Draw distance (0 = unlimited)
     float drawDistance = 0.0f;
     // Performance toggles

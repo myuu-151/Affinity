@@ -3120,6 +3120,16 @@ int main(void)
             // Auto-orbit when strafing (LEFT/RIGHT) with drag on release
             {
                 int autoOrbitTarget = 0;
+#ifdef AFN_AUTO_ORBIT_SPEED
+                if (inputRight)
+                {
+                    autoOrbitTarget = AFN_AUTO_ORBIT_SPEED;
+                    if (inputRight < 0)
+                        autoOrbitTarget = -autoOrbitTarget;
+                    if (key_is_down(KEY_L) || key_is_down(KEY_R))
+                        autoOrbitTarget *= 2;
+                }
+#else
                 if (inputRight)
                 {
                     autoOrbitTarget = (rotSpeed * 2 / 5);  // 40% of rotSpeed
@@ -3128,6 +3138,7 @@ int main(void)
                     if (key_is_down(KEY_L) || key_is_down(KEY_R))
                         autoOrbitTarget *= 2;
                 }
+#endif
                 if (autoOrbitTarget != 0)
                     auto_orbit_smooth += (autoOrbitTarget - auto_orbit_smooth) >> 2;
                 else
@@ -3174,8 +3185,13 @@ int main(void)
             if (key_hit(KEY_A) && player_on_ground)
                 player_vy = COL_JUMP_VEL;
             // Release A while rising: dampen upward velocity for short hop
+#ifdef AFN_JUMP_DAMPEN
+            if (!key_is_down(KEY_A) && player_vy > 0)
+                player_vy = (player_vy * AFN_JUMP_DAMPEN) >> 8;
+#else
             if (!key_is_down(KEY_A) && player_vy > 0)
                 player_vy = (player_vy * 3) / 4;
+#endif
 
             // Gravity: accelerate downward, clamp to terminal velocity
             player_vy -= COL_GRAVITY;
