@@ -156,9 +156,12 @@ enum class VsNodeType : int {
     Walk,           // set walk speed
     Sprint,         // set sprint speed
     OrbitCamera,    // rotate orbit camera
+    PlayAnim,       // play animation on player sprite
     Value,          // constant number output
     Key,            // constant key output (A/B/L/R/etc)
     Direction,      // constant direction output (Left/Right/Up/Down)
+    Animation,      // constant animation index output
+    Group,          // subgraph containing other nodes
     COUNT
 };
 
@@ -190,7 +193,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Branch",          0xFF885533, 1, 2, 1, 0, {"Condition"}, {}, {"True", "False"} },
     { "Compare Var",     0xFF885533, 0, 0, 2, 1, {"Var Slot", "Value"}, {"Result"}, {} },
     // Actions (orange)
-    { "Move Player",     0xFF3355AA, 1, 1, 1, 0, {"Speed"}, {}, {} },
+    { "Move Player",     0xFF3355AA, 1, 1, 2, 0, {"Speed", "Direction"}, {}, {} },
     { "Look Direction",  0xFF3355AA, 1, 1, 1, 0, {"Direction"}, {}, {} },
     { "Change Scene",    0xFF3355AA, 1, 1, 1, 0, {"Scene"}, {}, {} },
     { "Set Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot", "Value"}, {}, {} },
@@ -201,9 +204,12 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Walk",            0xFF3355AA, 1, 1, 1, 0, {"Speed"}, {}, {} },
     { "Sprint",          0xFF3355AA, 1, 1, 1, 0, {"Speed"}, {}, {} },
     { "Orbit Camera",    0xFF3355AA, 1, 1, 1, 0, {"Direction"}, {}, {} },
+    { "Play Animation",  0xFF3355AA, 1, 1, 1, 0, {"Anim"}, {}, {} },
     { "Value",           0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Key",             0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Direction",       0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
+    { "Animation",       0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
+    { "Group",           0xFF888844, 0, 0, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -212,6 +218,12 @@ struct VsNode {
     float x = 0, y = 0;          // canvas position
     // Per-node param values (interpreted based on type)
     int paramInt[4] = {};         // e.g. key index, var slot, pixels, scene index
+    bool selected = false;        // multi-select flag
+    // Group support
+    int groupId = 0;              // 0 = top-level; >0 = inside group with this node id
+    char groupLabel[32] = {};     // label for Group-type nodes
+    int grpInExec = 0, grpOutExec = 0;   // dynamic pin counts for Group nodes
+    int grpInData = 0, grpOutData = 0;
 };
 
 // Pin address: which node, which pin type, which pin index
@@ -225,8 +237,17 @@ struct VsLink {
     VsPin from, to;
 };
 
+// Annotation boxes (drawn behind nodes)
+struct VsAnnotation {
+    float x, y, w, h;            // canvas-space position and size
+    char label[64] = {};
+    ImU32 color = 0x44888888;     // fill color (translucent)
+    bool selected = false;        // multi-select flag
+};
+
 static std::vector<VsNode> sVsNodes;
 static std::vector<VsLink> sVsLinks;
+static std::vector<VsAnnotation> sVsAnnotations;
 static int sVsNextId = 1;
 static int sVsSelected = -1;     // selected node index (-1 = none)
 static float sVsPanX = 0, sVsPanY = 0;   // canvas pan offset
@@ -237,19 +258,53 @@ static bool sVsDraggingCanvas = false;
 static bool sVsDraggingLink = false;
 static VsPin sVsLinkStart = {};
 static ImVec2 sVsLinkEndPos = {};
+// Box selection
+static bool sVsBoxSelecting = false;
+static ImVec2 sVsBoxStart = {};        // screen-space start of selection box
+// Group navigation
+static int sVsEditingGroup = 0;        // 0 = top-level; >0 = inside group node id
+static float sVsParentPanX = 0, sVsParentPanY = 0;
+static float sVsParentZoom = 1.0f;
+// Group pin mappings: which internal pin maps to which group-node pin
+struct VsGroupPinMap {
+    int groupNodeId;
+    int pinType, pinIdx;           // pin on the group node
+    int innerNodeId;
+    int innerPinType, innerPinIdx; // pin on the internal node
+};
+static std::vector<VsGroupPinMap> sVsGroupPins;
+// Annotation interaction
+static int sVsSelectedAnnotation = -1;
+static bool sVsDraggingAnnotation = false;
+static bool sVsResizingAnnotation = false;
+static bool sVsResizingAnnotationLeft = false;
+static int sVsEditingAnnotation = -1;  // which annotation has active text input
 // Context menu
 static bool sVsShowContextMenu = false;
 static ImVec2 sVsContextMenuPos = {};
+// Auto-wire: when dropping a link on empty space, open context menu and wire to new node
+static VsPin sVsPendingAutoWire = { -1, 0, 0 };
 
 static constexpr float kVsNodeW = 160.0f;
 static constexpr float kVsHeaderH = 30.0f;
 static constexpr float kVsPinSpacing = 20.0f;
 static constexpr float kVsPinRadius = 5.0f;
 
+// Get pin counts for a node (uses dynamic counts for Group nodes)
+struct VsPinCounts { int inExec, outExec, inData, outData; };
+static VsPinCounts VsGetPinCounts(const VsNode& n) {
+    if (n.type == VsNodeType::Group)
+        return { n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData };
+    if ((int)n.type < 0 || (int)n.type >= (int)VsNodeType::COUNT)
+        return { 0, 0, 0, 0 };
+    const auto& def = sVsNodeDefs[(int)n.type];
+    return { def.inExec, def.outExec, def.inData, def.outData };
+}
+
 static float VsNodeHeight(const VsNode& n) {
     if ((int)n.type < 0 || (int)n.type >= (int)VsNodeType::COUNT) return kVsHeaderH + kVsPinSpacing + 8.0f;
-    const auto& def = sVsNodeDefs[(int)n.type];
-    int rows = std::max({ def.inExec + def.inData, def.outExec + def.outData, 1 });
+    auto pc = VsGetPinCounts(n);
+    int rows = std::max({ pc.inExec + pc.inData, pc.outExec + pc.outData, 1 });
     return kVsHeaderH + rows * kVsPinSpacing + 8.0f;
 }
 
@@ -266,6 +321,7 @@ static ImVec2 VsPinPos(const VsNode& n, int pinType, int pinIdx, ImVec2 canvasOr
     float w = kVsNodeW * zoom;
     float h = kVsHeaderH * zoom;
     float sp = kVsPinSpacing * zoom;
+    auto pc = VsGetPinCounts(n);
     float px, py;
     switch (pinType) {
     case 0: // execOut (right side, top)
@@ -273,12 +329,74 @@ static ImVec2 VsPinPos(const VsNode& n, int pinType, int pinIdx, ImVec2 canvasOr
     case 1: // execIn (left side, top)
         px = nx; py = ny + h + sp * 0.5f; break;
     case 2: // dataOut (right side, below exec)
-        px = nx + w; py = ny + h + sp * (0.5f + sVsNodeDefs[(int)n.type].outExec + pinIdx); break;
+        px = nx + w; py = ny + h + sp * (0.5f + pc.outExec + pinIdx); break;
     case 3: // dataIn (left side, below exec)
-        px = nx; py = ny + h + sp * (0.5f + sVsNodeDefs[(int)n.type].inExec + pinIdx); break;
+        px = nx; py = ny + h + sp * (0.5f + pc.inExec + pinIdx); break;
     default: px = nx; py = ny; break;
     }
     return ImVec2(px, py);
+}
+
+// Recompute group node pins from boundary-crossing links
+static void VsRecomputeGroupPins(int groupNodeId) {
+    int gi = VsFindNode(groupNodeId);
+    if (gi < 0) return;
+    VsNode& gn = sVsNodes[gi];
+
+    // Collect internal node ids
+    std::vector<int> insideIds;
+    for (auto& n : sVsNodes)
+        if (n.groupId == groupNodeId) insideIds.push_back(n.id);
+
+    auto isInside = [&](int id) {
+        for (int x : insideIds) if (x == id) return true;
+        return false;
+    };
+
+    // Remove old mappings for this group
+    sVsGroupPins.erase(std::remove_if(sVsGroupPins.begin(), sVsGroupPins.end(),
+        [&](const VsGroupPinMap& m) { return m.groupNodeId == groupNodeId; }), sVsGroupPins.end());
+
+    int inExec = 0, outExec = 0, inData = 0, outData = 0;
+
+    for (auto& lk : sVsLinks) {
+        bool fromIn = isInside(lk.from.nodeId);
+        bool toIn   = isInside(lk.to.nodeId);
+        if (fromIn && !toIn) {
+            // Outgoing: internal node's output becomes group's output
+            int pt, pi;
+            if (lk.from.pinType == 0) { pt = 0; pi = outExec++; }
+            else { pt = 2; pi = outData++; }
+            sVsGroupPins.push_back({ groupNodeId, pt, pi, lk.from.nodeId, lk.from.pinType, lk.from.pinIdx });
+        }
+        if (!fromIn && toIn) {
+            // Incoming: internal node's input becomes group's input
+            int pt, pi;
+            if (lk.to.pinType == 1) { pt = 1; pi = inExec++; }
+            else { pt = 3; pi = inData++; }
+            sVsGroupPins.push_back({ groupNodeId, pt, pi, lk.to.nodeId, lk.to.pinType, lk.to.pinIdx });
+        }
+    }
+
+    gn.grpInExec = inExec;
+    gn.grpOutExec = outExec;
+    gn.grpInData = inData;
+    gn.grpOutData = outData;
+}
+
+// Resolve a pin to its visible representation at the current editing level
+// If the pin's node is inside a group, map it to the group node's pin
+static VsPin VsResolvePin(const VsPin& pin) {
+    int ni = VsFindNode(pin.nodeId);
+    if (ni < 0) return pin;
+    VsNode& n = sVsNodes[ni];
+    if (n.groupId == sVsEditingGroup) return pin; // visible at current level
+    // Node is inside a group — find the mapping
+    for (auto& m : sVsGroupPins) {
+        if (m.innerNodeId == pin.nodeId && m.innerPinType == pin.pinType && m.innerPinIdx == pin.pinIdx)
+            return { m.groupNodeId, m.pinType, m.pinIdx };
+    }
+    return { -1, 0, 0 }; // not visible
 }
 
 // World size — supports up to 1024x1024 pixel tilemaps (128x128 tiles)
@@ -1065,9 +1183,12 @@ static bool SaveProject(const std::string& path)
     for (int i = 0; i < (int)sVsNodes.size(); i++)
     {
         const VsNode& n = sVsNodes[i];
-        fprintf(f, "vsNode=%d,%d,%.1f,%.1f,%d,%d,%d,%d\n",
+        fprintf(f, "vsNode=%d,%d,%.1f,%.1f,%d,%d,%d,%d,%d\n",
             n.id, (int)n.type, n.x, n.y,
-            n.paramInt[0], n.paramInt[1], n.paramInt[2], n.paramInt[3]);
+            n.paramInt[0], n.paramInt[1], n.paramInt[2], n.paramInt[3], n.groupId);
+        if (n.type == VsNodeType::Group)
+            fprintf(f, "vsGroupDef=%d|%s|%d,%d,%d,%d\n", n.id, n.groupLabel,
+                n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
     }
     fprintf(f, "vsLinkCount=%d\n", (int)sVsLinks.size());
     for (int i = 0; i < (int)sVsLinks.size(); i++)
@@ -1076,6 +1197,18 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "vsLink=%d,%d,%d|%d,%d,%d\n",
             lk.from.nodeId, lk.from.pinType, lk.from.pinIdx,
             lk.to.nodeId, lk.to.pinType, lk.to.pinIdx);
+    }
+    fprintf(f, "vsAnnotCount=%d\n", (int)sVsAnnotations.size());
+    for (int i = 0; i < (int)sVsAnnotations.size(); i++)
+    {
+        const VsAnnotation& ann = sVsAnnotations[i];
+        fprintf(f, "vsAnnot=%.1f,%.1f,%.1f,%.1f|%s\n", ann.x, ann.y, ann.w, ann.h, ann.label);
+    }
+    fprintf(f, "vsGroupPinCount=%d\n", (int)sVsGroupPins.size());
+    for (int i = 0; i < (int)sVsGroupPins.size(); i++) {
+        const auto& m = sVsGroupPins[i];
+        fprintf(f, "vsGroupPin=%d,%d,%d,%d,%d,%d\n",
+            m.groupNodeId, m.pinType, m.pinIdx, m.innerNodeId, m.innerPinType, m.innerPinIdx);
     }
 
     fclose(f);
@@ -1535,13 +1668,30 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "vsNode=", 7) == 0)
             {
                 VsNode n;
-                int typeInt;
-                if (sscanf(line + 7, "%d,%d,%f,%f,%d,%d,%d,%d",
+                int typeInt, gid = 0;
+                int nread = sscanf(line + 7, "%d,%d,%f,%f,%d,%d,%d,%d,%d",
                     &n.id, &typeInt, &n.x, &n.y,
-                    &n.paramInt[0], &n.paramInt[1], &n.paramInt[2], &n.paramInt[3]) >= 4)
+                    &n.paramInt[0], &n.paramInt[1], &n.paramInt[2], &n.paramInt[3], &gid);
+                if (nread >= 4)
                 {
                     n.type = (VsNodeType)typeInt;
+                    n.groupId = gid;
                     sVsNodes.push_back(n);
+                }
+            }
+            else if (strncmp(line, "vsGroupDef=", 11) == 0)
+            {
+                int nid, ie, oe, id2, od;
+                char lbl[32] = {};
+                if (sscanf(line + 11, "%d|%31[^|]|%d,%d,%d,%d", &nid, lbl, &ie, &oe, &id2, &od) >= 6) {
+                    int gi = VsFindNode(nid);
+                    if (gi >= 0) {
+                        strncpy(sVsNodes[gi].groupLabel, lbl, sizeof(sVsNodes[gi].groupLabel) - 1);
+                        sVsNodes[gi].grpInExec = ie;
+                        sVsNodes[gi].grpOutExec = oe;
+                        sVsNodes[gi].grpInData = id2;
+                        sVsNodes[gi].grpOutData = od;
+                    }
                 }
             }
             else if (sscanf(line, "vsLinkCount=%d", &ival) == 1) { sVsLinks.clear(); sVsLinks.reserve(ival); }
@@ -1553,6 +1703,26 @@ static bool LoadProject(const std::string& path)
                     &lk.to.nodeId, &lk.to.pinType, &lk.to.pinIdx) == 6)
                 {
                     sVsLinks.push_back(lk);
+                }
+            }
+            else if (sscanf(line, "vsGroupPinCount=%d", &ival) == 1) { sVsGroupPins.clear(); sVsGroupPins.reserve(ival); }
+            else if (strncmp(line, "vsGroupPin=", 11) == 0) {
+                VsGroupPinMap m;
+                if (sscanf(line + 11, "%d,%d,%d,%d,%d,%d",
+                    &m.groupNodeId, &m.pinType, &m.pinIdx, &m.innerNodeId, &m.innerPinType, &m.innerPinIdx) == 6)
+                    sVsGroupPins.push_back(m);
+            }
+            else if (sscanf(line, "vsAnnotCount=%d", &ival) == 1) { sVsAnnotations.clear(); sVsAnnotations.reserve(ival); }
+            else if (strncmp(line, "vsAnnot=", 8) == 0)
+            {
+                VsAnnotation ann;
+                float ax, ay, aw, ah;
+                // Parse "x,y,w,h|label"
+                if (sscanf(line + 8, "%f,%f,%f,%f|", &ax, &ay, &aw, &ah) == 4) {
+                    ann.x = ax; ann.y = ay; ann.w = aw; ann.h = ah;
+                    const char* pipe = strchr(line + 8, '|');
+                    if (pipe) strncpy(ann.label, pipe + 1, sizeof(ann.label) - 1);
+                    sVsAnnotations.push_back(ann);
                 }
             }
         }
@@ -2787,15 +2957,6 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             ImGui::DragFloat("##aspeed", &anim.speed, 0.05f, 0.0f, 10.0f, "%.1f");
             ImGui::PopItemWidth();
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Speed");
-            ImGui::SameLine();
-
-            // Game state dropdown
-            ImGui::PushItemWidth(Scaled(55));
-            int gs = (int)anim.gameState;
-            if (ImGui::Combo("##astate", &gs, kAnimStateNames, (int)AnimState::Count))
-                anim.gameState = (AnimState)gs;
-            ImGui::PopItemWidth();
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Game State");
             ImGui::SameLine();
 
             if (asset.anims.size() > 1 && ImGui::SmallButton("X##delanim"))
@@ -5675,13 +5836,51 @@ void FrameTick(float dt)
             dl->AddLine(ImVec2(canvasOrig.x, canvasOrig.y + gy),
                         ImVec2(canvasOrig.x + canvasSize.x, canvasOrig.y + gy), 0xFF1A1A1E);
 
-        // Draw links (bezier curves)
+        // Draw annotations (behind everything)
+        for (int ai = 0; ai < (int)sVsAnnotations.size(); ai++) {
+            auto& ann = sVsAnnotations[ai];
+            float ax = canvasOrig.x + (ann.x + sVsPanX) * zoom;
+            float ay = canvasOrig.y + (ann.y + sVsPanY) * zoom;
+            float aw = ann.w * zoom;
+            float ah = ann.h * zoom;
+            float headerH = 22.0f * zoom;
+            ImVec2 aMin(ax, ay);
+            ImVec2 aMax(ax + aw, ay + ah);
+            // Body fill
+            dl->AddRectFilled(aMin, aMax, ann.color, 4.0f * zoom);
+            // Header bar
+            dl->AddRectFilled(aMin, ImVec2(aMax.x, ay + headerH), 0x66AAAAAA, 4.0f * zoom, ImDrawFlags_RoundCornersTop);
+            // Border (highlight if selected)
+            bool aSel = (ai == sVsSelectedAnnotation) || ann.selected;
+            dl->AddRect(aMin, aMax, aSel ? 0xAAFFAA44 : 0x66666666, 4.0f * zoom, 0, aSel ? 1.5f : 1.0f);
+            // Label text
+            if (ann.label[0])
+                dl->AddText(ImVec2(ax + 6 * zoom, ay + 3 * zoom), 0xFFDDDDDD, ann.label);
+            // Resize grips (both bottom corners)
+            float grip = 22.0f * zoom;
+            ImU32 gripCol = aSel ? 0xAAFFAA44 : 0x66888888;
+            // Bottom-right
+            dl->AddTriangleFilled(
+                ImVec2(aMax.x, aMax.y - grip), ImVec2(aMax.x - grip, aMax.y), aMax,
+                gripCol);
+            // Bottom-left
+            dl->AddTriangleFilled(
+                ImVec2(aMin.x, aMax.y - grip), ImVec2(aMin.x + grip, aMax.y), ImVec2(aMin.x, aMax.y),
+                gripCol);
+        }
+
+        // Draw links (bezier curves) — resolve pins to current editing level
         for (auto& lk : sVsLinks) {
-            int fi = VsFindNode(lk.from.nodeId);
-            int ti = VsFindNode(lk.to.nodeId);
+            VsPin fromP = VsResolvePin(lk.from);
+            VsPin toP   = VsResolvePin(lk.to);
+            if (fromP.nodeId < 0 || toP.nodeId < 0) continue;
+            int fi = VsFindNode(fromP.nodeId);
+            int ti = VsFindNode(toP.nodeId);
             if (fi < 0 || ti < 0) continue;
-            ImVec2 p1 = VsPinPos(sVsNodes[fi], lk.from.pinType, lk.from.pinIdx, canvasOrig, zoom);
-            ImVec2 p2 = VsPinPos(sVsNodes[ti], lk.to.pinType, lk.to.pinIdx, canvasOrig, zoom);
+            // Both must be at current editing level
+            if (sVsNodes[fi].groupId != sVsEditingGroup || sVsNodes[ti].groupId != sVsEditingGroup) continue;
+            ImVec2 p1 = VsPinPos(sVsNodes[fi], fromP.pinType, fromP.pinIdx, canvasOrig, zoom);
+            ImVec2 p2 = VsPinPos(sVsNodes[ti], toP.pinType, toP.pinIdx, canvasOrig, zoom);
             float dx = std::max(50.0f * zoom, fabsf(p2.x - p1.x) * 0.5f);
             bool isExec = (lk.from.pinType == 0);
             ImU32 wireCol = isExec ? 0xFFFFFFFF : 0xFF44CCAA;
@@ -5707,6 +5906,7 @@ void FrameTick(float dt)
         for (int ni = 0; ni < (int)sVsNodes.size(); ni++) {
             VsNode& n = sVsNodes[ni];
             if ((int)n.type < 0 || (int)n.type >= (int)VsNodeType::COUNT) continue;
+            if (n.groupId != sVsEditingGroup) continue; // filter by editing level
             const auto& def = sVsNodeDefs[(int)n.type];
             float nw = kVsNodeW * zoom;
             float nh = VsNodeHeight(n) * zoom;
@@ -5719,45 +5919,23 @@ void FrameTick(float dt)
 
             ImVec2 nMin(nx, ny);
             ImVec2 nMax(nx + nw, ny + nh);
-            bool selected = (ni == sVsSelected);
+            bool isSel = (ni == sVsSelected) || n.selected;
 
             // Node body
             dl->AddRectFilled(nMin, nMax, 0xDD222228, 6.0f * zoom);
             // Header
             dl->AddRectFilled(nMin, ImVec2(nMax.x, nMin.y + hh), def.color, 6.0f * zoom, ImDrawFlags_RoundCornersTop);
             // Border
-            dl->AddRect(nMin, nMax, selected ? 0xFFFFAA44 : 0xFF555566, 6.0f * zoom, 0, selected ? 2.0f : 1.0f);
+            dl->AddRect(nMin, nMax, isSel ? 0xFFFFAA44 : 0xFF555566, 6.0f * zoom, 0, isSel ? 2.0f : 1.0f);
             // Title
-            dl->AddText(ImVec2(nx + 6 * zoom, ny + 2 * zoom), 0xFFFFFFFF, def.name);
+            const char* title = (n.type == VsNodeType::Group && n.groupLabel[0]) ? n.groupLabel : def.name;
+            dl->AddText(ImVec2(nx + 6 * zoom, ny + 2 * zoom), 0xFFFFFFFF, title);
 
             // Subtitle — show key/param value on the header
             {
                 const char* sub = nullptr;
                 char subBuf[32] = {};
                 switch (n.type) {
-                case VsNodeType::OnKeyPressed:
-                case VsNodeType::OnKeyReleased:
-                case VsNodeType::OnKeyHeld:
-                    if (n.paramInt[0] >= 0 && n.paramInt[0] < kVsKeyCount)
-                        sub = sVsKeyNames[n.paramInt[0]];
-                    break;
-                case VsNodeType::MovePlayer:
-                    snprintf(subBuf, sizeof(subBuf), "%d", n.paramInt[0]);
-                    sub = subBuf;
-                    break;
-                case VsNodeType::OrbitCamera: break;
-                case VsNodeType::Jump:
-                    snprintf(subBuf, sizeof(subBuf), "Force: %d", n.paramInt[0]);
-                    sub = subBuf;
-                    break;
-                case VsNodeType::Walk:
-                    snprintf(subBuf, sizeof(subBuf), "%d", n.paramInt[0]);
-                    sub = subBuf;
-                    break;
-                case VsNodeType::Sprint:
-                    snprintf(subBuf, sizeof(subBuf), "%d", n.paramInt[0]);
-                    sub = subBuf;
-                    break;
                 case VsNodeType::Value:
                     snprintf(subBuf, sizeof(subBuf), "%d", n.paramInt[0]);
                     sub = subBuf;
@@ -5770,18 +5948,32 @@ void FrameTick(float dt)
                     if (n.paramInt[0] >= 0 && n.paramInt[0] < kVsAxisCount)
                         sub = sVsAxisNames[n.paramInt[0]];
                     break;
-                case VsNodeType::ChangeScene:
-                    snprintf(subBuf, sizeof(subBuf), "Scene %d", n.paramInt[0]);
-                    sub = subBuf;
+                case VsNodeType::Animation: {
+                    // Show animation name from player sprite asset
+                    int ai = n.paramInt[0];
+                    bool found = false;
+                    for (int si = 0; si < (int)sSpriteAssets.size() && !found; si++) {
+                        if (ai >= 0 && ai < (int)sSpriteAssets[si].anims.size()) {
+                            sub = sSpriteAssets[si].anims[ai].name.c_str();
+                            found = true;
+                        }
+                    }
+                    if (!found) {
+                        snprintf(subBuf, sizeof(subBuf), "%d", ai);
+                        sub = subBuf;
+                    }
                     break;
+                }
                 default: break;
                 }
                 if (sub)
                     dl->AddText(ImVec2(nx + 6 * zoom, ny + 16 * zoom), 0xFFAADDFF, sub);
             }
 
-            // Draw pins — exec in
-            for (int p = 0; p < def.inExec; p++) {
+            // Draw pins — use dynamic counts for Group nodes
+            auto pc = VsGetPinCounts(n);
+            // exec in
+            for (int p = 0; p < pc.inExec; p++) {
                 ImVec2 pp = VsPinPos(n, 1, p, canvasOrig, zoom);
                 dl->AddTriangleFilled(
                     ImVec2(pp.x - pr, pp.y - pr), ImVec2(pp.x + pr, pp.y), ImVec2(pp.x - pr, pp.y + pr),
@@ -5790,32 +5982,32 @@ void FrameTick(float dt)
                     hoveredPin = { n.id, 1, p };
             }
             // exec out
-            for (int p = 0; p < def.outExec; p++) {
+            for (int p = 0; p < pc.outExec; p++) {
                 ImVec2 pp = VsPinPos(n, 0, p, canvasOrig, zoom);
                 dl->AddTriangleFilled(
                     ImVec2(pp.x - pr, pp.y - pr), ImVec2(pp.x + pr, pp.y), ImVec2(pp.x - pr, pp.y + pr),
                     0xFFFFFFFF);
-                // Label
-                if (def.outExecNames[p])
+                // Label (from def if available)
+                if (n.type != VsNodeType::Group && def.outExecNames[p])
                     dl->AddText(ImVec2(pp.x - 8 * zoom - ImGui::CalcTextSize(def.outExecNames[p]).x * zoom, pp.y - 6 * zoom),
                         0xFFCCCCCC, def.outExecNames[p]);
                 if (((io.MousePos.x - pp.x) * (io.MousePos.x - pp.x) + (io.MousePos.y - pp.y) * (io.MousePos.y - pp.y)) < pr * pr * 4)
                     hoveredPin = { n.id, 0, p };
             }
             // data in
-            for (int p = 0; p < def.inData; p++) {
+            for (int p = 0; p < pc.inData; p++) {
                 ImVec2 pp = VsPinPos(n, 3, p, canvasOrig, zoom);
                 dl->AddCircleFilled(pp, pr, 0xFF44CCAA);
-                if (def.inDataNames[p])
+                if (n.type != VsNodeType::Group && def.inDataNames[p])
                     dl->AddText(ImVec2(pp.x + pr + 4 * zoom, pp.y - 6 * zoom), 0xFFCCCCCC, def.inDataNames[p]);
                 if (((io.MousePos.x - pp.x) * (io.MousePos.x - pp.x) + (io.MousePos.y - pp.y) * (io.MousePos.y - pp.y)) < pr * pr * 4)
                     hoveredPin = { n.id, 3, p };
             }
             // data out
-            for (int p = 0; p < def.outData; p++) {
+            for (int p = 0; p < pc.outData; p++) {
                 ImVec2 pp = VsPinPos(n, 2, p, canvasOrig, zoom);
                 dl->AddCircleFilled(pp, pr, 0xFF44CCAA);
-                if (def.outDataNames[p])
+                if (n.type != VsNodeType::Group && def.outDataNames[p])
                     dl->AddText(ImVec2(pp.x - pr - 4 * zoom - ImGui::CalcTextSize(def.outDataNames[p]).x, pp.y - 6 * zoom),
                         0xFFCCCCCC, def.outDataNames[p]);
                 if (((io.MousePos.x - pp.x) * (io.MousePos.x - pp.x) + (io.MousePos.y - pp.y) * (io.MousePos.y - pp.y)) < pr * pr * 4)
@@ -5866,18 +6058,93 @@ void FrameTick(float dt)
                     skipCanvasClick = true;
             }
 
+            // Alt + left click — create annotation
+            if (io.MouseClicked[0] && !skipCanvasClick && io.KeyAlt) {
+                VsAnnotation ann;
+                ann.x = (io.MousePos.x - canvasOrig.x) / zoom - sVsPanX;
+                ann.y = (io.MousePos.y - canvasOrig.y) / zoom - sVsPanY;
+                ann.w = 300; ann.h = 200;
+                snprintf(ann.label, sizeof(ann.label), "Note");
+                sVsAnnotations.push_back(ann);
+                sVsSelectedAnnotation = (int)sVsAnnotations.size() - 1;
+                sVsEditingAnnotation = sVsSelectedAnnotation;
+                sVsSelected = -1;
+            }
             // Left click (use raw input — ImGui::IsMouseClicked may be eaten by other windows)
-            if (io.MouseClicked[0] && !skipCanvasClick) {
+            else if (io.MouseClicked[0] && !skipCanvasClick) {
+                // Check annotation hit (header drag, resize grip, body click)
+                int hitAnnotation = -1;
+                bool hitResize = false;
+                bool hitResizeLeft = false;
+                bool hitHeader = false;
+                for (int ai = (int)sVsAnnotations.size() - 1; ai >= 0; ai--) {
+                    auto& ann = sVsAnnotations[ai];
+                    float ax = canvasOrig.x + (ann.x + sVsPanX) * zoom;
+                    float ay = canvasOrig.y + (ann.y + sVsPanY) * zoom;
+                    float aw = ann.w * zoom, ah = ann.h * zoom;
+                    float headerH = 22.0f * zoom;
+                    float grip = 24.0f * zoom;
+                    // Resize grip (bottom-right corner)
+                    if (io.MousePos.x >= ax + aw - grip && io.MousePos.x <= ax + aw &&
+                        io.MousePos.y >= ay + ah - grip && io.MousePos.y <= ay + ah) {
+                        hitAnnotation = ai; hitResize = true; break;
+                    }
+                    // Resize grip (bottom-left corner)
+                    if (io.MousePos.x >= ax && io.MousePos.x <= ax + grip &&
+                        io.MousePos.y >= ay + ah - grip && io.MousePos.y <= ay + ah) {
+                        hitAnnotation = ai; hitResize = true; hitResizeLeft = true; break;
+                    }
+                    // Header bar
+                    if (io.MousePos.x >= ax && io.MousePos.x <= ax + aw &&
+                        io.MousePos.y >= ay && io.MousePos.y <= ay + headerH) {
+                        hitAnnotation = ai; hitHeader = true; break;
+                    }
+                }
+
                 if (hoveredPin.nodeId >= 0) {
                     // Start link drag from pin
                     sVsDraggingLink = true;
                     sVsLinkStart = hoveredPin;
                     sVsLinkEndPos = io.MousePos;
+                    sVsSelectedAnnotation = -1;
+                    sVsEditingAnnotation = -1;
                 } else if (hoveredNode >= 0) {
+                    // If clicking a node that's already part of multi-selection, keep the group
+                    if (!sVsNodes[hoveredNode].selected) {
+                        // Clear previous multi-selection
+                        for (auto& nd : sVsNodes) nd.selected = false;
+                        for (auto& ann : sVsAnnotations) ann.selected = false;
+                        sVsNodes[hoveredNode].selected = true;
+                    }
                     sVsSelected = hoveredNode;
                     sVsDraggingNode = true;
-                } else {
+                    sVsSelectedAnnotation = -1;
+                    sVsEditingAnnotation = -1;
+                } else if (hitAnnotation >= 0) {
+                    sVsSelectedAnnotation = hitAnnotation;
                     sVsSelected = -1;
+                    for (auto& nd : sVsNodes) nd.selected = false;
+                    for (auto& ann : sVsAnnotations) ann.selected = false;
+                    if (hitResize) {
+                        sVsResizingAnnotation = true;
+                        sVsResizingAnnotationLeft = hitResizeLeft;
+                    } else if (hitHeader) {
+                        sVsDraggingAnnotation = true;
+                    }
+                    // Double-click header to edit label
+                    if (hitHeader && io.MouseDoubleClicked[0])
+                        sVsEditingAnnotation = hitAnnotation;
+                    else if (!hitHeader)
+                        sVsEditingAnnotation = -1;
+                } else {
+                    // Start box selection on empty canvas
+                    sVsSelected = -1;
+                    sVsSelectedAnnotation = -1;
+                    sVsEditingAnnotation = -1;
+                    for (auto& nd : sVsNodes) nd.selected = false;
+                    for (auto& ann : sVsAnnotations) ann.selected = false;
+                    sVsBoxSelecting = true;
+                    sVsBoxStart = io.MousePos;
                 }
             }
 
@@ -5901,13 +6168,103 @@ void FrameTick(float dt)
                 sVsDraggingCanvas = true;
         }
 
-        // Drag node
+        // Drag node (move all selected nodes together)
         if (sVsDraggingNode && ImGui::IsMouseDragging(0) && sVsSelected >= 0) {
-            sVsNodes[sVsSelected].x += io.MouseDelta.x / zoom;
-            sVsNodes[sVsSelected].y += io.MouseDelta.y / zoom;
+            float dx = io.MouseDelta.x / zoom;
+            float dy = io.MouseDelta.y / zoom;
+            for (auto& nd : sVsNodes) {
+                if (nd.selected) { nd.x += dx; nd.y += dy; }
+            }
+            for (auto& ann : sVsAnnotations) {
+                if (ann.selected) { ann.x += dx; ann.y += dy; }
+            }
         }
         if (!ImGui::IsMouseDown(0))
             sVsDraggingNode = false;
+
+        // Drag / resize annotation
+        if (sVsDraggingAnnotation && ImGui::IsMouseDragging(0) && sVsSelectedAnnotation >= 0) {
+            sVsAnnotations[sVsSelectedAnnotation].x += io.MouseDelta.x / zoom;
+            sVsAnnotations[sVsSelectedAnnotation].y += io.MouseDelta.y / zoom;
+        }
+        if (!ImGui::IsMouseDown(0))
+            sVsDraggingAnnotation = false;
+        if (sVsResizingAnnotation && ImGui::IsMouseDragging(0) && sVsSelectedAnnotation >= 0) {
+            auto& ra = sVsAnnotations[sVsSelectedAnnotation];
+            float dx = io.MouseDelta.x / zoom;
+            float dy = io.MouseDelta.y / zoom;
+            if (sVsResizingAnnotationLeft) {
+                // Left grip: move x, shrink w
+                if (ra.w - dx >= 100) { ra.x += dx; ra.w -= dx; }
+            } else {
+                ra.w += dx;
+            }
+            ra.h += dy;
+            if (ra.w < 100) ra.w = 100;
+            if (ra.h < 60) ra.h = 60;
+        }
+        if (!ImGui::IsMouseDown(0)) {
+            sVsResizingAnnotation = false;
+            sVsResizingAnnotationLeft = false;
+        }
+
+        // Delete annotation with Delete key
+        if (sVsSelectedAnnotation >= 0 && sVsEditingAnnotation < 0 && ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+            sVsAnnotations.erase(sVsAnnotations.begin() + sVsSelectedAnnotation);
+            sVsSelectedAnnotation = -1;
+        }
+
+        // Box selection
+        if (sVsBoxSelecting) {
+            if (ImGui::IsMouseDragging(0)) {
+                // Draw selection rectangle
+                ImVec2 bMin(std::min(sVsBoxStart.x, io.MousePos.x), std::min(sVsBoxStart.y, io.MousePos.y));
+                ImVec2 bMax(std::max(sVsBoxStart.x, io.MousePos.x), std::max(sVsBoxStart.y, io.MousePos.y));
+                dl->AddRectFilled(bMin, bMax, 0x22FFAA44);
+                dl->AddRect(bMin, bMax, 0xAAFFAA44, 0, 0, 1.0f);
+                // Live-select nodes within box (only at current editing level)
+                for (auto& nd : sVsNodes) {
+                    if ((int)nd.type < 0 || (int)nd.type >= (int)VsNodeType::COUNT) continue;
+                    if (nd.groupId != sVsEditingGroup) { nd.selected = false; continue; }
+                    float nx = canvasOrig.x + (nd.x + sVsPanX) * zoom;
+                    float ny = canvasOrig.y + (nd.y + sVsPanY) * zoom;
+                    float nw = kVsNodeW * zoom;
+                    float nh = VsNodeHeight(nd) * zoom;
+                    nd.selected = (nx + nw > bMin.x && nx < bMax.x && ny + nh > bMin.y && ny < bMax.y);
+                }
+                // Live-select annotations — only when box crosses an edge (not fully inside)
+                for (auto& ann : sVsAnnotations) {
+                    float ax = canvasOrig.x + (ann.x + sVsPanX) * zoom;
+                    float ay = canvasOrig.y + (ann.y + sVsPanY) * zoom;
+                    float aw = ann.w * zoom;
+                    float ah = ann.h * zoom;
+                    bool overlaps = (ax + aw > bMin.x && ax < bMax.x && ay + ah > bMin.y && ay < bMax.y);
+                    bool boxInsideAnn = (bMin.x >= ax && bMax.x <= ax + aw && bMin.y >= ay && bMax.y <= ay + ah);
+                    ann.selected = overlaps && !boxInsideAnn;
+                }
+            }
+            if (!ImGui::IsMouseDown(0))
+                sVsBoxSelecting = false;
+        }
+
+        // Annotation label editing (inline text input on header)
+        if (sVsEditingAnnotation >= 0 && sVsEditingAnnotation < (int)sVsAnnotations.size()) {
+            auto& ann = sVsAnnotations[sVsEditingAnnotation];
+            float ax = canvasOrig.x + (ann.x + sVsPanX) * zoom;
+            float ay = canvasOrig.y + (ann.y + sVsPanY) * zoom;
+            float aw = ann.w * zoom;
+            ImGui::SetCursorScreenPos(ImVec2(ax + 2, ay + 1));
+            ImGui::PushItemWidth(aw - 4);
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.1f, 0.1f, 0.1f, 0.9f));
+            if (ImGui::InputText("##annlabel", ann.label, sizeof(ann.label),
+                    ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll))
+                sVsEditingAnnotation = -1;
+            // Auto-focus the input on first frame
+            if (!ImGui::IsItemActive() && ImGui::IsWindowFocused())
+                ImGui::SetKeyboardFocusHere(-1);
+            ImGui::PopStyleColor();
+            ImGui::PopItemWidth();
+        }
 
         // Drag canvas (middle mouse)
         if (sVsDraggingCanvas && ImGui::IsMouseDragging(2)) {
@@ -5934,6 +6291,11 @@ void FrameTick(float dt)
                     } else if (execLinkRev || dataLinkRev) {
                         sVsLinks.push_back({ hoveredPin, sVsLinkStart });
                     }
+                } else if (hoveredPin.nodeId < 0 && hoveredNode < 0) {
+                    // Dropped on empty space — open context menu and auto-wire
+                    sVsShowContextMenu = true;
+                    sVsContextMenuPos = io.MousePos;
+                    sVsPendingAutoWire = sVsLinkStart;
                 }
             }
         }
@@ -5941,12 +6303,118 @@ void FrameTick(float dt)
         // Delete selected node with Delete key
         if (sVsSelected >= 0 && ImGui::IsKeyPressed(ImGuiKey_Delete)) {
             int delId = sVsNodes[sVsSelected].id;
+            // If deleting a group, also delete children and their links
+            if (sVsNodes[sVsSelected].type == VsNodeType::Group) {
+                std::vector<int> childIds;
+                for (auto& nd : sVsNodes)
+                    if (nd.groupId == delId) childIds.push_back(nd.id);
+                // Remove links to children
+                for (int cid : childIds)
+                    sVsLinks.erase(std::remove_if(sVsLinks.begin(), sVsLinks.end(),
+                        [cid](const VsLink& l) { return l.from.nodeId == cid || l.to.nodeId == cid; }),
+                        sVsLinks.end());
+                // Remove children
+                sVsNodes.erase(std::remove_if(sVsNodes.begin(), sVsNodes.end(),
+                    [delId](const VsNode& nd) { return nd.groupId == delId; }), sVsNodes.end());
+                // Remove pin mappings
+                sVsGroupPins.erase(std::remove_if(sVsGroupPins.begin(), sVsGroupPins.end(),
+                    [delId](const VsGroupPinMap& m) { return m.groupNodeId == delId; }), sVsGroupPins.end());
+            }
             // Remove links connected to this node
             sVsLinks.erase(std::remove_if(sVsLinks.begin(), sVsLinks.end(),
                 [delId](const VsLink& l) { return l.from.nodeId == delId || l.to.nodeId == delId; }),
                 sVsLinks.end());
-            sVsNodes.erase(sVsNodes.begin() + sVsSelected);
+            // Need to re-find index since erase may have shifted it
+            int delIdx = VsFindNode(delId);
+            if (delIdx >= 0) sVsNodes.erase(sVsNodes.begin() + delIdx);
             sVsSelected = -1;
+        }
+
+        // Ctrl+G — group selected nodes
+        if (ImGui::IsKeyPressed(ImGuiKey_G) && io.KeyCtrl && !io.KeyShift) {
+            std::vector<int> selIds;
+            for (auto& nd : sVsNodes)
+                if (nd.selected && nd.groupId == sVsEditingGroup)
+                    selIds.push_back(nd.id);
+            if (selIds.size() >= 2) {
+                // Compute centroid
+                float cx = 0, cy = 0;
+                for (int id : selIds) { int i = VsFindNode(id); cx += sVsNodes[i].x; cy += sVsNodes[i].y; }
+                cx /= selIds.size(); cy /= selIds.size();
+
+                VsNode gn;
+                gn.id = sVsNextId++;
+                gn.type = VsNodeType::Group;
+                gn.x = cx; gn.y = cy;
+                gn.groupId = sVsEditingGroup;
+                snprintf(gn.groupLabel, sizeof(gn.groupLabel), "Group %d", gn.id);
+
+                // Reparent selected nodes into group
+                for (int id : selIds) {
+                    int i = VsFindNode(id);
+                    sVsNodes[i].groupId = gn.id;
+                    sVsNodes[i].selected = false;
+                }
+
+                sVsNodes.push_back(gn);
+                VsRecomputeGroupPins(gn.id);
+                sVsSelected = (int)sVsNodes.size() - 1;
+                for (auto& nd : sVsNodes) nd.selected = false;
+            }
+        }
+
+        // Ctrl+Shift+G — ungroup selected group node
+        if (ImGui::IsKeyPressed(ImGuiKey_G) && io.KeyCtrl && io.KeyShift && sVsSelected >= 0) {
+            VsNode& sel = sVsNodes[sVsSelected];
+            if (sel.type == VsNodeType::Group) {
+                int gid = sel.id;
+                // Reparent children back to current level
+                for (auto& nd : sVsNodes)
+                    if (nd.groupId == gid) nd.groupId = sVsEditingGroup;
+                // Remove pin mappings
+                sVsGroupPins.erase(std::remove_if(sVsGroupPins.begin(), sVsGroupPins.end(),
+                    [gid](const VsGroupPinMap& m) { return m.groupNodeId == gid; }), sVsGroupPins.end());
+                // Remove links that connected to the group node itself
+                sVsLinks.erase(std::remove_if(sVsLinks.begin(), sVsLinks.end(),
+                    [gid](const VsLink& l) { return l.from.nodeId == gid || l.to.nodeId == gid; }),
+                    sVsLinks.end());
+                // Delete the group node
+                int gi = VsFindNode(gid);
+                if (gi >= 0) sVsNodes.erase(sVsNodes.begin() + gi);
+                sVsSelected = -1;
+            }
+        }
+
+        // Double-click to enter group node
+        if (sVsSelected >= 0 && io.MouseDoubleClicked[0]) {
+            VsNode& sel = sVsNodes[sVsSelected];
+            if (sel.type == VsNodeType::Group) {
+                sVsParentPanX = sVsPanX;
+                sVsParentPanY = sVsPanY;
+                sVsParentZoom = sVsZoom;
+                sVsEditingGroup = sel.id;
+                sVsPanX = 0; sVsPanY = 0; sVsZoom = 1.0f;
+                sVsSelected = -1;
+                for (auto& nd : sVsNodes) nd.selected = false;
+            }
+        }
+
+        // Escape to exit group editing
+        if (sVsEditingGroup != 0 && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            VsRecomputeGroupPins(sVsEditingGroup);
+            sVsEditingGroup = 0;
+            sVsPanX = sVsParentPanX;
+            sVsPanY = sVsParentPanY;
+            sVsZoom = sVsParentZoom;
+            sVsSelected = -1;
+        }
+
+        // Breadcrumb when inside a group
+        if (sVsEditingGroup != 0) {
+            int gi = VsFindNode(sVsEditingGroup);
+            const char* lbl = (gi >= 0 && sVsNodes[gi].groupLabel[0]) ? sVsNodes[gi].groupLabel : "Group";
+            char bc[64]; snprintf(bc, sizeof(bc), "< Esc | Editing: %s", lbl);
+            dl->AddText(ImVec2(canvasOrig.x + 10, canvasOrig.y + 10), 0xFFFFFF88, bc);
         }
 
         dl->PopClipRect();
@@ -5960,64 +6428,61 @@ void FrameTick(float dt)
             ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Add Node");
             ImGui::Separator();
 
-            ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "Events");
-            for (int t = (int)VsNodeType::OnKeyPressed; t <= (int)VsNodeType::OnStart; t++) {
-                if (ImGui::MenuItem(sVsNodeDefs[t].name)) {
-                    VsNode n;
-                    n.id = sVsNextId++;
-                    n.type = (VsNodeType)t;
-                    n.x = (sVsContextMenuPos.x - canvasOrig.x) / zoom - sVsPanX;
-                    n.y = (sVsContextMenuPos.y - canvasOrig.y) / zoom - sVsPanY;
-                    sVsNodes.push_back(n);
-                    sVsSelected = (int)sVsNodes.size() - 1;
+            // Helper lambda to create a node at context menu position
+            auto addNodeAt = [&](VsNodeType t) {
+                VsNode n;
+                n.id = sVsNextId++;
+                n.type = t;
+                n.x = (sVsContextMenuPos.x - canvasOrig.x) / zoom - sVsPanX;
+                n.y = (sVsContextMenuPos.y - canvasOrig.y) / zoom - sVsPanY;
+                n.groupId = sVsEditingGroup;
+                sVsNodes.push_back(n);
+                sVsSelected = (int)sVsNodes.size() - 1;
+                // Auto-wire if we have a pending pin from link drag
+                if (sVsPendingAutoWire.nodeId >= 0) {
+                    auto pc = VsGetPinCounts(n);
+                    int srcType = sVsPendingAutoWire.pinType;
+                    // Dragged from exec out → connect to new node's exec in
+                    if (srcType == 0 && pc.inExec > 0)
+                        sVsLinks.push_back({ sVsPendingAutoWire, { n.id, 1, 0 } });
+                    // Dragged from exec in → connect new node's exec out to this
+                    else if (srcType == 1 && pc.outExec > 0)
+                        sVsLinks.push_back({ { n.id, 0, 0 }, sVsPendingAutoWire });
+                    // Dragged from data out → connect to new node's data in
+                    else if (srcType == 2 && pc.inData > 0)
+                        sVsLinks.push_back({ sVsPendingAutoWire, { n.id, 3, 0 } });
+                    // Dragged from data in → connect new node's data out to this
+                    else if (srcType == 3 && pc.outData > 0)
+                        sVsLinks.push_back({ { n.id, 2, 0 }, sVsPendingAutoWire });
+                    sVsPendingAutoWire = { -1, 0, 0 };
                 }
-            }
+            };
+
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "Events");
+            for (int t = (int)VsNodeType::OnKeyPressed; t <= (int)VsNodeType::OnStart; t++)
+                if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
             ImGui::Separator();
             ImGui::TextColored(ImVec4(0.4f, 0.5f, 0.9f, 1.0f), "Logic");
-            for (int t = (int)VsNodeType::Branch; t <= (int)VsNodeType::CompareVar; t++) {
-                if (ImGui::MenuItem(sVsNodeDefs[t].name)) {
-                    VsNode n;
-                    n.id = sVsNextId++;
-                    n.type = (VsNodeType)t;
-                    n.x = (sVsContextMenuPos.x - canvasOrig.x) / zoom - sVsPanX;
-                    n.y = (sVsContextMenuPos.y - canvasOrig.y) / zoom - sVsPanY;
-                    sVsNodes.push_back(n);
-                    sVsSelected = (int)sVsNodes.size() - 1;
-                }
-            }
+            for (int t = (int)VsNodeType::Branch; t <= (int)VsNodeType::CompareVar; t++)
+                if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
             ImGui::Separator();
             ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.3f, 1.0f), "Actions");
-            for (int t = (int)VsNodeType::MovePlayer; t <= (int)VsNodeType::OrbitCamera; t++) {
-                if (ImGui::MenuItem(sVsNodeDefs[t].name)) {
-                    VsNode n;
-                    n.id = sVsNextId++;
-                    n.type = (VsNodeType)t;
-                    n.x = (sVsContextMenuPos.x - canvasOrig.x) / zoom - sVsPanX;
-                    n.y = (sVsContextMenuPos.y - canvasOrig.y) / zoom - sVsPanY;
-                    sVsNodes.push_back(n);
-                    sVsSelected = (int)sVsNodes.size() - 1;
-                }
-            }
+            for (int t = (int)VsNodeType::MovePlayer; t <= (int)VsNodeType::PlayAnim; t++)
+                if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
             ImGui::Separator();
             ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.8f, 1.0f), "Data");
-            for (int t = (int)VsNodeType::Value; t < (int)VsNodeType::COUNT; t++) {
-                if (ImGui::MenuItem(sVsNodeDefs[t].name)) {
-                    VsNode n;
-                    n.id = sVsNextId++;
-                    n.type = (VsNodeType)t;
-                    n.x = (sVsContextMenuPos.x - canvasOrig.x) / zoom - sVsPanX;
-                    n.y = (sVsContextMenuPos.y - canvasOrig.y) / zoom - sVsPanY;
-                    sVsNodes.push_back(n);
-                    sVsSelected = (int)sVsNodes.size() - 1;
-                }
-            }
+            for (int t = (int)VsNodeType::Value; t <= (int)VsNodeType::Animation; t++)
+                if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
             ImGui::EndPopup();
+        } else {
+            // Context menu closed without selection — clear pending auto-wire
+            sVsPendingAutoWire = { -1, 0, 0 };
         }
 
         // Properties panel overlay — as child window inside canvas (data nodes only)
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
-            if (n.type == VsNodeType::Value || n.type == VsNodeType::Key || n.type == VsNodeType::Direction) {
+            if (n.type == VsNodeType::Value || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Group) {
             const auto& def = sVsNodeDefs[(int)n.type];
             float propW = 260, propH = 180;
             float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -6050,6 +6515,44 @@ void FrameTick(float dt)
             case VsNodeType::Key:
                 ImGui::Text("Key");
                 ImGui::Combo("##Key2", &n.paramInt[0], sVsKeyNames, kVsKeyCount);
+                break;
+            case VsNodeType::Animation: {
+                ImGui::Text("Animation");
+                // Build list of animation names from all sprite assets
+                // For now, use the first asset that has anims (typically the player sprite)
+                const char* preview = "None";
+                int totalAnims = 0;
+                for (int si = 0; si < (int)sSpriteAssets.size(); si++)
+                    totalAnims += (int)sSpriteAssets[si].anims.size();
+                if (totalAnims > 0) {
+                    // Flatten all anims across assets into a combo
+                    int idx = 0;
+                    for (int si = 0; si < (int)sSpriteAssets.size(); si++) {
+                        for (int ai = 0; ai < (int)sSpriteAssets[si].anims.size(); ai++, idx++) {
+                            if (idx == n.paramInt[0])
+                                preview = sSpriteAssets[si].anims[ai].name.c_str();
+                        }
+                    }
+                    if (ImGui::BeginCombo("##Anim", preview)) {
+                        idx = 0;
+                        for (int si = 0; si < (int)sSpriteAssets.size(); si++) {
+                            for (int ai = 0; ai < (int)sSpriteAssets[si].anims.size(); ai++, idx++) {
+                                bool sel = (idx == n.paramInt[0]);
+                                if (ImGui::Selectable(sSpriteAssets[si].anims[ai].name.c_str(), sel))
+                                    n.paramInt[0] = idx;
+                                if (sel) ImGui::SetItemDefaultFocus();
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                } else {
+                    ImGui::Text("(no animations)");
+                }
+                break;
+            }
+            case VsNodeType::Group:
+                ImGui::Text("Name");
+                ImGui::InputText("##GrpName", n.groupLabel, sizeof(n.groupLabel));
                 break;
             default: break;
             }

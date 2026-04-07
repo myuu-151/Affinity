@@ -19,6 +19,7 @@ A Game Boy Advance and Nintendo DS 3D engine with a Windows desktop editor. Impo
 - **mGBA Integration** — Launch the ROM directly in mGBA from the editor
 - **OAM Sprite Support** — 8-directional animated sprites with LOD, running alongside 3D meshes
 - **Collision System** — Pre-baked world-space collision with spatial grid, wall slide, floor snapping, and gravity
+- **Visual Script Nodes** — Event-driven node graph for game logic (key input, movement, animation, branching) with wirable data nodes
 - **Mode 7 Floor** — HBlank affine floor rendering for non-mesh projects
 
 ## Requirements
