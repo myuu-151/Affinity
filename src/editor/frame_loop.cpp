@@ -153,8 +153,12 @@ enum class VsNodeType : int {
     PlaySound,
     Wait,
     Jump,           // player jump
-    SetSpeed,       // set walk/sprint speed
+    Walk,           // set walk speed
+    Sprint,         // set sprint speed
     OrbitCamera,    // rotate orbit camera
+    Value,          // constant number output
+    Key,            // constant key output (A/B/L/R/etc)
+    Direction,      // constant direction output (Left/Right/Up/Down)
     COUNT
 };
 
@@ -177,16 +181,16 @@ static constexpr int kVsAxisCount = 4;
 
 static const VsNodeTypeDef sVsNodeDefs[] = {
     // Events (green)
-    { "On Key Pressed",  0xFF338833, 0, 1, 0, 0, {}, {}, {} },
-    { "On Key Released", 0xFF338833, 0, 1, 0, 0, {}, {}, {} },
-    { "On Key Held",     0xFF338833, 0, 1, 0, 0, {}, {}, {} },
+    { "On Key Pressed",  0xFF338833, 0, 1, 1, 0, {"Key"}, {}, {} },
+    { "On Key Released", 0xFF338833, 0, 1, 1, 0, {"Key"}, {}, {} },
+    { "On Key Held",     0xFF338833, 0, 1, 1, 0, {"Key"}, {}, {} },
     { "On Collision",    0xFF338833, 0, 1, 0, 0, {}, {}, {} },
     { "On Start",        0xFF338833, 0, 1, 0, 0, {}, {}, {} },
     // Logic (blue)
     { "Branch",          0xFF885533, 1, 2, 1, 0, {"Condition"}, {}, {"True", "False"} },
     { "Compare Var",     0xFF885533, 0, 0, 2, 1, {"Var Slot", "Value"}, {"Result"}, {} },
     // Actions (orange)
-    { "Move Player",     0xFF3355AA, 1, 1, 2, 0, {"Pixels", "Direction"}, {}, {} },
+    { "Move Player",     0xFF3355AA, 1, 1, 1, 0, {"Speed"}, {}, {} },
     { "Look Direction",  0xFF3355AA, 1, 1, 1, 0, {"Direction"}, {}, {} },
     { "Change Scene",    0xFF3355AA, 1, 1, 1, 0, {"Scene"}, {}, {} },
     { "Set Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot", "Value"}, {}, {} },
@@ -194,8 +198,12 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Play Sound",      0xFF3355AA, 1, 1, 1, 0, {"Sound ID"}, {}, {} },
     { "Wait",            0xFF3355AA, 1, 1, 1, 0, {"Frames"}, {}, {} },
     { "Jump",            0xFF3355AA, 1, 1, 1, 0, {"Force"}, {}, {} },
-    { "Set Speed",       0xFF3355AA, 1, 1, 2, 0, {"Walk", "Sprint"}, {}, {} },
+    { "Walk",            0xFF3355AA, 1, 1, 1, 0, {"Speed"}, {}, {} },
+    { "Sprint",          0xFF3355AA, 1, 1, 1, 0, {"Speed"}, {}, {} },
     { "Orbit Camera",    0xFF3355AA, 1, 1, 1, 0, {"Direction"}, {}, {} },
+    { "Value",           0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
+    { "Key",             0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
+    { "Direction",       0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
 };
 
 struct VsNode {
@@ -5734,19 +5742,33 @@ void FrameTick(float dt)
                         sub = sVsKeyNames[n.paramInt[0]];
                     break;
                 case VsNodeType::MovePlayer:
-                    if (n.paramInt[1] >= 0 && n.paramInt[1] < kVsAxisCount)
-                        sub = sVsAxisNames[n.paramInt[1]];
+                    snprintf(subBuf, sizeof(subBuf), "%d", n.paramInt[0]);
+                    sub = subBuf;
                     break;
-                case VsNodeType::OrbitCamera:
-                    sub = n.paramInt[0] == 0 ? "Left" : "Right";
-                    break;
+                case VsNodeType::OrbitCamera: break;
                 case VsNodeType::Jump:
                     snprintf(subBuf, sizeof(subBuf), "Force: %d", n.paramInt[0]);
                     sub = subBuf;
                     break;
-                case VsNodeType::SetSpeed:
-                    snprintf(subBuf, sizeof(subBuf), "W:%d S:%d", n.paramInt[0], n.paramInt[1]);
+                case VsNodeType::Walk:
+                    snprintf(subBuf, sizeof(subBuf), "%d", n.paramInt[0]);
                     sub = subBuf;
+                    break;
+                case VsNodeType::Sprint:
+                    snprintf(subBuf, sizeof(subBuf), "%d", n.paramInt[0]);
+                    sub = subBuf;
+                    break;
+                case VsNodeType::Value:
+                    snprintf(subBuf, sizeof(subBuf), "%d", n.paramInt[0]);
+                    sub = subBuf;
+                    break;
+                case VsNodeType::Key:
+                    if (n.paramInt[0] >= 0 && n.paramInt[0] < kVsKeyCount)
+                        sub = sVsKeyNames[n.paramInt[0]];
+                    break;
+                case VsNodeType::Direction:
+                    if (n.paramInt[0] >= 0 && n.paramInt[0] < kVsAxisCount)
+                        sub = sVsAxisNames[n.paramInt[0]];
                     break;
                 case VsNodeType::ChangeScene:
                     snprintf(subBuf, sizeof(subBuf), "Scene %d", n.paramInt[0]);
@@ -5859,10 +5881,19 @@ void FrameTick(float dt)
                 }
             }
 
-            // Right click — context menu
-            if (io.MouseClicked[1] && hoveredNode < 0) {
-                sVsShowContextMenu = true;
-                sVsContextMenuPos = io.MousePos;
+            // Right click — disconnect pin or open context menu
+            if (io.MouseClicked[1]) {
+                if (hoveredPin.nodeId >= 0) {
+                    // Remove all links connected to this pin
+                    sVsLinks.erase(std::remove_if(sVsLinks.begin(), sVsLinks.end(),
+                        [&](const VsLink& l) {
+                            return (l.from.nodeId == hoveredPin.nodeId && l.from.pinType == hoveredPin.pinType && l.from.pinIdx == hoveredPin.pinIdx) ||
+                                   (l.to.nodeId == hoveredPin.nodeId && l.to.pinType == hoveredPin.pinType && l.to.pinIdx == hoveredPin.pinIdx);
+                        }), sVsLinks.end());
+                } else if (hoveredNode < 0) {
+                    sVsShowContextMenu = true;
+                    sVsContextMenuPos = io.MousePos;
+                }
             }
 
             // Middle drag — pan canvas
@@ -5956,7 +5987,20 @@ void FrameTick(float dt)
             }
             ImGui::Separator();
             ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.3f, 1.0f), "Actions");
-            for (int t = (int)VsNodeType::MovePlayer; t < (int)VsNodeType::COUNT; t++) {
+            for (int t = (int)VsNodeType::MovePlayer; t <= (int)VsNodeType::OrbitCamera; t++) {
+                if (ImGui::MenuItem(sVsNodeDefs[t].name)) {
+                    VsNode n;
+                    n.id = sVsNextId++;
+                    n.type = (VsNodeType)t;
+                    n.x = (sVsContextMenuPos.x - canvasOrig.x) / zoom - sVsPanX;
+                    n.y = (sVsContextMenuPos.y - canvasOrig.y) / zoom - sVsPanY;
+                    sVsNodes.push_back(n);
+                    sVsSelected = (int)sVsNodes.size() - 1;
+                }
+            }
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.8f, 1.0f), "Data");
+            for (int t = (int)VsNodeType::Value; t < (int)VsNodeType::COUNT; t++) {
                 if (ImGui::MenuItem(sVsNodeDefs[t].name)) {
                     VsNode n;
                     n.id = sVsNextId++;
@@ -5970,10 +6014,10 @@ void FrameTick(float dt)
             ImGui::EndPopup();
         }
 
-        // Properties panel overlay (bottom-right) — as child window inside canvas
+        // Properties panel overlay — as child window inside canvas (data nodes only)
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
-            if ((int)n.type >= 0 && (int)n.type < (int)VsNodeType::COUNT) {
+            if (n.type == VsNodeType::Value || n.type == VsNodeType::Key || n.type == VsNodeType::Direction) {
             const auto& def = sVsNodeDefs[(int)n.type];
             float propW = 260, propH = 180;
             float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -5994,83 +6038,18 @@ void FrameTick(float dt)
             ImGui::PushItemWidth(-1);
 
             switch (n.type) {
-            case VsNodeType::OnKeyPressed:
-            case VsNodeType::OnKeyReleased:
-            case VsNodeType::OnKeyHeld:
+            // Data nodes — these have editable properties
+            case VsNodeType::Direction:
+                ImGui::Text("Direction");
+                ImGui::Combo("##Dir", &n.paramInt[0], sVsAxisNames, kVsAxisCount);
+                break;
+            case VsNodeType::Value:
+                ImGui::Text("Value");
+                ImGui::DragInt("##Val", &n.paramInt[0], 0.5f);
+                break;
+            case VsNodeType::Key:
                 ImGui::Text("Key");
-                ImGui::Combo("##Key", &n.paramInt[0], sVsKeyNames, kVsKeyCount);
-                break;
-            case VsNodeType::OnCollision: {
-                ImGui::Text("Object");
-                const char* prev = (n.paramInt[0] >= 0 && n.paramInt[0] < (int)sTmObjects.size())
-                    ? sTmObjects[n.paramInt[0]].name : "None";
-                if (ImGui::BeginCombo("##Object", prev)) {
-                    for (int oi = 0; oi < (int)sTmObjects.size(); oi++)
-                        if (ImGui::Selectable(sTmObjects[oi].name, n.paramInt[0] == oi))
-                            n.paramInt[0] = oi;
-                    ImGui::EndCombo();
-                }
-                break;
-            }
-            case VsNodeType::MovePlayer:
-                ImGui::Text("Pixels");
-                ImGui::DragInt("##Pixels", &n.paramInt[0], 0.5f, 1, 256);
-                ImGui::Text("Direction");
-                ImGui::Combo("##Direction", &n.paramInt[1], sVsAxisNames, kVsAxisCount);
-                break;
-            case VsNodeType::LookDirection:
-                ImGui::Text("Direction");
-                ImGui::Combo("##Direction", &n.paramInt[0], sVsAxisNames, kVsAxisCount);
-                break;
-            case VsNodeType::ChangeScene: {
-                ImGui::Text("Scene");
-                const char* prev = (n.paramInt[0] >= 0 && n.paramInt[0] < (int)sTmScenes.size())
-                    ? sTmScenes[n.paramInt[0]].name : "None";
-                if (ImGui::BeginCombo("##Scene", prev)) {
-                    for (int si = 0; si < (int)sTmScenes.size(); si++)
-                        if (ImGui::Selectable(sTmScenes[si].name, n.paramInt[0] == si))
-                            n.paramInt[0] = si;
-                    ImGui::EndCombo();
-                }
-                break;
-            }
-            case VsNodeType::SetVariable:
-            case VsNodeType::AddVariable:
-                ImGui::Text("Var Slot");
-                ImGui::DragInt("##VarSlot", &n.paramInt[0], 0.5f, 0, 31);
-                ImGui::Text("Value");
-                ImGui::DragInt("##Value", &n.paramInt[1], 0.5f);
-                break;
-            case VsNodeType::CompareVar:
-                ImGui::Text("Var Slot");
-                ImGui::DragInt("##VarSlot", &n.paramInt[0], 0.5f, 0, 31);
-                ImGui::Text("Value");
-                ImGui::DragInt("##Value", &n.paramInt[1], 0.5f);
-                break;
-            case VsNodeType::Branch:
-                ImGui::Text("Condition input");
-                break;
-            case VsNodeType::PlaySound:
-                ImGui::Text("Sound ID");
-                ImGui::DragInt("##SoundID", &n.paramInt[0], 0.5f, 0, 31);
-                break;
-            case VsNodeType::Wait:
-                ImGui::Text("Frames");
-                ImGui::DragInt("##Frames", &n.paramInt[0], 0.5f, 1, 600);
-                break;
-            case VsNodeType::Jump:
-                ImGui::Text("Force");
-                ImGui::DragInt("##Force", &n.paramInt[0], 0.5f, 1, 512);
-                break;
-            case VsNodeType::SetSpeed:
-                ImGui::Text("Walk");
-                ImGui::DragInt("##Walk", &n.paramInt[0], 0.5f, 1, 256);
-                ImGui::Text("Sprint");
-                ImGui::DragInt("##Sprint", &n.paramInt[1], 0.5f, 1, 256);
-                break;
-            case VsNodeType::OrbitCamera:
-                ImGui::Text("Direction");
-                ImGui::Combo("##Direction", &n.paramInt[0], sVsAxisNames, kVsAxisCount);
+                ImGui::Combo("##Key2", &n.paramInt[0], sVsKeyNames, kVsKeyCount);
                 break;
             default: break;
             }
