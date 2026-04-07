@@ -5826,19 +5826,26 @@ void FrameTick(float dt)
                 sVsPanY = (io.MousePos.y - canvasOrig.y) / sVsZoom - my;
             }
 
-            // Check if mouse is over the properties panel (don't deselect if clicking there)
-            bool overPropsPanel = false;
-            if (sVsSelected >= 0) {
-                float propW = 200, propH = 160;
-                ImVec2 propMin(canvasOrig.x + canvasSize.x - propW - 8, canvasOrig.y + canvasSize.y - propH - 8);
-                ImVec2 propMax(propMin.x + propW, propMin.y + propH);
-                if (io.MousePos.x >= propMin.x && io.MousePos.x <= propMax.x &&
-                    io.MousePos.y >= propMin.y && io.MousePos.y <= propMax.y)
-                    overPropsPanel = true;
+            // Don't process canvas clicks if a widget is active (e.g. combo dropdown open)
+            // or if mouse is over the properties panel child window
+            bool skipCanvasClick = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup);
+            if (!skipCanvasClick && sVsSelected >= 0) {
+                // Check props panel bounds (positioned below selected node)
+                const VsNode& sn = sVsNodes[sVsSelected];
+                float propW = 260, propH = 180;
+                float pnx = canvasOrig.x + (sn.x + sVsPanX) * zoom;
+                float pny = canvasOrig.y + (sn.y + sVsPanY) * zoom + VsNodeHeight(sn) * zoom + 4;
+                if (pnx + propW > canvasOrig.x + canvasSize.x) pnx = canvasOrig.x + canvasSize.x - propW - 4;
+                if (pny + propH > canvasOrig.y + canvasSize.y) pny = canvasOrig.y + canvasSize.y - propH - 4;
+                if (pnx < canvasOrig.x) pnx = canvasOrig.x + 4;
+                if (pny < canvasOrig.y) pny = canvasOrig.y + 4;
+                if (io.MousePos.x >= pnx && io.MousePos.x <= pnx + propW &&
+                    io.MousePos.y >= pny && io.MousePos.y <= pny + propH)
+                    skipCanvasClick = true;
             }
 
             // Left click (use raw input — ImGui::IsMouseClicked may be eaten by other windows)
-            if (io.MouseClicked[0] && !overPropsPanel) {
+            if (io.MouseClicked[0] && !skipCanvasClick) {
                 if (hoveredPin.nodeId >= 0) {
                     // Start link drag from pin
                     sVsDraggingLink = true;
