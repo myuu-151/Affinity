@@ -34,7 +34,7 @@ static Mode7Camera sCamera;
 static bool sInitialized = false;
 
 // Editor mode tabs
-enum class EditorTab { Map, Sprites, Tiles, Skybox, Player, ThreeD, Mode7, Tilemap };
+enum class EditorTab { Map, Sprites, Tiles, Skybox, Player, ThreeD, Mode7, Tilemap, Events };
 static EditorTab sActiveTab = EditorTab::Map;
 
 // Dummy tileset: 16 colors for the palette display
@@ -69,8 +69,8 @@ static std::vector<unsigned int> sTmSpriteTextures; // GL texture IDs, indexed b
 static int sTmSpriteTexCount = 0; // how many we've cached
 
 // ---- Tilemap object system ----
-enum class TmObjType { Player = 0, Enemy, NPC, Door, Chest, SavePoint, Tile, COUNT };
-static const char* sTmObjTypeNames[] = { "Player", "Enemy", "NPC", "Door", "Chest", "Save Point", "Tile" };
+enum class TmObjType { Player = 0, Enemy, NPC, Door, Chest, SavePoint, Tile, Teleport, COUNT };
+static const char* sTmObjTypeNames[] = { "Player", "Enemy", "NPC", "Door", "Chest", "Save Point", "Tile", "Teleport" };
 static const uint32_t sTmObjTypeColors[] = {
     0xFF44FF44, // Player - green
     0xFF4444FF, // Enemy - red
@@ -79,6 +79,7 @@ static const uint32_t sTmObjTypeColors[] = {
     0xFFFFFF44, // Chest - yellow
     0xFFFF44FF, // Save Point - magenta
     0xFF888888, // Tile - grey
+    0xFF44FFFF, // Teleport - cyan
 };
 
 struct TmObject {
@@ -86,6 +87,7 @@ struct TmObject {
     int tileX = 0, tileY = 0;       // position in tile coords (for non-Tile objects)
     char name[32] = "";
     int spriteAssetIdx = -1;         // index into sSpriteAssets (-1 = none)
+    int teleportScene = -1;          // target scene index (-1 = none, only for Teleport type)
     // Tile objects: one object covers multiple cells
     std::vector<std::pair<int,int>> cells; // (tileX,tileY) list — only used when type==Tile
 };
@@ -96,6 +98,173 @@ static int sTmStampAsset = -1;       // sprite asset index for stamp/paint mode 
 static int sTmStampObj = -1;         // which Tile object we're painting into (-1 = none)
 static int sTmPlaceTX = 0, sTmPlaceTY = 0; // tile coords for popup placement
 static float sTmObjPanelW = 200.0f;  // object panel width
+
+// ---- Scene instances ----
+struct TmScene {
+    char name[32] = "";
+    int mapW = 1, mapH = 1;        // grid dimensions in tiles
+    // Per-scene tilemap data
+    std::vector<uint16_t> tileIndices;  // saved tile grid
+    std::vector<TmObject> objects;      // saved objects
+};
+static std::vector<TmScene> sTmScenes;
+static int sTmSelectedScene = 0;     // active scene index
+static float sTmScenePanelW = 180.0f; // scene panel width
+
+// Save current tilemap state into the given scene
+static void SaveSceneState(TmScene& sc)
+{
+    sc.mapW = sTilemapData.floor.width;
+    sc.mapH = sTilemapData.floor.height;
+    sc.tileIndices = sTilemapData.floor.tileIndices;
+    sc.objects = sTmObjects;
+}
+
+// Load a scene's tilemap state into the active tilemap
+static void LoadSceneState(const TmScene& sc)
+{
+    sTilemapData.floor.width  = sc.mapW;
+    sTilemapData.floor.height = sc.mapH;
+    if (!sc.tileIndices.empty())
+        sTilemapData.floor.tileIndices = sc.tileIndices;
+    else
+        sTilemapData.floor.tileIndices.assign(sc.mapW * sc.mapH, 0);
+    sTmObjects = sc.objects;
+    sTmSelectedObj = -1;
+    sTmDragObj = -1;
+    sTmStampObj = -1;
+}
+
+// ---- Visual Script Node System ----
+enum class VsNodeType : int {
+    // Events (triggers — green, no input exec pin)
+    OnKeyPressed = 0, OnKeyReleased, OnKeyHeld,
+    OnCollision,
+    OnStart,
+    // Logic (blue)
+    Branch,         // if/else
+    CompareVar,     // variable comparison
+    // Actions (orange, has input exec pin)
+    MovePlayer,
+    LookDirection,
+    ChangeScene,
+    SetVariable,
+    AddVariable,
+    PlaySound,
+    Wait,
+    COUNT
+};
+
+struct VsNodeTypeDef {
+    const char* name;
+    ImU32 color;        // header color (ABGR)
+    int inExec;         // number of exec input pins (0 for events)
+    int outExec;        // number of exec output pins
+    int inData;         // number of data input pins
+    int outData;        // number of data output pins
+    const char* inDataNames[4];
+    const char* outDataNames[4];
+    const char* outExecNames[4];
+};
+
+static const char* sVsKeyNames[] = { "A", "B", "L", "R", "Start", "Select", "Up", "Down", "Left", "Right" };
+static constexpr int kVsKeyCount = 10;
+static const char* sVsAxisNames[] = { "Left", "Right", "Up", "Down" };
+static constexpr int kVsAxisCount = 4;
+
+static const VsNodeTypeDef sVsNodeDefs[] = {
+    // Events (green)
+    { "On Key Pressed",  0xFF338833, 0, 1, 0, 0, {}, {}, {} },
+    { "On Key Released", 0xFF338833, 0, 1, 0, 0, {}, {}, {} },
+    { "On Key Held",     0xFF338833, 0, 1, 0, 0, {}, {}, {} },
+    { "On Collision",    0xFF338833, 0, 1, 0, 0, {}, {}, {} },
+    { "On Start",        0xFF338833, 0, 1, 0, 0, {}, {}, {} },
+    // Logic (blue)
+    { "Branch",          0xFF885533, 1, 2, 1, 0, {"Condition"}, {}, {"True", "False"} },
+    { "Compare Var",     0xFF885533, 0, 0, 2, 1, {"Var Slot", "Value"}, {"Result"}, {} },
+    // Actions (orange)
+    { "Move Player",     0xFF3355AA, 1, 1, 2, 0, {"Pixels", "Direction"}, {}, {} },
+    { "Look Direction",  0xFF3355AA, 1, 1, 1, 0, {"Direction"}, {}, {} },
+    { "Change Scene",    0xFF3355AA, 1, 1, 1, 0, {"Scene"}, {}, {} },
+    { "Set Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot", "Value"}, {}, {} },
+    { "Add Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot", "Amount"}, {}, {} },
+    { "Play Sound",      0xFF3355AA, 1, 1, 1, 0, {"Sound ID"}, {}, {} },
+    { "Wait",            0xFF3355AA, 1, 1, 1, 0, {"Frames"}, {}, {} },
+};
+
+struct VsNode {
+    int id = 0;
+    VsNodeType type = VsNodeType::OnStart;
+    float x = 0, y = 0;          // canvas position
+    // Per-node param values (interpreted based on type)
+    int paramInt[4] = {};         // e.g. key index, var slot, pixels, scene index
+};
+
+// Pin address: which node, which pin type, which pin index
+struct VsPin {
+    int nodeId = -1;
+    int pinType = 0;              // 0=execOut, 1=execIn, 2=dataOut, 3=dataIn
+    int pinIdx = 0;
+};
+
+struct VsLink {
+    VsPin from, to;
+};
+
+static std::vector<VsNode> sVsNodes;
+static std::vector<VsLink> sVsLinks;
+static int sVsNextId = 1;
+static int sVsSelected = -1;     // selected node index (-1 = none)
+static float sVsPanX = 0, sVsPanY = 0;   // canvas pan offset
+static float sVsZoom = 1.0f;
+// Dragging state
+static bool sVsDraggingNode = false;
+static bool sVsDraggingCanvas = false;
+static bool sVsDraggingLink = false;
+static VsPin sVsLinkStart = {};
+static ImVec2 sVsLinkEndPos = {};
+// Context menu
+static bool sVsShowContextMenu = false;
+static ImVec2 sVsContextMenuPos = {};
+
+static constexpr float kVsNodeW = 160.0f;
+static constexpr float kVsHeaderH = 24.0f;
+static constexpr float kVsPinSpacing = 20.0f;
+static constexpr float kVsPinRadius = 5.0f;
+
+static float VsNodeHeight(const VsNode& n) {
+    const auto& def = sVsNodeDefs[(int)n.type];
+    int rows = std::max({ def.inExec + def.inData, def.outExec + def.outData, 1 });
+    return kVsHeaderH + rows * kVsPinSpacing + 8.0f;
+}
+
+static int VsFindNode(int id) {
+    for (int i = 0; i < (int)sVsNodes.size(); i++)
+        if (sVsNodes[i].id == id) return i;
+    return -1;
+}
+
+// Get pin screen position given canvas origin and zoom
+static ImVec2 VsPinPos(const VsNode& n, int pinType, int pinIdx, ImVec2 canvasOrig, float zoom) {
+    float nx = canvasOrig.x + (n.x + sVsPanX) * zoom;
+    float ny = canvasOrig.y + (n.y + sVsPanY) * zoom;
+    float w = kVsNodeW * zoom;
+    float h = kVsHeaderH * zoom;
+    float sp = kVsPinSpacing * zoom;
+    float px, py;
+    switch (pinType) {
+    case 0: // execOut (right side, top)
+        px = nx + w; py = ny + h + sp * (0.5f + pinIdx); break;
+    case 1: // execIn (left side, top)
+        px = nx; py = ny + h + sp * 0.5f; break;
+    case 2: // dataOut (right side, below exec)
+        px = nx + w; py = ny + h + sp * (0.5f + sVsNodeDefs[(int)n.type].outExec + pinIdx); break;
+    case 3: // dataIn (left side, below exec)
+        px = nx; py = ny + h + sp * (0.5f + sVsNodeDefs[(int)n.type].inExec + pinIdx); break;
+    default: px = nx; py = ny; break;
+    }
+    return ImVec2(px, py);
+}
 
 // World size — supports up to 1024x1024 pixel tilemaps (128x128 tiles)
 static constexpr float kWorldSize = 1024.0f;   // total extent
@@ -125,28 +294,29 @@ static void RebuildTmSpriteTextures()
 {
     for (auto t : sTmSpriteTextures)
         if (t) glDeleteTextures(1, &t);
+    sTmSpriteTextures.clear();
     sTmSpriteTextures.resize(sSpriteAssets.size(), 0);
     for (int i = 0; i < (int)sSpriteAssets.size(); i++)
     {
         const SpriteAsset& sa = sSpriteAssets[i];
         if (sa.frames.empty()) { sTmSpriteTextures[i] = 0; continue; }
         const SpriteFrame& frame = sa.frames[0];
-        int fSize = frame.width;
-        std::vector<uint32_t> rgba(fSize * fSize, 0);
-        for (int py = 0; py < fSize; py++)
-            for (int px = 0; px < fSize; px++)
+        int fw = frame.width, fh = frame.height;
+        std::vector<uint32_t> rgba(fw * fh, 0);
+        for (int py = 0; py < fh; py++)
+            for (int px = 0; px < fw; px++)
             {
                 uint8_t palIdx = frame.pixels[py * kMaxFrameSize + px];
                 if (palIdx == 0) continue;
                 uint32_t c = sa.palette[palIdx & 0xF];
-                rgba[py * fSize + px] = c | 0xFF000000;
+                rgba[py * fw + px] = c | 0xFF000000;
             }
         unsigned int tex = 0;
         glGenTextures(1, &tex);
         glBindTexture(GL_TEXTURE_2D, tex);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fSize, fSize, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fw, fh, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
         sTmSpriteTextures[i] = tex;
     }
     sTmSpriteTexCount = (int)sSpriteAssets.size();
@@ -805,6 +975,7 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "panX=%.2f\n", sTmMapPanX);
     fprintf(f, "panY=%.2f\n", sTmMapPanY);
     fprintf(f, "panelW=%.1f\n", sTmObjPanelW);
+    fprintf(f, "scenePanelW=%.1f\n", sTmScenePanelW);
     // Tile indices
     fprintf(f, "tiles=");
     for (int i = 0; i < (int)sTilemapData.floor.tileIndices.size(); i++)
@@ -818,8 +989,8 @@ static bool SaveProject(const std::string& path)
     for (int i = 0; i < (int)sTmObjects.size(); i++)
     {
         const TmObject& obj = sTmObjects[i];
-        fprintf(f, "obj=%d,%d,%d,%d,%s\n",
-            (int)obj.type, obj.tileX, obj.tileY, obj.spriteAssetIdx, obj.name);
+        fprintf(f, "obj=%d,%d,%d,%d,%d,%s\n",
+            (int)obj.type, obj.tileX, obj.tileY, obj.spriteAssetIdx, obj.teleportScene, obj.name);
         // Save cells for Tile objects
         if (obj.type == TmObjType::Tile && !obj.cells.empty())
         {
@@ -831,6 +1002,65 @@ static bool SaveProject(const std::string& path)
             }
             fprintf(f, "\n");
         }
+    }
+
+    // Scenes — save current scene state first
+    if (sTmSelectedScene >= 0 && sTmSelectedScene < (int)sTmScenes.size())
+        SaveSceneState(sTmScenes[sTmSelectedScene]);
+    fprintf(f, "sceneCount=%d\n", (int)sTmScenes.size());
+    fprintf(f, "selectedScene=%d\n", sTmSelectedScene);
+    for (int i = 0; i < (int)sTmScenes.size(); i++)
+    {
+        const TmScene& sc = sTmScenes[i];
+        fprintf(f, "scene=%d,%d,%s\n", sc.mapW, sc.mapH, sc.name);
+        // Per-scene tile data
+        fprintf(f, "scenetiles=");
+        for (int t = 0; t < (int)sc.tileIndices.size(); t++)
+        {
+            if (t > 0) fprintf(f, ",");
+            fprintf(f, "%d", sc.tileIndices[t]);
+        }
+        fprintf(f, "\n");
+        // Per-scene objects
+        fprintf(f, "sceneobjcount=%d\n", (int)sc.objects.size());
+        for (int oi = 0; oi < (int)sc.objects.size(); oi++)
+        {
+            const TmObject& obj = sc.objects[oi];
+            fprintf(f, "sceneobj=%d,%d,%d,%d,%d,%s\n",
+                (int)obj.type, obj.tileX, obj.tileY, obj.spriteAssetIdx, obj.teleportScene, obj.name);
+            if (obj.type == TmObjType::Tile && !obj.cells.empty())
+            {
+                fprintf(f, "sceneobjcells=");
+                for (int c = 0; c < (int)obj.cells.size(); c++)
+                {
+                    if (c > 0) fprintf(f, ",");
+                    fprintf(f, "%d:%d", obj.cells[c].first, obj.cells[c].second);
+                }
+                fprintf(f, "\n");
+            }
+        }
+    }
+
+    // Visual Script Nodes
+    fprintf(f, "\n[VisualScript]\n");
+    fprintf(f, "vsNextId=%d\n", sVsNextId);
+    fprintf(f, "vsPan=%.1f,%.1f\n", sVsPanX, sVsPanY);
+    fprintf(f, "vsZoom=%.3f\n", sVsZoom);
+    fprintf(f, "vsNodeCount=%d\n", (int)sVsNodes.size());
+    for (int i = 0; i < (int)sVsNodes.size(); i++)
+    {
+        const VsNode& n = sVsNodes[i];
+        fprintf(f, "vsNode=%d,%d,%.1f,%.1f,%d,%d,%d,%d\n",
+            n.id, (int)n.type, n.x, n.y,
+            n.paramInt[0], n.paramInt[1], n.paramInt[2], n.paramInt[3]);
+    }
+    fprintf(f, "vsLinkCount=%d\n", (int)sVsLinks.size());
+    for (int i = 0; i < (int)sVsLinks.size(); i++)
+    {
+        const VsLink& lk = sVsLinks[i];
+        fprintf(f, "vsLink=%d,%d,%d|%d,%d,%d\n",
+            lk.from.nodeId, lk.from.pinType, lk.from.pinIdx,
+            lk.to.nodeId, lk.to.pinType, lk.to.pinIdx);
     }
 
     fclose(f);
@@ -846,6 +1076,8 @@ static bool LoadProject(const std::string& path)
 
     // Reset state before loading
     sTmObjects.clear();
+    sTmScenes.clear();
+    sTmSelectedScene = 0;
     sTmSelectedObj = -1;
     sTmDragObj = -1;
     sTmStampAsset = -1;
@@ -886,7 +1118,7 @@ static bool LoadProject(const std::string& path)
             continue;
         }
 
-        float fval;
+        float fval, fval2;
         int ival;
         unsigned int uval;
 
@@ -1166,6 +1398,7 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "panX=%f", &fval) == 1) sTmMapPanX = fval;
             else if (sscanf(line, "panY=%f", &fval) == 1) sTmMapPanY = fval;
             else if (sscanf(line, "panelW=%f", &fval) == 1) sTmObjPanelW = fval;
+            else if (sscanf(line, "scenePanelW=%f", &fval) == 1) sTmScenePanelW = fval;
             else if (strncmp(line, "tiles=", 6) == 0)
             {
                 const char* p = line + 6;
@@ -1186,10 +1419,10 @@ static bool LoadProject(const std::string& path)
             {
                 TmObject obj;
                 int typeInt = 0;
-                // Parse: type,tileX,tileY,spriteAssetIdx,name
+                // Parse: type,tileX,tileY,spriteAssetIdx,teleportScene,name
                 char nameBuf[32] = {};
-                if (sscanf(line + 4, "%d,%d,%d,%d,%31[^\n]",
-                    &typeInt, &obj.tileX, &obj.tileY, &obj.spriteAssetIdx, nameBuf) >= 4)
+                if (sscanf(line + 4, "%d,%d,%d,%d,%d,%31[^\n]",
+                    &typeInt, &obj.tileX, &obj.tileY, &obj.spriteAssetIdx, &obj.teleportScene, nameBuf) >= 4)
                 {
                     obj.type = (TmObjType)typeInt;
                     strncpy(obj.name, nameBuf, sizeof(obj.name) - 1);
@@ -1211,12 +1444,116 @@ static bool LoadProject(const std::string& path)
                     p = comma + 1;
                 }
             }
+            else if (sscanf(line, "sceneCount=%d", &ival) == 1)
+            {
+                sTmScenes.clear();
+                sTmScenes.reserve(ival);
+            }
+            else if (sscanf(line, "selectedScene=%d", &ival) == 1)
+            {
+                sTmSelectedScene = ival;
+            }
+            else if (strncmp(line, "scene=", 6) == 0)
+            {
+                TmScene sc;
+                char nameBuf[32] = {};
+                if (sscanf(line + 6, "%d,%d,%31[^\n]", &sc.mapW, &sc.mapH, nameBuf) >= 2)
+                {
+                    strncpy(sc.name, nameBuf, sizeof(sc.name) - 1);
+                    sTmScenes.push_back(sc);
+                }
+            }
+            else if (strncmp(line, "scenetiles=", 11) == 0 && !sTmScenes.empty())
+            {
+                TmScene& sc = sTmScenes.back();
+                sc.tileIndices.clear();
+                const char* p = line + 11;
+                while (*p)
+                {
+                    int val = 0;
+                    if (sscanf(p, "%d", &val) == 1)
+                        sc.tileIndices.push_back((uint16_t)val);
+                    const char* comma = strchr(p, ',');
+                    if (!comma) break;
+                    p = comma + 1;
+                }
+            }
+            else if (sscanf(line, "sceneobjcount=%d", &ival) == 1 && !sTmScenes.empty())
+            {
+                sTmScenes.back().objects.clear();
+                sTmScenes.back().objects.reserve(ival);
+            }
+            else if (strncmp(line, "sceneobj=", 9) == 0 && !sTmScenes.empty())
+            {
+                TmObject obj;
+                int typeInt = 0;
+                char nameBuf[32] = {};
+                if (sscanf(line + 9, "%d,%d,%d,%d,%d,%31[^\n]",
+                    &typeInt, &obj.tileX, &obj.tileY, &obj.spriteAssetIdx, &obj.teleportScene, nameBuf) >= 4)
+                {
+                    obj.type = (TmObjType)typeInt;
+                    strncpy(obj.name, nameBuf, sizeof(obj.name) - 1);
+                    sTmScenes.back().objects.push_back(obj);
+                }
+            }
+            else if (strncmp(line, "sceneobjcells=", 14) == 0 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
+            {
+                TmObject& lastObj = sTmScenes.back().objects.back();
+                const char* p = line + 14;
+                while (*p)
+                {
+                    int cx, cy;
+                    if (sscanf(p, "%d:%d", &cx, &cy) == 2)
+                        lastObj.cells.push_back({cx, cy});
+                    const char* comma = strchr(p, ',');
+                    if (!comma) break;
+                    p = comma + 1;
+                }
+            }
+        }
+        else if (strcmp(section, "VisualScript") == 0)
+        {
+            if (sscanf(line, "vsNextId=%d", &ival) == 1) sVsNextId = ival;
+            else if (sscanf(line, "vsPan=%f,%f", &fval, &fval2) == 2) { sVsPanX = fval; sVsPanY = fval2; }
+            else if (sscanf(line, "vsZoom=%f", &fval) == 1) sVsZoom = fval;
+            else if (sscanf(line, "vsNodeCount=%d", &ival) == 1) { sVsNodes.clear(); sVsNodes.reserve(ival); }
+            else if (strncmp(line, "vsNode=", 7) == 0)
+            {
+                VsNode n;
+                int typeInt;
+                if (sscanf(line + 7, "%d,%d,%f,%f,%d,%d,%d,%d",
+                    &n.id, &typeInt, &n.x, &n.y,
+                    &n.paramInt[0], &n.paramInt[1], &n.paramInt[2], &n.paramInt[3]) >= 4)
+                {
+                    n.type = (VsNodeType)typeInt;
+                    sVsNodes.push_back(n);
+                }
+            }
+            else if (sscanf(line, "vsLinkCount=%d", &ival) == 1) { sVsLinks.clear(); sVsLinks.reserve(ival); }
+            else if (strncmp(line, "vsLink=", 7) == 0)
+            {
+                VsLink lk;
+                if (sscanf(line + 7, "%d,%d,%d|%d,%d,%d",
+                    &lk.from.nodeId, &lk.from.pinType, &lk.from.pinIdx,
+                    &lk.to.nodeId, &lk.to.pinType, &lk.to.pinIdx) == 6)
+                {
+                    sVsLinks.push_back(lk);
+                }
+            }
         }
     }
 
     // Mark tilemap as initialized if we loaded data
     if (sTilemapData.floor.width > 0 && sTilemapData.floor.height > 0)
         sTilemapDataInit = true;
+
+    // Load selected scene's data into active tilemap
+    if (sTmSelectedScene >= 0 && sTmSelectedScene < (int)sTmScenes.size())
+    {
+        const TmScene& sc = sTmScenes[sTmSelectedScene];
+        if (!sc.tileIndices.empty())
+            LoadSceneState(sc);
+    }
 
     fclose(f);
     sProjectPath = path;
@@ -1646,10 +1983,10 @@ static void DrawTabBar()
     TabButton("Scene",   EditorTab::Map);
     TabButton("Mode 7",  EditorTab::Mode7);
     TabButton("Tilemap", EditorTab::Tilemap);
-    TabButton("Tiles",   EditorTab::Tiles);
     TabButton("Sprites", EditorTab::Sprites);
     TabButton("Skybox",  EditorTab::Skybox);
     TabButton("3D",      EditorTab::ThreeD);
+    TabButton("Events",  EditorTab::Events);
 
     ImGui::SameLine(0, Scaled(20));
     // Play/Stop button
@@ -2023,20 +2360,15 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
         ImGui::PopItemWidth();
 
         ImGui::SameLine();
-        // Base size selector
-        const char* sizes[] = { "8x8", "16x16", "32x32", "64x64" };
-        int sizeIdx = (asset.baseSize == 64) ? 3 : (asset.baseSize == 32) ? 2 : (asset.baseSize == 16) ? 1 : 0;
         ImGui::PushItemWidth(Scaled(80));
-        if (ImGui::Combo("Size##base", &sizeIdx, sizes, 4))
         {
-            int newSize = (sizeIdx == 3) ? 64 : (sizeIdx == 2) ? 32 : (sizeIdx == 1) ? 16 : 8;
-            asset.baseSize = newSize;
-            // Resize all frames
-            for (auto& fr : asset.frames)
-            {
-                fr.width = newSize;
-                fr.height = newSize;
-            }
+            const char* sizes[] = { "8x8", "16x16", "32x32", "64x64" };
+            int sizeVals[] = { 8, 16, 32, 64 };
+            int curIdx = 2; // default 32x32
+            for (int si = 0; si < 4; si++)
+                if (sizeVals[si] == asset.baseSize) { curIdx = si; break; }
+            if (ImGui::Combo("##baseSize", &curIdx, sizes, 4))
+                asset.baseSize = sizeVals[curIdx];
         }
         ImGui::PopItemWidth();
 
@@ -2106,33 +2438,33 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                 sSelectedFrame = 0;
 
             SpriteFrame& frame = asset.frames[sSelectedFrame];
-            int fSize = frame.width;
+            int fw = frame.width, fh = frame.height;
 
             // Draw pixel grid
             float gridAvail = std::min(colW2 - Scaled(20), size.y * 0.5f);
-            float cellSize = gridAvail / (float)fSize;
+            float cellSize = std::min(gridAvail / (float)fw, gridAvail / (float)fh);
             cellSize = std::max(cellSize, 4.0f);
-            float gridPx = cellSize * fSize;
+            float gridW = cellSize * fw;
+            float gridH = cellSize * fh;
 
             ImVec2 gridStart = ImGui::GetCursorScreenPos();
             ImDrawList* dl = ImGui::GetWindowDrawList();
 
             // Draw pixels
-            for (int py = 0; py < fSize; py++)
+            for (int py = 0; py < fh; py++)
             {
-                for (int px = 0; px < fSize; px++)
+                for (int px = 0; px < fw; px++)
                 {
                     uint8_t palIdx = frame.pixels[py * kMaxFrameSize + px];
                     uint32_t col = asset.palette[palIdx & 0xF];
-                    // Convert RGBA to ABGR for ImGui
                     uint32_t r = (col >> 0) & 0xFF;
                     uint32_t g = (col >> 8) & 0xFF;
                     uint32_t b = (col >> 16) & 0xFF;
                     uint32_t a = (col >> 24) & 0xFF;
-                    if (palIdx == 0) a = 0; // transparent
+                    if (palIdx == 0) a = 0;
                     uint32_t imCol = (a << 24) | (b << 16) | (g << 8) | r;
                     if (palIdx == 0)
-                        imCol = 0xFF1A1A1A; // dark bg for transparent
+                        imCol = 0xFF1A1A1A;
 
                     ImVec2 p0(gridStart.x + px * cellSize, gridStart.y + py * cellSize);
                     ImVec2 p1(p0.x + cellSize, p0.y + cellSize);
@@ -2141,23 +2473,26 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             }
 
             // Grid lines
-            for (int i = 0; i <= fSize; i++)
+            for (int i = 0; i <= fw; i++)
             {
                 float x = gridStart.x + i * cellSize;
+                dl->AddLine(ImVec2(x, gridStart.y), ImVec2(x, gridStart.y + gridH), 0x40FFFFFF);
+            }
+            for (int i = 0; i <= fh; i++)
+            {
                 float y = gridStart.y + i * cellSize;
-                dl->AddLine(ImVec2(x, gridStart.y), ImVec2(x, gridStart.y + gridPx), 0x40FFFFFF);
-                dl->AddLine(ImVec2(gridStart.x, y), ImVec2(gridStart.x + gridPx, y), 0x40FFFFFF);
+                dl->AddLine(ImVec2(gridStart.x, y), ImVec2(gridStart.x + gridW, y), 0x40FFFFFF);
             }
 
             // Click to paint
             ImGui::SetCursorScreenPos(gridStart);
-            ImGui::InvisibleButton("##PixelGrid", ImVec2(gridPx, gridPx));
+            ImGui::InvisibleButton("##PixelGrid", ImVec2(gridW, gridH));
             if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left))
             {
                 ImVec2 mouse = ImGui::GetMousePos();
                 int px = (int)((mouse.x - gridStart.x) / cellSize);
                 int py = (int)((mouse.y - gridStart.y) / cellSize);
-                if (px >= 0 && px < fSize && py >= 0 && py < fSize)
+                if (px >= 0 && px < fw && py >= 0 && py < fh)
                     frame.pixels[py * kMaxFrameSize + px] = (uint8_t)sSpriteEditorPalColor;
             }
             if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Right))
@@ -2165,11 +2500,11 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                 ImVec2 mouse = ImGui::GetMousePos();
                 int px = (int)((mouse.x - gridStart.x) / cellSize);
                 int py = (int)((mouse.y - gridStart.y) / cellSize);
-                if (px >= 0 && px < fSize && py >= 0 && py < fSize)
-                    frame.pixels[py * kMaxFrameSize + px] = 0; // erase to transparent
+                if (px >= 0 && px < fw && py >= 0 && py < fh)
+                    frame.pixels[py * kMaxFrameSize + px] = 0;
             }
 
-            ImGui::SetCursorScreenPos(ImVec2(gridStart.x, gridStart.y + gridPx + 4));
+            ImGui::SetCursorScreenPos(ImVec2(gridStart.x, gridStart.y + gridH + 4));
 
             // Paint color selector (palette row)
             ImGui::Text("Paint:");
@@ -2243,23 +2578,25 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                 }
             }
 
-            // Thumbnail strip
-            float thumbSize = Scaled(32);
+            // Thumbnail strip — aspect ratio matches frame dimensions
+            float thumbBase = Scaled(32);
             for (int fi = 0; fi < (int)asset.frames.size(); fi++)
             {
                 ImGui::PushID(fi + 2000);
                 bool fsel = (sSelectedFrame == fi);
 
+                int tfw = asset.frames[fi].width, tfh = asset.frames[fi].height;
+                float thumbCell = std::min(thumbBase / (float)tfw, thumbBase / (float)tfh);
+                float thumbW = thumbCell * tfw, thumbH = thumbCell * tfh;
+
                 ImVec2 thumbStart = ImGui::GetCursorScreenPos();
                 uint32_t borderCol = fsel ? 0xFFFFFFFF : 0xFF444444;
                 ImDrawList* tdl = ImGui::GetWindowDrawList();
-                tdl->AddRect(thumbStart, ImVec2(thumbStart.x + thumbSize, thumbStart.y + thumbSize), borderCol);
+                tdl->AddRect(thumbStart, ImVec2(thumbStart.x + thumbW, thumbStart.y + thumbH), borderCol);
 
                 // Mini preview of frame
-                int fs = asset.frames[fi].width;
-                float thumbCell = thumbSize / (float)fs;
-                for (int ty = 0; ty < fs; ty++)
-                    for (int tx = 0; tx < fs; tx++)
+                for (int ty = 0; ty < tfh; ty++)
+                    for (int tx = 0; tx < tfw; tx++)
                     {
                         uint8_t pi = asset.frames[fi].pixels[ty * kMaxFrameSize + tx];
                         if (pi == 0) continue;
@@ -2274,7 +2611,7 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                     }
 
                 ImGui::SetCursorScreenPos(thumbStart);
-                if (ImGui::InvisibleButton("##fthumb", ImVec2(thumbSize, thumbSize)))
+                if (ImGui::InvisibleButton("##fthumb", ImVec2(thumbW, thumbH)))
                     sSelectedFrame = fi;
                 ImGui::SameLine();
                 ImGui::PopID();
@@ -2659,11 +2996,13 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                 {
                     asset.sourceImagePath = path;
 
-                    // Auto-detect frame size if not set
-                    if (asset.stripFrameW <= 0) asset.stripFrameW = asset.baseSize;
-                    if (asset.stripFrameH <= 0) asset.stripFrameH = asset.baseSize;
-                    int fw = asset.stripFrameW;
-                    int fh = asset.stripFrameH;
+                    // Auto-detect frame size from baseSize
+                    asset.stripFrameW = asset.baseSize;
+                    asset.stripFrameH = asset.baseSize;
+                    int fw = asset.baseSize;
+                    int fh = asset.baseSize;
+                    if (fw > kMaxFrameSize) fw = kMaxFrameSize;
+                    if (fh > kMaxFrameSize) fh = kMaxFrameSize;
 
                     // Count frames in the strip (horizontal layout)
                     int framesX = imgW / fw;
@@ -2730,13 +3069,13 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                         for (int fx = 0; fx < framesX; fx++)
                         {
                             SpriteFrame frame;
-                            frame.width = asset.baseSize;
-                            frame.height = asset.baseSize;
+                            frame.width = fw;
+                            frame.height = fh;
                             memset(frame.pixels, 0, sizeof(frame.pixels));
 
-                            for (int py = 0; py < fh && py < asset.baseSize; py++)
+                            for (int py = 0; py < fh && py < frame.height; py++)
                             {
-                                for (int px = 0; px < fw && px < asset.baseSize; px++)
+                                for (int px = 0; px < fw && px < frame.width; px++)
                                 {
                                     int srcX = fx * fw + px;
                                     int srcY = fy * fh + py;
@@ -2867,7 +3206,8 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
 
             // Show all frames for this animation
             float dirCellSz = Scaled(52);
-            float dirPreviewSz = dirCellSz - 22.0f;
+            float dirPreviewW = dirCellSz - 8.0f;
+            float dirPreviewH = dirCellSz - 22.0f;
             int dirCols = 4;
 
             for (int fi = 0; fi < anim.endFrame; fi++)
@@ -2913,12 +3253,9 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                     AssetDirSprite& ads = sAssetDirSprites[sSelectedAsset][dirSetIdx][d];
                     if (ads.texture)
                     {
-                        float aspect = (float)ads.width / (float)ads.height;
-                        float drawW = dirPreviewSz, drawH = dirPreviewSz;
-                        if (aspect > 1.0f) drawH = dirPreviewSz / aspect;
-                        else drawW = dirPreviewSz * aspect;
+                        float drawW = dirPreviewW, drawH = dirPreviewH;
                         float imgX = cmin.x + (dirCellSz - 4 - drawW) * 0.5f;
-                        float imgY = cmin.y + 16.0f + (dirPreviewSz - drawH) * 0.5f;
+                        float imgY = cmin.y + 16.0f + (dirPreviewH - drawH) * 0.5f;
                         dl2->AddImage((ImTextureID)(uintptr_t)ads.texture,
                             ImVec2(imgX, imgY), ImVec2(imgX + drawW, imgY + drawH));
                     }
@@ -2928,7 +3265,7 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                         ImVec2 esz2 = ImGui::CalcTextSize(emptyTxt);
                         dl2->AddText(
                             ImVec2(cmin.x + (dirCellSz - 4 - esz2.x) * 0.5f,
-                                   cmin.y + 16.0f + (dirPreviewSz - esz2.y) * 0.5f),
+                                   cmin.y + 16.0f + (dirPreviewH - esz2.y) * 0.5f),
                             0xFF666688, emptyTxt);
                     }
 
@@ -3616,13 +3953,37 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
         sTilemapData.floor.tileIndices.resize(1, 0);
     }
 
+    // Create default Scene 0 if none exist
+    if (sTmScenes.empty())
+    {
+        TmScene sc;
+        snprintf(sc.name, sizeof(sc.name), "Scene 0");
+        sc.mapW = sTilemapData.floor.width;
+        sc.mapH = sTilemapData.floor.height;
+        sTmScenes.push_back(sc);
+        sTmSelectedScene = 0;
+    }
+
     Tileset& ts = sTilemapData.tileset;
     TilemapLayer& tm = sTilemapData.floor;
     int tileCount = (int)ts.tiles.size();
 
-    // Rebuild sprite textures if asset count changed
-    if ((int)sSpriteAssets.size() != sTmSpriteTexCount)
-        RebuildTmSpriteTextures();
+    // Rebuild sprite textures if asset count changed or textures are stale
+    {
+        bool needRebuild = ((int)sSpriteAssets.size() != sTmSpriteTexCount);
+        if (!needRebuild)
+        {
+            // Check if any texture is missing (e.g. after project load)
+            for (int i = 0; i < (int)sSpriteAssets.size(); i++)
+            {
+                if (!sSpriteAssets[i].frames.empty() &&
+                    (i >= (int)sTmSpriteTextures.size() || sTmSpriteTextures[i] == 0))
+                { needRebuild = true; break; }
+            }
+        }
+        if (needRebuild)
+            RebuildTmSpriteTextures();
+    }
 
     const ImGuiWindowFlags panelFlags =
         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
@@ -3691,6 +4052,44 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             if (ImGui::Combo("Type", &typeInt, sTmObjTypeNames, (int)TmObjType::COUNT))
                 obj.type = (TmObjType)typeInt;
 
+            // Sprite asset link
+            {
+                const char* preview = (obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)sSpriteAssets.size())
+                    ? sSpriteAssets[obj.spriteAssetIdx].name.c_str() : "None";
+                if (ImGui::BeginCombo("Sprite", preview))
+                {
+                    if (ImGui::Selectable("None", obj.spriteAssetIdx < 0))
+                        obj.spriteAssetIdx = -1;
+                    for (int si = 0; si < (int)sSpriteAssets.size(); si++)
+                    {
+                        bool sel = (obj.spriteAssetIdx == si);
+                        if (ImGui::Selectable(sSpriteAssets[si].name.c_str(), sel))
+                            obj.spriteAssetIdx = si;
+                    }
+                    ImGui::EndCombo();
+                }
+            }
+
+            // Teleport: target scene selector
+            if (obj.type == TmObjType::Teleport)
+            {
+                const char* tpPreview = (obj.teleportScene >= 0 && obj.teleportScene < (int)sTmScenes.size())
+                    ? sTmScenes[obj.teleportScene].name : "None";
+                if (ImGui::BeginCombo("To Scene", tpPreview))
+                {
+                    if (ImGui::Selectable("None##tpnone", obj.teleportScene < 0))
+                        obj.teleportScene = -1;
+                    for (int si = 0; si < (int)sTmScenes.size(); si++)
+                    {
+                        if (si == sTmSelectedScene) continue;
+                        bool tpsel = (obj.teleportScene == si);
+                        if (ImGui::Selectable(sTmScenes[si].name, tpsel))
+                            obj.teleportScene = si;
+                    }
+                    ImGui::EndCombo();
+                }
+            }
+
             if (obj.type == TmObjType::Tile)
             {
                 ImGui::Text("Cells: %d", (int)obj.cells.size());
@@ -3755,9 +4154,136 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                        ImVec2(pos.x + objPanelW, pos.y + size.y), splCol, 2.0f);
     }
 
-    // ======== RIGHT PANEL: tilemap grid with draggable edges ========
+    // ======== SCENE PANEL (far right) ========
+    float scenePanelW = sTmScenePanelW;
+    {
+        ImGui::SetNextWindowPos(ImVec2(pos.x + size.x - scenePanelW, pos.y));
+        ImGui::SetNextWindowSize(ImVec2(scenePanelW, size.y));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.25f, 0.30f, 1.0f));
+        ImGui::Begin("##TmScenePanel", nullptr, panelFlags);
+
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Scenes");
+
+        // Add scene button
+        if (ImGui::Button("Add##addscene"))
+        {
+            // Save current scene state before switching
+            if (sTmSelectedScene >= 0 && sTmSelectedScene < (int)sTmScenes.size())
+                SaveSceneState(sTmScenes[sTmSelectedScene]);
+            // Create fresh 1x1 scene
+            TmScene sc;
+            snprintf(sc.name, sizeof(sc.name), "Scene %d", (int)sTmScenes.size());
+            sc.mapW = 1;
+            sc.mapH = 1;
+            sTmScenes.push_back(sc);
+            sTmSelectedScene = (int)sTmScenes.size() - 1;
+            // Load the fresh scene (1x1 empty grid, no objects)
+            LoadSceneState(sTmScenes[sTmSelectedScene]);
+        }
+
+        ImGui::Separator();
+
+        // Scene list
+        ImGui::BeginChild("##SceneList", ImVec2(0, size.y * 0.4f), true);
+        for (int i = 0; i < (int)sTmScenes.size(); i++)
+        {
+            bool sel = (i == sTmSelectedScene);
+            char lbl[64];
+            snprintf(lbl, sizeof(lbl), "%s##sc%d", sTmScenes[i].name, i);
+            if (ImGui::Selectable(lbl, sel) && i != sTmSelectedScene)
+            {
+                // Save current scene before switching
+                if (sTmSelectedScene >= 0 && sTmSelectedScene < (int)sTmScenes.size())
+                    SaveSceneState(sTmScenes[sTmSelectedScene]);
+                sTmSelectedScene = i;
+                LoadSceneState(sTmScenes[i]);
+            }
+        }
+        ImGui::EndChild();
+
+        ImGui::Separator();
+
+        // Selected scene properties
+        if (sTmSelectedScene >= 0 && sTmSelectedScene < (int)sTmScenes.size())
+        {
+            TmScene& sc = sTmScenes[sTmSelectedScene];
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Properties");
+            ImGui::PushItemWidth(scenePanelW - 16);
+            ImGui::InputText("Name##scname", sc.name, sizeof(sc.name));
+            // Sync scene dimensions with tilemap — bidirectional
+            sc.mapW = sTilemapData.floor.width;
+            sc.mapH = sTilemapData.floor.height;
+            int prevW = sc.mapW, prevH = sc.mapH;
+            ImGui::DragInt("Width##scw", &sc.mapW, 0.5f, 1, 128);
+            ImGui::DragInt("Height##sch", &sc.mapH, 0.5f, 1, 128);
+            if (sc.mapW != prevW || sc.mapH != prevH)
+            {
+                // User changed dimensions via properties — resize tilemap
+                std::vector<uint16_t> old = sTilemapData.floor.tileIndices;
+                int oldW = prevW, oldH = prevH;
+                sTilemapData.floor.width  = sc.mapW;
+                sTilemapData.floor.height = sc.mapH;
+                sTilemapData.floor.tileIndices.assign(sc.mapW * sc.mapH, 0);
+                for (int y = 0; y < std::min(oldH, sc.mapH); y++)
+                    for (int x = 0; x < std::min(oldW, sc.mapW); x++)
+                        sTilemapData.floor.tileIndices[y * sc.mapW + x] = old[y * oldW + x];
+            }
+
+            ImGui::PopItemWidth();
+
+            ImGui::Spacing();
+            if (ImGui::Button("Delete##delscene") && sTmScenes.size() > 1)
+            {
+                sTmScenes.erase(sTmScenes.begin() + sTmSelectedScene);
+                if (sTmSelectedScene >= (int)sTmScenes.size())
+                    sTmSelectedScene = (int)sTmScenes.size() - 1;
+                LoadSceneState(sTmScenes[sTmSelectedScene]);
+            }
+        }
+
+        ImGui::End();
+        ImGui::PopStyleColor(2);
+    }
+
+    // ======== SPLITTER between grid and scene panel ========
+    {
+        float splitterW = 6.0f;
+        float splitterX = pos.x + size.x - scenePanelW - splitterW * 0.5f;
+        ImVec2 splitterMin(splitterX, pos.y);
+        ImVec2 splitterMax(splitterX + splitterW, pos.y + size.y);
+        ImVec2 mouse = ImGui::GetMousePos();
+        bool hovered = (mouse.x >= splitterMin.x && mouse.x <= splitterMax.x &&
+                        mouse.y >= splitterMin.y && mouse.y <= splitterMax.y);
+        static bool sDraggingSceneSplitter = false;
+
+        if (hovered || sDraggingSceneSplitter)
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+
+        if (hovered && ImGui::IsMouseClicked(0))
+            sDraggingSceneSplitter = true;
+
+        if (sDraggingSceneSplitter)
+        {
+            if (ImGui::IsMouseDown(0))
+            {
+                sTmScenePanelW -= ImGui::GetIO().MouseDelta.x;
+                sTmScenePanelW = std::clamp(sTmScenePanelW, 120.0f, size.x * 0.5f);
+                scenePanelW = sTmScenePanelW;
+            }
+            else
+                sDraggingSceneSplitter = false;
+        }
+
+        ImDrawList* fgDl = ImGui::GetForegroundDrawList();
+        uint32_t splCol = (hovered || sDraggingSceneSplitter) ? 0xFF44AAFF : 0x40FFFFFF;
+        fgDl->AddLine(ImVec2(pos.x + size.x - scenePanelW, pos.y),
+                       ImVec2(pos.x + size.x - scenePanelW, pos.y + size.y), splCol, 2.0f);
+    }
+
+    // ======== CENTER: tilemap grid with draggable edges ========
     float gridPosX = pos.x + objPanelW;
-    float gridW2 = size.x - objPanelW;
+    float gridW2 = size.x - objPanelW - scenePanelW;
     ImGui::SetNextWindowPos(ImVec2(gridPosX, pos.y));
     ImGui::SetNextWindowSize(ImVec2(gridW2, size.y));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.10f, 1.0f));
@@ -3811,7 +4337,7 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
         dl->PushClipRect(clipMin, clipMax, true);
 
         // Draw tilemap cells — match window bg, subtle grey grid lines
-        uint32_t gridLineCol = 0x40FFFFFF;   // same as Frame Editor
+        uint32_t gridLineCol = 0x55FFFFFF;   // semi-transparent white cell border
         for (int ty = 0; ty < tm.height; ty++)
         {
             for (int tx = 0; tx < tm.width; tx++)
@@ -3860,6 +4386,7 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 }
 
                 // Draw sprite asset frame if any object with a sprite is on this cell
+                bool cellPainted = false;
                 for (const auto& obj : sTmObjects)
                 {
                     // Tile objects use cells list; other objects use tileX/tileY
@@ -3878,6 +4405,7 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     {
                         dl->AddImage((ImTextureID)(uintptr_t)sTmSpriteTextures[obj.spriteAssetIdx],
                             ImVec2(x0, y0), ImVec2(x1, y1));
+                        cellPainted = true;
                     }
                     else
                     {
@@ -3891,14 +4419,20 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                             ImVec2 tsz = ImGui::CalcTextSize(lbl);
                             dl->AddText(ImVec2(x0 + (cellSz - tsz.x) * 0.5f, y0 + (cellSz - tsz.y) * 0.5f), col, lbl);
                         }
+                        cellPainted = true;
                     }
                     break;
                 }
 
-                if (sEditorMode != EditorMode::Play)
+                // Border on unpainted cells only
+                if (!cellPainted)
                     dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), gridLineCol);
+
             }
         }
+        // Outer border around entire grid (foreground so it draws on top of textures)
+        ImGui::GetForegroundDrawList()->AddRect(ImVec2(ox, oy), ImVec2(ox + gridW, oy + gridH), 0x80FFFFFF);
+
         // --- Draggable edges to expand/shrink the tilemap ---
         // Edge hit zones (wider than visual for easy grabbing)
         float grab = std::max(8.0f, cellSz * 0.3f);
@@ -4367,8 +4901,7 @@ void FrameTick(float dt)
         ImGui::SameLine();
         if (ImGui::RadioButton("NDS", sBuildTarget == BuildTarget::NDS))
             sBuildTarget = BuildTarget::NDS;
-        ImGui::SameLine();
-        bool buildFromMenu = ImGui::MenuItem("Build", nullptr, false, !sPackaging);
+        bool buildFromMenu = false;
         if (buildFromMenu || sBuildRequested)
         {
             sBuildRequested = false;
@@ -5065,18 +5598,6 @@ void FrameTick(float dt)
             ImVec2(vp->WorkPos.x, bodyY),
             ImVec2(totalW, bodyH));
     }
-    else if (sActiveTab == EditorTab::Tiles)
-    {
-        // Tiles tab: placeholder
-        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
-        ImGui::SetNextWindowSize(ImVec2(totalW, bodyH));
-        ImGui::Begin("##TilesTab", nullptr,
-            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
-            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
-        ImGui::Text("Tile Editor — coming soon");
-        ImGui::End();
-    }
     else if (sActiveTab == EditorTab::Skybox)
     {
         // Skybox tab: placeholder
@@ -5108,6 +5629,360 @@ void FrameTick(float dt)
     else if (sActiveTab == EditorTab::ThreeD)
     {
         Draw3DView(ImVec2(vp->WorkPos.x, bodyY), ImVec2(totalW, bodyH));
+    }
+    else if (sActiveTab == EditorTab::Events)
+    {
+        ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar;
+
+        // ---- NODE GRAPH CANVAS ----
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
+        ImGui::SetNextWindowSize(ImVec2(totalW, bodyH));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.13f, 0.13f, 0.15f, 1.0f));
+        ImGui::Begin("##NodeCanvas", nullptr, flags);
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 canvasOrig = ImGui::GetCursorScreenPos();
+        ImVec2 canvasSize = ImVec2(totalW, bodyH - 8);
+        float zoom = sVsZoom;
+
+        // Clip to canvas
+        dl->PushClipRect(canvasOrig, ImVec2(canvasOrig.x + canvasSize.x, canvasOrig.y + canvasSize.y), true);
+
+        // Grid
+        float gridStep = 32.0f * zoom;
+        float offX = fmodf(sVsPanX * zoom, gridStep);
+        float offY = fmodf(sVsPanY * zoom, gridStep);
+        for (float gx = offX; gx < canvasSize.x; gx += gridStep)
+            dl->AddLine(ImVec2(canvasOrig.x + gx, canvasOrig.y),
+                        ImVec2(canvasOrig.x + gx, canvasOrig.y + canvasSize.y), 0xFF1A1A1E);
+        for (float gy = offY; gy < canvasSize.y; gy += gridStep)
+            dl->AddLine(ImVec2(canvasOrig.x, canvasOrig.y + gy),
+                        ImVec2(canvasOrig.x + canvasSize.x, canvasOrig.y + gy), 0xFF1A1A1E);
+
+        // Draw links (bezier curves)
+        for (auto& lk : sVsLinks) {
+            int fi = VsFindNode(lk.from.nodeId);
+            int ti = VsFindNode(lk.to.nodeId);
+            if (fi < 0 || ti < 0) continue;
+            ImVec2 p1 = VsPinPos(sVsNodes[fi], lk.from.pinType, lk.from.pinIdx, canvasOrig, zoom);
+            ImVec2 p2 = VsPinPos(sVsNodes[ti], lk.to.pinType, lk.to.pinIdx, canvasOrig, zoom);
+            float dx = std::max(50.0f * zoom, fabsf(p2.x - p1.x) * 0.5f);
+            bool isExec = (lk.from.pinType == 0);
+            ImU32 wireCol = isExec ? 0xFFFFFFFF : 0xFF44CCAA;
+            dl->AddBezierCubic(p1, ImVec2(p1.x + dx, p1.y), ImVec2(p2.x - dx, p2.y), p2, wireCol, 2.0f * zoom);
+        }
+
+        // Draw in-progress link drag
+        if (sVsDraggingLink) {
+            int si = VsFindNode(sVsLinkStart.nodeId);
+            if (si >= 0) {
+                ImVec2 p1 = VsPinPos(sVsNodes[si], sVsLinkStart.pinType, sVsLinkStart.pinIdx, canvasOrig, zoom);
+                ImVec2 p2 = sVsLinkEndPos;
+                float dx = std::max(50.0f * zoom, fabsf(p2.x - p1.x) * 0.5f);
+                dl->AddBezierCubic(p1, ImVec2(p1.x + dx, p1.y), ImVec2(p2.x - dx, p2.y), p2, 0x88FFFFFF, 2.0f * zoom);
+            }
+        }
+
+        // Draw nodes
+        ImGuiIO& io = ImGui::GetIO();
+        int hoveredNode = -1;
+        VsPin hoveredPin = { -1, 0, 0 };
+
+        for (int ni = 0; ni < (int)sVsNodes.size(); ni++) {
+            VsNode& n = sVsNodes[ni];
+            const auto& def = sVsNodeDefs[(int)n.type];
+            float nw = kVsNodeW * zoom;
+            float nh = VsNodeHeight(n) * zoom;
+            float hh = kVsHeaderH * zoom;
+            float sp = kVsPinSpacing * zoom;
+            float pr = kVsPinRadius * zoom;
+
+            float nx = canvasOrig.x + (n.x + sVsPanX) * zoom;
+            float ny = canvasOrig.y + (n.y + sVsPanY) * zoom;
+
+            ImVec2 nMin(nx, ny);
+            ImVec2 nMax(nx + nw, ny + nh);
+            bool selected = (ni == sVsSelected);
+
+            // Node body
+            dl->AddRectFilled(nMin, nMax, 0xDD222228, 6.0f * zoom);
+            // Header
+            dl->AddRectFilled(nMin, ImVec2(nMax.x, nMin.y + hh), def.color, 6.0f * zoom, ImDrawFlags_RoundCornersTop);
+            // Border
+            dl->AddRect(nMin, nMax, selected ? 0xFFFFAA44 : 0xFF555566, 6.0f * zoom, 0, selected ? 2.0f : 1.0f);
+            // Title
+            dl->AddText(ImVec2(nx + 6 * zoom, ny + 4 * zoom), 0xFFFFFFFF, def.name);
+
+            // Draw pins — exec in
+            for (int p = 0; p < def.inExec; p++) {
+                ImVec2 pp = VsPinPos(n, 1, p, canvasOrig, zoom);
+                dl->AddTriangleFilled(
+                    ImVec2(pp.x - pr, pp.y - pr), ImVec2(pp.x + pr, pp.y), ImVec2(pp.x - pr, pp.y + pr),
+                    0xFFFFFFFF);
+                if (((io.MousePos.x - pp.x) * (io.MousePos.x - pp.x) + (io.MousePos.y - pp.y) * (io.MousePos.y - pp.y)) < pr * pr * 4)
+                    hoveredPin = { n.id, 1, p };
+            }
+            // exec out
+            for (int p = 0; p < def.outExec; p++) {
+                ImVec2 pp = VsPinPos(n, 0, p, canvasOrig, zoom);
+                dl->AddTriangleFilled(
+                    ImVec2(pp.x - pr, pp.y - pr), ImVec2(pp.x + pr, pp.y), ImVec2(pp.x - pr, pp.y + pr),
+                    0xFFFFFFFF);
+                // Label
+                if (def.outExecNames[p])
+                    dl->AddText(ImVec2(pp.x - 8 * zoom - ImGui::CalcTextSize(def.outExecNames[p]).x * zoom, pp.y - 6 * zoom),
+                        0xFFCCCCCC, def.outExecNames[p]);
+                if (((io.MousePos.x - pp.x) * (io.MousePos.x - pp.x) + (io.MousePos.y - pp.y) * (io.MousePos.y - pp.y)) < pr * pr * 4)
+                    hoveredPin = { n.id, 0, p };
+            }
+            // data in
+            for (int p = 0; p < def.inData; p++) {
+                ImVec2 pp = VsPinPos(n, 3, p, canvasOrig, zoom);
+                dl->AddCircleFilled(pp, pr, 0xFF44CCAA);
+                if (def.inDataNames[p])
+                    dl->AddText(ImVec2(pp.x + pr + 4 * zoom, pp.y - 6 * zoom), 0xFFCCCCCC, def.inDataNames[p]);
+                if (((io.MousePos.x - pp.x) * (io.MousePos.x - pp.x) + (io.MousePos.y - pp.y) * (io.MousePos.y - pp.y)) < pr * pr * 4)
+                    hoveredPin = { n.id, 3, p };
+            }
+            // data out
+            for (int p = 0; p < def.outData; p++) {
+                ImVec2 pp = VsPinPos(n, 2, p, canvasOrig, zoom);
+                dl->AddCircleFilled(pp, pr, 0xFF44CCAA);
+                if (def.outDataNames[p])
+                    dl->AddText(ImVec2(pp.x - pr - 4 * zoom - ImGui::CalcTextSize(def.outDataNames[p]).x, pp.y - 6 * zoom),
+                        0xFFCCCCCC, def.outDataNames[p]);
+                if (((io.MousePos.x - pp.x) * (io.MousePos.x - pp.x) + (io.MousePos.y - pp.y) * (io.MousePos.y - pp.y)) < pr * pr * 4)
+                    hoveredPin = { n.id, 2, p };
+            }
+
+            // Hit test node body for hover
+            if (io.MousePos.x >= nMin.x && io.MousePos.x <= nMax.x &&
+                io.MousePos.y >= nMin.y && io.MousePos.y <= nMax.y)
+                hoveredNode = ni;
+        }
+
+        // Invisible button for canvas interaction
+        ImGui::SetCursorScreenPos(canvasOrig);
+        ImGui::InvisibleButton("##canvas", canvasSize, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
+        bool canvasHovered = ImGui::IsItemHovered();
+
+        // Mouse interactions
+        if (canvasHovered) {
+            // Zoom with scroll
+            if (fabsf(io.MouseWheel) > 0.01f) {
+                float oldZoom = sVsZoom;
+                sVsZoom = std::clamp(sVsZoom + io.MouseWheel * 0.1f, 0.3f, 3.0f);
+                // Zoom toward mouse
+                float mx = (io.MousePos.x - canvasOrig.x) / oldZoom - sVsPanX;
+                float my = (io.MousePos.y - canvasOrig.y) / oldZoom - sVsPanY;
+                sVsPanX = (io.MousePos.x - canvasOrig.x) / sVsZoom - mx;
+                sVsPanY = (io.MousePos.y - canvasOrig.y) / sVsZoom - my;
+            }
+
+            // Left click
+            if (ImGui::IsMouseClicked(0)) {
+                if (hoveredPin.nodeId >= 0) {
+                    // Start link drag from pin
+                    sVsDraggingLink = true;
+                    sVsLinkStart = hoveredPin;
+                    sVsLinkEndPos = io.MousePos;
+                } else if (hoveredNode >= 0) {
+                    sVsSelected = hoveredNode;
+                    sVsDraggingNode = true;
+                } else {
+                    sVsSelected = -1;
+                }
+            }
+
+            // Right click — context menu
+            if (ImGui::IsMouseClicked(1) && hoveredNode < 0) {
+                sVsShowContextMenu = true;
+                sVsContextMenuPos = io.MousePos;
+            }
+
+            // Middle drag — pan canvas
+            if (ImGui::IsMouseClicked(2))
+                sVsDraggingCanvas = true;
+        }
+
+        // Drag node
+        if (sVsDraggingNode && ImGui::IsMouseDragging(0) && sVsSelected >= 0) {
+            sVsNodes[sVsSelected].x += io.MouseDelta.x / zoom;
+            sVsNodes[sVsSelected].y += io.MouseDelta.y / zoom;
+        }
+        if (!ImGui::IsMouseDown(0))
+            sVsDraggingNode = false;
+
+        // Drag canvas (middle mouse)
+        if (sVsDraggingCanvas && ImGui::IsMouseDragging(2)) {
+            sVsPanX += io.MouseDelta.x / zoom;
+            sVsPanY += io.MouseDelta.y / zoom;
+        }
+        if (!ImGui::IsMouseDown(2))
+            sVsDraggingCanvas = false;
+
+        // Drag link
+        if (sVsDraggingLink) {
+            sVsLinkEndPos = io.MousePos;
+            if (!ImGui::IsMouseDown(0)) {
+                sVsDraggingLink = false;
+                // Complete link if hovering a compatible pin
+                if (hoveredPin.nodeId >= 0 && hoveredPin.nodeId != sVsLinkStart.nodeId) {
+                    // Exec->Exec or Data->Data
+                    bool execLink = (sVsLinkStart.pinType == 0 && hoveredPin.pinType == 1);
+                    bool dataLink = (sVsLinkStart.pinType == 2 && hoveredPin.pinType == 3);
+                    bool execLinkRev = (sVsLinkStart.pinType == 1 && hoveredPin.pinType == 0);
+                    bool dataLinkRev = (sVsLinkStart.pinType == 3 && hoveredPin.pinType == 2);
+                    if (execLink || dataLink) {
+                        sVsLinks.push_back({ sVsLinkStart, hoveredPin });
+                    } else if (execLinkRev || dataLinkRev) {
+                        sVsLinks.push_back({ hoveredPin, sVsLinkStart });
+                    }
+                }
+            }
+        }
+
+        // Delete selected node with Delete key
+        if (sVsSelected >= 0 && ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+            int delId = sVsNodes[sVsSelected].id;
+            // Remove links connected to this node
+            sVsLinks.erase(std::remove_if(sVsLinks.begin(), sVsLinks.end(),
+                [delId](const VsLink& l) { return l.from.nodeId == delId || l.to.nodeId == delId; }),
+                sVsLinks.end());
+            sVsNodes.erase(sVsNodes.begin() + sVsSelected);
+            sVsSelected = -1;
+        }
+
+        dl->PopClipRect();
+
+        // Context menu (right-click to add node)
+        if (sVsShowContextMenu) {
+            ImGui::OpenPopup("##AddNode");
+            sVsShowContextMenu = false;
+        }
+        if (ImGui::BeginPopup("##AddNode")) {
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Add Node");
+            ImGui::Separator();
+
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "Events");
+            for (int t = (int)VsNodeType::OnKeyPressed; t <= (int)VsNodeType::OnStart; t++) {
+                if (ImGui::MenuItem(sVsNodeDefs[t].name)) {
+                    VsNode n;
+                    n.id = sVsNextId++;
+                    n.type = (VsNodeType)t;
+                    n.x = (sVsContextMenuPos.x - canvasOrig.x) / zoom - sVsPanX;
+                    n.y = (sVsContextMenuPos.y - canvasOrig.y) / zoom - sVsPanY;
+                    sVsNodes.push_back(n);
+                    sVsSelected = (int)sVsNodes.size() - 1;
+                }
+            }
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.4f, 0.5f, 0.9f, 1.0f), "Logic");
+            for (int t = (int)VsNodeType::Branch; t <= (int)VsNodeType::CompareVar; t++) {
+                if (ImGui::MenuItem(sVsNodeDefs[t].name)) {
+                    VsNode n;
+                    n.id = sVsNextId++;
+                    n.type = (VsNodeType)t;
+                    n.x = (sVsContextMenuPos.x - canvasOrig.x) / zoom - sVsPanX;
+                    n.y = (sVsContextMenuPos.y - canvasOrig.y) / zoom - sVsPanY;
+                    sVsNodes.push_back(n);
+                    sVsSelected = (int)sVsNodes.size() - 1;
+                }
+            }
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.3f, 1.0f), "Actions");
+            for (int t = (int)VsNodeType::MovePlayer; t < (int)VsNodeType::COUNT; t++) {
+                if (ImGui::MenuItem(sVsNodeDefs[t].name)) {
+                    VsNode n;
+                    n.id = sVsNextId++;
+                    n.type = (VsNodeType)t;
+                    n.x = (sVsContextMenuPos.x - canvasOrig.x) / zoom - sVsPanX;
+                    n.y = (sVsContextMenuPos.y - canvasOrig.y) / zoom - sVsPanY;
+                    sVsNodes.push_back(n);
+                    sVsSelected = (int)sVsNodes.size() - 1;
+                }
+            }
+            ImGui::EndPopup();
+        }
+
+        // Properties panel overlay (bottom-right) for selected node
+        if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
+            VsNode& n = sVsNodes[sVsSelected];
+            const auto& def = sVsNodeDefs[(int)n.type];
+            float propW = 200, propH = 160;
+            ImVec2 propPos(canvasOrig.x + canvasSize.x - propW - 8, canvasOrig.y + canvasSize.y - propH - 8);
+            ImGui::SetNextWindowPos(propPos);
+            ImGui::SetNextWindowSize(ImVec2(propW, propH));
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.16f, 0.16f, 0.2f, 0.92f));
+            ImGui::Begin("##NodeProps", nullptr, flags | ImGuiWindowFlags_NoFocusOnAppearing);
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "%s", def.name);
+            ImGui::Separator();
+            ImGui::PushItemWidth(propW - 16);
+
+            switch (n.type) {
+            case VsNodeType::OnKeyPressed:
+            case VsNodeType::OnKeyReleased:
+            case VsNodeType::OnKeyHeld:
+                ImGui::Combo("Key", &n.paramInt[0], sVsKeyNames, kVsKeyCount);
+                break;
+            case VsNodeType::OnCollision: {
+                const char* prev = (n.paramInt[0] >= 0 && n.paramInt[0] < (int)sTmObjects.size())
+                    ? sTmObjects[n.paramInt[0]].name : "None";
+                if (ImGui::BeginCombo("Object", prev)) {
+                    for (int oi = 0; oi < (int)sTmObjects.size(); oi++)
+                        if (ImGui::Selectable(sTmObjects[oi].name, n.paramInt[0] == oi))
+                            n.paramInt[0] = oi;
+                    ImGui::EndCombo();
+                }
+                break;
+            }
+            case VsNodeType::MovePlayer:
+                ImGui::DragInt("Pixels", &n.paramInt[0], 0.5f, 1, 256);
+                ImGui::Combo("Direction", &n.paramInt[1], sVsAxisNames, kVsAxisCount);
+                break;
+            case VsNodeType::LookDirection:
+                ImGui::Combo("Direction", &n.paramInt[0], sVsAxisNames, kVsAxisCount);
+                break;
+            case VsNodeType::ChangeScene: {
+                const char* prev = (n.paramInt[0] >= 0 && n.paramInt[0] < (int)sTmScenes.size())
+                    ? sTmScenes[n.paramInt[0]].name : "None";
+                if (ImGui::BeginCombo("Scene", prev)) {
+                    for (int si = 0; si < (int)sTmScenes.size(); si++)
+                        if (ImGui::Selectable(sTmScenes[si].name, n.paramInt[0] == si))
+                            n.paramInt[0] = si;
+                    ImGui::EndCombo();
+                }
+                break;
+            }
+            case VsNodeType::SetVariable:
+            case VsNodeType::AddVariable:
+                ImGui::DragInt("Var Slot", &n.paramInt[0], 0.5f, 0, 31);
+                ImGui::DragInt("Value", &n.paramInt[1], 0.5f);
+                break;
+            case VsNodeType::CompareVar:
+                ImGui::DragInt("Var Slot", &n.paramInt[0], 0.5f, 0, 31);
+                ImGui::DragInt("Value", &n.paramInt[1], 0.5f);
+                break;
+            case VsNodeType::Branch:
+                ImGui::Text("Condition input");
+                break;
+            case VsNodeType::PlaySound:
+                ImGui::DragInt("Sound ID", &n.paramInt[0], 0.5f, 0, 31);
+                break;
+            case VsNodeType::Wait:
+                ImGui::DragInt("Frames", &n.paramInt[0], 0.5f, 1, 600);
+                break;
+            default: break;
+            }
+
+            ImGui::PopItemWidth();
+            ImGui::End();
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::End();
+        ImGui::PopStyleColor();
     }
     else if (sActiveTab == EditorTab::Mode7)
     {

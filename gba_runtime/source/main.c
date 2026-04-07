@@ -520,15 +520,12 @@ static void switch_dir_anim_set(int assetIdx, int newSet)
 }
 #endif
 
-// Map baseSize to GBA OBJ ATTR1_SIZE bits
 static u16 size_to_attr1(int baseSize)
 {
-    switch (baseSize) {
-        case 8:  return ATTR1_SIZE_8;
-        case 16: return ATTR1_SIZE_16;
-        case 64: return ATTR1_SIZE_64;
-        default: return ATTR1_SIZE_32;
-    }
+    if (baseSize <= 8)  return ATTR1_SIZE_8;
+    if (baseSize <= 16) return ATTR1_SIZE_16;
+    if (baseSize <= 32) return ATTR1_SIZE_32;
+    return ATTR1_SIZE_64;
 }
 
 // ---------------------------------------------------------------------------
@@ -595,8 +592,8 @@ static void update_sprites(void)
         int sprIdx = proj[i].idx;
         int palBank = g_sprites[sprIdx].palIdx;
         int tileId = 0;
-        int baseSize = 32; // default for player dir sprites
-        int scaleSize = 32; // size used for scale calculation (asset's original frame size)
+        int baseSize = 32;
+        int scaleSize = 32;
 
         // Resolve tile/palette from asset (both player and non-player sprites)
         {
@@ -614,7 +611,6 @@ static void update_sprites(void)
                         int dirIdx;
                         if (sprIdx == player_sprite_idx)
                         {
-                            // Player direction: based on movement/orbit angle (NOT camera-to-sprite)
                             u16 sprAngle;
                             if (player_moving)
                                 sprAngle = player_move_angle;
@@ -625,7 +621,6 @@ static void update_sprites(void)
                         }
                         else
                         {
-                            // Non-player: compute angle from camera to sprite
                             FIXED dx = g_sprites[sprIdx].x - cam_x;
                             FIXED dz = g_sprites[sprIdx].z - cam_z;
                             u16 angleToSprite = ArcTan2(dx >> 4, -(dz >> 4));
@@ -637,7 +632,7 @@ static void update_sprites(void)
                             int vramTile0 = afn_asset_dir_desc[ai][5];
                             tileId = vramTile0 + dirIdx * adTpf;
                             baseSize = afn_asset_dir_desc[ai][2];
-                            scaleSize = baseSize; // use direction size for scaling
+                            scaleSize = baseSize;
                             palBank = afn_asset_dir_desc[ai][3];
                         }
                     }
@@ -666,14 +661,10 @@ static void update_sprites(void)
         {
             int sprScale = g_sprites[sprIdx].scale;
             int invScale;
-            int canvasHalf = baseSize; // AFF_DBL canvas = 2 * baseSize
+            int canvasHalf = baseSize; // AFF_DBL canvas = 2 * base
             if (sprScale <= 0) sprScale = 256;
 
-            // Scale based on scaleSize (asset's original frame size) so direction
-            // sprites (64x64) appear the same on-screen size as regular frames (32x32)
             invScale = (proj[i].depth * 14 * baseSize) / (sprScale * scaleSize);
-            // invScale=128 means 2x magnification, which exactly fills the
-            // AFF_DBL canvas (2*baseSize).  Going lower clips the sprite.
             if (invScale < 128) invScale = 128;
             if (invScale > 2048) invScale = 2048;
 
@@ -682,9 +673,9 @@ static void update_sprites(void)
             obj_aff_mem[affIdx].pc = 0;
             obj_aff_mem[affIdx].pd = (s16)invScale;
 
-            int visHalf = (baseSize * 128) / invScale;
+            int visHalfH = (baseSize * 128) / invScale;
             int sx = proj[i].screenX - canvasHalf;
-            int sy = proj[i].screenY - canvasHalf - visHalf;
+            int sy = proj[i].screenY - canvasHalf - visHalfH;
 
             obj_mem[oamIdx].attr0 = ATTR0_Y(sy & 0xFF) | ATTR0_SQUARE | ATTR0_AFF_DBL;
             obj_mem[oamIdx].attr1 = ATTR1_X(sx & 0x1FF) | size_to_attr1(baseSize) | ATTR1_AFF_ID(affIdx);

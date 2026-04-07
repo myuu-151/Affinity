@@ -360,6 +360,7 @@ static void DrawSpriteFrame(int cx, int cy, int halfW, int halfH,
                             float fogAlpha)
 {
     int fSize = frame.width;
+    int fW = fSize, fH = fSize;
     if (fSize <= 0) return;
 
     // Map frame pixels to screen rect
@@ -374,16 +375,16 @@ static void DrawSpriteFrame(int cx, int cy, int halfW, int halfH,
         if (sy < 0 || sy >= kGBAHeight) continue;
         uint8_t* row = sFrameBuf + sy * kGBAWidth * 3;
 
-        int fy = dy * fSize / drawH;
-        if (fy >= fSize) fy = fSize - 1;
+        int fy = dy * fH / drawH;
+        if (fy >= fH) fy = fH - 1;
 
         for (int dx = 0; dx < drawW; dx++)
         {
             int sx = sx0 + dx;
             if (sx < 0 || sx >= kGBAWidth) continue;
 
-            int fx = dx * fSize / drawW;
-            if (fx >= fSize) fx = fSize - 1;
+            int fx = dx * fW / drawW;
+            if (fx >= fW) fx = fW - 1;
 
             uint8_t palIdx = frame.pixels[fy * kMaxFrameSize + fx];
             if (palIdx == 0) continue; // transparent
@@ -736,10 +737,10 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 if (frameIdx >= (int)asset.frames.size())
                     frameIdx = 0;
 
-                // Make half sizes square for pixel art
+                const SpriteFrame& sf = asset.frames[frameIdx];
                 int halfS = std::max(halfW, halfH);
                 DrawSpriteFrame(sp.screenX, drawCenterY, halfS, halfS,
-                                asset.frames[frameIdx], asset.palette, sp.fog);
+                                sf, asset.palette, sp.fog);
                 drewSprite = true;
             }
         }

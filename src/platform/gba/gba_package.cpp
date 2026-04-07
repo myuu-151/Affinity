@@ -157,27 +157,27 @@ static int SnapToOBJSize(int sz)
 
 static std::vector<uint32_t> FrameToGBATiles(const GBASpriteFrameExport& frame)
 {
-    int outSize = SnapToOBJSize(frame.width);
-    const int outTilesPerRow = outSize / 8;
-    const int outTotalTiles = outTilesPerRow * outTilesPerRow;
+    int fSize = SnapToOBJSize(frame.width);
+    int outW = fSize, outH = fSize;
+    const int outTilesX = outW / 8;
+    const int outTilesY = outH / 8;
+    const int outTotalTiles = outTilesX * outTilesY;
     std::vector<uint32_t> data(outTotalTiles * 8, 0);
 
 #if AFN_DEBUG_TEST_PATTERN
-    // Diagnostic: 4-quadrant test pattern with border
-    for (int oy = 0; oy < outSize; oy++)
+    for (int oy = 0; oy < outH; oy++)
     {
-        for (int ox = 0; ox < outSize; ox++)
+        for (int ox = 0; ox < outW; ox++)
         {
             uint8_t palIdx;
-            int half = outSize / 2;
-            if (ox == 0 || ox == outSize - 1 || oy == 0 || oy == outSize - 1)
-                palIdx = 5;  // border
-            else if (oy < half && ox < half) palIdx = 1;
-            else if (oy < half)              palIdx = 2;
-            else if (ox < half)              palIdx = 3;
-            else                              palIdx = 4;
+            if (ox == 0 || ox == outW - 1 || oy == 0 || oy == outH - 1)
+                palIdx = 5;
+            else if (oy < outH/2 && ox < outW/2) palIdx = 1;
+            else if (oy < outH/2)                 palIdx = 2;
+            else if (ox < outW/2)                 palIdx = 3;
+            else                                   palIdx = 4;
 
-            int tileIdx = (oy / 8) * outTilesPerRow + (ox / 8);
+            int tileIdx = (oy / 8) * outTilesX + (ox / 8);
             int lx = ox & 7;
             int ly = oy & 7;
             int rowIdx = tileIdx * 8 + ly;
@@ -188,20 +188,22 @@ static std::vector<uint32_t> FrameToGBATiles(const GBASpriteFrameExport& frame)
     return data;
 #endif
 
-    int fSize = frame.width;
-    if (fSize <= 0) return data;
+    int fW = frame.width, fH = frame.height;
+    if (fW <= 0 || fH <= 0) return data;
 
-    // Map each output pixel back to source frame pixel (upscale if needed)
-    for (int oy = 0; oy < outSize; oy++)
+    // Map each output pixel back to source frame pixel (scale to fit)
+    for (int oy = 0; oy < outH; oy++)
     {
-        int sy = oy * fSize / outSize;
-        for (int ox = 0; ox < outSize; ox++)
+        int sy = oy * fH / outH;
+        if (sy >= fH) sy = fH - 1;
+        for (int ox = 0; ox < outW; ox++)
         {
-            int sx = ox * fSize / outSize;
+            int sx = ox * fW / outW;
+            if (sx >= fW) sx = fW - 1;
             uint8_t palIdx = frame.pixels[sy * kExportMaxFrameSize + sx] & 0xF;
             if (palIdx == 0) continue;
 
-            int tileIdx = (oy / 8) * outTilesPerRow + (ox / 8);
+            int tileIdx = (oy / 8) * outTilesX + (ox / 8);
             int lx = ox & 7;
             int ly = oy & 7;
             int rowIdx = tileIdx * 8 + ly;
@@ -309,12 +311,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
     std::vector<int> assetTileStart;
     std::vector<int> assetTilesPerFrame;
 
+    std::vector<int> assetObjSize; // snapped OBJ size per asset
     for (size_t ai = 0; ai < assets.size(); ai++)
     {
         const auto& asset = assets[ai];
         int objSize = SnapToOBJSize(asset.baseSize);
-        int tilesPerRow = objSize / 8;
-        int tilesPerFrame = tilesPerRow * tilesPerRow;
+        assetObjSize.push_back(objSize);
+        int tilesPerFrame = (objSize / 8) * (objSize / 8);
         assetTileStart.push_back((int)allTiles.size() / 8);
         assetTilesPerFrame.push_back(tilesPerFrame);
 
@@ -715,11 +718,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
     if (!assets.empty())
     {
         f << "static const int afn_asset_desc[][5] = {\n";
+        f << "    // { tileStart, tilesPerFrame, frameCount, objSize, palBank }\n";
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
             f << "    { " << (assetTileStart[ai] + tileOffset) << ", " << assetTilesPerFrame[ai]
               << ", " << (int)assets[ai].frames.size()
-              << ", " << SnapToOBJSize(assets[ai].baseSize)
+              << ", " << assetObjSize[ai]
               << ", " << assets[ai].palBank << " },\n";
         }
         f << "};\n\n";
