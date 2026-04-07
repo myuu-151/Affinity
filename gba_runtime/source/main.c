@@ -2676,9 +2676,9 @@ static void render_minimap_bg_sw(u16* buf)
 #define COL_PLAYER_RADIUS 768   // 3 pixels (16.8)
 #define COL_PLAYER_HEIGHT 3072  // 12 pixels (16.8)
 #define COL_STEP_HEIGHT   1024  // 4 pixels (16.8)
-#define COL_GRAVITY       24    // ~0.09 pixels/frame^2 (16.8)
-#define COL_TERMINAL_VEL  1536  // 6 pixels/frame max fall speed (16.8)
-#define COL_JUMP_VEL      512   // initial upward velocity on jump (16.8)
+#define COL_GRAVITY       AFN_GRAVITY       // from editor export
+#define COL_TERMINAL_VEL  AFN_TERMINAL_VEL  // from editor export
+#define COL_JUMP_VEL      AFN_JUMP_VEL      // from editor export
 
 static FIXED player_ground_y;  // current floor height under player
 static FIXED player_vy;        // vertical velocity (16.8, negative = falling)
@@ -3208,9 +3208,9 @@ int main(void)
                 FIXED dy = target_cam_y - cam_y_smooth;
                 // Faster catch-up when landing (below target), slower when rising
                 if (player_on_ground)
-                    cam_y_smooth += (dy * 96) >> 8;  // ~37% per frame — snappy land
+                    cam_y_smooth += (dy * AFN_JUMP_CAM_LAND) >> 8;
                 else
-                    cam_y_smooth += (dy * 32) >> 8;  // ~12% per frame — floaty air
+                    cam_y_smooth += (dy * AFN_JUMP_CAM_AIR) >> 8;
                 // Snap when close to avoid drift
                 if (dy > -4 && dy < 4) cam_y_smooth = target_cam_y;
             }

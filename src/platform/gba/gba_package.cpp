@@ -278,6 +278,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
     f << "#define AFN_WALK_EASE_OUT "   << (int)(camera.walkEaseOut * 256.0f / 100.0f) << "\n";
     f << "#define AFN_SPRINT_EASE_IN "  << (int)(camera.sprintEaseIn * 256.0f / 100.0f) << "\n";
     f << "#define AFN_SPRINT_EASE_OUT " << (int)(camera.sprintEaseOut * 256.0f / 100.0f) << "\n";
+    // Jump physics as 16.8 fixed-point (editor pixels * 256)
+    f << "#define AFN_JUMP_VEL "      << (int)(camera.jumpForce * 256.0f) << "\n";
+    f << "#define AFN_GRAVITY "       << (int)(camera.gravity * 256.0f) << "\n";
+    f << "#define AFN_TERMINAL_VEL "  << (int)(camera.maxFallSpeed * 256.0f) << "\n";
+    f << "#define AFN_JUMP_CAM_LAND " << (int)(camera.jumpCamLand * 256.0f / 100.0f) << "\n";
+    f << "#define AFN_JUMP_CAM_AIR "  << (int)(camera.jumpCamAir * 256.0f / 100.0f) << "\n";
     // Draw distance as 16.8 fixed-point (editor units / 4 * 256), 0 = unlimited
     if (camera.drawDistance > 0.0f)
         f << "#define AFN_DRAW_DISTANCE " << (int)(camera.drawDistance / 4.0f * 256.0f) << "\n";

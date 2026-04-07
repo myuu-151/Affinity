@@ -82,6 +82,11 @@ struct GBACameraExport
     float walkEaseOut = 19.0f;
     float sprintEaseIn  = 6.0f;
     float sprintEaseOut = 12.0f;
+    float jumpForce     = 2.0f;   // initial upward velocity (pixels)
+    float gravity       = 0.09f;  // downward accel per frame (pixels)
+    float maxFallSpeed  = 6.0f;   // terminal velocity (pixels)
+    float jumpCamLand   = 37.0f;  // camera Y catch-up % when grounded
+    float jumpCamAir    = 12.0f;  // camera Y catch-up % when airborne
     float drawDistance  = 0.0f;   // 0 = unlimited
     int   smallTriCull  = 0;      // min screen-space area to render (0=off)
     bool  skipFloor     = false;  // skip floor rendering entirely

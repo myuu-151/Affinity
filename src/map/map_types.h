@@ -237,6 +237,13 @@ struct CameraStartObject
     float walkEaseOut = 19.0f;
     float sprintEaseIn  = 6.0f;
     float sprintEaseOut = 12.0f;
+    // Jump physics
+    float jumpForce    = 2.0f;   // initial upward velocity (pixels)
+    float gravity      = 0.09f;  // downward accel per frame (pixels)
+    float maxFallSpeed = 6.0f;   // terminal velocity (pixels)
+    // Jump camera follow
+    float jumpCamLand  = 37.0f;  // camera Y catch-up % when grounded
+    float jumpCamAir   = 12.0f;  // camera Y catch-up % when airborne
     // Draw distance (0 = unlimited)
     float drawDistance = 0.0f;
     // Performance toggles
