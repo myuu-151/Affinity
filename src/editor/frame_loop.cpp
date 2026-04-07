@@ -5949,19 +5949,10 @@ void FrameTick(float dt)
                         sub = sVsAxisNames[n.paramInt[0]];
                     break;
                 case VsNodeType::Animation: {
-                    // Show animation name from player sprite asset
-                    int ai = n.paramInt[0];
-                    bool found = false;
-                    for (int si = 0; si < (int)sSpriteAssets.size() && !found; si++) {
-                        if (ai >= 0 && ai < (int)sSpriteAssets[si].anims.size()) {
-                            sub = sSpriteAssets[si].anims[ai].name.c_str();
-                            found = true;
-                        }
-                    }
-                    if (!found) {
-                        snprintf(subBuf, sizeof(subBuf), "%d", ai);
-                        sub = subBuf;
-                    }
+                    int si = n.paramInt[0], ai = n.paramInt[1];
+                    if (si >= 0 && si < (int)sSpriteAssets.size() &&
+                        ai >= 0 && ai < (int)sSpriteAssets[si].anims.size())
+                        sub = sSpriteAssets[si].anims[ai].name.c_str();
                     break;
                 }
                 default: break;
@@ -6517,36 +6508,45 @@ void FrameTick(float dt)
                 ImGui::Combo("##Key2", &n.paramInt[0], sVsKeyNames, kVsKeyCount);
                 break;
             case VsNodeType::Animation: {
-                ImGui::Text("Animation");
-                // Build list of animation names from all sprite assets
-                // For now, use the first asset that has anims (typically the player sprite)
-                const char* preview = "None";
-                int totalAnims = 0;
-                for (int si = 0; si < (int)sSpriteAssets.size(); si++)
-                    totalAnims += (int)sSpriteAssets[si].anims.size();
-                if (totalAnims > 0) {
-                    // Flatten all anims across assets into a combo
-                    int idx = 0;
-                    for (int si = 0; si < (int)sSpriteAssets.size(); si++) {
-                        for (int ai = 0; ai < (int)sSpriteAssets[si].anims.size(); ai++, idx++) {
-                            if (idx == n.paramInt[0])
-                                preview = sSpriteAssets[si].anims[ai].name.c_str();
-                        }
-                    }
-                    if (ImGui::BeginCombo("##Anim", preview)) {
-                        idx = 0;
+                // Sprite asset selector
+                ImGui::Text("Sprite Asset");
+                if (sSpriteAssets.empty()) {
+                    ImGui::Text("(no sprite assets)");
+                    break;
+                }
+                {
+                    const char* assetPreview = (n.paramInt[0] >= 0 && n.paramInt[0] < (int)sSpriteAssets.size())
+                        ? sSpriteAssets[n.paramInt[0]].name.c_str() : "None";
+                    if (ImGui::BeginCombo("##AnimAsset", assetPreview)) {
                         for (int si = 0; si < (int)sSpriteAssets.size(); si++) {
-                            for (int ai = 0; ai < (int)sSpriteAssets[si].anims.size(); ai++, idx++) {
-                                bool sel = (idx == n.paramInt[0]);
-                                if (ImGui::Selectable(sSpriteAssets[si].anims[ai].name.c_str(), sel))
-                                    n.paramInt[0] = idx;
-                                if (sel) ImGui::SetItemDefaultFocus();
+                            bool sel = (si == n.paramInt[0]);
+                            if (ImGui::Selectable(sSpriteAssets[si].name.c_str(), sel)) {
+                                n.paramInt[0] = si;
+                                n.paramInt[1] = 0; // reset anim when asset changes
                             }
+                            if (sel) ImGui::SetItemDefaultFocus();
                         }
                         ImGui::EndCombo();
                     }
-                } else {
-                    ImGui::Text("(no animations)");
+                    // Animation selector (from chosen asset)
+                    ImGui::Text("Animation");
+                    int ai = n.paramInt[0];
+                    if (ai >= 0 && ai < (int)sSpriteAssets.size() && !sSpriteAssets[ai].anims.empty()) {
+                        const auto& anims = sSpriteAssets[ai].anims;
+                        const char* animPreview = (n.paramInt[1] >= 0 && n.paramInt[1] < (int)anims.size())
+                            ? anims[n.paramInt[1]].name.c_str() : "None";
+                        if (ImGui::BeginCombo("##AnimName", animPreview)) {
+                            for (int a = 0; a < (int)anims.size(); a++) {
+                                bool sel2 = (a == n.paramInt[1]);
+                                if (ImGui::Selectable(anims[a].name.c_str(), sel2))
+                                    n.paramInt[1] = a;
+                                if (sel2) ImGui::SetItemDefaultFocus();
+                            }
+                            ImGui::EndCombo();
+                        }
+                    } else {
+                        ImGui::Text("(no animations)");
+                    }
                 }
                 break;
             }
