@@ -141,6 +141,7 @@ struct GBAScriptNodeExport {
     int id;
     GBAScriptNodeType type;
     int paramInt[4];  // per-node params (key index, value, IEEE754 float bits, etc.)
+    char customCode[512] = {};  // user-editable code override (empty = use default)
 };
 
 struct GBAScriptLinkExport {

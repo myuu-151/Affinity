@@ -1496,6 +1496,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
             // Emit action code for a single action node
             auto emitAction = [&](const GBAScriptNodeExport* action) {
+                // Use custom code override if set
+                if (action->customCode[0]) {
+                    f << "    " << action->customCode << "\n";
+                    return;
+                }
                 switch (action->type)
                 {
                 case GBAScriptNodeType::MovePlayer: {

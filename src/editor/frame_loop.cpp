@@ -239,6 +239,7 @@ struct VsNode {
     char groupLabel[32] = {};     // label for Group-type nodes
     int grpInExec = 0, grpOutExec = 0;   // dynamic pin counts for Group nodes
     int grpInData = 0, grpOutData = 0;
+    char customCode[512] = {};            // user-editable code override (empty = use default)
 };
 
 // Pin address: which node, which pin type, which pin index
@@ -299,6 +300,9 @@ static bool sVsShowContextMenu = false;
 static ImVec2 sVsContextMenuPos = {};
 // Auto-wire: when dropping a link on empty space, open context menu and wire to new node
 static VsPin sVsPendingAutoWire = { -1, 0, 0 };
+// Node info popup (right-click on node)
+static int sVsNodeInfoIdx = -1;   // index of node showing info popup
+static char sVsNodeCodeBuf[2048] = {}; // editable code buffer
 
 static constexpr float kVsNodeW = 160.0f;
 static constexpr float kVsHeaderH = 30.0f;
@@ -1223,6 +1227,8 @@ static bool SaveProject(const std::string& path)
         if (n.type == VsNodeType::Group)
             fprintf(f, "vsGroupDef=%d|%s|%d,%d,%d,%d\n", n.id, n.groupLabel,
                 n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
+        if (n.customCode[0])
+            fprintf(f, "vsNodeCode=%d|%s\n", n.id, n.customCode);
     }
     fprintf(f, "vsLinkCount=%d\n", (int)sVsLinks.size());
     for (int i = 0; i < (int)sVsLinks.size(); i++)
@@ -1734,6 +1740,16 @@ static bool LoadProject(const std::string& path)
                         sVsNodes[gi].grpInData = id2;
                         sVsNodes[gi].grpOutData = od;
                     }
+                }
+            }
+            else if (strncmp(line, "vsNodeCode=", 11) == 0)
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 11, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    int gi = VsFindNode(nid);
+                    if (gi >= 0)
+                        strncpy(sVsNodes[gi].customCode, codeBuf, sizeof(sVsNodes[gi].customCode) - 1);
                 }
             }
             else if (sscanf(line, "vsLinkCount=%d", &ival) == 1) { sVsLinks.clear(); sVsLinks.reserve(ival); }
@@ -5329,6 +5345,7 @@ void FrameTick(float dt)
                     sn.id = n.id;
                     sn.type = (GBAScriptNodeType)(int)n.type;
                     for (int pi = 0; pi < 4; pi++) sn.paramInt[pi] = n.paramInt[pi];
+                    memcpy(sn.customCode, n.customCode, sizeof(sn.customCode));
                     exportScript.nodes.push_back(sn);
                 }
                 for (auto& l : sVsLinks)
@@ -6420,6 +6437,9 @@ void FrameTick(float dt)
             // Title
             const char* title = (n.type == VsNodeType::Group && n.groupLabel[0]) ? n.groupLabel : def.name;
             dl->AddText(ImVec2(nx + 6 * zoom, ny + 2 * zoom), 0xFFFFFFFF, title);
+            // Custom code indicator
+            if (n.customCode[0])
+                dl->AddText(ImVec2(nMax.x - 22 * zoom, ny + 2 * zoom), 0xAAFFCC66, "<>");
 
             // Subtitle — show key/param value on the header
             {
@@ -6636,7 +6656,7 @@ void FrameTick(float dt)
                 }
             }
 
-            // Right click — disconnect pin or open context menu
+            // Right click — node info, disconnect pin, or open context menu
             if (io.MouseClicked[1]) {
                 if (hoveredPin.nodeId >= 0) {
                     // Remove all links connected to this pin
@@ -6645,7 +6665,12 @@ void FrameTick(float dt)
                             return (l.from.nodeId == hoveredPin.nodeId && l.from.pinType == hoveredPin.pinType && l.from.pinIdx == hoveredPin.pinIdx) ||
                                    (l.to.nodeId == hoveredPin.nodeId && l.to.pinType == hoveredPin.pinType && l.to.pinIdx == hoveredPin.pinIdx);
                         }), sVsLinks.end());
-                } else if (hoveredNode < 0) {
+                } else if (hoveredNode >= 0) {
+                    // Open node info popup
+                    sVsNodeInfoIdx = hoveredNode;
+                    memcpy(sVsNodeCodeBuf, sVsNodes[hoveredNode].customCode, sizeof(sVsNodeCodeBuf));
+                    ImGui::OpenPopup("##NodeInfo");
+                } else {
                     sVsShowContextMenu = true;
                     sVsContextMenuPos = io.MousePos;
                 }
@@ -6916,6 +6941,114 @@ void FrameTick(float dt)
         // Context menu (right-click or Space to add node)
         static char sVsNodeSearch[64] = {};
         static bool sVsSearchFocused = false;
+        // Node info popup (right-click on node)
+        if (ImGui::BeginPopup("##NodeInfo")) {
+            if (sVsNodeInfoIdx >= 0 && sVsNodeInfoIdx < (int)sVsNodes.size()) {
+                VsNode& infoNode = sVsNodes[sVsNodeInfoIdx];
+                const auto& infoDef = sVsNodeDefs[(int)infoNode.type];
+
+                // Header
+                ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "%s", infoDef.name);
+                ImGui::Separator();
+
+                // Description
+                const char* desc = "";
+                switch (infoNode.type) {
+                case VsNodeType::OnKeyPressed:  desc = "Fires once when a key is pressed down."; break;
+                case VsNodeType::OnKeyReleased: desc = "Fires once when a key is released."; break;
+                case VsNodeType::OnKeyHeld:     desc = "Fires every frame while a key is held."; break;
+                case VsNodeType::OnCollision:   desc = "Fires when the player collides with an object."; break;
+                case VsNodeType::OnStart:       desc = "Fires once when the scene starts."; break;
+                case VsNodeType::OnUpdate:      desc = "Fires every frame."; break;
+                case VsNodeType::Branch:        desc = "If condition is true, execute True path; otherwise False."; break;
+                case VsNodeType::CompareVar:    desc = "Compares a variable slot against a value. Outputs 1 or 0."; break;
+                case VsNodeType::MovePlayer:    desc = "Moves the player in a direction while its key is held."; break;
+                case VsNodeType::LookDirection: desc = "Sets the player's facing direction."; break;
+                case VsNodeType::ChangeScene:   desc = "Loads a different scene by index."; break;
+                case VsNodeType::SetVariable:   desc = "Sets a variable slot to a value."; break;
+                case VsNodeType::AddVariable:   desc = "Adds an amount to a variable slot."; break;
+                case VsNodeType::PlaySound:     desc = "Plays a sound effect by ID."; break;
+                case VsNodeType::Wait:          desc = "Pauses execution for a number of frames."; break;
+                case VsNodeType::Jump:          desc = "Makes the player jump with the given force. Only works when grounded."; break;
+                case VsNodeType::Walk:          desc = "Sets the player's movement speed (walk)."; break;
+                case VsNodeType::Sprint:        desc = "Sets the player's movement speed (sprint)."; break;
+                case VsNodeType::OrbitCamera:   desc = "Rotates the orbit camera in a direction at a speed."; break;
+                case VsNodeType::PlayAnim:      desc = "Plays an animation on the player sprite."; break;
+                case VsNodeType::SetGravity:    desc = "Sets gravity strength (pixels per frame^2)."; break;
+                case VsNodeType::SetMaxFall:    desc = "Sets the maximum fall speed (terminal velocity)."; break;
+                case VsNodeType::DestroyObject: desc = "Removes a sprite/object from the scene."; break;
+                case VsNodeType::AutoOrbit:     desc = "Enables auto-orbit camera when strafing. 0 = disabled."; break;
+                case VsNodeType::DampenJump:    desc = "Multiplies upward velocity by factor when fired. Use with On Key Released for variable jump height."; break;
+                case VsNodeType::Integer:       desc = "Outputs a constant integer value."; break;
+                case VsNodeType::Key:           desc = "Outputs a key constant (A, B, L, R, etc)."; break;
+                case VsNodeType::Direction:     desc = "Outputs a direction (Left, Right, Up, Down)."; break;
+                case VsNodeType::Animation:     desc = "Outputs an animation index."; break;
+                case VsNodeType::Float:         desc = "Outputs a constant float value."; break;
+                case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
+                default: desc = "No description."; break;
+                }
+                ImGui::TextWrapped("%s", desc);
+                ImGui::Spacing();
+
+                // Default generated code preview
+                const char* defaultCode = "";
+                char defaultCodeBuf[256] = {};
+                switch (infoNode.type) {
+                case VsNodeType::Jump:
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (player_on_ground) player_vy = <force>;");
+                    defaultCode = defaultCodeBuf; break;
+                case VsNodeType::DampenJump:
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (player_vy > 0) player_vy = (player_vy * <factor>) >> 8;");
+                    defaultCode = defaultCodeBuf; break;
+                case VsNodeType::Walk:
+                    defaultCode = "afn_move_speed = <speed>;"; break;
+                case VsNodeType::Sprint:
+                    defaultCode = "afn_move_speed = <speed>;"; break;
+                case VsNodeType::SetGravity:
+                    defaultCode = "afn_gravity = <value>;"; break;
+                case VsNodeType::SetMaxFall:
+                    defaultCode = "afn_terminal_vel = <value>;"; break;
+                case VsNodeType::AutoOrbit:
+                    defaultCode = "afn_auto_orbit_speed = <speed>;"; break;
+                case VsNodeType::PlayAnim:
+                    defaultCode = "afn_play_anim = <anim>;"; break;
+                case VsNodeType::MovePlayer:
+                    defaultCode = "if (key_is_down(<key>)) afn_input_fwd/right += 256;"; break;
+                case VsNodeType::OrbitCamera:
+                    defaultCode = "if (key_is_down(<key>)) orbit_angle += <speed>;"; break;
+                default: break;
+                }
+
+                if (defaultCode[0]) {
+                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Default:");
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.8f, 0.6f, 1.0f));
+                    ImGui::TextWrapped("%s", defaultCode);
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+                }
+
+                // Editable code section
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Custom Code");
+                ImGui::TextWrapped("Override the generated code. Leave empty to use default.");
+                ImGui::Spacing();
+                ImGui::PushItemWidth(-1);
+                ImGui::InputTextMultiline("##NodeCode", sVsNodeCodeBuf, sizeof(sVsNodeCodeBuf),
+                    ImVec2(-1, 100), ImGuiInputTextFlags_AllowTabInput);
+                ImGui::PopItemWidth();
+                if (ImGui::Button("Save")) {
+                    memcpy(infoNode.customCode, sVsNodeCodeBuf, sizeof(infoNode.customCode));
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Clear")) {
+                    sVsNodeCodeBuf[0] = '\0';
+                    infoNode.customCode[0] = '\0';
+                }
+            }
+            ImGui::EndPopup();
+        }
+
         if (sVsShowContextMenu) {
             ImGui::OpenPopup("##AddNode");
             sVsShowContextMenu = false;
