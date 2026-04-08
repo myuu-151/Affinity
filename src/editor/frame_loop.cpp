@@ -8064,11 +8064,12 @@ void FrameTick(float dt)
         // Scene panel (top-right, only on Map tab)
         if (sActiveTab == EditorTab::Map)
         {
+            scenePanH = 160;
             ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
-                ImGuiWindowFlags_AlwaysAutoResize;
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
             ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + leftW, bodyY));
-            ImGui::SetNextWindowSizeConstraints(ImVec2(rightW, 0), ImVec2(rightW, 300));
+            ImGui::SetNextWindowSize(ImVec2(rightW, scenePanH));
             ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
             ImGui::Begin("##MapScenePanel", nullptr, panelFlags);
 
@@ -8096,7 +8097,8 @@ void FrameTick(float dt)
                 }
             }
 
-            // Scene list — selected item is an editable InputText
+            // Scene list in scrollable child that fills remaining space
+            ImGui::BeginChild("##MapSceneList", ImVec2(0, 0));
             for (int i = 0; i < (int)sMapScenes.size(); i++)
             {
                 bool sel = (i == sMapSelectedScene);
@@ -8120,8 +8122,8 @@ void FrameTick(float dt)
                     }
                 }
             }
+            ImGui::EndChild();
 
-            scenePanH = ImGui::GetWindowSize().y;
             ImGui::End();
             ImGui::PopStyleColor();
         }
