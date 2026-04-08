@@ -303,6 +303,7 @@ static VsPin sVsPendingAutoWire = { -1, 0, 0 };
 // Node info popup (right-click on node)
 static int sVsNodeInfoIdx = -1;   // index of node showing info popup
 static char sVsNodeCodeBuf[2048] = {}; // editable code buffer
+static bool sVsNodeInfoJustOpened = false;
 
 static constexpr float kVsNodeW = 160.0f;
 static constexpr float kVsHeaderH = 30.0f;
@@ -6669,6 +6670,7 @@ void FrameTick(float dt)
                     // Open node info popup
                     sVsNodeInfoIdx = hoveredNode;
                     memcpy(sVsNodeCodeBuf, sVsNodes[hoveredNode].customCode, sizeof(sVsNodeCodeBuf));
+                    sVsNodeInfoJustOpened = true;
                     ImGui::OpenPopup("##NodeInfo");
                 } else {
                     sVsShowContextMenu = true;
@@ -6990,47 +6992,112 @@ void FrameTick(float dt)
                 ImGui::TextWrapped("%s", desc);
                 ImGui::Spacing();
 
-                // Default generated code preview
+                // Resolve data input values by following links
+                auto resolveDataIn = [&](int nodeId, int pinIdx) -> VsNode* {
+                    for (auto& lk : sVsLinks)
+                        if (lk.to.nodeId == nodeId && lk.to.pinType == 3 && lk.to.pinIdx == pinIdx)
+                            for (auto& src : sVsNodes)
+                                if (src.id == lk.from.nodeId) return &src;
+                    return nullptr;
+                };
+                auto resolveFloat = [&](int nodeId, int pinIdx, float def) -> float {
+                    VsNode* src = resolveDataIn(nodeId, pinIdx);
+                    if (src && src->type == VsNodeType::Float) { float v; memcpy(&v, &src->paramInt[0], sizeof(float)); return v; }
+                    return def;
+                };
+                auto resolveInt = [&](int nodeId, int pinIdx, int def) -> int {
+                    VsNode* src = resolveDataIn(nodeId, pinIdx);
+                    if (src && src->type == VsNodeType::Integer) return src->paramInt[0];
+                    if (src && src->type == VsNodeType::Float) { float v; memcpy(&v, &src->paramInt[0], sizeof(float)); return (int)(v * 256.0f); }
+                    return def;
+                };
+                auto resolveDir = [&](int nodeId, int pinIdx) -> int {
+                    VsNode* src = resolveDataIn(nodeId, pinIdx);
+                    return src ? src->paramInt[0] : 0;
+                };
+
+                // Build actual generated code with resolved values
+                char defaultCodeBuf[512] = {};
                 const char* defaultCode = "";
-                char defaultCodeBuf[256] = {};
                 switch (infoNode.type) {
-                case VsNodeType::Jump:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (player_on_ground) player_vy = <force>;");
+                case VsNodeType::Jump: {
+                    float force = resolveFloat(infoNode.id, 0, 2.0f);
+                    int forceFixed = (int)(force * 256.0f);
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (player_on_ground) player_vy = %d;", forceFixed);
                     defaultCode = defaultCodeBuf; break;
-                case VsNodeType::DampenJump:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (player_vy > 0) player_vy = (player_vy * <factor>) >> 8;");
+                }
+                case VsNodeType::DampenJump: {
+                    float factor = resolveFloat(infoNode.id, 0, 0.75f);
+                    int factorFixed = (int)(factor * 256.0f);
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (player_vy > 0) player_vy = (player_vy * %d) >> 8;", factorFixed);
                     defaultCode = defaultCodeBuf; break;
-                case VsNodeType::Walk:
-                    defaultCode = "afn_move_speed = <speed>;"; break;
-                case VsNodeType::Sprint:
-                    defaultCode = "afn_move_speed = <speed>;"; break;
-                case VsNodeType::SetGravity:
-                    defaultCode = "afn_gravity = <value>;"; break;
-                case VsNodeType::SetMaxFall:
-                    defaultCode = "afn_terminal_vel = <value>;"; break;
-                case VsNodeType::AutoOrbit:
-                    defaultCode = "afn_auto_orbit_speed = <speed>;"; break;
-                case VsNodeType::PlayAnim:
-                    defaultCode = "afn_play_anim = <anim>;"; break;
-                case VsNodeType::MovePlayer:
-                    defaultCode = "if (key_is_down(<key>)) afn_input_fwd/right += 256;"; break;
-                case VsNodeType::OrbitCamera:
-                    defaultCode = "if (key_is_down(<key>)) orbit_angle += <speed>;"; break;
+                }
+                case VsNodeType::Walk: {
+                    int speed = resolveInt(infoNode.id, 0, 37);
+                    int gbaSpeed = (int)(speed * 37.0f / 35.0f);
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_move_speed = %d;", gbaSpeed);
+                    defaultCode = defaultCodeBuf; break;
+                }
+                case VsNodeType::Sprint: {
+                    int speed = resolveInt(infoNode.id, 0, 56);
+                    int gbaSpeed = (int)(speed * 37.0f / 35.0f);
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_move_speed = %d;", gbaSpeed);
+                    defaultCode = defaultCodeBuf; break;
+                }
+                case VsNodeType::SetGravity: {
+                    float val = resolveFloat(infoNode.id, 0, 0.09f);
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_gravity = %d;", (int)(val * 256.0f));
+                    defaultCode = defaultCodeBuf; break;
+                }
+                case VsNodeType::SetMaxFall: {
+                    float val = resolveFloat(infoNode.id, 0, 6.0f);
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_terminal_vel = %d;", (int)(val * 256.0f));
+                    defaultCode = defaultCodeBuf; break;
+                }
+                case VsNodeType::AutoOrbit: {
+                    int speed = resolveInt(infoNode.id, 0, 205);
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_auto_orbit_speed = %d;", speed);
+                    defaultCode = defaultCodeBuf; break;
+                }
+                case VsNodeType::PlayAnim: {
+                    int anim = resolveInt(infoNode.id, 0, 0);
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_play_anim = %d;", anim);
+                    defaultCode = defaultCodeBuf; break;
+                }
+                case VsNodeType::MovePlayer: {
+                    int dir = resolveDir(infoNode.id, 0);
+                    const char* dirKeys[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
+                    const char* dirVars[] = { "afn_input_right -= 256", "afn_input_right += 256",
+                                              "afn_input_fwd += 256", "afn_input_fwd -= 256" };
+                    if (dir >= 0 && dir < 4)
+                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(%s)) %s;", dirKeys[dir], dirVars[dir]);
+                    defaultCode = defaultCodeBuf; break;
+                }
+                case VsNodeType::OrbitCamera: {
+                    int dir = resolveDir(infoNode.id, 0);
+                    int speed = resolveInt(infoNode.id, 1, 512);
+                    const char* key = (dir == 0) ? "KEY_L" : "KEY_R";
+                    const char* sign = (dir == 0) ? "-" : "+";
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(%s)) orbit_angle %s= %d;", key, sign, speed);
+                    defaultCode = defaultCodeBuf; break;
+                }
+                case VsNodeType::DestroyObject: {
+                    int obj = resolveInt(infoNode.id, 0, 0);
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "// destroy object %d", obj);
+                    defaultCode = defaultCodeBuf; break;
+                }
                 default: break;
                 }
 
-                if (defaultCode[0]) {
-                    ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Default:");
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.8f, 0.6f, 1.0f));
-                    ImGui::TextWrapped("%s", defaultCode);
-                    ImGui::PopStyleColor();
-                    ImGui::Spacing();
+                // Pre-populate code field with default if empty and no custom code set
+                if (sVsNodeInfoJustOpened && !sVsNodeCodeBuf[0] && defaultCode[0]) {
+                    strncpy(sVsNodeCodeBuf, defaultCode, sizeof(sVsNodeCodeBuf) - 1);
                 }
+                sVsNodeInfoJustOpened = false;
 
                 // Editable code section
                 ImGui::Separator();
-                ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Custom Code");
-                ImGui::TextWrapped("Override the generated code. Leave empty to use default.");
+                ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Code");
                 ImGui::Spacing();
                 ImGui::PushItemWidth(-1);
                 ImGui::InputTextMultiline("##NodeCode", sVsNodeCodeBuf, sizeof(sVsNodeCodeBuf),
