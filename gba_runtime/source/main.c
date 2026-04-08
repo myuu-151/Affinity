@@ -73,6 +73,103 @@ static u16 dbg_fps_timer;   // last timer snapshot
 // 12 = ASM rasterizer (use rasterize_convex_asm instead of C version)
 #define PERF_MODE_COUNT 13
 static int perf_mode;
+// Texture fix mode (cycled with SELECT, 1-200)
+#define TEX_FIX_COUNT 200
+static int g_texFixMode = 1;
+
+// Each mode is encoded as: { clipMargin, depthClamp, rawDepthThresh, depthRatioNum, depthRatioDen, uvCorr }
+// clipMargin: -1=no clip, -2=always clip, >=0 = margin in pixels around screen
+// depthClamp: 0=default(16), >0=use this value
+// rawDepthThresh: 0=disabled, >0=clip when any vertex rawDepth < this
+// depthRatioNum/Den: 0=disabled, else clip when zMax*Den > zMin*Num
+// uvCorr: 0=none, 1=avgZ, 2=maxZ, 3=centered
+typedef struct { s16 clipMargin; s8 depthClamp; s8 rawDepthThresh; s8 ratioNum; s8 ratioDen; s8 uvCorr; s8 pad; } TexFixDef;
+
+static const TexFixDef g_texFixDefs[TEX_FIX_COUNT] = {
+    // 1: baseline (no fix)
+    {-1, 0, 0, 0,0, 0, 0},
+    // --- SCREEN CLIP MARGINS (2-21): 0,5,10,15,20,30,40,50,60,80,100,120,140,160,180,200,250,300,400,500 ---
+    { 0, 0, 0, 0,0, 0, 0}, { 5, 0, 0, 0,0, 0, 0}, {10, 0, 0, 0,0, 0, 0}, {15, 0, 0, 0,0, 0, 0},
+    {20, 0, 0, 0,0, 0, 0}, {30, 0, 0, 0,0, 0, 0}, {40, 0, 0, 0,0, 0, 0}, {50, 0, 0, 0,0, 0, 0},
+    {60, 0, 0, 0,0, 0, 0}, {80, 0, 0, 0,0, 0, 0}, {100,0, 0, 0,0, 0, 0}, {120,0, 0, 0,0, 0, 0},
+    {140,0, 0, 0,0, 0, 0}, {160,0, 0, 0,0, 0, 0}, {180,0, 0, 0,0, 0, 0}, {200,0, 0, 0,0, 0, 0},
+    {250,0, 0, 0,0, 0, 0}, {300,0, 0, 0,0, 0, 0}, {400,0, 0, 0,0, 0, 0}, {500,0, 0, 0,0, 0, 0},
+    // --- DEPTH CLAMP ONLY (22-37): values 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 ---
+    {-1, 1, 0, 0,0, 0, 0}, {-1, 2, 0, 0,0, 0, 0}, {-1, 3, 0, 0,0, 0, 0}, {-1, 4, 0, 0,0, 0, 0},
+    {-1, 5, 0, 0,0, 0, 0}, {-1, 6, 0, 0,0, 0, 0}, {-1, 7, 0, 0,0, 0, 0}, {-1, 8, 0, 0,0, 0, 0},
+    {-1, 9, 0, 0,0, 0, 0}, {-1,10, 0, 0,0, 0, 0}, {-1,11, 0, 0,0, 0, 0}, {-1,12, 0, 0,0, 0, 0},
+    {-1,13, 0, 0,0, 0, 0}, {-1,14, 0, 0,0, 0, 0}, {-1,15, 0, 0,0, 0, 0}, {-1,16, 0, 0,0, 0, 0},
+    // --- RAW DEPTH THRESHOLD ONLY (38-49): 8,10,12,14,16,20,24,28,32,40,48,64 ---
+    {-1, 0, 8, 0,0, 0, 0}, {-1, 0,10, 0,0, 0, 0}, {-1, 0,12, 0,0, 0, 0}, {-1, 0,14, 0,0, 0, 0},
+    {-1, 0,16, 0,0, 0, 0}, {-1, 0,20, 0,0, 0, 0}, {-1, 0,24, 0,0, 0, 0}, {-1, 0,28, 0,0, 0, 0},
+    {-1, 0,32, 0,0, 0, 0}, {-1, 0,40, 0,0, 0, 0}, {-1, 0,48, 0,0, 0, 0}, {-1, 0,64, 0,0, 0, 0},
+    // --- DEPTH RATIO ONLY (50-61): 11/10,5/4,13/10,3/2,8/5,7/4,2/1,5/2,3/1,7/2,4/1,5/1 ---
+    {-1, 0, 0, 11,10, 0, 0}, {-1, 0, 0, 5,4, 0, 0}, {-1, 0, 0, 13,10, 0, 0}, {-1, 0, 0, 3,2, 0, 0},
+    {-1, 0, 0, 8,5, 0, 0},  {-1, 0, 0, 7,4, 0, 0}, {-1, 0, 0, 2,1, 0, 0},  {-1, 0, 0, 5,2, 0, 0},
+    {-1, 0, 0, 3,1, 0, 0},  {-1, 0, 0, 7,2, 0, 0}, {-1, 0, 0, 4,1, 0, 0},  {-1, 0, 0, 5,1, 0, 0},
+    // --- UV CORRECTION ONLY (62-64) ---
+    {-1, 0, 0, 0,0, 1, 0}, {-1, 0, 0, 0,0, 2, 0}, {-1, 0, 0, 0,0, 3, 0},
+    // --- CLIP ALL (65) ---
+    {-2, 0, 0, 0,0, 0, 0},
+    // --- CLIP EXACT + DEPTH CLAMP combos (66-81): clamp 1-16 ---
+    { 0, 1, 0, 0,0, 0, 0}, { 0, 2, 0, 0,0, 0, 0}, { 0, 3, 0, 0,0, 0, 0}, { 0, 4, 0, 0,0, 0, 0},
+    { 0, 5, 0, 0,0, 0, 0}, { 0, 6, 0, 0,0, 0, 0}, { 0, 7, 0, 0,0, 0, 0}, { 0, 8, 0, 0,0, 0, 0},
+    { 0, 9, 0, 0,0, 0, 0}, { 0,10, 0, 0,0, 0, 0}, { 0,11, 0, 0,0, 0, 0}, { 0,12, 0, 0,0, 0, 0},
+    { 0,13, 0, 0,0, 0, 0}, { 0,14, 0, 0,0, 0, 0}, { 0,15, 0, 0,0, 0, 0}, { 0,16, 0, 0,0, 0, 0},
+    // --- CLIP EXACT + RAW DEPTH combos (82-93): rawDepth 8-64 ---
+    { 0, 0, 8, 0,0, 0, 0}, { 0, 0,10, 0,0, 0, 0}, { 0, 0,12, 0,0, 0, 0}, { 0, 0,14, 0,0, 0, 0},
+    { 0, 0,16, 0,0, 0, 0}, { 0, 0,20, 0,0, 0, 0}, { 0, 0,24, 0,0, 0, 0}, { 0, 0,28, 0,0, 0, 0},
+    { 0, 0,32, 0,0, 0, 0}, { 0, 0,40, 0,0, 0, 0}, { 0, 0,48, 0,0, 0, 0}, { 0, 0,64, 0,0, 0, 0},
+    // --- CLIP EXACT + DEPTH RATIO combos (94-105) ---
+    { 0, 0, 0, 11,10, 0, 0}, { 0, 0, 0, 5,4, 0, 0}, { 0, 0, 0, 13,10, 0, 0}, { 0, 0, 0, 3,2, 0, 0},
+    { 0, 0, 0, 8,5, 0, 0},  { 0, 0, 0, 7,4, 0, 0}, { 0, 0, 0, 2,1, 0, 0},  { 0, 0, 0, 5,2, 0, 0},
+    { 0, 0, 0, 3,1, 0, 0},  { 0, 0, 0, 7,2, 0, 0}, { 0, 0, 0, 4,1, 0, 0},  { 0, 0, 0, 5,1, 0, 0},
+    // --- CLIP EXACT + UV CORRECTION combos (106-108) ---
+    { 0, 0, 0, 0,0, 1, 0}, { 0, 0, 0, 0,0, 2, 0}, { 0, 0, 0, 0,0, 3, 0},
+    // --- CLAMP 8 + RAW DEPTH combos (109-114) ---
+    {-1, 8,16, 0,0, 0, 0}, {-1, 8,24, 0,0, 0, 0}, {-1, 8,32, 0,0, 0, 0},
+    {-1, 8,40, 0,0, 0, 0}, {-1, 8,48, 0,0, 0, 0}, {-1, 8,64, 0,0, 0, 0},
+    // --- CLAMP 8 + CLIP EXACT + RAW DEPTH combos (115-120) ---
+    { 0, 8,16, 0,0, 0, 0}, { 0, 8,24, 0,0, 0, 0}, { 0, 8,32, 0,0, 0, 0},
+    { 0, 8,40, 0,0, 0, 0}, { 0, 8,48, 0,0, 0, 0}, { 0, 8,64, 0,0, 0, 0},
+    // --- CLIP MARGIN + CLAMP 8 combos (121-130): margins 0,10,20,30,40,50,60,80,100,120 ---
+    { 0, 8, 0, 0,0, 0, 0}, {10, 8, 0, 0,0, 0, 0}, {20, 8, 0, 0,0, 0, 0}, {30, 8, 0, 0,0, 0, 0},
+    {40, 8, 0, 0,0, 0, 0}, {50, 8, 0, 0,0, 0, 0}, {60, 8, 0, 0,0, 0, 0}, {80, 8, 0, 0,0, 0, 0},
+    {100,8, 0, 0,0, 0, 0}, {120,8, 0, 0,0, 0, 0},
+    // --- CLIP MARGIN + CLAMP 12 combos (131-136) ---
+    { 0,12, 0, 0,0, 0, 0}, {10,12, 0, 0,0, 0, 0}, {20,12, 0, 0,0, 0, 0}, {40,12, 0, 0,0, 0, 0},
+    {60,12, 0, 0,0, 0, 0}, {100,12,0, 0,0, 0, 0},
+    // --- CLIP MARGIN + CLAMP 4 combos (137-142) ---
+    { 0, 4, 0, 0,0, 0, 0}, {10, 4, 0, 0,0, 0, 0}, {20, 4, 0, 0,0, 0, 0}, {40, 4, 0, 0,0, 0, 0},
+    {60, 4, 0, 0,0, 0, 0}, {100,4, 0, 0,0, 0, 0},
+    // --- UV CORR + CLAMP combos (143-148) ---
+    {-1, 8, 0, 0,0, 1, 0}, {-1, 8, 0, 0,0, 2, 0}, {-1, 8, 0, 0,0, 3, 0},
+    {-1,12, 0, 0,0, 1, 0}, {-1,12, 0, 0,0, 2, 0}, {-1,12, 0, 0,0, 3, 0},
+    // --- UV CORR + CLIP EXACT + CLAMP combos (149-154) ---
+    { 0, 8, 0, 0,0, 1, 0}, { 0, 8, 0, 0,0, 2, 0}, { 0, 8, 0, 0,0, 3, 0},
+    { 0,12, 0, 0,0, 1, 0}, { 0,12, 0, 0,0, 2, 0}, { 0,12, 0, 0,0, 3, 0},
+    // --- UV CORR + RAW DEPTH combos (155-160) ---
+    {-1, 0,16, 0,0, 1, 0}, {-1, 0,16, 0,0, 2, 0}, {-1, 0,16, 0,0, 3, 0},
+    {-1, 0,24, 0,0, 1, 0}, {-1, 0,24, 0,0, 2, 0}, {-1, 0,24, 0,0, 3, 0},
+    // --- DEPTH RATIO + CLAMP combos (161-168) ---
+    {-1, 8, 0, 3,2, 0, 0}, {-1, 8, 0, 5,4, 0, 0}, {-1, 8, 0, 2,1, 0, 0}, {-1, 8, 0, 11,10, 0, 0},
+    {-1,12, 0, 3,2, 0, 0}, {-1,12, 0, 5,4, 0, 0}, {-1,12, 0, 2,1, 0, 0}, {-1,12, 0, 11,10, 0, 0},
+    // --- CLIP EXACT + DEPTH RATIO + CLAMP combos (169-176) ---
+    { 0, 8, 0, 3,2, 0, 0}, { 0, 8, 0, 5,4, 0, 0}, { 0, 8, 0, 2,1, 0, 0}, { 0, 8, 0, 11,10, 0, 0},
+    { 0,12, 0, 3,2, 0, 0}, { 0,12, 0, 5,4, 0, 0}, { 0,12, 0, 2,1, 0, 0}, { 0,12, 0, 11,10, 0, 0},
+    // --- TRIPLE COMBOS: clip + clamp + rawDepth (177-184) ---
+    { 0, 8,16, 0,0, 0, 0}, { 0, 8,24, 0,0, 0, 0}, { 0,12,16, 0,0, 0, 0}, { 0,12,24, 0,0, 0, 0},
+    {10, 8,16, 0,0, 0, 0}, {10, 8,24, 0,0, 0, 0}, {20, 8,16, 0,0, 0, 0}, {20, 8,24, 0,0, 0, 0},
+    // --- TRIPLE COMBOS: clip + clamp + ratio (185-192) ---
+    { 0, 8, 0, 3,2, 0, 0}, { 0, 8, 0, 5,4, 0, 0}, {10, 8, 0, 3,2, 0, 0}, {10, 8, 0, 5,4, 0, 0},
+    { 0,12, 0, 3,2, 0, 0}, { 0,12, 0, 5,4, 0, 0}, {10,12, 0, 3,2, 0, 0}, {10,12, 0, 5,4, 0, 0},
+    // --- QUAD COMBOS: everything (193-196) ---
+    { 0, 8,16, 3,2, 1, 0}, { 0, 8,24, 5,4, 1, 0}, { 0,12,16, 3,2, 2, 0}, { 0,12,24, 5,4, 3, 0},
+    // --- CLIP ALL + UV CORR (197-199) ---
+    {-2, 0, 0, 0,0, 1, 0}, {-2, 0, 0, 0,0, 2, 0}, {-2, 0, 0, 0,0, 3, 0},
+    // --- CLIP ALL + CLAMP 8 (200) ---
+    {-2, 8, 0, 0,0, 0, 0},
+};
 static int g_ewramRender;  // when set, render to EWRAM then DMA to VRAM
 static int g_useAsmRast = 1;   // use ARM asm convex rasterizer by default
 
@@ -997,7 +1094,7 @@ IWRAM_CODE static void rasterize_tri_quarter(u16* buf, int x0, int y0, int x1, i
 
 // Sutherland-Hodgman viewport clipping with UV interpolation.
 // Clips a convex polygon against one axis-aligned edge, carrying U/V.
-static int clip_edge_uv(const int* inX, const int* inY, const int* inU, const int* inV,
+IWRAM_CODE static int clip_edge_uv(const int* inX, const int* inY, const int* inU, const int* inV,
                         int inCount, int* outX, int* outY, int* outU, int* outV,
                         int axis, int limit, int isMax)
 {
@@ -1024,10 +1121,11 @@ static int clip_edge_uv(const int* inX, const int* inY, const int* inU, const in
             int d = (axis ? dy : dx);
             if (d != 0) {
                 int t = limit - (axis ? inY[i] : inX[i]);
-                outX[out] = axis ? (inX[i] + (int)((long long)dx * t / d)) : limit;
-                outY[out] = axis ? limit : (inY[i] + (int)((long long)dy * t / d));
-                outU[out] = inU[i] + (int)((long long)du * t / d);
-                outV[out] = inV[i] + (int)((long long)dv * t / d);
+                // 32-bit fixed: (val * t) / d — values fit since screen coords < 16K, UVs < 9K
+                outX[out] = axis ? (inX[i] + dx * t / d) : limit;
+                outY[out] = axis ? limit : (inY[i] + dy * t / d);
+                outU[out] = inU[i] + du * t / d;
+                outV[out] = inV[i] + dv * t / d;
             } else {
                 outX[out] = inX[i]; outY[out] = inY[i];
                 outU[out] = inU[i]; outV[out] = inV[i];
@@ -1125,8 +1223,18 @@ IWRAM_CODE static void rasterize_convex(u16* buf, int* px, int* py, int count, u
 
     if (count < 3) return;
 
-    rasterize_convex_asm(buf, px, py, count, palIdx);
-    return;
+    // ASM has no divLUT bounds check — fall back to C for extreme edges
+    {
+        int yMin = py[0], yMax = py[0];
+        for (i = 1; i < count; i++) {
+            if (py[i] < yMin) yMin = py[i];
+            if (py[i] > yMax) yMax = py[i];
+        }
+        if (yMax - yMin < AFN_DIV_LUT_SIZE) {
+            rasterize_convex_asm(buf, px, py, count, palIdx);
+            return;
+        }
+    }
 
     top = 0; bot = 0;
     for (i = 1; i < count; i++) {
@@ -1223,8 +1331,18 @@ IWRAM_CODE static void rasterize_convex(u16* buf, int* px, int* py, int count, u
 IWRAM_CODE static void rasterize_convex_tex(u16* buf, int* px, int* py, int* pu, int* pv,
     int count, const u8* tex, int texMask, int texShift, u8 palBase)
 {
-    rasterize_convex_tex_asm(buf, px, py, pu, pv, count, tex, texMask, texShift, palBase);
-    return;
+    // ASM has no divLUT bounds check — fall back to C for extreme edges
+    {
+        int i, yMin = py[0], yMax = py[0];
+        for (i = 1; i < count; i++) {
+            if (py[i] < yMin) yMin = py[i];
+            if (py[i] > yMax) yMax = py[i];
+        }
+        if (yMax - yMin < AFN_DIV_LUT_SIZE) {
+            rasterize_convex_tex_asm(buf, px, py, pu, pv, count, tex, texMask, texShift, palBase);
+            return;
+        }
+    }
 
     int i, top, bot, L, R, Lh, Rh, Lx, Rx, Ldx, Rdx, y, h;
     int Lu, Ru, Lv, Rv, Ldu, Rdu, Ldv, Rdv;
@@ -1348,6 +1466,198 @@ IWRAM_CODE static void rasterize_convex_tex(u16* buf, int* px, int* py, int* pu,
             Lx += Ldx; Rx += Rdx;
             Lu += Ldu; Ru += Rdu;
             Lv += Ldv; Rv += Rdv;
+            y++;
+        }
+    }
+}
+
+// Perspective-corrected textured convex polygon rasterizer.
+// Same as rasterize_convex_tex but interpolates Z along edges and corrects
+// horizontal UV stepping per scanline to eliminate affine texture bending.
+// Only used for faces with large depth ratio where distortion is visible.
+IWRAM_CODE static void rasterize_convex_tex_pcorr(u16* buf, int* px, int* py,
+    int* pu, int* pv, int* pz, int count,
+    const u8* tex, int texMask, int texShift, u8 palBase)
+{
+    int i, top, bot, L, R, Lh, Rh, Lx, Rx, Ldx, Rdx, y, h;
+    int Lu, Ru, Lv, Rv, Ldu, Rdu, Ldv, Rdv;
+    int Lz, Rz, Ldz, Rdz;
+    int Lsteps, Rsteps;
+
+    if (count < 3) return;
+
+    top = 0; bot = 0;
+    for (i = 1; i < count; i++) {
+        if (py[i] < py[top]) top = i;
+        if (py[i] > py[bot]) bot = i;
+    }
+    if (py[bot] <= py[top]) return;
+
+    L = top; R = top;
+    Lh = 0; Rh = 0;
+    Lx = 0; Rx = 0;
+    Ldx = 0; Rdx = 0;
+    Lu = 0; Ru = 0; Lv = 0; Rv = 0;
+    Ldu = 0; Rdu = 0; Ldv = 0; Rdv = 0;
+    Lz = 0; Rz = 0; Ldz = 0; Rdz = 0;
+    Lsteps = 0; Rsteps = 0;
+    y = py[top];
+
+    for (;;)
+    {
+        while (!Lh)
+        {
+            int N = L - 1;
+            if (N < 0) N = count - 1;
+            if (py[N] < py[L] || ++Lsteps > count) return;
+            Lh = py[N] - py[L];
+            Lx = px[L] << 16;
+            Lu = pu[L] << 16;
+            Lv = pv[L] << 16;
+            Lz = pz[L] << 16;
+            if (Lh > 1) {
+                u32 inv = (u32)Lh < AFN_DIV_LUT_SIZE ? divLUT[Lh] : ((1u << 16) / (u32)Lh);
+                Ldx = (int)(inv * (u32)(px[N] - px[L]));
+                Ldu = (int)(inv * (u32)(pu[N] - pu[L]));
+                Ldv = (int)(inv * (u32)(pv[N] - pv[L]));
+                Ldz = (int)(inv * (u32)(pz[N] - pz[L]));
+            } else {
+                Ldx = 0; Ldu = 0; Ldv = 0; Ldz = 0;
+            }
+            L = N;
+        }
+
+        while (!Rh)
+        {
+            int N = R + 1;
+            if (N >= count) N = 0;
+            if (py[N] < py[R] || ++Rsteps > count) return;
+            Rh = py[N] - py[R];
+            Rx = px[R] << 16;
+            Ru = pu[R] << 16;
+            Rv = pv[R] << 16;
+            Rz = pz[R] << 16;
+            if (Rh > 1) {
+                u32 inv = (u32)Rh < AFN_DIV_LUT_SIZE ? divLUT[Rh] : ((1u << 16) / (u32)Rh);
+                Rdx = (int)(inv * (u32)(px[N] - px[R]));
+                Rdu = (int)(inv * (u32)(pu[N] - pu[R]));
+                Rdv = (int)(inv * (u32)(pv[N] - pv[R]));
+                Rdz = (int)(inv * (u32)(pz[N] - pz[R]));
+            } else {
+                Rdx = 0; Rdu = 0; Rdv = 0; Rdz = 0;
+            }
+            R = N;
+        }
+
+        h = Lh < Rh ? Lh : Rh;
+        Lh -= h;
+        Rh -= h;
+
+        while (h--)
+        {
+            if (y >= 0 && y < 160)
+            {
+                int xl = Lx >> 16, xr = Rx >> 16;
+                int ul = Lu >> 16, ur = Ru >> 16;
+                int vl = Lv >> 16, vr = Rv >> 16;
+                int zl = Lz >> 16, zr = Rz >> 16;
+                int tmp;
+                if (xl > xr) {
+                    tmp=xl;xl=xr;xr=tmp;
+                    tmp=ul;ul=ur;ur=tmp;
+                    tmp=vl;vl=vr;vr=tmp;
+                    tmp=zl;zl=zr;zr=tmp;
+                }
+                if (xr >= 0 && xl < 240)
+                {
+                    if (xr > 239) xr = 239;
+                    int fullSpan = xr - xl;
+                    if (fullSpan > 0)
+                    {
+                        // Perspective-correct UV at midpoint:
+                        // u_mid = (ul*zr + ur*zl) / (zl+zr)
+                        int zsum = zl + zr;
+                        if (zsum < 1) zsum = 1;
+                        int u_mid = ((ul * (zr >> 4)) + (ur * (zl >> 4))) / (zsum >> 4);
+                        int v_mid = ((vl * (zr >> 4)) + (vr * (zl >> 4))) / (zsum >> 4);
+                        int xmid = (xl + xr) >> 1;
+                        int spanL = xmid - xl;
+                        int spanR = xr - xmid;
+
+                        // Left half: xl to xmid
+                        if (spanL > 0)
+                        {
+                            int rcpL = (spanL <= 240) ? rcp_table[spanL] : (int)(65536 / spanL);
+                            int du2 = ((u_mid - ul) * rcpL) >> 8;
+                            int dv2 = ((v_mid - vl) * rcpL) >> 8;
+                            int su = ul << 8, sv = vl << 8;
+                            int xStart = xl;
+                            if (xStart < 0) { su -= du2 * xStart; sv -= dv2 * xStart; xStart = 0; }
+                            if (xStart <= xmid) {
+                                u16* row = buf + y * 120;
+                                int x = xStart;
+                                u16* rp = row + (x >> 1);
+                                int ti;
+                                if ((x & 1) && x <= xmid) {
+                                    ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
+                                    *rp = (*rp & 0x00FF) | ((u16)(palBase + tex[ti]) << 8);
+                                    su += du2; sv += dv2; x++; rp = row + (x >> 1);
+                                }
+                                int pc = (xmid - x + 1) >> 1;
+                                if (pc > 120) pc = 120;
+                                if (pc > 0) {
+                                    tex_scanline_asm(rp, pc, su, sv, du2<<1, dv2<<1,
+                                        tex, texMask, texShift, palBase, 0);
+                                    su += (du2<<1)*pc; sv += (dv2<<1)*pc;
+                                    x += pc*2; rp += pc;
+                                }
+                                if (x <= xmid) {
+                                    ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
+                                    *rp = (*rp & 0xFF00) | (palBase + tex[ti]);
+                                }
+                            }
+                        }
+
+                        // Right half: xmid+1 to xr
+                        if (spanR > 0)
+                        {
+                            int rcpR = (spanR <= 240) ? rcp_table[spanR] : (int)(65536 / spanR);
+                            int du2 = ((ur - u_mid) * rcpR) >> 8;
+                            int dv2 = ((vr - v_mid) * rcpR) >> 8;
+                            int su = u_mid << 8, sv = v_mid << 8;
+                            int xStart = xmid + 1;
+                            if (xStart < 0) { su -= du2 * xStart; sv -= dv2 * xStart; xStart = 0; }
+                            if (xStart <= xr) {
+                                u16* row = buf + y * 120;
+                                int x = xStart;
+                                u16* rp = row + (x >> 1);
+                                int ti;
+                                if ((x & 1) && x <= xr) {
+                                    ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
+                                    *rp = (*rp & 0x00FF) | ((u16)(palBase + tex[ti]) << 8);
+                                    su += du2; sv += dv2; x++; rp = row + (x >> 1);
+                                }
+                                int pc = (xr - x + 1) >> 1;
+                                if (pc > 120) pc = 120;
+                                if (pc > 0) {
+                                    tex_scanline_asm(rp, pc, su, sv, du2<<1, dv2<<1,
+                                        tex, texMask, texShift, palBase, 0);
+                                    su += (du2<<1)*pc; sv += (dv2<<1)*pc;
+                                    x += pc*2; rp += pc;
+                                }
+                                if (x <= xr) {
+                                    ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
+                                    *rp = (*rp & 0xFF00) | (palBase + tex[ti]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Lx += Ldx; Rx += Rdx;
+            Lu += Ldu; Ru += Rdu;
+            Lv += Ldv; Rv += Rdv;
+            Lz += Ldz; Rz += Rdz;
             y++;
         }
     }
@@ -2110,7 +2420,7 @@ static void clip_render_poly_flat(u16* buf,
 // OpenLara-style textured polygon clip+render.
 // Z is already clamped during projection — no 3D near-plane clip needed.
 // Just 2D screen-space Sutherland-Hodgman with UV interpolation, then rasterize.
-static void clip_render_poly_tex(u16* buf,
+IWRAM_CODE static void clip_render_poly_tex(u16* buf,
     const int* sx, const int* sy, const int* uIn, const int* vIn,
     int inCount, const u8* tex, int texMask, int texShift, u8 palBase)
 {
@@ -2259,7 +2569,11 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             fovLambda = (dx * g_sinf - dz * g_cosf) >> 8;
             g_vRawDepth[vb + v] = fovLambda;
 
-            if (fovLambda < 16) fovLambda = 16;
+            {
+                int depthClamp = g_texFixDefs[g_texFixMode - 1].depthClamp;
+                if (depthClamp <= 0) depthClamp = 16;
+                if (fovLambda < depthClamp) fovLambda = depthClamp;
+            }
             g_vsz[vb + v] = fovLambda;
 
             heightDiff = cam_h - wy;
@@ -2595,7 +2909,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         else if (ms->meshTextured && uvs && tex)
         {
             if (anyNear) {
-                // OpenLara-style: Z already clamped during projection, just 2D screen clip with UVs
+                // Near faces: 2D screen clip with UVs
                 int cx[] = {g_vsx[vb+i0], g_vsx[vb+i1], g_vsx[vb+i2], g_vsx[vb+i3]};
                 int cy[] = {g_vsy[vb+i0], g_vsy[vb+i1], g_vsy[vb+i2], g_vsy[vb+i3]};
                 int cu[] = {uvs[i0*2+0], uvs[i1*2+0], uvs[i2*2+0], isQuad ? uvs[i3*2+0] : 0};
@@ -2603,13 +2917,74 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 clip_render_poly_tex(buf, cx, cy, cu, cv, isQuad ? 4 : 3,
                     tex, ms->texMask, ms->texShift, (u8)ms->texPalBase);
             } else {
-                dbg_tex_tris++;
+                int tpx[] = {g_vsx[vb+i0], g_vsx[vb+i1], g_vsx[vb+i2], isQuad ? g_vsx[vb+i3] : 0};
+                int tpy[] = {g_vsy[vb+i0], g_vsy[vb+i1], g_vsy[vb+i2], isQuad ? g_vsy[vb+i3] : 0};
+                int tpu[] = {uvs[i0*2+0], uvs[i1*2+0], uvs[i2*2+0], isQuad ? uvs[i3*2+0] : 0};
+                int tpv[] = {uvs[i0*2+1], uvs[i1*2+1], uvs[i2*2+1], isQuad ? uvs[i3*2+1] : 0};
+                int nc = isQuad ? 4 : 3;
+                int needClip = 0;
                 {
-                    int tpx[] = {g_vsx[vb+i0], g_vsx[vb+i1], g_vsx[vb+i2], g_vsx[vb+i3]};
-                    int tpy[] = {g_vsy[vb+i0], g_vsy[vb+i1], g_vsy[vb+i2], g_vsy[vb+i3]};
-                    int tpu[] = {uvs[i0*2+0], uvs[i1*2+0], uvs[i2*2+0], isQuad ? uvs[i3*2+0] : 0};
-                    int tpv[] = {uvs[i0*2+1], uvs[i1*2+1], uvs[i2*2+1], isQuad ? uvs[i3*2+1] : 0};
-                    rasterize_convex_tex(buf, tpx, tpy, tpu, tpv, isQuad ? 4 : 3,
+                    const TexFixDef *fd = &g_texFixDefs[g_texFixMode - 1];
+                    // Screen clip margin check
+                    if (fd->clipMargin == -2) {
+                        needClip = 1; // always clip
+                    } else if (fd->clipMargin >= 0) {
+                        int m = fd->clipMargin;
+                        int xlo=-m, xhi=239+m, ylo=-m, yhi=159+m;
+                        needClip = tpx[0]<xlo||tpx[0]>xhi||tpy[0]<ylo||tpy[0]>yhi||
+                                   tpx[1]<xlo||tpx[1]>xhi||tpy[1]<ylo||tpy[1]>yhi||
+                                   tpx[2]<xlo||tpx[2]>xhi||tpy[2]<ylo||tpy[2]>yhi||
+                                   (isQuad&&(tpx[3]<xlo||tpx[3]>xhi||tpy[3]<ylo||tpy[3]>yhi));
+                    }
+                    // Raw depth threshold check
+                    if (fd->rawDepthThresh > 0) {
+                        int zt = fd->rawDepthThresh;
+                        needClip = needClip || g_vRawDepth[vb+i0]<zt||g_vRawDepth[vb+i1]<zt||
+                                   g_vRawDepth[vb+i2]<zt||(isQuad&&g_vRawDepth[vb+i3]<zt);
+                    }
+                    // Depth ratio check
+                    if (fd->ratioNum > 0 && fd->ratioDen > 0) {
+                        int zMn=g_vsz[vb+i0],zMx=zMn,zt2;
+                        zt2=g_vsz[vb+i1]; if(zt2<zMn)zMn=zt2; if(zt2>zMx)zMx=zt2;
+                        zt2=g_vsz[vb+i2]; if(zt2<zMn)zMn=zt2; if(zt2>zMx)zMx=zt2;
+                        if(isQuad){zt2=g_vsz[vb+i3]; if(zt2<zMn)zMn=zt2; if(zt2>zMx)zMx=zt2;}
+                        needClip = needClip || (zMx * fd->ratioDen > zMn * fd->ratioNum);
+                    }
+                    // UV correction
+                    if (fd->uvCorr > 0) {
+                        int z0=g_vsz[vb+i0],z1=g_vsz[vb+i1],z2=g_vsz[vb+i2];
+                        int z3=isQuad?g_vsz[vb+i3]:z0;
+                        if (fd->uvCorr == 1) {
+                            // avgZ / vertZ
+                            int zA=isQuad?(z0+z1+z2+z3)/4:(z0+z1+z2)/3;
+                            if(z0>0){tpu[0]=(tpu[0]*zA)/z0; tpv[0]=(tpv[0]*zA)/z0;}
+                            if(z1>0){tpu[1]=(tpu[1]*zA)/z1; tpv[1]=(tpv[1]*zA)/z1;}
+                            if(z2>0){tpu[2]=(tpu[2]*zA)/z2; tpv[2]=(tpv[2]*zA)/z2;}
+                            if(isQuad&&z3>0){tpu[3]=(tpu[3]*zA)/z3; tpv[3]=(tpv[3]*zA)/z3;}
+                        } else if (fd->uvCorr == 2) {
+                            // maxZ / vertZ
+                            int zM=z0; if(z1>zM)zM=z1; if(z2>zM)zM=z2; if(z3>zM)zM=z3;
+                            if(z0>0){tpu[0]=(tpu[0]*zM)/z0; tpv[0]=(tpv[0]*zM)/z0;}
+                            if(z1>0){tpu[1]=(tpu[1]*zM)/z1; tpv[1]=(tpv[1]*zM)/z1;}
+                            if(z2>0){tpu[2]=(tpu[2]*zM)/z2; tpv[2]=(tpv[2]*zM)/z2;}
+                            if(isQuad&&z3>0){tpu[3]=(tpu[3]*zM)/z3; tpv[3]=(tpv[3]*zM)/z3;}
+                        } else if (fd->uvCorr == 3) {
+                            // centered on face UV avg
+                            int zA=isQuad?(z0+z1+z2+z3)/4:(z0+z1+z2)/3;
+                            int uC=isQuad?(tpu[0]+tpu[1]+tpu[2]+tpu[3])/4:(tpu[0]+tpu[1]+tpu[2])/3;
+                            int vC=isQuad?(tpv[0]+tpv[1]+tpv[2]+tpv[3])/4:(tpv[0]+tpv[1]+tpv[2])/3;
+                            if(z0>0){tpu[0]=uC+((tpu[0]-uC)*zA)/z0; tpv[0]=vC+((tpv[0]-vC)*zA)/z0;}
+                            if(z1>0){tpu[1]=uC+((tpu[1]-uC)*zA)/z1; tpv[1]=vC+((tpv[1]-vC)*zA)/z1;}
+                            if(z2>0){tpu[2]=uC+((tpu[2]-uC)*zA)/z2; tpv[2]=vC+((tpv[2]-vC)*zA)/z2;}
+                            if(isQuad&&z3>0){tpu[3]=uC+((tpu[3]-uC)*zA)/z3; tpv[3]=vC+((tpv[3]-vC)*zA)/z3;}
+                        }
+                    }
+                }
+                if (needClip) {
+                    clip_render_poly_tex(buf, tpx, tpy, tpu, tpv, nc,
+                        tex, ms->texMask, ms->texShift, (u8)ms->texPalBase);
+                } else {
+                    rasterize_convex_tex(buf, tpx, tpy, tpu, tpv, nc,
                         tex, ms->texMask, ms->texShift, (u8)ms->texPalBase);
                 }
             }
@@ -3055,8 +3430,7 @@ int main(void)
             dbg_int(vramBuf, 102, 2, dbg_total_kcy, 1); // total Kcycles (prev frame)
             // FPS counter — bottom-right, perf mode — bottom-left
             dbg_int(vramBuf, 240 - 20, 160 - 7, dbg_fps, 1);
-            if (perf_mode > 0)
-                dbg_int(vramBuf, 2, 160 - 7, perf_mode, 2);
+            dbg_int(vramBuf, 2, 160 - 7, g_texFixMode, 2);
         }
 #endif
         // FPS measurement: count frames, update every ~1 second using Timer 3
@@ -3089,10 +3463,7 @@ int main(void)
         // SELECT: cycle perf mode
         if (key_hit(KEY_SELECT))
         {
-            perf_mode = (perf_mode + 1) % PERF_MODE_COUNT;
-            g_coverageOn = (perf_mode == 10);
-            g_ewramRender = (perf_mode == 11);
-            g_useAsmRast = (perf_mode == 12);
+            g_texFixMode = (g_texFixMode % TEX_FIX_COUNT) + 1;
         }
 
         if (player_sprite_idx >= 0)
@@ -3234,14 +3605,12 @@ int main(void)
 #ifndef AFN_HAS_SCRIPT
             if (key_hit(KEY_A) && player_on_ground)
                 player_vy = COL_JUMP_VEL;
-            // Release A while rising: dampen upward velocity for short hop
-  #ifdef AFN_JUMP_DAMPEN
+#endif
+
+            // Dampen jump: reduce upward velocity when A not held (variable jump height)
+#ifdef AFN_JUMP_DAMPEN
             if (!key_is_down(KEY_A) && player_vy > 0)
                 player_vy = (player_vy * AFN_JUMP_DAMPEN) >> 8;
-  #else
-            if (!key_is_down(KEY_A) && player_vy > 0)
-                player_vy = (player_vy * 3) / 4;
-  #endif
 #endif
 
             // Gravity: accelerate downward, clamp to terminal velocity

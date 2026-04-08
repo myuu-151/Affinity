@@ -217,7 +217,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Set Max Fall",    0xFF3355AA, 1, 1, 1, 0, {"Value (float)"}, {}, {} },
     { "Destroy Object", 0xFF3355AA, 1, 1, 1, 0, {"Object (int)"}, {}, {} },
     { "Auto Orbit",     0xFF3355AA, 1, 1, 1, 0, {"Speed (int)"}, {}, {} },
-    { "Dampen Jump",    0xFF3355AA, 1, 1, 1, 0, {"Factor (float)"}, {}, {} },
+    { "Dampen",         0xFF3355AA, 1, 1, 1, 0, {"Factor (float)"}, {}, {} },
     { "Integer",         0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Key",             0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Direction",       0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
