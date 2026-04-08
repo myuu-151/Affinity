@@ -14,6 +14,8 @@
 #include <cstring>
 #include <string>
 #include <map>
+#include <set>
+#include <sstream>
 #include <filesystem>
 #include <thread>
 
@@ -757,6 +759,8 @@ static bool sProjectDirty = false; // unsaved changes
 // Mesh assets
 static std::vector<MeshAsset> sMeshAssets;
 static int sSelectedMesh = -1;
+static std::set<int> sSelectedMeshes;       // multi-select set for mesh assets
+static bool sMeshDragSelecting = false;     // true while drag-selecting in mesh list
 
 // ---- 3D View state ----
 static float s3DOrbitYaw   = 0.4f;   // radians
@@ -2247,10 +2251,36 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
     ImGui::BeginChild("##MeshAssetList", ImVec2(0, listH), true);
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
-        bool sel = (sSelectedMesh == mi);
+        bool inSet = sSelectedMeshes.count(mi) > 0;
+        bool sel = (sSelectedMesh == mi) || inSet;
         if (ImGui::Selectable(sMeshAssets[mi].name.c_str(), sel))
+        {
+            ImGuiIO& io = ImGui::GetIO();
+            if (io.KeyShift && sSelectedMesh >= 0) {
+                // Range select from sSelectedMesh to mi
+                int lo = std::min(sSelectedMesh, mi);
+                int hi = std::max(sSelectedMesh, mi);
+                if (!io.KeyCtrl) sSelectedMeshes.clear();
+                for (int k = lo; k <= hi; k++) sSelectedMeshes.insert(k);
+            } else if (io.KeyCtrl) {
+                // Toggle individual
+                if (inSet) sSelectedMeshes.erase(mi); else sSelectedMeshes.insert(mi);
+            } else {
+                sSelectedMeshes.clear();
+                sSelectedMeshes.insert(mi);
+            }
             sSelectedMesh = mi;
+        }
+        // Drag-select: if mouse is down and hovering over this item, add it
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDown(0) && ImGui::IsMouseDragging(0, 2.0f))
+        {
+            if (!sMeshDragSelecting) { sSelectedMeshes.clear(); sMeshDragSelecting = true; }
+            sSelectedMeshes.insert(mi);
+            sSelectedMesh = mi;
+        }
     }
+    if (sMeshDragSelecting && !ImGui::IsMouseDown(0))
+        sMeshDragSelecting = false;
     ImGui::EndChild();
 
     if (ImGui::Button("Import OBJ...##3d"))
@@ -2270,20 +2300,45 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
 #endif
     }
     ImGui::SameLine();
-    if (sSelectedMesh >= 0 && sSelectedMesh < (int)sMeshAssets.size())
+    if (!sSelectedMeshes.empty() || (sSelectedMesh >= 0 && sSelectedMesh < (int)sMeshAssets.size()))
     {
-        if (ImGui::Button("Delete##meshDel"))
+        bool doDelete = ImGui::Button("Delete##meshDel");
+        // Also delete on Delete key when mesh list child was recently active
+        if (!doDelete && ImGui::IsKeyPressed(ImGuiKey_Delete) && !sSelectedMeshes.empty())
+            doDelete = true;
+        ImGui::SameLine();
+        if (ImGui::Button("Delete All##meshDelAll"))
         {
-            // Remove mesh asset and fix up references
             for (int i = 0; i < sSpriteCount; i++)
-            {
-                if (sSprites[i].meshIdx == sSelectedMesh)
-                    sSprites[i].meshIdx = -1;
-                else if (sSprites[i].meshIdx > sSelectedMesh)
-                    sSprites[i].meshIdx--;
-            }
-            sMeshAssets.erase(sMeshAssets.begin() + sSelectedMesh);
+                sSprites[i].meshIdx = -1;
+            sMeshAssets.clear();
             sSelectedMesh = -1;
+            sSelectedMeshes.clear();
+            sProjectDirty = true;
+            doDelete = false;
+        }
+        if (doDelete)
+        {
+            // Ensure sSelectedMesh is in the set
+            if (sSelectedMeshes.empty() && sSelectedMesh >= 0)
+                sSelectedMeshes.insert(sSelectedMesh);
+            // Delete from highest index to lowest so indices stay valid
+            std::vector<int> toDelete(sSelectedMeshes.begin(), sSelectedMeshes.end());
+            std::sort(toDelete.rbegin(), toDelete.rend());
+            for (int delIdx : toDelete)
+            {
+                if (delIdx < 0 || delIdx >= (int)sMeshAssets.size()) continue;
+                for (int i = 0; i < sSpriteCount; i++)
+                {
+                    if (sSprites[i].meshIdx == delIdx)
+                        sSprites[i].meshIdx = -1;
+                    else if (sSprites[i].meshIdx > delIdx)
+                        sSprites[i].meshIdx--;
+                }
+                sMeshAssets.erase(sMeshAssets.begin() + delIdx);
+            }
+            sSelectedMesh = -1;
+            sSelectedMeshes.clear();
             sProjectDirty = true;
         }
     }
@@ -2409,6 +2464,8 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             sSelectedSprite = i;
             sSelectedObjType = SelectedObjType::Sprite;
             sSprites[i].selected = true;
+            if (sSprites[i].meshIdx >= 0 && sSprites[i].meshIdx < (int)sMeshAssets.size())
+                sSelectedMesh = sSprites[i].meshIdx;
         }
     }
     ImGui::EndChild();
@@ -2615,6 +2672,10 @@ static void DrawViewport(ImVec2 pos, ImVec2 size)
                 sSelectedSprite = proj[i].spriteIdx;
                 sSprites[sSelectedSprite].selected = true;
                 sSelectedObjType = SelectedObjType::Sprite;
+                if (sSprites[sSelectedSprite].type == SpriteType::Mesh &&
+                    sSprites[sSelectedSprite].meshIdx >= 0 &&
+                    sSprites[sSelectedSprite].meshIdx < (int)sMeshAssets.size())
+                    sSelectedMesh = sSprites[sSelectedSprite].meshIdx;
                 ImGui::SetWindowFocus(nullptr); // release widget focus so keys work
                 break;
             }
@@ -3908,6 +3969,9 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             sSelectedSprite = i;
             sSelectedObjType = SelectedObjType::Sprite;
             sSprites[i].selected = true;
+            if (sSprites[i].type == SpriteType::Mesh &&
+                sSprites[i].meshIdx >= 0 && sSprites[i].meshIdx < (int)sMeshAssets.size())
+                sSelectedMesh = sSprites[i].meshIdx;
         }
     }
     ImGui::EndChild();
@@ -7197,6 +7261,207 @@ void FrameTick(float dt)
             sVsPanY = sVsParentPanY;
             sVsZoom = sVsParentZoom;
             sVsSelected = -1;
+        }
+
+        // Ctrl+A — select all nodes + annotations at current level
+        if (ImGui::IsKeyPressed(ImGuiKey_A) && io.KeyCtrl) {
+            for (auto& nd : sVsNodes)
+                if (nd.groupId == sVsEditingGroup) nd.selected = true;
+            for (auto& ann : sVsAnnotations) ann.selected = true;
+        }
+
+        // Ctrl+C — copy selected nodes/links/annotations to system clipboard
+        if (ImGui::IsKeyPressed(ImGuiKey_C) && io.KeyCtrl) {
+            std::string cb = "[AffinityNodes]\n";
+            // Collect selected node IDs
+            std::vector<int> selIds;
+            for (auto& nd : sVsNodes)
+                if (nd.selected || (&nd - &sVsNodes[0]) == sVsSelected)
+                    selIds.push_back(nd.id);
+            // Nodes
+            for (int id : selIds) {
+                int ni = VsFindNode(id);
+                if (ni < 0) continue;
+                auto& n = sVsNodes[ni];
+                char buf[1024];
+                snprintf(buf, sizeof(buf), "vsNode=%d,%d,%.1f,%.1f,%d,%d,%d,%d,%d\n",
+                    n.id, (int)n.type, n.x, n.y,
+                    n.paramInt[0], n.paramInt[1], n.paramInt[2], n.paramInt[3], n.groupId);
+                cb += buf;
+                if (n.type == VsNodeType::Group) {
+                    snprintf(buf, sizeof(buf), "vsGroupDef=%d|%s|%d,%d,%d,%d\n", n.id, n.groupLabel,
+                        n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
+                    cb += buf;
+                }
+                if (n.customCode[0]) {
+                    snprintf(buf, sizeof(buf), "vsNodeCode=%d|%s\n", n.id, n.customCode);
+                    cb += buf;
+                }
+            }
+            // Links (only between selected nodes)
+            std::set<int> selSet(selIds.begin(), selIds.end());
+            for (auto& lk : sVsLinks) {
+                if (selSet.count(lk.from.nodeId) && selSet.count(lk.to.nodeId)) {
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "vsLink=%d,%d,%d|%d,%d,%d\n",
+                        lk.from.nodeId, lk.from.pinType, lk.from.pinIdx,
+                        lk.to.nodeId, lk.to.pinType, lk.to.pinIdx);
+                    cb += buf;
+                }
+            }
+            // Annotations
+            for (auto& ann : sVsAnnotations) {
+                if (ann.selected) {
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "vsAnnot=%.1f,%.1f,%.1f,%.1f|%s\n",
+                        ann.x, ann.y, ann.w, ann.h, ann.label);
+                    cb += buf;
+                }
+            }
+            // Group pin mappings for selected groups
+            for (auto& m : sVsGroupPins) {
+                if (selSet.count(m.groupNodeId)) {
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "vsGroupPin=%d,%d,%d,%d,%d,%d\n",
+                        m.groupNodeId, m.pinType, m.pinIdx, m.innerNodeId, m.innerPinType, m.innerPinIdx);
+                    cb += buf;
+                }
+            }
+            ImGui::SetClipboardText(cb.c_str());
+        }
+
+        // Ctrl+V — paste nodes from system clipboard
+        if (ImGui::IsKeyPressed(ImGuiKey_V) && io.KeyCtrl) {
+            const char* clipText = ImGui::GetClipboardText();
+            if (clipText && strstr(clipText, "[AffinityNodes]")) {
+                // Parse clipboard into temp collections
+                std::vector<VsNode> pasteNodes;
+                std::vector<VsLink> pasteLinks;
+                std::vector<VsAnnotation> pasteAnnots;
+                std::vector<VsGroupPinMap> pastePins;
+                std::map<int, int> idRemap; // old ID -> new ID
+
+                // Parse line by line
+                std::istringstream ss(clipText);
+                std::string line;
+                while (std::getline(ss, line)) {
+                    if (line.empty() || line[0] == '[') continue;
+                    const char* l = line.c_str();
+
+                    VsNode n;
+                    int typeInt, gid = 0;
+                    if (sscanf(l, "vsNode=%d,%d,%f,%f,%d,%d,%d,%d,%d",
+                        &n.id, &typeInt, &n.x, &n.y,
+                        &n.paramInt[0], &n.paramInt[1], &n.paramInt[2], &n.paramInt[3], &gid) >= 4)
+                    {
+                        n.type = (VsNodeType)typeInt;
+                        n.groupId = gid;
+                        pasteNodes.push_back(n);
+                        continue;
+                    }
+
+                    int nid;
+                    char codeBuf[512] = {};
+                    if (sscanf(l, "vsNodeCode=%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                        for (auto& pn : pasteNodes)
+                            if (pn.id == nid) { strncpy(pn.customCode, codeBuf, sizeof(pn.customCode) - 1); break; }
+                        continue;
+                    }
+
+                    int ie, oe, id2, od;
+                    char lbl[32] = {};
+                    if (sscanf(l, "vsGroupDef=%d|%31[^|]|%d,%d,%d,%d", &nid, lbl, &ie, &oe, &id2, &od) >= 6) {
+                        for (auto& pn : pasteNodes)
+                            if (pn.id == nid) {
+                                strncpy(pn.groupLabel, lbl, sizeof(pn.groupLabel) - 1);
+                                pn.grpInExec = ie; pn.grpOutExec = oe;
+                                pn.grpInData = id2; pn.grpOutData = od;
+                                break;
+                            }
+                        continue;
+                    }
+
+                    VsLink lk;
+                    if (sscanf(l, "vsLink=%d,%d,%d|%d,%d,%d",
+                        &lk.from.nodeId, &lk.from.pinType, &lk.from.pinIdx,
+                        &lk.to.nodeId, &lk.to.pinType, &lk.to.pinIdx) == 6)
+                    {
+                        pasteLinks.push_back(lk);
+                        continue;
+                    }
+
+                    VsAnnotation ann;
+                    float ax, ay, aw, ah;
+                    if (sscanf(l, "vsAnnot=%f,%f,%f,%f|", &ax, &ay, &aw, &ah) == 4) {
+                        ann.x = ax; ann.y = ay; ann.w = aw; ann.h = ah;
+                        const char* pipe = strchr(l + 8, '|');
+                        if (pipe) strncpy(ann.label, pipe + 1, sizeof(ann.label) - 1);
+                        pasteAnnots.push_back(ann);
+                        continue;
+                    }
+
+                    VsGroupPinMap m;
+                    if (sscanf(l, "vsGroupPin=%d,%d,%d,%d,%d,%d",
+                        &m.groupNodeId, &m.pinType, &m.pinIdx, &m.innerNodeId, &m.innerPinType, &m.innerPinIdx) == 6)
+                    {
+                        pastePins.push_back(m);
+                        continue;
+                    }
+                }
+
+                if (!pasteNodes.empty()) {
+                    // Assign new IDs and build remap
+                    for (auto& pn : pasteNodes) {
+                        int oldId = pn.id;
+                        pn.id = sVsNextId++;
+                        idRemap[oldId] = pn.id;
+                    }
+
+                    // Offset positions to paste near center of view
+                    float cx = 0, cy = 0;
+                    for (auto& pn : pasteNodes) { cx += pn.x; cy += pn.y; }
+                    cx /= pasteNodes.size(); cy /= pasteNodes.size();
+                    float targetX = (-sVsPanX + canvasSize.x * 0.5f) / zoom;
+                    float targetY = (-sVsPanY + canvasSize.y * 0.5f) / zoom;
+                    float offX = targetX - cx, offY = targetY - cy;
+                    for (auto& pn : pasteNodes) { pn.x += offX; pn.y += offY; }
+                    for (auto& pa : pasteAnnots) { pa.x += offX; pa.y += offY; }
+
+                    // Remap group IDs
+                    for (auto& pn : pasteNodes) {
+                        if (pn.groupId != 0 && idRemap.count(pn.groupId))
+                            pn.groupId = idRemap[pn.groupId];
+                        else
+                            pn.groupId = sVsEditingGroup;
+                    }
+
+                    // Remap links
+                    for (auto& lk : pasteLinks) {
+                        if (idRemap.count(lk.from.nodeId)) lk.from.nodeId = idRemap[lk.from.nodeId];
+                        if (idRemap.count(lk.to.nodeId))   lk.to.nodeId = idRemap[lk.to.nodeId];
+                    }
+
+                    // Remap group pin mappings
+                    for (auto& m : pastePins) {
+                        if (idRemap.count(m.groupNodeId)) m.groupNodeId = idRemap[m.groupNodeId];
+                        if (idRemap.count(m.innerNodeId)) m.innerNodeId = idRemap[m.innerNodeId];
+                    }
+
+                    // Deselect existing, select pasted
+                    for (auto& nd : sVsNodes) nd.selected = false;
+                    for (auto& ann : sVsAnnotations) ann.selected = false;
+                    for (auto& pn : pasteNodes) pn.selected = true;
+                    for (auto& pa : pasteAnnots) pa.selected = true;
+
+                    // Add to editor state
+                    sVsNodes.insert(sVsNodes.end(), pasteNodes.begin(), pasteNodes.end());
+                    sVsLinks.insert(sVsLinks.end(), pasteLinks.begin(), pasteLinks.end());
+                    sVsAnnotations.insert(sVsAnnotations.end(), pasteAnnots.begin(), pasteAnnots.end());
+                    sVsGroupPins.insert(sVsGroupPins.end(), pastePins.begin(), pastePins.end());
+                    sVsSelected = -1;
+                    sProjectDirty = true;
+                }
+            }
         }
 
         // Breadcrumb when inside a group

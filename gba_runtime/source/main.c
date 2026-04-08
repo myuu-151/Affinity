@@ -3209,10 +3209,12 @@ int main(void)
     pal_bg_mem[2] = RGB15(8, 18, 8);    // checker light
     pal_bg_mem[3] = RGB15(2, 4, 2);     // minimap bg
     pal_bg_mem[4] = RGB15(5, 10, 5);    // minimap grid
-    // Load mesh shading palette
+    // Load mesh shading palette (clamp to 256 BG palette entries)
     {
         int k;
-        for (k = 0; k < AFN_MESH_COUNT * 8; k++)
+        int maxK = AFN_MESH_COUNT * 8;
+        if (AFN_MESH_PAL_BASE + maxK > 256) maxK = 256 - AFN_MESH_PAL_BASE;
+        for (k = 0; k < maxK; k++)
             pal_bg_mem[AFN_MESH_PAL_BASE + k] = afn_mesh_palette[k];
     }
     // Grayscale wireframe palette (indices 5-12)
