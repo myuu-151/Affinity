@@ -1374,6 +1374,8 @@ static bool LoadProject(const std::string& path)
     if (!f) return false;
 
     // Reset state before loading
+    sMapScenes.clear();
+    sMapSelectedScene = 0;
     sTmObjects.clear();
     sTmScenes.clear();
     sTmSelectedScene = 0;
@@ -1894,8 +1896,11 @@ static bool LoadProject(const std::string& path)
                     sVsAnnotations.push_back(ann);
                 }
             }
+        }
+        else if (strcmp(section, "MapScenes") == 0)
+        {
             // ---- Map Scenes (3D Scene tab) ----
-            else if (sscanf(line, "mapSceneCount=%d", &ival) == 1) { sMapScenes.clear(); sMapScenes.reserve(ival); }
+            if (sscanf(line, "mapSceneCount=%d", &ival) == 1) { sMapScenes.clear(); sMapScenes.reserve(ival); }
             else if (sscanf(line, "mapSelectedScene=%d", &ival) == 1) sMapSelectedScene = ival;
             else if (strncmp(line, "mapScene=", 9) == 0)
             {
@@ -4460,16 +4465,6 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
         sTmSelectedScene = 0;
     }
 
-    // Create default map scene if none exist (3D scene tab)
-    if (sMapScenes.empty())
-    {
-        MapScene ms;
-        snprintf(ms.name, sizeof(ms.name), "Scene 0");
-        SaveMapSceneState(ms);
-        sMapScenes.push_back(ms);
-        sMapSelectedScene = 0;
-    }
-
     Tileset& ts = sTilemapData.tileset;
     TilemapLayer& tm = sTilemapData.floor;
     int tileCount = (int)ts.tiles.size();
@@ -6460,6 +6455,16 @@ void FrameTick(float dt)
     float tilesetH  = bodyH * 0.35f;
     float tilemapH  = bodyH * 0.40f;
     float paletteH  = bodyH - tilesetH - tilemapH;
+
+    // Create default map scene if none exist (3D scene tab)
+    if (sMapScenes.empty())
+    {
+        MapScene ms;
+        snprintf(ms.name, sizeof(ms.name), "Scene 0");
+        SaveMapSceneState(ms);
+        sMapScenes.push_back(ms);
+        sMapSelectedScene = 0;
+    }
 
     // Draw everything
     DrawTabBar();
