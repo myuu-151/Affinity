@@ -111,6 +111,7 @@ struct GBAMeshExport
     int wireframe = 0;            // 1=wireframe overlay
     int grayscale = 0;            // 1=grayscale shaded faces
     float drawDistance = 0.0f;    // per-mesh draw distance (0 = use global/unlimited)
+    int collision = 1;            // 1 = generate collision faces, 0 = no collision
     // Texture mapping
     std::vector<float> uvs;       // u, v per vertex (flat, interleaved)
     int textured = 0;             // 1 = textured, 0 = flat shaded

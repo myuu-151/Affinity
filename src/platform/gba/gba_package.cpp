@@ -1197,6 +1197,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             if (sprites[si].meshIdx < 0) continue;
             int mi = sprites[si].meshIdx;
             if (mi >= (int)meshes.size()) continue;
+            if (!meshes[mi].collision) continue;
 
             const auto& mesh = meshes[mi];
             const auto& spr = sprites[si];
@@ -1469,10 +1470,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 chains.push_back(chain);
         }
 
+        // Define AFN_HAS_SCRIPT if ANY script nodes exist — disables fallback controls
+        if (!script.nodes.empty())
+            f << "#define AFN_HAS_SCRIPT 1\n\n";
+
         if (!chains.empty())
         {
             f << "// ---- Generated script code from visual node graph ----\n";
-            f << "#define AFN_HAS_SCRIPT 1\n\n";
 
             // Forward declarations for script state variables (defined later in main.c)
             // Using 'static' redeclaration — valid in C for same-TU forward refs.
@@ -1657,6 +1661,23 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     emitAction(a);
             }
             f << "}\n\n";
+        }
+        else if (!script.nodes.empty())
+        {
+            // Nodes exist but no complete chains — emit empty stubs
+            f << "// Script nodes present but no complete event chains\n";
+            f << "static FIXED afn_input_fwd;\n"
+              << "static FIXED afn_input_right;\n"
+              << "static FIXED afn_move_speed;\n"
+              << "static int   afn_play_anim;\n"
+              << "static int   afn_auto_orbit_speed;\n"
+              << "static FIXED afn_gravity;\n"
+              << "static FIXED afn_terminal_vel;\n\n";
+            f << "static inline void afn_script_start(void) {}\n";
+            f << "static inline void afn_script_key_held(void) {}\n";
+            f << "static inline void afn_script_key_pressed(void) {}\n";
+            f << "static inline void afn_script_key_released(void) {}\n";
+            f << "static inline void afn_script_update(void) {}\n\n";
         }
     }
 

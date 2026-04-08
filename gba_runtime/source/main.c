@@ -3500,17 +3500,12 @@ int main(void)
             inputRight = afn_input_right;
             moveSpeed = afn_move_speed;
 #else
+            // No script — player stands still
   #ifdef AFN_WALK_SPEED
-            moveSpeed = key_is_down(KEY_B) ? AFN_SPRINT_SPEED : AFN_WALK_SPEED;
+            moveSpeed = AFN_WALK_SPEED;
   #else
-            moveSpeed = key_is_down(KEY_B) ? 56 : 37;
+            moveSpeed = 37;
   #endif
-
-            // D-pad = player movement
-            if (key_is_down(KEY_UP))    inputFwd   += 256;
-            if (key_is_down(KEY_DOWN))  inputFwd   -= 256;
-            if (key_is_down(KEY_LEFT))  inputRight -= 256;
-            if (key_is_down(KEY_RIGHT)) inputRight += 256;
 #endif
 
             // Normalize diagonal (~0.707)
@@ -3523,12 +3518,6 @@ int main(void)
             int wasMoving = player_moving;
 
             // L/R shoulder = manual orbit (script handles this via OrbitCamera nodes)
-#ifndef AFN_HAS_SCRIPT
-            if (key_is_down(KEY_L))
-                orbit_angle -= rotSpeed;
-            if (key_is_down(KEY_R))
-                orbit_angle += rotSpeed;
-#endif
 
             // Auto-orbit when strafing (LEFT/RIGHT) with drag on release
             {
@@ -3537,24 +3526,6 @@ int main(void)
                 if (inputRight && afn_auto_orbit_speed > 0)
                 {
                     autoOrbitTarget = afn_auto_orbit_speed;
-                    if (inputRight < 0)
-                        autoOrbitTarget = -autoOrbitTarget;
-                    if (key_is_down(KEY_L) || key_is_down(KEY_R))
-                        autoOrbitTarget *= 2;
-                }
-#elif defined(AFN_AUTO_ORBIT_SPEED)
-                if (inputRight)
-                {
-                    autoOrbitTarget = AFN_AUTO_ORBIT_SPEED;
-                    if (inputRight < 0)
-                        autoOrbitTarget = -autoOrbitTarget;
-                    if (key_is_down(KEY_L) || key_is_down(KEY_R))
-                        autoOrbitTarget *= 2;
-                }
-#else
-                if (inputRight)
-                {
-                    autoOrbitTarget = (rotSpeed * 2 / 5);  // 40% of rotSpeed
                     if (inputRight < 0)
                         autoOrbitTarget = -autoOrbitTarget;
                     if (key_is_down(KEY_L) || key_is_down(KEY_R))
@@ -3603,23 +3574,14 @@ int main(void)
 #ifdef AFN_COL_FACE_COUNT
             collide_walls(&player_x, &player_z, player_y);
 
-            // Jump: A button, only when on ground
-#ifndef AFN_HAS_SCRIPT
-            if (key_hit(KEY_A) && player_on_ground)
-                player_vy = COL_JUMP_VEL;
-#endif
-
-            // Dampen jump: reduce upward velocity when A not held (variable jump height)
-#ifdef AFN_JUMP_DAMPEN
-            if (!key_is_down(KEY_A) && player_vy > 0)
-                player_vy = (player_vy * AFN_JUMP_DAMPEN) >> 8;
-#endif
+            // Jump + dampen are driven by script nodes only
 
             // Gravity: accelerate downward, clamp to terminal velocity
 #ifdef AFN_HAS_SCRIPT
             player_vy -= afn_gravity;
             if (player_vy < -afn_terminal_vel) player_vy = -afn_terminal_vel;
 #else
+            // No script — still apply default gravity so player doesn't float
             player_vy -= COL_GRAVITY;
             if (player_vy < -COL_TERMINAL_VEL) player_vy = -COL_TERMINAL_VEL;
 #endif
@@ -3775,33 +3737,7 @@ int main(void)
             // FREE CAMERA MODE (no player sprite — original controls)
             // ============================================================
 
-#ifdef AFN_WALK_SPEED
-            FIXED moveSpeed = key_is_down(KEY_B) ? AFN_SPRINT_SPEED : AFN_WALK_SPEED;
-#else
-            FIXED moveSpeed = key_is_down(KEY_B) ? 56 : 37;
-#endif
-            int   rotSpeed  = 0x0200;
-
-            if (key_is_down(KEY_LEFT))
-                cam_angle -= rotSpeed;
-            if (key_is_down(KEY_RIGHT))
-                cam_angle += rotSpeed;
-
-            if (key_is_down(KEY_UP))
-            {
-                cam_x += (g_sinf * moveSpeed) >> 8;
-                cam_z -= (g_cosf * moveSpeed) >> 8;
-            }
-            if (key_is_down(KEY_DOWN))
-            {
-                cam_x -= (g_sinf * moveSpeed) >> 8;
-                cam_z += (g_cosf * moveSpeed) >> 8;
-            }
-
-            if (key_is_down(KEY_L) && cam_h > (4 << 8))
-                cam_h -= 85;
-            if (key_is_down(KEY_R) && cam_h < (256 << 8))
-                cam_h += 85;
+            // Free camera — no fallback controls, driven by script nodes only
 
         }
 

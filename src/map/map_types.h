@@ -184,6 +184,7 @@ struct MeshAsset
     bool grayscale = false; // true = grayscale shaded faces (combine with wireframe for editor look)
     bool useQuads = true;  // true = export quads natively to GBA, false = fan-triangulate quads
     float drawDistance = 0.0f; // per-mesh draw distance (0 = use global/unlimited)
+    bool collision = true; // true = generate collision faces for this mesh
 
     // Quad index buffer — 4 consecutive indices per quad face from OBJ
     // OBJ quads are preserved as-is, not force-triangulated

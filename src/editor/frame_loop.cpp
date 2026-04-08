@@ -302,6 +302,16 @@ static bool sVsShowContextMenu = false;
 static ImVec2 sVsContextMenuPos = {};
 // Auto-wire: when dropping a link on empty space, open context menu and wire to new node
 static VsPin sVsPendingAutoWire = { -1, 0, 0 };
+// Undo stack for node deletions
+struct VsUndoSnapshot {
+    std::vector<VsNode> nodes;
+    std::vector<VsLink> links;
+    std::vector<VsAnnotation> annotations;
+    std::vector<VsGroupPinMap> groupPins;
+    int nextId;
+};
+static std::vector<VsUndoSnapshot> sVsUndoStack;
+static const int kVsMaxUndo = 32;
 // Node info popup (right-click on node)
 static int sVsNodeInfoIdx = -1;   // index of node showing info popup
 static char sVsNodeCodeBuf[2048] = {}; // editable code buffer
@@ -1185,7 +1195,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0);
     }
     fprintf(f, "\n");
 
@@ -1378,6 +1388,7 @@ static bool LoadProject(const std::string& path)
     if (!f) return false;
 
     // Reset state before loading
+    sVsUndoStack.clear();
     sMapScenes.clear();
     sMapSelectedScene = 0;
     sTmObjects.clear();
@@ -1640,10 +1651,10 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "MeshAssets") == 0)
         {
             char mname[256], mpath[512], mtexpath[512] = {};
-            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1;
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1;
             float mdrawdist = 0.0f;
-            // Try newest format: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath|usequads|drawdist
-            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d|%f", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist);
+            // Try newest format: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath|usequads|drawdist|collision
+            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d|%f|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision);
             if (matched < 2)
             {
                 // Try format without usequads: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath
@@ -1682,6 +1693,8 @@ static bool LoadProject(const std::string& path)
                     ma.useQuads = (musequads != 0);
                 if (matched >= 12)
                     ma.drawDistance = mdrawdist;
+                if (matched >= 13)
+                    ma.collision = (mcollision != 0);
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -2385,6 +2398,7 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             ImGui::Checkbox("Use Quads##meshQuad", &ma.useQuads);
         ImGui::DragFloat("Draw Distance##mesh", &ma.drawDistance, 1.0f, 0.0f, 2000.0f, "%.0f");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = use global draw distance");
+        ImGui::Checkbox("Collision##meshCol", &ma.collision);
 
         ImGui::Separator();
         ImGui::Checkbox("Textured##meshTex", &ma.textured);
@@ -5648,6 +5662,7 @@ void FrameTick(float dt)
                     me.wireframe = ma.wireframe ? 1 : 0;
                     me.grayscale = ma.grayscale ? 1 : 0;
                     me.drawDistance = ma.drawDistance;
+                    me.collision = ma.collision ? 1 : 0;
                     me.textured = ma.textured ? 1 : 0;
                     me.texW = ma.texW;
                     me.texH = ma.texH;
@@ -7154,34 +7169,74 @@ void FrameTick(float dt)
             }
         }
 
-        // Delete selected node with Delete key
-        if (sVsSelected >= 0 && ImGui::IsKeyPressed(ImGuiKey_Delete)) {
-            int delId = sVsNodes[sVsSelected].id;
-            // If deleting a group, also delete children and their links
-            if (sVsNodes[sVsSelected].type == VsNodeType::Group) {
-                std::vector<int> childIds;
-                for (auto& nd : sVsNodes)
-                    if (nd.groupId == delId) childIds.push_back(nd.id);
-                // Remove links to children
-                for (int cid : childIds)
-                    sVsLinks.erase(std::remove_if(sVsLinks.begin(), sVsLinks.end(),
-                        [cid](const VsLink& l) { return l.from.nodeId == cid || l.to.nodeId == cid; }),
-                        sVsLinks.end());
-                // Remove children
-                sVsNodes.erase(std::remove_if(sVsNodes.begin(), sVsNodes.end(),
-                    [delId](const VsNode& nd) { return nd.groupId == delId; }), sVsNodes.end());
-                // Remove pin mappings
-                sVsGroupPins.erase(std::remove_if(sVsGroupPins.begin(), sVsGroupPins.end(),
-                    [delId](const VsGroupPinMap& m) { return m.groupNodeId == delId; }), sVsGroupPins.end());
+        // Delete selected nodes with Delete key (multi-select or single)
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+            // Collect all node IDs to delete (selected or sVsSelected)
+            std::set<int> delIds;
+            for (auto& nd : sVsNodes)
+                if (nd.selected) delIds.insert(nd.id);
+            if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size())
+                delIds.insert(sVsNodes[sVsSelected].id);
+
+            bool anyAnnotDel = false;
+            for (auto& ann : sVsAnnotations)
+                if (ann.selected) { anyAnnotDel = true; break; }
+
+            if (!delIds.empty() || anyAnnotDel) {
+                // Save undo snapshot before deleting
+                VsUndoSnapshot snap;
+                snap.nodes = sVsNodes;
+                snap.links = sVsLinks;
+                snap.annotations = sVsAnnotations;
+                snap.groupPins = sVsGroupPins;
+                snap.nextId = sVsNextId;
+                sVsUndoStack.push_back(snap);
+                if ((int)sVsUndoStack.size() > kVsMaxUndo)
+                    sVsUndoStack.erase(sVsUndoStack.begin());
             }
-            // Remove links connected to this node
-            sVsLinks.erase(std::remove_if(sVsLinks.begin(), sVsLinks.end(),
-                [delId](const VsLink& l) { return l.from.nodeId == delId || l.to.nodeId == delId; }),
-                sVsLinks.end());
-            // Need to re-find index since erase may have shifted it
-            int delIdx = VsFindNode(delId);
-            if (delIdx >= 0) sVsNodes.erase(sVsNodes.begin() + delIdx);
+
+            if (!delIds.empty()) {
+                // For each group being deleted, also mark children for deletion
+                std::set<int> extraDel;
+                for (int did : delIds) {
+                    int idx = VsFindNode(did);
+                    if (idx >= 0 && sVsNodes[idx].type == VsNodeType::Group) {
+                        for (auto& nd : sVsNodes)
+                            if (nd.groupId == did) extraDel.insert(nd.id);
+                    }
+                }
+                delIds.insert(extraDel.begin(), extraDel.end());
+
+                // Remove all links connected to any deleted node
+                sVsLinks.erase(std::remove_if(sVsLinks.begin(), sVsLinks.end(),
+                    [&delIds](const VsLink& l) { return delIds.count(l.from.nodeId) || delIds.count(l.to.nodeId); }),
+                    sVsLinks.end());
+                // Remove pin mappings for deleted groups
+                sVsGroupPins.erase(std::remove_if(sVsGroupPins.begin(), sVsGroupPins.end(),
+                    [&delIds](const VsGroupPinMap& m) { return delIds.count(m.groupNodeId); }), sVsGroupPins.end());
+                // Remove the nodes
+                sVsNodes.erase(std::remove_if(sVsNodes.begin(), sVsNodes.end(),
+                    [&delIds](const VsNode& nd) { return delIds.count(nd.id); }), sVsNodes.end());
+                sVsSelected = -1;
+            }
+
+            // Delete selected annotations
+            sVsAnnotations.erase(std::remove_if(sVsAnnotations.begin(), sVsAnnotations.end(),
+                [](const VsAnnotation& a) { return a.selected; }), sVsAnnotations.end());
+            sVsSelectedAnnotation = -1;
+        }
+
+        // Ctrl+Z — undo last delete
+        if (ImGui::IsKeyPressed(ImGuiKey_Z) && io.KeyCtrl && !io.KeyShift && !sVsUndoStack.empty()) {
+            auto& snap = sVsUndoStack.back();
+            sVsNodes = snap.nodes;
+            sVsLinks = snap.links;
+            sVsAnnotations = snap.annotations;
+            sVsGroupPins = snap.groupPins;
+            sVsNextId = snap.nextId;
+            sVsUndoStack.pop_back();
             sVsSelected = -1;
+            sVsSelectedAnnotation = -1;
         }
 
         // Ctrl+G — group selected nodes
@@ -8009,11 +8064,11 @@ void FrameTick(float dt)
         // Scene panel (top-right, only on Map tab)
         if (sActiveTab == EditorTab::Map)
         {
-            scenePanH = 160;
             ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus;
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                ImGuiWindowFlags_AlwaysAutoResize;
             ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + leftW, bodyY));
-            ImGui::SetNextWindowSize(ImVec2(rightW, scenePanH));
+            ImGui::SetNextWindowSizeConstraints(ImVec2(rightW, 0), ImVec2(rightW, 300));
             ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
             ImGui::Begin("##MapScenePanel", nullptr, panelFlags);
 
@@ -8042,7 +8097,6 @@ void FrameTick(float dt)
             }
 
             // Scene list — selected item is an editable InputText
-            ImGui::BeginChild("##MapSceneList", ImVec2(0, 0), true);
             for (int i = 0; i < (int)sMapScenes.size(); i++)
             {
                 bool sel = (i == sMapSelectedScene);
@@ -8066,8 +8120,8 @@ void FrameTick(float dt)
                     }
                 }
             }
-            ImGui::EndChild();
 
+            scenePanH = ImGui::GetWindowSize().y;
             ImGui::End();
             ImGui::PopStyleColor();
         }
