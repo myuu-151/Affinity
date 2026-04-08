@@ -7776,30 +7776,32 @@ void FrameTick(float dt)
                 }
             }
 
-            // Scene list
-            ImGui::BeginChild("##MapSceneList", ImVec2(0, scenePanH - 60), true);
+            // Scene list — selected item is an editable InputText
+            ImGui::BeginChild("##MapSceneList", ImVec2(0, 0), true);
             for (int i = 0; i < (int)sMapScenes.size(); i++)
             {
                 bool sel = (i == sMapSelectedScene);
-                char lbl[64];
-                snprintf(lbl, sizeof(lbl), "%s##ms%d", sMapScenes[i].name, i);
-                if (ImGui::Selectable(lbl, sel) && i != sMapSelectedScene)
+                if (sel)
                 {
-                    if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
-                        SaveMapSceneState(sMapScenes[sMapSelectedScene]);
-                    sMapSelectedScene = i;
-                    LoadMapSceneState(sMapScenes[i]);
+                    ImGui::PushItemWidth(-1);
+                    char idBuf[32]; snprintf(idBuf, sizeof(idBuf), "##msname%d", i);
+                    ImGui::InputText(idBuf, sMapScenes[i].name, sizeof(sMapScenes[i].name));
+                    ImGui::PopItemWidth();
+                }
+                else
+                {
+                    char lbl[64];
+                    snprintf(lbl, sizeof(lbl), "%s##ms%d", sMapScenes[i].name, i);
+                    if (ImGui::Selectable(lbl, false))
+                    {
+                        if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+                            SaveMapSceneState(sMapScenes[sMapSelectedScene]);
+                        sMapSelectedScene = i;
+                        LoadMapSceneState(sMapScenes[i]);
+                    }
                 }
             }
             ImGui::EndChild();
-
-            // Rename field
-            if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
-            {
-                ImGui::PushItemWidth(-1);
-                ImGui::InputText("##msname", sMapScenes[sMapSelectedScene].name, sizeof(sMapScenes[sMapSelectedScene].name));
-                ImGui::PopItemWidth();
-            }
 
             ImGui::End();
             ImGui::PopStyleColor();
