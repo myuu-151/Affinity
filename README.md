@@ -2,129 +2,162 @@
   <img src="assets/affinity_logo.png" alt="Affinity Logo" width="300">
 </p>
 
-# Affinity Engine
-A Game Boy Advance and Nintendo DS 3D engine with a Windows desktop editor. Import OBJ meshes, place objects in a live perspective viewport, and package directly to a `.gba` or `.nds` ROM with software polygon rasterization.
+<h1 align="center">Affinity Engine</h1>
 
-> **This project is in active development.** Features and APIs may change.
+<p align="center">
+  A Game Boy Advance and Nintendo DS 3D engine with a Windows desktop editor.<br>
+  Import OBJ meshes, place objects in a live viewport, and package directly to <code>.gba</code> or <code>.nds</code> ROMs.
+</p>
+
+<p align="center">
+  <b>This project is in active development.</b> Features and APIs may change.
+</p>
+
+---
 
 ## Features
 
-- **Dual Target** — Build for GBA or NDS from the same project
-- **Software 3D Renderer** — Flat-shaded and textured polygon rasterizer with ARM ASM inner loops
-- **OBJ Mesh Import** — Load .obj files with per-mesh culling, draw distance, LOD, and texture mapping
-- **Live Viewport** — Real-time perspective preview matching GBA/NDS rendering
-- **Tilemap Editor** — Draggable grid with sprite tile painting, object placement, and save/load
-- **Blender-style Transform Tools** — G to grab, S to scale, X/Y/Z axis constraints with visual guides
-- **One-Click Packaging** — Builds a `.gba` or `.nds` ROM from the editor via devkitARM
-- **mGBA Integration** — Launch the ROM directly in mGBA from the editor
-- **OAM Sprite Support** — 8-directional animated sprites with LOD, running alongside 3D meshes
-- **Collision System** — Pre-baked world-space collision with spatial grid, wall slide, floor snapping, and gravity
-- **Visual Script Nodes** — Event-driven node graph for game logic (key input, movement, animation, branching) with wirable data nodes
-- **Mode 7 Floor** — HBlank affine floor rendering for non-mesh projects
+| | |
+|---|---|
+| **Software 3D Renderer** | Flat-shaded and textured polygon rasterizer with ARM ASM inner loops |
+| **Dual Target** | Build for GBA or NDS from the same project |
+| **OBJ Mesh Import** | Load .obj files with per-mesh culling, draw distance, LOD, and texture mapping |
+| **Live Viewport** | Real-time perspective preview matching GBA/NDS rendering |
+| **Tilemap Editor** | Draggable grid with sprite tile painting, object placement, and save/load |
+| **Visual Script Nodes** | Event-driven node graph for game logic — key input, movement, animation, branching |
+| **Collision System** | Pre-baked world-space collision with spatial grid, wall slide, floor snapping, and gravity |
+| **OAM Sprites** | 8-directional animated sprites with LOD, running alongside 3D meshes |
+| **One-Click Build** | Package a `.gba` or `.nds` ROM directly from the editor |
+| **mGBA Integration** | Launch ROMs directly in mGBA from the editor |
+| **Blender-style Tools** | G to grab, S to scale, X/Y/Z axis constraints with visual guides |
+| **Mode 7 Floor** | HBlank affine floor rendering for non-mesh projects |
 
-## Requirements
+---
+
+## Getting Started
+
+### Prerequisites
 
 - **Windows 10/11**
 - **Visual Studio 2022+** (MSVC C++17)
 - **CMake 3.16+**
-- **devkitPro** with devkitARM + libtonc (for GBA ROM packaging)
-- **mGBA** (optional, for launching ROMs from the editor)
+- **devkitPro** with devkitARM + libtonc *(for GBA ROM packaging)*
+- **mGBA** *(optional — for launching ROMs from the editor)*
 
-## Building the Editor
+### 1. Build the Editor
 
-1. Clone the repo:
-   ```bash
-   git clone https://github.com/myuu-151/Affinity.git
-   cd Affinity
-   ```
+```bash
+git clone https://github.com/myuu-151/Affinity.git
+cd Affinity
+cmake -S . -B build
+cmake --build build --config Release
+```
 
-2. Configure and build with CMake:
-   ```bat
-   cmake -S . -B build
-   cmake --build build --config Release
-   ```
+Run the editor:
+```
+build\Release\AffinityEditor.exe
+```
 
-3. Run:
-   ```
-   build\Release\AffinityEditor.exe
-   ```
+### 2. Install devkitPro (GBA Toolchain)
 
-## Building GBA ROMs
+You need devkitPro to compile GBA ROMs. The editor handles the build process — you just need the toolchain installed.
 
-The editor builds GBA ROMs automatically when you click the build button, but you need the devkitPro toolchain installed first.
+1. Download the installer from **[devkitpro.org](https://devkitpro.org/wiki/Getting_Started)**
+2. Run the installer
+3. Open the devkitPro MSYS2 terminal and install the GBA packages:
 
-### Install devkitPro
+```bash
+pacman -S devkitARM libtonc
+```
 
-1. Download the devkitPro installer from [devkitpro.org/wiki/Getting_Started](https://devkitpro.org/wiki/Getting_Started)
-2. Run the installer (Windows graphical installer or pacman-based setup for Linux/Mac)
-3. Install the GBA packages:
-   ```bash
-   pacman -S devkitARM libtonc
-   ```
-4. Make sure the environment variables are set (the installer usually does this):
-   ```
-   DEVKITPRO=/opt/devkitpro
-   DEVKITARM=/opt/devkitpro/devkitARM
-   ```
+4. Verify the environment variables are set *(the installer usually handles this)*:
 
-### Build Flow
+```
+DEVKITPRO=/opt/devkitpro
+DEVKITARM=/opt/devkitpro/devkitARM
+```
+
+### 3. Build a GBA ROM
 
 1. Open or create a project in the editor
 2. Add meshes, sprites, and set up your scene
-3. Click the **GBA Build** button — the editor exports `mapdata.h` to `gba_runtime/include/` and runs `make` in `gba_runtime/`
-4. The output ROM is `gba_runtime/affinity.gba`
+3. Click the **GBA Build** button
 
-To build the ROM manually:
+The editor exports `mapdata.h` and runs `make` automatically. The output ROM is:
+```
+gba_runtime/affinity.gba
+```
+
+<details>
+<summary><b>Manual ROM build</b></summary>
+
+If you want to build the ROM from the command line (after exporting from the editor):
+
 ```bash
 cd gba_runtime
 make
 ```
 
-> **Note:** `mapdata.h` must be exported from the editor first — it contains all mesh, sprite, map, and script data for the ROM.
+> `mapdata.h` must be exported from the editor first — it contains all mesh, sprite, map, and script data.
 
-## Editor Controls
+</details>
+
+---
+
+## Controls
+
+### Editor
 
 | Key | Action |
 |-----|--------|
-| W/S | Move forward/back |
-| A/D | Rotate left/right |
-| Q/E | Camera height down/up |
-| I/K | Pitch up/down |
-| G | Grab (translate) selected object |
-| S | Scale selected object |
-| X/Y/Z | Constrain to axis (during grab) |
-| R + drag | Resize selected object |
-| Delete | Delete selected object |
-| Right-click viewport | Place new object |
+| **W / S** | Move forward / back |
+| **A / D** | Rotate left / right |
+| **Q / E** | Camera height down / up |
+| **I / K** | Pitch up / down |
+| **G** | Grab (translate) selected object |
+| **S** | Scale selected object |
+| **X / Y / Z** | Constrain to axis (during grab) |
+| **R + drag** | Resize selected object |
+| **Delete** | Delete selected object |
+| **Right-click** | Place new object in viewport |
+| **Ctrl+A** | Select all nodes |
+| **Ctrl+C / V** | Copy / paste nodes (works across projects) |
+| **Ctrl+Z** | Undo delete |
 
-## GBA Controls
+### GBA Runtime
 
 | Button | Action |
 |--------|--------|
-| D-pad Up/Down | Move forward/back |
-| D-pad Left/Right | Rotate |
-| L/R | Camera height |
-| Start | Reset camera |
+| **D-pad** | Movement *(driven by visual script nodes)* |
+| **A** | Jump *(driven by visual script nodes)* |
+| **B** | Sprint *(driven by visual script nodes)* |
+| **L / R** | Orbit camera *(driven by visual script nodes)* |
+| **Start** | Reset to start position |
+| **Select** | Cycle display modes |
 
-## Architecture
+---
+
+## Project Structure
 
 ```
 src/
-  editor/       — ImGui editor (main loop, frame tick)
-  viewport/     — Software 3D rasterizer and Mode 7 preview
-  map/          — Mesh, sprite, and tilemap data types
-  math/         — Fixed-point types, camera struct
-  platform/gba/ — GBA ROM packaging (invokes devkitARM)
-  platform/nds/ — NDS ROM packaging
+  editor/        — ImGui editor (main loop, frame tick)
+  viewport/      — Software 3D rasterizer and Mode 7 preview
+  map/           — Mesh, sprite, and tilemap data types
+  math/          — Fixed-point types, camera struct
+  platform/gba/  — GBA ROM packaging (invokes devkitARM)
+  platform/nds/  — NDS ROM packaging
 gba_runtime/
-  source/       — GBA runtime (software polygon renderer, OAM sprites, input)
-  include/      — Generated mesh and map data header
+  source/        — GBA runtime (software polygon renderer, OAM sprites, input)
+  include/       — Generated mesh and map data header (mapdata.h)
 nds_runtime/
-  source/       — NDS runtime
+  source/        — NDS runtime
 thirdparty/
-  glfw/         — Windowing
-  imgui/        — UI framework
+  glfw/          — Windowing
+  imgui/         — UI framework
 ```
+
+---
 
 ## License
 
