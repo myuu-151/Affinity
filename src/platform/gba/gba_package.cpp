@@ -251,7 +251,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                             const std::vector<GBASpriteAssetExport>& assets,
                             const GBACameraExport& camera,
                             const std::vector<GBAMeshExport>& meshes,
-                            float orbitDist)
+                            float orbitDist,
+                            const GBAScriptExport& script)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
     std::ofstream f(outPath);
@@ -1359,6 +1360,301 @@ static bool GenerateMapData(const std::string& runtimeDir,
         }
     }
 
+    // ---- Generate script code from visual node graph ----
+    if (!script.nodes.empty())
+    {
+        // Helper: find node by id
+        auto findNode = [&](int id) -> const GBAScriptNodeExport* {
+            for (auto& n : script.nodes)
+                if (n.id == id) return &n;
+            return nullptr;
+        };
+
+        // Helper: find ALL exec links from a node's exec out pin (pinIdx)
+        auto findExecOuts = [&](int nodeId, int pinIdx) -> std::vector<int> {
+            std::vector<int> targets;
+            for (auto& l : script.links)
+                if (l.fromNodeId == nodeId && l.fromPinType == 0 && l.fromPinIdx == pinIdx)
+                    targets.push_back(l.toNodeId);
+            return targets;
+        };
+
+        // Helper: find data node connected to a node's data input pin
+        auto findDataIn = [&](int nodeId, int pinIdx) -> const GBAScriptNodeExport* {
+            for (auto& l : script.links)
+                if (l.toNodeId == nodeId && l.toPinType == 3 && l.toPinIdx == pinIdx)
+                    return findNode(l.fromNodeId);
+            return nullptr;
+        };
+
+        // Helper: resolve integer value from a data node
+        auto resolveInt = [&](const GBAScriptNodeExport* dn) -> int {
+            if (!dn) return 0;
+            return dn->paramInt[0];
+        };
+
+        // Helper: resolve float from a data node (stored as IEEE754 bits in paramInt[0])
+        auto resolveFloat = [&](const GBAScriptNodeExport* dn) -> float {
+            if (!dn) return 0.0f;
+            float fv;
+            memcpy(&fv, &dn->paramInt[0], sizeof(float));
+            return fv;
+        };
+
+        // Helper: resolve key name from a data node or event node's key param
+        auto resolveKeyName = [&](int keyIdx) -> const char* {
+            static const char* keys[] = { "KEY_A", "KEY_B", "KEY_L", "KEY_R",
+                                           "KEY_START", "KEY_SELECT",
+                                           "KEY_UP", "KEY_DOWN", "KEY_LEFT", "KEY_RIGHT" };
+            if (keyIdx >= 0 && keyIdx < 10) return keys[keyIdx];
+            return "KEY_A";
+        };
+
+        // Helper: resolve key index from event node (check data input first, then paramInt)
+        // Returns -1 if ambiguous (multiple keys connected) — caller should not wrap in key check
+        auto resolveEventKey = [&](const GBAScriptNodeExport& evNode) -> int {
+            int count = 0;
+            int keyVal = -1;
+            for (auto& l : script.links)
+                if (l.toNodeId == evNode.id && l.toPinType == 3 && l.toPinIdx == 0)
+                {
+                    auto* dn = findNode(l.fromNodeId);
+                    if (dn) { keyVal = dn->paramInt[0]; count++; }
+                }
+            if (count == 1) return keyVal;
+            if (count == 0) return evNode.paramInt[0];
+            return -1; // ambiguous — multiple keys connected
+        };
+
+        // Collect event chains: for each event node, walk exec links (BFS) to gather all actions
+        struct EventChain {
+            const GBAScriptNodeExport* event;
+            std::vector<const GBAScriptNodeExport*> actions;
+        };
+        std::vector<EventChain> chains;
+
+        for (auto& n : script.nodes)
+        {
+            if (n.type != GBAScriptNodeType::OnKeyPressed &&
+                n.type != GBAScriptNodeType::OnKeyReleased &&
+                n.type != GBAScriptNodeType::OnKeyHeld &&
+                n.type != GBAScriptNodeType::OnStart &&
+                n.type != GBAScriptNodeType::OnUpdate)
+                continue;
+
+            EventChain chain;
+            chain.event = &n;
+
+            // BFS from this event node, following all exec links
+            std::vector<int> frontier = findExecOuts(n.id, 0);
+            std::vector<bool> visited(10000, false);
+            int safety = 0;
+            while (!frontier.empty() && safety < 256)
+            {
+                int nid = frontier.front();
+                frontier.erase(frontier.begin());
+                if (nid < 0 || nid >= (int)visited.size() || visited[nid]) continue;
+                visited[nid] = true;
+                safety++;
+
+                auto* an = findNode(nid);
+                if (!an) continue;
+                chain.actions.push_back(an);
+
+                // Follow this node's exec outputs too (chained actions)
+                auto next = findExecOuts(an->id, 0);
+                for (int t : next) frontier.push_back(t);
+            }
+            if (!chain.actions.empty())
+                chains.push_back(chain);
+        }
+
+        if (!chains.empty())
+        {
+            f << "// ---- Generated script code from visual node graph ----\n";
+            f << "#define AFN_HAS_SCRIPT 1\n\n";
+
+            // Forward declarations for script state variables (defined later in main.c)
+            // Using 'static' redeclaration — valid in C for same-TU forward refs.
+            f << "// Script state variables (defined in main.c)\n";
+            f << "static FIXED afn_input_fwd;\n";
+            f << "static FIXED afn_input_right;\n";
+            f << "static FIXED afn_move_speed;\n";
+            f << "static int   afn_auto_orbit_speed;\n";
+            f << "static int   afn_play_anim;\n";
+            f << "static FIXED afn_gravity;\n";
+            f << "static FIXED afn_terminal_vel;\n";
+            f << "static FIXED player_vy;\n";
+            f << "static int   player_on_ground;\n";
+            f << "static u16   orbit_angle;\n\n";
+
+            // Group chains by event type for cleaner output
+            // OnStart → afn_script_start() — called once at init
+            // OnKeyHeld → afn_script_key_held() — called every frame
+            // OnKeyPressed → afn_script_key_pressed() — called every frame
+            // OnKeyReleased → afn_script_key_released() — called every frame
+
+            // Emit action code for a single action node
+            auto emitAction = [&](const GBAScriptNodeExport* action) {
+                switch (action->type)
+                {
+                case GBAScriptNodeType::MovePlayer: {
+                    auto* dirData = findDataIn(action->id, 0);
+                    int dir = dirData ? dirData->paramInt[0] : 0;
+                    // 0=Left, 1=Right, 2=Up, 3=Down
+                    const char* dirKeys[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
+                    const char* dirVars[] = { "afn_input_right -= 256", "afn_input_right += 256",
+                                              "afn_input_fwd += 256", "afn_input_fwd -= 256" };
+                    if (dir >= 0 && dir < 4)
+                        f << "    if (key_is_down(" << dirKeys[dir] << ")) " << dirVars[dir] << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::Jump: {
+                    auto* forceData = findDataIn(action->id, 0);
+                    float force = forceData ? resolveFloat(forceData) : 2.0f;
+                    int forceFixed = (int)(force * 256.0f);
+                    f << "    if (player_on_ground) player_vy = " << forceFixed << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::Walk: {
+                    auto* speedData = findDataIn(action->id, 0);
+                    int speed = speedData ? resolveInt(speedData) : 37;
+                    int gbaSpeed = (int)(speed * 37.0f / 35.0f);
+                    f << "    afn_move_speed = " << gbaSpeed << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::Sprint: {
+                    auto* speedData = findDataIn(action->id, 0);
+                    int speed = speedData ? resolveInt(speedData) : 56;
+                    int gbaSpeed = (int)(speed * 37.0f / 35.0f);
+                    f << "    afn_move_speed = " << gbaSpeed << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::OrbitCamera: {
+                    auto* dirData = findDataIn(action->id, 0);
+                    auto* speedData = findDataIn(action->id, 1);
+                    int dir = dirData ? dirData->paramInt[0] : 1;
+                    int speed = speedData ? resolveInt(speedData) : 512;
+                    // Map direction to L/R shoulder key check
+                    const char* key = (dir == 0) ? "KEY_L" : "KEY_R";
+                    const char* sign = (dir == 0) ? "-" : "+";
+                    f << "    if (key_is_down(" << key << ")) orbit_angle " << sign << "= " << speed << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::DampenJump: {
+                    auto* factorData = findDataIn(action->id, 0);
+                    float factor = factorData ? resolveFloat(factorData) : 0.75f;
+                    int factorFixed = (int)(factor * 256.0f);
+                    f << "    if (player_vy > 0) player_vy = (player_vy * " << factorFixed << ") >> 8;\n";
+                    break;
+                }
+                case GBAScriptNodeType::AutoOrbit: {
+                    auto* speedData = findDataIn(action->id, 0);
+                    int speed = speedData ? resolveInt(speedData) : 205;
+                    f << "    afn_auto_orbit_speed = " << speed << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetGravity: {
+                    auto* valData = findDataIn(action->id, 0);
+                    float val = valData ? resolveFloat(valData) : 0.09f;
+                    int valFixed = (int)(val * 256.0f);
+                    f << "    afn_gravity = " << valFixed << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetMaxFall: {
+                    auto* valData = findDataIn(action->id, 0);
+                    float val = valData ? resolveFloat(valData) : 6.0f;
+                    int valFixed = (int)(val * 256.0f);
+                    f << "    afn_terminal_vel = " << valFixed << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::PlayAnim: {
+                    auto* animData = findDataIn(action->id, 0);
+                    int animIdx = animData ? resolveInt(animData) : 0;
+                    f << "    afn_play_anim = " << animIdx << ";\n";
+                    break;
+                }
+                default:
+                    f << "    // unsupported action: type " << (int)action->type << "\n";
+                    break;
+                }
+            };
+
+            // Collect OnStart chains
+            bool hasStart = false, hasHeld = false, hasPressed = false, hasReleased = false, hasUpdate = false;
+            for (auto& c : chains) {
+                if (c.event->type == GBAScriptNodeType::OnStart) hasStart = true;
+                if (c.event->type == GBAScriptNodeType::OnKeyHeld) hasHeld = true;
+                if (c.event->type == GBAScriptNodeType::OnKeyPressed) hasPressed = true;
+                if (c.event->type == GBAScriptNodeType::OnKeyReleased) hasReleased = true;
+                if (c.event->type == GBAScriptNodeType::OnUpdate) hasUpdate = true;
+            }
+
+            // Always emit all four functions (main.c calls them unconditionally)
+
+            // OnStart → initialization function
+            f << "static inline void afn_script_start(void) {\n";
+            for (auto& c : chains) {
+                if (c.event->type != GBAScriptNodeType::OnStart) continue;
+                for (auto* a : c.actions)
+                    emitAction(a);
+            }
+            f << "}\n\n";
+
+            // Helper: emit actions with optional key guard
+            auto emitKeyBlock = [&](const EventChain& c, const char* keyCheck) {
+                int key = resolveEventKey(*c.event);
+                if (key >= 0) {
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), keyCheck, resolveKeyName(key));
+                    f << "  " << buf << " {\n";
+                    for (auto* a : c.actions)
+                        emitAction(a);
+                    f << "  }\n";
+                } else {
+                    // Ambiguous key — emit actions without guard (actions have own checks)
+                    f << "  { // (all d-pad)\n";
+                    for (auto* a : c.actions)
+                        emitAction(a);
+                    f << "  }\n";
+                }
+            };
+
+            // OnKeyHeld → per-frame held-key checks
+            f << "static inline void afn_script_key_held(void) {\n";
+            for (auto& c : chains) {
+                if (c.event->type != GBAScriptNodeType::OnKeyHeld) continue;
+                emitKeyBlock(c, "if (key_is_down(%s))");
+            }
+            f << "}\n\n";
+
+            // OnKeyPressed → per-frame key-hit checks
+            f << "static inline void afn_script_key_pressed(void) {\n";
+            for (auto& c : chains) {
+                if (c.event->type != GBAScriptNodeType::OnKeyPressed) continue;
+                emitKeyBlock(c, "if (key_hit(%s))");
+            }
+            f << "}\n\n";
+
+            // OnKeyReleased → edge-triggered release checks
+            f << "static inline void afn_script_key_released(void) {\n";
+            for (auto& c : chains) {
+                if (c.event->type != GBAScriptNodeType::OnKeyReleased) continue;
+                emitKeyBlock(c, "if (key_released(%s))");
+            }
+            f << "}\n\n";
+
+            // OnUpdate → runs every frame
+            f << "static inline void afn_script_update(void) {\n";
+            for (auto& c : chains) {
+                if (c.event->type != GBAScriptNodeType::OnUpdate) continue;
+                for (auto* a : c.actions)
+                    emitAction(a);
+            }
+            f << "}\n\n";
+        }
+    }
+
     f << "\n#endif // MAPDATA_H\n";
     f.close();
     return true;
@@ -1371,6 +1667,7 @@ bool PackageGBA(const std::string& runtimeDir,
                 const GBACameraExport& camera,
                 const std::vector<GBAMeshExport>& meshes,
                 float orbitDist,
+                const GBAScriptExport& script,
                 std::string& errorMsg)
 {
     std::string msysDir = ToMsysPath(runtimeDir);
@@ -1386,7 +1683,7 @@ bool PackageGBA(const std::string& runtimeDir,
     }
 
     // --- Step 1: Generate mapdata.h with sprite/camera/asset/player data ---
-    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist))
+    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, script))
     {
         errorMsg = "Failed to write mapdata.h";
         return false;

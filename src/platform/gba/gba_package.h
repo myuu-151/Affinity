@@ -119,6 +119,44 @@ struct GBAMeshExport
     uint16_t texPalette[16] = {}; // RGB15 palette for this texture
 };
 
+// ---- Visual Script Export ----
+
+// Node types matching editor VsNodeType enum
+enum class GBAScriptNodeType : int {
+    OnKeyPressed = 0, OnKeyReleased, OnKeyHeld,
+    OnCollision, OnStart,
+    Branch, CompareVar,
+    MovePlayer, LookDirection, ChangeScene, SetVariable, AddVariable,
+    PlaySound, Wait, Jump,
+    Walk, Sprint, OrbitCamera, PlayAnim,
+    SetGravity, SetMaxFall, DestroyObject,
+    AutoOrbit, DampenJump,
+    Integer, Key, Direction, Animation, Float,
+    OnUpdate,
+    Group,
+    COUNT
+};
+
+struct GBAScriptNodeExport {
+    int id;
+    GBAScriptNodeType type;
+    int paramInt[4];  // per-node params (key index, value, IEEE754 float bits, etc.)
+};
+
+struct GBAScriptLinkExport {
+    int fromNodeId;
+    int fromPinType;  // 0=execOut, 2=dataOut
+    int fromPinIdx;
+    int toNodeId;
+    int toPinType;    // 1=execIn, 3=dataIn
+    int toPinIdx;
+};
+
+struct GBAScriptExport {
+    std::vector<GBAScriptNodeExport> nodes;
+    std::vector<GBAScriptLinkExport> links;
+};
+
 // Package the current map into a .gba ROM.
 // runtimeDir: path to gba_runtime/ directory
 // outputPath: where to write the final .gba
@@ -130,6 +168,7 @@ bool PackageGBA(const std::string& runtimeDir,
                 const GBACameraExport& camera,
                 const std::vector<GBAMeshExport>& meshes,
                 float orbitDist,
+                const GBAScriptExport& script,
                 std::string& errorMsg);
 
 } // namespace Affinity

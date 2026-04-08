@@ -146,6 +146,15 @@ static int   player_moving;        // nonzero if D-pad held
 static u16   player_move_angle;    // brad angle of last movement direction
 static int   auto_orbit_smooth;   // smoothed auto-orbit value (fixed-point)
 
+// Script-driven state (set by generated afn_script_* functions)
+static FIXED afn_input_fwd;       // forward input accumulator
+static FIXED afn_input_right;     // right input accumulator
+static FIXED afn_move_speed;      // current movement speed
+static int   afn_auto_orbit_speed; // auto-orbit speed (0 = disabled)
+static int   afn_play_anim;       // animation request (-1 = none)
+static FIXED afn_gravity;         // gravity per frame (16.8)
+static FIXED afn_terminal_vel;    // max fall speed (16.8)
+
 // Direction animation set tracking (for DMA streaming)
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
 static int   g_active_dir_set[AFN_ASSET_COUNT]; // currently loaded direction set per asset
@@ -2974,6 +2983,15 @@ int main(void)
     player_on_ground = 1;
     cam_y_smooth = 0;
 #endif
+#ifdef AFN_HAS_SCRIPT
+    // Init script defaults before running OnStart handlers
+    afn_move_speed = AFN_WALK_SPEED;
+    afn_auto_orbit_speed = 0;
+    afn_gravity = AFN_GRAVITY;
+    afn_terminal_vel = AFN_TERMINAL_VEL;
+    afn_play_anim = -1;
+    afn_script_start();
+#endif
 #endif
 
     // Precompute initial sin/cos
@@ -3083,11 +3101,6 @@ int main(void)
             // ORBIT CAMERA MODE — Asterix XXL style
             // ============================================================
 
-#ifdef AFN_WALK_SPEED
-            FIXED moveSpeed = key_is_down(KEY_B) ? AFN_SPRINT_SPEED : AFN_WALK_SPEED;
-#else
-            FIXED moveSpeed = key_is_down(KEY_B) ? 56 : 37;
-#endif
             int   rotSpeed  = 0x0200;
 
             // View angle = orbit_angle (camera is behind player, looking forward)
@@ -3095,12 +3108,37 @@ int main(void)
             FIXED viewSin = lu_sin(viewAngle) >> 4;
             FIXED viewCos = lu_cos(viewAngle) >> 4;
 
-            // D-pad = player movement
             FIXED inputFwd = 0, inputRight = 0;
+            FIXED moveSpeed;
+
+#ifdef AFN_HAS_SCRIPT
+            // Reset per-frame script state
+            afn_input_fwd = 0;
+            afn_input_right = 0;
+            afn_play_anim = -1;
+
+            // Run per-frame script event handlers
+            afn_script_update();
+            afn_script_key_held();
+            afn_script_key_pressed();
+            afn_script_key_released();
+
+            inputFwd = afn_input_fwd;
+            inputRight = afn_input_right;
+            moveSpeed = afn_move_speed;
+#else
+  #ifdef AFN_WALK_SPEED
+            moveSpeed = key_is_down(KEY_B) ? AFN_SPRINT_SPEED : AFN_WALK_SPEED;
+  #else
+            moveSpeed = key_is_down(KEY_B) ? 56 : 37;
+  #endif
+
+            // D-pad = player movement
             if (key_is_down(KEY_UP))    inputFwd   += 256;
             if (key_is_down(KEY_DOWN))  inputFwd   -= 256;
             if (key_is_down(KEY_LEFT))  inputRight -= 256;
             if (key_is_down(KEY_RIGHT)) inputRight += 256;
+#endif
 
             // Normalize diagonal (~0.707)
             if (inputFwd && inputRight)
@@ -3111,16 +3149,27 @@ int main(void)
 
             int wasMoving = player_moving;
 
-            // L/R shoulder = manual orbit (always applies)
+            // L/R shoulder = manual orbit (script handles this via OrbitCamera nodes)
+#ifndef AFN_HAS_SCRIPT
             if (key_is_down(KEY_L))
                 orbit_angle -= rotSpeed;
             if (key_is_down(KEY_R))
                 orbit_angle += rotSpeed;
+#endif
 
             // Auto-orbit when strafing (LEFT/RIGHT) with drag on release
             {
                 int autoOrbitTarget = 0;
-#ifdef AFN_AUTO_ORBIT_SPEED
+#ifdef AFN_HAS_SCRIPT
+                if (inputRight && afn_auto_orbit_speed > 0)
+                {
+                    autoOrbitTarget = afn_auto_orbit_speed;
+                    if (inputRight < 0)
+                        autoOrbitTarget = -autoOrbitTarget;
+                    if (key_is_down(KEY_L) || key_is_down(KEY_R))
+                        autoOrbitTarget *= 2;
+                }
+#elif defined(AFN_AUTO_ORBIT_SPEED)
                 if (inputRight)
                 {
                     autoOrbitTarget = AFN_AUTO_ORBIT_SPEED;
@@ -3182,20 +3231,27 @@ int main(void)
             collide_walls(&player_x, &player_z, player_y);
 
             // Jump: A button, only when on ground
+#ifndef AFN_HAS_SCRIPT
             if (key_hit(KEY_A) && player_on_ground)
                 player_vy = COL_JUMP_VEL;
             // Release A while rising: dampen upward velocity for short hop
-#ifdef AFN_JUMP_DAMPEN
+  #ifdef AFN_JUMP_DAMPEN
             if (!key_is_down(KEY_A) && player_vy > 0)
                 player_vy = (player_vy * AFN_JUMP_DAMPEN) >> 8;
-#else
+  #else
             if (!key_is_down(KEY_A) && player_vy > 0)
                 player_vy = (player_vy * 3) / 4;
+  #endif
 #endif
 
             // Gravity: accelerate downward, clamp to terminal velocity
+#ifdef AFN_HAS_SCRIPT
+            player_vy -= afn_gravity;
+            if (player_vy < -afn_terminal_vel) player_vy = -afn_terminal_vel;
+#else
             player_vy -= COL_GRAVITY;
             if (player_vy < -COL_TERMINAL_VEL) player_vy = -COL_TERMINAL_VEL;
+#endif
             player_y += player_vy;
 
             // Floor check

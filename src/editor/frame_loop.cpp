@@ -168,6 +168,7 @@ enum class VsNodeType : int {
     Direction,      // constant direction output (Left/Right/Up/Down)
     Animation,      // constant animation index output
     Float,          // constant float output
+    OnUpdate,       // fires every frame
     Group,          // subgraph containing other nodes
     COUNT
 };
@@ -222,6 +223,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Direction",       0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Animation",       0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Float",           0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
+    { "On Update",       0xFF338833, 0, 1, 0, 0, {}, {}, {} },
     { "Group",           0xFF888844, 0, 0, 0, 0, {}, {}, {} },
 };
 
@@ -5799,6 +5801,23 @@ void FrameTick(float dt)
                 }
             }
 
+            // OnUpdate: fires every frame
+            for (auto& ev : sVsNodes) {
+                if (ev.type != VsNodeType::OnUpdate) continue;
+                auto acts = collectActionsPlay(ev.id);
+                execEventType = VsNodeType::OnUpdate;
+                for (auto* a : acts) execActionPlay(a);
+                execEventType = VsNodeType::Group;
+                // Surge
+                sVsFiredNodes.push_back(ev.id);
+                for (auto* a : acts) {
+                    sVsFiredNodes.push_back(a->id);
+                    for (auto& lk : sVsLinks)
+                        if (lk.to.nodeId == a->id && lk.to.pinType == 3)
+                            sVsFiredNodes.push_back(lk.from.nodeId);
+                }
+            }
+
             // Track previous key state for release edge detection (10 GBA keys)
             static bool sPrevKeyState[10] = {};
 
@@ -5833,9 +5852,9 @@ void FrameTick(float dt)
                     shouldSurge = shouldFire;
                 }
                 else if (ev.type == VsNodeType::OnKeyReleased) {
-                    shouldFire = (key >= 0) && !editorKeyDown(key);
-                    // Surge only on actual release edge: was down last frame, up now
-                    shouldSurge = (key >= 0 && key < 10) && sPrevKeyState[key] && !editorKeyDown(key);
+                    // Edge-triggered: only fire on the frame the key is actually released
+                    shouldFire = (key >= 0 && key < 10) && sPrevKeyState[key] && !editorKeyDown(key);
+                    shouldSurge = shouldFire;
                 }
 
                 if (shouldFire) {
@@ -5844,10 +5863,31 @@ void FrameTick(float dt)
                     execEventType = VsNodeType::Group;
                 }
                 if (shouldSurge) {
-                    sVsFiredNodes.push_back(ev.id);
+                    bool anyActionSurged = false;
                     for (auto* a : acts) {
+                        // For actions with built-in key checks, only surge if their key is held
+                        bool actionSurge = true;
+                        if (a->type == VsNodeType::MovePlayer) {
+                            auto* dd = findDataInPlay(a->id, 0);
+                            int dir = dd ? dd->paramInt[0] : 0;
+                            int dirKeys[] = { 8, 9, 6, 7 }; // Left,Right,Up,Down
+                            actionSurge = (dir >= 0 && dir < 4 && editorKeyDown(dirKeys[dir]));
+                        } else if (a->type == VsNodeType::OrbitCamera) {
+                            auto* dd = findDataInPlay(a->id, 0);
+                            int dir = dd ? dd->paramInt[0] : 1;
+                            actionSurge = editorKeyDown((dir == 0) ? 2 : 3);
+                        }
+                        if (!actionSurge) continue;
+                        anyActionSurged = true;
                         sVsFiredNodes.push_back(a->id);
-                        // PlayAnim data inputs get reverse surge; others normal
+                        // Directly surge the exec link(s) leading to this action
+                        for (int li = 0; li < (int)sVsLinks.size(); li++)
+                            if (sVsLinks[li].to.nodeId == a->id && sVsLinks[li].to.pinType == 1) {
+                                auto it = sVsLinkSurgeT.find(li);
+                                if (it == sVsLinkSurgeT.end() || it->second > 1.0f)
+                                    sVsLinkSurgeT[li] = 0.0f;
+                            }
+                        // PlayAnim data inputs get reverse surge; others forward
                         if (a->type == VsNodeType::PlayAnim) {
                             for (int li = 0; li < (int)sVsLinks.size(); li++)
                                 if (sVsLinks[li].to.nodeId == a->id && sVsLinks[li].to.pinType == 3) {
@@ -5861,10 +5901,21 @@ void FrameTick(float dt)
                                     sVsFiredNodes.push_back(lk.from.nodeId);
                         }
                     }
-                    // Fire data nodes feeding into the event node too (Key nodes)
-                    for (auto& lk : sVsLinks) {
-                        if (lk.to.nodeId == ev.id && lk.to.pinType == 3)
-                            sVsFiredNodes.push_back(lk.from.nodeId);
+                    // Only surge Key data nodes if any action actually surged
+                    // (don't add event node to sVsFiredNodes — we manually surged specific exec links above)
+                    if (anyActionSurged) {
+                        // Only surge Key nodes whose key is actually pressed
+                        for (auto& lk : sVsLinks) {
+                            if (lk.to.nodeId == ev.id && lk.to.pinType == 3) {
+                                auto* kn = findNodePlay(lk.from.nodeId);
+                                if (kn && kn->type == VsNodeType::Key) {
+                                    if (editorKeyDown(kn->paramInt[0]))
+                                        sVsFiredNodes.push_back(lk.from.nodeId);
+                                } else {
+                                    sVsFiredNodes.push_back(lk.from.nodeId);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -6934,6 +6985,7 @@ void FrameTick(float dt)
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
                     for (int t = (int)VsNodeType::OnKeyPressed; t <= (int)VsNodeType::OnStart; t++)
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnUpdate].name)) addNodeAt(VsNodeType::OnUpdate);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
