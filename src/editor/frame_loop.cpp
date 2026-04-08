@@ -5781,7 +5781,8 @@ void FrameTick(float dt)
                         if (it == sVsLinkSurgeRevT.end() || it->second > 1.0f)
                             sVsLinkSurgeRevT[li] = 0.0f;
                     }
-                // Walk backwards through exec links to find the event that triggered it
+                // Walk backwards through exec links to find the chain that triggered it
+                // Stop before event nodes (OnStart, OnKeyPressed, etc.) — they pulse on their own
                 int cur = sActivePlayAnimNodeId;
                 for (int safety = 0; safety < 20; safety++) {
                     int prev = -1;
@@ -5792,6 +5793,13 @@ void FrameTick(float dt)
                         }
                     }
                     if (prev < 0) break;
+                    // Don't continuously surge event nodes — they fire once
+                    VsNodeType prevType = VsNodeType::Group;
+                    for (auto& n : sVsNodes)
+                        if (n.id == prev) { prevType = n.type; break; }
+                    if (prevType == VsNodeType::OnStart || prevType == VsNodeType::OnKeyPressed ||
+                        prevType == VsNodeType::OnKeyReleased)
+                        break;
                     sVsFiredNodes.push_back(prev);
                     // Also fire data nodes feeding into this predecessor
                     for (auto& lk : sVsLinks)
