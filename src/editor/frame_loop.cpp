@@ -681,6 +681,58 @@ static CameraStartObject sCamObj = { 0.0f, 0.0f, 14.0f, 0.0f, 60.0f };
 static float sCamObjEditorScale = 0.05f; // editor-only visual size
 static Mode7Camera sSavedEditorCam;
 
+// ---- Map scenes (Scene tab) ----
+struct MapScene {
+    char name[32] = {};
+    FloorSprite sprites[kMaxFloorSprites] = {};
+    int spriteCount = 0;
+    CameraStartObject camera = { 0.0f, 0.0f, 14.0f, 0.0f, 60.0f };
+    float camEditorScale = 0.05f;
+    std::vector<VsNode> vsNodes;
+    std::vector<VsLink> vsLinks;
+    std::vector<VsAnnotation> vsAnnotations;
+    std::vector<VsGroupPinMap> vsGroupPins;
+    int vsNextId = 1;
+    float vsPanX = 0, vsPanY = 0;
+    float vsZoom = 1.0f;
+};
+static std::vector<MapScene> sMapScenes;
+static int sMapSelectedScene = 0;
+
+static void SaveMapSceneState(MapScene& sc)
+{
+    memcpy(sc.sprites, sSprites, sizeof(sSprites));
+    sc.spriteCount = sSpriteCount;
+    sc.camera = sCamObj;
+    sc.camEditorScale = sCamObjEditorScale;
+    sc.vsNodes = sVsNodes;
+    sc.vsLinks = sVsLinks;
+    sc.vsAnnotations = sVsAnnotations;
+    sc.vsGroupPins = sVsGroupPins;
+    sc.vsNextId = sVsNextId;
+    sc.vsPanX = sVsPanX;
+    sc.vsPanY = sVsPanY;
+    sc.vsZoom = sVsZoom;
+}
+
+static void LoadMapSceneState(const MapScene& sc)
+{
+    memcpy(sSprites, sc.sprites, sizeof(sSprites));
+    sSpriteCount = sc.spriteCount;
+    sSelectedSprite = -1;
+    sCamObj = sc.camera;
+    sCamObjEditorScale = sc.camEditorScale;
+    sVsNodes = sc.vsNodes;
+    sVsLinks = sc.vsLinks;
+    sVsAnnotations = sc.vsAnnotations;
+    sVsGroupPins = sc.vsGroupPins;
+    sVsNextId = sc.vsNextId;
+    sVsPanX = sc.vsPanX;
+    sVsPanY = sc.vsPanY;
+    sVsZoom = sc.vsZoom;
+    sVsSelected = -1;
+}
+
 // Preferences
 static float sUiScale = 1.0f;
 static bool  sShowPrefs = false;
@@ -1252,6 +1304,64 @@ static bool SaveProject(const std::string& path)
             m.groupNodeId, m.pinType, m.pinIdx, m.innerNodeId, m.innerPinType, m.innerPinIdx);
     }
 
+    // ---- Map Scenes (3D Scene tab) ----
+    // Save current state into active scene before writing
+    if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+        SaveMapSceneState(sMapScenes[sMapSelectedScene]);
+    fprintf(f, "\n[MapScenes]\n");
+    fprintf(f, "mapSceneCount=%d\n", (int)sMapScenes.size());
+    fprintf(f, "mapSelectedScene=%d\n", sMapSelectedScene);
+    for (int si = 0; si < (int)sMapScenes.size(); si++)
+    {
+        const MapScene& ms = sMapScenes[si];
+        fprintf(f, "mapScene=%s\n", ms.name);
+        fprintf(f, "msSpriteCount=%d\n", ms.spriteCount);
+        for (int i = 0; i < ms.spriteCount; i++)
+        {
+            const FloorSprite& sp = ms.sprites[i];
+            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d\n",
+                    sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
+                    sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx);
+        }
+        // Camera
+        fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f\n",
+                ms.camera.x, ms.camera.z, ms.camera.height, ms.camera.angle, ms.camera.horizon,
+                ms.camera.walkSpeed, ms.camera.sprintSpeed,
+                ms.camera.walkEaseIn, ms.camera.walkEaseOut, ms.camera.sprintEaseIn, ms.camera.sprintEaseOut,
+                ms.camera.jumpForce, ms.camera.gravity, ms.camera.maxFallSpeed,
+                ms.camera.jumpCamLand, ms.camera.jumpCamAir, ms.camera.autoOrbitSpeed, ms.camera.jumpDampen,
+                ms.camera.smallTriCull, ms.camera.skipFloor ? 1 : 0, ms.camera.coverageBuf ? 1 : 0,
+                ms.camera.drawDistance);
+        // Visual script
+        fprintf(f, "msVsNextId=%d\n", ms.vsNextId);
+        fprintf(f, "msVsPan=%.1f,%.1f\n", ms.vsPanX, ms.vsPanY);
+        fprintf(f, "msVsZoom=%.3f\n", ms.vsZoom);
+        fprintf(f, "msVsNodeCount=%d\n", (int)ms.vsNodes.size());
+        for (auto& n : ms.vsNodes)
+        {
+            fprintf(f, "msVsNode=%d,%d,%.1f,%.1f,%d,%d,%d,%d,%d\n",
+                n.id, (int)n.type, n.x, n.y,
+                n.paramInt[0], n.paramInt[1], n.paramInt[2], n.paramInt[3], n.groupId);
+            if (n.type == VsNodeType::Group)
+                fprintf(f, "msVsGroupDef=%d|%s|%d,%d,%d,%d\n", n.id, n.groupLabel,
+                    n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
+            if (n.customCode[0])
+                fprintf(f, "msVsNodeCode=%d|%s\n", n.id, n.customCode);
+        }
+        fprintf(f, "msVsLinkCount=%d\n", (int)ms.vsLinks.size());
+        for (auto& lk : ms.vsLinks)
+            fprintf(f, "msVsLink=%d,%d,%d|%d,%d,%d\n",
+                lk.from.nodeId, lk.from.pinType, lk.from.pinIdx,
+                lk.to.nodeId, lk.to.pinType, lk.to.pinIdx);
+        fprintf(f, "msVsAnnotCount=%d\n", (int)ms.vsAnnotations.size());
+        for (auto& ann : ms.vsAnnotations)
+            fprintf(f, "msVsAnnot=%.1f,%.1f,%.1f,%.1f|%s\n", ann.x, ann.y, ann.w, ann.h, ann.label);
+        fprintf(f, "msVsGroupPinCount=%d\n", (int)ms.vsGroupPins.size());
+        for (auto& m : ms.vsGroupPins)
+            fprintf(f, "msVsGroupPin=%d,%d,%d,%d,%d,%d\n",
+                m.groupNodeId, m.pinType, m.pinIdx, m.innerNodeId, m.innerPinType, m.innerPinIdx);
+    }
+
     fclose(f);
     sProjectPath = path;
     sProjectDirty = false;
@@ -1784,6 +1894,143 @@ static bool LoadProject(const std::string& path)
                     sVsAnnotations.push_back(ann);
                 }
             }
+            // ---- Map Scenes (3D Scene tab) ----
+            else if (sscanf(line, "mapSceneCount=%d", &ival) == 1) { sMapScenes.clear(); sMapScenes.reserve(ival); }
+            else if (sscanf(line, "mapSelectedScene=%d", &ival) == 1) sMapSelectedScene = ival;
+            else if (strncmp(line, "mapScene=", 9) == 0)
+            {
+                MapScene ms;
+                strncpy(ms.name, line + 9, sizeof(ms.name) - 1);
+                // Strip newline
+                char* nl = strchr(ms.name, '\n'); if (nl) *nl = '\0';
+                char* cr = strchr(ms.name, '\r'); if (cr) *cr = '\0';
+                sMapScenes.push_back(ms);
+            }
+            else if (sscanf(line, "msSpriteCount=%d", &ival) == 1 && !sMapScenes.empty())
+            {
+                sMapScenes.back().spriteCount = 0; // reset, will increment as we parse sprites
+            }
+            else if (strncmp(line, "msSprite=", 9) == 0 && !sMapScenes.empty())
+            {
+                MapScene& ms = sMapScenes.back();
+                FloorSprite sp = {};
+                int typeVal = 0, animEn = 0;
+                if (sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d",
+                    &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
+                    &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx) >= 6)
+                {
+                    sp.type = (SpriteType)typeVal;
+                    sp.animEnabled = (animEn != 0);
+                    if (ms.spriteCount < kMaxFloorSprites)
+                        ms.sprites[ms.spriteCount++] = sp;
+                }
+            }
+            else if (strncmp(line, "msCam=", 6) == 0 && !sMapScenes.empty())
+            {
+                MapScene& ms = sMapScenes.back();
+                CameraStartObject& c = ms.camera;
+                int sti = 0, sf = 0, cb = 0;
+                sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f",
+                    &c.x, &c.z, &c.height, &c.angle, &c.horizon,
+                    &c.walkSpeed, &c.sprintSpeed,
+                    &c.walkEaseIn, &c.walkEaseOut, &c.sprintEaseIn, &c.sprintEaseOut,
+                    &c.jumpForce, &c.gravity, &c.maxFallSpeed,
+                    &c.jumpCamLand, &c.jumpCamAir, &c.autoOrbitSpeed, &c.jumpDampen,
+                    &sti, &sf, &cb, &c.drawDistance);
+                c.smallTriCull = sti;
+                c.skipFloor = (sf != 0);
+                c.coverageBuf = (cb != 0);
+            }
+            else if (sscanf(line, "msVsNextId=%d", &ival) == 1 && !sMapScenes.empty())
+                sMapScenes.back().vsNextId = ival;
+            else if (!sMapScenes.empty() && strncmp(line, "msVsPan=", 8) == 0)
+            {
+                float px, py;
+                if (sscanf(line + 8, "%f,%f", &px, &py) == 2) { sMapScenes.back().vsPanX = px; sMapScenes.back().vsPanY = py; }
+            }
+            else if (!sMapScenes.empty() && sscanf(line, "msVsZoom=%f", &fval) == 1)
+                sMapScenes.back().vsZoom = fval;
+            else if (sscanf(line, "msVsNodeCount=%d", &ival) == 1 && !sMapScenes.empty())
+            {
+                sMapScenes.back().vsNodes.clear();
+                sMapScenes.back().vsNodes.reserve(ival);
+            }
+            else if (strncmp(line, "msVsNode=", 9) == 0 && !sMapScenes.empty())
+            {
+                VsNode n;
+                int typeInt, gid = 0;
+                if (sscanf(line + 9, "%d,%d,%f,%f,%d,%d,%d,%d,%d",
+                    &n.id, &typeInt, &n.x, &n.y,
+                    &n.paramInt[0], &n.paramInt[1], &n.paramInt[2], &n.paramInt[3], &gid) >= 4)
+                {
+                    n.type = (VsNodeType)typeInt;
+                    n.groupId = gid;
+                    sMapScenes.back().vsNodes.push_back(n);
+                }
+            }
+            else if (strncmp(line, "msVsGroupDef=", 13) == 0 && !sMapScenes.empty())
+            {
+                int nid, ie, oe, id2, od;
+                char lbl[32] = {};
+                if (sscanf(line + 13, "%d|%31[^|]|%d,%d,%d,%d", &nid, lbl, &ie, &oe, &id2, &od) >= 6) {
+                    for (auto& n : sMapScenes.back().vsNodes)
+                        if (n.id == nid) {
+                            strncpy(n.groupLabel, lbl, sizeof(n.groupLabel) - 1);
+                            n.grpInExec = ie; n.grpOutExec = oe; n.grpInData = id2; n.grpOutData = od;
+                            break;
+                        }
+                }
+            }
+            else if (strncmp(line, "msVsNodeCode=", 13) == 0 && !sMapScenes.empty())
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    for (auto& n : sMapScenes.back().vsNodes)
+                        if (n.id == nid) { strncpy(n.customCode, codeBuf, sizeof(n.customCode) - 1); break; }
+                }
+            }
+            else if (sscanf(line, "msVsLinkCount=%d", &ival) == 1 && !sMapScenes.empty())
+            {
+                sMapScenes.back().vsLinks.clear();
+                sMapScenes.back().vsLinks.reserve(ival);
+            }
+            else if (strncmp(line, "msVsLink=", 9) == 0 && !sMapScenes.empty())
+            {
+                VsLink lk;
+                if (sscanf(line + 9, "%d,%d,%d|%d,%d,%d",
+                    &lk.from.nodeId, &lk.from.pinType, &lk.from.pinIdx,
+                    &lk.to.nodeId, &lk.to.pinType, &lk.to.pinIdx) == 6)
+                    sMapScenes.back().vsLinks.push_back(lk);
+            }
+            else if (sscanf(line, "msVsAnnotCount=%d", &ival) == 1 && !sMapScenes.empty())
+            {
+                sMapScenes.back().vsAnnotations.clear();
+                sMapScenes.back().vsAnnotations.reserve(ival);
+            }
+            else if (strncmp(line, "msVsAnnot=", 10) == 0 && !sMapScenes.empty())
+            {
+                VsAnnotation ann;
+                float ax, ay, aw, ah;
+                if (sscanf(line + 10, "%f,%f,%f,%f|", &ax, &ay, &aw, &ah) == 4) {
+                    ann.x = ax; ann.y = ay; ann.w = aw; ann.h = ah;
+                    const char* pipe = strchr(line + 10, '|');
+                    if (pipe) strncpy(ann.label, pipe + 1, sizeof(ann.label) - 1);
+                    sMapScenes.back().vsAnnotations.push_back(ann);
+                }
+            }
+            else if (sscanf(line, "msVsGroupPinCount=%d", &ival) == 1 && !sMapScenes.empty())
+            {
+                sMapScenes.back().vsGroupPins.clear();
+                sMapScenes.back().vsGroupPins.reserve(ival);
+            }
+            else if (strncmp(line, "msVsGroupPin=", 13) == 0 && !sMapScenes.empty())
+            {
+                VsGroupPinMap m;
+                if (sscanf(line + 13, "%d,%d,%d,%d,%d,%d",
+                    &m.groupNodeId, &m.pinType, &m.pinIdx, &m.innerNodeId, &m.innerPinType, &m.innerPinIdx) == 6)
+                    sMapScenes.back().vsGroupPins.push_back(m);
+            }
         }
     }
 
@@ -1798,6 +2045,10 @@ static bool LoadProject(const std::string& path)
         if (!sc.tileIndices.empty())
             LoadSceneState(sc);
     }
+
+    // Load selected map scene into active editor state
+    if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+        LoadMapSceneState(sMapScenes[sMapSelectedScene]);
 
     fclose(f);
     sProjectPath = path;
@@ -1831,6 +2082,9 @@ static void CloseProject()
 
     sMeshAssets.clear();
     sSelectedMesh = -1;
+
+    sMapScenes.clear();
+    sMapSelectedScene = 0;
 
     sProjectPath.clear();
     sProjectDirty = false;
@@ -3440,9 +3694,11 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             }
 
             // Show all frames for this animation
-            float dirCellSz = Scaled(52);
-            float dirPreviewW = dirCellSz - 8.0f;
-            float dirPreviewH = dirCellSz - 22.0f;
+            float dirPreviewSz = Scaled(44);
+            float dirCellW = dirPreviewSz + 8.0f;
+            float dirCellH = dirPreviewSz + 22.0f;  // label text + square image
+            float dirPreviewW = dirPreviewSz;
+            float dirPreviewH = dirPreviewSz;
             int dirCols = 4;
 
             for (int fi = 0; fi < anim.endFrame; fi++)
@@ -3466,10 +3722,10 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
 
                     ImVec2 cpos = ImGui::GetCursorScreenPos();
                     ImVec2 cmin = cpos;
-                    ImVec2 cmax = ImVec2(cpos.x + dirCellSz - 4, cpos.y + dirCellSz - 4);
+                    ImVec2 cmax = ImVec2(cpos.x + dirCellW - 4, cpos.y + dirCellH - 4);
                     ImDrawList* dl2 = ImGui::GetWindowDrawList();
 
-                    bool clicked = ImGui::InvisibleButton("##adirbtn", ImVec2(dirCellSz - 4, dirCellSz - 4));
+                    bool clicked = ImGui::InvisibleButton("##adirbtn", ImVec2(dirCellW - 4, dirCellH - 4));
                     bool hovered = ImGui::IsItemHovered();
 
                     dl2->AddRectFilled(cmin, cmax, isPlayFrame ? 0xFF202530 : 0xFF151520);
@@ -3483,13 +3739,17 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                     else
                         snprintf(dirLabel, sizeof(dirLabel), "%s%d", kDirNames[d], frameNum);
                     ImVec2 lsz2 = ImGui::CalcTextSize(dirLabel);
-                    dl2->AddText(ImVec2(cmin.x + (dirCellSz - 4 - lsz2.x) * 0.5f, cmin.y + 2), 0xFFAAAACC, dirLabel);
+                    dl2->AddText(ImVec2(cmin.x + (dirCellW - 4 - lsz2.x) * 0.5f, cmin.y + 2), 0xFFAAAACC, dirLabel);
 
                     AssetDirSprite& ads = sAssetDirSprites[sSelectedAsset][dirSetIdx][d];
                     if (ads.texture)
                     {
+                        // Maintain aspect ratio within the square preview area
+                        float aspect = (ads.width > 0 && ads.height > 0) ? (float)ads.width / (float)ads.height : 1.0f;
                         float drawW = dirPreviewW, drawH = dirPreviewH;
-                        float imgX = cmin.x + (dirCellSz - 4 - drawW) * 0.5f;
+                        if (aspect > 1.0f) drawH = dirPreviewH / aspect;
+                        else drawW = dirPreviewW * aspect;
+                        float imgX = cmin.x + (dirCellW - 4 - drawW) * 0.5f;
                         float imgY = cmin.y + 16.0f + (dirPreviewH - drawH) * 0.5f;
                         dl2->AddImage((ImTextureID)(uintptr_t)ads.texture,
                             ImVec2(imgX, imgY), ImVec2(imgX + drawW, imgY + drawH));
@@ -3499,7 +3759,7 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                         const char* emptyTxt = "Click";
                         ImVec2 esz2 = ImGui::CalcTextSize(emptyTxt);
                         dl2->AddText(
-                            ImVec2(cmin.x + (dirCellSz - 4 - esz2.x) * 0.5f,
+                            ImVec2(cmin.x + (dirCellW - 4 - esz2.x) * 0.5f,
                                    cmin.y + 16.0f + (dirPreviewH - esz2.y) * 0.5f),
                             0xFF666688, emptyTxt);
                     }
@@ -4189,7 +4449,7 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
         sTilemapData.floor.tileIndices.resize(1, 0);
     }
 
-    // Create default Scene 0 if none exist
+    // Create default Scene 0 if none exist (tilemap scenes)
     if (sTmScenes.empty())
     {
         TmScene sc;
@@ -4198,6 +4458,16 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
         sc.mapH = sTilemapData.floor.height;
         sTmScenes.push_back(sc);
         sTmSelectedScene = 0;
+    }
+
+    // Create default map scene if none exist (3D scene tab)
+    if (sMapScenes.empty())
+    {
+        MapScene ms;
+        snprintf(ms.name, sizeof(ms.name), "Scene 0");
+        SaveMapSceneState(ms);
+        sMapScenes.push_back(ms);
+        sMapSelectedScene = 0;
     }
 
     Tileset& ts = sTilemapData.tileset;
@@ -7460,18 +7730,84 @@ void FrameTick(float dt)
     else
     {
         // Map / Tiles tabs: viewport + right panel
+        float scenePanH = 0;
+
         DrawViewport(
             ImVec2(vp->WorkPos.x, bodyY),
             ImVec2(leftW, bodyH));
 
+        // Scene panel (top-right, only on Map tab)
+        if (sActiveTab == EditorTab::Map)
+        {
+            scenePanH = 160;
+            ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus;
+            ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + leftW, bodyY));
+            ImGui::SetNextWindowSize(ImVec2(rightW, scenePanH));
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
+            ImGui::Begin("##MapScenePanel", nullptr, panelFlags);
+
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Scenes");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("+##addmapscene"))
+            {
+                if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+                    SaveMapSceneState(sMapScenes[sMapSelectedScene]);
+                MapScene ms;
+                snprintf(ms.name, sizeof(ms.name), "Scene %d", (int)sMapScenes.size());
+                ms.spriteCount = 0;
+                sMapScenes.push_back(ms);
+                sMapSelectedScene = (int)sMapScenes.size() - 1;
+                LoadMapSceneState(sMapScenes[sMapSelectedScene]);
+            }
+            if ((int)sMapScenes.size() > 1) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("x##delmapscene"))
+                {
+                    sMapScenes.erase(sMapScenes.begin() + sMapSelectedScene);
+                    if (sMapSelectedScene >= (int)sMapScenes.size())
+                        sMapSelectedScene = (int)sMapScenes.size() - 1;
+                    LoadMapSceneState(sMapScenes[sMapSelectedScene]);
+                }
+            }
+
+            // Scene list
+            ImGui::BeginChild("##MapSceneList", ImVec2(0, scenePanH - 60), true);
+            for (int i = 0; i < (int)sMapScenes.size(); i++)
+            {
+                bool sel = (i == sMapSelectedScene);
+                char lbl[64];
+                snprintf(lbl, sizeof(lbl), "%s##ms%d", sMapScenes[i].name, i);
+                if (ImGui::Selectable(lbl, sel) && i != sMapSelectedScene)
+                {
+                    if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+                        SaveMapSceneState(sMapScenes[sMapSelectedScene]);
+                    sMapSelectedScene = i;
+                    LoadMapSceneState(sMapScenes[i]);
+                }
+            }
+            ImGui::EndChild();
+
+            // Rename field
+            if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+            {
+                ImGui::PushItemWidth(-1);
+                ImGui::InputText("##msname", sMapScenes[sMapSelectedScene].name, sizeof(sMapScenes[sMapSelectedScene].name));
+                ImGui::PopItemWidth();
+            }
+
+            ImGui::End();
+            ImGui::PopStyleColor();
+        }
+
         if (sEditorMode == EditorMode::Edit)
             DrawObjectEditorPanel(
-                ImVec2(vp->WorkPos.x + leftW, bodyY),
-                ImVec2(rightW, bodyH));
+                ImVec2(vp->WorkPos.x + leftW, bodyY + scenePanH),
+                ImVec2(rightW, bodyH - scenePanH));
         else
             DrawTilesetPanel(
-                ImVec2(vp->WorkPos.x + leftW, bodyY),
-                ImVec2(rightW, bodyH));
+                ImVec2(vp->WorkPos.x + leftW, bodyY + scenePanH),
+                ImVec2(rightW, bodyH - scenePanH));
     }
 
     DrawStatusBar(
