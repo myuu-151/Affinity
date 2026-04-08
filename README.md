@@ -123,17 +123,6 @@ make
 | **Ctrl+C / V** | Copy / paste nodes (works across projects) |
 | **Ctrl+Z** | Undo delete |
 
-### GBA Runtime
-
-| Button | Action |
-|--------|--------|
-| **D-pad** | Movement *(driven by visual script nodes)* |
-| **A** | Jump *(driven by visual script nodes)* |
-| **B** | Sprint *(driven by visual script nodes)* |
-| **L / R** | Orbit camera *(driven by visual script nodes)* |
-| **Start** | Reset to start position |
-| **Select** | Cycle display modes |
-
 ---
 
 ## Project Structure
