@@ -5,8 +5,7 @@
 <h1 align="center">Affinity Engine</h1>
 
 <p align="center">
-  A Game Boy Advance and Nintendo DS 3D engine with a Windows desktop editor.<br>
-  Import OBJ meshes, place objects in a live viewport, and package directly to <code>.gba</code> or <code>.nds</code> ROMs.
+  A Game Boy Advance and Nintendo DS 3D engine with a Windows desktop editor.
 </p>
 
 <p align="center">
