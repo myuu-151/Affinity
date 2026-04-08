@@ -27,16 +27,60 @@ A Game Boy Advance and Nintendo DS 3D engine with a Windows desktop editor. Impo
 - **Windows 10/11**
 - **Visual Studio 2022+** (MSVC C++17)
 - **CMake 3.16+**
-- **devkitPro** with devkitARM + libtonc (for GBA/NDS ROM packaging)
+- **devkitPro** with devkitARM + libtonc (for GBA ROM packaging)
+- **mGBA** (optional, for launching ROMs from the editor)
 
-## Build
+## Building the Editor
 
-```bat
-cmake -S . -B build -G "Visual Studio 18 2026" -A x64
-cmake --build build --config Debug
+1. Clone the repo:
+   ```bash
+   git clone https://github.com/myuu-151/Affinity.git
+   cd Affinity
+   ```
+
+2. Configure and build with CMake:
+   ```bat
+   cmake -S . -B build
+   cmake --build build --config Release
+   ```
+
+3. Run:
+   ```
+   build\Release\AffinityEditor.exe
+   ```
+
+## Building GBA ROMs
+
+The editor builds GBA ROMs automatically when you click the build button, but you need the devkitPro toolchain installed first.
+
+### Install devkitPro
+
+1. Download the devkitPro installer from [devkitpro.org/wiki/Getting_Started](https://devkitpro.org/wiki/Getting_Started)
+2. Run the installer (Windows graphical installer or pacman-based setup for Linux/Mac)
+3. Install the GBA packages:
+   ```bash
+   pacman -S devkitARM libtonc
+   ```
+4. Make sure the environment variables are set (the installer usually does this):
+   ```
+   DEVKITPRO=/opt/devkitpro
+   DEVKITARM=/opt/devkitpro/devkitARM
+   ```
+
+### Build Flow
+
+1. Open or create a project in the editor
+2. Add meshes, sprites, and set up your scene
+3. Click the **GBA Build** button — the editor exports `mapdata.h` to `gba_runtime/include/` and runs `make` in `gba_runtime/`
+4. The output ROM is `gba_runtime/affinity.gba`
+
+To build the ROM manually:
+```bash
+cd gba_runtime
+make
 ```
 
-Run: `build\Debug\AffinityEditor.exe`
+> **Note:** `mapdata.h` must be exported from the editor first — it contains all mesh, sprite, map, and script data for the ROM.
 
 ## Editor Controls
 
