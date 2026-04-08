@@ -5757,7 +5757,7 @@ void FrameTick(float dt)
                             for (int li = 0; li < (int)sVsLinks.size(); li++)
                                 if (sVsLinks[li].to.nodeId == a->id && sVsLinks[li].to.pinType == 3) {
                                     auto it = sVsLinkSurgeRevT.find(li);
-                                    if (it == sVsLinkSurgeRevT.end() || it->second > 0.5f)
+                                    if (it == sVsLinkSurgeRevT.end() || it->second > 1.0f)
                                         sVsLinkSurgeRevT[li] = 0.0f;
                                 }
                         } else {
@@ -5776,7 +5776,7 @@ void FrameTick(float dt)
                 for (int li = 0; li < (int)sVsLinks.size(); li++)
                     if (sVsLinks[li].to.nodeId == sActivePlayAnimNodeId && sVsLinks[li].to.pinType == 3) {
                         auto it = sVsLinkSurgeRevT.find(li);
-                        if (it == sVsLinkSurgeRevT.end() || it->second > 0.5f)
+                        if (it == sVsLinkSurgeRevT.end() || it->second > 1.0f)
                             sVsLinkSurgeRevT[li] = 0.0f;
                     }
                 // Walk backwards through exec links to find the event that triggered it
@@ -5852,7 +5852,7 @@ void FrameTick(float dt)
                             for (int li = 0; li < (int)sVsLinks.size(); li++)
                                 if (sVsLinks[li].to.nodeId == a->id && sVsLinks[li].to.pinType == 3) {
                                     auto it = sVsLinkSurgeRevT.find(li);
-                                    if (it == sVsLinkSurgeRevT.end() || it->second > 0.5f)
+                                    if (it == sVsLinkSurgeRevT.end() || it->second > 1.0f)
                                         sVsLinkSurgeRevT[li] = 0.0f;
                                 }
                         } else {
@@ -6230,7 +6230,7 @@ void FrameTick(float dt)
                 // Start new surge when source fires and no surge active (or past halfway for held keys)
                 if (firing) {
                     auto it = sVsLinkSurgeT.find(li);
-                    if (it == sVsLinkSurgeT.end() || it->second > 0.5f)
+                    if (it == sVsLinkSurgeT.end() || it->second > 1.0f)
                         sVsLinkSurgeT[li] = 0.0f;
                 }
             }
