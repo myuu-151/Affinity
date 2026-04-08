@@ -6944,6 +6944,7 @@ void FrameTick(float dt)
         static char sVsNodeSearch[64] = {};
         static bool sVsSearchFocused = false;
         // Node info popup (right-click on node)
+        ImGui::SetNextWindowSizeConstraints(ImVec2(220, 0), ImVec2(300, 500));
         if (ImGui::BeginPopup("##NodeInfo")) {
             if (sVsNodeInfoIdx >= 0 && sVsNodeInfoIdx < (int)sVsNodes.size()) {
                 VsNode& infoNode = sVsNodes[sVsNodeInfoIdx];
@@ -7016,98 +7017,188 @@ void FrameTick(float dt)
                     return src ? src->paramInt[0] : 0;
                 };
 
-                // Build actual generated code with resolved values
+                // Helper: format a resolved float value or placeholder
+                auto fmtFloat = [&](int nodeId, int pinIdx, const char* placeholder) -> const char* {
+                    static char buf[32];
+                    VsNode* src = resolveDataIn(nodeId, pinIdx);
+                    if (!src) return placeholder;
+                    float v; memcpy(&v, &src->paramInt[0], sizeof(float));
+                    snprintf(buf, sizeof(buf), "%d", (int)(v * 256.0f));
+                    return buf;
+                };
+                auto fmtInt = [&](int nodeId, int pinIdx, const char* placeholder) -> const char* {
+                    static char buf[32];
+                    VsNode* src = resolveDataIn(nodeId, pinIdx);
+                    if (!src) return placeholder;
+                    if (src->type == VsNodeType::Integer) { snprintf(buf, sizeof(buf), "%d", src->paramInt[0]); return buf; }
+                    if (src->type == VsNodeType::Float) { float v; memcpy(&v, &src->paramInt[0], sizeof(float)); snprintf(buf, sizeof(buf), "%d", (int)(v * 256.0f)); return buf; }
+                    return placeholder;
+                };
+
+                // Build actual generated code with resolved values (or placeholders)
                 char defaultCodeBuf[512] = {};
                 const char* defaultCode = "";
                 switch (infoNode.type) {
-                case VsNodeType::Jump: {
-                    float force = resolveFloat(infoNode.id, 0, 2.0f);
-                    int forceFixed = (int)(force * 256.0f);
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (player_on_ground) player_vy = %d;", forceFixed);
+                case VsNodeType::Jump:
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (player_on_ground) player_vy = %s;", fmtFloat(infoNode.id, 0, "<force>"));
                     defaultCode = defaultCodeBuf; break;
-                }
-                case VsNodeType::DampenJump: {
-                    float factor = resolveFloat(infoNode.id, 0, 0.75f);
-                    int factorFixed = (int)(factor * 256.0f);
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (player_vy > 0) player_vy = (player_vy * %d) >> 8;", factorFixed);
+                case VsNodeType::DampenJump:
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (player_vy > 0) player_vy = (player_vy * %s) >> 8;", fmtFloat(infoNode.id, 0, "<factor>"));
                     defaultCode = defaultCodeBuf; break;
-                }
                 case VsNodeType::Walk: {
-                    int speed = resolveInt(infoNode.id, 0, 37);
-                    int gbaSpeed = (int)(speed * 37.0f / 35.0f);
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_move_speed = %d;", gbaSpeed);
+                    VsNode* src = resolveDataIn(infoNode.id, 0);
+                    if (src) { int s = resolveInt(infoNode.id, 0, 37); snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_move_speed = %d;", (int)(s * 37.0f / 35.0f)); }
+                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_move_speed = <speed>;");
                     defaultCode = defaultCodeBuf; break;
                 }
                 case VsNodeType::Sprint: {
-                    int speed = resolveInt(infoNode.id, 0, 56);
-                    int gbaSpeed = (int)(speed * 37.0f / 35.0f);
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_move_speed = %d;", gbaSpeed);
+                    VsNode* src = resolveDataIn(infoNode.id, 0);
+                    if (src) { int s = resolveInt(infoNode.id, 0, 56); snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_move_speed = %d;", (int)(s * 37.0f / 35.0f)); }
+                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_move_speed = <speed>;");
                     defaultCode = defaultCodeBuf; break;
                 }
-                case VsNodeType::SetGravity: {
-                    float val = resolveFloat(infoNode.id, 0, 0.09f);
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_gravity = %d;", (int)(val * 256.0f));
+                case VsNodeType::SetGravity:
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_gravity = %s;", fmtFloat(infoNode.id, 0, "<value>"));
                     defaultCode = defaultCodeBuf; break;
-                }
-                case VsNodeType::SetMaxFall: {
-                    float val = resolveFloat(infoNode.id, 0, 6.0f);
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_terminal_vel = %d;", (int)(val * 256.0f));
+                case VsNodeType::SetMaxFall:
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_terminal_vel = %s;", fmtFloat(infoNode.id, 0, "<value>"));
                     defaultCode = defaultCodeBuf; break;
-                }
-                case VsNodeType::AutoOrbit: {
-                    int speed = resolveInt(infoNode.id, 0, 205);
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_auto_orbit_speed = %d;", speed);
+                case VsNodeType::AutoOrbit:
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_auto_orbit_speed = %s;", fmtInt(infoNode.id, 0, "<speed>"));
                     defaultCode = defaultCodeBuf; break;
-                }
-                case VsNodeType::PlayAnim: {
-                    int anim = resolveInt(infoNode.id, 0, 0);
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_play_anim = %d;", anim);
+                case VsNodeType::PlayAnim:
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_play_anim = %s;", fmtInt(infoNode.id, 0, "<anim>"));
                     defaultCode = defaultCodeBuf; break;
-                }
                 case VsNodeType::MovePlayer: {
-                    int dir = resolveDir(infoNode.id, 0);
-                    const char* dirKeys[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
-                    const char* dirVars[] = { "afn_input_right -= 256", "afn_input_right += 256",
-                                              "afn_input_fwd += 256", "afn_input_fwd -= 256" };
-                    if (dir >= 0 && dir < 4)
-                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(%s)) %s;", dirKeys[dir], dirVars[dir]);
+                    VsNode* src = resolveDataIn(infoNode.id, 0);
+                    if (src) {
+                        int dir = src->paramInt[0];
+                        const char* dirKeys[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
+                        const char* dirVars[] = { "afn_input_right -= 256", "afn_input_right += 256",
+                                                  "afn_input_fwd += 256", "afn_input_fwd -= 256" };
+                        if (dir >= 0 && dir < 4)
+                            snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(%s)) %s;", dirKeys[dir], dirVars[dir]);
+                    } else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(<key>)) <move>;");
                     defaultCode = defaultCodeBuf; break;
                 }
                 case VsNodeType::OrbitCamera: {
-                    int dir = resolveDir(infoNode.id, 0);
-                    int speed = resolveInt(infoNode.id, 1, 512);
-                    const char* key = (dir == 0) ? "KEY_L" : "KEY_R";
-                    const char* sign = (dir == 0) ? "-" : "+";
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(%s)) orbit_angle %s= %d;", key, sign, speed);
+                    VsNode* dirSrc = resolveDataIn(infoNode.id, 0);
+                    VsNode* spdSrc = resolveDataIn(infoNode.id, 1);
+                    if (dirSrc) {
+                        int dir = dirSrc->paramInt[0];
+                        const char* key = (dir == 0) ? "KEY_L" : "KEY_R";
+                        const char* sign = (dir == 0) ? "-" : "+";
+                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(%s)) orbit_angle %s= %s;", key, sign, fmtInt(infoNode.id, 1, "<speed>"));
+                    } else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(<key>)) orbit_angle += %s;", fmtInt(infoNode.id, 1, "<speed>"));
                     defaultCode = defaultCodeBuf; break;
                 }
-                case VsNodeType::DestroyObject: {
-                    int obj = resolveInt(infoNode.id, 0, 0);
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "// destroy object %d", obj);
+                case VsNodeType::DestroyObject:
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "// destroy object %s", fmtInt(infoNode.id, 0, "<id>"));
+                    defaultCode = defaultCodeBuf; break;
+                // Events
+                case VsNodeType::OnKeyPressed: {
+                    VsNode* src = resolveDataIn(infoNode.id, 0);
+                    if (src && src->paramInt[0] >= 0 && src->paramInt[0] < kVsKeyCount)
+                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_hit(KEY_%s)) { ... }", sVsKeyNames[src->paramInt[0]]);
+                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_hit(<key>)) { ... }");
                     defaultCode = defaultCodeBuf; break;
                 }
+                case VsNodeType::OnKeyReleased: {
+                    VsNode* src = resolveDataIn(infoNode.id, 0);
+                    if (src && src->paramInt[0] >= 0 && src->paramInt[0] < kVsKeyCount)
+                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_released(KEY_%s)) { ... }", sVsKeyNames[src->paramInt[0]]);
+                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_released(<key>)) { ... }");
+                    defaultCode = defaultCodeBuf; break;
+                }
+                case VsNodeType::OnKeyHeld: {
+                    VsNode* src = resolveDataIn(infoNode.id, 0);
+                    if (src && src->paramInt[0] >= 0 && src->paramInt[0] < kVsKeyCount)
+                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(KEY_%s)) { ... }", sVsKeyNames[src->paramInt[0]]);
+                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(<key>)) { ... }");
+                    defaultCode = defaultCodeBuf; break;
+                }
+                case VsNodeType::OnStart:
+                    defaultCode = "// runs once at scene init"; break;
+                case VsNodeType::OnUpdate:
+                    defaultCode = "// runs every frame"; break;
+                case VsNodeType::OnCollision:
+                    defaultCode = "// runs on player collision"; break;
+                // Data nodes
+                case VsNodeType::Integer:
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "%d", infoNode.paramInt[0]);
+                    defaultCode = defaultCodeBuf; break;
+                case VsNodeType::Float: {
+                    float fv; memcpy(&fv, &infoNode.paramInt[0], sizeof(float));
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "%.3g  (fixed: %d)", fv, (int)(fv * 256.0f));
+                    defaultCode = defaultCodeBuf; break;
+                }
+                case VsNodeType::Key:
+                    if (infoNode.paramInt[0] >= 0 && infoNode.paramInt[0] < kVsKeyCount)
+                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "KEY_%s", sVsKeyNames[infoNode.paramInt[0]]);
+                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "<unset>");
+                    defaultCode = defaultCodeBuf; break;
+                case VsNodeType::Direction:
+                    if (infoNode.paramInt[0] >= 0 && infoNode.paramInt[0] < kVsAxisCount)
+                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "%s", sVsAxisNames[infoNode.paramInt[0]]);
+                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "<unset>");
+                    defaultCode = defaultCodeBuf; break;
+                case VsNodeType::Animation:
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "anim index %d", infoNode.paramInt[0]);
+                    defaultCode = defaultCodeBuf; break;
+                // Logic
+                case VsNodeType::Branch:
+                    defaultCode = "if (<condition>) { true } else { false }"; break;
+                case VsNodeType::CompareVar:
+                    defaultCode = "result = (vars[<slot>] == <value>) ? 1 : 0;"; break;
+                case VsNodeType::LookDirection:
+                    defaultCode = "// set player facing direction"; break;
+                case VsNodeType::ChangeScene:
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "// change to scene %s", fmtInt(infoNode.id, 0, "<id>"));
+                    defaultCode = defaultCodeBuf; break;
+                case VsNodeType::SetVariable:
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "vars[%s] = %s;", fmtInt(infoNode.id, 0, "<slot>"), fmtInt(infoNode.id, 1, "<value>"));
+                    defaultCode = defaultCodeBuf; break;
+                case VsNodeType::AddVariable:
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "vars[%s] += %s;", fmtInt(infoNode.id, 0, "<slot>"), fmtInt(infoNode.id, 1, "<amount>"));
+                    defaultCode = defaultCodeBuf; break;
+                case VsNodeType::PlaySound:
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "// play sound %s", fmtInt(infoNode.id, 0, "<id>"));
+                    defaultCode = defaultCodeBuf; break;
+                case VsNodeType::Wait:
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "// wait %s frames", fmtInt(infoNode.id, 0, "<n>"));
+                    defaultCode = defaultCodeBuf; break;
+                case VsNodeType::Group:
+                    defaultCode = "// subgraph"; break;
                 default: break;
-                }
-
-                // If no custom code saved, always show live-resolved default
-                if (!infoNode.customCode[0] && defaultCode[0]) {
-                    strncpy(sVsNodeCodeBuf, defaultCode, sizeof(sVsNodeCodeBuf) - 1);
                 }
 
                 // Editable code section
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Code");
                 ImGui::Spacing();
-                ImGui::PushItemWidth(-1);
-                ImGui::InputTextMultiline("##NodeCode", sVsNodeCodeBuf, sizeof(sVsNodeCodeBuf),
-                    ImVec2(-1, 100), ImGuiInputTextFlags_AllowTabInput);
-                ImGui::PopItemWidth();
-                if (ImGui::Button("Save")) {
+                if (!infoNode.customCode[0]) {
+                    // No custom override — show live-resolved default as read-only
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.8f, 0.6f, 1.0f));
+                    ImGui::TextWrapped("%s", defaultCode[0] ? defaultCode : "(no code)");
+                    ImGui::PopStyleColor();
+                    ImGui::Spacing();
+                    if (defaultCode[0] && ImGui::Button("Edit")) {
+                        strncpy(infoNode.customCode, defaultCode, sizeof(infoNode.customCode) - 1);
+                        memcpy(sVsNodeCodeBuf, infoNode.customCode, sizeof(sVsNodeCodeBuf));
+                    }
+                } else {
+                    // Custom code — editable
+                    ImGui::PushItemWidth(-1);
+                    ImGui::InputTextMultiline("##NodeCode", sVsNodeCodeBuf, sizeof(sVsNodeCodeBuf),
+                        ImVec2(-1, 100), ImGuiInputTextFlags_AllowTabInput);
+                    ImGui::PopItemWidth();
+                }
+                if (infoNode.customCode[0] && ImGui::Button("Save")) {
                     memcpy(infoNode.customCode, sVsNodeCodeBuf, sizeof(infoNode.customCode));
                     ImGui::CloseCurrentPopup();
                 }
-                ImGui::SameLine();
-                if (ImGui::Button("Clear")) {
+                if (infoNode.customCode[0]) ImGui::SameLine();
+                if (infoNode.customCode[0] && ImGui::Button("Reset")) {
                     sVsNodeCodeBuf[0] = '\0';
                     infoNode.customCode[0] = '\0';
                 }
