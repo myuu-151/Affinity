@@ -7089,11 +7089,10 @@ void FrameTick(float dt)
                 default: break;
                 }
 
-                // Pre-populate code field with default if empty and no custom code set
-                if (sVsNodeInfoJustOpened && !sVsNodeCodeBuf[0] && defaultCode[0]) {
+                // If no custom code saved, always show live-resolved default
+                if (!infoNode.customCode[0] && defaultCode[0]) {
                     strncpy(sVsNodeCodeBuf, defaultCode, sizeof(sVsNodeCodeBuf) - 1);
                 }
-                sVsNodeInfoJustOpened = false;
 
                 // Editable code section
                 ImGui::Separator();
