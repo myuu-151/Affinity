@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <map>
 #include <filesystem>
 #include <thread>
 
@@ -576,6 +577,17 @@ static float sManualOrbitCurrent = 0.0f; // smoothed manual orbit speed (J/L)
 static float sPlayerVelX = 0.0f, sPlayerVelZ = 0.0f; // smoothed player velocity
 static FloorSprite sSavedPlayerSprite; // saved player state before Play
 static int sSavedPlayerIdx = -1;
+static bool sScriptStartRan = false;  // script OnStart ran this Play session
+static float sScriptMoveSpeed = -1.0f; // persists across frames (Walk/Sprint nodes)
+static float sScriptAutoOrbitSpeed = 0.0f; // persists across frames (AutoOrbit node)
+static int sActivePlayAnimNodeId = -1; // PlayAnim node currently driving animation
+static int sPlayAnimIdle = -1;    // PlayAnim from OnStart (idle)
+static int sPlayAnimHeld = -1;    // PlayAnim from OnKeyHeld (sprint anim)
+static int sPlayAnimReleased = -1; // PlayAnim from OnKeyReleased (walk anim)
+// Link surge animation: tracks which node IDs fired this frame
+static std::vector<int> sVsFiredNodes;       // node IDs that fired this frame
+static std::map<int, float> sVsLinkSurgeT;   // link index → surge position 0→1 (traveling dot)
+static std::map<int, float> sVsLinkSurgeRevT; // link index → reverse surge (travels to→from)
 static SelectedObjType sSelectedObjType = SelectedObjType::None;
 
 // Active transform axis for viewport gizmo (0=none, 'X','Y','Z','S')
@@ -1024,7 +1036,8 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "small_tri_cull=%d\n", sCamObj.smallTriCull);
     fprintf(f, "skip_floor=%d\n", sCamObj.skipFloor ? 1 : 0);
     fprintf(f, "coverage_buf=%d\n", sCamObj.coverageBuf ? 1 : 0);
-    fprintf(f, "icon_scale=%.6f\n\n", sCamObjEditorScale);
+    fprintf(f, "icon_scale=%.6f\n", sCamObjEditorScale);
+    fprintf(f, "build_target=%d\n\n", (int)sBuildTarget);
 
     // Editor camera
     fprintf(f, "[EditorCamera]\n");
@@ -1314,6 +1327,7 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "skip_floor=%d", &ival) == 1) sCamObj.skipFloor = (ival != 0);
             else if (sscanf(line, "coverage_buf=%d", &ival) == 1) sCamObj.coverageBuf = (ival != 0);
             else if (sscanf(line, "icon_scale=%f", &fval) == 1) sCamObjEditorScale = fval;
+            else if (sscanf(line, "build_target=%d", &ival) == 1) sBuildTarget = (BuildTarget)ival;
         }
         else if (strcmp(section, "EditorCamera") == 0)
         {
@@ -5099,11 +5113,11 @@ void FrameTick(float dt)
             ImGui::EndMenu();
         }
         ImGui::Separator();
-        if (ImGui::RadioButton("GBA", sBuildTarget == BuildTarget::GBA))
-            sBuildTarget = BuildTarget::GBA;
-        ImGui::SameLine();
         if (ImGui::RadioButton("NDS", sBuildTarget == BuildTarget::NDS))
             sBuildTarget = BuildTarget::NDS;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("GBA", sBuildTarget == BuildTarget::GBA))
+            sBuildTarget = BuildTarget::GBA;
         bool buildFromMenu = false;
         if (buildFromMenu || sBuildRequested)
         {
@@ -5305,8 +5319,30 @@ void FrameTick(float dt)
                 float exportOrbitDist = sOrbitDist;
                 BuildTarget target = sBuildTarget;
 
+                // Build visual script export from node graph
+                GBAScriptExport exportScript;
+                for (auto& n : sVsNodes)
+                {
+                    GBAScriptNodeExport sn;
+                    sn.id = n.id;
+                    sn.type = (GBAScriptNodeType)(int)n.type;
+                    for (int pi = 0; pi < 4; pi++) sn.paramInt[pi] = n.paramInt[pi];
+                    exportScript.nodes.push_back(sn);
+                }
+                for (auto& l : sVsLinks)
+                {
+                    GBAScriptLinkExport sl;
+                    sl.fromNodeId  = l.from.nodeId;
+                    sl.fromPinType = l.from.pinType;
+                    sl.fromPinIdx  = l.from.pinIdx;
+                    sl.toNodeId    = l.to.nodeId;
+                    sl.toPinType   = l.to.pinType;
+                    sl.toPinIdx    = l.to.pinIdx;
+                    exportScript.links.push_back(sl);
+                }
+
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                             exportMeshes, exportOrbitDist, target]() {
+                             exportMeshes, exportOrbitDist, exportScript, target]() {
                     std::string err;
                     bool ok;
                     if (target == BuildTarget::NDS)
@@ -5314,7 +5350,7 @@ void FrameTick(float dt)
                                         exportMeshes, exportOrbitDist, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                                        exportMeshes, exportOrbitDist, err);
+                                        exportMeshes, exportOrbitDist, exportScript, err);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
@@ -5339,6 +5375,17 @@ void FrameTick(float dt)
             if (sSavedPlayerIdx >= 0 && sSavedPlayerIdx < sSpriteCount)
                 sSprites[sSavedPlayerIdx] = sSavedPlayerSprite;
             sSavedPlayerIdx = -1;
+            sScriptStartRan = false;
+            sScriptMoveSpeed = -1.0f;
+            sScriptAutoOrbitSpeed = 0.0f;
+            sActivePlayAnimNodeId = -1;
+            sPlayAnimIdle = -1;
+            sPlayAnimHeld = -1;
+            sPlayAnimReleased = -1;
+            sVsFiredNodes.clear();
+            sVsLinkSurgeT.clear();
+            sVsLinkSurgeRevT.clear();
+            // sOnStartFrames reset handled by sScriptStartRan = false
         }
 
         if (sEditorMode == EditorMode::Edit)
@@ -5537,58 +5584,341 @@ void FrameTick(float dt)
         }
         else
         {
-            // ---- PLAY MODE: third-person orbit camera ----
-            float moveSpeed = (ImGui::IsKeyDown(ImGuiKey_LeftShift) ? sCamObj.sprintSpeed : sCamObj.walkSpeed) * dt;
-            float rotSpeed  = 3.0f * dt;
+            // ---- PLAY MODE: node-graph-driven third-person orbit camera ----
+            // Interpret the visual script node graph to drive gameplay, matching
+            // the C code generated for the GBA runtime.
 
-            // Find player sprite
+            // Key mapping: Editor keyboard → GBA button indices
+            // 0=A, 1=B, 2=L, 3=R, 4=Start, 5=Select, 6=Up, 7=Down, 8=Left, 9=Right
+            auto editorKeyDown = [](int gbaKey) -> bool {
+                switch (gbaKey) {
+                case 0: return ImGui::IsKeyDown(ImGuiKey_Space);
+                case 1: return ImGui::IsKeyDown(ImGuiKey_LeftShift);
+                case 2: return ImGui::IsKeyDown(ImGuiKey_J);
+                case 3: return ImGui::IsKeyDown(ImGuiKey_L);
+                case 4: return ImGui::IsKeyDown(ImGuiKey_Enter);
+                case 5: return ImGui::IsKeyDown(ImGuiKey_Backspace);
+                case 6: return ImGui::IsKeyDown(ImGuiKey_W);
+                case 7: return ImGui::IsKeyDown(ImGuiKey_S);
+                case 8: return ImGui::IsKeyDown(ImGuiKey_A);
+                case 9: return ImGui::IsKeyDown(ImGuiKey_D);
+                default: return false;
+                }
+            };
+            auto editorKeyHit = [](int gbaKey) -> bool {
+                switch (gbaKey) {
+                case 0: return ImGui::IsKeyPressed(ImGuiKey_Space);
+                case 1: return ImGui::IsKeyPressed(ImGuiKey_LeftShift);
+                case 2: return ImGui::IsKeyPressed(ImGuiKey_J);
+                case 3: return ImGui::IsKeyPressed(ImGuiKey_L);
+                case 4: return ImGui::IsKeyPressed(ImGuiKey_Enter);
+                case 5: return ImGui::IsKeyPressed(ImGuiKey_Backspace);
+                case 6: return ImGui::IsKeyPressed(ImGuiKey_W);
+                case 7: return ImGui::IsKeyPressed(ImGuiKey_S);
+                case 8: return ImGui::IsKeyPressed(ImGuiKey_A);
+                case 9: return ImGui::IsKeyPressed(ImGuiKey_D);
+                default: return false;
+                }
+            };
+
+            float rotSpeed = 3.0f * dt;
+
+            // --- Node graph interpreter helpers ---
+            auto findNodePlay = [&](int id) -> const VsNode* {
+                for (auto& n : sVsNodes) if (n.id == id) return &n;
+                return nullptr;
+            };
+            auto findDataInPlay = [&](int nodeId, int pinIdx) -> const VsNode* {
+                for (auto& lk : sVsLinks)
+                    if (lk.to.nodeId == nodeId && lk.to.pinType == 3 && lk.to.pinIdx == pinIdx)
+                        return findNodePlay(lk.from.nodeId);
+                return nullptr;
+            };
+            auto resolveIntPlay = [](const VsNode* dn) -> int {
+                return dn ? dn->paramInt[0] : 0;
+            };
+            auto resolveFloatPlay = [](const VsNode* dn) -> float {
+                if (!dn) return 0.0f;
+                float fv; memcpy(&fv, &dn->paramInt[0], sizeof(float)); return fv;
+            };
+            auto resolveEventKeyPlay = [&](const VsNode& ev) -> int {
+                int count = 0; int keyVal = -1;
+                for (auto& lk : sVsLinks)
+                    if (lk.to.nodeId == ev.id && lk.to.pinType == 3 && lk.to.pinIdx == 0) {
+                        auto* dn = findNodePlay(lk.from.nodeId);
+                        if (dn) { keyVal = dn->paramInt[0]; count++; }
+                    }
+                if (count == 1) return keyVal;
+                if (count == 0) return ev.paramInt[0];
+                return -1;
+            };
+            auto collectActionsPlay = [&](int startNodeId) -> std::vector<const VsNode*> {
+                std::vector<const VsNode*> acts;
+                std::vector<int> front;
+                std::vector<bool> vis(10000, false);
+                for (auto& lk : sVsLinks)
+                    if (lk.from.nodeId == startNodeId && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                        front.push_back(lk.to.nodeId);
+                int safety = 0;
+                while (!front.empty() && safety < 256) {
+                    int nid = front.front(); front.erase(front.begin());
+                    if (nid < 0 || nid >= (int)vis.size() || vis[nid]) continue;
+                    vis[nid] = true; safety++;
+                    auto* an = findNodePlay(nid); if (!an) continue;
+                    acts.push_back(an);
+                    for (auto& lk : sVsLinks)
+                        if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                            front.push_back(lk.to.nodeId);
+                }
+                return acts;
+            };
+
+            // Script state for this frame
+            float scInputFwd = 0.0f, scInputRight = 0.0f;
+            float scOrbitDelta = 0.0f;
+
+            // Action interpreter
+            // execEventType tracks which event type is currently driving actions
+            VsNodeType execEventType = VsNodeType::Group; // sentinel
+            auto execActionPlay = [&](const VsNode* action) {
+                VsNodeType t = action->type;
+                if (t == VsNodeType::MovePlayer) {
+                    auto* dd = findDataInPlay(action->id, 0);
+                    int dir = dd ? dd->paramInt[0] : 0;
+                    int dirKeys[] = { 8, 9, 6, 7 }; // Left,Right,Up,Down
+                    if (dir >= 0 && dir < 4 && editorKeyDown(dirKeys[dir])) {
+                        if (dir == 0) scInputRight -= 1.0f;
+                        if (dir == 1) scInputRight += 1.0f;
+                        if (dir == 2) scInputFwd   += 1.0f;
+                        if (dir == 3) scInputFwd   -= 1.0f;
+                    }
+                }
+                else if (t == VsNodeType::Walk) {
+                    auto* sd = findDataInPlay(action->id, 0);
+                    sScriptMoveSpeed = sd ? (float)resolveIntPlay(sd) : sCamObj.walkSpeed;
+                }
+                else if (t == VsNodeType::Sprint) {
+                    auto* sd = findDataInPlay(action->id, 0);
+                    sScriptMoveSpeed = sd ? (float)resolveIntPlay(sd) : sCamObj.sprintSpeed;
+                }
+                else if (t == VsNodeType::OrbitCamera) {
+                    auto* dd = findDataInPlay(action->id, 0);
+                    auto* sd = findDataInPlay(action->id, 1);
+                    int dir = dd ? dd->paramInt[0] : 1;
+                    int speed = sd ? resolveIntPlay(sd) : 512;
+                    int key = (dir == 0) ? 2 : 3;
+                    if (editorKeyDown(key)) {
+                        float radPerFrame = (float)speed / 65536.0f * 6.28318f;
+                        scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;
+                    }
+                }
+                else if (t == VsNodeType::AutoOrbit) {
+                    auto* sd = findDataInPlay(action->id, 0);
+                    sScriptAutoOrbitSpeed = sd ? (float)resolveIntPlay(sd) : 205.0f;
+                }
+                // Jump, DampenJump, SetGravity, SetMaxFall — editor has no vertical physics
+                else if (t == VsNodeType::PlayAnim) {
+                    if (execEventType == VsNodeType::OnStart)
+                        sPlayAnimIdle = action->id;
+                    else if (execEventType == VsNodeType::OnKeyHeld)
+                        sPlayAnimHeld = action->id;
+                    else if (execEventType == VsNodeType::OnKeyReleased)
+                        sPlayAnimReleased = action->id;
+                }
+            };
+
+            // OnStart: run once when entering Play mode, keep firing for a few frames
+            // so the surge animation has time to be picked up by drawing code
+            static int sOnStartFrames = 0;
+            if (!sScriptStartRan) {
+                sScriptStartRan = true;
+                sOnStartFrames = 5; // keep OnStart surges alive for 5 frames
+                sScriptMoveSpeed = sCamObj.walkSpeed;
+                execEventType = VsNodeType::OnStart;
+                for (auto& ev : sVsNodes) {
+                    if (ev.type != VsNodeType::OnStart) continue;
+                    auto acts = collectActionsPlay(ev.id);
+                    for (auto* a : acts) execActionPlay(a);
+                }
+                execEventType = VsNodeType::Group;
+            }
+            sVsFiredNodes.clear();
+            // Re-inject OnStart node IDs for a few frames to guarantee surge pickup
+            if (sOnStartFrames > 0) {
+                sOnStartFrames--;
+                for (auto& ev : sVsNodes) {
+                    if (ev.type != VsNodeType::OnStart) continue;
+                    auto acts = collectActionsPlay(ev.id);
+                    sVsFiredNodes.push_back(ev.id);
+                    for (auto* a : acts) {
+                        sVsFiredNodes.push_back(a->id);
+                        // Data inputs to PlayAnim nodes get reverse surge
+                        if (a->type == VsNodeType::PlayAnim) {
+                            for (int li = 0; li < (int)sVsLinks.size(); li++)
+                                if (sVsLinks[li].to.nodeId == a->id && sVsLinks[li].to.pinType == 3) {
+                                    auto it = sVsLinkSurgeRevT.find(li);
+                                    if (it == sVsLinkSurgeRevT.end() || it->second > 0.5f)
+                                        sVsLinkSurgeRevT[li] = 0.0f;
+                                }
+                        } else {
+                            for (auto& lk : sVsLinks)
+                                if (lk.to.nodeId == a->id && lk.to.pinType == 3)
+                                    sVsFiredNodes.push_back(lk.from.nodeId);
+                        }
+                    }
+                }
+            }
+
+            // Continuously surge the active PlayAnim node and its entire chain
+            if (sActivePlayAnimNodeId >= 0) {
+                sVsFiredNodes.push_back(sActivePlayAnimNodeId);
+                // Mark data input links for REVERSE surge (PlayAnim → Animation)
+                for (int li = 0; li < (int)sVsLinks.size(); li++)
+                    if (sVsLinks[li].to.nodeId == sActivePlayAnimNodeId && sVsLinks[li].to.pinType == 3) {
+                        auto it = sVsLinkSurgeRevT.find(li);
+                        if (it == sVsLinkSurgeRevT.end() || it->second > 0.5f)
+                            sVsLinkSurgeRevT[li] = 0.0f;
+                    }
+                // Walk backwards through exec links to find the event that triggered it
+                int cur = sActivePlayAnimNodeId;
+                for (int safety = 0; safety < 20; safety++) {
+                    int prev = -1;
+                    for (auto& lk : sVsLinks) {
+                        if (lk.to.nodeId == cur && lk.to.pinType == 1) {
+                            prev = lk.from.nodeId;
+                            break;
+                        }
+                    }
+                    if (prev < 0) break;
+                    sVsFiredNodes.push_back(prev);
+                    // Also fire data nodes feeding into this predecessor
+                    for (auto& lk : sVsLinks)
+                        if (lk.to.nodeId == prev && lk.to.pinType == 3)
+                            sVsFiredNodes.push_back(lk.from.nodeId);
+                    cur = prev;
+                }
+            }
+
+            // Track previous key state for release edge detection (10 GBA keys)
+            static bool sPrevKeyState[10] = {};
+
+            // Walk all event nodes, track which fire for surge animation
+            for (auto& ev : sVsNodes)
+            {
+                if (ev.type != VsNodeType::OnKeyHeld &&
+                    ev.type != VsNodeType::OnKeyPressed &&
+                    ev.type != VsNodeType::OnKeyReleased)
+                    continue;
+                auto acts = collectActionsPlay(ev.id);
+                if (acts.empty()) continue;
+
+                int key = resolveEventKeyPlay(ev);
+                bool shouldFire = false;
+                bool shouldSurge = false;
+                if (ev.type == VsNodeType::OnKeyHeld) {
+                    if (key >= 0) {
+                        shouldFire = editorKeyDown(key);
+                        shouldSurge = shouldFire;
+                    } else {
+                        // Ambiguous key — always run actions (they have own checks),
+                        // but only surge if any d-pad or shoulder key is actually pressed
+                        shouldFire = true;
+                        shouldSurge = editorKeyDown(6) || editorKeyDown(7) ||
+                                      editorKeyDown(8) || editorKeyDown(9) ||
+                                      editorKeyDown(2) || editorKeyDown(3);
+                    }
+                }
+                else if (ev.type == VsNodeType::OnKeyPressed) {
+                    shouldFire = (key >= 0) && editorKeyHit(key);
+                    shouldSurge = shouldFire;
+                }
+                else if (ev.type == VsNodeType::OnKeyReleased) {
+                    shouldFire = (key >= 0) && !editorKeyDown(key);
+                    // Surge only on actual release edge: was down last frame, up now
+                    shouldSurge = (key >= 0 && key < 10) && sPrevKeyState[key] && !editorKeyDown(key);
+                }
+
+                if (shouldFire) {
+                    execEventType = ev.type;
+                    for (auto* a : acts) execActionPlay(a);
+                    execEventType = VsNodeType::Group;
+                }
+                if (shouldSurge) {
+                    sVsFiredNodes.push_back(ev.id);
+                    for (auto* a : acts) {
+                        sVsFiredNodes.push_back(a->id);
+                        // PlayAnim data inputs get reverse surge; others normal
+                        if (a->type == VsNodeType::PlayAnim) {
+                            for (int li = 0; li < (int)sVsLinks.size(); li++)
+                                if (sVsLinks[li].to.nodeId == a->id && sVsLinks[li].to.pinType == 3) {
+                                    auto it = sVsLinkSurgeRevT.find(li);
+                                    if (it == sVsLinkSurgeRevT.end() || it->second > 0.5f)
+                                        sVsLinkSurgeRevT[li] = 0.0f;
+                                }
+                        } else {
+                            for (auto& lk : sVsLinks)
+                                if (lk.to.nodeId == a->id && lk.to.pinType == 3)
+                                    sVsFiredNodes.push_back(lk.from.nodeId);
+                        }
+                    }
+                    // Fire data nodes feeding into the event node too (Key nodes)
+                    for (auto& lk : sVsLinks) {
+                        if (lk.to.nodeId == ev.id && lk.to.pinType == 3)
+                            sVsFiredNodes.push_back(lk.from.nodeId);
+                    }
+                }
+            }
+
+            // Update previous key state
+            for (int ki = 0; ki < 10; ki++) sPrevKeyState[ki] = editorKeyDown(ki);
+
+            // --- Apply results ---
+            float moveSpeed = (sScriptMoveSpeed > 0.0f ? sScriptMoveSpeed : sCamObj.walkSpeed) * dt;
+
             int playerIdx = -1;
             for (int i = 0; i < sSpriteCount; i++)
-            {
-                if (sSprites[i].type == SpriteType::Player)
-                { playerIdx = i; break; }
-            }
+                if (sSprites[i].type == SpriteType::Player) { playerIdx = i; break; }
 
             if (playerIdx >= 0)
             {
                 FloorSprite& player = sSprites[playerIdx];
-
-                // The camera look direction = from camera toward player
-                // Camera view angle = sOrbitAngle + PI (opposite of orbit offset)
                 float viewAngle = sOrbitAngle + 3.14159265f;
 
-                // WASD input
-                float inputX = 0.0f, inputZ = 0.0f;
-                if (ImGui::IsKeyDown(ImGuiKey_W)) { inputX += 1.0f; }
-                if (ImGui::IsKeyDown(ImGuiKey_S)) { inputX -= 1.0f; }
-                if (ImGui::IsKeyDown(ImGuiKey_A)) { inputZ -= 1.0f; }
-                if (ImGui::IsKeyDown(ImGuiKey_D)) { inputZ += 1.0f; }
+                float inputX = scInputFwd, inputZ = scInputRight;
+                if (inputX != 0.0f && inputZ != 0.0f) {
+                    float len = sqrtf(inputX * inputX + inputZ * inputZ);
+                    inputX /= len; inputZ /= len;
+                }
 
                 bool wasMoving = sPlayerMoving;
                 sPlayerMoving = (inputX != 0.0f || inputZ != 0.0f);
-                sPlayerSprinting = sPlayerMoving && ImGui::IsKeyDown(ImGuiKey_LeftShift);
+                sPlayerSprinting = sPlayerMoving && editorKeyDown(1);
 
-                // J/L manual orbit — smooth ease-in/out on orbit angle
+                // Pick active PlayAnim based on movement state
+                if (sPlayerSprinting && sPlayAnimHeld >= 0)
+                    sActivePlayAnimNodeId = sPlayAnimHeld;
+                else if (sPlayerMoving && sPlayAnimReleased >= 0)
+                    sActivePlayAnimNodeId = sPlayAnimReleased;
+                else if (sPlayAnimIdle >= 0)
+                    sActivePlayAnimNodeId = sPlayAnimIdle;
+
+                // Manual orbit from OrbitCamera nodes
                 {
-                    float manualTarget = 0.0f;
-                    if (ImGui::IsKeyDown(ImGuiKey_J)) manualTarget += rotSpeed;
-                    if (ImGui::IsKeyDown(ImGuiKey_L)) manualTarget -= rotSpeed;
-                    if (fabsf(manualTarget) > 0.001f)
-                        sManualOrbitCurrent += (manualTarget - sManualOrbitCurrent) * std::min(1.0f, 6.0f * dt);
+                    if (fabsf(scOrbitDelta) > 0.0001f)
+                        sManualOrbitCurrent += (scOrbitDelta - sManualOrbitCurrent) * std::min(1.0f, 6.0f * dt);
                     else
                         sManualOrbitCurrent *= 0.85f;
-                    if (fabsf(sManualOrbitCurrent) < fabsf(rotSpeed * 0.02f))
+                    if (fabsf(sManualOrbitCurrent) < 0.0001f)
                         sManualOrbitCurrent = 0.0f;
                     sOrbitAngle += sManualOrbitCurrent;
                 }
 
-                // Auto-orbit when strafing (A/D) with drag on release
+                // Auto-orbit when strafing
                 {
                     float autoOrbitTarget = 0.0f;
-                    if (inputZ != 0.0f)
-                    {
-                        autoOrbitTarget = rotSpeed * 0.4f * inputZ;
-                        if (ImGui::IsKeyDown(ImGuiKey_J) || ImGui::IsKeyDown(ImGuiKey_L))
+                    if (sScriptAutoOrbitSpeed > 0.0f && scInputRight != 0.0f) {
+                        autoOrbitTarget = (sScriptAutoOrbitSpeed / 65536.0f * 6.28318f) * scInputRight;
+                        if (editorKeyDown(2) || editorKeyDown(3))
                             autoOrbitTarget *= 2.0f;
                     }
                     if (fabsf(autoOrbitTarget) > 0.001f)
@@ -5600,40 +5930,27 @@ void FrameTick(float dt)
                     sOrbitAngle -= sAutoOrbitCurrent;
                 }
 
-                if (sPlayerMoving)
-                {
-                    // Normalize diagonal
-                    float len = sqrtf(inputX * inputX + inputZ * inputZ);
-                    inputX /= len;
-                    inputZ /= len;
-
-                    // Track movement direction relative to camera (for sprite facing)
+                if (sPlayerMoving) {
                     sPlayerMoveAngle = atan2f(inputZ, inputX);
-
-                    // Transform to world space using viewAngle
                     float fwdX = sinf(viewAngle), fwdZ = cosf(viewAngle);
                     float rightX = -cosf(viewAngle), rightZ = sinf(viewAngle);
                     player.x += (fwdX * inputX + rightX * inputZ) * moveSpeed;
                     player.z += (fwdZ * inputX + rightZ * inputZ) * moveSpeed;
                 }
                 else if (wasMoving)
-                {
                     sPlayerMoveAngle = sPlayerMoveAngle - sOrbitAngle;
-                }
 
-                // Clamp player to world
                 player.x = std::clamp(player.x, -kWorldHalf, kWorldHalf);
                 player.z = std::clamp(player.z, -kWorldHalf, kWorldHalf);
 
-                // Place camera at orbit offset from player with smooth follow
+                // Camera follow with smooth ease
                 {
                     float targetX = player.x + sinf(sOrbitAngle) * sOrbitDist;
                     float targetZ = player.z + cosf(sOrbitAngle) * sOrbitDist;
-                    // Camera follow using exposed ease values
                     bool orbiting = fabsf(sManualOrbitCurrent) > 0.0f;
                     float followPct;
                     if (orbiting)
-                        followPct = 50.0f; // fast follow during orbit to prevent drift
+                        followPct = 50.0f;
                     else if (sPlayerSprinting)
                         followPct = sPlayerMoving ? sCamObj.sprintEaseIn : sCamObj.sprintEaseOut;
                     else
@@ -5651,13 +5968,11 @@ void FrameTick(float dt)
             else
             {
                 // No player sprite — fallback to free camera
-                if (ImGui::IsKeyDown(ImGuiKey_W))
-                {
+                if (ImGui::IsKeyDown(ImGuiKey_W)) {
                     sCamera.x -= sinf(sCamera.angle) * moveSpeed;
                     sCamera.z -= cosf(sCamera.angle) * moveSpeed;
                 }
-                if (ImGui::IsKeyDown(ImGuiKey_S))
-                {
+                if (ImGui::IsKeyDown(ImGuiKey_S)) {
                     sCamera.x += sinf(sCamera.angle) * moveSpeed;
                     sCamera.z += cosf(sCamera.angle) * moveSpeed;
                 }
@@ -5903,22 +6218,104 @@ void FrameTick(float dt)
                 gripCol);
         }
 
+        // Update link surge positions — blue dot travels from source to dest
+        if (sEditorMode == EditorMode::Play)
+        {
+            float surgeDt = ImGui::GetIO().DeltaTime;
+            for (int li = 0; li < (int)sVsLinks.size(); li++) {
+                int srcId = sVsLinks[li].from.nodeId;
+                bool firing = false;
+                for (int fid : sVsFiredNodes)
+                    if (fid == srcId) { firing = true; break; }
+                // Start new surge when source fires and no surge active (or past halfway for held keys)
+                if (firing) {
+                    auto it = sVsLinkSurgeT.find(li);
+                    if (it == sVsLinkSurgeT.end() || it->second > 0.5f)
+                        sVsLinkSurgeT[li] = 0.0f;
+                }
+            }
+            // Advance surges
+            std::vector<int> done;
+            for (auto& [li, t] : sVsLinkSurgeT) {
+                t += surgeDt * 2.5f; // ~0.4s to travel full length
+                if (t > 1.5f) done.push_back(li);
+            }
+            for (int li : done) sVsLinkSurgeT.erase(li);
+            // Advance reverse surges
+            done.clear();
+            for (auto& [li, t] : sVsLinkSurgeRevT) {
+                t += surgeDt * 2.5f;
+                if (t > 1.5f) done.push_back(li);
+            }
+            for (int li : done) sVsLinkSurgeRevT.erase(li);
+        }
+        else {
+            sVsLinkSurgeT.clear();
+            sVsLinkSurgeRevT.clear();
+        }
+
         // Draw links (bezier curves) — resolve pins to current editing level
-        for (auto& lk : sVsLinks) {
+        auto bezEval = [](ImVec2 a, ImVec2 b, ImVec2 c, ImVec2 d, float u) -> ImVec2 {
+            float v = 1.0f - u;
+            return ImVec2(
+                v*v*v*a.x + 3*v*v*u*b.x + 3*v*u*u*c.x + u*u*u*d.x,
+                v*v*v*a.y + 3*v*v*u*b.y + 3*v*u*u*c.y + u*u*u*d.y);
+        };
+        for (int li = 0; li < (int)sVsLinks.size(); li++) {
+            auto& lk = sVsLinks[li];
             VsPin fromP = VsResolvePin(lk.from);
             VsPin toP   = VsResolvePin(lk.to);
             if (fromP.nodeId < 0 || toP.nodeId < 0) continue;
             int fi = VsFindNode(fromP.nodeId);
             int ti = VsFindNode(toP.nodeId);
             if (fi < 0 || ti < 0) continue;
-            // Both must be at current editing level
             if (sVsNodes[fi].groupId != sVsEditingGroup || sVsNodes[ti].groupId != sVsEditingGroup) continue;
             ImVec2 p1 = VsPinPos(sVsNodes[fi], fromP.pinType, fromP.pinIdx, canvasOrig, zoom);
             ImVec2 p2 = VsPinPos(sVsNodes[ti], toP.pinType, toP.pinIdx, canvasOrig, zoom);
             float dx = std::max(50.0f * zoom, fabsf(p2.x - p1.x) * 0.5f);
+            ImVec2 cp1(p1.x + dx, p1.y), cp2(p2.x - dx, p2.y);
             bool isExec = (lk.from.pinType == 0);
             ImU32 wireCol = isExec ? 0xFFFFFFFF : 0xFF44CCAA;
-            dl->AddBezierCubic(p1, ImVec2(p1.x + dx, p1.y), ImVec2(p2.x - dx, p2.y), p2, wireCol, 2.0f * zoom);
+            dl->AddBezierCubic(p1, cp1, cp2, p2, wireCol, 2.0f * zoom);
+
+            // Draw blue traveling surge (forward: from → to)
+            auto surgeIt = sVsLinkSurgeT.find(li);
+            if (surgeIt != sVsLinkSurgeT.end()) {
+                float st = surgeIt->second;
+                float center = std::clamp(st, 0.0f, 1.0f);
+                float fadeAlpha = (st > 1.0f) ? std::max(0.0f, 1.0f - (st - 1.0f) * 2.0f) : 1.0f;
+                int segs = 8;
+                float halfLen = 0.12f;
+                for (int si = 0; si <= segs; si++) {
+                    float u = center - halfLen + (halfLen * 2.0f * si / segs);
+                    u = std::clamp(u, 0.0f, 1.0f);
+                    ImVec2 pt = bezEval(p1, cp1, cp2, p2, u);
+                    float dist = fabsf(u - center) / halfLen;
+                    float bright = std::max(0.0f, 1.0f - dist * dist) * fadeAlpha;
+                    ImU32 col = ImGui::GetColorU32(ImVec4(0.3f * bright, 0.6f * bright, 1.0f * bright, bright));
+                    float rad = (2.0f + 3.0f * bright) * zoom;
+                    dl->AddCircleFilled(pt, rad, col);
+                }
+            }
+            // Draw reverse surge (to → from, for PlayAnim data links)
+            auto revIt = sVsLinkSurgeRevT.find(li);
+            if (revIt != sVsLinkSurgeRevT.end()) {
+                float st = revIt->second;
+                float center = 1.0f - std::clamp(st, 0.0f, 1.0f); // reversed direction
+                float fadeAlpha = (st > 1.0f) ? std::max(0.0f, 1.0f - (st - 1.0f) * 2.0f) : 1.0f;
+                int segs = 8;
+                float halfLen = 0.12f;
+                for (int si = 0; si <= segs; si++) {
+                    float u = center - halfLen + (halfLen * 2.0f * si / segs);
+                    u = std::clamp(u, 0.0f, 1.0f);
+                    ImVec2 pt = bezEval(p1, cp1, cp2, p2, u);
+                    float dist = fabsf(u - center) / halfLen;
+                    float bright = std::max(0.0f, 1.0f - dist * dist) * fadeAlpha;
+                    ImU32 col = ImGui::GetColorU32(ImVec4(0.3f * bright, 0.6f * bright, 1.0f * bright, bright));
+                    float rad = (2.0f + 3.0f * bright) * zoom;
+                    dl->AddCircleFilled(pt, rad, col);
+                }
+            }
         }
 
         // Draw in-progress link drag
@@ -6451,13 +6848,24 @@ void FrameTick(float dt)
 
         dl->PopClipRect();
 
-        // Context menu (right-click to add node)
+        // Space — open add-node menu at mouse cursor (Blender-style)
+        if (canvasHovered && ImGui::IsKeyPressed(ImGuiKey_Space) && !ImGui::IsPopupOpen("##AddNode")) {
+            sVsShowContextMenu = true;
+            sVsContextMenuPos = io.MousePos;
+        }
+
+        // Context menu (right-click or Space to add node)
+        static char sVsNodeSearch[64] = {};
+        static bool sVsSearchFocused = false;
         if (sVsShowContextMenu) {
             ImGui::OpenPopup("##AddNode");
             sVsShowContextMenu = false;
+            sVsNodeSearch[0] = '\0';
+            sVsSearchFocused = false;
         }
+        ImGui::SetNextWindowSizeConstraints(ImVec2(200, 0), ImVec2(300, 400));
         if (ImGui::BeginPopup("##AddNode")) {
-            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Add Node");
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Add");
             ImGui::Separator();
 
             // Helper lambda to create a node at context menu position
@@ -6474,37 +6882,90 @@ void FrameTick(float dt)
                 if (sVsPendingAutoWire.nodeId >= 0) {
                     auto pc = VsGetPinCounts(n);
                     int srcType = sVsPendingAutoWire.pinType;
-                    // Dragged from exec out → connect to new node's exec in
                     if (srcType == 0 && pc.inExec > 0)
                         sVsLinks.push_back({ sVsPendingAutoWire, { n.id, 1, 0 } });
-                    // Dragged from exec in → connect new node's exec out to this
                     else if (srcType == 1 && pc.outExec > 0)
                         sVsLinks.push_back({ { n.id, 0, 0 }, sVsPendingAutoWire });
-                    // Dragged from data out → connect to new node's data in
                     else if (srcType == 2 && pc.inData > 0)
                         sVsLinks.push_back({ sVsPendingAutoWire, { n.id, 3, 0 } });
-                    // Dragged from data in → connect new node's data out to this
                     else if (srcType == 3 && pc.outData > 0)
                         sVsLinks.push_back({ { n.id, 2, 0 }, sVsPendingAutoWire });
                     sVsPendingAutoWire = { -1, 0, 0 };
                 }
             };
 
-            ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "Events");
-            for (int t = (int)VsNodeType::OnKeyPressed; t <= (int)VsNodeType::OnStart; t++)
-                if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
+            // Search bar — auto-focus on open
+            if (!sVsSearchFocused) {
+                ImGui::SetKeyboardFocusHere();
+                sVsSearchFocused = true;
+            }
+            ImGui::PushItemWidth(-1);
+            ImGui::InputTextWithHint("##NodeSearch", "Search...", sVsNodeSearch, sizeof(sVsNodeSearch));
+            ImGui::PopItemWidth();
             ImGui::Separator();
-            ImGui::TextColored(ImVec4(0.4f, 0.5f, 0.9f, 1.0f), "Logic");
-            for (int t = (int)VsNodeType::Branch; t <= (int)VsNodeType::CompareVar; t++)
-                if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
-            ImGui::Separator();
-            ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.3f, 1.0f), "Actions");
-            for (int t = (int)VsNodeType::MovePlayer; t <= (int)VsNodeType::DampenJump; t++)
-                if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
-            ImGui::Separator();
-            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.8f, 1.0f), "Data");
-            for (int t = (int)VsNodeType::Integer; t <= (int)VsNodeType::Float; t++)
-                if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
+
+            bool hasSearch = sVsNodeSearch[0] != '\0';
+
+            // Case-insensitive substring match helper
+            auto matchesSearch = [&](const char* name) -> bool {
+                if (!hasSearch) return true;
+                const char* s = sVsNodeSearch;
+                const char* n2 = name;
+                // Simple case-insensitive find
+                for (; *n2; n2++) {
+                    const char* si = s;
+                    const char* ni = n2;
+                    while (*si && *ni && (tolower(*si) == tolower(*ni))) { si++; ni++; }
+                    if (!*si) return true;
+                }
+                return false;
+            };
+
+            if (hasSearch) {
+                // Flat filtered list when searching
+                for (int t = 0; t < (int)VsNodeType::Group; t++) {
+                    if (matchesSearch(sVsNodeDefs[t].name))
+                        if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
+                }
+            } else {
+                // Categorized submenus
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.8f, 0.4f, 1.0f));
+                if (ImGui::BeginMenu("Events")) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
+                    for (int t = (int)VsNodeType::OnKeyPressed; t <= (int)VsNodeType::OnStart; t++)
+                        if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
+                    ImGui::PopStyleColor();
+                    ImGui::EndMenu();
+                }
+                ImGui::PopStyleColor();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.5f, 0.9f, 1.0f));
+                if (ImGui::BeginMenu("Logic")) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
+                    for (int t = (int)VsNodeType::Branch; t <= (int)VsNodeType::CompareVar; t++)
+                        if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
+                    ImGui::PopStyleColor();
+                    ImGui::EndMenu();
+                }
+                ImGui::PopStyleColor();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.3f, 1.0f));
+                if (ImGui::BeginMenu("Actions")) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
+                    for (int t = (int)VsNodeType::MovePlayer; t <= (int)VsNodeType::DampenJump; t++)
+                        if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
+                    ImGui::PopStyleColor();
+                    ImGui::EndMenu();
+                }
+                ImGui::PopStyleColor();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.8f, 1.0f));
+                if (ImGui::BeginMenu("Data")) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
+                    for (int t = (int)VsNodeType::Integer; t <= (int)VsNodeType::Float; t++)
+                        if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
+                    ImGui::PopStyleColor();
+                    ImGui::EndMenu();
+                }
+                ImGui::PopStyleColor();
+            }
             ImGui::EndPopup();
         } else {
             // Context menu closed without selection — clear pending auto-wire
