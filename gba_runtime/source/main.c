@@ -600,7 +600,7 @@ static void load_editor_sprites(void)
 // DMA direction animation set switching
 // ---------------------------------------------------------------------------
 
-#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_DIR_ANIM_TILES_LEN)
 static void switch_dir_anim_set(int assetIdx, int newSet)
 {
     if (assetIdx < 0 || assetIdx >= AFN_ASSET_COUNT) return;
@@ -3281,7 +3281,7 @@ int main(void)
     init_obj_sprites();
 
     // DMA direction animation set 0 from ROM to VRAM at boot
-#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_DIR_ANIM_TILES_LEN)
     {
         int ai;
         for (ai = 0; ai < AFN_ASSET_COUNT; ai++)
@@ -3708,7 +3708,7 @@ int main(void)
                         }
                     }
 
-#ifdef AFN_MAX_ANIMS
+#if defined(AFN_MAX_ANIMS) && defined(AFN_DIR_ANIM_TILES_LEN)
                     if (g_current_anim[ai] >= AFN_MAX_ANIMS) continue;
                     {
                         int baseSet = afn_anim_desc[ai][g_current_anim[ai]][0];
