@@ -137,6 +137,7 @@ enum class GBAScriptNodeType : int {
     Integer, Key, Direction, Animation, Float,
     OnUpdate,
     Group,
+    Object,
     COUNT
 };
 

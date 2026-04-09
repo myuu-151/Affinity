@@ -180,6 +180,7 @@ enum class VsNodeType : int {
     Float,          // constant float output
     OnUpdate,       // fires every frame
     Group,          // subgraph containing other nodes
+    Object,         // constant object/sprite index output (dropdown)
     COUNT
 };
 
@@ -235,6 +236,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Float",           0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "On Update",       0xFF338833, 0, 1, 0, 0, {}, {}, {} },
     { "Group",           0xFF888844, 0, 0, 0, 0, {}, {}, {} },
+    { "Object",          0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
 };
 
 struct VsNode {
@@ -645,6 +647,7 @@ static bool sScriptStartRan = false;  // script OnStart ran this Play session
 static float sScriptMoveSpeed = -1.0f; // persists across frames (Walk/Sprint nodes)
 static float sScriptAutoOrbitSpeed = 0.0f; // persists across frames (AutoOrbit node)
 static int sPendingSceneSwitch = -1;   // scene index to switch to (-1 = none)
+static int sPendingSceneMode  = 0;    // 0 = 3D/MapScene, 1 = Tilemap/TmScene
 static int sActivePlayAnimNodeId = -1; // PlayAnim node currently driving animation
 static int sPlayAnimIdle = -1;    // PlayAnim from OnStart (idle)
 static int sPlayAnimHeld = -1;    // PlayAnim from OnKeyHeld (sprint anim)
@@ -6457,6 +6460,7 @@ void FrameTick(float dt)
             sScriptMoveSpeed = -1.0f;
             sScriptAutoOrbitSpeed = 0.0f;
             sPendingSceneSwitch = -1;
+            sPendingSceneMode = 0;
             sActivePlayAnimNodeId = -1;
             sPlayAnimIdle = -1;
             sPlayAnimHeld = -1;
@@ -6799,6 +6803,7 @@ void FrameTick(float dt)
                     auto* sd = findDataInPlay(action->id, 0);
                     int scIdx = sd ? resolveIntPlay(sd) : action->paramInt[0];
                     sPendingSceneSwitch = scIdx;
+                    sPendingSceneMode = action->paramInt[1];
                 }
                 // Jump, DampenJump, SetGravity, SetMaxFall — editor has no vertical physics
                 else if (t == VsNodeType::PlayAnim) {
@@ -7146,6 +7151,7 @@ void FrameTick(float dt)
                         auto* sd = bpFindDataIn(action->id, 0);
                         int scIdx = sd ? sd->paramInt[0] : action->paramInt[0];
                         sPendingSceneSwitch = scIdx;
+                        sPendingSceneMode = action->paramInt[1];
                     }
                 };
 
@@ -7284,6 +7290,7 @@ void FrameTick(float dt)
                                 auto* sd = bpFindDataIn(action->id, 0);
                                 int scIdx = sd ? sd->paramInt[0] : action->paramInt[0];
                                 sPendingSceneSwitch = scIdx;
+                                sPendingSceneMode = action->paramInt[1];
                             }
                         };
                         for (auto& ev : bpNodes) {
@@ -7314,13 +7321,26 @@ void FrameTick(float dt)
             }
 
             // Handle pending scene switch
-            if (sPendingSceneSwitch >= 0 && sPendingSceneSwitch < (int)sMapScenes.size() && sPendingSceneSwitch != sMapSelectedScene) {
-                SaveMapSceneState(sMapScenes[sMapSelectedScene]);
-                sMapSelectedScene = sPendingSceneSwitch;
-                LoadMapSceneState(sMapScenes[sMapSelectedScene]);
-                sScriptStartRan = false; // re-run OnStart in new scene
-                sPendingSceneSwitch = -1;
-            } else {
+            if (sPendingSceneSwitch >= 0) {
+                if (sPendingSceneMode == 0 && sPendingSceneSwitch < (int)sMapScenes.size()) {
+                    // Switch to a 3D/MapScene
+                    if (sPendingSceneSwitch != sMapSelectedScene || sActiveTab == EditorTab::Tilemap) {
+                        SaveMapSceneState(sMapScenes[sMapSelectedScene]);
+                        sMapSelectedScene = sPendingSceneSwitch;
+                        LoadMapSceneState(sMapScenes[sMapSelectedScene]);
+                        sActiveTab = EditorTab::Mode7;
+                        sScriptStartRan = false;
+                    }
+                } else if (sPendingSceneMode == 1 && sPendingSceneSwitch < (int)sTmScenes.size()) {
+                    // Switch to a Tilemap/TmScene
+                    if (sPendingSceneSwitch != sTmSelectedScene || sActiveTab != EditorTab::Tilemap) {
+                        SaveSceneState(sTmScenes[sTmSelectedScene]);
+                        sTmSelectedScene = sPendingSceneSwitch;
+                        LoadSceneState(sTmScenes[sTmSelectedScene]);
+                        sActiveTab = EditorTab::Tilemap;
+                        sScriptStartRan = false;
+                    }
+                }
                 sPendingSceneSwitch = -1;
             }
 
@@ -7920,6 +7940,23 @@ void FrameTick(float dt)
                     if (si >= 0 && si < (int)sSpriteAssets.size() &&
                         ai >= 0 && ai < (int)sSpriteAssets[si].anims.size())
                         sub = sSpriteAssets[si].anims[ai].name.c_str();
+                    break;
+                }
+                case VsNodeType::ChangeScene: {
+                    if (n.paramInt[1] == 0 && n.paramInt[0] >= 0 && n.paramInt[0] < (int)sMapScenes.size())
+                        { snprintf(subBuf, sizeof(subBuf), "[3D] %s", sMapScenes[n.paramInt[0]].name); sub = subBuf; }
+                    else if (n.paramInt[1] == 1 && n.paramInt[0] >= 0 && n.paramInt[0] < (int)sTmScenes.size())
+                        { snprintf(subBuf, sizeof(subBuf), "[TM] %s", sTmScenes[n.paramInt[0]].name); sub = subBuf; }
+                    break;
+                }
+                case VsNodeType::Object: {
+                    int oi = n.paramInt[0];
+                    if (oi >= 0 && oi < sSpriteCount) {
+                        int ai2 = sSprites[oi].assetIdx;
+                        if (ai2 >= 0 && ai2 < (int)sSpriteAssets.size())
+                            sub = sSpriteAssets[ai2].name.c_str();
+                        else { snprintf(subBuf, sizeof(subBuf), "[%d]", oi); sub = subBuf; }
+                    }
                     break;
                 }
                 default: break;
@@ -8999,7 +9036,8 @@ void FrameTick(float dt)
 
             if (hasSearch) {
                 // Flat filtered list when searching
-                for (int t = 0; t < (int)VsNodeType::Group; t++) {
+                for (int t = 0; t < (int)VsNodeType::COUNT; t++) {
+                    if ((VsNodeType)t == VsNodeType::Group) continue;
                     if (matchesSearch(sVsNodeDefs[t].name))
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
                 }
@@ -9038,6 +9076,7 @@ void FrameTick(float dt)
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
                     for (int t = (int)VsNodeType::Integer; t <= (int)VsNodeType::Float; t++)
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Object].name)) addNodeAt(VsNodeType::Object);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
@@ -9052,7 +9091,7 @@ void FrameTick(float dt)
         // Properties panel overlay — as child window inside canvas (data nodes only)
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
-            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group) {
+            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::ChangeScene) {
             const auto& def = sVsNodeDefs[(int)n.type];
             float propW = 260, propH = 180;
             float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -9133,6 +9172,70 @@ void FrameTick(float dt)
                         }
                     } else {
                         ImGui::Text("(no animations)");
+                    }
+                }
+                break;
+            }
+            case VsNodeType::ChangeScene: {
+                ImGui::Text("Scene");
+                // Build unified list: 3D scenes then Tilemap scenes
+                int totalScenes = (int)sMapScenes.size() + (int)sTmScenes.size();
+                if (totalScenes == 0) {
+                    ImGui::Text("(no scenes)");
+                } else {
+                    // Current selection label
+                    char curLabel[64] = "None";
+                    if (n.paramInt[1] == 0 && n.paramInt[0] >= 0 && n.paramInt[0] < (int)sMapScenes.size())
+                        snprintf(curLabel, sizeof(curLabel), "[3D] %s", sMapScenes[n.paramInt[0]].name);
+                    else if (n.paramInt[1] == 1 && n.paramInt[0] >= 0 && n.paramInt[0] < (int)sTmScenes.size())
+                        snprintf(curLabel, sizeof(curLabel), "[TM] %s", sTmScenes[n.paramInt[0]].name);
+                    if (ImGui::BeginCombo("##SceneSel", curLabel)) {
+                        for (int si = 0; si < (int)sMapScenes.size(); si++) {
+                            char label[64];
+                            snprintf(label, sizeof(label), "[3D] %s", sMapScenes[si].name);
+                            bool sel = (n.paramInt[1] == 0 && n.paramInt[0] == si);
+                            if (ImGui::Selectable(label, sel)) { n.paramInt[0] = si; n.paramInt[1] = 0; }
+                            if (sel) ImGui::SetItemDefaultFocus();
+                        }
+                        for (int si = 0; si < (int)sTmScenes.size(); si++) {
+                            char label[64];
+                            snprintf(label, sizeof(label), "[TM] %s", sTmScenes[si].name);
+                            bool sel = (n.paramInt[1] == 1 && n.paramInt[0] == si);
+                            if (ImGui::Selectable(label, sel)) { n.paramInt[0] = si; n.paramInt[1] = 1; }
+                            if (sel) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+                break;
+            }
+            case VsNodeType::Object: {
+                ImGui::Text("Object");
+                if (sSpriteCount == 0) {
+                    ImGui::Text("(no objects in scene)");
+                } else {
+                    const char* preview = (n.paramInt[0] >= 0 && n.paramInt[0] < sSpriteCount)
+                        ? (sSprites[n.paramInt[0]].assetIdx >= 0 && sSprites[n.paramInt[0]].assetIdx < (int)sSpriteAssets.size()
+                            ? sSpriteAssets[sSprites[n.paramInt[0]].assetIdx].name.c_str()
+                            : "(no asset)")
+                        : "None";
+                    char objLabel[64];
+                    if (n.paramInt[0] >= 0 && n.paramInt[0] < sSpriteCount)
+                        snprintf(objLabel, sizeof(objLabel), "[%d] %s", n.paramInt[0], preview);
+                    else
+                        snprintf(objLabel, sizeof(objLabel), "None");
+                    if (ImGui::BeginCombo("##Obj", objLabel)) {
+                        for (int si = 0; si < sSpriteCount; si++) {
+                            const char* assetName = (sSprites[si].assetIdx >= 0 && sSprites[si].assetIdx < (int)sSpriteAssets.size())
+                                ? sSpriteAssets[sSprites[si].assetIdx].name.c_str() : "(no asset)";
+                            char itemLabel[64];
+                            snprintf(itemLabel, sizeof(itemLabel), "[%d] %s", si, assetName);
+                            bool sel = (si == n.paramInt[0]);
+                            if (ImGui::Selectable(itemLabel, sel))
+                                n.paramInt[0] = si;
+                            if (sel) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
                     }
                 }
                 break;

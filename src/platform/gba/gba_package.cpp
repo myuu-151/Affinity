@@ -1491,6 +1491,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "static int   afn_auto_orbit_speed;\n";
             f << "static int   afn_play_anim;\n";
             f << "static int   afn_pending_scene;\n";
+            f << "static int   afn_pending_scene_mode;\n";
             f << "static int   afn_collided_sprite;\n";
             f << "static FIXED afn_gravity;\n";
             f << "static FIXED afn_terminal_vel;\n";
@@ -1591,8 +1592,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 }
                 case GBAScriptNodeType::ChangeScene: {
                     auto* scData = findDataIn(action->id, 0);
-                    int scIdx = scData ? resolveInt(scData) : 0;
+                    int scIdx = scData ? resolveInt(scData) : action->paramInt[0];
+                    int scMode = action->paramInt[1]; // 0=3D, 1=Tilemap
                     f << "    afn_pending_scene = " << scIdx << ";\n";
+                    f << "    afn_pending_scene_mode = " << scMode << ";\n";
                     break;
                 }
                 default:
@@ -1880,8 +1883,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 }
                 case GBAScriptNodeType::ChangeScene: {
                     auto* scData = bpFindDataIn(action->id, 0);
-                    std::string scIdx = scData ? bpResolveInt(scData) : "0";
+                    std::string scIdx = scData ? bpResolveInt(scData) : std::to_string(action->paramInt[0]);
+                    int scMode = action->paramInt[1];
                     f << "    afn_pending_scene = " << scIdx << ";\n";
+                    f << "    afn_pending_scene_mode = " << scMode << ";\n";
                     break;
                 }
                 default:
