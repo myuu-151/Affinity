@@ -2451,7 +2451,7 @@ IWRAM_CODE static void clip_render_poly_tex(u16* buf,
 }
 
 // Triangle sort entry for painter's algorithm (global across all meshes)
-typedef struct { int triIdx; int depth; u8 slot; u8 priority; } TriSort;
+typedef struct { int triIdx; int depth; u8 slot; } TriSort;
 
 // Per-mesh rendering state for global sort
 typedef struct {
@@ -2648,9 +2648,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 else if (ms->drawDist == 0 && (d0 + d1 + d2) / 3 > AFN_DRAW_DISTANCE) continue;
 #endif
                 g_triOrder[totalTris].triIdx = t;
-                g_triOrder[totalTris].depth = (d0 + d1 + d2) / 3;
+                g_triOrder[totalTris].depth = (d0 + d1 + d2) / 3 + (ms->drawPriority << 16);
                 g_triOrder[totalTris].slot = (u8)slotCount;
-                g_triOrder[totalTris].priority = (u8)ms->drawPriority;
                 totalTris++;
             }
         }
@@ -2699,9 +2698,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     else if (ms->drawDist == 0 && (d0 + d1 + d2 + d3) / 4 > AFN_DRAW_DISTANCE) continue;
 #endif
                     g_triOrder[totalTris].triIdx = t | 0x8000;
-                    g_triOrder[totalTris].depth = (d0 + d1 + d2 + d3) / 4;
+                    g_triOrder[totalTris].depth = (d0 + d1 + d2 + d3) / 4 + (ms->drawPriority << 16);
                     g_triOrder[totalTris].slot = (u8)slotCount;
-                    g_triOrder[totalTris].priority = (u8)ms->drawPriority;
                     totalTris++;
                 }
             }
@@ -2712,8 +2710,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
     }
 
     // ---- Phase 2: Global sort — all tris across all meshes ----
-    // Sort by priority first (higher priority draws first/behind), then by depth.
-    // Priority 0 = draws last (on top).
+    // Priority is baked into depth (priority << 16), so single compare handles both.
+    // Priority 0 = draws last (on top), higher = draws behind.
     {
         int a, b;
         for (a = 1; a < totalTris; a++)
@@ -2721,12 +2719,10 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             TriSort tmp = g_triOrder[a];
             b = a - 1;
             if (g_coverageOn)
-                while (b >= 0 && (g_triOrder[b].priority < tmp.priority ||
-                       (g_triOrder[b].priority == tmp.priority && g_triOrder[b].depth > tmp.depth)))
+                while (b >= 0 && g_triOrder[b].depth > tmp.depth)
                 { g_triOrder[b + 1] = g_triOrder[b]; b--; }
             else
-                while (b >= 0 && (g_triOrder[b].priority < tmp.priority ||
-                       (g_triOrder[b].priority == tmp.priority && g_triOrder[b].depth < tmp.depth)))
+                while (b >= 0 && g_triOrder[b].depth < tmp.depth)
             {
                 g_triOrder[b + 1] = g_triOrder[b];
                 b--;
@@ -3376,6 +3372,7 @@ int main(void)
     afn_terminal_vel = AFN_TERMINAL_VEL;
     afn_play_anim = -1;
     afn_script_start();
+    afn_bp_dispatch_start();
 #endif
 #endif
 
@@ -3503,6 +3500,11 @@ int main(void)
             afn_script_key_held();
             afn_script_key_pressed();
             afn_script_key_released();
+            // Blueprint instance dispatch
+            afn_bp_dispatch_update();
+            afn_bp_dispatch_key_held();
+            afn_bp_dispatch_key_pressed();
+            afn_bp_dispatch_key_released();
 
             inputFwd = afn_input_fwd;
             inputRight = afn_input_right;

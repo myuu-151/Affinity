@@ -219,6 +219,10 @@ struct FloorSprite
     bool  animEnabled = true; // false = static (no animation cycling)
     uint32_t color = 0xFFFF00FF; // tint color (ABGR) — used for editor preview
     bool  selected = false;
+    // Blueprint script attachment
+    int   blueprintIdx = -1;         // index into sBlueprintAssets (-1 = none)
+    struct { int paramIdx; int value; } instanceParams[8] = {};
+    int   instanceParamCount = 0;
 };
 
 static constexpr int kMaxFloorSprites = 64; // GBA OAM has 128 slots, reserve half

@@ -160,6 +160,27 @@ struct GBAScriptExport {
     std::vector<GBAScriptLinkExport> links;
 };
 
+// ---- Blueprint Export ----
+
+struct GBABlueprintParamExport {
+    int dataType;      // 0=int, 1=float, 2=key, 3=direction, 4=animation
+    int defaultValue;
+};
+
+struct GBABlueprintExport {
+    std::string name;
+    GBAScriptExport script;  // nodes + links
+    std::vector<GBABlueprintParamExport> params;
+};
+
+struct GBABlueprintInstanceExport {
+    int blueprintIdx;
+    int spriteIdx;      // -1 if tilemap object
+    int tmObjIdx;       // -1 if 3D sprite
+    int paramValues[8]; // resolved values (override or default)
+    int paramCount;
+};
+
 // Package the current map into a .gba ROM.
 // runtimeDir: path to gba_runtime/ directory
 // outputPath: where to write the final .gba
@@ -172,6 +193,8 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBAMeshExport>& meshes,
                 float orbitDist,
                 const GBAScriptExport& script,
+                const std::vector<GBABlueprintExport>& blueprints,
+                const std::vector<GBABlueprintInstanceExport>& bpInstances,
                 std::string& errorMsg);
 
 } // namespace Affinity
