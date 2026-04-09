@@ -1195,7 +1195,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority);
     }
     fprintf(f, "\n");
 
@@ -1654,10 +1654,10 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "MeshAssets") == 0)
         {
             char mname[256], mpath[512], mtexpath[512] = {};
-            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1;
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0;
             float mdrawdist = 0.0f;
-            // Try newest format: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath|usequads|drawdist|collision
-            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d|%f|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision);
+            // Try newest format: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath|usequads|drawdist|collision|drawpriority
+            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d|%f|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri);
             if (matched < 2)
             {
                 // Try format without usequads: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath
@@ -1698,6 +1698,8 @@ static bool LoadProject(const std::string& path)
                     ma.drawDistance = mdrawdist;
                 if (matched >= 13)
                     ma.collision = (mcollision != 0);
+                if (matched >= 14)
+                    ma.drawPriority = mdrawpri;
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -2402,6 +2404,8 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         ImGui::DragFloat("Draw Distance##mesh", &ma.drawDistance, 1.0f, 0.0f, 2000.0f, "%.0f");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = use global draw distance");
         ImGui::Checkbox("Collision##meshCol", &ma.collision);
+        ImGui::DragInt("Draw Priority##meshPri", &ma.drawPriority, 0.1f, 0, 10);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = draws on top, higher = draws behind");
 
         ImGui::Separator();
         ImGui::Checkbox("Textured##meshTex", &ma.textured);
@@ -5666,6 +5670,7 @@ void FrameTick(float dt)
                     me.grayscale = ma.grayscale ? 1 : 0;
                     me.drawDistance = ma.drawDistance;
                     me.collision = ma.collision ? 1 : 0;
+                    me.drawPriority = ma.drawPriority;
                     me.textured = ma.textured ? 1 : 0;
                     me.texW = ma.texW;
                     me.texH = ma.texH;

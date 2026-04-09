@@ -2451,7 +2451,7 @@ IWRAM_CODE static void clip_render_poly_tex(u16* buf,
 }
 
 // Triangle sort entry for painter's algorithm (global across all meshes)
-typedef struct { int triIdx; int depth; u8 slot; } TriSort;
+typedef struct { int triIdx; int depth; u8 slot; u8 priority; } TriSort;
 
 // Per-mesh rendering state for global sort
 typedef struct {
@@ -2466,6 +2466,7 @@ typedef struct {
     int texW, texShift, texMask, texPalBase;
     int vertCount, idxCount, quadIdxCount;
     int drawDist;
+    int drawPriority;
     int centerDepth;
 } MeshSlot;
 
@@ -2533,6 +2534,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         ms->meshWireframe = afn_mesh_desc[mi][12];
         ms->meshGrayscale = afn_mesh_desc[mi][13];
         ms->drawDist = afn_mesh_desc[mi][14];
+        ms->drawPriority = afn_mesh_desc[mi][15];
         ms->texMask = ms->texW > 0 ? ms->texW - 1 : 0;
         ms->uvs = afn_mesh_uv_ptrs[mi];
         ms->tex = tex_cache_ptrs[mi];
@@ -2648,6 +2650,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 g_triOrder[totalTris].triIdx = t;
                 g_triOrder[totalTris].depth = (d0 + d1 + d2) / 3;
                 g_triOrder[totalTris].slot = (u8)slotCount;
+                g_triOrder[totalTris].priority = (u8)ms->drawPriority;
                 totalTris++;
             }
         }
@@ -2698,6 +2701,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     g_triOrder[totalTris].triIdx = t | 0x8000;
                     g_triOrder[totalTris].depth = (d0 + d1 + d2 + d3) / 4;
                     g_triOrder[totalTris].slot = (u8)slotCount;
+                    g_triOrder[totalTris].priority = (u8)ms->drawPriority;
                     totalTris++;
                 }
             }
@@ -2708,6 +2712,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
     }
 
     // ---- Phase 2: Global sort — all tris across all meshes ----
+    // Sort by priority first (higher priority draws first/behind), then by depth.
+    // Priority 0 = draws last (on top).
     {
         int a, b;
         for (a = 1; a < totalTris; a++)
@@ -2715,10 +2721,12 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             TriSort tmp = g_triOrder[a];
             b = a - 1;
             if (g_coverageOn)
-                while (b >= 0 && g_triOrder[b].depth > tmp.depth)
+                while (b >= 0 && (g_triOrder[b].priority < tmp.priority ||
+                       (g_triOrder[b].priority == tmp.priority && g_triOrder[b].depth > tmp.depth)))
                 { g_triOrder[b + 1] = g_triOrder[b]; b--; }
             else
-                while (b >= 0 && g_triOrder[b].depth < tmp.depth)
+                while (b >= 0 && (g_triOrder[b].priority < tmp.priority ||
+                       (g_triOrder[b].priority == tmp.priority && g_triOrder[b].depth < tmp.depth)))
             {
                 g_triOrder[b + 1] = g_triOrder[b];
                 b--;
