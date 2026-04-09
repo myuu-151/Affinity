@@ -5260,8 +5260,8 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
 
         ImGui::Separator();
 
-        // Scene list
-        ImGui::BeginChild("##SceneList", ImVec2(0, size.y * 0.4f), true);
+        // Scene list (compact)
+        ImGui::BeginChild("##SceneList", ImVec2(0, 80), true);
         for (int i = 0; i < (int)sTmScenes.size(); i++)
         {
             bool sel = (i == sTmSelectedScene);
@@ -5278,12 +5278,11 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
         }
         ImGui::EndChild();
 
-        ImGui::Separator();
-
-        // Selected scene properties
+        // Selected scene properties (right below scene list)
         if (sTmSelectedScene >= 0 && sTmSelectedScene < (int)sTmScenes.size())
         {
             TmScene& sc = sTmScenes[sTmSelectedScene];
+            ImGui::Separator();
             ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Properties");
             ImGui::PushItemWidth(scenePanelW - 16);
             ImGui::InputText("Name##scname", sc.name, sizeof(sc.name));
@@ -5374,6 +5373,63 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     sTmSelectedScene = (int)sTmScenes.size() - 1;
                 LoadSceneState(sTmScenes[sTmSelectedScene]);
             }
+        }
+
+        // ---- Tiles section ----
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Tiles");
+
+        {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 cursor = ImGui::GetCursorScreenPos();
+            float tileDrawSize = std::max(10.0f, (scenePanelW - 24.0f) / (float)kTilesetCols);
+
+            for (int row = 0; row < kTilesetRows; row++)
+            {
+                for (int col = 0; col < kTilesetCols; col++)
+                {
+                    int idx = row * kTilesetCols + col;
+                    ImVec2 tPos(cursor.x + col * tileDrawSize, cursor.y + row * tileDrawSize);
+
+                    // Checkerboard fill to represent tile content
+                    uint32_t c1 = sPalette[(idx) % 16] | 0xFF000000;
+                    uint32_t c2 = sPalette[(idx + 3) % 16] | 0xFF000000;
+                    dl->AddRectFilled(tPos,
+                        ImVec2(tPos.x + tileDrawSize * 0.5f, tPos.y + tileDrawSize * 0.5f), c1);
+                    dl->AddRectFilled(ImVec2(tPos.x + tileDrawSize * 0.5f, tPos.y),
+                        ImVec2(tPos.x + tileDrawSize, tPos.y + tileDrawSize * 0.5f), c2);
+                    dl->AddRectFilled(ImVec2(tPos.x, tPos.y + tileDrawSize * 0.5f),
+                        ImVec2(tPos.x + tileDrawSize * 0.5f, tPos.y + tileDrawSize), c2);
+                    dl->AddRectFilled(ImVec2(tPos.x + tileDrawSize * 0.5f, tPos.y + tileDrawSize * 0.5f),
+                        ImVec2(tPos.x + tileDrawSize, tPos.y + tileDrawSize), c1);
+
+                    // Grid lines
+                    dl->AddRect(tPos, ImVec2(tPos.x + tileDrawSize, tPos.y + tileDrawSize),
+                        0x40FFFFFF);
+
+                    // Selection highlight
+                    if (idx == sSelectedTile)
+                        dl->AddRect(tPos, ImVec2(tPos.x + tileDrawSize, tPos.y + tileDrawSize),
+                            0xFFFFFFFF, 0.0f, 0, 2.0f);
+                }
+            }
+
+            // Invisible button for tile selection
+            ImVec2 gridSize(kTilesetCols * tileDrawSize, kTilesetRows * tileDrawSize);
+            ImGui::SetCursorScreenPos(cursor);
+            ImGui::InvisibleButton("##TmTileGrid", gridSize);
+            if (ImGui::IsItemClicked())
+            {
+                ImVec2 mouse = ImGui::GetMousePos();
+                int col = (int)((mouse.x - cursor.x) / tileDrawSize);
+                int row = (int)((mouse.y - cursor.y) / tileDrawSize);
+                col = std::clamp(col, 0, kTilesetCols - 1);
+                row = std::clamp(row, 0, kTilesetRows - 1);
+                sSelectedTile = row * kTilesetCols + col;
+            }
+
+            ImGui::SetCursorScreenPos(ImVec2(cursor.x, cursor.y + gridSize.y + 4));
+            ImGui::Text("Tile: %d", sSelectedTile);
         }
 
         ImGui::End();
@@ -7894,10 +7950,7 @@ void FrameTick(float dt)
                     break;
                 }
                 case VsNodeType::ChangeScene: {
-                    if (n.paramInt[1] == 0 && n.paramInt[0] >= 0 && n.paramInt[0] < (int)sMapScenes.size())
-                        { snprintf(subBuf, sizeof(subBuf), "[3D] %s", sMapScenes[n.paramInt[0]].name); sub = subBuf; }
-                    else if (n.paramInt[1] == 1 && n.paramInt[0] >= 0 && n.paramInt[0] < (int)sTmScenes.size())
-                        { snprintf(subBuf, sizeof(subBuf), "[TM] %s", sTmScenes[n.paramInt[0]].name); sub = subBuf; }
+                    sub = (n.paramInt[1] == 1) ? "Mode 0" : "Mode 4";
                     break;
                 }
                 case VsNodeType::Object: {
@@ -9128,35 +9181,13 @@ void FrameTick(float dt)
                 break;
             }
             case VsNodeType::ChangeScene: {
-                ImGui::Text("Scene");
-                // Build unified list: 3D scenes then Tilemap scenes
-                int totalScenes = (int)sMapScenes.size() + (int)sTmScenes.size();
-                if (totalScenes == 0) {
-                    ImGui::Text("(no scenes)");
-                } else {
-                    // Current selection label
-                    char curLabel[64] = "None";
-                    if (n.paramInt[1] == 0 && n.paramInt[0] >= 0 && n.paramInt[0] < (int)sMapScenes.size())
-                        snprintf(curLabel, sizeof(curLabel), "[3D] %s", sMapScenes[n.paramInt[0]].name);
-                    else if (n.paramInt[1] == 1 && n.paramInt[0] >= 0 && n.paramInt[0] < (int)sTmScenes.size())
-                        snprintf(curLabel, sizeof(curLabel), "[TM] %s", sTmScenes[n.paramInt[0]].name);
-                    if (ImGui::BeginCombo("##SceneSel", curLabel)) {
-                        for (int si = 0; si < (int)sMapScenes.size(); si++) {
-                            char label[64];
-                            snprintf(label, sizeof(label), "[3D] %s", sMapScenes[si].name);
-                            bool sel = (n.paramInt[1] == 0 && n.paramInt[0] == si);
-                            if (ImGui::Selectable(label, sel)) { n.paramInt[0] = si; n.paramInt[1] = 0; }
-                            if (sel) ImGui::SetItemDefaultFocus();
-                        }
-                        for (int si = 0; si < (int)sTmScenes.size(); si++) {
-                            char label[64];
-                            snprintf(label, sizeof(label), "[TM] %s", sTmScenes[si].name);
-                            bool sel = (n.paramInt[1] == 1 && n.paramInt[0] == si);
-                            if (ImGui::Selectable(label, sel)) { n.paramInt[0] = si; n.paramInt[1] = 1; }
-                            if (sel) ImGui::SetItemDefaultFocus();
-                        }
-                        ImGui::EndCombo();
-                    }
+                ImGui::Text("Mode");
+                const char* modeNames[] = { "Mode 4 (3D)", "Mode 0 (Tilemap)" };
+                int mode = (n.paramInt[1] == 1) ? 1 : 0;
+                if (ImGui::BeginCombo("##ModeSel", modeNames[mode])) {
+                    if (ImGui::Selectable("Mode 4 (3D)", mode == 0)) { n.paramInt[1] = 0; }
+                    if (ImGui::Selectable("Mode 0 (Tilemap)", mode == 1)) { n.paramInt[1] = 1; }
+                    ImGui::EndCombo();
                 }
                 break;
             }
