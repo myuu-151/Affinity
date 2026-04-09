@@ -47,6 +47,9 @@ extern void tex_scanline_asm(u16* rp, int pairCount, int su, int sv,
 // ARM assembly flat-fill scanline using VRAM strb trick (hline_fast.s, IWRAM)
 extern void afn_hline_fast(u16* row, int left, int right, u8 palIdx);
 
+// ARM assembly stmia framebuffer clear (hline_fast.s, IWRAM)
+extern void afn_clear_fb_stmia(u16* buf, u32 fill);
+
 // Debug profiling counters
 static int dbg_tex_tris;    // textured triangles this frame
 static int dbg_tex_spans;   // textured scanlines this frame
@@ -3204,6 +3207,10 @@ IWRAM_CODE static int collide_floor(FIXED px, FIXED pz, FIXED py, FIXED *outY)
 
 int main(void)
 {
+    // Boost EWRAM access speed: 8-cycle → 2-cycle on supported hardware.
+    // Undocumented register — safe on real GBA + most emulators.
+    *(volatile u32*)0x04000800 = 0x0E000020;
+
     // --- Video setup ---
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
     REG_DISPCNT = DCNT_MODE4 | DCNT_BG2 | DCNT_OBJ | DCNT_OBJ_1D;
@@ -3416,11 +3423,8 @@ int main(void)
         {
             u16* vramBuf = g_page ? (u16*)0x06000000 : (u16*)0x0600A000;
             u16* backbuf = g_ewramRender ? g_ewramBuf : vramBuf;
-            // DMA fill with sky color (palette 0)
-            {
-                static u32 fill = 0;
-                DMA_TRANSFER(backbuf, &fill, 120 * 160 / 2, 3, DMA_NOW | DMA_32 | DMA_SRC_FIXED);
-            }
+            // Clear framebuffer with stmia (sky color = palette 0)
+            afn_clear_fb_stmia(backbuf, 0);
             if (g_coverageOn) coverage_clear();
             dbg_tex_tris = 0;
             dbg_tex_spans = 0;

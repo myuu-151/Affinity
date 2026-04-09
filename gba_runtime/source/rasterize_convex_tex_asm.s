@@ -1,5 +1,7 @@
 @ rasterize_convex_tex_asm.s — IWRAM ARM textured convex polygon rasterizer
 @ Edge walking in ASM with UV interpolation, calls tex_scanline_asm per span.
+@ Uses FIQ register banking: edge deltas stored in FIQ-banked r8-r12, r14
+@ to eliminate 6 stack loads per scanline advance (~12 cycles/scanline saved).
 @ Eliminates C-level overhead from rasterize_convex_tex.
 @
 @ void rasterize_convex_tex_asm(u16* buf, int* px, int* py, int* pu, int* pv,
@@ -309,6 +311,26 @@ rasterize_convex_tex_asm:
     str     r0, [sp, #TF_Lh]
     str     r1, [sp, #TF_Rh]
 
+    @ Store edge deltas in FIQ-banked r8-r12, r14 for fast scanline advance.
+    @ FIQ regs are separate from System regs — r0-r7 are shared (accessible in both).
+    @ Save r6 (segment counter) on stack so we have 6 low regs for the transfer.
+    push    {r6}
+    ldr     r0, [sp, #4 + TF_LDX]
+    ldr     r1, [sp, #4 + TF_RDX]
+    ldr     r2, [sp, #4 + TF_LDU]
+    ldr     r3, [sp, #4 + TF_RDU]
+    ldr     r6, [sp, #4 + TF_LDV]
+    ldr     r7, [sp, #4 + TF_RDV]
+    msr     cpsr_c, #0x11          @ FIQ mode (IRQ still enabled, FIQ regs banked)
+    mov     r8, r0                 @ r8_fiq  = LDX
+    mov     r9, r1                 @ r9_fiq  = RDX
+    mov     r10, r2                @ r10_fiq = LDU
+    mov     r11, r3                @ r11_fiq = RDU
+    mov     r12, r6                @ r12_fiq = LDV
+    mov     r14, r7                @ r14_fiq = RDV
+    msr     cpsr_c, #0x1F          @ System mode
+    pop     {r6}
+
     .ltorg
 
     @ ============================================
@@ -457,28 +479,25 @@ rasterize_convex_tex_asm:
     add     sp, sp, #28                 @ clean up 7 stack args
 
 .Tscan_advance:
-    @ Advance edge X
-    ldr     r0, [sp, #TF_LDX]
-    add     r4, r4, r0
-    ldr     r0, [sp, #TF_RDX]
-    add     r5, r5, r0
-    @ Advance edge UV
-    ldr     r0, [sp, #TF_LDU]
-    ldr     r1, [sp, #TF_LU]
-    add     r1, r1, r0
-    str     r1, [sp, #TF_LU]
-    ldr     r0, [sp, #TF_RDU]
-    ldr     r1, [sp, #TF_RU]
-    add     r1, r1, r0
-    str     r1, [sp, #TF_RU]
-    ldr     r0, [sp, #TF_LDV]
+    @ Advance edges using FIQ-banked deltas (saves 6 stack loads per scanline).
+    @ Load current UV values into r0-r3 (shared regs, accessible in FIQ mode).
+    ldr     r0, [sp, #TF_LU]
     ldr     r1, [sp, #TF_LV]
-    add     r1, r1, r0
+    ldr     r2, [sp, #TF_RU]
+    ldr     r3, [sp, #TF_RV]
+    msr     cpsr_c, #0x11          @ FIQ mode — r8-r14 are now the banked deltas
+    add     r4, r4, r8             @ Lx += LDX  (r4 shared, r8_fiq = LDX)
+    add     r5, r5, r9             @ Rx += RDX  (r5 shared, r9_fiq = RDX)
+    add     r0, r0, r10            @ LU += LDU  (r0 shared, r10_fiq = LDU)
+    add     r2, r2, r11            @ RU += RDU  (r2 shared, r11_fiq = RDU)
+    add     r1, r1, r12            @ LV += LDV  (r1 shared, r12_fiq = LDV)
+    add     r3, r3, r14            @ RV += RDV  (r3 shared, r14_fiq = RDV)
+    msr     cpsr_c, #0x1F          @ System mode
+    @ Store updated UV values
+    str     r0, [sp, #TF_LU]
     str     r1, [sp, #TF_LV]
-    ldr     r0, [sp, #TF_RDV]
-    ldr     r1, [sp, #TF_RV]
-    add     r1, r1, r0
-    str     r1, [sp, #TF_RV]
+    str     r2, [sp, #TF_RU]
+    str     r3, [sp, #TF_RV]
     add     r9, r9, #1
     b       .Tscan_loop
 
