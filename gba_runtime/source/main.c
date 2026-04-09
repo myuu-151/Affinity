@@ -3371,6 +3371,7 @@ int main(void)
     afn_gravity = AFN_GRAVITY;
     afn_terminal_vel = AFN_TERMINAL_VEL;
     afn_play_anim = -1;
+    afn_pending_scene = -1;
     afn_script_start();
     afn_bp_dispatch_start();
 #endif
@@ -3494,6 +3495,7 @@ int main(void)
             afn_input_fwd = 0;
             afn_input_right = 0;
             afn_play_anim = -1;
+            afn_pending_scene = -1;
 
             // Run per-frame script event handlers
             afn_script_update();
@@ -3505,6 +3507,12 @@ int main(void)
             afn_bp_dispatch_key_held();
             afn_bp_dispatch_key_pressed();
             afn_bp_dispatch_key_released();
+
+            // Handle scene switch request
+            if (afn_pending_scene >= 0) {
+                // TODO: multi-scene data loading
+                // For now, just store the requested scene index
+            }
 
             inputFwd = afn_input_fwd;
             inputRight = afn_input_right;

@@ -113,6 +113,10 @@ struct TmScene {
     // Per-scene tilemap data
     std::vector<uint16_t> tileIndices;  // saved tile grid
     std::vector<TmObject> objects;      // saved objects
+    // Scene-level blueprint attachment
+    int blueprintIdx = -1;
+    struct { int paramIdx; int value; } instanceParams[8] = {};
+    int instanceParamCount = 0;
 };
 static std::vector<TmScene> sTmScenes;
 static int sTmSelectedScene = 0;     // active scene index
@@ -640,6 +644,7 @@ static int sSavedPlayerIdx = -1;
 static bool sScriptStartRan = false;  // script OnStart ran this Play session
 static float sScriptMoveSpeed = -1.0f; // persists across frames (Walk/Sprint nodes)
 static float sScriptAutoOrbitSpeed = 0.0f; // persists across frames (AutoOrbit node)
+static int sPendingSceneSwitch = -1;   // scene index to switch to (-1 = none)
 static int sActivePlayAnimNodeId = -1; // PlayAnim node currently driving animation
 static int sPlayAnimIdle = -1;    // PlayAnim from OnStart (idle)
 static int sPlayAnimHeld = -1;    // PlayAnim from OnKeyHeld (sprint anim)
@@ -748,6 +753,10 @@ struct MapScene {
     int vsNextId = 1;
     float vsPanX = 0, vsPanY = 0;
     float vsZoom = 1.0f;
+    // Scene-level blueprint attachment
+    int blueprintIdx = -1;
+    struct { int paramIdx; int value; } instanceParams[8] = {};
+    int instanceParamCount = 0;
 };
 static std::vector<MapScene> sMapScenes;
 static int sMapSelectedScene = 0;
@@ -1382,6 +1391,13 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "\n");
             }
         }
+        // Scene-level blueprint
+        if (sc.blueprintIdx >= 0) {
+            fprintf(f, "tmSceneBp=%d,%d", sc.blueprintIdx, sc.instanceParamCount);
+            for (int ip = 0; ip < sc.instanceParamCount; ip++)
+                fprintf(f, "|%d:%d", sc.instanceParams[ip].paramIdx, sc.instanceParams[ip].value);
+            fprintf(f, "\n");
+        }
     }
 
     // Visual Script Nodes
@@ -1455,6 +1471,13 @@ static bool SaveProject(const std::string& path)
                 ms.camera.jumpCamLand, ms.camera.jumpCamAir, ms.camera.autoOrbitSpeed, ms.camera.jumpDampen,
                 ms.camera.smallTriCull, ms.camera.skipFloor ? 1 : 0, ms.camera.coverageBuf ? 1 : 0,
                 ms.camera.drawDistance);
+        // Scene-level blueprint
+        if (ms.blueprintIdx >= 0) {
+            fprintf(f, "msSceneBp=%d,%d", ms.blueprintIdx, ms.instanceParamCount);
+            for (int ip = 0; ip < ms.instanceParamCount; ip++)
+                fprintf(f, "|%d:%d", ms.instanceParams[ip].paramIdx, ms.instanceParams[ip].value);
+            fprintf(f, "\n");
+        }
         // Visual script
         fprintf(f, "msVsNextId=%d\n", ms.vsNextId);
         fprintf(f, "msVsPan=%.1f,%.1f\n", ms.vsPanX, ms.vsPanY);
@@ -2121,6 +2144,24 @@ static bool LoadProject(const std::string& path)
                     p = comma + 1;
                 }
             }
+            else if (strncmp(line, "tmSceneBp=", 10) == 0 && !sTmScenes.empty())
+            {
+                TmScene& sc = sTmScenes.back();
+                int bpIdx = -1, ipc = 0;
+                sscanf(line + 10, "%d,%d", &bpIdx, &ipc);
+                sc.blueprintIdx = bpIdx;
+                sc.instanceParamCount = 0;
+                const char* pipe = strchr(line + 10, '|');
+                while (pipe && sc.instanceParamCount < 8) {
+                    int pi = 0, pv = 0;
+                    if (sscanf(pipe + 1, "%d:%d", &pi, &pv) == 2) {
+                        sc.instanceParams[sc.instanceParamCount].paramIdx = pi;
+                        sc.instanceParams[sc.instanceParamCount].value = pv;
+                        sc.instanceParamCount++;
+                    }
+                    pipe = strchr(pipe + 1, '|');
+                }
+            }
         }
         else if (strcmp(section, "VisualScript") == 0)
         {
@@ -2265,6 +2306,24 @@ static bool LoadProject(const std::string& path)
                 c.smallTriCull = sti;
                 c.skipFloor = (sf != 0);
                 c.coverageBuf = (cb != 0);
+            }
+            else if (strncmp(line, "msSceneBp=", 10) == 0 && !sMapScenes.empty())
+            {
+                MapScene& ms = sMapScenes.back();
+                int bpIdx = -1, ipc = 0;
+                sscanf(line + 10, "%d,%d", &bpIdx, &ipc);
+                ms.blueprintIdx = bpIdx;
+                ms.instanceParamCount = 0;
+                const char* pipe = strchr(line + 10, '|');
+                while (pipe && ms.instanceParamCount < 8) {
+                    int pi = 0, pv = 0;
+                    if (sscanf(pipe + 1, "%d:%d", &pi, &pv) == 2) {
+                        ms.instanceParams[ms.instanceParamCount].paramIdx = pi;
+                        ms.instanceParams[ms.instanceParamCount].value = pv;
+                        ms.instanceParamCount++;
+                    }
+                    pipe = strchr(pipe + 1, '|');
+                }
             }
             else if (sscanf(line, "msVsNextId=%d", &ival) == 1 && !sMapScenes.empty())
                 sMapScenes.back().vsNextId = ival;
@@ -4300,6 +4359,65 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
     }
     ImGui::EndChild();
 
+    // Scene-level blueprint
+    if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size()) {
+        MapScene& ms = sMapScenes[sMapSelectedScene];
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Scene Blueprint");
+        ImGui::PushItemWidth(size.x * 0.5f);
+        const char* bpPreview = (ms.blueprintIdx >= 0 && ms.blueprintIdx < (int)sBlueprintAssets.size())
+            ? sBlueprintAssets[ms.blueprintIdx].name : "(none)";
+        if (ImGui::BeginCombo("Script##scenebp", bpPreview)) {
+            if (ImGui::Selectable("(none)##scenebpnone", ms.blueprintIdx < 0)) {
+                ms.blueprintIdx = -1;
+                ms.instanceParamCount = 0;
+                sProjectDirty = true;
+            }
+            for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++) {
+                bool sel = (ms.blueprintIdx == bi);
+                if (ImGui::Selectable(sBlueprintAssets[bi].name, sel)) {
+                    ms.blueprintIdx = bi;
+                    ms.instanceParamCount = 0;
+                    sProjectDirty = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (ms.blueprintIdx >= 0 && ms.blueprintIdx < (int)sBlueprintAssets.size()) {
+            const BlueprintAsset& bp = sBlueprintAssets[ms.blueprintIdx];
+            for (int pi = 0; pi < bp.paramCount; pi++) {
+                const BpParam& param = bp.params[pi];
+                int overrideIdx = -1;
+                for (int oi = 0; oi < ms.instanceParamCount; oi++)
+                    if (ms.instanceParams[oi].paramIdx == pi) { overrideIdx = oi; break; }
+                int val = (overrideIdx >= 0) ? ms.instanceParams[overrideIdx].value : param.defaultInt;
+                ImGui::PushID(pi + 7000);
+                char label[48]; snprintf(label, sizeof(label), "%s##scbp%d", param.name, pi);
+                if (ImGui::DragInt(label, &val, 1.0f)) {
+                    if (overrideIdx >= 0) {
+                        ms.instanceParams[overrideIdx].value = val;
+                    } else if (ms.instanceParamCount < 8) {
+                        ms.instanceParams[ms.instanceParamCount].paramIdx = pi;
+                        ms.instanceParams[ms.instanceParamCount].value = val;
+                        ms.instanceParamCount++;
+                    }
+                    sProjectDirty = true;
+                }
+                if (overrideIdx >= 0) {
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Reset")) {
+                        for (int oi = overrideIdx; oi < ms.instanceParamCount - 1; oi++)
+                            ms.instanceParams[oi] = ms.instanceParams[oi + 1];
+                        ms.instanceParamCount--;
+                        sProjectDirty = true;
+                    }
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::PopItemWidth();
+    }
+
     ImGui::Separator();
 
     // Properties for selected object
@@ -4481,7 +4599,7 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::NewLine();
 
         // Blueprint attachment
-        if (!sBlueprintAssets.empty()) {
+        {
             ImGui::Separator();
             ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Blueprint");
             ImGui::PushItemWidth(size.x * 0.5f);
@@ -5055,7 +5173,7 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 ImGui::DragInt("Tile Y", &obj.tileY, 0.5f, 0, tm.height - 1);
             }
             // Blueprint attachment
-            if (!sBlueprintAssets.empty()) {
+            {
                 ImGui::Separator();
                 ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Blueprint");
                 const char* bpPreview = (obj.blueprintIdx >= 0 && obj.blueprintIdx < (int)sBlueprintAssets.size())
@@ -5235,6 +5353,64 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                         sTilemapData.floor.tileIndices[y * sc.mapW + x] = old[y * oldW + x];
             }
 
+            ImGui::PopItemWidth();
+
+            // Scene-level blueprint
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Scene Blueprint");
+            ImGui::PushItemWidth(scenePanelW - 16);
+            {
+                const char* bpPreview = (sc.blueprintIdx >= 0 && sc.blueprintIdx < (int)sBlueprintAssets.size())
+                    ? sBlueprintAssets[sc.blueprintIdx].name : "(none)";
+                if (ImGui::BeginCombo("Script##tmscbp", bpPreview)) {
+                    if (ImGui::Selectable("(none)##tmscbpnone", sc.blueprintIdx < 0)) {
+                        sc.blueprintIdx = -1;
+                        sc.instanceParamCount = 0;
+                        sProjectDirty = true;
+                    }
+                    for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++) {
+                        bool sel2 = (sc.blueprintIdx == bi);
+                        if (ImGui::Selectable(sBlueprintAssets[bi].name, sel2)) {
+                            sc.blueprintIdx = bi;
+                            sc.instanceParamCount = 0;
+                            sProjectDirty = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (sc.blueprintIdx >= 0 && sc.blueprintIdx < (int)sBlueprintAssets.size()) {
+                    const BlueprintAsset& bp = sBlueprintAssets[sc.blueprintIdx];
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        const BpParam& param = bp.params[pi];
+                        int overrideIdx = -1;
+                        for (int oi = 0; oi < sc.instanceParamCount; oi++)
+                            if (sc.instanceParams[oi].paramIdx == pi) { overrideIdx = oi; break; }
+                        int val = (overrideIdx >= 0) ? sc.instanceParams[overrideIdx].value : param.defaultInt;
+                        ImGui::PushID(pi + 8000);
+                        char label[48]; snprintf(label, sizeof(label), "%s##tmscbp%d", param.name, pi);
+                        if (ImGui::DragInt(label, &val, 1.0f)) {
+                            if (overrideIdx >= 0) {
+                                sc.instanceParams[overrideIdx].value = val;
+                            } else if (sc.instanceParamCount < 8) {
+                                sc.instanceParams[sc.instanceParamCount].paramIdx = pi;
+                                sc.instanceParams[sc.instanceParamCount].value = val;
+                                sc.instanceParamCount++;
+                            }
+                            sProjectDirty = true;
+                        }
+                        if (overrideIdx >= 0) {
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Reset")) {
+                                for (int oi = overrideIdx; oi < sc.instanceParamCount - 1; oi++)
+                                    sc.instanceParams[oi] = sc.instanceParams[oi + 1];
+                                sc.instanceParamCount--;
+                                sProjectDirty = true;
+                            }
+                        }
+                        ImGui::PopID();
+                    }
+                }
+            }
             ImGui::PopItemWidth();
 
             ImGui::Spacing();
@@ -6201,6 +6377,42 @@ void FrameTick(float dt)
                     }
                     exportBpInstances.push_back(inst);
                 }
+                // Collect scene-level blueprint instances (MapScenes)
+                for (int si = 0; si < (int)sMapScenes.size(); si++) {
+                    const MapScene& ms = sMapScenes[si];
+                    if (ms.blueprintIdx < 0 || ms.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
+                    const BlueprintAsset& bp = sBlueprintAssets[ms.blueprintIdx];
+                    GBABlueprintInstanceExport inst;
+                    inst.blueprintIdx = ms.blueprintIdx;
+                    inst.spriteIdx = -1;
+                    inst.tmObjIdx = -1;
+                    inst.paramCount = bp.paramCount;
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        inst.paramValues[pi] = bp.params[pi].defaultInt;
+                        for (int oi = 0; oi < ms.instanceParamCount; oi++)
+                            if (ms.instanceParams[oi].paramIdx == pi)
+                                inst.paramValues[pi] = ms.instanceParams[oi].value;
+                    }
+                    exportBpInstances.push_back(inst);
+                }
+                // Collect scene-level blueprint instances (TmScenes)
+                for (int si = 0; si < (int)sTmScenes.size(); si++) {
+                    const TmScene& sc = sTmScenes[si];
+                    if (sc.blueprintIdx < 0 || sc.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
+                    const BlueprintAsset& bp = sBlueprintAssets[sc.blueprintIdx];
+                    GBABlueprintInstanceExport inst;
+                    inst.blueprintIdx = sc.blueprintIdx;
+                    inst.spriteIdx = -1;
+                    inst.tmObjIdx = -1;
+                    inst.paramCount = bp.paramCount;
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        inst.paramValues[pi] = bp.params[pi].defaultInt;
+                        for (int oi = 0; oi < sc.instanceParamCount; oi++)
+                            if (sc.instanceParams[oi].paramIdx == pi)
+                                inst.paramValues[pi] = sc.instanceParams[oi].value;
+                    }
+                    exportBpInstances.push_back(inst);
+                }
 
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                              exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, target]() {
@@ -6239,6 +6451,7 @@ void FrameTick(float dt)
             sScriptStartRan = false;
             sScriptMoveSpeed = -1.0f;
             sScriptAutoOrbitSpeed = 0.0f;
+            sPendingSceneSwitch = -1;
             sActivePlayAnimNodeId = -1;
             sPlayAnimIdle = -1;
             sPlayAnimHeld = -1;
@@ -6577,6 +6790,11 @@ void FrameTick(float dt)
                     auto* sd = findDataInPlay(action->id, 0);
                     sScriptAutoOrbitSpeed = sd ? (float)resolveIntPlay(sd) : 205.0f;
                 }
+                else if (t == VsNodeType::ChangeScene) {
+                    auto* sd = findDataInPlay(action->id, 0);
+                    int scIdx = sd ? resolveIntPlay(sd) : action->paramInt[0];
+                    sPendingSceneSwitch = scIdx;
+                }
                 // Jump, DampenJump, SetGravity, SetMaxFall — editor has no vertical physics
                 else if (t == VsNodeType::PlayAnim) {
                     if (execEventType == VsNodeType::OnStart)
@@ -6886,6 +7104,11 @@ void FrameTick(float dt)
                         auto* sd = bpFindDataIn(action->id, 0);
                         sScriptAutoOrbitSpeed = sd ? (float)sd->paramInt[0] : 205.0f;
                     }
+                    else if (t == VsNodeType::ChangeScene) {
+                        auto* sd = bpFindDataIn(action->id, 0);
+                        int scIdx = sd ? sd->paramInt[0] : action->paramInt[0];
+                        sPendingSceneSwitch = scIdx;
+                    }
                 };
 
                 // Run blueprint events
@@ -6920,6 +7143,139 @@ void FrameTick(float dt)
                         }
                     }
                 }
+            }
+
+            // --- Scene-level blueprint ---
+            if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size()) {
+                const MapScene& ms = sMapScenes[sMapSelectedScene];
+                if (ms.blueprintIdx >= 0 && ms.blueprintIdx < (int)sBlueprintAssets.size()) {
+                    const BlueprintAsset& bp = sBlueprintAssets[ms.blueprintIdx];
+                    if (!bp.nodes.empty()) {
+                        std::vector<VsNode> bpNodes = bp.nodes;
+                        for (int pi = 0; pi < bp.paramCount; pi++) {
+                            int overrideVal = bp.params[pi].defaultInt;
+                            for (int oi = 0; oi < ms.instanceParamCount; oi++)
+                                if (ms.instanceParams[oi].paramIdx == pi)
+                                    overrideVal = ms.instanceParams[oi].value;
+                            for (auto& n : bpNodes)
+                                if (n.id == bp.params[pi].sourceNodeId)
+                                    n.paramInt[bp.params[pi].sourceParamIdx] = overrideVal;
+                        }
+                        auto bpFindNode = [&](int id) -> const VsNode* {
+                            for (auto& n : bpNodes) if (n.id == id) return &n;
+                            return nullptr;
+                        };
+                        auto bpFindDataIn = [&](int nodeId, int pinIdx) -> const VsNode* {
+                            for (auto& lk : bp.links)
+                                if (lk.to.nodeId == nodeId && lk.to.pinType == 3 && lk.to.pinIdx == pinIdx)
+                                    return bpFindNode(lk.from.nodeId);
+                            return nullptr;
+                        };
+                        auto bpCollectActions = [&](int startNodeId) -> std::vector<const VsNode*> {
+                            std::vector<const VsNode*> acts;
+                            std::vector<int> front;
+                            std::vector<bool> vis(10000, false);
+                            for (auto& lk : bp.links)
+                                if (lk.from.nodeId == startNodeId && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                    front.push_back(lk.to.nodeId);
+                            int safety = 0;
+                            while (!front.empty() && safety < 256) {
+                                int nid = front.front(); front.erase(front.begin());
+                                if (nid < 0 || nid >= (int)vis.size() || vis[nid]) continue;
+                                vis[nid] = true; safety++;
+                                auto* an = bpFindNode(nid); if (!an) continue;
+                                acts.push_back(an);
+                                for (auto& lk : bp.links)
+                                    if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                        front.push_back(lk.to.nodeId);
+                            }
+                            return acts;
+                        };
+                        auto bpResolveEventKey = [&](const VsNode& ev) -> int {
+                            int count = 0; int keyVal = -1;
+                            for (auto& lk : bp.links)
+                                if (lk.to.nodeId == ev.id && lk.to.pinType == 3 && lk.to.pinIdx == 0) {
+                                    auto* dn = bpFindNode(lk.from.nodeId);
+                                    if (dn) { keyVal = dn->paramInt[0]; count++; }
+                                }
+                            if (count == 1) return keyVal;
+                            if (count == 0) return ev.paramInt[0];
+                            return -1;
+                        };
+                        auto bpExecAction = [&](const VsNode* action) {
+                            VsNodeType t = action->type;
+                            if (t == VsNodeType::MovePlayer) {
+                                auto* dd = bpFindDataIn(action->id, 0);
+                                int dir = dd ? dd->paramInt[0] : 0;
+                                int dirKeys[] = { 8, 9, 6, 7 };
+                                if (dir >= 0 && dir < 4 && editorKeyDown(dirKeys[dir])) {
+                                    if (dir == 0) scInputRight -= 1.0f;
+                                    if (dir == 1) scInputRight += 1.0f;
+                                    if (dir == 2) scInputFwd   += 1.0f;
+                                    if (dir == 3) scInputFwd   -= 1.0f;
+                                }
+                            }
+                            else if (t == VsNodeType::Walk) {
+                                auto* sd = bpFindDataIn(action->id, 0);
+                                sScriptMoveSpeed = sd ? (float)sd->paramInt[0] : sCamObj.walkSpeed;
+                            }
+                            else if (t == VsNodeType::Sprint) {
+                                auto* sd = bpFindDataIn(action->id, 0);
+                                sScriptMoveSpeed = sd ? (float)sd->paramInt[0] : sCamObj.sprintSpeed;
+                            }
+                            else if (t == VsNodeType::OrbitCamera) {
+                                auto* dd = bpFindDataIn(action->id, 0);
+                                auto* sd = bpFindDataIn(action->id, 1);
+                                int dir = dd ? dd->paramInt[0] : 1;
+                                int speed = sd ? sd->paramInt[0] : 512;
+                                int key = (dir == 0) ? 2 : 3;
+                                if (editorKeyDown(key)) {
+                                    float radPerFrame = (float)speed / 65536.0f * 6.28318f;
+                                    scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;
+                                }
+                            }
+                            else if (t == VsNodeType::AutoOrbit) {
+                                auto* sd = bpFindDataIn(action->id, 0);
+                                sScriptAutoOrbitSpeed = sd ? (float)sd->paramInt[0] : 205.0f;
+                            }
+                            else if (t == VsNodeType::ChangeScene) {
+                                auto* sd = bpFindDataIn(action->id, 0);
+                                int scIdx = sd ? sd->paramInt[0] : action->paramInt[0];
+                                sPendingSceneSwitch = scIdx;
+                            }
+                        };
+                        for (auto& ev : bpNodes) {
+                            if (ev.type == VsNodeType::OnUpdate) {
+                                auto acts = bpCollectActions(ev.id);
+                                for (auto* a : acts) bpExecAction(a);
+                            }
+                            if (ev.type == VsNodeType::OnKeyHeld) {
+                                int key = bpResolveEventKey(ev);
+                                bool fire = (key >= 0) ? editorKeyDown(key) : true;
+                                if (fire) { auto acts = bpCollectActions(ev.id); for (auto* a : acts) bpExecAction(a); }
+                            }
+                            if (ev.type == VsNodeType::OnKeyPressed) {
+                                int key = bpResolveEventKey(ev);
+                                if (key >= 0 && editorKeyHit(key)) { auto acts = bpCollectActions(ev.id); for (auto* a : acts) bpExecAction(a); }
+                            }
+                            if (ev.type == VsNodeType::OnKeyReleased) {
+                                int key = bpResolveEventKey(ev);
+                                if (key >= 0 && key < 10 && sPrevKeyState[key] && !editorKeyDown(key)) { auto acts = bpCollectActions(ev.id); for (auto* a : acts) bpExecAction(a); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Handle pending scene switch
+            if (sPendingSceneSwitch >= 0 && sPendingSceneSwitch < (int)sMapScenes.size() && sPendingSceneSwitch != sMapSelectedScene) {
+                SaveMapSceneState(sMapScenes[sMapSelectedScene]);
+                sMapSelectedScene = sPendingSceneSwitch;
+                LoadMapSceneState(sMapScenes[sMapSelectedScene]);
+                sScriptStartRan = false; // re-run OnStart in new scene
+                sPendingSceneSwitch = -1;
+            } else {
+                sPendingSceneSwitch = -1;
             }
 
             // Update previous key state
@@ -8813,16 +9169,20 @@ void FrameTick(float dt)
                         if (ref == sSelectedBlueprint) ref = -1;
                         else if (ref > sSelectedBlueprint) ref--;
                     };
-                    for (int si = 0; si < (int)sMapScenes.size(); si++)
+                    for (int si = 0; si < (int)sMapScenes.size(); si++) {
                         for (int j = 0; j < sMapScenes[si].spriteCount; j++)
                             fixBpRef(sMapScenes[si].sprites[j].blueprintIdx);
+                        fixBpRef(sMapScenes[si].blueprintIdx);
+                    }
                     for (int j = 0; j < sSpriteCount; j++)
                         fixBpRef(sSprites[j].blueprintIdx);
                     for (auto& obj : sTmObjects)
                         fixBpRef(obj.blueprintIdx);
-                    for (auto& sc : sTmScenes)
+                    for (auto& sc : sTmScenes) {
                         for (auto& obj : sc.objects)
                             fixBpRef(obj.blueprintIdx);
+                        fixBpRef(sc.blueprintIdx);
+                    }
                     if (sVsEditBlueprintIdx > sSelectedBlueprint) sVsEditBlueprintIdx--;
                     sSelectedBlueprint = std::min(sSelectedBlueprint, (int)sBlueprintAssets.size() - 1);
                     sProjectDirty = true;

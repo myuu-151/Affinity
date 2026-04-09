@@ -1489,6 +1489,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "static FIXED afn_move_speed;\n";
             f << "static int   afn_auto_orbit_speed;\n";
             f << "static int   afn_play_anim;\n";
+            f << "static int   afn_pending_scene;\n";
             f << "static FIXED afn_gravity;\n";
             f << "static FIXED afn_terminal_vel;\n";
             f << "static FIXED player_vy;\n";
@@ -1586,6 +1587,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_play_anim = " << animIdx << ";\n";
                     break;
                 }
+                case GBAScriptNodeType::ChangeScene: {
+                    auto* scData = findDataIn(action->id, 0);
+                    int scIdx = scData ? resolveInt(scData) : 0;
+                    f << "    afn_pending_scene = " << scIdx << ";\n";
+                    break;
+                }
                 default:
                     f << "    // unsupported action: type " << (int)action->type << "\n";
                     break;
@@ -1673,6 +1680,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
               << "static FIXED afn_input_right;\n"
               << "static FIXED afn_move_speed;\n"
               << "static int   afn_play_anim;\n"
+              << "static int   afn_pending_scene;\n"
               << "static int   afn_auto_orbit_speed;\n"
               << "static FIXED afn_gravity;\n"
               << "static FIXED afn_terminal_vel;\n\n";
@@ -1851,6 +1859,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* animData = bpFindDataIn(action->id, 0);
                     std::string animIdx = animData ? bpResolveInt(animData) : "0";
                     f << "    afn_play_anim = " << animIdx << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::ChangeScene: {
+                    auto* scData = bpFindDataIn(action->id, 0);
+                    std::string scIdx = scData ? bpResolveInt(scData) : "0";
+                    f << "    afn_pending_scene = " << scIdx << ";\n";
                     break;
                 }
                 default:
