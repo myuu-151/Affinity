@@ -1410,6 +1410,9 @@ static bool LoadProject(const std::string& path)
     for (int i = 0; i < (int)sAssetDirSprites.size(); i++) FreeAssetDirSprites(i);
     sAssetDirSprites.clear();
     sSelectedAsset = -1;
+    sMeshAssets.clear();
+    sSelectedMesh = -1;
+    sSelectedMeshes.clear();
     sCamObj = { 0.0f, 0.0f, 14.0f, 0.0f, 60.0f };
     sCamObjEditorScale = 0.05f;
 
