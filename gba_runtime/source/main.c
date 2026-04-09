@@ -250,6 +250,7 @@ static FIXED afn_move_speed;      // current movement speed
 static int   afn_auto_orbit_speed; // auto-orbit speed (0 = disabled)
 static int   afn_play_anim;       // animation request (-1 = none)
 static int   afn_pending_scene;   // scene switch request (-1 = none)
+static int   afn_pending_scene_mode; // 0 = 3D/MapScene, 1 = Tilemap/TmScene
 static int   afn_collided_sprite; // sprite index player collided with (-1 = none)
 static FIXED afn_gravity;         // gravity per frame (16.8)
 static FIXED afn_terminal_vel;    // max fall speed (16.8)

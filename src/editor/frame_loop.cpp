@@ -2946,6 +2946,11 @@ static void DrawTabBar()
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
         if (ImGui::Button("Play", ImVec2(btnW, btnH)))
         {
+            // Save blueprint working set back before playing so bp.nodes/links are current
+            if (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0 && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
+                sBlueprintAssets[sVsEditBlueprintIdx].nodes = sVsNodes;
+                sBlueprintAssets[sVsEditBlueprintIdx].links = sVsLinks;
+            }
             sEditorMode = EditorMode::Play;
             sSavedEditorCam = sCamera;
             sCamera.x = sCamObj.x;
@@ -4365,65 +4370,6 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         }
     }
     ImGui::EndChild();
-
-    // Scene-level blueprint
-    if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size()) {
-        MapScene& ms = sMapScenes[sMapSelectedScene];
-        ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Scene Blueprint");
-        ImGui::PushItemWidth(size.x * 0.5f);
-        const char* bpPreview = (ms.blueprintIdx >= 0 && ms.blueprintIdx < (int)sBlueprintAssets.size())
-            ? sBlueprintAssets[ms.blueprintIdx].name : "(none)";
-        if (ImGui::BeginCombo("Script##scenebp", bpPreview)) {
-            if (ImGui::Selectable("(none)##scenebpnone", ms.blueprintIdx < 0)) {
-                ms.blueprintIdx = -1;
-                ms.instanceParamCount = 0;
-                sProjectDirty = true;
-            }
-            for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++) {
-                bool sel = (ms.blueprintIdx == bi);
-                if (ImGui::Selectable(sBlueprintAssets[bi].name, sel)) {
-                    ms.blueprintIdx = bi;
-                    ms.instanceParamCount = 0;
-                    sProjectDirty = true;
-                }
-            }
-            ImGui::EndCombo();
-        }
-        if (ms.blueprintIdx >= 0 && ms.blueprintIdx < (int)sBlueprintAssets.size()) {
-            const BlueprintAsset& bp = sBlueprintAssets[ms.blueprintIdx];
-            for (int pi = 0; pi < bp.paramCount; pi++) {
-                const BpParam& param = bp.params[pi];
-                int overrideIdx = -1;
-                for (int oi = 0; oi < ms.instanceParamCount; oi++)
-                    if (ms.instanceParams[oi].paramIdx == pi) { overrideIdx = oi; break; }
-                int val = (overrideIdx >= 0) ? ms.instanceParams[overrideIdx].value : param.defaultInt;
-                ImGui::PushID(pi + 7000);
-                char label[48]; snprintf(label, sizeof(label), "%s##scbp%d", param.name, pi);
-                if (ImGui::DragInt(label, &val, 1.0f)) {
-                    if (overrideIdx >= 0) {
-                        ms.instanceParams[overrideIdx].value = val;
-                    } else if (ms.instanceParamCount < 8) {
-                        ms.instanceParams[ms.instanceParamCount].paramIdx = pi;
-                        ms.instanceParams[ms.instanceParamCount].value = val;
-                        ms.instanceParamCount++;
-                    }
-                    sProjectDirty = true;
-                }
-                if (overrideIdx >= 0) {
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("Reset")) {
-                        for (int oi = overrideIdx; oi < ms.instanceParamCount - 1; oi++)
-                            ms.instanceParams[oi] = ms.instanceParams[oi + 1];
-                        ms.instanceParamCount--;
-                        sProjectDirty = true;
-                    }
-                }
-                ImGui::PopID();
-            }
-        }
-        ImGui::PopItemWidth();
-    }
 
     ImGui::Separator();
 
@@ -6093,6 +6039,11 @@ void FrameTick(float dt)
         if (buildFromMenu || sBuildRequested)
         {
             sBuildRequested = false;
+            // Save blueprint working set so export reads current nodes/links
+            if (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0 && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
+                sBlueprintAssets[sVsEditBlueprintIdx].nodes = sVsNodes;
+                sBlueprintAssets[sVsEditBlueprintIdx].links = sVsLinks;
+            }
             sPackaging = true;
             sPackageDone = false;
             sPackageSuccess = false;
@@ -9431,7 +9382,12 @@ void FrameTick(float dt)
         // Scene panel (top-right, only on Map tab)
         if (sActiveTab == EditorTab::Map)
         {
-            scenePanH = 160;
+            // Compute scene panel height: base for scene list + extra if blueprint attached
+            int bpExtraH = 0;
+            if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size() && sMapScenes[sMapSelectedScene].blueprintIdx >= 0)
+                bpExtraH = 20 + sMapScenes[sMapSelectedScene].instanceParamCount * 22;
+            scenePanH = 160 + 50 + bpExtraH;
+            if (scenePanH > bodyH * 0.5f) scenePanH = (float)(int)(bodyH * 0.5f);
             ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
@@ -9464,8 +9420,8 @@ void FrameTick(float dt)
                 }
             }
 
-            // Scene list in scrollable child that fills remaining space
-            ImGui::BeginChild("##MapSceneList", ImVec2(0, 0));
+            // Scene list
+            ImGui::BeginChild("##MapSceneList", ImVec2(0, 100));
             for (int i = 0; i < (int)sMapScenes.size(); i++)
             {
                 bool sel = (i == sMapSelectedScene);
@@ -9490,6 +9446,65 @@ void FrameTick(float dt)
                 }
             }
             ImGui::EndChild();
+
+            // Scene-level blueprint
+            if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size()) {
+                MapScene& ms = sMapScenes[sMapSelectedScene];
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Scene Blueprint");
+                ImGui::PushItemWidth(-1);
+                const char* bpPreview = (ms.blueprintIdx >= 0 && ms.blueprintIdx < (int)sBlueprintAssets.size())
+                    ? sBlueprintAssets[ms.blueprintIdx].name : "(none)";
+                if (ImGui::BeginCombo("Script##scenebp", bpPreview)) {
+                    if (ImGui::Selectable("(none)##scenebpnone", ms.blueprintIdx < 0)) {
+                        ms.blueprintIdx = -1;
+                        ms.instanceParamCount = 0;
+                        sProjectDirty = true;
+                    }
+                    for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++) {
+                        bool sel = (ms.blueprintIdx == bi);
+                        if (ImGui::Selectable(sBlueprintAssets[bi].name, sel)) {
+                            ms.blueprintIdx = bi;
+                            ms.instanceParamCount = 0;
+                            sProjectDirty = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ms.blueprintIdx >= 0 && ms.blueprintIdx < (int)sBlueprintAssets.size()) {
+                    const BlueprintAsset& bp = sBlueprintAssets[ms.blueprintIdx];
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        const BpParam& param = bp.params[pi];
+                        int overrideIdx = -1;
+                        for (int oi = 0; oi < ms.instanceParamCount; oi++)
+                            if (ms.instanceParams[oi].paramIdx == pi) { overrideIdx = oi; break; }
+                        int val = (overrideIdx >= 0) ? ms.instanceParams[overrideIdx].value : param.defaultInt;
+                        ImGui::PushID(pi + 7000);
+                        char label[48]; snprintf(label, sizeof(label), "%s##scbp%d", param.name, pi);
+                        if (ImGui::DragInt(label, &val, 1.0f)) {
+                            if (overrideIdx >= 0) {
+                                ms.instanceParams[overrideIdx].value = val;
+                            } else if (ms.instanceParamCount < 8) {
+                                ms.instanceParams[ms.instanceParamCount].paramIdx = pi;
+                                ms.instanceParams[ms.instanceParamCount].value = val;
+                                ms.instanceParamCount++;
+                            }
+                            sProjectDirty = true;
+                        }
+                        if (overrideIdx >= 0) {
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Reset")) {
+                                for (int oi = overrideIdx; oi < ms.instanceParamCount - 1; oi++)
+                                    ms.instanceParams[oi] = ms.instanceParams[oi + 1];
+                                ms.instanceParamCount--;
+                                sProjectDirty = true;
+                            }
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                ImGui::PopItemWidth();
+            }
 
             ImGui::End();
             ImGui::PopStyleColor();
