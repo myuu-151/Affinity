@@ -1045,7 +1045,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             }
         }
 
-        // Mesh descriptor table: { vertCount, indexCount, quadIndexCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase, wireframe, grayscale, drawDist, drawPriority }
+        // Mesh descriptor table: { vertCount, indexCount, quadIndexCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase, wireframe, grayscale, drawDist, drawPriority, visible }
         f << "static const int afn_mesh_desc[][16] = {\n";
         for (size_t mi = 0; mi < meshes.size(); mi++)
         {
@@ -1068,7 +1068,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 drawDist = (int)(meshes[mi].drawDistance / 4.0f * 256.0f);
             char hex[8];
             snprintf(hex, sizeof(hex), "0x%04X", meshes[mi].colorRGB15);
-            f << "    { " << vc << ", " << ic << ", " << qic << ", " << hex << ", " << meshes[mi].cullMode << ", " << lit << ", " << sorted << ", " << halfRes << ", " << textured << ", " << texW << ", " << texShift << ", " << texPalBases[mi] << ", " << wireframe << ", " << grayscale << ", " << drawDist << ", " << meshes[mi].drawPriority << " },\n";
+            f << "    { " << vc << ", " << ic << ", " << qic << ", " << hex << ", " << meshes[mi].cullMode << ", " << lit << ", " << sorted << ", " << halfRes << ", " << textured << ", " << texW << ", " << texShift << ", " << texPalBases[mi] << ", " << wireframe << ", " << grayscale << ", " << drawDist << ", " << meshes[mi].drawPriority << ", " << meshes[mi].visible << " },\n";
         }
         f << "};\n\n";
 
@@ -1443,7 +1443,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 n.type != GBAScriptNodeType::OnKeyReleased &&
                 n.type != GBAScriptNodeType::OnKeyHeld &&
                 n.type != GBAScriptNodeType::OnStart &&
-                n.type != GBAScriptNodeType::OnUpdate)
+                n.type != GBAScriptNodeType::OnUpdate &&
+                n.type != GBAScriptNodeType::OnCollision)
                 continue;
 
             EventChain chain;
@@ -1490,6 +1491,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "static int   afn_auto_orbit_speed;\n";
             f << "static int   afn_play_anim;\n";
             f << "static int   afn_pending_scene;\n";
+            f << "static int   afn_collided_sprite;\n";
             f << "static FIXED afn_gravity;\n";
             f << "static FIXED afn_terminal_vel;\n";
             f << "static FIXED player_vy;\n";
@@ -1671,6 +1673,19 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     emitAction(a);
             }
             f << "}\n\n";
+
+            // OnCollision → called when player collides with a sprite
+            f << "static inline void afn_script_collision(void) {\n";
+            bool hasCollision = false;
+            for (auto& c : chains) {
+                if (c.event->type != GBAScriptNodeType::OnCollision) continue;
+                hasCollision = true;
+                for (auto* a : c.actions)
+                    emitAction(a);
+            }
+            if (!hasCollision)
+                f << "  (void)0;\n";
+            f << "}\n\n";
         }
         else if (!script.nodes.empty())
         {
@@ -1681,6 +1696,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
               << "static FIXED afn_move_speed;\n"
               << "static int   afn_play_anim;\n"
               << "static int   afn_pending_scene;\n"
+              << "static int   afn_collided_sprite;\n"
               << "static int   afn_auto_orbit_speed;\n"
               << "static FIXED afn_gravity;\n"
               << "static FIXED afn_terminal_vel;\n\n";
@@ -1688,7 +1704,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "static inline void afn_script_key_held(void) {}\n";
             f << "static inline void afn_script_key_pressed(void) {}\n";
             f << "static inline void afn_script_key_released(void) {}\n";
-            f << "static inline void afn_script_update(void) {}\n\n";
+            f << "static inline void afn_script_update(void) {}\n";
+            f << "static inline void afn_script_collision(void) {}\n\n";
         }
     }
 
@@ -1766,7 +1783,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             for (auto& n : bpScript.nodes) {
                 bool isEvent = (n.type == GBAScriptNodeType::OnStart || n.type == GBAScriptNodeType::OnKeyHeld ||
                                 n.type == GBAScriptNodeType::OnKeyPressed || n.type == GBAScriptNodeType::OnKeyReleased ||
-                                n.type == GBAScriptNodeType::OnUpdate);
+                                n.type == GBAScriptNodeType::OnUpdate || n.type == GBAScriptNodeType::OnCollision);
                 if (!isEvent) continue;
                 BpChain chain; chain.event = &n;
                 std::vector<int> front;
@@ -1917,6 +1934,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
             for (auto& c : bpChains)
                 if (c.event->type == GBAScriptNodeType::OnUpdate)
                     for (auto* a : c.actions) bpEmitAction(a);
+            f << "}\n";
+
+            f << "static inline void afn_bp" << bi << "_collision(" << paramSig << ") {\n";
+            for (auto& c : bpChains)
+                if (c.event->type == GBAScriptNodeType::OnCollision)
+                    for (auto* a : c.actions) bpEmitAction(a);
             f << "}\n\n";
         }
 
@@ -1967,6 +1990,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             emitDispatch("key_pressed", "key_pressed");
             emitDispatch("key_released", "key_released");
             emitDispatch("update", "update");
+            emitDispatch("collision", "collision");
         }
     }
 
@@ -1976,6 +2000,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static inline void afn_bp_dispatch_key_pressed(void) {}\n";
         f << "static inline void afn_bp_dispatch_key_released(void) {}\n";
         f << "static inline void afn_bp_dispatch_update(void) {}\n";
+        f << "static inline void afn_bp_dispatch_collision(void) {}\n";
     }
 
     f << "\n#endif // MAPDATA_H\n";

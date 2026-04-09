@@ -1248,7 +1248,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0);
     }
     fprintf(f, "\n");
 
@@ -1805,10 +1805,10 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "MeshAssets") == 0)
         {
             char mname[256], mpath[512], mtexpath[512] = {};
-            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0;
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1;
             float mdrawdist = 0.0f;
             // Try newest format: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath|usequads|drawdist|collision|drawpriority
-            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d|%f|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri);
+            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d|%f|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible);
             if (matched < 2)
             {
                 // Try format without usequads: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath
@@ -1851,6 +1851,8 @@ static bool LoadProject(const std::string& path)
                     ma.collision = (mcollision != 0);
                 if (matched >= 14)
                     ma.drawPriority = mdrawpri;
+                if (matched >= 15)
+                    ma.visible = (mvisible != 0);
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -2765,6 +2767,8 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             ImGui::Checkbox("Use Quads##meshQuad", &ma.useQuads);
         ImGui::DragFloat("Draw Distance##mesh", &ma.drawDistance, 1.0f, 0.0f, 2000.0f, "%.0f");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = use global draw distance");
+        ImGui::Checkbox("Visible##meshVis", &ma.visible);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Uncheck for invisible collision-only mesh (saves GPU/CPU)");
         ImGui::Checkbox("Collision##meshCol", &ma.collision);
         ImGui::DragInt("Draw Priority##meshPri", &ma.drawPriority, 0.1f, 0, 10);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = draws on top, higher = draws behind");
@@ -6266,6 +6270,7 @@ void FrameTick(float dt)
                     me.drawDistance = ma.drawDistance;
                     me.collision = ma.collision ? 1 : 0;
                     me.drawPriority = ma.drawPriority;
+                    me.visible = ma.visible ? 1 : 0;
                     me.textured = ma.textured ? 1 : 0;
                     me.texW = ma.texW;
                     me.texH = ma.texH;
@@ -7005,6 +7010,39 @@ void FrameTick(float dt)
                 }
             }
 
+            // --- Collision detection ---
+            int collidedSprite = -1;
+            {
+                int pIdx = -1;
+                for (int i = 0; i < sSpriteCount; i++)
+                    if (sSprites[i].type == SpriteType::Player) { pIdx = i; break; }
+                if (pIdx >= 0) {
+                    float px = sSprites[pIdx].x, pz = sSprites[pIdx].z;
+                    float collisionRadius = 1.5f; // world units
+                    float cr2 = collisionRadius * collisionRadius;
+                    for (int ci = 0; ci < sSpriteCount; ci++) {
+                        if (ci == pIdx) continue;
+                        float dx = px - sSprites[ci].x;
+                        float dz = pz - sSprites[ci].z;
+                        if (dx * dx + dz * dz < cr2) {
+                            collidedSprite = ci;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // --- OnCollision scene script events ---
+            if (collidedSprite >= 0) {
+                for (auto& ev : sVsNodes) {
+                    if (ev.type != VsNodeType::OnCollision) continue;
+                    auto acts = collectActionsPlay(ev.id);
+                    execEventType = VsNodeType::OnCollision;
+                    for (auto* a : acts) execActionPlay(a);
+                    execEventType = VsNodeType::Group;
+                }
+            }
+
             // --- Blueprint instance scripts ---
             // For each sprite with a blueprint, run the blueprint's events using instance params
             for (int si = 0; si < sSpriteCount; si++) {
@@ -7142,6 +7180,10 @@ void FrameTick(float dt)
                             for (auto* a : acts) bpExecAction(a);
                         }
                     }
+                    if (ev.type == VsNodeType::OnCollision && collidedSprite >= 0) {
+                        auto acts = bpCollectActions(ev.id);
+                        for (auto* a : acts) bpExecAction(a);
+                    }
                 }
             }
 
@@ -7261,6 +7303,10 @@ void FrameTick(float dt)
                             if (ev.type == VsNodeType::OnKeyReleased) {
                                 int key = bpResolveEventKey(ev);
                                 if (key >= 0 && key < 10 && sPrevKeyState[key] && !editorKeyDown(key)) { auto acts = bpCollectActions(ev.id); for (auto* a : acts) bpExecAction(a); }
+                            }
+                            if (ev.type == VsNodeType::OnCollision && collidedSprite >= 0) {
+                                auto acts = bpCollectActions(ev.id);
+                                for (auto* a : acts) bpExecAction(a);
                             }
                         }
                     }

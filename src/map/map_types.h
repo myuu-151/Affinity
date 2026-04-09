@@ -186,6 +186,7 @@ struct MeshAsset
     float drawDistance = 0.0f; // per-mesh draw distance (0 = use global/unlimited)
     bool collision = true; // true = generate collision faces for this mesh
     int drawPriority = 0; // 0 = draws on top (last), higher = draws first (behind)
+    bool visible = true; // false = invisible collision-only mesh (saves CPU on GBA)
 
     // Quad index buffer — 4 consecutive indices per quad face from OBJ
     // OBJ quads are preserved as-is, not force-triangulated

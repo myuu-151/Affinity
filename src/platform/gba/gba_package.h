@@ -113,6 +113,7 @@ struct GBAMeshExport
     float drawDistance = 0.0f;    // per-mesh draw distance (0 = use global/unlimited)
     int collision = 1;            // 1 = generate collision faces, 0 = no collision
     int drawPriority = 0;         // 0 = draws on top (last), higher = draws first
+    int visible = 1;              // 1 = render, 0 = invisible collision-only
     // Texture mapping
     std::vector<float> uvs;       // u, v per vertex (flat, interleaved)
     int textured = 0;             // 1 = textured, 0 = flat shaded

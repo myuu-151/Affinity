@@ -249,6 +249,8 @@ static FIXED afn_input_right;     // right input accumulator
 static FIXED afn_move_speed;      // current movement speed
 static int   afn_auto_orbit_speed; // auto-orbit speed (0 = disabled)
 static int   afn_play_anim;       // animation request (-1 = none)
+static int   afn_pending_scene;   // scene switch request (-1 = none)
+static int   afn_collided_sprite; // sprite index player collided with (-1 = none)
 static FIXED afn_gravity;         // gravity per frame (16.8)
 static FIXED afn_terminal_vel;    // max fall speed (16.8)
 
@@ -2467,6 +2469,7 @@ typedef struct {
     int vertCount, idxCount, quadIdxCount;
     int drawDist;
     int drawPriority;
+    int visible;
     int centerDepth;
 } MeshSlot;
 
@@ -2503,6 +2506,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             continue;
 
         mi = g_sprites[si].meshIdx;
+        // Skip invisible meshes (collision-only)
+        if (!afn_mesh_desc[mi][16]) continue;
         vertCount = afn_mesh_desc[mi][0];
         if (vertCount > 512) vertCount = 512;
         if (totalVerts + vertCount > MAX_GLOBAL_VERTS) continue; // overflow guard
@@ -2535,6 +2540,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         ms->meshGrayscale = afn_mesh_desc[mi][13];
         ms->drawDist = afn_mesh_desc[mi][14];
         ms->drawPriority = afn_mesh_desc[mi][15];
+        ms->visible = afn_mesh_desc[mi][16];
         ms->texMask = ms->texW > 0 ? ms->texW - 1 : 0;
         ms->uvs = afn_mesh_uv_ptrs[mi];
         ms->tex = tex_cache_ptrs[mi];
@@ -3496,12 +3502,37 @@ int main(void)
             afn_input_right = 0;
             afn_play_anim = -1;
             afn_pending_scene = -1;
+            afn_collided_sprite = -1;
+
+            // Collision detection: player vs all non-player sprites
+            if (player_sprite_idx >= 0) {
+                int ci;
+                for (ci = 0; ci < g_spriteCount; ci++) {
+                    if (ci == player_sprite_idx) continue;
+                    FIXED dx = player_x - g_sprites[ci].x;
+                    FIXED dz = player_z - g_sprites[ci].z;
+                    // Distance squared in 16.8 fixed point — compare against radius^2
+                    // Collision radius ~24 pixels = 6144 in 16.8, squared = ~37M
+                    // Use >>4 to avoid overflow: (dx>>4)^2 threshold = 37748736>>8 = 147456
+                    FIXED dx4 = dx >> 4;
+                    FIXED dz4 = dz >> 4;
+                    if (dx4 * dx4 + dz4 * dz4 < 147456) {
+                        afn_collided_sprite = ci;
+                        break;
+                    }
+                }
+            }
 
             // Run per-frame script event handlers
             afn_script_update();
             afn_script_key_held();
             afn_script_key_pressed();
             afn_script_key_released();
+            // Collision event
+            if (afn_collided_sprite >= 0) {
+                afn_script_collision();
+                afn_bp_dispatch_collision();
+            }
             // Blueprint instance dispatch
             afn_bp_dispatch_update();
             afn_bp_dispatch_key_held();
@@ -3511,7 +3542,6 @@ int main(void)
             // Handle scene switch request
             if (afn_pending_scene >= 0) {
                 // TODO: multi-scene data loading
-                // For now, just store the requested scene index
             }
 
             inputFwd = afn_input_fwd;
