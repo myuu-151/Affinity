@@ -386,7 +386,7 @@ static bool sVsNodeInfoJustOpened = false;
 static bool sVsCodeWindowOpen = false;
 static bool sVsCodeWindowJustOpened = false;
 static int sVsCodeWindowNodeIdx = -1;
-static char sVsCodeWindowBuf[2048] = {}; // generated code (read-only display)
+static char sVsCodeWindowBuf[4096] = {}; // generated code (read-only display)
 static char sVsCodeWindowEditBuf[2048] = {}; // editable override
 
 static constexpr float kVsNodeW = 160.0f;
@@ -9507,11 +9507,28 @@ void FrameTick(float dt)
                 };
 
                 // Show both editor Play-mode and GBA runtime code
-                char defaultCodeBuf[2048] = {};
-                char gbaCodeBuf[512] = {};
+                char defaultCodeBuf[4096] = {};
+                char gbaCodeBuf[1024] = {};
                 const char* defaultCode = "";
                 const char* editorCode = "";
                 const char* gbaCode = "";
+
+                // Helper: build function signature and GBA body for action node preview
+                char funcSigBuf[128] = {};  // function signature line (empty = not an action node)
+                char gbaBodyBuf[512] = {};  // GBA body line(s) without wrapper
+                auto setActionFunc = [&](const VsNode& node, const char* suffix, const char* body) {
+                    bool isBp = (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0);
+                    if (node.funcName[0])
+                        snprintf(funcSigBuf, sizeof(funcSigBuf),
+                            "static inline void %s(void)", node.funcName);
+                    else if (isBp)
+                        snprintf(funcSigBuf, sizeof(funcSigBuf),
+                            "static inline void afn_bp%d%s_%d(...)", sVsEditBlueprintIdx, suffix, node.id);
+                    else
+                        snprintf(funcSigBuf, sizeof(funcSigBuf),
+                            "static inline void afn_script%s_%d(void)", suffix, node.id);
+                    strncpy(gbaBodyBuf, body, sizeof(gbaBodyBuf) - 1);
+                };
 
                 // Resolve event key name for GBA code display
                 auto resolveEventKeyForDisplay = [&](const VsNode& ev) -> int {
@@ -9657,207 +9674,288 @@ void FrameTick(float dt)
                 case VsNodeType::MovePlayer: {
                     editorCode =
                         "// ---- 2D Tilemap ----\n"
-                        "// dir: 0=Left, 1=Right, 2=Up, 3=Down\n"
-                        "// facing: 0=N, 2=E, 4=S, 6=W\n"
                         "if (instantMove) {\n"
-                        "    // OnKeyPressed: instant single-tile move\n"
                         "    facing = dirToFacing[dir];\n"
                         "    tilePos += dirDelta[dir];\n"
+                        "    stepCount++;\n"
                         "} else if (keyDown && lastMoveDir == dir) {\n"
-                        "    // OnKeyHeld: tap = face, hold = walk\n"
                         "    facing = dirToFacing[dir];\n"
-                        "    if (justPressed)\n"
-                        "        accum[dir] = 0.45; // tap window\n"
+                        "    if (justPressed) accum[dir] = 0.45f;\n"
                         "    else {\n"
                         "        accum[dir] += moveRate * dt;\n"
-                        "        if (accum >= 1.0) move one tile;\n"
+                        "        if (accum >= 1.0) { move; stepCount++; }\n"
                         "    }\n"
                         "}\n"
+                        "// visX/visY lerp toward tileX/tileY at moveRate\n"
                         "\n"
                         "// ---- 3D Scene ----\n"
-                        "// Continuous movement (no grid)\n"
-                        "if (keyDown(dirKey)) {\n"
-                        "    inputFwd  += dirFwd[dir];  // -1 or +1\n"
-                        "    inputRight += dirRight[dir];\n"
+                        "if (editorKeyDown(dirKey)) {\n"
+                        "    scInputFwd/scInputRight += direction;\n"
                         "}\n"
-                        "// Applied as: pos += forward * inputFwd * speed * dt";
+                        "// Consumed: normalize diagonal, then:\n"
+                        "// moveSpeed = sScriptMoveSpeed * dt;\n"
+                        "// fwdX = sinf(viewAngle); fwdZ = cosf(viewAngle);\n"
+                        "// player.x += (fwdX*inputX + rightX*inputZ) * moveSpeed;\n"
+                        "// player.z += (fwdZ*inputX + rightZ*inputZ) * moveSpeed;";
                     auto* dirData = resolveDataIn(infoNode.id, 0);
                     int dir = dirData ? dirData->paramInt[0] : 0;
                     const char* dirKeysGba[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
                     const char* dirVarsGba[] = { "afn_input_right -= 256", "afn_input_right += 256",
                                                  "afn_input_fwd += 256", "afn_input_fwd -= 256" };
+                    char bodyBuf[512];
                     if (dir >= 0 && dir < 4)
-                        snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                            "if (key_is_down(%s)) %s;", dirKeysGba[dir], dirVarsGba[dir]);
+                        snprintf(bodyBuf, sizeof(bodyBuf),
+                            "    if (key_is_down(%s)) %s;\n"
+                            "    // Runtime consumption:\n"
+                            "    // inputFwd/inputRight -> normalize diagonal\n"
+                            "    // moveFwd = (inputFwd * moveSpeed) >> 8;\n"
+                            "    // moveRight = (inputRight * moveSpeed) >> 8;\n"
+                            "    // player_x += (viewSin*moveFwd + rightSin*moveRight) >> 8;\n"
+                            "    // player_z -= (viewCos*moveFwd + rightCos*moveRight) >> 8;",
+                            dirKeysGba[dir], dirVarsGba[dir]);
                     else
-                        snprintf(gbaCodeBuf, sizeof(gbaCodeBuf), "// MovePlayer (no direction set)");
-                    gbaCode = gbaCodeBuf;
+                        snprintf(bodyBuf, sizeof(bodyBuf), "    // MovePlayer (no direction set)");
+                    setActionFunc(infoNode, "_move", bodyBuf);
                     break;
                 }
                 case VsNodeType::Walk: {
                     editorCode =
                         "// ---- 2D Tilemap ----\n"
-                        "moveRate = speed; // tiles/sec for accum\n"
+                        "tmMoveRate = speed;\n"
+                        "// accum[dir] += tmMoveRate * dt;\n"
+                        "// visX/visY lerp speed = tmMoveRate\n"
                         "\n"
                         "// ---- 3D Scene ----\n"
-                        "moveSpeed = speed; // world units/sec";
+                        "sScriptMoveSpeed = speed;\n"
+                        "// moveSpeed = sScriptMoveSpeed * dt;\n"
+                        "// player.x += fwd * inputFwd * moveSpeed;";
                     auto* sd = resolveDataIn(infoNode.id, 0);
                     int speed = sd ? sd->paramInt[0] : 37;
                     int gbaSpeed = (int)(speed * 37.0f / 35.0f);
-                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                        "afn_move_speed = %d;", gbaSpeed);
-                    gbaCode = gbaCodeBuf;
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_move_speed = %d;\n"
+                        "    // Runtime: moveSpeed = afn_move_speed;\n"
+                        "    // player_x += (viewSin * moveFwd * moveSpeed) >> 16;",
+                        gbaSpeed);
+                    setActionFunc(infoNode, "_walk", bodyBuf);
                     break;
                 }
                 case VsNodeType::Sprint: {
                     editorCode =
                         "// ---- 2D Tilemap ----\n"
-                        "moveRate = speed; // faster tiles/sec\n"
+                        "tmMoveRate = speed;\n"
+                        "// accum[dir] += tmMoveRate * dt;\n"
+                        "// visX/visY lerp speed = tmMoveRate\n"
                         "\n"
                         "// ---- 3D Scene ----\n"
-                        "moveSpeed = speed; // faster world units/sec";
+                        "sScriptMoveSpeed = speed;\n"
+                        "// moveSpeed = sScriptMoveSpeed * dt;\n"
+                        "// player.x += fwd * inputFwd * moveSpeed;";
                     auto* sd = resolveDataIn(infoNode.id, 0);
                     int speed = sd ? sd->paramInt[0] : 56;
                     int gbaSpeed = (int)(speed * 37.0f / 35.0f);
-                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                        "afn_move_speed = %d;", gbaSpeed);
-                    gbaCode = gbaCodeBuf;
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_move_speed = %d;\n"
+                        "    // Runtime: moveSpeed = afn_move_speed;\n"
+                        "    // player_x += (viewSin * moveFwd * moveSpeed) >> 16;",
+                        gbaSpeed);
+                    setActionFunc(infoNode, "_sprint", bodyBuf);
                     break;
                 }
                 case VsNodeType::Jump: {
                     editorCode =
-                        "// ---- 3D Scene only ----\n"
-                        "if (playerOnGround) {\n"
-                        "    playerVelY = force;\n"
-                        "    playerOnGround = false;\n"
-                        "}";
+                        "// ---- 3D Scene ----\n"
+                        "// (no editor vertical physics)";
                     auto* fd = resolveDataIn(infoNode.id, 0);
                     float force = 2.0f;
                     if (fd) { memcpy(&force, &fd->paramInt[0], sizeof(float)); }
                     int forceFixed = (int)(force * 256.0f);
-                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                        "if (player_on_ground) player_vy = %d;", forceFixed);
-                    gbaCode = gbaCodeBuf;
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    if (player_on_ground) player_vy = %d;\n"
+                        "    // Runtime: player_y += player_vy;\n"
+                        "    // player_vy -= afn_gravity;\n"
+                        "    // if (player_vy < -afn_terminal_vel)\n"
+                        "    //     player_vy = -afn_terminal_vel;",
+                        forceFixed);
+                    setActionFunc(infoNode, "_jump", bodyBuf);
                     break;
                 }
                 case VsNodeType::DampenJump: {
                     editorCode =
-                        "// ---- 3D Scene only ----\n"
-                        "if (playerVelY > 0)\n"
-                        "    playerVelY *= factor;";
+                        "// ---- 3D Scene ----\n"
+                        "// (no editor vertical physics)";
                     auto* fd = resolveDataIn(infoNode.id, 0);
                     float factor = 0.75f;
                     if (fd) { memcpy(&factor, &fd->paramInt[0], sizeof(float)); }
                     int factorFixed = (int)(factor * 256.0f);
-                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                        "if (player_vy > 0) player_vy = (player_vy * %d) >> 8;", factorFixed);
-                    gbaCode = gbaCodeBuf;
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    if (player_vy > 0) player_vy = (player_vy * %d) >> 8;\n"
+                        "    // Applied when A released while rising\n"
+                        "    // Reduces upward velocity for variable jump height",
+                        factorFixed);
+                    setActionFunc(infoNode, "_dampen_jump", bodyBuf);
                     break;
                 }
                 case VsNodeType::OrbitCamera: {
                     editorCode =
-                        "// ---- 3D Scene only ----\n"
-                        "if (keyDown(L_or_R))\n"
-                        "    orbitAngle += dir * speed;\n"
-                        "// Rotates camera orbit around player";
+                        "// ---- 3D Scene ----\n"
+                        "if (editorKeyDown(key)) {\n"
+                        "    float radPerFrame = speed / 65536.0f * 6.28318f;\n"
+                        "    scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;\n"
+                        "}\n"
+                        "// Consumed: sManualOrbitCurrent += (scOrbitDelta - current) * 6*dt;\n"
+                        "// sOrbitAngle += sManualOrbitCurrent;";
                     auto* dd = resolveDataIn(infoNode.id, 0);
                     auto* sd = resolveDataIn(infoNode.id, 1);
                     int odir = dd ? dd->paramInt[0] : 1;
                     int ospeed = sd ? sd->paramInt[0] : 512;
                     const char* okey = (odir == 0) ? "KEY_L" : "KEY_R";
                     const char* osign = (odir == 0) ? "-" : "+";
-                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                        "if (key_is_down(%s)) orbit_angle %s= %d;", okey, osign, ospeed);
-                    gbaCode = gbaCodeBuf;
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    if (key_is_down(%s)) orbit_angle %s= %d;\n"
+                        "    // orbit_angle drives camera rotation around player\n"
+                        "    // viewAngle = orbit_angle + player facing",
+                        okey, osign, ospeed);
+                    setActionFunc(infoNode, "_orbit", bodyBuf);
                     break;
                 }
                 case VsNodeType::ChangeScene:
                     editorCode =
-                        "// ---- 2D Tilemap ----\n"
-                        "pendingScene = sceneIdx;\n"
-                        "\n"
-                        "// ---- 3D Scene ----\n"
-                        "pendingScene = sceneIdx;\n"
-                        "pendingMode = mode; // 0=3D, 1=Tilemap";
-                    gbaCode =
-                        "afn_pending_scene = <scIdx>;\n"
-                        "afn_pending_scene_mode = <mode>;";
+                        "// ---- 2D Tilemap / 3D Scene ----\n"
+                        "sPendingSceneSwitch = scIdx;\n"
+                        "sPendingSceneMode = mode; // 0=3D, 1=Tilemap\n"
+                        "// Consumed next frame:\n"
+                        "//   SaveState -> switch scene index -> LoadState\n"
+                        "//   sScriptStartRan = false; // re-run OnStart";
+                    setActionFunc(infoNode, "_change_scene",
+                        "    afn_pending_scene = <scIdx>;\n"
+                        "    afn_pending_scene_mode = <mode>;\n"
+                        "    // Runtime: triggers scene reload next frame");
                     break;
                 case VsNodeType::SetGravity: {
                     editorCode =
-                        "// ---- 3D Scene only ----\n"
-                        "gravity = value; // downward accel/frame";
+                        "// ---- 3D Scene ----\n"
+                        "// (no editor vertical physics)";
                     auto* vd = resolveDataIn(infoNode.id, 0);
                     float val = 0.09f;
                     if (vd) { memcpy(&val, &vd->paramInt[0], sizeof(float)); }
                     int valFixed = (int)(val * 256.0f);
-                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                        "afn_gravity = %d;", valFixed);
-                    gbaCode = gbaCodeBuf;
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_gravity = %d;\n"
+                        "    // Runtime: player_vy -= afn_gravity; // each frame",
+                        valFixed);
+                    setActionFunc(infoNode, "_set_gravity", bodyBuf);
                     break;
                 }
                 case VsNodeType::SetMaxFall: {
                     editorCode =
-                        "// ---- 3D Scene only ----\n"
-                        "maxFallSpeed = value; // terminal velocity";
+                        "// ---- 3D Scene ----\n"
+                        "// (no editor vertical physics)";
                     auto* vd = resolveDataIn(infoNode.id, 0);
                     float val = 6.0f;
                     if (vd) { memcpy(&val, &vd->paramInt[0], sizeof(float)); }
                     int valFixed = (int)(val * 256.0f);
-                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                        "afn_terminal_vel = %d;", valFixed);
-                    gbaCode = gbaCodeBuf;
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_terminal_vel = %d;\n"
+                        "    // Runtime: if (player_vy < -afn_terminal_vel)\n"
+                        "    //     player_vy = -afn_terminal_vel;",
+                        valFixed);
+                    setActionFunc(infoNode, "_set_max_fall", bodyBuf);
                     break;
                 }
                 case VsNodeType::AutoOrbit: {
                     editorCode =
-                        "// ---- 3D Scene only ----\n"
-                        "autoOrbitSpeed = value; // brads/frame";
+                        "// ---- 3D Scene ----\n"
+                        "sScriptAutoOrbitSpeed = speed;\n"
+                        "// if strafing: target = (speed/65536 * 2pi) * inputRight;\n"
+                        "// sAutoOrbitCurrent += (target - current) * 6*dt;\n"
+                        "// sOrbitAngle -= sAutoOrbitCurrent;";
                     auto* sd = resolveDataIn(infoNode.id, 0);
                     int aspeed = sd ? sd->paramInt[0] : 205;
-                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                        "afn_auto_orbit_speed = %d;", aspeed);
-                    gbaCode = gbaCodeBuf;
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_auto_orbit_speed = %d;\n"
+                        "    // Runtime: if strafing && speed > 0:\n"
+                        "    //   auto_orbit_smooth += (target - smooth) >> 2;\n"
+                        "    //   orbit_angle += auto_orbit_smooth;",
+                        aspeed);
+                    setActionFunc(infoNode, "_auto_orbit", bodyBuf);
                     break;
                 }
                 case VsNodeType::PlayAnim: {
                     editorCode =
                         "// ---- 2D Tilemap ----\n"
-                        "animSet = animIdx; // direction sprite set\n"
+                        "// gameState check: Idle vs Walk vs Sprint\n"
+                        "if (apply) sTmObjAnimSet[oi] = animIdx;\n"
                         "\n"
                         "// ---- 3D Scene ----\n"
-                        "activePlayAnim = animIdx; // sprite anim";
+                        "// Registers which PlayAnim node drives each state:\n"
+                        "if (OnStart)       sPlayAnimIdle = id;\n"
+                        "if (OnKeyHeld)     sPlayAnimHeld = id;\n"
+                        "if (OnKeyReleased) sPlayAnimReleased = id;\n"
+                        "// Consumed: pick active based on movement:\n"
+                        "//   sprinting -> sPlayAnimHeld\n"
+                        "//   moving    -> sPlayAnimReleased\n"
+                        "//   idle      -> sPlayAnimIdle\n"
+                        "// Then reads Animation data node -> dirSetIdx\n"
+                        "// baseSet + (animTime * fps) % frameCount";
                     auto* sd = resolveDataIn(infoNode.id, 0);
                     int animIdx = sd ? sd->paramInt[0] : 0;
-                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                        "afn_play_anim = %d;", animIdx);
-                    gbaCode = gbaCodeBuf;
+                    char bodyBuf[512];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_play_anim = %d;\n"
+                        "    // Runtime consumption:\n"
+                        "    // int targetAnim = afn_play_anim;\n"
+                        "    // if (targetAnim != g_current_anim[ai]) {\n"
+                        "    //     g_current_anim[ai] = targetAnim;\n"
+                        "    //     g_anim_frame_counter = 0;\n"
+                        "    // }\n"
+                        "    // int baseSet = afn_anim_desc[ai][targetAnim][0];\n"
+                        "    // int fc = afn_anim_desc[ai][targetAnim][1];\n"
+                        "    // int fps = afn_anim_desc[ai][targetAnim][2];\n"
+                        "    // int frame = (g_anim_frame_counter / (60/fps)) %% fc;\n"
+                        "    // switch_dir_anim_set(ai, baseSet + frame);", animIdx);
+                    setActionFunc(infoNode, "_play_anim", bodyBuf);
                     break;
                 }
                 case VsNodeType::SetVariable:
                     editorCode =
-                        "// Both 2D & 3D:\n"
-                        "vars[slot] = value;";
-                    gbaCode =
-                        "afn_vars[<slot>] = <value>;";
+                        "// ---- 2D Tilemap / 3D Scene ----\n"
+                        "// (not implemented in editor)";
+                    setActionFunc(infoNode, "_set_var",
+                        "    afn_vars[<slot>] = <value>;");
                     break;
                 case VsNodeType::AddVariable:
                     editorCode =
-                        "// Both 2D & 3D:\n"
-                        "vars[slot] += amount;";
-                    gbaCode =
-                        "afn_vars[<slot>] += <amount>;";
+                        "// ---- 2D Tilemap / 3D Scene ----\n"
+                        "// (not implemented in editor)";
+                    setActionFunc(infoNode, "_add_var",
+                        "    afn_vars[<slot>] += <amount>;");
                     break;
                 case VsNodeType::DestroyObject:
                     editorCode =
-                        "// ---- 3D Scene only ----\n"
-                        "sprites[objIdx].scale = 0; // hide";
-                    gbaCode =
-                        "// DestroyObject: hide sprite at index";
+                        "// ---- 3D Scene ----\n"
+                        "// (not implemented in editor)";
+                    setActionFunc(infoNode, "_destroy",
+                        "    // DestroyObject: hide sprite at index");
                     break;
                 case VsNodeType::CustomCode:
-                    editorCode = "// Custom code — runs only on GBA";
-                    gbaCode = infoNode.customCode[0] ? infoNode.customCode : "// (empty — write your code here)";
+                    editorCode = "// (runs only on GBA runtime)";
+                    {
+                        char bodyBuf[512];
+                        if (infoNode.customCode[0])
+                            snprintf(bodyBuf, sizeof(bodyBuf), "    %s", infoNode.customCode);
+                        else
+                            snprintf(bodyBuf, sizeof(bodyBuf), "    // (empty)");
+                        setActionFunc(infoNode, "_custom", bodyBuf);
+                    }
                     break;
                 // Data nodes
                 case VsNodeType::Integer:
@@ -9921,10 +10019,18 @@ void FrameTick(float dt)
 
                 // Combine editor + GBA code for event/action nodes
                 if (editorCode[0]) {
-                    char combinedBuf[2048];
-                    snprintf(combinedBuf, sizeof(combinedBuf),
-                        "%s\n\n// ---- GBA Runtime (mapdata.h) ----\n%s",
-                        editorCode, gbaCode[0] ? gbaCode : "// (no GBA codegen for this node)");
+                    char combinedBuf[4096];
+                    if (funcSigBuf[0]) {
+                        // Action node: all three sections inside one function block
+                        snprintf(combinedBuf, sizeof(combinedBuf),
+                            "%s {\n\n%s\n\n    // ---- GBA Runtime (mapdata.h) ----\n%s\n}",
+                            funcSigBuf, editorCode, gbaBodyBuf);
+                    } else {
+                        // Event/other node: flat sections
+                        snprintf(combinedBuf, sizeof(combinedBuf),
+                            "%s\n\n// ---- GBA Runtime (mapdata.h) ----\n%s",
+                            editorCode, gbaCode[0] ? gbaCode : "// (no GBA codegen for this node)");
+                    }
                     strncpy(defaultCodeBuf, combinedBuf, sizeof(defaultCodeBuf) - 1);
                     defaultCodeBuf[sizeof(defaultCodeBuf) - 1] = '\0';
                     defaultCode = defaultCodeBuf;
