@@ -9783,16 +9783,16 @@ void FrameTick(float dt)
                 switch (infoNode.type) {
                 case VsNodeType::OnKeyPressed: {
                     editorCode =
-                        "int key = tmResolveEventKey(ev);\n"
-                        "bool fire = false;\n"
-                        "if (key >= 0) { fire = tmKeyHit(key); }\n"
-                        "else { for (int k = 0; k < 10; k++)\n"
-                        "    if (tmKeyHit(k)) { fire = true; break; } }\n"
-                        "if (fire) {\n"
-                        "    tmInstantMove = true;\n"
-                        "    auto acts = tmCollectActions(ev.id);\n"
-                        "    for (auto* a : acts) tmExecAction(a);\n"
-                        "    tmInstantMove = false;\n"
+                        "// ---- 2D Tilemap ----\n"
+                        "if (keyJustPressed(dir)) {\n"
+                        "    instantMove = true; // single-tile move\n"
+                        "    execActions();\n"
+                        "    instantMove = false;\n"
+                        "}\n"
+                        "\n"
+                        "// ---- 3D Scene ----\n"
+                        "if (editorKeyHit(key)) {\n"
+                        "    execActions(); // one-shot fire\n"
                         "}";
                     int ek = resolveEventKeyForDisplay(infoNode);
                     if (ek >= 0)
@@ -9810,11 +9810,14 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::OnKeyReleased: {
                     editorCode =
-                        "int key = tmResolveEventKey(ev);\n"
-                        "if (key >= 0 && key < 10 &&\n"
-                        "    sTmPrevKeyState[key] && !tmKeyDown(key)) {\n"
-                        "    auto acts = tmCollectActions(ev.id);\n"
-                        "    for (auto* a : acts) tmExecAction(a);\n"
+                        "// ---- 2D Tilemap ----\n"
+                        "if (prevKeyState[key] && !keyDown(key)) {\n"
+                        "    execActions();\n"
+                        "}\n"
+                        "\n"
+                        "// ---- 3D Scene ----\n"
+                        "if (prevKeyState[key] && !editorKeyDown(key)) {\n"
+                        "    execActions();\n"
                         "}";
                     int ek = resolveEventKeyForDisplay(infoNode);
                     snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
@@ -9826,11 +9829,21 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::OnKeyHeld: {
                     editorCode =
-                        "int key = tmResolveEventKey(ev);\n"
-                        "bool fire = (key >= 0) ? tmKeyDown(key) : true;\n"
-                        "if (fire) {\n"
-                        "    auto acts = tmCollectActions(ev.id);\n"
-                        "    for (auto* a : acts) tmExecAction(a);\n"
+                        "// ---- 2D Tilemap ----\n"
+                        "// Pre-frame: track direction priority\n"
+                        "// (newest press wins, fallback on release)\n"
+                        "lastMoveDir = resolveHeldDir(WASD);\n"
+                        "if (keyDown(key)) {\n"
+                        "    execActions();\n"
+                        "    // MovePlayer gates on lastMoveDir:\n"
+                        "    //   tap = face only, hold = walk\n"
+                        "}\n"
+                        "// Post: reset accum for released dirs\n"
+                        "\n"
+                        "// ---- 3D Scene ----\n"
+                        "if (editorKeyDown(key)) {\n"
+                        "    execActions();\n"
+                        "    // continuous — fires every frame\n"
                         "}";
                     int ek = resolveEventKeyForDisplay(infoNode);
                     snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
@@ -9842,49 +9855,63 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::OnStart:
                     editorCode =
-                        "if (!sScriptStartRan) {\n"
-                        "    auto acts = collectActionsPlay(ev.id);\n"
-                        "    for (auto* a : acts) execActionPlay(a);\n"
-                        "    sScriptStartRan = true;\n"
+                        "// ---- 2D Tilemap ----\n"
+                        "if (!onStartRan) {\n"
+                        "    execActions(); // runs once on Play\n"
+                        "    onStartRan = true;\n"
+                        "}\n"
+                        "\n"
+                        "// ---- 3D Scene ----\n"
+                        "if (!onStartRan) {\n"
+                        "    execActions(); // runs once on Play\n"
+                        "    onStartRan = true;\n"
                         "}";
                     gbaCode = "// ... actions ...";
                     break;
                 case VsNodeType::OnUpdate:
                     editorCode =
-                        "auto acts = tmCollectActions(ev.id);\n"
-                        "for (auto* a : acts) tmExecAction(a);";
+                        "// ---- 2D Tilemap ----\n"
+                        "execActions(); // every frame\n"
+                        "\n"
+                        "// ---- 3D Scene ----\n"
+                        "execActions(); // every frame";
                     gbaCode = "// ... actions ...";
                     break;
                 case VsNodeType::OnCollision:
                     editorCode =
+                        "// ---- 3D Scene only ----\n"
                         "if (collidedSprite >= 0) {\n"
-                        "    auto acts = collectActionsPlay(ev.id);\n"
-                        "    for (auto* a : acts) execActionPlay(a);\n"
+                        "    execActions();\n"
                         "}";
                     gbaCode = "// ... actions ...";
                     break;
                 case VsNodeType::MovePlayer: {
                     editorCode =
-                        "auto* dd = tmFindDataIn(action->id, 0);\n"
-                        "int dir = dd ? dd->paramInt[0] : 0;\n"
+                        "// ---- 2D Tilemap ----\n"
                         "// dir: 0=Left, 1=Right, 2=Up, 3=Down\n"
-                        "int dirKeys[] = { 8, 9, 6, 7 }; // A, D, W, S\n"
-                        "int dirToFacing[] = { 6, 2, 0, 4 };\n"
-                        "if (dir >= 0 && dir < 4) {\n"
-                        "    if (tmInstantMove) {\n"
-                        "        ImGuiKey dirImKeys[] = {\n"
-                        "            ImGuiKey_A, ImGuiKey_D,\n"
-                        "            ImGuiKey_W, ImGuiKey_S };\n"
-                        "        if (ImGui::IsKeyPressed(dirImKeys[dir])) {\n"
-                        "            sTmObjFacing[oi] = dirToFacing[dir];\n"
-                        "            // move one tile in dir\n"
-                        "        }\n"
-                        "    } else if (tmKeyDown(dirKeys[dir])) {\n"
-                        "        sTmObjFacing[oi] = dirToFacing[dir];\n"
-                        "        sTmMoveAccum[dir] += tmMoveRate * dt;\n"
-                        "        // move accumulated tiles\n"
+                        "// facing: 0=N, 2=E, 4=S, 6=W\n"
+                        "if (instantMove) {\n"
+                        "    // OnKeyPressed: instant single-tile move\n"
+                        "    facing = dirToFacing[dir];\n"
+                        "    tilePos += dirDelta[dir];\n"
+                        "} else if (keyDown && lastMoveDir == dir) {\n"
+                        "    // OnKeyHeld: tap = face, hold = walk\n"
+                        "    facing = dirToFacing[dir];\n"
+                        "    if (justPressed)\n"
+                        "        accum[dir] = 0.45; // tap window\n"
+                        "    else {\n"
+                        "        accum[dir] += moveRate * dt;\n"
+                        "        if (accum >= 1.0) move one tile;\n"
                         "    }\n"
-                        "}";
+                        "}\n"
+                        "\n"
+                        "// ---- 3D Scene ----\n"
+                        "// Continuous movement (no grid)\n"
+                        "if (keyDown(dirKey)) {\n"
+                        "    inputFwd  += dirFwd[dir];  // -1 or +1\n"
+                        "    inputRight += dirRight[dir];\n"
+                        "}\n"
+                        "// Applied as: pos += forward * inputFwd * speed * dt";
                     auto* dirData = resolveDataIn(infoNode.id, 0);
                     int dir = dirData ? dirData->paramInt[0] : 0;
                     const char* dirKeysGba[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
@@ -9900,8 +9927,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::Walk: {
                     editorCode =
-                        "auto* sd = tmFindDataIn(action->id, 0);\n"
-                        "tmMoveRate = sd ? (float)sd->paramInt[0] : 6.0f;";
+                        "// ---- 2D Tilemap ----\n"
+                        "moveRate = speed; // tiles/sec for accum\n"
+                        "\n"
+                        "// ---- 3D Scene ----\n"
+                        "moveSpeed = speed; // world units/sec";
                     auto* sd = resolveDataIn(infoNode.id, 0);
                     int speed = sd ? sd->paramInt[0] : 37;
                     int gbaSpeed = (int)(speed * 37.0f / 35.0f);
@@ -9912,8 +9942,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::Sprint: {
                     editorCode =
-                        "auto* sd = tmFindDataIn(action->id, 0);\n"
-                        "tmMoveRate = sd ? (float)sd->paramInt[0] : 12.0f;";
+                        "// ---- 2D Tilemap ----\n"
+                        "moveRate = speed; // faster tiles/sec\n"
+                        "\n"
+                        "// ---- 3D Scene ----\n"
+                        "moveSpeed = speed; // faster world units/sec";
                     auto* sd = resolveDataIn(infoNode.id, 0);
                     int speed = sd ? sd->paramInt[0] : 56;
                     int gbaSpeed = (int)(speed * 37.0f / 35.0f);
@@ -9924,11 +9957,10 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::Jump: {
                     editorCode =
-                        "auto* forceData = findDataInPlay(action->id, 0);\n"
-                        "float force = forceData ? resolveFloat(forceData) : 2.0f;\n"
-                        "if (sPlayerOnGround) {\n"
-                        "    sPlayerVelY = force;\n"
-                        "    sPlayerOnGround = false;\n"
+                        "// ---- 3D Scene only ----\n"
+                        "if (playerOnGround) {\n"
+                        "    playerVelY = force;\n"
+                        "    playerOnGround = false;\n"
                         "}";
                     auto* fd = resolveDataIn(infoNode.id, 0);
                     float force = 2.0f;
@@ -9941,10 +9973,9 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::DampenJump: {
                     editorCode =
-                        "auto* factorData = findDataInPlay(action->id, 0);\n"
-                        "float factor = factorData ? resolveFloat(factorData) : 0.75f;\n"
-                        "if (sPlayerVelY > 0)\n"
-                        "    sPlayerVelY *= factor;";
+                        "// ---- 3D Scene only ----\n"
+                        "if (playerVelY > 0)\n"
+                        "    playerVelY *= factor;";
                     auto* fd = resolveDataIn(infoNode.id, 0);
                     float factor = 0.75f;
                     if (fd) { memcpy(&factor, &fd->paramInt[0], sizeof(float)); }
@@ -9956,14 +9987,10 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::OrbitCamera: {
                     editorCode =
-                        "auto* dd = findDataInPlay(action->id, 0);\n"
-                        "auto* sd = findDataInPlay(action->id, 1);\n"
-                        "int dir = dd ? dd->paramInt[0] : 1;\n"
-                        "int speed = sd ? resolveIntPlay(sd) : 512;\n"
-                        "int key = (dir == 0) ? 2 : 3; // L or R\n"
-                        "if (editorKeyDown(key))\n"
-                        "    scOrbitDelta += (dir == 0 ? -1 : 1)\n"
-                        "        * (speed / 65536.0f * 6.28318f);";
+                        "// ---- 3D Scene only ----\n"
+                        "if (keyDown(L_or_R))\n"
+                        "    orbitAngle += dir * speed;\n"
+                        "// Rotates camera orbit around player";
                     auto* dd = resolveDataIn(infoNode.id, 0);
                     auto* sd = resolveDataIn(infoNode.id, 1);
                     int odir = dd ? dd->paramInt[0] : 1;
@@ -9977,19 +10004,20 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::ChangeScene:
                     editorCode =
-                        "auto* sd = tmFindDataIn(action->id, 0);\n"
-                        "int scIdx = sd ? sd->paramInt[0] : action->paramInt[0];\n"
-                        "sPendingSceneSwitch = scIdx;\n"
-                        "sPendingSceneMode = action->paramInt[1];";
+                        "// ---- 2D Tilemap ----\n"
+                        "pendingScene = sceneIdx;\n"
+                        "\n"
+                        "// ---- 3D Scene ----\n"
+                        "pendingScene = sceneIdx;\n"
+                        "pendingMode = mode; // 0=3D, 1=Tilemap";
                     gbaCode =
                         "afn_pending_scene = <scIdx>;\n"
                         "afn_pending_scene_mode = <mode>;";
                     break;
                 case VsNodeType::SetGravity: {
                     editorCode =
-                        "auto* valData = findDataInPlay(action->id, 0);\n"
-                        "float val = valData ? resolveFloat(valData) : 0.09f;\n"
-                        "sScriptGravity = val;";
+                        "// ---- 3D Scene only ----\n"
+                        "gravity = value; // downward accel/frame";
                     auto* vd = resolveDataIn(infoNode.id, 0);
                     float val = 0.09f;
                     if (vd) { memcpy(&val, &vd->paramInt[0], sizeof(float)); }
@@ -10001,9 +10029,8 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::SetMaxFall: {
                     editorCode =
-                        "auto* valData = findDataInPlay(action->id, 0);\n"
-                        "float val = valData ? resolveFloat(valData) : 6.0f;\n"
-                        "sScriptMaxFall = val;";
+                        "// ---- 3D Scene only ----\n"
+                        "maxFallSpeed = value; // terminal velocity";
                     auto* vd = resolveDataIn(infoNode.id, 0);
                     float val = 6.0f;
                     if (vd) { memcpy(&val, &vd->paramInt[0], sizeof(float)); }
@@ -10015,9 +10042,8 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::AutoOrbit: {
                     editorCode =
-                        "auto* sd = findDataInPlay(action->id, 0);\n"
-                        "sScriptAutoOrbitSpeed = sd\n"
-                        "    ? (float)sd->paramInt[0] : 205.0f;";
+                        "// ---- 3D Scene only ----\n"
+                        "autoOrbitSpeed = value; // brads/frame";
                     auto* sd = resolveDataIn(infoNode.id, 0);
                     int aspeed = sd ? sd->paramInt[0] : 205;
                     snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
@@ -10027,9 +10053,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::PlayAnim: {
                     editorCode =
-                        "auto* sd = findDataInPlay(action->id, 0);\n"
-                        "int animIdx = sd ? sd->paramInt[0] : 0;\n"
-                        "sActivePlayAnimNodeId = action->id;";
+                        "// ---- 2D Tilemap ----\n"
+                        "animSet = animIdx; // direction sprite set\n"
+                        "\n"
+                        "// ---- 3D Scene ----\n"
+                        "activePlayAnim = animIdx; // sprite anim";
                     auto* sd = resolveDataIn(infoNode.id, 0);
                     int animIdx = sd ? sd->paramInt[0] : 0;
                     snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
@@ -10039,30 +10067,22 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::SetVariable:
                     editorCode =
-                        "auto* slotData = findDataInPlay(action->id, 0);\n"
-                        "auto* valData = findDataInPlay(action->id, 1);\n"
-                        "int slot = slotData ? resolveIntPlay(slotData) : 0;\n"
-                        "int val = valData ? resolveIntPlay(valData) : 0;\n"
-                        "if (slot >= 0 && slot < 16) sScriptVars[slot] = val;";
+                        "// Both 2D & 3D:\n"
+                        "vars[slot] = value;";
                     gbaCode =
                         "afn_vars[<slot>] = <value>;";
                     break;
                 case VsNodeType::AddVariable:
                     editorCode =
-                        "auto* slotData = findDataInPlay(action->id, 0);\n"
-                        "auto* valData = findDataInPlay(action->id, 1);\n"
-                        "int slot = slotData ? resolveIntPlay(slotData) : 0;\n"
-                        "int amt = valData ? resolveIntPlay(valData) : 0;\n"
-                        "if (slot >= 0 && slot < 16) sScriptVars[slot] += amt;";
+                        "// Both 2D & 3D:\n"
+                        "vars[slot] += amount;";
                     gbaCode =
                         "afn_vars[<slot>] += <amount>;";
                     break;
                 case VsNodeType::DestroyObject:
                     editorCode =
-                        "auto* sd = findDataInPlay(action->id, 0);\n"
-                        "int objIdx = sd ? sd->paramInt[0] : -1;\n"
-                        "if (objIdx >= 0 && objIdx < sSpriteCount)\n"
-                        "    sSprites[objIdx].scale = 0.0f; // hide";
+                        "// ---- 3D Scene only ----\n"
+                        "sprites[objIdx].scale = 0; // hide";
                     gbaCode =
                         "// DestroyObject: hide sprite at index";
                     break;
@@ -10134,7 +10154,7 @@ void FrameTick(float dt)
                 if (editorCode[0]) {
                     char combinedBuf[2048];
                     snprintf(combinedBuf, sizeof(combinedBuf),
-                        "// ---- Editor Play Mode ----\n%s\n\n// ---- GBA Runtime (mapdata.h) ----\n%s",
+                        "%s\n\n// ---- GBA Runtime (mapdata.h) ----\n%s",
                         editorCode, gbaCode[0] ? gbaCode : "// (no GBA codegen for this node)");
                     strncpy(defaultCodeBuf, combinedBuf, sizeof(defaultCodeBuf) - 1);
                     defaultCodeBuf[sizeof(defaultCodeBuf) - 1] = '\0';
