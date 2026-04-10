@@ -110,6 +110,7 @@ static float sTmObjPanelW = 200.0f;  // object panel width
 static std::vector<TmObject> sSavedTmObjects; // saved tilemap objects before Play
 static float sTmMoveAccum[4] = {};  // per-direction movement accumulator (Up/Down/Left/Right)
 static std::vector<int> sTmObjFacing; // per-object facing direction (0=N..7=NW, index into dir sprites)
+static std::vector<int> sTmObjAnimSet; // per-object animation set index (for directional sprites)
 static std::vector<float> sTmObjMoveRate; // per-object tile move speed (tiles/sec), set by Walk/Sprint
 static int sTmLastMoveDir = -1; // last direction pressed (0=Left,1=Right,2=Up,3=Down), -1=none
 static bool sTmPrevDirHeld[4] = {}; // previous frame held state for edge detection
@@ -3111,6 +3112,7 @@ static void DrawTabBar()
             memset(sTmPrevKeyState, 0, sizeof(sTmPrevKeyState));
             sTmLastMoveDir = -1;
             sTmObjFacing.assign(sTmObjects.size(), 4); // default facing South
+            sTmObjAnimSet.assign(sTmObjects.size(), 0); // default animation set 0
             sTmObjMoveRate.assign(sTmObjects.size(), 6.0f); // default move speed
         }
         ImGui::PopStyleColor(2);
@@ -5933,8 +5935,10 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 !sAssetDirSprites[obj.spriteAssetIdx].empty())
             {
                 int facing = sTmObjFacing[i];
-                if (facing >= 0 && facing < 8)
-                    drawTex = sAssetDirSprites[obj.spriteAssetIdx][0][facing].texture;
+                int animSet = (i < (int)sTmObjAnimSet.size()) ? sTmObjAnimSet[i] : 0;
+                auto& dirSets = sAssetDirSprites[obj.spriteAssetIdx];
+                if (animSet >= 0 && animSet < (int)dirSets.size() && facing >= 0 && facing < 8)
+                    drawTex = dirSets[animSet][facing].texture;
             }
             // Fallback to static sprite texture
             if (!drawTex && obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)sTmSpriteTextures.size())
@@ -7911,6 +7915,12 @@ void FrameTick(float dt)
                             int scIdx = sd ? sd->paramInt[0] : action->paramInt[0];
                             sPendingSceneSwitch = scIdx;
                             sPendingSceneMode = action->paramInt[1];
+                        }
+                        else if (t == VsNodeType::PlayAnim) {
+                            auto* sd = tmFindDataIn(action->id, 0);
+                            int animIdx = sd ? sd->paramInt[0] : 0;
+                            if (oi >= 0 && oi < (int)sTmObjAnimSet.size())
+                                sTmObjAnimSet[oi] = animIdx;
                         }
                     };
 
