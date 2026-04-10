@@ -111,11 +111,14 @@ static std::vector<TmObject> sSavedTmObjects; // saved tilemap objects before Pl
 static float sTmMoveAccum[4] = {};  // per-direction movement accumulator (Up/Down/Left/Right)
 static std::vector<int> sTmObjFacing; // per-object facing direction (0=N..7=NW, index into dir sprites)
 static std::vector<int> sTmObjAnimSet; // per-object animation set index (for directional sprites)
+static std::vector<int> sTmObjStepCount; // per-object tile step counter (for step-based animation)
 static std::vector<float> sTmObjMoveRate; // per-object tile move speed (tiles/sec), set by Walk/Sprint
 static int sTmLastMoveDir = -1; // last direction pressed (0=Left,1=Right,2=Up,3=Down), -1=none
 static bool sTmPrevDirHeld[4] = {}; // previous frame held state for edge detection
 static bool sTmPrevKeyState[10] = {}; // previous frame key state for OnKeyReleased
 static bool sTmOnStartRan = false; // tilemap OnStart fired this play session
+static std::vector<float> sTmObjVisX; // per-object visual X position (smooth lerp)
+static std::vector<float> sTmObjVisY; // per-object visual Y position (smooth lerp)
 
 // ---- Scene instances ----
 struct TmScene {
@@ -1284,8 +1287,8 @@ static bool SaveProject(const std::string& path)
         for (int ani = 0; ani < (int)sa.anims.size(); ani++)
         {
             const SpriteAnim& an = sa.anims[ani];
-            fprintf(f, "anim=%s,%d,%d,%d,%d,%.2f,%d\n",
-                    an.name.c_str(), an.startFrame, an.endFrame, an.fps, an.loop ? 1 : 0, an.speed, (int)an.gameState);
+            fprintf(f, "anim=%s,%d,%d,%d,%d,%.2f,%d,%d\n",
+                    an.name.c_str(), an.startFrame, an.endFrame, an.fps, an.loop ? 1 : 0, an.speed, (int)an.gameState, an.stepAnim ? 1 : 0);
         }
         // LOD
         fprintf(f, "lodCount=%d\n", sa.lodCount);
@@ -1811,7 +1814,8 @@ static bool LoadProject(const std::string& path)
                         int sf, ef, afps, aloop;
                         float aspeed = 1.0f;
                         int agstate = 0;
-                        int nread = sscanf(line + 5, "%63[^,],%d,%d,%d,%d,%f,%d", aname, &sf, &ef, &afps, &aloop, &aspeed, &agstate);
+                        int astep = 0;
+                        int nread = sscanf(line + 5, "%63[^,],%d,%d,%d,%d,%f,%d,%d", aname, &sf, &ef, &afps, &aloop, &aspeed, &agstate, &astep);
                         if (nread >= 5)
                         {
                             an.name = aname;
@@ -1821,6 +1825,7 @@ static bool LoadProject(const std::string& path)
                             an.loop = (aloop != 0);
                             if (nread >= 6) an.speed = aspeed;
                             if (nread >= 7) an.gameState = (AnimState)agstate;
+                            if (nread >= 8) an.stepAnim = (astep != 0);
                             sa.anims.push_back(an);
                         }
                     }
@@ -3114,7 +3119,14 @@ static void DrawTabBar()
             sTmLastMoveDir = -1;
             sTmObjFacing.assign(sTmObjects.size(), 4); // default facing South
             sTmObjAnimSet.assign(sTmObjects.size(), 0); // default animation set 0
+            sTmObjStepCount.assign(sTmObjects.size(), 0);
             sTmObjMoveRate.assign(sTmObjects.size(), 6.0f); // default move speed
+            sTmObjVisX.resize(sTmObjects.size());
+            sTmObjVisY.resize(sTmObjects.size());
+            for (int i = 0; i < (int)sTmObjects.size(); i++) {
+                sTmObjVisX[i] = (float)sTmObjects[i].tileX;
+                sTmObjVisY[i] = (float)sTmObjects[i].tileY;
+            }
             sTmOnStartRan = false;
         }
         ImGui::PopStyleColor(2);
@@ -3935,6 +3947,9 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             ImGui::SameLine();
 
             ImGui::Checkbox("Loop##aloop", &anim.loop);
+            ImGui::SameLine();
+            ImGui::Checkbox("Step##astep", &anim.stepAnim);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Advance frame per tile step");
             ImGui::SameLine();
             ImGui::PushItemWidth(Scaled(50));
             ImGui::DragFloat("##aspeed", &anim.speed, 0.05f, 0.0f, 10.0f, "%.1f");
@@ -5923,8 +5938,12 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             const TmObject& obj = sTmObjects[i];
             if (obj.type == TmObjType::Tile) continue; // tiles already rendered in cells
 
-            float objX = ox + obj.tileX * cellSz;
-            float objY = oy + obj.tileY * cellSz;
+            float visTileX = (sEditorMode == EditorMode::Play && i < (int)sTmObjVisX.size())
+                ? sTmObjVisX[i] : (float)obj.tileX;
+            float visTileY = (sEditorMode == EditorMode::Play && i < (int)sTmObjVisY.size())
+                ? sTmObjVisY[i] : (float)obj.tileY;
+            float objX = ox + visTileX * cellSz;
+            float objY = oy + visTileY * cellSz;
             uint32_t col = sTmObjTypeColors[(int)obj.type];
             bool isSel = (i == sTmSelectedObj);
 
@@ -5947,9 +5966,17 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                         int base = GetAnimDirBase(asset, animIdx);
                         int frameCount = asset.anims[animIdx].endFrame;
                         if (frameCount > 0) {
-                            int fps = asset.anims[animIdx].fps > 0 ? asset.anims[animIdx].fps : 8;
-                            float effectiveFps = fps * asset.anims[animIdx].speed;
-                            int frame = effectiveFps > 0.0f ? ((int)(sViewportAnimTime * effectiveFps)) % frameCount : 0;
+                            int frame;
+                            if (asset.anims[animIdx].stepAnim) {
+                                // Step-based: advance one frame per tile step
+                                int stepCount = (i < (int)sTmObjStepCount.size()) ? sTmObjStepCount[i] : 0;
+                                frame = stepCount % frameCount;
+                            } else {
+                                // Time-based: continuous cycling
+                                int fps = asset.anims[animIdx].fps > 0 ? asset.anims[animIdx].fps : 8;
+                                float effectiveFps = fps * asset.anims[animIdx].speed;
+                                frame = effectiveFps > 0.0f ? ((int)(sViewportAnimTime * effectiveFps)) % frameCount : 0;
+                            }
                             dirSetIdx = base + frame;
                         }
                     }
@@ -7817,6 +7844,9 @@ void FrameTick(float dt)
                 }
                 for (int d = 0; d < 4; d++) sTmPrevDirHeld[d] = curHeld[d];
 
+                // Per-object flag: prevent any MovePlayer from firing twice in one frame
+                std::vector<bool> tmObjMovedThisFrame(sTmObjects.size(), false);
+
                 for (int oi = 0; oi < (int)sTmObjects.size(); oi++)
                 {
                     TmObject& obj = sTmObjects[oi];
@@ -7886,6 +7916,7 @@ void FrameTick(float dt)
                     auto tmExecAction = [&](const VsNode* action) {
                         VsNodeType t = action->type;
                         if (t == VsNodeType::MovePlayer) {
+                            if (tmObjMovedThisFrame[oi]) return;
                             auto* dd = tmFindDataIn(action->id, 0);
                             int dir = dd ? dd->paramInt[0] : 0;
                             // dir: 0=Left, 1=Right, 2=Up, 3=Down
@@ -7894,28 +7925,47 @@ void FrameTick(float dt)
                             int dirToFacing[] = { 6, 2, 0, 4 }; // Left=W, Right=E, Up=N, Down=S
                             if (dir >= 0 && dir < 4) {
                                 if (tmInstantMove) {
-                                    // OnKeyPressed: immediate single-tile move, only if this dir key was just pressed
+                                    // OnKeyPressed: immediate single-tile move, no repeat
                                     ImGuiKey dirImKeys[] = { ImGuiKey_A, ImGuiKey_D, ImGuiKey_W, ImGuiKey_S };
-                                    if (ImGui::IsKeyPressed(dirImKeys[dir])) {
+                                    if (ImGui::IsKeyPressed(dirImKeys[dir], false)) {
                                         if (oi < (int)sTmObjFacing.size())
                                             sTmObjFacing[oi] = dirToFacing[dir];
                                         if (dir == 0) obj.tileX -= 1;
                                         else if (dir == 1) obj.tileX += 1;
                                         else if (dir == 2) obj.tileY -= 1;
                                         else if (dir == 3) obj.tileY += 1;
+                                        if (oi < (int)sTmObjStepCount.size())
+                                            sTmObjStepCount[oi]++;
+                                        tmObjMovedThisFrame[oi] = true;
                                     }
                                 } else if (tmKeyDown(dirKeys[dir]) && sTmLastMoveDir == dir) {
                                     if (oi < (int)sTmObjFacing.size())
                                         sTmObjFacing[oi] = dirToFacing[dir];
-                                    // OnKeyHeld: accumulator-based continuous move
-                                    sTmMoveAccum[dir] += tmMoveRate * dt;
-                                    if (sTmMoveAccum[dir] >= 1.0f) {
-                                        int steps = (int)sTmMoveAccum[dir];
-                                        sTmMoveAccum[dir] -= steps;
-                                        if (dir == 0) obj.tileX -= steps;
-                                        else if (dir == 1) obj.tileX += steps;
-                                        else if (dir == 2) obj.tileY -= steps;
-                                        else if (dir == 3) obj.tileY += steps;
+                                    ImGuiKey dirImKeys[] = { ImGuiKey_A, ImGuiKey_D, ImGuiKey_W, ImGuiKey_S };
+                                    if (ImGui::IsKeyPressed(dirImKeys[dir], false)) {
+                                        // First frame: instant move
+                                        if (dir == 0) obj.tileX -= 1;
+                                        else if (dir == 1) obj.tileX += 1;
+                                        else if (dir == 2) obj.tileY -= 1;
+                                        else if (dir == 3) obj.tileY += 1;
+                                        if (oi < (int)sTmObjStepCount.size())
+                                            sTmObjStepCount[oi]++;
+                                        tmObjMovedThisFrame[oi] = true;
+                                        sTmMoveAccum[dir] = 0.0f;
+                                    } else {
+                                        // Held: accumulator movement
+                                        sTmMoveAccum[dir] += tmMoveRate * dt;
+                                        if (sTmMoveAccum[dir] >= 1.0f) {
+                                            int steps = (int)sTmMoveAccum[dir];
+                                            sTmMoveAccum[dir] -= steps;
+                                            if (dir == 0) obj.tileX -= steps;
+                                            else if (dir == 1) obj.tileX += steps;
+                                            else if (dir == 2) obj.tileY -= steps;
+                                            else if (dir == 3) obj.tileY += steps;
+                                            if (oi < (int)sTmObjStepCount.size())
+                                                sTmObjStepCount[oi] += steps;
+                                            tmObjMovedThisFrame[oi] = true;
+                                        }
                                     }
                                 }
                             }
@@ -7979,16 +8029,16 @@ void FrameTick(float dt)
                             int key = tmResolveEventKey(ev);
                             auto tmKeyHit = [](int gbaKey) -> bool {
                                 switch (gbaKey) {
-                                case 0: return ImGui::IsKeyPressed(ImGuiKey_Space);
-                                case 1: return ImGui::IsKeyPressed(ImGuiKey_LeftShift);
-                                case 2: return ImGui::IsKeyPressed(ImGuiKey_J);
-                                case 3: return ImGui::IsKeyPressed(ImGuiKey_L);
-                                case 4: return ImGui::IsKeyPressed(ImGuiKey_Enter);
-                                case 5: return ImGui::IsKeyPressed(ImGuiKey_Backspace);
-                                case 6: return ImGui::IsKeyPressed(ImGuiKey_W);
-                                case 7: return ImGui::IsKeyPressed(ImGuiKey_S);
-                                case 8: return ImGui::IsKeyPressed(ImGuiKey_A);
-                                case 9: return ImGui::IsKeyPressed(ImGuiKey_D);
+                                case 0: return ImGui::IsKeyPressed(ImGuiKey_Space, false);
+                                case 1: return ImGui::IsKeyPressed(ImGuiKey_LeftShift, false);
+                                case 2: return ImGui::IsKeyPressed(ImGuiKey_J, false);
+                                case 3: return ImGui::IsKeyPressed(ImGuiKey_L, false);
+                                case 4: return ImGui::IsKeyPressed(ImGuiKey_Enter, false);
+                                case 5: return ImGui::IsKeyPressed(ImGuiKey_Backspace, false);
+                                case 6: return ImGui::IsKeyPressed(ImGuiKey_W, false);
+                                case 7: return ImGui::IsKeyPressed(ImGuiKey_S, false);
+                                case 8: return ImGui::IsKeyPressed(ImGuiKey_A, false);
+                                case 9: return ImGui::IsKeyPressed(ImGuiKey_D, false);
                                 default: return false;
                                 }
                             };
@@ -8076,6 +8126,7 @@ void FrameTick(float dt)
                         auto scExecAction = [&](const VsNode* action) {
                             VsNodeType t = action->type;
                             if (t == VsNodeType::MovePlayer) {
+                                if (tmObjMovedThisFrame[oi]) return;
                                 auto* dd = scFindDataIn(action->id, 0);
                                 int dir = dd ? dd->paramInt[0] : 0;
                                 int dirKeys[] = { 8, 9, 6, 7 };
@@ -8083,25 +8134,43 @@ void FrameTick(float dt)
                                 if (dir >= 0 && dir < 4) {
                                     if (scInstantMove) {
                                         ImGuiKey dirImKeys[] = { ImGuiKey_A, ImGuiKey_D, ImGuiKey_W, ImGuiKey_S };
-                                        if (ImGui::IsKeyPressed(dirImKeys[dir])) {
+                                        if (ImGui::IsKeyPressed(dirImKeys[dir], false)) {
                                             if (oi < (int)sTmObjFacing.size())
                                                 sTmObjFacing[oi] = dirToFacing[dir];
                                             if (dir == 0) obj.tileX -= 1;
                                             else if (dir == 1) obj.tileX += 1;
                                             else if (dir == 2) obj.tileY -= 1;
                                             else if (dir == 3) obj.tileY += 1;
+                                            if (oi < (int)sTmObjStepCount.size())
+                                                sTmObjStepCount[oi]++;
+                                            tmObjMovedThisFrame[oi] = true;
                                         }
                                     } else if (tmKeyDown(dirKeys[dir]) && sTmLastMoveDir == dir) {
                                         if (oi < (int)sTmObjFacing.size())
                                             sTmObjFacing[oi] = dirToFacing[dir];
-                                        sTmMoveAccum[dir] += tmMoveRate * dt;
-                                        if (sTmMoveAccum[dir] >= 1.0f) {
-                                            int steps = (int)sTmMoveAccum[dir];
-                                            sTmMoveAccum[dir] -= steps;
-                                            if (dir == 0) obj.tileX -= steps;
-                                            else if (dir == 1) obj.tileX += steps;
-                                            else if (dir == 2) obj.tileY -= steps;
-                                            else if (dir == 3) obj.tileY += steps;
+                                        ImGuiKey dirImKeys2[] = { ImGuiKey_A, ImGuiKey_D, ImGuiKey_W, ImGuiKey_S };
+                                        if (ImGui::IsKeyPressed(dirImKeys2[dir], false)) {
+                                            if (dir == 0) obj.tileX -= 1;
+                                            else if (dir == 1) obj.tileX += 1;
+                                            else if (dir == 2) obj.tileY -= 1;
+                                            else if (dir == 3) obj.tileY += 1;
+                                            if (oi < (int)sTmObjStepCount.size())
+                                                sTmObjStepCount[oi]++;
+                                            tmObjMovedThisFrame[oi] = true;
+                                            sTmMoveAccum[dir] = 0.0f;
+                                        } else {
+                                            sTmMoveAccum[dir] += tmMoveRate * dt;
+                                            if (sTmMoveAccum[dir] >= 1.0f) {
+                                                int steps = (int)sTmMoveAccum[dir];
+                                                sTmMoveAccum[dir] -= steps;
+                                                if (dir == 0) obj.tileX -= steps;
+                                                else if (dir == 1) obj.tileX += steps;
+                                                else if (dir == 2) obj.tileY -= steps;
+                                                else if (dir == 3) obj.tileY += steps;
+                                                if (oi < (int)sTmObjStepCount.size())
+                                                    sTmObjStepCount[oi] += steps;
+                                                tmObjMovedThisFrame[oi] = true;
+                                            }
                                         }
                                     }
                                 }
@@ -8166,16 +8235,16 @@ void FrameTick(float dt)
                                 int key = scResolveEventKey(ev);
                                 auto scKeyHit = [](int gbaKey) -> bool {
                                     switch (gbaKey) {
-                                    case 0: return ImGui::IsKeyPressed(ImGuiKey_Space);
-                                    case 1: return ImGui::IsKeyPressed(ImGuiKey_LeftShift);
-                                    case 2: return ImGui::IsKeyPressed(ImGuiKey_J);
-                                    case 3: return ImGui::IsKeyPressed(ImGuiKey_L);
-                                    case 4: return ImGui::IsKeyPressed(ImGuiKey_Enter);
-                                    case 5: return ImGui::IsKeyPressed(ImGuiKey_Backspace);
-                                    case 6: return ImGui::IsKeyPressed(ImGuiKey_W);
-                                    case 7: return ImGui::IsKeyPressed(ImGuiKey_S);
-                                    case 8: return ImGui::IsKeyPressed(ImGuiKey_A);
-                                    case 9: return ImGui::IsKeyPressed(ImGuiKey_D);
+                                    case 0: return ImGui::IsKeyPressed(ImGuiKey_Space, false);
+                                    case 1: return ImGui::IsKeyPressed(ImGuiKey_LeftShift, false);
+                                    case 2: return ImGui::IsKeyPressed(ImGuiKey_J, false);
+                                    case 3: return ImGui::IsKeyPressed(ImGuiKey_L, false);
+                                    case 4: return ImGui::IsKeyPressed(ImGuiKey_Enter, false);
+                                    case 5: return ImGui::IsKeyPressed(ImGuiKey_Backspace, false);
+                                    case 6: return ImGui::IsKeyPressed(ImGuiKey_W, false);
+                                    case 7: return ImGui::IsKeyPressed(ImGuiKey_S, false);
+                                    case 8: return ImGui::IsKeyPressed(ImGuiKey_A, false);
+                                    case 9: return ImGui::IsKeyPressed(ImGuiKey_D, false);
                                     default: return false;
                                     }
                                 };
@@ -8204,6 +8273,23 @@ void FrameTick(float dt)
                 }
 
                 sTmOnStartRan = true;
+
+                // Smooth visual position lerp toward logical tile position
+                for (int i = 0; i < (int)sTmObjects.size(); i++) {
+                    if (i >= (int)sTmObjVisX.size()) break;
+                    float tx = (float)sTmObjects[i].tileX;
+                    float ty = (float)sTmObjects[i].tileY;
+                    float speed = 10.0f; // tiles per second
+                    if (i < (int)sTmObjMoveRate.size() && sTmObjMoveRate[i] > 0.0f)
+                        speed = sTmObjMoveRate[i] * 1.5f; // slightly faster than move rate for snappy feel
+                    float maxStep = speed * dt;
+                    float dx = tx - sTmObjVisX[i];
+                    float dy = ty - sTmObjVisY[i];
+                    if (dx > maxStep) dx = maxStep; else if (dx < -maxStep) dx = -maxStep;
+                    if (dy > maxStep) dy = maxStep; else if (dy < -maxStep) dy = -maxStep;
+                    sTmObjVisX[i] += dx;
+                    sTmObjVisY[i] += dy;
+                }
 
                 // Debug overlay for tilemap script
                 if (ImGui::Begin("TM Script Debug", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {

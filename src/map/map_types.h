@@ -67,6 +67,7 @@ struct SpriteAnim
     int endFrame   = 0;
     int fps        = 8;
     bool loop      = true;
+    bool stepAnim  = false; // true = advance frame per tile step (tilemap), false = time-based
     float speed    = 1.0f;  // playback speed multiplier (0..10, default 1)
     AnimState gameState = AnimState::None; // which game state triggers this anim
 };
