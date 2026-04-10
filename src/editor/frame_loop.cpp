@@ -7943,15 +7943,8 @@ void FrameTick(float dt)
                                         sTmObjFacing[oi] = dirToFacing[dir];
                                     ImGuiKey dirImKeys[] = { ImGuiKey_A, ImGuiKey_D, ImGuiKey_W, ImGuiKey_S };
                                     if (ImGui::IsKeyPressed(dirImKeys[dir], false)) {
-                                        // First frame: instant move
-                                        if (dir == 0) obj.tileX -= 1;
-                                        else if (dir == 1) obj.tileX += 1;
-                                        else if (dir == 2) obj.tileY -= 1;
-                                        else if (dir == 3) obj.tileY += 1;
-                                        if (oi < (int)sTmObjStepCount.size())
-                                            sTmObjStepCount[oi]++;
-                                        tmObjMovedThisFrame[oi] = true;
-                                        sTmMoveAccum[dir] = 0.0f;
+                                        // First frame: just face, pre-fill accumulator so move triggers quickly
+                                        sTmMoveAccum[dir] = 0.75f;
                                     } else {
                                         // Held: accumulator movement
                                         sTmMoveAccum[dir] += tmMoveRate * dt;
@@ -8150,14 +8143,8 @@ void FrameTick(float dt)
                                             sTmObjFacing[oi] = dirToFacing[dir];
                                         ImGuiKey dirImKeys2[] = { ImGuiKey_A, ImGuiKey_D, ImGuiKey_W, ImGuiKey_S };
                                         if (ImGui::IsKeyPressed(dirImKeys2[dir], false)) {
-                                            if (dir == 0) obj.tileX -= 1;
-                                            else if (dir == 1) obj.tileX += 1;
-                                            else if (dir == 2) obj.tileY -= 1;
-                                            else if (dir == 3) obj.tileY += 1;
-                                            if (oi < (int)sTmObjStepCount.size())
-                                                sTmObjStepCount[oi]++;
-                                            tmObjMovedThisFrame[oi] = true;
-                                            sTmMoveAccum[dir] = 0.0f;
+                                            // First frame: just face, pre-fill accumulator so move triggers quickly
+                                            sTmMoveAccum[dir] = 0.75f;
                                         } else {
                                             sTmMoveAccum[dir] += tmMoveRate * dt;
                                             if (sTmMoveAccum[dir] >= 1.0f) {
@@ -8275,13 +8262,15 @@ void FrameTick(float dt)
                 sTmOnStartRan = true;
 
                 // Smooth visual position lerp toward logical tile position
+                bool anyDirHeld = ImGui::IsKeyDown(ImGuiKey_W) || ImGui::IsKeyDown(ImGuiKey_A) ||
+                                  ImGui::IsKeyDown(ImGuiKey_S) || ImGui::IsKeyDown(ImGuiKey_D);
                 for (int i = 0; i < (int)sTmObjects.size(); i++) {
                     if (i >= (int)sTmObjVisX.size()) break;
                     float tx = (float)sTmObjects[i].tileX;
                     float ty = (float)sTmObjects[i].tileY;
-                    float speed = 10.0f; // tiles per second
+                    float speed = 10.0f;
                     if (i < (int)sTmObjMoveRate.size() && sTmObjMoveRate[i] > 0.0f)
-                        speed = sTmObjMoveRate[i] * 1.5f; // slightly faster than move rate for snappy feel
+                        speed = sTmObjMoveRate[i];
                     float maxStep = speed * dt;
                     float dx = tx - sTmObjVisX[i];
                     float dy = ty - sTmObjVisY[i];
