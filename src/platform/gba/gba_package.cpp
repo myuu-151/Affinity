@@ -362,6 +362,15 @@ static bool GenerateMapData(const std::string& runtimeDir,
     std::vector<uint32_t> dirAnimAllTiles; // ROM data for DMA streaming
     int dirVramNextTile = 0; // running VRAM tile offset for direction assets
 
+    // Determine which assets are actually referenced by sprites in the scene.
+    // Only referenced direction assets get VRAM slots — unreferenced ones still get
+    // ROM tile data (for future use) but no VRAM reservation, preventing OBJ VRAM overflow
+    // in Mode 4 where only 512 tiles (16KB) are usable.
+    std::vector<bool> assetReferencedBySprite(assets.size(), false);
+    for (size_t si = 0; si < sprites.size(); si++)
+        if (sprites[si].assetIdx >= 0 && sprites[si].assetIdx < (int)assets.size())
+            assetReferencedBySprite[sprites[si].assetIdx] = true;
+
     for (size_t ai = 0; ai < assets.size(); ai++)
     {
         if (!assets[ai].hasDirections || assets[ai].dirAnimSets.empty()) continue;
@@ -501,8 +510,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
         // Quantize and tile each set
         int dirSize = 64;
-        // Each asset needs a unique VRAM region for DMA: base + accumulated tiles from previous assets
-        assetDirInfos[ai].vramTile0 = (int)allTiles.size() / 8 + dirVramNextTile;
+        // Only allocate VRAM for assets referenced by sprites — unreferenced assets
+        // get ROM data but vramTile0 stays 0 (DMA skipped at runtime since hasDirs=0
+        // unless we mark them). We still emit ROM tiles for all direction assets.
+        if (assetReferencedBySprite[ai])
+            assetDirInfos[ai].vramTile0 = (int)allTiles.size() / 8 + dirVramNextTile;
 
         for (int si = 0; si < setCount; si++)
         {
@@ -543,9 +555,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
             }
         }
 
-        // Advance VRAM offset: reserve space for one set (8 dirs × tpf tiles)
+        // Advance VRAM offset only for referenced assets
         int tpf = (dirSize / 8) * (dirSize / 8); // tiles per direction frame
-        dirVramNextTile += 8 * tpf;
+        if (assetReferencedBySprite[ai])
+            dirVramNextTile += 8 * tpf;
     }
 
     // Auto-assign unique palBanks for ALL assets to prevent palette overwrites.
@@ -680,7 +693,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static const int afn_asset_dir_desc[][6] = {\n";
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
-            if (assetDirInfos[ai].has)
+            if (assetDirInfos[ai].has && assetReferencedBySprite[ai])
             {
                 int tpf = (assetDirInfos[ai].dirSize / 8) * (assetDirInfos[ai].dirSize / 8);
                 f << "    { " << assetDirInfos[ai].setCount << ", " << tpf
@@ -702,7 +715,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "    { ";
             for (int si = 0; si < maxDirSets; si++)
             {
-                if (assetDirInfos[ai].has && si < (int)assetDirInfos[ai].romSetU32Offset.size())
+                if (assetDirInfos[ai].has && assetReferencedBySprite[ai] && si < (int)assetDirInfos[ai].romSetU32Offset.size())
                     f << assetDirInfos[ai].romSetU32Offset[si];
                 else
                     f << -1;
