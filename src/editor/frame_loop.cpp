@@ -106,6 +106,9 @@ static int sTmStampAsset = -1;       // sprite asset index for stamp/paint mode 
 static int sTmStampObj = -1;         // which Tile object we're painting into (-1 = none)
 static int sTmPlaceTX = 0, sTmPlaceTY = 0; // tile coords for popup placement
 static float sTmObjPanelW = 200.0f;  // object panel width
+static std::vector<TmObject> sSavedTmObjects; // saved tilemap objects before Play
+static float sTmMoveAccum[4] = {};  // per-direction movement accumulator (Up/Down/Left/Right)
+static std::vector<int> sTmObjFacing; // per-object facing direction (0=N..7=NW, index into dir sprites)
 
 // ---- Scene instances ----
 struct TmScene {
@@ -3017,6 +3020,10 @@ static void DrawTabBar()
                     break;
                 }
             }
+            // Save tilemap object state for restore on Stop
+            sSavedTmObjects = sTmObjects;
+            memset(sTmMoveAccum, 0, sizeof(sTmMoveAccum));
+            sTmObjFacing.assign(sTmObjects.size(), 4); // default facing South
         }
         ImGui::PopStyleColor(2);
     }
@@ -5762,10 +5769,22 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
 
             // Draw sprite texture if available, otherwise diamond marker
             bool drewSprite = false;
-            if (obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)sTmSpriteTextures.size() &&
-                sTmSpriteTextures[obj.spriteAssetIdx])
+            GLuint drawTex = 0;
+            // During play mode, use direction sprite if available
+            if (sEditorMode == EditorMode::Play && i < (int)sTmObjFacing.size() &&
+                obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)sAssetDirSprites.size() &&
+                !sAssetDirSprites[obj.spriteAssetIdx].empty())
             {
-                dl->AddImage((ImTextureID)(uintptr_t)sTmSpriteTextures[obj.spriteAssetIdx],
+                int facing = sTmObjFacing[i];
+                if (facing >= 0 && facing < 8)
+                    drawTex = sAssetDirSprites[obj.spriteAssetIdx][0][facing].texture;
+            }
+            // Fallback to static sprite texture
+            if (!drawTex && obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)sTmSpriteTextures.size())
+                drawTex = sTmSpriteTextures[obj.spriteAssetIdx];
+            if (drawTex)
+            {
+                dl->AddImage((ImTextureID)(uintptr_t)drawTex,
                     ImVec2(objX, objY), ImVec2(objX + cellSz, objY + cellSz));
                 if (isSel)
                     dl->AddRect(ImVec2(objX, objY), ImVec2(objX + cellSz, objY + cellSz),
@@ -6564,6 +6583,11 @@ void FrameTick(float dt)
             sVsFiredNodes.clear();
             sVsLinkSurgeT.clear();
             sVsLinkSurgeRevT.clear();
+            // Restore tilemap objects
+            if (!sSavedTmObjects.empty()) {
+                sTmObjects = sSavedTmObjects;
+                sSavedTmObjects.clear();
+            }
             // sOnStartFrames reset handled by sScriptStartRan = false
         }
 
@@ -7563,6 +7587,176 @@ void FrameTick(float dt)
                 sCamera.horizon = std::min(120.0f, sCamera.horizon + 40.0f * dt);
             if (ImGui::IsKeyDown(ImGuiKey_K))
                 sCamera.horizon = std::max(10.0f, sCamera.horizon - 40.0f * dt);
+
+            // ---- TILEMAP PLAY MODE: blueprint execution for TmObjects ----
+            if (sActiveTab == EditorTab::Tilemap)
+            {
+                // Key mapping (reuse same GBA key indices)
+                auto tmKeyDown = [](int gbaKey) -> bool {
+                    switch (gbaKey) {
+                    case 0: return ImGui::IsKeyDown(ImGuiKey_Space);
+                    case 1: return ImGui::IsKeyDown(ImGuiKey_LeftShift);
+                    case 2: return ImGui::IsKeyDown(ImGuiKey_J);
+                    case 3: return ImGui::IsKeyDown(ImGuiKey_L);
+                    case 4: return ImGui::IsKeyDown(ImGuiKey_Enter);
+                    case 5: return ImGui::IsKeyDown(ImGuiKey_Backspace);
+                    case 6: return ImGui::IsKeyDown(ImGuiKey_W);
+                    case 7: return ImGui::IsKeyDown(ImGuiKey_S);
+                    case 8: return ImGui::IsKeyDown(ImGuiKey_A);
+                    case 9: return ImGui::IsKeyDown(ImGuiKey_D);
+                    default: return false;
+                    }
+                };
+
+                // Get current tilemap dimensions for clamping
+                int tmMapW = 1, tmMapH = 1;
+                if (sTmSelectedScene >= 0 && sTmSelectedScene < (int)sTmScenes.size()) {
+                    tmMapW = sTmScenes[sTmSelectedScene].mapW;
+                    tmMapH = sTmScenes[sTmSelectedScene].mapH;
+                }
+
+                float tmMoveRate = 12.0f; // tiles per second
+
+                for (int oi = 0; oi < (int)sTmObjects.size(); oi++)
+                {
+                    TmObject& obj = sTmObjects[oi];
+                    if (obj.blueprintIdx < 0 || obj.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
+                    const BlueprintAsset& bp = sBlueprintAssets[obj.blueprintIdx];
+                    if (bp.nodes.empty()) continue;
+
+                    // Build temporary copy with param overrides
+                    std::vector<VsNode> bpNodes = bp.nodes;
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        int overrideVal = bp.params[pi].defaultInt;
+                        for (int oi2 = 0; oi2 < obj.instanceParamCount; oi2++)
+                            if (obj.instanceParams[oi2].paramIdx == pi)
+                                overrideVal = obj.instanceParams[oi2].value;
+                        for (auto& n : bpNodes)
+                            if (n.id == bp.params[pi].sourceNodeId)
+                                n.paramInt[bp.params[pi].sourceParamIdx] = overrideVal;
+                    }
+
+                    auto tmFindNode = [&](int id) -> const VsNode* {
+                        for (auto& n : bpNodes) if (n.id == id) return &n;
+                        return nullptr;
+                    };
+                    auto tmFindDataIn = [&](int nodeId, int pinIdx) -> const VsNode* {
+                        for (auto& lk : bp.links)
+                            if (lk.to.nodeId == nodeId && lk.to.pinType == 3 && lk.to.pinIdx == pinIdx)
+                                return tmFindNode(lk.from.nodeId);
+                        return nullptr;
+                    };
+                    auto tmCollectActions = [&](int startNodeId) -> std::vector<const VsNode*> {
+                        std::vector<const VsNode*> acts;
+                        std::vector<int> front;
+                        std::vector<bool> vis(10000, false);
+                        for (auto& lk : bp.links)
+                            if (lk.from.nodeId == startNodeId && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                front.push_back(lk.to.nodeId);
+                        int safety = 0;
+                        while (!front.empty() && safety < 256) {
+                            int nid = front.front(); front.erase(front.begin());
+                            if (nid < 0 || nid >= (int)vis.size() || vis[nid]) continue;
+                            vis[nid] = true; safety++;
+                            auto* an = tmFindNode(nid); if (!an) continue;
+                            acts.push_back(an);
+                            for (auto& lk : bp.links)
+                                if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                    front.push_back(lk.to.nodeId);
+                        }
+                        return acts;
+                    };
+                    auto tmResolveEventKey = [&](const VsNode& ev) -> int {
+                        int count = 0; int keyVal = -1;
+                        for (auto& lk : bp.links)
+                            if (lk.to.nodeId == ev.id && lk.to.pinType == 3 && lk.to.pinIdx == 0) {
+                                auto* dn = tmFindNode(lk.from.nodeId);
+                                if (dn) { keyVal = dn->paramInt[0]; count++; }
+                            }
+                        if (count == 1) return keyVal;
+                        if (count == 0) return ev.paramInt[0];
+                        return -1;
+                    };
+                    auto tmExecAction = [&](const VsNode* action) {
+                        VsNodeType t = action->type;
+                        if (t == VsNodeType::MovePlayer) {
+                            auto* dd = tmFindDataIn(action->id, 0);
+                            int dir = dd ? dd->paramInt[0] : 0;
+                            // dir: 0=Left, 1=Right, 2=Up, 3=Down
+                            // facing: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW
+                            int dirKeys[] = { 8, 9, 6, 7 }; // A, D, W, S
+                            int dirToFacing[] = { 6, 2, 0, 4 }; // Left=W, Right=E, Up=N, Down=S
+                            if (dir >= 0 && dir < 4 && tmKeyDown(dirKeys[dir])) {
+                                if (oi < (int)sTmObjFacing.size())
+                                    sTmObjFacing[oi] = dirToFacing[dir];
+                                sTmMoveAccum[dir] += tmMoveRate * dt;
+                                if (sTmMoveAccum[dir] >= 1.0f) {
+                                    int steps = (int)sTmMoveAccum[dir];
+                                    sTmMoveAccum[dir] -= steps;
+                                    if (dir == 0) obj.tileX -= steps;       // Left
+                                    else if (dir == 1) obj.tileX += steps;  // Right
+                                    else if (dir == 2) obj.tileY -= steps;  // Up
+                                    else if (dir == 3) obj.tileY += steps;  // Down
+                                }
+                            }
+                        }
+                        else if (t == VsNodeType::ChangeScene) {
+                            auto* sd = tmFindDataIn(action->id, 0);
+                            int scIdx = sd ? sd->paramInt[0] : action->paramInt[0];
+                            sPendingSceneSwitch = scIdx;
+                            sPendingSceneMode = action->paramInt[1];
+                        }
+                    };
+
+                    // Run blueprint events
+                    for (auto& ev : bpNodes) {
+                        if (ev.type == VsNodeType::OnUpdate) {
+                            auto acts = tmCollectActions(ev.id);
+                            for (auto* a : acts) tmExecAction(a);
+                        }
+                        if (ev.type == VsNodeType::OnKeyHeld) {
+                            int key = tmResolveEventKey(ev);
+                            bool fire = (key >= 0) ? tmKeyDown(key) : true;
+                            if (fire) {
+                                auto acts = tmCollectActions(ev.id);
+                                for (auto* a : acts) tmExecAction(a);
+                            }
+                        }
+                        if (ev.type == VsNodeType::OnKeyPressed) {
+                            int key = tmResolveEventKey(ev);
+                            auto tmKeyHit = [](int gbaKey) -> bool {
+                                switch (gbaKey) {
+                                case 0: return ImGui::IsKeyPressed(ImGuiKey_Space);
+                                case 1: return ImGui::IsKeyPressed(ImGuiKey_LeftShift);
+                                case 2: return ImGui::IsKeyPressed(ImGuiKey_J);
+                                case 3: return ImGui::IsKeyPressed(ImGuiKey_L);
+                                case 4: return ImGui::IsKeyPressed(ImGuiKey_Enter);
+                                case 5: return ImGui::IsKeyPressed(ImGuiKey_Backspace);
+                                case 6: return ImGui::IsKeyPressed(ImGuiKey_W);
+                                case 7: return ImGui::IsKeyPressed(ImGuiKey_S);
+                                case 8: return ImGui::IsKeyPressed(ImGuiKey_A);
+                                case 9: return ImGui::IsKeyPressed(ImGuiKey_D);
+                                default: return false;
+                                }
+                            };
+                            if (key >= 0 && tmKeyHit(key)) {
+                                auto acts = tmCollectActions(ev.id);
+                                for (auto* a : acts) tmExecAction(a);
+                            }
+                        }
+                    }
+
+                    // Clamp object to tilemap bounds
+                    obj.tileX = std::clamp(obj.tileX, 0, tmMapW - 1);
+                    obj.tileY = std::clamp(obj.tileY, 0, tmMapH - 1);
+                }
+
+                // Reset accumulators for directions not held
+                if (!ImGui::IsKeyDown(ImGuiKey_A)) sTmMoveAccum[0] = 0.0f;
+                if (!ImGui::IsKeyDown(ImGuiKey_D)) sTmMoveAccum[1] = 0.0f;
+                if (!ImGui::IsKeyDown(ImGuiKey_W)) sTmMoveAccum[2] = 0.0f;
+                if (!ImGui::IsKeyDown(ImGuiKey_S)) sTmMoveAccum[3] = 0.0f;
+            }
         }
 
         // Clamp camera to world bounds
