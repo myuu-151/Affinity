@@ -1689,9 +1689,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 }
             };
 
-            // First pass: emit each action as its own function
+            // First pass: emit each action as its own function (deduplicate by node ID)
+            std::set<int> emittedActionIds;
             for (auto& c : chains) {
                 for (auto* a : c.actions) {
+                    if (emittedActionIds.count(a->id)) continue;
+                    emittedActionIds.insert(a->id);
                     const char* suffix = a->funcName[0] ? a->funcName : nullptr;
                     char defaultName[64];
                     if (!suffix) {
@@ -2060,9 +2063,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 }
             };
 
-            // First pass: emit each blueprint action as its own function
+            // First pass: emit each blueprint action as its own function (deduplicate by node ID)
+            std::set<int> bpEmittedIds;
             for (auto& c : bpChains) {
                 for (auto* a : c.actions) {
+                    if (bpEmittedIds.count(a->id)) continue;
+                    bpEmittedIds.insert(a->id);
                     const char* fname = a->funcName[0] ? a->funcName : nullptr;
                     char defaultName[64];
                     if (!fname) {
