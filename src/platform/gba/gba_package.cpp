@@ -1454,6 +1454,26 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int   player_on_ground;\n";
         f << "static u16   orbit_angle;\n\n";
     }
+    // Helper: get suffix string for an action node type
+    auto actionSuffix = [](GBAScriptNodeType t) -> const char* {
+        switch (t) {
+        case GBAScriptNodeType::MovePlayer:    return "_move";
+        case GBAScriptNodeType::Jump:          return "_jump";
+        case GBAScriptNodeType::Walk:          return "_walk";
+        case GBAScriptNodeType::Sprint:        return "_sprint";
+        case GBAScriptNodeType::OrbitCamera:   return "_orbit";
+        case GBAScriptNodeType::PlayAnim:      return "_play_anim";
+        case GBAScriptNodeType::SetGravity:    return "_set_gravity";
+        case GBAScriptNodeType::SetMaxFall:    return "_set_max_fall";
+        case GBAScriptNodeType::DestroyObject: return "_destroy";
+        case GBAScriptNodeType::AutoOrbit:     return "_auto_orbit";
+        case GBAScriptNodeType::DampenJump:    return "_dampen_jump";
+        case GBAScriptNodeType::ChangeScene:   return "_change_scene";
+        case GBAScriptNodeType::CustomCode:    return "_custom";
+        default: return "";
+        }
+    };
+
     if (!script.nodes.empty())
     {
         // Helper: find node by id
@@ -1567,14 +1587,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         {
             f << "// ---- Generated script code from visual node graph ----\n";
 
-            // Group chains by event type for cleaner output
-            // OnStart → afn_script_start() — called once at init
-            // OnKeyHeld → afn_script_key_held() — called every frame
-            // OnKeyPressed → afn_script_key_pressed() — called every frame
-            // OnKeyReleased → afn_script_key_released() — called every frame
-
-            // Emit action code for a single action node
-            auto emitAction = [&](const GBAScriptNodeExport* action) {
+            // Emit action body lines for a single action node
+            auto emitActionBody = [&](const GBAScriptNodeExport* action) {
                 // Use custom code override if set
                 if (action->customCode[0]) {
                     f << "    " << action->customCode << "\n";
@@ -1674,6 +1688,33 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 }
             };
 
+            // First pass: emit each action as its own function
+            for (auto& c : chains) {
+                for (auto* a : c.actions) {
+                    const char* suffix = a->funcName[0] ? a->funcName : nullptr;
+                    char defaultName[64];
+                    if (!suffix) {
+                        snprintf(defaultName, sizeof(defaultName), "afn_script%s_%d", actionSuffix(a->type), a->id);
+                        suffix = defaultName;
+                    }
+                    f << "static inline void " << suffix << "(void) {\n";
+                    emitActionBody(a);
+                    f << "}\n";
+                }
+            }
+            f << "\n";
+
+            // Helper: emit a call to an action's function
+            auto emitActionCall = [&](const GBAScriptNodeExport* a) {
+                char callName[64];
+                if (a->funcName[0]) {
+                    snprintf(callName, sizeof(callName), "%s", a->funcName);
+                } else {
+                    snprintf(callName, sizeof(callName), "afn_script%s_%d", actionSuffix(a->type), a->id);
+                }
+                f << "    " << callName << "();\n";
+            };
+
             // Collect OnStart chains
             bool hasStart = false, hasHeld = false, hasPressed = false, hasReleased = false, hasUpdate = false;
             for (auto& c : chains) {
@@ -1713,13 +1754,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
             for (auto& c : chains) {
                 if (c.event->type != GBAScriptNodeType::OnStart) continue;
                 for (auto* a : c.actions)
-                    emitAction(a);
+                    emitActionCall(a);
             }
             f << "}\n";
             emitFuncAlias("afn_script_start", GBAScriptNodeType::OnStart);
             f << "\n";
 
-            // Helper: emit actions with optional key guard
+            // Helper: emit action calls with optional key guard
             auto emitKeyBlock = [&](const EventChain& c, const char* keyCheck) {
                 int key = resolveEventKey(*c.event);
                 if (key >= 0) {
@@ -1727,13 +1768,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     snprintf(buf, sizeof(buf), keyCheck, resolveKeyName(key));
                     f << "  " << buf << " {\n";
                     for (auto* a : c.actions)
-                        emitAction(a);
+                        emitActionCall(a);
                     f << "  }\n";
                 } else {
                     // Ambiguous key — emit actions without guard (actions have own checks)
                     f << "  { // (all d-pad)\n";
                     for (auto* a : c.actions)
-                        emitAction(a);
+                        emitActionCall(a);
                     f << "  }\n";
                 }
             };
@@ -1773,7 +1814,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             for (auto& c : chains) {
                 if (c.event->type != GBAScriptNodeType::OnUpdate) continue;
                 for (auto* a : c.actions)
-                    emitAction(a);
+                    emitActionCall(a);
             }
             f << "}\n";
             emitFuncAlias("afn_script_update", GBAScriptNodeType::OnUpdate);
@@ -1786,7 +1827,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 if (c.event->type != GBAScriptNodeType::OnCollision) continue;
                 hasCollision = true;
                 for (auto* a : c.actions)
-                    emitAction(a);
+                    emitActionCall(a);
             }
             if (!hasCollision)
                 f << "  (void)0;\n";
@@ -1830,11 +1871,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
             const auto& bpScript = bp.script;
             int paramCount = (int)bp.params.size();
 
-            // Build param signature
-            std::string paramSig;
+            // Build param signature and call args
+            std::string paramSig, paramArgs;
             for (int pi = 0; pi < paramCount; pi++) {
-                if (pi > 0) paramSig += ", ";
+                if (pi > 0) { paramSig += ", "; paramArgs += ", "; }
                 paramSig += "int p" + std::to_string(pi);
+                paramArgs += "p" + std::to_string(pi);
             }
 
             // Helper lambdas for this blueprint's nodes/links
@@ -1912,8 +1954,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 if (!chain.actions.empty()) bpChains.push_back(chain);
             }
 
-            // Emit action code for blueprint
-            auto bpEmitAction = [&](const GBAScriptNodeExport* action) {
+            // Emit action body lines for blueprint
+            auto bpEmitActionBody = [&](const GBAScriptNodeExport* action) {
                 if (action->customCode[0]) {
                     f << "    " << action->customCode << "\n";
                     return;
@@ -2003,17 +2045,43 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 }
             };
 
+            // First pass: emit each blueprint action as its own function
+            for (auto& c : bpChains) {
+                for (auto* a : c.actions) {
+                    const char* fname = a->funcName[0] ? a->funcName : nullptr;
+                    char defaultName[64];
+                    if (!fname) {
+                        snprintf(defaultName, sizeof(defaultName), "afn_bp%d%s_%d", bi, actionSuffix(a->type), a->id);
+                        fname = defaultName;
+                    }
+                    f << "static inline void " << fname << "(" << paramSig << ") {\n";
+                    bpEmitActionBody(a);
+                    f << "}\n";
+                }
+            }
+
+            // Helper: emit a call to a blueprint action's function
+            auto bpEmitActionCall = [&](const GBAScriptNodeExport* a) {
+                char callName[64];
+                if (a->funcName[0]) {
+                    snprintf(callName, sizeof(callName), "%s", a->funcName);
+                } else {
+                    snprintf(callName, sizeof(callName), "afn_bp%d%s_%d", bi, actionSuffix(a->type), a->id);
+                }
+                f << "    " << callName << "(" << paramArgs << ");\n";
+            };
+
             auto bpEmitKeyBlock = [&](const BpChain& c, const char* keyCheck) {
                 int key = bpResolveEventKey(*c.event);
                 if (key >= 0) {
                     char buf[64];
                     snprintf(buf, sizeof(buf), keyCheck, bpResolveKeyName(key));
                     f << "  " << buf << " {\n";
-                    for (auto* a : c.actions) bpEmitAction(a);
+                    for (auto* a : c.actions) bpEmitActionCall(a);
                     f << "  }\n";
                 } else {
                     f << "  {\n";
-                    for (auto* a : c.actions) bpEmitAction(a);
+                    for (auto* a : c.actions) bpEmitActionCall(a);
                     f << "  }\n";
                 }
             };
@@ -2022,7 +2090,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "static inline void afn_bp" << bi << "_start(" << paramSig << ") {\n";
             for (auto& c : bpChains)
                 if (c.event->type == GBAScriptNodeType::OnStart)
-                    for (auto* a : c.actions) bpEmitAction(a);
+                    for (auto* a : c.actions) bpEmitActionCall(a);
             f << "}\n";
 
             f << "static inline void afn_bp" << bi << "_key_held(" << paramSig << ") {\n";
@@ -2046,13 +2114,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "static inline void afn_bp" << bi << "_update(" << paramSig << ") {\n";
             for (auto& c : bpChains)
                 if (c.event->type == GBAScriptNodeType::OnUpdate)
-                    for (auto* a : c.actions) bpEmitAction(a);
+                    for (auto* a : c.actions) bpEmitActionCall(a);
             f << "}\n";
 
             f << "static inline void afn_bp" << bi << "_collision(" << paramSig << ") {\n";
             for (auto& c : bpChains)
                 if (c.event->type == GBAScriptNodeType::OnCollision)
-                    for (auto* a : c.actions) bpEmitAction(a);
+                    for (auto* a : c.actions) bpEmitActionCall(a);
             f << "}\n\n";
         }
 

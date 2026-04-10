@@ -8635,7 +8635,7 @@ void FrameTick(float dt)
             // Border
             dl->AddRect(nMin, nMax, isSel ? 0xFFFFAA44 : 0xFF555566, 6.0f * zoom, 0, isSel ? 2.0f : 1.0f);
             // Title
-            const char* title = (n.type == VsNodeType::Group && n.groupLabel[0]) ? n.groupLabel : def.name;
+            const char* title = ((n.type == VsNodeType::Group || n.type == VsNodeType::CustomCode) && n.groupLabel[0]) ? n.groupLabel : def.name;
             dl->AddText(ImVec2(nx + 6 * zoom, ny + 2 * zoom), 0xFFFFFFFF, title);
             // Custom code indicator
             if (n.customCode[0])
@@ -10020,14 +10020,37 @@ void FrameTick(float dt)
                     case VsNodeType::OnStart:       suffix = "_start"; break;
                     case VsNodeType::OnUpdate:      suffix = "_update"; break;
                     case VsNodeType::OnCollision:   suffix = "_collision"; break;
+                    case VsNodeType::MovePlayer:    suffix = "_move"; break;
+                    case VsNodeType::Jump:          suffix = "_jump"; break;
+                    case VsNodeType::Walk:          suffix = "_walk"; break;
+                    case VsNodeType::Sprint:        suffix = "_sprint"; break;
+                    case VsNodeType::OrbitCamera:   suffix = "_orbit"; break;
+                    case VsNodeType::PlayAnim:      suffix = "_play_anim"; break;
+                    case VsNodeType::SetGravity:    suffix = "_set_gravity"; break;
+                    case VsNodeType::SetMaxFall:    suffix = "_set_max_fall"; break;
+                    case VsNodeType::DestroyObject: suffix = "_destroy"; break;
+                    case VsNodeType::AutoOrbit:     suffix = "_auto_orbit"; break;
+                    case VsNodeType::DampenJump:    suffix = "_dampen_jump"; break;
+                    case VsNodeType::ChangeScene:   suffix = "_change_scene"; break;
+                    case VsNodeType::CustomCode:    suffix = "_custom"; break;
                     default: suffix = ""; break;
                     }
-                    // Show default name as placeholder
+                    // Show default name as placeholder (action nodes include node ID to disambiguate)
+                    bool isEventNode = (cwNode.type == VsNodeType::OnKeyPressed || cwNode.type == VsNodeType::OnKeyReleased ||
+                                        cwNode.type == VsNodeType::OnKeyHeld || cwNode.type == VsNodeType::OnStart ||
+                                        cwNode.type == VsNodeType::OnUpdate || cwNode.type == VsNodeType::OnCollision);
                     char defaultName[64] = {};
-                    if (isBpNode && sVsEditBlueprintIdx < (int)sBlueprintAssets.size())
-                        snprintf(defaultName, sizeof(defaultName), "afn_bp%d%s", sVsEditBlueprintIdx, suffix);
-                    else
-                        snprintf(defaultName, sizeof(defaultName), "afn_script%s", suffix);
+                    if (isBpNode && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
+                        if (isEventNode)
+                            snprintf(defaultName, sizeof(defaultName), "afn_bp%d%s", sVsEditBlueprintIdx, suffix);
+                        else
+                            snprintf(defaultName, sizeof(defaultName), "afn_bp%d%s_%d", sVsEditBlueprintIdx, suffix, cwNode.id);
+                    } else {
+                        if (isEventNode)
+                            snprintf(defaultName, sizeof(defaultName), "afn_script%s", suffix);
+                        else
+                            snprintf(defaultName, sizeof(defaultName), "afn_script%s_%d", suffix, cwNode.id);
+                    }
                     ImGui::Spacing();
                     ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "Function Declaration");
                     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.1f, 0.1f, 0.12f, 1.0f));
@@ -10201,7 +10224,7 @@ void FrameTick(float dt)
         // Properties panel overlay — as child window inside canvas (data nodes only)
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
-            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::ChangeScene) {
+            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode) {
             const auto& def = sVsNodeDefs[(int)n.type];
             float propW = 260, propH = 180;
             float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -10363,6 +10386,10 @@ void FrameTick(float dt)
             case VsNodeType::Group:
                 ImGui::Text("Name");
                 ImGui::InputText("##GrpName", n.groupLabel, sizeof(n.groupLabel));
+                break;
+            case VsNodeType::CustomCode:
+                ImGui::Text("Name");
+                ImGui::InputText("##CcName", n.groupLabel, sizeof(n.groupLabel));
                 break;
             default: break;
             }
