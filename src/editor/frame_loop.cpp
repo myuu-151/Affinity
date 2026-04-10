@@ -39,6 +39,7 @@ static bool sInitialized = false;
 // Editor mode tabs
 enum class EditorTab { Map, Sprites, Tiles, Skybox, Player, ThreeD, Mode7, Tilemap, Events };
 static EditorTab sActiveTab = EditorTab::Map;
+static EditorTab sPlayTab = EditorTab::Map; // which tab Play was started on
 
 // Dummy tileset: 16 colors for the palette display
 static uint32_t sPalette[16] = {
@@ -110,6 +111,8 @@ static std::vector<TmObject> sSavedTmObjects; // saved tilemap objects before Pl
 static float sTmMoveAccum[4] = {};  // per-direction movement accumulator (Up/Down/Left/Right)
 static std::vector<int> sTmObjFacing; // per-object facing direction (0=N..7=NW, index into dir sprites)
 static std::vector<float> sTmObjMoveRate; // per-object tile move speed (tiles/sec), set by Walk/Sprint
+static int sTmLastMoveDir = -1; // last direction pressed (0=Left,1=Right,2=Up,3=Down), -1=none
+static bool sTmPrevDirHeld[4] = {}; // previous frame held state for edge detection
 
 // ---- Scene instances ----
 struct TmScene {
@@ -1243,6 +1246,8 @@ static bool SaveProject(const std::string& path)
         const SpriteAsset& sa = sSpriteAssets[ai];
         fprintf(f, "asset_begin=%s\n", sa.name.c_str());
         fprintf(f, "baseSize=%d\n", sa.baseSize);
+        if (!sa.sourceImagePath.empty())
+            fprintf(f, "srcImg=%s\n", sa.sourceImagePath.c_str());
         fprintf(f, "palBank=%d\n", sa.palBank);
         fprintf(f, "paletteSrc=%d\n", sa.paletteSrc);
         // Palette
@@ -1735,6 +1740,7 @@ static bool LoadProject(const std::string& path)
 
                     int iv; unsigned int uv; float fv;
                     if (sscanf(line, "baseSize=%d", &iv) == 1) sa.baseSize = iv;
+                    else if (strncmp(line, "srcImg=", 7) == 0) sa.sourceImagePath = line + 7;
                     else if (sscanf(line, "palBank=%d", &iv) == 1) sa.palBank = iv;
                     else if (sscanf(line, "paletteSrc=%d", &iv) == 1) sa.paletteSrc = iv;
                     else if (sscanf(line, "pal=%d,%u", &iv, &uv) == 2 && iv >= 0 && iv < 16) sa.palette[iv] = uv;
@@ -2997,6 +3003,7 @@ static void DrawTabBar()
                 sBlueprintAssets[sVsEditBlueprintIdx].links = sVsLinks;
             }
             sEditorMode = EditorMode::Play;
+            sPlayTab = sActiveTab;
             sSavedEditorCam = sCamera;
             sCamera.x = sCamObj.x;
             sCamera.z = sCamObj.z;
@@ -3377,7 +3384,76 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             for (int si = 0; si < 4; si++)
                 if (sizeVals[si] == asset.baseSize) { curIdx = si; break; }
             if (ImGui::Combo("##baseSize", &curIdx, sizes, 4))
-                asset.baseSize = sizeVals[curIdx];
+            {
+                int newSize = sizeVals[curIdx];
+                int oldSize = asset.baseSize;
+                if (newSize != oldSize && !asset.frames.empty())
+                {
+                    if (newSize < oldSize)
+                    {
+                        // Downscale: split each frame into sub-frames
+                        // e.g., 32x32 → 16x16 = 4 sub-frames per original frame
+                        int tilesX = oldSize / newSize;
+                        int tilesY = oldSize / newSize;
+                        std::vector<SpriteFrame> newFrames;
+                        for (auto& fr : asset.frames)
+                        {
+                            for (int ty = 0; ty < tilesY; ty++)
+                                for (int tx = 0; tx < tilesX; tx++)
+                                {
+                                    SpriteFrame sub;
+                                    sub.width = newSize;
+                                    sub.height = newSize;
+                                    memset(sub.pixels, 0, sizeof(sub.pixels));
+                                    for (int py = 0; py < newSize; py++)
+                                        for (int px = 0; px < newSize; px++)
+                                        {
+                                            int sx = tx * newSize + px;
+                                            int sy = ty * newSize + py;
+                                            if (sx < fr.width && sy < fr.height)
+                                                sub.pixels[py * kMaxFrameSize + px] = fr.pixels[sy * kMaxFrameSize + sx];
+                                        }
+                                    newFrames.push_back(sub);
+                                }
+                        }
+                        asset.frames = std::move(newFrames);
+                    }
+                    else
+                    {
+                        // Upscale: merge consecutive sub-frames back into larger frames
+                        // e.g., 16x16 → 32x32 = merge 4 sub-frames into 1
+                        int tilesX = newSize / oldSize;
+                        int tilesY = newSize / oldSize;
+                        int subsPerFrame = tilesX * tilesY;
+                        std::vector<SpriteFrame> newFrames;
+                        for (int i = 0; i < (int)asset.frames.size(); i += subsPerFrame)
+                        {
+                            SpriteFrame big;
+                            big.width = newSize;
+                            big.height = newSize;
+                            memset(big.pixels, 0, sizeof(big.pixels));
+                            for (int s = 0; s < subsPerFrame && (i + s) < (int)asset.frames.size(); s++)
+                            {
+                                int tx = s % tilesX;
+                                int ty = s / tilesX;
+                                const SpriteFrame& sub = asset.frames[i + s];
+                                for (int py = 0; py < oldSize; py++)
+                                    for (int px = 0; px < oldSize; px++)
+                                    {
+                                        int dx = tx * oldSize + px;
+                                        int dy = ty * oldSize + py;
+                                        if (dx < newSize && dy < newSize)
+                                            big.pixels[dy * kMaxFrameSize + dx] = sub.pixels[py * kMaxFrameSize + px];
+                                    }
+                            }
+                            newFrames.push_back(big);
+                        }
+                        asset.frames = std::move(newFrames);
+                    }
+                    sTmSpriteTexCount = -1;
+                }
+                asset.baseSize = newSize;
+            }
         }
         ImGui::PopItemWidth();
 
@@ -6793,6 +6869,8 @@ void FrameTick(float dt)
             // Interpret the visual script node graph to drive gameplay, matching
             // the C code generated for the GBA runtime.
 
+            if (sPlayTab != EditorTab::Tilemap)
+            {
             // Key mapping: Editor keyboard → GBA button indices
             // 0=A, 1=B, 2=L, 3=R, 4=Start, 5=Select, 6=Up, 7=Down, 8=Left, 9=Right
             auto editorKeyDown = [](int gbaKey) -> bool {
@@ -7589,9 +7667,10 @@ void FrameTick(float dt)
                 sCamera.horizon = std::min(120.0f, sCamera.horizon + 40.0f * dt);
             if (ImGui::IsKeyDown(ImGuiKey_K))
                 sCamera.horizon = std::max(10.0f, sCamera.horizon - 40.0f * dt);
+            } // end Mode7/3D play mode
 
             // ---- TILEMAP PLAY MODE: blueprint execution for TmObjects ----
-            if (sActiveTab == EditorTab::Tilemap)
+            if (sPlayTab == EditorTab::Tilemap)
             {
                 // Key mapping (reuse same GBA key indices)
                 auto tmKeyDown = [](int gbaKey) -> bool {
@@ -7616,6 +7695,24 @@ void FrameTick(float dt)
                     tmMapW = sTmScenes[sTmSelectedScene].mapW;
                     tmMapH = sTmScenes[sTmSelectedScene].mapH;
                 }
+
+                // Track most-recently-pressed direction to prevent diagonal movement
+                // dir mapping: 0=Left(A), 1=Right(D), 2=Up(W), 3=Down(S)
+                bool curHeld[4] = {
+                    ImGui::IsKeyDown(ImGuiKey_A), ImGui::IsKeyDown(ImGuiKey_D),
+                    ImGui::IsKeyDown(ImGuiKey_W), ImGui::IsKeyDown(ImGuiKey_S)
+                };
+                // Newly pressed direction takes priority
+                for (int d = 0; d < 4; d++)
+                    if (curHeld[d] && !sTmPrevDirHeld[d])
+                        sTmLastMoveDir = d;
+                // If current priority dir released, fall back to any still-held dir
+                if (sTmLastMoveDir >= 0 && !curHeld[sTmLastMoveDir]) {
+                    sTmLastMoveDir = -1;
+                    for (int d = 0; d < 4; d++)
+                        if (curHeld[d]) { sTmLastMoveDir = d; break; }
+                }
+                for (int d = 0; d < 4; d++) sTmPrevDirHeld[d] = curHeld[d];
 
                 for (int oi = 0; oi < (int)sTmObjects.size(); oi++)
                 {
@@ -7691,7 +7788,7 @@ void FrameTick(float dt)
                             // facing: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW
                             int dirKeys[] = { 8, 9, 6, 7 }; // A, D, W, S
                             int dirToFacing[] = { 6, 2, 0, 4 }; // Left=W, Right=E, Up=N, Down=S
-                            if (dir >= 0 && dir < 4 && tmKeyDown(dirKeys[dir])) {
+                            if (dir >= 0 && dir < 4 && tmKeyDown(dirKeys[dir]) && sTmLastMoveDir == dir) {
                                 if (oi < (int)sTmObjFacing.size())
                                     sTmObjFacing[oi] = dirToFacing[dir];
                                 sTmMoveAccum[dir] += tmMoveRate * dt;
