@@ -386,7 +386,20 @@ static bool GenerateMapData(const std::string& runtimeDir,
         else
             assetDirInfos[ai].palBank = assets[ai].palBank;
 
-        // Collect ALL unique colors across ALL sets for shared palette
+        // Compute which direction sets are actually used by animations
+        // to avoid wasting palette slots on unused sets' colors
+        std::vector<bool> usedSets(assets[ai].dirAnimSets.size(), false);
+        {
+            int base = 0;
+            for (size_t an = 0; an < assets[ai].anims.size(); an++) {
+                int fc = assets[ai].anims[an].endFrame;
+                for (int f2 = 0; f2 < fc && (base + f2) < (int)usedSets.size(); f2++)
+                    usedSets[base + f2] = true;
+                base += fc;
+            }
+        }
+
+        // Collect unique colors only from animation-referenced direction sets
         struct ColorFreq { unsigned short rgb15; int count; };
         std::vector<ColorFreq> colorFreqs;
         auto findOrAdd = [&](unsigned short c15) -> int {
@@ -396,10 +409,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
             return (int)colorFreqs.size() - 1;
         };
 
-        // If sharing palette from another asset, collect colors from source asset too
-        // so both assets share the same quantized palette
+        // Collect colors from a specific asset, restricted to used sets
         auto collectColorsFromAsset = [&](int assetIdx) {
             for (size_t si2 = 0; si2 < assets[assetIdx].dirAnimSets.size(); si2++)
+            {
+                if (si2 < usedSets.size() && !usedSets[si2]) continue;
                 for (int d = 0; d < 8; d++)
                 {
                     const auto& img = assets[assetIdx].dirAnimSets[si2].dirImages[d];
@@ -415,6 +429,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                             findOrAdd((unsigned short)(r2 | (g2 << 5) | (b2 << 10)));
                         }
                 }
+            }
         };
 
         // If sharing palette, use source's colors; otherwise use own
