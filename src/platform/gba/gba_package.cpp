@@ -1599,6 +1599,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_pending_scene_mode = " << scMode << ";\n";
                     break;
                 }
+                case GBAScriptNodeType::CustomCode:
+                    break; // handled by customCode[0] check above
                 default:
                     f << "    // unsupported action: type " << (int)action->type << "\n";
                     break;
@@ -1617,14 +1619,38 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
             // Always emit all four functions (main.c calls them unconditionally)
 
+            // Helper: find custom func name for an event type (first one wins)
+            auto findCustomName = [&](GBAScriptNodeType evType) -> const char* {
+                for (auto& c : chains)
+                    if (c.event->type == evType && c.event->funcName[0])
+                        return c.event->funcName;
+                return nullptr;
+            };
+            // Helper: emit function with optional rename + #define alias
+            auto emitFuncStart = [&](const char* defaultName, GBAScriptNodeType evType) {
+                const char* custom = findCustomName(evType);
+                if (custom) {
+                    f << "static inline void " << custom << "(void) {\n";
+                } else {
+                    f << "static inline void " << defaultName << "(void) {\n";
+                }
+            };
+            auto emitFuncAlias = [&](const char* defaultName, GBAScriptNodeType evType) {
+                const char* custom = findCustomName(evType);
+                if (custom)
+                    f << "#define " << defaultName << " " << custom << "\n";
+            };
+
             // OnStart → initialization function
-            f << "static inline void afn_script_start(void) {\n";
+            emitFuncStart("afn_script_start", GBAScriptNodeType::OnStart);
             for (auto& c : chains) {
                 if (c.event->type != GBAScriptNodeType::OnStart) continue;
                 for (auto* a : c.actions)
                     emitAction(a);
             }
-            f << "}\n\n";
+            f << "}\n";
+            emitFuncAlias("afn_script_start", GBAScriptNodeType::OnStart);
+            f << "\n";
 
             // Helper: emit actions with optional key guard
             auto emitKeyBlock = [&](const EventChain& c, const char* keyCheck) {
@@ -1646,40 +1672,48 @@ static bool GenerateMapData(const std::string& runtimeDir,
             };
 
             // OnKeyHeld → per-frame held-key checks
-            f << "static inline void afn_script_key_held(void) {\n";
+            emitFuncStart("afn_script_key_held", GBAScriptNodeType::OnKeyHeld);
             for (auto& c : chains) {
                 if (c.event->type != GBAScriptNodeType::OnKeyHeld) continue;
                 emitKeyBlock(c, "if (key_is_down(%s))");
             }
-            f << "}\n\n";
+            f << "}\n";
+            emitFuncAlias("afn_script_key_held", GBAScriptNodeType::OnKeyHeld);
+            f << "\n";
 
             // OnKeyPressed → per-frame key-hit checks
-            f << "static inline void afn_script_key_pressed(void) {\n";
+            emitFuncStart("afn_script_key_pressed", GBAScriptNodeType::OnKeyPressed);
             for (auto& c : chains) {
                 if (c.event->type != GBAScriptNodeType::OnKeyPressed) continue;
                 emitKeyBlock(c, "if (key_hit(%s))");
             }
-            f << "}\n\n";
+            f << "}\n";
+            emitFuncAlias("afn_script_key_pressed", GBAScriptNodeType::OnKeyPressed);
+            f << "\n";
 
             // OnKeyReleased → edge-triggered release checks
-            f << "static inline void afn_script_key_released(void) {\n";
+            emitFuncStart("afn_script_key_released", GBAScriptNodeType::OnKeyReleased);
             for (auto& c : chains) {
                 if (c.event->type != GBAScriptNodeType::OnKeyReleased) continue;
                 emitKeyBlock(c, "if (key_released(%s))");
             }
-            f << "}\n\n";
+            f << "}\n";
+            emitFuncAlias("afn_script_key_released", GBAScriptNodeType::OnKeyReleased);
+            f << "\n";
 
             // OnUpdate → runs every frame
-            f << "static inline void afn_script_update(void) {\n";
+            emitFuncStart("afn_script_update", GBAScriptNodeType::OnUpdate);
             for (auto& c : chains) {
                 if (c.event->type != GBAScriptNodeType::OnUpdate) continue;
                 for (auto* a : c.actions)
                     emitAction(a);
             }
-            f << "}\n\n";
+            f << "}\n";
+            emitFuncAlias("afn_script_update", GBAScriptNodeType::OnUpdate);
+            f << "\n";
 
             // OnCollision → called when player collides with a sprite
-            f << "static inline void afn_script_collision(void) {\n";
+            emitFuncStart("afn_script_collision", GBAScriptNodeType::OnCollision);
             bool hasCollision = false;
             for (auto& c : chains) {
                 if (c.event->type != GBAScriptNodeType::OnCollision) continue;
@@ -1689,7 +1723,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
             }
             if (!hasCollision)
                 f << "  (void)0;\n";
-            f << "}\n\n";
+            f << "}\n";
+            emitFuncAlias("afn_script_collision", GBAScriptNodeType::OnCollision);
+            f << "\n";
         }
         else if (hasAnyScript)
         {
@@ -1892,6 +1928,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_pending_scene_mode = " << scMode << ";\n";
                     break;
                 }
+                case GBAScriptNodeType::CustomCode:
+                    break; // handled by customCode[0] check above
                 default:
                     f << "    // unsupported bp action: type " << (int)action->type << "\n";
                     break;

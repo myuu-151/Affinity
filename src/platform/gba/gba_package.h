@@ -138,6 +138,7 @@ enum class GBAScriptNodeType : int {
     OnUpdate,
     Group,
     Object,
+    CustomCode,
     COUNT
 };
 
@@ -146,6 +147,7 @@ struct GBAScriptNodeExport {
     GBAScriptNodeType type;
     int paramInt[4];  // per-node params (key index, value, IEEE754 float bits, etc.)
     char customCode[512] = {};  // user-editable code override (empty = use default)
+    char funcName[64] = {};     // custom function name (empty = use default)
 };
 
 struct GBAScriptLinkExport {

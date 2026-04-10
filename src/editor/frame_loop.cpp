@@ -190,6 +190,7 @@ enum class VsNodeType : int {
     OnUpdate,       // fires every frame
     Group,          // subgraph containing other nodes
     Object,         // constant object/sprite index output (dropdown)
+    CustomCode,     // user-written C code (GBA only)
     COUNT
 };
 
@@ -246,6 +247,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "On Update",       0xFF338833, 0, 1, 0, 0, {}, {}, {} },
     { "Group",           0xFF888844, 0, 0, 0, 0, {}, {}, {} },
     { "Object",          0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
+    { "Custom Code",     0xFF993399, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -261,6 +263,7 @@ struct VsNode {
     int grpInExec = 0, grpOutExec = 0;   // dynamic pin counts for Group nodes
     int grpInData = 0, grpOutData = 0;
     char customCode[512] = {};            // user-editable code override (empty = use default)
+    char funcName[64] = {};               // custom function name (empty = use default afn_ name)
 };
 
 // Pin address: which node, which pin type, which pin index
@@ -374,6 +377,7 @@ static char sVsNodeCodeBuf[2048] = {}; // editable code buffer
 static bool sVsNodeInfoJustOpened = false;
 // Script code window (opened from node right-click "Edit")
 static bool sVsCodeWindowOpen = false;
+static bool sVsCodeWindowJustOpened = false;
 static int sVsCodeWindowNodeIdx = -1;
 static char sVsCodeWindowBuf[2048] = {}; // generated code (read-only display)
 static char sVsCodeWindowEditBuf[2048] = {}; // editable override
@@ -1346,6 +1350,8 @@ static bool SaveProject(const std::string& path)
                     n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
             if (n.customCode[0])
                 fprintf(f, "bpVsNodeCode=%d|%s\n", n.id, n.customCode);
+            if (n.funcName[0])
+                fprintf(f, "bpVsNodeFunc=%d|%s\n", n.id, n.funcName);
         }
         fprintf(f, "bpVsLinkCount=%d\n", (int)bp.links.size());
         for (auto& lk : bp.links)
@@ -1494,6 +1500,8 @@ static bool SaveProject(const std::string& path)
                 n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
         if (n.customCode[0])
             fprintf(f, "vsNodeCode=%d|%s\n", n.id, n.customCode);
+        if (n.funcName[0])
+            fprintf(f, "vsNodeFunc=%d|%s\n", n.id, n.funcName);
     }
     fprintf(f, "vsLinkCount=%d\n", (int)saveLinks->size());
     for (int i = 0; i < (int)saveLinks->size(); i++)
@@ -2017,6 +2025,15 @@ static bool LoadProject(const std::string& path)
                         if (n.id == nid) { strncpy(n.customCode, codeBuf, sizeof(n.customCode) - 1); break; }
                 }
             }
+            else if (strncmp(line, "bpVsNodeFunc=", 13) == 0 && !sBlueprintAssets.empty())
+            {
+                int nid;
+                char nameBuf[64] = {};
+                if (sscanf(line + 13, "%d|%63[^\n]", &nid, nameBuf) >= 2) {
+                    for (auto& n : sBlueprintAssets.back().nodes)
+                        if (n.id == nid) { strncpy(n.funcName, nameBuf, sizeof(n.funcName) - 1); break; }
+                }
+            }
             else if (sscanf(line, "bpVsLinkCount=%d", &ival) == 1 && !sBlueprintAssets.empty())
             {
                 sBlueprintAssets.back().links.clear();
@@ -2286,6 +2303,16 @@ static bool LoadProject(const std::string& path)
                     int gi = VsFindNode(nid);
                     if (gi >= 0)
                         strncpy(sVsNodes[gi].customCode, codeBuf, sizeof(sVsNodes[gi].customCode) - 1);
+                }
+            }
+            else if (strncmp(line, "vsNodeFunc=", 11) == 0)
+            {
+                int nid;
+                char nameBuf[64] = {};
+                if (sscanf(line + 11, "%d|%63[^\n]", &nid, nameBuf) >= 2) {
+                    int gi = VsFindNode(nid);
+                    if (gi >= 0)
+                        strncpy(sVsNodes[gi].funcName, nameBuf, sizeof(sVsNodes[gi].funcName) - 1);
                 }
             }
             else if (sscanf(line, "vsLinkCount=%d", &ival) == 1) { sVsLinks.clear(); sVsLinks.reserve(ival); }
@@ -6547,6 +6574,7 @@ void FrameTick(float dt)
                     sn.type = (GBAScriptNodeType)(int)n.type;
                     for (int pi = 0; pi < 4; pi++) sn.paramInt[pi] = n.paramInt[pi];
                     memcpy(sn.customCode, n.customCode, sizeof(sn.customCode));
+                    memcpy(sn.funcName, n.funcName, sizeof(sn.funcName));
                     exportScript.nodes.push_back(sn);
                 }
                 for (auto& l : sVsLinks)
@@ -6574,6 +6602,7 @@ void FrameTick(float dt)
                         sn.type = (GBAScriptNodeType)(int)n.type;
                         for (int pi = 0; pi < 4; pi++) sn.paramInt[pi] = n.paramInt[pi];
                         memcpy(sn.customCode, n.customCode, sizeof(sn.customCode));
+                    memcpy(sn.funcName, n.funcName, sizeof(sn.funcName));
                         // Mark parameter-exposed nodes with sentinel in paramInt[3]
                         for (int pi = 0; pi < bp.paramCount; pi++)
                             if (bp.params[pi].sourceNodeId == n.id)
@@ -9264,8 +9293,7 @@ void FrameTick(float dt)
                             if (dn) { keyVal = dn->paramInt[0]; count++; }
                         }
                     if (count == 1) return keyVal;
-                    if (count == 0) return ev.paramInt[0];
-                    return -1;
+                    return -1; // no key or multiple keys
                 };
                 auto gbaKeyName = [](int key) -> const char* {
                     const char* names[] = { "KEY_A","KEY_B","KEY_L","KEY_R","KEY_START","KEY_SELECT",
@@ -9309,18 +9337,14 @@ void FrameTick(float dt)
                     int ek = resolveEventKeyForDisplay(infoNode);
                     if (ek >= 0)
                         snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                            "static inline void %s_key_pressed(%s) {\n"
-                            "  if (key_hit(%s)) {\n"
+                            "if (key_hit(%s)) {\n"
                             "    // ... actions ...\n"
-                            "  }\n"
-                            "}", bpPrefix, bpParamSig, gbaKeyName(ek));
+                            "}", gbaKeyName(ek));
                     else
                         snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                            "static inline void %s_key_pressed(%s) {\n"
-                            "  { // (all d-pad)\n"
+                            "{ // (all d-pad)\n"
                             "    // ... actions ...\n"
-                            "  }\n"
-                            "}", bpPrefix, bpParamSig);
+                            "}");
                     gbaCode = gbaCodeBuf;
                     break;
                 }
@@ -9334,11 +9358,9 @@ void FrameTick(float dt)
                         "}";
                     int ek = resolveEventKeyForDisplay(infoNode);
                     snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                        "static inline void %s_key_released(%s) {\n"
-                        "  if (key_released(%s)) {\n"
+                        "if (key_released(%s)) {\n"
                         "    // ... actions ...\n"
-                        "  }\n"
-                        "}", bpPrefix, bpParamSig, ek >= 0 ? gbaKeyName(ek) : "KEY_xxx");
+                        "}", ek >= 0 ? gbaKeyName(ek) : "KEY_xxx");
                     gbaCode = gbaCodeBuf;
                     break;
                 }
@@ -9352,11 +9374,9 @@ void FrameTick(float dt)
                         "}";
                     int ek = resolveEventKeyForDisplay(infoNode);
                     snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                        "static inline void %s_key_held(%s) {\n"
-                        "  if (key_is_down(%s)) {\n"
+                        "if (key_is_down(%s)) {\n"
                         "    // ... actions ...\n"
-                        "  }\n"
-                        "}", bpPrefix, bpParamSig, ek >= 0 ? gbaKeyName(ek) : "KEY_xxx");
+                        "}", ek >= 0 ? gbaKeyName(ek) : "KEY_xxx");
                     gbaCode = gbaCodeBuf;
                     break;
                 }
@@ -9367,21 +9387,13 @@ void FrameTick(float dt)
                         "    for (auto* a : acts) execActionPlay(a);\n"
                         "    sScriptStartRan = true;\n"
                         "}";
-                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                        "static inline void %s_start(%s) {\n"
-                        "    // ... actions ...\n"
-                        "}", bpPrefix, bpParamSig);
-                    gbaCode = gbaCodeBuf;
+                    gbaCode = "// ... actions ...";
                     break;
                 case VsNodeType::OnUpdate:
                     editorCode =
                         "auto acts = tmCollectActions(ev.id);\n"
                         "for (auto* a : acts) tmExecAction(a);";
-                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                        "static inline void %s_update(%s) {\n"
-                        "    // ... actions ...\n"
-                        "}", bpPrefix, bpParamSig);
-                    gbaCode = gbaCodeBuf;
+                    gbaCode = "// ... actions ...";
                     break;
                 case VsNodeType::OnCollision:
                     editorCode =
@@ -9389,11 +9401,7 @@ void FrameTick(float dt)
                         "    auto acts = collectActionsPlay(ev.id);\n"
                         "    for (auto* a : acts) execActionPlay(a);\n"
                         "}";
-                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                        "static inline void %s_collision(%s) {\n"
-                        "    // ... actions ...\n"
-                        "}", bpPrefix, bpParamSig);
-                    gbaCode = gbaCodeBuf;
+                    gbaCode = "// ... actions ...";
                     break;
                 case VsNodeType::MovePlayer: {
                     editorCode =
@@ -9598,6 +9606,10 @@ void FrameTick(float dt)
                     gbaCode =
                         "// DestroyObject: hide sprite at index";
                     break;
+                case VsNodeType::CustomCode:
+                    editorCode = "// Custom code — runs only on GBA";
+                    gbaCode = infoNode.customCode[0] ? infoNode.customCode : "// (empty — write your code here)";
+                    break;
                 // Data nodes
                 case VsNodeType::Integer:
                     snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "%d", infoNode.paramInt[0]);
@@ -9674,12 +9686,12 @@ void FrameTick(float dt)
                     ImGui::Separator();
                     if (ImGui::Button("View Code")) {
                         sVsCodeWindowOpen = true;
+                        sVsCodeWindowJustOpened = true;
                         sVsCodeWindowNodeIdx = sVsNodeInfoIdx;
                         strncpy(sVsCodeWindowBuf, defaultCode, sizeof(sVsCodeWindowBuf) - 1);
                         sVsCodeWindowBuf[sizeof(sVsCodeWindowBuf) - 1] = '\0';
                         strncpy(sVsCodeWindowEditBuf, infoNode.customCode, sizeof(sVsCodeWindowEditBuf) - 1);
                         sVsCodeWindowEditBuf[sizeof(sVsCodeWindowEditBuf) - 1] = '\0';
-                        ImGui::CloseCurrentPopup();
                     }
                     if (infoNode.customCode[0]) {
                         ImGui::SameLine();
@@ -9728,21 +9740,53 @@ void FrameTick(float dt)
         }
 
         // ---- Script Code Window (standalone, resizable) ----
+        if (sVsCodeWindowJustOpened) {
+            ImGui::SetNextWindowFocus();
+            sVsCodeWindowJustOpened = false;
+        }
         if (sVsCodeWindowOpen && sVsCodeWindowNodeIdx >= 0 && sVsCodeWindowNodeIdx < (int)sVsNodes.size()) {
             VsNode& cwNode = sVsNodes[sVsCodeWindowNodeIdx];
             const char* nodeName = sVsNodeDefs[(int)cwNode.type].name;
             char winTitle[64];
             snprintf(winTitle, sizeof(winTitle), "Code: %s###ScriptCodeWin", nodeName);
-            ImGui::SetNextWindowSize(ImVec2(500, 350), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(500, 550), ImGuiCond_FirstUseEver);
             if (ImGui::Begin(winTitle, &sVsCodeWindowOpen)) {
                 // Generated code (read-only, monospace)
                 ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Generated Code");
                 ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.1f, 0.1f, 0.12f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.9f, 0.6f, 1.0f));
-                float genHeight = cwNode.customCode[0] ? ImGui::GetContentRegionAvail().y * 0.45f : ImGui::GetContentRegionAvail().y - 30;
+                float genHeight = cwNode.customCode[0] ? ImGui::GetContentRegionAvail().y * 0.40f : ImGui::GetContentRegionAvail().y - 80;
                 ImGui::InputTextMultiline("##GenCode", sVsCodeWindowBuf, sizeof(sVsCodeWindowBuf),
                     ImVec2(-1, genHeight), ImGuiInputTextFlags_ReadOnly);
                 ImGui::PopStyleColor(2);
+
+                // Function declaration (editable)
+                {
+                    bool isBpNode = (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0);
+                    const char* suffix = "";
+                    switch (cwNode.type) {
+                    case VsNodeType::OnKeyPressed:  suffix = "_key_pressed"; break;
+                    case VsNodeType::OnKeyReleased: suffix = "_key_released"; break;
+                    case VsNodeType::OnKeyHeld:     suffix = "_key_held"; break;
+                    case VsNodeType::OnStart:       suffix = "_start"; break;
+                    case VsNodeType::OnUpdate:      suffix = "_update"; break;
+                    case VsNodeType::OnCollision:   suffix = "_collision"; break;
+                    default: suffix = ""; break;
+                    }
+                    // Show default name as placeholder
+                    char defaultName[64] = {};
+                    if (isBpNode && sVsEditBlueprintIdx < (int)sBlueprintAssets.size())
+                        snprintf(defaultName, sizeof(defaultName), "afn_bp%d%s", sVsEditBlueprintIdx, suffix);
+                    else
+                        snprintf(defaultName, sizeof(defaultName), "afn_script%s", suffix);
+                    ImGui::Spacing();
+                    ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "Function Declaration");
+                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.1f, 0.1f, 0.12f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.7f, 1.0f, 1.0f));
+                    if (ImGui::InputTextWithHint("##FuncDecl", defaultName, cwNode.funcName, sizeof(cwNode.funcName)))
+                        sProjectDirty = true;
+                    ImGui::PopStyleColor(2);
+                }
 
                 // Custom override section
                 ImGui::Spacing();
@@ -9810,6 +9854,16 @@ void FrameTick(float dt)
                         sVsLinks.push_back({ { n.id, 2, 0 }, sVsPendingAutoWire });
                     sVsPendingAutoWire = { -1, 0, 0 };
                 }
+                // Auto-open code window for Custom Code nodes
+                if (t == VsNodeType::CustomCode) {
+                    VsNode& cn = sVsNodes.back();
+                    strncpy(cn.customCode, "// write your GBA C code here\n", sizeof(cn.customCode) - 1);
+                    sVsCodeWindowOpen = true;
+                    sVsCodeWindowNodeIdx = (int)sVsNodes.size() - 1;
+                    snprintf(sVsCodeWindowBuf, sizeof(sVsCodeWindowBuf),
+                        "// ---- Editor Play Mode ----\n// Custom code — runs only on GBA\n\n// ---- GBA Runtime (mapdata.h) ----\n%s", cn.customCode);
+                    strncpy(sVsCodeWindowEditBuf, cn.customCode, sizeof(sVsCodeWindowEditBuf) - 1);
+                }
             };
 
             // Search bar — auto-focus on open
@@ -9872,6 +9926,8 @@ void FrameTick(float dt)
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
                     for (int t = (int)VsNodeType::MovePlayer; t <= (int)VsNodeType::DampenJump; t++)
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CustomCode].name)) addNodeAt(VsNodeType::CustomCode);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
