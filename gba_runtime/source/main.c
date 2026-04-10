@@ -3502,10 +3502,9 @@ int main(void)
             FIXED moveSpeed;
 
 #ifdef AFN_HAS_SCRIPT
-            // Reset per-frame script state
+            // Reset per-frame script state (afn_play_anim persists — set once by script)
             afn_input_fwd = 0;
             afn_input_right = 0;
-            afn_play_anim = -1;
             afn_pending_scene = -1;
             afn_collided_sprite = -1;
 
