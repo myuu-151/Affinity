@@ -95,6 +95,7 @@ struct TmObject {
     int teleportScene = -1;          // target scene index (-1 = none, only for Teleport type)
     // Tile objects: one object covers multiple cells
     std::vector<std::pair<int,int>> cells; // (tileX,tileY) list — only used when type==Tile
+    float displayScale = 1.0f;      // visual scale multiplier (0.5 - 4.0)
     // Blueprint script attachment
     int blueprintIdx = -1;
     struct { int paramIdx; int value; } instanceParams[8] = {};
@@ -105,6 +106,7 @@ static int sTmSelectedObj = -1;      // selected object index (-1 = none)
 static int sTmDragObj = -1;          // object being dragged (-1 = none)
 static int sTmStampAsset = -1;       // sprite asset index for stamp/paint mode (-1 = off)
 static int sTmStampObj = -1;         // which Tile object we're painting into (-1 = none)
+static int sTmPaintScale = 4;       // paint block size: 1=single sub-cell, 4=4x4 block, 8=8x8 block
 static int sTmPlaceTX = 0, sTmPlaceTY = 0; // tile coords for popup placement
 static float sTmObjPanelW = 200.0f;  // object panel width
 static std::vector<TmObject> sSavedTmObjects; // saved tilemap objects before Play
@@ -1384,6 +1386,7 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "[Tilemap]\n");
     fprintf(f, "width=%d\n", sTilemapData.floor.width);
     fprintf(f, "height=%d\n", sTilemapData.floor.height);
+    fprintf(f, "subdivided=2\n");
     fprintf(f, "zoom=%.4f\n", sTmMapZoom);
     fprintf(f, "panX=%.2f\n", sTmMapPanX);
     fprintf(f, "panY=%.2f\n", sTmMapPanY);
@@ -1404,6 +1407,8 @@ static bool SaveProject(const std::string& path)
         const TmObject& obj = sTmObjects[i];
         fprintf(f, "obj=%d,%d,%d,%d,%d,%s\n",
             (int)obj.type, obj.tileX, obj.tileY, obj.spriteAssetIdx, obj.teleportScene, obj.name);
+        if (obj.displayScale != 1.0f)
+            fprintf(f, "objScale=%.2f\n", obj.displayScale);
         if (obj.blueprintIdx >= 0) {
             fprintf(f, "objBp=%d,%d", obj.blueprintIdx, obj.instanceParamCount);
             for (int ip = 0; ip < obj.instanceParamCount; ip++)
@@ -1447,6 +1452,8 @@ static bool SaveProject(const std::string& path)
             const TmObject& obj = sc.objects[oi];
             fprintf(f, "sceneobj=%d,%d,%d,%d,%d,%s\n",
                 (int)obj.type, obj.tileX, obj.tileY, obj.spriteAssetIdx, obj.teleportScene, obj.name);
+            if (obj.displayScale != 1.0f)
+                fprintf(f, "sceneobjScale=%.2f\n", obj.displayScale);
             if (obj.blueprintIdx >= 0) {
                 fprintf(f, "sceneobjBp=%d,%d", obj.blueprintIdx, obj.instanceParamCount);
                 for (int ip = 0; ip < obj.instanceParamCount; ip++)
@@ -1621,9 +1628,9 @@ static bool LoadProject(const std::string& path)
     sTmStampAsset = -1;
     sTmStampObj = -1;
     sTilemapDataInit = false;
-    sTilemapData.floor.width = 1;
-    sTilemapData.floor.height = 1;
-    sTilemapData.floor.tileIndices.assign(1, 0);
+    sTilemapData.floor.width = 2;
+    sTilemapData.floor.height = 2;
+    sTilemapData.floor.tileIndices.assign(4, 0);
     sSpriteCount = 0;
     sSelectedSprite = -1;
     sSelectedObjType = SelectedObjType::None;
@@ -1644,6 +1651,7 @@ static bool LoadProject(const std::string& path)
 
     char line[32768]; // large buffer for frame pixel data lines (64x64 = ~16KB worst case)
     char section[64] = {};
+    int tmSubdivLevel = 0; // 0=old, 1=first 2x, 2=current 4x
 
     while (fgets(line, sizeof(line), f))
     {
@@ -2098,6 +2106,7 @@ static bool LoadProject(const std::string& path)
                 sTilemapData.floor.tileIndices.resize(
                     sTilemapData.floor.width * sTilemapData.floor.height, 0);
             }
+            else if (sscanf(line, "subdivided=%d", &ival) == 1) { tmSubdivLevel = ival; }
             else if (sscanf(line, "zoom=%f", &fval) == 1) sTmMapZoom = fval;
             else if (sscanf(line, "panX=%f", &fval) == 1) sTmMapPanX = fval;
             else if (sscanf(line, "panY=%f", &fval) == 1) sTmMapPanY = fval;
@@ -2132,6 +2141,10 @@ static bool LoadProject(const std::string& path)
                     strncpy(obj.name, nameBuf, sizeof(obj.name) - 1);
                     sTmObjects.push_back(obj);
                 }
+            }
+            else if (sscanf(line, "objScale=%f", &fval) == 1 && !sTmObjects.empty())
+            {
+                sTmObjects.back().displayScale = fval;
             }
             else if (strncmp(line, "objBp=", 6) == 0 && !sTmObjects.empty())
             {
@@ -2216,6 +2229,10 @@ static bool LoadProject(const std::string& path)
                     strncpy(obj.name, nameBuf, sizeof(obj.name) - 1);
                     sTmScenes.back().objects.push_back(obj);
                 }
+            }
+            else if (sscanf(line, "sceneobjScale=%f", &fval) == 1 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
+            {
+                sTmScenes.back().objects.back().displayScale = fval;
             }
             else if (strncmp(line, "sceneobjBp=", 11) == 0 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
             {
@@ -2529,6 +2546,67 @@ static bool LoadProject(const std::string& path)
                     &m.groupNodeId, &m.pinType, &m.pinIdx, &m.innerNodeId, &m.innerPinType, &m.innerPinIdx) == 6)
                     sMapScenes.back().vsGroupPins.push_back(m);
             }
+        }
+    }
+
+    // --- Migrate tilemap data to 4x4 sub-grid (subdivided=2) ---
+    // subdivided=0: old format, needs 4x expansion
+    // subdivided=1: first 2x format, needs 2x more expansion
+    // subdivided=2: current format, no migration needed
+    if (tmSubdivLevel < 2 && sTilemapData.floor.width > 0 && sTilemapData.floor.height > 0)
+    {
+        int passes = (tmSubdivLevel == 0) ? 2 : 1; // 0→2 passes, 1→1 pass
+
+        auto migrateFloor = [](int& w, int& h, std::vector<uint16_t>& tiles, std::vector<TmObject>& objs)
+        {
+            int oldW = w, oldH = h;
+            int newW = oldW * 2, newH = oldH * 2;
+            std::vector<uint16_t> newTiles(newW * newH, 0);
+            for (int y = 0; y < oldH; y++)
+            {
+                for (int x = 0; x < oldW; x++)
+                {
+                    uint16_t v = tiles[y * oldW + x];
+                    newTiles[(2 * y)     * newW + (2 * x)]     = v;
+                    newTiles[(2 * y)     * newW + (2 * x + 1)] = v;
+                    newTiles[(2 * y + 1) * newW + (2 * x)]     = v;
+                    newTiles[(2 * y + 1) * newW + (2 * x + 1)] = v;
+                }
+            }
+            tiles = std::move(newTiles);
+            w = newW;
+            h = newH;
+
+            for (auto& obj : objs)
+            {
+                if (obj.type == TmObjType::Tile)
+                {
+                    std::vector<std::pair<int,int>> newCells;
+                    newCells.reserve(obj.cells.size() * 4);
+                    for (auto& c : obj.cells)
+                    {
+                        int nx = c.first * 2, ny = c.second * 2;
+                        newCells.push_back({nx, ny});
+                        newCells.push_back({nx + 1, ny});
+                        newCells.push_back({nx, ny + 1});
+                        newCells.push_back({nx + 1, ny + 1});
+                    }
+                    obj.cells = std::move(newCells);
+                }
+                else
+                {
+                    obj.tileX *= 2;
+                    obj.tileY *= 2;
+                }
+            }
+        };
+
+        for (int p = 0; p < passes; p++)
+        {
+            migrateFloor(sTilemapData.floor.width, sTilemapData.floor.height,
+                         sTilemapData.floor.tileIndices, sTmObjects);
+            for (auto& sc : sTmScenes)
+                migrateFloor(sc.mapW, sc.mapH, sc.tileIndices, sc.objects);
         }
     }
 
@@ -5191,10 +5269,10 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             memset(t.pixels, 0, sizeof(t.pixels));
         for (int i = 0; i < 16; i++)
             sTilemapData.tileset.palette[i] = sPalette[i];
-        // Default tilemap: 1x1, single tile — drag edges to expand
-        sTilemapData.floor.width  = 1;
-        sTilemapData.floor.height = 1;
-        sTilemapData.floor.tileIndices.resize(1, 0);
+        // Default tilemap: 4x4 sub-cells (one full tile) — drag edges to expand
+        sTilemapData.floor.width  = 4;
+        sTilemapData.floor.height = 4;
+        sTilemapData.floor.tileIndices.resize(16, 0);
     }
 
     // Create default Scene 0 if none exist (tilemap scenes)
@@ -5352,6 +5430,7 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             {
                 ImGui::DragInt("Tile X", &obj.tileX, 0.5f, 0, tm.width - 1);
                 ImGui::DragInt("Tile Y", &obj.tileY, 0.5f, 0, tm.height - 1);
+                ImGui::SliderFloat("Scale", &obj.displayScale, 0.5f, 4.0f, "%.1f");
             }
             // Blueprint attachment
             {
@@ -5686,6 +5765,16 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 sTmObjects.erase(sTmObjects.begin() + sTmSelectedObj);
                 sTmSelectedObj = std::min(sTmSelectedObj, (int)sTmObjects.size() - 1);
             }
+            // Draw mode: 1x, 4x, 8x
+            {
+                ImGui::Text("Draw:");
+                ImGui::SameLine();
+                if (ImGui::RadioButton("1x", sTmPaintScale == 1)) sTmPaintScale = 1;
+                ImGui::SameLine();
+                if (ImGui::RadioButton("4x", sTmPaintScale == 4)) sTmPaintScale = 4;
+                ImGui::SameLine();
+                if (ImGui::RadioButton("8x", sTmPaintScale == 8)) sTmPaintScale = 8;
+            }
             ImGui::PopItemWidth();
         }
 
@@ -5871,9 +5960,31 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     break;
                 }
 
-                // Border on unpainted cells only
+                // Border on unpainted cells only — lighter for sub-cells, medium every 2, heavy every 4
                 if (!cellPainted)
-                    dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), gridLineCol);
+                {
+                    // Faint sub-cell border
+                    dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), 0x22FFFFFF);
+                    // Medium lines every 2 cells
+                    uint32_t medCol = 0x44FFFFFF;
+                    if (tx % 2 == 0)
+                        dl->AddLine(ImVec2(x0, y0), ImVec2(x0, y1), medCol, 1.0f);
+                    if (ty % 2 == 0)
+                        dl->AddLine(ImVec2(x0, y0), ImVec2(x1, y0), medCol, 1.0f);
+                    if (tx == tm.width - 1 || (tx + 1) % 2 == 0)
+                        dl->AddLine(ImVec2(x1, y0), ImVec2(x1, y1), medCol, 1.0f);
+                    if (ty == tm.height - 1 || (ty + 1) % 2 == 0)
+                        dl->AddLine(ImVec2(x0, y1), ImVec2(x1, y1), medCol, 1.0f);
+                    // Heavy lines every 4 cells (original tile boundaries)
+                    if (tx % 4 == 0)
+                        dl->AddLine(ImVec2(x0, y0), ImVec2(x0, y1), gridLineCol, 1.0f);
+                    if (ty % 4 == 0)
+                        dl->AddLine(ImVec2(x0, y0), ImVec2(x1, y0), gridLineCol, 1.0f);
+                    if (tx == tm.width - 1 || (tx + 1) % 4 == 0)
+                        dl->AddLine(ImVec2(x1, y0), ImVec2(x1, y1), gridLineCol, 1.0f);
+                    if (ty == tm.height - 1 || (ty + 1) % 4 == 0)
+                        dl->AddLine(ImVec2(x0, y1), ImVec2(x1, y1), gridLineCol, 1.0f);
+                }
 
             }
         }
@@ -5944,6 +6055,11 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 ? sTmObjVisY[i] : (float)obj.tileY;
             float objX = ox + visTileX * cellSz;
             float objY = oy + visTileY * cellSz;
+            float dscale = obj.displayScale > 0.0f ? obj.displayScale : 1.0f;
+            float objSz = cellSz * dscale;
+            // Center the scaled sprite on the object's tile
+            float objDrawX = objX - (objSz - cellSz) * 0.5f;
+            float objDrawY = objY - (objSz - cellSz) * 0.5f;
             uint32_t col = sTmObjTypeColors[(int)obj.type];
             bool isSel = (i == sTmSelectedObj);
 
@@ -5991,17 +6107,17 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             if (drawTex)
             {
                 dl->AddImage((ImTextureID)(uintptr_t)drawTex,
-                    ImVec2(objX, objY), ImVec2(objX + cellSz, objY + cellSz));
+                    ImVec2(objDrawX, objDrawY), ImVec2(objDrawX + objSz, objDrawY + objSz));
                 if (isSel)
-                    dl->AddRect(ImVec2(objX, objY), ImVec2(objX + cellSz, objY + cellSz),
+                    dl->AddRect(ImVec2(objDrawX, objDrawY), ImVec2(objDrawX + objSz, objDrawY + objSz),
                         0xFFFFFFFF, 0.0f, 0, 2.0f);
                 drewSprite = true;
             }
             if (!drewSprite)
             {
-                float cx = objX + cellSz * 0.5f;
-                float cy = objY + cellSz * 0.5f;
-                float r = cellSz * 0.35f;
+                float cx = objDrawX + objSz * 0.5f;
+                float cy = objDrawY + objSz * 0.5f;
+                float r = objSz * 0.35f;
                 ImVec2 diamond[4] = {
                     ImVec2(cx, cy - r), ImVec2(cx + r, cy),
                     ImVec2(cx, cy + r), ImVec2(cx - r, cy)
@@ -6024,9 +6140,9 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
         // Stamp mode indicator (edit mode only)
         if (sEditorMode != EditorMode::Play && sTmStampAsset >= 0 && sTmStampAsset < (int)sSpriteAssets.size())
         {
-            char stampLbl[64];
-            snprintf(stampLbl, sizeof(stampLbl), "Painting: %s  (Esc to stop, RMB erase)",
-                sSpriteAssets[sTmStampAsset].name.c_str());
+            char stampLbl[96];
+            snprintf(stampLbl, sizeof(stampLbl), "Painting: %s  [%dx]  (Esc to stop, RMB erase, Tab cycle)",
+                sSpriteAssets[sTmStampAsset].name.c_str(), sTmPaintScale);
             ImVec2 txtSz = ImGui::CalcTextSize(stampLbl);
             float lx = clipMin.x + (clipMax.x - clipMin.x - txtSz.x) * 0.5f;
             float ly = clipMax.y - txtSz.y - 8;
@@ -6078,17 +6194,19 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
 
             float threshold = cellSz;
             if (threshold < 8.0f) threshold = 8.0f;
+            int step = sTmPaintScale > 1 ? sTmPaintScale : 1;
+            int minDim = step;
 
             if (sTmDragEdge == 2) // bottom: drag down = add row, drag up = remove
             {
                 while (sDragAccum >= threshold)
                 {
-                    resizeTilemap(tm.width, tm.height + 1, 0, 0);
+                    resizeTilemap(tm.width, tm.height + step, 0, 0);
                     sDragAccum -= threshold;
                 }
-                while (sDragAccum <= -threshold && tm.height > 1)
+                while (sDragAccum <= -threshold && tm.height > minDim)
                 {
-                    resizeTilemap(tm.width, tm.height - 1, 0, 0);
+                    resizeTilemap(tm.width, tm.height - step, 0, 0);
                     sDragAccum += threshold;
                 }
             }
@@ -6096,13 +6214,13 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             {
                 while (sDragAccum <= -threshold)
                 {
-                    resizeTilemap(tm.width, tm.height + 1, 0, 1);
-                    sTmMapPanY -= cellSz * 0.5f; // shift pan to keep grid visually stable
+                    resizeTilemap(tm.width, tm.height + step, 0, step);
+                    sTmMapPanY -= cellSz * 0.5f;
                     sDragAccum += threshold;
                 }
-                while (sDragAccum >= threshold && tm.height > 1)
+                while (sDragAccum >= threshold && tm.height > minDim)
                 {
-                    resizeTilemap(tm.width, tm.height - 1, 0, -1);
+                    resizeTilemap(tm.width, tm.height - step, 0, -step);
                     sTmMapPanY += cellSz * 0.5f;
                     sDragAccum -= threshold;
                 }
@@ -6111,12 +6229,12 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             {
                 while (sDragAccum >= threshold)
                 {
-                    resizeTilemap(tm.width + 1, tm.height, 0, 0);
+                    resizeTilemap(tm.width + step, tm.height, 0, 0);
                     sDragAccum -= threshold;
                 }
-                while (sDragAccum <= -threshold && tm.width > 1)
+                while (sDragAccum <= -threshold && tm.width > minDim)
                 {
-                    resizeTilemap(tm.width - 1, tm.height, 0, 0);
+                    resizeTilemap(tm.width - step, tm.height, 0, 0);
                     sDragAccum += threshold;
                 }
             }
@@ -6124,13 +6242,13 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             {
                 while (sDragAccum <= -threshold)
                 {
-                    resizeTilemap(tm.width + 1, tm.height, 1, 0);
+                    resizeTilemap(tm.width + step, tm.height, step, 0);
                     sTmMapPanX -= cellSz * 0.5f;
                     sDragAccum += threshold;
                 }
-                while (sDragAccum >= threshold && tm.width > 1)
+                while (sDragAccum >= threshold && tm.width > minDim)
                 {
-                    resizeTilemap(tm.width - 1, tm.height, -1, 0);
+                    resizeTilemap(tm.width - step, tm.height, -step, 0);
                     sTmMapPanX += cellSz * 0.5f;
                     sDragAccum -= threshold;
                 }
@@ -6157,22 +6275,42 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 sTmStampObj = -1;
             }
 
+            // Cycle paint scale with Tab while stamping (1→4→8→1)
+            if (sTmStampAsset >= 0 && ImGui::IsKeyPressed(ImGuiKey_Tab))
+            {
+                if (sTmPaintScale <= 1) sTmPaintScale = 4;
+                else if (sTmPaintScale <= 4) sTmPaintScale = 8;
+                else sTmPaintScale = 1;
+            }
+
             // Stamp paint mode: left-click adds cells, right-click removes cells
             if (sTmStampAsset >= 0 && sTmStampObj >= 0 && sTmStampObj < (int)sTmObjects.size() && inGrid)
             {
                 TmObject& tileObj = sTmObjects[sTmStampObj];
-                auto cellIt = std::find(tileObj.cells.begin(), tileObj.cells.end(), std::make_pair(hoverTX, hoverTY));
+                int ps = sTmPaintScale > 1 ? sTmPaintScale : 1;
+                int mask = ~(ps - 1); // alignment mask (works for powers of 2)
+                int bx = hoverTX & mask;
+                int by = hoverTY & mask;
                 if (ImGui::IsMouseDown(0) && ImGui::IsItemActive())
                 {
-                    // Add cell if not already present
-                    if (cellIt == tileObj.cells.end())
-                        tileObj.cells.push_back({hoverTX, hoverTY});
+                    for (int dy = 0; dy < ps; dy++)
+                        for (int dx = 0; dx < ps; dx++)
+                        {
+                            std::pair<int,int> bc = {bx + dx, by + dy};
+                            if (bc.first >= 0 && bc.first < tm.width && bc.second >= 0 && bc.second < tm.height)
+                                if (std::find(tileObj.cells.begin(), tileObj.cells.end(), bc) == tileObj.cells.end())
+                                    tileObj.cells.push_back(bc);
+                        }
                 }
                 else if (ImGui::IsMouseDown(1))
                 {
-                    // Remove cell
-                    if (cellIt != tileObj.cells.end())
-                        tileObj.cells.erase(cellIt);
+                    for (int dy = 0; dy < ps; dy++)
+                        for (int dx = 0; dx < ps; dx++)
+                        {
+                            auto it = std::find(tileObj.cells.begin(), tileObj.cells.end(), std::make_pair(bx + dx, by + dy));
+                            if (it != tileObj.cells.end())
+                                tileObj.cells.erase(it);
+                        }
                 }
             }
 
@@ -6212,8 +6350,11 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 if (ImGui::IsMouseDown(0))
                 {
                     TmObject& obj = sTmObjects[sTmDragObj];
-                    obj.tileX = std::clamp(hoverTX, 0, tm.width - 1);
-                    obj.tileY = std::clamp(hoverTY, 0, tm.height - 1);
+                    int snapX = std::clamp(hoverTX, 0, tm.width - 1);
+                    int snapY = std::clamp(hoverTY, 0, tm.height - 1);
+                    if (sTmPaintScale > 1) { int m = ~(sTmPaintScale - 1); snapX &= m; snapY &= m; }
+                    obj.tileX = snapX;
+                    obj.tileY = snapY;
                 }
                 else
                     sTmDragObj = -1;
@@ -6221,8 +6362,8 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             // Click empty cell to open sprite instance picker (only when not stamping)
             else if (sTmStampAsset < 0 && hoveredObj < 0 && inGrid && ImGui::IsMouseClicked(0))
             {
-                sTmPlaceTX = hoverTX;
-                sTmPlaceTY = hoverTY;
+                if (sTmPaintScale > 1) { int m = ~(sTmPaintScale - 1); sTmPlaceTX = hoverTX & m; sTmPlaceTY = hoverTY & m; }
+                else { sTmPlaceTX = hoverTX; sTmPlaceTY = hoverTY; }
                 ImGui::OpenPopup("##TmPlaceObj");
             }
         }
@@ -6243,11 +6384,18 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     snprintf(label, sizeof(label), "%s##sa%d", sSpriteAssets[i].name.c_str(), i);
                     if (ImGui::Selectable(label))
                     {
-                        // Create one Tile object with the clicked cell and enter stamp mode
+                        // Create Tile object with initial cells and enter stamp mode
                         TmObject obj;
                         obj.type = TmObjType::Tile;
                         obj.spriteAssetIdx = i;
-                        obj.cells.push_back({sTmPlaceTX, sTmPlaceTY});
+                        {
+                            int ps = sTmPaintScale > 1 ? sTmPaintScale : 1;
+                            int m = ~(ps - 1);
+                            int bx = sTmPlaceTX & m, by = sTmPlaceTY & m;
+                            for (int dy = 0; dy < ps; dy++)
+                                for (int dx = 0; dx < ps; dx++)
+                                    obj.cells.push_back({bx + dx, by + dy});
+                        }
                         snprintf(obj.name, sizeof(obj.name), "%s", sSpriteAssets[i].name.c_str());
                         sTmObjects.push_back(obj);
                         sTmSelectedObj = (int)sTmObjects.size() - 1;
@@ -8279,67 +8427,6 @@ void FrameTick(float dt)
                     sTmObjVisX[i] += dx;
                     sTmObjVisY[i] += dy;
                 }
-
-                // Debug overlay for tilemap script
-                if (ImGui::Begin("TM Script Debug", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-                    ImGui::Text("sVsNodes: %d, sVsLinks: %d", (int)sVsNodes.size(), (int)sVsLinks.size());
-                    ImGui::Text("sTmObjects: %d", (int)sTmObjects.size());
-                    for (int i = 0; i < (int)sTmObjAnimSet.size(); i++) {
-                        int bpIdx = (i < (int)sTmObjects.size()) ? sTmObjects[i].blueprintIdx : -1;
-                        int assetIdx = (i < (int)sTmObjects.size()) ? sTmObjects[i].spriteAssetIdx : -1;
-                        int typeInt = (i < (int)sTmObjects.size()) ? (int)sTmObjects[i].type : -1;
-                        ImGui::Text("obj[%d] anim=%d face=%d asset=%d bp=%d type=%d", i,
-                            sTmObjAnimSet[i], i < (int)sTmObjFacing.size() ? sTmObjFacing[i] : -1,
-                            assetIdx, bpIdx, typeInt);
-                    }
-                    // Show blueprint info for obj[2] (or first obj with bp)
-                    for (int i = 0; i < (int)sTmObjects.size(); i++) {
-                        int bpi = sTmObjects[i].blueprintIdx;
-                        if (bpi < 0 || bpi >= (int)sBlueprintAssets.size()) continue;
-                        const auto& bp = sBlueprintAssets[bpi];
-                        ImGui::Text("obj[%d] bp=%d nodes=%d links=%d", i, bpi, (int)bp.nodes.size(), (int)bp.links.size());
-                        for (auto& ev : bp.nodes) {
-                            if (ev.type == VsNodeType::OnUpdate) {
-                                ImGui::Text("  BP OnUpdate %d ->", ev.id);
-                                for (auto& lk : bp.links)
-                                    if (lk.from.nodeId == ev.id && lk.from.pinType == 0)
-                                        for (auto& n : bp.nodes)
-                                            if (n.id == lk.to.nodeId)
-                                                ImGui::Text("    action %d type=%d", n.id, (int)n.type);
-                            }
-                        }
-                        // Show ALL exec links
-                        ImGui::Text("  ALL exec links:");
-                        for (auto& lk : bp.links)
-                            if (lk.from.pinType == 0 || lk.to.pinType == 1)
-                                ImGui::Text("    %d(pin%d) -> %d(pin%d)", lk.from.nodeId, lk.from.pinIdx, lk.to.nodeId, lk.to.pinIdx);
-                        // Show PlayAnim data connections
-                        for (auto& n : bp.nodes) {
-                            if (n.type == VsNodeType::PlayAnim) {
-                                ImGui::Text("  PlayAnim %d dataIn:", n.id);
-                                for (auto& lk : bp.links)
-                                    if (lk.to.nodeId == n.id && lk.to.pinType == 3 && lk.to.pinIdx == 0)
-                                        for (auto& dn : bp.nodes)
-                                            if (dn.id == lk.from.nodeId)
-                                                ImGui::Text("    Anim %d p0=%d p1=%d", dn.id, dn.paramInt[0], dn.paramInt[1]);
-                                // Show exec in to PlayAnim
-                                ImGui::Text("  PlayAnim %d execIn:", n.id);
-                                for (auto& lk : bp.links)
-                                    if (lk.to.nodeId == n.id && lk.to.pinType == 1)
-                                        ImGui::Text("    from node %d", lk.from.nodeId);
-                            }
-                        }
-                    }
-                    ImGui::Text("dirSprites: %d assets", (int)sAssetDirSprites.size());
-                    for (int i = 0; i < (int)sAssetDirSprites.size(); i++) {
-                        int nSets = (int)sAssetDirSprites[i].size();
-                        int nAnims = (i < (int)sSpriteAssets.size()) ? (int)sSpriteAssets[i].anims.size() : 0;
-                        bool hasDirs = (i < (int)sSpriteAssets.size()) ? sSpriteAssets[i].hasDirections : false;
-                        if (nSets > 0 || nAnims > 0 || hasDirs)
-                            ImGui::Text("  asset[%d] dirSets=%d anims=%d hasDirs=%d", i, nSets, nAnims, hasDirs ? 1 : 0);
-                    }
-                }
-                ImGui::End();
 
                 // Reset accumulators for directions not held
                 if (!ImGui::IsKeyDown(ImGuiKey_A)) sTmMoveAccum[0] = 0.0f;
