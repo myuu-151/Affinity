@@ -533,38 +533,44 @@ static bool GenerateMapData(const std::string& runtimeDir,
         dirVramNextTile += 8 * tpf;
     }
 
-    // Auto-assign unique palBanks for direction assets to prevent palette conflicts.
-    // Assets sharing a palette (paletteSrc) keep the same bank; others get unique banks.
+    // Auto-assign unique palBanks for ALL assets to prevent palette overwrites.
+    // Assets sharing a palette (paletteSrc) share the same bank. Bank 0 is reserved
+    // (transparent), banks 1-15 available. Bank 6 reserved for minimap.
+    // Stores resolved bank per asset in resolvedPalBank[].
+    std::vector<int> resolvedPalBank(assets.size(), -1);
     {
         bool usedBanks[16] = {};
-        // First pass: mark banks used by non-direction assets and shared palette sources
-        for (size_t ai = 0; ai < assets.size(); ai++)
-            if (!assetDirInfos[ai].has)
-                usedBanks[assets[ai].palBank & 15] = true;
-        // Second pass: resolve conflicts among direction assets
+        usedBanks[0] = true;  // bank 0 = transparent, never use
+        usedBanks[6] = true;  // bank 6 = minimap dots
+
+        // Pass 1: assign banks to independent assets (paletteSrc < 0 or self)
         for (size_t ai = 0; ai < assets.size(); ai++) {
-            if (!assetDirInfos[ai].has) continue;
-            // If sharing palette, must match source — skip
             int src = assets[ai].paletteSrc;
-            if (src >= 0 && src < (int)assets.size() && src != (int)ai) continue;
-            int bank = assetDirInfos[ai].palBank & 15;
+            if (src >= 0 && src < (int)assets.size() && src != (int)ai) continue; // shared — handle later
+            int bank = assets[ai].palBank & 15;
+            if (bank == 0) bank = 1; // avoid bank 0
             if (!usedBanks[bank]) {
                 usedBanks[bank] = true;
             } else {
                 // Conflict — find next free bank
                 for (int b = 1; b < 16; b++)
                     if (!usedBanks[b]) { bank = b; break; }
-                assetDirInfos[ai].palBank = bank;
                 usedBanks[bank] = true;
             }
+            resolvedPalBank[ai] = bank;
         }
-        // Third pass: update shared palette assets to match their source
+        // Pass 2: shared palette assets inherit their source's resolved bank
         for (size_t ai = 0; ai < assets.size(); ai++) {
-            if (!assetDirInfos[ai].has) continue;
             int src = assets[ai].paletteSrc;
-            if (src >= 0 && src < (int)assets.size() && src != (int)ai && assetDirInfos[src].has)
-                assetDirInfos[ai].palBank = assetDirInfos[src].palBank;
+            if (src >= 0 && src < (int)assets.size() && src != (int)ai)
+                resolvedPalBank[ai] = resolvedPalBank[src];
+            // Fallback if somehow unassigned
+            if (resolvedPalBank[ai] < 0) resolvedPalBank[ai] = 1;
         }
+        // Apply resolved banks to direction infos too
+        for (size_t ai = 0; ai < assets.size(); ai++)
+            if (assetDirInfos[ai].has)
+                assetDirInfos[ai].palBank = resolvedPalBank[ai];
     }
 
     int totalTileCount = (int)allTiles.size() / 8;
@@ -770,12 +776,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "    // { tileStart, tilesPerFrame, frameCount, objSize, palBank }\n";
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
-            // Direction assets use dedup'd palBank to avoid overwriting other palettes
-            int emitPalBank = (assetDirInfos[ai].has) ? assetDirInfos[ai].palBank : assets[ai].palBank;
             f << "    { " << (assetTileStart[ai] + tileOffset) << ", " << assetTilesPerFrame[ai]
               << ", " << (int)assets[ai].frames.size()
               << ", " << assetObjSize[ai]
-              << ", " << emitPalBank << " },\n";
+              << ", " << resolvedPalBank[ai] << " },\n";
         }
         f << "};\n\n";
     }
