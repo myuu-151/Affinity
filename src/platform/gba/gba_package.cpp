@@ -1784,11 +1784,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "  }\n";
                 } else {
                     // Multiple keys: OR them together
+                    // keyCheck is "if (func(%s))" — extract "func(%s)" by stripping "if (" and ")"
+                    std::string kc(keyCheck);
+                    std::string condFmt = kc.substr(4, kc.size() - 5); // strip "if (" and ")"
                     f << "  if (";
                     for (size_t ki = 0; ki < keys.size(); ki++) {
                         if (ki > 0) f << " || ";
                         char buf[64];
-                        snprintf(buf, sizeof(buf), keyCheck, resolveKeyName(keys[ki]));
+                        snprintf(buf, sizeof(buf), condFmt.c_str(), resolveKeyName(keys[ki]));
                         f << buf;
                     }
                     f << ") {\n";
@@ -2125,11 +2128,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "  }\n";
                 } else {
                     // Multiple keys: OR them together
+                    // keyCheck is "if (func(%s))" — extract "func(%s)" by stripping "if (" and ")"
+                    std::string kc(keyCheck);
+                    std::string condFmt = kc.substr(4, kc.size() - 5);
                     f << "  if (";
                     for (size_t ki = 0; ki < keys.size(); ki++) {
                         if (ki > 0) f << " || ";
                         char buf[64];
-                        snprintf(buf, sizeof(buf), keyCheck, bpResolveKeyName(keys[ki]));
+                        snprintf(buf, sizeof(buf), condFmt.c_str(), bpResolveKeyName(keys[ki]));
                         f << buf;
                     }
                     f << ") {\n";
