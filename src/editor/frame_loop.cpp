@@ -5933,6 +5933,9 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     }
                     else
                     {
+                        // Non-Tile objects are drawn separately in the object loop below
+                        // (with scaling, directional sprites, etc.) — skip them here
+                        if (obj.type != TmObjType::Tile) continue;
                         if (obj.tileX != tx || obj.tileY != ty) continue;
                     }
                     if (obj.spriteAssetIdx < 0 || obj.spriteAssetIdx >= (int)sSpriteAssets.size()) continue;
