@@ -1668,7 +1668,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 }
                 case GBAScriptNodeType::PlayAnim: {
                     auto* animData = findDataIn(action->id, 0);
-                    int animIdx = animData ? resolveInt(animData) : 0;
+                    // Animation node: paramInt[0]=sprite asset, paramInt[1]=anim index
+                    int animIdx = animData ? animData->paramInt[1] : 0;
                     f << "    afn_play_anim = " << animIdx << ";\n";
                     break;
                 }
@@ -2025,7 +2026,21 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 }
                 case GBAScriptNodeType::PlayAnim: {
                     auto* animData = bpFindDataIn(action->id, 0);
-                    std::string animIdx = animData ? bpResolveInt(animData) : "0";
+                    // Animation node: paramInt[0]=sprite asset, paramInt[1]=anim index
+                    // Check if param-exposed, otherwise read paramInt[1]
+                    std::string animIdx = "0";
+                    if (animData) {
+                        bool isParam = false;
+                        for (int pi = 0; pi < paramCount; pi++) {
+                            if (animData->paramInt[3] == -(pi + 1)) {
+                                animIdx = "p" + std::to_string(pi);
+                                isParam = true;
+                                break;
+                            }
+                        }
+                        if (!isParam)
+                            animIdx = std::to_string(animData->paramInt[1]);
+                    }
                     f << "    afn_play_anim = " << animIdx << ";\n";
                     break;
                 }
