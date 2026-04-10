@@ -8091,8 +8091,8 @@ void FrameTick(float dt)
                                         sTmObjFacing[oi] = dirToFacing[dir];
                                     ImGuiKey dirImKeys[] = { ImGuiKey_A, ImGuiKey_D, ImGuiKey_W, ImGuiKey_S };
                                     if (ImGui::IsKeyPressed(dirImKeys[dir], false)) {
-                                        // First frame: just face, pre-fill accumulator so move triggers quickly
-                                        sTmMoveAccum[dir] = 0.75f;
+                                        // First frame: just face, pre-fill accumulator (lower = longer before move)
+                                        sTmMoveAccum[dir] = 0.45f;
                                     } else {
                                         // Held: accumulator movement
                                         sTmMoveAccum[dir] += tmMoveRate * dt;
@@ -8291,8 +8291,8 @@ void FrameTick(float dt)
                                             sTmObjFacing[oi] = dirToFacing[dir];
                                         ImGuiKey dirImKeys2[] = { ImGuiKey_A, ImGuiKey_D, ImGuiKey_W, ImGuiKey_S };
                                         if (ImGui::IsKeyPressed(dirImKeys2[dir], false)) {
-                                            // First frame: just face, pre-fill accumulator so move triggers quickly
-                                            sTmMoveAccum[dir] = 0.75f;
+                                            // First frame: just face, pre-fill accumulator (lower = longer before move)
+                                            sTmMoveAccum[dir] = 0.45f;
                                         } else {
                                             sTmMoveAccum[dir] += tmMoveRate * dt;
                                             if (sTmMoveAccum[dir] >= 1.0f) {
