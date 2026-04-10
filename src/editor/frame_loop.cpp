@@ -3221,6 +3221,18 @@ static void DrawTabBar()
             if (sSavedPlayerIdx >= 0 && sSavedPlayerIdx < sSpriteCount)
                 sSprites[sSavedPlayerIdx] = sSavedPlayerSprite;
             sSavedPlayerIdx = -1;
+            sScriptStartRan = false;
+            sScriptMoveSpeed = -1.0f;
+            sScriptAutoOrbitSpeed = 0.0f;
+            sPendingSceneSwitch = -1;
+            sPendingSceneMode = 0;
+            sActivePlayAnimNodeId = -1;
+            sPlayAnimIdle = -1;
+            sPlayAnimHeld = -1;
+            sPlayAnimReleased = -1;
+            sVsFiredNodes.clear();
+            sVsLinkSurgeT.clear();
+            sVsLinkSurgeRevT.clear();
         }
         ImGui::PopStyleColor(2);
     }
@@ -7290,6 +7302,13 @@ void FrameTick(float dt)
                     sVsFiredNodes.push_back(ev.id);
                     for (auto* a : acts) {
                         sVsFiredNodes.push_back(a->id);
+                        // Directly surge exec links from event to actions
+                        for (int li = 0; li < (int)sVsLinks.size(); li++)
+                            if (sVsLinks[li].to.nodeId == a->id && sVsLinks[li].to.pinType == 1) {
+                                auto it = sVsLinkSurgeT.find(li);
+                                if (it == sVsLinkSurgeT.end() || it->second > 1.0f)
+                                    sVsLinkSurgeT[li] = 0.0f;
+                            }
                         // Data inputs to PlayAnim nodes get reverse surge
                         if (a->type == VsNodeType::PlayAnim) {
                             for (int li = 0; li < (int)sVsLinks.size(); li++)
@@ -7310,7 +7329,7 @@ void FrameTick(float dt)
             // Continuously surge the active PlayAnim node and its entire chain
             if (sActivePlayAnimNodeId >= 0) {
                 sVsFiredNodes.push_back(sActivePlayAnimNodeId);
-                // Mark data input links for REVERSE surge (PlayAnim → Animation)
+                // Continuously reverse-surge data inputs (PlayAnim → Animation)
                 for (int li = 0; li < (int)sVsLinks.size(); li++)
                     if (sVsLinks[li].to.nodeId == sActivePlayAnimNodeId && sVsLinks[li].to.pinType == 3) {
                         auto it = sVsLinkSurgeRevT.find(li);
@@ -7396,9 +7415,26 @@ void FrameTick(float dt)
                     shouldSurge = shouldFire;
                 }
                 else if (ev.type == VsNodeType::OnKeyReleased) {
-                    // Edge-triggered: only fire on the frame the key is actually released
-                    shouldFire = (key >= 0 && key < 10) && sPrevKeyState[key] && !editorKeyDown(key);
-                    shouldSurge = shouldFire;
+                    if (key >= 0 && key < 10) {
+                        // Single key: edge-triggered release
+                        shouldFire = sPrevKeyState[key] && !editorKeyDown(key);
+                        shouldSurge = shouldFire;
+                    } else {
+                        // Multiple keys connected — fire if ANY was just released
+                        for (auto& lk : sVsLinks) {
+                            if (lk.to.nodeId == ev.id && lk.to.pinType == 3) {
+                                auto* kn = findNodePlay(lk.from.nodeId);
+                                if (kn && kn->type == VsNodeType::Key) {
+                                    int k = kn->paramInt[0];
+                                    if (k >= 0 && k < 10 && sPrevKeyState[k] && !editorKeyDown(k)) {
+                                        shouldFire = true;
+                                        shouldSurge = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if (shouldFire) {
@@ -7821,7 +7857,7 @@ void FrameTick(float dt)
                 // Pick active PlayAnim based on movement state
                 if (sPlayerSprinting && sPlayAnimHeld >= 0)
                     sActivePlayAnimNodeId = sPlayAnimHeld;
-                else if (sPlayerMoving && sPlayAnimReleased >= 0)
+                else if (sPlayAnimReleased >= 0)
                     sActivePlayAnimNodeId = sPlayAnimReleased;
                 else if (sPlayAnimIdle >= 0)
                     sActivePlayAnimNodeId = sPlayAnimIdle;
