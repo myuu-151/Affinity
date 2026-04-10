@@ -109,6 +109,7 @@ static float sTmObjPanelW = 200.0f;  // object panel width
 static std::vector<TmObject> sSavedTmObjects; // saved tilemap objects before Play
 static float sTmMoveAccum[4] = {};  // per-direction movement accumulator (Up/Down/Left/Right)
 static std::vector<int> sTmObjFacing; // per-object facing direction (0=N..7=NW, index into dir sprites)
+static std::vector<float> sTmObjMoveRate; // per-object tile move speed (tiles/sec), set by Walk/Sprint
 
 // ---- Scene instances ----
 struct TmScene {
@@ -3024,6 +3025,7 @@ static void DrawTabBar()
             sSavedTmObjects = sTmObjects;
             memset(sTmMoveAccum, 0, sizeof(sTmMoveAccum));
             sTmObjFacing.assign(sTmObjects.size(), 4); // default facing South
+            sTmObjMoveRate.assign(sTmObjects.size(), 6.0f); // default move speed
         }
         ImGui::PopStyleColor(2);
     }
@@ -7615,14 +7617,17 @@ void FrameTick(float dt)
                     tmMapH = sTmScenes[sTmSelectedScene].mapH;
                 }
 
-                float tmMoveRate = 12.0f; // tiles per second
-
                 for (int oi = 0; oi < (int)sTmObjects.size(); oi++)
                 {
                     TmObject& obj = sTmObjects[oi];
                     if (obj.blueprintIdx < 0 || obj.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
                     const BlueprintAsset& bp = sBlueprintAssets[obj.blueprintIdx];
                     if (bp.nodes.empty()) continue;
+
+                    // Reset to default each frame; Walk/Sprint node overrides it
+                    if (oi >= (int)sTmObjMoveRate.size()) sTmObjMoveRate.resize(oi + 1, 6.0f);
+                    sTmObjMoveRate[oi] = 6.0f;
+                    float& tmMoveRate = sTmObjMoveRate[oi];
 
                     // Build temporary copy with param overrides
                     std::vector<VsNode> bpNodes = bp.nodes;
@@ -7700,6 +7705,14 @@ void FrameTick(float dt)
                                 }
                             }
                         }
+                        else if (t == VsNodeType::Walk) {
+                            auto* sd = tmFindDataIn(action->id, 0);
+                            tmMoveRate = sd ? (float)sd->paramInt[0] : 6.0f;
+                        }
+                        else if (t == VsNodeType::Sprint) {
+                            auto* sd = tmFindDataIn(action->id, 0);
+                            tmMoveRate = sd ? (float)sd->paramInt[0] : 12.0f;
+                        }
                         else if (t == VsNodeType::ChangeScene) {
                             auto* sd = tmFindDataIn(action->id, 0);
                             int scIdx = sd ? sd->paramInt[0] : action->paramInt[0];
@@ -7708,12 +7721,13 @@ void FrameTick(float dt)
                         }
                     };
 
-                    // Run blueprint events
-                    for (auto& ev : bpNodes) {
+                    // Run blueprint events — OnUpdate first so Walk/Sprint set rate before MovePlayer
+                    for (auto& ev : bpNodes)
                         if (ev.type == VsNodeType::OnUpdate) {
                             auto acts = tmCollectActions(ev.id);
                             for (auto* a : acts) tmExecAction(a);
                         }
+                    for (auto& ev : bpNodes) {
                         if (ev.type == VsNodeType::OnKeyHeld) {
                             int key = tmResolveEventKey(ev);
                             bool fire = (key >= 0) ? tmKeyDown(key) : true;
