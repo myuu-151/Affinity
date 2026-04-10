@@ -533,6 +533,40 @@ static bool GenerateMapData(const std::string& runtimeDir,
         dirVramNextTile += 8 * tpf;
     }
 
+    // Auto-assign unique palBanks for direction assets to prevent palette conflicts.
+    // Assets sharing a palette (paletteSrc) keep the same bank; others get unique banks.
+    {
+        bool usedBanks[16] = {};
+        // First pass: mark banks used by non-direction assets and shared palette sources
+        for (size_t ai = 0; ai < assets.size(); ai++)
+            if (!assetDirInfos[ai].has)
+                usedBanks[assets[ai].palBank & 15] = true;
+        // Second pass: resolve conflicts among direction assets
+        for (size_t ai = 0; ai < assets.size(); ai++) {
+            if (!assetDirInfos[ai].has) continue;
+            // If sharing palette, must match source — skip
+            int src = assets[ai].paletteSrc;
+            if (src >= 0 && src < (int)assets.size() && src != (int)ai) continue;
+            int bank = assetDirInfos[ai].palBank & 15;
+            if (!usedBanks[bank]) {
+                usedBanks[bank] = true;
+            } else {
+                // Conflict — find next free bank
+                for (int b = 1; b < 16; b++)
+                    if (!usedBanks[b]) { bank = b; break; }
+                assetDirInfos[ai].palBank = bank;
+                usedBanks[bank] = true;
+            }
+        }
+        // Third pass: update shared palette assets to match their source
+        for (size_t ai = 0; ai < assets.size(); ai++) {
+            if (!assetDirInfos[ai].has) continue;
+            int src = assets[ai].paletteSrc;
+            if (src >= 0 && src < (int)assets.size() && src != (int)ai && assetDirInfos[src].has)
+                assetDirInfos[ai].palBank = assetDirInfos[src].palBank;
+        }
+    }
+
     int totalTileCount = (int)allTiles.size() / 8;
     int minimapTile = totalTileCount + dirVramNextTile;
 
@@ -736,10 +770,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "    // { tileStart, tilesPerFrame, frameCount, objSize, palBank }\n";
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
+            // Direction assets use dedup'd palBank to avoid overwriting other palettes
+            int emitPalBank = (assetDirInfos[ai].has) ? assetDirInfos[ai].palBank : assets[ai].palBank;
             f << "    { " << (assetTileStart[ai] + tileOffset) << ", " << assetTilesPerFrame[ai]
               << ", " << (int)assets[ai].frames.size()
               << ", " << assetObjSize[ai]
-              << ", " << assets[ai].palBank << " },\n";
+              << ", " << emitPalBank << " },\n";
         }
         f << "};\n\n";
     }
