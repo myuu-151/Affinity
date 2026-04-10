@@ -3505,7 +3505,6 @@ int main(void)
             // Reset per-frame script state
             afn_input_fwd = 0;
             afn_input_right = 0;
-            afn_play_anim = 0;  // default to idle; OnKeyHeld overrides per-frame
             afn_pending_scene = -1;
             afn_collided_sprite = -1;
 
