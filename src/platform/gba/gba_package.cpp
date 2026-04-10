@@ -601,7 +601,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
     }
 
     int totalTileCount = (int)allTiles.size() / 8;
-    int minimapTile = totalTileCount + dirVramNextTile;
+    // In Mode 4 (meshes present), tiles 0-511 overlap bitmap — offset by 512
+    int tileOffset = meshes.empty() ? 0 : 512;
+    int minimapTile = totalTileCount + dirVramNextTile + tileOffset;
 
     // Emit combined tile data (always emit even if empty — runtime expects the symbol)
     if (!allTiles.empty())
@@ -675,9 +677,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
     }
     f << "\n";
 
-    // In Mode 4 (meshes present), OBJ tiles 0-511 overlap bitmap framebuffer.
-    // Offset all tile IDs by 512 so sprites use accessible VRAM.
-    int tileOffset = meshes.empty() ? 0 : 512;
+    // tileOffset already computed above (before minimapTile)
 
     // Asset direction descriptor table: { setCount, tpf, dirSize, palBank, hasDirs, vramTile0 }
     if (!assets.empty())
