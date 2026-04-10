@@ -115,6 +115,7 @@ static std::vector<float> sTmObjMoveRate; // per-object tile move speed (tiles/s
 static int sTmLastMoveDir = -1; // last direction pressed (0=Left,1=Right,2=Up,3=Down), -1=none
 static bool sTmPrevDirHeld[4] = {}; // previous frame held state for edge detection
 static bool sTmPrevKeyState[10] = {}; // previous frame key state for OnKeyReleased
+static bool sTmOnStartRan = false; // tilemap OnStart fired this play session
 
 // ---- Scene instances ----
 struct TmScene {
@@ -3114,6 +3115,7 @@ static void DrawTabBar()
             sTmObjFacing.assign(sTmObjects.size(), 4); // default facing South
             sTmObjAnimSet.assign(sTmObjects.size(), 0); // default animation set 0
             sTmObjMoveRate.assign(sTmObjects.size(), 6.0f); // default move speed
+            sTmOnStartRan = false;
         }
         ImGui::PopStyleColor(2);
     }
@@ -5935,10 +5937,26 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 !sAssetDirSprites[obj.spriteAssetIdx].empty())
             {
                 int facing = sTmObjFacing[i];
-                int animSet = (i < (int)sTmObjAnimSet.size()) ? sTmObjAnimSet[i] : 0;
+                int animIdx = (i < (int)sTmObjAnimSet.size()) ? sTmObjAnimSet[i] : 0;
                 auto& dirSets = sAssetDirSprites[obj.spriteAssetIdx];
-                if (animSet >= 0 && animSet < (int)dirSets.size() && facing >= 0 && facing < 8)
-                    drawTex = dirSets[animSet][facing].texture;
+                int dirSetIdx = 0;
+                // Convert animIdx to sAssetDirSprites set index with frame cycling
+                if (obj.spriteAssetIdx < (int)sSpriteAssets.size()) {
+                    auto& asset = sSpriteAssets[obj.spriteAssetIdx];
+                    if (animIdx >= 0 && animIdx < (int)asset.anims.size()) {
+                        int base = GetAnimDirBase(asset, animIdx);
+                        int frameCount = asset.anims[animIdx].endFrame;
+                        if (frameCount > 0) {
+                            int fps = asset.anims[animIdx].fps > 0 ? asset.anims[animIdx].fps : 8;
+                            float effectiveFps = fps * asset.anims[animIdx].speed;
+                            int frame = effectiveFps > 0.0f ? ((int)(sViewportAnimTime * effectiveFps)) % frameCount : 0;
+                            dirSetIdx = base + frame;
+                        }
+                    }
+                }
+                if (dirSetIdx >= (int)dirSets.size()) dirSetIdx = 0;
+                if (facing >= 0 && facing < 8)
+                    drawTex = dirSets[dirSetIdx][facing].texture;
             }
             // Fallback to static sprite texture
             if (!drawTex && obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)sTmSpriteTextures.size())
@@ -7918,13 +7936,31 @@ void FrameTick(float dt)
                         }
                         else if (t == VsNodeType::PlayAnim) {
                             auto* sd = tmFindDataIn(action->id, 0);
-                            int animIdx = sd ? sd->paramInt[0] : 0;
-                            if (oi >= 0 && oi < (int)sTmObjAnimSet.size())
+                            int assetIdx = sd ? sd->paramInt[0] : -1;
+                            int animIdx = sd ? sd->paramInt[1] : 0;
+                            // Check animation gameState vs movement
+                            bool apply = true;
+                            if (assetIdx >= 0 && assetIdx < (int)sSpriteAssets.size() &&
+                                animIdx >= 0 && animIdx < (int)sSpriteAssets[assetIdx].anims.size()) {
+                                AnimState gs = sSpriteAssets[assetIdx].anims[animIdx].gameState;
+                                bool moving = ImGui::IsKeyDown(ImGuiKey_W) || ImGui::IsKeyDown(ImGuiKey_A) ||
+                                              ImGui::IsKeyDown(ImGuiKey_S) || ImGui::IsKeyDown(ImGuiKey_D);
+                                if (gs == AnimState::Idle && moving) apply = false;
+                                if ((gs == AnimState::Walk || gs == AnimState::Run) && !moving) apply = false;
+                            }
+                            if (apply && oi >= 0 && oi < (int)sTmObjAnimSet.size())
                                 sTmObjAnimSet[oi] = animIdx;
                         }
                     };
 
-                    // Run blueprint events — OnUpdate first so Walk/Sprint set rate before MovePlayer
+                    // Run blueprint events — OnStart once, then OnUpdate each frame
+                    if (!sTmOnStartRan) {
+                        for (auto& ev : bpNodes)
+                            if (ev.type == VsNodeType::OnStart) {
+                                auto acts = tmCollectActions(ev.id);
+                                for (auto* a : acts) tmExecAction(a);
+                            }
+                    }
                     for (auto& ev : bpNodes)
                         if (ev.type == VsNodeType::OnUpdate) {
                             auto acts = tmCollectActions(ev.id);
@@ -7980,6 +8016,255 @@ void FrameTick(float dt)
                     obj.tileX = std::clamp(obj.tileX, 0, tmMapW - 1);
                     obj.tileY = std::clamp(obj.tileY, 0, tmMapH - 1);
                 }
+
+                // ---- Scene-level script execution for tilemap ----
+                if (!sVsNodes.empty()) {
+                    // Find first Player object (or first object) as target
+                    int oi = -1;
+                    for (int i = 0; i < (int)sTmObjects.size(); i++)
+                        if (sTmObjects[i].type == TmObjType::Player) { oi = i; break; }
+                    if (oi < 0 && !sTmObjects.empty()) oi = 0;
+
+                    if (oi >= 0) {
+                        TmObject& obj = sTmObjects[oi];
+                        if (oi >= (int)sTmObjMoveRate.size()) sTmObjMoveRate.resize(oi + 1, 6.0f);
+                        sTmObjMoveRate[oi] = 6.0f;
+                        float& tmMoveRate = sTmObjMoveRate[oi];
+
+                        auto scFindNode = [&](int id) -> const VsNode* {
+                            for (auto& n : sVsNodes) if (n.id == id) return &n;
+                            return nullptr;
+                        };
+                        auto scFindDataIn = [&](int nodeId, int pinIdx) -> const VsNode* {
+                            for (auto& lk : sVsLinks)
+                                if (lk.to.nodeId == nodeId && lk.to.pinType == 3 && lk.to.pinIdx == pinIdx)
+                                    return scFindNode(lk.from.nodeId);
+                            return nullptr;
+                        };
+                        auto scCollectActions = [&](int startNodeId) -> std::vector<const VsNode*> {
+                            std::vector<const VsNode*> acts;
+                            std::vector<int> front;
+                            std::vector<bool> vis(10000, false);
+                            for (auto& lk : sVsLinks)
+                                if (lk.from.nodeId == startNodeId && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                    front.push_back(lk.to.nodeId);
+                            int safety = 0;
+                            while (!front.empty() && safety < 256) {
+                                int nid = front.front(); front.erase(front.begin());
+                                if (nid < 0 || nid >= (int)vis.size() || vis[nid]) continue;
+                                vis[nid] = true; safety++;
+                                auto* an = scFindNode(nid); if (!an) continue;
+                                acts.push_back(an);
+                                for (auto& lk : sVsLinks)
+                                    if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                        front.push_back(lk.to.nodeId);
+                            }
+                            return acts;
+                        };
+                        auto scResolveEventKey = [&](const VsNode& ev) -> int {
+                            int count = 0; int keyVal = -1;
+                            for (auto& lk : sVsLinks)
+                                if (lk.to.nodeId == ev.id && lk.to.pinType == 3 && lk.to.pinIdx == 0) {
+                                    auto* dn = scFindNode(lk.from.nodeId);
+                                    if (dn) { keyVal = dn->paramInt[0]; count++; }
+                                }
+                            if (count == 1) return keyVal;
+                            if (count == 0) return ev.paramInt[0];
+                            return -1;
+                        };
+                        bool scInstantMove = false;
+                        auto scExecAction = [&](const VsNode* action) {
+                            VsNodeType t = action->type;
+                            if (t == VsNodeType::MovePlayer) {
+                                auto* dd = scFindDataIn(action->id, 0);
+                                int dir = dd ? dd->paramInt[0] : 0;
+                                int dirKeys[] = { 8, 9, 6, 7 };
+                                int dirToFacing[] = { 6, 2, 0, 4 };
+                                if (dir >= 0 && dir < 4) {
+                                    if (scInstantMove) {
+                                        ImGuiKey dirImKeys[] = { ImGuiKey_A, ImGuiKey_D, ImGuiKey_W, ImGuiKey_S };
+                                        if (ImGui::IsKeyPressed(dirImKeys[dir])) {
+                                            if (oi < (int)sTmObjFacing.size())
+                                                sTmObjFacing[oi] = dirToFacing[dir];
+                                            if (dir == 0) obj.tileX -= 1;
+                                            else if (dir == 1) obj.tileX += 1;
+                                            else if (dir == 2) obj.tileY -= 1;
+                                            else if (dir == 3) obj.tileY += 1;
+                                        }
+                                    } else if (tmKeyDown(dirKeys[dir]) && sTmLastMoveDir == dir) {
+                                        if (oi < (int)sTmObjFacing.size())
+                                            sTmObjFacing[oi] = dirToFacing[dir];
+                                        sTmMoveAccum[dir] += tmMoveRate * dt;
+                                        if (sTmMoveAccum[dir] >= 1.0f) {
+                                            int steps = (int)sTmMoveAccum[dir];
+                                            sTmMoveAccum[dir] -= steps;
+                                            if (dir == 0) obj.tileX -= steps;
+                                            else if (dir == 1) obj.tileX += steps;
+                                            else if (dir == 2) obj.tileY -= steps;
+                                            else if (dir == 3) obj.tileY += steps;
+                                        }
+                                    }
+                                }
+                            }
+                            else if (t == VsNodeType::Walk) {
+                                auto* sd = scFindDataIn(action->id, 0);
+                                tmMoveRate = sd ? (float)sd->paramInt[0] : 6.0f;
+                            }
+                            else if (t == VsNodeType::Sprint) {
+                                auto* sd = scFindDataIn(action->id, 0);
+                                tmMoveRate = sd ? (float)sd->paramInt[0] : 12.0f;
+                            }
+                            else if (t == VsNodeType::ChangeScene) {
+                                auto* sd = scFindDataIn(action->id, 0);
+                                int scIdx = sd ? sd->paramInt[0] : action->paramInt[0];
+                                sPendingSceneSwitch = scIdx;
+                                sPendingSceneMode = action->paramInt[1];
+                            }
+                            else if (t == VsNodeType::PlayAnim) {
+                                auto* sd = scFindDataIn(action->id, 0);
+                                int assetIdx = sd ? sd->paramInt[0] : -1;
+                                int animIdx = sd ? sd->paramInt[1] : 0;
+                                bool apply = true;
+                                if (assetIdx >= 0 && assetIdx < (int)sSpriteAssets.size() &&
+                                    animIdx >= 0 && animIdx < (int)sSpriteAssets[assetIdx].anims.size()) {
+                                    AnimState gs = sSpriteAssets[assetIdx].anims[animIdx].gameState;
+                                    bool moving = ImGui::IsKeyDown(ImGuiKey_W) || ImGui::IsKeyDown(ImGuiKey_A) ||
+                                                  ImGui::IsKeyDown(ImGuiKey_S) || ImGui::IsKeyDown(ImGuiKey_D);
+                                    if (gs == AnimState::Idle && moving) apply = false;
+                                    if ((gs == AnimState::Walk || gs == AnimState::Run) && !moving) apply = false;
+                                }
+                                if (apply && oi >= 0 && oi < (int)sTmObjAnimSet.size())
+                                    sTmObjAnimSet[oi] = animIdx;
+                            }
+                        };
+
+                        // OnStart (once)
+                        if (!sTmOnStartRan) {
+                            for (auto& ev : sVsNodes)
+                                if (ev.type == VsNodeType::OnStart) {
+                                    auto acts = scCollectActions(ev.id);
+                                    for (auto* a : acts) scExecAction(a);
+                                }
+                        }
+                        // OnUpdate
+                        for (auto& ev : sVsNodes)
+                            if (ev.type == VsNodeType::OnUpdate) {
+                                auto acts = scCollectActions(ev.id);
+                                for (auto* a : acts) scExecAction(a);
+                            }
+                        // OnKeyHeld
+                        for (auto& ev : sVsNodes) {
+                            if (ev.type == VsNodeType::OnKeyHeld) {
+                                int key = scResolveEventKey(ev);
+                                bool fire = (key >= 0) ? tmKeyDown(key) : true;
+                                if (fire) {
+                                    auto acts = scCollectActions(ev.id);
+                                    for (auto* a : acts) scExecAction(a);
+                                }
+                            }
+                            if (ev.type == VsNodeType::OnKeyPressed) {
+                                int key = scResolveEventKey(ev);
+                                auto scKeyHit = [](int gbaKey) -> bool {
+                                    switch (gbaKey) {
+                                    case 0: return ImGui::IsKeyPressed(ImGuiKey_Space);
+                                    case 1: return ImGui::IsKeyPressed(ImGuiKey_LeftShift);
+                                    case 2: return ImGui::IsKeyPressed(ImGuiKey_J);
+                                    case 3: return ImGui::IsKeyPressed(ImGuiKey_L);
+                                    case 4: return ImGui::IsKeyPressed(ImGuiKey_Enter);
+                                    case 5: return ImGui::IsKeyPressed(ImGuiKey_Backspace);
+                                    case 6: return ImGui::IsKeyPressed(ImGuiKey_W);
+                                    case 7: return ImGui::IsKeyPressed(ImGuiKey_S);
+                                    case 8: return ImGui::IsKeyPressed(ImGuiKey_A);
+                                    case 9: return ImGui::IsKeyPressed(ImGuiKey_D);
+                                    default: return false;
+                                    }
+                                };
+                                bool fire = false;
+                                if (key >= 0) { fire = scKeyHit(key); }
+                                else { for (int k = 0; k < 10; k++) if (scKeyHit(k)) { fire = true; break; } }
+                                if (fire) {
+                                    scInstantMove = true;
+                                    auto acts = scCollectActions(ev.id);
+                                    for (auto* a : acts) scExecAction(a);
+                                    scInstantMove = false;
+                                }
+                            }
+                            if (ev.type == VsNodeType::OnKeyReleased) {
+                                int key = scResolveEventKey(ev);
+                                if (key >= 0 && key < 10 && sTmPrevKeyState[key] && !tmKeyDown(key)) {
+                                    auto acts = scCollectActions(ev.id);
+                                    for (auto* a : acts) scExecAction(a);
+                                }
+                            }
+                        }
+
+                        obj.tileX = std::clamp(obj.tileX, 0, tmMapW - 1);
+                        obj.tileY = std::clamp(obj.tileY, 0, tmMapH - 1);
+                    }
+                }
+
+                sTmOnStartRan = true;
+
+                // Debug overlay for tilemap script
+                if (ImGui::Begin("TM Script Debug", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                    ImGui::Text("sVsNodes: %d, sVsLinks: %d", (int)sVsNodes.size(), (int)sVsLinks.size());
+                    ImGui::Text("sTmObjects: %d", (int)sTmObjects.size());
+                    for (int i = 0; i < (int)sTmObjAnimSet.size(); i++) {
+                        int bpIdx = (i < (int)sTmObjects.size()) ? sTmObjects[i].blueprintIdx : -1;
+                        int assetIdx = (i < (int)sTmObjects.size()) ? sTmObjects[i].spriteAssetIdx : -1;
+                        int typeInt = (i < (int)sTmObjects.size()) ? (int)sTmObjects[i].type : -1;
+                        ImGui::Text("obj[%d] anim=%d face=%d asset=%d bp=%d type=%d", i,
+                            sTmObjAnimSet[i], i < (int)sTmObjFacing.size() ? sTmObjFacing[i] : -1,
+                            assetIdx, bpIdx, typeInt);
+                    }
+                    // Show blueprint info for obj[2] (or first obj with bp)
+                    for (int i = 0; i < (int)sTmObjects.size(); i++) {
+                        int bpi = sTmObjects[i].blueprintIdx;
+                        if (bpi < 0 || bpi >= (int)sBlueprintAssets.size()) continue;
+                        const auto& bp = sBlueprintAssets[bpi];
+                        ImGui::Text("obj[%d] bp=%d nodes=%d links=%d", i, bpi, (int)bp.nodes.size(), (int)bp.links.size());
+                        for (auto& ev : bp.nodes) {
+                            if (ev.type == VsNodeType::OnUpdate) {
+                                ImGui::Text("  BP OnUpdate %d ->", ev.id);
+                                for (auto& lk : bp.links)
+                                    if (lk.from.nodeId == ev.id && lk.from.pinType == 0)
+                                        for (auto& n : bp.nodes)
+                                            if (n.id == lk.to.nodeId)
+                                                ImGui::Text("    action %d type=%d", n.id, (int)n.type);
+                            }
+                        }
+                        // Show ALL exec links
+                        ImGui::Text("  ALL exec links:");
+                        for (auto& lk : bp.links)
+                            if (lk.from.pinType == 0 || lk.to.pinType == 1)
+                                ImGui::Text("    %d(pin%d) -> %d(pin%d)", lk.from.nodeId, lk.from.pinIdx, lk.to.nodeId, lk.to.pinIdx);
+                        // Show PlayAnim data connections
+                        for (auto& n : bp.nodes) {
+                            if (n.type == VsNodeType::PlayAnim) {
+                                ImGui::Text("  PlayAnim %d dataIn:", n.id);
+                                for (auto& lk : bp.links)
+                                    if (lk.to.nodeId == n.id && lk.to.pinType == 3 && lk.to.pinIdx == 0)
+                                        for (auto& dn : bp.nodes)
+                                            if (dn.id == lk.from.nodeId)
+                                                ImGui::Text("    Anim %d p0=%d p1=%d", dn.id, dn.paramInt[0], dn.paramInt[1]);
+                                // Show exec in to PlayAnim
+                                ImGui::Text("  PlayAnim %d execIn:", n.id);
+                                for (auto& lk : bp.links)
+                                    if (lk.to.nodeId == n.id && lk.to.pinType == 1)
+                                        ImGui::Text("    from node %d", lk.from.nodeId);
+                            }
+                        }
+                    }
+                    ImGui::Text("dirSprites: %d assets", (int)sAssetDirSprites.size());
+                    for (int i = 0; i < (int)sAssetDirSprites.size(); i++) {
+                        int nSets = (int)sAssetDirSprites[i].size();
+                        int nAnims = (i < (int)sSpriteAssets.size()) ? (int)sSpriteAssets[i].anims.size() : 0;
+                        bool hasDirs = (i < (int)sSpriteAssets.size()) ? sSpriteAssets[i].hasDirections : false;
+                        if (nSets > 0 || nAnims > 0 || hasDirs)
+                            ImGui::Text("  asset[%d] dirSets=%d anims=%d hasDirs=%d", i, nSets, nAnims, hasDirs ? 1 : 0);
+                    }
+                }
+                ImGui::End();
 
                 // Reset accumulators for directions not held
                 if (!ImGui::IsKeyDown(ImGuiKey_A)) sTmMoveAccum[0] = 0.0f;
