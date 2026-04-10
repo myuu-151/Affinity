@@ -9248,172 +9248,292 @@ void FrameTick(float dt)
                     return placeholder;
                 };
 
-                // Build actual generated code with resolved values (or placeholders)
-                char defaultCodeBuf[512] = {};
+                // Show both editor Play-mode and GBA runtime code
+                char defaultCodeBuf[2048] = {};
+                char gbaCodeBuf[512] = {};
                 const char* defaultCode = "";
+                const char* editorCode = "";
+                const char* gbaCode = "";
                 switch (infoNode.type) {
-                case VsNodeType::Jump:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (player_on_ground) player_vy = %s;", fmtFloat(infoNode.id, 0, "<force>"));
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::DampenJump:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (player_vy > 0) player_vy = (player_vy * %s) >> 8;", fmtFloat(infoNode.id, 0, "<factor>"));
-                    defaultCode = defaultCodeBuf; break;
+                case VsNodeType::OnKeyPressed:
+                    editorCode =
+                        "int key = tmResolveEventKey(ev);\n"
+                        "bool fire = false;\n"
+                        "if (key >= 0) { fire = tmKeyHit(key); }\n"
+                        "else { for (int k = 0; k < 10; k++)\n"
+                        "    if (tmKeyHit(k)) { fire = true; break; } }\n"
+                        "if (fire) {\n"
+                        "    tmInstantMove = true;\n"
+                        "    auto acts = tmCollectActions(ev.id);\n"
+                        "    for (auto* a : acts) tmExecAction(a);\n"
+                        "    tmInstantMove = false;\n"
+                        "}";
+                    gbaCode =
+                        "if (key_hit(KEY_xxx)) {\n"
+                        "    // ... actions ...\n"
+                        "}";
+                    break;
+                case VsNodeType::OnKeyReleased:
+                    editorCode =
+                        "int key = tmResolveEventKey(ev);\n"
+                        "if (key >= 0 && key < 10 &&\n"
+                        "    sTmPrevKeyState[key] && !tmKeyDown(key)) {\n"
+                        "    auto acts = tmCollectActions(ev.id);\n"
+                        "    for (auto* a : acts) tmExecAction(a);\n"
+                        "}";
+                    gbaCode =
+                        "if (key_released(KEY_xxx)) {\n"
+                        "    // ... actions ...\n"
+                        "}";
+                    break;
+                case VsNodeType::OnKeyHeld:
+                    editorCode =
+                        "int key = tmResolveEventKey(ev);\n"
+                        "bool fire = (key >= 0) ? tmKeyDown(key) : true;\n"
+                        "if (fire) {\n"
+                        "    auto acts = tmCollectActions(ev.id);\n"
+                        "    for (auto* a : acts) tmExecAction(a);\n"
+                        "}";
+                    gbaCode =
+                        "if (key_is_down(KEY_xxx)) {\n"
+                        "    // ... actions ...\n"
+                        "}";
+                    break;
+                case VsNodeType::OnStart:
+                    editorCode =
+                        "if (!sScriptStartRan) {\n"
+                        "    auto acts = collectActionsPlay(ev.id);\n"
+                        "    for (auto* a : acts) execActionPlay(a);\n"
+                        "    sScriptStartRan = true;\n"
+                        "}";
+                    gbaCode =
+                        "static inline void afn_script_start(void) {\n"
+                        "    // ... actions ...\n"
+                        "}";
+                    break;
+                case VsNodeType::OnUpdate:
+                    editorCode =
+                        "auto acts = tmCollectActions(ev.id);\n"
+                        "for (auto* a : acts) tmExecAction(a);";
+                    gbaCode =
+                        "static inline void afn_script_update(void) {\n"
+                        "    // ... actions ...\n"
+                        "}";
+                    break;
+                case VsNodeType::OnCollision:
+                    editorCode =
+                        "if (collidedSprite >= 0) {\n"
+                        "    auto acts = collectActionsPlay(ev.id);\n"
+                        "    for (auto* a : acts) execActionPlay(a);\n"
+                        "}";
+                    gbaCode =
+                        "static inline void afn_script_collision(void) {\n"
+                        "    // ... actions ...\n"
+                        "}";
+                    break;
+                case VsNodeType::MovePlayer: {
+                    editorCode =
+                        "auto* dd = tmFindDataIn(action->id, 0);\n"
+                        "int dir = dd ? dd->paramInt[0] : 0;\n"
+                        "// dir: 0=Left, 1=Right, 2=Up, 3=Down\n"
+                        "int dirKeys[] = { 8, 9, 6, 7 }; // A, D, W, S\n"
+                        "int dirToFacing[] = { 6, 2, 0, 4 };\n"
+                        "if (dir >= 0 && dir < 4) {\n"
+                        "    if (tmInstantMove) {\n"
+                        "        ImGuiKey dirImKeys[] = {\n"
+                        "            ImGuiKey_A, ImGuiKey_D,\n"
+                        "            ImGuiKey_W, ImGuiKey_S };\n"
+                        "        if (ImGui::IsKeyPressed(dirImKeys[dir])) {\n"
+                        "            sTmObjFacing[oi] = dirToFacing[dir];\n"
+                        "            // move one tile in dir\n"
+                        "        }\n"
+                        "    } else if (tmKeyDown(dirKeys[dir])) {\n"
+                        "        sTmObjFacing[oi] = dirToFacing[dir];\n"
+                        "        sTmMoveAccum[dir] += tmMoveRate * dt;\n"
+                        "        // move accumulated tiles\n"
+                        "    }\n"
+                        "}";
+                    auto* dirData = resolveDataIn(infoNode.id, 0);
+                    int dir = dirData ? dirData->paramInt[0] : 0;
+                    const char* dirKeysGba[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
+                    const char* dirVarsGba[] = { "afn_input_right -= 256", "afn_input_right += 256",
+                                                 "afn_input_fwd += 256", "afn_input_fwd -= 256" };
+                    if (dir >= 0 && dir < 4)
+                        snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                            "if (key_is_down(%s)) %s;", dirKeysGba[dir], dirVarsGba[dir]);
+                    else
+                        snprintf(gbaCodeBuf, sizeof(gbaCodeBuf), "// MovePlayer (no direction set)");
+                    gbaCode = gbaCodeBuf;
+                    break;
+                }
                 case VsNodeType::Walk: {
-                    VsNode* src = resolveDataIn(infoNode.id, 0);
-                    if (src) { int s = resolveInt(infoNode.id, 0, 37); snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_move_speed = %d;", (int)(s * 37.0f / 35.0f)); }
-                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_move_speed = <speed>;");
-                    defaultCode = defaultCodeBuf; break;
+                    editorCode =
+                        "auto* sd = tmFindDataIn(action->id, 0);\n"
+                        "tmMoveRate = sd ? (float)sd->paramInt[0] : 6.0f;";
+                    auto* sd = resolveDataIn(infoNode.id, 0);
+                    int speed = sd ? sd->paramInt[0] : 37;
+                    int gbaSpeed = (int)(speed * 37.0f / 35.0f);
+                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                        "afn_move_speed = %d;", gbaSpeed);
+                    gbaCode = gbaCodeBuf;
+                    break;
                 }
                 case VsNodeType::Sprint: {
-                    VsNode* src = resolveDataIn(infoNode.id, 0);
-                    if (src) { int s = resolveInt(infoNode.id, 0, 56); snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_move_speed = %d;", (int)(s * 37.0f / 35.0f)); }
-                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_move_speed = <speed>;");
-                    defaultCode = defaultCodeBuf; break;
+                    editorCode =
+                        "auto* sd = tmFindDataIn(action->id, 0);\n"
+                        "tmMoveRate = sd ? (float)sd->paramInt[0] : 12.0f;";
+                    auto* sd = resolveDataIn(infoNode.id, 0);
+                    int speed = sd ? sd->paramInt[0] : 56;
+                    int gbaSpeed = (int)(speed * 37.0f / 35.0f);
+                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                        "afn_move_speed = %d;", gbaSpeed);
+                    gbaCode = gbaCodeBuf;
+                    break;
                 }
-                case VsNodeType::SetGravity:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_gravity = %s;", fmtFloat(infoNode.id, 0, "<value>"));
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::SetMaxFall:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_terminal_vel = %s;", fmtFloat(infoNode.id, 0, "<value>"));
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::AutoOrbit:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_auto_orbit_speed = %s;", fmtInt(infoNode.id, 0, "<speed>"));
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::PlayAnim:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_play_anim = %s;", fmtInt(infoNode.id, 0, "<anim>"));
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::MovePlayer: {
-                    VsNode* src = resolveDataIn(infoNode.id, 0);
-                    if (src) {
-                        int dir = src->paramInt[0];
-                        const char* dirKeys[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
-                        const char* dirVars[] = { "afn_input_right -= 256", "afn_input_right += 256",
-                                                  "afn_input_fwd += 256", "afn_input_fwd -= 256" };
-                        if (dir >= 0 && dir < 4)
-                            snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(%s)) %s;", dirKeys[dir], dirVars[dir]);
-                    } else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(<key>)) <move>;");
-                    defaultCode = defaultCodeBuf; break;
+                case VsNodeType::Jump: {
+                    editorCode =
+                        "auto* forceData = findDataInPlay(action->id, 0);\n"
+                        "float force = forceData ? resolveFloat(forceData) : 2.0f;\n"
+                        "if (sPlayerOnGround) {\n"
+                        "    sPlayerVelY = force;\n"
+                        "    sPlayerOnGround = false;\n"
+                        "}";
+                    auto* fd = resolveDataIn(infoNode.id, 0);
+                    float force = 2.0f;
+                    if (fd) { memcpy(&force, &fd->paramInt[0], sizeof(float)); }
+                    int forceFixed = (int)(force * 256.0f);
+                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                        "if (player_on_ground) player_vy = %d;", forceFixed);
+                    gbaCode = gbaCodeBuf;
+                    break;
+                }
+                case VsNodeType::DampenJump: {
+                    editorCode =
+                        "auto* factorData = findDataInPlay(action->id, 0);\n"
+                        "float factor = factorData ? resolveFloat(factorData) : 0.75f;\n"
+                        "if (sPlayerVelY > 0)\n"
+                        "    sPlayerVelY *= factor;";
+                    auto* fd = resolveDataIn(infoNode.id, 0);
+                    float factor = 0.75f;
+                    if (fd) { memcpy(&factor, &fd->paramInt[0], sizeof(float)); }
+                    int factorFixed = (int)(factor * 256.0f);
+                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                        "if (player_vy > 0) player_vy = (player_vy * %d) >> 8;", factorFixed);
+                    gbaCode = gbaCodeBuf;
+                    break;
                 }
                 case VsNodeType::OrbitCamera: {
-                    VsNode* dirSrc = resolveDataIn(infoNode.id, 0);
-                    VsNode* spdSrc = resolveDataIn(infoNode.id, 1);
-                    if (dirSrc) {
-                        int dir = dirSrc->paramInt[0];
-                        const char* key = (dir == 0) ? "KEY_L" : "KEY_R";
-                        const char* sign = (dir == 0) ? "-" : "+";
-                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(%s)) orbit_angle %s= %s;", key, sign, fmtInt(infoNode.id, 1, "<speed>"));
-                    } else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(<key>)) orbit_angle += %s;", fmtInt(infoNode.id, 1, "<speed>"));
-                    defaultCode = defaultCodeBuf; break;
+                    editorCode =
+                        "auto* dd = findDataInPlay(action->id, 0);\n"
+                        "auto* sd = findDataInPlay(action->id, 1);\n"
+                        "int dir = dd ? dd->paramInt[0] : 1;\n"
+                        "int speed = sd ? resolveIntPlay(sd) : 512;\n"
+                        "int key = (dir == 0) ? 2 : 3; // L or R\n"
+                        "if (editorKeyDown(key))\n"
+                        "    scOrbitDelta += (dir == 0 ? -1 : 1)\n"
+                        "        * (speed / 65536.0f * 6.28318f);";
+                    auto* dd = resolveDataIn(infoNode.id, 0);
+                    auto* sd = resolveDataIn(infoNode.id, 1);
+                    int odir = dd ? dd->paramInt[0] : 1;
+                    int ospeed = sd ? sd->paramInt[0] : 512;
+                    const char* okey = (odir == 0) ? "KEY_L" : "KEY_R";
+                    const char* osign = (odir == 0) ? "-" : "+";
+                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                        "if (key_is_down(%s)) orbit_angle %s= %d;", okey, osign, ospeed);
+                    gbaCode = gbaCodeBuf;
+                    break;
                 }
+                case VsNodeType::ChangeScene:
+                    editorCode =
+                        "auto* sd = tmFindDataIn(action->id, 0);\n"
+                        "int scIdx = sd ? sd->paramInt[0] : action->paramInt[0];\n"
+                        "sPendingSceneSwitch = scIdx;\n"
+                        "sPendingSceneMode = action->paramInt[1];";
+                    gbaCode =
+                        "afn_pending_scene = <scIdx>;\n"
+                        "afn_pending_scene_mode = <mode>;";
+                    break;
+                case VsNodeType::SetGravity: {
+                    editorCode =
+                        "auto* valData = findDataInPlay(action->id, 0);\n"
+                        "float val = valData ? resolveFloat(valData) : 0.09f;\n"
+                        "sScriptGravity = val;";
+                    auto* vd = resolveDataIn(infoNode.id, 0);
+                    float val = 0.09f;
+                    if (vd) { memcpy(&val, &vd->paramInt[0], sizeof(float)); }
+                    int valFixed = (int)(val * 256.0f);
+                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                        "afn_gravity = %d;", valFixed);
+                    gbaCode = gbaCodeBuf;
+                    break;
+                }
+                case VsNodeType::SetMaxFall: {
+                    editorCode =
+                        "auto* valData = findDataInPlay(action->id, 0);\n"
+                        "float val = valData ? resolveFloat(valData) : 6.0f;\n"
+                        "sScriptMaxFall = val;";
+                    auto* vd = resolveDataIn(infoNode.id, 0);
+                    float val = 6.0f;
+                    if (vd) { memcpy(&val, &vd->paramInt[0], sizeof(float)); }
+                    int valFixed = (int)(val * 256.0f);
+                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                        "afn_terminal_vel = %d;", valFixed);
+                    gbaCode = gbaCodeBuf;
+                    break;
+                }
+                case VsNodeType::AutoOrbit: {
+                    editorCode =
+                        "auto* sd = findDataInPlay(action->id, 0);\n"
+                        "sScriptAutoOrbitSpeed = sd\n"
+                        "    ? (float)sd->paramInt[0] : 205.0f;";
+                    auto* sd = resolveDataIn(infoNode.id, 0);
+                    int aspeed = sd ? sd->paramInt[0] : 205;
+                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                        "afn_auto_orbit_speed = %d;", aspeed);
+                    gbaCode = gbaCodeBuf;
+                    break;
+                }
+                case VsNodeType::PlayAnim: {
+                    editorCode =
+                        "auto* sd = findDataInPlay(action->id, 0);\n"
+                        "int animIdx = sd ? sd->paramInt[0] : 0;\n"
+                        "sActivePlayAnimNodeId = action->id;";
+                    auto* sd = resolveDataIn(infoNode.id, 0);
+                    int animIdx = sd ? sd->paramInt[0] : 0;
+                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                        "afn_play_anim = %d;", animIdx);
+                    gbaCode = gbaCodeBuf;
+                    break;
+                }
+                case VsNodeType::SetVariable:
+                    editorCode =
+                        "auto* slotData = findDataInPlay(action->id, 0);\n"
+                        "auto* valData = findDataInPlay(action->id, 1);\n"
+                        "int slot = slotData ? resolveIntPlay(slotData) : 0;\n"
+                        "int val = valData ? resolveIntPlay(valData) : 0;\n"
+                        "if (slot >= 0 && slot < 16) sScriptVars[slot] = val;";
+                    gbaCode =
+                        "afn_vars[<slot>] = <value>;";
+                    break;
+                case VsNodeType::AddVariable:
+                    editorCode =
+                        "auto* slotData = findDataInPlay(action->id, 0);\n"
+                        "auto* valData = findDataInPlay(action->id, 1);\n"
+                        "int slot = slotData ? resolveIntPlay(slotData) : 0;\n"
+                        "int amt = valData ? resolveIntPlay(valData) : 0;\n"
+                        "if (slot >= 0 && slot < 16) sScriptVars[slot] += amt;";
+                    gbaCode =
+                        "afn_vars[<slot>] += <amount>;";
+                    break;
                 case VsNodeType::DestroyObject:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "// destroy object %s", fmtInt(infoNode.id, 0, "<id>"));
-                    defaultCode = defaultCodeBuf; break;
-                // Events — generate full code chunk with action body
-                case VsNodeType::OnKeyPressed:
-                case VsNodeType::OnKeyReleased:
-                case VsNodeType::OnKeyHeld:
-                case VsNodeType::OnStart:
-                case VsNodeType::OnUpdate:
-                case VsNodeType::OnCollision: {
-                    // Collect action chain from this event via exec links
-                    auto emitActionCode = [&](const VsNode& an) -> std::string {
-                        if (an.customCode[0]) return std::string("    ") + an.customCode;
-                        switch (an.type) {
-                        case VsNodeType::MovePlayer: {
-                            VsNode* d = resolveDataIn(an.id, 0);
-                            int dir = d ? d->paramInt[0] : 0;
-                            const char* dk[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
-                            const char* dv[] = { "afn_input_right -= 256", "afn_input_right += 256",
-                                                 "afn_input_fwd += 256", "afn_input_fwd -= 256" };
-                            if (dir >= 0 && dir < 4) { char b[128]; snprintf(b, sizeof(b), "    if (key_is_down(%s)) %s;", dk[dir], dv[dir]); return b; }
-                            return "    // move player <dir>";
-                        }
-                        case VsNodeType::Jump: { char b[128]; snprintf(b, sizeof(b), "    if (player_on_ground) player_vy = %s;", fmtFloat(an.id, 0, "<force>")); return b; }
-                        case VsNodeType::DampenJump: { char b[128]; snprintf(b, sizeof(b), "    if (player_vy > 0) player_vy = (player_vy * %s) >> 8;", fmtFloat(an.id, 0, "<factor>")); return b; }
-                        case VsNodeType::Walk: {
-                            VsNode* s = resolveDataIn(an.id, 0);
-                            if (s) { int sp = resolveInt(an.id, 0, 37); char b[128]; snprintf(b, sizeof(b), "    afn_move_speed = %d;", (int)(sp * 37.0f / 35.0f)); return b; }
-                            return "    afn_move_speed = <speed>;";
-                        }
-                        case VsNodeType::Sprint: {
-                            VsNode* s = resolveDataIn(an.id, 0);
-                            if (s) { int sp = resolveInt(an.id, 0, 56); char b[128]; snprintf(b, sizeof(b), "    afn_move_speed = %d;", (int)(sp * 37.0f / 35.0f)); return b; }
-                            return "    afn_move_speed = <speed>;";
-                        }
-                        case VsNodeType::OrbitCamera: {
-                            VsNode* d = resolveDataIn(an.id, 0);
-                            int dir = d ? d->paramInt[0] : 1;
-                            const char* k = (dir == 0) ? "KEY_L" : "KEY_R";
-                            const char* sg = (dir == 0) ? "-" : "+";
-                            char b[128]; snprintf(b, sizeof(b), "    if (key_is_down(%s)) orbit_angle %s= %s;", k, sg, fmtInt(an.id, 1, "<speed>")); return b;
-                        }
-                        case VsNodeType::SetGravity: { char b[128]; snprintf(b, sizeof(b), "    afn_gravity = %s;", fmtFloat(an.id, 0, "<value>")); return b; }
-                        case VsNodeType::SetMaxFall: { char b[128]; snprintf(b, sizeof(b), "    afn_terminal_vel = %s;", fmtFloat(an.id, 0, "<value>")); return b; }
-                        case VsNodeType::AutoOrbit: { char b[128]; snprintf(b, sizeof(b), "    afn_auto_orbit_speed = %s;", fmtInt(an.id, 0, "<speed>")); return b; }
-                        case VsNodeType::PlayAnim: { char b[128]; snprintf(b, sizeof(b), "    afn_play_anim = %s;", fmtInt(an.id, 0, "<anim>")); return b; }
-                        case VsNodeType::ChangeScene: { char b[128]; snprintf(b, sizeof(b), "    afn_pending_scene = %s;", fmtInt(an.id, 0, "<id>")); return b; }
-                        case VsNodeType::SetVariable: { char b[128]; snprintf(b, sizeof(b), "    vars[%s] = %s;", fmtInt(an.id, 0, "<slot>"), fmtInt(an.id, 1, "<value>")); return b; }
-                        case VsNodeType::AddVariable: { char b[128]; snprintf(b, sizeof(b), "    vars[%s] += %s;", fmtInt(an.id, 0, "<slot>"), fmtInt(an.id, 1, "<amount>")); return b; }
-                        case VsNodeType::DestroyObject: { char b[128]; snprintf(b, sizeof(b), "    // destroy object %s", fmtInt(an.id, 0, "<id>")); return b; }
-                        default: return "    // (unsupported)";
-                        }
-                    };
-                    // Walk exec chain
-                    std::vector<const VsNode*> chain;
-                    std::vector<int> front;
-                    std::vector<bool> vis(10000, false);
-                    for (auto& lk : sVsLinks)
-                        if (lk.from.nodeId == infoNode.id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
-                            front.push_back(lk.to.nodeId);
-                    int safety = 0;
-                    while (!front.empty() && safety < 256) {
-                        int nid = front.front(); front.erase(front.begin());
-                        if (nid < 0 || nid >= (int)vis.size() || vis[nid]) continue;
-                        vis[nid] = true; safety++;
-                        for (auto& nd : sVsNodes)
-                            if (nd.id == nid) { chain.push_back(&nd); break; }
-                        for (auto& lk : sVsLinks)
-                            if (lk.from.nodeId == nid && lk.from.pinType == 0 && lk.from.pinIdx == 0)
-                                front.push_back(lk.to.nodeId);
-                    }
-                    // Build code string
-                    std::string code;
-                    if (infoNode.type == VsNodeType::OnKeyPressed || infoNode.type == VsNodeType::OnKeyReleased || infoNode.type == VsNodeType::OnKeyHeld) {
-                        const char* fn = (infoNode.type == VsNodeType::OnKeyPressed) ? "key_hit" :
-                                         (infoNode.type == VsNodeType::OnKeyReleased) ? "key_released" : "key_is_down";
-                        // Resolve all connected keys
-                        std::vector<int> keys;
-                        for (auto& lk : sVsLinks)
-                            if (lk.to.nodeId == infoNode.id && lk.to.pinType == 3 && lk.to.pinIdx == 0)
-                                for (auto& nd : sVsNodes)
-                                    if (nd.id == lk.from.nodeId && nd.paramInt[0] >= 0 && nd.paramInt[0] < kVsKeyCount)
-                                        keys.push_back(nd.paramInt[0]);
-                        if (keys.size() == 1) {
-                            code = std::string("if (") + fn + "(KEY_" + sVsKeyNames[keys[0]] + ")) {\n";
-                        } else if (keys.size() > 1) {
-                            code = "if (";
-                            for (int ki = 0; ki < (int)keys.size(); ki++) {
-                                if (ki > 0) code += " || ";
-                                code += std::string(fn) + "(KEY_" + sVsKeyNames[keys[ki]] + ")";
-                            }
-                            code += ") {\n";
-                        } else {
-                            code = std::string("if (") + fn + "(<key>)) {\n";
-                        }
-                    } else if (infoNode.type == VsNodeType::OnStart) {
-                        code = "void afn_script_start(void) {\n";
-                    } else if (infoNode.type == VsNodeType::OnUpdate) {
-                        code = "void afn_script_update(void) {\n";
-                    } else {
-                        code = "void afn_script_collision(void) {\n";
-                    }
-                    for (auto* an : chain)
-                        code += emitActionCode(*an) + "\n";
-                    code += "}";
-                    strncpy(defaultCodeBuf, code.c_str(), sizeof(defaultCodeBuf) - 1);
-                    defaultCodeBuf[sizeof(defaultCodeBuf) - 1] = '\0';
-                    defaultCode = defaultCodeBuf; break;
-                }
+                    editorCode =
+                        "auto* sd = findDataInPlay(action->id, 0);\n"
+                        "int objIdx = sd ? sd->paramInt[0] : -1;\n"
+                        "if (objIdx >= 0 && objIdx < sSpriteCount)\n"
+                        "    sSprites[objIdx].scale = 0.0f; // hide";
+                    gbaCode =
+                        "// DestroyObject: hide sprite at index";
+                    break;
                 // Data nodes
                 case VsNodeType::Integer:
                     snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "%d", infoNode.paramInt[0]);
@@ -9438,29 +9558,51 @@ void FrameTick(float dt)
                     defaultCode = defaultCodeBuf; break;
                 // Logic
                 case VsNodeType::Branch:
-                    defaultCode = "if (<condition>) { true } else { false }"; break;
+                    defaultCode =
+                        "// Branch — conditional execution\n"
+                        "int cond = findDataIn(action, 0)->paramInt[0];\n"
+                        "if (cond) execChain(truePin);\n"
+                        "else execChain(falsePin);";
+                    break;
                 case VsNodeType::CompareVar:
-                    defaultCode = "result = (vars[<slot>] == <value>) ? 1 : 0;"; break;
+                    defaultCode =
+                        "// CompareVar — compare variable slot\n"
+                        "int slot = findDataIn(action, 0)->paramInt[0];\n"
+                        "int value = findDataIn(action, 1)->paramInt[0];\n"
+                        "result = (vars[slot] == value) ? 1 : 0;";
+                    break;
                 case VsNodeType::LookDirection:
-                    defaultCode = "// set player facing direction"; break;
-                case VsNodeType::ChangeScene:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "// change to scene %s", fmtInt(infoNode.id, 0, "<id>"));
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::SetVariable:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "vars[%s] = %s;", fmtInt(infoNode.id, 0, "<slot>"), fmtInt(infoNode.id, 1, "<value>"));
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::AddVariable:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "vars[%s] += %s;", fmtInt(infoNode.id, 0, "<slot>"), fmtInt(infoNode.id, 1, "<amount>"));
-                    defaultCode = defaultCodeBuf; break;
+                    defaultCode =
+                        "// LookDirection — set player facing\n"
+                        "int dir = findDataIn(action, 0)->paramInt[0];\n"
+                        "playerFacing = dir;";
+                    break;
                 case VsNodeType::PlaySound:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "// play sound %s", fmtInt(infoNode.id, 0, "<id>"));
-                    defaultCode = defaultCodeBuf; break;
+                    defaultCode =
+                        "// PlaySound — trigger sound effect\n"
+                        "int soundId = findDataIn(action, 0)->paramInt[0];\n"
+                        "// (sound playback not yet implemented in editor)";
+                    break;
                 case VsNodeType::Wait:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "// wait %s frames", fmtInt(infoNode.id, 0, "<n>"));
-                    defaultCode = defaultCodeBuf; break;
+                    defaultCode =
+                        "// Wait — pause execution for N frames\n"
+                        "int frames = findDataIn(action, 0)->paramInt[0];\n"
+                        "waitCounter = frames;";
+                    break;
                 case VsNodeType::Group:
-                    defaultCode = "// subgraph"; break;
+                    defaultCode = "// Group — contains a subgraph of nodes"; break;
                 default: break;
+                }
+
+                // Combine editor + GBA code for event/action nodes
+                if (editorCode[0]) {
+                    char combinedBuf[2048];
+                    snprintf(combinedBuf, sizeof(combinedBuf),
+                        "// ---- Editor Play Mode ----\n%s\n\n// ---- GBA Runtime (mapdata.h) ----\n%s",
+                        editorCode, gbaCode[0] ? gbaCode : "// (no GBA codegen for this node)");
+                    strncpy(defaultCodeBuf, combinedBuf, sizeof(defaultCodeBuf) - 1);
+                    defaultCodeBuf[sizeof(defaultCodeBuf) - 1] = '\0';
+                    defaultCode = defaultCodeBuf;
                 }
 
                 // "View Code" button opens standalone script window
