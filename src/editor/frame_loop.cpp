@@ -9566,111 +9566,197 @@ void FrameTick(float dt)
                     bpParamSig[0] = '\0';
                 }
 
+                // Helper: build function signature for event node preview
+                auto setEventFunc = [&](const VsNode& node, const char* defaultName) {
+                    if (node.funcName[0])
+                        snprintf(funcSigBuf, sizeof(funcSigBuf),
+                            "static inline void %s(void)", node.funcName);
+                    else if (isBp)
+                        snprintf(funcSigBuf, sizeof(funcSigBuf),
+                            "static inline void afn_bp%d_%s(%s)", sVsEditBlueprintIdx, defaultName,
+                            bpParamSig[0] ? bpParamSig : "void");
+                    else
+                        snprintf(funcSigBuf, sizeof(funcSigBuf),
+                            "static inline void %s(void)", defaultName);
+                };
+
+                // Helper: find action nodes connected via exec-out from an event node
+                // and build their GBA call names as a string
+                auto buildActionCalls = [&](const VsNode& evNode, const char* indent) -> std::string {
+                    char callsBuf[1024] = {};
+                    // Suffix map for VsNodeType -> GBA function suffix
+                    auto editorActionSuffix = [](VsNodeType t) -> const char* {
+                        switch (t) {
+                        case VsNodeType::MovePlayer:    return "_move";
+                        case VsNodeType::Jump:          return "_jump";
+                        case VsNodeType::Walk:          return "_walk";
+                        case VsNodeType::Sprint:        return "_sprint";
+                        case VsNodeType::OrbitCamera:   return "_orbit";
+                        case VsNodeType::PlayAnim:      return "_play_anim";
+                        case VsNodeType::SetGravity:    return "_set_gravity";
+                        case VsNodeType::SetMaxFall:    return "_set_max_fall";
+                        case VsNodeType::DestroyObject: return "_destroy";
+                        case VsNodeType::AutoOrbit:     return "_auto_orbit";
+                        case VsNodeType::DampenJump:    return "_dampen_jump";
+                        case VsNodeType::ChangeScene:   return "_change_scene";
+                        case VsNodeType::CustomCode:    return "_custom";
+                        case VsNodeType::SetVariable:   return "_set_var";
+                        case VsNodeType::AddVariable:   return "_add_var";
+                        default: return "";
+                        }
+                    };
+                    // Walk exec-out links from the event node
+                    std::vector<int> actionIds;
+                    std::vector<int> frontier;
+                    frontier.push_back(evNode.id);
+                    while (!frontier.empty()) {
+                        int curId = frontier.back(); frontier.pop_back();
+                        for (auto& lk : sVsLinks) {
+                            if (lk.from.nodeId == curId && lk.from.pinType == 0) {
+                                int toId = lk.to.nodeId;
+                                // Find the target node
+                                for (auto& n : sVsNodes) {
+                                    if (n.id == toId) {
+                                        const char* suf = editorActionSuffix(n.type);
+                                        if (suf[0]) {
+                                            actionIds.push_back(toId);
+                                            char line[128];
+                                            if (n.funcName[0])
+                                                snprintf(line, sizeof(line), "%s%s();\n", indent, n.funcName);
+                                            else if (isBp)
+                                                snprintf(line, sizeof(line), "%safn_bp%d%s_%d(...);\n", indent, sVsEditBlueprintIdx, suf, n.id);
+                                            else
+                                                snprintf(line, sizeof(line), "%safn_script%s_%d();\n", indent, suf, n.id);
+                                            strncat(callsBuf, line, sizeof(callsBuf) - strlen(callsBuf) - 1);
+                                        }
+                                        // Follow chain further
+                                        frontier.push_back(toId);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (!callsBuf[0])
+                        snprintf(callsBuf, sizeof(callsBuf), "%s// (no actions connected)\n", indent);
+                    return std::string(callsBuf);
+                };
+
                 switch (infoNode.type) {
                 case VsNodeType::OnKeyPressed: {
+                    setEventFunc(infoNode, "afn_script_key_pressed");
                     editorCode =
-                        "// ---- 2D Tilemap ----\n"
-                        "if (keyJustPressed(dir)) {\n"
-                        "    instantMove = true; // single-tile move\n"
-                        "    execActions();\n"
-                        "    instantMove = false;\n"
-                        "}\n"
+                        "    // ---- 2D Tilemap ----\n"
+                        "    // ImGui::IsKeyPressed(dirKey, false) — no repeat\n"
+                        "    if (keyJustPressed(dir)) {\n"
+                        "        instantMove = true;\n"
+                        "        for (action : actions) execAction(action);\n"
+                        "        instantMove = false;\n"
+                        "    }\n"
                         "\n"
-                        "// ---- 3D Scene ----\n"
-                        "if (editorKeyHit(key)) {\n"
-                        "    execActions(); // one-shot fire\n"
-                        "}";
+                        "    // ---- 3D Scene ----\n"
+                        "    if (editorKeyHit(key)) {\n"
+                        "        for (action : actions) execAction(action);\n"
+                        "    }";
                     int ek = resolveEventKeyForDisplay(infoNode);
+                    std::string calls = buildActionCalls(infoNode, "        ");
                     if (ek >= 0)
-                        snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                            "if (key_hit(%s)) {\n"
-                            "    // ... actions ...\n"
-                            "}", gbaKeyName(ek));
+                        snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                            "    if (key_hit(%s)) {\n%s    }", gbaKeyName(ek), calls.c_str());
                     else
-                        snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                            "{ // (all d-pad)\n"
-                            "    // ... actions ...\n"
-                            "}");
-                    gbaCode = gbaCodeBuf;
+                        snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                            "    { // (all d-pad)\n%s    }", calls.c_str());
                     break;
                 }
                 case VsNodeType::OnKeyReleased: {
+                    setEventFunc(infoNode, "afn_script_key_released");
                     editorCode =
-                        "// ---- 2D Tilemap ----\n"
-                        "if (prevKeyState[key] && !keyDown(key)) {\n"
-                        "    execActions();\n"
-                        "}\n"
+                        "    // ---- 2D Tilemap ----\n"
+                        "    if (prevKeys[key] && !keyDown(key)) {\n"
+                        "        for (action : actions) execAction(action);\n"
+                        "    }\n"
                         "\n"
-                        "// ---- 3D Scene ----\n"
-                        "if (prevKeyState[key] && !editorKeyDown(key)) {\n"
-                        "    execActions();\n"
-                        "}";
+                        "    // ---- 3D Scene ----\n"
+                        "    if (prevKeyState[key] && !editorKeyDown(key)) {\n"
+                        "        for (action : actions) execAction(action);\n"
+                        "    }";
                     int ek = resolveEventKeyForDisplay(infoNode);
-                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                        "if (key_released(%s)) {\n"
-                        "    // ... actions ...\n"
-                        "}", ek >= 0 ? gbaKeyName(ek) : "KEY_xxx");
-                    gbaCode = gbaCodeBuf;
+                    std::string calls = buildActionCalls(infoNode, "        ");
+                    snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                        "    if (key_released(%s)) {\n%s    }",
+                        ek >= 0 ? gbaKeyName(ek) : "KEY_xxx", calls.c_str());
                     break;
                 }
                 case VsNodeType::OnKeyHeld: {
+                    setEventFunc(infoNode, "afn_script_key_held");
                     editorCode =
-                        "// ---- 2D Tilemap ----\n"
-                        "// Pre-frame: track direction priority\n"
-                        "// (newest press wins, fallback on release)\n"
-                        "lastMoveDir = resolveHeldDir(WASD);\n"
-                        "if (keyDown(key)) {\n"
-                        "    execActions();\n"
-                        "    // MovePlayer gates on lastMoveDir:\n"
-                        "    //   tap = face only, hold = walk\n"
-                        "}\n"
-                        "// Post: reset accum for released dirs\n"
+                        "    // ---- 2D Tilemap ----\n"
+                        "    // lastMoveDir = resolveHeldDir(WASD);\n"
+                        "    if (keyDown(key)) {\n"
+                        "        for (action : actions) execAction(action);\n"
+                        "        // MovePlayer gates on lastMoveDir\n"
+                        "    }\n"
+                        "    // reset accum for released dirs\n"
                         "\n"
-                        "// ---- 3D Scene ----\n"
-                        "if (editorKeyDown(key)) {\n"
-                        "    execActions();\n"
-                        "    // continuous — fires every frame\n"
-                        "}";
+                        "    // ---- 3D Scene ----\n"
+                        "    // fires every frame while held\n"
+                        "    if (editorKeyDown(key)) {\n"
+                        "        for (action : actions) execAction(action);\n"
+                        "    }";
                     int ek = resolveEventKeyForDisplay(infoNode);
-                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
-                        "if (key_is_down(%s)) {\n"
-                        "    // ... actions ...\n"
-                        "}", ek >= 0 ? gbaKeyName(ek) : "KEY_xxx");
-                    gbaCode = gbaCodeBuf;
+                    std::string calls = buildActionCalls(infoNode, "        ");
+                    snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                        "    if (key_is_down(%s)) {\n%s    }",
+                        ek >= 0 ? gbaKeyName(ek) : "KEY_xxx", calls.c_str());
                     break;
                 }
-                case VsNodeType::OnStart:
+                case VsNodeType::OnStart: {
+                    setEventFunc(infoNode, "afn_script_start");
                     editorCode =
-                        "// ---- 2D Tilemap ----\n"
-                        "if (!onStartRan) {\n"
-                        "    execActions(); // runs once on Play\n"
-                        "    onStartRan = true;\n"
-                        "}\n"
+                        "    // ---- 2D Tilemap ----\n"
+                        "    if (!onStartRan) {\n"
+                        "        for (action : actions) execAction(action);\n"
+                        "        onStartRan = true;\n"
+                        "    }\n"
                         "\n"
-                        "// ---- 3D Scene ----\n"
-                        "if (!onStartRan) {\n"
-                        "    execActions(); // runs once on Play\n"
-                        "    onStartRan = true;\n"
-                        "}";
-                    gbaCode = "// ... actions ...";
+                        "    // ---- 3D Scene ----\n"
+                        "    if (!sScriptStartRan) {\n"
+                        "        sScriptMoveSpeed = walkSpeed; // default\n"
+                        "        for (action : actions) execAction(action);\n"
+                        "        sScriptStartRan = true;\n"
+                        "    }";
+                    std::string calls = buildActionCalls(infoNode, "    ");
+                    snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                        "    // Called once at boot after scene load\n%s", calls.c_str());
                     break;
-                case VsNodeType::OnUpdate:
+                }
+                case VsNodeType::OnUpdate: {
+                    setEventFunc(infoNode, "afn_script_update");
                     editorCode =
-                        "// ---- 2D Tilemap ----\n"
-                        "execActions(); // every frame\n"
+                        "    // ---- 2D Tilemap ----\n"
+                        "    for (action : actions) execAction(action);\n"
+                        "    // runs every frame\n"
                         "\n"
-                        "// ---- 3D Scene ----\n"
-                        "execActions(); // every frame";
-                    gbaCode = "// ... actions ...";
+                        "    // ---- 3D Scene ----\n"
+                        "    for (action : actions) execAction(action);\n"
+                        "    // runs every frame";
+                    std::string calls = buildActionCalls(infoNode, "    ");
+                    snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                        "    // Called every frame\n%s", calls.c_str());
                     break;
-                case VsNodeType::OnCollision:
+                }
+                case VsNodeType::OnCollision: {
+                    setEventFunc(infoNode, "afn_script_collision");
                     editorCode =
-                        "// ---- 3D Scene only ----\n"
-                        "if (collidedSprite >= 0) {\n"
-                        "    execActions();\n"
-                        "}";
-                    gbaCode = "// ... actions ...";
+                        "    // ---- 3D Scene only ----\n"
+                        "    if (collidedSprite >= 0) {\n"
+                        "        execActions();\n"
+                        "    }";
+                    std::string calls = buildActionCalls(infoNode, "    ");
+                    snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                        "    // Called when player collides with sprite\n%s", calls.c_str());
                     break;
+                }
                 case VsNodeType::MovePlayer: {
                     editorCode =
                         "// ---- 2D Tilemap ----\n"
@@ -10021,12 +10107,12 @@ void FrameTick(float dt)
                 if (editorCode[0]) {
                     char combinedBuf[4096];
                     if (funcSigBuf[0]) {
-                        // Action node: all three sections inside one function block
+                        // Event/action node: all sections inside function block
                         snprintf(combinedBuf, sizeof(combinedBuf),
                             "%s {\n\n%s\n\n    // ---- GBA Runtime (mapdata.h) ----\n%s\n}",
                             funcSigBuf, editorCode, gbaBodyBuf);
                     } else {
-                        // Event/other node: flat sections
+                        // Other node: flat sections
                         snprintf(combinedBuf, sizeof(combinedBuf),
                             "%s\n\n// ---- GBA Runtime (mapdata.h) ----\n%s",
                             editorCode, gbaCode[0] ? gbaCode : "// (no GBA codegen for this node)");
