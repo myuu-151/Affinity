@@ -9254,8 +9254,46 @@ void FrameTick(float dt)
                 const char* defaultCode = "";
                 const char* editorCode = "";
                 const char* gbaCode = "";
+
+                // Resolve event key name for GBA code display
+                auto resolveEventKeyForDisplay = [&](const VsNode& ev) -> int {
+                    int count = 0; int keyVal = -1;
+                    for (auto& lk : sVsLinks)
+                        if (lk.to.nodeId == ev.id && lk.to.pinType == 3 && lk.to.pinIdx == 0) {
+                            auto* dn = resolveDataIn(lk.to.nodeId, 0);
+                            if (dn) { keyVal = dn->paramInt[0]; count++; }
+                        }
+                    if (count == 1) return keyVal;
+                    if (count == 0) return ev.paramInt[0];
+                    return -1;
+                };
+                auto gbaKeyName = [](int key) -> const char* {
+                    const char* names[] = { "KEY_A","KEY_B","KEY_L","KEY_R","KEY_START","KEY_SELECT",
+                                            "KEY_UP","KEY_DOWN","KEY_LEFT","KEY_RIGHT" };
+                    return (key >= 0 && key < 10) ? names[key] : "0";
+                };
+
+                // Build function prefix for blueprint vs scene
+                bool isBp = (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0);
+                const char* bpPrefix = "";
+                char bpFuncBuf[64] = {};
+                char bpParamSig[128] = {};
+                if (isBp && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
+                    snprintf(bpFuncBuf, sizeof(bpFuncBuf), "afn_bp%d", sVsEditBlueprintIdx);
+                    bpPrefix = bpFuncBuf;
+                    auto& bp = sBlueprintAssets[sVsEditBlueprintIdx];
+                    bpParamSig[0] = '\0';
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        char tmp[32]; snprintf(tmp, sizeof(tmp), "%sint p%d", pi > 0 ? ", " : "", pi);
+                        strncat(bpParamSig, tmp, sizeof(bpParamSig) - strlen(bpParamSig) - 1);
+                    }
+                } else {
+                    bpPrefix = "afn_script";
+                    bpParamSig[0] = '\0';
+                }
+
                 switch (infoNode.type) {
-                case VsNodeType::OnKeyPressed:
+                case VsNodeType::OnKeyPressed: {
                     editorCode =
                         "int key = tmResolveEventKey(ev);\n"
                         "bool fire = false;\n"
@@ -9268,12 +9306,25 @@ void FrameTick(float dt)
                         "    for (auto* a : acts) tmExecAction(a);\n"
                         "    tmInstantMove = false;\n"
                         "}";
-                    gbaCode =
-                        "if (key_hit(KEY_xxx)) {\n"
-                        "    // ... actions ...\n"
-                        "}";
+                    int ek = resolveEventKeyForDisplay(infoNode);
+                    if (ek >= 0)
+                        snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                            "static inline void %s_key_pressed(%s) {\n"
+                            "  if (key_hit(%s)) {\n"
+                            "    // ... actions ...\n"
+                            "  }\n"
+                            "}", bpPrefix, bpParamSig, gbaKeyName(ek));
+                    else
+                        snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                            "static inline void %s_key_pressed(%s) {\n"
+                            "  { // (all d-pad)\n"
+                            "    // ... actions ...\n"
+                            "  }\n"
+                            "}", bpPrefix, bpParamSig);
+                    gbaCode = gbaCodeBuf;
                     break;
-                case VsNodeType::OnKeyReleased:
+                }
+                case VsNodeType::OnKeyReleased: {
                     editorCode =
                         "int key = tmResolveEventKey(ev);\n"
                         "if (key >= 0 && key < 10 &&\n"
@@ -9281,12 +9332,17 @@ void FrameTick(float dt)
                         "    auto acts = tmCollectActions(ev.id);\n"
                         "    for (auto* a : acts) tmExecAction(a);\n"
                         "}";
-                    gbaCode =
-                        "if (key_released(KEY_xxx)) {\n"
+                    int ek = resolveEventKeyForDisplay(infoNode);
+                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                        "static inline void %s_key_released(%s) {\n"
+                        "  if (key_released(%s)) {\n"
                         "    // ... actions ...\n"
-                        "}";
+                        "  }\n"
+                        "}", bpPrefix, bpParamSig, ek >= 0 ? gbaKeyName(ek) : "KEY_xxx");
+                    gbaCode = gbaCodeBuf;
                     break;
-                case VsNodeType::OnKeyHeld:
+                }
+                case VsNodeType::OnKeyHeld: {
                     editorCode =
                         "int key = tmResolveEventKey(ev);\n"
                         "bool fire = (key >= 0) ? tmKeyDown(key) : true;\n"
@@ -9294,11 +9350,16 @@ void FrameTick(float dt)
                         "    auto acts = tmCollectActions(ev.id);\n"
                         "    for (auto* a : acts) tmExecAction(a);\n"
                         "}";
-                    gbaCode =
-                        "if (key_is_down(KEY_xxx)) {\n"
+                    int ek = resolveEventKeyForDisplay(infoNode);
+                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                        "static inline void %s_key_held(%s) {\n"
+                        "  if (key_is_down(%s)) {\n"
                         "    // ... actions ...\n"
-                        "}";
+                        "  }\n"
+                        "}", bpPrefix, bpParamSig, ek >= 0 ? gbaKeyName(ek) : "KEY_xxx");
+                    gbaCode = gbaCodeBuf;
                     break;
+                }
                 case VsNodeType::OnStart:
                     editorCode =
                         "if (!sScriptStartRan) {\n"
@@ -9306,19 +9367,21 @@ void FrameTick(float dt)
                         "    for (auto* a : acts) execActionPlay(a);\n"
                         "    sScriptStartRan = true;\n"
                         "}";
-                    gbaCode =
-                        "static inline void afn_script_start(void) {\n"
+                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                        "static inline void %s_start(%s) {\n"
                         "    // ... actions ...\n"
-                        "}";
+                        "}", bpPrefix, bpParamSig);
+                    gbaCode = gbaCodeBuf;
                     break;
                 case VsNodeType::OnUpdate:
                     editorCode =
                         "auto acts = tmCollectActions(ev.id);\n"
                         "for (auto* a : acts) tmExecAction(a);";
-                    gbaCode =
-                        "static inline void afn_script_update(void) {\n"
+                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                        "static inline void %s_update(%s) {\n"
                         "    // ... actions ...\n"
-                        "}";
+                        "}", bpPrefix, bpParamSig);
+                    gbaCode = gbaCodeBuf;
                     break;
                 case VsNodeType::OnCollision:
                     editorCode =
@@ -9326,10 +9389,11 @@ void FrameTick(float dt)
                         "    auto acts = collectActionsPlay(ev.id);\n"
                         "    for (auto* a : acts) execActionPlay(a);\n"
                         "}";
-                    gbaCode =
-                        "static inline void afn_script_collision(void) {\n"
+                    snprintf(gbaCodeBuf, sizeof(gbaCodeBuf),
+                        "static inline void %s_collision(%s) {\n"
                         "    // ... actions ...\n"
-                        "}";
+                        "}", bpPrefix, bpParamSig);
+                    gbaCode = gbaCodeBuf;
                     break;
                 case VsNodeType::MovePlayer: {
                     editorCode =
