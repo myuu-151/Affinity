@@ -321,6 +321,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
     // Sprite assets
     f << "#define AFN_ASSET_COUNT " << (int)assets.size() << "\n\n";
 
+    // Determine which assets are actually referenced by sprites in the scene.
+    // Only referenced assets get VRAM tiles — unreferenced ones are skipped to prevent
+    // OBJ VRAM overflow in Mode 4 where only 512 tiles (16KB) are usable.
+    std::vector<bool> assetReferencedBySprite(assets.size(), false);
+    for (size_t si = 0; si < sprites.size(); si++)
+        if (sprites[si].assetIdx >= 0 && sprites[si].assetIdx < (int)assets.size())
+            assetReferencedBySprite[sprites[si].assetIdx] = true;
+
     // Build one combined tile data array: all assets, all frames, packed contiguously
     std::vector<uint32_t> allTiles;
     std::vector<int> assetTileStart;
@@ -337,8 +345,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
         assetTilesPerFrame.push_back(tilesPerFrame);
 
         // Skip static frames for direction-based assets — they use DMA direction tiles
-        // and including them wastes OBJ VRAM (critical when 2+ direction assets fill 32KB)
         if (asset.hasDirections && !asset.dirAnimSets.empty()) continue;
+        // Skip unreferenced assets — no sprite uses them, saves OBJ VRAM
+        if (!assetReferencedBySprite[ai]) continue;
 
         for (size_t fi = 0; fi < asset.frames.size(); fi++)
         {
@@ -348,7 +357,6 @@ static bool GenerateMapData(const std::string& runtimeDir,
     }
 
     // Quantize and append per-asset directional sprites (multi-set support)
-    // Set 0's tiles go into allTiles (VRAM init). All sets go into dirAnimAllTiles (ROM for DMA).
     struct AssetDirInfo {
         bool has = false;
         int setCount = 0;
@@ -361,15 +369,6 @@ static bool GenerateMapData(const std::string& runtimeDir,
     std::vector<AssetDirInfo> assetDirInfos(assets.size());
     std::vector<uint32_t> dirAnimAllTiles; // ROM data for DMA streaming
     int dirVramNextTile = 0; // running VRAM tile offset for direction assets
-
-    // Determine which assets are actually referenced by sprites in the scene.
-    // Only referenced direction assets get VRAM slots — unreferenced ones still get
-    // ROM tile data (for future use) but no VRAM reservation, preventing OBJ VRAM overflow
-    // in Mode 4 where only 512 tiles (16KB) are usable.
-    std::vector<bool> assetReferencedBySprite(assets.size(), false);
-    for (size_t si = 0; si < sprites.size(); si++)
-        if (sprites[si].assetIdx >= 0 && sprites[si].assetIdx < (int)assets.size())
-            assetReferencedBySprite[sprites[si].assetIdx] = true;
 
     for (size_t ai = 0; ai < assets.size(); ai++)
     {
