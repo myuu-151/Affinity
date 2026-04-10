@@ -113,6 +113,7 @@ static std::vector<int> sTmObjFacing; // per-object facing direction (0=N..7=NW,
 static std::vector<float> sTmObjMoveRate; // per-object tile move speed (tiles/sec), set by Walk/Sprint
 static int sTmLastMoveDir = -1; // last direction pressed (0=Left,1=Right,2=Up,3=Down), -1=none
 static bool sTmPrevDirHeld[4] = {}; // previous frame held state for edge detection
+static bool sTmPrevKeyState[10] = {}; // previous frame key state for OnKeyReleased
 
 // ---- Scene instances ----
 struct TmScene {
@@ -371,6 +372,11 @@ static const int kVsMaxUndo = 32;
 static int sVsNodeInfoIdx = -1;   // index of node showing info popup
 static char sVsNodeCodeBuf[2048] = {}; // editable code buffer
 static bool sVsNodeInfoJustOpened = false;
+// Script code window (opened from node right-click "Edit")
+static bool sVsCodeWindowOpen = false;
+static int sVsCodeWindowNodeIdx = -1;
+static char sVsCodeWindowBuf[2048] = {}; // generated code (read-only display)
+static char sVsCodeWindowEditBuf[2048] = {}; // editable override
 
 static constexpr float kVsNodeW = 160.0f;
 static constexpr float kVsHeaderH = 30.0f;
@@ -818,14 +824,17 @@ static void SaveMapSceneState(MapScene& sc)
     sc.spriteCount = sSpriteCount;
     sc.camera = sCamObj;
     sc.camEditorScale = sCamObjEditorScale;
-    sc.vsNodes = sVsNodes;
-    sc.vsLinks = sVsLinks;
-    sc.vsAnnotations = sVsAnnotations;
-    sc.vsGroupPins = sVsGroupPins;
-    sc.vsNextId = sVsNextId;
-    sc.vsPanX = sVsPanX;
-    sc.vsPanY = sVsPanY;
-    sc.vsZoom = sVsZoom;
+    // Only save visual script state if we're editing the scene script (not a blueprint)
+    if (sVsEditSource != VsEditSource::Blueprint) {
+        sc.vsNodes = sVsNodes;
+        sc.vsLinks = sVsLinks;
+        sc.vsAnnotations = sVsAnnotations;
+        sc.vsGroupPins = sVsGroupPins;
+        sc.vsNextId = sVsNextId;
+        sc.vsPanX = sVsPanX;
+        sc.vsPanY = sVsPanY;
+        sc.vsZoom = sVsZoom;
+    }
 }
 
 static void LoadMapSceneState(const MapScene& sc)
@@ -1453,15 +1462,30 @@ static bool SaveProject(const std::string& path)
         }
     }
 
-    // Visual Script Nodes
+    // Visual Script Nodes — if editing a blueprint, save scene nodes from MapScene stash
     fprintf(f, "\n[VisualScript]\n");
-    fprintf(f, "vsNextId=%d\n", sVsNextId);
-    fprintf(f, "vsPan=%.1f,%.1f\n", sVsPanX, sVsPanY);
-    fprintf(f, "vsZoom=%.3f\n", sVsZoom);
-    fprintf(f, "vsNodeCount=%d\n", (int)sVsNodes.size());
-    for (int i = 0; i < (int)sVsNodes.size(); i++)
+    const std::vector<VsNode>* saveNodes = &sVsNodes;
+    const std::vector<VsLink>* saveLinks = &sVsLinks;
+    const std::vector<VsAnnotation>* saveAnnotations = &sVsAnnotations;
+    const std::vector<VsGroupPinMap>* saveGroupPins = &sVsGroupPins;
+    int saveNextId = sVsNextId;
+    float savePanX = sVsPanX, savePanY = sVsPanY, saveZoom = sVsZoom;
+    if (sVsEditSource == VsEditSource::Blueprint && sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size()) {
+        const MapScene& ms = sMapScenes[sMapSelectedScene];
+        saveNodes = &ms.vsNodes;
+        saveLinks = &ms.vsLinks;
+        saveAnnotations = &ms.vsAnnotations;
+        saveGroupPins = &ms.vsGroupPins;
+        saveNextId = ms.vsNextId;
+        savePanX = ms.vsPanX; savePanY = ms.vsPanY; saveZoom = ms.vsZoom;
+    }
+    fprintf(f, "vsNextId=%d\n", saveNextId);
+    fprintf(f, "vsPan=%.1f,%.1f\n", savePanX, savePanY);
+    fprintf(f, "vsZoom=%.3f\n", saveZoom);
+    fprintf(f, "vsNodeCount=%d\n", (int)saveNodes->size());
+    for (int i = 0; i < (int)saveNodes->size(); i++)
     {
-        const VsNode& n = sVsNodes[i];
+        const VsNode& n = (*saveNodes)[i];
         fprintf(f, "vsNode=%d,%d,%.1f,%.1f,%d,%d,%d,%d,%d\n",
             n.id, (int)n.type, n.x, n.y,
             n.paramInt[0], n.paramInt[1], n.paramInt[2], n.paramInt[3], n.groupId);
@@ -1471,23 +1495,23 @@ static bool SaveProject(const std::string& path)
         if (n.customCode[0])
             fprintf(f, "vsNodeCode=%d|%s\n", n.id, n.customCode);
     }
-    fprintf(f, "vsLinkCount=%d\n", (int)sVsLinks.size());
-    for (int i = 0; i < (int)sVsLinks.size(); i++)
+    fprintf(f, "vsLinkCount=%d\n", (int)saveLinks->size());
+    for (int i = 0; i < (int)saveLinks->size(); i++)
     {
-        const VsLink& lk = sVsLinks[i];
+        const VsLink& lk = (*saveLinks)[i];
         fprintf(f, "vsLink=%d,%d,%d|%d,%d,%d\n",
             lk.from.nodeId, lk.from.pinType, lk.from.pinIdx,
             lk.to.nodeId, lk.to.pinType, lk.to.pinIdx);
     }
-    fprintf(f, "vsAnnotCount=%d\n", (int)sVsAnnotations.size());
-    for (int i = 0; i < (int)sVsAnnotations.size(); i++)
+    fprintf(f, "vsAnnotCount=%d\n", (int)saveAnnotations->size());
+    for (int i = 0; i < (int)saveAnnotations->size(); i++)
     {
-        const VsAnnotation& ann = sVsAnnotations[i];
+        const VsAnnotation& ann = (*saveAnnotations)[i];
         fprintf(f, "vsAnnot=%.1f,%.1f,%.1f,%.1f|%s\n", ann.x, ann.y, ann.w, ann.h, ann.label);
     }
-    fprintf(f, "vsGroupPinCount=%d\n", (int)sVsGroupPins.size());
-    for (int i = 0; i < (int)sVsGroupPins.size(); i++) {
-        const auto& m = sVsGroupPins[i];
+    fprintf(f, "vsGroupPinCount=%d\n", (int)saveGroupPins->size());
+    for (int i = 0; i < (int)saveGroupPins->size(); i++) {
+        const auto& m = (*saveGroupPins)[i];
         fprintf(f, "vsGroupPin=%d,%d,%d,%d,%d,%d\n",
             m.groupNodeId, m.pinType, m.pinIdx, m.innerNodeId, m.innerPinType, m.innerPinIdx);
     }
@@ -2486,6 +2510,31 @@ static bool LoadProject(const std::string& path)
             LoadSceneState(sc);
     }
 
+    // Post-load cleanup: remove blueprint nodes that leaked into MapScene scripts
+    // (caused by a bug where SaveMapSceneState saved blueprint nodes as scene data)
+    for (int si = 0; si < (int)sMapScenes.size(); si++) {
+        MapScene& ms = sMapScenes[si];
+        for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++) {
+            const auto& bp = sBlueprintAssets[bi];
+            if (!ms.vsNodes.empty() && ms.vsNodes.size() == bp.nodes.size()) {
+                bool match = true;
+                for (int ni = 0; ni < (int)ms.vsNodes.size() && match; ni++) {
+                    if (ms.vsNodes[ni].id != bp.nodes[ni].id ||
+                        ms.vsNodes[ni].type != bp.nodes[ni].type)
+                        match = false;
+                }
+                if (match) {
+                    ms.vsNodes.clear();
+                    ms.vsLinks.clear();
+                    ms.vsAnnotations.clear();
+                    ms.vsGroupPins.clear();
+                    ms.vsNextId = 1;
+                    break;
+                }
+            }
+        }
+    }
+
     // Load selected map scene into active editor state
     if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
         LoadMapSceneState(sMapScenes[sMapSelectedScene]);
@@ -3031,6 +3080,9 @@ static void DrawTabBar()
             // Save tilemap object state for restore on Stop
             sSavedTmObjects = sTmObjects;
             memset(sTmMoveAccum, 0, sizeof(sTmMoveAccum));
+            memset(sTmPrevDirHeld, 0, sizeof(sTmPrevDirHeld));
+            memset(sTmPrevKeyState, 0, sizeof(sTmPrevKeyState));
+            sTmLastMoveDir = -1;
             sTmObjFacing.assign(sTmObjects.size(), 4); // default facing South
             sTmObjMoveRate.assign(sTmObjects.size(), 6.0f); // default move speed
         }
@@ -7779,6 +7831,7 @@ void FrameTick(float dt)
                         if (count == 0) return ev.paramInt[0];
                         return -1;
                     };
+                    bool tmInstantMove = false; // set true for OnKeyPressed events
                     auto tmExecAction = [&](const VsNode* action) {
                         VsNodeType t = action->type;
                         if (t == VsNodeType::MovePlayer) {
@@ -7788,17 +7841,31 @@ void FrameTick(float dt)
                             // facing: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW
                             int dirKeys[] = { 8, 9, 6, 7 }; // A, D, W, S
                             int dirToFacing[] = { 6, 2, 0, 4 }; // Left=W, Right=E, Up=N, Down=S
-                            if (dir >= 0 && dir < 4 && tmKeyDown(dirKeys[dir]) && sTmLastMoveDir == dir) {
-                                if (oi < (int)sTmObjFacing.size())
-                                    sTmObjFacing[oi] = dirToFacing[dir];
-                                sTmMoveAccum[dir] += tmMoveRate * dt;
-                                if (sTmMoveAccum[dir] >= 1.0f) {
-                                    int steps = (int)sTmMoveAccum[dir];
-                                    sTmMoveAccum[dir] -= steps;
-                                    if (dir == 0) obj.tileX -= steps;       // Left
-                                    else if (dir == 1) obj.tileX += steps;  // Right
-                                    else if (dir == 2) obj.tileY -= steps;  // Up
-                                    else if (dir == 3) obj.tileY += steps;  // Down
+                            if (dir >= 0 && dir < 4) {
+                                if (tmInstantMove) {
+                                    // OnKeyPressed: immediate single-tile move, only if this dir key was just pressed
+                                    ImGuiKey dirImKeys[] = { ImGuiKey_A, ImGuiKey_D, ImGuiKey_W, ImGuiKey_S };
+                                    if (ImGui::IsKeyPressed(dirImKeys[dir])) {
+                                        if (oi < (int)sTmObjFacing.size())
+                                            sTmObjFacing[oi] = dirToFacing[dir];
+                                        if (dir == 0) obj.tileX -= 1;
+                                        else if (dir == 1) obj.tileX += 1;
+                                        else if (dir == 2) obj.tileY -= 1;
+                                        else if (dir == 3) obj.tileY += 1;
+                                    }
+                                } else if (tmKeyDown(dirKeys[dir]) && sTmLastMoveDir == dir) {
+                                    if (oi < (int)sTmObjFacing.size())
+                                        sTmObjFacing[oi] = dirToFacing[dir];
+                                    // OnKeyHeld: accumulator-based continuous move
+                                    sTmMoveAccum[dir] += tmMoveRate * dt;
+                                    if (sTmMoveAccum[dir] >= 1.0f) {
+                                        int steps = (int)sTmMoveAccum[dir];
+                                        sTmMoveAccum[dir] -= steps;
+                                        if (dir == 0) obj.tileX -= steps;
+                                        else if (dir == 1) obj.tileX += steps;
+                                        else if (dir == 2) obj.tileY -= steps;
+                                        else if (dir == 3) obj.tileY += steps;
+                                    }
                                 }
                             }
                         }
@@ -7850,7 +7917,20 @@ void FrameTick(float dt)
                                 default: return false;
                                 }
                             };
-                            if (key >= 0 && tmKeyHit(key)) {
+                            // key < 0 means multiple keys connected — fire if ANY key was just pressed
+                            bool fire = false;
+                            if (key >= 0) { fire = tmKeyHit(key); }
+                            else { for (int k = 0; k < 10; k++) if (tmKeyHit(k)) { fire = true; break; } }
+                            if (fire) {
+                                tmInstantMove = true;
+                                auto acts = tmCollectActions(ev.id);
+                                for (auto* a : acts) tmExecAction(a);
+                                tmInstantMove = false;
+                            }
+                        }
+                        if (ev.type == VsNodeType::OnKeyReleased) {
+                            int key = tmResolveEventKey(ev);
+                            if (key >= 0 && key < 10 && sTmPrevKeyState[key] && !tmKeyDown(key)) {
                                 auto acts = tmCollectActions(ev.id);
                                 for (auto* a : acts) tmExecAction(a);
                             }
@@ -7867,6 +7947,9 @@ void FrameTick(float dt)
                 if (!ImGui::IsKeyDown(ImGuiKey_D)) sTmMoveAccum[1] = 0.0f;
                 if (!ImGui::IsKeyDown(ImGuiKey_W)) sTmMoveAccum[2] = 0.0f;
                 if (!ImGui::IsKeyDown(ImGuiKey_S)) sTmMoveAccum[3] = 0.0f;
+
+                // Update previous key state for OnKeyReleased
+                for (int ki = 0; ki < 10; ki++) sTmPrevKeyState[ki] = tmKeyDown(ki);
             }
         }
 
@@ -8349,7 +8432,12 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::Object: {
                     int oi = n.paramInt[0];
-                    if (oi >= 0 && oi < sSpriteCount) {
+                    int kind = n.paramInt[1];
+                    if (kind == 0 && oi >= 0 && oi < (int)sSpriteAssets.size())
+                        sub = sSpriteAssets[oi].name.c_str();
+                    else if (kind == 1 && oi >= 0 && oi < (int)sMeshAssets.size())
+                        sub = sMeshAssets[oi].name.c_str();
+                    else if (kind == 2 && oi >= 0 && oi < sSpriteCount) {
                         int ai2 = sSprites[oi].assetIdx;
                         if (ai2 >= 0 && ai2 < (int)sSpriteAssets.size())
                             sub = sSpriteAssets[ai2].name.c_str();
@@ -9220,34 +9308,112 @@ void FrameTick(float dt)
                 case VsNodeType::DestroyObject:
                     snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "// destroy object %s", fmtInt(infoNode.id, 0, "<id>"));
                     defaultCode = defaultCodeBuf; break;
-                // Events
-                case VsNodeType::OnKeyPressed: {
-                    VsNode* src = resolveDataIn(infoNode.id, 0);
-                    if (src && src->paramInt[0] >= 0 && src->paramInt[0] < kVsKeyCount)
-                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_hit(KEY_%s)) { ... }", sVsKeyNames[src->paramInt[0]]);
-                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_hit(<key>)) { ... }");
-                    defaultCode = defaultCodeBuf; break;
-                }
-                case VsNodeType::OnKeyReleased: {
-                    VsNode* src = resolveDataIn(infoNode.id, 0);
-                    if (src && src->paramInt[0] >= 0 && src->paramInt[0] < kVsKeyCount)
-                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_released(KEY_%s)) { ... }", sVsKeyNames[src->paramInt[0]]);
-                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_released(<key>)) { ... }");
-                    defaultCode = defaultCodeBuf; break;
-                }
-                case VsNodeType::OnKeyHeld: {
-                    VsNode* src = resolveDataIn(infoNode.id, 0);
-                    if (src && src->paramInt[0] >= 0 && src->paramInt[0] < kVsKeyCount)
-                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(KEY_%s)) { ... }", sVsKeyNames[src->paramInt[0]]);
-                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(<key>)) { ... }");
-                    defaultCode = defaultCodeBuf; break;
-                }
+                // Events — generate full code chunk with action body
+                case VsNodeType::OnKeyPressed:
+                case VsNodeType::OnKeyReleased:
+                case VsNodeType::OnKeyHeld:
                 case VsNodeType::OnStart:
-                    defaultCode = "// runs once at scene init"; break;
                 case VsNodeType::OnUpdate:
-                    defaultCode = "// runs every frame"; break;
-                case VsNodeType::OnCollision:
-                    defaultCode = "// runs on player collision"; break;
+                case VsNodeType::OnCollision: {
+                    // Collect action chain from this event via exec links
+                    auto emitActionCode = [&](const VsNode& an) -> std::string {
+                        if (an.customCode[0]) return std::string("    ") + an.customCode;
+                        switch (an.type) {
+                        case VsNodeType::MovePlayer: {
+                            VsNode* d = resolveDataIn(an.id, 0);
+                            int dir = d ? d->paramInt[0] : 0;
+                            const char* dk[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
+                            const char* dv[] = { "afn_input_right -= 256", "afn_input_right += 256",
+                                                 "afn_input_fwd += 256", "afn_input_fwd -= 256" };
+                            if (dir >= 0 && dir < 4) { char b[128]; snprintf(b, sizeof(b), "    if (key_is_down(%s)) %s;", dk[dir], dv[dir]); return b; }
+                            return "    // move player <dir>";
+                        }
+                        case VsNodeType::Jump: { char b[128]; snprintf(b, sizeof(b), "    if (player_on_ground) player_vy = %s;", fmtFloat(an.id, 0, "<force>")); return b; }
+                        case VsNodeType::DampenJump: { char b[128]; snprintf(b, sizeof(b), "    if (player_vy > 0) player_vy = (player_vy * %s) >> 8;", fmtFloat(an.id, 0, "<factor>")); return b; }
+                        case VsNodeType::Walk: {
+                            VsNode* s = resolveDataIn(an.id, 0);
+                            if (s) { int sp = resolveInt(an.id, 0, 37); char b[128]; snprintf(b, sizeof(b), "    afn_move_speed = %d;", (int)(sp * 37.0f / 35.0f)); return b; }
+                            return "    afn_move_speed = <speed>;";
+                        }
+                        case VsNodeType::Sprint: {
+                            VsNode* s = resolveDataIn(an.id, 0);
+                            if (s) { int sp = resolveInt(an.id, 0, 56); char b[128]; snprintf(b, sizeof(b), "    afn_move_speed = %d;", (int)(sp * 37.0f / 35.0f)); return b; }
+                            return "    afn_move_speed = <speed>;";
+                        }
+                        case VsNodeType::OrbitCamera: {
+                            VsNode* d = resolveDataIn(an.id, 0);
+                            int dir = d ? d->paramInt[0] : 1;
+                            const char* k = (dir == 0) ? "KEY_L" : "KEY_R";
+                            const char* sg = (dir == 0) ? "-" : "+";
+                            char b[128]; snprintf(b, sizeof(b), "    if (key_is_down(%s)) orbit_angle %s= %s;", k, sg, fmtInt(an.id, 1, "<speed>")); return b;
+                        }
+                        case VsNodeType::SetGravity: { char b[128]; snprintf(b, sizeof(b), "    afn_gravity = %s;", fmtFloat(an.id, 0, "<value>")); return b; }
+                        case VsNodeType::SetMaxFall: { char b[128]; snprintf(b, sizeof(b), "    afn_terminal_vel = %s;", fmtFloat(an.id, 0, "<value>")); return b; }
+                        case VsNodeType::AutoOrbit: { char b[128]; snprintf(b, sizeof(b), "    afn_auto_orbit_speed = %s;", fmtInt(an.id, 0, "<speed>")); return b; }
+                        case VsNodeType::PlayAnim: { char b[128]; snprintf(b, sizeof(b), "    afn_play_anim = %s;", fmtInt(an.id, 0, "<anim>")); return b; }
+                        case VsNodeType::ChangeScene: { char b[128]; snprintf(b, sizeof(b), "    afn_pending_scene = %s;", fmtInt(an.id, 0, "<id>")); return b; }
+                        case VsNodeType::SetVariable: { char b[128]; snprintf(b, sizeof(b), "    vars[%s] = %s;", fmtInt(an.id, 0, "<slot>"), fmtInt(an.id, 1, "<value>")); return b; }
+                        case VsNodeType::AddVariable: { char b[128]; snprintf(b, sizeof(b), "    vars[%s] += %s;", fmtInt(an.id, 0, "<slot>"), fmtInt(an.id, 1, "<amount>")); return b; }
+                        case VsNodeType::DestroyObject: { char b[128]; snprintf(b, sizeof(b), "    // destroy object %s", fmtInt(an.id, 0, "<id>")); return b; }
+                        default: return "    // (unsupported)";
+                        }
+                    };
+                    // Walk exec chain
+                    std::vector<const VsNode*> chain;
+                    std::vector<int> front;
+                    std::vector<bool> vis(10000, false);
+                    for (auto& lk : sVsLinks)
+                        if (lk.from.nodeId == infoNode.id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                            front.push_back(lk.to.nodeId);
+                    int safety = 0;
+                    while (!front.empty() && safety < 256) {
+                        int nid = front.front(); front.erase(front.begin());
+                        if (nid < 0 || nid >= (int)vis.size() || vis[nid]) continue;
+                        vis[nid] = true; safety++;
+                        for (auto& nd : sVsNodes)
+                            if (nd.id == nid) { chain.push_back(&nd); break; }
+                        for (auto& lk : sVsLinks)
+                            if (lk.from.nodeId == nid && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                front.push_back(lk.to.nodeId);
+                    }
+                    // Build code string
+                    std::string code;
+                    if (infoNode.type == VsNodeType::OnKeyPressed || infoNode.type == VsNodeType::OnKeyReleased || infoNode.type == VsNodeType::OnKeyHeld) {
+                        const char* fn = (infoNode.type == VsNodeType::OnKeyPressed) ? "key_hit" :
+                                         (infoNode.type == VsNodeType::OnKeyReleased) ? "key_released" : "key_is_down";
+                        // Resolve all connected keys
+                        std::vector<int> keys;
+                        for (auto& lk : sVsLinks)
+                            if (lk.to.nodeId == infoNode.id && lk.to.pinType == 3 && lk.to.pinIdx == 0)
+                                for (auto& nd : sVsNodes)
+                                    if (nd.id == lk.from.nodeId && nd.paramInt[0] >= 0 && nd.paramInt[0] < kVsKeyCount)
+                                        keys.push_back(nd.paramInt[0]);
+                        if (keys.size() == 1) {
+                            code = std::string("if (") + fn + "(KEY_" + sVsKeyNames[keys[0]] + ")) {\n";
+                        } else if (keys.size() > 1) {
+                            code = "if (";
+                            for (int ki = 0; ki < (int)keys.size(); ki++) {
+                                if (ki > 0) code += " || ";
+                                code += std::string(fn) + "(KEY_" + sVsKeyNames[keys[ki]] + ")";
+                            }
+                            code += ") {\n";
+                        } else {
+                            code = std::string("if (") + fn + "(<key>)) {\n";
+                        }
+                    } else if (infoNode.type == VsNodeType::OnStart) {
+                        code = "void afn_script_start(void) {\n";
+                    } else if (infoNode.type == VsNodeType::OnUpdate) {
+                        code = "void afn_script_update(void) {\n";
+                    } else {
+                        code = "void afn_script_collision(void) {\n";
+                    }
+                    for (auto* an : chain)
+                        code += emitActionCode(*an) + "\n";
+                    code += "}";
+                    strncpy(defaultCodeBuf, code.c_str(), sizeof(defaultCodeBuf) - 1);
+                    defaultCodeBuf[sizeof(defaultCodeBuf) - 1] = '\0';
+                    defaultCode = defaultCodeBuf; break;
+                }
                 // Data nodes
                 case VsNodeType::Integer:
                     snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "%d", infoNode.paramInt[0]);
@@ -9297,35 +9463,22 @@ void FrameTick(float dt)
                 default: break;
                 }
 
-                // Editable code section
-                ImGui::Separator();
-                ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Code");
-                ImGui::Spacing();
-                if (!infoNode.customCode[0]) {
-                    // No custom override — show live-resolved default as read-only
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.8f, 0.6f, 1.0f));
-                    ImGui::TextWrapped("%s", defaultCode[0] ? defaultCode : "(no code)");
-                    ImGui::PopStyleColor();
-                    ImGui::Spacing();
-                    if (defaultCode[0] && ImGui::Button("Edit")) {
-                        strncpy(infoNode.customCode, defaultCode, sizeof(infoNode.customCode) - 1);
-                        memcpy(sVsNodeCodeBuf, infoNode.customCode, sizeof(sVsNodeCodeBuf));
+                // "View Code" button opens standalone script window
+                if (defaultCode[0]) {
+                    ImGui::Separator();
+                    if (ImGui::Button("View Code")) {
+                        sVsCodeWindowOpen = true;
+                        sVsCodeWindowNodeIdx = sVsNodeInfoIdx;
+                        strncpy(sVsCodeWindowBuf, defaultCode, sizeof(sVsCodeWindowBuf) - 1);
+                        sVsCodeWindowBuf[sizeof(sVsCodeWindowBuf) - 1] = '\0';
+                        strncpy(sVsCodeWindowEditBuf, infoNode.customCode, sizeof(sVsCodeWindowEditBuf) - 1);
+                        sVsCodeWindowEditBuf[sizeof(sVsCodeWindowEditBuf) - 1] = '\0';
+                        ImGui::CloseCurrentPopup();
                     }
-                } else {
-                    // Custom code — editable
-                    ImGui::PushItemWidth(-1);
-                    ImGui::InputTextMultiline("##NodeCode", sVsNodeCodeBuf, sizeof(sVsNodeCodeBuf),
-                        ImVec2(-1, 100), ImGuiInputTextFlags_AllowTabInput);
-                    ImGui::PopItemWidth();
-                }
-                if (infoNode.customCode[0] && ImGui::Button("Save")) {
-                    memcpy(infoNode.customCode, sVsNodeCodeBuf, sizeof(infoNode.customCode));
-                    ImGui::CloseCurrentPopup();
-                }
-                if (infoNode.customCode[0]) ImGui::SameLine();
-                if (infoNode.customCode[0] && ImGui::Button("Reset")) {
-                    sVsNodeCodeBuf[0] = '\0';
-                    infoNode.customCode[0] = '\0';
+                    if (infoNode.customCode[0]) {
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "(has custom code)");
+                    }
                 }
 
                 // "Expose as Parameter" — only in blueprint editing mode, only for data nodes
@@ -9366,6 +9519,54 @@ void FrameTick(float dt)
                 }
             }
             ImGui::EndPopup();
+        }
+
+        // ---- Script Code Window (standalone, resizable) ----
+        if (sVsCodeWindowOpen && sVsCodeWindowNodeIdx >= 0 && sVsCodeWindowNodeIdx < (int)sVsNodes.size()) {
+            VsNode& cwNode = sVsNodes[sVsCodeWindowNodeIdx];
+            const char* nodeName = sVsNodeDefs[(int)cwNode.type].name;
+            char winTitle[64];
+            snprintf(winTitle, sizeof(winTitle), "Code: %s###ScriptCodeWin", nodeName);
+            ImGui::SetNextWindowSize(ImVec2(500, 350), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin(winTitle, &sVsCodeWindowOpen)) {
+                // Generated code (read-only, monospace)
+                ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Generated Code");
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.1f, 0.1f, 0.12f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.9f, 0.6f, 1.0f));
+                float genHeight = cwNode.customCode[0] ? ImGui::GetContentRegionAvail().y * 0.45f : ImGui::GetContentRegionAvail().y - 30;
+                ImGui::InputTextMultiline("##GenCode", sVsCodeWindowBuf, sizeof(sVsCodeWindowBuf),
+                    ImVec2(-1, genHeight), ImGuiInputTextFlags_ReadOnly);
+                ImGui::PopStyleColor(2);
+
+                // Custom override section
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.5f, 1.0f), "Custom Override");
+                ImGui::SameLine();
+                if (!cwNode.customCode[0]) {
+                    if (ImGui::SmallButton("Enable")) {
+                        strncpy(cwNode.customCode, sVsCodeWindowBuf, sizeof(cwNode.customCode) - 1);
+                        strncpy(sVsCodeWindowEditBuf, cwNode.customCode, sizeof(sVsCodeWindowEditBuf) - 1);
+                        sProjectDirty = true;
+                    }
+                } else {
+                    if (ImGui::SmallButton("Reset")) {
+                        cwNode.customCode[0] = '\0';
+                        sVsCodeWindowEditBuf[0] = '\0';
+                        sProjectDirty = true;
+                    }
+                }
+                if (cwNode.customCode[0]) {
+                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.1f, 0.08f, 1.0f));
+                    ImGui::InputTextMultiline("##EditCode", sVsCodeWindowEditBuf, sizeof(sVsCodeWindowEditBuf),
+                        ImVec2(-1, -30), ImGuiInputTextFlags_AllowTabInput);
+                    ImGui::PopStyleColor();
+                    if (ImGui::Button("Save")) {
+                        strncpy(cwNode.customCode, sVsCodeWindowEditBuf, sizeof(cwNode.customCode) - 1);
+                        sProjectDirty = true;
+                    }
+                }
+            }
+            ImGui::End();
         }
 
         if (sVsShowContextMenu) {
@@ -9586,30 +9787,62 @@ void FrameTick(float dt)
                 break;
             }
             case VsNodeType::Object: {
+                // paramInt[1]: 0=Sprite Asset, 1=Mesh Asset, 2=Scene Sprite
                 ImGui::Text("Object");
-                if (sSpriteCount == 0) {
-                    ImGui::Text("(no objects in scene)");
+                const char* objKinds[] = { "Sprite", "Mesh", "Instance" };
+                int objKind = std::clamp(n.paramInt[1], 0, 2);
+                ImGui::PushItemWidth(Scaled(70));
+                if (ImGui::Combo("##ObjKind", &objKind, objKinds, 3))
+                    n.paramInt[1] = objKind;
+                ImGui::PopItemWidth();
+
+                if (objKind == 0) {
+                    // Sprite assets
+                    const char* preview = (n.paramInt[0] >= 0 && n.paramInt[0] < (int)sSpriteAssets.size())
+                        ? sSpriteAssets[n.paramInt[0]].name.c_str() : "None";
+                    if (ImGui::BeginCombo("##ObjSpr", preview)) {
+                        for (int si = 0; si < (int)sSpriteAssets.size(); si++) {
+                            char itemLabel[64];
+                            snprintf(itemLabel, sizeof(itemLabel), "[%d] %s", si, sSpriteAssets[si].name.c_str());
+                            if (ImGui::Selectable(itemLabel, si == n.paramInt[0]))
+                                n.paramInt[0] = si;
+                            if (si == n.paramInt[0]) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
+                    }
+                } else if (objKind == 1) {
+                    // Mesh assets
+                    const char* preview = (n.paramInt[0] >= 0 && n.paramInt[0] < (int)sMeshAssets.size())
+                        ? sMeshAssets[n.paramInt[0]].name.c_str() : "None";
+                    if (ImGui::BeginCombo("##ObjMesh", preview)) {
+                        for (int mi = 0; mi < (int)sMeshAssets.size(); mi++) {
+                            char itemLabel[64];
+                            snprintf(itemLabel, sizeof(itemLabel), "[%d] %s", mi, sMeshAssets[mi].name.c_str());
+                            if (ImGui::Selectable(itemLabel, mi == n.paramInt[0]))
+                                n.paramInt[0] = mi;
+                            if (mi == n.paramInt[0]) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
+                    }
                 } else {
+                    // Scene sprite instances (original behavior)
                     const char* preview = (n.paramInt[0] >= 0 && n.paramInt[0] < sSpriteCount)
                         ? (sSprites[n.paramInt[0]].assetIdx >= 0 && sSprites[n.paramInt[0]].assetIdx < (int)sSpriteAssets.size()
-                            ? sSpriteAssets[sSprites[n.paramInt[0]].assetIdx].name.c_str()
-                            : "(no asset)")
+                            ? sSpriteAssets[sSprites[n.paramInt[0]].assetIdx].name.c_str() : "(no asset)")
                         : "None";
                     char objLabel[64];
                     if (n.paramInt[0] >= 0 && n.paramInt[0] < sSpriteCount)
                         snprintf(objLabel, sizeof(objLabel), "[%d] %s", n.paramInt[0], preview);
-                    else
-                        snprintf(objLabel, sizeof(objLabel), "None");
-                    if (ImGui::BeginCombo("##Obj", objLabel)) {
+                    else snprintf(objLabel, sizeof(objLabel), "None");
+                    if (ImGui::BeginCombo("##ObjInst", objLabel)) {
                         for (int si = 0; si < sSpriteCount; si++) {
                             const char* assetName = (sSprites[si].assetIdx >= 0 && sSprites[si].assetIdx < (int)sSpriteAssets.size())
                                 ? sSpriteAssets[sSprites[si].assetIdx].name.c_str() : "(no asset)";
                             char itemLabel[64];
                             snprintf(itemLabel, sizeof(itemLabel), "[%d] %s", si, assetName);
-                            bool sel = (si == n.paramInt[0]);
-                            if (ImGui::Selectable(itemLabel, sel))
+                            if (ImGui::Selectable(itemLabel, si == n.paramInt[0]))
                                 n.paramInt[0] = si;
-                            if (sel) ImGui::SetItemDefaultFocus();
+                            if (si == n.paramInt[0]) ImGui::SetItemDefaultFocus();
                         }
                         ImGui::EndCombo();
                     }
