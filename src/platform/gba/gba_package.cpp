@@ -1766,17 +1766,32 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
             // Helper: emit action calls with optional key guard
             auto emitKeyBlock = [&](const EventChain& c, const char* keyCheck) {
-                int key = resolveEventKey(*c.event);
-                if (key >= 0) {
+                // Collect all keys connected to this event node
+                std::vector<int> keys;
+                for (auto& l : script.links)
+                    if (l.toNodeId == c.event->id && l.toPinType == 3 && l.toPinIdx == 0) {
+                        auto* dn = findNode(l.fromNodeId);
+                        if (dn) keys.push_back(dn->paramInt[0]);
+                    }
+                if (keys.empty()) keys.push_back(c.event->paramInt[0]);
+
+                if (keys.size() == 1) {
                     char buf[64];
-                    snprintf(buf, sizeof(buf), keyCheck, resolveKeyName(key));
+                    snprintf(buf, sizeof(buf), keyCheck, resolveKeyName(keys[0]));
                     f << "  " << buf << " {\n";
                     for (auto* a : c.actions)
                         emitActionCall(a);
                     f << "  }\n";
                 } else {
-                    // Ambiguous key — emit actions without guard (actions have own checks)
-                    f << "  { // (all d-pad)\n";
+                    // Multiple keys: OR them together
+                    f << "  if (";
+                    for (size_t ki = 0; ki < keys.size(); ki++) {
+                        if (ki > 0) f << " || ";
+                        char buf[64];
+                        snprintf(buf, sizeof(buf), keyCheck, resolveKeyName(keys[ki]));
+                        f << buf;
+                    }
+                    f << ") {\n";
                     for (auto* a : c.actions)
                         emitActionCall(a);
                     f << "  }\n";
@@ -2093,15 +2108,31 @@ static bool GenerateMapData(const std::string& runtimeDir,
             };
 
             auto bpEmitKeyBlock = [&](const BpChain& c, const char* keyCheck) {
-                int key = bpResolveEventKey(*c.event);
-                if (key >= 0) {
+                // Collect all keys connected to this event node
+                std::vector<int> keys;
+                for (auto& lk : bpScript.links)
+                    if (lk.toNodeId == c.event->id && lk.toPinType == 3 && lk.toPinIdx == 0) {
+                        auto* dn = bpFindNode(lk.fromNodeId);
+                        if (dn) keys.push_back(dn->paramInt[0]);
+                    }
+                if (keys.empty()) keys.push_back(c.event->paramInt[0]);
+
+                if (keys.size() == 1) {
                     char buf[64];
-                    snprintf(buf, sizeof(buf), keyCheck, bpResolveKeyName(key));
+                    snprintf(buf, sizeof(buf), keyCheck, bpResolveKeyName(keys[0]));
                     f << "  " << buf << " {\n";
                     for (auto* a : c.actions) bpEmitActionCall(a);
                     f << "  }\n";
                 } else {
-                    f << "  {\n";
+                    // Multiple keys: OR them together
+                    f << "  if (";
+                    for (size_t ki = 0; ki < keys.size(); ki++) {
+                        if (ki > 0) f << " || ";
+                        char buf[64];
+                        snprintf(buf, sizeof(buf), keyCheck, bpResolveKeyName(keys[ki]));
+                        f << buf;
+                    }
+                    f << ") {\n";
                     for (auto* a : c.actions) bpEmitActionCall(a);
                     f << "  }\n";
                 }
