@@ -303,6 +303,31 @@ enum class VsNodeType : int {
     Average,        // (A + B) / 2
     GetHP2,         // alias: get HP as condition (>0 = alive)
     PingPong,       // bouncing value between min and max
+    // Batch 5: Advanced gameplay
+    Print,          // debug print integer to mGBA log
+    SetColor,       // change sprite palette color
+    SwapSprite,     // swap sprite asset at runtime
+    GetAngle,       // angle between two sprites (brads)
+    GetPlayerY,     // read player Y position (height)
+    GetSpriteY,     // read any sprite's Y position
+    SetSpriteY,     // set sprite Y position
+    WaitUntil,      // block exec until condition is true
+    RepeatWhile,    // keep firing while condition is true
+    StopAll,        // stop all running scripts
+    SetLayer,       // set sprite draw priority layer
+    GetLayer,       // read sprite draw priority
+    SetAlpha,       // set sprite alpha/blend level
+    Flash,          // flash sprite white for N frames
+    Delay,          // delay downstream exec by N frames (non-blocking)
+    GetVelocityY,   // read player vertical velocity
+    SetSpriteScale, // set specific sprite's scale
+    RotateSprite,   // rotate sprite by angle
+    GetRotation,    // get sprite rotation angle
+    SetHP2,         // set HP with clamping to max
+    HealHP,         // add HP (clamped to max)
+    GetMaxHP,       // read max HP value
+    SetMaxHP,       // set max HP for sprite
+    IsAlive,        // gate: passes if sprite HP > 0
     COUNT
 };
 
@@ -465,6 +490,31 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Average",        0xFF666688, 0, 0, 2, 1, {"A", "B"}, {"Result"}, {} },
     { "Is Alive",       0xFF666688, 0, 0, 1, 1, {"Object (int)"}, {"Alive"}, {} },
     { "Ping Pong",      0xFF666688, 0, 0, 2, 1, {"Range", "Speed"}, {"Value"}, {} },
+    // Batch 5: Advanced gameplay
+    { "Print",          0xFF993399, 1, 1, 1, 0, {"Value (int)"}, {}, {} },
+    { "Set Color",      0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Color (int)"}, {}, {} },
+    { "Swap Sprite",    0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Asset (int)"}, {}, {} },
+    { "Get Angle",      0xFF666688, 0, 0, 2, 1, {"Obj A (int)", "Obj B (int)"}, {"Angle"}, {} },
+    { "Get Player Y",   0xFF666688, 0, 0, 0, 1, {}, {"Y"}, {} },
+    { "Get Sprite Y",   0xFF666688, 0, 0, 1, 1, {"Object (int)"}, {"Y"}, {} },
+    { "Set Sprite Y",   0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Y (int)"}, {}, {} },
+    { "Wait Until",     0xFF885533, 1, 1, 1, 0, {"Condition"}, {}, {} },
+    { "Repeat While",   0xFF885533, 1, 1, 1, 0, {"Condition"}, {}, {} },
+    { "Stop All",       0xFF3355AA, 1, 0, 0, 0, {}, {}, {} },
+    { "Set Layer",      0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Layer (int)"}, {}, {} },
+    { "Get Layer",      0xFF666688, 0, 0, 1, 1, {"Object (int)"}, {"Layer"}, {} },
+    { "Set Alpha",      0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Alpha (int)"}, {}, {} },
+    { "Flash",          0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Frames (int)"}, {}, {} },
+    { "Delay",          0xFF885533, 1, 1, 1, 0, {"Frames (int)"}, {}, {} },
+    { "Get Velocity Y", 0xFF666688, 0, 0, 0, 1, {}, {"VelY"}, {} },
+    { "Set Sprite Scale",0xFF3355AA,1, 1, 2, 0, {"Object (int)", "Scale (float)"}, {}, {} },
+    { "Rotate Sprite",  0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Angle (int)"}, {}, {} },
+    { "Get Rotation",   0xFF666688, 0, 0, 1, 1, {"Object (int)"}, {"Angle"}, {} },
+    { "Set HP (Clamped)",0xFF3355AA,1, 1, 2, 0, {"Object (int)", "HP (int)"}, {}, {} },
+    { "Heal HP",        0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Amount (int)"}, {}, {} },
+    { "Get Max HP",     0xFF666688, 0, 0, 1, 1, {"Object (int)"}, {"MaxHP"}, {} },
+    { "Set Max HP",     0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "MaxHP (int)"}, {}, {} },
+    { "Is Alive",       0xFF885533, 1, 1, 1, 0, {"Object (int)"}, {}, {} },
 };
 
 struct VsNode {
@@ -7467,6 +7517,13 @@ void FrameTick(float dt)
                                 front.push_back(lk.to.nodeId);
                         continue;
                     }
+                    if (an->type == VsNodeType::IsAlive) {
+                        // IsAlive gate - always pass through in editor preview
+                        for (auto& lk : sVsLinks)
+                            if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                front.push_back(lk.to.nodeId);
+                        continue;
+                    }
                     acts.push_back(an);
                     for (auto& lk : sVsLinks)
                         if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
@@ -9814,6 +9871,30 @@ void FrameTick(float dt)
                 case VsNodeType::Average:       desc = "Outputs (A + B) / 2."; break;
                 case VsNodeType::GetHP2:        desc = "Outputs 1 if sprite's HP > 0 (alive), 0 if dead."; break;
                 case VsNodeType::PingPong:      desc = "Outputs a value that bounces between 0 and Range based on time and Speed."; break;
+                case VsNodeType::Print:         desc = "Debug: prints an integer value to mGBA log output."; break;
+                case VsNodeType::SetColor:      desc = "Changes a sprite's palette color index at runtime."; break;
+                case VsNodeType::SwapSprite:    desc = "Swaps a sprite's asset/tileset to a different one at runtime."; break;
+                case VsNodeType::GetAngle:      desc = "Outputs the angle (in brads) between two sprites."; break;
+                case VsNodeType::GetPlayerY:    desc = "Outputs the player's Y position (height)."; break;
+                case VsNodeType::GetSpriteY:    desc = "Outputs a sprite's Y position (height)."; break;
+                case VsNodeType::SetSpriteY:    desc = "Sets a sprite's Y position (height)."; break;
+                case VsNodeType::WaitUntil:     desc = "Blocks execution until the connected condition becomes true."; break;
+                case VsNodeType::RepeatWhile:   desc = "Keeps firing downstream every frame while condition is true."; break;
+                case VsNodeType::StopAll:       desc = "Stops all running script chains immediately."; break;
+                case VsNodeType::SetLayer:      desc = "Sets a sprite's draw priority layer (0=back, 3=front)."; break;
+                case VsNodeType::GetLayer:      desc = "Outputs a sprite's current draw priority layer."; break;
+                case VsNodeType::SetAlpha:      desc = "Sets a sprite's alpha blend level (0=transparent, 16=opaque)."; break;
+                case VsNodeType::Flash:         desc = "Flashes a sprite white for the specified number of frames."; break;
+                case VsNodeType::Delay:         desc = "Delays downstream execution by N frames (non-blocking)."; break;
+                case VsNodeType::GetVelocityY:  desc = "Outputs the player's current vertical velocity."; break;
+                case VsNodeType::SetSpriteScale:desc = "Sets the scale of a specific sprite."; break;
+                case VsNodeType::RotateSprite:  desc = "Rotates a sprite by the given angle (brads)."; break;
+                case VsNodeType::GetRotation:   desc = "Outputs a sprite's current rotation angle."; break;
+                case VsNodeType::SetHP2:        desc = "Sets HP clamped to max HP (won't exceed maximum)."; break;
+                case VsNodeType::HealHP:        desc = "Adds HP to a sprite, clamped to max HP."; break;
+                case VsNodeType::GetMaxHP:      desc = "Outputs a sprite's maximum HP value."; break;
+                case VsNodeType::SetMaxHP:      desc = "Sets a sprite's maximum HP value."; break;
+                case VsNodeType::IsAlive:       desc = "Gate: only passes execution if the sprite's HP is greater than 0."; break;
                 case VsNodeType::Integer:       desc = "Outputs a constant integer value."; break;
                 case VsNodeType::Key:           desc = "Outputs a key constant (A, B, L, R, etc)."; break;
                 case VsNodeType::Direction:     desc = "Outputs a direction (Left, Right, Up, Down)."; break;
@@ -10017,6 +10098,22 @@ void FrameTick(float dt)
                         case VsNodeType::CloneSprite:   return "_clone";
                         case VsNodeType::HideAll:       return "_hide_all";
                         case VsNodeType::ShowAll:       return "_show_all";
+                        case VsNodeType::Print:         return "_print";
+                        case VsNodeType::SetColor:      return "_set_color";
+                        case VsNodeType::SwapSprite:    return "_swap_sprite";
+                        case VsNodeType::SetSpriteY:    return "_set_sprite_y";
+                        case VsNodeType::WaitUntil:     return "_wait_until";
+                        case VsNodeType::RepeatWhile:   return "_repeat_while";
+                        case VsNodeType::StopAll:       return "_stop_all";
+                        case VsNodeType::SetLayer:      return "_set_layer";
+                        case VsNodeType::SetAlpha:      return "_set_alpha";
+                        case VsNodeType::Flash:         return "_flash";
+                        case VsNodeType::Delay:         return "_delay";
+                        case VsNodeType::SetSpriteScale:return "_set_spr_scale";
+                        case VsNodeType::RotateSprite:  return "_rotate_sprite";
+                        case VsNodeType::SetHP2:        return "_set_hp_clamped";
+                        case VsNodeType::HealHP:        return "_heal_hp";
+                        case VsNodeType::SetMaxHP:      return "_set_max_hp";
                         default: return "";
                         }
                     };
@@ -11205,6 +11302,220 @@ void FrameTick(float dt)
                         "    int t = (afn_frame_count * speed) % (range * 2);\n"
                         "    return (t < range) ? t : (range * 2 - t);");
                     break;
+                // Batch 5
+                case VsNodeType::Print: {
+                    editorCode = "// Debug print to mGBA log";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    mgba_printf(\"val=%%d\", %s);",
+                        fmtInt(infoNode.id, 0, "<value>"));
+                    setActionFunc(infoNode, "_print", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::SetColor: {
+                    editorCode = "// Change sprite palette color";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    g_sprites[%s].pal = %s;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<color>"));
+                    setActionFunc(infoNode, "_set_color", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::SwapSprite: {
+                    editorCode = "// Swap sprite asset";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    g_sprites[%s].asset = %s;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<asset>"));
+                    setActionFunc(infoNode, "_swap_sprite", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::GetAngle:
+                    editorCode = "// Angle between two sprites (brads)";
+                    setActionFunc(infoNode, "_get_angle",
+                        "    FIXED dx = g_sprites[b].wx - g_sprites[a].wx;\n"
+                        "    FIXED dz = g_sprites[b].wz - g_sprites[a].wz;\n"
+                        "    return ArcTan2(dz, dx);");
+                    break;
+                case VsNodeType::GetPlayerY:
+                    editorCode = "// Read player Y (height)";
+                    setActionFunc(infoNode, "_get_player_y",
+                        "    return player_y >> 8;");
+                    break;
+                case VsNodeType::GetSpriteY: {
+                    editorCode = "// Read sprite Y position";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    return g_sprites[%s].wy >> 8;",
+                        fmtInt(infoNode.id, 0, "<obj>"));
+                    setActionFunc(infoNode, "_get_sprite_y", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::SetSpriteY: {
+                    editorCode = "// Set sprite Y position";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    g_sprites[%s].wy = %s << 8;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<y>"));
+                    setActionFunc(infoNode, "_set_sprite_y", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::WaitUntil:
+                    editorCode = "// Block until condition is true";
+                    setActionFunc(infoNode, "_wait_until",
+                        "    if (!condition) return; // re-check next frame");
+                    break;
+                case VsNodeType::RepeatWhile:
+                    editorCode = "// Repeat while condition is true";
+                    setActionFunc(infoNode, "_repeat_while",
+                        "    if (!condition) return;\n"
+                        "    // fire downstream, re-check next frame");
+                    break;
+                case VsNodeType::StopAll:
+                    editorCode = "// Stop all scripts";
+                    setActionFunc(infoNode, "_stop_all",
+                        "    afn_scripts_stopped = 1;");
+                    break;
+                case VsNodeType::SetLayer: {
+                    editorCode = "// Set sprite draw priority";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    afn_sprite_layer[%s] = %s;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<layer>"));
+                    setActionFunc(infoNode, "_set_layer", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::GetLayer: {
+                    editorCode = "// Read sprite draw priority";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    return afn_sprite_layer[%s];",
+                        fmtInt(infoNode.id, 0, "<obj>"));
+                    setActionFunc(infoNode, "_get_layer", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::SetAlpha: {
+                    editorCode = "// Set sprite alpha blend";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    afn_sprite_alpha[%s] = %s;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<alpha>"));
+                    setActionFunc(infoNode, "_set_alpha", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::Flash: {
+                    editorCode = "// Flash sprite white";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    afn_flash_obj[%s] = %s;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<frames>"));
+                    setActionFunc(infoNode, "_flash", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::Delay: {
+                    editorCode = "// Delay downstream by N frames";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    static int afn_delay_%d = 0;\n"
+                        "    if (afn_delay_%d > 0) { afn_delay_%d--; return; }\n"
+                        "    afn_delay_%d = %s;",
+                        infoNode.id, infoNode.id, infoNode.id,
+                        infoNode.id, fmtInt(infoNode.id, 0, "<frames>"));
+                    setActionFunc(infoNode, "_delay", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::GetVelocityY:
+                    editorCode = "// Read player vertical velocity";
+                    setActionFunc(infoNode, "_get_vel_y",
+                        "    return player_vy;");
+                    break;
+                case VsNodeType::SetSpriteScale: {
+                    editorCode = "// Set sprite scale";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    g_sprites[%s].scale = %s;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtFloat(infoNode.id, 1, "<scale>"));
+                    setActionFunc(infoNode, "_set_spr_scale", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::RotateSprite: {
+                    editorCode = "// Rotate sprite by angle";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    afn_sprite_rot[%s] = %s;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<angle>"));
+                    setActionFunc(infoNode, "_rotate_sprite", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::GetRotation: {
+                    editorCode = "// Read sprite rotation";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    return afn_sprite_rot[%s];",
+                        fmtInt(infoNode.id, 0, "<obj>"));
+                    setActionFunc(infoNode, "_get_rotation", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::SetHP2: {
+                    editorCode = "// Set HP clamped to max";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    afn_hp[%s] = %s;\n"
+                        "    if (afn_hp[%s] > afn_max_hp[%s]) afn_hp[%s] = afn_max_hp[%s];",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<hp>"),
+                        fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 0, "<obj>"));
+                    setActionFunc(infoNode, "_set_hp_clamped", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::HealHP: {
+                    editorCode = "// Heal HP (clamped)";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    afn_hp[%s] += %s;\n"
+                        "    if (afn_hp[%s] > afn_max_hp[%s]) afn_hp[%s] = afn_max_hp[%s];",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<amount>"),
+                        fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 0, "<obj>"));
+                    setActionFunc(infoNode, "_heal_hp", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::GetMaxHP: {
+                    editorCode = "// Read max HP";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    return afn_max_hp[%s];",
+                        fmtInt(infoNode.id, 0, "<obj>"));
+                    setActionFunc(infoNode, "_get_max_hp", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::SetMaxHP: {
+                    editorCode = "// Set max HP";
+                    char bodyBuf5[256];
+                    snprintf(bodyBuf5, sizeof(bodyBuf5),
+                        "    afn_max_hp[%s] = %s;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<maxhp>"));
+                    setActionFunc(infoNode, "_set_max_hp", bodyBuf5);
+                    break;
+                }
+                case VsNodeType::IsAlive:
+                    editorCode = "// Gate: passes if HP > 0";
+                    setActionFunc(infoNode, "_is_alive_gate",
+                        "    if (afn_hp[obj] > 0) {\n"
+                        "        /* downstream */\n"
+                        "    }");
+                    break;
                 case VsNodeType::CustomCode:
                     editorCode = "// (runs only on GBA runtime)";
                     {
@@ -11545,6 +11856,30 @@ void FrameTick(float dt)
                     case VsNodeType::Average:       suffix = "_avg"; break;
                     case VsNodeType::GetHP2:        suffix = "_is_alive"; break;
                     case VsNodeType::PingPong:      suffix = "_ping_pong"; break;
+                    case VsNodeType::Print:         suffix = "_print"; break;
+                    case VsNodeType::SetColor:      suffix = "_set_color"; break;
+                    case VsNodeType::SwapSprite:    suffix = "_swap_sprite"; break;
+                    case VsNodeType::GetAngle:      suffix = "_get_angle"; break;
+                    case VsNodeType::GetPlayerY:    suffix = "_get_player_y"; break;
+                    case VsNodeType::GetSpriteY:    suffix = "_get_sprite_y"; break;
+                    case VsNodeType::SetSpriteY:    suffix = "_set_sprite_y"; break;
+                    case VsNodeType::WaitUntil:     suffix = "_wait_until"; break;
+                    case VsNodeType::RepeatWhile:   suffix = "_repeat_while"; break;
+                    case VsNodeType::StopAll:       suffix = "_stop_all"; break;
+                    case VsNodeType::SetLayer:      suffix = "_set_layer"; break;
+                    case VsNodeType::GetLayer:      suffix = "_get_layer"; break;
+                    case VsNodeType::SetAlpha:      suffix = "_set_alpha"; break;
+                    case VsNodeType::Flash:         suffix = "_flash"; break;
+                    case VsNodeType::Delay:         suffix = "_delay"; break;
+                    case VsNodeType::GetVelocityY:  suffix = "_get_vel_y"; break;
+                    case VsNodeType::SetSpriteScale:suffix = "_set_spr_scale"; break;
+                    case VsNodeType::RotateSprite:  suffix = "_rotate_sprite"; break;
+                    case VsNodeType::GetRotation:   suffix = "_get_rotation"; break;
+                    case VsNodeType::SetHP2:        suffix = "_set_hp_clamped"; break;
+                    case VsNodeType::HealHP:        suffix = "_heal_hp"; break;
+                    case VsNodeType::GetMaxHP:      suffix = "_get_max_hp"; break;
+                    case VsNodeType::SetMaxHP:      suffix = "_set_max_hp"; break;
+                    case VsNodeType::IsAlive:       suffix = "_is_alive_gate"; break;
                     default: suffix = ""; break;
                     }
                     // Show default name as placeholder (action nodes include node ID to disambiguate)
@@ -11773,6 +12108,22 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HideAll].name)) addNodeAt(VsNodeType::HideAll);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ShowAll].name)) addNodeAt(VsNodeType::ShowAll);
                     ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetColor].name)) addNodeAt(VsNodeType::SetColor);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SwapSprite].name)) addNodeAt(VsNodeType::SwapSprite);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetSpriteY].name)) addNodeAt(VsNodeType::SetSpriteY);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetLayer].name)) addNodeAt(VsNodeType::SetLayer);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetAlpha].name)) addNodeAt(VsNodeType::SetAlpha);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Flash].name)) addNodeAt(VsNodeType::Flash);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetSpriteScale].name)) addNodeAt(VsNodeType::SetSpriteScale);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::RotateSprite].name)) addNodeAt(VsNodeType::RotateSprite);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP2].name)) addNodeAt(VsNodeType::SetHP2);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HealHP].name)) addNodeAt(VsNodeType::HealHP);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetMaxHP].name)) addNodeAt(VsNodeType::SetMaxHP);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopAll].name)) addNodeAt(VsNodeType::StopAll);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Print].name)) addNodeAt(VsNodeType::Print);
+                    ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CustomCode].name)) addNodeAt(VsNodeType::CustomCode);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
@@ -11810,6 +12161,11 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsHPZero].name)) addNodeAt(VsNodeType::IsHPZero);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNear].name)) addNodeAt(VsNodeType::IsNear);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Countdown].name)) addNodeAt(VsNodeType::Countdown);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsAlive].name)) addNodeAt(VsNodeType::IsAlive);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::WaitUntil].name)) addNodeAt(VsNodeType::WaitUntil);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::RepeatWhile].name)) addNodeAt(VsNodeType::RepeatWhile);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Delay].name)) addNodeAt(VsNodeType::Delay);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Select].name)) addNodeAt(VsNodeType::Select);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Lerp].name)) addNodeAt(VsNodeType::Lerp);
@@ -11828,6 +12184,14 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Remap].name)) addNodeAt(VsNodeType::Remap);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Average].name)) addNodeAt(VsNodeType::Average);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::PingPong].name)) addNodeAt(VsNodeType::PingPong);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetAngle].name)) addNodeAt(VsNodeType::GetAngle);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetPlayerY].name)) addNodeAt(VsNodeType::GetPlayerY);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetSpriteY].name)) addNodeAt(VsNodeType::GetSpriteY);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetVelocityY].name)) addNodeAt(VsNodeType::GetVelocityY);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetLayer].name)) addNodeAt(VsNodeType::GetLayer);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetRotation].name)) addNodeAt(VsNodeType::GetRotation);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetMaxHP].name)) addNodeAt(VsNodeType::GetMaxHP);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }

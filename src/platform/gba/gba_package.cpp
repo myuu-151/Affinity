@@ -1476,9 +1476,19 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int   afn_cam_speed = 256;\n";
         f << "static FIXED afn_force_x, afn_force_z;\n";
         f << "static int   afn_friction = 256;\n";
-        f << "static int   afn_vars[16];\n\n";
+        f << "static int   afn_vars[16];\n";
+        f << "static int   afn_scripts_stopped;\n";
+        f << "static u8    afn_sprite_layer[16];\n";
+        f << "static u8    afn_sprite_alpha[16];\n";
+        f << "static u8    afn_flash_obj[16];\n";
+        f << "static u16   afn_sprite_rot[16];\n";
+        f << "static int   afn_max_hp[16];\n\n";
         // Clone sprite stub
-        f << "static inline void afn_clone_sprite(int src) { (void)src; }\n\n";
+        f << "static inline void afn_clone_sprite(int src) { (void)src; }\n";
+        // mGBA debug log stub
+        f << "#ifndef mgba_printf\n";
+        f << "#define mgba_printf(...) ((void)0)\n";
+        f << "#endif\n\n";
         // SRAM helpers
         f << "static inline void afn_sram_save(void) {\n";
         f << "    volatile u8* sram = (volatile u8*)0x0E000000;\n";
@@ -1567,6 +1577,23 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::IsFlagSet:     return "_is_flag_set";
         case GBAScriptNodeType::IsHPZero:      return "_is_hp_zero";
         case GBAScriptNodeType::IsNear:        return "_is_near";
+        case GBAScriptNodeType::Print:         return "_print";
+        case GBAScriptNodeType::SetColor:      return "_set_color";
+        case GBAScriptNodeType::SwapSprite:    return "_swap_sprite";
+        case GBAScriptNodeType::SetSpriteY:    return "_set_sprite_y";
+        case GBAScriptNodeType::WaitUntil:     return "_wait_until";
+        case GBAScriptNodeType::RepeatWhile:   return "_repeat_while";
+        case GBAScriptNodeType::StopAll:       return "_stop_all";
+        case GBAScriptNodeType::SetLayer:      return "_set_layer";
+        case GBAScriptNodeType::SetAlpha:      return "_set_alpha";
+        case GBAScriptNodeType::Flash:         return "_flash";
+        case GBAScriptNodeType::Delay:         return "_delay";
+        case GBAScriptNodeType::SetSpriteScale:return "_set_spr_scale";
+        case GBAScriptNodeType::RotateSprite:  return "_rotate_sprite";
+        case GBAScriptNodeType::SetHP2:        return "_set_hp_clamped";
+        case GBAScriptNodeType::HealHP:        return "_heal_hp";
+        case GBAScriptNodeType::SetMaxHP:      return "_set_max_hp";
+        case GBAScriptNodeType::IsAlive:       return "_is_alive_gate";
         default: return "";
         }
     };
@@ -2097,6 +2124,109 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 case GBAScriptNodeType::ShowAll:
                     f << "    { int i; for (i=0;i<16;i++) afn_sprite_visible[i]=1; }\n";
                     break;
+                case GBAScriptNodeType::Print: {
+                    auto* valData = findDataIn(action->id, 0);
+                    int val = valData ? resolveInt(valData) : 0;
+                    f << "    mgba_printf(\"val=%d\", " << val << ");\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetColor: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* colData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int col = colData ? resolveInt(colData) : 0;
+                    f << "    g_sprites[" << obj << "].pal = " << col << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SwapSprite: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* assetData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int asset = assetData ? resolveInt(assetData) : 0;
+                    f << "    g_sprites[" << obj << "].asset = " << asset << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetSpriteY: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* yData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int y = yData ? resolveInt(yData) : 0;
+                    f << "    g_sprites[" << obj << "].wy = " << y << " << 8;\n";
+                    break;
+                }
+                case GBAScriptNodeType::StopAll:
+                    f << "    afn_scripts_stopped = 1;\n";
+                    break;
+                case GBAScriptNodeType::SetLayer: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* layerData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int layer = layerData ? resolveInt(layerData) : 0;
+                    f << "    afn_sprite_layer[" << obj << "] = " << layer << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetAlpha: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* alphaData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int alpha = alphaData ? resolveInt(alphaData) : 16;
+                    f << "    afn_sprite_alpha[" << obj << "] = " << alpha << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::Flash: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* framesData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int frames = framesData ? resolveInt(framesData) : 8;
+                    f << "    afn_flash_obj[" << obj << "] = " << frames << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::Delay:
+                    f << "    { static int afn_dly_" << action->id << " = 0;\n";
+                    f << "      if (afn_dly_" << action->id << " > 0) { afn_dly_" << action->id << "--; return; } }\n";
+                    break;
+                case GBAScriptNodeType::SetSpriteScale: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* scaleData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int scale = scaleData ? (int)(resolveFloat(scaleData) * 256.0f) : 256;
+                    f << "    g_sprites[" << obj << "].scale = " << scale << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::RotateSprite: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* angData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int ang = angData ? resolveInt(angData) : 0;
+                    f << "    afn_sprite_rot[" << obj << "] = " << ang << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetHP2: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* hpData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int hp = hpData ? resolveInt(hpData) : 100;
+                    f << "    afn_hp[" << obj << "] = " << hp << ";\n";
+                    f << "    if (afn_hp[" << obj << "] > afn_max_hp[" << obj << "]) afn_hp[" << obj << "] = afn_max_hp[" << obj << "];\n";
+                    break;
+                }
+                case GBAScriptNodeType::HealHP: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* amtData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int amt = amtData ? resolveInt(amtData) : 1;
+                    f << "    afn_hp[" << obj << "] += " << amt << ";\n";
+                    f << "    if (afn_hp[" << obj << "] > afn_max_hp[" << obj << "]) afn_hp[" << obj << "] = afn_max_hp[" << obj << "];\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetMaxHP: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* maxData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int maxhp = maxData ? resolveInt(maxData) : 100;
+                    f << "    afn_max_hp[" << obj << "] = " << maxhp << ";\n";
+                    break;
+                }
                 default:
                     f << "    // unsupported action: type " << (int)action->type << "\n";
                     break;
@@ -2107,7 +2237,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             auto isGateNode = [](GBAScriptNodeType t) {
                 return t == GBAScriptNodeType::IsMoving || t == GBAScriptNodeType::IsOnGround || t == GBAScriptNodeType::IsJumping
                     || t == GBAScriptNodeType::IsFlagSet || t == GBAScriptNodeType::IsHPZero || t == GBAScriptNodeType::IsNear
-                    || t == GBAScriptNodeType::Countdown;
+                    || t == GBAScriptNodeType::Countdown || t == GBAScriptNodeType::IsAlive;
             };
             std::set<int> emittedActionIds;
             for (auto& c : chains) {
@@ -2214,6 +2344,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "    { static int afn_cd_" << a->id << " = " << a->paramInt[0] << ";\n";
                         f << "      if (--afn_cd_" << a->id << " <= 0) { afn_cd_" << a->id << " = " << a->paramInt[0] << ";\n";
                         gateDepth += 2; // two closing braces: inner if + outer block
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsAlive) {
+                        f << "    if (afn_hp[" << a->paramInt[0] << "] > 0) {\n";
+                        gateDepth++;
                         continue;
                     }
                     emitActionCall(a);
@@ -2840,6 +2975,109 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 case GBAScriptNodeType::ShowAll:
                     f << "    { int i; for (i=0;i<16;i++) afn_sprite_visible[i]=1; }\n";
                     break;
+                case GBAScriptNodeType::Print: {
+                    auto* valData = bpFindDataIn(action->id, 0);
+                    std::string val = valData ? bpResolveInt(valData) : "0";
+                    f << "    mgba_printf(\"val=%d\", " << val << ");\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetColor: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* colData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string col = colData ? bpResolveInt(colData) : "0";
+                    f << "    g_sprites[" << obj << "].pal = " << col << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SwapSprite: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* assetData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string asset = assetData ? bpResolveInt(assetData) : "0";
+                    f << "    g_sprites[" << obj << "].asset = " << asset << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetSpriteY: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* yData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string y = yData ? bpResolveInt(yData) : "0";
+                    f << "    g_sprites[" << obj << "].wy = " << y << " << 8;\n";
+                    break;
+                }
+                case GBAScriptNodeType::StopAll:
+                    f << "    afn_scripts_stopped = 1;\n";
+                    break;
+                case GBAScriptNodeType::SetLayer: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* layerData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string layer = layerData ? bpResolveInt(layerData) : "0";
+                    f << "    afn_sprite_layer[" << obj << "] = " << layer << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetAlpha: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* alphaData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string alpha = alphaData ? bpResolveInt(alphaData) : "16";
+                    f << "    afn_sprite_alpha[" << obj << "] = " << alpha << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::Flash: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* framesData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string frames = framesData ? bpResolveInt(framesData) : "8";
+                    f << "    afn_flash_obj[" << obj << "] = " << frames << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::Delay:
+                    f << "    { static int afn_dly_" << action->id << " = 0;\n";
+                    f << "      if (afn_dly_" << action->id << " > 0) { afn_dly_" << action->id << "--; return; } }\n";
+                    break;
+                case GBAScriptNodeType::SetSpriteScale: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* scaleData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string scale = scaleData ? bpResolveFloat(scaleData) : "256";
+                    f << "    g_sprites[" << obj << "].scale = " << scale << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::RotateSprite: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* angData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string ang = angData ? bpResolveInt(angData) : "0";
+                    f << "    afn_sprite_rot[" << obj << "] = " << ang << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetHP2: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* hpData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string hp = hpData ? bpResolveInt(hpData) : "100";
+                    f << "    afn_hp[" << obj << "] = " << hp << ";\n";
+                    f << "    if (afn_hp[" << obj << "] > afn_max_hp[" << obj << "]) afn_hp[" << obj << "] = afn_max_hp[" << obj << "];\n";
+                    break;
+                }
+                case GBAScriptNodeType::HealHP: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* amtData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string amt = amtData ? bpResolveInt(amtData) : "1";
+                    f << "    afn_hp[" << obj << "] += " << amt << ";\n";
+                    f << "    if (afn_hp[" << obj << "] > afn_max_hp[" << obj << "]) afn_hp[" << obj << "] = afn_max_hp[" << obj << "];\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetMaxHP: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* maxData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string maxhp = maxData ? bpResolveInt(maxData) : "100";
+                    f << "    afn_max_hp[" << obj << "] = " << maxhp << ";\n";
+                    break;
+                }
                 default:
                     f << "    // unsupported bp action: type " << (int)action->type << "\n";
                     break;
@@ -2850,7 +3088,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             auto bpIsGateNode = [](GBAScriptNodeType t) {
                 return t == GBAScriptNodeType::IsMoving || t == GBAScriptNodeType::IsOnGround || t == GBAScriptNodeType::IsJumping
                     || t == GBAScriptNodeType::IsFlagSet || t == GBAScriptNodeType::IsHPZero || t == GBAScriptNodeType::IsNear
-                    || t == GBAScriptNodeType::Countdown;
+                    || t == GBAScriptNodeType::Countdown || t == GBAScriptNodeType::IsAlive;
             };
             std::set<int> bpEmittedIds;
             for (auto& c : bpChains) {
@@ -2922,6 +3160,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "    { static int afn_cd_" << a->id << " = " << a->paramInt[0] << ";\n";
                         f << "      if (--afn_cd_" << a->id << " <= 0) { afn_cd_" << a->id << " = " << a->paramInt[0] << ";\n";
                         gateDepth += 2;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsAlive) {
+                        f << "    if (afn_hp[" << a->paramInt[0] << "] > 0) {\n";
+                        gateDepth++;
                         continue;
                     }
                     bpEmitActionCall(a);

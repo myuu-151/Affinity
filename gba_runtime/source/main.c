@@ -279,6 +279,12 @@ static int   afn_cam_speed = 256;  // camera follow speed (16.8 fixed, 256=1.0)
 static FIXED afn_force_x, afn_force_z; // accumulated force on player
 static int   afn_friction = 256;   // ground friction (16.8 fixed, 256=1.0)
 static int   afn_vars[16];        // general-purpose variable slots
+static int   afn_scripts_stopped; // 1 = stop all script execution
+static u8    afn_sprite_layer[16]; // per-sprite draw priority layer
+static u8    afn_sprite_alpha[16]; // per-sprite alpha blend level
+static u8    afn_flash_obj[16];   // per-sprite flash frames remaining
+static u16   afn_sprite_rot[16];  // per-sprite rotation angle (brads)
+static int   afn_max_hp[16];     // per-sprite max HP
 
 // Direction animation set tracking (for DMA streaming)
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
@@ -3413,7 +3419,7 @@ int main(void)
     afn_start_z = player_z;
     afn_frame_count = 0;
     afn_score = 0;
-    { int i; for (i = 0; i < 16; i++) { afn_hp[i] = 100; afn_collision_enabled[i] = 1; } }
+    { int i; for (i = 0; i < 16; i++) { afn_hp[i] = 100; afn_max_hp[i] = 100; afn_collision_enabled[i] = 1; afn_sprite_alpha[i] = 16; } }
     afn_script_start();
     afn_bp_dispatch_start();
 #endif
