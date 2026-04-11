@@ -1452,7 +1452,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static FIXED afn_terminal_vel;\n";
         f << "static FIXED player_vy;\n";
         f << "static int   player_on_ground;\n";
-        f << "static u16   orbit_angle;\n\n";
+        f << "static u16   orbit_angle;\n";
+        f << "extern int player_moving;\n\n";
     }
     // Helper: get suffix string for an action node type
     auto actionSuffix = [](GBAScriptNodeType t) -> const char* {
@@ -1586,8 +1587,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
         if (!chains.empty())
         {
-            f << "// ---- Generated script code from visual node graph ----\n";
-            f << "extern int player_moving;\n\n";
+            f << "// ---- Generated script code from visual node graph ----\n\n";
 
             // Emit action body lines for a single action node
             auto emitActionBody = [&](const GBAScriptNodeExport* action) {
