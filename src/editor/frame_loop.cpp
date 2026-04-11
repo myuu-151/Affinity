@@ -199,6 +199,28 @@ enum class VsNodeType : int {
     Object,         // constant object/sprite index output (dropdown)
     CustomCode,     // user-written C code (GBA only)
     IsMoving,       // condition gate: passes exec only if player is moving
+    IsOnGround,     // condition gate: passes exec only if player is on ground
+    IsJumping,      // condition gate: passes exec only if player is airborne + rising
+    CheckFlag,      // condition: branch on flag set/clear (2 exec outs)
+    SetFlag,        // set a flag bit (0-31)
+    ToggleFlag,     // toggle a flag bit
+    FreezePlayer,   // disable player input
+    UnfreezePlayer, // re-enable player input
+    SetCameraHeight,// set camera Y height
+    SetHorizon,     // set horizon scanline
+    Teleport,       // teleport player to x,y,z
+    SetVisible,     // show/hide a sprite
+    SetPosition,    // set sprite position
+    StopAnim,       // stop animation playback
+    SetAnimSpeed,   // set animation playback speed
+    SetVelocityY,   // set vertical velocity directly
+    StopSound,      // stop all sound
+    AddMath,        // A + B
+    SubtractMath,   // A - B
+    MultiplyMath,   // A * B
+    NegateMath,     // -A
+    RandomInt,      // random int in [Min, Max]
+    GetFlag,        // read flag value (data node)
     COUNT
 };
 
@@ -257,6 +279,28 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Object",          0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Custom Code",     0xFF993399, 1, 1, 0, 0, {}, {}, {} },
     { "Is Moving",      0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Is On Ground",   0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Jumping",     0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Check Flag",     0xFF885533, 1, 2, 1, 0, {"Flag (int)"}, {}, {"Set", "Clear"} },
+    { "Set Flag",       0xFF3355AA, 1, 1, 2, 0, {"Flag (int)", "Value (int)"}, {}, {} },
+    { "Toggle Flag",    0xFF3355AA, 1, 1, 1, 0, {"Flag (int)"}, {}, {} },
+    { "Freeze Player",  0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Unfreeze Player",0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Set Cam Height", 0xFF3355AA, 1, 1, 1, 0, {"Height (int)"}, {}, {} },
+    { "Set Horizon",    0xFF3355AA, 1, 1, 1, 0, {"Scanline (int)"}, {}, {} },
+    { "Teleport",       0xFF3355AA, 1, 1, 3, 0, {"X (int)", "Y (int)", "Z (int)"}, {}, {} },
+    { "Set Visible",    0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Visible (int)"}, {}, {} },
+    { "Set Position",   0xFF3355AA, 1, 1, 3, 0, {"Object (int)", "X (int)", "Z (int)"}, {}, {} },
+    { "Stop Anim",      0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Set Anim Speed", 0xFF3355AA, 1, 1, 1, 0, {"Speed (int)"}, {}, {} },
+    { "Set Velocity Y", 0xFF3355AA, 1, 1, 1, 0, {"Velocity (float)"}, {}, {} },
+    { "Stop Sound",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Add",            0xFF666688, 0, 0, 2, 1, {"A", "B"}, {"Result"}, {} },
+    { "Subtract",       0xFF666688, 0, 0, 2, 1, {"A", "B"}, {"Result"}, {} },
+    { "Multiply",       0xFF666688, 0, 0, 2, 1, {"A", "B"}, {"Result"}, {} },
+    { "Negate",         0xFF666688, 0, 0, 1, 1, {"Value"}, {"Result"}, {} },
+    { "Random Int",     0xFF666688, 0, 0, 2, 1, {"Min", "Max"}, {"Result"}, {} },
+    { "Get Flag",       0xFF666688, 0, 0, 1, 1, {"Flag (int)"}, {"Value"}, {} },
 };
 
 struct VsNode {
@@ -7211,14 +7255,25 @@ void FrameTick(float dt)
                     if (nid < 0 || nid >= (int)vis.size() || vis[nid]) continue;
                     vis[nid] = true; safety++;
                     auto* an = findNodePlay(nid); if (!an) continue;
-                    // IsMoving gate: only pass through if player is moving
+                    // Gate nodes: only pass through if condition met
                     if (an->type == VsNodeType::IsMoving) {
                         if (sPlayerMoving) {
                             for (auto& lk : sVsLinks)
                                 if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
                                     front.push_back(lk.to.nodeId);
                         }
-                        continue; // don't add IsMoving itself to acts
+                        continue;
+                    }
+                    if (an->type == VsNodeType::IsOnGround) {
+                        // TODO: editor has no vertical physics, always pass through
+                        for (auto& lk : sVsLinks)
+                            if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                front.push_back(lk.to.nodeId);
+                        continue;
+                    }
+                    if (an->type == VsNodeType::IsJumping) {
+                        // TODO: editor has no vertical physics, never pass through
+                        continue;
                     }
                     acts.push_back(an);
                     for (auto& lk : sVsLinks)
@@ -9475,6 +9530,28 @@ void FrameTick(float dt)
                 case VsNodeType::AutoOrbit:     desc = "Enables auto-orbit camera when strafing. 0 = disabled."; break;
                 case VsNodeType::DampenJump:    desc = "Multiplies upward velocity by factor when fired. Use with On Key Released for variable jump height."; break;
                 case VsNodeType::IsMoving:      desc = "Gate: only passes execution through if the player is currently moving (d-pad held)."; break;
+                case VsNodeType::IsOnGround:    desc = "Gate: only passes execution through if the player is on the ground."; break;
+                case VsNodeType::IsJumping:     desc = "Gate: only passes execution through if the player is airborne and rising."; break;
+                case VsNodeType::CheckFlag:     desc = "Branches on whether a flag (0-31) is set or clear."; break;
+                case VsNodeType::SetFlag:       desc = "Sets a flag bit (0-31) to a value (0 or 1)."; break;
+                case VsNodeType::ToggleFlag:    desc = "Toggles a flag bit (0-31)."; break;
+                case VsNodeType::FreezePlayer:  desc = "Disables all player input until UnfreezePlayer is called."; break;
+                case VsNodeType::UnfreezePlayer:desc = "Re-enables player input after FreezePlayer."; break;
+                case VsNodeType::SetCameraHeight:desc = "Sets the camera height above the floor."; break;
+                case VsNodeType::SetHorizon:    desc = "Sets the horizon scanline (0-159). Higher = camera looks down."; break;
+                case VsNodeType::Teleport:      desc = "Teleports the player to an absolute X, Y, Z position."; break;
+                case VsNodeType::SetVisible:    desc = "Shows or hides a sprite. 0 = hidden, 1 = visible."; break;
+                case VsNodeType::SetPosition:   desc = "Sets a sprite's world position (X, Z)."; break;
+                case VsNodeType::StopAnim:      desc = "Stops the current animation playback."; break;
+                case VsNodeType::SetAnimSpeed:  desc = "Sets animation playback speed multiplier."; break;
+                case VsNodeType::SetVelocityY:  desc = "Sets the player's vertical velocity directly. Works airborne."; break;
+                case VsNodeType::StopSound:     desc = "Stops all sound channels."; break;
+                case VsNodeType::AddMath:       desc = "Outputs A + B."; break;
+                case VsNodeType::SubtractMath:  desc = "Outputs A - B."; break;
+                case VsNodeType::MultiplyMath:  desc = "Outputs (A * B) >> 8 (fixed-point multiply)."; break;
+                case VsNodeType::NegateMath:    desc = "Outputs -Value."; break;
+                case VsNodeType::RandomInt:     desc = "Outputs a random integer between Min and Max (inclusive)."; break;
+                case VsNodeType::GetFlag:       desc = "Reads a flag bit (0-31). Outputs 1 if set, 0 if clear."; break;
                 case VsNodeType::Integer:       desc = "Outputs a constant integer value."; break;
                 case VsNodeType::Key:           desc = "Outputs a key constant (A, B, L, R, etc)."; break;
                 case VsNodeType::Direction:     desc = "Outputs a direction (Left, Right, Up, Down)."; break;
@@ -9621,6 +9698,22 @@ void FrameTick(float dt)
                         case VsNodeType::AutoOrbit:     return "_auto_orbit";
                         case VsNodeType::DampenJump:    return "_dampen_jump";
                         case VsNodeType::IsMoving:      return "_is_moving";
+                        case VsNodeType::IsOnGround:    return "_is_grounded";
+                        case VsNodeType::IsJumping:     return "_is_jumping";
+                        case VsNodeType::CheckFlag:     return "_check_flag";
+                        case VsNodeType::SetFlag:       return "_set_flag";
+                        case VsNodeType::ToggleFlag:    return "_toggle_flag";
+                        case VsNodeType::FreezePlayer:  return "_freeze";
+                        case VsNodeType::UnfreezePlayer:return "_unfreeze";
+                        case VsNodeType::SetCameraHeight:return "_set_cam_h";
+                        case VsNodeType::SetHorizon:    return "_set_horizon";
+                        case VsNodeType::Teleport:      return "_teleport";
+                        case VsNodeType::SetVisible:    return "_set_visible";
+                        case VsNodeType::SetPosition:   return "_set_pos";
+                        case VsNodeType::StopAnim:      return "_stop_anim";
+                        case VsNodeType::SetAnimSpeed:  return "_set_anim_speed";
+                        case VsNodeType::SetVelocityY:  return "_set_vel_y";
+                        case VsNodeType::StopSound:     return "_stop_sound";
                         case VsNodeType::ChangeScene:   return "_change_scene";
                         case VsNodeType::CustomCode:    return "_custom";
                         case VsNodeType::SetVariable:   return "_set_var";
@@ -10064,6 +10157,189 @@ void FrameTick(float dt)
                         "        /* downstream actions */\n"
                         "    }");
                     break;
+                case VsNodeType::IsOnGround:
+                    editorCode =
+                        "// Gate: passes execution only if player is on ground";
+                    setActionFunc(infoNode, "_is_grounded",
+                        "    if (player_on_ground) {\n"
+                        "        /* downstream actions */\n"
+                        "    }");
+                    break;
+                case VsNodeType::IsJumping:
+                    editorCode =
+                        "// Gate: passes execution only if player is airborne + rising";
+                    setActionFunc(infoNode, "_is_jumping",
+                        "    if (!player_on_ground && player_vy > 0) {\n"
+                        "        /* downstream actions */\n"
+                        "    }");
+                    break;
+                case VsNodeType::CheckFlag:
+                    editorCode =
+                        "// Branch on flag state\n"
+                        "if (afn_flags & (1 << flag)) execChain(setPin);\n"
+                        "else execChain(clearPin);";
+                    setActionFunc(infoNode, "_check_flag",
+                        "    int flag = findDataIn(0)->paramInt[0];\n"
+                        "    if (afn_flags & (1u << flag)) { /* Set chain */ }\n"
+                        "    else { /* Clear chain */ }");
+                    break;
+                case VsNodeType::SetFlag: {
+                    editorCode =
+                        "// Set flag bit to value (0 or 1)";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    int flag = %s;\n"
+                        "    int val = %s;\n"
+                        "    if (val) afn_flags |= (1u << flag);\n"
+                        "    else afn_flags &= ~(1u << flag);",
+                        fmtInt(infoNode.id, 0, "<flag>"), fmtInt(infoNode.id, 1, "<value>"));
+                    setActionFunc(infoNode, "_set_flag", bodyBuf);
+                    break;
+                }
+                case VsNodeType::ToggleFlag: {
+                    editorCode =
+                        "// Toggle flag bit";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_flags ^= (1u << %s);",
+                        fmtInt(infoNode.id, 0, "<flag>"));
+                    setActionFunc(infoNode, "_toggle_flag", bodyBuf);
+                    break;
+                }
+                case VsNodeType::FreezePlayer:
+                    editorCode =
+                        "// Disable player input";
+                    setActionFunc(infoNode, "_freeze",
+                        "    afn_player_frozen = 1;");
+                    break;
+                case VsNodeType::UnfreezePlayer:
+                    editorCode =
+                        "// Re-enable player input";
+                    setActionFunc(infoNode, "_unfreeze",
+                        "    afn_player_frozen = 0;");
+                    break;
+                case VsNodeType::SetCameraHeight: {
+                    editorCode =
+                        "// Set camera height above floor";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    cam_h = %s << 8;",
+                        fmtInt(infoNode.id, 0, "<height>"));
+                    setActionFunc(infoNode, "_set_cam_h", bodyBuf);
+                    break;
+                }
+                case VsNodeType::SetHorizon: {
+                    editorCode =
+                        "// Set horizon scanline (0-159)";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    m7_horizon = %s;",
+                        fmtInt(infoNode.id, 0, "<scanline>"));
+                    setActionFunc(infoNode, "_set_horizon", bodyBuf);
+                    break;
+                }
+                case VsNodeType::Teleport: {
+                    editorCode =
+                        "// Teleport player to absolute position";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    player_x = %s << 8;\n"
+                        "    player_y = %s << 8;\n"
+                        "    player_z = %s << 8;",
+                        fmtInt(infoNode.id, 0, "<x>"),
+                        fmtInt(infoNode.id, 1, "<y>"),
+                        fmtInt(infoNode.id, 2, "<z>"));
+                    setActionFunc(infoNode, "_teleport", bodyBuf);
+                    break;
+                }
+                case VsNodeType::SetVisible: {
+                    editorCode =
+                        "// Show or hide a sprite (0=hidden, 1=visible)";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_sprite_visible[%s] = %s;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<visible>"));
+                    setActionFunc(infoNode, "_set_visible", bodyBuf);
+                    break;
+                }
+                case VsNodeType::SetPosition: {
+                    editorCode =
+                        "// Set sprite world position";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    int obj = %s;\n"
+                        "    g_sprites[obj].wx = %s << 8;\n"
+                        "    g_sprites[obj].wz = %s << 8;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<x>"),
+                        fmtInt(infoNode.id, 2, "<z>"));
+                    setActionFunc(infoNode, "_set_pos", bodyBuf);
+                    break;
+                }
+                case VsNodeType::StopAnim:
+                    editorCode =
+                        "// Stop animation playback";
+                    setActionFunc(infoNode, "_stop_anim",
+                        "    afn_play_anim = -1;");
+                    break;
+                case VsNodeType::SetAnimSpeed: {
+                    editorCode =
+                        "// Set animation speed multiplier";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_anim_speed = %s;",
+                        fmtInt(infoNode.id, 0, "<speed>"));
+                    setActionFunc(infoNode, "_set_anim_speed", bodyBuf);
+                    break;
+                }
+                case VsNodeType::SetVelocityY: {
+                    editorCode =
+                        "// Set vertical velocity directly (works airborne)";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    player_vy = %s;",
+                        fmtFloat(infoNode.id, 0, "<velocity>"));
+                    setActionFunc(infoNode, "_set_vel_y", bodyBuf);
+                    break;
+                }
+                case VsNodeType::StopSound:
+                    editorCode =
+                        "// Stop all sound channels";
+                    setActionFunc(infoNode, "_stop_sound",
+                        "    REG_SOUNDCNT_H = 0;");
+                    break;
+                case VsNodeType::AddMath:
+                    editorCode = "// A + B";
+                    setActionFunc(infoNode, "_add",
+                        "    return a + b;");
+                    break;
+                case VsNodeType::SubtractMath:
+                    editorCode = "// A - B";
+                    setActionFunc(infoNode, "_sub",
+                        "    return a - b;");
+                    break;
+                case VsNodeType::MultiplyMath:
+                    editorCode = "// (A * B) >> 8 (fixed-point)";
+                    setActionFunc(infoNode, "_mul",
+                        "    return (a * b) >> 8;");
+                    break;
+                case VsNodeType::NegateMath:
+                    editorCode = "// -Value";
+                    setActionFunc(infoNode, "_negate",
+                        "    return -value;");
+                    break;
+                case VsNodeType::RandomInt:
+                    editorCode = "// Random integer in [Min, Max]";
+                    setActionFunc(infoNode, "_random",
+                        "    afn_rng = afn_rng * 1103515245 + 12345;\n"
+                        "    return min + ((afn_rng >> 16) % (max - min + 1));");
+                    break;
+                case VsNodeType::GetFlag:
+                    editorCode = "// Read flag bit (0-31)";
+                    setActionFunc(infoNode, "_get_flag",
+                        "    return (afn_flags >> flag) & 1;");
+                    break;
                 case VsNodeType::CustomCode:
                     editorCode = "// (runs only on GBA runtime)";
                     {
@@ -10296,6 +10572,28 @@ void FrameTick(float dt)
                     case VsNodeType::AutoOrbit:     suffix = "_auto_orbit"; break;
                     case VsNodeType::DampenJump:    suffix = "_dampen_jump"; break;
                     case VsNodeType::IsMoving:      suffix = "_is_moving"; break;
+                    case VsNodeType::IsOnGround:    suffix = "_is_grounded"; break;
+                    case VsNodeType::IsJumping:     suffix = "_is_jumping"; break;
+                    case VsNodeType::CheckFlag:     suffix = "_check_flag"; break;
+                    case VsNodeType::SetFlag:       suffix = "_set_flag"; break;
+                    case VsNodeType::ToggleFlag:    suffix = "_toggle_flag"; break;
+                    case VsNodeType::FreezePlayer:  suffix = "_freeze"; break;
+                    case VsNodeType::UnfreezePlayer:suffix = "_unfreeze"; break;
+                    case VsNodeType::SetCameraHeight:suffix = "_set_cam_h"; break;
+                    case VsNodeType::SetHorizon:    suffix = "_set_horizon"; break;
+                    case VsNodeType::Teleport:      suffix = "_teleport"; break;
+                    case VsNodeType::SetVisible:    suffix = "_set_visible"; break;
+                    case VsNodeType::SetPosition:   suffix = "_set_pos"; break;
+                    case VsNodeType::StopAnim:      suffix = "_stop_anim"; break;
+                    case VsNodeType::SetAnimSpeed:  suffix = "_set_anim_speed"; break;
+                    case VsNodeType::SetVelocityY:  suffix = "_set_vel_y"; break;
+                    case VsNodeType::StopSound:     suffix = "_stop_sound"; break;
+                    case VsNodeType::AddMath:       suffix = "_add"; break;
+                    case VsNodeType::SubtractMath:  suffix = "_sub"; break;
+                    case VsNodeType::MultiplyMath:  suffix = "_mul"; break;
+                    case VsNodeType::NegateMath:    suffix = "_negate"; break;
+                    case VsNodeType::RandomInt:     suffix = "_random"; break;
+                    case VsNodeType::GetFlag:       suffix = "_get_flag"; break;
                     case VsNodeType::ChangeScene:   suffix = "_change_scene"; break;
                     case VsNodeType::LookDirection: suffix = "_look"; break;
                     case VsNodeType::PlaySound:     suffix = "_play_sound"; break;
@@ -10469,6 +10767,9 @@ void FrameTick(float dt)
                     for (int t = (int)VsNodeType::Branch; t <= (int)VsNodeType::CompareVar; t++)
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsMoving].name)) addNodeAt(VsNodeType::IsMoving);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsOnGround].name)) addNodeAt(VsNodeType::IsOnGround);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsJumping].name)) addNodeAt(VsNodeType::IsJumping);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CheckFlag].name)) addNodeAt(VsNodeType::CheckFlag);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
@@ -10478,6 +10779,20 @@ void FrameTick(float dt)
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
                     for (int t = (int)VsNodeType::MovePlayer; t <= (int)VsNodeType::DampenJump; t++)
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetFlag].name)) addNodeAt(VsNodeType::SetFlag);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ToggleFlag].name)) addNodeAt(VsNodeType::ToggleFlag);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FreezePlayer].name)) addNodeAt(VsNodeType::FreezePlayer);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::UnfreezePlayer].name)) addNodeAt(VsNodeType::UnfreezePlayer);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetCameraHeight].name)) addNodeAt(VsNodeType::SetCameraHeight);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHorizon].name)) addNodeAt(VsNodeType::SetHorizon);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Teleport].name)) addNodeAt(VsNodeType::Teleport);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetVisible].name)) addNodeAt(VsNodeType::SetVisible);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetPosition].name)) addNodeAt(VsNodeType::SetPosition);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopAnim].name)) addNodeAt(VsNodeType::StopAnim);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetAnimSpeed].name)) addNodeAt(VsNodeType::SetAnimSpeed);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetVelocityY].name)) addNodeAt(VsNodeType::SetVelocityY);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopSound].name)) addNodeAt(VsNodeType::StopSound);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CustomCode].name)) addNodeAt(VsNodeType::CustomCode);
                     ImGui::PopStyleColor();
@@ -10490,6 +10805,13 @@ void FrameTick(float dt)
                     for (int t = (int)VsNodeType::Integer; t <= (int)VsNodeType::Float; t++)
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Object].name)) addNodeAt(VsNodeType::Object);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::AddMath].name)) addNodeAt(VsNodeType::AddMath);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SubtractMath].name)) addNodeAt(VsNodeType::SubtractMath);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::MultiplyMath].name)) addNodeAt(VsNodeType::MultiplyMath);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::NegateMath].name)) addNodeAt(VsNodeType::NegateMath);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::RandomInt].name)) addNodeAt(VsNodeType::RandomInt);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetFlag].name)) addNodeAt(VsNodeType::GetFlag);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
