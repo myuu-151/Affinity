@@ -9998,7 +9998,6 @@ void FrameTick(float dt)
                         case VsNodeType::FlipSprite:    return "_flip_sprite";
                         case VsNodeType::SetDrawDist:   return "_set_draw_dist";
                         case VsNodeType::EnableCollision:return "_enable_collision";
-                        case VsNodeType::SetSpriteAnim: return "_set_sprite_anim";
                         case VsNodeType::ChangeScene:   return "_change_scene";
                         case VsNodeType::CustomCode:    return "_custom";
                         case VsNodeType::SetVariable:   return "_set_var";

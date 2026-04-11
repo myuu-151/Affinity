@@ -1547,7 +1547,6 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::FlipSprite:    return "_flip_sprite";
         case GBAScriptNodeType::SetDrawDist:   return "_set_draw_dist";
         case GBAScriptNodeType::EnableCollision:return "_enable_collision";
-        case GBAScriptNodeType::SetSpriteAnim: return "_set_sprite_anim";
         case GBAScriptNodeType::ChangeScene:   return "_change_scene";
         case GBAScriptNodeType::CustomCode:    return "_custom";
         case GBAScriptNodeType::Countdown:     return "_countdown";
