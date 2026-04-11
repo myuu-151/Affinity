@@ -198,6 +198,7 @@ enum class VsNodeType : int {
     Group,          // subgraph containing other nodes
     Object,         // constant object/sprite index output (dropdown)
     CustomCode,     // user-written C code (GBA only)
+    IsMoving,       // condition gate: passes exec only if player is moving
     COUNT
 };
 
@@ -255,6 +256,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Group",           0xFF888844, 0, 0, 0, 0, {}, {}, {} },
     { "Object",          0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Custom Code",     0xFF993399, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Moving",      0xFF885533, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -7209,6 +7211,15 @@ void FrameTick(float dt)
                     if (nid < 0 || nid >= (int)vis.size() || vis[nid]) continue;
                     vis[nid] = true; safety++;
                     auto* an = findNodePlay(nid); if (!an) continue;
+                    // IsMoving gate: only pass through if player is moving
+                    if (an->type == VsNodeType::IsMoving) {
+                        if (sPlayerMoving) {
+                            for (auto& lk : sVsLinks)
+                                if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                    front.push_back(lk.to.nodeId);
+                        }
+                        continue; // don't add IsMoving itself to acts
+                    }
                     acts.push_back(an);
                     for (auto& lk : sVsLinks)
                         if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
@@ -9463,6 +9474,7 @@ void FrameTick(float dt)
                 case VsNodeType::DestroyObject: desc = "Removes a sprite/object from the scene."; break;
                 case VsNodeType::AutoOrbit:     desc = "Enables auto-orbit camera when strafing. 0 = disabled."; break;
                 case VsNodeType::DampenJump:    desc = "Multiplies upward velocity by factor when fired. Use with On Key Released for variable jump height."; break;
+                case VsNodeType::IsMoving:      desc = "Gate: only passes execution through if the player is currently moving (d-pad held)."; break;
                 case VsNodeType::Integer:       desc = "Outputs a constant integer value."; break;
                 case VsNodeType::Key:           desc = "Outputs a key constant (A, B, L, R, etc)."; break;
                 case VsNodeType::Direction:     desc = "Outputs a direction (Left, Right, Up, Down)."; break;
@@ -9608,6 +9620,7 @@ void FrameTick(float dt)
                         case VsNodeType::DestroyObject: return "_destroy";
                         case VsNodeType::AutoOrbit:     return "_auto_orbit";
                         case VsNodeType::DampenJump:    return "_dampen_jump";
+                        case VsNodeType::IsMoving:      return "_is_moving";
                         case VsNodeType::ChangeScene:   return "_change_scene";
                         case VsNodeType::CustomCode:    return "_custom";
                         case VsNodeType::SetVariable:   return "_set_var";
@@ -10042,6 +10055,15 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_destroy",
                         "    // DestroyObject: hide sprite at index");
                     break;
+                case VsNodeType::IsMoving:
+                    editorCode =
+                        "// Gate: passes execution only if player is moving\n"
+                        "if (sPlayerMoving) { /* downstream actions */ }";
+                    setActionFunc(infoNode, "_is_moving",
+                        "    if (player_moving) {\n"
+                        "        /* downstream actions */\n"
+                        "    }");
+                    break;
                 case VsNodeType::CustomCode:
                     editorCode = "// (runs only on GBA runtime)";
                     {
@@ -10054,62 +10076,102 @@ void FrameTick(float dt)
                     }
                     break;
                 // Data nodes
-                case VsNodeType::Integer:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "%d", infoNode.paramInt[0]);
-                    defaultCode = defaultCodeBuf; break;
+                case VsNodeType::Integer: {
+                    editorCode = "// Constant integer value";
+                    char body[128];
+                    snprintf(body, sizeof(body), "    return %d;", infoNode.paramInt[0]);
+                    setActionFunc(infoNode, "_int", body);
+                    break;
+                }
                 case VsNodeType::Float: {
                     float fv; memcpy(&fv, &infoNode.paramInt[0], sizeof(float));
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "%.3g  (fixed: %d)", fv, (int)(fv * 256.0f));
-                    defaultCode = defaultCodeBuf; break;
+                    editorCode = "// Constant float value (fixed-point on GBA)";
+                    char body[128];
+                    snprintf(body, sizeof(body), "    return %d; // %.3g * 256", (int)(fv * 256.0f), fv);
+                    setActionFunc(infoNode, "_float", body);
+                    break;
                 }
-                case VsNodeType::Key:
+                case VsNodeType::Key: {
+                    editorCode = "// Constant key value";
+                    char body[128];
                     if (infoNode.paramInt[0] >= 0 && infoNode.paramInt[0] < kVsKeyCount)
-                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "KEY_%s", sVsKeyNames[infoNode.paramInt[0]]);
-                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "<unset>");
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::Direction:
+                        snprintf(body, sizeof(body), "    return KEY_%s;", sVsKeyNames[infoNode.paramInt[0]]);
+                    else
+                        snprintf(body, sizeof(body), "    return 0; // <unset>");
+                    setActionFunc(infoNode, "_key", body);
+                    break;
+                }
+                case VsNodeType::Direction: {
+                    editorCode = "// Constant direction value";
+                    char body[128];
                     if (infoNode.paramInt[0] >= 0 && infoNode.paramInt[0] < kVsAxisCount)
-                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "%s", sVsAxisNames[infoNode.paramInt[0]]);
-                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "<unset>");
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::Animation:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "anim index %d", infoNode.paramInt[0]);
-                    defaultCode = defaultCodeBuf; break;
+                        snprintf(body, sizeof(body), "    return %d; // %s", infoNode.paramInt[0], sVsAxisNames[infoNode.paramInt[0]]);
+                    else
+                        snprintf(body, sizeof(body), "    return 0; // <unset>");
+                    setActionFunc(infoNode, "_dir", body);
+                    break;
+                }
+                case VsNodeType::Animation: {
+                    editorCode = "// Constant animation index";
+                    char body[128];
+                    snprintf(body, sizeof(body), "    return %d; // anim index", infoNode.paramInt[1]);
+                    setActionFunc(infoNode, "_anim", body);
+                    break;
+                }
+                case VsNodeType::Object: {
+                    editorCode = "// Constant object/sprite index";
+                    char body[128];
+                    snprintf(body, sizeof(body), "    return %d;", infoNode.paramInt[0]);
+                    setActionFunc(infoNode, "_obj", body);
+                    break;
+                }
                 // Logic
                 case VsNodeType::Branch:
-                    defaultCode =
-                        "// Branch — conditional execution\n"
-                        "int cond = findDataIn(action, 0)->paramInt[0];\n"
+                    editorCode =
+                        "// Conditional execution\n"
                         "if (cond) execChain(truePin);\n"
                         "else execChain(falsePin);";
+                    setActionFunc(infoNode, "_branch",
+                        "    int cond = findDataIn(0)->paramInt[0];\n"
+                        "    if (cond) { /* true chain */ }\n"
+                        "    else { /* false chain */ }");
                     break;
                 case VsNodeType::CompareVar:
-                    defaultCode =
-                        "// CompareVar — compare variable slot\n"
-                        "int slot = findDataIn(action, 0)->paramInt[0];\n"
-                        "int value = findDataIn(action, 1)->paramInt[0];\n"
+                    editorCode =
+                        "// Compare variable slot to value\n"
                         "result = (vars[slot] == value) ? 1 : 0;";
+                    setActionFunc(infoNode, "_compare_var",
+                        "    int slot = findDataIn(0)->paramInt[0];\n"
+                        "    int value = findDataIn(1)->paramInt[0];\n"
+                        "    return (afn_vars[slot] == value) ? 1 : 0;");
                     break;
                 case VsNodeType::LookDirection:
-                    defaultCode =
-                        "// LookDirection — set player facing\n"
-                        "int dir = findDataIn(action, 0)->paramInt[0];\n"
-                        "playerFacing = dir;";
+                    editorCode =
+                        "// Set player facing direction";
+                    setActionFunc(infoNode, "_look",
+                        "    int dir = findDataIn(0)->paramInt[0];\n"
+                        "    player_facing = dir;");
                     break;
                 case VsNodeType::PlaySound:
-                    defaultCode =
-                        "// PlaySound — trigger sound effect\n"
-                        "int soundId = findDataIn(action, 0)->paramInt[0];\n"
-                        "// (sound playback not yet implemented in editor)";
+                    editorCode =
+                        "// Trigger sound effect\n"
+                        "// (not yet implemented in editor)";
+                    setActionFunc(infoNode, "_play_sound",
+                        "    int soundId = findDataIn(0)->paramInt[0];\n"
+                        "    // play_sound(soundId);");
                     break;
                 case VsNodeType::Wait:
-                    defaultCode =
-                        "// Wait — pause execution for N frames\n"
-                        "int frames = findDataIn(action, 0)->paramInt[0];\n"
-                        "waitCounter = frames;";
+                    editorCode =
+                        "// Pause execution for N frames";
+                    setActionFunc(infoNode, "_wait",
+                        "    int frames = findDataIn(0)->paramInt[0];\n"
+                        "    wait_counter = frames;");
                     break;
                 case VsNodeType::Group:
-                    defaultCode = "// Group — contains a subgraph of nodes"; break;
+                    editorCode = "// Contains a subgraph of nodes";
+                    setActionFunc(infoNode, "_group",
+                        "    // subgraph execution");
+                    break;
                 default: break;
                 }
 
@@ -10233,8 +10295,23 @@ void FrameTick(float dt)
                     case VsNodeType::DestroyObject: suffix = "_destroy"; break;
                     case VsNodeType::AutoOrbit:     suffix = "_auto_orbit"; break;
                     case VsNodeType::DampenJump:    suffix = "_dampen_jump"; break;
+                    case VsNodeType::IsMoving:      suffix = "_is_moving"; break;
                     case VsNodeType::ChangeScene:   suffix = "_change_scene"; break;
+                    case VsNodeType::LookDirection: suffix = "_look"; break;
+                    case VsNodeType::PlaySound:     suffix = "_play_sound"; break;
+                    case VsNodeType::Wait:          suffix = "_wait"; break;
+                    case VsNodeType::SetVariable:   suffix = "_set_var"; break;
+                    case VsNodeType::AddVariable:   suffix = "_add_var"; break;
                     case VsNodeType::CustomCode:    suffix = "_custom"; break;
+                    case VsNodeType::Integer:       suffix = "_int"; break;
+                    case VsNodeType::Float:         suffix = "_float"; break;
+                    case VsNodeType::Key:           suffix = "_key"; break;
+                    case VsNodeType::Direction:     suffix = "_dir"; break;
+                    case VsNodeType::Animation:     suffix = "_anim"; break;
+                    case VsNodeType::Object:        suffix = "_obj"; break;
+                    case VsNodeType::Branch:        suffix = "_branch"; break;
+                    case VsNodeType::CompareVar:    suffix = "_compare_var"; break;
+                    case VsNodeType::Group:         suffix = "_group"; break;
                     default: suffix = ""; break;
                     }
                     // Show default name as placeholder (action nodes include node ID to disambiguate)
@@ -10391,6 +10468,7 @@ void FrameTick(float dt)
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
                     for (int t = (int)VsNodeType::Branch; t <= (int)VsNodeType::CompareVar; t++)
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsMoving].name)) addNodeAt(VsNodeType::IsMoving);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }

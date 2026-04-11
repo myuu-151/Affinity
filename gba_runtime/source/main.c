@@ -242,7 +242,7 @@ static FIXED player_y;             // player height (16.8)
 static u16   orbit_angle;          // brad angle of camera around player
 static FIXED orbit_dist;           // distance from player (16.8)
 static int   player_sprite_idx = -1;
-static int   player_moving;        // nonzero if D-pad held
+int          player_moving;        // nonzero if D-pad held (non-static for mapdata.h access)
 static u16   player_move_angle;    // brad angle of last movement direction
 static int   auto_orbit_smooth;   // smoothed auto-orbit value (fixed-point)
 

@@ -139,6 +139,7 @@ enum class GBAScriptNodeType : int {
     Group,
     Object,
     CustomCode,
+    IsMoving,
     COUNT
 };
 
