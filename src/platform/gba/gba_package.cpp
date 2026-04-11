@@ -1464,7 +1464,28 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int   afn_fade_target;\n";
         f << "static int   afn_fade_frames;\n";
         f << "static int   afn_fade_counter;\n";
-        f << "static int   afn_fade_level;\n\n";
+        f << "static int   afn_fade_level;\n";
+        f << "static int   afn_hp[16];\n";
+        f << "static int   afn_score;\n";
+        f << "static FIXED afn_start_x, afn_start_y, afn_start_z;\n";
+        f << "static int   afn_frame_count;\n";
+        f << "static u8    afn_sprite_flip[16];\n";
+        f << "static int   afn_draw_distance;\n";
+        f << "static u8    afn_collision_enabled[16];\n\n";
+        // SRAM helpers
+        f << "static inline void afn_sram_save(void) {\n";
+        f << "    volatile u8* sram = (volatile u8*)0x0E000000;\n";
+        f << "    sram[0] = 'A'; sram[1] = 'F'; // magic\n";
+        f << "    int i; for (i = 0; i < 4; i++) sram[2+i] = (afn_flags >> (i*8)) & 0xFF;\n";
+        f << "    for (i = 0; i < 4; i++) sram[6+i] = (afn_score >> (i*8)) & 0xFF;\n";
+        f << "}\n";
+        f << "static inline void afn_sram_load(void) {\n";
+        f << "    volatile u8* sram = (volatile u8*)0x0E000000;\n";
+        f << "    if (sram[0] != 'A' || sram[1] != 'F') return;\n";
+        f << "    afn_flags = sram[2] | (sram[3]<<8) | (sram[4]<<16) | (sram[5]<<24);\n";
+        f << "    afn_score = sram[6] | (sram[7]<<8) | (sram[8]<<16) | (sram[9]<<24);\n";
+        f << "}\n";
+        f << "static inline void afn_spawn_effect(int id, FIXED x, FIXED z) { (void)id; (void)x; (void)z; }\n\n";
     }
     // Helper: get suffix string for an action node type
     auto actionSuffix = [](GBAScriptNodeType t) -> const char* {
@@ -1505,6 +1526,21 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::LookAt:        return "_look_at";
         case GBAScriptNodeType::SetSpriteAnim: return "_set_sprite_anim";
         case GBAScriptNodeType::SpawnEffect:   return "_spawn_effect";
+        case GBAScriptNodeType::DoOnce:        return "_do_once";
+        case GBAScriptNodeType::FlipFlop:      return "_flip_flop";
+        case GBAScriptNodeType::Gate:          return "_gate";
+        case GBAScriptNodeType::ForLoop:       return "_for_loop";
+        case GBAScriptNodeType::Sequence:      return "_sequence";
+        case GBAScriptNodeType::SetHP:         return "_set_hp";
+        case GBAScriptNodeType::DamageHP:      return "_damage_hp";
+        case GBAScriptNodeType::AddScore:      return "_add_score";
+        case GBAScriptNodeType::Respawn:       return "_respawn";
+        case GBAScriptNodeType::SaveData:      return "_save_data";
+        case GBAScriptNodeType::LoadData:      return "_load_data";
+        case GBAScriptNodeType::FlipSprite:    return "_flip_sprite";
+        case GBAScriptNodeType::SetDrawDist:   return "_set_draw_dist";
+        case GBAScriptNodeType::EnableCollision:return "_enable_collision";
+        case GBAScriptNodeType::SetSpriteAnim: return "_set_sprite_anim";
         case GBAScriptNodeType::ChangeScene:   return "_change_scene";
         case GBAScriptNodeType::CustomCode:    return "_custom";
         default: return "";
@@ -1878,6 +1914,84 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     int x = xData ? resolveInt(xData) : 0;
                     int z = zData ? resolveInt(zData) : 0;
                     f << "    afn_spawn_effect(" << eff << ", " << x << " << 8, " << z << " << 8);\n";
+                    break;
+                }
+                case GBAScriptNodeType::DoOnce:
+                    f << "    { static int afn_done_" << action->id << " = 0;\n";
+                    f << "      if (afn_done_" << action->id << ") return;\n";
+                    f << "      afn_done_" << action->id << " = 1; }\n";
+                    break;
+                case GBAScriptNodeType::FlipFlop:
+                    f << "    // FlipFlop handled at call site\n";
+                    break;
+                case GBAScriptNodeType::Gate: {
+                    auto* openData = findDataIn(action->id, 0);
+                    int open = openData ? resolveInt(openData) : 1;
+                    f << "    if (!" << open << ") return;\n";
+                    break;
+                }
+                case GBAScriptNodeType::ForLoop: {
+                    auto* countData = findDataIn(action->id, 0);
+                    int count = countData ? resolveInt(countData) : 1;
+                    f << "    // ForLoop: repeats downstream " << count << " times\n";
+                    break;
+                }
+                case GBAScriptNodeType::Sequence:
+                    f << "    // Sequence: fires Then 0 then Then 1\n";
+                    break;
+                case GBAScriptNodeType::SetHP: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* hpData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int hp = hpData ? resolveInt(hpData) : 100;
+                    f << "    afn_hp[" << obj << "] = " << hp << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::DamageHP: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* amtData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int amt = amtData ? resolveInt(amtData) : 1;
+                    f << "    afn_hp[" << obj << "] -= " << amt << ";\n";
+                    f << "    if (afn_hp[" << obj << "] < 0) afn_hp[" << obj << "] = 0;\n";
+                    break;
+                }
+                case GBAScriptNodeType::AddScore: {
+                    auto* amtData = findDataIn(action->id, 0);
+                    int amt = amtData ? resolveInt(amtData) : 1;
+                    f << "    afn_score += " << amt << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::Respawn:
+                    f << "    player_x = afn_start_x; player_y = afn_start_y; player_z = afn_start_z;\n";
+                    f << "    player_vy = 0;\n";
+                    break;
+                case GBAScriptNodeType::SaveData:
+                    f << "    afn_sram_save();\n";
+                    break;
+                case GBAScriptNodeType::LoadData:
+                    f << "    afn_sram_load();\n";
+                    break;
+                case GBAScriptNodeType::FlipSprite: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* flipData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int flip = flipData ? resolveInt(flipData) : 1;
+                    f << "    afn_sprite_flip[" << obj << "] = " << flip << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetDrawDist: {
+                    auto* distData = findDataIn(action->id, 0);
+                    int dist = distData ? resolveInt(distData) : 0;
+                    f << "    afn_draw_distance = " << dist << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::EnableCollision: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* enData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int en = enData ? resolveInt(enData) : 1;
+                    f << "    afn_collision_enabled[" << obj << "] = " << en << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::CustomCode:
@@ -2452,6 +2566,72 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     std::string x = xData ? bpResolveInt(xData) : "0";
                     std::string z = zData ? bpResolveInt(zData) : "0";
                     f << "    afn_spawn_effect(" << eff << ", " << x << " << 8, " << z << " << 8);\n";
+                    break;
+                }
+                case GBAScriptNodeType::DoOnce:
+                    f << "    { static int afn_done_" << action->id << " = 0;\n";
+                    f << "      if (afn_done_" << action->id << ") return;\n";
+                    f << "      afn_done_" << action->id << " = 1; }\n";
+                    break;
+                case GBAScriptNodeType::Gate: {
+                    auto* openData = bpFindDataIn(action->id, 0);
+                    std::string open = openData ? bpResolveInt(openData) : "1";
+                    f << "    if (!" << open << ") return;\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetHP: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* hpData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string hp = hpData ? bpResolveInt(hpData) : "100";
+                    f << "    afn_hp[" << obj << "] = " << hp << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::DamageHP: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* amtData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string amt = amtData ? bpResolveInt(amtData) : "1";
+                    f << "    afn_hp[" << obj << "] -= " << amt << ";\n";
+                    f << "    if (afn_hp[" << obj << "] < 0) afn_hp[" << obj << "] = 0;\n";
+                    break;
+                }
+                case GBAScriptNodeType::AddScore: {
+                    auto* amtData = bpFindDataIn(action->id, 0);
+                    std::string amt = amtData ? bpResolveInt(amtData) : "1";
+                    f << "    afn_score += " << amt << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::Respawn:
+                    f << "    player_x = afn_start_x; player_y = afn_start_y; player_z = afn_start_z;\n";
+                    f << "    player_vy = 0;\n";
+                    break;
+                case GBAScriptNodeType::SaveData:
+                    f << "    afn_sram_save();\n";
+                    break;
+                case GBAScriptNodeType::LoadData:
+                    f << "    afn_sram_load();\n";
+                    break;
+                case GBAScriptNodeType::FlipSprite: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* flipData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string flip = flipData ? bpResolveInt(flipData) : "1";
+                    f << "    afn_sprite_flip[" << obj << "] = " << flip << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetDrawDist: {
+                    auto* distData = bpFindDataIn(action->id, 0);
+                    std::string dist = distData ? bpResolveInt(distData) : "0";
+                    f << "    afn_draw_distance = " << dist << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::EnableCollision: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* enData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string en = enData ? bpResolveInt(enData) : "1";
+                    f << "    afn_collision_enabled[" << obj << "] = " << en << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::CustomCode:

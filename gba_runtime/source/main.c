@@ -267,6 +267,13 @@ static int   afn_fade_target;     // 0=bright, 16=black
 static int   afn_fade_frames;     // duration of fade
 static int   afn_fade_counter;    // current frame in fade
 static int   afn_fade_level;      // current blend level (0-16)
+static int   afn_hp[16];         // per-sprite health points
+static int   afn_score;          // global score counter
+static FIXED afn_start_x, afn_start_y, afn_start_z; // spawn point
+static int   afn_frame_count;    // frame counter since boot
+static u8    afn_sprite_flip[16]; // per-sprite horizontal flip
+static int   afn_draw_distance;  // runtime draw distance override
+static u8    afn_collision_enabled[16]; // per-sprite collision toggle
 
 // Direction animation set tracking (for DMA streaming)
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
@@ -3396,6 +3403,12 @@ int main(void)
     afn_terminal_vel = AFN_TERMINAL_VEL;
     afn_play_anim = -1;
     afn_pending_scene = -1;
+    afn_start_x = player_x;
+    afn_start_y = player_y;
+    afn_start_z = player_z;
+    afn_frame_count = 0;
+    afn_score = 0;
+    { int i; for (i = 0; i < 16; i++) { afn_hp[i] = 100; afn_collision_enabled[i] = 1; } }
     afn_script_start();
     afn_bp_dispatch_start();
 #endif
@@ -3559,6 +3572,9 @@ int main(void)
             if (afn_pending_scene >= 0) {
                 // TODO: multi-scene data loading
             }
+
+            // Frame counter
+            afn_frame_count++;
 
             // Screen shake processing
             if (afn_shake_frames > 0) {
