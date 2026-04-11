@@ -111,6 +111,9 @@ struct GBAMeshExport
     int wireframe = 0;            // 1=wireframe overlay
     int grayscale = 0;            // 1=grayscale shaded faces
     float drawDistance = 0.0f;    // per-mesh draw distance (0 = use global/unlimited)
+    int collision = 1;            // 1 = generate collision faces, 0 = no collision
+    int drawPriority = 0;         // 0 = draws on top (last), higher = draws first
+    int visible = 1;              // 1 = render, 0 = invisible collision-only
     // Texture mapping
     std::vector<float> uvs;       // u, v per vertex (flat, interleaved)
     int textured = 0;             // 1 = textured, 0 = flat shaded
@@ -134,6 +137,9 @@ enum class GBAScriptNodeType : int {
     Integer, Key, Direction, Animation, Float,
     OnUpdate,
     Group,
+    Object,
+    CustomCode,
+    IsMoving,
     COUNT
 };
 
@@ -142,6 +148,7 @@ struct GBAScriptNodeExport {
     GBAScriptNodeType type;
     int paramInt[4];  // per-node params (key index, value, IEEE754 float bits, etc.)
     char customCode[512] = {};  // user-editable code override (empty = use default)
+    char funcName[64] = {};     // custom function name (empty = use default)
 };
 
 struct GBAScriptLinkExport {
@@ -158,6 +165,27 @@ struct GBAScriptExport {
     std::vector<GBAScriptLinkExport> links;
 };
 
+// ---- Blueprint Export ----
+
+struct GBABlueprintParamExport {
+    int dataType;      // 0=int, 1=float, 2=key, 3=direction, 4=animation
+    int defaultValue;
+};
+
+struct GBABlueprintExport {
+    std::string name;
+    GBAScriptExport script;  // nodes + links
+    std::vector<GBABlueprintParamExport> params;
+};
+
+struct GBABlueprintInstanceExport {
+    int blueprintIdx;
+    int spriteIdx;      // -1 if tilemap object
+    int tmObjIdx;       // -1 if 3D sprite
+    int paramValues[8]; // resolved values (override or default)
+    int paramCount;
+};
+
 // Package the current map into a .gba ROM.
 // runtimeDir: path to gba_runtime/ directory
 // outputPath: where to write the final .gba
@@ -170,6 +198,8 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBAMeshExport>& meshes,
                 float orbitDist,
                 const GBAScriptExport& script,
+                const std::vector<GBABlueprintExport>& blueprints,
+                const std::vector<GBABlueprintInstanceExport>& bpInstances,
                 std::string& errorMsg);
 
 } // namespace Affinity

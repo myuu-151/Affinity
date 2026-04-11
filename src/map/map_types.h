@@ -67,6 +67,7 @@ struct SpriteAnim
     int endFrame   = 0;
     int fps        = 8;
     bool loop      = true;
+    bool stepAnim  = false; // true = advance frame per tile step (tilemap), false = time-based
     float speed    = 1.0f;  // playback speed multiplier (0..10, default 1)
     AnimState gameState = AnimState::None; // which game state triggers this anim
 };
@@ -184,6 +185,9 @@ struct MeshAsset
     bool grayscale = false; // true = grayscale shaded faces (combine with wireframe for editor look)
     bool useQuads = true;  // true = export quads natively to GBA, false = fan-triangulate quads
     float drawDistance = 0.0f; // per-mesh draw distance (0 = use global/unlimited)
+    bool collision = true; // true = generate collision faces for this mesh
+    int drawPriority = 0; // 0 = draws on top (last), higher = draws first (behind)
+    bool visible = true; // false = invisible collision-only mesh (saves CPU on GBA)
 
     // Quad index buffer — 4 consecutive indices per quad face from OBJ
     // OBJ quads are preserved as-is, not force-triangulated
@@ -217,6 +221,10 @@ struct FloorSprite
     bool  animEnabled = true; // false = static (no animation cycling)
     uint32_t color = 0xFFFF00FF; // tint color (ABGR) — used for editor preview
     bool  selected = false;
+    // Blueprint script attachment
+    int   blueprintIdx = -1;         // index into sBlueprintAssets (-1 = none)
+    struct { int paramIdx; int value; } instanceParams[8] = {};
+    int   instanceParamCount = 0;
 };
 
 static constexpr int kMaxFloorSprites = 64; // GBA OAM has 128 slots, reserve half

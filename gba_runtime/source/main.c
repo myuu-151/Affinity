@@ -47,6 +47,9 @@ extern void tex_scanline_asm(u16* rp, int pairCount, int su, int sv,
 // ARM assembly flat-fill scanline using VRAM strb trick (hline_fast.s, IWRAM)
 extern void afn_hline_fast(u16* row, int left, int right, u8 palIdx);
 
+// ARM assembly stmia framebuffer clear (hline_fast.s, IWRAM)
+extern void afn_clear_fb_stmia(u16* buf, u32 fill);
+
 // Debug profiling counters
 static int dbg_tex_tris;    // textured triangles this frame
 static int dbg_tex_spans;   // textured scanlines this frame
@@ -239,7 +242,7 @@ static FIXED player_y;             // player height (16.8)
 static u16   orbit_angle;          // brad angle of camera around player
 static FIXED orbit_dist;           // distance from player (16.8)
 static int   player_sprite_idx = -1;
-static int   player_moving;        // nonzero if D-pad held
+int          player_moving;        // nonzero if D-pad held (non-static for mapdata.h access)
 static u16   player_move_angle;    // brad angle of last movement direction
 static int   auto_orbit_smooth;   // smoothed auto-orbit value (fixed-point)
 
@@ -249,6 +252,9 @@ static FIXED afn_input_right;     // right input accumulator
 static FIXED afn_move_speed;      // current movement speed
 static int   afn_auto_orbit_speed; // auto-orbit speed (0 = disabled)
 static int   afn_play_anim;       // animation request (-1 = none)
+static int   afn_pending_scene;   // scene switch request (-1 = none)
+static int   afn_pending_scene_mode; // 0 = 3D/MapScene, 1 = Tilemap/TmScene
+static int   afn_collided_sprite; // sprite index player collided with (-1 = none)
 static FIXED afn_gravity;         // gravity per frame (16.8)
 static FIXED afn_terminal_vel;    // max fall speed (16.8)
 
@@ -600,7 +606,7 @@ static void load_editor_sprites(void)
 // DMA direction animation set switching
 // ---------------------------------------------------------------------------
 
-#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_DIR_ANIM_TILES_LEN)
 static void switch_dir_anim_set(int assetIdx, int newSet)
 {
     if (assetIdx < 0 || assetIdx >= AFN_ASSET_COUNT) return;
@@ -2466,6 +2472,8 @@ typedef struct {
     int texW, texShift, texMask, texPalBase;
     int vertCount, idxCount, quadIdxCount;
     int drawDist;
+    int drawPriority;
+    int visible;
     int centerDepth;
 } MeshSlot;
 
@@ -2502,6 +2510,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             continue;
 
         mi = g_sprites[si].meshIdx;
+        // Skip invisible meshes (collision-only)
+        if (!afn_mesh_desc[mi][16]) continue;
         vertCount = afn_mesh_desc[mi][0];
         if (vertCount > 512) vertCount = 512;
         if (totalVerts + vertCount > MAX_GLOBAL_VERTS) continue; // overflow guard
@@ -2533,6 +2543,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         ms->meshWireframe = afn_mesh_desc[mi][12];
         ms->meshGrayscale = afn_mesh_desc[mi][13];
         ms->drawDist = afn_mesh_desc[mi][14];
+        ms->drawPriority = afn_mesh_desc[mi][15];
+        ms->visible = afn_mesh_desc[mi][16];
         ms->texMask = ms->texW > 0 ? ms->texW - 1 : 0;
         ms->uvs = afn_mesh_uv_ptrs[mi];
         ms->tex = tex_cache_ptrs[mi];
@@ -2646,7 +2658,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 else if (ms->drawDist == 0 && (d0 + d1 + d2) / 3 > AFN_DRAW_DISTANCE) continue;
 #endif
                 g_triOrder[totalTris].triIdx = t;
-                g_triOrder[totalTris].depth = (d0 + d1 + d2) / 3;
+                g_triOrder[totalTris].depth = (d0 + d1 + d2) / 3 + (ms->drawPriority << 16);
                 g_triOrder[totalTris].slot = (u8)slotCount;
                 totalTris++;
             }
@@ -2696,7 +2708,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     else if (ms->drawDist == 0 && (d0 + d1 + d2 + d3) / 4 > AFN_DRAW_DISTANCE) continue;
 #endif
                     g_triOrder[totalTris].triIdx = t | 0x8000;
-                    g_triOrder[totalTris].depth = (d0 + d1 + d2 + d3) / 4;
+                    g_triOrder[totalTris].depth = (d0 + d1 + d2 + d3) / 4 + (ms->drawPriority << 16);
                     g_triOrder[totalTris].slot = (u8)slotCount;
                     totalTris++;
                 }
@@ -2708,6 +2720,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
     }
 
     // ---- Phase 2: Global sort — all tris across all meshes ----
+    // Priority is baked into depth (priority << 16), so single compare handles both.
+    // Priority 0 = draws last (on top), higher = draws behind.
     {
         int a, b;
         for (a = 1; a < totalTris; a++)
@@ -3193,6 +3207,10 @@ IWRAM_CODE static int collide_floor(FIXED px, FIXED pz, FIXED py, FIXED *outY)
 
 int main(void)
 {
+    // Boost EWRAM access speed: 8-cycle → 2-cycle on supported hardware.
+    // Undocumented register — safe on real GBA + most emulators.
+    *(volatile u32*)0x04000800 = 0x0E000020;
+
     // --- Video setup ---
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
     REG_DISPCNT = DCNT_MODE4 | DCNT_BG2 | DCNT_OBJ | DCNT_OBJ_1D;
@@ -3281,7 +3299,7 @@ int main(void)
     init_obj_sprites();
 
     // DMA direction animation set 0 from ROM to VRAM at boot
-#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_DIR_ANIM_TILES_LEN)
     {
         int ai;
         for (ai = 0; ai < AFN_ASSET_COUNT; ai++)
@@ -3367,7 +3385,9 @@ int main(void)
     afn_gravity = AFN_GRAVITY;
     afn_terminal_vel = AFN_TERMINAL_VEL;
     afn_play_anim = -1;
+    afn_pending_scene = -1;
     afn_script_start();
+    afn_bp_dispatch_start();
 #endif
 #endif
 
@@ -3403,11 +3423,8 @@ int main(void)
         {
             u16* vramBuf = g_page ? (u16*)0x06000000 : (u16*)0x0600A000;
             u16* backbuf = g_ewramRender ? g_ewramBuf : vramBuf;
-            // DMA fill with sky color (palette 0)
-            {
-                static u32 fill = 0;
-                DMA_TRANSFER(backbuf, &fill, 120 * 160 / 2, 3, DMA_NOW | DMA_32 | DMA_SRC_FIXED);
-            }
+            // Clear framebuffer with stmia (sky color = palette 0)
+            afn_clear_fb_stmia(backbuf, 0);
             if (g_coverageOn) coverage_clear();
             dbg_tex_tris = 0;
             dbg_tex_spans = 0;
@@ -3488,29 +3505,59 @@ int main(void)
             // Reset per-frame script state
             afn_input_fwd = 0;
             afn_input_right = 0;
-            afn_play_anim = -1;
+            afn_pending_scene = -1;
+            afn_collided_sprite = -1;
+
+            // Collision detection: player vs all non-player sprites
+            if (player_sprite_idx >= 0) {
+                int ci;
+                for (ci = 0; ci < g_spriteCount; ci++) {
+                    if (ci == player_sprite_idx) continue;
+                    FIXED dx = player_x - g_sprites[ci].x;
+                    FIXED dz = player_z - g_sprites[ci].z;
+                    // Distance squared in 16.8 fixed point — compare against radius^2
+                    // Collision radius ~24 pixels = 6144 in 16.8, squared = ~37M
+                    // Use >>4 to avoid overflow: (dx>>4)^2 threshold = 37748736>>8 = 147456
+                    FIXED dx4 = dx >> 4;
+                    FIXED dz4 = dz >> 4;
+                    if (dx4 * dx4 + dz4 * dz4 < 147456) {
+                        afn_collided_sprite = ci;
+                        break;
+                    }
+                }
+            }
 
             // Run per-frame script event handlers
             afn_script_update();
             afn_script_key_held();
             afn_script_key_pressed();
             afn_script_key_released();
+            // Collision event
+            if (afn_collided_sprite >= 0) {
+                afn_script_collision();
+                afn_bp_dispatch_collision();
+            }
+            // Blueprint instance dispatch
+            afn_bp_dispatch_update();
+            afn_bp_dispatch_key_held();
+            afn_bp_dispatch_key_pressed();
+            afn_bp_dispatch_key_released();
+
+            // Handle scene switch request
+            if (afn_pending_scene >= 0) {
+                // TODO: multi-scene data loading
+            }
 
             inputFwd = afn_input_fwd;
             inputRight = afn_input_right;
             moveSpeed = afn_move_speed;
 #else
+            // No script — player stands still
   #ifdef AFN_WALK_SPEED
-            moveSpeed = key_is_down(KEY_B) ? AFN_SPRINT_SPEED : AFN_WALK_SPEED;
+            moveSpeed = AFN_WALK_SPEED;
   #else
-            moveSpeed = key_is_down(KEY_B) ? 56 : 37;
+            moveSpeed = 37;
   #endif
-
-            // D-pad = player movement
-            if (key_is_down(KEY_UP))    inputFwd   += 256;
-            if (key_is_down(KEY_DOWN))  inputFwd   -= 256;
-            if (key_is_down(KEY_LEFT))  inputRight -= 256;
-            if (key_is_down(KEY_RIGHT)) inputRight += 256;
 #endif
 
             // Normalize diagonal (~0.707)
@@ -3523,12 +3570,6 @@ int main(void)
             int wasMoving = player_moving;
 
             // L/R shoulder = manual orbit (script handles this via OrbitCamera nodes)
-#ifndef AFN_HAS_SCRIPT
-            if (key_is_down(KEY_L))
-                orbit_angle -= rotSpeed;
-            if (key_is_down(KEY_R))
-                orbit_angle += rotSpeed;
-#endif
 
             // Auto-orbit when strafing (LEFT/RIGHT) with drag on release
             {
@@ -3537,24 +3578,6 @@ int main(void)
                 if (inputRight && afn_auto_orbit_speed > 0)
                 {
                     autoOrbitTarget = afn_auto_orbit_speed;
-                    if (inputRight < 0)
-                        autoOrbitTarget = -autoOrbitTarget;
-                    if (key_is_down(KEY_L) || key_is_down(KEY_R))
-                        autoOrbitTarget *= 2;
-                }
-#elif defined(AFN_AUTO_ORBIT_SPEED)
-                if (inputRight)
-                {
-                    autoOrbitTarget = AFN_AUTO_ORBIT_SPEED;
-                    if (inputRight < 0)
-                        autoOrbitTarget = -autoOrbitTarget;
-                    if (key_is_down(KEY_L) || key_is_down(KEY_R))
-                        autoOrbitTarget *= 2;
-                }
-#else
-                if (inputRight)
-                {
-                    autoOrbitTarget = (rotSpeed * 2 / 5);  // 40% of rotSpeed
                     if (inputRight < 0)
                         autoOrbitTarget = -autoOrbitTarget;
                     if (key_is_down(KEY_L) || key_is_down(KEY_R))
@@ -3603,23 +3626,14 @@ int main(void)
 #ifdef AFN_COL_FACE_COUNT
             collide_walls(&player_x, &player_z, player_y);
 
-            // Jump: A button, only when on ground
-#ifndef AFN_HAS_SCRIPT
-            if (key_hit(KEY_A) && player_on_ground)
-                player_vy = COL_JUMP_VEL;
-#endif
-
-            // Dampen jump: reduce upward velocity when A not held (variable jump height)
-#ifdef AFN_JUMP_DAMPEN
-            if (!key_is_down(KEY_A) && player_vy > 0)
-                player_vy = (player_vy * AFN_JUMP_DAMPEN) >> 8;
-#endif
+            // Jump + dampen are driven by script nodes only
 
             // Gravity: accelerate downward, clamp to terminal velocity
 #ifdef AFN_HAS_SCRIPT
             player_vy -= afn_gravity;
             if (player_vy < -afn_terminal_vel) player_vy = -afn_terminal_vel;
 #else
+            // No script — still apply default gravity so player doesn't float
             player_vy -= COL_GRAVITY;
             if (player_vy < -COL_TERMINAL_VEL) player_vy = -COL_TERMINAL_VEL;
 #endif
@@ -3717,28 +3731,11 @@ int main(void)
                     if (!g_asset_anim_enabled[ai])
                         continue;
 
-                    // Determine target anim by game state mapping
-                    // States: 0=None, 1=Idle, 2=Walk, 3=Run, 4=Sprint
+                    // Animation driven by PlayAnim script nodes
                     {
-                        int desiredState = 1; // Idle
-                        if (player_moving)
-                            desiredState = key_is_down(KEY_B) ? 4 : 2; // Sprint or Walk
+                        int targetAnim = (afn_play_anim >= 0 && afn_play_anim < AFN_MAX_ANIMS)
+                            ? afn_play_anim : 0;
 
-                        int targetAnim = 0; // fallback to slot 0
-#ifdef AFN_STATE_COUNT
-                        {
-                            int slot = afn_state_to_anim[ai][desiredState];
-                            if (slot >= 0 && slot < AFN_MAX_ANIMS)
-                                targetAnim = slot;
-                            else
-                            {
-                                // Walk/Run fallback: try Run(3) if Walk(2) missing, vice versa
-                                if (desiredState == 2) slot = afn_state_to_anim[ai][3];
-                                else if (desiredState == 3) slot = afn_state_to_anim[ai][2];
-                                if (slot >= 0 && slot < AFN_MAX_ANIMS) targetAnim = slot;
-                            }
-                        }
-#endif
                         if (targetAnim != g_current_anim[ai])
                         {
                             g_current_anim[ai] = targetAnim;
@@ -3746,7 +3743,7 @@ int main(void)
                         }
                     }
 
-#ifdef AFN_MAX_ANIMS
+#if defined(AFN_MAX_ANIMS) && defined(AFN_DIR_ANIM_TILES_LEN)
                     if (g_current_anim[ai] >= AFN_MAX_ANIMS) continue;
                     {
                         int baseSet = afn_anim_desc[ai][g_current_anim[ai]][0];
@@ -3775,33 +3772,7 @@ int main(void)
             // FREE CAMERA MODE (no player sprite — original controls)
             // ============================================================
 
-#ifdef AFN_WALK_SPEED
-            FIXED moveSpeed = key_is_down(KEY_B) ? AFN_SPRINT_SPEED : AFN_WALK_SPEED;
-#else
-            FIXED moveSpeed = key_is_down(KEY_B) ? 56 : 37;
-#endif
-            int   rotSpeed  = 0x0200;
-
-            if (key_is_down(KEY_LEFT))
-                cam_angle -= rotSpeed;
-            if (key_is_down(KEY_RIGHT))
-                cam_angle += rotSpeed;
-
-            if (key_is_down(KEY_UP))
-            {
-                cam_x += (g_sinf * moveSpeed) >> 8;
-                cam_z -= (g_cosf * moveSpeed) >> 8;
-            }
-            if (key_is_down(KEY_DOWN))
-            {
-                cam_x -= (g_sinf * moveSpeed) >> 8;
-                cam_z += (g_cosf * moveSpeed) >> 8;
-            }
-
-            if (key_is_down(KEY_L) && cam_h > (4 << 8))
-                cam_h -= 85;
-            if (key_is_down(KEY_R) && cam_h < (256 << 8))
-                cam_h += 85;
+            // Free camera — no fallback controls, driven by script nodes only
 
         }
 

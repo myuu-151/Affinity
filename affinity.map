@@ -1,0 +1,8 @@
+Archive member included to satisfy reference by file (symbol)
+
+C:/devkitPro/devkitARM/bin/../lib/gcc/arm-none-eabi/15.2.0/thumb\libgcc.a(_sync_none.o)
+                              (__sync_synchronize_none)
+C:/devkitPro/devkitARM/bin/../lib/gcc/arm-none-eabi/15.2.0/../../../../arm-none-eabi/lib/thumb\libg.a(libc_a-init.o)
+                              C:/devkitPro/devkitARM/bin/../lib/gcc/arm-none-eabi/15.2.0/../../../../arm-none-eabi/lib/thumb/gba_crt0.o (__libc_init_array)
+C:/devkitPro/devkitARM/bin/../lib/gcc/arm-none-eabi/15.2.0/../../../../arm-none-eabi/lib/thumb\libsysbase.a(libsysbase_libsysbase_a-malloc_vars.o)
+                              C:/devkitPro/devkitARM/bin/../lib/gcc/arm-none-eabi/15.2.0/../../../../arm-none-eabi/lib/thumb/gba_crt0.o (fake_heap_end)

@@ -97,3 +97,48 @@ afn_hline_fast:
     bx      lr
 
 .size afn_hline_fast, .-afn_hline_fast
+
+@ ---------------------------------------------------------------------------
+@ afn_clear_fb_stmia — Clear 240x160 framebuffer using stmia (38400 bytes)
+@ Uses 10 zero registers per stmia = 40 bytes/iter, 8x unrolled = 320 bytes/loop
+@ 120 iterations × 320 = 38400 bytes total.
+@
+@ void afn_clear_fb_stmia(u16* buf, u32 fill);
+@   buf  = destination (VRAM or EWRAM backbuffer)
+@   fill = 32-bit fill value (e.g., 0 or palIdx broadcast to all 4 bytes)
+@ ---------------------------------------------------------------------------
+    .global afn_clear_fb_stmia
+    .type   afn_clear_fb_stmia, %function
+
+afn_clear_fb_stmia:
+    stmfd   sp!, {r4-r11, lr}
+
+    @ Broadcast fill value to r2-r11
+    mov     r2, r1
+    mov     r3, r1
+    mov     r4, r1
+    mov     r5, r1
+    mov     r6, r1
+    mov     r7, r1
+    mov     r8, r1
+    mov     r9, r1
+    mov     r10, r1
+    mov     r11, r1
+
+    mov     r12, #120               @ 120 iterations × 8 × 40 bytes = 38400
+.Lclear_loop:
+    stmia   r0!, {r2-r11}          @ 40 bytes
+    stmia   r0!, {r2-r11}          @ 40 bytes
+    stmia   r0!, {r2-r11}          @ 40 bytes
+    stmia   r0!, {r2-r11}          @ 40 bytes
+    stmia   r0!, {r2-r11}          @ 40 bytes
+    stmia   r0!, {r2-r11}          @ 40 bytes
+    stmia   r0!, {r2-r11}          @ 40 bytes
+    stmia   r0!, {r2-r11}          @ 40 bytes
+    subs    r12, r12, #1
+    bne     .Lclear_loop
+
+    ldmfd   sp!, {r4-r11, lr}
+    bx      lr
+
+.size afn_clear_fb_stmia, .-afn_clear_fb_stmia

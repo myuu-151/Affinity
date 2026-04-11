@@ -39,6 +39,7 @@ static bool sInitialized = false;
 // Editor mode tabs
 enum class EditorTab { Map, Sprites, Tiles, Skybox, Player, ThreeD, Mode7, Tilemap, Events };
 static EditorTab sActiveTab = EditorTab::Map;
+static EditorTab sPlayTab = EditorTab::Map; // which tab Play was started on
 
 // Dummy tileset: 16 colors for the palette display
 static uint32_t sPalette[16] = {
@@ -69,6 +70,7 @@ static int  sTmDragEdge = 0;       // 0=none, 1=top, 2=bottom, 3=left, 4=right
 
 // ---- Tilemap sprite texture cache ----
 static std::vector<unsigned int> sTmSpriteTextures; // GL texture IDs, indexed by sprite asset
+static std::vector<bool> sTmSpriteTexOwned;          // true = we created it, false = borrowed from dir sprites
 static int sTmSpriteTexCount = 0; // how many we've cached
 
 // ---- Tilemap object system ----
@@ -93,14 +95,32 @@ struct TmObject {
     int teleportScene = -1;          // target scene index (-1 = none, only for Teleport type)
     // Tile objects: one object covers multiple cells
     std::vector<std::pair<int,int>> cells; // (tileX,tileY) list — only used when type==Tile
+    float displayScale = 1.0f;      // visual scale multiplier (0.5 - 4.0)
+    // Blueprint script attachment
+    int blueprintIdx = -1;
+    struct { int paramIdx; int value; } instanceParams[8] = {};
+    int instanceParamCount = 0;
 };
 static std::vector<TmObject> sTmObjects;
 static int sTmSelectedObj = -1;      // selected object index (-1 = none)
 static int sTmDragObj = -1;          // object being dragged (-1 = none)
 static int sTmStampAsset = -1;       // sprite asset index for stamp/paint mode (-1 = off)
 static int sTmStampObj = -1;         // which Tile object we're painting into (-1 = none)
+static int sTmPaintScale = 4;       // paint block size: 1=single sub-cell, 4=4x4 block, 8=8x8 block
 static int sTmPlaceTX = 0, sTmPlaceTY = 0; // tile coords for popup placement
 static float sTmObjPanelW = 200.0f;  // object panel width
+static std::vector<TmObject> sSavedTmObjects; // saved tilemap objects before Play
+static float sTmMoveAccum[4] = {};  // per-direction movement accumulator (Up/Down/Left/Right)
+static std::vector<int> sTmObjFacing; // per-object facing direction (0=N..7=NW, index into dir sprites)
+static std::vector<int> sTmObjAnimSet; // per-object animation set index (for directional sprites)
+static std::vector<int> sTmObjStepCount; // per-object tile step counter (for step-based animation)
+static std::vector<float> sTmObjMoveRate; // per-object tile move speed (tiles/sec), set by Walk/Sprint
+static int sTmLastMoveDir = -1; // last direction pressed (0=Left,1=Right,2=Up,3=Down), -1=none
+static bool sTmPrevDirHeld[4] = {}; // previous frame held state for edge detection
+static bool sTmPrevKeyState[10] = {}; // previous frame key state for OnKeyReleased
+static bool sTmOnStartRan = false; // tilemap OnStart fired this play session
+static std::vector<float> sTmObjVisX; // per-object visual X position (smooth lerp)
+static std::vector<float> sTmObjVisY; // per-object visual Y position (smooth lerp)
 
 // ---- Scene instances ----
 struct TmScene {
@@ -109,6 +129,10 @@ struct TmScene {
     // Per-scene tilemap data
     std::vector<uint16_t> tileIndices;  // saved tile grid
     std::vector<TmObject> objects;      // saved objects
+    // Scene-level blueprint attachment
+    int blueprintIdx = -1;
+    struct { int paramIdx; int value; } instanceParams[8] = {};
+    int instanceParamCount = 0;
 };
 static std::vector<TmScene> sTmScenes;
 static int sTmSelectedScene = 0;     // active scene index
@@ -172,6 +196,9 @@ enum class VsNodeType : int {
     Float,          // constant float output
     OnUpdate,       // fires every frame
     Group,          // subgraph containing other nodes
+    Object,         // constant object/sprite index output (dropdown)
+    CustomCode,     // user-written C code (GBA only)
+    IsMoving,       // condition gate: passes exec only if player is moving
     COUNT
 };
 
@@ -227,6 +254,9 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Float",           0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "On Update",       0xFF338833, 0, 1, 0, 0, {}, {}, {} },
     { "Group",           0xFF888844, 0, 0, 0, 0, {}, {}, {} },
+    { "Object",          0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
+    { "Custom Code",     0xFF993399, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Moving",      0xFF885533, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -242,6 +272,7 @@ struct VsNode {
     int grpInExec = 0, grpOutExec = 0;   // dynamic pin counts for Group nodes
     int grpInData = 0, grpOutData = 0;
     char customCode[512] = {};            // user-editable code override (empty = use default)
+    char funcName[64] = {};               // custom function name (empty = use default afn_ name)
 };
 
 // Pin address: which node, which pin type, which pin index
@@ -291,6 +322,43 @@ struct VsGroupPinMap {
     int innerPinType, innerPinIdx; // pin on the internal node
 };
 static std::vector<VsGroupPinMap> sVsGroupPins;
+
+// ---- Blueprint Script Asset System ----
+// Parameter slot exposed by a blueprint for per-instance override
+struct BpParam {
+    char name[32] = {};          // display name ("Patrol Speed")
+    int  sourceNodeId = -1;      // which VsNode provides the default
+    int  sourceParamIdx = 0;     // which paramInt[] slot (0-3)
+    int  dataType = 0;           // 0=int, 1=float, 2=key, 3=direction, 4=animation
+    int  defaultInt = 0;         // default value
+};
+
+struct BlueprintAsset {
+    char name[32] = "Script";
+    std::vector<VsNode>        nodes;
+    std::vector<VsLink>        links;
+    std::vector<VsAnnotation>  annotations;
+    std::vector<VsGroupPinMap> groupPins;
+    int nextId = 1;
+    float panX = 0, panY = 0, zoom = 1.0f;
+    BpParam params[8] = {};
+    int paramCount = 0;
+};
+
+static std::vector<BlueprintAsset> sBlueprintAssets;
+static int sSelectedBlueprint = -1;
+
+// Track what the node editor is currently editing
+enum class VsEditSource { Scene, Blueprint };
+static VsEditSource sVsEditSource = VsEditSource::Scene;
+static int sVsEditBlueprintIdx = -1;
+
+// Per-instance override (on objects that reference blueprints)
+struct BpInstanceParam {
+    int paramIdx = 0;   // index into BlueprintAsset::params[]
+    int value = 0;      // overridden value
+};
+
 // Annotation interaction
 static int sVsSelectedAnnotation = -1;
 static bool sVsDraggingAnnotation = false;
@@ -302,10 +370,26 @@ static bool sVsShowContextMenu = false;
 static ImVec2 sVsContextMenuPos = {};
 // Auto-wire: when dropping a link on empty space, open context menu and wire to new node
 static VsPin sVsPendingAutoWire = { -1, 0, 0 };
+// Undo stack for node deletions
+struct VsUndoSnapshot {
+    std::vector<VsNode> nodes;
+    std::vector<VsLink> links;
+    std::vector<VsAnnotation> annotations;
+    std::vector<VsGroupPinMap> groupPins;
+    int nextId;
+};
+static std::vector<VsUndoSnapshot> sVsUndoStack;
+static const int kVsMaxUndo = 32;
 // Node info popup (right-click on node)
 static int sVsNodeInfoIdx = -1;   // index of node showing info popup
 static char sVsNodeCodeBuf[2048] = {}; // editable code buffer
 static bool sVsNodeInfoJustOpened = false;
+// Script code window (opened from node right-click "Edit")
+static bool sVsCodeWindowOpen = false;
+static bool sVsCodeWindowJustOpened = false;
+static int sVsCodeWindowNodeIdx = -1;
+static char sVsCodeWindowBuf[4096] = {}; // generated code (read-only display)
+static char sVsCodeWindowEditBuf[2048] = {}; // editable override
 
 static constexpr float kVsNodeW = 160.0f;
 static constexpr float kVsHeaderH = 30.0f;
@@ -447,32 +531,51 @@ static int   sAnimFrameCurrent = 0;    // current frame index during playback
 // Rebuild tilemap sprite texture cache from sprite assets
 static void RebuildTmSpriteTextures()
 {
-    for (auto t : sTmSpriteTextures)
-        if (t) glDeleteTextures(1, &t);
+    for (int j = 0; j < (int)sTmSpriteTextures.size(); j++)
+        if (sTmSpriteTextures[j] && (j >= (int)sTmSpriteTexOwned.size() || sTmSpriteTexOwned[j]))
+            glDeleteTextures(1, &sTmSpriteTextures[j]);
     sTmSpriteTextures.clear();
     sTmSpriteTextures.resize(sSpriteAssets.size(), 0);
+    sTmSpriteTexOwned.clear();
+    sTmSpriteTexOwned.resize(sSpriteAssets.size(), false);
     for (int i = 0; i < (int)sSpriteAssets.size(); i++)
     {
         const SpriteAsset& sa = sSpriteAssets[i];
-        if (sa.frames.empty()) { sTmSpriteTextures[i] = 0; continue; }
-        const SpriteFrame& frame = sa.frames[0];
-        int fw = frame.width, fh = frame.height;
-        std::vector<uint32_t> rgba(fw * fh, 0);
-        for (int py = 0; py < fh; py++)
-            for (int px = 0; px < fw; px++)
-            {
-                uint8_t palIdx = frame.pixels[py * kMaxFrameSize + px];
-                if (palIdx == 0) continue;
-                uint32_t c = sa.palette[palIdx & 0xF];
-                rgba[py * fw + px] = c | 0xFF000000;
-            }
-        unsigned int tex = 0;
-        glGenTextures(1, &tex);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fw, fh, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
-        sTmSpriteTextures[i] = tex;
+
+        // Try frame 0 pixels first
+        bool hasFramePixels = false;
+        if (!sa.frames.empty())
+        {
+            const SpriteFrame& frame = sa.frames[0];
+            for (int p = 0; p < frame.width * frame.height && !hasFramePixels; p++)
+                if (frame.pixels[p / frame.width * kMaxFrameSize + p % frame.width] != 0)
+                    hasFramePixels = true;
+        }
+
+        if (hasFramePixels)
+        {
+            const SpriteFrame& frame = sa.frames[0];
+            int fw = frame.width, fh = frame.height;
+            std::vector<uint32_t> rgba(fw * fh, 0);
+            for (int py = 0; py < fh; py++)
+                for (int px = 0; px < fw; px++)
+                {
+                    uint8_t palIdx = frame.pixels[py * kMaxFrameSize + px];
+                    if (palIdx == 0) continue;
+                    uint32_t c = sa.palette[palIdx & 0xF];
+                    rgba[py * fw + px] = c | 0xFF000000;
+                }
+            unsigned int tex = 0;
+            glGenTextures(1, &tex);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fw, fh, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+            sTmSpriteTextures[i] = tex;
+            sTmSpriteTexOwned[i] = true;
+        }
+        // Direction sprite fallback is handled in a second pass below
+        // (sAssetDirSprites is declared after this function)
     }
     sTmSpriteTexCount = (int)sSpriteAssets.size();
 }
@@ -490,6 +593,27 @@ static const char* const kDirNames[] = { "N", "NE", "E", "SE", "S", "SW", "W", "
 // sAssetDirSprites[assetIdx][setIdx][dir] — parallel to sSpriteAssets
 static std::vector<std::vector<std::array<AssetDirSprite, 8>>> sAssetDirSprites;
 static int sSelectedDirAnimSet = 0;
+
+// Patch tilemap sprite textures: for assets with no frame pixels but direction sprites,
+// use the South-facing (or first available) direction texture as the preview.
+static void PatchTmSpriteTexturesFromDirs()
+{
+    for (int i = 0; i < (int)sTmSpriteTextures.size(); i++)
+    {
+        if (sTmSpriteTextures[i] != 0) continue; // already has a texture
+        if (i >= (int)sAssetDirSprites.size() || sAssetDirSprites[i].empty()) continue;
+        // Try South (4) first, then cycle through others
+        for (int dir = 4, tries = 0; tries < 8; tries++, dir = (dir + 1) % 8)
+        {
+            GLuint tex = sAssetDirSprites[i][0][dir].texture;
+            if (tex)
+            {
+                sTmSpriteTextures[i] = tex;
+                break;
+            }
+        }
+    }
+}
 
 // Compute the base index into the flat dirAnimSets/sAssetDirSprites vector for a given animation
 static int GetAnimDirBase(const SpriteAsset& asset, int animIdx)
@@ -589,6 +713,8 @@ static int sSavedPlayerIdx = -1;
 static bool sScriptStartRan = false;  // script OnStart ran this Play session
 static float sScriptMoveSpeed = -1.0f; // persists across frames (Walk/Sprint nodes)
 static float sScriptAutoOrbitSpeed = 0.0f; // persists across frames (AutoOrbit node)
+static int sPendingSceneSwitch = -1;   // scene index to switch to (-1 = none)
+static int sPendingSceneMode  = 0;    // 0 = 3D/MapScene, 1 = Tilemap/TmScene
 static int sActivePlayAnimNodeId = -1; // PlayAnim node currently driving animation
 static int sPlayAnimIdle = -1;    // PlayAnim from OnStart (idle)
 static int sPlayAnimHeld = -1;    // PlayAnim from OnKeyHeld (sprint anim)
@@ -697,6 +823,10 @@ struct MapScene {
     int vsNextId = 1;
     float vsPanX = 0, vsPanY = 0;
     float vsZoom = 1.0f;
+    // Scene-level blueprint attachment
+    int blueprintIdx = -1;
+    struct { int paramIdx; int value; } instanceParams[8] = {};
+    int instanceParamCount = 0;
 };
 static std::vector<MapScene> sMapScenes;
 static int sMapSelectedScene = 0;
@@ -707,14 +837,17 @@ static void SaveMapSceneState(MapScene& sc)
     sc.spriteCount = sSpriteCount;
     sc.camera = sCamObj;
     sc.camEditorScale = sCamObjEditorScale;
-    sc.vsNodes = sVsNodes;
-    sc.vsLinks = sVsLinks;
-    sc.vsAnnotations = sVsAnnotations;
-    sc.vsGroupPins = sVsGroupPins;
-    sc.vsNextId = sVsNextId;
-    sc.vsPanX = sVsPanX;
-    sc.vsPanY = sVsPanY;
-    sc.vsZoom = sVsZoom;
+    // Only save visual script state if we're editing the scene script (not a blueprint)
+    if (sVsEditSource != VsEditSource::Blueprint) {
+        sc.vsNodes = sVsNodes;
+        sc.vsLinks = sVsLinks;
+        sc.vsAnnotations = sVsAnnotations;
+        sc.vsGroupPins = sVsGroupPins;
+        sc.vsNextId = sVsNextId;
+        sc.vsPanX = sVsPanX;
+        sc.vsPanY = sVsPanY;
+        sc.vsZoom = sVsZoom;
+    }
 }
 
 static void LoadMapSceneState(const MapScene& sc)
@@ -1117,10 +1250,13 @@ static bool SaveProject(const std::string& path)
     for (int i = 0; i < sSpriteCount; i++)
     {
         const FloorSprite& sp = sSprites[i];
-        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d\n",
+        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d",
                 sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                 sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0,
-                sp.meshIdx);
+                sp.meshIdx, sp.blueprintIdx, sp.instanceParamCount);
+        for (int ip = 0; ip < sp.instanceParamCount; ip++)
+            fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
+        fprintf(f, "\n");
     }
     fprintf(f, "\n");
 
@@ -1132,6 +1268,8 @@ static bool SaveProject(const std::string& path)
         const SpriteAsset& sa = sSpriteAssets[ai];
         fprintf(f, "asset_begin=%s\n", sa.name.c_str());
         fprintf(f, "baseSize=%d\n", sa.baseSize);
+        if (!sa.sourceImagePath.empty())
+            fprintf(f, "srcImg=%s\n", sa.sourceImagePath.c_str());
         fprintf(f, "palBank=%d\n", sa.palBank);
         fprintf(f, "paletteSrc=%d\n", sa.paletteSrc);
         // Palette
@@ -1153,8 +1291,8 @@ static bool SaveProject(const std::string& path)
         for (int ani = 0; ani < (int)sa.anims.size(); ani++)
         {
             const SpriteAnim& an = sa.anims[ani];
-            fprintf(f, "anim=%s,%d,%d,%d,%d,%.2f,%d\n",
-                    an.name.c_str(), an.startFrame, an.endFrame, an.fps, an.loop ? 1 : 0, an.speed, (int)an.gameState);
+            fprintf(f, "anim=%s,%d,%d,%d,%d,%.2f,%d,%d\n",
+                    an.name.c_str(), an.startFrame, an.endFrame, an.fps, an.loop ? 1 : 0, an.speed, (int)an.gameState, an.stepAnim ? 1 : 0);
         }
         // LOD
         fprintf(f, "lodCount=%d\n", sa.lodCount);
@@ -1185,7 +1323,58 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0);
+    }
+    fprintf(f, "\n");
+
+    // Blueprint assets
+    // Save current blueprint working set back if editing one
+    if (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0 && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
+        BlueprintAsset& bp = sBlueprintAssets[sVsEditBlueprintIdx];
+        bp.nodes = sVsNodes; bp.links = sVsLinks; bp.annotations = sVsAnnotations;
+        bp.groupPins = sVsGroupPins; bp.nextId = sVsNextId;
+        bp.panX = sVsPanX; bp.panY = sVsPanY; bp.zoom = sVsZoom;
+    }
+    fprintf(f, "[Blueprints]\n");
+    fprintf(f, "bpCount=%d\n", (int)sBlueprintAssets.size());
+    for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++)
+    {
+        const BlueprintAsset& bp = sBlueprintAssets[bi];
+        fprintf(f, "bp_begin=%s\n", bp.name);
+        fprintf(f, "bpParamCount=%d\n", bp.paramCount);
+        for (int pi = 0; pi < bp.paramCount; pi++) {
+            const BpParam& p = bp.params[pi];
+            fprintf(f, "bpParam=%d|%s|%d|%d|%d|%d\n", pi, p.name, p.sourceNodeId, p.sourceParamIdx, p.dataType, p.defaultInt);
+        }
+        fprintf(f, "bpVsNextId=%d\n", bp.nextId);
+        fprintf(f, "bpVsPan=%.1f,%.1f\n", bp.panX, bp.panY);
+        fprintf(f, "bpVsZoom=%.3f\n", bp.zoom);
+        fprintf(f, "bpVsNodeCount=%d\n", (int)bp.nodes.size());
+        for (auto& n : bp.nodes) {
+            fprintf(f, "bpVsNode=%d,%d,%.1f,%.1f,%d,%d,%d,%d,%d\n",
+                n.id, (int)n.type, n.x, n.y,
+                n.paramInt[0], n.paramInt[1], n.paramInt[2], n.paramInt[3], n.groupId);
+            if (n.type == VsNodeType::Group)
+                fprintf(f, "bpVsGroupDef=%d|%s|%d,%d,%d,%d\n", n.id, n.groupLabel,
+                    n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
+            if (n.customCode[0])
+                fprintf(f, "bpVsNodeCode=%d|%s\n", n.id, n.customCode);
+            if (n.funcName[0])
+                fprintf(f, "bpVsNodeFunc=%d|%s\n", n.id, n.funcName);
+        }
+        fprintf(f, "bpVsLinkCount=%d\n", (int)bp.links.size());
+        for (auto& lk : bp.links)
+            fprintf(f, "bpVsLink=%d,%d,%d|%d,%d,%d\n",
+                lk.from.nodeId, lk.from.pinType, lk.from.pinIdx,
+                lk.to.nodeId, lk.to.pinType, lk.to.pinIdx);
+        fprintf(f, "bpVsAnnotCount=%d\n", (int)bp.annotations.size());
+        for (auto& ann : bp.annotations)
+            fprintf(f, "bpVsAnnot=%.1f,%.1f,%.1f,%.1f|%s\n", ann.x, ann.y, ann.w, ann.h, ann.label);
+        fprintf(f, "bpVsGroupPinCount=%d\n", (int)bp.groupPins.size());
+        for (auto& m : bp.groupPins)
+            fprintf(f, "bpVsGroupPin=%d,%d,%d,%d,%d,%d\n",
+                m.groupNodeId, m.pinType, m.pinIdx, m.innerNodeId, m.innerPinType, m.innerPinIdx);
+        fprintf(f, "bp_end\n");
     }
     fprintf(f, "\n");
 
@@ -1199,6 +1388,7 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "[Tilemap]\n");
     fprintf(f, "width=%d\n", sTilemapData.floor.width);
     fprintf(f, "height=%d\n", sTilemapData.floor.height);
+    fprintf(f, "subdivided=2\n");
     fprintf(f, "zoom=%.4f\n", sTmMapZoom);
     fprintf(f, "panX=%.2f\n", sTmMapPanX);
     fprintf(f, "panY=%.2f\n", sTmMapPanY);
@@ -1219,6 +1409,14 @@ static bool SaveProject(const std::string& path)
         const TmObject& obj = sTmObjects[i];
         fprintf(f, "obj=%d,%d,%d,%d,%d,%s\n",
             (int)obj.type, obj.tileX, obj.tileY, obj.spriteAssetIdx, obj.teleportScene, obj.name);
+        if (obj.displayScale != 1.0f)
+            fprintf(f, "objScale=%.2f\n", obj.displayScale);
+        if (obj.blueprintIdx >= 0) {
+            fprintf(f, "objBp=%d,%d", obj.blueprintIdx, obj.instanceParamCount);
+            for (int ip = 0; ip < obj.instanceParamCount; ip++)
+                fprintf(f, "|%d:%d", obj.instanceParams[ip].paramIdx, obj.instanceParams[ip].value);
+            fprintf(f, "\n");
+        }
         // Save cells for Tile objects
         if (obj.type == TmObjType::Tile && !obj.cells.empty())
         {
@@ -1256,6 +1454,14 @@ static bool SaveProject(const std::string& path)
             const TmObject& obj = sc.objects[oi];
             fprintf(f, "sceneobj=%d,%d,%d,%d,%d,%s\n",
                 (int)obj.type, obj.tileX, obj.tileY, obj.spriteAssetIdx, obj.teleportScene, obj.name);
+            if (obj.displayScale != 1.0f)
+                fprintf(f, "sceneobjScale=%.2f\n", obj.displayScale);
+            if (obj.blueprintIdx >= 0) {
+                fprintf(f, "sceneobjBp=%d,%d", obj.blueprintIdx, obj.instanceParamCount);
+                for (int ip = 0; ip < obj.instanceParamCount; ip++)
+                    fprintf(f, "|%d:%d", obj.instanceParams[ip].paramIdx, obj.instanceParams[ip].value);
+                fprintf(f, "\n");
+            }
             if (obj.type == TmObjType::Tile && !obj.cells.empty())
             {
                 fprintf(f, "sceneobjcells=");
@@ -1267,17 +1473,39 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "\n");
             }
         }
+        // Scene-level blueprint
+        if (sc.blueprintIdx >= 0) {
+            fprintf(f, "tmSceneBp=%d,%d", sc.blueprintIdx, sc.instanceParamCount);
+            for (int ip = 0; ip < sc.instanceParamCount; ip++)
+                fprintf(f, "|%d:%d", sc.instanceParams[ip].paramIdx, sc.instanceParams[ip].value);
+            fprintf(f, "\n");
+        }
     }
 
-    // Visual Script Nodes
+    // Visual Script Nodes — if editing a blueprint, save scene nodes from MapScene stash
     fprintf(f, "\n[VisualScript]\n");
-    fprintf(f, "vsNextId=%d\n", sVsNextId);
-    fprintf(f, "vsPan=%.1f,%.1f\n", sVsPanX, sVsPanY);
-    fprintf(f, "vsZoom=%.3f\n", sVsZoom);
-    fprintf(f, "vsNodeCount=%d\n", (int)sVsNodes.size());
-    for (int i = 0; i < (int)sVsNodes.size(); i++)
+    const std::vector<VsNode>* saveNodes = &sVsNodes;
+    const std::vector<VsLink>* saveLinks = &sVsLinks;
+    const std::vector<VsAnnotation>* saveAnnotations = &sVsAnnotations;
+    const std::vector<VsGroupPinMap>* saveGroupPins = &sVsGroupPins;
+    int saveNextId = sVsNextId;
+    float savePanX = sVsPanX, savePanY = sVsPanY, saveZoom = sVsZoom;
+    if (sVsEditSource == VsEditSource::Blueprint && sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size()) {
+        const MapScene& ms = sMapScenes[sMapSelectedScene];
+        saveNodes = &ms.vsNodes;
+        saveLinks = &ms.vsLinks;
+        saveAnnotations = &ms.vsAnnotations;
+        saveGroupPins = &ms.vsGroupPins;
+        saveNextId = ms.vsNextId;
+        savePanX = ms.vsPanX; savePanY = ms.vsPanY; saveZoom = ms.vsZoom;
+    }
+    fprintf(f, "vsNextId=%d\n", saveNextId);
+    fprintf(f, "vsPan=%.1f,%.1f\n", savePanX, savePanY);
+    fprintf(f, "vsZoom=%.3f\n", saveZoom);
+    fprintf(f, "vsNodeCount=%d\n", (int)saveNodes->size());
+    for (int i = 0; i < (int)saveNodes->size(); i++)
     {
-        const VsNode& n = sVsNodes[i];
+        const VsNode& n = (*saveNodes)[i];
         fprintf(f, "vsNode=%d,%d,%.1f,%.1f,%d,%d,%d,%d,%d\n",
             n.id, (int)n.type, n.x, n.y,
             n.paramInt[0], n.paramInt[1], n.paramInt[2], n.paramInt[3], n.groupId);
@@ -1286,24 +1514,26 @@ static bool SaveProject(const std::string& path)
                 n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
         if (n.customCode[0])
             fprintf(f, "vsNodeCode=%d|%s\n", n.id, n.customCode);
+        if (n.funcName[0])
+            fprintf(f, "vsNodeFunc=%d|%s\n", n.id, n.funcName);
     }
-    fprintf(f, "vsLinkCount=%d\n", (int)sVsLinks.size());
-    for (int i = 0; i < (int)sVsLinks.size(); i++)
+    fprintf(f, "vsLinkCount=%d\n", (int)saveLinks->size());
+    for (int i = 0; i < (int)saveLinks->size(); i++)
     {
-        const VsLink& lk = sVsLinks[i];
+        const VsLink& lk = (*saveLinks)[i];
         fprintf(f, "vsLink=%d,%d,%d|%d,%d,%d\n",
             lk.from.nodeId, lk.from.pinType, lk.from.pinIdx,
             lk.to.nodeId, lk.to.pinType, lk.to.pinIdx);
     }
-    fprintf(f, "vsAnnotCount=%d\n", (int)sVsAnnotations.size());
-    for (int i = 0; i < (int)sVsAnnotations.size(); i++)
+    fprintf(f, "vsAnnotCount=%d\n", (int)saveAnnotations->size());
+    for (int i = 0; i < (int)saveAnnotations->size(); i++)
     {
-        const VsAnnotation& ann = sVsAnnotations[i];
+        const VsAnnotation& ann = (*saveAnnotations)[i];
         fprintf(f, "vsAnnot=%.1f,%.1f,%.1f,%.1f|%s\n", ann.x, ann.y, ann.w, ann.h, ann.label);
     }
-    fprintf(f, "vsGroupPinCount=%d\n", (int)sVsGroupPins.size());
-    for (int i = 0; i < (int)sVsGroupPins.size(); i++) {
-        const auto& m = sVsGroupPins[i];
+    fprintf(f, "vsGroupPinCount=%d\n", (int)saveGroupPins->size());
+    for (int i = 0; i < (int)saveGroupPins->size(); i++) {
+        const auto& m = (*saveGroupPins)[i];
         fprintf(f, "vsGroupPin=%d,%d,%d,%d,%d,%d\n",
             m.groupNodeId, m.pinType, m.pinIdx, m.innerNodeId, m.innerPinType, m.innerPinIdx);
     }
@@ -1323,9 +1553,13 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d\n",
+            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
-                    sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx);
+                    sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
+                    sp.blueprintIdx, sp.instanceParamCount);
+            for (int ip = 0; ip < sp.instanceParamCount; ip++)
+                fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
+            fprintf(f, "\n");
         }
         // Camera
         fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f\n",
@@ -1336,6 +1570,13 @@ static bool SaveProject(const std::string& path)
                 ms.camera.jumpCamLand, ms.camera.jumpCamAir, ms.camera.autoOrbitSpeed, ms.camera.jumpDampen,
                 ms.camera.smallTriCull, ms.camera.skipFloor ? 1 : 0, ms.camera.coverageBuf ? 1 : 0,
                 ms.camera.drawDistance);
+        // Scene-level blueprint
+        if (ms.blueprintIdx >= 0) {
+            fprintf(f, "msSceneBp=%d,%d", ms.blueprintIdx, ms.instanceParamCount);
+            for (int ip = 0; ip < ms.instanceParamCount; ip++)
+                fprintf(f, "|%d:%d", ms.instanceParams[ip].paramIdx, ms.instanceParams[ip].value);
+            fprintf(f, "\n");
+        }
         // Visual script
         fprintf(f, "msVsNextId=%d\n", ms.vsNextId);
         fprintf(f, "msVsPan=%.1f,%.1f\n", ms.vsPanX, ms.vsPanY);
@@ -1378,6 +1619,7 @@ static bool LoadProject(const std::string& path)
     if (!f) return false;
 
     // Reset state before loading
+    sVsUndoStack.clear();
     sMapScenes.clear();
     sMapSelectedScene = 0;
     sTmObjects.clear();
@@ -1388,9 +1630,9 @@ static bool LoadProject(const std::string& path)
     sTmStampAsset = -1;
     sTmStampObj = -1;
     sTilemapDataInit = false;
-    sTilemapData.floor.width = 1;
-    sTilemapData.floor.height = 1;
-    sTilemapData.floor.tileIndices.assign(1, 0);
+    sTilemapData.floor.width = 2;
+    sTilemapData.floor.height = 2;
+    sTilemapData.floor.tileIndices.assign(4, 0);
     sSpriteCount = 0;
     sSelectedSprite = -1;
     sSelectedObjType = SelectedObjType::None;
@@ -1399,11 +1641,19 @@ static bool LoadProject(const std::string& path)
     for (int i = 0; i < (int)sAssetDirSprites.size(); i++) FreeAssetDirSprites(i);
     sAssetDirSprites.clear();
     sSelectedAsset = -1;
+    sMeshAssets.clear();
+    sSelectedMesh = -1;
+    sSelectedMeshes.clear();
+    sBlueprintAssets.clear();
+    sSelectedBlueprint = -1;
+    sVsEditSource = VsEditSource::Scene;
+    sVsEditBlueprintIdx = -1;
     sCamObj = { 0.0f, 0.0f, 14.0f, 0.0f, 60.0f };
     sCamObjEditorScale = 0.05f;
 
     char line[32768]; // large buffer for frame pixel data lines (64x64 = ~16KB worst case)
     char section[64] = {};
+    int tmSubdivLevel = 0; // 0=old, 1=first 2x, 2=current 4x
 
     while (fgets(line, sizeof(line), f))
     {
@@ -1473,7 +1723,8 @@ static bool LoadProject(const std::string& path)
                 unsigned int col;
                 // Try extended format (with assetIdx, animIdx, type, rotation, animEnabled, meshIdx)
                 float rot = 0.0f;
-                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx);
+                int bpIdx = -1, bpParamCnt = 0;
+                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt);
                 if (matched >= 6)
                 {
                     FloorSprite& sp = sSprites[sSpriteCount];
@@ -1490,6 +1741,20 @@ static bool LoadProject(const std::string& path)
                     sp.rotation = (matched >= 10) ? rot : 0.0f;
                     sp.animEnabled = (matched >= 11) ? (animEn != 0) : true;
                     sp.meshIdx = (matched >= 12) ? mIdx : -1;
+                    sp.blueprintIdx = (matched >= 13) ? bpIdx : -1;
+                    sp.instanceParamCount = (matched >= 14) ? std::min(bpParamCnt, 8) : 0;
+                    // Parse instance params from pipe-delimited suffix
+                    if (sp.instanceParamCount > 0) {
+                        const char* p = line;
+                        for (int ip = 0; ip < sp.instanceParamCount; ip++) {
+                            p = strchr(p, '|'); if (!p) break; p++;
+                            int pIdx, pVal;
+                            if (sscanf(p, "%d:%d", &pIdx, &pVal) == 2) {
+                                sp.instanceParams[ip].paramIdx = pIdx;
+                                sp.instanceParams[ip].value = pVal;
+                            }
+                        }
+                    }
                     sp.selected = false;
                     sSpriteCount++;
                 }
@@ -1522,6 +1787,7 @@ static bool LoadProject(const std::string& path)
 
                     int iv; unsigned int uv; float fv;
                     if (sscanf(line, "baseSize=%d", &iv) == 1) sa.baseSize = iv;
+                    else if (strncmp(line, "srcImg=", 7) == 0) sa.sourceImagePath = line + 7;
                     else if (sscanf(line, "palBank=%d", &iv) == 1) sa.palBank = iv;
                     else if (sscanf(line, "paletteSrc=%d", &iv) == 1) sa.paletteSrc = iv;
                     else if (sscanf(line, "pal=%d,%u", &iv, &uv) == 2 && iv >= 0 && iv < 16) sa.palette[iv] = uv;
@@ -1558,7 +1824,8 @@ static bool LoadProject(const std::string& path)
                         int sf, ef, afps, aloop;
                         float aspeed = 1.0f;
                         int agstate = 0;
-                        int nread = sscanf(line + 5, "%63[^,],%d,%d,%d,%d,%f,%d", aname, &sf, &ef, &afps, &aloop, &aspeed, &agstate);
+                        int astep = 0;
+                        int nread = sscanf(line + 5, "%63[^,],%d,%d,%d,%d,%f,%d,%d", aname, &sf, &ef, &afps, &aloop, &aspeed, &agstate, &astep);
                         if (nread >= 5)
                         {
                             an.name = aname;
@@ -1568,6 +1835,7 @@ static bool LoadProject(const std::string& path)
                             an.loop = (aloop != 0);
                             if (nread >= 6) an.speed = aspeed;
                             if (nread >= 7) an.gameState = (AnimState)agstate;
+                            if (nread >= 8) an.stepAnim = (astep != 0);
                             sa.anims.push_back(an);
                         }
                     }
@@ -1640,10 +1908,10 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "MeshAssets") == 0)
         {
             char mname[256], mpath[512], mtexpath[512] = {};
-            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1;
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1;
             float mdrawdist = 0.0f;
-            // Try newest format: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath|usequads|drawdist
-            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d|%f", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist);
+            // Try newest format: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath|usequads|drawdist|collision|drawpriority
+            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d|%f|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible);
             if (matched < 2)
             {
                 // Try format without usequads: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath
@@ -1682,6 +1950,12 @@ static bool LoadProject(const std::string& path)
                     ma.useQuads = (musequads != 0);
                 if (matched >= 12)
                     ma.drawDistance = mdrawdist;
+                if (matched >= 13)
+                    ma.collision = (mcollision != 0);
+                if (matched >= 14)
+                    ma.drawPriority = mdrawpri;
+                if (matched >= 15)
+                    ma.visible = (mvisible != 0);
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -1690,6 +1964,133 @@ static bool LoadProject(const std::string& path)
                 if (ma.textured && mtexpath[0])
                     LoadMeshTexture(std::string(mtexpath), ma);
                 sMeshAssets.push_back(std::move(ma));
+            }
+        }
+        else if (strcmp(section, "Blueprints") == 0)
+        {
+            if (sscanf(line, "bpCount=%d", &ival) == 1)
+            {
+                sBlueprintAssets.clear();
+                sBlueprintAssets.reserve(ival);
+            }
+            else if (strncmp(line, "bp_begin=", 9) == 0)
+            {
+                BlueprintAsset bp;
+                strncpy(bp.name, line + 9, sizeof(bp.name) - 1);
+                sBlueprintAssets.push_back(bp);
+            }
+            else if (sscanf(line, "bpParamCount=%d", &ival) == 1 && !sBlueprintAssets.empty())
+                sBlueprintAssets.back().paramCount = ival;
+            else if (strncmp(line, "bpParam=", 8) == 0 && !sBlueprintAssets.empty())
+            {
+                int pi, srcNode, srcParam, dtype, defVal;
+                char pname[32] = {};
+                if (sscanf(line + 8, "%d|%31[^|]|%d|%d|%d|%d", &pi, pname, &srcNode, &srcParam, &dtype, &defVal) >= 6
+                    && pi >= 0 && pi < 8) {
+                    BpParam& p = sBlueprintAssets.back().params[pi];
+                    strncpy(p.name, pname, sizeof(p.name) - 1);
+                    p.sourceNodeId = srcNode; p.sourceParamIdx = srcParam;
+                    p.dataType = dtype; p.defaultInt = defVal;
+                }
+            }
+            else if (sscanf(line, "bpVsNextId=%d", &ival) == 1 && !sBlueprintAssets.empty())
+                sBlueprintAssets.back().nextId = ival;
+            else if (strncmp(line, "bpVsPan=", 8) == 0 && !sBlueprintAssets.empty())
+            {
+                float px, py;
+                if (sscanf(line + 8, "%f,%f", &px, &py) == 2) {
+                    sBlueprintAssets.back().panX = px; sBlueprintAssets.back().panY = py;
+                }
+            }
+            else if (sscanf(line, "bpVsZoom=%f", &fval) == 1 && !sBlueprintAssets.empty())
+                sBlueprintAssets.back().zoom = fval;
+            else if (sscanf(line, "bpVsNodeCount=%d", &ival) == 1 && !sBlueprintAssets.empty())
+            {
+                sBlueprintAssets.back().nodes.clear();
+                sBlueprintAssets.back().nodes.reserve(ival);
+            }
+            else if (strncmp(line, "bpVsNode=", 9) == 0 && !sBlueprintAssets.empty())
+            {
+                VsNode n;
+                int typeInt, gid = 0;
+                if (sscanf(line + 9, "%d,%d,%f,%f,%d,%d,%d,%d,%d",
+                    &n.id, &typeInt, &n.x, &n.y,
+                    &n.paramInt[0], &n.paramInt[1], &n.paramInt[2], &n.paramInt[3], &gid) >= 4) {
+                    n.type = (VsNodeType)typeInt; n.groupId = gid;
+                    sBlueprintAssets.back().nodes.push_back(n);
+                }
+            }
+            else if (strncmp(line, "bpVsGroupDef=", 13) == 0 && !sBlueprintAssets.empty())
+            {
+                int nid, ie, oe, id2, od;
+                char lbl[32] = {};
+                if (sscanf(line + 13, "%d|%31[^|]|%d,%d,%d,%d", &nid, lbl, &ie, &oe, &id2, &od) >= 6) {
+                    for (auto& n : sBlueprintAssets.back().nodes)
+                        if (n.id == nid) {
+                            strncpy(n.groupLabel, lbl, sizeof(n.groupLabel) - 1);
+                            n.grpInExec = ie; n.grpOutExec = oe; n.grpInData = id2; n.grpOutData = od;
+                            break;
+                        }
+                }
+            }
+            else if (strncmp(line, "bpVsNodeCode=", 13) == 0 && !sBlueprintAssets.empty())
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    for (auto& n : sBlueprintAssets.back().nodes)
+                        if (n.id == nid) { strncpy(n.customCode, codeBuf, sizeof(n.customCode) - 1); break; }
+                }
+            }
+            else if (strncmp(line, "bpVsNodeFunc=", 13) == 0 && !sBlueprintAssets.empty())
+            {
+                int nid;
+                char nameBuf[64] = {};
+                if (sscanf(line + 13, "%d|%63[^\n]", &nid, nameBuf) >= 2) {
+                    for (auto& n : sBlueprintAssets.back().nodes)
+                        if (n.id == nid) { strncpy(n.funcName, nameBuf, sizeof(n.funcName) - 1); break; }
+                }
+            }
+            else if (sscanf(line, "bpVsLinkCount=%d", &ival) == 1 && !sBlueprintAssets.empty())
+            {
+                sBlueprintAssets.back().links.clear();
+                sBlueprintAssets.back().links.reserve(ival);
+            }
+            else if (strncmp(line, "bpVsLink=", 9) == 0 && !sBlueprintAssets.empty())
+            {
+                VsLink lk;
+                if (sscanf(line + 9, "%d,%d,%d|%d,%d,%d",
+                    &lk.from.nodeId, &lk.from.pinType, &lk.from.pinIdx,
+                    &lk.to.nodeId, &lk.to.pinType, &lk.to.pinIdx) == 6)
+                    sBlueprintAssets.back().links.push_back(lk);
+            }
+            else if (sscanf(line, "bpVsAnnotCount=%d", &ival) == 1 && !sBlueprintAssets.empty())
+            {
+                sBlueprintAssets.back().annotations.clear();
+                sBlueprintAssets.back().annotations.reserve(ival);
+            }
+            else if (strncmp(line, "bpVsAnnot=", 10) == 0 && !sBlueprintAssets.empty())
+            {
+                VsAnnotation ann;
+                float ax, ay, aw, ah;
+                if (sscanf(line + 10, "%f,%f,%f,%f|", &ax, &ay, &aw, &ah) == 4) {
+                    ann.x = ax; ann.y = ay; ann.w = aw; ann.h = ah;
+                    const char* pipe = strchr(line + 10, '|');
+                    if (pipe) strncpy(ann.label, pipe + 1, sizeof(ann.label) - 1);
+                    sBlueprintAssets.back().annotations.push_back(ann);
+                }
+            }
+            else if (sscanf(line, "bpVsGroupPinCount=%d", &ival) == 1 && !sBlueprintAssets.empty())
+            {
+                sBlueprintAssets.back().groupPins.clear();
+                sBlueprintAssets.back().groupPins.reserve(ival);
+            }
+            else if (strncmp(line, "bpVsGroupPin=", 13) == 0 && !sBlueprintAssets.empty())
+            {
+                VsGroupPinMap m;
+                if (sscanf(line + 13, "%d,%d,%d,%d,%d,%d",
+                    &m.groupNodeId, &m.pinType, &m.pinIdx, &m.innerNodeId, &m.innerPinType, &m.innerPinIdx) == 6)
+                    sBlueprintAssets.back().groupPins.push_back(m);
             }
         }
         else if (strcmp(section, "Palette") == 0)
@@ -1707,6 +2108,7 @@ static bool LoadProject(const std::string& path)
                 sTilemapData.floor.tileIndices.resize(
                     sTilemapData.floor.width * sTilemapData.floor.height, 0);
             }
+            else if (sscanf(line, "subdivided=%d", &ival) == 1) { tmSubdivLevel = ival; }
             else if (sscanf(line, "zoom=%f", &fval) == 1) sTmMapZoom = fval;
             else if (sscanf(line, "panX=%f", &fval) == 1) sTmMapPanX = fval;
             else if (sscanf(line, "panY=%f", &fval) == 1) sTmMapPanY = fval;
@@ -1740,6 +2142,27 @@ static bool LoadProject(const std::string& path)
                     obj.type = (TmObjType)typeInt;
                     strncpy(obj.name, nameBuf, sizeof(obj.name) - 1);
                     sTmObjects.push_back(obj);
+                }
+            }
+            else if (sscanf(line, "objScale=%f", &fval) == 1 && !sTmObjects.empty())
+            {
+                sTmObjects.back().displayScale = fval;
+            }
+            else if (strncmp(line, "objBp=", 6) == 0 && !sTmObjects.empty())
+            {
+                TmObject& lastObj = sTmObjects.back();
+                int bpIdx = -1, bpCnt = 0;
+                sscanf(line + 6, "%d,%d", &bpIdx, &bpCnt);
+                lastObj.blueprintIdx = bpIdx;
+                lastObj.instanceParamCount = std::min(bpCnt, 8);
+                const char* p = line + 6;
+                for (int ip = 0; ip < lastObj.instanceParamCount; ip++) {
+                    p = strchr(p, '|'); if (!p) break; p++;
+                    int pIdx, pVal;
+                    if (sscanf(p, "%d:%d", &pIdx, &pVal) == 2) {
+                        lastObj.instanceParams[ip].paramIdx = pIdx;
+                        lastObj.instanceParams[ip].value = pVal;
+                    }
                 }
             }
             else if (strncmp(line, "cells=", 6) == 0 && !sTmObjects.empty())
@@ -1809,6 +2232,27 @@ static bool LoadProject(const std::string& path)
                     sTmScenes.back().objects.push_back(obj);
                 }
             }
+            else if (sscanf(line, "sceneobjScale=%f", &fval) == 1 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
+            {
+                sTmScenes.back().objects.back().displayScale = fval;
+            }
+            else if (strncmp(line, "sceneobjBp=", 11) == 0 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
+            {
+                TmObject& lastObj = sTmScenes.back().objects.back();
+                int bpIdx = -1, bpCnt = 0;
+                sscanf(line + 11, "%d,%d", &bpIdx, &bpCnt);
+                lastObj.blueprintIdx = bpIdx;
+                lastObj.instanceParamCount = std::min(bpCnt, 8);
+                const char* p = line + 11;
+                for (int ip = 0; ip < lastObj.instanceParamCount; ip++) {
+                    p = strchr(p, '|'); if (!p) break; p++;
+                    int pIdx, pVal;
+                    if (sscanf(p, "%d:%d", &pIdx, &pVal) == 2) {
+                        lastObj.instanceParams[ip].paramIdx = pIdx;
+                        lastObj.instanceParams[ip].value = pVal;
+                    }
+                }
+            }
             else if (strncmp(line, "sceneobjcells=", 14) == 0 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
             {
                 TmObject& lastObj = sTmScenes.back().objects.back();
@@ -1821,6 +2265,24 @@ static bool LoadProject(const std::string& path)
                     const char* comma = strchr(p, ',');
                     if (!comma) break;
                     p = comma + 1;
+                }
+            }
+            else if (strncmp(line, "tmSceneBp=", 10) == 0 && !sTmScenes.empty())
+            {
+                TmScene& sc = sTmScenes.back();
+                int bpIdx = -1, ipc = 0;
+                sscanf(line + 10, "%d,%d", &bpIdx, &ipc);
+                sc.blueprintIdx = bpIdx;
+                sc.instanceParamCount = 0;
+                const char* pipe = strchr(line + 10, '|');
+                while (pipe && sc.instanceParamCount < 8) {
+                    int pi = 0, pv = 0;
+                    if (sscanf(pipe + 1, "%d:%d", &pi, &pv) == 2) {
+                        sc.instanceParams[sc.instanceParamCount].paramIdx = pi;
+                        sc.instanceParams[sc.instanceParamCount].value = pv;
+                        sc.instanceParamCount++;
+                    }
+                    pipe = strchr(pipe + 1, '|');
                 }
             }
         }
@@ -1867,6 +2329,16 @@ static bool LoadProject(const std::string& path)
                     int gi = VsFindNode(nid);
                     if (gi >= 0)
                         strncpy(sVsNodes[gi].customCode, codeBuf, sizeof(sVsNodes[gi].customCode) - 1);
+                }
+            }
+            else if (strncmp(line, "vsNodeFunc=", 11) == 0)
+            {
+                int nid;
+                char nameBuf[64] = {};
+                if (sscanf(line + 11, "%d|%63[^\n]", &nid, nameBuf) >= 2) {
+                    int gi = VsFindNode(nid);
+                    if (gi >= 0)
+                        strncpy(sVsNodes[gi].funcName, nameBuf, sizeof(sVsNodes[gi].funcName) - 1);
                 }
             }
             else if (sscanf(line, "vsLinkCount=%d", &ival) == 1) { sVsLinks.clear(); sVsLinks.reserve(ival); }
@@ -1923,13 +2395,31 @@ static bool LoadProject(const std::string& path)
             {
                 MapScene& ms = sMapScenes.back();
                 FloorSprite sp = {};
-                int typeVal = 0, animEn = 0;
-                if (sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d",
+                int typeVal = 0, animEn = 0, bpIdx = -1, bpParamCnt = 0;
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
-                    &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx) >= 6)
+                    &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
+                    &bpIdx, &bpParamCnt);
+                if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
                     sp.animEnabled = (animEn != 0);
+                    sp.blueprintIdx = (matched >= 13) ? bpIdx : -1;
+                    sp.instanceParamCount = (matched >= 14) ? std::min(bpParamCnt, 8) : 0;
+                    // Parse instance params from pipe-delimited suffix
+                    if (sp.instanceParamCount > 0) {
+                        const char* p = line + 9;
+                        for (int ip = 0; ip < sp.instanceParamCount; ip++) {
+                            p = strchr(p, '|');
+                            if (!p) break;
+                            p++;
+                            int pIdx, pVal;
+                            if (sscanf(p, "%d:%d", &pIdx, &pVal) == 2) {
+                                sp.instanceParams[ip].paramIdx = pIdx;
+                                sp.instanceParams[ip].value = pVal;
+                            }
+                        }
+                    }
                     if (ms.spriteCount < kMaxFloorSprites)
                         ms.sprites[ms.spriteCount++] = sp;
                 }
@@ -1949,6 +2439,24 @@ static bool LoadProject(const std::string& path)
                 c.smallTriCull = sti;
                 c.skipFloor = (sf != 0);
                 c.coverageBuf = (cb != 0);
+            }
+            else if (strncmp(line, "msSceneBp=", 10) == 0 && !sMapScenes.empty())
+            {
+                MapScene& ms = sMapScenes.back();
+                int bpIdx = -1, ipc = 0;
+                sscanf(line + 10, "%d,%d", &bpIdx, &ipc);
+                ms.blueprintIdx = bpIdx;
+                ms.instanceParamCount = 0;
+                const char* pipe = strchr(line + 10, '|');
+                while (pipe && ms.instanceParamCount < 8) {
+                    int pi = 0, pv = 0;
+                    if (sscanf(pipe + 1, "%d:%d", &pi, &pv) == 2) {
+                        ms.instanceParams[ms.instanceParamCount].paramIdx = pi;
+                        ms.instanceParams[ms.instanceParamCount].value = pv;
+                        ms.instanceParamCount++;
+                    }
+                    pipe = strchr(pipe + 1, '|');
+                }
             }
             else if (sscanf(line, "msVsNextId=%d", &ival) == 1 && !sMapScenes.empty())
                 sMapScenes.back().vsNextId = ival;
@@ -2043,6 +2551,67 @@ static bool LoadProject(const std::string& path)
         }
     }
 
+    // --- Migrate tilemap data to 4x4 sub-grid (subdivided=2) ---
+    // subdivided=0: old format, needs 4x expansion
+    // subdivided=1: first 2x format, needs 2x more expansion
+    // subdivided=2: current format, no migration needed
+    if (tmSubdivLevel < 2 && sTilemapData.floor.width > 0 && sTilemapData.floor.height > 0)
+    {
+        int passes = (tmSubdivLevel == 0) ? 2 : 1; // 0→2 passes, 1→1 pass
+
+        auto migrateFloor = [](int& w, int& h, std::vector<uint16_t>& tiles, std::vector<TmObject>& objs)
+        {
+            int oldW = w, oldH = h;
+            int newW = oldW * 2, newH = oldH * 2;
+            std::vector<uint16_t> newTiles(newW * newH, 0);
+            for (int y = 0; y < oldH; y++)
+            {
+                for (int x = 0; x < oldW; x++)
+                {
+                    uint16_t v = tiles[y * oldW + x];
+                    newTiles[(2 * y)     * newW + (2 * x)]     = v;
+                    newTiles[(2 * y)     * newW + (2 * x + 1)] = v;
+                    newTiles[(2 * y + 1) * newW + (2 * x)]     = v;
+                    newTiles[(2 * y + 1) * newW + (2 * x + 1)] = v;
+                }
+            }
+            tiles = std::move(newTiles);
+            w = newW;
+            h = newH;
+
+            for (auto& obj : objs)
+            {
+                if (obj.type == TmObjType::Tile)
+                {
+                    std::vector<std::pair<int,int>> newCells;
+                    newCells.reserve(obj.cells.size() * 4);
+                    for (auto& c : obj.cells)
+                    {
+                        int nx = c.first * 2, ny = c.second * 2;
+                        newCells.push_back({nx, ny});
+                        newCells.push_back({nx + 1, ny});
+                        newCells.push_back({nx, ny + 1});
+                        newCells.push_back({nx + 1, ny + 1});
+                    }
+                    obj.cells = std::move(newCells);
+                }
+                else
+                {
+                    obj.tileX *= 2;
+                    obj.tileY *= 2;
+                }
+            }
+        };
+
+        for (int p = 0; p < passes; p++)
+        {
+            migrateFloor(sTilemapData.floor.width, sTilemapData.floor.height,
+                         sTilemapData.floor.tileIndices, sTmObjects);
+            for (auto& sc : sTmScenes)
+                migrateFloor(sc.mapW, sc.mapH, sc.tileIndices, sc.objects);
+        }
+    }
+
     // Mark tilemap as initialized if we loaded data
     if (sTilemapData.floor.width > 0 && sTilemapData.floor.height > 0)
         sTilemapDataInit = true;
@@ -2053,6 +2622,31 @@ static bool LoadProject(const std::string& path)
         const TmScene& sc = sTmScenes[sTmSelectedScene];
         if (!sc.tileIndices.empty())
             LoadSceneState(sc);
+    }
+
+    // Post-load cleanup: remove blueprint nodes that leaked into MapScene scripts
+    // (caused by a bug where SaveMapSceneState saved blueprint nodes as scene data)
+    for (int si = 0; si < (int)sMapScenes.size(); si++) {
+        MapScene& ms = sMapScenes[si];
+        for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++) {
+            const auto& bp = sBlueprintAssets[bi];
+            if (!ms.vsNodes.empty() && ms.vsNodes.size() == bp.nodes.size()) {
+                bool match = true;
+                for (int ni = 0; ni < (int)ms.vsNodes.size() && match; ni++) {
+                    if (ms.vsNodes[ni].id != bp.nodes[ni].id ||
+                        ms.vsNodes[ni].type != bp.nodes[ni].type)
+                        match = false;
+                }
+                if (match) {
+                    ms.vsNodes.clear();
+                    ms.vsLinks.clear();
+                    ms.vsAnnotations.clear();
+                    ms.vsGroupPins.clear();
+                    ms.vsNextId = 1;
+                    break;
+                }
+            }
+        }
     }
 
     // Load selected map scene into active editor state
@@ -2091,6 +2685,11 @@ static void CloseProject()
 
     sMeshAssets.clear();
     sSelectedMesh = -1;
+
+    sBlueprintAssets.clear();
+    sSelectedBlueprint = -1;
+    sVsEditSource = VsEditSource::Scene;
+    sVsEditBlueprintIdx = -1;
 
     sMapScenes.clear();
     sMapSelectedScene = 0;
@@ -2385,6 +2984,11 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             ImGui::Checkbox("Use Quads##meshQuad", &ma.useQuads);
         ImGui::DragFloat("Draw Distance##mesh", &ma.drawDistance, 1.0f, 0.0f, 2000.0f, "%.0f");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = use global draw distance");
+        ImGui::Checkbox("Visible##meshVis", &ma.visible);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Uncheck for invisible collision-only mesh (saves GPU/CPU)");
+        ImGui::Checkbox("Collision##meshCol", &ma.collision);
+        ImGui::DragInt("Draw Priority##meshPri", &ma.drawPriority, 0.1f, 0, 10);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = draws on top, higher = draws behind");
 
         ImGui::Separator();
         ImGui::Checkbox("Textured##meshTex", &ma.textured);
@@ -2540,9 +3144,9 @@ static void DrawTabBar()
         ImGui::SameLine();
     };
 
-    TabButton("Scene",   EditorTab::Map);
-    TabButton("Mode 7",  EditorTab::Mode7);
-    TabButton("Tilemap", EditorTab::Tilemap);
+    TabButton("Mode 4",  EditorTab::Map);
+    TabButton("Mode 1",  EditorTab::Mode7);
+    TabButton("Mode 0",  EditorTab::Tilemap);
     TabButton("Sprites", EditorTab::Sprites);
     TabButton("Skybox",  EditorTab::Skybox);
     TabButton("3D",      EditorTab::ThreeD);
@@ -2556,7 +3160,13 @@ static void DrawTabBar()
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
         if (ImGui::Button("Play", ImVec2(btnW, btnH)))
         {
+            // Save blueprint working set back before playing so bp.nodes/links are current
+            if (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0 && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
+                sBlueprintAssets[sVsEditBlueprintIdx].nodes = sVsNodes;
+                sBlueprintAssets[sVsEditBlueprintIdx].links = sVsLinks;
+            }
             sEditorMode = EditorMode::Play;
+            sPlayTab = sActiveTab;
             sSavedEditorCam = sCamera;
             sCamera.x = sCamObj.x;
             sCamera.z = sCamObj.z;
@@ -2581,6 +3191,23 @@ static void DrawTabBar()
                     break;
                 }
             }
+            // Save tilemap object state for restore on Stop
+            sSavedTmObjects = sTmObjects;
+            memset(sTmMoveAccum, 0, sizeof(sTmMoveAccum));
+            memset(sTmPrevDirHeld, 0, sizeof(sTmPrevDirHeld));
+            memset(sTmPrevKeyState, 0, sizeof(sTmPrevKeyState));
+            sTmLastMoveDir = -1;
+            sTmObjFacing.assign(sTmObjects.size(), 4); // default facing South
+            sTmObjAnimSet.assign(sTmObjects.size(), 0); // default animation set 0
+            sTmObjStepCount.assign(sTmObjects.size(), 0);
+            sTmObjMoveRate.assign(sTmObjects.size(), 6.0f); // default move speed
+            sTmObjVisX.resize(sTmObjects.size());
+            sTmObjVisY.resize(sTmObjects.size());
+            for (int i = 0; i < (int)sTmObjects.size(); i++) {
+                sTmObjVisX[i] = (float)sTmObjects[i].tileX;
+                sTmObjVisY[i] = (float)sTmObjects[i].tileY;
+            }
+            sTmOnStartRan = false;
         }
         ImGui::PopStyleColor(2);
     }
@@ -2596,6 +3223,18 @@ static void DrawTabBar()
             if (sSavedPlayerIdx >= 0 && sSavedPlayerIdx < sSpriteCount)
                 sSprites[sSavedPlayerIdx] = sSavedPlayerSprite;
             sSavedPlayerIdx = -1;
+            sScriptStartRan = false;
+            sScriptMoveSpeed = -1.0f;
+            sScriptAutoOrbitSpeed = 0.0f;
+            sPendingSceneSwitch = -1;
+            sPendingSceneMode = 0;
+            sActivePlayAnimNodeId = -1;
+            sPlayAnimIdle = -1;
+            sPlayAnimHeld = -1;
+            sPlayAnimReleased = -1;
+            sVsFiredNodes.clear();
+            sVsLinkSurgeT.clear();
+            sVsLinkSurgeRevT.clear();
         }
         ImGui::PopStyleColor(2);
     }
@@ -2932,7 +3571,76 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             for (int si = 0; si < 4; si++)
                 if (sizeVals[si] == asset.baseSize) { curIdx = si; break; }
             if (ImGui::Combo("##baseSize", &curIdx, sizes, 4))
-                asset.baseSize = sizeVals[curIdx];
+            {
+                int newSize = sizeVals[curIdx];
+                int oldSize = asset.baseSize;
+                if (newSize != oldSize && !asset.frames.empty())
+                {
+                    if (newSize < oldSize)
+                    {
+                        // Downscale: split each frame into sub-frames
+                        // e.g., 32x32 → 16x16 = 4 sub-frames per original frame
+                        int tilesX = oldSize / newSize;
+                        int tilesY = oldSize / newSize;
+                        std::vector<SpriteFrame> newFrames;
+                        for (auto& fr : asset.frames)
+                        {
+                            for (int ty = 0; ty < tilesY; ty++)
+                                for (int tx = 0; tx < tilesX; tx++)
+                                {
+                                    SpriteFrame sub;
+                                    sub.width = newSize;
+                                    sub.height = newSize;
+                                    memset(sub.pixels, 0, sizeof(sub.pixels));
+                                    for (int py = 0; py < newSize; py++)
+                                        for (int px = 0; px < newSize; px++)
+                                        {
+                                            int sx = tx * newSize + px;
+                                            int sy = ty * newSize + py;
+                                            if (sx < fr.width && sy < fr.height)
+                                                sub.pixels[py * kMaxFrameSize + px] = fr.pixels[sy * kMaxFrameSize + sx];
+                                        }
+                                    newFrames.push_back(sub);
+                                }
+                        }
+                        asset.frames = std::move(newFrames);
+                    }
+                    else
+                    {
+                        // Upscale: merge consecutive sub-frames back into larger frames
+                        // e.g., 16x16 → 32x32 = merge 4 sub-frames into 1
+                        int tilesX = newSize / oldSize;
+                        int tilesY = newSize / oldSize;
+                        int subsPerFrame = tilesX * tilesY;
+                        std::vector<SpriteFrame> newFrames;
+                        for (int i = 0; i < (int)asset.frames.size(); i += subsPerFrame)
+                        {
+                            SpriteFrame big;
+                            big.width = newSize;
+                            big.height = newSize;
+                            memset(big.pixels, 0, sizeof(big.pixels));
+                            for (int s = 0; s < subsPerFrame && (i + s) < (int)asset.frames.size(); s++)
+                            {
+                                int tx = s % tilesX;
+                                int ty = s / tilesX;
+                                const SpriteFrame& sub = asset.frames[i + s];
+                                for (int py = 0; py < oldSize; py++)
+                                    for (int px = 0; px < oldSize; px++)
+                                    {
+                                        int dx = tx * oldSize + px;
+                                        int dy = ty * oldSize + py;
+                                        if (dx < newSize && dy < newSize)
+                                            big.pixels[dy * kMaxFrameSize + dx] = sub.pixels[py * kMaxFrameSize + px];
+                                    }
+                            }
+                            newFrames.push_back(big);
+                        }
+                        asset.frames = std::move(newFrames);
+                    }
+                    sTmSpriteTexCount = -1;
+                }
+                asset.baseSize = newSize;
+            }
         }
         ImGui::PopItemWidth();
 
@@ -3331,6 +4039,9 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             ImGui::SameLine();
 
             ImGui::Checkbox("Loop##aloop", &anim.loop);
+            ImGui::SameLine();
+            ImGui::Checkbox("Step##astep", &anim.stepAnim);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Advance frame per tile step");
             ImGui::SameLine();
             ImGui::PushItemWidth(Scaled(50));
             ImGui::DragFloat("##aspeed", &anim.speed, 0.05f, 0.0f, 10.0f, "%.1f");
@@ -4156,6 +4867,66 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         }
         ImGui::NewLine();
 
+        // Blueprint attachment
+        {
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Blueprint");
+            ImGui::PushItemWidth(size.x * 0.5f);
+            const char* bpPreview = (sp.blueprintIdx >= 0 && sp.blueprintIdx < (int)sBlueprintAssets.size())
+                ? sBlueprintAssets[sp.blueprintIdx].name : "(none)";
+            if (ImGui::BeginCombo("Script##sprbp", bpPreview)) {
+                if (ImGui::Selectable("(none)##sprbpnone", sp.blueprintIdx < 0)) {
+                    sp.blueprintIdx = -1;
+                    sp.instanceParamCount = 0;
+                    sProjectDirty = true;
+                }
+                for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++) {
+                    bool sel = (sp.blueprintIdx == bi);
+                    if (ImGui::Selectable(sBlueprintAssets[bi].name, sel)) {
+                        sp.blueprintIdx = bi;
+                        sp.instanceParamCount = 0; // reset overrides on change
+                        sProjectDirty = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            // Show exposed parameters with override fields
+            if (sp.blueprintIdx >= 0 && sp.blueprintIdx < (int)sBlueprintAssets.size()) {
+                const BlueprintAsset& bp = sBlueprintAssets[sp.blueprintIdx];
+                for (int pi = 0; pi < bp.paramCount; pi++) {
+                    const BpParam& param = bp.params[pi];
+                    // Find if this param has an instance override
+                    int overrideIdx = -1;
+                    for (int oi = 0; oi < sp.instanceParamCount; oi++)
+                        if (sp.instanceParams[oi].paramIdx == pi) { overrideIdx = oi; break; }
+                    int val = (overrideIdx >= 0) ? sp.instanceParams[overrideIdx].value : param.defaultInt;
+                    ImGui::PushID(pi + 5000);
+                    char label[48]; snprintf(label, sizeof(label), "%s##bp%d", param.name, pi);
+                    if (ImGui::DragInt(label, &val, 1.0f)) {
+                        if (overrideIdx >= 0) {
+                            sp.instanceParams[overrideIdx].value = val;
+                        } else if (sp.instanceParamCount < 8) {
+                            sp.instanceParams[sp.instanceParamCount].paramIdx = pi;
+                            sp.instanceParams[sp.instanceParamCount].value = val;
+                            sp.instanceParamCount++;
+                        }
+                        sProjectDirty = true;
+                    }
+                    if (overrideIdx >= 0) {
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Reset")) {
+                            for (int oi = overrideIdx; oi < sp.instanceParamCount - 1; oi++)
+                                sp.instanceParams[oi] = sp.instanceParams[oi + 1];
+                            sp.instanceParamCount--;
+                            sProjectDirty = true;
+                        }
+                    }
+                    ImGui::PopID();
+                }
+            }
+            ImGui::PopItemWidth();
+        }
+
         if (ImGui::Button("Delete Sprite"))
         {
             for (int j = sSelectedSprite; j < sSpriteCount - 1; j++)
@@ -4512,10 +5283,10 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             memset(t.pixels, 0, sizeof(t.pixels));
         for (int i = 0; i < 16; i++)
             sTilemapData.tileset.palette[i] = sPalette[i];
-        // Default tilemap: 1x1, single tile — drag edges to expand
-        sTilemapData.floor.width  = 1;
-        sTilemapData.floor.height = 1;
-        sTilemapData.floor.tileIndices.resize(1, 0);
+        // Default tilemap: 4x4 sub-cells (one full tile) — drag edges to expand
+        sTilemapData.floor.width  = 4;
+        sTilemapData.floor.height = 4;
+        sTilemapData.floor.tileIndices.resize(16, 0);
     }
 
     // Create default Scene 0 if none exist (tilemap scenes)
@@ -4547,7 +5318,10 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             }
         }
         if (needRebuild)
+        {
             RebuildTmSpriteTextures();
+            PatchTmSpriteTexturesFromDirs();
+        }
     }
 
     const ImGuiWindowFlags panelFlags =
@@ -4586,11 +5360,12 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
 
         ImGui::Separator();
 
-        // Object list
+        // Object list (exclude Tile-type objects — those live in the Tiles panel)
         ImGui::BeginChild("##ObjList", ImVec2(0, size.y * 0.45f), true);
         for (int i = 0; i < (int)sTmObjects.size(); i++)
         {
             TmObject& obj = sTmObjects[i];
+            if (obj.type == TmObjType::Tile) continue;
             uint32_t col = sTmObjTypeColors[(int)obj.type];
             ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(col));
             bool selected = (i == sTmSelectedObj);
@@ -4669,7 +5444,64 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             {
                 ImGui::DragInt("Tile X", &obj.tileX, 0.5f, 0, tm.width - 1);
                 ImGui::DragInt("Tile Y", &obj.tileY, 0.5f, 0, tm.height - 1);
+                ImGui::SliderFloat("Scale", &obj.displayScale, 0.5f, 4.0f, "%.1f");
             }
+            // Blueprint attachment
+            {
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Blueprint");
+                const char* bpPreview = (obj.blueprintIdx >= 0 && obj.blueprintIdx < (int)sBlueprintAssets.size())
+                    ? sBlueprintAssets[obj.blueprintIdx].name : "(none)";
+                if (ImGui::BeginCombo("Script##tmbp", bpPreview)) {
+                    if (ImGui::Selectable("(none)##tmbpnone", obj.blueprintIdx < 0)) {
+                        obj.blueprintIdx = -1;
+                        obj.instanceParamCount = 0;
+                        sProjectDirty = true;
+                    }
+                    for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++) {
+                        bool sel = (obj.blueprintIdx == bi);
+                        if (ImGui::Selectable(sBlueprintAssets[bi].name, sel)) {
+                            obj.blueprintIdx = bi;
+                            obj.instanceParamCount = 0;
+                            sProjectDirty = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (obj.blueprintIdx >= 0 && obj.blueprintIdx < (int)sBlueprintAssets.size()) {
+                    const BlueprintAsset& bp = sBlueprintAssets[obj.blueprintIdx];
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        const BpParam& param = bp.params[pi];
+                        int overrideIdx = -1;
+                        for (int oi = 0; oi < obj.instanceParamCount; oi++)
+                            if (obj.instanceParams[oi].paramIdx == pi) { overrideIdx = oi; break; }
+                        int val = (overrideIdx >= 0) ? obj.instanceParams[overrideIdx].value : param.defaultInt;
+                        ImGui::PushID(pi + 6000);
+                        char label[48]; snprintf(label, sizeof(label), "%s##tmbp%d", param.name, pi);
+                        if (ImGui::DragInt(label, &val, 1.0f)) {
+                            if (overrideIdx >= 0) {
+                                obj.instanceParams[overrideIdx].value = val;
+                            } else if (obj.instanceParamCount < 8) {
+                                obj.instanceParams[obj.instanceParamCount].paramIdx = pi;
+                                obj.instanceParams[obj.instanceParamCount].value = val;
+                                obj.instanceParamCount++;
+                            }
+                            sProjectDirty = true;
+                        }
+                        if (overrideIdx >= 0) {
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Reset")) {
+                                for (int oi = overrideIdx; oi < obj.instanceParamCount - 1; oi++)
+                                    obj.instanceParams[oi] = obj.instanceParams[oi + 1];
+                                obj.instanceParamCount--;
+                                sProjectDirty = true;
+                            }
+                        }
+                        ImGui::PopID();
+                    }
+                }
+            }
+
             ImGui::PopItemWidth();
 
             ImGui::Spacing();
@@ -4719,11 +5551,13 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                        ImVec2(pos.x + objPanelW, pos.y + size.y), splCol, 2.0f);
     }
 
-    // ======== SCENE PANEL (far right) ========
+    // ======== SCENE PANEL (top right) ========
     float scenePanelW = sTmScenePanelW;
+    float tilePanelH  = size.y * 0.4f;
+    float scenePanelH = size.y - tilePanelH;
     {
         ImGui::SetNextWindowPos(ImVec2(pos.x + size.x - scenePanelW, pos.y));
-        ImGui::SetNextWindowSize(ImVec2(scenePanelW, size.y));
+        ImGui::SetNextWindowSize(ImVec2(scenePanelW, scenePanelH));
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.25f, 0.30f, 1.0f));
         ImGui::Begin("##TmScenePanel", nullptr, panelFlags);
@@ -4749,8 +5583,8 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
 
         ImGui::Separator();
 
-        // Scene list
-        ImGui::BeginChild("##SceneList", ImVec2(0, size.y * 0.4f), true);
+        // Scene list (compact)
+        ImGui::BeginChild("##SceneList", ImVec2(0, 80), true);
         for (int i = 0; i < (int)sTmScenes.size(); i++)
         {
             bool sel = (i == sTmSelectedScene);
@@ -4767,12 +5601,11 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
         }
         ImGui::EndChild();
 
-        ImGui::Separator();
-
-        // Selected scene properties
+        // Selected scene properties (right below scene list)
         if (sTmSelectedScene >= 0 && sTmSelectedScene < (int)sTmScenes.size())
         {
             TmScene& sc = sTmScenes[sTmSelectedScene];
+            ImGui::Separator();
             ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Properties");
             ImGui::PushItemWidth(scenePanelW - 16);
             ImGui::InputText("Name##scname", sc.name, sizeof(sc.name));
@@ -4797,6 +5630,64 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
 
             ImGui::PopItemWidth();
 
+            // Scene-level blueprint
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Scene Blueprint");
+            ImGui::PushItemWidth(scenePanelW - 16);
+            {
+                const char* bpPreview = (sc.blueprintIdx >= 0 && sc.blueprintIdx < (int)sBlueprintAssets.size())
+                    ? sBlueprintAssets[sc.blueprintIdx].name : "(none)";
+                if (ImGui::BeginCombo("Script##tmscbp", bpPreview)) {
+                    if (ImGui::Selectable("(none)##tmscbpnone", sc.blueprintIdx < 0)) {
+                        sc.blueprintIdx = -1;
+                        sc.instanceParamCount = 0;
+                        sProjectDirty = true;
+                    }
+                    for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++) {
+                        bool sel2 = (sc.blueprintIdx == bi);
+                        if (ImGui::Selectable(sBlueprintAssets[bi].name, sel2)) {
+                            sc.blueprintIdx = bi;
+                            sc.instanceParamCount = 0;
+                            sProjectDirty = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (sc.blueprintIdx >= 0 && sc.blueprintIdx < (int)sBlueprintAssets.size()) {
+                    const BlueprintAsset& bp = sBlueprintAssets[sc.blueprintIdx];
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        const BpParam& param = bp.params[pi];
+                        int overrideIdx = -1;
+                        for (int oi = 0; oi < sc.instanceParamCount; oi++)
+                            if (sc.instanceParams[oi].paramIdx == pi) { overrideIdx = oi; break; }
+                        int val = (overrideIdx >= 0) ? sc.instanceParams[overrideIdx].value : param.defaultInt;
+                        ImGui::PushID(pi + 8000);
+                        char label[48]; snprintf(label, sizeof(label), "%s##tmscbp%d", param.name, pi);
+                        if (ImGui::DragInt(label, &val, 1.0f)) {
+                            if (overrideIdx >= 0) {
+                                sc.instanceParams[overrideIdx].value = val;
+                            } else if (sc.instanceParamCount < 8) {
+                                sc.instanceParams[sc.instanceParamCount].paramIdx = pi;
+                                sc.instanceParams[sc.instanceParamCount].value = val;
+                                sc.instanceParamCount++;
+                            }
+                            sProjectDirty = true;
+                        }
+                        if (overrideIdx >= 0) {
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Reset")) {
+                                for (int oi = overrideIdx; oi < sc.instanceParamCount - 1; oi++)
+                                    sc.instanceParams[oi] = sc.instanceParams[oi + 1];
+                                sc.instanceParamCount--;
+                                sProjectDirty = true;
+                            }
+                        }
+                        ImGui::PopID();
+                    }
+                }
+            }
+            ImGui::PopItemWidth();
+
             ImGui::Spacing();
             if (ImGui::Button("Delete##delscene") && sTmScenes.size() > 1)
             {
@@ -4805,6 +5696,100 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     sTmSelectedScene = (int)sTmScenes.size() - 1;
                 LoadSceneState(sTmScenes[sTmSelectedScene]);
             }
+        }
+
+        ImGui::End();
+        ImGui::PopStyleColor(2);
+    }
+
+    // ======== TILES PANEL (bottom right — Tile objects only) ========
+    {
+        ImGui::SetNextWindowPos(ImVec2(pos.x + size.x - scenePanelW, pos.y + scenePanelH));
+        ImGui::SetNextWindowSize(ImVec2(scenePanelW, tilePanelH));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.25f, 0.30f, 1.0f));
+        ImGui::Begin("##TmTilesPanel", nullptr, panelFlags);
+
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Tiles");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Add##addtile"))
+        {
+            TmObject obj;
+            obj.type = TmObjType::Tile;
+            snprintf(obj.name, sizeof(obj.name), "Tile %d", (int)sTmObjects.size());
+            obj.tileX = tm.width / 2;
+            obj.tileY = tm.height / 2;
+            sTmObjects.push_back(obj);
+            sTmSelectedObj = (int)sTmObjects.size() - 1;
+        }
+
+        ImGui::Separator();
+
+        // Tile object list
+        ImGui::BeginChild("##TileObjList", ImVec2(0, tilePanelH * 0.35f), true);
+        for (int i = 0; i < (int)sTmObjects.size(); i++)
+        {
+            TmObject& obj = sTmObjects[i];
+            if (obj.type != TmObjType::Tile) continue;
+            bool selected = (i == sTmSelectedObj);
+            char label[64];
+            snprintf(label, sizeof(label), "%s##tile%d", obj.name, i);
+            if (ImGui::Selectable(label, selected))
+                sTmSelectedObj = i;
+        }
+        ImGui::EndChild();
+
+        ImGui::Separator();
+
+        // Selected tile properties
+        if (sTmSelectedObj >= 0 && sTmSelectedObj < (int)sTmObjects.size() &&
+            sTmObjects[sTmSelectedObj].type == TmObjType::Tile)
+        {
+            TmObject& obj = sTmObjects[sTmSelectedObj];
+            ImGui::PushItemWidth(scenePanelW - 16);
+            ImGui::InputText("Name##tilename", obj.name, sizeof(obj.name));
+
+            // Sprite asset link
+            {
+                const char* preview = (obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)sSpriteAssets.size())
+                    ? sSpriteAssets[obj.spriteAssetIdx].name.c_str() : "None";
+                if (ImGui::BeginCombo("Sprite##tilesprite", preview))
+                {
+                    if (ImGui::Selectable("None##tsnone", obj.spriteAssetIdx < 0))
+                        obj.spriteAssetIdx = -1;
+                    for (int si = 0; si < (int)sSpriteAssets.size(); si++)
+                    {
+                        bool sel = (obj.spriteAssetIdx == si);
+                        if (ImGui::Selectable(sSpriteAssets[si].name.c_str(), sel))
+                            obj.spriteAssetIdx = si;
+                    }
+                    ImGui::EndCombo();
+                }
+            }
+
+            ImGui::Text("Cells: %d", (int)obj.cells.size());
+            if (ImGui::Button("Paint##tilepaint"))
+            {
+                sTmStampAsset = obj.spriteAssetIdx;
+                sTmStampObj = sTmSelectedObj;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Delete##tiledel"))
+            {
+                sTmObjects.erase(sTmObjects.begin() + sTmSelectedObj);
+                sTmSelectedObj = std::min(sTmSelectedObj, (int)sTmObjects.size() - 1);
+            }
+            // Draw mode: 1x, 4x, 8x
+            {
+                ImGui::Text("Draw:");
+                ImGui::SameLine();
+                if (ImGui::RadioButton("1x", sTmPaintScale == 1)) sTmPaintScale = 1;
+                ImGui::SameLine();
+                if (ImGui::RadioButton("4x", sTmPaintScale == 4)) sTmPaintScale = 4;
+                ImGui::SameLine();
+                if (ImGui::RadioButton("8x", sTmPaintScale == 8)) sTmPaintScale = 8;
+            }
+            ImGui::PopItemWidth();
         }
 
         ImGui::End();
@@ -4962,6 +5947,9 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     }
                     else
                     {
+                        // Non-Tile objects are drawn separately in the object loop below
+                        // (with scaling, directional sprites, etc.) — skip them here
+                        if (obj.type != TmObjType::Tile) continue;
                         if (obj.tileX != tx || obj.tileY != ty) continue;
                     }
                     if (obj.spriteAssetIdx < 0 || obj.spriteAssetIdx >= (int)sSpriteAssets.size()) continue;
@@ -4989,9 +5977,31 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     break;
                 }
 
-                // Border on unpainted cells only
+                // Border on unpainted cells only — lighter for sub-cells, medium every 2, heavy every 4
                 if (!cellPainted)
-                    dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), gridLineCol);
+                {
+                    // Faint sub-cell border
+                    dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), 0x22FFFFFF);
+                    // Medium lines every 2 cells
+                    uint32_t medCol = 0x44FFFFFF;
+                    if (tx % 2 == 0)
+                        dl->AddLine(ImVec2(x0, y0), ImVec2(x0, y1), medCol, 1.0f);
+                    if (ty % 2 == 0)
+                        dl->AddLine(ImVec2(x0, y0), ImVec2(x1, y0), medCol, 1.0f);
+                    if (tx == tm.width - 1 || (tx + 1) % 2 == 0)
+                        dl->AddLine(ImVec2(x1, y0), ImVec2(x1, y1), medCol, 1.0f);
+                    if (ty == tm.height - 1 || (ty + 1) % 2 == 0)
+                        dl->AddLine(ImVec2(x0, y1), ImVec2(x1, y1), medCol, 1.0f);
+                    // Heavy lines every 4 cells (original tile boundaries)
+                    if (tx % 4 == 0)
+                        dl->AddLine(ImVec2(x0, y0), ImVec2(x0, y1), gridLineCol, 1.0f);
+                    if (ty % 4 == 0)
+                        dl->AddLine(ImVec2(x0, y0), ImVec2(x1, y0), gridLineCol, 1.0f);
+                    if (tx == tm.width - 1 || (tx + 1) % 4 == 0)
+                        dl->AddLine(ImVec2(x1, y0), ImVec2(x1, y1), gridLineCol, 1.0f);
+                    if (ty == tm.height - 1 || (ty + 1) % 4 == 0)
+                        dl->AddLine(ImVec2(x0, y1), ImVec2(x1, y1), gridLineCol, 1.0f);
+                }
 
             }
         }
@@ -5050,44 +6060,106 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 dl->AddLine(ImVec2(edgeRight, edgeTop), ImVec2(edgeRight, edgeBottom), 0xFF44AAFF, 3.0f);
         }
 
-        // Draw non-Tile objects on the grid (diamond markers — rendered above tiles, edit mode only)
-        if (sEditorMode != EditorMode::Play)
+        // Draw non-Tile objects on the grid
         for (int i = 0; i < (int)sTmObjects.size(); i++)
         {
             const TmObject& obj = sTmObjects[i];
             if (obj.type == TmObjType::Tile) continue; // tiles already rendered in cells
 
-            float objX = ox + obj.tileX * cellSz;
-            float objY = oy + obj.tileY * cellSz;
+            float visTileX = (sEditorMode == EditorMode::Play && i < (int)sTmObjVisX.size())
+                ? sTmObjVisX[i] : (float)obj.tileX;
+            float visTileY = (sEditorMode == EditorMode::Play && i < (int)sTmObjVisY.size())
+                ? sTmObjVisY[i] : (float)obj.tileY;
+            float objX = ox + visTileX * cellSz;
+            float objY = oy + visTileY * cellSz;
+            float dscale = obj.displayScale > 0.0f ? obj.displayScale : 1.0f;
+            float objSz = cellSz * dscale;
+            // Center the scaled sprite on the object's tile
+            float objDrawX = objX - (objSz - cellSz) * 0.5f;
+            float objDrawY = objY - (objSz - cellSz) * 0.5f;
             uint32_t col = sTmObjTypeColors[(int)obj.type];
             bool isSel = (i == sTmSelectedObj);
 
-            // Diamond marker centered in the tile
-            float cx = objX + cellSz * 0.5f;
-            float cy = objY + cellSz * 0.5f;
-            float r = cellSz * 0.35f;
-            ImVec2 diamond[4] = {
-                ImVec2(cx, cy - r), ImVec2(cx + r, cy),
-                ImVec2(cx, cy + r), ImVec2(cx - r, cy)
-            };
-            dl->AddConvexPolyFilled(diamond, 4, (col & 0x00FFFFFF) | 0x80000000);
-            dl->AddPolyline(diamond, 4, isSel ? 0xFFFFFFFF : col, ImDrawFlags_Closed, isSel ? 2.5f : 1.5f);
+            // Draw sprite texture if available, otherwise diamond marker
+            bool drewSprite = false;
+            GLuint drawTex = 0;
+            // During play mode, use direction sprite if available
+            if (sEditorMode == EditorMode::Play && i < (int)sTmObjFacing.size() &&
+                obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)sAssetDirSprites.size() &&
+                !sAssetDirSprites[obj.spriteAssetIdx].empty())
+            {
+                int facing = sTmObjFacing[i];
+                int animIdx = (i < (int)sTmObjAnimSet.size()) ? sTmObjAnimSet[i] : 0;
+                auto& dirSets = sAssetDirSprites[obj.spriteAssetIdx];
+                int dirSetIdx = 0;
+                // Convert animIdx to sAssetDirSprites set index with frame cycling
+                if (obj.spriteAssetIdx < (int)sSpriteAssets.size()) {
+                    auto& asset = sSpriteAssets[obj.spriteAssetIdx];
+                    if (animIdx >= 0 && animIdx < (int)asset.anims.size()) {
+                        int base = GetAnimDirBase(asset, animIdx);
+                        int frameCount = asset.anims[animIdx].endFrame;
+                        if (frameCount > 0) {
+                            int frame;
+                            if (asset.anims[animIdx].stepAnim) {
+                                // Step-based: advance one frame per tile step
+                                int stepCount = (i < (int)sTmObjStepCount.size()) ? sTmObjStepCount[i] : 0;
+                                frame = stepCount % frameCount;
+                            } else {
+                                // Time-based: continuous cycling
+                                int fps = asset.anims[animIdx].fps > 0 ? asset.anims[animIdx].fps : 8;
+                                float effectiveFps = fps * asset.anims[animIdx].speed;
+                                frame = effectiveFps > 0.0f ? ((int)(sViewportAnimTime * effectiveFps)) % frameCount : 0;
+                            }
+                            dirSetIdx = base + frame;
+                        }
+                    }
+                }
+                if (dirSetIdx >= (int)dirSets.size()) dirSetIdx = 0;
+                if (facing >= 0 && facing < 8)
+                    drawTex = dirSets[dirSetIdx][facing].texture;
+            }
+            // Fallback to static sprite texture
+            if (!drawTex && obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)sTmSpriteTextures.size())
+                drawTex = sTmSpriteTextures[obj.spriteAssetIdx];
+            if (drawTex)
+            {
+                dl->AddImage((ImTextureID)(uintptr_t)drawTex,
+                    ImVec2(objDrawX, objDrawY), ImVec2(objDrawX + objSz, objDrawY + objSz));
+                if (isSel)
+                    dl->AddRect(ImVec2(objDrawX, objDrawY), ImVec2(objDrawX + objSz, objDrawY + objSz),
+                        0xFFFFFFFF, 0.0f, 0, 2.0f);
+                drewSprite = true;
+            }
+            if (!drewSprite)
+            {
+                float cx = objDrawX + objSz * 0.5f;
+                float cy = objDrawY + objSz * 0.5f;
+                float r = objSz * 0.35f;
+                ImVec2 diamond[4] = {
+                    ImVec2(cx, cy - r), ImVec2(cx + r, cy),
+                    ImVec2(cx, cy + r), ImVec2(cx - r, cy)
+                };
+                dl->AddConvexPolyFilled(diamond, 4, (col & 0x00FFFFFF) | 0x80000000);
+                dl->AddPolyline(diamond, 4, isSel ? 0xFFFFFFFF : col, ImDrawFlags_Closed, isSel ? 2.5f : 1.5f);
+            }
 
             // Label
             if (cellSz >= 20.0f)
             {
                 const char* lbl = obj.name[0] ? obj.name : sTmObjTypeNames[(int)obj.type];
                 ImVec2 textSz = ImGui::CalcTextSize(lbl);
-                dl->AddText(ImVec2(cx - textSz.x * 0.5f, cy + r + 2), col, lbl);
+                float lcx = objX + cellSz * 0.5f;
+                float lcy = objY + cellSz;
+                dl->AddText(ImVec2(lcx - textSz.x * 0.5f, lcy + 2), col, lbl);
             }
         }
 
         // Stamp mode indicator (edit mode only)
         if (sEditorMode != EditorMode::Play && sTmStampAsset >= 0 && sTmStampAsset < (int)sSpriteAssets.size())
         {
-            char stampLbl[64];
-            snprintf(stampLbl, sizeof(stampLbl), "Painting: %s  (Esc to stop, RMB erase)",
-                sSpriteAssets[sTmStampAsset].name.c_str());
+            char stampLbl[96];
+            snprintf(stampLbl, sizeof(stampLbl), "Painting: %s  [%dx]  (Esc to stop, RMB erase, Tab cycle)",
+                sSpriteAssets[sTmStampAsset].name.c_str(), sTmPaintScale);
             ImVec2 txtSz = ImGui::CalcTextSize(stampLbl);
             float lx = clipMin.x + (clipMax.x - clipMin.x - txtSz.x) * 0.5f;
             float ly = clipMax.y - txtSz.y - 8;
@@ -5139,17 +6211,19 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
 
             float threshold = cellSz;
             if (threshold < 8.0f) threshold = 8.0f;
+            int step = sTmPaintScale > 1 ? sTmPaintScale : 1;
+            int minDim = step;
 
             if (sTmDragEdge == 2) // bottom: drag down = add row, drag up = remove
             {
                 while (sDragAccum >= threshold)
                 {
-                    resizeTilemap(tm.width, tm.height + 1, 0, 0);
+                    resizeTilemap(tm.width, tm.height + step, 0, 0);
                     sDragAccum -= threshold;
                 }
-                while (sDragAccum <= -threshold && tm.height > 1)
+                while (sDragAccum <= -threshold && tm.height > minDim)
                 {
-                    resizeTilemap(tm.width, tm.height - 1, 0, 0);
+                    resizeTilemap(tm.width, tm.height - step, 0, 0);
                     sDragAccum += threshold;
                 }
             }
@@ -5157,13 +6231,13 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             {
                 while (sDragAccum <= -threshold)
                 {
-                    resizeTilemap(tm.width, tm.height + 1, 0, 1);
-                    sTmMapPanY -= cellSz * 0.5f; // shift pan to keep grid visually stable
+                    resizeTilemap(tm.width, tm.height + step, 0, step);
+                    sTmMapPanY -= cellSz * 0.5f;
                     sDragAccum += threshold;
                 }
-                while (sDragAccum >= threshold && tm.height > 1)
+                while (sDragAccum >= threshold && tm.height > minDim)
                 {
-                    resizeTilemap(tm.width, tm.height - 1, 0, -1);
+                    resizeTilemap(tm.width, tm.height - step, 0, -step);
                     sTmMapPanY += cellSz * 0.5f;
                     sDragAccum -= threshold;
                 }
@@ -5172,12 +6246,12 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             {
                 while (sDragAccum >= threshold)
                 {
-                    resizeTilemap(tm.width + 1, tm.height, 0, 0);
+                    resizeTilemap(tm.width + step, tm.height, 0, 0);
                     sDragAccum -= threshold;
                 }
-                while (sDragAccum <= -threshold && tm.width > 1)
+                while (sDragAccum <= -threshold && tm.width > minDim)
                 {
-                    resizeTilemap(tm.width - 1, tm.height, 0, 0);
+                    resizeTilemap(tm.width - step, tm.height, 0, 0);
                     sDragAccum += threshold;
                 }
             }
@@ -5185,13 +6259,13 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             {
                 while (sDragAccum <= -threshold)
                 {
-                    resizeTilemap(tm.width + 1, tm.height, 1, 0);
+                    resizeTilemap(tm.width + step, tm.height, step, 0);
                     sTmMapPanX -= cellSz * 0.5f;
                     sDragAccum += threshold;
                 }
-                while (sDragAccum >= threshold && tm.width > 1)
+                while (sDragAccum >= threshold && tm.width > minDim)
                 {
-                    resizeTilemap(tm.width - 1, tm.height, -1, 0);
+                    resizeTilemap(tm.width - step, tm.height, -step, 0);
                     sTmMapPanX += cellSz * 0.5f;
                     sDragAccum -= threshold;
                 }
@@ -5218,22 +6292,42 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 sTmStampObj = -1;
             }
 
+            // Cycle paint scale with Tab while stamping (1→4→8→1)
+            if (sTmStampAsset >= 0 && ImGui::IsKeyPressed(ImGuiKey_Tab))
+            {
+                if (sTmPaintScale <= 1) sTmPaintScale = 4;
+                else if (sTmPaintScale <= 4) sTmPaintScale = 8;
+                else sTmPaintScale = 1;
+            }
+
             // Stamp paint mode: left-click adds cells, right-click removes cells
             if (sTmStampAsset >= 0 && sTmStampObj >= 0 && sTmStampObj < (int)sTmObjects.size() && inGrid)
             {
                 TmObject& tileObj = sTmObjects[sTmStampObj];
-                auto cellIt = std::find(tileObj.cells.begin(), tileObj.cells.end(), std::make_pair(hoverTX, hoverTY));
+                int ps = sTmPaintScale > 1 ? sTmPaintScale : 1;
+                int mask = ~(ps - 1); // alignment mask (works for powers of 2)
+                int bx = hoverTX & mask;
+                int by = hoverTY & mask;
                 if (ImGui::IsMouseDown(0) && ImGui::IsItemActive())
                 {
-                    // Add cell if not already present
-                    if (cellIt == tileObj.cells.end())
-                        tileObj.cells.push_back({hoverTX, hoverTY});
+                    for (int dy = 0; dy < ps; dy++)
+                        for (int dx = 0; dx < ps; dx++)
+                        {
+                            std::pair<int,int> bc = {bx + dx, by + dy};
+                            if (bc.first >= 0 && bc.first < tm.width && bc.second >= 0 && bc.second < tm.height)
+                                if (std::find(tileObj.cells.begin(), tileObj.cells.end(), bc) == tileObj.cells.end())
+                                    tileObj.cells.push_back(bc);
+                        }
                 }
                 else if (ImGui::IsMouseDown(1))
                 {
-                    // Remove cell
-                    if (cellIt != tileObj.cells.end())
-                        tileObj.cells.erase(cellIt);
+                    for (int dy = 0; dy < ps; dy++)
+                        for (int dx = 0; dx < ps; dx++)
+                        {
+                            auto it = std::find(tileObj.cells.begin(), tileObj.cells.end(), std::make_pair(bx + dx, by + dy));
+                            if (it != tileObj.cells.end())
+                                tileObj.cells.erase(it);
+                        }
                 }
             }
 
@@ -5273,8 +6367,11 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 if (ImGui::IsMouseDown(0))
                 {
                     TmObject& obj = sTmObjects[sTmDragObj];
-                    obj.tileX = std::clamp(hoverTX, 0, tm.width - 1);
-                    obj.tileY = std::clamp(hoverTY, 0, tm.height - 1);
+                    int snapX = std::clamp(hoverTX, 0, tm.width - 1);
+                    int snapY = std::clamp(hoverTY, 0, tm.height - 1);
+                    if (sTmPaintScale > 1) { int m = ~(sTmPaintScale - 1); snapX &= m; snapY &= m; }
+                    obj.tileX = snapX;
+                    obj.tileY = snapY;
                 }
                 else
                     sTmDragObj = -1;
@@ -5282,8 +6379,8 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             // Click empty cell to open sprite instance picker (only when not stamping)
             else if (sTmStampAsset < 0 && hoveredObj < 0 && inGrid && ImGui::IsMouseClicked(0))
             {
-                sTmPlaceTX = hoverTX;
-                sTmPlaceTY = hoverTY;
+                if (sTmPaintScale > 1) { int m = ~(sTmPaintScale - 1); sTmPlaceTX = hoverTX & m; sTmPlaceTY = hoverTY & m; }
+                else { sTmPlaceTX = hoverTX; sTmPlaceTY = hoverTY; }
                 ImGui::OpenPopup("##TmPlaceObj");
             }
         }
@@ -5304,11 +6401,18 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     snprintf(label, sizeof(label), "%s##sa%d", sSpriteAssets[i].name.c_str(), i);
                     if (ImGui::Selectable(label))
                     {
-                        // Create one Tile object with the clicked cell and enter stamp mode
+                        // Create Tile object with initial cells and enter stamp mode
                         TmObject obj;
                         obj.type = TmObjType::Tile;
                         obj.spriteAssetIdx = i;
-                        obj.cells.push_back({sTmPlaceTX, sTmPlaceTY});
+                        {
+                            int ps = sTmPaintScale > 1 ? sTmPaintScale : 1;
+                            int m = ~(ps - 1);
+                            int bx = sTmPlaceTX & m, by = sTmPlaceTY & m;
+                            for (int dy = 0; dy < ps; dy++)
+                                for (int dx = 0; dx < ps; dx++)
+                                    obj.cells.push_back({bx + dx, by + dy});
+                        }
                         snprintf(obj.name, sizeof(obj.name), "%s", sSpriteAssets[i].name.c_str());
                         sTmObjects.push_back(obj);
                         sTmSelectedObj = (int)sTmObjects.size() - 1;
@@ -5470,6 +6574,11 @@ void FrameTick(float dt)
         if (buildFromMenu || sBuildRequested)
         {
             sBuildRequested = false;
+            // Save blueprint working set so export reads current nodes/links
+            if (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0 && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
+                sBlueprintAssets[sVsEditBlueprintIdx].nodes = sVsNodes;
+                sBlueprintAssets[sVsEditBlueprintIdx].links = sVsLinks;
+            }
             sPackaging = true;
             sPackageDone = false;
             sPackageSuccess = false;
@@ -5648,6 +6757,9 @@ void FrameTick(float dt)
                     me.wireframe = ma.wireframe ? 1 : 0;
                     me.grayscale = ma.grayscale ? 1 : 0;
                     me.drawDistance = ma.drawDistance;
+                    me.collision = ma.collision ? 1 : 0;
+                    me.drawPriority = ma.drawPriority;
+                    me.visible = ma.visible ? 1 : 0;
                     me.textured = ma.textured ? 1 : 0;
                     me.texW = ma.texW;
                     me.texH = ma.texH;
@@ -5676,6 +6788,7 @@ void FrameTick(float dt)
                     sn.type = (GBAScriptNodeType)(int)n.type;
                     for (int pi = 0; pi < 4; pi++) sn.paramInt[pi] = n.paramInt[pi];
                     memcpy(sn.customCode, n.customCode, sizeof(sn.customCode));
+                    memcpy(sn.funcName, n.funcName, sizeof(sn.funcName));
                     exportScript.nodes.push_back(sn);
                 }
                 for (auto& l : sVsLinks)
@@ -5690,8 +6803,83 @@ void FrameTick(float dt)
                     exportScript.links.push_back(sl);
                 }
 
+                // Build blueprint exports
+                std::vector<GBABlueprintExport> exportBlueprints;
+                std::vector<GBABlueprintInstanceExport> exportBpInstances;
+                for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++) {
+                    const BlueprintAsset& bp = sBlueprintAssets[bi];
+                    GBABlueprintExport bpEx;
+                    bpEx.name = bp.name;
+                    for (auto& n : bp.nodes) {
+                        GBAScriptNodeExport sn;
+                        sn.id = n.id;
+                        sn.type = (GBAScriptNodeType)(int)n.type;
+                        for (int pi = 0; pi < 4; pi++) sn.paramInt[pi] = n.paramInt[pi];
+                        memcpy(sn.customCode, n.customCode, sizeof(sn.customCode));
+                    memcpy(sn.funcName, n.funcName, sizeof(sn.funcName));
+                        // Mark parameter-exposed nodes with sentinel in paramInt[3]
+                        for (int pi = 0; pi < bp.paramCount; pi++)
+                            if (bp.params[pi].sourceNodeId == n.id)
+                                sn.paramInt[3] = -(pi + 1);
+                        bpEx.script.nodes.push_back(sn);
+                    }
+                    for (auto& l : bp.links) {
+                        GBAScriptLinkExport sl;
+                        sl.fromNodeId = l.from.nodeId; sl.fromPinType = l.from.pinType; sl.fromPinIdx = l.from.pinIdx;
+                        sl.toNodeId = l.to.nodeId; sl.toPinType = l.to.pinType; sl.toPinIdx = l.to.pinIdx;
+                        bpEx.script.links.push_back(sl);
+                    }
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        GBABlueprintParamExport pe;
+                        pe.dataType = bp.params[pi].dataType;
+                        pe.defaultValue = bp.params[pi].defaultInt;
+                        bpEx.params.push_back(pe);
+                    }
+                    exportBlueprints.push_back(std::move(bpEx));
+                }
+                // Collect instances from sprites
+                for (int si = 0; si < sSpriteCount; si++) {
+                    const FloorSprite& sp = sSprites[si];
+                    if (sp.blueprintIdx < 0 || sp.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
+                    const BlueprintAsset& bp = sBlueprintAssets[sp.blueprintIdx];
+                    GBABlueprintInstanceExport inst;
+                    inst.blueprintIdx = sp.blueprintIdx;
+                    inst.spriteIdx = si;
+                    inst.tmObjIdx = -1;
+                    inst.paramCount = bp.paramCount;
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        inst.paramValues[pi] = bp.params[pi].defaultInt;
+                        for (int oi = 0; oi < sp.instanceParamCount; oi++)
+                            if (sp.instanceParams[oi].paramIdx == pi)
+                                inst.paramValues[pi] = sp.instanceParams[oi].value;
+                    }
+                    exportBpInstances.push_back(inst);
+                }
+                // Skip TmObject blueprint instances — GBA runtime is 3D/Mode7 only;
+                // tilemap blueprints would double-execute Walk/Sprint nodes and cause
+                // the player to move too fast.
+                // Collect scene-level blueprint instances (MapScenes)
+                for (int si = 0; si < (int)sMapScenes.size(); si++) {
+                    const MapScene& ms = sMapScenes[si];
+                    if (ms.blueprintIdx < 0 || ms.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
+                    const BlueprintAsset& bp = sBlueprintAssets[ms.blueprintIdx];
+                    GBABlueprintInstanceExport inst;
+                    inst.blueprintIdx = ms.blueprintIdx;
+                    inst.spriteIdx = -1;
+                    inst.tmObjIdx = -1;
+                    inst.paramCount = bp.paramCount;
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        inst.paramValues[pi] = bp.params[pi].defaultInt;
+                        for (int oi = 0; oi < ms.instanceParamCount; oi++)
+                            if (ms.instanceParams[oi].paramIdx == pi)
+                                inst.paramValues[pi] = ms.instanceParams[oi].value;
+                    }
+                    exportBpInstances.push_back(inst);
+                }
+                // Skip TmScene blueprint instances — same reason as TmObjects above.
+
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                             exportMeshes, exportOrbitDist, exportScript, target]() {
+                             exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, target]() {
                     std::string err;
                     bool ok;
                     if (target == BuildTarget::NDS)
@@ -5699,7 +6887,7 @@ void FrameTick(float dt)
                                         exportMeshes, exportOrbitDist, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                                        exportMeshes, exportOrbitDist, exportScript, err);
+                                        exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, err);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
@@ -5727,6 +6915,8 @@ void FrameTick(float dt)
             sScriptStartRan = false;
             sScriptMoveSpeed = -1.0f;
             sScriptAutoOrbitSpeed = 0.0f;
+            sPendingSceneSwitch = -1;
+            sPendingSceneMode = 0;
             sActivePlayAnimNodeId = -1;
             sPlayAnimIdle = -1;
             sPlayAnimHeld = -1;
@@ -5734,6 +6924,11 @@ void FrameTick(float dt)
             sVsFiredNodes.clear();
             sVsLinkSurgeT.clear();
             sVsLinkSurgeRevT.clear();
+            // Restore tilemap objects
+            if (!sSavedTmObjects.empty()) {
+                sTmObjects = sSavedTmObjects;
+                sSavedTmObjects.clear();
+            }
             // sOnStartFrames reset handled by sScriptStartRan = false
         }
 
@@ -5937,6 +7132,8 @@ void FrameTick(float dt)
             // Interpret the visual script node graph to drive gameplay, matching
             // the C code generated for the GBA runtime.
 
+            if (sPlayTab != EditorTab::Tilemap)
+            {
             // Key mapping: Editor keyboard → GBA button indices
             // 0=A, 1=B, 2=L, 3=R, 4=Start, 5=Select, 6=Up, 7=Down, 8=Left, 9=Right
             auto editorKeyDown = [](int gbaKey) -> bool {
@@ -6014,6 +7211,15 @@ void FrameTick(float dt)
                     if (nid < 0 || nid >= (int)vis.size() || vis[nid]) continue;
                     vis[nid] = true; safety++;
                     auto* an = findNodePlay(nid); if (!an) continue;
+                    // IsMoving gate: only pass through if player is moving
+                    if (an->type == VsNodeType::IsMoving) {
+                        if (sPlayerMoving) {
+                            for (auto& lk : sVsLinks)
+                                if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                    front.push_back(lk.to.nodeId);
+                        }
+                        continue; // don't add IsMoving itself to acts
+                    }
                     acts.push_back(an);
                     for (auto& lk : sVsLinks)
                         if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
@@ -6065,6 +7271,12 @@ void FrameTick(float dt)
                     auto* sd = findDataInPlay(action->id, 0);
                     sScriptAutoOrbitSpeed = sd ? (float)resolveIntPlay(sd) : 205.0f;
                 }
+                else if (t == VsNodeType::ChangeScene) {
+                    auto* sd = findDataInPlay(action->id, 0);
+                    int scIdx = sd ? resolveIntPlay(sd) : action->paramInt[0];
+                    sPendingSceneSwitch = scIdx;
+                    sPendingSceneMode = action->paramInt[1];
+                }
                 // Jump, DampenJump, SetGravity, SetMaxFall — editor has no vertical physics
                 else if (t == VsNodeType::PlayAnim) {
                     if (execEventType == VsNodeType::OnStart)
@@ -6101,6 +7313,13 @@ void FrameTick(float dt)
                     sVsFiredNodes.push_back(ev.id);
                     for (auto* a : acts) {
                         sVsFiredNodes.push_back(a->id);
+                        // Directly surge exec links from event to actions
+                        for (int li = 0; li < (int)sVsLinks.size(); li++)
+                            if (sVsLinks[li].to.nodeId == a->id && sVsLinks[li].to.pinType == 1) {
+                                auto it = sVsLinkSurgeT.find(li);
+                                if (it == sVsLinkSurgeT.end() || it->second > 1.0f)
+                                    sVsLinkSurgeT[li] = 0.0f;
+                            }
                         // Data inputs to PlayAnim nodes get reverse surge
                         if (a->type == VsNodeType::PlayAnim) {
                             for (int li = 0; li < (int)sVsLinks.size(); li++)
@@ -6115,44 +7334,6 @@ void FrameTick(float dt)
                                     sVsFiredNodes.push_back(lk.from.nodeId);
                         }
                     }
-                }
-            }
-
-            // Continuously surge the active PlayAnim node and its entire chain
-            if (sActivePlayAnimNodeId >= 0) {
-                sVsFiredNodes.push_back(sActivePlayAnimNodeId);
-                // Mark data input links for REVERSE surge (PlayAnim → Animation)
-                for (int li = 0; li < (int)sVsLinks.size(); li++)
-                    if (sVsLinks[li].to.nodeId == sActivePlayAnimNodeId && sVsLinks[li].to.pinType == 3) {
-                        auto it = sVsLinkSurgeRevT.find(li);
-                        if (it == sVsLinkSurgeRevT.end() || it->second > 1.0f)
-                            sVsLinkSurgeRevT[li] = 0.0f;
-                    }
-                // Walk backwards through exec links to find the chain that triggered it
-                // Stop before event nodes (OnStart, OnKeyPressed, etc.) — they pulse on their own
-                int cur = sActivePlayAnimNodeId;
-                for (int safety = 0; safety < 20; safety++) {
-                    int prev = -1;
-                    for (auto& lk : sVsLinks) {
-                        if (lk.to.nodeId == cur && lk.to.pinType == 1) {
-                            prev = lk.from.nodeId;
-                            break;
-                        }
-                    }
-                    if (prev < 0) break;
-                    // Don't continuously surge event nodes — they fire once
-                    VsNodeType prevType = VsNodeType::Group;
-                    for (auto& n : sVsNodes)
-                        if (n.id == prev) { prevType = n.type; break; }
-                    if (prevType == VsNodeType::OnStart || prevType == VsNodeType::OnKeyPressed ||
-                        prevType == VsNodeType::OnKeyReleased)
-                        break;
-                    sVsFiredNodes.push_back(prev);
-                    // Also fire data nodes feeding into this predecessor
-                    for (auto& lk : sVsLinks)
-                        if (lk.to.nodeId == prev && lk.to.pinType == 3)
-                            sVsFiredNodes.push_back(lk.from.nodeId);
-                    cur = prev;
                 }
             }
 
@@ -6207,9 +7388,26 @@ void FrameTick(float dt)
                     shouldSurge = shouldFire;
                 }
                 else if (ev.type == VsNodeType::OnKeyReleased) {
-                    // Edge-triggered: only fire on the frame the key is actually released
-                    shouldFire = (key >= 0 && key < 10) && sPrevKeyState[key] && !editorKeyDown(key);
-                    shouldSurge = shouldFire;
+                    if (key >= 0 && key < 10) {
+                        // Single key: edge-triggered release
+                        shouldFire = sPrevKeyState[key] && !editorKeyDown(key);
+                        shouldSurge = shouldFire;
+                    } else {
+                        // Multiple keys connected — fire if ANY was just released
+                        for (auto& lk : sVsLinks) {
+                            if (lk.to.nodeId == ev.id && lk.to.pinType == 3) {
+                                auto* kn = findNodePlay(lk.from.nodeId);
+                                if (kn && kn->type == VsNodeType::Key) {
+                                    int k = kn->paramInt[0];
+                                    if (k >= 0 && k < 10 && sPrevKeyState[k] && !editorKeyDown(k)) {
+                                        shouldFire = true;
+                                        shouldSurge = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if (shouldFire) {
@@ -6275,6 +7473,335 @@ void FrameTick(float dt)
                 }
             }
 
+            // --- Collision detection ---
+            int collidedSprite = -1;
+            {
+                int pIdx = -1;
+                for (int i = 0; i < sSpriteCount; i++)
+                    if (sSprites[i].type == SpriteType::Player) { pIdx = i; break; }
+                if (pIdx >= 0) {
+                    float px = sSprites[pIdx].x, pz = sSprites[pIdx].z;
+                    float collisionRadius = 1.5f; // world units
+                    float cr2 = collisionRadius * collisionRadius;
+                    for (int ci = 0; ci < sSpriteCount; ci++) {
+                        if (ci == pIdx) continue;
+                        float dx = px - sSprites[ci].x;
+                        float dz = pz - sSprites[ci].z;
+                        if (dx * dx + dz * dz < cr2) {
+                            collidedSprite = ci;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // --- OnCollision scene script events ---
+            if (collidedSprite >= 0) {
+                for (auto& ev : sVsNodes) {
+                    if (ev.type != VsNodeType::OnCollision) continue;
+                    auto acts = collectActionsPlay(ev.id);
+                    execEventType = VsNodeType::OnCollision;
+                    for (auto* a : acts) execActionPlay(a);
+                    execEventType = VsNodeType::Group;
+                }
+            }
+
+            // --- Blueprint instance scripts ---
+            // For each sprite with a blueprint, run the blueprint's events using instance params
+            for (int si = 0; si < sSpriteCount; si++) {
+                const FloorSprite& sp = sSprites[si];
+                if (sp.blueprintIdx < 0 || sp.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
+                const BlueprintAsset& bp = sBlueprintAssets[sp.blueprintIdx];
+                if (bp.nodes.empty()) continue;
+
+                // Build a temporary copy of nodes with parameter overrides applied
+                std::vector<VsNode> bpNodes = bp.nodes;
+                for (int pi = 0; pi < bp.paramCount; pi++) {
+                    int overrideVal = bp.params[pi].defaultInt;
+                    for (int oi = 0; oi < sp.instanceParamCount; oi++)
+                        if (sp.instanceParams[oi].paramIdx == pi)
+                            overrideVal = sp.instanceParams[oi].value;
+                    // Apply override to the source data node
+                    for (auto& n : bpNodes)
+                        if (n.id == bp.params[pi].sourceNodeId)
+                            n.paramInt[bp.params[pi].sourceParamIdx] = overrideVal;
+                }
+
+                // Lambdas operating on blueprint nodes/links
+                auto bpFindNode = [&](int id) -> const VsNode* {
+                    for (auto& n : bpNodes) if (n.id == id) return &n;
+                    return nullptr;
+                };
+                auto bpFindDataIn = [&](int nodeId, int pinIdx) -> const VsNode* {
+                    for (auto& lk : bp.links)
+                        if (lk.to.nodeId == nodeId && lk.to.pinType == 3 && lk.to.pinIdx == pinIdx)
+                            return bpFindNode(lk.from.nodeId);
+                    return nullptr;
+                };
+                auto bpCollectActions = [&](int startNodeId) -> std::vector<const VsNode*> {
+                    std::vector<const VsNode*> acts;
+                    std::vector<int> front;
+                    std::vector<bool> vis(10000, false);
+                    for (auto& lk : bp.links)
+                        if (lk.from.nodeId == startNodeId && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                            front.push_back(lk.to.nodeId);
+                    int safety = 0;
+                    while (!front.empty() && safety < 256) {
+                        int nid = front.front(); front.erase(front.begin());
+                        if (nid < 0 || nid >= (int)vis.size() || vis[nid]) continue;
+                        vis[nid] = true; safety++;
+                        auto* an = bpFindNode(nid); if (!an) continue;
+                        acts.push_back(an);
+                        for (auto& lk : bp.links)
+                            if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                front.push_back(lk.to.nodeId);
+                    }
+                    return acts;
+                };
+                auto bpResolveEventKey = [&](const VsNode& ev) -> int {
+                    int count = 0; int keyVal = -1;
+                    for (auto& lk : bp.links)
+                        if (lk.to.nodeId == ev.id && lk.to.pinType == 3 && lk.to.pinIdx == 0) {
+                            auto* dn = bpFindNode(lk.from.nodeId);
+                            if (dn) { keyVal = dn->paramInt[0]; count++; }
+                        }
+                    if (count == 1) return keyVal;
+                    if (count == 0) return ev.paramInt[0];
+                    return -1;
+                };
+                auto bpExecAction = [&](const VsNode* action) {
+                    VsNodeType t = action->type;
+                    if (t == VsNodeType::MovePlayer) {
+                        auto* dd = bpFindDataIn(action->id, 0);
+                        int dir = dd ? dd->paramInt[0] : 0;
+                        int dirKeys[] = { 8, 9, 6, 7 };
+                        if (dir >= 0 && dir < 4 && editorKeyDown(dirKeys[dir])) {
+                            if (dir == 0) scInputRight -= 1.0f;
+                            if (dir == 1) scInputRight += 1.0f;
+                            if (dir == 2) scInputFwd   += 1.0f;
+                            if (dir == 3) scInputFwd   -= 1.0f;
+                        }
+                    }
+                    else if (t == VsNodeType::Walk) {
+                        auto* sd = bpFindDataIn(action->id, 0);
+                        sScriptMoveSpeed = sd ? (float)sd->paramInt[0] : sCamObj.walkSpeed;
+                    }
+                    else if (t == VsNodeType::Sprint) {
+                        auto* sd = bpFindDataIn(action->id, 0);
+                        sScriptMoveSpeed = sd ? (float)sd->paramInt[0] : sCamObj.sprintSpeed;
+                    }
+                    else if (t == VsNodeType::OrbitCamera) {
+                        auto* dd = bpFindDataIn(action->id, 0);
+                        auto* sd = bpFindDataIn(action->id, 1);
+                        int dir = dd ? dd->paramInt[0] : 1;
+                        int speed = sd ? sd->paramInt[0] : 512;
+                        int key = (dir == 0) ? 2 : 3;
+                        if (editorKeyDown(key)) {
+                            float radPerFrame = (float)speed / 65536.0f * 6.28318f;
+                            scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;
+                        }
+                    }
+                    else if (t == VsNodeType::AutoOrbit) {
+                        auto* sd = bpFindDataIn(action->id, 0);
+                        sScriptAutoOrbitSpeed = sd ? (float)sd->paramInt[0] : 205.0f;
+                    }
+                    else if (t == VsNodeType::ChangeScene) {
+                        auto* sd = bpFindDataIn(action->id, 0);
+                        int scIdx = sd ? sd->paramInt[0] : action->paramInt[0];
+                        sPendingSceneSwitch = scIdx;
+                        sPendingSceneMode = action->paramInt[1];
+                    }
+                };
+
+                // Run blueprint events
+                for (auto& ev : bpNodes) {
+                    if (ev.type == VsNodeType::OnStart && !sScriptStartRan) {
+                        // OnStart already ran above
+                    }
+                    if (ev.type == VsNodeType::OnUpdate) {
+                        auto acts = bpCollectActions(ev.id);
+                        for (auto* a : acts) bpExecAction(a);
+                    }
+                    if (ev.type == VsNodeType::OnKeyHeld) {
+                        int key = bpResolveEventKey(ev);
+                        bool fire = (key >= 0) ? editorKeyDown(key) : true;
+                        if (fire) {
+                            auto acts = bpCollectActions(ev.id);
+                            for (auto* a : acts) bpExecAction(a);
+                        }
+                    }
+                    if (ev.type == VsNodeType::OnKeyPressed) {
+                        int key = bpResolveEventKey(ev);
+                        if (key >= 0 && editorKeyHit(key)) {
+                            auto acts = bpCollectActions(ev.id);
+                            for (auto* a : acts) bpExecAction(a);
+                        }
+                    }
+                    if (ev.type == VsNodeType::OnKeyReleased) {
+                        int key = bpResolveEventKey(ev);
+                        if (key >= 0 && key < 10 && sPrevKeyState[key] && !editorKeyDown(key)) {
+                            auto acts = bpCollectActions(ev.id);
+                            for (auto* a : acts) bpExecAction(a);
+                        }
+                    }
+                    if (ev.type == VsNodeType::OnCollision && collidedSprite >= 0) {
+                        auto acts = bpCollectActions(ev.id);
+                        for (auto* a : acts) bpExecAction(a);
+                    }
+                }
+            }
+
+            // --- Scene-level blueprint ---
+            if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size()) {
+                const MapScene& ms = sMapScenes[sMapSelectedScene];
+                if (ms.blueprintIdx >= 0 && ms.blueprintIdx < (int)sBlueprintAssets.size()) {
+                    const BlueprintAsset& bp = sBlueprintAssets[ms.blueprintIdx];
+                    if (!bp.nodes.empty()) {
+                        std::vector<VsNode> bpNodes = bp.nodes;
+                        for (int pi = 0; pi < bp.paramCount; pi++) {
+                            int overrideVal = bp.params[pi].defaultInt;
+                            for (int oi = 0; oi < ms.instanceParamCount; oi++)
+                                if (ms.instanceParams[oi].paramIdx == pi)
+                                    overrideVal = ms.instanceParams[oi].value;
+                            for (auto& n : bpNodes)
+                                if (n.id == bp.params[pi].sourceNodeId)
+                                    n.paramInt[bp.params[pi].sourceParamIdx] = overrideVal;
+                        }
+                        auto bpFindNode = [&](int id) -> const VsNode* {
+                            for (auto& n : bpNodes) if (n.id == id) return &n;
+                            return nullptr;
+                        };
+                        auto bpFindDataIn = [&](int nodeId, int pinIdx) -> const VsNode* {
+                            for (auto& lk : bp.links)
+                                if (lk.to.nodeId == nodeId && lk.to.pinType == 3 && lk.to.pinIdx == pinIdx)
+                                    return bpFindNode(lk.from.nodeId);
+                            return nullptr;
+                        };
+                        auto bpCollectActions = [&](int startNodeId) -> std::vector<const VsNode*> {
+                            std::vector<const VsNode*> acts;
+                            std::vector<int> front;
+                            std::vector<bool> vis(10000, false);
+                            for (auto& lk : bp.links)
+                                if (lk.from.nodeId == startNodeId && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                    front.push_back(lk.to.nodeId);
+                            int safety = 0;
+                            while (!front.empty() && safety < 256) {
+                                int nid = front.front(); front.erase(front.begin());
+                                if (nid < 0 || nid >= (int)vis.size() || vis[nid]) continue;
+                                vis[nid] = true; safety++;
+                                auto* an = bpFindNode(nid); if (!an) continue;
+                                acts.push_back(an);
+                                for (auto& lk : bp.links)
+                                    if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                        front.push_back(lk.to.nodeId);
+                            }
+                            return acts;
+                        };
+                        auto bpResolveEventKey = [&](const VsNode& ev) -> int {
+                            int count = 0; int keyVal = -1;
+                            for (auto& lk : bp.links)
+                                if (lk.to.nodeId == ev.id && lk.to.pinType == 3 && lk.to.pinIdx == 0) {
+                                    auto* dn = bpFindNode(lk.from.nodeId);
+                                    if (dn) { keyVal = dn->paramInt[0]; count++; }
+                                }
+                            if (count == 1) return keyVal;
+                            if (count == 0) return ev.paramInt[0];
+                            return -1;
+                        };
+                        auto bpExecAction = [&](const VsNode* action) {
+                            VsNodeType t = action->type;
+                            if (t == VsNodeType::MovePlayer) {
+                                auto* dd = bpFindDataIn(action->id, 0);
+                                int dir = dd ? dd->paramInt[0] : 0;
+                                int dirKeys[] = { 8, 9, 6, 7 };
+                                if (dir >= 0 && dir < 4 && editorKeyDown(dirKeys[dir])) {
+                                    if (dir == 0) scInputRight -= 1.0f;
+                                    if (dir == 1) scInputRight += 1.0f;
+                                    if (dir == 2) scInputFwd   += 1.0f;
+                                    if (dir == 3) scInputFwd   -= 1.0f;
+                                }
+                            }
+                            else if (t == VsNodeType::Walk) {
+                                auto* sd = bpFindDataIn(action->id, 0);
+                                sScriptMoveSpeed = sd ? (float)sd->paramInt[0] : sCamObj.walkSpeed;
+                            }
+                            else if (t == VsNodeType::Sprint) {
+                                auto* sd = bpFindDataIn(action->id, 0);
+                                sScriptMoveSpeed = sd ? (float)sd->paramInt[0] : sCamObj.sprintSpeed;
+                            }
+                            else if (t == VsNodeType::OrbitCamera) {
+                                auto* dd = bpFindDataIn(action->id, 0);
+                                auto* sd = bpFindDataIn(action->id, 1);
+                                int dir = dd ? dd->paramInt[0] : 1;
+                                int speed = sd ? sd->paramInt[0] : 512;
+                                int key = (dir == 0) ? 2 : 3;
+                                if (editorKeyDown(key)) {
+                                    float radPerFrame = (float)speed / 65536.0f * 6.28318f;
+                                    scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;
+                                }
+                            }
+                            else if (t == VsNodeType::AutoOrbit) {
+                                auto* sd = bpFindDataIn(action->id, 0);
+                                sScriptAutoOrbitSpeed = sd ? (float)sd->paramInt[0] : 205.0f;
+                            }
+                            else if (t == VsNodeType::ChangeScene) {
+                                auto* sd = bpFindDataIn(action->id, 0);
+                                int scIdx = sd ? sd->paramInt[0] : action->paramInt[0];
+                                sPendingSceneSwitch = scIdx;
+                                sPendingSceneMode = action->paramInt[1];
+                            }
+                        };
+                        for (auto& ev : bpNodes) {
+                            if (ev.type == VsNodeType::OnUpdate) {
+                                auto acts = bpCollectActions(ev.id);
+                                for (auto* a : acts) bpExecAction(a);
+                            }
+                            if (ev.type == VsNodeType::OnKeyHeld) {
+                                int key = bpResolveEventKey(ev);
+                                bool fire = (key >= 0) ? editorKeyDown(key) : true;
+                                if (fire) { auto acts = bpCollectActions(ev.id); for (auto* a : acts) bpExecAction(a); }
+                            }
+                            if (ev.type == VsNodeType::OnKeyPressed) {
+                                int key = bpResolveEventKey(ev);
+                                if (key >= 0 && editorKeyHit(key)) { auto acts = bpCollectActions(ev.id); for (auto* a : acts) bpExecAction(a); }
+                            }
+                            if (ev.type == VsNodeType::OnKeyReleased) {
+                                int key = bpResolveEventKey(ev);
+                                if (key >= 0 && key < 10 && sPrevKeyState[key] && !editorKeyDown(key)) { auto acts = bpCollectActions(ev.id); for (auto* a : acts) bpExecAction(a); }
+                            }
+                            if (ev.type == VsNodeType::OnCollision && collidedSprite >= 0) {
+                                auto acts = bpCollectActions(ev.id);
+                                for (auto* a : acts) bpExecAction(a);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Handle pending scene switch
+            if (sPendingSceneSwitch >= 0) {
+                if (sPendingSceneMode == 0 && sPendingSceneSwitch < (int)sMapScenes.size()) {
+                    // Switch to a 3D/MapScene
+                    if (sPendingSceneSwitch != sMapSelectedScene || sActiveTab == EditorTab::Tilemap) {
+                        SaveMapSceneState(sMapScenes[sMapSelectedScene]);
+                        sMapSelectedScene = sPendingSceneSwitch;
+                        LoadMapSceneState(sMapScenes[sMapSelectedScene]);
+                        sActiveTab = EditorTab::Mode7;
+                        sScriptStartRan = false;
+                    }
+                } else if (sPendingSceneMode == 1 && sPendingSceneSwitch < (int)sTmScenes.size()) {
+                    // Switch to a Tilemap/TmScene
+                    if (sPendingSceneSwitch != sTmSelectedScene || sActiveTab != EditorTab::Tilemap) {
+                        SaveSceneState(sTmScenes[sTmSelectedScene]);
+                        sTmSelectedScene = sPendingSceneSwitch;
+                        LoadSceneState(sTmScenes[sTmSelectedScene]);
+                        sActiveTab = EditorTab::Tilemap;
+                        sScriptStartRan = false;
+                    }
+                }
+                sPendingSceneSwitch = -1;
+            }
+
             // Update previous key state
             for (int ki = 0; ki < 10; ki++) sPrevKeyState[ki] = editorKeyDown(ki);
 
@@ -6301,12 +7828,24 @@ void FrameTick(float dt)
                 sPlayerSprinting = sPlayerMoving && editorKeyDown(1);
 
                 // Pick active PlayAnim based on movement state
-                if (sPlayerSprinting && sPlayAnimHeld >= 0)
+                if (sPlayerMoving && sPlayAnimHeld >= 0)
                     sActivePlayAnimNodeId = sPlayAnimHeld;
-                else if (sPlayerMoving && sPlayAnimReleased >= 0)
+                else if (sPlayAnimReleased >= 0)
                     sActivePlayAnimNodeId = sPlayAnimReleased;
                 else if (sPlayAnimIdle >= 0)
                     sActivePlayAnimNodeId = sPlayAnimIdle;
+
+                // Continuously surge the active PlayAnim node and its data chain
+                if (sActivePlayAnimNodeId >= 0) {
+                    sVsFiredNodes.push_back(sActivePlayAnimNodeId);
+                    // Continuously reverse-surge data inputs (PlayAnim → Animation)
+                    for (int li = 0; li < (int)sVsLinks.size(); li++)
+                        if (sVsLinks[li].to.nodeId == sActivePlayAnimNodeId && sVsLinks[li].to.pinType == 3) {
+                            auto it = sVsLinkSurgeRevT.find(li);
+                            if (it == sVsLinkSurgeRevT.end() || it->second > 1.0f)
+                                sVsLinkSurgeRevT[li] = 0.0f;
+                        }
+                }
 
                 // Manual orbit from OrbitCamera nodes
                 {
@@ -6398,6 +7937,299 @@ void FrameTick(float dt)
                 sCamera.horizon = std::min(120.0f, sCamera.horizon + 40.0f * dt);
             if (ImGui::IsKeyDown(ImGuiKey_K))
                 sCamera.horizon = std::max(10.0f, sCamera.horizon - 40.0f * dt);
+            } // end Mode7/3D play mode
+
+            // ---- TILEMAP PLAY MODE: blueprint execution for TmObjects ----
+            if (sPlayTab == EditorTab::Tilemap)
+            {
+                // Key mapping (reuse same GBA key indices)
+                auto tmKeyDown = [](int gbaKey) -> bool {
+                    switch (gbaKey) {
+                    case 0: return ImGui::IsKeyDown(ImGuiKey_Space);
+                    case 1: return ImGui::IsKeyDown(ImGuiKey_LeftShift);
+                    case 2: return ImGui::IsKeyDown(ImGuiKey_J);
+                    case 3: return ImGui::IsKeyDown(ImGuiKey_L);
+                    case 4: return ImGui::IsKeyDown(ImGuiKey_Enter);
+                    case 5: return ImGui::IsKeyDown(ImGuiKey_Backspace);
+                    case 6: return ImGui::IsKeyDown(ImGuiKey_W);
+                    case 7: return ImGui::IsKeyDown(ImGuiKey_S);
+                    case 8: return ImGui::IsKeyDown(ImGuiKey_A);
+                    case 9: return ImGui::IsKeyDown(ImGuiKey_D);
+                    default: return false;
+                    }
+                };
+
+                // Get current tilemap dimensions for clamping
+                int tmMapW = 1, tmMapH = 1;
+                if (sTmSelectedScene >= 0 && sTmSelectedScene < (int)sTmScenes.size()) {
+                    tmMapW = sTmScenes[sTmSelectedScene].mapW;
+                    tmMapH = sTmScenes[sTmSelectedScene].mapH;
+                }
+
+                // Track most-recently-pressed direction to prevent diagonal movement
+                // dir mapping: 0=Left(A), 1=Right(D), 2=Up(W), 3=Down(S)
+                bool curHeld[4] = {
+                    ImGui::IsKeyDown(ImGuiKey_A), ImGui::IsKeyDown(ImGuiKey_D),
+                    ImGui::IsKeyDown(ImGuiKey_W), ImGui::IsKeyDown(ImGuiKey_S)
+                };
+                // Newly pressed direction takes priority
+                for (int d = 0; d < 4; d++)
+                    if (curHeld[d] && !sTmPrevDirHeld[d])
+                        sTmLastMoveDir = d;
+                // If current priority dir released, fall back to any still-held dir
+                if (sTmLastMoveDir >= 0 && !curHeld[sTmLastMoveDir]) {
+                    sTmLastMoveDir = -1;
+                    for (int d = 0; d < 4; d++)
+                        if (curHeld[d]) { sTmLastMoveDir = d; break; }
+                }
+                for (int d = 0; d < 4; d++) sTmPrevDirHeld[d] = curHeld[d];
+
+                // Per-object flag: prevent any MovePlayer from firing twice in one frame
+                std::vector<bool> tmObjMovedThisFrame(sTmObjects.size(), false);
+
+                for (int oi = 0; oi < (int)sTmObjects.size(); oi++)
+                {
+                    TmObject& obj = sTmObjects[oi];
+                    if (obj.blueprintIdx < 0 || obj.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
+                    const BlueprintAsset& bp = sBlueprintAssets[obj.blueprintIdx];
+                    if (bp.nodes.empty()) continue;
+
+                    // Reset to default each frame; Walk/Sprint node overrides it
+                    if (oi >= (int)sTmObjMoveRate.size()) sTmObjMoveRate.resize(oi + 1, 6.0f);
+                    sTmObjMoveRate[oi] = 6.0f;
+                    float& tmMoveRate = sTmObjMoveRate[oi];
+
+                    // Build temporary copy with param overrides
+                    std::vector<VsNode> bpNodes = bp.nodes;
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        int overrideVal = bp.params[pi].defaultInt;
+                        for (int oi2 = 0; oi2 < obj.instanceParamCount; oi2++)
+                            if (obj.instanceParams[oi2].paramIdx == pi)
+                                overrideVal = obj.instanceParams[oi2].value;
+                        for (auto& n : bpNodes)
+                            if (n.id == bp.params[pi].sourceNodeId)
+                                n.paramInt[bp.params[pi].sourceParamIdx] = overrideVal;
+                    }
+
+                    auto tmFindNode = [&](int id) -> const VsNode* {
+                        for (auto& n : bpNodes) if (n.id == id) return &n;
+                        return nullptr;
+                    };
+                    auto tmFindDataIn = [&](int nodeId, int pinIdx) -> const VsNode* {
+                        for (auto& lk : bp.links)
+                            if (lk.to.nodeId == nodeId && lk.to.pinType == 3 && lk.to.pinIdx == pinIdx)
+                                return tmFindNode(lk.from.nodeId);
+                        return nullptr;
+                    };
+                    auto tmCollectActions = [&](int startNodeId) -> std::vector<const VsNode*> {
+                        std::vector<const VsNode*> acts;
+                        std::vector<int> front;
+                        std::vector<bool> vis(10000, false);
+                        for (auto& lk : bp.links)
+                            if (lk.from.nodeId == startNodeId && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                front.push_back(lk.to.nodeId);
+                        int safety = 0;
+                        while (!front.empty() && safety < 256) {
+                            int nid = front.front(); front.erase(front.begin());
+                            if (nid < 0 || nid >= (int)vis.size() || vis[nid]) continue;
+                            vis[nid] = true; safety++;
+                            auto* an = tmFindNode(nid); if (!an) continue;
+                            acts.push_back(an);
+                            for (auto& lk : bp.links)
+                                if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                    front.push_back(lk.to.nodeId);
+                        }
+                        return acts;
+                    };
+                    auto tmResolveEventKey = [&](const VsNode& ev) -> int {
+                        int count = 0; int keyVal = -1;
+                        for (auto& lk : bp.links)
+                            if (lk.to.nodeId == ev.id && lk.to.pinType == 3 && lk.to.pinIdx == 0) {
+                                auto* dn = tmFindNode(lk.from.nodeId);
+                                if (dn) { keyVal = dn->paramInt[0]; count++; }
+                            }
+                        if (count == 1) return keyVal;
+                        if (count == 0) return ev.paramInt[0];
+                        return -1;
+                    };
+                    bool tmInstantMove = false; // set true for OnKeyPressed events
+                    auto tmExecAction = [&](const VsNode* action) {
+                        VsNodeType t = action->type;
+                        if (t == VsNodeType::MovePlayer) {
+                            if (tmObjMovedThisFrame[oi]) return;
+                            auto* dd = tmFindDataIn(action->id, 0);
+                            int dir = dd ? dd->paramInt[0] : 0;
+                            // dir: 0=Left, 1=Right, 2=Up, 3=Down
+                            // facing: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW
+                            int dirKeys[] = { 8, 9, 6, 7 }; // A, D, W, S
+                            int dirToFacing[] = { 6, 2, 0, 4 }; // Left=W, Right=E, Up=N, Down=S
+                            if (dir >= 0 && dir < 4) {
+                                if (tmInstantMove) {
+                                    // OnKeyPressed: immediate single-tile move, no repeat
+                                    ImGuiKey dirImKeys[] = { ImGuiKey_A, ImGuiKey_D, ImGuiKey_W, ImGuiKey_S };
+                                    if (ImGui::IsKeyPressed(dirImKeys[dir], false)) {
+                                        if (oi < (int)sTmObjFacing.size())
+                                            sTmObjFacing[oi] = dirToFacing[dir];
+                                        if (dir == 0) obj.tileX -= 1;
+                                        else if (dir == 1) obj.tileX += 1;
+                                        else if (dir == 2) obj.tileY -= 1;
+                                        else if (dir == 3) obj.tileY += 1;
+                                        if (oi < (int)sTmObjStepCount.size())
+                                            sTmObjStepCount[oi]++;
+                                        tmObjMovedThisFrame[oi] = true;
+                                    }
+                                } else if (tmKeyDown(dirKeys[dir]) && sTmLastMoveDir == dir) {
+                                    if (oi < (int)sTmObjFacing.size())
+                                        sTmObjFacing[oi] = dirToFacing[dir];
+                                    ImGuiKey dirImKeys[] = { ImGuiKey_A, ImGuiKey_D, ImGuiKey_W, ImGuiKey_S };
+                                    if (ImGui::IsKeyPressed(dirImKeys[dir], false)) {
+                                        // First frame: just face, pre-fill accumulator (lower = longer before move)
+                                        sTmMoveAccum[dir] = 0.45f;
+                                    } else {
+                                        // Held: accumulator movement
+                                        sTmMoveAccum[dir] += tmMoveRate * dt;
+                                        if (sTmMoveAccum[dir] >= 1.0f) {
+                                            int steps = (int)sTmMoveAccum[dir];
+                                            sTmMoveAccum[dir] -= steps;
+                                            if (dir == 0) obj.tileX -= steps;
+                                            else if (dir == 1) obj.tileX += steps;
+                                            else if (dir == 2) obj.tileY -= steps;
+                                            else if (dir == 3) obj.tileY += steps;
+                                            if (oi < (int)sTmObjStepCount.size())
+                                                sTmObjStepCount[oi] += steps;
+                                            tmObjMovedThisFrame[oi] = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        else if (t == VsNodeType::Walk) {
+                            auto* sd = tmFindDataIn(action->id, 0);
+                            tmMoveRate = sd ? (float)sd->paramInt[0] : 6.0f;
+                        }
+                        else if (t == VsNodeType::Sprint) {
+                            auto* sd = tmFindDataIn(action->id, 0);
+                            tmMoveRate = sd ? (float)sd->paramInt[0] : 12.0f;
+                        }
+                        else if (t == VsNodeType::ChangeScene) {
+                            auto* sd = tmFindDataIn(action->id, 0);
+                            int scIdx = sd ? sd->paramInt[0] : action->paramInt[0];
+                            sPendingSceneSwitch = scIdx;
+                            sPendingSceneMode = action->paramInt[1];
+                        }
+                        else if (t == VsNodeType::PlayAnim) {
+                            auto* sd = tmFindDataIn(action->id, 0);
+                            int assetIdx = sd ? sd->paramInt[0] : -1;
+                            int animIdx = sd ? sd->paramInt[1] : 0;
+                            // Check animation gameState vs movement
+                            bool apply = true;
+                            if (assetIdx >= 0 && assetIdx < (int)sSpriteAssets.size() &&
+                                animIdx >= 0 && animIdx < (int)sSpriteAssets[assetIdx].anims.size()) {
+                                AnimState gs = sSpriteAssets[assetIdx].anims[animIdx].gameState;
+                                bool moving = ImGui::IsKeyDown(ImGuiKey_W) || ImGui::IsKeyDown(ImGuiKey_A) ||
+                                              ImGui::IsKeyDown(ImGuiKey_S) || ImGui::IsKeyDown(ImGuiKey_D);
+                                if (gs == AnimState::Idle && moving) apply = false;
+                                if ((gs == AnimState::Walk || gs == AnimState::Run) && !moving) apply = false;
+                            }
+                            if (apply && oi >= 0 && oi < (int)sTmObjAnimSet.size())
+                                sTmObjAnimSet[oi] = animIdx;
+                        }
+                    };
+
+                    // Run blueprint events — OnStart once, then OnUpdate each frame
+                    if (!sTmOnStartRan) {
+                        for (auto& ev : bpNodes)
+                            if (ev.type == VsNodeType::OnStart) {
+                                auto acts = tmCollectActions(ev.id);
+                                for (auto* a : acts) tmExecAction(a);
+                            }
+                    }
+                    for (auto& ev : bpNodes)
+                        if (ev.type == VsNodeType::OnUpdate) {
+                            auto acts = tmCollectActions(ev.id);
+                            for (auto* a : acts) tmExecAction(a);
+                        }
+                    for (auto& ev : bpNodes) {
+                        if (ev.type == VsNodeType::OnKeyHeld) {
+                            int key = tmResolveEventKey(ev);
+                            bool fire = (key >= 0) ? tmKeyDown(key) : true;
+                            if (fire) {
+                                auto acts = tmCollectActions(ev.id);
+                                for (auto* a : acts) tmExecAction(a);
+                            }
+                        }
+                        if (ev.type == VsNodeType::OnKeyPressed) {
+                            int key = tmResolveEventKey(ev);
+                            auto tmKeyHit = [](int gbaKey) -> bool {
+                                switch (gbaKey) {
+                                case 0: return ImGui::IsKeyPressed(ImGuiKey_Space, false);
+                                case 1: return ImGui::IsKeyPressed(ImGuiKey_LeftShift, false);
+                                case 2: return ImGui::IsKeyPressed(ImGuiKey_J, false);
+                                case 3: return ImGui::IsKeyPressed(ImGuiKey_L, false);
+                                case 4: return ImGui::IsKeyPressed(ImGuiKey_Enter, false);
+                                case 5: return ImGui::IsKeyPressed(ImGuiKey_Backspace, false);
+                                case 6: return ImGui::IsKeyPressed(ImGuiKey_W, false);
+                                case 7: return ImGui::IsKeyPressed(ImGuiKey_S, false);
+                                case 8: return ImGui::IsKeyPressed(ImGuiKey_A, false);
+                                case 9: return ImGui::IsKeyPressed(ImGuiKey_D, false);
+                                default: return false;
+                                }
+                            };
+                            // key < 0 means multiple keys connected — fire if ANY key was just pressed
+                            bool fire = false;
+                            if (key >= 0) { fire = tmKeyHit(key); }
+                            else { for (int k = 0; k < 10; k++) if (tmKeyHit(k)) { fire = true; break; } }
+                            if (fire) {
+                                tmInstantMove = true;
+                                auto acts = tmCollectActions(ev.id);
+                                for (auto* a : acts) tmExecAction(a);
+                                tmInstantMove = false;
+                            }
+                        }
+                        if (ev.type == VsNodeType::OnKeyReleased) {
+                            int key = tmResolveEventKey(ev);
+                            if (key >= 0 && key < 10 && sTmPrevKeyState[key] && !tmKeyDown(key)) {
+                                auto acts = tmCollectActions(ev.id);
+                                for (auto* a : acts) tmExecAction(a);
+                            }
+                        }
+                    }
+
+                    // Clamp object to tilemap bounds
+                    obj.tileX = std::clamp(obj.tileX, 0, tmMapW - 1);
+                    obj.tileY = std::clamp(obj.tileY, 0, tmMapH - 1);
+                }
+
+                sTmOnStartRan = true;
+
+                // Smooth visual position lerp toward logical tile position
+                bool anyDirHeld = ImGui::IsKeyDown(ImGuiKey_W) || ImGui::IsKeyDown(ImGuiKey_A) ||
+                                  ImGui::IsKeyDown(ImGuiKey_S) || ImGui::IsKeyDown(ImGuiKey_D);
+                for (int i = 0; i < (int)sTmObjects.size(); i++) {
+                    if (i >= (int)sTmObjVisX.size()) break;
+                    float tx = (float)sTmObjects[i].tileX;
+                    float ty = (float)sTmObjects[i].tileY;
+                    float speed = 10.0f;
+                    if (i < (int)sTmObjMoveRate.size() && sTmObjMoveRate[i] > 0.0f)
+                        speed = sTmObjMoveRate[i];
+                    float maxStep = speed * dt;
+                    float dx = tx - sTmObjVisX[i];
+                    float dy = ty - sTmObjVisY[i];
+                    if (dx > maxStep) dx = maxStep; else if (dx < -maxStep) dx = -maxStep;
+                    if (dy > maxStep) dy = maxStep; else if (dy < -maxStep) dy = -maxStep;
+                    sTmObjVisX[i] += dx;
+                    sTmObjVisY[i] += dy;
+                }
+
+                // Reset accumulators for directions not held
+                if (!ImGui::IsKeyDown(ImGuiKey_A)) sTmMoveAccum[0] = 0.0f;
+                if (!ImGui::IsKeyDown(ImGuiKey_D)) sTmMoveAccum[1] = 0.0f;
+                if (!ImGui::IsKeyDown(ImGuiKey_W)) sTmMoveAccum[2] = 0.0f;
+                if (!ImGui::IsKeyDown(ImGuiKey_S)) sTmMoveAccum[3] = 0.0f;
+
+                // Update previous key state for OnKeyReleased
+                for (int ki = 0; ki < 10; ki++) sTmPrevKeyState[ki] = tmKeyDown(ki);
+            }
         }
 
         // Clamp camera to world bounds
@@ -6487,7 +8319,8 @@ void FrameTick(float dt)
                   nullptr, spriteAngle,
                   assetDirImgs.empty() ? nullptr : assetDirImgs.data(), (int)assetDirImgs.size(),
                   spriteDirImgs.empty() ? nullptr : spriteDirImgs.data(), (int)spriteDirImgs.size(),
-                  sMeshAssets.empty() ? nullptr : sMeshAssets.data(), (int)sMeshAssets.size(),
+                  (useMode7Floor || sMeshAssets.empty()) ? nullptr : sMeshAssets.data(),
+                  useMode7Floor ? 0 : (int)sMeshAssets.size(),
                   useMode7Floor);
 
     // Draw axis guide line when transforming a selected sprite
@@ -6576,15 +8409,63 @@ void FrameTick(float dt)
         ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar;
 
+        // ---- Expose as Parameter helpers ----
+        auto isDataNodeType = [](VsNodeType t) {
+            return t == VsNodeType::Integer || t == VsNodeType::Float ||
+                   t == VsNodeType::Key || t == VsNodeType::Direction || t == VsNodeType::Animation;
+        };
+        auto dataTypeFromNode = [](VsNodeType t) -> int {
+            switch (t) {
+                case VsNodeType::Integer:   return 0;
+                case VsNodeType::Float:     return 1;
+                case VsNodeType::Key:       return 2;
+                case VsNodeType::Direction: return 3;
+                case VsNodeType::Animation: return 4;
+                default: return 0;
+            }
+        };
+
         // ---- NODE GRAPH CANVAS ----
+        float browserH = Scaled(120);
+        float canvasH = bodyH - browserH;
         ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
-        ImGui::SetNextWindowSize(ImVec2(totalW, bodyH));
+        ImGui::SetNextWindowSize(ImVec2(totalW, canvasH));
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.13f, 0.13f, 0.15f, 1.0f));
         ImGui::Begin("##NodeCanvas", nullptr, flags);
 
+        // Edit source indicator (small label at top-left of canvas)
+        {
+            ImDrawList* barDl = ImGui::GetWindowDrawList();
+            if (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0 && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
+                char lbl[64]; snprintf(lbl, sizeof(lbl), " Blueprint: %s ", sBlueprintAssets[sVsEditBlueprintIdx].name);
+                ImVec2 tsz = ImGui::CalcTextSize(lbl);
+                ImVec2 p0(vp->WorkPos.x + 4, bodyY + 4);
+                ImVec2 p1(p0.x + tsz.x + 8, p0.y + tsz.y + 6);
+                barDl->AddRectFilled(p0, p1, 0xCC1A3A5A, 4.0f);
+                barDl->AddText(ImVec2(p0.x + 4, p0.y + 3), 0xFF66CCFF, lbl);
+                // Back button
+                ImGui::SetCursorScreenPos(ImVec2(p1.x + 4, p0.y));
+                if (ImGui::SmallButton("Back##bpback")) {
+                    BlueprintAsset& bp = sBlueprintAssets[sVsEditBlueprintIdx];
+                    bp.nodes = sVsNodes; bp.links = sVsLinks; bp.annotations = sVsAnnotations;
+                    bp.groupPins = sVsGroupPins; bp.nextId = sVsNextId;
+                    bp.panX = sVsPanX; bp.panY = sVsPanY; bp.zoom = sVsZoom;
+                    if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+                        LoadMapSceneState(sMapScenes[sMapSelectedScene]);
+                    sVsEditSource = VsEditSource::Scene;
+                    sVsEditBlueprintIdx = -1;
+                    sVsSelected = -1;
+                    sVsUndoStack.clear();
+                }
+            } else {
+                ImVec2 p0(vp->WorkPos.x + 4, bodyY + 4);
+                barDl->AddText(ImVec2(p0.x + 4, p0.y + 3), 0xFF99CC99, "Scene Script");
+            }
+        }
+
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 canvasOrig = ImGui::GetCursorScreenPos();
-        ImVec2 canvasSize = ImVec2(totalW, bodyH - 8);
+        ImVec2 canvasSize = ImVec2(totalW, canvasH - 8);
         float zoom = sVsZoom;
 
         // Clip to canvas
@@ -6775,11 +8656,23 @@ void FrameTick(float dt)
             // Border
             dl->AddRect(nMin, nMax, isSel ? 0xFFFFAA44 : 0xFF555566, 6.0f * zoom, 0, isSel ? 2.0f : 1.0f);
             // Title
-            const char* title = (n.type == VsNodeType::Group && n.groupLabel[0]) ? n.groupLabel : def.name;
+            const char* title = ((n.type == VsNodeType::Group || n.type == VsNodeType::CustomCode) && n.groupLabel[0]) ? n.groupLabel : def.name;
             dl->AddText(ImVec2(nx + 6 * zoom, ny + 2 * zoom), 0xFFFFFFFF, title);
             // Custom code indicator
             if (n.customCode[0])
                 dl->AddText(ImVec2(nMax.x - 22 * zoom, ny + 2 * zoom), 0xAAFFCC66, "<>");
+            // Blueprint parameter badge "P"
+            if (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0
+                && sVsEditBlueprintIdx < (int)sBlueprintAssets.size() && isDataNodeType(n.type)) {
+                const BlueprintAsset& bp = sBlueprintAssets[sVsEditBlueprintIdx];
+                for (int pi = 0; pi < bp.paramCount; pi++) {
+                    if (bp.params[pi].sourceNodeId == n.id) {
+                        float badgeX = n.customCode[0] ? (nMax.x - 40 * zoom) : (nMax.x - 22 * zoom);
+                        dl->AddText(ImVec2(badgeX, ny + 2 * zoom), 0xAA44CCFF, "P");
+                        break;
+                    }
+                }
+            }
 
             // Subtitle — show key/param value on the header
             {
@@ -6810,6 +8703,25 @@ void FrameTick(float dt)
                     if (si >= 0 && si < (int)sSpriteAssets.size() &&
                         ai >= 0 && ai < (int)sSpriteAssets[si].anims.size())
                         sub = sSpriteAssets[si].anims[ai].name.c_str();
+                    break;
+                }
+                case VsNodeType::ChangeScene: {
+                    sub = (n.paramInt[1] == 1) ? "Mode 0" : "Mode 4";
+                    break;
+                }
+                case VsNodeType::Object: {
+                    int oi = n.paramInt[0];
+                    int kind = n.paramInt[1];
+                    if (kind == 0 && oi >= 0 && oi < (int)sSpriteAssets.size())
+                        sub = sSpriteAssets[oi].name.c_str();
+                    else if (kind == 1 && oi >= 0 && oi < (int)sMeshAssets.size())
+                        sub = sMeshAssets[oi].name.c_str();
+                    else if (kind == 2 && oi >= 0 && oi < sSpriteCount) {
+                        int ai2 = sSprites[oi].assetIdx;
+                        if (ai2 >= 0 && ai2 < (int)sSpriteAssets.size())
+                            sub = sSpriteAssets[ai2].name.c_str();
+                        else { snprintf(subBuf, sizeof(subBuf), "[%d]", oi); sub = subBuf; }
+                    }
                     break;
                 }
                 default: break;
@@ -7154,34 +9066,74 @@ void FrameTick(float dt)
             }
         }
 
-        // Delete selected node with Delete key
-        if (sVsSelected >= 0 && ImGui::IsKeyPressed(ImGuiKey_Delete)) {
-            int delId = sVsNodes[sVsSelected].id;
-            // If deleting a group, also delete children and their links
-            if (sVsNodes[sVsSelected].type == VsNodeType::Group) {
-                std::vector<int> childIds;
-                for (auto& nd : sVsNodes)
-                    if (nd.groupId == delId) childIds.push_back(nd.id);
-                // Remove links to children
-                for (int cid : childIds)
-                    sVsLinks.erase(std::remove_if(sVsLinks.begin(), sVsLinks.end(),
-                        [cid](const VsLink& l) { return l.from.nodeId == cid || l.to.nodeId == cid; }),
-                        sVsLinks.end());
-                // Remove children
-                sVsNodes.erase(std::remove_if(sVsNodes.begin(), sVsNodes.end(),
-                    [delId](const VsNode& nd) { return nd.groupId == delId; }), sVsNodes.end());
-                // Remove pin mappings
-                sVsGroupPins.erase(std::remove_if(sVsGroupPins.begin(), sVsGroupPins.end(),
-                    [delId](const VsGroupPinMap& m) { return m.groupNodeId == delId; }), sVsGroupPins.end());
+        // Delete selected nodes with Delete key (multi-select or single)
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+            // Collect all node IDs to delete (selected or sVsSelected)
+            std::set<int> delIds;
+            for (auto& nd : sVsNodes)
+                if (nd.selected) delIds.insert(nd.id);
+            if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size())
+                delIds.insert(sVsNodes[sVsSelected].id);
+
+            bool anyAnnotDel = false;
+            for (auto& ann : sVsAnnotations)
+                if (ann.selected) { anyAnnotDel = true; break; }
+
+            if (!delIds.empty() || anyAnnotDel) {
+                // Save undo snapshot before deleting
+                VsUndoSnapshot snap;
+                snap.nodes = sVsNodes;
+                snap.links = sVsLinks;
+                snap.annotations = sVsAnnotations;
+                snap.groupPins = sVsGroupPins;
+                snap.nextId = sVsNextId;
+                sVsUndoStack.push_back(snap);
+                if ((int)sVsUndoStack.size() > kVsMaxUndo)
+                    sVsUndoStack.erase(sVsUndoStack.begin());
             }
-            // Remove links connected to this node
-            sVsLinks.erase(std::remove_if(sVsLinks.begin(), sVsLinks.end(),
-                [delId](const VsLink& l) { return l.from.nodeId == delId || l.to.nodeId == delId; }),
-                sVsLinks.end());
-            // Need to re-find index since erase may have shifted it
-            int delIdx = VsFindNode(delId);
-            if (delIdx >= 0) sVsNodes.erase(sVsNodes.begin() + delIdx);
+
+            if (!delIds.empty()) {
+                // For each group being deleted, also mark children for deletion
+                std::set<int> extraDel;
+                for (int did : delIds) {
+                    int idx = VsFindNode(did);
+                    if (idx >= 0 && sVsNodes[idx].type == VsNodeType::Group) {
+                        for (auto& nd : sVsNodes)
+                            if (nd.groupId == did) extraDel.insert(nd.id);
+                    }
+                }
+                delIds.insert(extraDel.begin(), extraDel.end());
+
+                // Remove all links connected to any deleted node
+                sVsLinks.erase(std::remove_if(sVsLinks.begin(), sVsLinks.end(),
+                    [&delIds](const VsLink& l) { return delIds.count(l.from.nodeId) || delIds.count(l.to.nodeId); }),
+                    sVsLinks.end());
+                // Remove pin mappings for deleted groups
+                sVsGroupPins.erase(std::remove_if(sVsGroupPins.begin(), sVsGroupPins.end(),
+                    [&delIds](const VsGroupPinMap& m) { return delIds.count(m.groupNodeId); }), sVsGroupPins.end());
+                // Remove the nodes
+                sVsNodes.erase(std::remove_if(sVsNodes.begin(), sVsNodes.end(),
+                    [&delIds](const VsNode& nd) { return delIds.count(nd.id); }), sVsNodes.end());
+                sVsSelected = -1;
+            }
+
+            // Delete selected annotations
+            sVsAnnotations.erase(std::remove_if(sVsAnnotations.begin(), sVsAnnotations.end(),
+                [](const VsAnnotation& a) { return a.selected; }), sVsAnnotations.end());
+            sVsSelectedAnnotation = -1;
+        }
+
+        // Ctrl+Z — undo last delete
+        if (ImGui::IsKeyPressed(ImGuiKey_Z) && io.KeyCtrl && !io.KeyShift && !sVsUndoStack.empty()) {
+            auto& snap = sVsUndoStack.back();
+            sVsNodes = snap.nodes;
+            sVsLinks = snap.links;
+            sVsAnnotations = snap.annotations;
+            sVsGroupPins = snap.groupPins;
+            sVsNextId = snap.nextId;
+            sVsUndoStack.pop_back();
             sVsSelected = -1;
+            sVsSelectedAnnotation = -1;
         }
 
         // Ctrl+G — group selected nodes
@@ -7522,6 +9474,7 @@ void FrameTick(float dt)
                 case VsNodeType::DestroyObject: desc = "Removes a sprite/object from the scene."; break;
                 case VsNodeType::AutoOrbit:     desc = "Enables auto-orbit camera when strafing. 0 = disabled."; break;
                 case VsNodeType::DampenJump:    desc = "Multiplies upward velocity by factor when fired. Use with On Key Released for variable jump height."; break;
+                case VsNodeType::IsMoving:      desc = "Gate: only passes execution through if the player is currently moving (d-pad held)."; break;
                 case VsNodeType::Integer:       desc = "Outputs a constant integer value."; break;
                 case VsNodeType::Key:           desc = "Outputs a key constant (A, B, L, R, etc)."; break;
                 case VsNodeType::Direction:     desc = "Outputs a direction (Left, Right, Up, Down)."; break;
@@ -7575,175 +9528,846 @@ void FrameTick(float dt)
                     return placeholder;
                 };
 
-                // Build actual generated code with resolved values (or placeholders)
-                char defaultCodeBuf[512] = {};
+                // Show both editor Play-mode and GBA runtime code
+                char defaultCodeBuf[4096] = {};
+                char gbaCodeBuf[1024] = {};
                 const char* defaultCode = "";
+                const char* editorCode = "";
+                const char* gbaCode = "";
+
+                // Helper: build function signature and GBA body for action node preview
+                char funcSigBuf[128] = {};  // function signature line (empty = not an action node)
+                char gbaBodyBuf[512] = {};  // GBA body line(s) without wrapper
+                auto setActionFunc = [&](const VsNode& node, const char* suffix, const char* body) {
+                    bool isBp = (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0);
+                    if (node.funcName[0])
+                        snprintf(funcSigBuf, sizeof(funcSigBuf),
+                            "static inline void %s(void)", node.funcName);
+                    else if (isBp)
+                        snprintf(funcSigBuf, sizeof(funcSigBuf),
+                            "static inline void afn_bp%d%s_%d(...)", sVsEditBlueprintIdx, suffix, node.id);
+                    else
+                        snprintf(funcSigBuf, sizeof(funcSigBuf),
+                            "static inline void afn_script%s_%d(void)", suffix, node.id);
+                    strncpy(gbaBodyBuf, body, sizeof(gbaBodyBuf) - 1);
+                };
+
+                // Resolve event key name for GBA code display
+                auto resolveEventKeyForDisplay = [&](const VsNode& ev) -> int {
+                    int count = 0; int keyVal = -1;
+                    for (auto& lk : sVsLinks)
+                        if (lk.to.nodeId == ev.id && lk.to.pinType == 3 && lk.to.pinIdx == 0) {
+                            auto* dn = resolveDataIn(lk.to.nodeId, 0);
+                            if (dn) { keyVal = dn->paramInt[0]; count++; }
+                        }
+                    if (count == 1) return keyVal;
+                    return -1; // no key or multiple keys
+                };
+                auto gbaKeyName = [](int key) -> const char* {
+                    const char* names[] = { "KEY_A","KEY_B","KEY_L","KEY_R","KEY_START","KEY_SELECT",
+                                            "KEY_UP","KEY_DOWN","KEY_LEFT","KEY_RIGHT" };
+                    return (key >= 0 && key < 10) ? names[key] : "0";
+                };
+
+                // Build function prefix for blueprint vs scene
+                bool isBp = (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0);
+                const char* bpPrefix = "";
+                char bpFuncBuf[64] = {};
+                char bpParamSig[128] = {};
+                if (isBp && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
+                    snprintf(bpFuncBuf, sizeof(bpFuncBuf), "afn_bp%d", sVsEditBlueprintIdx);
+                    bpPrefix = bpFuncBuf;
+                    auto& bp = sBlueprintAssets[sVsEditBlueprintIdx];
+                    bpParamSig[0] = '\0';
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        char tmp[32]; snprintf(tmp, sizeof(tmp), "%sint p%d", pi > 0 ? ", " : "", pi);
+                        strncat(bpParamSig, tmp, sizeof(bpParamSig) - strlen(bpParamSig) - 1);
+                    }
+                } else {
+                    bpPrefix = "afn_script";
+                    bpParamSig[0] = '\0';
+                }
+
+                // Helper: build function signature for event node preview
+                auto setEventFunc = [&](const VsNode& node, const char* defaultName) {
+                    if (node.funcName[0])
+                        snprintf(funcSigBuf, sizeof(funcSigBuf),
+                            "static inline void %s(void)", node.funcName);
+                    else if (isBp)
+                        snprintf(funcSigBuf, sizeof(funcSigBuf),
+                            "static inline void afn_bp%d_%s(%s)", sVsEditBlueprintIdx, defaultName,
+                            bpParamSig[0] ? bpParamSig : "void");
+                    else
+                        snprintf(funcSigBuf, sizeof(funcSigBuf),
+                            "static inline void %s(void)", defaultName);
+                };
+
+                // Helper: find action nodes connected via exec-out from an event node
+                // and build their GBA call names as a string
+                auto buildActionCalls = [&](const VsNode& evNode, const char* indent) -> std::string {
+                    char callsBuf[1024] = {};
+                    // Suffix map for VsNodeType -> GBA function suffix
+                    auto editorActionSuffix = [](VsNodeType t) -> const char* {
+                        switch (t) {
+                        case VsNodeType::MovePlayer:    return "_move";
+                        case VsNodeType::Jump:          return "_jump";
+                        case VsNodeType::Walk:          return "_walk";
+                        case VsNodeType::Sprint:        return "_sprint";
+                        case VsNodeType::OrbitCamera:   return "_orbit";
+                        case VsNodeType::PlayAnim:      return "_play_anim";
+                        case VsNodeType::SetGravity:    return "_set_gravity";
+                        case VsNodeType::SetMaxFall:    return "_set_max_fall";
+                        case VsNodeType::DestroyObject: return "_destroy";
+                        case VsNodeType::AutoOrbit:     return "_auto_orbit";
+                        case VsNodeType::DampenJump:    return "_dampen_jump";
+                        case VsNodeType::IsMoving:      return "_is_moving";
+                        case VsNodeType::ChangeScene:   return "_change_scene";
+                        case VsNodeType::CustomCode:    return "_custom";
+                        case VsNodeType::SetVariable:   return "_set_var";
+                        case VsNodeType::AddVariable:   return "_add_var";
+                        default: return "";
+                        }
+                    };
+                    // Walk exec-out links from the event node
+                    std::vector<int> actionIds;
+                    std::vector<int> frontier;
+                    frontier.push_back(evNode.id);
+                    while (!frontier.empty()) {
+                        int curId = frontier.back(); frontier.pop_back();
+                        for (auto& lk : sVsLinks) {
+                            if (lk.from.nodeId == curId && lk.from.pinType == 0) {
+                                int toId = lk.to.nodeId;
+                                // Find the target node
+                                for (auto& n : sVsNodes) {
+                                    if (n.id == toId) {
+                                        const char* suf = editorActionSuffix(n.type);
+                                        if (suf[0]) {
+                                            actionIds.push_back(toId);
+                                            char line[128];
+                                            if (n.funcName[0])
+                                                snprintf(line, sizeof(line), "%s%s();\n", indent, n.funcName);
+                                            else if (isBp)
+                                                snprintf(line, sizeof(line), "%safn_bp%d%s_%d(...);\n", indent, sVsEditBlueprintIdx, suf, n.id);
+                                            else
+                                                snprintf(line, sizeof(line), "%safn_script%s_%d();\n", indent, suf, n.id);
+                                            strncat(callsBuf, line, sizeof(callsBuf) - strlen(callsBuf) - 1);
+                                        }
+                                        // Follow chain further
+                                        frontier.push_back(toId);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (!callsBuf[0])
+                        snprintf(callsBuf, sizeof(callsBuf), "%s// (no actions connected)\n", indent);
+                    return std::string(callsBuf);
+                };
+
                 switch (infoNode.type) {
-                case VsNodeType::Jump:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (player_on_ground) player_vy = %s;", fmtFloat(infoNode.id, 0, "<force>"));
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::DampenJump:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (player_vy > 0) player_vy = (player_vy * %s) >> 8;", fmtFloat(infoNode.id, 0, "<factor>"));
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::Walk: {
-                    VsNode* src = resolveDataIn(infoNode.id, 0);
-                    if (src) { int s = resolveInt(infoNode.id, 0, 37); snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_move_speed = %d;", (int)(s * 37.0f / 35.0f)); }
-                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_move_speed = <speed>;");
-                    defaultCode = defaultCodeBuf; break;
-                }
-                case VsNodeType::Sprint: {
-                    VsNode* src = resolveDataIn(infoNode.id, 0);
-                    if (src) { int s = resolveInt(infoNode.id, 0, 56); snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_move_speed = %d;", (int)(s * 37.0f / 35.0f)); }
-                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_move_speed = <speed>;");
-                    defaultCode = defaultCodeBuf; break;
-                }
-                case VsNodeType::SetGravity:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_gravity = %s;", fmtFloat(infoNode.id, 0, "<value>"));
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::SetMaxFall:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_terminal_vel = %s;", fmtFloat(infoNode.id, 0, "<value>"));
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::AutoOrbit:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_auto_orbit_speed = %s;", fmtInt(infoNode.id, 0, "<speed>"));
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::PlayAnim:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "afn_play_anim = %s;", fmtInt(infoNode.id, 0, "<anim>"));
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::MovePlayer: {
-                    VsNode* src = resolveDataIn(infoNode.id, 0);
-                    if (src) {
-                        int dir = src->paramInt[0];
-                        const char* dirKeys[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
-                        const char* dirVars[] = { "afn_input_right -= 256", "afn_input_right += 256",
-                                                  "afn_input_fwd += 256", "afn_input_fwd -= 256" };
-                        if (dir >= 0 && dir < 4)
-                            snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(%s)) %s;", dirKeys[dir], dirVars[dir]);
-                    } else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(<key>)) <move>;");
-                    defaultCode = defaultCodeBuf; break;
-                }
-                case VsNodeType::OrbitCamera: {
-                    VsNode* dirSrc = resolveDataIn(infoNode.id, 0);
-                    VsNode* spdSrc = resolveDataIn(infoNode.id, 1);
-                    if (dirSrc) {
-                        int dir = dirSrc->paramInt[0];
-                        const char* key = (dir == 0) ? "KEY_L" : "KEY_R";
-                        const char* sign = (dir == 0) ? "-" : "+";
-                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(%s)) orbit_angle %s= %s;", key, sign, fmtInt(infoNode.id, 1, "<speed>"));
-                    } else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(<key>)) orbit_angle += %s;", fmtInt(infoNode.id, 1, "<speed>"));
-                    defaultCode = defaultCodeBuf; break;
-                }
-                case VsNodeType::DestroyObject:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "// destroy object %s", fmtInt(infoNode.id, 0, "<id>"));
-                    defaultCode = defaultCodeBuf; break;
-                // Events
                 case VsNodeType::OnKeyPressed: {
-                    VsNode* src = resolveDataIn(infoNode.id, 0);
-                    if (src && src->paramInt[0] >= 0 && src->paramInt[0] < kVsKeyCount)
-                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_hit(KEY_%s)) { ... }", sVsKeyNames[src->paramInt[0]]);
-                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_hit(<key>)) { ... }");
-                    defaultCode = defaultCodeBuf; break;
+                    setEventFunc(infoNode, "afn_script_key_pressed");
+                    editorCode =
+                        "    // ---- 2D Tilemap ----\n"
+                        "    // ImGui::IsKeyPressed(dirKey, false) — no repeat\n"
+                        "    if (keyJustPressed(dir)) {\n"
+                        "        instantMove = true;\n"
+                        "        for (action : actions) execAction(action);\n"
+                        "        instantMove = false;\n"
+                        "    }\n"
+                        "\n"
+                        "    // ---- 3D Scene ----\n"
+                        "    if (editorKeyHit(key)) {\n"
+                        "        for (action : actions) execAction(action);\n"
+                        "    }";
+                    int ek = resolveEventKeyForDisplay(infoNode);
+                    std::string calls = buildActionCalls(infoNode, "        ");
+                    if (ek >= 0)
+                        snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                            "    if (key_hit(%s)) {\n%s    }", gbaKeyName(ek), calls.c_str());
+                    else
+                        snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                            "    { // (all d-pad)\n%s    }", calls.c_str());
+                    break;
                 }
                 case VsNodeType::OnKeyReleased: {
-                    VsNode* src = resolveDataIn(infoNode.id, 0);
-                    if (src && src->paramInt[0] >= 0 && src->paramInt[0] < kVsKeyCount)
-                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_released(KEY_%s)) { ... }", sVsKeyNames[src->paramInt[0]]);
-                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_released(<key>)) { ... }");
-                    defaultCode = defaultCodeBuf; break;
+                    setEventFunc(infoNode, "afn_script_key_released");
+                    editorCode =
+                        "    // ---- 2D Tilemap ----\n"
+                        "    if (prevKeys[key] && !keyDown(key)) {\n"
+                        "        for (action : actions) execAction(action);\n"
+                        "    }\n"
+                        "\n"
+                        "    // ---- 3D Scene ----\n"
+                        "    if (prevKeyState[key] && !editorKeyDown(key)) {\n"
+                        "        for (action : actions) execAction(action);\n"
+                        "    }";
+                    int ek = resolveEventKeyForDisplay(infoNode);
+                    std::string calls = buildActionCalls(infoNode, "        ");
+                    snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                        "    if (key_released(%s)) {\n%s    }",
+                        ek >= 0 ? gbaKeyName(ek) : "KEY_xxx", calls.c_str());
+                    break;
                 }
                 case VsNodeType::OnKeyHeld: {
-                    VsNode* src = resolveDataIn(infoNode.id, 0);
-                    if (src && src->paramInt[0] >= 0 && src->paramInt[0] < kVsKeyCount)
-                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(KEY_%s)) { ... }", sVsKeyNames[src->paramInt[0]]);
-                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "if (key_is_down(<key>)) { ... }");
-                    defaultCode = defaultCodeBuf; break;
+                    setEventFunc(infoNode, "afn_script_key_held");
+                    editorCode =
+                        "    // ---- 2D Tilemap ----\n"
+                        "    // lastMoveDir = resolveHeldDir(WASD);\n"
+                        "    if (keyDown(key)) {\n"
+                        "        for (action : actions) execAction(action);\n"
+                        "        // MovePlayer gates on lastMoveDir\n"
+                        "    }\n"
+                        "    // reset accum for released dirs\n"
+                        "\n"
+                        "    // ---- 3D Scene ----\n"
+                        "    // fires every frame while held\n"
+                        "    if (editorKeyDown(key)) {\n"
+                        "        for (action : actions) execAction(action);\n"
+                        "    }";
+                    int ek = resolveEventKeyForDisplay(infoNode);
+                    std::string calls = buildActionCalls(infoNode, "        ");
+                    snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                        "    if (key_is_down(%s)) {\n%s    }",
+                        ek >= 0 ? gbaKeyName(ek) : "KEY_xxx", calls.c_str());
+                    break;
                 }
-                case VsNodeType::OnStart:
-                    defaultCode = "// runs once at scene init"; break;
-                case VsNodeType::OnUpdate:
-                    defaultCode = "// runs every frame"; break;
-                case VsNodeType::OnCollision:
-                    defaultCode = "// runs on player collision"; break;
+                case VsNodeType::OnStart: {
+                    setEventFunc(infoNode, "afn_script_start");
+                    editorCode =
+                        "    // ---- 2D Tilemap ----\n"
+                        "    if (!onStartRan) {\n"
+                        "        for (action : actions) execAction(action);\n"
+                        "        onStartRan = true;\n"
+                        "    }\n"
+                        "\n"
+                        "    // ---- 3D Scene ----\n"
+                        "    if (!sScriptStartRan) {\n"
+                        "        sScriptMoveSpeed = walkSpeed; // default\n"
+                        "        for (action : actions) execAction(action);\n"
+                        "        sScriptStartRan = true;\n"
+                        "    }";
+                    std::string calls = buildActionCalls(infoNode, "    ");
+                    snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                        "    // Called once at boot after scene load\n%s", calls.c_str());
+                    break;
+                }
+                case VsNodeType::OnUpdate: {
+                    setEventFunc(infoNode, "afn_script_update");
+                    editorCode =
+                        "    // ---- 2D Tilemap ----\n"
+                        "    for (action : actions) execAction(action);\n"
+                        "    // runs every frame\n"
+                        "\n"
+                        "    // ---- 3D Scene ----\n"
+                        "    for (action : actions) execAction(action);\n"
+                        "    // runs every frame";
+                    std::string calls = buildActionCalls(infoNode, "    ");
+                    snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                        "    // Called every frame\n%s", calls.c_str());
+                    break;
+                }
+                case VsNodeType::OnCollision: {
+                    setEventFunc(infoNode, "afn_script_collision");
+                    editorCode =
+                        "    // ---- 3D Scene only ----\n"
+                        "    if (collidedSprite >= 0) {\n"
+                        "        execActions();\n"
+                        "    }";
+                    std::string calls = buildActionCalls(infoNode, "    ");
+                    snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                        "    // Called when player collides with sprite\n%s", calls.c_str());
+                    break;
+                }
+                case VsNodeType::MovePlayer: {
+                    editorCode =
+                        "// ---- 2D Tilemap ----\n"
+                        "if (instantMove) {\n"
+                        "    facing = dirToFacing[dir];\n"
+                        "    tilePos += dirDelta[dir];\n"
+                        "    stepCount++;\n"
+                        "} else if (keyDown && lastMoveDir == dir) {\n"
+                        "    facing = dirToFacing[dir];\n"
+                        "    if (justPressed) accum[dir] = 0.45f;\n"
+                        "    else {\n"
+                        "        accum[dir] += moveRate * dt;\n"
+                        "        if (accum >= 1.0) { move; stepCount++; }\n"
+                        "    }\n"
+                        "}\n"
+                        "// visX/visY lerp toward tileX/tileY at moveRate\n"
+                        "\n"
+                        "// ---- 3D Scene ----\n"
+                        "if (editorKeyDown(dirKey)) {\n"
+                        "    scInputFwd/scInputRight += direction;\n"
+                        "}\n"
+                        "// Consumed: normalize diagonal, then:\n"
+                        "// moveSpeed = sScriptMoveSpeed * dt;\n"
+                        "// fwdX = sinf(viewAngle); fwdZ = cosf(viewAngle);\n"
+                        "// player.x += (fwdX*inputX + rightX*inputZ) * moveSpeed;\n"
+                        "// player.z += (fwdZ*inputX + rightZ*inputZ) * moveSpeed;";
+                    auto* dirData = resolveDataIn(infoNode.id, 0);
+                    int dir = dirData ? dirData->paramInt[0] : 0;
+                    const char* dirKeysGba[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
+                    const char* dirVarsGba[] = { "afn_input_right -= 256", "afn_input_right += 256",
+                                                 "afn_input_fwd += 256", "afn_input_fwd -= 256" };
+                    char bodyBuf[512];
+                    if (dir >= 0 && dir < 4)
+                        snprintf(bodyBuf, sizeof(bodyBuf),
+                            "    if (key_is_down(%s)) %s;\n"
+                            "    // Runtime consumption:\n"
+                            "    // inputFwd/inputRight -> normalize diagonal\n"
+                            "    // moveFwd = (inputFwd * moveSpeed) >> 8;\n"
+                            "    // moveRight = (inputRight * moveSpeed) >> 8;\n"
+                            "    // player_x += (viewSin*moveFwd + rightSin*moveRight) >> 8;\n"
+                            "    // player_z -= (viewCos*moveFwd + rightCos*moveRight) >> 8;",
+                            dirKeysGba[dir], dirVarsGba[dir]);
+                    else
+                        snprintf(bodyBuf, sizeof(bodyBuf), "    // MovePlayer (no direction set)");
+                    setActionFunc(infoNode, "_move", bodyBuf);
+                    break;
+                }
+                case VsNodeType::Walk: {
+                    editorCode =
+                        "// ---- 2D Tilemap ----\n"
+                        "tmMoveRate = speed;\n"
+                        "// accum[dir] += tmMoveRate * dt;\n"
+                        "// visX/visY lerp speed = tmMoveRate\n"
+                        "\n"
+                        "// ---- 3D Scene ----\n"
+                        "sScriptMoveSpeed = speed;\n"
+                        "// moveSpeed = sScriptMoveSpeed * dt;\n"
+                        "// player.x += fwd * inputFwd * moveSpeed;";
+                    auto* sd = resolveDataIn(infoNode.id, 0);
+                    int speed = sd ? sd->paramInt[0] : 37;
+                    int gbaSpeed = (int)(speed * 37.0f / 35.0f);
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_move_speed = %d;\n"
+                        "    // Runtime: moveSpeed = afn_move_speed;\n"
+                        "    // player_x += (viewSin * moveFwd * moveSpeed) >> 16;",
+                        gbaSpeed);
+                    setActionFunc(infoNode, "_walk", bodyBuf);
+                    break;
+                }
+                case VsNodeType::Sprint: {
+                    editorCode =
+                        "// ---- 2D Tilemap ----\n"
+                        "tmMoveRate = speed;\n"
+                        "// accum[dir] += tmMoveRate * dt;\n"
+                        "// visX/visY lerp speed = tmMoveRate\n"
+                        "\n"
+                        "// ---- 3D Scene ----\n"
+                        "sScriptMoveSpeed = speed;\n"
+                        "// moveSpeed = sScriptMoveSpeed * dt;\n"
+                        "// player.x += fwd * inputFwd * moveSpeed;";
+                    auto* sd = resolveDataIn(infoNode.id, 0);
+                    int speed = sd ? sd->paramInt[0] : 56;
+                    int gbaSpeed = (int)(speed * 37.0f / 35.0f);
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_move_speed = %d;\n"
+                        "    // Runtime: moveSpeed = afn_move_speed;\n"
+                        "    // player_x += (viewSin * moveFwd * moveSpeed) >> 16;",
+                        gbaSpeed);
+                    setActionFunc(infoNode, "_sprint", bodyBuf);
+                    break;
+                }
+                case VsNodeType::Jump: {
+                    editorCode =
+                        "// ---- 3D Scene ----\n"
+                        "// (no editor vertical physics)";
+                    auto* fd = resolveDataIn(infoNode.id, 0);
+                    float force = 2.0f;
+                    if (fd) { memcpy(&force, &fd->paramInt[0], sizeof(float)); }
+                    int forceFixed = (int)(force * 256.0f);
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    if (player_on_ground) player_vy = %d;\n"
+                        "    // Runtime: player_y += player_vy;\n"
+                        "    // player_vy -= afn_gravity;\n"
+                        "    // if (player_vy < -afn_terminal_vel)\n"
+                        "    //     player_vy = -afn_terminal_vel;",
+                        forceFixed);
+                    setActionFunc(infoNode, "_jump", bodyBuf);
+                    break;
+                }
+                case VsNodeType::DampenJump: {
+                    editorCode =
+                        "// ---- 3D Scene ----\n"
+                        "// (no editor vertical physics)";
+                    auto* fd = resolveDataIn(infoNode.id, 0);
+                    float factor = 0.75f;
+                    if (fd) { memcpy(&factor, &fd->paramInt[0], sizeof(float)); }
+                    int factorFixed = (int)(factor * 256.0f);
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    if (player_vy > 0) player_vy = (player_vy * %d) >> 8;\n"
+                        "    // Applied when A released while rising\n"
+                        "    // Reduces upward velocity for variable jump height",
+                        factorFixed);
+                    setActionFunc(infoNode, "_dampen_jump", bodyBuf);
+                    break;
+                }
+                case VsNodeType::OrbitCamera: {
+                    editorCode =
+                        "// ---- 3D Scene ----\n"
+                        "if (editorKeyDown(key)) {\n"
+                        "    float radPerFrame = speed / 65536.0f * 6.28318f;\n"
+                        "    scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;\n"
+                        "}\n"
+                        "// Consumed: sManualOrbitCurrent += (scOrbitDelta - current) * 6*dt;\n"
+                        "// sOrbitAngle += sManualOrbitCurrent;";
+                    auto* dd = resolveDataIn(infoNode.id, 0);
+                    auto* sd = resolveDataIn(infoNode.id, 1);
+                    int odir = dd ? dd->paramInt[0] : 1;
+                    int ospeed = sd ? sd->paramInt[0] : 512;
+                    const char* okey = (odir == 0) ? "KEY_L" : "KEY_R";
+                    const char* osign = (odir == 0) ? "-" : "+";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    if (key_is_down(%s)) orbit_angle %s= %d;\n"
+                        "    // orbit_angle drives camera rotation around player\n"
+                        "    // viewAngle = orbit_angle + player facing",
+                        okey, osign, ospeed);
+                    setActionFunc(infoNode, "_orbit", bodyBuf);
+                    break;
+                }
+                case VsNodeType::ChangeScene:
+                    editorCode =
+                        "// ---- 2D Tilemap / 3D Scene ----\n"
+                        "sPendingSceneSwitch = scIdx;\n"
+                        "sPendingSceneMode = mode; // 0=3D, 1=Tilemap\n"
+                        "// Consumed next frame:\n"
+                        "//   SaveState -> switch scene index -> LoadState\n"
+                        "//   sScriptStartRan = false; // re-run OnStart";
+                    setActionFunc(infoNode, "_change_scene",
+                        "    afn_pending_scene = <scIdx>;\n"
+                        "    afn_pending_scene_mode = <mode>;\n"
+                        "    // Runtime: triggers scene reload next frame");
+                    break;
+                case VsNodeType::SetGravity: {
+                    editorCode =
+                        "// ---- 3D Scene ----\n"
+                        "// (no editor vertical physics)";
+                    auto* vd = resolveDataIn(infoNode.id, 0);
+                    float val = 0.09f;
+                    if (vd) { memcpy(&val, &vd->paramInt[0], sizeof(float)); }
+                    int valFixed = (int)(val * 256.0f);
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_gravity = %d;\n"
+                        "    // Runtime: player_vy -= afn_gravity; // each frame",
+                        valFixed);
+                    setActionFunc(infoNode, "_set_gravity", bodyBuf);
+                    break;
+                }
+                case VsNodeType::SetMaxFall: {
+                    editorCode =
+                        "// ---- 3D Scene ----\n"
+                        "// (no editor vertical physics)";
+                    auto* vd = resolveDataIn(infoNode.id, 0);
+                    float val = 6.0f;
+                    if (vd) { memcpy(&val, &vd->paramInt[0], sizeof(float)); }
+                    int valFixed = (int)(val * 256.0f);
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_terminal_vel = %d;\n"
+                        "    // Runtime: if (player_vy < -afn_terminal_vel)\n"
+                        "    //     player_vy = -afn_terminal_vel;",
+                        valFixed);
+                    setActionFunc(infoNode, "_set_max_fall", bodyBuf);
+                    break;
+                }
+                case VsNodeType::AutoOrbit: {
+                    editorCode =
+                        "// ---- 3D Scene ----\n"
+                        "sScriptAutoOrbitSpeed = speed;\n"
+                        "// if strafing: target = (speed/65536 * 2pi) * inputRight;\n"
+                        "// sAutoOrbitCurrent += (target - current) * 6*dt;\n"
+                        "// sOrbitAngle -= sAutoOrbitCurrent;";
+                    auto* sd = resolveDataIn(infoNode.id, 0);
+                    int aspeed = sd ? sd->paramInt[0] : 205;
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_auto_orbit_speed = %d;\n"
+                        "    // Runtime: if strafing && speed > 0:\n"
+                        "    //   auto_orbit_smooth += (target - smooth) >> 2;\n"
+                        "    //   orbit_angle += auto_orbit_smooth;",
+                        aspeed);
+                    setActionFunc(infoNode, "_auto_orbit", bodyBuf);
+                    break;
+                }
+                case VsNodeType::PlayAnim: {
+                    editorCode =
+                        "// ---- 2D Tilemap ----\n"
+                        "// gameState check: Idle vs Walk vs Sprint\n"
+                        "if (apply) sTmObjAnimSet[oi] = animIdx;\n"
+                        "\n"
+                        "// ---- 3D Scene ----\n"
+                        "// Registers which PlayAnim node drives each state:\n"
+                        "if (OnStart)       sPlayAnimIdle = id;\n"
+                        "if (OnKeyHeld)     sPlayAnimHeld = id;\n"
+                        "if (OnKeyReleased) sPlayAnimReleased = id;\n"
+                        "// Consumed: pick active based on movement:\n"
+                        "//   sprinting -> sPlayAnimHeld\n"
+                        "//   moving    -> sPlayAnimReleased\n"
+                        "//   idle      -> sPlayAnimIdle\n"
+                        "// Then reads Animation data node -> dirSetIdx\n"
+                        "// baseSet + (animTime * fps) % frameCount";
+                    auto* sd = resolveDataIn(infoNode.id, 0);
+                    int animIdx = sd ? sd->paramInt[0] : 0;
+                    char bodyBuf[512];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_play_anim = %d;\n"
+                        "    // Runtime consumption:\n"
+                        "    // int targetAnim = afn_play_anim;\n"
+                        "    // if (targetAnim != g_current_anim[ai]) {\n"
+                        "    //     g_current_anim[ai] = targetAnim;\n"
+                        "    //     g_anim_frame_counter = 0;\n"
+                        "    // }\n"
+                        "    // int baseSet = afn_anim_desc[ai][targetAnim][0];\n"
+                        "    // int fc = afn_anim_desc[ai][targetAnim][1];\n"
+                        "    // int fps = afn_anim_desc[ai][targetAnim][2];\n"
+                        "    // int frame = (g_anim_frame_counter / (60/fps)) %% fc;\n"
+                        "    // switch_dir_anim_set(ai, baseSet + frame);", animIdx);
+                    setActionFunc(infoNode, "_play_anim", bodyBuf);
+                    break;
+                }
+                case VsNodeType::SetVariable:
+                    editorCode =
+                        "// ---- 2D Tilemap / 3D Scene ----\n"
+                        "// (not implemented in editor)";
+                    setActionFunc(infoNode, "_set_var",
+                        "    afn_vars[<slot>] = <value>;");
+                    break;
+                case VsNodeType::AddVariable:
+                    editorCode =
+                        "// ---- 2D Tilemap / 3D Scene ----\n"
+                        "// (not implemented in editor)";
+                    setActionFunc(infoNode, "_add_var",
+                        "    afn_vars[<slot>] += <amount>;");
+                    break;
+                case VsNodeType::DestroyObject:
+                    editorCode =
+                        "// ---- 3D Scene ----\n"
+                        "// (not implemented in editor)";
+                    setActionFunc(infoNode, "_destroy",
+                        "    // DestroyObject: hide sprite at index");
+                    break;
+                case VsNodeType::IsMoving:
+                    editorCode =
+                        "// Gate: passes execution only if player is moving\n"
+                        "if (sPlayerMoving) { /* downstream actions */ }";
+                    setActionFunc(infoNode, "_is_moving",
+                        "    if (player_moving) {\n"
+                        "        /* downstream actions */\n"
+                        "    }");
+                    break;
+                case VsNodeType::CustomCode:
+                    editorCode = "// (runs only on GBA runtime)";
+                    {
+                        char bodyBuf[512];
+                        if (infoNode.customCode[0])
+                            snprintf(bodyBuf, sizeof(bodyBuf), "    %s", infoNode.customCode);
+                        else
+                            snprintf(bodyBuf, sizeof(bodyBuf), "    // (empty)");
+                        setActionFunc(infoNode, "_custom", bodyBuf);
+                    }
+                    break;
                 // Data nodes
-                case VsNodeType::Integer:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "%d", infoNode.paramInt[0]);
-                    defaultCode = defaultCodeBuf; break;
+                case VsNodeType::Integer: {
+                    editorCode = "// Constant integer value";
+                    char body[128];
+                    snprintf(body, sizeof(body), "    return %d;", infoNode.paramInt[0]);
+                    setActionFunc(infoNode, "_int", body);
+                    break;
+                }
                 case VsNodeType::Float: {
                     float fv; memcpy(&fv, &infoNode.paramInt[0], sizeof(float));
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "%.3g  (fixed: %d)", fv, (int)(fv * 256.0f));
-                    defaultCode = defaultCodeBuf; break;
+                    editorCode = "// Constant float value (fixed-point on GBA)";
+                    char body[128];
+                    snprintf(body, sizeof(body), "    return %d; // %.3g * 256", (int)(fv * 256.0f), fv);
+                    setActionFunc(infoNode, "_float", body);
+                    break;
                 }
-                case VsNodeType::Key:
+                case VsNodeType::Key: {
+                    editorCode = "// Constant key value";
+                    char body[128];
                     if (infoNode.paramInt[0] >= 0 && infoNode.paramInt[0] < kVsKeyCount)
-                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "KEY_%s", sVsKeyNames[infoNode.paramInt[0]]);
-                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "<unset>");
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::Direction:
+                        snprintf(body, sizeof(body), "    return KEY_%s;", sVsKeyNames[infoNode.paramInt[0]]);
+                    else
+                        snprintf(body, sizeof(body), "    return 0; // <unset>");
+                    setActionFunc(infoNode, "_key", body);
+                    break;
+                }
+                case VsNodeType::Direction: {
+                    editorCode = "// Constant direction value";
+                    char body[128];
                     if (infoNode.paramInt[0] >= 0 && infoNode.paramInt[0] < kVsAxisCount)
-                        snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "%s", sVsAxisNames[infoNode.paramInt[0]]);
-                    else snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "<unset>");
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::Animation:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "anim index %d", infoNode.paramInt[0]);
-                    defaultCode = defaultCodeBuf; break;
+                        snprintf(body, sizeof(body), "    return %d; // %s", infoNode.paramInt[0], sVsAxisNames[infoNode.paramInt[0]]);
+                    else
+                        snprintf(body, sizeof(body), "    return 0; // <unset>");
+                    setActionFunc(infoNode, "_dir", body);
+                    break;
+                }
+                case VsNodeType::Animation: {
+                    editorCode = "// Constant animation index";
+                    char body[128];
+                    snprintf(body, sizeof(body), "    return %d; // anim index", infoNode.paramInt[1]);
+                    setActionFunc(infoNode, "_anim", body);
+                    break;
+                }
+                case VsNodeType::Object: {
+                    editorCode = "// Constant object/sprite index";
+                    char body[128];
+                    snprintf(body, sizeof(body), "    return %d;", infoNode.paramInt[0]);
+                    setActionFunc(infoNode, "_obj", body);
+                    break;
+                }
                 // Logic
                 case VsNodeType::Branch:
-                    defaultCode = "if (<condition>) { true } else { false }"; break;
+                    editorCode =
+                        "// Conditional execution\n"
+                        "if (cond) execChain(truePin);\n"
+                        "else execChain(falsePin);";
+                    setActionFunc(infoNode, "_branch",
+                        "    int cond = findDataIn(0)->paramInt[0];\n"
+                        "    if (cond) { /* true chain */ }\n"
+                        "    else { /* false chain */ }");
+                    break;
                 case VsNodeType::CompareVar:
-                    defaultCode = "result = (vars[<slot>] == <value>) ? 1 : 0;"; break;
+                    editorCode =
+                        "// Compare variable slot to value\n"
+                        "result = (vars[slot] == value) ? 1 : 0;";
+                    setActionFunc(infoNode, "_compare_var",
+                        "    int slot = findDataIn(0)->paramInt[0];\n"
+                        "    int value = findDataIn(1)->paramInt[0];\n"
+                        "    return (afn_vars[slot] == value) ? 1 : 0;");
+                    break;
                 case VsNodeType::LookDirection:
-                    defaultCode = "// set player facing direction"; break;
-                case VsNodeType::ChangeScene:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "// change to scene %s", fmtInt(infoNode.id, 0, "<id>"));
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::SetVariable:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "vars[%s] = %s;", fmtInt(infoNode.id, 0, "<slot>"), fmtInt(infoNode.id, 1, "<value>"));
-                    defaultCode = defaultCodeBuf; break;
-                case VsNodeType::AddVariable:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "vars[%s] += %s;", fmtInt(infoNode.id, 0, "<slot>"), fmtInt(infoNode.id, 1, "<amount>"));
-                    defaultCode = defaultCodeBuf; break;
+                    editorCode =
+                        "// Set player facing direction";
+                    setActionFunc(infoNode, "_look",
+                        "    int dir = findDataIn(0)->paramInt[0];\n"
+                        "    player_facing = dir;");
+                    break;
                 case VsNodeType::PlaySound:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "// play sound %s", fmtInt(infoNode.id, 0, "<id>"));
-                    defaultCode = defaultCodeBuf; break;
+                    editorCode =
+                        "// Trigger sound effect\n"
+                        "// (not yet implemented in editor)";
+                    setActionFunc(infoNode, "_play_sound",
+                        "    int soundId = findDataIn(0)->paramInt[0];\n"
+                        "    // play_sound(soundId);");
+                    break;
                 case VsNodeType::Wait:
-                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "// wait %s frames", fmtInt(infoNode.id, 0, "<n>"));
-                    defaultCode = defaultCodeBuf; break;
+                    editorCode =
+                        "// Pause execution for N frames";
+                    setActionFunc(infoNode, "_wait",
+                        "    int frames = findDataIn(0)->paramInt[0];\n"
+                        "    wait_counter = frames;");
+                    break;
                 case VsNodeType::Group:
-                    defaultCode = "// subgraph"; break;
+                    editorCode = "// Contains a subgraph of nodes";
+                    setActionFunc(infoNode, "_group",
+                        "    // subgraph execution");
+                    break;
                 default: break;
                 }
 
-                // Editable code section
-                ImGui::Separator();
-                ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Code");
-                ImGui::Spacing();
-                if (!infoNode.customCode[0]) {
-                    // No custom override — show live-resolved default as read-only
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.8f, 0.6f, 1.0f));
-                    ImGui::TextWrapped("%s", defaultCode[0] ? defaultCode : "(no code)");
-                    ImGui::PopStyleColor();
-                    ImGui::Spacing();
-                    if (defaultCode[0] && ImGui::Button("Edit")) {
-                        strncpy(infoNode.customCode, defaultCode, sizeof(infoNode.customCode) - 1);
-                        memcpy(sVsNodeCodeBuf, infoNode.customCode, sizeof(sVsNodeCodeBuf));
+                // Combine editor + GBA code for event/action nodes
+                if (editorCode[0]) {
+                    char combinedBuf[4096];
+                    if (funcSigBuf[0]) {
+                        // Event/action node: all sections inside function block
+                        snprintf(combinedBuf, sizeof(combinedBuf),
+                            "%s {\n\n%s\n\n    // ---- GBA Runtime (mapdata.h) ----\n%s\n}",
+                            funcSigBuf, editorCode, gbaBodyBuf);
+                    } else {
+                        // Other node: flat sections
+                        snprintf(combinedBuf, sizeof(combinedBuf),
+                            "%s\n\n// ---- GBA Runtime (mapdata.h) ----\n%s",
+                            editorCode, gbaCode[0] ? gbaCode : "// (no GBA codegen for this node)");
                     }
-                } else {
-                    // Custom code — editable
-                    ImGui::PushItemWidth(-1);
-                    ImGui::InputTextMultiline("##NodeCode", sVsNodeCodeBuf, sizeof(sVsNodeCodeBuf),
-                        ImVec2(-1, 100), ImGuiInputTextFlags_AllowTabInput);
-                    ImGui::PopItemWidth();
+                    strncpy(defaultCodeBuf, combinedBuf, sizeof(defaultCodeBuf) - 1);
+                    defaultCodeBuf[sizeof(defaultCodeBuf) - 1] = '\0';
+                    defaultCode = defaultCodeBuf;
                 }
-                if (infoNode.customCode[0] && ImGui::Button("Save")) {
-                    memcpy(infoNode.customCode, sVsNodeCodeBuf, sizeof(infoNode.customCode));
-                    ImGui::CloseCurrentPopup();
+
+                // "View Code" button opens standalone script window
+                if (defaultCode[0]) {
+                    ImGui::Separator();
+                    if (ImGui::Button("View Code")) {
+                        sVsCodeWindowOpen = true;
+                        sVsCodeWindowJustOpened = true;
+                        sVsCodeWindowNodeIdx = sVsNodeInfoIdx;
+                        strncpy(sVsCodeWindowBuf, defaultCode, sizeof(sVsCodeWindowBuf) - 1);
+                        sVsCodeWindowBuf[sizeof(sVsCodeWindowBuf) - 1] = '\0';
+                        strncpy(sVsCodeWindowEditBuf, infoNode.customCode, sizeof(sVsCodeWindowEditBuf) - 1);
+                        sVsCodeWindowEditBuf[sizeof(sVsCodeWindowEditBuf) - 1] = '\0';
+                    }
+                    if (infoNode.customCode[0]) {
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "(has custom code)");
+                    }
                 }
-                if (infoNode.customCode[0]) ImGui::SameLine();
-                if (infoNode.customCode[0] && ImGui::Button("Reset")) {
-                    sVsNodeCodeBuf[0] = '\0';
-                    infoNode.customCode[0] = '\0';
+
+                // "Expose as Parameter" — only in blueprint editing mode, only for data nodes
+                if (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0
+                    && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()
+                    && isDataNodeType(infoNode.type))
+                {
+                    ImGui::Separator();
+                    BlueprintAsset& bp = sBlueprintAssets[sVsEditBlueprintIdx];
+                    // Check if already exposed
+                    int existingParam = -1;
+                    for (int pi = 0; pi < bp.paramCount; pi++)
+                        if (bp.params[pi].sourceNodeId == infoNode.id) { existingParam = pi; break; }
+                    bool exposed = (existingParam >= 0);
+                    if (ImGui::Checkbox("Expose as Parameter", &exposed)) {
+                        if (exposed && existingParam < 0 && bp.paramCount < 8) {
+                            BpParam& p = bp.params[bp.paramCount];
+                            snprintf(p.name, sizeof(p.name), "Param%d", bp.paramCount);
+                            p.sourceNodeId = infoNode.id;
+                            p.sourceParamIdx = 0;
+                            p.dataType = dataTypeFromNode(infoNode.type);
+                            p.defaultInt = infoNode.paramInt[0];
+                            bp.paramCount++;
+                            sProjectDirty = true;
+                        } else if (!exposed && existingParam >= 0) {
+                            // Remove param, shift others down
+                            for (int pi = existingParam; pi < bp.paramCount - 1; pi++)
+                                bp.params[pi] = bp.params[pi + 1];
+                            bp.paramCount--;
+                            bp.params[bp.paramCount] = {};
+                            sProjectDirty = true;
+                        }
+                    }
+                    if (exposed && existingParam >= 0) {
+                        ImGui::SetNextItemWidth(120);
+                        ImGui::InputText("##PName", bp.params[existingParam].name, 32);
+                    }
                 }
             }
             ImGui::EndPopup();
+        }
+
+        // ---- Script Code Window (standalone, resizable) ----
+        if (sVsCodeWindowJustOpened) {
+            ImGui::SetNextWindowFocus();
+            sVsCodeWindowJustOpened = false;
+        }
+        if (sVsCodeWindowOpen && sVsCodeWindowNodeIdx >= 0 && sVsCodeWindowNodeIdx < (int)sVsNodes.size()) {
+            VsNode& cwNode = sVsNodes[sVsCodeWindowNodeIdx];
+            const char* nodeName = sVsNodeDefs[(int)cwNode.type].name;
+            char winTitle[64];
+            snprintf(winTitle, sizeof(winTitle), "Code: %s###ScriptCodeWin", nodeName);
+            ImGui::SetNextWindowSize(ImVec2(500, 550), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin(winTitle, &sVsCodeWindowOpen)) {
+                // Generated code (read-only, monospace)
+                ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Generated Code");
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.1f, 0.1f, 0.12f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.9f, 0.6f, 1.0f));
+                float genHeight = cwNode.customCode[0] ? ImGui::GetContentRegionAvail().y * 0.40f : ImGui::GetContentRegionAvail().y - 80;
+                ImGui::InputTextMultiline("##GenCode", sVsCodeWindowBuf, sizeof(sVsCodeWindowBuf),
+                    ImVec2(-1, genHeight), ImGuiInputTextFlags_ReadOnly);
+                ImGui::PopStyleColor(2);
+
+                // Function declaration (editable)
+                {
+                    bool isBpNode = (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0);
+                    const char* suffix = "";
+                    switch (cwNode.type) {
+                    case VsNodeType::OnKeyPressed:  suffix = "_key_pressed"; break;
+                    case VsNodeType::OnKeyReleased: suffix = "_key_released"; break;
+                    case VsNodeType::OnKeyHeld:     suffix = "_key_held"; break;
+                    case VsNodeType::OnStart:       suffix = "_start"; break;
+                    case VsNodeType::OnUpdate:      suffix = "_update"; break;
+                    case VsNodeType::OnCollision:   suffix = "_collision"; break;
+                    case VsNodeType::MovePlayer:    suffix = "_move"; break;
+                    case VsNodeType::Jump:          suffix = "_jump"; break;
+                    case VsNodeType::Walk:          suffix = "_walk"; break;
+                    case VsNodeType::Sprint:        suffix = "_sprint"; break;
+                    case VsNodeType::OrbitCamera:   suffix = "_orbit"; break;
+                    case VsNodeType::PlayAnim:      suffix = "_play_anim"; break;
+                    case VsNodeType::SetGravity:    suffix = "_set_gravity"; break;
+                    case VsNodeType::SetMaxFall:    suffix = "_set_max_fall"; break;
+                    case VsNodeType::DestroyObject: suffix = "_destroy"; break;
+                    case VsNodeType::AutoOrbit:     suffix = "_auto_orbit"; break;
+                    case VsNodeType::DampenJump:    suffix = "_dampen_jump"; break;
+                    case VsNodeType::IsMoving:      suffix = "_is_moving"; break;
+                    case VsNodeType::ChangeScene:   suffix = "_change_scene"; break;
+                    case VsNodeType::LookDirection: suffix = "_look"; break;
+                    case VsNodeType::PlaySound:     suffix = "_play_sound"; break;
+                    case VsNodeType::Wait:          suffix = "_wait"; break;
+                    case VsNodeType::SetVariable:   suffix = "_set_var"; break;
+                    case VsNodeType::AddVariable:   suffix = "_add_var"; break;
+                    case VsNodeType::CustomCode:    suffix = "_custom"; break;
+                    case VsNodeType::Integer:       suffix = "_int"; break;
+                    case VsNodeType::Float:         suffix = "_float"; break;
+                    case VsNodeType::Key:           suffix = "_key"; break;
+                    case VsNodeType::Direction:     suffix = "_dir"; break;
+                    case VsNodeType::Animation:     suffix = "_anim"; break;
+                    case VsNodeType::Object:        suffix = "_obj"; break;
+                    case VsNodeType::Branch:        suffix = "_branch"; break;
+                    case VsNodeType::CompareVar:    suffix = "_compare_var"; break;
+                    case VsNodeType::Group:         suffix = "_group"; break;
+                    default: suffix = ""; break;
+                    }
+                    // Show default name as placeholder (action nodes include node ID to disambiguate)
+                    bool isEventNode = (cwNode.type == VsNodeType::OnKeyPressed || cwNode.type == VsNodeType::OnKeyReleased ||
+                                        cwNode.type == VsNodeType::OnKeyHeld || cwNode.type == VsNodeType::OnStart ||
+                                        cwNode.type == VsNodeType::OnUpdate || cwNode.type == VsNodeType::OnCollision);
+                    char defaultName[64] = {};
+                    if (isBpNode && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
+                        if (isEventNode)
+                            snprintf(defaultName, sizeof(defaultName), "afn_bp%d%s", sVsEditBlueprintIdx, suffix);
+                        else
+                            snprintf(defaultName, sizeof(defaultName), "afn_bp%d%s_%d", sVsEditBlueprintIdx, suffix, cwNode.id);
+                    } else {
+                        if (isEventNode)
+                            snprintf(defaultName, sizeof(defaultName), "afn_script%s", suffix);
+                        else
+                            snprintf(defaultName, sizeof(defaultName), "afn_script%s_%d", suffix, cwNode.id);
+                    }
+                    ImGui::Spacing();
+                    ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "Function Declaration");
+                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.1f, 0.1f, 0.12f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.7f, 1.0f, 1.0f));
+                    if (ImGui::InputTextWithHint("##FuncDecl", defaultName, cwNode.funcName, sizeof(cwNode.funcName)))
+                        sProjectDirty = true;
+                    ImGui::PopStyleColor(2);
+                }
+
+                // Custom override section
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.5f, 1.0f), "Custom Override");
+                ImGui::SameLine();
+                if (!cwNode.customCode[0]) {
+                    if (ImGui::SmallButton("Enable")) {
+                        strncpy(cwNode.customCode, sVsCodeWindowBuf, sizeof(cwNode.customCode) - 1);
+                        strncpy(sVsCodeWindowEditBuf, cwNode.customCode, sizeof(sVsCodeWindowEditBuf) - 1);
+                        sProjectDirty = true;
+                    }
+                } else {
+                    if (ImGui::SmallButton("Reset")) {
+                        cwNode.customCode[0] = '\0';
+                        sVsCodeWindowEditBuf[0] = '\0';
+                        sProjectDirty = true;
+                    }
+                }
+                if (cwNode.customCode[0]) {
+                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.1f, 0.08f, 1.0f));
+                    ImGui::InputTextMultiline("##EditCode", sVsCodeWindowEditBuf, sizeof(sVsCodeWindowEditBuf),
+                        ImVec2(-1, -30), ImGuiInputTextFlags_AllowTabInput);
+                    ImGui::PopStyleColor();
+                    if (ImGui::Button("Save")) {
+                        strncpy(cwNode.customCode, sVsCodeWindowEditBuf, sizeof(cwNode.customCode) - 1);
+                        sProjectDirty = true;
+                    }
+                }
+            }
+            ImGui::End();
         }
 
         if (sVsShowContextMenu) {
@@ -7781,6 +10405,16 @@ void FrameTick(float dt)
                         sVsLinks.push_back({ { n.id, 2, 0 }, sVsPendingAutoWire });
                     sVsPendingAutoWire = { -1, 0, 0 };
                 }
+                // Auto-open code window for Custom Code nodes
+                if (t == VsNodeType::CustomCode) {
+                    VsNode& cn = sVsNodes.back();
+                    strncpy(cn.customCode, "// write your GBA C code here\n", sizeof(cn.customCode) - 1);
+                    sVsCodeWindowOpen = true;
+                    sVsCodeWindowNodeIdx = (int)sVsNodes.size() - 1;
+                    snprintf(sVsCodeWindowBuf, sizeof(sVsCodeWindowBuf),
+                        "// ---- Editor Play Mode ----\n// Custom code — runs only on GBA\n\n// ---- GBA Runtime (mapdata.h) ----\n%s", cn.customCode);
+                    strncpy(sVsCodeWindowEditBuf, cn.customCode, sizeof(sVsCodeWindowEditBuf) - 1);
+                }
             };
 
             // Search bar — auto-focus on open
@@ -7812,7 +10446,8 @@ void FrameTick(float dt)
 
             if (hasSearch) {
                 // Flat filtered list when searching
-                for (int t = 0; t < (int)VsNodeType::Group; t++) {
+                for (int t = 0; t < (int)VsNodeType::COUNT; t++) {
+                    if ((VsNodeType)t == VsNodeType::Group) continue;
                     if (matchesSearch(sVsNodeDefs[t].name))
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
                 }
@@ -7833,6 +10468,7 @@ void FrameTick(float dt)
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
                     for (int t = (int)VsNodeType::Branch; t <= (int)VsNodeType::CompareVar; t++)
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsMoving].name)) addNodeAt(VsNodeType::IsMoving);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
@@ -7842,6 +10478,8 @@ void FrameTick(float dt)
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
                     for (int t = (int)VsNodeType::MovePlayer; t <= (int)VsNodeType::DampenJump; t++)
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CustomCode].name)) addNodeAt(VsNodeType::CustomCode);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
@@ -7851,6 +10489,7 @@ void FrameTick(float dt)
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,1));
                     for (int t = (int)VsNodeType::Integer; t <= (int)VsNodeType::Float; t++)
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Object].name)) addNodeAt(VsNodeType::Object);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
@@ -7865,7 +10504,7 @@ void FrameTick(float dt)
         // Properties panel overlay — as child window inside canvas (data nodes only)
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
-            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group) {
+            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode) {
             const auto& def = sVsNodeDefs[(int)n.type];
             float propW = 260, propH = 180;
             float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -7950,9 +10589,87 @@ void FrameTick(float dt)
                 }
                 break;
             }
+            case VsNodeType::ChangeScene: {
+                ImGui::Text("Mode");
+                const char* modeNames[] = { "Mode 4", "Mode 0" };
+                int mode = (n.paramInt[1] == 1) ? 1 : 0;
+                if (ImGui::BeginCombo("##ModeSel", modeNames[mode])) {
+                    if (ImGui::Selectable("Mode 4", mode == 0)) { n.paramInt[1] = 0; }
+                    if (ImGui::Selectable("Mode 0", mode == 1)) { n.paramInt[1] = 1; }
+                    ImGui::EndCombo();
+                }
+                break;
+            }
+            case VsNodeType::Object: {
+                // paramInt[1]: 0=Sprite Asset, 1=Mesh Asset, 2=Scene Sprite
+                ImGui::Text("Object");
+                const char* objKinds[] = { "Sprite", "Mesh", "Instance" };
+                int objKind = std::clamp(n.paramInt[1], 0, 2);
+                ImGui::PushItemWidth(Scaled(70));
+                if (ImGui::Combo("##ObjKind", &objKind, objKinds, 3))
+                    n.paramInt[1] = objKind;
+                ImGui::PopItemWidth();
+
+                if (objKind == 0) {
+                    // Sprite assets
+                    const char* preview = (n.paramInt[0] >= 0 && n.paramInt[0] < (int)sSpriteAssets.size())
+                        ? sSpriteAssets[n.paramInt[0]].name.c_str() : "None";
+                    if (ImGui::BeginCombo("##ObjSpr", preview)) {
+                        for (int si = 0; si < (int)sSpriteAssets.size(); si++) {
+                            char itemLabel[64];
+                            snprintf(itemLabel, sizeof(itemLabel), "[%d] %s", si, sSpriteAssets[si].name.c_str());
+                            if (ImGui::Selectable(itemLabel, si == n.paramInt[0]))
+                                n.paramInt[0] = si;
+                            if (si == n.paramInt[0]) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
+                    }
+                } else if (objKind == 1) {
+                    // Mesh assets
+                    const char* preview = (n.paramInt[0] >= 0 && n.paramInt[0] < (int)sMeshAssets.size())
+                        ? sMeshAssets[n.paramInt[0]].name.c_str() : "None";
+                    if (ImGui::BeginCombo("##ObjMesh", preview)) {
+                        for (int mi = 0; mi < (int)sMeshAssets.size(); mi++) {
+                            char itemLabel[64];
+                            snprintf(itemLabel, sizeof(itemLabel), "[%d] %s", mi, sMeshAssets[mi].name.c_str());
+                            if (ImGui::Selectable(itemLabel, mi == n.paramInt[0]))
+                                n.paramInt[0] = mi;
+                            if (mi == n.paramInt[0]) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
+                    }
+                } else {
+                    // Scene sprite instances (original behavior)
+                    const char* preview = (n.paramInt[0] >= 0 && n.paramInt[0] < sSpriteCount)
+                        ? (sSprites[n.paramInt[0]].assetIdx >= 0 && sSprites[n.paramInt[0]].assetIdx < (int)sSpriteAssets.size()
+                            ? sSpriteAssets[sSprites[n.paramInt[0]].assetIdx].name.c_str() : "(no asset)")
+                        : "None";
+                    char objLabel[64];
+                    if (n.paramInt[0] >= 0 && n.paramInt[0] < sSpriteCount)
+                        snprintf(objLabel, sizeof(objLabel), "[%d] %s", n.paramInt[0], preview);
+                    else snprintf(objLabel, sizeof(objLabel), "None");
+                    if (ImGui::BeginCombo("##ObjInst", objLabel)) {
+                        for (int si = 0; si < sSpriteCount; si++) {
+                            const char* assetName = (sSprites[si].assetIdx >= 0 && sSprites[si].assetIdx < (int)sSpriteAssets.size())
+                                ? sSpriteAssets[sSprites[si].assetIdx].name.c_str() : "(no asset)";
+                            char itemLabel[64];
+                            snprintf(itemLabel, sizeof(itemLabel), "[%d] %s", si, assetName);
+                            if (ImGui::Selectable(itemLabel, si == n.paramInt[0]))
+                                n.paramInt[0] = si;
+                            if (si == n.paramInt[0]) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+                break;
+            }
             case VsNodeType::Group:
                 ImGui::Text("Name");
                 ImGui::InputText("##GrpName", n.groupLabel, sizeof(n.groupLabel));
+                break;
+            case VsNodeType::CustomCode:
+                ImGui::Text("Name");
+                ImGui::InputText("##CcName", n.groupLabel, sizeof(n.groupLabel));
                 break;
             default: break;
             }
@@ -7965,6 +10682,138 @@ void FrameTick(float dt)
 
         ImGui::End();       // ##NodeCanvas
         ImGui::PopStyleColor();
+
+        // ---- BLUEPRINT ASSET BROWSER (bottom panel) ----
+        {
+            float browY = bodyY + canvasH;
+            ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, browY));
+            ImGui::SetNextWindowSize(ImVec2(totalW, browserH));
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.11f, 0.11f, 0.13f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.14f, 0.14f, 0.16f, 1.0f));
+            ImGui::Begin("##BpBrowser", nullptr, flags);
+
+            // Header row: title + action buttons
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.8f, 1.0f), "Blueprints");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("+ New##bpnew")) {
+                BlueprintAsset bp;
+                snprintf(bp.name, sizeof(bp.name), "Blueprint%d", (int)sBlueprintAssets.size());
+                sBlueprintAssets.push_back(bp);
+                sSelectedBlueprint = (int)sBlueprintAssets.size() - 1;
+                sProjectDirty = true;
+            }
+            if (sSelectedBlueprint >= 0 && sSelectedBlueprint < (int)sBlueprintAssets.size()) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Edit##bpedit")) {
+                    if (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0 && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
+                        BlueprintAsset& old = sBlueprintAssets[sVsEditBlueprintIdx];
+                        old.nodes = sVsNodes; old.links = sVsLinks; old.annotations = sVsAnnotations;
+                        old.groupPins = sVsGroupPins; old.nextId = sVsNextId;
+                        old.panX = sVsPanX; old.panY = sVsPanY; old.zoom = sVsZoom;
+                    } else if (sVsEditSource == VsEditSource::Scene) {
+                        if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+                            SaveMapSceneState(sMapScenes[sMapSelectedScene]);
+                    }
+                    BlueprintAsset& bp = sBlueprintAssets[sSelectedBlueprint];
+                    sVsNodes = bp.nodes; sVsLinks = bp.links; sVsAnnotations = bp.annotations;
+                    sVsGroupPins = bp.groupPins; sVsNextId = bp.nextId;
+                    sVsPanX = bp.panX; sVsPanY = bp.panY; sVsZoom = bp.zoom;
+                    sVsEditSource = VsEditSource::Blueprint;
+                    sVsEditBlueprintIdx = sSelectedBlueprint;
+                    sVsSelected = -1;
+                    sVsEditingGroup = 0;
+                    sVsUndoStack.clear();
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Dup##bpdup")) {
+                    BlueprintAsset dup = sBlueprintAssets[sSelectedBlueprint];
+                    snprintf(dup.name, sizeof(dup.name), "%s Copy", sBlueprintAssets[sSelectedBlueprint].name);
+                    sBlueprintAssets.push_back(std::move(dup));
+                    sSelectedBlueprint = (int)sBlueprintAssets.size() - 1;
+                    sProjectDirty = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Del##bpdel")) {
+                    if (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx == sSelectedBlueprint) {
+                        if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+                            LoadMapSceneState(sMapScenes[sMapSelectedScene]);
+                        sVsEditSource = VsEditSource::Scene;
+                        sVsEditBlueprintIdx = -1;
+                    }
+                    sBlueprintAssets.erase(sBlueprintAssets.begin() + sSelectedBlueprint);
+                    auto fixBpRef = [&](int& ref) {
+                        if (ref == sSelectedBlueprint) ref = -1;
+                        else if (ref > sSelectedBlueprint) ref--;
+                    };
+                    for (int si = 0; si < (int)sMapScenes.size(); si++) {
+                        for (int j = 0; j < sMapScenes[si].spriteCount; j++)
+                            fixBpRef(sMapScenes[si].sprites[j].blueprintIdx);
+                        fixBpRef(sMapScenes[si].blueprintIdx);
+                    }
+                    for (int j = 0; j < sSpriteCount; j++)
+                        fixBpRef(sSprites[j].blueprintIdx);
+                    for (auto& obj : sTmObjects)
+                        fixBpRef(obj.blueprintIdx);
+                    for (auto& sc : sTmScenes) {
+                        for (auto& obj : sc.objects)
+                            fixBpRef(obj.blueprintIdx);
+                        fixBpRef(sc.blueprintIdx);
+                    }
+                    if (sVsEditBlueprintIdx > sSelectedBlueprint) sVsEditBlueprintIdx--;
+                    sSelectedBlueprint = std::min(sSelectedBlueprint, (int)sBlueprintAssets.size() - 1);
+                    sProjectDirty = true;
+                }
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(Scaled(100));
+                if (ImGui::InputText("##BpRename", sBlueprintAssets[sSelectedBlueprint].name, 32))
+                    sProjectDirty = true;
+            }
+            ImGui::Separator();
+
+            // Scrollable blueprint list
+            ImGui::BeginChild("##BpList", ImVec2(0, 0), false);
+            for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++) {
+                BlueprintAsset& bp = sBlueprintAssets[bi];
+                bool isSel = (sSelectedBlueprint == bi);
+                bool isEditing = (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx == bi);
+                char label[64];
+                snprintf(label, sizeof(label), "%s%s###bp%d", bp.name, isEditing ? " (editing)" : "", bi);
+
+                if (ImGui::Selectable(label, isSel, ImGuiSelectableFlags_AllowDoubleClick)) {
+                    sSelectedBlueprint = bi;
+                    // Double-click to edit
+                    if (ImGui::IsMouseDoubleClicked(0)) {
+                        if (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0 && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
+                            BlueprintAsset& old = sBlueprintAssets[sVsEditBlueprintIdx];
+                            old.nodes = sVsNodes; old.links = sVsLinks; old.annotations = sVsAnnotations;
+                            old.groupPins = sVsGroupPins; old.nextId = sVsNextId;
+                            old.panX = sVsPanX; old.panY = sVsPanY; old.zoom = sVsZoom;
+                        } else if (sVsEditSource == VsEditSource::Scene) {
+                            if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+                                SaveMapSceneState(sMapScenes[sMapSelectedScene]);
+                        }
+                        sVsNodes = bp.nodes; sVsLinks = bp.links; sVsAnnotations = bp.annotations;
+                        sVsGroupPins = bp.groupPins; sVsNextId = bp.nextId;
+                        sVsPanX = bp.panX; sVsPanY = bp.panY; sVsZoom = bp.zoom;
+                        sVsEditSource = VsEditSource::Blueprint;
+                        sVsEditBlueprintIdx = bi;
+                        sVsSelected = -1;
+                        sVsEditingGroup = 0;
+                        sVsUndoStack.clear();
+                    }
+                }
+                // Show node/param count as detail
+                ImGui::SameLine(Scaled(180));
+                ImGui::TextDisabled("%d nodes, %d params", (int)bp.nodes.size(), bp.paramCount);
+            }
+            if (sBlueprintAssets.empty()) {
+                ImGui::TextDisabled("No blueprints. Click '+ New' to create one.");
+            }
+            ImGui::EndChild(); // ##BpList
+
+            ImGui::End();       // ##BpBrowser
+            ImGui::PopStyleColor(2);
+        }
     }
     else if (sActiveTab == EditorTab::Mode7)
     {
@@ -8009,9 +10858,15 @@ void FrameTick(float dt)
         // Scene panel (top-right, only on Map tab)
         if (sActiveTab == EditorTab::Map)
         {
-            scenePanH = 160;
+            // Compute scene panel height: base for scene list + extra if blueprint attached
+            int bpExtraH = 0;
+            if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size() && sMapScenes[sMapSelectedScene].blueprintIdx >= 0)
+                bpExtraH = 20 + sMapScenes[sMapSelectedScene].instanceParamCount * 22;
+            scenePanH = 160 + 50 + bpExtraH;
+            if (scenePanH > bodyH * 0.5f) scenePanH = (float)(int)(bodyH * 0.5f);
             ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus;
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
             ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + leftW, bodyY));
             ImGui::SetNextWindowSize(ImVec2(rightW, scenePanH));
             ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
@@ -8041,8 +10896,8 @@ void FrameTick(float dt)
                 }
             }
 
-            // Scene list — selected item is an editable InputText
-            ImGui::BeginChild("##MapSceneList", ImVec2(0, 0), true);
+            // Scene list
+            ImGui::BeginChild("##MapSceneList", ImVec2(0, 100));
             for (int i = 0; i < (int)sMapScenes.size(); i++)
             {
                 bool sel = (i == sMapSelectedScene);
@@ -8067,6 +10922,65 @@ void FrameTick(float dt)
                 }
             }
             ImGui::EndChild();
+
+            // Scene-level blueprint
+            if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size()) {
+                MapScene& ms = sMapScenes[sMapSelectedScene];
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Scene Blueprint");
+                ImGui::PushItemWidth(-1);
+                const char* bpPreview = (ms.blueprintIdx >= 0 && ms.blueprintIdx < (int)sBlueprintAssets.size())
+                    ? sBlueprintAssets[ms.blueprintIdx].name : "(none)";
+                if (ImGui::BeginCombo("Script##scenebp", bpPreview)) {
+                    if (ImGui::Selectable("(none)##scenebpnone", ms.blueprintIdx < 0)) {
+                        ms.blueprintIdx = -1;
+                        ms.instanceParamCount = 0;
+                        sProjectDirty = true;
+                    }
+                    for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++) {
+                        bool sel = (ms.blueprintIdx == bi);
+                        if (ImGui::Selectable(sBlueprintAssets[bi].name, sel)) {
+                            ms.blueprintIdx = bi;
+                            ms.instanceParamCount = 0;
+                            sProjectDirty = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ms.blueprintIdx >= 0 && ms.blueprintIdx < (int)sBlueprintAssets.size()) {
+                    const BlueprintAsset& bp = sBlueprintAssets[ms.blueprintIdx];
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        const BpParam& param = bp.params[pi];
+                        int overrideIdx = -1;
+                        for (int oi = 0; oi < ms.instanceParamCount; oi++)
+                            if (ms.instanceParams[oi].paramIdx == pi) { overrideIdx = oi; break; }
+                        int val = (overrideIdx >= 0) ? ms.instanceParams[overrideIdx].value : param.defaultInt;
+                        ImGui::PushID(pi + 7000);
+                        char label[48]; snprintf(label, sizeof(label), "%s##scbp%d", param.name, pi);
+                        if (ImGui::DragInt(label, &val, 1.0f)) {
+                            if (overrideIdx >= 0) {
+                                ms.instanceParams[overrideIdx].value = val;
+                            } else if (ms.instanceParamCount < 8) {
+                                ms.instanceParams[ms.instanceParamCount].paramIdx = pi;
+                                ms.instanceParams[ms.instanceParamCount].value = val;
+                                ms.instanceParamCount++;
+                            }
+                            sProjectDirty = true;
+                        }
+                        if (overrideIdx >= 0) {
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Reset")) {
+                                for (int oi = overrideIdx; oi < ms.instanceParamCount - 1; oi++)
+                                    ms.instanceParams[oi] = ms.instanceParams[oi + 1];
+                                ms.instanceParamCount--;
+                                sProjectDirty = true;
+                            }
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                ImGui::PopItemWidth();
+            }
 
             ImGui::End();
             ImGui::PopStyleColor();

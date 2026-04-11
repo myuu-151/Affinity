@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <set>
 #include <filesystem>
 
 #ifdef _WIN32
@@ -252,7 +253,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
                             const GBACameraExport& camera,
                             const std::vector<GBAMeshExport>& meshes,
                             float orbitDist,
-                            const GBAScriptExport& script)
+                            const GBAScriptExport& script,
+                            const std::vector<GBABlueprintExport>& blueprints,
+                            const std::vector<GBABlueprintInstanceExport>& bpInstances)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
     std::ofstream f(outPath);
@@ -318,6 +321,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
     // Sprite assets
     f << "#define AFN_ASSET_COUNT " << (int)assets.size() << "\n\n";
 
+    // Determine which assets are actually referenced by sprites in the scene.
+    // Only referenced assets get VRAM tiles — unreferenced ones are skipped to prevent
+    // OBJ VRAM overflow in Mode 4 where only 512 tiles (16KB) are usable.
+    std::vector<bool> assetReferencedBySprite(assets.size(), false);
+    for (size_t si = 0; si < sprites.size(); si++)
+        if (sprites[si].assetIdx >= 0 && sprites[si].assetIdx < (int)assets.size())
+            assetReferencedBySprite[sprites[si].assetIdx] = true;
+
     // Build one combined tile data array: all assets, all frames, packed contiguously
     std::vector<uint32_t> allTiles;
     std::vector<int> assetTileStart;
@@ -334,8 +345,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
         assetTilesPerFrame.push_back(tilesPerFrame);
 
         // Skip static frames for direction-based assets — they use DMA direction tiles
-        // and including them wastes OBJ VRAM (critical when 2+ direction assets fill 32KB)
         if (asset.hasDirections && !asset.dirAnimSets.empty()) continue;
+        // Skip unreferenced assets — no sprite uses them, saves OBJ VRAM
+        if (!assetReferencedBySprite[ai]) continue;
 
         for (size_t fi = 0; fi < asset.frames.size(); fi++)
         {
@@ -345,7 +357,6 @@ static bool GenerateMapData(const std::string& runtimeDir,
     }
 
     // Quantize and append per-asset directional sprites (multi-set support)
-    // Set 0's tiles go into allTiles (VRAM init). All sets go into dirAnimAllTiles (ROM for DMA).
     struct AssetDirInfo {
         bool has = false;
         int setCount = 0;
@@ -383,7 +394,20 @@ static bool GenerateMapData(const std::string& runtimeDir,
         else
             assetDirInfos[ai].palBank = assets[ai].palBank;
 
-        // Collect ALL unique colors across ALL sets for shared palette
+        // Compute which direction sets are actually used by animations
+        // to avoid wasting palette slots on unused sets' colors
+        std::vector<bool> usedSets(assets[ai].dirAnimSets.size(), false);
+        {
+            int base = 0;
+            for (size_t an = 0; an < assets[ai].anims.size(); an++) {
+                int fc = assets[ai].anims[an].endFrame;
+                for (int f2 = 0; f2 < fc && (base + f2) < (int)usedSets.size(); f2++)
+                    usedSets[base + f2] = true;
+                base += fc;
+            }
+        }
+
+        // Collect unique colors only from animation-referenced direction sets
         struct ColorFreq { unsigned short rgb15; int count; };
         std::vector<ColorFreq> colorFreqs;
         auto findOrAdd = [&](unsigned short c15) -> int {
@@ -393,10 +417,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
             return (int)colorFreqs.size() - 1;
         };
 
-        // If sharing palette from another asset, collect colors from source asset too
-        // so both assets share the same quantized palette
+        // Collect colors from a specific asset, restricted to used sets
         auto collectColorsFromAsset = [&](int assetIdx) {
             for (size_t si2 = 0; si2 < assets[assetIdx].dirAnimSets.size(); si2++)
+            {
+                if (si2 < usedSets.size() && !usedSets[si2]) continue;
                 for (int d = 0; d < 8; d++)
                 {
                     const auto& img = assets[assetIdx].dirAnimSets[si2].dirImages[d];
@@ -412,6 +437,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                             findOrAdd((unsigned short)(r2 | (g2 << 5) | (b2 << 10)));
                         }
                 }
+            }
         };
 
         // If sharing palette, use source's colors; otherwise use own
@@ -483,8 +509,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
         // Quantize and tile each set
         int dirSize = 64;
-        // Each asset needs a unique VRAM region for DMA: base + accumulated tiles from previous assets
-        assetDirInfos[ai].vramTile0 = (int)allTiles.size() / 8 + dirVramNextTile;
+        // Only allocate VRAM for assets referenced by sprites — unreferenced assets
+        // get ROM data but vramTile0 stays 0 (DMA skipped at runtime since hasDirs=0
+        // unless we mark them). We still emit ROM tiles for all direction assets.
+        if (assetReferencedBySprite[ai])
+            assetDirInfos[ai].vramTile0 = (int)allTiles.size() / 8 + dirVramNextTile;
 
         for (int si = 0; si < setCount; si++)
         {
@@ -525,13 +554,56 @@ static bool GenerateMapData(const std::string& runtimeDir,
             }
         }
 
-        // Advance VRAM offset: reserve space for one set (8 dirs × tpf tiles)
+        // Advance VRAM offset only for referenced assets
         int tpf = (dirSize / 8) * (dirSize / 8); // tiles per direction frame
-        dirVramNextTile += 8 * tpf;
+        if (assetReferencedBySprite[ai])
+            dirVramNextTile += 8 * tpf;
+    }
+
+    // Auto-assign unique palBanks for ALL assets to prevent palette overwrites.
+    // Assets sharing a palette (paletteSrc) share the same bank. Bank 0 is reserved
+    // (transparent), banks 1-15 available. Bank 6 reserved for minimap.
+    // Stores resolved bank per asset in resolvedPalBank[].
+    std::vector<int> resolvedPalBank(assets.size(), -1);
+    {
+        bool usedBanks[16] = {};
+        usedBanks[0] = true;  // bank 0 = transparent, never use
+        usedBanks[6] = true;  // bank 6 = minimap dots
+
+        // Pass 1: assign banks to independent assets (paletteSrc < 0 or self)
+        for (size_t ai = 0; ai < assets.size(); ai++) {
+            int src = assets[ai].paletteSrc;
+            if (src >= 0 && src < (int)assets.size() && src != (int)ai) continue; // shared — handle later
+            int bank = assets[ai].palBank & 15;
+            if (bank == 0) bank = 1; // avoid bank 0
+            if (!usedBanks[bank]) {
+                usedBanks[bank] = true;
+            } else {
+                // Conflict — find next free bank
+                for (int b = 1; b < 16; b++)
+                    if (!usedBanks[b]) { bank = b; break; }
+                usedBanks[bank] = true;
+            }
+            resolvedPalBank[ai] = bank;
+        }
+        // Pass 2: shared palette assets inherit their source's resolved bank
+        for (size_t ai = 0; ai < assets.size(); ai++) {
+            int src = assets[ai].paletteSrc;
+            if (src >= 0 && src < (int)assets.size() && src != (int)ai)
+                resolvedPalBank[ai] = resolvedPalBank[src];
+            // Fallback if somehow unassigned
+            if (resolvedPalBank[ai] < 0) resolvedPalBank[ai] = 1;
+        }
+        // Apply resolved banks to direction infos too
+        for (size_t ai = 0; ai < assets.size(); ai++)
+            if (assetDirInfos[ai].has)
+                assetDirInfos[ai].palBank = resolvedPalBank[ai];
     }
 
     int totalTileCount = (int)allTiles.size() / 8;
-    int minimapTile = totalTileCount + dirVramNextTile;
+    // In Mode 4 (meshes present), tiles 0-511 overlap bitmap — offset by 512
+    int tileOffset = meshes.empty() ? 0 : 512;
+    int minimapTile = totalTileCount + dirVramNextTile + tileOffset;
 
     // Emit combined tile data (always emit even if empty — runtime expects the symbol)
     if (!allTiles.empty())
@@ -605,9 +677,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
     }
     f << "\n";
 
-    // In Mode 4 (meshes present), OBJ tiles 0-511 overlap bitmap framebuffer.
-    // Offset all tile IDs by 512 so sprites use accessible VRAM.
-    int tileOffset = meshes.empty() ? 0 : 512;
+    // tileOffset already computed above (before minimapTile)
 
     // Asset direction descriptor table: { setCount, tpf, dirSize, palBank, hasDirs, vramTile0 }
     if (!assets.empty())
@@ -622,7 +692,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static const int afn_asset_dir_desc[][6] = {\n";
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
-            if (assetDirInfos[ai].has)
+            if (assetDirInfos[ai].has && assetReferencedBySprite[ai])
             {
                 int tpf = (assetDirInfos[ai].dirSize / 8) * (assetDirInfos[ai].dirSize / 8);
                 f << "    { " << assetDirInfos[ai].setCount << ", " << tpf
@@ -644,7 +714,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "    { ";
             for (int si = 0; si < maxDirSets; si++)
             {
-                if (assetDirInfos[ai].has && si < (int)assetDirInfos[ai].romSetU32Offset.size())
+                if (assetDirInfos[ai].has && assetReferencedBySprite[ai] && si < (int)assetDirInfos[ai].romSetU32Offset.size())
                     f << assetDirInfos[ai].romSetU32Offset[si];
                 else
                     f << -1;
@@ -736,7 +806,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "    { " << (assetTileStart[ai] + tileOffset) << ", " << assetTilesPerFrame[ai]
               << ", " << (int)assets[ai].frames.size()
               << ", " << assetObjSize[ai]
-              << ", " << assets[ai].palBank << " },\n";
+              << ", " << resolvedPalBank[ai] << " },\n";
         }
         f << "};\n\n";
     }
@@ -1042,8 +1112,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
             }
         }
 
-        // Mesh descriptor table: { vertCount, indexCount, quadIndexCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase, wireframe, grayscale, drawDist }
-        f << "static const int afn_mesh_desc[][15] = {\n";
+        // Mesh descriptor table: { vertCount, indexCount, quadIndexCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase, wireframe, grayscale, drawDist, drawPriority, visible }
+        f << "static const int afn_mesh_desc[][17] = {\n";
         for (size_t mi = 0; mi < meshes.size(); mi++)
         {
             int vc = finalVertCounts[mi];
@@ -1065,7 +1135,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 drawDist = (int)(meshes[mi].drawDistance / 4.0f * 256.0f);
             char hex[8];
             snprintf(hex, sizeof(hex), "0x%04X", meshes[mi].colorRGB15);
-            f << "    { " << vc << ", " << ic << ", " << qic << ", " << hex << ", " << meshes[mi].cullMode << ", " << lit << ", " << sorted << ", " << halfRes << ", " << textured << ", " << texW << ", " << texShift << ", " << texPalBases[mi] << ", " << wireframe << ", " << grayscale << ", " << drawDist << " },\n";
+            f << "    { " << vc << ", " << ic << ", " << qic << ", " << hex << ", " << meshes[mi].cullMode << ", " << lit << ", " << sorted << ", " << halfRes << ", " << textured << ", " << texW << ", " << texShift << ", " << texPalBases[mi] << ", " << wireframe << ", " << grayscale << ", " << drawDist << ", " << meshes[mi].drawPriority << ", " << meshes[mi].visible << " },\n";
         }
         f << "};\n\n";
 
@@ -1197,6 +1267,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             if (sprites[si].meshIdx < 0) continue;
             int mi = sprites[si].meshIdx;
             if (mi >= (int)meshes.size()) continue;
+            if (!meshes[mi].collision) continue;
 
             const auto& mesh = meshes[mi];
             const auto& spr = sprites[si];
@@ -1361,6 +1432,50 @@ static bool GenerateMapData(const std::string& runtimeDir,
     }
 
     // ---- Generate script code from visual node graph ----
+    // Define AFN_HAS_SCRIPT and emit variable declarations if ANY scripts or blueprints exist
+    bool hasAnyScript = !script.nodes.empty() || !blueprints.empty();
+    if (hasAnyScript)
+    {
+        f << "#define AFN_HAS_SCRIPT 1\n\n";
+
+        // Forward declarations for script state variables (defined later in main.c)
+        f << "// Script state variables (defined in main.c)\n";
+        f << "static FIXED afn_input_fwd;\n";
+        f << "static FIXED afn_input_right;\n";
+        f << "static FIXED afn_move_speed;\n";
+        f << "static int   afn_auto_orbit_speed;\n";
+        f << "static int   afn_play_anim;\n";
+        f << "static int   afn_pending_scene;\n";
+        f << "static int   afn_pending_scene_mode;\n";
+        f << "static int   afn_collided_sprite;\n";
+        f << "static FIXED afn_gravity;\n";
+        f << "static FIXED afn_terminal_vel;\n";
+        f << "static FIXED player_vy;\n";
+        f << "static int   player_on_ground;\n";
+        f << "static u16   orbit_angle;\n";
+        f << "extern int player_moving;\n\n";
+    }
+    // Helper: get suffix string for an action node type
+    auto actionSuffix = [](GBAScriptNodeType t) -> const char* {
+        switch (t) {
+        case GBAScriptNodeType::MovePlayer:    return "_move";
+        case GBAScriptNodeType::Jump:          return "_jump";
+        case GBAScriptNodeType::Walk:          return "_walk";
+        case GBAScriptNodeType::Sprint:        return "_sprint";
+        case GBAScriptNodeType::OrbitCamera:   return "_orbit";
+        case GBAScriptNodeType::PlayAnim:      return "_play_anim";
+        case GBAScriptNodeType::SetGravity:    return "_set_gravity";
+        case GBAScriptNodeType::SetMaxFall:    return "_set_max_fall";
+        case GBAScriptNodeType::DestroyObject: return "_destroy";
+        case GBAScriptNodeType::AutoOrbit:     return "_auto_orbit";
+        case GBAScriptNodeType::DampenJump:    return "_dampen_jump";
+        case GBAScriptNodeType::IsMoving:      return "_is_moving";
+        case GBAScriptNodeType::ChangeScene:   return "_change_scene";
+        case GBAScriptNodeType::CustomCode:    return "_custom";
+        default: return "";
+        }
+    };
+
     if (!script.nodes.empty())
     {
         // Helper: find node by id
@@ -1439,7 +1554,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 n.type != GBAScriptNodeType::OnKeyReleased &&
                 n.type != GBAScriptNodeType::OnKeyHeld &&
                 n.type != GBAScriptNodeType::OnStart &&
-                n.type != GBAScriptNodeType::OnUpdate)
+                n.type != GBAScriptNodeType::OnUpdate &&
+                n.type != GBAScriptNodeType::OnCollision)
                 continue;
 
             EventChain chain;
@@ -1471,31 +1587,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
         if (!chains.empty())
         {
-            f << "// ---- Generated script code from visual node graph ----\n";
-            f << "#define AFN_HAS_SCRIPT 1\n\n";
+            f << "// ---- Generated script code from visual node graph ----\n\n";
 
-            // Forward declarations for script state variables (defined later in main.c)
-            // Using 'static' redeclaration — valid in C for same-TU forward refs.
-            f << "// Script state variables (defined in main.c)\n";
-            f << "static FIXED afn_input_fwd;\n";
-            f << "static FIXED afn_input_right;\n";
-            f << "static FIXED afn_move_speed;\n";
-            f << "static int   afn_auto_orbit_speed;\n";
-            f << "static int   afn_play_anim;\n";
-            f << "static FIXED afn_gravity;\n";
-            f << "static FIXED afn_terminal_vel;\n";
-            f << "static FIXED player_vy;\n";
-            f << "static int   player_on_ground;\n";
-            f << "static u16   orbit_angle;\n\n";
-
-            // Group chains by event type for cleaner output
-            // OnStart → afn_script_start() — called once at init
-            // OnKeyHeld → afn_script_key_held() — called every frame
-            // OnKeyPressed → afn_script_key_pressed() — called every frame
-            // OnKeyReleased → afn_script_key_released() — called every frame
-
-            // Emit action code for a single action node
-            auto emitAction = [&](const GBAScriptNodeExport* action) {
+            // Emit action body lines for a single action node
+            auto emitActionBody = [&](const GBAScriptNodeExport* action) {
                 // Use custom code override if set
                 if (action->customCode[0]) {
                     f << "    " << action->customCode << "\n";
@@ -1575,14 +1670,56 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 }
                 case GBAScriptNodeType::PlayAnim: {
                     auto* animData = findDataIn(action->id, 0);
-                    int animIdx = animData ? resolveInt(animData) : 0;
+                    // Animation node: paramInt[0]=sprite asset, paramInt[1]=anim index
+                    int animIdx = animData ? animData->paramInt[1] : 0;
                     f << "    afn_play_anim = " << animIdx << ";\n";
                     break;
                 }
+                case GBAScriptNodeType::ChangeScene: {
+                    auto* scData = findDataIn(action->id, 0);
+                    int scIdx = scData ? resolveInt(scData) : action->paramInt[0];
+                    int scMode = action->paramInt[1]; // 0=3D, 1=Tilemap
+                    f << "    afn_pending_scene = " << scIdx << ";\n";
+                    f << "    afn_pending_scene_mode = " << scMode << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::CustomCode:
+                    break; // handled by customCode[0] check above
                 default:
                     f << "    // unsupported action: type " << (int)action->type << "\n";
                     break;
                 }
+            };
+
+            // First pass: emit each action as its own function (deduplicate by node ID)
+            std::set<int> emittedActionIds;
+            for (auto& c : chains) {
+                for (auto* a : c.actions) {
+                    if (a->type == GBAScriptNodeType::IsMoving) continue;
+                    if (emittedActionIds.count(a->id)) continue;
+                    emittedActionIds.insert(a->id);
+                    const char* suffix = a->funcName[0] ? a->funcName : nullptr;
+                    char defaultName[64];
+                    if (!suffix) {
+                        snprintf(defaultName, sizeof(defaultName), "afn_script%s_%d", actionSuffix(a->type), a->id);
+                        suffix = defaultName;
+                    }
+                    f << "static inline void " << suffix << "(void) {\n";
+                    emitActionBody(a);
+                    f << "}\n";
+                }
+            }
+            f << "\n";
+
+            // Helper: emit a call to an action's function
+            auto emitActionCall = [&](const GBAScriptNodeExport* a) {
+                char callName[64];
+                if (a->funcName[0]) {
+                    snprintf(callName, sizeof(callName), "%s", a->funcName);
+                } else {
+                    snprintf(callName, sizeof(callName), "afn_script%s_%d", actionSuffix(a->type), a->id);
+                }
+                f << "    " << callName << "();\n";
             };
 
             // Collect OnStart chains
@@ -1597,67 +1734,538 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
             // Always emit all four functions (main.c calls them unconditionally)
 
+            // Helper: find custom func name for an event type (first one wins)
+            auto findCustomName = [&](GBAScriptNodeType evType) -> const char* {
+                for (auto& c : chains)
+                    if (c.event->type == evType && c.event->funcName[0])
+                        return c.event->funcName;
+                return nullptr;
+            };
+            // Helper: emit function with optional rename + #define alias
+            auto emitFuncStart = [&](const char* defaultName, GBAScriptNodeType evType) {
+                const char* custom = findCustomName(evType);
+                if (custom) {
+                    f << "static inline void " << custom << "(void) {\n";
+                } else {
+                    f << "static inline void " << defaultName << "(void) {\n";
+                }
+            };
+            auto emitFuncAlias = [&](const char* defaultName, GBAScriptNodeType evType) {
+                const char* custom = findCustomName(evType);
+                if (custom)
+                    f << "#define " << defaultName << " " << custom << "\n";
+            };
+
+            // Emit action calls with IsMoving gate support
+            auto emitActionsWithGates = [&](const std::vector<const GBAScriptNodeExport*>& actions) {
+                int gateDepth = 0;
+                for (auto* a : actions) {
+                    if (a->type == GBAScriptNodeType::IsMoving) {
+                        f << "    if (player_moving) {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    emitActionCall(a);
+                }
+                for (int g = 0; g < gateDepth; g++)
+                    f << "    }\n";
+            };
+
             // OnStart → initialization function
-            f << "static inline void afn_script_start(void) {\n";
+            emitFuncStart("afn_script_start", GBAScriptNodeType::OnStart);
             for (auto& c : chains) {
                 if (c.event->type != GBAScriptNodeType::OnStart) continue;
-                for (auto* a : c.actions)
-                    emitAction(a);
+                emitActionsWithGates(c.actions);
             }
-            f << "}\n\n";
+            f << "}\n";
+            emitFuncAlias("afn_script_start", GBAScriptNodeType::OnStart);
+            f << "\n";
 
-            // Helper: emit actions with optional key guard
             auto emitKeyBlock = [&](const EventChain& c, const char* keyCheck) {
-                int key = resolveEventKey(*c.event);
-                if (key >= 0) {
+                // Collect all keys connected to this event node
+                std::vector<int> keys;
+                for (auto& l : script.links)
+                    if (l.toNodeId == c.event->id && l.toPinType == 3 && l.toPinIdx == 0) {
+                        auto* dn = findNode(l.fromNodeId);
+                        if (dn) keys.push_back(dn->paramInt[0]);
+                    }
+                if (keys.empty()) keys.push_back(c.event->paramInt[0]);
+
+                if (keys.size() == 1) {
                     char buf[64];
-                    snprintf(buf, sizeof(buf), keyCheck, resolveKeyName(key));
+                    snprintf(buf, sizeof(buf), keyCheck, resolveKeyName(keys[0]));
                     f << "  " << buf << " {\n";
-                    for (auto* a : c.actions)
-                        emitAction(a);
+                    emitActionsWithGates(c.actions);
                     f << "  }\n";
                 } else {
-                    // Ambiguous key — emit actions without guard (actions have own checks)
-                    f << "  { // (all d-pad)\n";
-                    for (auto* a : c.actions)
-                        emitAction(a);
+                    // Multiple keys: OR them together
+                    std::string kc(keyCheck);
+                    std::string condFmt = kc.substr(4, kc.size() - 5); // strip "if (" and ")"
+                    f << "  if (";
+                    for (size_t ki = 0; ki < keys.size(); ki++) {
+                        if (ki > 0) f << " || ";
+                        char buf[64];
+                        snprintf(buf, sizeof(buf), condFmt.c_str(), resolveKeyName(keys[ki]));
+                        f << buf;
+                    }
+                    f << ") {\n";
+                    emitActionsWithGates(c.actions);
                     f << "  }\n";
                 }
             };
 
             // OnKeyHeld → per-frame held-key checks
-            f << "static inline void afn_script_key_held(void) {\n";
+            emitFuncStart("afn_script_key_held", GBAScriptNodeType::OnKeyHeld);
             for (auto& c : chains) {
                 if (c.event->type != GBAScriptNodeType::OnKeyHeld) continue;
                 emitKeyBlock(c, "if (key_is_down(%s))");
             }
-            f << "}\n\n";
+            f << "}\n";
+            emitFuncAlias("afn_script_key_held", GBAScriptNodeType::OnKeyHeld);
+            f << "\n";
 
             // OnKeyPressed → per-frame key-hit checks
-            f << "static inline void afn_script_key_pressed(void) {\n";
+            emitFuncStart("afn_script_key_pressed", GBAScriptNodeType::OnKeyPressed);
             for (auto& c : chains) {
                 if (c.event->type != GBAScriptNodeType::OnKeyPressed) continue;
                 emitKeyBlock(c, "if (key_hit(%s))");
             }
-            f << "}\n\n";
+            f << "}\n";
+            emitFuncAlias("afn_script_key_pressed", GBAScriptNodeType::OnKeyPressed);
+            f << "\n";
 
             // OnKeyReleased → edge-triggered release checks
-            f << "static inline void afn_script_key_released(void) {\n";
+            emitFuncStart("afn_script_key_released", GBAScriptNodeType::OnKeyReleased);
             for (auto& c : chains) {
                 if (c.event->type != GBAScriptNodeType::OnKeyReleased) continue;
                 emitKeyBlock(c, "if (key_released(%s))");
             }
-            f << "}\n\n";
+            f << "}\n";
+            emitFuncAlias("afn_script_key_released", GBAScriptNodeType::OnKeyReleased);
+            f << "\n";
 
             // OnUpdate → runs every frame
-            f << "static inline void afn_script_update(void) {\n";
+            emitFuncStart("afn_script_update", GBAScriptNodeType::OnUpdate);
             for (auto& c : chains) {
                 if (c.event->type != GBAScriptNodeType::OnUpdate) continue;
-                for (auto* a : c.actions)
-                    emitAction(a);
+                emitActionsWithGates(c.actions);
             }
+            f << "}\n";
+            emitFuncAlias("afn_script_update", GBAScriptNodeType::OnUpdate);
+            f << "\n";
+
+            // OnCollision → called when player collides with a sprite
+            emitFuncStart("afn_script_collision", GBAScriptNodeType::OnCollision);
+            bool hasCollision = false;
+            for (auto& c : chains) {
+                if (c.event->type != GBAScriptNodeType::OnCollision) continue;
+                hasCollision = true;
+                emitActionsWithGates(c.actions);
+            }
+            if (!hasCollision)
+                f << "  (void)0;\n";
+            f << "}\n";
+            emitFuncAlias("afn_script_collision", GBAScriptNodeType::OnCollision);
+            f << "\n";
+        }
+        else if (hasAnyScript)
+        {
+            // No inline scene chains but blueprints exist — emit empty stubs
+            f << "// No inline scene script chains — stubs for blueprint support\n";
+            f << "static inline void afn_script_start(void) {}\n";
+            f << "static inline void afn_script_key_held(void) {}\n";
+            f << "static inline void afn_script_key_pressed(void) {}\n";
+            f << "static inline void afn_script_key_released(void) {}\n";
+            f << "static inline void afn_script_update(void) {}\n";
+            f << "static inline void afn_script_collision(void) {}\n\n";
+        }
+    }
+    // If no inline scene script but hasAnyScript, emit stubs
+    if (script.nodes.empty() && hasAnyScript)
+    {
+        f << "// No inline scene script — stubs for blueprint support\n";
+        f << "static inline void afn_script_start(void) {}\n";
+        f << "static inline void afn_script_key_held(void) {}\n";
+        f << "static inline void afn_script_key_pressed(void) {}\n";
+        f << "static inline void afn_script_key_released(void) {}\n";
+        f << "static inline void afn_script_update(void) {}\n";
+        f << "static inline void afn_script_collision(void) {}\n\n";
+    }
+
+    // ---- Blueprint codegen ----
+    f << "\n// ---- Blueprint script functions ----\n";
+    f << "#define AFN_BP_COUNT " << (int)blueprints.size() << "\n";
+    f << "#define AFN_BP_INSTANCE_COUNT " << (int)bpInstances.size() << "\n\n";
+
+    if (!blueprints.empty()) {
+        // For each blueprint, generate parameterized functions using the same emitAction/chain logic
+        for (int bi = 0; bi < (int)blueprints.size(); bi++) {
+            const auto& bp = blueprints[bi];
+            const auto& bpScript = bp.script;
+            int paramCount = (int)bp.params.size();
+
+            // Build param signature and call args
+            std::string paramSig, paramArgs;
+            for (int pi = 0; pi < paramCount; pi++) {
+                if (pi > 0) { paramSig += ", "; paramArgs += ", "; }
+                paramSig += "int p" + std::to_string(pi);
+                paramArgs += "p" + std::to_string(pi);
+            }
+
+            // Helper lambdas for this blueprint's nodes/links
+            auto bpFindNode = [&](int id) -> const GBAScriptNodeExport* {
+                for (auto& n : bpScript.nodes)
+                    if (n.id == id) return &n;
+                return nullptr;
+            };
+            auto bpFindDataIn = [&](int nodeId, int pinIdx) -> const GBAScriptNodeExport* {
+                for (auto& lk : bpScript.links)
+                    if (lk.toNodeId == nodeId && lk.toPinType == 3 && lk.toPinIdx == pinIdx)
+                        return bpFindNode(lk.fromNodeId);
+                return nullptr;
+            };
+            auto bpResolveInt = [&](const GBAScriptNodeExport* n) -> std::string {
+                if (!n) return "0";
+                // Check if this node is a parameter-exposed node
+                for (int pi = 0; pi < paramCount; pi++) {
+                    // Match by node ID against the param's source — we encode sourceNodeId
+                    // in the paramInt[3] slot during export
+                    if (n->paramInt[3] == -(pi + 1))  // sentinel: negative (pi+1)
+                        return "p" + std::to_string(pi);
+                }
+                return std::to_string(n->paramInt[0]);
+            };
+            auto bpResolveFloat = [&](const GBAScriptNodeExport* n) -> std::string {
+                if (!n) return "0";
+                for (int pi = 0; pi < paramCount; pi++) {
+                    if (n->paramInt[3] == -(pi + 1))
+                        return "p" + std::to_string(pi);
+                }
+                float fv; memcpy(&fv, &n->paramInt[0], sizeof(float));
+                return std::to_string((int)(fv * 256.0f));
+            };
+            auto bpResolveKeyName = [](int key) -> const char* {
+                const char* names[] = { "KEY_A","KEY_B","KEY_L","KEY_R","KEY_START","KEY_SELECT",
+                                        "KEY_UP","KEY_DOWN","KEY_LEFT","KEY_RIGHT" };
+                return (key >= 0 && key < 10) ? names[key] : "KEY_A";
+            };
+            auto bpResolveEventKey = [&](const GBAScriptNodeExport& ev) -> int {
+                int count = 0; int keyVal = -1;
+                for (auto& lk : bpScript.links)
+                    if (lk.toNodeId == ev.id && lk.toPinType == 3 && lk.toPinIdx == 0) {
+                        auto* dn = bpFindNode(lk.fromNodeId);
+                        if (dn) { keyVal = dn->paramInt[0]; count++; }
+                    }
+                if (count == 1) return keyVal;
+                if (count == 0) return ev.paramInt[0];
+                return -1;
+            };
+
+            // Build event chains for this blueprint
+            struct BpChain { const GBAScriptNodeExport* event; std::vector<const GBAScriptNodeExport*> actions; };
+            std::vector<BpChain> bpChains;
+            for (auto& n : bpScript.nodes) {
+                bool isEvent = (n.type == GBAScriptNodeType::OnStart || n.type == GBAScriptNodeType::OnKeyHeld ||
+                                n.type == GBAScriptNodeType::OnKeyPressed || n.type == GBAScriptNodeType::OnKeyReleased ||
+                                n.type == GBAScriptNodeType::OnUpdate || n.type == GBAScriptNodeType::OnCollision);
+                if (!isEvent) continue;
+                BpChain chain; chain.event = &n;
+                std::vector<int> front;
+                for (auto& lk : bpScript.links)
+                    if (lk.fromNodeId == n.id && lk.fromPinType == 0) front.push_back(lk.toNodeId);
+                std::set<int> visited;
+                while (!front.empty()) {
+                    int nid = front.front(); front.erase(front.begin());
+                    if (visited.count(nid)) continue;
+                    visited.insert(nid);
+                    auto* an = bpFindNode(nid);
+                    if (!an) continue;
+                    chain.actions.push_back(an);
+                    for (auto& lk : bpScript.links)
+                        if (lk.fromNodeId == an->id && lk.fromPinType == 0) front.push_back(lk.toNodeId);
+                }
+                if (!chain.actions.empty()) bpChains.push_back(chain);
+            }
+
+            // Emit action body lines for blueprint
+            auto bpEmitActionBody = [&](const GBAScriptNodeExport* action) {
+                if (action->customCode[0]) {
+                    f << "    " << action->customCode << "\n";
+                    return;
+                }
+                switch (action->type) {
+                case GBAScriptNodeType::MovePlayer: {
+                    auto* dirData = bpFindDataIn(action->id, 0);
+                    int dir = dirData ? dirData->paramInt[0] : 0;
+                    const char* dirKeys[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
+                    const char* dirVars[] = { "afn_input_right -= 256", "afn_input_right += 256",
+                                              "afn_input_fwd += 256", "afn_input_fwd -= 256" };
+                    if (dir >= 0 && dir < 4)
+                        f << "    if (key_is_down(" << dirKeys[dir] << ")) " << dirVars[dir] << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::Jump: {
+                    auto* forceData = bpFindDataIn(action->id, 0);
+                    std::string force = forceData ? bpResolveFloat(forceData) : std::to_string((int)(2.0f * 256.0f));
+                    f << "    if (player_on_ground) player_vy = " << force << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::Walk: {
+                    auto* speedData = bpFindDataIn(action->id, 0);
+                    std::string speed = speedData ? bpResolveInt(speedData) : "37";
+                    f << "    afn_move_speed = " << speed << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::Sprint: {
+                    auto* speedData = bpFindDataIn(action->id, 0);
+                    std::string speed = speedData ? bpResolveInt(speedData) : "56";
+                    f << "    afn_move_speed = " << speed << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::OrbitCamera: {
+                    auto* dirData = bpFindDataIn(action->id, 0);
+                    auto* speedData = bpFindDataIn(action->id, 1);
+                    int dir = dirData ? dirData->paramInt[0] : 1;
+                    std::string speed = speedData ? bpResolveInt(speedData) : "512";
+                    const char* key = (dir == 0) ? "KEY_L" : "KEY_R";
+                    const char* sign = (dir == 0) ? "-" : "+";
+                    f << "    if (key_is_down(" << key << ")) orbit_angle " << sign << "= " << speed << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::AutoOrbit: {
+                    auto* speedData = bpFindDataIn(action->id, 0);
+                    std::string speed = speedData ? bpResolveInt(speedData) : "205";
+                    f << "    afn_auto_orbit_speed = " << speed << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::DampenJump: {
+                    auto* factorData = bpFindDataIn(action->id, 0);
+                    std::string factor = factorData ? bpResolveFloat(factorData) : std::to_string((int)(0.75f * 256.0f));
+                    f << "    if (player_vy > 0) player_vy = (player_vy * " << factor << ") >> 8;\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetGravity: {
+                    auto* valData = bpFindDataIn(action->id, 0);
+                    std::string val = valData ? bpResolveFloat(valData) : std::to_string((int)(0.09f * 256.0f));
+                    f << "    afn_gravity = " << val << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetMaxFall: {
+                    auto* valData = bpFindDataIn(action->id, 0);
+                    std::string val = valData ? bpResolveFloat(valData) : std::to_string((int)(6.0f * 256.0f));
+                    f << "    afn_terminal_vel = " << val << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::PlayAnim: {
+                    auto* animData = bpFindDataIn(action->id, 0);
+                    // Animation node: paramInt[0]=sprite asset, paramInt[1]=anim index
+                    // Check if param-exposed, otherwise read paramInt[1]
+                    std::string animIdx = "0";
+                    if (animData) {
+                        bool isParam = false;
+                        for (int pi = 0; pi < paramCount; pi++) {
+                            if (animData->paramInt[3] == -(pi + 1)) {
+                                animIdx = "p" + std::to_string(pi);
+                                isParam = true;
+                                break;
+                            }
+                        }
+                        if (!isParam)
+                            animIdx = std::to_string(animData->paramInt[1]);
+                    }
+                    f << "    afn_play_anim = " << animIdx << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::ChangeScene: {
+                    auto* scData = bpFindDataIn(action->id, 0);
+                    std::string scIdx = scData ? bpResolveInt(scData) : std::to_string(action->paramInt[0]);
+                    int scMode = action->paramInt[1];
+                    f << "    afn_pending_scene = " << scIdx << ";\n";
+                    f << "    afn_pending_scene_mode = " << scMode << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::CustomCode:
+                    break; // handled by customCode[0] check above
+                default:
+                    f << "    // unsupported bp action: type " << (int)action->type << "\n";
+                    break;
+                }
+            };
+
+            // First pass: emit each blueprint action as its own function (deduplicate by node ID)
+            std::set<int> bpEmittedIds;
+            for (auto& c : bpChains) {
+                for (auto* a : c.actions) {
+                    if (a->type == GBAScriptNodeType::IsMoving) continue;
+                    if (bpEmittedIds.count(a->id)) continue;
+                    bpEmittedIds.insert(a->id);
+                    const char* fname = a->funcName[0] ? a->funcName : nullptr;
+                    char defaultName[64];
+                    if (!fname) {
+                        snprintf(defaultName, sizeof(defaultName), "afn_bp%d%s_%d", bi, actionSuffix(a->type), a->id);
+                        fname = defaultName;
+                    }
+                    f << "static inline void " << fname << "(" << paramSig << ") {\n";
+                    bpEmitActionBody(a);
+                    f << "}\n";
+                }
+            }
+
+            // Helper: emit a call to a blueprint action's function
+            auto bpEmitActionCall = [&](const GBAScriptNodeExport* a) {
+                char callName[64];
+                if (a->funcName[0]) {
+                    snprintf(callName, sizeof(callName), "%s", a->funcName);
+                } else {
+                    snprintf(callName, sizeof(callName), "afn_bp%d%s_%d", bi, actionSuffix(a->type), a->id);
+                }
+                f << "    " << callName << "(" << paramArgs << ");\n";
+            };
+
+            // Emit blueprint actions with IsMoving gate support
+            auto bpEmitActionsWithGates = [&](const std::vector<const GBAScriptNodeExport*>& actions) {
+                int gateDepth = 0;
+                for (auto* a : actions) {
+                    if (a->type == GBAScriptNodeType::IsMoving) {
+                        f << "    if (player_moving) {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    bpEmitActionCall(a);
+                }
+                for (int g = 0; g < gateDepth; g++)
+                    f << "    }\n";
+            };
+
+            auto bpEmitKeyBlock = [&](const BpChain& c, const char* keyCheck) {
+                // Collect all keys connected to this event node
+                std::vector<int> keys;
+                for (auto& lk : bpScript.links)
+                    if (lk.toNodeId == c.event->id && lk.toPinType == 3 && lk.toPinIdx == 0) {
+                        auto* dn = bpFindNode(lk.fromNodeId);
+                        if (dn) keys.push_back(dn->paramInt[0]);
+                    }
+                if (keys.empty()) keys.push_back(c.event->paramInt[0]);
+
+                if (keys.size() == 1) {
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), keyCheck, bpResolveKeyName(keys[0]));
+                    f << "  " << buf << " {\n";
+                    bpEmitActionsWithGates(c.actions);
+                    f << "  }\n";
+                } else {
+                    // Multiple keys: OR them together
+                    std::string kc(keyCheck);
+                    std::string condFmt = kc.substr(4, kc.size() - 5);
+                    f << "  if (";
+                    for (size_t ki = 0; ki < keys.size(); ki++) {
+                        if (ki > 0) f << " || ";
+                        char buf[64];
+                        snprintf(buf, sizeof(buf), condFmt.c_str(), bpResolveKeyName(keys[ki]));
+                        f << buf;
+                    }
+                    f << ") {\n";
+                    bpEmitActionsWithGates(c.actions);
+                    f << "  }\n";
+                }
+            };
+
+            // Emit the 5 functions for this blueprint
+            f << "static inline void afn_bp" << bi << "_start(" << paramSig << ") {\n";
+            for (auto& c : bpChains)
+                if (c.event->type == GBAScriptNodeType::OnStart)
+                    bpEmitActionsWithGates(c.actions);
+            f << "}\n";
+
+            f << "static inline void afn_bp" << bi << "_key_held(" << paramSig << ") {\n";
+            for (auto& c : bpChains)
+                if (c.event->type == GBAScriptNodeType::OnKeyHeld)
+                    bpEmitKeyBlock(c, "if (key_is_down(%s))");
+            f << "}\n";
+
+            f << "static inline void afn_bp" << bi << "_key_pressed(" << paramSig << ") {\n";
+            for (auto& c : bpChains)
+                if (c.event->type == GBAScriptNodeType::OnKeyPressed)
+                    bpEmitKeyBlock(c, "if (key_hit(%s))");
+            f << "}\n";
+
+            f << "static inline void afn_bp" << bi << "_key_released(" << paramSig << ") {\n";
+            for (auto& c : bpChains)
+                if (c.event->type == GBAScriptNodeType::OnKeyReleased)
+                    bpEmitKeyBlock(c, "if (key_released(%s))");
+            f << "}\n";
+
+            f << "static inline void afn_bp" << bi << "_update(" << paramSig << ") {\n";
+            for (auto& c : bpChains)
+                if (c.event->type == GBAScriptNodeType::OnUpdate)
+                    bpEmitActionsWithGates(c.actions);
+            f << "}\n";
+
+            f << "static inline void afn_bp" << bi << "_collision(" << paramSig << ") {\n";
+            for (auto& c : bpChains)
+                if (c.event->type == GBAScriptNodeType::OnCollision)
+                    bpEmitActionsWithGates(c.actions);
             f << "}\n\n";
         }
+
+        // Instance dispatch table
+        if (!bpInstances.empty()) {
+            int maxParams = 0;
+            for (auto& bp : blueprints) maxParams = std::max(maxParams, (int)bp.params.size());
+            if (maxParams < 1) maxParams = 1;
+
+            f << "static const struct { int bpIdx; int sprIdx; int params[" << maxParams << "]; }\n";
+            f << "    afn_bp_instances[" << (int)bpInstances.size() << "] = {\n";
+            for (int ii = 0; ii < (int)bpInstances.size(); ii++) {
+                const auto& inst = bpInstances[ii];
+                f << "    {" << inst.blueprintIdx << ", " << inst.spriteIdx << ", {";
+                for (int pi = 0; pi < maxParams; pi++) {
+                    if (pi > 0) f << ",";
+                    f << ((pi < inst.paramCount) ? inst.paramValues[pi] : 0);
+                }
+                f << "}},\n";
+            }
+            f << "};\n\n";
+
+            // Dispatch functions
+            f << "static inline void afn_bp_dispatch_start(void) {\n";
+            f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
+            f << "    switch (afn_bp_instances[i].bpIdx) {\n";
+            for (int bi = 0; bi < (int)blueprints.size(); bi++) {
+                int pc = (int)blueprints[bi].params.size();
+                f << "    case " << bi << ": afn_bp" << bi << "_start(";
+                for (int pi = 0; pi < pc; pi++) { if (pi > 0) f << ","; f << "afn_bp_instances[i].params[" << pi << "]"; }
+                f << "); break;\n";
+            }
+            f << "    }\n  }\n}\n";
+
+            auto emitDispatch = [&](const char* funcName, const char* suffix) {
+                f << "static inline void afn_bp_dispatch_" << suffix << "(void) {\n";
+                f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
+                f << "    switch (afn_bp_instances[i].bpIdx) {\n";
+                for (int bi = 0; bi < (int)blueprints.size(); bi++) {
+                    int pc = (int)blueprints[bi].params.size();
+                    f << "    case " << bi << ": afn_bp" << bi << "_" << suffix << "(";
+                    for (int pi = 0; pi < pc; pi++) { if (pi > 0) f << ","; f << "afn_bp_instances[i].params[" << pi << "]"; }
+                    f << "); break;\n";
+                }
+                f << "    }\n  }\n}\n";
+            };
+            emitDispatch("key_held", "key_held");
+            emitDispatch("key_pressed", "key_pressed");
+            emitDispatch("key_released", "key_released");
+            emitDispatch("update", "update");
+            emitDispatch("collision", "collision");
+        }
+    }
+
+    if (bpInstances.empty()) {
+        f << "static inline void afn_bp_dispatch_start(void) {}\n";
+        f << "static inline void afn_bp_dispatch_key_held(void) {}\n";
+        f << "static inline void afn_bp_dispatch_key_pressed(void) {}\n";
+        f << "static inline void afn_bp_dispatch_key_released(void) {}\n";
+        f << "static inline void afn_bp_dispatch_update(void) {}\n";
+        f << "static inline void afn_bp_dispatch_collision(void) {}\n";
     }
 
     f << "\n#endif // MAPDATA_H\n";
@@ -1673,6 +2281,8 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBAMeshExport>& meshes,
                 float orbitDist,
                 const GBAScriptExport& script,
+                const std::vector<GBABlueprintExport>& blueprints,
+                const std::vector<GBABlueprintInstanceExport>& bpInstances,
                 std::string& errorMsg)
 {
     std::string msysDir = ToMsysPath(runtimeDir);
@@ -1688,7 +2298,7 @@ bool PackageGBA(const std::string& runtimeDir,
     }
 
     // --- Step 1: Generate mapdata.h with sprite/camera/asset/player data ---
-    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, script))
+    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, script, blueprints, bpInstances))
     {
         errorMsg = "Failed to write mapdata.h";
         return false;
