@@ -123,6 +123,16 @@ make
 | **Ctrl+C / V** | Copy / paste nodes (works across projects) |
 | **Ctrl+Z** | Undo delete |
 
+### Nodes
+
+| Key | Action |
+|-----|--------|
+| **Right-click** | Add new node |
+| **Ctrl+A** | Select all nodes |
+| **Ctrl+C / V** | Copy / paste nodes (works across projects) |
+| **Ctrl+Z** | Undo delete |
+| **Delete** | Delete selected node or link |
+
 ---
 
 ## Project Structure
