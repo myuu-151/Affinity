@@ -127,19 +127,19 @@ make
 
 | Key | Action |
 |-----|--------|
-| **W / S** | Move forward / back |
-| **A / D** | Rotate left / right |
-| **Q / E** | Camera height down / up |
-| **I / K** | Pitch up / down |
-| **G** | Grab (translate) selected object |
-| **S** | Scale selected object |
-| **X / Y / Z** | Constrain to axis (during grab) |
-| **R + drag** | Resize selected object |
-| **Delete** | Delete selected object |
-| **Right-click** | Place new object in viewport |
+| **Space** | Add node at cursor |
+| **Right-click** | Add node / node properties |
+| **Delete** | Delete selected nodes |
 | **Ctrl+A** | Select all nodes |
 | **Ctrl+C / V** | Copy / paste nodes (works across projects) |
 | **Ctrl+Z** | Undo delete |
+| **Ctrl+G** | Group selected nodes |
+| **Ctrl+Shift+G** | Ungroup selected group |
+| **Alt + click** | Create annotation |
+| **Double-click** | Enter group node |
+| **Escape** | Exit group |
+| **Scroll wheel** | Zoom canvas |
+| **Middle mouse + drag** | Pan canvas |
 
 ---
 
