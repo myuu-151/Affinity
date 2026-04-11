@@ -127,11 +127,19 @@ make
 
 | Key | Action |
 |-----|--------|
-| **Right-click** | Add new node |
+| **W / S** | Move forward / back |
+| **A / D** | Rotate left / right |
+| **Q / E** | Camera height down / up |
+| **I / K** | Pitch up / down |
+| **G** | Grab (translate) selected object |
+| **S** | Scale selected object |
+| **X / Y / Z** | Constrain to axis (during grab) |
+| **R + drag** | Resize selected object |
+| **Delete** | Delete selected object |
+| **Right-click** | Place new object in viewport |
 | **Ctrl+A** | Select all nodes |
 | **Ctrl+C / V** | Copy / paste nodes (works across projects) |
 | **Ctrl+Z** | Undo delete |
-| **Delete** | Delete selected node or link |
 
 ---
 
