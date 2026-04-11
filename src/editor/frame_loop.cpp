@@ -3144,9 +3144,9 @@ static void DrawTabBar()
         ImGui::SameLine();
     };
 
-    TabButton("Scene",   EditorTab::Map);
-    TabButton("Mode 7",  EditorTab::Mode7);
-    TabButton("Tilemap", EditorTab::Tilemap);
+    TabButton("Mode 4",  EditorTab::Map);
+    TabButton("Mode 1",  EditorTab::Mode7);
+    TabButton("Mode 0",  EditorTab::Tilemap);
     TabButton("Sprites", EditorTab::Sprites);
     TabButton("Skybox",  EditorTab::Skybox);
     TabButton("3D",      EditorTab::ThreeD);
@@ -10591,11 +10591,11 @@ void FrameTick(float dt)
             }
             case VsNodeType::ChangeScene: {
                 ImGui::Text("Mode");
-                const char* modeNames[] = { "Mode 4 (3D)", "Mode 0 (Tilemap)" };
+                const char* modeNames[] = { "Mode 4", "Mode 0" };
                 int mode = (n.paramInt[1] == 1) ? 1 : 0;
                 if (ImGui::BeginCombo("##ModeSel", modeNames[mode])) {
-                    if (ImGui::Selectable("Mode 4 (3D)", mode == 0)) { n.paramInt[1] = 0; }
-                    if (ImGui::Selectable("Mode 0 (Tilemap)", mode == 1)) { n.paramInt[1] = 1; }
+                    if (ImGui::Selectable("Mode 4", mode == 0)) { n.paramInt[1] = 0; }
+                    if (ImGui::Selectable("Mode 0", mode == 1)) { n.paramInt[1] = 1; }
                     ImGui::EndCombo();
                 }
                 break;
