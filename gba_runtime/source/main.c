@@ -257,6 +257,10 @@ static int   afn_pending_scene_mode; // 0 = 3D/MapScene, 1 = Tilemap/TmScene
 static int   afn_collided_sprite; // sprite index player collided with (-1 = none)
 static FIXED afn_gravity;         // gravity per frame (16.8)
 static FIXED afn_terminal_vel;    // max fall speed (16.8)
+static int   afn_player_frozen;  // nonzero = input disabled
+static u32   afn_flags;          // 32-bit game flags for script system
+static int   afn_anim_speed = 1; // animation speed multiplier
+static u32   afn_rng = 12345;   // simple PRNG state
 
 // Direction animation set tracking (for DMA streaming)
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
@@ -3529,9 +3533,11 @@ int main(void)
 
             // Run per-frame script event handlers
             afn_script_update();
-            afn_script_key_held();
-            afn_script_key_pressed();
-            afn_script_key_released();
+            if (!afn_player_frozen) {
+                afn_script_key_held();
+                afn_script_key_pressed();
+                afn_script_key_released();
+            }
             // Collision event
             if (afn_collided_sprite >= 0) {
                 afn_script_collision();
