@@ -274,6 +274,11 @@ static int   afn_frame_count;    // frame counter since boot
 static u8    afn_sprite_flip[16]; // per-sprite horizontal flip
 static int   afn_draw_distance;  // runtime draw distance override
 static u8    afn_collision_enabled[16]; // per-sprite collision toggle
+static int   afn_cam_locked;       // 1 = camera rotation locked
+static int   afn_cam_speed = 256;  // camera follow speed (16.8 fixed, 256=1.0)
+static FIXED afn_force_x, afn_force_z; // accumulated force on player
+static int   afn_friction = 256;   // ground friction (16.8 fixed, 256=1.0)
+static int   afn_vars[16];        // general-purpose variable slots
 
 // Direction animation set tracking (for DMA streaming)
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0

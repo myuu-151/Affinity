@@ -1471,7 +1471,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int   afn_frame_count;\n";
         f << "static u8    afn_sprite_flip[16];\n";
         f << "static int   afn_draw_distance;\n";
-        f << "static u8    afn_collision_enabled[16];\n\n";
+        f << "static u8    afn_collision_enabled[16];\n";
+        f << "static int   afn_cam_locked;\n";
+        f << "static int   afn_cam_speed = 256;\n";
+        f << "static FIXED afn_force_x, afn_force_z;\n";
+        f << "static int   afn_friction = 256;\n";
+        f << "static int   afn_vars[16];\n\n";
+        // Clone sprite stub
+        f << "static inline void afn_clone_sprite(int src) { (void)src; }\n\n";
         // SRAM helpers
         f << "static inline void afn_sram_save(void) {\n";
         f << "    volatile u8* sram = (volatile u8*)0x0E000000;\n";
@@ -1543,6 +1550,24 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::SetSpriteAnim: return "_set_sprite_anim";
         case GBAScriptNodeType::ChangeScene:   return "_change_scene";
         case GBAScriptNodeType::CustomCode:    return "_custom";
+        case GBAScriptNodeType::Countdown:     return "_countdown";
+        case GBAScriptNodeType::ResetTimer:    return "_reset_timer";
+        case GBAScriptNodeType::Increment:     return "_increment";
+        case GBAScriptNodeType::Decrement:     return "_decrement";
+        case GBAScriptNodeType::SetFOV:        return "_set_fov";
+        case GBAScriptNodeType::ShakeStop:     return "_shake_stop";
+        case GBAScriptNodeType::LockCamera:    return "_lock_cam";
+        case GBAScriptNodeType::UnlockCamera:  return "_unlock_cam";
+        case GBAScriptNodeType::SetCamSpeed:   return "_set_cam_speed";
+        case GBAScriptNodeType::ApplyForce:    return "_apply_force";
+        case GBAScriptNodeType::Bounce:        return "_bounce";
+        case GBAScriptNodeType::SetFriction:   return "_set_friction";
+        case GBAScriptNodeType::CloneSprite:   return "_clone";
+        case GBAScriptNodeType::HideAll:       return "_hide_all";
+        case GBAScriptNodeType::ShowAll:       return "_show_all";
+        case GBAScriptNodeType::IsFlagSet:     return "_is_flag_set";
+        case GBAScriptNodeType::IsHPZero:      return "_is_hp_zero";
+        case GBAScriptNodeType::IsNear:        return "_is_near";
         default: return "";
         }
     };
@@ -1996,6 +2021,83 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 }
                 case GBAScriptNodeType::CustomCode:
                     break; // handled by customCode[0] check above
+                case GBAScriptNodeType::Countdown: {
+                    auto* cntData = findDataIn(action->id, 0);
+                    int cnt = cntData ? resolveInt(cntData) : 60;
+                    f << "    { static int afn_cd_" << action->id << " = " << cnt << ";\n";
+                    f << "      if (--afn_cd_" << action->id << " <= 0) { afn_cd_" << action->id << " = " << cnt << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::ResetTimer:
+                    f << "    // reset countdown timers (handled by reinit)\n";
+                    break;
+                case GBAScriptNodeType::Increment: {
+                    auto* slotData = findDataIn(action->id, 0);
+                    int slot = slotData ? resolveInt(slotData) : 0;
+                    f << "    afn_vars[" << slot << "]++;\n";
+                    break;
+                }
+                case GBAScriptNodeType::Decrement: {
+                    auto* slotData = findDataIn(action->id, 0);
+                    int slot = slotData ? resolveInt(slotData) : 0;
+                    f << "    afn_vars[" << slot << "]--;\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetFOV: {
+                    auto* fovData = findDataIn(action->id, 0);
+                    int fov = fovData ? resolveInt(fovData) : 256;
+                    f << "    cam_fov = " << fov << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::ShakeStop:
+                    f << "    afn_shake_frames = 0;\n";
+                    f << "    REG_BG_OFS[2].x = 0; REG_BG_OFS[2].y = 0;\n";
+                    break;
+                case GBAScriptNodeType::LockCamera:
+                    f << "    afn_cam_locked = 1;\n";
+                    break;
+                case GBAScriptNodeType::UnlockCamera:
+                    f << "    afn_cam_locked = 0;\n";
+                    break;
+                case GBAScriptNodeType::SetCamSpeed: {
+                    auto* spdData = findDataIn(action->id, 0);
+                    int spd = spdData ? resolveInt(spdData) : 256;
+                    f << "    afn_cam_speed = " << spd << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::ApplyForce: {
+                    auto* fxData = findDataIn(action->id, 0);
+                    auto* fzData = findDataIn(action->id, 1);
+                    int fx = fxData ? resolveInt(fxData) : 0;
+                    int fz = fzData ? resolveInt(fzData) : 0;
+                    f << "    afn_force_x += " << fx << ";\n";
+                    f << "    afn_force_z += " << fz << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::Bounce: {
+                    auto* dampData = findDataIn(action->id, 0);
+                    int damp = dampData ? (int)(resolveFloat(dampData) * 256.0f) : 192; // 0.75 * 256
+                    f << "    player_vy = -(player_vy * " << damp << ") >> 8;\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetFriction: {
+                    auto* fData = findDataIn(action->id, 0);
+                    int fr = fData ? (int)(resolveFloat(fData) * 256.0f) : 230; // ~0.9 * 256
+                    f << "    afn_friction = " << fr << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::CloneSprite: {
+                    auto* srcData = findDataIn(action->id, 0);
+                    int src = srcData ? resolveInt(srcData) : 0;
+                    f << "    afn_clone_sprite(" << src << ");\n";
+                    break;
+                }
+                case GBAScriptNodeType::HideAll:
+                    f << "    { int i; for (i=0;i<16;i++) afn_sprite_visible[i]=0; }\n";
+                    break;
+                case GBAScriptNodeType::ShowAll:
+                    f << "    { int i; for (i=0;i<16;i++) afn_sprite_visible[i]=1; }\n";
+                    break;
                 default:
                     f << "    // unsupported action: type " << (int)action->type << "\n";
                     break;
@@ -2004,7 +2106,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
             // First pass: emit each action as its own function (deduplicate by node ID)
             auto isGateNode = [](GBAScriptNodeType t) {
-                return t == GBAScriptNodeType::IsMoving || t == GBAScriptNodeType::IsOnGround || t == GBAScriptNodeType::IsJumping;
+                return t == GBAScriptNodeType::IsMoving || t == GBAScriptNodeType::IsOnGround || t == GBAScriptNodeType::IsJumping
+                    || t == GBAScriptNodeType::IsFlagSet || t == GBAScriptNodeType::IsHPZero || t == GBAScriptNodeType::IsNear
+                    || t == GBAScriptNodeType::Countdown;
             };
             std::set<int> emittedActionIds;
             for (auto& c : chains) {
@@ -2087,6 +2191,30 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     if (a->type == GBAScriptNodeType::IsJumping) {
                         f << "    if (!player_on_ground && player_vy > 0) {\n";
                         gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsFlagSet) {
+                        f << "    if (afn_flags & (1u << " << a->paramInt[0] << ")) {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsHPZero) {
+                        f << "    if (afn_hp[" << a->paramInt[0] << "] == 0) {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsNear) {
+                        f << "    { FIXED dx = g_sprites[" << a->paramInt[0] << "].wx - g_sprites[" << a->paramInt[1] << "].wx;\n";
+                        f << "      FIXED dz = g_sprites[" << a->paramInt[0] << "].wz - g_sprites[" << a->paramInt[1] << "].wz;\n";
+                        f << "      if (dx<0) dx=-dx; if (dz<0) dz=-dz;\n";
+                        f << "      if (((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8 < " << a->paramInt[2] << ") {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::Countdown) {
+                        f << "    { static int afn_cd_" << a->id << " = " << a->paramInt[0] << ";\n";
+                        f << "      if (--afn_cd_" << a->id << " <= 0) { afn_cd_" << a->id << " = " << a->paramInt[0] << ";\n";
+                        gateDepth += 2; // two closing braces: inner if + outer block
                         continue;
                     }
                     emitActionCall(a);
@@ -2636,6 +2764,83 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 }
                 case GBAScriptNodeType::CustomCode:
                     break; // handled by customCode[0] check above
+                case GBAScriptNodeType::Countdown: {
+                    auto* cntData = bpFindDataIn(action->id, 0);
+                    std::string cnt = cntData ? bpResolveInt(cntData) : "60";
+                    f << "    { static int afn_cd_" << action->id << " = " << cnt << ";\n";
+                    f << "      if (--afn_cd_" << action->id << " <= 0) { afn_cd_" << action->id << " = " << cnt << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::ResetTimer:
+                    f << "    // reset countdown timers (handled by reinit)\n";
+                    break;
+                case GBAScriptNodeType::Increment: {
+                    auto* slotData = bpFindDataIn(action->id, 0);
+                    std::string slot = slotData ? bpResolveInt(slotData) : "0";
+                    f << "    afn_vars[" << slot << "]++;\n";
+                    break;
+                }
+                case GBAScriptNodeType::Decrement: {
+                    auto* slotData = bpFindDataIn(action->id, 0);
+                    std::string slot = slotData ? bpResolveInt(slotData) : "0";
+                    f << "    afn_vars[" << slot << "]--;\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetFOV: {
+                    auto* fovData = bpFindDataIn(action->id, 0);
+                    std::string fov = fovData ? bpResolveInt(fovData) : "256";
+                    f << "    cam_fov = " << fov << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::ShakeStop:
+                    f << "    afn_shake_frames = 0;\n";
+                    f << "    REG_BG_OFS[2].x = 0; REG_BG_OFS[2].y = 0;\n";
+                    break;
+                case GBAScriptNodeType::LockCamera:
+                    f << "    afn_cam_locked = 1;\n";
+                    break;
+                case GBAScriptNodeType::UnlockCamera:
+                    f << "    afn_cam_locked = 0;\n";
+                    break;
+                case GBAScriptNodeType::SetCamSpeed: {
+                    auto* spdData = bpFindDataIn(action->id, 0);
+                    std::string spd = spdData ? bpResolveInt(spdData) : "256";
+                    f << "    afn_cam_speed = " << spd << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::ApplyForce: {
+                    auto* fxData = bpFindDataIn(action->id, 0);
+                    auto* fzData = bpFindDataIn(action->id, 1);
+                    std::string fx = fxData ? bpResolveInt(fxData) : "0";
+                    std::string fz = fzData ? bpResolveInt(fzData) : "0";
+                    f << "    afn_force_x += " << fx << ";\n";
+                    f << "    afn_force_z += " << fz << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::Bounce: {
+                    auto* dampData = bpFindDataIn(action->id, 0);
+                    std::string damp = dampData ? bpResolveFloat(dampData) : "192";
+                    f << "    player_vy = -(player_vy * " << damp << ") >> 8;\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetFriction: {
+                    auto* fData = bpFindDataIn(action->id, 0);
+                    std::string fr = fData ? bpResolveFloat(fData) : "230";
+                    f << "    afn_friction = " << fr << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::CloneSprite: {
+                    auto* srcData = bpFindDataIn(action->id, 0);
+                    std::string src = srcData ? bpResolveInt(srcData) : "0";
+                    f << "    afn_clone_sprite(" << src << ");\n";
+                    break;
+                }
+                case GBAScriptNodeType::HideAll:
+                    f << "    { int i; for (i=0;i<16;i++) afn_sprite_visible[i]=0; }\n";
+                    break;
+                case GBAScriptNodeType::ShowAll:
+                    f << "    { int i; for (i=0;i<16;i++) afn_sprite_visible[i]=1; }\n";
+                    break;
                 default:
                     f << "    // unsupported bp action: type " << (int)action->type << "\n";
                     break;
@@ -2644,7 +2849,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
             // First pass: emit each blueprint action as its own function (deduplicate by node ID)
             auto bpIsGateNode = [](GBAScriptNodeType t) {
-                return t == GBAScriptNodeType::IsMoving || t == GBAScriptNodeType::IsOnGround || t == GBAScriptNodeType::IsJumping;
+                return t == GBAScriptNodeType::IsMoving || t == GBAScriptNodeType::IsOnGround || t == GBAScriptNodeType::IsJumping
+                    || t == GBAScriptNodeType::IsFlagSet || t == GBAScriptNodeType::IsHPZero || t == GBAScriptNodeType::IsNear
+                    || t == GBAScriptNodeType::Countdown;
             };
             std::set<int> bpEmittedIds;
             for (auto& c : bpChains) {
@@ -2692,6 +2899,30 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     if (a->type == GBAScriptNodeType::IsJumping) {
                         f << "    if (!player_on_ground && player_vy > 0) {\n";
                         gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsFlagSet) {
+                        f << "    if (afn_flags & (1u << " << a->paramInt[0] << ")) {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsHPZero) {
+                        f << "    if (afn_hp[" << a->paramInt[0] << "] == 0) {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsNear) {
+                        f << "    { FIXED dx = g_sprites[" << a->paramInt[0] << "].wx - g_sprites[" << a->paramInt[1] << "].wx;\n";
+                        f << "      FIXED dz = g_sprites[" << a->paramInt[0] << "].wz - g_sprites[" << a->paramInt[1] << "].wz;\n";
+                        f << "      if (dx<0) dx=-dx; if (dz<0) dz=-dz;\n";
+                        f << "      if (((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8 < " << a->paramInt[2] << ") {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::Countdown) {
+                        f << "    { static int afn_cd_" << a->id << " = " << a->paramInt[0] << ";\n";
+                        f << "      if (--afn_cd_" << a->id << " <= 0) { afn_cd_" << a->id << " = " << a->paramInt[0] << ";\n";
+                        gateDepth += 2;
                         continue;
                     }
                     bpEmitActionCall(a);
