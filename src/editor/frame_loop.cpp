@@ -221,6 +221,30 @@ enum class VsNodeType : int {
     NegateMath,     // -A
     RandomInt,      // random int in [Min, Max]
     GetFlag,        // read flag value (data node)
+    // Math/logic data nodes
+    AbsMath,        // |A|
+    MinMath,        // min(A, B)
+    MaxMath,        // max(A, B)
+    ModuloMath,     // A % B
+    ClampMath,      // clamp(Val, Min, Max)
+    SignMath,       // sign(A): -1, 0, or 1
+    CompareInt,     // A op B -> 0 or 1
+    AndLogic,       // A && B
+    OrLogic,        // A || B
+    NotLogic,       // !A
+    GetVariable,    // read variable slot
+    GetPlayerX,     // read player X position
+    GetPlayerZ,     // read player Z position
+    // Actions
+    OnTimer,        // event: fires every N frames
+    SetScale,       // set sprite scale
+    ScreenShake,    // camera shake for N frames
+    FadeOut,        // fade screen to black
+    FadeIn,         // fade screen from black
+    MoveToward,     // move sprite toward position
+    LookAt,         // face sprite toward object
+    SetSpriteAnim,  // play animation on specific sprite
+    SpawnEffect,    // visual effect at position
     COUNT
 };
 
@@ -301,6 +325,30 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Negate",         0xFF666688, 0, 0, 1, 1, {"Value"}, {"Result"}, {} },
     { "Random Int",     0xFF666688, 0, 0, 2, 1, {"Min", "Max"}, {"Result"}, {} },
     { "Get Flag",       0xFF666688, 0, 0, 1, 1, {"Flag (int)"}, {"Value"}, {} },
+    // Math/logic data nodes
+    { "Abs",            0xFF666688, 0, 0, 1, 1, {"Value"}, {"Result"}, {} },
+    { "Min",            0xFF666688, 0, 0, 2, 1, {"A", "B"}, {"Result"}, {} },
+    { "Max",            0xFF666688, 0, 0, 2, 1, {"A", "B"}, {"Result"}, {} },
+    { "Modulo",         0xFF666688, 0, 0, 2, 1, {"A", "B"}, {"Result"}, {} },
+    { "Clamp",          0xFF666688, 0, 0, 3, 1, {"Value", "Min", "Max"}, {"Result"}, {} },
+    { "Sign",           0xFF666688, 0, 0, 1, 1, {"Value"}, {"Result"}, {} },
+    { "Compare",        0xFF666688, 0, 0, 2, 1, {"A", "B"}, {"Result"}, {} },
+    { "AND",            0xFF666688, 0, 0, 2, 1, {"A", "B"}, {"Result"}, {} },
+    { "OR",             0xFF666688, 0, 0, 2, 1, {"A", "B"}, {"Result"}, {} },
+    { "NOT",            0xFF666688, 0, 0, 1, 1, {"Value"}, {"Result"}, {} },
+    { "Get Variable",   0xFF666688, 0, 0, 1, 1, {"Var Slot (int)"}, {"Value"}, {} },
+    { "Get Player X",   0xFF666688, 0, 0, 0, 1, {}, {"X"}, {} },
+    { "Get Player Z",   0xFF666688, 0, 0, 0, 1, {}, {"Z"}, {} },
+    // More events/actions
+    { "On Timer",       0xFF338833, 0, 1, 1, 0, {"Interval (int)"}, {}, {} },
+    { "Set Scale",      0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Scale (float)"}, {}, {} },
+    { "Screen Shake",   0xFF3355AA, 1, 1, 2, 0, {"Intensity (int)", "Frames (int)"}, {}, {} },
+    { "Fade Out",       0xFF3355AA, 1, 1, 1, 0, {"Frames (int)"}, {}, {} },
+    { "Fade In",        0xFF3355AA, 1, 1, 1, 0, {"Frames (int)"}, {}, {} },
+    { "Move Toward",    0xFF3355AA, 1, 1, 3, 0, {"Object (int)", "Target (int)", "Speed (int)"}, {}, {} },
+    { "Look At",        0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Target (int)"}, {}, {} },
+    { "Set Sprite Anim",0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Anim (int)"}, {}, {} },
+    { "Spawn Effect",   0xFF3355AA, 1, 1, 3, 0, {"Effect (int)", "X (int)", "Z (int)"}, {}, {} },
 };
 
 struct VsNode {
@@ -9552,6 +9600,28 @@ void FrameTick(float dt)
                 case VsNodeType::NegateMath:    desc = "Outputs -Value."; break;
                 case VsNodeType::RandomInt:     desc = "Outputs a random integer between Min and Max (inclusive)."; break;
                 case VsNodeType::GetFlag:       desc = "Reads a flag bit (0-31). Outputs 1 if set, 0 if clear."; break;
+                case VsNodeType::AbsMath:       desc = "Outputs the absolute value of the input."; break;
+                case VsNodeType::MinMath:       desc = "Outputs the smaller of A and B."; break;
+                case VsNodeType::MaxMath:       desc = "Outputs the larger of A and B."; break;
+                case VsNodeType::ModuloMath:    desc = "Outputs A modulo B (remainder)."; break;
+                case VsNodeType::ClampMath:     desc = "Clamps Value between Min and Max."; break;
+                case VsNodeType::SignMath:      desc = "Outputs -1 if negative, 0 if zero, 1 if positive."; break;
+                case VsNodeType::CompareInt:    desc = "Compares A and B. paramInt[0] selects operator: 0=Equal, 1=NotEqual, 2=Less, 3=Greater, 4=LessEq, 5=GreaterEq."; break;
+                case VsNodeType::AndLogic:      desc = "Outputs 1 if both A and B are nonzero."; break;
+                case VsNodeType::OrLogic:       desc = "Outputs 1 if either A or B is nonzero."; break;
+                case VsNodeType::NotLogic:      desc = "Outputs 1 if Value is zero, 0 otherwise."; break;
+                case VsNodeType::GetVariable:   desc = "Reads a variable slot and outputs its value."; break;
+                case VsNodeType::GetPlayerX:    desc = "Outputs the player's current X position."; break;
+                case VsNodeType::GetPlayerZ:    desc = "Outputs the player's current Z position."; break;
+                case VsNodeType::OnTimer:       desc = "Fires every N frames. Connect an Integer for the interval."; break;
+                case VsNodeType::SetScale:      desc = "Sets a sprite's scale. 256 = normal size."; break;
+                case VsNodeType::ScreenShake:   desc = "Shakes the camera for N frames at given intensity."; break;
+                case VsNodeType::FadeOut:       desc = "Fades the screen to black over N frames."; break;
+                case VsNodeType::FadeIn:        desc = "Fades the screen in from black over N frames."; break;
+                case VsNodeType::MoveToward:    desc = "Moves a sprite toward another sprite at a speed each frame."; break;
+                case VsNodeType::LookAt:        desc = "Rotates a sprite to face toward a target sprite."; break;
+                case VsNodeType::SetSpriteAnim: desc = "Sets the animation index on a specific sprite (not just the player)."; break;
+                case VsNodeType::SpawnEffect:   desc = "Triggers a visual effect at a position (effect ID, X, Z)."; break;
                 case VsNodeType::Integer:       desc = "Outputs a constant integer value."; break;
                 case VsNodeType::Key:           desc = "Outputs a key constant (A, B, L, R, etc)."; break;
                 case VsNodeType::Direction:     desc = "Outputs a direction (Left, Right, Up, Down)."; break;
@@ -9714,6 +9784,14 @@ void FrameTick(float dt)
                         case VsNodeType::SetAnimSpeed:  return "_set_anim_speed";
                         case VsNodeType::SetVelocityY:  return "_set_vel_y";
                         case VsNodeType::StopSound:     return "_stop_sound";
+                        case VsNodeType::SetScale:      return "_set_scale";
+                        case VsNodeType::ScreenShake:   return "_shake";
+                        case VsNodeType::FadeOut:       return "_fade_out";
+                        case VsNodeType::FadeIn:        return "_fade_in";
+                        case VsNodeType::MoveToward:    return "_move_toward";
+                        case VsNodeType::LookAt:        return "_look_at";
+                        case VsNodeType::SetSpriteAnim: return "_set_sprite_anim";
+                        case VsNodeType::SpawnEffect:   return "_spawn_effect";
                         case VsNodeType::ChangeScene:   return "_change_scene";
                         case VsNodeType::CustomCode:    return "_custom";
                         case VsNodeType::SetVariable:   return "_set_var";
@@ -10340,6 +10418,208 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_get_flag",
                         "    return (afn_flags >> flag) & 1;");
                     break;
+                case VsNodeType::AbsMath:
+                    editorCode = "// Absolute value";
+                    setActionFunc(infoNode, "_abs",
+                        "    int v = value;\n"
+                        "    return (v < 0) ? -v : v;");
+                    break;
+                case VsNodeType::MinMath:
+                    editorCode = "// Minimum of A and B";
+                    setActionFunc(infoNode, "_min",
+                        "    return (a < b) ? a : b;");
+                    break;
+                case VsNodeType::MaxMath:
+                    editorCode = "// Maximum of A and B";
+                    setActionFunc(infoNode, "_max",
+                        "    return (a > b) ? a : b;");
+                    break;
+                case VsNodeType::ModuloMath:
+                    editorCode = "// A % B (remainder)";
+                    setActionFunc(infoNode, "_mod",
+                        "    return (b != 0) ? (a % b) : 0;");
+                    break;
+                case VsNodeType::ClampMath:
+                    editorCode = "// Clamp value to [min, max]";
+                    setActionFunc(infoNode, "_clamp",
+                        "    if (val < lo) return lo;\n"
+                        "    if (val > hi) return hi;\n"
+                        "    return val;");
+                    break;
+                case VsNodeType::SignMath:
+                    editorCode = "// Sign: -1, 0, or 1";
+                    setActionFunc(infoNode, "_sign",
+                        "    return (v > 0) ? 1 : (v < 0) ? -1 : 0;");
+                    break;
+                case VsNodeType::CompareInt: {
+                    const char* ops[] = { "==", "!=", "<", ">", "<=", ">=" };
+                    int op = infoNode.paramInt[0];
+                    if (op < 0 || op > 5) op = 0;
+                    editorCode = "// Compare A and B";
+                    char bodyBuf[128];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    return (a %s b) ? 1 : 0;", ops[op]);
+                    setActionFunc(infoNode, "_compare", bodyBuf);
+                    break;
+                }
+                case VsNodeType::AndLogic:
+                    editorCode = "// Logical AND";
+                    setActionFunc(infoNode, "_and",
+                        "    return (a && b) ? 1 : 0;");
+                    break;
+                case VsNodeType::OrLogic:
+                    editorCode = "// Logical OR";
+                    setActionFunc(infoNode, "_or",
+                        "    return (a || b) ? 1 : 0;");
+                    break;
+                case VsNodeType::NotLogic:
+                    editorCode = "// Logical NOT";
+                    setActionFunc(infoNode, "_not",
+                        "    return (value == 0) ? 1 : 0;");
+                    break;
+                case VsNodeType::GetVariable:
+                    editorCode = "// Read variable slot";
+                    setActionFunc(infoNode, "_get_var",
+                        "    return afn_vars[slot];");
+                    break;
+                case VsNodeType::GetPlayerX:
+                    editorCode = "// Read player X position";
+                    setActionFunc(infoNode, "_get_px",
+                        "    return player_x >> 8;");
+                    break;
+                case VsNodeType::GetPlayerZ:
+                    editorCode = "// Read player Z position";
+                    setActionFunc(infoNode, "_get_pz",
+                        "    return player_z >> 8;");
+                    break;
+                case VsNodeType::OnTimer: {
+                    setEventFunc(infoNode, "afn_script_timer");
+                    editorCode =
+                        "// Fires every N frames\n"
+                        "static int timer = 0;\n"
+                        "if (++timer >= interval) {\n"
+                        "    timer = 0;\n"
+                        "    execActions();\n"
+                        "}";
+                    auto* iData = resolveDataIn(infoNode.id, 0);
+                    int interval = iData ? iData->paramInt[0] : 60;
+                    std::string calls = buildActionCalls(infoNode, "        ");
+                    snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                        "    static int afn_timer_%d = 0;\n"
+                        "    if (++afn_timer_%d >= %d) {\n"
+                        "        afn_timer_%d = 0;\n%s    }",
+                        infoNode.id, infoNode.id, interval, infoNode.id, calls.c_str());
+                    break;
+                }
+                case VsNodeType::SetScale: {
+                    editorCode =
+                        "// Set sprite scale (256 = normal)";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    int obj = %s;\n"
+                        "    int scale = %s; // 8.8 fixed\n"
+                        "    g_sprites[obj].scale = scale;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtFloat(infoNode.id, 1, "<scale>"));
+                    setActionFunc(infoNode, "_set_scale", bodyBuf);
+                    break;
+                }
+                case VsNodeType::ScreenShake: {
+                    editorCode =
+                        "// Camera shake effect";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_shake_intensity = %s;\n"
+                        "    afn_shake_frames = %s;",
+                        fmtInt(infoNode.id, 0, "<intensity>"),
+                        fmtInt(infoNode.id, 1, "<frames>"));
+                    setActionFunc(infoNode, "_shake", bodyBuf);
+                    break;
+                }
+                case VsNodeType::FadeOut: {
+                    editorCode =
+                        "// Fade screen to black";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_fade_target = 16; // full black\n"
+                        "    afn_fade_frames = %s;\n"
+                        "    afn_fade_counter = 0;",
+                        fmtInt(infoNode.id, 0, "<frames>"));
+                    setActionFunc(infoNode, "_fade_out", bodyBuf);
+                    break;
+                }
+                case VsNodeType::FadeIn: {
+                    editorCode =
+                        "// Fade screen from black";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_fade_target = 0; // full bright\n"
+                        "    afn_fade_frames = %s;\n"
+                        "    afn_fade_counter = 0;",
+                        fmtInt(infoNode.id, 0, "<frames>"));
+                    setActionFunc(infoNode, "_fade_in", bodyBuf);
+                    break;
+                }
+                case VsNodeType::MoveToward: {
+                    editorCode =
+                        "// Move sprite toward target at speed";
+                    char bodyBuf[512];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    int obj = %s, target = %s, spd = %s;\n"
+                        "    FIXED dx = g_sprites[target].wx - g_sprites[obj].wx;\n"
+                        "    FIXED dz = g_sprites[target].wz - g_sprites[obj].wz;\n"
+                        "    // Normalize and move\n"
+                        "    if (dx > spd) g_sprites[obj].wx += spd;\n"
+                        "    else if (dx < -spd) g_sprites[obj].wx -= spd;\n"
+                        "    else g_sprites[obj].wx = g_sprites[target].wx;\n"
+                        "    if (dz > spd) g_sprites[obj].wz += spd;\n"
+                        "    else if (dz < -spd) g_sprites[obj].wz -= spd;\n"
+                        "    else g_sprites[obj].wz = g_sprites[target].wz;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<target>"),
+                        fmtInt(infoNode.id, 2, "<speed>"));
+                    setActionFunc(infoNode, "_move_toward", bodyBuf);
+                    break;
+                }
+                case VsNodeType::LookAt: {
+                    editorCode =
+                        "// Face sprite toward target";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    int obj = %s, target = %s;\n"
+                        "    FIXED dx = g_sprites[target].wx - g_sprites[obj].wx;\n"
+                        "    FIXED dz = g_sprites[target].wz - g_sprites[obj].wz;\n"
+                        "    g_sprites[obj].facing = ArcTan2(dx, dz);",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<target>"));
+                    setActionFunc(infoNode, "_look_at", bodyBuf);
+                    break;
+                }
+                case VsNodeType::SetSpriteAnim: {
+                    editorCode =
+                        "// Set animation on a specific sprite";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    int obj = %s;\n"
+                        "    int anim = %s;\n"
+                        "    g_sprites[obj].anim = anim;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<anim>"));
+                    setActionFunc(infoNode, "_set_sprite_anim", bodyBuf);
+                    break;
+                }
+                case VsNodeType::SpawnEffect: {
+                    editorCode =
+                        "// Spawn visual effect at position";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_spawn_effect(%s, %s << 8, %s << 8);",
+                        fmtInt(infoNode.id, 0, "<effect>"),
+                        fmtInt(infoNode.id, 1, "<x>"),
+                        fmtInt(infoNode.id, 2, "<z>"));
+                    setActionFunc(infoNode, "_spawn_effect", bodyBuf);
+                    break;
+                }
                 case VsNodeType::CustomCode:
                     editorCode = "// (runs only on GBA runtime)";
                     {
@@ -10594,6 +10874,28 @@ void FrameTick(float dt)
                     case VsNodeType::NegateMath:    suffix = "_negate"; break;
                     case VsNodeType::RandomInt:     suffix = "_random"; break;
                     case VsNodeType::GetFlag:       suffix = "_get_flag"; break;
+                    case VsNodeType::AbsMath:       suffix = "_abs"; break;
+                    case VsNodeType::MinMath:       suffix = "_min"; break;
+                    case VsNodeType::MaxMath:       suffix = "_max"; break;
+                    case VsNodeType::ModuloMath:    suffix = "_mod"; break;
+                    case VsNodeType::ClampMath:     suffix = "_clamp"; break;
+                    case VsNodeType::SignMath:      suffix = "_sign"; break;
+                    case VsNodeType::CompareInt:    suffix = "_compare"; break;
+                    case VsNodeType::AndLogic:      suffix = "_and"; break;
+                    case VsNodeType::OrLogic:       suffix = "_or"; break;
+                    case VsNodeType::NotLogic:      suffix = "_not"; break;
+                    case VsNodeType::GetVariable:   suffix = "_get_var"; break;
+                    case VsNodeType::GetPlayerX:    suffix = "_get_px"; break;
+                    case VsNodeType::GetPlayerZ:    suffix = "_get_pz"; break;
+                    case VsNodeType::OnTimer:       suffix = "_timer"; break;
+                    case VsNodeType::SetScale:      suffix = "_set_scale"; break;
+                    case VsNodeType::ScreenShake:   suffix = "_shake"; break;
+                    case VsNodeType::FadeOut:       suffix = "_fade_out"; break;
+                    case VsNodeType::FadeIn:        suffix = "_fade_in"; break;
+                    case VsNodeType::MoveToward:    suffix = "_move_toward"; break;
+                    case VsNodeType::LookAt:        suffix = "_look_at"; break;
+                    case VsNodeType::SetSpriteAnim: suffix = "_set_sprite_anim"; break;
+                    case VsNodeType::SpawnEffect:   suffix = "_spawn_effect"; break;
                     case VsNodeType::ChangeScene:   suffix = "_change_scene"; break;
                     case VsNodeType::LookDirection: suffix = "_look"; break;
                     case VsNodeType::PlaySound:     suffix = "_play_sound"; break;
@@ -10757,6 +11059,7 @@ void FrameTick(float dt)
                     for (int t = (int)VsNodeType::OnKeyPressed; t <= (int)VsNodeType::OnStart; t++)
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnUpdate].name)) addNodeAt(VsNodeType::OnUpdate);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnTimer].name)) addNodeAt(VsNodeType::OnTimer);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
@@ -10794,6 +11097,15 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetVelocityY].name)) addNodeAt(VsNodeType::SetVelocityY);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopSound].name)) addNodeAt(VsNodeType::StopSound);
                     ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetScale].name)) addNodeAt(VsNodeType::SetScale);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ScreenShake].name)) addNodeAt(VsNodeType::ScreenShake);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FadeOut].name)) addNodeAt(VsNodeType::FadeOut);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FadeIn].name)) addNodeAt(VsNodeType::FadeIn);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::MoveToward].name)) addNodeAt(VsNodeType::MoveToward);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::LookAt].name)) addNodeAt(VsNodeType::LookAt);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetSpriteAnim].name)) addNodeAt(VsNodeType::SetSpriteAnim);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
+                    ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CustomCode].name)) addNodeAt(VsNodeType::CustomCode);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
@@ -10812,6 +11124,20 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::NegateMath].name)) addNodeAt(VsNodeType::NegateMath);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::RandomInt].name)) addNodeAt(VsNodeType::RandomInt);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetFlag].name)) addNodeAt(VsNodeType::GetFlag);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetVariable].name)) addNodeAt(VsNodeType::GetVariable);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetPlayerX].name)) addNodeAt(VsNodeType::GetPlayerX);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetPlayerZ].name)) addNodeAt(VsNodeType::GetPlayerZ);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::AbsMath].name)) addNodeAt(VsNodeType::AbsMath);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::MinMath].name)) addNodeAt(VsNodeType::MinMath);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::MaxMath].name)) addNodeAt(VsNodeType::MaxMath);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ModuloMath].name)) addNodeAt(VsNodeType::ModuloMath);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ClampMath].name)) addNodeAt(VsNodeType::ClampMath);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SignMath].name)) addNodeAt(VsNodeType::SignMath);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CompareInt].name)) addNodeAt(VsNodeType::CompareInt);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::AndLogic].name)) addNodeAt(VsNodeType::AndLogic);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OrLogic].name)) addNodeAt(VsNodeType::OrLogic);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::NotLogic].name)) addNodeAt(VsNodeType::NotLogic);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
@@ -10826,7 +11152,7 @@ void FrameTick(float dt)
         // Properties panel overlay — as child window inside canvas (data nodes only)
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
-            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode) {
+            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt) {
             const auto& def = sVsNodeDefs[(int)n.type];
             float propW = 260, propH = 180;
             float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -10918,6 +11244,17 @@ void FrameTick(float dt)
                 if (ImGui::BeginCombo("##ModeSel", modeNames[mode])) {
                     if (ImGui::Selectable("Mode 4", mode == 0)) { n.paramInt[1] = 0; }
                     if (ImGui::Selectable("Mode 0", mode == 1)) { n.paramInt[1] = 1; }
+                    ImGui::EndCombo();
+                }
+                break;
+            }
+            case VsNodeType::CompareInt: {
+                ImGui::Text("Operator");
+                const char* opNames[] = { "==", "!=", "<", ">", "<=", ">=" };
+                int op = std::clamp(n.paramInt[0], 0, 5);
+                if (ImGui::BeginCombo("##CmpOp", opNames[op])) {
+                    for (int i = 0; i < 6; i++)
+                        if (ImGui::Selectable(opNames[i], op == i)) { n.paramInt[0] = i; sProjectDirty = true; }
                     ImGui::EndCombo();
                 }
                 break;
