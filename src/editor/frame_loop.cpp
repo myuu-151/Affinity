@@ -245,6 +245,34 @@ enum class VsNodeType : int {
     LookAt,         // face sprite toward object
     SetSpriteAnim,  // play animation on specific sprite
     SpawnEffect,    // visual effect at position
+    // Flow control
+    DoOnce,         // only fires downstream once per play session
+    FlipFlop,       // alternates between two exec outputs each trigger
+    Gate,           // open/close gate that blocks or passes exec
+    ForLoop,        // repeat downstream N times
+    Sequence,       // fire exec outputs in order (1, then 2)
+    // More data nodes
+    Select,         // pick A or B based on condition
+    Lerp,           // linear interpolation A->B by T
+    Distance,       // distance between two sprites
+    GetSpriteX,     // read any sprite's X
+    GetSpriteZ,     // read any sprite's Z
+    IsKeyDown,      // outputs 1/0 for whether a key is held
+    SinWave,        // oscillating value over time
+    GetTime,        // frame counter as data
+    // Game systems
+    SetHP,          // set health points
+    GetHP,          // read health points
+    DamageHP,       // subtract from HP
+    AddScore,       // add to score counter
+    GetScore,       // read score
+    Respawn,        // reset player to start position
+    SaveData,       // save flags to SRAM
+    LoadData,       // load flags from SRAM
+    // More visual/object
+    FlipSprite,     // flip sprite horizontally
+    SetDrawDist,    // change draw distance at runtime
+    EnableCollision,// enable/disable collision on object
     COUNT
 };
 
@@ -349,6 +377,34 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Look At",        0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Target (int)"}, {}, {} },
     { "Set Sprite Anim",0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Anim (int)"}, {}, {} },
     { "Spawn Effect",   0xFF3355AA, 1, 1, 3, 0, {"Effect (int)", "X (int)", "Z (int)"}, {}, {} },
+    // Flow control
+    { "Do Once",        0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Flip Flop",      0xFF885533, 1, 2, 0, 0, {}, {}, {"A", "B"} },
+    { "Gate",           0xFF885533, 1, 1, 1, 0, {"Open (int)"}, {}, {} },
+    { "For Loop",       0xFF885533, 1, 1, 1, 0, {"Count (int)"}, {}, {} },
+    { "Sequence",       0xFF885533, 1, 2, 0, 0, {}, {}, {"Then 0", "Then 1"} },
+    // More data
+    { "Select",         0xFF666688, 0, 0, 3, 1, {"Cond", "A", "B"}, {"Result"}, {} },
+    { "Lerp",           0xFF666688, 0, 0, 3, 1, {"A", "B", "T"}, {"Result"}, {} },
+    { "Distance",       0xFF666688, 0, 0, 2, 1, {"Obj A (int)", "Obj B (int)"}, {"Dist"}, {} },
+    { "Get Sprite X",   0xFF666688, 0, 0, 1, 1, {"Object (int)"}, {"X"}, {} },
+    { "Get Sprite Z",   0xFF666688, 0, 0, 1, 1, {"Object (int)"}, {"Z"}, {} },
+    { "Is Key Down",    0xFF666688, 0, 0, 1, 1, {"Key"}, {"Held"}, {} },
+    { "Sin Wave",       0xFF666688, 0, 0, 2, 1, {"Amplitude", "Period"}, {"Value"}, {} },
+    { "Get Time",       0xFF666688, 0, 0, 0, 1, {}, {"Frames"}, {} },
+    // Game systems
+    { "Set HP",         0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "HP (int)"}, {}, {} },
+    { "Get HP",         0xFF666688, 0, 0, 1, 1, {"Object (int)"}, {"HP"}, {} },
+    { "Damage HP",      0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Amount (int)"}, {}, {} },
+    { "Add Score",      0xFF3355AA, 1, 1, 1, 0, {"Amount (int)"}, {}, {} },
+    { "Get Score",      0xFF666688, 0, 0, 0, 1, {}, {"Score"}, {} },
+    { "Respawn",        0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Save Data",      0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Load Data",      0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    // More visual/object
+    { "Flip Sprite",    0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Flip (int)"}, {}, {} },
+    { "Set Draw Dist",  0xFF3355AA, 1, 1, 1, 0, {"Distance (int)"}, {}, {} },
+    { "Enable Collision",0xFF3355AA,1, 1, 2, 0, {"Object (int)", "Enable (int)"}, {}, {} },
 };
 
 struct VsNode {
@@ -9622,6 +9678,30 @@ void FrameTick(float dt)
                 case VsNodeType::LookAt:        desc = "Rotates a sprite to face toward a target sprite."; break;
                 case VsNodeType::SetSpriteAnim: desc = "Sets the animation index on a specific sprite (not just the player)."; break;
                 case VsNodeType::SpawnEffect:   desc = "Triggers a visual effect at a position (effect ID, X, Z)."; break;
+                case VsNodeType::DoOnce:        desc = "Only passes execution through once. Subsequent triggers are ignored."; break;
+                case VsNodeType::FlipFlop:      desc = "Alternates between exec output A and B each time triggered."; break;
+                case VsNodeType::Gate:          desc = "Passes execution only if the Open input is nonzero. 0 = blocked."; break;
+                case VsNodeType::ForLoop:       desc = "Executes the downstream chain Count times in a row."; break;
+                case VsNodeType::Sequence:      desc = "Fires Then 0, then Then 1 in order each trigger."; break;
+                case VsNodeType::Select:        desc = "If Cond is nonzero, outputs A. Otherwise outputs B."; break;
+                case VsNodeType::Lerp:          desc = "Linearly interpolates from A to B by T (0-256 = 0.0-1.0 fixed-point)."; break;
+                case VsNodeType::Distance:      desc = "Outputs the approximate distance between two sprites."; break;
+                case VsNodeType::GetSpriteX:    desc = "Reads a sprite's X world position."; break;
+                case VsNodeType::GetSpriteZ:    desc = "Reads a sprite's Z world position."; break;
+                case VsNodeType::IsKeyDown:     desc = "Outputs 1 if the connected key is currently held, 0 otherwise."; break;
+                case VsNodeType::SinWave:       desc = "Outputs an oscillating value: amplitude * sin(frame * 2pi / period)."; break;
+                case VsNodeType::GetTime:       desc = "Outputs the current frame counter (increments every frame)."; break;
+                case VsNodeType::SetHP:         desc = "Sets a sprite's health points to a value."; break;
+                case VsNodeType::GetHP:         desc = "Reads a sprite's current health points."; break;
+                case VsNodeType::DamageHP:      desc = "Subtracts an amount from a sprite's HP. Clamps to 0."; break;
+                case VsNodeType::AddScore:      desc = "Adds an amount to the global score counter."; break;
+                case VsNodeType::GetScore:      desc = "Outputs the current score."; break;
+                case VsNodeType::Respawn:       desc = "Resets the player to their starting position and resets velocity."; break;
+                case VsNodeType::SaveData:      desc = "Saves all flags and score to SRAM (persistent across power cycles)."; break;
+                case VsNodeType::LoadData:      desc = "Loads flags and score from SRAM."; break;
+                case VsNodeType::FlipSprite:    desc = "Flips a sprite horizontally. 1 = flipped, 0 = normal."; break;
+                case VsNodeType::SetDrawDist:   desc = "Changes the mesh draw distance at runtime."; break;
+                case VsNodeType::EnableCollision:desc = "Enables or disables collision on a sprite. 0 = off, 1 = on."; break;
                 case VsNodeType::Integer:       desc = "Outputs a constant integer value."; break;
                 case VsNodeType::Key:           desc = "Outputs a key constant (A, B, L, R, etc)."; break;
                 case VsNodeType::Direction:     desc = "Outputs a direction (Left, Right, Up, Down)."; break;
@@ -9792,6 +9872,21 @@ void FrameTick(float dt)
                         case VsNodeType::LookAt:        return "_look_at";
                         case VsNodeType::SetSpriteAnim: return "_set_sprite_anim";
                         case VsNodeType::SpawnEffect:   return "_spawn_effect";
+                        case VsNodeType::DoOnce:        return "_do_once";
+                        case VsNodeType::FlipFlop:      return "_flip_flop";
+                        case VsNodeType::Gate:          return "_gate";
+                        case VsNodeType::ForLoop:       return "_for_loop";
+                        case VsNodeType::Sequence:      return "_sequence";
+                        case VsNodeType::SetHP:         return "_set_hp";
+                        case VsNodeType::DamageHP:      return "_damage_hp";
+                        case VsNodeType::AddScore:      return "_add_score";
+                        case VsNodeType::Respawn:       return "_respawn";
+                        case VsNodeType::SaveData:      return "_save_data";
+                        case VsNodeType::LoadData:      return "_load_data";
+                        case VsNodeType::FlipSprite:    return "_flip_sprite";
+                        case VsNodeType::SetDrawDist:   return "_set_draw_dist";
+                        case VsNodeType::EnableCollision:return "_enable_collision";
+                        case VsNodeType::SetSpriteAnim: return "_set_sprite_anim";
                         case VsNodeType::ChangeScene:   return "_change_scene";
                         case VsNodeType::CustomCode:    return "_custom";
                         case VsNodeType::SetVariable:   return "_set_var";
@@ -10620,6 +10715,187 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_spawn_effect", bodyBuf);
                     break;
                 }
+                // Flow control
+                case VsNodeType::DoOnce:
+                    editorCode = "// Only fires once per session";
+                    setActionFunc(infoNode, "_do_once",
+                        "    static int done = 0;\n"
+                        "    if (done) return;\n"
+                        "    done = 1;\n"
+                        "    /* downstream actions */");
+                    break;
+                case VsNodeType::FlipFlop:
+                    editorCode = "// Alternates A and B outputs";
+                    setActionFunc(infoNode, "_flip_flop",
+                        "    static int state = 0;\n"
+                        "    state = !state;\n"
+                        "    if (state) { /* exec A */ }\n"
+                        "    else { /* exec B */ }");
+                    break;
+                case VsNodeType::Gate: {
+                    editorCode = "// Blocks execution if Open == 0";
+                    char bodyBuf2[256];
+                    snprintf(bodyBuf2, sizeof(bodyBuf2),
+                        "    if (%s) { /* downstream */ }",
+                        fmtInt(infoNode.id, 0, "<open>"));
+                    setActionFunc(infoNode, "_gate", bodyBuf2);
+                    break;
+                }
+                case VsNodeType::ForLoop: {
+                    editorCode = "// Repeat downstream N times";
+                    char bodyBuf2[256];
+                    snprintf(bodyBuf2, sizeof(bodyBuf2),
+                        "    for (int i = 0; i < %s; i++) {\n"
+                        "        /* downstream actions */\n"
+                        "    }",
+                        fmtInt(infoNode.id, 0, "<count>"));
+                    setActionFunc(infoNode, "_for_loop", bodyBuf2);
+                    break;
+                }
+                case VsNodeType::Sequence:
+                    editorCode = "// Fire Then 0, then Then 1";
+                    setActionFunc(infoNode, "_sequence",
+                        "    /* exec Then 0 chain */\n"
+                        "    /* exec Then 1 chain */");
+                    break;
+                // Data nodes
+                case VsNodeType::Select:
+                    editorCode = "// If cond != 0 return A, else B";
+                    setActionFunc(infoNode, "_select",
+                        "    return cond ? a : b;");
+                    break;
+                case VsNodeType::Lerp:
+                    editorCode = "// Lerp from A to B by T (0-256)";
+                    setActionFunc(infoNode, "_lerp",
+                        "    // result = a + ((b - a) * t) >> 8\n"
+                        "    return a + (((b - a) * t) >> 8);");
+                    break;
+                case VsNodeType::Distance:
+                    editorCode = "// Approximate distance between two sprites";
+                    setActionFunc(infoNode, "_distance",
+                        "    FIXED dx = g_sprites[a].wx - g_sprites[b].wx;\n"
+                        "    FIXED dz = g_sprites[a].wz - g_sprites[b].wz;\n"
+                        "    // Manhattan approx: max(|dx|,|dz|) + min(|dx|,|dz|)/2\n"
+                        "    if (dx < 0) dx = -dx;\n"
+                        "    if (dz < 0) dz = -dz;\n"
+                        "    return ((dx > dz) ? dx + (dz >> 1) : dz + (dx >> 1)) >> 8;");
+                    break;
+                case VsNodeType::GetSpriteX:
+                    editorCode = "// Read sprite X position";
+                    setActionFunc(infoNode, "_get_sx",
+                        "    return g_sprites[obj].wx >> 8;");
+                    break;
+                case VsNodeType::GetSpriteZ:
+                    editorCode = "// Read sprite Z position";
+                    setActionFunc(infoNode, "_get_sz",
+                        "    return g_sprites[obj].wz >> 8;");
+                    break;
+                case VsNodeType::IsKeyDown:
+                    editorCode = "// 1 if key held, 0 otherwise";
+                    setActionFunc(infoNode, "_is_key_down",
+                        "    return key_is_down(key) ? 1 : 0;");
+                    break;
+                case VsNodeType::SinWave:
+                    editorCode = "// Oscillating value using sin LUT";
+                    setActionFunc(infoNode, "_sin_wave",
+                        "    // amplitude * lu_sin(frame * 65536 / period) >> 12\n"
+                        "    int phase = (afn_frame_count * 65536 / period) & 0xFFFF;\n"
+                        "    return (amplitude * lu_sin(phase)) >> 12;");
+                    break;
+                case VsNodeType::GetTime:
+                    editorCode = "// Frame counter since boot";
+                    setActionFunc(infoNode, "_get_time",
+                        "    return afn_frame_count;");
+                    break;
+                // Game systems
+                case VsNodeType::SetHP: {
+                    editorCode = "// Set sprite HP";
+                    char bodyBuf2[256];
+                    snprintf(bodyBuf2, sizeof(bodyBuf2),
+                        "    afn_hp[%s] = %s;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<hp>"));
+                    setActionFunc(infoNode, "_set_hp", bodyBuf2);
+                    break;
+                }
+                case VsNodeType::GetHP:
+                    editorCode = "// Read sprite HP";
+                    setActionFunc(infoNode, "_get_hp",
+                        "    return afn_hp[obj];");
+                    break;
+                case VsNodeType::DamageHP: {
+                    editorCode = "// Subtract from HP (clamp to 0)";
+                    char bodyBuf2[256];
+                    snprintf(bodyBuf2, sizeof(bodyBuf2),
+                        "    int obj = %s;\n"
+                        "    afn_hp[obj] -= %s;\n"
+                        "    if (afn_hp[obj] < 0) afn_hp[obj] = 0;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<amount>"));
+                    setActionFunc(infoNode, "_damage_hp", bodyBuf2);
+                    break;
+                }
+                case VsNodeType::AddScore: {
+                    editorCode = "// Add to score counter";
+                    char bodyBuf2[256];
+                    snprintf(bodyBuf2, sizeof(bodyBuf2),
+                        "    afn_score += %s;",
+                        fmtInt(infoNode.id, 0, "<amount>"));
+                    setActionFunc(infoNode, "_add_score", bodyBuf2);
+                    break;
+                }
+                case VsNodeType::GetScore:
+                    editorCode = "// Read current score";
+                    setActionFunc(infoNode, "_get_score",
+                        "    return afn_score;");
+                    break;
+                case VsNodeType::Respawn:
+                    editorCode = "// Reset player to start position";
+                    setActionFunc(infoNode, "_respawn",
+                        "    player_x = afn_start_x;\n"
+                        "    player_y = afn_start_y;\n"
+                        "    player_z = afn_start_z;\n"
+                        "    player_vy = 0;");
+                    break;
+                case VsNodeType::SaveData:
+                    editorCode = "// Save flags + score to SRAM";
+                    setActionFunc(infoNode, "_save_data",
+                        "    afn_sram_save();");
+                    break;
+                case VsNodeType::LoadData:
+                    editorCode = "// Load flags + score from SRAM";
+                    setActionFunc(infoNode, "_load_data",
+                        "    afn_sram_load();");
+                    break;
+                case VsNodeType::FlipSprite: {
+                    editorCode = "// Flip sprite horizontally";
+                    char bodyBuf2[256];
+                    snprintf(bodyBuf2, sizeof(bodyBuf2),
+                        "    afn_sprite_flip[%s] = %s;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<flip>"));
+                    setActionFunc(infoNode, "_flip_sprite", bodyBuf2);
+                    break;
+                }
+                case VsNodeType::SetDrawDist: {
+                    editorCode = "// Change mesh draw distance";
+                    char bodyBuf2[256];
+                    snprintf(bodyBuf2, sizeof(bodyBuf2),
+                        "    afn_draw_distance = %s;",
+                        fmtInt(infoNode.id, 0, "<distance>"));
+                    setActionFunc(infoNode, "_set_draw_dist", bodyBuf2);
+                    break;
+                }
+                case VsNodeType::EnableCollision: {
+                    editorCode = "// Enable/disable collision on sprite";
+                    char bodyBuf2[256];
+                    snprintf(bodyBuf2, sizeof(bodyBuf2),
+                        "    afn_collision_enabled[%s] = %s;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<enable>"));
+                    setActionFunc(infoNode, "_enable_collision", bodyBuf2);
+                    break;
+                }
                 case VsNodeType::CustomCode:
                     editorCode = "// (runs only on GBA runtime)";
                     {
@@ -10896,6 +11172,30 @@ void FrameTick(float dt)
                     case VsNodeType::LookAt:        suffix = "_look_at"; break;
                     case VsNodeType::SetSpriteAnim: suffix = "_set_sprite_anim"; break;
                     case VsNodeType::SpawnEffect:   suffix = "_spawn_effect"; break;
+                    case VsNodeType::DoOnce:        suffix = "_do_once"; break;
+                    case VsNodeType::FlipFlop:      suffix = "_flip_flop"; break;
+                    case VsNodeType::Gate:          suffix = "_gate"; break;
+                    case VsNodeType::ForLoop:       suffix = "_for_loop"; break;
+                    case VsNodeType::Sequence:      suffix = "_sequence"; break;
+                    case VsNodeType::Select:        suffix = "_select"; break;
+                    case VsNodeType::Lerp:          suffix = "_lerp"; break;
+                    case VsNodeType::Distance:      suffix = "_distance"; break;
+                    case VsNodeType::GetSpriteX:    suffix = "_get_sx"; break;
+                    case VsNodeType::GetSpriteZ:    suffix = "_get_sz"; break;
+                    case VsNodeType::IsKeyDown:     suffix = "_is_key_down"; break;
+                    case VsNodeType::SinWave:       suffix = "_sin_wave"; break;
+                    case VsNodeType::GetTime:       suffix = "_get_time"; break;
+                    case VsNodeType::SetHP:         suffix = "_set_hp"; break;
+                    case VsNodeType::GetHP:         suffix = "_get_hp"; break;
+                    case VsNodeType::DamageHP:      suffix = "_damage_hp"; break;
+                    case VsNodeType::AddScore:      suffix = "_add_score"; break;
+                    case VsNodeType::GetScore:      suffix = "_get_score"; break;
+                    case VsNodeType::Respawn:       suffix = "_respawn"; break;
+                    case VsNodeType::SaveData:      suffix = "_save_data"; break;
+                    case VsNodeType::LoadData:      suffix = "_load_data"; break;
+                    case VsNodeType::FlipSprite:    suffix = "_flip_sprite"; break;
+                    case VsNodeType::SetDrawDist:   suffix = "_set_draw_dist"; break;
+                    case VsNodeType::EnableCollision:suffix = "_enable_collision"; break;
                     case VsNodeType::ChangeScene:   suffix = "_change_scene"; break;
                     case VsNodeType::LookDirection: suffix = "_look"; break;
                     case VsNodeType::PlaySound:     suffix = "_play_sound"; break;
@@ -11073,6 +11373,12 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsOnGround].name)) addNodeAt(VsNodeType::IsOnGround);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsJumping].name)) addNodeAt(VsNodeType::IsJumping);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CheckFlag].name)) addNodeAt(VsNodeType::CheckFlag);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::DoOnce].name)) addNodeAt(VsNodeType::DoOnce);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FlipFlop].name)) addNodeAt(VsNodeType::FlipFlop);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Gate].name)) addNodeAt(VsNodeType::Gate);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ForLoop].name)) addNodeAt(VsNodeType::ForLoop);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Sequence].name)) addNodeAt(VsNodeType::Sequence);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
@@ -11106,6 +11412,16 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetSpriteAnim].name)) addNodeAt(VsNodeType::SetSpriteAnim);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
                     ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP].name)) addNodeAt(VsNodeType::SetHP);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::DamageHP].name)) addNodeAt(VsNodeType::DamageHP);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::AddScore].name)) addNodeAt(VsNodeType::AddScore);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Respawn].name)) addNodeAt(VsNodeType::Respawn);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SaveData].name)) addNodeAt(VsNodeType::SaveData);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::LoadData].name)) addNodeAt(VsNodeType::LoadData);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FlipSprite].name)) addNodeAt(VsNodeType::FlipSprite);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetDrawDist].name)) addNodeAt(VsNodeType::SetDrawDist);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::EnableCollision].name)) addNodeAt(VsNodeType::EnableCollision);
+                    ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CustomCode].name)) addNodeAt(VsNodeType::CustomCode);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
@@ -11138,6 +11454,17 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::AndLogic].name)) addNodeAt(VsNodeType::AndLogic);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OrLogic].name)) addNodeAt(VsNodeType::OrLogic);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::NotLogic].name)) addNodeAt(VsNodeType::NotLogic);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Select].name)) addNodeAt(VsNodeType::Select);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Lerp].name)) addNodeAt(VsNodeType::Lerp);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Distance].name)) addNodeAt(VsNodeType::Distance);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetSpriteX].name)) addNodeAt(VsNodeType::GetSpriteX);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetSpriteZ].name)) addNodeAt(VsNodeType::GetSpriteZ);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsKeyDown].name)) addNodeAt(VsNodeType::IsKeyDown);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SinWave].name)) addNodeAt(VsNodeType::SinWave);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetTime].name)) addNodeAt(VsNodeType::GetTime);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetHP].name)) addNodeAt(VsNodeType::GetHP);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetScore].name)) addNodeAt(VsNodeType::GetScore);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
