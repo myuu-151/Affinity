@@ -7326,44 +7326,6 @@ void FrameTick(float dt)
                 }
             }
 
-            // Continuously surge the active PlayAnim node and its entire chain
-            if (sActivePlayAnimNodeId >= 0) {
-                sVsFiredNodes.push_back(sActivePlayAnimNodeId);
-                // Continuously reverse-surge data inputs (PlayAnim → Animation)
-                for (int li = 0; li < (int)sVsLinks.size(); li++)
-                    if (sVsLinks[li].to.nodeId == sActivePlayAnimNodeId && sVsLinks[li].to.pinType == 3) {
-                        auto it = sVsLinkSurgeRevT.find(li);
-                        if (it == sVsLinkSurgeRevT.end() || it->second > 1.0f)
-                            sVsLinkSurgeRevT[li] = 0.0f;
-                    }
-                // Walk backwards through exec links to find the chain that triggered it
-                // Stop before event nodes (OnStart, OnKeyPressed, etc.) — they pulse on their own
-                int cur = sActivePlayAnimNodeId;
-                for (int safety = 0; safety < 20; safety++) {
-                    int prev = -1;
-                    for (auto& lk : sVsLinks) {
-                        if (lk.to.nodeId == cur && lk.to.pinType == 1) {
-                            prev = lk.from.nodeId;
-                            break;
-                        }
-                    }
-                    if (prev < 0) break;
-                    // Don't continuously surge event nodes — they fire once
-                    VsNodeType prevType = VsNodeType::Group;
-                    for (auto& n : sVsNodes)
-                        if (n.id == prev) { prevType = n.type; break; }
-                    if (prevType == VsNodeType::OnStart || prevType == VsNodeType::OnKeyPressed ||
-                        prevType == VsNodeType::OnKeyReleased)
-                        break;
-                    sVsFiredNodes.push_back(prev);
-                    // Also fire data nodes feeding into this predecessor
-                    for (auto& lk : sVsLinks)
-                        if (lk.to.nodeId == prev && lk.to.pinType == 3)
-                            sVsFiredNodes.push_back(lk.from.nodeId);
-                    cur = prev;
-                }
-            }
-
             // OnUpdate: fires every frame
             for (auto& ev : sVsNodes) {
                 if (ev.type != VsNodeType::OnUpdate) continue;
@@ -7855,12 +7817,24 @@ void FrameTick(float dt)
                 sPlayerSprinting = sPlayerMoving && editorKeyDown(1);
 
                 // Pick active PlayAnim based on movement state
-                if (sPlayerSprinting && sPlayAnimHeld >= 0)
+                if (sPlayerMoving && sPlayAnimHeld >= 0)
                     sActivePlayAnimNodeId = sPlayAnimHeld;
                 else if (sPlayAnimReleased >= 0)
                     sActivePlayAnimNodeId = sPlayAnimReleased;
                 else if (sPlayAnimIdle >= 0)
                     sActivePlayAnimNodeId = sPlayAnimIdle;
+
+                // Continuously surge the active PlayAnim node and its data chain
+                if (sActivePlayAnimNodeId >= 0) {
+                    sVsFiredNodes.push_back(sActivePlayAnimNodeId);
+                    // Continuously reverse-surge data inputs (PlayAnim → Animation)
+                    for (int li = 0; li < (int)sVsLinks.size(); li++)
+                        if (sVsLinks[li].to.nodeId == sActivePlayAnimNodeId && sVsLinks[li].to.pinType == 3) {
+                            auto it = sVsLinkSurgeRevT.find(li);
+                            if (it == sVsLinkSurgeRevT.end() || it->second > 1.0f)
+                                sVsLinkSurgeRevT[li] = 0.0f;
+                        }
+                }
 
                 // Manual orbit from OrbitCamera nodes
                 {
