@@ -1482,9 +1482,19 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static u8    afn_sprite_alpha[16];\n";
         f << "static u8    afn_flash_obj[16];\n";
         f << "static u16   afn_sprite_rot[16];\n";
-        f << "static int   afn_max_hp[16];\n\n";
+        f << "static int   afn_max_hp[16];\n";
+        f << "static u8    afn_ai_mode[16];\n";
+        f << "static u16   afn_sprite_tint[16];\n";
+        f << "static u8    afn_sprite_shake[16];\n";
+        f << "static int   afn_hud_value[4];\n";
+        f << "static u8    afn_hud_visible[4];\n";
+        f << "static FIXED afn_patrol_home_x[16];\n";
+        f << "static FIXED afn_patrol_home_z[16];\n";
+        f << "static u16   afn_bg_color;\n\n";
         // Clone sprite stub
         f << "static inline void afn_clone_sprite(int src) { (void)src; }\n";
+        // Emit particle stub
+        f << "static inline void afn_emit_particle(int type, FIXED x, FIXED z) { (void)type; (void)x; (void)z; }\n";
         // mGBA debug log stub
         f << "#ifndef mgba_printf\n";
         f << "#define mgba_printf(...) ((void)0)\n";
@@ -1594,6 +1604,20 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::HealHP:        return "_heal_hp";
         case GBAScriptNodeType::SetMaxHP:      return "_set_max_hp";
         case GBAScriptNodeType::IsAlive:       return "_is_alive_gate";
+        case GBAScriptNodeType::SetBGColor:    return "_set_bg_color";
+        case GBAScriptNodeType::FacePlayer:    return "_face_player";
+        case GBAScriptNodeType::MoveForward:   return "_move_fwd";
+        case GBAScriptNodeType::Patrol:        return "_patrol";
+        case GBAScriptNodeType::ChasePlayer:   return "_chase_player";
+        case GBAScriptNodeType::FleePlayer:    return "_flee_player";
+        case GBAScriptNodeType::SetAI:         return "_set_ai";
+        case GBAScriptNodeType::EmitParticle:  return "_emit_particle";
+        case GBAScriptNodeType::SetTint:       return "_set_tint";
+        case GBAScriptNodeType::Shake:         return "_shake_sprite";
+        case GBAScriptNodeType::SetText:       return "_set_text";
+        case GBAScriptNodeType::ShowHUD:       return "_show_hud";
+        case GBAScriptNodeType::HideHUD:       return "_hide_hud";
+        case GBAScriptNodeType::ArraySet:      return "_array_set";
         default: return "";
         }
     };
@@ -2225,6 +2249,136 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     int obj = objData ? resolveInt(objData) : 0;
                     int maxhp = maxData ? resolveInt(maxData) : 100;
                     f << "    afn_max_hp[" << obj << "] = " << maxhp << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetBGColor: {
+                    auto* colData = findDataIn(action->id, 0);
+                    int col = colData ? resolveInt(colData) : 0;
+                    f << "    afn_bg_color = " << col << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::FacePlayer: {
+                    auto* objData = findDataIn(action->id, 0);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    f << "    afn_sprite_rot[" << obj << "] = ArcTan2(player_z - g_sprites[" << obj << "].wz, player_x - g_sprites[" << obj << "].wx);\n";
+                    break;
+                }
+                case GBAScriptNodeType::MoveForward: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* spdData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int spd = spdData ? resolveInt(spdData) : 1;
+                    f << "    { int ang = afn_sprite_rot[" << obj << "];\n";
+                    f << "      g_sprites[" << obj << "].wx += (lu_cos(ang) * " << spd << ") >> 12;\n";
+                    f << "      g_sprites[" << obj << "].wz -= (lu_sin(ang) * " << spd << ") >> 12; }\n";
+                    break;
+                }
+                case GBAScriptNodeType::Patrol: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* x1Data = findDataIn(action->id, 1);
+                    auto* z1Data = findDataIn(action->id, 2);
+                    auto* spdData = findDataIn(action->id, 3);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int x1 = x1Data ? resolveInt(x1Data) : 0;
+                    int z1 = z1Data ? resolveInt(z1Data) : 0;
+                    int spd = spdData ? resolveInt(spdData) : 1;
+                    f << "    { static int afn_patrol_dir_" << action->id << " = 1;\n";
+                    f << "      FIXED tx = afn_patrol_dir_" << action->id << " ? (" << x1 << "<<8) : afn_patrol_home_x[" << obj << "];\n";
+                    f << "      FIXED tz = afn_patrol_dir_" << action->id << " ? (" << z1 << "<<8) : afn_patrol_home_z[" << obj << "];\n";
+                    f << "      FIXED dx = tx - g_sprites[" << obj << "].wx; FIXED dz = tz - g_sprites[" << obj << "].wz;\n";
+                    f << "      if (dx<0) dx=-dx; if (dz<0) dz=-dz;\n";
+                    f << "      int dist = (dx>dz)?dx+(dz>>1):dz+(dx>>1);\n";
+                    f << "      if ((dist>>8) < 4) afn_patrol_dir_" << action->id << " ^= 1;\n";
+                    f << "      else if (dist > 0) { g_sprites[" << obj << "].wx += ((tx-g_sprites[" << obj << "].wx) * " << spd << ") / (dist>>8);\n";
+                    f << "        g_sprites[" << obj << "].wz += ((tz-g_sprites[" << obj << "].wz) * " << spd << ") / (dist>>8); } }\n";
+                    break;
+                }
+                case GBAScriptNodeType::ChasePlayer: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* spdData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int spd = spdData ? resolveInt(spdData) : 1;
+                    f << "    { FIXED dx = player_x - g_sprites[" << obj << "].wx;\n";
+                    f << "      FIXED dz = player_z - g_sprites[" << obj << "].wz;\n";
+                    f << "      FIXED adx = dx<0?-dx:dx; FIXED adz = dz<0?-dz:dz;\n";
+                    f << "      int dist = (adx>adz)?adx+(adz>>1):adz+(adx>>1);\n";
+                    f << "      if (dist > 0) { g_sprites[" << obj << "].wx += (dx * " << spd << ") / (dist>>8);\n";
+                    f << "        g_sprites[" << obj << "].wz += (dz * " << spd << ") / (dist>>8); } }\n";
+                    break;
+                }
+                case GBAScriptNodeType::FleePlayer: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* spdData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int spd = spdData ? resolveInt(spdData) : 1;
+                    f << "    { FIXED dx = g_sprites[" << obj << "].wx - player_x;\n";
+                    f << "      FIXED dz = g_sprites[" << obj << "].wz - player_z;\n";
+                    f << "      FIXED adx = dx<0?-dx:dx; FIXED adz = dz<0?-dz:dz;\n";
+                    f << "      int dist = (adx>adz)?adx+(adz>>1):adz+(adx>>1);\n";
+                    f << "      if (dist > 0) { g_sprites[" << obj << "].wx += (dx * " << spd << ") / (dist>>8);\n";
+                    f << "        g_sprites[" << obj << "].wz += (dz * " << spd << ") / (dist>>8); } }\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetAI: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* modeData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int mode = modeData ? resolveInt(modeData) : 0;
+                    f << "    afn_ai_mode[" << obj << "] = " << mode << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::EmitParticle: {
+                    auto* typeData = findDataIn(action->id, 0);
+                    auto* xData = findDataIn(action->id, 1);
+                    auto* zData = findDataIn(action->id, 2);
+                    int type = typeData ? resolveInt(typeData) : 0;
+                    int x = xData ? resolveInt(xData) : 0;
+                    int z = zData ? resolveInt(zData) : 0;
+                    f << "    afn_emit_particle(" << type << ", " << x << " << 8, " << z << " << 8);\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetTint: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* colData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int col = colData ? resolveInt(colData) : 0;
+                    f << "    afn_sprite_tint[" << obj << "] = " << col << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::Shake: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* frData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int fr = frData ? resolveInt(frData) : 8;
+                    f << "    afn_sprite_shake[" << obj << "] = " << fr << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetText: {
+                    auto* slotData = findDataIn(action->id, 0);
+                    auto* valData = findDataIn(action->id, 1);
+                    int slot = slotData ? resolveInt(slotData) : 0;
+                    int val = valData ? resolveInt(valData) : 0;
+                    f << "    afn_hud_value[" << slot << "] = " << val << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::ShowHUD: {
+                    auto* slotData = findDataIn(action->id, 0);
+                    int slot = slotData ? resolveInt(slotData) : 0;
+                    f << "    afn_hud_visible[" << slot << "] = 1;\n";
+                    break;
+                }
+                case GBAScriptNodeType::HideHUD: {
+                    auto* slotData = findDataIn(action->id, 0);
+                    int slot = slotData ? resolveInt(slotData) : 0;
+                    f << "    afn_hud_visible[" << slot << "] = 0;\n";
+                    break;
+                }
+                case GBAScriptNodeType::ArraySet: {
+                    auto* idxData = findDataIn(action->id, 0);
+                    auto* valData = findDataIn(action->id, 1);
+                    int idx = idxData ? resolveInt(idxData) : 0;
+                    int val = valData ? resolveInt(valData) : 0;
+                    f << "    afn_vars[" << idx << " & 15] = " << val << ";\n";
                     break;
                 }
                 default:
@@ -3076,6 +3230,116 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     std::string obj = objData ? bpResolveInt(objData) : "0";
                     std::string maxhp = maxData ? bpResolveInt(maxData) : "100";
                     f << "    afn_max_hp[" << obj << "] = " << maxhp << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetBGColor: {
+                    auto* colData = bpFindDataIn(action->id, 0);
+                    std::string col = colData ? bpResolveInt(colData) : "0";
+                    f << "    afn_bg_color = " << col << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::FacePlayer: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    f << "    afn_sprite_rot[" << obj << "] = ArcTan2(player_z - g_sprites[" << obj << "].wz, player_x - g_sprites[" << obj << "].wx);\n";
+                    break;
+                }
+                case GBAScriptNodeType::MoveForward: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* spdData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string spd = spdData ? bpResolveInt(spdData) : "1";
+                    f << "    { int ang = afn_sprite_rot[" << obj << "];\n";
+                    f << "      g_sprites[" << obj << "].wx += (lu_cos(ang) * " << spd << ") >> 12;\n";
+                    f << "      g_sprites[" << obj << "].wz -= (lu_sin(ang) * " << spd << ") >> 12; }\n";
+                    break;
+                }
+                case GBAScriptNodeType::ChasePlayer: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* spdData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string spd = spdData ? bpResolveInt(spdData) : "1";
+                    f << "    { FIXED dx = player_x - g_sprites[" << obj << "].wx;\n";
+                    f << "      FIXED dz = player_z - g_sprites[" << obj << "].wz;\n";
+                    f << "      FIXED adx = dx<0?-dx:dx; FIXED adz = dz<0?-dz:dz;\n";
+                    f << "      int dist = (adx>adz)?adx+(adz>>1):adz+(adx>>1);\n";
+                    f << "      if (dist > 0) { g_sprites[" << obj << "].wx += (dx * " << spd << ") / (dist>>8);\n";
+                    f << "        g_sprites[" << obj << "].wz += (dz * " << spd << ") / (dist>>8); } }\n";
+                    break;
+                }
+                case GBAScriptNodeType::FleePlayer: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* spdData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string spd = spdData ? bpResolveInt(spdData) : "1";
+                    f << "    { FIXED dx = g_sprites[" << obj << "].wx - player_x;\n";
+                    f << "      FIXED dz = g_sprites[" << obj << "].wz - player_z;\n";
+                    f << "      FIXED adx = dx<0?-dx:dx; FIXED adz = dz<0?-dz:dz;\n";
+                    f << "      int dist = (adx>adz)?adx+(adz>>1):adz+(adx>>1);\n";
+                    f << "      if (dist > 0) { g_sprites[" << obj << "].wx += (dx * " << spd << ") / (dist>>8);\n";
+                    f << "        g_sprites[" << obj << "].wz += (dz * " << spd << ") / (dist>>8); } }\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetAI: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* modeData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string mode = modeData ? bpResolveInt(modeData) : "0";
+                    f << "    afn_ai_mode[" << obj << "] = " << mode << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::EmitParticle: {
+                    auto* typeData = bpFindDataIn(action->id, 0);
+                    auto* xData = bpFindDataIn(action->id, 1);
+                    auto* zData = bpFindDataIn(action->id, 2);
+                    std::string type = typeData ? bpResolveInt(typeData) : "0";
+                    std::string x = xData ? bpResolveInt(xData) : "0";
+                    std::string z = zData ? bpResolveInt(zData) : "0";
+                    f << "    afn_emit_particle(" << type << ", " << x << " << 8, " << z << " << 8);\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetTint: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* colData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string col = colData ? bpResolveInt(colData) : "0";
+                    f << "    afn_sprite_tint[" << obj << "] = " << col << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::Shake: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* frData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string fr = frData ? bpResolveInt(frData) : "8";
+                    f << "    afn_sprite_shake[" << obj << "] = " << fr << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetText: {
+                    auto* slotData = bpFindDataIn(action->id, 0);
+                    auto* valData = bpFindDataIn(action->id, 1);
+                    std::string slot = slotData ? bpResolveInt(slotData) : "0";
+                    std::string val = valData ? bpResolveInt(valData) : "0";
+                    f << "    afn_hud_value[" << slot << "] = " << val << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::ShowHUD: {
+                    auto* slotData = bpFindDataIn(action->id, 0);
+                    std::string slot = slotData ? bpResolveInt(slotData) : "0";
+                    f << "    afn_hud_visible[" << slot << "] = 1;\n";
+                    break;
+                }
+                case GBAScriptNodeType::HideHUD: {
+                    auto* slotData = bpFindDataIn(action->id, 0);
+                    std::string slot = slotData ? bpResolveInt(slotData) : "0";
+                    f << "    afn_hud_visible[" << slot << "] = 0;\n";
+                    break;
+                }
+                case GBAScriptNodeType::ArraySet: {
+                    auto* idxData = bpFindDataIn(action->id, 0);
+                    auto* valData = bpFindDataIn(action->id, 1);
+                    std::string idx = idxData ? bpResolveInt(idxData) : "0";
+                    std::string val = valData ? bpResolveInt(valData) : "0";
+                    f << "    afn_vars[" << idx << " & 15] = " << val << ";\n";
                     break;
                 }
                 default:
