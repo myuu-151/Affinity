@@ -261,6 +261,12 @@ static int   afn_player_frozen;  // nonzero = input disabled
 static u32   afn_flags;          // 32-bit game flags for script system
 static int   afn_anim_speed = 1; // animation speed multiplier
 static u32   afn_rng = 12345;   // simple PRNG state
+static int   afn_shake_intensity; // screen shake pixel offset
+static int   afn_shake_frames;    // remaining shake frames
+static int   afn_fade_target;     // 0=bright, 16=black
+static int   afn_fade_frames;     // duration of fade
+static int   afn_fade_counter;    // current frame in fade
+static int   afn_fade_level;      // current blend level (0-16)
 
 // Direction animation set tracking (for DMA streaming)
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
@@ -3552,6 +3558,33 @@ int main(void)
             // Handle scene switch request
             if (afn_pending_scene >= 0) {
                 // TODO: multi-scene data loading
+            }
+
+            // Screen shake processing
+            if (afn_shake_frames > 0) {
+                afn_shake_frames--;
+                int sx = (afn_rng & 0xFF) % (afn_shake_intensity * 2 + 1) - afn_shake_intensity;
+                int sy = ((afn_rng >> 8) & 0xFF) % (afn_shake_intensity * 2 + 1) - afn_shake_intensity;
+                afn_rng = afn_rng * 1103515245 + 12345;
+                REG_BG_OFS[2].x = sx;
+                REG_BG_OFS[2].y = sy;
+            } else {
+                REG_BG_OFS[2].x = 0;
+                REG_BG_OFS[2].y = 0;
+            }
+
+            // Fade processing
+            if (afn_fade_frames > 0) {
+                afn_fade_counter++;
+                afn_fade_level = afn_fade_target == 16
+                    ? (afn_fade_counter * 16 / afn_fade_frames)
+                    : (16 - afn_fade_counter * 16 / afn_fade_frames);
+                if (afn_fade_counter >= afn_fade_frames) {
+                    afn_fade_level = afn_fade_target;
+                    afn_fade_frames = 0;
+                }
+                REG_BLDCNT = BLD_BUILD(BLD_BG2 | BLD_OBJ, 0, BLD_BLACK);
+                REG_BLDY = afn_fade_level;
             }
 
             inputFwd = afn_input_fwd;

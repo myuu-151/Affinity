@@ -1458,7 +1458,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int   afn_player_frozen;\n";
         f << "static int   afn_anim_speed = 1;\n";
         f << "static u32   afn_rng = 12345;\n";
-        f << "static u8    afn_sprite_visible[16];\n\n";
+        f << "static u8    afn_sprite_visible[16];\n";
+        f << "static int   afn_shake_intensity;\n";
+        f << "static int   afn_shake_frames;\n";
+        f << "static int   afn_fade_target;\n";
+        f << "static int   afn_fade_frames;\n";
+        f << "static int   afn_fade_counter;\n";
+        f << "static int   afn_fade_level;\n\n";
     }
     // Helper: get suffix string for an action node type
     auto actionSuffix = [](GBAScriptNodeType t) -> const char* {
@@ -1491,6 +1497,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::SetAnimSpeed:  return "_set_anim_speed";
         case GBAScriptNodeType::SetVelocityY:  return "_set_vel_y";
         case GBAScriptNodeType::StopSound:     return "_stop_sound";
+        case GBAScriptNodeType::SetScale:      return "_set_scale";
+        case GBAScriptNodeType::ScreenShake:   return "_shake";
+        case GBAScriptNodeType::FadeOut:       return "_fade_out";
+        case GBAScriptNodeType::FadeIn:        return "_fade_in";
+        case GBAScriptNodeType::MoveToward:    return "_move_toward";
+        case GBAScriptNodeType::LookAt:        return "_look_at";
+        case GBAScriptNodeType::SetSpriteAnim: return "_set_sprite_anim";
+        case GBAScriptNodeType::SpawnEffect:   return "_spawn_effect";
         case GBAScriptNodeType::ChangeScene:   return "_change_scene";
         case GBAScriptNodeType::CustomCode:    return "_custom";
         default: return "";
@@ -1787,6 +1801,85 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 case GBAScriptNodeType::StopSound:
                     f << "    REG_SOUNDCNT_H = 0;\n";
                     break;
+                case GBAScriptNodeType::SetScale: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* scaleData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    float scale = scaleData ? resolveFloat(scaleData) : 1.0f;
+                    int scaleFixed = (int)(scale * 256.0f);
+                    f << "    g_sprites[" << obj << "].scale = " << scaleFixed << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::ScreenShake: {
+                    auto* intData = findDataIn(action->id, 0);
+                    auto* frData = findDataIn(action->id, 1);
+                    int intensity = intData ? resolveInt(intData) : 3;
+                    int frames = frData ? resolveInt(frData) : 10;
+                    f << "    afn_shake_intensity = " << intensity << ";\n";
+                    f << "    afn_shake_frames = " << frames << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::FadeOut: {
+                    auto* frData = findDataIn(action->id, 0);
+                    int frames = frData ? resolveInt(frData) : 30;
+                    f << "    afn_fade_target = 16;\n";
+                    f << "    afn_fade_frames = " << frames << ";\n";
+                    f << "    afn_fade_counter = 0;\n";
+                    break;
+                }
+                case GBAScriptNodeType::FadeIn: {
+                    auto* frData = findDataIn(action->id, 0);
+                    int frames = frData ? resolveInt(frData) : 30;
+                    f << "    afn_fade_target = 0;\n";
+                    f << "    afn_fade_frames = " << frames << ";\n";
+                    f << "    afn_fade_counter = 0;\n";
+                    break;
+                }
+                case GBAScriptNodeType::MoveToward: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* tgtData = findDataIn(action->id, 1);
+                    auto* spdData = findDataIn(action->id, 2);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int tgt = tgtData ? resolveInt(tgtData) : 0;
+                    int spd = spdData ? resolveInt(spdData) : 64;
+                    f << "    { FIXED dx = g_sprites[" << tgt << "].wx - g_sprites[" << obj << "].wx;\n";
+                    f << "      FIXED dz = g_sprites[" << tgt << "].wz - g_sprites[" << obj << "].wz;\n";
+                    f << "      if (dx > " << spd << ") g_sprites[" << obj << "].wx += " << spd << ";\n";
+                    f << "      else if (dx < -" << spd << ") g_sprites[" << obj << "].wx -= " << spd << ";\n";
+                    f << "      else g_sprites[" << obj << "].wx = g_sprites[" << tgt << "].wx;\n";
+                    f << "      if (dz > " << spd << ") g_sprites[" << obj << "].wz += " << spd << ";\n";
+                    f << "      else if (dz < -" << spd << ") g_sprites[" << obj << "].wz -= " << spd << ";\n";
+                    f << "      else g_sprites[" << obj << "].wz = g_sprites[" << tgt << "].wz; }\n";
+                    break;
+                }
+                case GBAScriptNodeType::LookAt: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* tgtData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int tgt = tgtData ? resolveInt(tgtData) : 0;
+                    f << "    { FIXED dx = g_sprites[" << tgt << "].wx - g_sprites[" << obj << "].wx;\n";
+                    f << "      FIXED dz = g_sprites[" << tgt << "].wz - g_sprites[" << obj << "].wz;\n";
+                    f << "      g_sprites[" << obj << "].facing = ArcTan2(dx, dz); }\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetSpriteAnim: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* animData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int anim = animData ? resolveInt(animData) : 0;
+                    f << "    g_sprites[" << obj << "].anim = " << anim << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SpawnEffect: {
+                    auto* effData = findDataIn(action->id, 0);
+                    auto* xData = findDataIn(action->id, 1);
+                    auto* zData = findDataIn(action->id, 2);
+                    int eff = effData ? resolveInt(effData) : 0;
+                    int x = xData ? resolveInt(xData) : 0;
+                    int z = zData ? resolveInt(zData) : 0;
+                    f << "    afn_spawn_effect(" << eff << ", " << x << " << 8, " << z << " << 8);\n";
+                    break;
+                }
                 case GBAScriptNodeType::CustomCode:
                     break; // handled by customCode[0] check above
                 default:
@@ -2283,6 +2376,84 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 case GBAScriptNodeType::StopSound:
                     f << "    REG_SOUNDCNT_H = 0;\n";
                     break;
+                case GBAScriptNodeType::SetScale: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* scaleData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string scale = scaleData ? bpResolveFloat(scaleData) : "256";
+                    f << "    g_sprites[" << obj << "].scale = " << scale << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::ScreenShake: {
+                    auto* intData = bpFindDataIn(action->id, 0);
+                    auto* frData = bpFindDataIn(action->id, 1);
+                    std::string intensity = intData ? bpResolveInt(intData) : "3";
+                    std::string frames = frData ? bpResolveInt(frData) : "10";
+                    f << "    afn_shake_intensity = " << intensity << ";\n";
+                    f << "    afn_shake_frames = " << frames << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::FadeOut: {
+                    auto* frData = bpFindDataIn(action->id, 0);
+                    std::string frames = frData ? bpResolveInt(frData) : "30";
+                    f << "    afn_fade_target = 16;\n";
+                    f << "    afn_fade_frames = " << frames << ";\n";
+                    f << "    afn_fade_counter = 0;\n";
+                    break;
+                }
+                case GBAScriptNodeType::FadeIn: {
+                    auto* frData = bpFindDataIn(action->id, 0);
+                    std::string frames = frData ? bpResolveInt(frData) : "30";
+                    f << "    afn_fade_target = 0;\n";
+                    f << "    afn_fade_frames = " << frames << ";\n";
+                    f << "    afn_fade_counter = 0;\n";
+                    break;
+                }
+                case GBAScriptNodeType::MoveToward: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* tgtData = bpFindDataIn(action->id, 1);
+                    auto* spdData = bpFindDataIn(action->id, 2);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string tgt = tgtData ? bpResolveInt(tgtData) : "0";
+                    std::string spd = spdData ? bpResolveInt(spdData) : "64";
+                    f << "    { FIXED dx = g_sprites[" << tgt << "].wx - g_sprites[" << obj << "].wx;\n";
+                    f << "      FIXED dz = g_sprites[" << tgt << "].wz - g_sprites[" << obj << "].wz;\n";
+                    f << "      if (dx > " << spd << ") g_sprites[" << obj << "].wx += " << spd << ";\n";
+                    f << "      else if (dx < -" << spd << ") g_sprites[" << obj << "].wx -= " << spd << ";\n";
+                    f << "      else g_sprites[" << obj << "].wx = g_sprites[" << tgt << "].wx;\n";
+                    f << "      if (dz > " << spd << ") g_sprites[" << obj << "].wz += " << spd << ";\n";
+                    f << "      else if (dz < -" << spd << ") g_sprites[" << obj << "].wz -= " << spd << ";\n";
+                    f << "      else g_sprites[" << obj << "].wz = g_sprites[" << tgt << "].wz; }\n";
+                    break;
+                }
+                case GBAScriptNodeType::LookAt: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* tgtData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string tgt = tgtData ? bpResolveInt(tgtData) : "0";
+                    f << "    { FIXED dx = g_sprites[" << tgt << "].wx - g_sprites[" << obj << "].wx;\n";
+                    f << "      FIXED dz = g_sprites[" << tgt << "].wz - g_sprites[" << obj << "].wz;\n";
+                    f << "      g_sprites[" << obj << "].facing = ArcTan2(dx, dz); }\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetSpriteAnim: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* animData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string anim = animData ? bpResolveInt(animData) : "0";
+                    f << "    g_sprites[" << obj << "].anim = " << anim << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SpawnEffect: {
+                    auto* effData = bpFindDataIn(action->id, 0);
+                    auto* xData = bpFindDataIn(action->id, 1);
+                    auto* zData = bpFindDataIn(action->id, 2);
+                    std::string eff = effData ? bpResolveInt(effData) : "0";
+                    std::string x = xData ? bpResolveInt(xData) : "0";
+                    std::string z = zData ? bpResolveInt(zData) : "0";
+                    f << "    afn_spawn_effect(" << eff << ", " << x << " << 8, " << z << " << 8);\n";
+                    break;
+                }
                 case GBAScriptNodeType::CustomCode:
                     break; // handled by customCode[0] check above
                 default:
