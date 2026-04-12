@@ -3904,7 +3904,7 @@ static void DrawTabBar()
             memset(sTmPrevKeyState, 0, sizeof(sTmPrevKeyState));
             sTmLastMoveDir = -1;
             sTmObjFacing.assign(sTmObjects.size(), 4); // default facing South
-            sTmObjAnimSet.assign(sTmObjects.size(), 0); // default animation set 0
+            sTmObjAnimSet.assign(sTmObjects.size(), -1); // -1 = no animation until script sets one
             sTmObjStepCount.assign(sTmObjects.size(), 0);
             sTmObjMoveRate.assign(sTmObjects.size(), 6.0f); // default move speed
             sTmObjVisX.resize(sTmObjects.size());
@@ -7349,27 +7349,29 @@ void FrameTick(float dt)
                 std::string rtDirStr = rtDir.string();
                 std::string outPath = sPackageOutputPath;
 
+                // Skip 3D floor sprites for tilemap builds (Mode 0 uses TmObjects instead)
                 std::vector<GBASpriteExport> exportSprites;
-                for (int i = 0; i < sSpriteCount; i++)
+                if (sActiveTab != EditorTab::Tilemap)
                 {
-                    GBASpriteExport se;
-                    se.x = sSprites[i].x;
-                    se.y = sSprites[i].y;
-                    se.z = sSprites[i].z;
-                    se.scale = sSprites[i].scale;
-                    se.rotation = sSprites[i].rotation;
-                    se.assetIdx = sSprites[i].assetIdx;
-                    se.animIdx = sSprites[i].animIdx;
-                    se.animEnabled = sSprites[i].animEnabled;
-                    se.spriteType = (int)sSprites[i].type;
-                    // Only Mesh-type sprites get a mesh reference; others force -1
-                    se.meshIdx = (sSprites[i].type == SpriteType::Mesh) ? sSprites[i].meshIdx : -1;
-                    // Use asset palette bank if linked, otherwise cycle 1-5
-                    if (se.assetIdx >= 0 && se.assetIdx < (int)sSpriteAssets.size())
-                        se.palIdx = sSpriteAssets[se.assetIdx].palBank;
-                    else
-                        se.palIdx = (i % 5) + 1;
-                    exportSprites.push_back(se);
+                    for (int i = 0; i < sSpriteCount; i++)
+                    {
+                        GBASpriteExport se;
+                        se.x = sSprites[i].x;
+                        se.y = sSprites[i].y;
+                        se.z = sSprites[i].z;
+                        se.scale = sSprites[i].scale;
+                        se.rotation = sSprites[i].rotation;
+                        se.assetIdx = sSprites[i].assetIdx;
+                        se.animIdx = sSprites[i].animIdx;
+                        se.animEnabled = sSprites[i].animEnabled;
+                        se.spriteType = (int)sSprites[i].type;
+                        se.meshIdx = (sSprites[i].type == SpriteType::Mesh) ? sSprites[i].meshIdx : -1;
+                        if (se.assetIdx >= 0 && se.assetIdx < (int)sSpriteAssets.size())
+                            se.palIdx = sSpriteAssets[se.assetIdx].palBank;
+                        else
+                            se.palIdx = (i % 5) + 1;
+                        exportSprites.push_back(se);
+                    }
                 }
                 GBACameraExport exportCam;
                 exportCam.x = sCamObj.x;
@@ -7447,10 +7449,10 @@ void FrameTick(float dt)
                     exportAssets.push_back(ea);
                 }
 
-                // Collect mesh assets for export (skip for Mode 7 tab — uses hardware affine floor)
+                // Collect mesh assets for export (skip for Mode 7 and Tilemap tabs)
                 std::vector<GBAMeshExport> exportMeshes;
-                bool exportMode7 = (sActiveTab == EditorTab::Mode7);
-                if (!exportMode7) for (const auto& ma : sMeshAssets)
+                bool skipMeshExport = (sActiveTab == EditorTab::Mode7 || sActiveTab == EditorTab::Tilemap);
+                if (!skipMeshExport) for (const auto& ma : sMeshAssets)
                 {
                     GBAMeshExport me;
                     for (const auto& v : ma.vertices)
@@ -7629,8 +7631,118 @@ void FrameTick(float dt)
                 }
                 // Skip TmScene blueprint instances — same reason as TmObjects above.
 
+                // Collect tilemap scene data for Mode 0 export
+                std::vector<GBATmSceneExport> exportTmScenes;
+                bool isTilemapBuild = (sActiveTab == EditorTab::Tilemap);
+                if (isTilemapBuild)
+                {
+                    // Save current scene state first
+                    if (sTmSelectedScene >= 0 && sTmSelectedScene < (int)sTmScenes.size())
+                        SaveSceneState(sTmScenes[sTmSelectedScene]);
+
+                    for (int si2 = 0; si2 < (int)sTmScenes.size(); si2++)
+                    {
+                        const TmScene& sc = sTmScenes[si2];
+                        GBATmSceneExport tse;
+                        tse.mapW = sc.mapW;
+                        tse.mapH = sc.mapH;
+                        tse.zoom = sc.zoom;
+                        memset(tse.palette, 0, sizeof(tse.palette));
+
+                        // Build BG tiles from sprite asset Tile objects
+                        // Tile 0 = blank (all zeros → palette[0] = white)
+                        // Each unique sprite asset gets one 8x8 BG tile + palette bank
+                        std::vector<uint8_t> bgTiles;     // 64 bytes per 8x8 tile (palette indices)
+                        bgTiles.resize(64, 0);            // tile 0 = blank
+                        int bgTileCount = 1;
+
+                        // Map sprite asset index → (bgTileIdx, palBank)
+                        std::map<int, std::pair<int,int>> assetToBgTile;
+                        int nextPalBank = 1; // bank 0 reserved for blank
+
+                        // Build cell → tile index map
+                        std::vector<uint16_t> cellMap(sc.mapW * sc.mapH, 0); // default = tile 0 (blank)
+
+                        for (const auto& obj : sc.objects)
+                        {
+                            if (obj.type != TmObjType::Tile) continue;
+                            if (obj.spriteAssetIdx < 0 || obj.spriteAssetIdx >= (int)sSpriteAssets.size()) continue;
+
+                            int saIdx = obj.spriteAssetIdx;
+                            if (assetToBgTile.find(saIdx) == assetToBgTile.end())
+                            {
+                                // New sprite asset — create BG tile + palette bank
+                                const SpriteAsset& sa = sSpriteAssets[saIdx];
+                                int palBank = nextPalBank++;
+                                if (palBank > 15) palBank = 15; // max 16 banks
+
+                                // Copy sprite palette into palette bank
+                                for (int pi = 0; pi < 16; pi++)
+                                    tse.palette[palBank * 16 + pi] = sa.palette[pi];
+
+                                // Create 8x8 BG tile from frame[0] with nearest-neighbor sampling
+                                int bgIdx = bgTileCount++;
+                                bgTiles.resize(bgTileCount * 64, 0);
+                                if (!sa.frames.empty())
+                                {
+                                    const SpriteFrame& frame = sa.frames[0];
+                                    int fw = frame.width, fh = frame.height;
+                                    for (int py2 = 0; py2 < 8; py2++)
+                                    {
+                                        int srcY = py2 * fh / 8;
+                                        for (int px2 = 0; px2 < 8; px2++)
+                                        {
+                                            int srcX = px2 * fw / 8;
+                                            uint8_t pix = frame.pixels[srcY * kMaxFrameSize + srcX];
+                                            bgTiles[bgIdx * 64 + py2 * 8 + px2] = pix;
+                                        }
+                                    }
+                                }
+
+                                assetToBgTile[saIdx] = {bgIdx, palBank};
+                            }
+
+                            // Paint cells with this tile
+                            auto& info = assetToBgTile[saIdx];
+                            int bgIdx = info.first;
+                            int palBank = info.second;
+                            uint16_t screenEntry = (uint16_t)(bgIdx | (palBank << 12));
+
+                            for (const auto& cell : obj.cells)
+                            {
+                                int cx = cell.first, cy = cell.second;
+                                if (cx >= 0 && cx < sc.mapW && cy >= 0 && cy < sc.mapH)
+                                    cellMap[cy * sc.mapW + cx] = screenEntry;
+                            }
+                        }
+
+                        tse.tileIndices = std::move(cellMap);
+                        tse.tilePixels = std::move(bgTiles);
+                        tse.tileCount = bgTileCount;
+                        // palette[0] = white backdrop (set in bank 0)
+                        tse.palette[0] = 0xFFFFFFFF; // white RGBA
+
+                        // Copy objects
+                        for (const auto& obj : sc.objects)
+                        {
+                            GBATmObjectExport oe;
+                            oe.tileX = obj.tileX;
+                            oe.tileY = obj.tileY;
+                            oe.type = (int)obj.type;
+                            oe.spriteAssetIdx = obj.spriteAssetIdx;
+                            oe.teleportScene = obj.teleportScene;
+                            oe.camFollow = obj.camFollow;
+                            oe.displayScale = obj.displayScale;
+                            memcpy(oe.name, obj.name, sizeof(oe.name));
+                            oe.name[31] = '\0';
+                            tse.objects.push_back(oe);
+                        }
+                        exportTmScenes.push_back(std::move(tse));
+                    }
+                }
+
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                             exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, target]() {
+                             exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, target]() {
                     std::string err;
                     bool ok;
                     if (target == BuildTarget::NDS)
@@ -7638,7 +7750,7 @@ void FrameTick(float dt)
                                         exportMeshes, exportOrbitDist, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                                        exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, err);
+                                        exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, err);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
@@ -8977,7 +9089,13 @@ void FrameTick(float dt)
                     for (auto& ev : bpNodes) {
                         if (ev.type == VsNodeType::OnKeyHeld) {
                             int key = tmResolveEventKey(ev);
-                            bool fire = (key >= 0) ? tmKeyDown(key) : true;
+                            bool fire = false;
+                            if (key >= 0) { fire = tmKeyDown(key); }
+                            else {
+                                // Multiple keys connected — fire if ANY is held
+                                for (int k = 0; k < 10; k++)
+                                    if (tmKeyDown(k)) { fire = true; break; }
+                            }
                             if (fire) {
                                 auto acts = tmCollectActions(ev.id);
                                 for (auto* a : acts) tmExecAction(a);
@@ -9013,7 +9131,15 @@ void FrameTick(float dt)
                         }
                         if (ev.type == VsNodeType::OnKeyReleased) {
                             int key = tmResolveEventKey(ev);
-                            if (key >= 0 && key < 10 && sTmPrevKeyState[key] && !tmKeyDown(key)) {
+                            bool fire = false;
+                            if (key >= 0 && key < 10) {
+                                fire = sTmPrevKeyState[key] && !tmKeyDown(key);
+                            } else {
+                                // Multiple keys connected — fire if ANY was just released
+                                for (int k = 0; k < 10; k++)
+                                    if (sTmPrevKeyState[k] && !tmKeyDown(k)) { fire = true; break; }
+                            }
+                            if (fire) {
                                 auto acts = tmCollectActions(ev.id);
                                 for (auto* a : acts) tmExecAction(a);
                             }

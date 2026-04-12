@@ -255,7 +255,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                             float orbitDist,
                             const GBAScriptExport& script,
                             const std::vector<GBABlueprintExport>& blueprints,
-                            const std::vector<GBABlueprintInstanceExport>& bpInstances)
+                            const std::vector<GBABlueprintInstanceExport>& bpInstances,
+                            const std::vector<GBATmSceneExport>& tmScenes)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
     std::ofstream f(outPath);
@@ -328,6 +329,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
     for (size_t si = 0; si < sprites.size(); si++)
         if (sprites[si].assetIdx >= 0 && sprites[si].assetIdx < (int)assets.size())
             assetReferencedBySprite[sprites[si].assetIdx] = true;
+    // Also mark assets referenced by tilemap objects (Player, NPC, etc. need OAM tiles)
+    for (const auto& sc : tmScenes)
+        for (const auto& obj : sc.objects)
+            if (obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)assets.size())
+                assetReferencedBySprite[obj.spriteAssetIdx] = true;
 
     // Build one combined tile data array: all assets, all frames, packed contiguously
     std::vector<uint32_t> allTiles;
@@ -345,7 +351,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         assetTilesPerFrame.push_back(tilesPerFrame);
 
         // Skip static frames for direction-based assets — they use DMA direction tiles
-        if (asset.hasDirections && !asset.dirAnimSets.empty()) continue;
+        // (but not for Mode 0 tilemap builds which need static OBJ tiles)
+        if (asset.hasDirections && !asset.dirAnimSets.empty() && tmScenes.empty()) continue;
         // Skip unreferenced assets — no sprite uses them, saves OBJ VRAM
         if (!assetReferencedBySprite[ai]) continue;
 
@@ -4236,6 +4243,117 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static inline void afn_bp_dispatch_collision(void) {}\n";
     }
 
+    // ---- Mode 0 Tilemap Data ----
+    if (!tmScenes.empty())
+    {
+        f << "\n// ---- Mode 0 Tilemap ----\n";
+        f << "#define AFN_MODE0 1\n";
+        f << "#define AFN_TM_SCENE_COUNT " << (int)tmScenes.size() << "\n\n";
+
+        // Emit per-scene data
+        for (int si = 0; si < (int)tmScenes.size(); si++)
+        {
+            const auto& sc = tmScenes[si];
+            f << "// Scene " << si << ": " << sc.mapW << "x" << sc.mapH << "\n";
+            f << "#define AFN_TM" << si << "_W " << sc.mapW << "\n";
+            f << "#define AFN_TM" << si << "_H " << sc.mapH << "\n";
+            f << "#define AFN_TM" << si << "_ZOOM " << (int)(sc.zoom * 256.0f) << "\n";
+            // BG size: 0=32x32, 1=64x32, 2=32x64, 3=64x64
+            int bgSz = 0;
+            if (sc.mapW > 32 && sc.mapH > 32) bgSz = 3;
+            else if (sc.mapW > 32) bgSz = 1;
+            else if (sc.mapH > 32) bgSz = 2;
+            f << "#define AFN_TM" << si << "_BG_SIZE " << bgSz << "\n";
+
+            // BG palette -> RGB15 (256 entries = 16 banks of 16 colors)
+            f << "static const u16 afn_tm" << si << "_pal[256] = {\n";
+            for (int bank = 0; bank < 16; bank++)
+            {
+                f << "    ";
+                for (int pi = 0; pi < 16; pi++)
+                {
+                    uint32_t c = sc.palette[bank * 16 + pi];
+                    int r = (c & 0xFF) >> 3;
+                    int g = ((c >> 8) & 0xFF) >> 3;
+                    int b = ((c >> 16) & 0xFF) >> 3;
+                    uint16_t rgb15 = (uint16_t)(r | (g << 5) | (b << 10));
+                    f << "0x" << std::hex << rgb15 << std::dec;
+                    if (bank < 15 || pi < 15) f << ",";
+                }
+                f << "\n";
+            }
+            f << "};\n";
+
+            // Tile pixel data -> 4bpp packed (each tile = 32 bytes = 8 u32)
+            int nTiles = sc.tileCount;
+            if (nTiles < 1) nTiles = 1;
+            f << "#define AFN_TM" << si << "_TILE_COUNT " << nTiles << "\n";
+            int tileU32Count = nTiles * 8; // 8 u32 per 4bpp tile
+            f << "static const u32 afn_tm" << si << "_tiles[" << tileU32Count << "] = {\n";
+            for (int ti = 0; ti < nTiles; ti++)
+            {
+                f << "    ";
+                // Convert 8bpp tile to 4bpp packed u32
+                for (int row = 0; row < 8; row++)
+                {
+                    uint32_t packed = 0;
+                    for (int col = 0; col < 8; col++)
+                    {
+                        int srcIdx = ti * 64 + row * 8 + col;
+                        uint8_t pix = (srcIdx < (int)sc.tilePixels.size()) ? (sc.tilePixels[srcIdx] & 0x0F) : 0;
+                        packed |= ((uint32_t)pix) << (col * 4);
+                    }
+                    f << "0x" << std::hex << packed << std::dec;
+                    if (row < 7 || ti < nTiles - 1) f << ",";
+                }
+                f << "\n";
+            }
+            f << "};\n";
+            f << "#define AFN_TM" << si << "_TILES_LEN " << (tileU32Count * 4) << "\n";
+
+            // Tilemap screen entries (tile index in bits 0-9, palette bank in bits 12-15)
+            int mapSize = sc.mapW * sc.mapH;
+            f << "static const u16 afn_tm" << si << "_map[" << mapSize << "] = {\n    ";
+            for (int mi = 0; mi < mapSize; mi++)
+            {
+                uint16_t idx = (mi < (int)sc.tileIndices.size()) ? sc.tileIndices[mi] : 0;
+                f << "0x" << std::hex << idx << std::dec;
+                if (mi < mapSize - 1) f << ",";
+                if ((mi & 31) == 31 && mi < mapSize - 1) f << "\n    ";
+            }
+            f << "\n};\n";
+
+            // Objects
+            int objCount = (int)sc.objects.size();
+            f << "#define AFN_TM" << si << "_OBJ_COUNT " << objCount << "\n";
+            if (objCount > 0)
+            {
+                // { tileX, tileY, type, spriteAssetIdx, camFollow, teleportScene }
+                f << "static const struct { s16 tx,ty; u8 type; s8 assetIdx; u8 camFollow; s8 teleScene; } "
+                  << "afn_tm" << si << "_objs[" << objCount << "] = {\n";
+                for (int oi = 0; oi < objCount; oi++)
+                {
+                    const auto& obj = sc.objects[oi];
+                    f << "    {" << obj.tileX << "," << obj.tileY << ","
+                      << obj.type << "," << obj.spriteAssetIdx << ","
+                      << (obj.camFollow ? 1 : 0) << "," << obj.teleportScene << "},\n";
+                }
+                f << "};\n";
+            }
+            f << "\n";
+        }
+
+        // Find player object across all scenes (first scene, first Player type)
+        int tmPlayerScene = -1, tmPlayerObj = -1;
+        for (int si = 0; si < (int)tmScenes.size() && tmPlayerScene < 0; si++)
+            for (int oi = 0; oi < (int)tmScenes[si].objects.size(); oi++)
+                if (tmScenes[si].objects[oi].type == 0) // Player
+                { tmPlayerScene = si; tmPlayerObj = oi; break; }
+        f << "#define AFN_TM_PLAYER_SCENE " << tmPlayerScene << "\n";
+        f << "#define AFN_TM_PLAYER_OBJ " << tmPlayerObj << "\n";
+        f << "#define AFN_TM_START_SCENE 0\n";
+    }
+
     f << "\n#endif // MAPDATA_H\n";
     f.close();
     return true;
@@ -4251,6 +4369,7 @@ bool PackageGBA(const std::string& runtimeDir,
                 const GBAScriptExport& script,
                 const std::vector<GBABlueprintExport>& blueprints,
                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
+                const std::vector<GBATmSceneExport>& tmScenes,
                 std::string& errorMsg)
 {
     std::string msysDir = ToMsysPath(runtimeDir);
@@ -4266,7 +4385,7 @@ bool PackageGBA(const std::string& runtimeDir,
     }
 
     // --- Step 1: Generate mapdata.h with sprite/camera/asset/player data ---
-    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, script, blueprints, bpInstances))
+    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, script, blueprints, bpInstances, tmScenes))
     {
         errorMsg = "Failed to write mapdata.h";
         return false;

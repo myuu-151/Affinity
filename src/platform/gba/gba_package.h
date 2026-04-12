@@ -380,6 +380,28 @@ struct GBABlueprintInstanceExport {
     int paramCount;
 };
 
+// ---- Mode 0 Tilemap Export ----
+
+struct GBATmObjectExport {
+    int tileX, tileY;       // grid position
+    int type;               // TmObjType enum
+    int spriteAssetIdx;     // -1 = none
+    int teleportScene;      // -1 = none
+    bool camFollow;
+    float displayScale;
+    char name[32];
+};
+
+struct GBATmSceneExport {
+    int mapW, mapH;                          // grid dimensions in tiles
+    float zoom;                              // camera zoom (1.0 = 8px per tile)
+    std::vector<uint16_t> tileIndices;       // mapW * mapH tile indices
+    std::vector<GBATmObjectExport> objects;
+    uint32_t palette[256];                   // tileset palette (RGBA8)
+    std::vector<uint8_t> tilePixels;         // 8bpp tile pixel data (nTiles * 64 bytes)
+    int tileCount;                           // number of unique tiles
+};
+
 // Package the current map into a .gba ROM.
 // runtimeDir: path to gba_runtime/ directory
 // outputPath: where to write the final .gba
@@ -394,6 +416,7 @@ bool PackageGBA(const std::string& runtimeDir,
                 const GBAScriptExport& script,
                 const std::vector<GBABlueprintExport>& blueprints,
                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
+                const std::vector<GBATmSceneExport>& tmScenes,
                 std::string& errorMsg);
 
 } // namespace Affinity
