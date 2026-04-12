@@ -1807,22 +1807,35 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "// ---- Generated script code from visual node graph ----\n\n";
 
             // Emit action body lines for a single action node
+            // Helper: replace $0..$7 in a string with resolved data-in values
+            auto resolveCustomPlaceholders = [&](const std::string& src, int nodeId) -> std::string {
+                std::string code = src;
+                for (int pi = 7; pi >= 0; pi--) {
+                    char placeholder[4]; snprintf(placeholder, sizeof(placeholder), "$%d", pi);
+                    size_t pos = 0;
+                    while ((pos = code.find(placeholder, pos)) != std::string::npos) {
+                        auto* din = findDataIn(nodeId, pi);
+                        int val = din ? resolveInt(din) : 0;
+                        std::string valStr = std::to_string(val);
+                        code.replace(pos, strlen(placeholder), valStr);
+                        pos += valStr.size();
+                    }
+                }
+                return code;
+            };
+
             auto emitActionBody = [&](const GBAScriptNodeExport* action) {
                 // Use custom code override if set
                 if (action->customCode[0]) {
-                    // Replace $0..$7 placeholders with resolved data-in values
-                    std::string code(action->customCode);
-                    for (int pi = 7; pi >= 0; pi--) {
-                        char placeholder[4]; snprintf(placeholder, sizeof(placeholder), "$%d", pi);
-                        size_t pos = 0;
-                        while ((pos = code.find(placeholder, pos)) != std::string::npos) {
-                            auto* din = findDataIn(action->id, pi);
-                            int val = din ? resolveInt(din) : 0;
-                            std::string valStr = std::to_string(val);
-                            code.replace(pos, strlen(placeholder), valStr);
-                            pos += valStr.size();
+                    // Emit per-pin code blocks first
+                    for (int pi = 0; pi < action->ccPinCount && pi < 8; pi++) {
+                        if (action->ccPinCode[pi][0]) {
+                            std::string pinCode = resolveCustomPlaceholders(action->ccPinCode[pi], action->id);
+                            f << "    " << pinCode << "\n";
                         }
                     }
+                    // Emit main custom code with placeholders resolved
+                    std::string code = resolveCustomPlaceholders(action->customCode, action->id);
                     f << "    " << code << "\n";
                     return;
                 }
@@ -3053,20 +3066,33 @@ static bool GenerateMapData(const std::string& runtimeDir,
             }
 
             // Emit action body lines for blueprint
+            // Helper: replace $0..$7 in a string with resolved blueprint data-in values
+            auto bpResolveCustomPlaceholders = [&](const std::string& src, int nodeId) -> std::string {
+                std::string code = src;
+                for (int pi = 7; pi >= 0; pi--) {
+                    char placeholder[4]; snprintf(placeholder, sizeof(placeholder), "$%d", pi);
+                    size_t pos = 0;
+                    while ((pos = code.find(placeholder, pos)) != std::string::npos) {
+                        auto* din = bpFindDataIn(nodeId, pi);
+                        std::string val = din ? bpResolveInt(din) : "0";
+                        code.replace(pos, strlen(placeholder), val);
+                        pos += val.size();
+                    }
+                }
+                return code;
+            };
+
             auto bpEmitActionBody = [&](const GBAScriptNodeExport* action) {
                 if (action->customCode[0]) {
-                    // Replace $0..$7 placeholders with resolved data-in values
-                    std::string code(action->customCode);
-                    for (int pi = 7; pi >= 0; pi--) {
-                        char placeholder[4]; snprintf(placeholder, sizeof(placeholder), "$%d", pi);
-                        size_t pos = 0;
-                        while ((pos = code.find(placeholder, pos)) != std::string::npos) {
-                            auto* din = bpFindDataIn(action->id, pi);
-                            std::string val = din ? bpResolveInt(din) : "0";
-                            code.replace(pos, strlen(placeholder), val);
-                            pos += val.size();
+                    // Emit per-pin code blocks first
+                    for (int pi = 0; pi < action->ccPinCount && pi < 8; pi++) {
+                        if (action->ccPinCode[pi][0]) {
+                            std::string pinCode = bpResolveCustomPlaceholders(action->ccPinCode[pi], action->id);
+                            f << "    " << pinCode << "\n";
                         }
                     }
+                    // Emit main custom code with placeholders resolved
+                    std::string code = bpResolveCustomPlaceholders(action->customCode, action->id);
                     f << "    " << code << "\n";
                     return;
                 }

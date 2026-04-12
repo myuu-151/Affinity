@@ -702,6 +702,7 @@ struct VsNode {
     char customCode[512] = {};            // user-editable code override (empty = use default)
     char funcName[64] = {};               // custom function name (empty = use default afn_ name)
     char ccPinNames[8][16] = {};          // custom data-in pin labels for CustomCode nodes
+    char ccPinCode[8][128] = {};          // per-pin code snippets for CustomCode nodes
 };
 
 // Pin address: which node, which pin type, which pin index
@@ -1789,9 +1790,12 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "bpVsGroupDef=%d|%s|%d,%d,%d,%d\n", n.id, n.groupLabel,
                     n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
             if (n.type == VsNodeType::CustomCode && n.grpInData > 0) {
-                for (int pi = 0; pi < n.grpInData && pi < 8; pi++)
+                for (int pi = 0; pi < n.grpInData && pi < 8; pi++) {
                     if (n.ccPinNames[pi][0])
                         fprintf(f, "bpVsCcPin=%d,%d|%s\n", n.id, pi, n.ccPinNames[pi]);
+                    if (n.ccPinCode[pi][0])
+                        fprintf(f, "bpVsCcCode=%d,%d|%s\n", n.id, pi, n.ccPinCode[pi]);
+                }
             }
             if (n.customCode[0])
                 fprintf(f, "bpVsNodeCode=%d|%s\n", n.id, n.customCode);
@@ -2027,9 +2031,12 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "msVsGroupDef=%d|%s|%d,%d,%d,%d\n", n.id, n.groupLabel,
                     n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
             if (n.type == VsNodeType::CustomCode && n.grpInData > 0) {
-                for (int pi = 0; pi < n.grpInData && pi < 8; pi++)
+                for (int pi = 0; pi < n.grpInData && pi < 8; pi++) {
                     if (n.ccPinNames[pi][0])
                         fprintf(f, "msVsCcPin=%d,%d|%s\n", n.id, pi, n.ccPinNames[pi]);
+                    if (n.ccPinCode[pi][0])
+                        fprintf(f, "msVsCcCode=%d,%d|%s\n", n.id, pi, n.ccPinCode[pi]);
+                }
             }
             if (n.customCode[0])
                 fprintf(f, "msVsNodeCode=%d|%s\n", n.id, n.customCode);
@@ -2504,6 +2511,18 @@ static bool LoadProject(const std::string& path)
                         }
                 }
             }
+            else if (strncmp(line, "bpVsCcCode=", 11) == 0 && !sBlueprintAssets.empty())
+            {
+                int nid, pi;
+                char codeBuf[128] = {};
+                if (sscanf(line + 11, "%d,%d|%127[^\n]", &nid, &pi, codeBuf) >= 3) {
+                    for (auto& n : sBlueprintAssets.back().nodes)
+                        if (n.id == nid && pi >= 0 && pi < 8) {
+                            strncpy(n.ccPinCode[pi], codeBuf, sizeof(n.ccPinCode[pi]) - 1);
+                            break;
+                        }
+                }
+            }
             else if (sscanf(line, "bpVsLinkCount=%d", &ival) == 1 && !sBlueprintAssets.empty())
             {
                 sBlueprintAssets.back().links.clear();
@@ -2968,6 +2987,18 @@ static bool LoadProject(const std::string& path)
                     for (auto& n : sMapScenes.back().vsNodes)
                         if (n.id == nid && pi >= 0 && pi < 8) {
                             strncpy(n.ccPinNames[pi], pname, sizeof(n.ccPinNames[pi]) - 1);
+                            break;
+                        }
+                }
+            }
+            else if (strncmp(line, "msVsCcCode=", 11) == 0 && !sMapScenes.empty())
+            {
+                int nid, pi;
+                char codeBuf[128] = {};
+                if (sscanf(line + 11, "%d,%d|%127[^\n]", &nid, &pi, codeBuf) >= 3) {
+                    for (auto& n : sMapScenes.back().vsNodes)
+                        if (n.id == nid && pi >= 0 && pi < 8) {
+                            strncpy(n.ccPinCode[pi], codeBuf, sizeof(n.ccPinCode[pi]) - 1);
                             break;
                         }
                 }
@@ -7254,6 +7285,11 @@ void FrameTick(float dt)
                     for (int pi = 0; pi < 4; pi++) sn.paramInt[pi] = n.paramInt[pi];
                     memcpy(sn.customCode, n.customCode, sizeof(sn.customCode));
                     memcpy(sn.funcName, n.funcName, sizeof(sn.funcName));
+                    if (n.type == VsNodeType::CustomCode) {
+                        sn.ccPinCount = n.grpInData;
+                        for (int pi = 0; pi < n.grpInData && pi < 8; pi++)
+                            memcpy(sn.ccPinCode[pi], n.ccPinCode[pi], sizeof(sn.ccPinCode[pi]));
+                    }
                     exportScript.nodes.push_back(sn);
                 }
                 for (auto& l : sVsLinks)
@@ -7282,6 +7318,11 @@ void FrameTick(float dt)
                         for (int pi = 0; pi < 4; pi++) sn.paramInt[pi] = n.paramInt[pi];
                         memcpy(sn.customCode, n.customCode, sizeof(sn.customCode));
                     memcpy(sn.funcName, n.funcName, sizeof(sn.funcName));
+                        if (n.type == VsNodeType::CustomCode) {
+                            sn.ccPinCount = n.grpInData;
+                            for (int pi2 = 0; pi2 < n.grpInData && pi2 < 8; pi2++)
+                                memcpy(sn.ccPinCode[pi2], n.ccPinCode[pi2], sizeof(sn.ccPinCode[pi2]));
+                        }
                         // Mark parameter-exposed nodes with sentinel in paramInt[3]
                         for (int pi = 0; pi < bp.paramCount; pi++)
                             if (bp.params[pi].sourceNodeId == n.id)
@@ -12533,9 +12574,8 @@ void FrameTick(float dt)
                 case VsNodeType::CustomCode:
                     editorCode = "// (runs only on GBA runtime)";
                     {
-                        if (infoNode.customCode[0]) {
-                            // Replace $0..$7 with resolved values for preview
-                            std::string code(infoNode.customCode);
+                        auto resolveCC = [&](const std::string& src) -> std::string {
+                            std::string code = src;
                             for (int pi = 7; pi >= 0; pi--) {
                                 char ph[4]; snprintf(ph, sizeof(ph), "$%d", pi);
                                 size_t pos = 0;
@@ -12547,12 +12587,25 @@ void FrameTick(float dt)
                                     pos += vs.size();
                                 }
                             }
-                            char bodyBuf[512];
-                            snprintf(bodyBuf, sizeof(bodyBuf), "    %s", code.c_str());
-                            setActionFunc(infoNode, "_custom", bodyBuf);
-                        } else {
-                            setActionFunc(infoNode, "_custom", "    // (empty)");
+                            return code;
+                        };
+                        std::string body;
+                        // Per-pin code blocks
+                        for (int pi = 0; pi < infoNode.grpInData && pi < 8; pi++) {
+                            if (infoNode.ccPinCode[pi][0]) {
+                                body += "    ";
+                                body += resolveCC(infoNode.ccPinCode[pi]);
+                                body += "\n";
+                            }
                         }
+                        // Main custom code
+                        if (infoNode.customCode[0]) {
+                            body += "    ";
+                            body += resolveCC(infoNode.customCode);
+                        } else if (body.empty()) {
+                            body = "    // (empty)";
+                        }
+                        setActionFunc(infoNode, "_custom", body.c_str());
                     }
                     break;
                 // Data nodes
@@ -13025,7 +13078,6 @@ void FrameTick(float dt)
                         cwNode.grpInData--;
                         sProjectDirty = true;
                     }
-                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.1f, 0.12f, 0.14f, 1.0f));
                     for (int pi = 0; pi < cwNode.grpInData && pi < 8; pi++) {
                         char pinLabel[32];
                         snprintf(pinLabel, sizeof(pinLabel), "$%d", pi);
@@ -13033,13 +13085,21 @@ void FrameTick(float dt)
                         ImGui::Text("%s", pinLabel);
                         ImGui::PopStyleColor();
                         ImGui::SameLine();
-                        char inputId[16];
-                        snprintf(inputId, sizeof(inputId), "##cwpin%d", pi);
-                        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-                        if (ImGui::InputTextWithHint(inputId, "(pin name)", cwNode.ccPinNames[pi], sizeof(cwNode.ccPinNames[pi])))
+                        char nameId[16];
+                        snprintf(nameId, sizeof(nameId), "##cwpn%d", pi);
+                        ImGui::SetNextItemWidth(120);
+                        if (ImGui::InputTextWithHint(nameId, "(name)", cwNode.ccPinNames[pi], sizeof(cwNode.ccPinNames[pi])))
                             sProjectDirty = true;
+                        // Per-pin code box
+                        char codeId[16];
+                        snprintf(codeId, sizeof(codeId), "##cwpc%d", pi);
+                        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.08f, 0.1f, 0.12f, 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.85f, 0.6f, 1.0f));
+                        char phBuf[32]; snprintf(phBuf, sizeof(phBuf), "code using %s", pinLabel);
+                        if (ImGui::InputTextWithHint(codeId, phBuf, cwNode.ccPinCode[pi], sizeof(cwNode.ccPinCode[pi])))
+                            sProjectDirty = true;
+                        ImGui::PopStyleColor(2);
                     }
-                    ImGui::PopStyleColor();
                 }
 
                 // Custom override section

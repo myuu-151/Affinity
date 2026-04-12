@@ -338,6 +338,8 @@ struct GBAScriptNodeExport {
     int paramInt[4];  // per-node params (key index, value, IEEE754 float bits, etc.)
     char customCode[512] = {};  // user-editable code override (empty = use default)
     char funcName[64] = {};     // custom function name (empty = use default)
+    char ccPinCode[8][128] = {};  // per-pin code snippets for CustomCode nodes
+    int ccPinCount = 0;           // number of data-in pins
 };
 
 struct GBAScriptLinkExport {
