@@ -13010,6 +13010,38 @@ void FrameTick(float dt)
                     ImGui::PopStyleColor(2);
                 }
 
+                // Data input pins section (CustomCode nodes only)
+                if (cwNode.type == VsNodeType::CustomCode) {
+                    ImGui::Spacing();
+                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.8f, 1.0f), "Data Inputs");
+                    ImGui::SameLine();
+                    if (cwNode.grpInData < 8 && ImGui::SmallButton("+##cwccpin")) { cwNode.grpInData++; sProjectDirty = true; }
+                    ImGui::SameLine();
+                    if (cwNode.grpInData > 0 && ImGui::SmallButton("-##cwccpin")) {
+                        int removeIdx = cwNode.grpInData - 1;
+                        for (int li = (int)sVsLinks.size() - 1; li >= 0; li--)
+                            if (sVsLinks[li].to.nodeId == cwNode.id && sVsLinks[li].to.pinType == 3 && sVsLinks[li].to.pinIdx == removeIdx)
+                                sVsLinks.erase(sVsLinks.begin() + li);
+                        cwNode.grpInData--;
+                        sProjectDirty = true;
+                    }
+                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.1f, 0.12f, 0.14f, 1.0f));
+                    for (int pi = 0; pi < cwNode.grpInData && pi < 8; pi++) {
+                        char pinLabel[32];
+                        snprintf(pinLabel, sizeof(pinLabel), "$%d", pi);
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.9f, 0.8f, 1.0f));
+                        ImGui::Text("%s", pinLabel);
+                        ImGui::PopStyleColor();
+                        ImGui::SameLine();
+                        char inputId[16];
+                        snprintf(inputId, sizeof(inputId), "##cwpin%d", pi);
+                        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                        if (ImGui::InputTextWithHint(inputId, "(pin name)", cwNode.ccPinNames[pi], sizeof(cwNode.ccPinNames[pi])))
+                            sProjectDirty = true;
+                    }
+                    ImGui::PopStyleColor();
+                }
+
                 // Custom override section
                 ImGui::Spacing();
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.5f, 1.0f), "Custom Override");
