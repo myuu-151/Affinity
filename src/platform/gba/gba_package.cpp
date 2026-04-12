@@ -3059,7 +3059,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     if (n->funcName[0])
                         snprintf(buf, sizeof(buf), "%s()", n->funcName);
                     else
-                        snprintf(buf, sizeof(buf), "afn_bp%d_custom_%d()", bpIdx, n->id);
+                        snprintf(buf, sizeof(buf), "afn_bp%d_custom_%d()", bi, n->id);
                     return buf;
                 }
                 return std::to_string(n->paramInt[0]);

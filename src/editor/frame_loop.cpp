@@ -12962,7 +12962,10 @@ void FrameTick(float dt)
 
                 // Generated code preview (read-only)
                 if (sVsCodeWindowBuf[0]) {
-                    ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Generated Code");
+                    if (cwNode.customCode[0])
+                        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "Generated Code (overridden by GBA Runtime below)");
+                    else
+                        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Generated Code");
                     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.1f, 0.1f, 0.12f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.9f, 0.6f, 1.0f));
                     { int lc = 1; for (const char* p = sVsCodeWindowBuf; *p; ++p) if (*p == '\n') ++lc;
@@ -13001,7 +13004,8 @@ void FrameTick(float dt)
                 ImGui::Spacing();
 
                 // --- GBA Runtime ---
-                codeSection("GBA Runtime", "##CodeGBA", ImVec4(1.0f, 0.8f, 0.5f, 1.0f), ImVec4(0.9f, 0.8f, 0.5f, 1.0f),
+                codeSection(cwNode.customCode[0] ? "GBA Runtime (saved)" : "GBA Runtime",
+                            "##CodeGBA", ImVec4(1.0f, 0.8f, 0.5f, 1.0f), ImVec4(0.9f, 0.8f, 0.5f, 1.0f),
                             sVsCodeWindowEditBuf, sizeof(sVsCodeWindowEditBuf));
                 ImGui::Spacing();
 
@@ -13341,11 +13345,52 @@ void FrameTick(float dt)
 
                 // Save all three sections
                 ImGui::Spacing();
+                // Helper: return true if buffer is empty or only contains the placeholder comment
+                auto isPlaceholder = [](const char* buf, const char* placeholder) {
+                    // skip leading whitespace
+                    const char* p = buf;
+                    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+                    if (*p == '\0') return true;
+                    // check exact placeholder match (ignoring trailing whitespace)
+                    size_t plen = strlen(placeholder);
+                    if (strncmp(p, placeholder, plen) == 0) {
+                        const char* after = p + plen;
+                        while (*after == ' ' || *after == '\t' || *after == '\n' || *after == '\r') after++;
+                        if (*after == '\0') return true;
+                    }
+                    return false;
+                };
                 if (ImGui::Button("Save")) {
-                    strncpy(cwNode.customCode, sVsCodeWindowEditBuf, sizeof(cwNode.customCode) - 1);
-                    strncpy(cwNode.codeScene, sVsCodeWindowSceneBuf, sizeof(cwNode.codeScene) - 1);
-                    strncpy(cwNode.codeTilemap, sVsCodeWindowTilemapBuf, sizeof(cwNode.codeTilemap) - 1);
+                    // Only store if user wrote real code (not just placeholder)
+                    if (isPlaceholder(sVsCodeWindowEditBuf, "// GBA runtime C code"))
+                        cwNode.customCode[0] = '\0';
+                    else
+                        strncpy(cwNode.customCode, sVsCodeWindowEditBuf, sizeof(cwNode.customCode) - 1);
+
+                    if (isPlaceholder(sVsCodeWindowSceneBuf, "// Mode 4 code"))
+                        cwNode.codeScene[0] = '\0';
+                    else
+                        strncpy(cwNode.codeScene, sVsCodeWindowSceneBuf, sizeof(cwNode.codeScene) - 1);
+
+                    if (isPlaceholder(sVsCodeWindowTilemapBuf, "// Mode 0 code"))
+                        cwNode.codeTilemap[0] = '\0';
+                    else
+                        strncpy(cwNode.codeTilemap, sVsCodeWindowTilemapBuf, sizeof(cwNode.codeTilemap) - 1);
+
                     sProjectDirty = true;
+                }
+                ImGui::SameLine();
+                // Clear button to remove overrides and revert to generated code
+                if (cwNode.customCode[0] || cwNode.codeScene[0] || cwNode.codeTilemap[0]) {
+                    if (ImGui::Button("Clear Overrides")) {
+                        cwNode.customCode[0] = '\0';
+                        cwNode.codeScene[0] = '\0';
+                        cwNode.codeTilemap[0] = '\0';
+                        strncpy(sVsCodeWindowEditBuf, "// GBA runtime C code", sizeof(sVsCodeWindowEditBuf) - 1);
+                        strncpy(sVsCodeWindowSceneBuf, "// Mode 4 code", sizeof(sVsCodeWindowSceneBuf) - 1);
+                        strncpy(sVsCodeWindowTilemapBuf, "// Mode 0 code", sizeof(sVsCodeWindowTilemapBuf) - 1);
+                        sProjectDirty = true;
+                    }
                 }
             }
             ImGui::End();
