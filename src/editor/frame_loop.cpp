@@ -820,10 +820,13 @@ static bool sVsNodeInfoJustOpened = false;
 static bool sVsCodeWindowOpen = false;
 static bool sVsCodeWindowJustOpened = false;
 static int sVsCodeWindowNodeIdx = -1;
-static char sVsCodeWindowBuf[4096] = {}; // generated code (read-only display)
+static char sVsCodeWindowBuf[4096] = {}; // generated code (combined, for View Code tooltip)
 static char sVsCodeWindowEditBuf[2048] = {}; // editable GBA override
 static char sVsCodeWindowSceneBuf[2048] = {}; // editable scene code
 static char sVsCodeWindowTilemapBuf[2048] = {}; // editable tilemap code
+static char sVsGenScene[2048] = {};    // generated Mode 4 code (default for scene buf)
+static char sVsGenTilemap[2048] = {};  // generated Mode 0 code (default for tilemap buf)
+static char sVsGenGBA[2048] = {};      // generated GBA runtime code (default for GBA buf)
 static int sLastCodeWindowNode = -1;
 
 static constexpr float kVsNodeW = 160.0f;
@@ -12864,22 +12867,59 @@ void FrameTick(float dt)
                 default: break;
                 }
 
-                // Combine editor + GBA code for event/action nodes
+                // Split editor code into Mode 4 / Mode 0 sections
+                // and store GBA runtime code separately
                 if (editorCode[0]) {
-                    char combinedBuf[4096];
-                    if (funcSigBuf[0]) {
-                        // Event/action node: all sections inside function block
-                        snprintf(combinedBuf, sizeof(combinedBuf),
-                            "%s {\n\n%s\n\n    // ---- GBA Runtime (mapdata.h) ----\n%s\n}",
-                            funcSigBuf, editorCode, gbaBodyBuf);
+                    // Parse editorCode to split "2D Tilemap" and "3D Scene" sections
+                    const char* tmMarker = strstr(editorCode, "// ---- 2D Tilemap");
+                    const char* scMarker = strstr(editorCode, "// ---- 3D Scene");
+                    char genScene[2048] = {};
+                    char genTilemap[2048] = {};
+
+                    if (tmMarker && scMarker) {
+                        // Extract tilemap section (from marker to scene marker)
+                        const char* tmStart = strchr(tmMarker, '\n');
+                        if (tmStart) tmStart++; else tmStart = tmMarker;
+                        size_t tmLen = (scMarker > tmStart) ? (size_t)(scMarker - tmStart) : 0;
+                        if (tmLen > 0) {
+                            strncpy(genTilemap, tmStart, tmLen < sizeof(genTilemap) - 1 ? tmLen : sizeof(genTilemap) - 1);
+                            // Trim trailing whitespace
+                            size_t len = strlen(genTilemap);
+                            while (len > 0 && (genTilemap[len-1] == '\n' || genTilemap[len-1] == ' ')) genTilemap[--len] = '\0';
+                        }
+                        // Extract scene section (from marker to end)
+                        const char* scStart = strchr(scMarker, '\n');
+                        if (scStart) scStart++; else scStart = scMarker;
+                        strncpy(genScene, scStart, sizeof(genScene) - 1);
+                        size_t len = strlen(genScene);
+                        while (len > 0 && (genScene[len-1] == '\n' || genScene[len-1] == ' ')) genScene[--len] = '\0';
+                    } else if (scMarker) {
+                        // Scene only
+                        const char* scStart = strchr(scMarker, '\n');
+                        if (scStart) scStart++; else scStart = scMarker;
+                        strncpy(genScene, scStart, sizeof(genScene) - 1);
                     } else {
-                        // Other node: flat sections
-                        snprintf(combinedBuf, sizeof(combinedBuf),
-                            "%s\n\n// ---- GBA Runtime (mapdata.h) ----\n%s",
-                            editorCode, gbaCode[0] ? gbaCode : "// (no GBA codegen for this node)");
+                        // No markers — put everything in both
+                        strncpy(genScene, editorCode, sizeof(genScene) - 1);
+                        strncpy(genTilemap, editorCode, sizeof(genTilemap) - 1);
                     }
-                    strncpy(defaultCodeBuf, combinedBuf, sizeof(defaultCodeBuf) - 1);
-                    defaultCodeBuf[sizeof(defaultCodeBuf) - 1] = '\0';
+
+                    // Build GBA runtime code with function signature
+                    char genGBA[2048] = {};
+                    if (funcSigBuf[0]) {
+                        snprintf(genGBA, sizeof(genGBA), "%s {\n%s\n}", funcSigBuf, gbaBodyBuf);
+                    } else {
+                        strncpy(genGBA, gbaCode[0] ? gbaCode : "// (no GBA codegen for this node)", sizeof(genGBA) - 1);
+                    }
+
+                    // Store for code window defaults
+                    strncpy(sVsGenScene, genScene, sizeof(sVsGenScene) - 1);
+                    strncpy(sVsGenTilemap, genTilemap, sizeof(sVsGenTilemap) - 1);
+                    strncpy(sVsGenGBA, genGBA, sizeof(sVsGenGBA) - 1);
+
+                    // Build combined for defaultCode (tooltip / legacy)
+                    snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "%s\n\n%s\n\n%s",
+                             genTilemap[0] ? genTilemap : "", genScene[0] ? genScene : "", genGBA);
                     defaultCode = defaultCodeBuf;
                 }
 
@@ -12955,30 +12995,13 @@ void FrameTick(float dt)
                 // Initialize edit buffers on first open / node switch
                 if (sLastCodeWindowNode != sVsCodeWindowNodeIdx) {
                     sLastCodeWindowNode = sVsCodeWindowNodeIdx;
-                    strncpy(sVsCodeWindowEditBuf, cwNode.customCode[0] ? cwNode.customCode : "// GBA runtime C code", sizeof(sVsCodeWindowEditBuf) - 1);
-                    strncpy(sVsCodeWindowSceneBuf, cwNode.codeScene[0] ? cwNode.codeScene : "// Mode 4 code", sizeof(sVsCodeWindowSceneBuf) - 1);
-                    strncpy(sVsCodeWindowTilemapBuf, cwNode.codeTilemap[0] ? cwNode.codeTilemap : "// Mode 0 code", sizeof(sVsCodeWindowTilemapBuf) - 1);
+                    // Use saved override if present, otherwise show generated code
+                    strncpy(sVsCodeWindowEditBuf, cwNode.customCode[0] ? cwNode.customCode : (sVsGenGBA[0] ? sVsGenGBA : "// GBA runtime C code"), sizeof(sVsCodeWindowEditBuf) - 1);
+                    strncpy(sVsCodeWindowSceneBuf, cwNode.codeScene[0] ? cwNode.codeScene : (sVsGenScene[0] ? sVsGenScene : "// Mode 4 code"), sizeof(sVsCodeWindowSceneBuf) - 1);
+                    strncpy(sVsCodeWindowTilemapBuf, cwNode.codeTilemap[0] ? cwNode.codeTilemap : (sVsGenTilemap[0] ? sVsGenTilemap : "// Mode 0 code"), sizeof(sVsCodeWindowTilemapBuf) - 1);
                 }
 
-                // Generated code preview (read-only)
-                if (sVsCodeWindowBuf[0]) {
-                    if (cwNode.customCode[0])
-                        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "Generated Code (overridden by GBA Runtime below)");
-                    else
-                        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Generated Code");
-                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.1f, 0.1f, 0.12f, 1.0f));
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.9f, 0.6f, 1.0f));
-                    { int lc = 1; for (const char* p = sVsCodeWindowBuf; *p; ++p) if (*p == '\n') ++lc;
-                      if (lc < 3) lc = 3;
-                      float genH = ImGui::GetTextLineHeight() * lc + ImGui::GetStyle().FramePadding.y * 2;
-                      ImGui::InputTextMultiline("##GenCode", sVsCodeWindowBuf, sizeof(sVsCodeWindowBuf),
-                          ImVec2(-1, genH), ImGuiInputTextFlags_ReadOnly);
-                    }
-                    ImGui::PopStyleColor(2);
-                    ImGui::Spacing();
-                }
-
-                // Custom code sections (editable)
+                // Code sections (editable — shows generated code by default, saved overrides persist)
                 auto codeSection = [&](const char* label, const char* imgId, ImVec4 labelColor, ImVec4 textColor,
                                        char* editBuf, size_t editBufSz) {
                     ImGui::TextColored(labelColor, "%s", label);
@@ -12994,17 +13017,19 @@ void FrameTick(float dt)
                 };
 
                 // --- Mode 4 ---
-                codeSection("Mode 4", "##CodeScene", ImVec4(0.4f, 0.8f, 1.0f, 1.0f), ImVec4(0.5f, 0.85f, 0.9f, 1.0f),
+                codeSection(cwNode.codeScene[0] ? "Mode 4 (modified)" : "Mode 4",
+                            "##CodeScene", ImVec4(0.4f, 0.8f, 1.0f, 1.0f), ImVec4(0.5f, 0.85f, 0.9f, 1.0f),
                             sVsCodeWindowSceneBuf, sizeof(sVsCodeWindowSceneBuf));
                 ImGui::Spacing();
 
                 // --- Mode 0 ---
-                codeSection("Mode 0", "##CodeTilemap", ImVec4(0.4f, 1.0f, 0.6f, 1.0f), ImVec4(0.5f, 0.9f, 0.6f, 1.0f),
+                codeSection(cwNode.codeTilemap[0] ? "Mode 0 (modified)" : "Mode 0",
+                            "##CodeTilemap", ImVec4(0.4f, 1.0f, 0.6f, 1.0f), ImVec4(0.5f, 0.9f, 0.6f, 1.0f),
                             sVsCodeWindowTilemapBuf, sizeof(sVsCodeWindowTilemapBuf));
                 ImGui::Spacing();
 
                 // --- GBA Runtime ---
-                codeSection(cwNode.customCode[0] ? "GBA Runtime (saved)" : "GBA Runtime",
+                codeSection(cwNode.customCode[0] ? "GBA Runtime (modified)" : "GBA Runtime",
                             "##CodeGBA", ImVec4(1.0f, 0.8f, 0.5f, 1.0f), ImVec4(0.9f, 0.8f, 0.5f, 1.0f),
                             sVsCodeWindowEditBuf, sizeof(sVsCodeWindowEditBuf));
                 ImGui::Spacing();
@@ -13345,34 +13370,36 @@ void FrameTick(float dt)
 
                 // Save all three sections
                 ImGui::Spacing();
-                // Helper: return true if buffer is empty or only contains the placeholder comment
-                auto isPlaceholder = [](const char* buf, const char* placeholder) {
+                // Helper: return true if buffer matches the generated default (no real override)
+                auto isUnchanged = [](const char* buf, const char* generated, const char* placeholder) {
                     // skip leading whitespace
                     const char* p = buf;
                     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
                     if (*p == '\0') return true;
-                    // check exact placeholder match (ignoring trailing whitespace)
+                    // check placeholder match
                     size_t plen = strlen(placeholder);
                     if (strncmp(p, placeholder, plen) == 0) {
                         const char* after = p + plen;
                         while (*after == ' ' || *after == '\t' || *after == '\n' || *after == '\r') after++;
                         if (*after == '\0') return true;
                     }
+                    // check if identical to generated code
+                    if (generated[0] && strcmp(buf, generated) == 0) return true;
                     return false;
                 };
                 if (ImGui::Button("Save")) {
-                    // Only store if user wrote real code (not just placeholder)
-                    if (isPlaceholder(sVsCodeWindowEditBuf, "// GBA runtime C code"))
+                    // Only store if user actually modified the code
+                    if (isUnchanged(sVsCodeWindowEditBuf, sVsGenGBA, "// GBA runtime C code"))
                         cwNode.customCode[0] = '\0';
                     else
                         strncpy(cwNode.customCode, sVsCodeWindowEditBuf, sizeof(cwNode.customCode) - 1);
 
-                    if (isPlaceholder(sVsCodeWindowSceneBuf, "// Mode 4 code"))
+                    if (isUnchanged(sVsCodeWindowSceneBuf, sVsGenScene, "// Mode 4 code"))
                         cwNode.codeScene[0] = '\0';
                     else
                         strncpy(cwNode.codeScene, sVsCodeWindowSceneBuf, sizeof(cwNode.codeScene) - 1);
 
-                    if (isPlaceholder(sVsCodeWindowTilemapBuf, "// Mode 0 code"))
+                    if (isUnchanged(sVsCodeWindowTilemapBuf, sVsGenTilemap, "// Mode 0 code"))
                         cwNode.codeTilemap[0] = '\0';
                     else
                         strncpy(cwNode.codeTilemap, sVsCodeWindowTilemapBuf, sizeof(cwNode.codeTilemap) - 1);
@@ -13386,9 +13413,9 @@ void FrameTick(float dt)
                         cwNode.customCode[0] = '\0';
                         cwNode.codeScene[0] = '\0';
                         cwNode.codeTilemap[0] = '\0';
-                        strncpy(sVsCodeWindowEditBuf, "// GBA runtime C code", sizeof(sVsCodeWindowEditBuf) - 1);
-                        strncpy(sVsCodeWindowSceneBuf, "// Mode 4 code", sizeof(sVsCodeWindowSceneBuf) - 1);
-                        strncpy(sVsCodeWindowTilemapBuf, "// Mode 0 code", sizeof(sVsCodeWindowTilemapBuf) - 1);
+                        strncpy(sVsCodeWindowEditBuf, sVsGenGBA[0] ? sVsGenGBA : "// GBA runtime C code", sizeof(sVsCodeWindowEditBuf) - 1);
+                        strncpy(sVsCodeWindowSceneBuf, sVsGenScene[0] ? sVsGenScene : "// Mode 4 code", sizeof(sVsCodeWindowSceneBuf) - 1);
+                        strncpy(sVsCodeWindowTilemapBuf, sVsGenTilemap[0] ? sVsGenTilemap : "// Mode 0 code", sizeof(sVsCodeWindowTilemapBuf) - 1);
                         sProjectDirty = true;
                     }
                 }
