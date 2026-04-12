@@ -197,7 +197,7 @@ enum class VsNodeType : int {
     OnUpdate,       // fires every frame
     Group,          // subgraph containing other nodes
     Object,         // constant object/sprite index output (dropdown)
-    CustomCode,     // user-written C code (GBA only)
+    CustomCode,     // user-written C code
     IsMoving,       // condition gate: passes exec only if player is moving
     IsOnGround,     // condition gate: passes exec only if player is on ground
     IsJumping,      // condition gate: passes exec only if player is airborne + rising
@@ -699,7 +699,9 @@ struct VsNode {
     char groupLabel[32] = {};     // label for Group-type nodes
     int grpInExec = 0, grpOutExec = 0;   // dynamic pin counts for Group nodes
     int grpInData = 0, grpOutData = 0;
-    char customCode[512] = {};            // user-editable code override (empty = use default)
+    char customCode[512] = {};            // GBA runtime code override (empty = use default)
+    char codeScene[512] = {};             // 3D scene code override (empty = use default)
+    char codeTilemap[512] = {};           // 2D tilemap code override (empty = use default)
     char funcName[64] = {};               // custom function name (empty = use default afn_ name)
     char ccPinNames[8][16] = {};          // custom data-in pin labels for CustomCode nodes
     char ccPinCode[8][128] = {};          // per-pin code snippets for CustomCode nodes
@@ -819,7 +821,10 @@ static bool sVsCodeWindowOpen = false;
 static bool sVsCodeWindowJustOpened = false;
 static int sVsCodeWindowNodeIdx = -1;
 static char sVsCodeWindowBuf[4096] = {}; // generated code (read-only display)
-static char sVsCodeWindowEditBuf[2048] = {}; // editable override
+static char sVsCodeWindowEditBuf[2048] = {}; // editable GBA override
+static char sVsCodeWindowSceneBuf[2048] = {}; // editable scene code
+static char sVsCodeWindowTilemapBuf[2048] = {}; // editable tilemap code
+static int sLastCodeWindowNode = -1;
 
 static constexpr float kVsNodeW = 160.0f;
 static constexpr float kVsHeaderH = 30.0f;
@@ -832,7 +837,7 @@ static VsPinCounts VsGetPinCounts(const VsNode& n) {
     if (n.type == VsNodeType::Group)
         return { n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData };
     if (n.type == VsNodeType::CustomCode)
-        return { 1, 1, n.grpInData, 0 }; // dynamic data-in pins
+        return { n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData };
     if ((int)n.type < 0 || (int)n.type >= (int)VsNodeType::COUNT)
         return { 0, 0, 0, 0 };
     const auto& def = sVsNodeDefs[(int)n.type];
@@ -1786,10 +1791,10 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "bpVsNode=%d,%d,%.1f,%.1f,%d,%d,%d,%d,%d\n",
                 n.id, (int)n.type, n.x, n.y,
                 n.paramInt[0], n.paramInt[1], n.paramInt[2], n.paramInt[3], n.groupId);
-            if (n.type == VsNodeType::Group || (n.type == VsNodeType::CustomCode && n.grpInData > 0))
+            if (n.type == VsNodeType::Group || n.type == VsNodeType::CustomCode)
                 fprintf(f, "bpVsGroupDef=%d|%s|%d,%d,%d,%d\n", n.id, n.groupLabel,
                     n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
-            if (n.type == VsNodeType::CustomCode && n.grpInData > 0) {
+            if (n.type == VsNodeType::CustomCode) {
                 for (int pi = 0; pi < n.grpInData && pi < 8; pi++) {
                     if (n.ccPinNames[pi][0])
                         fprintf(f, "bpVsCcPin=%d,%d|%s\n", n.id, pi, n.ccPinNames[pi]);
@@ -1799,6 +1804,10 @@ static bool SaveProject(const std::string& path)
             }
             if (n.customCode[0])
                 fprintf(f, "bpVsNodeCode=%d|%s\n", n.id, n.customCode);
+            if (n.codeScene[0])
+                fprintf(f, "bpVsSceneCode=%d|%s\n", n.id, n.codeScene);
+            if (n.codeTilemap[0])
+                fprintf(f, "bpVsTilemapCode=%d|%s\n", n.id, n.codeTilemap);
             if (n.funcName[0])
                 fprintf(f, "bpVsNodeFunc=%d|%s\n", n.id, n.funcName);
         }
@@ -1949,11 +1958,23 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "vsNode=%d,%d,%.1f,%.1f,%d,%d,%d,%d,%d\n",
             n.id, (int)n.type, n.x, n.y,
             n.paramInt[0], n.paramInt[1], n.paramInt[2], n.paramInt[3], n.groupId);
-        if (n.type == VsNodeType::Group)
+        if (n.type == VsNodeType::Group || n.type == VsNodeType::CustomCode)
             fprintf(f, "vsGroupDef=%d|%s|%d,%d,%d,%d\n", n.id, n.groupLabel,
                 n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
+        if (n.type == VsNodeType::CustomCode) {
+            for (int pi = 0; pi < n.grpInData && pi < 8; pi++) {
+                if (n.ccPinNames[pi][0])
+                    fprintf(f, "vsCcPin=%d,%d|%s\n", n.id, pi, n.ccPinNames[pi]);
+                if (n.ccPinCode[pi][0])
+                    fprintf(f, "vsCcCode=%d,%d|%s\n", n.id, pi, n.ccPinCode[pi]);
+            }
+        }
         if (n.customCode[0])
             fprintf(f, "vsNodeCode=%d|%s\n", n.id, n.customCode);
+        if (n.codeScene[0])
+            fprintf(f, "vsSceneCode=%d|%s\n", n.id, n.codeScene);
+        if (n.codeTilemap[0])
+            fprintf(f, "vsTilemapCode=%d|%s\n", n.id, n.codeTilemap);
         if (n.funcName[0])
             fprintf(f, "vsNodeFunc=%d|%s\n", n.id, n.funcName);
     }
@@ -2027,10 +2048,10 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "msVsNode=%d,%d,%.1f,%.1f,%d,%d,%d,%d,%d\n",
                 n.id, (int)n.type, n.x, n.y,
                 n.paramInt[0], n.paramInt[1], n.paramInt[2], n.paramInt[3], n.groupId);
-            if (n.type == VsNodeType::Group || (n.type == VsNodeType::CustomCode && n.grpInData > 0))
+            if (n.type == VsNodeType::Group || n.type == VsNodeType::CustomCode)
                 fprintf(f, "msVsGroupDef=%d|%s|%d,%d,%d,%d\n", n.id, n.groupLabel,
                     n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
-            if (n.type == VsNodeType::CustomCode && n.grpInData > 0) {
+            if (n.type == VsNodeType::CustomCode) {
                 for (int pi = 0; pi < n.grpInData && pi < 8; pi++) {
                     if (n.ccPinNames[pi][0])
                         fprintf(f, "msVsCcPin=%d,%d|%s\n", n.id, pi, n.ccPinNames[pi]);
@@ -2040,6 +2061,10 @@ static bool SaveProject(const std::string& path)
             }
             if (n.customCode[0])
                 fprintf(f, "msVsNodeCode=%d|%s\n", n.id, n.customCode);
+            if (n.codeScene[0])
+                fprintf(f, "msVsSceneCode=%d|%s\n", n.id, n.codeScene);
+            if (n.codeTilemap[0])
+                fprintf(f, "msVsTilemapCode=%d|%s\n", n.id, n.codeTilemap);
         }
         fprintf(f, "msVsLinkCount=%d\n", (int)ms.vsLinks.size());
         for (auto& lk : ms.vsLinks)
@@ -2490,6 +2515,24 @@ static bool LoadProject(const std::string& path)
                         if (n.id == nid) { strncpy(n.customCode, codeBuf, sizeof(n.customCode) - 1); break; }
                 }
             }
+            else if (strncmp(line, "bpVsSceneCode=", 14) == 0 && !sBlueprintAssets.empty())
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 14, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    for (auto& n : sBlueprintAssets.back().nodes)
+                        if (n.id == nid) { strncpy(n.codeScene, codeBuf, sizeof(n.codeScene) - 1); break; }
+                }
+            }
+            else if (strncmp(line, "bpVsTilemapCode=", 16) == 0 && !sBlueprintAssets.empty())
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 16, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    for (auto& n : sBlueprintAssets.back().nodes)
+                        if (n.id == nid) { strncpy(n.codeTilemap, codeBuf, sizeof(n.codeTilemap) - 1); break; }
+                }
+            }
             else if (strncmp(line, "bpVsNodeFunc=", 13) == 0 && !sBlueprintAssets.empty())
             {
                 int nid;
@@ -2803,6 +2846,46 @@ static bool LoadProject(const std::string& path)
                         strncpy(sVsNodes[gi].customCode, codeBuf, sizeof(sVsNodes[gi].customCode) - 1);
                 }
             }
+            else if (strncmp(line, "vsCcPin=", 8) == 0)
+            {
+                int nid, pi;
+                char pname[16] = {};
+                if (sscanf(line + 8, "%d,%d|%15[^\n]", &nid, &pi, pname) >= 3) {
+                    int gi = VsFindNode(nid);
+                    if (gi >= 0 && pi >= 0 && pi < 8)
+                        strncpy(sVsNodes[gi].ccPinNames[pi], pname, sizeof(sVsNodes[gi].ccPinNames[pi]) - 1);
+                }
+            }
+            else if (strncmp(line, "vsCcCode=", 9) == 0)
+            {
+                int nid, pi;
+                char codeBuf[128] = {};
+                if (sscanf(line + 9, "%d,%d|%127[^\n]", &nid, &pi, codeBuf) >= 3) {
+                    int gi = VsFindNode(nid);
+                    if (gi >= 0 && pi >= 0 && pi < 8)
+                        strncpy(sVsNodes[gi].ccPinCode[pi], codeBuf, sizeof(sVsNodes[gi].ccPinCode[pi]) - 1);
+                }
+            }
+            else if (strncmp(line, "vsSceneCode=", 12) == 0)
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 12, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    int gi = VsFindNode(nid);
+                    if (gi >= 0)
+                        strncpy(sVsNodes[gi].codeScene, codeBuf, sizeof(sVsNodes[gi].codeScene) - 1);
+                }
+            }
+            else if (strncmp(line, "vsTilemapCode=", 14) == 0)
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 14, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    int gi = VsFindNode(nid);
+                    if (gi >= 0)
+                        strncpy(sVsNodes[gi].codeTilemap, codeBuf, sizeof(sVsNodes[gi].codeTilemap) - 1);
+                }
+            }
             else if (strncmp(line, "vsNodeFunc=", 11) == 0)
             {
                 int nid;
@@ -2977,6 +3060,24 @@ static bool LoadProject(const std::string& path)
                 if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
                     for (auto& n : sMapScenes.back().vsNodes)
                         if (n.id == nid) { strncpy(n.customCode, codeBuf, sizeof(n.customCode) - 1); break; }
+                }
+            }
+            else if (strncmp(line, "msVsSceneCode=", 14) == 0 && !sMapScenes.empty())
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 14, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    for (auto& n : sMapScenes.back().vsNodes)
+                        if (n.id == nid) { strncpy(n.codeScene, codeBuf, sizeof(n.codeScene) - 1); break; }
+                }
+            }
+            else if (strncmp(line, "msVsTilemapCode=", 16) == 0 && !sMapScenes.empty())
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 16, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    for (auto& n : sMapScenes.back().vsNodes)
+                        if (n.id == nid) { strncpy(n.codeTilemap, codeBuf, sizeof(n.codeTilemap) - 1); break; }
                 }
             }
             else if (strncmp(line, "msVsCcPin=", 10) == 0 && !sMapScenes.empty())
@@ -7862,6 +7963,10 @@ void FrameTick(float dt)
                     else if (execEventType == VsNodeType::OnKeyReleased)
                         sPlayAnimReleased = action->id;
                 }
+                // CustomCode: pass-through in editor (C code runs on GBA/NDS runtime)
+                else if (t == VsNodeType::CustomCode) {
+                    // no-op in editor — execution flow continues to downstream nodes
+                }
             };
 
             // OnStart: run once when entering Play mode, keep firing for a few frames
@@ -9820,13 +9925,33 @@ void FrameTick(float dt)
                     n.id, (int)n.type, n.x, n.y,
                     n.paramInt[0], n.paramInt[1], n.paramInt[2], n.paramInt[3], n.groupId);
                 cb += buf;
-                if (n.type == VsNodeType::Group) {
+                if (n.type == VsNodeType::Group || n.type == VsNodeType::CustomCode) {
                     snprintf(buf, sizeof(buf), "vsGroupDef=%d|%s|%d,%d,%d,%d\n", n.id, n.groupLabel,
                         n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
                     cb += buf;
                 }
+                if (n.type == VsNodeType::CustomCode) {
+                    for (int pi = 0; pi < n.grpInData && pi < 8; pi++) {
+                        if (n.ccPinNames[pi][0]) {
+                            snprintf(buf, sizeof(buf), "vsCcPin=%d,%d|%s\n", n.id, pi, n.ccPinNames[pi]);
+                            cb += buf;
+                        }
+                        if (n.ccPinCode[pi][0]) {
+                            snprintf(buf, sizeof(buf), "vsCcCode=%d,%d|%s\n", n.id, pi, n.ccPinCode[pi]);
+                            cb += buf;
+                        }
+                    }
+                }
                 if (n.customCode[0]) {
                     snprintf(buf, sizeof(buf), "vsNodeCode=%d|%s\n", n.id, n.customCode);
+                    cb += buf;
+                }
+                if (n.codeScene[0]) {
+                    snprintf(buf, sizeof(buf), "vsSceneCode=%d|%s\n", n.id, n.codeScene);
+                    cb += buf;
+                }
+                if (n.codeTilemap[0]) {
+                    snprintf(buf, sizeof(buf), "vsTilemapCode=%d|%s\n", n.id, n.codeTilemap);
                     cb += buf;
                 }
             }
@@ -9898,6 +10023,31 @@ void FrameTick(float dt)
                         for (auto& pn : pasteNodes)
                             if (pn.id == nid) { strncpy(pn.customCode, codeBuf, sizeof(pn.customCode) - 1); break; }
                         continue;
+                    }
+                    if (sscanf(l, "vsSceneCode=%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                        for (auto& pn : pasteNodes)
+                            if (pn.id == nid) { strncpy(pn.codeScene, codeBuf, sizeof(pn.codeScene) - 1); break; }
+                        continue;
+                    }
+                    if (sscanf(l, "vsTilemapCode=%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                        for (auto& pn : pasteNodes)
+                            if (pn.id == nid) { strncpy(pn.codeTilemap, codeBuf, sizeof(pn.codeTilemap) - 1); break; }
+                        continue;
+                    }
+
+                    { int cnid, cpi;
+                      char pname[16] = {};
+                      if (sscanf(l, "vsCcPin=%d,%d|%15[^\n]", &cnid, &cpi, pname) >= 3) {
+                          for (auto& pn : pasteNodes)
+                              if (pn.id == cnid && cpi >= 0 && cpi < 8) { strncpy(pn.ccPinNames[cpi], pname, sizeof(pn.ccPinNames[cpi]) - 1); break; }
+                          continue;
+                      }
+                      char ccBuf[128] = {};
+                      if (sscanf(l, "vsCcCode=%d,%d|%127[^\n]", &cnid, &cpi, ccBuf) >= 3) {
+                          for (auto& pn : pasteNodes)
+                              if (pn.id == cnid && cpi >= 0 && cpi < 8) { strncpy(pn.ccPinCode[cpi], ccBuf, sizeof(pn.ccPinCode[cpi]) - 1); break; }
+                          continue;
+                      }
                     }
 
                     int ie, oe, id2, od;
@@ -12572,7 +12722,7 @@ void FrameTick(float dt)
                         "    return afn_last_key;");
                     break;
                 case VsNodeType::CustomCode:
-                    editorCode = "// (runs only on GBA runtime)";
+                    editorCode = "// Custom C code (emitted to GBA/NDS runtime)";
                     {
                         auto resolveCC = [&](const std::string& src) -> std::string {
                             std::string code = src;
@@ -12736,10 +12886,9 @@ void FrameTick(float dt)
                         sVsCodeWindowNodeIdx = sVsNodeInfoIdx;
                         strncpy(sVsCodeWindowBuf, defaultCode, sizeof(sVsCodeWindowBuf) - 1);
                         sVsCodeWindowBuf[sizeof(sVsCodeWindowBuf) - 1] = '\0';
-                        strncpy(sVsCodeWindowEditBuf, infoNode.customCode, sizeof(sVsCodeWindowEditBuf) - 1);
-                        sVsCodeWindowEditBuf[sizeof(sVsCodeWindowEditBuf) - 1] = '\0';
+                        sLastCodeWindowNode = -1; // force buffer reinit
                     }
-                    if (infoNode.customCode[0]) {
+                    if (infoNode.customCode[0] || infoNode.codeScene[0] || infoNode.codeTilemap[0]) {
                         ImGui::SameLine();
                         ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "(has custom code)");
                     }
@@ -12797,14 +12946,43 @@ void FrameTick(float dt)
             snprintf(winTitle, sizeof(winTitle), "Code: %s###ScriptCodeWin", nodeName);
             ImGui::SetNextWindowSize(ImVec2(500, 550), ImGuiCond_FirstUseEver);
             if (ImGui::Begin(winTitle, &sVsCodeWindowOpen)) {
-                // Generated code (read-only, monospace)
-                ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Generated Code");
-                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.1f, 0.1f, 0.12f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.9f, 0.6f, 1.0f));
-                float genHeight = cwNode.customCode[0] ? ImGui::GetContentRegionAvail().y * 0.40f : ImGui::GetContentRegionAvail().y - 80;
-                ImGui::InputTextMultiline("##GenCode", sVsCodeWindowBuf, sizeof(sVsCodeWindowBuf),
-                    ImVec2(-1, genHeight), ImGuiInputTextFlags_ReadOnly);
-                ImGui::PopStyleColor(2);
+                // Initialize edit buffers on first open / node switch
+                if (sLastCodeWindowNode != sVsCodeWindowNodeIdx) {
+                    sLastCodeWindowNode = sVsCodeWindowNodeIdx;
+                    strncpy(sVsCodeWindowEditBuf, cwNode.customCode[0] ? cwNode.customCode : "// GBA runtime C code", sizeof(sVsCodeWindowEditBuf) - 1);
+                    strncpy(sVsCodeWindowSceneBuf, cwNode.codeScene[0] ? cwNode.codeScene : "// Mode 4 code", sizeof(sVsCodeWindowSceneBuf) - 1);
+                    strncpy(sVsCodeWindowTilemapBuf, cwNode.codeTilemap[0] ? cwNode.codeTilemap : "// Mode 0 code", sizeof(sVsCodeWindowTilemapBuf) - 1);
+                }
+
+                // Helper lambda for each code section
+                auto codeSection = [&](const char* label, const char* imgId, ImVec4 labelColor, ImVec4 textColor,
+                                       char* editBuf, size_t editBufSz, char* nodeBuf, size_t nodeBufSz) {
+                    ImGui::TextColored(labelColor, "%s", label);
+                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.1f, 0.1f, 0.12f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, textColor);
+                    int lc = 1; for (const char* p = editBuf; *p; ++p) if (*p == '\n') ++lc;
+                    if (lc < 3) lc = 3;
+                    float codeH = ImGui::GetTextLineHeight() * lc + ImGui::GetStyle().FramePadding.y * 2;
+                    if (ImGui::InputTextMultiline(imgId, editBuf, editBufSz,
+                            ImVec2(-1, codeH), ImGuiInputTextFlags_AllowTabInput))
+                        { /* edited */ }
+                    ImGui::PopStyleColor(2);
+                };
+
+                // --- Mode 4 ---
+                codeSection("Mode 4", "##CodeScene", ImVec4(0.4f, 0.8f, 1.0f, 1.0f), ImVec4(0.5f, 0.85f, 0.9f, 1.0f),
+                            sVsCodeWindowSceneBuf, sizeof(sVsCodeWindowSceneBuf), cwNode.codeScene, sizeof(cwNode.codeScene));
+                ImGui::Spacing();
+
+                // --- Mode 0 ---
+                codeSection("Mode 0", "##CodeTilemap", ImVec4(0.4f, 1.0f, 0.6f, 1.0f), ImVec4(0.5f, 0.9f, 0.6f, 1.0f),
+                            sVsCodeWindowTilemapBuf, sizeof(sVsCodeWindowTilemapBuf), cwNode.codeTilemap, sizeof(cwNode.codeTilemap));
+                ImGui::Spacing();
+
+                // --- GBA Runtime ---
+                codeSection("GBA Runtime", "##CodeGBA", ImVec4(1.0f, 0.8f, 0.5f, 1.0f), ImVec4(0.9f, 0.8f, 0.5f, 1.0f),
+                            sVsCodeWindowEditBuf, sizeof(sVsCodeWindowEditBuf), cwNode.customCode, sizeof(cwNode.customCode));
+                ImGui::Spacing();
 
                 // Function declaration (editable)
                 {
@@ -13063,8 +13241,42 @@ void FrameTick(float dt)
                     ImGui::PopStyleColor(2);
                 }
 
-                // Data input pins section (CustomCode nodes only)
+                // Pin configuration (CustomCode nodes only)
                 if (cwNode.type == VsNodeType::CustomCode) {
+                    ImGui::Spacing();
+                    ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Pins");
+
+                    // Helper to remove links when reducing pin count
+                    auto removePinLinks = [&](int nodeId, int pinType, int pinIdx) {
+                        for (int li = (int)sVsLinks.size() - 1; li >= 0; li--) {
+                            auto& lk = sVsLinks[li];
+                            if ((lk.from.nodeId == nodeId && lk.from.pinType == pinType && lk.from.pinIdx == pinIdx) ||
+                                (lk.to.nodeId == nodeId && lk.to.pinType == pinType && lk.to.pinIdx == pinIdx))
+                                sVsLinks.erase(sVsLinks.begin() + li);
+                        }
+                    };
+
+                    // Exec In
+                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.6f, 1.0f), "Exec In: %d", cwNode.grpInExec);
+                    ImGui::SameLine();
+                    if (cwNode.grpInExec < 8 && ImGui::SmallButton("+##exi")) { cwNode.grpInExec++; sProjectDirty = true; }
+                    ImGui::SameLine();
+                    if (cwNode.grpInExec > 0 && ImGui::SmallButton("-##exi")) { removePinLinks(cwNode.id, 1, cwNode.grpInExec - 1); cwNode.grpInExec--; sProjectDirty = true; }
+
+                    // Exec Out
+                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.6f, 1.0f), "Exec Out: %d", cwNode.grpOutExec);
+                    ImGui::SameLine();
+                    if (cwNode.grpOutExec < 8 && ImGui::SmallButton("+##exo")) { cwNode.grpOutExec++; sProjectDirty = true; }
+                    ImGui::SameLine();
+                    if (cwNode.grpOutExec > 0 && ImGui::SmallButton("-##exo")) { removePinLinks(cwNode.id, 0, cwNode.grpOutExec - 1); cwNode.grpOutExec--; sProjectDirty = true; }
+
+                    // Data Out
+                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.6f, 1.0f), "Data Out: %d", cwNode.grpOutData);
+                    ImGui::SameLine();
+                    if (cwNode.grpOutData < 8 && ImGui::SmallButton("+##dto")) { cwNode.grpOutData++; sProjectDirty = true; }
+                    ImGui::SameLine();
+                    if (cwNode.grpOutData > 0 && ImGui::SmallButton("-##dto")) { removePinLinks(cwNode.id, 2, cwNode.grpOutData - 1); cwNode.grpOutData--; sProjectDirty = true; }
+
                     ImGui::Spacing();
                     ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.8f, 1.0f), "Data Inputs");
                     ImGui::SameLine();
@@ -13106,36 +13318,13 @@ void FrameTick(float dt)
                     }
                 }
 
-                // Custom override section
+                // Save all three sections
                 ImGui::Spacing();
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.5f, 1.0f), "Custom Override");
-                ImGui::SameLine();
-                if (!cwNode.customCode[0]) {
-                    if (ImGui::SmallButton("Enable")) {
-                        strncpy(cwNode.customCode, sVsCodeWindowBuf, sizeof(cwNode.customCode) - 1);
-                        strncpy(sVsCodeWindowEditBuf, cwNode.customCode, sizeof(sVsCodeWindowEditBuf) - 1);
-                        sProjectDirty = true;
-                    }
-                } else {
-                    if (ImGui::SmallButton("Reset")) {
-                        cwNode.customCode[0] = '\0';
-                        sVsCodeWindowEditBuf[0] = '\0';
-                        sProjectDirty = true;
-                    }
-                }
-                if (cwNode.customCode[0]) {
-                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.1f, 0.08f, 1.0f));
-                    { int lc = 1; for (const char* p = sVsCodeWindowEditBuf; *p; ++p) if (*p == '\n') ++lc;
-                      if (lc < 4) lc = 4;
-                      float codeH = ImGui::GetTextLineHeight() * lc + ImGui::GetStyle().FramePadding.y * 2;
-                      ImGui::InputTextMultiline("##EditCode", sVsCodeWindowEditBuf, sizeof(sVsCodeWindowEditBuf),
-                          ImVec2(-1, codeH), ImGuiInputTextFlags_AllowTabInput);
-                    }
-                    ImGui::PopStyleColor();
-                    if (ImGui::Button("Save")) {
-                        strncpy(cwNode.customCode, sVsCodeWindowEditBuf, sizeof(cwNode.customCode) - 1);
-                        sProjectDirty = true;
-                    }
+                if (ImGui::Button("Save")) {
+                    strncpy(cwNode.customCode, sVsCodeWindowEditBuf, sizeof(cwNode.customCode) - 1);
+                    strncpy(cwNode.codeScene, sVsCodeWindowSceneBuf, sizeof(cwNode.codeScene) - 1);
+                    strncpy(cwNode.codeTilemap, sVsCodeWindowTilemapBuf, sizeof(cwNode.codeTilemap) - 1);
+                    sProjectDirty = true;
                 }
             }
             ImGui::End();
@@ -13179,12 +13368,14 @@ void FrameTick(float dt)
                 // Auto-open code window for Custom Code nodes
                 if (t == VsNodeType::CustomCode) {
                     VsNode& cn = sVsNodes.back();
-                    strncpy(cn.customCode, "// write your GBA C code here\n// use $0, $1, ... for data input values", sizeof(cn.customCode) - 1);
+                    cn.grpInExec = 1; cn.grpOutExec = 1;
+                    cn.grpInData = 0; cn.grpOutData = 0;
+                    strncpy(cn.customCode, "// GBA runtime C code\n// use $0, $1, ... for data input values", sizeof(cn.customCode) - 1);
+                    strncpy(cn.codeScene, "// Mode 4 code", sizeof(cn.codeScene) - 1);
+                    strncpy(cn.codeTilemap, "// Mode 0 code", sizeof(cn.codeTilemap) - 1);
                     sVsCodeWindowOpen = true;
                     sVsCodeWindowNodeIdx = (int)sVsNodes.size() - 1;
-                    snprintf(sVsCodeWindowBuf, sizeof(sVsCodeWindowBuf),
-                        "// ---- Editor Play Mode ----\n// Custom code — runs only on GBA\n\n// ---- GBA Runtime (mapdata.h) ----\n%s", cn.customCode);
-                    strncpy(sVsCodeWindowEditBuf, cn.customCode, sizeof(sVsCodeWindowEditBuf) - 1);
+                    sLastCodeWindowNode = -1; // force buffer init
                 }
             };
 
@@ -13219,8 +13410,19 @@ void FrameTick(float dt)
                 // Flat filtered list when searching
                 for (int t = 0; t < (int)VsNodeType::COUNT; t++) {
                     if ((VsNodeType)t == VsNodeType::Group) continue;
+                    if ((VsNodeType)t == VsNodeType::CustomCode) continue; // shown per-category below
                     if (matchesSearch(sVsNodeDefs[t].name))
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
+                }
+                // Custom Code entries per category
+                const char* ccCategories[] = { "Custom Code (Events)", "Custom Code (Logic)", "Custom Code (Actions)", "Custom Code (Data)" };
+                ImVec4 ccColors[] = { {0.4f,0.8f,0.4f,1}, {0.4f,0.5f,0.9f,1}, {0.9f,0.6f,0.3f,1}, {0.6f,0.6f,0.8f,1} };
+                for (int ci = 0; ci < 4; ci++) {
+                    if (matchesSearch(ccCategories[ci])) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, ccColors[ci]);
+                        if (ImGui::MenuItem(ccCategories[ci])) addNodeAt(VsNodeType::CustomCode);
+                        ImGui::PopStyleColor();
+                    }
                 }
             } else {
                 // Categorized submenus
@@ -13234,6 +13436,8 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnTriggerEnter].name)) addNodeAt(VsNodeType::OnTriggerEnter);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnTriggerExit].name)) addNodeAt(VsNodeType::OnTriggerExit);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnAnyKey].name)) addNodeAt(VsNodeType::OnAnyKey);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CustomCode].name)) addNodeAt(VsNodeType::CustomCode);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
@@ -13253,6 +13457,8 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Gate].name)) addNodeAt(VsNodeType::Gate);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ForLoop].name)) addNodeAt(VsNodeType::ForLoop);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Sequence].name)) addNodeAt(VsNodeType::Sequence);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CustomCode].name)) addNodeAt(VsNodeType::CustomCode);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
@@ -13484,6 +13690,8 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetScene].name)) addNodeAt(VsNodeType::GetScene);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetInputAxis].name)) addNodeAt(VsNodeType::GetInputAxis);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetLastKey].name)) addNodeAt(VsNodeType::GetLastKey);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CustomCode].name)) addNodeAt(VsNodeType::CustomCode);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
