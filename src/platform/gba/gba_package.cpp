@@ -1505,7 +1505,22 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int   afn_prev_state[16];\n";
         f << "static int   afn_state_timer[16];\n";
         // Text rendering
-        f << "static u16   afn_text_color = 0x7FFF;\n\n";
+        f << "static u16   afn_text_color = 0x7FFF;\n";
+        // Collision
+        f << "static int   afn_collision_size[16];\n";
+        f << "static int   afn_collision_ignore[16];\n";
+        // Lifetime / spawning
+        f << "static int   afn_lifetime[16];\n";
+        // HUD bars
+        f << "static u16   afn_bar_color[4];\n";
+        f << "static int   afn_bar_max[4];\n";
+        f << "static int   afn_timer_visible;\n";
+        // Checkpoint
+        f << "static FIXED afn_checkpoint_x, afn_checkpoint_z;\n";
+        f << "static int   afn_checkpoint_set;\n";
+        // Input
+        f << "static int   afn_last_key;\n";
+        f << "static int   afn_current_scene;\n\n";
         // Clone sprite stub
         f << "static inline void afn_clone_sprite(int src) { (void)src; }\n";
         // Emit particle stub
@@ -1531,7 +1546,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "    afn_flags = sram[2] | (sram[3]<<8) | (sram[4]<<16) | (sram[5]<<24);\n";
         f << "    afn_score = sram[6] | (sram[7]<<8) | (sram[8]<<16) | (sram[9]<<24);\n";
         f << "}\n";
-        f << "static inline void afn_spawn_effect(int id, FIXED x, FIXED z) { (void)id; (void)x; (void)z; }\n\n";
+        f << "static inline void afn_spawn_effect(int id, FIXED x, FIXED z) { (void)id; (void)x; (void)z; }\n";
+        f << "static inline void afn_spawn_sprite(int asset, FIXED x, FIXED z) { (void)asset; (void)x; (void)z; }\n";
+        f << "static inline void afn_spawn_projectile(int obj, int asset, int speed) { (void)obj; (void)asset; (void)speed; }\n";
+        f << "static inline void afn_draw_bar(int x, int y, int w, int fill) { (void)x; (void)y; (void)w; (void)fill; }\n";
+        f << "static inline void afn_draw_sprite_icon(int asset, int x, int y) { (void)asset; (void)x; (void)y; }\n\n";
     }
     // Helper: get suffix string for an action node type
     auto actionSuffix = [](GBAScriptNodeType t) -> const char* {
@@ -1654,6 +1673,22 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::IsInState:     return "_is_in_state";
         case GBAScriptNodeType::HasItem:       return "_has_item";
         case GBAScriptNodeType::IsDialogueOpen:return "_is_dlg_open";
+        case GBAScriptNodeType::SetCollisionSize:return "_set_col_size";
+        case GBAScriptNodeType::IgnoreCollision:return "_ignore_col";
+        case GBAScriptNodeType::IsColliding:   return "_is_colliding";
+        case GBAScriptNodeType::SpawnAt:       return "_spawn_at";
+        case GBAScriptNodeType::DestroyAfter:  return "_destroy_after";
+        case GBAScriptNodeType::SpawnProjectile:return "_spawn_proj";
+        case GBAScriptNodeType::SetLifetime:   return "_set_lifetime";
+        case GBAScriptNodeType::DrawBar:       return "_draw_bar";
+        case GBAScriptNodeType::DrawSpriteIcon:return "_draw_icon";
+        case GBAScriptNodeType::ShowTimer:     return "_show_timer";
+        case GBAScriptNodeType::HideTimer:     return "_hide_timer";
+        case GBAScriptNodeType::SetBarColor:   return "_set_bar_color";
+        case GBAScriptNodeType::SetBarMax:     return "_set_bar_max";
+        case GBAScriptNodeType::ReloadScene:   return "_reload_scene";
+        case GBAScriptNodeType::SetCheckpoint: return "_set_checkpoint";
+        case GBAScriptNodeType::LoadCheckpoint:return "_load_checkpoint";
         default: return "";
         }
     };
@@ -2525,6 +2560,112 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_state[" << obj << " & 15] = " << st << "; afn_state_timer[" << obj << " & 15] = 0;\n";
                     break;
                 }
+                // Batch 8: Collision / Spawning / UI / Scene / Input
+                case GBAScriptNodeType::SetCollisionSize: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* radData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int rad = radData ? resolveInt(radData) : 8;
+                    f << "    afn_collision_size[" << obj << "] = " << rad << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::IgnoreCollision: {
+                    auto* aData = findDataIn(action->id, 0);
+                    auto* bData = findDataIn(action->id, 1);
+                    int a = aData ? resolveInt(aData) : 0;
+                    int b = bData ? resolveInt(bData) : 0;
+                    f << "    afn_collision_ignore[" << a << "] = " << b << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SpawnAt: {
+                    auto* assetData = findDataIn(action->id, 0);
+                    auto* xData = findDataIn(action->id, 1);
+                    auto* zData = findDataIn(action->id, 2);
+                    int asset = assetData ? resolveInt(assetData) : 0;
+                    int x = xData ? resolveInt(xData) : 0;
+                    int z = zData ? resolveInt(zData) : 0;
+                    f << "    afn_spawn_sprite(" << asset << ", " << x << " << 8, " << z << " << 8);\n";
+                    break;
+                }
+                case GBAScriptNodeType::DestroyAfter: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* frData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int fr = frData ? resolveInt(frData) : 60;
+                    f << "    afn_lifetime[" << obj << "] = " << fr << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SpawnProjectile: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* assetData = findDataIn(action->id, 1);
+                    auto* spdData = findDataIn(action->id, 2);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int asset = assetData ? resolveInt(assetData) : 0;
+                    int spd = spdData ? resolveInt(spdData) : 4;
+                    f << "    afn_spawn_projectile(" << obj << ", " << asset << ", " << spd << ");\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetLifetime: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* frData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int fr = frData ? resolveInt(frData) : 60;
+                    f << "    afn_lifetime[" << obj << "] = " << fr << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::DrawBar: {
+                    auto* xData = findDataIn(action->id, 0);
+                    auto* yData = findDataIn(action->id, 1);
+                    auto* wData = findDataIn(action->id, 2);
+                    auto* fillData = findDataIn(action->id, 3);
+                    int x = xData ? resolveInt(xData) : 0;
+                    int y = yData ? resolveInt(yData) : 0;
+                    int w = wData ? resolveInt(wData) : 32;
+                    int fill = fillData ? resolveInt(fillData) : 0;
+                    f << "    afn_draw_bar(" << x << ", " << y << ", " << w << ", " << fill << ");\n";
+                    break;
+                }
+                case GBAScriptNodeType::DrawSpriteIcon: {
+                    auto* assetData = findDataIn(action->id, 0);
+                    auto* xData = findDataIn(action->id, 1);
+                    auto* yData = findDataIn(action->id, 2);
+                    int asset = assetData ? resolveInt(assetData) : 0;
+                    int x = xData ? resolveInt(xData) : 0;
+                    int y = yData ? resolveInt(yData) : 0;
+                    f << "    afn_draw_sprite_icon(" << asset << ", " << x << ", " << y << ");\n";
+                    break;
+                }
+                case GBAScriptNodeType::ShowTimer:
+                    f << "    afn_timer_visible = 1;\n";
+                    break;
+                case GBAScriptNodeType::HideTimer:
+                    f << "    afn_timer_visible = 0;\n";
+                    break;
+                case GBAScriptNodeType::SetBarColor: {
+                    auto* barData = findDataIn(action->id, 0);
+                    auto* colData = findDataIn(action->id, 1);
+                    int bar = barData ? resolveInt(barData) : 0;
+                    int col = colData ? resolveInt(colData) : 0x7FFF;
+                    f << "    afn_bar_color[" << bar << " & 3] = " << col << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetBarMax: {
+                    auto* barData = findDataIn(action->id, 0);
+                    auto* maxData = findDataIn(action->id, 1);
+                    int bar = barData ? resolveInt(barData) : 0;
+                    int mx = maxData ? resolveInt(maxData) : 100;
+                    f << "    afn_bar_max[" << bar << " & 3] = " << mx << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::ReloadScene:
+                    f << "    afn_pending_scene = afn_current_scene;\n";
+                    break;
+                case GBAScriptNodeType::SetCheckpoint:
+                    f << "    afn_checkpoint_x = player_x; afn_checkpoint_z = player_z; afn_checkpoint_set = 1;\n";
+                    break;
+                case GBAScriptNodeType::LoadCheckpoint:
+                    f << "    if (afn_checkpoint_set) { player_x = afn_checkpoint_x; player_z = afn_checkpoint_z; }\n";
+                    break;
                 default:
                     f << "    // unsupported action: type " << (int)action->type << "\n";
                     break;
@@ -2537,7 +2678,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     || t == GBAScriptNodeType::IsFlagSet || t == GBAScriptNodeType::IsHPZero || t == GBAScriptNodeType::IsNear
                     || t == GBAScriptNodeType::Countdown || t == GBAScriptNodeType::IsAlive
                     || t == GBAScriptNodeType::HasItem || t == GBAScriptNodeType::IsDialogueOpen
-                    || t == GBAScriptNodeType::IsInState;
+                    || t == GBAScriptNodeType::IsInState || t == GBAScriptNodeType::IsColliding;
             };
             std::set<int> emittedActionIds;
             for (auto& c : chains) {
@@ -2663,6 +2804,16 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     }
                     if (a->type == GBAScriptNodeType::IsInState) {
                         f << "    if (afn_state[" << a->paramInt[0] << " & 15] == " << a->paramInt[1] << ") {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsColliding) {
+                        f << "    { FIXED dx = g_sprites[" << a->paramInt[0] << "].wx - g_sprites[" << a->paramInt[1] << "].wx;\n";
+                        f << "      FIXED dz = g_sprites[" << a->paramInt[0] << "].wz - g_sprites[" << a->paramInt[1] << "].wz;\n";
+                        f << "      if (dx<0) dx=-dx; if (dz<0) dz=-dz;\n";
+                        f << "      int cr = afn_collision_size[" << a->paramInt[0] << "] + afn_collision_size[" << a->paramInt[1] << "];\n";
+                        f << "      if (cr <= 0) cr = 16;\n";
+                        f << "      if (((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8 < cr) {\n";
                         gateDepth++;
                         continue;
                     }
@@ -3601,6 +3752,112 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_state[" << obj << " & 15] = " << st << "; afn_state_timer[" << obj << " & 15] = 0;\n";
                     break;
                 }
+                // Batch 8: Collision / Spawning / UI / Scene / Input
+                case GBAScriptNodeType::SetCollisionSize: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* radData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string rad = radData ? bpResolveInt(radData) : "8";
+                    f << "    afn_collision_size[" << obj << "] = " << rad << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::IgnoreCollision: {
+                    auto* aData = bpFindDataIn(action->id, 0);
+                    auto* bData = bpFindDataIn(action->id, 1);
+                    std::string a = aData ? bpResolveInt(aData) : "0";
+                    std::string b = bData ? bpResolveInt(bData) : "0";
+                    f << "    afn_collision_ignore[" << a << "] = " << b << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SpawnAt: {
+                    auto* assetData = bpFindDataIn(action->id, 0);
+                    auto* xData = bpFindDataIn(action->id, 1);
+                    auto* zData = bpFindDataIn(action->id, 2);
+                    std::string asset = assetData ? bpResolveInt(assetData) : "0";
+                    std::string x = xData ? bpResolveInt(xData) : "0";
+                    std::string z = zData ? bpResolveInt(zData) : "0";
+                    f << "    afn_spawn_sprite(" << asset << ", " << x << " << 8, " << z << " << 8);\n";
+                    break;
+                }
+                case GBAScriptNodeType::DestroyAfter: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* frData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string fr = frData ? bpResolveInt(frData) : "60";
+                    f << "    afn_lifetime[" << obj << "] = " << fr << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SpawnProjectile: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* assetData = bpFindDataIn(action->id, 1);
+                    auto* spdData = bpFindDataIn(action->id, 2);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string asset = assetData ? bpResolveInt(assetData) : "0";
+                    std::string spd = spdData ? bpResolveInt(spdData) : "4";
+                    f << "    afn_spawn_projectile(" << obj << ", " << asset << ", " << spd << ");\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetLifetime: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* frData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string fr = frData ? bpResolveInt(frData) : "60";
+                    f << "    afn_lifetime[" << obj << "] = " << fr << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::DrawBar: {
+                    auto* xData = bpFindDataIn(action->id, 0);
+                    auto* yData = bpFindDataIn(action->id, 1);
+                    auto* wData = bpFindDataIn(action->id, 2);
+                    auto* fillData = bpFindDataIn(action->id, 3);
+                    std::string x = xData ? bpResolveInt(xData) : "0";
+                    std::string y = yData ? bpResolveInt(yData) : "0";
+                    std::string w = wData ? bpResolveInt(wData) : "32";
+                    std::string fill = fillData ? bpResolveInt(fillData) : "0";
+                    f << "    afn_draw_bar(" << x << ", " << y << ", " << w << ", " << fill << ");\n";
+                    break;
+                }
+                case GBAScriptNodeType::DrawSpriteIcon: {
+                    auto* assetData = bpFindDataIn(action->id, 0);
+                    auto* xData = bpFindDataIn(action->id, 1);
+                    auto* yData = bpFindDataIn(action->id, 2);
+                    std::string asset = assetData ? bpResolveInt(assetData) : "0";
+                    std::string x = xData ? bpResolveInt(xData) : "0";
+                    std::string y = yData ? bpResolveInt(yData) : "0";
+                    f << "    afn_draw_sprite_icon(" << asset << ", " << x << ", " << y << ");\n";
+                    break;
+                }
+                case GBAScriptNodeType::ShowTimer:
+                    f << "    afn_timer_visible = 1;\n";
+                    break;
+                case GBAScriptNodeType::HideTimer:
+                    f << "    afn_timer_visible = 0;\n";
+                    break;
+                case GBAScriptNodeType::SetBarColor: {
+                    auto* barData = bpFindDataIn(action->id, 0);
+                    auto* colData = bpFindDataIn(action->id, 1);
+                    std::string bar = barData ? bpResolveInt(barData) : "0";
+                    std::string col = colData ? bpResolveInt(colData) : "0x7FFF";
+                    f << "    afn_bar_color[" << bar << " & 3] = " << col << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetBarMax: {
+                    auto* barData = bpFindDataIn(action->id, 0);
+                    auto* maxData = bpFindDataIn(action->id, 1);
+                    std::string bar = barData ? bpResolveInt(barData) : "0";
+                    std::string mx = maxData ? bpResolveInt(maxData) : "100";
+                    f << "    afn_bar_max[" << bar << " & 3] = " << mx << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::ReloadScene:
+                    f << "    afn_pending_scene = afn_current_scene;\n";
+                    break;
+                case GBAScriptNodeType::SetCheckpoint:
+                    f << "    afn_checkpoint_x = player_x; afn_checkpoint_z = player_z; afn_checkpoint_set = 1;\n";
+                    break;
+                case GBAScriptNodeType::LoadCheckpoint:
+                    f << "    if (afn_checkpoint_set) { player_x = afn_checkpoint_x; player_z = afn_checkpoint_z; }\n";
+                    break;
                 default:
                     f << "    // unsupported bp action: type " << (int)action->type << "\n";
                     break;
@@ -3613,7 +3870,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     || t == GBAScriptNodeType::IsFlagSet || t == GBAScriptNodeType::IsHPZero || t == GBAScriptNodeType::IsNear
                     || t == GBAScriptNodeType::Countdown || t == GBAScriptNodeType::IsAlive
                     || t == GBAScriptNodeType::HasItem || t == GBAScriptNodeType::IsDialogueOpen
-                    || t == GBAScriptNodeType::IsInState;
+                    || t == GBAScriptNodeType::IsInState || t == GBAScriptNodeType::IsColliding;
             };
             std::set<int> bpEmittedIds;
             for (auto& c : bpChains) {
@@ -3704,6 +3961,16 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     }
                     if (a->type == GBAScriptNodeType::IsInState) {
                         f << "    if (afn_state[" << a->paramInt[0] << " & 15] == " << a->paramInt[1] << ") {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsColliding) {
+                        f << "    { FIXED dx = g_sprites[" << a->paramInt[0] << "].wx - g_sprites[" << a->paramInt[1] << "].wx;\n";
+                        f << "      FIXED dz = g_sprites[" << a->paramInt[0] << "].wz - g_sprites[" << a->paramInt[1] << "].wz;\n";
+                        f << "      if (dx<0) dx=-dx; if (dz<0) dz=-dz;\n";
+                        f << "      int cr = afn_collision_size[" << a->paramInt[0] << "] + afn_collision_size[" << a->paramInt[1] << "];\n";
+                        f << "      if (cr <= 0) cr = 16;\n";
+                        f << "      if (((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8 < cr) {\n";
                         gateDepth++;
                         continue;
                     }

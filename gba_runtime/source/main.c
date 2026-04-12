@@ -304,6 +304,16 @@ static int   afn_state[16];    // per-sprite state machine state
 static int   afn_prev_state[16]; // per-sprite previous state
 static int   afn_state_timer[16]; // frames in current state
 static u16   afn_text_color;   // text rendering color
+static int   afn_collision_size[16]; // per-sprite collision radius
+static int   afn_collision_ignore[16]; // per-sprite collision ignore target
+static int   afn_lifetime[16]; // per-sprite remaining lifetime (frames)
+static u16   afn_bar_color[4]; // HUD bar colors
+static int   afn_bar_max[4];   // HUD bar max values
+static int   afn_timer_visible; // countdown timer visibility
+static FIXED afn_checkpoint_x, afn_checkpoint_z; // checkpoint position
+static int   afn_checkpoint_set; // 1 = checkpoint saved
+static int   afn_last_key;     // last button pressed
+static int   afn_current_scene; // current scene index
 
 // Direction animation set tracking (for DMA streaming)
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0

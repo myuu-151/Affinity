@@ -384,6 +384,35 @@ enum class VsNodeType : int {
     TransitionState,// change state after optional delay
     PrevState,      // read sprite's previous state
     StateTimer,     // frames spent in current state
+    // Batch 8: Collision / Spawning / UI / Scene / Input
+    // Collision
+    OnTriggerEnter, // event: fires when sprite enters trigger zone
+    OnTriggerExit,  // event: fires when sprite exits trigger zone
+    SetCollisionSize,// change sprite collision radius at runtime
+    IgnoreCollision,// disable collision between two specific sprites
+    IsColliding,    // gate: passes if two sprites are currently overlapping
+    // Spawning
+    SpawnAt,        // spawn new sprite from asset at position
+    DestroyAfter,   // auto-destroy sprite after N frames
+    SpawnProjectile,// spawn + move in a direction at speed
+    SetLifetime,    // set remaining lifetime for a sprite
+    GetLifetime,    // read remaining lifetime
+    // UI
+    DrawBar,        // draw a horizontal bar (HP bar, progress, etc.)
+    DrawSpriteIcon, // draw a sprite icon on HUD at screen pos
+    ShowTimer,      // display countdown timer on screen
+    HideTimer,      // hide countdown timer
+    SetBarColor,    // set bar fill color
+    SetBarMax,      // set bar maximum value
+    // Scene/Level
+    ReloadScene,    // restart current scene
+    GetScene,       // read current scene index
+    SetCheckpoint,  // save checkpoint position
+    LoadCheckpoint, // respawn at checkpoint
+    // Input
+    GetInputAxis,   // returns -1/0/1 for dpad axis (data node)
+    OnAnyKey,       // event: fires on any button press
+    GetLastKey,     // read last key pressed (data node)
     COUNT
 };
 
@@ -627,6 +656,35 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Transition",     0xFF3355AA, 1, 1, 3, 0, {"Object (int)", "State (int)", "Delay (int)"}, {}, {} },
     { "Prev State",     0xFF666688, 0, 0, 1, 1, {"Object (int)"}, {"State"}, {} },
     { "State Timer",    0xFF666688, 0, 0, 1, 1, {"Object (int)"}, {"Frames"}, {} },
+    // Batch 8: Collision / Spawning / UI / Scene / Input
+    // Collision
+    { "On Trigger Enter",0xFF338833, 0, 1, 2, 0, {"Obj A (int)", "Obj B (int)"}, {}, {} },
+    { "On Trigger Exit", 0xFF338833, 0, 1, 2, 0, {"Obj A (int)", "Obj B (int)"}, {}, {} },
+    { "Set Collision Size",0xFF3355AA,1, 1, 2, 0, {"Object (int)", "Radius (int)"}, {}, {} },
+    { "Ignore Collision",0xFF3355AA, 1, 1, 2, 0, {"Obj A (int)", "Obj B (int)"}, {}, {} },
+    { "Is Colliding",   0xFF885533, 1, 1, 2, 0, {"Obj A (int)", "Obj B (int)"}, {}, {} },
+    // Spawning
+    { "Spawn At",       0xFF3355AA, 1, 1, 3, 0, {"Asset (int)", "X (int)", "Z (int)"}, {}, {} },
+    { "Destroy After",  0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Frames (int)"}, {}, {} },
+    { "Spawn Projectile",0xFF3355AA,1, 1, 4, 0, {"Asset (int)", "X (int)", "Z (int)", "Speed (int)"}, {}, {} },
+    { "Set Lifetime",   0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Frames (int)"}, {}, {} },
+    { "Get Lifetime",   0xFF666688, 0, 0, 1, 1, {"Object (int)"}, {"Frames"}, {} },
+    // UI
+    { "Draw Bar",       0xFF3355AA, 1, 1, 4, 0, {"X (int)", "Y (int)", "Value (int)", "Max (int)"}, {}, {} },
+    { "Draw Sprite Icon",0xFF3355AA,1, 1, 3, 0, {"Asset (int)", "X (int)", "Y (int)"}, {}, {} },
+    { "Show Timer",     0xFF3355AA, 1, 1, 2, 0, {"Slot (int)", "Seconds (int)"}, {}, {} },
+    { "Hide Timer",     0xFF3355AA, 1, 1, 1, 0, {"Slot (int)"}, {}, {} },
+    { "Set Bar Color",  0xFF3355AA, 1, 1, 1, 0, {"Color (int)"}, {}, {} },
+    { "Set Bar Max",    0xFF3355AA, 1, 1, 1, 0, {"Max (int)"}, {}, {} },
+    // Scene/Level
+    { "Reload Scene",   0xFF3355AA, 1, 0, 0, 0, {}, {}, {} },
+    { "Get Scene",      0xFF666688, 0, 0, 0, 1, {}, {"Scene"}, {} },
+    { "Set Checkpoint", 0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Load Checkpoint",0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    // Input
+    { "Get Input Axis", 0xFF666688, 0, 0, 1, 1, {"Axis (int)"}, {"Value"}, {} },
+    { "On Any Key",     0xFF338833, 0, 1, 0, 0, {}, {}, {} },
+    { "Get Last Key",   0xFF666688, 0, 0, 0, 1, {}, {"Key"}, {} },
 };
 
 struct VsNode {
@@ -7653,6 +7711,13 @@ void FrameTick(float dt)
                                 front.push_back(lk.to.nodeId);
                         continue;
                     }
+                    if (an->type == VsNodeType::IsColliding) {
+                        // Collision check - always pass through in editor preview
+                        for (auto& lk : sVsLinks)
+                            if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                front.push_back(lk.to.nodeId);
+                        continue;
+                    }
                     acts.push_back(an);
                     for (auto& lk : sVsLinks)
                         if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
@@ -10074,6 +10139,29 @@ void FrameTick(float dt)
                 case VsNodeType::TransitionState:desc = "Changes a sprite's state after an optional delay (in frames)."; break;
                 case VsNodeType::PrevState:     desc = "Outputs the sprite's previous state (before last transition)."; break;
                 case VsNodeType::StateTimer:    desc = "Outputs how many frames the sprite has been in its current state."; break;
+                case VsNodeType::OnTriggerEnter:desc = "Event: fires when a sprite enters a trigger zone."; break;
+                case VsNodeType::OnTriggerExit: desc = "Event: fires when a sprite exits a trigger zone."; break;
+                case VsNodeType::SetCollisionSize:desc = "Sets the collision radius of a sprite."; break;
+                case VsNodeType::IgnoreCollision:desc = "Disables collision between two specific sprites."; break;
+                case VsNodeType::IsColliding:   desc = "Gate: only passes execution if two sprites are overlapping."; break;
+                case VsNodeType::SpawnAt:       desc = "Spawns a new sprite at the given world position."; break;
+                case VsNodeType::DestroyAfter:  desc = "Destroys a sprite after a delay (in frames)."; break;
+                case VsNodeType::SpawnProjectile:desc = "Spawns a projectile from a sprite in its facing direction."; break;
+                case VsNodeType::SetLifetime:   desc = "Sets the remaining lifetime (in frames) for a sprite."; break;
+                case VsNodeType::GetLifetime:   desc = "Outputs the remaining lifetime of a sprite."; break;
+                case VsNodeType::DrawBar:       desc = "Draws a horizontal bar at screen position (X, Y) with fill amount."; break;
+                case VsNodeType::DrawSpriteIcon:desc = "Draws a sprite icon at screen position (X, Y)."; break;
+                case VsNodeType::ShowTimer:     desc = "Shows the on-screen countdown timer."; break;
+                case VsNodeType::HideTimer:     desc = "Hides the on-screen countdown timer."; break;
+                case VsNodeType::SetBarColor:   desc = "Sets the color of a HUD bar (RGB15)."; break;
+                case VsNodeType::SetBarMax:     desc = "Sets the maximum value for a HUD bar."; break;
+                case VsNodeType::ReloadScene:   desc = "Reloads the current scene from scratch."; break;
+                case VsNodeType::GetScene:      desc = "Outputs the current scene index."; break;
+                case VsNodeType::SetCheckpoint: desc = "Saves the current player position as a checkpoint."; break;
+                case VsNodeType::LoadCheckpoint:desc = "Teleports the player back to the last saved checkpoint."; break;
+                case VsNodeType::GetInputAxis:  desc = "Outputs the current D-pad axis value (-256 to 256)."; break;
+                case VsNodeType::OnAnyKey:      desc = "Event: fires when any button is pressed."; break;
+                case VsNodeType::GetLastKey:    desc = "Outputs the key code of the last button pressed."; break;
                 case VsNodeType::Integer:       desc = "Outputs a constant integer value."; break;
                 case VsNodeType::Key:           desc = "Outputs a key constant (A, B, L, R, etc)."; break;
                 case VsNodeType::Direction:     desc = "Outputs a direction (Left, Right, Up, Down)."; break;
@@ -10321,6 +10409,22 @@ void FrameTick(float dt)
                         case VsNodeType::SetSpeaker:    return "_set_speaker";
                         case VsNodeType::SetState:      return "_set_state";
                         case VsNodeType::TransitionState:return "_transition";
+                        case VsNodeType::SetCollisionSize:return "_set_col_size";
+                        case VsNodeType::IgnoreCollision:return "_ignore_col";
+                        case VsNodeType::IsColliding:   return "_is_colliding";
+                        case VsNodeType::SpawnAt:       return "_spawn_at";
+                        case VsNodeType::DestroyAfter:  return "_destroy_after";
+                        case VsNodeType::SpawnProjectile:return "_spawn_proj";
+                        case VsNodeType::SetLifetime:   return "_set_lifetime";
+                        case VsNodeType::DrawBar:       return "_draw_bar";
+                        case VsNodeType::DrawSpriteIcon:return "_draw_icon";
+                        case VsNodeType::ShowTimer:     return "_show_timer";
+                        case VsNodeType::HideTimer:     return "_hide_timer";
+                        case VsNodeType::SetBarColor:   return "_set_bar_color";
+                        case VsNodeType::SetBarMax:     return "_set_bar_max";
+                        case VsNodeType::ReloadScene:   return "_reload_scene";
+                        case VsNodeType::SetCheckpoint: return "_set_checkpoint";
+                        case VsNodeType::LoadCheckpoint:return "_load_checkpoint";
                         default: return "";
                         }
                     };
@@ -12191,6 +12295,200 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_state_timer", b7);
                     break;
                 }
+                // Batch 8: Collision / Spawning / UI / Scene / Input
+                case VsNodeType::OnTriggerEnter: {
+                    setEventFunc(infoNode, "afn_script_trigger_enter");
+                    editorCode = "// Event: sprite entered trigger zone";
+                    std::string calls = buildActionCalls(infoNode, "    ");
+                    snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                        "    // Called when sprite enters trigger\n%s", calls.c_str());
+                    break;
+                }
+                case VsNodeType::OnTriggerExit: {
+                    setEventFunc(infoNode, "afn_script_trigger_exit");
+                    editorCode = "// Event: sprite exited trigger zone";
+                    std::string calls = buildActionCalls(infoNode, "    ");
+                    snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                        "    // Called when sprite exits trigger\n%s", calls.c_str());
+                    break;
+                }
+                case VsNodeType::SetCollisionSize: {
+                    editorCode = "// Set collision radius";
+                    char b8[256];
+                    snprintf(b8, sizeof(b8),
+                        "    afn_collision_size[%s] = %s;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<radius>"));
+                    setActionFunc(infoNode, "_set_col_size", b8);
+                    break;
+                }
+                case VsNodeType::IgnoreCollision: {
+                    editorCode = "// Disable collision between two sprites";
+                    char b8[256];
+                    snprintf(b8, sizeof(b8),
+                        "    afn_collision_ignore[%s] = %s;",
+                        fmtInt(infoNode.id, 0, "<objA>"),
+                        fmtInt(infoNode.id, 1, "<objB>"));
+                    setActionFunc(infoNode, "_ignore_col", b8);
+                    break;
+                }
+                case VsNodeType::IsColliding:
+                    editorCode = "// Gate: passes if two sprites overlap";
+                    setActionFunc(infoNode, "_is_colliding",
+                        "    if (sprites_colliding(objA, objB)) {\n"
+                        "        /* downstream */\n"
+                        "    }");
+                    break;
+                case VsNodeType::SpawnAt: {
+                    editorCode = "// Spawn sprite at position";
+                    char b8[512];
+                    snprintf(b8, sizeof(b8),
+                        "    afn_spawn_sprite(%s, %s << 8, %s << 8);",
+                        fmtInt(infoNode.id, 0, "<asset>"),
+                        fmtInt(infoNode.id, 1, "<x>"),
+                        fmtInt(infoNode.id, 2, "<z>"));
+                    setActionFunc(infoNode, "_spawn_at", b8);
+                    break;
+                }
+                case VsNodeType::DestroyAfter: {
+                    editorCode = "// Destroy sprite after delay";
+                    char b8[256];
+                    snprintf(b8, sizeof(b8),
+                        "    afn_lifetime[%s] = %s;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<frames>"));
+                    setActionFunc(infoNode, "_destroy_after", b8);
+                    break;
+                }
+                case VsNodeType::SpawnProjectile: {
+                    editorCode = "// Spawn projectile from sprite";
+                    char b8[512];
+                    snprintf(b8, sizeof(b8),
+                        "    afn_spawn_projectile(%s, %s, %s);",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<asset>"),
+                        fmtInt(infoNode.id, 2, "<speed>"));
+                    setActionFunc(infoNode, "_spawn_proj", b8);
+                    break;
+                }
+                case VsNodeType::SetLifetime: {
+                    editorCode = "// Set sprite lifetime";
+                    char b8[256];
+                    snprintf(b8, sizeof(b8),
+                        "    afn_lifetime[%s] = %s;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<frames>"));
+                    setActionFunc(infoNode, "_set_lifetime", b8);
+                    break;
+                }
+                case VsNodeType::GetLifetime: {
+                    editorCode = "// Read sprite lifetime";
+                    char b8[256];
+                    snprintf(b8, sizeof(b8),
+                        "    return afn_lifetime[%s];",
+                        fmtInt(infoNode.id, 0, "<obj>"));
+                    setActionFunc(infoNode, "_get_lifetime", b8);
+                    break;
+                }
+                case VsNodeType::DrawBar: {
+                    editorCode = "// Draw HUD bar";
+                    char b8[512];
+                    snprintf(b8, sizeof(b8),
+                        "    afn_draw_bar(%s, %s, %s, %s);",
+                        fmtInt(infoNode.id, 0, "<x>"),
+                        fmtInt(infoNode.id, 1, "<y>"),
+                        fmtInt(infoNode.id, 2, "<width>"),
+                        fmtInt(infoNode.id, 3, "<fill>"));
+                    setActionFunc(infoNode, "_draw_bar", b8);
+                    break;
+                }
+                case VsNodeType::DrawSpriteIcon: {
+                    editorCode = "// Draw sprite icon on HUD";
+                    char b8[256];
+                    snprintf(b8, sizeof(b8),
+                        "    afn_draw_sprite_icon(%s, %s, %s);",
+                        fmtInt(infoNode.id, 0, "<asset>"),
+                        fmtInt(infoNode.id, 1, "<x>"),
+                        fmtInt(infoNode.id, 2, "<y>"));
+                    setActionFunc(infoNode, "_draw_icon", b8);
+                    break;
+                }
+                case VsNodeType::ShowTimer:
+                    editorCode = "// Show countdown timer";
+                    setActionFunc(infoNode, "_show_timer",
+                        "    afn_timer_visible = 1;");
+                    break;
+                case VsNodeType::HideTimer:
+                    editorCode = "// Hide countdown timer";
+                    setActionFunc(infoNode, "_hide_timer",
+                        "    afn_timer_visible = 0;");
+                    break;
+                case VsNodeType::SetBarColor: {
+                    editorCode = "// Set bar color";
+                    char b8[256];
+                    snprintf(b8, sizeof(b8),
+                        "    afn_bar_color[%s] = %s;",
+                        fmtInt(infoNode.id, 0, "<bar>"),
+                        fmtInt(infoNode.id, 1, "<color>"));
+                    setActionFunc(infoNode, "_set_bar_color", b8);
+                    break;
+                }
+                case VsNodeType::SetBarMax: {
+                    editorCode = "// Set bar max value";
+                    char b8[256];
+                    snprintf(b8, sizeof(b8),
+                        "    afn_bar_max[%s] = %s;",
+                        fmtInt(infoNode.id, 0, "<bar>"),
+                        fmtInt(infoNode.id, 1, "<max>"));
+                    setActionFunc(infoNode, "_set_bar_max", b8);
+                    break;
+                }
+                case VsNodeType::ReloadScene:
+                    editorCode = "// Reload current scene";
+                    setActionFunc(infoNode, "_reload_scene",
+                        "    afn_pending_scene = afn_current_scene;\n"
+                        "    // Triggers scene reload next frame");
+                    break;
+                case VsNodeType::GetScene:
+                    editorCode = "// Read current scene index";
+                    setActionFunc(infoNode, "_get_scene",
+                        "    return afn_current_scene;");
+                    break;
+                case VsNodeType::SetCheckpoint: {
+                    editorCode = "// Save checkpoint";
+                    setActionFunc(infoNode, "_set_checkpoint",
+                        "    afn_checkpoint_x = player_x;\n"
+                        "    afn_checkpoint_z = player_z;\n"
+                        "    afn_checkpoint_set = 1;");
+                    break;
+                }
+                case VsNodeType::LoadCheckpoint:
+                    editorCode = "// Load checkpoint";
+                    setActionFunc(infoNode, "_load_checkpoint",
+                        "    if (afn_checkpoint_set) {\n"
+                        "        player_x = afn_checkpoint_x;\n"
+                        "        player_z = afn_checkpoint_z;\n"
+                        "    }");
+                    break;
+                case VsNodeType::GetInputAxis:
+                    editorCode = "// Read D-pad axis value";
+                    setActionFunc(infoNode, "_get_input_axis",
+                        "    // 0=horizontal, 1=vertical\n"
+                        "    return (axis==0) ? afn_input_right : afn_input_fwd;");
+                    break;
+                case VsNodeType::OnAnyKey: {
+                    setEventFunc(infoNode, "afn_script_any_key");
+                    editorCode = "// Event: any button pressed";
+                    std::string calls = buildActionCalls(infoNode, "    ");
+                    snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                        "    if (key_hit(KEY_FULL)) {\n%s    }", calls.c_str());
+                    break;
+                }
+                case VsNodeType::GetLastKey:
+                    editorCode = "// Read last key pressed";
+                    setActionFunc(infoNode, "_get_last_key",
+                        "    return afn_last_key;");
+                    break;
                 case VsNodeType::CustomCode:
                     editorCode = "// (runs only on GBA runtime)";
                     {
@@ -12605,12 +12903,37 @@ void FrameTick(float dt)
                     case VsNodeType::TransitionState:suffix = "_transition"; break;
                     case VsNodeType::PrevState:     suffix = "_prev_state"; break;
                     case VsNodeType::StateTimer:    suffix = "_state_timer"; break;
+                    case VsNodeType::OnTriggerEnter:suffix = "_trigger_enter"; break;
+                    case VsNodeType::OnTriggerExit:suffix = "_trigger_exit"; break;
+                    case VsNodeType::SetCollisionSize:suffix = "_set_col_size"; break;
+                    case VsNodeType::IgnoreCollision:suffix = "_ignore_col"; break;
+                    case VsNodeType::IsColliding:   suffix = "_is_colliding"; break;
+                    case VsNodeType::SpawnAt:       suffix = "_spawn_at"; break;
+                    case VsNodeType::DestroyAfter:  suffix = "_destroy_after"; break;
+                    case VsNodeType::SpawnProjectile:suffix = "_spawn_proj"; break;
+                    case VsNodeType::SetLifetime:   suffix = "_set_lifetime"; break;
+                    case VsNodeType::GetLifetime:   suffix = "_get_lifetime"; break;
+                    case VsNodeType::DrawBar:       suffix = "_draw_bar"; break;
+                    case VsNodeType::DrawSpriteIcon:suffix = "_draw_icon"; break;
+                    case VsNodeType::ShowTimer:     suffix = "_show_timer"; break;
+                    case VsNodeType::HideTimer:     suffix = "_hide_timer"; break;
+                    case VsNodeType::SetBarColor:   suffix = "_set_bar_color"; break;
+                    case VsNodeType::SetBarMax:     suffix = "_set_bar_max"; break;
+                    case VsNodeType::ReloadScene:   suffix = "_reload_scene"; break;
+                    case VsNodeType::GetScene:      suffix = "_get_scene"; break;
+                    case VsNodeType::SetCheckpoint: suffix = "_set_checkpoint"; break;
+                    case VsNodeType::LoadCheckpoint:suffix = "_load_checkpoint"; break;
+                    case VsNodeType::GetInputAxis:  suffix = "_get_input_axis"; break;
+                    case VsNodeType::OnAnyKey:      suffix = "_on_any_key"; break;
+                    case VsNodeType::GetLastKey:    suffix = "_get_last_key"; break;
                     default: suffix = ""; break;
                     }
                     // Show default name as placeholder (action nodes include node ID to disambiguate)
                     bool isEventNode = (cwNode.type == VsNodeType::OnKeyPressed || cwNode.type == VsNodeType::OnKeyReleased ||
                                         cwNode.type == VsNodeType::OnKeyHeld || cwNode.type == VsNodeType::OnStart ||
-                                        cwNode.type == VsNodeType::OnUpdate || cwNode.type == VsNodeType::OnCollision);
+                                        cwNode.type == VsNodeType::OnUpdate || cwNode.type == VsNodeType::OnCollision ||
+                                        cwNode.type == VsNodeType::OnTriggerEnter || cwNode.type == VsNodeType::OnTriggerExit ||
+                                        cwNode.type == VsNodeType::OnAnyKey);
                     char defaultName[64] = {};
                     if (isBpNode && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
                         if (isEventNode)
@@ -12753,6 +13076,9 @@ void FrameTick(float dt)
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnUpdate].name)) addNodeAt(VsNodeType::OnUpdate);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnTimer].name)) addNodeAt(VsNodeType::OnTimer);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnTriggerEnter].name)) addNodeAt(VsNodeType::OnTriggerEnter);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnTriggerExit].name)) addNodeAt(VsNodeType::OnTriggerExit);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnAnyKey].name)) addNodeAt(VsNodeType::OnAnyKey);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
@@ -12884,6 +13210,25 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetState].name)) addNodeAt(VsNodeType::SetState);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::TransitionState].name)) addNodeAt(VsNodeType::TransitionState);
                     ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetCollisionSize].name)) addNodeAt(VsNodeType::SetCollisionSize);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IgnoreCollision].name)) addNodeAt(VsNodeType::IgnoreCollision);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnAt].name)) addNodeAt(VsNodeType::SpawnAt);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::DestroyAfter].name)) addNodeAt(VsNodeType::DestroyAfter);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnProjectile].name)) addNodeAt(VsNodeType::SpawnProjectile);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetLifetime].name)) addNodeAt(VsNodeType::SetLifetime);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::DrawBar].name)) addNodeAt(VsNodeType::DrawBar);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::DrawSpriteIcon].name)) addNodeAt(VsNodeType::DrawSpriteIcon);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ShowTimer].name)) addNodeAt(VsNodeType::ShowTimer);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HideTimer].name)) addNodeAt(VsNodeType::HideTimer);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetBarColor].name)) addNodeAt(VsNodeType::SetBarColor);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetBarMax].name)) addNodeAt(VsNodeType::SetBarMax);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ReloadScene].name)) addNodeAt(VsNodeType::ReloadScene);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetCheckpoint].name)) addNodeAt(VsNodeType::SetCheckpoint);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::LoadCheckpoint].name)) addNodeAt(VsNodeType::LoadCheckpoint);
+                    ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CustomCode].name)) addNodeAt(VsNodeType::CustomCode);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
@@ -12934,6 +13279,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HasItem].name)) addNodeAt(VsNodeType::HasItem);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsDialogueOpen].name)) addNodeAt(VsNodeType::IsDialogueOpen);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsInState].name)) addNodeAt(VsNodeType::IsInState);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsColliding].name)) addNodeAt(VsNodeType::IsColliding);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::DialogueChoice].name)) addNodeAt(VsNodeType::DialogueChoice);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Select].name)) addNodeAt(VsNodeType::Select);
@@ -12978,6 +13324,11 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetState].name)) addNodeAt(VsNodeType::GetState);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::PrevState].name)) addNodeAt(VsNodeType::PrevState);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StateTimer].name)) addNodeAt(VsNodeType::StateTimer);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetLifetime].name)) addNodeAt(VsNodeType::GetLifetime);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetScene].name)) addNodeAt(VsNodeType::GetScene);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetInputAxis].name)) addNodeAt(VsNodeType::GetInputAxis);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetLastKey].name)) addNodeAt(VsNodeType::GetLastKey);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }
