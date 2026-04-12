@@ -1810,7 +1810,20 @@ static bool GenerateMapData(const std::string& runtimeDir,
             auto emitActionBody = [&](const GBAScriptNodeExport* action) {
                 // Use custom code override if set
                 if (action->customCode[0]) {
-                    f << "    " << action->customCode << "\n";
+                    // Replace $0..$7 placeholders with resolved data-in values
+                    std::string code(action->customCode);
+                    for (int pi = 7; pi >= 0; pi--) {
+                        char placeholder[4]; snprintf(placeholder, sizeof(placeholder), "$%d", pi);
+                        size_t pos = 0;
+                        while ((pos = code.find(placeholder, pos)) != std::string::npos) {
+                            auto* din = findDataIn(action->id, pi);
+                            int val = din ? resolveInt(din) : 0;
+                            std::string valStr = std::to_string(val);
+                            code.replace(pos, strlen(placeholder), valStr);
+                            pos += valStr.size();
+                        }
+                    }
+                    f << "    " << code << "\n";
                     return;
                 }
                 switch (action->type)
@@ -3042,7 +3055,19 @@ static bool GenerateMapData(const std::string& runtimeDir,
             // Emit action body lines for blueprint
             auto bpEmitActionBody = [&](const GBAScriptNodeExport* action) {
                 if (action->customCode[0]) {
-                    f << "    " << action->customCode << "\n";
+                    // Replace $0..$7 placeholders with resolved data-in values
+                    std::string code(action->customCode);
+                    for (int pi = 7; pi >= 0; pi--) {
+                        char placeholder[4]; snprintf(placeholder, sizeof(placeholder), "$%d", pi);
+                        size_t pos = 0;
+                        while ((pos = code.find(placeholder, pos)) != std::string::npos) {
+                            auto* din = bpFindDataIn(action->id, pi);
+                            std::string val = din ? bpResolveInt(din) : "0";
+                            code.replace(pos, strlen(placeholder), val);
+                            pos += val.size();
+                        }
+                    }
+                    f << "    " << code << "\n";
                     return;
                 }
                 switch (action->type) {

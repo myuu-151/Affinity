@@ -701,6 +701,7 @@ struct VsNode {
     int grpInData = 0, grpOutData = 0;
     char customCode[512] = {};            // user-editable code override (empty = use default)
     char funcName[64] = {};               // custom function name (empty = use default afn_ name)
+    char ccPinNames[8][16] = {};          // custom data-in pin labels for CustomCode nodes
 };
 
 // Pin address: which node, which pin type, which pin index
@@ -829,6 +830,8 @@ struct VsPinCounts { int inExec, outExec, inData, outData; };
 static VsPinCounts VsGetPinCounts(const VsNode& n) {
     if (n.type == VsNodeType::Group)
         return { n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData };
+    if (n.type == VsNodeType::CustomCode)
+        return { 1, 1, n.grpInData, 0 }; // dynamic data-in pins
     if ((int)n.type < 0 || (int)n.type >= (int)VsNodeType::COUNT)
         return { 0, 0, 0, 0 };
     const auto& def = sVsNodeDefs[(int)n.type];
@@ -1782,9 +1785,14 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "bpVsNode=%d,%d,%.1f,%.1f,%d,%d,%d,%d,%d\n",
                 n.id, (int)n.type, n.x, n.y,
                 n.paramInt[0], n.paramInt[1], n.paramInt[2], n.paramInt[3], n.groupId);
-            if (n.type == VsNodeType::Group)
+            if (n.type == VsNodeType::Group || (n.type == VsNodeType::CustomCode && n.grpInData > 0))
                 fprintf(f, "bpVsGroupDef=%d|%s|%d,%d,%d,%d\n", n.id, n.groupLabel,
                     n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
+            if (n.type == VsNodeType::CustomCode && n.grpInData > 0) {
+                for (int pi = 0; pi < n.grpInData && pi < 8; pi++)
+                    if (n.ccPinNames[pi][0])
+                        fprintf(f, "bpVsCcPin=%d,%d|%s\n", n.id, pi, n.ccPinNames[pi]);
+            }
             if (n.customCode[0])
                 fprintf(f, "bpVsNodeCode=%d|%s\n", n.id, n.customCode);
             if (n.funcName[0])
@@ -2015,9 +2023,14 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "msVsNode=%d,%d,%.1f,%.1f,%d,%d,%d,%d,%d\n",
                 n.id, (int)n.type, n.x, n.y,
                 n.paramInt[0], n.paramInt[1], n.paramInt[2], n.paramInt[3], n.groupId);
-            if (n.type == VsNodeType::Group)
+            if (n.type == VsNodeType::Group || (n.type == VsNodeType::CustomCode && n.grpInData > 0))
                 fprintf(f, "msVsGroupDef=%d|%s|%d,%d,%d,%d\n", n.id, n.groupLabel,
                     n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
+            if (n.type == VsNodeType::CustomCode && n.grpInData > 0) {
+                for (int pi = 0; pi < n.grpInData && pi < 8; pi++)
+                    if (n.ccPinNames[pi][0])
+                        fprintf(f, "msVsCcPin=%d,%d|%s\n", n.id, pi, n.ccPinNames[pi]);
+            }
             if (n.customCode[0])
                 fprintf(f, "msVsNodeCode=%d|%s\n", n.id, n.customCode);
         }
@@ -2479,6 +2492,18 @@ static bool LoadProject(const std::string& path)
                         if (n.id == nid) { strncpy(n.funcName, nameBuf, sizeof(n.funcName) - 1); break; }
                 }
             }
+            else if (strncmp(line, "bpVsCcPin=", 10) == 0 && !sBlueprintAssets.empty())
+            {
+                int nid, pi;
+                char pname[16] = {};
+                if (sscanf(line + 10, "%d,%d|%15[^\n]", &nid, &pi, pname) >= 3) {
+                    for (auto& n : sBlueprintAssets.back().nodes)
+                        if (n.id == nid && pi >= 0 && pi < 8) {
+                            strncpy(n.ccPinNames[pi], pname, sizeof(n.ccPinNames[pi]) - 1);
+                            break;
+                        }
+                }
+            }
             else if (sscanf(line, "bpVsLinkCount=%d", &ival) == 1 && !sBlueprintAssets.empty())
             {
                 sBlueprintAssets.back().links.clear();
@@ -2933,6 +2958,18 @@ static bool LoadProject(const std::string& path)
                 if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
                     for (auto& n : sMapScenes.back().vsNodes)
                         if (n.id == nid) { strncpy(n.customCode, codeBuf, sizeof(n.customCode) - 1); break; }
+                }
+            }
+            else if (strncmp(line, "msVsCcPin=", 10) == 0 && !sMapScenes.empty())
+            {
+                int nid, pi;
+                char pname[16] = {};
+                if (sscanf(line + 10, "%d,%d|%15[^\n]", &nid, &pi, pname) >= 3) {
+                    for (auto& n : sMapScenes.back().vsNodes)
+                        if (n.id == nid && pi >= 0 && pi < 8) {
+                            strncpy(n.ccPinNames[pi], pname, sizeof(n.ccPinNames[pi]) - 1);
+                            break;
+                        }
                 }
             }
             else if (sscanf(line, "msVsLinkCount=%d", &ival) == 1 && !sMapScenes.empty())
@@ -9256,7 +9293,11 @@ void FrameTick(float dt)
             for (int p = 0; p < pc.inData; p++) {
                 ImVec2 pp = VsPinPos(n, 3, p, canvasOrig, zoom);
                 dl->AddCircleFilled(pp, pr, 0xFF44CCAA);
-                if (n.type != VsNodeType::Group && def.inDataNames[p])
+                if (n.type == VsNodeType::CustomCode && p < 8 && n.ccPinNames[p][0])
+                    dl->AddText(ImVec2(pp.x + pr + 4 * zoom, pp.y - 6 * zoom), 0xFFCCCCCC, n.ccPinNames[p]);
+                else if (n.type == VsNodeType::CustomCode)
+                    { char lbl[8]; snprintf(lbl, sizeof(lbl), "$%d", p); dl->AddText(ImVec2(pp.x + pr + 4 * zoom, pp.y - 6 * zoom), 0xFFCCCCCC, lbl); }
+                else if (n.type != VsNodeType::Group && def.inDataNames[p])
                     dl->AddText(ImVec2(pp.x + pr + 4 * zoom, pp.y - 6 * zoom), 0xFFCCCCCC, def.inDataNames[p]);
                 if (((io.MousePos.x - pp.x) * (io.MousePos.x - pp.x) + (io.MousePos.y - pp.y) * (io.MousePos.y - pp.y)) < pr * pr * 4)
                     hoveredPin = { n.id, 3, p };
@@ -12492,12 +12533,26 @@ void FrameTick(float dt)
                 case VsNodeType::CustomCode:
                     editorCode = "// (runs only on GBA runtime)";
                     {
-                        char bodyBuf[512];
-                        if (infoNode.customCode[0])
-                            snprintf(bodyBuf, sizeof(bodyBuf), "    %s", infoNode.customCode);
-                        else
-                            snprintf(bodyBuf, sizeof(bodyBuf), "    // (empty)");
-                        setActionFunc(infoNode, "_custom", bodyBuf);
+                        if (infoNode.customCode[0]) {
+                            // Replace $0..$7 with resolved values for preview
+                            std::string code(infoNode.customCode);
+                            for (int pi = 7; pi >= 0; pi--) {
+                                char ph[4]; snprintf(ph, sizeof(ph), "$%d", pi);
+                                size_t pos = 0;
+                                while ((pos = code.find(ph, pos)) != std::string::npos) {
+                                    auto* din = resolveDataIn(infoNode.id, pi);
+                                    int val = din ? din->paramInt[0] : 0;
+                                    std::string vs = std::to_string(val);
+                                    code.replace(pos, strlen(ph), vs);
+                                    pos += vs.size();
+                                }
+                            }
+                            char bodyBuf[512];
+                            snprintf(bodyBuf, sizeof(bodyBuf), "    %s", code.c_str());
+                            setActionFunc(infoNode, "_custom", bodyBuf);
+                        } else {
+                            setActionFunc(infoNode, "_custom", "    // (empty)");
+                        }
                     }
                     break;
                 // Data nodes
@@ -13024,7 +13079,7 @@ void FrameTick(float dt)
                 // Auto-open code window for Custom Code nodes
                 if (t == VsNodeType::CustomCode) {
                     VsNode& cn = sVsNodes.back();
-                    strncpy(cn.customCode, "// write your GBA C code here\n", sizeof(cn.customCode) - 1);
+                    strncpy(cn.customCode, "// write your GBA C code here\n// use $0, $1, ... for data input values", sizeof(cn.customCode) - 1);
                     sVsCodeWindowOpen = true;
                     sVsCodeWindowNodeIdx = (int)sVsNodes.size() - 1;
                     snprintf(sVsCodeWindowBuf, sizeof(sVsCodeWindowBuf),
@@ -13517,10 +13572,29 @@ void FrameTick(float dt)
                 ImGui::Text("Name");
                 ImGui::InputText("##GrpName", n.groupLabel, sizeof(n.groupLabel));
                 break;
-            case VsNodeType::CustomCode:
+            case VsNodeType::CustomCode: {
                 ImGui::Text("Name");
                 ImGui::InputText("##CcName", n.groupLabel, sizeof(n.groupLabel));
+                ImGui::Separator();
+                ImGui::Text("Data Inputs: %d", n.grpInData);
+                ImGui::SameLine();
+                if (n.grpInData < 8 && ImGui::SmallButton("+##ccpin")) { n.grpInData++; sProjectDirty = true; }
+                ImGui::SameLine();
+                if (n.grpInData > 0 && ImGui::SmallButton("-##ccpin")) {
+                    // Remove links to the removed pin
+                    int removeIdx = n.grpInData - 1;
+                    for (int li = (int)sVsLinks.size() - 1; li >= 0; li--)
+                        if (sVsLinks[li].to.nodeId == n.id && sVsLinks[li].to.pinType == 3 && sVsLinks[li].to.pinIdx == removeIdx)
+                            sVsLinks.erase(sVsLinks.begin() + li);
+                    n.grpInData--;
+                    sProjectDirty = true;
+                }
+                for (int pi = 0; pi < n.grpInData && pi < 8; pi++) {
+                    char lbl[16]; snprintf(lbl, sizeof(lbl), "$%d##ccpn%d", pi, pi);
+                    ImGui::InputTextWithHint(lbl, lbl, n.ccPinNames[pi], sizeof(n.ccPinNames[pi]));
+                }
                 break;
+            }
             default: break;
             }
 
