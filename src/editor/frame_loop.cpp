@@ -97,6 +97,7 @@ struct TmObject {
     // Tile objects: one object covers multiple cells
     std::vector<std::pair<int,int>> cells; // (tileX,tileY) list — only used when type==Tile
     float displayScale = 1.0f;      // visual scale multiplier (0.5 - 4.0)
+    bool camFollow = true;          // camera centers on this object during play
     // Blueprint script attachment
     int blueprintIdx = -1;
     struct { int paramIdx; int value; } instanceParams[8] = {};
@@ -128,7 +129,6 @@ struct TmScene {
     char name[32] = "";
     int mapW = 1, mapH = 1;        // grid dimensions in tiles
     float zoom = 1.0f;             // camera zoom level (exported to GBA)
-    bool camFollowPlayer = true;   // camera centers on player during play
     // Per-scene tilemap data
     std::vector<uint16_t> tileIndices;  // saved tile grid
     std::vector<TmObject> objects;      // saved objects
@@ -146,7 +146,7 @@ static void SaveSceneState(TmScene& sc)
 {
     sc.mapW = sTilemapData.floor.width;
     sc.mapH = sTilemapData.floor.height;
-    sc.zoom = sTilemapZoom;
+    sc.zoom = sTmMapZoom;
     sc.tileIndices = sTilemapData.floor.tileIndices;
     sc.objects = sTmObjects;
 }
@@ -156,7 +156,7 @@ static void LoadSceneState(const TmScene& sc)
 {
     sTilemapData.floor.width  = sc.mapW;
     sTilemapData.floor.height = sc.mapH;
-    sTilemapZoom = sc.zoom;
+    sTmMapZoom = sc.zoom;
     if (!sc.tileIndices.empty())
         sTilemapData.floor.tileIndices = sc.tileIndices;
     else
@@ -1915,6 +1915,8 @@ static bool SaveProject(const std::string& path)
             (int)obj.type, obj.tileX, obj.tileY, obj.spriteAssetIdx, obj.teleportScene, obj.name);
         if (obj.displayScale != 1.0f)
             fprintf(f, "objScale=%.2f\n", obj.displayScale);
+        if (!obj.camFollow)
+            fprintf(f, "objCamFollow=0\n");
         if (obj.blueprintIdx >= 0) {
             fprintf(f, "objBp=%d,%d", obj.blueprintIdx, obj.instanceParamCount);
             for (int ip = 0; ip < obj.instanceParamCount; ip++)
@@ -1944,7 +1946,7 @@ static bool SaveProject(const std::string& path)
         const TmScene& sc = sTmScenes[i];
         fprintf(f, "scene=%d,%d,%s\n", sc.mapW, sc.mapH, sc.name);
         fprintf(f, "scenezoom=%.3f\n", sc.zoom);
-        fprintf(f, "scenecamfollow=%d\n", sc.camFollowPlayer ? 1 : 0);
+        // scenecamfollow removed — now per-object
         // Per-scene tile data
         fprintf(f, "scenetiles=");
         for (int t = 0; t < (int)sc.tileIndices.size(); t++)
@@ -1962,6 +1964,8 @@ static bool SaveProject(const std::string& path)
                 (int)obj.type, obj.tileX, obj.tileY, obj.spriteAssetIdx, obj.teleportScene, obj.name);
             if (obj.displayScale != 1.0f)
                 fprintf(f, "sceneobjScale=%.2f\n", obj.displayScale);
+            if (!obj.camFollow)
+                fprintf(f, "sceneobjCamFollow=0\n");
             if (obj.blueprintIdx >= 0) {
                 fprintf(f, "sceneobjBp=%d,%d", obj.blueprintIdx, obj.instanceParamCount);
                 for (int ip = 0; ip < obj.instanceParamCount; ip++)
@@ -2748,6 +2752,11 @@ static bool LoadProject(const std::string& path)
             {
                 sTmObjects.back().displayScale = fval;
             }
+            else if (strncmp(line, "objCamFollow=", 13) == 0 && !sTmObjects.empty())
+            {
+                int v = 1; sscanf(line + 13, "%d", &v);
+                sTmObjects.back().camFollow = (v != 0);
+            }
             else if (strncmp(line, "objBp=", 6) == 0 && !sTmObjects.empty())
             {
                 TmObject& lastObj = sTmObjects.back();
@@ -2802,10 +2811,7 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "scenezoom=", 10) == 0 && !sTmScenes.empty()) {
                 sscanf(line + 10, "%f", &sTmScenes.back().zoom);
             }
-            else if (strncmp(line, "scenecamfollow=", 15) == 0 && !sTmScenes.empty()) {
-                int v = 1; sscanf(line + 15, "%d", &v);
-                sTmScenes.back().camFollowPlayer = (v != 0);
-            }
+            // scenecamfollow= is deprecated — now per-object (objCamFollow)
             else if (strncmp(line, "scenetiles=", 11) == 0 && !sTmScenes.empty())
             {
                 TmScene& sc = sTmScenes.back();
@@ -2842,6 +2848,11 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "sceneobjScale=%f", &fval) == 1 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
             {
                 sTmScenes.back().objects.back().displayScale = fval;
+            }
+            else if (strncmp(line, "sceneobjCamFollow=", 18) == 0 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
+            {
+                int v = 1; sscanf(line + 18, "%d", &v);
+                sTmScenes.back().objects.back().camFollow = (v != 0);
             }
             else if (strncmp(line, "sceneobjBp=", 11) == 0 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
             {
@@ -5704,24 +5715,6 @@ static void DrawTilemapPanel(ImVec2 pos, ImVec2 size)
     float cellW = baseCell * sTilemapZoom;
     float cellH = cellW;
 
-    // Camera follow player during play mode
-    if (sEditorMode == EditorMode::Play &&
-        sTmSelectedScene >= 0 && sTmSelectedScene < (int)sTmScenes.size() &&
-        sTmScenes[sTmSelectedScene].camFollowPlayer) {
-        // Find player object
-        for (int i = 0; i < (int)sTmObjects.size(); i++) {
-            if (sTmObjects[i].type == TmObjType::Player && i < (int)sTmObjVisX.size()) {
-                float panelW = size.x - 24.0f;
-                float panelH = maxH;
-                float playerPx = sTmObjVisX[i] * cellW + cellW * 0.5f;
-                float playerPy = sTmObjVisY[i] * cellH + cellH * 0.5f;
-                sTilemapPanX = panelW * 0.5f - playerPx;
-                sTilemapPanY = panelH * 0.5f - playerPy;
-                break;
-            }
-        }
-    }
-
     // Apply pan offset and clip drawing to panel
     ImVec2 clipMin = cursor;
     ImVec2 clipMax(pos.x + size.x, pos.y + size.y);
@@ -6160,6 +6153,8 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 ImGui::DragInt("Tile X", &obj.tileX, 0.5f, 0, tm.width - 1);
                 ImGui::DragInt("Tile Y", &obj.tileY, 0.5f, 0, tm.height - 1);
                 ImGui::SliderFloat("Scale", &obj.displayScale, 0.5f, 4.0f, "%.1f");
+                if (ImGui::Checkbox("Camera Follow", &obj.camFollow))
+                    sProjectDirty = true;
             }
             // Blueprint attachment
             {
@@ -6330,15 +6325,12 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             int prevW = sc.mapW, prevH = sc.mapH;
             ImGui::DragInt("Width##scw", &sc.mapW, 0.5f, 1, 128);
             ImGui::DragInt("Height##sch", &sc.mapH, 0.5f, 1, 128);
-            // Zoom slider — synced with scroll wheel
-            sc.zoom = sTilemapZoom;
-            if (ImGui::SliderFloat("Zoom##sczoom", &sc.zoom, 0.5f, 5.0f, "%.2f")) {
-                sTilemapZoom = sc.zoom;
+            // Zoom slider — synced with scroll wheel on main tilemap canvas
+            sc.zoom = sTmMapZoom;
+            if (ImGui::SliderFloat("Zoom##sczoom", &sc.zoom, 0.5f, 16.0f, "%.2f")) {
+                sTmMapZoom = sc.zoom;
                 sProjectDirty = true;
             }
-            if (ImGui::Checkbox("Camera Follow##scfollow", &sc.camFollowPlayer))
-                sProjectDirty = true;
-
             if (sc.mapW != prevW || sc.mapH != prevH)
             {
                 // User changed dimensions via properties — resize tilemap
@@ -6586,6 +6578,9 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 float ratio = 1.0f - sTmMapZoom / oldZoom;
                 sTmMapPanX += mx * ratio;
                 sTmMapPanY += mz * ratio;
+                // Sync to scene
+                if (sTmSelectedScene >= 0 && sTmSelectedScene < (int)sTmScenes.size())
+                    sTmScenes[sTmSelectedScene].zoom = sTmMapZoom;
             }
             // Middle-mouse pan
             if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
@@ -6598,6 +6593,22 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
 
         // Cell size: fixed base of 48px * zoom
         float cellSz = 48.0f * sTmMapZoom;
+
+        // Camera follow — center on object with camFollow enabled
+        if (sEditorMode == EditorMode::Play) {
+            for (int i = 0; i < (int)sTmObjects.size(); i++) {
+                if (sTmObjects[i].camFollow && i < (int)sTmObjVisX.size()) {
+                    float playerPx = sTmObjVisX[i] * cellSz + cellSz * 0.5f;
+                    float playerPy = sTmObjVisY[i] * cellSz + cellSz * 0.5f;
+                    float gridW2 = tm.width * cellSz;
+                    float gridH2 = tm.height * cellSz;
+                    // Pan offsets so player lands at center of available area
+                    sTmMapPanX = availW * 0.5f - (availW - gridW2) * 0.5f - playerPx;
+                    sTmMapPanY = availH * 0.5f - (availH - gridH2) * 0.5f - playerPy;
+                    break;
+                }
+            }
+        }
 
         // Center the grid in the available area
         float gridW = tm.width * cellSz;
