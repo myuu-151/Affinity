@@ -37,7 +37,7 @@ static Mode7Camera sCamera;
 static bool sInitialized = false;
 
 // Editor mode tabs
-enum class EditorTab { Map, Sprites, Tiles, Skybox, Player, ThreeD, Mode7, Tilemap, Events };
+enum class EditorTab { Map, Sprites, Tiles, Skybox, Player, ThreeD, Mode7, Tilemap, Events, Elements, Sound };
 static EditorTab sActiveTab = EditorTab::Map;
 static EditorTab sPlayTab = EditorTab::Map; // which tab Play was started on
 
@@ -63,6 +63,7 @@ static bool sTilemapDataInit = false;
 static int sTmSelectedTile = 0;    // selected tile index in tileset
 static int sTmPalColor = 1;        // selected palette paint color
 static float sTmMapZoom = 1.0f;    // tilemap grid zoom
+static float sTilemapZoom = 1.0f;  // tilemap canvas zoom (synced with scene)
 static float sTmMapPanX = 0.0f;
 static float sTmMapPanY = 0.0f;
 static int sTmTool = 0;            // 0 = draw, 1 = erase, 2 = pick
@@ -126,6 +127,8 @@ static std::vector<float> sTmObjVisY; // per-object visual Y position (smooth le
 struct TmScene {
     char name[32] = "";
     int mapW = 1, mapH = 1;        // grid dimensions in tiles
+    float zoom = 1.0f;             // camera zoom level (exported to GBA)
+    bool camFollowPlayer = true;   // camera centers on player during play
     // Per-scene tilemap data
     std::vector<uint16_t> tileIndices;  // saved tile grid
     std::vector<TmObject> objects;      // saved objects
@@ -143,6 +146,7 @@ static void SaveSceneState(TmScene& sc)
 {
     sc.mapW = sTilemapData.floor.width;
     sc.mapH = sTilemapData.floor.height;
+    sc.zoom = sTilemapZoom;
     sc.tileIndices = sTilemapData.floor.tileIndices;
     sc.objects = sTmObjects;
 }
@@ -152,6 +156,7 @@ static void LoadSceneState(const TmScene& sc)
 {
     sTilemapData.floor.width  = sc.mapW;
     sTilemapData.floor.height = sc.mapH;
+    sTilemapZoom = sc.zoom;
     if (!sc.tileIndices.empty())
         sTilemapData.floor.tileIndices = sc.tileIndices;
     else
@@ -790,6 +795,39 @@ struct BpInstanceParam {
     int paramIdx = 0;   // index into BlueprintAsset::params[]
     int value = 0;      // overridden value
 };
+
+// ---- HUD / UI Elements ----
+enum class HudElementType { Text, Bar, Icon, Box, Button };
+static const char* sHudTypeNames[] = { "Text", "Bar", "Icon", "Box", "Button" };
+
+struct HudElement {
+    int id = 0;
+    char name[32] = "Element";
+    HudElementType type = HudElementType::Text;
+    int x = 0, y = 0;       // screen position (GBA coords, 0-239 / 0-159)
+    int w = 40, h = 12;     // size
+    // Text properties
+    char text[64] = "Hello";
+    int fontSize = 0;        // 0=small, 1=large
+    uint16_t color = 0x7FFF; // RGB15 text/fill color
+    // Bar properties
+    int barMax = 100;
+    int barValue = 100;
+    uint16_t barFillColor = 0x001F;  // RGB15 red
+    uint16_t barBgColor = 0x0000;    // RGB15 black
+    // Icon properties
+    int spriteAssetIdx = -1;
+    int spriteFrame = 0;
+    // General
+    bool visible = true;
+    int layer = 0;           // draw order (higher = on top)
+};
+
+static std::vector<HudElement> sHudElements;
+static int sHudNextId = 1;
+static int sHudSelectedIdx = -1;
+static float sHudCanvasZoom = 3.0f;
+static ImVec2 sHudCanvasPan = {0, 0};
 
 // Annotation interaction
 static int sVsSelectedAnnotation = -1;
@@ -1830,6 +1868,20 @@ static bool SaveProject(const std::string& path)
     }
     fprintf(f, "\n");
 
+    // HUD Elements
+    fprintf(f, "[Elements]\n");
+    fprintf(f, "elemCount=%d\n", (int)sHudElements.size());
+    fprintf(f, "elemNextId=%d\n", sHudNextId);
+    for (auto& el : sHudElements) {
+        fprintf(f, "elem=%d|%s|%d|%d|%d|%d|%d|%s|%d|%u|%d|%d|%u|%u|%d|%d|%d|%d\n",
+            el.id, el.name, (int)el.type, el.x, el.y, el.w, el.h,
+            el.text, el.fontSize, el.color,
+            el.barMax, el.barValue, el.barFillColor, el.barBgColor,
+            el.spriteAssetIdx, el.spriteFrame,
+            el.visible ? 1 : 0, el.layer);
+    }
+    fprintf(f, "\n");
+
     // Palette
     fprintf(f, "[Palette]\n");
     for (int i = 0; i < 16; i++)
@@ -1891,6 +1943,8 @@ static bool SaveProject(const std::string& path)
     {
         const TmScene& sc = sTmScenes[i];
         fprintf(f, "scene=%d,%d,%s\n", sc.mapW, sc.mapH, sc.name);
+        fprintf(f, "scenezoom=%.3f\n", sc.zoom);
+        fprintf(f, "scenecamfollow=%d\n", sc.camFollowPlayer ? 1 : 0);
         // Per-scene tile data
         fprintf(f, "scenetiles=");
         for (int t = 0; t < (int)sc.tileIndices.size(); t++)
@@ -2124,6 +2178,9 @@ static bool LoadProject(const std::string& path)
     sSelectedBlueprint = -1;
     sVsEditSource = VsEditSource::Scene;
     sVsEditBlueprintIdx = -1;
+    sHudElements.clear();
+    sHudNextId = 1;
+    sHudSelectedIdx = -1;
     sCamObj = { 0.0f, 0.0f, 14.0f, 0.0f, 60.0f };
     sCamObjEditorScale = 0.05f;
 
@@ -2611,6 +2668,31 @@ static bool LoadProject(const std::string& path)
                     sBlueprintAssets.back().groupPins.push_back(m);
             }
         }
+        else if (strcmp(section, "Elements") == 0)
+        {
+            if (sscanf(line, "elemNextId=%d", &ival) == 1) sHudNextId = ival;
+            else if (strncmp(line, "elem=", 5) == 0) {
+                HudElement el;
+                char nameBuf[32] = {}, textBuf[64] = {};
+                int typeI = 0, visI = 1;
+                unsigned fillC = 0, bgC = 0, colC = 0;
+                if (sscanf(line + 5, "%d|%31[^|]|%d|%d|%d|%d|%d|%63[^|]|%d|%u|%d|%d|%u|%u|%d|%d|%d|%d",
+                    &el.id, nameBuf, &typeI, &el.x, &el.y, &el.w, &el.h,
+                    textBuf, &el.fontSize, &colC,
+                    &el.barMax, &el.barValue, &fillC, &bgC,
+                    &el.spriteAssetIdx, &el.spriteFrame,
+                    &visI, &el.layer) >= 3) {
+                    strncpy(el.name, nameBuf, sizeof(el.name) - 1);
+                    strncpy(el.text, textBuf, sizeof(el.text) - 1);
+                    el.type = (HudElementType)typeI;
+                    el.color = (uint16_t)colC;
+                    el.barFillColor = (uint16_t)fillC;
+                    el.barBgColor = (uint16_t)bgC;
+                    el.visible = (visI != 0);
+                    sHudElements.push_back(el);
+                }
+            }
+        }
         else if (strcmp(section, "Palette") == 0)
         {
             int idx;
@@ -2716,6 +2798,13 @@ static bool LoadProject(const std::string& path)
                     strncpy(sc.name, nameBuf, sizeof(sc.name) - 1);
                     sTmScenes.push_back(sc);
                 }
+            }
+            else if (strncmp(line, "scenezoom=", 10) == 0 && !sTmScenes.empty()) {
+                sscanf(line + 10, "%f", &sTmScenes.back().zoom);
+            }
+            else if (strncmp(line, "scenecamfollow=", 15) == 0 && !sTmScenes.empty()) {
+                int v = 1; sscanf(line + 15, "%d", &v);
+                sTmScenes.back().camFollowPlayer = (v != 0);
             }
             else if (strncmp(line, "scenetiles=", 11) == 0 && !sTmScenes.empty())
             {
@@ -3291,6 +3380,10 @@ static void CloseProject()
     sVsEditSource = VsEditSource::Scene;
     sVsEditBlueprintIdx = -1;
 
+    sHudElements.clear();
+    sHudNextId = 1;
+    sHudSelectedIdx = -1;
+
     sMapScenes.clear();
     sMapSelectedScene = 0;
 
@@ -3750,7 +3843,9 @@ static void DrawTabBar()
     TabButton("Sprites", EditorTab::Sprites);
     TabButton("Skybox",  EditorTab::Skybox);
     TabButton("3D",      EditorTab::ThreeD);
-    TabButton("Nodes",   EditorTab::Events);
+    TabButton("Nodes",    EditorTab::Events);
+    TabButton("Elements", EditorTab::Elements);
+    TabButton("Sound",    EditorTab::Sound);
 
     ImGui::SameLine(0, Scaled(20));
     // Play/Stop button
@@ -5546,7 +5641,6 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
 }
 
 // ---- Right middle: Tilemap (top-down minimap) ----
-static float sTilemapZoom = 1.0f;
 static float sTilemapPanX = 0.0f;
 static float sTilemapPanY = 0.0f;
 
@@ -5593,6 +5687,9 @@ static void DrawTilemapPanel(ImVec2 pos, ImVec2 size)
             float ratio = 1.0f - sTilemapZoom / oldZoom;
             sTilemapPanX += mx * ratio;
             sTilemapPanY += mz * ratio;
+            // Sync to scene
+            if (sTmSelectedScene >= 0 && sTmSelectedScene < (int)sTmScenes.size())
+                sTmScenes[sTmSelectedScene].zoom = sTilemapZoom;
         }
 
         // Middle mouse drag to pan
@@ -5606,6 +5703,24 @@ static void DrawTilemapPanel(ImVec2 pos, ImVec2 size)
 
     float cellW = baseCell * sTilemapZoom;
     float cellH = cellW;
+
+    // Camera follow player during play mode
+    if (sEditorMode == EditorMode::Play &&
+        sTmSelectedScene >= 0 && sTmSelectedScene < (int)sTmScenes.size() &&
+        sTmScenes[sTmSelectedScene].camFollowPlayer) {
+        // Find player object
+        for (int i = 0; i < (int)sTmObjects.size(); i++) {
+            if (sTmObjects[i].type == TmObjType::Player && i < (int)sTmObjVisX.size()) {
+                float panelW = size.x - 24.0f;
+                float panelH = maxH;
+                float playerPx = sTmObjVisX[i] * cellW + cellW * 0.5f;
+                float playerPy = sTmObjVisY[i] * cellH + cellH * 0.5f;
+                sTilemapPanX = panelW * 0.5f - playerPx;
+                sTilemapPanY = panelH * 0.5f - playerPy;
+                break;
+            }
+        }
+    }
 
     // Apply pan offset and clip drawing to panel
     ImVec2 clipMin = cursor;
@@ -6215,6 +6330,15 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             int prevW = sc.mapW, prevH = sc.mapH;
             ImGui::DragInt("Width##scw", &sc.mapW, 0.5f, 1, 128);
             ImGui::DragInt("Height##sch", &sc.mapH, 0.5f, 1, 128);
+            // Zoom slider — synced with scroll wheel
+            sc.zoom = sTilemapZoom;
+            if (ImGui::SliderFloat("Zoom##sczoom", &sc.zoom, 0.5f, 5.0f, "%.2f")) {
+                sTilemapZoom = sc.zoom;
+                sProjectDirty = true;
+            }
+            if (ImGui::Checkbox("Camera Follow##scfollow", &sc.camFollowPlayer))
+                sProjectDirty = true;
+
             if (sc.mapW != prevW || sc.mapH != prevH)
             {
                 // User changed dimensions via properties — resize tilemap
@@ -14170,6 +14294,361 @@ void FrameTick(float dt)
         DrawSpritesTab(
             ImVec2(vp->WorkPos.x, bodyY),
             ImVec2(totalW, bodyH), dt);
+    }
+    else if (sActiveTab == EditorTab::Sound)
+    {
+        // Sound tab: placeholder
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
+        ImGui::SetNextWindowSize(ImVec2(totalW, bodyH));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
+        ImGui::Begin("##SoundTab", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Sound Editor");
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.55f, 1.0f), "Coming soon");
+        ImGui::End();
+        ImGui::PopStyleColor();
+    }
+    else if (sActiveTab == EditorTab::Elements)
+    {
+        // Elements tab: HUD / UI layout editor with 240x160 GBA screen canvas
+        float elemRightW = std::max(Scaled(260), totalW * 0.28f);
+        float elemLeftW = totalW - elemRightW;
+
+        // ---- Canvas (left side) ----
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
+        ImGui::SetNextWindowSize(ImVec2(elemLeftW, bodyH));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.10f, 1.0f));
+        ImGui::Begin("##HudCanvas", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar);
+        {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 winPos = ImGui::GetCursorScreenPos();
+            ImVec2 winSize = ImGui::GetContentRegionAvail();
+
+            // Center the 240x160 canvas in the available area
+            float zoom = sHudCanvasZoom;
+            float canvasW = 240.0f * zoom;
+            float canvasH = 160.0f * zoom;
+            float cx = winPos.x + (winSize.x - canvasW) * 0.5f + sHudCanvasPan.x;
+            float cy = winPos.y + (winSize.y - canvasH) * 0.5f + sHudCanvasPan.y;
+
+            // GBA screen background
+            dl->AddRectFilled(ImVec2(cx, cy), ImVec2(cx + canvasW, cy + canvasH),
+                IM_COL32(0, 0, 0, 255));
+            dl->AddRect(ImVec2(cx - 1, cy - 1), ImVec2(cx + canvasW + 1, cy + canvasH + 1),
+                IM_COL32(80, 80, 100, 255));
+
+            // Draw grid lines every 8px (GBA tile grid)
+            for (int gx = 0; gx <= 240; gx += 8) {
+                float sx = cx + gx * zoom;
+                dl->AddLine(ImVec2(sx, cy), ImVec2(sx, cy + canvasH),
+                    IM_COL32(40, 40, 50, gx % 32 == 0 ? 120 : 60));
+            }
+            for (int gy = 0; gy <= 160; gy += 8) {
+                float sy = cy + gy * zoom;
+                dl->AddLine(ImVec2(cx, sy), ImVec2(cx + canvasW, sy),
+                    IM_COL32(40, 40, 50, gy % 32 == 0 ? 120 : 60));
+            }
+
+            // Draw HUD elements
+            for (int i = 0; i < (int)sHudElements.size(); i++) {
+                auto& el = sHudElements[i];
+                if (!el.visible) continue;
+                float ex = cx + el.x * zoom;
+                float ey = cy + el.y * zoom;
+                float ew = el.w * zoom;
+                float eh = el.h * zoom;
+                bool selected = (i == sHudSelectedIdx);
+
+                // Convert RGB15 to RGBA32
+                auto rgb15to32 = [](uint16_t c) -> ImU32 {
+                    int r = (c & 0x1F) << 3;
+                    int g = ((c >> 5) & 0x1F) << 3;
+                    int b = ((c >> 10) & 0x1F) << 3;
+                    return IM_COL32(r, g, b, 255);
+                };
+
+                // Draw sprite background if assigned (all element types)
+                bool hasSprite = (el.spriteAssetIdx >= 0 && el.spriteAssetIdx < (int)sTmSpriteTextures.size() &&
+                    sTmSpriteTextures[el.spriteAssetIdx]);
+                if (hasSprite) {
+                    dl->AddImage((ImTextureID)(intptr_t)sTmSpriteTextures[el.spriteAssetIdx],
+                        ImVec2(ex, ey), ImVec2(ex + ew, ey + eh));
+                }
+
+                switch (el.type) {
+                case HudElementType::Text:
+                    if (!hasSprite)
+                        dl->AddRectFilled(ImVec2(ex, ey), ImVec2(ex + ew, ey + eh),
+                            IM_COL32(0, 0, 0, 100));
+                    dl->AddText(ImVec2(ex + 2, ey + 1), rgb15to32(el.color), el.text);
+                    break;
+                case HudElementType::Bar: {
+                    if (!hasSprite) {
+                        dl->AddRectFilled(ImVec2(ex, ey), ImVec2(ex + ew, ey + eh),
+                            rgb15to32(el.barBgColor));
+                    }
+                    float fillW = (el.barMax > 0) ? (ew * el.barValue / el.barMax) : ew;
+                    dl->AddRectFilled(ImVec2(ex, ey), ImVec2(ex + fillW, ey + eh),
+                        rgb15to32(el.barFillColor));
+                    dl->AddRect(ImVec2(ex, ey), ImVec2(ex + ew, ey + eh),
+                        IM_COL32(200, 200, 200, 180));
+                    break;
+                }
+                case HudElementType::Icon:
+                    if (!hasSprite) {
+                        dl->AddRectFilled(ImVec2(ex, ey), ImVec2(ex + ew, ey + eh),
+                            IM_COL32(60, 60, 80, 200));
+                        dl->AddText(ImVec2(ex + 2, ey + 1), IM_COL32(200, 200, 255, 255), "ICO");
+                    }
+                    break;
+                case HudElementType::Box:
+                    if (!hasSprite) {
+                        dl->AddRectFilled(ImVec2(ex, ey), ImVec2(ex + ew, ey + eh),
+                            rgb15to32(el.color));
+                    }
+                    dl->AddRect(ImVec2(ex, ey), ImVec2(ex + ew, ey + eh),
+                        IM_COL32(255, 255, 255, 180));
+                    break;
+                case HudElementType::Button:
+                    if (!hasSprite) {
+                        dl->AddRectFilled(ImVec2(ex, ey), ImVec2(ex + ew, ey + eh),
+                            IM_COL32(50, 50, 70, 230));
+                    }
+                    dl->AddRect(ImVec2(ex, ey), ImVec2(ex + ew, ey + eh),
+                        IM_COL32(150, 150, 180, 255));
+                    dl->AddText(ImVec2(ex + 4, ey + 2), IM_COL32(255, 255, 255, 255), el.text);
+                    break;
+                }
+
+                // Selection outline
+                if (selected) {
+                    dl->AddRect(ImVec2(ex - 1, ey - 1), ImVec2(ex + ew + 1, ey + eh + 1),
+                        IM_COL32(255, 200, 50, 255), 0, 0, 2.0f);
+                }
+            }
+
+            // Interaction: click to select, drag to move
+            ImGui::SetCursorScreenPos(winPos);
+            ImGui::InvisibleButton("##HudCanvasArea", winSize);
+            bool canvasHovered = ImGui::IsItemHovered();
+
+            if (canvasHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                ImVec2 mouse = ImGui::GetMousePos();
+                sHudSelectedIdx = -1;
+                // Pick topmost element (iterate reverse for layer order)
+                for (int i = (int)sHudElements.size() - 1; i >= 0; i--) {
+                    auto& el = sHudElements[i];
+                    float ex = cx + el.x * zoom;
+                    float ey = cy + el.y * zoom;
+                    float ew = el.w * zoom;
+                    float eh = el.h * zoom;
+                    if (mouse.x >= ex && mouse.x <= ex + ew &&
+                        mouse.y >= ey && mouse.y <= ey + eh) {
+                        sHudSelectedIdx = i;
+                        break;
+                    }
+                }
+            }
+
+            // Drag selected element
+            if (sHudSelectedIdx >= 0 && sHudSelectedIdx < (int)sHudElements.size() &&
+                ImGui::IsMouseDragging(ImGuiMouseButton_Left) && canvasHovered) {
+                ImVec2 delta = ImGui::GetIO().MouseDelta;
+                sHudElements[sHudSelectedIdx].x += (int)(delta.x / zoom);
+                sHudElements[sHudSelectedIdx].y += (int)(delta.y / zoom);
+                sHudElements[sHudSelectedIdx].x = std::clamp(sHudElements[sHudSelectedIdx].x, 0, 239);
+                sHudElements[sHudSelectedIdx].y = std::clamp(sHudElements[sHudSelectedIdx].y, 0, 159);
+                sProjectDirty = true;
+            }
+
+            // Pan with middle mouse
+            if (canvasHovered && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+                sHudCanvasPan.x += ImGui::GetIO().MouseDelta.x;
+                sHudCanvasPan.y += ImGui::GetIO().MouseDelta.y;
+            }
+
+            // Zoom with scroll
+            if (canvasHovered && ImGui::GetIO().MouseWheel != 0) {
+                sHudCanvasZoom = std::clamp(sHudCanvasZoom + ImGui::GetIO().MouseWheel * 0.25f, 1.0f, 8.0f);
+            }
+
+            // Canvas label
+            dl->AddText(ImVec2(cx, cy - 16), IM_COL32(150, 150, 170, 200), "240 x 160");
+        }
+        ImGui::End();
+        ImGui::PopStyleColor();
+
+        // ---- Properties panel (right side) ----
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + elemLeftW, bodyY));
+        ImGui::SetNextWindowSize(ImVec2(elemRightW, bodyH));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.25f, 0.30f, 1.0f));
+        ImGui::Begin("##HudProps", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_NoBringToFrontOnFocus);
+        {
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Elements");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("+##addelem")) {
+                HudElement el;
+                el.id = sHudNextId++;
+                snprintf(el.name, sizeof(el.name), "Element %d", el.id);
+                el.x = 8; el.y = 8;
+                sHudElements.push_back(el);
+                sHudSelectedIdx = (int)sHudElements.size() - 1;
+                sProjectDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add element");
+            ImGui::Separator();
+
+            // Element list
+            for (int i = 0; i < (int)sHudElements.size(); i++) {
+                auto& el = sHudElements[i];
+                bool selected = (i == sHudSelectedIdx);
+                char label[64];
+                snprintf(label, sizeof(label), "[%s] %s##elem%d", sHudTypeNames[(int)el.type], el.name, el.id);
+                if (ImGui::Selectable(label, selected))
+                    sHudSelectedIdx = i;
+            }
+
+            // Delete selected
+            if (sHudSelectedIdx >= 0 && sHudSelectedIdx < (int)sHudElements.size()) {
+                ImGui::Spacing();
+                if (ImGui::SmallButton("Delete##delelem")) {
+                    sHudElements.erase(sHudElements.begin() + sHudSelectedIdx);
+                    sHudSelectedIdx = -1;
+                    sProjectDirty = true;
+                }
+            }
+
+            // Properties for selected element
+            if (sHudSelectedIdx >= 0 && sHudSelectedIdx < (int)sHudElements.size()) {
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Properties");
+                auto& el = sHudElements[sHudSelectedIdx];
+
+                ImGui::PushItemWidth(elemRightW * 0.55f);
+                ImGui::InputText("Name", el.name, sizeof(el.name));
+
+                int typeIdx = (int)el.type;
+                if (ImGui::Combo("Type", &typeIdx, sHudTypeNames, IM_ARRAYSIZE(sHudTypeNames))) {
+                    el.type = (HudElementType)typeIdx;
+                    // Set default sizes per type
+                    switch (el.type) {
+                    case HudElementType::Text:   el.w = 60; el.h = 12; break;
+                    case HudElementType::Bar:    el.w = 48; el.h = 6;  break;
+                    case HudElementType::Icon:   el.w = 16; el.h = 16; break;
+                    case HudElementType::Box:    el.w = 40; el.h = 30; break;
+                    case HudElementType::Button: el.w = 48; el.h = 16; break;
+                    }
+                    sProjectDirty = true;
+                }
+
+                if (ImGui::DragInt("X", &el.x, 1, 0, 239)) sProjectDirty = true;
+                if (ImGui::DragInt("Y", &el.y, 1, 0, 159)) sProjectDirty = true;
+                if (ImGui::DragInt("W", &el.w, 1, 1, 240)) sProjectDirty = true;
+                if (ImGui::DragInt("H", &el.h, 1, 1, 160)) sProjectDirty = true;
+                if (ImGui::Checkbox("Visible", &el.visible)) sProjectDirty = true;
+                if (ImGui::DragInt("Layer", &el.layer, 1, 0, 31)) sProjectDirty = true;
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Sprite");
+                {
+                    const char* preview = (el.spriteAssetIdx >= 0 && el.spriteAssetIdx < (int)sSpriteAssets.size())
+                        ? sSpriteAssets[el.spriteAssetIdx].name.c_str() : "(none)";
+                    if (ImGui::BeginCombo("Asset", preview)) {
+                        if (ImGui::Selectable("(none)", el.spriteAssetIdx < 0)) {
+                            el.spriteAssetIdx = -1; sProjectDirty = true;
+                        }
+                        for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++) {
+                            char itemLabel[64];
+                            snprintf(itemLabel, sizeof(itemLabel), "%d: %s", ai, sSpriteAssets[ai].name.c_str());
+                            bool sel = (ai == el.spriteAssetIdx);
+                            if (ImGui::Selectable(itemLabel, sel)) {
+                                el.spriteAssetIdx = ai;
+                                sProjectDirty = true;
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                    if (el.spriteAssetIdx >= 0 && el.spriteAssetIdx < (int)sSpriteAssets.size()) {
+                        int maxFrame = (int)sSpriteAssets[el.spriteAssetIdx].frames.size() - 1;
+                        if (maxFrame < 0) maxFrame = 0;
+                        if (ImGui::SliderInt("Frame", &el.spriteFrame, 0, maxFrame)) sProjectDirty = true;
+                        // Preview thumbnail
+                        if (el.spriteAssetIdx < (int)sTmSpriteTextures.size() && sTmSpriteTextures[el.spriteAssetIdx]) {
+                            float prevSize = std::min(elemRightW * 0.4f, 64.0f);
+                            ImGui::Image((ImTextureID)(intptr_t)sTmSpriteTextures[el.spriteAssetIdx],
+                                ImVec2(prevSize, prevSize));
+                        }
+                    }
+                }
+
+                ImGui::Spacing();
+                ImGui::Separator();
+
+                // Type-specific properties
+                switch (el.type) {
+                case HudElementType::Text:
+                case HudElementType::Button:
+                    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Text");
+                    if (ImGui::InputText("Label", el.text, sizeof(el.text))) sProjectDirty = true;
+                    { int fs = el.fontSize;
+                      if (ImGui::Combo("Size", &fs, "Small\0Large\0")) { el.fontSize = fs; sProjectDirty = true; } }
+                    { // RGB15 color picker
+                      float col[3] = { (el.color & 0x1F) / 31.0f, ((el.color >> 5) & 0x1F) / 31.0f, ((el.color >> 10) & 0x1F) / 31.0f };
+                      if (ImGui::ColorEdit3("Color", col, ImGuiColorEditFlags_NoInputs)) {
+                          el.color = ((int)(col[0] * 31) & 0x1F) | (((int)(col[1] * 31) & 0x1F) << 5) | (((int)(col[2] * 31) & 0x1F) << 10);
+                          sProjectDirty = true;
+                      }
+                    }
+                    break;
+                case HudElementType::Bar:
+                    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Bar");
+                    if (ImGui::DragInt("Max", &el.barMax, 1, 1, 999)) sProjectDirty = true;
+                    if (ImGui::DragInt("Value", &el.barValue, 1, 0, el.barMax)) sProjectDirty = true;
+                    { float col[3] = { (el.barFillColor & 0x1F) / 31.0f, ((el.barFillColor >> 5) & 0x1F) / 31.0f, ((el.barFillColor >> 10) & 0x1F) / 31.0f };
+                      if (ImGui::ColorEdit3("Fill", col, ImGuiColorEditFlags_NoInputs)) {
+                          el.barFillColor = ((int)(col[0] * 31) & 0x1F) | (((int)(col[1] * 31) & 0x1F) << 5) | (((int)(col[2] * 31) & 0x1F) << 10);
+                          sProjectDirty = true;
+                      }
+                    }
+                    { float col[3] = { (el.barBgColor & 0x1F) / 31.0f, ((el.barBgColor >> 5) & 0x1F) / 31.0f, ((el.barBgColor >> 10) & 0x1F) / 31.0f };
+                      if (ImGui::ColorEdit3("BG", col, ImGuiColorEditFlags_NoInputs)) {
+                          el.barBgColor = ((int)(col[0] * 31) & 0x1F) | (((int)(col[1] * 31) & 0x1F) << 5) | (((int)(col[2] * 31) & 0x1F) << 10);
+                          sProjectDirty = true;
+                      }
+                    }
+                    break;
+                case HudElementType::Icon:
+                    // All sprite properties handled in common section above
+                    break;
+                case HudElementType::Box:
+                    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Box");
+                    { float col[3] = { (el.color & 0x1F) / 31.0f, ((el.color >> 5) & 0x1F) / 31.0f, ((el.color >> 10) & 0x1F) / 31.0f };
+                      if (ImGui::ColorEdit3("Color", col, ImGuiColorEditFlags_NoInputs)) {
+                          el.color = ((int)(col[0] * 31) & 0x1F) | (((int)(col[1] * 31) & 0x1F) << 5) | (((int)(col[2] * 31) & 0x1F) << 10);
+                          sProjectDirty = true;
+                      }
+                    }
+                    break;
+                default: break;
+                }
+
+                ImGui::PopItemWidth();
+            }
+        }
+        ImGui::End();
+        ImGui::PopStyleColor(2);
     }
     else
     {
