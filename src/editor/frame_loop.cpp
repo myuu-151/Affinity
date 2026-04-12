@@ -13095,9 +13095,13 @@ void FrameTick(float dt)
                         snprintf(codeId, sizeof(codeId), "##cwpc%d", pi);
                         ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.08f, 0.1f, 0.12f, 1.0f));
                         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.85f, 0.6f, 1.0f));
-                        char phBuf[32]; snprintf(phBuf, sizeof(phBuf), "code using %s", pinLabel);
-                        if (ImGui::InputTextWithHint(codeId, phBuf, cwNode.ccPinCode[pi], sizeof(cwNode.ccPinCode[pi])))
-                            sProjectDirty = true;
+                        { int lc = 1; for (const char* p = cwNode.ccPinCode[pi]; *p; ++p) if (*p == '\n') ++lc;
+                          if (lc < 2) lc = 2;
+                          float pinCodeH = ImGui::GetTextLineHeight() * lc + ImGui::GetStyle().FramePadding.y * 2;
+                          if (ImGui::InputTextMultiline(codeId, cwNode.ccPinCode[pi], sizeof(cwNode.ccPinCode[pi]),
+                                  ImVec2(-1, pinCodeH), ImGuiInputTextFlags_AllowTabInput))
+                              sProjectDirty = true;
+                        }
                         ImGui::PopStyleColor(2);
                     }
                 }
@@ -13121,8 +13125,12 @@ void FrameTick(float dt)
                 }
                 if (cwNode.customCode[0]) {
                     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.1f, 0.08f, 1.0f));
-                    ImGui::InputTextMultiline("##EditCode", sVsCodeWindowEditBuf, sizeof(sVsCodeWindowEditBuf),
-                        ImVec2(-1, -30), ImGuiInputTextFlags_AllowTabInput);
+                    { int lc = 1; for (const char* p = sVsCodeWindowEditBuf; *p; ++p) if (*p == '\n') ++lc;
+                      if (lc < 4) lc = 4;
+                      float codeH = ImGui::GetTextLineHeight() * lc + ImGui::GetStyle().FramePadding.y * 2;
+                      ImGui::InputTextMultiline("##EditCode", sVsCodeWindowEditBuf, sizeof(sVsCodeWindowEditBuf),
+                          ImVec2(-1, codeH), ImGuiInputTextFlags_AllowTabInput);
+                    }
                     ImGui::PopStyleColor();
                     if (ImGui::Button("Save")) {
                         strncpy(cwNode.customCode, sVsCodeWindowEditBuf, sizeof(cwNode.customCode) - 1);
