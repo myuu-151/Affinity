@@ -293,6 +293,17 @@ static u8    afn_hud_visible[4]; // HUD slot visibility
 static FIXED afn_patrol_home_x[16]; // patrol start X per sprite
 static FIXED afn_patrol_home_z[16]; // patrol start Z per sprite
 static u16   afn_bg_color;      // background clear color
+static int   afn_inventory[16]; // inventory item counts
+static int   afn_dlg_open;     // 1 = dialogue box visible
+static int   afn_dlg_text;     // current dialogue text ID
+static int   afn_dlg_line;     // current line within dialogue
+static int   afn_dlg_speaker;  // current speaker index
+static int   afn_dlg_choice_a, afn_dlg_choice_b; // choice text IDs
+static int   afn_dlg_choosing; // 1 = waiting for player choice
+static int   afn_state[16];    // per-sprite state machine state
+static int   afn_prev_state[16]; // per-sprite previous state
+static int   afn_state_timer[16]; // frames in current state
+static u16   afn_text_color;   // text rendering color
 
 // Direction animation set tracking (for DMA streaming)
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
@@ -3431,6 +3442,7 @@ int main(void)
         afn_hp[i] = 100; afn_max_hp[i] = 100; afn_collision_enabled[i] = 1; afn_sprite_alpha[i] = 16;
         if (i < NUM_SPRITES) { afn_patrol_home_x[i] = g_sprites[i].wx; afn_patrol_home_z[i] = g_sprites[i].wz; }
     } }
+    afn_text_color = 0x7FFF;
     afn_script_start();
     afn_bp_dispatch_start();
 #endif
@@ -3597,6 +3609,9 @@ int main(void)
 
             // Frame counter
             afn_frame_count++;
+
+            // State machine timers
+            { int i; for (i = 0; i < 16; i++) afn_state_timer[i]++; }
 
             // Screen shake processing
             if (afn_shake_frames > 0) {

@@ -355,6 +355,35 @@ enum class VsNodeType : int {
     GetRandom,      // random float 0.0-1.0 (as 0-256 fixed)
     ArrayGet,       // read from variable array slot
     ArraySet,       // write to variable array slot
+    // Batch 7: Text / Inventory / Dialogue / State Machine
+    // Text rendering
+    DrawNumber,     // draw integer at screen X,Y
+    DrawTextID,     // draw text string by ID at screen X,Y
+    ClearText,      // clear all rendered text
+    SetTextColor,   // set text color for next draw
+    // Inventory
+    AddItem,        // add item to inventory slot
+    RemoveItem,     // remove item from inventory slot
+    HasItem,        // gate: passes if item count > 0
+    GetItemCount,   // read item quantity
+    SetItemCount,   // set item quantity directly
+    UseItem,        // consume one of an item (decrement)
+    // Dialogue
+    ShowDialogue,   // show dialogue box with text ID
+    HideDialogue,   // close dialogue box
+    NextLine,       // advance to next dialogue line
+    IsDialogueOpen, // gate: passes if dialogue box is open
+    SetSpeaker,     // set speaker portrait/name index
+    DialogueChoice, // present 2 choices, branch on selection
+    // State Machine
+    SetState,       // set sprite state machine state
+    GetState,       // read sprite current state
+    OnStateEnter,   // event: fires when entering state
+    OnStateExit,    // event: fires when exiting state
+    IsInState,      // gate: passes if sprite in given state
+    TransitionState,// change state after optional delay
+    PrevState,      // read sprite's previous state
+    StateTimer,     // frames spent in current state
     COUNT
 };
 
@@ -569,6 +598,35 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Get Random",     0xFF666688, 0, 0, 0, 1, {}, {"Value"}, {} },
     { "Array Get",      0xFF666688, 0, 0, 1, 1, {"Index (int)"}, {"Value"}, {} },
     { "Array Set",      0xFF3355AA, 1, 1, 2, 0, {"Index (int)", "Value (int)"}, {}, {} },
+    // Batch 7: Text / Inventory / Dialogue / State Machine
+    // Text rendering (purple tint)
+    { "Draw Number",    0xFF3355AA, 1, 1, 3, 0, {"Value (int)", "X (int)", "Y (int)"}, {}, {} },
+    { "Draw Text",      0xFF3355AA, 1, 1, 3, 0, {"Text ID (int)", "X (int)", "Y (int)"}, {}, {} },
+    { "Clear Text",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Set Text Color", 0xFF3355AA, 1, 1, 1, 0, {"Color (int)"}, {}, {} },
+    // Inventory
+    { "Add Item",       0xFF3355AA, 1, 1, 2, 0, {"Slot (int)", "Amount (int)"}, {}, {} },
+    { "Remove Item",    0xFF3355AA, 1, 1, 2, 0, {"Slot (int)", "Amount (int)"}, {}, {} },
+    { "Has Item",       0xFF885533, 1, 1, 1, 0, {"Slot (int)"}, {}, {} },
+    { "Get Item Count", 0xFF666688, 0, 0, 1, 1, {"Slot (int)"}, {"Count"}, {} },
+    { "Set Item Count", 0xFF3355AA, 1, 1, 2, 0, {"Slot (int)", "Count (int)"}, {}, {} },
+    { "Use Item",       0xFF3355AA, 1, 1, 1, 0, {"Slot (int)"}, {}, {} },
+    // Dialogue
+    { "Show Dialogue",  0xFF3355AA, 1, 1, 1, 0, {"Text ID (int)"}, {}, {} },
+    { "Hide Dialogue",  0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Next Line",      0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Dialogue Open",0xFF885533,1, 1, 0, 0, {}, {}, {} },
+    { "Set Speaker",    0xFF3355AA, 1, 1, 1, 0, {"Speaker (int)"}, {}, {} },
+    { "Dialogue Choice",0xFF885533, 1, 2, 2, 0, {"Choice A (int)", "Choice B (int)"}, {}, {"A", "B"} },
+    // State Machine
+    { "Set State",      0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "State (int)"}, {}, {} },
+    { "Get State",      0xFF666688, 0, 0, 1, 1, {"Object (int)"}, {"State"}, {} },
+    { "On State Enter", 0xFF338833, 0, 1, 2, 0, {"Object (int)", "State (int)"}, {}, {} },
+    { "On State Exit",  0xFF338833, 0, 1, 2, 0, {"Object (int)", "State (int)"}, {}, {} },
+    { "Is In State",    0xFF885533, 1, 1, 2, 0, {"Object (int)", "State (int)"}, {}, {} },
+    { "Transition",     0xFF3355AA, 1, 1, 3, 0, {"Object (int)", "State (int)", "Delay (int)"}, {}, {} },
+    { "Prev State",     0xFF666688, 0, 0, 1, 1, {"Object (int)"}, {"State"}, {} },
+    { "State Timer",    0xFF666688, 0, 0, 1, 1, {"Object (int)"}, {"Frames"}, {} },
 };
 
 struct VsNode {
@@ -7572,7 +7630,24 @@ void FrameTick(float dt)
                         continue;
                     }
                     if (an->type == VsNodeType::IsAlive) {
-                        // IsAlive gate - always pass through in editor preview
+                        for (auto& lk : sVsLinks)
+                            if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                front.push_back(lk.to.nodeId);
+                        continue;
+                    }
+                    if (an->type == VsNodeType::HasItem) {
+                        for (auto& lk : sVsLinks)
+                            if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                front.push_back(lk.to.nodeId);
+                        continue;
+                    }
+                    if (an->type == VsNodeType::IsDialogueOpen) {
+                        for (auto& lk : sVsLinks)
+                            if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                front.push_back(lk.to.nodeId);
+                        continue;
+                    }
+                    if (an->type == VsNodeType::IsInState) {
                         for (auto& lk : sVsLinks)
                             if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
                                 front.push_back(lk.to.nodeId);
@@ -9975,6 +10050,30 @@ void FrameTick(float dt)
                 case VsNodeType::GetRandom:     desc = "Outputs a random value between 0 and 255 (fixed-point 0.0-1.0)."; break;
                 case VsNodeType::ArrayGet:      desc = "Reads from the variable array at the given index."; break;
                 case VsNodeType::ArraySet:      desc = "Writes a value to the variable array at the given index."; break;
+                case VsNodeType::DrawNumber:    desc = "Draws an integer value at screen position (X, Y) using tile font."; break;
+                case VsNodeType::DrawTextID:    desc = "Draws a predefined text string (by ID) at screen position (X, Y)."; break;
+                case VsNodeType::ClearText:     desc = "Clears all rendered text from the screen."; break;
+                case VsNodeType::SetTextColor:  desc = "Sets the color used for subsequent text rendering (RGB15)."; break;
+                case VsNodeType::AddItem:       desc = "Adds the given amount to an inventory slot (0-15)."; break;
+                case VsNodeType::RemoveItem:    desc = "Removes the given amount from an inventory slot. Won't go below 0."; break;
+                case VsNodeType::HasItem:       desc = "Gate: only passes execution if the inventory slot has count > 0."; break;
+                case VsNodeType::GetItemCount:  desc = "Outputs the quantity of items in the given inventory slot."; break;
+                case VsNodeType::SetItemCount:  desc = "Sets the exact count of items in an inventory slot."; break;
+                case VsNodeType::UseItem:       desc = "Consumes one item from the given inventory slot if available."; break;
+                case VsNodeType::ShowDialogue:  desc = "Opens a dialogue box displaying the text with the given ID."; break;
+                case VsNodeType::HideDialogue:  desc = "Closes the currently open dialogue box."; break;
+                case VsNodeType::NextLine:      desc = "Advances the dialogue to the next line of text."; break;
+                case VsNodeType::IsDialogueOpen:desc = "Gate: only passes execution if a dialogue box is currently open."; break;
+                case VsNodeType::SetSpeaker:    desc = "Sets the current speaker index (controls portrait/name display)."; break;
+                case VsNodeType::DialogueChoice:desc = "Presents two choices to the player. Branches to A or B based on selection."; break;
+                case VsNodeType::SetState:      desc = "Sets a sprite's state machine to the given state ID."; break;
+                case VsNodeType::GetState:      desc = "Outputs a sprite's current state machine state ID."; break;
+                case VsNodeType::OnStateEnter:  desc = "Event: fires when the sprite enters the specified state."; break;
+                case VsNodeType::OnStateExit:   desc = "Event: fires when the sprite exits the specified state."; break;
+                case VsNodeType::IsInState:     desc = "Gate: only passes execution if the sprite is in the given state."; break;
+                case VsNodeType::TransitionState:desc = "Changes a sprite's state after an optional delay (in frames)."; break;
+                case VsNodeType::PrevState:     desc = "Outputs the sprite's previous state (before last transition)."; break;
+                case VsNodeType::StateTimer:    desc = "Outputs how many frames the sprite has been in its current state."; break;
                 case VsNodeType::Integer:       desc = "Outputs a constant integer value."; break;
                 case VsNodeType::Key:           desc = "Outputs a key constant (A, B, L, R, etc)."; break;
                 case VsNodeType::Direction:     desc = "Outputs a direction (Left, Right, Up, Down)."; break;
@@ -10208,6 +10307,20 @@ void FrameTick(float dt)
                         case VsNodeType::ShowHUD:       return "_show_hud";
                         case VsNodeType::HideHUD:       return "_hide_hud";
                         case VsNodeType::ArraySet:      return "_array_set";
+                        case VsNodeType::DrawNumber:    return "_draw_number";
+                        case VsNodeType::DrawTextID:    return "_draw_text";
+                        case VsNodeType::ClearText:     return "_clear_text";
+                        case VsNodeType::SetTextColor:  return "_set_text_color";
+                        case VsNodeType::AddItem:       return "_add_item";
+                        case VsNodeType::RemoveItem:    return "_remove_item";
+                        case VsNodeType::SetItemCount:  return "_set_item_count";
+                        case VsNodeType::UseItem:       return "_use_item";
+                        case VsNodeType::ShowDialogue:  return "_show_dialogue";
+                        case VsNodeType::HideDialogue:  return "_hide_dialogue";
+                        case VsNodeType::NextLine:      return "_next_line";
+                        case VsNodeType::SetSpeaker:    return "_set_speaker";
+                        case VsNodeType::SetState:      return "_set_state";
+                        case VsNodeType::TransitionState:return "_transition";
                         default: return "";
                         }
                     };
@@ -11859,6 +11972,225 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_array_set", b6);
                     break;
                 }
+                // Batch 7: Text rendering
+                case VsNodeType::DrawNumber: {
+                    editorCode = "// Draw number at screen pos";
+                    char b7[256];
+                    snprintf(b7, sizeof(b7),
+                        "    afn_draw_number(%s, %s, %s);",
+                        fmtInt(infoNode.id, 0, "<value>"),
+                        fmtInt(infoNode.id, 1, "<x>"),
+                        fmtInt(infoNode.id, 2, "<y>"));
+                    setActionFunc(infoNode, "_draw_number", b7);
+                    break;
+                }
+                case VsNodeType::DrawTextID: {
+                    editorCode = "// Draw text string at screen pos";
+                    char b7[256];
+                    snprintf(b7, sizeof(b7),
+                        "    afn_draw_text(%s, %s, %s);",
+                        fmtInt(infoNode.id, 0, "<textID>"),
+                        fmtInt(infoNode.id, 1, "<x>"),
+                        fmtInt(infoNode.id, 2, "<y>"));
+                    setActionFunc(infoNode, "_draw_text", b7);
+                    break;
+                }
+                case VsNodeType::ClearText:
+                    editorCode = "// Clear all text";
+                    setActionFunc(infoNode, "_clear_text",
+                        "    afn_clear_text();");
+                    break;
+                case VsNodeType::SetTextColor: {
+                    editorCode = "// Set text draw color";
+                    char b7[256];
+                    snprintf(b7, sizeof(b7),
+                        "    afn_text_color = %s;",
+                        fmtInt(infoNode.id, 0, "<color>"));
+                    setActionFunc(infoNode, "_set_text_color", b7);
+                    break;
+                }
+                // Inventory
+                case VsNodeType::AddItem: {
+                    editorCode = "// Add to inventory slot";
+                    char b7[256];
+                    snprintf(b7, sizeof(b7),
+                        "    afn_inventory[%s & 15] += %s;",
+                        fmtInt(infoNode.id, 0, "<slot>"),
+                        fmtInt(infoNode.id, 1, "<amount>"));
+                    setActionFunc(infoNode, "_add_item", b7);
+                    break;
+                }
+                case VsNodeType::RemoveItem: {
+                    editorCode = "// Remove from inventory slot";
+                    char b7[256];
+                    snprintf(b7, sizeof(b7),
+                        "    afn_inventory[%s & 15] -= %s;\n"
+                        "    if (afn_inventory[%s & 15] < 0) afn_inventory[%s & 15] = 0;",
+                        fmtInt(infoNode.id, 0, "<slot>"),
+                        fmtInt(infoNode.id, 1, "<amount>"),
+                        fmtInt(infoNode.id, 0, "<slot>"),
+                        fmtInt(infoNode.id, 0, "<slot>"));
+                    setActionFunc(infoNode, "_remove_item", b7);
+                    break;
+                }
+                case VsNodeType::HasItem:
+                    editorCode = "// Gate: passes if item count > 0";
+                    setActionFunc(infoNode, "_has_item",
+                        "    if (afn_inventory[slot & 15] > 0) {\n"
+                        "        /* downstream */\n"
+                        "    }");
+                    break;
+                case VsNodeType::GetItemCount: {
+                    editorCode = "// Read inventory slot count";
+                    char b7[256];
+                    snprintf(b7, sizeof(b7),
+                        "    return afn_inventory[%s & 15];",
+                        fmtInt(infoNode.id, 0, "<slot>"));
+                    setActionFunc(infoNode, "_get_item_count", b7);
+                    break;
+                }
+                case VsNodeType::SetItemCount: {
+                    editorCode = "// Set inventory slot count";
+                    char b7[256];
+                    snprintf(b7, sizeof(b7),
+                        "    afn_inventory[%s & 15] = %s;",
+                        fmtInt(infoNode.id, 0, "<slot>"),
+                        fmtInt(infoNode.id, 1, "<count>"));
+                    setActionFunc(infoNode, "_set_item_count", b7);
+                    break;
+                }
+                case VsNodeType::UseItem: {
+                    editorCode = "// Consume one item";
+                    char b7[256];
+                    snprintf(b7, sizeof(b7),
+                        "    if (afn_inventory[%s & 15] > 0) afn_inventory[%s & 15]--;",
+                        fmtInt(infoNode.id, 0, "<slot>"),
+                        fmtInt(infoNode.id, 0, "<slot>"));
+                    setActionFunc(infoNode, "_use_item", b7);
+                    break;
+                }
+                // Dialogue
+                case VsNodeType::ShowDialogue: {
+                    editorCode = "// Open dialogue box";
+                    char b7[256];
+                    snprintf(b7, sizeof(b7),
+                        "    afn_dlg_text = %s;\n"
+                        "    afn_dlg_open = 1;\n"
+                        "    afn_dlg_line = 0;",
+                        fmtInt(infoNode.id, 0, "<textID>"));
+                    setActionFunc(infoNode, "_show_dialogue", b7);
+                    break;
+                }
+                case VsNodeType::HideDialogue:
+                    editorCode = "// Close dialogue box";
+                    setActionFunc(infoNode, "_hide_dialogue",
+                        "    afn_dlg_open = 0;");
+                    break;
+                case VsNodeType::NextLine:
+                    editorCode = "// Advance dialogue line";
+                    setActionFunc(infoNode, "_next_line",
+                        "    afn_dlg_line++;");
+                    break;
+                case VsNodeType::IsDialogueOpen:
+                    editorCode = "// Gate: passes if dialogue open";
+                    setActionFunc(infoNode, "_is_dlg_open",
+                        "    if (afn_dlg_open) {\n"
+                        "        /* downstream */\n"
+                        "    }");
+                    break;
+                case VsNodeType::SetSpeaker: {
+                    editorCode = "// Set dialogue speaker";
+                    char b7[256];
+                    snprintf(b7, sizeof(b7),
+                        "    afn_dlg_speaker = %s;",
+                        fmtInt(infoNode.id, 0, "<speaker>"));
+                    setActionFunc(infoNode, "_set_speaker", b7);
+                    break;
+                }
+                case VsNodeType::DialogueChoice:
+                    editorCode = "// Branch on player choice";
+                    setActionFunc(infoNode, "_dlg_choice",
+                        "    afn_dlg_choice_a = choiceA;\n"
+                        "    afn_dlg_choice_b = choiceB;\n"
+                        "    afn_dlg_choosing = 1;\n"
+                        "    // branches to A or B output");
+                    break;
+                // State Machine
+                case VsNodeType::SetState: {
+                    editorCode = "// Set sprite state";
+                    char b7[256];
+                    snprintf(b7, sizeof(b7),
+                        "    afn_prev_state[%s & 15] = afn_state[%s & 15];\n"
+                        "    afn_state[%s & 15] = %s;\n"
+                        "    afn_state_timer[%s & 15] = 0;",
+                        fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 1, "<state>"),
+                        fmtInt(infoNode.id, 0, "<obj>"));
+                    setActionFunc(infoNode, "_set_state", b7);
+                    break;
+                }
+                case VsNodeType::GetState: {
+                    editorCode = "// Read sprite state";
+                    char b7[256];
+                    snprintf(b7, sizeof(b7),
+                        "    return afn_state[%s & 15];",
+                        fmtInt(infoNode.id, 0, "<obj>"));
+                    setActionFunc(infoNode, "_get_state", b7);
+                    break;
+                }
+                case VsNodeType::OnStateEnter:
+                    editorCode = "// Event: fires on state enter";
+                    setActionFunc(infoNode, "_on_state_enter",
+                        "    // checked each frame: if state just changed to target");
+                    break;
+                case VsNodeType::OnStateExit:
+                    editorCode = "// Event: fires on state exit";
+                    setActionFunc(infoNode, "_on_state_exit",
+                        "    // checked each frame: if state just changed from target");
+                    break;
+                case VsNodeType::IsInState:
+                    editorCode = "// Gate: passes if in state";
+                    setActionFunc(infoNode, "_is_in_state",
+                        "    if (afn_state[obj & 15] == state) {\n"
+                        "        /* downstream */\n"
+                        "    }");
+                    break;
+                case VsNodeType::TransitionState: {
+                    editorCode = "// Transition state with delay";
+                    char b7[512];
+                    snprintf(b7, sizeof(b7),
+                        "    static int afn_trans_%d = 0;\n"
+                        "    if (afn_trans_%d > 0) { afn_trans_%d--; return; }\n"
+                        "    afn_trans_%d = %s;\n"
+                        "    afn_prev_state[%s & 15] = afn_state[%s & 15];\n"
+                        "    afn_state[%s & 15] = %s;\n"
+                        "    afn_state_timer[%s & 15] = 0;",
+                        infoNode.id, infoNode.id, infoNode.id, infoNode.id,
+                        fmtInt(infoNode.id, 2, "<delay>"),
+                        fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 1, "<state>"),
+                        fmtInt(infoNode.id, 0, "<obj>"));
+                    setActionFunc(infoNode, "_transition", b7);
+                    break;
+                }
+                case VsNodeType::PrevState: {
+                    editorCode = "// Read previous state";
+                    char b7[256];
+                    snprintf(b7, sizeof(b7),
+                        "    return afn_prev_state[%s & 15];",
+                        fmtInt(infoNode.id, 0, "<obj>"));
+                    setActionFunc(infoNode, "_prev_state", b7);
+                    break;
+                }
+                case VsNodeType::StateTimer: {
+                    editorCode = "// Frames in current state";
+                    char b7[256];
+                    snprintf(b7, sizeof(b7),
+                        "    return afn_state_timer[%s & 15];",
+                        fmtInt(infoNode.id, 0, "<obj>"));
+                    setActionFunc(infoNode, "_state_timer", b7);
+                    break;
+                }
                 case VsNodeType::CustomCode:
                     editorCode = "// (runs only on GBA runtime)";
                     {
@@ -12249,6 +12581,30 @@ void FrameTick(float dt)
                     case VsNodeType::GetRandom:     suffix = "_get_random"; break;
                     case VsNodeType::ArrayGet:      suffix = "_array_get"; break;
                     case VsNodeType::ArraySet:      suffix = "_array_set"; break;
+                    case VsNodeType::DrawNumber:    suffix = "_draw_number"; break;
+                    case VsNodeType::DrawTextID:    suffix = "_draw_text"; break;
+                    case VsNodeType::ClearText:     suffix = "_clear_text"; break;
+                    case VsNodeType::SetTextColor:  suffix = "_set_text_color"; break;
+                    case VsNodeType::AddItem:       suffix = "_add_item"; break;
+                    case VsNodeType::RemoveItem:    suffix = "_remove_item"; break;
+                    case VsNodeType::HasItem:       suffix = "_has_item"; break;
+                    case VsNodeType::GetItemCount:  suffix = "_get_item_count"; break;
+                    case VsNodeType::SetItemCount:  suffix = "_set_item_count"; break;
+                    case VsNodeType::UseItem:       suffix = "_use_item"; break;
+                    case VsNodeType::ShowDialogue:  suffix = "_show_dialogue"; break;
+                    case VsNodeType::HideDialogue:  suffix = "_hide_dialogue"; break;
+                    case VsNodeType::NextLine:      suffix = "_next_line"; break;
+                    case VsNodeType::IsDialogueOpen:suffix = "_is_dlg_open"; break;
+                    case VsNodeType::SetSpeaker:    suffix = "_set_speaker"; break;
+                    case VsNodeType::DialogueChoice:suffix = "_dlg_choice"; break;
+                    case VsNodeType::SetState:      suffix = "_set_state"; break;
+                    case VsNodeType::GetState:      suffix = "_get_state"; break;
+                    case VsNodeType::OnStateEnter:  suffix = "_on_state_enter"; break;
+                    case VsNodeType::OnStateExit:   suffix = "_on_state_exit"; break;
+                    case VsNodeType::IsInState:     suffix = "_is_in_state"; break;
+                    case VsNodeType::TransitionState:suffix = "_transition"; break;
+                    case VsNodeType::PrevState:     suffix = "_prev_state"; break;
+                    case VsNodeType::StateTimer:    suffix = "_state_timer"; break;
                     default: suffix = ""; break;
                     }
                     // Show default name as placeholder (action nodes include node ID to disambiguate)
@@ -12510,6 +12866,24 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HideHUD].name)) addNodeAt(VsNodeType::HideHUD);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ArraySet].name)) addNodeAt(VsNodeType::ArraySet);
                     ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::DrawNumber].name)) addNodeAt(VsNodeType::DrawNumber);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::DrawTextID].name)) addNodeAt(VsNodeType::DrawTextID);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ClearText].name)) addNodeAt(VsNodeType::ClearText);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetTextColor].name)) addNodeAt(VsNodeType::SetTextColor);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::AddItem].name)) addNodeAt(VsNodeType::AddItem);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::RemoveItem].name)) addNodeAt(VsNodeType::RemoveItem);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetItemCount].name)) addNodeAt(VsNodeType::SetItemCount);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::UseItem].name)) addNodeAt(VsNodeType::UseItem);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ShowDialogue].name)) addNodeAt(VsNodeType::ShowDialogue);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HideDialogue].name)) addNodeAt(VsNodeType::HideDialogue);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::NextLine].name)) addNodeAt(VsNodeType::NextLine);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetSpeaker].name)) addNodeAt(VsNodeType::SetSpeaker);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetState].name)) addNodeAt(VsNodeType::SetState);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::TransitionState].name)) addNodeAt(VsNodeType::TransitionState);
+                    ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CustomCode].name)) addNodeAt(VsNodeType::CustomCode);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
@@ -12554,6 +12928,13 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Delay].name)) addNodeAt(VsNodeType::Delay);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnDeath].name)) addNodeAt(VsNodeType::OnDeath);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnHit].name)) addNodeAt(VsNodeType::OnHit);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnStateEnter].name)) addNodeAt(VsNodeType::OnStateEnter);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnStateExit].name)) addNodeAt(VsNodeType::OnStateExit);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HasItem].name)) addNodeAt(VsNodeType::HasItem);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsDialogueOpen].name)) addNodeAt(VsNodeType::IsDialogueOpen);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsInState].name)) addNodeAt(VsNodeType::IsInState);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::DialogueChoice].name)) addNodeAt(VsNodeType::DialogueChoice);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Select].name)) addNodeAt(VsNodeType::Select);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Lerp].name)) addNodeAt(VsNodeType::Lerp);
@@ -12592,6 +12973,11 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SmoothStep].name)) addNodeAt(VsNodeType::SmoothStep);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::EaseIn].name)) addNodeAt(VsNodeType::EaseIn);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::EaseOut].name)) addNodeAt(VsNodeType::EaseOut);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetItemCount].name)) addNodeAt(VsNodeType::GetItemCount);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetState].name)) addNodeAt(VsNodeType::GetState);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::PrevState].name)) addNodeAt(VsNodeType::PrevState);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StateTimer].name)) addNodeAt(VsNodeType::StateTimer);
                     ImGui::PopStyleColor();
                     ImGui::EndMenu();
                 }

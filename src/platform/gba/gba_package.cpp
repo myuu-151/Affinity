@@ -1490,11 +1490,30 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static u8    afn_hud_visible[4];\n";
         f << "static FIXED afn_patrol_home_x[16];\n";
         f << "static FIXED afn_patrol_home_z[16];\n";
-        f << "static u16   afn_bg_color;\n\n";
+        f << "static u16   afn_bg_color;\n";
+        // Inventory
+        f << "static int   afn_inventory[16];\n";
+        // Dialogue
+        f << "static int   afn_dlg_open;\n";
+        f << "static int   afn_dlg_text;\n";
+        f << "static int   afn_dlg_line;\n";
+        f << "static int   afn_dlg_speaker;\n";
+        f << "static int   afn_dlg_choice_a, afn_dlg_choice_b;\n";
+        f << "static int   afn_dlg_choosing;\n";
+        // State machine
+        f << "static int   afn_state[16];\n";
+        f << "static int   afn_prev_state[16];\n";
+        f << "static int   afn_state_timer[16];\n";
+        // Text rendering
+        f << "static u16   afn_text_color = 0x7FFF;\n\n";
         // Clone sprite stub
         f << "static inline void afn_clone_sprite(int src) { (void)src; }\n";
         // Emit particle stub
         f << "static inline void afn_emit_particle(int type, FIXED x, FIXED z) { (void)type; (void)x; (void)z; }\n";
+        // Text rendering stubs
+        f << "static inline void afn_draw_number(int val, int x, int y) { (void)val; (void)x; (void)y; }\n";
+        f << "static inline void afn_draw_text(int id, int x, int y) { (void)id; (void)x; (void)y; }\n";
+        f << "static inline void afn_clear_text(void) {}\n";
         // mGBA debug log stub
         f << "#ifndef mgba_printf\n";
         f << "#define mgba_printf(...) ((void)0)\n";
@@ -1618,6 +1637,23 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::ShowHUD:       return "_show_hud";
         case GBAScriptNodeType::HideHUD:       return "_hide_hud";
         case GBAScriptNodeType::ArraySet:      return "_array_set";
+        case GBAScriptNodeType::DrawNumber:    return "_draw_number";
+        case GBAScriptNodeType::DrawTextID:    return "_draw_text";
+        case GBAScriptNodeType::ClearText:     return "_clear_text";
+        case GBAScriptNodeType::SetTextColor:  return "_set_text_color";
+        case GBAScriptNodeType::AddItem:       return "_add_item";
+        case GBAScriptNodeType::RemoveItem:    return "_remove_item";
+        case GBAScriptNodeType::SetItemCount:  return "_set_item_count";
+        case GBAScriptNodeType::UseItem:       return "_use_item";
+        case GBAScriptNodeType::ShowDialogue:  return "_show_dialogue";
+        case GBAScriptNodeType::HideDialogue:  return "_hide_dialogue";
+        case GBAScriptNodeType::NextLine:      return "_next_line";
+        case GBAScriptNodeType::SetSpeaker:    return "_set_speaker";
+        case GBAScriptNodeType::SetState:      return "_set_state";
+        case GBAScriptNodeType::TransitionState:return "_transition";
+        case GBAScriptNodeType::IsInState:     return "_is_in_state";
+        case GBAScriptNodeType::HasItem:       return "_has_item";
+        case GBAScriptNodeType::IsDialogueOpen:return "_is_dlg_open";
         default: return "";
         }
     };
@@ -2381,6 +2417,114 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_vars[" << idx << " & 15] = " << val << ";\n";
                     break;
                 }
+                // Text rendering
+                case GBAScriptNodeType::DrawNumber: {
+                    auto* valData = findDataIn(action->id, 0);
+                    auto* xData = findDataIn(action->id, 1);
+                    auto* yData = findDataIn(action->id, 2);
+                    int val = valData ? resolveInt(valData) : 0;
+                    int x = xData ? resolveInt(xData) : 0;
+                    int y = yData ? resolveInt(yData) : 0;
+                    f << "    afn_draw_number(" << val << ", " << x << ", " << y << ");\n";
+                    break;
+                }
+                case GBAScriptNodeType::DrawTextID: {
+                    auto* idData = findDataIn(action->id, 0);
+                    auto* xData = findDataIn(action->id, 1);
+                    auto* yData = findDataIn(action->id, 2);
+                    int id = idData ? resolveInt(idData) : 0;
+                    int x = xData ? resolveInt(xData) : 0;
+                    int y = yData ? resolveInt(yData) : 0;
+                    f << "    afn_draw_text(" << id << ", " << x << ", " << y << ");\n";
+                    break;
+                }
+                case GBAScriptNodeType::ClearText:
+                    f << "    afn_clear_text();\n";
+                    break;
+                case GBAScriptNodeType::SetTextColor: {
+                    auto* colData = findDataIn(action->id, 0);
+                    int col = colData ? resolveInt(colData) : 0x7FFF;
+                    f << "    afn_text_color = " << col << ";\n";
+                    break;
+                }
+                // Inventory
+                case GBAScriptNodeType::AddItem: {
+                    auto* slotData = findDataIn(action->id, 0);
+                    auto* amtData = findDataIn(action->id, 1);
+                    int slot = slotData ? resolveInt(slotData) : 0;
+                    int amt = amtData ? resolveInt(amtData) : 1;
+                    f << "    afn_inventory[" << slot << " & 15] += " << amt << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::RemoveItem: {
+                    auto* slotData = findDataIn(action->id, 0);
+                    auto* amtData = findDataIn(action->id, 1);
+                    int slot = slotData ? resolveInt(slotData) : 0;
+                    int amt = amtData ? resolveInt(amtData) : 1;
+                    f << "    afn_inventory[" << slot << " & 15] -= " << amt << ";\n";
+                    f << "    if (afn_inventory[" << slot << " & 15] < 0) afn_inventory[" << slot << " & 15] = 0;\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetItemCount: {
+                    auto* slotData = findDataIn(action->id, 0);
+                    auto* cntData = findDataIn(action->id, 1);
+                    int slot = slotData ? resolveInt(slotData) : 0;
+                    int cnt = cntData ? resolveInt(cntData) : 0;
+                    f << "    afn_inventory[" << slot << " & 15] = " << cnt << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::UseItem: {
+                    auto* slotData = findDataIn(action->id, 0);
+                    int slot = slotData ? resolveInt(slotData) : 0;
+                    f << "    if (afn_inventory[" << slot << " & 15] > 0) afn_inventory[" << slot << " & 15]--;\n";
+                    break;
+                }
+                // Dialogue
+                case GBAScriptNodeType::ShowDialogue: {
+                    auto* txtData = findDataIn(action->id, 0);
+                    int txt = txtData ? resolveInt(txtData) : 0;
+                    f << "    afn_dlg_text = " << txt << "; afn_dlg_open = 1; afn_dlg_line = 0;\n";
+                    break;
+                }
+                case GBAScriptNodeType::HideDialogue:
+                    f << "    afn_dlg_open = 0;\n";
+                    break;
+                case GBAScriptNodeType::NextLine:
+                    f << "    afn_dlg_line++;\n";
+                    break;
+                case GBAScriptNodeType::SetSpeaker: {
+                    auto* spkData = findDataIn(action->id, 0);
+                    int spk = spkData ? resolveInt(spkData) : 0;
+                    f << "    afn_dlg_speaker = " << spk << ";\n";
+                    break;
+                }
+                // State Machine
+                case GBAScriptNodeType::SetState: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* stData = findDataIn(action->id, 1);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int st = stData ? resolveInt(stData) : 0;
+                    f << "    afn_prev_state[" << obj << " & 15] = afn_state[" << obj << " & 15];\n";
+                    f << "    afn_state[" << obj << " & 15] = " << st << ";\n";
+                    f << "    afn_state_timer[" << obj << " & 15] = 0;\n";
+                    break;
+                }
+                case GBAScriptNodeType::TransitionState: {
+                    auto* objData = findDataIn(action->id, 0);
+                    auto* stData = findDataIn(action->id, 1);
+                    auto* delData = findDataIn(action->id, 2);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    int st = stData ? resolveInt(stData) : 0;
+                    int del = delData ? resolveInt(delData) : 0;
+                    if (del > 0) {
+                        f << "    { static int afn_trans_" << action->id << " = 0;\n";
+                        f << "      if (afn_trans_" << action->id << " > 0) { afn_trans_" << action->id << "--; return; }\n";
+                        f << "      afn_trans_" << action->id << " = " << del << "; }\n";
+                    }
+                    f << "    afn_prev_state[" << obj << " & 15] = afn_state[" << obj << " & 15];\n";
+                    f << "    afn_state[" << obj << " & 15] = " << st << "; afn_state_timer[" << obj << " & 15] = 0;\n";
+                    break;
+                }
                 default:
                     f << "    // unsupported action: type " << (int)action->type << "\n";
                     break;
@@ -2391,7 +2535,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
             auto isGateNode = [](GBAScriptNodeType t) {
                 return t == GBAScriptNodeType::IsMoving || t == GBAScriptNodeType::IsOnGround || t == GBAScriptNodeType::IsJumping
                     || t == GBAScriptNodeType::IsFlagSet || t == GBAScriptNodeType::IsHPZero || t == GBAScriptNodeType::IsNear
-                    || t == GBAScriptNodeType::Countdown || t == GBAScriptNodeType::IsAlive;
+                    || t == GBAScriptNodeType::Countdown || t == GBAScriptNodeType::IsAlive
+                    || t == GBAScriptNodeType::HasItem || t == GBAScriptNodeType::IsDialogueOpen
+                    || t == GBAScriptNodeType::IsInState;
             };
             std::set<int> emittedActionIds;
             for (auto& c : chains) {
@@ -2502,6 +2648,21 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     }
                     if (a->type == GBAScriptNodeType::IsAlive) {
                         f << "    if (afn_hp[" << a->paramInt[0] << "] > 0) {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::HasItem) {
+                        f << "    if (afn_inventory[" << a->paramInt[0] << " & 15] > 0) {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsDialogueOpen) {
+                        f << "    if (afn_dlg_open) {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsInState) {
+                        f << "    if (afn_state[" << a->paramInt[0] << " & 15] == " << a->paramInt[1] << ") {\n";
                         gateDepth++;
                         continue;
                     }
@@ -3342,6 +3503,104 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_vars[" << idx << " & 15] = " << val << ";\n";
                     break;
                 }
+                case GBAScriptNodeType::DrawNumber: {
+                    auto* valData = bpFindDataIn(action->id, 0);
+                    auto* xData = bpFindDataIn(action->id, 1);
+                    auto* yData = bpFindDataIn(action->id, 2);
+                    std::string val = valData ? bpResolveInt(valData) : "0";
+                    std::string x = xData ? bpResolveInt(xData) : "0";
+                    std::string y = yData ? bpResolveInt(yData) : "0";
+                    f << "    afn_draw_number(" << val << ", " << x << ", " << y << ");\n";
+                    break;
+                }
+                case GBAScriptNodeType::DrawTextID: {
+                    auto* idData = bpFindDataIn(action->id, 0);
+                    auto* xData = bpFindDataIn(action->id, 1);
+                    auto* yData = bpFindDataIn(action->id, 2);
+                    std::string id = idData ? bpResolveInt(idData) : "0";
+                    std::string x = xData ? bpResolveInt(xData) : "0";
+                    std::string y = yData ? bpResolveInt(yData) : "0";
+                    f << "    afn_draw_text(" << id << ", " << x << ", " << y << ");\n";
+                    break;
+                }
+                case GBAScriptNodeType::ClearText:
+                    f << "    afn_clear_text();\n";
+                    break;
+                case GBAScriptNodeType::SetTextColor: {
+                    auto* colData = bpFindDataIn(action->id, 0);
+                    std::string col = colData ? bpResolveInt(colData) : "0x7FFF";
+                    f << "    afn_text_color = " << col << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::AddItem: {
+                    auto* slotData = bpFindDataIn(action->id, 0);
+                    auto* amtData = bpFindDataIn(action->id, 1);
+                    std::string slot = slotData ? bpResolveInt(slotData) : "0";
+                    std::string amt = amtData ? bpResolveInt(amtData) : "1";
+                    f << "    afn_inventory[" << slot << " & 15] += " << amt << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::RemoveItem: {
+                    auto* slotData = bpFindDataIn(action->id, 0);
+                    auto* amtData = bpFindDataIn(action->id, 1);
+                    std::string slot = slotData ? bpResolveInt(slotData) : "0";
+                    std::string amt = amtData ? bpResolveInt(amtData) : "1";
+                    f << "    afn_inventory[" << slot << " & 15] -= " << amt << ";\n";
+                    f << "    if (afn_inventory[" << slot << " & 15] < 0) afn_inventory[" << slot << " & 15] = 0;\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetItemCount: {
+                    auto* slotData = bpFindDataIn(action->id, 0);
+                    auto* cntData = bpFindDataIn(action->id, 1);
+                    std::string slot = slotData ? bpResolveInt(slotData) : "0";
+                    std::string cnt = cntData ? bpResolveInt(cntData) : "0";
+                    f << "    afn_inventory[" << slot << " & 15] = " << cnt << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::UseItem: {
+                    auto* slotData = bpFindDataIn(action->id, 0);
+                    std::string slot = slotData ? bpResolveInt(slotData) : "0";
+                    f << "    if (afn_inventory[" << slot << " & 15] > 0) afn_inventory[" << slot << " & 15]--;\n";
+                    break;
+                }
+                case GBAScriptNodeType::ShowDialogue: {
+                    auto* txtData = bpFindDataIn(action->id, 0);
+                    std::string txt = txtData ? bpResolveInt(txtData) : "0";
+                    f << "    afn_dlg_text = " << txt << "; afn_dlg_open = 1; afn_dlg_line = 0;\n";
+                    break;
+                }
+                case GBAScriptNodeType::HideDialogue:
+                    f << "    afn_dlg_open = 0;\n";
+                    break;
+                case GBAScriptNodeType::NextLine:
+                    f << "    afn_dlg_line++;\n";
+                    break;
+                case GBAScriptNodeType::SetSpeaker: {
+                    auto* spkData = bpFindDataIn(action->id, 0);
+                    std::string spk = spkData ? bpResolveInt(spkData) : "0";
+                    f << "    afn_dlg_speaker = " << spk << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetState: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* stData = bpFindDataIn(action->id, 1);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string st = stData ? bpResolveInt(stData) : "0";
+                    f << "    afn_prev_state[" << obj << " & 15] = afn_state[" << obj << " & 15];\n";
+                    f << "    afn_state[" << obj << " & 15] = " << st << "; afn_state_timer[" << obj << " & 15] = 0;\n";
+                    break;
+                }
+                case GBAScriptNodeType::TransitionState: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    auto* stData = bpFindDataIn(action->id, 1);
+                    auto* delData = bpFindDataIn(action->id, 2);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    std::string st = stData ? bpResolveInt(stData) : "0";
+                    std::string del = delData ? bpResolveInt(delData) : "0";
+                    f << "    afn_prev_state[" << obj << " & 15] = afn_state[" << obj << " & 15];\n";
+                    f << "    afn_state[" << obj << " & 15] = " << st << "; afn_state_timer[" << obj << " & 15] = 0;\n";
+                    break;
+                }
                 default:
                     f << "    // unsupported bp action: type " << (int)action->type << "\n";
                     break;
@@ -3352,7 +3611,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
             auto bpIsGateNode = [](GBAScriptNodeType t) {
                 return t == GBAScriptNodeType::IsMoving || t == GBAScriptNodeType::IsOnGround || t == GBAScriptNodeType::IsJumping
                     || t == GBAScriptNodeType::IsFlagSet || t == GBAScriptNodeType::IsHPZero || t == GBAScriptNodeType::IsNear
-                    || t == GBAScriptNodeType::Countdown || t == GBAScriptNodeType::IsAlive;
+                    || t == GBAScriptNodeType::Countdown || t == GBAScriptNodeType::IsAlive
+                    || t == GBAScriptNodeType::HasItem || t == GBAScriptNodeType::IsDialogueOpen
+                    || t == GBAScriptNodeType::IsInState;
             };
             std::set<int> bpEmittedIds;
             for (auto& c : bpChains) {
@@ -3428,6 +3689,21 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     }
                     if (a->type == GBAScriptNodeType::IsAlive) {
                         f << "    if (afn_hp[" << a->paramInt[0] << "] > 0) {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::HasItem) {
+                        f << "    if (afn_inventory[" << a->paramInt[0] << " & 15] > 0) {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsDialogueOpen) {
+                        f << "    if (afn_dlg_open) {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsInState) {
+                        f << "    if (afn_state[" << a->paramInt[0] << " & 15] == " << a->paramInt[1] << ") {\n";
                         gateDepth++;
                         continue;
                     }
