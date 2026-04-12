@@ -12960,9 +12960,24 @@ void FrameTick(float dt)
                     strncpy(sVsCodeWindowTilemapBuf, cwNode.codeTilemap[0] ? cwNode.codeTilemap : "// Mode 0 code", sizeof(sVsCodeWindowTilemapBuf) - 1);
                 }
 
-                // Helper lambda for each code section
+                // Generated code preview (read-only)
+                if (sVsCodeWindowBuf[0]) {
+                    ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Generated Code");
+                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.1f, 0.1f, 0.12f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.9f, 0.6f, 1.0f));
+                    { int lc = 1; for (const char* p = sVsCodeWindowBuf; *p; ++p) if (*p == '\n') ++lc;
+                      if (lc < 3) lc = 3;
+                      float genH = ImGui::GetTextLineHeight() * lc + ImGui::GetStyle().FramePadding.y * 2;
+                      ImGui::InputTextMultiline("##GenCode", sVsCodeWindowBuf, sizeof(sVsCodeWindowBuf),
+                          ImVec2(-1, genH), ImGuiInputTextFlags_ReadOnly);
+                    }
+                    ImGui::PopStyleColor(2);
+                    ImGui::Spacing();
+                }
+
+                // Custom code sections (editable)
                 auto codeSection = [&](const char* label, const char* imgId, ImVec4 labelColor, ImVec4 textColor,
-                                       char* editBuf, size_t editBufSz, char* nodeBuf, size_t nodeBufSz) {
+                                       char* editBuf, size_t editBufSz) {
                     ImGui::TextColored(labelColor, "%s", label);
                     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.1f, 0.1f, 0.12f, 1.0f));
                     ImGui::PushStyleColor(ImGuiCol_Text, textColor);
@@ -12977,17 +12992,17 @@ void FrameTick(float dt)
 
                 // --- Mode 4 ---
                 codeSection("Mode 4", "##CodeScene", ImVec4(0.4f, 0.8f, 1.0f, 1.0f), ImVec4(0.5f, 0.85f, 0.9f, 1.0f),
-                            sVsCodeWindowSceneBuf, sizeof(sVsCodeWindowSceneBuf), cwNode.codeScene, sizeof(cwNode.codeScene));
+                            sVsCodeWindowSceneBuf, sizeof(sVsCodeWindowSceneBuf));
                 ImGui::Spacing();
 
                 // --- Mode 0 ---
                 codeSection("Mode 0", "##CodeTilemap", ImVec4(0.4f, 1.0f, 0.6f, 1.0f), ImVec4(0.5f, 0.9f, 0.6f, 1.0f),
-                            sVsCodeWindowTilemapBuf, sizeof(sVsCodeWindowTilemapBuf), cwNode.codeTilemap, sizeof(cwNode.codeTilemap));
+                            sVsCodeWindowTilemapBuf, sizeof(sVsCodeWindowTilemapBuf));
                 ImGui::Spacing();
 
                 // --- GBA Runtime ---
                 codeSection("GBA Runtime", "##CodeGBA", ImVec4(1.0f, 0.8f, 0.5f, 1.0f), ImVec4(0.9f, 0.8f, 0.5f, 1.0f),
-                            sVsCodeWindowEditBuf, sizeof(sVsCodeWindowEditBuf), cwNode.customCode, sizeof(cwNode.customCode));
+                            sVsCodeWindowEditBuf, sizeof(sVsCodeWindowEditBuf));
                 ImGui::Spacing();
 
                 // Function declaration (editable)
