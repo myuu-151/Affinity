@@ -340,6 +340,9 @@ struct GBAScriptNodeExport {
     char funcName[64] = {};     // custom function name (empty = use default)
     char ccPinCode[8][128] = {};  // per-pin code snippets for CustomCode nodes
     int ccPinCount = 0;           // number of data-in pins
+    int ccExecIn = 1;             // number of exec-in pins
+    int ccExecOut = 1;            // number of exec-out pins
+    int ccDataOut = 0;            // number of data-out pins
 };
 
 struct GBAScriptLinkExport {

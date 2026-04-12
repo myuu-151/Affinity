@@ -1725,6 +1725,20 @@ static bool GenerateMapData(const std::string& runtimeDir,
             return dn->paramInt[0];
         };
 
+        // Helper: resolve integer as C expression string (handles CustomCode data-out)
+        auto resolveIntExpr = [&](const GBAScriptNodeExport* dn) -> std::string {
+            if (!dn) return "0";
+            if (dn->type == GBAScriptNodeType::CustomCode) {
+                char buf[64];
+                if (dn->funcName[0])
+                    snprintf(buf, sizeof(buf), "%s()", dn->funcName);
+                else
+                    snprintf(buf, sizeof(buf), "afn_script_custom_%d()", dn->id);
+                return buf;
+            }
+            return std::to_string(dn->paramInt[0]);
+        };
+
         // Helper: resolve float from a data node (stored as IEEE754 bits in paramInt[0])
         auto resolveFloat = [&](const GBAScriptNodeExport* dn) -> float {
             if (!dn) return 0.0f;
@@ -1794,9 +1808,16 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 if (!an) continue;
                 chain.actions.push_back(an);
 
-                // Follow this node's exec outputs too (chained actions)
-                auto next = findExecOuts(an->id, 0);
-                for (int t : next) frontier.push_back(t);
+                // Follow this node's exec outputs (all pins for CustomCode, pin 0 for others)
+                if (an->type == GBAScriptNodeType::CustomCode) {
+                    for (int ep = 0; ep < 8; ep++) {
+                        auto next = findExecOuts(an->id, ep);
+                        for (int t : next) frontier.push_back(t);
+                    }
+                } else {
+                    auto next = findExecOuts(an->id, 0);
+                    for (int t : next) frontier.push_back(t);
+                }
             }
             if (!chain.actions.empty())
                 chains.push_back(chain);
@@ -1815,8 +1836,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     size_t pos = 0;
                     while ((pos = code.find(placeholder, pos)) != std::string::npos) {
                         auto* din = findDataIn(nodeId, pi);
-                        int val = din ? resolveInt(din) : 0;
-                        std::string valStr = std::to_string(val);
+                        std::string valStr = din ? resolveIntExpr(din) : "0";
                         code.replace(pos, strlen(placeholder), valStr);
                         pos += valStr.size();
                     }
@@ -2718,10 +2738,33 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         snprintf(defaultName, sizeof(defaultName), "afn_script%s_%d", actionSuffix(a->type), a->id);
                         suffix = defaultName;
                     }
-                    f << "static inline void " << suffix << "(void) {\n";
+                    bool hasDataOut = (a->type == GBAScriptNodeType::CustomCode && a->ccDataOut > 0);
+                    if (hasDataOut)
+                        f << "static inline int " << suffix << "(void) {\n";
+                    else
+                        f << "static inline void " << suffix << "(void) {\n";
                     emitActionBody(a);
+                    if (hasDataOut)
+                        f << "    return 0; // default if no explicit return\n";
                     f << "}\n";
                 }
+            }
+
+            // Emit standalone CustomCode data-out nodes not already in action chains
+            for (auto& n : script.nodes) {
+                if (n.type != GBAScriptNodeType::CustomCode) continue;
+                if (n.ccDataOut <= 0) continue;
+                if (emittedActionIds.count(n.id)) continue;
+                emittedActionIds.insert(n.id);
+                const char* suffix = n.funcName[0] ? n.funcName : nullptr;
+                char defaultName[64];
+                if (!suffix) {
+                    snprintf(defaultName, sizeof(defaultName), "afn_script_custom_%d", n.id);
+                    suffix = defaultName;
+                }
+                f << "static inline int " << suffix << "(void) {\n";
+                emitActionBody(&n);
+                f << "    return 0;\n}\n";
             }
             f << "\n";
 
@@ -3010,6 +3053,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     // in the paramInt[3] slot during export
                     if (n->paramInt[3] == -(pi + 1))  // sentinel: negative (pi+1)
                         return "p" + std::to_string(pi);
+                }
+                if (n->type == GBAScriptNodeType::CustomCode) {
+                    char buf[64];
+                    if (n->funcName[0])
+                        snprintf(buf, sizeof(buf), "%s()", n->funcName);
+                    else
+                        snprintf(buf, sizeof(buf), "afn_bp%d_custom_%d()", bpIdx, n->id);
+                    return buf;
                 }
                 return std::to_string(n->paramInt[0]);
             };
@@ -3935,10 +3986,33 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         snprintf(defaultName, sizeof(defaultName), "afn_bp%d%s_%d", bi, actionSuffix(a->type), a->id);
                         fname = defaultName;
                     }
-                    f << "static inline void " << fname << "(" << paramSig << ") {\n";
+                    bool hasDataOut = (a->type == GBAScriptNodeType::CustomCode && a->ccDataOut > 0);
+                    if (hasDataOut)
+                        f << "static inline int " << fname << "(" << paramSig << ") {\n";
+                    else
+                        f << "static inline void " << fname << "(" << paramSig << ") {\n";
                     bpEmitActionBody(a);
+                    if (hasDataOut)
+                        f << "    return 0; // default if no explicit return\n";
                     f << "}\n";
                 }
+            }
+
+            // Emit standalone CustomCode data-out nodes not already in action chains
+            for (auto& n : bpScript.nodes) {
+                if (n.type != GBAScriptNodeType::CustomCode) continue;
+                if (n.ccDataOut <= 0) continue;
+                if (bpEmittedIds.count(n.id)) continue;
+                bpEmittedIds.insert(n.id);
+                const char* fname = n.funcName[0] ? n.funcName : nullptr;
+                char defaultName[64];
+                if (!fname) {
+                    snprintf(defaultName, sizeof(defaultName), "afn_bp%d_custom_%d", bi, n.id);
+                    fname = defaultName;
+                }
+                f << "static inline int " << fname << "(" << paramSig << ") {\n";
+                bpEmitActionBody(&n);
+                f << "    return 0;\n}\n";
             }
 
             // Helper: emit a call to a blueprint action's function

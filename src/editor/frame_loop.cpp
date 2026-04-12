@@ -7388,6 +7388,9 @@ void FrameTick(float dt)
                     memcpy(sn.funcName, n.funcName, sizeof(sn.funcName));
                     if (n.type == VsNodeType::CustomCode) {
                         sn.ccPinCount = n.grpInData;
+                        sn.ccExecIn = n.grpInExec;
+                        sn.ccExecOut = n.grpOutExec;
+                        sn.ccDataOut = n.grpOutData;
                         for (int pi = 0; pi < n.grpInData && pi < 8; pi++)
                             memcpy(sn.ccPinCode[pi], n.ccPinCode[pi], sizeof(sn.ccPinCode[pi]));
                     }
@@ -7421,6 +7424,9 @@ void FrameTick(float dt)
                     memcpy(sn.funcName, n.funcName, sizeof(sn.funcName));
                         if (n.type == VsNodeType::CustomCode) {
                             sn.ccPinCount = n.grpInData;
+                            sn.ccExecIn = n.grpInExec;
+                            sn.ccExecOut = n.grpOutExec;
+                            sn.ccDataOut = n.grpOutData;
                             for (int pi2 = 0; pi2 < n.grpInData && pi2 < 8; pi2++)
                                 memcpy(sn.ccPinCode[pi2], n.ccPinCode[pi2], sizeof(sn.ccPinCode[pi2]));
                         }
