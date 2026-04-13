@@ -3838,9 +3838,9 @@ int main(void)
                         int visSize = (scale8 * tm_tile_size) >> 8;
                         // Double-size canvas = 2 * dirSize
                         int canvasSize = dirSize * 2;
-                        // Center the visible sprite on the tile
-                        int adjX = scrX + tm_tile_size / 2 - canvasSize / 2;
-                        int adjY = scrY + tm_tile_size - visSize - (canvasSize - visSize) / 2;
+                        // Center sprite on tile (match editor: centered both axes)
+                        int adjX = scrX + (tm_tile_size - canvasSize) / 2;
+                        int adjY = scrY + (tm_tile_size - canvasSize) / 2;
 
                         // Use ATTR0_AFF_DBL with affine matrix 0
                         u16 a0 = ATTR0_SQUARE | ATTR0_AFF_DBL | ((adjY & 0x1FF));
