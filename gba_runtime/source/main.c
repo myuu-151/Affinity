@@ -3588,6 +3588,16 @@ int main(void)
     tm_anim_idx = 0;
     tm_anim_frame = 0;
     tm_anim_timer = 0;
+    // Load direction sprite set 0 for player asset (if directional)
+#if AFN_TM_PLAYER_OBJ >= 0 && defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+    {
+        int pa = afn_tm0_objs[AFN_TM_PLAYER_OBJ].assetIdx;
+        if (pa >= 0 && pa < AFN_ASSET_COUNT && afn_asset_dir_desc[pa][4]) {
+            g_active_dir_set[pa] = -1; // force load
+            switch_dir_anim_set(pa, 0);
+        }
+    }
+#endif
 #endif
 
     // Precompute initial sin/cos
@@ -3761,42 +3771,114 @@ int main(void)
                     tm_anim_timer = 0;
                 }
 
-                // Advance animation frame
                 if (playerAsset >= 0 && playerAsset < AFN_ASSET_COUNT)
                 {
-                    int startF = afn_anim_desc[playerAsset][tm_anim_idx][0];
-                    int endF   = afn_anim_desc[playerAsset][tm_anim_idx][1];
-                    int fps    = afn_anim_desc[playerAsset][tm_anim_idx][2];
-                    int frameCount = endF - startF + 1;
-                    if (frameCount < 1) frameCount = 1;
-                    int ticksPerFrame = (fps > 0) ? (60 / fps) : 8;
-                    if (ticksPerFrame < 1) ticksPerFrame = 1;
-
-                    tm_anim_timer++;
-                    if (tm_anim_timer >= ticksPerFrame)
-                    {
-                        tm_anim_timer = 0;
-                        tm_anim_frame++;
-                        if (tm_anim_frame >= frameCount)
-                            tm_anim_frame = 0;
-                    }
-
-                    int curFrame = startF + tm_anim_frame;
                     int scrX = px - tm_cam_x;
                     int scrY = py - tm_cam_y;
-                    int tileBase = afn_asset_desc[playerAsset][0]; // tile start in VRAM
-                    int tpf     = afn_asset_desc[playerAsset][1]; // tiles per frame
-                    int objSz   = afn_asset_desc[playerAsset][3]; // OBJ size
-                    int palBank = afn_asset_desc[playerAsset][4];
-                    int tileCur = tileBase + curFrame * tpf;
-                    u16 a0 = ATTR0_SQUARE | ((scrY & 0x1FF));
-                    u16 a1;
-                    if (objSz >= 32) a1 = ATTR1_SIZE_32;
-                    else if (objSz >= 16) a1 = ATTR1_SIZE_16;
-                    else a1 = ATTR1_SIZE_8;
-                    a1 |= ((scrX & 0x1FF));
-                    u16 a2 = ATTR2_PALBANK(palBank) | (tileCur & 0x3FF);
-                    obj_set_attr(&oam_mem[0], a0, a1, a2);
+
+#if defined(AFN_HAS_ASSET_DIRS)
+                    // Direction-based asset: use dir descriptor for size/tiles
+                    if (afn_asset_dir_desc[playerAsset][4]) {
+                        int tpf     = afn_asset_dir_desc[playerAsset][1]; // tiles per direction frame
+                        int dirSize = afn_asset_dir_desc[playerAsset][2]; // pixel size (e.g. 64)
+                        int palBank = afn_asset_dir_desc[playerAsset][3];
+                        int vramT0  = afn_asset_dir_desc[playerAsset][5]; // VRAM tile start
+
+                        // Advance animation: cycle direction sets
+                        int startF = afn_anim_desc[playerAsset][tm_anim_idx][0];
+                        int endF   = afn_anim_desc[playerAsset][tm_anim_idx][1];
+                        int fps    = afn_anim_desc[playerAsset][tm_anim_idx][2];
+                        int frameCount = endF - startF + 1;
+                        if (frameCount < 1) frameCount = 1;
+                        int ticksPerFrame = (fps > 0) ? (60 / fps) : 8;
+                        if (ticksPerFrame < 1) ticksPerFrame = 1;
+
+                        tm_anim_timer++;
+                        if (tm_anim_timer >= ticksPerFrame) {
+                            tm_anim_timer = 0;
+                            tm_anim_frame++;
+                            if (tm_anim_frame >= frameCount)
+                                tm_anim_frame = 0;
+                        }
+
+                        // DMA the current direction set to VRAM
+                        int curSet = startF + tm_anim_frame;
+                        switch_dir_anim_set(playerAsset, curSet);
+
+                        // Facing direction from movement
+                        int facing = 4; // default South
+                        if (tm_move_timer > 0 || moving) {
+                            if (tm_move_dy < 0) facing = 0;      // up = N
+                            else if (tm_move_dy > 0) facing = 4;  // down = S
+                            else if (tm_move_dx < 0) facing = 6;  // left = W
+                            else if (tm_move_dx > 0) facing = 2;  // right = E
+                        }
+                        int tileCur = vramT0 + facing * tpf;
+
+                        // Apply displayScale via OAM affine
+                        // scale8 is 8.8 fixed: 256 = 1.0x
+                        // Auto-fit: scale sprite to displayScale * tile_size pixels
+                        // visSize = displayScale * tile_size
+                        // affine pa = dirSize / visSize (in 8.8 fixed)
+                        int scale8 = (int)afn_tm0_objs[AFN_TM_PLAYER_OBJ].scale8;
+                        if (scale8 < 1) scale8 = 256;
+                        // Target pixel size = displayScale * tile_size
+                        // pa = (dirSize * 256) / (displayScale * tile_size)
+                        //    = (dirSize * 256 * 256) / (scale8 * tile_size)
+                        int pa = (dirSize * 256 * 256) / (scale8 * tm_tile_size);
+                        if (pa < 1) pa = 256;
+                        // Set affine matrix 0
+                        OBJ_AFFINE *oa = &obj_aff_mem[0];
+                        oa->pa = (s16)pa;
+                        oa->pb = 0;
+                        oa->pc = 0;
+                        oa->pd = (s16)pa;
+
+                        // Visible size = displayScale * tile_size
+                        int visSize = (scale8 * tm_tile_size) >> 8;
+                        // Double-size canvas = 2 * dirSize
+                        int canvasSize = dirSize * 2;
+                        // Center the visible sprite on the tile
+                        int adjX = scrX + tm_tile_size / 2 - canvasSize / 2;
+                        int adjY = scrY + tm_tile_size - visSize - (canvasSize - visSize) / 2;
+
+                        // Use ATTR0_AFF_DBL with affine matrix 0
+                        u16 a0 = ATTR0_SQUARE | ATTR0_AFF_DBL | ((adjY & 0x1FF));
+                        u16 a1 = size_to_attr1(dirSize) | ATTR1_AFF_ID(0) | ((adjX & 0x1FF));
+                        u16 a2 = ATTR2_PALBANK(palBank) | (tileCur & 0x3FF);
+                        obj_set_attr(&oam_mem[0], a0, a1, a2);
+                    }
+                    else
+#endif
+                    {
+                        // Static asset: use asset_desc
+                        int startF = afn_anim_desc[playerAsset][tm_anim_idx][0];
+                        int endF   = afn_anim_desc[playerAsset][tm_anim_idx][1];
+                        int fps    = afn_anim_desc[playerAsset][tm_anim_idx][2];
+                        int frameCount = endF - startF + 1;
+                        if (frameCount < 1) frameCount = 1;
+                        int ticksPerFrame = (fps > 0) ? (60 / fps) : 8;
+                        if (ticksPerFrame < 1) ticksPerFrame = 1;
+
+                        tm_anim_timer++;
+                        if (tm_anim_timer >= ticksPerFrame) {
+                            tm_anim_timer = 0;
+                            tm_anim_frame++;
+                            if (tm_anim_frame >= frameCount)
+                                tm_anim_frame = 0;
+                        }
+
+                        int curFrame = startF + tm_anim_frame;
+                        int tileBase = afn_asset_desc[playerAsset][0];
+                        int tpf     = afn_asset_desc[playerAsset][1];
+                        int objSz   = afn_asset_desc[playerAsset][3];
+                        int palBank = afn_asset_desc[playerAsset][4];
+                        int tileCur = tileBase + curFrame * tpf;
+                        u16 a0 = ATTR0_SQUARE | ((scrY & 0x1FF));
+                        u16 a1 = size_to_attr1(objSz) | ((scrX & 0x1FF));
+                        u16 a2 = ATTR2_PALBANK(palBank) | (tileCur & 0x3FF);
+                        obj_set_attr(&oam_mem[0], a0, a1, a2);
+                    }
                 }
                 else
                     obj_hide(&oam_mem[0]);
