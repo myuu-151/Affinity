@@ -865,6 +865,9 @@ static char sVsCodeWindowTilemapBuf[2048] = {}; // editable tilemap code
 static char sVsGenScene[2048] = {};    // generated Mode 4 code (default for scene buf)
 static char sVsGenTilemap[2048] = {};  // generated Mode 0 code (default for tilemap buf)
 static char sVsGenGBA[2048] = {};      // generated GBA runtime code (default for GBA buf)
+static char sVsPrevGenGBA[2048] = {};      // previous gen snapshot (for live-update diffing)
+static char sVsPrevGenScene[2048] = {};
+static char sVsPrevGenTilemap[2048] = {};
 static int sLastCodeWindowNode = -1;
 
 static constexpr float kVsNodeW = 160.0f;
@@ -13303,14 +13306,29 @@ void FrameTick(float dt)
                     strncpy(sVsCodeWindowEditBuf, cwNode.customCode[0] ? cwNode.customCode : (sVsGenGBA[0] ? sVsGenGBA : "// GBA runtime C code"), sizeof(sVsCodeWindowEditBuf) - 1);
                     strncpy(sVsCodeWindowSceneBuf, cwNode.codeScene[0] ? cwNode.codeScene : (sVsGenScene[0] ? sVsGenScene : "// Mode 4 code"), sizeof(sVsCodeWindowSceneBuf) - 1);
                     strncpy(sVsCodeWindowTilemapBuf, cwNode.codeTilemap[0] ? cwNode.codeTilemap : (sVsGenTilemap[0] ? sVsGenTilemap : "// Mode 0 code"), sizeof(sVsCodeWindowTilemapBuf) - 1);
+                    // Init prev snapshots so live-update diffing works
+                    strncpy(sVsPrevGenGBA, sVsGenGBA, sizeof(sVsPrevGenGBA) - 1);
+                    strncpy(sVsPrevGenScene, sVsGenScene, sizeof(sVsPrevGenScene) - 1);
+                    strncpy(sVsPrevGenTilemap, sVsGenTilemap, sizeof(sVsPrevGenTilemap) - 1);
                 }
-                // Live-update: refresh from generated code when user hasn't saved custom overrides
-                if (!cwNode.customCode[0] && sVsGenGBA[0] && strcmp(sVsCodeWindowEditBuf, sVsGenGBA) != 0)
+                // Live-update: only refresh if the buffer still matches the OLD generated code
+                // (meaning the user hasn't manually edited it)
+                if (!cwNode.customCode[0] && sVsGenGBA[0] && strcmp(sVsGenGBA, sVsPrevGenGBA) != 0
+                    && strcmp(sVsCodeWindowEditBuf, sVsPrevGenGBA) == 0) {
                     strncpy(sVsCodeWindowEditBuf, sVsGenGBA, sizeof(sVsCodeWindowEditBuf) - 1);
-                if (!cwNode.codeScene[0] && sVsGenScene[0] && strcmp(sVsCodeWindowSceneBuf, sVsGenScene) != 0)
+                }
+                if (!cwNode.codeScene[0] && sVsGenScene[0] && strcmp(sVsGenScene, sVsPrevGenScene) != 0
+                    && strcmp(sVsCodeWindowSceneBuf, sVsPrevGenScene) == 0) {
                     strncpy(sVsCodeWindowSceneBuf, sVsGenScene, sizeof(sVsCodeWindowSceneBuf) - 1);
-                if (!cwNode.codeTilemap[0] && sVsGenTilemap[0] && strcmp(sVsCodeWindowTilemapBuf, sVsGenTilemap) != 0)
+                }
+                if (!cwNode.codeTilemap[0] && sVsGenTilemap[0] && strcmp(sVsGenTilemap, sVsPrevGenTilemap) != 0
+                    && strcmp(sVsCodeWindowTilemapBuf, sVsPrevGenTilemap) == 0) {
                     strncpy(sVsCodeWindowTilemapBuf, sVsGenTilemap, sizeof(sVsCodeWindowTilemapBuf) - 1);
+                }
+                // Snapshot current generated code for next frame's diff
+                strncpy(sVsPrevGenGBA, sVsGenGBA, sizeof(sVsPrevGenGBA) - 1);
+                strncpy(sVsPrevGenScene, sVsGenScene, sizeof(sVsPrevGenScene) - 1);
+                strncpy(sVsPrevGenTilemap, sVsGenTilemap, sizeof(sVsPrevGenTilemap) - 1);
 
                 // Code sections (editable — shows generated code by default, saved overrides persist)
                 auto codeSection = [&](const char* label, const char* imgId, ImVec4 labelColor, ImVec4 textColor,
