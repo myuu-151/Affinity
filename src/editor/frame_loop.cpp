@@ -6060,6 +6060,8 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             obj.type = (TmObjType)sAddObjType;
             obj.tileX = tm.width / 2;
             obj.tileY = tm.height / 2;
+            if (obj.type == TmObjType::Player)
+                obj.displayScale = 2.0f;
             snprintf(obj.name, sizeof(obj.name), "%s %d",
                 sTmObjTypeNames[sAddObjType], (int)sTmObjects.size());
             sTmObjects.push_back(obj);
@@ -6323,8 +6325,8 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             sc.mapW = sTilemapData.floor.width;
             sc.mapH = sTilemapData.floor.height;
             int prevW = sc.mapW, prevH = sc.mapH;
-            ImGui::DragInt("Width##scw", &sc.mapW, 0.5f, 1, 128);
-            ImGui::DragInt("Height##sch", &sc.mapH, 0.5f, 1, 128);
+            ImGui::DragInt("Width##scw", &sc.mapW, 0.5f, 1, 64);
+            ImGui::DragInt("Height##sch", &sc.mapH, 0.5f, 1, 64);
             // Zoom slider — synced with scroll wheel on main tilemap canvas
             sc.zoom = sTmMapZoom;
             if (ImGui::SliderFloat("Zoom##sczoom", &sc.zoom, 0.5f, 16.0f, "%.2f")) {
@@ -6647,7 +6649,7 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 {
                     const Tile8& tile = ts.tiles[ti];
                     float pxSz = cellSz / (float)kTileSize;
-                    if (pxSz >= 2.0f)
+                    if (pxSz >= 2.0f && cellSz >= 16.0f)
                     {
                         for (int py = 0; py < kTileSize; py++)
                         {
@@ -6712,32 +6714,28 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     break;
                 }
 
-                // Border on unpainted cells only — lighter for sub-cells, medium every 2, heavy every 4
-                if (!cellPainted)
-                {
-                    // Faint sub-cell border
-                    dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), 0x22FFFFFF);
-                    // Medium lines every 2 cells
-                    uint32_t medCol = 0x44FFFFFF;
-                    if (tx % 2 == 0)
-                        dl->AddLine(ImVec2(x0, y0), ImVec2(x0, y1), medCol, 1.0f);
-                    if (ty % 2 == 0)
-                        dl->AddLine(ImVec2(x0, y0), ImVec2(x1, y0), medCol, 1.0f);
-                    if (tx == tm.width - 1 || (tx + 1) % 2 == 0)
-                        dl->AddLine(ImVec2(x1, y0), ImVec2(x1, y1), medCol, 1.0f);
-                    if (ty == tm.height - 1 || (ty + 1) % 2 == 0)
-                        dl->AddLine(ImVec2(x0, y1), ImVec2(x1, y1), medCol, 1.0f);
-                    // Heavy lines every 4 cells (original tile boundaries)
-                    if (tx % 4 == 0)
-                        dl->AddLine(ImVec2(x0, y0), ImVec2(x0, y1), gridLineCol, 1.0f);
-                    if (ty % 4 == 0)
-                        dl->AddLine(ImVec2(x0, y0), ImVec2(x1, y0), gridLineCol, 1.0f);
-                    if (tx == tm.width - 1 || (tx + 1) % 4 == 0)
-                        dl->AddLine(ImVec2(x1, y0), ImVec2(x1, y1), gridLineCol, 1.0f);
-                    if (ty == tm.height - 1 || (ty + 1) % 4 == 0)
-                        dl->AddLine(ImVec2(x0, y1), ImVec2(x1, y1), gridLineCol, 1.0f);
-                }
+                // Per-cell grid skipped — full-span grid lines drawn after cell loop
 
+            }
+        }
+        // Full-span grid lines (efficient: width + height lines instead of per-cell)
+        if (cellSz >= 4.0f) {
+            // Determine grid line intervals based on cell size
+            int step = 1;
+            if (cellSz < 8.0f) step = 4;
+            else if (cellSz < 16.0f) step = 2;
+            uint32_t lineCol = 0x33FFFFFF;
+            // Vertical lines
+            for (int tx = 0; tx <= tm.width; tx += step) {
+                float x = ox + tx * cellSz;
+                if (x >= clipMin.x && x <= clipMax.x)
+                    dl->AddLine(ImVec2(x, std::max(oy, clipMin.y)), ImVec2(x, std::min(oy + gridH, clipMax.y)), lineCol);
+            }
+            // Horizontal lines
+            for (int ty = 0; ty <= tm.height; ty += step) {
+                float y = oy + ty * cellSz;
+                if (y >= clipMin.y && y <= clipMax.y)
+                    dl->AddLine(ImVec2(std::max(ox, clipMin.x), y), ImVec2(std::min(ox + gridW, clipMax.x), y), lineCol);
             }
         }
         // Outer border around entire grid (foreground so it draws on top of textures)
@@ -7590,8 +7588,8 @@ void FrameTick(float dt)
                     }
                     exportBlueprints.push_back(std::move(bpEx));
                 }
-                // Collect instances from sprites
-                for (int si = 0; si < sSpriteCount; si++) {
+                // Collect instances from 3D sprites (skip for tilemap builds)
+                for (int si = 0; si < sSpriteCount && sActiveTab != EditorTab::Tilemap; si++) {
                     const FloorSprite& sp = sSprites[si];
                     if (sp.blueprintIdx < 0 || sp.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
                     const BlueprintAsset& bp = sBlueprintAssets[sp.blueprintIdx];
@@ -7608,11 +7606,31 @@ void FrameTick(float dt)
                     }
                     exportBpInstances.push_back(inst);
                 }
-                // Skip TmObject blueprint instances — GBA runtime is 3D/Mode7 only;
-                // tilemap blueprints would double-execute Walk/Sprint nodes and cause
-                // the player to move too fast.
-                // Collect scene-level blueprint instances (MapScenes)
-                for (int si = 0; si < (int)sMapScenes.size(); si++) {
+                // Collect TmObject blueprint instances (for Mode 0 tilemap builds)
+                if (sActiveTab == EditorTab::Tilemap) {
+                    for (int si = 0; si < (int)sTmScenes.size(); si++) {
+                        const TmScene& sc = sTmScenes[si];
+                        for (int oi = 0; oi < (int)sc.objects.size(); oi++) {
+                            const TmObject& obj = sc.objects[oi];
+                            if (obj.blueprintIdx < 0 || obj.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
+                            const BlueprintAsset& bp = sBlueprintAssets[obj.blueprintIdx];
+                            GBABlueprintInstanceExport inst;
+                            inst.blueprintIdx = obj.blueprintIdx;
+                            inst.spriteIdx = -1;
+                            inst.tmObjIdx = oi;
+                            inst.paramCount = bp.paramCount;
+                            for (int pi = 0; pi < bp.paramCount; pi++) {
+                                inst.paramValues[pi] = bp.params[pi].defaultInt;
+                                for (int ipi = 0; ipi < obj.instanceParamCount; ipi++)
+                                    if (obj.instanceParams[ipi].paramIdx == pi)
+                                        inst.paramValues[pi] = obj.instanceParams[ipi].value;
+                            }
+                            exportBpInstances.push_back(inst);
+                        }
+                    }
+                }
+                // Collect scene-level blueprint instances (MapScenes) — skip for tilemap builds
+                for (int si = 0; si < (int)sMapScenes.size() && sActiveTab != EditorTab::Tilemap; si++) {
                     const MapScene& ms = sMapScenes[si];
                     if (ms.blueprintIdx < 0 || ms.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
                     const BlueprintAsset& bp = sBlueprintAssets[ms.blueprintIdx];
@@ -7663,8 +7681,11 @@ void FrameTick(float dt)
                         // Build cell → tile index map
                         std::vector<uint16_t> cellMap(sc.mapW * sc.mapH, 0); // default = tile 0 (blank)
 
-                        for (const auto& obj : sc.objects)
+                        // Iterate in reverse so earlier objects overwrite later ones
+                        // (matches editor rendering where first object in list draws on top)
+                        for (int oi = (int)sc.objects.size() - 1; oi >= 0; oi--)
                         {
+                            const auto& obj = sc.objects[oi];
                             if (obj.type != TmObjType::Tile) continue;
                             if (obj.spriteAssetIdx < 0 || obj.spriteAssetIdx >= (int)sSpriteAssets.size()) continue;
 
