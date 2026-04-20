@@ -70,7 +70,7 @@ static u16 dbg_fps_timer;   // last timer snapshot
 static int tm_player_tx, tm_player_ty;  // player grid position
 static int tm_move_dx, tm_move_dy;      // current move direction (-1,0,1)
 static int tm_move_timer;               // frames remaining in current move
-#define TM_MOVE_FRAMES 8                // frames per tile move (smooth walk)
+static int tm_move_frames = 8;          // frames per tile move (derived from afn_move_speed)
 static int tm_cam_x, tm_cam_y;          // camera scroll in pixels
 static int tm_tile_size = 8;            // pixels per tile on screen
 static int tm_scene_idx;                // current scene
@@ -3729,7 +3729,7 @@ int main(void)
                     {
                         tm_move_dx = dx;
                         tm_move_dy = dy;
-                        tm_move_timer = TM_MOVE_FRAMES;
+                        tm_move_timer = tm_move_frames;
                     }
                 }
             }
@@ -3765,6 +3765,13 @@ int main(void)
                 tm_anim_timer = 0;
             }
 
+            // Derive tile move speed from script Walk node
+            // Higher afn_move_speed = faster = fewer frames per tile
+            if (afn_move_speed > 0)
+                tm_move_frames = 48 / afn_move_speed;
+            if (tm_move_frames < 2) tm_move_frames = 2;
+            if (tm_move_frames > 30) tm_move_frames = 30;
+
             // Frame counter
             afn_frame_count++;
 #endif
@@ -3778,9 +3785,9 @@ int main(void)
                 int fromY = tm_player_ty * tm_tile_size;
                 int toX = (tm_player_tx + tm_move_dx) * tm_tile_size;
                 int toY = (tm_player_ty + tm_move_dy) * tm_tile_size;
-                int t = TM_MOVE_FRAMES - tm_move_timer; // 1..TM_MOVE_FRAMES
-                px = fromX + (toX - fromX) * t / TM_MOVE_FRAMES;
-                py = fromY + (toY - fromY) * t / TM_MOVE_FRAMES;
+                int t = tm_move_frames - tm_move_timer; // 1..tm_move_frames
+                px = fromX + (toX - fromX) * t / tm_move_frames;
+                py = fromY + (toY - fromY) * t / tm_move_frames;
             }
             else
             {
