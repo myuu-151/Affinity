@@ -11171,9 +11171,16 @@ void FrameTick(float dt)
                             "// player.x += fwd * inputFwd * moveSpeed;",
                             speed, speed);
                         editorCode = edBuf;
-                        char bodyBuf[256];
+                        char bodyBuf[512];
                         snprintf(bodyBuf, sizeof(bodyBuf),
-                            "    afn_move_speed = %d;", gbaSpeed);
+                            "    afn_move_speed = %d;\n"
+                            "    // --- Runtime (main.c) ---\n"
+                            "    // Mode 0: tm_move_frames = 48 / afn_move_speed; // = %d frames/tile\n"
+                            "    //         tm_move_timer = tm_move_frames; // countdown per tile move\n"
+                            "    //         px = lerp(fromX, toX, t / tm_move_frames);\n"
+                            "    // Mode 7: moveSpeed = afn_move_speed; // = %d\n"
+                            "    //         player_x += (viewSin * inputFwd * moveSpeed) >> 16;",
+                            gbaSpeed, (gbaSpeed > 0 ? 48 / gbaSpeed : 8), gbaSpeed);
                         setActionFunc(infoNode, "_walk", bodyBuf);
                     } else {
                         editorCode =
@@ -11183,7 +11190,13 @@ void FrameTick(float dt)
                             "// ---- 3D Scene ----\n"
                             "sScriptMoveSpeed = $0;";
                         setActionFunc(infoNode, "_walk",
-                            "    afn_move_speed = $0; // connect Integer to speed input");
+                            "    afn_move_speed = $0;\n"
+                            "    // --- Runtime (main.c) ---\n"
+                            "    // Mode 0: tm_move_frames = 48 / afn_move_speed;\n"
+                            "    //         tm_move_timer = tm_move_frames;\n"
+                            "    //         px = lerp(fromX, toX, t / tm_move_frames);\n"
+                            "    // Mode 7: moveSpeed = afn_move_speed;\n"
+                            "    //         player_x += (viewSin * inputFwd * moveSpeed) >> 16;");
                     }
                     break;
                 }
@@ -11205,9 +11218,16 @@ void FrameTick(float dt)
                             "// player.x += fwd * inputFwd * moveSpeed;",
                             speed, speed);
                         editorCode = edBuf;
-                        char bodyBuf[256];
+                        char bodyBuf[512];
                         snprintf(bodyBuf, sizeof(bodyBuf),
-                            "    afn_move_speed = %d;", gbaSpeed);
+                            "    afn_move_speed = %d;\n"
+                            "    // --- Runtime (main.c) ---\n"
+                            "    // Mode 0: tm_move_frames = 48 / afn_move_speed; // = %d frames/tile\n"
+                            "    //         tm_move_timer = tm_move_frames;\n"
+                            "    //         px = lerp(fromX, toX, t / tm_move_frames);\n"
+                            "    // Mode 7: moveSpeed = afn_move_speed; // = %d\n"
+                            "    //         player_x += (viewSin * inputFwd * moveSpeed) >> 16;",
+                            gbaSpeed, (gbaSpeed > 0 ? 48 / gbaSpeed : 8), gbaSpeed);
                         setActionFunc(infoNode, "_sprint", bodyBuf);
                     } else {
                         editorCode =
@@ -11217,7 +11237,13 @@ void FrameTick(float dt)
                             "// ---- 3D Scene ----\n"
                             "sScriptMoveSpeed = $0;";
                         setActionFunc(infoNode, "_sprint",
-                            "    afn_move_speed = $0; // connect Integer to speed input");
+                            "    afn_move_speed = $0;\n"
+                            "    // --- Runtime (main.c) ---\n"
+                            "    // Mode 0: tm_move_frames = 48 / afn_move_speed;\n"
+                            "    //         tm_move_timer = tm_move_frames;\n"
+                            "    //         px = lerp(fromX, toX, t / tm_move_frames);\n"
+                            "    // Mode 7: moveSpeed = afn_move_speed;\n"
+                            "    //         player_x += (viewSin * inputFwd * moveSpeed) >> 16;");
                     }
                     break;
                 }
