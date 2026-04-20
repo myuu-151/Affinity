@@ -758,9 +758,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     if (spd <= 0.0f) spd = 1.0f;
                     int effectiveFps = (int)(fps * spd);
                     if (effectiveFps < 1) effectiveFps = 1;
-                    int endIdx = base + fc - 1;
-                    if (endIdx < base) endIdx = base;
-                    f << "{ " << base << ", " << endIdx << ", " << effectiveFps << " }";
+                    if (fc < 1) fc = 1;
+                    f << "{ " << base << ", " << fc << ", " << effectiveFps << " }";
                     base += fc;
                 }
                 else

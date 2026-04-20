@@ -3743,6 +3743,7 @@ int main(void)
             afn_input_right = 0;
             afn_pending_scene = -1;
             afn_collided_sprite = -1;
+            afn_play_anim = -1;
 
             // Run per-frame script event handlers
             afn_script_update();
@@ -3757,10 +3758,16 @@ int main(void)
             afn_bp_dispatch_key_pressed();
             afn_bp_dispatch_key_released();
 
-            // Apply script-driven animation change
-            if (afn_play_anim >= 0 && afn_play_anim != tm_anim_idx)
-            {
-                tm_anim_idx = afn_play_anim;
+            // Apply script-driven animation change (or revert to idle if no script requested one)
+            if (afn_play_anim >= 0) {
+                if (afn_play_anim != tm_anim_idx) {
+                    tm_anim_idx = afn_play_anim;
+                    tm_anim_frame = 0;
+                    tm_anim_timer = 0;
+                }
+            } else if (tm_anim_idx != 0) {
+                // No script requested an animation this frame — revert to idle
+                tm_anim_idx = 0;
                 tm_anim_frame = 0;
                 tm_anim_timer = 0;
             }
@@ -3822,10 +3829,9 @@ int main(void)
                         int vramT0  = afn_asset_dir_desc[playerAsset][5]; // VRAM tile start
 
                         // Advance animation: cycle direction sets
-                        int startF = afn_anim_desc[playerAsset][tm_anim_idx][0];
-                        int endF   = afn_anim_desc[playerAsset][tm_anim_idx][1];
-                        int fps    = afn_anim_desc[playerAsset][tm_anim_idx][2];
-                        int frameCount = endF - startF + 1;
+                        int baseSet    = afn_anim_desc[playerAsset][tm_anim_idx][0];
+                        int frameCount = afn_anim_desc[playerAsset][tm_anim_idx][1];
+                        int fps        = afn_anim_desc[playerAsset][tm_anim_idx][2];
                         if (frameCount < 1) frameCount = 1;
                         int ticksPerFrame = (fps > 0) ? (60 / fps) : 8;
                         if (ticksPerFrame < 1) ticksPerFrame = 1;
@@ -3839,7 +3845,7 @@ int main(void)
                         }
 
                         // DMA the current direction set to VRAM
-                        int curSet = startF + tm_anim_frame;
+                        int curSet = baseSet + tm_anim_frame;
                         switch_dir_anim_set(playerAsset, curSet);
 
                         // Facing direction from movement
@@ -3889,10 +3895,9 @@ int main(void)
 #endif
                     {
                         // Static asset: use asset_desc
-                        int startF = afn_anim_desc[playerAsset][tm_anim_idx][0];
-                        int endF   = afn_anim_desc[playerAsset][tm_anim_idx][1];
-                        int fps    = afn_anim_desc[playerAsset][tm_anim_idx][2];
-                        int frameCount = endF - startF + 1;
+                        int baseSet    = afn_anim_desc[playerAsset][tm_anim_idx][0];
+                        int frameCount = afn_anim_desc[playerAsset][tm_anim_idx][1];
+                        int fps        = afn_anim_desc[playerAsset][tm_anim_idx][2];
                         if (frameCount < 1) frameCount = 1;
                         int ticksPerFrame = (fps > 0) ? (60 / fps) : 8;
                         if (ticksPerFrame < 1) ticksPerFrame = 1;
@@ -3905,7 +3910,7 @@ int main(void)
                                 tm_anim_frame = 0;
                         }
 
-                        int curFrame = startF + tm_anim_frame;
+                        int curFrame = baseSet + tm_anim_frame;
                         int tileBase = afn_asset_desc[playerAsset][0];
                         int tpf     = afn_asset_desc[playerAsset][1];
                         int objSz   = afn_asset_desc[playerAsset][3];
@@ -3961,6 +3966,7 @@ int main(void)
             afn_input_right = 0;
             afn_pending_scene = -1;
             afn_collided_sprite = -1;
+            afn_play_anim = -1;
 
             // Collision detection: player vs all non-player sprites
             if (player_sprite_idx >= 0) {
@@ -3998,14 +4004,6 @@ int main(void)
             afn_bp_dispatch_key_held();
             afn_bp_dispatch_key_pressed();
             afn_bp_dispatch_key_released();
-
-            // Apply script-driven animation change
-            if (afn_play_anim >= 0 && afn_play_anim != tm_anim_idx)
-            {
-                tm_anim_idx = afn_play_anim;
-                tm_anim_frame = 0;
-                tm_anim_timer = 0;
-            }
 
             // Handle scene switch request
             if (afn_pending_scene >= 0) {
@@ -4228,10 +4226,29 @@ int main(void)
                     if (!g_asset_anim_enabled[ai])
                         continue;
 
-                    // Animation driven by PlayAnim script nodes
+                    // Determine target anim: PlayAnim override, or auto state machine
+                    // States: 0=None, 1=Idle, 2=Walk, 3=Run, 4=Sprint
                     {
-                        int targetAnim = (afn_play_anim >= 0 && afn_play_anim < AFN_MAX_ANIMS)
-                            ? afn_play_anim : 0;
+                        int targetAnim = 0;
+                        int desiredState = 1; // Idle
+                        if (player_moving)
+                            desiredState = key_is_down(KEY_B) ? 4 : 2;
+#ifdef AFN_STATE_COUNT
+                        {
+                            int slot = afn_state_to_anim[ai][desiredState];
+                            if (slot >= 0 && slot < AFN_MAX_ANIMS)
+                                targetAnim = slot;
+                            else
+                            {
+                                if (desiredState == 2) slot = afn_state_to_anim[ai][3];
+                                else if (desiredState == 3) slot = afn_state_to_anim[ai][2];
+                                if (slot >= 0 && slot < AFN_MAX_ANIMS) targetAnim = slot;
+                            }
+                        }
+#endif
+                        // PlayAnim node override (if script explicitly set one)
+                        if (afn_play_anim >= 0 && afn_play_anim < AFN_MAX_ANIMS)
+                            targetAnim = afn_play_anim;
 
                         if (targetAnim != g_current_anim[ai])
                         {
