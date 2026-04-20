@@ -13330,6 +13330,45 @@ void FrameTick(float dt)
                 strncpy(sVsPrevGenScene, sVsGenScene, sizeof(sVsPrevGenScene) - 1);
                 strncpy(sVsPrevGenTilemap, sVsGenTilemap, sizeof(sVsPrevGenTilemap) - 1);
 
+                // Resolve $0-$7 placeholders in display buffers using current connections
+                {
+                    auto cwResolve = [&](char* buf, size_t bufSz) {
+                        for (int pi = 7; pi >= 0; pi--) {
+                            char ph[4]; snprintf(ph, sizeof(ph), "$%d", pi);
+                            char* pos = strstr(buf, ph);
+                            if (!pos) continue;
+                            // Find connected data node
+                            int val = 0;
+                            bool found = false;
+                            for (auto& lk : sVsLinks) {
+                                if (lk.to.nodeId == cwNode.id && lk.to.pinType == 3 && lk.to.pinIdx == pi) {
+                                    for (auto& src : sVsNodes) {
+                                        if (src.id == lk.from.nodeId) {
+                                            val = src.paramInt[0];
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                            if (!found) continue;
+                            // Replace all occurrences of $N with the value
+                            char valStr[16]; snprintf(valStr, sizeof(valStr), "%d", val);
+                            size_t phLen = strlen(ph), vsLen = strlen(valStr);
+                            while ((pos = strstr(buf, ph)) != nullptr) {
+                                size_t tail = strlen(pos + phLen);
+                                if (pos - buf + vsLen + tail >= bufSz - 1) break;
+                                memmove(pos + vsLen, pos + phLen, tail + 1);
+                                memcpy(pos, valStr, vsLen);
+                            }
+                        }
+                    };
+                    cwResolve(sVsCodeWindowEditBuf, sizeof(sVsCodeWindowEditBuf));
+                    cwResolve(sVsCodeWindowSceneBuf, sizeof(sVsCodeWindowSceneBuf));
+                    cwResolve(sVsCodeWindowTilemapBuf, sizeof(sVsCodeWindowTilemapBuf));
+                }
+
                 // Code sections (editable — shows generated code by default, saved overrides persist)
                 auto codeSection = [&](const char* label, const char* imgId, ImVec4 labelColor, ImVec4 textColor,
                                        char* editBuf, size_t editBufSz) {
