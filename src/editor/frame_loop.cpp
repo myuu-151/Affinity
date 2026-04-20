@@ -11141,12 +11141,11 @@ void FrameTick(float dt)
                     if (dir >= 0 && dir < 4)
                         snprintf(bodyBuf, sizeof(bodyBuf),
                             "    if (key_is_down(%s)) %s;\n"
-                            "    // Runtime consumption:\n"
-                            "    // inputFwd/inputRight -> normalize diagonal\n"
-                            "    // moveFwd = (inputFwd * moveSpeed) >> 8;\n"
-                            "    // moveRight = (inputRight * moveSpeed) >> 8;\n"
-                            "    // player_x += (viewSin*moveFwd + rightSin*moveRight) >> 8;\n"
-                            "    // player_z -= (viewCos*moveFwd + rightCos*moveRight) >> 8;",
+                            "    // --- Runtime (main.c) ---\n"
+                            "    // inputFwd = afn_input_fwd; inputRight = afn_input_right;\n"
+                            "    // FIXED moveFwd = (inputFwd * moveSpeed) >> 8;\n"
+                            "    // player_x += (viewSin * moveFwd) >> 8;\n"
+                            "    // player_z -= (viewCos * moveFwd) >> 8;",
                             dirKeysGba[dir], dirVarsGba[dir]);
                     else
                         snprintf(bodyBuf, sizeof(bodyBuf), "    // MovePlayer (no direction set)");
@@ -11255,13 +11254,14 @@ void FrameTick(float dt)
                     float force = 2.0f;
                     if (fd) { memcpy(&force, &fd->paramInt[0], sizeof(float)); }
                     int forceFixed = (int)(force * 256.0f);
-                    char bodyBuf[256];
+                    char bodyBuf[512];
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    if (player_on_ground) player_vy = %d;\n"
-                        "    // Runtime: player_y += player_vy;\n"
-                        "    // player_vy -= afn_gravity;\n"
-                        "    // if (player_vy < -afn_terminal_vel)\n"
-                        "    //     player_vy = -afn_terminal_vel;",
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // player_vy -= afn_gravity; // each frame\n"
+                        "    // if (player_vy < -afn_terminal_vel) player_vy = -afn_terminal_vel;\n"
+                        "    // player_y += player_vy;\n"
+                        "    // if (player_y <= floor_y) { player_y = floor_y; player_on_ground = 1; player_vy = 0; }",
                         forceFixed);
                     setActionFunc(infoNode, "_jump", bodyBuf);
                     break;
@@ -11274,11 +11274,14 @@ void FrameTick(float dt)
                     float factor = 0.75f;
                     if (fd) { memcpy(&factor, &fd->paramInt[0], sizeof(float)); }
                     int factorFixed = (int)(factor * 256.0f);
-                    char bodyBuf[256];
+                    char bodyBuf[512];
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    if (player_vy > 0) player_vy = (player_vy * %d) >> 8;\n"
-                        "    // Applied when A released while rising\n"
-                        "    // Reduces upward velocity for variable jump height",
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // player_vy -= afn_gravity; // each frame\n"
+                        "    // if (player_vy < -afn_terminal_vel) player_vy = -afn_terminal_vel;\n"
+                        "    // player_y += player_vy;\n"
+                        "    // if (player_y <= floor_y) { player_y = floor_y; player_on_ground = 1; player_vy = 0; }",
                         factorFixed);
                     setActionFunc(infoNode, "_dampen_jump", bodyBuf);
                     break;
@@ -11301,8 +11304,10 @@ void FrameTick(float dt)
                     char bodyBuf[256];
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    if (key_is_down(%s)) orbit_angle %s= %d;\n"
-                        "    // orbit_angle drives camera rotation around player\n"
-                        "    // viewAngle = orbit_angle + player facing",
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // viewAngle = orbit_angle;\n"
+                        "    // viewSin = lu_sin(viewAngle); viewCos = lu_cos(viewAngle);\n"
+                        "    // cam_x = player_x - (orbSin * AFN_ORBIT_DIST) >> 8;",
                         okey, osign, ospeed);
                     setActionFunc(infoNode, "_orbit", bodyBuf);
                     break;
@@ -11331,7 +11336,8 @@ void FrameTick(float dt)
                     char bodyBuf[256];
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    afn_gravity = %d;\n"
-                        "    // Runtime: player_vy -= afn_gravity; // each frame",
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // player_vy -= afn_gravity; // each frame while airborne",
                         valFixed);
                     setActionFunc(infoNode, "_set_gravity", bodyBuf);
                     break;
@@ -11347,8 +11353,8 @@ void FrameTick(float dt)
                     char bodyBuf[256];
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    afn_terminal_vel = %d;\n"
-                        "    // Runtime: if (player_vy < -afn_terminal_vel)\n"
-                        "    //     player_vy = -afn_terminal_vel;",
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // if (player_vy < -afn_terminal_vel) player_vy = -afn_terminal_vel;",
                         valFixed);
                     setActionFunc(infoNode, "_set_max_fall", bodyBuf);
                     break;
@@ -11365,9 +11371,10 @@ void FrameTick(float dt)
                     char bodyBuf[256];
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    afn_auto_orbit_speed = %d;\n"
-                        "    // Runtime: if strafing && speed > 0:\n"
-                        "    //   auto_orbit_smooth += (target - smooth) >> 2;\n"
-                        "    //   orbit_angle += auto_orbit_smooth;",
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // if (strafing && speed > 0) autoOrbitTarget = afn_auto_orbit_speed;\n"
+                        "    // auto_orbit_smooth += (target - smooth) >> 2;\n"
+                        "    // orbit_angle += auto_orbit_smooth;",
                         aspeed);
                     setActionFunc(infoNode, "_auto_orbit", bodyBuf);
                     break;
@@ -11394,17 +11401,14 @@ void FrameTick(float dt)
                     char bodyBuf[512];
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    afn_play_anim = %d;\n"
-                        "    // Runtime consumption:\n"
-                        "    // int targetAnim = afn_play_anim;\n"
-                        "    // if (targetAnim != g_current_anim[ai]) {\n"
-                        "    //     g_current_anim[ai] = targetAnim;\n"
-                        "    //     g_anim_frame_counter = 0;\n"
-                        "    // }\n"
-                        "    // int baseSet = afn_anim_desc[ai][targetAnim][0];\n"
-                        "    // int fc = afn_anim_desc[ai][targetAnim][1];\n"
-                        "    // int fps = afn_anim_desc[ai][targetAnim][2];\n"
-                        "    // int frame = (g_anim_frame_counter / (60/fps)) %% fc;\n"
-                        "    // switch_dir_anim_set(ai, baseSet + frame);", animIdx);
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Mode 0: if (afn_play_anim >= 0 && afn_play_anim != tm_anim_idx)\n"
+                        "    //           { tm_anim_idx = afn_play_anim; tm_anim_frame = 0; }\n"
+                        "    //         curSet = afn_anim_desc[asset][tm_anim_idx][0] + tm_anim_frame;\n"
+                        "    //         switch_dir_anim_set(asset, curSet); // DMA tiles to VRAM\n"
+                        "    // Mode 7: targetAnim = afn_play_anim;\n"
+                        "    //         if (targetAnim != g_current_anim[ai]) switch_dir_anim_set(ai, baseSet + frame);",
+                        animIdx);
                     setActionFunc(infoNode, "_play_anim", bodyBuf);
                     break;
                 }
@@ -11491,20 +11495,26 @@ void FrameTick(float dt)
                     editorCode =
                         "// Disable player input";
                     setActionFunc(infoNode, "_freeze",
-                        "    afn_player_frozen = 1;");
+                        "    afn_player_frozen = 1;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // if (!afn_player_frozen) { afn_script_key_held(); ... } // blocks all key input handlers");
                     break;
                 case VsNodeType::UnfreezePlayer:
                     editorCode =
                         "// Re-enable player input";
                     setActionFunc(infoNode, "_unfreeze",
-                        "    afn_player_frozen = 0;");
+                        "    afn_player_frozen = 0;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // if (!afn_player_frozen) { afn_script_key_held(); ... } // blocks all key input handlers");
                     break;
                 case VsNodeType::SetCameraHeight: {
                     editorCode =
                         "// Set camera height above floor";
                     char bodyBuf[256];
                     snprintf(bodyBuf, sizeof(bodyBuf),
-                        "    cam_h = %s << 8;",
+                        "    cam_h = %s << 8;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // cam_y = player_y + cam_h; // camera height above player",
                         fmtInt(infoNode.id, 0, "<height>"));
                     setActionFunc(infoNode, "_set_cam_h", bodyBuf);
                     break;
@@ -11514,7 +11524,9 @@ void FrameTick(float dt)
                         "// Set horizon scanline (0-159)";
                     char bodyBuf[256];
                     snprintf(bodyBuf, sizeof(bodyBuf),
-                        "    m7_horizon = %s;",
+                        "    m7_horizon = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Mode 7 scanline rendering starts from horizon line",
                         fmtInt(infoNode.id, 0, "<scanline>"));
                     setActionFunc(infoNode, "_set_horizon", bodyBuf);
                     break;
@@ -11526,7 +11538,9 @@ void FrameTick(float dt)
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    player_x = %s << 8;\n"
                         "    player_y = %s << 8;\n"
-                        "    player_z = %s << 8;",
+                        "    player_z = %s << 8;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // cam_x = player_x - orbit_offset; // camera follows player position",
                         fmtInt(infoNode.id, 0, "<x>"),
                         fmtInt(infoNode.id, 1, "<y>"),
                         fmtInt(infoNode.id, 2, "<z>"));
@@ -11577,9 +11591,14 @@ void FrameTick(float dt)
                 case VsNodeType::SetVelocityY: {
                     editorCode =
                         "// Set vertical velocity directly (works airborne)";
-                    char bodyBuf[256];
+                    char bodyBuf[512];
                     snprintf(bodyBuf, sizeof(bodyBuf),
-                        "    player_vy = %s;",
+                        "    player_vy = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // player_vy -= afn_gravity; // each frame\n"
+                        "    // if (player_vy < -afn_terminal_vel) player_vy = -afn_terminal_vel;\n"
+                        "    // player_y += player_vy;\n"
+                        "    // if (player_y <= floor_y) { player_y = floor_y; player_on_ground = 1; player_vy = 0; }",
                         fmtFloat(infoNode.id, 0, "<velocity>"));
                     setActionFunc(infoNode, "_set_vel_y", bodyBuf);
                     break;
@@ -11730,10 +11749,12 @@ void FrameTick(float dt)
                 case VsNodeType::ScreenShake: {
                     editorCode =
                         "// Camera shake effect";
-                    char bodyBuf[256];
+                    char bodyBuf[512];
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    afn_shake_intensity = %s;\n"
-                        "    afn_shake_frames = %s;",
+                        "    afn_shake_frames = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // if (afn_shake_frames > 0) { shake_frames--; sx = rand %% (intensity*2+1) - intensity; REG_BG_OFS[2].x = sx; }",
                         fmtInt(infoNode.id, 0, "<intensity>"),
                         fmtInt(infoNode.id, 1, "<frames>"));
                     setActionFunc(infoNode, "_shake", bodyBuf);
@@ -11742,11 +11763,13 @@ void FrameTick(float dt)
                 case VsNodeType::FadeOut: {
                     editorCode =
                         "// Fade screen to black";
-                    char bodyBuf[256];
+                    char bodyBuf[512];
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    afn_fade_target = 16; // full black\n"
                         "    afn_fade_frames = %s;\n"
-                        "    afn_fade_counter = 0;",
+                        "    afn_fade_counter = 0;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // fade_level = fade_counter * 16 / fade_frames; REG_BLDY = fade_level; // 0=clear, 16=black",
                         fmtInt(infoNode.id, 0, "<frames>"));
                     setActionFunc(infoNode, "_fade_out", bodyBuf);
                     break;
@@ -11754,11 +11777,13 @@ void FrameTick(float dt)
                 case VsNodeType::FadeIn: {
                     editorCode =
                         "// Fade screen from black";
-                    char bodyBuf[256];
+                    char bodyBuf[512];
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    afn_fade_target = 0; // full bright\n"
                         "    afn_fade_frames = %s;\n"
-                        "    afn_fade_counter = 0;",
+                        "    afn_fade_counter = 0;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // fade_level = 16 - fade_counter * 16 / fade_frames; REG_BLDY = fade_level;",
                         fmtInt(infoNode.id, 0, "<frames>"));
                     setActionFunc(infoNode, "_fade_in", bodyBuf);
                     break;
@@ -11963,7 +11988,9 @@ void FrameTick(float dt)
                         "    player_x = afn_start_x;\n"
                         "    player_y = afn_start_y;\n"
                         "    player_z = afn_start_z;\n"
-                        "    player_vy = 0;");
+                        "    player_vy = 0;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // cam_x = player_x - orbit_offset; // camera follows player position");
                     break;
                 case VsNodeType::SaveData:
                     editorCode = "// Save flags + score to SRAM";
@@ -11989,7 +12016,9 @@ void FrameTick(float dt)
                     editorCode = "// Change mesh draw distance";
                     char bodyBuf2[256];
                     snprintf(bodyBuf2, sizeof(bodyBuf2),
-                        "    afn_draw_distance = %s;",
+                        "    afn_draw_distance = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // if (afn_draw_distance > 0 && dist > afn_draw_distance) continue; // skip far sprites/meshes",
                         fmtInt(infoNode.id, 0, "<distance>"));
                     setActionFunc(infoNode, "_set_draw_dist", bodyBuf2);
                     break;
@@ -12117,9 +12146,14 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::Bounce: {
                     editorCode = "// Reverse Y velocity with damping";
-                    char bodyBuf3[256];
+                    char bodyBuf3[512];
                     snprintf(bodyBuf3, sizeof(bodyBuf3),
-                        "    player_vy = -(player_vy * %s) >> 8;",
+                        "    player_vy = -(player_vy * %s) >> 8;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // player_vy -= afn_gravity; // each frame\n"
+                        "    // if (player_vy < -afn_terminal_vel) player_vy = -afn_terminal_vel;\n"
+                        "    // player_y += player_vy;\n"
+                        "    // if (player_y <= floor_y) { player_y = floor_y; player_on_ground = 1; player_vy = 0; }",
                         fmtFloat(infoNode.id, 0, "<damping>"));
                     setActionFunc(infoNode, "_bounce", bodyBuf3);
                     break;
