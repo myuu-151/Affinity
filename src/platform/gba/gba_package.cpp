@@ -758,7 +758,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     if (spd <= 0.0f) spd = 1.0f;
                     int effectiveFps = (int)(fps * spd);
                     if (effectiveFps < 1) effectiveFps = 1;
-                    f << "{ " << base << ", " << fc << ", " << effectiveFps << " }";
+                    int endIdx = base + fc - 1;
+                    if (endIdx < base) endIdx = base;
+                    f << "{ " << base << ", " << endIdx << ", " << effectiveFps << " }";
                     base += fc;
                 }
                 else
@@ -1888,16 +1890,20 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 }
                 case GBAScriptNodeType::Walk: {
                     auto* speedData = findDataIn(action->id, 0);
-                    int speed = speedData ? resolveInt(speedData) : 37;
-                    int gbaSpeed = (int)(speed * 37.0f / 35.0f);
-                    f << "    afn_move_speed = " << gbaSpeed << ";\n";
+                    if (speedData) {
+                        int speed = resolveInt(speedData);
+                        int gbaSpeed = (int)(speed * 37.0f / 35.0f);
+                        f << "    afn_move_speed = " << gbaSpeed << ";\n";
+                    }
                     break;
                 }
                 case GBAScriptNodeType::Sprint: {
                     auto* speedData = findDataIn(action->id, 0);
-                    int speed = speedData ? resolveInt(speedData) : 56;
-                    int gbaSpeed = (int)(speed * 37.0f / 35.0f);
-                    f << "    afn_move_speed = " << gbaSpeed << ";\n";
+                    if (speedData) {
+                        int speed = resolveInt(speedData);
+                        int gbaSpeed = (int)(speed * 37.0f / 35.0f);
+                        f << "    afn_move_speed = " << gbaSpeed << ";\n";
+                    }
                     break;
                 }
                 case GBAScriptNodeType::OrbitCamera: {

@@ -11151,49 +11151,71 @@ void FrameTick(float dt)
                     break;
                 }
                 case VsNodeType::Walk: {
-                    editorCode =
-                        "// ---- 2D Tilemap ----\n"
-                        "tmMoveRate = speed;\n"
-                        "// accum[dir] += tmMoveRate * dt;\n"
-                        "// visX/visY lerp speed = tmMoveRate\n"
-                        "\n"
-                        "// ---- 3D Scene ----\n"
-                        "sScriptMoveSpeed = speed;\n"
-                        "// moveSpeed = sScriptMoveSpeed * dt;\n"
-                        "// player.x += fwd * inputFwd * moveSpeed;";
                     auto* sd = resolveDataIn(infoNode.id, 0);
-                    int speed = sd ? sd->paramInt[0] : 37;
-                    int gbaSpeed = (int)(speed * 37.0f / 35.0f);
-                    char bodyBuf[256];
-                    snprintf(bodyBuf, sizeof(bodyBuf),
-                        "    afn_move_speed = %d;\n"
-                        "    // Runtime: moveSpeed = afn_move_speed;\n"
-                        "    // player_x += (viewSin * moveFwd * moveSpeed) >> 16;",
-                        gbaSpeed);
-                    setActionFunc(infoNode, "_walk", bodyBuf);
+                    if (sd) {
+                        int speed = sd->paramInt[0];
+                        int gbaSpeed = (int)(speed * 37.0f / 35.0f);
+                        char edBuf[512];
+                        snprintf(edBuf, sizeof(edBuf),
+                            "// ---- 2D Tilemap ----\n"
+                            "tmMoveRate = %d;\n"
+                            "// accum[dir] += tmMoveRate * dt;\n"
+                            "// visX/visY lerp speed = tmMoveRate\n"
+                            "\n"
+                            "// ---- 3D Scene ----\n"
+                            "sScriptMoveSpeed = %d;\n"
+                            "// moveSpeed = sScriptMoveSpeed * dt;\n"
+                            "// player.x += fwd * inputFwd * moveSpeed;",
+                            speed, speed);
+                        editorCode = edBuf;
+                        char bodyBuf[256];
+                        snprintf(bodyBuf, sizeof(bodyBuf),
+                            "    afn_move_speed = %d;", gbaSpeed);
+                        setActionFunc(infoNode, "_walk", bodyBuf);
+                    } else {
+                        editorCode =
+                            "// ---- 2D Tilemap ----\n"
+                            "tmMoveRate = $0;\n"
+                            "\n"
+                            "// ---- 3D Scene ----\n"
+                            "sScriptMoveSpeed = $0;";
+                        setActionFunc(infoNode, "_walk",
+                            "    afn_move_speed = $0; // connect Integer to speed input");
+                    }
                     break;
                 }
                 case VsNodeType::Sprint: {
-                    editorCode =
-                        "// ---- 2D Tilemap ----\n"
-                        "tmMoveRate = speed;\n"
-                        "// accum[dir] += tmMoveRate * dt;\n"
-                        "// visX/visY lerp speed = tmMoveRate\n"
-                        "\n"
-                        "// ---- 3D Scene ----\n"
-                        "sScriptMoveSpeed = speed;\n"
-                        "// moveSpeed = sScriptMoveSpeed * dt;\n"
-                        "// player.x += fwd * inputFwd * moveSpeed;";
                     auto* sd = resolveDataIn(infoNode.id, 0);
-                    int speed = sd ? sd->paramInt[0] : 56;
-                    int gbaSpeed = (int)(speed * 37.0f / 35.0f);
-                    char bodyBuf[256];
-                    snprintf(bodyBuf, sizeof(bodyBuf),
-                        "    afn_move_speed = %d;\n"
-                        "    // Runtime: moveSpeed = afn_move_speed;\n"
-                        "    // player_x += (viewSin * moveFwd * moveSpeed) >> 16;",
-                        gbaSpeed);
-                    setActionFunc(infoNode, "_sprint", bodyBuf);
+                    if (sd) {
+                        int speed = sd->paramInt[0];
+                        int gbaSpeed = (int)(speed * 37.0f / 35.0f);
+                        char edBuf[512];
+                        snprintf(edBuf, sizeof(edBuf),
+                            "// ---- 2D Tilemap ----\n"
+                            "tmMoveRate = %d;\n"
+                            "// accum[dir] += tmMoveRate * dt;\n"
+                            "// visX/visY lerp speed = tmMoveRate\n"
+                            "\n"
+                            "// ---- 3D Scene ----\n"
+                            "sScriptMoveSpeed = %d;\n"
+                            "// moveSpeed = sScriptMoveSpeed * dt;\n"
+                            "// player.x += fwd * inputFwd * moveSpeed;",
+                            speed, speed);
+                        editorCode = edBuf;
+                        char bodyBuf[256];
+                        snprintf(bodyBuf, sizeof(bodyBuf),
+                            "    afn_move_speed = %d;", gbaSpeed);
+                        setActionFunc(infoNode, "_sprint", bodyBuf);
+                    } else {
+                        editorCode =
+                            "// ---- 2D Tilemap ----\n"
+                            "tmMoveRate = $0;\n"
+                            "\n"
+                            "// ---- 3D Scene ----\n"
+                            "sScriptMoveSpeed = $0;";
+                        setActionFunc(infoNode, "_sprint",
+                            "    afn_move_speed = $0; // connect Integer to speed input");
+                    }
                     break;
                 }
                 case VsNodeType::Jump: {
@@ -13282,6 +13304,13 @@ void FrameTick(float dt)
                     strncpy(sVsCodeWindowSceneBuf, cwNode.codeScene[0] ? cwNode.codeScene : (sVsGenScene[0] ? sVsGenScene : "// Mode 4 code"), sizeof(sVsCodeWindowSceneBuf) - 1);
                     strncpy(sVsCodeWindowTilemapBuf, cwNode.codeTilemap[0] ? cwNode.codeTilemap : (sVsGenTilemap[0] ? sVsGenTilemap : "// Mode 0 code"), sizeof(sVsCodeWindowTilemapBuf) - 1);
                 }
+                // Live-update: refresh from generated code when user hasn't saved custom overrides
+                if (!cwNode.customCode[0] && sVsGenGBA[0] && strcmp(sVsCodeWindowEditBuf, sVsGenGBA) != 0)
+                    strncpy(sVsCodeWindowEditBuf, sVsGenGBA, sizeof(sVsCodeWindowEditBuf) - 1);
+                if (!cwNode.codeScene[0] && sVsGenScene[0] && strcmp(sVsCodeWindowSceneBuf, sVsGenScene) != 0)
+                    strncpy(sVsCodeWindowSceneBuf, sVsGenScene, sizeof(sVsCodeWindowSceneBuf) - 1);
+                if (!cwNode.codeTilemap[0] && sVsGenTilemap[0] && strcmp(sVsCodeWindowTilemapBuf, sVsGenTilemap) != 0)
+                    strncpy(sVsCodeWindowTilemapBuf, sVsGenTilemap, sizeof(sVsCodeWindowTilemapBuf) - 1);
 
                 // Code sections (editable — shows generated code by default, saved overrides persist)
                 auto codeSection = [&](const char* label, const char* imgId, ImVec4 labelColor, ImVec4 textColor,
