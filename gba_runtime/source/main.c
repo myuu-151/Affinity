@@ -15,6 +15,9 @@
 
 #include "mapdata.h"
 
+// libtonc has key_hit (press edge) but no release edge — define it here
+#define key_released(k) (~__key_curr & __key_prev & (k))
+
 // ---------------------------------------------------------------------------
 // Mode 7 state
 // ---------------------------------------------------------------------------
@@ -3731,6 +3734,41 @@ int main(void)
                 }
             }
 
+            // Set player_moving for script nodes (IsMoving, etc.)
+            player_moving = (tm_move_timer > 0 || key_is_down(KEY_LEFT) || key_is_down(KEY_RIGHT) || key_is_down(KEY_UP) || key_is_down(KEY_DOWN));
+
+#ifdef AFN_HAS_SCRIPT
+            // Reset per-frame script state
+            afn_input_fwd = 0;
+            afn_input_right = 0;
+            afn_pending_scene = -1;
+            afn_collided_sprite = -1;
+
+            // Run per-frame script event handlers
+            afn_script_update();
+            if (!afn_player_frozen) {
+                afn_script_key_held();
+                afn_script_key_pressed();
+                afn_script_key_released();
+            }
+            // Blueprint instance dispatch
+            afn_bp_dispatch_update();
+            afn_bp_dispatch_key_held();
+            afn_bp_dispatch_key_pressed();
+            afn_bp_dispatch_key_released();
+
+            // Apply script-driven animation change
+            if (afn_play_anim >= 0 && afn_play_anim != tm_anim_idx)
+            {
+                tm_anim_idx = afn_play_anim;
+                tm_anim_frame = 0;
+                tm_anim_timer = 0;
+            }
+
+            // Frame counter
+            afn_frame_count++;
+#endif
+
             // Compute player pixel position (with smooth interpolation)
             int px, py;
             if (tm_move_timer > 0)
@@ -3758,18 +3796,10 @@ int main(void)
             REG_BG0HOFS = tm_cam_x;
             REG_BG0VOFS = tm_cam_y;
 
-            // Animation state: switch between idle (0) and walk (1)
+            // Animation + rendering
 #if AFN_TM_PLAYER_OBJ >= 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
             {
                 int playerAsset = afn_tm0_objs[AFN_TM_PLAYER_OBJ].assetIdx;
-                int moving = (tm_move_timer > 0) ? 1 : 0;
-                int wantAnim = moving ? 1 : 0; // 0=idle, 1=walk
-                if (wantAnim != tm_anim_idx)
-                {
-                    tm_anim_idx = wantAnim;
-                    tm_anim_frame = 0;
-                    tm_anim_timer = 0;
-                }
 
                 if (playerAsset >= 0 && playerAsset < AFN_ASSET_COUNT)
                 {
@@ -3807,7 +3837,7 @@ int main(void)
 
                         // Facing direction from movement
                         int facing = 4; // default South
-                        if (tm_move_timer > 0 || moving) {
+                        if (tm_move_timer > 0 || tm_move_dx != 0 || tm_move_dy != 0) {
                             if (tm_move_dy < 0) facing = 0;      // up = N
                             else if (tm_move_dy > 0) facing = 4;  // down = S
                             else if (tm_move_dx < 0) facing = 6;  // left = W
@@ -3961,6 +3991,14 @@ int main(void)
             afn_bp_dispatch_key_held();
             afn_bp_dispatch_key_pressed();
             afn_bp_dispatch_key_released();
+
+            // Apply script-driven animation change
+            if (afn_play_anim >= 0 && afn_play_anim != tm_anim_idx)
+            {
+                tm_anim_idx = afn_play_anim;
+                tm_anim_frame = 0;
+                tm_anim_timer = 0;
+            }
 
             // Handle scene switch request
             if (afn_pending_scene >= 0) {
