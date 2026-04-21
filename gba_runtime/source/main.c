@@ -18,6 +18,18 @@
 // libtonc has key_hit (press edge) but no release edge — define it here
 #define key_released(k) (~__key_curr & __key_prev & (k))
 
+// Default starting mode if not defined by export
+// 0=Mode4/3D, 1=Mode0/tilemap, 2=Mode1/Mode7(legacy)
+#ifndef AFN_START_MODE
+  #if defined(AFN_HAS_MODE0)
+    #define AFN_START_MODE 1
+  #elif defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+    #define AFN_START_MODE 0
+  #else
+    #define AFN_START_MODE 2
+  #endif
+#endif
+
 // ---------------------------------------------------------------------------
 // Mode 7 state
 // ---------------------------------------------------------------------------
@@ -64,9 +76,8 @@ static int dbg_fps_frames;  // frame counter for FPS measurement
 static u16 dbg_fps_timer;   // last timer snapshot
 
 // ---------------------------------------------------------------------------
-// Mode 0 tilemap state
+// Mode 0 tilemap state (always declared; only used when afn_current_mode == 1)
 // ---------------------------------------------------------------------------
-#ifdef AFN_MODE0
 static int tm_player_tx, tm_player_ty;  // player grid position
 static int tm_move_dx, tm_move_dy;      // current move direction (-1,0,1)
 static int tm_move_timer;               // frames remaining in current move
@@ -77,7 +88,6 @@ static int tm_scene_idx;                // current scene
 static int tm_anim_idx;                 // current animation index (0=idle, 1=walk, ...)
 static int tm_anim_frame;               // current frame within animation
 static int tm_anim_timer;               // frame counter for animation timing
-#endif
 
 // Perf mode cycled with SELECT:
 // 0 = default
@@ -275,8 +285,8 @@ static FIXED afn_input_right;
 static FIXED afn_move_speed;
 static int   afn_auto_orbit_speed;
 static int   afn_play_anim;
-static int   afn_pending_scene;
-static int   afn_pending_scene_mode;
+static int   afn_pending_scene = -1;
+static int   afn_pending_scene_mode = -1;
 static int   afn_collided_sprite;
 static FIXED afn_gravity;
 static FIXED afn_terminal_vel;
@@ -374,9 +384,13 @@ typedef struct {
 static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
 static int g_spriteCount = 0;
 
-#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
 static int g_page = 0;
-#endif
+
+// ---------------------------------------------------------------------------
+// Runtime scene mode state
+// ---------------------------------------------------------------------------
+static int afn_current_mode;     // 0=Mode4/3D, 1=Mode0/tilemap, 2=Mode1/Mode7
+static int g_scene_transition;   // 0=none, 1=fading_out, 3=fading_in
 
 // Sprite projection result for sorting
 typedef struct {
@@ -3293,32 +3307,52 @@ IWRAM_CODE static int collide_floor(FIXED px, FIXED pz, FIXED py, FIXED *outY)
 #endif /* AFN_COL_FACE_COUNT */
 
 // ---------------------------------------------------------------------------
-// Main
+// Scene management — teardown, init, transition
 // ---------------------------------------------------------------------------
 
-int main(void)
+static void scene_teardown(void)
 {
-    // Boost EWRAM access speed: 8-cycle → 2-cycle on supported hardware.
-    // Undocumented register — safe on real GBA + most emulators.
-    *(volatile u32*)0x04000800 = 0x0E000020;
+    // Disable display during setup
+    REG_DISPCNT = 0;
 
-    // --- Video setup ---
+    // Remove HBlank ISR (Mode 1 uses it)
+    irq_delete(II_HBLANK);
+
+    // Clear OAM
+    { int i; for (i = 0; i < 128; i++) obj_hide(&oam_mem[i]); }
+
+    // Clear BG registers
+    REG_BG0CNT = 0; REG_BG0HOFS = 0; REG_BG0VOFS = 0;
+    REG_BG2CNT = 0;
+    REG_BG2PA = 0x0100; REG_BG2PB = 0; REG_BG2PC = 0; REG_BG2PD = 0x0100;
+    REG_BG2X = 0; REG_BG2Y = 0;
+
+    // Clear BG VRAM (charblocks 0-3 = 64KB)
+    memset((void*)0x06000000, 0, 0x10000);
+
+    // Reset blend
+    REG_BLDCNT = 0; REG_BLDY = 0;
+
+    // Reset page for Mode 4
+    g_page = 0;
+}
+
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+static void mode4_init_scene(void)
+{
     REG_DISPCNT = DCNT_MODE4 | DCNT_BG2 | DCNT_OBJ | DCNT_OBJ_1D;
-    // BG2 identity transform for Mode 4 bitmap display
-    REG_BG2PA = 0x0100;
-    REG_BG2PB = 0;
-    REG_BG2PC = 0;
-    REG_BG2PD = 0x0100;
-    REG_BG2X  = 0;
-    REG_BG2Y  = 0;
-    // Set up BG palette for bitmap rendering
+    REG_BG2PA = 0x0100; REG_BG2PB = 0;
+    REG_BG2PC = 0;      REG_BG2PD = 0x0100;
+    REG_BG2X  = 0;      REG_BG2Y  = 0;
+
+    // BG palette for bitmap rendering
     pal_bg_mem[0] = RGB15(10, 16, 24);  // sky
-    pal_bg_mem[1] = RGB15(4, 10, 4);    // checker dark
-    pal_bg_mem[2] = RGB15(8, 18, 8);    // checker light
-    pal_bg_mem[3] = RGB15(2, 4, 2);     // minimap bg
-    pal_bg_mem[4] = RGB15(5, 10, 5);    // minimap grid
-    // Load mesh shading palette (clamp to 256 BG palette entries)
+    pal_bg_mem[1] = RGB15(4, 10, 4);
+    pal_bg_mem[2] = RGB15(8, 18, 8);
+    pal_bg_mem[3] = RGB15(2, 4, 2);
+    pal_bg_mem[4] = RGB15(5, 10, 5);
+
+    // Mesh shading palette
     {
         int k;
         int maxK = AFN_MESH_COUNT * 8;
@@ -3326,32 +3360,19 @@ int main(void)
         for (k = 0; k < maxK; k++)
             pal_bg_mem[AFN_MESH_PAL_BASE + k] = afn_mesh_palette[k];
     }
-    // Grayscale wireframe palette (indices 5-12)
-    {
-        int k;
-        for (k = 0; k < 8; k++)
-        {
-            int g = k * 31 / 7; // 0 to 31
-            pal_bg_mem[5 + k] = RGB15(g, g, g);
-        }
-    }
-    // Load texture palettes
+    // Grayscale wireframe palette (5-12)
+    { int k; for (k = 0; k < 8; k++) { int g = k * 31 / 7; pal_bg_mem[5 + k] = RGB15(g, g, g); } }
+    // Texture palettes
 #ifdef AFN_TEX_PAL_COUNT
-    {
-        int k;
-        for (k = 0; k < AFN_TEX_PAL_COUNT; k++)
-            pal_bg_mem[AFN_TEX_PAL_BASE + k] = afn_tex_palette[k];
-    }
+    { int k; for (k = 0; k < AFN_TEX_PAL_COUNT; k++) pal_bg_mem[AFN_TEX_PAL_BASE + k] = afn_tex_palette[k]; }
 #endif
-    // Copy mesh textures from ROM to EWRAM for faster pixel reads
+    // Copy textures ROM → EWRAM
     {
-        int mi2;
-        int offset = 0;
+        int mi2, offset = 0;
         for (mi2 = 0; mi2 < AFN_MESH_COUNT; mi2++)
         {
             int tw = afn_mesh_desc[mi2][9];
-            int th = tw; // textures are square
-            int sz = tw * th;
+            int sz = tw * tw;
             if (afn_mesh_tex_ptrs[mi2] && sz > 0 && offset + sz <= TEX_CACHE_SIZE)
             {
                 memcpy(tex_cache + offset, afn_mesh_tex_ptrs[mi2], sz);
@@ -3359,25 +3380,85 @@ int main(void)
                 offset += sz;
             }
             else
-            {
-                tex_cache_ptrs[mi2] = (u8*)afn_mesh_tex_ptrs[mi2]; // fallback to ROM
-            }
+                tex_cache_ptrs[mi2] = (u8*)afn_mesh_tex_ptrs[mi2];
         }
     }
-#else
-  #ifdef AFN_MODE0
-    REG_DISPCNT = DCNT_MODE0 | DCNT_BG0 | DCNT_OBJ | DCNT_OBJ_1D;
-  #else
-    REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
-  #endif
+
+    // Reload OBJ tiles (tile offset 512 for Mode 4)
+    init_obj_sprites();
+
+    // Camera init
+#ifdef AFFINITY_HAS_SPRITES
+    cam_x     = AFN_CAM_X;
+    cam_z     = AFN_CAM_Z;
+    cam_h     = AFN_CAM_H;
+    cam_angle = AFN_CAM_ANGLE;
+    m7_horizon = AFN_CAM_HORIZON;
 #endif
 
-#ifdef AFN_MODE0
-    // --- Mode 0: Regular tiled BG ---
+    // Orbit camera init
+    player_sprite_idx = -1;
+#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
+    player_sprite_idx = AFN_PLAYER_IDX;
+#if defined(AFFINITY_HAS_SPRITES) && AFN_SPRITE_COUNT > 0
+    load_editor_sprites();
+    player_x = g_sprites[AFN_PLAYER_IDX].x;
+    player_z = g_sprites[AFN_PLAYER_IDX].z;
+    player_y = g_sprites[AFN_PLAYER_IDX].y;
+#endif
+    orbit_angle = AFN_CAM_ANGLE;
+    orbit_dist = AFN_ORBIT_DIST;
+    player_moving = 0;
+    player_move_angle = 0x4000;
+#ifdef AFN_COL_FACE_COUNT
+    player_ground_y = 0;
+    player_vy = 0;
+    player_on_ground = 1;
+    cam_y_smooth = 0;
+#endif
+#ifdef AFN_HAS_SCRIPT
+    afn_start_x = player_x;
+    afn_start_y = player_y;
+    afn_start_z = player_z;
+    { int i; for (i = 0; i < 16 && i < NUM_SPRITES; i++) {
+        afn_patrol_home_x[i] = g_sprites[i].wx;
+        afn_patrol_home_z[i] = g_sprites[i].wz;
+    } }
+#endif
+#endif
+
+    // Determine which assets have animation-enabled sprites
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+#if defined(AFN_SPRITE_COUNT) && AFN_SPRITE_COUNT > 0
     {
-        // BG size from export: 0=32x32, 1=64x32, 2=32x64, 3=64x64
+        int si;
+        for (si = 0; si < g_spriteCount; si++)
+        {
+            int aidx = g_sprites[si].assetIdx;
+            if (aidx >= 0 && aidx < AFN_ASSET_COUNT && g_sprites[si].animEnabled
+                && g_sprites[si].spriteType == 1)
+                g_asset_anim_enabled[aidx] = 1;
+        }
+    }
+#endif
+#endif
+
+    g_page = 0;
+    g_cosf = lu_cos(cam_angle) >> 4;
+    g_sinf = lu_sin(cam_angle) >> 4;
+}
+#endif /* AFN_MESH_COUNT */
+
+#ifdef AFN_HAS_MODE0
+static void mode0_init_scene(int tmIdx)
+{
+    REG_DISPCNT = DCNT_MODE0 | DCNT_BG0 | DCNT_OBJ | DCNT_OBJ_1D;
+
+    // Currently only scene 0 data is statically accessible via AFN_TM0_* defines
+    // (runtime multi-tilemap-scene requires data indirection — future work)
+    {
         u16 bgSizeFlag;
-        int sbbBase = 28; // screenblock base
+        int sbbBase = 28;
 #if AFN_TM0_BG_SIZE == 3
         bgSizeFlag = BG_REG_64x64; sbbBase = 28;
 #elif AFN_TM0_BG_SIZE == 2
@@ -3391,19 +3472,18 @@ int main(void)
         REG_BG0HOFS = 0;
         REG_BG0VOFS = 0;
     }
-    // Load scene 0 tilemap data
+
+    // Load tilemap data
     {
         int ti;
         const u32 *src = afn_tm0_tiles;
         u32 *dst = (u32*)tile_mem[0];
         for (ti = 0; ti < (int)(AFN_TM0_TILES_LEN / 4); ti++)
             dst[ti] = src[ti];
-        // Load BG palette (256 entries = 16 banks of 16 colors)
         for (ti = 0; ti < 256; ti++)
             pal_bg_mem[ti] = afn_tm0_pal[ti];
-        // Set palette index 0 to white for empty tile background
         pal_bg_mem[0] = RGB15(31, 31, 31);
-        // Load screen map with proper screenblock layout
+        // Load screen map
         {
             int mapW = AFN_TM0_W;
             int mapH = AFN_TM0_H;
@@ -3418,7 +3498,6 @@ int main(void)
 #else
             bgW = 32; bgH = 32; sbbBase2 = 31;
 #endif
-            // Clear all screenblocks used
             {
                 int nSBB2;
 #if AFN_TM0_BG_SIZE == 3
@@ -3432,52 +3511,157 @@ int main(void)
                 for (si = 0; si < nSBB2; si++)
                     memset(se_mem[sbbBase2 + si], 0, 32 * 32 * 2);
             }
-            // Copy map entries into screenblocks
             for (y = 0; y < mapH && y < bgH; y++)
-            {
                 for (x = 0; x < mapW && x < bgW; x++)
                 {
-                    // Screenblock layout: each 32x32 block is one screenblock
-                    int sbbOfs = (x >> 5); // 0 for left, 1 for right
+                    int sbbOfs = (x >> 5);
                     if (y >= 32) sbbOfs += (bgW > 32) ? 2 : 1;
                     u16 *map = (u16*)se_mem[sbbBase2 + sbbOfs];
                     map[(y & 31) * 32 + (x & 31)] = afn_tm0_map[y * mapW + x];
                 }
-            }
         }
     }
-#elif !defined(AFN_MESH_COUNT) || AFN_MESH_COUNT == 0
-    REG_BG2CNT = BG_CBB(2) | BG_SBB(28) | BG_AFF_64x64 | BG_8BPP | BG_PRIO(2);
 
-    REG_BG2PA = 0x0100;
-    REG_BG2PB = 0;
-    REG_BG2PC = 0;
-    REG_BG2PD = 0x0100;
-    REG_BG2X  = 0;
-    REG_BG2Y  = 0;
-
-    // --- Load map data ---
-#ifdef AFFINITY_HAS_MAPDATA
-    load_editor_map();
-#else
-    load_checkerboard();
-#endif
-#endif /* !AFN_MESH_COUNT */
-
-    // --- OBJ sprite setup ---
+    // Reload OBJ tiles
     init_obj_sprites();
 
-    // DMA direction animation set 0 from ROM to VRAM at boot
-#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_DIR_ANIM_TILES_LEN)
+    // Player init
+    tm_scene_idx = tmIdx;
+    tm_move_dx = 0; tm_move_dy = 0; tm_move_timer = 0;
+#if AFN_TM_PLAYER_OBJ >= 0
+    tm_player_tx = afn_tm0_objs[AFN_TM_PLAYER_OBJ].tx;
+    tm_player_ty = afn_tm0_objs[AFN_TM_PLAYER_OBJ].ty;
+#else
+    tm_player_tx = 0; tm_player_ty = 0;
+#endif
+    tm_cam_x = tm_player_tx * tm_tile_size - 120 + tm_tile_size / 2;
+    tm_cam_y = tm_player_ty * tm_tile_size - 80 + tm_tile_size / 2;
+    tm_anim_idx = 0; tm_anim_frame = 0; tm_anim_timer = 0;
+
+    // Load direction sprite set 0 for player asset
+#if AFN_TM_PLAYER_OBJ >= 0 && defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
     {
-        int ai;
-        for (ai = 0; ai < AFN_ASSET_COUNT; ai++)
-        {
-            if (!afn_asset_dir_desc[ai][4]) continue;
-            switch_dir_anim_set(ai, 0);
+        int pa = afn_tm0_objs[AFN_TM_PLAYER_OBJ].assetIdx;
+        if (pa >= 0 && pa < AFN_ASSET_COUNT && afn_asset_dir_desc[pa][4]) {
+            g_active_dir_set[pa] = -1;
+            switch_dir_anim_set(pa, 0);
         }
     }
 #endif
+}
+#endif /* AFN_HAS_MODE0 */
+
+static void scene_load(int sceneMode, int sceneIdx)
+{
+    afn_current_mode = sceneMode;
+
+    // Reset per-scene script state (preserve score, inventory, flags, vars, rng)
+#ifdef AFN_HAS_SCRIPT
+    afn_frame_count = 0;
+    afn_play_anim = -1;
+    afn_collided_sprite = -1;
+    afn_pending_scene = -1;
+    afn_pending_scene_mode = -1;
+    afn_scripts_stopped = 0;
+    afn_player_frozen = 0;
+    afn_shake_frames = 0;
+    afn_dlg_open = 0;
+    player_moving = 0;
+    { int i; for (i = 0; i < 16; i++) {
+        afn_hp[i] = 100; afn_max_hp[i] = 100;
+        afn_collision_enabled[i] = 1; afn_sprite_alpha[i] = 16;
+        afn_state[i] = 0; afn_prev_state[i] = 0; afn_state_timer[i] = 0;
+        afn_sprite_flip[i] = 0; afn_sprite_layer[i] = 0;
+        afn_flash_obj[i] = 0; afn_sprite_shake[i] = 0;
+        afn_lifetime[i] = 0; afn_collision_size[i] = 0;
+        afn_collision_ignore[i] = 0;
+    } }
+    afn_move_speed = AFN_WALK_SPEED;
+#endif
+
+    if (sceneMode == 1) {
+#ifdef AFN_HAS_MODE0
+        mode0_init_scene(sceneIdx);
+#endif
+    } else if (sceneMode == 0) {
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+        mode4_init_scene();
+#endif
+    } else {
+        // Mode 1 (legacy Mode 7) — not switching to this at runtime
+    }
+
+    // Re-run OnStart scripts for new scene
+#ifdef AFN_HAS_SCRIPT
+    afn_script_start();
+    afn_bp_dispatch_start();
+#endif
+}
+
+static void start_scene_transition(void)
+{
+    g_scene_transition = 1;
+#ifdef AFN_HAS_SCRIPT
+    afn_fade_target = 16;  // fade to black
+    afn_fade_frames = 15;
+    afn_fade_counter = 0;
+    REG_BLDCNT = BLD_BUILD(BLD_BG0 | BLD_BG2 | BLD_OBJ, 0, BLD_BLACK);
+#else
+    // No script — instant switch
+    g_scene_transition = 0;
+#endif
+}
+
+static void handle_scene_transition(void)
+{
+#ifdef AFN_HAS_SCRIPT
+    switch (g_scene_transition) {
+    case 1: // Fading out
+        afn_fade_counter++;
+        afn_fade_level = afn_fade_counter * 16 / afn_fade_frames;
+        REG_BLDY = afn_fade_level;
+        if (afn_fade_counter >= afn_fade_frames) {
+            afn_fade_level = 16;
+            REG_BLDY = 16;
+            // Teardown and load new scene
+            scene_teardown();
+            scene_load(afn_pending_scene_mode, afn_pending_scene);
+            // Start fade in
+            afn_fade_target = 0;
+            afn_fade_frames = 15;
+            afn_fade_counter = 0;
+            REG_BLDCNT = BLD_BUILD(BLD_BG0 | BLD_BG2 | BLD_OBJ, 0, BLD_BLACK);
+            REG_BLDY = 16;
+            g_scene_transition = 3;
+        }
+        break;
+    case 3: // Fading in
+        afn_fade_counter++;
+        afn_fade_level = 16 - afn_fade_counter * 16 / afn_fade_frames;
+        REG_BLDY = afn_fade_level;
+        if (afn_fade_counter >= afn_fade_frames) {
+            afn_fade_level = 0;
+            afn_fade_frames = 0;
+            REG_BLDCNT = 0;
+            REG_BLDY = 0;
+            g_scene_transition = 0;
+            afn_pending_scene = -1;
+            afn_pending_scene_mode = -1;
+        }
+        break;
+    }
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+int main(void)
+{
+    // Boost EWRAM access speed: 8-cycle → 2-cycle on supported hardware.
+    // Undocumented register — safe on real GBA + most emulators.
+    *(volatile u32*)0x04000800 = 0x0E000020;
 
     // --- Reciprocal LUT for texture rasterizer ---
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
@@ -3485,20 +3669,109 @@ int main(void)
     init_divLUT();
 #endif
 
-    // --- Minimap setup ---
-#if !defined(AFN_MODE0) && (!defined(AFN_MESH_COUNT) || AFN_MESH_COUNT == 0)
-    init_minimap();
+    // --- Camera defaults ---
+    cam_fov = 128;
+#ifdef AFFINITY_HAS_SPRITES
+    cam_x     = AFN_CAM_X;
+    cam_z     = AFN_CAM_Z;
+    cam_h     = AFN_CAM_H;
+    cam_angle = AFN_CAM_ANGLE;
+    m7_horizon = AFN_CAM_HORIZON;
+#else
+    cam_x     = 128 << 8;
+    cam_z     = 128 << 8;
+    cam_h     = 14 << 8;
+    cam_angle = 0;
 #endif
 
+    // --- Script defaults ---
+#ifdef AFN_HAS_SCRIPT
+    afn_move_speed = AFN_WALK_SPEED;
+    afn_auto_orbit_speed = 0;
+    afn_gravity = AFN_GRAVITY;
+    afn_terminal_vel = AFN_TERMINAL_VEL;
+    afn_play_anim = -1;
+    afn_pending_scene = -1;
+    afn_pending_scene_mode = -1;
+    afn_frame_count = 0;
+    afn_score = 0;
+    { int i; for (i = 0; i < 16; i++) {
+        afn_hp[i] = 100; afn_max_hp[i] = 100; afn_collision_enabled[i] = 1; afn_sprite_alpha[i] = 16;
+    } }
+    afn_text_color = 0x7FFF;
+#endif
+
+    // --- Initial scene load (uses AFN_START_MODE from export) ---
+    afn_current_mode = AFN_START_MODE;
+    g_scene_transition = 0;
+
+    if (afn_current_mode == 1) {
+#ifdef AFN_HAS_MODE0
+        mode0_init_scene(0);
+#endif
+    } else if (afn_current_mode == 0) {
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+        mode4_init_scene();
+#endif
+    } else {
+        // Mode 1 (legacy Mode 7 floor)
+        REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
+        REG_BG2CNT = BG_CBB(2) | BG_SBB(28) | BG_AFF_64x64 | BG_8BPP | BG_PRIO(2);
+        REG_BG2PA = 0x0100; REG_BG2PB = 0;
+        REG_BG2PC = 0;      REG_BG2PD = 0x0100;
+        REG_BG2X  = 0;      REG_BG2Y  = 0;
+#ifdef AFFINITY_HAS_MAPDATA
+        load_editor_map();
+#else
+        load_checkerboard();
+#endif
+        init_obj_sprites();
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_DIR_ANIM_TILES_LEN)
+        { int ai; for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {
+            if (!afn_asset_dir_desc[ai][4]) continue;
+            switch_dir_anim_set(ai, 0);
+        } }
+#endif
+        init_minimap();
 #if defined(AFFINITY_HAS_SPRITES) && AFN_SPRITE_COUNT > 0
-    load_editor_sprites();
+        load_editor_sprites();
 #else
     #ifndef AFFINITY_HAS_MAPDATA
-    init_demo_sprites();
+        init_demo_sprites();
     #endif
 #endif
+        // Orbit camera init for legacy mode
+        player_sprite_idx = -1;
+#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
+        player_sprite_idx = AFN_PLAYER_IDX;
+        player_x = g_sprites[AFN_PLAYER_IDX].x;
+        player_z = g_sprites[AFN_PLAYER_IDX].z;
+        player_y = g_sprites[AFN_PLAYER_IDX].y;
+        orbit_angle = AFN_CAM_ANGLE;
+        orbit_dist = AFN_ORBIT_DIST;
+        player_moving = 0;
+        player_move_angle = 0x4000;
+#ifdef AFN_COL_FACE_COUNT
+        player_ground_y = 0; player_vy = 0; player_on_ground = 1; cam_y_smooth = 0;
+#endif
+#ifdef AFN_HAS_SCRIPT
+        afn_start_x = player_x; afn_start_y = player_y; afn_start_z = player_z;
+        if (g_spriteCount > 0) {
+            int i; for (i = 0; i < 16 && i < NUM_SPRITES; i++) {
+                afn_patrol_home_x[i] = g_sprites[i].wx; afn_patrol_home_z[i] = g_sprites[i].wz;
+            }
+        }
+#endif
+#endif
+    }
 
-    // Determine which assets have animation-enabled sprites (must be after load_editor_sprites)
+    // Run OnStart scripts
+#ifdef AFN_HAS_SCRIPT
+    afn_script_start();
+    afn_bp_dispatch_start();
+#endif
+
+    // Determine which assets have animation-enabled sprites
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
 #if defined(AFN_SPRITE_COUNT) && AFN_SPRITE_COUNT > 0
     {
@@ -3507,97 +3780,8 @@ int main(void)
         {
             int aidx = g_sprites[si].assetIdx;
             if (aidx >= 0 && aidx < AFN_ASSET_COUNT && g_sprites[si].animEnabled
-                && g_sprites[si].spriteType == 1) // 1 = Player
+                && g_sprites[si].spriteType == 1)
                 g_asset_anim_enabled[aidx] = 1;
-        }
-    }
-#endif
-#endif
-
-    // --- Camera init ---
-#ifdef AFFINITY_HAS_SPRITES
-    cam_x     = AFN_CAM_X;
-    cam_z     = AFN_CAM_Z;
-    cam_h     = AFN_CAM_H;
-    cam_angle = AFN_CAM_ANGLE;
-    cam_fov   = 128;
-    m7_horizon = AFN_CAM_HORIZON;
-#else
-    cam_x     = 128 << 8;
-    cam_z     = 128 << 8;
-    cam_h     = 14 << 8;
-    cam_angle = 0;
-    cam_fov   = 128;
-#endif
-
-    // --- Orbit camera init ---
-    player_sprite_idx = -1;
-#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
-    player_sprite_idx = AFN_PLAYER_IDX;
-    player_x = g_sprites[AFN_PLAYER_IDX].x;
-    player_z = g_sprites[AFN_PLAYER_IDX].z;
-    player_y = g_sprites[AFN_PLAYER_IDX].y;
-    orbit_angle = AFN_CAM_ANGLE;
-    orbit_dist = AFN_ORBIT_DIST;
-    player_moving = 0;
-    player_move_angle = 0x4000; // face away from camera (show back)
-#ifdef AFN_COL_FACE_COUNT
-    player_ground_y = 0;
-    player_vy = 0;
-    player_on_ground = 1;
-    cam_y_smooth = 0;
-#endif
-#ifdef AFN_HAS_SCRIPT
-    // Init script defaults before running OnStart handlers
-    afn_move_speed = AFN_WALK_SPEED;
-    afn_auto_orbit_speed = 0;
-    afn_gravity = AFN_GRAVITY;
-    afn_terminal_vel = AFN_TERMINAL_VEL;
-    afn_play_anim = -1;
-    afn_pending_scene = -1;
-    afn_start_x = player_x;
-    afn_start_y = player_y;
-    afn_start_z = player_z;
-    afn_frame_count = 0;
-    afn_score = 0;
-    { int i; for (i = 0; i < 16; i++) {
-        afn_hp[i] = 100; afn_max_hp[i] = 100; afn_collision_enabled[i] = 1; afn_sprite_alpha[i] = 16;
-        if (i < NUM_SPRITES) { afn_patrol_home_x[i] = g_sprites[i].wx; afn_patrol_home_z[i] = g_sprites[i].wz; }
-    } }
-    afn_text_color = 0x7FFF;
-    afn_script_start();
-    afn_bp_dispatch_start();
-#endif
-#endif
-
-    // --- Mode 0 player init ---
-#ifdef AFN_MODE0
-    tm_scene_idx = AFN_TM_START_SCENE;
-    tm_move_dx = 0;
-    tm_move_dy = 0;
-    tm_move_timer = 0;
-    // Find player object position
-#if AFN_TM_PLAYER_OBJ >= 0
-    tm_player_tx = afn_tm0_objs[AFN_TM_PLAYER_OBJ].tx;
-    tm_player_ty = afn_tm0_objs[AFN_TM_PLAYER_OBJ].ty;
-#else
-    tm_player_tx = 0;
-    tm_player_ty = 0;
-#endif
-    // Center camera on player
-    tm_cam_x = tm_player_tx * tm_tile_size - 120 + tm_tile_size / 2;
-    tm_cam_y = tm_player_ty * tm_tile_size - 80 + tm_tile_size / 2;
-    // Start with idle animation (anim 0)
-    tm_anim_idx = 0;
-    tm_anim_frame = 0;
-    tm_anim_timer = 0;
-    // Load direction sprite set 0 for player asset (if directional)
-#if AFN_TM_PLAYER_OBJ >= 0 && defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
-    {
-        int pa = afn_tm0_objs[AFN_TM_PLAYER_OBJ].assetIdx;
-        if (pa >= 0 && pa < AFN_ASSET_COUNT && afn_asset_dir_desc[pa][4]) {
-            g_active_dir_set[pa] = -1; // force load
-            switch_dir_anim_set(pa, 0);
         }
     }
 #endif
@@ -3618,9 +3802,9 @@ int main(void)
 
     irq_init(NULL);
     irq_add(II_VBLANK, NULL);
-#if !defined(AFN_MODE0) && (!defined(AFN_MESH_COUNT) || AFN_MESH_COUNT == 0)
-    irq_add(II_HBLANK, m7_hbl);
-#endif
+    // HBlank ISR only for Mode 1 (legacy Mode 7 floor)
+    if (afn_current_mode == 2)
+        irq_add(II_HBLANK, m7_hbl);
 
 #ifdef AFN_COVERAGE_BUF
     g_coverageOn = 1;
@@ -3631,11 +3815,11 @@ int main(void)
     while (1)
     {
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-        // Software render to back buffer
+        // Software render to back buffer (Mode 4 / 3D only)
+        if (afn_current_mode == 0)
         {
             u16* vramBuf = g_page ? (u16*)0x06000000 : (u16*)0x0600A000;
             u16* backbuf = g_ewramRender ? g_ewramBuf : vramBuf;
-            // Clear framebuffer with stmia (sky color = palette 0)
             afn_clear_fb_stmia(backbuf, 0);
             if (g_coverageOn) coverage_clear();
             dbg_tex_tris = 0;
@@ -3643,23 +3827,18 @@ int main(void)
             g_pixels_drawn = 0;
             dbg_tex_pixels = 0;
             {
-                // Single timer with prescaler=64: 1 tick = 64 cycles, max ~4.2M cycles
-                REG_TM2CNT_H = 0;           // disable
-                REG_TM2CNT_L = 0;           // reload = 0
-                REG_TM2CNT_H = 0x0081;      // enable, prescaler=64
+                REG_TM2CNT_H = 0;
+                REG_TM2CNT_L = 0;
+                REG_TM2CNT_H = 0x0081;
                 render_meshes_sw(backbuf);
                 dbg_vcount = (int)REG_TM2CNT_L;
-                // Keep timer running to measure total frame
             }
-            // If EWRAM render, DMA copy to VRAM backbuf
             if (g_ewramRender)
                 DMA_TRANSFER(vramBuf, g_ewramBuf, 120 * 160 / 2, 3, DMA_NOW | DMA_32);
-            // Debug overlay: render Kcycles | total Kcycles (from last frame)
             dbg_int(vramBuf, 2, 2, dbg_tex_tris, 1);
             dbg_int(vramBuf, 30, 2, dbg_tex_spans, 1);
-            dbg_int(vramBuf, 62, 2, (dbg_vcount * 64) / 1000, 1); // render Kcycles
-            dbg_int(vramBuf, 102, 2, dbg_total_kcy, 1); // total Kcycles (prev frame)
-            // FPS counter — bottom-right, perf mode — bottom-left
+            dbg_int(vramBuf, 62, 2, (dbg_vcount * 64) / 1000, 1);
+            dbg_int(vramBuf, 102, 2, dbg_total_kcy, 1);
             dbg_int(vramBuf, 240 - 20, 160 - 7, dbg_fps, 1);
             dbg_int(vramBuf, 2, 160 - 7, g_texFixMode, 2);
         }
@@ -3678,24 +3857,41 @@ int main(void)
         }
         // Capture total frame time (timer still running from render start)
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-        dbg_total_kcy = ((int)REG_TM2CNT_L * 64) / 1000; // total Kcycles
-        REG_TM2CNT_H = 0; // stop timer
+        if (afn_current_mode == 0) {
+            dbg_total_kcy = ((int)REG_TM2CNT_L * 64) / 1000;
+            REG_TM2CNT_H = 0;
+        }
 #endif
         VBlankIntrWait();
-#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-        // Flip page
-        g_page ^= 1;
-        REG_DISPCNT = DCNT_MODE4 | DCNT_BG2 | DCNT_OBJ | DCNT_OBJ_1D | (g_page ? DCNT_PAGE : 0);
-#elif !defined(AFN_MODE0)
-        REG_DISPCNT &= ~DCNT_BG2;
-#endif
+        // Page flip (Mode 4 only)
+        if (afn_current_mode == 0) {
+            g_page ^= 1;
+            REG_DISPCNT = DCNT_MODE4 | DCNT_BG2 | DCNT_OBJ | DCNT_OBJ_1D | (g_page ? DCNT_PAGE : 0);
+        } else if (afn_current_mode == 2) {
+            REG_DISPCNT &= ~DCNT_BG2; // Mode 7: BG2 managed by HBlank ISR
+        }
         key_poll();
 
-#ifdef AFN_MODE0
+        // --- Scene transition state machine ---
+        if (g_scene_transition > 0) {
+            handle_scene_transition();
+            continue;
+        }
+        // Check for pending scene switch
+#ifdef AFN_HAS_SCRIPT
+        if (afn_pending_scene >= 0 && afn_pending_scene_mode >= 0) {
+            start_scene_transition();
+            continue;
+        }
+#endif
+
         // ============================================================
-        // MODE 0 TILEMAP UPDATE
+        // RUNTIME MODE DISPATCH
         // ============================================================
+#ifdef AFN_HAS_MODE0
+        if (afn_current_mode == 1)
         {
+        // ---- MODE 0 TILEMAP UPDATE ----
             // Grid-based movement
             if (tm_move_timer > 0)
             {
@@ -3742,6 +3938,7 @@ int main(void)
             afn_input_fwd = 0;
             afn_input_right = 0;
             afn_pending_scene = -1;
+            afn_pending_scene_mode = -1;
             afn_collided_sprite = -1;
             afn_play_anim = -1;
 
@@ -3935,8 +4132,9 @@ int main(void)
                     obj_hide(&oam_mem[i]);
             }
         }
-        continue; // skip Mode 7 / 3D mesh logic
-#endif /* AFN_MODE0 */
+        else
+        { /* Mode 4 / Mode 7 update */
+#endif /* AFN_HAS_MODE0 */
 
         // SELECT: cycle perf mode
         if (key_hit(KEY_SELECT))
@@ -3965,6 +4163,7 @@ int main(void)
             afn_input_fwd = 0;
             afn_input_right = 0;
             afn_pending_scene = -1;
+            afn_pending_scene_mode = -1;
             afn_collided_sprite = -1;
             afn_play_anim = -1;
 
@@ -4005,10 +4204,7 @@ int main(void)
             afn_bp_dispatch_key_pressed();
             afn_bp_dispatch_key_released();
 
-            // Handle scene switch request
-            if (afn_pending_scene >= 0) {
-                // TODO: multi-scene data loading
-            }
+            // Scene switch is now handled by the transition state machine above
 
             // Frame counter
             afn_frame_count++;
@@ -4339,9 +4535,15 @@ int main(void)
         // Project and draw sprites
         update_sprites();
 
-        // Update minimap (not in mesh/bitmap mode — no BG0 available, not in Mode 0)
-#if !defined(AFN_MODE0) && (!defined(AFN_MESH_COUNT) || AFN_MESH_COUNT == 0)
-        update_minimap();
+        // Update minimap (Mode 1/Mode 7 only — no BG0 in mesh mode, not in Mode 0)
+        if (afn_current_mode == 2) {
+#if !defined(AFN_HAS_MESHES) || !defined(AFN_HAS_MODE0)
+            update_minimap();
+#endif
+        }
+
+#ifdef AFN_HAS_MODE0
+        } /* end Mode 4/7 else block */
 #endif
     }
 

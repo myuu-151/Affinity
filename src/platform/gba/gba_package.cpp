@@ -1453,8 +1453,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static FIXED afn_move_speed;\n";
         f << "static int   afn_auto_orbit_speed;\n";
         f << "static int   afn_play_anim;\n";
-        f << "static int   afn_pending_scene;\n";
-        f << "static int   afn_pending_scene_mode;\n";
+        f << "static int   afn_pending_scene = -1;\n";
+        f << "static int   afn_pending_scene_mode = -1;\n";
         f << "static int   afn_collided_sprite;\n";
         f << "static FIXED afn_gravity;\n";
         f << "static FIXED afn_terminal_vel;\n";
@@ -4235,7 +4235,19 @@ static bool GenerateMapData(const std::string& runtimeDir,
             emitDispatch("key_pressed", "key_pressed");
             emitDispatch("key_released", "key_released");
             emitDispatch("update", "update");
-            emitDispatch("collision", "collision");
+
+            // Collision dispatch — only fire for the instance whose sprite was collided
+            f << "static inline void afn_bp_dispatch_collision(void) {\n";
+            f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
+            f << "    if (afn_bp_instances[i].sprIdx != afn_collided_sprite) continue;\n";
+            f << "    switch (afn_bp_instances[i].bpIdx) {\n";
+            for (int bi = 0; bi < (int)blueprints.size(); bi++) {
+                int pc = (int)blueprints[bi].params.size();
+                f << "    case " << bi << ": afn_bp" << bi << "_collision(";
+                for (int pi = 0; pi < pc; pi++) { if (pi > 0) f << ","; f << "afn_bp_instances[i].params[" << pi << "]"; }
+                f << "); break;\n";
+            }
+            f << "    }\n  }\n}\n";
         }
     }
 
@@ -4252,7 +4264,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
     if (!tmScenes.empty())
     {
         f << "\n// ---- Mode 0 Tilemap ----\n";
-        f << "#define AFN_MODE0 1\n";
+        f << "#define AFN_HAS_MODE0 1\n";
         f << "#define AFN_TM_SCENE_COUNT " << (int)tmScenes.size() << "\n\n";
 
         // Emit per-scene data
@@ -4360,6 +4372,23 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "#define AFN_TM_PLAYER_SCENE " << tmPlayerScene << "\n";
         f << "#define AFN_TM_PLAYER_OBJ " << tmPlayerObj << "\n";
         f << "#define AFN_TM_START_SCENE 0\n";
+    }
+
+    // ---- Scene mode config ----
+    // Determine starting mode: 1=Mode0/tilemap, 0=Mode4/3D mesh
+    // If tilemap scenes exist, start in Mode 0; otherwise Mode 4 (mesh) or Mode 1 (legacy)
+    {
+        int startMode = 0; // default: Mode 4 / 3D
+        if (!tmScenes.empty() && meshes.empty())
+            startMode = 1; // tilemap only
+        else if (!tmScenes.empty() && !meshes.empty())
+            startMode = 1; // both exist: start in tilemap
+        else if (tmScenes.empty() && meshes.empty())
+            startMode = 2; // legacy Mode 1 (Mode 7 floor)
+        f << "\n// Runtime scene mode: 0=Mode4/3D, 1=Mode0/tilemap, 2=Mode1/Mode7\n";
+        f << "#define AFN_START_MODE " << startMode << "\n";
+        if (!meshes.empty())
+            f << "#define AFN_HAS_MESHES 1\n";
     }
 
     f << "\n#endif // MAPDATA_H\n";
