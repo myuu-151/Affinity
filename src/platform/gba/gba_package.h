@@ -329,6 +329,7 @@ enum class GBAScriptNodeType : int {
     GetInputAxis,
     OnAnyKey,
     GetLastKey,
+    OnCollision2D,
     COUNT
 };
 

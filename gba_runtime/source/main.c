@@ -288,6 +288,7 @@ static int   afn_play_anim;
 static int   afn_pending_scene = -1;
 static int   afn_pending_scene_mode = -1;
 static int   afn_collided_sprite;
+static int   afn_collided_tm_obj = -1;
 static FIXED afn_gravity;
 static FIXED afn_terminal_vel;
 static int   afn_player_frozen;
@@ -3973,6 +3974,32 @@ int main(void)
                 afn_script_key_pressed();
                 afn_script_key_released();
             }
+
+            // Collision2D: check if player is adjacent to any tilemap object
+            // Uses <= cells so it fires one tile outside the blocking zone
+            // Skip during first 10 frames after scene load (prevents ping-pong)
+            afn_collided_tm_obj = -1;
+#if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0
+            if (afn_frame_count > 10)
+            { int ci; for (ci = 0; ci < AFN_TM0_OBJ_COUNT; ci++) {
+                if (ci == AFN_TM_PLAYER_OBJ) continue;
+                int sc = afn_tm0_objs[ci].scale8;
+                if (sc < 256) sc = 256;
+                int cells = sc >> 8;
+                if (cells < 1) cells = 1;
+                int ox = afn_tm0_objs[ci].tx;
+                int oy = afn_tm0_objs[ci].ty;
+                int ddx = tm_player_tx - ox; if (ddx < 0) ddx = -ddx;
+                int ddy = tm_player_ty - oy; if (ddy < 0) ddy = -ddy;
+                if (ddx <= cells && ddy <= cells) {
+                    afn_collided_tm_obj = ci;
+                    afn_script_collision2d();
+                    afn_bp_dispatch_collision2d();
+                    break;
+                }
+            }}
+#endif
+
             // Blueprint instance dispatch
             afn_bp_dispatch_update();
             afn_bp_dispatch_key_held();

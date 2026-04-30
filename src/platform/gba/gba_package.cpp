@@ -1470,6 +1470,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int   afn_pending_scene = -1;\n";
         f << "static int   afn_pending_scene_mode = -1;\n";
         f << "static int   afn_collided_sprite;\n";
+        f << "static int   afn_collided_tm_obj = -1;\n";
         f << "static FIXED afn_gravity;\n";
         f << "static FIXED afn_terminal_vel;\n";
         f << "static FIXED player_vy;\n";
@@ -1808,7 +1809,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 n.type != GBAScriptNodeType::OnKeyHeld &&
                 n.type != GBAScriptNodeType::OnStart &&
                 n.type != GBAScriptNodeType::OnUpdate &&
-                n.type != GBAScriptNodeType::OnCollision)
+                n.type != GBAScriptNodeType::OnCollision &&
+                n.type != GBAScriptNodeType::OnCollision2D)
                 continue;
 
             EventChain chain;
@@ -3014,6 +3016,20 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "}\n";
             emitFuncAlias("afn_script_collision", GBAScriptNodeType::OnCollision);
             f << "\n";
+
+            // OnCollision2D → called when player collides with a tilemap object (Mode 0)
+            emitFuncStart("afn_script_collision2d", GBAScriptNodeType::OnCollision2D);
+            bool hasCollision2D = false;
+            for (auto& c : chains) {
+                if (c.event->type != GBAScriptNodeType::OnCollision2D) continue;
+                hasCollision2D = true;
+                emitActionsWithGates(c.actions);
+            }
+            if (!hasCollision2D)
+                f << "  (void)0;\n";
+            f << "}\n";
+            emitFuncAlias("afn_script_collision2d", GBAScriptNodeType::OnCollision2D);
+            f << "\n";
         }
         else if (hasAnyScript)
         {
@@ -3024,7 +3040,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "static inline void afn_script_key_pressed(void) {}\n";
             f << "static inline void afn_script_key_released(void) {}\n";
             f << "static inline void afn_script_update(void) {}\n";
-            f << "static inline void afn_script_collision(void) {}\n\n";
+            f << "static inline void afn_script_collision(void) {}\n";
+            f << "static inline void afn_script_collision2d(void) {}\n\n";
         }
     }
     // If no inline scene script but hasAnyScript, emit stubs
@@ -3036,7 +3053,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static inline void afn_script_key_pressed(void) {}\n";
         f << "static inline void afn_script_key_released(void) {}\n";
         f << "static inline void afn_script_update(void) {}\n";
-        f << "static inline void afn_script_collision(void) {}\n\n";
+        f << "static inline void afn_script_collision(void) {}\n";
+        f << "static inline void afn_script_collision2d(void) {}\n\n";
     }
 
     // ---- Blueprint codegen ----
@@ -3122,7 +3140,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
             for (auto& n : bpScript.nodes) {
                 bool isEvent = (n.type == GBAScriptNodeType::OnStart || n.type == GBAScriptNodeType::OnKeyHeld ||
                                 n.type == GBAScriptNodeType::OnKeyPressed || n.type == GBAScriptNodeType::OnKeyReleased ||
-                                n.type == GBAScriptNodeType::OnUpdate || n.type == GBAScriptNodeType::OnCollision);
+                                n.type == GBAScriptNodeType::OnUpdate || n.type == GBAScriptNodeType::OnCollision ||
+                                n.type == GBAScriptNodeType::OnCollision2D);
                 if (!isEvent) continue;
                 BpChain chain; chain.event = &n;
                 std::vector<int> front;
@@ -4199,6 +4218,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
             for (auto& c : bpChains)
                 if (c.event->type == GBAScriptNodeType::OnCollision)
                     bpEmitActionsWithGates(c.actions);
+            f << "}\n";
+
+            f << "static inline void afn_bp" << bi << "_collision2d(" << paramSig << ") {\n";
+            for (auto& c : bpChains)
+                if (c.event->type == GBAScriptNodeType::OnCollision2D)
+                    bpEmitActionsWithGates(c.actions);
             f << "}\n\n";
         }
 
@@ -4208,11 +4233,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
             for (auto& bp : blueprints) maxParams = std::max(maxParams, (int)bp.params.size());
             if (maxParams < 1) maxParams = 1;
 
-            f << "static const struct { int bpIdx; int sprIdx; int sceneMode; int params[" << maxParams << "]; }\n";
+            f << "static const struct { int bpIdx; int sprIdx; int tmObjIdx; int sceneMode; int params[" << maxParams << "]; }\n";
             f << "    afn_bp_instances[" << (int)bpInstances.size() << "] = {\n";
             for (int ii = 0; ii < (int)bpInstances.size(); ii++) {
                 const auto& inst = bpInstances[ii];
-                f << "    {" << inst.blueprintIdx << ", " << inst.spriteIdx << ", " << inst.sceneMode << ", {";
+                f << "    {" << inst.blueprintIdx << ", " << inst.spriteIdx << ", " << inst.tmObjIdx << ", " << inst.sceneMode << ", {";
                 for (int pi = 0; pi < maxParams; pi++) {
                     if (pi > 0) f << ",";
                     f << ((pi < inst.paramCount) ? inst.paramValues[pi] : 0);
@@ -4265,6 +4290,20 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 f << "); break;\n";
             }
             f << "    }\n  }\n}\n";
+
+            // Collision2D dispatch — only fire for matching mode + collided tilemap object
+            f << "static inline void afn_bp_dispatch_collision2d(void) {\n";
+            f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
+            f << "    if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;\n";
+            f << "    if (afn_bp_instances[i].tmObjIdx != afn_collided_tm_obj) continue;\n";
+            f << "    switch (afn_bp_instances[i].bpIdx) {\n";
+            for (int bi = 0; bi < (int)blueprints.size(); bi++) {
+                int pc = (int)blueprints[bi].params.size();
+                f << "    case " << bi << ": afn_bp" << bi << "_collision2d(";
+                for (int pi = 0; pi < pc; pi++) { if (pi > 0) f << ","; f << "afn_bp_instances[i].params[" << pi << "]"; }
+                f << "); break;\n";
+            }
+            f << "    }\n  }\n}\n";
         }
     }
 
@@ -4275,6 +4314,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static inline void afn_bp_dispatch_key_released(void) {}\n";
         f << "static inline void afn_bp_dispatch_update(void) {}\n";
         f << "static inline void afn_bp_dispatch_collision(void) {}\n";
+        f << "static inline void afn_bp_dispatch_collision2d(void) {}\n";
     }
 
     // ---- Mode 0 Tilemap Data ----

@@ -421,6 +421,7 @@ enum class VsNodeType : int {
     GetInputAxis,   // returns -1/0/1 for dpad axis (data node)
     OnAnyKey,       // event: fires on any button press
     GetLastKey,     // read last key pressed (data node)
+    OnCollision2D,  // event: fires when player collides with tilemap object (Mode 0)
     COUNT
 };
 
@@ -693,6 +694,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Get Input Axis", 0xFF666688, 0, 0, 1, 1, {"Axis (int)"}, {"Value"}, {} },
     { "On Any Key",     0xFF338833, 0, 1, 0, 0, {}, {}, {} },
     { "Get Last Key",   0xFF666688, 0, 0, 0, 1, {}, {"Key"}, {} },
+    { "On Collision 2D", 0xFF338833, 0, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -10733,6 +10735,7 @@ void FrameTick(float dt)
                 case VsNodeType::GetInputAxis:  desc = "Outputs the current D-pad axis value (-256 to 256)."; break;
                 case VsNodeType::OnAnyKey:      desc = "Event: fires when any button is pressed."; break;
                 case VsNodeType::GetLastKey:    desc = "Outputs the key code of the last button pressed."; break;
+                case VsNodeType::OnCollision2D: desc = "Event: fires when the player collides with this object in Mode 0 (tilemap)."; break;
                 case VsNodeType::Integer:       desc = "Outputs a constant integer value."; break;
                 case VsNodeType::Key:           desc = "Outputs a key constant (A, B, L, R, etc)."; break;
                 case VsNodeType::Direction:     desc = "Outputs a direction (Left, Right, Up, Down)."; break;
@@ -11149,6 +11152,18 @@ void FrameTick(float dt)
                     std::string calls = buildActionCalls(infoNode, "    ");
                     snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
                         "    // Called when player collides with sprite\n%s", calls.c_str());
+                    break;
+                }
+                case VsNodeType::OnCollision2D: {
+                    setEventFunc(infoNode, "afn_script_collision2d");
+                    editorCode =
+                        "    // ---- Mode 0 (Tilemap) ----\n"
+                        "    if (collidedTmObj >= 0) {\n"
+                        "        execActions();\n"
+                        "    }";
+                    std::string calls2d = buildActionCalls(infoNode, "    ");
+                    snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                        "    // Called when player collides with tilemap object\n%s", calls2d.c_str());
                     break;
                 }
                 case VsNodeType::MovePlayer: {
@@ -13518,6 +13533,7 @@ void FrameTick(float dt)
                     case VsNodeType::OnStart:       suffix = "_start"; break;
                     case VsNodeType::OnUpdate:      suffix = "_update"; break;
                     case VsNodeType::OnCollision:   suffix = "_collision"; break;
+                    case VsNodeType::OnCollision2D: suffix = "_collision2d"; break;
                     case VsNodeType::MovePlayer:    suffix = "_move"; break;
                     case VsNodeType::Jump:          suffix = "_jump"; break;
                     case VsNodeType::Walk:          suffix = "_walk"; break;
@@ -13742,7 +13758,7 @@ void FrameTick(float dt)
                                         cwNode.type == VsNodeType::OnKeyHeld || cwNode.type == VsNodeType::OnStart ||
                                         cwNode.type == VsNodeType::OnUpdate || cwNode.type == VsNodeType::OnCollision ||
                                         cwNode.type == VsNodeType::OnTriggerEnter || cwNode.type == VsNodeType::OnTriggerExit ||
-                                        cwNode.type == VsNodeType::OnAnyKey);
+                                        cwNode.type == VsNodeType::OnAnyKey || cwNode.type == VsNodeType::OnCollision2D);
                     char defaultName[64] = {};
                     if (isBpNode && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
                         if (isEventNode)
@@ -14002,6 +14018,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnTriggerEnter].name)) addNodeAt(VsNodeType::OnTriggerEnter);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnTriggerExit].name)) addNodeAt(VsNodeType::OnTriggerExit);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnAnyKey].name)) addNodeAt(VsNodeType::OnAnyKey);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnCollision2D].name)) addNodeAt(VsNodeType::OnCollision2D);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CustomCode].name)) addNodeAt(VsNodeType::CustomCode);
                     ImGui::PopStyleColor();
