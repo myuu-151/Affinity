@@ -4247,6 +4247,25 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                 else if (sSprites[i].assetIdx > sSelectedAsset)
                     sSprites[i].assetIdx--;
             }
+            // Fix up tilemap object references (current scene + all scenes)
+            auto fixTmObjs = [&](std::vector<TmObject>& objs) {
+                for (auto& obj : objs) {
+                    if (obj.spriteAssetIdx == sSelectedAsset)
+                        obj.spriteAssetIdx = -1;
+                    else if (obj.spriteAssetIdx > sSelectedAsset)
+                        obj.spriteAssetIdx--;
+                }
+            };
+            fixTmObjs(sTmObjects);
+            for (auto& sc : sTmScenes)
+                fixTmObjs(sc.objects);
+            // Fix up HUD element references
+            for (auto& el : sHudElements) {
+                if (el.spriteAssetIdx == sSelectedAsset)
+                    el.spriteAssetIdx = -1;
+                else if (el.spriteAssetIdx > sSelectedAsset)
+                    el.spriteAssetIdx--;
+            }
             if (sSelectedAsset >= (int)sSpriteAssets.size())
                 sSelectedAsset = (int)sSpriteAssets.size() - 1;
         }

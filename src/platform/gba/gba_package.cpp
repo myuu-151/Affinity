@@ -327,14 +327,17 @@ static bool GenerateMapData(const std::string& runtimeDir,
     // Only referenced assets get VRAM tiles — unreferenced ones are skipped to prevent
     // OBJ VRAM overflow in Mode 4 where only 512 tiles (16KB) are usable.
     std::vector<bool> assetReferencedBySprite(assets.size(), false);
+    std::vector<bool> assetReferencedByTilemap(assets.size(), false);
     for (size_t si = 0; si < sprites.size(); si++)
         if (sprites[si].assetIdx >= 0 && sprites[si].assetIdx < (int)assets.size())
             assetReferencedBySprite[sprites[si].assetIdx] = true;
     // Also mark assets referenced by tilemap objects (Player, NPC, etc. need OAM tiles)
     for (const auto& sc : tmScenes)
         for (const auto& obj : sc.objects)
-            if (obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)assets.size())
+            if (obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)assets.size()) {
                 assetReferencedBySprite[obj.spriteAssetIdx] = true;
+                assetReferencedByTilemap[obj.spriteAssetIdx] = true;
+            }
 
     // Build one combined tile data array: all assets, all frames, packed contiguously
     std::vector<uint32_t> allTiles;
@@ -352,8 +355,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         assetTilesPerFrame.push_back(tilesPerFrame);
 
         // Skip static frames for direction-based assets — they use DMA direction tiles
-        // (but not for Mode 0 tilemap builds which need static OBJ tiles)
-        if (asset.hasDirections && !asset.dirAnimSets.empty() && tmScenes.empty()) continue;
+        // (but tilemap-referenced direction assets need static OBJ tiles for Mode 0)
+        if (asset.hasDirections && !asset.dirAnimSets.empty() && !assetReferencedByTilemap[ai]) continue;
         // Skip unreferenced assets — no sprite uses them, saves OBJ VRAM
         if (!assetReferencedBySprite[ai]) continue;
 
