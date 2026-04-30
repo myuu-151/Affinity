@@ -500,14 +500,14 @@ static void init_obj_sprites(void)
 
 #ifdef AFN_ASSET_COUNT
 #if AFN_ASSET_COUNT > 0
-    // Copy all asset tile data into OBJ VRAM (charblock 4)
-    // In Mode 4 (bitmap), tiles 0-511 overlap the framebuffer — offset to tile 512
+    // Copy static OBJ tile data into VRAM — placed AFTER direction tile space
+    // so direction DMA gets priority for the limited Mode 4 OBJ region.
     {
         const u32 *src = afn_all_tiles;
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-        u32 *dst = (u32*)&tile_mem[4][512];
+        u32 *dst = (u32*)&tile_mem[4][512 + AFN_DIR_VRAM_TILES];
 #else
-        u32 *dst = (u32*)tile_mem[4];
+        u32 *dst = (u32*)&tile_mem[4][AFN_DIR_VRAM_TILES];
 #endif
         for (i = 0; i < (int)(AFN_ALL_TILES_LEN / 4); i++)
             dst[i] = src[i];

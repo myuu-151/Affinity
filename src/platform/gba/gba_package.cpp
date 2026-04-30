@@ -331,10 +331,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
     for (size_t si = 0; si < sprites.size(); si++)
         if (sprites[si].assetIdx >= 0 && sprites[si].assetIdx < (int)assets.size())
             assetReferencedBySprite[sprites[si].assetIdx] = true;
-    // Also mark assets referenced by tilemap objects (Player, NPC, etc. need OAM tiles)
+    // Also mark assets referenced by tilemap objects that need OAM tiles.
+    // Tile-type objects (type 6) generate BG tiles — they don't need OBJ VRAM.
     for (const auto& sc : tmScenes)
         for (const auto& obj : sc.objects)
-            if (obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)assets.size()) {
+            if (obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)assets.size() && obj.type != 6) {
                 assetReferencedBySprite[obj.spriteAssetIdx] = true;
                 assetReferencedByTilemap[obj.spriteAssetIdx] = true;
             }
@@ -523,8 +524,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
         // Only allocate VRAM for assets referenced by sprites — unreferenced assets
         // get ROM data but vramTile0 stays 0 (DMA skipped at runtime since hasDirs=0
         // unless we mark them). We still emit ROM tiles for all direction assets.
+        // Direction tiles go first in VRAM (before static tiles) so they get
+        // priority for the limited Mode 4 OBJ VRAM (512 tiles at indices 512-1023).
         if (assetReferencedBySprite[ai])
-            assetDirInfos[ai].vramTile0 = (int)allTiles.size() / 8 + dirVramNextTile;
+            assetDirInfos[ai].vramTile0 = dirVramNextTile;
 
         for (int si = 0; si < setCount; si++)
         {
@@ -637,7 +640,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "// No static OBJ tiles (all assets use direction DMA)\n";
         f << "static const u32 afn_all_tiles[1] = { 0 };\n";
     }
-    f << "#define AFN_ALL_TILES_LEN " << (int)allTiles.size() * 4 << "\n\n";
+    f << "#define AFN_ALL_TILES_LEN " << (int)allTiles.size() * 4 << "\n";
+    f << "#define AFN_DIR_VRAM_TILES " << dirVramNextTile << "\n\n";
 
     // Emit direction animation ROM tile data (for DMA streaming)
     if (!dirAnimAllTiles.empty())
@@ -815,7 +819,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "    // { tileStart, tilesPerFrame, frameCount, objSize, palBank }\n";
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
-            f << "    { " << (assetTileStart[ai] + tileOffset) << ", " << assetTilesPerFrame[ai]
+            f << "    { " << (assetTileStart[ai] + tileOffset + dirVramNextTile) << ", " << assetTilesPerFrame[ai]
               << ", " << (int)assets[ai].frames.size()
               << ", " << assetObjSize[ai]
               << ", " << resolvedPalBank[ai] << " },\n";
