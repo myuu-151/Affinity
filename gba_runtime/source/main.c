@@ -3591,6 +3591,23 @@ static void scene_load(int sceneMode, int sceneIdx)
     } else if (sceneMode == 0) {
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
         mode4_init_scene();
+#else
+        // Minimal Mode 4 setup when no meshes exist
+        REG_DISPCNT = DCNT_MODE4 | DCNT_BG2 | DCNT_OBJ | DCNT_OBJ_1D;
+        g_page = 0;
+        init_obj_sprites();
+#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
+        player_sprite_idx = AFN_PLAYER_IDX;
+#if defined(AFFINITY_HAS_SPRITES) && AFN_SPRITE_COUNT > 0
+        load_editor_sprites();
+        player_x = g_sprites[AFN_PLAYER_IDX].x;
+        player_z = g_sprites[AFN_PLAYER_IDX].z;
+        player_y = g_sprites[AFN_PLAYER_IDX].y;
+#endif
+        orbit_angle = AFN_CAM_ANGLE;
+        orbit_dist = AFN_ORBIT_DIST;
+        player_moving = 0;
+#endif
 #endif
     } else {
         // Mode 1 (legacy Mode 7) — not switching to this at runtime
