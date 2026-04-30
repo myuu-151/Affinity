@@ -7390,9 +7390,8 @@ void FrameTick(float dt)
                 std::string rtDirStr = rtDir.string();
                 std::string outPath = sPackageOutputPath;
 
-                // Skip 3D floor sprites for tilemap builds (Mode 0 uses TmObjects instead)
+                // Always export 3D sprites — runtime can switch modes
                 std::vector<GBASpriteExport> exportSprites;
-                if (sActiveTab != EditorTab::Tilemap)
                 {
                     for (int i = 0; i < sSpriteCount; i++)
                     {
@@ -7493,10 +7492,9 @@ void FrameTick(float dt)
                     exportAssets.push_back(ea);
                 }
 
-                // Collect mesh assets for export (skip for Mode 7 and Tilemap tabs)
+                // Collect mesh assets for export (always include — runtime can switch modes)
                 std::vector<GBAMeshExport> exportMeshes;
-                bool skipMeshExport = (sActiveTab == EditorTab::Mode7 || sActiveTab == EditorTab::Tilemap);
-                if (!skipMeshExport) for (const auto& ma : sMeshAssets)
+                for (const auto& ma : sMeshAssets)
                 {
                     GBAMeshExport me;
                     for (const auto& v : ma.vertices)

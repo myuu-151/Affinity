@@ -10333,7 +10333,7 @@ static const struct { s16 tx,ty; u8 type; s8 assetIdx; u8 camFollow; u8 collisio
 #define AFN_TM_START_SCENE 0
 
 // Runtime scene mode: 0=Mode4/3D, 1=Mode0/tilemap, 2=Mode1/Mode7
-#define AFN_START_MODE 0
+#define AFN_START_MODE 1
 #define AFN_HAS_MESHES 1
 
 #endif // MAPDATA_H

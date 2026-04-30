@@ -3595,6 +3595,8 @@ static void scene_load(int sceneMode, int sceneIdx)
         // Minimal Mode 4 setup when no meshes exist
         REG_DISPCNT = DCNT_MODE4 | DCNT_BG2 | DCNT_OBJ | DCNT_OBJ_1D;
         g_page = 0;
+        // Set background palette (index 0 = sky color)
+        pal_bg_mem[0] = RGB15(10, 16, 24);
         init_obj_sprites();
 #if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
         player_sprite_idx = AFN_PLAYER_IDX;
@@ -3863,6 +3865,13 @@ int main(void)
             dbg_int(vramBuf, 102, 2, dbg_total_kcy, 1);
             dbg_int(vramBuf, 240 - 20, 160 - 7, dbg_fps, 1);
             dbg_int(vramBuf, 2, 160 - 7, g_texFixMode, 2);
+        }
+#else
+        // No meshes — still clear the Mode 4 framebuffer so it's not garbage
+        if (afn_current_mode == 0)
+        {
+            u16* vramBuf = g_page ? (u16*)0x06000000 : (u16*)0x0600A000;
+            afn_clear_fb_stmia(vramBuf, 0);
         }
 #endif
         // FPS measurement: count frames, update every ~1 second using Timer 3
