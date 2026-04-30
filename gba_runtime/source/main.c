@@ -3927,12 +3927,20 @@ int main(void)
                     // Bounds check
                     if (nx >= 0 && nx < AFN_TM0_W && ny >= 0 && ny < AFN_TM0_H)
                     {
-                        // Object collision check
+                        // Object collision check (respects displayScale cell size)
                         int blocked = 0;
 #if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0
                         { int ci; for (ci = 0; ci < AFN_TM0_OBJ_COUNT; ci++) {
                             if (!afn_tm0_objs[ci].collision) continue;
-                            if (afn_tm0_objs[ci].tx == nx && afn_tm0_objs[ci].ty == ny) {
+                            int sc = afn_tm0_objs[ci].scale8;
+                            if (sc < 256) sc = 256;
+                            int cells = sc >> 8;
+                            if (cells < 1) cells = 1;
+                            int ox = afn_tm0_objs[ci].tx;
+                            int oy = afn_tm0_objs[ci].ty;
+                            int ddx = nx - ox; if (ddx < 0) ddx = -ddx;
+                            int ddy = ny - oy; if (ddy < 0) ddy = -ddy;
+                            if (ddx < cells && ddy < cells) {
                                 blocked = 1; break;
                             }
                         }}
