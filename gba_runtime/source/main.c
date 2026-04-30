@@ -3868,12 +3868,14 @@ int main(void)
         }
 #endif
         VBlankIntrWait();
-        // Page flip (Mode 4 only)
-        if (afn_current_mode == 0) {
-            g_page ^= 1;
-            REG_DISPCNT = DCNT_MODE4 | DCNT_BG2 | DCNT_OBJ | DCNT_OBJ_1D | (g_page ? DCNT_PAGE : 0);
-        } else if (afn_current_mode == 2) {
-            REG_DISPCNT &= ~DCNT_BG2; // Mode 7: BG2 managed by HBlank ISR
+        // Page flip (Mode 4 only) — skip during scene transitions
+        if (g_scene_transition == 0) {
+            if (afn_current_mode == 0) {
+                g_page ^= 1;
+                REG_DISPCNT = DCNT_MODE4 | DCNT_BG2 | DCNT_OBJ | DCNT_OBJ_1D | (g_page ? DCNT_PAGE : 0);
+            } else if (afn_current_mode == 2) {
+                REG_DISPCNT &= ~DCNT_BG2; // Mode 7: BG2 managed by HBlank ISR
+            }
         }
         key_poll();
 
@@ -4295,7 +4297,8 @@ int main(void)
                 afn_script_key_released();
             }
             // Collision event (radius-based, non-mesh sprites only)
-            if (afn_collided_sprite >= 0 &&
+            // Skip first 10 frames after scene load to prevent ping-pong
+            if (afn_collided_sprite >= 0 && afn_frame_count > 10 &&
                 g_sprites[afn_collided_sprite].meshIdx < 0) {
                 afn_script_collision();
                 afn_bp_dispatch_collision();
@@ -4420,8 +4423,9 @@ int main(void)
             collide_walls(&player_x, &player_z, player_y);
 
             // Mesh collision event (wall-contact-based)
+            // Skip first 10 frames after scene load to prevent ping-pong
 #ifdef AFN_HAS_SCRIPT
-            if (afn_wall_collided_sprite >= 0) {
+            if (afn_wall_collided_sprite >= 0 && afn_frame_count > 10) {
                 afn_collided_sprite = afn_wall_collided_sprite;
                 afn_script_collision();
                 afn_bp_dispatch_collision();

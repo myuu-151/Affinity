@@ -29,7 +29,7 @@ static int afn_current_mode;
 
 // Player sprite index (-1 = none)
 #define AFN_PLAYER_IDX -1
-#define AFN_ORBIT_DIST 3840
+#define AFN_ORBIT_DIST 1920
 
 #define AFN_ASSET_COUNT 6
 
@@ -9450,14 +9450,35 @@ static inline void afn_spawn_projectile(int obj, int asset, int speed) { (void)o
 static inline void afn_draw_bar(int x, int y, int w, int fill) { (void)x; (void)y; (void)w; (void)fill; }
 static inline void afn_draw_sprite_icon(int asset, int x, int y) { (void)asset; (void)x; (void)y; }
 
-// No inline scene script — stubs for blueprint support
-static inline void afn_script_start(void) {}
-static inline void afn_script_key_held(void) {}
-static inline void afn_script_key_pressed(void) {}
-static inline void afn_script_key_released(void) {}
-static inline void afn_script_update(void) {}
-static inline void afn_script_collision(void) {}
-static inline void afn_script_collision2d(void) {}
+// ---- Generated script code from visual node graph ----
+
+static inline void afn_script_change_scene_1(void) {
+    afn_pending_scene = 0;
+    afn_pending_scene_mode = 1;
+}
+
+static inline void afn_script_start(void) {
+}
+
+static inline void afn_script_key_held(void) {
+}
+
+static inline void afn_script_key_pressed(void) {
+}
+
+static inline void afn_script_key_released(void) {
+}
+
+static inline void afn_script_update(void) {
+}
+
+static inline void afn_script_collision(void) {
+  (void)0;
+}
+
+static inline void afn_script_collision2d(void) {
+    afn_script_change_scene_1();
+}
 
 
 // ---- Blueprint script functions ----
@@ -9627,7 +9648,7 @@ static inline void afn_bp2_collision2d() {
 
 static inline void afn_bp3_change_scene_1() {
     afn_pending_scene = 0;
-    afn_pending_scene_mode = 0;
+    afn_pending_scene_mode = 1;
 }
 static inline void afn_bp3_start() {
 }
