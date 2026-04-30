@@ -268,6 +268,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
     f << "#define MAPDATA_H\n\n";
     f << "#define AFFINITY_HAS_SPRITES\n\n";
 
+    // Scene mode tracking (must be before blueprint dispatch)
+    f << "static int afn_current_mode;\n\n";
+
     // Camera start
     f << "// Camera start position\n";
     f << "#define AFN_CAM_X     " << EditorToGBAFixed(camera.x) << "\n";
@@ -4394,7 +4397,6 @@ static bool GenerateMapData(const std::string& runtimeDir,
         if (sm == 0 && meshes.empty())   sm = tmScenes.empty() ? 2 : 1;
         f << "\n// Runtime scene mode: 0=Mode4/3D, 1=Mode0/tilemap, 2=Mode1/Mode7\n";
         f << "#define AFN_START_MODE " << sm << "\n";
-        f << "static int afn_current_mode;\n";
         if (!meshes.empty())
             f << "#define AFN_HAS_MESHES 1\n";
     }
