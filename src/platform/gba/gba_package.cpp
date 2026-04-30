@@ -4202,11 +4202,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
             for (auto& bp : blueprints) maxParams = std::max(maxParams, (int)bp.params.size());
             if (maxParams < 1) maxParams = 1;
 
-            f << "static const struct { int bpIdx; int sprIdx; int params[" << maxParams << "]; }\n";
+            f << "static const struct { int bpIdx; int sprIdx; int sceneMode; int params[" << maxParams << "]; }\n";
             f << "    afn_bp_instances[" << (int)bpInstances.size() << "] = {\n";
             for (int ii = 0; ii < (int)bpInstances.size(); ii++) {
                 const auto& inst = bpInstances[ii];
-                f << "    {" << inst.blueprintIdx << ", " << inst.spriteIdx << ", {";
+                f << "    {" << inst.blueprintIdx << ", " << inst.spriteIdx << ", " << inst.sceneMode << ", {";
                 for (int pi = 0; pi < maxParams; pi++) {
                     if (pi > 0) f << ",";
                     f << ((pi < inst.paramCount) ? inst.paramValues[pi] : 0);
@@ -4215,9 +4215,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
             }
             f << "};\n\n";
 
-            // Dispatch functions
+            // Dispatch functions — only run instances matching the current scene mode
             f << "static inline void afn_bp_dispatch_start(void) {\n";
             f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
+            f << "    if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;\n";
             f << "    switch (afn_bp_instances[i].bpIdx) {\n";
             for (int bi = 0; bi < (int)blueprints.size(); bi++) {
                 int pc = (int)blueprints[bi].params.size();
@@ -4230,6 +4231,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             auto emitDispatch = [&](const char* funcName, const char* suffix) {
                 f << "static inline void afn_bp_dispatch_" << suffix << "(void) {\n";
                 f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
+                f << "    if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;\n";
                 f << "    switch (afn_bp_instances[i].bpIdx) {\n";
                 for (int bi = 0; bi < (int)blueprints.size(); bi++) {
                     int pc = (int)blueprints[bi].params.size();
@@ -4244,9 +4246,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
             emitDispatch("key_released", "key_released");
             emitDispatch("update", "update");
 
-            // Collision dispatch — only fire for the instance whose sprite was collided
+            // Collision dispatch — only fire for matching mode + collided sprite
             f << "static inline void afn_bp_dispatch_collision(void) {\n";
             f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
+            f << "    if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;\n";
             f << "    if (afn_bp_instances[i].sprIdx != afn_collided_sprite) continue;\n";
             f << "    switch (afn_bp_instances[i].bpIdx) {\n";
             for (int bi = 0; bi < (int)blueprints.size(); bi++) {

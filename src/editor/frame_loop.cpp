@@ -7610,8 +7610,8 @@ void FrameTick(float dt)
                     }
                     exportBlueprints.push_back(std::move(bpEx));
                 }
-                // Collect instances from 3D sprites (skip for tilemap builds)
-                for (int si = 0; si < sSpriteCount && sActiveTab != EditorTab::Tilemap; si++) {
+                // Collect instances from 3D sprites (sceneMode=0: Mode4/3D)
+                for (int si = 0; si < sSpriteCount; si++) {
                     const FloorSprite& sp = sSprites[si];
                     if (sp.blueprintIdx < 0 || sp.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
                     const BlueprintAsset& bp = sBlueprintAssets[sp.blueprintIdx];
@@ -7619,6 +7619,7 @@ void FrameTick(float dt)
                     inst.blueprintIdx = sp.blueprintIdx;
                     inst.spriteIdx = si;
                     inst.tmObjIdx = -1;
+                    inst.sceneMode = 0; // Mode 4
                     inst.paramCount = bp.paramCount;
                     for (int pi = 0; pi < bp.paramCount; pi++) {
                         inst.paramValues[pi] = bp.params[pi].defaultInt;
@@ -7628,31 +7629,30 @@ void FrameTick(float dt)
                     }
                     exportBpInstances.push_back(inst);
                 }
-                // Collect TmObject blueprint instances (for Mode 0 tilemap builds)
-                if (sActiveTab == EditorTab::Tilemap) {
-                    for (int si = 0; si < (int)sTmScenes.size(); si++) {
-                        const TmScene& sc = sTmScenes[si];
-                        for (int oi = 0; oi < (int)sc.objects.size(); oi++) {
-                            const TmObject& obj = sc.objects[oi];
-                            if (obj.blueprintIdx < 0 || obj.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
-                            const BlueprintAsset& bp = sBlueprintAssets[obj.blueprintIdx];
-                            GBABlueprintInstanceExport inst;
-                            inst.blueprintIdx = obj.blueprintIdx;
-                            inst.spriteIdx = -1;
-                            inst.tmObjIdx = oi;
-                            inst.paramCount = bp.paramCount;
-                            for (int pi = 0; pi < bp.paramCount; pi++) {
-                                inst.paramValues[pi] = bp.params[pi].defaultInt;
-                                for (int ipi = 0; ipi < obj.instanceParamCount; ipi++)
-                                    if (obj.instanceParams[ipi].paramIdx == pi)
-                                        inst.paramValues[pi] = obj.instanceParams[ipi].value;
-                            }
-                            exportBpInstances.push_back(inst);
+                // Collect TmObject blueprint instances (sceneMode=1: Mode0/tilemap)
+                for (int si = 0; si < (int)sTmScenes.size(); si++) {
+                    const TmScene& sc = sTmScenes[si];
+                    for (int oi = 0; oi < (int)sc.objects.size(); oi++) {
+                        const TmObject& obj = sc.objects[oi];
+                        if (obj.blueprintIdx < 0 || obj.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
+                        const BlueprintAsset& bp = sBlueprintAssets[obj.blueprintIdx];
+                        GBABlueprintInstanceExport inst;
+                        inst.blueprintIdx = obj.blueprintIdx;
+                        inst.spriteIdx = -1;
+                        inst.tmObjIdx = oi;
+                        inst.sceneMode = 1; // Mode 0
+                        inst.paramCount = bp.paramCount;
+                        for (int pi = 0; pi < bp.paramCount; pi++) {
+                            inst.paramValues[pi] = bp.params[pi].defaultInt;
+                            for (int ipi = 0; ipi < obj.instanceParamCount; ipi++)
+                                if (obj.instanceParams[ipi].paramIdx == pi)
+                                    inst.paramValues[pi] = obj.instanceParams[ipi].value;
                         }
+                        exportBpInstances.push_back(inst);
                     }
                 }
-                // Collect scene-level blueprint instances (MapScenes) — skip for tilemap builds
-                for (int si = 0; si < (int)sMapScenes.size() && sActiveTab != EditorTab::Tilemap; si++) {
+                // Collect scene-level blueprint instances (MapScenes, sceneMode=0)
+                for (int si = 0; si < (int)sMapScenes.size(); si++) {
                     const MapScene& ms = sMapScenes[si];
                     if (ms.blueprintIdx < 0 || ms.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
                     const BlueprintAsset& bp = sBlueprintAssets[ms.blueprintIdx];
@@ -7660,6 +7660,7 @@ void FrameTick(float dt)
                     inst.blueprintIdx = ms.blueprintIdx;
                     inst.spriteIdx = -1;
                     inst.tmObjIdx = -1;
+                    inst.sceneMode = 0; // Mode 4
                     inst.paramCount = bp.paramCount;
                     for (int pi = 0; pi < bp.paramCount; pi++) {
                         inst.paramValues[pi] = bp.params[pi].defaultInt;
@@ -7669,7 +7670,6 @@ void FrameTick(float dt)
                     }
                     exportBpInstances.push_back(inst);
                 }
-                // Skip TmScene blueprint instances — same reason as TmObjects above.
 
                 // Collect tilemap scene data for Mode 0 export
                 // Always export tilemap data when scenes exist (needed for runtime scene switching)

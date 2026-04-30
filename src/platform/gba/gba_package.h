@@ -376,6 +376,7 @@ struct GBABlueprintInstanceExport {
     int blueprintIdx;
     int spriteIdx;      // -1 if tilemap object
     int tmObjIdx;       // -1 if 3D sprite
+    int sceneMode;      // 0=Mode4/3D, 1=Mode0/tilemap
     int paramValues[8]; // resolved values (override or default)
     int paramCount;
 };
