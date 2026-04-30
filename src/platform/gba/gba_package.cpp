@@ -1277,6 +1277,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             float v0y, v1y, v2y;
             float nx, nz;
             int flags;     // 1=floor, 2=ceiling, 4=wall
+            int sprIdx;    // sprite index that owns this face (-1 = none)
         };
 
         std::vector<CollFaceExp> collFaces;
@@ -1336,6 +1337,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 cf.v0y = ay; cf.v1y = by; cf.v2y = cy;
                 cf.nx = nnx; cf.nz = nnz;
                 cf.flags = flags;
+                cf.sprIdx = (int)si;
                 collFaces.push_back(cf);
             };
 
@@ -1398,6 +1400,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "    int v0y, v1y, v2y;\n";
             f << "    int nx, nz;\n";
             f << "    int flags;\n";
+            f << "    int sprIdx;\n";
             f << "} CollFace;\n\n";
 
             f << "static const CollFace afn_col_faces[" << totalFaces << "] = {\n";
@@ -1413,7 +1416,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                   << toFx(cf.v2x) << "," << toFx(cf.v2z) << ", "
                   << toFy(cf.v0y) << "," << toFy(cf.v1y) << "," << toFy(cf.v2y) << ", "
                   << (int)(cf.nx * 256.0f) << "," << (int)(cf.nz * 256.0f) << ", "
-                  << cf.flags << " },\n";
+                  << cf.flags << ", " << cf.sprIdx << " },\n";
             }
             f << "};\n\n";
 

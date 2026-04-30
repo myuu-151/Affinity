@@ -3190,8 +3190,11 @@ static FIXED cam_y_smooth;     // smoothed camera Y offset (16.8)
 
 // Push player out of wall faces. Modifies *px, *pz in place.
 // Optimized: plane-distance only (no per-edge segment tests, no 64-bit division).
+static int afn_wall_collided_sprite = -1; // sprite index touched via mesh wall collision
+
 IWRAM_CODE static void collide_walls(FIXED *px, FIXED *pz, FIXED py)
 {
+    afn_wall_collided_sprite = -1;
     int gx = *px >> AFN_COL_GRID_SHIFT;
     int gz = *pz >> AFN_COL_GRID_SHIFT;
     if (gx < 0) gx = 0; if (gx >= AFN_COL_GRID_SIZE) gx = AFN_COL_GRID_SIZE - 1;
@@ -3245,6 +3248,7 @@ IWRAM_CODE static void collide_walls(FIXED *px, FIXED *pz, FIXED py)
             ppx -= (face->nx * push) >> 8;
             ppz -= (face->nz * push) >> 8;
         }
+        if (face->sprIdx >= 0) afn_wall_collided_sprite = face->sprIdx;
     }
     *px = ppx;
     *pz = ppz;
@@ -4193,8 +4197,9 @@ int main(void)
                 afn_script_key_pressed();
                 afn_script_key_released();
             }
-            // Collision event
-            if (afn_collided_sprite >= 0) {
+            // Collision event (radius-based, non-mesh sprites only)
+            if (afn_collided_sprite >= 0 &&
+                g_sprites[afn_collided_sprite].meshIdx < 0) {
                 afn_script_collision();
                 afn_bp_dispatch_collision();
             }
@@ -4316,6 +4321,15 @@ int main(void)
             // Collision: wall blocking + slide, gravity + floor
 #ifdef AFN_COL_FACE_COUNT
             collide_walls(&player_x, &player_z, player_y);
+
+            // Mesh collision event (wall-contact-based)
+#ifdef AFN_HAS_SCRIPT
+            if (afn_wall_collided_sprite >= 0) {
+                afn_collided_sprite = afn_wall_collided_sprite;
+                afn_script_collision();
+                afn_bp_dispatch_collision();
+            }
+#endif
 
             // Jump + dampen are driven by script nodes only
 
