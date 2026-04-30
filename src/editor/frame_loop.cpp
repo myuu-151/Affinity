@@ -7628,8 +7628,8 @@ void FrameTick(float dt)
                     }
                     exportBpInstances.push_back(inst);
                 }
-                // Collect TmObject blueprint instances (always, needed for scene switching)
-                if (!sTmScenes.empty()) {
+                // Collect TmObject blueprint instances (for Mode 0 tilemap builds)
+                if (sActiveTab == EditorTab::Tilemap) {
                     for (int si = 0; si < (int)sTmScenes.size(); si++) {
                         const TmScene& sc = sTmScenes[si];
                         for (int oi = 0; oi < (int)sc.objects.size(); oi++) {
@@ -7651,8 +7651,8 @@ void FrameTick(float dt)
                         }
                     }
                 }
-                // Collect scene-level blueprint instances (MapScenes)
-                for (int si = 0; si < (int)sMapScenes.size(); si++) {
+                // Collect scene-level blueprint instances (MapScenes) — skip for tilemap builds
+                for (int si = 0; si < (int)sMapScenes.size() && sActiveTab != EditorTab::Tilemap; si++) {
                     const MapScene& ms = sMapScenes[si];
                     if (ms.blueprintIdx < 0 || ms.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
                     const BlueprintAsset& bp = sBlueprintAssets[ms.blueprintIdx];
