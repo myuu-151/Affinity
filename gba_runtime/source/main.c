@@ -389,7 +389,7 @@ static int g_page = 0;
 // ---------------------------------------------------------------------------
 // Runtime scene mode state
 // ---------------------------------------------------------------------------
-static int afn_current_mode;     // 0=Mode4/3D, 1=Mode0/tilemap, 2=Mode1/Mode7
+// afn_current_mode declared in mapdata.h (0=Mode4/3D, 1=Mode0/tilemap, 2=Mode1/Mode7)
 static int g_scene_transition;   // 0=none, 1=fading_out, 3=fading_in
 
 // Sprite projection result for sorting
