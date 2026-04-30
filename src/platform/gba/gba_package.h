@@ -389,6 +389,7 @@ struct GBATmObjectExport {
     int spriteAssetIdx;     // -1 = none
     int teleportScene;      // -1 = none
     bool camFollow;
+    bool collision;
     float displayScale;
     char name[32];
 };

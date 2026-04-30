@@ -3927,9 +3927,21 @@ int main(void)
                     // Bounds check
                     if (nx >= 0 && nx < AFN_TM0_W && ny >= 0 && ny < AFN_TM0_H)
                     {
-                        tm_move_dx = dx;
-                        tm_move_dy = dy;
-                        tm_move_timer = tm_move_frames;
+                        // Object collision check
+                        int blocked = 0;
+#if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0
+                        { int ci; for (ci = 0; ci < AFN_TM0_OBJ_COUNT; ci++) {
+                            if (!afn_tm0_objs[ci].collision) continue;
+                            if (afn_tm0_objs[ci].tx == nx && afn_tm0_objs[ci].ty == ny) {
+                                blocked = 1; break;
+                            }
+                        }}
+#endif
+                        if (!blocked) {
+                            tm_move_dx = dx;
+                            tm_move_dy = dy;
+                            tm_move_timer = tm_move_frames;
+                        }
                     }
                 }
             }
@@ -4129,11 +4141,61 @@ int main(void)
 #else
             obj_hide(&oam_mem[0]);
 #endif
-            // Hide remaining OAM slots
+            // Draw non-player tilemap objects as OAM sprites
             {
-                int i;
-                for (i = 1; i < 128; i++)
-                    obj_hide(&oam_mem[i]);
+                int oamSlot = 1;
+#if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+                int oi;
+                for (oi = 0; oi < AFN_TM0_OBJ_COUNT && oamSlot < 128; oi++) {
+                    if (oi == AFN_TM_PLAYER_OBJ) continue;
+                    if (afn_tm0_objs[oi].type == 6) continue; // skip Tile objects
+                    int ai = afn_tm0_objs[oi].assetIdx;
+                    if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
+
+                    int objPx = afn_tm0_objs[oi].tx * tm_tile_size;
+                    int objPy = afn_tm0_objs[oi].ty * tm_tile_size;
+                    int osx = objPx - tm_cam_x;
+                    int osy = objPy - tm_cam_y;
+
+                    // Off-screen cull
+                    if (osx < -64 || osx > 240+64 || osy < -64 || osy > 160+64) {
+                        continue;
+                    }
+
+                    int tileBase = afn_asset_desc[ai][0];
+                    int tpf      = afn_asset_desc[ai][1];
+                    int objSz    = afn_asset_desc[ai][3];
+                    int palBank  = afn_asset_desc[ai][4];
+                    int tileCur  = tileBase; // first frame
+
+                    // Affine scaling — mirrors player direction path
+                    int sc8 = (int)afn_tm0_objs[oi].scale8;
+                    if (sc8 < 1) sc8 = 256;
+                    int pa = (objSz * 256 * 256) / (sc8 * tm_tile_size);
+                    if (pa < 1) pa = 256;
+                    OBJ_AFFINE *oa = &obj_aff_mem[oamSlot];
+                    oa->pa = (s16)pa;
+                    oa->pb = 0;
+                    oa->pc = 0;
+                    oa->pd = (s16)pa;
+
+                    int canvasSize = objSz * 2;
+                    int adjX = osx + (tm_tile_size - canvasSize) / 2;
+                    int adjY = osy + (tm_tile_size - canvasSize) / 2;
+
+                    u16 a0 = ATTR0_SQUARE | ATTR0_AFF_DBL | ((adjY & 0x1FF));
+                    u16 a1 = size_to_attr1(objSz) | ATTR1_AFF_ID(oamSlot) | ((adjX & 0x1FF));
+                    u16 a2 = ATTR2_PALBANK(palBank) | (tileCur & 0x3FF);
+                    obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
+                    oamSlot++;
+                }
+#endif
+                // Hide remaining OAM slots
+                {
+                    int i;
+                    for (i = oamSlot; i < 128; i++)
+                        obj_hide(&oam_mem[i]);
+                }
             }
         }
         else

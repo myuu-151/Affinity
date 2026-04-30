@@ -75,8 +75,8 @@ static std::vector<bool> sTmSpriteTexOwned;          // true = we created it, fa
 static int sTmSpriteTexCount = 0; // how many we've cached
 
 // ---- Tilemap object system ----
-enum class TmObjType { Player = 0, Enemy, NPC, Door, Chest, SavePoint, Tile, Teleport, COUNT };
-static const char* sTmObjTypeNames[] = { "Player", "Enemy", "NPC", "Door", "Chest", "Save Point", "Tile", "Teleport" };
+enum class TmObjType { Player = 0, Enemy, NPC, Door, Chest, SavePoint, Tile, Teleport, Trigger, Bounds, COUNT };
+static const char* sTmObjTypeNames[] = { "Player", "Enemy", "NPC", "Door", "Chest", "Save Point", "Tile", "Teleport", "Trigger", "Bounds" };
 static const uint32_t sTmObjTypeColors[] = {
     0xFF44FF44, // Player - green
     0xFF4444FF, // Enemy - red
@@ -86,6 +86,8 @@ static const uint32_t sTmObjTypeColors[] = {
     0xFFFF44FF, // Save Point - magenta
     0xFF888888, // Tile - grey
     0xFF44FFFF, // Teleport - cyan
+    0xFFAAAAFF, // Trigger - light purple
+    0xFF88AACC, // Bounds - steel blue
 };
 
 struct TmObject {
@@ -98,6 +100,7 @@ struct TmObject {
     std::vector<std::pair<int,int>> cells; // (tileX,tileY) list — only used when type==Tile
     float displayScale = 1.0f;      // visual scale multiplier (0.5 - 4.0)
     bool camFollow = true;          // camera centers on this object during play
+    bool collision = false;         // blocks player movement on this tile
     // Blueprint script attachment
     int blueprintIdx = -1;
     struct { int paramIdx; int value; } instanceParams[8] = {};
@@ -1920,6 +1923,8 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "objScale=%.2f\n", obj.displayScale);
         if (!obj.camFollow)
             fprintf(f, "objCamFollow=0\n");
+        if (obj.collision)
+            fprintf(f, "objCollision=1\n");
         if (obj.blueprintIdx >= 0) {
             fprintf(f, "objBp=%d,%d", obj.blueprintIdx, obj.instanceParamCount);
             for (int ip = 0; ip < obj.instanceParamCount; ip++)
@@ -1969,6 +1974,8 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "sceneobjScale=%.2f\n", obj.displayScale);
             if (!obj.camFollow)
                 fprintf(f, "sceneobjCamFollow=0\n");
+            if (obj.collision)
+                fprintf(f, "sceneobjCollision=1\n");
             if (obj.blueprintIdx >= 0) {
                 fprintf(f, "sceneobjBp=%d,%d", obj.blueprintIdx, obj.instanceParamCount);
                 for (int ip = 0; ip < obj.instanceParamCount; ip++)
@@ -2760,6 +2767,11 @@ static bool LoadProject(const std::string& path)
                 int v = 1; sscanf(line + 13, "%d", &v);
                 sTmObjects.back().camFollow = (v != 0);
             }
+            else if (strncmp(line, "objCollision=", 13) == 0 && !sTmObjects.empty())
+            {
+                int v = 0; sscanf(line + 13, "%d", &v);
+                sTmObjects.back().collision = (v != 0);
+            }
             else if (strncmp(line, "objBp=", 6) == 0 && !sTmObjects.empty())
             {
                 TmObject& lastObj = sTmObjects.back();
@@ -2856,6 +2868,11 @@ static bool LoadProject(const std::string& path)
             {
                 int v = 1; sscanf(line + 18, "%d", &v);
                 sTmScenes.back().objects.back().camFollow = (v != 0);
+            }
+            else if (strncmp(line, "sceneobjCollision=", 18) == 0 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
+            {
+                int v = 0; sscanf(line + 18, "%d", &v);
+                sTmScenes.back().objects.back().collision = (v != 0);
             }
             else if (strncmp(line, "sceneobjBp=", 11) == 0 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
             {
@@ -6179,6 +6196,8 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 ImGui::SliderFloat("Scale", &obj.displayScale, 0.5f, 4.0f, "%.1f");
                 if (ImGui::Checkbox("Camera Follow", &obj.camFollow))
                     sProjectDirty = true;
+                if (ImGui::Checkbox("Collision", &obj.collision))
+                    sProjectDirty = true;
             }
             // Blueprint attachment
             {
@@ -7431,7 +7450,10 @@ void FrameTick(float dt)
                     for (const auto& fr : sa.frames)
                     {
                         GBASpriteFrameExport ef;
-                        memcpy(ef.pixels, fr.pixels, sizeof(ef.pixels));
+                        memset(ef.pixels, 0, sizeof(ef.pixels));
+                        for (int py = 0; py < fr.height && py < kExportMaxFrameSize; py++)
+                            for (int px = 0; px < fr.width && px < kExportMaxFrameSize; px++)
+                                ef.pixels[py * kExportMaxFrameSize + px] = fr.pixels[py * kMaxFrameSize + px];
                         ef.width = fr.width;
                         ef.height = fr.height;
                         ea.frames.push_back(ef);
@@ -7775,6 +7797,7 @@ void FrameTick(float dt)
                             oe.spriteAssetIdx = obj.spriteAssetIdx;
                             oe.teleportScene = obj.teleportScene;
                             oe.camFollow = obj.camFollow;
+                            oe.collision = obj.collision;
                             oe.displayScale = obj.displayScale;
                             memcpy(oe.name, obj.name, sizeof(oe.name));
                             oe.name[31] = '\0';
