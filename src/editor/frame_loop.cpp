@@ -7653,9 +7653,9 @@ void FrameTick(float dt)
                 // Skip TmScene blueprint instances — same reason as TmObjects above.
 
                 // Collect tilemap scene data for Mode 0 export
+                // Always export tilemap data when scenes exist (needed for runtime scene switching)
                 std::vector<GBATmSceneExport> exportTmScenes;
-                bool isTilemapBuild = (sActiveTab == EditorTab::Tilemap);
-                if (isTilemapBuild)
+                if (!sTmScenes.empty())
                 {
                     // Save current scene state first
                     if (sTmSelectedScene >= 0 && sTmSelectedScene < (int)sTmScenes.size())
@@ -7765,8 +7765,11 @@ void FrameTick(float dt)
                     }
                 }
 
+                // Determine start mode from active tab: Tilemap=1, 3D/default=0, legacy=2
+                int exportStartMode = (sActiveTab == EditorTab::Tilemap) ? 1 : 0;
+
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                             exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, target]() {
+                             exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportStartMode, target]() {
                     std::string err;
                     bool ok;
                     if (target == BuildTarget::NDS)
@@ -7774,7 +7777,7 @@ void FrameTick(float dt)
                                         exportMeshes, exportOrbitDist, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                                        exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, err);
+                                        exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportStartMode, err);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)

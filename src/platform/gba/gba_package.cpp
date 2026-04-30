@@ -256,7 +256,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                             const GBAScriptExport& script,
                             const std::vector<GBABlueprintExport>& blueprints,
                             const std::vector<GBABlueprintInstanceExport>& bpInstances,
-                            const std::vector<GBATmSceneExport>& tmScenes)
+                            const std::vector<GBATmSceneExport>& tmScenes,
+                            int startMode)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
     std::ofstream f(outPath);
@@ -4375,18 +4376,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
     }
 
     // ---- Scene mode config ----
-    // Determine starting mode: 1=Mode0/tilemap, 0=Mode4/3D mesh
-    // If tilemap scenes exist, start in Mode 0; otherwise Mode 4 (mesh) or Mode 1 (legacy)
+    // startMode is determined by caller based on active editor tab
+    // Fallback: if the requested mode's data doesn't exist, pick what's available
     {
-        int startMode = 0; // default: Mode 4 / 3D
-        if (!tmScenes.empty() && meshes.empty())
-            startMode = 1; // tilemap only
-        else if (!tmScenes.empty() && !meshes.empty())
-            startMode = 1; // both exist: start in tilemap
-        else if (tmScenes.empty() && meshes.empty())
-            startMode = 2; // legacy Mode 1 (Mode 7 floor)
+        int sm = startMode;
+        if (sm == 1 && tmScenes.empty()) sm = meshes.empty() ? 2 : 0;
+        if (sm == 0 && meshes.empty())   sm = tmScenes.empty() ? 2 : 1;
         f << "\n// Runtime scene mode: 0=Mode4/3D, 1=Mode0/tilemap, 2=Mode1/Mode7\n";
-        f << "#define AFN_START_MODE " << startMode << "\n";
+        f << "#define AFN_START_MODE " << sm << "\n";
         if (!meshes.empty())
             f << "#define AFN_HAS_MESHES 1\n";
     }
@@ -4407,6 +4404,7 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBABlueprintExport>& blueprints,
                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
                 const std::vector<GBATmSceneExport>& tmScenes,
+                int startMode,
                 std::string& errorMsg)
 {
     std::string msysDir = ToMsysPath(runtimeDir);
@@ -4422,7 +4420,7 @@ bool PackageGBA(const std::string& runtimeDir,
     }
 
     // --- Step 1: Generate mapdata.h with sprite/camera/asset/player data ---
-    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, script, blueprints, bpInstances, tmScenes))
+    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, script, blueprints, bpInstances, tmScenes, startMode))
     {
         errorMsg = "Failed to write mapdata.h";
         return false;

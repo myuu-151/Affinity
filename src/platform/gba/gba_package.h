@@ -417,6 +417,7 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBABlueprintExport>& blueprints,
                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
                 const std::vector<GBATmSceneExport>& tmScenes,
+                int startMode,
                 std::string& errorMsg);
 
 } // namespace Affinity
