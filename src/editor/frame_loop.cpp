@@ -13542,8 +13542,10 @@ void FrameTick(float dt)
                     char m0Body[1024] = {};
                     {
                         bool hasModeSplit = (strstr(gbaBodyBuf, "// Mode 0:") || strstr(gbaBodyBuf, "// Mode 4:"));
-                        if (hasModeSplit) {
+                        bool hasRtHeader = (strstr(gbaBodyBuf, "// --- Runtime") != nullptr);
+                        if (hasModeSplit || hasRtHeader) {
                             int curMode = 0; // 0=shared, 4=mode4, 1=mode0
+                            bool inRtBlock = false; // inside a "// --- Runtime" commented block
                             const char* p = gbaBodyBuf;
                             while (*p) {
                                 const char* eol = strchr(p, '\n');
@@ -13557,7 +13559,8 @@ void FrameTick(float dt)
                                 const char* rtHdr = strstr(lineBuf, "// --- Runtime");
 
                                 if (rtHdr) {
-                                    curMode = 0; // reset context
+                                    curMode = 0;
+                                    inRtBlock = true; // lines after this are runtime comments
                                 } else if (m0tag) {
                                     curMode = 1;
                                     int indent = (int)(m0tag - lineBuf);
@@ -13575,11 +13578,10 @@ void FrameTick(float dt)
                                     snprintf(cleaned, sizeof(cleaned), "%.*s%s\n", indent, lineBuf, content);
                                     strncat(m4Body, cleaned, sizeof(m4Body) - strlen(m4Body) - 1);
                                 } else {
-                                    // Check if continuation comment under a mode tag
                                     const char* sl = lineBuf;
                                     while (*sl == ' ') sl++;
-                                    if (curMode != 0 && sl[0] == '/' && sl[1] == '/') {
-                                        // Continuation of current mode — uncomment and add
+                                    if ((curMode != 0 || inRtBlock) && sl[0] == '/' && sl[1] == '/') {
+                                        // Continuation comment — uncomment and route
                                         int indent = (int)(sl - lineBuf);
                                         const char* content = sl + 2;
                                         while (*content == ' ') content++;
@@ -13587,11 +13589,17 @@ void FrameTick(float dt)
                                         snprintf(cleaned, sizeof(cleaned), "%.*s%s\n", indent, lineBuf, content);
                                         if (curMode == 4)
                                             strncat(m4Body, cleaned, sizeof(m4Body) - strlen(m4Body) - 1);
-                                        else
+                                        else if (curMode == 1)
                                             strncat(m0Body, cleaned, sizeof(m0Body) - strlen(m0Body) - 1);
+                                        else {
+                                            // inRtBlock shared — goes into both
+                                            strncat(m4Body, cleaned, sizeof(m4Body) - strlen(m4Body) - 1);
+                                            strncat(m0Body, cleaned, sizeof(m0Body) - strlen(m0Body) - 1);
+                                        }
                                     } else {
-                                        // Shared line — goes into both, reset mode context
+                                        // Shared line — goes into both, reset context
                                         curMode = 0;
+                                        inRtBlock = false;
                                         strncat(m4Body, lineBuf, sizeof(m4Body) - strlen(m4Body) - 1);
                                         strncat(m4Body, "\n", sizeof(m4Body) - strlen(m4Body) - 1);
                                         strncat(m0Body, lineBuf, sizeof(m0Body) - strlen(m0Body) - 1);
