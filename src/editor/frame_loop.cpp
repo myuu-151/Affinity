@@ -852,6 +852,7 @@ static bool sHudBoxSelecting = false;
 static ImVec2 sHudBoxSelStart = {0, 0};
 static std::vector<bool> sHudPieceSelected; // per-piece selection within current element
 static std::vector<HudPiece> sHudPieceClipboard; // copy-paste buffer
+static int sHudPieceDragSrc = -1; // piece list drag-reorder source index
 
 // Annotation interaction
 static int sVsSelectedAnnotation = -1;
@@ -15334,12 +15335,68 @@ void FrameTick(float dt)
                 for (int pi = 0; pi < (int)el.pieces.size(); pi++) {
                     ImGui::PushID(pi);
                     bool psel = (pi == el.selectedPiece);
+                    bool multiSel = (pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi]);
                     char plabel[64];
                     const char* pname = (el.pieces[pi].spriteAssetIdx >= 0 && el.pieces[pi].spriteAssetIdx < (int)sSpriteAssets.size())
                         ? sSpriteAssets[el.pieces[pi].spriteAssetIdx].name.c_str() : "empty";
                     snprintf(plabel, sizeof(plabel), "%d: %s (%dpx)", pi, pname, el.pieces[pi].size);
-                    if (ImGui::Selectable(plabel, psel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
+                    // Highlight multi-selected pieces with blue tint
+                    if (multiSel && !psel)
+                        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.2f, 0.4f, 0.7f, 0.6f));
+                    if (ImGui::Selectable(plabel, psel || multiSel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
                         el.selectedPiece = pi;
+                    if (multiSel && !psel)
+                        ImGui::PopStyleColor();
+                    // Drag source — drags all selected if part of multi-selection
+                    if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
+                        ImGui::SetDragDropPayload("HUD_PIECE", &pi, sizeof(int));
+                        if (multiSel) {
+                            int cnt = 0;
+                            for (int k = 0; k < (int)sHudPieceSelected.size(); k++)
+                                if (sHudPieceSelected[k]) cnt++;
+                            ImGui::Text("Move %d pieces", cnt);
+                        } else {
+                            ImGui::Text("%s", plabel);
+                        }
+                        ImGui::EndDragDropSource();
+                    }
+                    // Drop target — swap single or insert group
+                    if (ImGui::BeginDragDropTarget()) {
+                        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("HUD_PIECE")) {
+                            int src = *(const int*)payload->Data;
+                            bool srcMultiSel = (src < (int)sHudPieceSelected.size() && sHudPieceSelected[src]);
+                            if (srcMultiSel) {
+                                // Collect selected pieces, remove from list, insert at drop position
+                                std::vector<HudPiece> moved;
+                                for (int k = (int)el.pieces.size() - 1; k >= 0; k--)
+                                    if (k < (int)sHudPieceSelected.size() && sHudPieceSelected[k])
+                                        moved.insert(moved.begin(), el.pieces[k]);
+                                // Remove selected (reverse order to preserve indices)
+                                for (int k = (int)el.pieces.size() - 1; k >= 0; k--)
+                                    if (k < (int)sHudPieceSelected.size() && sHudPieceSelected[k])
+                                        el.pieces.erase(el.pieces.begin() + k);
+                                // Find adjusted drop index
+                                int dropAt = std::min(pi, (int)el.pieces.size());
+                                // Adjust if drop was after removed items
+                                int beforeDrop = 0;
+                                for (int k = 0; k < pi && k < (int)sHudPieceSelected.size(); k++)
+                                    if (sHudPieceSelected[k]) beforeDrop++;
+                                dropAt = std::min(pi - beforeDrop, (int)el.pieces.size());
+                                if (dropAt < 0) dropAt = 0;
+                                el.pieces.insert(el.pieces.begin() + dropAt, moved.begin(), moved.end());
+                                // Update selection to new positions
+                                sHudPieceSelected.assign(el.pieces.size(), false);
+                                for (int k = dropAt; k < dropAt + (int)moved.size(); k++)
+                                    sHudPieceSelected[k] = true;
+                                el.selectedPiece = dropAt;
+                            } else if (src != pi && src >= 0 && src < (int)el.pieces.size()) {
+                                std::swap(el.pieces[src], el.pieces[pi]);
+                                el.selectedPiece = pi;
+                            }
+                            sProjectDirty = true;
+                        }
+                        ImGui::EndDragDropTarget();
+                    }
                     ImGui::SameLine();
                     if (ImGui::SmallButton("-")) {
                         el.pieces.erase(el.pieces.begin() + pi);
