@@ -802,8 +802,8 @@ struct BpInstanceParam {
 };
 
 // ---- HUD / UI Elements ----
-enum class HudElementType { Text, Bar, Icon, Box, Button };
-static const char* sHudTypeNames[] = { "Text", "Bar", "Icon", "Box", "Button" };
+enum class HudElementType { Text, Bar, Icon, Menu, Button };
+static const char* sHudTypeNames[] = { "Text", "Bar", "Icon", "Menu", "Button" };
 
 // A single OAM sprite piece within a composite element
 struct HudPiece {
@@ -811,6 +811,11 @@ struct HudPiece {
     int frame = 0;           // which frame of that asset
     int localX = 0, localY = 0; // offset within the element
     int size = 16;           // POT size: 8, 16, 32, or 64
+};
+
+struct HudCursorStop {
+    int localX = 0, localY = 0;  // position within the element
+    int linkedElement = -1;      // index into sHudElements (-1 = none)
 };
 
 struct HudElement {
@@ -837,6 +842,37 @@ struct HudElement {
     // Composite pieces
     std::vector<HudPiece> pieces;
     int selectedPiece = -1;  // currently selected piece index (editor only)
+    // Cursor stops for menu navigation
+    std::vector<HudCursorStop> stops;
+    int selectedStop = -1;   // editor only
+    // Cursor sprite for menu
+    int cursorAssetIdx = -1;
+    int cursorFrame = 0;
+    int cursorOffX = -8, cursorOffY = 0; // offset from stop position
+    // Menu text rows
+    struct TextRow {
+        char label[32] = "";
+        int localX = 0, localY = 0;
+        uint32_t color = 0xFFFFFFFF; // RGBA8
+    };
+    std::vector<TextRow> textRows;
+    int selectedTextRow = -1;
+    // Sprite overlay items
+    struct SpriteItem {
+        int spriteAssetIdx = -1;
+        int frame = 0;
+        int localX = 0, localY = 0;
+        int size = 16;
+        float scale = 1.0f;
+    };
+    std::vector<SpriteItem> spriteItems;
+    int selectedSpriteItem = -1;
+    // Section collapse state (editor only)
+    bool collapseBackground = false;
+    bool collapseSprites = false;
+    bool collapseText = false;
+    bool collapseCursor = false;
+    bool collapseStops = false;
 };
 
 static std::vector<HudElement> sHudElements;
@@ -1910,6 +1946,16 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "elemPieceCount=%d\n", (int)el.pieces.size());
         for (auto& pc : el.pieces)
             fprintf(f, "elemPiece=%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size);
+        fprintf(f, "elemStopCount=%d\n", (int)el.stops.size());
+        for (auto& st : el.stops)
+            fprintf(f, "elemStop=%d|%d|%d\n", st.localX, st.localY, st.linkedElement);
+        fprintf(f, "elemCursor=%d|%d|%d|%d\n", el.cursorAssetIdx, el.cursorFrame, el.cursorOffX, el.cursorOffY);
+        fprintf(f, "elemTextCount=%d\n", (int)el.textRows.size());
+        for (auto& tr : el.textRows)
+            fprintf(f, "elemText=%d|%d|%u|%s\n", tr.localX, tr.localY, tr.color, tr.label);
+        fprintf(f, "elemSpriteCount=%d\n", (int)el.spriteItems.size());
+        for (auto& si : el.spriteItems)
+            fprintf(f, "elemSprite=%d|%d|%d|%d|%d|%.2f\n", si.spriteAssetIdx, si.frame, si.localX, si.localY, si.size, si.scale);
     }
     fprintf(f, "\n");
 
@@ -2740,6 +2786,43 @@ static bool LoadProject(const std::string& path)
                 if (sscanf(line + 10, "%d|%d|%d|%d|%d",
                     &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size) == 5)
                     sHudElements.back().pieces.push_back(pc);
+            }
+            else if (sscanf(line, "elemStopCount=%d", &ival) == 1 && !sHudElements.empty()) {
+                sHudElements.back().stops.clear();
+                sHudElements.back().stops.reserve(ival);
+            }
+            else if (strncmp(line, "elemStop=", 9) == 0 && !sHudElements.empty()) {
+                HudCursorStop st;
+                if (sscanf(line + 9, "%d|%d|%d", &st.localX, &st.localY, &st.linkedElement) == 3)
+                    sHudElements.back().stops.push_back(st);
+            }
+            else if (strncmp(line, "elemCursor=", 11) == 0 && !sHudElements.empty()) {
+                auto& el = sHudElements.back();
+                sscanf(line + 11, "%d|%d|%d|%d", &el.cursorAssetIdx, &el.cursorFrame, &el.cursorOffX, &el.cursorOffY);
+            }
+            else if (sscanf(line, "elemTextCount=%d", &ival) == 1 && !sHudElements.empty()) {
+                sHudElements.back().textRows.clear();
+                sHudElements.back().textRows.reserve(ival);
+            }
+            else if (strncmp(line, "elemText=", 9) == 0 && !sHudElements.empty()) {
+                HudElement::TextRow tr;
+                unsigned int col = 0xFFFFFFFF;
+                int n = 0;
+                if (sscanf(line + 9, "%d|%d|%u|%n", &tr.localX, &tr.localY, &col, &n) >= 3) {
+                    tr.color = col;
+                    if (n > 0) strncpy(tr.label, line + 9 + n, sizeof(tr.label) - 1);
+                    sHudElements.back().textRows.push_back(tr);
+                }
+            }
+            else if (sscanf(line, "elemSpriteCount=%d", &ival) == 1 && !sHudElements.empty()) {
+                sHudElements.back().spriteItems.clear();
+                sHudElements.back().spriteItems.reserve(ival);
+            }
+            else if (strncmp(line, "elemSprite=", 11) == 0 && !sHudElements.empty()) {
+                HudElement::SpriteItem si;
+                if (sscanf(line + 11, "%d|%d|%d|%d|%d|%f",
+                    &si.spriteAssetIdx, &si.frame, &si.localX, &si.localY, &si.size, &si.scale) >= 5)
+                    sHudElements.back().spriteItems.push_back(si);
             }
         }
         else if (strcmp(section, "Palette") == 0)
@@ -14835,7 +14918,7 @@ void FrameTick(float dt)
                         dl->AddText(ImVec2(ex + 2, ey + 1), IM_COL32(200, 200, 255, 255), "ICO");
                     }
                     break;
-                case HudElementType::Box:
+                case HudElementType::Menu:
                     // No background fill — pieces/sprites drive the visuals
                     break;
                 case HudElementType::Button:
@@ -14870,6 +14953,89 @@ void FrameTick(float dt)
                     if (selected && pi == el.selectedPiece) outlineCol = IM_COL32(100, 255, 100, 255);
                     else if (pieceMultiSel) outlineCol = IM_COL32(100, 200, 255, 255);
                     dl->AddRect(ImVec2(px, py), ImVec2(px + psz, py + psz), outlineCol);
+                }
+
+                // Draw sprite overlay items
+                for (int si = 0; si < (int)el.spriteItems.size(); si++) {
+                    auto& item = el.spriteItems[si];
+                    float ix = cx + (el.x + item.localX) * zoom;
+                    float iy = cy + (el.y + item.localY) * zoom;
+                    float isz = item.size * item.scale * zoom;
+                    if (item.spriteAssetIdx >= 0 && item.spriteAssetIdx < (int)sTmSpriteTextures.size() &&
+                        sTmSpriteTextures[item.spriteAssetIdx]) {
+                        dl->AddImage((ImTextureID)(intptr_t)sTmSpriteTextures[item.spriteAssetIdx],
+                            ImVec2(ix, iy), ImVec2(ix + isz, iy + isz));
+                    } else {
+                        dl->AddRectFilled(ImVec2(ix, iy), ImVec2(ix + isz, iy + isz),
+                            IM_COL32(80, 120, 180, 80));
+                    }
+                    if (selected && si == el.selectedSpriteItem)
+                        dl->AddRect(ImVec2(ix, iy), ImVec2(ix + isz, iy + isz), IM_COL32(100, 180, 255, 255));
+                }
+
+                // Draw text rows
+                for (int ti = 0; ti < (int)el.textRows.size(); ti++) {
+                    auto& tr = el.textRows[ti];
+                    float tx = cx + (el.x + tr.localX) * zoom;
+                    float ty = cy + (el.y + tr.localY) * zoom;
+                    ImU32 tcol = (selected && ti == el.selectedTextRow)
+                        ? IM_COL32(255, 255, 100, 255)
+                        : tr.color;
+                    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * (zoom / 3.0f),
+                        ImVec2(tx, ty), tcol, tr.label);
+                }
+
+                // Draw cursor preview always at stop 0 (starting position)
+                if (el.cursorAssetIdx >= 0 && !el.stops.empty()) {
+                    auto& cst = el.stops[0];
+                    float curX = cx + (el.x + cst.localX + el.cursorOffX) * zoom;
+                    float curY = cy + (el.y + cst.localY + el.cursorOffY) * zoom;
+                    float csz = 8 * zoom;
+                    if (el.cursorAssetIdx < (int)sTmSpriteTextures.size() && sTmSpriteTextures[el.cursorAssetIdx])
+                        dl->AddImage((ImTextureID)(intptr_t)sTmSpriteTextures[el.cursorAssetIdx],
+                            ImVec2(curX, curY), ImVec2(curX + csz, curY + csz));
+                    else
+                        dl->AddTriangleFilled(
+                            ImVec2(curX, curY), ImVec2(curX + csz, curY + csz * 0.5f),
+                            ImVec2(curX, curY + csz), IM_COL32(255, 80, 80, 200));
+                } else if (el.cursorAssetIdx >= 0 && el.stops.empty()) {
+                    // No stops yet — show cursor at element origin
+                    float curX = cx + (el.x + el.cursorOffX) * zoom;
+                    float curY = cy + (el.y + el.cursorOffY) * zoom;
+                    float csz = 8 * zoom;
+                    if (el.cursorAssetIdx < (int)sTmSpriteTextures.size() && sTmSpriteTextures[el.cursorAssetIdx])
+                        dl->AddImage((ImTextureID)(intptr_t)sTmSpriteTextures[el.cursorAssetIdx],
+                            ImVec2(curX, curY), ImVec2(curX + csz, curY + csz));
+                    else
+                        dl->AddTriangleFilled(
+                            ImVec2(curX, curY), ImVec2(curX + csz, curY + csz * 0.5f),
+                            ImVec2(curX, curY + csz), IM_COL32(255, 80, 80, 200));
+                }
+
+                // Draw cursor stop markers
+                if (selected) {
+                    for (int si = 0; si < (int)el.stops.size(); si++) {
+                        auto& st = el.stops[si];
+                        float sx = cx + (el.x + st.localX) * zoom;
+                        float sy = cy + (el.y + st.localY) * zoom;
+                        float sz = 6 * zoom;
+                        ImU32 stopCol = (si == el.selectedStop)
+                            ? IM_COL32(255, 220, 50, 255)
+                            : IM_COL32(255, 100, 100, 200);
+                        // Diamond marker
+                        float mx = sx + sz * 0.5f, my = sy + sz * 0.5f;
+                        dl->AddQuadFilled(
+                            ImVec2(mx, my - sz * 0.5f), ImVec2(mx + sz * 0.5f, my),
+                            ImVec2(mx, my + sz * 0.5f), ImVec2(mx - sz * 0.5f, my), stopCol);
+                        dl->AddQuad(
+                            ImVec2(mx, my - sz * 0.5f), ImVec2(mx + sz * 0.5f, my),
+                            ImVec2(mx, my + sz * 0.5f), ImVec2(mx - sz * 0.5f, my),
+                            IM_COL32(255, 255, 255, 255));
+                        // Label
+                        char slabel[8];
+                        snprintf(slabel, sizeof(slabel), "%d", si);
+                        dl->AddText(ImVec2(sx + sz + 2, sy - 2), IM_COL32(255, 255, 255, 200), slabel);
+                    }
                 }
 
                 // Selection outline — fit to pieces bounds if any, else use W/H
@@ -15227,7 +15393,7 @@ void FrameTick(float dt)
                     case HudElementType::Text:   el.w = 60; el.h = 12; break;
                     case HudElementType::Bar:    el.w = 48; el.h = 6;  break;
                     case HudElementType::Icon:   el.w = 16; el.h = 16; break;
-                    case HudElementType::Box:    el.w = 40; el.h = 30; break;
+                    case HudElementType::Menu:    el.w = 40; el.h = 30; break;
                     case HudElementType::Button: el.w = 48; el.h = 16; break;
                     }
                     sProjectDirty = true;
@@ -15313,147 +15479,339 @@ void FrameTick(float dt)
                 case HudElementType::Icon:
                     // All sprite properties handled in common section above
                     break;
-                case HudElementType::Box:
+                case HudElementType::Menu:
                     break;
                 default: break;
                 }
 
-                // ---- Composite Pieces ----
+                // ============ BACKGROUND ============
                 ImGui::Spacing();
                 ImGui::Separator();
-                ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "Pieces");
+                if (ImGui::SmallButton(el.collapseBackground ? ">##bg" : "v##bg"))
+                    el.collapseBackground = !el.collapseBackground;
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "Background");
                 ImGui::SameLine();
                 if (ImGui::SmallButton("+##addpiece")) {
                     HudPiece p;
-                    p.localX = (int)el.pieces.size() * 16; // offset each new piece
+                    p.localX = (int)el.pieces.size() * 16;
                     sHudElements[sHudSelectedIdx].pieces.push_back(p);
                     sHudElements[sHudSelectedIdx].selectedPiece = (int)sHudElements[sHudSelectedIdx].pieces.size() - 1;
                     sProjectDirty = true;
                 }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add sprite piece");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add background piece");
 
-                for (int pi = 0; pi < (int)el.pieces.size(); pi++) {
-                    ImGui::PushID(pi);
-                    bool psel = (pi == el.selectedPiece);
-                    bool multiSel = (pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi]);
-                    char plabel[64];
-                    const char* pname = (el.pieces[pi].spriteAssetIdx >= 0 && el.pieces[pi].spriteAssetIdx < (int)sSpriteAssets.size())
-                        ? sSpriteAssets[el.pieces[pi].spriteAssetIdx].name.c_str() : "empty";
-                    snprintf(plabel, sizeof(plabel), "%d: %s (%dpx)", pi, pname, el.pieces[pi].size);
-                    // Highlight multi-selected pieces with blue tint
-                    if (multiSel && !psel)
-                        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.2f, 0.4f, 0.7f, 0.6f));
-                    if (ImGui::Selectable(plabel, psel || multiSel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
-                        el.selectedPiece = pi;
-                    if (multiSel && !psel)
-                        ImGui::PopStyleColor();
-                    // Drag source — drags all selected if part of multi-selection
-                    if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
-                        ImGui::SetDragDropPayload("HUD_PIECE", &pi, sizeof(int));
-                        if (multiSel) {
-                            int cnt = 0;
-                            for (int k = 0; k < (int)sHudPieceSelected.size(); k++)
-                                if (sHudPieceSelected[k]) cnt++;
-                            ImGui::Text("Move %d pieces", cnt);
-                        } else {
-                            ImGui::Text("%s", plabel);
-                        }
-                        ImGui::EndDragDropSource();
-                    }
-                    // Drop target — swap single or insert group
-                    if (ImGui::BeginDragDropTarget()) {
-                        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("HUD_PIECE")) {
-                            int src = *(const int*)payload->Data;
-                            bool srcMultiSel = (src < (int)sHudPieceSelected.size() && sHudPieceSelected[src]);
-                            if (srcMultiSel) {
-                                // Collect selected pieces, remove from list, insert at drop position
-                                std::vector<HudPiece> moved;
-                                for (int k = (int)el.pieces.size() - 1; k >= 0; k--)
-                                    if (k < (int)sHudPieceSelected.size() && sHudPieceSelected[k])
-                                        moved.insert(moved.begin(), el.pieces[k]);
-                                // Remove selected (reverse order to preserve indices)
-                                for (int k = (int)el.pieces.size() - 1; k >= 0; k--)
-                                    if (k < (int)sHudPieceSelected.size() && sHudPieceSelected[k])
-                                        el.pieces.erase(el.pieces.begin() + k);
-                                // Find adjusted drop index
-                                int dropAt = std::min(pi, (int)el.pieces.size());
-                                // Adjust if drop was after removed items
-                                int beforeDrop = 0;
-                                for (int k = 0; k < pi && k < (int)sHudPieceSelected.size(); k++)
-                                    if (sHudPieceSelected[k]) beforeDrop++;
-                                dropAt = std::min(pi - beforeDrop, (int)el.pieces.size());
-                                if (dropAt < 0) dropAt = 0;
-                                el.pieces.insert(el.pieces.begin() + dropAt, moved.begin(), moved.end());
-                                // Update selection to new positions
-                                sHudPieceSelected.assign(el.pieces.size(), false);
-                                for (int k = dropAt; k < dropAt + (int)moved.size(); k++)
-                                    sHudPieceSelected[k] = true;
-                                el.selectedPiece = dropAt;
-                            } else if (src != pi && src >= 0 && src < (int)el.pieces.size()) {
-                                std::swap(el.pieces[src], el.pieces[pi]);
-                                el.selectedPiece = pi;
+                if (!el.collapseBackground) {
+                    for (int pi = 0; pi < (int)el.pieces.size(); pi++) {
+                        ImGui::PushID(pi);
+                        bool psel = (pi == el.selectedPiece);
+                        bool multiSel = (pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi]);
+                        char plabel[64];
+                        const char* pname = (el.pieces[pi].spriteAssetIdx >= 0 && el.pieces[pi].spriteAssetIdx < (int)sSpriteAssets.size())
+                            ? sSpriteAssets[el.pieces[pi].spriteAssetIdx].name.c_str() : "empty";
+                        snprintf(plabel, sizeof(plabel), "%d: %s (%dpx)", pi, pname, el.pieces[pi].size);
+                        if (multiSel && !psel)
+                            ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.2f, 0.4f, 0.7f, 0.6f));
+                        if (ImGui::Selectable(plabel, psel || multiSel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
+                            el.selectedPiece = pi;
+                        if (multiSel && !psel)
+                            ImGui::PopStyleColor();
+                        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
+                            ImGui::SetDragDropPayload("HUD_PIECE", &pi, sizeof(int));
+                            if (multiSel) {
+                                int cnt = 0;
+                                for (int k = 0; k < (int)sHudPieceSelected.size(); k++)
+                                    if (sHudPieceSelected[k]) cnt++;
+                                ImGui::Text("Move %d pieces", cnt);
+                            } else {
+                                ImGui::Text("%s", plabel);
                             }
-                            sProjectDirty = true;
+                            ImGui::EndDragDropSource();
                         }
-                        ImGui::EndDragDropTarget();
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("-")) {
-                        el.pieces.erase(el.pieces.begin() + pi);
-                        if (el.selectedPiece >= (int)el.pieces.size()) el.selectedPiece = -1;
-                        sProjectDirty = true;
+                        if (ImGui::BeginDragDropTarget()) {
+                            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("HUD_PIECE")) {
+                                int src = *(const int*)payload->Data;
+                                bool srcMultiSel = (src < (int)sHudPieceSelected.size() && sHudPieceSelected[src]);
+                                if (srcMultiSel) {
+                                    std::vector<HudPiece> moved;
+                                    for (int k = (int)el.pieces.size() - 1; k >= 0; k--)
+                                        if (k < (int)sHudPieceSelected.size() && sHudPieceSelected[k])
+                                            moved.insert(moved.begin(), el.pieces[k]);
+                                    for (int k = (int)el.pieces.size() - 1; k >= 0; k--)
+                                        if (k < (int)sHudPieceSelected.size() && sHudPieceSelected[k])
+                                            el.pieces.erase(el.pieces.begin() + k);
+                                    int beforeDrop = 0;
+                                    for (int k = 0; k < pi && k < (int)sHudPieceSelected.size(); k++)
+                                        if (sHudPieceSelected[k]) beforeDrop++;
+                                    int dropAt = std::clamp(pi - beforeDrop, 0, (int)el.pieces.size());
+                                    el.pieces.insert(el.pieces.begin() + dropAt, moved.begin(), moved.end());
+                                    sHudPieceSelected.assign(el.pieces.size(), false);
+                                    for (int k = dropAt; k < dropAt + (int)moved.size(); k++)
+                                        sHudPieceSelected[k] = true;
+                                    el.selectedPiece = dropAt;
+                                } else if (src != pi && src >= 0 && src < (int)el.pieces.size()) {
+                                    std::swap(el.pieces[src], el.pieces[pi]);
+                                    el.selectedPiece = pi;
+                                }
+                                sProjectDirty = true;
+                            }
+                            ImGui::EndDragDropTarget();
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("-")) {
+                            el.pieces.erase(el.pieces.begin() + pi);
+                            if (el.selectedPiece >= (int)el.pieces.size()) el.selectedPiece = -1;
+                            sProjectDirty = true;
+                            ImGui::PopID();
+                            break;
+                        }
                         ImGui::PopID();
-                        break;
                     }
-                    ImGui::PopID();
+
+                    if (el.selectedPiece >= 0 && el.selectedPiece < (int)el.pieces.size()) {
+                        auto& pc = el.pieces[el.selectedPiece];
+                        ImGui::Spacing();
+                        const char* pcPreview = (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sSpriteAssets.size())
+                            ? sSpriteAssets[pc.spriteAssetIdx].name.c_str() : "(none)";
+                        if (ImGui::BeginCombo("Asset##pc", pcPreview)) {
+                            if (ImGui::Selectable("(none)##pc", pc.spriteAssetIdx < 0)) {
+                                pc.spriteAssetIdx = -1; sProjectDirty = true;
+                            }
+                            for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++) {
+                                char il[64];
+                                snprintf(il, sizeof(il), "%d: %s", ai, sSpriteAssets[ai].name.c_str());
+                                if (ImGui::Selectable(il, ai == pc.spriteAssetIdx)) {
+                                    pc.spriteAssetIdx = ai; sProjectDirty = true;
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+                        if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sSpriteAssets.size()) {
+                            int maxFr = std::max(0, (int)sSpriteAssets[pc.spriteAssetIdx].frames.size() - 1);
+                            if (ImGui::SliderInt("Frame##pc", &pc.frame, 0, maxFr)) sProjectDirty = true;
+                        }
+                        int sizeIdx = (pc.size == 8) ? 0 : (pc.size == 16) ? 1 : (pc.size == 32) ? 2 : 3;
+                        if (ImGui::Combo("Size##pc", &sizeIdx, "8\0" "16\0" "32\0" "64\0")) {
+                            const int sizes[] = {8, 16, 32, 64};
+                            pc.size = sizes[sizeIdx]; sProjectDirty = true;
+                        }
+                        if (ImGui::DragInt("X##pc", &pc.localX, 1)) sProjectDirty = true;
+                        if (ImGui::DragInt("Y##pc", &pc.localY, 1)) sProjectDirty = true;
+                        if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sTmSpriteTextures.size() && sTmSpriteTextures[pc.spriteAssetIdx]) {
+                            float prevSz = std::min(elemRightW * 0.4f, 64.0f);
+                            ImGui::Image((ImTextureID)(intptr_t)sTmSpriteTextures[pc.spriteAssetIdx],
+                                ImVec2(prevSz, prevSz));
+                        }
+                    }
                 }
 
-                // Selected piece properties
-                if (el.selectedPiece >= 0 && el.selectedPiece < (int)el.pieces.size()) {
-                    auto& pc = el.pieces[el.selectedPiece];
-                    ImGui::Spacing();
+                // ============ SPRITES ============
+                ImGui::Spacing();
+                ImGui::Separator();
+                if (ImGui::SmallButton(el.collapseSprites ? ">##spr" : "v##spr"))
+                    el.collapseSprites = !el.collapseSprites;
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.5f, 0.7f, 1.0f, 1.0f), "Sprites");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("+##addspritem")) {
+                    HudElement::SpriteItem si;
+                    si.localX = 4;
+                    si.localY = 4 + (int)el.spriteItems.size() * 18;
+                    el.spriteItems.push_back(si);
+                    el.selectedSpriteItem = (int)el.spriteItems.size() - 1;
+                    sProjectDirty = true;
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add sprite overlay");
 
-                    // Sprite asset picker
-                    const char* pcPreview = (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sSpriteAssets.size())
-                        ? sSpriteAssets[pc.spriteAssetIdx].name.c_str() : "(none)";
-                    if (ImGui::BeginCombo("Asset##pc", pcPreview)) {
-                        if (ImGui::Selectable("(none)##pc", pc.spriteAssetIdx < 0)) {
-                            pc.spriteAssetIdx = -1; sProjectDirty = true;
+                if (!el.collapseSprites) {
+                    for (int si = 0; si < (int)el.spriteItems.size(); si++) {
+                        ImGui::PushID(2000 + si);
+                        bool ssel = (si == el.selectedSpriteItem);
+                        char slbl[64];
+                        const char* sname = (el.spriteItems[si].spriteAssetIdx >= 0 && el.spriteItems[si].spriteAssetIdx < (int)sSpriteAssets.size())
+                            ? sSpriteAssets[el.spriteItems[si].spriteAssetIdx].name.c_str() : "empty";
+                        snprintf(slbl, sizeof(slbl), "%d: %s (%dpx)", si, sname, el.spriteItems[si].size);
+                        if (ImGui::Selectable(slbl, ssel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
+                            el.selectedSpriteItem = si;
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("-##delspr")) {
+                            el.spriteItems.erase(el.spriteItems.begin() + si);
+                            if (el.selectedSpriteItem >= (int)el.spriteItems.size()) el.selectedSpriteItem = -1;
+                            sProjectDirty = true;
+                            ImGui::PopID(); break;
+                        }
+                        ImGui::PopID();
+                    }
+                    if (el.selectedSpriteItem >= 0 && el.selectedSpriteItem < (int)el.spriteItems.size()) {
+                        auto& si = el.spriteItems[el.selectedSpriteItem];
+                        ImGui::Spacing();
+                        const char* sprPrev = (si.spriteAssetIdx >= 0 && si.spriteAssetIdx < (int)sSpriteAssets.size())
+                            ? sSpriteAssets[si.spriteAssetIdx].name.c_str() : "(none)";
+                        if (ImGui::BeginCombo("Asset##spr", sprPrev)) {
+                            if (ImGui::Selectable("(none)##spr", si.spriteAssetIdx < 0)) {
+                                si.spriteAssetIdx = -1; sProjectDirty = true;
+                            }
+                            for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++) {
+                                char il[64];
+                                snprintf(il, sizeof(il), "%d: %s", ai, sSpriteAssets[ai].name.c_str());
+                                if (ImGui::Selectable(il, ai == si.spriteAssetIdx)) {
+                                    si.spriteAssetIdx = ai; sProjectDirty = true;
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+                        if (si.spriteAssetIdx >= 0 && si.spriteAssetIdx < (int)sSpriteAssets.size()) {
+                            int maxFr = std::max(0, (int)sSpriteAssets[si.spriteAssetIdx].frames.size() - 1);
+                            if (ImGui::SliderInt("Frame##spr", &si.frame, 0, maxFr)) sProjectDirty = true;
+                        }
+                        int sizeIdx = (si.size == 8) ? 0 : (si.size == 16) ? 1 : (si.size == 32) ? 2 : 3;
+                        if (ImGui::Combo("Size##spr", &sizeIdx, "8\0" "16\0" "32\0" "64\0")) {
+                            const int sizes[] = {8, 16, 32, 64};
+                            si.size = sizes[sizeIdx]; sProjectDirty = true;
+                        }
+                        if (ImGui::DragInt("X##spr", &si.localX, 1)) sProjectDirty = true;
+                        if (ImGui::DragInt("Y##spr", &si.localY, 1)) sProjectDirty = true;
+                        if (ImGui::DragFloat("Scale##spr", &si.scale, 0.1f, 0.1f, 8.0f, "%.1f")) sProjectDirty = true;
+                    }
+                }
+
+                // ============ TEXT ============
+                ImGui::Spacing();
+                ImGui::Separator();
+                if (ImGui::SmallButton(el.collapseText ? ">##txt" : "v##txt"))
+                    el.collapseText = !el.collapseText;
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Text");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("+##addtext")) {
+                    HudElement::TextRow tr;
+                    snprintf(tr.label, sizeof(tr.label), "Row %d", (int)el.textRows.size());
+                    tr.localX = 8;
+                    tr.localY = 8 + (int)el.textRows.size() * 10;
+                    el.textRows.push_back(tr);
+                    el.selectedTextRow = (int)el.textRows.size() - 1;
+                    sProjectDirty = true;
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add text row");
+
+                if (!el.collapseText) {
+                    for (int ti = 0; ti < (int)el.textRows.size(); ti++) {
+                        ImGui::PushID(3000 + ti);
+                        bool tsel = (ti == el.selectedTextRow);
+                        char tlbl[64];
+                        snprintf(tlbl, sizeof(tlbl), "%d: \"%s\" (%d,%d)", ti,
+                            el.textRows[ti].label, el.textRows[ti].localX, el.textRows[ti].localY);
+                        if (ImGui::Selectable(tlbl, tsel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
+                            el.selectedTextRow = ti;
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("-##deltxt")) {
+                            el.textRows.erase(el.textRows.begin() + ti);
+                            if (el.selectedTextRow >= (int)el.textRows.size()) el.selectedTextRow = -1;
+                            sProjectDirty = true;
+                            ImGui::PopID(); break;
+                        }
+                        ImGui::PopID();
+                    }
+                    if (el.selectedTextRow >= 0 && el.selectedTextRow < (int)el.textRows.size()) {
+                        auto& tr = el.textRows[el.selectedTextRow];
+                        ImGui::Spacing();
+                        if (ImGui::InputText("Label##txt", tr.label, sizeof(tr.label))) sProjectDirty = true;
+                        if (ImGui::DragInt("X##txt", &tr.localX, 1)) sProjectDirty = true;
+                        if (ImGui::DragInt("Y##txt", &tr.localY, 1)) sProjectDirty = true;
+                        ImVec4 tcf = ImGui::ColorConvertU32ToFloat4(tr.color);
+                        if (ImGui::ColorEdit4("Color##txt", &tcf.x, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoAlpha)) {
+                            tr.color = ImGui::ColorConvertFloat4ToU32(tcf);
+                            sProjectDirty = true;
+                        }
+                    }
+                }
+
+                // ============ CURSOR ============
+                ImGui::Spacing();
+                ImGui::Separator();
+                if (ImGui::SmallButton(el.collapseCursor ? ">##cur" : "v##cur"))
+                    el.collapseCursor = !el.collapseCursor;
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.6f, 1.0f), "Cursor");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("+##addstop")) {
+                    HudCursorStop st;
+                    st.localX = el.w / 2;
+                    st.localY = 4 + (int)el.stops.size() * 10;
+                    el.stops.push_back(st);
+                    el.selectedStop = (int)el.stops.size() - 1;
+                    sProjectDirty = true;
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add cursor stop");
+
+                if (!el.collapseCursor) {
+                    // Cursor sprite
+                    const char* curPrev = (el.cursorAssetIdx >= 0 && el.cursorAssetIdx < (int)sSpriteAssets.size())
+                        ? sSpriteAssets[el.cursorAssetIdx].name.c_str() : "(none)";
+                    if (ImGui::BeginCombo("Asset##cur", curPrev)) {
+                        if (ImGui::Selectable("(none)##cur", el.cursorAssetIdx < 0)) {
+                            el.cursorAssetIdx = -1; sProjectDirty = true;
                         }
                         for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++) {
                             char il[64];
                             snprintf(il, sizeof(il), "%d: %s", ai, sSpriteAssets[ai].name.c_str());
-                            if (ImGui::Selectable(il, ai == pc.spriteAssetIdx)) {
-                                pc.spriteAssetIdx = ai;
-                                sProjectDirty = true;
+                            if (ImGui::Selectable(il, ai == el.cursorAssetIdx)) {
+                                el.cursorAssetIdx = ai; sProjectDirty = true;
                             }
                         }
                         ImGui::EndCombo();
                     }
-
-                    // Frame picker
-                    if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sSpriteAssets.size()) {
-                        int maxFr = std::max(0, (int)sSpriteAssets[pc.spriteAssetIdx].frames.size() - 1);
-                        if (ImGui::SliderInt("Frame##pc", &pc.frame, 0, maxFr)) sProjectDirty = true;
+                    if (el.cursorAssetIdx >= 0 && el.cursorAssetIdx < (int)sSpriteAssets.size()) {
+                        int maxFr = std::max(0, (int)sSpriteAssets[el.cursorAssetIdx].frames.size() - 1);
+                        if (ImGui::SliderInt("Frame##cur", &el.cursorFrame, 0, maxFr)) sProjectDirty = true;
                     }
+                    if (ImGui::DragInt("Offset X##cur", &el.cursorOffX, 1)) sProjectDirty = true;
+                    if (ImGui::DragInt("Offset Y##cur", &el.cursorOffY, 1)) sProjectDirty = true;
 
-                    // POT size
-                    int sizeIdx = (pc.size == 8) ? 0 : (pc.size == 16) ? 1 : (pc.size == 32) ? 2 : 3;
-                    if (ImGui::Combo("Size##pc", &sizeIdx, "8\0" "16\0" "32\0" "64\0")) {
-                        const int sizes[] = {8, 16, 32, 64};
-                        pc.size = sizes[sizeIdx];
-                        sProjectDirty = true;
+                    // Stops list
+                    ImGui::Spacing();
+                    ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Stops");
+                    for (int si = 0; si < (int)el.stops.size(); si++) {
+                        ImGui::PushID(4000 + si);
+                        bool ssel = (si == el.selectedStop);
+                        char slabel[64];
+                        const char* linkName = (el.stops[si].linkedElement >= 0 &&
+                            el.stops[si].linkedElement < (int)sHudElements.size())
+                            ? sHudElements[el.stops[si].linkedElement].name : "(none)";
+                        snprintf(slabel, sizeof(slabel), "%d: (%d,%d) -> %s", si,
+                            el.stops[si].localX, el.stops[si].localY, linkName);
+                        if (ImGui::Selectable(slabel, ssel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
+                            el.selectedStop = si;
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("-##delstop")) {
+                            el.stops.erase(el.stops.begin() + si);
+                            if (el.selectedStop >= (int)el.stops.size()) el.selectedStop = -1;
+                            sProjectDirty = true;
+                            ImGui::PopID(); break;
+                        }
+                        ImGui::PopID();
                     }
-
-                    // Local offset
-                    if (ImGui::DragInt("X##pc", &pc.localX, 1)) sProjectDirty = true;
-                    if (ImGui::DragInt("Y##pc", &pc.localY, 1)) sProjectDirty = true;
-
-                    // Preview thumbnail
-                    if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sTmSpriteTextures.size() && sTmSpriteTextures[pc.spriteAssetIdx]) {
-                        float prevSz = std::min(elemRightW * 0.4f, 64.0f);
-                        ImGui::Image((ImTextureID)(intptr_t)sTmSpriteTextures[pc.spriteAssetIdx],
-                            ImVec2(prevSz, prevSz));
+                    if (el.selectedStop >= 0 && el.selectedStop < (int)el.stops.size()) {
+                        auto& st = el.stops[el.selectedStop];
+                        ImGui::Spacing();
+                        if (ImGui::DragInt("X##stop", &st.localX, 1)) sProjectDirty = true;
+                        if (ImGui::DragInt("Y##stop", &st.localY, 1)) sProjectDirty = true;
+                        const char* curLink = (st.linkedElement >= 0 && st.linkedElement < (int)sHudElements.size())
+                            ? sHudElements[st.linkedElement].name : "(none)";
+                        if (ImGui::BeginCombo("Link##stop", curLink)) {
+                            if (ImGui::Selectable("(none)##stoplink", st.linkedElement < 0)) {
+                                st.linkedElement = -1; sProjectDirty = true;
+                            }
+                            for (int ei = 0; ei < (int)sHudElements.size(); ei++) {
+                                if (ei == sHudSelectedIdx) continue;
+                                char elbl[48];
+                                snprintf(elbl, sizeof(elbl), "%s##sl%d", sHudElements[ei].name, ei);
+                                if (ImGui::Selectable(elbl, ei == st.linkedElement)) {
+                                    st.linkedElement = ei; sProjectDirty = true;
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
                     }
                 }
 
