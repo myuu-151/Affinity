@@ -14985,9 +14985,11 @@ void FrameTick(float dt)
                         ImVec2(tx, ty), tcol, tr.label);
                 }
 
-                // Draw cursor preview always at stop 0 (starting position)
+                // Draw cursor preview at selected stop (clicks between stops to preview)
                 if (el.cursorAssetIdx >= 0 && !el.stops.empty()) {
-                    auto& cst = el.stops[0];
+                    int csi = (selected && el.selectedStop >= 0 && el.selectedStop < (int)el.stops.size())
+                        ? el.selectedStop : 0;
+                    auto& cst = el.stops[csi];
                     float curX = cx + (el.x + cst.localX + el.cursorOffX) * zoom;
                     float curY = cy + (el.y + cst.localY + el.cursorOffY) * zoom;
                     float csz = 8 * zoom;
