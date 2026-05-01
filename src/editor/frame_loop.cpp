@@ -805,6 +805,14 @@ struct BpInstanceParam {
 enum class HudElementType { Text, Bar, Icon, Box, Button };
 static const char* sHudTypeNames[] = { "Text", "Bar", "Icon", "Box", "Button" };
 
+// A single OAM sprite piece within a composite element
+struct HudPiece {
+    int spriteAssetIdx = -1; // which sprite asset
+    int frame = 0;           // which frame of that asset
+    int localX = 0, localY = 0; // offset within the element
+    int size = 16;           // POT size: 8, 16, 32, or 64
+};
+
 struct HudElement {
     int id = 0;
     char name[32] = "Element";
@@ -826,6 +834,9 @@ struct HudElement {
     // General
     bool visible = true;
     int layer = 0;           // draw order (higher = on top)
+    // Composite pieces
+    std::vector<HudPiece> pieces;
+    int selectedPiece = -1;  // currently selected piece index (editor only)
 };
 
 static std::vector<HudElement> sHudElements;
@@ -833,6 +844,14 @@ static int sHudNextId = 1;
 static int sHudSelectedIdx = -1;
 static float sHudCanvasZoom = 3.0f;
 static ImVec2 sHudCanvasPan = {0, 0};
+static int sHudDragPiece = -1;       // piece index being dragged (-1 = dragging whole element)
+static float sHudPieceDragAccX = 0;  // sub-cell drag accumulator
+static float sHudPieceDragAccY = 0;
+static int sHudRenamingIdx = -1;     // element being renamed (-1 = none)
+static bool sHudBoxSelecting = false;
+static ImVec2 sHudBoxSelStart = {0, 0};
+static std::vector<bool> sHudPieceSelected; // per-piece selection within current element
+static std::vector<HudPiece> sHudPieceClipboard; // copy-paste buffer
 
 // Annotation interaction
 static int sVsSelectedAnnotation = -1;
@@ -1887,6 +1906,9 @@ static bool SaveProject(const std::string& path)
             el.barMax, el.barValue, el.barFillColor, el.barBgColor,
             el.spriteAssetIdx, el.spriteFrame,
             el.visible ? 1 : 0, el.layer);
+        fprintf(f, "elemPieceCount=%d\n", (int)el.pieces.size());
+        for (auto& pc : el.pieces)
+            fprintf(f, "elemPiece=%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size);
     }
     fprintf(f, "\n");
 
@@ -2707,6 +2729,16 @@ static bool LoadProject(const std::string& path)
                     el.visible = (visI != 0);
                     sHudElements.push_back(el);
                 }
+            }
+            else if (sscanf(line, "elemPieceCount=%d", &ival) == 1 && !sHudElements.empty()) {
+                sHudElements.back().pieces.clear();
+                sHudElements.back().pieces.reserve(ival);
+            }
+            else if (strncmp(line, "elemPiece=", 10) == 0 && !sHudElements.empty()) {
+                HudPiece pc;
+                if (sscanf(line + 10, "%d|%d|%d|%d|%d",
+                    &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size) == 5)
+                    sHudElements.back().pieces.push_back(pc);
             }
         }
         else if (strcmp(section, "Palette") == 0)
@@ -14677,6 +14709,20 @@ void FrameTick(float dt)
     }
     else if (sActiveTab == EditorTab::Elements)
     {
+        // Ensure sprite textures are available for piece rendering
+        {
+            bool needRebuild = ((int)sSpriteAssets.size() != sTmSpriteTexCount);
+            if (!needRebuild)
+                for (int i = 0; i < (int)sSpriteAssets.size(); i++)
+                    if (!sSpriteAssets[i].frames.empty() &&
+                        (i >= (int)sTmSpriteTextures.size() || sTmSpriteTextures[i] == 0))
+                    { needRebuild = true; break; }
+            if (needRebuild) {
+                RebuildTmSpriteTextures();
+                PatchTmSpriteTexturesFromDirs();
+            }
+        }
+
         // Elements tab: HUD / UI layout editor with 240x160 GBA screen canvas
         float elemRightW = std::max(Scaled(260), totalW * 0.28f);
         float elemLeftW = totalW - elemRightW;
@@ -14789,12 +14835,7 @@ void FrameTick(float dt)
                     }
                     break;
                 case HudElementType::Box:
-                    if (!hasSprite) {
-                        dl->AddRectFilled(ImVec2(ex, ey), ImVec2(ex + ew, ey + eh),
-                            rgb15to32(el.color));
-                    }
-                    dl->AddRect(ImVec2(ex, ey), ImVec2(ex + ew, ey + eh),
-                        IM_COL32(255, 255, 255, 180));
+                    // No background fill — pieces/sprites drive the visuals
                     break;
                 case HudElementType::Button:
                     if (!hasSprite) {
@@ -14807,9 +14848,48 @@ void FrameTick(float dt)
                     break;
                 }
 
-                // Selection outline
+                // Draw composite pieces
+                for (int pi = 0; pi < (int)el.pieces.size(); pi++) {
+                    auto& pc = el.pieces[pi];
+                    float px = cx + (el.x + pc.localX) * zoom;
+                    float py = cy + (el.y + pc.localY) * zoom;
+                    float psz = pc.size * zoom;
+
+                    if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sTmSpriteTextures.size() &&
+                        sTmSpriteTextures[pc.spriteAssetIdx]) {
+                        dl->AddImage((ImTextureID)(intptr_t)sTmSpriteTextures[pc.spriteAssetIdx],
+                            ImVec2(px, py), ImVec2(px + psz, py + psz));
+                    } else {
+                        dl->AddRectFilled(ImVec2(px, py), ImVec2(px + psz, py + psz),
+                            IM_COL32(80, 80, 120, 100));
+                    }
+                    // Piece outline
+                    bool pieceMultiSel = selected && pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi];
+                    ImU32 outlineCol = IM_COL32(100, 100, 150, 120);
+                    if (selected && pi == el.selectedPiece) outlineCol = IM_COL32(100, 255, 100, 255);
+                    else if (pieceMultiSel) outlineCol = IM_COL32(100, 200, 255, 255);
+                    dl->AddRect(ImVec2(px, py), ImVec2(px + psz, py + psz), outlineCol);
+                }
+
+                // Selection outline — fit to pieces bounds if any, else use W/H
                 if (selected) {
-                    dl->AddRect(ImVec2(ex - 1, ey - 1), ImVec2(ex + ew + 1, ey + eh + 1),
+                    float selX0 = ex, selY0 = ey, selX1 = ex + ew, selY1 = ey + eh;
+                    if (!el.pieces.empty()) {
+                        int minPx = el.pieces[0].localX, minPy = el.pieces[0].localY;
+                        int maxPx = el.pieces[0].localX + el.pieces[0].size;
+                        int maxPy = el.pieces[0].localY + el.pieces[0].size;
+                        for (auto& pc : el.pieces) {
+                            if (pc.localX < minPx) minPx = pc.localX;
+                            if (pc.localY < minPy) minPy = pc.localY;
+                            if (pc.localX + pc.size > maxPx) maxPx = pc.localX + pc.size;
+                            if (pc.localY + pc.size > maxPy) maxPy = pc.localY + pc.size;
+                        }
+                        selX0 = cx + (el.x + minPx) * zoom;
+                        selY0 = cy + (el.y + minPy) * zoom;
+                        selX1 = cx + (el.x + maxPx) * zoom;
+                        selY1 = cy + (el.y + maxPy) * zoom;
+                    }
+                    dl->AddRect(ImVec2(selX0 - 1, selY0 - 1), ImVec2(selX1 + 1, selY1 + 1),
                         IM_COL32(255, 200, 50, 255), 0, 0, 2.0f);
                 }
             }
@@ -14821,31 +14901,233 @@ void FrameTick(float dt)
 
             if (canvasHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 ImVec2 mouse = ImGui::GetMousePos();
-                sHudSelectedIdx = -1;
-                // Pick topmost element (iterate reverse for layer order)
+                sHudDragPiece = -1;
+                sHudBoxSelecting = false;
+                bool clickedPiece = false;
+
+                // First check if clicking on a piece within any element
                 for (int i = (int)sHudElements.size() - 1; i >= 0; i--) {
                     auto& el = sHudElements[i];
-                    float ex = cx + el.x * zoom;
-                    float ey = cy + el.y * zoom;
-                    float ew = el.w * zoom;
-                    float eh = el.h * zoom;
-                    if (mouse.x >= ex && mouse.x <= ex + ew &&
-                        mouse.y >= ey && mouse.y <= ey + eh) {
+                    for (int pi = (int)el.pieces.size() - 1; pi >= 0; pi--) {
+                        auto& pc = el.pieces[pi];
+                        float px = cx + (el.x + pc.localX) * zoom;
+                        float py = cy + (el.y + pc.localY) * zoom;
+                        float psz = pc.size * zoom;
+                        if (mouse.x >= px && mouse.x <= px + psz &&
+                            mouse.y >= py && mouse.y <= py + psz) {
+                            sHudSelectedIdx = i;
+                            el.selectedPiece = pi;
+                            sHudPieceDragAccX = 0;
+                            sHudPieceDragAccY = 0;
+                            // If this piece is already multi-selected, drag all selected
+                            if (i == sHudSelectedIdx && pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi]) {
+                                sHudDragPiece = -2; // -2 = drag multi-selection
+                            } else {
+                                sHudDragPiece = pi;
+                                // Clear multi-select, select just this one
+                                sHudPieceSelected.assign(el.pieces.size(), false);
+                                sHudPieceSelected[pi] = true;
+                            }
+                            clickedPiece = true;
+                            break;
+                        }
+                    }
+                    if (clickedPiece) break;
+                    // Check element bounds (for elements without pieces)
+                    float ex2 = cx + el.x * zoom;
+                    float ey2 = cy + el.y * zoom;
+                    float ew2 = el.w * zoom;
+                    float eh2 = el.h * zoom;
+                    if (mouse.x >= ex2 && mouse.x <= ex2 + ew2 &&
+                        mouse.y >= ey2 && mouse.y <= ey2 + eh2) {
+                        sHudSelectedIdx = i;
+                        clickedPiece = true;
+                        break;
+                    }
+                }
+
+                if (!clickedPiece) {
+                    // Start box selection
+                    sHudSelectedIdx = -1;
+                    sHudBoxSelecting = true;
+                    sHudBoxSelStart = mouse;
+                    sHudPieceSelected.clear();
+                }
+            }
+
+            // Box selection drag
+            if (sHudBoxSelecting && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                ImVec2 mouse = ImGui::GetMousePos();
+                float bx0 = std::min(sHudBoxSelStart.x, mouse.x);
+                float by0 = std::min(sHudBoxSelStart.y, mouse.y);
+                float bx1 = std::max(sHudBoxSelStart.x, mouse.x);
+                float by1 = std::max(sHudBoxSelStart.y, mouse.y);
+                // Draw selection rectangle
+                dl->AddRectFilled(ImVec2(bx0, by0), ImVec2(bx1, by1), IM_COL32(100, 150, 255, 40));
+                dl->AddRect(ImVec2(bx0, by0), ImVec2(bx1, by1), IM_COL32(100, 150, 255, 180));
+            }
+
+            // Box selection release — find pieces inside the box
+            if (sHudBoxSelecting && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                sHudBoxSelecting = false;
+                ImVec2 mouse = ImGui::GetMousePos();
+                float bx0 = std::min(sHudBoxSelStart.x, mouse.x);
+                float by0 = std::min(sHudBoxSelStart.y, mouse.y);
+                float bx1 = std::max(sHudBoxSelStart.x, mouse.x);
+                float by1 = std::max(sHudBoxSelStart.y, mouse.y);
+
+                // Find element with pieces inside the box
+                for (int i = 0; i < (int)sHudElements.size(); i++) {
+                    auto& el = sHudElements[i];
+                    sHudPieceSelected.assign(el.pieces.size(), false);
+                    bool anySelected = false;
+                    for (int pi = 0; pi < (int)el.pieces.size(); pi++) {
+                        auto& pc = el.pieces[pi];
+                        float px0 = cx + (el.x + pc.localX) * zoom;
+                        float py0 = cy + (el.y + pc.localY) * zoom;
+                        float px1 = px0 + pc.size * zoom;
+                        float py1 = py0 + pc.size * zoom;
+                        // Piece overlaps box?
+                        if (px1 > bx0 && px0 < bx1 && py1 > by0 && py0 < by1) {
+                            sHudPieceSelected[pi] = true;
+                            anySelected = true;
+                        }
+                    }
+                    if (anySelected) {
                         sHudSelectedIdx = i;
                         break;
                     }
                 }
             }
 
-            // Drag selected element
-            if (sHudSelectedIdx >= 0 && sHudSelectedIdx < (int)sHudElements.size() &&
+            // Drag piece(s) or whole element
+            if (!sHudBoxSelecting && sHudSelectedIdx >= 0 && sHudSelectedIdx < (int)sHudElements.size() &&
                 ImGui::IsMouseDragging(ImGuiMouseButton_Left) && canvasHovered) {
+                auto& el = sHudElements[sHudSelectedIdx];
                 ImVec2 delta = ImGui::GetIO().MouseDelta;
-                sHudElements[sHudSelectedIdx].x += (int)(delta.x / zoom);
-                sHudElements[sHudSelectedIdx].y += (int)(delta.y / zoom);
-                sHudElements[sHudSelectedIdx].x = std::clamp(sHudElements[sHudSelectedIdx].x, 0, 239);
-                sHudElements[sHudSelectedIdx].y = std::clamp(sHudElements[sHudSelectedIdx].y, 0, 159);
-                sProjectDirty = true;
+
+                if (sHudDragPiece == -2) {
+                    // Dragging multi-selected pieces — pixel-by-pixel
+                    sHudPieceDragAccX += delta.x / zoom;
+                    sHudPieceDragAccY += delta.y / zoom;
+                    int moveX = (int)sHudPieceDragAccX;
+                    int moveY = (int)sHudPieceDragAccY;
+                    if (moveX != 0 || moveY != 0) {
+                        for (int pi = 0; pi < (int)el.pieces.size() && pi < (int)sHudPieceSelected.size(); pi++) {
+                            if (!sHudPieceSelected[pi]) continue;
+                            el.pieces[pi].localX += moveX;
+                            el.pieces[pi].localY += moveY;
+                        }
+                        sHudPieceDragAccX -= moveX;
+                        sHudPieceDragAccY -= moveY;
+                        sProjectDirty = true;
+                    }
+                } else if (sHudDragPiece >= 0 && sHudDragPiece < (int)el.pieces.size()) {
+                    // Dragging single piece — pixel-by-pixel
+                    auto& pc = el.pieces[sHudDragPiece];
+                    sHudPieceDragAccX += delta.x / zoom;
+                    sHudPieceDragAccY += delta.y / zoom;
+                    int moveX = (int)sHudPieceDragAccX;
+                    int moveY = (int)sHudPieceDragAccY;
+                    if (moveX != 0 || moveY != 0) {
+                        pc.localX += moveX;
+                        pc.localY += moveY;
+                        sHudPieceDragAccX -= moveX;
+                        sHudPieceDragAccY -= moveY;
+                        sProjectDirty = true;
+                    }
+                } else if (sHudDragPiece == -1) {
+                    // Dragging whole element
+                    el.x += (int)(delta.x / zoom);
+                    el.y += (int)(delta.y / zoom);
+                    el.x = std::clamp(el.x, 0, 239);
+                    el.y = std::clamp(el.y, 0, 159);
+                    sProjectDirty = true;
+                }
+            }
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                sHudDragPiece = -1;
+            }
+
+            // WASD nudge selected pieces pixel-by-pixel
+            if (canvasHovered && sHudSelectedIdx >= 0 && sHudSelectedIdx < (int)sHudElements.size()) {
+                auto& el = sHudElements[sHudSelectedIdx];
+                int dx = 0, dy = 0;
+                if (ImGui::IsKeyPressed(ImGuiKey_W, true)) dy = -1;
+                if (ImGui::IsKeyPressed(ImGuiKey_S, true)) dy =  1;
+                if (ImGui::IsKeyPressed(ImGuiKey_A, true)) dx = -1;
+                if (ImGui::IsKeyPressed(ImGuiKey_D, true)) dx =  1;
+                if (dx != 0 || dy != 0) {
+                    bool anySelected = false;
+                    for (int pi = 0; pi < (int)el.pieces.size() && pi < (int)sHudPieceSelected.size(); pi++)
+                        if (sHudPieceSelected[pi]) { anySelected = true; break; }
+                    if (anySelected) {
+                        for (int pi = 0; pi < (int)el.pieces.size() && pi < (int)sHudPieceSelected.size(); pi++) {
+                            if (!sHudPieceSelected[pi]) continue;
+                            el.pieces[pi].localX += dx;
+                            el.pieces[pi].localY += dy;
+                        }
+                    } else {
+                        for (auto& pc : el.pieces) {
+                            pc.localX += dx;
+                            pc.localY += dy;
+                        }
+                    }
+                    sProjectDirty = true;
+                }
+            }
+
+            // Ctrl+C / Ctrl+V copy-paste pieces
+            if (canvasHovered && sHudSelectedIdx >= 0 && sHudSelectedIdx < (int)sHudElements.size()) {
+                auto& el = sHudElements[sHudSelectedIdx];
+                bool ctrl = ImGui::GetIO().KeyCtrl;
+                if (ctrl && ImGui::IsKeyPressed(ImGuiKey_C, false)) {
+                    sHudPieceClipboard.clear();
+                    bool anySelected = false;
+                    for (int pi = 0; pi < (int)el.pieces.size() && pi < (int)sHudPieceSelected.size(); pi++)
+                        if (sHudPieceSelected[pi]) { anySelected = true; break; }
+                    if (anySelected) {
+                        for (int pi = 0; pi < (int)el.pieces.size() && pi < (int)sHudPieceSelected.size(); pi++)
+                            if (sHudPieceSelected[pi]) sHudPieceClipboard.push_back(el.pieces[pi]);
+                    } else if (el.selectedPiece >= 0 && el.selectedPiece < (int)el.pieces.size()) {
+                        sHudPieceClipboard.push_back(el.pieces[el.selectedPiece]);
+                    }
+                }
+                if (ctrl && ImGui::IsKeyPressed(ImGuiKey_V, false) && !sHudPieceClipboard.empty()) {
+                    int base = (int)el.pieces.size();
+                    for (auto& cp : sHudPieceClipboard) {
+                        HudPiece np = cp;
+                        np.localX += np.size; // offset so it doesn't overlap exactly
+                        el.pieces.push_back(np);
+                    }
+                    // Select the pasted pieces
+                    sHudPieceSelected.assign(el.pieces.size(), false);
+                    for (int pi = base; pi < (int)el.pieces.size(); pi++)
+                        sHudPieceSelected[pi] = true;
+                    el.selectedPiece = base;
+                    sProjectDirty = true;
+                }
+            }
+
+            // Delete selected pieces
+            if (canvasHovered && sHudSelectedIdx >= 0 && sHudSelectedIdx < (int)sHudElements.size() &&
+                ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
+                auto& el = sHudElements[sHudSelectedIdx];
+                bool anySelected = false;
+                for (int pi = 0; pi < (int)el.pieces.size() && pi < (int)sHudPieceSelected.size(); pi++)
+                    if (sHudPieceSelected[pi]) { anySelected = true; break; }
+                if (anySelected) {
+                    for (int pi = (int)el.pieces.size() - 1; pi >= 0; pi--)
+                        if (pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi])
+                            el.pieces.erase(el.pieces.begin() + pi);
+                    sHudPieceSelected.clear();
+                    el.selectedPiece = -1;
+                    sProjectDirty = true;
+                } else if (el.selectedPiece >= 0 && el.selectedPiece < (int)el.pieces.size()) {
+                    el.pieces.erase(el.pieces.begin() + el.selectedPiece);
+                    el.selectedPiece = -1;
+                    sProjectDirty = true;
+                }
             }
 
             // Pan with middle mouse
@@ -14889,14 +15171,31 @@ void FrameTick(float dt)
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add element");
             ImGui::Separator();
 
-            // Element list
+            // Element list (double-click to rename)
             for (int i = 0; i < (int)sHudElements.size(); i++) {
                 auto& el = sHudElements[i];
                 bool selected = (i == sHudSelectedIdx);
-                char label[64];
-                snprintf(label, sizeof(label), "[%s] %s##elem%d", sHudTypeNames[(int)el.type], el.name, el.id);
-                if (ImGui::Selectable(label, selected))
-                    sHudSelectedIdx = i;
+                ImGui::PushID(i);
+                if (sHudRenamingIdx == i) {
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                    if (ImGui::InputText("##rename", el.name, sizeof(el.name),
+                        ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll)) {
+                        sHudRenamingIdx = -1;
+                        sProjectDirty = true;
+                    }
+                    if (!ImGui::IsItemActive() && ImGui::IsMouseClicked(0))
+                        sHudRenamingIdx = -1;
+                    if (sHudRenamingIdx == i && ImGui::IsItemActive() == false && ImGui::IsItemDeactivated())
+                        sHudRenamingIdx = -1;
+                } else {
+                    char label[64];
+                    snprintf(label, sizeof(label), "[%s] %s", sHudTypeNames[(int)el.type], el.name);
+                    if (ImGui::Selectable(label, selected))
+                        sHudSelectedIdx = i;
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
+                        sHudRenamingIdx = i;
+                }
+                ImGui::PopID();
             }
 
             // Delete selected
@@ -15014,15 +15313,91 @@ void FrameTick(float dt)
                     // All sprite properties handled in common section above
                     break;
                 case HudElementType::Box:
-                    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Box");
-                    { float col[3] = { (el.color & 0x1F) / 31.0f, ((el.color >> 5) & 0x1F) / 31.0f, ((el.color >> 10) & 0x1F) / 31.0f };
-                      if (ImGui::ColorEdit3("Color", col, ImGuiColorEditFlags_NoInputs)) {
-                          el.color = ((int)(col[0] * 31) & 0x1F) | (((int)(col[1] * 31) & 0x1F) << 5) | (((int)(col[2] * 31) & 0x1F) << 10);
-                          sProjectDirty = true;
-                      }
-                    }
                     break;
                 default: break;
+                }
+
+                // ---- Composite Pieces ----
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "Pieces");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("+##addpiece")) {
+                    HudPiece p;
+                    p.localX = (int)el.pieces.size() * 16; // offset each new piece
+                    sHudElements[sHudSelectedIdx].pieces.push_back(p);
+                    sHudElements[sHudSelectedIdx].selectedPiece = (int)sHudElements[sHudSelectedIdx].pieces.size() - 1;
+                    sProjectDirty = true;
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add sprite piece");
+
+                for (int pi = 0; pi < (int)el.pieces.size(); pi++) {
+                    ImGui::PushID(pi);
+                    bool psel = (pi == el.selectedPiece);
+                    char plabel[64];
+                    const char* pname = (el.pieces[pi].spriteAssetIdx >= 0 && el.pieces[pi].spriteAssetIdx < (int)sSpriteAssets.size())
+                        ? sSpriteAssets[el.pieces[pi].spriteAssetIdx].name.c_str() : "empty";
+                    snprintf(plabel, sizeof(plabel), "%d: %s (%dpx)", pi, pname, el.pieces[pi].size);
+                    if (ImGui::Selectable(plabel, psel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
+                        el.selectedPiece = pi;
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("-")) {
+                        el.pieces.erase(el.pieces.begin() + pi);
+                        if (el.selectedPiece >= (int)el.pieces.size()) el.selectedPiece = -1;
+                        sProjectDirty = true;
+                        ImGui::PopID();
+                        break;
+                    }
+                    ImGui::PopID();
+                }
+
+                // Selected piece properties
+                if (el.selectedPiece >= 0 && el.selectedPiece < (int)el.pieces.size()) {
+                    auto& pc = el.pieces[el.selectedPiece];
+                    ImGui::Spacing();
+
+                    // Sprite asset picker
+                    const char* pcPreview = (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sSpriteAssets.size())
+                        ? sSpriteAssets[pc.spriteAssetIdx].name.c_str() : "(none)";
+                    if (ImGui::BeginCombo("Asset##pc", pcPreview)) {
+                        if (ImGui::Selectable("(none)##pc", pc.spriteAssetIdx < 0)) {
+                            pc.spriteAssetIdx = -1; sProjectDirty = true;
+                        }
+                        for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++) {
+                            char il[64];
+                            snprintf(il, sizeof(il), "%d: %s", ai, sSpriteAssets[ai].name.c_str());
+                            if (ImGui::Selectable(il, ai == pc.spriteAssetIdx)) {
+                                pc.spriteAssetIdx = ai;
+                                sProjectDirty = true;
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+
+                    // Frame picker
+                    if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sSpriteAssets.size()) {
+                        int maxFr = std::max(0, (int)sSpriteAssets[pc.spriteAssetIdx].frames.size() - 1);
+                        if (ImGui::SliderInt("Frame##pc", &pc.frame, 0, maxFr)) sProjectDirty = true;
+                    }
+
+                    // POT size
+                    int sizeIdx = (pc.size == 8) ? 0 : (pc.size == 16) ? 1 : (pc.size == 32) ? 2 : 3;
+                    if (ImGui::Combo("Size##pc", &sizeIdx, "8\0" "16\0" "32\0" "64\0")) {
+                        const int sizes[] = {8, 16, 32, 64};
+                        pc.size = sizes[sizeIdx];
+                        sProjectDirty = true;
+                    }
+
+                    // Local offset
+                    if (ImGui::DragInt("X##pc", &pc.localX, 1)) sProjectDirty = true;
+                    if (ImGui::DragInt("Y##pc", &pc.localY, 1)) sProjectDirty = true;
+
+                    // Preview thumbnail
+                    if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sTmSpriteTextures.size() && sTmSpriteTextures[pc.spriteAssetIdx]) {
+                        float prevSz = std::min(elemRightW * 0.4f, 64.0f);
+                        ImGui::Image((ImTextureID)(intptr_t)sTmSpriteTextures[pc.spriteAssetIdx],
+                            ImVec2(prevSz, prevSz));
+                    }
                 }
 
                 ImGui::PopItemWidth();
