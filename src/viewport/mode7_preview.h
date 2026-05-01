@@ -3,7 +3,7 @@
 #include "../math/math_types.h"
 #include "../map/map_types.h"
 
-// Software Mode 7 rasterizer — renders the GBA-resolution preview into an RGB buffer.
+// Software Mode 4 rasterizer — renders the GBA-resolution preview into an RGB buffer.
 // The buffer is 240x160x3 bytes (RGB8). Upload to an OpenGL texture for display.
 
 namespace Mode7
@@ -26,7 +26,7 @@ struct AssetDirImages
     PlayerDirImage dirs[8]; // N, NE, E, SE, S, SW, W, NW
 };
 
-// Render one frame of Mode 7 into the pixel buffer
+// Render one frame of Mode 4 into the pixel buffer
 void Render(const Mode7Camera& cam, const Mode7Map* map = nullptr,
             const FloorSprite* sprites = nullptr, int spriteCount = 0,
             const CameraStartObject* camObj = nullptr, float camObjScale = 1.0f,

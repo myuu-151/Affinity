@@ -10,7 +10,7 @@ using Fixed16 = int32_t;
 struct Vec2i { int x, y; };
 struct Vec2f { float x, y; };
 
-// Mode 7 camera state
+// Mode 4 camera state
 struct Mode7Camera
 {
     float x     = 0.0f;   // world X

@@ -122,7 +122,7 @@ struct SpriteAsset
     bool hasDirections = false;        // true if any direction image is loaded
 };
 
-// Object types for Mode 7 scene entities
+// Object types for Mode 4 scene entities
 enum class SpriteType : int
 {
     Prop = 0,       // static decoration (trees, signs, rocks)
@@ -205,7 +205,7 @@ struct MeshAsset
 
 static constexpr int kMaxMeshAssets = 32;
 
-// A sprite object placed on the Mode 7 floor
+// A sprite object placed on the Mode 4 floor
 struct FloorSprite
 {
     float x = 0.0f;          // world X
@@ -264,7 +264,7 @@ struct CameraStartObject
     bool coverageBuf = false; // front-to-back with coverage buffer (reduces overdraw)
 };
 
-// Map data — the floor plane rendered by Mode 7
+// Map data — the floor plane rendered by Mode 4
 struct Mode7Map
 {
     Tileset      tileset;

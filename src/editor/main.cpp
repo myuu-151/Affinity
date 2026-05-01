@@ -1,4 +1,4 @@
-// Affinity GBA Mode 7 Engine — Editor
+// Affinity GBA Mode 4 Engine — Editor
 // ImGui + GLFW + OpenGL2
 
 #include "imgui.h"

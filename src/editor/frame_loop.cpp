@@ -709,9 +709,11 @@ struct VsNode {
     char groupLabel[32] = {};     // label for Group-type nodes
     int grpInExec = 0, grpOutExec = 0;   // dynamic pin counts for Group nodes
     int grpInData = 0, grpOutData = 0;
-    char customCode[512] = {};            // GBA runtime code override (empty = use default)
-    char codeScene[512] = {};             // 3D scene code override (empty = use default)
-    char codeTilemap[512] = {};           // 2D tilemap code override (empty = use default)
+    char customCode[512] = {};            // GBA runtime code override (legacy, maps to codeRtMode4)
+    char codeScene[512] = {};             // Mode 4 editor code override
+    char codeTilemap[512] = {};           // Mode 0 editor code override
+    char codeRtMode4[512] = {};           // Mode 4 runtime C implementation
+    char codeRtMode0[512] = {};           // Mode 0 runtime C implementation
     char funcName[64] = {};               // custom function name (empty = use default afn_ name)
     char ccPinNames[8][16] = {};          // custom data-in pin labels for CustomCode nodes
     char ccPinCode[8][128] = {};          // per-pin code snippets for CustomCode nodes
@@ -802,8 +804,8 @@ struct BpInstanceParam {
 };
 
 // ---- HUD / UI Elements ----
-enum class HudElementType { Text, Bar, Icon, Menu, Button };
-static const char* sHudTypeNames[] = { "Text", "Bar", "Icon", "Menu", "Button" };
+enum class HudElementType { Element };
+static const char* sHudTypeNames[] = { "Element" };
 
 // A single OAM sprite piece within a composite element
 struct HudPiece {
@@ -821,7 +823,7 @@ struct HudCursorStop {
 struct HudElement {
     int id = 0;
     char name[32] = "Element";
-    HudElementType type = HudElementType::Text;
+    HudElementType type = HudElementType::Element;
     int x = 0, y = 0;       // screen position (GBA coords, 0-239 / 0-159)
     int w = 40, h = 12;     // size
     // Text properties
@@ -839,6 +841,7 @@ struct HudElement {
     // General
     bool visible = true;
     int layer = 0;           // draw order (higher = on top)
+    int blueprintIdx = -1;   // blueprint instance (-1 = none)
     // Composite pieces
     std::vector<HudPiece> pieces;
     int selectedPiece = -1;  // currently selected piece index (editor only)
@@ -920,15 +923,21 @@ static bool sVsCodeWindowOpen = false;
 static bool sVsCodeWindowJustOpened = false;
 static int sVsCodeWindowNodeIdx = -1;
 static char sVsCodeWindowBuf[4096] = {}; // generated code (combined, for View Code tooltip)
-static char sVsCodeWindowEditBuf[2048] = {}; // editable GBA override
-static char sVsCodeWindowSceneBuf[2048] = {}; // editable scene code
-static char sVsCodeWindowTilemapBuf[2048] = {}; // editable tilemap code
-static char sVsGenScene[2048] = {};    // generated Mode 4 code (default for scene buf)
-static char sVsGenTilemap[2048] = {};  // generated Mode 0 code (default for tilemap buf)
-static char sVsGenGBA[2048] = {};      // generated GBA runtime code (default for GBA buf)
+static char sVsCodeWindowEditBuf[2048] = {}; // editable GBA override (legacy)
+static char sVsCodeWindowSceneBuf[2048] = {}; // editable Mode 4 editor code
+static char sVsCodeWindowTilemapBuf[2048] = {}; // editable Mode 0 editor code
+static char sVsCodeWindowRtM4Buf[2048] = {}; // editable Mode 4 runtime code
+static char sVsCodeWindowRtM0Buf[2048] = {}; // editable Mode 0 runtime code
+static char sVsGenScene[2048] = {};    // generated Mode 4 editor code
+static char sVsGenTilemap[2048] = {};  // generated Mode 0 editor code
+static char sVsGenGBA[2048] = {};      // generated GBA runtime code (legacy)
+static char sVsGenRtM4[2048] = {};     // generated Mode 4 runtime code
+static char sVsGenRtM0[2048] = {};     // generated Mode 0 runtime code
 static char sVsPrevGenGBA[2048] = {};      // previous gen snapshot (for live-update diffing)
 static char sVsPrevGenScene[2048] = {};
 static char sVsPrevGenTilemap[2048] = {};
+static char sVsPrevGenRtM4[2048] = {};
+static char sVsPrevGenRtM0[2048] = {};
 static int sLastCodeWindowNode = -1;
 
 static constexpr float kVsNodeW = 160.0f;
@@ -1913,6 +1922,10 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "bpVsSceneCode=%d|%s\n", n.id, n.codeScene);
             if (n.codeTilemap[0])
                 fprintf(f, "bpVsTilemapCode=%d|%s\n", n.id, n.codeTilemap);
+            if (n.codeRtMode4[0])
+                fprintf(f, "bpVsRtM4Code=%d|%s\n", n.id, n.codeRtMode4);
+            if (n.codeRtMode0[0])
+                fprintf(f, "bpVsRtM0Code=%d|%s\n", n.id, n.codeRtMode0);
             if (n.funcName[0])
                 fprintf(f, "bpVsNodeFunc=%d|%s\n", n.id, n.funcName);
         }
@@ -1956,6 +1969,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "elemSpriteCount=%d\n", (int)el.spriteItems.size());
         for (auto& si : el.spriteItems)
             fprintf(f, "elemSprite=%d|%d|%d|%d|%d|%.2f\n", si.spriteAssetIdx, si.frame, si.localX, si.localY, si.size, si.scale);
+        fprintf(f, "elemBp=%d\n", el.blueprintIdx);
     }
     fprintf(f, "\n");
 
@@ -2117,6 +2131,10 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "vsSceneCode=%d|%s\n", n.id, n.codeScene);
         if (n.codeTilemap[0])
             fprintf(f, "vsTilemapCode=%d|%s\n", n.id, n.codeTilemap);
+        if (n.codeRtMode4[0])
+            fprintf(f, "vsRtM4Code=%d|%s\n", n.id, n.codeRtMode4);
+        if (n.codeRtMode0[0])
+            fprintf(f, "vsRtM0Code=%d|%s\n", n.id, n.codeRtMode0);
         if (n.funcName[0])
             fprintf(f, "vsNodeFunc=%d|%s\n", n.id, n.funcName);
     }
@@ -2207,6 +2225,10 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "msVsSceneCode=%d|%s\n", n.id, n.codeScene);
             if (n.codeTilemap[0])
                 fprintf(f, "msVsTilemapCode=%d|%s\n", n.id, n.codeTilemap);
+            if (n.codeRtMode4[0])
+                fprintf(f, "msVsRtM4Code=%d|%s\n", n.id, n.codeRtMode4);
+            if (n.codeRtMode0[0])
+                fprintf(f, "msVsRtM0Code=%d|%s\n", n.id, n.codeRtMode0);
         }
         fprintf(f, "msVsLinkCount=%d\n", (int)ms.vsLinks.size());
         for (auto& lk : ms.vsLinks)
@@ -2678,6 +2700,24 @@ static bool LoadProject(const std::string& path)
                         if (n.id == nid) { strncpy(n.codeTilemap, codeBuf, sizeof(n.codeTilemap) - 1); break; }
                 }
             }
+            else if (strncmp(line, "bpVsRtM4Code=", 13) == 0 && !sBlueprintAssets.empty())
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    for (auto& n : sBlueprintAssets.back().nodes)
+                        if (n.id == nid) { strncpy(n.codeRtMode4, codeBuf, sizeof(n.codeRtMode4) - 1); break; }
+                }
+            }
+            else if (strncmp(line, "bpVsRtM0Code=", 13) == 0 && !sBlueprintAssets.empty())
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    for (auto& n : sBlueprintAssets.back().nodes)
+                        if (n.id == nid) { strncpy(n.codeRtMode0, codeBuf, sizeof(n.codeRtMode0) - 1); break; }
+                }
+            }
             else if (strncmp(line, "bpVsNodeFunc=", 13) == 0 && !sBlueprintAssets.empty())
             {
                 int nid;
@@ -2823,6 +2863,9 @@ static bool LoadProject(const std::string& path)
                 if (sscanf(line + 11, "%d|%d|%d|%d|%d|%f",
                     &si.spriteAssetIdx, &si.frame, &si.localX, &si.localY, &si.size, &si.scale) >= 5)
                     sHudElements.back().spriteItems.push_back(si);
+            }
+            else if (sscanf(line, "elemBp=%d", &ival) == 1 && !sHudElements.empty()) {
+                sHudElements.back().blueprintIdx = ival;
             }
         }
         else if (strcmp(section, "Palette") == 0)
@@ -3127,6 +3170,26 @@ static bool LoadProject(const std::string& path)
                         strncpy(sVsNodes[gi].codeTilemap, codeBuf, sizeof(sVsNodes[gi].codeTilemap) - 1);
                 }
             }
+            else if (strncmp(line, "vsRtM4Code=", 11) == 0)
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 11, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    int gi = VsFindNode(nid);
+                    if (gi >= 0)
+                        strncpy(sVsNodes[gi].codeRtMode4, codeBuf, sizeof(sVsNodes[gi].codeRtMode4) - 1);
+                }
+            }
+            else if (strncmp(line, "vsRtM0Code=", 11) == 0)
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 11, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    int gi = VsFindNode(nid);
+                    if (gi >= 0)
+                        strncpy(sVsNodes[gi].codeRtMode0, codeBuf, sizeof(sVsNodes[gi].codeRtMode0) - 1);
+                }
+            }
             else if (strncmp(line, "vsNodeFunc=", 11) == 0)
             {
                 int nid;
@@ -3319,6 +3382,24 @@ static bool LoadProject(const std::string& path)
                 if (sscanf(line + 16, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
                     for (auto& n : sMapScenes.back().vsNodes)
                         if (n.id == nid) { strncpy(n.codeTilemap, codeBuf, sizeof(n.codeTilemap) - 1); break; }
+                }
+            }
+            else if (strncmp(line, "msVsRtM4Code=", 13) == 0 && !sMapScenes.empty())
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    for (auto& n : sMapScenes.back().vsNodes)
+                        if (n.id == nid) { strncpy(n.codeRtMode4, codeBuf, sizeof(n.codeRtMode4) - 1); break; }
+                }
+            }
+            else if (strncmp(line, "msVsRtM0Code=", 13) == 0 && !sMapScenes.empty())
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    for (auto& n : sMapScenes.back().vsNodes)
+                        if (n.id == nid) { strncpy(n.codeRtMode0, codeBuf, sizeof(n.codeRtMode0) - 1); break; }
                 }
             }
             else if (strncmp(line, "msVsCcPin=", 10) == 0 && !sMapScenes.empty())
@@ -4101,7 +4182,7 @@ static void DrawTabBar()
     ImGui::PopStyleVar(3);
 }
 
-// ---- Left: Mode 7 Viewport ----
+// ---- Left: Mode 4 Viewport ----
 static void DrawViewport(ImVec2 pos, ImVec2 size)
 {
     ImGui::SetNextWindowPos(pos);
@@ -4174,7 +4255,7 @@ static void DrawViewport(ImVec2 pos, ImVec2 size)
         float gbaX = (mouse.x - imgPos.x) / scale;
         float gbaY = (mouse.y - imgPos.y) / scale;
 
-        // Inverse Mode 7 projection: screen -> world
+        // Inverse Mode 4 projection: screen -> world
         int horizon2 = (int)sCamera.horizon;
         if (gbaY > horizon2 + 1)
         {
@@ -5884,7 +5965,7 @@ static void DrawTilemapPanel(ImVec2 pos, ImVec2 size)
         for (int col = 0; col < mapCols; col++)
         {
             ImVec2 cPos(cursor.x + col * cellW, cursor.y + row * cellH);
-            // Checkerboard pattern — matches Mode 7 floor (1 cell = 1 checker square)
+            // Checkerboard pattern — matches Mode 4 floor (1 cell = 1 checker square)
             int check = (col + row) % 2;
             uint32_t c = check ? 0xFF50A050 : 0xFF285028;
             dl->AddRectFilled(cPos, ImVec2(cPos.x + cellW, cPos.y + cellH), c);
@@ -8079,7 +8160,7 @@ void FrameTick(float dt)
                 float dgbaX = gbaX - sGrabStartGbaX;
                 float dgbaY = gbaY - sGrabStartGbaY;
 
-                // Inverse Mode 7: compute world-space delta from GBA-pixel delta
+                // Inverse Mode 4: compute world-space delta from GBA-pixel delta
                 // At the sprite's depth, 1 GBA pixel = (depth / fov) world units laterally
                 float dxw = sGrabOrigX - sCamera.x;
                 float dzw = sGrabOrigZ - sCamera.z;
@@ -9375,7 +9456,7 @@ void FrameTick(float dt)
 
     // Player position is freely editable — only set on creation, not per-frame
 
-    // ---- Render Mode 7 ----
+    // ---- Render Mode 4 ----
     // Only show camera object in Edit mode (in Play mode you ARE the camera)
     const CameraStartObject* camObjPtr = (sEditorMode == EditorMode::Edit) ? &sCamObj : nullptr;
     sViewportAnimTime += dt;
@@ -11351,7 +11432,7 @@ void FrameTick(float dt)
                             "    // Mode 0: tm_move_frames = 48 / afn_move_speed; // = %d frames/tile\n"
                             "    //         tm_move_timer = tm_move_frames; // countdown per tile move\n"
                             "    //         px = lerp(fromX, toX, t / tm_move_frames);\n"
-                            "    // Mode 7: moveSpeed = afn_move_speed; // = %d\n"
+                            "    // Mode 4: moveSpeed = afn_move_speed; // = %d\n"
                             "    //         player_x += (viewSin * inputFwd * moveSpeed) >> 16;",
                             gbaSpeed, (gbaSpeed > 0 ? 48 / gbaSpeed : 8), gbaSpeed);
                         setActionFunc(infoNode, "_walk", bodyBuf);
@@ -11368,7 +11449,7 @@ void FrameTick(float dt)
                             "    // Mode 0: tm_move_frames = 48 / afn_move_speed;\n"
                             "    //         tm_move_timer = tm_move_frames;\n"
                             "    //         px = lerp(fromX, toX, t / tm_move_frames);\n"
-                            "    // Mode 7: moveSpeed = afn_move_speed;\n"
+                            "    // Mode 4: moveSpeed = afn_move_speed;\n"
                             "    //         player_x += (viewSin * inputFwd * moveSpeed) >> 16;");
                     }
                     break;
@@ -11398,7 +11479,7 @@ void FrameTick(float dt)
                             "    // Mode 0: tm_move_frames = 48 / afn_move_speed; // = %d frames/tile\n"
                             "    //         tm_move_timer = tm_move_frames;\n"
                             "    //         px = lerp(fromX, toX, t / tm_move_frames);\n"
-                            "    // Mode 7: moveSpeed = afn_move_speed; // = %d\n"
+                            "    // Mode 4: moveSpeed = afn_move_speed; // = %d\n"
                             "    //         player_x += (viewSin * inputFwd * moveSpeed) >> 16;",
                             gbaSpeed, (gbaSpeed > 0 ? 48 / gbaSpeed : 8), gbaSpeed);
                         setActionFunc(infoNode, "_sprint", bodyBuf);
@@ -11415,7 +11496,7 @@ void FrameTick(float dt)
                             "    // Mode 0: tm_move_frames = 48 / afn_move_speed;\n"
                             "    //         tm_move_timer = tm_move_frames;\n"
                             "    //         px = lerp(fromX, toX, t / tm_move_frames);\n"
-                            "    // Mode 7: moveSpeed = afn_move_speed;\n"
+                            "    // Mode 4: moveSpeed = afn_move_speed;\n"
                             "    //         player_x += (viewSin * inputFwd * moveSpeed) >> 16;");
                     }
                     break;
@@ -11580,7 +11661,7 @@ void FrameTick(float dt)
                         "    //           { tm_anim_idx = afn_play_anim; tm_anim_frame = 0; }\n"
                         "    //         curSet = afn_anim_desc[asset][tm_anim_idx][0] + tm_anim_frame;\n"
                         "    //         switch_dir_anim_set(asset, curSet); // DMA tiles to VRAM\n"
-                        "    // Mode 7: targetAnim = afn_play_anim;\n"
+                        "    // Mode 4: targetAnim = afn_play_anim;\n"
                         "    //         if (targetAnim != g_current_anim[ai]) switch_dir_anim_set(ai, baseSet + frame);",
                         animIdx);
                     setActionFunc(infoNode, "_play_anim", bodyBuf);
@@ -11700,7 +11781,7 @@ void FrameTick(float dt)
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    m7_horizon = %s;\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // Mode 7 scanline rendering starts from horizon line",
+                        "    // Mode 4 scanline rendering starts from horizon line",
                         fmtInt(infoNode.id, 0, "<scanline>"));
                     setActionFunc(infoNode, "_set_horizon", bodyBuf);
                     break;
@@ -13453,10 +13534,105 @@ void FrameTick(float dt)
                         strncpy(genGBA, gbaCode[0] ? gbaCode : "// (no GBA codegen for this node)", sizeof(genGBA) - 1);
                     }
 
+                    // Split gbaBodyBuf into mode-specific bodies
+                    // Lines containing "// Mode 0:" go to M0 only, "// Mode 4:" go to M4 only,
+                    // lines with "// --- Runtime" are section headers (skip in split),
+                    // everything else is shared
+                    char m4Body[1024] = {};
+                    char m0Body[1024] = {};
+                    {
+                        bool hasModeSplit = (strstr(gbaBodyBuf, "// Mode 0:") || strstr(gbaBodyBuf, "// Mode 4:"));
+                        if (hasModeSplit) {
+                            int curMode = 0; // 0=shared, 4=mode4, 1=mode0
+                            const char* p = gbaBodyBuf;
+                            while (*p) {
+                                const char* eol = strchr(p, '\n');
+                                int lineLen = eol ? (int)(eol - p) : (int)strlen(p);
+                                char lineBuf[256] = {};
+                                if (lineLen < (int)sizeof(lineBuf))
+                                    strncpy(lineBuf, p, lineLen);
+
+                                const char* m0tag = strstr(lineBuf, "// Mode 0:");
+                                const char* m4tag = strstr(lineBuf, "// Mode 4:");
+                                const char* rtHdr = strstr(lineBuf, "// --- Runtime");
+
+                                if (rtHdr) {
+                                    curMode = 0; // reset context
+                                } else if (m0tag) {
+                                    curMode = 1;
+                                    int indent = (int)(m0tag - lineBuf);
+                                    const char* content = m0tag + 10;
+                                    while (*content == ' ') content++;
+                                    char cleaned[256];
+                                    snprintf(cleaned, sizeof(cleaned), "%.*s%s\n", indent, lineBuf, content);
+                                    strncat(m0Body, cleaned, sizeof(m0Body) - strlen(m0Body) - 1);
+                                } else if (m4tag) {
+                                    curMode = 4;
+                                    int indent = (int)(m4tag - lineBuf);
+                                    const char* content = m4tag + 10;
+                                    while (*content == ' ') content++;
+                                    char cleaned[256];
+                                    snprintf(cleaned, sizeof(cleaned), "%.*s%s\n", indent, lineBuf, content);
+                                    strncat(m4Body, cleaned, sizeof(m4Body) - strlen(m4Body) - 1);
+                                } else {
+                                    // Check if continuation comment under a mode tag
+                                    const char* sl = lineBuf;
+                                    while (*sl == ' ') sl++;
+                                    if (curMode != 0 && sl[0] == '/' && sl[1] == '/') {
+                                        // Continuation of current mode — uncomment and add
+                                        int indent = (int)(sl - lineBuf);
+                                        const char* content = sl + 2;
+                                        while (*content == ' ') content++;
+                                        char cleaned[256];
+                                        snprintf(cleaned, sizeof(cleaned), "%.*s%s\n", indent, lineBuf, content);
+                                        if (curMode == 4)
+                                            strncat(m4Body, cleaned, sizeof(m4Body) - strlen(m4Body) - 1);
+                                        else
+                                            strncat(m0Body, cleaned, sizeof(m0Body) - strlen(m0Body) - 1);
+                                    } else {
+                                        // Shared line — goes into both, reset mode context
+                                        curMode = 0;
+                                        strncat(m4Body, lineBuf, sizeof(m4Body) - strlen(m4Body) - 1);
+                                        strncat(m4Body, "\n", sizeof(m4Body) - strlen(m4Body) - 1);
+                                        strncat(m0Body, lineBuf, sizeof(m0Body) - strlen(m0Body) - 1);
+                                        strncat(m0Body, "\n", sizeof(m0Body) - strlen(m0Body) - 1);
+                                    }
+                                }
+                                p = eol ? eol + 1 : p + lineLen;
+                            }
+                            // Trim trailing newlines
+                            size_t l4 = strlen(m4Body);
+                            while (l4 > 0 && m4Body[l4-1] == '\n') m4Body[--l4] = '\0';
+                            size_t l0 = strlen(m0Body);
+                            while (l0 > 0 && m0Body[l0-1] == '\n') m0Body[--l0] = '\0';
+                        } else {
+                            strncpy(m4Body, gbaBodyBuf, sizeof(m4Body) - 1);
+                            strncpy(m0Body, gbaBodyBuf, sizeof(m0Body) - 1);
+                        }
+                    }
+
+                    // Build Mode 4 Runtime code
+                    char genRtM4[2048] = {};
+                    if (funcSigBuf[0]) {
+                        snprintf(genRtM4, sizeof(genRtM4), "%s {\n%s\n}", funcSigBuf, m4Body);
+                    } else {
+                        strncpy(genRtM4, gbaCode[0] ? gbaCode : "// (no Mode 4 runtime codegen)", sizeof(genRtM4) - 1);
+                    }
+
+                    // Build Mode 0 Runtime code
+                    char genRtM0[2048] = {};
+                    if (funcSigBuf[0]) {
+                        snprintf(genRtM0, sizeof(genRtM0), "%s {\n%s\n}", funcSigBuf, m0Body);
+                    } else {
+                        strncpy(genRtM0, "// (no Mode 0 runtime codegen)", sizeof(genRtM0) - 1);
+                    }
+
                     // Store for code window defaults
                     strncpy(sVsGenScene, genScene, sizeof(sVsGenScene) - 1);
                     strncpy(sVsGenTilemap, genTilemap, sizeof(sVsGenTilemap) - 1);
                     strncpy(sVsGenGBA, genGBA, sizeof(sVsGenGBA) - 1);
+                    strncpy(sVsGenRtM4, genRtM4, sizeof(sVsGenRtM4) - 1);
+                    strncpy(sVsGenRtM0, genRtM0, sizeof(sVsGenRtM0) - 1);
 
                     // Build combined for defaultCode (tooltip / legacy)
                     snprintf(defaultCodeBuf, sizeof(defaultCodeBuf), "%s\n\n%s\n\n%s",
@@ -13475,7 +13651,7 @@ void FrameTick(float dt)
                         sVsCodeWindowBuf[sizeof(sVsCodeWindowBuf) - 1] = '\0';
                         sLastCodeWindowNode = -1; // force buffer reinit
                     }
-                    if (infoNode.customCode[0] || infoNode.codeScene[0] || infoNode.codeTilemap[0]) {
+                    if (infoNode.customCode[0] || infoNode.codeScene[0] || infoNode.codeTilemap[0] || infoNode.codeRtMode4[0] || infoNode.codeRtMode0[0]) {
                         ImGui::SameLine();
                         ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "(has custom code)");
                     }
@@ -13537,13 +13713,17 @@ void FrameTick(float dt)
                 if (sLastCodeWindowNode != sVsCodeWindowNodeIdx) {
                     sLastCodeWindowNode = sVsCodeWindowNodeIdx;
                     // Use saved override if present, otherwise show generated code
+                    strncpy(sVsCodeWindowSceneBuf, cwNode.codeScene[0] ? cwNode.codeScene : (sVsGenScene[0] ? sVsGenScene : "// Mode 4 editor code"), sizeof(sVsCodeWindowSceneBuf) - 1);
+                    strncpy(sVsCodeWindowTilemapBuf, cwNode.codeTilemap[0] ? cwNode.codeTilemap : (sVsGenTilemap[0] ? sVsGenTilemap : "// Mode 0 editor code"), sizeof(sVsCodeWindowTilemapBuf) - 1);
+                    strncpy(sVsCodeWindowRtM4Buf, cwNode.codeRtMode4[0] ? cwNode.codeRtMode4 : (sVsGenRtM4[0] ? sVsGenRtM4 : "// Mode 4 runtime C code"), sizeof(sVsCodeWindowRtM4Buf) - 1);
+                    strncpy(sVsCodeWindowRtM0Buf, cwNode.codeRtMode0[0] ? cwNode.codeRtMode0 : (sVsGenRtM0[0] ? sVsGenRtM0 : "// Mode 0 runtime C code"), sizeof(sVsCodeWindowRtM0Buf) - 1);
                     strncpy(sVsCodeWindowEditBuf, cwNode.customCode[0] ? cwNode.customCode : (sVsGenGBA[0] ? sVsGenGBA : "// GBA runtime C code"), sizeof(sVsCodeWindowEditBuf) - 1);
-                    strncpy(sVsCodeWindowSceneBuf, cwNode.codeScene[0] ? cwNode.codeScene : (sVsGenScene[0] ? sVsGenScene : "// Mode 4 code"), sizeof(sVsCodeWindowSceneBuf) - 1);
-                    strncpy(sVsCodeWindowTilemapBuf, cwNode.codeTilemap[0] ? cwNode.codeTilemap : (sVsGenTilemap[0] ? sVsGenTilemap : "// Mode 0 code"), sizeof(sVsCodeWindowTilemapBuf) - 1);
                     // Init prev snapshots so live-update diffing works
                     strncpy(sVsPrevGenGBA, sVsGenGBA, sizeof(sVsPrevGenGBA) - 1);
                     strncpy(sVsPrevGenScene, sVsGenScene, sizeof(sVsPrevGenScene) - 1);
                     strncpy(sVsPrevGenTilemap, sVsGenTilemap, sizeof(sVsPrevGenTilemap) - 1);
+                    strncpy(sVsPrevGenRtM4, sVsGenRtM4, sizeof(sVsPrevGenRtM4) - 1);
+                    strncpy(sVsPrevGenRtM0, sVsGenRtM0, sizeof(sVsPrevGenRtM0) - 1);
                 }
                 // Live-update: only refresh if the buffer still matches the OLD generated code
                 // (meaning the user hasn't manually edited it)
@@ -13559,10 +13739,20 @@ void FrameTick(float dt)
                     && strcmp(sVsCodeWindowTilemapBuf, sVsPrevGenTilemap) == 0) {
                     strncpy(sVsCodeWindowTilemapBuf, sVsGenTilemap, sizeof(sVsCodeWindowTilemapBuf) - 1);
                 }
+                if (!cwNode.codeRtMode4[0] && sVsGenRtM4[0] && strcmp(sVsGenRtM4, sVsPrevGenRtM4) != 0
+                    && strcmp(sVsCodeWindowRtM4Buf, sVsPrevGenRtM4) == 0) {
+                    strncpy(sVsCodeWindowRtM4Buf, sVsGenRtM4, sizeof(sVsCodeWindowRtM4Buf) - 1);
+                }
+                if (!cwNode.codeRtMode0[0] && sVsGenRtM0[0] && strcmp(sVsGenRtM0, sVsPrevGenRtM0) != 0
+                    && strcmp(sVsCodeWindowRtM0Buf, sVsPrevGenRtM0) == 0) {
+                    strncpy(sVsCodeWindowRtM0Buf, sVsGenRtM0, sizeof(sVsCodeWindowRtM0Buf) - 1);
+                }
                 // Snapshot current generated code for next frame's diff
                 strncpy(sVsPrevGenGBA, sVsGenGBA, sizeof(sVsPrevGenGBA) - 1);
                 strncpy(sVsPrevGenScene, sVsGenScene, sizeof(sVsPrevGenScene) - 1);
                 strncpy(sVsPrevGenTilemap, sVsGenTilemap, sizeof(sVsPrevGenTilemap) - 1);
+                strncpy(sVsPrevGenRtM4, sVsGenRtM4, sizeof(sVsPrevGenRtM4) - 1);
+                strncpy(sVsPrevGenRtM0, sVsGenRtM0, sizeof(sVsPrevGenRtM0) - 1);
 
                 // Resolve $0-$7 placeholders in display buffers using current connections
                 {
@@ -13601,6 +13791,8 @@ void FrameTick(float dt)
                     cwResolve(sVsCodeWindowEditBuf, sizeof(sVsCodeWindowEditBuf));
                     cwResolve(sVsCodeWindowSceneBuf, sizeof(sVsCodeWindowSceneBuf));
                     cwResolve(sVsCodeWindowTilemapBuf, sizeof(sVsCodeWindowTilemapBuf));
+                    cwResolve(sVsCodeWindowRtM4Buf, sizeof(sVsCodeWindowRtM4Buf));
+                    cwResolve(sVsCodeWindowRtM0Buf, sizeof(sVsCodeWindowRtM0Buf));
                 }
 
                 // Code sections (editable — shows generated code by default, saved overrides persist)
@@ -13618,22 +13810,28 @@ void FrameTick(float dt)
                     ImGui::PopStyleColor(2);
                 };
 
-                // --- Mode 4 ---
-                codeSection(cwNode.codeScene[0] ? "Mode 4 (modified)" : "Mode 4",
+                // --- Mode 4 Editor ---
+                codeSection(cwNode.codeScene[0] ? "Mode 4 Editor (modified)" : "Mode 4 Editor",
                             "##CodeScene", ImVec4(0.4f, 0.8f, 1.0f, 1.0f), ImVec4(0.5f, 0.85f, 0.9f, 1.0f),
                             sVsCodeWindowSceneBuf, sizeof(sVsCodeWindowSceneBuf));
                 ImGui::Spacing();
 
-                // --- Mode 0 ---
-                codeSection(cwNode.codeTilemap[0] ? "Mode 0 (modified)" : "Mode 0",
+                // --- Mode 0 Editor ---
+                codeSection(cwNode.codeTilemap[0] ? "Mode 0 Editor (modified)" : "Mode 0 Editor",
                             "##CodeTilemap", ImVec4(0.4f, 1.0f, 0.6f, 1.0f), ImVec4(0.5f, 0.9f, 0.6f, 1.0f),
                             sVsCodeWindowTilemapBuf, sizeof(sVsCodeWindowTilemapBuf));
                 ImGui::Spacing();
 
-                // --- GBA Runtime ---
-                codeSection(cwNode.customCode[0] ? "GBA Runtime (modified)" : "GBA Runtime",
-                            "##CodeGBA", ImVec4(1.0f, 0.8f, 0.5f, 1.0f), ImVec4(0.9f, 0.8f, 0.5f, 1.0f),
-                            sVsCodeWindowEditBuf, sizeof(sVsCodeWindowEditBuf));
+                // --- Mode 4 Runtime ---
+                codeSection(cwNode.codeRtMode4[0] ? "Mode 4 Runtime (modified)" : "Mode 4 Runtime",
+                            "##CodeRtM4", ImVec4(1.0f, 0.8f, 0.5f, 1.0f), ImVec4(0.9f, 0.8f, 0.5f, 1.0f),
+                            sVsCodeWindowRtM4Buf, sizeof(sVsCodeWindowRtM4Buf));
+                ImGui::Spacing();
+
+                // --- Mode 0 Runtime ---
+                codeSection(cwNode.codeRtMode0[0] ? "Mode 0 Runtime (modified)" : "Mode 0 Runtime",
+                            "##CodeRtM0", ImVec4(1.0f, 0.6f, 0.8f, 1.0f), ImVec4(0.9f, 0.6f, 0.8f, 1.0f),
+                            sVsCodeWindowRtM0Buf, sizeof(sVsCodeWindowRtM0Buf));
                 ImGui::Spacing();
 
                 // Function declaration (editable)
@@ -13992,33 +14190,47 @@ void FrameTick(float dt)
                 };
                 if (ImGui::Button("Save")) {
                     // Only store if user actually modified the code
+                    if (isUnchanged(sVsCodeWindowSceneBuf, sVsGenScene, "// Mode 4 editor code"))
+                        cwNode.codeScene[0] = '\0';
+                    else
+                        strncpy(cwNode.codeScene, sVsCodeWindowSceneBuf, sizeof(cwNode.codeScene) - 1);
+
+                    if (isUnchanged(sVsCodeWindowTilemapBuf, sVsGenTilemap, "// Mode 0 editor code"))
+                        cwNode.codeTilemap[0] = '\0';
+                    else
+                        strncpy(cwNode.codeTilemap, sVsCodeWindowTilemapBuf, sizeof(cwNode.codeTilemap) - 1);
+
+                    if (isUnchanged(sVsCodeWindowRtM4Buf, sVsGenRtM4, "// Mode 4 runtime C code"))
+                        cwNode.codeRtMode4[0] = '\0';
+                    else
+                        strncpy(cwNode.codeRtMode4, sVsCodeWindowRtM4Buf, sizeof(cwNode.codeRtMode4) - 1);
+
+                    if (isUnchanged(sVsCodeWindowRtM0Buf, sVsGenRtM0, "// Mode 0 runtime C code"))
+                        cwNode.codeRtMode0[0] = '\0';
+                    else
+                        strncpy(cwNode.codeRtMode0, sVsCodeWindowRtM0Buf, sizeof(cwNode.codeRtMode0) - 1);
+
                     if (isUnchanged(sVsCodeWindowEditBuf, sVsGenGBA, "// GBA runtime C code"))
                         cwNode.customCode[0] = '\0';
                     else
                         strncpy(cwNode.customCode, sVsCodeWindowEditBuf, sizeof(cwNode.customCode) - 1);
 
-                    if (isUnchanged(sVsCodeWindowSceneBuf, sVsGenScene, "// Mode 4 code"))
-                        cwNode.codeScene[0] = '\0';
-                    else
-                        strncpy(cwNode.codeScene, sVsCodeWindowSceneBuf, sizeof(cwNode.codeScene) - 1);
-
-                    if (isUnchanged(sVsCodeWindowTilemapBuf, sVsGenTilemap, "// Mode 0 code"))
-                        cwNode.codeTilemap[0] = '\0';
-                    else
-                        strncpy(cwNode.codeTilemap, sVsCodeWindowTilemapBuf, sizeof(cwNode.codeTilemap) - 1);
-
                     sProjectDirty = true;
                 }
                 ImGui::SameLine();
                 // Clear button to remove overrides and revert to generated code
-                if (cwNode.customCode[0] || cwNode.codeScene[0] || cwNode.codeTilemap[0]) {
+                if (cwNode.customCode[0] || cwNode.codeScene[0] || cwNode.codeTilemap[0] || cwNode.codeRtMode4[0] || cwNode.codeRtMode0[0]) {
                     if (ImGui::Button("Clear Overrides")) {
                         cwNode.customCode[0] = '\0';
                         cwNode.codeScene[0] = '\0';
                         cwNode.codeTilemap[0] = '\0';
+                        cwNode.codeRtMode4[0] = '\0';
+                        cwNode.codeRtMode0[0] = '\0';
                         strncpy(sVsCodeWindowEditBuf, sVsGenGBA[0] ? sVsGenGBA : "// GBA runtime C code", sizeof(sVsCodeWindowEditBuf) - 1);
-                        strncpy(sVsCodeWindowSceneBuf, sVsGenScene[0] ? sVsGenScene : "// Mode 4 code", sizeof(sVsCodeWindowSceneBuf) - 1);
-                        strncpy(sVsCodeWindowTilemapBuf, sVsGenTilemap[0] ? sVsGenTilemap : "// Mode 0 code", sizeof(sVsCodeWindowTilemapBuf) - 1);
+                        strncpy(sVsCodeWindowSceneBuf, sVsGenScene[0] ? sVsGenScene : "// Mode 4 editor code", sizeof(sVsCodeWindowSceneBuf) - 1);
+                        strncpy(sVsCodeWindowTilemapBuf, sVsGenTilemap[0] ? sVsGenTilemap : "// Mode 0 editor code", sizeof(sVsCodeWindowTilemapBuf) - 1);
+                        strncpy(sVsCodeWindowRtM4Buf, sVsGenRtM4[0] ? sVsGenRtM4 : "// Mode 4 runtime C code", sizeof(sVsCodeWindowRtM4Buf) - 1);
+                        strncpy(sVsCodeWindowRtM0Buf, sVsGenRtM0[0] ? sVsGenRtM0 : "// Mode 0 runtime C code", sizeof(sVsCodeWindowRtM0Buf) - 1);
                         sProjectDirty = true;
                     }
                 }
@@ -14746,7 +14958,7 @@ void FrameTick(float dt)
     }
     else if (sActiveTab == EditorTab::Mode7)
     {
-        // Mode 7 tab: viewport + tileset/tilemap/palette panels
+        // Mode 4 tab: viewport + tileset/tilemap/palette panels
         DrawViewport(
             ImVec2(vp->WorkPos.x, bodyY),
             ImVec2(leftW, bodyH));
@@ -14892,45 +15104,8 @@ void FrameTick(float dt)
                         ImVec2(ex, ey), ImVec2(ex + ew, ey + eh));
                 }
 
-                switch (el.type) {
-                case HudElementType::Text:
-                    if (!hasSprite)
-                        dl->AddRectFilled(ImVec2(ex, ey), ImVec2(ex + ew, ey + eh),
-                            IM_COL32(0, 0, 0, 100));
-                    dl->AddText(ImVec2(ex + 2, ey + 1), rgb15to32(el.color), el.text);
-                    break;
-                case HudElementType::Bar: {
-                    if (!hasSprite) {
-                        dl->AddRectFilled(ImVec2(ex, ey), ImVec2(ex + ew, ey + eh),
-                            rgb15to32(el.barBgColor));
-                    }
-                    float fillW = (el.barMax > 0) ? (ew * el.barValue / el.barMax) : ew;
-                    dl->AddRectFilled(ImVec2(ex, ey), ImVec2(ex + fillW, ey + eh),
-                        rgb15to32(el.barFillColor));
-                    dl->AddRect(ImVec2(ex, ey), ImVec2(ex + ew, ey + eh),
-                        IM_COL32(200, 200, 200, 180));
-                    break;
-                }
-                case HudElementType::Icon:
-                    if (!hasSprite) {
-                        dl->AddRectFilled(ImVec2(ex, ey), ImVec2(ex + ew, ey + eh),
-                            IM_COL32(60, 60, 80, 200));
-                        dl->AddText(ImVec2(ex + 2, ey + 1), IM_COL32(200, 200, 255, 255), "ICO");
-                    }
-                    break;
-                case HudElementType::Menu:
-                    // No background fill — pieces/sprites drive the visuals
-                    break;
-                case HudElementType::Button:
-                    if (!hasSprite) {
-                        dl->AddRectFilled(ImVec2(ex, ey), ImVec2(ex + ew, ey + eh),
-                            IM_COL32(50, 50, 70, 230));
-                    }
-                    dl->AddRect(ImVec2(ex, ey), ImVec2(ex + ew, ey + eh),
-                        IM_COL32(150, 150, 180, 255));
-                    dl->AddText(ImVec2(ex + 4, ey + 2), IM_COL32(255, 255, 255, 255), el.text);
-                    break;
-                }
+                // Element — pieces/sprites/text drive the visuals
+                (void)hasSprite;
 
                 // Draw composite pieces
                 for (int pi = 0; pi < (int)el.pieces.size(); pi++) {
@@ -15358,7 +15533,7 @@ void FrameTick(float dt)
                         sHudRenamingIdx = -1;
                 } else {
                     char label[64];
-                    snprintf(label, sizeof(label), "[%s] %s", sHudTypeNames[(int)el.type], el.name);
+                    snprintf(label, sizeof(label), "%s", el.name);
                     if (ImGui::Selectable(label, selected))
                         sHudSelectedIdx = i;
                     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
@@ -15387,20 +15562,6 @@ void FrameTick(float dt)
                 ImGui::PushItemWidth(elemRightW * 0.55f);
                 ImGui::InputText("Name", el.name, sizeof(el.name));
 
-                int typeIdx = (int)el.type;
-                if (ImGui::Combo("Type", &typeIdx, sHudTypeNames, IM_ARRAYSIZE(sHudTypeNames))) {
-                    el.type = (HudElementType)typeIdx;
-                    // Set default sizes per type
-                    switch (el.type) {
-                    case HudElementType::Text:   el.w = 60; el.h = 12; break;
-                    case HudElementType::Bar:    el.w = 48; el.h = 6;  break;
-                    case HudElementType::Icon:   el.w = 16; el.h = 16; break;
-                    case HudElementType::Menu:    el.w = 40; el.h = 30; break;
-                    case HudElementType::Button: el.w = 48; el.h = 16; break;
-                    }
-                    sProjectDirty = true;
-                }
-
                 if (ImGui::DragInt("X", &el.x, 1, 0, 239)) sProjectDirty = true;
                 if (ImGui::DragInt("Y", &el.y, 1, 0, 159)) sProjectDirty = true;
                 if (ImGui::DragInt("W", &el.w, 1, 1, 240)) sProjectDirty = true;
@@ -15408,82 +15569,23 @@ void FrameTick(float dt)
                 if (ImGui::Checkbox("Visible", &el.visible)) sProjectDirty = true;
                 if (ImGui::DragInt("Layer", &el.layer, 1, 0, 31)) sProjectDirty = true;
 
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Sprite");
+                // Blueprint
                 {
-                    const char* preview = (el.spriteAssetIdx >= 0 && el.spriteAssetIdx < (int)sSpriteAssets.size())
-                        ? sSpriteAssets[el.spriteAssetIdx].name.c_str() : "(none)";
-                    if (ImGui::BeginCombo("Asset", preview)) {
-                        if (ImGui::Selectable("(none)", el.spriteAssetIdx < 0)) {
-                            el.spriteAssetIdx = -1; sProjectDirty = true;
+                    const char* bpPrev = (el.blueprintIdx >= 0 && el.blueprintIdx < (int)sBlueprintAssets.size())
+                        ? sBlueprintAssets[el.blueprintIdx].name : "(none)";
+                    if (ImGui::BeginCombo("Blueprint", bpPrev)) {
+                        if (ImGui::Selectable("(none)##bp", el.blueprintIdx < 0)) {
+                            el.blueprintIdx = -1; sProjectDirty = true;
                         }
-                        for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++) {
-                            char itemLabel[64];
-                            snprintf(itemLabel, sizeof(itemLabel), "%d: %s", ai, sSpriteAssets[ai].name.c_str());
-                            bool sel = (ai == el.spriteAssetIdx);
-                            if (ImGui::Selectable(itemLabel, sel)) {
-                                el.spriteAssetIdx = ai;
-                                sProjectDirty = true;
+                        for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++) {
+                            char bl[64];
+                            snprintf(bl, sizeof(bl), "%d: %s", bi, sBlueprintAssets[bi].name);
+                            if (ImGui::Selectable(bl, bi == el.blueprintIdx)) {
+                                el.blueprintIdx = bi; sProjectDirty = true;
                             }
                         }
                         ImGui::EndCombo();
                     }
-                    if (el.spriteAssetIdx >= 0 && el.spriteAssetIdx < (int)sSpriteAssets.size()) {
-                        int maxFrame = (int)sSpriteAssets[el.spriteAssetIdx].frames.size() - 1;
-                        if (maxFrame < 0) maxFrame = 0;
-                        if (ImGui::SliderInt("Frame", &el.spriteFrame, 0, maxFrame)) sProjectDirty = true;
-                        // Preview thumbnail
-                        if (el.spriteAssetIdx < (int)sTmSpriteTextures.size() && sTmSpriteTextures[el.spriteAssetIdx]) {
-                            float prevSize = std::min(elemRightW * 0.4f, 64.0f);
-                            ImGui::Image((ImTextureID)(intptr_t)sTmSpriteTextures[el.spriteAssetIdx],
-                                ImVec2(prevSize, prevSize));
-                        }
-                    }
-                }
-
-                ImGui::Spacing();
-                ImGui::Separator();
-
-                // Type-specific properties
-                switch (el.type) {
-                case HudElementType::Text:
-                case HudElementType::Button:
-                    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Text");
-                    if (ImGui::InputText("Label", el.text, sizeof(el.text))) sProjectDirty = true;
-                    { int fs = el.fontSize;
-                      if (ImGui::Combo("Size", &fs, "Small\0Large\0")) { el.fontSize = fs; sProjectDirty = true; } }
-                    { // RGB15 color picker
-                      float col[3] = { (el.color & 0x1F) / 31.0f, ((el.color >> 5) & 0x1F) / 31.0f, ((el.color >> 10) & 0x1F) / 31.0f };
-                      if (ImGui::ColorEdit3("Color", col, ImGuiColorEditFlags_NoInputs)) {
-                          el.color = ((int)(col[0] * 31) & 0x1F) | (((int)(col[1] * 31) & 0x1F) << 5) | (((int)(col[2] * 31) & 0x1F) << 10);
-                          sProjectDirty = true;
-                      }
-                    }
-                    break;
-                case HudElementType::Bar:
-                    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Bar");
-                    if (ImGui::DragInt("Max", &el.barMax, 1, 1, 999)) sProjectDirty = true;
-                    if (ImGui::DragInt("Value", &el.barValue, 1, 0, el.barMax)) sProjectDirty = true;
-                    { float col[3] = { (el.barFillColor & 0x1F) / 31.0f, ((el.barFillColor >> 5) & 0x1F) / 31.0f, ((el.barFillColor >> 10) & 0x1F) / 31.0f };
-                      if (ImGui::ColorEdit3("Fill", col, ImGuiColorEditFlags_NoInputs)) {
-                          el.barFillColor = ((int)(col[0] * 31) & 0x1F) | (((int)(col[1] * 31) & 0x1F) << 5) | (((int)(col[2] * 31) & 0x1F) << 10);
-                          sProjectDirty = true;
-                      }
-                    }
-                    { float col[3] = { (el.barBgColor & 0x1F) / 31.0f, ((el.barBgColor >> 5) & 0x1F) / 31.0f, ((el.barBgColor >> 10) & 0x1F) / 31.0f };
-                      if (ImGui::ColorEdit3("BG", col, ImGuiColorEditFlags_NoInputs)) {
-                          el.barBgColor = ((int)(col[0] * 31) & 0x1F) | (((int)(col[1] * 31) & 0x1F) << 5) | (((int)(col[2] * 31) & 0x1F) << 10);
-                          sProjectDirty = true;
-                      }
-                    }
-                    break;
-                case HudElementType::Icon:
-                    // All sprite properties handled in common section above
-                    break;
-                case HudElementType::Menu:
-                    break;
-                default: break;
                 }
 
                 // ============ BACKGROUND ============

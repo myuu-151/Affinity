@@ -294,7 +294,7 @@ static void DrawLine(int ax, int ay, int bx, int by,
     }
 }
 
-// Project a 3D world-space point to Mode 7 screen space
+// Project a 3D world-space point to Mode 4 screen space
 // Returns false if behind camera
 static bool ProjectPoint(float wx, float wy, float wz,
                          const Mode7Camera& cam, float cosA, float sinA,
@@ -461,7 +461,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
 
     if (mode7Floor)
     {
-        // --- Mode 7 affine floor rendering ---
+        // --- Mode 4 affine floor rendering ---
         for (int y = 0; y < kGBAHeight; y++)
         {
             uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
@@ -478,7 +478,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 continue;
             }
 
-            // Mode 7 per-scanline math (matches Tonc HBlank ISR)
+            // Mode 4 per-scanline math (matches Tonc HBlank ISR)
             float lambda = cam.height / (float)(y - horizon);
 
             float lcf = lambda * cosA;
@@ -598,7 +598,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         float dx = sprites[i].x - cam.x;
         float dz = sprites[i].z - cam.z;
 
-        // Invert the Mode 7 floor mapping to find screen position.
+        // Invert the Mode 4 floor mapping to find screen position.
         // Floor forward: wx = cam.x + (px-120)*lambda*cosA + fov*lambda*sinA
         //                wz = cam.z + (px-120)*lambda*sinA - fov*lambda*cosA
         // Solving for lambda: fov*lambda = dx*sinA - dz*cosA
