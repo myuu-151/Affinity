@@ -422,6 +422,7 @@ enum class VsNodeType : int {
     OnAnyKey,       // event: fires on any button press
     GetLastKey,     // read last key pressed (data node)
     OnCollision2D,  // event: fires when player collides with tilemap object (Mode 0)
+    IsTrue,         // gate: passes exec if data input is non-zero
     COUNT
 };
 
@@ -695,6 +696,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "On Any Key",     0xFF338833, 0, 1, 0, 0, {}, {}, {} },
     { "Get Last Key",   0xFF666688, 0, 0, 0, 1, {}, {"Key"}, {} },
     { "On Collision 2D", 0xFF338833, 0, 1, 0, 0, {}, {}, {} },
+    { "Is True",        0xFF885533, 1, 1, 1, 0, {"Value (int)"}, {}, {} },
 };
 
 struct VsNode {
@@ -8367,6 +8369,13 @@ void FrameTick(float dt)
                                 front.push_back(lk.to.nodeId);
                         continue;
                     }
+                    if (an->type == VsNodeType::IsTrue) {
+                        // Truth gate - always pass through in editor preview
+                        for (auto& lk : sVsLinks)
+                            if (lk.from.nodeId == an->id && lk.from.pinType == 0 && lk.from.pinIdx == 0)
+                                front.push_back(lk.to.nodeId);
+                        continue;
+                    }
                     if (an->type == VsNodeType::IsHPZero) {
                         // HP zero check - always pass through in editor preview
                         for (auto& lk : sVsLinks)
@@ -10931,6 +10940,7 @@ void FrameTick(float dt)
                 case VsNodeType::OnAnyKey:      desc = "Event: fires when any button is pressed."; break;
                 case VsNodeType::GetLastKey:    desc = "Outputs the key code of the last button pressed."; break;
                 case VsNodeType::OnCollision2D: desc = "Event: fires when the player collides with this object in Mode 0 (tilemap)."; break;
+                case VsNodeType::IsTrue:        desc = "Gate: only passes execution through if the data input is non-zero (true)."; break;
                 case VsNodeType::Integer:       desc = "Outputs a constant integer value."; break;
                 case VsNodeType::Key:           desc = "Outputs a key constant (A, B, L, R, etc)."; break;
                 case VsNodeType::Direction:     desc = "Outputs a direction (Left, Right, Up, Down)."; break;
@@ -11194,6 +11204,7 @@ void FrameTick(float dt)
                         case VsNodeType::ReloadScene:   return "_reload_scene";
                         case VsNodeType::SetCheckpoint: return "_set_checkpoint";
                         case VsNodeType::LoadCheckpoint:return "_load_checkpoint";
+                        case VsNodeType::IsTrue:        return "_is_true";
                         default: return "";
                         }
                     };
@@ -12312,6 +12323,13 @@ void FrameTick(float dt)
                         "    if (dz < 0) dz = -dz;\n"
                         "    int dist = ((dx > dz) ? dx + (dz>>1) : dz + (dx>>1)) >> 8;\n"
                         "    if (dist < radius) { /* downstream */ }");
+                    break;
+                case VsNodeType::IsTrue:
+                    editorCode = "// Gate: passes if value != 0";
+                    setActionFunc(infoNode, "_is_true",
+                        "    if ($0) {\n"
+                        "        /* downstream */\n"
+                        "    }");
                     break;
                 // Timers/counters
                 case VsNodeType::Countdown: {
@@ -14071,6 +14089,7 @@ void FrameTick(float dt)
                     case VsNodeType::GetInputAxis:  suffix = "_get_input_axis"; break;
                     case VsNodeType::OnAnyKey:      suffix = "_on_any_key"; break;
                     case VsNodeType::GetLastKey:    suffix = "_get_last_key"; break;
+                    case VsNodeType::IsTrue:        suffix = "_is_true"; break;
                     default: suffix = ""; break;
                     }
                     // Show default name as placeholder (action nodes include node ID to disambiguate)
@@ -14540,6 +14559,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OrLogic].name)) addNodeAt(VsNodeType::OrLogic);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::NotLogic].name)) addNodeAt(VsNodeType::NotLogic);
                     ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsTrue].name)) addNodeAt(VsNodeType::IsTrue);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsFlagSet].name)) addNodeAt(VsNodeType::IsFlagSet);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsHPZero].name)) addNodeAt(VsNodeType::IsHPZero);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNear].name)) addNodeAt(VsNodeType::IsNear);
