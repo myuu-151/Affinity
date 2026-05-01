@@ -9676,8 +9676,8 @@ static const u16 afn_mesh2_qidx[40] = {
 
 static const int afn_mesh_desc[][17] = {
     { 20, 0, 40, 0x7C1F, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1 },
-    { 4, 0, 4, 0x7C1F, 0, 0, 0, 0, 1, 64, 6, 32, 0, 0, 12096, 0, 0 },
-    { 18, 0, 40, 0x7C1F, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1 },
+    { 4, 0, 4, 0x7C1F, 0, 0, 0, 0, 1, 64, 6, 32, 0, 0, 12096, 0, 1 },
+    { 18, 0, 40, 0x7C1F, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1 },
 };
 
 static const s16* const afn_mesh_vert_ptrs[] = { afn_mesh0_verts, afn_mesh1_verts, afn_mesh2_verts };
@@ -10333,7 +10333,7 @@ static const struct { s16 tx,ty; u8 type; s8 assetIdx; u8 camFollow; u8 collisio
 #define AFN_TM_START_SCENE 0
 
 // Runtime scene mode: 0=Mode4/3D, 1=Mode0/tilemap, 2=Mode1/Mode7
-#define AFN_START_MODE 1
+#define AFN_START_MODE 0
 #define AFN_HAS_MESHES 1
 
 #endif // MAPDATA_H

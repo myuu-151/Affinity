@@ -14707,16 +14707,33 @@ void FrameTick(float dt)
             dl->AddRect(ImVec2(cx - 1, cy - 1), ImVec2(cx + canvasW + 1, cy + canvasH + 1),
                 IM_COL32(80, 80, 100, 255));
 
-            // Draw grid lines every 8px (GBA tile grid)
-            for (int gx = 0; gx <= 240; gx += 8) {
-                float sx = cx + gx * zoom;
-                dl->AddLine(ImVec2(sx, cy), ImVec2(sx, cy + canvasH),
-                    IM_COL32(40, 40, 50, gx % 32 == 0 ? 120 : 60));
-            }
-            for (int gy = 0; gy <= 160; gy += 8) {
-                float sy = cy + gy * zoom;
-                dl->AddLine(ImVec2(cx, sy), ImVec2(cx + canvasW, sy),
-                    IM_COL32(40, 40, 50, gy % 32 == 0 ? 120 : 60));
+            // Draw pixel grid (every pixel when zoomed enough, else every 8px tile grid)
+            if (zoom >= 2.0f) {
+                // Per-pixel grid
+                for (int gx = 0; gx <= 240; gx++) {
+                    float sx = cx + gx * zoom;
+                    int alpha = (gx % 8 == 0) ? (gx % 32 == 0 ? 160 : 80) : 40;
+                    dl->AddLine(ImVec2(sx, cy), ImVec2(sx, cy + canvasH),
+                        IM_COL32(60, 60, 80, alpha));
+                }
+                for (int gy = 0; gy <= 160; gy++) {
+                    float sy = cy + gy * zoom;
+                    int alpha = (gy % 8 == 0) ? (gy % 32 == 0 ? 160 : 80) : 40;
+                    dl->AddLine(ImVec2(cx, sy), ImVec2(cx + canvasW, sy),
+                        IM_COL32(60, 60, 80, alpha));
+                }
+            } else {
+                // Tile grid only at low zoom
+                for (int gx = 0; gx <= 240; gx += 8) {
+                    float sx = cx + gx * zoom;
+                    dl->AddLine(ImVec2(sx, cy), ImVec2(sx, cy + canvasH),
+                        IM_COL32(40, 40, 50, gx % 32 == 0 ? 120 : 60));
+                }
+                for (int gy = 0; gy <= 160; gy += 8) {
+                    float sy = cy + gy * zoom;
+                    dl->AddLine(ImVec2(cx, sy), ImVec2(cx + canvasW, sy),
+                        IM_COL32(40, 40, 50, gy % 32 == 0 ? 120 : 60));
+                }
             }
 
             // Draw HUD elements
