@@ -357,11 +357,22 @@ static bool GenerateMapData(const std::string& runtimeDir,
     std::vector<int> assetTileStart;
     std::vector<int> assetTilesPerFrame;
 
+    // Compute max piece size per asset from HUD elements (pieces may request larger OAM than asset's native size)
+    std::vector<int> hudMaxSize(assets.size(), 0);
+    for (const auto& el : hudElements)
+        for (const auto& pc : el.pieces)
+            if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)assets.size())
+                if (pc.size > hudMaxSize[pc.spriteAssetIdx])
+                    hudMaxSize[pc.spriteAssetIdx] = pc.size;
+
     std::vector<int> assetObjSize; // snapped OBJ size per asset
     for (size_t ai = 0; ai < assets.size(); ai++)
     {
         const auto& asset = assets[ai];
         int objSize = SnapToOBJSize(asset.baseSize);
+        // If a HUD piece uses this asset at a larger size, expand to fit
+        if (hudMaxSize[ai] > objSize)
+            objSize = SnapToOBJSize(hudMaxSize[ai]);
         assetObjSize.push_back(objSize);
         int tilesPerFrame = (objSize / 8) * (objSize / 8);
         assetTileStart.push_back((int)allTiles.size() / 8);
@@ -376,6 +387,16 @@ static bool GenerateMapData(const std::string& runtimeDir,
         for (size_t fi = 0; fi < asset.frames.size(); fi++)
         {
             auto td = FrameToGBATiles(asset.frames[fi]);
+            // If the effective objSize is larger than the frame's native tile count,
+            // pad by repeating the last tile to fill the required OAM tile count
+            int nativeTiles = (int)td.size() / 8;
+            if (nativeTiles < tilesPerFrame) {
+                td.resize(tilesPerFrame * 8, 0);
+                // Repeat the pattern tile to fill remaining slots
+                for (int pt = nativeTiles; pt < tilesPerFrame; pt++)
+                    for (int w = 0; w < 8; w++)
+                        td[pt * 8 + w] = td[((pt % nativeTiles) * 8) + w];
+            }
             allTiles.insert(allTiles.end(), td.begin(), td.end());
         }
     }
