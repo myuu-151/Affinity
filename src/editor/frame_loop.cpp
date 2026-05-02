@@ -15648,9 +15648,258 @@ void FrameTick(float dt)
                 ImGui::PopID();
             }
 
-            // Delete selected
+            // Copy / Paste / Delete selected element
             if (sHudSelectedIdx >= 0 && sHudSelectedIdx < (int)sHudElements.size()) {
                 ImGui::Spacing();
+                if (ImGui::SmallButton("Copy##cpyelem")) {
+                    // Serialize element + referenced sprite assets to clipboard file
+                    auto& el = sHudElements[sHudSelectedIdx];
+                    // Collect unique sprite asset indices used by this element
+                    std::vector<int> usedAssets;
+                    auto addAsset = [&](int idx) {
+                        if (idx < 0 || idx >= (int)sSpriteAssets.size()) return;
+                        for (int a : usedAssets) if (a == idx) return;
+                        usedAssets.push_back(idx);
+                    };
+                    addAsset(el.spriteAssetIdx);
+                    addAsset(el.cursorAssetIdx);
+                    for (auto& pc : el.pieces) addAsset(pc.spriteAssetIdx);
+                    for (auto& si : el.spriteItems) addAsset(si.spriteAssetIdx);
+
+                    const char* home = getenv("USERPROFILE");
+                    if (!home) home = getenv("HOME");
+                    char clipPath[512];
+                    snprintf(clipPath, sizeof(clipPath), "%s/affinity_elem_clipboard.txt", home ? home : ".");
+                    FILE* cf = fopen(clipPath, "w");
+                    if (cf) {
+                        // Write sprite assets first
+                        fprintf(cf, "assetCount=%d\n", (int)usedAssets.size());
+                        for (int ai : usedAssets) {
+                            auto& sa = sSpriteAssets[ai];
+                            fprintf(cf, "asset=%d|%s|%d\n", ai, sa.name.c_str(), sa.baseSize);
+                            fprintf(cf, "assetPal=");
+                            for (int c = 0; c < 16; c++) fprintf(cf, "%s%u", c ? "," : "", sa.palette[c]);
+                            fprintf(cf, "\n");
+                            fprintf(cf, "assetFrames=%d\n", (int)sa.frames.size());
+                            for (auto& fr : sa.frames) {
+                                fprintf(cf, "assetFrame=%d|%d|", fr.width, fr.height);
+                                for (int py2 = 0; py2 < fr.height; py2++)
+                                    for (int px2 = 0; px2 < fr.width; px2++)
+                                        fprintf(cf, "%02x", fr.pixels[py2 * kMaxFrameSize + px2]);
+                                fprintf(cf, "\n");
+                            }
+                            fprintf(cf, "assetAnims=%d\n", (int)sa.anims.size());
+                            for (auto& an : sa.anims)
+                                fprintf(cf, "assetAnim=%s|%d|%d|%d|%d|%f|%d\n", an.name.c_str(),
+                                    an.startFrame, an.endFrame, an.fps, an.loop ? 1 : 0, an.speed, (int)an.gameState);
+                        }
+                        // Write element
+                        fprintf(cf, "elemName=%s\n", el.name);
+                        fprintf(cf, "elemPos=%d|%d|%d|%d\n", el.x, el.y, el.w, el.h);
+                        fprintf(cf, "elemSprite=%d|%d\n", el.spriteAssetIdx, el.spriteFrame);
+                        fprintf(cf, "elemVisible=%d\n", el.visible ? 1 : 0);
+                        fprintf(cf, "elemBp=%d\n", el.blueprintIdx);
+                        // Pieces
+                        fprintf(cf, "elemPieceCount=%d\n", (int)el.pieces.size());
+                        for (auto& pc : el.pieces)
+                            fprintf(cf, "elemPiece=%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size);
+                        // Stops
+                        fprintf(cf, "elemStopCount=%d\n", (int)el.stops.size());
+                        for (auto& st : el.stops) {
+                            fprintf(cf, "elemStop=%d|%d|%d\n", st.localX, st.localY, st.linkedElement);
+                            for (int mi = 0; mi < st.modifierCount && mi < kMaxStopModifiers; mi++)
+                                fprintf(cf, "elemStopMod=%d|%d|%d|%f|%f\n", st.modifiers[mi].targetSpriteIdx,
+                                    st.modifiers[mi].offsetX, st.modifiers[mi].offsetY,
+                                    st.modifiers[mi].scale, st.modifiers[mi].rotation);
+                        }
+                        // Cursor
+                        fprintf(cf, "elemCursor=%d|%d|%d|%d\n", el.cursorAssetIdx, el.cursorFrame, el.cursorOffX, el.cursorOffY);
+                        // Text rows
+                        fprintf(cf, "elemTextCount=%d\n", (int)el.textRows.size());
+                        for (auto& tr : el.textRows)
+                            fprintf(cf, "elemText=%s|%d|%d|%u\n", tr.label, tr.localX, tr.localY, tr.color);
+                        // Sprite items
+                        fprintf(cf, "elemSpriteCount=%d\n", (int)el.spriteItems.size());
+                        for (auto& si : el.spriteItems)
+                            fprintf(cf, "elemSpriteItem=%d|%d|%d|%d|%d|%f\n", si.spriteAssetIdx, si.frame, si.localX, si.localY, si.size, si.scale);
+                        fclose(cf);
+                    }
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy element to clipboard (cross-project)");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Paste##pstelem")) {
+                    const char* home = getenv("USERPROFILE");
+                    if (!home) home = getenv("HOME");
+                    char clipPath[512];
+                    snprintf(clipPath, sizeof(clipPath), "%s/affinity_elem_clipboard.txt", home ? home : ".");
+                    FILE* cf = fopen(clipPath, "r");
+                    if (cf) {
+                        char line[4096];
+                        // Read sprite assets — build remap table (old index -> new index)
+                        std::vector<std::pair<int,int>> assetRemap; // {oldIdx, newIdx}
+                        int assetCount = 0;
+                        if (fgets(line, sizeof(line), cf) && sscanf(line, "assetCount=%d", &assetCount) == 1) {
+                            for (int a = 0; a < assetCount; a++) {
+                                int oldIdx = -1, baseSize = 8;
+                                char aname[128] = {};
+                                if (!fgets(line, sizeof(line), cf)) break;
+                                sscanf(line, "asset=%d|%127[^|]|%d", &oldIdx, aname, &baseSize);
+                                // Check if asset already exists by name
+                                int existIdx = -1;
+                                for (int ei = 0; ei < (int)sSpriteAssets.size(); ei++) {
+                                    if (sSpriteAssets[ei].name == aname) { existIdx = ei; break; }
+                                }
+                                // Read palette
+                                uint32_t pal[16] = {};
+                                if (fgets(line, sizeof(line), cf)) {
+                                    const char* p = line + 9; // skip "assetPal="
+                                    for (int c = 0; c < 16; c++) {
+                                        unsigned v = 0;
+                                        sscanf(p, "%u", &v); pal[c] = v;
+                                        const char* comma = strchr(p, ',');
+                                        if (comma) p = comma + 1; else break;
+                                    }
+                                }
+                                // Read frames
+                                int frameCount = 0;
+                                std::vector<SpriteFrame> frames;
+                                if (fgets(line, sizeof(line), cf))
+                                    sscanf(line, "assetFrames=%d", &frameCount);
+                                for (int fi = 0; fi < frameCount; fi++) {
+                                    SpriteFrame fr;
+                                    if (!fgets(line, sizeof(line), cf)) break;
+                                    char* bar1 = strchr(line + 11, '|');
+                                    if (!bar1) continue;
+                                    sscanf(line + 11, "%d|%d|", &fr.width, &fr.height);
+                                    char* hexData = strchr(bar1 + 1, '|');
+                                    if (hexData) {
+                                        hexData++;
+                                        for (int p2 = 0; p2 < fr.width * fr.height && hexData[0] && hexData[1]; p2++) {
+                                            unsigned val = 0;
+                                            sscanf(hexData, "%02x", &val);
+                                            int row = p2 / fr.width, col = p2 % fr.width;
+                                            fr.pixels[row * kMaxFrameSize + col] = (uint8_t)val;
+                                            hexData += 2;
+                                        }
+                                    }
+                                    frames.push_back(fr);
+                                }
+                                // Read anims
+                                int animCount = 0;
+                                std::vector<SpriteAnim> anims;
+                                if (fgets(line, sizeof(line), cf))
+                                    sscanf(line, "assetAnims=%d", &animCount);
+                                for (int ai2 = 0; ai2 < animCount; ai2++) {
+                                    SpriteAnim an;
+                                    if (!fgets(line, sizeof(line), cf)) break;
+                                    char anName[64] = {};
+                                    int loopInt = 1, stateInt = 0;
+                                    sscanf(line + 10, "%63[^|]|%d|%d|%d|%d|%f|%d",
+                                        anName, &an.startFrame, &an.endFrame, &an.fps, &loopInt, &an.speed, &stateInt);
+                                    an.name = anName;
+                                    an.loop = loopInt != 0;
+                                    an.gameState = (AnimState)stateInt;
+                                    anims.push_back(an);
+                                }
+                                if (existIdx >= 0) {
+                                    assetRemap.push_back({oldIdx, existIdx});
+                                } else {
+                                    // Create new sprite asset
+                                    SpriteAsset sa;
+                                    sa.name = aname;
+                                    sa.baseSize = baseSize;
+                                    memcpy(sa.palette, pal, sizeof(pal));
+                                    sa.frames = std::move(frames);
+                                    sa.anims = std::move(anims);
+                                    int newIdx = (int)sSpriteAssets.size();
+                                    sSpriteAssets.push_back(std::move(sa));
+                                    assetRemap.push_back({oldIdx, newIdx});
+                                }
+                            }
+                        }
+                        // Remap helper
+                        auto remapAsset = [&](int oldIdx) -> int {
+                            for (auto& rm : assetRemap)
+                                if (rm.first == oldIdx) return rm.second;
+                            return oldIdx;
+                        };
+                        // Read element
+                        HudElement nel;
+                        nel.id = sHudNextId++;
+                        int ival2;
+                        while (fgets(line, sizeof(line), cf)) {
+                            // Strip newline
+                            size_t len = strlen(line);
+                            while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
+
+                            if (sscanf(line, "elemName=%31[^\n]", nel.name) == 1) {}
+                            else if (sscanf(line, "elemPos=%d|%d|%d|%d", &nel.x, &nel.y, &nel.w, &nel.h) == 4) {}
+                            else if (sscanf(line, "elemSprite=%d|%d", &nel.spriteAssetIdx, &nel.spriteFrame) == 2) {
+                                nel.spriteAssetIdx = remapAsset(nel.spriteAssetIdx);
+                            }
+                            else if (sscanf(line, "elemVisible=%d", &ival2) == 1) nel.visible = ival2 != 0;
+                            else if (sscanf(line, "elemBp=%d", &nel.blueprintIdx) == 1) {}
+                            else if (sscanf(line, "elemPieceCount=%d", &ival2) == 1) {
+                                nel.pieces.clear(); nel.pieces.reserve(ival2);
+                            }
+                            else if (strncmp(line, "elemPiece=", 10) == 0) {
+                                HudPiece pc;
+                                if (sscanf(line + 10, "%d|%d|%d|%d|%d", &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size) == 5) {
+                                    pc.spriteAssetIdx = remapAsset(pc.spriteAssetIdx);
+                                    nel.pieces.push_back(pc);
+                                }
+                            }
+                            else if (sscanf(line, "elemStopCount=%d", &ival2) == 1) {
+                                nel.stops.clear(); nel.stops.reserve(ival2);
+                            }
+                            else if (strncmp(line, "elemStopMod=", 12) == 0 && !nel.stops.empty()) {
+                                auto& st = nel.stops.back();
+                                if (st.modifierCount < kMaxStopModifiers) {
+                                    auto& mod = st.modifiers[st.modifierCount];
+                                    if (sscanf(line + 12, "%d|%d|%d|%f|%f", &mod.targetSpriteIdx,
+                                        &mod.offsetX, &mod.offsetY, &mod.scale, &mod.rotation) >= 5)
+                                        st.modifierCount++;
+                                }
+                            }
+                            else if (strncmp(line, "elemStop=", 9) == 0) {
+                                HudCursorStop st;
+                                if (sscanf(line + 9, "%d|%d|%d", &st.localX, &st.localY, &st.linkedElement) == 3)
+                                    nel.stops.push_back(st);
+                            }
+                            else if (strncmp(line, "elemCursor=", 11) == 0) {
+                                sscanf(line + 11, "%d|%d|%d|%d", &nel.cursorAssetIdx, &nel.cursorFrame, &nel.cursorOffX, &nel.cursorOffY);
+                                nel.cursorAssetIdx = remapAsset(nel.cursorAssetIdx);
+                            }
+                            else if (sscanf(line, "elemTextCount=%d", &ival2) == 1) {
+                                nel.textRows.clear(); nel.textRows.reserve(ival2);
+                            }
+                            else if (strncmp(line, "elemText=", 9) == 0) {
+                                HudElement::TextRow tr;
+                                unsigned col = 0xFFFFFFFF;
+                                if (sscanf(line + 9, "%31[^|]|%d|%d|%u", tr.label, &tr.localX, &tr.localY, &col) >= 3) {
+                                    tr.color = col;
+                                    nel.textRows.push_back(tr);
+                                }
+                            }
+                            else if (sscanf(line, "elemSpriteCount=%d", &ival2) == 1) {
+                                nel.spriteItems.clear(); nel.spriteItems.reserve(ival2);
+                            }
+                            else if (strncmp(line, "elemSpriteItem=", 15) == 0) {
+                                HudElement::SpriteItem si;
+                                if (sscanf(line + 15, "%d|%d|%d|%d|%d|%f", &si.spriteAssetIdx, &si.frame, &si.localX, &si.localY, &si.size, &si.scale) >= 5) {
+                                    si.spriteAssetIdx = remapAsset(si.spriteAssetIdx);
+                                    nel.spriteItems.push_back(si);
+                                }
+                            }
+                        }
+                        fclose(cf);
+                        sHudElements.push_back(std::move(nel));
+                        sHudSelectedIdx = (int)sHudElements.size() - 1;
+                        sProjectDirty = true;
+                    }
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Paste element from clipboard (cross-project, imports sprite assets)");
+                ImGui::SameLine();
                 if (ImGui::SmallButton("Delete##delelem")) {
                     sHudElements.erase(sHudElements.begin() + sHudSelectedIdx);
                     sHudSelectedIdx = -1;
