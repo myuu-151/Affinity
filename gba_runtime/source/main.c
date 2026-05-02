@@ -87,6 +87,8 @@ static int tm_tile_size = 8;            // pixels per tile on screen
 static int tm_scene_idx;                // current scene
 static int tm_dir_adj = 0;              // tile ID adjustment for direction sprites (mesh offset only)
 static int tm_static_adj = 0;           // tile ID adjustment for static/HUD tiles
+static int tm_hud_was_visible = 0;      // track HUD visibility for direction tile restore
+static int tm_dir_needs_reload = 0;     // force direction tile re-DMA after first VBlank
 static int tm_anim_idx;                 // current animation index (0=idle, 1=walk, ...)
 static int tm_anim_frame;               // current frame within animation
 static int tm_anim_timer;               // frame counter for animation timing
@@ -771,6 +773,20 @@ static void switch_dir_anim_set(int assetIdx, int newSet)
     DMA_TRANSFER(dst, src, wordCount, 3, DMA_NOW | DMA_32);
 
     g_active_dir_set[assetIdx] = newSet;
+}
+#endif
+
+// Re-copy static OBJ tiles to VRAM (fixes direction DMA overlap in Mode 0)
+#if defined(AFN_HAS_MODE0) && defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+static void mode0_reload_static_tiles(void)
+{
+    int staticStart = AFN_DIR_VRAM_TILES - (tm_static_adj - 512);
+    if (staticStart < 0) staticStart = 0;
+    u32 *dst = (u32*)(0x06010000 + staticStart * 32);
+    const u32 *src = afn_all_tiles;
+    int i;
+    for (i = 0; i < (int)(AFN_ALL_TILES_LEN / 4); i++)
+        dst[i] = src[i];
 }
 #endif
 
@@ -3598,15 +3614,15 @@ static void mode0_init_scene(int tmIdx)
     tm_cam_y = tm_player_ty * tm_tile_size - 80 + tm_tile_size / 2;
     tm_anim_idx = 0; tm_anim_frame = 0; tm_anim_timer = 0;
 
-    // Load direction sprite set 0 for player asset
-#if AFN_TM_PLAYER_OBJ >= 0 && defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
-    {
-        int pa = afn_tm0_objs[AFN_TM_PLAYER_OBJ].assetIdx;
-        if (pa >= 0 && pa < AFN_ASSET_COUNT && afn_asset_dir_desc[pa][4]) {
-            g_active_dir_set[pa] = -1;
-            switch_dir_anim_set(pa, 0);
-        }
-    }
+    // Load direction sprite set 0 for all direction assets
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+    { int ai; for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {
+        if (!afn_asset_dir_desc[ai][4]) continue;
+        g_active_dir_set[ai] = -1;
+        switch_dir_anim_set(ai, 0);
+    } }
+    // Direction tile DMA may fail if display is active — schedule re-DMA after VBlank
+    tm_dir_needs_reload = 1;
 #endif
 }
 #endif /* AFN_HAS_MODE0 */
@@ -3982,6 +3998,22 @@ int main(void)
         if (afn_current_mode == 1)
         {
         // ---- MODE 0 TILEMAP UPDATE ----
+            // Re-DMA direction tiles after first VBlank (boot DMA may fail during active display)
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_DIR_ANIM_TILES_LEN)
+            if (tm_dir_needs_reload) {
+                tm_dir_needs_reload = 0;
+                { int ai; for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {
+                    if (!afn_asset_dir_desc[ai][4]) continue;
+                    int curSet = g_active_dir_set[ai];
+                    g_active_dir_set[ai] = -1;
+                    if (curSet >= 0) switch_dir_anim_set(ai, curSet);
+                    else switch_dir_anim_set(ai, 0);
+                } }
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+                mode0_reload_static_tiles();
+#endif
+            }
+#endif
             // Grid-based movement
             if (tm_move_timer > 0)
             {
@@ -4146,17 +4178,9 @@ int main(void)
             // Animation + rendering
 #if AFN_TM_PLAYER_OBJ >= 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
             {
-                // Hide player when HUD is visible (HUD DMA overwrites direction tile VRAM)
-                int hidePlayer = 0;
-#if defined(AFN_HUD_ELEM_COUNT) && AFN_HUD_ELEM_COUNT > 0
-                { int ei2; for (ei2 = 0; ei2 < AFN_HUD_ELEM_COUNT; ei2++) if (afn_hud_visible[ei2]) hidePlayer = 1; }
-#endif
                 int playerAsset = afn_tm0_objs[AFN_TM_PLAYER_OBJ].assetIdx;
 
-                if (hidePlayer) {
-                    obj_hide(&oam_mem[0]);
-                }
-                else if (playerAsset >= 0 && playerAsset < AFN_ASSET_COUNT)
+                if (playerAsset >= 0 && playerAsset < AFN_ASSET_COUNT)
                 {
                     int scrX = px - tm_cam_x;
                     int scrY = py - tm_cam_y;
@@ -4188,6 +4212,10 @@ int main(void)
                         // DMA the current direction set to VRAM
                         int curSet = baseSet + tm_anim_frame;
                         switch_dir_anim_set(playerAsset, curSet);
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+                        // Direction DMA may overlap static tile VRAM in Mode 0 — restore
+                        mode0_reload_static_tiles();
+#endif
 
                         // Facing direction from movement
                         int facing = 4; // default South
@@ -4218,16 +4246,12 @@ int main(void)
                         oa->pc = 0;
                         oa->pd = (s16)pa;
 
-                        // Visible size = displayScale * tile_size
-                        int visSize = (scale8 * tm_tile_size) >> 8;
                         // Double-size canvas = 2 * dirSize
                         int canvasSize = dirSize * 2;
-                        // Center sprite on tile (match editor: centered both axes)
                         int adjX = scrX + (tm_tile_size - canvasSize) / 2;
                         int adjY = scrY + (tm_tile_size - canvasSize) / 2;
 
-                        // Use ATTR0_AFF_DBL with affine matrix 0
-                        u16 a0 = ATTR0_SQUARE | ATTR0_AFF_DBL | ((adjY & 0x1FF));
+                        u16 a0 = ATTR0_SQUARE | ATTR0_AFF_DBL | ((adjY & 0xFF));
                         u16 a1 = size_to_attr1(dirSize) | ATTR1_AFF_ID(0) | ((adjX & 0x1FF));
                         u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(1) | (tileCur & 0x3FF);
                         obj_set_attr(&oam_mem[0], a0, a1, a2);
@@ -4272,16 +4296,9 @@ int main(void)
             // Draw non-player tilemap objects as OAM sprites
             {
                 int oamSlot = 1;
-#if defined(AFN_HUD_ELEM_COUNT) && AFN_HUD_ELEM_COUNT > 0
-                // Check if any HUD is visible — skip world objects to avoid VRAM tile conflicts
-                int anyHudUp = 0;
-                { int ei2; for (ei2 = 0; ei2 < AFN_HUD_ELEM_COUNT; ei2++) if (afn_hud_visible[ei2]) anyHudUp = 1; }
-#else
-                int anyHudUp = 0;
-#endif
 #if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
                 int oi;
-                for (oi = 0; oi < AFN_TM0_OBJ_COUNT && oamSlot < 128 && !anyHudUp; oi++) {
+                for (oi = 0; oi < AFN_TM0_OBJ_COUNT && oamSlot < 128; oi++) {
                     if (oi == AFN_TM_PLAYER_OBJ) continue;
                     if (afn_tm0_objs[oi].type == 6) continue; // skip Tile objects
                     int ai = afn_tm0_objs[oi].assetIdx;
@@ -4297,13 +4314,27 @@ int main(void)
                         continue;
                     }
 
-                    int tileBase = afn_asset_desc[ai][0];
-                    int tpf      = afn_asset_desc[ai][1];
-                    int objSz    = afn_asset_desc[ai][3];
-                    int palBank  = afn_asset_desc[ai][4];
-                    int tileCur  = tileBase - tm_static_adj; // first frame
+                    int objSz, palBank, tileCur;
+#if defined(AFN_HAS_ASSET_DIRS)
+                    // Direction-based NPC: use dir descriptor
+                    if (afn_asset_dir_desc[ai][4]) {
+                        int vramT0 = afn_asset_dir_desc[ai][5];
+                        int dirSize = afn_asset_dir_desc[ai][2];
+                        objSz = dirSize;
+                        palBank = afn_asset_dir_desc[ai][3];
+                        tileCur = vramT0 - tm_dir_adj; // facing 4 (south) = default
+                        int tpf = afn_asset_dir_desc[ai][1];
+                        tileCur += 4 * tpf; // default south facing
+                    } else
+#endif
+                    {
+                        int tileBase = afn_asset_desc[ai][0];
+                        objSz = afn_asset_desc[ai][3];
+                        palBank = afn_asset_desc[ai][4];
+                        tileCur = tileBase - tm_static_adj; // first frame
+                    }
 
-                    // Affine scaling — mirrors player direction path
+                    // Affine scaling
                     int sc8 = (int)afn_tm0_objs[oi].scale8;
                     if (sc8 < 1) sc8 = 256;
                     int pa = (objSz * 256 * 256) / (sc8 * tm_tile_size);
@@ -4318,7 +4349,7 @@ int main(void)
                     int adjX = osx + (tm_tile_size - canvasSize) / 2;
                     int adjY = osy + (tm_tile_size - canvasSize) / 2;
 
-                    u16 a0 = ATTR0_SQUARE | ATTR0_AFF_DBL | ((adjY & 0x1FF));
+                    u16 a0 = ATTR0_SQUARE | ATTR0_AFF_DBL | ((adjY & 0xFF));
                     u16 a1 = size_to_attr1(objSz) | ATTR1_AFF_ID(oamSlot) | ((adjX & 0x1FF));
                     u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(1) | (tileCur & 0x3FF);
                     obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
@@ -4330,7 +4361,7 @@ int main(void)
                 { int anyHudVisible = 0;
                 { int ei2; for (ei2 = 0; ei2 < AFN_HUD_ELEM_COUNT; ei2++) if (afn_hud_visible[ei2]) anyHudVisible = 1; }
                 if (anyHudVisible) {
-                    // DMA all static tiles from ROM into end of OBJ VRAM (overwriting direction tiles that aren't needed while HUD is up)
+                    // DMA all static tiles from ROM into end of OBJ VRAM
                     int staticTiles = AFN_ALL_TILES_LEN / 32;
                     int vramStart = 1024 - staticTiles;
                     if (vramStart < 0) vramStart = 0;
@@ -4339,6 +4370,21 @@ int main(void)
                         u32 *tdst = (u32*)(0x06010000 + vramStart * 32);
                         int w; for (w = 0; w < (int)(AFN_ALL_TILES_LEN / 4); w++) tdst[w] = tsrc[w];
                     }
+                    tm_hud_was_visible = 1;
+                } else if (tm_hud_was_visible) {
+                    // HUD just closed — restore direction tiles that were overwritten
+                    tm_hud_was_visible = 0;
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+                    { int ai; for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {
+                        if (!afn_asset_dir_desc[ai][4]) continue;
+                        int curSet = g_active_dir_set[ai];
+                        g_active_dir_set[ai] = -1; // force re-DMA
+                        if (curSet >= 0) switch_dir_anim_set(ai, curSet);
+                    } }
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+                    mode0_reload_static_tiles();
+#endif
+#endif
                 }
                 }
                 { int ei;
