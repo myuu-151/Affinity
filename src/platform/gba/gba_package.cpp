@@ -257,6 +257,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                             const std::vector<GBABlueprintExport>& blueprints,
                             const std::vector<GBABlueprintInstanceExport>& bpInstances,
                             const std::vector<GBATmSceneExport>& tmScenes,
+                            const std::vector<GBAHudElementExport>& hudElements,
                             int startMode)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
@@ -342,6 +343,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 assetReferencedBySprite[obj.spriteAssetIdx] = true;
                 assetReferencedByTilemap[obj.spriteAssetIdx] = true;
             }
+    // Mark assets referenced by HUD element pieces and cursors
+    for (const auto& el : hudElements) {
+        for (const auto& pc : el.pieces)
+            if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)assets.size())
+                assetReferencedBySprite[pc.spriteAssetIdx] = true;
+        if (el.cursorAssetIdx >= 0 && el.cursorAssetIdx < (int)assets.size())
+            assetReferencedBySprite[el.cursorAssetIdx] = true;
+    }
 
     // Build one combined tile data array: all assets, all frames, packed contiguously
     std::vector<uint32_t> allTiles;
@@ -1511,6 +1520,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static u8    afn_sprite_shake[16];\n";
         f << "static int   afn_hud_value[4];\n";
         f << "static u8    afn_hud_visible[4];\n";
+        f << "static int   afn_cursor_stop;\n";
+        f << "static int   afn_stop_count;\n";
+        f << "static int   afn_stop_links[8];\n";
+        f << "static int   afn_elem_idx;\n";
+        f << "static int   afn_active_element;\n";
         f << "static FIXED afn_patrol_home_x[16];\n";
         f << "static FIXED afn_patrol_home_z[16];\n";
         f << "static u16   afn_bg_color;\n";
@@ -1712,6 +1726,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::ReloadScene:   return "_reload_scene";
         case GBAScriptNodeType::SetCheckpoint: return "_set_checkpoint";
         case GBAScriptNodeType::LoadCheckpoint:return "_load_checkpoint";
+        case GBAScriptNodeType::CursorUp:      return "_cursor_up";
+        case GBAScriptNodeType::CursorDown:    return "_cursor_down";
+        case GBAScriptNodeType::FollowLink:    return "_follow_link";
         default: return "";
         }
     };
@@ -2510,6 +2527,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* slotData = findDataIn(action->id, 0);
                     int slot = slotData ? resolveInt(slotData) : 0;
                     f << "    afn_hud_visible[" << slot << "] = 1;\n";
+                    f << "    afn_elem_idx = " << slot << ";\n";
+                    f << "    afn_active_element = " << slot << ";\n";
+                    f << "    afn_cursor_stop = 0;\n";
+                    f << "#ifdef AFN_HUD_ELEM_COUNT\n";
+                    f << "    afn_stop_count = afn_hud_elems[" << slot << "].stopCount;\n";
+                    f << "    { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[" << slot << "].stopStart + si].link; }\n";
+                    f << "#endif\n";
                     break;
                 }
                 case GBAScriptNodeType::HideHUD: {
@@ -2740,6 +2764,16 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 case GBAScriptNodeType::LoadCheckpoint:
                     f << "    if (afn_checkpoint_set) { player_x = afn_checkpoint_x; player_z = afn_checkpoint_z; }\n";
                     break;
+                case GBAScriptNodeType::CursorUp:
+                    f << "    if (afn_cursor_stop > 0) afn_cursor_stop--; else afn_cursor_stop = afn_stop_count - 1;\n";
+                    break;
+                case GBAScriptNodeType::CursorDown:
+                    f << "    afn_cursor_stop++; if (afn_cursor_stop >= afn_stop_count) afn_cursor_stop = 0;\n";
+                    break;
+                case GBAScriptNodeType::FollowLink:
+                    f << "    { int link = afn_stop_links[afn_cursor_stop];\n";
+                    f << "      if (link >= 0) { afn_hud_visible[afn_elem_idx] = 0; afn_hud_visible[link] = 1; afn_active_element = link; } }\n";
+                    break;
                 default:
                     f << "    // unsupported action: type " << (int)action->type << "\n";
                     break;
@@ -2752,7 +2786,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     || t == GBAScriptNodeType::IsFlagSet || t == GBAScriptNodeType::IsHPZero || t == GBAScriptNodeType::IsNear
                     || t == GBAScriptNodeType::Countdown || t == GBAScriptNodeType::IsAlive
                     || t == GBAScriptNodeType::HasItem || t == GBAScriptNodeType::IsDialogueOpen
-                    || t == GBAScriptNodeType::IsInState || t == GBAScriptNodeType::IsColliding;
+                    || t == GBAScriptNodeType::IsInState || t == GBAScriptNodeType::IsColliding
+                    || t == GBAScriptNodeType::IsTrue;
             };
             std::set<int> emittedActionIds;
             for (auto& c : chains) {
@@ -2911,6 +2946,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "      int cr = afn_collision_size[" << a->paramInt[0] << "] + afn_collision_size[" << a->paramInt[1] << "];\n";
                         f << "      if (cr <= 0) cr = 16;\n";
                         f << "      if (((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8 < cr) {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsTrue) {
+                        auto* valData = findDataIn(a->id, 0);
+                        int val = valData ? resolveInt(valData) : 0;
+                        f << "    if (" << val << ") {\n";
                         gateDepth++;
                         continue;
                     }
@@ -3155,11 +3197,38 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* an = bpFindNode(nid);
                     if (!an) continue;
                     chain.actions.push_back(an);
-                    for (auto& lk : bpScript.links)
-                        if (lk.fromNodeId == an->id && lk.fromPinType == 0) front.push_back(lk.toNodeId);
+                    // Don't follow exec outs of FlipFlop — it dispatches its own branches
+                    if (an->type != GBAScriptNodeType::FlipFlop) {
+                        for (auto& lk : bpScript.links)
+                            if (lk.fromNodeId == an->id && lk.fromPinType == 0) front.push_back(lk.toNodeId);
+                    }
                 }
                 if (!chain.actions.empty()) bpChains.push_back(chain);
             }
+
+            // Helper: collect downstream actions from a node's specific exec out pin via BFS
+            auto bpCollectBranch = [&](int nodeId, int pinIdx) -> std::vector<const GBAScriptNodeExport*> {
+                std::vector<const GBAScriptNodeExport*> result;
+                std::vector<int> fr2;
+                for (auto& lk : bpScript.links)
+                    if (lk.fromNodeId == nodeId && lk.fromPinType == 0 && lk.fromPinIdx == pinIdx)
+                        fr2.push_back(lk.toNodeId);
+                std::set<int> vis2;
+                while (!fr2.empty()) {
+                    int nid2 = fr2.front(); fr2.erase(fr2.begin());
+                    if (vis2.count(nid2)) continue;
+                    vis2.insert(nid2);
+                    auto* an2 = bpFindNode(nid2);
+                    if (!an2) continue;
+                    result.push_back(an2);
+                    if (an2->type != GBAScriptNodeType::FlipFlop) {
+                        for (auto& lk : bpScript.links)
+                            if (lk.fromNodeId == an2->id && lk.fromPinType == 0)
+                                fr2.push_back(lk.toNodeId);
+                    }
+                }
+                return result;
+            };
 
             // Emit action body lines for blueprint
             // Helper: replace $0..$7 in a string with resolved blueprint data-in values
@@ -3785,6 +3854,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* slotData = bpFindDataIn(action->id, 0);
                     std::string slot = slotData ? bpResolveInt(slotData) : "0";
                     f << "    afn_hud_visible[" << slot << "] = 1;\n";
+                    f << "    afn_elem_idx = " << slot << ";\n";
+                    f << "    afn_active_element = " << slot << ";\n";
+                    f << "    afn_cursor_stop = 0;\n";
+                    f << "#ifdef AFN_HUD_ELEM_COUNT\n";
+                    f << "    afn_stop_count = afn_hud_elems[" << slot << "].stopCount;\n";
+                    f << "    { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[" << slot << "].stopStart + si].link; }\n";
+                    f << "#endif\n";
                     break;
                 }
                 case GBAScriptNodeType::HideHUD: {
@@ -4005,6 +4081,21 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 case GBAScriptNodeType::LoadCheckpoint:
                     f << "    if (afn_checkpoint_set) { player_x = afn_checkpoint_x; player_z = afn_checkpoint_z; }\n";
                     break;
+                case GBAScriptNodeType::FlipFlop:
+                    f << "    // FlipFlop: handled inline at dispatch site\n";
+                    break;
+                case GBAScriptNodeType::CursorUp:
+                    f << "    if (afn_cursor_stop > 0) afn_cursor_stop--;\n";
+                    f << "    else afn_cursor_stop = afn_stop_count - 1;\n";
+                    break;
+                case GBAScriptNodeType::CursorDown:
+                    f << "    afn_cursor_stop++;\n";
+                    f << "    if (afn_cursor_stop >= afn_stop_count) afn_cursor_stop = 0;\n";
+                    break;
+                case GBAScriptNodeType::FollowLink:
+                    f << "    { int link = afn_stop_links[afn_cursor_stop];\n";
+                    f << "      if (link >= 0) { afn_hud_visible[afn_elem_idx] = 0; afn_hud_visible[link] = 1; afn_active_element = link; } }\n";
+                    break;
                 default:
                     f << "    // unsupported bp action: type " << (int)action->type << "\n";
                     break;
@@ -4017,7 +4108,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     || t == GBAScriptNodeType::IsFlagSet || t == GBAScriptNodeType::IsHPZero || t == GBAScriptNodeType::IsNear
                     || t == GBAScriptNodeType::Countdown || t == GBAScriptNodeType::IsAlive
                     || t == GBAScriptNodeType::HasItem || t == GBAScriptNodeType::IsDialogueOpen
-                    || t == GBAScriptNodeType::IsInState || t == GBAScriptNodeType::IsColliding;
+                    || t == GBAScriptNodeType::IsInState || t == GBAScriptNodeType::IsColliding
+                    || t == GBAScriptNodeType::IsTrue || t == GBAScriptNodeType::FlipFlop;
             };
             std::set<int> bpEmittedIds;
             for (auto& c : bpChains) {
@@ -4040,6 +4132,27 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     if (hasDataOut)
                         f << "    return 0; // default if no explicit return\n";
                     f << "}\n";
+                }
+            }
+
+            // Emit functions for FlipFlop branch actions not in main chains
+            for (auto& c : bpChains) {
+                for (auto* a : c.actions) {
+                    if (a->type != GBAScriptNodeType::FlipFlop) continue;
+                    for (int pin = 0; pin < 2; pin++) {
+                        auto branch = bpCollectBranch(a->id, pin);
+                        for (auto* ba : branch) {
+                            if (bpIsGateNode(ba->type)) continue;
+                            if (bpEmittedIds.count(ba->id)) continue;
+                            bpEmittedIds.insert(ba->id);
+                            const char* fname2 = ba->funcName[0] ? ba->funcName : nullptr;
+                            char dn2[64];
+                            if (!fname2) { snprintf(dn2, sizeof(dn2), "afn_bp%d%s_%d", bi, actionSuffix(ba->type), ba->id); fname2 = dn2; }
+                            f << "static inline void " << fname2 << "(" << paramSig << ") {\n";
+                            bpEmitActionBody(ba);
+                            f << "}\n";
+                        }
+                    }
                 }
             }
 
@@ -4142,6 +4255,25 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "      if (cr <= 0) cr = 16;\n";
                         f << "      if (((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8 < cr) {\n";
                         gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsTrue) {
+                        auto* valData = bpFindDataIn(a->id, 0);
+                        std::string val = valData ? bpResolveInt(valData) : "0";
+                        f << "    if (" << val << ") {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::FlipFlop) {
+                        f << "    { static int afn_ff_" << a->id << " = 0;\n";
+                        f << "      afn_ff_" << a->id << " = !afn_ff_" << a->id << ";\n";
+                        auto brA = bpCollectBranch(a->id, 0);
+                        auto brB = bpCollectBranch(a->id, 1);
+                        f << "      if (afn_ff_" << a->id << ") {\n";
+                        for (auto* a2 : brA) bpEmitActionCall(a2);
+                        f << "      } else {\n";
+                        for (auto* a2 : brB) bpEmitActionCall(a2);
+                        f << "      } }\n";
                         continue;
                     }
                     bpEmitActionCall(a);
@@ -4431,6 +4563,72 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "#define AFN_TM_START_SCENE 0\n";
     }
 
+    // ---- HUD Element Data ----
+    if (!hudElements.empty())
+    {
+        f << "\n// ---- HUD Elements ----\n";
+        f << "#define AFN_HUD_ELEM_COUNT " << (int)hudElements.size() << "\n";
+
+        // Emit element descriptors: {screenX, screenY, pieceStart, pieceCount, stopStart, stopCount, textStart, textCount, cursorAsset, cursorFrame, cursorOffX, cursorOffY}
+        int totalPieces = 0, totalStops = 0, totalText = 0;
+        for (auto& el : hudElements) { totalPieces += (int)el.pieces.size(); totalStops += (int)el.stops.size(); totalText += (int)el.textRows.size(); }
+
+        f << "static const struct { s16 x,y; u16 pieceStart,pieceCount,stopStart,stopCount,textStart,textCount; s8 curAsset,curFrame,curOffX,curOffY; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
+        int pOff = 0, sOff = 0, tOff = 0;
+        for (auto& el : hudElements) {
+            f << "    {" << el.screenX << "," << el.screenY << ","
+              << pOff << "," << (int)el.pieces.size() << ","
+              << sOff << "," << (int)el.stops.size() << ","
+              << tOff << "," << (int)el.textRows.size() << ","
+              << el.cursorAssetIdx << "," << el.cursorFrame << "," << el.cursorOffX << "," << el.cursorOffY << "},\n";
+            pOff += (int)el.pieces.size();
+            sOff += (int)el.stops.size();
+            tOff += (int)el.textRows.size();
+        }
+        f << "};\n";
+
+        // Pieces: {assetIdx, frame, localX, localY, size}
+        if (totalPieces > 0) {
+            f << "static const struct { s8 asset; u8 frame; s16 x,y; u8 size; } afn_hud_pieces[" << totalPieces << "] = {\n";
+            for (auto& el : hudElements)
+                for (auto& pc : el.pieces)
+                    f << "    {" << pc.spriteAssetIdx << "," << pc.frame << "," << pc.localX << "," << pc.localY << "," << pc.size << "},\n";
+            f << "};\n";
+        } else {
+            f << "static const int afn_hud_pieces[1] = {0}; // no pieces\n";
+        }
+
+        // Stops: {localX, localY, linkedElement}
+        if (totalStops > 0) {
+            f << "static const struct { s16 x,y; s8 link; } afn_hud_stops[" << totalStops << "] = {\n";
+            for (auto& el : hudElements)
+                for (auto& st : el.stops)
+                    f << "    {" << st.localX << "," << st.localY << "," << st.linkedElement << "},\n";
+            f << "};\n";
+        } else {
+            f << "static const int afn_hud_stops[1] = {0}; // no stops\n";
+        }
+
+        // Text rows: {localX, localY, colorRGB15, text}
+        if (totalText > 0) {
+            f << "static const struct { s16 x,y; u16 color; char text[32]; } afn_hud_texts[" << totalText << "] = {\n";
+            for (auto& el : hudElements)
+                for (auto& tr : el.textRows) {
+                    f << "    {" << tr.localX << "," << tr.localY << ",0x" << std::hex << tr.colorRGB15 << std::dec << ",\"";
+                    // Escape the text
+                    for (int ci = 0; tr.text[ci] && ci < 31; ci++) {
+                        char c = tr.text[ci];
+                        if (c == '"' || c == '\\') f << '\\';
+                        f << c;
+                    }
+                    f << "\"},\n";
+                }
+            f << "};\n";
+        } else {
+            f << "static const int afn_hud_texts[1] = {0}; // no text\n";
+        }
+    }
+
     // ---- Scene mode config ----
     // startMode is determined by caller based on active editor tab
     // Fallback: if the requested mode's data doesn't exist, pick what's available
@@ -4460,6 +4658,7 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBABlueprintExport>& blueprints,
                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
                 const std::vector<GBATmSceneExport>& tmScenes,
+                const std::vector<GBAHudElementExport>& hudElements,
                 int startMode,
                 std::string& errorMsg)
 {
@@ -4476,7 +4675,7 @@ bool PackageGBA(const std::string& runtimeDir,
     }
 
     // --- Step 1: Generate mapdata.h with sprite/camera/asset/player data ---
-    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, script, blueprints, bpInstances, tmScenes, startMode))
+    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, script, blueprints, bpInstances, tmScenes, hudElements, startMode))
     {
         errorMsg = "Failed to write mapdata.h";
         return false;

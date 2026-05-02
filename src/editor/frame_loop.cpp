@@ -7930,6 +7930,27 @@ void FrameTick(float dt)
                     exportBpInstances.push_back(inst);
                 }
 
+                // Collect element blueprint instances
+                for (int ei = 0; ei < (int)sHudElements.size(); ei++) {
+                    const HudElement& el = sHudElements[ei];
+                    if (el.blueprintIdx < 0 || el.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
+                    const BlueprintAsset& bp = sBlueprintAssets[el.blueprintIdx];
+                    auto addElemInst = [&](int mode) {
+                        GBABlueprintInstanceExport inst;
+                        inst.blueprintIdx = el.blueprintIdx;
+                        inst.spriteIdx = -1;
+                        inst.tmObjIdx = -1;
+                        inst.sceneMode = mode;
+                        inst.paramCount = bp.paramCount;
+                        for (int pi = 0; pi < bp.paramCount; pi++)
+                            inst.paramValues[pi] = bp.params[pi].defaultInt;
+                        exportBpInstances.push_back(inst);
+                    };
+                    if (el.runtimeMode == 0) { addElemInst(0); addElemInst(1); } // Both
+                    else if (el.runtimeMode == 1) addElemInst(0); // Mode 4 Only
+                    else if (el.runtimeMode == 2) addElemInst(1); // Mode 0 Only
+                }
+
                 // Collect tilemap scene data for Mode 0 export
                 // Always export tilemap data when scenes exist (needed for runtime scene switching)
                 std::vector<GBATmSceneExport> exportTmScenes;
@@ -8044,11 +8065,56 @@ void FrameTick(float dt)
                     }
                 }
 
+                // Collect HUD element data for export
+                std::vector<GBAHudElementExport> exportHudElements;
+                for (int ei = 0; ei < (int)sHudElements.size(); ei++) {
+                    const HudElement& el = sHudElements[ei];
+                    GBAHudElementExport he;
+                    he.screenX = el.x;
+                    he.screenY = el.y;
+                    he.visible = el.visible;
+                    he.runtimeMode = el.runtimeMode;
+                    for (auto& pc : el.pieces) {
+                        GBAHudPieceExport pe;
+                        pe.spriteAssetIdx = pc.spriteAssetIdx;
+                        pe.frame = pc.frame;
+                        pe.localX = pc.localX;
+                        pe.localY = pc.localY;
+                        pe.size = pc.size;
+                        he.pieces.push_back(pe);
+                    }
+                    for (auto& st : el.stops) {
+                        GBAHudStopExport se;
+                        se.localX = st.localX;
+                        se.localY = st.localY;
+                        se.linkedElement = st.linkedElement;
+                        he.stops.push_back(se);
+                    }
+                    for (auto& tr : el.textRows) {
+                        GBAHudTextRowExport te;
+                        memcpy(te.text, tr.label, sizeof(te.text));
+                        te.text[31] = '\0';
+                        te.localX = tr.localX;
+                        te.localY = tr.localY;
+                        // Convert RGBA8 to RGB15
+                        int r = (tr.color & 0xFF) >> 3;
+                        int g = ((tr.color >> 8) & 0xFF) >> 3;
+                        int b = ((tr.color >> 16) & 0xFF) >> 3;
+                        te.colorRGB15 = (uint16_t)(r | (g << 5) | (b << 10));
+                        he.textRows.push_back(te);
+                    }
+                    he.cursorAssetIdx = el.cursorAssetIdx;
+                    he.cursorFrame = el.cursorFrame;
+                    he.cursorOffX = el.cursorOffX;
+                    he.cursorOffY = el.cursorOffY;
+                    exportHudElements.push_back(std::move(he));
+                }
+
                 // Determine start mode from active tab: Tilemap=1, 3D/default=0, legacy=2
                 int exportStartMode = (sActiveTab == EditorTab::Tilemap) ? 1 : 0;
 
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                             exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportStartMode, target]() {
+                             exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportStartMode, target]() {
                     std::string err;
                     bool ok;
                     if (target == BuildTarget::NDS)
@@ -8056,7 +8122,7 @@ void FrameTick(float dt)
                                         exportMeshes, exportOrbitDist, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                                        exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportStartMode, err);
+                                        exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportStartMode, err);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)

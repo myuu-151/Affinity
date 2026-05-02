@@ -31,10 +31,10 @@ static int afn_current_mode;
 #define AFN_PLAYER_IDX 0
 #define AFN_ORBIT_DIST 1920
 
-#define AFN_ASSET_COUNT 6
+#define AFN_ASSET_COUNT 16
 
-// Combined OBJ tile data (17 tiles, 544 bytes)
-static const u32 afn_all_tiles[136] = {
+// Combined OBJ tile data (27 tiles, 864 bytes)
+static const u32 afn_all_tiles[216] = {
     0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
     0x00000000, 0x00000000, 0x00000000, 0x00000111, 0x00011111, 0x11122110, 0x22222210, 0x22212100, 
     0x00000000, 0x00000000, 0x00000000, 0x00011100, 0x11111111, 0x12221122, 0x01221222, 0x00122121, 
@@ -51,9 +51,19 @@ static const u32 afn_all_tiles[136] = {
     0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
     0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
     0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
-    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000
+    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 
+    0x00000000, 0x00000001, 0x00000111, 0x00011111, 0x01111111, 0x00011111, 0x00000111, 0x00000001, 
+    0x11111111, 0x11111111, 0x11111111, 0x22221111, 0x11112111, 0x22211211, 0x22221211, 0x11221211, 
+    0x11111111, 0x11111111, 0x11111111, 0x22222222, 0x11111111, 0x22222222, 0x22222222, 0x11111111, 
+    0x11111111, 0x11111111, 0x11111111, 0x11112222, 0x11121111, 0x11211222, 0x11212222, 0x11212211, 
+    0x11121211, 0x11121211, 0x11121211, 0x11121211, 0x11121211, 0x11121211, 0x11121211, 0x11121211, 
+    0x11212111, 0x11212111, 0x11212111, 0x11211222, 0x11221111, 0x11122222, 0x11112222, 0x11111111, 
+    0x11121211, 0x11121211, 0x11121211, 0x22211211, 0x11112211, 0x22222111, 0x22221111, 0x11111111, 
+    0x11111111, 0x11111111, 0x11111111, 0x22222222, 0x11111111, 0x22222222, 0x22222222, 0x11111111, 
+    0x11111111, 0x11111111, 0x11111111, 0x11111111, 0x11111111, 0x11111111, 0x11111111, 0x11111111, 
+    0x11212111, 0x11212111, 0x11212111, 0x11212111, 0x11212111, 0x11212111, 0x11212111, 0x11212111
 };
-#define AFN_ALL_TILES_LEN 544
+#define AFN_ALL_TILES_LEN 864
 #define AFN_DIR_VRAM_TILES 1024
 
 // Direction animation tile data — ROM only, DMA'd to VRAM on set change
@@ -9283,12 +9293,32 @@ static const u16 afn_pal2[16] = { 0x0000, 0x7FFF, 0x0000, 0x0000, 0x0000, 0x0000
 static const u16 afn_pal3[16] = { 0x0000, 0x6FFB, 0x56B5, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
 static const u16 afn_pal4[16] = { 0x0000, 0x072C, 0x2BF6, 0x01C5, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
 static const u16 afn_pal5[16] = { 0x0000, 0x0000, 0x2A7F, 0x04FF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal6[16] = { 0x0000, 0x0421, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal7[16] = { 0x0000, 0x7FFF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal8[16] = { 0x0000, 0x7FFF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal9[16] = { 0x0000, 0x7FFF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal10[16] = { 0x0000, 0x7FFF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal11[16] = { 0x0000, 0x7FFF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal12[16] = { 0x0000, 0x7FFF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal13[16] = { 0x0000, 0x7FFF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal14[16] = { 0x0000, 0x7FFF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal15[16] = { 0x0000, 0x7FFF, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
 static const u16 afn_pal_assetdir0[16] = { 0x0000, 0x0000, 0x18C6, 0x0253, 0x03FF, 0x035B, 0x2FFF, 0x01AE, 0x010B, 0x1593, 0x0045, 0x0012, 0x001F, 0x0018, 0x7FFF, 0x2618 };
 static const u16 afn_pal_assetdir1[16] = { 0x0000, 0x0000, 0x18C6, 0x0253, 0x03FF, 0x035B, 0x2FFF, 0x01AE, 0x010B, 0x1593, 0x0045, 0x0012, 0x001F, 0x0018, 0x7FFF, 0x2618 };
 static const u16 afn_pal_assetdir2[16] = { 0x0000, 0x0000, 0x04FF, 0x2A7F, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
 static const u16 afn_pal_assetdir3[16] = { 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
 static const u16 afn_pal_assetdir4[16] = { 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
 static const u16 afn_pal_assetdir5[16] = { 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal_assetdir6[16] = { 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal_assetdir7[16] = { 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal_assetdir8[16] = { 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal_assetdir9[16] = { 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal_assetdir10[16] = { 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal_assetdir11[16] = { 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal_assetdir12[16] = { 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal_assetdir13[16] = { 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal_assetdir14[16] = { 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
+static const u16 afn_pal_assetdir15[16] = { 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000 };
 
 #define AFN_HAS_ASSET_DIRS 1
 #define AFN_MAX_DIR_SETS 12
@@ -9299,12 +9329,32 @@ static const int afn_asset_dir_desc[][6] = {
     { 0, 0, 0, 0, 0, 0 },
     { 0, 0, 0, 0, 0, 0 },
     { 0, 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 0 },
 };
 
 static const int afn_dir_set_offsets[][AFN_MAX_DIR_SETS] = {
     { 0, 4096, 8192, 12288, 16384, 20480, 24576, 28672, 32768, 36864, 40960, 45056 },
     { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
     { 53248, 57344, 61440, 65536, 69632, -1, -1, -1, -1, -1, -1, -1 },
+    { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+    { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
     { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
     { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
     { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
@@ -9318,11 +9368,31 @@ static const int afn_anim_desc[][AFN_MAX_ANIMS][3] = {
     { { 0, 1, 8 }, { 0, 0, 8 }, { 0, 0, 8 } },
     { { 0, 1, 8 }, { 0, 0, 8 }, { 0, 0, 8 } },
     { { 0, 1, 8 }, { 0, 0, 8 }, { 0, 0, 8 } },
+    { { 0, 1, 8 }, { 0, 0, 8 }, { 0, 0, 8 } },
+    { { 0, 1, 8 }, { 0, 0, 8 }, { 0, 0, 8 } },
+    { { 0, 1, 8 }, { 0, 0, 8 }, { 0, 0, 8 } },
+    { { 0, 1, 8 }, { 0, 0, 8 }, { 0, 0, 8 } },
+    { { 0, 1, 8 }, { 0, 0, 8 }, { 0, 0, 8 } },
+    { { 0, 1, 8 }, { 0, 0, 8 }, { 0, 0, 8 } },
+    { { 0, 1, 8 }, { 0, 0, 8 }, { 0, 0, 8 } },
+    { { 0, 1, 8 }, { 0, 0, 8 }, { 0, 0, 8 } },
+    { { 0, 1, 8 }, { 0, 0, 8 }, { 0, 0, 8 } },
+    { { 0, 1, 8 }, { 0, 0, 8 }, { 0, 0, 8 } },
 };
 
 #define AFN_STATE_COUNT 5
 static const int afn_state_to_anim[][AFN_STATE_COUNT] = {
     { -1, 0, 1, 1, 2 },
+    { 0, -1, -1, -1, -1 },
+    { 0, -1, -1, -1, -1 },
+    { 0, -1, -1, -1, -1 },
+    { 0, -1, -1, -1, -1 },
+    { 0, -1, -1, -1, -1 },
+    { 0, -1, -1, -1, -1 },
+    { 0, -1, -1, -1, -1 },
+    { 0, -1, -1, -1, -1 },
+    { 0, -1, -1, -1, -1 },
+    { 0, -1, -1, -1, -1 },
     { 0, -1, -1, -1, -1 },
     { 0, -1, -1, -1, -1 },
     { 0, -1, -1, -1, -1 },
@@ -9338,6 +9408,16 @@ static const int afn_asset_desc[][5] = {
     { 1537, 1, 16, 8, 3 },
     { 1537, 1, 16, 8, 4 },
     { 1537, 4, 4, 16, 5 },
+    { 1553, 1, 1, 8, 7 },
+    { 1554, 1, 1, 8, 8 },
+    { 1555, 1, 1, 8, 9 },
+    { 1556, 1, 1, 8, 10 },
+    { 1557, 1, 1, 8, 11 },
+    { 1558, 1, 1, 8, 12 },
+    { 1559, 1, 1, 8, 13 },
+    { 1560, 1, 1, 8, 14 },
+    { 1561, 1, 1, 8, 15 },
+    { 1562, 1, 1, 8, 1 },
 };
 
 #define AFN_SPRITE_COUNT 3
@@ -9676,8 +9756,8 @@ static const u16 afn_mesh2_qidx[40] = {
 
 static const int afn_mesh_desc[][17] = {
     { 20, 0, 40, 0x7C1F, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1 },
-    { 4, 0, 4, 0x7C1F, 0, 0, 0, 0, 1, 64, 6, 32, 0, 0, 12096, 0, 1 },
-    { 18, 0, 40, 0x7C1F, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1 },
+    { 4, 0, 4, 0x7C1F, 0, 0, 0, 0, 1, 64, 6, 32, 0, 0, 12096, 0, 0 },
+    { 18, 0, 40, 0x7C1F, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1 },
 };
 
 static const s16* const afn_mesh_vert_ptrs[] = { afn_mesh0_verts, afn_mesh1_verts, afn_mesh2_verts };
@@ -9821,6 +9901,11 @@ static u16   afn_sprite_tint[16];
 static u8    afn_sprite_shake[16];
 static int   afn_hud_value[4];
 static u8    afn_hud_visible[4];
+static int   afn_cursor_stop;
+static int   afn_stop_count;
+static int   afn_stop_links[8];
+static int   afn_elem_idx;
+static int   afn_active_element;
 static FIXED afn_patrol_home_x[16];
 static FIXED afn_patrol_home_z[16];
 static u16   afn_bg_color;
@@ -9884,8 +9969,8 @@ static inline void afn_script_collision2d(void) {}
 
 
 // ---- Blueprint script functions ----
-#define AFN_BP_COUNT 4
-#define AFN_BP_INSTANCE_COUNT 4
+#define AFN_BP_COUNT 5
+#define AFN_BP_INSTANCE_COUNT 6
 
 static inline void afn_bp0_move_4() {
     if (key_is_down(KEY_LEFT)) afn_input_right -= 256;
@@ -10068,71 +10153,160 @@ static inline void afn_bp3_collision2d() {
     afn_bp3_change_scene_1();
 }
 
+static inline void afn_bp4_cursor_up_17() {
+    if (afn_cursor_stop > 0) afn_cursor_stop--;
+    else afn_cursor_stop = afn_stop_count - 1;
+}
+static inline void afn_bp4_cursor_down_20() {
+    afn_cursor_stop++;
+    if (afn_cursor_stop >= afn_stop_count) afn_cursor_stop = 0;
+}
+static inline void afn_bp4_follow_link_23() {
+    { int link = afn_stop_links[afn_cursor_stop];
+      if (link >= 0) { afn_hud_visible[afn_elem_idx] = 0; afn_hud_visible[link] = 1; afn_active_element = link; } }
+}
+static inline void afn_bp4_show_hud_9() {
+    afn_hud_visible[0] = 1;
+    afn_elem_idx = 0;
+    afn_active_element = 0;
+    afn_cursor_stop = 0;
+#ifdef AFN_HUD_ELEM_COUNT
+    afn_stop_count = afn_hud_elems[0].stopCount;
+    { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[0].stopStart + si].link; }
+#endif
+}
+static inline void afn_bp4_freeze_10() {
+    afn_player_frozen = 1;
+}
+static inline void afn_bp4_set_flag_11() {
+    if (1) afn_flags |= (1u << 0);
+    else afn_flags &= ~(1u << 0);
+}
+static inline void afn_bp4_hide_hud_12() {
+    afn_hud_visible[0] = 0;
+}
+static inline void afn_bp4_unfreeze_13() {
+    afn_player_frozen = 0;
+}
+static inline void afn_bp4_set_flag_14() {
+    if (0) afn_flags |= (1u << 0);
+    else afn_flags &= ~(1u << 0);
+}
+static inline void afn_bp4_start() {
+}
+static inline void afn_bp4_key_held() {
+}
+static inline void afn_bp4_key_pressed() {
+  if (key_hit(KEY_START)) {
+    { static int afn_ff_8 = 0;
+      afn_ff_8 = !afn_ff_8;
+      if (afn_ff_8) {
+    afn_bp4_show_hud_9();
+    afn_bp4_freeze_10();
+    afn_bp4_set_flag_11();
+      } else {
+    afn_bp4_hide_hud_12();
+    afn_bp4_unfreeze_13();
+    afn_bp4_set_flag_14();
+      } }
+  }
+  if (key_hit(KEY_UP)) {
+    if (afn_flags & (1u << 0)) {
+    afn_bp4_cursor_up_17();
+    }
+  }
+  if (key_hit(KEY_DOWN)) {
+    if (afn_flags & (1u << 0)) {
+    afn_bp4_cursor_down_20();
+    }
+  }
+  if (key_hit(KEY_A)) {
+    if (afn_flags & (1u << 0)) {
+    afn_bp4_follow_link_23();
+    }
+  }
+}
+static inline void afn_bp4_key_released() {
+}
+static inline void afn_bp4_update() {
+}
+static inline void afn_bp4_collision() {
+}
+static inline void afn_bp4_collision2d() {
+}
+
 static const struct { int bpIdx; int sprIdx; int tmObjIdx; int sceneMode; int params[1]; }
-    afn_bp_instances[4] = {
+    afn_bp_instances[6] = {
     {1, 2, -1, 0, {0}},
     {2, -1, 0, 1, {0}},
     {3, -1, 3, 1, {0}},
     {0, -1, -1, 0, {0}},
+    {4, -1, -1, 0, {0}},
+    {4, -1, -1, 1, {0}},
 };
 
 static inline void afn_bp_dispatch_start(void) {
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 6; i++) {
     if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;
     switch (afn_bp_instances[i].bpIdx) {
     case 0: afn_bp0_start(); break;
     case 1: afn_bp1_start(); break;
     case 2: afn_bp2_start(); break;
     case 3: afn_bp3_start(); break;
+    case 4: afn_bp4_start(); break;
     }
   }
 }
 static inline void afn_bp_dispatch_key_held(void) {
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 6; i++) {
     if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;
     switch (afn_bp_instances[i].bpIdx) {
     case 0: afn_bp0_key_held(); break;
     case 1: afn_bp1_key_held(); break;
     case 2: afn_bp2_key_held(); break;
     case 3: afn_bp3_key_held(); break;
+    case 4: afn_bp4_key_held(); break;
     }
   }
 }
 static inline void afn_bp_dispatch_key_pressed(void) {
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 6; i++) {
     if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;
     switch (afn_bp_instances[i].bpIdx) {
     case 0: afn_bp0_key_pressed(); break;
     case 1: afn_bp1_key_pressed(); break;
     case 2: afn_bp2_key_pressed(); break;
     case 3: afn_bp3_key_pressed(); break;
+    case 4: afn_bp4_key_pressed(); break;
     }
   }
 }
 static inline void afn_bp_dispatch_key_released(void) {
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 6; i++) {
     if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;
     switch (afn_bp_instances[i].bpIdx) {
     case 0: afn_bp0_key_released(); break;
     case 1: afn_bp1_key_released(); break;
     case 2: afn_bp2_key_released(); break;
     case 3: afn_bp3_key_released(); break;
+    case 4: afn_bp4_key_released(); break;
     }
   }
 }
 static inline void afn_bp_dispatch_update(void) {
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 6; i++) {
     if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;
     switch (afn_bp_instances[i].bpIdx) {
     case 0: afn_bp0_update(); break;
     case 1: afn_bp1_update(); break;
     case 2: afn_bp2_update(); break;
     case 3: afn_bp3_update(); break;
+    case 4: afn_bp4_update(); break;
     }
   }
 }
 static inline void afn_bp_dispatch_collision(void) {
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 6; i++) {
     if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;
     if (afn_bp_instances[i].sprIdx != afn_collided_sprite) continue;
     switch (afn_bp_instances[i].bpIdx) {
@@ -10140,11 +10314,12 @@ static inline void afn_bp_dispatch_collision(void) {
     case 1: afn_bp1_collision(); break;
     case 2: afn_bp2_collision(); break;
     case 3: afn_bp3_collision(); break;
+    case 4: afn_bp4_collision(); break;
     }
   }
 }
 static inline void afn_bp_dispatch_collision2d(void) {
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < 6; i++) {
     if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;
     if (afn_bp_instances[i].tmObjIdx != afn_collided_tm_obj) continue;
     switch (afn_bp_instances[i].bpIdx) {
@@ -10152,6 +10327,7 @@ static inline void afn_bp_dispatch_collision2d(void) {
     case 1: afn_bp1_collision2d(); break;
     case 2: afn_bp2_collision2d(); break;
     case 3: afn_bp3_collision2d(); break;
+    case 4: afn_bp4_collision2d(); break;
     }
   }
 }
@@ -10332,8 +10508,74 @@ static const struct { s16 tx,ty; u8 type; s8 assetIdx; u8 camFollow; u8 collisio
 #define AFN_TM_PLAYER_OBJ 0
 #define AFN_TM_START_SCENE 0
 
+// ---- HUD Elements ----
+#define AFN_HUD_ELEM_COUNT 1
+static const struct { s16 x,y; u16 pieceStart,pieceCount,stopStart,stopCount,textStart,textCount; s8 curAsset,curFrame,curOffX,curOffY; } afn_hud_elems[1] = {
+    {76,50,0,50,0,2,0,2,6,0,0,-1},
+};
+static const struct { s8 asset; u8 frame; s16 x,y; u8 size; } afn_hud_pieces[50] = {
+    {7,0,64,-11,8},
+    {8,0,88,-11,8},
+    {8,0,80,-11,8},
+    {8,0,72,-11,8},
+    {9,0,144,-11,8},
+    {8,0,96,-11,8},
+    {8,0,104,-11,8},
+    {8,0,112,-11,8},
+    {8,0,120,-11,8},
+    {8,0,120,-11,8},
+    {8,0,128,-11,8},
+    {8,0,136,-11,8},
+    {10,0,64,-3,8},
+    {10,0,64,5,8},
+    {10,0,64,13,8},
+    {10,0,64,21,8},
+    {10,0,64,29,8},
+    {10,0,64,37,8},
+    {11,0,144,45,8},
+    {12,0,64,45,8},
+    {13,0,72,45,8},
+    {13,0,96,45,8},
+    {13,0,80,45,8},
+    {13,0,88,45,8},
+    {13,0,104,45,8},
+    {13,0,112,45,8},
+    {13,0,120,45,8},
+    {13,0,128,45,8},
+    {13,0,136,45,8},
+    {14,0,72,-3,16},
+    {14,0,72,13,16},
+    {14,0,72,29,16},
+    {14,0,88,-3,16},
+    {14,0,88,13,16},
+    {14,0,88,29,16},
+    {14,0,104,-3,16},
+    {14,0,104,13,16},
+    {14,0,104,29,16},
+    {14,0,120,-3,16},
+    {14,0,120,13,16},
+    {14,0,120,29,16},
+    {14,0,136,29,16},
+    {14,0,136,-3,16},
+    {14,0,136,13,16},
+    {15,0,144,29,8},
+    {15,0,144,37,8},
+    {15,0,144,-3,8},
+    {15,0,144,5,8},
+    {15,0,144,13,8},
+    {15,0,144,21,8},
+};
+static const struct { s16 x,y; s8 link; } afn_hud_stops[2] = {
+    {86,9,-1},
+    {86,28,-1},
+};
+static const struct { s16 x,y; u16 color; char text[32]; } afn_hud_texts[2] = {
+    {103,8,0x0,"Bag"},
+    {103,27,0x0,"Exit"},
+};
+
 // Runtime scene mode: 0=Mode4/3D, 1=Mode0/tilemap, 2=Mode1/Mode7
-#define AFN_START_MODE 0
+#define AFN_START_MODE 1
 #define AFN_HAS_MESHES 1
 
 #endif // MAPDATA_H

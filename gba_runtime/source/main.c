@@ -85,6 +85,8 @@ static int tm_move_frames = 8;          // frames per tile move (derived from af
 static int tm_cam_x, tm_cam_y;          // camera scroll in pixels
 static int tm_tile_size = 8;            // pixels per tile on screen
 static int tm_scene_idx;                // current scene
+static int tm_dir_adj = 0;              // tile ID adjustment for direction sprites (mesh offset only)
+static int tm_static_adj = 0;           // tile ID adjustment for static/HUD tiles
 static int tm_anim_idx;                 // current animation index (0=idle, 1=walk, ...)
 static int tm_anim_frame;               // current frame within animation
 static int tm_anim_timer;               // frame counter for animation timing
@@ -502,13 +504,25 @@ static void init_obj_sprites(void)
 #ifdef AFN_ASSET_COUNT
 #if AFN_ASSET_COUNT > 0
     // Copy static OBJ tile data into VRAM — placed AFTER direction tile space
-    // so direction DMA gets priority for the limited Mode 4 OBJ region.
+    // In Mode 4 (bitmap), tiles 0-511 overlap the framebuffer, so offset by 512.
+    // In Mode 0 (tilemap), place within 1024-tile VRAM bounds using tm_static_adj.
     {
         const u32 *src = afn_all_tiles;
+        // OBJ VRAM base = 0x06010000, each tile = 32 bytes
+        // tile_mem[4] only indexes 512 tiles; use raw pointer for tiles >= 512
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-        u32 *dst = (u32*)&tile_mem[4][512 + AFN_DIR_VRAM_TILES];
+        u32 *dst;
+        if (afn_current_mode == 1) {
+            // Mode 0: place static tiles right after direction tile space
+            int staticStart = AFN_DIR_VRAM_TILES - (tm_static_adj - 512);
+            if (staticStart < 0) staticStart = 0;
+            dst = (u32*)(0x06010000 + staticStart * 32);
+        } else {
+            // Mode 4: skip bitmap overlap region (512 tiles) + direction tiles
+            dst = (u32*)(0x06010000 + (512 + AFN_DIR_VRAM_TILES) * 32);
+        }
 #else
-        u32 *dst = (u32*)&tile_mem[4][AFN_DIR_VRAM_TILES];
+        u32 *dst = (u32*)(0x06010000 + AFN_DIR_VRAM_TILES * 32);
 #endif
         for (i = 0; i < (int)(AFN_ALL_TILES_LEN / 4); i++)
             dst[i] = src[i];
@@ -541,6 +555,30 @@ static void init_obj_sprites(void)
 #endif
 #if AFN_ASSET_COUNT > 7
             case 7: pal = afn_pal7; break;
+#endif
+#if AFN_ASSET_COUNT > 8
+            case 8: pal = afn_pal8; break;
+#endif
+#if AFN_ASSET_COUNT > 9
+            case 9: pal = afn_pal9; break;
+#endif
+#if AFN_ASSET_COUNT > 10
+            case 10: pal = afn_pal10; break;
+#endif
+#if AFN_ASSET_COUNT > 11
+            case 11: pal = afn_pal11; break;
+#endif
+#if AFN_ASSET_COUNT > 12
+            case 12: pal = afn_pal12; break;
+#endif
+#if AFN_ASSET_COUNT > 13
+            case 13: pal = afn_pal13; break;
+#endif
+#if AFN_ASSET_COUNT > 14
+            case 14: pal = afn_pal14; break;
+#endif
+#if AFN_ASSET_COUNT > 15
+            case 15: pal = afn_pal15; break;
 #endif
             default: break;
         }
@@ -727,7 +765,7 @@ static void switch_dir_anim_set(int assetIdx, int newSet)
     // Copy 8 directions * tpf tiles * 32 bytes/tile from ROM to VRAM
     int wordCount = 8 * tpf * 8; // 8 dirs * tpf tiles * 8 u32s per tile
     const u32 *src = &afn_dir_anim_tiles[romOffset];
-    u32 *dst = (u32*)&tile_mem[4][vramTile0];
+    u32 *dst = (u32*)(0x06010000 + (vramTile0 - tm_dir_adj) * 32);
 
     // Use DMA3 for fast ROM→VRAM copy (runs at ~2 cycles per word)
     DMA_TRANSFER(dst, src, wordCount, 3, DMA_NOW | DMA_32);
@@ -3458,6 +3496,23 @@ static void mode4_init_scene(void)
 static void mode0_init_scene(int tmIdx)
 {
     REG_DISPCNT = DCNT_MODE0 | DCNT_BG0 | DCNT_OBJ | DCNT_OBJ_1D;
+    // In Mode 0, OBJ tiles don't need bitmap offset — compute adjustments
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+    tm_dir_adj = 512; // direction tiles: just remove mesh offset
+    {
+        // Static tiles: place within VRAM bounds (1024 tiles max)
+        int staticTiles = AFN_ALL_TILES_LEN / 32;
+        int idealStart = AFN_DIR_VRAM_TILES;
+        if (idealStart + staticTiles > 1024) {
+            idealStart = 1024 - staticTiles;
+            if (idealStart < 0) idealStart = 0;
+        }
+        tm_static_adj = 512 + (AFN_DIR_VRAM_TILES - idealStart);
+    }
+#else
+    tm_dir_adj = 0;
+    tm_static_adj = 0;
+#endif
 
     // Currently only scene 0 data is statically accessible via AFN_TM0_* defines
     // (runtime multi-tilemap-scene requires data indirection — future work)
@@ -3473,7 +3528,7 @@ static void mode0_init_scene(int tmIdx)
 #else
         bgSizeFlag = BG_REG_32x32; sbbBase = 31;
 #endif
-        REG_BG0CNT = BG_CBB(0) | BG_SBB(sbbBase) | BG_4BPP | bgSizeFlag | BG_PRIO(0);
+        REG_BG0CNT = BG_CBB(0) | BG_SBB(sbbBase) | BG_4BPP | bgSizeFlag | BG_PRIO(2);
         REG_BG0HOFS = 0;
         REG_BG0VOFS = 0;
     }
@@ -3589,6 +3644,8 @@ static void scene_load(int sceneMode, int sceneIdx)
         mode0_init_scene(sceneIdx);
 #endif
     } else if (sceneMode == 0) {
+        tm_dir_adj = 0;
+        tm_static_adj = 0;
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
         mode4_init_scene();
 #else
@@ -4132,7 +4189,7 @@ int main(void)
                             else if (tm_move_dx < 0) facing = 6;  // left = W
                             else if (tm_move_dx > 0) facing = 2;  // right = E
                         }
-                        int tileCur = vramT0 + facing * tpf;
+                        int tileCur = vramT0 - tm_dir_adj + facing * tpf;
 
                         // Apply displayScale via OAM affine
                         // scale8 is 8.8 fixed: 256 = 1.0x
@@ -4164,7 +4221,7 @@ int main(void)
                         // Use ATTR0_AFF_DBL with affine matrix 0
                         u16 a0 = ATTR0_SQUARE | ATTR0_AFF_DBL | ((adjY & 0x1FF));
                         u16 a1 = size_to_attr1(dirSize) | ATTR1_AFF_ID(0) | ((adjX & 0x1FF));
-                        u16 a2 = ATTR2_PALBANK(palBank) | (tileCur & 0x3FF);
+                        u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(1) | (tileCur & 0x3FF);
                         obj_set_attr(&oam_mem[0], a0, a1, a2);
                     }
                     else
@@ -4191,10 +4248,10 @@ int main(void)
                         int tpf     = afn_asset_desc[playerAsset][1];
                         int objSz   = afn_asset_desc[playerAsset][3];
                         int palBank = afn_asset_desc[playerAsset][4];
-                        int tileCur = tileBase + curFrame * tpf;
+                        int tileCur = tileBase - tm_static_adj + curFrame * tpf;
                         u16 a0 = ATTR0_SQUARE | ((scrY & 0x1FF));
                         u16 a1 = size_to_attr1(objSz) | ((scrX & 0x1FF));
-                        u16 a2 = ATTR2_PALBANK(palBank) | (tileCur & 0x3FF);
+                        u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(1) | (tileCur & 0x3FF);
                         obj_set_attr(&oam_mem[0], a0, a1, a2);
                     }
                 }
@@ -4229,7 +4286,7 @@ int main(void)
                     int tpf      = afn_asset_desc[ai][1];
                     int objSz    = afn_asset_desc[ai][3];
                     int palBank  = afn_asset_desc[ai][4];
-                    int tileCur  = tileBase; // first frame
+                    int tileCur  = tileBase - tm_static_adj; // first frame
 
                     // Affine scaling — mirrors player direction path
                     int sc8 = (int)afn_tm0_objs[oi].scale8;
@@ -4248,10 +4305,79 @@ int main(void)
 
                     u16 a0 = ATTR0_SQUARE | ATTR0_AFF_DBL | ((adjY & 0x1FF));
                     u16 a1 = size_to_attr1(objSz) | ATTR1_AFF_ID(oamSlot) | ((adjX & 0x1FF));
-                    u16 a2 = ATTR2_PALBANK(palBank) | (tileCur & 0x3FF);
+                    u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(1) | (tileCur & 0x3FF);
                     obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
                     oamSlot++;
                 }
+#endif
+                // Draw HUD element pieces (screen-space OAM, no camera offset)
+#if defined(AFN_HUD_ELEM_COUNT) && AFN_HUD_ELEM_COUNT > 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+                { int anyHudVisible = 0;
+                { int ei2; for (ei2 = 0; ei2 < AFN_HUD_ELEM_COUNT; ei2++) if (afn_hud_visible[ei2]) anyHudVisible = 1; }
+                if (anyHudVisible) {
+                    // DMA all static tiles from ROM into end of OBJ VRAM (overwriting direction tiles that aren't needed while HUD is up)
+                    int staticTiles = AFN_ALL_TILES_LEN / 32;
+                    int vramStart = 1024 - staticTiles;
+                    if (vramStart < 0) vramStart = 0;
+                    {
+                        const u32 *tsrc = afn_all_tiles;
+                        u32 *tdst = (u32*)(0x06010000 + vramStart * 32);
+                        int w; for (w = 0; w < (int)(AFN_ALL_TILES_LEN / 4); w++) tdst[w] = tsrc[w];
+                    }
+                }
+                }
+                { int ei;
+                for (ei = 0; ei < AFN_HUD_ELEM_COUNT && oamSlot < 126; ei++) {
+                    if (!afn_hud_visible[ei]) continue;
+                    int ex = afn_hud_elems[ei].x;
+                    int ey = afn_hud_elems[ei].y;
+                    int pStart = afn_hud_elems[ei].pieceStart;
+                    int pCount = afn_hud_elems[ei].pieceCount;
+                    // Compute tile adjustment: assets store tileStart as (rawOff + 512 + DIR_VRAM_TILES)
+                    // We placed tiles at VRAM (1024 - staticTiles), so adjustment = 512 + DIR_VRAM_TILES - (1024 - staticTiles)
+                    int staticTiles2 = AFN_ALL_TILES_LEN / 32;
+                    int hudTileAdj = 512 + AFN_DIR_VRAM_TILES - (1024 - staticTiles2);
+                    int pi;
+                    for (pi = 0; pi < pCount && oamSlot < 126; pi++) {
+                        int ai = afn_hud_pieces[pStart + pi].asset;
+                        if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
+                        int fr = afn_hud_pieces[pStart + pi].frame;
+                        int sx = ex + afn_hud_pieces[pStart + pi].x;
+                        int sy = ey + afn_hud_pieces[pStart + pi].y;
+                        int tileBase = afn_asset_desc[ai][0];
+                        int tpf      = afn_asset_desc[ai][1];
+                        int objSz    = afn_asset_desc[ai][3];
+                        int palBank  = afn_asset_desc[ai][4];
+                        int tileCur  = tileBase - hudTileAdj + fr * tpf;
+
+                        u16 a0 = ATTR0_SQUARE | ((sy & 0xFF));
+                        u16 a1 = size_to_attr1(objSz) | ((sx & 0x1FF));
+                        u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
+                        obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
+                        oamSlot++;
+                    }
+                    // Draw cursor at active stop
+                    if (ei == afn_active_element && afn_hud_elems[ei].stopCount > 0 && afn_hud_elems[ei].curAsset >= 0 && oamSlot < 128) {
+                        int staticTiles3 = AFN_ALL_TILES_LEN / 32;
+                        int hudTileAdj2 = 512 + AFN_DIR_VRAM_TILES - (1024 - staticTiles3);
+                        int si2 = afn_hud_elems[ei].stopStart + afn_cursor_stop;
+                        int csx = ex + afn_hud_stops[si2].x + afn_hud_elems[ei].curOffX;
+                        int csy = ey + afn_hud_stops[si2].y + afn_hud_elems[ei].curOffY;
+                        int cai = afn_hud_elems[ei].curAsset;
+                        int cfr = afn_hud_elems[ei].curFrame;
+                        if (cai >= 0 && cai < AFN_ASSET_COUNT) {
+                            int ctb = afn_asset_desc[cai][0];
+                            int ctpf = afn_asset_desc[cai][1];
+                            int csz = afn_asset_desc[cai][3];
+                            int cpb = afn_asset_desc[cai][4];
+                            u16 ca0 = ATTR0_SQUARE | ((csy & 0xFF));
+                            u16 ca1 = size_to_attr1(csz) | ((csx & 0x1FF));
+                            u16 ca2 = ATTR2_PALBANK(cpb) | ATTR2_PRIO(0) | ((ctb - hudTileAdj2 + cfr * ctpf) & 0x3FF);
+                            obj_set_attr(&oam_mem[oamSlot], ca0, ca1, ca2);
+                            oamSlot++;
+                        }
+                    }
+                }}
 #endif
                 // Hide remaining OAM slots
                 {

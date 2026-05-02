@@ -330,6 +330,11 @@ enum class GBAScriptNodeType : int {
     OnAnyKey,
     GetLastKey,
     OnCollision2D,
+    IsTrue,
+    CursorUp,
+    CursorDown,
+    FollowLink,
+    GetCursorStop,
     COUNT
 };
 
@@ -405,6 +410,38 @@ struct GBATmSceneExport {
     int tileCount;                           // number of unique tiles
 };
 
+// ---- HUD Element Export ----
+
+struct GBAHudPieceExport {
+    int spriteAssetIdx;
+    int frame;
+    int localX, localY;
+    int size;   // 8, 16, 32, 64
+};
+
+struct GBAHudStopExport {
+    int localX, localY;
+    int linkedElement;  // -1 = none
+};
+
+struct GBAHudTextRowExport {
+    char text[32];
+    int localX, localY;
+    uint16_t colorRGB15;
+};
+
+struct GBAHudElementExport {
+    int screenX, screenY;
+    bool visible;
+    int runtimeMode;     // 0=Both, 1=Mode4, 2=Mode0
+    std::vector<GBAHudPieceExport> pieces;
+    std::vector<GBAHudStopExport> stops;
+    std::vector<GBAHudTextRowExport> textRows;
+    int cursorAssetIdx;
+    int cursorFrame;
+    int cursorOffX, cursorOffY;
+};
+
 // Package the current map into a .gba ROM.
 // runtimeDir: path to gba_runtime/ directory
 // outputPath: where to write the final .gba
@@ -420,6 +457,7 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBABlueprintExport>& blueprints,
                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
                 const std::vector<GBATmSceneExport>& tmScenes,
+                const std::vector<GBAHudElementExport>& hudElements,
                 int startMode,
                 std::string& errorMsg);
 
