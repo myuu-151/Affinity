@@ -862,6 +862,7 @@ struct HudElement {
     bool visible = true;
     int layer = 0;           // draw order (higher = on top)
     int blueprintIdx = -1;   // blueprint instance (-1 = none)
+    int runtimeMode = 0;     // 0=Both, 1=Mode 4 Only, 2=Mode 0 Only
     // Composite pieces
     std::vector<HudPiece> pieces;
     int selectedPiece = -1;  // currently selected piece index (editor only)
@@ -1995,6 +1996,8 @@ static bool SaveProject(const std::string& path)
         for (auto& si : el.spriteItems)
             fprintf(f, "elemSprite=%d|%d|%d|%d|%d|%.2f\n", si.spriteAssetIdx, si.frame, si.localX, si.localY, si.size, si.scale);
         fprintf(f, "elemBp=%d\n", el.blueprintIdx);
+        if (el.runtimeMode != 0)
+            fprintf(f, "elemMode=%d\n", el.runtimeMode);
     }
     fprintf(f, "\n");
 
@@ -2900,6 +2903,9 @@ static bool LoadProject(const std::string& path)
             }
             else if (sscanf(line, "elemBp=%d", &ival) == 1 && !sHudElements.empty()) {
                 sHudElements.back().blueprintIdx = ival;
+            }
+            else if (sscanf(line, "elemMode=%d", &ival) == 1 && !sHudElements.empty()) {
+                sHudElements.back().runtimeMode = ival;
             }
         }
         else if (strcmp(section, "Palette") == 0)
@@ -15699,6 +15705,7 @@ void FrameTick(float dt)
                         fprintf(cf, "elemSprite=%d|%d\n", el.spriteAssetIdx, el.spriteFrame);
                         fprintf(cf, "elemVisible=%d\n", el.visible ? 1 : 0);
                         fprintf(cf, "elemBp=%d\n", el.blueprintIdx);
+                        fprintf(cf, "elemMode=%d\n", el.runtimeMode);
                         // Pieces
                         fprintf(cf, "elemPieceCount=%d\n", (int)el.pieces.size());
                         for (auto& pc : el.pieces)
@@ -15839,6 +15846,7 @@ void FrameTick(float dt)
                             }
                             else if (sscanf(line, "elemVisible=%d", &ival2) == 1) nel.visible = ival2 != 0;
                             else if (sscanf(line, "elemBp=%d", &nel.blueprintIdx) == 1) {}
+                            else if (sscanf(line, "elemMode=%d", &nel.runtimeMode) == 1) {}
                             else if (sscanf(line, "elemPieceCount=%d", &ival2) == 1) {
                                 nel.pieces.clear(); nel.pieces.reserve(ival2);
                             }
@@ -15941,6 +15949,13 @@ void FrameTick(float dt)
                         }
                         ImGui::EndCombo();
                     }
+                }
+
+                // Runtime mode
+                {
+                    static const char* modeNames[] = { "Both", "Mode 4 Only", "Mode 0 Only" };
+                    if (ImGui::Combo("Runtime Mode", &el.runtimeMode, modeNames, 3))
+                        sProjectDirty = true;
                 }
 
                 // ============ BACKGROUND ============
