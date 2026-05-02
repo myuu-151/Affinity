@@ -817,9 +817,19 @@ struct HudPiece {
     int size = 16;           // POT size: 8, 16, 32, or 64
 };
 
+struct StopModifier {
+    int targetSpriteIdx = -1;    // which sprite item to affect (-1 = none)
+    int offsetX = 0, offsetY = 0; // position offset when this stop is active
+    float scale = 1.0f;          // scale multiplier (1.0 = no change)
+    float rotation = 0.0f;       // rotation in degrees
+};
+static constexpr int kMaxStopModifiers = 4;
+
 struct HudCursorStop {
     int localX = 0, localY = 0;  // position within the element
     int linkedElement = -1;      // index into sHudElements (-1 = none)
+    StopModifier modifiers[kMaxStopModifiers] = {};
+    int modifierCount = 0;
 };
 
 struct HudElement {
@@ -1962,8 +1972,13 @@ static bool SaveProject(const std::string& path)
         for (auto& pc : el.pieces)
             fprintf(f, "elemPiece=%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size);
         fprintf(f, "elemStopCount=%d\n", (int)el.stops.size());
-        for (auto& st : el.stops)
+        for (auto& st : el.stops) {
             fprintf(f, "elemStop=%d|%d|%d\n", st.localX, st.localY, st.linkedElement);
+            for (int mi = 0; mi < st.modifierCount && mi < kMaxStopModifiers; mi++)
+                fprintf(f, "elemStopMod=%d|%d|%d|%f|%f\n", st.modifiers[mi].targetSpriteIdx,
+                    st.modifiers[mi].offsetX, st.modifiers[mi].offsetY,
+                    st.modifiers[mi].scale, st.modifiers[mi].rotation);
+        }
         fprintf(f, "elemCursor=%d|%d|%d|%d\n", el.cursorAssetIdx, el.cursorFrame, el.cursorOffX, el.cursorOffY);
         fprintf(f, "elemTextCount=%d\n", (int)el.textRows.size());
         for (auto& tr : el.textRows)
@@ -2832,6 +2847,15 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "elemStopCount=%d", &ival) == 1 && !sHudElements.empty()) {
                 sHudElements.back().stops.clear();
                 sHudElements.back().stops.reserve(ival);
+            }
+            else if (strncmp(line, "elemStopMod=", 12) == 0 && !sHudElements.empty() && !sHudElements.back().stops.empty()) {
+                auto& st = sHudElements.back().stops.back();
+                if (st.modifierCount < kMaxStopModifiers) {
+                    auto& mod = st.modifiers[st.modifierCount];
+                    if (sscanf(line + 12, "%d|%d|%d|%f|%f", &mod.targetSpriteIdx,
+                        &mod.offsetX, &mod.offsetY, &mod.scale, &mod.rotation) >= 5)
+                        st.modifierCount++;
+                }
             }
             else if (strncmp(line, "elemStop=", 9) == 0 && !sHudElements.empty()) {
                 HudCursorStop st;
@@ -15159,12 +15183,31 @@ void FrameTick(float dt)
                     dl->AddRect(ImVec2(px, py), ImVec2(px + psz, py + psz), outlineCol);
                 }
 
-                // Draw sprite overlay items
+                // Collect active stop modifiers for sprite items
+                int activeStopIdx = (el.selectedStop >= 0 && el.selectedStop < (int)el.stops.size())
+                    ? el.selectedStop : (!el.stops.empty() ? 0 : -1);
+
+                // Draw sprite overlay items (with stop modifier offsets applied)
                 for (int si = 0; si < (int)el.spriteItems.size(); si++) {
                     auto& item = el.spriteItems[si];
-                    float ix = cx + (el.x + item.localX) * zoom;
-                    float iy = cy + (el.y + item.localY) * zoom;
-                    float isz = item.size * item.scale * zoom;
+                    float modOX = 0, modOY = 0;
+                    float modScale = 1.0f;
+                    // Apply modifier from active stop if it targets this sprite
+                    if (activeStopIdx >= 0) {
+                        auto& st = el.stops[activeStopIdx];
+                        for (int mi = 0; mi < st.modifierCount && mi < kMaxStopModifiers; mi++) {
+                            if (st.modifiers[mi].targetSpriteIdx == si) {
+                                modOX = (float)st.modifiers[mi].offsetX;
+                                modOY = (float)st.modifiers[mi].offsetY;
+                                modScale = st.modifiers[mi].scale;
+                                break;
+                            }
+                        }
+                    }
+                    float finalScale = item.scale * modScale;
+                    float ix = cx + (el.x + item.localX + modOX) * zoom;
+                    float iy = cy + (el.y + item.localY + modOY) * zoom;
+                    float isz = item.size * finalScale * zoom;
                     if (item.spriteAssetIdx >= 0 && item.spriteAssetIdx < (int)sTmSpriteTextures.size() &&
                         sTmSpriteTextures[item.spriteAssetIdx]) {
                         dl->AddImage((ImTextureID)(intptr_t)sTmSpriteTextures[item.spriteAssetIdx],
@@ -15931,6 +15974,55 @@ void FrameTick(float dt)
                                 }
                             }
                             ImGui::EndCombo();
+                        }
+
+                        // Stop modifiers (affect sprite items when cursor is at this stop)
+                        ImGui::Spacing();
+                        ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.0f, 1.0f), "Modifiers");
+                        ImGui::SameLine();
+                        if (st.modifierCount < kMaxStopModifiers && ImGui::SmallButton("+##addmod")) {
+                            st.modifiers[st.modifierCount] = StopModifier{};
+                            st.modifierCount++;
+                            sProjectDirty = true;
+                        }
+                        for (int mi = 0; mi < st.modifierCount; mi++) {
+                            ImGui::PushID(5000 + mi);
+                            auto& mod = st.modifiers[mi];
+                            // Target sprite dropdown
+                            const char* tgtName = (mod.targetSpriteIdx >= 0 && mod.targetSpriteIdx < (int)el.spriteItems.size())
+                                ? "(sprite)" : "(none)";
+                            char tgtLbl[32];
+                            if (mod.targetSpriteIdx >= 0 && mod.targetSpriteIdx < (int)el.spriteItems.size())
+                                snprintf(tgtLbl, sizeof(tgtLbl), "Sprite %d", mod.targetSpriteIdx);
+                            else
+                                snprintf(tgtLbl, sizeof(tgtLbl), "(none)");
+                            if (ImGui::BeginCombo("Target##mod", tgtLbl)) {
+                                if (ImGui::Selectable("(none)##mod", mod.targetSpriteIdx < 0)) {
+                                    mod.targetSpriteIdx = -1; sProjectDirty = true;
+                                }
+                                for (int si2 = 0; si2 < (int)el.spriteItems.size(); si2++) {
+                                    char sl2[32];
+                                    snprintf(sl2, sizeof(sl2), "Sprite %d##mod%d", si2, si2);
+                                    if (ImGui::Selectable(sl2, si2 == mod.targetSpriteIdx)) {
+                                        mod.targetSpriteIdx = si2; sProjectDirty = true;
+                                    }
+                                }
+                                ImGui::EndCombo();
+                            }
+                            if (ImGui::DragInt("Offset X##mod", &mod.offsetX, 1)) sProjectDirty = true;
+                            if (ImGui::DragInt("Offset Y##mod", &mod.offsetY, 1)) sProjectDirty = true;
+                            if (ImGui::DragFloat("Scale##mod", &mod.scale, 0.05f, 0.1f, 4.0f, "%.2f")) sProjectDirty = true;
+                            if (ImGui::DragFloat("Rotation##mod", &mod.rotation, 1.0f, -360.0f, 360.0f, "%.0f")) sProjectDirty = true;
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("-##delmod")) {
+                                for (int j = mi; j < st.modifierCount - 1; j++)
+                                    st.modifiers[j] = st.modifiers[j + 1];
+                                st.modifierCount--;
+                                sProjectDirty = true;
+                                ImGui::PopID(); break;
+                            }
+                            ImGui::Separator();
+                            ImGui::PopID();
                         }
                     }
                 }
