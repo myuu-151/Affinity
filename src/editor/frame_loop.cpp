@@ -423,6 +423,10 @@ enum class VsNodeType : int {
     GetLastKey,     // read last key pressed (data node)
     OnCollision2D,  // event: fires when player collides with tilemap object (Mode 0)
     IsTrue,         // gate: passes exec if data input is non-zero
+    CursorUp,       // move element cursor to previous stop (wraps)
+    CursorDown,     // move element cursor to next stop (wraps)
+    FollowLink,     // navigate to linked element at current cursor stop
+    GetCursorStop,  // data: returns current cursor stop index
     COUNT
 };
 
@@ -697,6 +701,10 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Get Last Key",   0xFF666688, 0, 0, 0, 1, {}, {"Key"}, {} },
     { "On Collision 2D", 0xFF338833, 0, 1, 0, 0, {}, {}, {} },
     { "Is True",        0xFF885533, 1, 1, 1, 0, {"Value (int)"}, {}, {} },
+    { "Cursor Up",      0xFF8855AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Cursor Down",    0xFF8855AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Follow Link",    0xFF8855AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Get Cursor Stop",0xFF666688, 0, 0, 0, 1, {}, {"Stop"}, {} },
 };
 
 struct VsNode {
@@ -10965,6 +10973,10 @@ void FrameTick(float dt)
                 case VsNodeType::GetLastKey:    desc = "Outputs the key code of the last button pressed."; break;
                 case VsNodeType::OnCollision2D: desc = "Event: fires when the player collides with this object in Mode 0 (tilemap)."; break;
                 case VsNodeType::IsTrue:        desc = "Gate: only passes execution through if the data input is non-zero (true)."; break;
+                case VsNodeType::CursorUp:      desc = "Moves the element's cursor to the previous stop (wraps to last)."; break;
+                case VsNodeType::CursorDown:    desc = "Moves the element's cursor to the next stop (wraps to first)."; break;
+                case VsNodeType::FollowLink:    desc = "Navigates to the linked element at the current cursor stop."; break;
+                case VsNodeType::GetCursorStop: desc = "Returns the current cursor stop index (0-based)."; break;
                 case VsNodeType::Integer:       desc = "Outputs a constant integer value."; break;
                 case VsNodeType::Key:           desc = "Outputs a key constant (A, B, L, R, etc)."; break;
                 case VsNodeType::Direction:     desc = "Outputs a direction (Left, Right, Up, Down)."; break;
@@ -11229,6 +11241,9 @@ void FrameTick(float dt)
                         case VsNodeType::SetCheckpoint: return "_set_checkpoint";
                         case VsNodeType::LoadCheckpoint:return "_load_checkpoint";
                         case VsNodeType::IsTrue:        return "_is_true";
+                        case VsNodeType::CursorUp:      return "_cursor_up";
+                        case VsNodeType::CursorDown:    return "_cursor_down";
+                        case VsNodeType::FollowLink:    return "_follow_link";
                         default: return "";
                         }
                     };
@@ -12353,6 +12368,30 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_is_true",
                         "    if ($0) {\n"
                         "        /* downstream */\n"
+                        "    }");
+                    break;
+                case VsNodeType::CursorUp:
+                    editorCode = "// Move cursor to previous stop (wraps)";
+                    setActionFunc(infoNode, "_cursor_up",
+                        "    if (afn_cursor_stop > 0) afn_cursor_stop--;\n"
+                        "    else afn_cursor_stop = afn_stop_count - 1;\n"
+                        "    afn_apply_stop_modifiers(afn_cursor_stop);");
+                    break;
+                case VsNodeType::CursorDown:
+                    editorCode = "// Move cursor to next stop (wraps)";
+                    setActionFunc(infoNode, "_cursor_down",
+                        "    afn_cursor_stop++;\n"
+                        "    if (afn_cursor_stop >= afn_stop_count) afn_cursor_stop = 0;\n"
+                        "    afn_apply_stop_modifiers(afn_cursor_stop);");
+                    break;
+                case VsNodeType::FollowLink:
+                    editorCode = "// Navigate to linked element at current stop";
+                    setActionFunc(infoNode, "_follow_link",
+                        "    int link = afn_stop_links[afn_cursor_stop];\n"
+                        "    if (link >= 0) {\n"
+                        "        afn_hud_visible[afn_elem_idx] = 0;\n"
+                        "        afn_hud_visible[link] = 1;\n"
+                        "        afn_active_element = link;\n"
                         "    }");
                     break;
                 // Timers/counters
@@ -14114,6 +14153,10 @@ void FrameTick(float dt)
                     case VsNodeType::OnAnyKey:      suffix = "_on_any_key"; break;
                     case VsNodeType::GetLastKey:    suffix = "_get_last_key"; break;
                     case VsNodeType::IsTrue:        suffix = "_is_true"; break;
+                    case VsNodeType::CursorUp:      suffix = "_cursor_up"; break;
+                    case VsNodeType::CursorDown:    suffix = "_cursor_down"; break;
+                    case VsNodeType::FollowLink:    suffix = "_follow_link"; break;
+                    case VsNodeType::GetCursorStop: suffix = "_get_cursor_stop"; break;
                     default: suffix = ""; break;
                     }
                     // Show default name as placeholder (action nodes include node ID to disambiguate)
@@ -14511,6 +14554,9 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetText].name)) addNodeAt(VsNodeType::SetText);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ShowHUD].name)) addNodeAt(VsNodeType::ShowHUD);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HideHUD].name)) addNodeAt(VsNodeType::HideHUD);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CursorUp].name)) addNodeAt(VsNodeType::CursorUp);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CursorDown].name)) addNodeAt(VsNodeType::CursorDown);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FollowLink].name)) addNodeAt(VsNodeType::FollowLink);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ArraySet].name)) addNodeAt(VsNodeType::ArraySet);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::DrawNumber].name)) addNodeAt(VsNodeType::DrawNumber);
@@ -14651,6 +14697,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetScene].name)) addNodeAt(VsNodeType::GetScene);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetInputAxis].name)) addNodeAt(VsNodeType::GetInputAxis);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetLastKey].name)) addNodeAt(VsNodeType::GetLastKey);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetCursorStop].name)) addNodeAt(VsNodeType::GetCursorStop);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CustomCode].name)) addNodeAt(VsNodeType::CustomCode);
                     ImGui::PopStyleColor();
