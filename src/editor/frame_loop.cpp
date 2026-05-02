@@ -15106,8 +15106,9 @@ void FrameTick(float dt)
                 }
             }
 
-            // Draw HUD elements
+            // Draw only the selected element on canvas
             for (int i = 0; i < (int)sHudElements.size(); i++) {
+                if (i != sHudSelectedIdx) continue;
                 auto& el = sHudElements[i];
                 if (!el.visible) continue;
                 float ex = cx + el.x * zoom;
@@ -15277,8 +15278,9 @@ void FrameTick(float dt)
                 sHudBoxSelecting = false;
                 bool clickedPiece = false;
 
-                // First check if clicking on a piece within any element
-                for (int i = (int)sHudElements.size() - 1; i >= 0; i--) {
+                // Check if clicking on a piece within the selected element
+                if (sHudSelectedIdx >= 0 && sHudSelectedIdx < (int)sHudElements.size()) {
+                    int i = sHudSelectedIdx;
                     auto& el = sHudElements[i];
                     for (int pi = (int)el.pieces.size() - 1; pi >= 0; pi--) {
                         auto& pc = el.pieces[pi];
@@ -15287,12 +15289,11 @@ void FrameTick(float dt)
                         float psz = pc.size * zoom;
                         if (mouse.x >= px && mouse.x <= px + psz &&
                             mouse.y >= py && mouse.y <= py + psz) {
-                            sHudSelectedIdx = i;
                             el.selectedPiece = pi;
                             sHudPieceDragAccX = 0;
                             sHudPieceDragAccY = 0;
                             // If this piece is already multi-selected, drag all selected
-                            if (i == sHudSelectedIdx && pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi]) {
+                            if (pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi]) {
                                 sHudDragPiece = -2; // -2 = drag multi-selection
                             } else {
                                 sHudDragPiece = pi;
@@ -15304,23 +15305,10 @@ void FrameTick(float dt)
                             break;
                         }
                     }
-                    if (clickedPiece) break;
-                    // Check element bounds (for elements without pieces)
-                    float ex2 = cx + el.x * zoom;
-                    float ey2 = cy + el.y * zoom;
-                    float ew2 = el.w * zoom;
-                    float eh2 = el.h * zoom;
-                    if (mouse.x >= ex2 && mouse.x <= ex2 + ew2 &&
-                        mouse.y >= ey2 && mouse.y <= ey2 + eh2) {
-                        sHudSelectedIdx = i;
-                        clickedPiece = true;
-                        break;
-                    }
                 }
 
                 if (!clickedPiece) {
-                    // Start box selection
-                    sHudSelectedIdx = -1;
+                    // Start box selection (keep current element selected)
                     sHudBoxSelecting = true;
                     sHudBoxSelStart = mouse;
                     sHudPieceSelected.clear();
