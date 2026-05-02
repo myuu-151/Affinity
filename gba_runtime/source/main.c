@@ -4146,9 +4146,17 @@ int main(void)
             // Animation + rendering
 #if AFN_TM_PLAYER_OBJ >= 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
             {
+                // Hide player when HUD is visible (HUD DMA overwrites direction tile VRAM)
+                int hidePlayer = 0;
+#if defined(AFN_HUD_ELEM_COUNT) && AFN_HUD_ELEM_COUNT > 0
+                { int ei2; for (ei2 = 0; ei2 < AFN_HUD_ELEM_COUNT; ei2++) if (afn_hud_visible[ei2]) hidePlayer = 1; }
+#endif
                 int playerAsset = afn_tm0_objs[AFN_TM_PLAYER_OBJ].assetIdx;
 
-                if (playerAsset >= 0 && playerAsset < AFN_ASSET_COUNT)
+                if (hidePlayer) {
+                    obj_hide(&oam_mem[0]);
+                }
+                else if (playerAsset >= 0 && playerAsset < AFN_ASSET_COUNT)
                 {
                     int scrX = px - tm_cam_x;
                     int scrY = py - tm_cam_y;
@@ -4264,9 +4272,16 @@ int main(void)
             // Draw non-player tilemap objects as OAM sprites
             {
                 int oamSlot = 1;
+#if defined(AFN_HUD_ELEM_COUNT) && AFN_HUD_ELEM_COUNT > 0
+                // Check if any HUD is visible — skip world objects to avoid VRAM tile conflicts
+                int anyHudUp = 0;
+                { int ei2; for (ei2 = 0; ei2 < AFN_HUD_ELEM_COUNT; ei2++) if (afn_hud_visible[ei2]) anyHudUp = 1; }
+#else
+                int anyHudUp = 0;
+#endif
 #if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
                 int oi;
-                for (oi = 0; oi < AFN_TM0_OBJ_COUNT && oamSlot < 128; oi++) {
+                for (oi = 0; oi < AFN_TM0_OBJ_COUNT && oamSlot < 128 && !anyHudUp; oi++) {
                     if (oi == AFN_TM_PLAYER_OBJ) continue;
                     if (afn_tm0_objs[oi].type == 6) continue; // skip Tile objects
                     int ai = afn_tm0_objs[oi].assetIdx;
@@ -4338,7 +4353,9 @@ int main(void)
                     int staticTiles2 = AFN_ALL_TILES_LEN / 32;
                     int hudTileAdj = 512 + AFN_DIR_VRAM_TILES - (1024 - staticTiles2);
                     int pi;
-                    for (pi = 0; pi < pCount && oamSlot < 126; pi++) {
+                    // Render pieces in reverse order: editor draws 0→N (back to front),
+                    // but GBA OAM lower slots render on top, so iterate N→0
+                    for (pi = pCount - 1; pi >= 0 && oamSlot < 126; pi--) {
                         int ai = afn_hud_pieces[pStart + pi].asset;
                         if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
                         int fr = afn_hud_pieces[pStart + pi].frame;

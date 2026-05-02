@@ -10514,9 +10514,9 @@ static const struct { s16 tx,ty; u8 type; s8 assetIdx; u8 camFollow; u8 collisio
 // ---- HUD Elements ----
 #define AFN_HUD_ELEM_COUNT 1
 static const struct { s16 x,y; u16 pieceStart,pieceCount,stopStart,stopCount,textStart,textCount; s8 curAsset,curFrame,curOffX,curOffY; } afn_hud_elems[1] = {
-    {76,50,0,50,0,2,0,2,6,0,0,-1},
+    {76,50,0,53,0,2,0,2,6,0,0,-1},
 };
-static const struct { s8 asset; u8 frame; s16 x,y; u8 size; } afn_hud_pieces[50] = {
+static const struct { s8 asset; u8 frame; s16 x,y; u8 size; } afn_hud_pieces[53] = {
     {7,0,64,-11,8},
     {8,0,88,-11,8},
     {8,0,80,-11,8},
@@ -10535,7 +10535,6 @@ static const struct { s8 asset; u8 frame; s16 x,y; u8 size; } afn_hud_pieces[50]
     {10,0,64,21,8},
     {10,0,64,29,8},
     {10,0,64,37,8},
-    {11,0,144,45,8},
     {12,0,64,45,8},
     {13,0,72,45,8},
     {13,0,96,45,8},
@@ -10545,7 +10544,6 @@ static const struct { s8 asset; u8 frame; s16 x,y; u8 size; } afn_hud_pieces[50]
     {13,0,112,45,8},
     {13,0,120,45,8},
     {13,0,128,45,8},
-    {13,0,136,45,8},
     {14,0,72,-3,16},
     {14,0,72,13,16},
     {14,0,72,29,16},
@@ -10555,18 +10553,23 @@ static const struct { s8 asset; u8 frame; s16 x,y; u8 size; } afn_hud_pieces[50]
     {14,0,104,-3,16},
     {14,0,104,13,16},
     {14,0,104,29,16},
-    {14,0,120,-3,16},
     {14,0,120,13,16},
+    {14,0,136,-3,8},
+    {14,0,136,13,8},
+    {14,0,120,-3,16},
+    {14,0,136,5,8},
+    {14,0,136,29,8},
+    {14,0,136,21,8},
+    {14,0,136,37,8},
     {14,0,120,29,16},
-    {14,0,136,29,16},
-    {14,0,136,-3,16},
-    {14,0,136,13,16},
+    {15,0,144,13,8},
+    {15,0,144,21,8},
     {15,0,144,29,8},
     {15,0,144,37,8},
     {15,0,144,-3,8},
     {15,0,144,5,8},
-    {15,0,144,13,8},
-    {15,0,144,21,8},
+    {13,0,136,45,8},
+    {11,0,144,45,8},
 };
 static const struct { s16 x,y; s8 link; } afn_hud_stops[2] = {
     {86,9,-1},
