@@ -82,6 +82,8 @@ static int tm_player_tx, tm_player_ty;  // player grid position
 static int tm_move_dx, tm_move_dy;      // current move direction (-1,0,1)
 static int tm_move_timer;               // frames remaining in current move
 static int tm_move_frames = 8;          // frames per tile move (derived from afn_move_speed)
+static int tm_turn_timer = 0;          // frames since direction key pressed (turn-in-place delay)
+static int tm_turn_facing = -1;        // direction key being held (-1 = none)
 static int tm_cam_x, tm_cam_y;          // camera scroll in pixels
 static int tm_tile_size = 8;            // pixels per tile on screen
 static int tm_scene_idx;                // current scene
@@ -89,7 +91,7 @@ static int tm_dir_adj = 0;              // tile ID adjustment for direction spri
 static int tm_static_adj = 0;           // tile ID adjustment for static/HUD tiles
 static int tm_hud_was_visible = 0;      // track HUD visibility for direction tile restore
 static int tm_dir_needs_reload = 0;     // force direction tile re-DMA after first VBlank
-static int tm_player_facing = 4; // persist last facing direction (default South)
+// tm_player_facing is declared in mapdata.h (set by MovePlayer node)
 // Saved player OAM attributes for layer-sorted rendering
 static u16 tm_player_a0, tm_player_a1, tm_player_a2;
 static s16 tm_player_pa;
@@ -4155,42 +4157,64 @@ int main(void)
             {
                 // Accept new input
                 int dx = 0, dy = 0;
-                if (key_is_down(KEY_LEFT))  dx = -1;
-                else if (key_is_down(KEY_RIGHT)) dx = 1;
-                else if (key_is_down(KEY_UP))    dy = -1;
-                else if (key_is_down(KEY_DOWN))  dy = 1;
+                int newFacing = -1;
+                if (key_is_down(KEY_LEFT))       { dx = -1; newFacing = 6; }
+                else if (key_is_down(KEY_RIGHT)) { dx = 1;  newFacing = 2; }
+                else if (key_is_down(KEY_UP))    { dy = -1; newFacing = 0; }
+                else if (key_is_down(KEY_DOWN))  { dy = 1;  newFacing = 4; }
 
-                if (dx != 0 || dy != 0)
+                if (newFacing >= 0)
                 {
-                    int nx = tm_player_tx + dx;
-                    int ny = tm_player_ty + dy;
-                    // Bounds check
-                    if (nx >= 0 && nx < AFN_TM0_W && ny >= 0 && ny < AFN_TM0_H)
+                    // Turn-in-place: tap to turn, hold to walk (like Pokémon)
+                    if (newFacing != tm_turn_facing) {
+                        // New direction — set facing immediately, reset hold timer
+                        int wasFacing = tm_player_facing;
+                        tm_turn_facing = newFacing;
+                        tm_player_facing = newFacing;
+                        // If already facing this way, no turn delay needed
+                        tm_turn_timer = (newFacing == wasFacing) ? 6 : 0;
+                    }
+                    tm_turn_timer++;
+
+                    // Move only after holding past turn delay (~6 frames = 0.1s)
+                    if (tm_turn_timer > 6)
                     {
-                        // Object collision check (respects displayScale cell size)
-                        int blocked = 0;
+                        int nx = tm_player_tx + dx;
+                        int ny = tm_player_ty + dy;
+                        // Bounds check
+                        if (nx >= 0 && nx < AFN_TM0_W && ny >= 0 && ny < AFN_TM0_H)
+                        {
+                            // Object collision check (respects displayScale cell size)
+                            int blocked = 0;
 #if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0
-                        { int ci; for (ci = 0; ci < AFN_TM0_OBJ_COUNT; ci++) {
-                            if (!afn_tm0_objs[ci].collision) continue;
-                            int sc = afn_tm0_objs[ci].scale8;
-                            if (sc < 256) sc = 256;
-                            int cells = sc >> 8;
-                            if (cells < 1) cells = 1;
-                            int ox = afn_tm0_objs[ci].tx;
-                            int oy = afn_tm0_objs[ci].ty;
-                            int ddx = nx - ox; if (ddx < 0) ddx = -ddx;
-                            int ddy = ny - oy; if (ddy < 0) ddy = -ddy;
-                            if (ddx < cells && ddy < cells) {
-                                blocked = 1; break;
-                            }
-                        }}
+                            { int ci; for (ci = 0; ci < AFN_TM0_OBJ_COUNT; ci++) {
+                                if (!afn_tm0_objs[ci].collision) continue;
+                                int sc = afn_tm0_objs[ci].scale8;
+                                if (sc < 256) sc = 256;
+                                int cells = sc >> 8;
+                                if (cells < 1) cells = 1;
+                                int ox = afn_tm0_objs[ci].tx;
+                                int oy = afn_tm0_objs[ci].ty;
+                                int ddx = nx - ox; if (ddx < 0) ddx = -ddx;
+                                int ddy = ny - oy; if (ddy < 0) ddy = -ddy;
+                                if (ddx < cells && ddy < cells) {
+                                    blocked = 1; break;
+                                }
+                            }}
 #endif
-                        if (!blocked) {
-                            tm_move_dx = dx;
-                            tm_move_dy = dy;
-                            tm_move_timer = tm_move_frames;
+                            if (!blocked) {
+                                tm_move_dx = dx;
+                                tm_move_dy = dy;
+                                tm_move_timer = tm_move_frames;
+                            }
                         }
                     }
+                }
+                else
+                {
+                    // No direction key held — reset turn state
+                    tm_turn_timer = 0;
+                    tm_turn_facing = -1;
                 }
             }
 
@@ -4328,13 +4352,7 @@ int main(void)
                                 tm_anim_frame = 0;
                         }
 
-                        // Facing direction from movement (persists when idle)
-                        if (tm_move_timer > 0 || tm_move_dx != 0 || tm_move_dy != 0) {
-                            if (tm_move_dy < 0) tm_player_facing = 0;      // up = N
-                            else if (tm_move_dy > 0) tm_player_facing = 4;  // down = S
-                            else if (tm_move_dx < 0) tm_player_facing = 6;  // left = W
-                            else if (tm_move_dx > 0) tm_player_facing = 2;  // right = E
-                        }
+                        // Facing direction — driven by MovePlayer node (sets tm_player_facing)
                         int facing = tm_player_facing;
 
                         // DMA current facing into compact VRAM slot

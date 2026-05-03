@@ -11801,16 +11801,15 @@ void FrameTick(float dt)
                     const char* dirKeysGba[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
                     const char* dirVarsGba[] = { "afn_input_right -= 256", "afn_input_right += 256",
                                                  "afn_input_fwd += 256", "afn_input_fwd -= 256" };
+                    const int dirFacingGba[] = { 6, 2, 0, 4 }; // L=W, R=E, U=N, D=S
                     char bodyBuf[512];
                     if (dir >= 0 && dir < 4)
                         snprintf(bodyBuf, sizeof(bodyBuf),
-                            "    if (key_is_down(%s)) %s;\n"
+                            "    if (key_is_down(%s)) { %s; tm_player_facing = %d; }\n"
                             "    // --- Runtime (main.c) ---\n"
-                            "    // inputFwd = afn_input_fwd; inputRight = afn_input_right;\n"
-                            "    // FIXED moveFwd = (inputFwd * moveSpeed) >> 8;\n"
-                            "    // player_x += (viewSin * moveFwd) >> 8;\n"
-                            "    // player_z -= (viewCos * moveFwd) >> 8;",
-                            dirKeysGba[dir], dirVarsGba[dir]);
+                            "    // Mode 4: player_x += (viewSin * moveFwd) >> 8;\n"
+                            "    // Mode 0: tm_player_facing persists last walked direction",
+                            dirKeysGba[dir], dirVarsGba[dir], dirFacingGba[dir]);
                     else
                         snprintf(bodyBuf, sizeof(bodyBuf), "    // MovePlayer (no direction set)");
                     setActionFunc(infoNode, "_move", bodyBuf);
