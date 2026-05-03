@@ -156,9 +156,9 @@ static int SnapToOBJSize(int sz)
 // colored-quadrant test pattern.
 #define AFN_DEBUG_TEST_PATTERN 0
 
-static std::vector<uint32_t> FrameToGBATiles(const GBASpriteFrameExport& frame)
+static std::vector<uint32_t> FrameToGBATiles(const GBASpriteFrameExport& frame, int overrideSize = 0)
 {
-    int fSize = SnapToOBJSize(frame.width);
+    int fSize = overrideSize > 0 ? SnapToOBJSize(overrideSize) : SnapToOBJSize(frame.width);
     int outW = fSize, outH = fSize;
     const int outTilesX = outW / 8;
     const int outTilesY = outH / 8;
@@ -386,17 +386,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
         for (size_t fi = 0; fi < asset.frames.size(); fi++)
         {
-            auto td = FrameToGBATiles(asset.frames[fi]);
-            // If the effective objSize is larger than the frame's native tile count,
-            // pad by repeating the last tile to fill the required OAM tile count
-            int nativeTiles = (int)td.size() / 8;
-            if (nativeTiles < tilesPerFrame) {
-                td.resize(tilesPerFrame * 8, 0);
-                // Repeat the pattern tile to fill remaining slots
-                for (int pt = nativeTiles; pt < tilesPerFrame; pt++)
-                    for (int w = 0; w < 8; w++)
-                        td[pt * 8 + w] = td[((pt % nativeTiles) * 8) + w];
-            }
+            auto td = FrameToGBATiles(asset.frames[fi], objSize);
             allTiles.insert(allTiles.end(), td.begin(), td.end());
         }
     }
@@ -618,9 +608,30 @@ static bool GenerateMapData(const std::string& runtimeDir,
         usedBanks[6] = true;  // bank 6 = minimap dots
 
         // Pass 1: assign banks to independent assets (paletteSrc < 0 or self)
+        // Also detect identical palettes and merge them to the same bank
         for (size_t ai = 0; ai < assets.size(); ai++) {
             int src = assets[ai].paletteSrc;
             if (src >= 0 && src < (int)assets.size() && src != (int)ai) continue; // shared — handle later
+
+            // Check if any earlier independent asset has an identical palette
+            // Skip assets with direction sprites — their palBank gets overwritten by direction palette
+            int matchBank = -1;
+            for (size_t bi = 0; bi < ai; bi++) {
+                if (resolvedPalBank[bi] < 0) continue;
+                int bsrc = assets[bi].paletteSrc;
+                if (bsrc >= 0 && bsrc < (int)assets.size() && bsrc != (int)bi) continue;
+                // Don't merge with assets that have direction palettes (they overwrite the bank)
+                if (assets[bi].hasDirections && !assets[bi].dirAnimSets.empty()) continue;
+                bool same = true;
+                for (int c = 0; c < 16; c++)
+                    if (assets[ai].palette[c] != assets[bi].palette[c]) { same = false; break; }
+                if (same) { matchBank = resolvedPalBank[bi]; break; }
+            }
+            if (matchBank >= 0) {
+                resolvedPalBank[ai] = matchBank;
+                continue;
+            }
+
             int bank = assets[ai].palBank & 15;
             if (bank == 0) bank = 1; // avoid bank 0
             if (!usedBanks[bank]) {
@@ -1480,6 +1491,72 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 f << "\n};\n";
             }
             f << "\n";
+        }
+    }
+
+    // ---- HUD Element Data (emitted early so script/blueprint functions can reference arrays) ----
+    if (!hudElements.empty())
+    {
+        f << "\n// ---- HUD Elements ----\n";
+        f << "#define AFN_HUD_ELEM_COUNT " << (int)hudElements.size() << "\n";
+
+        // Emit element descriptors: {screenX, screenY, pieceStart, pieceCount, stopStart, stopCount, textStart, textCount, cursorAsset, cursorFrame, cursorOffX, cursorOffY}
+        int totalPieces = 0, totalStops = 0, totalText = 0;
+        for (auto& el : hudElements) { totalPieces += (int)el.pieces.size(); totalStops += (int)el.stops.size(); totalText += (int)el.textRows.size(); }
+
+        f << "static const struct { s16 x,y; u16 pieceStart,pieceCount,stopStart,stopCount,textStart,textCount; s8 curAsset,curFrame,curOffX,curOffY; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
+        int pOff = 0, sOff = 0, tOff = 0;
+        for (auto& el : hudElements) {
+            f << "    {" << el.screenX << "," << el.screenY << ","
+              << pOff << "," << (int)el.pieces.size() << ","
+              << sOff << "," << (int)el.stops.size() << ","
+              << tOff << "," << (int)el.textRows.size() << ","
+              << el.cursorAssetIdx << "," << el.cursorFrame << "," << el.cursorOffX << "," << el.cursorOffY << "},\n";
+            pOff += (int)el.pieces.size();
+            sOff += (int)el.stops.size();
+            tOff += (int)el.textRows.size();
+        }
+        f << "};\n";
+
+        // Pieces: {assetIdx, frame, localX, localY, size}
+        if (totalPieces > 0) {
+            f << "static const struct { s8 asset; u8 frame; s16 x,y; u8 size; } afn_hud_pieces[" << totalPieces << "] = {\n";
+            for (auto& el : hudElements)
+                for (auto& pc : el.pieces)
+                    f << "    {" << pc.spriteAssetIdx << "," << pc.frame << "," << pc.localX << "," << pc.localY << "," << pc.size << "},\n";
+            f << "};\n";
+        } else {
+            f << "static const int afn_hud_pieces[1] = {0}; // no pieces\n";
+        }
+
+        // Stops: {localX, localY, linkedElement}
+        if (totalStops > 0) {
+            f << "static const struct { s16 x,y; s8 link; } afn_hud_stops[" << totalStops << "] = {\n";
+            for (auto& el : hudElements)
+                for (auto& st : el.stops)
+                    f << "    {" << st.localX << "," << st.localY << "," << st.linkedElement << "},\n";
+            f << "};\n";
+        } else {
+            f << "static const int afn_hud_stops[1] = {0}; // no stops\n";
+        }
+
+        // Text rows: {localX, localY, colorRGB15, text}
+        if (totalText > 0) {
+            f << "static const struct { s16 x,y; u16 color; char text[32]; } afn_hud_texts[" << totalText << "] = {\n";
+            for (auto& el : hudElements)
+                for (auto& tr : el.textRows) {
+                    f << "    {" << tr.localX << "," << tr.localY << ",0x" << std::hex << tr.colorRGB15 << std::dec << ",\"";
+                    // Escape the text
+                    for (int ci = 0; tr.text[ci] && ci < 31; ci++) {
+                        char c = tr.text[ci];
+                        if (c == '"' || c == '\\') f << '\\';
+                        f << c;
+                    }
+                    f << "\"},\n";
+                }
+            f << "};\n";
+        } else {
+            f << "static const int afn_hud_texts[1] = {0}; // no text\n";
         }
     }
 
@@ -2551,10 +2628,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_elem_idx = " << slot << ";\n";
                     f << "    afn_active_element = " << slot << ";\n";
                     f << "    afn_cursor_stop = 0;\n";
-                    f << "#ifdef AFN_HUD_ELEM_COUNT\n";
                     f << "    afn_stop_count = afn_hud_elems[" << slot << "].stopCount;\n";
                     f << "    { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[" << slot << "].stopStart + si].link; }\n";
-                    f << "#endif\n";
                     break;
                 }
                 case GBAScriptNodeType::HideHUD: {
@@ -2786,10 +2861,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    if (afn_checkpoint_set) { player_x = afn_checkpoint_x; player_z = afn_checkpoint_z; }\n";
                     break;
                 case GBAScriptNodeType::CursorUp:
-                    f << "    if (afn_cursor_stop > 0) afn_cursor_stop--; else afn_cursor_stop = afn_stop_count - 1;\n";
+                    f << "    if (afn_cursor_stop > 0) afn_cursor_stop--;\n";
+                    f << "    else afn_cursor_stop = afn_stop_count - 1;\n";
                     break;
                 case GBAScriptNodeType::CursorDown:
-                    f << "    afn_cursor_stop++; if (afn_cursor_stop >= afn_stop_count) afn_cursor_stop = 0;\n";
+                    f << "    afn_cursor_stop++;\n";
+                    f << "    if (afn_cursor_stop >= afn_stop_count) afn_cursor_stop = 0;\n";
                     break;
                 case GBAScriptNodeType::FollowLink:
                     f << "    { int link = afn_stop_links[afn_cursor_stop];\n";
@@ -3878,10 +3955,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_elem_idx = " << slot << ";\n";
                     f << "    afn_active_element = " << slot << ";\n";
                     f << "    afn_cursor_stop = 0;\n";
-                    f << "#ifdef AFN_HUD_ELEM_COUNT\n";
                     f << "    afn_stop_count = afn_hud_elems[" << slot << "].stopCount;\n";
                     f << "    { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[" << slot << "].stopStart + si].link; }\n";
-                    f << "#endif\n";
                     break;
                 }
                 case GBAScriptNodeType::HideHUD: {
@@ -4584,71 +4659,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "#define AFN_TM_START_SCENE 0\n";
     }
 
-    // ---- HUD Element Data ----
-    if (!hudElements.empty())
-    {
-        f << "\n// ---- HUD Elements ----\n";
-        f << "#define AFN_HUD_ELEM_COUNT " << (int)hudElements.size() << "\n";
-
-        // Emit element descriptors: {screenX, screenY, pieceStart, pieceCount, stopStart, stopCount, textStart, textCount, cursorAsset, cursorFrame, cursorOffX, cursorOffY}
-        int totalPieces = 0, totalStops = 0, totalText = 0;
-        for (auto& el : hudElements) { totalPieces += (int)el.pieces.size(); totalStops += (int)el.stops.size(); totalText += (int)el.textRows.size(); }
-
-        f << "static const struct { s16 x,y; u16 pieceStart,pieceCount,stopStart,stopCount,textStart,textCount; s8 curAsset,curFrame,curOffX,curOffY; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
-        int pOff = 0, sOff = 0, tOff = 0;
-        for (auto& el : hudElements) {
-            f << "    {" << el.screenX << "," << el.screenY << ","
-              << pOff << "," << (int)el.pieces.size() << ","
-              << sOff << "," << (int)el.stops.size() << ","
-              << tOff << "," << (int)el.textRows.size() << ","
-              << el.cursorAssetIdx << "," << el.cursorFrame << "," << el.cursorOffX << "," << el.cursorOffY << "},\n";
-            pOff += (int)el.pieces.size();
-            sOff += (int)el.stops.size();
-            tOff += (int)el.textRows.size();
-        }
-        f << "};\n";
-
-        // Pieces: {assetIdx, frame, localX, localY, size}
-        if (totalPieces > 0) {
-            f << "static const struct { s8 asset; u8 frame; s16 x,y; u8 size; } afn_hud_pieces[" << totalPieces << "] = {\n";
-            for (auto& el : hudElements)
-                for (auto& pc : el.pieces)
-                    f << "    {" << pc.spriteAssetIdx << "," << pc.frame << "," << pc.localX << "," << pc.localY << "," << pc.size << "},\n";
-            f << "};\n";
-        } else {
-            f << "static const int afn_hud_pieces[1] = {0}; // no pieces\n";
-        }
-
-        // Stops: {localX, localY, linkedElement}
-        if (totalStops > 0) {
-            f << "static const struct { s16 x,y; s8 link; } afn_hud_stops[" << totalStops << "] = {\n";
-            for (auto& el : hudElements)
-                for (auto& st : el.stops)
-                    f << "    {" << st.localX << "," << st.localY << "," << st.linkedElement << "},\n";
-            f << "};\n";
-        } else {
-            f << "static const int afn_hud_stops[1] = {0}; // no stops\n";
-        }
-
-        // Text rows: {localX, localY, colorRGB15, text}
-        if (totalText > 0) {
-            f << "static const struct { s16 x,y; u16 color; char text[32]; } afn_hud_texts[" << totalText << "] = {\n";
-            for (auto& el : hudElements)
-                for (auto& tr : el.textRows) {
-                    f << "    {" << tr.localX << "," << tr.localY << ",0x" << std::hex << tr.colorRGB15 << std::dec << ",\"";
-                    // Escape the text
-                    for (int ci = 0; tr.text[ci] && ci < 31; ci++) {
-                        char c = tr.text[ci];
-                        if (c == '"' || c == '\\') f << '\\';
-                        f << c;
-                    }
-                    f << "\"},\n";
-                }
-            f << "};\n";
-        } else {
-            f << "static const int afn_hud_texts[1] = {0}; // no text\n";
-        }
-    }
+    // (HUD Element Data emitted earlier, before script codegen)
 
     // ---- Scene mode config ----
     // startMode is determined by caller based on active editor tab
