@@ -89,6 +89,7 @@ static int tm_dir_adj = 0;              // tile ID adjustment for direction spri
 static int tm_static_adj = 0;           // tile ID adjustment for static/HUD tiles
 static int tm_hud_was_visible = 0;      // track HUD visibility for direction tile restore
 static int tm_dir_needs_reload = 0;     // force direction tile re-DMA after first VBlank
+static int tm_player_facing = 4; // persist last facing direction (default South)
 // Saved player OAM attributes for layer-sorted rendering
 static u16 tm_player_a0, tm_player_a1, tm_player_a2;
 static s16 tm_player_pa;
@@ -4327,14 +4328,14 @@ int main(void)
                                 tm_anim_frame = 0;
                         }
 
-                        // Facing direction from movement
-                        int facing = 4; // default South
+                        // Facing direction from movement (persists when idle)
                         if (tm_move_timer > 0 || tm_move_dx != 0 || tm_move_dy != 0) {
-                            if (tm_move_dy < 0) facing = 0;      // up = N
-                            else if (tm_move_dy > 0) facing = 4;  // down = S
-                            else if (tm_move_dx < 0) facing = 6;  // left = W
-                            else if (tm_move_dx > 0) facing = 2;  // right = E
+                            if (tm_move_dy < 0) tm_player_facing = 0;      // up = N
+                            else if (tm_move_dy > 0) tm_player_facing = 4;  // down = S
+                            else if (tm_move_dx < 0) tm_player_facing = 6;  // left = W
+                            else if (tm_move_dx > 0) tm_player_facing = 2;  // right = E
                         }
+                        int facing = tm_player_facing;
 
                         // DMA current facing into compact VRAM slot
                         int curSet = baseSet + tm_anim_frame;
