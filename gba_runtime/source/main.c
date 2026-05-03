@@ -85,10 +85,16 @@ static int tm_move_frames = 8;          // frames per tile move (derived from af
 static int tm_cam_x, tm_cam_y;          // camera scroll in pixels
 static int tm_tile_size = 8;            // pixels per tile on screen
 static int tm_scene_idx;                // current scene
-static int tm_dir_adj = 0;              // tile ID adjustment for direction sprites (mesh offset only)
+static int tm_dir_adj = 0;              // tile ID adjustment for direction sprites (Mode 4 only)
 static int tm_static_adj = 0;           // tile ID adjustment for static/HUD tiles
 static int tm_hud_was_visible = 0;      // track HUD visibility for direction tile restore
 static int tm_dir_needs_reload = 0;     // force direction tile re-DMA after first VBlank
+// Compact per-object direction VRAM (Mode 0 only — 1 facing per slot)
+#define TM_MAX_DIR_OBJS 32
+static int tm_obj_vram_slot[TM_MAX_DIR_OBJS];   // VRAM tile start per tilemap object
+static int tm_obj_dir_facing[TM_MAX_DIR_OBJS];  // loaded facing direction (-1 = none)
+static int tm_obj_dir_set[TM_MAX_DIR_OBJS];     // loaded animation set (-1 = none)
+static int tm_dir_slot_count = 0;                // total direction VRAM tiles used
 static int tm_anim_idx;                 // current animation index (0=idle, 1=walk, ...)
 static int tm_anim_frame;               // current frame within animation
 static int tm_anim_timer;               // frame counter for animation timing
@@ -515,10 +521,8 @@ static void init_obj_sprites(void)
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
         u32 *dst;
         if (afn_current_mode == 1) {
-            // Mode 0: place static tiles right after direction tile space
-            int staticStart = AFN_DIR_VRAM_TILES - (tm_static_adj - 512);
-            if (staticStart < 0) staticStart = 0;
-            dst = (u32*)(0x06010000 + staticStart * 32);
+            // Mode 0: place static tiles right after compact direction slots
+            dst = (u32*)(0x06010000 + tm_dir_slot_count * 32);
         } else {
             // Mode 4: skip bitmap overlap region (512 tiles) + direction tiles
             dst = (u32*)(0x06010000 + (512 + AFN_DIR_VRAM_TILES) * 32);
@@ -776,17 +780,24 @@ static void switch_dir_anim_set(int assetIdx, int newSet)
 }
 #endif
 
-// Re-copy static OBJ tiles to VRAM (fixes direction DMA overlap in Mode 0)
-#if defined(AFN_HAS_MODE0) && defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
-static void mode0_reload_static_tiles(void)
+// Mode 0: DMA a single facing direction into an object's compact VRAM slot
+#if defined(AFN_HAS_MODE0) && defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+static void mode0_dma_dir_facing(int objIdx, int assetIdx, int setIdx, int facing)
 {
-    int staticStart = AFN_DIR_VRAM_TILES - (tm_static_adj - 512);
-    if (staticStart < 0) staticStart = 0;
-    u32 *dst = (u32*)(0x06010000 + staticStart * 32);
-    const u32 *src = afn_all_tiles;
-    int i;
-    for (i = 0; i < (int)(AFN_ALL_TILES_LEN / 4); i++)
-        dst[i] = src[i];
+    if (objIdx < 0 || objIdx >= TM_MAX_DIR_OBJS) return;
+    if (tm_obj_dir_set[objIdx] == setIdx && tm_obj_dir_facing[objIdx] == facing) return;
+
+    int tpf = afn_asset_dir_desc[assetIdx][1];
+    int romBase = afn_dir_set_offsets[assetIdx][setIdx];
+    if (romBase < 0) return;
+
+    int wordCount = tpf * 8; // 1 direction: tpf tiles * 8 u32s per tile
+    const u32 *src = &afn_dir_anim_tiles[romBase + facing * tpf * 8];
+    u32 *dst = (u32*)(0x06010000 + tm_obj_vram_slot[objIdx] * 32);
+    DMA_TRANSFER(dst, src, wordCount, 3, DMA_NOW | DMA_32);
+
+    tm_obj_dir_set[objIdx] = setIdx;
+    tm_obj_dir_facing[objIdx] = facing;
 }
 #endif
 
@@ -3512,22 +3523,34 @@ static void mode4_init_scene(void)
 static void mode0_init_scene(int tmIdx)
 {
     REG_DISPCNT = DCNT_MODE0 | DCNT_BG0 | DCNT_OBJ | DCNT_OBJ_1D;
-    // In Mode 0, OBJ tiles don't need bitmap offset — compute adjustments
-#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-    tm_dir_adj = 512; // direction tiles: just remove mesh offset
+
+    // Compact VRAM layout for Mode 0: each direction object gets 1 facing
+    // slot (tpf tiles) instead of 8*tpf. This leaves room for static tiles.
     {
-        // Static tiles: place within VRAM bounds (1024 tiles max)
-        int staticTiles = AFN_ALL_TILES_LEN / 32;
-        int idealStart = AFN_DIR_VRAM_TILES;
-        if (idealStart + staticTiles > 1024) {
-            idealStart = 1024 - staticTiles;
-            if (idealStart < 0) idealStart = 0;
+        int nextSlot = 0;
+        int oi;
+#if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0 && defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+        for (oi = 0; oi < AFN_TM0_OBJ_COUNT && oi < TM_MAX_DIR_OBJS; oi++) {
+            int ai = afn_tm0_objs[oi].assetIdx;
+            if (ai >= 0 && ai < AFN_ASSET_COUNT && afn_asset_dir_desc[ai][4]) {
+                tm_obj_vram_slot[oi] = nextSlot;
+                nextSlot += afn_asset_dir_desc[ai][1]; // tpf tiles
+            } else {
+                tm_obj_vram_slot[oi] = -1;
+            }
+            tm_obj_dir_facing[oi] = -1;
+            tm_obj_dir_set[oi] = -1;
         }
-        tm_static_adj = 512 + (AFN_DIR_VRAM_TILES - idealStart);
+#endif
+        tm_dir_slot_count = nextSlot;
     }
+    // Static tiles go right after compact direction slots
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+    tm_dir_adj = 512;
+    tm_static_adj = 512 + AFN_DIR_VRAM_TILES - tm_dir_slot_count;
 #else
     tm_dir_adj = 0;
-    tm_static_adj = 0;
+    tm_static_adj = AFN_DIR_VRAM_TILES - tm_dir_slot_count;
 #endif
 
     // Currently only scene 0 data is statically accessible via AFN_TM0_* defines
@@ -3614,14 +3637,13 @@ static void mode0_init_scene(int tmIdx)
     tm_cam_y = tm_player_ty * tm_tile_size - 80 + tm_tile_size / 2;
     tm_anim_idx = 0; tm_anim_frame = 0; tm_anim_timer = 0;
 
-    // Load direction sprite set 0 for all direction assets
-#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
-    { int ai; for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {
-        if (!afn_asset_dir_desc[ai][4]) continue;
-        g_active_dir_set[ai] = -1;
-        switch_dir_anim_set(ai, 0);
+    // Load initial facing (south=4) for all direction objects
+#if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0 && defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+    { int oi2; for (oi2 = 0; oi2 < AFN_TM0_OBJ_COUNT && oi2 < TM_MAX_DIR_OBJS; oi2++) {
+        if (tm_obj_vram_slot[oi2] < 0) continue;
+        int ai = afn_tm0_objs[oi2].assetIdx;
+        mode0_dma_dir_facing(oi2, ai, 0, 4); // set 0, facing south
     } }
-    // Direction tile DMA may fail if display is active — schedule re-DMA after VBlank
     tm_dir_needs_reload = 1;
 #endif
 }
@@ -3999,19 +4021,20 @@ int main(void)
         {
         // ---- MODE 0 TILEMAP UPDATE ----
             // Re-DMA direction tiles after first VBlank (boot DMA may fail during active display)
-#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_DIR_ANIM_TILES_LEN)
+#if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0 && defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
             if (tm_dir_needs_reload) {
                 tm_dir_needs_reload = 0;
-                { int ai; for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {
-                    if (!afn_asset_dir_desc[ai][4]) continue;
-                    int curSet = g_active_dir_set[ai];
-                    g_active_dir_set[ai] = -1;
-                    if (curSet >= 0) switch_dir_anim_set(ai, curSet);
-                    else switch_dir_anim_set(ai, 0);
+                { int oi2; for (oi2 = 0; oi2 < AFN_TM0_OBJ_COUNT && oi2 < TM_MAX_DIR_OBJS; oi2++) {
+                    if (tm_obj_vram_slot[oi2] < 0) continue;
+                    int ai = afn_tm0_objs[oi2].assetIdx;
+                    int prevSet = tm_obj_dir_set[oi2];
+                    int prevFace = tm_obj_dir_facing[oi2];
+                    tm_obj_dir_set[oi2] = -1; // force re-DMA
+                    tm_obj_dir_facing[oi2] = -1;
+                    mode0_dma_dir_facing(oi2, ai,
+                        prevSet >= 0 ? prevSet : 0,
+                        prevFace >= 0 ? prevFace : 4);
                 } }
-#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-                mode0_reload_static_tiles();
-#endif
             }
 #endif
             // Grid-based movement
@@ -4188,10 +4211,8 @@ int main(void)
 #if defined(AFN_HAS_ASSET_DIRS)
                     // Direction-based asset: use dir descriptor for size/tiles
                     if (afn_asset_dir_desc[playerAsset][4]) {
-                        int tpf     = afn_asset_dir_desc[playerAsset][1]; // tiles per direction frame
                         int dirSize = afn_asset_dir_desc[playerAsset][2]; // pixel size (e.g. 64)
                         int palBank = afn_asset_dir_desc[playerAsset][3];
-                        int vramT0  = afn_asset_dir_desc[playerAsset][5]; // VRAM tile start
 
                         // Advance animation: cycle direction sets
                         int baseSet    = afn_anim_desc[playerAsset][tm_anim_idx][0];
@@ -4209,14 +4230,6 @@ int main(void)
                                 tm_anim_frame = 0;
                         }
 
-                        // DMA the current direction set to VRAM
-                        int curSet = baseSet + tm_anim_frame;
-                        switch_dir_anim_set(playerAsset, curSet);
-#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-                        // Direction DMA may overlap static tile VRAM in Mode 0 — restore
-                        mode0_reload_static_tiles();
-#endif
-
                         // Facing direction from movement
                         int facing = 4; // default South
                         if (tm_move_timer > 0 || tm_move_dx != 0 || tm_move_dy != 0) {
@@ -4225,7 +4238,11 @@ int main(void)
                             else if (tm_move_dx < 0) facing = 6;  // left = W
                             else if (tm_move_dx > 0) facing = 2;  // right = E
                         }
-                        int tileCur = vramT0 - tm_dir_adj + facing * tpf;
+
+                        // DMA current facing into compact VRAM slot
+                        int curSet = baseSet + tm_anim_frame;
+                        mode0_dma_dir_facing(AFN_TM_PLAYER_OBJ, playerAsset, curSet, facing);
+                        int tileCur = tm_obj_vram_slot[AFN_TM_PLAYER_OBJ];
 
                         // Apply displayScale via OAM affine
                         // scale8 is 8.8 fixed: 256 = 1.0x
@@ -4316,15 +4333,14 @@ int main(void)
 
                     int objSz, palBank, tileCur;
 #if defined(AFN_HAS_ASSET_DIRS)
-                    // Direction-based NPC: use dir descriptor
-                    if (afn_asset_dir_desc[ai][4]) {
-                        int vramT0 = afn_asset_dir_desc[ai][5];
+                    // Direction-based NPC: DMA current facing into compact slot
+                    if (afn_asset_dir_desc[ai][4] && oi < TM_MAX_DIR_OBJS && tm_obj_vram_slot[oi] >= 0) {
                         int dirSize = afn_asset_dir_desc[ai][2];
                         objSz = dirSize;
                         palBank = afn_asset_dir_desc[ai][3];
-                        tileCur = vramT0 - tm_dir_adj; // facing 4 (south) = default
-                        int tpf = afn_asset_dir_desc[ai][1];
-                        tileCur += 4 * tpf; // default south facing
+                        // Default south facing; DMA only if set/facing changed
+                        mode0_dma_dir_facing(oi, ai, 0, 4);
+                        tileCur = tm_obj_vram_slot[oi];
                     } else
 #endif
                     {
@@ -4372,18 +4388,19 @@ int main(void)
                     }
                     tm_hud_was_visible = 1;
                 } else if (tm_hud_was_visible) {
-                    // HUD just closed — restore direction tiles that were overwritten
+                    // HUD just closed — force re-DMA of direction facings
                     tm_hud_was_visible = 0;
-#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
-                    { int ai; for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {
-                        if (!afn_asset_dir_desc[ai][4]) continue;
-                        int curSet = g_active_dir_set[ai];
-                        g_active_dir_set[ai] = -1; // force re-DMA
-                        if (curSet >= 0) switch_dir_anim_set(ai, curSet);
+#if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0 && defined(AFN_HAS_ASSET_DIRS)
+                    { int oi2; for (oi2 = 0; oi2 < AFN_TM0_OBJ_COUNT && oi2 < TM_MAX_DIR_OBJS; oi2++) {
+                        if (tm_obj_vram_slot[oi2] < 0) continue;
+                        int prevSet = tm_obj_dir_set[oi2];
+                        int prevFace = tm_obj_dir_facing[oi2];
+                        tm_obj_dir_set[oi2] = -1;
+                        tm_obj_dir_facing[oi2] = -1;
+                        mode0_dma_dir_facing(oi2, afn_tm0_objs[oi2].assetIdx,
+                            prevSet >= 0 ? prevSet : 0,
+                            prevFace >= 0 ? prevFace : 4);
                     } }
-#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-                    mode0_reload_static_tiles();
-#endif
 #endif
                 }
                 }
