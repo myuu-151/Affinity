@@ -798,6 +798,42 @@ static void init_obj_sprites(void)
 #if AFN_ASSET_COUNT > 3
                 case 3: adPal = afn_pal_assetdir3; break;
 #endif
+#if AFN_ASSET_COUNT > 4
+                case 4: adPal = afn_pal_assetdir4; break;
+#endif
+#if AFN_ASSET_COUNT > 5
+                case 5: adPal = afn_pal_assetdir5; break;
+#endif
+#if AFN_ASSET_COUNT > 6
+                case 6: adPal = afn_pal_assetdir6; break;
+#endif
+#if AFN_ASSET_COUNT > 7
+                case 7: adPal = afn_pal_assetdir7; break;
+#endif
+#if AFN_ASSET_COUNT > 8
+                case 8: adPal = afn_pal_assetdir8; break;
+#endif
+#if AFN_ASSET_COUNT > 9
+                case 9: adPal = afn_pal_assetdir9; break;
+#endif
+#if AFN_ASSET_COUNT > 10
+                case 10: adPal = afn_pal_assetdir10; break;
+#endif
+#if AFN_ASSET_COUNT > 11
+                case 11: adPal = afn_pal_assetdir11; break;
+#endif
+#if AFN_ASSET_COUNT > 12
+                case 12: adPal = afn_pal_assetdir12; break;
+#endif
+#if AFN_ASSET_COUNT > 13
+                case 13: adPal = afn_pal_assetdir13; break;
+#endif
+#if AFN_ASSET_COUNT > 14
+                case 14: adPal = afn_pal_assetdir14; break;
+#endif
+#if AFN_ASSET_COUNT > 15
+                case 15: adPal = afn_pal_assetdir15; break;
+#endif
                 default: break;
             }
             if (adPal)
@@ -4505,21 +4541,50 @@ int main(void)
 
                     int objSz, palBank, tileCur;
 #if defined(AFN_HAS_ASSET_DIRS)
-                    // Direction-based NPC: DMA current facing into compact slot
+                    // Direction-based NPC: DMA selected facing into compact slot
                     if (afn_asset_dir_desc[ai][4] && oi < TM_MAX_DIR_OBJS && tm_obj_vram_slot[oi] >= 0) {
                         int dirSize = afn_asset_dir_desc[ai][2];
                         objSz = dirSize;
                         palBank = afn_asset_dir_desc[ai][3];
-                        // Default south facing; DMA only if set/facing changed
-                        mode0_dma_dir_facing(oi, ai, 0, 4);
+                        int dirSet = 0;
+                        int dirFace = afn_tm0_objs[oi].facing;
+                        // Animated direction sprite: cycle animation sets
+                        if (afn_tm0_objs[oi].animPlay) {
+                            int animI = afn_tm0_objs[oi].animIdx;
+                            int baseFrame  = afn_anim_desc[ai][animI][0];
+                            int frameCount = afn_anim_desc[ai][animI][1];
+                            int fps        = afn_anim_desc[ai][animI][2];
+                            if (frameCount > 0 && fps > 0) {
+                                int ticksPerFrame = 60 / fps;
+                                if (ticksPerFrame < 1) ticksPerFrame = 1;
+                                dirSet = baseFrame + (afn_frame_count / ticksPerFrame) % frameCount;
+                            } else {
+                                dirSet = baseFrame;
+                            }
+                        }
+                        mode0_dma_dir_facing(oi, ai, dirSet, dirFace);
                         tileCur = tm_obj_vram_slot[oi];
                     } else
 #endif
                     {
                         int tileBase = afn_asset_desc[ai][0];
+                        int tpf     = afn_asset_desc[ai][1];
                         objSz = afn_asset_desc[ai][3];
                         palBank = afn_asset_desc[ai][4];
                         tileCur = tileBase - tm_static_adj; // first frame
+                        // Animated objects: cycle through selected animation
+                        if (afn_tm0_objs[oi].animPlay) {
+                            int animI = afn_tm0_objs[oi].animIdx;
+                            int baseFrame  = afn_anim_desc[ai][animI][0];
+                            int frameCount = afn_anim_desc[ai][animI][1];
+                            int fps        = afn_anim_desc[ai][animI][2];
+                            if (frameCount > 0 && fps > 0) {
+                                int ticksPerFrame = 60 / fps;
+                                if (ticksPerFrame < 1) ticksPerFrame = 1;
+                                int curFrame = (afn_frame_count / ticksPerFrame) % frameCount;
+                                tileCur = tileBase - tm_static_adj + (baseFrame + curFrame) * tpf;
+                            }
+                        }
                     }
 
                     // Affine scaling

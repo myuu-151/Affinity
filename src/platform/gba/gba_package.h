@@ -399,6 +399,9 @@ struct GBATmObjectExport {
     bool collision;
     float displayScale;
     int layer;
+    bool animPlay;
+    int animIdx;
+    int facing;
     char name[32];
 };
 

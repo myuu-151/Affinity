@@ -77,6 +77,7 @@ static int sTmSpriteTexCount = 0; // how many we've cached
 // ---- Tilemap object system ----
 enum class TmObjType { Player = 0, Enemy, NPC, Door, Chest, SavePoint, Tile, Teleport, Trigger, Bounds, COUNT };
 static const char* sTmObjTypeNames[] = { "Player", "Enemy", "NPC", "Door", "Chest", "Save Point", "Tile", "Teleport", "Trigger", "Bounds" };
+static const char* sTmDirNames[] = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
 static const uint32_t sTmObjTypeColors[] = {
     0xFF44FF44, // Player - green
     0xFF4444FF, // Enemy - red
@@ -102,6 +103,9 @@ struct TmObject {
     bool camFollow = true;          // camera centers on this object during play
     bool collision = false;         // blocks player movement on this tile
     int layer = 0;                  // draw layer (0=back, 3=front)
+    bool animPlay = false;          // play animation on GBA runtime
+    int animIdx = 0;                // which animation to play
+    int facing = 4;                 // direction facing (0=N,1=NE,2=E,3=SE,4=S,5=SW,6=W,7=NW)
     // Blueprint script attachment
     int blueprintIdx = -1;
     struct { int paramIdx; int value; } instanceParams[8] = {};
@@ -2051,6 +2055,10 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "objCollision=1\n");
         if (obj.layer != 0)
             fprintf(f, "objLayer=%d\n", obj.layer);
+        if (obj.animPlay)
+            fprintf(f, "objAnim=%d\n", obj.animIdx);
+        if (obj.facing != 4)
+            fprintf(f, "objFacing=%d\n", obj.facing);
         if (obj.blueprintIdx >= 0) {
             fprintf(f, "objBp=%d,%d", obj.blueprintIdx, obj.instanceParamCount);
             for (int ip = 0; ip < obj.instanceParamCount; ip++)
@@ -2104,6 +2112,10 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "sceneobjCollision=1\n");
             if (obj.layer != 0)
                 fprintf(f, "sceneobjLayer=%d\n", obj.layer);
+            if (obj.animPlay)
+                fprintf(f, "sceneobjAnim=%d\n", obj.animIdx);
+            if (obj.facing != 4)
+                fprintf(f, "sceneobjFacing=%d\n", obj.facing);
             if (obj.blueprintIdx >= 0) {
                 fprintf(f, "sceneobjBp=%d,%d", obj.blueprintIdx, obj.instanceParamCount);
                 for (int ip = 0; ip < obj.instanceParamCount; ip++)
@@ -3005,6 +3017,15 @@ static bool LoadProject(const std::string& path)
             {
                 sTmObjects.back().layer = ival;
             }
+            else if (sscanf(line, "objAnim=%d", &ival) == 1 && !sTmObjects.empty())
+            {
+                sTmObjects.back().animPlay = true;
+                sTmObjects.back().animIdx = ival;
+            }
+            else if (sscanf(line, "objFacing=%d", &ival) == 1 && !sTmObjects.empty())
+            {
+                sTmObjects.back().facing = ival;
+            }
             else if (strncmp(line, "objBp=", 6) == 0 && !sTmObjects.empty())
             {
                 TmObject& lastObj = sTmObjects.back();
@@ -3110,6 +3131,15 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "sceneobjLayer=%d", &ival) == 1 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
             {
                 sTmScenes.back().objects.back().layer = ival;
+            }
+            else if (sscanf(line, "sceneobjAnim=%d", &ival) == 1 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
+            {
+                sTmScenes.back().objects.back().animPlay = true;
+                sTmScenes.back().objects.back().animIdx = ival;
+            }
+            else if (sscanf(line, "sceneobjFacing=%d", &ival) == 1 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
+            {
+                sTmScenes.back().objects.back().facing = ival;
             }
             else if (strncmp(line, "sceneobjBp=", 11) == 0 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
             {
@@ -5218,6 +5248,67 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             ImGui::PushItemWidth(Scaled(50));
             ImGui::DragInt("Bank##palbank", &asset.palBank, 1.0f, 0, 15);
             ImGui::PopItemWidth();
+
+            // Populate palette from direction sprite images
+            if (asset.hasDirections && sSelectedAsset < (int)sAssetDirSprites.size()
+                && !sAssetDirSprites[sSelectedAsset].empty())
+            {
+                if (ImGui::Button("From Directions##dirpal"))
+                {
+                    // Collect unique RGB15 colors from all direction images
+                    struct CF { unsigned short rgb15; int count; };
+                    std::vector<CF> cfs;
+                    auto findOrAdd = [&](unsigned short c15) {
+                        for (size_t i = 0; i < cfs.size(); i++)
+                            if (cfs[i].rgb15 == c15) { cfs[i].count++; return; }
+                        cfs.push_back({c15, 1});
+                    };
+                    for (int si = 0; si < (int)sAssetDirSprites[sSelectedAsset].size(); si++)
+                        for (int d = 0; d < 8; d++)
+                        {
+                            const auto& img = sAssetDirSprites[sSelectedAsset][si][d];
+                            if (!img.pixels || img.width <= 0 || img.height <= 0) continue;
+                            for (int y = 0; y < img.height; y++)
+                                for (int x = 0; x < img.width; x++)
+                                {
+                                    int idx = (y * img.width + x) * 4;
+                                    if (img.pixels[idx + 3] < 128) continue;
+                                    unsigned r = img.pixels[idx + 0] >> 3;
+                                    unsigned g = img.pixels[idx + 1] >> 3;
+                                    unsigned b = img.pixels[idx + 2] >> 3;
+                                    findOrAdd((unsigned short)(r | (g << 5) | (b << 10)));
+                                }
+                        }
+                    // Merge to 15 colors
+                    while ((int)cfs.size() > 15)
+                    {
+                        int bi2 = 0, bj2 = 1, bd = 999999;
+                        for (size_t i = 0; i < cfs.size(); i++)
+                            for (size_t j = i + 1; j < cfs.size(); j++)
+                            {
+                                int dr = (int)(cfs[i].rgb15 & 0x1F) - (int)(cfs[j].rgb15 & 0x1F);
+                                int dg = (int)((cfs[i].rgb15 >> 5) & 0x1F) - (int)((cfs[j].rgb15 >> 5) & 0x1F);
+                                int db = (int)((cfs[i].rgb15 >> 10) & 0x1F) - (int)((cfs[j].rgb15 >> 10) & 0x1F);
+                                int dist = dr*dr + dg*dg + db*db;
+                                if (dist < bd) { bd = dist; bi2 = (int)i; bj2 = (int)j; }
+                            }
+                        if (cfs[bi2].count < cfs[bj2].count)
+                            cfs[bi2].rgb15 = cfs[bj2].rgb15;
+                        cfs[bi2].count += cfs[bj2].count;
+                        cfs.erase(cfs.begin() + bj2);
+                    }
+                    // Write into asset palette
+                    memset(asset.palette, 0, sizeof(asset.palette));
+                    for (int i = 0; i < (int)cfs.size(); i++)
+                    {
+                        unsigned short c = cfs[i].rgb15;
+                        unsigned r = (c & 0x1F) << 3;
+                        unsigned g = ((c >> 5) & 0x1F) << 3;
+                        unsigned b = ((c >> 10) & 0x1F) << 3;
+                        asset.palette[i + 1] = r | (g << 8) | (b << 16) | 0xFF000000;
+                    }
+                }
+            }
         }
 
         for (int c = 0; c < 16; c++)
@@ -6481,6 +6572,41 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     sProjectDirty = true;
                 ImGui::Text("Layer (0=back, 3=front)");
                 ImGui::SliderInt("##objlayer", &obj.layer, 0, 3);
+                // Animation playback
+                if (ImGui::Checkbox("Animate", &obj.animPlay))
+                    sProjectDirty = true;
+                if (obj.animPlay && obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)sSpriteAssets.size()) {
+                    const auto& sa = sSpriteAssets[obj.spriteAssetIdx];
+                    if (!sa.anims.empty()) {
+                        ImGui::Text("Animation");
+                        const char* animPreview = (obj.animIdx >= 0 && obj.animIdx < (int)sa.anims.size())
+                            ? sa.anims[obj.animIdx].name.c_str() : "None";
+                        if (ImGui::BeginCombo("##objAnim", animPreview)) {
+                            for (int ai = 0; ai < (int)sa.anims.size(); ai++) {
+                                bool sel = (obj.animIdx == ai);
+                                if (ImGui::Selectable(sa.anims[ai].name.c_str(), sel)) {
+                                    obj.animIdx = ai;
+                                    sProjectDirty = true;
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+                    }
+                }
+                // Direction facing (for directional sprite assets)
+                if (obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)sSpriteAssets.size() &&
+                    sSpriteAssets[obj.spriteAssetIdx].hasDirections) {
+                    ImGui::Text("Facing");
+                    if (ImGui::BeginCombo("##objFacing", sTmDirNames[obj.facing & 7])) {
+                        for (int d = 0; d < 8; d++) {
+                            if (ImGui::Selectable(sTmDirNames[d], obj.facing == d)) {
+                                obj.facing = d;
+                                sProjectDirty = true;
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
             }
             // Blueprint attachment
             {
@@ -6811,6 +6937,41 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
 
             ImGui::Text("Layer (0=back, 3=front)");
             ImGui::SliderInt("##tilelayer", &obj.layer, 0, 3);
+            // Animation playback
+            if (ImGui::Checkbox("Animate##tile", &obj.animPlay))
+                sProjectDirty = true;
+            if (obj.animPlay && obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)sSpriteAssets.size()) {
+                const auto& sa = sSpriteAssets[obj.spriteAssetIdx];
+                if (!sa.anims.empty()) {
+                    ImGui::Text("Animation");
+                    const char* animPreview = (obj.animIdx >= 0 && obj.animIdx < (int)sa.anims.size())
+                        ? sa.anims[obj.animIdx].name.c_str() : "None";
+                    if (ImGui::BeginCombo("##tileAnim", animPreview)) {
+                        for (int ai = 0; ai < (int)sa.anims.size(); ai++) {
+                            bool sel = (obj.animIdx == ai);
+                            if (ImGui::Selectable(sa.anims[ai].name.c_str(), sel)) {
+                                obj.animIdx = ai;
+                                sProjectDirty = true;
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+            }
+            // Direction facing (for directional sprite assets)
+            if (obj.spriteAssetIdx >= 0 && obj.spriteAssetIdx < (int)sSpriteAssets.size() &&
+                sSpriteAssets[obj.spriteAssetIdx].hasDirections) {
+                ImGui::Text("Facing");
+                if (ImGui::BeginCombo("##tileFacing", sTmDirNames[obj.facing & 7])) {
+                    for (int d = 0; d < 8; d++) {
+                        if (ImGui::Selectable(sTmDirNames[d], obj.facing == d)) {
+                            obj.facing = d;
+                            sProjectDirty = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+            }
             ImGui::Text("Cells: %d", (int)obj.cells.size());
             if (ImGui::Button("Paint##tilepaint"))
             {
@@ -7231,12 +7392,13 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
         // Invisible button for mouse interaction
         ImGui::SetCursorScreenPos(cursor);
         ImGui::InvisibleButton("##TmMapGrid", ImVec2(availW, availH));
+        bool tmGridHovered = ImGui::IsItemHovered();
 
         // --- Edge dragging logic ---
         // Track cumulative drag distance in pixels to know when to add/remove a row/col
         static float sDragAccum = 0.0f;
 
-        if (ImGui::IsMouseClicked(0) && hoverEdge != 0)
+        if (ImGui::IsMouseClicked(0) && hoverEdge != 0 && tmGridHovered)
         {
             sTmDragEdge = hoverEdge;
             sDragAccum = 0.0f;
@@ -7342,7 +7504,8 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             int hoverTX = (int)std::floor((mouse.x - ox) / cellSz);
             int hoverTY = (int)std::floor((mouse.y - oy) / cellSz);
             bool inGrid = (hoverTX >= 0 && hoverTX < tm.width &&
-                           hoverTY >= 0 && hoverTY < tm.height);
+                           hoverTY >= 0 && hoverTY < tm.height &&
+                           tmGridHovered);
 
             // Cancel stamp mode with Escape
             if (sTmStampAsset >= 0 && ImGui::IsKeyPressed(ImGuiKey_Escape))
@@ -8104,6 +8267,9 @@ void FrameTick(float dt)
                             oe.collision = obj.collision;
                             oe.displayScale = obj.displayScale;
                             oe.layer = obj.layer;
+                            oe.animPlay = obj.animPlay;
+                            oe.animIdx = obj.animIdx;
+                            oe.facing = obj.facing;
                             memcpy(oe.name, obj.name, sizeof(oe.name));
                             oe.name[31] = '\0';
                             tse.objects.push_back(oe);
