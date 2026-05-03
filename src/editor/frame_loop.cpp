@@ -4535,6 +4535,11 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             std::swap(sSpriteAssets[src], sSpriteAssets[dst]);
             if (src < (int)sAssetDirSprites.size() && dst < (int)sAssetDirSprites.size())
                 std::swap(sAssetDirSprites[src], sAssetDirSprites[dst]);
+            // Swap cached preview textures so viewport shows correct sprites
+            if (src < (int)sTmSpriteTextures.size() && dst < (int)sTmSpriteTextures.size())
+                std::swap(sTmSpriteTextures[src], sTmSpriteTextures[dst]);
+            if (src < (int)sTmSpriteTexOwned.size() && dst < (int)sTmSpriteTexOwned.size())
+                std::swap(sTmSpriteTexOwned[src], sTmSpriteTexOwned[dst]);
             // Update all references
             auto remap = [&](int& idx) {
                 if (idx == src) idx = dst;
