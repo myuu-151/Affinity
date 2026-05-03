@@ -31,7 +31,7 @@ setActionFunc(infoNode, "_sprint",
 - **Pure math/data nodes** (Add, Sub, Mul, etc.) that just `return` a value: add `// --- Runtime --- inline data node, evaluated at call site`
 - **Gate/flow nodes** (IsMoving, DoOnce, etc.): add a brief comment about how the condition is evaluated
 - **When adding a new node**, always include the runtime chain — search `main.c` for how the variable is consumed
-- **When modifying node behavior** (e.g. FreezePlayer now also sets `afn_play_anim = -1`), update BOTH the exporter (`gba_package.cpp`) AND the `setActionFunc` body in `frame_loop.cpp`
+- **When modifying node behavior** (e.g. FreezePlayer now also sets `afn_play_anim = -1`), update BOTH the exporter (`gba_package.cpp`) AND the `setActionFunc` body in `frame_loop.cpp`. This applies to ANY change — codegen, runtime consumption, or guard conditions. Do this in the SAME edit pass, never defer it. If you touch `gba_package.cpp` or `main.c` for a node, you MUST also touch the `setActionFunc` before moving on.
 
 ### Key Files
 

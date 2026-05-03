@@ -12184,14 +12184,12 @@ void FrameTick(float dt)
                         "    afn_move_speed = 0;\n"
                         "    afn_bp_def_frozen[<blueprint>] = 1;\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // Mode 0: if (!afn_player_frozen) { dx = key_input; }\n"
-                        "    //         tm_move_timer blocked, no tile movement\n"
-                        "    // Mode 4: if (!afn_player_frozen) { inputFwd/inputRight = key; }\n"
-                        "    //         afn_play_anim = -1 reverts to idle anim\n"
-                        "    //         afn_move_speed = 0 stops walk/sprint\n"
-                        "    // --- Dispatch (mapdata.h) ---\n"
-                        "    // afn_bp_def_frozen[bpIdx] skips all dispatch for that blueprint\n"
-                        "    // key_held/pressed/released/update/collision all check frozen flag");
+                        "    // MovePlayer: if (!afn_player_frozen && key_is_down(...))\n"
+                        "    //   skips input, facing (tm_player_facing), and movement\n"
+                        "    // Anim: if (!afn_player_frozen) { tm_anim_timer++; }\n"
+                        "    //   frame cycling frozen, holds current sprite frame\n"
+                        "    // Anim index: afn_play_anim from other nodes ignored while frozen\n"
+                        "    // Dispatch: afn_bp_def_frozen[bpIdx] skips blueprint dispatch");
                     break;
                 case VsNodeType::UnfreezePlayer:
                     editorCode =
@@ -12201,11 +12199,9 @@ void FrameTick(float dt)
                         "    afn_play_anim = 0;\n"
                         "    afn_bp_def_frozen[<blueprint>] = 0;\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // Re-enables d-pad input for movement\n"
-                        "    // afn_play_anim = 0 restores idle animation\n"
-                        "    // Walk/Sprint nodes can set afn_move_speed again\n"
-                        "    // --- Dispatch (mapdata.h) ---\n"
-                        "    // Clears frozen flag, blueprint dispatch resumes");
+                        "    // MovePlayer: input, facing, and movement resume\n"
+                        "    // Anim: frame cycling resumes, afn_play_anim = 0 restores idle\n"
+                        "    // Dispatch: blueprint dispatch resumes");
                     break;
                 case VsNodeType::SetCameraHeight: {
                     editorCode =
