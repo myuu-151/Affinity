@@ -4052,7 +4052,7 @@ int main(void)
                 }
             }
 
-            if (tm_move_timer == 0)
+            if (tm_move_timer == 0 && !afn_player_frozen)
             {
                 // Accept new input
                 int dx = 0, dy = 0;
@@ -4109,11 +4109,9 @@ int main(void)
 
             // Run per-frame script event handlers
             afn_script_update();
-            if (!afn_player_frozen) {
-                afn_script_key_held();
-                afn_script_key_pressed();
-                afn_script_key_released();
-            }
+            afn_script_key_held();
+            afn_script_key_pressed();
+            afn_script_key_released();
 
             // Collision2D: check if player is adjacent to any tilemap object
             // Uses <= cells so it fires one tile outside the blocking zone
@@ -4140,11 +4138,34 @@ int main(void)
             }}
 #endif
 
-            // Blueprint instance dispatch
-            afn_bp_dispatch_update();
-            afn_bp_dispatch_key_held();
-            afn_bp_dispatch_key_pressed();
-            afn_bp_dispatch_key_released();
+            // Blueprint instance dispatch — save cursor state so we can
+            // override it with our own bounds-safe logic afterwards
+            {
+#if defined(AFN_HUD_ELEM_COUNT) && AFN_HUD_ELEM_COUNT > 0
+                int savedCursorStop = afn_cursor_stop;
+#endif
+                afn_bp_dispatch_update();
+                afn_bp_dispatch_key_held();
+                afn_bp_dispatch_key_pressed();
+                afn_bp_dispatch_key_released();
+#if defined(AFN_HUD_ELEM_COUNT) && AFN_HUD_ELEM_COUNT > 0
+                // Override blueprint cursor nav with bounds-safe version
+                if (afn_hud_visible[0]) {
+                    int sc = (int)afn_hud_elems[afn_active_element].stopCount;
+                    if (sc > 0) {
+                        afn_cursor_stop = savedCursorStop;
+                        if (key_hit(KEY_UP)) {
+                            afn_cursor_stop--;
+                            if (afn_cursor_stop < 0) afn_cursor_stop = sc - 1;
+                        }
+                        if (key_hit(KEY_DOWN)) {
+                            afn_cursor_stop++;
+                            if (afn_cursor_stop >= sc) afn_cursor_stop = 0;
+                        }
+                    }
+                }
+#endif
+            }
 
             // Apply script-driven animation change (or revert to idle if no script requested one)
             if (afn_play_anim >= 0) {
@@ -4416,6 +4437,28 @@ int main(void)
                     int staticTiles2 = AFN_ALL_TILES_LEN / 32;
                     int hudTileAdj = 512 + AFN_DIR_VRAM_TILES - (1024 - staticTiles2);
                     int pi;
+                    // Draw cursor FIRST (lowest OAM slot = renders on top)
+                    if (ei == afn_active_element && afn_hud_elems[ei].stopCount > 0 && afn_hud_elems[ei].curAsset >= 0 && oamSlot < 128) {
+                        int stopIdx = afn_cursor_stop;
+                        int maxStops = afn_hud_elems[ei].stopCount;
+                        if (stopIdx < 0 || stopIdx >= maxStops) stopIdx = 0;
+                        int si2 = afn_hud_elems[ei].stopStart + stopIdx;
+                        int csx = ex + (int)afn_hud_stops[si2].x + (int)afn_hud_elems[ei].curOffX;
+                        int csy = ey + (int)afn_hud_stops[si2].y + (int)afn_hud_elems[ei].curOffY;
+                        int cai = afn_hud_elems[ei].curAsset;
+                        int cfr = afn_hud_elems[ei].curFrame;
+                        if (cai >= 0 && cai < AFN_ASSET_COUNT) {
+                            int ctb = afn_asset_desc[cai][0];
+                            int ctpf = afn_asset_desc[cai][1];
+                            int csz = afn_asset_desc[cai][3];
+                            int cpb = afn_asset_desc[cai][4];
+                            u16 ca0 = ATTR0_SQUARE | ((csy & 0xFF));
+                            u16 ca1 = size_to_attr1(csz) | ((csx & 0x1FF));
+                            u16 ca2 = ATTR2_PALBANK(cpb) | ATTR2_PRIO(0) | ((ctb - hudTileAdj + cfr * ctpf) & 0x3FF);
+                            obj_set_attr(&oam_mem[oamSlot], ca0, ca1, ca2);
+                            oamSlot++;
+                        }
+                    }
                     // Render pieces in reverse order: editor draws 0→N (back to front),
                     // but GBA OAM lower slots render on top, so iterate N→0
                     for (pi = pCount - 1; pi >= 0 && oamSlot < 126; pi--) {
@@ -4435,27 +4478,6 @@ int main(void)
                         u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
                         obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
                         oamSlot++;
-                    }
-                    // Draw cursor at active stop
-                    if (ei == afn_active_element && afn_hud_elems[ei].stopCount > 0 && afn_hud_elems[ei].curAsset >= 0 && oamSlot < 128) {
-                        int staticTiles3 = AFN_ALL_TILES_LEN / 32;
-                        int hudTileAdj2 = 512 + AFN_DIR_VRAM_TILES - (1024 - staticTiles3);
-                        int si2 = afn_hud_elems[ei].stopStart + afn_cursor_stop;
-                        int csx = ex + afn_hud_stops[si2].x + afn_hud_elems[ei].curOffX;
-                        int csy = ey + afn_hud_stops[si2].y + afn_hud_elems[ei].curOffY;
-                        int cai = afn_hud_elems[ei].curAsset;
-                        int cfr = afn_hud_elems[ei].curFrame;
-                        if (cai >= 0 && cai < AFN_ASSET_COUNT) {
-                            int ctb = afn_asset_desc[cai][0];
-                            int ctpf = afn_asset_desc[cai][1];
-                            int csz = afn_asset_desc[cai][3];
-                            int cpb = afn_asset_desc[cai][4];
-                            u16 ca0 = ATTR0_SQUARE | ((csy & 0xFF));
-                            u16 ca1 = size_to_attr1(csz) | ((csx & 0x1FF));
-                            u16 ca2 = ATTR2_PALBANK(cpb) | ATTR2_PRIO(0) | ((ctb - hudTileAdj2 + cfr * ctpf) & 0x3FF);
-                            obj_set_attr(&oam_mem[oamSlot], ca0, ca1, ca2);
-                            oamSlot++;
-                        }
                     }
                 }}
 #endif
@@ -4523,11 +4545,9 @@ int main(void)
 
             // Run per-frame script event handlers
             afn_script_update();
-            if (!afn_player_frozen) {
-                afn_script_key_held();
-                afn_script_key_pressed();
-                afn_script_key_released();
-            }
+            afn_script_key_held();
+            afn_script_key_pressed();
+            afn_script_key_released();
             // Collision event (radius-based, non-mesh sprites only)
             // Skip first 10 frames after scene load to prevent ping-pong
             if (afn_collided_sprite >= 0 && afn_frame_count > 10 &&
