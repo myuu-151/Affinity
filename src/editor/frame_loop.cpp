@@ -6469,9 +6469,12 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             }
             else
             {
-                ImGui::DragInt("Tile X", &obj.tileX, 0.5f, 0, tm.width - 1);
-                ImGui::DragInt("Tile Y", &obj.tileY, 0.5f, 0, tm.height - 1);
-                ImGui::SliderFloat("Scale", &obj.displayScale, 0.5f, 4.0f, "%.1f");
+                ImGui::Text("Tile X");
+                ImGui::DragInt("##tileX", &obj.tileX, 0.5f, 0, tm.width - 1);
+                ImGui::Text("Tile Y");
+                ImGui::DragInt("##tileY", &obj.tileY, 0.5f, 0, tm.height - 1);
+                ImGui::Text("Scale");
+                ImGui::SliderFloat("##objScale", &obj.displayScale, 0.5f, 4.0f, "%.1f");
                 if (ImGui::Checkbox("Camera Follow", &obj.camFollow))
                     sProjectDirty = true;
                 if (ImGui::Checkbox("Collision", &obj.collision))
