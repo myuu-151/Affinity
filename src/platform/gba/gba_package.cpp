@@ -1610,6 +1610,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static u32   afn_flags;\n";
         f << "static int   afn_player_frozen;\n";
         f << "static int   tm_player_facing = 4;\n";
+        f << "extern int   tm_move_timer;\n";
         f << "static int   afn_anim_speed = 1;\n";
         f << "static u32   afn_rng = 12345;\n";
         f << "static u8    afn_sprite_visible[16];\n";
@@ -2040,7 +2041,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     // facing: Left=6(W), Right=2(E), Up=0(N), Down=4(S)
                     const int dirFacing[] = { 6, 2, 0, 4 };
                     if (dir >= 0 && dir < 4)
-                        f << "    if (key_is_down(" << dirKeys[dir] << ")) { " << dirVars[dir] << "; tm_player_facing = " << dirFacing[dir] << "; }\n";
+                        f << "    if (key_is_down(" << dirKeys[dir] << ")) { " << dirVars[dir] << "; if (tm_move_timer == 0) tm_player_facing = " << dirFacing[dir] << "; }\n";
                     break;
                 }
                 case GBAScriptNodeType::Jump: {
@@ -3420,7 +3421,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                                               "afn_input_fwd += 256", "afn_input_fwd -= 256" };
                     const int dirFacing[] = { 6, 2, 0, 4 };
                     if (dir >= 0 && dir < 4)
-                        f << "    if (key_is_down(" << dirKeys[dir] << ")) { " << dirVars[dir] << "; tm_player_facing = " << dirFacing[dir] << "; }\n";
+                        f << "    if (key_is_down(" << dirKeys[dir] << ")) { " << dirVars[dir] << "; if (tm_move_timer == 0) tm_player_facing = " << dirFacing[dir] << "; }\n";
                     break;
                 }
                 case GBAScriptNodeType::Jump: {

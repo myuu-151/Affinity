@@ -80,7 +80,7 @@ static u16 dbg_fps_timer;   // last timer snapshot
 // ---------------------------------------------------------------------------
 static int tm_player_tx, tm_player_ty;  // player grid position
 static int tm_move_dx, tm_move_dy;      // current move direction (-1,0,1)
-static int tm_move_timer;               // frames remaining in current move
+int tm_move_timer;                      // frames remaining in current move (non-static for mapdata.h access)
 static int tm_move_frames = 8;          // frames per tile move (derived from afn_move_speed)
 static int tm_turn_timer = 0;          // frames since direction key pressed (turn-in-place delay)
 static int tm_turn_facing = -1;        // direction key being held (-1 = none)
