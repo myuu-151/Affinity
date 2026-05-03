@@ -391,56 +391,49 @@ static void font_glyph_to_tile(u32* dst, const u8* glyph, int colorIdx)
     }
 }
 
-// Load font into charblock 1 for BG1 text overlay
-// palIdx: OBJ palette index in BG palette to use for text color
-static void hud_text_init(void)
-{
-    // Set palette entry 1 in BG palette bank 15 to black (default)
-    ((u16*)0x05000000)[15 * 16 + 1] = 0x0000;
+// Load font glyphs into OBJ VRAM for pixel-precise OAM text rendering
+// Font tiles placed before HUD static tiles at end of OBJ VRAM
+static int hud_font_tile_base = 0;
+static int hud_font_loaded = 0;
 
-    // Convert all 96 glyphs into 4bpp tiles in charblock 1
-    u32* cb = (u32*)tile_mem[1];  // charblock 1
+static void hud_font_load(int staticTileCount)
+{
+    // Place 96 font tiles right before static tiles
+    hud_font_tile_base = 1024 - staticTileCount - 96;
+    if (hud_font_tile_base < 0) hud_font_tile_base = 0;
+
+    // Set OBJ palette bank 15 entry 1 to black (text color)
+    ((u16*)0x05000200)[15 * 16 + 1] = 0x0000;
+
+    // Convert 96 glyphs into 4bpp tiles
+    u32* dst = (u32*)(0x06010000 + hud_font_tile_base * 32);
     int gi;
     for (gi = 0; gi < 96; gi++) {
-        font_glyph_to_tile(cb + gi * 8, hud_font[gi], 1); // color index 1
+        font_glyph_to_tile(dst + gi * 8, hud_font[gi], 1);
     }
-
-    // Set up BG1 as 32x32 text layer, charblock 1, SBB 27, priority 0 (on top)
-    REG_BG1CNT = BG_CBB(1) | BG_SBB(27) | BG_4BPP | BG_REG_32x32 | BG_PRIO(0);
-    REG_BG1HOFS = 0;
-    REG_BG1VOFS = 0;
-
-    // Clear the tilemap (SBB 27)
-    {
-        u16* map = (u16*)se_mem[27];
-        int i; for (i = 0; i < 32 * 32; i++) map[i] = 0;
-    }
+    hud_font_loaded = 1;
 }
 
-// Write a string to BG1 tilemap at tile position (tx, ty)
-// palBank: 4bpp palette bank (0-15)
-static void hud_text_draw(int tx, int ty, const char* str, int palBank)
+// Render a text string as OAM sprites, one 8x8 sprite per character
+// Returns number of OAM slots used
+static int hud_text_oam(int oamStart, int px, int py, const char* str, int palBank)
 {
-    u16* map = (u16*)se_mem[27];
-    while (*str && tx < 30) {
+    int slot = oamStart;
+    while (*str && slot < 126) {
         int ch = (unsigned char)*str;
-        if (ch >= 32 && ch < 128) {
-            int tileIdx = ch - 32; // font tile index
-            map[ty * 32 + tx] = tileIdx | (palBank << 12);
+        if (ch > 32 && ch < 128) {  // skip spaces (transparent anyway)
+            int tileIdx = hud_font_tile_base + (ch - 32);
+            u16 a0 = ATTR0_SQUARE | ((py & 0xFF));
+            u16 a1 = ATTR1_SIZE_8 | ((px & 0x1FF));
+            u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileIdx & 0x3FF);
+            obj_set_attr(&oam_mem[slot], a0, a1, a2);
+            slot++;
         }
-        tx++;
+        px += 8;
         str++;
     }
+    return slot - oamStart;
 }
-
-// Clear all text from BG1
-static void hud_text_clear(void)
-{
-    u16* map = (u16*)se_mem[27];
-    int i; for (i = 0; i < 32 * 32; i++) map[i] = 0;
-}
-
-static int hud_text_inited = 0;
 
 // ---------------------------------------------------------------------------
 // Orbit camera state (used when player sprite exists)
@@ -4554,38 +4547,12 @@ int main(void)
                         u32 *tdst = (u32*)(0x06010000 + vramStart * 32);
                         int w; for (w = 0; w < (int)(AFN_ALL_TILES_LEN / 4); w++) tdst[w] = tsrc[w];
                     }
-                    // HUD text rendering via BG1
-                    if (!hud_text_inited) {
-                        hud_text_init();
-                        hud_text_inited = 1;
-                        REG_DISPCNT |= DCNT_BG1;
-                    }
-                    hud_text_clear();
-                    // Draw text rows for each visible HUD element
-                    { int ei3;
-                    for (ei3 = 0; ei3 < AFN_HUD_ELEM_COUNT; ei3++) {
-                        if (!afn_hud_visible[ei3]) continue;
-                        int elX = afn_hud_elems[ei3].x;
-                        int elY = afn_hud_elems[ei3].y;
-                        int tStart = afn_hud_elems[ei3].textStart;
-                        int tCount = afn_hud_elems[ei3].textCount;
-                        int ti2;
-                        for (ti2 = 0; ti2 < tCount; ti2++) {
-                            int px = elX + afn_hud_texts[tStart + ti2].x;
-                            int py = elY + afn_hud_texts[tStart + ti2].y;
-                            // Convert pixel position to tile position
-                            int tx = px >> 3;
-                            int ty = py >> 3;
-                            hud_text_draw(tx, ty, afn_hud_texts[tStart + ti2].text, 15);
-                        }
-                    }}
+                    // Load font into OBJ VRAM if not yet loaded
+                    if (!hud_font_loaded) hud_font_load(staticTiles);
                     tm_hud_was_visible = 1;
                 } else if (tm_hud_was_visible) {
-                    // HUD just closed — clear text overlay and disable BG1
-                    hud_text_clear();
-                    REG_DISPCNT &= ~DCNT_BG1;
-                    hud_text_inited = 0;
-                    // Force re-DMA of direction facings
+                    // HUD just closed — force re-DMA of direction facings
+                    hud_font_loaded = 0;
                     tm_hud_was_visible = 0;
 #if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0 && defined(AFN_HAS_ASSET_DIRS)
                     { int oi2; for (oi2 = 0; oi2 < AFN_TM0_OBJ_COUNT && oi2 < TM_MAX_DIR_OBJS; oi2++) {
@@ -4635,6 +4602,16 @@ int main(void)
                             oamSlot++;
                         }
                     }
+                    // Render text rows as OAM (between cursor and pieces for draw order)
+                    { int tStart2 = afn_hud_elems[ei].textStart;
+                      int tCount2 = afn_hud_elems[ei].textCount;
+                      int ti2;
+                      for (ti2 = 0; ti2 < tCount2 && oamSlot < 126; ti2++) {
+                          int tpx = ex + afn_hud_texts[tStart2 + ti2].x;
+                          int tpy = ey + afn_hud_texts[tStart2 + ti2].y;
+                          oamSlot += hud_text_oam(oamSlot, tpx, tpy, afn_hud_texts[tStart2 + ti2].text, 15);
+                      }
+                    }
                     // Render pieces in reverse order: editor draws 0→N (back to front),
                     // but GBA OAM lower slots render on top, so iterate N→0
                     for (pi = pCount - 1; pi >= 0 && oamSlot < 126; pi--) {
@@ -4651,7 +4628,7 @@ int main(void)
 
                         u16 a0 = ATTR0_SQUARE | ((sy & 0xFF));
                         u16 a1 = size_to_attr1(objSz) | ((sx & 0x1FF));
-                        u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(1) | (tileCur & 0x3FF);
+                        u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
                         obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
                         oamSlot++;
                     }
