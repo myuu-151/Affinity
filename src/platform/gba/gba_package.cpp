@@ -620,7 +620,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
             // Check if any earlier independent asset has an identical palette
             // Skip assets with direction sprites — their palBank gets overwritten by direction palette
+            // Direction assets must NEVER share a bank with non-direction assets, because
+            // runtime loads direction palettes on top of the shared bank, corrupting the other asset.
             int matchBank = -1;
+            if (assets[ai].hasDirections && !assets[ai].dirAnimSets.empty()) {
+                // Force direction assets to get their own unique bank — skip merging entirely
+            } else
             for (size_t bi = 0; bi < ai; bi++) {
                 if (resolvedPalBank[bi] < 0) continue;
                 int bsrc = assets[bi].paletteSrc;
