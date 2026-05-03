@@ -101,6 +101,7 @@ struct TmObject {
     float displayScale = 1.0f;      // visual scale multiplier (0.5 - 4.0)
     bool camFollow = true;          // camera centers on this object during play
     bool collision = false;         // blocks player movement on this tile
+    int layer = 0;                  // draw layer (0=back, 3=front)
     // Blueprint script attachment
     int blueprintIdx = -1;
     struct { int paramIdx; int value; } instanceParams[8] = {};
@@ -894,10 +895,11 @@ struct HudElement {
     };
     std::vector<SpriteItem> spriteItems;
     int selectedSpriteItem = -1;
-    // Layer draw order (0=back, 1, 2=front) — controls OAM slot ordering
+    // Layer draw order (0=back, 3=front) — controls OAM slot ordering
     int layerPieces = 0;   // background pieces
-    int layerText = 1;     // text rows
-    int layerCursor = 2;   // cursor sprite
+    int layerSprites = 1;  // sprite overlay items
+    int layerText = 2;     // text rows
+    int layerCursor = 3;   // cursor sprite
     // Section collapse state (editor only)
     bool collapseBackground = false;
     bool collapseSprites = false;
@@ -2005,8 +2007,8 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "elemBp=%d\n", el.blueprintIdx);
         if (el.runtimeMode != 0)
             fprintf(f, "elemMode=%d\n", el.runtimeMode);
-        if (el.layerPieces != 0 || el.layerText != 1 || el.layerCursor != 2)
-            fprintf(f, "elemLayers=%d|%d|%d\n", el.layerPieces, el.layerText, el.layerCursor);
+        if (el.layerPieces != 0 || el.layerSprites != 1 || el.layerText != 2 || el.layerCursor != 3)
+            fprintf(f, "elemLayers=%d|%d|%d|%d\n", el.layerPieces, el.layerSprites, el.layerText, el.layerCursor);
     }
     fprintf(f, "\n");
 
@@ -2047,6 +2049,8 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "objCamFollow=0\n");
         if (obj.collision)
             fprintf(f, "objCollision=1\n");
+        if (obj.layer != 0)
+            fprintf(f, "objLayer=%d\n", obj.layer);
         if (obj.blueprintIdx >= 0) {
             fprintf(f, "objBp=%d,%d", obj.blueprintIdx, obj.instanceParamCount);
             for (int ip = 0; ip < obj.instanceParamCount; ip++)
@@ -2098,6 +2102,8 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "sceneobjCamFollow=0\n");
             if (obj.collision)
                 fprintf(f, "sceneobjCollision=1\n");
+            if (obj.layer != 0)
+                fprintf(f, "sceneobjLayer=%d\n", obj.layer);
             if (obj.blueprintIdx >= 0) {
                 fprintf(f, "sceneobjBp=%d,%d", obj.blueprintIdx, obj.instanceParamCount);
                 for (int ip = 0; ip < obj.instanceParamCount; ip++)
@@ -2920,8 +2926,14 @@ static bool LoadProject(const std::string& path)
                 sHudElements.back().runtimeMode = ival;
             }
             else if (strncmp(line, "elemLayers=", 11) == 0 && !sHudElements.empty()) {
-                sscanf(line + 11, "%d|%d|%d", &sHudElements.back().layerPieces,
-                    &sHudElements.back().layerText, &sHudElements.back().layerCursor);
+                HudElement& hel = sHudElements.back();
+                int n = sscanf(line + 11, "%d|%d|%d|%d", &hel.layerPieces,
+                    &hel.layerSprites, &hel.layerText, &hel.layerCursor);
+                if (n == 3) { // old 3-field format: pieces|text|cursor (no sprites)
+                    hel.layerCursor = hel.layerText;
+                    hel.layerText = hel.layerSprites;
+                    hel.layerSprites = 1;
+                }
             }
         }
         else if (strcmp(section, "Palette") == 0)
@@ -2988,6 +3000,10 @@ static bool LoadProject(const std::string& path)
             {
                 int v = 0; sscanf(line + 13, "%d", &v);
                 sTmObjects.back().collision = (v != 0);
+            }
+            else if (sscanf(line, "objLayer=%d", &ival) == 1 && !sTmObjects.empty())
+            {
+                sTmObjects.back().layer = ival;
             }
             else if (strncmp(line, "objBp=", 6) == 0 && !sTmObjects.empty())
             {
@@ -3090,6 +3106,10 @@ static bool LoadProject(const std::string& path)
             {
                 int v = 0; sscanf(line + 18, "%d", &v);
                 sTmScenes.back().objects.back().collision = (v != 0);
+            }
+            else if (sscanf(line, "sceneobjLayer=%d", &ival) == 1 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
+            {
+                sTmScenes.back().objects.back().layer = ival;
             }
             else if (strncmp(line, "sceneobjBp=", 11) == 0 && !sTmScenes.empty() && !sTmScenes.back().objects.empty())
             {
@@ -6330,6 +6350,9 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
         ImGuiWindowFlags_NoTitleBar;
+    const ImGuiWindowFlags sidePanelFlags =
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar;
 
     float objPanelW = sTmObjPanelW;
 
@@ -6338,7 +6361,7 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
     ImGui::SetNextWindowSize(ImVec2(objPanelW, size.y));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.25f, 0.30f, 1.0f));
-    ImGui::Begin("##TmObjPanel", nullptr, panelFlags);
+    ImGui::Begin("##TmObjPanel", nullptr, sidePanelFlags);
     {
         ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Objects");
 
@@ -6453,6 +6476,8 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     sProjectDirty = true;
                 if (ImGui::Checkbox("Collision", &obj.collision))
                     sProjectDirty = true;
+                ImGui::Text("Layer (0=back, 3=front)");
+                ImGui::SliderInt("##objlayer", &obj.layer, 0, 3);
             }
             // Blueprint attachment
             {
@@ -6568,7 +6593,7 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
         ImGui::SetNextWindowSize(ImVec2(scenePanelW, scenePanelH));
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.25f, 0.30f, 1.0f));
-        ImGui::Begin("##TmScenePanel", nullptr, panelFlags);
+        ImGui::Begin("##TmScenePanel", nullptr, sidePanelFlags);
 
         ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Scenes");
 
@@ -6722,7 +6747,7 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
         ImGui::SetNextWindowSize(ImVec2(scenePanelW, tilePanelH));
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.25f, 0.30f, 1.0f));
-        ImGui::Begin("##TmTilesPanel", nullptr, panelFlags);
+        ImGui::Begin("##TmTilesPanel", nullptr, sidePanelFlags);
 
         ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Tiles");
         ImGui::SameLine();
@@ -6781,6 +6806,8 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 }
             }
 
+            ImGui::Text("Layer (0=back, 3=front)");
+            ImGui::SliderInt("##tilelayer", &obj.layer, 0, 3);
             ImGui::Text("Cells: %d", (int)obj.cells.size());
             if (ImGui::Button("Paint##tilepaint"))
             {
@@ -8073,6 +8100,7 @@ void FrameTick(float dt)
                             oe.camFollow = obj.camFollow;
                             oe.collision = obj.collision;
                             oe.displayScale = obj.displayScale;
+                            oe.layer = obj.layer;
                             memcpy(oe.name, obj.name, sizeof(oe.name));
                             oe.name[31] = '\0';
                             tse.objects.push_back(oe);
@@ -8123,7 +8151,17 @@ void FrameTick(float dt)
                     he.cursorFrame = el.cursorFrame;
                     he.cursorOffX = el.cursorOffX;
                     he.cursorOffY = el.cursorOffY;
+                    for (auto& si : el.spriteItems) {
+                        GBAHudPieceExport pe;
+                        pe.spriteAssetIdx = si.spriteAssetIdx;
+                        pe.frame = si.frame;
+                        pe.localX = si.localX;
+                        pe.localY = si.localY;
+                        pe.size = si.size;
+                        he.sprites.push_back(pe);
+                    }
                     he.layerPieces = el.layerPieces;
+                    he.layerSprites = el.layerSprites;
                     he.layerText = el.layerText;
                     he.layerCursor = el.layerCursor;
                     exportHudElements.push_back(std::move(he));
@@ -15925,8 +15963,8 @@ void FrameTick(float dt)
                         fprintf(cf, "elemVisible=%d\n", el.visible ? 1 : 0);
                         fprintf(cf, "elemBp=%d\n", el.blueprintIdx);
                         fprintf(cf, "elemMode=%d\n", el.runtimeMode);
-                        if (el.layerPieces != 0 || el.layerText != 1 || el.layerCursor != 2)
-                            fprintf(cf, "elemLayers=%d|%d|%d\n", el.layerPieces, el.layerText, el.layerCursor);
+                        if (el.layerPieces != 0 || el.layerSprites != 1 || el.layerText != 2 || el.layerCursor != 3)
+                            fprintf(cf, "elemLayers=%d|%d|%d|%d\n", el.layerPieces, el.layerSprites, el.layerText, el.layerCursor);
                         // Pieces
                         fprintf(cf, "elemPieceCount=%d\n", (int)el.pieces.size());
                         for (auto& pc : el.pieces)
@@ -16069,7 +16107,8 @@ void FrameTick(float dt)
                             else if (sscanf(line, "elemBp=%d", &nel.blueprintIdx) == 1) {}
                             else if (sscanf(line, "elemMode=%d", &nel.runtimeMode) == 1) {}
                             else if (strncmp(line, "elemLayers=", 11) == 0) {
-                                sscanf(line + 11, "%d|%d|%d", &nel.layerPieces, &nel.layerText, &nel.layerCursor);
+                                int n = sscanf(line + 11, "%d|%d|%d|%d", &nel.layerPieces, &nel.layerSprites, &nel.layerText, &nel.layerCursor);
+                                if (n == 3) { nel.layerCursor = nel.layerText; nel.layerText = nel.layerSprites; nel.layerSprites = 1; }
                             }
                             else if (sscanf(line, "elemPieceCount=%d", &ival2) == 1) {
                                 nel.pieces.clear(); nel.pieces.reserve(ival2);
@@ -16187,10 +16226,11 @@ void FrameTick(float dt)
 
                 // Layer draw order
                 ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.7f, 1.0f), "Layer Order (0=back, 2=front)");
-                if (ImGui::SliderInt("Pieces##layer", &el.layerPieces, 0, 2)) sProjectDirty = true;
-                if (ImGui::SliderInt("Text##layer", &el.layerText, 0, 2)) sProjectDirty = true;
-                if (ImGui::SliderInt("Cursor##layer", &el.layerCursor, 0, 2)) sProjectDirty = true;
+                ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.7f, 1.0f), "Layer Order (0=back, 3=front)");
+                if (ImGui::SliderInt("Background##layer", &el.layerPieces, 0, 3)) sProjectDirty = true;
+                if (ImGui::SliderInt("Sprites##layer", &el.layerSprites, 0, 3)) sProjectDirty = true;
+                if (ImGui::SliderInt("Text##layer", &el.layerText, 0, 3)) sProjectDirty = true;
+                if (ImGui::SliderInt("Cursor##layer", &el.layerCursor, 0, 3)) sProjectDirty = true;
 
                 // ============ BACKGROUND ============
                 ImGui::Spacing();

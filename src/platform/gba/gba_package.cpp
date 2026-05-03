@@ -359,11 +359,16 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
     // Compute max piece size per asset from HUD elements (pieces may request larger OAM than asset's native size)
     std::vector<int> hudMaxSize(assets.size(), 0);
-    for (const auto& el : hudElements)
+    for (const auto& el : hudElements) {
         for (const auto& pc : el.pieces)
             if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)assets.size())
                 if (pc.size > hudMaxSize[pc.spriteAssetIdx])
                     hudMaxSize[pc.spriteAssetIdx] = pc.size;
+        for (const auto& sp : el.sprites)
+            if (sp.spriteAssetIdx >= 0 && sp.spriteAssetIdx < (int)assets.size())
+                if (sp.size > hudMaxSize[sp.spriteAssetIdx])
+                    hudMaxSize[sp.spriteAssetIdx] = sp.size;
+    }
 
     std::vector<int> assetObjSize; // snapped OBJ size per asset
     for (size_t ai = 0; ai < assets.size(); ai++)
@@ -1501,19 +1506,21 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "#define AFN_HUD_ELEM_COUNT " << (int)hudElements.size() << "\n";
 
         // Emit element descriptors: {screenX, screenY, pieceStart, pieceCount, stopStart, stopCount, textStart, textCount, cursorAsset, cursorFrame, cursorOffX, cursorOffY}
-        int totalPieces = 0, totalStops = 0, totalText = 0;
-        for (auto& el : hudElements) { totalPieces += (int)el.pieces.size(); totalStops += (int)el.stops.size(); totalText += (int)el.textRows.size(); }
+        int totalPieces = 0, totalSprites = 0, totalStops = 0, totalText = 0;
+        for (auto& el : hudElements) { totalPieces += (int)el.pieces.size(); totalSprites += (int)el.sprites.size(); totalStops += (int)el.stops.size(); totalText += (int)el.textRows.size(); }
 
-        f << "static const struct { s16 x,y; u16 pieceStart,pieceCount,stopStart,stopCount,textStart,textCount; s8 curAsset,curFrame,curOffX,curOffY; u8 layerPieces,layerText,layerCursor,pad; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
-        int pOff = 0, sOff = 0, tOff = 0;
+        f << "static const struct { s16 x,y; u16 pieceStart,pieceCount,spriteStart,spriteCount,stopStart,stopCount,textStart,textCount; s8 curAsset,curFrame,curOffX,curOffY; u8 layerPieces,layerSprites,layerText,layerCursor; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
+        int pOff = 0, spOff = 0, sOff = 0, tOff = 0;
         for (auto& el : hudElements) {
             f << "    {" << el.screenX << "," << el.screenY << ","
               << pOff << "," << (int)el.pieces.size() << ","
+              << spOff << "," << (int)el.sprites.size() << ","
               << sOff << "," << (int)el.stops.size() << ","
               << tOff << "," << (int)el.textRows.size() << ","
               << el.cursorAssetIdx << "," << el.cursorFrame << "," << el.cursorOffX << "," << el.cursorOffY << ","
-              << el.layerPieces << "," << el.layerText << "," << el.layerCursor << ",0},\n";
+              << el.layerPieces << "," << el.layerSprites << "," << el.layerText << "," << el.layerCursor << "},\n";
             pOff += (int)el.pieces.size();
+            spOff += (int)el.sprites.size();
             sOff += (int)el.stops.size();
             tOff += (int)el.textRows.size();
         }
@@ -1528,6 +1535,17 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "};\n";
         } else {
             f << "static const int afn_hud_pieces[1] = {0}; // no pieces\n";
+        }
+
+        // Sprites: {assetIdx, frame, localX, localY, size}
+        if (totalSprites > 0) {
+            f << "static const struct { s8 asset; u8 frame; s16 x,y; u8 size; } afn_hud_sprites[" << totalSprites << "] = {\n";
+            for (auto& el : hudElements)
+                for (auto& sp : el.sprites)
+                    f << "    {" << sp.spriteAssetIdx << "," << sp.frame << "," << sp.localX << "," << sp.localY << "," << sp.size << "},\n";
+            f << "};\n";
+        } else {
+            f << "static const int afn_hud_sprites[1] = {0}; // no sprites\n";
         }
 
         // Stops: {localX, localY, linkedElement}
@@ -4682,7 +4700,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             {
                 // { tileX, tileY, type, spriteAssetIdx, camFollow, teleportScene, scale8 }
                 // scale8: 8.8 fixed point (256 = 1.0x, 128 = 0.5x, 64 = 0.25x)
-                f << "static const struct { s16 tx,ty; u8 type; s8 assetIdx; u8 camFollow; u8 collision; s8 teleScene; u16 scale8; } "
+                f << "static const struct { s16 tx,ty; u8 type; s8 assetIdx; u8 camFollow; u8 collision; s8 teleScene; u16 scale8; u8 layer; } "
                   << "afn_tm" << si << "_objs[" << objCount << "] = {\n";
                 for (int oi = 0; oi < objCount; oi++)
                 {
@@ -4691,7 +4709,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     if (scale8 < 1) scale8 = 256;
                     f << "    {" << obj.tileX << "," << obj.tileY << ","
                       << obj.type << "," << obj.spriteAssetIdx << ","
-                      << (obj.camFollow ? 1 : 0) << "," << (obj.collision ? 1 : 0) << "," << obj.teleportScene << "," << scale8 << "},\n";
+                      << (obj.camFollow ? 1 : 0) << "," << (obj.collision ? 1 : 0) << "," << obj.teleportScene << "," << scale8 << "," << obj.layer << "},\n";
                 }
                 f << "};\n";
             }

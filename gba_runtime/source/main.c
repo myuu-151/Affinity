@@ -4476,7 +4476,11 @@ int main(void)
                 int oamSlot = 1;
 #if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
                 int oi;
+                int layerPass;
+                // Render objects from highest layer to lowest (higher layer = lower OAM slot = on top)
+                for (layerPass = 3; layerPass >= 0; layerPass--)
                 for (oi = 0; oi < AFN_TM0_OBJ_COUNT && oamSlot < 128; oi++) {
+                    if ((int)afn_tm0_objs[oi].layer != layerPass) continue;
                     if (oi == AFN_TM_PLAYER_OBJ) continue;
                     if (afn_tm0_objs[oi].type == 6) continue; // skip Tile objects
                     int ai = afn_tm0_objs[oi].assetIdx;
@@ -4581,17 +4585,18 @@ int main(void)
                     int hudTileAdj = 512 + AFN_DIR_VRAM_TILES - (1024 - staticTiles2);
                     int pi;
                     // Render layers in order: highest layer value first (lowest OAM slot = on top)
-                    // layers[0..2] map to: 0=pieces, 1=text, 2=cursor
-                    int layerOrder[3];
+                    // layers[0..3] map to: 0=pieces, 1=sprites, 2=text, 3=cursor
+                    int layerOrder[4];
                     { int lp = afn_hud_elems[ei].layerPieces;
+                      int ls = afn_hud_elems[ei].layerSprites;
                       int lt = afn_hud_elems[ei].layerText;
                       int lc = afn_hud_elems[ei].layerCursor;
                       // Sort: render highest layer first (gets lowest OAM slot = on top)
-                      // Simple insertion sort of 3 items: {type, layer}
-                      int sortType[3] = {0, 1, 2}; // pieces, text, cursor
-                      int sortVal[3]  = {lp, lt, lc};
+                      // Simple insertion sort of 4 items: {type, layer}
+                      int sortType[4] = {0, 1, 2, 3}; // pieces, sprites, text, cursor
+                      int sortVal[4]  = {lp, ls, lt, lc};
                       int si3, sj;
-                      for (si3 = 1; si3 < 3; si3++) {
+                      for (si3 = 1; si3 < 4; si3++) {
                           int tmpT = sortType[si3], tmpV = sortVal[si3];
                           sj = si3 - 1;
                           while (sj >= 0 && sortVal[sj] < tmpV) {
@@ -4599,11 +4604,13 @@ int main(void)
                           }
                           sortType[sj+1] = tmpT; sortVal[sj+1] = tmpV;
                       }
-                      layerOrder[0] = sortType[0]; layerOrder[1] = sortType[1]; layerOrder[2] = sortType[2];
+                      layerOrder[0] = sortType[0]; layerOrder[1] = sortType[1]; layerOrder[2] = sortType[2]; layerOrder[3] = sortType[3];
                     }
+                    int spStart = afn_hud_elems[ei].spriteStart;
+                    int spCount2 = afn_hud_elems[ei].spriteCount;
                     { int pass;
-                    for (pass = 0; pass < 3 && oamSlot < 126; pass++) {
-                        if (layerOrder[pass] == 2) {
+                    for (pass = 0; pass < 4 && oamSlot < 126; pass++) {
+                        if (layerOrder[pass] == 3) {
                             // Cursor
                             if (ei == afn_active_element && afn_hud_elems[ei].stopCount > 0 && afn_hud_elems[ei].curAsset >= 0 && oamSlot < 128) {
                                 int stopIdx = afn_cursor_stop;
@@ -4626,7 +4633,7 @@ int main(void)
                                     oamSlot++;
                                 }
                             }
-                        } else if (layerOrder[pass] == 1) {
+                        } else if (layerOrder[pass] == 2) {
                             // Text
                             int tStart2 = afn_hud_elems[ei].textStart;
                             int tCount2 = afn_hud_elems[ei].textCount;
@@ -4635,6 +4642,27 @@ int main(void)
                                 int tpx = ex + afn_hud_texts[tStart2 + ti2].x;
                                 int tpy = ey + afn_hud_texts[tStart2 + ti2].y;
                                 oamSlot += hud_text_oam(oamSlot, tpx, tpy, afn_hud_texts[tStart2 + ti2].text, 15);
+                            }
+                        } else if (layerOrder[pass] == 1) {
+                            // Sprites (reverse order like pieces)
+                            int spi;
+                            for (spi = spCount2 - 1; spi >= 0 && oamSlot < 126; spi--) {
+                                int ai = afn_hud_sprites[spStart + spi].asset;
+                                if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
+                                int fr = afn_hud_sprites[spStart + spi].frame;
+                                int sx = ex + afn_hud_sprites[spStart + spi].x;
+                                int sy = ey + afn_hud_sprites[spStart + spi].y;
+                                int tileBase = afn_asset_desc[ai][0];
+                                int tpf      = afn_asset_desc[ai][1];
+                                int objSz    = afn_asset_desc[ai][3];
+                                int palBank  = afn_asset_desc[ai][4];
+                                int tileCur  = tileBase - hudTileAdj + fr * tpf;
+
+                                u16 a0 = ATTR0_SQUARE | ((sy & 0xFF));
+                                u16 a1 = size_to_attr1(objSz) | ((sx & 0x1FF));
+                                u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
+                                obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
+                                oamSlot++;
                             }
                         } else {
                             // Pieces (reverse order: editor draws 0→N back to front, OAM lower slot = on top)

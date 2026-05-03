@@ -398,6 +398,7 @@ struct GBATmObjectExport {
     bool camFollow;
     bool collision;
     float displayScale;
+    int layer;
     char name[32];
 };
 
@@ -436,12 +437,13 @@ struct GBAHudElementExport {
     bool visible;
     int runtimeMode;     // 0=Both, 1=Mode4, 2=Mode0
     std::vector<GBAHudPieceExport> pieces;
+    std::vector<GBAHudPieceExport> sprites;
     std::vector<GBAHudStopExport> stops;
     std::vector<GBAHudTextRowExport> textRows;
     int cursorAssetIdx;
     int cursorFrame;
     int cursorOffX, cursorOffY;
-    int layerPieces, layerText, layerCursor;
+    int layerPieces, layerSprites, layerText, layerCursor;
 };
 
 // Package the current map into a .gba ROM.
