@@ -89,6 +89,11 @@ static int tm_dir_adj = 0;              // tile ID adjustment for direction spri
 static int tm_static_adj = 0;           // tile ID adjustment for static/HUD tiles
 static int tm_hud_was_visible = 0;      // track HUD visibility for direction tile restore
 static int tm_dir_needs_reload = 0;     // force direction tile re-DMA after first VBlank
+// Saved player OAM attributes for layer-sorted rendering
+static u16 tm_player_a0, tm_player_a1, tm_player_a2;
+static s16 tm_player_pa;
+static int tm_player_use_affine;
+static int tm_player_oam_ready;
 // Compact per-object direction VRAM (Mode 0 only — 1 facing per slot)
 #define TM_MAX_DIR_OBJS 32
 static int tm_obj_vram_slot[TM_MAX_DIR_OBJS];   // VRAM tile start per tilemap object
@@ -4359,7 +4364,8 @@ int main(void)
             REG_BG0HOFS = tm_cam_x;
             REG_BG0VOFS = tm_cam_y;
 
-            // Animation + rendering
+            // Player animation update — save OAM data for layer-sorted rendering
+            tm_player_oam_ready = 0;
 #if AFN_TM_PLAYER_OBJ >= 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
             {
                 int playerAsset = afn_tm0_objs[AFN_TM_PLAYER_OBJ].assetIdx;
@@ -4405,34 +4411,22 @@ int main(void)
                         mode0_dma_dir_facing(AFN_TM_PLAYER_OBJ, playerAsset, curSet, facing);
                         int tileCur = tm_obj_vram_slot[AFN_TM_PLAYER_OBJ];
 
-                        // Apply displayScale via OAM affine
-                        // scale8 is 8.8 fixed: 256 = 1.0x
-                        // Auto-fit: scale sprite to displayScale * tile_size pixels
-                        // visSize = displayScale * tile_size
-                        // affine pa = dirSize / visSize (in 8.8 fixed)
                         int scale8 = (int)afn_tm0_objs[AFN_TM_PLAYER_OBJ].scale8;
                         if (scale8 < 1) scale8 = 256;
-                        // Target pixel size = displayScale * tile_size
-                        // pa = (dirSize * 256) / (displayScale * tile_size)
-                        //    = (dirSize * 256 * 256) / (scale8 * tile_size)
                         int pa = (dirSize * 256 * 256) / (scale8 * tm_tile_size);
                         if (pa < 1) pa = 256;
-                        // Set affine matrix 0
-                        OBJ_AFFINE *oa = &obj_aff_mem[0];
-                        oa->pa = (s16)pa;
-                        oa->pb = 0;
-                        oa->pc = 0;
-                        oa->pd = (s16)pa;
 
-                        // Double-size canvas = 2 * dirSize
                         int canvasSize = dirSize * 2;
                         int adjX = scrX + (tm_tile_size - canvasSize) / 2;
                         int adjY = scrY + (tm_tile_size - canvasSize) / 2;
 
-                        u16 a0 = ATTR0_SQUARE | ATTR0_AFF_DBL | ((adjY & 0xFF));
-                        u16 a1 = size_to_attr1(dirSize) | ATTR1_AFF_ID(0) | ((adjX & 0x1FF));
-                        u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(1) | (tileCur & 0x3FF);
-                        obj_set_attr(&oam_mem[0], a0, a1, a2);
+                        { int plPrio = (afn_tm0_objs[AFN_TM_PLAYER_OBJ].layer == 0) ? 3 : 1;
+                        tm_player_a0 = ATTR0_SQUARE | ATTR0_AFF_DBL | ((adjY & 0xFF));
+                        tm_player_a1 = size_to_attr1(dirSize) | ((adjX & 0x1FF)); // AFF_ID set at render time
+                        tm_player_a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(plPrio) | (tileCur & 0x3FF); }
+                        tm_player_pa = (s16)pa;
+                        tm_player_use_affine = 1;
+                        tm_player_oam_ready = 1;
                     }
                     else
 #endif
@@ -4459,21 +4453,20 @@ int main(void)
                         int objSz   = afn_asset_desc[playerAsset][3];
                         int palBank = afn_asset_desc[playerAsset][4];
                         int tileCur = tileBase - tm_static_adj + curFrame * tpf;
-                        u16 a0 = ATTR0_SQUARE | ((scrY & 0x1FF));
-                        u16 a1 = size_to_attr1(objSz) | ((scrX & 0x1FF));
-                        u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(1) | (tileCur & 0x3FF);
-                        obj_set_attr(&oam_mem[0], a0, a1, a2);
+                        { int plPrio = (afn_tm0_objs[AFN_TM_PLAYER_OBJ].layer == 0) ? 3 : 1;
+                        tm_player_a0 = ATTR0_SQUARE | ((scrY & 0x1FF));
+                        tm_player_a1 = size_to_attr1(objSz) | ((scrX & 0x1FF));
+                        tm_player_a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(plPrio) | (tileCur & 0x3FF); }
+                        tm_player_pa = 0;
+                        tm_player_use_affine = 0;
+                        tm_player_oam_ready = 1;
                     }
                 }
-                else
-                    obj_hide(&oam_mem[0]);
             }
-#else
-            obj_hide(&oam_mem[0]);
 #endif
-            // Draw non-player tilemap objects as OAM sprites
+            // Draw all tilemap objects (including player) sorted by layer
             {
-                int oamSlot = 1;
+                int oamSlot = 0;
 #if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
                 int oi;
                 int layerPass;
@@ -4481,8 +4474,22 @@ int main(void)
                 for (layerPass = 3; layerPass >= 0; layerPass--)
                 for (oi = 0; oi < AFN_TM0_OBJ_COUNT && oamSlot < 128; oi++) {
                     if ((int)afn_tm0_objs[oi].layer != layerPass) continue;
-                    if (oi == AFN_TM_PLAYER_OBJ) continue;
                     if (afn_tm0_objs[oi].type == 6) continue; // skip Tile objects
+                    // Player: use pre-computed OAM data from animation block
+                    if (oi == AFN_TM_PLAYER_OBJ) {
+                        if (tm_player_oam_ready) {
+                            if (tm_player_use_affine) {
+                                OBJ_AFFINE *oa = &obj_aff_mem[oamSlot];
+                                oa->pa = tm_player_pa; oa->pb = 0; oa->pc = 0; oa->pd = tm_player_pa;
+                                obj_set_attr(&oam_mem[oamSlot], tm_player_a0,
+                                    (tm_player_a1 & ~0x3E00) | ATTR1_AFF_ID(oamSlot), tm_player_a2);
+                            } else {
+                                obj_set_attr(&oam_mem[oamSlot], tm_player_a0, tm_player_a1, tm_player_a2);
+                            }
+                            oamSlot++;
+                        }
+                        continue;
+                    }
                     int ai = afn_tm0_objs[oi].assetIdx;
                     if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
 
@@ -4530,9 +4537,11 @@ int main(void)
                     int adjX = osx + (tm_tile_size - canvasSize) / 2;
                     int adjY = osy + (tm_tile_size - canvasSize) / 2;
 
+                    // Layer 0 objects render behind BG (prio 3), layer 1+ in front (prio 1)
+                    int objPrio = (layerPass == 0) ? 3 : 1;
                     u16 a0 = ATTR0_SQUARE | ATTR0_AFF_DBL | ((adjY & 0xFF));
                     u16 a1 = size_to_attr1(objSz) | ATTR1_AFF_ID(oamSlot) | ((adjX & 0x1FF));
-                    u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(1) | (tileCur & 0x3FF);
+                    u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(objPrio) | (tileCur & 0x3FF);
                     obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
                     oamSlot++;
                 }
