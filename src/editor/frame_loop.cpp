@@ -4509,6 +4509,7 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
     ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Sprite Assets");
     ImGui::Separator();
 
+    static int sDragAssetSrc = -1;
     for (int i = 0; i < (int)sSpriteAssets.size(); i++)
     {
         bool sel = (sSelectedAsset == i);
@@ -4520,7 +4521,44 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             sAssetPreviewFrame = 0;
             sAssetPreviewTimer = 0.0f;
         }
+        // Drag source
+        if (ImGui::IsItemActive() && !ImGui::IsItemHovered())
+        {
+            if (sDragAssetSrc < 0) sDragAssetSrc = i;
+        }
+        // Drop target
+        if (sDragAssetSrc >= 0 && sDragAssetSrc != i && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
+        {
+            int src = sDragAssetSrc;
+            int dst = i;
+            // Swap asset and direction sprite data
+            std::swap(sSpriteAssets[src], sSpriteAssets[dst]);
+            if (src < (int)sAssetDirSprites.size() && dst < (int)sAssetDirSprites.size())
+                std::swap(sAssetDirSprites[src], sAssetDirSprites[dst]);
+            // Update all references
+            auto remap = [&](int& idx) {
+                if (idx == src) idx = dst;
+                else if (idx == dst) idx = src;
+            };
+            for (auto& sp : sSprites) remap(sp.assetIdx);
+            for (auto& obj : sTmObjects) remap(obj.spriteAssetIdx);
+            for (auto& sc : sTmScenes)
+                for (auto& obj : sc.objects)
+                    remap(obj.spriteAssetIdx);
+            for (auto& el : sHudElements)
+            {
+                remap(el.spriteAssetIdx);
+                for (auto& pc : el.pieces) remap(pc.spriteAssetIdx);
+                for (auto& sp : el.spriteItems) remap(sp.spriteAssetIdx);
+                remap(el.cursorAssetIdx);
+            }
+            for (auto& sa : sSpriteAssets) remap(sa.paletteSrc);
+            if (sSelectedAsset == src) sSelectedAsset = dst;
+            else if (sSelectedAsset == dst) sSelectedAsset = src;
+            sDragAssetSrc = dst;
+        }
     }
+    if (!ImGui::IsMouseDown(0)) sDragAssetSrc = -1;
 
     ImGui::Separator();
     if (ImGui::Button("+ New", ImVec2(-1, 0)))
@@ -4587,6 +4625,21 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                     el.spriteAssetIdx = -1;
                 else if (el.spriteAssetIdx > sSelectedAsset)
                     el.spriteAssetIdx--;
+                for (auto& pc : el.pieces) {
+                    if (pc.spriteAssetIdx == sSelectedAsset) pc.spriteAssetIdx = -1;
+                    else if (pc.spriteAssetIdx > sSelectedAsset) pc.spriteAssetIdx--;
+                }
+                for (auto& sp : el.spriteItems) {
+                    if (sp.spriteAssetIdx == sSelectedAsset) sp.spriteAssetIdx = -1;
+                    else if (sp.spriteAssetIdx > sSelectedAsset) sp.spriteAssetIdx--;
+                }
+                if (el.cursorAssetIdx == sSelectedAsset) el.cursorAssetIdx = -1;
+                else if (el.cursorAssetIdx > sSelectedAsset) el.cursorAssetIdx--;
+            }
+            // Fix up paletteSrc references
+            for (auto& sa : sSpriteAssets) {
+                if (sa.paletteSrc == sSelectedAsset) sa.paletteSrc = -1;
+                else if (sa.paletteSrc > sSelectedAsset) sa.paletteSrc--;
             }
             if (sSelectedAsset >= (int)sSpriteAssets.size())
                 sSelectedAsset = (int)sSpriteAssets.size() - 1;
