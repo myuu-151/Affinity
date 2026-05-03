@@ -441,6 +441,7 @@ struct GBAHudElementExport {
     int cursorAssetIdx;
     int cursorFrame;
     int cursorOffX, cursorOffY;
+    int layerPieces, layerText, layerCursor;
 };
 
 // Package the current map into a .gba ROM.

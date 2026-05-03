@@ -894,6 +894,10 @@ struct HudElement {
     };
     std::vector<SpriteItem> spriteItems;
     int selectedSpriteItem = -1;
+    // Layer draw order (0=back, 1, 2=front) — controls OAM slot ordering
+    int layerPieces = 0;   // background pieces
+    int layerText = 1;     // text rows
+    int layerCursor = 2;   // cursor sprite
     // Section collapse state (editor only)
     bool collapseBackground = false;
     bool collapseSprites = false;
@@ -2001,6 +2005,8 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "elemBp=%d\n", el.blueprintIdx);
         if (el.runtimeMode != 0)
             fprintf(f, "elemMode=%d\n", el.runtimeMode);
+        if (el.layerPieces != 0 || el.layerText != 1 || el.layerCursor != 2)
+            fprintf(f, "elemLayers=%d|%d|%d\n", el.layerPieces, el.layerText, el.layerCursor);
     }
     fprintf(f, "\n");
 
@@ -2912,6 +2918,10 @@ static bool LoadProject(const std::string& path)
             }
             else if (sscanf(line, "elemMode=%d", &ival) == 1 && !sHudElements.empty()) {
                 sHudElements.back().runtimeMode = ival;
+            }
+            else if (strncmp(line, "elemLayers=", 11) == 0 && !sHudElements.empty()) {
+                sscanf(line + 11, "%d|%d|%d", &sHudElements.back().layerPieces,
+                    &sHudElements.back().layerText, &sHudElements.back().layerCursor);
             }
         }
         else if (strcmp(section, "Palette") == 0)
@@ -8113,6 +8123,9 @@ void FrameTick(float dt)
                     he.cursorFrame = el.cursorFrame;
                     he.cursorOffX = el.cursorOffX;
                     he.cursorOffY = el.cursorOffY;
+                    he.layerPieces = el.layerPieces;
+                    he.layerText = el.layerText;
+                    he.layerCursor = el.layerCursor;
                     exportHudElements.push_back(std::move(he));
                 }
 
@@ -15912,6 +15925,8 @@ void FrameTick(float dt)
                         fprintf(cf, "elemVisible=%d\n", el.visible ? 1 : 0);
                         fprintf(cf, "elemBp=%d\n", el.blueprintIdx);
                         fprintf(cf, "elemMode=%d\n", el.runtimeMode);
+                        if (el.layerPieces != 0 || el.layerText != 1 || el.layerCursor != 2)
+                            fprintf(cf, "elemLayers=%d|%d|%d\n", el.layerPieces, el.layerText, el.layerCursor);
                         // Pieces
                         fprintf(cf, "elemPieceCount=%d\n", (int)el.pieces.size());
                         for (auto& pc : el.pieces)
@@ -16053,6 +16068,9 @@ void FrameTick(float dt)
                             else if (sscanf(line, "elemVisible=%d", &ival2) == 1) nel.visible = ival2 != 0;
                             else if (sscanf(line, "elemBp=%d", &nel.blueprintIdx) == 1) {}
                             else if (sscanf(line, "elemMode=%d", &nel.runtimeMode) == 1) {}
+                            else if (strncmp(line, "elemLayers=", 11) == 0) {
+                                sscanf(line + 11, "%d|%d|%d", &nel.layerPieces, &nel.layerText, &nel.layerCursor);
+                            }
                             else if (sscanf(line, "elemPieceCount=%d", &ival2) == 1) {
                                 nel.pieces.clear(); nel.pieces.reserve(ival2);
                             }
@@ -16166,6 +16184,13 @@ void FrameTick(float dt)
                     if (ImGui::Combo("Runtime Mode", &el.runtimeMode, modeNames, 3))
                         sProjectDirty = true;
                 }
+
+                // Layer draw order
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.7f, 1.0f), "Layer Order (0=back, 2=front)");
+                if (ImGui::SliderInt("Pieces##layer", &el.layerPieces, 0, 2)) sProjectDirty = true;
+                if (ImGui::SliderInt("Text##layer", &el.layerText, 0, 2)) sProjectDirty = true;
+                if (ImGui::SliderInt("Cursor##layer", &el.layerCursor, 0, 2)) sProjectDirty = true;
 
                 // ============ BACKGROUND ============
                 ImGui::Spacing();

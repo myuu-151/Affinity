@@ -1504,14 +1504,15 @@ static bool GenerateMapData(const std::string& runtimeDir,
         int totalPieces = 0, totalStops = 0, totalText = 0;
         for (auto& el : hudElements) { totalPieces += (int)el.pieces.size(); totalStops += (int)el.stops.size(); totalText += (int)el.textRows.size(); }
 
-        f << "static const struct { s16 x,y; u16 pieceStart,pieceCount,stopStart,stopCount,textStart,textCount; s8 curAsset,curFrame,curOffX,curOffY; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
+        f << "static const struct { s16 x,y; u16 pieceStart,pieceCount,stopStart,stopCount,textStart,textCount; s8 curAsset,curFrame,curOffX,curOffY; u8 layerPieces,layerText,layerCursor,pad; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
         int pOff = 0, sOff = 0, tOff = 0;
         for (auto& el : hudElements) {
             f << "    {" << el.screenX << "," << el.screenY << ","
               << pOff << "," << (int)el.pieces.size() << ","
               << sOff << "," << (int)el.stops.size() << ","
               << tOff << "," << (int)el.textRows.size() << ","
-              << el.cursorAssetIdx << "," << el.cursorFrame << "," << el.cursorOffX << "," << el.cursorOffY << "},\n";
+              << el.cursorAssetIdx << "," << el.cursorFrame << "," << el.cursorOffX << "," << el.cursorOffY << ","
+              << el.layerPieces << "," << el.layerText << "," << el.layerCursor << ",0},\n";
             pOff += (int)el.pieces.size();
             sOff += (int)el.stops.size();
             tOff += (int)el.textRows.size();

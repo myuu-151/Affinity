@@ -4580,58 +4580,84 @@ int main(void)
                     int staticTiles2 = AFN_ALL_TILES_LEN / 32;
                     int hudTileAdj = 512 + AFN_DIR_VRAM_TILES - (1024 - staticTiles2);
                     int pi;
-                    // Draw cursor FIRST (lowest OAM slot = renders on top)
-                    if (ei == afn_active_element && afn_hud_elems[ei].stopCount > 0 && afn_hud_elems[ei].curAsset >= 0 && oamSlot < 128) {
-                        int stopIdx = afn_cursor_stop;
-                        int maxStops = afn_hud_elems[ei].stopCount;
-                        if (stopIdx < 0 || stopIdx >= maxStops) stopIdx = 0;
-                        int si2 = afn_hud_elems[ei].stopStart + stopIdx;
-                        int csx = ex + (int)afn_hud_stops[si2].x + (int)afn_hud_elems[ei].curOffX;
-                        int csy = ey + (int)afn_hud_stops[si2].y + (int)afn_hud_elems[ei].curOffY;
-                        int cai = afn_hud_elems[ei].curAsset;
-                        int cfr = afn_hud_elems[ei].curFrame;
-                        if (cai >= 0 && cai < AFN_ASSET_COUNT) {
-                            int ctb = afn_asset_desc[cai][0];
-                            int ctpf = afn_asset_desc[cai][1];
-                            int csz = afn_asset_desc[cai][3];
-                            int cpb = afn_asset_desc[cai][4];
-                            u16 ca0 = ATTR0_SQUARE | ((csy & 0xFF));
-                            u16 ca1 = size_to_attr1(csz) | ((csx & 0x1FF));
-                            u16 ca2 = ATTR2_PALBANK(cpb) | ATTR2_PRIO(0) | ((ctb - hudTileAdj + cfr * ctpf) & 0x3FF);
-                            obj_set_attr(&oam_mem[oamSlot], ca0, ca1, ca2);
-                            oamSlot++;
-                        }
-                    }
-                    // Render text rows as OAM (between cursor and pieces for draw order)
-                    { int tStart2 = afn_hud_elems[ei].textStart;
-                      int tCount2 = afn_hud_elems[ei].textCount;
-                      int ti2;
-                      for (ti2 = 0; ti2 < tCount2 && oamSlot < 126; ti2++) {
-                          int tpx = ex + afn_hud_texts[tStart2 + ti2].x;
-                          int tpy = ey + afn_hud_texts[tStart2 + ti2].y;
-                          oamSlot += hud_text_oam(oamSlot, tpx, tpy, afn_hud_texts[tStart2 + ti2].text, 15);
+                    // Render layers in order: highest layer value first (lowest OAM slot = on top)
+                    // layers[0..2] map to: 0=pieces, 1=text, 2=cursor
+                    int layerOrder[3];
+                    { int lp = afn_hud_elems[ei].layerPieces;
+                      int lt = afn_hud_elems[ei].layerText;
+                      int lc = afn_hud_elems[ei].layerCursor;
+                      // Sort: render highest layer first (gets lowest OAM slot = on top)
+                      // Simple insertion sort of 3 items: {type, layer}
+                      int sortType[3] = {0, 1, 2}; // pieces, text, cursor
+                      int sortVal[3]  = {lp, lt, lc};
+                      int si3, sj;
+                      for (si3 = 1; si3 < 3; si3++) {
+                          int tmpT = sortType[si3], tmpV = sortVal[si3];
+                          sj = si3 - 1;
+                          while (sj >= 0 && sortVal[sj] < tmpV) {
+                              sortType[sj+1] = sortType[sj]; sortVal[sj+1] = sortVal[sj]; sj--;
+                          }
+                          sortType[sj+1] = tmpT; sortVal[sj+1] = tmpV;
                       }
+                      layerOrder[0] = sortType[0]; layerOrder[1] = sortType[1]; layerOrder[2] = sortType[2];
                     }
-                    // Render pieces in reverse order: editor draws 0→N (back to front),
-                    // but GBA OAM lower slots render on top, so iterate N→0
-                    for (pi = pCount - 1; pi >= 0 && oamSlot < 126; pi--) {
-                        int ai = afn_hud_pieces[pStart + pi].asset;
-                        if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
-                        int fr = afn_hud_pieces[pStart + pi].frame;
-                        int sx = ex + afn_hud_pieces[pStart + pi].x;
-                        int sy = ey + afn_hud_pieces[pStart + pi].y;
-                        int tileBase = afn_asset_desc[ai][0];
-                        int tpf      = afn_asset_desc[ai][1];
-                        int objSz    = afn_asset_desc[ai][3];
-                        int palBank  = afn_asset_desc[ai][4];
-                        int tileCur  = tileBase - hudTileAdj + fr * tpf;
+                    { int pass;
+                    for (pass = 0; pass < 3 && oamSlot < 126; pass++) {
+                        if (layerOrder[pass] == 2) {
+                            // Cursor
+                            if (ei == afn_active_element && afn_hud_elems[ei].stopCount > 0 && afn_hud_elems[ei].curAsset >= 0 && oamSlot < 128) {
+                                int stopIdx = afn_cursor_stop;
+                                int maxStops = afn_hud_elems[ei].stopCount;
+                                if (stopIdx < 0 || stopIdx >= maxStops) stopIdx = 0;
+                                int si2 = afn_hud_elems[ei].stopStart + stopIdx;
+                                int csx = ex + (int)afn_hud_stops[si2].x + (int)afn_hud_elems[ei].curOffX;
+                                int csy = ey + (int)afn_hud_stops[si2].y + (int)afn_hud_elems[ei].curOffY;
+                                int cai = afn_hud_elems[ei].curAsset;
+                                int cfr = afn_hud_elems[ei].curFrame;
+                                if (cai >= 0 && cai < AFN_ASSET_COUNT) {
+                                    int ctb = afn_asset_desc[cai][0];
+                                    int ctpf = afn_asset_desc[cai][1];
+                                    int csz = afn_asset_desc[cai][3];
+                                    int cpb = afn_asset_desc[cai][4];
+                                    u16 ca0 = ATTR0_SQUARE | ((csy & 0xFF));
+                                    u16 ca1 = size_to_attr1(csz) | ((csx & 0x1FF));
+                                    u16 ca2 = ATTR2_PALBANK(cpb) | ATTR2_PRIO(0) | ((ctb - hudTileAdj + cfr * ctpf) & 0x3FF);
+                                    obj_set_attr(&oam_mem[oamSlot], ca0, ca1, ca2);
+                                    oamSlot++;
+                                }
+                            }
+                        } else if (layerOrder[pass] == 1) {
+                            // Text
+                            int tStart2 = afn_hud_elems[ei].textStart;
+                            int tCount2 = afn_hud_elems[ei].textCount;
+                            int ti2;
+                            for (ti2 = 0; ti2 < tCount2 && oamSlot < 126; ti2++) {
+                                int tpx = ex + afn_hud_texts[tStart2 + ti2].x;
+                                int tpy = ey + afn_hud_texts[tStart2 + ti2].y;
+                                oamSlot += hud_text_oam(oamSlot, tpx, tpy, afn_hud_texts[tStart2 + ti2].text, 15);
+                            }
+                        } else {
+                            // Pieces (reverse order: editor draws 0→N back to front, OAM lower slot = on top)
+                            for (pi = pCount - 1; pi >= 0 && oamSlot < 126; pi--) {
+                                int ai = afn_hud_pieces[pStart + pi].asset;
+                                if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
+                                int fr = afn_hud_pieces[pStart + pi].frame;
+                                int sx = ex + afn_hud_pieces[pStart + pi].x;
+                                int sy = ey + afn_hud_pieces[pStart + pi].y;
+                                int tileBase = afn_asset_desc[ai][0];
+                                int tpf      = afn_asset_desc[ai][1];
+                                int objSz    = afn_asset_desc[ai][3];
+                                int palBank  = afn_asset_desc[ai][4];
+                                int tileCur  = tileBase - hudTileAdj + fr * tpf;
 
-                        u16 a0 = ATTR0_SQUARE | ((sy & 0xFF));
-                        u16 a1 = size_to_attr1(objSz) | ((sx & 0x1FF));
-                        u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
-                        obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
-                        oamSlot++;
-                    }
+                                u16 a0 = ATTR0_SQUARE | ((sy & 0xFF));
+                                u16 a1 = size_to_attr1(objSz) | ((sx & 0x1FF));
+                                u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
+                                obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
+                                oamSlot++;
+                            }
+                        }
+                    }}
                 }}
 #endif
                 // Hide remaining OAM slots
