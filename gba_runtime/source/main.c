@@ -4268,17 +4268,20 @@ int main(void)
             afn_bp_dispatch_key_released();
 
             // Apply script-driven animation change (or revert to idle if no script requested one)
-            if (afn_play_anim >= 0) {
-                if (afn_play_anim != tm_anim_idx) {
-                    tm_anim_idx = afn_play_anim;
+            // When frozen, ignore script anim requests — hold current frame
+            if (!afn_player_frozen) {
+                if (afn_play_anim >= 0) {
+                    if (afn_play_anim != tm_anim_idx) {
+                        tm_anim_idx = afn_play_anim;
+                        tm_anim_frame = 0;
+                        tm_anim_timer = 0;
+                    }
+                } else if (tm_anim_idx != 0) {
+                    // No script requested an animation this frame — revert to idle
+                    tm_anim_idx = 0;
                     tm_anim_frame = 0;
                     tm_anim_timer = 0;
                 }
-            } else if (tm_anim_idx != 0) {
-                // No script requested an animation this frame — revert to idle
-                tm_anim_idx = 0;
-                tm_anim_frame = 0;
-                tm_anim_timer = 0;
             }
 
             // Derive tile move speed from script Walk node
@@ -4344,12 +4347,14 @@ int main(void)
                         int ticksPerFrame = (fps > 0) ? (60 / fps) : 8;
                         if (ticksPerFrame < 1) ticksPerFrame = 1;
 
+                        if (!afn_player_frozen) {
                         tm_anim_timer++;
                         if (tm_anim_timer >= ticksPerFrame) {
                             tm_anim_timer = 0;
                             tm_anim_frame++;
                             if (tm_anim_frame >= frameCount)
                                 tm_anim_frame = 0;
+                        }
                         }
 
                         // Facing direction — driven by MovePlayer node (sets tm_player_facing)
@@ -4388,12 +4393,14 @@ int main(void)
                         int ticksPerFrame = (fps > 0) ? (60 / fps) : 8;
                         if (ticksPerFrame < 1) ticksPerFrame = 1;
 
+                        if (!afn_player_frozen) {
                         tm_anim_timer++;
                         if (tm_anim_timer >= ticksPerFrame) {
                             tm_anim_timer = 0;
                             tm_anim_frame++;
                             if (tm_anim_frame >= frameCount)
                                 tm_anim_frame = 0;
+                        }
                         }
 
                         int curFrame = baseSet + tm_anim_frame;

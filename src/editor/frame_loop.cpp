@@ -11810,9 +11810,11 @@ void FrameTick(float dt)
                     char bodyBuf[512];
                     if (dir >= 0 && dir < 4)
                         snprintf(bodyBuf, sizeof(bodyBuf),
-                            "    if (key_is_down(%s)) { %s;\n"
+                            "    if (!afn_player_frozen && key_is_down(%s)) {\n"
+                            "        %s;\n"
                             "        if (tm_move_timer == 0) tm_player_facing = %d; }\n"
                             "    // --- Runtime (main.c) ---\n"
+                            "    // Frozen: skips input, facing, and anim cycling\n"
                             "    // Mode 0: tap = turn in place, hold = walk\n"
                             "    // Mode 4: player_x += (viewSin * moveFwd) >> 8;",
                             dirKeysGba[dir], dirVarsGba[dir], dirFacingGba[dir]);
