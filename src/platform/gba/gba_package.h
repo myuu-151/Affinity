@@ -335,6 +335,7 @@ enum class GBAScriptNodeType : int {
     CursorDown,
     FollowLink,
     GetCursorStop,
+    BlueprintRef,
     COUNT
 };
 

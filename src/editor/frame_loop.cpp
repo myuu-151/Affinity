@@ -427,6 +427,7 @@ enum class VsNodeType : int {
     CursorDown,     // move element cursor to next stop (wraps)
     FollowLink,     // navigate to linked element at current cursor stop
     GetCursorStop,  // data: returns current cursor stop index
+    BlueprintRef,   // data: constant blueprint definition index (dropdown)
     COUNT
 };
 
@@ -490,8 +491,8 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Check Flag",     0xFF885533, 1, 2, 1, 0, {"Flag (int)"}, {}, {"Set", "Clear"} },
     { "Set Flag",       0xFF3355AA, 1, 1, 2, 0, {"Flag (int)", "Value (int)"}, {}, {} },
     { "Toggle Flag",    0xFF3355AA, 1, 1, 1, 0, {"Flag (int)"}, {}, {} },
-    { "Freeze Player",  0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
-    { "Unfreeze Player",0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Freeze Player",  0xFF3355AA, 1, 1, 1, 0, {"Blueprint"}, {}, {} },
+    { "Unfreeze Player",0xFF3355AA, 1, 1, 1, 0, {"Blueprint"}, {}, {} },
     { "Set Cam Height", 0xFF3355AA, 1, 1, 1, 0, {"Height (int)"}, {}, {} },
     { "Set Horizon",    0xFF3355AA, 1, 1, 1, 0, {"Scanline (int)"}, {}, {} },
     { "Teleport",       0xFF3355AA, 1, 1, 3, 0, {"X (int)", "Y (int)", "Z (int)"}, {}, {} },
@@ -705,6 +706,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Cursor Down",    0xFF8855AA, 1, 1, 0, 0, {}, {}, {} },
     { "Follow Link",    0xFF8855AA, 1, 1, 0, 0, {}, {}, {} },
     { "Get Cursor Stop",0xFF666688, 0, 0, 0, 1, {}, {"Stop"}, {} },
+    { "Blueprint",      0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
 };
 
 struct VsNode {
@@ -830,6 +832,7 @@ struct StopModifier {
     int offsetX = 0, offsetY = 0; // position offset when this stop is active
     float scale = 1.0f;          // scale multiplier (1.0 = no change)
     float rotation = 0.0f;       // rotation in degrees
+    uint32_t color = 0;          // tint color RGBA8 (0 = no color change)
 };
 static constexpr int kMaxStopModifiers = 4;
 
@@ -1984,9 +1987,9 @@ static bool SaveProject(const std::string& path)
         for (auto& st : el.stops) {
             fprintf(f, "elemStop=%d|%d|%d\n", st.localX, st.localY, st.linkedElement);
             for (int mi = 0; mi < st.modifierCount && mi < kMaxStopModifiers; mi++)
-                fprintf(f, "elemStopMod=%d|%d|%d|%f|%f\n", st.modifiers[mi].targetSpriteIdx,
+                fprintf(f, "elemStopMod=%d|%d|%d|%f|%f|%u\n", st.modifiers[mi].targetSpriteIdx,
                     st.modifiers[mi].offsetX, st.modifiers[mi].offsetY,
-                    st.modifiers[mi].scale, st.modifiers[mi].rotation);
+                    st.modifiers[mi].scale, st.modifiers[mi].rotation, st.modifiers[mi].color);
         }
         fprintf(f, "elemCursor=%d|%d|%d|%d\n", el.cursorAssetIdx, el.cursorFrame, el.cursorOffX, el.cursorOffY);
         fprintf(f, "elemTextCount=%d\n", (int)el.textRows.size());
@@ -2863,9 +2866,12 @@ static bool LoadProject(const std::string& path)
                 auto& st = sHudElements.back().stops.back();
                 if (st.modifierCount < kMaxStopModifiers) {
                     auto& mod = st.modifiers[st.modifierCount];
-                    if (sscanf(line + 12, "%d|%d|%d|%f|%f", &mod.targetSpriteIdx,
-                        &mod.offsetX, &mod.offsetY, &mod.scale, &mod.rotation) >= 5)
+                    unsigned colVal = 0;
+                    if (sscanf(line + 12, "%d|%d|%d|%f|%f|%u", &mod.targetSpriteIdx,
+                        &mod.offsetX, &mod.offsetY, &mod.scale, &mod.rotation, &colVal) >= 5) {
+                        mod.color = colVal;
                         st.modifierCount++;
+                    }
                 }
             }
             else if (strncmp(line, "elemStop=", 9) == 0 && !sHudElements.empty()) {
@@ -10039,6 +10045,13 @@ void FrameTick(float dt)
                     sub = (n.paramInt[1] == 1) ? "Mode 0" : "Mode 4";
                     break;
                 }
+                case VsNodeType::BlueprintRef: {
+                    int bi2 = n.paramInt[0];
+                    if (bi2 >= 0 && bi2 < (int)sBlueprintAssets.size())
+                        sub = sBlueprintAssets[bi2].name;
+                    else { snprintf(subBuf, sizeof(subBuf), "[%d]", bi2); sub = subBuf; }
+                    break;
+                }
                 case VsNodeType::Object: {
                     int oi = n.paramInt[0];
                     int kind = n.paramInt[1];
@@ -10991,8 +11004,8 @@ void FrameTick(float dt)
                 case VsNodeType::SetTint:       desc = "Sets a color tint on a sprite (RGB15)."; break;
                 case VsNodeType::Shake:         desc = "Shakes a specific sprite for N frames."; break;
                 case VsNodeType::SetText:       desc = "Sets a HUD text slot to display a numeric value."; break;
-                case VsNodeType::ShowHUD:       desc = "Makes a HUD element slot visible."; break;
-                case VsNodeType::HideHUD:       desc = "Hides a HUD element slot."; break;
+                case VsNodeType::ShowHUD:       desc = "Makes a HUD element slot visible and freezes player movement."; break;
+                case VsNodeType::HideHUD:       desc = "Hides a HUD element slot and unfreezes player movement."; break;
                 case VsNodeType::GetRandom:     desc = "Outputs a random value between 0 and 255 (fixed-point 0.0-1.0)."; break;
                 case VsNodeType::ArrayGet:      desc = "Reads from the variable array at the given index."; break;
                 case VsNodeType::ArraySet:      desc = "Writes a value to the variable array at the given index."; break;
@@ -11049,6 +11062,7 @@ void FrameTick(float dt)
                 case VsNodeType::CursorDown:    desc = "Moves the element's cursor to the next stop (wraps to first)."; break;
                 case VsNodeType::FollowLink:    desc = "Navigates to the linked element at the current cursor stop."; break;
                 case VsNodeType::GetCursorStop: desc = "Returns the current cursor stop index (0-based)."; break;
+                case VsNodeType::BlueprintRef:  desc = "Outputs a blueprint definition index. Use with Freeze/Unfreeze Player to disable a specific blueprint."; break;
                 case VsNodeType::Integer:       desc = "Outputs a constant integer value."; break;
                 case VsNodeType::Key:           desc = "Outputs a key constant (A, B, L, R, etc)."; break;
                 case VsNodeType::Direction:     desc = "Outputs a direction (Left, Right, Up, Down)."; break;
@@ -11794,21 +11808,28 @@ void FrameTick(float dt)
                         "// ---- 2D Tilemap / 3D Scene ----\n"
                         "// (not implemented in editor)";
                     setActionFunc(infoNode, "_set_var",
-                        "    afn_vars[<slot>] = <value>;");
+                        "    afn_vars[<slot>] = <value>;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Read by GetVariable / CompareVar / gate nodes at call site");
                     break;
                 case VsNodeType::AddVariable:
                     editorCode =
                         "// ---- 2D Tilemap / 3D Scene ----\n"
                         "// (not implemented in editor)";
                     setActionFunc(infoNode, "_add_var",
-                        "    afn_vars[<slot>] += <amount>;");
+                        "    afn_vars[<slot>] += <amount>;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Read by GetVariable / CompareVar / gate nodes at call site");
                     break;
                 case VsNodeType::DestroyObject:
                     editorCode =
                         "// ---- 3D Scene ----\n"
                         "// (not implemented in editor)";
                     setActionFunc(infoNode, "_destroy",
-                        "    // DestroyObject: hide sprite at index");
+                        "    // DestroyObject: hide sprite at index\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // g_sprites[obj].assetIdx = -1; obj_mem[slot].attr0 = ATTR0_HIDE;\n"
+                        "    // afn_collision_enabled[obj] = 0; // no further collision");
                     break;
                 case VsNodeType::IsMoving:
                     editorCode =
@@ -11817,7 +11838,9 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_is_moving",
                         "    if (player_moving) {\n"
                         "        /* downstream actions */\n"
-                        "    }");
+                        "    }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // player_moving set by d-pad input handler each frame");
                     break;
                 case VsNodeType::IsOnGround:
                     editorCode =
@@ -11825,7 +11848,9 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_is_grounded",
                         "    if (player_on_ground) {\n"
                         "        /* downstream actions */\n"
-                        "    }");
+                        "    }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // player_on_ground set when player_y <= floor_y");
                     break;
                 case VsNodeType::IsJumping:
                     editorCode =
@@ -11833,7 +11858,9 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_is_jumping",
                         "    if (!player_on_ground && player_vy > 0) {\n"
                         "        /* downstream actions */\n"
-                        "    }");
+                        "    }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // player_vy > 0 means ascending; gravity decreases vy each frame");
                     break;
                 case VsNodeType::CheckFlag:
                     editorCode =
@@ -11870,19 +11897,35 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::FreezePlayer:
                     editorCode =
-                        "// Disable player input";
+                        "// Disable player input + freeze blueprint";
                     setActionFunc(infoNode, "_freeze",
                         "    afn_player_frozen = 1;\n"
+                        "    afn_play_anim = -1;\n"
+                        "    afn_move_speed = 0;\n"
+                        "    afn_bp_def_frozen[<blueprint>] = 1;\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // if (!afn_player_frozen) { afn_script_key_held(); ... } // blocks all key input handlers");
+                        "    // Mode 0: if (!afn_player_frozen) { dx = key_input; }\n"
+                        "    //         tm_move_timer blocked, no tile movement\n"
+                        "    // Mode 4: if (!afn_player_frozen) { inputFwd/inputRight = key; }\n"
+                        "    //         afn_play_anim = -1 reverts to idle anim\n"
+                        "    //         afn_move_speed = 0 stops walk/sprint\n"
+                        "    // --- Dispatch (mapdata.h) ---\n"
+                        "    // afn_bp_def_frozen[bpIdx] skips all dispatch for that blueprint\n"
+                        "    // key_held/pressed/released/update/collision all check frozen flag");
                     break;
                 case VsNodeType::UnfreezePlayer:
                     editorCode =
-                        "// Re-enable player input";
+                        "// Re-enable player input + unfreeze blueprint";
                     setActionFunc(infoNode, "_unfreeze",
                         "    afn_player_frozen = 0;\n"
+                        "    afn_play_anim = 0;\n"
+                        "    afn_bp_def_frozen[<blueprint>] = 0;\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // if (!afn_player_frozen) { afn_script_key_held(); ... } // blocks all key input handlers");
+                        "    // Re-enables d-pad input for movement\n"
+                        "    // afn_play_anim = 0 restores idle animation\n"
+                        "    // Walk/Sprint nodes can set afn_move_speed again\n"
+                        "    // --- Dispatch (mapdata.h) ---\n"
+                        "    // Clears frozen flag, blueprint dispatch resumes");
                     break;
                 case VsNodeType::SetCameraHeight: {
                     editorCode =
@@ -11929,7 +11972,9 @@ void FrameTick(float dt)
                         "// Show or hide a sprite (0=hidden, 1=visible)";
                     char bodyBuf[256];
                     snprintf(bodyBuf, sizeof(bodyBuf),
-                        "    afn_sprite_visible[%s] = %s;",
+                        "    afn_sprite_visible[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // if (!afn_sprite_visible[i]) obj_mem[slot].attr0 = ATTR0_HIDE;",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<visible>"));
                     setActionFunc(infoNode, "_set_visible", bodyBuf);
@@ -11942,7 +11987,9 @@ void FrameTick(float dt)
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    int obj = %s;\n"
                         "    g_sprites[obj].wx = %s << 8;\n"
-                        "    g_sprites[obj].wz = %s << 8;",
+                        "    g_sprites[obj].wz = %s << 8;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // wx/wz used for projection -> screenX/screenY -> OAM position",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<x>"),
                         fmtInt(infoNode.id, 2, "<z>"));
@@ -11953,14 +12000,20 @@ void FrameTick(float dt)
                     editorCode =
                         "// Stop animation playback";
                     setActionFunc(infoNode, "_stop_anim",
-                        "    afn_play_anim = -1;");
+                        "    afn_play_anim = -1;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_play_anim < 0 => revert to idle anim (tm_anim_idx unchanged)\n"
+                        "    // Mode 4: targetAnim falls through to movement-based default");
                     break;
                 case VsNodeType::SetAnimSpeed: {
                     editorCode =
                         "// Set animation speed multiplier";
                     char bodyBuf[256];
                     snprintf(bodyBuf, sizeof(bodyBuf),
-                        "    afn_anim_speed = %s;",
+                        "    afn_anim_speed = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // anim_timer += afn_anim_speed; // per-frame tick\n"
+                        "    // if (anim_timer >= threshold) advance frame",
                         fmtInt(infoNode.id, 0, "<speed>"));
                     setActionFunc(infoNode, "_set_anim_speed", bodyBuf);
                     break;
@@ -11984,27 +12037,33 @@ void FrameTick(float dt)
                     editorCode =
                         "// Stop all sound channels";
                     setActionFunc(infoNode, "_stop_sound",
-                        "    REG_SOUNDCNT_H = 0;");
+                        "    REG_SOUNDCNT_H = 0;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Direct GBA hardware register write; silences DMA sound channels");
                     break;
                 case VsNodeType::AddMath:
                     editorCode = "// A + B";
                     setActionFunc(infoNode, "_add",
-                        "    return a + b;");
+                        "    return a + b;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::SubtractMath:
                     editorCode = "// A - B";
                     setActionFunc(infoNode, "_sub",
-                        "    return a - b;");
+                        "    return a - b;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::MultiplyMath:
                     editorCode = "// (A * B) >> 8 (fixed-point)";
                     setActionFunc(infoNode, "_mul",
-                        "    return (a * b) >> 8;");
+                        "    return (a * b) >> 8;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::NegateMath:
                     editorCode = "// -Value";
                     setActionFunc(infoNode, "_negate",
-                        "    return -value;");
+                        "    return -value;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::RandomInt:
                     editorCode = "// Random integer in [Min, Max]";
@@ -12117,7 +12176,10 @@ void FrameTick(float dt)
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    int obj = %s;\n"
                         "    int scale = %s; // 8.8 fixed\n"
-                        "    g_sprites[obj].scale = scale;",
+                        "    g_sprites[obj].scale = scale;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // invScale = (depth * 14 * baseSize) / (scale * scaleSize);\n"
+                        "    // obj_aff_mem[affIdx].pa = pd = invScale; // OAM affine matrix",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtFloat(infoNode.id, 1, "<scale>"));
                     setActionFunc(infoNode, "_set_scale", bodyBuf);
@@ -12179,7 +12241,9 @@ void FrameTick(float dt)
                         "    else g_sprites[obj].wx = g_sprites[target].wx;\n"
                         "    if (dz > spd) g_sprites[obj].wz += spd;\n"
                         "    else if (dz < -spd) g_sprites[obj].wz -= spd;\n"
-                        "    else g_sprites[obj].wz = g_sprites[target].wz;",
+                        "    else g_sprites[obj].wz = g_sprites[target].wz;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Direct sprite position update each frame; re-projected to OAM",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<target>"),
                         fmtInt(infoNode.id, 2, "<speed>"));
@@ -12194,7 +12258,9 @@ void FrameTick(float dt)
                         "    int obj = %s, target = %s;\n"
                         "    FIXED dx = g_sprites[target].wx - g_sprites[obj].wx;\n"
                         "    FIXED dz = g_sprites[target].wz - g_sprites[obj].wz;\n"
-                        "    g_sprites[obj].facing = ArcTan2(dx, dz);",
+                        "    g_sprites[obj].facing = ArcTan2(dx, dz);\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // facing angle selects direction set for DMA tile rendering",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<target>"));
                     setActionFunc(infoNode, "_look_at", bodyBuf);
@@ -12207,7 +12273,9 @@ void FrameTick(float dt)
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    int obj = %s;\n"
                         "    int anim = %s;\n"
-                        "    g_sprites[obj].anim = anim;",
+                        "    g_sprites[obj].anim = anim;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // anim index selects afn_anim_desc row -> DMA direction tiles",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<anim>"));
                     setActionFunc(infoNode, "_set_sprite_anim", bodyBuf);
@@ -12222,7 +12290,12 @@ void FrameTick(float dt)
                         fmtInt(infoNode.id, 0, "<effect>"),
                         fmtInt(infoNode.id, 1, "<x>"),
                         fmtInt(infoNode.id, 2, "<z>"));
-                    setActionFunc(infoNode, "_spawn_effect", bodyBuf);
+                    {
+                        std::string spawnBody = std::string(bodyBuf) +
+                            "\n    // --- Runtime (main.c) ---\n"
+                            "    // Stub/placeholder; no particle system in current runtime";
+                        setActionFunc(infoNode, "_spawn_effect", spawnBody.c_str());
+                    }
                     break;
                 }
                 // Flow control
@@ -12232,7 +12305,9 @@ void FrameTick(float dt)
                         "    static int done = 0;\n"
                         "    if (done) return;\n"
                         "    done = 1;\n"
-                        "    /* downstream actions */");
+                        "    /* downstream actions */\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Static flag persists until scene reload resets it");
                     break;
                 case VsNodeType::FlipFlop:
                     editorCode = "// Alternates A and B outputs";
@@ -12240,13 +12315,17 @@ void FrameTick(float dt)
                         "    static int state = 0;\n"
                         "    state = !state;\n"
                         "    if (state) { /* exec A */ }\n"
-                        "    else { /* exec B */ }");
+                        "    else { /* exec B */ }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Static toggle; alternates output chain each invocation");
                     break;
                 case VsNodeType::Gate: {
                     editorCode = "// Blocks execution if Open == 0";
                     char bodyBuf2[256];
                     snprintf(bodyBuf2, sizeof(bodyBuf2),
-                        "    if (%s) { /* downstream */ }",
+                        "    if (%s) { /* downstream */ }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Condition evaluated inline; blocks downstream when false",
                         fmtInt(infoNode.id, 0, "<open>"));
                     setActionFunc(infoNode, "_gate", bodyBuf2);
                     break;
@@ -12257,7 +12336,9 @@ void FrameTick(float dt)
                     snprintf(bodyBuf2, sizeof(bodyBuf2),
                         "    for (int i = 0; i < %s; i++) {\n"
                         "        /* downstream actions */\n"
-                        "    }",
+                        "    }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Loop unrolled inline; fires downstream N times per frame",
                         fmtInt(infoNode.id, 0, "<count>"));
                     setActionFunc(infoNode, "_for_loop", bodyBuf2);
                     break;
@@ -12266,7 +12347,9 @@ void FrameTick(float dt)
                     editorCode = "// Fire Then 0, then Then 1";
                     setActionFunc(infoNode, "_sequence",
                         "    /* exec Then 0 chain */\n"
-                        "    /* exec Then 1 chain */");
+                        "    /* exec Then 1 chain */\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Both chains execute sequentially in the same frame");
                     break;
                 // Data nodes
                 case VsNodeType::Select:
@@ -12322,7 +12405,9 @@ void FrameTick(float dt)
                     editorCode = "// Set sprite HP";
                     char bodyBuf2[256];
                     snprintf(bodyBuf2, sizeof(bodyBuf2),
-                        "    afn_hp[%s] = %s;",
+                        "    afn_hp[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_hp[i] checked by IsHPZero/IsAlive gates; init 100",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<hp>"));
                     setActionFunc(infoNode, "_set_hp", bodyBuf2);
@@ -12339,7 +12424,9 @@ void FrameTick(float dt)
                     snprintf(bodyBuf2, sizeof(bodyBuf2),
                         "    int obj = %s;\n"
                         "    afn_hp[obj] -= %s;\n"
-                        "    if (afn_hp[obj] < 0) afn_hp[obj] = 0;",
+                        "    if (afn_hp[obj] < 0) afn_hp[obj] = 0;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Triggers OnHit event; if HP == 0 triggers OnDeath",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<amount>"));
                     setActionFunc(infoNode, "_damage_hp", bodyBuf2);
@@ -12372,18 +12459,24 @@ void FrameTick(float dt)
                 case VsNodeType::SaveData:
                     editorCode = "// Save flags + score to SRAM";
                     setActionFunc(infoNode, "_save_data",
-                        "    afn_sram_save();");
+                        "    afn_sram_save();\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Writes afn_flags, afn_score, afn_vars to SRAM (0x0E000000)");
                     break;
                 case VsNodeType::LoadData:
                     editorCode = "// Load flags + score from SRAM";
                     setActionFunc(infoNode, "_load_data",
-                        "    afn_sram_load();");
+                        "    afn_sram_load();\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Reads afn_flags, afn_score, afn_vars from SRAM (0x0E000000)");
                     break;
                 case VsNodeType::FlipSprite: {
                     editorCode = "// Flip sprite horizontally";
                     char bodyBuf2[256];
                     snprintf(bodyBuf2, sizeof(bodyBuf2),
-                        "    afn_sprite_flip[%s] = %s;",
+                        "    afn_sprite_flip[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Direction DMA mirrors tile data when flip == 1",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<flip>"));
                     setActionFunc(infoNode, "_flip_sprite", bodyBuf2);
@@ -12407,7 +12500,10 @@ void FrameTick(float dt)
                         "    afn_collision_enabled[%s] = %s;",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<enable>"));
-                    setActionFunc(infoNode, "_enable_collision", bodyBuf2);
+                    std::string collBody = std::string(bodyBuf2) +
+                        "\n    // --- Runtime (main.c) ---\n"
+                        "    // if (!afn_collision_enabled[i]) skip collision check vs player";
+                    setActionFunc(infoNode, "_enable_collision", collBody.c_str());
                     break;
                 }
                 // Gate conditions
@@ -12447,14 +12543,18 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_cursor_up",
                         "    if (afn_cursor_stop > 0) afn_cursor_stop--;\n"
                         "    else afn_cursor_stop = afn_stop_count - 1;\n"
-                        "    afn_apply_stop_modifiers(afn_cursor_stop);");
+                        "    afn_apply_stop_modifiers(afn_cursor_stop);\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Cursor sprite rendered in OAM at stop[afn_cursor_stop] position");
                     break;
                 case VsNodeType::CursorDown:
                     editorCode = "// Move cursor to next stop (wraps)";
                     setActionFunc(infoNode, "_cursor_down",
                         "    afn_cursor_stop++;\n"
                         "    if (afn_cursor_stop >= afn_stop_count) afn_cursor_stop = 0;\n"
-                        "    afn_apply_stop_modifiers(afn_cursor_stop);");
+                        "    afn_apply_stop_modifiers(afn_cursor_stop);\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Cursor sprite rendered in OAM at stop[afn_cursor_stop] position");
                     break;
                 case VsNodeType::FollowLink:
                     editorCode = "// Navigate to linked element at current stop";
@@ -12464,7 +12564,9 @@ void FrameTick(float dt)
                         "        afn_hud_visible[afn_elem_idx] = 0;\n"
                         "        afn_hud_visible[link] = 1;\n"
                         "        afn_active_element = link;\n"
-                        "    }");
+                        "    }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Switches visible HUD element; cursor resets to new element's stops");
                     break;
                 // Timers/counters
                 case VsNodeType::Countdown: {
@@ -12490,7 +12592,9 @@ void FrameTick(float dt)
                     editorCode = "// Add 1 to variable slot";
                     char bodyBuf3[256];
                     snprintf(bodyBuf3, sizeof(bodyBuf3),
-                        "    afn_vars[%s]++;",
+                        "    afn_vars[%s]++;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_vars[0..15] read by GetVariable / CompareVar gates",
                         fmtInt(infoNode.id, 0, "<slot>"));
                     setActionFunc(infoNode, "_increment", bodyBuf3);
                     break;
@@ -12499,7 +12603,9 @@ void FrameTick(float dt)
                     editorCode = "// Subtract 1 from variable slot";
                     char bodyBuf3[256];
                     snprintf(bodyBuf3, sizeof(bodyBuf3),
-                        "    afn_vars[%s]--;",
+                        "    afn_vars[%s]--;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_vars[0..15] read by GetVariable / CompareVar gates",
                         fmtInt(infoNode.id, 0, "<slot>"));
                     setActionFunc(infoNode, "_decrement", bodyBuf3);
                     break;
@@ -12766,7 +12872,10 @@ void FrameTick(float dt)
                     editorCode = "// Set sprite scale";
                     char bodyBuf5[256];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
-                        "    g_sprites[%s].scale = %s;",
+                        "    g_sprites[%s].scale = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // invScale = (depth * 14 * baseSize) / (scale * scaleSize);\n"
+                        "    // obj_aff_mem[affIdx].pa = pd = invScale; // OAM affine",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtFloat(infoNode.id, 1, "<scale>"));
                     setActionFunc(infoNode, "_set_spr_scale", bodyBuf5);
@@ -12793,10 +12902,12 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::SetHP2: {
                     editorCode = "// Set HP clamped to max";
-                    char bodyBuf5[256];
+                    char bodyBuf5[512];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
                         "    afn_hp[%s] = %s;\n"
-                        "    if (afn_hp[%s] > afn_max_hp[%s]) afn_hp[%s] = afn_max_hp[%s];",
+                        "    if (afn_hp[%s] > afn_max_hp[%s]) afn_hp[%s] = afn_max_hp[%s];\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_hp[i] clamped to afn_max_hp[i]; checked by HP gates",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<hp>"),
                         fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 0, "<obj>"),
@@ -12806,10 +12917,12 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::HealHP: {
                     editorCode = "// Heal HP (clamped)";
-                    char bodyBuf5[256];
+                    char bodyBuf5[512];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
                         "    afn_hp[%s] += %s;\n"
-                        "    if (afn_hp[%s] > afn_max_hp[%s]) afn_hp[%s] = afn_max_hp[%s];",
+                        "    if (afn_hp[%s] > afn_max_hp[%s]) afn_hp[%s] = afn_max_hp[%s];\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_hp[i] clamped to afn_max_hp[i]; checked by HP gates",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<amount>"),
                         fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 0, "<obj>"),
@@ -12830,7 +12943,9 @@ void FrameTick(float dt)
                     editorCode = "// Set max HP";
                     char bodyBuf5[256];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
-                        "    afn_max_hp[%s] = %s;",
+                        "    afn_max_hp[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Upper clamp for HealHP / SetHP2; init 100",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<maxhp>"));
                     setActionFunc(infoNode, "_set_max_hp", bodyBuf5);
@@ -13050,19 +13165,26 @@ void FrameTick(float dt)
                     break;
                 }
                 case VsNodeType::ShowHUD: {
-                    editorCode = "// Show HUD element";
-                    char b6[256];
+                    editorCode = "// Show HUD element + freeze player";
+                    char b6[512];
                     snprintf(b6, sizeof(b6),
-                        "    afn_hud_visible[%s] = 1;",
+                        "    afn_hud_visible[%s] = 1;\n"
+                        "    afn_player_frozen = 1;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // DMA static HUD tiles to OBJ VRAM; init cursor at stop 0\n"
+                        "    // Player input blocked while afn_player_frozen == 1",
                         fmtInt(infoNode.id, 0, "<slot>"));
                     setActionFunc(infoNode, "_show_hud", b6);
                     break;
                 }
                 case VsNodeType::HideHUD: {
-                    editorCode = "// Hide HUD element";
-                    char b6[256];
+                    editorCode = "// Hide HUD element + unfreeze player";
+                    char b6[512];
                     snprintf(b6, sizeof(b6),
-                        "    afn_hud_visible[%s] = 0;",
+                        "    afn_hud_visible[%s] = 0;\n"
+                        "    afn_player_frozen = 0;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // HUD OAM slots hidden; player input re-enabled",
                         fmtInt(infoNode.id, 0, "<slot>"));
                     setActionFunc(infoNode, "_hide_hud", b6);
                     break;
@@ -14229,6 +14351,7 @@ void FrameTick(float dt)
                     case VsNodeType::CursorDown:    suffix = "_cursor_down"; break;
                     case VsNodeType::FollowLink:    suffix = "_follow_link"; break;
                     case VsNodeType::GetCursorStop: suffix = "_get_cursor_stop"; break;
+                    case VsNodeType::BlueprintRef:  suffix = "_bp_ref"; break;
                     default: suffix = ""; break;
                     }
                     // Show default name as placeholder (action nodes include node ID to disambiguate)
@@ -14679,6 +14802,7 @@ void FrameTick(float dt)
                     for (int t = (int)VsNodeType::Integer; t <= (int)VsNodeType::Float; t++)
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Object].name)) addNodeAt(VsNodeType::Object);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::BlueprintRef].name)) addNodeAt(VsNodeType::BlueprintRef);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::AddMath].name)) addNodeAt(VsNodeType::AddMath);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SubtractMath].name)) addNodeAt(VsNodeType::SubtractMath);
@@ -14786,7 +14910,7 @@ void FrameTick(float dt)
         // Properties panel overlay — as child window inside canvas (data nodes only)
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
-            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt) {
+            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt) {
             const auto& def = sVsNodeDefs[(int)n.type];
             float propW = 260, propH = 180;
             float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -14953,6 +15077,22 @@ void FrameTick(float dt)
                         }
                         ImGui::EndCombo();
                     }
+                }
+                break;
+            }
+            case VsNodeType::BlueprintRef: {
+                ImGui::Text("Blueprint");
+                const char* bpPreview = (n.paramInt[0] >= 0 && n.paramInt[0] < (int)sBlueprintAssets.size())
+                    ? sBlueprintAssets[n.paramInt[0]].name : "None";
+                if (ImGui::BeginCombo("##BpRef", bpPreview)) {
+                    for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++) {
+                        char itemLabel[64];
+                        snprintf(itemLabel, sizeof(itemLabel), "[%d] %s", bi, sBlueprintAssets[bi].name);
+                        if (ImGui::Selectable(itemLabel, bi == n.paramInt[0]))
+                            n.paramInt[0] = bi;
+                        if (bi == n.paramInt[0]) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
                 }
                 break;
             }
@@ -15781,9 +15921,9 @@ void FrameTick(float dt)
                         for (auto& st : el.stops) {
                             fprintf(cf, "elemStop=%d|%d|%d\n", st.localX, st.localY, st.linkedElement);
                             for (int mi = 0; mi < st.modifierCount && mi < kMaxStopModifiers; mi++)
-                                fprintf(cf, "elemStopMod=%d|%d|%d|%f|%f\n", st.modifiers[mi].targetSpriteIdx,
+                                fprintf(cf, "elemStopMod=%d|%d|%d|%f|%f|%u\n", st.modifiers[mi].targetSpriteIdx,
                                     st.modifiers[mi].offsetX, st.modifiers[mi].offsetY,
-                                    st.modifiers[mi].scale, st.modifiers[mi].rotation);
+                                    st.modifiers[mi].scale, st.modifiers[mi].rotation, st.modifiers[mi].color);
                         }
                         // Cursor
                         fprintf(cf, "elemCursor=%d|%d|%d|%d\n", el.cursorAssetIdx, el.cursorFrame, el.cursorOffX, el.cursorOffY);
@@ -15930,9 +16070,12 @@ void FrameTick(float dt)
                                 auto& st = nel.stops.back();
                                 if (st.modifierCount < kMaxStopModifiers) {
                                     auto& mod = st.modifiers[st.modifierCount];
-                                    if (sscanf(line + 12, "%d|%d|%d|%f|%f", &mod.targetSpriteIdx,
-                                        &mod.offsetX, &mod.offsetY, &mod.scale, &mod.rotation) >= 5)
+                                    unsigned colVal2 = 0;
+                                    if (sscanf(line + 12, "%d|%d|%d|%f|%f|%u", &mod.targetSpriteIdx,
+                                        &mod.offsetX, &mod.offsetY, &mod.scale, &mod.rotation, &colVal2) >= 5) {
+                                        mod.color = colVal2;
                                         st.modifierCount++;
+                                    }
                                 }
                             }
                             else if (strncmp(line, "elemStop=", 9) == 0) {
@@ -16390,6 +16533,22 @@ void FrameTick(float dt)
                             if (ImGui::DragInt("Offset Y##mod", &mod.offsetY, 1)) sProjectDirty = true;
                             if (ImGui::DragFloat("Scale##mod", &mod.scale, 0.05f, 0.1f, 4.0f, "%.2f")) sProjectDirty = true;
                             if (ImGui::DragFloat("Rotation##mod", &mod.rotation, 1.0f, -360.0f, 360.0f, "%.0f")) sProjectDirty = true;
+                            {
+                                float col[3] = { ((mod.color >> 0) & 0xFF) / 255.0f,
+                                                  ((mod.color >> 8) & 0xFF) / 255.0f,
+                                                  ((mod.color >> 16) & 0xFF) / 255.0f };
+                                if (ImGui::ColorEdit3("Color##mod", col)) {
+                                    mod.color = ((uint32_t)(col[0] * 255.0f) & 0xFF)
+                                              | (((uint32_t)(col[1] * 255.0f) & 0xFF) << 8)
+                                              | (((uint32_t)(col[2] * 255.0f) & 0xFF) << 16)
+                                              | 0xFF000000u;
+                                    sProjectDirty = true;
+                                }
+                                if (mod.color != 0) {
+                                    ImGui::SameLine();
+                                    if (ImGui::SmallButton("X##clrcol")) { mod.color = 0; sProjectDirty = true; }
+                                }
+                            }
                             ImGui::SameLine();
                             if (ImGui::SmallButton("-##delmod")) {
                                 for (int j = mi; j < st.modifierCount - 1; j++)

@@ -1831,6 +1831,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
         }
     };
 
+    // Per-blueprint-definition frozen flags (must precede script/blueprint functions)
+    if (!blueprints.empty())
+        f << "static int afn_bp_def_frozen[" << (int)blueprints.size() << "];\n\n";
+    else
+        f << "static int afn_bp_def_frozen[1];\n\n";
+
     if (!script.nodes.empty())
     {
         // Helper: find node by id
@@ -2104,12 +2110,27 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_flags ^= (1u << " << flag << ");\n";
                     break;
                 }
-                case GBAScriptNodeType::FreezePlayer:
+                case GBAScriptNodeType::FreezePlayer: {
+                    auto* bpData = findDataIn(action->id, 0);
                     f << "    afn_player_frozen = 1;\n";
+                    f << "    afn_play_anim = -1;\n";
+                    f << "    afn_move_speed = 0;\n";
+                    if (bpData) {
+                        int bpIdx = resolveInt(bpData);
+                        f << "    afn_bp_def_frozen[" << bpIdx << "] = 1;\n";
+                    }
                     break;
-                case GBAScriptNodeType::UnfreezePlayer:
+                }
+                case GBAScriptNodeType::UnfreezePlayer: {
+                    auto* bpData = findDataIn(action->id, 0);
                     f << "    afn_player_frozen = 0;\n";
+                    f << "    afn_play_anim = 0;\n";
+                    if (bpData) {
+                        int bpIdx = resolveInt(bpData);
+                        f << "    afn_bp_def_frozen[" << bpIdx << "] = 0;\n";
+                    }
                     break;
+                }
                 case GBAScriptNodeType::SetCameraHeight: {
                     auto* hData = findDataIn(action->id, 0);
                     int h = hData ? resolveInt(hData) : 64;
@@ -2628,6 +2649,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_elem_idx = " << slot << ";\n";
                     f << "    afn_active_element = " << slot << ";\n";
                     f << "    afn_cursor_stop = 0;\n";
+                    f << "    afn_player_frozen = 1;\n";
+                    f << "    afn_play_anim = -1;\n";
+                    f << "    afn_move_speed = 0;\n";
                     f << "    afn_stop_count = afn_hud_elems[" << slot << "].stopCount;\n";
                     f << "    { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[" << slot << "].stopStart + si].link; }\n";
                     break;
@@ -2636,6 +2660,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* slotData = findDataIn(action->id, 0);
                     int slot = slotData ? resolveInt(slotData) : 0;
                     f << "    afn_hud_visible[" << slot << "] = 0;\n";
+                    f << "    afn_player_frozen = 0;\n";
+                    f << "    afn_play_anim = 0;\n";
                     break;
                 }
                 case GBAScriptNodeType::ArraySet: {
@@ -3465,12 +3491,27 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_flags ^= (1u << " << flag << ");\n";
                     break;
                 }
-                case GBAScriptNodeType::FreezePlayer:
+                case GBAScriptNodeType::FreezePlayer: {
+                    auto* bpData = bpFindDataIn(action->id, 0);
                     f << "    afn_player_frozen = 1;\n";
+                    f << "    afn_play_anim = -1;\n";
+                    f << "    afn_move_speed = 0;\n";
+                    if (bpData) {
+                        std::string bpIdx = bpResolveInt(bpData);
+                        f << "    afn_bp_def_frozen[" << bpIdx << "] = 1;\n";
+                    }
                     break;
-                case GBAScriptNodeType::UnfreezePlayer:
+                }
+                case GBAScriptNodeType::UnfreezePlayer: {
+                    auto* bpData = bpFindDataIn(action->id, 0);
                     f << "    afn_player_frozen = 0;\n";
+                    f << "    afn_play_anim = 0;\n";
+                    if (bpData) {
+                        std::string bpIdx = bpResolveInt(bpData);
+                        f << "    afn_bp_def_frozen[" << bpIdx << "] = 0;\n";
+                    }
                     break;
+                }
                 case GBAScriptNodeType::SetCameraHeight: {
                     auto* hData = bpFindDataIn(action->id, 0);
                     std::string h = hData ? bpResolveInt(hData) : "64";
@@ -3955,6 +3996,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_elem_idx = " << slot << ";\n";
                     f << "    afn_active_element = " << slot << ";\n";
                     f << "    afn_cursor_stop = 0;\n";
+                    f << "    afn_player_frozen = 1;\n";
+                    f << "    afn_play_anim = -1;\n";
+                    f << "    afn_move_speed = 0;\n";
                     f << "    afn_stop_count = afn_hud_elems[" << slot << "].stopCount;\n";
                     f << "    { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[" << slot << "].stopStart + si].link; }\n";
                     break;
@@ -3963,6 +4007,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* slotData = bpFindDataIn(action->id, 0);
                     std::string slot = slotData ? bpResolveInt(slotData) : "0";
                     f << "    afn_hud_visible[" << slot << "] = 0;\n";
+                    f << "    afn_player_frozen = 0;\n";
+                    f << "    afn_play_anim = 0;\n";
                     break;
                 }
                 case GBAScriptNodeType::ArraySet: {
@@ -4491,6 +4537,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 f << "static inline void afn_bp_dispatch_" << suffix << "(void) {\n";
                 f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
                 f << "    if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;\n";
+                f << "    if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;\n";
                 f << "    switch (afn_bp_instances[i].bpIdx) {\n";
                 for (int bi = 0; bi < (int)blueprints.size(); bi++) {
                     int pc = (int)blueprints[bi].params.size();
@@ -4509,6 +4556,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "static inline void afn_bp_dispatch_collision(void) {\n";
             f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
             f << "    if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;\n";
+            f << "    if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;\n";
             f << "    if (afn_bp_instances[i].sprIdx != afn_collided_sprite) continue;\n";
             f << "    switch (afn_bp_instances[i].bpIdx) {\n";
             for (int bi = 0; bi < (int)blueprints.size(); bi++) {
@@ -4523,6 +4571,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "static inline void afn_bp_dispatch_collision2d(void) {\n";
             f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
             f << "    if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;\n";
+            f << "    if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;\n";
             f << "    if (afn_bp_instances[i].tmObjIdx != afn_collided_tm_obj) continue;\n";
             f << "    switch (afn_bp_instances[i].bpIdx) {\n";
             for (int bi = 0; bi < (int)blueprints.size(); bi++) {
