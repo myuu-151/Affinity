@@ -706,62 +706,9 @@ static void init_obj_sprites(void)
     for (i = 0; i < AFN_ASSET_COUNT; i++)
     {
         int palBank = afn_asset_desc[i][4];
-        const u16 *pal = 0;
-        switch (i) {
-            case 0: pal = afn_pal0; break;
-#if AFN_ASSET_COUNT > 1
-            case 1: pal = afn_pal1; break;
-#endif
-#if AFN_ASSET_COUNT > 2
-            case 2: pal = afn_pal2; break;
-#endif
-#if AFN_ASSET_COUNT > 3
-            case 3: pal = afn_pal3; break;
-#endif
-#if AFN_ASSET_COUNT > 4
-            case 4: pal = afn_pal4; break;
-#endif
-#if AFN_ASSET_COUNT > 5
-            case 5: pal = afn_pal5; break;
-#endif
-#if AFN_ASSET_COUNT > 6
-            case 6: pal = afn_pal6; break;
-#endif
-#if AFN_ASSET_COUNT > 7
-            case 7: pal = afn_pal7; break;
-#endif
-#if AFN_ASSET_COUNT > 8
-            case 8: pal = afn_pal8; break;
-#endif
-#if AFN_ASSET_COUNT > 9
-            case 9: pal = afn_pal9; break;
-#endif
-#if AFN_ASSET_COUNT > 10
-            case 10: pal = afn_pal10; break;
-#endif
-#if AFN_ASSET_COUNT > 11
-            case 11: pal = afn_pal11; break;
-#endif
-#if AFN_ASSET_COUNT > 12
-            case 12: pal = afn_pal12; break;
-#endif
-#if AFN_ASSET_COUNT > 13
-            case 13: pal = afn_pal13; break;
-#endif
-#if AFN_ASSET_COUNT > 14
-            case 14: pal = afn_pal14; break;
-#endif
-#if AFN_ASSET_COUNT > 15
-            case 15: pal = afn_pal15; break;
-#endif
-            default: break;
-        }
-        if (pal)
-        {
-            int c;
-            for (c = 0; c < 16; c++)
-                pal_obj_mem[palBank * 16 + c] = pal[c];
-        }
+        int c;
+        for (c = 0; c < 16; c++)
+            pal_obj_mem[palBank * 16 + c] = afn_pal[i][c];
     }
 
     // Init direction animation set tracking — DMA set 0 from ROM at boot
@@ -786,62 +733,9 @@ static void init_obj_sprites(void)
         {
             if (!afn_asset_dir_desc[ai][4]) continue; // no directions
             int adPalBank = afn_asset_dir_desc[ai][3];
-            const u16 *adPal = 0;
-            switch (ai) {
-                case 0: adPal = afn_pal_assetdir0; break;
-#if AFN_ASSET_COUNT > 1
-                case 1: adPal = afn_pal_assetdir1; break;
-#endif
-#if AFN_ASSET_COUNT > 2
-                case 2: adPal = afn_pal_assetdir2; break;
-#endif
-#if AFN_ASSET_COUNT > 3
-                case 3: adPal = afn_pal_assetdir3; break;
-#endif
-#if AFN_ASSET_COUNT > 4
-                case 4: adPal = afn_pal_assetdir4; break;
-#endif
-#if AFN_ASSET_COUNT > 5
-                case 5: adPal = afn_pal_assetdir5; break;
-#endif
-#if AFN_ASSET_COUNT > 6
-                case 6: adPal = afn_pal_assetdir6; break;
-#endif
-#if AFN_ASSET_COUNT > 7
-                case 7: adPal = afn_pal_assetdir7; break;
-#endif
-#if AFN_ASSET_COUNT > 8
-                case 8: adPal = afn_pal_assetdir8; break;
-#endif
-#if AFN_ASSET_COUNT > 9
-                case 9: adPal = afn_pal_assetdir9; break;
-#endif
-#if AFN_ASSET_COUNT > 10
-                case 10: adPal = afn_pal_assetdir10; break;
-#endif
-#if AFN_ASSET_COUNT > 11
-                case 11: adPal = afn_pal_assetdir11; break;
-#endif
-#if AFN_ASSET_COUNT > 12
-                case 12: adPal = afn_pal_assetdir12; break;
-#endif
-#if AFN_ASSET_COUNT > 13
-                case 13: adPal = afn_pal_assetdir13; break;
-#endif
-#if AFN_ASSET_COUNT > 14
-                case 14: adPal = afn_pal_assetdir14; break;
-#endif
-#if AFN_ASSET_COUNT > 15
-                case 15: adPal = afn_pal_assetdir15; break;
-#endif
-                default: break;
-            }
-            if (adPal)
-            {
-                int c;
-                for (c = 0; c < 16; c++)
-                    pal_obj_mem[adPalBank * 16 + c] = adPal[c];
-            }
+            int c;
+            for (c = 0; c < 16; c++)
+                pal_obj_mem[adPalBank * 16 + c] = afn_pal_assetdir[ai][c];
         }
     }
 #endif

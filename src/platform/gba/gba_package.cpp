@@ -709,10 +709,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "#define AFN_DIR_ANIM_TILES_LEN " << (int)dirAnimAllTiles.size() * 4 << "\n\n";
     }
 
-    // Emit per-asset palette arrays
+    // Emit per-asset palette table (2D array indexed by asset)
+    f << "static const u16 afn_pal[" << assets.size() << "][16] = {\n";
     for (size_t ai = 0; ai < assets.size(); ai++)
     {
-        f << "static const u16 afn_pal" << ai << "[16] = { ";
+        f << "    { ";
         for (int c = 0; c < 16; c++)
         {
             char hex[8];
@@ -720,15 +721,17 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << hex;
             if (c < 15) f << ", ";
         }
-        f << " };\n";
+        f << " },\n";
     }
+    f << "};\n";
 
-    // Per-asset direction palettes (emit for all assets; zeros if no dirs)
+    // Per-asset direction palette table (2D array indexed by asset)
     if (!assets.empty())
     {
+        f << "static const u16 afn_pal_assetdir[" << assets.size() << "][16] = {\n";
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
-            f << "static const u16 afn_pal_assetdir" << ai << "[16] = { ";
+            f << "    { ";
             for (int c = 0; c < 16; c++)
             {
                 char hex[8];
@@ -736,8 +739,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 f << hex;
                 if (c < 15) f << ", ";
             }
-            f << " };\n";
+            f << " },\n";
         }
+        f << "};\n";
     }
     f << "\n";
 
