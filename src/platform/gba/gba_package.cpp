@@ -1545,7 +1545,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    {" << sp.spriteAssetIdx << "," << sp.frame << "," << sp.localX << "," << sp.localY << "," << sp.size << "},\n";
             f << "};\n";
         } else {
-            f << "static const int afn_hud_sprites[1] = {0}; // no sprites\n";
+            f << "static const struct { s8 asset; u8 frame; s16 x,y; u8 size; } afn_hud_sprites[1] = {{0}};\n";
         }
 
         // Stops: {localX, localY, linkedElement}

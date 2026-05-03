@@ -4643,7 +4643,7 @@ int main(void)
                                 int tpy = ey + afn_hud_texts[tStart2 + ti2].y;
                                 oamSlot += hud_text_oam(oamSlot, tpx, tpy, afn_hud_texts[tStart2 + ti2].text, 15);
                             }
-                        } else if (layerOrder[pass] == 1) {
+                        } else if (layerOrder[pass] == 1 && spCount2 > 0) {
                             // Sprites (reverse order like pieces)
                             int spi;
                             for (spi = spCount2 - 1; spi >= 0 && oamSlot < 126; spi--) {
