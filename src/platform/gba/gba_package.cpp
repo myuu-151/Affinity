@@ -1816,6 +1816,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::ChasePlayer:   return "_chase_player";
         case GBAScriptNodeType::FollowPlayer:  return "_follow_player";
         case GBAScriptNodeType::IsNear2D:      return "_is_near_2d";
+        case GBAScriptNodeType::SetFollowAnim: return "_set_fol_anim";
+        case GBAScriptNodeType::SetFollowFacing: return "_set_fol_facing";
         case GBAScriptNodeType::FleePlayer:    return "_flee_player";
         case GBAScriptNodeType::SetAI:         return "_set_ai";
         case GBAScriptNodeType::EmitParticle:  return "_emit_particle";
@@ -2638,22 +2640,33 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 }
                 case GBAScriptNodeType::FollowPlayer: {
                     auto* objData = findDataIn(action->id, 0);
-                    auto* distData = findDataIn(action->id, 1);
                     int obj = objData ? resolveInt(objData) : 0;
-                    int minDist = distData ? resolveInt(distData) : 1;
-                    if (minDist <= 0) minDist = 1;
-                    // Mode 0: tile-based follow
-                    f << "    { static int afn_follow_timer_" << action->id << " = 0;\n";
-                    f << "      if (++afn_follow_timer_" << action->id << " >= tm_move_frames) {\n";
-                    f << "        afn_follow_timer_" << action->id << " = 0;\n";
-                    f << "        int dx = tm_player_tx - tm_obj_tx[" << obj << "];\n";
-                    f << "        int dy = tm_player_ty - tm_obj_ty[" << obj << "];\n";
-                    f << "        int adx = dx<0?-dx:dx; int ady = dy<0?-dy:dy;\n";
-                    f << "        if (adx + ady > " << minDist << ") {\n";
-                    f << "          if (adx >= ady) tm_obj_tx[" << obj << "] += (dx > 0) ? 1 : -1;\n";
-                    f << "          else            tm_obj_ty[" << obj << "] += (dy > 0) ? 1 : -1;\n";
-                    f << "        }\n";
-                    f << "      } }\n";
+                    // Mode 0: activate generic breadcrumb-trail follow system
+                    f << "    if (!tm_fol_active) {\n";
+                    f << "      tm_fol_obj = " << obj << ";\n";
+                    f << "      tm_fol_prev_ptx = tm_player_tx;\n";
+                    f << "      tm_fol_prev_pty = tm_player_ty;\n";
+                    f << "      tm_fol_trail_count = 0;\n";
+                    f << "      tm_fol_trail_head = 0;\n";
+                    f << "      tm_fol_active = 1;\n";
+                    f << "    }\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetFollowAnim: {
+                    auto* walkData = findDataIn(action->id, 0);
+                    auto* idleData = findDataIn(action->id, 1);
+                    int walkIdx = walkData ? resolveInt(walkData) : 1;
+                    int idleIdx = idleData ? resolveInt(idleData) : 0;
+                    f << "    if (tm_fol_active && tm_fol_obj >= 0) {\n";
+                    f << "      tm_obj_anim_play[tm_fol_obj] = 1;\n";
+                    f << "      tm_obj_anim_idx[tm_fol_obj] = tm_fol_moving ? " << walkIdx << " : " << idleIdx << ";\n";
+                    f << "    }\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetFollowFacing: {
+                    f << "    if (tm_fol_active && tm_fol_obj >= 0) {\n";
+                    f << "      tm_obj_facing[tm_fol_obj] = tm_fol_facing;\n";
+                    f << "    }\n";
                     break;
                 }
                 case GBAScriptNodeType::SetAI: {
@@ -4010,25 +4023,33 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     break;
                 }
                 case GBAScriptNodeType::FollowPlayer: {
-                    auto* objData = bpFindDataIn(action->id, 0);
-                    auto* distData = bpFindDataIn(action->id, 1);
-                    std::string obj = objData ? bpResolveInt(objData) : "0";
-                    std::string minDist = distData ? bpResolveInt(distData) : "1";
-                    // Mode 0: tile-based follow using tm_obj_tx/ty toward tm_player_tx/ty
-                    // Moves 1 tile every 8 frames (matches default walk speed)
-                    f << "    { static int afn_follow_timer_" << action->id << " = 0;\n";
-                    f << "      if (++afn_follow_timer_" << action->id << " >= tm_move_frames) {\n";
-                    f << "        afn_follow_timer_" << action->id << " = 0;\n";
-                    f << "        int oi = " << obj << ";\n";
-                    f << "        int dx = tm_player_tx - tm_obj_tx[oi];\n";
-                    f << "        int dy = tm_player_ty - tm_obj_ty[oi];\n";
-                    f << "        int adx = dx<0?-dx:dx; int ady = dy<0?-dy:dy;\n";
-                    f << "        int md = " << minDist << "; if (md <= 0) md = 1;\n";
-                    f << "        if (adx + ady > md) {\n";
-                    f << "          if (adx >= ady) tm_obj_tx[oi] += (dx > 0) ? 1 : -1;\n";
-                    f << "          else            tm_obj_ty[oi] += (dy > 0) ? 1 : -1;\n";
-                    f << "        }\n";
-                    f << "      } }\n";
+                    // Mode 0: activate the generic breadcrumb-trail follow system in main.c
+                    // Sets tm_fol_active + tm_fol_obj so the runtime tick handles movement
+                    f << "    if (!tm_fol_active) {\n";
+                    f << "      tm_fol_obj = afn_bp_cur_tm_obj;\n";
+                    f << "      tm_fol_prev_ptx = tm_player_tx;\n";
+                    f << "      tm_fol_prev_pty = tm_player_ty;\n";
+                    f << "      tm_fol_trail_count = 0;\n";
+                    f << "      tm_fol_trail_head = 0;\n";
+                    f << "      tm_fol_active = 1;\n";
+                    f << "    }\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetFollowAnim: {
+                    auto* walkData = bpFindDataIn(action->id, 0);
+                    auto* idleData = bpFindDataIn(action->id, 1);
+                    std::string walkIdx = walkData ? bpResolveInt(walkData) : "1";
+                    std::string idleIdx = idleData ? bpResolveInt(idleData) : "0";
+                    f << "    if (tm_fol_active && tm_fol_obj >= 0) {\n";
+                    f << "      tm_obj_anim_play[tm_fol_obj] = 1;\n";
+                    f << "      tm_obj_anim_idx[tm_fol_obj] = tm_fol_moving ? " << walkIdx << " : " << idleIdx << ";\n";
+                    f << "    }\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetFollowFacing: {
+                    f << "    if (tm_fol_active && tm_fol_obj >= 0) {\n";
+                    f << "      tm_obj_facing[tm_fol_obj] = tm_fol_facing;\n";
+                    f << "    }\n";
                     break;
                 }
                 case GBAScriptNodeType::SetAI: {

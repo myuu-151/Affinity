@@ -14948,19 +14948,25 @@ static inline void afn_bp5_set_flag_4() {
     else afn_flags &= ~(1u << 1);
 }
 static inline void afn_bp5_follow_player_1() {
-    { static int afn_follow_timer_1 = 0;
-      if (++afn_follow_timer_1 >= tm_move_frames) {
-        afn_follow_timer_1 = 0;
-        int oi = 17;
-        int dx = tm_player_tx - tm_obj_tx[oi];
-        int dy = tm_player_ty - tm_obj_ty[oi];
-        int adx = dx<0?-dx:dx; int ady = dy<0?-dy:dy;
-        int md = 1; if (md <= 0) md = 1;
-        if (adx + ady > md) {
-          if (adx >= ady) tm_obj_tx[oi] += (dx > 0) ? 1 : -1;
-          else            tm_obj_ty[oi] += (dy > 0) ? 1 : -1;
-        }
-      } }
+    if (!tm_fol_active) {
+      tm_fol_obj = afn_bp_cur_tm_obj;
+      tm_fol_prev_ptx = tm_player_tx;
+      tm_fol_prev_pty = tm_player_ty;
+      tm_fol_trail_count = 0;
+      tm_fol_trail_head = 0;
+      tm_fol_active = 1;
+    }
+}
+static inline void afn_bp5_set_fol_facing_13() {
+    if (tm_fol_active && tm_fol_obj >= 0) {
+      tm_obj_facing[tm_fol_obj] = tm_fol_facing;
+    }
+}
+static inline void afn_bp5_set_fol_anim_14() {
+    if (tm_fol_active && tm_fol_obj >= 0) {
+      tm_obj_anim_play[tm_fol_obj] = 1;
+      tm_obj_anim_idx[tm_fol_obj] = tm_fol_moving ? 1 : 0;
+    }
 }
 static inline void afn_bp5_start() {
 }
@@ -14978,6 +14984,8 @@ static inline void afn_bp5_key_released() {
 static inline void afn_bp5_update() {
     if (afn_flags & (1u << 1)) {
     afn_bp5_follow_player_1();
+    afn_bp5_set_fol_facing_13();
+    afn_bp5_set_fol_anim_14();
     }
 }
 static inline void afn_bp5_collision() {
@@ -15274,7 +15282,7 @@ static const struct { s16 tx,ty; u8 type; s8 assetIdx; u8 camFollow; u8 collisio
     {14,14,6,4,1,0,-1,256,0,0,0,4},
     {6,4,2,16,1,0,-1,512,3,1,0,0},
     {14,9,0,18,1,0,-1,512,3,1,0,0},
-    {14,2,0,17,1,0,-1,512,3,0,0,4},
+    {14,2,0,17,1,1,-1,512,3,0,0,4},
 };
 
 #define AFN_TM_PLAYER_SCENE 0

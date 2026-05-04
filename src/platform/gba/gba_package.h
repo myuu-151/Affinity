@@ -338,6 +338,8 @@ enum class GBAScriptNodeType : int {
     BlueprintRef,
     FollowPlayer,
     IsNear2D,
+    SetFollowAnim,
+    SetFollowFacing,
     COUNT
 };
 

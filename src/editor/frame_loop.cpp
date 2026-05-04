@@ -436,6 +436,8 @@ enum class VsNodeType : int {
     BlueprintRef,   // data: constant blueprint definition index (dropdown)
     FollowPlayer,   // move sprite toward player, stop at distance
     IsNear2D,       // gate: passes if player is adjacent to this blueprint's tilemap object
+    SetFollowAnim,  // set follow object's walk/idle animation from follow state
+    SetFollowFacing,// set follow object's facing direction from follow state
     COUNT
 };
 
@@ -717,6 +719,8 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Blueprint",      0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Follow Player",  0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Distance (int)"}, {}, {} },
     { "Is Near 2D",     0xFF2266BB, 1, 1, 0, 0, {}, {}, {} },
+    { "Set Follow Anim",0xFF3355AA, 1, 1, 2, 0, {"Walk Anim (int)", "Idle Anim (int)"}, {}, {} },
+    { "Set Follow Facing",0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -11282,6 +11286,8 @@ void FrameTick(float dt)
                 case VsNodeType::FleePlayer:    desc = "Moves a sprite away from the player at the given speed."; break;
                 case VsNodeType::FollowPlayer:  desc = "Moves a sprite toward the player, stopping at the given distance (default = collision bounds)."; break;
                 case VsNodeType::IsNear2D:      desc = "Gate: passes exec only if the player is currently adjacent to this blueprint's tilemap object (Mode 0)."; break;
+                case VsNodeType::SetFollowAnim: desc = "Sets the follow object's animation: walk anim while moving, idle anim when stopped (Mode 0)."; break;
+                case VsNodeType::SetFollowFacing: desc = "Sets the follow object's facing direction from its movement direction (Mode 0)."; break;
                 case VsNodeType::SetAI:         desc = "Sets the AI behavior mode for a sprite (0=None, 1=Patrol, 2=Chase, 3=Flee)."; break;
                 case VsNodeType::GetAI:         desc = "Outputs the current AI behavior mode of a sprite."; break;
                 case VsNodeType::OnDeath:       desc = "Event: fires when the specified sprite's HP reaches 0."; break;
@@ -11576,6 +11582,8 @@ void FrameTick(float dt)
                         case VsNodeType::FleePlayer:    return "_flee_player";
                         case VsNodeType::FollowPlayer:  return "_follow_player";
                         case VsNodeType::IsNear2D:      return "_is_near_2d";
+                        case VsNodeType::SetFollowAnim: return "_set_fol_anim";
+                        case VsNodeType::SetFollowFacing: return "_set_fol_facing";
                         case VsNodeType::SetAI:         return "_set_ai";
                         case VsNodeType::EmitParticle:  return "_emit_particle";
                         case VsNodeType::SetTint:       return "_set_tint";
@@ -13381,27 +13389,21 @@ void FrameTick(float dt)
                     break;
                 }
                 case VsNodeType::FollowPlayer: {
-                    editorCode = "// Follow player, stop at distance";
-                    char b6[1024];
-                    snprintf(b6, sizeof(b6),
-                        "    FIXED dx = player_x - g_sprites[%s].wx;\n"
-                        "    FIXED dz = player_z - g_sprites[%s].wz;\n"
-                        "    FIXED adx = dx<0?-dx:dx; FIXED adz = dz<0?-dz:dz;\n"
-                        "    int dist = (adx>adz)?adx+(adz>>1):adz+(adx>>1);\n"
-                        "    int minDist = %s << 8;\n"
-                        "    if (minDist <= 0) minDist = 1 << 8;\n"
-                        "    if (dist > minDist && dist > 0) {\n"
-                        "        g_sprites[%s].wx += (dx * 1) / (dist >> 8);\n"
-                        "        g_sprites[%s].wz += (dz * 1) / (dist >> 8); }\n"
+                    editorCode = "// Follow player (breadcrumb trail)";
+                    setActionFunc(infoNode, "_follow_player",
+                        "    if (!tm_fol_active) {\n"
+                        "      tm_fol_obj = afn_bp_cur_tm_obj;\n"
+                        "      tm_fol_prev_ptx = tm_player_tx;\n"
+                        "      tm_fol_prev_pty = tm_player_ty;\n"
+                        "      tm_fol_trail_count = 0;\n"
+                        "      tm_fol_trail_head = 0;\n"
+                        "      tm_fol_active = 1;\n"
+                        "    }\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // Mode 4: moves sprite toward player, stops at minDist\n"
-                        "    // Mode 0: moves tm obj tile-by-tile toward player tile",
-                        fmtInt(infoNode.id, 0, "<obj>"),
-                        fmtInt(infoNode.id, 0, "<obj>"),
-                        fmtInt(infoNode.id, 1, "<dist>"),
-                        fmtInt(infoNode.id, 0, "<obj>"),
-                        fmtInt(infoNode.id, 0, "<obj>"));
-                    setActionFunc(infoNode, "_follow_player", b6);
+                        "    // Mode 0: activates breadcrumb-trail follow system\n"
+                        "    //   records player tile history, follower consumes trail\n"
+                        "    //   smooth pixel lerp between tiles, facing + walk anim auto-set\n"
+                        "    // Mode 4: moves sprite toward player, stops at minDist");
                     break;
                 }
                 case VsNodeType::IsNear2D: {
@@ -13413,6 +13415,35 @@ void FrameTick(float dt)
                         "    // --- Runtime (main.c) ---\n"
                         "    // Mode 0: afn_collided_tm_obj set when player tile adjacent to obj\n"
                         "    //         afn_bp_cur_tm_obj = instance's bound tilemap object index");
+                    break;
+                }
+                case VsNodeType::SetFollowAnim: {
+                    editorCode = "// Set follow object walk/idle animation";
+                    char b6[512];
+                    snprintf(b6, sizeof(b6),
+                        "    if (tm_fol_active && tm_fol_obj >= 0) {\n"
+                        "      tm_obj_anim_play[tm_fol_obj] = 1;\n"
+                        "      tm_obj_anim_idx[tm_fol_obj] = tm_fol_moving ? %s : %s;\n"
+                        "    }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Mode 0: tm_fol_moving = 1 while follower is lerping between tiles\n"
+                        "    //   sets walk anim index while moving, idle when stopped\n"
+                        "    //   tm_obj_anim_play/idx[] drive DMA direction sprite reload",
+                        fmtInt(infoNode.id, 0, "<walk>"),
+                        fmtInt(infoNode.id, 1, "<idle>"));
+                    setActionFunc(infoNode, "_set_fol_anim", b6);
+                    break;
+                }
+                case VsNodeType::SetFollowFacing: {
+                    editorCode = "// Set follow object facing from movement direction";
+                    setActionFunc(infoNode, "_set_fol_facing",
+                        "    if (tm_fol_active && tm_fol_obj >= 0) {\n"
+                        "      tm_obj_facing[tm_fol_obj] = tm_fol_facing;\n"
+                        "    }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Mode 0: tm_fol_facing = direction follower moved (0/2/4/6)\n"
+                        "    //   set each time follower consumes a breadcrumb tile\n"
+                        "    //   tm_obj_facing[] drives DMA direction sprite facing reload");
                     break;
                 }
                 case VsNodeType::SetAI: {
@@ -14609,6 +14640,8 @@ void FrameTick(float dt)
                     case VsNodeType::FleePlayer:    suffix = "_flee_player"; break;
                     case VsNodeType::FollowPlayer:  suffix = "_follow_player"; break;
                     case VsNodeType::IsNear2D:      suffix = "_is_near_2d"; break;
+                    case VsNodeType::SetFollowAnim: suffix = "_set_fol_anim"; break;
+                    case VsNodeType::SetFollowFacing: suffix = "_set_fol_facing"; break;
                     case VsNodeType::SetAI:         suffix = "_set_ai"; break;
                     case VsNodeType::GetAI:         suffix = "_get_ai"; break;
                     case VsNodeType::OnDeath:       suffix = "_on_death"; break;
@@ -15064,6 +15097,8 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ChasePlayer].name)) addNodeAt(VsNodeType::ChasePlayer);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FleePlayer].name)) addNodeAt(VsNodeType::FleePlayer);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FollowPlayer].name)) addNodeAt(VsNodeType::FollowPlayer);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetFollowAnim].name)) addNodeAt(VsNodeType::SetFollowAnim);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetFollowFacing].name)) addNodeAt(VsNodeType::SetFollowFacing);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetAI].name)) addNodeAt(VsNodeType::SetAI);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::EmitParticle].name)) addNodeAt(VsNodeType::EmitParticle);
