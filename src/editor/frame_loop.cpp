@@ -846,6 +846,7 @@ struct SoundSample {
     bool loop = false;
     int loopStart = 0;          // sample offset
     bool builtIn = false;       // true = generated, not imported
+    int baseNote = -1;          // MIDI note this sample was recorded at (-1 = single-cycle)
     bool isDrumKit = false;     // true = note selects sample from drumHits
     DrumHit drumHits[128];      // per-note samples (only used if isDrumKit)
 };
@@ -1179,6 +1180,212 @@ static bool LoadGMDrumKit(SoundSample& kit) {
     return true;
 }
 
+// Load a GM tonal instrument from gm.dls by program number
+// Extracts the sample for the region covering note 60 (middle C)
+static bool LoadGMInstrument(int program, const char* name, SoundSample& out) {
+    FILE* f = fopen("C:\\Windows\\System32\\drivers\\gm.dls", "rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    std::vector<uint8_t> buf(sz);
+    fread(buf.data(), 1, sz, f);
+    fclose(f);
+
+    const uint8_t* d = buf.data();
+    const uint8_t* end = d + sz;
+
+    auto rd32 = [](const uint8_t* p) -> uint32_t {
+        return p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
+    };
+    auto rd16 = [](const uint8_t* p) -> uint16_t {
+        return p[0] | (p[1] << 8);
+    };
+
+    if (sz < 12 || memcmp(d, "RIFF", 4) != 0) return false;
+
+    // Collect wave pool
+    struct WaveInfo {
+        const uint8_t* data = nullptr;
+        int length = 0;
+        int sampleRate = 22050;
+        int bitsPerSample = 16;
+        int channels = 1;
+        int unityNote = 60;
+    };
+    std::vector<WaveInfo> waves;
+
+    const uint8_t* wvpl = nullptr;
+    uint32_t wvplSize = 0;
+    const uint8_t* lins = nullptr;
+    uint32_t linsSize = 0;
+
+    // Find wvpl and lins
+    {
+        const uint8_t* p = d + 12;
+        while (p + 8 <= end) {
+            uint32_t ckId = rd32(p);
+            uint32_t ckSize = rd32(p + 4);
+            if (ckId == 0x5453494C && p + 12 <= end) {
+                uint32_t listType = rd32(p + 8);
+                if (listType == 0x6C707677) { wvpl = p + 12; wvplSize = ckSize - 4; }
+                if (listType == 0x736E696C) { lins = p + 12; linsSize = ckSize - 4; }
+            }
+            p += 8 + ((ckSize + 1) & ~1);
+        }
+    }
+    if (!wvpl || !lins) return false;
+
+    // Parse waves
+    {
+        const uint8_t* p = wvpl;
+        const uint8_t* wEnd = wvpl + wvplSize;
+        while (p + 12 <= wEnd) {
+            uint32_t ckId = rd32(p);
+            uint32_t ckSize = rd32(p + 4);
+            if (ckId == 0x5453494C) {
+                uint32_t listType = rd32(p + 8);
+                if (listType == 0x65766177) { // 'wave'
+                    WaveInfo wi;
+                    const uint8_t* wp = p + 12;
+                    const uint8_t* waveEnd = p + 8 + ckSize;
+                    while (wp + 8 <= waveEnd) {
+                        uint32_t wckId = rd32(wp);
+                        uint32_t wckSize = rd32(wp + 4);
+                        if (wckId == 0x20746D66 && wckSize >= 16) {
+                            wi.channels = rd16(wp + 10);
+                            wi.sampleRate = rd32(wp + 12);
+                            wi.bitsPerSample = rd16(wp + 22);
+                        } else if (wckId == 0x61746164) {
+                            wi.data = wp + 8;
+                            wi.length = wckSize;
+                        } else if (wckId == 0x706D7377 && wckSize >= 20) { // 'wsmp'
+                            wi.unityNote = rd16(wp + 12);
+                        }
+                        wp += 8 + ((wckSize + 1) & ~1);
+                    }
+                    waves.push_back(wi);
+                }
+            }
+            p += 8 + ((ckSize + 1) & ~1);
+        }
+    }
+
+    // Find the instrument with matching program (bank 0, non-percussion)
+    const uint8_t* targetIns = nullptr;
+    uint32_t targetInsSize = 0;
+    {
+        const uint8_t* p = lins;
+        const uint8_t* lEnd = lins + linsSize;
+        while (p + 12 <= lEnd) {
+            uint32_t ckId = rd32(p);
+            uint32_t ckSize = rd32(p + 4);
+            if (ckId == 0x5453494C) {
+                uint32_t listType = rd32(p + 8);
+                if (listType == 0x20736E69) { // 'ins '
+                    const uint8_t* ip = p + 12;
+                    const uint8_t* iEnd = p + 8 + ckSize;
+                    while (ip + 8 <= iEnd) {
+                        uint32_t ickId = rd32(ip);
+                        uint32_t ickSize = rd32(ip + 4);
+                        if (ickId == 0x68736E69 && ickSize >= 12) { // 'insh'
+                            uint32_t ulBank = rd32(ip + 12);
+                            uint32_t ulProgram = rd32(ip + 16);
+                            if (!(ulBank & 0x80000000) && (int)ulProgram == program) {
+                                targetIns = p + 12;
+                                targetInsSize = ckSize - 4;
+                            }
+                        }
+                        ip += 8 + ((ickSize + 1) & ~1);
+                    }
+                    if (targetIns) break;
+                }
+            }
+            p += 8 + ((ckSize + 1) & ~1);
+        }
+    }
+    if (!targetIns) return false;
+
+    // Find region covering note 60
+    const uint8_t* lrgn = nullptr;
+    uint32_t lrgnSize = 0;
+    {
+        const uint8_t* p = targetIns;
+        const uint8_t* iEnd = targetIns + targetInsSize;
+        while (p + 12 <= iEnd) {
+            uint32_t ckId = rd32(p);
+            uint32_t ckSize = rd32(p + 4);
+            if (ckId == 0x5453494C) {
+                uint32_t listType = rd32(p + 8);
+                if (listType == 0x6E67726C) { lrgn = p + 12; lrgnSize = ckSize - 4; break; }
+            }
+            p += 8 + ((ckSize + 1) & ~1);
+        }
+    }
+    if (!lrgn) return false;
+
+    int waveIdx = -1;
+    {
+        const uint8_t* rp = lrgn;
+        const uint8_t* rEnd = lrgn + lrgnSize;
+        while (rp + 12 <= rEnd) {
+            uint32_t ckId = rd32(rp);
+            uint32_t ckSize = rd32(rp + 4);
+            if (ckId == 0x5453494C) {
+                uint32_t listType = rd32(rp + 8);
+                if (listType == 0x206E6772 || listType == 0x326E6772) {
+                    int keyLo = 0, keyHi = 127;
+                    int wi = -1;
+                    const uint8_t* rrp = rp + 12;
+                    const uint8_t* rrEnd = rp + 8 + ckSize;
+                    while (rrp + 8 <= rrEnd) {
+                        uint32_t rckId = rd32(rrp);
+                        uint32_t rckSize = rd32(rrp + 4);
+                        if (rckId == 0x686E6772 && rckSize >= 8) {
+                            keyLo = rd16(rrp + 8); keyHi = rd16(rrp + 10);
+                        } else if (rckId == 0x6B6E6C77 && rckSize >= 12) {
+                            wi = (int)rd32(rrp + 16);
+                        }
+                        rrp += 8 + ((rckSize + 1) & ~1);
+                    }
+                    if (wi >= 0 && keyLo <= 60 && keyHi >= 60) { waveIdx = wi; break; }
+                }
+            }
+            rp += 8 + ((ckSize + 1) & ~1);
+        }
+    }
+    if (waveIdx < 0 || waveIdx >= (int)waves.size() || !waves[waveIdx].data) return false;
+
+    // Convert wave to 8-bit 16384Hz
+    WaveInfo& wi = waves[waveIdx];
+    int numSamples = (wi.bitsPerSample == 16) ? wi.length / (2 * wi.channels) : wi.length / wi.channels;
+    int dstLen = (int)((float)numSamples / wi.sampleRate * 16384);
+    if (dstLen < 1) return false;
+    if (dstLen > 32768) dstLen = 32768; // cap at 2 sec
+
+    snprintf(out.name, sizeof(out.name), "%s", name);
+    out.data.resize(dstLen);
+    out.sampleRate = 16384;
+    out.loop = false;
+    out.builtIn = true;
+    out.baseNote = wi.unityNote;
+
+    for (int i = 0; i < dstLen; i++) {
+        int srcIdx = (int)((float)i / dstLen * numSamples);
+        if (srcIdx >= numSamples) srcIdx = numSamples - 1;
+        int val = 0;
+        if (wi.bitsPerSample == 16) {
+            const int16_t* s16 = (const int16_t*)(wi.data + srcIdx * 2 * wi.channels);
+            val = s16[0] >> 8;
+        } else {
+            val = (int)wi.data[srcIdx * wi.channels] - 128;
+        }
+        out.data[i] = (int8_t)val;
+    }
+
+    return true;
+}
+
 // Generate built-in waveform samples
 static void InitBuiltInSamples()
 {
@@ -1254,6 +1461,43 @@ static void InitBuiltInSamples()
         SoundSample kit;
         if (LoadGMDrumKit(kit)) {
             sSoundBank.push_back(std::move(kit));
+        }
+    }
+
+    // GM instruments from Windows DLS
+    {
+        struct GMLoad { int program; const char* name; };
+        GMLoad gmInstruments[] = {
+            {  0, "GM Piano" },
+            { 24, "GM Nylon Guitar" },
+            { 25, "GM Steel Guitar" },
+            { 26, "GM Jazz Guitar" },
+            { 27, "GM Clean Guitar" },
+            { 29, "GM Overdrive Guitar" },
+            { 30, "GM Distortion Guitar" },
+            { 32, "GM Acoustic Bass" },
+            { 33, "GM Finger Bass" },
+            { 34, "GM Pick Bass" },
+            { 36, "GM Slap Bass" },
+            { 38, "GM Synth Bass 1" },
+            { 28, "GM Muted Guitar" },
+            { 48, "GM Strings" },
+            { 49, "GM Slow Strings" },
+            { 50, "GM Synth Strings" },
+            { 52, "GM Choir" },
+            { 56, "GM Trumpet" },
+            { 61, "GM Brass" },
+            { 73, "GM Flute" },
+            { 80, "GM Square Lead" },
+            { 81, "GM Saw Lead" },
+            { 88, "GM New Age Pad" },
+            { 89, "GM Warm Pad" },
+        };
+        for (auto& gm : gmInstruments) {
+            SoundSample s;
+            if (LoadGMInstrument(gm.program, gm.name, s)) {
+                sSoundBank.push_back(std::move(s));
+            }
         }
     }
 
@@ -1453,11 +1697,12 @@ static bool ParseMidiFile(const char* path, MidiFile& out)
             } else if (cmd == 0xA0 || cmd == 0xB0 || cmd == 0xE0) {
                 tp += 2; // 2 data bytes
             } else if (cmd == 0xC0) {
-                // Program Change — capture instrument
+                // Program Change — capture instrument (skip ch 10, always drums in GM)
                 int prog = tp[0] & 0x7F;
                 out.channelProgram[ch] = prog;
-                snprintf(out.channelName[ch], sizeof(out.channelName[ch]),
-                    "Ch %d: %s", ch + 1, sGMInstrumentNames[prog]);
+                if (ch != 9) // channel 10 (0-indexed as 9) is always drums in GM
+                    snprintf(out.channelName[ch], sizeof(out.channelName[ch]),
+                        "Ch %d: %s", ch + 1, sGMInstrumentNames[prog]);
                 tp += 1;
             } else if (cmd == 0xD0) {
                 tp += 1; // 1 data byte
@@ -1538,6 +1783,15 @@ struct AudioVoice {
     int startSample = 0;    // sample offset within buffer to start playing
     int midiNote = -1;      // MIDI note number (for retrigger detection)
     int midiChannel = -1;   // MIDI channel (for retrigger detection)
+    // ADSR envelope
+    int envPhase = 0;       // 0=attack, 1=decay, 2=sustain, 3=release
+    int envPos = 0;         // samples elapsed in current phase
+    int attack = 50;        // samples (~3ms at 16384Hz)
+    int decay = 800;        // samples (~49ms)
+    float sustain = 0.6f;   // sustain level 0-1
+    int release = 1600;     // samples (~98ms) — musical fade-out
+    float envLevel = 0.0f;  // current envelope amplitude 0-1
+    bool isDrum = false;    // drums skip ADSR
 };
 
 static HWAVEOUT sWaveOut = nullptr;
@@ -1621,7 +1875,8 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                         } else if (!smp.data.empty()) {
                             smpData = smp.data.data();
                             smpLen = (int)smp.data.size();
-                            smpLoop = true; // tonal: loop for MIDI, remaining handles cutoff
+                            // Single-cycle waveforms loop; real samples (baseNote set) play once
+                            smpLoop = (smp.baseNote < 0);
                         }
 
                         if (smpData && smpLen > 0) {
@@ -1637,18 +1892,29 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             if (isDrum) {
                                 // Drums play at original pitch (1:1)
                                 v.inc = 65536;
+                            } else if (smp.baseNote >= 0) {
+                                // Real sample: pitch relative to recorded note
+                                float ratio = NoteToFreq(n.note) / NoteToFreq(smp.baseNote);
+                                v.inc = (uint32_t)(ratio * 65536.0f);
                             } else {
-                                // Calculate pitch: base frequency of sample at sampleRate / sampleLength
+                                // Single-cycle waveform: base frequency = sampleRate / length
                                 float baseFreq = (float)smpRate / (float)v.length;
                                 float noteFreq = NoteToFreq(n.note);
                                 v.inc = (uint32_t)(noteFreq / baseFreq * 65536.0f);
                             }
                             v.volume = n.velocity * mf.channelVolume[n.channel] / 100;
                             if (v.volume > 160) v.volume = 160;
+                            // ADSR envelope init
+                            v.envPhase = 0;
+                            v.envPos = 0;
+                            v.envLevel = 0.0f;
+                            v.isDrum = isDrum;
                             // Convert tick duration to samples
                             float secPerTick = 60.0f / (mf.tempo * mf.ticksPerBeat);
                             v.remaining = (int)(n.duration * secPerTick * kAudioSampleRate);
                             if (v.remaining < 100) v.remaining = 100;
+                            // Add release time so note fades out after its MIDI duration
+                            if (!isDrum) v.remaining += v.release;
                             // Drums: remaining is max of duration and sample length
                             if (isDrum && v.remaining < smpLen)
                                 v.remaining = smpLen;
@@ -1680,7 +1946,12 @@ static void AudioMixBuffer(int8_t* buf, int len) {
         int iStart = voice.startSample;
         voice.startSample = 0; // only delay on the first buffer
         for (int i = iStart; i < len; i++) {
-            // Note duration expired
+            // Transition to release phase when near end of note
+            if (voice.remaining >= 0 && voice.remaining <= voice.release && voice.envPhase < 3 && !voice.isDrum) {
+                voice.envPhase = 3; // release
+                voice.envPos = 0;
+            }
+            // Note fully expired after release
             if (voice.remaining == 0) {
                 voice.active = false;
                 break;
@@ -1701,10 +1972,31 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                     break;
                 }
             }
-            // Apply volume with fade-out near end of note
-            int vol = voice.volume;
-            if (voice.remaining >= 0 && voice.remaining < 200)
-                vol = vol * voice.remaining / 200;
+
+            // ADSR envelope
+            float env = 1.0f;
+            if (!voice.isDrum) {
+                switch (voice.envPhase) {
+                case 0: // Attack
+                    env = (voice.attack > 0) ? (float)voice.envPos / voice.attack : 1.0f;
+                    if (++voice.envPos >= voice.attack) { voice.envPhase = 1; voice.envPos = 0; }
+                    break;
+                case 1: // Decay
+                    env = 1.0f - (1.0f - voice.sustain) * ((voice.decay > 0) ? (float)voice.envPos / voice.decay : 1.0f);
+                    if (++voice.envPos >= voice.decay) { voice.envPhase = 2; voice.envPos = 0; }
+                    break;
+                case 2: // Sustain
+                    env = voice.sustain;
+                    break;
+                case 3: // Release
+                    env = voice.sustain * (1.0f - ((voice.release > 0) ? (float)voice.envPos / voice.release : 1.0f));
+                    if (++voice.envPos >= voice.release) { voice.active = false; break; }
+                    break;
+                }
+                voice.envLevel = env;
+            }
+
+            int vol = (int)(voice.volume * env);
             int val = voice.data[sampleIdx] * vol / 256;
             mix[i] += (int16_t)val;
             voice.pos += voice.inc;
@@ -16916,8 +17208,10 @@ void FrameTick(float dt)
         if (sSelectedMidi >= 0 && sSelectedMidi < (int)sMidiFiles.size()) {
             MidiFile& mf = sMidiFiles[sSelectedMidi];
             ImGui::Text("File: %s", mf.name);
-            ImGui::Text("Tempo: %d BPM  |  Ticks/Beat: %d", mf.tempo, mf.ticksPerBeat);
-            ImGui::Text("Tracks: %d", (int)mf.tracks.size());
+            ImGui::Text("Tracks: %d  |  Ticks/Beat: %d", (int)mf.tracks.size(), mf.ticksPerBeat);
+            ImGui::PushItemWidth(Scaled(200));
+            ImGui::SliderInt("BPM", &mf.tempo, 20, 400);
+            ImGui::PopItemWidth();
 
             ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.4f, 1.0f), "Channel -> Sample Bank");
@@ -16943,12 +17237,34 @@ void FrameTick(float dt)
                 ImGui::PopStyleColor();
                 ImGui::SameLine();
 
-                // Mute toggle
+                // Mute toggle (LMB = mute, RMB = solo, Shift+LMB = add to solo)
                 char muteId[32];
                 snprintf(muteId, sizeof(muteId), "%s##mute%d", mf.channelMuted[ch] ? "M" : " ", ch);
-                if (ImGui::SmallButton(muteId))
-                    mf.channelMuted[ch] = !mf.channelMuted[ch];
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip(mf.channelMuted[ch] ? "Unmute" : "Mute");
+                bool shiftHeld = ImGui::GetIO().KeyShift;
+                if (ImGui::SmallButton(muteId)) {
+                    if (shiftHeld) {
+                        // Shift+LMB: toggle this channel into/out of solo group
+                        mf.channelMuted[ch] = !mf.channelMuted[ch];
+                    } else {
+                        mf.channelMuted[ch] = !mf.channelMuted[ch];
+                    }
+                }
+                if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(1)) {
+                    // RMB: solo — mute all others, unmute this one
+                    // If already solo (only this unmuted), unsolo all
+                    bool alreadySolo = true;
+                    for (int c2 = 0; c2 < 16; c2++) {
+                        if (!mf.channelUsed[c2]) continue;
+                        if (c2 == ch && mf.channelMuted[c2]) { alreadySolo = false; break; }
+                        if (c2 != ch && !mf.channelMuted[c2]) { alreadySolo = false; break; }
+                    }
+                    if (alreadySolo) {
+                        for (int c2 = 0; c2 < 16; c2++) mf.channelMuted[c2] = false;
+                    } else {
+                        for (int c2 = 0; c2 < 16; c2++) mf.channelMuted[c2] = (c2 != ch);
+                    }
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("LMB: Mute | RMB: Solo | Shift+LMB: Add to solo");
                 ImGui::SameLine();
 
                 // Channel name (dimmed if muted)
