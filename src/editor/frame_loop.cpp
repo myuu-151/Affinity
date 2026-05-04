@@ -1159,7 +1159,7 @@ static bool ParseMidiFile(const char* path, MidiFile& out)
 static constexpr int kAudioSampleRate = 16384;
 static constexpr int kAudioBufSize = 1024;
 static constexpr int kAudioBufCount = 2;
-static constexpr int kMaxVoices = 8;
+static constexpr int kMaxVoices = 24;
 
 struct AudioVoice {
     const int8_t* data = nullptr;
@@ -1171,6 +1171,9 @@ struct AudioVoice {
     int volume = 128;       // 0-255
     bool active = false;
     int remaining = -1;     // samples until note-off (-1 = until end of data)
+    int startSample = 0;    // sample offset within buffer to start playing
+    int midiNote = -1;      // MIDI note number (for retrigger detection)
+    int midiChannel = -1;   // MIDI channel (for retrigger detection)
 };
 
 static HWAVEOUT sWaveOut = nullptr;
@@ -1199,19 +1202,37 @@ static void AudioMixBuffer(int8_t* buf, int len) {
         MidiFile& mf = sMidiFiles[sMidiPlayIdx];
         double ticksPerSec = mf.ticksPerBeat * mf.tempo / 60.0;
         double secPerBuf = (double)len / kAudioSampleRate;
-        int newTick = (int)((sMidiPlayTime + secPerBuf) * ticksPerSec);
+        double startTime = sMidiPlayTime;
+        int newTick = (int)((startTime + secPerBuf) * ticksPerSec);
 
         // Trigger notes that start between sMidiPlayTick and newTick
         for (auto& t : mf.tracks) {
             for (auto& n : t.notes) {
                 if (n.tick >= sMidiPlayTick && n.tick < newTick) {
+                    // Calculate sample-accurate start offset within this buffer
+                    double noteTimeSec = (double)n.tick / ticksPerSec;
+                    int sampleOff = (int)((noteTimeSec - startTime) * kAudioSampleRate);
+                    if (sampleOff < 0) sampleOff = 0;
+                    if (sampleOff >= len) sampleOff = len - 1;
+
+                    // Kill any existing voice playing the same note+channel (retrigger)
+                    for (int v = 0; v < kMaxVoices; v++) {
+                        if (sVoices[v].active && sVoices[v].midiNote == n.note && sVoices[v].midiChannel == n.channel)
+                            sVoices[v].active = false;
+                    }
+
                     // Find a free voice
                     int vi = -1;
                     for (int v = 0; v < kMaxVoices; v++)
                         if (!sVoices[v].active) { vi = v; break; }
                     if (vi < 0) {
-                        // Steal oldest voice
+                        // Steal voice closest to finishing
+                        int minRem = INT_MAX;
                         vi = 0;
+                        for (int v = 0; v < kMaxVoices; v++) {
+                            int r = sVoices[v].remaining;
+                            if (r >= 0 && r < minRem) { minRem = r; vi = v; }
+                        }
                     }
                     int bankIdx = mf.channelBank[n.channel];
                     if (bankIdx >= 0 && bankIdx < (int)sSoundBank.size()) {
@@ -1223,6 +1244,9 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             v.loop = smp.loop;
                             v.loopStart = smp.loopStart;
                             v.pos = 0;
+                            v.startSample = sampleOff;
+                            v.midiNote = n.note;
+                            v.midiChannel = n.channel;
                             // Calculate pitch: base frequency of sample at sampleRate / sampleLength
                             float baseFreq = (float)smp.sampleRate / (float)v.length;
                             float noteFreq = NoteToFreq(n.note);
@@ -1258,7 +1282,9 @@ static void AudioMixBuffer(int8_t* buf, int len) {
     for (int v = 0; v < kMaxVoices; v++) {
         AudioVoice& voice = sVoices[v];
         if (!voice.active || !voice.data) continue;
-        for (int i = 0; i < len; i++) {
+        int iStart = voice.startSample;
+        voice.startSample = 0; // only delay on the first buffer
+        for (int i = iStart; i < len; i++) {
             // Note duration expired
             if (voice.remaining == 0) {
                 voice.active = false;
