@@ -4322,8 +4322,8 @@ int main(void)
                         prev_ptx = tm_player_tx;
                         prev_pty = tm_player_ty;
 
-                        // Pop oldest breadcrumb and start lerp
-                        if (trail_count > 0) {
+                        // Pop oldest breadcrumb and start lerp (keep 1 buffered for spacing)
+                        if (trail_count > 1) {
                             int tail = (trail_head - trail_count + FOLLOW_TRAIL_LEN) % FOLLOW_TRAIL_LEN;
                             int new_tx = trail_tx[tail];
                             int new_ty = trail_ty[tail];
@@ -4529,8 +4529,16 @@ int main(void)
 
                     int objPx = ((oi < TM_MAX_DIR_OBJS) ? tm_obj_tx[oi] : afn_tm0_objs[oi].tx) * tm_tile_size;
                     int objPy = ((oi < TM_MAX_DIR_OBJS) ? tm_obj_ty[oi] : afn_tm0_objs[oi].ty) * tm_tile_size;
-                    // Apply smooth follow offset for object 5
-                    if (oi == 5) { objPx += tm_follow_offset_x; objPy += tm_follow_offset_y; }
+                    // Apply smooth follow offset for object 5 + nudge half tile closer
+                    if (oi == 5) {
+                        objPx += tm_follow_offset_x;
+                        objPy += tm_follow_offset_y;
+                        // Nudge toward player using smooth player pixel pos (px/py computed above)
+                        int ntx = px - objPx;
+                        int nty = py - objPy;
+                        objPx += ntx / 4;
+                        objPy += nty / 4;
+                    }
                     int osx = objPx - tm_cam_x;
                     int osy = objPy - tm_cam_y;
 
