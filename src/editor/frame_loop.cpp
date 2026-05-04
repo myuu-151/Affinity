@@ -888,29 +888,29 @@ static void InitBuiltInSamples()
     // Square 50%
     addWave("Square 50%", [](int i, int len) -> int8_t {
         return (i < len / 2) ? 96 : -96;
-    }, 32, true);
+    }, 32, false);
 
     // Square 25%
     addWave("Square 25%", [](int i, int len) -> int8_t {
         return (i < len / 4) ? 96 : -96;
-    }, 32, true);
+    }, 32, false);
 
     // Triangle
     addWave("Triangle", [](int i, int len) -> int8_t {
         int half = len / 2;
         if (i < half) return (int8_t)(-96 + 192 * i / half);
         return (int8_t)(96 - 192 * (i - half) / half);
-    }, 32, true);
+    }, 32, false);
 
     // Sawtooth
     addWave("Sawtooth", [](int i, int len) -> int8_t {
         return (int8_t)(-96 + 192 * i / len);
-    }, 32, true);
+    }, 32, false);
 
     // Sine
     addWave("Sine", [](int i, int len) -> int8_t {
         return (int8_t)(96.0f * sinf(2.0f * 3.14159f * i / len));
-    }, 32, true);
+    }, 32, false);
 
     // White Noise
     {
@@ -922,7 +922,7 @@ static void InitBuiltInSamples()
             seed = seed * 1103515245 + 12345;
             s.data[i] = (int8_t)((seed >> 16) & 0xFF);
         }
-        s.loop = true;
+        s.loop = false;
         s.builtIn = true;
         s.sampleRate = 16384;
         sSoundBank.push_back(std::move(s));
@@ -986,6 +986,30 @@ static void InitBuiltInSamples()
         s.sampleRate = 16384;
         sSoundBank.push_back(std::move(s));
     }
+
+    // Piano (warm, rich harmonics — even + odd, decaying higher partials)
+    addWave("Piano", [](int i, int len) -> int8_t {
+        float p = 2.0f * 3.14159f * i / len;
+        float v = sinf(p)               // fundamental
+               + 0.6f  * sinf(2*p)      // 2nd
+               + 0.35f * sinf(3*p)      // 3rd
+               + 0.2f  * sinf(4*p)      // 4th
+               + 0.1f  * sinf(5*p)      // 5th
+               + 0.05f * sinf(6*p);     // 6th
+        return (int8_t)(v * 96.0f / 2.3f);
+    }, 64, false);
+
+    // Harp (bright pluck — strong odd harmonics for shimmery tone)
+    addWave("Harp", [](int i, int len) -> int8_t {
+        float p = 2.0f * 3.14159f * i / len;
+        float v = sinf(p)               // fundamental
+               + 0.5f  * sinf(2*p)      // 2nd
+               + 0.4f  * sinf(3*p)      // 3rd
+               + 0.15f * sinf(5*p)      // 5th
+               + 0.1f  * sinf(7*p)      // 7th
+               + 0.05f * sinf(9*p);     // 9th
+        return (int8_t)(v * 96.0f / 2.2f);
+    }, 64, false);
 }
 
 // Parse a standard MIDI file (.mid)
@@ -1241,7 +1265,7 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             AudioVoice& v = sVoices[vi];
                             v.data = smp.data.data();
                             v.length = (int)smp.data.size();
-                            v.loop = smp.loop;
+                            v.loop = true; // always loop for MIDI — remaining handles cutoff
                             v.loopStart = smp.loopStart;
                             v.pos = 0;
                             v.startSample = sampleOff;
@@ -1372,38 +1396,62 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
     int vi = 0;
     AudioVoice& v = sVoices[vi];
 
-    if (smp.loop && smp.data.size() < 256) {
-        // Short looping waveform: render ~0.5 sec with decay envelope
+    if (smp.loop) {
+        // Looping waveform: play as continuous drone at requested pitch
+        v.data = smp.data.data();
+        v.length = (int)smp.data.size();
+        v.loop = true;
+        v.loopStart = smp.loopStart;
+        v.pos = 0;
+        float baseFreq = (float)smp.sampleRate / (float)smp.data.size();
+        float noteFreq = NoteToFreq(note);
+        v.inc = (uint32_t)(noteFreq / baseFreq * 65536.0f);
+        v.volume = 120;
+        v.remaining = -1;
+        v.startSample = 0;
+        v.midiNote = -1;
+        v.midiChannel = -1;
+        v.active = true;
+    } else if (smp.data.size() < 256) {
+        // Short non-looping waveform: render ~0.5 sec with decay at middle C
         int outLen = kAudioSampleRate / 2;
         sPreviewBuf.resize(outLen);
         float baseFreq = (float)smp.sampleRate / (float)smp.data.size();
         float noteFreq = NoteToFreq(note);
-        float ratio = noteFreq / baseFreq;
         uint32_t pos = 0;
-        uint32_t inc = (uint32_t)(ratio * 65536.0f);
+        uint32_t inc = (uint32_t)(noteFreq / baseFreq * 65536.0f);
         int srcLen = (int)smp.data.size();
         for (int i = 0; i < outLen; i++) {
             int si = (int)(pos >> 16) % srcLen;
-            float env = 1.0f - (float)i / outLen; // linear decay
+            float env = 1.0f - (float)i / outLen;
             sPreviewBuf[i] = (int8_t)(smp.data[si] * env * 0.6f);
             pos += inc;
         }
         v.data = sPreviewBuf.data();
         v.length = outLen;
         v.loop = false;
-        v.pos = 0;
-        v.inc = 65536; // 1:1, already pitch-shifted
-        v.volume = 160;
-        v.active = true;
-    } else {
-        // One-shot or long sample: play directly
-        v.data = smp.data.data();
-        v.length = (int)smp.data.size();
-        v.loop = false; // don't loop for preview
         v.loopStart = 0;
         v.pos = 0;
-        v.inc = 65536; // play at original rate
+        v.inc = 65536;
         v.volume = 160;
+        v.remaining = -1;
+        v.startSample = 0;
+        v.midiNote = -1;
+        v.midiChannel = -1;
+        v.active = true;
+    } else {
+        // Long one-shot sample (kick, snare, etc.): play directly
+        v.data = smp.data.data();
+        v.length = (int)smp.data.size();
+        v.loop = false;
+        v.loopStart = 0;
+        v.pos = 0;
+        v.inc = 65536;
+        v.volume = 160;
+        v.remaining = -1;
+        v.startSample = 0;
+        v.midiNote = -1;
+        v.midiChannel = -1;
         v.active = true;
     }
 }
