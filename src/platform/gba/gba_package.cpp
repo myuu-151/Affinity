@@ -2643,7 +2643,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 }
                 case GBAScriptNodeType::FollowPlayer: {
                     auto* objData = findDataIn(action->id, 0);
+                    auto* distData = findDataIn(action->id, 1);
+                    auto* speedData = findDataIn(action->id, 2);
                     int obj = objData ? resolveInt(objData) : 0;
+                    int dist = distData ? resolveInt(distData) : 0;
+                    int speed = speedData ? resolveInt(speedData) : 0;
                     // Mode 0: activate generic breadcrumb-trail follow system
                     f << "    if (!tm_fol_active) {\n";
                     f << "      tm_fol_obj = " << obj << ";\n";
@@ -2653,6 +2657,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "      tm_fol_trail_head = 0;\n";
                     f << "      tm_fol_active = 1;\n";
                     f << "    }\n";
+                    f << "    tm_fol_dist = " << dist << ";\n";
+                    f << "    tm_fol_speed = " << speed << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::IsFollowMoving:
@@ -4027,7 +4033,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 }
                 case GBAScriptNodeType::FollowPlayer: {
                     // Mode 0: activate the generic breadcrumb-trail follow system in main.c
-                    // Sets tm_fol_active + tm_fol_obj so the runtime tick handles movement
+                    auto* distData = bpFindDataIn(action->id, 1);
+                    auto* speedData = bpFindDataIn(action->id, 2);
+                    std::string dist = distData ? bpResolveInt(distData) : "0";
+                    std::string speed = speedData ? bpResolveInt(speedData) : "0";
                     f << "    if (!tm_fol_active) {\n";
                     f << "      tm_fol_obj = afn_bp_cur_tm_obj;\n";
                     f << "      tm_fol_prev_ptx = tm_player_tx;\n";
@@ -4036,6 +4045,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "      tm_fol_trail_head = 0;\n";
                     f << "      tm_fol_active = 1;\n";
                     f << "    }\n";
+                    f << "    tm_fol_dist = " << dist << ";\n";
+                    f << "    tm_fol_speed = " << speed << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::IsFollowMoving:

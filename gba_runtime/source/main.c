@@ -49,6 +49,8 @@ static int tm_fol_trail_count;
 static int tm_fol_trail_head;
 static int tm_fol_moving;
 static int tm_fol_facing;
+static int tm_fol_speed;
+static int tm_fol_dist;
 static s16 tm_obj_facing[TM_MAX_DIR_OBJS];
 static s8  tm_obj_anim_play[TM_MAX_DIR_OBJS];
 static s8  tm_obj_anim_idx[TM_MAX_DIR_OBJS];
@@ -3788,6 +3790,8 @@ static void mode0_init_scene(int tmIdx)
     tm_fol_lerp_timer = 0;
     tm_fol_offset_x = 0;
     tm_fol_offset_y = 0;
+    tm_fol_speed = 0;
+    tm_fol_dist = 0;
 
     // Init mutable object positions from const data
 #if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0
@@ -4339,13 +4343,13 @@ int main(void)
                     if (tm_fol_trail_count < TM_FOL_TRAIL_LEN) tm_fol_trail_count++;
                     tm_fol_prev_ptx = tm_player_tx;
                     tm_fol_prev_pty = tm_player_ty;
-                    if (tm_fol_trail_count > 1) {
+                    if (tm_fol_trail_count > (tm_fol_dist > 0 ? tm_fol_dist : 1)) {
                         int tail = (tm_fol_trail_head - tm_fol_trail_count + TM_FOL_TRAIL_LEN) % TM_FOL_TRAIL_LEN;
                         int ntx = tm_fol_trail_tx[tail];
                         int nty = tm_fol_trail_ty[tail];
                         tm_fol_lerp_dx = (tm_obj_tx[oi] - ntx) * tm_tile_size;
                         tm_fol_lerp_dy = (tm_obj_ty[oi] - nty) * tm_tile_size;
-                        tm_fol_lerp_total = tm_move_frames;
+                        tm_fol_lerp_total = (tm_fol_speed > 0) ? tm_fol_speed : tm_move_frames;
                         tm_fol_lerp_timer = tm_fol_lerp_total;
                         { int mdx = ntx - tm_obj_tx[oi], mdy = nty - tm_obj_ty[oi];
                           if (mdy < 0) tm_fol_facing = 0;

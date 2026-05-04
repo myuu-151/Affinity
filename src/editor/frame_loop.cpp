@@ -717,7 +717,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Follow Link",    0xFF8855AA, 1, 1, 0, 0, {}, {}, {} },
     { "Get Cursor Stop",0xFF666688, 0, 0, 0, 1, {}, {"Stop"}, {} },
     { "Blueprint",      0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
-    { "Follow Player",  0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Distance (int)"}, {}, {} },
+    { "Follow Player",  0xFF3355AA, 1, 1, 3, 0, {"Object (int)", "Distance (int)", "Speed (int)"}, {}, {} },
     { "Is Near 2D",     0xFF2266BB, 1, 1, 0, 0, {}, {}, {} },
     { "Is Follow Moving",0xFF2266BB, 1, 1, 0, 0, {}, {}, {} },
     { "Set Follow Facing",0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
@@ -13404,11 +13404,12 @@ void FrameTick(float dt)
                         "      tm_fol_trail_head = 0;\n"
                         "      tm_fol_active = 1;\n"
                         "    }\n"
+                        "    tm_fol_dist = <dist>;  // tile gap (0 = 1 tile)\n"
+                        "    tm_fol_speed = <speed>; // lerp frames (0 = match player)\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // Mode 0: activates breadcrumb-trail follow system\n"
-                        "    //   records player tile history, follower consumes trail\n"
-                        "    //   smooth pixel lerp between tiles, facing + walk anim auto-set\n"
-                        "    // Mode 4: moves sprite toward player, stops at minDist");
+                        "    // Mode 0: breadcrumb-trail follow system\n"
+                        "    //   tm_fol_dist = trail gap before follower moves\n"
+                        "    //   tm_fol_speed = lerp frames per tile (0 = tm_move_frames)");
                     break;
                 }
                 case VsNodeType::IsNear2D: {
