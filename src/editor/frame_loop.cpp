@@ -114,6 +114,7 @@ struct TmObject {
 static std::vector<TmObject> sTmObjects;
 static int sTmSelectedObj = -1;      // selected object index (-1 = none)
 static int sTmDragObj = -1;          // object being dragged (-1 = none)
+static int sTmDragOffX = 0, sTmDragOffY = 0; // grab offset in tiles
 static int sTmStampAsset = -1;       // sprite asset index for stamp/paint mode (-1 = off)
 static int sTmStampObj = -1;         // which Tile object we're painting into (-1 = none)
 static int sTmPaintScale = 4;       // paint block size: 1=single sub-cell, 4=4x4 block, 8=8x8 block
@@ -6619,9 +6620,9 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             else
             {
                 ImGui::Text("Tile X");
-                ImGui::DragInt("##tileX", &obj.tileX, 0.5f, 0, tm.width - 1);
+                ImGui::DragInt("##tileX", &obj.tileX, 0.1f, 0, tm.width - 1);
                 ImGui::Text("Tile Y");
-                ImGui::DragInt("##tileY", &obj.tileY, 0.5f, 0, tm.height - 1);
+                ImGui::DragInt("##tileY", &obj.tileY, 0.1f, 0, tm.height - 1);
                 ImGui::Text("Scale");
                 ImGui::SliderFloat("##objScale", &obj.displayScale, 0.5f, 4.0f, "%.1f");
                 if (ImGui::Checkbox("Camera Follow", &obj.camFollow))
@@ -7649,7 +7650,6 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     TmObject& obj = sTmObjects[sTmDragObj];
                     int snapX = std::clamp(hoverTX, 0, tm.width - 1);
                     int snapY = std::clamp(hoverTY, 0, tm.height - 1);
-                    if (sTmPaintScale > 1) { int m = ~(sTmPaintScale - 1); snapX &= m; snapY &= m; }
                     obj.tileX = snapX;
                     obj.tileY = snapY;
                 }
