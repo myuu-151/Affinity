@@ -4288,26 +4288,41 @@ int main(void)
             afn_bp_dispatch_key_pressed();
             afn_bp_dispatch_key_released();
 
-            // --- HARDCODED AI FOLLOW TEST ---
-            // Object 5 (dragon_ow) follows player when A pressed nearby
+            // --- HARDCODED AI FOLLOW TEST (breadcrumb trail) ---
             {
                 static int follow_active = 0;
-                static int follow_timer = 0;
-                // Press A anywhere → activate follow (debug: no proximity check)
+                #define FOLLOW_TRAIL_LEN 16
+                static s16 trail_tx[FOLLOW_TRAIL_LEN];
+                static s16 trail_ty[FOLLOW_TRAIL_LEN];
+                static int trail_head = 0;
+                static int trail_count = 0;
+                static s16 prev_ptx = -1, prev_pty = -1;
+
                 if (key_hit(KEY_A)) {
                     follow_active = 1;
+                    trail_count = 0;
+                    trail_head = 0;
+                    prev_ptx = tm_player_tx;
+                    prev_pty = tm_player_ty;
                 }
-                // Follow logic: move 1 tile toward player each move cycle
+
                 if (follow_active) {
-                    if (++follow_timer >= tm_move_frames) {
-                        follow_timer = 0;
-                        int dx = tm_player_tx - tm_obj_tx[5];
-                        int dy = tm_player_ty - tm_obj_ty[5];
-                        int adx = dx < 0 ? -dx : dx;
-                        int ady = dy < 0 ? -dy : dy;
-                        if (adx + ady > 3) {
-                            if (adx >= ady) tm_obj_tx[5] += (dx > 0) ? 1 : -1;
-                            else            tm_obj_ty[5] += (dy > 0) ? 1 : -1;
+                    // Record player position when they move to a new tile
+                    if (tm_player_tx != prev_ptx || tm_player_ty != prev_pty) {
+                        // Push previous position onto trail
+                        trail_tx[trail_head] = prev_ptx;
+                        trail_ty[trail_head] = prev_pty;
+                        trail_head = (trail_head + 1) % FOLLOW_TRAIL_LEN;
+                        if (trail_count < FOLLOW_TRAIL_LEN) trail_count++;
+                        prev_ptx = tm_player_tx;
+                        prev_pty = tm_player_ty;
+
+                        // Pop oldest breadcrumb and move follower there
+                        if (trail_count > 0) {
+                            int tail = (trail_head - trail_count + FOLLOW_TRAIL_LEN) % FOLLOW_TRAIL_LEN;
+                            tm_obj_tx[5] = trail_tx[tail];
+                            tm_obj_ty[5] = trail_ty[tail];
+                            trail_count--;
                         }
                     }
                 }
