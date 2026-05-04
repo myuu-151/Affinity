@@ -141,6 +141,8 @@ static s16 tm_obj_ty[TM_MAX_DIR_OBJS];          // mutable object tile Y
 static int tm_follow_offset_x = 0, tm_follow_offset_y = 0; // smooth follow pixel offset
 static int tm_follow_active = 0; // is AI follow engaged
 static s16 tm_obj_facing[TM_MAX_DIR_OBJS]; // mutable facing direction per object
+static s8  tm_obj_anim_play[TM_MAX_DIR_OBJS]; // mutable animPlay per object
+static s8  tm_obj_anim_idx[TM_MAX_DIR_OBJS];  // mutable animIdx per object
 static int tm_anim_idx;                 // current animation index (0=idle, 1=walk, ...)
 static int tm_anim_frame;               // current frame within animation
 static int tm_anim_timer;               // frame counter for animation timing
@@ -3760,6 +3762,8 @@ static void mode0_init_scene(int tmIdx)
         tm_obj_tx[oi2] = afn_tm0_objs[oi2].tx;
         tm_obj_ty[oi2] = afn_tm0_objs[oi2].ty;
         tm_obj_facing[oi2] = afn_tm0_objs[oi2].facing;
+        tm_obj_anim_play[oi2] = afn_tm0_objs[oi2].animPlay;
+        tm_obj_anim_idx[oi2] = afn_tm0_objs[oi2].animIdx;
     } }
 #endif
 
@@ -4349,6 +4353,9 @@ int main(void)
                         }
                     }
                     if (fol_lerp_timer > 0) fol_lerp_timer--;
+                    // Walk anim while moving, idle when stopped
+                    tm_obj_anim_play[5] = 1;
+                    tm_obj_anim_idx[5] = (fol_lerp_timer > 0) ? 1 : 0; // 1=walk, 0=idle
                 }
                 tm_follow_offset_x = (fol_lerp_timer > 0) ? (fol_lerp_dx * fol_lerp_timer / fol_lerp_total) : 0;
                 tm_follow_offset_y = (fol_lerp_timer > 0) ? (fol_lerp_dy * fol_lerp_timer / fol_lerp_total) : 0;
@@ -4562,17 +4569,20 @@ int main(void)
                         int dirSet = 0;
                         int dirFace = (oi < TM_MAX_DIR_OBJS) ? tm_obj_facing[oi] : afn_tm0_objs[oi].facing;
                         // Animated direction sprite: cycle animation sets
-                        if (afn_tm0_objs[oi].animPlay) {
-                            int animI = afn_tm0_objs[oi].animIdx;
-                            int baseFrame  = afn_anim_desc[ai][animI][0];
-                            int frameCount = afn_anim_desc[ai][animI][1];
-                            int fps        = afn_anim_desc[ai][animI][2];
-                            if (frameCount > 0 && fps > 0) {
-                                int ticksPerFrame = 60 / fps;
-                                if (ticksPerFrame < 1) ticksPerFrame = 1;
-                                dirSet = baseFrame + (afn_frame_count / ticksPerFrame) % frameCount;
-                            } else {
-                                dirSet = baseFrame;
+                        {
+                            int ap = (oi < TM_MAX_DIR_OBJS) ? tm_obj_anim_play[oi] : afn_tm0_objs[oi].animPlay;
+                            int ai2 = (oi < TM_MAX_DIR_OBJS) ? tm_obj_anim_idx[oi] : afn_tm0_objs[oi].animIdx;
+                            if (ap) {
+                                int baseFrame  = afn_anim_desc[ai][ai2][0];
+                                int frameCount = afn_anim_desc[ai][ai2][1];
+                                int fps        = afn_anim_desc[ai][ai2][2];
+                                if (frameCount > 0 && fps > 0) {
+                                    int ticksPerFrame = 60 / fps;
+                                    if (ticksPerFrame < 1) ticksPerFrame = 1;
+                                    dirSet = baseFrame + (afn_frame_count / ticksPerFrame) % frameCount;
+                                } else {
+                                    dirSet = baseFrame;
+                                }
                             }
                         }
                         mode0_dma_dir_facing(oi, ai, dirSet, dirFace);
@@ -4586,8 +4596,10 @@ int main(void)
                         palBank = afn_asset_desc[ai][4];
                         tileCur = tileBase - tm_static_adj; // first frame
                         // Animated objects: cycle through selected animation
-                        if (afn_tm0_objs[oi].animPlay) {
-                            int animI = afn_tm0_objs[oi].animIdx;
+                        {
+                            int ap = (oi < TM_MAX_DIR_OBJS) ? tm_obj_anim_play[oi] : afn_tm0_objs[oi].animPlay;
+                            int animI = (oi < TM_MAX_DIR_OBJS) ? tm_obj_anim_idx[oi] : afn_tm0_objs[oi].animIdx;
+                        if (ap) {
                             int baseFrame  = afn_anim_desc[ai][animI][0];
                             int frameCount = afn_anim_desc[ai][animI][1];
                             int fps        = afn_anim_desc[ai][animI][2];
@@ -4597,6 +4609,7 @@ int main(void)
                                 int curFrame = (afn_frame_count / ticksPerFrame) % frameCount;
                                 tileCur = tileBase - tm_static_adj + (baseFrame + curFrame) * tpf;
                             }
+                        }
                         }
                     }
 
