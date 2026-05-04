@@ -436,7 +436,7 @@ enum class VsNodeType : int {
     BlueprintRef,   // data: constant blueprint definition index (dropdown)
     FollowPlayer,   // move sprite toward player, stop at distance
     IsNear2D,       // gate: passes if player is adjacent to this blueprint's tilemap object
-    SetFollowAnim,  // set follow object's walk/idle animation from follow state
+    IsFollowMoving, // gate: passes if follow object is currently moving
     SetFollowFacing,// set follow object's facing direction from follow state
     COUNT
 };
@@ -719,7 +719,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Blueprint",      0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Follow Player",  0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Distance (int)"}, {}, {} },
     { "Is Near 2D",     0xFF2266BB, 1, 1, 0, 0, {}, {}, {} },
-    { "Set Follow Anim",0xFF3355AA, 1, 1, 2, 0, {"Walk Anim (int)", "Idle Anim (int)"}, {}, {} },
+    { "Is Follow Moving",0xFF2266BB, 1, 1, 0, 0, {}, {}, {} },
     { "Set Follow Facing",0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
 };
 
@@ -10353,6 +10353,11 @@ void FrameTick(float dt)
                             sub = sSpriteAssets[ai2].name.c_str();
                         else { snprintf(subBuf, sizeof(subBuf), "[%d]", oi); sub = subBuf; }
                     }
+                    else if (kind == 3 && oi >= 0 && oi < (int)sTmObjects.size()) {
+                        if (sTmObjects[oi].name[0])
+                            sub = sTmObjects[oi].name;
+                        else { snprintf(subBuf, sizeof(subBuf), "Obj %d", oi); sub = subBuf; }
+                    }
                     break;
                 }
                 default: break;
@@ -11286,7 +11291,7 @@ void FrameTick(float dt)
                 case VsNodeType::FleePlayer:    desc = "Moves a sprite away from the player at the given speed."; break;
                 case VsNodeType::FollowPlayer:  desc = "Moves a sprite toward the player, stopping at the given distance (default = collision bounds)."; break;
                 case VsNodeType::IsNear2D:      desc = "Gate: passes exec only if the player is currently adjacent to this blueprint's tilemap object (Mode 0)."; break;
-                case VsNodeType::SetFollowAnim: desc = "Sets the follow object's animation: walk anim while moving, idle anim when stopped (Mode 0)."; break;
+                case VsNodeType::IsFollowMoving: desc = "Gate: passes exec only if the follow object is currently moving between tiles (Mode 0)."; break;
                 case VsNodeType::SetFollowFacing: desc = "Sets the follow object's facing direction from its movement direction (Mode 0)."; break;
                 case VsNodeType::SetAI:         desc = "Sets the AI behavior mode for a sprite (0=None, 1=Patrol, 2=Chase, 3=Flee)."; break;
                 case VsNodeType::GetAI:         desc = "Outputs the current AI behavior mode of a sprite."; break;
@@ -11582,7 +11587,7 @@ void FrameTick(float dt)
                         case VsNodeType::FleePlayer:    return "_flee_player";
                         case VsNodeType::FollowPlayer:  return "_follow_player";
                         case VsNodeType::IsNear2D:      return "_is_near_2d";
-                        case VsNodeType::SetFollowAnim: return "_set_fol_anim";
+                        case VsNodeType::IsFollowMoving: return "_is_fol_moving";
                         case VsNodeType::SetFollowFacing: return "_set_fol_facing";
                         case VsNodeType::SetAI:         return "_set_ai";
                         case VsNodeType::EmitParticle:  return "_emit_particle";
@@ -13417,21 +13422,15 @@ void FrameTick(float dt)
                         "    //         afn_bp_cur_tm_obj = instance's bound tilemap object index");
                     break;
                 }
-                case VsNodeType::SetFollowAnim: {
-                    editorCode = "// Set follow object walk/idle animation";
-                    char b6[512];
-                    snprintf(b6, sizeof(b6),
-                        "    if (tm_fol_active && tm_fol_obj >= 0) {\n"
-                        "      tm_obj_anim_play[tm_fol_obj] = 1;\n"
-                        "      tm_obj_anim_idx[tm_fol_obj] = tm_fol_moving ? %s : %s;\n"
+                case VsNodeType::IsFollowMoving: {
+                    editorCode = "// Gate: pass if follow object is moving";
+                    setActionFunc(infoNode, "_is_fol_moving",
+                        "    if (tm_fol_moving) {\n"
+                        "        // exec downstream\n"
                         "    }\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // Mode 0: tm_fol_moving = 1 while follower is lerping between tiles\n"
-                        "    //   sets walk anim index while moving, idle when stopped\n"
-                        "    //   tm_obj_anim_play/idx[] drive DMA direction sprite reload",
-                        fmtInt(infoNode.id, 0, "<walk>"),
-                        fmtInt(infoNode.id, 1, "<idle>"));
-                    setActionFunc(infoNode, "_set_fol_anim", b6);
+                        "    // Mode 0: tm_fol_moving = 1 while follower lerps between tiles\n"
+                        "    //   Use with SetSpriteAnim to play walk anim conditionally");
                     break;
                 }
                 case VsNodeType::SetFollowFacing: {
@@ -14640,7 +14639,7 @@ void FrameTick(float dt)
                     case VsNodeType::FleePlayer:    suffix = "_flee_player"; break;
                     case VsNodeType::FollowPlayer:  suffix = "_follow_player"; break;
                     case VsNodeType::IsNear2D:      suffix = "_is_near_2d"; break;
-                    case VsNodeType::SetFollowAnim: suffix = "_set_fol_anim"; break;
+                    case VsNodeType::IsFollowMoving: suffix = "_is_fol_moving"; break;
                     case VsNodeType::SetFollowFacing: suffix = "_set_fol_facing"; break;
                     case VsNodeType::SetAI:         suffix = "_set_ai"; break;
                     case VsNodeType::GetAI:         suffix = "_get_ai"; break;
@@ -15097,7 +15096,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ChasePlayer].name)) addNodeAt(VsNodeType::ChasePlayer);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FleePlayer].name)) addNodeAt(VsNodeType::FleePlayer);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FollowPlayer].name)) addNodeAt(VsNodeType::FollowPlayer);
-                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetFollowAnim].name)) addNodeAt(VsNodeType::SetFollowAnim);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsFollowMoving].name)) addNodeAt(VsNodeType::IsFollowMoving);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetFollowFacing].name)) addNodeAt(VsNodeType::SetFollowFacing);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetAI].name)) addNodeAt(VsNodeType::SetAI);
                     ImGui::Separator();
@@ -15378,12 +15377,12 @@ void FrameTick(float dt)
                 break;
             }
             case VsNodeType::Object: {
-                // paramInt[1]: 0=Sprite Asset, 1=Mesh Asset, 2=Scene Sprite
+                // paramInt[1]: 0=Sprite Asset, 1=Mesh Asset, 2=Scene Sprite, 3=Tilemap Obj
                 ImGui::Text("Object");
-                const char* objKinds[] = { "Sprite", "Mesh", "Instance" };
-                int objKind = std::clamp(n.paramInt[1], 0, 2);
-                ImGui::PushItemWidth(Scaled(70));
-                if (ImGui::Combo("##ObjKind", &objKind, objKinds, 3))
+                const char* objKinds[] = { "Sprite", "Mesh", "Instance", "Tilemap Obj" };
+                int objKind = std::clamp(n.paramInt[1], 0, 3);
+                ImGui::PushItemWidth(Scaled(85));
+                if (ImGui::Combo("##ObjKind", &objKind, objKinds, 4))
                     n.paramInt[1] = objKind;
                 ImGui::PopItemWidth();
 
@@ -15415,7 +15414,7 @@ void FrameTick(float dt)
                         }
                         ImGui::EndCombo();
                     }
-                } else {
+                } else if (objKind == 2) {
                     // Scene sprite instances (original behavior)
                     const char* preview = (n.paramInt[0] >= 0 && n.paramInt[0] < sSpriteCount)
                         ? (sSprites[n.paramInt[0]].assetIdx >= 0 && sSprites[n.paramInt[0]].assetIdx < (int)sSpriteAssets.size()
@@ -15434,6 +15433,30 @@ void FrameTick(float dt)
                             if (ImGui::Selectable(itemLabel, si == n.paramInt[0]))
                                 n.paramInt[0] = si;
                             if (si == n.paramInt[0]) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
+                    }
+                } else {
+                    // Tilemap objects (Mode 0)
+                    const char* preview = "None";
+                    char prevBuf[64];
+                    if (n.paramInt[0] >= 0 && n.paramInt[0] < (int)sTmObjects.size()) {
+                        if (sTmObjects[n.paramInt[0]].name[0])
+                            snprintf(prevBuf, sizeof(prevBuf), "[%d] %s", n.paramInt[0], sTmObjects[n.paramInt[0]].name);
+                        else
+                            snprintf(prevBuf, sizeof(prevBuf), "[%d] Obj", n.paramInt[0]);
+                        preview = prevBuf;
+                    }
+                    if (ImGui::BeginCombo("##ObjTm", preview)) {
+                        for (int ti = 0; ti < (int)sTmObjects.size(); ti++) {
+                            char itemLabel[64];
+                            if (sTmObjects[ti].name[0])
+                                snprintf(itemLabel, sizeof(itemLabel), "[%d] %s", ti, sTmObjects[ti].name);
+                            else
+                                snprintf(itemLabel, sizeof(itemLabel), "[%d] (unnamed)", ti);
+                            if (ImGui::Selectable(itemLabel, ti == n.paramInt[0]))
+                                n.paramInt[0] = ti;
+                            if (ti == n.paramInt[0]) ImGui::SetItemDefaultFocus();
                         }
                         ImGui::EndCombo();
                     }

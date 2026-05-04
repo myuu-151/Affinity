@@ -1816,7 +1816,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::ChasePlayer:   return "_chase_player";
         case GBAScriptNodeType::FollowPlayer:  return "_follow_player";
         case GBAScriptNodeType::IsNear2D:      return "_is_near_2d";
-        case GBAScriptNodeType::SetFollowAnim: return "_set_fol_anim";
+        case GBAScriptNodeType::IsFollowMoving: return "_is_fol_moving";
         case GBAScriptNodeType::SetFollowFacing: return "_set_fol_facing";
         case GBAScriptNodeType::FleePlayer:    return "_flee_player";
         case GBAScriptNodeType::SetAI:         return "_set_ai";
@@ -1902,6 +1902,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         // Helper: resolve integer value from a data node
         auto resolveInt = [&](const GBAScriptNodeExport* dn) -> int {
             if (!dn) return 0;
+            if (dn->type == GBAScriptNodeType::Animation) return dn->paramInt[1];
             return dn->paramInt[0];
         };
 
@@ -1916,6 +1917,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     snprintf(buf, sizeof(buf), "afn_script_custom_%d()", dn->id);
                 return buf;
             }
+            if (dn->type == GBAScriptNodeType::Animation) return std::to_string(dn->paramInt[1]);
             return std::to_string(dn->paramInt[0]);
         };
 
@@ -2297,7 +2299,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* animData = findDataIn(action->id, 1);
                     int obj = objData ? resolveInt(objData) : 0;
                     int anim = animData ? resolveInt(animData) : 0;
-                    f << "    g_sprites[" << obj << "].anim = " << anim << ";\n";
+                    f << "    if (afn_current_mode == 1) { tm_obj_anim_idx[" << obj << "] = " << anim << "; tm_obj_anim_play[" << obj << "] = 1; }\n";
+                    f << "    else { afn_play_anim = " << anim << "; }\n";
                     break;
                 }
                 case GBAScriptNodeType::SpawnEffect: {
@@ -2652,17 +2655,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    }\n";
                     break;
                 }
-                case GBAScriptNodeType::SetFollowAnim: {
-                    auto* walkData = findDataIn(action->id, 0);
-                    auto* idleData = findDataIn(action->id, 1);
-                    int walkIdx = walkData ? resolveInt(walkData) : 1;
-                    int idleIdx = idleData ? resolveInt(idleData) : 0;
-                    f << "    if (tm_fol_active && tm_fol_obj >= 0) {\n";
-                    f << "      tm_obj_anim_play[tm_fol_obj] = 1;\n";
-                    f << "      tm_obj_anim_idx[tm_fol_obj] = tm_fol_moving ? " << walkIdx << " : " << idleIdx << ";\n";
-                    f << "    }\n";
+                case GBAScriptNodeType::IsFollowMoving:
+                    // Gate node — handled inline in bpEmitActionsWithGates
                     break;
-                }
                 case GBAScriptNodeType::SetFollowFacing: {
                     f << "    if (tm_fol_active && tm_fol_obj >= 0) {\n";
                     f << "      tm_obj_facing[tm_fol_obj] = tm_fol_facing;\n";
@@ -2980,7 +2975,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     || t == GBAScriptNodeType::Countdown || t == GBAScriptNodeType::IsAlive
                     || t == GBAScriptNodeType::HasItem || t == GBAScriptNodeType::IsDialogueOpen
                     || t == GBAScriptNodeType::IsInState || t == GBAScriptNodeType::IsColliding
-                    || t == GBAScriptNodeType::IsTrue || t == GBAScriptNodeType::IsNear2D;
+                    || t == GBAScriptNodeType::IsTrue || t == GBAScriptNodeType::IsNear2D
+                    || t == GBAScriptNodeType::IsFollowMoving;
             };
             std::set<int> emittedActionIds;
             for (auto& c : chains) {
@@ -3151,6 +3147,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     }
                     if (a->type == GBAScriptNodeType::IsNear2D) {
                         f << "    if (afn_collided_tm_obj == afn_bp_cur_tm_obj && afn_bp_cur_tm_obj >= 0) {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsFollowMoving) {
+                        f << "    if (tm_fol_moving) {\n";
                         gateDepth++;
                         continue;
                     }
@@ -3346,6 +3347,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         snprintf(buf, sizeof(buf), "afn_bp%d_custom_%d()", bi, n->id);
                     return buf;
                 }
+                if (n->type == GBAScriptNodeType::Animation) return std::to_string(n->paramInt[1]);
                 return std::to_string(n->paramInt[0]);
             };
             auto bpResolveFloat = [&](const GBAScriptNodeExport* n) -> std::string {
@@ -3713,7 +3715,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* animData = bpFindDataIn(action->id, 1);
                     std::string obj = objData ? bpResolveInt(objData) : "0";
                     std::string anim = animData ? bpResolveInt(animData) : "0";
-                    f << "    g_sprites[" << obj << "].anim = " << anim << ";\n";
+                    f << "    if (afn_current_mode == 1) { tm_obj_anim_idx[" << obj << "] = " << anim << "; tm_obj_anim_play[" << obj << "] = 1; }\n";
+                    f << "    else { afn_play_anim = " << anim << "; }\n";
                     break;
                 }
                 case GBAScriptNodeType::SpawnEffect: {
@@ -4035,17 +4038,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    }\n";
                     break;
                 }
-                case GBAScriptNodeType::SetFollowAnim: {
-                    auto* walkData = bpFindDataIn(action->id, 0);
-                    auto* idleData = bpFindDataIn(action->id, 1);
-                    std::string walkIdx = walkData ? bpResolveInt(walkData) : "1";
-                    std::string idleIdx = idleData ? bpResolveInt(idleData) : "0";
-                    f << "    if (tm_fol_active && tm_fol_obj >= 0) {\n";
-                    f << "      tm_obj_anim_play[tm_fol_obj] = 1;\n";
-                    f << "      tm_obj_anim_idx[tm_fol_obj] = tm_fol_moving ? " << walkIdx << " : " << idleIdx << ";\n";
-                    f << "    }\n";
+                case GBAScriptNodeType::IsFollowMoving:
+                    // Gate node — handled inline in bpEmitActionsWithGates
                     break;
-                }
                 case GBAScriptNodeType::SetFollowFacing: {
                     f << "    if (tm_fol_active && tm_fol_obj >= 0) {\n";
                     f << "      tm_obj_facing[tm_fol_obj] = tm_fol_facing;\n";
@@ -4357,7 +4352,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     || t == GBAScriptNodeType::HasItem || t == GBAScriptNodeType::IsDialogueOpen
                     || t == GBAScriptNodeType::IsInState || t == GBAScriptNodeType::IsColliding
                     || t == GBAScriptNodeType::IsTrue || t == GBAScriptNodeType::FlipFlop
-                    || t == GBAScriptNodeType::CheckFlag || t == GBAScriptNodeType::IsNear2D;
+                    || t == GBAScriptNodeType::CheckFlag || t == GBAScriptNodeType::IsNear2D
+                    || t == GBAScriptNodeType::IsFollowMoving;
             };
             std::set<int> bpEmittedIds;
             for (auto& c : bpChains) {
@@ -4517,13 +4513,33 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         gateDepth++;
                         continue;
                     }
+                    if (a->type == GBAScriptNodeType::IsFollowMoving) {
+                        f << "    if (tm_fol_moving) {\n";
+                        gateDepth++;
+                        continue;
+                    }
                     if (a->type == GBAScriptNodeType::CheckFlag) {
                         auto* flagData = bpFindDataIn(a->id, 0);
                         std::string flag = flagData ? bpResolveInt(flagData) : std::to_string(a->paramInt[0]);
                         auto brSet = bpCollectBranch(a->id, 0);
                         auto brClear = bpCollectBranch(a->id, 1);
                         f << "    if (afn_flags & (1u << " << flag << ")) {\n";
-                        for (auto* a2 : brSet) bpEmitActionCall(a2);
+                        for (auto* a2 : brSet) {
+                            if (bpIsGateNode(a2->type)) {
+                                if (a2->type == GBAScriptNodeType::IsFollowMoving)
+                                    f << "    if (tm_fol_moving) {\n";
+                                else if (a2->type == GBAScriptNodeType::IsMoving)
+                                    f << "    if (player_moving) {\n";
+                                else if (a2->type == GBAScriptNodeType::IsOnGround)
+                                    f << "    if (player_on_ground) {\n";
+                                else if (a2->type == GBAScriptNodeType::IsFlagSet)
+                                    f << "    if (afn_flags & (1u << " << a2->paramInt[0] << ")) {\n";
+                                else bpEmitActionCall(a2);
+                                gateDepth++;
+                            } else bpEmitActionCall(a2);
+                        }
+                        for (int g2 = 0; g2 < gateDepth; g2++) f << "    }\n";
+                        gateDepth = 0;
                         if (!brClear.empty()) {
                             f << "    } else {\n";
                             for (auto* a2 : brClear) bpEmitActionCall(a2);
