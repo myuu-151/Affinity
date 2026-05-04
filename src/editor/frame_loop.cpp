@@ -24,6 +24,8 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <shobjidl.h>
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
 #endif
 #include <GL/gl.h>
 
@@ -828,6 +830,590 @@ struct BpInstanceParam {
     int paramIdx = 0;   // index into BlueprintAsset::params[]
     int value = 0;      // overridden value
 };
+
+// ---- Sound / Sample Bank ----
+
+struct SoundSample {
+    char name[32] = "Sample";
+    std::vector<int8_t> data;   // 8-bit signed PCM
+    int sampleRate = 16384;     // Hz
+    bool loop = false;
+    int loopStart = 0;          // sample offset
+    bool builtIn = false;       // true = generated, not imported
+};
+
+struct MidiNote {
+    int tick;           // absolute tick position
+    int channel;        // MIDI channel 0-15
+    int note;           // MIDI note number 0-127
+    int velocity;       // 0-127
+    int duration;       // length in ticks
+};
+
+struct MidiTrack {
+    char name[32] = "Track";
+    std::vector<MidiNote> notes;
+};
+
+struct MidiFile {
+    char name[64] = "";
+    int ticksPerBeat = 480;
+    int tempo = 120;            // BPM
+    std::vector<MidiTrack> tracks;
+    int channelBank[16] = {};   // sample bank index per MIDI channel
+};
+
+static std::vector<SoundSample> sSoundBank;
+static std::vector<MidiFile> sMidiFiles;
+static int sSelectedSample = -1;
+static int sSelectedMidi = -1;
+
+// Generate built-in waveform samples
+static void InitBuiltInSamples()
+{
+    if (!sSoundBank.empty()) return;
+
+    auto addWave = [&](const char* name, auto genFunc, int len, bool doLoop) {
+        SoundSample s;
+        snprintf(s.name, sizeof(s.name), "%s", name);
+        s.data.resize(len);
+        for (int i = 0; i < len; i++)
+            s.data[i] = genFunc(i, len);
+        s.loop = doLoop;
+        s.builtIn = true;
+        s.sampleRate = 16384;
+        sSoundBank.push_back(std::move(s));
+    };
+
+    // Square 50%
+    addWave("Square 50%", [](int i, int len) -> int8_t {
+        return (i < len / 2) ? 96 : -96;
+    }, 32, true);
+
+    // Square 25%
+    addWave("Square 25%", [](int i, int len) -> int8_t {
+        return (i < len / 4) ? 96 : -96;
+    }, 32, true);
+
+    // Triangle
+    addWave("Triangle", [](int i, int len) -> int8_t {
+        int half = len / 2;
+        if (i < half) return (int8_t)(-96 + 192 * i / half);
+        return (int8_t)(96 - 192 * (i - half) / half);
+    }, 32, true);
+
+    // Sawtooth
+    addWave("Sawtooth", [](int i, int len) -> int8_t {
+        return (int8_t)(-96 + 192 * i / len);
+    }, 32, true);
+
+    // Sine
+    addWave("Sine", [](int i, int len) -> int8_t {
+        return (int8_t)(96.0f * sinf(2.0f * 3.14159f * i / len));
+    }, 32, true);
+
+    // White Noise
+    {
+        SoundSample s;
+        snprintf(s.name, sizeof(s.name), "Noise");
+        s.data.resize(256);
+        unsigned int seed = 12345;
+        for (int i = 0; i < 256; i++) {
+            seed = seed * 1103515245 + 12345;
+            s.data[i] = (int8_t)((seed >> 16) & 0xFF);
+        }
+        s.loop = true;
+        s.builtIn = true;
+        s.sampleRate = 16384;
+        sSoundBank.push_back(std::move(s));
+    }
+
+    // Kick drum (decaying sine burst)
+    {
+        SoundSample s;
+        snprintf(s.name, sizeof(s.name), "Kick");
+        int len = 512;
+        s.data.resize(len);
+        for (int i = 0; i < len; i++) {
+            float t = (float)i / len;
+            float freq = 150.0f * (1.0f - t * 0.8f); // pitch drops
+            float env = (1.0f - t) * (1.0f - t);       // decay
+            s.data[i] = (int8_t)(96.0f * env * sinf(2.0f * 3.14159f * freq * t));
+        }
+        s.loop = false;
+        s.builtIn = true;
+        s.sampleRate = 16384;
+        sSoundBank.push_back(std::move(s));
+    }
+
+    // Snare (noise burst + decay)
+    {
+        SoundSample s;
+        snprintf(s.name, sizeof(s.name), "Snare");
+        int len = 384;
+        s.data.resize(len);
+        unsigned int seed2 = 54321;
+        for (int i = 0; i < len; i++) {
+            float t = (float)i / len;
+            float env = (1.0f - t) * (1.0f - t);
+            seed2 = seed2 * 1103515245 + 12345;
+            float noise = ((int)((seed2 >> 16) & 0xFF) - 128) / 128.0f;
+            float tone = sinf(2.0f * 3.14159f * 200.0f * t);
+            s.data[i] = (int8_t)(80.0f * env * (noise * 0.7f + tone * 0.3f));
+        }
+        s.loop = false;
+        s.builtIn = true;
+        s.sampleRate = 16384;
+        sSoundBank.push_back(std::move(s));
+    }
+
+    // Hi-hat (short noise)
+    {
+        SoundSample s;
+        snprintf(s.name, sizeof(s.name), "Hi-Hat");
+        int len = 128;
+        s.data.resize(len);
+        unsigned int seed3 = 99999;
+        for (int i = 0; i < len; i++) {
+            float t = (float)i / len;
+            float env = (1.0f - t);
+            seed3 = seed3 * 1103515245 + 12345;
+            float noise = ((int)((seed3 >> 16) & 0xFF) - 128) / 128.0f;
+            s.data[i] = (int8_t)(64.0f * env * noise);
+        }
+        s.loop = false;
+        s.builtIn = true;
+        s.sampleRate = 16384;
+        sSoundBank.push_back(std::move(s));
+    }
+}
+
+// Parse a standard MIDI file (.mid)
+static bool ParseMidiFile(const char* path, MidiFile& out)
+{
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    std::vector<uint8_t> buf(sz);
+    fread(buf.data(), 1, sz, f);
+    fclose(f);
+
+    if (sz < 14) return false;
+    const uint8_t* p = buf.data();
+    const uint8_t* end = p + sz;
+
+    // Read big-endian helpers
+    auto rd16 = [](const uint8_t* d) -> int { return (d[0] << 8) | d[1]; };
+    auto rd32 = [](const uint8_t* d) -> int { return (d[0] << 24) | (d[1] << 16) | (d[2] << 8) | d[3]; };
+
+    // MThd header
+    if (memcmp(p, "MThd", 4) != 0) return false;
+    int hdrLen = rd32(p + 4);
+    int format = rd16(p + 8);
+    int nTracks = rd16(p + 10);
+    int tpb = rd16(p + 12);
+    (void)format;
+    out.ticksPerBeat = tpb;
+    out.tempo = 120;
+    p += 8 + hdrLen;
+
+    // Extract filename for display
+    {
+        std::string pathStr(path);
+        size_t sl = pathStr.find_last_of("/\\");
+        std::string fname = (sl != std::string::npos) ? pathStr.substr(sl + 1) : pathStr;
+        size_t dot = fname.find_last_of('.');
+        if (dot != std::string::npos) fname = fname.substr(0, dot);
+        snprintf(out.name, sizeof(out.name), "%s", fname.c_str());
+    }
+
+    for (int ti = 0; ti < nTracks && p + 8 <= end; ti++) {
+        if (memcmp(p, "MTrk", 4) != 0) break;
+        int trkLen = rd32(p + 4);
+        const uint8_t* tp = p + 8;
+        const uint8_t* trkEnd = tp + trkLen;
+        if (trkEnd > end) trkEnd = end;
+        p = trkEnd;
+
+        MidiTrack trk;
+        snprintf(trk.name, sizeof(trk.name), "Track %d", ti);
+
+        int absTick = 0;
+        uint8_t runningStatus = 0;
+
+        // Track active notes for duration calc
+        struct ActiveNote { int note; int channel; int tick; int velocity; };
+        std::vector<ActiveNote> active;
+
+        while (tp < trkEnd) {
+            // Variable-length delta time
+            int delta = 0;
+            while (tp < trkEnd && (*tp & 0x80)) {
+                delta = (delta << 7) | (*tp & 0x7F);
+                tp++;
+            }
+            if (tp >= trkEnd) break;
+            delta = (delta << 7) | (*tp & 0x7F);
+            tp++;
+            absTick += delta;
+
+            if (tp >= trkEnd) break;
+            uint8_t status = *tp;
+            if (status & 0x80) { runningStatus = status; tp++; }
+            else { status = runningStatus; }
+
+            int cmd = status & 0xF0;
+            int ch = status & 0x0F;
+
+            if (cmd == 0x90 || cmd == 0x80) {
+                if (tp + 1 >= trkEnd) break;
+                int note = tp[0] & 0x7F;
+                int vel = tp[1] & 0x7F;
+                tp += 2;
+                if (cmd == 0x90 && vel > 0) {
+                    active.push_back({note, ch, absTick, vel});
+                } else {
+                    // Note off — find matching active note
+                    for (int ai = (int)active.size() - 1; ai >= 0; ai--) {
+                        if (active[ai].note == note && active[ai].channel == ch) {
+                            MidiNote mn;
+                            mn.tick = active[ai].tick;
+                            mn.channel = active[ai].channel;
+                            mn.note = active[ai].note;
+                            mn.velocity = active[ai].velocity;
+                            mn.duration = absTick - active[ai].tick;
+                            trk.notes.push_back(mn);
+                            active.erase(active.begin() + ai);
+                            break;
+                        }
+                    }
+                }
+            } else if (cmd == 0xA0 || cmd == 0xB0 || cmd == 0xE0) {
+                tp += 2; // 2 data bytes
+            } else if (cmd == 0xC0 || cmd == 0xD0) {
+                tp += 1; // 1 data byte
+            } else if (status == 0xFF) {
+                // Meta event
+                if (tp >= trkEnd) break;
+                uint8_t metaType = *tp++;
+                int metaLen = 0;
+                while (tp < trkEnd && (*tp & 0x80)) {
+                    metaLen = (metaLen << 7) | (*tp & 0x7F);
+                    tp++;
+                }
+                if (tp < trkEnd) {
+                    metaLen = (metaLen << 7) | (*tp & 0x7F);
+                    tp++;
+                }
+                if (metaType == 0x51 && metaLen == 3 && tp + 3 <= trkEnd) {
+                    // Tempo: microseconds per quarter note
+                    int usPerBeat = (tp[0] << 16) | (tp[1] << 8) | tp[2];
+                    if (usPerBeat > 0) out.tempo = 60000000 / usPerBeat;
+                }
+                if (metaType == 0x03 && metaLen > 0 && metaLen < 31 && tp + metaLen <= trkEnd) {
+                    memcpy(trk.name, tp, metaLen);
+                    trk.name[metaLen] = 0;
+                }
+                tp += metaLen;
+            } else if (status == 0xF0 || status == 0xF7) {
+                // SysEx
+                int sxLen = 0;
+                while (tp < trkEnd && (*tp & 0x80)) {
+                    sxLen = (sxLen << 7) | (*tp & 0x7F);
+                    tp++;
+                }
+                if (tp < trkEnd) {
+                    sxLen = (sxLen << 7) | (*tp & 0x7F);
+                    tp++;
+                }
+                tp += sxLen;
+            }
+        }
+
+        // Close any remaining active notes
+        for (auto& an : active) {
+            MidiNote mn;
+            mn.tick = an.tick;
+            mn.channel = an.channel;
+            mn.note = an.note;
+            mn.velocity = an.velocity;
+            mn.duration = absTick - an.tick;
+            trk.notes.push_back(mn);
+        }
+
+        if (!trk.notes.empty())
+            out.tracks.push_back(std::move(trk));
+    }
+
+    // Default: all channels use first sample
+    for (int i = 0; i < 16; i++) out.channelBank[i] = 0;
+
+    return !out.tracks.empty();
+}
+
+// ---- Audio Playback Engine ----
+#ifdef _WIN32
+
+static constexpr int kAudioSampleRate = 16384;
+static constexpr int kAudioBufSize = 1024;
+static constexpr int kAudioBufCount = 2;
+static constexpr int kMaxVoices = 8;
+
+struct AudioVoice {
+    const int8_t* data = nullptr;
+    int length = 0;
+    int loopStart = 0;
+    bool loop = false;
+    uint32_t pos = 0;       // 16.16 fixed-point position
+    uint32_t inc = 0;       // 16.16 fixed-point increment (for pitch)
+    int volume = 128;       // 0-255
+    bool active = false;
+    int remaining = -1;     // samples until note-off (-1 = until end of data)
+};
+
+static HWAVEOUT sWaveOut = nullptr;
+static WAVEHDR sWaveHdrs[kAudioBufCount] = {};
+static int8_t sAudioBufs[kAudioBufCount][kAudioBufSize] = {};
+static AudioVoice sVoices[kMaxVoices] = {};
+static bool sAudioOpen = false;
+
+// MIDI playback state
+static bool sMidiPlaying = false;
+static int sMidiPlayIdx = -1;     // index into sMidiFiles
+static double sMidiPlayTime = 0;  // seconds elapsed
+static int sMidiPlayTick = 0;     // current tick position
+
+// Note-to-frequency table (A4 = 440Hz)
+static float NoteToFreq(int note) {
+    return 440.0f * powf(2.0f, (note - 69) / 12.0f);
+}
+
+static void AudioMixBuffer(int8_t* buf, int len) {
+    // Clear
+    memset(buf, 0, len);
+
+    // Advance MIDI playback
+    if (sMidiPlaying && sMidiPlayIdx >= 0 && sMidiPlayIdx < (int)sMidiFiles.size()) {
+        MidiFile& mf = sMidiFiles[sMidiPlayIdx];
+        double ticksPerSec = mf.ticksPerBeat * mf.tempo / 60.0;
+        double secPerBuf = (double)len / kAudioSampleRate;
+        int newTick = (int)((sMidiPlayTime + secPerBuf) * ticksPerSec);
+
+        // Trigger notes that start between sMidiPlayTick and newTick
+        for (auto& t : mf.tracks) {
+            for (auto& n : t.notes) {
+                if (n.tick >= sMidiPlayTick && n.tick < newTick) {
+                    // Find a free voice
+                    int vi = -1;
+                    for (int v = 0; v < kMaxVoices; v++)
+                        if (!sVoices[v].active) { vi = v; break; }
+                    if (vi < 0) {
+                        // Steal oldest voice
+                        vi = 0;
+                    }
+                    int bankIdx = mf.channelBank[n.channel];
+                    if (bankIdx >= 0 && bankIdx < (int)sSoundBank.size()) {
+                        SoundSample& smp = sSoundBank[bankIdx];
+                        if (!smp.data.empty()) {
+                            AudioVoice& v = sVoices[vi];
+                            v.data = smp.data.data();
+                            v.length = (int)smp.data.size();
+                            v.loop = smp.loop;
+                            v.loopStart = smp.loopStart;
+                            v.pos = 0;
+                            // Calculate pitch: base frequency of sample at sampleRate / sampleLength
+                            float baseFreq = (float)smp.sampleRate / (float)v.length;
+                            float noteFreq = NoteToFreq(n.note);
+                            v.inc = (uint32_t)(noteFreq / baseFreq * 65536.0f);
+                            v.volume = n.velocity;
+                            if (v.volume > 160) v.volume = 160;
+                            // Convert tick duration to samples
+                            float secPerTick = 60.0f / (mf.tempo * mf.ticksPerBeat);
+                            v.remaining = (int)(n.duration * secPerTick * kAudioSampleRate);
+                            if (v.remaining < 100) v.remaining = 100;
+                            v.active = true;
+                        }
+                    }
+                }
+            }
+        }
+        sMidiPlayTime += secPerBuf;
+        sMidiPlayTick = newTick;
+
+        // Check if past end
+        int maxTick = 0;
+        for (auto& t : mf.tracks)
+            for (auto& n : t.notes)
+                if (n.tick + n.duration > maxTick) maxTick = n.tick + n.duration;
+        if (sMidiPlayTick > maxTick) {
+            sMidiPlaying = false;
+            for (auto& v : sVoices) v.active = false;
+        }
+    }
+
+    // Mix all active voices
+    int16_t mix[kAudioBufSize] = {};
+    for (int v = 0; v < kMaxVoices; v++) {
+        AudioVoice& voice = sVoices[v];
+        if (!voice.active || !voice.data) continue;
+        for (int i = 0; i < len; i++) {
+            // Note duration expired
+            if (voice.remaining == 0) {
+                voice.active = false;
+                break;
+            }
+            if (voice.remaining > 0) voice.remaining--;
+
+            int sampleIdx = (int)(voice.pos >> 16);
+            if (sampleIdx >= voice.length) {
+                if (voice.loop) {
+                    int loopLen = voice.length - voice.loopStart;
+                    if (loopLen > 0)
+                        sampleIdx = voice.loopStart + (sampleIdx - voice.loopStart) % loopLen;
+                    else
+                        sampleIdx = 0;
+                    voice.pos = (uint32_t)sampleIdx << 16 | (voice.pos & 0xFFFF);
+                } else {
+                    voice.active = false;
+                    break;
+                }
+            }
+            // Apply volume with fade-out near end of note
+            int vol = voice.volume;
+            if (voice.remaining >= 0 && voice.remaining < 200)
+                vol = vol * voice.remaining / 200;
+            int val = voice.data[sampleIdx] * vol / 256;
+            mix[i] += (int16_t)val;
+            voice.pos += voice.inc;
+        }
+    }
+
+    // Clamp and convert to unsigned 8-bit (waveOut expects 0-255, center=128)
+    for (int i = 0; i < len; i++) {
+        int v = mix[i];
+        if (v > 127) v = 127;
+        if (v < -128) v = -128;
+        buf[i] = (int8_t)(v + 128);
+    }
+}
+
+static void CALLBACK AudioCallback(HWAVEOUT hwo, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2) {
+    (void)hwo; (void)dwInstance; (void)dwParam2;
+    if (uMsg == WOM_DONE) {
+        WAVEHDR* hdr = (WAVEHDR*)dwParam1;
+        AudioMixBuffer((int8_t*)hdr->lpData, kAudioBufSize);
+        waveOutWrite(sWaveOut, hdr, sizeof(WAVEHDR));
+    }
+}
+
+static void AudioInit() {
+    if (sAudioOpen) return;
+    WAVEFORMATEX wfx = {};
+    wfx.wFormatTag = WAVE_FORMAT_PCM;
+    wfx.nChannels = 1;
+    wfx.nSamplesPerSec = kAudioSampleRate;
+    wfx.wBitsPerSample = 8;
+    wfx.nBlockAlign = 1;
+    wfx.nAvgBytesPerSec = kAudioSampleRate;
+    if (waveOutOpen(&sWaveOut, WAVE_MAPPER, &wfx, (DWORD_PTR)AudioCallback, 0, CALLBACK_FUNCTION) != MMSYSERR_NOERROR)
+        return;
+    for (int i = 0; i < kAudioBufCount; i++) {
+        sWaveHdrs[i].lpData = (LPSTR)sAudioBufs[i];
+        sWaveHdrs[i].dwBufferLength = kAudioBufSize;
+        waveOutPrepareHeader(sWaveOut, &sWaveHdrs[i], sizeof(WAVEHDR));
+        memset(sAudioBufs[i], 0, kAudioBufSize);
+        waveOutWrite(sWaveOut, &sWaveHdrs[i], sizeof(WAVEHDR));
+    }
+    sAudioOpen = true;
+}
+
+static void AudioStopAll();
+
+// For preview: expand short looping waveforms into a longer decaying buffer
+static std::vector<int8_t> sPreviewBuf;
+
+static void AudioPlaySample(int bankIdx, int note = 60) {
+    if (!sAudioOpen) AudioInit();
+    if (bankIdx < 0 || bankIdx >= (int)sSoundBank.size()) return;
+    SoundSample& smp = sSoundBank[bankIdx];
+    if (smp.data.empty()) return;
+
+    // Stop any existing preview
+    AudioStopAll();
+
+    int vi = 0;
+    AudioVoice& v = sVoices[vi];
+
+    if (smp.loop && smp.data.size() < 256) {
+        // Short looping waveform: render ~0.5 sec with decay envelope
+        int outLen = kAudioSampleRate / 2;
+        sPreviewBuf.resize(outLen);
+        float baseFreq = (float)smp.sampleRate / (float)smp.data.size();
+        float noteFreq = NoteToFreq(note);
+        float ratio = noteFreq / baseFreq;
+        uint32_t pos = 0;
+        uint32_t inc = (uint32_t)(ratio * 65536.0f);
+        int srcLen = (int)smp.data.size();
+        for (int i = 0; i < outLen; i++) {
+            int si = (int)(pos >> 16) % srcLen;
+            float env = 1.0f - (float)i / outLen; // linear decay
+            sPreviewBuf[i] = (int8_t)(smp.data[si] * env * 0.6f);
+            pos += inc;
+        }
+        v.data = sPreviewBuf.data();
+        v.length = outLen;
+        v.loop = false;
+        v.pos = 0;
+        v.inc = 65536; // 1:1, already pitch-shifted
+        v.volume = 160;
+        v.active = true;
+    } else {
+        // One-shot or long sample: play directly
+        v.data = smp.data.data();
+        v.length = (int)smp.data.size();
+        v.loop = false; // don't loop for preview
+        v.loopStart = 0;
+        v.pos = 0;
+        v.inc = 65536; // play at original rate
+        v.volume = 160;
+        v.active = true;
+    }
+}
+
+static void AudioStopAll() {
+    for (auto& v : sVoices) v.active = false;
+    sMidiPlaying = false;
+}
+
+static void AudioPlayMidi(int midiIdx) {
+    if (!sAudioOpen) AudioInit();
+    if (midiIdx < 0 || midiIdx >= (int)sMidiFiles.size()) return;
+    AudioStopAll();
+    sMidiPlayIdx = midiIdx;
+    sMidiPlayTime = 0;
+    sMidiPlayTick = 0;
+    sMidiPlaying = true;
+}
+
+static void AudioShutdown() {
+    if (!sAudioOpen) return;
+    waveOutReset(sWaveOut);
+    for (int i = 0; i < kAudioBufCount; i++)
+        waveOutUnprepareHeader(sWaveOut, &sWaveHdrs[i], sizeof(WAVEHDR));
+    waveOutClose(sWaveOut);
+    sWaveOut = nullptr;
+    sAudioOpen = false;
+}
+
+#else
+static void AudioInit() {}
+static void AudioPlaySample(int, int = 60) {}
+static void AudioStopAll() {}
+static void AudioPlayMidi(int) {}
+static void AudioShutdown() {}
+#endif
 
 // ---- HUD / UI Elements ----
 enum class HudElementType { Element };
@@ -3766,6 +4352,8 @@ void FrameInit()
         }
         fclose(pf);
     }
+
+    InitBuiltInSamples();
 
     sInitialized = true;
 }
@@ -15684,17 +16272,345 @@ void FrameTick(float dt)
     }
     else if (sActiveTab == EditorTab::Sound)
     {
-        // Sound tab: placeholder
+        float panelW = Scaled(260);
+        float flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus;
+
+        // ---- Left panel: Sample Bank ----
         ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
-        ImGui::SetNextWindowSize(ImVec2(totalW, bodyH));
+        ImGui::SetNextWindowSize(ImVec2(panelW, bodyH));
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
-        ImGui::Begin("##SoundTab", nullptr,
-            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
-            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
-        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Sound Editor");
+        ImGui::Begin("##SndBank", nullptr, flags);
+
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Sample Bank");
         ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.55f, 1.0f), "Coming soon");
+
+        // Import WAV button
+        if (ImGui::Button("Import WAV", ImVec2(-1, 0))) {
+#ifdef _WIN32
+            char wavPath[MAX_PATH] = {};
+            OPENFILENAMEA ofn = {};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.lpstrFilter = "WAV Files\0*.wav\0All\0*.*\0";
+            ofn.lpstrFile = wavPath;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_FILEMUSTEXIST;
+            if (GetOpenFileNameA(&ofn)) {
+                // Load WAV: minimal parser for PCM format
+                FILE* wf = fopen(wavPath, "rb");
+                if (wf) {
+                    uint8_t hdr[44];
+                    if (fread(hdr, 1, 44, wf) == 44 && memcmp(hdr, "RIFF", 4) == 0 && memcmp(hdr + 8, "WAVE", 4) == 0) {
+                        int channels = hdr[22] | (hdr[23] << 8);
+                        int srcRate = hdr[24] | (hdr[25] << 8) | (hdr[26] << 16) | (hdr[27] << 24);
+                        int bitsPerSample = hdr[34] | (hdr[35] << 8);
+                        int dataSize = hdr[40] | (hdr[41] << 8) | (hdr[42] << 16) | (hdr[43] << 24);
+                        int numSamples = dataSize / (channels * (bitsPerSample / 8));
+
+                        std::vector<int8_t> pcm;
+                        if (bitsPerSample == 16) {
+                            std::vector<int16_t> raw(numSamples * channels);
+                            fread(raw.data(), 2, numSamples * channels, wf);
+                            // Downsample to 16384 Hz mono 8-bit
+                            double ratio = (double)srcRate / 16384.0;
+                            int outLen = (int)(numSamples / ratio);
+                            pcm.resize(outLen);
+                            for (int i = 0; i < outLen; i++) {
+                                int srcIdx = (int)(i * ratio) * channels;
+                                if (srcIdx < (int)raw.size())
+                                    pcm[i] = (int8_t)(raw[srcIdx] >> 8);
+                            }
+                        } else if (bitsPerSample == 8) {
+                            std::vector<uint8_t> raw(numSamples * channels);
+                            fread(raw.data(), 1, numSamples * channels, wf);
+                            double ratio = (double)srcRate / 16384.0;
+                            int outLen = (int)(numSamples / ratio);
+                            pcm.resize(outLen);
+                            for (int i = 0; i < outLen; i++) {
+                                int srcIdx = (int)(i * ratio) * channels;
+                                if (srcIdx < (int)raw.size())
+                                    pcm[i] = (int8_t)(raw[srcIdx] - 128);
+                            }
+                        }
+                        if (!pcm.empty()) {
+                            SoundSample s;
+                            std::string fname(wavPath);
+                            size_t sl = fname.find_last_of("/\\");
+                            if (sl != std::string::npos) fname = fname.substr(sl + 1);
+                            size_t dot = fname.find_last_of('.');
+                            if (dot != std::string::npos) fname = fname.substr(0, dot);
+                            snprintf(s.name, sizeof(s.name), "%s", fname.c_str());
+                            s.data = std::move(pcm);
+                            s.sampleRate = 16384;
+                            s.builtIn = false;
+                            sSoundBank.push_back(std::move(s));
+                            sSelectedSample = (int)sSoundBank.size() - 1;
+                            sProjectDirty = true;
+                        }
+                    }
+                    fclose(wf);
+                }
+            }
+#endif
+        }
+
+        ImGui::Spacing();
+
+        // Sample list
+        for (int i = 0; i < (int)sSoundBank.size(); i++) {
+            char label[48];
+            snprintf(label, sizeof(label), "%s[%d] %s", sSoundBank[i].builtIn ? "*" : " ", i, sSoundBank[i].name);
+            bool sel = (sSelectedSample == i);
+            if (ImGui::Selectable(label, sel))
+                sSelectedSample = i;
+        }
+
+        ImGui::Separator();
+
+        // Selected sample details + waveform preview
+        if (sSelectedSample >= 0 && sSelectedSample < (int)sSoundBank.size()) {
+            SoundSample& s = sSoundBank[sSelectedSample];
+            ImGui::InputText("Name##smp", s.name, sizeof(s.name));
+            ImGui::Text("Samples: %d", (int)s.data.size());
+            ImGui::Text("Rate: %d Hz", s.sampleRate);
+            ImGui::Checkbox("Loop##smp", &s.loop);
+            if (s.loop)
+                ImGui::SliderInt("Loop Start", &s.loopStart, 0, std::max(0, (int)s.data.size() - 1));
+
+            // Waveform preview
+            float availW = ImGui::GetContentRegionAvail().x;
+            float waveH = Scaled(60);
+            ImVec2 wp = ImGui::GetCursorScreenPos();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(wp, ImVec2(wp.x + availW, wp.y + waveH), 0xFF1A1A1A);
+            dl->AddLine(ImVec2(wp.x, wp.y + waveH / 2), ImVec2(wp.x + availW, wp.y + waveH / 2), 0xFF333333);
+
+            if (!s.data.empty()) {
+                int n = (int)s.data.size();
+                float step = (float)n / availW;
+                ImVec2 prev(wp.x, wp.y + waveH / 2 - s.data[0] * waveH / 256.0f);
+                for (int xi = 1; xi < (int)availW; xi++) {
+                    int si = (int)(xi * step);
+                    if (si >= n) si = n - 1;
+                    float y = wp.y + waveH / 2 - s.data[si] * waveH / 256.0f;
+                    ImVec2 cur(wp.x + xi, y);
+                    dl->AddLine(prev, cur, 0xFF44AAFF);
+                    prev = cur;
+                }
+            }
+            ImGui::Dummy(ImVec2(availW, waveH));
+
+            // Play / Stop buttons
+            if (ImGui::Button("Play##smp", ImVec2(Scaled(60), 0)))
+                AudioPlaySample(sSelectedSample, 60);
+            ImGui::SameLine();
+            if (ImGui::Button("Stop##smp", ImVec2(Scaled(60), 0)))
+                AudioStopAll();
+
+            // Delete button (non-built-in only)
+            if (!s.builtIn) {
+                ImGui::SameLine();
+                if (ImGui::Button("Delete Sample")) {
+                    sSoundBank.erase(sSoundBank.begin() + sSelectedSample);
+                    sSelectedSample = -1;
+                    sProjectDirty = true;
+                }
+            }
+        }
+
+        ImGui::End();
+        ImGui::PopStyleColor();
+
+        // ---- Right panel: MIDI / Channel Assignment ----
+        float rightX = vp->WorkPos.x + panelW;
+        float rightW = totalW - panelW;
+        ImGui::SetNextWindowPos(ImVec2(rightX, bodyY));
+        ImGui::SetNextWindowSize(ImVec2(rightW, bodyH));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.14f, 1.0f));
+        ImGui::Begin("##SndMidi", nullptr, flags);
+
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "MIDI Sequences");
+        ImGui::Separator();
+
+        // Import MIDI button
+        if (ImGui::Button("Import MIDI", ImVec2(Scaled(120), 0))) {
+#ifdef _WIN32
+            char midPath[MAX_PATH] = {};
+            OPENFILENAMEA ofn = {};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.lpstrFilter = "MIDI Files\0*.mid;*.midi\0All\0*.*\0";
+            ofn.lpstrFile = midPath;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_FILEMUSTEXIST;
+            if (GetOpenFileNameA(&ofn)) {
+                MidiFile mf;
+                if (ParseMidiFile(midPath, mf)) {
+                    sMidiFiles.push_back(std::move(mf));
+                    sSelectedMidi = (int)sMidiFiles.size() - 1;
+                    sProjectDirty = true;
+                }
+            }
+#endif
+        }
+
+        // MIDI file list
+        ImGui::Spacing();
+        for (int i = 0; i < (int)sMidiFiles.size(); i++) {
+            char label[80];
+            int totalNotes = 0;
+            for (auto& t : sMidiFiles[i].tracks) totalNotes += (int)t.notes.size();
+            snprintf(label, sizeof(label), "[%d] %s (%d BPM, %d notes)", i, sMidiFiles[i].name, sMidiFiles[i].tempo, totalNotes);
+            bool sel = (sSelectedMidi == i);
+            if (ImGui::Selectable(label, sel))
+                sSelectedMidi = i;
+        }
+
+        ImGui::Separator();
+
+        // Selected MIDI details + channel assignment
+        if (sSelectedMidi >= 0 && sSelectedMidi < (int)sMidiFiles.size()) {
+            MidiFile& mf = sMidiFiles[sSelectedMidi];
+            ImGui::Text("File: %s", mf.name);
+            ImGui::Text("Tempo: %d BPM  |  Ticks/Beat: %d", mf.tempo, mf.ticksPerBeat);
+            ImGui::Text("Tracks: %d", (int)mf.tracks.size());
+
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.4f, 1.0f), "Channel -> Sample Bank");
+            ImGui::Separator();
+
+            // Detect which channels are actually used
+            bool channelUsed[16] = {};
+            for (auto& t : mf.tracks)
+                for (auto& n : t.notes)
+                    channelUsed[n.channel] = true;
+
+            for (int ch = 0; ch < 16; ch++) {
+                if (!channelUsed[ch]) continue;
+                char chLabel[32];
+                snprintf(chLabel, sizeof(chLabel), "Ch %2d", ch + 1);
+                ImGui::PushItemWidth(Scaled(140));
+                // Dropdown of sample bank
+                const char* preview = (mf.channelBank[ch] >= 0 && mf.channelBank[ch] < (int)sSoundBank.size())
+                    ? sSoundBank[mf.channelBank[ch]].name : "None";
+                char comboId[32];
+                snprintf(comboId, sizeof(comboId), "##ch%d", ch);
+                ImGui::Text("%s", chLabel); ImGui::SameLine();
+                if (ImGui::BeginCombo(comboId, preview)) {
+                    for (int si = 0; si < (int)sSoundBank.size(); si++) {
+                        char itemLabel[48];
+                        snprintf(itemLabel, sizeof(itemLabel), "[%d] %s", si, sSoundBank[si].name);
+                        if (ImGui::Selectable(itemLabel, si == mf.channelBank[ch])) {
+                            mf.channelBank[ch] = si;
+                            sProjectDirty = true;
+                        }
+                        if (si == mf.channelBank[ch]) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopItemWidth();
+            }
+
+            // Piano roll preview
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Piano Roll");
+            float rollW = ImGui::GetContentRegionAvail().x;
+            float rollH = Scaled(200);
+            ImVec2 rp = ImGui::GetCursorScreenPos();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(rp, ImVec2(rp.x + rollW, rp.y + rollH), 0xFF0D0D0D);
+
+            // Find tick range and note range
+            int minNote = 127, maxNote = 0, maxTick = 1;
+            for (auto& t : mf.tracks)
+                for (auto& n : t.notes) {
+                    if (n.note < minNote) minNote = n.note;
+                    if (n.note > maxNote) maxNote = n.note;
+                    if (n.tick + n.duration > maxTick) maxTick = n.tick + n.duration;
+                }
+            if (minNote > maxNote) { minNote = 60; maxNote = 72; }
+            int noteRange = maxNote - minNote + 1;
+            if (noteRange < 12) { minNote -= (12 - noteRange) / 2; noteRange = 12; }
+
+            // Draw note grid lines
+            float noteH = rollH / noteRange;
+            for (int n = 0; n <= noteRange; n++) {
+                float y = rp.y + n * noteH;
+                dl->AddLine(ImVec2(rp.x, y), ImVec2(rp.x + rollW, y), 0xFF1A1A1A);
+            }
+
+            // Channel colors
+            uint32_t chColors[] = {
+                0xFF4488FF, 0xFFFF8844, 0xFF44FF88, 0xFFFF44AA,
+                0xFFAAAA44, 0xFF44AAAA, 0xFFAA44FF, 0xFFFFAA44,
+                0xFF8888FF, 0xFFFF8888, 0xFF88FF88, 0xFFFF88FF,
+                0xFFFFFF44, 0xFF44FFFF, 0xFFCC88CC, 0xFFCCCC88
+            };
+
+            // Draw notes
+            for (auto& t : mf.tracks) {
+                for (auto& n : t.notes) {
+                    float x0 = rp.x + (float)n.tick / maxTick * rollW;
+                    float x1 = rp.x + (float)(n.tick + n.duration) / maxTick * rollW;
+                    float y0 = rp.y + (float)(maxNote - n.note) / noteRange * rollH;
+                    float y1 = y0 + noteH;
+                    if (x1 - x0 < 1) x1 = x0 + 1;
+                    uint32_t col = chColors[n.channel & 15];
+                    // Dim alpha based on velocity
+                    int alpha = 100 + n.velocity;
+                    col = (col & 0x00FFFFFF) | ((alpha & 0xFF) << 24);
+                    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), col);
+                }
+            }
+
+            // Draw playhead line on piano roll
+            if (sMidiPlaying && sMidiPlayIdx == sSelectedMidi && maxTick > 0) {
+                float px = rp.x + (float)sMidiPlayTick / maxTick * rollW;
+                dl->AddLine(ImVec2(px, rp.y), ImVec2(px, rp.y + rollH), 0xFFFFFFFF, 2.0f);
+            }
+
+            ImGui::Dummy(ImVec2(rollW, rollH));
+
+            // Timeline progress bar
+            {
+                float progress = 0.0f;
+                if (sMidiPlaying && sMidiPlayIdx == sSelectedMidi && maxTick > 0)
+                    progress = (float)sMidiPlayTick / maxTick;
+                float barW = rollW;
+                float barH = Scaled(12);
+                ImVec2 bp = ImGui::GetCursorScreenPos();
+                dl->AddRectFilled(bp, ImVec2(bp.x + barW, bp.y + barH), 0xFF1A1A1A);
+                if (progress > 0.0f)
+                    dl->AddRectFilled(bp, ImVec2(bp.x + barW * progress, bp.y + barH), 0xFF4488FF);
+                dl->AddRect(bp, ImVec2(bp.x + barW, bp.y + barH), 0xFF333333);
+                // Time label
+                double totalSec = (maxTick > 0 && mf.ticksPerBeat > 0 && mf.tempo > 0)
+                    ? (double)maxTick / (mf.ticksPerBeat * mf.tempo / 60.0) : 0;
+                double curSec = totalSec * progress;
+                char timeBuf[64];
+                snprintf(timeBuf, sizeof(timeBuf), "%d:%02d / %d:%02d",
+                    (int)curSec / 60, (int)curSec % 60,
+                    (int)totalSec / 60, (int)totalSec % 60);
+                ImVec2 tsz = ImGui::CalcTextSize(timeBuf);
+                dl->AddText(ImVec2(bp.x + (barW - tsz.x) * 0.5f, bp.y + (barH - tsz.y) * 0.5f),
+                    0xFFCCCCCC, timeBuf);
+                ImGui::Dummy(ImVec2(barW, barH));
+                ImGui::Spacing();
+            }
+
+            // Play / Stop / Delete
+            if (ImGui::Button("Play##midi", ImVec2(Scaled(60), 0)))
+                AudioPlayMidi(sSelectedMidi);
+            ImGui::SameLine();
+            if (ImGui::Button("Stop##midi", ImVec2(Scaled(60), 0)))
+                AudioStopAll();
+            ImGui::SameLine();
+            if (ImGui::Button("Delete MIDI")) {
+                sMidiFiles.erase(sMidiFiles.begin() + sSelectedMidi);
+                sSelectedMidi = -1;
+                sProjectDirty = true;
+            }
+        }
+
         ImGui::End();
         ImGui::PopStyleColor();
     }
