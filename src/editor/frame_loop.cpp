@@ -11403,7 +11403,7 @@ void FrameTick(float dt)
 
                 // Helper: build function signature and GBA body for action node preview
                 char funcSigBuf[128] = {};  // function signature line (empty = not an action node)
-                char gbaBodyBuf[512] = {};  // GBA body line(s) without wrapper
+                char gbaBodyBuf[1024] = {};  // GBA body line(s) without wrapper
                 auto setActionFunc = [&](const VsNode& node, const char* suffix, const char* body) {
                     bool isBp = (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0);
                     if (node.funcName[0])
