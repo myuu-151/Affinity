@@ -138,6 +138,7 @@ static int tm_obj_dir_set[TM_MAX_DIR_OBJS];     // loaded animation set (-1 = no
 static int tm_dir_slot_count = 0;                // total direction VRAM tiles used
 static s16 tm_obj_tx[TM_MAX_DIR_OBJS];          // mutable object tile X (for FollowPlayer etc.)
 static s16 tm_obj_ty[TM_MAX_DIR_OBJS];          // mutable object tile Y
+static int tm_follow_offset_x = 0, tm_follow_offset_y = 0; // smooth follow pixel offset
 static int tm_anim_idx;                 // current animation index (0=idle, 1=walk, ...)
 static int tm_anim_frame;               // current frame within animation
 static int tm_anim_timer;               // frame counter for animation timing
@@ -4288,7 +4289,7 @@ int main(void)
             afn_bp_dispatch_key_pressed();
             afn_bp_dispatch_key_released();
 
-            // --- HARDCODED AI FOLLOW TEST (breadcrumb trail) ---
+            // --- HARDCODED AI FOLLOW TEST (breadcrumb trail + smooth lerp) ---
             {
                 static int follow_active = 0;
                 #define FOLLOW_TRAIL_LEN 16
@@ -4297,6 +4298,9 @@ int main(void)
                 static int trail_head = 0;
                 static int trail_count = 0;
                 static s16 prev_ptx = -1, prev_pty = -1;
+                // Smooth movement: pixel offset that lerps to 0
+                static int fol_lerp_timer = 0;
+                static int fol_lerp_dx = 0, fol_lerp_dy = 0; // offset in pixels at start of move
 
                 if (key_hit(KEY_A)) {
                     follow_active = 1;
@@ -4304,12 +4308,13 @@ int main(void)
                     trail_head = 0;
                     prev_ptx = tm_player_tx;
                     prev_pty = tm_player_ty;
+                    fol_lerp_timer = 0;
+                    fol_lerp_dx = 0; fol_lerp_dy = 0;
                 }
 
                 if (follow_active) {
                     // Record player position when they move to a new tile
                     if (tm_player_tx != prev_ptx || tm_player_ty != prev_pty) {
-                        // Push previous position onto trail
                         trail_tx[trail_head] = prev_ptx;
                         trail_ty[trail_head] = prev_pty;
                         trail_head = (trail_head + 1) % FOLLOW_TRAIL_LEN;
@@ -4317,15 +4322,26 @@ int main(void)
                         prev_ptx = tm_player_tx;
                         prev_pty = tm_player_ty;
 
-                        // Pop oldest breadcrumb and move follower there
+                        // Pop oldest breadcrumb and start lerp
                         if (trail_count > 0) {
                             int tail = (trail_head - trail_count + FOLLOW_TRAIL_LEN) % FOLLOW_TRAIL_LEN;
-                            tm_obj_tx[5] = trail_tx[tail];
-                            tm_obj_ty[5] = trail_ty[tail];
+                            int new_tx = trail_tx[tail];
+                            int new_ty = trail_ty[tail];
+                            // Pixel offset = old pos - new pos (in pixels)
+                            fol_lerp_dx = (tm_obj_tx[5] - new_tx) * tm_tile_size;
+                            fol_lerp_dy = (tm_obj_ty[5] - new_ty) * tm_tile_size;
+                            fol_lerp_timer = tm_move_frames;
+                            tm_obj_tx[5] = new_tx;
+                            tm_obj_ty[5] = new_ty;
                             trail_count--;
                         }
                     }
+                    // Tick down lerp
+                    if (fol_lerp_timer > 0) fol_lerp_timer--;
                 }
+                // Store pixel offset for rendering
+                tm_follow_offset_x = (fol_lerp_timer > 0) ? (fol_lerp_dx * fol_lerp_timer / tm_move_frames) : 0;
+                tm_follow_offset_y = (fol_lerp_timer > 0) ? (fol_lerp_dy * fol_lerp_timer / tm_move_frames) : 0;
             }
             // --- END HARDCODED AI FOLLOW TEST ---
 
@@ -4513,6 +4529,8 @@ int main(void)
 
                     int objPx = ((oi < TM_MAX_DIR_OBJS) ? tm_obj_tx[oi] : afn_tm0_objs[oi].tx) * tm_tile_size;
                     int objPy = ((oi < TM_MAX_DIR_OBJS) ? tm_obj_ty[oi] : afn_tm0_objs[oi].ty) * tm_tile_size;
+                    // Apply smooth follow offset for object 5
+                    if (oi == 5) { objPx += tm_follow_offset_x; objPy += tm_follow_offset_y; }
                     int osx = objPx - tm_cam_x;
                     int osy = objPy - tm_cam_y;
 
