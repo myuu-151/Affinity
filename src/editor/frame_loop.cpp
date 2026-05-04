@@ -434,6 +434,8 @@ enum class VsNodeType : int {
     FollowLink,     // navigate to linked element at current cursor stop
     GetCursorStop,  // data: returns current cursor stop index
     BlueprintRef,   // data: constant blueprint definition index (dropdown)
+    FollowPlayer,   // move sprite toward player, stop at distance
+    IsNear2D,       // gate: passes if player is adjacent to this blueprint's tilemap object
     COUNT
 };
 
@@ -713,6 +715,8 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Follow Link",    0xFF8855AA, 1, 1, 0, 0, {}, {}, {} },
     { "Get Cursor Stop",0xFF666688, 0, 0, 0, 1, {}, {"Stop"}, {} },
     { "Blueprint",      0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
+    { "Follow Player",  0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Distance (int)"}, {}, {} },
+    { "Is Near 2D",     0xFF2266BB, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -4514,7 +4518,9 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
     for (int i = 0; i < (int)sSpriteAssets.size(); i++)
     {
         bool sel = (sSelectedAsset == i);
-        if (ImGui::Selectable(sSpriteAssets[i].name.c_str(), sel))
+        char assetLabel[128];
+        snprintf(assetLabel, sizeof(assetLabel), "[%d] %s", i, sSpriteAssets[i].name.c_str());
+        if (ImGui::Selectable(assetLabel, sel))
         {
             sSelectedAsset = i;
             sSelectedFrame = 0;
@@ -5831,7 +5837,7 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
     {
         char label[64];
         const char* typeName = kSpriteTypeNames[(int)sSprites[i].type];
-        snprintf(label, sizeof(label), "%s %d", typeName, i);
+        snprintf(label, sizeof(label), "[%d] %s", i, typeName);
         bool sel = (sSelectedObjType == SelectedObjType::Sprite && sSelectedSprite == i);
 
         // Color dot
@@ -6547,7 +6553,7 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(col));
             bool selected = (i == sTmSelectedObj);
             char label[64];
-            snprintf(label, sizeof(label), "%s##obj%d", obj.name, i);
+            snprintf(label, sizeof(label), "[%d] %s##obj%d", i, obj.name, i);
             if (ImGui::Selectable(label, selected))
                 sTmSelectedObj = i;
             ImGui::PopStyleColor();
@@ -11274,6 +11280,8 @@ void FrameTick(float dt)
                 case VsNodeType::Patrol:        desc = "Moves a sprite back and forth between its start and (X1,Z1)."; break;
                 case VsNodeType::ChasePlayer:   desc = "Moves a sprite toward the player at the given speed."; break;
                 case VsNodeType::FleePlayer:    desc = "Moves a sprite away from the player at the given speed."; break;
+                case VsNodeType::FollowPlayer:  desc = "Moves a sprite toward the player, stopping at the given distance (default = collision bounds)."; break;
+                case VsNodeType::IsNear2D:      desc = "Gate: passes exec only if the player is currently adjacent to this blueprint's tilemap object (Mode 0)."; break;
                 case VsNodeType::SetAI:         desc = "Sets the AI behavior mode for a sprite (0=None, 1=Patrol, 2=Chase, 3=Flee)."; break;
                 case VsNodeType::GetAI:         desc = "Outputs the current AI behavior mode of a sprite."; break;
                 case VsNodeType::OnDeath:       desc = "Event: fires when the specified sprite's HP reaches 0."; break;
@@ -11566,6 +11574,8 @@ void FrameTick(float dt)
                         case VsNodeType::Patrol:        return "_patrol";
                         case VsNodeType::ChasePlayer:   return "_chase_player";
                         case VsNodeType::FleePlayer:    return "_flee_player";
+                        case VsNodeType::FollowPlayer:  return "_follow_player";
+                        case VsNodeType::IsNear2D:      return "_is_near_2d";
                         case VsNodeType::SetAI:         return "_set_ai";
                         case VsNodeType::EmitParticle:  return "_emit_particle";
                         case VsNodeType::SetTint:       return "_set_tint";
@@ -13370,6 +13380,41 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_flee_player", b6);
                     break;
                 }
+                case VsNodeType::FollowPlayer: {
+                    editorCode = "// Follow player, stop at distance";
+                    char b6[1024];
+                    snprintf(b6, sizeof(b6),
+                        "    FIXED dx = player_x - g_sprites[%s].wx;\n"
+                        "    FIXED dz = player_z - g_sprites[%s].wz;\n"
+                        "    FIXED adx = dx<0?-dx:dx; FIXED adz = dz<0?-dz:dz;\n"
+                        "    int dist = (adx>adz)?adx+(adz>>1):adz+(adx>>1);\n"
+                        "    int minDist = %s << 8;\n"
+                        "    if (minDist <= 0) minDist = 1 << 8;\n"
+                        "    if (dist > minDist && dist > 0) {\n"
+                        "        g_sprites[%s].wx += (dx * 1) / (dist >> 8);\n"
+                        "        g_sprites[%s].wz += (dz * 1) / (dist >> 8); }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Mode 4: moves sprite toward player, stops at minDist\n"
+                        "    // Mode 0: moves tm obj tile-by-tile toward player tile",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 1, "<dist>"),
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 0, "<obj>"));
+                    setActionFunc(infoNode, "_follow_player", b6);
+                    break;
+                }
+                case VsNodeType::IsNear2D: {
+                    editorCode = "// Gate: pass if player adjacent to this object (Mode 0)";
+                    setActionFunc(infoNode, "_is_near_2d",
+                        "    if (afn_collided_tm_obj == afn_bp_cur_tm_obj) {\n"
+                        "        // exec downstream\n"
+                        "    }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Mode 0: afn_collided_tm_obj set when player tile adjacent to obj\n"
+                        "    //         afn_bp_cur_tm_obj = instance's bound tilemap object index");
+                    break;
+                }
                 case VsNodeType::SetAI: {
                     editorCode = "// Set AI behavior mode";
                     char b6[256];
@@ -14562,6 +14607,8 @@ void FrameTick(float dt)
                     case VsNodeType::Patrol:        suffix = "_patrol"; break;
                     case VsNodeType::ChasePlayer:   suffix = "_chase_player"; break;
                     case VsNodeType::FleePlayer:    suffix = "_flee_player"; break;
+                    case VsNodeType::FollowPlayer:  suffix = "_follow_player"; break;
+                    case VsNodeType::IsNear2D:      suffix = "_is_near_2d"; break;
                     case VsNodeType::SetAI:         suffix = "_set_ai"; break;
                     case VsNodeType::GetAI:         suffix = "_get_ai"; break;
                     case VsNodeType::OnDeath:       suffix = "_on_death"; break;
@@ -15016,6 +15063,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Patrol].name)) addNodeAt(VsNodeType::Patrol);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ChasePlayer].name)) addNodeAt(VsNodeType::ChasePlayer);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FleePlayer].name)) addNodeAt(VsNodeType::FleePlayer);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FollowPlayer].name)) addNodeAt(VsNodeType::FollowPlayer);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetAI].name)) addNodeAt(VsNodeType::SetAI);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::EmitParticle].name)) addNodeAt(VsNodeType::EmitParticle);
@@ -15105,6 +15153,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsFlagSet].name)) addNodeAt(VsNodeType::IsFlagSet);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsHPZero].name)) addNodeAt(VsNodeType::IsHPZero);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNear].name)) addNodeAt(VsNodeType::IsNear);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNear2D].name)) addNodeAt(VsNodeType::IsNear2D);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Countdown].name)) addNodeAt(VsNodeType::Countdown);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsAlive].name)) addNodeAt(VsNodeType::IsAlive);
                     ImGui::Separator();

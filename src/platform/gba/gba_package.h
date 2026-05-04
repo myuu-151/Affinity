@@ -336,6 +336,8 @@ enum class GBAScriptNodeType : int {
     FollowLink,
     GetCursorStop,
     BlueprintRef,
+    FollowPlayer,
+    IsNear2D,
     COUNT
 };
 
