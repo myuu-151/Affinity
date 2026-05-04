@@ -42,6 +42,7 @@
 - **CMake 3.16+**
 - **devkitPro** with devkitARM + libtonc *(for GBA ROM packaging)*
 - **mGBA** *(optional — for launching ROMs from the editor)*
+- **Visual C++ Redistributable** *(required to run pre-built releases — [download](https://aka.ms/vs/17/release/vc_redist.x64.exe))*
 
 ### 1. Build the Editor
 
