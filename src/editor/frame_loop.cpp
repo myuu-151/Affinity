@@ -833,6 +833,12 @@ struct BpInstanceParam {
 
 // ---- Sound / Sample Bank ----
 
+struct DrumHit {
+    std::vector<int8_t> data;
+    int sampleRate = 16384;
+    char name[32] = "";
+};
+
 struct SoundSample {
     char name[32] = "Sample";
     std::vector<int8_t> data;   // 8-bit signed PCM
@@ -840,6 +846,8 @@ struct SoundSample {
     bool loop = false;
     int loopStart = 0;          // sample offset
     bool builtIn = false;       // true = generated, not imported
+    bool isDrumKit = false;     // true = note selects sample from drumHits
+    DrumHit drumHits[128];      // per-note samples (only used if isDrumKit)
 };
 
 struct MidiNote {
@@ -855,18 +863,321 @@ struct MidiTrack {
     std::vector<MidiNote> notes;
 };
 
+// General MIDI instrument names
+static const char* sGMInstrumentNames[128] = {
+    "Acoustic Grand Piano","Bright Acoustic Piano","Electric Grand Piano","Honky-tonk Piano",
+    "Electric Piano 1","Electric Piano 2","Harpsichord","Clavinet",
+    "Celesta","Glockenspiel","Music Box","Vibraphone",
+    "Marimba","Xylophone","Tubular Bells","Dulcimer",
+    "Drawbar Organ","Percussive Organ","Rock Organ","Church Organ",
+    "Reed Organ","Accordion","Harmonica","Tango Accordion",
+    "Acoustic Guitar (nylon)","Acoustic Guitar (steel)","Electric Guitar (jazz)","Electric Guitar (clean)",
+    "Electric Guitar (muted)","Overdriven Guitar","Distortion Guitar","Guitar Harmonics",
+    "Acoustic Bass","Electric Bass (finger)","Electric Bass (pick)","Fretless Bass",
+    "Slap Bass 1","Slap Bass 2","Synth Bass 1","Synth Bass 2",
+    "Violin","Viola","Cello","Contrabass",
+    "Tremolo Strings","Pizzicato Strings","Orchestral Harp","Timpani",
+    "String Ensemble 1","String Ensemble 2","Synth Strings 1","Synth Strings 2",
+    "Choir Aahs","Voice Oohs","Synth Choir","Orchestra Hit",
+    "Trumpet","Trombone","Tuba","Muted Trumpet",
+    "French Horn","Brass Section","Synth Brass 1","Synth Brass 2",
+    "Soprano Sax","Alto Sax","Tenor Sax","Baritone Sax",
+    "Oboe","English Horn","Bassoon","Clarinet",
+    "Piccolo","Flute","Recorder","Pan Flute",
+    "Blown Bottle","Shakuhachi","Whistle","Ocarina",
+    "Lead 1 (square)","Lead 2 (sawtooth)","Lead 3 (calliope)","Lead 4 (chiff)",
+    "Lead 5 (charang)","Lead 6 (voice)","Lead 7 (fifths)","Lead 8 (bass+lead)",
+    "Pad 1 (new age)","Pad 2 (warm)","Pad 3 (polysynth)","Pad 4 (choir)",
+    "Pad 5 (bowed)","Pad 6 (metallic)","Pad 7 (halo)","Pad 8 (sweep)",
+    "FX 1 (rain)","FX 2 (soundtrack)","FX 3 (crystal)","FX 4 (atmosphere)",
+    "FX 5 (brightness)","FX 6 (goblins)","FX 7 (echoes)","FX 8 (sci-fi)",
+    "Sitar","Banjo","Shamisen","Koto",
+    "Kalimba","Bagpipe","Fiddle","Shanai",
+    "Tinkle Bell","Agogo","Steel Drums","Woodblock",
+    "Taiko Drum","Melodic Tom","Synth Drum","Reverse Cymbal",
+    "Guitar Fret Noise","Breath Noise","Seashore","Bird Tweet",
+    "Telephone Ring","Helicopter","Applause","Gunshot"
+};
+
 struct MidiFile {
     char name[64] = "";
     int ticksPerBeat = 480;
     int tempo = 120;            // BPM
     std::vector<MidiTrack> tracks;
     int channelBank[16] = {};   // sample bank index per MIDI channel
+    int channelProgram[16];     // GM program number per channel (-1 = unset)
+    char channelName[16][48];   // display name per channel
+    bool channelUsed[16] = {};  // whether channel has any notes
+    bool channelMuted[16] = {}; // mute toggle per channel
+    int channelVolume[16];      // per-channel volume 0-100 (default 100)
 };
 
 static std::vector<SoundSample> sSoundBank;
 static std::vector<MidiFile> sMidiFiles;
 static int sSelectedSample = -1;
 static int sSelectedMidi = -1;
+
+// GM drum note names (subset — notes 35-81)
+static const char* sGMDrumNames[] = {
+    "Acoustic Bass Drum","Bass Drum 1","Side Stick","Acoustic Snare",
+    "Hand Clap","Electric Snare","Low Floor Tom","Closed Hi-Hat",
+    "High Floor Tom","Pedal Hi-Hat","Low Tom","Open Hi-Hat",
+    "Low-Mid Tom","Hi-Mid Tom","Crash Cymbal 1","High Tom",
+    "Ride Cymbal 1","Chinese Cymbal","Ride Bell","Tambourine",
+    "Splash Cymbal","Cowbell","Crash Cymbal 2","Vibraslap",
+    "Ride Cymbal 2","Hi Bongo","Low Bongo","Mute Hi Conga",
+    "Open Hi Conga","Low Conga","High Timbale","Low Timbale",
+    "High Agogo","Low Agogo","Cabasa","Maracas",
+    "Short Whistle","Long Whistle","Short Guiro","Long Guiro",
+    "Claves","Hi Wood Block","Low Wood Block","Mute Cuica",
+    "Open Cuica","Mute Triangle","Open Triangle"
+};
+
+// Parse Windows GM DLS soundbank for drum kit
+static bool LoadGMDrumKit(SoundSample& kit) {
+    FILE* f = fopen("C:\\Windows\\System32\\drivers\\gm.dls", "rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    std::vector<uint8_t> buf(sz);
+    fread(buf.data(), 1, sz, f);
+    fclose(f);
+
+    const uint8_t* d = buf.data();
+    const uint8_t* end = d + sz;
+
+    auto rd32 = [](const uint8_t* p) -> uint32_t {
+        return p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
+    };
+    auto rd16 = [](const uint8_t* p) -> uint16_t {
+        return p[0] | (p[1] << 8);
+    };
+
+    // Verify RIFF DLS header
+    if (sz < 12 || memcmp(d, "RIFF", 4) != 0 || memcmp(d + 8, "DLS ", 4) != 0)
+        return false;
+
+    // Step 1: Find wave pool (wvpl) — collect all wave data offsets
+    struct WaveInfo {
+        const uint8_t* data = nullptr;
+        int length = 0;
+        int sampleRate = 22050;
+        int bitsPerSample = 16;
+        int channels = 1;
+    };
+    std::vector<WaveInfo> waves;
+
+    // Find wvpl LIST
+    const uint8_t* wvpl = nullptr;
+    uint32_t wvplSize = 0;
+    {
+        const uint8_t* p = d + 12;
+        while (p + 8 <= end) {
+            uint32_t ckId = rd32(p);
+            uint32_t ckSize = rd32(p + 4);
+            if (ckId == 0x5453494C && p + 12 <= end) { // 'LIST'
+                uint32_t listType = rd32(p + 8);
+                if (listType == 0x6C707677) { // 'wvpl'
+                    wvpl = p + 12;
+                    wvplSize = ckSize - 4;
+                    break;
+                }
+            }
+            p += 8 + ((ckSize + 1) & ~1);
+        }
+    }
+    if (!wvpl) return false;
+
+    // Parse each wave in wvpl
+    {
+        const uint8_t* p = wvpl;
+        const uint8_t* wEnd = wvpl + wvplSize;
+        while (p + 12 <= wEnd) {
+            uint32_t ckId = rd32(p);
+            uint32_t ckSize = rd32(p + 4);
+            if (ckId == 0x5453494C) { // LIST
+                uint32_t listType = rd32(p + 8);
+                if (listType == 0x65766177) { // 'wave'
+                    WaveInfo wi;
+                    const uint8_t* wp = p + 12;
+                    const uint8_t* waveEnd = p + 8 + ckSize;
+                    while (wp + 8 <= waveEnd) {
+                        uint32_t wckId = rd32(wp);
+                        uint32_t wckSize = rd32(wp + 4);
+                        if (wckId == 0x20746D66 && wckSize >= 16) { // 'fmt '
+                            wi.channels = rd16(wp + 10);
+                            wi.sampleRate = rd32(wp + 12);
+                            wi.bitsPerSample = rd16(wp + 22);
+                        } else if (wckId == 0x61746164) { // 'data'
+                            wi.data = wp + 8;
+                            wi.length = wckSize;
+                        }
+                        wp += 8 + ((wckSize + 1) & ~1);
+                    }
+                    waves.push_back(wi);
+                }
+            }
+            p += 8 + ((ckSize + 1) & ~1);
+        }
+    }
+
+    // Step 2: Find percussion instrument (bank 128)
+    // Look for lins LIST -> ins LIST with insh bank=128
+    const uint8_t* lins = nullptr;
+    uint32_t linsSize = 0;
+    {
+        const uint8_t* p = d + 12;
+        while (p + 8 <= end) {
+            uint32_t ckId = rd32(p);
+            uint32_t ckSize = rd32(p + 4);
+            if (ckId == 0x5453494C && p + 12 <= end) { // LIST
+                uint32_t listType = rd32(p + 8);
+                if (listType == 0x736E696C) { // 'lins'
+                    lins = p + 12;
+                    linsSize = ckSize - 4;
+                    break;
+                }
+            }
+            p += 8 + ((ckSize + 1) & ~1);
+        }
+    }
+    if (!lins) return false;
+
+    // Find the drum instrument (bank MSB & 0x80 set, or ulBank & 0x80000000)
+    const uint8_t* drumIns = nullptr;
+    uint32_t drumInsSize = 0;
+    {
+        const uint8_t* p = lins;
+        const uint8_t* lEnd = lins + linsSize;
+        while (p + 12 <= lEnd) {
+            uint32_t ckId = rd32(p);
+            uint32_t ckSize = rd32(p + 4);
+            if (ckId == 0x5453494C) { // LIST
+                uint32_t listType = rd32(p + 8);
+                if (listType == 0x20736E69) { // 'ins '
+                    // Search for insh chunk inside this instrument
+                    const uint8_t* ip = p + 12;
+                    const uint8_t* iEnd = p + 8 + ckSize;
+                    while (ip + 8 <= iEnd) {
+                        uint32_t ickId = rd32(ip);
+                        uint32_t ickSize = rd32(ip + 4);
+                        if (ickId == 0x68736E69 && ickSize >= 12) { // 'insh'
+                            uint32_t ulBank = rd32(ip + 12);
+                            if (ulBank & 0x80000000) { // percussion
+                                drumIns = p + 12;
+                                drumInsSize = ckSize - 4;
+                                break;
+                            }
+                        }
+                        ip += 8 + ((ickSize + 1) & ~1);
+                    }
+                    if (drumIns) break;
+                }
+            }
+            p += 8 + ((ckSize + 1) & ~1);
+        }
+    }
+    if (!drumIns) return false;
+
+    // Step 3: Parse regions (lrgn -> rgn) to map key ranges to wave indices
+    const uint8_t* lrgn = nullptr;
+    uint32_t lrgnSize = 0;
+    {
+        const uint8_t* p = drumIns;
+        const uint8_t* iEnd = drumIns + drumInsSize;
+        while (p + 12 <= iEnd) {
+            uint32_t ckId = rd32(p);
+            uint32_t ckSize = rd32(p + 4);
+            if (ckId == 0x5453494C) { // LIST
+                uint32_t listType = rd32(p + 8);
+                if (listType == 0x6E67726C) { // 'lrgn'
+                    lrgn = p + 12;
+                    lrgnSize = ckSize - 4;
+                    break;
+                }
+            }
+            p += 8 + ((ckSize + 1) & ~1);
+        }
+    }
+    if (!lrgn) return false;
+
+    snprintf(kit.name, sizeof(kit.name), "GM Drums");
+    kit.isDrumKit = true;
+    kit.builtIn = true;
+    kit.sampleRate = 16384;
+
+    // Parse each region
+    const uint8_t* rp = lrgn;
+    const uint8_t* rEnd = lrgn + lrgnSize;
+    while (rp + 12 <= rEnd) {
+        uint32_t ckId = rd32(rp);
+        uint32_t ckSize = rd32(rp + 4);
+        if (ckId == 0x5453494C) { // LIST
+            uint32_t listType = rd32(rp + 8);
+            if (listType == 0x206E6772 || listType == 0x326E6772) { // 'rgn ' or 'rgn2'
+                int keyLo = 0, keyHi = 127;
+                int waveIdx = -1;
+                const uint8_t* rrp = rp + 12;
+                const uint8_t* rrEnd = rp + 8 + ckSize;
+                while (rrp + 8 <= rrEnd) {
+                    uint32_t rckId = rd32(rrp);
+                    uint32_t rckSize = rd32(rrp + 4);
+                    if (rckId == 0x686E6772 && rckSize >= 8) { // 'rgnh'
+                        keyLo = rd16(rrp + 8);
+                        keyHi = rd16(rrp + 10);
+                    } else if (rckId == 0x6B6E6C77 && rckSize >= 12) { // 'wlnk'
+                        waveIdx = (int)rd32(rrp + 16);
+                    }
+                    rrp += 8 + ((rckSize + 1) & ~1);
+                }
+
+                // Convert wave and store into drum hits
+                if (waveIdx >= 0 && waveIdx < (int)waves.size() && waves[waveIdx].data) {
+                    WaveInfo& wi = waves[waveIdx];
+                    for (int note = keyLo; note <= keyHi && note < 128; note++) {
+                        DrumHit& hit = kit.drumHits[note];
+                        int numSamples = 0;
+                        if (wi.bitsPerSample == 16)
+                            numSamples = wi.length / (2 * wi.channels);
+                        else if (wi.bitsPerSample == 8)
+                            numSamples = wi.length / wi.channels;
+
+                        // Downsample to 16384 Hz 8-bit mono
+                        int srcRate = wi.sampleRate;
+                        int dstLen = (int)((float)numSamples / srcRate * 16384);
+                        if (dstLen < 1) continue;
+                        if (dstLen > 16384) dstLen = 16384; // cap at 1 sec
+
+                        hit.data.resize(dstLen);
+                        hit.sampleRate = 16384;
+                        for (int i = 0; i < dstLen; i++) {
+                            int srcIdx = (int)((float)i / dstLen * numSamples);
+                            if (srcIdx >= numSamples) srcIdx = numSamples - 1;
+                            int val = 0;
+                            if (wi.bitsPerSample == 16) {
+                                const int16_t* s16 = (const int16_t*)(wi.data + srcIdx * 2 * wi.channels);
+                                val = s16[0] >> 8; // 16-bit to 8-bit
+                            } else {
+                                val = (int)wi.data[srcIdx * wi.channels] - 128;
+                            }
+                            hit.data[i] = (int8_t)val;
+                        }
+
+                        // Name
+                        if (note >= 35 && note <= 81)
+                            snprintf(hit.name, sizeof(hit.name), "%s", sGMDrumNames[note - 35]);
+                        else
+                            snprintf(hit.name, sizeof(hit.name), "Drum %d", note);
+                    }
+                }
+            }
+        }
+        rp += 8 + ((ckSize + 1) & ~1);
+    }
+
+    return true;
+}
 
 // Generate built-in waveform samples
 static void InitBuiltInSamples()
@@ -893,6 +1204,16 @@ static void InitBuiltInSamples()
     // Square 25%
     addWave("Square 25%", [](int i, int len) -> int8_t {
         return (i < len / 4) ? 96 : -96;
+    }, 32, false);
+
+    // Square 75%
+    addWave("Square 75%", [](int i, int len) -> int8_t {
+        return (i < len * 3 / 4) ? 96 : -96;
+    }, 32, false);
+
+    // Square 12.5% (100% is just DC — 12.5% is the GBA's 4th duty)
+    addWave("Square 12.5%", [](int i, int len) -> int8_t {
+        return (i < len / 8) ? 96 : -96;
     }, 32, false);
 
     // Triangle
@@ -928,63 +1249,12 @@ static void InitBuiltInSamples()
         sSoundBank.push_back(std::move(s));
     }
 
-    // Kick drum (decaying sine burst)
+    // GM Drum Kit (loaded from Windows GS Wavetable DLS)
     {
-        SoundSample s;
-        snprintf(s.name, sizeof(s.name), "Kick");
-        int len = 512;
-        s.data.resize(len);
-        for (int i = 0; i < len; i++) {
-            float t = (float)i / len;
-            float freq = 150.0f * (1.0f - t * 0.8f); // pitch drops
-            float env = (1.0f - t) * (1.0f - t);       // decay
-            s.data[i] = (int8_t)(96.0f * env * sinf(2.0f * 3.14159f * freq * t));
+        SoundSample kit;
+        if (LoadGMDrumKit(kit)) {
+            sSoundBank.push_back(std::move(kit));
         }
-        s.loop = false;
-        s.builtIn = true;
-        s.sampleRate = 16384;
-        sSoundBank.push_back(std::move(s));
-    }
-
-    // Snare (noise burst + decay)
-    {
-        SoundSample s;
-        snprintf(s.name, sizeof(s.name), "Snare");
-        int len = 384;
-        s.data.resize(len);
-        unsigned int seed2 = 54321;
-        for (int i = 0; i < len; i++) {
-            float t = (float)i / len;
-            float env = (1.0f - t) * (1.0f - t);
-            seed2 = seed2 * 1103515245 + 12345;
-            float noise = ((int)((seed2 >> 16) & 0xFF) - 128) / 128.0f;
-            float tone = sinf(2.0f * 3.14159f * 200.0f * t);
-            s.data[i] = (int8_t)(80.0f * env * (noise * 0.7f + tone * 0.3f));
-        }
-        s.loop = false;
-        s.builtIn = true;
-        s.sampleRate = 16384;
-        sSoundBank.push_back(std::move(s));
-    }
-
-    // Hi-hat (short noise)
-    {
-        SoundSample s;
-        snprintf(s.name, sizeof(s.name), "Hi-Hat");
-        int len = 128;
-        s.data.resize(len);
-        unsigned int seed3 = 99999;
-        for (int i = 0; i < len; i++) {
-            float t = (float)i / len;
-            float env = (1.0f - t);
-            seed3 = seed3 * 1103515245 + 12345;
-            float noise = ((int)((seed3 >> 16) & 0xFF) - 128) / 128.0f;
-            s.data[i] = (int8_t)(64.0f * env * noise);
-        }
-        s.loop = false;
-        s.builtIn = true;
-        s.sampleRate = 16384;
-        sSoundBank.push_back(std::move(s));
     }
 
     // Piano (warm, rich harmonics — even + odd, decaying higher partials)
@@ -1009,6 +1279,60 @@ static void InitBuiltInSamples()
                + 0.1f  * sinf(7*p)      // 7th
                + 0.05f * sinf(9*p);     // 9th
         return (int8_t)(v * 96.0f / 2.2f);
+    }, 64, false);
+
+    // Flute (pure tone with gentle 2nd harmonic — airy, hollow)
+    addWave("Flute", [](int i, int len) -> int8_t {
+        float p = 2.0f * 3.14159f * i / len;
+        float v = sinf(p)
+               + 0.15f * sinf(2*p)
+               + 0.05f * sinf(3*p);
+        return (int8_t)(v * 80.0f / 1.2f);
+    }, 64, false);
+
+    // Music Box (bell-like — fundamental + strong 3rd partial + high shimmer)
+    addWave("Music Box", [](int i, int len) -> int8_t {
+        float p = 2.0f * 3.14159f * i / len;
+        float v = sinf(p)
+               + 0.1f  * sinf(2*p)
+               + 0.45f * sinf(3*p)
+               + 0.05f * sinf(4*p)
+               + 0.2f  * sinf(5*p)
+               + 0.08f * sinf(8*p);
+        return (int8_t)(v * 70.0f / 1.88f);
+    }, 64, false);
+
+    // Celeste (soft bell — detuned pairs for chorus shimmer)
+    addWave("Celeste", [](int i, int len) -> int8_t {
+        float p = 2.0f * 3.14159f * i / len;
+        float v = sinf(p)
+               + 0.3f * sinf(2.005f*p)   // slightly detuned 2nd
+               + 0.2f * sinf(3*p)
+               + 0.15f * sinf(4.01f*p)   // slightly detuned 4th
+               + 0.1f * sinf(6*p);
+        return (int8_t)(v * 72.0f / 1.75f);
+    }, 64, false);
+
+    // Vibraphone (mellow bell — even harmonics dominate)
+    addWave("Vibraphone", [](int i, int len) -> int8_t {
+        float p = 2.0f * 3.14159f * i / len;
+        float v = sinf(p)
+               + 0.5f * sinf(2*p)
+               + 0.08f * sinf(3*p)
+               + 0.3f * sinf(4*p)
+               + 0.05f * sinf(5*p)
+               + 0.1f * sinf(6*p);
+        return (int8_t)(v * 68.0f / 2.03f);
+    }, 64, false);
+
+    // Pad (warm, round — low harmonics only, organ-like)
+    addWave("Pad", [](int i, int len) -> int8_t {
+        float p = 2.0f * 3.14159f * i / len;
+        float v = sinf(p)
+               + 0.4f * sinf(2*p)
+               + 0.15f * sinf(3*p)
+               + 0.08f * sinf(4*p);
+        return (int8_t)(v * 75.0f / 1.63f);
     }, 64, false);
 }
 
@@ -1042,6 +1366,17 @@ static bool ParseMidiFile(const char* path, MidiFile& out)
     out.ticksPerBeat = tpb;
     out.tempo = 120;
     p += 8 + hdrLen;
+
+    // Initialize channel data before parsing
+    for (int i = 0; i < 16; i++) {
+        out.channelBank[i] = 0;
+        out.channelProgram[i] = -1;
+        out.channelUsed[i] = false;
+        out.channelVolume[i] = 100;
+        snprintf(out.channelName[i], sizeof(out.channelName[i]), "Ch %d", i + 1);
+    }
+    // GM standard: channel 10 is drums
+    snprintf(out.channelName[9], sizeof(out.channelName[9]), "Ch 10: Drums");
 
     // Extract filename for display
     {
@@ -1098,6 +1433,7 @@ static bool ParseMidiFile(const char* path, MidiFile& out)
                 tp += 2;
                 if (cmd == 0x90 && vel > 0) {
                     active.push_back({note, ch, absTick, vel});
+                    out.channelUsed[ch] = true;
                 } else {
                     // Note off — find matching active note
                     for (int ai = (int)active.size() - 1; ai >= 0; ai--) {
@@ -1116,7 +1452,14 @@ static bool ParseMidiFile(const char* path, MidiFile& out)
                 }
             } else if (cmd == 0xA0 || cmd == 0xB0 || cmd == 0xE0) {
                 tp += 2; // 2 data bytes
-            } else if (cmd == 0xC0 || cmd == 0xD0) {
+            } else if (cmd == 0xC0) {
+                // Program Change — capture instrument
+                int prog = tp[0] & 0x7F;
+                out.channelProgram[ch] = prog;
+                snprintf(out.channelName[ch], sizeof(out.channelName[ch]),
+                    "Ch %d: %s", ch + 1, sGMInstrumentNames[prog]);
+                tp += 1;
+            } else if (cmd == 0xD0) {
                 tp += 1; // 1 data byte
             } else if (status == 0xFF) {
                 // Meta event
@@ -1170,9 +1513,6 @@ static bool ParseMidiFile(const char* path, MidiFile& out)
         if (!trk.notes.empty())
             out.tracks.push_back(std::move(trk));
     }
-
-    // Default: all channels use first sample
-    for (int i = 0; i < 16; i++) out.channelBank[i] = 0;
 
     return !out.tracks.empty();
 }
@@ -1232,7 +1572,7 @@ static void AudioMixBuffer(int8_t* buf, int len) {
         // Trigger notes that start between sMidiPlayTick and newTick
         for (auto& t : mf.tracks) {
             for (auto& n : t.notes) {
-                if (n.tick >= sMidiPlayTick && n.tick < newTick) {
+                if (n.tick >= sMidiPlayTick && n.tick < newTick && !mf.channelMuted[n.channel]) {
                     // Calculate sample-accurate start offset within this buffer
                     double noteTimeSec = (double)n.tick / ticksPerSec;
                     int sampleOff = (int)((noteTimeSec - startTime) * kAudioSampleRate);
@@ -1261,26 +1601,57 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                     int bankIdx = mf.channelBank[n.channel];
                     if (bankIdx >= 0 && bankIdx < (int)sSoundBank.size()) {
                         SoundSample& smp = sSoundBank[bankIdx];
-                        if (!smp.data.empty()) {
+
+                        const int8_t* smpData = nullptr;
+                        int smpLen = 0;
+                        int smpRate = smp.sampleRate;
+                        bool smpLoop = true;
+                        bool isDrum = false;
+
+                        if (smp.isDrumKit) {
+                            // Drum kit: note selects the sample
+                            DrumHit& hit = smp.drumHits[n.note & 127];
+                            if (!hit.data.empty()) {
+                                smpData = hit.data.data();
+                                smpLen = (int)hit.data.size();
+                                smpRate = hit.sampleRate;
+                                smpLoop = false; // drums don't loop
+                                isDrum = true;
+                            }
+                        } else if (!smp.data.empty()) {
+                            smpData = smp.data.data();
+                            smpLen = (int)smp.data.size();
+                            smpLoop = true; // tonal: loop for MIDI, remaining handles cutoff
+                        }
+
+                        if (smpData && smpLen > 0) {
                             AudioVoice& v = sVoices[vi];
-                            v.data = smp.data.data();
-                            v.length = (int)smp.data.size();
-                            v.loop = true; // always loop for MIDI — remaining handles cutoff
-                            v.loopStart = smp.loopStart;
+                            v.data = smpData;
+                            v.length = smpLen;
+                            v.loop = smpLoop;
+                            v.loopStart = isDrum ? 0 : smp.loopStart;
                             v.pos = 0;
                             v.startSample = sampleOff;
                             v.midiNote = n.note;
                             v.midiChannel = n.channel;
-                            // Calculate pitch: base frequency of sample at sampleRate / sampleLength
-                            float baseFreq = (float)smp.sampleRate / (float)v.length;
-                            float noteFreq = NoteToFreq(n.note);
-                            v.inc = (uint32_t)(noteFreq / baseFreq * 65536.0f);
-                            v.volume = n.velocity;
+                            if (isDrum) {
+                                // Drums play at original pitch (1:1)
+                                v.inc = 65536;
+                            } else {
+                                // Calculate pitch: base frequency of sample at sampleRate / sampleLength
+                                float baseFreq = (float)smpRate / (float)v.length;
+                                float noteFreq = NoteToFreq(n.note);
+                                v.inc = (uint32_t)(noteFreq / baseFreq * 65536.0f);
+                            }
+                            v.volume = n.velocity * mf.channelVolume[n.channel] / 100;
                             if (v.volume > 160) v.volume = 160;
                             // Convert tick duration to samples
                             float secPerTick = 60.0f / (mf.tempo * mf.ticksPerBeat);
                             v.remaining = (int)(n.duration * secPerTick * kAudioSampleRate);
                             if (v.remaining < 100) v.remaining = 100;
+                            // Drums: remaining is max of duration and sample length
+                            if (isDrum && v.remaining < smpLen)
+                                v.remaining = smpLen;
                             v.active = true;
                         }
                     }
@@ -16552,23 +16923,46 @@ void FrameTick(float dt)
             ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.4f, 1.0f), "Channel -> Sample Bank");
             ImGui::Separator();
 
-            // Detect which channels are actually used
-            bool channelUsed[16] = {};
-            for (auto& t : mf.tracks)
-                for (auto& n : t.notes)
-                    channelUsed[n.channel] = true;
+            // Channel colors (same as piano roll)
+            static const uint32_t chListColors[16] = {
+                0xFF4488FF, 0xFFFF8844, 0xFF44FF88, 0xFFFF44AA,
+                0xFFAAAA44, 0xFF44AAAA, 0xFFAA44FF, 0xFFFFAA44,
+                0xFF8888FF, 0xFFFF8888, 0xFF88FF88, 0xFFFF88FF,
+                0xFFFFFF44, 0xFF44FFFF, 0xFFCC88CC, 0xFFCCCC88
+            };
 
             for (int ch = 0; ch < 16; ch++) {
-                if (!channelUsed[ch]) continue;
-                char chLabel[32];
-                snprintf(chLabel, sizeof(chLabel), "Ch %2d", ch + 1);
+                if (!mf.channelUsed[ch]) continue;
+
+                // Color dot
+                uint32_t col = chListColors[ch];
+                ImVec4 colV((col & 0xFF) / 255.0f, ((col >> 8) & 0xFF) / 255.0f,
+                            ((col >> 16) & 0xFF) / 255.0f, 1.0f);
+                ImGui::PushStyleColor(ImGuiCol_Text, mf.channelMuted[ch] ? ImVec4(0.4f, 0.4f, 0.4f, 1.0f) : colV);
+                ImGui::Bullet();
+                ImGui::PopStyleColor();
+                ImGui::SameLine();
+
+                // Mute toggle
+                char muteId[32];
+                snprintf(muteId, sizeof(muteId), "%s##mute%d", mf.channelMuted[ch] ? "M" : " ", ch);
+                if (ImGui::SmallButton(muteId))
+                    mf.channelMuted[ch] = !mf.channelMuted[ch];
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(mf.channelMuted[ch] ? "Unmute" : "Mute");
+                ImGui::SameLine();
+
+                // Channel name (dimmed if muted)
+                if (mf.channelMuted[ch]) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
+                ImGui::Text("%s", mf.channelName[ch]);
+                if (mf.channelMuted[ch]) ImGui::PopStyleColor();
+                ImGui::SameLine();
+
+                // Sample bank dropdown
                 ImGui::PushItemWidth(Scaled(140));
-                // Dropdown of sample bank
                 const char* preview = (mf.channelBank[ch] >= 0 && mf.channelBank[ch] < (int)sSoundBank.size())
                     ? sSoundBank[mf.channelBank[ch]].name : "None";
                 char comboId[32];
                 snprintf(comboId, sizeof(comboId), "##ch%d", ch);
-                ImGui::Text("%s", chLabel); ImGui::SameLine();
                 if (ImGui::BeginCombo(comboId, preview)) {
                     for (int si = 0; si < (int)sSoundBank.size(); si++) {
                         char itemLabel[48];
@@ -16581,6 +16975,14 @@ void FrameTick(float dt)
                     }
                     ImGui::EndCombo();
                 }
+                ImGui::PopItemWidth();
+
+                // Volume slider
+                ImGui::SameLine();
+                ImGui::PushItemWidth(Scaled(60));
+                char volId[32];
+                snprintf(volId, sizeof(volId), "##vol%d", ch);
+                ImGui::SliderInt(volId, &mf.channelVolume[ch], 0, 100, "%d%%");
                 ImGui::PopItemWidth();
             }
 
@@ -16612,8 +17014,8 @@ void FrameTick(float dt)
                 dl->AddLine(ImVec2(rp.x, y), ImVec2(rp.x + rollW, y), 0xFF1A1A1A);
             }
 
-            // Channel colors
-            uint32_t chColors[] = {
+            // Channel colors (shared with channel list)
+            static const uint32_t chColors[16] = {
                 0xFF4488FF, 0xFFFF8844, 0xFF44FF88, 0xFFFF44AA,
                 0xFFAAAA44, 0xFF44AAAA, 0xFFAA44FF, 0xFFFFAA44,
                 0xFF8888FF, 0xFFFF8888, 0xFF88FF88, 0xFFFF88FF,
@@ -16629,8 +17031,8 @@ void FrameTick(float dt)
                     float y1 = y0 + noteH;
                     if (x1 - x0 < 1) x1 = x0 + 1;
                     uint32_t col = chColors[n.channel & 15];
-                    // Dim alpha based on velocity
-                    int alpha = 100 + n.velocity;
+                    // Dim alpha based on velocity; further dim if muted
+                    int alpha = mf.channelMuted[n.channel] ? 30 : (100 + n.velocity);
                     col = (col & 0x00FFFFFF) | ((alpha & 0xFF) << 24);
                     dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), col);
                 }
@@ -16644,18 +17046,45 @@ void FrameTick(float dt)
 
             ImGui::Dummy(ImVec2(rollW, rollH));
 
-            // Timeline progress bar
+            // Timeline progress bar (draggable)
             {
                 float progress = 0.0f;
                 if (sMidiPlaying && sMidiPlayIdx == sSelectedMidi && maxTick > 0)
                     progress = (float)sMidiPlayTick / maxTick;
                 float barW = rollW;
-                float barH = Scaled(12);
+                float barH = Scaled(16);
                 ImVec2 bp = ImGui::GetCursorScreenPos();
+
+                // Invisible button for drag interaction
+                ImGui::InvisibleButton("##timeline", ImVec2(barW, barH));
+                bool hovered = ImGui::IsItemHovered();
+                bool held = ImGui::IsItemActive();
+                if ((hovered || held) && ImGui::IsMouseDown(0) && maxTick > 0) {
+                    float mx = ImGui::GetMousePos().x - bp.x;
+                    float seekPct = mx / barW;
+                    if (seekPct < 0.0f) seekPct = 0.0f;
+                    if (seekPct > 1.0f) seekPct = 1.0f;
+                    double ticksPerSec = mf.ticksPerBeat * mf.tempo / 60.0;
+                    sMidiPlayTick = (int)(seekPct * maxTick);
+                    sMidiPlayTime = (double)sMidiPlayTick / ticksPerSec;
+                    progress = seekPct;
+                    // Kill all voices on seek to avoid lingering notes
+                    for (auto& v : sVoices) v.active = false;
+                    // Start playback if not already
+                    if (!sMidiPlaying) {
+                        if (!sAudioOpen) AudioInit();
+                        sMidiPlayIdx = sSelectedMidi;
+                        sMidiPlaying = true;
+                    }
+                }
+
                 dl->AddRectFilled(bp, ImVec2(bp.x + barW, bp.y + barH), 0xFF1A1A1A);
                 if (progress > 0.0f)
                     dl->AddRectFilled(bp, ImVec2(bp.x + barW * progress, bp.y + barH), 0xFF4488FF);
-                dl->AddRect(bp, ImVec2(bp.x + barW, bp.y + barH), 0xFF333333);
+                dl->AddRect(bp, ImVec2(bp.x + barW, bp.y + barH), hovered || held ? 0xFF5599FF : 0xFF333333);
+                // Playhead handle
+                float hx = bp.x + barW * progress;
+                dl->AddRectFilled(ImVec2(hx - 2, bp.y), ImVec2(hx + 2, bp.y + barH), 0xFFFFFFFF);
                 // Time label
                 double totalSec = (maxTick > 0 && mf.ticksPerBeat > 0 && mf.tempo > 0)
                     ? (double)maxTick / (mf.ticksPerBeat * mf.tempo / 60.0) : 0;
@@ -16667,7 +17096,6 @@ void FrameTick(float dt)
                 ImVec2 tsz = ImGui::CalcTextSize(timeBuf);
                 dl->AddText(ImVec2(bp.x + (barW - tsz.x) * 0.5f, bp.y + (barH - tsz.y) * 0.5f),
                     0xFFCCCCCC, timeBuf);
-                ImGui::Dummy(ImVec2(barW, barH));
                 ImGui::Spacing();
             }
 
