@@ -13,6 +13,7 @@
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#undef PlaySound
 #endif
 
 namespace fs = std::filesystem;
@@ -258,6 +259,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                             const std::vector<GBABlueprintInstanceExport>& bpInstances,
                             const std::vector<GBATmSceneExport>& tmScenes,
                             const std::vector<GBAHudElementExport>& hudElements,
+                            const std::vector<GBASoundSampleExport>& soundSamples,
+                            const std::vector<GBASoundInstanceExport>& soundInstances,
                             int startMode)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
@@ -2230,8 +2233,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    player_vy = " << velFixed << ";\n";
                     break;
                 }
+                case GBAScriptNodeType::PlaySound: {
+                    auto* sndData = findDataIn(action->id, 0);
+                    int sndId = sndData ? resolveInt(sndData) : 0;
+                    f << "    afn_play_sound(" << sndId << ");\n";
+                    break;
+                }
                 case GBAScriptNodeType::StopSound:
-                    f << "    REG_SOUNDCNT_H = 0;\n";
+                    f << "    afn_stop_sound();\n";
                     break;
                 case GBAScriptNodeType::SetScale: {
                     auto* objData = findDataIn(action->id, 0);
@@ -3653,8 +3662,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    player_vy = " << vel << ";\n";
                     break;
                 }
+                case GBAScriptNodeType::PlaySound: {
+                    auto* sndData = bpFindDataIn(action->id, 0);
+                    std::string sndId = sndData ? bpResolveInt(sndData) : "0";
+                    f << "    afn_play_sound(" << sndId << ");\n";
+                    break;
+                }
                 case GBAScriptNodeType::StopSound:
-                    f << "    REG_SOUNDCNT_H = 0;\n";
+                    f << "    afn_stop_sound();\n";
                     break;
                 case GBAScriptNodeType::SetScale: {
                     auto* objData = bpFindDataIn(action->id, 0);
@@ -4877,6 +4892,85 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "#define AFN_HAS_MESHES 1\n";
     }
 
+    // ---- Sound / DMA Audio Data ----
+    if (!soundSamples.empty()) {
+        f << "\n// ---- DMA Audio: PCM Samples ----\n";
+        f << "#define AFN_SOUND_SAMPLE_COUNT " << soundSamples.size() << "\n";
+        f << "#define AFN_SOUND_INSTANCE_COUNT " << soundInstances.size() << "\n\n";
+
+        // Emit each sample as a const s8 array
+        for (int i = 0; i < (int)soundSamples.size(); i++) {
+            auto& smp = soundSamples[i];
+            f << "static const s8 afn_pcm_" << i << "[] __attribute__((aligned(4))) = {\n    ";
+            for (int j = 0; j < (int)smp.data.size(); j++) {
+                f << (int)smp.data[j];
+                if (j < (int)smp.data.size() - 1) f << ",";
+                if ((j & 31) == 31) f << "\n    ";
+            }
+            f << "\n};\n";
+            f << "#define AFN_PCM_" << i << "_LEN " << smp.data.size() << "\n";
+            f << "#define AFN_PCM_" << i << "_RATE " << smp.sampleRate << "\n\n";
+        }
+
+        // Sample pointer + length table
+        f << "static const s8* const afn_pcm_ptrs[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    afn_pcm_" << i << ",\n";
+        f << "};\n";
+        f << "static const int afn_pcm_lens[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    AFN_PCM_" << i << "_LEN,\n";
+        f << "};\n";
+        f << "static const int afn_pcm_rates[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    AFN_PCM_" << i << "_RATE,\n";
+        f << "};\n\n";
+
+        // Note event struct type definition (must come before note arrays)
+        f << "typedef struct { int tick; u8 note; u8 vel; u8 smpIdx; u16 dur; } AfnSndNote;\n\n";
+
+        // Emit note sequences per instance
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            auto& inst = soundInstances[i];
+            if (inst.notes.empty()) continue;
+            f << "// Instance " << i << ": " << inst.name << "\n";
+            f << "static const AfnSndNote afn_snd_notes_" << i << "[] = {\n";
+            for (auto& n : inst.notes) {
+                f << "    {" << n.tick << "," << n.note << "," << n.velocity << "," << n.sampleIdx << "," << n.duration << "},\n";
+            }
+            f << "};\n";
+            f << "#define AFN_SND_" << i << "_NOTE_COUNT " << inst.notes.size() << "\n";
+            f << "#define AFN_SND_" << i << "_TEMPO " << inst.tempo << "\n";
+            f << "#define AFN_SND_" << i << "_TPB " << inst.ticksPerBeat << "\n\n";
+        }
+
+        // Instance note pointers + counts + ticks-per-frame table
+        f << "static const AfnSndNote* const afn_snd_note_ptrs[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            if (soundInstances[i].notes.empty())
+                f << "    0,\n";
+            else
+                f << "    afn_snd_notes_" << i << ",\n";
+        }
+        f << "};\n";
+
+        f << "static const int afn_snd_note_counts[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            f << "    " << soundInstances[i].notes.size() << ",\n";
+        }
+        f << "};\n";
+
+        f << "static const int afn_snd_tpf[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            int tpf = soundInstances[i].tempo * soundInstances[i].ticksPerBeat / 3600;
+            if (tpf < 1) tpf = 1;
+            f << "    " << tpf << ",\n";
+        }
+        f << "};\n\n";
+
+        f << "#define AFN_HAS_SOUND 1\n";
+    }
+
     f << "\n#endif // MAPDATA_H\n";
     f.close();
     return true;
@@ -4894,6 +4988,8 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
                 const std::vector<GBATmSceneExport>& tmScenes,
                 const std::vector<GBAHudElementExport>& hudElements,
+                const std::vector<GBASoundSampleExport>& soundSamples,
+                const std::vector<GBASoundInstanceExport>& soundInstances,
                 int startMode,
                 std::string& errorMsg)
 {
@@ -4910,7 +5006,7 @@ bool PackageGBA(const std::string& runtimeDir,
     }
 
     // --- Step 1: Generate mapdata.h with sprite/camera/asset/player data ---
-    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, script, blueprints, bpInstances, tmScenes, hudElements, startMode))
+    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, script, blueprints, bpInstances, tmScenes, hudElements, soundSamples, soundInstances, startMode))
     {
         errorMsg = "Failed to write mapdata.h";
         return false;

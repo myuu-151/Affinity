@@ -440,6 +440,7 @@ enum class VsNodeType : int {
     IsNear2D,       // gate: passes if player is adjacent to this blueprint's tilemap object
     IsFollowMoving, // gate: passes if follow object is currently moving
     SetFollowFacing,// set follow object's facing direction from follow state
+    SoundInstance,  // data node: select a sound instance by dropdown
     COUNT
 };
 
@@ -476,7 +477,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Change Scene",    0xFF3355AA, 1, 1, 1, 0, {"Scene (int)"}, {}, {} },
     { "Set Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot (int)", "Value"}, {}, {} },
     { "Add Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot (int)", "Amount"}, {}, {} },
-    { "Play Sound",      0xFF3355AA, 1, 1, 1, 0, {"Sound ID (int)"}, {}, {} },
+    { "Play Sound",      0xFF3355AA, 1, 1, 1, 0, {"Sound Instance"}, {}, {} },
     { "Wait",            0xFF3355AA, 1, 1, 1, 0, {"Frames (int)"}, {}, {} },
     { "Jump",            0xFF3355AA, 1, 1, 1, 0, {"Force (float)"}, {}, {} },
     { "Walk",            0xFF3355AA, 1, 1, 1, 0, {"Speed (int)"}, {}, {} },
@@ -723,6 +724,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Is Near 2D",     0xFF2266BB, 1, 1, 0, 0, {}, {}, {} },
     { "Is Follow Moving",0xFF2266BB, 1, 1, 0, 0, {}, {}, {} },
     { "Set Follow Facing",0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Sound Instance",  0xFF88AACC, 0, 0, 0, 1, {}, {}, {} },
 };
 
 struct VsNode {
@@ -842,6 +844,8 @@ struct DrumHit {
 struct EnvPoint {
     float time = 0;   // 0.0-1.0 normalized position
     float level = 1;  // 0.0-1.0 amplitude
+    bool operator==(const EnvPoint& o) const { return time == o.time && level == o.level; }
+    bool operator!=(const EnvPoint& o) const { return !(*this == o); }
 };
 
 struct SoundSample {
@@ -925,12 +929,21 @@ static std::vector<MidiFile> sMidiFiles;
 static int sSelectedSample = -1;
 static int sSelectedMidi = -1;
 
+// Per-sample overrides (waveform edits + envelope) stored per-instance
+struct SampleOverride {
+    int sampleIdx = -1;
+    std::vector<int8_t> data;       // edited PCM (empty = no waveform override)
+    std::vector<EnvPoint> envelope; // edited envelope (empty = no env override)
+    bool envEnabled = false;
+};
+
 // Sound instances — named slots referencing a MIDI + bank config for export
 struct SoundInstance {
     char name[48] = "Untitled";
     int midiIdx = -1;           // index into sMidiFiles (-1 = none)
     int channelBank[16] = {};   // per-channel sample bank override
     int volume = 100;           // master volume 0-100
+    std::vector<SampleOverride> overrides; // per-sample edits
 };
 static std::vector<SoundInstance> sSoundInstances;
 static int sSelectedInstance = -1;
@@ -1219,6 +1232,23 @@ static void InitBuiltInSamples()
     addWave("Square 50%", [](int i, int len) -> int8_t {
         return (i < len / 2) ? 96 : -96;
     }, 32, false);
+
+    // Pinna Lead (custom waveform + envelope from pinna2 project)
+    {
+        SoundSample s;
+        snprintf(s.name, sizeof(s.name), "Pinna Lead");
+        int8_t wave[] = {61,60,90,83,82,76,79,80,79,74,78,78,78,79,58,39,-70,-3,79,80,79,-3,-46,-38,-36,-36,-35,31,-29,-70,-126,-127};
+        s.data.assign(wave, wave + 32);
+        s.sampleRate = 16384;
+        s.loop = false;
+        s.builtIn = true;
+        s.envEnabled = true;
+        s.envelope.push_back({0.0f, 1.0f});
+        s.envelope.push_back({0.5367f, 1.0f});
+        s.envelope.push_back({0.9224f, 0.51f});
+        s.envelope.push_back({1.0f, 1.0f});
+        sSoundBank.push_back(std::move(s));
+    }
 
     // Square 25%
     addWave("Square 25%", [](int i, int len) -> int8_t {
@@ -1613,6 +1643,65 @@ static void InitBuiltInSamples()
         float v = sinf(p) + 0.5f*sinf(2*p) + 0.7f*sinf(3*p) + 0.1f*sinf(4*p) + 0.3f*sinf(5*p);
         return (int8_t)(v * 96.0f / 2.6f);
     }, 64, false);
+}
+
+// Store original (clean) sound bank state for reset
+static std::vector<std::vector<int8_t>> sCleanBankData;
+static std::vector<std::vector<EnvPoint>> sCleanBankEnv;
+static std::vector<bool> sCleanBankEnvEnabled;
+
+static void SnapshotCleanBank() {
+    sCleanBankData.resize(sSoundBank.size());
+    sCleanBankEnv.resize(sSoundBank.size());
+    sCleanBankEnvEnabled.resize(sSoundBank.size());
+    for (int i = 0; i < (int)sSoundBank.size(); i++) {
+        sCleanBankData[i] = sSoundBank[i].data;
+        sCleanBankEnv[i] = sSoundBank[i].envelope;
+        sCleanBankEnvEnabled[i] = sSoundBank[i].envEnabled;
+    }
+}
+
+static void ResetBankToClean() {
+    for (int i = 0; i < (int)sSoundBank.size() && i < (int)sCleanBankData.size(); i++) {
+        sSoundBank[i].data = sCleanBankData[i];
+        sSoundBank[i].envelope = sCleanBankEnv[i];
+        sSoundBank[i].envEnabled = sCleanBankEnvEnabled[i];
+    }
+    sSampleOriginal.clear();
+}
+
+// Save current edits from sound bank into the given instance
+static void SaveEditsToInstance(SoundInstance& inst) {
+    inst.overrides.clear();
+    for (int i = 0; i < (int)sSoundBank.size() && i < (int)sCleanBankData.size(); i++) {
+        bool dataChanged = (sSoundBank[i].data != sCleanBankData[i]);
+        bool envChanged = (sSoundBank[i].envelope != sCleanBankEnv[i]) ||
+                          (sSoundBank[i].envEnabled != sCleanBankEnvEnabled[i]);
+        if (dataChanged || envChanged) {
+            SampleOverride ov;
+            ov.sampleIdx = i;
+            if (dataChanged) ov.data = sSoundBank[i].data;
+            if (envChanged) {
+                ov.envelope = sSoundBank[i].envelope;
+                ov.envEnabled = sSoundBank[i].envEnabled;
+            }
+            inst.overrides.push_back(std::move(ov));
+        }
+    }
+}
+
+// Apply an instance's overrides onto the (clean) sound bank
+static void LoadInstanceOverrides(const SoundInstance& inst) {
+    ResetBankToClean();
+    for (auto& ov : inst.overrides) {
+        if (ov.sampleIdx < 0 || ov.sampleIdx >= (int)sSoundBank.size()) continue;
+        if (!ov.data.empty())
+            sSoundBank[ov.sampleIdx].data = ov.data;
+        if (!ov.envelope.empty()) {
+            sSoundBank[ov.sampleIdx].envelope = ov.envelope;
+            sSoundBank[ov.sampleIdx].envEnabled = ov.envEnabled;
+        }
+    }
 }
 
 // Parse a standard MIDI file (.mid)
@@ -3660,47 +3749,47 @@ static bool SaveProject(const std::string& path)
                 m.groupNodeId, m.pinType, m.pinIdx, m.innerNodeId, m.innerPinType, m.innerPinIdx);
     }
 
-    // Sound Instances
-    // Sound Bank (saves edited/custom samples with PCM data + envelope)
-    fprintf(f, "\n[SoundBank]\n");
-    fprintf(f, "count=%d\n", (int)sSoundBank.size());
-    for (int i = 0; i < (int)sSoundBank.size(); i++) {
-        const SoundSample& smp = sSoundBank[i];
-        fprintf(f, "smp_begin=%s\n", smp.name);
-        fprintf(f, "smpRate=%d\n", smp.sampleRate);
-        fprintf(f, "smpLoop=%d\n", smp.loop ? 1 : 0);
-        fprintf(f, "smpLoopStart=%d\n", smp.loopStart);
-        fprintf(f, "smpBuiltIn=%d\n", smp.builtIn ? 1 : 0);
-        fprintf(f, "smpDrumKit=%d\n", smp.isDrumKit ? 1 : 0);
-        fprintf(f, "smpEnvEnabled=%d\n", smp.envEnabled ? 1 : 0);
-        // Envelope points
-        if (!smp.envelope.empty()) {
-            fprintf(f, "smpEnvPts=%d", (int)smp.envelope.size());
-            for (auto& ep : smp.envelope)
-                fprintf(f, ",%.4f,%.4f", ep.time, ep.level);
-            fprintf(f, "\n");
-        }
-        // PCM data (base64-style: emit as comma-separated int8 values)
-        if (!smp.data.empty() && !smp.isDrumKit) {
-            fprintf(f, "smpDataLen=%d\n", (int)smp.data.size());
-            fprintf(f, "smpData=");
-            for (int di = 0; di < (int)smp.data.size(); di++) {
-                if (di > 0) fprintf(f, ",");
-                fprintf(f, "%d", (int)smp.data[di]);
-            }
-            fprintf(f, "\n");
-        }
-        fprintf(f, "smp_end\n");
-    }
+    // Save current instance edits before writing
+    if (sSelectedInstance >= 0 && sSelectedInstance < (int)sSoundInstances.size())
+        SaveEditsToInstance(sSoundInstances[sSelectedInstance]);
 
+    // Sound Instances (with per-instance sample overrides)
     fprintf(f, "\n[SoundInstances]\n");
     fprintf(f, "count=%d\n", (int)sSoundInstances.size());
     for (int i = 0; i < (int)sSoundInstances.size(); i++) {
         const SoundInstance& si = sSoundInstances[i];
-        fprintf(f, "inst=%s|%d|%d", si.name, si.midiIdx, si.volume);
-        for (int ch = 0; ch < 16; ch++)
-            fprintf(f, ",%d", si.channelBank[ch]);
+        fprintf(f, "inst_begin=%s\n", si.name);
+        fprintf(f, "instMidi=%d\n", si.midiIdx);
+        fprintf(f, "instVol=%d\n", si.volume);
+        fprintf(f, "instBanks=");
+        for (int ch = 0; ch < 16; ch++) {
+            if (ch > 0) fprintf(f, ",");
+            fprintf(f, "%d", si.channelBank[ch]);
+        }
         fprintf(f, "\n");
+        // Per-sample overrides
+        fprintf(f, "instOverrides=%d\n", (int)si.overrides.size());
+        for (auto& ov : si.overrides) {
+            fprintf(f, "ov_begin=%d\n", ov.sampleIdx);
+            fprintf(f, "ovEnvEnabled=%d\n", ov.envEnabled ? 1 : 0);
+            if (!ov.envelope.empty()) {
+                fprintf(f, "ovEnvPts=%d", (int)ov.envelope.size());
+                for (auto& ep : ov.envelope)
+                    fprintf(f, ",%.4f,%.4f", ep.time, ep.level);
+                fprintf(f, "\n");
+            }
+            if (!ov.data.empty()) {
+                fprintf(f, "ovDataLen=%d\n", (int)ov.data.size());
+                fprintf(f, "ovData=");
+                for (int di = 0; di < (int)ov.data.size(); di++) {
+                    if (di > 0) fprintf(f, ",");
+                    fprintf(f, "%d", (int)ov.data[di]);
+                }
+                fprintf(f, "\n");
+            }
+            fprintf(f, "ov_end\n");
+        }
+        fprintf(f, "inst_end\n");
     }
 
     // MIDI Files (embedded note data)
@@ -5009,50 +5098,49 @@ static bool LoadProject(const std::string& path)
         }
         else if (strcmp(section, "SoundBank") == 0)
         {
-            static SoundSample* curSmp = nullptr;
+            // Legacy format — match by name and load edits into the sound bank
+            static int legacySmpIdx = -1; // index into sSoundBank (matched by name)
+            static char legacySmpName[32] = {};
             if (strncmp(line, "count=", 6) == 0) {
-                sSoundBank.clear();
-                curSmp = nullptr;
+                legacySmpIdx = -1;
             }
             else if (strncmp(line, "smp_begin=", 10) == 0) {
-                sSoundBank.push_back(SoundSample{});
-                curSmp = &sSoundBank.back();
-                strncpy(curSmp->name, line + 10, sizeof(curSmp->name) - 1);
+                strncpy(legacySmpName, line + 10, sizeof(legacySmpName) - 1);
+                legacySmpName[31] = 0;
+                // Find matching sample in current bank by name
+                legacySmpIdx = -1;
+                for (int si = 0; si < (int)sSoundBank.size(); si++) {
+                    if (strcmp(sSoundBank[si].name, legacySmpName) == 0) {
+                        legacySmpIdx = si;
+                        break;
+                    }
+                }
             }
             else if (strcmp(line, "smp_end") == 0) {
-                curSmp = nullptr;
+                legacySmpIdx = -1;
             }
-            else if (curSmp) {
-                if (sscanf(line, "smpRate=%d", &ival) == 1) curSmp->sampleRate = ival;
-                else if (sscanf(line, "smpLoop=%d", &ival) == 1) curSmp->loop = (ival != 0);
-                else if (sscanf(line, "smpLoopStart=%d", &ival) == 1) curSmp->loopStart = ival;
-                else if (sscanf(line, "smpBuiltIn=%d", &ival) == 1) curSmp->builtIn = (ival != 0);
-                else if (sscanf(line, "smpDrumKit=%d", &ival) == 1) curSmp->isDrumKit = (ival != 0);
-                else if (sscanf(line, "smpEnvEnabled=%d", &ival) == 1) curSmp->envEnabled = (ival != 0);
+            else if (legacySmpIdx >= 0 && legacySmpIdx < (int)sSoundBank.size()) {
+                SoundSample& smp = sSoundBank[legacySmpIdx];
+                if (sscanf(line, "smpEnvEnabled=%d", &ival) == 1) smp.envEnabled = (ival != 0);
                 else if (strncmp(line, "smpEnvPts=", 10) == 0) {
-                    curSmp->envelope.clear();
+                    smp.envelope.clear();
                     int numPts = 0;
                     const char* p = line + 10;
                     sscanf(p, "%d", &numPts);
                     for (int ei = 0; ei < numPts; ei++) {
-                        p = strchr(p, ',');
-                        if (!p) break; p++;
+                        p = strchr(p, ','); if (!p) break; p++;
                         float t, l;
                         if (sscanf(p, "%f,%f", &t, &l) == 2)
-                            curSmp->envelope.push_back({t, l});
-                        p = strchr(p, ',');
-                        if (!p) break; p++;
+                            smp.envelope.push_back({t, l});
+                        p = strchr(p, ','); if (!p) break; p++;
                     }
                 }
-                else if (sscanf(line, "smpDataLen=%d", &ival) == 1) {
-                    curSmp->data.reserve(ival);
-                }
                 else if (strncmp(line, "smpData=", 8) == 0) {
-                    curSmp->data.clear();
+                    smp.data.clear();
                     const char* p = line + 8;
                     while (*p) {
                         int v = atoi(p);
-                        curSmp->data.push_back((int8_t)v);
+                        smp.data.push_back((int8_t)v);
                         while (*p && *p != ',') p++;
                         if (*p == ',') p++;
                     }
@@ -5061,12 +5149,79 @@ static bool LoadProject(const std::string& path)
         }
         else if (strcmp(section, "SoundInstances") == 0)
         {
+            static SoundInstance* curInst = nullptr;
+            static SampleOverride* curOv = nullptr;
             if (strncmp(line, "count=", 6) == 0) {
                 sSoundInstances.clear();
+                curInst = nullptr;
+                curOv = nullptr;
             }
+            // New format
+            else if (strncmp(line, "inst_begin=", 11) == 0) {
+                sSoundInstances.push_back(SoundInstance{});
+                curInst = &sSoundInstances.back();
+                strncpy(curInst->name, line + 11, sizeof(curInst->name) - 1);
+                curOv = nullptr;
+            }
+            else if (strcmp(line, "inst_end") == 0) {
+                curInst = nullptr;
+                curOv = nullptr;
+            }
+            else if (curInst && strncmp(line, "ov_begin=", 9) == 0) {
+                SampleOverride ov;
+                ov.sampleIdx = atoi(line + 9);
+                curInst->overrides.push_back(ov);
+                curOv = &curInst->overrides.back();
+            }
+            else if (strcmp(line, "ov_end") == 0) {
+                curOv = nullptr;
+            }
+            else if (curOv) {
+                if (sscanf(line, "ovEnvEnabled=%d", &ival) == 1) curOv->envEnabled = (ival != 0);
+                else if (strncmp(line, "ovEnvPts=", 9) == 0) {
+                    curOv->envelope.clear();
+                    int numPts = 0;
+                    const char* p = line + 9;
+                    sscanf(p, "%d", &numPts);
+                    for (int ei = 0; ei < numPts; ei++) {
+                        p = strchr(p, ','); if (!p) break; p++;
+                        float t, l;
+                        if (sscanf(p, "%f,%f", &t, &l) == 2)
+                            curOv->envelope.push_back({t, l});
+                        p = strchr(p, ','); if (!p) break; p++;
+                    }
+                }
+                else if (sscanf(line, "ovDataLen=%d", &ival) == 1) {
+                    curOv->data.reserve(ival);
+                }
+                else if (strncmp(line, "ovData=", 7) == 0) {
+                    curOv->data.clear();
+                    const char* p = line + 7;
+                    while (*p) {
+                        int v = atoi(p);
+                        curOv->data.push_back((int8_t)v);
+                        while (*p && *p != ',') p++;
+                        if (*p == ',') p++;
+                    }
+                }
+            }
+            else if (curInst) {
+                if (sscanf(line, "instMidi=%d", &ival) == 1) curInst->midiIdx = ival;
+                else if (sscanf(line, "instVol=%d", &ival) == 1) curInst->volume = ival;
+                else if (strncmp(line, "instBanks=", 10) == 0) {
+                    sscanf(line + 10, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                        &curInst->channelBank[0], &curInst->channelBank[1], &curInst->channelBank[2], &curInst->channelBank[3],
+                        &curInst->channelBank[4], &curInst->channelBank[5], &curInst->channelBank[6], &curInst->channelBank[7],
+                        &curInst->channelBank[8], &curInst->channelBank[9], &curInst->channelBank[10], &curInst->channelBank[11],
+                        &curInst->channelBank[12], &curInst->channelBank[13], &curInst->channelBank[14], &curInst->channelBank[15]);
+                }
+                else if (sscanf(line, "instOverrides=%d", &ival) == 1) {
+                    curInst->overrides.reserve(ival);
+                }
+            }
+            // Legacy format (old inst= lines)
             else if (strncmp(line, "inst=", 5) == 0) {
                 SoundInstance si;
-                // Format: name|midiIdx|volume,ch0,ch1,...,ch15
                 char nameBuf[48] = {};
                 const char* p = line + 5;
                 const char* pipe1 = strchr(p, '|');
@@ -5079,7 +5234,6 @@ static bool LoadProject(const std::string& path)
                     const char* pipe2 = strchr(pipe1 + 1, '|');
                     if (pipe2) {
                         si.midiIdx = atoi(pipe1 + 1);
-                        // volume,ch0,ch1,...
                         const char* vp = pipe2 + 1;
                         sscanf(vp, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
                             &si.volume,
@@ -5253,6 +5407,12 @@ static bool LoadProject(const std::string& path)
     if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
         LoadMapSceneState(sMapScenes[sMapSelectedScene]);
 
+    // Load first sound instance overrides (if any)
+    if (!sSoundInstances.empty()) {
+        sSelectedInstance = 0;
+        LoadInstanceOverrides(sSoundInstances[0]);
+    }
+
     fclose(f);
     sProjectPath = path;
     sProjectDirty = false;
@@ -5334,6 +5494,7 @@ void FrameInit()
     }
 
     InitBuiltInSamples();
+    SnapshotCleanBank();
 
     sInitialized = true;
 }
@@ -9975,8 +10136,69 @@ void FrameTick(float dt)
                 // Determine start mode from active tab: Tilemap=1, 3D/default=0, legacy=2
                 int exportStartMode = (sActiveTab == EditorTab::Tilemap) ? 1 : 0;
 
+                // --- Gather sound data for export ---
+                std::vector<GBASoundSampleExport> exportSoundSamples;
+                std::vector<GBASoundInstanceExport> exportSoundInstances;
+                {
+                    // Collect all samples used by any sound instance
+                    std::set<int> usedSamples;
+                    for (auto& inst : sSoundInstances) {
+                        if (inst.midiIdx < 0 || inst.midiIdx >= (int)sMidiFiles.size()) continue;
+                        auto& midi = sMidiFiles[inst.midiIdx];
+                        for (int ch = 0; ch < 16; ch++) {
+                            if (midi.channelUsed[ch])
+                                usedSamples.insert(inst.channelBank[ch]);
+                        }
+                    }
+                    // Build sample export list with index remapping
+                    std::map<int, int> sampleRemap; // old bank idx -> export idx
+                    for (int idx : usedSamples) {
+                        if (idx < 0 || idx >= (int)sSoundBank.size()) continue;
+                        int exportIdx = (int)exportSoundSamples.size();
+                        sampleRemap[idx] = exportIdx;
+                        GBASoundSampleExport se;
+                        se.name = sSoundBank[idx].name;
+                        se.data = sSoundBank[idx].data;
+                        se.sampleRate = sSoundBank[idx].sampleRate;
+                        exportSoundSamples.push_back(std::move(se));
+                    }
+                    // Build instance exports
+                    for (int i = 0; i < (int)sSoundInstances.size(); i++) {
+                        auto& inst = sSoundInstances[i];
+                        if (inst.midiIdx < 0 || inst.midiIdx >= (int)sMidiFiles.size()) continue;
+                        auto& midi = sMidiFiles[inst.midiIdx];
+                        GBASoundInstanceExport ie;
+                        ie.name = inst.name;
+                        ie.ticksPerBeat = midi.ticksPerBeat;
+                        ie.tempo = midi.tempo;
+                        // Merge all tracks into flat note list
+                        for (auto& track : midi.tracks) {
+                            for (auto& n : track.notes) {
+                                GBASoundNoteExport ne;
+                                ne.tick = n.tick;
+                                ne.channel = n.channel;
+                                ne.note = n.note;
+                                ne.velocity = n.velocity;
+                                ne.duration = n.duration;
+                                int bankIdx = inst.channelBank[n.channel];
+                                auto it = sampleRemap.find(bankIdx);
+                                ne.sampleIdx = (it != sampleRemap.end()) ? it->second : 0;
+                                ie.notes.push_back(ne);
+                            }
+                        }
+                        // Sort by tick
+                        std::sort(ie.notes.begin(), ie.notes.end(),
+                            [](const GBASoundNoteExport& a, const GBASoundNoteExport& b) { return a.tick < b.tick; });
+                        // Record sample indices used
+                        std::set<int> instSamples;
+                        for (auto& n : ie.notes) instSamples.insert(n.sampleIdx);
+                        for (int si : instSamples) ie.sampleIndices.push_back(si);
+                        exportSoundInstances.push_back(std::move(ie));
+                    }
+                }
+
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                             exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportStartMode, target]() {
+                             exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, target]() {
                     std::string err;
                     bool ok;
                     if (target == BuildTarget::NDS)
@@ -9984,7 +10206,7 @@ void FrameTick(float dt)
                                         exportMeshes, exportOrbitDist, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                                        exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportStartMode, err);
+                                        exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
@@ -11604,15 +11826,17 @@ void FrameTick(float dt)
         // ---- Expose as Parameter helpers ----
         auto isDataNodeType = [](VsNodeType t) {
             return t == VsNodeType::Integer || t == VsNodeType::Float ||
-                   t == VsNodeType::Key || t == VsNodeType::Direction || t == VsNodeType::Animation;
+                   t == VsNodeType::Key || t == VsNodeType::Direction || t == VsNodeType::Animation ||
+                   t == VsNodeType::SoundInstance;
         };
         auto dataTypeFromNode = [](VsNodeType t) -> int {
             switch (t) {
-                case VsNodeType::Integer:   return 0;
-                case VsNodeType::Float:     return 1;
-                case VsNodeType::Key:       return 2;
-                case VsNodeType::Direction: return 3;
-                case VsNodeType::Animation: return 4;
+                case VsNodeType::Integer:       return 0;
+                case VsNodeType::Float:         return 1;
+                case VsNodeType::Key:           return 2;
+                case VsNodeType::Direction:     return 3;
+                case VsNodeType::Animation:     return 4;
+                case VsNodeType::SoundInstance: return 0; // outputs int (instance index)
                 default: return 0;
             }
         };
@@ -11895,6 +12119,13 @@ void FrameTick(float dt)
                     if (si >= 0 && si < (int)sSpriteAssets.size() &&
                         ai >= 0 && ai < (int)sSpriteAssets[si].anims.size())
                         sub = sSpriteAssets[si].anims[ai].name.c_str();
+                    break;
+                }
+                case VsNodeType::SoundInstance: {
+                    int idx = n.paramInt[0];
+                    if (idx >= 0 && idx < (int)sSoundInstances.size())
+                        sub = sSoundInstances[idx].name;
+                    else { snprintf(subBuf, sizeof(subBuf), "[%d]", idx); sub = subBuf; }
                     break;
                 }
                 case VsNodeType::ChangeScene: {
@@ -12933,6 +13164,7 @@ void FrameTick(float dt)
                 case VsNodeType::Direction:     desc = "Outputs a direction (Left, Right, Up, Down)."; break;
                 case VsNodeType::Animation:     desc = "Outputs an animation index."; break;
                 case VsNodeType::Float:         desc = "Outputs a constant float value."; break;
+                case VsNodeType::SoundInstance: desc = "Outputs a sound instance index for PlaySound."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -13904,9 +14136,10 @@ void FrameTick(float dt)
                     editorCode =
                         "// Stop all sound channels";
                     setActionFunc(infoNode, "_stop_sound",
-                        "    REG_SOUNDCNT_H = 0;\n"
+                        "    afn_stop_sound();\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // Direct GBA hardware register write; silences DMA sound channels");
+                        "    // snd_seq_active = -1;\n"
+                        "    // All voices deactivated, DMA continues silent");
                     break;
                 case VsNodeType::AddMath:
                     editorCode = "// A + B";
@@ -15627,6 +15860,13 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_anim", body);
                     break;
                 }
+                case VsNodeType::SoundInstance: {
+                    editorCode = "// Sound instance index";
+                    char body[128];
+                    snprintf(body, sizeof(body), "    return %d; // sound instance", infoNode.paramInt[0]);
+                    setActionFunc(infoNode, "_snd_inst", body);
+                    break;
+                }
                 case VsNodeType::Object: {
                     editorCode = "// Constant object/sprite index";
                     char body[128];
@@ -15663,11 +15903,15 @@ void FrameTick(float dt)
                     break;
                 case VsNodeType::PlaySound:
                     editorCode =
-                        "// Trigger sound effect\n"
-                        "// (not yet implemented in editor)";
+                        "// Trigger sound instance playback via DMA audio";
                     setActionFunc(infoNode, "_play_sound",
-                        "    int soundId = findDataIn(0)->paramInt[0];\n"
-                        "    // play_sound(soundId);");
+                        "    afn_play_sound(instanceId);\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // snd_seq_active = instanceId;\n"
+                        "    // snd_seq_tick = 0; snd_seq_next = 0;\n"
+                        "    // Each frame: afn_sound_tick() advances sequence,\n"
+                        "    //   triggers afn_trigger_sample() for each note,\n"
+                        "    //   afn_sound_mix() renders 4-voice PCM to DMA buffer");
                     break;
                 case VsNodeType::Wait:
                     editorCode =
@@ -16141,6 +16385,7 @@ void FrameTick(float dt)
                     case VsNodeType::Key:           suffix = "_key"; break;
                     case VsNodeType::Direction:     suffix = "_dir"; break;
                     case VsNodeType::Animation:     suffix = "_anim"; break;
+                    case VsNodeType::SoundInstance: suffix = "_snd_inst"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
                     case VsNodeType::Branch:        suffix = "_branch"; break;
                     case VsNodeType::CompareVar:    suffix = "_compare_var"; break;
@@ -16838,7 +17083,7 @@ void FrameTick(float dt)
         // Properties panel overlay — as child window inside canvas (data nodes only)
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
-            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt) {
+            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt || n.type == VsNodeType::SoundInstance) {
             const auto& def = sVsNodeDefs[(int)n.type];
             float propW = 260, propH = 180;
             float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -16919,6 +17164,25 @@ void FrameTick(float dt)
                         }
                     } else {
                         ImGui::Text("(no animations)");
+                    }
+                }
+                break;
+            }
+            case VsNodeType::SoundInstance: {
+                ImGui::Text("Sound Instance");
+                if (sSoundInstances.empty()) {
+                    ImGui::Text("(no sound instances)");
+                } else {
+                    const char* preview = (n.paramInt[0] >= 0 && n.paramInt[0] < (int)sSoundInstances.size())
+                        ? sSoundInstances[n.paramInt[0]].name : "None";
+                    if (ImGui::BeginCombo("##SndInst", preview)) {
+                        for (int si = 0; si < (int)sSoundInstances.size(); si++) {
+                            bool sel = (si == n.paramInt[0]);
+                            if (ImGui::Selectable(sSoundInstances[si].name, sel))
+                                n.paramInt[0] = si;
+                            if (sel) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
                     }
                 }
                 break;
@@ -17410,6 +17674,21 @@ void FrameTick(float dt)
                 sProjectDirty = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Draw waveform | LMB drag to sculpt");
+            // Smooth button — averages adjacent samples to round off edges
+            if (ImGui::Button("Smooth##smp", ImVec2(Scaled(55), 0)) && !s.data.empty()) {
+                if (sSampleOriginal.find(sSelectedSample) == sSampleOriginal.end())
+                    sSampleOriginal[sSelectedSample] = s.data;
+                int n = (int)s.data.size();
+                std::vector<int8_t> smoothed(n);
+                for (int si = 0; si < n; si++) {
+                    int prev = (si - 1 + n) % n;
+                    int next = (si + 1) % n;
+                    smoothed[si] = (int8_t)(((int)s.data[prev] + (int)s.data[si] * 2 + (int)s.data[next]) / 4);
+                }
+                s.data = std::move(smoothed);
+                sProjectDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Smooth waveform (click multiple times for more)");
 
             // Envelope shaper
             ImGui::Checkbox("Envelope##smp", &s.envEnabled);
@@ -17548,10 +17827,14 @@ void FrameTick(float dt)
 
         // Add / Delete buttons
         if (ImGui::Button("+##addinst", ImVec2(Scaled(24), 0))) {
+            // Save current instance edits before switching
+            if (sSelectedInstance >= 0 && sSelectedInstance < (int)sSoundInstances.size())
+                SaveEditsToInstance(sSoundInstances[sSelectedInstance]);
             SoundInstance inst;
             snprintf(inst.name, sizeof(inst.name), "Sound %d", (int)sSoundInstances.size());
             sSoundInstances.push_back(inst);
             sSelectedInstance = (int)sSoundInstances.size() - 1;
+            ResetBankToClean(); // new instance starts with clean bank
             sProjectDirty = true;
         }
         ImGui::SameLine();
@@ -17559,6 +17842,11 @@ void FrameTick(float dt)
             sSoundInstances.erase(sSoundInstances.begin() + sSelectedInstance);
             if (sSelectedInstance >= (int)sSoundInstances.size())
                 sSelectedInstance = (int)sSoundInstances.size() - 1;
+            // Load new selection's overrides (or reset if none)
+            if (sSelectedInstance >= 0)
+                LoadInstanceOverrides(sSoundInstances[sSelectedInstance]);
+            else
+                ResetBankToClean();
             sProjectDirty = true;
         }
 
@@ -17573,8 +17861,13 @@ void FrameTick(float dt)
                 char label[64];
                 snprintf(label, sizeof(label), "[%d] %s", i, sSoundInstances[i].name);
                 bool sel = (sSelectedInstance == i);
-                if (ImGui::Selectable(label, sel))
+                if (ImGui::Selectable(label, sel)) {
+                    // Save current instance before switching
+                    if (sSelectedInstance >= 0 && sSelectedInstance < (int)sSoundInstances.size())
+                        SaveEditsToInstance(sSoundInstances[sSelectedInstance]);
                     sSelectedInstance = i;
+                    LoadInstanceOverrides(sSoundInstances[i]);
+                }
             }
             ImGui::EndChild();
         }

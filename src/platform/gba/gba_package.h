@@ -340,6 +340,7 @@ enum class GBAScriptNodeType : int {
     IsNear2D,
     IsFollowMoving,
     SetFollowFacing,
+    SoundInstance,
     COUNT
 };
 
@@ -453,6 +454,32 @@ struct GBAHudElementExport {
     int layerPieces, layerSprites, layerText, layerCursor;
 };
 
+// Sound export: a single PCM sample (8-bit signed, 16384 Hz)
+struct GBASoundSampleExport {
+    std::string name;
+    std::vector<int8_t> data;
+    int sampleRate = 16384;
+};
+
+// Sound export: a note event in a sequence
+struct GBASoundNoteExport {
+    int tick;       // absolute tick position
+    int channel;    // channel 0-15
+    int note;       // MIDI note 0-127
+    int velocity;   // 0-127
+    int duration;   // ticks
+    int sampleIdx;  // index into exported sample array
+};
+
+// Sound export: a complete sound instance (sequence + sample refs)
+struct GBASoundInstanceExport {
+    std::string name;
+    int ticksPerBeat = 480;
+    int tempo = 120;
+    std::vector<GBASoundNoteExport> notes; // all notes merged
+    std::vector<int> sampleIndices;        // which samples this instance uses
+};
+
 // Package the current map into a .gba ROM.
 // runtimeDir: path to gba_runtime/ directory
 // outputPath: where to write the final .gba
@@ -469,6 +496,8 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
                 const std::vector<GBATmSceneExport>& tmScenes,
                 const std::vector<GBAHudElementExport>& hudElements,
+                const std::vector<GBASoundSampleExport>& soundSamples,
+                const std::vector<GBASoundInstanceExport>& soundInstances,
                 int startMode,
                 std::string& errorMsg);
 
