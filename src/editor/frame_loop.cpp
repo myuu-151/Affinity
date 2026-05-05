@@ -10160,7 +10160,12 @@ void FrameTick(float dt)
                         GBASoundSampleExport se;
                         se.name = sSoundBank[idx].name;
                         se.data = sSoundBank[idx].data;
-                        se.sampleRate = sSoundBank[idx].sampleRate;
+                        // Single-cycle waveforms (≤64 samples): tune so note 60 = middle C (262 Hz)
+                        // rate = length * 262 → baseInc gives exactly 262 Hz at note 60
+                        if ((int)se.data.size() <= 64)
+                            se.sampleRate = (int)se.data.size() * 262;
+                        else
+                            se.sampleRate = sSoundBank[idx].sampleRate;
                         exportSoundSamples.push_back(std::move(se));
                     }
                     // Build instance exports
