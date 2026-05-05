@@ -87,10 +87,9 @@ static void afn_stop_sound(void);
 // ---------------------------------------------------------------------------
 #ifdef AFN_HAS_SOUND
 
-#define SND_BUF_SIZE 304   // samples per VBlank (16384/~59.7 ≈ 274, +10% margin)
+#define SND_BUF_SIZE 304
 #define SND_MAX_VOICES 4
 
-// Double buffer: DMA plays from one half while we mix into the other
 static s8 snd_buf[2][SND_BUF_SIZE] __attribute__((aligned(4)));
 static int snd_cur_buf = 0;
 
@@ -121,9 +120,11 @@ static void afn_sound_init(void) {
     }
     REG_SNDSTAT = SSTAT_ENABLE;
     REG_SNDDSCNT = SDS_A100 | SDS_AL | SDS_AR | SDS_ATMR0 | SDS_ARESET;
+    // Timer 0: sample rate clock (18157 Hz — standard GBA rate, 304 samples/frame exact)
     REG_TM0CNT_H = 0;
-    REG_TM0CNT_L = 65536 - 1024;
+    REG_TM0CNT_L = 65536 - 924;
     REG_TM0CNT_H = TM_ENABLE;
+    // Start DMA on buffer 0 (silence)
     snd_cur_buf = 0;
     REG_DMA1CNT = 0;
     REG_DMA1SAD = (u32)snd_buf[0];
@@ -144,19 +145,18 @@ static void afn_stop_sound(void) {
         snd_voices[i].active = 0;
 }
 
-// Simple mixer: direct to s8, no 16-bit accum, no envelope
+// Simple VBlank-driven mixer
 static void afn_sound_mix(void) {
     if (!snd_initialized) return;
 
-    // Swap buffers: stop DMA, re-point to finished buffer, restart
-    int play = snd_cur_buf;
+    // Swap: DMA plays the buffer we just mixed, we mix into the other
     snd_cur_buf ^= 1;
     REG_DMA1CNT = 0;
-    REG_DMA1SAD = (u32)snd_buf[play];
+    REG_DMA1SAD = (u32)snd_buf[snd_cur_buf ^ 1];
     REG_DMA1DAD = (u32)&REG_FIFO_A;
     REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
 
-    // Mix into idle buffer (snd_cur_buf is the one NOT playing)
+    // Clear and mix into current buffer (will play next frame)
     s8* buf = snd_buf[snd_cur_buf];
     u32* b32 = (u32*)buf;
     for (int i = 0; i < SND_BUF_SIZE / 4; i++) b32[i] = 0;
@@ -165,18 +165,23 @@ static void afn_sound_mix(void) {
         SndVoice* vc = &snd_voices[v];
         if (!vc->active) continue;
         int n = vc->remaining < SND_BUF_SIZE ? vc->remaining : SND_BUF_SIZE;
+        const s8* wdata = vc->data;
+        int pos = vc->pos;
+        int inc = vc->inc;
+        int vol = vc->vol;
+        int loopLen = vc->loopLen;
         for (int i = 0; i < n; i++) {
-            int s = (int)vc->data[vc->pos >> 12];
-            // Attenuate: sample * vol / 128, then >> 2 for headroom
-            s = (s * vc->vol) >> 9;
+            int s = (int)wdata[pos >> 12];
+            s = (s * vol) >> 9;
             int m = (int)buf[i] + s;
             if (m > 127) m = 127;
             if (m < -128) m = -128;
             buf[i] = (s8)m;
-            vc->pos += vc->inc;
-            if (vc->pos >= vc->loopLen)
-                vc->pos -= vc->loopLen;
+            pos += inc;
+            if (pos >= loopLen)
+                pos -= loopLen;
         }
+        vc->pos = pos;
         vc->remaining -= n;
         if (vc->remaining <= 0) vc->active = 0;
     }
@@ -196,12 +201,9 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     vc->length = afn_pcm_lens[smpIdx];
     vc->loopLen = vc->length << 12; // fixed 20.12
     vc->pos = 0;
-    // Pitch: baseInc = (sampleRate << 12) / 16384 gives 1:1 playback
-    // For single-cycle waveforms, base frequency = sampleRate / waveLength
-    // To play MIDI note, we want: freq = 440 * 2^((note-69)/12)
-    // inc = freq * waveLength / outputRate * 4096
-    // Simpler: baseInc plays at the sample's native pitch (assumed middle C = 60)
-    int baseInc = (afn_pcm_rates[smpIdx] << 12) / 16384;
+    // Pitch: baseInc = (sampleRate << 12) / outputRate gives 1:1 playback
+    // Output rate = 18157 Hz (CPU_FREQ / 924)
+    int baseInc = (afn_pcm_rates[smpIdx] << 12) / 18157;
     // Semitone table (12-TET, 4096 = 1.0 in 12-bit fixed)
     // Precomputed: ratio[i] = 4096 * 2^(i/12) for i=0..11
     static const u16 semitone_up[12] = {
@@ -222,10 +224,8 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     if (baseInc < 1) baseInc = 1;
     vc->inc = baseInc;
     vc->vol = vel; // 0-127
-    // Convert tick duration to output samples: samples = durTicks * samplesPerTick
-    // samplesPerTick = 16384 * 60 / (tempo * tpb) — but we don't have tempo here
-    // Use tpf (ticks per frame) to convert: durSamples = durTicks / tpf * SND_BUF_SIZE
-    // Approximate: each tick ≈ SND_BUF_SIZE / tpf output samples
+    // Convert tick duration to output samples
+    // Each frame = SND_BUF_SIZE output samples, sequencer advances tpf ticks/frame
     int tpf = afn_snd_tpf[snd_seq_active >= 0 ? snd_seq_active : 0];
     int durSamples = (durTicks * SND_BUF_SIZE) / (tpf > 0 ? tpf : 1);
     if (durSamples < SND_BUF_SIZE) durSamples = SND_BUF_SIZE; // minimum 1 frame

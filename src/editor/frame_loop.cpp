@@ -10141,13 +10141,14 @@ void FrameTick(float dt)
                 std::vector<GBASoundInstanceExport> exportSoundInstances;
                 {
                     // Collect all samples used by any sound instance
+                    // Use the MIDI file's channelBank (what the user edits in the sound tab)
                     std::set<int> usedSamples;
                     for (auto& inst : sSoundInstances) {
                         if (inst.midiIdx < 0 || inst.midiIdx >= (int)sMidiFiles.size()) continue;
                         auto& midi = sMidiFiles[inst.midiIdx];
                         for (int ch = 0; ch < 16; ch++) {
                             if (midi.channelUsed[ch])
-                                usedSamples.insert(inst.channelBank[ch]);
+                                usedSamples.insert(midi.channelBank[ch]);
                         }
                     }
                     // Build sample export list with index remapping
@@ -10180,7 +10181,7 @@ void FrameTick(float dt)
                                 ne.note = n.note;
                                 ne.velocity = n.velocity;
                                 ne.duration = n.duration;
-                                int bankIdx = inst.channelBank[n.channel];
+                                int bankIdx = midi.channelBank[n.channel];
                                 auto it = sampleRemap.find(bankIdx);
                                 ne.sampleIdx = (it != sampleRemap.end()) ? it->second : 0;
                                 ie.notes.push_back(ne);
