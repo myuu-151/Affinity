@@ -3803,12 +3803,18 @@ static bool SaveProject(const std::string& path)
             }
             fprintf(f, "impDataLen=%d\n", (int)s.data.size());
             if (!s.data.empty()) {
-                fprintf(f, "impData=");
-                for (int di = 0; di < (int)s.data.size(); di++) {
-                    if (di > 0) fprintf(f, ",");
-                    fprintf(f, "%d", (int)s.data[di]);
+                // Write PCM in chunks to avoid exceeding line buffer on load
+                const int chunkSize = 4000;
+                for (int off = 0; off < (int)s.data.size(); off += chunkSize) {
+                    int end = off + chunkSize;
+                    if (end > (int)s.data.size()) end = (int)s.data.size();
+                    fprintf(f, "impData=");
+                    for (int di = off; di < end; di++) {
+                        if (di > off) fprintf(f, ",");
+                        fprintf(f, "%d", (int)s.data[di]);
+                    }
+                    fprintf(f, "\n");
                 }
-                fprintf(f, "\n");
             }
             fprintf(f, "imp_end\n");
         }
@@ -5241,8 +5247,11 @@ static bool LoadProject(const std::string& path)
                         p = strchr(p, ','); if (!p) break; p++;
                     }
                 }
-                else if (strncmp(line, "impData=", 8) == 0) {
+                else if (sscanf(line, "impDataLen=%d", &ival) == 1) {
                     curImp->data.clear();
+                    curImp->data.reserve(ival);
+                }
+                else if (strncmp(line, "impData=", 8) == 0) {
                     const char* p = line + 8;
                     while (*p) {
                         int v = atoi(p);
