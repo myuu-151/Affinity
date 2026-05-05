@@ -948,6 +948,8 @@ struct SoundInstance {
 static std::vector<SoundInstance> sSoundInstances;
 static int sSelectedInstance = -1;
 static std::map<int, std::vector<int8_t>> sSampleOriginal; // backup of original waveform data per bank index
+static int sWaveSelStart = -1; // selection start sample index (-1 = no selection)
+static int sWaveSelEnd = -1;   // selection end sample index
 
 // GM drum note names (subset — notes 35-81)
 static const char* sGMDrumNames[] = {
@@ -1899,7 +1901,7 @@ struct AudioVoice {
     int length = 0;
     int loopStart = 0;
     bool loop = false;
-    uint32_t pos = 0;       // 16.16 fixed-point position
+    uint64_t pos = 0;       // 16.16 fixed-point position (64-bit for long samples)
     uint32_t inc = 0;       // 16.16 fixed-point increment (for pitch)
     int volume = 128;       // 0-255
     bool active = false;
@@ -1923,12 +1925,29 @@ static bool sMidiPlaying = false;
 static int sMidiPlayIdx = -1;     // index into sMidiFiles
 static double sMidiPlayTime = 0;  // seconds elapsed
 static int sMidiPlayTick = 0;     // current tick position
+static bool sMidiEditMode = false;  // master edit toggle for piano roll
 static bool sMidiEraseMode = false; // erase tool for piano roll
 static bool sMidiDragMode = false;  // drag tool to resize note duration
 static int sMidiDragTrack = -1;     // track index of note being dragged
 static int sMidiDragNote = -1;      // note index being dragged
 static int sMidiDragOrigDur = 0;    // original duration before drag
 static bool sMidiAddMode = false;   // add tool for placing new notes
+static bool sMidiMoveMode = false;  // (legacy, kept for compat)
+static int sMidiMoveTrack = -1;
+static int sMidiMoveNote = -1;
+static int sMidiMoveOrigNote = 0;
+static int sMidiMoveOrigTick = 0;
+static float sMidiMoveClickX = 0;
+static float sMidiMoveClickY = 0;
+// Note selection + clipboard
+static std::vector<std::pair<int,int>> sMidiSelectedNotes; // (trackIdx, noteIdx) pairs
+static std::vector<MidiNote> sMidiClipboard;
+static int sMidiClipboardBaseTick = 0;
+// RMB drag-to-delete box
+static bool sMidiRmbDragging = false;
+static float sMidiRmbStartX = 0, sMidiRmbStartY = 0;
+static float sMidiZoom = 1.0f;     // piano roll zoom (1.0 = fit all, <1 = zoom in, >1 = zoom out)
+static float sMidiScrollX = 0.0f;  // horizontal scroll offset (0-1 range)
 
 // Note-to-frequency table (A4 = 440Hz)
 static float NoteToFreq(int note) {
@@ -2015,11 +2034,17 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             if (isDrum) {
                                 // Drums play at original pitch (1:1)
                                 v.inc = 65536;
-                            } else {
+                            } else if (smpLen <= 64) {
                                 // Single-cycle waveform: base frequency = sampleRate / length
                                 float baseFreq = (float)smpRate / (float)v.length;
                                 float noteFreq = NoteToFreq(n.note);
                                 v.inc = (uint32_t)(noteFreq / baseFreq * 65536.0f);
+                            } else {
+                                // Long sample (WAV): play at native rate, pitch-shift relative to note 60
+                                float baseInc = (float)smpRate / (float)kAudioSampleRate * 65536.0f;
+                                float semitones = (float)(n.note - 60);
+                                v.inc = (uint32_t)(baseInc * powf(2.0f, semitones / 12.0f));
+                                v.loop = false; // long samples are one-shots
                             }
                             v.volume = n.velocity * mf.channelVolume[n.channel] / 100;
                             if (v.volume > 160) v.volume = 160;
@@ -2027,8 +2052,8 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             float secPerTick = 60.0f / (mf.tempo * mf.ticksPerBeat);
                             v.remaining = (int)(n.duration * secPerTick * kAudioSampleRate);
                             if (v.remaining < 100) v.remaining = 100;
-                            // Drums: remaining is max of duration and sample length
-                            if (isDrum && v.remaining < smpLen)
+                            // One-shot samples (drums/WAVs): remaining must cover full sample
+                            if (!v.loop && v.remaining < smpLen)
                                 v.remaining = smpLen;
                             v.totalDuration = v.remaining;
                             v.elapsed = 0;
@@ -2076,7 +2101,7 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                         sampleIdx = voice.loopStart + (sampleIdx - voice.loopStart) % loopLen;
                     else
                         sampleIdx = 0;
-                    voice.pos = (uint32_t)sampleIdx << 16 | (voice.pos & 0xFFFF);
+                    voice.pos = ((uint64_t)sampleIdx << 16) | (voice.pos & 0xFFFF);
                 } else {
                     voice.active = false;
                     break;
@@ -2218,15 +2243,16 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         v.midiChannel = -1;
         v.active = true;
     } else {
-        // Long one-shot sample (kick, snare, etc.): play directly
+        // Long one-shot sample (WAV, kick, snare, etc.): play at native rate
         v.data = smp.data.data();
         v.length = (int)smp.data.size();
         v.loop = false;
         v.loopStart = 0;
         v.pos = 0;
-        v.inc = 65536;
+        v.inc = (uint32_t)((float)smp.sampleRate / (float)kAudioSampleRate * 65536.0f);
         v.volume = 160;
-        v.remaining = (int)smp.data.size();
+        // remaining in output samples = source samples / inc rate
+        v.remaining = (int)((float)smp.data.size() / ((float)smp.sampleRate / kAudioSampleRate));
         v.totalDuration = v.remaining;
         v.elapsed = 0;
         v.bankIdx = bankIdx;
@@ -3753,6 +3779,40 @@ static bool SaveProject(const std::string& path)
     if (sSelectedInstance >= 0 && sSelectedInstance < (int)sSoundInstances.size())
         SaveEditsToInstance(sSoundInstances[sSelectedInstance]);
 
+    // Imported (non-built-in) samples
+    {
+        int importedCount = 0;
+        for (auto& s : sSoundBank) if (!s.builtIn) importedCount++;
+        fprintf(f, "\n[ImportedSamples]\n");
+        fprintf(f, "count=%d\n", importedCount);
+        for (int i = 0; i < (int)sSoundBank.size(); i++) {
+            SoundSample& s = sSoundBank[i];
+            if (s.builtIn) continue;
+            fprintf(f, "imp_begin=%s\n", s.name);
+            fprintf(f, "impRate=%d\n", s.sampleRate);
+            fprintf(f, "impLoop=%d\n", s.loop ? 1 : 0);
+            fprintf(f, "impLoopStart=%d\n", s.loopStart);
+            fprintf(f, "impIdx=%d\n", i);
+            fprintf(f, "impEnvEnabled=%d\n", s.envEnabled ? 1 : 0);
+            if (!s.envelope.empty()) {
+                fprintf(f, "impEnvPts=%d", (int)s.envelope.size());
+                for (auto& ep : s.envelope)
+                    fprintf(f, ",%.4f,%.4f", ep.time, ep.level);
+                fprintf(f, "\n");
+            }
+            fprintf(f, "impDataLen=%d\n", (int)s.data.size());
+            if (!s.data.empty()) {
+                fprintf(f, "impData=");
+                for (int di = 0; di < (int)s.data.size(); di++) {
+                    if (di > 0) fprintf(f, ",");
+                    fprintf(f, "%d", (int)s.data[di]);
+                }
+                fprintf(f, "\n");
+            }
+            fprintf(f, "imp_end\n");
+        }
+    }
+
     // Sound Instances (with per-instance sample overrides)
     fprintf(f, "\n[SoundInstances]\n");
     fprintf(f, "count=%d\n", (int)sSoundInstances.size());
@@ -5141,6 +5201,50 @@ static bool LoadProject(const std::string& path)
                     while (*p) {
                         int v = atoi(p);
                         smp.data.push_back((int8_t)v);
+                        while (*p && *p != ',') p++;
+                        if (*p == ',') p++;
+                    }
+                }
+            }
+        }
+        else if (strcmp(section, "ImportedSamples") == 0)
+        {
+            static SoundSample* curImp = nullptr;
+            if (strncmp(line, "imp_begin=", 10) == 0) {
+                SoundSample s;
+                strncpy(s.name, line + 10, sizeof(s.name) - 1);
+                s.name[31] = 0;
+                s.builtIn = false;
+                sSoundBank.push_back(std::move(s));
+                curImp = &sSoundBank.back();
+            }
+            else if (strcmp(line, "imp_end") == 0) {
+                curImp = nullptr;
+            }
+            else if (curImp) {
+                if (sscanf(line, "impRate=%d", &ival) == 1) curImp->sampleRate = ival;
+                else if (sscanf(line, "impLoop=%d", &ival) == 1) curImp->loop = (ival != 0);
+                else if (sscanf(line, "impLoopStart=%d", &ival) == 1) curImp->loopStart = ival;
+                else if (sscanf(line, "impEnvEnabled=%d", &ival) == 1) curImp->envEnabled = (ival != 0);
+                else if (strncmp(line, "impEnvPts=", 10) == 0) {
+                    curImp->envelope.clear();
+                    int numPts = 0;
+                    const char* p = line + 10;
+                    sscanf(p, "%d", &numPts);
+                    for (int ei = 0; ei < numPts; ei++) {
+                        p = strchr(p, ','); if (!p) break; p++;
+                        float t, l;
+                        if (sscanf(p, "%f,%f", &t, &l) == 2)
+                            curImp->envelope.push_back({t, l});
+                        p = strchr(p, ','); if (!p) break; p++;
+                    }
+                }
+                else if (strncmp(line, "impData=", 8) == 0) {
+                    curImp->data.clear();
+                    const char* p = line + 8;
+                    while (*p) {
+                        int v = atoi(p);
+                        curImp->data.push_back((int8_t)v);
                         while (*p && *p != ',') p++;
                         if (*p == ',') p++;
                     }
@@ -10164,7 +10268,10 @@ void FrameTick(float dt)
                                     GBASoundSampleExport se;
                                     se.name = std::string(smp.name) + "_" + std::to_string(n.note);
                                     se.data = hit.data;
-                                    se.sampleRate = hit.sampleRate;
+                                    // Calibrate rate so pitch-shift at this note cancels to native rate
+                                    // Runtime does: rate * 2^((note-60)/12), we want native rate
+                                    // So: exportedRate = nativeRate * 2^((60-note)/12)
+                                    se.sampleRate = (int)(hit.sampleRate * powf(2.0f, (60 - (n.note & 127)) / 12.0f));
                                     se.loop = false;
                                     exportSoundSamples.push_back(std::move(se));
                                 } else {
@@ -17570,59 +17677,81 @@ void FrameTick(float dt)
             ofn.nMaxFile = MAX_PATH;
             ofn.Flags = OFN_FILEMUSTEXIST;
             if (GetOpenFileNameA(&ofn)) {
-                // Load WAV: minimal parser for PCM format
+                // Load WAV: chunk-scanning parser for PCM format
                 FILE* wf = fopen(wavPath, "rb");
                 if (wf) {
-                    uint8_t hdr[44];
-                    if (fread(hdr, 1, 44, wf) == 44 && memcmp(hdr, "RIFF", 4) == 0 && memcmp(hdr + 8, "WAVE", 4) == 0) {
-                        int channels = hdr[22] | (hdr[23] << 8);
-                        int srcRate = hdr[24] | (hdr[25] << 8) | (hdr[26] << 16) | (hdr[27] << 24);
-                        int bitsPerSample = hdr[34] | (hdr[35] << 8);
-                        int dataSize = hdr[40] | (hdr[41] << 8) | (hdr[42] << 16) | (hdr[43] << 24);
-                        int numSamples = dataSize / (channels * (bitsPerSample / 8));
+                    // Read entire file
+                    fseek(wf, 0, SEEK_END);
+                    long fileSize = ftell(wf);
+                    fseek(wf, 0, SEEK_SET);
+                    std::vector<uint8_t> wavData(fileSize);
+                    fread(wavData.data(), 1, fileSize, wf);
+                    fclose(wf); wf = NULL;
 
-                        std::vector<int8_t> pcm;
-                        if (bitsPerSample == 16) {
-                            std::vector<int16_t> raw(numSamples * channels);
-                            fread(raw.data(), 2, numSamples * channels, wf);
-                            // Downsample to 16384 Hz mono 8-bit
-                            double ratio = (double)srcRate / 16384.0;
-                            int outLen = (int)(numSamples / ratio);
-                            pcm.resize(outLen);
-                            for (int i = 0; i < outLen; i++) {
-                                int srcIdx = (int)(i * ratio) * channels;
-                                if (srcIdx < (int)raw.size())
-                                    pcm[i] = (int8_t)(raw[srcIdx] >> 8);
+                    int channels = 0, srcRate = 0, bitsPerSample = 0;
+                    const uint8_t* dataPtr = NULL;
+                    int dataSize = 0;
+
+                    // Verify RIFF/WAVE header
+                    if (fileSize >= 12 && memcmp(wavData.data(), "RIFF", 4) == 0 && memcmp(wavData.data() + 8, "WAVE", 4) == 0) {
+                        // Scan chunks starting after RIFF header (offset 12)
+                        int pos = 12;
+                        while (pos + 8 <= fileSize) {
+                            const uint8_t* ck = wavData.data() + pos;
+                            int ckSize = ck[4] | (ck[5] << 8) | (ck[6] << 16) | (ck[7] << 24);
+                            if (memcmp(ck, "fmt ", 4) == 0 && ckSize >= 16) {
+                                channels = ck[10] | (ck[11] << 8);
+                                srcRate = ck[12] | (ck[13] << 8) | (ck[14] << 16) | (ck[15] << 24);
+                                bitsPerSample = ck[22] | (ck[23] << 8);
+                            } else if (memcmp(ck, "data", 4) == 0) {
+                                dataPtr = ck + 8;
+                                dataSize = ckSize;
                             }
-                        } else if (bitsPerSample == 8) {
-                            std::vector<uint8_t> raw(numSamples * channels);
-                            fread(raw.data(), 1, numSamples * channels, wf);
-                            double ratio = (double)srcRate / 16384.0;
-                            int outLen = (int)(numSamples / ratio);
-                            pcm.resize(outLen);
-                            for (int i = 0; i < outLen; i++) {
-                                int srcIdx = (int)(i * ratio) * channels;
-                                if (srcIdx < (int)raw.size())
-                                    pcm[i] = (int8_t)(raw[srcIdx] - 128);
-                            }
-                        }
-                        if (!pcm.empty()) {
-                            SoundSample s;
-                            std::string fname(wavPath);
-                            size_t sl = fname.find_last_of("/\\");
-                            if (sl != std::string::npos) fname = fname.substr(sl + 1);
-                            size_t dot = fname.find_last_of('.');
-                            if (dot != std::string::npos) fname = fname.substr(0, dot);
-                            snprintf(s.name, sizeof(s.name), "%s", fname.c_str());
-                            s.data = std::move(pcm);
-                            s.sampleRate = 16384;
-                            s.builtIn = false;
-                            sSoundBank.push_back(std::move(s));
-                            sSelectedSample = (int)sSoundBank.size() - 1;
-                            sProjectDirty = true;
+                            pos += 8 + ((ckSize + 1) & ~1); // chunks are word-aligned
                         }
                     }
-                    fclose(wf);
+
+                    int numSamples = (channels > 0 && bitsPerSample > 0) ? dataSize / (channels * (bitsPerSample / 8)) : 0;
+                    std::vector<int8_t> pcm;
+                    if (dataPtr && numSamples > 0 && bitsPerSample == 16) {
+                        const int16_t* raw = (const int16_t*)dataPtr;
+                        int rawCount = dataSize / 2;
+                        double ratio = (double)srcRate / 16384.0;
+                        int outLen = (int)(numSamples / ratio);
+                        pcm.resize(outLen);
+                        for (int i = 0; i < outLen; i++) {
+                            int srcIdx = (int)(i * ratio) * channels;
+                            if (srcIdx < rawCount)
+                                pcm[i] = (int8_t)(raw[srcIdx] >> 8);
+                        }
+                    } else if (dataPtr && numSamples > 0 && bitsPerSample == 8) {
+                        const uint8_t* raw = dataPtr;
+                        int rawCount = dataSize;
+                        double ratio = (double)srcRate / 16384.0;
+                        int outLen = (int)(numSamples / ratio);
+                        pcm.resize(outLen);
+                        for (int i = 0; i < outLen; i++) {
+                            int srcIdx = (int)(i * ratio) * channels;
+                            if (srcIdx < rawCount)
+                                pcm[i] = (int8_t)(raw[srcIdx] - 128);
+                        }
+                    }
+                    if (!pcm.empty()) {
+                        SoundSample s;
+                        std::string fname(wavPath);
+                        size_t sl = fname.find_last_of("/\\");
+                        if (sl != std::string::npos) fname = fname.substr(sl + 1);
+                        size_t dot = fname.find_last_of('.');
+                        if (dot != std::string::npos) fname = fname.substr(0, dot);
+                        snprintf(s.name, sizeof(s.name), "%s", fname.c_str());
+                        s.data = std::move(pcm);
+                        s.sampleRate = 16384;
+                        s.builtIn = false;
+                        sSoundBank.push_back(std::move(s));
+                        sSelectedSample = (int)sSoundBank.size() - 1;
+                        sProjectDirty = true;
+                    }
+                    if (wf) fclose(wf);
                 }
             }
 #endif
@@ -17674,8 +17803,36 @@ void FrameTick(float dt)
                 }
             }
 
+            // Draw selection highlight
+            if (!s.data.empty() && sWaveSelStart >= 0 && sWaveSelEnd >= 0) {
+                int n = (int)s.data.size();
+                if (sWaveSelStart <= sWaveSelEnd) {
+                    // Normal selection: highlight [start, end)
+                    float x0 = wp.x + (float)sWaveSelStart / n * availW;
+                    float x1 = wp.x + (float)sWaveSelEnd / n * availW;
+                    dl->AddRectFilled(ImVec2(x0, wp.y), ImVec2(x1, wp.y + waveH), 0x4044AAFF);
+                } else {
+                    // Inverted selection: highlight [0, end) and [start, n)
+                    float x0 = wp.x + (float)sWaveSelEnd / n * availW;
+                    float x1 = wp.x + (float)sWaveSelStart / n * availW;
+                    dl->AddRectFilled(ImVec2(wp.x, wp.y), ImVec2(x0, wp.y + waveH), 0x40FF6644);
+                    dl->AddRectFilled(ImVec2(x1, wp.y), ImVec2(wp.x + availW, wp.y + waveH), 0x40FF6644);
+                }
+            }
+
             // Interactive drawing on the waveform
             ImGui::InvisibleButton("##wavedraw", ImVec2(availW, waveH));
+            if (!s.builtIn && !s.data.empty() && ImGui::IsItemHovered() && ImGui::IsMouseDown(1)) {
+                // Right-click drag: select range (for WAV trimming)
+                ImVec2 mp = ImGui::GetMousePos();
+                int n = (int)s.data.size();
+                int sampleX = (int)((mp.x - wp.x) / availW * n);
+                if (sampleX < 0) sampleX = 0;
+                if (sampleX > n) sampleX = n;
+                if (ImGui::IsMouseClicked(1))
+                    sWaveSelStart = sampleX;
+                sWaveSelEnd = sampleX;
+            }
             if (!s.data.empty() && (ImGui::IsItemActive() || ImGui::IsItemHovered()) && ImGui::IsMouseDown(0)) {
                 // Stash original before first edit
                 if (sSampleOriginal.find(sSelectedSample) == sSampleOriginal.end())
@@ -17699,7 +17856,42 @@ void FrameTick(float dt)
                 }
                 sProjectDirty = true;
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Draw waveform | LMB drag to sculpt");
+            // Ctrl+I: invert selection | Delete: delete selected region
+            if (!s.builtIn && !s.data.empty() && sWaveSelStart >= 0 && sWaveSelEnd >= 0) {
+                int selA = sWaveSelStart < sWaveSelEnd ? sWaveSelStart : sWaveSelEnd;
+                int selB = sWaveSelStart < sWaveSelEnd ? sWaveSelEnd : sWaveSelStart;
+                int n = (int)s.data.size();
+                if (selA < 0) selA = 0;
+                if (selB > n) selB = n;
+                if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_I)) {
+                    // Invert selection: select everything EXCEPT current selection
+                    sWaveSelEnd = selA;
+                    sWaveSelStart = selB;
+                    // Wrap: new selection is [0, selA] + [selB, n] — represent as inverted
+                    // Simpler: just swap to mean "keep this, delete the rest"
+                    // After invert, selStart > selEnd means "outside region selected"
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+                    if (sSampleOriginal.find(sSelectedSample) == sSampleOriginal.end())
+                        sSampleOriginal[sSelectedSample] = s.data;
+                    if (sWaveSelStart <= sWaveSelEnd) {
+                        // Normal selection: delete [selA, selB)
+                        s.data.erase(s.data.begin() + selA, s.data.begin() + selB);
+                    } else {
+                        // Inverted selection: keep [selB, selA), delete the rest
+                        int keepStart = sWaveSelEnd; // smaller value after invert
+                        int keepEnd = sWaveSelStart;  // larger value after invert
+                        if (keepStart < 0) keepStart = 0;
+                        if (keepEnd > n) keepEnd = n;
+                        std::vector<int8_t> kept(s.data.begin() + keepStart, s.data.begin() + keepEnd);
+                        s.data = std::move(kept);
+                    }
+                    sWaveSelStart = -1;
+                    sWaveSelEnd = -1;
+                    sProjectDirty = true;
+                }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("LMB: draw | RMB drag: select | Ctrl+I: invert | Del: delete");
             // Smooth button — averages adjacent samples to round off edges
             if (ImGui::Button("Smooth##smp", ImVec2(Scaled(55), 0)) && !s.data.empty()) {
                 if (sSampleOriginal.find(sSelectedSample) == sSampleOriginal.end())
@@ -17961,6 +18153,22 @@ void FrameTick(float dt)
             }
 #endif
         }
+        ImGui::SameLine();
+        if (ImGui::Button("Create Sequence", ImVec2(Scaled(130), 0))) {
+            MidiFile mf;
+            snprintf(mf.name, sizeof(mf.name), "Sequence %d", (int)sMidiFiles.size() + 1);
+            mf.ticksPerBeat = 480;
+            mf.tempo = 120;
+            memset(mf.channelUsed, 0, sizeof(mf.channelUsed));
+            mf.channelUsed[0] = true;
+            for (int i = 0; i < 16; i++) mf.channelVolume[i] = 100;
+            MidiTrack t;
+            strncpy(t.name, "Track 1", sizeof(t.name));
+            mf.tracks.push_back(t);
+            sMidiFiles.push_back(std::move(mf));
+            sSelectedMidi = (int)sMidiFiles.size() - 1;
+            sProjectDirty = true;
+        }
 
         // MIDI file list
         ImGui::Spacing();
@@ -18084,16 +18292,28 @@ void FrameTick(float dt)
             dl->AddRectFilled(rp, ImVec2(rp.x + rollW, rp.y + rollH), 0xFF0D0D0D);
 
             // Find tick range and note range
-            int minNote = 127, maxNote = 0, maxTick = 1;
+            int minNote = 127, maxNote = 0, contentTick = 1;
             for (auto& t : mf.tracks)
                 for (auto& n : t.notes) {
                     if (n.note < minNote) minNote = n.note;
                     if (n.note > maxNote) maxNote = n.note;
-                    if (n.tick + n.duration > maxTick) maxTick = n.tick + n.duration;
+                    if (n.tick + n.duration > contentTick) contentTick = n.tick + n.duration;
                 }
+            // Display maxTick has padding for editing; contentTick is actual content length
+            int maxTick = contentTick;
+            int minTimeline = mf.ticksPerBeat * 4;
+            if (maxTick < minTimeline) maxTick = minTimeline;
+            maxTick = maxTick + maxTick / 4; // 25% padding beyond furthest note
+            // Apply zoom: viewTicks is how many ticks are visible in the roll
+            float viewTicks = maxTick * sMidiZoom;
+            float scrollOff = sMidiScrollX * (maxTick - viewTicks); // tick offset
+            if (sMidiZoom >= 1.0f) { scrollOff = 0; viewTicks = (float)maxTick; }
             if (minNote > maxNote) { minNote = 60; maxNote = 72; }
+            // Add padding so notes can be moved beyond current range
+            minNote -= 6; if (minNote < 0) minNote = 0;
+            maxNote += 6; if (maxNote > 127) maxNote = 127;
             int noteRange = maxNote - minNote + 1;
-            if (noteRange < 12) { minNote -= (12 - noteRange) / 2; noteRange = 12; }
+            if (noteRange < 24) { minNote -= (24 - noteRange) / 2; if (minNote < 0) minNote = 0; noteRange = 24; }
 
             // Draw note grid lines
             float noteH = rollH / noteRange;
@@ -18110,130 +18330,341 @@ void FrameTick(float dt)
                 0xFFFFFF44, 0xFF44FFFF, 0xFFCC88CC, 0xFFCCCC88
             };
 
-            // Draw notes
-            for (auto& t : mf.tracks) {
-                for (auto& n : t.notes) {
-                    float x0 = rp.x + (float)n.tick / maxTick * rollW;
-                    float x1 = rp.x + (float)(n.tick + n.duration) / maxTick * rollW;
+            // Draw notes (with zoom/scroll)
+            for (int ti = 0; ti < (int)mf.tracks.size(); ti++) {
+                for (int ni = 0; ni < (int)mf.tracks[ti].notes.size(); ni++) {
+                    auto& n = mf.tracks[ti].notes[ni];
+                    float x0 = rp.x + ((float)n.tick - scrollOff) / viewTicks * rollW;
+                    float x1 = rp.x + ((float)(n.tick + n.duration) - scrollOff) / viewTicks * rollW;
+                    if (x1 < rp.x || x0 > rp.x + rollW) continue;
                     float y0 = rp.y + (float)(maxNote - n.note) / noteRange * rollH;
                     float y1 = y0 + noteH;
                     if (x1 - x0 < 1) x1 = x0 + 1;
                     uint32_t col = chColors[n.channel & 15];
-                    // Dim alpha based on velocity; further dim if muted
                     int alpha = mf.channelMuted[n.channel] ? 30 : (100 + n.velocity);
                     col = (col & 0x00FFFFFF) | ((alpha & 0xFF) << 24);
                     dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), col);
+                    // Highlight selected notes
+                    bool selected = false;
+                    for (auto& sel : sMidiSelectedNotes)
+                        if (sel.first == ti && sel.second == ni) { selected = true; break; }
+                    if (selected)
+                        dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), 0xFFFFFFFF, 0, 0, 2.0f);
                 }
             }
 
             // Draw playhead line on piano roll
             if (sMidiPlaying && sMidiPlayIdx == sSelectedMidi && maxTick > 0) {
-                float px = rp.x + (float)sMidiPlayTick / maxTick * rollW;
-                dl->AddLine(ImVec2(px, rp.y), ImVec2(px, rp.y + rollH), 0xFFFFFFFF, 2.0f);
+                float px = rp.x + ((float)sMidiPlayTick - scrollOff) / viewTicks * rollW;
+                if (px >= rp.x && px <= rp.x + rollW)
+                    dl->AddLine(ImVec2(px, rp.y), ImVec2(px, rp.y + rollH), 0xFFFFFFFF, 2.0f);
             }
 
             // Piano roll interaction area
             ImGui::InvisibleButton("##pianoroll", ImVec2(rollW, rollH));
-            // Erase mode: click on notes to delete them
-            if (sMidiEraseMode && ImGui::IsItemHovered() && ImGui::IsMouseClicked(0)) {
-                ImVec2 mp = ImGui::GetMousePos();
-                float clickTick = (mp.x - rp.x) / rollW * maxTick;
-                float clickNote = maxNote - (mp.y - rp.y) / rollH * noteRange;
-                int bestTrack = -1, bestNote = -1;
-                float bestDist = 999999.0f;
-                for (int ti = 0; ti < (int)mf.tracks.size(); ti++) {
-                    for (int ni = 0; ni < (int)mf.tracks[ti].notes.size(); ni++) {
-                        auto& n = mf.tracks[ti].notes[ni];
-                        if (clickTick >= n.tick && clickTick <= n.tick + n.duration) {
-                            float noteDist = fabsf(clickNote - n.note);
-                            if (noteDist < 1.5f && noteDist < bestDist) {
-                                bestDist = noteDist;
-                                bestTrack = ti;
-                                bestNote = ni;
-                            }
-                        }
+            bool pianoHovered = ImGui::IsItemHovered();
+            // Prevent parent window from consuming scroll when over piano roll
+            if (pianoHovered) ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+            // Scroll wheel: zoom in/out on timeline
+            if (pianoHovered) {
+                float wheel = ImGui::GetIO().MouseWheel;
+                if (wheel != 0.0f) {
+                    float oldZoom = sMidiZoom;
+                    sMidiZoom -= wheel * 0.1f;
+                    if (sMidiZoom < 0.1f) sMidiZoom = 0.1f;
+                    if (sMidiZoom > 3.0f) sMidiZoom = 3.0f;
+                    // Adjust scroll to keep mouse position stable
+                    if (sMidiZoom < 1.0f) {
+                        ImVec2 mp = ImGui::GetMousePos();
+                        float mouseRatio = (mp.x - rp.x) / rollW;
+                        float oldView = maxTick * oldZoom;
+                        float newView = maxTick * sMidiZoom;
+                        float oldTickAtMouse = sMidiScrollX * (maxTick - oldView) + mouseRatio * oldView;
+                        float newScrollOff = oldTickAtMouse - mouseRatio * newView;
+                        float maxScroll = (float)maxTick - newView;
+                        if (maxScroll > 0) sMidiScrollX = newScrollOff / maxScroll;
+                        if (sMidiScrollX < 0.0f) sMidiScrollX = 0.0f;
+                        if (sMidiScrollX > 1.0f) sMidiScrollX = 1.0f;
+                    } else {
+                        sMidiScrollX = 0.0f;
                     }
                 }
-                if (bestTrack >= 0) {
-                    mf.tracks[bestTrack].notes.erase(mf.tracks[bestTrack].notes.begin() + bestNote);
-                    sProjectDirty = true;
+                // Middle-mouse drag to pan
+                if (ImGui::IsMouseDragging(2)) {
+                    float delta = ImGui::GetIO().MouseDelta.x;
+                    if (viewTicks < maxTick) {
+                        sMidiScrollX -= delta / rollW;
+                        if (sMidiScrollX < 0.0f) sMidiScrollX = 0.0f;
+                        if (sMidiScrollX > 1.0f) sMidiScrollX = 1.0f;
+                    }
                 }
             }
-            // Drag mode: click near note end and drag to resize duration
-            if (sMidiDragMode && ImGui::IsItemHovered()) {
+            // --- Default interaction: move notes (body) and resize (edge) ---
+            // Only allow editing when edit mode is on
+            bool nearEdge = false;
+            if (sMidiEditMode && pianoHovered && sMidiMoveTrack < 0 && sMidiDragTrack < 0) {
                 ImVec2 mp = ImGui::GetMousePos();
-                float mouseTick = (mp.x - rp.x) / rollW * maxTick;
+                float mouseTick = (mp.x - rp.x) / rollW * viewTicks + scrollOff;
                 float mouseNote = maxNote - (mp.y - rp.y) / rollH * noteRange;
-                if (ImGui::IsMouseClicked(0)) {
-                    // Find note whose right edge is near the click
-                    int bestTrack = -1, bestNote = -1;
-                    float bestDist = 999999.0f;
-                    float grabThresh = maxTick * 0.01f; // 1% of total width
+                float grabThresh = viewTicks * 0.015f;
+                for (auto& t : mf.tracks) {
+                    for (auto& n : t.notes) {
+                        float noteEnd = (float)(n.tick + n.duration);
+                        if (fabsf(mouseTick - noteEnd) < grabThresh && fabsf(mouseNote - n.note) < 1.5f) {
+                            nearEdge = true; break;
+                        }
+                    }
+                    if (nearEdge) break;
+                }
+                if (nearEdge) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            }
+            // RMB drag: box select notes (then Delete to remove)
+            if (sMidiEditMode && pianoHovered && ImGui::IsMouseClicked(1)) {
+                ImVec2 mp = ImGui::GetMousePos();
+                sMidiRmbDragging = true;
+                sMidiRmbStartX = mp.x;
+                sMidiRmbStartY = mp.y;
+            }
+            if (sMidiRmbDragging) {
+                if (ImGui::IsMouseDown(1)) {
+                    // Draw the selection box
+                    ImVec2 mp = ImGui::GetMousePos();
+                    float x0 = sMidiRmbStartX < mp.x ? sMidiRmbStartX : mp.x;
+                    float y0 = sMidiRmbStartY < mp.y ? sMidiRmbStartY : mp.y;
+                    float x1 = sMidiRmbStartX > mp.x ? sMidiRmbStartX : mp.x;
+                    float y1 = sMidiRmbStartY > mp.y ? sMidiRmbStartY : mp.y;
+                    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), 0x3044AAFF);
+                    dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), 0xFF44AAFF);
+                } else {
+                    // Released: select all notes inside the box
+                    ImVec2 mp = ImGui::GetMousePos();
+                    float x0 = sMidiRmbStartX < mp.x ? sMidiRmbStartX : mp.x;
+                    float y0 = sMidiRmbStartY < mp.y ? sMidiRmbStartY : mp.y;
+                    float x1 = sMidiRmbStartX > mp.x ? sMidiRmbStartX : mp.x;
+                    float y1 = sMidiRmbStartY > mp.y ? sMidiRmbStartY : mp.y;
+                    float tickA = (x0 - rp.x) / rollW * viewTicks + scrollOff;
+                    float tickB = (x1 - rp.x) / rollW * viewTicks + scrollOff;
+                    float noteTop = maxNote - (y0 - rp.y) / rollH * noteRange;
+                    float noteBot = maxNote - (y1 - rp.y) / rollH * noteRange;
+                    float noteHi = noteTop > noteBot ? noteTop : noteBot;
+                    float noteLo = noteTop < noteBot ? noteTop : noteBot;
+                    sMidiSelectedNotes.clear();
                     for (int ti = 0; ti < (int)mf.tracks.size(); ti++) {
                         for (int ni = 0; ni < (int)mf.tracks[ti].notes.size(); ni++) {
                             auto& n = mf.tracks[ti].notes[ni];
-                            float noteEnd = (float)(n.tick + n.duration);
-                            float endDist = fabsf(mouseTick - noteEnd);
-                            float noteDist = fabsf(mouseNote - n.note);
-                            if (endDist < grabThresh && noteDist < 1.5f && endDist < bestDist) {
-                                bestDist = endDist;
-                                bestTrack = ti;
-                                bestNote = ni;
+                            float nEnd = (float)(n.tick + n.duration);
+                            if (nEnd > tickA && n.tick < tickB && n.note >= noteLo && n.note <= noteHi)
+                                sMidiSelectedNotes.push_back({ti, ni});
+                        }
+                    }
+                    sMidiRmbDragging = false;
+                }
+            }
+            // LMB click: edge=resize, body=select+move, empty=add note
+            if (sMidiEditMode && pianoHovered && ImGui::IsMouseClicked(0)) {
+                ImVec2 mp = ImGui::GetMousePos();
+                float mouseTick = (mp.x - rp.x) / rollW * viewTicks + scrollOff;
+                float mouseNote = maxNote - (mp.y - rp.y) / rollH * noteRange;
+                float grabThresh = viewTicks * 0.015f;
+                // First check for edge grab (resize)
+                int edgeTrack = -1, edgeNote = -1;
+                float edgeBest = 999999.0f;
+                for (int ti = 0; ti < (int)mf.tracks.size(); ti++) {
+                    for (int ni = 0; ni < (int)mf.tracks[ti].notes.size(); ni++) {
+                        auto& n = mf.tracks[ti].notes[ni];
+                        float noteEnd = (float)(n.tick + n.duration);
+                        float endDist = fabsf(mouseTick - noteEnd);
+                        float noteDist = fabsf(mouseNote - n.note);
+                        if (endDist < grabThresh && noteDist < 1.5f && endDist < edgeBest) {
+                            edgeBest = endDist;
+                            edgeTrack = ti;
+                            edgeNote = ni;
+                        }
+                    }
+                }
+                if (edgeTrack >= 0) {
+                    // Start resize
+                    sMidiDragTrack = edgeTrack;
+                    sMidiDragNote = edgeNote;
+                    sMidiDragOrigDur = mf.tracks[edgeTrack].notes[edgeNote].duration;
+                } else {
+                    // Check for body grab (move)
+                    int bestTrack = -1, bestNote = -1;
+                    float bestDist = 999999.0f;
+                    for (int ti = 0; ti < (int)mf.tracks.size(); ti++) {
+                        for (int ni = 0; ni < (int)mf.tracks[ti].notes.size(); ni++) {
+                            auto& n = mf.tracks[ti].notes[ni];
+                            if (mouseTick >= n.tick && mouseTick <= n.tick + n.duration) {
+                                float noteDist = fabsf(mouseNote - n.note);
+                                if (noteDist < 1.5f && noteDist < bestDist) {
+                                    bestDist = noteDist;
+                                    bestTrack = ti;
+                                    bestNote = ni;
+                                }
                             }
                         }
                     }
                     if (bestTrack >= 0) {
-                        sMidiDragTrack = bestTrack;
-                        sMidiDragNote = bestNote;
-                        sMidiDragOrigDur = mf.tracks[bestTrack].notes[bestNote].duration;
+                        // Select this note
+                        bool alreadySelected = false;
+                        for (auto& sel : sMidiSelectedNotes)
+                            if (sel.first == bestTrack && sel.second == bestNote) { alreadySelected = true; break; }
+                        if (!ImGui::GetIO().KeyShift) sMidiSelectedNotes.clear();
+                        if (!alreadySelected)
+                            sMidiSelectedNotes.push_back({bestTrack, bestNote});
+                        // Start move
+                        sMidiMoveTrack = bestTrack;
+                        sMidiMoveNote = bestNote;
+                        sMidiMoveOrigNote = mf.tracks[bestTrack].notes[bestNote].note;
+                        sMidiMoveOrigTick = mf.tracks[bestTrack].notes[bestNote].tick;
+                        sMidiMoveClickX = mp.x;
+                        sMidiMoveClickY = mp.y;
+                    } else {
+                        // Clicked empty space — add a new note
+                        sMidiSelectedNotes.clear();
+                        if (mf.tracks.empty()) {
+                            MidiTrack t;
+                            strncpy(t.name, "Track 1", sizeof(t.name));
+                            mf.tracks.push_back(t);
+                        }
+                        MidiNote nn;
+                        nn.tick = (int)mouseTick;
+                        nn.channel = 0;
+                        nn.note = (int)(mouseNote + 0.5f);
+                        if (nn.note < 0) nn.note = 0;
+                        if (nn.note > 127) nn.note = 127;
+                        nn.velocity = 100;
+                        nn.duration = mf.ticksPerBeat;
+                        mf.tracks[0].notes.push_back(nn);
+                        mf.channelUsed[0] = true;
+                        sProjectDirty = true;
                     }
                 }
             }
-            // Continue drag
-            if (sMidiDragMode && sMidiDragTrack >= 0 && sMidiDragNote >= 0) {
+            // Continue resize drag
+            if (sMidiDragTrack >= 0 && sMidiDragNote >= 0) {
                 if (ImGui::IsMouseDown(0)) {
                     ImVec2 mp = ImGui::GetMousePos();
-                    float mouseTick = (mp.x - rp.x) / rollW * maxTick;
+                    float mouseTick = (mp.x - rp.x) / rollW * viewTicks + scrollOff;
                     auto& n = mf.tracks[sMidiDragTrack].notes[sMidiDragNote];
                     int newDur = (int)(mouseTick - n.tick);
                     if (newDur < 1) newDur = 1;
+                    // Shift: snap to end of another note
+                    if (ImGui::GetIO().KeyShift) {
+                        int snapEnd = n.tick + newDur;
+                        int bestSnap = snapEnd;
+                        int snapDist = (int)(viewTicks * 0.02f);
+                        for (auto& t : mf.tracks)
+                            for (auto& on : t.notes) {
+                                if (&on == &n) continue;
+                                int oEnd = on.tick + on.duration;
+                                if (abs(snapEnd - on.tick) < snapDist) { bestSnap = on.tick; snapDist = abs(snapEnd - on.tick); }
+                                if (abs(snapEnd - oEnd) < snapDist) { bestSnap = oEnd; snapDist = abs(snapEnd - oEnd); }
+                            }
+                        newDur = bestSnap - n.tick;
+                        if (newDur < 1) newDur = 1;
+                    }
                     n.duration = newDur;
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
                 } else {
-                    // Released — finalize
                     if (sMidiDragTrack >= 0) sProjectDirty = true;
                     sMidiDragTrack = -1;
                     sMidiDragNote = -1;
                 }
             }
-            // Add mode: click to place a new note
-            if (sMidiAddMode && ImGui::IsItemHovered() && ImGui::IsMouseClicked(0)) {
-                ImVec2 mp = ImGui::GetMousePos();
-                float clickTick = (mp.x - rp.x) / rollW * maxTick;
-                int clickNote = (int)(maxNote - (mp.y - rp.y) / rollH * noteRange + 0.5f);
-                if (clickNote < 0) clickNote = 0;
-                if (clickNote > 127) clickNote = 127;
-                // Add to first track (create one if none exist)
+            // Continue move drag
+            if (sMidiMoveTrack >= 0 && sMidiMoveNote >= 0) {
+                if (ImGui::IsMouseDown(0)) {
+                    ImVec2 mp = ImGui::GetMousePos();
+                    float pixelsPerNote = rollH / noteRange;
+                    float dy = sMidiMoveClickY - mp.y;
+                    float dx = mp.x - sMidiMoveClickX;
+                    int noteDelta = (int)(dy / pixelsPerNote + 0.5f);
+                    int tickDelta = (int)(dx / rollW * viewTicks);
+                    int newNote = sMidiMoveOrigNote + noteDelta;
+                    int newTick = sMidiMoveOrigTick + tickDelta;
+                    if (newNote < 0) newNote = 0;
+                    if (newNote > 127) newNote = 127;
+                    if (newTick < 0) newTick = 0;
+                    // Shift held: snap tick to other note edges, snap pitch to other notes
+                    if (ImGui::GetIO().KeyShift) {
+                        int snapTickDist = (int)(viewTicks * 0.02f);
+                        int bestSnapTick = newTick;
+                        int bestSnapNote = newNote;
+                        int snapNoteDist = 999;
+                        for (auto& t : mf.tracks)
+                            for (auto& on : t.notes) {
+                                if (&on == &mf.tracks[sMidiMoveTrack].notes[sMidiMoveNote]) continue;
+                                // Snap tick to start/end of other notes
+                                int oEnd = on.tick + on.duration;
+                                if (abs(newTick - on.tick) < snapTickDist) { bestSnapTick = on.tick; snapTickDist = abs(newTick - on.tick); }
+                                if (abs(newTick - oEnd) < snapTickDist) { bestSnapTick = oEnd; snapTickDist = abs(newTick - oEnd); }
+                                // Snap note pitch
+                                int d = abs(on.note - newNote);
+                                if (d < snapNoteDist && d > 0) { snapNoteDist = d; bestSnapNote = on.note; }
+                            }
+                        newTick = bestSnapTick;
+                        if (snapNoteDist <= 2) newNote = bestSnapNote;
+                    }
+                    mf.tracks[sMidiMoveTrack].notes[sMidiMoveNote].note = newNote;
+                    mf.tracks[sMidiMoveTrack].notes[sMidiMoveNote].tick = newTick;
+                } else {
+                    if (sMidiMoveTrack >= 0) sProjectDirty = true;
+                    sMidiMoveTrack = -1;
+                    sMidiMoveNote = -1;
+                }
+            }
+            // Ctrl+C: copy selected notes
+            if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C) && !sMidiSelectedNotes.empty()) {
+                sMidiClipboard.clear();
+                sMidiClipboardBaseTick = INT_MAX;
+                for (auto& sel : sMidiSelectedNotes) {
+                    if (sel.first < (int)mf.tracks.size() && sel.second < (int)mf.tracks[sel.first].notes.size()) {
+                        auto& n = mf.tracks[sel.first].notes[sel.second];
+                        sMidiClipboard.push_back(n);
+                        if (n.tick < sMidiClipboardBaseTick) sMidiClipboardBaseTick = n.tick;
+                    }
+                }
+            }
+            // Ctrl+V: paste at playhead or beginning
+            if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V) && !sMidiClipboard.empty()) {
+                int pasteTick = sMidiPlayTick > 0 ? sMidiPlayTick : 0;
                 if (mf.tracks.empty()) {
                     MidiTrack t;
                     strncpy(t.name, "Track 1", sizeof(t.name));
                     mf.tracks.push_back(t);
                 }
-                MidiNote nn;
-                nn.tick = (int)clickTick;
-                nn.channel = 0;
-                nn.note = clickNote;
-                nn.velocity = 100;
-                nn.duration = mf.ticksPerBeat; // default 1 beat
-                mf.tracks[0].notes.push_back(nn);
+                sMidiSelectedNotes.clear();
+                for (auto& cn : sMidiClipboard) {
+                    MidiNote nn = cn;
+                    nn.tick = pasteTick + (cn.tick - sMidiClipboardBaseTick);
+                    mf.tracks[0].notes.push_back(nn);
+                    sMidiSelectedNotes.push_back({0, (int)mf.tracks[0].notes.size() - 1});
+                }
                 mf.channelUsed[0] = true;
                 sProjectDirty = true;
             }
+            // Delete key: delete selected notes
+            if (ImGui::IsKeyPressed(ImGuiKey_Delete) && !sMidiSelectedNotes.empty()) {
+                // Sort in reverse order so erasing doesn't invalidate indices
+                std::sort(sMidiSelectedNotes.begin(), sMidiSelectedNotes.end(),
+                    [](const std::pair<int,int>& a, const std::pair<int,int>& b) {
+                        return a.first != b.first ? a.first > b.first : a.second > b.second;
+                    });
+                for (auto& sel : sMidiSelectedNotes) {
+                    if (sel.first < (int)mf.tracks.size() && sel.second < (int)mf.tracks[sel.first].notes.size())
+                        mf.tracks[sel.first].notes.erase(mf.tracks[sel.first].notes.begin() + sel.second);
+                }
+                sMidiSelectedNotes.clear();
+                sProjectDirty = true;
+            }
 
-            // Timeline progress bar (draggable)
+            // Timeline progress bar (draggable) — uses contentTick for accurate time display
             {
                 float progress = 0.0f;
-                if (sMidiPlaying && sMidiPlayIdx == sSelectedMidi && maxTick > 0)
-                    progress = (float)sMidiPlayTick / maxTick;
+                int barMaxTick = contentTick > 0 ? contentTick : maxTick;
+                if (sMidiPlaying && sMidiPlayIdx == sSelectedMidi && barMaxTick > 0)
+                    progress = (float)sMidiPlayTick / barMaxTick;
                 float barW = rollW;
                 float barH = Scaled(16);
                 ImVec2 bp = ImGui::GetCursorScreenPos();
@@ -18242,13 +18673,13 @@ void FrameTick(float dt)
                 ImGui::InvisibleButton("##timeline", ImVec2(barW, barH));
                 bool hovered = ImGui::IsItemHovered();
                 bool held = ImGui::IsItemActive();
-                if ((hovered || held) && ImGui::IsMouseDown(0) && maxTick > 0) {
+                if ((hovered || held) && ImGui::IsMouseDown(0) && barMaxTick > 0) {
                     float mx = ImGui::GetMousePos().x - bp.x;
                     float seekPct = mx / barW;
                     if (seekPct < 0.0f) seekPct = 0.0f;
                     if (seekPct > 1.0f) seekPct = 1.0f;
                     double ticksPerSec = mf.ticksPerBeat * mf.tempo / 60.0;
-                    sMidiPlayTick = (int)(seekPct * maxTick);
+                    sMidiPlayTick = (int)(seekPct * barMaxTick);
                     sMidiPlayTime = (double)sMidiPlayTick / ticksPerSec;
                     progress = seekPct;
                     // Kill all voices on seek to avoid lingering notes
@@ -18269,8 +18700,8 @@ void FrameTick(float dt)
                 float hx = bp.x + barW * progress;
                 dl->AddRectFilled(ImVec2(hx - 2, bp.y), ImVec2(hx + 2, bp.y + barH), 0xFFFFFFFF);
                 // Time label
-                double totalSec = (maxTick > 0 && mf.ticksPerBeat > 0 && mf.tempo > 0)
-                    ? (double)maxTick / (mf.ticksPerBeat * mf.tempo / 60.0) : 0;
+                double totalSec = (barMaxTick > 0 && mf.ticksPerBeat > 0 && mf.tempo > 0)
+                    ? (double)barMaxTick / (mf.ticksPerBeat * mf.tempo / 60.0) : 0;
                 double curSec = totalSec * progress;
                 char timeBuf[64];
                 snprintf(timeBuf, sizeof(timeBuf), "%d:%02d / %d:%02d",
@@ -18289,29 +18720,15 @@ void FrameTick(float dt)
             if (ImGui::Button("Stop##midi", ImVec2(Scaled(60), 0)))
                 AudioStopAll();
             ImGui::SameLine();
-            if (sMidiAddMode) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.8f, 0.3f, 1.0f));
-            if (ImGui::Button("Add##midi", ImVec2(Scaled(50), 0))) {
-                sMidiAddMode = !sMidiAddMode;
-                if (sMidiAddMode) { sMidiEraseMode = false; sMidiDragMode = false; }
-            }
-            if (sMidiAddMode) ImGui::PopStyleColor();
+            if (sMidiEditMode) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.5f, 0.1f, 1.0f));
+            if (ImGui::Button("Edit##midi", ImVec2(Scaled(50), 0)))
+                sMidiEditMode = !sMidiEditMode;
+            if (sMidiEditMode) ImGui::PopStyleColor();
             ImGui::SameLine();
-            if (sMidiEraseMode) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
-            if (ImGui::Button("Erase##midi", ImVec2(Scaled(50), 0))) {
-                sMidiEraseMode = !sMidiEraseMode;
-                if (sMidiEraseMode) { sMidiDragMode = false; sMidiAddMode = false; }
-            }
-            if (sMidiEraseMode) ImGui::PopStyleColor();
-            ImGui::SameLine();
-            if (sMidiDragMode) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.8f, 1.0f));
-            if (ImGui::Button("Drag##midi", ImVec2(Scaled(50), 0))) {
-                sMidiDragMode = !sMidiDragMode;
-                if (sMidiDragMode) { sMidiEraseMode = false; sMidiAddMode = false; }
-            }
-            if (sMidiDragMode) ImGui::PopStyleColor();
-            if (sMidiAddMode) { ImGui::SameLine(); ImGui::TextColored(ImVec4(0.4f,1,0.5f,1), "Click to add"); }
-            if (sMidiEraseMode) { ImGui::SameLine(); ImGui::TextColored(ImVec4(1,0.4f,0.4f,1), "Click to delete"); }
-            if (sMidiDragMode) { ImGui::SameLine(); ImGui::TextColored(ImVec4(0.4f,0.8f,1,1), "Drag note ends"); }
+            if (sMidiEditMode)
+                ImGui::TextColored(ImVec4(0.9f,0.7f,0.3f,1), "LMB=add/move | Edge=resize | Shift=snap | RMB=select | Del=delete");
+            else
+                ImGui::TextColored(ImVec4(0.5f,0.5f,0.5f,1), "Edit off");
             ImGui::SameLine();
             if (ImGui::Button("Delete MIDI")) {
                 sMidiFiles.erase(sMidiFiles.begin() + sSelectedMidi);

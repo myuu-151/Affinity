@@ -215,8 +215,8 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     // Pitch: baseInc = (sampleRate << 12) / outputRate gives 1:1 playback
     // Output rate = 18157 Hz (CPU_FREQ / 924)
     int baseInc = (afn_pcm_rates[smpIdx] << 12) / 18157;
-    // One-shot samples (drums): play at native rate, no pitch shift
-    if (vc->loop) {
+    // Pitch-shift all samples (note 60 = original pitch)
+    {
         // Semitone table (12-TET, 4096 = 1.0 in 12-bit fixed)
         static const u16 semitone_up[12] = {
             4096, 4340, 4598, 4871, 5161, 5468,
