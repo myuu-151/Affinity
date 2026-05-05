@@ -104,6 +104,7 @@ typedef struct {
     int loopLen;       // length << 8
     int loop;          // 1 = loop (oscillators), 0 = one-shot (drums)
     int interp;        // 0 = nearest, 1 = linear interpolation
+    int gainShift;     // volume shift: 7 = normal, 6 = loud
 } SndVoice;
 
 static SndVoice snd_voices[SND_MAX_VOICES];
@@ -186,7 +187,7 @@ static void afn_sound_mix(void) {
             } else {
                 s = (int)wdata[idx];
             }
-            s = (s * vol) >> 7;
+            s = (s * vol) >> vc->gainShift;
             int m = (int)buf[i] + s;
             if (m > 127) m = 127;
             if (m < -128) m = -128;
@@ -257,6 +258,7 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     }
     vc->remaining = durSamples;
     vc->interp = (snd_seq_active >= 0) ? afn_snd_interp[snd_seq_active] : 0;
+    vc->gainShift = (snd_seq_active >= 0 && afn_snd_gain[snd_seq_active]) ? 6 : 7;
     vc->active = 1;
 }
 
