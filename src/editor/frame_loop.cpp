@@ -943,6 +943,7 @@ struct SoundInstance {
     int midiIdx = -1;           // index into sMidiFiles (-1 = none)
     int channelBank[16] = {};   // per-channel sample bank override
     int volume = 100;           // master volume 0-100
+    int interpolation = 0;     // 0 = nearest, 1 = smooth (linear)
     std::vector<SampleOverride> overrides; // per-sample edits
 };
 static std::vector<SoundInstance> sSoundInstances;
@@ -3821,6 +3822,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "inst_begin=%s\n", si.name);
         fprintf(f, "instMidi=%d\n", si.midiIdx);
         fprintf(f, "instVol=%d\n", si.volume);
+        fprintf(f, "instInterp=%d\n", si.interpolation);
         fprintf(f, "instBanks=");
         for (int ch = 0; ch < 16; ch++) {
             if (ch > 0) fprintf(f, ",");
@@ -5312,6 +5314,7 @@ static bool LoadProject(const std::string& path)
             else if (curInst) {
                 if (sscanf(line, "instMidi=%d", &ival) == 1) curInst->midiIdx = ival;
                 else if (sscanf(line, "instVol=%d", &ival) == 1) curInst->volume = ival;
+                else if (sscanf(line, "instInterp=%d", &ival) == 1) curInst->interpolation = ival;
                 else if (strncmp(line, "instBanks=", 10) == 0) {
                     sscanf(line + 10, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
                         &curInst->channelBank[0], &curInst->channelBank[1], &curInst->channelBank[2], &curInst->channelBank[3],
@@ -10330,6 +10333,7 @@ void FrameTick(float dt)
                         ie.name = inst.name;
                         ie.ticksPerBeat = midi.ticksPerBeat;
                         ie.tempo = midi.tempo;
+                        ie.interpolation = inst.interpolation;
                         for (auto& track : midi.tracks) {
                             for (auto& n : track.notes) {
                                 int bankIdx = midi.channelBank[n.channel];
@@ -18144,6 +18148,18 @@ void FrameTick(float dt)
             }
             ImGui::PopItemWidth();
             ImGui::SliderInt("Vol##inst", &inst.volume, 0, 100, "%d%%");
+            const char* interpNames[] = { "Nearest", "Smooth" };
+            ImGui::PushItemWidth(-1);
+            if (ImGui::BeginCombo("##interp", interpNames[inst.interpolation])) {
+                for (int ii = 0; ii < 2; ii++) {
+                    if (ImGui::Selectable(interpNames[ii], inst.interpolation == ii)) {
+                        inst.interpolation = ii;
+                        sProjectDirty = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopItemWidth();
         }
 
         ImGui::End();

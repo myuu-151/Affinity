@@ -4971,6 +4971,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
             if (tpf < 1) tpf = 1;
             f << "    " << tpf << ",\n";
         }
+        f << "};\n";
+
+        f << "static const u8 afn_snd_interp[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            f << "    " << soundInstances[i].interpolation << ",\n";
+        }
         f << "};\n\n";
 
         f << "#define AFN_HAS_SOUND 1\n";

@@ -96,13 +96,14 @@ static int snd_cur_buf = 0;
 typedef struct {
     const s8* data;
     int length;
-    int pos;           // fixed 20.12
-    int inc;           // fixed 20.12
+    int pos;           // fixed 24.8
+    int inc;           // fixed 24.8
     int vol;           // 0-127
     int active;
     int remaining;     // samples left
-    int loopLen;       // length << 12
+    int loopLen;       // length << 8
     int loop;          // 1 = loop (oscillators), 0 = one-shot (drums)
+    int interp;        // 0 = nearest, 1 = linear interpolation
 } SndVoice;
 
 static SndVoice snd_voices[SND_MAX_VOICES];
@@ -172,9 +173,19 @@ static void afn_sound_mix(void) {
         int vol = vc->vol;
         int loopLen = vc->loopLen;
         int isLoop = vc->loop;
+        int useInterp = vc->interp;
         int done = 0;
         for (int i = 0; i < n; i++) {
-            int s = (int)wdata[pos >> 12];
+            int idx = pos >> 8;
+            int s;
+            if (useInterp) {
+                int frac = pos & 0xFF;
+                int s0 = (int)wdata[idx];
+                int s1 = (idx + 1 < vc->length) ? (int)wdata[idx + 1] : s0;
+                s = s0 + (((s1 - s0) * frac) >> 8);
+            } else {
+                s = (int)wdata[idx];
+            }
             s = (s * vol) >> 9;
             int m = (int)buf[i] + s;
             if (m > 127) m = 127;
@@ -205,29 +216,29 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     SndVoice* vc = &snd_voices[vi];
     vc->data = afn_pcm_ptrs[smpIdx];
     vc->length = afn_pcm_lens[smpIdx];
-    vc->loopLen = vc->length << 12; // fixed 20.12
+    vc->loopLen = vc->length << 8; // fixed 24.8
 #ifdef AFN_PCM_HAS_LOOP
     vc->loop = afn_pcm_loop[smpIdx];
 #else
     vc->loop = (vc->length <= 64) ? 1 : 0;
 #endif
     vc->pos = 0;
-    // Pitch: baseInc = (sampleRate << 12) / outputRate gives 1:1 playback
+    // Pitch: baseInc = (sampleRate << 8) / outputRate gives 1:1 playback
     // Output rate = 18157 Hz (CPU_FREQ / 924)
-    int baseInc = (afn_pcm_rates[smpIdx] << 12) / 18157;
+    int baseInc = (afn_pcm_rates[smpIdx] << 8) / 18157;
     // Pitch-shift all samples (note 60 = original pitch)
     {
-        // Semitone table (12-TET, 4096 = 1.0 in 12-bit fixed)
+        // Semitone table (12-TET, 256 = 1.0 in 8-bit fixed)
         static const u16 semitone_up[12] = {
-            4096, 4340, 4598, 4871, 5161, 5468,
-            5793, 6137, 6502, 6889, 7298, 7732
+            256, 271, 287, 304, 323, 342,
+            362, 384, 406, 431, 456, 483
         };
         int shift = note - 60;
         int octaves = 0;
         int semi = shift;
         while (semi >= 12) { semi -= 12; octaves++; }
         while (semi < 0) { semi += 12; octaves--; }
-        baseInc = (baseInc * semitone_up[semi]) >> 12;
+        baseInc = (baseInc * semitone_up[semi]) >> 8;
         if (octaves > 0) baseInc <<= octaves;
         else if (octaves < 0) baseInc >>= (-octaves);
     }
@@ -240,6 +251,7 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     int durSamples = (durTicks * SND_BUF_SIZE) / (tpf > 0 ? tpf : 1);
     if (durSamples < SND_BUF_SIZE) durSamples = SND_BUF_SIZE; // minimum 1 frame
     vc->remaining = durSamples;
+    vc->interp = (snd_seq_active >= 0) ? afn_snd_interp[snd_seq_active] : 0;
     vc->active = 1;
 }
 
