@@ -186,7 +186,7 @@ static void afn_sound_mix(void) {
             } else {
                 s = (int)wdata[idx];
             }
-            s = (s * vol) >> 9;
+            s = (s * vol) >> 7;
             int m = (int)buf[i] + s;
             if (m > 127) m = 127;
             if (m < -128) m = -128;
