@@ -250,6 +250,11 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     int tpf = afn_snd_tpf[snd_seq_active >= 0 ? snd_seq_active : 0];
     int durSamples = (durTicks * SND_BUF_SIZE) / (tpf > 0 ? tpf : 1);
     if (durSamples < SND_BUF_SIZE) durSamples = SND_BUF_SIZE; // minimum 1 frame
+    // For one-shot samples, ensure remaining covers the full sample playback
+    if (!vc->loop) {
+        int smpDur = (vc->length << 8) / (baseInc > 0 ? baseInc : 1);
+        if (smpDur > durSamples) durSamples = smpDur;
+    }
     vc->remaining = durSamples;
     vc->interp = (snd_seq_active >= 0) ? afn_snd_interp[snd_seq_active] : 0;
     vc->active = 1;
