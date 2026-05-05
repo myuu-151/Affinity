@@ -87,54 +87,52 @@ static void afn_stop_sound(void);
 // ---------------------------------------------------------------------------
 #ifdef AFN_HAS_SOUND
 
-#define SND_BUF_SIZE 304   // samples per VBlank (~16384/60 ≈ 273, pad to 304 for alignment)
+#define SND_BUF_SIZE 304   // samples per VBlank (16384/~59.7 ≈ 274, +10% margin)
 #define SND_MAX_VOICES 4
 
 // Double buffer: DMA plays from one half while we mix into the other
 static s8 snd_buf[2][SND_BUF_SIZE] __attribute__((aligned(4)));
-static int snd_cur_buf = 0; // buffer currently being PLAYED by DMA (0 or 1)
+static int snd_cur_buf = 0;
 
 typedef struct {
     const s8* data;
-    int length;        // total sample length (in samples)
-    int pos;           // current playback position (fixed 20.12)
-    int inc;           // pitch increment (fixed 20.12)
-    int vol;           // volume 0-128
+    int length;
+    int pos;           // fixed 20.12
+    int inc;           // fixed 20.12
+    int vol;           // 0-127
     int active;
-    int remaining;     // samples left to play (counts down each mix)
-    int loopLen;       // loop length in fixed 20.12 (length << 12)
+    int remaining;     // samples left
+    int loopLen;       // length << 12
 } SndVoice;
 
 static SndVoice snd_voices[SND_MAX_VOICES];
 
-// Sequence playback state per instance
-static int snd_seq_active = -1;  // which instance is playing (-1 = none)
-static int snd_seq_tick = 0;     // current tick position
-static int snd_seq_next = 0;     // next note index to check
+static int snd_seq_active = -1;
+static int snd_seq_tick = 0;
+static int snd_seq_next = 0;
+static int snd_initialized = 0;
 
 static void afn_sound_init(void) {
-    // Clear both buffers
+    if (snd_initialized) return;
+    snd_initialized = 1;
     for (int i = 0; i < SND_BUF_SIZE; i++) {
         snd_buf[0][i] = 0;
         snd_buf[1][i] = 0;
     }
-    // Enable sound master
     REG_SNDSTAT = SSTAT_ENABLE;
-    // DMA Sound A: full volume, use Timer 0, output to both L+R, reset FIFO
     REG_SNDDSCNT = SDS_A100 | SDS_AL | SDS_AR | SDS_ATMR0 | SDS_ARESET;
-    // Timer 0: 16384 Hz (CPU=16777216, 16777216/16384 = 1024 cycles)
     REG_TM0CNT_H = 0;
     REG_TM0CNT_L = 65536 - 1024;
     REG_TM0CNT_H = TM_ENABLE;
-    // Start DMA1 pointing to buffer 0
     snd_cur_buf = 0;
-    REG_DMA1CNT = 0; // disable first
+    REG_DMA1CNT = 0;
     REG_DMA1SAD = (u32)snd_buf[0];
     REG_DMA1DAD = (u32)&REG_FIFO_A;
     REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
 }
 
 static void afn_play_sound(int instanceId) {
+    afn_sound_init();
     snd_seq_active = instanceId;
     snd_seq_tick = 0;
     snd_seq_next = 0;
@@ -146,43 +144,40 @@ static void afn_stop_sound(void) {
         snd_voices[i].active = 0;
 }
 
-// Called at VBlank: swap DMA to the buffer we just finished mixing,
-// then mix the next frame into the other buffer.
-IWRAM_CODE static void afn_sound_mix(void) {
-    // 1) Point DMA to the buffer we just mixed (cur_buf ^ 1 was being mixed last frame)
-    int play = snd_cur_buf ^ 1; // the one we mixed last frame
-    REG_DMA1CNT = 0; // disable DMA
+// Simple mixer: direct to s8, no 16-bit accum, no envelope
+static void afn_sound_mix(void) {
+    if (!snd_initialized) return;
+
+    // Swap buffers: stop DMA, re-point to finished buffer, restart
+    int play = snd_cur_buf;
+    snd_cur_buf ^= 1;
+    REG_DMA1CNT = 0;
     REG_DMA1SAD = (u32)snd_buf[play];
+    REG_DMA1DAD = (u32)&REG_FIFO_A;
     REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
-    snd_cur_buf = play; // now DMA is playing 'play'
 
-    // 2) Mix into the other buffer (the one DMA is NOT reading)
-    int mix = snd_cur_buf ^ 1;
-    s8* buf = snd_buf[mix];
+    // Mix into idle buffer (snd_cur_buf is the one NOT playing)
+    s8* buf = snd_buf[snd_cur_buf];
+    u32* b32 = (u32*)buf;
+    for (int i = 0; i < SND_BUF_SIZE / 4; i++) b32[i] = 0;
 
-    // Clear with 32-bit writes for speed
-    u32* buf32 = (u32*)buf;
-    for (int i = 0; i < SND_BUF_SIZE / 4; i++) buf32[i] = 0;
-
-    // Mix active voices (looping single-cycle waveforms)
     for (int v = 0; v < SND_MAX_VOICES; v++) {
         SndVoice* vc = &snd_voices[v];
         if (!vc->active) continue;
-        int samplesThisBuf = SND_BUF_SIZE;
-        if (vc->remaining < samplesThisBuf) samplesThisBuf = vc->remaining;
-        for (int i = 0; i < samplesThisBuf; i++) {
-            int smpPos = vc->pos >> 12;
-            int sample = (int)vc->data[smpPos];
-            int mixed = (int)buf[i] + ((sample * vc->vol) >> 7);
-            if (mixed > 127) mixed = 127;
-            if (mixed < -128) mixed = -128;
-            buf[i] = (s8)mixed;
+        int n = vc->remaining < SND_BUF_SIZE ? vc->remaining : SND_BUF_SIZE;
+        for (int i = 0; i < n; i++) {
+            int s = (int)vc->data[vc->pos >> 12];
+            // Attenuate: sample * vol / 128, then >> 2 for headroom
+            s = (s * vc->vol) >> 9;
+            int m = (int)buf[i] + s;
+            if (m > 127) m = 127;
+            if (m < -128) m = -128;
+            buf[i] = (s8)m;
             vc->pos += vc->inc;
-            // Wrap around for looping
             if (vc->pos >= vc->loopLen)
                 vc->pos -= vc->loopLen;
         }
-        vc->remaining -= samplesThisBuf;
+        vc->remaining -= n;
         if (vc->remaining <= 0) vc->active = 0;
     }
 }
@@ -4144,9 +4139,6 @@ int main(void)
     init_divLUT();
 #endif
 
-    // --- DMA Audio init ---
-    afn_sound_init();
-
     // --- Camera defaults ---
     cam_fov = 128;
 #ifdef AFFINITY_HAS_SPRITES
@@ -4289,7 +4281,7 @@ int main(void)
     perf_mode = 10; // coverage mode by default when editor enables it
 #endif
 
-    // --- Main loop ---
+    // --- Main loop --- (sound init is lazy, triggered by first afn_play_sound)
     while (1)
     {
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
