@@ -459,6 +459,7 @@ struct GBASoundSampleExport {
     std::string name;
     std::vector<int8_t> data;
     int sampleRate = 16384;
+    bool loop = true;
 };
 
 // Sound export: a note event in a sequence

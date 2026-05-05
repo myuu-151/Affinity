@@ -102,6 +102,7 @@ typedef struct {
     int active;
     int remaining;     // samples left
     int loopLen;       // length << 12
+    int loop;          // 1 = loop (oscillators), 0 = one-shot (drums)
 } SndVoice;
 
 static SndVoice snd_voices[SND_MAX_VOICES];
@@ -170,6 +171,8 @@ static void afn_sound_mix(void) {
         int inc = vc->inc;
         int vol = vc->vol;
         int loopLen = vc->loopLen;
+        int isLoop = vc->loop;
+        int done = 0;
         for (int i = 0; i < n; i++) {
             int s = (int)wdata[pos >> 12];
             s = (s * vol) >> 9;
@@ -178,10 +181,13 @@ static void afn_sound_mix(void) {
             if (m < -128) m = -128;
             buf[i] = (s8)m;
             pos += inc;
-            if (pos >= loopLen)
-                pos -= loopLen;
+            if (pos >= loopLen) {
+                if (isLoop) pos -= loopLen;
+                else { done = 1; break; }
+            }
         }
         vc->pos = pos;
+        if (done) { vc->active = 0; continue; }
         vc->remaining -= n;
         if (vc->remaining <= 0) vc->active = 0;
     }
@@ -200,27 +206,31 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     vc->data = afn_pcm_ptrs[smpIdx];
     vc->length = afn_pcm_lens[smpIdx];
     vc->loopLen = vc->length << 12; // fixed 20.12
+#ifdef AFN_PCM_HAS_LOOP
+    vc->loop = afn_pcm_loop[smpIdx];
+#else
+    vc->loop = (vc->length <= 64) ? 1 : 0;
+#endif
     vc->pos = 0;
     // Pitch: baseInc = (sampleRate << 12) / outputRate gives 1:1 playback
     // Output rate = 18157 Hz (CPU_FREQ / 924)
     int baseInc = (afn_pcm_rates[smpIdx] << 12) / 18157;
-    // Semitone table (12-TET, 4096 = 1.0 in 12-bit fixed)
-    // Precomputed: ratio[i] = 4096 * 2^(i/12) for i=0..11
-    static const u16 semitone_up[12] = {
-        4096, 4340, 4598, 4871, 5161, 5468,
-        5793, 6137, 6502, 6889, 7298, 7732
-    };
-    int shift = note - 60;
-    int octaves = 0;
-    int semi = shift;
-    // Normalize to 0..11 semitones + octave shifts
-    while (semi >= 12) { semi -= 12; octaves++; }
-    while (semi < 0) { semi += 12; octaves--; }
-    // Apply semitone ratio
-    baseInc = (baseInc * semitone_up[semi]) >> 12;
-    // Apply octave shifts
-    if (octaves > 0) baseInc <<= octaves;
-    else if (octaves < 0) baseInc >>= (-octaves);
+    // One-shot samples (drums): play at native rate, no pitch shift
+    if (vc->loop) {
+        // Semitone table (12-TET, 4096 = 1.0 in 12-bit fixed)
+        static const u16 semitone_up[12] = {
+            4096, 4340, 4598, 4871, 5161, 5468,
+            5793, 6137, 6502, 6889, 7298, 7732
+        };
+        int shift = note - 60;
+        int octaves = 0;
+        int semi = shift;
+        while (semi >= 12) { semi -= 12; octaves++; }
+        while (semi < 0) { semi += 12; octaves--; }
+        baseInc = (baseInc * semitone_up[semi]) >> 12;
+        if (octaves > 0) baseInc <<= octaves;
+        else if (octaves < 0) baseInc >>= (-octaves);
+    }
     if (baseInc < 1) baseInc = 1;
     vc->inc = baseInc;
     vc->vol = vel; // 0-127

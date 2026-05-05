@@ -10140,33 +10140,52 @@ void FrameTick(float dt)
                 std::vector<GBASoundSampleExport> exportSoundSamples;
                 std::vector<GBASoundInstanceExport> exportSoundInstances;
                 {
+                    // Remap: for normal banks, bankIdx -> exportIdx
+                    // For drum kits: (bankIdx << 8 | note) -> exportIdx
+                    std::map<int, int> sampleRemap;
+
                     // Collect all samples used by any sound instance
-                    // Use the MIDI file's channelBank (what the user edits in the sound tab)
-                    std::set<int> usedSamples;
                     for (auto& inst : sSoundInstances) {
                         if (inst.midiIdx < 0 || inst.midiIdx >= (int)sMidiFiles.size()) continue;
                         auto& midi = sMidiFiles[inst.midiIdx];
-                        for (int ch = 0; ch < 16; ch++) {
-                            if (midi.channelUsed[ch])
-                                usedSamples.insert(midi.channelBank[ch]);
+                        for (auto& track : midi.tracks) {
+                            for (auto& n : track.notes) {
+                                int bankIdx = midi.channelBank[n.channel];
+                                if (bankIdx < 0 || bankIdx >= (int)sSoundBank.size()) continue;
+                                auto& smp = sSoundBank[bankIdx];
+                                if (smp.isDrumKit) {
+                                    // Each drum note is a separate sample
+                                    int key = (bankIdx << 8) | (n.note & 127);
+                                    if (sampleRemap.count(key)) continue;
+                                    auto& hit = smp.drumHits[n.note & 127];
+                                    if (hit.data.empty()) continue;
+                                    int exportIdx = (int)exportSoundSamples.size();
+                                    sampleRemap[key] = exportIdx;
+                                    GBASoundSampleExport se;
+                                    se.name = std::string(smp.name) + "_" + std::to_string(n.note);
+                                    se.data = hit.data;
+                                    se.sampleRate = hit.sampleRate;
+                                    se.loop = false;
+                                    exportSoundSamples.push_back(std::move(se));
+                                } else {
+                                    // Normal waveform bank
+                                    if (sampleRemap.count(bankIdx)) continue;
+                                    int exportIdx = (int)exportSoundSamples.size();
+                                    sampleRemap[bankIdx] = exportIdx;
+                                    GBASoundSampleExport se;
+                                    se.name = smp.name;
+                                    se.data = smp.data;
+                                    if ((int)se.data.size() <= 64 && !se.data.empty()) {
+                                        se.sampleRate = (int)se.data.size() * 262;
+                                        se.loop = true;
+                                    } else {
+                                        se.sampleRate = smp.sampleRate;
+                                        se.loop = (int)se.data.size() <= 64;
+                                    }
+                                    exportSoundSamples.push_back(std::move(se));
+                                }
+                            }
                         }
-                    }
-                    // Build sample export list with index remapping
-                    std::map<int, int> sampleRemap; // old bank idx -> export idx
-                    for (int idx : usedSamples) {
-                        if (idx < 0 || idx >= (int)sSoundBank.size()) continue;
-                        int exportIdx = (int)exportSoundSamples.size();
-                        sampleRemap[idx] = exportIdx;
-                        GBASoundSampleExport se;
-                        se.name = sSoundBank[idx].name;
-                        se.data = sSoundBank[idx].data;
-                        // Single-cycle waveforms (≤64 samples): tune so note 60 = middle C (262 Hz)
-                        // rate = length * 262 → baseInc gives exactly 262 Hz at note 60
-                        if ((int)se.data.size() <= 64)
-                            se.sampleRate = (int)se.data.size() * 262;
-                        else
-                            se.sampleRate = sSoundBank[idx].sampleRate;
-                        exportSoundSamples.push_back(std::move(se));
                     }
                     // Build instance exports
                     for (int i = 0; i < (int)sSoundInstances.size(); i++) {
@@ -10177,25 +10196,26 @@ void FrameTick(float dt)
                         ie.name = inst.name;
                         ie.ticksPerBeat = midi.ticksPerBeat;
                         ie.tempo = midi.tempo;
-                        // Merge all tracks into flat note list
                         for (auto& track : midi.tracks) {
                             for (auto& n : track.notes) {
+                                int bankIdx = midi.channelBank[n.channel];
+                                if (bankIdx < 0 || bankIdx >= (int)sSoundBank.size()) continue;
                                 GBASoundNoteExport ne;
                                 ne.tick = n.tick;
                                 ne.channel = n.channel;
                                 ne.note = n.note;
                                 ne.velocity = n.velocity;
                                 ne.duration = n.duration;
-                                int bankIdx = midi.channelBank[n.channel];
-                                auto it = sampleRemap.find(bankIdx);
-                                ne.sampleIdx = (it != sampleRemap.end()) ? it->second : 0;
+                                // Look up correct sample index
+                                int key = sSoundBank[bankIdx].isDrumKit ? ((bankIdx << 8) | (n.note & 127)) : bankIdx;
+                                auto it = sampleRemap.find(key);
+                                if (it == sampleRemap.end()) continue; // skip if sample not found
+                                ne.sampleIdx = it->second;
                                 ie.notes.push_back(ne);
                             }
                         }
-                        // Sort by tick
                         std::sort(ie.notes.begin(), ie.notes.end(),
                             [](const GBASoundNoteExport& a, const GBASoundNoteExport& b) { return a.tick < b.tick; });
-                        // Record sample indices used
                         std::set<int> instSamples;
                         for (auto& n : ie.notes) instSamples.insert(n.sampleIdx);
                         for (int si : instSamples) ie.sampleIndices.push_back(si);
