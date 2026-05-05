@@ -9906,8 +9906,15 @@ void FrameTick(float dt)
                 BuildTarget target = sBuildTarget;
 
                 // Build visual script export from node graph
+                // If editing a blueprint, save it back and restore scene script for export
+                const std::vector<VsNode>* sceneNodes = &sVsNodes;
+                const std::vector<VsLink>* sceneLinks = &sVsLinks;
+                if (sVsEditSource == VsEditSource::Blueprint && sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size()) {
+                    sceneNodes = &sMapScenes[sMapSelectedScene].vsNodes;
+                    sceneLinks = &sMapScenes[sMapSelectedScene].vsLinks;
+                }
                 GBAScriptExport exportScript;
-                for (auto& n : sVsNodes)
+                for (auto& n : *sceneNodes)
                 {
                     GBAScriptNodeExport sn;
                     sn.id = n.id;
@@ -9925,7 +9932,7 @@ void FrameTick(float dt)
                     }
                     exportScript.nodes.push_back(sn);
                 }
-                for (auto& l : sVsLinks)
+                for (auto& l : *sceneLinks)
                 {
                     GBAScriptLinkExport sl;
                     sl.fromNodeId  = l.from.nodeId;
@@ -10059,6 +10066,26 @@ void FrameTick(float dt)
                     if (el.runtimeMode == 0) { addElemInst(0); addElemInst(1); } // Both
                     else if (el.runtimeMode == 1) addElemInst(0); // Mode 4 Only
                     else if (el.runtimeMode == 2) addElemInst(1); // Mode 0 Only
+                }
+
+                // Collect TmScene-level blueprint instances (sceneMode=1: Mode0/tilemap)
+                for (int si2 = 0; si2 < (int)sTmScenes.size(); si2++) {
+                    const TmScene& sc = sTmScenes[si2];
+                    if (sc.blueprintIdx < 0 || sc.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
+                    const BlueprintAsset& bp = sBlueprintAssets[sc.blueprintIdx];
+                    GBABlueprintInstanceExport inst;
+                    inst.blueprintIdx = sc.blueprintIdx;
+                    inst.spriteIdx = -1;
+                    inst.tmObjIdx = -1;
+                    inst.sceneMode = 1; // Mode 0
+                    inst.paramCount = bp.paramCount;
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        inst.paramValues[pi] = bp.params[pi].defaultInt;
+                        for (int oi = 0; oi < sc.instanceParamCount; oi++)
+                            if (sc.instanceParams[oi].paramIdx == pi)
+                                inst.paramValues[pi] = sc.instanceParams[oi].value;
+                    }
+                    exportBpInstances.push_back(inst);
                 }
 
                 // Collect tilemap scene data for Mode 0 export
