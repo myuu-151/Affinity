@@ -10539,8 +10539,8 @@ void FrameTick(float dt)
                         for (const auto& obj : sc.objects)
                         {
                             GBATmObjectExport oe;
-                            oe.tileX = obj.tileX * sc.pixelScale;
-                            oe.tileY = obj.tileY * sc.pixelScale;
+                            oe.tileX = obj.tileX;
+                            oe.tileY = obj.tileY;
                             oe.type = (int)obj.type;
                             oe.spriteAssetIdx = obj.spriteAssetIdx;
                             oe.teleportScene = obj.teleportScene;
