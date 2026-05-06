@@ -4017,8 +4017,9 @@ static void mode0_init_scene(int tmIdx)
         }
     }
 
-    // Reload OBJ tiles
+    // Reload OBJ tiles (clobbers font VRAM area)
     init_obj_sprites();
+    hud_font_loaded = 0;
 
     // Player init
     tm_move_dx = 0; tm_move_dy = 0; tm_move_timer = 0;
@@ -4089,6 +4090,8 @@ static void scene_load(int sceneMode, int sceneIdx)
     afn_dlg_open = 0;
     player_moving = 0;
     { int ei; for (ei = 0; ei < 4; ei++) { afn_hud_visible[ei] = 0; afn_hud_prev_visible[ei] = 0; afn_hud_anim_frame[ei] = 0; } }
+    hud_font_loaded = 0;
+    tm_hud_was_visible = 0;
     { int i; for (i = 0; i < 16; i++) {
         afn_hp[i] = 100; afn_max_hp[i] = 100;
         afn_collision_enabled[i] = 1; afn_sprite_alpha[i] = 16;
@@ -4244,7 +4247,7 @@ int main(void)
     { int i; for (i = 0; i < 16; i++) {
         afn_hp[i] = 100; afn_max_hp[i] = 100; afn_collision_enabled[i] = 1; afn_sprite_alpha[i] = 16;
     } }
-    afn_text_color = 0x7FFF;
+    afn_text_color = 0x0000; // black text on white background
 #endif
 
     // --- Initial scene load (uses AFN_START_MODE from export) ---
