@@ -4701,11 +4701,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
             for (auto& bp : blueprints) maxParams = std::max(maxParams, (int)bp.params.size());
             if (maxParams < 1) maxParams = 1;
 
-            f << "static const struct { int bpIdx; int sprIdx; int tmObjIdx; int sceneMode; int sceneIdx; int params[" << maxParams << "]; }\n";
+            f << "static const struct { int bpIdx; int sprIdx; int tmObjIdx; int sceneMode; unsigned int sceneMask; int params[" << maxParams << "]; }\n";
             f << "    afn_bp_instances[" << (int)bpInstances.size() << "] = {\n";
             for (int ii = 0; ii < (int)bpInstances.size(); ii++) {
                 const auto& inst = bpInstances[ii];
-                f << "    {" << inst.blueprintIdx << ", " << inst.spriteIdx << ", " << inst.tmObjIdx << ", " << inst.sceneMode << ", " << inst.sceneIdx << ", {";
+                f << "    {" << inst.blueprintIdx << ", " << inst.spriteIdx << ", " << inst.tmObjIdx << ", " << inst.sceneMode << ", 0x" << std::hex << inst.sceneMask << std::dec << "u, {";
                 for (int pi = 0; pi < maxParams; pi++) {
                     if (pi > 0) f << ",";
                     f << ((pi < inst.paramCount) ? inst.paramValues[pi] : 0);
@@ -4718,7 +4718,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "static inline void afn_bp_dispatch_start(void) {\n";
             f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
             f << "    if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;\n";
-            f << "    if (afn_bp_instances[i].sceneIdx >= 0 && afn_bp_instances[i].sceneIdx != tm_scene_idx) continue;\n";
+            f << "    if (afn_bp_instances[i].sceneMask != 0xFFFFFFFFu && !(afn_bp_instances[i].sceneMask & (1u << tm_scene_idx))) continue;\n";
             f << "    switch (afn_bp_instances[i].bpIdx) {\n";
             for (int bi = 0; bi < (int)blueprints.size(); bi++) {
                 int pc = (int)blueprints[bi].params.size();
@@ -4732,7 +4732,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 f << "static inline void afn_bp_dispatch_" << suffix << "(void) {\n";
                 f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
                 f << "    if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;\n";
-                f << "    if (afn_bp_instances[i].sceneIdx >= 0 && afn_bp_instances[i].sceneIdx != tm_scene_idx) continue;\n";
+                f << "    if (afn_bp_instances[i].sceneMask != 0xFFFFFFFFu && !(afn_bp_instances[i].sceneMask & (1u << tm_scene_idx))) continue;\n";
                 f << "    if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;\n";
                 f << "    afn_bp_cur_tm_obj = afn_bp_instances[i].tmObjIdx;\n";
                 f << "    afn_bp_cur_spr_idx = afn_bp_instances[i].sprIdx;\n";
@@ -4754,7 +4754,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "static inline void afn_bp_dispatch_collision(void) {\n";
             f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
             f << "    if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;\n";
-            f << "    if (afn_bp_instances[i].sceneIdx >= 0 && afn_bp_instances[i].sceneIdx != tm_scene_idx) continue;\n";
+            f << "    if (afn_bp_instances[i].sceneMask != 0xFFFFFFFFu && !(afn_bp_instances[i].sceneMask & (1u << tm_scene_idx))) continue;\n";
             f << "    if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;\n";
             f << "    if (afn_bp_instances[i].sprIdx != afn_collided_sprite) continue;\n";
             f << "    switch (afn_bp_instances[i].bpIdx) {\n";
@@ -4770,7 +4770,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "static inline void afn_bp_dispatch_collision2d(void) {\n";
             f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
             f << "    if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;\n";
-            f << "    if (afn_bp_instances[i].sceneIdx >= 0 && afn_bp_instances[i].sceneIdx != tm_scene_idx) continue;\n";
+            f << "    if (afn_bp_instances[i].sceneMask != 0xFFFFFFFFu && !(afn_bp_instances[i].sceneMask & (1u << tm_scene_idx))) continue;\n";
             f << "    if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;\n";
             f << "    if (afn_bp_instances[i].tmObjIdx != afn_collided_tm_obj) continue;\n";
             f << "    switch (afn_bp_instances[i].bpIdx) {\n";

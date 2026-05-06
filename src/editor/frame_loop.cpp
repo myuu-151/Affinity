@@ -2610,8 +2610,8 @@ struct HudElement {
     int layer = 0;           // draw order (higher = on top)
     int blueprintIdx = -1;   // blueprint instance (-1 = none)
     int runtimeMode = 0;     // 0=Both, 1=Mode 4 Only, 2=Mode 0 Only
-    int mode0SceneIdx = -1;  // -1=All Mode 0 scenes, >=0 = specific scene
-    int mode4SceneIdx = -1;  // -1=All Mode 4 scenes, >=0 = specific scene
+    uint32_t mode0SceneMask = 0xFFFFFFFF; // bitmask: bit N = runs on Mode 0 scene N
+    uint32_t mode4SceneMask = 0xFFFFFFFF; // bitmask: bit N = runs on Mode 4 scene N
     // Composite pieces
     std::vector<HudPiece> pieces;
     int selectedPiece = -1;  // currently selected piece index (editor only)
@@ -3766,10 +3766,10 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "elemBp=%d\n", el.blueprintIdx);
         if (el.runtimeMode != 0)
             fprintf(f, "elemMode=%d\n", el.runtimeMode);
-        if (el.mode0SceneIdx >= 0)
-            fprintf(f, "elemM0Scene=%d\n", el.mode0SceneIdx);
-        if (el.mode4SceneIdx >= 0)
-            fprintf(f, "elemM4Scene=%d\n", el.mode4SceneIdx);
+        if (el.mode0SceneMask != 0xFFFFFFFF)
+            fprintf(f, "elemM0Mask=%x\n", el.mode0SceneMask);
+        if (el.mode4SceneMask != 0xFFFFFFFF)
+            fprintf(f, "elemM4Mask=%x\n", el.mode4SceneMask);
         if (el.layerPieces != 0 || el.layerSprites != 1 || el.layerText != 2 || el.layerCursor != 3)
             fprintf(f, "elemLayers=%d|%d|%d|%d\n", el.layerPieces, el.layerSprites, el.layerText, el.layerCursor);
         if (!el.keyframes.empty()) {
@@ -4823,11 +4823,17 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "elemMode=%d", &ival) == 1 && !sHudElements.empty()) {
                 sHudElements.back().runtimeMode = ival;
             }
-            else if (sscanf(line, "elemM0Scene=%d", &ival) == 1 && !sHudElements.empty()) {
-                sHudElements.back().mode0SceneIdx = ival;
+            else if (strncmp(line, "elemM0Mask=", 11) == 0 && !sHudElements.empty()) {
+                unsigned int mask; if (sscanf(line + 11, "%x", &mask) == 1) sHudElements.back().mode0SceneMask = mask;
             }
-            else if (sscanf(line, "elemM4Scene=%d", &ival) == 1 && !sHudElements.empty()) {
-                sHudElements.back().mode4SceneIdx = ival;
+            else if (strncmp(line, "elemM4Mask=", 11) == 0 && !sHudElements.empty()) {
+                unsigned int mask; if (sscanf(line + 11, "%x", &mask) == 1) sHudElements.back().mode4SceneMask = mask;
+            }
+            else if (strncmp(line, "elemM0Scene=", 12) == 0 && !sHudElements.empty()) {
+                int idx; if (sscanf(line + 12, "%d", &idx) == 1 && idx >= 0) sHudElements.back().mode0SceneMask = (1u << idx);
+            }
+            else if (strncmp(line, "elemM4Scene=", 12) == 0 && !sHudElements.empty()) {
+                int idx; if (sscanf(line + 12, "%d", &idx) == 1 && idx >= 0) sHudElements.back().mode4SceneMask = (1u << idx);
             }
             else if (strncmp(line, "elemLayers=", 11) == 0 && !sHudElements.empty()) {
                 HudElement& hel = sHudElements.back();
@@ -10377,7 +10383,7 @@ void FrameTick(float dt)
                     inst.spriteIdx = si;
                     inst.tmObjIdx = -1;
                     inst.sceneMode = 0; // Mode 4
-                    inst.sceneIdx = -1; // all Mode 4 scenes
+                    inst.sceneMask = 0xFFFFFFFF; // all Mode 4 scenes
                     inst.paramCount = bp.paramCount;
                     for (int pi = 0; pi < bp.paramCount; pi++) {
                         inst.paramValues[pi] = bp.params[pi].defaultInt;
@@ -10399,7 +10405,7 @@ void FrameTick(float dt)
                         inst.spriteIdx = -1;
                         inst.tmObjIdx = oi;
                         inst.sceneMode = 1; // Mode 0
-                        inst.sceneIdx = si; // this tilemap scene
+                        inst.sceneMask = (1u << si); // this tilemap scene
                         inst.paramCount = bp.paramCount;
                         for (int pi = 0; pi < bp.paramCount; pi++) {
                             inst.paramValues[pi] = bp.params[pi].defaultInt;
@@ -10420,7 +10426,7 @@ void FrameTick(float dt)
                     inst.spriteIdx = -1;
                     inst.tmObjIdx = -1;
                     inst.sceneMode = 0; // Mode 4
-                    inst.sceneIdx = si; // this Mode 4 scene
+                    inst.sceneMask = (1u << si); // this Mode 4 scene
                     inst.paramCount = bp.paramCount;
                     for (int pi = 0; pi < bp.paramCount; pi++) {
                         inst.paramValues[pi] = bp.params[pi].defaultInt;
@@ -10436,21 +10442,21 @@ void FrameTick(float dt)
                     const HudElement& el = sHudElements[ei];
                     if (el.blueprintIdx < 0 || el.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
                     const BlueprintAsset& bp = sBlueprintAssets[el.blueprintIdx];
-                    auto addElemInst = [&](int mode, int scIdx) {
+                    auto addElemInst = [&](int mode, uint32_t mask) {
                         GBABlueprintInstanceExport inst;
                         inst.blueprintIdx = el.blueprintIdx;
                         inst.spriteIdx = -1;
                         inst.tmObjIdx = -1;
                         inst.sceneMode = mode;
-                        inst.sceneIdx = scIdx;
+                        inst.sceneMask = mask;
                         inst.paramCount = bp.paramCount;
                         for (int pi = 0; pi < bp.paramCount; pi++)
                             inst.paramValues[pi] = bp.params[pi].defaultInt;
                         exportBpInstances.push_back(inst);
                     };
-                    if (el.runtimeMode == 0) { addElemInst(0, el.mode4SceneIdx); addElemInst(1, el.mode0SceneIdx); } // Both
-                    else if (el.runtimeMode == 1) addElemInst(0, el.mode4SceneIdx); // Mode 4 Only
-                    else if (el.runtimeMode == 2) addElemInst(1, el.mode0SceneIdx); // Mode 0 Only
+                    if (el.runtimeMode == 0) { addElemInst(0, el.mode4SceneMask); addElemInst(1, el.mode0SceneMask); } // Both
+                    else if (el.runtimeMode == 1) addElemInst(0, el.mode4SceneMask); // Mode 4 Only
+                    else if (el.runtimeMode == 2) addElemInst(1, el.mode0SceneMask); // Mode 0 Only
                 }
 
                 // Collect TmScene-level blueprint instances (sceneMode=1: Mode0/tilemap)
@@ -10463,7 +10469,7 @@ void FrameTick(float dt)
                     inst.spriteIdx = -1;
                     inst.tmObjIdx = -1;
                     inst.sceneMode = 1; // Mode 0
-                    inst.sceneIdx = si2; // this tilemap scene
+                    inst.sceneMask = (1u << si2); // this tilemap scene
                     inst.paramCount = bp.paramCount;
                     for (int pi = 0; pi < bp.paramCount; pi++) {
                         inst.paramValues[pi] = bp.params[pi].defaultInt;
@@ -19947,10 +19953,10 @@ void FrameTick(float dt)
                         fprintf(cf, "elemVisible=%d\n", el.visible ? 1 : 0);
                         fprintf(cf, "elemBp=%d\n", el.blueprintIdx);
                         fprintf(cf, "elemMode=%d\n", el.runtimeMode);
-                        if (el.mode0SceneIdx >= 0)
-                            fprintf(cf, "elemM0Scene=%d\n", el.mode0SceneIdx);
-                        if (el.mode4SceneIdx >= 0)
-                            fprintf(cf, "elemM4Scene=%d\n", el.mode4SceneIdx);
+                        if (el.mode0SceneMask != 0xFFFFFFFF)
+                            fprintf(cf, "elemM0Mask=%x\n", el.mode0SceneMask);
+                        if (el.mode4SceneMask != 0xFFFFFFFF)
+                            fprintf(cf, "elemM4Mask=%x\n", el.mode4SceneMask);
                         if (el.layerPieces != 0 || el.layerSprites != 1 || el.layerText != 2 || el.layerCursor != 3)
                             fprintf(cf, "elemLayers=%d|%d|%d|%d\n", el.layerPieces, el.layerSprites, el.layerText, el.layerCursor);
                         // Pieces
@@ -20094,8 +20100,10 @@ void FrameTick(float dt)
                             else if (sscanf(line, "elemVisible=%d", &ival2) == 1) nel.visible = ival2 != 0;
                             else if (sscanf(line, "elemBp=%d", &nel.blueprintIdx) == 1) {}
                             else if (sscanf(line, "elemMode=%d", &nel.runtimeMode) == 1) {}
-                            else if (sscanf(line, "elemM0Scene=%d", &nel.mode0SceneIdx) == 1) {}
-                            else if (sscanf(line, "elemM4Scene=%d", &nel.mode4SceneIdx) == 1) {}
+                            else if (strncmp(line, "elemM0Mask=", 11) == 0) { unsigned int m; if (sscanf(line+11,"%x",&m)==1) nel.mode0SceneMask=m; }
+                            else if (strncmp(line, "elemM4Mask=", 11) == 0) { unsigned int m; if (sscanf(line+11,"%x",&m)==1) nel.mode4SceneMask=m; }
+                            else if (strncmp(line, "elemM0Scene=", 12) == 0) { int idx; if (sscanf(line+12,"%d",&idx)==1 && idx>=0) nel.mode0SceneMask=(1u<<idx); }
+                            else if (strncmp(line, "elemM4Scene=", 12) == 0) { int idx; if (sscanf(line+12,"%d",&idx)==1 && idx>=0) nel.mode4SceneMask=(1u<<idx); }
                             else if (strncmp(line, "elemLayers=", 11) == 0) {
                                 int n = sscanf(line + 11, "%d|%d|%d|%d", &nel.layerPieces, &nel.layerSprites, &nel.layerText, &nel.layerCursor);
                                 if (n == 3) { nel.layerCursor = nel.layerText; nel.layerText = nel.layerSprites; nel.layerSprites = 1; }
@@ -20214,28 +20222,57 @@ void FrameTick(float dt)
                         sProjectDirty = true;
                 }
 
-                // Scene selector (Mode 0)
-                if (el.runtimeMode != 1 && !sTmScenes.empty()) { // show if Both or Mode 0 Only
-                    int sel0 = el.mode0SceneIdx + 1; // 0="All", 1..N=scene
-                    std::string preview0 = (sel0 == 0) ? "All" : sTmScenes[sel0-1].name;
-                    if (ImGui::BeginCombo("Mode 0 Scene", preview0.c_str())) {
-                        if (ImGui::Selectable("All", sel0 == 0)) { el.mode0SceneIdx = -1; sProjectDirty = true; }
-                        for (int si = 0; si < (int)sTmScenes.size(); si++) {
-                            if (ImGui::Selectable(sTmScenes[si].name, sel0 == si+1)) { el.mode0SceneIdx = si; sProjectDirty = true; }
+                // Scene mask (Mode 0) — collapsible dot toggles
+                if (el.runtimeMode != 1 && !sTmScenes.empty()) {
+                    bool allOn = (el.mode0SceneMask == 0xFFFFFFFF);
+                    int count = (int)sTmScenes.size();
+                    // Count enabled scenes for label
+                    int enabledCount = 0;
+                    for (int si = 0; si < count; si++) if (el.mode0SceneMask & (1u << si)) enabledCount++;
+                    char label0[64];
+                    if (allOn || enabledCount == count) snprintf(label0, sizeof(label0), "Mode 0 Scenes: All");
+                    else snprintf(label0, sizeof(label0), "Mode 0 Scenes: %d/%d", enabledCount, count);
+                    if (ImGui::TreeNode(label0)) {
+                        for (int si = 0; si < count && si < 32; si++) {
+                            bool on = (el.mode0SceneMask & (1u << si)) != 0;
+                            ImVec4 col = on ? ImVec4(0.2f, 1.0f, 0.4f, 1.0f) : ImVec4(0.3f, 0.3f, 0.3f, 1.0f);
+                            ImGui::PushStyleColor(ImGuiCol_Text, col);
+                            char dotLabel[64];
+                            snprintf(dotLabel, sizeof(dotLabel), "%s %s##m0s%d", on ? "\xe2\x97\x8f" : "\xe2\x97\x8b", sTmScenes[si].name, si);
+                            if (ImGui::Selectable(dotLabel, false, 0, ImVec2(0, 0))) {
+                                el.mode0SceneMask ^= (1u << si);
+                                if (el.mode0SceneMask == 0) el.mode0SceneMask = (1u << si); // don't allow empty
+                                sProjectDirty = true;
+                            }
+                            ImGui::PopStyleColor();
                         }
-                        ImGui::EndCombo();
+                        ImGui::TreePop();
                     }
                 }
-                // Scene selector (Mode 4)
-                if (el.runtimeMode != 2 && !sMapScenes.empty()) { // show if Both or Mode 4 Only
-                    int sel4 = el.mode4SceneIdx + 1;
-                    std::string preview4 = (sel4 == 0) ? "All" : sMapScenes[sel4-1].name;
-                    if (ImGui::BeginCombo("Mode 4 Scene", preview4.c_str())) {
-                        if (ImGui::Selectable("All", sel4 == 0)) { el.mode4SceneIdx = -1; sProjectDirty = true; }
-                        for (int si = 0; si < (int)sMapScenes.size(); si++) {
-                            if (ImGui::Selectable(sMapScenes[si].name, sel4 == si+1)) { el.mode4SceneIdx = si; sProjectDirty = true; }
+                // Scene mask (Mode 4) — collapsible dot toggles
+                if (el.runtimeMode != 2 && !sMapScenes.empty()) {
+                    bool allOn4 = (el.mode4SceneMask == 0xFFFFFFFF);
+                    int count4 = (int)sMapScenes.size();
+                    int enabledCount4 = 0;
+                    for (int si = 0; si < count4; si++) if (el.mode4SceneMask & (1u << si)) enabledCount4++;
+                    char label4[64];
+                    if (allOn4 || enabledCount4 == count4) snprintf(label4, sizeof(label4), "Mode 4 Scenes: All");
+                    else snprintf(label4, sizeof(label4), "Mode 4 Scenes: %d/%d", enabledCount4, count4);
+                    if (ImGui::TreeNode(label4)) {
+                        for (int si = 0; si < count4 && si < 32; si++) {
+                            bool on = (el.mode4SceneMask & (1u << si)) != 0;
+                            ImVec4 col = on ? ImVec4(0.2f, 1.0f, 0.4f, 1.0f) : ImVec4(0.3f, 0.3f, 0.3f, 1.0f);
+                            ImGui::PushStyleColor(ImGuiCol_Text, col);
+                            char dotLabel[64];
+                            snprintf(dotLabel, sizeof(dotLabel), "%s %s##m4s%d", on ? "\xe2\x97\x8f" : "\xe2\x97\x8b", sMapScenes[si].name, si);
+                            if (ImGui::Selectable(dotLabel, false, 0, ImVec2(0, 0))) {
+                                el.mode4SceneMask ^= (1u << si);
+                                if (el.mode4SceneMask == 0) el.mode4SceneMask = (1u << si);
+                                sProjectDirty = true;
+                            }
+                            ImGui::PopStyleColor();
                         }
-                        ImGui::EndCombo();
+                        ImGui::TreePop();
                     }
                 }
 
