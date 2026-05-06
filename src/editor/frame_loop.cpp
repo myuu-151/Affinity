@@ -8986,6 +8986,8 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     sc.pixelScale = (scaleIdx == 1) ? 2 : 1;
                     sProjectDirty = true;
                 }
+                if (sc.pixelScale == 2 && (sc.mapW > 32 || sc.mapH > 32))
+                    ImGui::TextColored(ImVec4(1,0.6f,0.2f,1), "Max 32x32 at 2x scale");
             }
             if (sc.mapW != prevW || sc.mapH != prevH)
             {
@@ -10511,12 +10513,14 @@ void FrameTick(float dt)
                                     }
                             }
 
-                            // Double the map: each cell → 2x2 block
+                            // Double the map: each cell → 2x2 block (cap at 64x64 hardware max)
                             int origW = tse.mapW, origH = tse.mapH;
-                            int newW = origW * 2, newH = origH * 2;
+                            int clampW = (origW > 32) ? 32 : origW;
+                            int clampH = (origH > 32) ? 32 : origH;
+                            int newW = clampW * 2, newH = clampH * 2;
                             std::vector<uint16_t> newMap(newW * newH, 0);
-                            for (int y = 0; y < origH; y++)
-                                for (int x = 0; x < origW; x++)
+                            for (int y = 0; y < clampH; y++)
+                                for (int x = 0; x < clampW; x++)
                                 {
                                     uint16_t se = tse.tileIndices[y * origW + x];
                                     int origTi2 = se & 0x3FF;

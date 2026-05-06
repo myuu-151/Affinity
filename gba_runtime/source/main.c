@@ -4471,7 +4471,11 @@ int main(void)
                         int nx = tm_player_tx + dx;
                         int ny = tm_player_ty + dy;
                         // Bounds check
+#ifdef AFN_TM0_LOGICAL_W
+                        if (nx >= 0 && nx < AFN_TM0_LOGICAL_W && ny >= 0 && ny < AFN_TM0_LOGICAL_H)
+#else
                         if (nx >= 0 && nx < AFN_TM0_W && ny >= 0 && ny < AFN_TM0_H)
+#endif
                         {
                             // Object collision check (respects displayScale cell size)
                             int blocked = 0;
