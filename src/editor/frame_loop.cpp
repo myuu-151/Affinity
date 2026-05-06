@@ -2578,6 +2578,14 @@ struct HudCursorStop {
     int modifierCount = 0;
 };
 
+struct HudKeyframe {
+    int frame = 0;          // frame number (at 60fps)
+    int offsetX = 0, offsetY = 0; // position offset from base
+    int rot = 0;            // rotation in degrees (0-359)
+    int scaleX = 256;       // 8.8 fixed point (256 = 1.0x)
+    int scaleY = 256;
+};
+
 struct HudElement {
     int id = 0;
     char name[32] = "Element";
@@ -2640,6 +2648,11 @@ struct HudElement {
     bool collapseText = false;
     bool collapseCursor = false;
     bool collapseStops = false;
+    // Keyframe animation
+    std::vector<HudKeyframe> keyframes;
+    bool animLoop = false;
+    int selectedKeyframe = -1;
+    bool collapseKeyframes = false;
 };
 
 static std::vector<HudElement> sHudElements;
@@ -2647,6 +2660,11 @@ static int sHudNextId = 1;
 static int sHudSelectedIdx = -1;
 static float sHudCanvasZoom = 3.0f;
 static ImVec2 sHudCanvasPan = {0, 0};
+static float sHudTimelineH = 150.0f;
+static int sHudTimelinePlayhead = 0;
+static float sHudTimelineScroll = 0.0f;
+static float sHudTimelineZoom = 4.0f;  // pixels per frame
+static bool sHudTimelinePlaying = false;
 static int sHudDragPiece = -1;       // piece index being dragged (-1 = dragging whole element)
 static float sHudPieceDragAccX = 0;  // sub-cell drag accumulator
 static float sHudPieceDragAccY = 0;
@@ -3743,6 +3761,12 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "elemMode=%d\n", el.runtimeMode);
         if (el.layerPieces != 0 || el.layerSprites != 1 || el.layerText != 2 || el.layerCursor != 3)
             fprintf(f, "elemLayers=%d|%d|%d|%d\n", el.layerPieces, el.layerSprites, el.layerText, el.layerCursor);
+        if (!el.keyframes.empty()) {
+            fprintf(f, "elemKfCount=%d\n", (int)el.keyframes.size());
+            fprintf(f, "elemKfLoop=%d\n", el.animLoop ? 1 : 0);
+            for (auto& kf : el.keyframes)
+                fprintf(f, "elemKf=%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY);
+        }
     }
     fprintf(f, "\n");
 
@@ -4797,6 +4821,19 @@ static bool LoadProject(const std::string& path)
                     hel.layerText = hel.layerSprites;
                     hel.layerSprites = 1;
                 }
+            }
+            else if (sscanf(line, "elemKfCount=%d", &ival) == 1 && !sHudElements.empty()) {
+                sHudElements.back().keyframes.clear();
+                sHudElements.back().keyframes.reserve(ival);
+            }
+            else if (sscanf(line, "elemKfLoop=%d", &ival) == 1 && !sHudElements.empty()) {
+                sHudElements.back().animLoop = (ival != 0);
+            }
+            else if (strncmp(line, "elemKf=", 7) == 0 && !sHudElements.empty()) {
+                HudKeyframe kf;
+                if (sscanf(line + 7, "%d|%d|%d|%d|%d|%d", &kf.frame, &kf.offsetX, &kf.offsetY,
+                    &kf.rot, &kf.scaleX, &kf.scaleY) >= 4)
+                    sHudElements.back().keyframes.push_back(kf);
             }
         }
         else if (strcmp(section, "Palette") == 0)
@@ -10618,6 +10655,17 @@ void FrameTick(float dt)
                     he.layerSprites = el.layerSprites;
                     he.layerText = el.layerText;
                     he.layerCursor = el.layerCursor;
+                    for (auto& kf : el.keyframes) {
+                        GBAHudKeyframeExport ke;
+                        ke.frame = kf.frame;
+                        ke.offX = kf.offsetX;
+                        ke.offY = kf.offsetY;
+                        ke.rot = kf.rot;
+                        ke.scaleX = kf.scaleX;
+                        ke.scaleY = kf.scaleY;
+                        he.keyframes.push_back(ke);
+                    }
+                    he.animLoop = el.animLoop;
                     exportHudElements.push_back(std::move(he));
                 }
 
@@ -19248,10 +19296,12 @@ void FrameTick(float dt)
         // Elements tab: HUD / UI layout editor with 240x160 GBA screen canvas
         float elemRightW = std::max(Scaled(260), totalW * 0.28f);
         float elemLeftW = totalW - elemRightW;
+        float timelineH = sHudTimelineH;
+        float elemBodyH = bodyH - timelineH;
 
         // ---- Canvas (left side) ----
         ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
-        ImGui::SetNextWindowSize(ImVec2(elemLeftW, bodyH));
+        ImGui::SetNextWindowSize(ImVec2(elemLeftW, elemBodyH));
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.10f, 1.0f));
         ImGui::Begin("##HudCanvas", nullptr,
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -19726,7 +19776,7 @@ void FrameTick(float dt)
 
         // ---- Properties panel (right side) ----
         ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + elemLeftW, bodyY));
-        ImGui::SetNextWindowSize(ImVec2(elemRightW, bodyH));
+        ImGui::SetNextWindowSize(ImVec2(elemRightW, elemBodyH));
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.25f, 0.30f, 1.0f));
         ImGui::Begin("##HudProps", nullptr,
@@ -20492,7 +20542,354 @@ void FrameTick(float dt)
                     }
                 }
 
+                // ---- Keyframes section ----
+                ImGui::Separator();
+                if (ImGui::SmallButton(el.collapseKeyframes ? ">##kf" : "v##kf"))
+                    el.collapseKeyframes = !el.collapseKeyframes;
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Keyframes");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("+##addkf")) {
+                    HudKeyframe kf;
+                    kf.frame = el.keyframes.empty() ? 0 : (el.keyframes.back().frame + 15);
+                    el.keyframes.push_back(kf);
+                    el.selectedKeyframe = (int)el.keyframes.size() - 1;
+                    sProjectDirty = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Checkbox("Loop##kfloop", &el.animLoop)) sProjectDirty = true;
+
+                if (!el.collapseKeyframes) {
+                    for (int ki = 0; ki < (int)el.keyframes.size(); ki++) {
+                        ImGui::PushID(6000 + ki);
+                        auto& kf = el.keyframes[ki];
+                        bool ksel = (ki == el.selectedKeyframe);
+                        char klabel[64];
+                        snprintf(klabel, sizeof(klabel), "%d: f%d (%+d,%+d) r%d s%.1f,%.1f",
+                            ki, kf.frame, kf.offsetX, kf.offsetY, kf.rot,
+                            kf.scaleX / 256.0f, kf.scaleY / 256.0f);
+                        if (ImGui::Selectable(klabel, ksel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
+                            el.selectedKeyframe = ki;
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("-##delkf")) {
+                            el.keyframes.erase(el.keyframes.begin() + ki);
+                            if (el.selectedKeyframe >= (int)el.keyframes.size()) el.selectedKeyframe = -1;
+                            sProjectDirty = true;
+                            ImGui::PopID(); break;
+                        }
+                        ImGui::PopID();
+                    }
+                    if (el.selectedKeyframe >= 0 && el.selectedKeyframe < (int)el.keyframes.size()) {
+                        auto& kf = el.keyframes[el.selectedKeyframe];
+                        ImGui::Spacing();
+                        if (ImGui::DragInt("Frame##kf", &kf.frame, 1, 0, 600)) sProjectDirty = true;
+                        if (ImGui::DragInt("Offset X##kf", &kf.offsetX, 1)) sProjectDirty = true;
+                        if (ImGui::DragInt("Offset Y##kf", &kf.offsetY, 1)) sProjectDirty = true;
+                        if (ImGui::DragInt("Rotation##kf", &kf.rot, 1, 0, 359)) sProjectDirty = true;
+                        float sx = kf.scaleX / 256.0f, sy = kf.scaleY / 256.0f;
+                        if (ImGui::DragFloat("Scale X##kf", &sx, 0.01f, 0.1f, 4.0f, "%.2f")) {
+                            kf.scaleX = (int)(sx * 256.0f); sProjectDirty = true;
+                        }
+                        if (ImGui::DragFloat("Scale Y##kf", &sy, 0.01f, 0.1f, 4.0f, "%.2f")) {
+                            kf.scaleY = (int)(sy * 256.0f); sProjectDirty = true;
+                        }
+                    }
+                }
+
                 ImGui::PopItemWidth();
+            }
+        }
+        ImGui::End();
+        ImGui::PopStyleColor(2);
+
+        // ---- Timeline panel (bottom, Blender-style) ----
+        float tlY = bodyY + elemBodyH;
+        ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, tlY));
+        ImGui::SetNextWindowSize(ImVec2(totalW, timelineH));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.16f, 0.16f, 0.16f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.08f, 0.08f, 0.08f, 1.0f));
+        ImGui::Begin("##HudTimeline", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar);
+        {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 winPos = ImGui::GetCursorScreenPos();
+            ImVec2 winSize = ImGui::GetContentRegionAvail();
+
+            float labelW = 120.0f;
+            float trackX = winPos.x + labelW;
+            float trackW = winSize.x - labelW;
+            float rulerH = 24.0f;
+            float rowH = 24.0f;
+
+            // ---- Resize handle (top edge) ----
+            {
+                ImGui::SetCursorScreenPos(ImVec2(winPos.x, winPos.y - 3));
+                ImGui::InvisibleButton("##tlresize", ImVec2(winSize.x, 6));
+                if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+                if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0)) {
+                    sHudTimelineH -= ImGui::GetIO().MouseDelta.y;
+                    sHudTimelineH = std::clamp(sHudTimelineH, 80.0f, bodyH * 0.6f);
+                }
+            }
+
+            // ---- Top toolbar (Blender style: transport + frame info) ----
+            float toolbarY = winPos.y + 2;
+            {
+                // Dark toolbar bg
+                dl->AddRectFilled(ImVec2(winPos.x, winPos.y), ImVec2(winPos.x + winSize.x, winPos.y + rulerH),
+                    IM_COL32(36, 36, 36, 255));
+                dl->AddLine(ImVec2(winPos.x, winPos.y + rulerH), ImVec2(winPos.x + winSize.x, winPos.y + rulerH),
+                    IM_COL32(20, 20, 20, 255));
+
+                ImGui::SetCursorScreenPos(ImVec2(winPos.x + 6, toolbarY));
+                // Play/Pause
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.22f, 0.22f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.30f, 0.30f, 0.30f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, sHudTimelinePlaying ? ImVec4(0.4f,0.7f,1.0f,1.0f) : ImVec4(0.8f,0.8f,0.8f,1.0f));
+                if (ImGui::SmallButton(sHudTimelinePlaying ? "||" : ">"))
+                    sHudTimelinePlaying = !sHudTimelinePlaying;
+                ImGui::PopStyleColor(3);
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.22f, 0.22f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.30f, 0.30f, 0.30f, 1.0f));
+                if (ImGui::SmallButton("|<")) { sHudTimelinePlayhead = 0; sHudTimelinePlaying = false; }
+                ImGui::PopStyleColor(2);
+                ImGui::SameLine();
+                // Frame counter
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.85f, 0.85f, 1.0f));
+                ImGui::SetNextItemWidth(50);
+                ImGui::DragInt("##tlframe", &sHudTimelinePlayhead, 1, 0, 9999);
+                ImGui::PopStyleColor();
+                ImGui::SameLine();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
+                ImGui::Text("/ 60fps");
+                ImGui::PopStyleColor();
+            }
+
+            if (sHudTimelinePlaying) sHudTimelinePlayhead++;
+
+            // ---- Determine adaptive ruler step (like Blender: auto-scale labels to avoid overlap) ----
+            // Minimum pixels between labels
+            float minLabelSpacing = 60.0f;
+            int frameStep = 1;
+            // Find a nice step: 1, 2, 5, 10, 20, 50, 100, 200...
+            {
+                int candidates[] = {1, 2, 5, 10, 15, 20, 30, 50, 60, 100, 120, 200, 300, 600};
+                for (int ci = 0; ci < 14; ci++) {
+                    if (candidates[ci] * sHudTimelineZoom >= minLabelSpacing) { frameStep = candidates[ci]; break; }
+                    frameStep = candidates[ci];
+                }
+            }
+            int subStep = (frameStep >= 10) ? frameStep / 5 : (frameStep >= 2 ? 1 : 1);
+
+            // ---- Frame ruler ----
+            float rulerTop = winPos.y + rulerH;
+            float rulerBot = rulerTop + rulerH;
+            {
+                dl->AddRectFilled(ImVec2(trackX, rulerTop), ImVec2(trackX + trackW, rulerBot),
+                    IM_COL32(30, 30, 30, 255));
+                // Label area bg
+                dl->AddRectFilled(ImVec2(winPos.x, rulerTop), ImVec2(trackX, rulerBot),
+                    IM_COL32(36, 36, 36, 255));
+
+                dl->PushClipRect(ImVec2(trackX, rulerTop), ImVec2(trackX + trackW, rulerBot), true);
+
+                int scrollFrame = (int)(sHudTimelineScroll / sHudTimelineZoom);
+                int framesVis = (int)(trackW / sHudTimelineZoom) + 2;
+
+                // Sub-ticks
+                for (int f = (scrollFrame / subStep) * subStep; f < scrollFrame + framesVis; f += subStep) {
+                    if (f < 0) continue;
+                    float fx = trackX + f * sHudTimelineZoom - sHudTimelineScroll;
+                    if (fx < trackX - 1 || fx > trackX + trackW + 1) continue;
+                    bool isMajor = (f % frameStep == 0);
+                    float tickTop = isMajor ? rulerTop + 2 : rulerTop + rulerH * 0.5f;
+                    dl->AddLine(ImVec2(fx, tickTop), ImVec2(fx, rulerBot),
+                        isMajor ? IM_COL32(100, 100, 100, 200) : IM_COL32(60, 60, 60, 150));
+                    if (isMajor) {
+                        char buf[16]; snprintf(buf, sizeof(buf), "%d", f);
+                        dl->AddText(ImVec2(fx + 3, rulerTop + 2), IM_COL32(170, 170, 170, 255), buf);
+                    }
+                }
+
+                // Playhead marker on ruler
+                float phx = trackX + sHudTimelinePlayhead * sHudTimelineZoom - sHudTimelineScroll;
+                if (phx >= trackX - 6 && phx <= trackX + trackW + 6) {
+                    // Blue playhead like Blender
+                    dl->AddTriangleFilled(
+                        ImVec2(phx - 6, rulerTop + 1), ImVec2(phx + 6, rulerTop + 1), ImVec2(phx, rulerTop + 10),
+                        IM_COL32(70, 150, 255, 255));
+                    dl->AddTriangle(
+                        ImVec2(phx - 6, rulerTop + 1), ImVec2(phx + 6, rulerTop + 1), ImVec2(phx, rulerTop + 10),
+                        IM_COL32(100, 180, 255, 255));
+                }
+                dl->PopClipRect();
+
+                // Bottom ruler line
+                dl->AddLine(ImVec2(winPos.x, rulerBot), ImVec2(winPos.x + winSize.x, rulerBot),
+                    IM_COL32(20, 20, 20, 255));
+
+                // Click/drag ruler to scrub
+                ImGui::SetCursorScreenPos(ImVec2(trackX, rulerTop));
+                ImGui::InvisibleButton("##ruler", ImVec2(trackW, rulerH));
+                if (ImGui::IsItemActive()) {
+                    float mx = ImGui::GetMousePos().x;
+                    int nf = (int)((mx - trackX + sHudTimelineScroll) / sHudTimelineZoom + 0.5f);
+                    if (nf < 0) nf = 0;
+                    sHudTimelinePlayhead = nf;
+                }
+            }
+
+            // ---- Track area ----
+            float tracksTop = rulerBot;
+            float tracksBot = winPos.y + winSize.y;
+
+            // Clip everything
+            dl->PushClipRect(ImVec2(winPos.x, tracksTop), ImVec2(winPos.x + winSize.x, tracksBot), true);
+
+            // Track background
+            dl->AddRectFilled(ImVec2(trackX, tracksTop), ImVec2(trackX + trackW, tracksBot),
+                IM_COL32(26, 26, 26, 255));
+
+            // Vertical grid lines (match ruler ticks)
+            {
+                int scrollFrame = (int)(sHudTimelineScroll / sHudTimelineZoom);
+                int framesVis = (int)(trackW / sHudTimelineZoom) + 2;
+                for (int f = (scrollFrame / subStep) * subStep; f < scrollFrame + framesVis; f += subStep) {
+                    if (f < 0) continue;
+                    float fx = trackX + f * sHudTimelineZoom - sHudTimelineScroll;
+                    if (fx < trackX || fx > trackX + trackW) continue;
+                    bool isMajor = (f % frameStep == 0);
+                    dl->AddLine(ImVec2(fx, tracksTop), ImVec2(fx, tracksBot),
+                        isMajor ? IM_COL32(45, 45, 45, 255) : IM_COL32(35, 35, 35, 200));
+                }
+            }
+
+            // Element rows
+            for (int i = 0; i < (int)sHudElements.size(); i++) {
+                auto& el = sHudElements[i];
+                float ry = tracksTop + i * rowH;
+                if (ry > tracksBot) break;
+                if (ry + rowH < tracksTop) continue;
+
+                bool selected = (i == sHudSelectedIdx);
+
+                // Row bg
+                ImU32 rowBg = (i % 2 == 0) ? IM_COL32(32, 32, 32, 255) : IM_COL32(28, 28, 28, 255);
+                if (selected) rowBg = IM_COL32(38, 42, 55, 255);
+                dl->AddRectFilled(ImVec2(winPos.x, ry), ImVec2(winPos.x + winSize.x, ry + rowH), rowBg);
+
+                // Label area bg (slightly lighter)
+                dl->AddRectFilled(ImVec2(winPos.x, ry), ImVec2(trackX, ry + rowH),
+                    selected ? IM_COL32(50, 55, 70, 255) : IM_COL32(42, 42, 42, 255));
+
+                // Label text
+                ImU32 labelCol = selected ? IM_COL32(230, 210, 130, 255) : IM_COL32(180, 180, 180, 220);
+                dl->AddText(ImVec2(winPos.x + 8, ry + (rowH - ImGui::GetFontSize()) * 0.5f), labelCol, el.name);
+
+                // Row separator
+                dl->AddLine(ImVec2(winPos.x, ry + rowH - 1), ImVec2(winPos.x + winSize.x, ry + rowH - 1),
+                    IM_COL32(20, 20, 20, 200));
+
+                // Click label to select
+                ImGui::SetCursorScreenPos(ImVec2(winPos.x, ry));
+                ImGui::InvisibleButton(("##tlrow" + std::to_string(i)).c_str(), ImVec2(labelW, rowH));
+                if (ImGui::IsItemClicked()) sHudSelectedIdx = i;
+
+                // Keyframe diamonds
+                dl->PushClipRect(ImVec2(trackX, ry), ImVec2(trackX + trackW, ry + rowH), true);
+                for (int ki = 0; ki < (int)el.keyframes.size(); ki++) {
+                    auto& kf = el.keyframes[ki];
+                    float kx = trackX + kf.frame * sHudTimelineZoom - sHudTimelineScroll;
+                    if (kx < trackX - 10 || kx > trackX + trackW + 10) continue;
+                    float ky = ry + rowH * 0.5f;
+                    float ds = 5.0f;
+                    bool kfSel = (selected && ki == el.selectedKeyframe);
+                    // Blender-style: orange keyframes, white when selected
+                    ImU32 kfFill = kfSel ? IM_COL32(255, 255, 255, 255) : IM_COL32(230, 160, 40, 255);
+                    ImU32 kfOutline = kfSel ? IM_COL32(70, 150, 255, 255) : IM_COL32(180, 120, 20, 255);
+                    dl->AddQuadFilled(
+                        ImVec2(kx, ky - ds), ImVec2(kx + ds, ky),
+                        ImVec2(kx, ky + ds), ImVec2(kx - ds, ky), kfFill);
+                    dl->AddQuad(
+                        ImVec2(kx, ky - ds), ImVec2(kx + ds, ky),
+                        ImVec2(kx, ky + ds), ImVec2(kx - ds, ky), kfOutline, 1.5f);
+                }
+                dl->PopClipRect();
+
+                // Track interaction
+                ImGui::SetCursorScreenPos(ImVec2(trackX, ry));
+                ImGui::InvisibleButton(("##tltrack" + std::to_string(i)).c_str(), ImVec2(trackW, rowH));
+                if (ImGui::IsItemClicked()) {
+                    sHudSelectedIdx = i;
+                    float mx = ImGui::GetMousePos().x;
+                    // Find nearest keyframe within click range
+                    int nearest = -1;
+                    float nearDist = 999;
+                    for (int ki = 0; ki < (int)el.keyframes.size(); ki++) {
+                        float kx = trackX + el.keyframes[ki].frame * sHudTimelineZoom - sHudTimelineScroll;
+                        float d = std::abs(mx - kx);
+                        if (d < nearDist) { nearDist = d; nearest = ki; }
+                    }
+                    el.selectedKeyframe = (nearest >= 0 && nearDist < 8.0f) ? nearest : -1;
+                }
+                // Double-click to insert keyframe
+                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                    float mx = ImGui::GetMousePos().x;
+                    int nf = (int)((mx - trackX + sHudTimelineScroll) / sHudTimelineZoom + 0.5f);
+                    if (nf < 0) nf = 0;
+                    HudKeyframe kf;
+                    kf.frame = nf;
+                    int insertAt = (int)el.keyframes.size();
+                    for (int ki = 0; ki < (int)el.keyframes.size(); ki++)
+                        if (el.keyframes[ki].frame > nf) { insertAt = ki; break; }
+                    el.keyframes.insert(el.keyframes.begin() + insertAt, kf);
+                    el.selectedKeyframe = insertAt;
+                    sProjectDirty = true;
+                }
+                // Drag keyframe
+                if (selected && el.selectedKeyframe >= 0 && el.selectedKeyframe < (int)el.keyframes.size() &&
+                    ImGui::IsItemActive() && ImGui::IsMouseDragging(0)) {
+                    float mx = ImGui::GetMousePos().x;
+                    int nf = (int)((mx - trackX + sHudTimelineScroll) / sHudTimelineZoom + 0.5f);
+                    if (nf < 0) nf = 0;
+                    el.keyframes[el.selectedKeyframe].frame = nf;
+                    sProjectDirty = true;
+                }
+            }
+
+            // Label/track vertical separator
+            dl->AddLine(ImVec2(trackX, tracksTop), ImVec2(trackX, tracksBot), IM_COL32(20, 20, 20, 255));
+
+            // ---- Playhead line (blue, full height through tracks) ----
+            {
+                float phx = trackX + sHudTimelinePlayhead * sHudTimelineZoom - sHudTimelineScroll;
+                if (phx >= trackX && phx <= trackX + trackW) {
+                    dl->AddLine(ImVec2(phx, tracksTop), ImVec2(phx, tracksBot),
+                        IM_COL32(70, 150, 255, 200), 1.5f);
+                }
+            }
+
+            dl->PopClipRect();
+
+            // ---- Scroll/zoom (anywhere over the track area) ----
+            ImGui::SetCursorScreenPos(ImVec2(trackX, tracksTop));
+            ImGui::InvisibleButton("##tlscroll", ImVec2(trackW, tracksBot - tracksTop));
+            if (ImGui::IsItemHovered()) {
+                float wheel = ImGui::GetIO().MouseWheel;
+                if (ImGui::GetIO().KeyCtrl) {
+                    // Ctrl+scroll = zoom around mouse position
+                    float mx = ImGui::GetMousePos().x - trackX;
+                    float oldFrame = (mx + sHudTimelineScroll) / sHudTimelineZoom;
+                    sHudTimelineZoom = std::clamp(sHudTimelineZoom * (1.0f + wheel * 0.1f), 1.0f, 20.0f);
+                    sHudTimelineScroll = oldFrame * sHudTimelineZoom - mx;
+                    if (sHudTimelineScroll < 0) sHudTimelineScroll = 0;
+                } else {
+                    sHudTimelineScroll -= wheel * 50.0f;
+                    if (sHudTimelineScroll < 0) sHudTimelineScroll = 0;
+                }
             }
         }
         ImGui::End();

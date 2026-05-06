@@ -441,6 +441,13 @@ struct GBAHudTextRowExport {
     uint16_t colorRGB15;
 };
 
+struct GBAHudKeyframeExport {
+    int frame;
+    int offX, offY;
+    int rot;           // degrees 0-359 (converted to brads at export)
+    int scaleX, scaleY; // 8.8 fixed point (256 = 1.0x)
+};
+
 struct GBAHudElementExport {
     int screenX, screenY;
     bool visible;
@@ -453,6 +460,8 @@ struct GBAHudElementExport {
     int cursorFrame;
     int cursorOffX, cursorOffY;
     int layerPieces, layerSprites, layerText, layerCursor;
+    std::vector<GBAHudKeyframeExport> keyframes;
+    bool animLoop = false;
 };
 
 // Sound export: a single PCM sample (8-bit signed, 16384 Hz)

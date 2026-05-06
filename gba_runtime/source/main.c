@@ -797,6 +797,8 @@ static u16   afn_sprite_tint[16];
 static u8    afn_sprite_shake[16];
 static int   afn_hud_value[4];
 static u8    afn_hud_visible[4];
+static u8    afn_hud_prev_visible[4];
+static int   afn_hud_anim_frame[4];
 static FIXED afn_patrol_home_x[16];
 static FIXED afn_patrol_home_z[16];
 static u16   afn_bg_color;
@@ -4879,6 +4881,14 @@ int main(void)
 #endif
                 // Draw HUD element pieces (screen-space OAM, no camera offset)
 #if defined(AFN_HUD_ELEM_COUNT) && AFN_HUD_ELEM_COUNT > 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+                // Tick HUD keyframe animations
+                { int ei2; for (ei2 = 0; ei2 < AFN_HUD_ELEM_COUNT && ei2 < 4; ei2++) {
+                    if (afn_hud_visible[ei2] && !afn_hud_prev_visible[ei2])
+                        afn_hud_anim_frame[ei2] = 0; // reset on show
+                    afn_hud_prev_visible[ei2] = afn_hud_visible[ei2];
+                    if (afn_hud_visible[ei2])
+                        afn_hud_anim_frame[ei2]++;
+                } }
                 { int anyHudVisible = 0;
                 { int ei2; for (ei2 = 0; ei2 < AFN_HUD_ELEM_COUNT; ei2++) if (afn_hud_visible[ei2]) anyHudVisible = 1; }
                 if (anyHudVisible) {
@@ -4917,6 +4927,67 @@ int main(void)
                     if (!afn_hud_visible[ei]) continue;
                     int ex = afn_hud_elems[ei].x;
                     int ey = afn_hud_elems[ei].y;
+                    int hudKfRot = 0;    // interpolated rotation (brad8, 0-255)
+                    int hudKfSx = 256;   // interpolated scaleX (8.8)
+                    int hudKfSy = 256;   // interpolated scaleY (8.8)
+#ifdef AFN_HUD_HAS_KF
+                    if (ei < 4 && afn_hud_elems[ei].kfCount >= 2) {
+                        int kfS = afn_hud_elems[ei].kfStart;
+                        int kfN = afn_hud_elems[ei].kfCount;
+                        int curF = afn_hud_anim_frame[ei];
+                        int lastF = afn_hud_kf[kfS + kfN - 1].frame;
+                        if (lastF > 0 && afn_hud_elems[ei].kfLoop && curF > lastF)
+                            curF = curF % (lastF + 1);
+                        else if (curF > lastF)
+                            curF = lastF;
+                        // Find surrounding keyframes
+                        int kA = 0, kB = 0;
+                        { int ki; for (ki = 0; ki < kfN - 1; ki++) {
+                            if ((int)afn_hud_kf[kfS + ki + 1].frame > curF) { kA = ki; kB = ki + 1; break; }
+                            kA = kfN - 1; kB = kfN - 1;
+                        } }
+                        int fA = afn_hud_kf[kfS + kA].frame;
+                        int fB = afn_hud_kf[kfS + kB].frame;
+                        int span = fB - fA;
+                        if (span <= 0 || kA == kB) {
+                            ex += afn_hud_kf[kfS + kA].offX;
+                            ey += afn_hud_kf[kfS + kA].offY;
+                            hudKfRot = afn_hud_kf[kfS + kA].rot;
+                            hudKfSx = afn_hud_kf[kfS + kA].scaleX;
+                            hudKfSy = afn_hud_kf[kfS + kA].scaleY;
+                        } else {
+                            int t256 = ((curF - fA) * 256) / span; // 0-256 lerp factor
+                            ex += afn_hud_kf[kfS + kA].offX + ((afn_hud_kf[kfS + kB].offX - afn_hud_kf[kfS + kA].offX) * t256) / 256;
+                            ey += afn_hud_kf[kfS + kA].offY + ((afn_hud_kf[kfS + kB].offY - afn_hud_kf[kfS + kA].offY) * t256) / 256;
+                            hudKfRot = afn_hud_kf[kfS + kA].rot + ((afn_hud_kf[kfS + kB].rot - afn_hud_kf[kfS + kA].rot) * t256) / 256;
+                            hudKfSx = afn_hud_kf[kfS + kA].scaleX + (((int)afn_hud_kf[kfS + kB].scaleX - (int)afn_hud_kf[kfS + kA].scaleX) * t256) / 256;
+                            hudKfSy = afn_hud_kf[kfS + kA].scaleY + (((int)afn_hud_kf[kfS + kB].scaleY - (int)afn_hud_kf[kfS + kA].scaleY) * t256) / 256;
+                        }
+                    }
+#endif
+                    int hudUseAffine = (hudKfRot != 0 || hudKfSx != 256 || hudKfSy != 256) ? 1 : 0;
+                    int hudAffSlot = -1;
+                    if (hudUseAffine) {
+                        // Allocate one affine matrix for this element (use oamSlot as affine id)
+                        hudAffSlot = oamSlot < 32 ? oamSlot : -1;
+                        if (hudAffSlot >= 0 && hudAffSlot < 32) {
+                            // brad8 -> brad16 for lu_sin/lu_cos
+                            u16 angle16 = (u16)(hudKfRot << 8);
+                            int cosV = lu_cos(angle16) >> 4; // .12 fixed
+                            int sinV = lu_sin(angle16) >> 4;
+                            // affine pa = cos/sx, pb = sin/sx, pc = -sin/sy, pd = cos/sy
+                            // GBA affine is screen->texture, so scale inverted: 256/sx
+                            int invSx = (hudKfSx > 0) ? (256 * 256) / hudKfSx : 256;
+                            int invSy = (hudKfSy > 0) ? (256 * 256) / hudKfSy : 256;
+                            OBJ_AFFINE *oa = &obj_aff_mem[hudAffSlot];
+                            oa->pa = (s16)((cosV * invSx) >> 12);
+                            oa->pb = (s16)((sinV * invSx) >> 12);
+                            oa->pc = (s16)((-sinV * invSy) >> 12);
+                            oa->pd = (s16)((cosV * invSy) >> 12);
+                        } else {
+                            hudUseAffine = 0;
+                        }
+                    }
                     int pStart = afn_hud_elems[ei].pieceStart;
                     int pCount = afn_hud_elems[ei].pieceCount;
                     // Compute tile adjustment: assets store tileStart as (rawOff + 512 + DIR_VRAM_TILES)
@@ -4968,6 +5039,10 @@ int main(void)
                                     int cpb = afn_asset_desc[cai][4];
                                     u16 ca0 = ATTR0_SQUARE | ((csy & 0xFF));
                                     u16 ca1 = size_to_attr1(csz) | ((csx & 0x1FF));
+                                    if (hudUseAffine && hudAffSlot >= 0) {
+                                        ca0 |= ATTR0_AFF;
+                                        ca1 |= ATTR1_AFF_ID(hudAffSlot);
+                                    }
                                     u16 ca2 = ATTR2_PALBANK(cpb) | ATTR2_PRIO(0) | ((ctb - hudTileAdj + cfr * ctpf) & 0x3FF);
                                     obj_set_attr(&oam_mem[oamSlot], ca0, ca1, ca2);
                                     oamSlot++;
@@ -5000,6 +5075,10 @@ int main(void)
 
                                 u16 a0 = ATTR0_SQUARE | ((sy & 0xFF));
                                 u16 a1 = size_to_attr1(objSz) | ((sx & 0x1FF));
+                                if (hudUseAffine && hudAffSlot >= 0) {
+                                    a0 |= ATTR0_AFF;
+                                    a1 |= ATTR1_AFF_ID(hudAffSlot);
+                                }
                                 u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
                                 obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
                                 oamSlot++;
@@ -5020,6 +5099,10 @@ int main(void)
 
                                 u16 a0 = ATTR0_SQUARE | ((sy & 0xFF));
                                 u16 a1 = size_to_attr1(objSz) | ((sx & 0x1FF));
+                                if (hudUseAffine && hudAffSlot >= 0) {
+                                    a0 |= ATTR0_AFF;
+                                    a1 |= ATTR1_AFF_ID(hudAffSlot);
+                                }
                                 u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
                                 obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
                                 oamSlot++;

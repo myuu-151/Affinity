@@ -1517,12 +1517,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "\n// ---- HUD Elements ----\n";
         f << "#define AFN_HUD_ELEM_COUNT " << (int)hudElements.size() << "\n";
 
-        // Emit element descriptors: {screenX, screenY, pieceStart, pieceCount, stopStart, stopCount, textStart, textCount, cursorAsset, cursorFrame, cursorOffX, cursorOffY}
-        int totalPieces = 0, totalSprites = 0, totalStops = 0, totalText = 0;
-        for (auto& el : hudElements) { totalPieces += (int)el.pieces.size(); totalSprites += (int)el.sprites.size(); totalStops += (int)el.stops.size(); totalText += (int)el.textRows.size(); }
+        // Emit element descriptors
+        int totalPieces = 0, totalSprites = 0, totalStops = 0, totalText = 0, totalKf = 0;
+        for (auto& el : hudElements) { totalPieces += (int)el.pieces.size(); totalSprites += (int)el.sprites.size(); totalStops += (int)el.stops.size(); totalText += (int)el.textRows.size(); totalKf += (int)el.keyframes.size(); }
 
-        f << "static const struct { s16 x,y; u16 pieceStart,pieceCount,spriteStart,spriteCount,stopStart,stopCount,textStart,textCount; s8 curAsset,curFrame,curOffX,curOffY; u8 layerPieces,layerSprites,layerText,layerCursor; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
-        int pOff = 0, spOff = 0, sOff = 0, tOff = 0;
+        f << "static const struct { s16 x,y; u16 pieceStart,pieceCount,spriteStart,spriteCount,stopStart,stopCount,textStart,textCount; s8 curAsset,curFrame,curOffX,curOffY; u8 layerPieces,layerSprites,layerText,layerCursor; u16 kfStart,kfCount; u8 kfLoop; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
+        int pOff = 0, spOff = 0, sOff = 0, tOff = 0, kfOff = 0;
         for (auto& el : hudElements) {
             f << "    {" << el.screenX << "," << el.screenY << ","
               << pOff << "," << (int)el.pieces.size() << ","
@@ -1530,11 +1530,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
               << sOff << "," << (int)el.stops.size() << ","
               << tOff << "," << (int)el.textRows.size() << ","
               << el.cursorAssetIdx << "," << el.cursorFrame << "," << el.cursorOffX << "," << el.cursorOffY << ","
-              << el.layerPieces << "," << el.layerSprites << "," << el.layerText << "," << el.layerCursor << "},\n";
+              << el.layerPieces << "," << el.layerSprites << "," << el.layerText << "," << el.layerCursor << ","
+              << kfOff << "," << (int)el.keyframes.size() << "," << (el.animLoop ? 1 : 0) << "},\n";
             pOff += (int)el.pieces.size();
             spOff += (int)el.sprites.size();
             sOff += (int)el.stops.size();
             tOff += (int)el.textRows.size();
+            kfOff += (int)el.keyframes.size();
         }
         f << "};\n";
 
@@ -1588,6 +1590,22 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "};\n";
         } else {
             f << "static const int afn_hud_texts[1] = {0}; // no text\n";
+        }
+
+        // Keyframes: {frame, offX, offY, rot(brad8), scaleX(8.8), scaleY(8.8)}
+        if (totalKf > 0) {
+            f << "static const struct { u16 frame; s16 offX,offY; s16 rot; u16 scaleX,scaleY; } afn_hud_kf[" << totalKf << "] = {\n";
+            for (auto& el : hudElements)
+                for (auto& kf : el.keyframes) {
+                    // Convert degrees to brads (0-255 = 0-360)
+                    int brad = (kf.rot * 256 + 180) / 360;
+                    brad &= 0xFF;
+                    f << "    {" << kf.frame << "," << kf.offX << "," << kf.offY << "," << brad << "," << kf.scaleX << "," << kf.scaleY << "},\n";
+                }
+            f << "};\n";
+            f << "#define AFN_HUD_HAS_KF 1\n";
+        } else {
+            f << "static const int afn_hud_kf[1] = {0};\n";
         }
     }
 
