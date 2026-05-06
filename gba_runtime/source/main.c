@@ -372,12 +372,14 @@ static int tm_move_frames = 8;          // frames per tile move (derived from af
 static int tm_turn_timer = 0;          // frames since direction key pressed (turn-in-place delay)
 static int tm_turn_facing = -1;        // direction key being held (-1 = none)
 static int tm_cam_x, tm_cam_y;          // camera scroll in pixels
-#ifdef AFN_TM0_TILE_SIZE
-static int tm_tile_size = AFN_TM0_TILE_SIZE;
-#else
 static int tm_tile_size = 8;
-#endif
-static int tm_scene_idx;                // current scene
+// tm_scene_idx declared in mapdata.h (used by blueprint dispatch)
+// Current scene data (set by mode0_init_scene via indirection tables)
+static const u16 *tm_cur_map;
+static const AfnTmObj *tm_cur_objs;
+static int tm_cur_obj_count;
+static int tm_cur_map_w, tm_cur_map_h;
+static int tm_cur_logical_w, tm_cur_logical_h;
 static int tm_dir_adj = 0;              // tile ID adjustment for direction sprites (Mode 4 only)
 static int tm_static_adj = 0;           // tile ID adjustment for static/HUD tiles
 static int tm_hud_was_visible = 0;      // track HUD visibility for direction tile restore
@@ -3922,14 +3924,25 @@ static void mode0_init_scene(int tmIdx)
 {
     REG_DISPCNT = DCNT_MODE0 | DCNT_BG0 | DCNT_OBJ | DCNT_OBJ_1D;
 
+    // Set current scene data from indirection tables
+    tm_scene_idx = tmIdx;
+    tm_cur_objs = afn_tm_scene_objs[tmIdx];
+    tm_cur_obj_count = afn_tm_scene_obj_count[tmIdx];
+    tm_cur_map = afn_tm_scene_map[tmIdx];
+    tm_cur_map_w = afn_tm_scene_w[tmIdx];
+    tm_cur_map_h = afn_tm_scene_h[tmIdx];
+    tm_cur_logical_w = afn_tm_scene_logical_w[tmIdx];
+    tm_cur_logical_h = afn_tm_scene_logical_h[tmIdx];
+    tm_tile_size = afn_tm_scene_tile_size[tmIdx];
+
     // Compact VRAM layout for Mode 0: each direction object gets 1 facing
     // slot (tpf tiles) instead of 8*tpf. This leaves room for static tiles.
     {
         int nextSlot = 0;
         int oi;
-#if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0 && defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
-        for (oi = 0; oi < AFN_TM0_OBJ_COUNT && oi < TM_MAX_DIR_OBJS; oi++) {
-            int ai = afn_tm0_objs[oi].assetIdx;
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+        for (oi = 0; oi < tm_cur_obj_count && oi < TM_MAX_DIR_OBJS; oi++) {
+            int ai = tm_cur_objs[oi].assetIdx;
             if (ai >= 0 && ai < AFN_ASSET_COUNT && afn_asset_dir_desc[ai][4]) {
                 tm_obj_vram_slot[oi] = nextSlot;
                 nextSlot += afn_asset_dir_desc[ai][1]; // tpf tiles
@@ -3951,20 +3964,15 @@ static void mode0_init_scene(int tmIdx)
     tm_static_adj = AFN_DIR_VRAM_TILES - tm_dir_slot_count;
 #endif
 
-    // Currently only scene 0 data is statically accessible via AFN_TM0_* defines
-    // (runtime multi-tilemap-scene requires data indirection — future work)
+    // BG size from scene data (runtime instead of compile-time)
     {
+        int bgSz = afn_tm_scene_bg_size[tmIdx];
         u16 bgSizeFlag;
         int sbbBase = 28;
-#if AFN_TM0_BG_SIZE == 3
-        bgSizeFlag = BG_REG_64x64; sbbBase = 28;
-#elif AFN_TM0_BG_SIZE == 2
-        bgSizeFlag = BG_REG_32x64; sbbBase = 30;
-#elif AFN_TM0_BG_SIZE == 1
-        bgSizeFlag = BG_REG_64x32; sbbBase = 30;
-#else
-        bgSizeFlag = BG_REG_32x32; sbbBase = 31;
-#endif
+        if (bgSz == 3) { bgSizeFlag = BG_REG_64x64; sbbBase = 28; }
+        else if (bgSz == 2) { bgSizeFlag = BG_REG_32x64; sbbBase = 30; }
+        else if (bgSz == 1) { bgSizeFlag = BG_REG_64x32; sbbBase = 30; }
+        else { bgSizeFlag = BG_REG_32x32; sbbBase = 31; }
         REG_BG0CNT = BG_CBB(0) | BG_SBB(sbbBase) | BG_4BPP | bgSizeFlag | BG_PRIO(2);
         REG_BG0HOFS = 0;
         REG_BG0VOFS = 0;
@@ -3973,37 +3981,27 @@ static void mode0_init_scene(int tmIdx)
     // Load tilemap data
     {
         int ti;
-        const u32 *src = afn_tm0_tiles;
+        const u32 *src = afn_tm_scene_tiles[tmIdx];
+        int tilesLen = afn_tm_scene_tiles_len[tmIdx];
         u32 *dst = (u32*)tile_mem[0];
-        for (ti = 0; ti < (int)(AFN_TM0_TILES_LEN / 4); ti++)
+        for (ti = 0; ti < tilesLen / 4; ti++)
             dst[ti] = src[ti];
+        const u16 *pal = afn_tm_scene_pal[tmIdx];
         for (ti = 0; ti < 256; ti++)
-            pal_bg_mem[ti] = afn_tm0_pal[ti];
+            pal_bg_mem[ti] = pal[ti];
         pal_bg_mem[0] = RGB15(31, 31, 31);
         // Load screen map
         {
-            int mapW = AFN_TM0_W;
-            int mapH = AFN_TM0_H;
-            int bgW, bgH, sbbBase2;
+            int mapW = tm_cur_map_w;
+            int mapH = tm_cur_map_h;
+            int bgSz = afn_tm_scene_bg_size[tmIdx];
+            int bgW, bgH, sbbBase2, nSBB2;
             int x, y;
-#if AFN_TM0_BG_SIZE == 3
-            bgW = 64; bgH = 64; sbbBase2 = 28;
-#elif AFN_TM0_BG_SIZE == 2
-            bgW = 32; bgH = 64; sbbBase2 = 30;
-#elif AFN_TM0_BG_SIZE == 1
-            bgW = 64; bgH = 32; sbbBase2 = 30;
-#else
-            bgW = 32; bgH = 32; sbbBase2 = 31;
-#endif
+            if (bgSz == 3) { bgW = 64; bgH = 64; sbbBase2 = 28; nSBB2 = 4; }
+            else if (bgSz == 2) { bgW = 32; bgH = 64; sbbBase2 = 30; nSBB2 = 2; }
+            else if (bgSz == 1) { bgW = 64; bgH = 32; sbbBase2 = 30; nSBB2 = 2; }
+            else { bgW = 32; bgH = 32; sbbBase2 = 31; nSBB2 = 1; }
             {
-                int nSBB2;
-#if AFN_TM0_BG_SIZE == 3
-                nSBB2 = 4;
-#elif AFN_TM0_BG_SIZE >= 1
-                nSBB2 = 2;
-#else
-                nSBB2 = 1;
-#endif
                 int si;
                 for (si = 0; si < nSBB2; si++)
                     memset(se_mem[sbbBase2 + si], 0, 32 * 32 * 2);
@@ -4014,7 +4012,7 @@ static void mode0_init_scene(int tmIdx)
                     int sbbOfs = (x >> 5);
                     if (y >= 32) sbbOfs += (bgW > 32) ? 2 : 1;
                     u16 *map = (u16*)se_mem[sbbBase2 + sbbOfs];
-                    map[(y & 31) * 32 + (x & 31)] = afn_tm0_map[y * mapW + x];
+                    map[(y & 31) * 32 + (x & 31)] = tm_cur_map[y * mapW + x];
                 }
         }
     }
@@ -4023,11 +4021,14 @@ static void mode0_init_scene(int tmIdx)
     init_obj_sprites();
 
     // Player init
-    tm_scene_idx = tmIdx;
     tm_move_dx = 0; tm_move_dy = 0; tm_move_timer = 0;
 #if AFN_TM_PLAYER_OBJ >= 0
-    tm_player_tx = afn_tm0_objs[AFN_TM_PLAYER_OBJ].tx;
-    tm_player_ty = afn_tm0_objs[AFN_TM_PLAYER_OBJ].ty;
+    if (tmIdx == AFN_TM_PLAYER_SCENE) {
+        tm_player_tx = tm_cur_objs[AFN_TM_PLAYER_OBJ].tx;
+        tm_player_ty = tm_cur_objs[AFN_TM_PLAYER_OBJ].ty;
+    } else {
+        tm_player_tx = 0; tm_player_ty = 0;
+    }
 #else
     tm_player_tx = 0; tm_player_ty = 0;
 #endif
@@ -4047,23 +4048,25 @@ static void mode0_init_scene(int tmIdx)
     tm_fol_dist = 0;
 
     // Init mutable object positions from const data
-#if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0
-    { int oi2; for (oi2 = 0; oi2 < AFN_TM0_OBJ_COUNT && oi2 < TM_MAX_DIR_OBJS; oi2++) {
-        tm_obj_tx[oi2] = afn_tm0_objs[oi2].tx;
-        tm_obj_ty[oi2] = afn_tm0_objs[oi2].ty;
-        tm_obj_facing[oi2] = afn_tm0_objs[oi2].facing;
-        tm_obj_anim_play[oi2] = afn_tm0_objs[oi2].animPlay;
-        tm_obj_anim_idx[oi2] = afn_tm0_objs[oi2].animIdx;
-    } }
-#endif
+    if (tm_cur_obj_count > 0) {
+        int oi2; for (oi2 = 0; oi2 < tm_cur_obj_count && oi2 < TM_MAX_DIR_OBJS; oi2++) {
+            tm_obj_tx[oi2] = tm_cur_objs[oi2].tx;
+            tm_obj_ty[oi2] = tm_cur_objs[oi2].ty;
+            tm_obj_facing[oi2] = tm_cur_objs[oi2].facing;
+            tm_obj_anim_play[oi2] = tm_cur_objs[oi2].animPlay;
+            tm_obj_anim_idx[oi2] = tm_cur_objs[oi2].animIdx;
+        }
+    }
 
     // Load initial facing (south=4) for all direction objects
-#if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0 && defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
-    { int oi2; for (oi2 = 0; oi2 < AFN_TM0_OBJ_COUNT && oi2 < TM_MAX_DIR_OBJS; oi2++) {
-        if (tm_obj_vram_slot[oi2] < 0) continue;
-        int ai = afn_tm0_objs[oi2].assetIdx;
-        mode0_dma_dir_facing(oi2, ai, 0, 4); // set 0, facing south
-    } }
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+    if (tm_cur_obj_count > 0) {
+        int oi2; for (oi2 = 0; oi2 < tm_cur_obj_count && oi2 < TM_MAX_DIR_OBJS; oi2++) {
+            if (tm_obj_vram_slot[oi2] < 0) continue;
+            int ai = tm_cur_objs[oi2].assetIdx;
+            mode0_dma_dir_facing(oi2, ai, 0, 4); // set 0, facing south
+        }
+    }
     tm_dir_needs_reload = 1;
 #endif
 }
@@ -4085,6 +4088,7 @@ static void scene_load(int sceneMode, int sceneIdx)
     afn_shake_frames = 0;
     afn_dlg_open = 0;
     player_moving = 0;
+    { int ei; for (ei = 0; ei < 4; ei++) { afn_hud_visible[ei] = 0; afn_hud_prev_visible[ei] = 0; afn_hud_anim_frame[ei] = 0; } }
     { int i; for (i = 0; i < 16; i++) {
         afn_hp[i] = 100; afn_max_hp[i] = 100;
         afn_collision_enabled[i] = 1; afn_sprite_alpha[i] = 16;
@@ -4446,12 +4450,12 @@ int main(void)
         {
         // ---- MODE 0 TILEMAP UPDATE ----
             // Re-DMA direction tiles after first VBlank (boot DMA may fail during active display)
-#if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0 && defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
-            if (tm_dir_needs_reload) {
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+            if (tm_dir_needs_reload && tm_cur_obj_count > 0) {
                 tm_dir_needs_reload = 0;
-                { int oi2; for (oi2 = 0; oi2 < AFN_TM0_OBJ_COUNT && oi2 < TM_MAX_DIR_OBJS; oi2++) {
+                { int oi2; for (oi2 = 0; oi2 < tm_cur_obj_count && oi2 < TM_MAX_DIR_OBJS; oi2++) {
                     if (tm_obj_vram_slot[oi2] < 0) continue;
-                    int ai = afn_tm0_objs[oi2].assetIdx;
+                    int ai = tm_cur_objs[oi2].assetIdx;
                     int prevSet = tm_obj_dir_set[oi2];
                     int prevFace = tm_obj_dir_facing[oi2];
                     tm_obj_dir_set[oi2] = -1; // force re-DMA
@@ -4506,30 +4510,24 @@ int main(void)
                         int nx = tm_player_tx + dx;
                         int ny = tm_player_ty + dy;
                         // Bounds check
-#ifdef AFN_TM0_LOGICAL_W
-                        if (nx >= 0 && nx < AFN_TM0_LOGICAL_W && ny >= 0 && ny < AFN_TM0_LOGICAL_H)
-#else
-                        if (nx >= 0 && nx < AFN_TM0_W && ny >= 0 && ny < AFN_TM0_H)
-#endif
+                        if (nx >= 0 && nx < tm_cur_logical_w && ny >= 0 && ny < tm_cur_logical_h)
                         {
                             // Object collision check (respects displayScale cell size)
                             int blocked = 0;
-#if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0
-                            { int ci; for (ci = 0; ci < AFN_TM0_OBJ_COUNT; ci++) {
-                                if (!afn_tm0_objs[ci].collision) continue;
-                                int sc = afn_tm0_objs[ci].scale8;
+                            { int ci; for (ci = 0; ci < tm_cur_obj_count; ci++) {
+                                if (!tm_cur_objs[ci].collision) continue;
+                                int sc = tm_cur_objs[ci].scale8;
                                 if (sc < 256) sc = 256;
                                 int cells = sc >> 8;
                                 if (cells < 1) cells = 1;
-                                int ox = (ci < TM_MAX_DIR_OBJS) ? tm_obj_tx[ci] : afn_tm0_objs[ci].tx;
-                                int oy = (ci < TM_MAX_DIR_OBJS) ? tm_obj_ty[ci] : afn_tm0_objs[ci].ty;
+                                int ox = (ci < TM_MAX_DIR_OBJS) ? tm_obj_tx[ci] : tm_cur_objs[ci].tx;
+                                int oy = (ci < TM_MAX_DIR_OBJS) ? tm_obj_ty[ci] : tm_cur_objs[ci].ty;
                                 int ddx = nx - ox; if (ddx < 0) ddx = -ddx;
                                 int ddy = ny - oy; if (ddy < 0) ddy = -ddy;
                                 if (ddx < cells && ddy < cells) {
                                     blocked = 1; break;
                                 }
                             }}
-#endif
                             if (!blocked) {
                                 tm_move_dx = dx;
                                 tm_move_dy = dy;
@@ -4568,16 +4566,15 @@ int main(void)
             // Uses <= cells so it fires one tile outside the blocking zone
             // Skip during first 10 frames after scene load (prevents ping-pong)
             afn_collided_tm_obj = -1;
-#if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0
-            if (afn_frame_count > 10)
-            { int ci; for (ci = 0; ci < AFN_TM0_OBJ_COUNT; ci++) {
+            if (afn_frame_count > 10 && tm_cur_obj_count > 0)
+            { int ci; for (ci = 0; ci < tm_cur_obj_count; ci++) {
                 if (ci == AFN_TM_PLAYER_OBJ) continue;
-                int sc = afn_tm0_objs[ci].scale8;
+                int sc = tm_cur_objs[ci].scale8;
                 if (sc < 256) sc = 256;
                 int cells = sc >> 8;
                 if (cells < 1) cells = 1;
-                int ox = (ci < TM_MAX_DIR_OBJS) ? tm_obj_tx[ci] : afn_tm0_objs[ci].tx;
-                int oy = (ci < TM_MAX_DIR_OBJS) ? tm_obj_ty[ci] : afn_tm0_objs[ci].ty;
+                int ox = (ci < TM_MAX_DIR_OBJS) ? tm_obj_tx[ci] : tm_cur_objs[ci].tx;
+                int oy = (ci < TM_MAX_DIR_OBJS) ? tm_obj_ty[ci] : tm_cur_objs[ci].ty;
                 int ddx = tm_player_tx - ox; if (ddx < 0) ddx = -ddx;
                 int ddy = tm_player_ty - oy; if (ddy < 0) ddy = -ddy;
                 if (ddx <= cells && ddy <= cells) {
@@ -4587,7 +4584,6 @@ int main(void)
                     break;
                 }
             }}
-#endif
 
             // Blueprint instance dispatch
             afn_bp_dispatch_update();
@@ -4690,7 +4686,7 @@ int main(void)
             tm_player_oam_ready = 0;
 #if AFN_TM_PLAYER_OBJ >= 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
             {
-                int playerAsset = afn_tm0_objs[AFN_TM_PLAYER_OBJ].assetIdx;
+                int playerAsset = tm_cur_objs[AFN_TM_PLAYER_OBJ].assetIdx;
 
                 if (playerAsset >= 0 && playerAsset < AFN_ASSET_COUNT)
                 {
@@ -4729,7 +4725,7 @@ int main(void)
                         mode0_dma_dir_facing(AFN_TM_PLAYER_OBJ, playerAsset, curSet, facing);
                         int tileCur = tm_obj_vram_slot[AFN_TM_PLAYER_OBJ];
 
-                        int scale8 = (int)afn_tm0_objs[AFN_TM_PLAYER_OBJ].scale8;
+                        int scale8 = (int)tm_cur_objs[AFN_TM_PLAYER_OBJ].scale8;
                         if (scale8 < 1) scale8 = 256;
                         int pa = (dirSize * 256 * 256) / (scale8 * tm_tile_size);
                         if (pa < 1) pa = 256;
@@ -4738,7 +4734,7 @@ int main(void)
                         int adjX = scrX + (tm_tile_size - canvasSize) / 2;
                         int adjY = scrY + (tm_tile_size - canvasSize) / 2;
 
-                        { int plPrio = (afn_tm0_objs[AFN_TM_PLAYER_OBJ].layer == 0) ? 3 : 1;
+                        { int plPrio = (tm_cur_objs[AFN_TM_PLAYER_OBJ].layer == 0) ? 3 : 1;
                         tm_player_a0 = ATTR0_SQUARE | ATTR0_AFF_DBL | ((adjY & 0xFF));
                         tm_player_a1 = size_to_attr1(dirSize) | ((adjX & 0x1FF)); // AFF_ID set at render time
                         tm_player_a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(plPrio) | (tileCur & 0x3FF); }
@@ -4773,7 +4769,7 @@ int main(void)
                         int objSz   = afn_asset_desc[playerAsset][3];
                         int palBank = afn_asset_desc[playerAsset][4];
                         int tileCur = tileBase - tm_static_adj + curFrame * tpf;
-                        { int plPrio = (afn_tm0_objs[AFN_TM_PLAYER_OBJ].layer == 0) ? 3 : 1;
+                        { int plPrio = (tm_cur_objs[AFN_TM_PLAYER_OBJ].layer == 0) ? 3 : 1;
                         tm_player_a0 = ATTR0_SQUARE | ((scrY & 0x1FF));
                         tm_player_a1 = size_to_attr1(objSz) | ((scrX & 0x1FF));
                         tm_player_a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(plPrio) | (tileCur & 0x3FF); }
@@ -4787,14 +4783,14 @@ int main(void)
             // Draw all tilemap objects (including player) sorted by layer
             {
                 int oamSlot = 0;
-#if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+#if defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
                 int oi;
                 int layerPass;
                 // Render objects from highest layer to lowest (higher layer = lower OAM slot = on top)
                 for (layerPass = 3; layerPass >= 0; layerPass--)
-                for (oi = 0; oi < AFN_TM0_OBJ_COUNT && oamSlot < 128; oi++) {
-                    if ((int)afn_tm0_objs[oi].layer != layerPass) continue;
-                    if (afn_tm0_objs[oi].type == 6) continue; // skip Tile objects
+                for (oi = 0; oi < tm_cur_obj_count && oamSlot < 128; oi++) {
+                    if ((int)tm_cur_objs[oi].layer != layerPass) continue;
+                    if (tm_cur_objs[oi].type == 6) continue; // skip Tile objects
                     // Player: use pre-computed OAM data from animation block
                     if (oi == AFN_TM_PLAYER_OBJ) {
                         if (tm_player_oam_ready) {
@@ -4810,11 +4806,11 @@ int main(void)
                         }
                         continue;
                     }
-                    int ai = afn_tm0_objs[oi].assetIdx;
+                    int ai = tm_cur_objs[oi].assetIdx;
                     if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
 
-                    int objPx = ((oi < TM_MAX_DIR_OBJS) ? tm_obj_tx[oi] : afn_tm0_objs[oi].tx) * tm_tile_size;
-                    int objPy = ((oi < TM_MAX_DIR_OBJS) ? tm_obj_ty[oi] : afn_tm0_objs[oi].ty) * tm_tile_size;
+                    int objPx = ((oi < TM_MAX_DIR_OBJS) ? tm_obj_tx[oi] : tm_cur_objs[oi].tx) * tm_tile_size;
+                    int objPy = ((oi < TM_MAX_DIR_OBJS) ? tm_obj_ty[oi] : tm_cur_objs[oi].ty) * tm_tile_size;
                     // Apply smooth follow offset for the followed object
                     if (oi == tm_fol_obj && tm_fol_active) {
                         objPx += tm_fol_offset_x;
@@ -4836,11 +4832,11 @@ int main(void)
                         objSz = dirSize;
                         palBank = afn_asset_dir_desc[ai][3];
                         int dirSet = 0;
-                        int dirFace = (oi < TM_MAX_DIR_OBJS) ? tm_obj_facing[oi] : afn_tm0_objs[oi].facing;
+                        int dirFace = (oi < TM_MAX_DIR_OBJS) ? tm_obj_facing[oi] : tm_cur_objs[oi].facing;
                         // Animated direction sprite: cycle animation sets
                         {
-                            int ap = (oi < TM_MAX_DIR_OBJS) ? tm_obj_anim_play[oi] : afn_tm0_objs[oi].animPlay;
-                            int ai2 = (oi < TM_MAX_DIR_OBJS) ? tm_obj_anim_idx[oi] : afn_tm0_objs[oi].animIdx;
+                            int ap = (oi < TM_MAX_DIR_OBJS) ? tm_obj_anim_play[oi] : tm_cur_objs[oi].animPlay;
+                            int ai2 = (oi < TM_MAX_DIR_OBJS) ? tm_obj_anim_idx[oi] : tm_cur_objs[oi].animIdx;
                             if (ap) {
                                 int baseFrame  = afn_anim_desc[ai][ai2][0];
                                 int frameCount = afn_anim_desc[ai][ai2][1];
@@ -4866,8 +4862,8 @@ int main(void)
                         tileCur = tileBase - tm_static_adj; // first frame
                         // Animated objects: cycle through selected animation
                         {
-                            int ap = (oi < TM_MAX_DIR_OBJS) ? tm_obj_anim_play[oi] : afn_tm0_objs[oi].animPlay;
-                            int animI = (oi < TM_MAX_DIR_OBJS) ? tm_obj_anim_idx[oi] : afn_tm0_objs[oi].animIdx;
+                            int ap = (oi < TM_MAX_DIR_OBJS) ? tm_obj_anim_play[oi] : tm_cur_objs[oi].animPlay;
+                            int animI = (oi < TM_MAX_DIR_OBJS) ? tm_obj_anim_idx[oi] : tm_cur_objs[oi].animIdx;
                         if (ap) {
                             int baseFrame  = afn_anim_desc[ai][animI][0];
                             int frameCount = afn_anim_desc[ai][animI][1];
@@ -4883,7 +4879,7 @@ int main(void)
                     }
 
                     // Affine scaling
-                    int sc8 = (int)afn_tm0_objs[oi].scale8;
+                    int sc8 = (int)tm_cur_objs[oi].scale8;
                     if (sc8 < 1) sc8 = 256;
                     int pa = (objSz * 256 * 256) / (sc8 * tm_tile_size);
                     if (pa < 1) pa = 256;
@@ -4935,14 +4931,15 @@ int main(void)
                     // HUD just closed — force re-DMA of direction facings
                     hud_font_loaded = 0;
                     tm_hud_was_visible = 0;
-#if defined(AFN_TM0_OBJ_COUNT) && AFN_TM0_OBJ_COUNT > 0 && defined(AFN_HAS_ASSET_DIRS)
-                    { int oi2; for (oi2 = 0; oi2 < AFN_TM0_OBJ_COUNT && oi2 < TM_MAX_DIR_OBJS; oi2++) {
+#if defined(AFN_HAS_ASSET_DIRS)
+                    if (tm_cur_obj_count > 0) {
+                    int oi2; for (oi2 = 0; oi2 < tm_cur_obj_count && oi2 < TM_MAX_DIR_OBJS; oi2++) {
                         if (tm_obj_vram_slot[oi2] < 0) continue;
                         int prevSet = tm_obj_dir_set[oi2];
                         int prevFace = tm_obj_dir_facing[oi2];
                         tm_obj_dir_set[oi2] = -1;
                         tm_obj_dir_facing[oi2] = -1;
-                        mode0_dma_dir_facing(oi2, afn_tm0_objs[oi2].assetIdx,
+                        mode0_dma_dir_facing(oi2, tm_cur_objs[oi2].assetIdx,
                             prevSet >= 0 ? prevSet : 0,
                             prevFace >= 0 ? prevFace : 4);
                     } }

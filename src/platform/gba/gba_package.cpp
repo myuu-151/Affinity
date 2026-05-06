@@ -273,7 +273,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
     f << "#define AFFINITY_HAS_SPRITES\n\n";
 
     // Scene mode tracking (must be before blueprint dispatch)
-    f << "static int afn_current_mode;\n\n";
+    f << "static int afn_current_mode;\n";
+    f << "static int tm_scene_idx;\n\n";
 
     // Camera start
     f << "// Camera start position\n";
@@ -4700,11 +4701,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
             for (auto& bp : blueprints) maxParams = std::max(maxParams, (int)bp.params.size());
             if (maxParams < 1) maxParams = 1;
 
-            f << "static const struct { int bpIdx; int sprIdx; int tmObjIdx; int sceneMode; int params[" << maxParams << "]; }\n";
+            f << "static const struct { int bpIdx; int sprIdx; int tmObjIdx; int sceneMode; int sceneIdx; int params[" << maxParams << "]; }\n";
             f << "    afn_bp_instances[" << (int)bpInstances.size() << "] = {\n";
             for (int ii = 0; ii < (int)bpInstances.size(); ii++) {
                 const auto& inst = bpInstances[ii];
-                f << "    {" << inst.blueprintIdx << ", " << inst.spriteIdx << ", " << inst.tmObjIdx << ", " << inst.sceneMode << ", {";
+                f << "    {" << inst.blueprintIdx << ", " << inst.spriteIdx << ", " << inst.tmObjIdx << ", " << inst.sceneMode << ", " << inst.sceneIdx << ", {";
                 for (int pi = 0; pi < maxParams; pi++) {
                     if (pi > 0) f << ",";
                     f << ((pi < inst.paramCount) ? inst.paramValues[pi] : 0);
@@ -4713,10 +4714,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
             }
             f << "};\n\n";
 
-            // Dispatch functions — only run instances matching the current scene mode
+            // Dispatch functions — only run instances matching the current scene mode + scene index
             f << "static inline void afn_bp_dispatch_start(void) {\n";
             f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
             f << "    if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;\n";
+            f << "    if (afn_bp_instances[i].sceneIdx >= 0 && afn_bp_instances[i].sceneIdx != tm_scene_idx) continue;\n";
             f << "    switch (afn_bp_instances[i].bpIdx) {\n";
             for (int bi = 0; bi < (int)blueprints.size(); bi++) {
                 int pc = (int)blueprints[bi].params.size();
@@ -4730,6 +4732,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 f << "static inline void afn_bp_dispatch_" << suffix << "(void) {\n";
                 f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
                 f << "    if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;\n";
+                f << "    if (afn_bp_instances[i].sceneIdx >= 0 && afn_bp_instances[i].sceneIdx != tm_scene_idx) continue;\n";
                 f << "    if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;\n";
                 f << "    afn_bp_cur_tm_obj = afn_bp_instances[i].tmObjIdx;\n";
                 f << "    afn_bp_cur_spr_idx = afn_bp_instances[i].sprIdx;\n";
@@ -4751,6 +4754,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "static inline void afn_bp_dispatch_collision(void) {\n";
             f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
             f << "    if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;\n";
+            f << "    if (afn_bp_instances[i].sceneIdx >= 0 && afn_bp_instances[i].sceneIdx != tm_scene_idx) continue;\n";
             f << "    if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;\n";
             f << "    if (afn_bp_instances[i].sprIdx != afn_collided_sprite) continue;\n";
             f << "    switch (afn_bp_instances[i].bpIdx) {\n";
@@ -4766,6 +4770,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "static inline void afn_bp_dispatch_collision2d(void) {\n";
             f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
             f << "    if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;\n";
+            f << "    if (afn_bp_instances[i].sceneIdx >= 0 && afn_bp_instances[i].sceneIdx != tm_scene_idx) continue;\n";
             f << "    if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;\n";
             f << "    if (afn_bp_instances[i].tmObjIdx != afn_collided_tm_obj) continue;\n";
             f << "    switch (afn_bp_instances[i].bpIdx) {\n";
@@ -4795,6 +4800,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "\n// ---- Mode 0 Tilemap ----\n";
         f << "#define AFN_HAS_MODE0 1\n";
         f << "#define AFN_TM_SCENE_COUNT " << (int)tmScenes.size() << "\n\n";
+
+        // Obj struct typedef (shared by all scenes)
+        f << "typedef struct { s16 tx,ty; u8 type; s8 assetIdx; u8 camFollow; u8 collision; s8 teleScene; u16 scale8; u8 layer; u8 animPlay; s8 animIdx; u8 facing; } AfnTmObj;\n\n";
 
         // Emit per-scene data
         for (int si = 0; si < (int)tmScenes.size(); si++)
@@ -4879,7 +4887,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 // { tileX, tileY, type, spriteAssetIdx, camFollow, teleportScene, scale8 }
                 // scale8: 8.8 fixed point (256 = 1.0x, 128 = 0.5x, 64 = 0.25x)
                 int arrSize = (objCount > 0) ? objCount : 1;
-                f << "static const struct { s16 tx,ty; u8 type; s8 assetIdx; u8 camFollow; u8 collision; s8 teleScene; u16 scale8; u8 layer; u8 animPlay; s8 animIdx; u8 facing; } "
+                f << "static const AfnTmObj "
                   << "afn_tm" << si << "_objs[" << arrSize << "] = {\n";
                 for (int oi = 0; oi < objCount; oi++)
                 {
@@ -4895,6 +4903,61 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 f << "};\n";
             }
             f << "\n";
+        }
+
+        // Scene indirection tables for runtime scene switching
+        {
+            int nsc = (int)tmScenes.size();
+
+            // Palette pointers
+            f << "static const u16 * const afn_tm_scene_pal[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "afn_tm" << si << "_pal";
+            f << "};\n";
+
+            // Tile data pointers + lengths
+            f << "static const u32 * const afn_tm_scene_tiles[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "afn_tm" << si << "_tiles";
+            f << "};\n";
+            f << "static const int afn_tm_scene_tiles_len[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_TILES_LEN";
+            f << "};\n";
+
+            // Map data pointers + dimensions
+            f << "static const u16 * const afn_tm_scene_map[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "afn_tm" << si << "_map";
+            f << "};\n";
+            f << "static const int afn_tm_scene_w[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_W";
+            f << "};\n";
+            f << "static const int afn_tm_scene_h[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_H";
+            f << "};\n";
+
+            // BG size
+            f << "static const int afn_tm_scene_bg_size[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_BG_SIZE";
+            f << "};\n";
+
+            // Tile size
+            f << "static const int afn_tm_scene_tile_size[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_TILE_SIZE";
+            f << "};\n";
+
+            // Logical dimensions
+            f << "static const int afn_tm_scene_logical_w[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_LOGICAL_W";
+            f << "};\n";
+            f << "static const int afn_tm_scene_logical_h[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_LOGICAL_H";
+            f << "};\n";
+
+            // Object pointers + counts
+            f << "static const AfnTmObj * const afn_tm_scene_objs[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "afn_tm" << si << "_objs";
+            f << "};\n";
+            f << "static const int afn_tm_scene_obj_count[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_OBJ_COUNT";
+            f << "};\n\n";
         }
 
         // Find player object across all scenes (first scene, first Player type)

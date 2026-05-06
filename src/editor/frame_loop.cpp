@@ -2610,6 +2610,8 @@ struct HudElement {
     int layer = 0;           // draw order (higher = on top)
     int blueprintIdx = -1;   // blueprint instance (-1 = none)
     int runtimeMode = 0;     // 0=Both, 1=Mode 4 Only, 2=Mode 0 Only
+    int mode0SceneIdx = -1;  // -1=All Mode 0 scenes, >=0 = specific scene
+    int mode4SceneIdx = -1;  // -1=All Mode 4 scenes, >=0 = specific scene
     // Composite pieces
     std::vector<HudPiece> pieces;
     int selectedPiece = -1;  // currently selected piece index (editor only)
@@ -3764,6 +3766,10 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "elemBp=%d\n", el.blueprintIdx);
         if (el.runtimeMode != 0)
             fprintf(f, "elemMode=%d\n", el.runtimeMode);
+        if (el.mode0SceneIdx >= 0)
+            fprintf(f, "elemM0Scene=%d\n", el.mode0SceneIdx);
+        if (el.mode4SceneIdx >= 0)
+            fprintf(f, "elemM4Scene=%d\n", el.mode4SceneIdx);
         if (el.layerPieces != 0 || el.layerSprites != 1 || el.layerText != 2 || el.layerCursor != 3)
             fprintf(f, "elemLayers=%d|%d|%d|%d\n", el.layerPieces, el.layerSprites, el.layerText, el.layerCursor);
         if (!el.keyframes.empty()) {
@@ -4816,6 +4822,12 @@ static bool LoadProject(const std::string& path)
             }
             else if (sscanf(line, "elemMode=%d", &ival) == 1 && !sHudElements.empty()) {
                 sHudElements.back().runtimeMode = ival;
+            }
+            else if (sscanf(line, "elemM0Scene=%d", &ival) == 1 && !sHudElements.empty()) {
+                sHudElements.back().mode0SceneIdx = ival;
+            }
+            else if (sscanf(line, "elemM4Scene=%d", &ival) == 1 && !sHudElements.empty()) {
+                sHudElements.back().mode4SceneIdx = ival;
             }
             else if (strncmp(line, "elemLayers=", 11) == 0 && !sHudElements.empty()) {
                 HudElement& hel = sHudElements.back();
@@ -10365,6 +10377,7 @@ void FrameTick(float dt)
                     inst.spriteIdx = si;
                     inst.tmObjIdx = -1;
                     inst.sceneMode = 0; // Mode 4
+                    inst.sceneIdx = -1; // all Mode 4 scenes
                     inst.paramCount = bp.paramCount;
                     for (int pi = 0; pi < bp.paramCount; pi++) {
                         inst.paramValues[pi] = bp.params[pi].defaultInt;
@@ -10386,6 +10399,7 @@ void FrameTick(float dt)
                         inst.spriteIdx = -1;
                         inst.tmObjIdx = oi;
                         inst.sceneMode = 1; // Mode 0
+                        inst.sceneIdx = si; // this tilemap scene
                         inst.paramCount = bp.paramCount;
                         for (int pi = 0; pi < bp.paramCount; pi++) {
                             inst.paramValues[pi] = bp.params[pi].defaultInt;
@@ -10406,6 +10420,7 @@ void FrameTick(float dt)
                     inst.spriteIdx = -1;
                     inst.tmObjIdx = -1;
                     inst.sceneMode = 0; // Mode 4
+                    inst.sceneIdx = si; // this Mode 4 scene
                     inst.paramCount = bp.paramCount;
                     for (int pi = 0; pi < bp.paramCount; pi++) {
                         inst.paramValues[pi] = bp.params[pi].defaultInt;
@@ -10421,20 +10436,21 @@ void FrameTick(float dt)
                     const HudElement& el = sHudElements[ei];
                     if (el.blueprintIdx < 0 || el.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
                     const BlueprintAsset& bp = sBlueprintAssets[el.blueprintIdx];
-                    auto addElemInst = [&](int mode) {
+                    auto addElemInst = [&](int mode, int scIdx) {
                         GBABlueprintInstanceExport inst;
                         inst.blueprintIdx = el.blueprintIdx;
                         inst.spriteIdx = -1;
                         inst.tmObjIdx = -1;
                         inst.sceneMode = mode;
+                        inst.sceneIdx = scIdx;
                         inst.paramCount = bp.paramCount;
                         for (int pi = 0; pi < bp.paramCount; pi++)
                             inst.paramValues[pi] = bp.params[pi].defaultInt;
                         exportBpInstances.push_back(inst);
                     };
-                    if (el.runtimeMode == 0) { addElemInst(0); addElemInst(1); } // Both
-                    else if (el.runtimeMode == 1) addElemInst(0); // Mode 4 Only
-                    else if (el.runtimeMode == 2) addElemInst(1); // Mode 0 Only
+                    if (el.runtimeMode == 0) { addElemInst(0, el.mode4SceneIdx); addElemInst(1, el.mode0SceneIdx); } // Both
+                    else if (el.runtimeMode == 1) addElemInst(0, el.mode4SceneIdx); // Mode 4 Only
+                    else if (el.runtimeMode == 2) addElemInst(1, el.mode0SceneIdx); // Mode 0 Only
                 }
 
                 // Collect TmScene-level blueprint instances (sceneMode=1: Mode0/tilemap)
@@ -10447,6 +10463,7 @@ void FrameTick(float dt)
                     inst.spriteIdx = -1;
                     inst.tmObjIdx = -1;
                     inst.sceneMode = 1; // Mode 0
+                    inst.sceneIdx = si2; // this tilemap scene
                     inst.paramCount = bp.paramCount;
                     for (int pi = 0; pi < bp.paramCount; pi++) {
                         inst.paramValues[pi] = bp.params[pi].defaultInt;
@@ -17865,21 +17882,37 @@ void FrameTick(float dt)
                         ImGui::EndCombo();
                     }
                 } else {
-                    // Tilemap objects (Mode 0)
+                    // Tilemap objects (Mode 0) — with scene selector
+                    // paramInt[2] = scene index for object lookup
+                    int tmSceneIdx = std::clamp(n.paramInt[2], 0, std::max(0, (int)sTmScenes.size() - 1));
+                    const char* scPreview = (tmSceneIdx >= 0 && tmSceneIdx < (int)sTmScenes.size())
+                        ? sTmScenes[tmSceneIdx].name : "None";
+                    ImGui::PushItemWidth(Scaled(85));
+                    if (ImGui::BeginCombo("##ObjTmScene", scPreview)) {
+                        for (int si = 0; si < (int)sTmScenes.size(); si++) {
+                            if (ImGui::Selectable(sTmScenes[si].name, si == tmSceneIdx))
+                                n.paramInt[2] = si;
+                        }
+                        ImGui::EndCombo();
+                    }
+                    ImGui::PopItemWidth();
+
+                    // Show objects from selected scene
+                    const auto& scObjs = (tmSceneIdx == sTmSelectedScene) ? sTmObjects : sTmScenes[tmSceneIdx].objects;
                     const char* preview = "None";
                     char prevBuf[64];
-                    if (n.paramInt[0] >= 0 && n.paramInt[0] < (int)sTmObjects.size()) {
-                        if (sTmObjects[n.paramInt[0]].name[0])
-                            snprintf(prevBuf, sizeof(prevBuf), "[%d] %s", n.paramInt[0], sTmObjects[n.paramInt[0]].name);
+                    if (n.paramInt[0] >= 0 && n.paramInt[0] < (int)scObjs.size()) {
+                        if (scObjs[n.paramInt[0]].name[0])
+                            snprintf(prevBuf, sizeof(prevBuf), "[%d] %s", n.paramInt[0], scObjs[n.paramInt[0]].name);
                         else
                             snprintf(prevBuf, sizeof(prevBuf), "[%d] Obj", n.paramInt[0]);
                         preview = prevBuf;
                     }
                     if (ImGui::BeginCombo("##ObjTm", preview)) {
-                        for (int ti = 0; ti < (int)sTmObjects.size(); ti++) {
+                        for (int ti = 0; ti < (int)scObjs.size(); ti++) {
                             char itemLabel[64];
-                            if (sTmObjects[ti].name[0])
-                                snprintf(itemLabel, sizeof(itemLabel), "[%d] %s", ti, sTmObjects[ti].name);
+                            if (scObjs[ti].name[0])
+                                snprintf(itemLabel, sizeof(itemLabel), "[%d] %s", ti, scObjs[ti].name);
                             else
                                 snprintf(itemLabel, sizeof(itemLabel), "[%d] (unnamed)", ti);
                             if (ImGui::Selectable(itemLabel, ti == n.paramInt[0]))
@@ -19914,6 +19947,10 @@ void FrameTick(float dt)
                         fprintf(cf, "elemVisible=%d\n", el.visible ? 1 : 0);
                         fprintf(cf, "elemBp=%d\n", el.blueprintIdx);
                         fprintf(cf, "elemMode=%d\n", el.runtimeMode);
+                        if (el.mode0SceneIdx >= 0)
+                            fprintf(cf, "elemM0Scene=%d\n", el.mode0SceneIdx);
+                        if (el.mode4SceneIdx >= 0)
+                            fprintf(cf, "elemM4Scene=%d\n", el.mode4SceneIdx);
                         if (el.layerPieces != 0 || el.layerSprites != 1 || el.layerText != 2 || el.layerCursor != 3)
                             fprintf(cf, "elemLayers=%d|%d|%d|%d\n", el.layerPieces, el.layerSprites, el.layerText, el.layerCursor);
                         // Pieces
@@ -20057,6 +20094,8 @@ void FrameTick(float dt)
                             else if (sscanf(line, "elemVisible=%d", &ival2) == 1) nel.visible = ival2 != 0;
                             else if (sscanf(line, "elemBp=%d", &nel.blueprintIdx) == 1) {}
                             else if (sscanf(line, "elemMode=%d", &nel.runtimeMode) == 1) {}
+                            else if (sscanf(line, "elemM0Scene=%d", &nel.mode0SceneIdx) == 1) {}
+                            else if (sscanf(line, "elemM4Scene=%d", &nel.mode4SceneIdx) == 1) {}
                             else if (strncmp(line, "elemLayers=", 11) == 0) {
                                 int n = sscanf(line + 11, "%d|%d|%d|%d", &nel.layerPieces, &nel.layerSprites, &nel.layerText, &nel.layerCursor);
                                 if (n == 3) { nel.layerCursor = nel.layerText; nel.layerText = nel.layerSprites; nel.layerSprites = 1; }
@@ -20173,6 +20212,31 @@ void FrameTick(float dt)
                     static const char* modeNames[] = { "Both", "Mode 4 Only", "Mode 0 Only" };
                     if (ImGui::Combo("Runtime Mode", &el.runtimeMode, modeNames, 3))
                         sProjectDirty = true;
+                }
+
+                // Scene selector (Mode 0)
+                if (el.runtimeMode != 1 && !sTmScenes.empty()) { // show if Both or Mode 0 Only
+                    int sel0 = el.mode0SceneIdx + 1; // 0="All", 1..N=scene
+                    std::string preview0 = (sel0 == 0) ? "All" : sTmScenes[sel0-1].name;
+                    if (ImGui::BeginCombo("Mode 0 Scene", preview0.c_str())) {
+                        if (ImGui::Selectable("All", sel0 == 0)) { el.mode0SceneIdx = -1; sProjectDirty = true; }
+                        for (int si = 0; si < (int)sTmScenes.size(); si++) {
+                            if (ImGui::Selectable(sTmScenes[si].name, sel0 == si+1)) { el.mode0SceneIdx = si; sProjectDirty = true; }
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+                // Scene selector (Mode 4)
+                if (el.runtimeMode != 2 && !sMapScenes.empty()) { // show if Both or Mode 4 Only
+                    int sel4 = el.mode4SceneIdx + 1;
+                    std::string preview4 = (sel4 == 0) ? "All" : sMapScenes[sel4-1].name;
+                    if (ImGui::BeginCombo("Mode 4 Scene", preview4.c_str())) {
+                        if (ImGui::Selectable("All", sel4 == 0)) { el.mode4SceneIdx = -1; sProjectDirty = true; }
+                        for (int si = 0; si < (int)sMapScenes.size(); si++) {
+                            if (ImGui::Selectable(sMapScenes[si].name, sel4 == si+1)) { el.mode4SceneIdx = si; sProjectDirty = true; }
+                        }
+                        ImGui::EndCombo();
+                    }
                 }
 
                 // Layer draw order
