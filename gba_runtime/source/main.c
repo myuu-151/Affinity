@@ -92,7 +92,8 @@ static void afn_stop_sound(void);
 #define SND_BUF_SIZE 304
 #define SND_MAX_VOICES 4
 
-static s8 snd_buf[2][SND_BUF_SIZE] __attribute__((aligned(4)));
+// Sound buffers in EWRAM to save IWRAM space (32KB limit)
+EWRAM_DATA static s8 snd_buf[2][SND_BUF_SIZE] __attribute__((aligned(4)));
 static int snd_cur_buf = 0;
 
 typedef struct {
@@ -109,36 +110,45 @@ typedef struct {
     int gainShift;     // volume shift: 7 = normal, 6 = loud
 } SndVoice;
 
-static SndVoice snd_voices[SND_MAX_VOICES];
+EWRAM_DATA static SndVoice snd_voices[SND_MAX_VOICES];
 
 static int snd_seq_active = -1;
 static int snd_seq_tick = 0;
 static int snd_seq_next = 0;
 static int snd_initialized = 0;
 
-static void afn_sound_init(void) {
-    if (snd_initialized) return;
-    snd_initialized = 1;
-    for (int i = 0; i < SND_BUF_SIZE; i++) {
-        snd_buf[0][i] = 0;
-        snd_buf[1][i] = 0;
-    }
+static void afn_sound_hw_start(void) {
+    // Enable sound hardware, timer, and FIFO DMA
     REG_SNDSTAT = SSTAT_ENABLE;
     REG_SNDDSCNT = SDS_A100 | SDS_AL | SDS_AR | SDS_ATMR0 | SDS_ARESET;
-    // Timer 0: sample rate clock (18157 Hz — standard GBA rate, 304 samples/frame exact)
     REG_TM0CNT_H = 0;
-    REG_TM0CNT_L = 65536 - 924;
+    REG_TM0CNT_L = 65536 - 924;  // 18157 Hz
     REG_TM0CNT_H = TM_ENABLE;
-    // Start DMA on buffer 0 (silence)
     snd_cur_buf = 0;
     REG_DMA1CNT = 0;
     REG_DMA1SAD = (u32)snd_buf[0];
     REG_DMA1DAD = (u32)&REG_FIFO_A;
     REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
+    snd_initialized = 1;
+}
+
+static void afn_sound_hw_stop(void) {
+    // Shut down timer and DMA to free bus bandwidth
+    REG_DMA1CNT = 0;
+    REG_TM0CNT_H = 0;
+    snd_initialized = 0;
+}
+
+static void afn_sound_init(void) {
+    // Just clear buffers — don't start HW until play
+    for (int i = 0; i < SND_BUF_SIZE; i++) {
+        snd_buf[0][i] = 0;
+        snd_buf[1][i] = 0;
+    }
 }
 
 static void afn_play_sound(int instanceId) {
-    afn_sound_init();
+    if (!snd_initialized) afn_sound_hw_start();
     snd_seq_active = instanceId;
     snd_seq_tick = 0;
     snd_seq_next = 0;
@@ -150,19 +160,31 @@ static void afn_stop_sound(void) {
         snd_voices[i].active = 0;
 }
 
-// Simple VBlank-driven mixer
-static void afn_sound_mix(void) {
+// Called at VBlank: swap DMA to the buffer we just finished mixing,
+// then mix the next frame into the other buffer.
+IWRAM_CODE static void afn_sound_mix(void) {
     if (!snd_initialized) return;
 
-    // Swap: DMA plays the buffer we just mixed, we mix into the other
-    snd_cur_buf ^= 1;
-    REG_DMA1CNT = 0;
-    REG_DMA1SAD = (u32)snd_buf[snd_cur_buf ^ 1];
-    REG_DMA1DAD = (u32)&REG_FIFO_A;
-    REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
+    // Check if any voice is still active — if not, shut down HW
+    {
+        int anyActive = 0;
+        for (int v = 0; v < SND_MAX_VOICES; v++)
+            if (snd_voices[v].active) { anyActive = 1; break; }
+        if (!anyActive && snd_seq_active < 0) {
+            afn_sound_hw_stop();
+            return;
+        }
+    }
 
-    // Clear and mix into current buffer (will play next frame)
-    s8* buf = snd_buf[snd_cur_buf];
+    // Point DMA to the buffer we mixed last frame
+    int play = snd_cur_buf ^ 1;
+    REG_DMA1CNT = 0;
+    REG_DMA1SAD = (u32)snd_buf[play];
+    REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
+    snd_cur_buf = play;
+
+    // Mix into the other buffer
+    s8* buf = snd_buf[snd_cur_buf ^ 1];
     u32* b32 = (u32*)buf;
     for (int i = 0; i < SND_BUF_SIZE / 4; i++) b32[i] = 0;
 
@@ -4185,6 +4207,9 @@ int main(void)
     init_rcp_table();
     init_divLUT();
 #endif
+
+    // --- DMA Audio init (early, before main loop) ---
+    afn_sound_init();
 
     // --- Camera defaults ---
     cam_fov = 128;
