@@ -4875,12 +4875,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
             // Objects
             int objCount = (int)sc.objects.size();
             f << "#define AFN_TM" << si << "_OBJ_COUNT " << objCount << "\n";
-            if (objCount > 0)
             {
                 // { tileX, tileY, type, spriteAssetIdx, camFollow, teleportScene, scale8 }
                 // scale8: 8.8 fixed point (256 = 1.0x, 128 = 0.5x, 64 = 0.25x)
+                int arrSize = (objCount > 0) ? objCount : 1;
                 f << "static const struct { s16 tx,ty; u8 type; s8 assetIdx; u8 camFollow; u8 collision; s8 teleScene; u16 scale8; u8 layer; u8 animPlay; s8 animIdx; u8 facing; } "
-                  << "afn_tm" << si << "_objs[" << objCount << "] = {\n";
+                  << "afn_tm" << si << "_objs[" << arrSize << "] = {\n";
                 for (int oi = 0; oi < objCount; oi++)
                 {
                     const auto& obj = sc.objects[oi];
@@ -4890,6 +4890,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                       << obj.type << "," << obj.spriteAssetIdx << ","
                       << (obj.camFollow ? 1 : 0) << "," << (obj.collision ? 1 : 0) << "," << obj.teleportScene << "," << scale8 << "," << obj.layer << "," << (obj.animPlay ? 1 : 0) << "," << obj.animIdx << "," << obj.facing << "},\n";
                 }
+                if (objCount == 0)
+                    f << "    {0,0,0,0,0,0,0,256,0,0,0,0},\n";
                 f << "};\n";
             }
             f << "\n";

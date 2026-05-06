@@ -8997,6 +8997,29 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 sTmSelectedScene = i;
                 LoadSceneState(sTmScenes[i]);
             }
+            // Drag-drop reorder
+            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
+                ImGui::SetDragDropPayload("TM_SCENE", &i, sizeof(int));
+                ImGui::Text("%s", sTmScenes[i].name);
+                ImGui::EndDragDropSource();
+            }
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("TM_SCENE")) {
+                    int src = *(const int*)payload->Data;
+                    if (src != i && src >= 0 && src < (int)sTmScenes.size()) {
+                        TmScene tmp = sTmScenes[src];
+                        sTmScenes.erase(sTmScenes.begin() + src);
+                        int dst = (src < i) ? i - 1 : i;
+                        sTmScenes.insert(sTmScenes.begin() + dst, tmp);
+                        // Keep selection following the moved scene
+                        if (sTmSelectedScene == src) sTmSelectedScene = dst;
+                        else if (src < sTmSelectedScene && dst >= sTmSelectedScene) sTmSelectedScene--;
+                        else if (src > sTmSelectedScene && dst <= sTmSelectedScene) sTmSelectedScene++;
+                        sProjectDirty = true;
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
         }
         ImGui::EndChild();
 
@@ -21072,6 +21095,28 @@ void FrameTick(float dt)
                         sMapSelectedScene = i;
                         LoadMapSceneState(sMapScenes[i]);
                     }
+                }
+                // Drag-drop reorder
+                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
+                    ImGui::SetDragDropPayload("MAP_SCENE", &i, sizeof(int));
+                    ImGui::Text("%s", sMapScenes[i].name);
+                    ImGui::EndDragDropSource();
+                }
+                if (ImGui::BeginDragDropTarget()) {
+                    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MAP_SCENE")) {
+                        int src = *(const int*)payload->Data;
+                        if (src != i && src >= 0 && src < (int)sMapScenes.size()) {
+                            MapScene tmp = sMapScenes[src];
+                            sMapScenes.erase(sMapScenes.begin() + src);
+                            int dst = (src < i) ? i - 1 : i;
+                            sMapScenes.insert(sMapScenes.begin() + dst, tmp);
+                            if (sMapSelectedScene == src) sMapSelectedScene = dst;
+                            else if (src < sMapSelectedScene && dst >= sMapSelectedScene) sMapSelectedScene--;
+                            else if (src > sMapSelectedScene && dst <= sMapSelectedScene) sMapSelectedScene++;
+                            sProjectDirty = true;
+                        }
+                    }
+                    ImGui::EndDragDropTarget();
                 }
             }
             ImGui::EndChild();
