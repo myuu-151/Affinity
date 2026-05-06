@@ -5083,6 +5083,8 @@ int main(void)
                             for (ti2 = 0; ti2 < tCount2 && oamSlot < 126; ti2++) {
                                 int tpx = ex + afn_hud_texts[tStart2 + ti2].x;
                                 int tpy = ey + afn_hud_texts[tStart2 + ti2].y;
+                                // Apply per-text color
+                                ((u16*)0x05000200)[15 * 16 + 1] = afn_hud_texts[tStart2 + ti2].color;
                                 oamSlot += hud_text_oam(oamSlot, tpx, tpy, afn_hud_texts[tStart2 + ti2].text, 15);
                             }
                         } else if (layerOrder[pass] == 1 && spCount2 > 0) {
