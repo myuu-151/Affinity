@@ -4054,17 +4054,21 @@ static bool SaveProject(const std::string& path)
                     fprintf(f, ",%.4f,%.4f", ep.time, ep.level);
                 fprintf(f, "\n");
             }
-            fprintf(f, "impDataLen=%d\n", (int)s.data.size());
-            if (!s.data.empty()) {
+            // Save the ORIGINAL un-amplified data (so gain can be re-applied on load)
+            const std::vector<int8_t>& saveData =
+                (sSampleOriginal.count(i) && !sSampleOriginal[i].empty())
+                    ? sSampleOriginal[i] : s.data;
+            fprintf(f, "impDataLen=%d\n", (int)saveData.size());
+            if (!saveData.empty()) {
                 // Write PCM in chunks to avoid exceeding line buffer on load
                 const int chunkSize = 4000;
-                for (int off = 0; off < (int)s.data.size(); off += chunkSize) {
+                for (int off = 0; off < (int)saveData.size(); off += chunkSize) {
                     int end = off + chunkSize;
-                    if (end > (int)s.data.size()) end = (int)s.data.size();
+                    if (end > (int)saveData.size()) end = (int)saveData.size();
                     fprintf(f, "impData=");
                     for (int di = off; di < end; di++) {
                         if (di > off) fprintf(f, ",");
-                        fprintf(f, "%d", (int)s.data[di]);
+                        fprintf(f, "%d", (int)saveData[di]);
                     }
                     fprintf(f, "\n");
                 }
@@ -5482,6 +5486,18 @@ static bool LoadProject(const std::string& path)
                 curImp = &sSoundBank.back();
             }
             else if (strcmp(line, "imp_end") == 0) {
+                // Data was saved un-amplified; re-apply gain and store original
+                if (curImp && curImp->ampGainDb != 0.0f && !curImp->data.empty()) {
+                    int idx = (int)sSoundBank.size() - 1;
+                    sSampleOriginal[idx] = curImp->data; // store un-amplified as original
+                    float gain = powf(10.0f, curImp->ampGainDb / 20.0f);
+                    for (int si = 0; si < (int)curImp->data.size(); si++) {
+                        int v = (int)(curImp->data[si] * gain);
+                        if (v > 127) v = 127;
+                        if (v < -128) v = -128;
+                        curImp->data[si] = (int8_t)v;
+                    }
+                }
                 curImp = nullptr;
             }
             else if (curImp) {
@@ -18380,6 +18396,7 @@ void FrameTick(float dt)
                     sSampleOriginal.erase(sSelectedSample);
                     sSelectedSample = -1;
                     sProjectDirty = true;
+                    goto sampleDetailsDone; // skip rest — s is invalid
                 }
             }
 
@@ -18405,6 +18422,7 @@ void FrameTick(float dt)
                 }
             }
         }
+        sampleDetailsDone:
 
         ImGui::End();
         ImGui::PopStyleColor();
