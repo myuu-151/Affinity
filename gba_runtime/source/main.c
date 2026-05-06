@@ -348,7 +348,11 @@ static int tm_move_frames = 8;          // frames per tile move (derived from af
 static int tm_turn_timer = 0;          // frames since direction key pressed (turn-in-place delay)
 static int tm_turn_facing = -1;        // direction key being held (-1 = none)
 static int tm_cam_x, tm_cam_y;          // camera scroll in pixels
-static int tm_tile_size = 8;            // pixels per tile on screen
+#ifdef AFN_TM0_TILE_SIZE
+static int tm_tile_size = AFN_TM0_TILE_SIZE;
+#else
+static int tm_tile_size = 8;
+#endif
 static int tm_scene_idx;                // current scene
 static int tm_dir_adj = 0;              // tile ID adjustment for direction sprites (Mode 4 only)
 static int tm_static_adj = 0;           // tile ID adjustment for static/HUD tiles

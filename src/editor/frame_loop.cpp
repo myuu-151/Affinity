@@ -139,7 +139,8 @@ static std::vector<float> sTmObjVisY; // per-object visual Y position (smooth le
 struct TmScene {
     char name[32] = "";
     int mapW = 1, mapH = 1;        // grid dimensions in tiles
-    float zoom = 1.0f;             // camera zoom level (exported to GBA)
+    float zoom = 1.0f;             // editor canvas zoom level
+    int pixelScale = 1;            // export pixel scale (1=normal, 2=2x zoom)
     // Per-scene tilemap data
     std::vector<uint16_t> tileIndices;  // saved tile grid
     std::vector<TmObject> objects;      // saved objects
@@ -3817,6 +3818,8 @@ static bool SaveProject(const std::string& path)
         const TmScene& sc = sTmScenes[i];
         fprintf(f, "scene=%d,%d,%s\n", sc.mapW, sc.mapH, sc.name);
         fprintf(f, "scenezoom=%.3f\n", sc.zoom);
+        if (sc.pixelScale != 1)
+            fprintf(f, "scenepxscale=%d\n", sc.pixelScale);
         // scenecamfollow removed — now per-object
         // Per-scene tile data
         fprintf(f, "scenetiles=");
@@ -4927,6 +4930,11 @@ static bool LoadProject(const std::string& path)
             }
             else if (strncmp(line, "scenezoom=", 10) == 0 && !sTmScenes.empty()) {
                 sscanf(line + 10, "%f", &sTmScenes.back().zoom);
+            }
+            else if (strncmp(line, "scenepxscale=", 13) == 0 && !sTmScenes.empty()) {
+                int pxs = 1;
+                sscanf(line + 13, "%d", &pxs);
+                sTmScenes.back().pixelScale = (pxs == 2) ? 2 : 1;
             }
             // scenecamfollow= is deprecated — now per-object (objCamFollow)
             else if (strncmp(line, "scenetiles=", 11) == 0 && !sTmScenes.empty())
@@ -8970,6 +8978,15 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 sTmMapZoom = sc.zoom;
                 sProjectDirty = true;
             }
+            // Pixel Scale dropdown (1x or 2x)
+            {
+                const char* scaleNames[] = { "1x", "2x" };
+                int scaleIdx = (sc.pixelScale == 2) ? 1 : 0;
+                if (ImGui::Combo("Pixel Scale##scpxs", &scaleIdx, scaleNames, 2)) {
+                    sc.pixelScale = (scaleIdx == 1) ? 2 : 1;
+                    sProjectDirty = true;
+                }
+            }
             if (sc.mapW != prevW || sc.mapH != prevH)
             {
                 // User changed dimensions via properties — resize tilemap
@@ -10389,6 +10406,7 @@ void FrameTick(float dt)
                         tse.mapW = sc.mapW;
                         tse.mapH = sc.mapH;
                         tse.zoom = sc.zoom;
+                        tse.pixelScale = sc.pixelScale;
                         memset(tse.palette, 0, sizeof(tse.palette));
 
                         // Build BG tiles from sprite asset Tile objects
@@ -10467,12 +10485,62 @@ void FrameTick(float dt)
                         // palette[0] = white backdrop (set in bank 0)
                         tse.palette[0] = 0xFFFFFFFF; // white RGBA
 
+                        // Pixel Scale 2x: double each tile into 4 tiles, double map dims
+                        if (sc.pixelScale == 2)
+                        {
+                            int origTileCount = tse.tileCount;
+                            std::vector<uint8_t> origPixels = tse.tilePixels;
+
+                            // Each original tile → 4 new tiles (TL, TR, BL, BR)
+                            int newTileCount = origTileCount * 4;
+                            std::vector<uint8_t> newPixels(newTileCount * 64, 0);
+                            for (int ti = 0; ti < origTileCount; ti++)
+                            {
+                                for (int quadY = 0; quadY < 2; quadY++)
+                                    for (int quadX = 0; quadX < 2; quadX++)
+                                    {
+                                        int newTi = ti * 4 + quadY * 2 + quadX;
+                                        for (int py3 = 0; py3 < 8; py3++)
+                                            for (int px3 = 0; px3 < 8; px3++)
+                                            {
+                                                int srcX = quadX * 4 + px3 / 2;
+                                                int srcY = quadY * 4 + py3 / 2;
+                                                newPixels[newTi * 64 + py3 * 8 + px3] =
+                                                    origPixels[ti * 64 + srcY * 8 + srcX];
+                                            }
+                                    }
+                            }
+
+                            // Double the map: each cell → 2x2 block
+                            int origW = tse.mapW, origH = tse.mapH;
+                            int newW = origW * 2, newH = origH * 2;
+                            std::vector<uint16_t> newMap(newW * newH, 0);
+                            for (int y = 0; y < origH; y++)
+                                for (int x = 0; x < origW; x++)
+                                {
+                                    uint16_t se = tse.tileIndices[y * origW + x];
+                                    int origTi2 = se & 0x3FF;
+                                    int palBits = se & 0xF000;
+                                    int baseTi = origTi2 * 4;
+                                    newMap[(y*2  ) * newW + (x*2  )] = (uint16_t)((baseTi + 0) | palBits); // TL
+                                    newMap[(y*2  ) * newW + (x*2+1)] = (uint16_t)((baseTi + 1) | palBits); // TR
+                                    newMap[(y*2+1) * newW + (x*2  )] = (uint16_t)((baseTi + 2) | palBits); // BL
+                                    newMap[(y*2+1) * newW + (x*2+1)] = (uint16_t)((baseTi + 3) | palBits); // BR
+                                }
+
+                            tse.tilePixels = std::move(newPixels);
+                            tse.tileCount = newTileCount;
+                            tse.tileIndices = std::move(newMap);
+                            tse.mapW = newW;
+                            tse.mapH = newH;
+                        }
+
                         // Copy objects
                         for (const auto& obj : sc.objects)
                         {
                             GBATmObjectExport oe;
-                            oe.tileX = obj.tileX;
-                            oe.tileY = obj.tileY;
+                            oe.tileX = obj.tileX * sc.pixelScale;
+                            oe.tileY = obj.tileY * sc.pixelScale;
                             oe.type = (int)obj.type;
                             oe.spriteAssetIdx = obj.spriteAssetIdx;
                             oe.teleportScene = obj.teleportScene;
@@ -18400,8 +18468,8 @@ void FrameTick(float dt)
                 }
             }
 
-            // Amplify slider (imported samples only)
-            if (s.category == SmpCat_Import && !s.data.empty()) {
+            // Amplify slider (all samples with data)
+            if (!s.data.empty()) {
                 ImGui::PushItemWidth(-1);
                 float prevGain = s.ampGainDb;
                 ImGui::SliderFloat("##ampDb", &s.ampGainDb, -12.0f, 24.0f, "Amplify: %.1f dB");

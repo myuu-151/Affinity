@@ -413,6 +413,7 @@ struct GBATmObjectExport {
 struct GBATmSceneExport {
     int mapW, mapH;                          // grid dimensions in tiles
     float zoom;                              // camera zoom (1.0 = 8px per tile)
+    int pixelScale = 1;                      // pixel scale (1=normal, 2=2x zoom)
     std::vector<uint16_t> tileIndices;       // mapW * mapH tile indices
     std::vector<GBATmObjectExport> objects;
     uint32_t palette[256];                   // tileset palette (RGBA8)

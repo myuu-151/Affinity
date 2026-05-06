@@ -4778,6 +4778,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "#define AFN_TM" << si << "_W " << sc.mapW << "\n";
             f << "#define AFN_TM" << si << "_H " << sc.mapH << "\n";
             f << "#define AFN_TM" << si << "_ZOOM " << (int)(sc.zoom * 256.0f) << "\n";
+            f << "#define AFN_TM" << si << "_TILE_SIZE " << (8 * sc.pixelScale) << "\n";
             // BG size: 0=32x32, 1=64x32, 2=32x64, 3=64x64
             int bgSz = 0;
             if (sc.mapW > 32 && sc.mapH > 32) bgSz = 3;
