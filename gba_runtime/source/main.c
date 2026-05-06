@@ -671,7 +671,8 @@ static const u8 hud_font[96][8] = {
 };
 
 // Convert 1bpp font glyph to 4bpp GBA tile (32 bytes) in dst
-static void font_glyph_to_tile(u32* dst, const u8* glyph, int colorIdx)
+// bgIdx = palette index for background pixels (0 = transparent, >0 = solid)
+static void font_glyph_to_tile(u32* dst, const u8* glyph, int colorIdx, int bgIdx)
 {
     int row;
     for (row = 0; row < 8; row++) {
@@ -681,6 +682,8 @@ static void font_glyph_to_tile(u32* dst, const u8* glyph, int colorIdx)
         for (col = 0; col < 8; col++) {
             if (bits & (0x80 >> col))
                 px |= (colorIdx & 0xF) << (col * 4);
+            else
+                px |= (bgIdx & 0xF) << (col * 4);
         }
         dst[row] = px;
     }
@@ -697,14 +700,15 @@ static void hud_font_load(int staticTileCount)
     hud_font_tile_base = 1024 - staticTileCount - 96;
     if (hud_font_tile_base < 0) hud_font_tile_base = 0;
 
-    // Set OBJ palette bank 15 entry 1 to black (text color)
-    ((u16*)0x05000200)[15 * 16 + 1] = 0x0000;
+    // Set OBJ palette bank 15: entry 1 = text color, entry 2 = background fill
+    ((u16*)0x05000200)[15 * 16 + 1] = afn_text_color;
+    ((u16*)0x05000200)[15 * 16 + 2] = RGB15(31, 31, 31); // white background
 
-    // Convert 96 glyphs into 4bpp tiles
+    // Convert 96 glyphs into 4bpp tiles (colorIdx=1, bgIdx=2 for solid background)
     u32* dst = (u32*)(0x06010000 + hud_font_tile_base * 32);
     int gi;
     for (gi = 0; gi < 96; gi++) {
-        font_glyph_to_tile(dst + gi * 8, hud_font[gi], 1);
+        font_glyph_to_tile(dst + gi * 8, hud_font[gi], 1, 2);
     }
     hud_font_loaded = 1;
 }
