@@ -2668,6 +2668,7 @@ static bool sHudTimelinePlaying = false;
 static bool sHudTimelineZoomInit = false;
 static int sHudTimelineSelStart = -1;  // frame range selection start
 static int sHudTimelineSelEnd = -1;    // frame range selection end
+static std::set<int> sHudTimelineSelFrames; // ctrl-click individual frame selection
 static int sHudDragPiece = -1;       // piece index being dragged (-1 = dragging whole element)
 static float sHudPieceDragAccX = 0;  // sub-cell drag accumulator
 static float sHudPieceDragAccY = 0;
@@ -20186,8 +20187,25 @@ void FrameTick(float dt)
                         snprintf(plabel, sizeof(plabel), "%d: %s (%dpx)", pi, pname, el.pieces[pi].size);
                         if (multiSel && !psel)
                             ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.2f, 0.4f, 0.7f, 0.6f));
-                        if (ImGui::Selectable(plabel, psel || multiSel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
+                        if (ImGui::Selectable(plabel, psel || multiSel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0))) {
+                            if (ImGui::GetIO().KeyShift && el.selectedPiece >= 0) {
+                                // Shift-click: range select from selectedPiece to pi
+                                int a = std::min(el.selectedPiece, pi);
+                                int b = std::max(el.selectedPiece, pi);
+                                sHudPieceSelected.assign(el.pieces.size(), false);
+                                for (int k = a; k <= b; k++) sHudPieceSelected[k] = true;
+                            } else if (ImGui::GetIO().KeyCtrl) {
+                                // Ctrl-click: toggle individual piece
+                                if (sHudPieceSelected.size() != el.pieces.size())
+                                    sHudPieceSelected.assign(el.pieces.size(), false);
+                                sHudPieceSelected[pi] = !sHudPieceSelected[pi];
+                            } else {
+                                // Plain click: select single
+                                sHudPieceSelected.assign(el.pieces.size(), false);
+                                sHudPieceSelected[pi] = true;
+                            }
                             el.selectedPiece = pi;
+                        }
                         if (multiSel && !psel)
                             ImGui::PopStyleColor();
                         if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
@@ -20700,31 +20718,53 @@ void FrameTick(float dt)
         if (tlHovered && mouse.y >= tracksTop && mouse.y < tracksBot) {
             int rowIdx = (int)((mouse.y - tracksTop) / rowH);
             bool inTrack = (mouse.x >= trackX);
-            if (ImGui::IsMouseClicked(0) && rowIdx >= 0 && rowIdx < (int)sHudElements.size()) {
-                sHudSelectedIdx = rowIdx;
+            bool validRow = (rowIdx >= 0 && rowIdx < (int)sHudElements.size());
+            if (ImGui::IsMouseClicked(0)) {
+                if (validRow) sHudSelectedIdx = rowIdx;
                 if (inTrack) {
                     int clickFrame = (int)((mouse.x - trackX + sHudTimelineScroll) / sHudTimelineZoom + 0.5f);
                     if (clickFrame < 0) clickFrame = 0;
                     // Shift-click: set range end
                     if (ImGui::GetIO().KeyShift && sHudTimelineSelStart >= 0) {
                         sHudTimelineSelEnd = clickFrame;
+                        // Add range to individual set too
+                        int a = std::min(sHudTimelineSelStart, clickFrame);
+                        int b = std::max(sHudTimelineSelStart, clickFrame);
+                        for (int f = a; f <= b; f++) sHudTimelineSelFrames.insert(f);
+                    } else if (ImGui::GetIO().KeyCtrl) {
+                        // Ctrl-click: toggle individual frame
+                        if (sHudTimelineSelFrames.count(clickFrame))
+                            sHudTimelineSelFrames.erase(clickFrame);
+                        else
+                            sHudTimelineSelFrames.insert(clickFrame);
+                        sHudTimelineSelStart = -1;
+                        sHudTimelineSelEnd = -1;
                     } else {
                         // Check if clicking a keyframe
-                        auto& el = sHudElements[rowIdx];
-                        int nearest = -1; float nearDist = 999;
-                        for (int ki = 0; ki < (int)el.keyframes.size(); ki++) {
-                            float kx = trackX + el.keyframes[ki].frame * sHudTimelineZoom - sHudTimelineScroll;
-                            float d = std::abs(mouse.x - kx);
-                            if (d < nearDist) { nearDist = d; nearest = ki; }
+                        bool hitKf = false;
+                        if (validRow) {
+                            auto& el = sHudElements[rowIdx];
+                            int nearest = -1; float nearDist = 999;
+                            for (int ki = 0; ki < (int)el.keyframes.size(); ki++) {
+                                float kx = trackX + el.keyframes[ki].frame * sHudTimelineZoom - sHudTimelineScroll;
+                                float d = std::abs(mouse.x - kx);
+                                if (d < nearDist) { nearDist = d; nearest = ki; }
+                            }
+                            if (nearest >= 0 && nearDist < 8.0f) {
+                                el.selectedKeyframe = nearest;
+                                hitKf = true;
+                            } else {
+                                el.selectedKeyframe = -1;
+                            }
                         }
-                        if (nearest >= 0 && nearDist < 8.0f) {
-                            el.selectedKeyframe = nearest;
+                        if (hitKf) {
                             sHudTimelineSelStart = -1;
                             sHudTimelineSelEnd = -1;
+                            sHudTimelineSelFrames.clear();
                         } else {
-                            el.selectedKeyframe = -1;
                             sHudTimelineSelStart = clickFrame;
                             sHudTimelineSelEnd = -1;
+                            sHudTimelineSelFrames.clear();
                         }
                     }
                 }
@@ -20823,6 +20863,14 @@ void FrameTick(float dt)
                 if (selRx > selLx)
                     dl->AddRectFilled(ImVec2(selLx, rulerTop), ImVec2(selRx, rulerBot), IM_COL32(70, 130, 220, 40));
             }
+            // Individual frame highlight on ruler
+            for (int sf : sHudTimelineSelFrames) {
+                float fx = trackX + sf * sHudTimelineZoom - sHudTimelineScroll;
+                float fx2 = fx + sHudTimelineZoom;
+                if (fx2 < trackX || fx > trackX + trackW) continue;
+                fx = std::max(fx, trackX); fx2 = std::min(fx2, trackX + trackW);
+                dl->AddRectFilled(ImVec2(fx, rulerTop), ImVec2(fx2, rulerBot), IM_COL32(70, 130, 220, 40));
+            }
             // Playhead marker
             float phx = trackX + sHudTimelinePlayhead * sHudTimelineZoom - sHudTimelineScroll;
             if (phx >= trackX - 8 && phx <= trackX + trackW + 8) {
@@ -20855,7 +20903,7 @@ void FrameTick(float dt)
           }
         }
 
-        // Frame range selection highlight
+        // Frame range selection highlight (shift-click range)
         if (sHudTimelineSelStart >= 0 && sHudTimelineSelEnd >= 0) {
             int selA = std::min(sHudTimelineSelStart, sHudTimelineSelEnd);
             int selB = std::max(sHudTimelineSelStart, sHudTimelineSelEnd);
@@ -20867,6 +20915,15 @@ void FrameTick(float dt)
                 dl->AddRectFilled(ImVec2(selLx, tracksTop), ImVec2(selRx, tracksBot), IM_COL32(70, 130, 220, 50));
                 dl->AddRect(ImVec2(selLx, tracksTop), ImVec2(selRx, tracksBot), IM_COL32(70, 130, 220, 120));
             }
+        }
+        // Individual frame selection highlight (ctrl-click)
+        for (int sf : sHudTimelineSelFrames) {
+            float fx = trackX + sf * sHudTimelineZoom - sHudTimelineScroll;
+            float fx2 = fx + sHudTimelineZoom;
+            if (fx2 < trackX || fx > trackX + trackW) continue;
+            fx = std::max(fx, trackX);
+            fx2 = std::min(fx2, trackX + trackW);
+            dl->AddRectFilled(ImVec2(fx, tracksTop), ImVec2(fx2, tracksBot), IM_COL32(70, 130, 220, 50));
         }
 
         // Element rows

@@ -797,8 +797,6 @@ static u16   afn_sprite_tint[16];
 static u8    afn_sprite_shake[16];
 static int   afn_hud_value[4];
 static u8    afn_hud_visible[4];
-static u8    afn_hud_prev_visible[4];
-static int   afn_hud_anim_frame[4];
 static FIXED afn_patrol_home_x[16];
 static FIXED afn_patrol_home_z[16];
 static u16   afn_bg_color;
@@ -824,6 +822,10 @@ static int   afn_checkpoint_set;
 static int   afn_last_key;
 static int   afn_current_scene;
 #endif /* !AFN_HAS_SCRIPT */
+
+// HUD keyframe animation state (always needed, not script-dependent)
+static u8    afn_hud_prev_visible[4];
+static int   afn_hud_anim_frame[4];
 
 // Direction animation set tracking (for DMA streaming)
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
