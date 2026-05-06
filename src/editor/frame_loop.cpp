@@ -2660,7 +2660,7 @@ static int sHudNextId = 1;
 static int sHudSelectedIdx = -1;
 static float sHudCanvasZoom = 3.0f;
 static ImVec2 sHudCanvasPan = {0, 0};
-static float sHudTimelineH = 150.0f;
+static float sHudTimelineH = 200.0f;
 static int sHudTimelinePlayhead = 0;
 static float sHudTimelineScroll = 0.0f;
 static float sHudTimelineZoom = 4.0f;  // pixels per frame
@@ -19774,9 +19774,9 @@ void FrameTick(float dt)
         ImGui::End();
         ImGui::PopStyleColor();
 
-        // ---- Properties panel (right side) ----
+        // ---- Properties panel (right side, also shortened for timeline) ----
         ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + elemLeftW, bodyY));
-        ImGui::SetNextWindowSize(ImVec2(elemRightW, elemBodyH));
+        ImGui::SetNextWindowSize(ImVec2(elemRightW, bodyH));
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.25f, 0.30f, 1.0f));
         ImGui::Begin("##HudProps", nullptr,
@@ -20603,78 +20603,35 @@ void FrameTick(float dt)
         ImGui::PopStyleColor(2);
 
         // ---- Timeline panel (bottom, Blender-style) ----
+        // Uses a single InvisibleButton for the whole area + manual hit testing.
+        // No per-row widgets — everything is draw list + mouse position checks.
         float tlY = bodyY + elemBodyH;
         ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, tlY));
         ImGui::SetNextWindowSize(ImVec2(totalW, timelineH));
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.16f, 0.16f, 0.16f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.08f, 0.08f, 0.08f, 1.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
         ImGui::Begin("##HudTimeline", nullptr,
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
             ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoScrollbar);
         {
             ImDrawList* dl = ImGui::GetWindowDrawList();
-            ImVec2 winPos = ImGui::GetCursorScreenPos();
-            ImVec2 winSize = ImGui::GetContentRegionAvail();
+            ImVec2 winPos = ImGui::GetWindowPos();
+            float winW = totalW, winH = timelineH;
 
             float labelW = 120.0f;
             float trackX = winPos.x + labelW;
-            float trackW = winSize.x - labelW;
-            float rulerH = 24.0f;
+            float trackW = winW - labelW;
+            float headerH = 22.0f;
             float rowH = 24.0f;
 
-            // ---- Resize handle (top edge) ----
-            {
-                ImGui::SetCursorScreenPos(ImVec2(winPos.x, winPos.y - 3));
-                ImGui::InvisibleButton("##tlresize", ImVec2(winSize.x, 6));
-                if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
-                if (ImGui::IsItemActive() && ImGui::IsMouseDragging(0)) {
-                    sHudTimelineH -= ImGui::GetIO().MouseDelta.y;
-                    sHudTimelineH = std::clamp(sHudTimelineH, 80.0f, bodyH * 0.6f);
-                }
-            }
-
-            // ---- Top toolbar (Blender style: transport + frame info) ----
-            float toolbarY = winPos.y + 2;
-            {
-                // Dark toolbar bg
-                dl->AddRectFilled(ImVec2(winPos.x, winPos.y), ImVec2(winPos.x + winSize.x, winPos.y + rulerH),
-                    IM_COL32(36, 36, 36, 255));
-                dl->AddLine(ImVec2(winPos.x, winPos.y + rulerH), ImVec2(winPos.x + winSize.x, winPos.y + rulerH),
-                    IM_COL32(20, 20, 20, 255));
-
-                ImGui::SetCursorScreenPos(ImVec2(winPos.x + 6, toolbarY));
-                // Play/Pause
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.22f, 0.22f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.30f, 0.30f, 0.30f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_Text, sHudTimelinePlaying ? ImVec4(0.4f,0.7f,1.0f,1.0f) : ImVec4(0.8f,0.8f,0.8f,1.0f));
-                if (ImGui::SmallButton(sHudTimelinePlaying ? "||" : ">"))
-                    sHudTimelinePlaying = !sHudTimelinePlaying;
-                ImGui::PopStyleColor(3);
-                ImGui::SameLine();
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.22f, 0.22f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.30f, 0.30f, 0.30f, 1.0f));
-                if (ImGui::SmallButton("|<")) { sHudTimelinePlayhead = 0; sHudTimelinePlaying = false; }
-                ImGui::PopStyleColor(2);
-                ImGui::SameLine();
-                // Frame counter
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.85f, 0.85f, 1.0f));
-                ImGui::SetNextItemWidth(50);
-                ImGui::DragInt("##tlframe", &sHudTimelinePlayhead, 1, 0, 9999);
-                ImGui::PopStyleColor();
-                ImGui::SameLine();
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 1.0f));
-                ImGui::Text("/ 60fps");
-                ImGui::PopStyleColor();
-            }
-
+            // Advance playhead
             if (sHudTimelinePlaying) sHudTimelinePlayhead++;
 
-            // ---- Determine adaptive ruler step (like Blender: auto-scale labels to avoid overlap) ----
-            // Minimum pixels between labels
+            // Adaptive ruler step
             float minLabelSpacing = 60.0f;
             int frameStep = 1;
-            // Find a nice step: 1, 2, 5, 10, 20, 50, 100, 200...
             {
                 int candidates[] = {1, 2, 5, 10, 15, 20, 30, 50, 60, 100, 120, 200, 300, 600};
                 for (int ci = 0; ci < 14; ci++) {
@@ -20684,76 +20641,179 @@ void FrameTick(float dt)
             }
             int subStep = (frameStep >= 10) ? frameStep / 5 : (frameStep >= 2 ? 1 : 1);
 
-            // ---- Frame ruler ----
-            float rulerTop = winPos.y + rulerH;
-            float rulerBot = rulerTop + rulerH;
+            float headerTop = winPos.y;
+            float headerBot = headerTop + headerH;
+            float tracksTop = headerBot;
+            float tracksBot = winPos.y + winH;
+
+            // ---- ONE InvisibleButton for the entire window (captures all input) ----
+            ImGui::SetCursorScreenPos(winPos);
+            ImGui::InvisibleButton("##tlarea", ImVec2(winW, winH));
+            bool tlHovered = ImGui::IsItemHovered();
+            bool tlActive = ImGui::IsItemActive();
+            ImVec2 mouse = ImGui::GetMousePos();
+
+            // ---- Resize handle (top edge, 6px zone) ----
             {
-                dl->AddRectFilled(ImVec2(trackX, rulerTop), ImVec2(trackX + trackW, rulerBot),
-                    IM_COL32(30, 30, 30, 255));
-                // Label area bg
-                dl->AddRectFilled(ImVec2(winPos.x, rulerTop), ImVec2(trackX, rulerBot),
-                    IM_COL32(36, 36, 36, 255));
+                bool inResize = (mouse.y >= winPos.y - 3 && mouse.y <= winPos.y + 3 &&
+                                 mouse.x >= winPos.x && mouse.x <= winPos.x + winW);
+                if (inResize) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+                if (inResize && ImGui::IsMouseDragging(0)) {
+                    sHudTimelineH -= ImGui::GetIO().MouseDelta.y;
+                    sHudTimelineH = std::clamp(sHudTimelineH, 80.0f, bodyH * 0.6f);
+                }
+            }
 
-                dl->PushClipRect(ImVec2(trackX, rulerTop), ImVec2(trackX + trackW, rulerBot), true);
-
-                int scrollFrame = (int)(sHudTimelineScroll / sHudTimelineZoom);
-                int framesVis = (int)(trackW / sHudTimelineZoom) + 2;
-
-                // Sub-ticks
-                for (int f = (scrollFrame / subStep) * subStep; f < scrollFrame + framesVis; f += subStep) {
-                    if (f < 0) continue;
-                    float fx = trackX + f * sHudTimelineZoom - sHudTimelineScroll;
-                    if (fx < trackX - 1 || fx > trackX + trackW + 1) continue;
-                    bool isMajor = (f % frameStep == 0);
-                    float tickTop = isMajor ? rulerTop + 2 : rulerTop + rulerH * 0.5f;
-                    dl->AddLine(ImVec2(fx, tickTop), ImVec2(fx, rulerBot),
-                        isMajor ? IM_COL32(100, 100, 100, 200) : IM_COL32(60, 60, 60, 150));
-                    if (isMajor) {
-                        char buf[16]; snprintf(buf, sizeof(buf), "%d", f);
-                        dl->AddText(ImVec2(fx + 3, rulerTop + 2), IM_COL32(170, 170, 170, 255), buf);
+            // ---- Scroll/zoom ----
+            if (tlHovered) {
+                float wheel = ImGui::GetIO().MouseWheel;
+                if (wheel != 0) {
+                    if (ImGui::GetIO().KeyCtrl) {
+                        float mx2 = mouse.x - trackX;
+                        float oldFrame = (mx2 + sHudTimelineScroll) / sHudTimelineZoom;
+                        sHudTimelineZoom = std::clamp(sHudTimelineZoom * (1.0f + wheel * 0.1f), 1.0f, 20.0f);
+                        sHudTimelineScroll = oldFrame * sHudTimelineZoom - mx2;
+                        if (sHudTimelineScroll < 0) sHudTimelineScroll = 0;
+                    } else {
+                        sHudTimelineScroll -= wheel * 50.0f;
+                        if (sHudTimelineScroll < 0) sHudTimelineScroll = 0;
                     }
                 }
+            }
 
-                // Playhead marker on ruler
-                float phx = trackX + sHudTimelinePlayhead * sHudTimelineZoom - sHudTimelineScroll;
-                if (phx >= trackX - 6 && phx <= trackX + trackW + 6) {
-                    // Blue playhead like Blender
-                    dl->AddTriangleFilled(
-                        ImVec2(phx - 6, rulerTop + 1), ImVec2(phx + 6, rulerTop + 1), ImVec2(phx, rulerTop + 10),
-                        IM_COL32(70, 150, 255, 255));
-                    dl->AddTriangle(
-                        ImVec2(phx - 6, rulerTop + 1), ImVec2(phx + 6, rulerTop + 1), ImVec2(phx, rulerTop + 10),
-                        IM_COL32(100, 180, 255, 255));
+            // ---- Input: header area (ruler scrub, transport buttons) ----
+            bool inHeader = (mouse.y >= headerTop && mouse.y < headerBot);
+            if (inHeader && tlHovered) {
+                // Transport buttons (play, reset) in label column
+                float bx = winPos.x + 4, by = headerTop + 3;
+                float bw = 18, bh = headerH - 6;
+                if (ImGui::IsMouseClicked(0)) {
+                    if (mouse.x >= bx && mouse.x <= bx + bw && mouse.y >= by && mouse.y <= by + bh)
+                        sHudTimelinePlaying = !sHudTimelinePlaying;
+                    else if (mouse.x >= bx + bw + 2 && mouse.x <= bx + bw * 2 + 2 && mouse.y >= by && mouse.y <= by + bh)
+                        { sHudTimelinePlayhead = 0; sHudTimelinePlaying = false; }
                 }
-                dl->PopClipRect();
-
-                // Bottom ruler line
-                dl->AddLine(ImVec2(winPos.x, rulerBot), ImVec2(winPos.x + winSize.x, rulerBot),
-                    IM_COL32(20, 20, 20, 255));
-
-                // Click/drag ruler to scrub
-                ImGui::SetCursorScreenPos(ImVec2(trackX, rulerTop));
-                ImGui::InvisibleButton("##ruler", ImVec2(trackW, rulerH));
-                if (ImGui::IsItemActive()) {
-                    float mx = ImGui::GetMousePos().x;
-                    int nf = (int)((mx - trackX + sHudTimelineScroll) / sHudTimelineZoom + 0.5f);
+                // Ruler scrub (track area of header)
+                if (mouse.x >= trackX && (ImGui::IsMouseClicked(0) || ImGui::IsMouseDragging(0))) {
+                    int nf = (int)((mouse.x - trackX + sHudTimelineScroll) / sHudTimelineZoom + 0.5f);
                     if (nf < 0) nf = 0;
                     sHudTimelinePlayhead = nf;
                 }
             }
 
-            // ---- Track area ----
-            float tracksTop = rulerBot;
-            float tracksBot = winPos.y + winSize.y;
+            // ---- Input: track area (select row, select/add/drag keyframes) ----
+            bool inTracks = (mouse.y >= tracksTop && mouse.y < tracksBot);
+            if (inTracks && tlHovered) {
+                int rowIdx = (int)((mouse.y - tracksTop) / rowH);
+                bool inLabel = (mouse.x < trackX);
+                bool inTrack = (mouse.x >= trackX);
 
-            // Clip everything
-            dl->PushClipRect(ImVec2(winPos.x, tracksTop), ImVec2(winPos.x + winSize.x, tracksBot), true);
+                if (ImGui::IsMouseClicked(0) && rowIdx >= 0 && rowIdx < (int)sHudElements.size()) {
+                    sHudSelectedIdx = rowIdx;
+                    if (inTrack) {
+                        auto& el = sHudElements[rowIdx];
+                        int nearest = -1;
+                        float nearDist = 999;
+                        for (int ki = 0; ki < (int)el.keyframes.size(); ki++) {
+                            float kx = trackX + el.keyframes[ki].frame * sHudTimelineZoom - sHudTimelineScroll;
+                            float d = std::abs(mouse.x - kx);
+                            if (d < nearDist) { nearDist = d; nearest = ki; }
+                        }
+                        el.selectedKeyframe = (nearest >= 0 && nearDist < 8.0f) ? nearest : -1;
+                    }
+                }
+                // Double-click to insert keyframe
+                if (inTrack && ImGui::IsMouseDoubleClicked(0) && rowIdx >= 0 && rowIdx < (int)sHudElements.size()) {
+                    auto& el = sHudElements[rowIdx];
+                    int nf = (int)((mouse.x - trackX + sHudTimelineScroll) / sHudTimelineZoom + 0.5f);
+                    if (nf < 0) nf = 0;
+                    HudKeyframe kf;
+                    kf.frame = nf;
+                    int insertAt = (int)el.keyframes.size();
+                    for (int ki = 0; ki < (int)el.keyframes.size(); ki++)
+                        if (el.keyframes[ki].frame > nf) { insertAt = ki; break; }
+                    el.keyframes.insert(el.keyframes.begin() + insertAt, kf);
+                    el.selectedKeyframe = insertAt;
+                    sProjectDirty = true;
+                }
+                // Drag selected keyframe
+                if (inTrack && ImGui::IsMouseDragging(0) && sHudSelectedIdx >= 0 && sHudSelectedIdx < (int)sHudElements.size()) {
+                    auto& el = sHudElements[sHudSelectedIdx];
+                    if (el.selectedKeyframe >= 0 && el.selectedKeyframe < (int)el.keyframes.size()) {
+                        int nf = (int)((mouse.x - trackX + sHudTimelineScroll) / sHudTimelineZoom + 0.5f);
+                        if (nf < 0) nf = 0;
+                        el.keyframes[el.selectedKeyframe].frame = nf;
+                        sProjectDirty = true;
+                    }
+                }
+            }
 
-            // Track background
+            // ==== DRAWING (all draw-list, no widgets) ====
+
+            // Header bg
+            dl->AddRectFilled(ImVec2(winPos.x, headerTop), ImVec2(winPos.x + winW, headerBot),
+                IM_COL32(36, 36, 36, 255));
+            dl->AddLine(ImVec2(winPos.x, headerBot), ImVec2(winPos.x + winW, headerBot),
+                IM_COL32(20, 20, 20, 255));
+
+            // Transport buttons
+            {
+                float bx = winPos.x + 4, by = headerTop + 3;
+                float bw = 18, bh = headerH - 6;
+                // Play
+                bool hovPlay = (mouse.x >= bx && mouse.x <= bx + bw && mouse.y >= by && mouse.y <= by + bh);
+                dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bw, by + bh),
+                    hovPlay ? IM_COL32(60, 60, 60, 255) : IM_COL32(45, 45, 45, 255), 2);
+                dl->AddText(ImVec2(bx + 4, by + 1),
+                    sHudTimelinePlaying ? IM_COL32(100, 180, 255, 255) : IM_COL32(200, 200, 200, 255),
+                    sHudTimelinePlaying ? "||" : ">");
+                // Reset
+                float bx2 = bx + bw + 2;
+                bool hovReset = (mouse.x >= bx2 && mouse.x <= bx2 + bw && mouse.y >= by && mouse.y <= by + bh);
+                dl->AddRectFilled(ImVec2(bx2, by), ImVec2(bx2 + bw, by + bh),
+                    hovReset ? IM_COL32(60, 60, 60, 255) : IM_COL32(45, 45, 45, 255), 2);
+                dl->AddText(ImVec2(bx2 + 3, by + 1), IM_COL32(200, 200, 200, 255), "|<");
+                // Frame number
+                char fbuf[16]; snprintf(fbuf, sizeof(fbuf), "%d", sHudTimelinePlayhead);
+                dl->AddText(ImVec2(bx2 + bw + 6, by + 1), IM_COL32(200, 200, 200, 255), fbuf);
+            }
+
+            // Ruler ticks
+            dl->PushClipRect(ImVec2(trackX, headerTop), ImVec2(trackX + trackW, headerBot), true);
+            {
+                int scrollFrame = (int)(sHudTimelineScroll / sHudTimelineZoom);
+                int framesVis = (int)(trackW / sHudTimelineZoom) + 2;
+                for (int f = (scrollFrame / subStep) * subStep; f < scrollFrame + framesVis; f += subStep) {
+                    if (f < 0) continue;
+                    float fx = trackX + f * sHudTimelineZoom - sHudTimelineScroll;
+                    if (fx < trackX - 1 || fx > trackX + trackW + 1) continue;
+                    bool isMajor = (f % frameStep == 0);
+                    float tickTop2 = isMajor ? headerTop + 2 : headerTop + headerH * 0.6f;
+                    dl->AddLine(ImVec2(fx, tickTop2), ImVec2(fx, headerBot),
+                        isMajor ? IM_COL32(100, 100, 100, 200) : IM_COL32(60, 60, 60, 150));
+                    if (isMajor) {
+                        char buf[16]; snprintf(buf, sizeof(buf), "%d", f);
+                        dl->AddText(ImVec2(fx + 3, headerTop + 2), IM_COL32(170, 170, 170, 255), buf);
+                    }
+                }
+                // Playhead triangle
+                float phx = trackX + sHudTimelinePlayhead * sHudTimelineZoom - sHudTimelineScroll;
+                if (phx >= trackX - 6 && phx <= trackX + trackW + 6) {
+                    dl->AddTriangleFilled(
+                        ImVec2(phx - 5, headerTop + 1), ImVec2(phx + 5, headerTop + 1), ImVec2(phx, headerTop + 10),
+                        IM_COL32(70, 150, 255, 255));
+                }
+            }
+            dl->PopClipRect();
+
+            // Track area
+            dl->PushClipRect(ImVec2(winPos.x, tracksTop), ImVec2(winPos.x + winW, tracksBot), true);
+
+            // Track bg
             dl->AddRectFilled(ImVec2(trackX, tracksTop), ImVec2(trackX + trackW, tracksBot),
                 IM_COL32(26, 26, 26, 255));
 
-            // Vertical grid lines (match ruler ticks)
+            // Vertical grid
             {
                 int scrollFrame = (int)(sHudTimelineScroll / sHudTimelineZoom);
                 int framesVis = (int)(trackW / sHudTimelineZoom) + 2;
@@ -20773,15 +20833,14 @@ void FrameTick(float dt)
                 float ry = tracksTop + i * rowH;
                 if (ry > tracksBot) break;
                 if (ry + rowH < tracksTop) continue;
-
                 bool selected = (i == sHudSelectedIdx);
 
                 // Row bg
                 ImU32 rowBg = (i % 2 == 0) ? IM_COL32(32, 32, 32, 255) : IM_COL32(28, 28, 28, 255);
                 if (selected) rowBg = IM_COL32(38, 42, 55, 255);
-                dl->AddRectFilled(ImVec2(winPos.x, ry), ImVec2(winPos.x + winSize.x, ry + rowH), rowBg);
+                dl->AddRectFilled(ImVec2(winPos.x, ry), ImVec2(winPos.x + winW, ry + rowH), rowBg);
 
-                // Label area bg (slightly lighter)
+                // Label bg
                 dl->AddRectFilled(ImVec2(winPos.x, ry), ImVec2(trackX, ry + rowH),
                     selected ? IM_COL32(50, 55, 70, 255) : IM_COL32(42, 42, 42, 255));
 
@@ -20790,16 +20849,10 @@ void FrameTick(float dt)
                 dl->AddText(ImVec2(winPos.x + 8, ry + (rowH - ImGui::GetFontSize()) * 0.5f), labelCol, el.name);
 
                 // Row separator
-                dl->AddLine(ImVec2(winPos.x, ry + rowH - 1), ImVec2(winPos.x + winSize.x, ry + rowH - 1),
+                dl->AddLine(ImVec2(winPos.x, ry + rowH - 1), ImVec2(winPos.x + winW, ry + rowH - 1),
                     IM_COL32(20, 20, 20, 200));
 
-                // Click label to select
-                ImGui::SetCursorScreenPos(ImVec2(winPos.x, ry));
-                ImGui::InvisibleButton(("##tlrow" + std::to_string(i)).c_str(), ImVec2(labelW, rowH));
-                if (ImGui::IsItemClicked()) sHudSelectedIdx = i;
-
                 // Keyframe diamonds
-                dl->PushClipRect(ImVec2(trackX, ry), ImVec2(trackX + trackW, ry + rowH), true);
                 for (int ki = 0; ki < (int)el.keyframes.size(); ki++) {
                     auto& kf = el.keyframes[ki];
                     float kx = trackX + kf.frame * sHudTimelineZoom - sHudTimelineScroll;
@@ -20807,7 +20860,6 @@ void FrameTick(float dt)
                     float ky = ry + rowH * 0.5f;
                     float ds = 5.0f;
                     bool kfSel = (selected && ki == el.selectedKeyframe);
-                    // Blender-style: orange keyframes, white when selected
                     ImU32 kfFill = kfSel ? IM_COL32(255, 255, 255, 255) : IM_COL32(230, 160, 40, 255);
                     ImU32 kfOutline = kfSel ? IM_COL32(70, 150, 255, 255) : IM_COL32(180, 120, 20, 255);
                     dl->AddQuadFilled(
@@ -20817,82 +20869,22 @@ void FrameTick(float dt)
                         ImVec2(kx, ky - ds), ImVec2(kx + ds, ky),
                         ImVec2(kx, ky + ds), ImVec2(kx - ds, ky), kfOutline, 1.5f);
                 }
-                dl->PopClipRect();
-
-                // Track interaction
-                ImGui::SetCursorScreenPos(ImVec2(trackX, ry));
-                ImGui::InvisibleButton(("##tltrack" + std::to_string(i)).c_str(), ImVec2(trackW, rowH));
-                if (ImGui::IsItemClicked()) {
-                    sHudSelectedIdx = i;
-                    float mx = ImGui::GetMousePos().x;
-                    // Find nearest keyframe within click range
-                    int nearest = -1;
-                    float nearDist = 999;
-                    for (int ki = 0; ki < (int)el.keyframes.size(); ki++) {
-                        float kx = trackX + el.keyframes[ki].frame * sHudTimelineZoom - sHudTimelineScroll;
-                        float d = std::abs(mx - kx);
-                        if (d < nearDist) { nearDist = d; nearest = ki; }
-                    }
-                    el.selectedKeyframe = (nearest >= 0 && nearDist < 8.0f) ? nearest : -1;
-                }
-                // Double-click to insert keyframe
-                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
-                    float mx = ImGui::GetMousePos().x;
-                    int nf = (int)((mx - trackX + sHudTimelineScroll) / sHudTimelineZoom + 0.5f);
-                    if (nf < 0) nf = 0;
-                    HudKeyframe kf;
-                    kf.frame = nf;
-                    int insertAt = (int)el.keyframes.size();
-                    for (int ki = 0; ki < (int)el.keyframes.size(); ki++)
-                        if (el.keyframes[ki].frame > nf) { insertAt = ki; break; }
-                    el.keyframes.insert(el.keyframes.begin() + insertAt, kf);
-                    el.selectedKeyframe = insertAt;
-                    sProjectDirty = true;
-                }
-                // Drag keyframe
-                if (selected && el.selectedKeyframe >= 0 && el.selectedKeyframe < (int)el.keyframes.size() &&
-                    ImGui::IsItemActive() && ImGui::IsMouseDragging(0)) {
-                    float mx = ImGui::GetMousePos().x;
-                    int nf = (int)((mx - trackX + sHudTimelineScroll) / sHudTimelineZoom + 0.5f);
-                    if (nf < 0) nf = 0;
-                    el.keyframes[el.selectedKeyframe].frame = nf;
-                    sProjectDirty = true;
-                }
             }
 
-            // Label/track vertical separator
+            // Label/track separator
             dl->AddLine(ImVec2(trackX, tracksTop), ImVec2(trackX, tracksBot), IM_COL32(20, 20, 20, 255));
 
-            // ---- Playhead line (blue, full height through tracks) ----
+            // Playhead line
             {
                 float phx = trackX + sHudTimelinePlayhead * sHudTimelineZoom - sHudTimelineScroll;
-                if (phx >= trackX && phx <= trackX + trackW) {
-                    dl->AddLine(ImVec2(phx, tracksTop), ImVec2(phx, tracksBot),
-                        IM_COL32(70, 150, 255, 200), 1.5f);
-                }
+                if (phx >= trackX && phx <= trackX + trackW)
+                    dl->AddLine(ImVec2(phx, tracksTop), ImVec2(phx, tracksBot), IM_COL32(70, 150, 255, 200), 1.5f);
             }
 
             dl->PopClipRect();
-
-            // ---- Scroll/zoom (anywhere over the track area) ----
-            ImGui::SetCursorScreenPos(ImVec2(trackX, tracksTop));
-            ImGui::InvisibleButton("##tlscroll", ImVec2(trackW, tracksBot - tracksTop));
-            if (ImGui::IsItemHovered()) {
-                float wheel = ImGui::GetIO().MouseWheel;
-                if (ImGui::GetIO().KeyCtrl) {
-                    // Ctrl+scroll = zoom around mouse position
-                    float mx = ImGui::GetMousePos().x - trackX;
-                    float oldFrame = (mx + sHudTimelineScroll) / sHudTimelineZoom;
-                    sHudTimelineZoom = std::clamp(sHudTimelineZoom * (1.0f + wheel * 0.1f), 1.0f, 20.0f);
-                    sHudTimelineScroll = oldFrame * sHudTimelineZoom - mx;
-                    if (sHudTimelineScroll < 0) sHudTimelineScroll = 0;
-                } else {
-                    sHudTimelineScroll -= wheel * 50.0f;
-                    if (sHudTimelineScroll < 0) sHudTimelineScroll = 0;
-                }
-            }
         }
         ImGui::End();
+        ImGui::PopStyleVar();
         ImGui::PopStyleColor(2);
     }
     else
