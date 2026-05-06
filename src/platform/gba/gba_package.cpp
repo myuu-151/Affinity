@@ -2665,6 +2665,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "      tm_fol_trail_count = 0;\n";
                     f << "      tm_fol_trail_head = 0;\n";
                     f << "      tm_fol_active = 1;\n";
+                    f << "      if (" << obj << " >= 0 && " << obj << " < TM_MAX_DIR_OBJS) {\n";
+                    f << "        tm_obj_dir_set[" << obj << "] = -1;\n";
+                    f << "        tm_obj_dir_facing[" << obj << "] = -1;\n";
+                    f << "      }\n";
                     f << "    }\n";
                     f << "    tm_fol_dist = " << dist << ";\n";
                     f << "    tm_fol_speed = " << speed << ";\n";
@@ -4059,6 +4063,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "      tm_fol_trail_count = 0;\n";
                     f << "      tm_fol_trail_head = 0;\n";
                     f << "      tm_fol_active = 1;\n";
+                    f << "      if (afn_bp_cur_tm_obj >= 0 && afn_bp_cur_tm_obj < TM_MAX_DIR_OBJS) {\n";
+                    f << "        tm_obj_dir_set[afn_bp_cur_tm_obj] = -1;\n";
+                    f << "        tm_obj_dir_facing[afn_bp_cur_tm_obj] = -1;\n";
+                    f << "      }\n";
                     f << "    }\n";
                     f << "    tm_fol_dist = " << dist << ";\n";
                     f << "    tm_fol_speed = " << speed << ";\n";

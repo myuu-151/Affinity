@@ -54,6 +54,8 @@ static int tm_fol_dist;
 static s16 tm_obj_facing[TM_MAX_DIR_OBJS];
 static s8  tm_obj_anim_play[TM_MAX_DIR_OBJS];
 static s8  tm_obj_anim_idx[TM_MAX_DIR_OBJS];
+static int tm_obj_dir_set[TM_MAX_DIR_OBJS];
+static int tm_obj_dir_facing[TM_MAX_DIR_OBJS];
 
 // ---------------------------------------------------------------------------
 // Forward declarations for sound functions (used by mapdata.h script codegen)
