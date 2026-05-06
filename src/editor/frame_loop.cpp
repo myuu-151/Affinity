@@ -1923,7 +1923,8 @@ static void ResetBankToClean() {
         sSoundBank[i].envelope = sCleanBankEnv[i];
         sSoundBank[i].envEnabled = sCleanBankEnvEnabled[i];
     }
-    sSampleOriginal.clear();
+    // NOTE: do NOT clear sSampleOriginal — it holds the un-amplified WAV data
+    // which must persist across instance switches to avoid double-amplification
 }
 
 // Save current edits from sound bank into the given instance
