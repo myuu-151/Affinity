@@ -948,7 +948,7 @@ struct SoundInstance {
     int channelBank[16] = {};   // per-channel sample bank override
     int volume = 100;           // master volume 0-100
     int interpolation = 0;     // 0 = nearest, 1 = smooth (linear)
-    int mixerGain = 0;         // 0 = Normal (>>7), 1 = Loud (>>6)
+    int mixerGain = 0;         // 0 = Normal (>>7), 1 = Loud (>>6), 2 = Quiet (>>9)
     std::vector<SampleOverride> overrides; // per-sample edits
 };
 static std::vector<SoundInstance> sSoundInstances;
@@ -18522,10 +18522,10 @@ void FrameTick(float dt)
                 ImGui::EndCombo();
             }
             ImGui::PopItemWidth();
-            const char* gainNames[] = { "Normal", "Loud" };
+            const char* gainNames[] = { "Normal", "Loud", "Quiet" };
             ImGui::PushItemWidth(-1);
             if (ImGui::BeginCombo("##mixgain", gainNames[inst.mixerGain])) {
-                for (int gi = 0; gi < 2; gi++) {
+                for (int gi = 0; gi < 3; gi++) {
                     if (ImGui::Selectable(gainNames[gi], inst.mixerGain == gi)) {
                         inst.mixerGain = gi;
                         sProjectDirty = true;

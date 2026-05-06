@@ -258,7 +258,11 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     }
     vc->remaining = durSamples;
     vc->interp = (snd_seq_active >= 0) ? afn_snd_interp[snd_seq_active] : 0;
-    vc->gainShift = (snd_seq_active >= 0 && afn_snd_gain[snd_seq_active]) ? 6 : 7;
+    // gainShift: 0=Normal(>>7), 1=Loud(>>6), 2=Quiet(>>9)
+    {
+        int g = (snd_seq_active >= 0) ? afn_snd_gain[snd_seq_active] : 0;
+        vc->gainShift = (g == 1) ? 6 : (g == 2) ? 9 : 7;
+    }
     vc->active = 1;
 }
 
