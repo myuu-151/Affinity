@@ -847,6 +847,9 @@ struct SampleRegion {
     int sampleRate = 16384;
     int baseNote = 60;
     int keyLo = 0, keyHi = 127;
+    bool hasLoop = false;
+    int loopStart = 0; // in downsampled samples
+    int loopEnd = 0;   // in downsampled samples
 };
 
 struct EnvPoint {
@@ -874,6 +877,7 @@ struct SoundSample {
     float ampGainDb = 0.0f;        // amplify gain in dB (imported samples only)
     int octaveShift = 0;           // pitch shift in octaves (-3 to +3)
     int baseNote = 60;             // MIDI note the sample was recorded at (for pitch calc)
+    int releaseMs = 250;           // release fade-out time in ms (0 = no fade)
     std::vector<SampleRegion> regions; // multi-sample regions (GM instruments)
 };
 
@@ -1272,6 +1276,9 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         int bitsPerSample = 16;
         int channels = 1;
         int unityNote = 60;  // MIDI note the sample was recorded at
+        bool hasLoop = false;
+        int loopStartSmp = 0; // loop start in source samples
+        int loopEndSmp = 0;   // loop end in source samples
     };
     std::vector<WaveInfo> waves;
     const uint8_t* wvpl = nullptr;
@@ -1310,7 +1317,21 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                         wi.data = wp + 8;
                         wi.length = wckSize;
                     } else if (wckId == 0x706D7377 && wckSize >= 8) { // 'wsmp'
+                        // wsmp: cbSize(4) usUnityNote(2) sFineTune(2) lAttenuation(4) fulOptions(4) cSampleLoops(4)
+                        uint32_t cbSize = rd32(wp + 8);
                         wi.unityNote = rd16(wp + 8 + 4);
+                        if (wckSize >= 20) {
+                            uint32_t nLoops = rd32(wp + 8 + 16);
+                            if (nLoops > 0 && wckSize >= cbSize + 16) {
+                                // WLOOP: cbSize(4) ulType(4) ulStart(4) ulLength(4)
+                                const uint8_t* lp = wp + 8 + cbSize;
+                                uint32_t loopStart = rd32(lp + 8);
+                                uint32_t loopLen = rd32(lp + 12);
+                                wi.hasLoop = true;
+                                wi.loopStartSmp = (int)loopStart;
+                                wi.loopEndSmp = (int)(loopStart + loopLen);
+                            }
+                        }
                     }
                     wp += 8 + ((wckSize + 1) & ~1);
                 }
@@ -1376,7 +1397,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
     }
 
     // Helper: downsample a wave to 16384 Hz 8-bit mono
-    auto downsampleWave = [&](WaveInfo& wi, int unityNote, int keyLo, int keyHi, SampleRegion& out) {
+    auto downsampleWave = [&](WaveInfo& wi, int unityNote, int keyLo, int keyHi, bool forceLoop, int forceLoopStart, int forceLoopEnd, SampleRegion& out) {
         int numSamples = 0;
         if (wi.bitsPerSample == 16)
             numSamples = wi.length / (2 * wi.channels);
@@ -1385,7 +1406,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         if (numSamples < 1) return false;
         int dstLen = (int)((float)numSamples / wi.sampleRate * 16384);
         if (dstLen < 1) return false;
-        if (dstLen > 32768) dstLen = 32768;
+        if (dstLen > 131072) dstLen = 131072; // ~8 seconds at 16384 Hz
         out.data.resize(dstLen);
         for (int i = 0; i < dstLen; i++) {
             int srcIdx = (int)((float)i / dstLen * numSamples);
@@ -1403,6 +1424,18 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         out.baseNote = unityNote;
         out.keyLo = keyLo;
         out.keyHi = keyHi;
+        // Convert loop points from source sample rate to downsampled rate
+        bool useLoop = forceLoop;
+        int srcLoopS = forceLoopStart, srcLoopE = forceLoopEnd;
+        if (!useLoop && wi.hasLoop) { useLoop = true; srcLoopS = wi.loopStartSmp; srcLoopE = wi.loopEndSmp; }
+        if (useLoop && srcLoopE > srcLoopS) {
+            float ratio = (float)dstLen / numSamples;
+            out.hasLoop = true;
+            out.loopStart = (int)(srcLoopS * ratio);
+            out.loopEnd = (int)(srcLoopE * ratio);
+            if (out.loopEnd > dstLen) out.loopEnd = dstLen;
+            if (out.loopStart >= out.loopEnd) out.hasLoop = false;
+        }
         return true;
     };
 
@@ -1415,7 +1448,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         const uint8_t* rEnd = ins.lrgn + ins.lrgnSize;
 
         // Collect all regions
-        struct RgnInfo { int keyLo, keyHi, waveIdx, unityNote; };
+        struct RgnInfo { int keyLo, keyHi, waveIdx, unityNote; bool hasLoop; int loopStart, loopEnd; };
         std::vector<RgnInfo> allRegions;
         while (rp + 12 <= rEnd) {
             uint32_t ckId = rd32(rp);
@@ -1424,6 +1457,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                 uint32_t lt = rd32(rp + 8);
                 if (lt == 0x206E6772 || lt == 0x326E6772) {
                     int keyLo = 0, keyHi = 127, waveIdx = -1, thisUnity = -1;
+                    bool rgnLoop = false; int rgnLoopStart = 0, rgnLoopEnd = 0;
                     const uint8_t* rrp = rp + 12;
                     const uint8_t* rrEnd = rp + 8 + ckSize;
                     while (rrp + 8 <= rrEnd) {
@@ -1436,12 +1470,27 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                             waveIdx = (int)rd32(rrp + 16);
                         } else if (rckId == 0x706D7377 && rckSize >= 8) {
                             thisUnity = rd16(rrp + 8 + 4);
+                            // Parse region-level loop points
+                            if (rckSize >= 20) {
+                                uint32_t cbSz = rd32(rrp + 8);
+                                uint32_t nL = rd32(rrp + 8 + 16);
+                                if (nL > 0 && rckSize >= cbSz + 16) {
+                                    const uint8_t* rlp = rrp + 8 + cbSz;
+                                    rgnLoop = true;
+                                    rgnLoopStart = (int)rd32(rlp + 8);
+                                    rgnLoopEnd = rgnLoopStart + (int)rd32(rlp + 12);
+                                }
+                            }
                         }
                         rrp += 8 + ((rckSize + 1) & ~1);
                     }
                     if (waveIdx >= 0 && waveIdx < (int)waves.size() && waves[waveIdx].data) {
                         int unity = (thisUnity >= 0) ? thisUnity : waves[waveIdx].unityNote;
-                        allRegions.push_back({keyLo, keyHi, waveIdx, unity});
+                        // Use region-level loop if present, else fall back to wave-level
+                        bool useLoop = rgnLoop ? true : waves[waveIdx].hasLoop;
+                        int ls = rgnLoop ? rgnLoopStart : waves[waveIdx].loopStartSmp;
+                        int le = rgnLoop ? rgnLoopEnd : waves[waveIdx].loopEndSmp;
+                        allRegions.push_back({keyLo, keyHi, waveIdx, unity, useLoop, ls, le});
                     }
                 }
             }
@@ -1461,7 +1510,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         // Build primary sample from note-60 region
         auto& pr = allRegions[primaryIdx];
         SampleRegion primaryRgn;
-        if (!downsampleWave(waves[pr.waveIdx], pr.unityNote, pr.keyLo, pr.keyHi, primaryRgn))
+        if (!downsampleWave(waves[pr.waveIdx], pr.unityNote, pr.keyLo, pr.keyHi, pr.hasLoop, pr.loopStart, pr.loopEnd, primaryRgn))
             continue;
 
         SoundSample s;
@@ -1476,7 +1525,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         // Add all regions (including primary) for multi-sample playback
         for (auto& rgn : allRegions) {
             SampleRegion sr;
-            if (downsampleWave(waves[rgn.waveIdx], rgn.unityNote, rgn.keyLo, rgn.keyHi, sr))
+            if (downsampleWave(waves[rgn.waveIdx], rgn.unityNote, rgn.keyLo, rgn.keyHi, rgn.hasLoop, rgn.loopStart, rgn.loopEnd, sr))
                 s.regions.push_back(std::move(sr));
         }
 
@@ -2194,6 +2243,7 @@ struct AudioVoice {
     const int8_t* data = nullptr;
     int length = 0;
     int loopStart = 0;
+    int loopEnd = 0;      // 0 = use length as loop end
     bool loop = false;
     uint64_t pos = 0;       // 16.16 fixed-point position (64-bit for long samples)
     uint32_t inc = 0;       // 16.16 fixed-point increment (for pitch)
@@ -2299,7 +2349,10 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                         int smpLen = 0;
                         int smpRate = smp.sampleRate;
                         bool smpLoop = true;
+                        int smpLoopStart = 0;
+                        int smpLoopEnd = 0;
                         bool isDrum = false;
+                        bool hasRegionLoop = false; // DLS sustain loop
 
                         int noteBaseNote = smp.baseNote; // may be overridden by region
 
@@ -2327,7 +2380,14 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             smpLen = (int)best->data.size();
                             smpRate = best->sampleRate;
                             noteBaseNote = best->baseNote;
-                            smpLoop = true;
+                            if (best->hasLoop) {
+                                smpLoop = true;
+                                smpLoopStart = best->loopStart;
+                                smpLoopEnd = best->loopEnd;
+                                hasRegionLoop = true;
+                            } else {
+                                smpLoop = true; // still loop for MIDI duration control
+                            }
                         } else if (!smp.data.empty()) {
                             smpData = smp.data.data();
                             smpLen = (int)smp.data.size();
@@ -2339,7 +2399,8 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             v.data = smpData;
                             v.length = smpLen;
                             v.loop = smpLoop;
-                            v.loopStart = isDrum ? 0 : smp.loopStart;
+                            v.loopStart = hasRegionLoop ? smpLoopStart : (isDrum ? 0 : smp.loopStart);
+                            v.loopEnd = hasRegionLoop ? smpLoopEnd : 0;
                             v.pos = 0;
                             v.startSample = sampleOff;
                             v.midiNote = n.note;
@@ -2357,7 +2418,8 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                                 float baseInc = (float)smpRate / (float)kAudioSampleRate * 65536.0f;
                                 float semitones = (float)(n.note + smp.octaveShift * 12 - noteBaseNote);
                                 v.inc = (uint32_t)(baseInc * powf(2.0f, semitones / 12.0f));
-                                v.loop = false; // long samples are one-shots
+                                if (!hasRegionLoop)
+                                    v.loop = false; // long samples without DLS loops are one-shots
                             }
                             v.volume = n.velocity * mf.channelVolume[n.channel] / 100;
                             if (v.volume > 160) v.volume = 160;
@@ -2371,8 +2433,9 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             v.totalDuration = v.remaining;
                             v.elapsed = 0;
                             v.bankIdx = bankIdx;
+                            // Release phase: fade after note-off using sample's releaseMs
                             v.releaseRemaining = 0;
-                            v.releaseLen = 0;
+                            v.releaseLen = smp.releaseMs > 0 ? (smp.releaseMs * kAudioSampleRate / 1000) : 0;
                             v.active = true;
                         }
                     }
@@ -2401,26 +2464,33 @@ static void AudioMixBuffer(int8_t* buf, int len) {
         int iStart = voice.startSample;
         voice.startSample = 0; // only delay on the first buffer
         for (int i = iStart; i < len; i++) {
-            // Note duration expired
+            // Note duration expired — enter release phase or stop
             if (voice.remaining == 0) {
-                voice.active = false;
-                break;
-            }
-            if (voice.remaining > 0) voice.remaining--;
-
-            int sampleIdx = (int)(voice.pos >> 16);
-            if (sampleIdx >= voice.length) {
-                if (voice.loop) {
-                    int loopLen = voice.length - voice.loopStart;
-                    if (loopLen > 0)
-                        sampleIdx = voice.loopStart + (sampleIdx - voice.loopStart) % loopLen;
-                    else
-                        sampleIdx = 0;
-                    voice.pos = ((uint64_t)sampleIdx << 16) | (voice.pos & 0xFFFF);
-                } else {
+                if (voice.releaseLen > 0 && voice.releaseRemaining == 0) {
+                    // Start release phase: stop looping, fade out
+                    voice.releaseRemaining = voice.releaseLen;
+                    voice.loop = false; // stop looping, play remainder of sample
+                    voice.remaining = -1; // don't re-trigger this check
+                } else if (voice.releaseRemaining == 0) {
                     voice.active = false;
                     break;
                 }
+            }
+            if (voice.remaining > 0) voice.remaining--;
+            if (voice.releaseRemaining > 0) voice.releaseRemaining--;
+
+            int sampleIdx = (int)(voice.pos >> 16);
+            int loopEndPt = (voice.loopEnd > 0) ? voice.loopEnd : voice.length;
+            if (voice.loop && sampleIdx >= loopEndPt) {
+                int loopLen = loopEndPt - voice.loopStart;
+                if (loopLen > 0)
+                    sampleIdx = voice.loopStart + (sampleIdx - voice.loopStart) % loopLen;
+                else
+                    sampleIdx = 0;
+                voice.pos = ((uint64_t)sampleIdx << 16) | (voice.pos & 0xFFFF);
+            } else if (sampleIdx >= voice.length) {
+                voice.active = false;
+                break;
             }
             // Envelope shaper
             int vol = voice.volume;
@@ -2442,8 +2512,14 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                     vol = (int)(vol * envVal);
                 }
             }
-            // Simple fade-out near end of note (fallback if no envelope)
-            if (voice.remaining >= 0 && voice.remaining < 200)
+            // Release phase fade-out (DLS sustain-loop instruments)
+            if (voice.releaseRemaining > 0 && voice.releaseLen > 0)
+                vol = vol * voice.releaseRemaining / voice.releaseLen;
+            else if (voice.releaseLen > 0 && voice.releaseRemaining == 0 && voice.remaining < 0) {
+                voice.active = false; break; // release finished
+            }
+            // Simple fade-out near end of note (fallback if no release envelope)
+            if (voice.releaseLen == 0 && voice.remaining >= 0 && voice.remaining < 200)
                 vol = vol * voice.remaining / 200;
             int val = voice.data[sampleIdx] * vol / 256;
             mix[i] += (int16_t)val;
@@ -2515,6 +2591,7 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         v.length = (int)smp.data.size();
         v.loop = true;
         v.loopStart = smp.loopStart;
+        v.loopEnd = 0;
         v.pos = 0;
         float baseFreq = (float)smp.sampleRate / (float)smp.data.size();
         float noteFreq = NoteToFreq(shiftedNote);
@@ -2549,6 +2626,7 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         v.length = outLen;
         v.loop = false;
         v.loopStart = 0;
+        v.loopEnd = 0;
         v.pos = 0;
         v.inc = 65536;
         v.volume = 160;
@@ -2564,16 +2642,50 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         v.active = true;
     } else {
         // Long one-shot sample (WAV, kick, snare, etc.): play at native rate, apply octave shift
-        v.data = smp.data.data();
-        v.length = (int)smp.data.size();
-        v.loop = false;
-        v.loopStart = 0;
+        // For GM multi-sample instruments, pick the region matching the preview note
+        const int8_t* playData = smp.data.data();
+        int playLen = (int)smp.data.size();
+        int playRate = smp.sampleRate;
+        int playBase = smp.baseNote;
+        bool playLoop = false;
+        int playLoopStart = 0;
+        int playLoopEnd = 0;
+        int playReleaseLen = 0;
+        if (!smp.regions.empty()) {
+            SampleRegion* best = nullptr;
+            for (auto& rgn : smp.regions) {
+                if (note >= rgn.keyLo && note <= rgn.keyHi) { best = &rgn; break; }
+            }
+            if (!best) best = &smp.regions[0];
+            playData = best->data.data();
+            playLen = (int)best->data.size();
+            playRate = best->sampleRate;
+            playBase = best->baseNote;
+            if (best->hasLoop) {
+                playLoop = true;
+                playLoopStart = best->loopStart;
+                playLoopEnd = best->loopEnd;
+                playReleaseLen = smp.releaseMs > 0 ? (smp.releaseMs * kAudioSampleRate / 1000) : 0;
+            }
+        }
+        v.data = playData;
+        v.length = playLen;
+        v.loop = playLoop;
+        v.loopStart = playLoopStart;
+        v.loopEnd = playLoopEnd;
         v.pos = 0;
-        float previewSemi = (float)(shiftedNote - smp.baseNote);
-        v.inc = (uint32_t)((float)smp.sampleRate / (float)kAudioSampleRate * 65536.0f * powf(2.0f, previewSemi / 12.0f));
+        float previewSemi = (float)(shiftedNote - playBase);
+        v.inc = (uint32_t)((float)playRate / (float)kAudioSampleRate * 65536.0f * powf(2.0f, previewSemi / 12.0f));
         v.volume = 160;
-        // remaining in output samples = source samples / inc rate
-        v.remaining = (int)((float)smp.data.size() / ((float)smp.sampleRate / kAudioSampleRate));
+        if (playLoop) {
+            // Sustain-looped: play for 2 seconds then release
+            v.remaining = kAudioSampleRate * 2;
+            v.releaseLen = playReleaseLen;
+        } else {
+            // remaining in output samples = source samples / inc rate
+            v.remaining = (int)((float)playLen / ((float)playRate / kAudioSampleRate));
+            v.releaseLen = 0;
+        }
         v.totalDuration = v.remaining;
         v.elapsed = 0;
         v.bankIdx = bankIdx;
@@ -2581,7 +2693,6 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         v.midiNote = -1;
         v.midiChannel = -1;
         v.releaseRemaining = 0;
-        v.releaseLen = 0;
         v.active = true;
     }
 }
@@ -18727,6 +18838,15 @@ void FrameTick(float dt)
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shift pitch by octaves (-3 to +3)");
                 ImGui::PopItemWidth();
                 if (s.octaveShift != prevOct) sProjectDirty = true;
+            }
+            // Release fade-out slider
+            {
+                ImGui::PushItemWidth(-1);
+                int prevRel = s.releaseMs;
+                ImGui::SliderInt("##relMs", &s.releaseMs, 0, 2000, "Release: %d ms");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fade-out time after note-off (0 = instant cut)");
+                ImGui::PopItemWidth();
+                if (s.releaseMs != prevRel) sProjectDirty = true;
             }
         }
         sampleDetailsDone:
