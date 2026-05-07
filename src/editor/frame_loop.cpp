@@ -842,6 +842,13 @@ struct DrumHit {
     char name[32] = "";
 };
 
+struct SampleRegion {
+    std::vector<int8_t> data;
+    int sampleRate = 16384;
+    int baseNote = 60;
+    int keyLo = 0, keyHi = 127;
+};
+
 struct EnvPoint {
     float time = 0;   // 0.0-1.0 normalized position
     float level = 1;  // 0.0-1.0 amplitude
@@ -867,6 +874,7 @@ struct SoundSample {
     float ampGainDb = 0.0f;        // amplify gain in dB (imported samples only)
     int octaveShift = 0;           // pitch shift in octaves (-3 to +3)
     int baseNote = 60;             // MIDI note the sample was recorded at (for pitch calc)
+    std::vector<SampleRegion> regions; // multi-sample regions (GM instruments)
 };
 
 struct MidiNote {
@@ -1367,88 +1375,18 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         }
     }
 
-    int count = 0;
-    // For each GM program, find the region covering middle C (note 60) and extract
-    bool loaded[128] = {};
-    for (auto& ins : instruments) {
-        if (loaded[ins.program]) continue;
-        const uint8_t* rp = ins.lrgn;
-        const uint8_t* rEnd = ins.lrgn + ins.lrgnSize;
-        int bestWave = -1;
-        int rgnUnityNote = -1; // region-level unity note override (-1 = use wave-level)
-        while (rp + 12 <= rEnd) {
-            uint32_t ckId = rd32(rp);
-            uint32_t ckSize = rd32(rp + 4);
-            if (ckId == 0x5453494C) {
-                uint32_t lt = rd32(rp + 8);
-                if (lt == 0x206E6772 || lt == 0x326E6772) { // 'rgn ' or 'rgn2'
-                    int keyLo = 0, keyHi = 127, waveIdx = -1;
-                    int thisUnity = -1;
-                    const uint8_t* rrp = rp + 12;
-                    const uint8_t* rrEnd = rp + 8 + ckSize;
-                    while (rrp + 8 <= rrEnd) {
-                        uint32_t rckId = rd32(rrp);
-                        uint32_t rckSize = rd32(rrp + 4);
-                        if (rckId == 0x686E6772 && rckSize >= 8) {
-                            keyLo = rd16(rrp + 8);
-                            keyHi = rd16(rrp + 10);
-                        } else if (rckId == 0x6B6E6C77 && rckSize >= 12) {
-                            waveIdx = (int)rd32(rrp + 16);
-                        } else if (rckId == 0x706D7377 && rckSize >= 8) { // 'wsmp'
-                            thisUnity = rd16(rrp + 8 + 4);
-                        }
-                        rrp += 8 + ((rckSize + 1) & ~1);
-                    }
-                    if (waveIdx >= 0 && keyLo <= 60 && keyHi >= 60) {
-                        bestWave = waveIdx;
-                        rgnUnityNote = thisUnity;
-                    }
-                }
-            }
-            rp += 8 + ((ckSize + 1) & ~1);
-        }
-        // Fallback: use first region if no region covers note 60
-        if (bestWave < 0) {
-            rp = ins.lrgn;
-            while (rp + 12 <= rEnd) {
-                uint32_t ckId = rd32(rp);
-                uint32_t ckSize = rd32(rp + 4);
-                if (ckId == 0x5453494C) {
-                    uint32_t lt = rd32(rp + 8);
-                    if (lt == 0x206E6772 || lt == 0x326E6772) {
-                        const uint8_t* rrp = rp + 12;
-                        const uint8_t* rrEnd = rp + 8 + ckSize;
-                        while (rrp + 8 <= rrEnd) {
-                            uint32_t rckId = rd32(rrp);
-                            uint32_t rckSize = rd32(rrp + 4);
-                            if (rckId == 0x6B6E6C77 && rckSize >= 12)
-                                bestWave = (int)rd32(rrp + 16);
-                            rrp += 8 + ((rckSize + 1) & ~1);
-                        }
-                        if (bestWave >= 0) break;
-                    }
-                }
-                rp += 8 + ((ckSize + 1) & ~1);
-            }
-        }
-
-        if (bestWave < 0 || bestWave >= (int)waves.size() || !waves[bestWave].data) continue;
-        WaveInfo& wi = waves[bestWave];
+    // Helper: downsample a wave to 16384 Hz 8-bit mono
+    auto downsampleWave = [&](WaveInfo& wi, int unityNote, int keyLo, int keyHi, SampleRegion& out) {
         int numSamples = 0;
         if (wi.bitsPerSample == 16)
             numSamples = wi.length / (2 * wi.channels);
         else if (wi.bitsPerSample == 8)
             numSamples = wi.length / wi.channels;
-        if (numSamples < 1) continue;
-
-        // Downsample to 16384 Hz 8-bit mono
+        if (numSamples < 1) return false;
         int dstLen = (int)((float)numSamples / wi.sampleRate * 16384);
-        if (dstLen < 1) continue;
-        if (dstLen > 32768) dstLen = 32768; // cap at 2 sec
-
-        SoundSample s;
-        snprintf(s.name, sizeof(s.name), "%s", sGMInstrumentNames[ins.program]);
-        s.data.resize(dstLen);
+        if (dstLen < 1) return false;
+        if (dstLen > 32768) dstLen = 32768;
+        out.data.resize(dstLen);
         for (int i = 0; i < dstLen; i++) {
             int srcIdx = (int)((float)i / dstLen * numSamples);
             if (srcIdx >= numSamples) srcIdx = numSamples - 1;
@@ -1459,13 +1397,89 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
             } else {
                 val = (int)wi.data[srcIdx * wi.channels] - 128;
             }
-            s.data[i] = (int8_t)val;
+            out.data[i] = (int8_t)val;
         }
+        out.sampleRate = 16384;
+        out.baseNote = unityNote;
+        out.keyLo = keyLo;
+        out.keyHi = keyHi;
+        return true;
+    };
+
+    int count = 0;
+    // For each GM program, extract ALL regions as multi-sample
+    bool loaded[128] = {};
+    for (auto& ins : instruments) {
+        if (loaded[ins.program]) continue;
+        const uint8_t* rp = ins.lrgn;
+        const uint8_t* rEnd = ins.lrgn + ins.lrgnSize;
+
+        // Collect all regions
+        struct RgnInfo { int keyLo, keyHi, waveIdx, unityNote; };
+        std::vector<RgnInfo> allRegions;
+        while (rp + 12 <= rEnd) {
+            uint32_t ckId = rd32(rp);
+            uint32_t ckSize = rd32(rp + 4);
+            if (ckId == 0x5453494C) {
+                uint32_t lt = rd32(rp + 8);
+                if (lt == 0x206E6772 || lt == 0x326E6772) {
+                    int keyLo = 0, keyHi = 127, waveIdx = -1, thisUnity = -1;
+                    const uint8_t* rrp = rp + 12;
+                    const uint8_t* rrEnd = rp + 8 + ckSize;
+                    while (rrp + 8 <= rrEnd) {
+                        uint32_t rckId = rd32(rrp);
+                        uint32_t rckSize = rd32(rrp + 4);
+                        if (rckId == 0x686E6772 && rckSize >= 8) {
+                            keyLo = rd16(rrp + 8);
+                            keyHi = rd16(rrp + 10);
+                        } else if (rckId == 0x6B6E6C77 && rckSize >= 12) {
+                            waveIdx = (int)rd32(rrp + 16);
+                        } else if (rckId == 0x706D7377 && rckSize >= 8) {
+                            thisUnity = rd16(rrp + 8 + 4);
+                        }
+                        rrp += 8 + ((rckSize + 1) & ~1);
+                    }
+                    if (waveIdx >= 0 && waveIdx < (int)waves.size() && waves[waveIdx].data) {
+                        int unity = (thisUnity >= 0) ? thisUnity : waves[waveIdx].unityNote;
+                        allRegions.push_back({keyLo, keyHi, waveIdx, unity});
+                    }
+                }
+            }
+            rp += 8 + ((ckSize + 1) & ~1);
+        }
+        if (allRegions.empty()) continue;
+
+        // Find the region covering note 60 as the primary sample
+        int primaryIdx = 0;
+        for (int ri = 0; ri < (int)allRegions.size(); ri++) {
+            if (allRegions[ri].keyLo <= 60 && allRegions[ri].keyHi >= 60) {
+                primaryIdx = ri;
+                break;
+            }
+        }
+
+        // Build primary sample from note-60 region
+        auto& pr = allRegions[primaryIdx];
+        SampleRegion primaryRgn;
+        if (!downsampleWave(waves[pr.waveIdx], pr.unityNote, pr.keyLo, pr.keyHi, primaryRgn))
+            continue;
+
+        SoundSample s;
+        snprintf(s.name, sizeof(s.name), "%s", sGMInstrumentNames[ins.program]);
+        s.data = primaryRgn.data;
         s.sampleRate = 16384;
         s.loop = false;
-        s.baseNote = (rgnUnityNote >= 0) ? rgnUnityNote : wi.unityNote;
+        s.baseNote = primaryRgn.baseNote;
         s.builtIn = true;
         s.category = SmpCat_GM;
+
+        // Add all regions (including primary) for multi-sample playback
+        for (auto& rgn : allRegions) {
+            SampleRegion sr;
+            if (downsampleWave(waves[rgn.waveIdx], rgn.unityNote, rgn.keyLo, rgn.keyHi, sr))
+                s.regions.push_back(std::move(sr));
+        }
+
         bank.push_back(std::move(s));
         loaded[ins.program] = true;
         count++;
@@ -2287,6 +2301,8 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                         bool smpLoop = true;
                         bool isDrum = false;
 
+                        int noteBaseNote = smp.baseNote; // may be overridden by region
+
                         if (smp.isDrumKit) {
                             // Drum kit: note selects the sample
                             DrumHit& hit = smp.drumHits[n.note & 127];
@@ -2297,6 +2313,21 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                                 smpLoop = false; // drums don't loop
                                 isDrum = true;
                             }
+                        } else if (!smp.regions.empty()) {
+                            // Multi-sample: pick region matching the note
+                            SampleRegion* best = nullptr;
+                            for (auto& rgn : smp.regions) {
+                                if (n.note >= rgn.keyLo && n.note <= rgn.keyHi) {
+                                    best = &rgn;
+                                    break;
+                                }
+                            }
+                            if (!best) best = &smp.regions[0]; // fallback
+                            smpData = best->data.data();
+                            smpLen = (int)best->data.size();
+                            smpRate = best->sampleRate;
+                            noteBaseNote = best->baseNote;
+                            smpLoop = true;
                         } else if (!smp.data.empty()) {
                             smpData = smp.data.data();
                             smpLen = (int)smp.data.size();
@@ -2324,7 +2355,7 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             } else {
                                 // Long sample (WAV): play at native rate, pitch-shift relative to base note
                                 float baseInc = (float)smpRate / (float)kAudioSampleRate * 65536.0f;
-                                float semitones = (float)(n.note + smp.octaveShift * 12 - smp.baseNote);
+                                float semitones = (float)(n.note + smp.octaveShift * 12 - noteBaseNote);
                                 v.inc = (uint32_t)(baseInc * powf(2.0f, semitones / 12.0f));
                                 v.loop = false; // long samples are one-shots
                             }
@@ -10802,6 +10833,25 @@ void FrameTick(float dt)
                                     se.sampleRate = (int)(hit.sampleRate * powf(2.0f, (60 - (n.note & 127)) / 12.0f));
                                     se.loop = false;
                                     exportSoundSamples.push_back(std::move(se));
+                                } else if (!smp.regions.empty()) {
+                                    // Multi-sample GM: each note maps to a region sample
+                                    // Find region for this note
+                                    SampleRegion* best = nullptr;
+                                    for (auto& rgn : smp.regions)
+                                        if (n.note >= rgn.keyLo && n.note <= rgn.keyHi) { best = &rgn; break; }
+                                    if (!best) best = &smp.regions[0];
+                                    // Key by bankIdx + region baseNote to deduplicate
+                                    int key = (bankIdx << 8) | (best->baseNote & 127);
+                                    if (!sampleRemap.count(key)) {
+                                        int exportIdx = (int)exportSoundSamples.size();
+                                        sampleRemap[key] = exportIdx;
+                                        GBASoundSampleExport se;
+                                        se.name = std::string(smp.name) + "_" + std::to_string(best->baseNote);
+                                        se.data = best->data;
+                                        se.sampleRate = best->sampleRate;
+                                        se.loop = false;
+                                        exportSoundSamples.push_back(std::move(se));
+                                    }
                                 } else {
                                     // Normal waveform bank
                                     if (sampleRemap.count(bankIdx)) continue;
@@ -10840,18 +10890,30 @@ void FrameTick(float dt)
                                 GBASoundNoteExport ne;
                                 ne.tick = n.tick;
                                 ne.channel = n.channel;
-                                // Bake octave shift and baseNote into exported note
-                                // GBA runtime uses (note - 60) for pitch, so remap:
-                                // exported = original + octaveShift*12 - baseNote + 60
-                                ne.note = n.note + sSoundBank[bankIdx].octaveShift * 12
-                                        - sSoundBank[bankIdx].baseNote + 60;
                                 ne.velocity = n.velocity;
                                 ne.duration = n.duration;
+                                auto& smp = sSoundBank[bankIdx];
                                 // Look up correct sample index
-                                int key = sSoundBank[bankIdx].isDrumKit ? ((bankIdx << 8) | (n.note & 127)) : bankIdx;
+                                int key;
+                                int noteBase = smp.baseNote;
+                                if (smp.isDrumKit) {
+                                    key = (bankIdx << 8) | (n.note & 127);
+                                } else if (!smp.regions.empty()) {
+                                    // Multi-sample: find region for this note
+                                    SampleRegion* best = nullptr;
+                                    for (auto& rgn : smp.regions)
+                                        if (n.note >= rgn.keyLo && n.note <= rgn.keyHi) { best = &rgn; break; }
+                                    if (!best) best = &smp.regions[0];
+                                    key = (bankIdx << 8) | (best->baseNote & 127);
+                                    noteBase = best->baseNote;
+                                } else {
+                                    key = bankIdx;
+                                }
                                 auto it = sampleRemap.find(key);
-                                if (it == sampleRemap.end()) continue; // skip if sample not found
+                                if (it == sampleRemap.end()) continue;
                                 ne.sampleIdx = it->second;
+                                // Bake octave shift and baseNote into exported note
+                                ne.note = n.note + smp.octaveShift * 12 - noteBase + 60;
                                 ie.notes.push_back(ne);
                             }
                         }
