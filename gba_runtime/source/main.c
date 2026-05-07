@@ -4120,6 +4120,7 @@ static void scene_load(int sceneMode, int sceneIdx)
     } else if (sceneMode == 0) {
         tm_dir_adj = 0;
         tm_static_adj = AFN_DIR_VRAM_TILES;
+        tm_scene_idx = sceneIdx;
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
         mode4_init_scene();
 #else

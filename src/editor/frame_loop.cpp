@@ -865,6 +865,7 @@ struct SoundSample {
     std::vector<EnvPoint> envelope; // if empty, no envelope applied
     bool envEnabled = false;
     float ampGainDb = 0.0f;        // amplify gain in dB (imported samples only)
+    int octaveShift = 0;           // pitch shift in octaves (-3 to +3)
 };
 
 struct MidiNote {
@@ -940,6 +941,8 @@ struct SampleOverride {
     std::vector<int8_t> data;       // edited PCM (empty = no waveform override)
     std::vector<EnvPoint> envelope; // edited envelope (empty = no env override)
     bool envEnabled = false;
+    int octaveShift = 0;            // pitch shift in octaves
+    bool hasOctave = false;         // true if octave was overridden
 };
 
 // Sound instances — named slots referencing a MIDI + bank config for export
@@ -1259,6 +1262,9 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         int sampleRate = 22050;
         int bitsPerSample = 16;
         int channels = 1;
+        bool hasLoop = false;
+        int loopStart = 0;   // in source samples
+        int loopLength = 0;  // in source samples
     };
     std::vector<WaveInfo> waves;
     const uint8_t* wvpl = nullptr;
@@ -1296,6 +1302,13 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                     } else if (wckId == 0x61746164) {
                         wi.data = wp + 8;
                         wi.length = wckSize;
+                    } else if (wckId == 0x706D7377 && wckSize >= 20) { // 'wsmp'
+                        uint32_t cLoops = rd32(wp + 8 + 16);
+                        if (cLoops > 0 && wckSize >= 36) {
+                            wi.hasLoop = true;
+                            wi.loopStart = (int)rd32(wp + 8 + 24);
+                            wi.loopLength = (int)rd32(wp + 8 + 28);
+                        }
                     }
                     wp += 8 + ((wckSize + 1) & ~1);
                 }
@@ -1368,6 +1381,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         const uint8_t* rp = ins.lrgn;
         const uint8_t* rEnd = ins.lrgn + ins.lrgnSize;
         int bestWave = -1;
+        bool rgnHasLoop = false; int rgnLoopStart = 0, rgnLoopLen = 0;
         while (rp + 12 <= rEnd) {
             uint32_t ckId = rd32(rp);
             uint32_t ckSize = rd32(rp + 4);
@@ -1375,6 +1389,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                 uint32_t lt = rd32(rp + 8);
                 if (lt == 0x206E6772 || lt == 0x326E6772) { // 'rgn ' or 'rgn2'
                     int keyLo = 0, keyHi = 127, waveIdx = -1;
+                    bool thisLoop = false; int thisLoopStart = 0, thisLoopLen = 0;
                     const uint8_t* rrp = rp + 12;
                     const uint8_t* rrEnd = rp + 8 + ckSize;
                     while (rrp + 8 <= rrEnd) {
@@ -1385,11 +1400,19 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                             keyHi = rd16(rrp + 10);
                         } else if (rckId == 0x6B6E6C77 && rckSize >= 12) {
                             waveIdx = (int)rd32(rrp + 16);
+                        } else if (rckId == 0x706D7377 && rckSize >= 20) { // 'wsmp'
+                            uint32_t cLoops = rd32(rrp + 8 + 16);
+                            if (cLoops > 0 && rckSize >= 36) {
+                                thisLoop = true;
+                                thisLoopStart = (int)rd32(rrp + 8 + 24);
+                                thisLoopLen = (int)rd32(rrp + 8 + 28);
+                            }
                         }
                         rrp += 8 + ((rckSize + 1) & ~1);
                     }
                     if (waveIdx >= 0 && keyLo <= 60 && keyHi >= 60) {
                         bestWave = waveIdx;
+                        rgnHasLoop = thisLoop; rgnLoopStart = thisLoopStart; rgnLoopLen = thisLoopLen;
                     }
                 }
             }
@@ -1905,15 +1928,18 @@ static void InitBuiltInSamples()
 static std::vector<std::vector<int8_t>> sCleanBankData;
 static std::vector<std::vector<EnvPoint>> sCleanBankEnv;
 static std::vector<bool> sCleanBankEnvEnabled;
+static std::vector<int> sCleanBankOctave;
 
 static void SnapshotCleanBank() {
     sCleanBankData.resize(sSoundBank.size());
     sCleanBankEnv.resize(sSoundBank.size());
     sCleanBankEnvEnabled.resize(sSoundBank.size());
+    sCleanBankOctave.resize(sSoundBank.size());
     for (int i = 0; i < (int)sSoundBank.size(); i++) {
         sCleanBankData[i] = sSoundBank[i].data;
         sCleanBankEnv[i] = sSoundBank[i].envelope;
         sCleanBankEnvEnabled[i] = sSoundBank[i].envEnabled;
+        sCleanBankOctave[i] = sSoundBank[i].octaveShift;
     }
 }
 
@@ -1922,6 +1948,7 @@ static void ResetBankToClean() {
         sSoundBank[i].data = sCleanBankData[i];
         sSoundBank[i].envelope = sCleanBankEnv[i];
         sSoundBank[i].envEnabled = sCleanBankEnvEnabled[i];
+        sSoundBank[i].octaveShift = (i < (int)sCleanBankOctave.size()) ? sCleanBankOctave[i] : 0;
     }
     // NOTE: do NOT clear sSampleOriginal — it holds the un-amplified WAV data
     // which must persist across instance switches to avoid double-amplification
@@ -1934,13 +1961,19 @@ static void SaveEditsToInstance(SoundInstance& inst) {
         bool dataChanged = (sSoundBank[i].data != sCleanBankData[i]);
         bool envChanged = (sSoundBank[i].envelope != sCleanBankEnv[i]) ||
                           (sSoundBank[i].envEnabled != sCleanBankEnvEnabled[i]);
-        if (dataChanged || envChanged) {
+        int cleanOct = (i < (int)sCleanBankOctave.size()) ? sCleanBankOctave[i] : 0;
+        bool octChanged = (sSoundBank[i].octaveShift != cleanOct);
+        if (dataChanged || envChanged || octChanged) {
             SampleOverride ov;
             ov.sampleIdx = i;
             if (dataChanged) ov.data = sSoundBank[i].data;
             if (envChanged) {
                 ov.envelope = sSoundBank[i].envelope;
                 ov.envEnabled = sSoundBank[i].envEnabled;
+            }
+            if (octChanged) {
+                ov.octaveShift = sSoundBank[i].octaveShift;
+                ov.hasOctave = true;
             }
             inst.overrides.push_back(std::move(ov));
         }
@@ -1958,6 +1991,8 @@ static void LoadInstanceOverrides(const SoundInstance& inst) {
             sSoundBank[ov.sampleIdx].envelope = ov.envelope;
             sSoundBank[ov.sampleIdx].envEnabled = ov.envEnabled;
         }
+        if (ov.hasOctave)
+            sSoundBank[ov.sampleIdx].octaveShift = ov.octaveShift;
     }
 }
 
@@ -2167,6 +2202,8 @@ struct AudioVoice {
     int startSample = 0;    // sample offset within buffer to start playing
     int midiNote = -1;      // MIDI note number (for retrigger detection)
     int midiChannel = -1;   // MIDI channel (for retrigger detection)
+    int releaseRemaining = 0; // samples left in release fade (0 = not releasing)
+    int releaseLen = 0;       // total release length in samples
 };
 
 static HWAVEOUT sWaveOut = nullptr;
@@ -2292,12 +2329,12 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             } else if (smpLen <= 64) {
                                 // Single-cycle waveform: base frequency = sampleRate / length
                                 float baseFreq = (float)smpRate / (float)v.length;
-                                float noteFreq = NoteToFreq(n.note);
+                                float noteFreq = NoteToFreq(n.note + smp.octaveShift * 12);
                                 v.inc = (uint32_t)(noteFreq / baseFreq * 65536.0f);
                             } else {
                                 // Long sample (WAV): play at native rate, pitch-shift relative to note 60
                                 float baseInc = (float)smpRate / (float)kAudioSampleRate * 65536.0f;
-                                float semitones = (float)(n.note - 60);
+                                float semitones = (float)(n.note + smp.octaveShift * 12 - 60);
                                 v.inc = (uint32_t)(baseInc * powf(2.0f, semitones / 12.0f));
                                 v.loop = false; // long samples are one-shots
                             }
@@ -2313,6 +2350,8 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             v.totalDuration = v.remaining;
                             v.elapsed = 0;
                             v.bankIdx = bankIdx;
+                            v.releaseRemaining = 0;
+                            v.releaseLen = 0;
                             v.active = true;
                         }
                     }
@@ -2448,6 +2487,7 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
     int vi = 0;
     AudioVoice& v = sVoices[vi];
 
+    int shiftedNote = note + smp.octaveShift * 12;
     if (smp.loop) {
         // Looping waveform: play as continuous drone at requested pitch
         v.data = smp.data.data();
@@ -2456,7 +2496,7 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         v.loopStart = smp.loopStart;
         v.pos = 0;
         float baseFreq = (float)smp.sampleRate / (float)smp.data.size();
-        float noteFreq = NoteToFreq(note);
+        float noteFreq = NoteToFreq(shiftedNote);
         v.inc = (uint32_t)(noteFreq / baseFreq * 65536.0f);
         v.volume = 120;
         v.remaining = kAudioSampleRate; // 1 second preview
@@ -2466,13 +2506,15 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         v.startSample = 0;
         v.midiNote = -1;
         v.midiChannel = -1;
+        v.releaseRemaining = 0;
+        v.releaseLen = 0;
         v.active = true;
     } else if (smp.data.size() < 256) {
         // Short non-looping waveform: render ~0.5 sec with decay at middle C
         int outLen = kAudioSampleRate / 2;
         sPreviewBuf.resize(outLen);
         float baseFreq = (float)smp.sampleRate / (float)smp.data.size();
-        float noteFreq = NoteToFreq(note);
+        float noteFreq = NoteToFreq(shiftedNote);
         uint32_t pos = 0;
         uint32_t inc = (uint32_t)(noteFreq / baseFreq * 65536.0f);
         int srcLen = (int)smp.data.size();
@@ -2496,15 +2538,17 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         v.startSample = 0;
         v.midiNote = -1;
         v.midiChannel = -1;
+        v.releaseRemaining = 0;
+        v.releaseLen = 0;
         v.active = true;
     } else {
-        // Long one-shot sample (WAV, kick, snare, etc.): play at native rate
+        // Long one-shot sample (WAV, kick, snare, etc.): play at native rate, apply octave shift
         v.data = smp.data.data();
         v.length = (int)smp.data.size();
         v.loop = false;
         v.loopStart = 0;
         v.pos = 0;
-        v.inc = (uint32_t)((float)smp.sampleRate / (float)kAudioSampleRate * 65536.0f);
+        v.inc = (uint32_t)((float)smp.sampleRate / (float)kAudioSampleRate * 65536.0f * powf(2.0f, (float)smp.octaveShift));
         v.volume = 160;
         // remaining in output samples = source samples / inc rate
         v.remaining = (int)((float)smp.data.size() / ((float)smp.sampleRate / kAudioSampleRate));
@@ -2514,6 +2558,8 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         v.startSample = 0;
         v.midiNote = -1;
         v.midiChannel = -1;
+        v.releaseRemaining = 0;
+        v.releaseLen = 0;
         v.active = true;
     }
 }
@@ -4087,6 +4133,7 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "impLoopStart=%d\n", s.loopStart);
             fprintf(f, "impIdx=%d\n", i);
             fprintf(f, "impAmpDb=%.2f\n", s.ampGainDb);
+            if (s.octaveShift != 0) fprintf(f, "impOctave=%d\n", s.octaveShift);
             fprintf(f, "impEnvEnabled=%d\n", s.envEnabled ? 1 : 0);
             if (!s.envelope.empty()) {
                 fprintf(f, "impEnvPts=%d", (int)s.envelope.size());
@@ -4138,6 +4185,7 @@ static bool SaveProject(const std::string& path)
         for (auto& ov : si.overrides) {
             fprintf(f, "ov_begin=%d\n", ov.sampleIdx);
             fprintf(f, "ovEnvEnabled=%d\n", ov.envEnabled ? 1 : 0);
+            if (ov.hasOctave) fprintf(f, "ovOctave=%d\n", ov.octaveShift);
             if (!ov.envelope.empty()) {
                 fprintf(f, "ovEnvPts=%d", (int)ov.envelope.size());
                 for (auto& ep : ov.envelope)
@@ -5575,6 +5623,7 @@ static bool LoadProject(const std::string& path)
                 else if (sscanf(line, "impLoop=%d", &ival) == 1) curImp->loop = (ival != 0);
                 else if (sscanf(line, "impLoopStart=%d", &ival) == 1) curImp->loopStart = ival;
                 else if (sscanf(line, "impAmpDb=%f", &fval) == 1) curImp->ampGainDb = fval;
+                else if (sscanf(line, "impOctave=%d", &ival) == 1) curImp->octaveShift = ival;
                 else if (sscanf(line, "impEnvEnabled=%d", &ival) == 1) curImp->envEnabled = (ival != 0);
                 else if (strncmp(line, "impEnvPts=", 10) == 0) {
                     curImp->envelope.clear();
@@ -5635,6 +5684,7 @@ static bool LoadProject(const std::string& path)
             }
             else if (curOv) {
                 if (sscanf(line, "ovEnvEnabled=%d", &ival) == 1) curOv->envEnabled = (ival != 0);
+                else if (sscanf(line, "ovOctave=%d", &ival) == 1) { curOv->octaveShift = ival; curOv->hasOctave = true; }
                 else if (strncmp(line, "ovEnvPts=", 9) == 0) {
                     curOv->envelope.clear();
                     int numPts = 0;
@@ -10799,7 +10849,7 @@ void FrameTick(float dt)
                                 GBASoundNoteExport ne;
                                 ne.tick = n.tick;
                                 ne.channel = n.channel;
-                                ne.note = n.note;
+                                ne.note = n.note + sSoundBank[bankIdx].octaveShift * 12;
                                 ne.velocity = n.velocity;
                                 ne.duration = n.duration;
                                 // Look up correct sample index
@@ -18611,6 +18661,15 @@ void FrameTick(float dt)
                     }
                     sProjectDirty = true;
                 }
+            }
+            // Octave shift slider
+            {
+                ImGui::PushItemWidth(-1);
+                int prevOct = s.octaveShift;
+                ImGui::SliderInt("##octShift", &s.octaveShift, -3, 3, "Octave: %d");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shift pitch by octaves (-3 to +3)");
+                ImGui::PopItemWidth();
+                if (s.octaveShift != prevOct) sProjectDirty = true;
             }
         }
         sampleDetailsDone:
