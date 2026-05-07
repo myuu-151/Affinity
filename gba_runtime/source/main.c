@@ -90,7 +90,8 @@ static void afn_stop_sound(void);
 #ifdef AFN_HAS_SOUND
 
 #define SND_BUF_SIZE 304
-#define SND_MAX_VOICES 6
+#define SND_MAX_VOICES 8  // max allocated; actual count per instance from afn_snd_voices[]
+static int snd_voice_count = 6; // active voice limit (set from afn_snd_voices[] on play)
 
 // Sound buffers in EWRAM to save IWRAM space (32KB limit)
 EWRAM_DATA static s8 snd_buf[2][SND_BUF_SIZE] __attribute__((aligned(4)));
@@ -156,11 +157,14 @@ static void afn_play_sound(int instanceId) {
     snd_seq_active = instanceId;
     snd_seq_tick = 0;
     snd_seq_next = 0;
+    snd_voice_count = afn_snd_voices[instanceId];
+    if (snd_voice_count < 4) snd_voice_count = 4;
+    if (snd_voice_count > SND_MAX_VOICES) snd_voice_count = SND_MAX_VOICES;
 }
 
 static void afn_stop_sound(void) {
     snd_seq_active = -1;
-    for (int i = 0; i < SND_MAX_VOICES; i++)
+    for (int i = 0; i < snd_voice_count; i++)
         snd_voices[i].active = 0;
 }
 
@@ -172,7 +176,7 @@ IWRAM_CODE static void afn_sound_mix(void) {
     // Check if any voice is still active — if not, shut down HW
     {
         int anyActive = 0;
-        for (int v = 0; v < SND_MAX_VOICES; v++)
+        for (int v = 0; v < snd_voice_count; v++)
             if (snd_voices[v].active) { anyActive = 1; break; }
         if (!anyActive && snd_seq_active < 0) {
             afn_sound_hw_stop();
@@ -196,7 +200,7 @@ IWRAM_CODE static void afn_sound_mix(void) {
         for (int i = 0; i < SND_BUF_SIZE / 2; i++) a32[i] = 0;
     }
 
-    for (int v = 0; v < SND_MAX_VOICES; v++) {
+    for (int v = 0; v < snd_voice_count; v++) {
         SndVoice* vc = &snd_voices[v];
         if (!vc->active) continue;
         int n = SND_BUF_SIZE;
@@ -211,7 +215,7 @@ IWRAM_CODE static void afn_sound_mix(void) {
         if (vc->remaining > 0 && vc->remaining <= 256)
             vol = (vol * vc->remaining) >> 8;
         if (vc->remaining < 0 && vc->releaseRem > 0)
-            vol = (vol * vc->releaseRem) >> 12;
+            vol = (vol * vc->releaseRem) >> 13; // >>13 because max is 8192
         int gs = vc->gainShift;
         int done = 0;
         if (vc->loop) {
@@ -251,7 +255,7 @@ IWRAM_CODE static void afn_sound_mix(void) {
             vc->remaining -= n;
             if (vc->remaining <= 0) {
                 vc->remaining = -1;
-                vc->releaseRem = 4096;
+                vc->releaseRem = 8192;
                 vc->loop = 0;
             }
         } else if (vc->remaining < 0) {
@@ -275,14 +279,14 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     if (smpIdx < 0 || smpIdx >= AFN_SOUND_SAMPLE_COUNT) return;
     // Find free voice, or steal the one closest to finishing
     int vi = -1;
-    for (int i = 0; i < SND_MAX_VOICES; i++) {
+    for (int i = 0; i < snd_voice_count; i++) {
         if (!snd_voices[i].active) { vi = i; break; }
     }
     if (vi < 0) {
         // Prefer stealing releasing voices, then closest to finishing
         int minScore = 0x7FFFFFFF;
         vi = 0;
-        for (int i = 0; i < SND_MAX_VOICES; i++) {
+        for (int i = 0; i < snd_voice_count; i++) {
             int s = (snd_voices[i].remaining < 0) ? snd_voices[i].releaseRem
                                                     : snd_voices[i].remaining + 10000;
             if (s < minScore) { minScore = s; vi = i; }
@@ -327,7 +331,7 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     // Each frame = SND_BUF_SIZE output samples, sequencer advances tpf ticks/frame
     int tpf = afn_snd_tpf[snd_seq_active >= 0 ? snd_seq_active : 0];
     int durSamples = (durTicks * SND_BUF_SIZE) / (tpf > 0 ? tpf : 1);
-    if (durSamples < 2724) durSamples = 2724; // minimum ~150ms (18157 * 0.15)
+    if (durSamples < 5443) durSamples = 5443; // minimum ~300ms (18157 * 0.30)
     // For one-shot samples, ensure remaining covers the full sample playback
     if (!vc->loop) {
         int smpDur = (vc->length << 8) / (baseInc > 0 ? baseInc : 1);

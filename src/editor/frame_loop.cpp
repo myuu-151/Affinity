@@ -971,6 +971,7 @@ struct SoundInstance {
     int volume = 100;           // master volume 0-100
     int interpolation = 0;     // 0 = nearest, 1 = smooth (linear)
     int mixerGain = 0;         // 0 = Normal (>>7), 1 = Loud (>>6), 2 = Quiet (>>9)
+    int voiceCount = 6;        // max simultaneous voices on GBA (4-8)
     std::vector<SampleOverride> overrides; // per-sample edits
 };
 static std::vector<SoundInstance> sSoundInstances;
@@ -4362,6 +4363,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "instVol=%d\n", si.volume);
         fprintf(f, "instInterp=%d\n", si.interpolation);
         fprintf(f, "instGain=%d\n", si.mixerGain);
+        fprintf(f, "instVoices=%d\n", si.voiceCount);
         fprintf(f, "instBanks=");
         for (int ch = 0; ch < 16; ch++) {
             if (ch > 0) fprintf(f, ",");
@@ -5914,6 +5916,7 @@ static bool LoadProject(const std::string& path)
                 else if (sscanf(line, "instVol=%d", &ival) == 1) curInst->volume = ival;
                 else if (sscanf(line, "instInterp=%d", &ival) == 1) curInst->interpolation = ival;
                 else if (sscanf(line, "instGain=%d", &ival) == 1) curInst->mixerGain = ival;
+                else if (sscanf(line, "instVoices=%d", &ival) == 1) curInst->voiceCount = ival;
                 else if (strncmp(line, "instBanks=", 10) == 0) {
                     sscanf(line + 10, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
                         &curInst->channelBank[0], &curInst->channelBank[1], &curInst->channelBank[2], &curInst->channelBank[3],
@@ -11064,6 +11067,7 @@ void FrameTick(float dt)
                         ie.tempo = midi.tempo;
                         ie.interpolation = inst.interpolation;
                         ie.mixerGain = inst.mixerGain;
+                        ie.voiceCount = inst.voiceCount;
                         for (auto& track : midi.tracks) {
                             for (auto& n : track.notes) {
                                 int bankIdx = midi.channelBank[n.channel];
@@ -19043,6 +19047,21 @@ void FrameTick(float dt)
                 for (int gi = 0; gi < 3; gi++) {
                     if (ImGui::Selectable(gainNames[gi], inst.mixerGain == gi)) {
                         inst.mixerGain = gi;
+                        sProjectDirty = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopItemWidth();
+            const char* voiceNames[] = { "4", "5", "6", "7", "8" };
+            int voiceIdx = inst.voiceCount - 4;
+            if (voiceIdx < 0) voiceIdx = 0;
+            if (voiceIdx > 4) voiceIdx = 4;
+            ImGui::PushItemWidth(-1);
+            if (ImGui::BeginCombo("##voices", (std::string(voiceNames[voiceIdx]) + " Voices").c_str())) {
+                for (int vi = 0; vi < 5; vi++) {
+                    if (ImGui::Selectable((std::string(voiceNames[vi]) + " Voices").c_str(), voiceIdx == vi)) {
+                        inst.voiceCount = vi + 4;
                         sProjectDirty = true;
                     }
                 }
