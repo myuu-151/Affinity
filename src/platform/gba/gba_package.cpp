@@ -615,6 +615,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         bool usedBanks[16] = {};
         usedBanks[0] = true;  // bank 0 = transparent, never use
         usedBanks[6] = true;  // bank 6 = minimap dots
+        usedBanks[15] = true; // bank 15 = HUD font text
 
         // Pass 1: assign banks to independent assets (paletteSrc < 0 or self)
         // Also detect identical palettes and merge them to the same bank
@@ -647,15 +648,38 @@ static bool GenerateMapData(const std::string& runtimeDir,
             }
 
             int bank = assets[ai].palBank & 15;
-            if (bank == 0) bank = 1; // avoid bank 0
-            if (!usedBanks[bank]) {
-                usedBanks[bank] = true;
-            } else {
-                // Conflict — find next free bank
-                for (int b = 1; b < 16; b++)
+            if (bank == 0 || usedBanks[bank]) {
+                // Find next free bank
+                bank = -1;
+                for (int b = 1; b < 15; b++)
                     if (!usedBanks[b]) { bank = b; break; }
-                usedBanks[bank] = true;
+                if (bank < 0) {
+                    // All banks exhausted — merge with most similar palette
+                    // Skip entry 0 (transparent) and weight by non-zero entries only
+                    int bestBank = 1; int bestDiff = 0x7FFFFFFF;
+                    for (size_t bi = 0; bi < ai; bi++) {
+                        if (resolvedPalBank[bi] < 1) continue;
+                        if (assets[bi].hasDirections && !assets[bi].dirAnimSets.empty()) continue;
+                        int diff = 0; int usedCount = 0;
+                        for (int c = 1; c < 16; c++) { // skip entry 0
+                            uint32_t ca = assets[ai].palette[c];
+                            uint32_t cb = assets[bi].palette[c];
+                            if (ca == 0 && cb == 0) continue; // both unused
+                            usedCount++;
+                            int dr = (int)(ca & 0xFF) - (int)(cb & 0xFF);
+                            int dg = (int)((ca >> 8) & 0xFF) - (int)((cb >> 8) & 0xFF);
+                            int db = (int)((ca >> 16) & 0xFF) - (int)((cb >> 16) & 0xFF);
+                            diff += dr*dr + dg*dg + db*db;
+                            // Penalize when one is zero and other isn't (mismatched usage)
+                            if ((ca == 0) != (cb == 0)) diff += 10000;
+                        }
+                        if (usedCount == 0) diff = 0x7FFFFFFE; // no overlap at all
+                        if (diff < bestDiff) { bestDiff = diff; bestBank = resolvedPalBank[bi]; }
+                    }
+                    bank = bestBank;
+                }
             }
+            usedBanks[bank] = true;
             resolvedPalBank[ai] = bank;
         }
         // Pass 2: shared palette assets inherit their source's resolved bank
@@ -1543,10 +1567,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
         // Pieces: {assetIdx, frame, localX, localY, size}
         if (totalPieces > 0) {
-            f << "static const struct { s8 asset; u8 frame; s16 x,y; u8 size; } afn_hud_pieces[" << totalPieces << "] = {\n";
+            f << "static const struct { s8 asset; u8 frame; s16 x,y; u8 size; u8 blackTint; u8 opacity; } afn_hud_pieces[" << totalPieces << "] = {\n";
             for (auto& el : hudElements)
                 for (auto& pc : el.pieces)
-                    f << "    {" << pc.spriteAssetIdx << "," << pc.frame << "," << pc.localX << "," << pc.localY << "," << pc.size << "},\n";
+                    f << "    {" << pc.spriteAssetIdx << "," << pc.frame << "," << pc.localX << "," << pc.localY << "," << pc.size << "," << (pc.blackTint ? 1 : 0) << "," << pc.opacity << "},\n";
             f << "};\n";
         } else {
             f << "static const int afn_hud_pieces[1] = {0}; // no pieces\n";

@@ -2561,6 +2561,8 @@ struct HudPiece {
     int frame = 0;           // which frame of that asset
     int localX = 0, localY = 0; // offset within the element
     int size = 16;           // POT size: 8, 16, 32, or 64
+    bool blackTint = false;  // render as solid black silhouette
+    int opacity = 16;        // 0-16 (GBA alpha blend, 16 = fully opaque)
 };
 
 struct StopModifier {
@@ -3747,7 +3749,7 @@ static bool SaveProject(const std::string& path)
             el.visible ? 1 : 0, el.layer);
         fprintf(f, "elemPieceCount=%d\n", (int)el.pieces.size());
         for (auto& pc : el.pieces)
-            fprintf(f, "elemPiece=%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size);
+            fprintf(f, "elemPiece=%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity);
         fprintf(f, "elemStopCount=%d\n", (int)el.stops.size());
         for (auto& st : el.stops) {
             fprintf(f, "elemStop=%d|%d|%d\n", st.localX, st.localY, st.linkedElement);
@@ -4763,10 +4765,10 @@ static bool LoadProject(const std::string& path)
                 sHudElements.back().pieces.reserve(ival);
             }
             else if (strncmp(line, "elemPiece=", 10) == 0 && !sHudElements.empty()) {
-                HudPiece pc;
-                if (sscanf(line + 10, "%d|%d|%d|%d|%d",
-                    &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size) == 5)
-                    sHudElements.back().pieces.push_back(pc);
+                HudPiece pc; int bt = 0, opa = 16;
+                int n = sscanf(line + 10, "%d|%d|%d|%d|%d|%d|%d",
+                    &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size, &bt, &opa);
+                if (n >= 5) { pc.blackTint = (bt != 0); pc.opacity = std::clamp(opa, 0, 16); sHudElements.back().pieces.push_back(pc); }
             }
             else if (sscanf(line, "elemStopCount=%d", &ival) == 1 && !sHudElements.empty()) {
                 sHudElements.back().stops.clear();
@@ -10667,6 +10669,8 @@ void FrameTick(float dt)
                         pe.localX = pc.localX;
                         pe.localY = pc.localY;
                         pe.size = pc.size;
+                        pe.blackTint = pc.blackTint;
+                        pe.opacity = pc.opacity;
                         he.pieces.push_back(pe);
                     }
                     for (auto& st : el.stops) {
@@ -19463,8 +19467,11 @@ void FrameTick(float dt)
 
                     if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sTmSpriteTextures.size() &&
                         sTmSpriteTextures[pc.spriteAssetIdx]) {
+                        int alpha = (pc.opacity * 255) / 16;
+                        ImU32 tintCol = pc.blackTint ? IM_COL32(0, 0, 0, alpha) : IM_COL32(255, 255, 255, alpha);
                         dl->AddImage((ImTextureID)(intptr_t)sTmSpriteTextures[pc.spriteAssetIdx],
-                            ImVec2(px, py), ImVec2(px + psz, py + psz));
+                            ImVec2(px, py), ImVec2(px + psz, py + psz),
+                            ImVec2(0,0), ImVec2(1,1), tintCol);
                     } else {
                         dl->AddRectFilled(ImVec2(px, py), ImVec2(px + psz, py + psz),
                             IM_COL32(80, 80, 120, 100));
@@ -19962,7 +19969,7 @@ void FrameTick(float dt)
                         // Pieces
                         fprintf(cf, "elemPieceCount=%d\n", (int)el.pieces.size());
                         for (auto& pc : el.pieces)
-                            fprintf(cf, "elemPiece=%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size);
+                            fprintf(cf, "elemPiece=%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity);
                         // Stops
                         fprintf(cf, "elemStopCount=%d\n", (int)el.stops.size());
                         for (auto& st : el.stops) {
@@ -20112,8 +20119,10 @@ void FrameTick(float dt)
                                 nel.pieces.clear(); nel.pieces.reserve(ival2);
                             }
                             else if (strncmp(line, "elemPiece=", 10) == 0) {
-                                HudPiece pc;
-                                if (sscanf(line + 10, "%d|%d|%d|%d|%d", &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size) == 5) {
+                                HudPiece pc; int bt2 = 0, opa2 = 16;
+                                int n2 = sscanf(line + 10, "%d|%d|%d|%d|%d|%d|%d", &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size, &bt2, &opa2);
+                                if (n2 >= 5) {
+                                    pc.blackTint = (bt2 != 0); pc.opacity = std::clamp(opa2, 0, 16);
                                     pc.spriteAssetIdx = remapAsset(pc.spriteAssetIdx);
                                     nel.pieces.push_back(pc);
                                 }
@@ -20414,6 +20423,10 @@ void FrameTick(float dt)
                         }
                         if (ImGui::DragInt("X##pc", &pc.localX, 1)) sProjectDirty = true;
                         if (ImGui::DragInt("Y##pc", &pc.localY, 1)) sProjectDirty = true;
+                        if (ImGui::Checkbox("Black##pc", &pc.blackTint)) sProjectDirty = true;
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(80);
+                        if (ImGui::SliderInt("Opacity##pc", &pc.opacity, 0, 16)) sProjectDirty = true;
                         if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sTmSpriteTextures.size() && sTmSpriteTextures[pc.spriteAssetIdx]) {
                             float prevSz = std::min(elemRightW * 0.4f, 64.0f);
                             ImGui::Image((ImTextureID)(intptr_t)sTmSpriteTextures[pc.spriteAssetIdx],

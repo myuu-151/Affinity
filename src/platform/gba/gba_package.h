@@ -429,6 +429,8 @@ struct GBAHudPieceExport {
     int frame;
     int localX, localY;
     int size;   // 8, 16, 32, 64
+    bool blackTint = false;
+    int opacity = 16;
 };
 
 struct GBAHudStopExport {

@@ -720,6 +720,8 @@ static void font_glyph_to_tile(u32* dst, const u8* glyph, int colorIdx, int bgId
 static int hud_font_tile_base = 0;
 static int hud_font_loaded = 0;
 static int hud_pal_remap[AFN_ASSET_COUNT]; // dynamic palette bank for HUD assets
+static int hud_need_blend = 0;
+static int hud_blend_alpha = 16;
 
 static void hud_font_load(int staticTileCount)
 {
@@ -3990,7 +3992,7 @@ static void mode0_init_scene(int tmIdx)
         const u16 *pal = afn_tm_scene_pal[tmIdx];
         for (ti = 0; ti < 256; ti++)
             pal_bg_mem[ti] = pal[ti];
-        pal_bg_mem[0] = RGB15(31, 31, 31);
+        pal_bg_mem[0] = RGB15(0, 0, 0);
         // Load screen map
         {
             int mapW = tm_cur_map_w;
@@ -4974,7 +4976,31 @@ int main(void)
                                 }
                             }
                         }
-                    } } }
+                    } }
+                    // Bank 0: all-black palette for blackTint pieces
+                    // (index 0 = transparent, 1-15 = black)
+                    { int c; for (c = 1; c < 16; c++) pal_obj_mem[c] = 0x0000; }
+                    // HUD blend alpha is set after fade processing (they share REG_BLDCNT)
+                    { int needBlend = 0, blendAlpha = 16;
+                    int ei5; for (ei5 = 0; ei5 < AFN_HUD_ELEM_COUNT; ei5++) {
+                        if (!afn_hud_visible[ei5]) continue;
+                        int ps3 = afn_hud_elems[ei5].pieceStart;
+                        int pc3 = afn_hud_elems[ei5].pieceCount;
+                        int pi4; for (pi4 = 0; pi4 < pc3; pi4++) {
+                            if (afn_hud_pieces[ps3 + pi4].opacity < 16) {
+                                needBlend = 1;
+                                if (afn_hud_pieces[ps3 + pi4].opacity < blendAlpha)
+                                    blendAlpha = afn_hud_pieces[ps3 + pi4].opacity;
+                            }
+                        }
+                    }
+                    hud_need_blend = needBlend;
+                    hud_blend_alpha = blendAlpha;
+                    if (needBlend) {
+                        REG_BLDCNT = BLD_STD | BLD_BOT(BLD_BG0 | BLD_BG1 | BLD_BG2 | BLD_BG3 | BLD_OBJ | BLD_BACKDROP);
+                        REG_BLDALPHA = BLD_EVA(blendAlpha) | BLD_EVB(16 - blendAlpha);
+                    } }
+                    }
                     // Load font into OBJ VRAM if not yet loaded
                     if (!hud_font_loaded) hud_font_load(staticTiles);
                     tm_hud_was_visible = 1;
@@ -5171,7 +5197,8 @@ int main(void)
                                 int tileBase = afn_asset_desc[ai][0];
                                 int tpf      = afn_asset_desc[ai][1];
                                 int objSz    = afn_asset_desc[ai][3];
-                                int palBank  = hud_pal_remap[ai] ? hud_pal_remap[ai] : afn_asset_desc[ai][4];
+                                int palBank  = afn_hud_pieces[pStart + pi].blackTint ? 0
+                                    : (hud_pal_remap[ai] ? hud_pal_remap[ai] : afn_asset_desc[ai][4]);
                                 int tileCur  = tileBase - hudTileAdj + fr * tpf;
 
                                 u16 a0 = ATTR0_SQUARE | ((sy & 0xFF));
@@ -5180,6 +5207,8 @@ int main(void)
                                     a0 |= ATTR0_AFF;
                                     a1 |= ATTR1_AFF_ID(hudAffSlot);
                                 }
+                                if (afn_hud_pieces[pStart + pi].opacity < 16)
+                                    a0 |= ATTR0_BLEND;
                                 u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
                                 obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
                                 oamSlot++;
@@ -5301,6 +5330,11 @@ int main(void)
                 }
                 REG_BLDCNT = BLD_BUILD(BLD_BG2 | BLD_OBJ, 0, BLD_BLACK);
                 REG_BLDY = afn_fade_level;
+            } else if (hud_need_blend) {
+                REG_BLDCNT = BLD_STD | BLD_BOT(BLD_BG0 | BLD_BG1 | BLD_BG2 | BLD_BG3 | BLD_OBJ | BLD_BACKDROP);
+                REG_BLDALPHA = BLD_EVA(hud_blend_alpha) | BLD_EVB(16 - hud_blend_alpha);
+            } else {
+                REG_BLDCNT = 0;
             }
 
             inputFwd = afn_input_fwd;
