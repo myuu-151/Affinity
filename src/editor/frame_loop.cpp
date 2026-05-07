@@ -11027,6 +11027,8 @@ void FrameTick(float dt)
                                         se.loop = best->hasLoop;
                                         se.loopStart = best->loopStart;
                                         se.loopEnd = best->hasLoop ? best->loopEnd : 0;
+                                        se.decayPct = smp.decayPct;
+                                        se.decayMinMs = smp.decayMinMs;
                                         exportSoundSamples.push_back(std::move(se));
                                     }
                                 } else {
@@ -11044,6 +11046,8 @@ void FrameTick(float dt)
                                         se.sampleRate = smp.sampleRate;
                                         se.loop = (int)se.data.size() <= 64;
                                     }
+                                    se.decayPct = smp.decayPct;
+                                    se.decayMinMs = smp.decayMinMs;
                                     exportSoundSamples.push_back(std::move(se));
                                 }
                             }

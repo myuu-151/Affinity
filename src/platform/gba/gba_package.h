@@ -475,6 +475,8 @@ struct GBASoundSampleExport {
     bool loop = true;
     int loopStart = 0; // in samples (0 = loop from start)
     int loopEnd = 0;   // in samples (0 = loop to end)
+    int decayPct = 0;  // volume decay over note duration (0-100)
+    int decayMinMs = 500; // minimum note length for decay (ms)
 };
 
 // Sound export: a note event in a sequence

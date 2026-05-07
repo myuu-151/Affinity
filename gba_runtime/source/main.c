@@ -111,6 +111,8 @@ typedef struct {
     int gainShift;     // volume shift: 7 = normal, 6 = loud
     int releaseRem;    // samples left in release fade (0 = not releasing)
     int releaseLen;    // total release length
+    int volFade;       // current volume in 8.8 fixed point (decays per frame)
+    int volDec;        // volume decrement per frame in 8.8 fixed point
 } SndVoice;
 
 EWRAM_DATA static SndVoice snd_voices[SND_MAX_VOICES];
@@ -199,10 +201,12 @@ IWRAM_CODE static void afn_sound_mix(void) {
         const s8* wdata = vc->data;
         int pos = vc->pos;
         int inc = vc->inc;
-        // Compute release-adjusted volume once per frame (no per-sample division)
-        int vol = vc->vol;
+        // Compute volume: apply decay and release (per-frame, no per-sample division)
+        int vol = vc->volFade >> 8; // 8.8 -> integer
+        if (vol > vc->vol) vol = vc->vol;
+        if (vol < 0) vol = 0;
         if (vc->releaseRem > 0 && vc->releaseLen > 0)
-            vol = (vol * vc->releaseRem) >> 12; // releaseLen is always 4096
+            vol = (vol * vc->releaseRem) >> 12;
         int loopLen = vc->loopLen;
         int loopStart = vc->loopStart;
         int isLoop = vc->loop;
@@ -246,7 +250,8 @@ IWRAM_CODE static void afn_sound_mix(void) {
                 }
             }
         }
-        // Decrement release per frame
+        // Decrement decay and release per frame
+        if (vc->volDec > 0) vc->volFade -= vc->volDec;
         if (vc->releaseRem > 0) {
             vc->releaseRem -= n;
             if (vc->releaseRem <= 0) vc->active = 0;
@@ -257,12 +262,21 @@ IWRAM_CODE static void afn_sound_mix(void) {
 // Trigger a looping sample voice with duration in ticks
 static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     if (smpIdx < 0 || smpIdx >= AFN_SOUND_SAMPLE_COUNT) return;
-    // Find free voice (or steal voice 0)
+    // Find free voice, or steal the one closest to finishing
     int vi = -1;
     for (int i = 0; i < SND_MAX_VOICES; i++) {
         if (!snd_voices[i].active) { vi = i; break; }
     }
-    if (vi < 0) vi = 0;
+    if (vi < 0) {
+        // Steal voice with least remaining (or in release)
+        int minRem = 0x7FFFFFFF;
+        vi = 0;
+        for (int i = 0; i < SND_MAX_VOICES; i++) {
+            int r = snd_voices[i].remaining;
+            if (r < 0) r = snd_voices[i].releaseRem; // releasing = almost done
+            if (r < minRem) { minRem = r; vi = i; }
+        }
+    }
     SndVoice* vc = &snd_voices[vi];
     vc->data = afn_pcm_ptrs[smpIdx];
     vc->length = afn_pcm_lens[smpIdx];
@@ -317,7 +331,22 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     }
     // Release: ~250ms fade after note-off for looped samples
     vc->releaseRem = 0;
-    vc->releaseLen = vc->loop ? 4096 : 0; // power of 2 for shift-based fade
+    vc->releaseLen = vc->loop ? 4096 : 0;
+    // Decay: precompute per-frame volume decrement (8.8 fixed point)
+    {
+        int dp = afn_pcm_decay[smpIdx];
+        int minDur = afn_pcm_decay_min[smpIdx];
+        vc->volFade = vel << 8; // initial volume in 8.8
+        if (dp > 0 && durSamples > minDur) {
+            // Total drop = vel * dp / 100 over durSamples
+            // Per-frame drop = (vel * dp * 256) / (100 * durSamples / SND_BUF_SIZE)
+            int totalDrop = (vel * dp * 256) / 100; // in 8.8
+            int numFrames = durSamples / SND_BUF_SIZE;
+            vc->volDec = numFrames > 0 ? totalDrop / numFrames : 0;
+        } else {
+            vc->volDec = 0;
+        }
+    }
     vc->active = 1;
 }
 

@@ -5058,6 +5058,16 @@ static bool GenerateMapData(const std::string& runtimeDir,
             int le = soundSamples[i].loopEnd > 0 ? soundSamples[i].loopEnd : (int)soundSamples[i].data.size();
             f << "    " << le << ",\n";
         }
+        f << "};\n";
+        // Decay percentage per sample (0-100)
+        f << "static const u8 afn_pcm_decay[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << soundSamples[i].decayPct << ",\n";
+        f << "};\n";
+        // Minimum note duration for decay (in output samples, pre-converted from ms)
+        f << "static const int afn_pcm_decay_min[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << (soundSamples[i].decayMinMs * 18157 / 1000) << ",\n";
         f << "};\n\n";
 
         // Note event struct type definition (must come before note arrays)
