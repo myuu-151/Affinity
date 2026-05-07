@@ -866,7 +866,9 @@ struct SoundSample {
     std::vector<int8_t> data;   // 8-bit signed PCM
     int sampleRate = 16384;     // Hz
     bool loop = false;
-    int loopStart = 0;          // sample offset
+    int loopStart = 0;          // sample offset (actual position, not percentage)
+    int loopEnd = 0;            // sample offset (0 = end of sample)
+    bool loopFromDLS = false;   // true = initialized from DLS, skip crossfade
     bool builtIn = false;       // true = generated, not imported
     bool isDrumKit = false;     // true = note selects sample from drumHits
     int category = SmpCat_Oscillator; // UI grouping category
@@ -2292,6 +2294,7 @@ struct AudioVoice {
     int midiChannel = -1;   // MIDI channel (for retrigger detection)
     int releaseRemaining = 0; // samples left in release fade (0 = not releasing)
     int releaseLen = 0;       // total release length in samples
+    bool loopFromDLS = false; // true = DLS loop points, skip crossfade
 };
 
 static HWAVEOUT sWaveOut = nullptr;
@@ -2439,8 +2442,26 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             v.data = smpData;
                             v.length = smpLen;
                             v.loop = smpLoop;
-                            v.loopStart = hasRegionLoop ? smpLoopStart : (isDrum ? 0 : smp.loopStart);
-                            v.loopEnd = hasRegionLoop ? smpLoopEnd : 0;
+                            if (smp.loop && !isDrum && smpLen > 0) {
+                                if (smp.loopFromDLS && hasRegionLoop) {
+                                    // DLS-derived positions — use exact region values, no crossfade
+                                    v.loopStart = smpLoopStart;
+                                    v.loopEnd = smpLoopEnd;
+                                    v.loopFromDLS = true;
+                                } else {
+                                    // User-set positions — scale proportionally to this region
+                                    int refLen = !smp.regions.empty() && !smp.regions[0].data.empty() ? (int)smp.regions[0].data.size() : smpLen;
+                                    if (refLen < 1) refLen = 1;
+                                    v.loopStart = smp.loopStart * smpLen / refLen;
+                                    v.loopEnd = smp.loopEnd > 0 ? smp.loopEnd * smpLen / refLen : 0;
+                                    if (v.loopEnd > smpLen) v.loopEnd = smpLen;
+                                    if (v.loopStart >= v.loopEnd && v.loopEnd > 0) v.loopStart = v.loopEnd - 1;
+                                }
+                            } else {
+                                v.loopStart = hasRegionLoop ? smpLoopStart : 0;
+                                v.loopEnd = hasRegionLoop ? smpLoopEnd : 0;
+                                v.loopFromDLS = hasRegionLoop;
+                            }
                             v.pos = 0;
                             v.startSample = sampleOff;
                             v.midiNote = n.note;
@@ -2458,8 +2479,8 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                                 float baseInc = (float)smpRate / (float)kAudioSampleRate * 65536.0f;
                                 float semitones = (float)(n.note + smp.octaveShift * 12 - noteBaseNote);
                                 v.inc = (uint32_t)(baseInc * powf(2.0f, semitones / 12.0f));
-                                if (!hasRegionLoop)
-                                    v.loop = false; // long samples without DLS loops are one-shots
+                                if (!hasRegionLoop && !smp.loop)
+                                    v.loop = false; // long samples without DLS or user loops are one-shots
                             }
                             v.volume = n.velocity * mf.channelVolume[n.channel] / 100;
                             if (v.volume > 160) v.volume = 160;
@@ -2507,9 +2528,8 @@ static void AudioMixBuffer(int8_t* buf, int len) {
             // Note duration expired — enter release phase or stop
             if (voice.remaining == 0) {
                 if (voice.releaseLen > 0 && voice.releaseRemaining == 0) {
-                    // Start release phase: stop looping, fade out
+                    // Start release phase: keep looping but fade out volume
                     voice.releaseRemaining = voice.releaseLen;
-                    voice.loop = false; // stop looping, play remainder of sample
                     voice.remaining = -1; // don't re-trigger this check
                 } else if (voice.releaseRemaining == 0) {
                     voice.active = false;
@@ -2521,13 +2541,24 @@ static void AudioMixBuffer(int8_t* buf, int len) {
 
             int sampleIdx = (int)(voice.pos >> 16);
             int loopEndPt = (voice.loopEnd > 0) ? voice.loopEnd : voice.length;
-            if (voice.loop && sampleIdx >= loopEndPt) {
+            int loopXfade = 0; // crossfade blend factor (0 = no blend)
+            float loopBlend = 0.0f;
+            if (voice.loop) {
                 int loopLen = loopEndPt - voice.loopStart;
-                if (loopLen > 0)
-                    sampleIdx = voice.loopStart + (sampleIdx - voice.loopStart) % loopLen;
-                else
-                    sampleIdx = 0;
-                voice.pos = ((uint64_t)sampleIdx << 16) | (voice.pos & 0xFFFF);
+                if (loopLen > 0) {
+                    // Crossfade zone: last 1024 samples before loop end (skip for DLS loops)
+                    int xfadeLen = voice.loopFromDLS ? 0 : 1024;
+                    if (xfadeLen > loopLen / 2) xfadeLen = loopLen / 2;
+                    int distToEnd = loopEndPt - sampleIdx;
+                    if (distToEnd <= xfadeLen && distToEnd > 0) {
+                        loopXfade = 1;
+                        loopBlend = 1.0f - (float)distToEnd / xfadeLen;
+                    }
+                    if (sampleIdx >= loopEndPt) {
+                        sampleIdx = voice.loopStart + (sampleIdx - voice.loopStart) % loopLen;
+                        voice.pos = ((uint64_t)sampleIdx << 16) | (voice.pos & 0xFFFF);
+                    }
+                }
             } else if (sampleIdx >= voice.length) {
                 voice.active = false;
                 break;
@@ -2573,7 +2604,20 @@ static void AudioMixBuffer(int8_t* buf, int len) {
             // Simple fade-out near end of note (fallback if no release envelope)
             if (voice.releaseLen == 0 && voice.remaining >= 0 && voice.remaining < 200)
                 vol = vol * voice.remaining / 200;
-            int val = voice.data[sampleIdx] * vol / 256;
+            int smpVal = voice.data[sampleIdx];
+            if (loopXfade && voice.loopStart < voice.length) {
+                // Blend with where we'd be after the wrap (loop start region)
+                int xfadeLen = 1024;
+                int loopLen = loopEndPt - voice.loopStart;
+                if (xfadeLen > loopLen / 2) xfadeLen = loopLen / 2;
+                int distToEnd = loopEndPt - sampleIdx;
+                int blendIdx = voice.loopStart + (xfadeLen - distToEnd);
+                if (blendIdx < voice.loopStart) blendIdx = voice.loopStart;
+                if (blendIdx >= loopEndPt) blendIdx = voice.loopStart;
+                int blendVal = voice.data[blendIdx];
+                smpVal = (int)((1.0f - loopBlend) * smpVal + loopBlend * blendVal);
+            }
+            int val = smpVal * vol / 256;
             mix[i] += (int16_t)val;
             voice.pos += voice.inc;
             voice.elapsed++;
@@ -2638,12 +2682,12 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
     AudioVoice& v = sVoices[vi];
 
     int shiftedNote = note + smp.octaveShift * 12;
-    if (smp.loop) {
-        // Looping waveform: play as continuous drone at requested pitch
+    if (smp.loop && (int)smp.data.size() <= 64) {
+        // Short single-cycle oscillator: play as continuous drone at requested pitch
         v.data = smp.data.data();
         v.length = (int)smp.data.size();
         v.loop = true;
-        v.loopStart = smp.loopStart;
+        v.loopStart = 0;
         v.loopEnd = 0;
         v.pos = 0;
         float baseFreq = (float)smp.sampleRate / (float)smp.data.size();
@@ -2651,6 +2695,22 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         v.inc = (uint32_t)(noteFreq / baseFreq * 65536.0f);
         v.volume = 120;
         v.remaining = kAudioSampleRate; // 1 second preview
+        v.totalDuration = v.remaining;
+    } else if (smp.loop) {
+        // Long sample with sustain loop: play at native rate, loop in sustain region
+        v.data = smp.data.data();
+        v.length = (int)smp.data.size();
+        v.loop = true;
+        v.loopStart = smp.loopStart;
+        v.loopEnd = smp.loopEnd > 0 ? smp.loopEnd : 0;
+        v.loopFromDLS = smp.loopFromDLS;
+        v.pos = 0;
+        // Play at native sample rate with pitch shift relative to base note
+        float baseInc = (float)smp.sampleRate / (float)kAudioSampleRate * 65536.0f;
+        float semitones = (float)(shiftedNote - smp.baseNote);
+        v.inc = (uint32_t)(baseInc * powf(2.0f, semitones / 12.0f));
+        v.volume = 120;
+        v.remaining = kAudioSampleRate * 3; // 3 second preview to hear the loop
         v.totalDuration = v.remaining;
         v.elapsed = 0;
         v.bankIdx = bankIdx;
@@ -4317,6 +4377,7 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "impRate=%d\n", s.sampleRate);
             fprintf(f, "impLoop=%d\n", s.loop ? 1 : 0);
             fprintf(f, "impLoopStart=%d\n", s.loopStart);
+            if (s.loopEnd > 0) fprintf(f, "impLoopEnd=%d\n", s.loopEnd);
             fprintf(f, "impIdx=%d\n", i);
             fprintf(f, "impAmpDb=%.2f\n", s.ampGainDb);
             if (s.octaveShift != 0) fprintf(f, "impOctave=%d\n", s.octaveShift);
@@ -5815,6 +5876,7 @@ static bool LoadProject(const std::string& path)
                 if (sscanf(line, "impRate=%d", &ival) == 1) curImp->sampleRate = ival;
                 else if (sscanf(line, "impLoop=%d", &ival) == 1) curImp->loop = (ival != 0);
                 else if (sscanf(line, "impLoopStart=%d", &ival) == 1) curImp->loopStart = ival;
+                else if (sscanf(line, "impLoopEnd=%d", &ival) == 1) curImp->loopEnd = ival;
                 else if (sscanf(line, "impAmpDb=%f", &fval) == 1) curImp->ampGainDb = fval;
                 else if (sscanf(line, "impOctave=%d", &ival) == 1) curImp->octaveShift = ival;
                 else if (sscanf(line, "impRelease=%d", &ival) == 1) curImp->releaseMs = ival;
@@ -11027,9 +11089,18 @@ void FrameTick(float dt)
                                         se.name = std::string(smp.name) + "_" + std::to_string(best->baseNote);
                                         se.data = best->data;
                                         se.sampleRate = best->sampleRate;
-                                        se.loop = best->hasLoop;
-                                        se.loopStart = best->loopStart;
-                                        se.loopEnd = best->hasLoop ? best->loopEnd : 0;
+                                        if (smp.loop) {
+                                            // User override sustain loop — scale from reference to this region
+                                            int dl = (int)best->data.size();
+                                            int refLen = !smp.regions.empty() && !smp.regions[0].data.empty() ? (int)smp.regions[0].data.size() : dl;
+                                            se.loop = true;
+                                            se.loopStart = smp.loopFromDLS ? smp.loopStart : (refLen > 0 ? smp.loopStart * dl / refLen : 0);
+                                            se.loopEnd = smp.loopFromDLS ? smp.loopEnd : (refLen > 0 && smp.loopEnd > 0 ? smp.loopEnd * dl / refLen : 0);
+                                        } else {
+                                            se.loop = best->hasLoop;
+                                            se.loopStart = best->loopStart;
+                                            se.loopEnd = best->hasLoop ? best->loopEnd : 0;
+                                        }
                                         se.decayPct = smp.decayPct;
                                         se.decayMinMs = smp.decayMinMs;
                                         exportSoundSamples.push_back(std::move(se));
@@ -11047,7 +11118,12 @@ void FrameTick(float dt)
                                         se.loop = true;
                                     } else {
                                         se.sampleRate = smp.sampleRate;
-                                        se.loop = (int)se.data.size() <= 64;
+                                        se.loop = smp.loop || (int)se.data.size() <= 64;
+                                    }
+                                    if (smp.loop) {
+                                        // Exact sample positions
+                                        se.loopStart = smp.loopStart;
+                                        se.loopEnd = smp.loopEnd > 0 ? smp.loopEnd : 0;
                                     }
                                     se.decayPct = smp.decayPct;
                                     se.decayMinMs = smp.decayMinMs;
@@ -18656,6 +18732,59 @@ void FrameTick(float dt)
                 }
             }
 
+            // Draw native DLS loop points (always visible for GM banks with regions)
+            if (!s.loop && !s.regions.empty()) {
+                for (auto& r : s.regions) {
+                    if (r.hasLoop && !r.data.empty()) {
+                        int rn = (int)r.data.size();
+                        float dlsStartX = wp.x + (float)r.loopStart / rn * availW;
+                        float dlsEndX = wp.x + (float)r.loopEnd / rn * availW;
+                        dl->AddLine(ImVec2(dlsStartX, wp.y), ImVec2(dlsStartX, wp.y + waveH), 0x8800FF88, 1.0f);
+                        dl->AddLine(ImVec2(dlsEndX, wp.y), ImVec2(dlsEndX, wp.y + waveH), 0x884466FF, 1.0f);
+                        dl->AddText(ImVec2(dlsStartX + 2, wp.y + 1), 0x8800FF88, "DLS");
+                        break; // show first region only
+                    }
+                }
+            }
+
+            // Draw sustain loop region overlay (user override)
+            {
+                int refLen = !s.data.empty() ? (int)s.data.size()
+                           : (!s.regions.empty() && !s.regions[0].data.empty() ? (int)s.regions[0].data.size() : 0);
+            if (s.loop && refLen > 0) {
+                int n = refLen;
+                float lsX = wp.x + (float)s.loopStart / n * availW;
+                float leX = wp.x + (float)(s.loopEnd > 0 ? s.loopEnd : n) / n * availW;
+                // Dim regions outside loop
+                dl->AddRectFilled(ImVec2(wp.x, wp.y), ImVec2(lsX, wp.y + waveH), 0x60000000);
+                dl->AddRectFilled(ImVec2(leX, wp.y), ImVec2(wp.x + availW, wp.y + waveH), 0x60000000);
+                // Loop region tint
+                dl->AddRectFilled(ImVec2(lsX, wp.y), ImVec2(leX, wp.y + waveH), 0x1800FF88);
+                // Loop start line (green)
+                dl->AddLine(ImVec2(lsX, wp.y), ImVec2(lsX, wp.y + waveH), 0xFF00FF88, 2.0f);
+                // Loop end line (red)
+                dl->AddLine(ImVec2(leX, wp.y), ImVec2(leX, wp.y + waveH), 0xFF4466FF, 2.0f);
+                // Labels
+                dl->AddText(ImVec2(lsX + 2, wp.y + 1), 0xFF00FF88, "S");
+                dl->AddText(ImVec2(leX - 10, wp.y + 1), 0xFF4466FF, "E");
+            }
+            }
+
+            // Draw playback position bar
+            if (!s.data.empty()) {
+                int n = (int)s.data.size();
+                for (int vi = 0; vi < kMaxVoices; vi++) {
+                    if (sVoices[vi].active && sVoices[vi].bankIdx == sSelectedSample) {
+                        int playPos = (int)(sVoices[vi].pos >> 16);
+                        if (playPos >= 0 && playPos < n) {
+                            float px = wp.x + (float)playPos / n * availW;
+                            dl->AddLine(ImVec2(px, wp.y), ImVec2(px, wp.y + waveH), 0xFFFFFFFF, 1.5f);
+                        }
+                        break;
+                    }
+                }
+            }
+
             // Draw selection highlight
             if (!s.data.empty() && sWaveSelStart >= 0 && sWaveSelEnd >= 0) {
                 int n = (int)s.data.size();
@@ -18912,6 +19041,58 @@ void FrameTick(float dt)
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Shift pitch by octaves (-3 to +3)");
                 ImGui::PopItemWidth();
                 if (s.octaveShift != prevOct) sProjectDirty = true;
+            }
+            // Sustain loop toggle + sliders (percentage-based, applies to all regions)
+            if (!s.isDrumKit) {
+                bool prevLoop = s.loop;
+                ImGui::Checkbox("Sustain Loop", &s.loop);
+                if (s.loop && !prevLoop) {
+                    // Just enabled — initialize from DLS loop points if available
+                    s.loopFromDLS = false;
+                    if (!s.regions.empty()) {
+                        for (auto& r : s.regions) {
+                            if (r.hasLoop && r.loopStart >= 0 && r.loopEnd > r.loopStart && !r.data.empty()) {
+                                // Store EXACT DLS positions (relative to first region)
+                                s.loopStart = r.loopStart;
+                                s.loopEnd = r.loopEnd;
+                                s.loopFromDLS = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!s.loopFromDLS) {
+                        // No DLS — default to full sample
+                        int refLen = !s.regions.empty() && !s.regions[0].data.empty() ? (int)s.regions[0].data.size() : (int)s.data.size();
+                        s.loopStart = 0;
+                        s.loopEnd = refLen > 0 ? refLen : 1;
+                    }
+                    sProjectDirty = true;
+                }
+                if (s.loop != prevLoop) sProjectDirty = true;
+                if (s.loop) {
+                    // Reference length for percentage display
+                    int refLen = !s.regions.empty() && !s.regions[0].data.empty() ? (int)s.regions[0].data.size() : (int)s.data.size();
+                    if (refLen < 1) refLen = 1;
+                    ImGui::PushItemWidth(-1);
+                    int prevStart = s.loopStart;
+                    int prevEnd = s.loopEnd;
+                    // Display as percentage, edit as sample position
+                    float startPct = (float)s.loopStart / refLen * 100.0f;
+                    float endPct = (float)s.loopEnd / refLen * 100.0f;
+                    char startBuf[32], endBuf[32];
+                    snprintf(startBuf, sizeof(startBuf), "Loop Start: %.1f%%%%", startPct);
+                    snprintf(endBuf, sizeof(endBuf), "Loop End: %.1f%%%%", endPct);
+                    if (ImGui::SliderInt("##loopStart", &s.loopStart, 0, refLen - 1, startBuf)) {
+                        if (s.loopStart >= s.loopEnd) s.loopStart = s.loopEnd - 1;
+                        s.loopFromDLS = false; // user modified
+                    }
+                    if (ImGui::SliderInt("##loopEnd", &s.loopEnd, 1, refLen, endBuf)) {
+                        if (s.loopEnd <= s.loopStart) s.loopEnd = s.loopStart + 1;
+                        s.loopFromDLS = false; // user modified
+                    }
+                    ImGui::PopItemWidth();
+                    if (s.loopStart != prevStart || s.loopEnd != prevEnd) sProjectDirty = true;
+                }
             }
             // Release fade-out slider
             {
