@@ -218,30 +218,10 @@ IWRAM_CODE static void afn_sound_mix(void) {
             vol = vol * vc->releaseRem / vc->releaseLen; // once per frame, not per sample
         int gs = vc->gainShift;
         int done = 0;
-        // Attack ramp: mix first attackRem samples with ramping volume
-        int attackStart = 0;
-        if (vc->attackRem > 0) {
-            int ar = vc->attackRem;
-            int rampN = ar < n ? ar : n;
-            int lenFixed = vc->length << 8;
-            for (int i = 0; i < rampN; i++) {
-                int av = vol * (64 - ar + i) >> 6;
-                mix_acc[i] += ((int)wdata[pos >> 8] * av) >> gs;
-                pos += inc;
-                if (vc->loop && pos >= vc->loopLen) {
-                    int span = vc->loopLen - vc->loopStart;
-                    while (pos >= vc->loopLen && span > 0) pos -= span;
-                    if (pos < vc->loopStart) pos = vc->loopStart;
-                } else if (!vc->loop && pos >= lenFixed) { done = 1; break; }
-            }
-            vc->attackRem -= rampN;
-            attackStart = rampN;
-        }
-        if (!done && attackStart < n) {
         if (vc->loop) {
             int loopLen = vc->loopLen;
             int loopSpan = loopLen - vc->loopStart;
-            int i = attackStart;
+            int i = 0;
             while (i < n) {
                 int samplesUntilWrap = (loopLen - pos + inc - 1) / inc;
                 int chunk = n - i;
@@ -252,20 +232,18 @@ IWRAM_CODE static void afn_sound_mix(void) {
                     mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
                     pos += inc;
                 }
-                while (pos >= loopLen) {
+                if (pos >= loopLen) {
                     pos -= loopSpan;
-                    if (loopSpan <= 0) { pos = vc->loopStart; break; }
+                    if (pos < vc->loopStart) pos = vc->loopStart;
                 }
-                if (pos < vc->loopStart) pos = vc->loopStart;
             }
         } else {
             int lenFixed = vc->length << 8;
-            for (int i = attackStart; i < n; i++) {
+            for (int i = 0; i < n; i++) {
                 mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
                 pos += inc;
                 if (pos >= lenFixed) { done = 1; break; }
             }
-        }
         }
         vc->pos = pos;
         if (done) { vc->active = 0; continue; }
