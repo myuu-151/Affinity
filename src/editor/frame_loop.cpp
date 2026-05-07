@@ -11103,6 +11103,7 @@ void FrameTick(float dt)
                                         }
                                         se.decayPct = smp.decayPct;
                                         se.decayMinMs = smp.decayMinMs;
+                                        se.releaseMs = smp.releaseMs;
                                         exportSoundSamples.push_back(std::move(se));
                                     }
                                 } else {
@@ -11127,6 +11128,7 @@ void FrameTick(float dt)
                                     }
                                     se.decayPct = smp.decayPct;
                                     se.decayMinMs = smp.decayMinMs;
+                                    se.releaseMs = smp.releaseMs;
                                     exportSoundSamples.push_back(std::move(se));
                                 }
                             }

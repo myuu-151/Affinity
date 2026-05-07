@@ -113,6 +113,7 @@ typedef struct {
     int volFade;       // current volume in 8.8 fixed point (decays per frame)
     int volDec;        // volume decrement per frame in 8.8 fixed point
     int releaseRem;    // samples left in release (0 = not releasing)
+    int releaseLen;    // total release length in output samples
 } SndVoice;
 
 EWRAM_DATA static SndVoice snd_voices[SND_MAX_VOICES];
@@ -214,8 +215,8 @@ IWRAM_CODE static void afn_sound_mix(void) {
         if (vol < 0) vol = 0;
         if (vc->remaining > 0 && vc->remaining <= 256)
             vol = (vol * vc->remaining) >> 8;
-        if (vc->remaining < 0 && vc->releaseRem > 0)
-            vol = (vol * vc->releaseRem) >> 13; // >>13 because max is 8192
+        if (vc->remaining < 0 && vc->releaseRem > 0 && vc->releaseLen > 0)
+            vol = vol * vc->releaseRem / vc->releaseLen; // once per frame, not per sample
         int gs = vc->gainShift;
         int done = 0;
         if (vc->loop) {
@@ -255,7 +256,7 @@ IWRAM_CODE static void afn_sound_mix(void) {
             vc->remaining -= n;
             if (vc->remaining <= 0) {
                 vc->remaining = -1;
-                vc->releaseRem = 8192;
+                vc->releaseRem = vc->releaseLen;
                 // Keep looping during release — fade volume instead
             }
         } else if (vc->remaining < 0) {
@@ -345,6 +346,8 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
         vc->gainShift = (g == 1) ? 6 : (g == 2) ? 9 : 7;
     }
     vc->releaseRem = 0;
+    vc->releaseLen = afn_pcm_release[smpIdx]; // per-sample release in output samples
+    if (vc->releaseLen < 304) vc->releaseLen = 304; // minimum 1 frame
     // Decay: precompute per-frame volume decrement (8.8 fixed point)
     {
         int dp = afn_pcm_decay[smpIdx];
