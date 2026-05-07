@@ -5047,6 +5047,17 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static const u8 afn_pcm_loop[" << soundSamples.size() << "] = {\n";
         for (int i = 0; i < (int)soundSamples.size(); i++)
             f << "    " << (soundSamples[i].loop ? 1 : 0) << ",\n";
+        f << "};\n";
+        // Loop start/end arrays for DLS sustain loops
+        f << "static const int afn_pcm_loop_start[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << soundSamples[i].loopStart << ",\n";
+        f << "};\n";
+        f << "static const int afn_pcm_loop_end[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++) {
+            int le = soundSamples[i].loopEnd > 0 ? soundSamples[i].loopEnd : (int)soundSamples[i].data.size();
+            f << "    " << le << ",\n";
+        }
         f << "};\n\n";
 
         // Note event struct type definition (must come before note arrays)

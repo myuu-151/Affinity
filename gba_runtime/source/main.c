@@ -103,11 +103,14 @@ typedef struct {
     int inc;           // fixed 24.8
     int vol;           // 0-127
     int active;
-    int remaining;     // samples left
-    int loopLen;       // length << 8
+    int remaining;     // samples left (-1 = in release phase)
+    int loopLen;       // loop end << 8
+    int loopStart;     // loop start << 8
     int loop;          // 1 = loop (oscillators), 0 = one-shot (drums)
     int interp;        // 0 = nearest, 1 = linear interpolation
     int gainShift;     // volume shift: 7 = normal, 6 = loud
+    int releaseRem;    // samples left in release fade (0 = not releasing)
+    int releaseLen;    // total release length
 } SndVoice;
 
 EWRAM_DATA static SndVoice snd_voices[SND_MAX_VOICES];
@@ -191,12 +194,17 @@ IWRAM_CODE static void afn_sound_mix(void) {
     for (int v = 0; v < SND_MAX_VOICES; v++) {
         SndVoice* vc = &snd_voices[v];
         if (!vc->active) continue;
-        int n = vc->remaining < SND_BUF_SIZE ? vc->remaining : SND_BUF_SIZE;
+        int n = SND_BUF_SIZE;
+        if (vc->remaining > 0 && vc->remaining < n) n = vc->remaining;
         const s8* wdata = vc->data;
         int pos = vc->pos;
         int inc = vc->inc;
+        // Compute release-adjusted volume once per frame (no per-sample division)
         int vol = vc->vol;
+        if (vc->releaseRem > 0 && vc->releaseLen > 0)
+            vol = (vol * vc->releaseRem) >> 12; // releaseLen is always 4096
         int loopLen = vc->loopLen;
+        int loopStart = vc->loopStart;
         int isLoop = vc->loop;
         int useInterp = vc->interp;
         int done = 0;
@@ -217,15 +225,32 @@ IWRAM_CODE static void afn_sound_mix(void) {
             if (m < -128) m = -128;
             buf[i] = (s8)m;
             pos += inc;
-            if (pos >= loopLen) {
-                if (isLoop) pos -= loopLen;
-                else { done = 1; break; }
+            if (isLoop && pos >= loopLen) {
+                pos -= (loopLen - loopStart); // wrap back by loop length
+                if (pos < loopStart) pos = loopStart;
+            } else if (!isLoop && pos >= (vc->length << 8)) {
+                done = 1; break;
             }
         }
         vc->pos = pos;
         if (done) { vc->active = 0; continue; }
-        vc->remaining -= n;
-        if (vc->remaining <= 0) vc->active = 0;
+        if (vc->remaining > 0) {
+            vc->remaining -= n;
+            if (vc->remaining <= 0) {
+                if (vc->releaseLen > 0) {
+                    vc->releaseRem = vc->releaseLen;
+                    vc->loop = 0;
+                    vc->remaining = -1;
+                } else {
+                    vc->active = 0;
+                }
+            }
+        }
+        // Decrement release per frame
+        if (vc->releaseRem > 0) {
+            vc->releaseRem -= n;
+            if (vc->releaseRem <= 0) vc->active = 0;
+        }
     }
 }
 
@@ -241,11 +266,14 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     SndVoice* vc = &snd_voices[vi];
     vc->data = afn_pcm_ptrs[smpIdx];
     vc->length = afn_pcm_lens[smpIdx];
-    vc->loopLen = vc->length << 8; // fixed 24.8
 #ifdef AFN_PCM_HAS_LOOP
     vc->loop = afn_pcm_loop[smpIdx];
+    vc->loopStart = afn_pcm_loop_start[smpIdx] << 8;
+    vc->loopLen = afn_pcm_loop_end[smpIdx] << 8;
 #else
     vc->loop = (vc->length <= 64) ? 1 : 0;
+    vc->loopStart = 0;
+    vc->loopLen = vc->length << 8;
 #endif
     vc->pos = 0;
     // Pitch: baseInc = (sampleRate << 8) / outputRate gives 1:1 playback
@@ -287,6 +315,9 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
         int g = (snd_seq_active >= 0) ? afn_snd_gain[snd_seq_active] : 0;
         vc->gainShift = (g == 1) ? 6 : (g == 2) ? 9 : 7;
     }
+    // Release: ~250ms fade after note-off for looped samples
+    vc->releaseRem = 0;
+    vc->releaseLen = vc->loop ? 4096 : 0; // power of 2 for shift-based fade
     vc->active = 1;
 }
 

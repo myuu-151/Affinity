@@ -958,6 +958,9 @@ struct SampleOverride {
     bool envEnabled = false;
     int octaveShift = 0;            // pitch shift in octaves
     bool hasOctave = false;         // true if octave was overridden
+    int releaseMs = -1;             // -1 = not overridden
+    int decayPct = -1;
+    int decayMinMs = -1;
 };
 
 // Sound instances — named slots referencing a MIDI + bank config for export
@@ -1984,17 +1987,26 @@ static std::vector<std::vector<int8_t>> sCleanBankData;
 static std::vector<std::vector<EnvPoint>> sCleanBankEnv;
 static std::vector<bool> sCleanBankEnvEnabled;
 static std::vector<int> sCleanBankOctave;
+static std::vector<int> sCleanBankRelease;
+static std::vector<int> sCleanBankDecay;
+static std::vector<int> sCleanBankDecayMin;
 
 static void SnapshotCleanBank() {
     sCleanBankData.resize(sSoundBank.size());
     sCleanBankEnv.resize(sSoundBank.size());
     sCleanBankEnvEnabled.resize(sSoundBank.size());
     sCleanBankOctave.resize(sSoundBank.size());
+    sCleanBankRelease.resize(sSoundBank.size());
+    sCleanBankDecay.resize(sSoundBank.size());
+    sCleanBankDecayMin.resize(sSoundBank.size());
     for (int i = 0; i < (int)sSoundBank.size(); i++) {
         sCleanBankData[i] = sSoundBank[i].data;
         sCleanBankEnv[i] = sSoundBank[i].envelope;
         sCleanBankEnvEnabled[i] = sSoundBank[i].envEnabled;
         sCleanBankOctave[i] = sSoundBank[i].octaveShift;
+        sCleanBankRelease[i] = sSoundBank[i].releaseMs;
+        sCleanBankDecay[i] = sSoundBank[i].decayPct;
+        sCleanBankDecayMin[i] = sSoundBank[i].decayMinMs;
     }
 }
 
@@ -2004,6 +2016,9 @@ static void ResetBankToClean() {
         sSoundBank[i].envelope = sCleanBankEnv[i];
         sSoundBank[i].envEnabled = sCleanBankEnvEnabled[i];
         sSoundBank[i].octaveShift = (i < (int)sCleanBankOctave.size()) ? sCleanBankOctave[i] : 0;
+        sSoundBank[i].releaseMs = (i < (int)sCleanBankRelease.size()) ? sCleanBankRelease[i] : 250;
+        sSoundBank[i].decayPct = (i < (int)sCleanBankDecay.size()) ? sCleanBankDecay[i] : 0;
+        sSoundBank[i].decayMinMs = (i < (int)sCleanBankDecayMin.size()) ? sCleanBankDecayMin[i] : 500;
     }
     // NOTE: do NOT clear sSampleOriginal — it holds the un-amplified WAV data
     // which must persist across instance switches to avoid double-amplification
@@ -2018,7 +2033,12 @@ static void SaveEditsToInstance(SoundInstance& inst) {
                           (sSoundBank[i].envEnabled != sCleanBankEnvEnabled[i]);
         int cleanOct = (i < (int)sCleanBankOctave.size()) ? sCleanBankOctave[i] : 0;
         bool octChanged = (sSoundBank[i].octaveShift != cleanOct);
-        if (dataChanged || envChanged || octChanged) {
+        int cleanRel = (i < (int)sCleanBankRelease.size()) ? sCleanBankRelease[i] : 250;
+        int cleanDec = (i < (int)sCleanBankDecay.size()) ? sCleanBankDecay[i] : 0;
+        int cleanDecMin = (i < (int)sCleanBankDecayMin.size()) ? sCleanBankDecayMin[i] : 500;
+        bool relChanged = (sSoundBank[i].releaseMs != cleanRel);
+        bool decChanged = (sSoundBank[i].decayPct != cleanDec) || (sSoundBank[i].decayMinMs != cleanDecMin);
+        if (dataChanged || envChanged || octChanged || relChanged || decChanged) {
             SampleOverride ov;
             ov.sampleIdx = i;
             if (dataChanged) ov.data = sSoundBank[i].data;
@@ -2029,6 +2049,11 @@ static void SaveEditsToInstance(SoundInstance& inst) {
             if (octChanged) {
                 ov.octaveShift = sSoundBank[i].octaveShift;
                 ov.hasOctave = true;
+            }
+            if (relChanged) ov.releaseMs = sSoundBank[i].releaseMs;
+            if (decChanged) {
+                ov.decayPct = sSoundBank[i].decayPct;
+                ov.decayMinMs = sSoundBank[i].decayMinMs;
             }
             inst.overrides.push_back(std::move(ov));
         }
@@ -2048,6 +2073,12 @@ static void LoadInstanceOverrides(const SoundInstance& inst) {
         }
         if (ov.hasOctave)
             sSoundBank[ov.sampleIdx].octaveShift = ov.octaveShift;
+        if (ov.releaseMs >= 0)
+            sSoundBank[ov.sampleIdx].releaseMs = ov.releaseMs;
+        if (ov.decayPct >= 0)
+            sSoundBank[ov.sampleIdx].decayPct = ov.decayPct;
+        if (ov.decayMinMs >= 0)
+            sSoundBank[ov.sampleIdx].decayMinMs = ov.decayMinMs;
     }
 }
 
@@ -2269,6 +2300,7 @@ static AudioVoice sVoices[kMaxVoices] = {};
 static bool sAudioOpen = false;
 
 // MIDI playback state
+static float sMidiMasterDb = 0.0f; // master volume in dB (-20 to +20)
 static bool sMidiPlaying = false;
 static int sMidiPlayIdx = -1;     // index into sMidiFiles
 static double sMidiPlayTime = 0;  // seconds elapsed
@@ -2524,7 +2556,7 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                 SoundSample& bsmp = sSoundBank[voice.bankIdx];
                 int dp = bsmp.decayPct;
                 int minDecaySamples = bsmp.decayMinMs * kAudioSampleRate / 1000;
-                if (dp > 0 && voice.totalDuration > minDecaySamples && voice.remaining > 0) {
+                if (dp > 0 && voice.totalDuration > minDecaySamples) {
                     float t = (float)voice.elapsed / voice.totalDuration;
                     if (t > 1.0f) t = 1.0f;
                     float fade = 1.0f - t * (dp / 100.0f);
@@ -2547,9 +2579,10 @@ static void AudioMixBuffer(int8_t* buf, int len) {
         }
     }
 
-    // Clamp and convert to unsigned 8-bit (waveOut expects 0-255, center=128)
+    // Apply master volume and clamp to unsigned 8-bit (waveOut expects 0-255, center=128)
+    float masterGain = powf(10.0f, sMidiMasterDb / 20.0f);
     for (int i = 0; i < len; i++) {
-        int v = mix[i];
+        int v = (int)(mix[i] * masterGain);
         if (v > 127) v = 127;
         if (v < -128) v = -128;
         buf[i] = (int8_t)(v + 128);
@@ -4286,6 +4319,9 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "impIdx=%d\n", i);
             fprintf(f, "impAmpDb=%.2f\n", s.ampGainDb);
             if (s.octaveShift != 0) fprintf(f, "impOctave=%d\n", s.octaveShift);
+            if (s.releaseMs != 250) fprintf(f, "impRelease=%d\n", s.releaseMs);
+            if (s.decayPct != 0) fprintf(f, "impDecay=%d\n", s.decayPct);
+            if (s.decayMinMs != 500) fprintf(f, "impDecayMin=%d\n", s.decayMinMs);
             fprintf(f, "impEnvEnabled=%d\n", s.envEnabled ? 1 : 0);
             if (!s.envelope.empty()) {
                 fprintf(f, "impEnvPts=%d", (int)s.envelope.size());
@@ -4338,6 +4374,9 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "ov_begin=%d\n", ov.sampleIdx);
             fprintf(f, "ovEnvEnabled=%d\n", ov.envEnabled ? 1 : 0);
             if (ov.hasOctave) fprintf(f, "ovOctave=%d\n", ov.octaveShift);
+            if (ov.releaseMs >= 0) fprintf(f, "ovRelease=%d\n", ov.releaseMs);
+            if (ov.decayPct >= 0) fprintf(f, "ovDecay=%d\n", ov.decayPct);
+            if (ov.decayMinMs >= 0) fprintf(f, "ovDecayMin=%d\n", ov.decayMinMs);
             if (!ov.envelope.empty()) {
                 fprintf(f, "ovEnvPts=%d", (int)ov.envelope.size());
                 for (auto& ep : ov.envelope)
@@ -5776,6 +5815,9 @@ static bool LoadProject(const std::string& path)
                 else if (sscanf(line, "impLoopStart=%d", &ival) == 1) curImp->loopStart = ival;
                 else if (sscanf(line, "impAmpDb=%f", &fval) == 1) curImp->ampGainDb = fval;
                 else if (sscanf(line, "impOctave=%d", &ival) == 1) curImp->octaveShift = ival;
+                else if (sscanf(line, "impRelease=%d", &ival) == 1) curImp->releaseMs = ival;
+                else if (sscanf(line, "impDecay=%d", &ival) == 1) curImp->decayPct = ival;
+                else if (sscanf(line, "impDecayMin=%d", &ival) == 1) curImp->decayMinMs = ival;
                 else if (sscanf(line, "impEnvEnabled=%d", &ival) == 1) curImp->envEnabled = (ival != 0);
                 else if (strncmp(line, "impEnvPts=", 10) == 0) {
                     curImp->envelope.clear();
@@ -5837,6 +5879,9 @@ static bool LoadProject(const std::string& path)
             else if (curOv) {
                 if (sscanf(line, "ovEnvEnabled=%d", &ival) == 1) curOv->envEnabled = (ival != 0);
                 else if (sscanf(line, "ovOctave=%d", &ival) == 1) { curOv->octaveShift = ival; curOv->hasOctave = true; }
+                else if (sscanf(line, "ovRelease=%d", &ival) == 1) curOv->releaseMs = ival;
+                else if (sscanf(line, "ovDecay=%d", &ival) == 1) curOv->decayPct = ival;
+                else if (sscanf(line, "ovDecayMin=%d", &ival) == 1) curOv->decayMinMs = ival;
                 else if (strncmp(line, "ovEnvPts=", 9) == 0) {
                     curOv->envelope.clear();
                     int numPts = 0;
@@ -10979,7 +11024,9 @@ void FrameTick(float dt)
                                         se.name = std::string(smp.name) + "_" + std::to_string(best->baseNote);
                                         se.data = best->data;
                                         se.sampleRate = best->sampleRate;
-                                        se.loop = false;
+                                        se.loop = best->hasLoop;
+                                        se.loopStart = best->loopStart;
+                                        se.loopEnd = best->hasLoop ? best->loopEnd : 0;
                                         exportSoundSamples.push_back(std::move(se));
                                     }
                                 } else {
@@ -19072,6 +19119,10 @@ void FrameTick(float dt)
             ImGui::Text("Tracks: %d  |  Ticks/Beat: %d", (int)mf.tracks.size(), mf.ticksPerBeat);
             ImGui::PushItemWidth(Scaled(200));
             ImGui::SliderInt("BPM", &mf.tempo, 20, 400);
+            ImGui::PopItemWidth();
+
+            ImGui::PushItemWidth(-1);
+            ImGui::SliderFloat("##masterDb", &sMidiMasterDb, -20.0f, 20.0f, "Master: %.1f dB");
             ImGui::PopItemWidth();
 
             ImGui::Spacing();
