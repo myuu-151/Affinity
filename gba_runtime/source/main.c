@@ -187,10 +187,14 @@ IWRAM_CODE static void afn_sound_mix(void) {
     REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
     snd_cur_buf = play;
 
-    // Mix into 16-bit accumulation buffer, clamp to s8 once at end
+    // Mix into IWRAM 16-bit accumulation buffer, clamp to s8 once at end
     s8* buf = snd_buf[snd_cur_buf ^ 1];
     static s16 mix_acc[SND_BUF_SIZE];
-    for (int i = 0; i < SND_BUF_SIZE; i++) mix_acc[i] = 0;
+    // Clear accumulator (32-bit writes, 2 samples at a time)
+    {
+        u32* a32 = (u32*)mix_acc;
+        for (int i = 0; i < SND_BUF_SIZE / 2; i++) a32[i] = 0;
+    }
 
     for (int v = 0; v < SND_MAX_VOICES; v++) {
         SndVoice* vc = &snd_voices[v];
@@ -208,20 +212,37 @@ IWRAM_CODE static void afn_sound_mix(void) {
             vol = (vol * vc->remaining) >> 8;
         if (vc->remaining < 0 && vc->releaseRem > 0)
             vol = (vol * vc->releaseRem) >> 12;
-        int loopLen = vc->loopLen;
-        int loopStart = vc->loopStart;
-        int isLoop = vc->loop;
         int gs = vc->gainShift;
         int done = 0;
-        // Inner loop: no interpolation, no per-sample clamp
-        for (int i = 0; i < n; i++) {
-            mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
-            pos += inc;
-            if (isLoop && pos >= loopLen) {
-                pos -= (loopLen - loopStart);
-                if (pos < loopStart) pos = loopStart;
-            } else if (!isLoop && pos >= (vc->length << 8)) {
-                done = 1; break;
+        if (vc->loop) {
+            // Looping voice: process in chunks up to loop boundary (no branch in hot path)
+            int loopLen = vc->loopLen;
+            int loopSpan = loopLen - vc->loopStart;
+            int i = 0;
+            while (i < n) {
+                // How many samples until we hit loop end?
+                int samplesUntilWrap = (loopLen - pos + inc - 1) / inc;
+                int chunk = n - i;
+                if (samplesUntilWrap > 0 && samplesUntilWrap < chunk)
+                    chunk = samplesUntilWrap;
+                int end = i + chunk;
+                // Tight inner loop — no branches
+                for (; i < end; i++) {
+                    mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
+                    pos += inc;
+                }
+                if (pos >= loopLen) {
+                    pos -= loopSpan;
+                    if (pos < vc->loopStart) pos = vc->loopStart;
+                }
+            }
+        } else {
+            // Non-looping: straight mix until end of sample
+            int lenFixed = vc->length << 8;
+            for (int i = 0; i < n; i++) {
+                mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
+                pos += inc;
+                if (pos >= lenFixed) { done = 1; break; }
             }
         }
         vc->pos = pos;
@@ -240,7 +261,7 @@ IWRAM_CODE static void afn_sound_mix(void) {
         if (vc->volDec > 0) vc->volFade -= vc->volDec;
     }
 
-    // Clamp and write to output buffer
+    // Clamp and write to output buffer (4 samples at a time)
     for (int i = 0; i < SND_BUF_SIZE; i++) {
         int m = mix_acc[i];
         if (m > 127) m = 127;
