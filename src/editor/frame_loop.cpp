@@ -878,6 +878,7 @@ struct SoundSample {
     int octaveShift = 0;           // pitch shift in octaves (-3 to +3)
     int baseNote = 60;             // MIDI note the sample was recorded at (for pitch calc)
     int releaseMs = 250;           // release fade-out time in ms (0 = no fade)
+    int decayPct = 0;              // volume decay over note duration (0-100%, 0 = no decay)
     std::vector<SampleRegion> regions; // multi-sample regions (GM instruments)
 };
 
@@ -2510,6 +2511,16 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                     }
                     if (t < smp.envelope.front().time) envVal = smp.envelope.front().level;
                     vol = (int)(vol * envVal);
+                }
+            }
+            // Decay: fade volume during note duration (simulates natural instrument decay)
+            if (voice.bankIdx >= 0 && voice.bankIdx < (int)sSoundBank.size()) {
+                int dp = sSoundBank[voice.bankIdx].decayPct;
+                if (dp > 0 && voice.totalDuration > 0 && voice.remaining > 0) {
+                    float t = (float)voice.elapsed / voice.totalDuration;
+                    if (t > 1.0f) t = 1.0f;
+                    float fade = 1.0f - t * (dp / 100.0f); // 1.0 → (1 - decay%)
+                    vol = (int)(vol * fade);
                 }
             }
             // Release phase fade-out (DLS sustain-loop instruments)
@@ -18847,6 +18858,15 @@ void FrameTick(float dt)
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fade-out time after note-off (0 = instant cut)");
                 ImGui::PopItemWidth();
                 if (s.releaseMs != prevRel) sProjectDirty = true;
+            }
+            // Decay slider — volume fades during note
+            {
+                ImGui::PushItemWidth(-1);
+                int prevDec = s.decayPct;
+                ImGui::SliderInt("##decPct", &s.decayPct, 0, 100, "Decay: %d%%");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Volume decay over note duration (0%% = sustain, 100%% = full fade)");
+                ImGui::PopItemWidth();
+                if (s.decayPct != prevDec) sProjectDirty = true;
             }
         }
         sampleDetailsDone:
