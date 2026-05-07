@@ -114,6 +114,7 @@ typedef struct {
     int volDec;        // volume decrement per frame in 8.8 fixed point
     int releaseRem;    // samples left in release (0 = not releasing)
     int releaseLen;    // total release length in output samples
+    int attackRem;     // samples left in attack ramp (0 = done)
 } SndVoice;
 
 EWRAM_DATA static SndVoice snd_voices[SND_MAX_VOICES];
@@ -217,19 +218,35 @@ IWRAM_CODE static void afn_sound_mix(void) {
             vol = vol * vc->releaseRem / vc->releaseLen; // once per frame, not per sample
         int gs = vc->gainShift;
         int done = 0;
+        // Attack ramp: mix first attackRem samples with ramping volume
+        int attackStart = 0;
+        if (vc->attackRem > 0) {
+            int ar = vc->attackRem;
+            int rampN = ar < n ? ar : n;
+            int lenFixed = vc->length << 8;
+            for (int i = 0; i < rampN; i++) {
+                int av = vol * (64 - ar + i) >> 6;
+                mix_acc[i] += ((int)wdata[pos >> 8] * av) >> gs;
+                pos += inc;
+                if (vc->loop && pos >= vc->loopLen) {
+                    pos -= (vc->loopLen - vc->loopStart);
+                    if (pos < vc->loopStart) pos = vc->loopStart;
+                } else if (!vc->loop && pos >= lenFixed) { done = 1; break; }
+            }
+            vc->attackRem -= rampN;
+            attackStart = rampN;
+        }
+        if (!done && attackStart < n) {
         if (vc->loop) {
-            // Looping voice: process in chunks up to loop boundary (no branch in hot path)
             int loopLen = vc->loopLen;
             int loopSpan = loopLen - vc->loopStart;
-            int i = 0;
+            int i = attackStart;
             while (i < n) {
-                // How many samples until we hit loop end?
                 int samplesUntilWrap = (loopLen - pos + inc - 1) / inc;
                 int chunk = n - i;
                 if (samplesUntilWrap > 0 && samplesUntilWrap < chunk)
                     chunk = samplesUntilWrap;
                 int end = i + chunk;
-                // Tight inner loop — no branches
                 for (; i < end; i++) {
                     mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
                     pos += inc;
@@ -240,13 +257,13 @@ IWRAM_CODE static void afn_sound_mix(void) {
                 }
             }
         } else {
-            // Non-looping: straight mix until end of sample
             int lenFixed = vc->length << 8;
-            for (int i = 0; i < n; i++) {
+            for (int i = attackStart; i < n; i++) {
                 mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
                 pos += inc;
                 if (pos >= lenFixed) { done = 1; break; }
             }
+        }
         }
         vc->pos = pos;
         if (done) { vc->active = 0; continue; }
@@ -361,6 +378,7 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
             vc->volDec = 0;
         }
     }
+    vc->attackRem = 64; // fade in over 64 samples to avoid click
     vc->active = 1;
 }
 
