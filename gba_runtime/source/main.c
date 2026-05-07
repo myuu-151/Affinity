@@ -256,7 +256,7 @@ IWRAM_CODE static void afn_sound_mix(void) {
             if (vc->remaining <= 0) {
                 vc->remaining = -1;
                 vc->releaseRem = 8192;
-                vc->loop = 0;
+                // Keep looping during release — fade volume instead
             }
         } else if (vc->remaining < 0) {
             vc->releaseRem -= n;
