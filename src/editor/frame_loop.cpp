@@ -866,6 +866,7 @@ struct SoundSample {
     bool envEnabled = false;
     float ampGainDb = 0.0f;        // amplify gain in dB (imported samples only)
     int octaveShift = 0;           // pitch shift in octaves (-3 to +3)
+    int baseNote = 60;             // MIDI note the sample was recorded at (for pitch calc)
 };
 
 struct MidiNote {
@@ -1262,9 +1263,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         int sampleRate = 22050;
         int bitsPerSample = 16;
         int channels = 1;
-        bool hasLoop = false;
-        int loopStart = 0;   // in source samples
-        int loopLength = 0;  // in source samples
+        int unityNote = 60;  // MIDI note the sample was recorded at
     };
     std::vector<WaveInfo> waves;
     const uint8_t* wvpl = nullptr;
@@ -1302,13 +1301,8 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                     } else if (wckId == 0x61746164) {
                         wi.data = wp + 8;
                         wi.length = wckSize;
-                    } else if (wckId == 0x706D7377 && wckSize >= 20) { // 'wsmp'
-                        uint32_t cLoops = rd32(wp + 8 + 16);
-                        if (cLoops > 0 && wckSize >= 36) {
-                            wi.hasLoop = true;
-                            wi.loopStart = (int)rd32(wp + 8 + 24);
-                            wi.loopLength = (int)rd32(wp + 8 + 28);
-                        }
+                    } else if (wckId == 0x706D7377 && wckSize >= 8) { // 'wsmp'
+                        wi.unityNote = rd16(wp + 8 + 4);
                     }
                     wp += 8 + ((wckSize + 1) & ~1);
                 }
@@ -1381,7 +1375,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         const uint8_t* rp = ins.lrgn;
         const uint8_t* rEnd = ins.lrgn + ins.lrgnSize;
         int bestWave = -1;
-        bool rgnHasLoop = false; int rgnLoopStart = 0, rgnLoopLen = 0;
+        int rgnUnityNote = -1; // region-level unity note override (-1 = use wave-level)
         while (rp + 12 <= rEnd) {
             uint32_t ckId = rd32(rp);
             uint32_t ckSize = rd32(rp + 4);
@@ -1389,7 +1383,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                 uint32_t lt = rd32(rp + 8);
                 if (lt == 0x206E6772 || lt == 0x326E6772) { // 'rgn ' or 'rgn2'
                     int keyLo = 0, keyHi = 127, waveIdx = -1;
-                    bool thisLoop = false; int thisLoopStart = 0, thisLoopLen = 0;
+                    int thisUnity = -1;
                     const uint8_t* rrp = rp + 12;
                     const uint8_t* rrEnd = rp + 8 + ckSize;
                     while (rrp + 8 <= rrEnd) {
@@ -1400,19 +1394,14 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                             keyHi = rd16(rrp + 10);
                         } else if (rckId == 0x6B6E6C77 && rckSize >= 12) {
                             waveIdx = (int)rd32(rrp + 16);
-                        } else if (rckId == 0x706D7377 && rckSize >= 20) { // 'wsmp'
-                            uint32_t cLoops = rd32(rrp + 8 + 16);
-                            if (cLoops > 0 && rckSize >= 36) {
-                                thisLoop = true;
-                                thisLoopStart = (int)rd32(rrp + 8 + 24);
-                                thisLoopLen = (int)rd32(rrp + 8 + 28);
-                            }
+                        } else if (rckId == 0x706D7377 && rckSize >= 8) { // 'wsmp'
+                            thisUnity = rd16(rrp + 8 + 4);
                         }
                         rrp += 8 + ((rckSize + 1) & ~1);
                     }
                     if (waveIdx >= 0 && keyLo <= 60 && keyHi >= 60) {
                         bestWave = waveIdx;
-                        rgnHasLoop = thisLoop; rgnLoopStart = thisLoopStart; rgnLoopLen = thisLoopLen;
+                        rgnUnityNote = thisUnity;
                     }
                 }
             }
@@ -1474,6 +1463,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         }
         s.sampleRate = 16384;
         s.loop = false;
+        s.baseNote = (rgnUnityNote >= 0) ? rgnUnityNote : wi.unityNote;
         s.builtIn = true;
         s.category = SmpCat_GM;
         bank.push_back(std::move(s));
@@ -2332,9 +2322,9 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                                 float noteFreq = NoteToFreq(n.note + smp.octaveShift * 12);
                                 v.inc = (uint32_t)(noteFreq / baseFreq * 65536.0f);
                             } else {
-                                // Long sample (WAV): play at native rate, pitch-shift relative to note 60
+                                // Long sample (WAV): play at native rate, pitch-shift relative to base note
                                 float baseInc = (float)smpRate / (float)kAudioSampleRate * 65536.0f;
-                                float semitones = (float)(n.note + smp.octaveShift * 12 - 60);
+                                float semitones = (float)(n.note + smp.octaveShift * 12 - smp.baseNote);
                                 v.inc = (uint32_t)(baseInc * powf(2.0f, semitones / 12.0f));
                                 v.loop = false; // long samples are one-shots
                             }
@@ -2548,7 +2538,8 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         v.loop = false;
         v.loopStart = 0;
         v.pos = 0;
-        v.inc = (uint32_t)((float)smp.sampleRate / (float)kAudioSampleRate * 65536.0f * powf(2.0f, (float)smp.octaveShift));
+        float previewSemi = (float)(shiftedNote - smp.baseNote);
+        v.inc = (uint32_t)((float)smp.sampleRate / (float)kAudioSampleRate * 65536.0f * powf(2.0f, previewSemi / 12.0f));
         v.volume = 160;
         // remaining in output samples = source samples / inc rate
         v.remaining = (int)((float)smp.data.size() / ((float)smp.sampleRate / kAudioSampleRate));
@@ -10849,7 +10840,11 @@ void FrameTick(float dt)
                                 GBASoundNoteExport ne;
                                 ne.tick = n.tick;
                                 ne.channel = n.channel;
-                                ne.note = n.note + sSoundBank[bankIdx].octaveShift * 12;
+                                // Bake octave shift and baseNote into exported note
+                                // GBA runtime uses (note - 60) for pitch, so remap:
+                                // exported = original + octaveShift*12 - baseNote + 60
+                                ne.note = n.note + sSoundBank[bankIdx].octaveShift * 12
+                                        - sSoundBank[bankIdx].baseNote + 60;
                                 ne.velocity = n.velocity;
                                 ne.duration = n.duration;
                                 // Look up correct sample index
