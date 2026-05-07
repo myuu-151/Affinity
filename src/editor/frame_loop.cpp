@@ -2526,130 +2526,116 @@ static void AudioMixBuffer(int8_t* buf, int len) {
         AudioVoice& voice = sVoices[v];
         if (!voice.active || !voice.data) continue;
         int iStart = voice.startSample;
-        voice.startSample = 0; // only delay on the first buffer
+        voice.startSample = 0;
+
+        // --- Compute volume ONCE per buffer (not per sample) ---
+        int vol = voice.volume;
+        // Natural decay for hi-hats and cymbals (channel 9)
+        if (voice.midiChannel == 9) {
+            int mn = voice.midiNote;
+            bool isHiHat = (mn == 42 || mn == 44 || mn == 46);
+            bool isCymbal = (mn == 49 || mn == 51 || mn == 52 || mn == 53 || mn == 55 || mn == 57 || mn == 59);
+            if (isHiHat || isCymbal) {
+                int decaySamples = isHiHat ? (kAudioSampleRate / 5) : (kAudioSampleRate * 4 / 5);
+                float t = (float)voice.elapsed / decaySamples;
+                if (t > 1.0f) t = 1.0f;
+                float fade = 1.0f - t;
+                vol = (int)(vol * fade * fade);
+            }
+        }
+        if (voice.bankIdx >= 0 && voice.bankIdx < (int)sSoundBank.size()) {
+            SoundSample& smp = sSoundBank[voice.bankIdx];
+            if (smp.envEnabled && !smp.envelope.empty() && voice.totalDuration > 0) {
+                float t = (float)voice.elapsed / voice.totalDuration;
+                if (t > 1.0f) t = 1.0f;
+                float envVal = smp.envelope.back().level;
+                for (int ei = 0; ei < (int)smp.envelope.size() - 1; ei++) {
+                    if (t >= smp.envelope[ei].time && t <= smp.envelope[ei+1].time) {
+                        float seg = (t - smp.envelope[ei].time) / (smp.envelope[ei+1].time - smp.envelope[ei].time);
+                        envVal = smp.envelope[ei].level + seg * (smp.envelope[ei+1].level - smp.envelope[ei].level);
+                        break;
+                    }
+                }
+                if (t < smp.envelope.front().time) envVal = smp.envelope.front().level;
+                vol = (int)(vol * envVal);
+            }
+            // Decay
+            int dp = smp.decayPct;
+            int minDecaySamples = smp.decayMinMs * kAudioSampleRate / 1000;
+            if (dp > 0 && voice.totalDuration > minDecaySamples) {
+                float t = (float)voice.elapsed / voice.totalDuration;
+                if (t > 1.0f) t = 1.0f;
+                vol = (int)(vol * (1.0f - t * (dp / 100.0f)));
+            }
+        }
+        // Release phase fade-out
+        if (voice.releaseRemaining > 0 && voice.releaseLen > 0)
+            vol = vol * voice.releaseRemaining / voice.releaseLen;
+        else if (voice.releaseLen > 0 && voice.releaseRemaining == 0 && voice.remaining < 0) {
+            voice.active = false; continue;
+        }
+        // Simple fade-out near end of note
+        if (voice.releaseLen == 0 && voice.remaining >= 0 && voice.remaining < 200)
+            vol = vol * voice.remaining / 200;
+        if (vol <= 0) { voice.elapsed += len - iStart; voice.remaining -= len - iStart; continue; }
+
+        // --- Precompute loop constants ---
+        int loopEndPt = (voice.loopEnd > 0) ? voice.loopEnd : voice.length;
+        int loopLen = voice.loop ? (loopEndPt - voice.loopStart) : 0;
+        int xfadeLen = (voice.loop && !voice.loopFromDLS && loopLen > 0) ? 1024 : 0;
+        if (xfadeLen > loopLen / 2) xfadeLen = loopLen / 2;
+
+        // --- Inner sample loop (tight, minimal branching) ---
         for (int i = iStart; i < len; i++) {
-            // Note duration expired — enter release phase or stop
             if (voice.remaining == 0) {
                 if (voice.releaseLen > 0 && voice.releaseRemaining == 0) {
-                    // Start release phase: keep looping but fade out volume
                     voice.releaseRemaining = voice.releaseLen;
-                    voice.remaining = -1; // don't re-trigger this check
+                    voice.remaining = -1;
                 } else if (voice.releaseRemaining == 0) {
-                    voice.active = false;
-                    break;
+                    voice.active = false; break;
                 }
             }
             if (voice.remaining > 0) voice.remaining--;
             if (voice.releaseRemaining > 0) voice.releaseRemaining--;
 
             int sampleIdx = (int)(voice.pos >> 16);
-            int loopEndPt = (voice.loopEnd > 0) ? voice.loopEnd : voice.length;
-            int loopXfade = 0; // crossfade blend factor (0 = no blend)
-            float loopBlend = 0.0f;
             if (voice.loop) {
-                int loopLen = loopEndPt - voice.loopStart;
-                if (loopLen > 0) {
-                    // Crossfade zone: last 1024 samples before loop end (skip for DLS loops)
-                    int xfadeLen = voice.loopFromDLS ? 0 : 1024;
-                    if (xfadeLen > loopLen / 2) xfadeLen = loopLen / 2;
-                    int distToEnd = loopEndPt - sampleIdx;
-                    if (distToEnd <= xfadeLen && distToEnd > 0) {
-                        loopXfade = 1;
-                        loopBlend = 1.0f - (float)distToEnd / xfadeLen;
-                    }
-                    if (sampleIdx >= loopEndPt) {
-                        sampleIdx = voice.loopStart + (sampleIdx - voice.loopStart) % loopLen;
-                        voice.pos = ((uint64_t)sampleIdx << 16) | (voice.pos & 0xFFFF);
-                    }
+                if (loopLen > 0 && sampleIdx >= loopEndPt) {
+                    sampleIdx = voice.loopStart + (sampleIdx - voice.loopStart) % loopLen;
+                    voice.pos = ((uint64_t)sampleIdx << 16) | (voice.pos & 0xFFFF);
                 }
             } else if (sampleIdx >= voice.length) {
-                voice.active = false;
-                break;
+                voice.active = false; break;
             }
-            // Envelope shaper
-            int vol = voice.volume;
-            // Natural decay for hi-hats and cymbals (channel 9)
-            if (voice.midiChannel == 9) {
-                int mn = voice.midiNote;
-                // 42=closed HH, 44=pedal HH, 46=open HH
-                bool isHiHat = (mn == 42 || mn == 44 || mn == 46);
-                // 49=crash1, 51=ride1, 52=chinese, 53=ride bell, 55=splash, 57=crash2, 59=ride2
-                bool isCymbal = (mn == 49 || mn == 51 || mn == 52 || mn == 53 || mn == 55 || mn == 57 || mn == 59);
-                if (isHiHat || isCymbal) {
-                    // Fixed decay time: hi-hats ~200ms, cymbals ~800ms
-                    int decaySamples = isHiHat ? (kAudioSampleRate / 5) : (kAudioSampleRate * 4 / 5);
-                    float t = (float)voice.elapsed / decaySamples;
-                    if (t > 1.0f) t = 1.0f;
-                    float fade = 1.0f - t;
-                    fade = fade * fade;
-                    vol = (int)(vol * fade);
-                }
-            }
-            if (voice.bankIdx >= 0 && voice.bankIdx < (int)sSoundBank.size()) {
-                SoundSample& smp = sSoundBank[voice.bankIdx];
-                if (smp.envEnabled && !smp.envelope.empty() && voice.totalDuration > 0) {
-                    float t = (float)voice.elapsed / voice.totalDuration;
-                    if (t > 1.0f) t = 1.0f;
-                    // Lerp envelope
-                    float envVal = smp.envelope.back().level;
-                    for (int ei = 0; ei < (int)smp.envelope.size() - 1; ei++) {
-                        if (t >= smp.envelope[ei].time && t <= smp.envelope[ei+1].time) {
-                            float seg = (t - smp.envelope[ei].time) / (smp.envelope[ei+1].time - smp.envelope[ei].time);
-                            envVal = smp.envelope[ei].level + seg * (smp.envelope[ei+1].level - smp.envelope[ei].level);
-                            break;
-                        }
-                    }
-                    if (t < smp.envelope.front().time) envVal = smp.envelope.front().level;
-                    vol = (int)(vol * envVal);
-                }
-            }
-            // Decay: fade volume during note duration (simulates natural instrument decay)
-            if (voice.bankIdx >= 0 && voice.bankIdx < (int)sSoundBank.size()) {
-                SoundSample& bsmp = sSoundBank[voice.bankIdx];
-                int dp = bsmp.decayPct;
-                int minDecaySamples = bsmp.decayMinMs * kAudioSampleRate / 1000;
-                if (dp > 0 && voice.totalDuration > minDecaySamples) {
-                    float t = (float)voice.elapsed / voice.totalDuration;
-                    if (t > 1.0f) t = 1.0f;
-                    float fade = 1.0f - t * (dp / 100.0f);
-                    vol = (int)(vol * fade);
-                }
-            }
-            // Release phase fade-out (DLS sustain-loop instruments)
-            if (voice.releaseRemaining > 0 && voice.releaseLen > 0)
-                vol = vol * voice.releaseRemaining / voice.releaseLen;
-            else if (voice.releaseLen > 0 && voice.releaseRemaining == 0 && voice.remaining < 0) {
-                voice.active = false; break; // release finished
-            }
-            // Simple fade-out near end of note (fallback if no release envelope)
-            if (voice.releaseLen == 0 && voice.remaining >= 0 && voice.remaining < 200)
-                vol = vol * voice.remaining / 200;
             int smpVal = voice.data[sampleIdx];
-            if (loopXfade && voice.loopStart < voice.length) {
-                // Blend with where we'd be after the wrap (loop start region)
-                int xfadeLen = 1024;
-                int loopLen = loopEndPt - voice.loopStart;
-                if (xfadeLen > loopLen / 2) xfadeLen = loopLen / 2;
+            // Crossfade at loop boundary (integer math)
+            if (xfadeLen > 0) {
                 int distToEnd = loopEndPt - sampleIdx;
-                int blendIdx = voice.loopStart + (xfadeLen - distToEnd);
-                if (blendIdx < voice.loopStart) blendIdx = voice.loopStart;
-                if (blendIdx >= loopEndPt) blendIdx = voice.loopStart;
-                int blendVal = voice.data[blendIdx];
-                smpVal = (int)((1.0f - loopBlend) * smpVal + loopBlend * blendVal);
+                if (distToEnd <= xfadeLen && distToEnd > 0 && voice.loopStart < voice.length) {
+                    int blendIdx = voice.loopStart + (xfadeLen - distToEnd);
+                    if (blendIdx >= loopEndPt) blendIdx = voice.loopStart;
+                    int blendVal = voice.data[blendIdx];
+                    // Integer blend: (smpVal * distToEnd + blendVal * (xfadeLen - distToEnd)) / xfadeLen
+                    smpVal = (smpVal * distToEnd + blendVal * (xfadeLen - distToEnd)) / xfadeLen;
+                }
             }
-            int val = smpVal * vol / 256;
-            mix[i] += (int16_t)val;
+            mix[i] += (int16_t)(smpVal * vol / 256);
             voice.pos += voice.inc;
             voice.elapsed++;
         }
     }
 
-    // Apply master volume and clamp to unsigned 8-bit (waveOut expects 0-255, center=128)
-    float masterGain = powf(10.0f, sMidiMasterDb / 20.0f);
+    // Apply master volume and clamp to unsigned 8-bit
+    static int sMasterVolInt = 256; // cached
+    static float sLastMasterDb = -999.0f;
+    if (sMidiMasterDb != sLastMasterDb) {
+        sLastMasterDb = sMidiMasterDb;
+        sMasterVolInt = (int)(powf(10.0f, sMidiMasterDb / 20.0f) * 256.0f);
+    }
     for (int i = 0; i < len; i++) {
-        int v = (int)(mix[i] * masterGain);
+        int v = (mix[i] * sMasterVolInt) >> 8;
         if (v > 127) v = 127;
-        if (v < -128) v = -128;
+        else if (v < -128) v = -128;
         buf[i] = (int8_t)(v + 128);
     }
 }
