@@ -719,6 +719,7 @@ static void font_glyph_to_tile(u32* dst, const u8* glyph, int colorIdx, int bgId
 // Font tiles placed before HUD static tiles at end of OBJ VRAM
 static int hud_font_tile_base = 0;
 static int hud_font_loaded = 0;
+static int hud_pal_remap[AFN_ASSET_COUNT]; // dynamic palette bank for HUD assets
 
 static void hud_font_load(int staticTileCount)
 {
@@ -4927,6 +4928,53 @@ int main(void)
                         u32 *tdst = (u32*)(0x06010000 + vramStart * 32);
                         int w; for (w = 0; w < (int)(AFN_ALL_TILES_LEN / 4); w++) tdst[w] = tsrc[w];
                     }
+                    // Dynamic palette bank assignment for visible HUD assets
+                    // Assigns unique palette banks at runtime so assets don't
+                    // fight over shared banks from export time
+                    { int nextBank = 1;
+                    int bankOwner[16];
+                    { int bi; for (bi = 0; bi < 16; bi++) bankOwner[bi] = -1; }
+                    { int ai2; for (ai2 = 0; ai2 < AFN_ASSET_COUNT; ai2++) hud_pal_remap[ai2] = 0; }
+                    { int ei3; for (ei3 = 0; ei3 < AFN_HUD_ELEM_COUNT; ei3++) {
+                        if (!afn_hud_visible[ei3]) continue;
+                        int ps = afn_hud_elems[ei3].pieceStart;
+                        int pc = afn_hud_elems[ei3].pieceCount;
+                        int ss = afn_hud_elems[ei3].spriteStart;
+                        int sc2 = afn_hud_elems[ei3].spriteCount;
+                        int pass2; for (pass2 = 0; pass2 < 2; pass2++) {
+                            int cnt = (pass2 == 0) ? pc : sc2;
+                            int ji; for (ji = 0; ji < cnt; ji++) {
+                                int ai2 = (pass2 == 0)
+                                    ? afn_hud_pieces[ps + ji].asset
+                                    : afn_hud_sprites[ss + ji].asset;
+                                if (ai2 < 0 || ai2 >= AFN_ASSET_COUNT) continue;
+                                if (hud_pal_remap[ai2] > 0) continue; // already assigned
+                                // Check if an existing bank has an identical palette
+                                int found = -1;
+                                { int b; for (b = 1; b < 15 && found < 0; b++) {
+                                    if (bankOwner[b] < 0) continue;
+                                    int match = 1;
+                                    int c; for (c = 0; c < 16; c++) {
+                                        if (afn_pal[ai2][c] != afn_pal[bankOwner[b]][c]) { match = 0; break; }
+                                    }
+                                    if (match) found = b;
+                                } }
+                                if (found >= 0) {
+                                    hud_pal_remap[ai2] = found;
+                                } else {
+                                    // Skip reserved banks: 0 (transparent), 6 (minimap), 15 (font)
+                                    while (nextBank == 6) nextBank++;
+                                    if (nextBank >= 15) nextBank = 14; // cap at last usable
+                                    hud_pal_remap[ai2] = nextBank;
+                                    bankOwner[nextBank] = ai2;
+                                    { int c; for (c = 0; c < 16; c++)
+                                        pal_obj_mem[nextBank * 16 + c] = afn_pal[ai2][c]; }
+                                    nextBank++;
+                                    while (nextBank == 6) nextBank++;
+                                }
+                            }
+                        }
+                    } } }
                     // Load font into OBJ VRAM if not yet loaded
                     if (!hud_font_loaded) hud_font_load(staticTiles);
                     tm_hud_was_visible = 1;
@@ -5063,7 +5111,7 @@ int main(void)
                                     int ctb = afn_asset_desc[cai][0];
                                     int ctpf = afn_asset_desc[cai][1];
                                     int csz = afn_asset_desc[cai][3];
-                                    int cpb = afn_asset_desc[cai][4];
+                                    int cpb = hud_pal_remap[cai] ? hud_pal_remap[cai] : afn_asset_desc[cai][4];
                                     u16 ca0 = ATTR0_SQUARE | ((csy & 0xFF));
                                     u16 ca1 = size_to_attr1(csz) | ((csx & 0x1FF));
                                     if (hudUseAffine && hudAffSlot >= 0) {
@@ -5099,7 +5147,7 @@ int main(void)
                                 int tileBase = afn_asset_desc[ai][0];
                                 int tpf      = afn_asset_desc[ai][1];
                                 int objSz    = afn_asset_desc[ai][3];
-                                int palBank  = afn_asset_desc[ai][4];
+                                int palBank  = hud_pal_remap[ai] ? hud_pal_remap[ai] : afn_asset_desc[ai][4];
                                 int tileCur  = tileBase - hudTileAdj + fr * tpf;
 
                                 u16 a0 = ATTR0_SQUARE | ((sy & 0xFF));
@@ -5123,7 +5171,7 @@ int main(void)
                                 int tileBase = afn_asset_desc[ai][0];
                                 int tpf      = afn_asset_desc[ai][1];
                                 int objSz    = afn_asset_desc[ai][3];
-                                int palBank  = afn_asset_desc[ai][4];
+                                int palBank  = hud_pal_remap[ai] ? hud_pal_remap[ai] : afn_asset_desc[ai][4];
                                 int tileCur  = tileBase - hudTileAdj + fr * tpf;
 
                                 u16 a0 = ATTR0_SQUARE | ((sy & 0xFF));
