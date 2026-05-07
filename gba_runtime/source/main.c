@@ -261,12 +261,19 @@ IWRAM_CODE static void afn_sound_mix(void) {
         if (vc->volDec > 0) vc->volFade -= vc->volDec;
     }
 
-    // Clamp and write to output buffer (4 samples at a time)
-    for (int i = 0; i < SND_BUF_SIZE; i++) {
-        int m = mix_acc[i];
-        if (m > 127) m = 127;
-        else if (m < -128) m = -128;
-        buf[i] = (s8)m;
+    // Scale mix down by active voice count to prevent clipping, then clamp
+    {
+        int active = 0;
+        for (int v = 0; v < snd_voice_count; v++)
+            if (snd_voices[v].active) active++;
+        // Scale: 1 voice = full, 2 = /2, 3+ = /3 (avoid too quiet)
+        int shift = (active >= 3) ? 2 : (active >= 2) ? 1 : 0;
+        for (int i = 0; i < SND_BUF_SIZE; i++) {
+            int m = mix_acc[i] >> shift;
+            if (m > 127) m = 127;
+            else if (m < -128) m = -128;
+            buf[i] = (s8)m;
+        }
     }
 }
 
