@@ -869,6 +869,7 @@ struct SoundSample {
     int loopStart = 0;          // sample offset (actual position, not percentage)
     int loopEnd = 0;            // sample offset (0 = end of sample)
     bool loopFromDLS = false;   // true = initialized from DLS, skip crossfade
+    bool noSustainLoop = false; // true = ignore DLS sustain loops (percussive instruments)
     bool builtIn = false;       // true = generated, not imported
     bool isDrumKit = false;     // true = note selects sample from drumHits
     int category = SmpCat_Oscillator; // UI grouping category
@@ -2423,13 +2424,15 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             smpLen = (int)best->data.size();
                             smpRate = best->sampleRate;
                             noteBaseNote = best->baseNote;
-                            if (best->hasLoop) {
+                            if (best->hasLoop && !smp.noSustainLoop) {
                                 smpLoop = true;
                                 smpLoopStart = best->loopStart;
                                 smpLoopEnd = best->loopEnd;
                                 hasRegionLoop = true;
-                            } else {
+                            } else if (!smp.noSustainLoop) {
                                 smpLoop = true; // still loop for MIDI duration control
+                            } else {
+                                smpLoop = false; // percussive: play once, no loop
                             }
                         } else if (!smp.data.empty()) {
                             smpData = smp.data.data();
@@ -2565,6 +2568,23 @@ static void AudioMixBuffer(int8_t* buf, int len) {
             }
             // Envelope shaper
             int vol = voice.volume;
+            // Natural decay for hi-hats and cymbals (channel 9)
+            if (voice.midiChannel == 9) {
+                int mn = voice.midiNote;
+                // 42=closed HH, 44=pedal HH, 46=open HH
+                bool isHiHat = (mn == 42 || mn == 44 || mn == 46);
+                // 49=crash1, 51=ride1, 52=chinese, 53=ride bell, 55=splash, 57=crash2, 59=ride2
+                bool isCymbal = (mn == 49 || mn == 51 || mn == 52 || mn == 53 || mn == 55 || mn == 57 || mn == 59);
+                if (isHiHat || isCymbal) {
+                    // Fixed decay time: hi-hats ~200ms, cymbals ~800ms
+                    int decaySamples = isHiHat ? (kAudioSampleRate / 5) : (kAudioSampleRate * 4 / 5);
+                    float t = (float)voice.elapsed / decaySamples;
+                    if (t > 1.0f) t = 1.0f;
+                    float fade = 1.0f - t;
+                    fade = fade * fade;
+                    vol = (int)(vol * fade);
+                }
+            }
             if (voice.bankIdx >= 0 && voice.bankIdx < (int)sSoundBank.size()) {
                 SoundSample& smp = sSoundBank[voice.bankIdx];
                 if (smp.envEnabled && !smp.envelope.empty() && voice.totalDuration > 0) {
@@ -2774,7 +2794,7 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
             playLen = (int)best->data.size();
             playRate = best->sampleRate;
             playBase = best->baseNote;
-            if (best->hasLoop) {
+            if (best->hasLoop && !smp.noSustainLoop) {
                 playLoop = true;
                 playLoopStart = best->loopStart;
                 playLoopEnd = best->loopEnd;
@@ -2795,9 +2815,14 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
             v.remaining = kAudioSampleRate * 2;
             v.releaseLen = playReleaseLen;
         } else {
-            // remaining in output samples = source samples / inc rate
-            v.remaining = (int)((float)playLen / ((float)playRate / kAudioSampleRate));
-            v.releaseLen = 0;
+            // One-shot: play full sample, loop to keep voice alive for release fade
+            int smpDur = (int)((float)playLen / ((float)v.inc / 65536.0f));
+            int relSamples = smp.releaseMs > 0 ? (smp.releaseMs * kAudioSampleRate / 1000) : (kAudioSampleRate / 4);
+            v.loop = true; // keep looping so voice stays alive through release
+            v.loopStart = playLen > 64 ? playLen - 64 : 0; // loop last tiny bit (near-silence)
+            v.loopEnd = playLen;
+            v.remaining = smpDur > relSamples ? smpDur - relSamples : smpDur;
+            v.releaseLen = relSamples;
         }
         v.totalDuration = v.remaining;
         v.elapsed = 0;
@@ -4384,6 +4409,7 @@ static bool SaveProject(const std::string& path)
             if (s.releaseMs != 250) fprintf(f, "impRelease=%d\n", s.releaseMs);
             if (s.decayPct != 0) fprintf(f, "impDecay=%d\n", s.decayPct);
             if (s.decayMinMs != 500) fprintf(f, "impDecayMin=%d\n", s.decayMinMs);
+            if (s.noSustainLoop) fprintf(f, "impNoSusLoop=1\n");
             fprintf(f, "impEnvEnabled=%d\n", s.envEnabled ? 1 : 0);
             if (!s.envelope.empty()) {
                 fprintf(f, "impEnvPts=%d", (int)s.envelope.size());
@@ -5882,6 +5908,7 @@ static bool LoadProject(const std::string& path)
                 else if (sscanf(line, "impRelease=%d", &ival) == 1) curImp->releaseMs = ival;
                 else if (sscanf(line, "impDecay=%d", &ival) == 1) curImp->decayPct = ival;
                 else if (sscanf(line, "impDecayMin=%d", &ival) == 1) curImp->decayMinMs = ival;
+                else if (sscanf(line, "impNoSusLoop=%d", &ival) == 1) curImp->noSustainLoop = (ival != 0);
                 else if (sscanf(line, "impEnvEnabled=%d", &ival) == 1) curImp->envEnabled = (ival != 0);
                 else if (strncmp(line, "impEnvPts=", 10) == 0) {
                     curImp->envelope.clear();
@@ -11096,10 +11123,14 @@ void FrameTick(float dt)
                                             se.loop = true;
                                             se.loopStart = smp.loopFromDLS ? smp.loopStart : (refLen > 0 ? smp.loopStart * dl / refLen : 0);
                                             se.loopEnd = smp.loopFromDLS ? smp.loopEnd : (refLen > 0 && smp.loopEnd > 0 ? smp.loopEnd * dl / refLen : 0);
-                                        } else {
+                                        } else if (!smp.noSustainLoop) {
                                             se.loop = best->hasLoop;
                                             se.loopStart = best->loopStart;
                                             se.loopEnd = best->hasLoop ? best->loopEnd : 0;
+                                        } else {
+                                            se.loop = false;
+                                            se.loopStart = 0;
+                                            se.loopEnd = 0;
                                         }
                                         se.decayPct = smp.decayPct;
                                         se.decayMinMs = smp.decayMinMs;
@@ -19096,6 +19127,13 @@ void FrameTick(float dt)
                     if (s.loopStart != prevStart || s.loopEnd != prevEnd) sProjectDirty = true;
                 }
             }
+            // No Sustain Loop toggle (for percussive GM instruments like Music Box)
+            if (!s.isDrumKit && !s.regions.empty()) {
+                bool prevNSL = s.noSustainLoop;
+                ImGui::Checkbox("No Sustain Loop", &s.noSustainLoop);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ignore DLS sustain loops (for percussive instruments)");
+                if (s.noSustainLoop != prevNSL) sProjectDirty = true;
+            }
             // Release fade-out slider
             {
                 ImGui::PushItemWidth(-1);
@@ -19280,6 +19318,27 @@ void FrameTick(float dt)
             if (GetOpenFileNameA(&ofn)) {
                 MidiFile mf;
                 if (ParseMidiFile(midPath, mf)) {
+                    // Auto-assign sample banks from MIDI program changes
+                    for (int ch = 0; ch < 16; ch++) {
+                        if (!mf.channelUsed[ch]) continue;
+                        if (ch == 9) {
+                            // Drums: find the drum kit sample bank
+                            for (int b = 0; b < (int)sSoundBank.size(); b++) {
+                                if (sSoundBank[b].isDrumKit) { mf.channelBank[ch] = b; break; }
+                            }
+                            continue;
+                        }
+                        int prog = mf.channelProgram[ch];
+                        if (prog < 0 || prog >= 128) continue;
+                        const char* gmName = sGMInstrumentNames[prog];
+                        // Find matching sample bank by name
+                        for (int b = 0; b < (int)sSoundBank.size(); b++) {
+                            if (strcmp(sSoundBank[b].name, gmName) == 0) {
+                                mf.channelBank[ch] = b;
+                                break;
+                            }
+                        }
+                    }
                     sMidiFiles.push_back(std::move(mf));
                     sSelectedMidi = (int)sMidiFiles.size() - 1;
                     sProjectDirty = true;
