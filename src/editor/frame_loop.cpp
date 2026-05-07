@@ -2324,10 +2324,15 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                     if (sampleOff < 0) sampleOff = 0;
                     if (sampleOff >= len) sampleOff = len - 1;
 
-                    // Kill any existing voice playing the same note+channel (retrigger)
+                    // Fade out any existing voice playing the same note+channel (anti-click retrigger)
                     for (int v = 0; v < kMaxVoices; v++) {
-                        if (sVoices[v].active && sVoices[v].midiNote == n.note && sVoices[v].midiChannel == n.channel)
-                            sVoices[v].active = false;
+                        if (sVoices[v].active && sVoices[v].midiNote == n.note && sVoices[v].midiChannel == n.channel) {
+                            sVoices[v].releaseRemaining = 200; // ~12ms fade
+                            sVoices[v].releaseLen = 200;
+                            sVoices[v].remaining = -1;
+                            sVoices[v].loop = false;
+                            sVoices[v].midiNote = -1; // unlink so it won't match again
+                        }
                     }
 
                     // Find a free voice
