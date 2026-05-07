@@ -229,7 +229,8 @@ IWRAM_CODE static void afn_sound_mix(void) {
                 mix_acc[i] += ((int)wdata[pos >> 8] * av) >> gs;
                 pos += inc;
                 if (vc->loop && pos >= vc->loopLen) {
-                    pos -= (vc->loopLen - vc->loopStart);
+                    int span = vc->loopLen - vc->loopStart;
+                    while (pos >= vc->loopLen && span > 0) pos -= span;
                     if (pos < vc->loopStart) pos = vc->loopStart;
                 } else if (!vc->loop && pos >= lenFixed) { done = 1; break; }
             }
@@ -251,10 +252,11 @@ IWRAM_CODE static void afn_sound_mix(void) {
                     mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
                     pos += inc;
                 }
-                if (pos >= loopLen) {
+                while (pos >= loopLen) {
                     pos -= loopSpan;
-                    if (pos < vc->loopStart) pos = vc->loopStart;
+                    if (loopSpan <= 0) { pos = vc->loopStart; break; }
                 }
+                if (pos < vc->loopStart) pos = vc->loopStart;
             }
         } else {
             int lenFixed = vc->length << 8;
