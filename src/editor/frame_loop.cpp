@@ -879,6 +879,7 @@ struct SoundSample {
     int baseNote = 60;             // MIDI note the sample was recorded at (for pitch calc)
     int releaseMs = 250;           // release fade-out time in ms (0 = no fade)
     int decayPct = 0;              // volume decay over note duration (0-100%, 0 = no decay)
+    int decayMinMs = 500;          // minimum note length for decay to apply (ms)
     std::vector<SampleRegion> regions; // multi-sample regions (GM instruments)
 };
 
@@ -2515,11 +2516,13 @@ static void AudioMixBuffer(int8_t* buf, int len) {
             }
             // Decay: fade volume during note duration (simulates natural instrument decay)
             if (voice.bankIdx >= 0 && voice.bankIdx < (int)sSoundBank.size()) {
-                int dp = sSoundBank[voice.bankIdx].decayPct;
-                if (dp > 0 && voice.totalDuration > 0 && voice.remaining > 0) {
+                SoundSample& bsmp = sSoundBank[voice.bankIdx];
+                int dp = bsmp.decayPct;
+                int minDecaySamples = bsmp.decayMinMs * kAudioSampleRate / 1000;
+                if (dp > 0 && voice.totalDuration > minDecaySamples && voice.remaining > 0) {
                     float t = (float)voice.elapsed / voice.totalDuration;
                     if (t > 1.0f) t = 1.0f;
-                    float fade = 1.0f - t * (dp / 100.0f); // 1.0 → (1 - decay%)
+                    float fade = 1.0f - t * (dp / 100.0f);
                     vol = (int)(vol * fade);
                 }
             }
@@ -18867,6 +18870,15 @@ void FrameTick(float dt)
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Volume decay over note duration (0%% = sustain, 100%% = full fade)");
                 ImGui::PopItemWidth();
                 if (s.decayPct != prevDec) sProjectDirty = true;
+            }
+            // Decay minimum duration — notes shorter than this skip decay
+            if (s.decayPct > 0) {
+                ImGui::PushItemWidth(-1);
+                int prevMin = s.decayMinMs;
+                ImGui::SliderInt("##decMin", &s.decayMinMs, 0, 2000, "Decay after: %d ms");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Notes shorter than this keep full volume");
+                ImGui::PopItemWidth();
+                if (s.decayMinMs != prevMin) sProjectDirty = true;
             }
         }
         sampleDetailsDone:
