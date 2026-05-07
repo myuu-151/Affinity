@@ -30,7 +30,7 @@ static int tm_scene_idx;
 
 // Player sprite index (-1 = none)
 #define AFN_PLAYER_IDX 0
-#define AFN_ORBIT_DIST 3840
+#define AFN_ORBIT_DIST 1920
 
 #define AFN_ASSET_COUNT 26
 
@@ -15197,7 +15197,7 @@ static inline void afn_script_collision2d(void) {}
 
 // ---- Blueprint script functions ----
 #define AFN_BP_COUNT 8
-#define AFN_BP_INSTANCE_COUNT 7
+#define AFN_BP_INSTANCE_COUNT 8
 
 static inline void afn_bp0_move_4() {
     if (!afn_player_frozen && key_is_down(KEY_LEFT)) { afn_input_right -= 256; if (tm_move_timer == 0) tm_player_facing = 6; }
@@ -15289,7 +15289,7 @@ static inline void afn_bp0_collision2d() {
 }
 
 static inline void afn_bp1_change_scene_1() {
-    afn_pending_scene = 0;
+    afn_pending_scene = 1;
     afn_pending_scene_mode = 1;
 }
 static inline void afn_bp1_start() {
@@ -15361,7 +15361,7 @@ static inline void afn_bp2_collision2d() {
 }
 
 static inline void afn_bp3_change_scene_1() {
-    afn_pending_scene = 1;
+    afn_pending_scene = 0;
     afn_pending_scene_mode = 0;
 }
 static inline void afn_bp3_start() {
@@ -15583,9 +15583,10 @@ static inline void afn_bp7_collision2d() {
 }
 
 static const struct { int bpIdx; int sprIdx; int tmObjIdx; int sceneMode; unsigned int sceneMask; int params[1]; }
-    afn_bp_instances[7] = {
+    afn_bp_instances[8] = {
     {1, 2, -1, 0, 0xffffffffu, {0}},
     {2, -1, 0, 1, 0x2u, {0}},
+    {3, -1, 4, 1, 0x2u, {0}},
     {5, -1, 5, 1, 0x2u, {0}},
     {0, -1, -1, 0, 0x1u, {0}},
     {4, -1, -1, 1, 0x2u, {0}},
@@ -15594,7 +15595,7 @@ static const struct { int bpIdx; int sprIdx; int tmObjIdx; int sceneMode; unsign
 };
 
 static inline void afn_bp_dispatch_start(void) {
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < 8; i++) {
     if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;
     if (afn_bp_instances[i].sceneMask != 0xFFFFFFFFu && !(afn_bp_instances[i].sceneMask & (1u << tm_scene_idx))) continue;
     switch (afn_bp_instances[i].bpIdx) {
@@ -15610,7 +15611,7 @@ static inline void afn_bp_dispatch_start(void) {
   }
 }
 static inline void afn_bp_dispatch_key_held(void) {
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < 8; i++) {
     if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;
     if (afn_bp_instances[i].sceneMask != 0xFFFFFFFFu && !(afn_bp_instances[i].sceneMask & (1u << tm_scene_idx))) continue;
     if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;
@@ -15629,7 +15630,7 @@ static inline void afn_bp_dispatch_key_held(void) {
   }
 }
 static inline void afn_bp_dispatch_key_pressed(void) {
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < 8; i++) {
     if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;
     if (afn_bp_instances[i].sceneMask != 0xFFFFFFFFu && !(afn_bp_instances[i].sceneMask & (1u << tm_scene_idx))) continue;
     if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;
@@ -15648,7 +15649,7 @@ static inline void afn_bp_dispatch_key_pressed(void) {
   }
 }
 static inline void afn_bp_dispatch_key_released(void) {
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < 8; i++) {
     if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;
     if (afn_bp_instances[i].sceneMask != 0xFFFFFFFFu && !(afn_bp_instances[i].sceneMask & (1u << tm_scene_idx))) continue;
     if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;
@@ -15667,7 +15668,7 @@ static inline void afn_bp_dispatch_key_released(void) {
   }
 }
 static inline void afn_bp_dispatch_update(void) {
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < 8; i++) {
     if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;
     if (afn_bp_instances[i].sceneMask != 0xFFFFFFFFu && !(afn_bp_instances[i].sceneMask & (1u << tm_scene_idx))) continue;
     if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;
@@ -15686,7 +15687,7 @@ static inline void afn_bp_dispatch_update(void) {
   }
 }
 static inline void afn_bp_dispatch_collision(void) {
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < 8; i++) {
     if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;
     if (afn_bp_instances[i].sceneMask != 0xFFFFFFFFu && !(afn_bp_instances[i].sceneMask & (1u << tm_scene_idx))) continue;
     if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;
@@ -15704,7 +15705,7 @@ static inline void afn_bp_dispatch_collision(void) {
   }
 }
 static inline void afn_bp_dispatch_collision2d(void) {
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < 8; i++) {
     if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;
     if (afn_bp_instances[i].sceneMask != 0xFFFFFFFFu && !(afn_bp_instances[i].sceneMask & (1u << tm_scene_idx))) continue;
     if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;
@@ -15936,7 +15937,7 @@ static const AfnTmObj afn_tm1_objs[6] = {
     {0,0,6,3,1,0,-1,256,0,0,0,4},
     {14,14,6,4,1,0,-1,256,0,0,0,4},
     {6,4,2,16,1,0,-1,512,3,1,0,0},
-    {14,9,0,18,1,0,-1,512,3,1,0,0},
+    {14,9,0,18,1,1,-1,512,3,1,0,0},
     {14,2,0,17,1,1,-1,512,3,0,0,4},
 };
 
@@ -15958,7 +15959,7 @@ static const int afn_tm_scene_obj_count[2] = {AFN_TM0_OBJ_COUNT,AFN_TM1_OBJ_COUN
 #define AFN_TM_START_SCENE 0
 
 // Runtime scene mode: 0=Mode4/3D, 1=Mode0/tilemap, 2=Mode1/Mode7
-#define AFN_START_MODE 1
+#define AFN_START_MODE 0
 #define AFN_HAS_MESHES 1
 
 #endif // MAPDATA_H

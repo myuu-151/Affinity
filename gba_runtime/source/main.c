@@ -31,15 +31,15 @@ typedef struct {
     u16   facing;    // facing angle (brad, used by LookAt/FacePlayer scripts)
 } FloorSpriteGBA;
 
-static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
+EWRAM_DATA static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
 static FIXED player_x, player_z;   // player world position (16.8)
 static FIXED player_y;             // player height (16.8)
 
 // Mode 0 tilemap: forward declarations needed by blueprint codegen
 #define TM_MAX_DIR_OBJS 32
 static int tm_player_tx, tm_player_ty;
-static s16 tm_obj_tx[TM_MAX_DIR_OBJS];
-static s16 tm_obj_ty[TM_MAX_DIR_OBJS];
+EWRAM_DATA static s16 tm_obj_tx[TM_MAX_DIR_OBJS];
+EWRAM_DATA static s16 tm_obj_ty[TM_MAX_DIR_OBJS];
 static int tm_move_frames;
 // Follow system: forward declarations for blueprint nodes
 static int tm_fol_obj;
@@ -51,11 +51,11 @@ static int tm_fol_moving;
 static int tm_fol_facing;
 static int tm_fol_speed;
 static int tm_fol_dist;
-static s16 tm_obj_facing[TM_MAX_DIR_OBJS];
-static s8  tm_obj_anim_play[TM_MAX_DIR_OBJS];
-static s8  tm_obj_anim_idx[TM_MAX_DIR_OBJS];
-static int tm_obj_dir_set[TM_MAX_DIR_OBJS];
-static int tm_obj_dir_facing[TM_MAX_DIR_OBJS];
+EWRAM_DATA static s16 tm_obj_facing[TM_MAX_DIR_OBJS];
+EWRAM_DATA static s8  tm_obj_anim_play[TM_MAX_DIR_OBJS];
+EWRAM_DATA static s8  tm_obj_anim_idx[TM_MAX_DIR_OBJS];
+EWRAM_DATA static int tm_obj_dir_set[TM_MAX_DIR_OBJS];
+EWRAM_DATA static int tm_obj_dir_facing[TM_MAX_DIR_OBJS];
 
 // ---------------------------------------------------------------------------
 // Forward declarations for sound functions (used by mapdata.h script codegen)
@@ -337,7 +337,7 @@ static FIXED g_cosf, g_sinf;
 #define TEX_CACHE_SIZE 4096
 extern u8 tex_iwram[TEX_CACHE_SIZE]; // IWRAM buffer (defined in tex_iwram.c)
 #define tex_cache tex_iwram
-static u8* tex_cache_ptrs[AFN_MESH_COUNT];
+EWRAM_DATA static u8* tex_cache_ptrs[AFN_MESH_COUNT];
 
 // ARM assembly textured scanline inner loop (tex_scanline.s, runs in IWRAM)
 extern void tex_scanline_asm(u16* rp, int pairCount, int su, int sv,
@@ -392,18 +392,18 @@ static int tm_player_use_affine;
 static int tm_player_oam_ready;
 // Compact per-object direction VRAM (Mode 0 only — 1 facing per slot)
 #define TM_MAX_DIR_OBJS 32
-static int tm_obj_vram_slot[TM_MAX_DIR_OBJS];   // VRAM tile start per tilemap object
-static int tm_obj_dir_facing[TM_MAX_DIR_OBJS];  // loaded facing direction (-1 = none)
-static int tm_obj_dir_set[TM_MAX_DIR_OBJS];     // loaded animation set (-1 = none)
+EWRAM_DATA static int tm_obj_vram_slot[TM_MAX_DIR_OBJS];   // VRAM tile start per tilemap object
+EWRAM_DATA static int tm_obj_dir_facing[TM_MAX_DIR_OBJS];  // loaded facing direction (-1 = none)
+EWRAM_DATA static int tm_obj_dir_set[TM_MAX_DIR_OBJS];     // loaded animation set (-1 = none)
 static int tm_dir_slot_count = 0;                // total direction VRAM tiles used
-static s16 tm_obj_tx[TM_MAX_DIR_OBJS];          // mutable object tile X (for FollowPlayer etc.)
-static s16 tm_obj_ty[TM_MAX_DIR_OBJS];          // mutable object tile Y
+EWRAM_DATA static s16 tm_obj_tx[TM_MAX_DIR_OBJS];          // mutable object tile X (for FollowPlayer etc.)
+EWRAM_DATA static s16 tm_obj_ty[TM_MAX_DIR_OBJS];          // mutable object tile Y
 // Generic follow system (single follower for now)
 static int tm_fol_obj = -1;            // which object is following (-1 = none)
 static int tm_fol_active = 0;          // is follow engaged
 #define TM_FOL_TRAIL_LEN 16
-static s16 tm_fol_trail_tx[TM_FOL_TRAIL_LEN];
-static s16 tm_fol_trail_ty[TM_FOL_TRAIL_LEN];
+EWRAM_DATA static s16 tm_fol_trail_tx[TM_FOL_TRAIL_LEN];
+EWRAM_DATA static s16 tm_fol_trail_ty[TM_FOL_TRAIL_LEN];
 static int tm_fol_trail_head = 0;
 static int tm_fol_trail_count = 0;
 static s16 tm_fol_prev_ptx = -1, tm_fol_prev_pty = -1;
@@ -413,9 +413,9 @@ static int tm_fol_lerp_dx = 0, tm_fol_lerp_dy = 0;
 static int tm_fol_offset_x = 0, tm_fol_offset_y = 0;
 static int tm_fol_moving = 0;    // 1 while follower is lerping between tiles
 static int tm_fol_facing = 4;    // direction follower last moved (0/2/4/6), default south
-static s16 tm_obj_facing[TM_MAX_DIR_OBJS]; // mutable facing direction per object
-static s8  tm_obj_anim_play[TM_MAX_DIR_OBJS]; // mutable animPlay per object
-static s8  tm_obj_anim_idx[TM_MAX_DIR_OBJS];  // mutable animIdx per object
+EWRAM_DATA static s16 tm_obj_facing[TM_MAX_DIR_OBJS]; // mutable facing direction per object
+EWRAM_DATA static s8  tm_obj_anim_play[TM_MAX_DIR_OBJS]; // mutable animPlay per object
+EWRAM_DATA static s8  tm_obj_anim_idx[TM_MAX_DIR_OBJS];  // mutable animIdx per object
 static int tm_anim_idx;                 // current animation index (0=idle, 1=walk, ...)
 static int tm_anim_frame;               // current frame within animation
 static int tm_anim_timer;               // frame counter for animation timing
@@ -719,7 +719,7 @@ static void font_glyph_to_tile(u32* dst, const u8* glyph, int colorIdx, int bgId
 // Font tiles placed before HUD static tiles at end of OBJ VRAM
 static int hud_font_tile_base = 0;
 static int hud_font_loaded = 0;
-static int hud_pal_remap[AFN_ASSET_COUNT]; // dynamic palette bank for HUD assets
+EWRAM_DATA static int hud_pal_remap[AFN_ASSET_COUNT]; // dynamic palette bank for HUD assets
 static int hud_need_blend = 0;
 static int hud_blend_alpha = 16;
 
@@ -801,48 +801,48 @@ static int   afn_fade_target;
 static int   afn_fade_frames;
 static int   afn_fade_counter;
 static int   afn_fade_level;
-static int   afn_hp[16];
+EWRAM_DATA static int   afn_hp[16];
 static int   afn_score;
 static FIXED afn_start_x, afn_start_y, afn_start_z;
 static int   afn_frame_count;
-static u8    afn_sprite_flip[16];
+EWRAM_DATA static u8    afn_sprite_flip[16];
 static int   afn_draw_distance;
-static u8    afn_collision_enabled[16];
+EWRAM_DATA static u8    afn_collision_enabled[16];
 static int   afn_cam_locked;
 static int   afn_cam_speed = 256;
 static FIXED afn_force_x, afn_force_z;
 static int   afn_friction = 256;
-static int   afn_vars[16];
+EWRAM_DATA static int   afn_vars[16];
 static int   afn_scripts_stopped;
-static u8    afn_sprite_layer[16];
-static u8    afn_sprite_alpha[16];
-static u8    afn_flash_obj[16];
-static u16   afn_sprite_rot[16];
-static int   afn_max_hp[16];
-static u8    afn_ai_mode[16];
-static u16   afn_sprite_tint[16];
-static u8    afn_sprite_shake[16];
-static int   afn_hud_value[4];
-static u8    afn_hud_visible[4];
-static FIXED afn_patrol_home_x[16];
-static FIXED afn_patrol_home_z[16];
+EWRAM_DATA static u8    afn_sprite_layer[16];
+EWRAM_DATA static u8    afn_sprite_alpha[16];
+EWRAM_DATA static u8    afn_flash_obj[16];
+EWRAM_DATA static u16   afn_sprite_rot[16];
+EWRAM_DATA static int   afn_max_hp[16];
+EWRAM_DATA static u8    afn_ai_mode[16];
+EWRAM_DATA static u16   afn_sprite_tint[16];
+EWRAM_DATA static u8    afn_sprite_shake[16];
+EWRAM_DATA static int   afn_hud_value[4];
+EWRAM_DATA static u8    afn_hud_visible[4];
+EWRAM_DATA static FIXED afn_patrol_home_x[16];
+EWRAM_DATA static FIXED afn_patrol_home_z[16];
 static u16   afn_bg_color;
-static int   afn_inventory[16];
+EWRAM_DATA static int   afn_inventory[16];
 static int   afn_dlg_open;
 static int   afn_dlg_text;
 static int   afn_dlg_line;
 static int   afn_dlg_speaker;
 static int   afn_dlg_choice_a, afn_dlg_choice_b;
 static int   afn_dlg_choosing;
-static int   afn_state[16];
-static int   afn_prev_state[16];
-static int   afn_state_timer[16];
+EWRAM_DATA static int   afn_state[16];
+EWRAM_DATA static int   afn_prev_state[16];
+EWRAM_DATA static int   afn_state_timer[16];
 static u16   afn_text_color;
-static int   afn_collision_size[16];
-static int   afn_collision_ignore[16];
-static int   afn_lifetime[16];
-static u16   afn_bar_color[4];
-static int   afn_bar_max[4];
+EWRAM_DATA static int   afn_collision_size[16];
+EWRAM_DATA static int   afn_collision_ignore[16];
+EWRAM_DATA static int   afn_lifetime[16];
+EWRAM_DATA static u16   afn_bar_color[4];
+EWRAM_DATA static int   afn_bar_max[4];
 static int   afn_timer_visible;
 static FIXED afn_checkpoint_x, afn_checkpoint_z;
 static int   afn_checkpoint_set;
@@ -851,15 +851,15 @@ static int   afn_current_scene;
 #endif /* !AFN_HAS_SCRIPT */
 
 // HUD keyframe animation state (always needed, not script-dependent)
-static u8    afn_hud_prev_visible[4];
-static int   afn_hud_anim_frame[4];
+EWRAM_DATA static u8    afn_hud_prev_visible[4];
+EWRAM_DATA static int   afn_hud_anim_frame[4];
 
 // Direction animation set tracking (for DMA streaming)
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
-static int   g_active_dir_set[AFN_ASSET_COUNT]; // currently loaded direction set per asset
+EWRAM_DATA static int g_active_dir_set[AFN_ASSET_COUNT]; // currently loaded direction set per asset
 static int   g_anim_frame_counter; // VBlank counter for animation frame cycling
-static int   g_current_anim[AFN_ASSET_COUNT];  // per-asset: 0=idle, 1=run, 2=sprint
-static u8    g_asset_anim_enabled[AFN_ASSET_COUNT]; // per-asset: any sprite wants animation?
+EWRAM_DATA static int g_current_anim[AFN_ASSET_COUNT];  // per-asset: 0=idle, 1=run, 2=sprint
+EWRAM_DATA static u8  g_asset_anim_enabled[AFN_ASSET_COUNT]; // per-asset: any sprite wants animation?
 #endif
 
 // FloorSpriteGBA, g_sprites, MAX_FLOOR_SPRITES declared before mapdata.h include
@@ -1172,10 +1172,14 @@ static void switch_dir_anim_set(int assetIdx, int newSet)
     int romOffset = afn_dir_set_offsets[assetIdx][newSet]; // u32 index into ROM array
     if (romOffset < 0) return;
 
+    // Guard: skip if DMA would overflow OBJ VRAM (1024 tiles max)
+    int dstTile = vramTile0 - tm_dir_adj;
+    if (dstTile + 8 * tpf > 1024) return;
+
     // Copy 8 directions * tpf tiles * 32 bytes/tile from ROM to VRAM
     int wordCount = 8 * tpf * 8; // 8 dirs * tpf tiles * 8 u32s per tile
     const u32 *src = &afn_dir_anim_tiles[romOffset];
-    u32 *dst = (u32*)(0x06010000 + (vramTile0 - tm_dir_adj) * 32);
+    u32 *dst = (u32*)(0x06010000 + dstTile * 32);
 
     // Use DMA3 for fast ROM→VRAM copy (runs at ~2 cycles per word)
     DMA_TRANSFER(dst, src, wordCount, 3, DMA_NOW | DMA_32);
@@ -1564,8 +1568,8 @@ IWRAM_CODE static void afn_hline(u16* row, int left, int right, u8 palIdx);
 // Row-level coverage: track widest covered span per scanline.
 // If a new hline falls entirely within the already-covered span, skip it.
 // Much cheaper than per-pixel — just 2 compares per scanline.
-static s16 g_cov_left[160];   // leftmost covered pixel per row (init 240 = empty)
-static s16 g_cov_right[160];  // rightmost covered pixel per row (init -1 = empty)
+EWRAM_DATA static s16 g_cov_left[160];   // leftmost covered pixel per row (init 240 = empty)
+EWRAM_DATA static s16 g_cov_right[160];  // rightmost covered pixel per row (init -1 = empty)
 static int g_coverageOn;      // runtime toggle for coverage buffer
 
 static void coverage_clear(void)
@@ -1599,7 +1603,7 @@ IWRAM_CODE static void afn_hline(u16* row, int left, int right, u8 palIdx)
 
 // Reciprocal lookup table: rcp_table[n] = (1 << 16) / n for n=1..240
 // Used to replace per-scanline division with multiply in texture rasterizer
-static u16 rcp_table[241];
+EWRAM_DATA static u16 rcp_table[241];
 
 static void init_rcp_table(void)
 {
@@ -1612,7 +1616,7 @@ static void init_rcp_table(void)
 // Reciprocal LUT for division-free slope computation (OpenLara style)
 // divLUT[h] = (1 << 16) / h — replaces costly ARM7 software division
 #define AFN_DIV_LUT_SIZE 512
-static u32 divLUT[AFN_DIV_LUT_SIZE];
+EWRAM_DATA static u32 divLUT[AFN_DIV_LUT_SIZE];
 u32* g_divLUT_ptr; /* global pointer for ASM access — set in init_divLUT */
 
 static void init_divLUT(void)
@@ -3060,7 +3064,7 @@ EWRAM_DATA static FIXED g_vRawDepth[MAX_GLOBAL_VERTS];
 EWRAM_DATA static FIXED g_vSide[MAX_GLOBAL_VERTS];
 EWRAM_DATA static FIXED g_vHeight[MAX_GLOBAL_VERTS];
 EWRAM_DATA static TriSort g_triOrder[MAX_GLOBAL_TRIS];
-static MeshSlot g_meshSlots[MAX_FLOOR_SPRITES];
+EWRAM_DATA static MeshSlot g_meshSlots[MAX_FLOOR_SPRITES];
 
 // Render all mesh sprites into the bitmap
 IWRAM_CODE static void render_meshes_sw(u16* buf)
