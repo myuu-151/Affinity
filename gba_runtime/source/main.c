@@ -204,9 +204,12 @@ IWRAM_CODE static void afn_sound_mix(void) {
         int vol = vc->volFade >> 8; // 8.8 -> integer
         if (vol > vc->vol) vol = vc->vol;
         if (vol < 0) vol = 0;
-        // Fade last 256 samples of remaining (anti-click, no extra voice needed)
+        // Fade last 256 samples of remaining (anti-click before release)
         if (vc->remaining > 0 && vc->remaining <= 256)
             vol = (vol * vc->remaining) >> 8;
+        // Release phase: fade out over releaseRem (4096 samples max)
+        if (vc->remaining < 0 && vc->releaseRem > 0)
+            vol = (vol * vc->releaseRem) >> 12; // >>12 because max is 4096
         int loopLen = vc->loopLen;
         int loopStart = vc->loopStart;
         int isLoop = vc->loop;
@@ -240,7 +243,16 @@ IWRAM_CODE static void afn_sound_mix(void) {
         if (done) { vc->active = 0; continue; }
         if (vc->remaining > 0) {
             vc->remaining -= n;
-            if (vc->remaining <= 0) vc->active = 0;
+            if (vc->remaining <= 0) {
+                // Enter release: stop looping, fade out over ~4096 samples (~225ms)
+                vc->remaining = -1;
+                vc->releaseRem = 4096;
+                vc->loop = 0;
+            }
+        } else if (vc->remaining < 0) {
+            // In release phase — count down
+            vc->releaseRem -= n;
+            if (vc->releaseRem <= 0) { vc->active = 0; continue; }
         }
         if (vc->volDec > 0) vc->volFade -= vc->volDec;
     }
