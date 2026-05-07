@@ -997,8 +997,9 @@ static void init_obj_sprites(void)
             // Mode 0: place static tiles right after compact direction slots
             dst = (u32*)(0x06010000 + tm_dir_slot_count * 32);
         } else {
-            // Mode 4: skip bitmap overlap region (512 tiles) + direction tiles
-            dst = (u32*)(0x06010000 + (512 + AFN_DIR_VRAM_TILES) * 32);
+            // Mode 4/7: skip bitmap overlap region (512 tiles) only
+            // Direction tiles are DMA'd separately by switch_dir_anim_set
+            dst = (u32*)(0x06010000 + 512 * 32);
         }
 #else
         u32 *dst = (u32*)(0x06010000 + AFN_DIR_VRAM_TILES * 32);
@@ -1323,7 +1324,7 @@ static void update_sprites(void)
                     else
 #endif
                     {
-                        tileId = afn_asset_desc[ai][0];
+                        tileId = afn_asset_desc[ai][0] - tm_static_adj;
                         baseSize = afn_asset_desc[ai][3];
                         palBank = afn_asset_desc[ai][4];
                     }
@@ -3859,6 +3860,7 @@ static void mode4_init_scene(void)
 
     // Reload OBJ tiles (tile offset 512 for Mode 4)
     init_obj_sprites();
+    tm_static_adj = AFN_DIR_VRAM_TILES;
 
     // Camera init
 #ifdef AFFINITY_HAS_SPRITES
@@ -4113,7 +4115,7 @@ static void scene_load(int sceneMode, int sceneIdx)
 #endif
     } else if (sceneMode == 0) {
         tm_dir_adj = 0;
-        tm_static_adj = 0;
+        tm_static_adj = AFN_DIR_VRAM_TILES;
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
         mode4_init_scene();
 #else
@@ -4278,6 +4280,7 @@ int main(void)
         load_checkerboard();
 #endif
         init_obj_sprites();
+        tm_static_adj = AFN_DIR_VRAM_TILES;
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_DIR_ANIM_TILES_LEN)
         { int ai; for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {
             if (!afn_asset_dir_desc[ai][4]) continue;
@@ -4424,29 +4427,30 @@ int main(void)
         VBlankIntrWait();
         afn_sound_tick();
         afn_sound_mix();
-        // Page flip (Mode 4 only) — skip during scene transitions
-        if (g_scene_transition == 0) {
-            if (afn_current_mode == 0) {
-                g_page ^= 1;
-                REG_DISPCNT = DCNT_MODE4 | DCNT_BG2 | DCNT_OBJ | DCNT_OBJ_1D | (g_page ? DCNT_PAGE : 0);
-            } else if (afn_current_mode == 2) {
+        // Page flip / display mode
+        if (afn_current_mode == 0) {
+            g_page ^= 1;
+            REG_DISPCNT = DCNT_MODE4 | DCNT_BG2 | DCNT_OBJ | DCNT_OBJ_1D | (g_page ? DCNT_PAGE : 0);
+        } else if (g_scene_transition == 0) {
+            if (afn_current_mode == 2) {
                 REG_DISPCNT &= ~DCNT_BG2; // Mode 7: BG2 managed by HBlank ISR
             }
         }
         key_poll();
 
-        // --- Scene transition state machine ---
-        if (g_scene_transition > 0) {
-            handle_scene_transition();
-            continue;
-        }
-        // Check for pending scene switch
+        // --- Scene transition state machine (skip for Mode 4 — no tile scene switching) ---
+        if (afn_current_mode != 0) {
+            if (g_scene_transition > 0) {
+                handle_scene_transition();
+                continue;
+            }
 #ifdef AFN_HAS_SCRIPT
-        if (afn_pending_scene >= 0 && afn_pending_scene_mode >= 0) {
-            start_scene_transition();
-            continue;
-        }
+            if (afn_pending_scene >= 0 && afn_pending_scene_mode >= 0) {
+                start_scene_transition();
+                continue;
+            }
 #endif
+        }
 
         // ============================================================
         // RUNTIME MODE DISPATCH
