@@ -315,7 +315,7 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     // Each frame = SND_BUF_SIZE output samples, sequencer advances tpf ticks/frame
     int tpf = afn_snd_tpf[snd_seq_active >= 0 ? snd_seq_active : 0];
     int durSamples = (durTicks * SND_BUF_SIZE) / (tpf > 0 ? tpf : 1);
-    if (durSamples < SND_BUF_SIZE) durSamples = SND_BUF_SIZE; // minimum 1 frame
+    if (durSamples < 2724) durSamples = 2724; // minimum ~150ms (18157 * 0.15)
     // For one-shot samples, ensure remaining covers the full sample playback
     if (!vc->loop) {
         int smpDur = (vc->length << 8) / (baseInc > 0 ? baseInc : 1);
