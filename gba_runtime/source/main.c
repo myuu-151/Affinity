@@ -90,7 +90,7 @@ static void afn_stop_sound(void);
 #ifdef AFN_HAS_SOUND
 
 #define SND_BUF_SIZE 304
-#define SND_MAX_VOICES 4
+#define SND_MAX_VOICES 6
 
 // Sound buffers in EWRAM to save IWRAM space (32KB limit)
 EWRAM_DATA static s8 snd_buf[2][SND_BUF_SIZE] __attribute__((aligned(4)));
@@ -187,10 +187,10 @@ IWRAM_CODE static void afn_sound_mix(void) {
     REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
     snd_cur_buf = play;
 
-    // Mix into the other buffer
+    // Mix into 16-bit accumulation buffer, clamp to s8 once at end
     s8* buf = snd_buf[snd_cur_buf ^ 1];
-    u32* b32 = (u32*)buf;
-    for (int i = 0; i < SND_BUF_SIZE / 4; i++) b32[i] = 0;
+    static s16 mix_acc[SND_BUF_SIZE];
+    for (int i = 0; i < SND_BUF_SIZE; i++) mix_acc[i] = 0;
 
     for (int v = 0; v < SND_MAX_VOICES; v++) {
         SndVoice* vc = &snd_voices[v];
@@ -200,40 +200,25 @@ IWRAM_CODE static void afn_sound_mix(void) {
         const s8* wdata = vc->data;
         int pos = vc->pos;
         int inc = vc->inc;
-        // Compute volume: apply decay and release per-frame
-        int vol = vc->volFade >> 8; // 8.8 -> integer
+        // Compute volume once per frame
+        int vol = vc->volFade >> 8;
         if (vol > vc->vol) vol = vc->vol;
         if (vol < 0) vol = 0;
-        // Fade last 256 samples of remaining (anti-click before release)
         if (vc->remaining > 0 && vc->remaining <= 256)
             vol = (vol * vc->remaining) >> 8;
-        // Release phase: fade out over releaseRem (4096 samples max)
         if (vc->remaining < 0 && vc->releaseRem > 0)
-            vol = (vol * vc->releaseRem) >> 12; // >>12 because max is 4096
+            vol = (vol * vc->releaseRem) >> 12;
         int loopLen = vc->loopLen;
         int loopStart = vc->loopStart;
         int isLoop = vc->loop;
-        int useInterp = vc->interp;
+        int gs = vc->gainShift;
         int done = 0;
+        // Inner loop: no interpolation, no per-sample clamp
         for (int i = 0; i < n; i++) {
-            int idx = pos >> 8;
-            int s;
-            if (useInterp) {
-                int frac = pos & 0xFF;
-                int s0 = (int)wdata[idx];
-                int s1 = (idx + 1 < vc->length) ? (int)wdata[idx + 1] : s0;
-                s = s0 + (((s1 - s0) * frac) >> 8);
-            } else {
-                s = (int)wdata[idx];
-            }
-            s = (s * vol) >> vc->gainShift;
-            int m = (int)buf[i] + s;
-            if (m > 127) m = 127;
-            if (m < -128) m = -128;
-            buf[i] = (s8)m;
+            mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
             pos += inc;
             if (isLoop && pos >= loopLen) {
-                pos -= (loopLen - loopStart); // wrap back by loop length
+                pos -= (loopLen - loopStart);
                 if (pos < loopStart) pos = loopStart;
             } else if (!isLoop && pos >= (vc->length << 8)) {
                 done = 1; break;
@@ -244,17 +229,23 @@ IWRAM_CODE static void afn_sound_mix(void) {
         if (vc->remaining > 0) {
             vc->remaining -= n;
             if (vc->remaining <= 0) {
-                // Enter release: stop looping, fade out over ~4096 samples (~225ms)
                 vc->remaining = -1;
                 vc->releaseRem = 4096;
                 vc->loop = 0;
             }
         } else if (vc->remaining < 0) {
-            // In release phase — count down
             vc->releaseRem -= n;
             if (vc->releaseRem <= 0) { vc->active = 0; continue; }
         }
         if (vc->volDec > 0) vc->volFade -= vc->volDec;
+    }
+
+    // Clamp and write to output buffer
+    for (int i = 0; i < SND_BUF_SIZE; i++) {
+        int m = mix_acc[i];
+        if (m > 127) m = 127;
+        else if (m < -128) m = -128;
+        buf[i] = (s8)m;
     }
 }
 
