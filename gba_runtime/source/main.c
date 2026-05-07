@@ -213,8 +213,6 @@ IWRAM_CODE static void afn_sound_mix(void) {
         int vol = vc->volFade >> 8;
         if (vol > vc->vol) vol = vc->vol;
         if (vol < 0) vol = 0;
-        if (vc->remaining > 0 && vc->remaining <= 256)
-            vol = (vol * vc->remaining) >> 8;
         if (vc->remaining < 0 && vc->releaseRem > 0 && vc->releaseLen > 0)
             vol = vol * vc->releaseRem / vc->releaseLen; // once per frame, not per sample
         int gs = vc->gainShift;
