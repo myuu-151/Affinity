@@ -894,6 +894,7 @@ struct SoundSample {
     float lfoFreqHz = 5.0f;       // vibrato LFO rate in Hz
     float lfoDepthCents = 0.0f;   // default vibrato depth in cents (always active)
     float lfoCC1Cents = 0.0f;     // vibrato depth in cents at CC#1=127
+    bool vibratoEnabled = true;   // toggle for LFO/modulation vibrato
 };
 
 struct MidiNote {
@@ -1238,7 +1239,7 @@ static bool LoadGMDrumKit(SoundSample& kit) {
                         int srcRate = wi.sampleRate;
                         int dstLen = (int)((float)numSamples / srcRate * 16384);
                         if (dstLen < 1) continue;
-                        if (dstLen > 16384) dstLen = 16384; // cap at 1 sec
+                        if (dstLen > 65536) dstLen = 65536; // cap at ~4 sec
 
                         hit.data.resize(dstLen);
                         hit.sampleRate = 16384;
@@ -1443,7 +1444,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                                         uint16_t src = rd16(cp);
                                         uint16_t ctrl = rd16(cp + 2);
                                         uint16_t dst = rd16(cp + 4);
-                                        uint16_t xform = rd16(cp + 6);
+                                        // uint16_t xform = rd16(cp + 6);
                                         int32_t scale = (int32_t)rd32(cp + 8);
                                         // DLS: CONN_DST_ATTENUATION=0x0001, CONN_DST_PITCH=0x0003
                                         if (src == 0x0001 && dst == 0x0003 && ctrl == 0x0000) {
@@ -1491,36 +1492,34 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         else if (wi.bitsPerSample == 8)
             numSamples = wi.length / wi.channels;
         if (numSamples < 1) return false;
-        int dstLen = (int)((float)numSamples / wi.sampleRate * 16384);
-        if (dstLen < 1) return false;
-        if (dstLen > 131072) dstLen = 131072; // ~8 seconds at 16384 Hz
-        out.data.resize(dstLen);
-        for (int i = 0; i < dstLen; i++) {
-            int srcIdx = (int)((float)i / dstLen * numSamples);
-            if (srcIdx >= numSamples) srcIdx = numSamples - 1;
-            int val = 0;
+        if (numSamples > 524288) numSamples = 524288; // cap ~12s at 44100
+        // Keep original sample rate and 16-bit data (like SF2) for editor preview quality
+        out.data16.resize(numSamples);
+        out.data.resize(numSamples);
+        for (int i = 0; i < numSamples; i++) {
             if (wi.bitsPerSample == 16) {
-                const int16_t* s16 = (const int16_t*)(wi.data + srcIdx * 2 * wi.channels);
-                val = s16[0] >> 8;
+                const int16_t* s16 = (const int16_t*)(wi.data + i * 2 * wi.channels);
+                out.data16[i] = s16[0];
+                out.data[i] = (int8_t)(s16[0] >> 8);
             } else {
-                val = (int)wi.data[srcIdx * wi.channels] - 128;
+                int val = (int)wi.data[i * wi.channels] - 128;
+                out.data16[i] = (int16_t)(val << 8);
+                out.data[i] = (int8_t)val;
             }
-            out.data[i] = (int8_t)val;
         }
-        out.sampleRate = 16384;
+        out.sampleRate = wi.sampleRate;
         out.baseNote = unityNote;
         out.keyLo = keyLo;
         out.keyHi = keyHi;
-        // Convert loop points from source sample rate to downsampled rate
+        // Keep loop points at original sample rate (no conversion needed)
         bool useLoop = forceLoop;
         int srcLoopS = forceLoopStart, srcLoopE = forceLoopEnd;
         if (!useLoop && wi.hasLoop) { useLoop = true; srcLoopS = wi.loopStartSmp; srcLoopE = wi.loopEndSmp; }
         if (useLoop && srcLoopE > srcLoopS) {
-            float ratio = (float)dstLen / numSamples;
             out.hasLoop = true;
-            out.loopStart = (int)(srcLoopS * ratio);
-            out.loopEnd = (int)(srcLoopE * ratio);
-            if (out.loopEnd > dstLen) out.loopEnd = dstLen;
+            out.loopStart = srcLoopS;
+            out.loopEnd = srcLoopE;
+            if (out.loopEnd > numSamples) out.loopEnd = numSamples;
             if (out.loopStart >= out.loopEnd) out.hasLoop = false;
         }
         return true;
@@ -1605,7 +1604,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         SoundSample s;
         snprintf(s.name, sizeof(s.name), "%s", sGMInstrumentNames[ins.program]);
         s.data = primaryRgn.data;
-        s.sampleRate = 16384;
+        s.sampleRate = primaryRgn.sampleRate;
         s.loop = false;
         s.baseNote = primaryRgn.baseNote;
         s.builtIn = true;
@@ -2409,6 +2408,7 @@ struct AudioVoice {
     float lfoDepthCents = 0.0f; // default vibrato depth (always on)
     float lfoCC1Cents = 0.0f;   // CC#1-controlled vibrato depth
     float lfoPhase = 0.0f;      // per-voice LFO phase
+    bool vibratoEnabled = true;
     int releaseRemaining = 0; // samples left in release fade (0 = not releasing)
     int releaseLen = 0;       // total release length in samples
     bool loopFromDLS = false; // true = DLS loop points, skip crossfade
@@ -2597,6 +2597,7 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             v.lfoDepthCents = smp.lfoDepthCents;
                             v.lfoCC1Cents = smp.lfoCC1Cents;
                             v.lfoPhase = 0.0f;
+                            v.vibratoEnabled = smp.vibratoEnabled;
                             if (isDrum) {
                                 // Drums play at original pitch (1:1)
                                 v.inc = 65536;
@@ -2608,7 +2609,7 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             } else {
                                 // Long sample (WAV): play at native rate, pitch-shift relative to base note
                                 float baseInc = (float)smpRate / (float)kAudioSampleRate * 65536.0f;
-                                float semitones = (float)(n.note + smp.octaveShift * 12 - noteBaseNote) - (float)noteFineTune / 100.0f;
+                                float semitones = (float)(n.note + smp.octaveShift * 12 - noteBaseNote) + (float)noteFineTune / 100.0f;
                                 v.inc = (uint32_t)(baseInc * powf(2.0f, semitones / 12.0f));
                                 if (!hasRegionLoop && !smp.loop)
                                     v.loop = false; // long samples without DLS or user loops are one-shots
@@ -2654,16 +2655,17 @@ static void AudioMixBuffer(int8_t* buf, int len) {
             int ch = sVoices[v].midiChannel;
             float bendSemi = (float)sMidiPitchBend[ch] / 8192.0f * 2.0f; // ±2 semitones
 
-            // Per-voice LFO vibrato from DLS articulation
-            sVoices[v].lfoPhase += 2.0f * 3.14159265f * sVoices[v].lfoFreqHz * secPerBuf;
-            if (sVoices[v].lfoPhase > 2.0f * 3.14159265f) sVoices[v].lfoPhase -= 2.0f * 3.14159265f;
-            float lfoVal = sinf(sVoices[v].lfoPhase);
-
-            // Default vibrato (always on) + CC#1-controlled vibrato
-            float vibCents = sVoices[v].lfoDepthCents;
-            float cc1 = (float)sMidiModulation[ch] / 127.0f;
-            vibCents += cc1 * sVoices[v].lfoCC1Cents;
-            float vibratoSemi = lfoVal * vibCents / 100.0f; // cents → semitones
+            float vibratoSemi = 0.0f;
+            if (sVoices[v].vibratoEnabled) {
+                // Per-voice LFO vibrato from DLS articulation
+                sVoices[v].lfoPhase += 2.0f * 3.14159265f * sVoices[v].lfoFreqHz * secPerBuf;
+                if (sVoices[v].lfoPhase > 2.0f * 3.14159265f) sVoices[v].lfoPhase -= 2.0f * 3.14159265f;
+                float lfoVal = sinf(sVoices[v].lfoPhase);
+                float vibCents = sVoices[v].lfoDepthCents;
+                float cc1 = (float)sMidiModulation[ch] / 127.0f;
+                vibCents += cc1 * sVoices[v].lfoCC1Cents;
+                vibratoSemi = lfoVal * vibCents / 100.0f;
+            }
 
             float totalSemi = bendSemi + vibratoSemi;
             sVoices[v].inc = (uint32_t)(sVoices[v].baseInc * powf(2.0f, totalSemi / 12.0f));
@@ -2990,7 +2992,7 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         v.loopStart = playLoopStart;
         v.loopEnd = playLoopEnd;
         v.pos = 0;
-        float previewSemi = (float)(shiftedNote - playBase) - (float)playFineTune / 100.0f;
+        float previewSemi = (float)(shiftedNote - playBase) + (float)playFineTune / 100.0f;
         v.inc = (uint32_t)((float)playRate / (float)kAudioSampleRate * 65536.0f * powf(2.0f, previewSemi / 12.0f));
         v.volume = 160;
         if (playLoop) {
@@ -19804,8 +19806,13 @@ void FrameTick(float dt)
                 ImGui::PopItemWidth();
                 if (s.decayMinMs != prevMin) sProjectDirty = true;
             }
-            // Vibrato depth (LFO → pitch)
+            // Vibrato toggle + depth (LFO → pitch)
             {
+                bool prevEn = s.vibratoEnabled;
+                ImGui::Checkbox("##vibEn", &s.vibratoEnabled);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Enable/disable LFO vibrato");
+                if (s.vibratoEnabled != prevEn) sProjectDirty = true;
+                ImGui::SameLine();
                 ImGui::PushItemWidth(-1);
                 int vibCents = (int)s.lfoDepthCents;
                 int prevVib = vibCents;
