@@ -859,7 +859,7 @@ struct EnvPoint {
     bool operator!=(const EnvPoint& o) const { return !(*this == o); }
 };
 
-enum SampleCategory { SmpCat_Oscillator = 0, SmpCat_Noise = 1, SmpCat_GM = 2, SmpCat_Import = 3 };
+enum SampleCategory { SmpCat_Oscillator = 0, SmpCat_Noise = 1, SmpCat_GM = 2, SmpCat_Import = 3, SmpCat_SF2 = 4 };
 
 struct SoundSample {
     char name[32] = "Sample";
@@ -973,7 +973,7 @@ struct SoundInstance {
     int channelBank[16] = {};   // per-channel sample bank override
     int volume = 100;           // master volume 0-100
     int interpolation = 0;     // 0 = nearest, 1 = smooth (linear)
-    int mixerGain = 0;         // 0 = Normal (>>7), 1 = Loud (>>6), 2 = Quiet (>>9)
+    int mixerGain = 0;         // 0 = Normal (>>7), 1 = Loud (>>6), 2 = Mid (>>8), 3 = Quiet (>>9)
     int voiceCount = 6;        // max simultaneous voices on GBA (4-8)
     std::vector<SampleOverride> overrides; // per-sample edits
 };
@@ -2679,7 +2679,7 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
     if (!sAudioOpen) AudioInit();
     if (bankIdx < 0 || bankIdx >= (int)sSoundBank.size()) return;
     SoundSample& smp = sSoundBank[bankIdx];
-    if (smp.data.empty()) return;
+    if (smp.data.empty() && smp.regions.empty() && !smp.isDrumKit) return;
 
     // Stop any existing preview
     AudioStopAll();
@@ -2726,7 +2726,7 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         v.releaseRemaining = 0;
         v.releaseLen = 0;
         v.active = true;
-    } else if (smp.data.size() < 256) {
+    } else if (!smp.data.empty() && smp.data.size() < 256) {
         // Short non-looping waveform: render ~0.5 sec with decay at middle C
         int outLen = kAudioSampleRate / 2;
         sPreviewBuf.resize(outLen);
@@ -18650,6 +18650,329 @@ void FrameTick(float dt)
 #endif
         }
 
+        // Import SF2 button
+        if (ImGui::Button("Import SF2", ImVec2(-1, 0))) {
+#ifdef _WIN32
+            char sf2Path[MAX_PATH] = {};
+            OPENFILENAMEA ofn = {};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.lpstrFilter = "SoundFont Files\0*.sf2\0All\0*.*\0";
+            ofn.lpstrFile = sf2Path;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_FILEMUSTEXIST;
+            if (GetOpenFileNameA(&ofn)) {
+                FILE* sf = fopen(sf2Path, "rb");
+                if (sf) {
+                    fseek(sf, 0, SEEK_END);
+                    long fileSize = ftell(sf);
+                    fseek(sf, 0, SEEK_SET);
+                    std::vector<uint8_t> sf2(fileSize);
+                    fread(sf2.data(), 1, fileSize, sf);
+                    fclose(sf);
+
+                    auto rd16 = [](const uint8_t* p) -> uint16_t { return p[0] | (p[1] << 8); };
+                    auto rd32 = [](const uint8_t* p) -> uint32_t { return p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24); };
+                    auto rds16 = [](const uint8_t* p) -> int16_t { return (int16_t)(p[0] | (p[1] << 8)); };
+
+                    const uint8_t* d = sf2.data();
+                    const uint8_t* dend = d + fileSize;
+
+                    // Validate RIFF/sfbk header
+                    if (fileSize < 12 || memcmp(d, "RIFF", 4) != 0 || memcmp(d + 8, "sfbk", 4) != 0) goto sf2_done;
+
+                    {
+                        // Find sdta (sample data) and pdta (preset data) chunks
+                        const uint8_t* smplData = nullptr;
+                        uint32_t smplSize = 0;
+                        const uint8_t* pdta = nullptr;
+                        uint32_t pdtaSize = 0;
+                        {
+                            const uint8_t* p = d + 12;
+                            while (p + 8 <= dend) {
+                                uint32_t ckId = rd32(p);
+                                uint32_t ckSz = rd32(p + 4);
+                                if (ckId == 0x5453494C && p + 12 <= dend) { // LIST
+                                    uint32_t listType = rd32(p + 8);
+                                    if (listType == 0x61746473) { // sdta
+                                        // Find smpl sub-chunk
+                                        const uint8_t* sp = p + 12;
+                                        const uint8_t* se = p + 8 + ckSz;
+                                        while (sp + 8 <= se) {
+                                            if (rd32(sp) == 0x6C706D73) { // smpl
+                                                smplSize = rd32(sp + 4);
+                                                smplData = sp + 8;
+                                                break;
+                                            }
+                                            sp += 8 + ((rd32(sp + 4) + 1) & ~1);
+                                        }
+                                    } else if (listType == 0x61746470) { // pdta
+                                        pdta = p + 12;
+                                        pdtaSize = ckSz - 4;
+                                    }
+                                }
+                                p += 8 + ((ckSz + 1) & ~1);
+                            }
+                        }
+                        if (!smplData || !pdta) goto sf2_done;
+
+                        // Parse pdta sub-chunks
+                        struct SF2Chunk { const uint8_t* data; uint32_t size; };
+                        SF2Chunk phdr={}, pbag={}, pgen={}, inst={}, ibag={}, igen={}, shdr={};
+                        {
+                            const uint8_t* p = pdta;
+                            const uint8_t* pe = pdta + pdtaSize;
+                            while (p + 8 <= pe) {
+                                uint32_t tag = rd32(p);
+                                uint32_t sz = rd32(p + 4);
+                                SF2Chunk c = {p + 8, sz};
+                                if (tag == 0x72646870) phdr = c;       // phdr
+                                else if (tag == 0x67616270) pbag = c;  // pbag
+                                else if (tag == 0x6E656770) pgen = c;  // pgen
+                                else if (tag == 0x74736E69) inst = c;  // inst
+                                else if (tag == 0x67616269) ibag = c;  // ibag
+                                else if (tag == 0x6E656769) igen = c;  // igen
+                                else if (tag == 0x72646873) shdr = c;  // shdr
+                                p += 8 + ((sz + 1) & ~1);
+                            }
+                        }
+                        if (!phdr.data || !inst.data || !ibag.data || !igen.data || !shdr.data) goto sf2_done;
+
+                        // Parse sample headers
+                        struct SF2Sample {
+                            char name[21];
+                            uint32_t start, end, loopStart, loopEnd, sampleRate;
+                            uint8_t origPitch;
+                            int8_t pitchCorr;
+                            uint16_t sampleType;
+                        };
+                        int nSamples = shdr.size / 46;
+                        std::vector<SF2Sample> samples(nSamples);
+                        for (int i = 0; i < nSamples; i++) {
+                            const uint8_t* sp = shdr.data + i * 46;
+                            memset(samples[i].name, 0, 21);
+                            memcpy(samples[i].name, sp, 20);
+                            samples[i].start = rd32(sp + 20);
+                            samples[i].end = rd32(sp + 24);
+                            samples[i].loopStart = rd32(sp + 28);
+                            samples[i].loopEnd = rd32(sp + 32);
+                            samples[i].sampleRate = rd32(sp + 36);
+                            samples[i].origPitch = sp[40];
+                            samples[i].pitchCorr = (int8_t)sp[41];
+                            samples[i].sampleType = rd16(sp + 44);
+                        }
+
+                        // Parse instrument bags
+                        int nIBags = ibag.size / 4;
+                        struct SF2Bag { uint16_t genIdx, modIdx; };
+                        std::vector<SF2Bag> iBags(nIBags);
+                        for (int i = 0; i < nIBags; i++) {
+                            iBags[i].genIdx = rd16(ibag.data + i * 4);
+                            iBags[i].modIdx = rd16(ibag.data + i * 4 + 2);
+                        }
+
+                        // Parse instrument generators
+                        int nIGens = igen.size / 4;
+                        struct SF2Gen { uint16_t oper; int16_t amount; };
+                        std::vector<SF2Gen> iGens(nIGens);
+                        for (int i = 0; i < nIGens; i++) {
+                            iGens[i].oper = rd16(igen.data + i * 4);
+                            iGens[i].amount = rds16(igen.data + i * 4 + 2);
+                        }
+
+                        // Parse instruments
+                        int nInst = inst.size / 22;
+                        struct SF2Inst { char name[21]; uint16_t bagIdx; };
+                        std::vector<SF2Inst> insts(nInst);
+                        for (int i = 0; i < nInst; i++) {
+                            memset(insts[i].name, 0, 21);
+                            memcpy(insts[i].name, inst.data + i * 22, 20);
+                            insts[i].bagIdx = rd16(inst.data + i * 22 + 20);
+                        }
+
+                        // Parse preset headers to find which instrument each preset uses
+                        int nPresets = phdr.size / 38;
+                        int nPBags = pbag.size / 4;
+                        int nPGens = pgen.size / 4;
+                        std::vector<SF2Bag> pBags(nPBags);
+                        for (int i = 0; i < nPBags; i++) {
+                            pBags[i].genIdx = rd16(pbag.data + i * 4);
+                            pBags[i].modIdx = rd16(pbag.data + i * 4 + 2);
+                        }
+                        std::vector<SF2Gen> pGens(nPGens);
+                        for (int i = 0; i < nPGens; i++) {
+                            pGens[i].oper = rd16(pgen.data + i * 4);
+                            pGens[i].amount = rds16(pgen.data + i * 4 + 2);
+                        }
+
+                        // For each preset, find its instrument and build a SoundSample
+                        for (int pi = 0; pi < nPresets - 1; pi++) {
+                            const uint8_t* pp = phdr.data + pi * 38;
+                            char presetName[21] = {};
+                            memcpy(presetName, pp, 20);
+                            // Trim trailing spaces/nulls
+                            for (int k = 19; k >= 0 && (presetName[k] == ' ' || presetName[k] == 0); k--)
+                                presetName[k] = 0;
+                            uint16_t presetNum = rd16(pp + 20);
+                            uint16_t bank = rd16(pp + 22);
+                            uint16_t pBagStart = rd16(pp + 24);
+                            uint16_t pBagEnd = rd16(phdr.data + (pi + 1) * 38 + 24);
+                            bool isDrum = (bank == 128);
+
+                            // Find instrument index from preset generators
+                            int instIdx = -1;
+                            for (int bi = pBagStart; bi < pBagEnd && bi < nPBags - 1; bi++) {
+                                int g0 = pBags[bi].genIdx;
+                                int g1 = pBags[bi + 1].genIdx;
+                                for (int gi = g0; gi < g1 && gi < nPGens; gi++) {
+                                    if (pGens[gi].oper == 41) // instrument
+                                        instIdx = pGens[gi].amount;
+                                }
+                            }
+                            if (instIdx < 0 || instIdx >= nInst - 1) continue;
+
+                            // Build SoundSample from instrument zones
+                            SF2Inst& si = insts[instIdx];
+                            int iBagStart = si.bagIdx;
+                            int iBagEnd = insts[instIdx + 1].bagIdx;
+
+                            // Collect global zone defaults (zone 0 if it has no sampleID)
+                            int globalSampleModes = -1;
+                            int globalCoarseTune = 0;
+                            bool zone0HasSample = false;
+                            if (iBagStart < iBagEnd && iBagStart < nIBags - 1) {
+                                int g0 = iBags[iBagStart].genIdx;
+                                int g1 = iBags[iBagStart + 1].genIdx;
+                                for (int gi = g0; gi < g1 && gi < nIGens; gi++) {
+                                    if (iGens[gi].oper == 53) { zone0HasSample = true; break; }
+                                }
+                                if (!zone0HasSample) {
+                                    for (int gi = g0; gi < g1 && gi < nIGens; gi++) {
+                                        if (iGens[gi].oper == 54) globalSampleModes = iGens[gi].amount;
+                                        if (iGens[gi].oper == 51) globalCoarseTune = iGens[gi].amount;
+                                    }
+                                }
+                            }
+
+                            SoundSample smp;
+                            strncpy(smp.name, presetName, sizeof(smp.name) - 1);
+                            smp.builtIn = false;
+                            smp.category = SmpCat_SF2;
+                            smp.isDrumKit = isDrum;
+                            smp.loop = false;
+
+                            int firstZone = zone0HasSample ? iBagStart : iBagStart + 1;
+
+                            if (isDrum) {
+                                // Drum kit: each zone maps to a note
+                                for (int bi = firstZone; bi < iBagEnd && bi < nIBags - 1; bi++) {
+                                    int g0 = iBags[bi].genIdx;
+                                    int g1 = iBags[bi + 1].genIdx;
+                                    int smpIdx = -1, keyLo = 0, keyHi = 127, rootKey = -1;
+                                    for (int gi = g0; gi < g1 && gi < nIGens; gi++) {
+                                        if (iGens[gi].oper == 53) smpIdx = iGens[gi].amount;
+                                        else if (iGens[gi].oper == 43) { keyLo = iGens[gi].amount & 0xFF; keyHi = (iGens[gi].amount >> 8) & 0xFF; }
+                                        else if (iGens[gi].oper == 58) rootKey = iGens[gi].amount;
+                                    }
+                                    if (smpIdx < 0 || smpIdx >= nSamples - 1) continue;
+                                    SF2Sample& ss = samples[smpIdx];
+                                    if (ss.sampleType != 1 && ss.sampleType != 0) continue;
+                                    int numSmp = ss.end - ss.start;
+                                    if (numSmp <= 0) continue;
+                                    // Downsample 16-bit to 8-bit at 16384 Hz
+                                    int srcRate = ss.sampleRate;
+                                    int dstLen = (int)((float)numSmp / srcRate * 16384);
+                                    if (dstLen < 1) continue;
+                                    if (dstLen > 16384) dstLen = 16384;
+                                    for (int note = keyLo; note <= keyHi && note < 128; note++) {
+                                        DrumHit& hit = smp.drumHits[note];
+                                        hit.data.resize(dstLen);
+                                        hit.sampleRate = 16384;
+                                        const int16_t* src16 = (const int16_t*)(smplData + ss.start * 2);
+                                        for (int i = 0; i < dstLen; i++) {
+                                            int srcIdx = (int)((float)i / dstLen * numSmp);
+                                            if (srcIdx >= numSmp) srcIdx = numSmp - 1;
+                                            hit.data[i] = (int8_t)(src16[srcIdx] >> 8);
+                                        }
+                                        if (rootKey >= 0)
+                                            snprintf(hit.name, sizeof(hit.name), "%s", ss.name);
+                                    }
+                                }
+                            } else {
+                                // Melodic instrument: build regions
+                                for (int bi = firstZone; bi < iBagEnd && bi < nIBags - 1; bi++) {
+                                    int g0 = iBags[bi].genIdx;
+                                    int g1 = iBags[bi + 1].genIdx;
+                                    int smpIdx = -1, keyLo = 0, keyHi = 127, rootKey = -1;
+                                    int sampleModes = globalSampleModes;
+                                    int coarseTune = globalCoarseTune;
+                                    for (int gi = g0; gi < g1 && gi < nIGens; gi++) {
+                                        if (iGens[gi].oper == 53) smpIdx = iGens[gi].amount;
+                                        else if (iGens[gi].oper == 43) { keyLo = iGens[gi].amount & 0xFF; keyHi = (iGens[gi].amount >> 8) & 0xFF; }
+                                        else if (iGens[gi].oper == 58) rootKey = iGens[gi].amount;
+                                        else if (iGens[gi].oper == 54) sampleModes = iGens[gi].amount;
+                                        else if (iGens[gi].oper == 51) coarseTune = iGens[gi].amount;
+                                    }
+                                    if (smpIdx < 0 || smpIdx >= nSamples - 1) continue;
+                                    SF2Sample& ss = samples[smpIdx];
+                                    if (ss.sampleType != 1 && ss.sampleType != 0) continue;
+                                    int numSmp = ss.end - ss.start;
+                                    if (numSmp <= 0) continue;
+
+                                    SampleRegion rgn;
+                                    rgn.keyLo = keyLo;
+                                    rgn.keyHi = keyHi;
+                                    rgn.baseNote = (rootKey >= 0) ? rootKey : ss.origPitch;
+                                    rgn.baseNote += coarseTune; // apply tuning
+                                    rgn.sampleRate = ss.sampleRate;
+
+                                    // Downsample to 16384 Hz 8-bit
+                                    int dstLen = (int)((float)numSmp / ss.sampleRate * 16384);
+                                    if (dstLen < 1) continue;
+                                    if (dstLen > 32768) dstLen = 32768; // cap at 2 sec
+                                    rgn.data.resize(dstLen);
+                                    const int16_t* src16 = (const int16_t*)(smplData + ss.start * 2);
+                                    for (int i = 0; i < dstLen; i++) {
+                                        int srcIdx = (int)((float)i / dstLen * numSmp);
+                                        if (srcIdx >= numSmp) srcIdx = numSmp - 1;
+                                        rgn.data[i] = (int8_t)(src16[srcIdx] >> 8);
+                                    }
+                                    rgn.sampleRate = 16384;
+
+                                    // Loop points
+                                    bool hasLoop = (sampleModes == 1 || sampleModes == 3);
+                                    if (hasLoop && ss.loopStart >= ss.start && ss.loopEnd > ss.loopStart) {
+                                        rgn.hasLoop = true;
+                                        // Scale loop points to downsampled length
+                                        rgn.loopStart = (int)((float)(ss.loopStart - ss.start) / numSmp * dstLen);
+                                        rgn.loopEnd = (int)((float)(ss.loopEnd - ss.start) / numSmp * dstLen);
+                                        if (rgn.loopEnd > dstLen) rgn.loopEnd = dstLen;
+                                        if (rgn.loopStart >= rgn.loopEnd) rgn.hasLoop = false;
+                                    }
+
+                                    smp.regions.push_back(std::move(rgn));
+                                }
+                                // If only one region with full key range, also populate .data for preview
+                                if (smp.regions.size() == 1 && !smp.regions[0].data.empty()) {
+                                    smp.data = smp.regions[0].data;
+                                    smp.sampleRate = smp.regions[0].sampleRate;
+                                    smp.baseNote = smp.regions[0].baseNote;
+                                }
+                            }
+
+                            // Only add if we got data
+                            if (isDrum || !smp.regions.empty()) {
+                                sSoundBank.push_back(std::move(smp));
+                                sProjectDirty = true;
+                            }
+                        }
+                        sSelectedSample = (int)sSoundBank.size() - 1;
+                    }
+                    sf2_done:;
+                }
+            }
+#endif
+        }
+
         ImGui::Spacing();
 
         // Sample list (scrollable, categorized)
@@ -18718,6 +19041,7 @@ void FrameTick(float dt)
             drawCategory("Noise", SmpCat_Noise, false);
             drawCategory("GM", SmpCat_GM, true);
             drawCategory("Import", SmpCat_Import, false);
+            drawCategory("SF2", SmpCat_SF2, false);
 
             ImGui::EndChild();
         }
@@ -19248,10 +19572,10 @@ void FrameTick(float dt)
                 ImGui::EndCombo();
             }
             ImGui::PopItemWidth();
-            const char* gainNames[] = { "Normal", "Loud", "Quiet" };
+            const char* gainNames[] = { "Normal", "Loud", "Mid", "Quiet" };
             ImGui::PushItemWidth(-1);
             if (ImGui::BeginCombo("##mixgain", gainNames[inst.mixerGain])) {
-                for (int gi = 0; gi < 3; gi++) {
+                for (int gi = 0; gi < 4; gi++) {
                     if (ImGui::Selectable(gainNames[gi], inst.mixerGain == gi)) {
                         inst.mixerGain = gi;
                         sProjectDirty = true;
