@@ -851,6 +851,7 @@ struct SampleRegion {
     bool hasLoop = false;
     int loopStart = 0;
     int loopEnd = 0;
+    int fineTune = 0;     // fine tuning in cents (-100 to +100)
     // SF2 volume envelope (timecents, -12000 = 1ms, 0 = 1s, 1200 = 2s)
     float envDecaySec = 0;    // decay time in seconds (0 = not set)
     float envSustainDb = 0;   // sustain attenuation in dB (0 = full, 100 = silent)
@@ -899,9 +900,16 @@ struct MidiNote {
     int duration;       // length in ticks
 };
 
+struct MidiPitchBend {
+    int tick;
+    int channel;
+    int value; // -8192 to +8191 (0 = center)
+};
+
 struct MidiTrack {
     char name[32] = "Track";
     std::vector<MidiNote> notes;
+    std::vector<MidiPitchBend> bends;
 };
 
 // General MIDI instrument names
@@ -1290,6 +1298,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         int bitsPerSample = 16;
         int channels = 1;
         int unityNote = 60;  // MIDI note the sample was recorded at
+        int fineTune = 0;    // fine tuning in cents (-100 to +100)
         bool hasLoop = false;
         int loopStartSmp = 0; // loop start in source samples
         int loopEndSmp = 0;   // loop end in source samples
@@ -1334,6 +1343,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                         // wsmp: cbSize(4) usUnityNote(2) sFineTune(2) lAttenuation(4) fulOptions(4) cSampleLoops(4)
                         uint32_t cbSize = rd32(wp + 8);
                         wi.unityNote = rd16(wp + 8 + 4);
+                        wi.fineTune = (int16_t)rd16(wp + 8 + 6); // signed cents
                         if (wckSize >= 20) {
                             uint32_t nLoops = rd32(wp + 8 + 16);
                             if (nLoops > 0 && wckSize >= cbSize + 16) {
@@ -1462,7 +1472,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         const uint8_t* rEnd = ins.lrgn + ins.lrgnSize;
 
         // Collect all regions
-        struct RgnInfo { int keyLo, keyHi, waveIdx, unityNote; bool hasLoop; int loopStart, loopEnd; };
+        struct RgnInfo { int keyLo, keyHi, waveIdx, unityNote, fineTune; bool hasLoop; int loopStart, loopEnd; };
         std::vector<RgnInfo> allRegions;
         while (rp + 12 <= rEnd) {
             uint32_t ckId = rd32(rp);
@@ -1470,7 +1480,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
             if (ckId == 0x5453494C) {
                 uint32_t lt = rd32(rp + 8);
                 if (lt == 0x206E6772 || lt == 0x326E6772) {
-                    int keyLo = 0, keyHi = 127, waveIdx = -1, thisUnity = -1;
+                    int keyLo = 0, keyHi = 127, waveIdx = -1, thisUnity = -1, thisFineTune = -9999;
                     bool rgnLoop = false; int rgnLoopStart = 0, rgnLoopEnd = 0;
                     const uint8_t* rrp = rp + 12;
                     const uint8_t* rrEnd = rp + 8 + ckSize;
@@ -1484,6 +1494,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                             waveIdx = (int)rd32(rrp + 16);
                         } else if (rckId == 0x706D7377 && rckSize >= 8) {
                             thisUnity = rd16(rrp + 8 + 4);
+                            thisFineTune = (int16_t)rd16(rrp + 8 + 6);
                             // Parse region-level loop points
                             if (rckSize >= 20) {
                                 uint32_t cbSz = rd32(rrp + 8);
@@ -1500,11 +1511,12 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                     }
                     if (waveIdx >= 0 && waveIdx < (int)waves.size() && waves[waveIdx].data) {
                         int unity = (thisUnity >= 0) ? thisUnity : waves[waveIdx].unityNote;
+                        int ft = (thisFineTune != -9999) ? thisFineTune : waves[waveIdx].fineTune;
                         // Use region-level loop if present, else fall back to wave-level
                         bool useLoop = rgnLoop ? true : waves[waveIdx].hasLoop;
                         int ls = rgnLoop ? rgnLoopStart : waves[waveIdx].loopStartSmp;
                         int le = rgnLoop ? rgnLoopEnd : waves[waveIdx].loopEndSmp;
-                        allRegions.push_back({keyLo, keyHi, waveIdx, unity, useLoop, ls, le});
+                        allRegions.push_back({keyLo, keyHi, waveIdx, unity, ft, useLoop, ls, le});
                     }
                 }
             }
@@ -1539,8 +1551,10 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         // Add all regions (including primary) for multi-sample playback
         for (auto& rgn : allRegions) {
             SampleRegion sr;
-            if (downsampleWave(waves[rgn.waveIdx], rgn.unityNote, rgn.keyLo, rgn.keyHi, rgn.hasLoop, rgn.loopStart, rgn.loopEnd, sr))
+            if (downsampleWave(waves[rgn.waveIdx], rgn.unityNote, rgn.keyLo, rgn.keyHi, rgn.hasLoop, rgn.loopStart, rgn.loopEnd, sr)) {
+                sr.fineTune = rgn.fineTune;
                 s.regions.push_back(std::move(sr));
+            }
         }
 
         bank.push_back(std::move(s));
@@ -2205,7 +2219,18 @@ static bool ParseMidiFile(const char* path, MidiFile& out)
                         }
                     }
                 }
-            } else if (cmd == 0xA0 || cmd == 0xB0 || cmd == 0xE0) {
+            } else if (cmd == 0xE0) {
+                // Pitch bend
+                int lo = tp[0] & 0x7F;
+                int hi = tp[1] & 0x7F;
+                int bend = ((hi << 7) | lo) - 8192; // -8192 to +8191
+                MidiPitchBend pb;
+                pb.tick = absTick;
+                pb.channel = ch;
+                pb.value = bend;
+                trk.bends.push_back(pb);
+                tp += 2;
+            } else if (cmd == 0xA0 || cmd == 0xB0) {
                 tp += 2; // 2 data bytes
             } else if (cmd == 0xC0) {
                 // Program Change — capture instrument (skip ch 10, always drums in GM)
@@ -2290,6 +2315,7 @@ struct AudioVoice {
     bool loop = false;
     uint64_t pos = 0;       // 16.16 fixed-point position (64-bit for long samples)
     uint32_t inc = 0;       // 16.16 fixed-point increment (for pitch)
+    uint32_t baseInc = 0;   // inc without pitch bend (for recalculating)
     int volume = 128;       // 0-255
     bool active = false;
     int remaining = -1;     // samples until note-off (-1 = until end of data)
@@ -2339,6 +2365,7 @@ static bool sMidiRmbDragging = false;
 static float sMidiRmbStartX = 0, sMidiRmbStartY = 0;
 static float sMidiZoom = 1.0f;     // piano roll zoom (1.0 = fit all, <1 = zoom in, >1 = zoom out)
 static float sMidiScrollX = 0.0f;  // horizontal scroll offset (0-1 range)
+static int sMidiPitchBend[16] = {}; // per-channel pitch bend (-8192 to +8191), reset on play
 
 // Note-to-frequency table (A4 = 440Hz)
 static float NoteToFreq(int note) {
@@ -2406,6 +2433,7 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                         bool hasRegionLoop = false; // DLS sustain loop
 
                         int noteBaseNote = smp.baseNote; // may be overridden by region
+                        int noteFineTune = 0; // cents
 
                         if (smp.isDrumKit) {
                             // Drum kit: note selects the sample
@@ -2432,6 +2460,7 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             smpLen = (int)best->data.size();
                             smpRate = best->sampleRate;
                             noteBaseNote = best->baseNote;
+                            noteFineTune = best->fineTune;
                             if (best->hasLoop && !smp.noSustainLoop) {
                                 smpLoop = true;
                                 smpLoopStart = best->loopStart;
@@ -2489,10 +2518,16 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             } else {
                                 // Long sample (WAV): play at native rate, pitch-shift relative to base note
                                 float baseInc = (float)smpRate / (float)kAudioSampleRate * 65536.0f;
-                                float semitones = (float)(n.note + smp.octaveShift * 12 - noteBaseNote);
+                                float semitones = (float)(n.note + smp.octaveShift * 12 - noteBaseNote) - (float)noteFineTune / 100.0f;
                                 v.inc = (uint32_t)(baseInc * powf(2.0f, semitones / 12.0f));
                                 if (!hasRegionLoop && !smp.loop)
                                     v.loop = false; // long samples without DLS or user loops are one-shots
+                            }
+                            v.baseInc = v.inc;
+                            // Apply current pitch bend for this channel
+                            if (sMidiPitchBend[n.channel] != 0) {
+                                float bendSemi = (float)sMidiPitchBend[n.channel] / 8192.0f * 2.0f; // ±2 semitones
+                                v.inc = (uint32_t)(v.baseInc * powf(2.0f, bendSemi / 12.0f));
                             }
                             v.volume = n.velocity * mf.channelVolume[n.channel] / 100;
                             if (v.volume > 160) v.volume = 160;
@@ -2515,6 +2550,22 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                 }
             }
         }
+        // Process pitch bend events in this tick range
+        for (auto& t : mf.tracks) {
+            for (auto& pb : t.bends) {
+                if (pb.tick >= sMidiPlayTick && pb.tick < newTick) {
+                    sMidiPitchBend[pb.channel] = pb.value;
+                    // Update all active voices on this channel
+                    for (int v = 0; v < kMaxVoices; v++) {
+                        if (sVoices[v].active && sVoices[v].midiChannel == pb.channel && sVoices[v].baseInc > 0) {
+                            float bendSemi = (float)pb.value / 8192.0f * 2.0f; // ±2 semitones
+                            sVoices[v].inc = (uint32_t)(sVoices[v].baseInc * powf(2.0f, bendSemi / 12.0f));
+                        }
+                    }
+                }
+            }
+        }
+
         sMidiPlayTime += secPerBuf;
         sMidiPlayTick = newTick;
 
@@ -2805,6 +2856,7 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         int playLen = (int)smp.data.size();
         int playRate = smp.sampleRate;
         int playBase = smp.baseNote;
+        int playFineTune = 0;
         bool playLoop = false;
         int playLoopStart = 0;
         int playLoopEnd = 0;
@@ -2820,6 +2872,7 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
             playLen = (int)best->data.size();
             playRate = best->sampleRate;
             playBase = best->baseNote;
+                playFineTune = best->fineTune;
             if (best->hasLoop && !smp.noSustainLoop) {
                 playLoop = true;
                 playLoopStart = best->loopStart;
@@ -2834,7 +2887,7 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         v.loopStart = playLoopStart;
         v.loopEnd = playLoopEnd;
         v.pos = 0;
-        float previewSemi = (float)(shiftedNote - playBase);
+        float previewSemi = (float)(shiftedNote - playBase) - (float)playFineTune / 100.0f;
         v.inc = (uint32_t)((float)playRate / (float)kAudioSampleRate * 65536.0f * powf(2.0f, previewSemi / 12.0f));
         v.volume = 160;
         if (playLoop) {
@@ -2902,6 +2955,7 @@ static void AudioPlayMidi(int midiIdx) {
     sMidiPlayIdx = midiIdx;
     sMidiPlayTime = 0;
     sMidiPlayTick = 0;
+    memset(sMidiPitchBend, 0, sizeof(sMidiPitchBend));
     sMidiPlaying = true;
 }
 
