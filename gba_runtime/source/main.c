@@ -99,21 +99,22 @@ static int snd_cur_buf = 0;
 
 typedef struct {
     const s8* data;
-    int length;
     int pos;           // fixed 24.8
     int inc;           // fixed 24.8
-    int vol;           // 0-127
-    int active;
-    int remaining;     // samples left (-1 = in release phase)
+    int length;
     int loopLen;       // loop end << 8
     int loopStart;     // loop start << 8
-    int loop;          // 1 = loop (oscillators), 0 = one-shot (drums)
-    int interp;        // 0 = nearest, 1 = linear interpolation
-    int gainShift;     // volume shift: 7 = normal, 6 = loud
+    int vol;           // 0-127
     int volFade;       // current volume in 8.8 fixed point (decays per frame)
     int volDec;        // volume decrement per frame in 8.8 fixed point
+    int remaining;     // samples left (-1 = in release phase)
     int releaseRem;    // samples left in release (0 = not releasing)
     int releaseLen;    // total release length in output samples
+    int gainShift;     // volume shift: 7 = normal, 6 = loud
+    u8 active;
+    u8 loop;           // 1 = loop, 0 = one-shot
+    u8 interp;         // 0 = nearest, 1 = linear interpolation
+    u8 pad;
 } SndVoice;
 
 EWRAM_DATA static SndVoice snd_voices[SND_MAX_VOICES];
@@ -209,29 +210,27 @@ IWRAM_CODE static void afn_sound_mix(void) {
         const s8* wdata = vc->data;
         int pos = vc->pos;
         int inc = vc->inc;
-        // Compute volume once per frame
+        // Compute volume once per frame — precompute shifted vol to remove shift from inner loop
         int vol = vc->volFade >> 8;
         if (vol > vc->vol) vol = vc->vol;
         if (vol < 0) vol = 0;
+        // Soft fadeout in last 256 samples of note
         if (vc->remaining > 0 && vc->remaining <= 256)
             vol = (vol * vc->remaining) >> 8;
         if (vc->remaining < 0 && vc->releaseRem > 0 && vc->releaseLen > 0)
-            vol = vol * vc->releaseRem / vc->releaseLen; // once per frame, not per sample
+            vol = vol * vc->releaseRem / vc->releaseLen;
         int gs = vc->gainShift;
         int done = 0;
         if (vc->loop) {
-            // Looping voice: process in chunks up to loop boundary (no branch in hot path)
             int loopLen = vc->loopLen;
             int loopSpan = loopLen - vc->loopStart;
             int i = 0;
             while (i < n) {
-                // How many samples until we hit loop end?
                 int samplesUntilWrap = (loopLen - pos + inc - 1) / inc;
                 int chunk = n - i;
                 if (samplesUntilWrap > 0 && samplesUntilWrap < chunk)
                     chunk = samplesUntilWrap;
                 int end = i + chunk;
-                // Tight inner loop — no branches
                 for (; i < end; i++) {
                     mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
                     pos += inc;
@@ -242,7 +241,6 @@ IWRAM_CODE static void afn_sound_mix(void) {
                 }
             }
         } else {
-            // Non-looping: straight mix until end of sample
             int lenFixed = vc->length << 8;
             for (int i = 0; i < n; i++) {
                 mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
@@ -257,7 +255,6 @@ IWRAM_CODE static void afn_sound_mix(void) {
             if (vc->remaining <= 0) {
                 vc->remaining = -1;
                 vc->releaseRem = vc->releaseLen;
-                // Keep looping during release — fade volume instead
             }
         } else if (vc->remaining < 0) {
             vc->releaseRem -= n;
@@ -267,11 +264,16 @@ IWRAM_CODE static void afn_sound_mix(void) {
     }
 
     // Clamp and write to output buffer (4 samples at a time)
-    for (int i = 0; i < SND_BUF_SIZE; i++) {
-        int m = mix_acc[i];
-        if (m > 127) m = 127;
-        else if (m < -128) m = -128;
-        buf[i] = (s8)m;
+    {
+        u32* dst = (u32*)buf;
+        for (int i = 0; i < SND_BUF_SIZE; i += 4) {
+            int a = mix_acc[i], b = mix_acc[i+1], c = mix_acc[i+2], d = mix_acc[i+3];
+            if (a > 127) a = 127; else if (a < -128) a = -128;
+            if (b > 127) b = 127; else if (b < -128) b = -128;
+            if (c > 127) c = 127; else if (c < -128) c = -128;
+            if (d > 127) d = 127; else if (d < -128) d = -128;
+            dst[i >> 2] = (u32)((u8)a | ((u8)b << 8) | ((u8)c << 16) | ((u8)d << 24));
+        }
     }
 }
 
@@ -340,10 +342,10 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     }
     vc->remaining = durSamples;
     vc->interp = (snd_seq_active >= 0) ? afn_snd_interp[snd_seq_active] : 0;
-    // gainShift: 0=Normal(>>7), 1=Loud(>>6), 2=Quiet(>>9)
+    // gainShift: 0=Normal(>>7), 1=Loud(>>6), 2=Mid(>>8), 3=Quiet(>>9)
     {
         int g = (snd_seq_active >= 0) ? afn_snd_gain[snd_seq_active] : 0;
-        vc->gainShift = (g == 1) ? 6 : (g == 2) ? 9 : 7;
+        vc->gainShift = (g == 1) ? 6 : (g == 2) ? 8 : (g == 3) ? 9 : 7;
     }
     vc->releaseRem = 0;
     vc->releaseLen = afn_pcm_release[smpIdx]; // per-sample release in output samples
