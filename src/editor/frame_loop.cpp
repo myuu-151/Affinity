@@ -19037,6 +19037,13 @@ void FrameTick(float dt)
                                 }
                             }
 
+                            // Mark as having DLS-style loop points so MIDI path uses exact region values
+                            if (!isDrum) {
+                                for (auto& rgn : smp.regions) {
+                                    if (rgn.hasLoop) { smp.loopFromDLS = true; break; }
+                                }
+                            }
+
                             // Only add if we got data
                             if (isDrum || !smp.regions.empty()) {
                                 sSoundBank.push_back(std::move(smp));
