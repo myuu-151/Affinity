@@ -844,12 +844,17 @@ struct DrumHit {
 
 struct SampleRegion {
     std::vector<int8_t> data;
+    std::vector<int16_t> data16; // 16-bit for SF2 (editor preview only)
     int sampleRate = 16384;
     int baseNote = 60;
     int keyLo = 0, keyHi = 127;
     bool hasLoop = false;
-    int loopStart = 0; // in downsampled samples
-    int loopEnd = 0;   // in downsampled samples
+    int loopStart = 0;
+    int loopEnd = 0;
+    // SF2 volume envelope (timecents, -12000 = 1ms, 0 = 1s, 1200 = 2s)
+    float envDecaySec = 0;    // decay time in seconds (0 = not set)
+    float envSustainDb = 0;   // sustain attenuation in dB (0 = full, 100 = silent)
+    float envReleaseSec = 0;  // release time in seconds
 };
 
 struct EnvPoint {
@@ -2278,6 +2283,7 @@ static constexpr int kMaxVoices = 24;
 
 struct AudioVoice {
     const int8_t* data = nullptr;
+    const int16_t* data16 = nullptr; // 16-bit source (SF2), used if non-null
     int length = 0;
     int loopStart = 0;
     int loopEnd = 0;      // 0 = use length as loop end
@@ -2390,6 +2396,7 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                         SoundSample& smp = sSoundBank[bankIdx];
 
                         const int8_t* smpData = nullptr;
+                        const int16_t* smpData16 = nullptr;
                         int smpLen = 0;
                         int smpRate = smp.sampleRate;
                         bool smpLoop = true;
@@ -2421,6 +2428,7 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             }
                             if (!best) best = &smp.regions[0]; // fallback
                             smpData = best->data.data();
+                            smpData16 = !best->data16.empty() ? best->data16.data() : nullptr;
                             smpLen = (int)best->data.size();
                             smpRate = best->sampleRate;
                             noteBaseNote = best->baseNote;
@@ -2443,6 +2451,7 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                         if (smpData && smpLen > 0) {
                             AudioVoice& v = sVoices[vi];
                             v.data = smpData;
+                            v.data16 = smpData16;
                             v.length = smpLen;
                             v.loop = smpLoop;
                             if (smp.loop && !isDrum && smpLen > 0) {
@@ -2583,7 +2592,7 @@ static void AudioMixBuffer(int8_t* buf, int len) {
         int loopEndPt = (voice.loopEnd > 0) ? voice.loopEnd : voice.length;
         int loopLen = voice.loop ? (loopEndPt - voice.loopStart) : 0;
         int xfadeLen = (voice.loop && !voice.loopFromDLS && loopLen > 0) ? 1024 : 0;
-        if (xfadeLen > loopLen / 2) xfadeLen = loopLen / 2;
+        if (xfadeLen > loopLen / 8) xfadeLen = loopLen / 8; // keep crossfade small relative to loop
 
         // --- Inner sample loop (tight, minimal branching) ---
         for (int i = iStart; i < len; i++) {
@@ -2607,19 +2616,47 @@ static void AudioMixBuffer(int8_t* buf, int len) {
             } else if (sampleIdx >= voice.length) {
                 voice.active = false; break;
             }
-            int smpVal = voice.data[sampleIdx];
+            // Fade out near end of non-looping sample
+            int smpVol = vol;
+            if (!voice.loop && voice.length > 0) {
+                int fadeZone = voice.length / 4;
+                if (fadeZone > 8000) fadeZone = 8000;
+                if (fadeZone < 500) fadeZone = 500;
+                int distToEnd = voice.length - sampleIdx;
+                if (distToEnd < fadeZone)
+                    smpVol = vol * distToEnd / fadeZone;
+            }
+            // Linear interpolation between samples
+            int smpVal;
+            {
+                int frac = (int)(voice.pos & 0xFFFF);
+                int nextIdx = sampleIdx + 1;
+                if (voice.loop && loopLen > 0 && nextIdx >= loopEndPt)
+                    nextIdx = voice.loopStart;
+                else if (nextIdx >= voice.length)
+                    nextIdx = voice.length - 1;
+                if (voice.data16) {
+                    // 16-bit source (SF2): interpolate in 16-bit, output scaled to 8-bit range
+                    int s0 = voice.data16[sampleIdx];
+                    int s1 = voice.data16[nextIdx];
+                    smpVal = (s0 + ((s1 - s0) * frac >> 16)) >> 8;
+                } else {
+                    int s0 = voice.data[sampleIdx];
+                    int s1 = voice.data[nextIdx];
+                    smpVal = s0 + ((s1 - s0) * frac >> 16);
+                }
+            }
             // Crossfade at loop boundary (integer math)
             if (xfadeLen > 0) {
                 int distToEnd = loopEndPt - sampleIdx;
                 if (distToEnd <= xfadeLen && distToEnd > 0 && voice.loopStart < voice.length) {
                     int blendIdx = voice.loopStart + (xfadeLen - distToEnd);
                     if (blendIdx >= loopEndPt) blendIdx = voice.loopStart;
-                    int blendVal = voice.data[blendIdx];
-                    // Integer blend: (smpVal * distToEnd + blendVal * (xfadeLen - distToEnd)) / xfadeLen
+                    int blendVal = voice.data16 ? (voice.data16[blendIdx] >> 8) : (int)voice.data[blendIdx];
                     smpVal = (smpVal * distToEnd + blendVal * (xfadeLen - distToEnd)) / xfadeLen;
                 }
             }
-            mix[i] += (int16_t)(smpVal * vol / 256);
+            mix[i] += (int16_t)(smpVal * smpVol / 256);
             voice.pos += voice.inc;
             voice.elapsed++;
         }
@@ -2688,6 +2725,7 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
     AudioVoice& v = sVoices[vi];
 
     int shiftedNote = note + smp.octaveShift * 12;
+    v.data16 = nullptr; // clear by default, set only for SF2 regions
     if (smp.loop && (int)smp.data.size() <= 64) {
         // Short single-cycle oscillator: play as continuous drone at requested pitch
         v.data = smp.data.data();
@@ -2763,6 +2801,7 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         // Long one-shot sample (WAV, kick, snare, etc.): play at native rate, apply octave shift
         // For GM multi-sample instruments, pick the region matching the preview note
         const int8_t* playData = smp.data.data();
+        const int16_t* playData16 = nullptr;
         int playLen = (int)smp.data.size();
         int playRate = smp.sampleRate;
         int playBase = smp.baseNote;
@@ -2777,6 +2816,7 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
             }
             if (!best) best = &smp.regions[0];
             playData = best->data.data();
+            if (!best->data16.empty()) playData16 = best->data16.data();
             playLen = (int)best->data.size();
             playRate = best->sampleRate;
             playBase = best->baseNote;
@@ -2788,6 +2828,7 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
             }
         }
         v.data = playData;
+        v.data16 = playData16;
         v.length = playLen;
         v.loop = playLoop;
         v.loopStart = playLoopStart;
@@ -2797,18 +2838,46 @@ static void AudioPlaySample(int bankIdx, int note = 60) {
         v.inc = (uint32_t)((float)playRate / (float)kAudioSampleRate * 65536.0f * powf(2.0f, previewSemi / 12.0f));
         v.volume = 160;
         if (playLoop) {
-            // Sustain-looped: play for 2 seconds then release
-            v.remaining = kAudioSampleRate * 2;
-            v.releaseLen = playReleaseLen;
+            float sustainSec;
+            // Use SF2 envelope if available
+            SampleRegion* bestRgn = nullptr;
+            if (!smp.regions.empty()) {
+                for (auto& rgn : smp.regions) {
+                    if (note >= rgn.keyLo && note <= rgn.keyHi) { bestRgn = &rgn; break; }
+                }
+                if (!bestRgn) bestRgn = &smp.regions[0];
+            }
+            if (bestRgn && bestRgn->envDecaySec > 0.001f && smp.category == SmpCat_SF2) {
+                // Use SF2 decay + sustain level to determine preview duration
+                // If sustain is loud (low dB), note holds longer; if quiet (high dB), short decay
+                float sustainAtten = bestRgn->envSustainDb; // dB attenuation (0=full, 100=silent)
+                if (sustainAtten >= 80.0f) {
+                    // Sustain is nearly silent — play just the decay
+                    sustainSec = bestRgn->envDecaySec;
+                } else {
+                    // Sustain has volume — play decay + some sustain time
+                    sustainSec = bestRgn->envDecaySec + 1.0f * (1.0f - sustainAtten / 100.0f);
+                }
+                if (sustainSec > 3.0f) sustainSec = 3.0f;
+                if (sustainSec < 0.15f) sustainSec = 0.15f;
+                playReleaseLen = (int)(bestRgn->envReleaseSec * kAudioSampleRate);
+                if (playReleaseLen < kAudioSampleRate / 20) playReleaseLen = kAudioSampleRate / 20; // min 50ms
+                if (playReleaseLen > kAudioSampleRate * 2) playReleaseLen = kAudioSampleRate * 2;
+            } else {
+                // Non-SF2: pitch-dependent sustain
+                float octavesAboveC2 = (float)(shiftedNote - 36) / 12.0f;
+                if (octavesAboveC2 < 0) octavesAboveC2 = 0;
+                sustainSec = 2.0f / powf(2.0f, octavesAboveC2 * 0.5f);
+                if (sustainSec < 0.3f) sustainSec = 0.3f;
+            }
+            v.remaining = (int)(sustainSec * kAudioSampleRate);
+            v.releaseLen = playReleaseLen > 0 ? playReleaseLen
+                         : (int)(sustainSec * 0.5f * kAudioSampleRate);
         } else {
-            // One-shot: play full sample, loop to keep voice alive for release fade
+            // One-shot: play full sample, mixer handles fade-out near end
             int smpDur = (int)((float)playLen / ((float)v.inc / 65536.0f));
-            int relSamples = smp.releaseMs > 0 ? (smp.releaseMs * kAudioSampleRate / 1000) : (kAudioSampleRate / 4);
-            v.loop = true; // keep looping so voice stays alive through release
-            v.loopStart = playLen > 64 ? playLen - 64 : 0; // loop last tiny bit (near-silence)
-            v.loopEnd = playLen;
-            v.remaining = smpDur > relSamples ? smpDur - relSamples : smpDur;
-            v.releaseLen = relSamples;
+            v.remaining = smpDur;
+            v.releaseLen = 0;
         }
         v.totalDuration = v.remaining;
         v.elapsed = 0;
@@ -18905,12 +18974,16 @@ void FrameTick(float dt)
                                     int smpIdx = -1, keyLo = 0, keyHi = 127, rootKey = -1;
                                     int sampleModes = globalSampleModes;
                                     int coarseTune = globalCoarseTune;
+                                    int decayVolEnv = -12000, sustainVolEnv = 0, releaseVolEnv = -12000;
                                     for (int gi = g0; gi < g1 && gi < nIGens; gi++) {
                                         if (iGens[gi].oper == 53) smpIdx = iGens[gi].amount;
                                         else if (iGens[gi].oper == 43) { keyLo = iGens[gi].amount & 0xFF; keyHi = (iGens[gi].amount >> 8) & 0xFF; }
                                         else if (iGens[gi].oper == 58) rootKey = iGens[gi].amount;
                                         else if (iGens[gi].oper == 54) sampleModes = iGens[gi].amount;
                                         else if (iGens[gi].oper == 51) coarseTune = iGens[gi].amount;
+                                        else if (iGens[gi].oper == 36) decayVolEnv = iGens[gi].amount;   // decayVolEnv
+                                        else if (iGens[gi].oper == 37) sustainVolEnv = iGens[gi].amount; // sustainVolEnv (centibels)
+                                        else if (iGens[gi].oper == 38) releaseVolEnv = iGens[gi].amount; // releaseVolEnv
                                     }
                                     if (smpIdx < 0 || smpIdx >= nSamples - 1) continue;
                                     SF2Sample& ss = samples[smpIdx];
@@ -18925,28 +18998,34 @@ void FrameTick(float dt)
                                     rgn.baseNote += coarseTune; // apply tuning
                                     rgn.sampleRate = ss.sampleRate;
 
-                                    // Downsample to 16384 Hz 8-bit
-                                    int dstLen = (int)((float)numSmp / ss.sampleRate * 16384);
-                                    if (dstLen < 1) continue;
-                                    if (dstLen > 32768) dstLen = 32768; // cap at 2 sec
-                                    rgn.data.resize(dstLen);
+                                    // Keep original 16-bit data at original sample rate
+                                    int dstLen = numSmp;
+                                    if (dstLen > 262144) dstLen = 262144; // cap ~6s at 44100
                                     const int16_t* src16 = (const int16_t*)(smplData + ss.start * 2);
+                                    rgn.data16.resize(dstLen);
+                                    rgn.data.resize(dstLen); // 8-bit copy for waveform display / GBA export
                                     for (int i = 0; i < dstLen; i++) {
-                                        int srcIdx = (int)((float)i / dstLen * numSmp);
-                                        if (srcIdx >= numSmp) srcIdx = numSmp - 1;
-                                        rgn.data[i] = (int8_t)(src16[srcIdx] >> 8);
+                                        rgn.data16[i] = src16[i];
+                                        rgn.data[i] = (int8_t)(src16[i] >> 8);
                                     }
-                                    rgn.sampleRate = 16384;
+                                    rgn.sampleRate = ss.sampleRate;
 
-                                    // Loop points
+                                    // Loop points (direct, no conversion needed)
                                     bool hasLoop = (sampleModes == 1 || sampleModes == 3);
                                     if (hasLoop && ss.loopStart >= ss.start && ss.loopEnd > ss.loopStart) {
                                         rgn.hasLoop = true;
-                                        rgn.loopStart = (int)((float)(ss.loopStart - ss.start) / numSmp * dstLen);
-                                        rgn.loopEnd = (int)((float)(ss.loopEnd - ss.start) / numSmp * dstLen);
+                                        rgn.loopStart = ss.loopStart - ss.start;
+                                        rgn.loopEnd = ss.loopEnd - ss.start;
                                         if (rgn.loopEnd > dstLen) rgn.loopEnd = dstLen;
                                         if (rgn.loopStart >= rgn.loopEnd) rgn.hasLoop = false;
                                     }
+
+                                    // Convert SF2 timecents to seconds: seconds = 2^(tc/1200)
+                                    rgn.envDecaySec = powf(2.0f, (float)decayVolEnv / 1200.0f);
+                                    rgn.envSustainDb = (float)sustainVolEnv / 10.0f; // centibels to dB
+                                    rgn.envReleaseSec = powf(2.0f, (float)releaseVolEnv / 1200.0f);
+                                    if (rgn.envDecaySec > 10.0f) rgn.envDecaySec = 10.0f;
+                                    if (rgn.envReleaseSec > 5.0f) rgn.envReleaseSec = 5.0f;
 
                                     smp.regions.push_back(std::move(rgn));
                                 }
@@ -19243,6 +19322,69 @@ void FrameTick(float dt)
                 }
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("LMB: draw | RMB drag: select | Ctrl+I: invert | Del: delete");
+
+            // Piano roll for multi-region instruments
+            if (!s.regions.empty()) {
+                float pianoH = Scaled(24);
+                ImVec2 pp = ImGui::GetCursorScreenPos();
+                // Draw 2 octaves centered around middle C (C3-C5, notes 48-72)
+                int noteMin = 36, noteMax = 84;
+                int numNotes = noteMax - noteMin;
+                float keyW = availW / numNotes;
+                static int sHoveredNote = -1;
+                // Background
+                dl->AddRectFilled(pp, ImVec2(pp.x + availW, pp.y + pianoH), 0xFF1A1A1A);
+                // Draw keys
+                for (int n = noteMin; n < noteMax; n++) {
+                    int pc = n % 12;
+                    bool isBlack = (pc == 1 || pc == 3 || pc == 6 || pc == 8 || pc == 10);
+                    float x0 = pp.x + (n - noteMin) * keyW;
+                    float x1 = x0 + keyW;
+                    // Find which region covers this note
+                    bool hasRegion = false;
+                    for (auto& rgn : s.regions) {
+                        if (n >= rgn.keyLo && n <= rgn.keyHi) { hasRegion = true; break; }
+                    }
+                    uint32_t col;
+                    if (n == sHoveredNote)
+                        col = 0xFF4488FF;
+                    else if (!hasRegion)
+                        col = 0xFF222222;
+                    else if (isBlack)
+                        col = 0xFF2A2A2A;
+                    else
+                        col = 0xFF3A3A3A;
+                    dl->AddRectFilled(ImVec2(x0, pp.y), ImVec2(x1 - 1, pp.y + pianoH), col);
+                    // C labels
+                    if (pc == 0) {
+                        char lbl[8]; snprintf(lbl, sizeof(lbl), "C%d", n / 12 - 1);
+                        dl->AddText(ImVec2(x0 + 1, pp.y + pianoH - Scaled(12)), 0xFF888888, lbl);
+                    }
+                }
+                // Region boundaries
+                for (auto& rgn : s.regions) {
+                    if (rgn.keyLo >= noteMin && rgn.keyLo < noteMax) {
+                        float rx = pp.x + (rgn.keyLo - noteMin) * keyW;
+                        dl->AddLine(ImVec2(rx, pp.y), ImVec2(rx, pp.y + pianoH), 0xFF00AAFF, 1.0f);
+                    }
+                }
+                ImGui::InvisibleButton("##pianoroll", ImVec2(availW, pianoH));
+                if (ImGui::IsItemHovered()) {
+                    ImVec2 mp = ImGui::GetMousePos();
+                    sHoveredNote = noteMin + (int)((mp.x - pp.x) / keyW);
+                    if (sHoveredNote < noteMin) sHoveredNote = noteMin;
+                    if (sHoveredNote >= noteMax) sHoveredNote = noteMax - 1;
+                    static const char* noteNames[] = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"};
+                    ImGui::SetTooltip("Note %d (%s%d)", sHoveredNote,
+                        noteNames[sHoveredNote % 12], sHoveredNote / 12 - 1);
+                    if (ImGui::IsMouseClicked(0)) {
+                        AudioPlaySample(sSelectedSample, sHoveredNote);
+                    }
+                } else {
+                    sHoveredNote = -1;
+                }
+            }
+
             // Smooth button — averages adjacent samples to round off edges
             if (ImGui::Button("Smooth##smp", ImVec2(Scaled(55), 0)) && !s.data.empty()) {
                 if (sSampleOriginal.find(sSelectedSample) == sSampleOriginal.end())
