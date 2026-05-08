@@ -890,6 +890,10 @@ struct SoundSample {
     int decayPct = 0;              // volume decay over note duration (0-100%, 0 = no decay)
     int decayMinMs = 500;          // minimum note length for decay to apply (ms)
     std::vector<SampleRegion> regions; // multi-sample regions (GM instruments)
+    // DLS articulation LFO vibrato
+    float lfoFreqHz = 5.0f;       // vibrato LFO rate in Hz
+    float lfoDepthCents = 0.0f;   // default vibrato depth in cents (always active)
+    float lfoCC1Cents = 0.0f;     // vibrato depth in cents at CC#1=127
 };
 
 struct MidiNote {
@@ -906,10 +910,18 @@ struct MidiPitchBend {
     int value; // -8192 to +8191 (0 = center)
 };
 
+struct MidiCC {
+    int tick;
+    int channel;
+    int cc;     // controller number (1 = modulation, etc.)
+    int value;  // 0-127
+};
+
 struct MidiTrack {
     char name[32] = "Track";
     std::vector<MidiNote> notes;
     std::vector<MidiPitchBend> bends;
+    std::vector<MidiCC> ccs;
 };
 
 // General MIDI instrument names
@@ -1382,7 +1394,13 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
     if (!lins) return 0;
 
     // Parse all melodic instruments (bank 0, non-percussion)
-    struct InsInfo { int program; const uint8_t* lrgn; uint32_t lrgnSize; };
+    struct InsInfo {
+        int program;
+        const uint8_t* lrgn; uint32_t lrgnSize;
+        float lfoFreqHz = 5.0f;     // LFO rate (default 5 Hz)
+        float lfoDepthCents = 0.0f; // LFO → pitch depth (default vibrato, cents)
+        float lfoCC1Cents = 0.0f;   // LFO → pitch depth controlled by CC#1 (cents)
+    };
     std::vector<InsInfo> instruments;
     {
         const uint8_t* p = lins;
@@ -1397,6 +1415,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                 int program = -1;
                 const uint8_t* rgn = nullptr;
                 uint32_t rgnSize = 0;
+                float lfoFreq = 5.0f, lfoDepth = 0.0f, lfoCC1 = 0.0f;
                 while (ip + 8 <= iEnd) {
                     uint32_t ickId = rd32(ip);
                     uint32_t ickSize = rd32(ip + 4);
@@ -1408,12 +1427,56 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                         if (lt == 0x6E67726C) { // 'lrgn'
                             rgn = ip + 12;
                             rgnSize = ickSize - 4;
+                        } else if (lt == 0x7472616C || lt == 0x3272616C) { // 'lart' or 'lar2' LIST
+                            // Parse articulation chunks inside lart/lar2
+                            const uint8_t* ap = ip + 12;
+                            const uint8_t* aEnd = ip + 8 + ickSize;
+                            while (ap + 8 <= aEnd) {
+                                uint32_t aId = rd32(ap);
+                                uint32_t aSize = rd32(ap + 4);
+                                // art1 = 0x31747261, art2 = 0x32747261
+                                if ((aId == 0x31747261 || aId == 0x32747261) && aSize >= 8) {
+                                    uint32_t cbSize = rd32(ap + 8);
+                                    uint32_t nConns = rd32(ap + 12);
+                                    const uint8_t* cp = ap + 8 + cbSize;
+                                    for (uint32_t ci = 0; ci < nConns && cp + 12 <= ap + 8 + aSize; ci++, cp += 12) {
+                                        uint16_t src = rd16(cp);
+                                        uint16_t ctrl = rd16(cp + 2);
+                                        uint16_t dst = rd16(cp + 4);
+                                        uint16_t xform = rd16(cp + 6);
+                                        int32_t scale = (int32_t)rd32(cp + 8);
+                                        // DLS: CONN_DST_ATTENUATION=0x0001, CONN_DST_PITCH=0x0003
+                                        if (src == 0x0001 && dst == 0x0003 && ctrl == 0x0000) {
+                                            // LFO → Pitch (no control) = default vibrato depth in cents
+                                            lfoDepth = (float)scale / 65536.0f;
+                                        } else if (src == 0x0001 && dst == 0x0003 && ctrl == 0x0081) {
+                                            // LFO → Pitch (CC#1 control) = mod wheel vibrato depth
+                                            lfoCC1 = (float)scale / 65536.0f;
+                                        } else if (src == 0x0000 && dst == 0x0104 && ctrl == 0x0000) {
+                                            // None → LFO Frequency = absolute pitch cents
+                                            // DLS: freq = 440 * 2^((cents - 6900) / 1200)
+                                            float absCents = (float)scale / 65536.0f;
+                                            lfoFreq = 440.0f * powf(2.0f, (absCents - 6900.0f) / 1200.0f);
+                                            if (lfoFreq < 0.1f) lfoFreq = 0.1f;
+                                            if (lfoFreq > 20.0f) lfoFreq = 20.0f;
+                                        }
+                                    }
+                                }
+                                ap += 8 + ((aSize + 1) & ~1);
+                            }
                         }
                     }
                     ip += 8 + ((ickSize + 1) & ~1);
                 }
                 if (!(ulBank & 0x80000000) && program >= 0 && program < 128 && rgn) {
-                    instruments.push_back({program, rgn, rgnSize});
+                    InsInfo info;
+                    info.program = program;
+                    info.lrgn = rgn;
+                    info.lrgnSize = rgnSize;
+                    info.lfoFreqHz = lfoFreq;
+                    info.lfoDepthCents = lfoDepth;
+                    info.lfoCC1Cents = lfoCC1;
+                    instruments.push_back(info);
                 }
             }
             p += 8 + ((ckSize + 1) & ~1);
@@ -1547,6 +1610,9 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         s.baseNote = primaryRgn.baseNote;
         s.builtIn = true;
         s.category = SmpCat_GM;
+        s.lfoFreqHz = ins.lfoFreqHz;
+        s.lfoDepthCents = ins.lfoDepthCents;
+        s.lfoCC1Cents = ins.lfoCC1Cents;
 
         // Add all regions (including primary) for multi-sample playback
         for (auto& rgn : allRegions) {
@@ -2230,8 +2296,21 @@ static bool ParseMidiFile(const char* path, MidiFile& out)
                 pb.value = bend;
                 trk.bends.push_back(pb);
                 tp += 2;
-            } else if (cmd == 0xA0 || cmd == 0xB0) {
-                tp += 2; // 2 data bytes
+            } else if (cmd == 0xB0) {
+                // Control Change
+                int ccNum = tp[0] & 0x7F;
+                int ccVal = tp[1] & 0x7F;
+                if (ccNum == 1) { // CC#1 = Modulation wheel
+                    MidiCC cc;
+                    cc.tick = absTick;
+                    cc.channel = ch;
+                    cc.cc = ccNum;
+                    cc.value = ccVal;
+                    trk.ccs.push_back(cc);
+                }
+                tp += 2;
+            } else if (cmd == 0xA0) {
+                tp += 2; // aftertouch, 2 data bytes
             } else if (cmd == 0xC0) {
                 // Program Change — capture instrument (skip ch 10, always drums in GM)
                 int prog = tp[0] & 0x7F;
@@ -2325,6 +2404,11 @@ struct AudioVoice {
     int startSample = 0;    // sample offset within buffer to start playing
     int midiNote = -1;      // MIDI note number (for retrigger detection)
     int midiChannel = -1;   // MIDI channel (for retrigger detection)
+    int gmProgram = -1;     // GM program number
+    float lfoFreqHz = 5.0f;     // vibrato LFO rate
+    float lfoDepthCents = 0.0f; // default vibrato depth (always on)
+    float lfoCC1Cents = 0.0f;   // CC#1-controlled vibrato depth
+    float lfoPhase = 0.0f;      // per-voice LFO phase
     int releaseRemaining = 0; // samples left in release fade (0 = not releasing)
     int releaseLen = 0;       // total release length in samples
     bool loopFromDLS = false; // true = DLS loop points, skip crossfade
@@ -2366,6 +2450,7 @@ static float sMidiRmbStartX = 0, sMidiRmbStartY = 0;
 static float sMidiZoom = 1.0f;     // piano roll zoom (1.0 = fit all, <1 = zoom in, >1 = zoom out)
 static float sMidiScrollX = 0.0f;  // horizontal scroll offset (0-1 range)
 static int sMidiPitchBend[16] = {}; // per-channel pitch bend (-8192 to +8191), reset on play
+static int sMidiModulation[16] = {}; // per-channel CC#1 modulation (0-127), reset on play
 
 // Note-to-frequency table (A4 = 440Hz)
 static float NoteToFreq(int note) {
@@ -2507,6 +2592,11 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                             v.startSample = sampleOff;
                             v.midiNote = n.note;
                             v.midiChannel = n.channel;
+                            v.gmProgram = mf.channelProgram[n.channel];
+                            v.lfoFreqHz = smp.lfoFreqHz;
+                            v.lfoDepthCents = smp.lfoDepthCents;
+                            v.lfoCC1Cents = smp.lfoCC1Cents;
+                            v.lfoPhase = 0.0f;
                             if (isDrum) {
                                 // Drums play at original pitch (1:1)
                                 v.inc = 65536;
@@ -2524,11 +2614,7 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                                     v.loop = false; // long samples without DLS or user loops are one-shots
                             }
                             v.baseInc = v.inc;
-                            // Apply current pitch bend for this channel
-                            if (sMidiPitchBend[n.channel] != 0) {
-                                float bendSemi = (float)sMidiPitchBend[n.channel] / 8192.0f * 2.0f; // ±2 semitones
-                                v.inc = (uint32_t)(v.baseInc * powf(2.0f, bendSemi / 12.0f));
-                            }
+                            // Pitch bend + modulation applied per-buffer in the LFO loop below
                             v.volume = n.velocity * mf.channelVolume[n.channel] / 100;
                             if (v.volume > 160) v.volume = 160;
                             // Convert tick duration to samples
@@ -2550,20 +2636,37 @@ static void AudioMixBuffer(int8_t* buf, int len) {
                 }
             }
         }
-        // Process pitch bend events in this tick range
+        // Process pitch bend and CC events in this tick range
         for (auto& t : mf.tracks) {
             for (auto& pb : t.bends) {
-                if (pb.tick >= sMidiPlayTick && pb.tick < newTick) {
+                if (pb.tick >= sMidiPlayTick && pb.tick < newTick)
                     sMidiPitchBend[pb.channel] = pb.value;
-                    // Update all active voices on this channel
-                    for (int v = 0; v < kMaxVoices; v++) {
-                        if (sVoices[v].active && sVoices[v].midiChannel == pb.channel && sVoices[v].baseInc > 0) {
-                            float bendSemi = (float)pb.value / 8192.0f * 2.0f; // ±2 semitones
-                            sVoices[v].inc = (uint32_t)(sVoices[v].baseInc * powf(2.0f, bendSemi / 12.0f));
-                        }
-                    }
-                }
             }
+            for (auto& cc : t.ccs) {
+                if (cc.tick >= sMidiPlayTick && cc.tick < newTick && cc.cc == 1)
+                    sMidiModulation[cc.channel] = cc.value;
+            }
+        }
+
+        // Apply pitch bend + LFO vibrato to all active voices
+        for (int v = 0; v < kMaxVoices; v++) {
+            if (!sVoices[v].active || sVoices[v].baseInc == 0 || sVoices[v].midiChannel < 0) continue;
+            int ch = sVoices[v].midiChannel;
+            float bendSemi = (float)sMidiPitchBend[ch] / 8192.0f * 2.0f; // ±2 semitones
+
+            // Per-voice LFO vibrato from DLS articulation
+            sVoices[v].lfoPhase += 2.0f * 3.14159265f * sVoices[v].lfoFreqHz * secPerBuf;
+            if (sVoices[v].lfoPhase > 2.0f * 3.14159265f) sVoices[v].lfoPhase -= 2.0f * 3.14159265f;
+            float lfoVal = sinf(sVoices[v].lfoPhase);
+
+            // Default vibrato (always on) + CC#1-controlled vibrato
+            float vibCents = sVoices[v].lfoDepthCents;
+            float cc1 = (float)sMidiModulation[ch] / 127.0f;
+            vibCents += cc1 * sVoices[v].lfoCC1Cents;
+            float vibratoSemi = lfoVal * vibCents / 100.0f; // cents → semitones
+
+            float totalSemi = bendSemi + vibratoSemi;
+            sVoices[v].inc = (uint32_t)(sVoices[v].baseInc * powf(2.0f, totalSemi / 12.0f));
         }
 
         sMidiPlayTime += secPerBuf;
@@ -2956,6 +3059,7 @@ static void AudioPlayMidi(int midiIdx) {
     sMidiPlayTime = 0;
     sMidiPlayTick = 0;
     memset(sMidiPitchBend, 0, sizeof(sMidiPitchBend));
+    memset(sMidiModulation, 0, sizeof(sMidiModulation));
     sMidiPlaying = true;
 }
 
@@ -19699,6 +19803,17 @@ void FrameTick(float dt)
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Notes shorter than this keep full volume");
                 ImGui::PopItemWidth();
                 if (s.decayMinMs != prevMin) sProjectDirty = true;
+            }
+            // Vibrato depth (LFO → pitch)
+            {
+                ImGui::PushItemWidth(-1);
+                int vibCents = (int)s.lfoDepthCents;
+                int prevVib = vibCents;
+                ImGui::SliderInt("##vibrato", &vibCents, 0, 100, "Vibrato: %d cents");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("LFO vibrato depth in cents (0 = off, ~20 = subtle, ~50 = pronounced)");
+                s.lfoDepthCents = (float)vibCents;
+                ImGui::PopItemWidth();
+                if (vibCents != prevVib) sProjectDirty = true;
             }
         }
         sampleDetailsDone:
