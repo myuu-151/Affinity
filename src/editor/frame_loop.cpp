@@ -18942,7 +18942,6 @@ void FrameTick(float dt)
                                     bool hasLoop = (sampleModes == 1 || sampleModes == 3);
                                     if (hasLoop && ss.loopStart >= ss.start && ss.loopEnd > ss.loopStart) {
                                         rgn.hasLoop = true;
-                                        // Scale loop points to downsampled length
                                         rgn.loopStart = (int)((float)(ss.loopStart - ss.start) / numSmp * dstLen);
                                         rgn.loopEnd = (int)((float)(ss.loopEnd - ss.start) / numSmp * dstLen);
                                         if (rgn.loopEnd > dstLen) rgn.loopEnd = dstLen;
@@ -19051,7 +19050,15 @@ void FrameTick(float dt)
         // Selected sample details + waveform preview
         if (sSelectedSample >= 0 && sSelectedSample < (int)sSoundBank.size()) {
             SoundSample& s = sSoundBank[sSelectedSample];
-            ImGui::Text("%s  |  %d smp  |  %d Hz", s.name, (int)s.data.size(), s.sampleRate);
+            {
+                int dispLen = (int)s.data.size();
+                int dispRate = s.sampleRate;
+                if (dispLen == 0 && !s.regions.empty() && !s.regions[0].data.empty()) {
+                    dispLen = (int)s.regions[0].data.size();
+                    dispRate = s.regions[0].sampleRate;
+                }
+                ImGui::Text("%s  |  %d smp  |  %d Hz", s.name, dispLen, dispRate);
+            }
 
             // Waveform editor (drawable)
             float availW = ImGui::GetContentRegionAvail().x;
@@ -19061,17 +19068,28 @@ void FrameTick(float dt)
             dl->AddRectFilled(wp, ImVec2(wp.x + availW, wp.y + waveH), 0xFF1A1A1A);
             dl->AddLine(ImVec2(wp.x, wp.y + waveH / 2), ImVec2(wp.x + availW, wp.y + waveH / 2), 0xFF333333);
 
-            if (!s.data.empty()) {
-                int n = (int)s.data.size();
-                float step = (float)n / availW;
-                ImVec2 prev(wp.x, wp.y + waveH / 2 - s.data[0] * waveH / 256.0f);
-                for (int xi = 1; xi < (int)availW; xi++) {
-                    int si = (int)(xi * step);
-                    if (si >= n) si = n - 1;
-                    float y = wp.y + waveH / 2 - s.data[si] * waveH / 256.0f;
-                    ImVec2 cur(wp.x + xi, y);
-                    dl->AddLine(prev, cur, 0xFF44AAFF);
-                    prev = cur;
+            {
+                // Use smp.data, or first region's data as fallback for multi-region instruments
+                const int8_t* waveData = nullptr;
+                int waveLen = 0;
+                if (!s.data.empty()) {
+                    waveData = s.data.data();
+                    waveLen = (int)s.data.size();
+                } else if (!s.regions.empty() && !s.regions[0].data.empty()) {
+                    waveData = s.regions[0].data.data();
+                    waveLen = (int)s.regions[0].data.size();
+                }
+                if (waveData && waveLen > 0) {
+                    float step = (float)waveLen / availW;
+                    ImVec2 prev(wp.x, wp.y + waveH / 2 - waveData[0] * waveH / 256.0f);
+                    for (int xi = 1; xi < (int)availW; xi++) {
+                        int si = (int)(xi * step);
+                        if (si >= waveLen) si = waveLen - 1;
+                        float y = wp.y + waveH / 2 - waveData[si] * waveH / 256.0f;
+                        ImVec2 cur(wp.x + xi, y);
+                        dl->AddLine(prev, cur, 0xFF44AAFF);
+                        prev = cur;
+                    }
                 }
             }
 
@@ -19114,16 +19132,24 @@ void FrameTick(float dt)
             }
 
             // Draw playback position bar
-            if (!s.data.empty()) {
+            {
                 int n = (int)s.data.size();
-                for (int vi = 0; vi < kMaxVoices; vi++) {
-                    if (sVoices[vi].active && sVoices[vi].bankIdx == sSelectedSample) {
-                        int playPos = (int)(sVoices[vi].pos >> 16);
-                        if (playPos >= 0 && playPos < n) {
-                            float px = wp.x + (float)playPos / n * availW;
-                            dl->AddLine(ImVec2(px, wp.y), ImVec2(px, wp.y + waveH), 0xFFFFFFFF, 1.5f);
+                if (n == 0 && !s.regions.empty() && !s.regions[0].data.empty())
+                    n = (int)s.regions[0].data.size();
+                if (n > 0) {
+                    for (int vi = 0; vi < kMaxVoices; vi++) {
+                        if (sVoices[vi].active && sVoices[vi].bankIdx == sSelectedSample) {
+                            int playPos = (int)(sVoices[vi].pos >> 16);
+                            // Scale to display length if voice uses a different region
+                            int voiceLen = sVoices[vi].length;
+                            if (voiceLen > 0 && voiceLen != n)
+                                playPos = playPos * n / voiceLen;
+                            if (playPos >= 0 && playPos < n) {
+                                float px = wp.x + (float)playPos / n * availW;
+                                dl->AddLine(ImVec2(px, wp.y), ImVec2(px, wp.y + waveH), 0xFFFFFFFF, 1.5f);
+                            }
+                            break;
                         }
-                        break;
                     }
                 }
             }
