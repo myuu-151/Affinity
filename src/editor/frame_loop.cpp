@@ -20843,8 +20843,9 @@ void FrameTick(float dt)
                 // Element — pieces/sprites/text drive the visuals
                 (void)hasSprite;
 
-                // Compute per-piece layer offsets from selected keyframe
-                // For each piece, check if it belongs to any layer with a selected keyframe
+                // Compute per-piece layer offsets from keyframes
+                // During playback: interpolate between keyframes based on playhead
+                // When stopped: use the manually selected keyframe
                 struct LayerTransform { float ox = 0, oy = 0; float sx = 1, sy = 1; };
                 auto getPieceLayerTransform = [&](HudElement::ItemType type, int idx) -> LayerTransform {
                     LayerTransform t;
@@ -20853,12 +20854,51 @@ void FrameTick(float dt)
                         for (auto& it : lay.items)
                             if (it.type == type && it.index == idx) { inLayer = true; break; }
                         if (!inLayer) continue;
-                        if (lay.selectedKeyframe >= 0 && lay.selectedKeyframe < (int)lay.keyframes.size()) {
-                            auto& kf = lay.keyframes[lay.selectedKeyframe];
-                            t.ox += kf.offsetX;
-                            t.oy += kf.offsetY;
-                            t.sx *= kf.scaleX / 256.0f;
-                            t.sy *= kf.scaleY / 256.0f;
+                        if (lay.keyframes.empty()) continue;
+
+                        if (sHudTimelinePlaying && lay.keyframes.size() >= 1) {
+                            // Find surrounding keyframes for playhead
+                            int ph = sHudTimelinePlayhead;
+                            // Find last kf at or before playhead, and first kf after
+                            int prevIdx = -1, nextIdx = -1;
+                            for (int ki = 0; ki < (int)lay.keyframes.size(); ki++) {
+                                if (lay.keyframes[ki].frame <= ph) prevIdx = ki;
+                                if (lay.keyframes[ki].frame > ph && nextIdx < 0) nextIdx = ki;
+                            }
+                            if (prevIdx < 0 && nextIdx < 0) continue;
+                            if (prevIdx < 0) prevIdx = nextIdx; // before first kf
+                            if (nextIdx < 0) nextIdx = prevIdx; // after last kf
+
+                            auto& kfA = lay.keyframes[prevIdx];
+                            auto& kfB = lay.keyframes[nextIdx];
+
+                            if (prevIdx == nextIdx || lay.interp == Interp_Constant) {
+                                // Constant or single keyframe — snap to prev
+                                t.ox += kfA.offsetX; t.oy += kfA.offsetY;
+                                t.sx *= kfA.scaleX / 256.0f; t.sy *= kfA.scaleY / 256.0f;
+                            } else {
+                                // Linear or Bezier interpolation
+                                float span = (float)(kfB.frame - kfA.frame);
+                                float frac = (span > 0) ? (float)(ph - kfA.frame) / span : 0.0f;
+                                frac = std::clamp(frac, 0.0f, 1.0f);
+                                if (lay.interp == Interp_Bezier) {
+                                    // Smooth ease in/out
+                                    frac = frac * frac * (3.0f - 2.0f * frac);
+                                }
+                                t.ox += kfA.offsetX + (kfB.offsetX - kfA.offsetX) * frac;
+                                t.oy += kfA.offsetY + (kfB.offsetY - kfA.offsetY) * frac;
+                                float sxA = kfA.scaleX / 256.0f, sxB = kfB.scaleX / 256.0f;
+                                float syA = kfA.scaleY / 256.0f, syB = kfB.scaleY / 256.0f;
+                                t.sx *= sxA + (sxB - sxA) * frac;
+                                t.sy *= syA + (syB - syA) * frac;
+                            }
+                        } else {
+                            // Stopped — use selected keyframe
+                            if (lay.selectedKeyframe >= 0 && lay.selectedKeyframe < (int)lay.keyframes.size()) {
+                                auto& kf = lay.keyframes[lay.selectedKeyframe];
+                                t.ox += kf.offsetX; t.oy += kf.offsetY;
+                                t.sx *= kf.scaleX / 256.0f; t.sy *= kf.scaleY / 256.0f;
+                            }
                         }
                     }
                     return t;
