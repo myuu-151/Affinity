@@ -5133,6 +5133,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
         for (int i = 0; i < (int)soundInstances.size(); i++) {
             f << "    " << soundInstances[i].voiceCount << ",\n";
         }
+        f << "};\n";
+
+        f << "static const u8 afn_snd_softfade[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            f << "    " << soundInstances[i].softFade << ",\n";
+        }
         f << "};\n\n";
 
         f << "#define AFN_HAS_SOUND 1\n";

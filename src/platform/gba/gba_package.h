@@ -498,6 +498,7 @@ struct GBASoundInstanceExport {
     int interpolation = 0;                 // 0 = nearest, 1 = linear
     int mixerGain = 0;                     // 0 = Normal (>>7), 1 = Loud (>>6)
     int voiceCount = 6;                    // max simultaneous voices (4-8)
+    int softFade = 1;                      // 256-sample fadeout at end of notes
     std::vector<GBASoundNoteExport> notes; // all notes merged
     std::vector<int> sampleIndices;        // which samples this instance uses
 };

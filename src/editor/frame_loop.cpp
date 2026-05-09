@@ -1001,6 +1001,7 @@ struct SoundInstance {
     int interpolation = 0;     // 0 = nearest, 1 = smooth (linear)
     int mixerGain = 0;         // 0 = Normal (>>7), 1 = Loud (>>6), 2 = Mid (>>8), 3 = Quiet (>>9)
     int voiceCount = 6;        // max simultaneous voices on GBA (4-8)
+    int softFade = 1;          // 0 = hard cutoff, 1 = 256-sample fadeout at end of notes
     std::vector<SampleOverride> overrides; // per-sample edits
 };
 static std::vector<SoundInstance> sSoundInstances;
@@ -4666,6 +4667,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "instInterp=%d\n", si.interpolation);
         fprintf(f, "instGain=%d\n", si.mixerGain);
         fprintf(f, "instVoices=%d\n", si.voiceCount);
+        fprintf(f, "instSoftFade=%d\n", si.softFade);
         fprintf(f, "instBanks=");
         for (int ch = 0; ch < 16; ch++) {
             if (ch > 0) fprintf(f, ",");
@@ -6221,6 +6223,7 @@ static bool LoadProject(const std::string& path)
                 else if (sscanf(line, "instInterp=%d", &ival) == 1) curInst->interpolation = ival;
                 else if (sscanf(line, "instGain=%d", &ival) == 1) curInst->mixerGain = ival;
                 else if (sscanf(line, "instVoices=%d", &ival) == 1) curInst->voiceCount = ival;
+                else if (sscanf(line, "instSoftFade=%d", &ival) == 1) curInst->softFade = ival;
                 else if (strncmp(line, "instBanks=", 10) == 0) {
                     sscanf(line + 10, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
                         &curInst->channelBank[0], &curInst->channelBank[1], &curInst->channelBank[2], &curInst->channelBank[3],
@@ -11392,6 +11395,7 @@ void FrameTick(float dt)
                         ie.interpolation = inst.interpolation;
                         ie.mixerGain = inst.mixerGain;
                         ie.voiceCount = inst.voiceCount;
+                        ie.softFade = inst.softFade;
                         for (auto& track : midi.tracks) {
                             for (auto& n : track.notes) {
                                 int bankIdx = midi.channelBank[n.channel];
@@ -19950,6 +19954,12 @@ void FrameTick(float dt)
                 ImGui::EndCombo();
             }
             ImGui::PopItemWidth();
+            bool sf = inst.softFade != 0;
+            if (ImGui::Checkbox("Soft Fade", &sf)) {
+                inst.softFade = sf ? 1 : 0;
+                sProjectDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("256-sample fadeout at end of notes (smoother but softer endings)");
         }
 
         ImGui::End();
@@ -20708,42 +20718,53 @@ void FrameTick(float dt)
                 // Element — pieces/sprites/text drive the visuals
                 (void)hasSprite;
 
-                // Draw composite pieces
+                // Draw composite pieces (with screen wrapping)
                 for (int pi = 0; pi < (int)el.pieces.size(); pi++) {
                     auto& pc = el.pieces[pi];
-                    float px = cx + (el.x + pc.localX) * zoom;
-                    float py = cy + (el.y + pc.localY) * zoom;
+                    float baseX = el.x + pc.localX;
+                    float baseY = el.y + pc.localY;
                     float psz = pc.size * zoom;
-
-                    if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sTmSpriteTextures.size() &&
-                        sTmSpriteTextures[pc.spriteAssetIdx]) {
-                        int alpha = (pc.opacity * 255) / 16;
-                        ImU32 tintCol = pc.blackTint ? IM_COL32(0, 0, 0, alpha) : IM_COL32(255, 255, 255, alpha);
-                        dl->AddImage((ImTextureID)(intptr_t)sTmSpriteTextures[pc.spriteAssetIdx],
-                            ImVec2(px, py), ImVec2(px + psz, py + psz),
-                            ImVec2(0,0), ImVec2(1,1), tintCol);
-                    } else {
-                        dl->AddRectFilled(ImVec2(px, py), ImVec2(px + psz, py + psz),
-                            IM_COL32(80, 80, 120, 100));
-                    }
-                    // Piece outline
-                    bool pieceMultiSel = selected && pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi];
-                    ImU32 outlineCol = IM_COL32(100, 100, 150, 120);
-                    if (selected && pi == el.selectedPiece) outlineCol = IM_COL32(100, 255, 100, 255);
-                    else if (pieceMultiSel) outlineCol = IM_COL32(100, 200, 255, 255);
-                    dl->AddRect(ImVec2(px, py), ImVec2(px + psz, py + psz), outlineCol);
+                    // Wrap at screen edges: pieces sliding off one side appear on the other
+                    float wrapX[] = { 0, -240, 240 };
+                    float wrapY[] = { 0, -160, 160 };
+                    for (int wy = 0; wy < 3; wy++) {
+                    for (int wx = 0; wx < 3; wx++) {
+                        float wrpX = baseX + wrapX[wx];
+                        float wrpY = baseY + wrapY[wy];
+                        if (wrpX + pc.size <= 0 || wrpX >= 240 || wrpY + pc.size <= 0 || wrpY >= 160) continue;
+                        int wi = wy * 3 + wx;
+                        float px = cx + wrpX * zoom;
+                        float py = cy + wrpY * zoom;
+                        if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sTmSpriteTextures.size() &&
+                            sTmSpriteTextures[pc.spriteAssetIdx]) {
+                            int alpha = (pc.opacity * 255) / 16;
+                            ImU32 tintCol = pc.blackTint ? IM_COL32(0, 0, 0, alpha) : IM_COL32(255, 255, 255, alpha);
+                            dl->AddImage((ImTextureID)(intptr_t)sTmSpriteTextures[pc.spriteAssetIdx],
+                                ImVec2(px, py), ImVec2(px + psz, py + psz),
+                                ImVec2(0,0), ImVec2(1,1), tintCol);
+                        } else {
+                            dl->AddRectFilled(ImVec2(px, py), ImVec2(px + psz, py + psz),
+                                IM_COL32(80, 80, 120, 100));
+                        }
+                        if (wi == 0) {
+                            bool pieceMultiSel = selected && pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi];
+                            ImU32 outlineCol = IM_COL32(100, 100, 150, 120);
+                            if (selected && pi == el.selectedPiece) outlineCol = IM_COL32(100, 255, 100, 255);
+                            else if (pieceMultiSel) outlineCol = IM_COL32(100, 200, 255, 255);
+                            dl->AddRect(ImVec2(px, py), ImVec2(px + psz, py + psz), outlineCol);
+                        }
+                    }}
                 }
 
                 // Collect active stop modifiers for sprite items
                 int activeStopIdx = (el.selectedStop >= 0 && el.selectedStop < (int)el.stops.size())
                     ? el.selectedStop : (!el.stops.empty() ? 0 : -1);
 
-                // Draw sprite overlay items (with stop modifier offsets applied)
+                // Draw sprite overlay items (with stop modifier offsets applied, GBA wrapping)
                 for (int si = 0; si < (int)el.spriteItems.size(); si++) {
                     auto& item = el.spriteItems[si];
                     float modOX = 0, modOY = 0;
                     float modScale = 1.0f;
-                    // Apply modifier from active stop if it targets this sprite
                     if (activeStopIdx >= 0) {
                         auto& st = el.stops[activeStopIdx];
                         for (int mi = 0; mi < st.modifierCount && mi < kMaxStopModifiers; mi++) {
@@ -20756,19 +20777,30 @@ void FrameTick(float dt)
                         }
                     }
                     float finalScale = item.scale * modScale;
-                    float ix = cx + (el.x + item.localX + modOX) * zoom;
-                    float iy = cy + (el.y + item.localY + modOY) * zoom;
+                    float baseX = el.x + item.localX + modOX;
+                    float baseY = el.y + item.localY + modOY;
                     float isz = item.size * finalScale * zoom;
-                    if (item.spriteAssetIdx >= 0 && item.spriteAssetIdx < (int)sTmSpriteTextures.size() &&
-                        sTmSpriteTextures[item.spriteAssetIdx]) {
-                        dl->AddImage((ImTextureID)(intptr_t)sTmSpriteTextures[item.spriteAssetIdx],
-                            ImVec2(ix, iy), ImVec2(ix + isz, iy + isz));
-                    } else {
-                        dl->AddRectFilled(ImVec2(ix, iy), ImVec2(ix + isz, iy + isz),
-                            IM_COL32(80, 120, 180, 80));
-                    }
-                    if (selected && si == el.selectedSpriteItem)
-                        dl->AddRect(ImVec2(ix, iy), ImVec2(ix + isz, iy + isz), IM_COL32(100, 180, 255, 255));
+                    float itemSz = item.size * finalScale;
+                    float wrapX[] = { 0, -240, 240 };
+                    float wrapY[] = { 0, -160, 160 };
+                    for (int wy2 = 0; wy2 < 3; wy2++) {
+                    for (int wx2 = 0; wx2 < 3; wx2++) {
+                        float wrpX = baseX + wrapX[wx2];
+                        float wrpY = baseY + wrapY[wy2];
+                        if (wrpX + itemSz <= 0 || wrpX >= 240 || wrpY + itemSz <= 0 || wrpY >= 160) continue;
+                        float ix = cx + wrpX * zoom;
+                        float iy = cy + wrpY * zoom;
+                        if (item.spriteAssetIdx >= 0 && item.spriteAssetIdx < (int)sTmSpriteTextures.size() &&
+                            sTmSpriteTextures[item.spriteAssetIdx]) {
+                            dl->AddImage((ImTextureID)(intptr_t)sTmSpriteTextures[item.spriteAssetIdx],
+                                ImVec2(ix, iy), ImVec2(ix + isz, iy + isz));
+                        } else {
+                            dl->AddRectFilled(ImVec2(ix, iy), ImVec2(ix + isz, iy + isz),
+                                IM_COL32(80, 120, 180, 80));
+                        }
+                        if (wx2 == 0 && wy2 == 0 && selected && si == el.selectedSpriteItem)
+                            dl->AddRect(ImVec2(ix, iy), ImVec2(ix + isz, iy + isz), IM_COL32(100, 180, 255, 255));
+                    }}
                 }
 
                 // Draw text rows
