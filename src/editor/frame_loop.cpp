@@ -3123,7 +3123,6 @@ struct HudKeyframe {
     int rot = 0;            // rotation in degrees (0-359)
     int scaleX = 256;       // 8.8 fixed point (256 = 1.0x)
     int scaleY = 256;
-    HudInterpMode interp = Interp_Linear;
 };
 
 struct HudElement {
@@ -3202,6 +3201,7 @@ struct HudElement {
         std::vector<HudKeyframe> keyframes;
         bool loop = false;
         int selectedKeyframe = -1;
+        HudInterpMode interp = Interp_Linear;
     };
     std::vector<AnimLayer> animLayers;
     int selectedLayer = -1;
@@ -4386,19 +4386,20 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "elemKfCount=%d\n", (int)el.keyframes.size());
             fprintf(f, "elemKfLoop=%d\n", el.animLoop ? 1 : 0);
             for (auto& kf : el.keyframes)
-                fprintf(f, "elemKf=%d|%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY, (int)kf.interp);
+                fprintf(f, "elemKf=%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY);
         }
         if (!el.animLayers.empty()) {
             fprintf(f, "elemLayerCount=%d\n", (int)el.animLayers.size());
             for (auto& lay : el.animLayers) {
                 fprintf(f, "elemLayer=%s\n", lay.name);
                 fprintf(f, "elemLayerLoop=%d\n", lay.loop ? 1 : 0);
+                fprintf(f, "elemLayerInterp=%d\n", (int)lay.interp);
                 fprintf(f, "elemLayerItemCount=%d\n", (int)lay.items.size());
                 for (auto& it : lay.items)
                     fprintf(f, "elemLayerItem=%d|%d\n", (int)it.type, it.index);
                 fprintf(f, "elemLayerKfCount=%d\n", (int)lay.keyframes.size());
                 for (auto& kf : lay.keyframes)
-                    fprintf(f, "elemLayerKf=%d|%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY, (int)kf.interp);
+                        fprintf(f, "elemLayerKf=%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY);
             }
         }
     }
@@ -5488,12 +5489,10 @@ static bool LoadProject(const std::string& path)
                 sHudElements.back().animLoop = (ival != 0);
             }
             else if (strncmp(line, "elemKf=", 7) == 0 && !sHudElements.empty()) {
-                HudKeyframe kf; int im = 1;
-                if (sscanf(line + 7, "%d|%d|%d|%d|%d|%d|%d", &kf.frame, &kf.offsetX, &kf.offsetY,
-                    &kf.rot, &kf.scaleX, &kf.scaleY, &im) >= 4) {
-                    kf.interp = (HudInterpMode)std::clamp(im, 0, 2);
+                HudKeyframe kf;
+                if (sscanf(line + 7, "%d|%d|%d|%d|%d|%d", &kf.frame, &kf.offsetX, &kf.offsetY,
+                    &kf.rot, &kf.scaleX, &kf.scaleY) >= 4)
                     sHudElements.back().keyframes.push_back(kf);
-                }
             }
             else if (sscanf(line, "elemLayerCount=%d", &ival) == 1 && !sHudElements.empty()) {
                 sHudElements.back().animLayers.clear();
@@ -5511,6 +5510,9 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "elemLayerLoop=%d", &ival) == 1 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
                 sHudElements.back().animLayers.back().loop = (ival != 0);
             }
+            else if (sscanf(line, "elemLayerInterp=%d", &ival) == 1 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
+                sHudElements.back().animLayers.back().interp = (HudInterpMode)std::clamp(ival, 0, 2);
+            }
             else if (sscanf(line, "elemLayerItemCount=%d", &ival) == 1 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
                 sHudElements.back().animLayers.back().items.reserve(ival);
             }
@@ -5523,12 +5525,10 @@ static bool LoadProject(const std::string& path)
                 sHudElements.back().animLayers.back().keyframes.reserve(ival);
             }
             else if (strncmp(line, "elemLayerKf=", 12) == 0 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
-                HudKeyframe kf; int im = 1;
-                if (sscanf(line + 12, "%d|%d|%d|%d|%d|%d|%d", &kf.frame, &kf.offsetX, &kf.offsetY,
-                    &kf.rot, &kf.scaleX, &kf.scaleY, &im) >= 4) {
-                    kf.interp = (HudInterpMode)std::clamp(im, 0, 2);
+                HudKeyframe kf;
+                if (sscanf(line + 12, "%d|%d|%d|%d|%d|%d", &kf.frame, &kf.offsetX, &kf.offsetY,
+                    &kf.rot, &kf.scaleX, &kf.scaleY) >= 4)
                     sHudElements.back().animLayers.back().keyframes.push_back(kf);
-                }
             }
         }
         else if (strcmp(section, "Palette") == 0)
@@ -22258,6 +22258,12 @@ void FrameTick(float dt)
                         ImGui::Spacing();
                         if (ImGui::InputText("Name##layer", lay.name, sizeof(lay.name))) sProjectDirty = true;
                         if (ImGui::Checkbox("Loop##layer", &lay.loop)) sProjectDirty = true;
+                        const char* interpNames[] = { "Constant", "Linear", "Bezier" };
+                        int interpIdx = (int)lay.interp;
+                        if (ImGui::Combo("Interpolation##layer", &interpIdx, interpNames, 3)) {
+                            lay.interp = (HudInterpMode)interpIdx;
+                            sProjectDirty = true;
+                        }
 
                         // Items in this layer
                         ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.8f, 1.0f), "Items:");
@@ -22577,66 +22583,6 @@ void FrameTick(float dt)
             dl->AddRectFilled(ImVec2(bx2 + 5, by2 + 3), ImVec2(bx2 + 7, by2 + bh2 - 3), IM_COL32(200, 200, 200, 255));
             dl->AddTriangleFilled(ImVec2(bx2 + 16, by2 + 3), ImVec2(bx2 + 16, by2 + bh2 - 3), ImVec2(bx2 + 9, by2 + bh2 / 2),
                 IM_COL32(200, 200, 200, 255));
-            // Interpolation mode button
-            float bx3 = bx2 + bw2 + 8;
-            float ibw = 50.0f; // wider to fit icon + label
-            bool hovI = (mouse.x >= bx3 && mouse.x <= bx3 + ibw && mouse.y >= by2 && mouse.y <= by2 + bh2);
-            dl->AddRectFilled(ImVec2(bx3, by2), ImVec2(bx3 + ibw, by2 + bh2),
-                hovI ? IM_COL32(75, 75, 75, 255) : IM_COL32(56, 56, 56, 255), 3);
-            // Determine current interp mode from selected keyframe
-            HudInterpMode curInterp = Interp_Linear;
-            if (sHudSelectedIdx >= 0 && sHudSelectedIdx < (int)sHudElements.size()) {
-                auto& el2 = sHudElements[sHudSelectedIdx];
-                if (el2.selectedLayer >= 0 && el2.selectedLayer < (int)el2.animLayers.size()) {
-                    auto& lay2 = el2.animLayers[el2.selectedLayer];
-                    if (lay2.selectedKeyframe >= 0 && lay2.selectedKeyframe < (int)lay2.keyframes.size())
-                        curInterp = lay2.keyframes[lay2.selectedKeyframe].interp;
-                }
-            }
-            // Draw interp icon (left side of button)
-            {
-                float ix = bx3 + 4, iy = by2 + 2, ih = bh2 - 4;
-                ImU32 ic = IM_COL32(200, 200, 200, 255);
-                if (curInterp == Interp_Constant) {
-                    // Step function: horizontal then vertical
-                    dl->AddLine(ImVec2(ix, iy + ih), ImVec2(ix + 6, iy + ih), ic, 1.5f);
-                    dl->AddLine(ImVec2(ix + 6, iy + ih), ImVec2(ix + 6, iy), ic, 1.5f);
-                    dl->AddLine(ImVec2(ix + 6, iy), ImVec2(ix + 12, iy), ic, 1.5f);
-                } else if (curInterp == Interp_Linear) {
-                    // Diagonal line
-                    dl->AddLine(ImVec2(ix, iy + ih), ImVec2(ix + 12, iy), ic, 1.5f);
-                } else {
-                    // Bezier S-curve
-                    ImVec2 pts[8];
-                    for (int s = 0; s < 8; s++) {
-                        float t = s / 7.0f;
-                        float u = 1 - t;
-                        // cubic bezier: P0=(0,1) P1=(0.4,1) P2=(0.6,0) P3=(1,0)
-                        float bx4 = u*u*u*0 + 3*u*u*t*0.4f + 3*u*t*t*0.6f + t*t*t*1.0f;
-                        float by4 = u*u*u*1 + 3*u*u*t*1.0f + 3*u*t*t*0.0f + t*t*t*0.0f;
-                        pts[s] = ImVec2(ix + bx4 * 12, iy + by4 * ih);
-                    }
-                    for (int s = 0; s < 7; s++)
-                        dl->AddLine(pts[s], pts[s+1], ic, 1.5f);
-                }
-            }
-            // Label text
-            const char* interpLabels[] = { "Const", "Lin", "Bez" };
-            dl->AddText(ImVec2(bx3 + 18, by2 + 1), IM_COL32(180, 180, 180, 255), interpLabels[curInterp]);
-            // Click to cycle
-            if (hovI && ImGui::IsMouseClicked(0)) {
-                if (sHudSelectedIdx >= 0 && sHudSelectedIdx < (int)sHudElements.size()) {
-                    auto& el2 = sHudElements[sHudSelectedIdx];
-                    if (el2.selectedLayer >= 0 && el2.selectedLayer < (int)el2.animLayers.size()) {
-                        auto& lay2 = el2.animLayers[el2.selectedLayer];
-                        if (lay2.selectedKeyframe >= 0 && lay2.selectedKeyframe < (int)lay2.keyframes.size()) {
-                            int m = (int)lay2.keyframes[lay2.selectedKeyframe].interp;
-                            lay2.keyframes[lay2.selectedKeyframe].interp = (HudInterpMode)((m + 1) % 3);
-                        }
-                    }
-                }
-            }
-
             // FPS and Range — drawn as text on right side of toolbar, click to edit inline
             int fpsVals[] = { 6, 8, 12, 24, 30, 60, 120, 240 };
             float ty = toolbarTop + (toolbarH - ImGui::GetFontSize()) * 0.5f;
