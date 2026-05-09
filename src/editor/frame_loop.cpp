@@ -3219,6 +3219,13 @@ static int sHudTimelinePlayhead = 0;
 static float sHudTimelineScroll = 0.0f;
 static float sHudTimelineZoom = 4.0f;  // pixels per frame (recalculated on first draw)
 static bool sHudTimelinePlaying = false;
+static int sHudTimelineFPS = 3;        // index into fps options (default 24)
+static float sHudTimelineAccum = 0;    // frame accumulator for speed control
+static int sHudTimelineRangeStart = 0;
+static int sHudTimelineRangeEnd = 60;
+static int sHudTlEditField = 0;        // 0=none, 1=fps, 2=rangeStart, 3=rangeEnd
+static char sHudTlEditBuf[16] = "";
+static int sHudTlEditCursor = 0;
 static bool sHudTimelineZoomInit = false;
 static float sHudTimelineScrollY = 0;  // vertical scroll for sub-rows
 static int sHudTimelineSelStart = -1;  // frame range selection start
@@ -22354,8 +22361,19 @@ void FrameTick(float dt)
         float tracksTop = rulerBot;
         float tracksBot = tlY + tlH;
 
-        // Advance playhead
-        if (sHudTimelinePlaying) sHudTimelinePlayhead++;
+        // Advance playhead (speed-controlled, targets 60fps timeline)
+        if (sHudTimelinePlaying) {
+            float fpsValues[] = { 6.0f, 8.0f, 12.0f, 24.0f, 30.0f, 60.0f, 120.0f, 240.0f };
+            float fps = fpsValues[std::clamp(sHudTimelineFPS, 0, 7)];
+            float dt = ImGui::GetIO().DeltaTime;
+            sHudTimelineAccum += dt * fps;
+            int steps = (int)sHudTimelineAccum;
+            sHudTimelineAccum -= steps;
+            sHudTimelinePlayhead += steps;
+            if (sHudTimelineRangeEnd > sHudTimelineRangeStart &&
+                sHudTimelinePlayhead > sHudTimelineRangeEnd)
+                sHudTimelinePlayhead = sHudTimelineRangeStart;
+        }
 
         // Adaptive ruler step
         int frameStep = 1;
@@ -22533,11 +22551,100 @@ void FrameTick(float dt)
             dl->AddRectFilled(ImVec2(bx2 + 5, by2 + 3), ImVec2(bx2 + 7, by2 + bh2 - 3), IM_COL32(200, 200, 200, 255));
             dl->AddTriangleFilled(ImVec2(bx2 + 16, by2 + 3), ImVec2(bx2 + 16, by2 + bh2 - 3), ImVec2(bx2 + 9, by2 + bh2 / 2),
                 IM_COL32(200, 200, 200, 255));
-            // Frame number display
-            char fbuf[32]; snprintf(fbuf, sizeof(fbuf), "Frame %d", sHudTimelinePlayhead);
-            dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
-                ImVec2(bx2 + bw2 + 12, toolbarTop + (toolbarH - ImGui::GetFontSize()) * 0.5f),
-                IM_COL32(210, 210, 210, 255), fbuf);
+            // FPS and Range — drawn as text on right side of toolbar, click to edit inline
+            int fpsVals[] = { 6, 8, 12, 24, 30, 60, 120, 240 };
+            float ty = toolbarTop + (toolbarH - ImGui::GetFontSize()) * 0.5f;
+            float fh = ImGui::GetFontSize();
+            // Measure total width needed for right-aligned fields
+            float rngEndW = std::max(ImGui::CalcTextSize("60").x + 10, 30.0f);
+            float rngStartW = std::max(ImGui::CalcTextSize("0").x + 10, 30.0f);
+            float dashW = ImGui::CalcTextSize("-").x + 8;
+            float rangeLabelW = ImGui::CalcTextSize("range:").x + 4;
+            float fpsValW = std::max(ImGui::CalcTextSize("24").x + 10, 30.0f);
+            float fpsLabelW = ImGui::CalcTextSize("fps:").x + 4;
+            float totalFieldsW = fpsLabelW + fpsValW + 10 + rangeLabelW + rngStartW + dashW + rngEndW + 10;
+            float tx = tlX + tlW - totalFieldsW;
+
+            // Helper: draw an editable number field on the foreground draw list
+            // Click to edit, type digits, Enter to confirm, Escape to cancel
+            auto drawEditField = [&](float& fx, float fy2, float fh2, int fieldId, int* valuePtr, bool isFps) {
+                char valBuf[8];
+                if (isFps) snprintf(valBuf, sizeof(valBuf), "%d", fpsVals[std::clamp(*valuePtr, 0, 7)]);
+                else snprintf(valBuf, sizeof(valBuf), "%d", *valuePtr);
+                ImVec2 vsz = ImGui::CalcTextSize(valBuf);
+                float fw = std::max(vsz.x + 10, 30.0f);
+                bool editing = (sHudTlEditField == fieldId);
+                dl->AddRectFilled(ImVec2(fx - 2, fy2 - 1), ImVec2(fx + fw, fy2 + fh2 + 1),
+                    editing ? IM_COL32(35, 35, 45, 255) : IM_COL32(32, 32, 38, 255), 2);
+                if (editing) {
+                    dl->AddRect(ImVec2(fx - 2, fy2 - 1), ImVec2(fx + fw, fy2 + fh2 + 1), IM_COL32(80, 130, 220, 255), 2);
+                    dl->AddText(ImVec2(fx + 2, fy2), IM_COL32(255, 255, 255, 255), sHudTlEditBuf);
+                    // Handle keyboard input
+                    auto& io = ImGui::GetIO();
+                    for (int ci = 0; ci < io.InputQueueCharacters.Size; ci++) {
+                        char ch = (char)io.InputQueueCharacters[ci];
+                        if (ch >= '0' && ch <= '9' && sHudTlEditCursor < 6) {
+                            sHudTlEditBuf[sHudTlEditCursor++] = ch;
+                            sHudTlEditBuf[sHudTlEditCursor] = '\0';
+                        }
+                    }
+                    if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && sHudTlEditCursor > 0) {
+                        sHudTlEditBuf[--sHudTlEditCursor] = '\0';
+                    }
+                    if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
+                        int v = atoi(sHudTlEditBuf);
+                        if (isFps) {
+                            int best = 0, bestD = 9999;
+                            for (int i = 0; i < 8; i++) { int d = std::abs(fpsVals[i] - v); if (d < bestD) { bestD = d; best = i; } }
+                            *valuePtr = best;
+                        } else {
+                            *valuePtr = std::max(0, v);
+                        }
+                        sHudTlEditField = 0;
+                    }
+                    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) sHudTlEditField = 0;
+                    // Click outside to confirm
+                    if (ImGui::IsMouseClicked(0) && !(mouse.x >= fx - 2 && mouse.x <= fx + fw && mouse.y >= fy2 - 1 && mouse.y <= fy2 + fh2 + 1)) {
+                        int v = atoi(sHudTlEditBuf);
+                        if (isFps) {
+                            int best = 0, bestD = 9999;
+                            for (int i = 0; i < 8; i++) { int d = std::abs(fpsVals[i] - v); if (d < bestD) { bestD = d; best = i; } }
+                            *valuePtr = best;
+                        } else {
+                            *valuePtr = std::max(0, v);
+                        }
+                        sHudTlEditField = 0;
+                    }
+                } else {
+                    dl->AddText(ImVec2(fx + 2, fy2), IM_COL32(220, 220, 220, 255), valBuf);
+                    if (ImGui::IsMouseClicked(0) && mouse.x >= fx - 2 && mouse.x <= fx + fw && mouse.y >= fy2 - 1 && mouse.y <= fy2 + fh2 + 1) {
+                        sHudTlEditField = fieldId;
+                        sHudTlEditBuf[0] = '\0';
+                        sHudTlEditCursor = 0;
+                    }
+                }
+                fx += fw;
+            };
+
+            // fps: [value]
+            dl->AddText(ImVec2(tx, ty), IM_COL32(140, 145, 155, 255), "fps:");
+            tx += ImGui::CalcTextSize("fps:").x + 4;
+            drawEditField(tx, ty, fh, 1, &sHudTimelineFPS, true);
+            tx += 10;
+
+            // range: [start] - [end]
+            dl->AddText(ImVec2(tx, ty), IM_COL32(140, 145, 155, 255), "range:");
+            tx += ImGui::CalcTextSize("range:").x + 4;
+            drawEditField(tx, ty, fh, 2, &sHudTimelineRangeStart, false);
+            tx += 4;
+            dl->AddText(ImVec2(tx, ty), IM_COL32(100, 100, 100, 255), "-");
+            tx += ImGui::CalcTextSize("-").x + 4;
+            drawEditField(tx, ty, fh, 3, &sHudTimelineRangeEnd, false);
+
+            if (sHudTimelineRangeStart < 0) sHudTimelineRangeStart = 0;
+            if (sHudTimelineRangeEnd < sHudTimelineRangeStart) sHudTimelineRangeEnd = sHudTimelineRangeStart;
+            // Consume keyboard when editing so other shortcuts don't fire
+            if (sHudTlEditField > 0) ImGui::GetIO().InputQueueCharacters.clear();
         }
 
         // 3. Ruler strip
@@ -22582,6 +22689,15 @@ void FrameTick(float dt)
                 fx = std::max(fx, trackX); fx2 = std::min(fx2, trackX + trackW);
                 dl->AddRectFilled(ImVec2(fx, rulerTop), ImVec2(fx2, rulerBot), IM_COL32(70, 130, 220, 40));
             }
+            // Dark overlay outside frame range (Blender-style)
+            if (sHudTimelineRangeEnd > sHudTimelineRangeStart) {
+                float rngLx = trackX + sHudTimelineRangeStart * sHudTimelineZoom - sHudTimelineScroll;
+                float rngRx = trackX + sHudTimelineRangeEnd * sHudTimelineZoom - sHudTimelineScroll;
+                if (rngLx > trackX)
+                    dl->AddRectFilled(ImVec2(trackX, rulerTop), ImVec2(std::min(rngLx, trackX + trackW), rulerBot), IM_COL32(0, 0, 0, 80));
+                if (rngRx < trackX + trackW)
+                    dl->AddRectFilled(ImVec2(std::max(rngRx, trackX), rulerTop), ImVec2(trackX + trackW, rulerBot), IM_COL32(0, 0, 0, 80));
+            }
             // Playhead marker
             float phx = trackX + sHudTimelinePlayhead * sHudTimelineZoom - sHudTimelineScroll;
             if (phx >= trackX - 8 && phx <= trackX + trackW + 8) {
@@ -22612,6 +22728,16 @@ void FrameTick(float dt)
               dl->AddLine(ImVec2(fx, tracksTop), ImVec2(fx, tracksBot),
                   maj ? IM_COL32(50, 50, 55, 255) : IM_COL32(38, 38, 40, 200));
           }
+        }
+
+        // Dark overlay outside frame range on tracks (Blender-style)
+        if (sHudTimelineRangeEnd > sHudTimelineRangeStart) {
+            float rngLx = trackX + sHudTimelineRangeStart * sHudTimelineZoom - sHudTimelineScroll;
+            float rngRx = trackX + sHudTimelineRangeEnd * sHudTimelineZoom - sHudTimelineScroll;
+            if (rngLx > trackX)
+                dl->AddRectFilled(ImVec2(trackX, tracksTop), ImVec2(std::min(rngLx, trackX + trackW), tracksBot), IM_COL32(0, 0, 0, 60));
+            if (rngRx < trackX + trackW)
+                dl->AddRectFilled(ImVec2(std::max(rngRx, trackX), tracksTop), ImVec2(trackX + trackW, tracksBot), IM_COL32(0, 0, 0, 60));
         }
 
         // Frame range selection highlight (shift-click range)
