@@ -22062,7 +22062,7 @@ void FrameTick(float dt)
         float trackX = vp->WorkPos.x + labelW;
         float trackW = tlW - labelW;
         float toolbarH = 26.0f;
-        float rulerH = 22.0f;
+        float rulerH = 28.0f;
         float rowH = 28.0f;
 
         // Auto-fit zoom so frame 50 is visible initially
@@ -22269,7 +22269,9 @@ void FrameTick(float dt)
                     maj ? IM_COL32(110, 110, 120, 220) : IM_COL32(65, 65, 70, 180));
                 if (maj) {
                     char buf[16]; snprintf(buf, sizeof(buf), "%d", f);
-                    dl->AddText(ImVec2(fx + 3, rulerTop + 3), IM_COL32(160, 165, 175, 255), buf);
+                    ImVec2 tsz = ImGui::CalcTextSize(buf);
+                    if (fx + 3 + tsz.x <= trackX + trackW)
+                        dl->AddText(ImVec2(fx + 3, rulerTop + 3), IM_COL32(160, 165, 175, 255), buf);
                 }
             }
             // Frame range highlight on ruler
@@ -22346,13 +22348,13 @@ void FrameTick(float dt)
             dl->AddRectFilled(ImVec2(fx, tracksTop), ImVec2(fx2, tracksBot), IM_COL32(70, 130, 220, 50));
         }
 
-        // Element rows
-        for (int i = 0; i < (int)sHudElements.size(); i++) {
+        // Element rows — only show the selected element
+        for (int ii = 0; ii < 1; ii++) {
+            int i = sHudSelectedIdx;
+            if (i < 0 || i >= (int)sHudElements.size()) break;
             auto& el = sHudElements[i];
-            float ry = tracksTop + i * rowH;
-            if (ry > tracksBot) break;
-            if (ry + rowH < tracksTop) continue;
-            bool sel = (i == sHudSelectedIdx);
+            float ry = tracksTop;
+            bool sel = true;
 
             // Row bg (track area)
             dl->AddRectFilled(ImVec2(trackX, ry), ImVec2(trackX + trackW, ry + rowH),
