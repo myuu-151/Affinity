@@ -3217,6 +3217,53 @@ static std::vector<bool> sHudPieceSelected; // per-piece selection within curren
 static std::vector<HudPiece> sHudPieceClipboard; // copy-paste buffer
 static int sHudPieceDragSrc = -1; // piece list drag-reorder source index
 
+// HUD undo stack
+struct HudUndoEntry {
+    int elementIdx;
+    HudElement snapshot;
+};
+static constexpr int kHudMaxUndo = 64;
+static std::vector<HudUndoEntry> sHudUndoStack;
+static int sHudUndoCursor = -1; // points to current state in undo stack
+static bool sHudUndoDragPushed = false; // prevent multiple pushes during drag
+
+static void HudUndoPush(int idx) {
+    if (idx < 0 || idx >= (int)sHudElements.size()) return;
+    // Truncate any redo entries
+    if (sHudUndoCursor >= 0 && sHudUndoCursor < (int)sHudUndoStack.size() - 1)
+        sHudUndoStack.resize(sHudUndoCursor + 1);
+    sHudUndoStack.push_back({ idx, sHudElements[idx] });
+    if ((int)sHudUndoStack.size() > kHudMaxUndo)
+        sHudUndoStack.erase(sHudUndoStack.begin());
+    sHudUndoCursor = (int)sHudUndoStack.size() - 1;
+}
+
+static bool HudUndo() {
+    if (sHudUndoCursor < 0 || sHudUndoStack.empty()) return false;
+    auto& entry = sHudUndoStack[sHudUndoCursor];
+    if (entry.elementIdx >= 0 && entry.elementIdx < (int)sHudElements.size()) {
+        HudElement current = sHudElements[entry.elementIdx];
+        sHudElements[entry.elementIdx] = entry.snapshot;
+        entry.snapshot = current; // swap so redo restores current
+        sHudSelectedIdx = entry.elementIdx;
+    }
+    sHudUndoCursor--;
+    return true;
+}
+
+static bool HudRedo() {
+    if (sHudUndoCursor >= (int)sHudUndoStack.size() - 1) return false;
+    sHudUndoCursor++;
+    auto& entry = sHudUndoStack[sHudUndoCursor];
+    if (entry.elementIdx >= 0 && entry.elementIdx < (int)sHudElements.size()) {
+        HudElement current = sHudElements[entry.elementIdx];
+        sHudElements[entry.elementIdx] = entry.snapshot;
+        entry.snapshot = current;
+        sHudSelectedIdx = entry.elementIdx;
+    }
+    return true;
+}
+
 // Annotation interaction
 static int sVsSelectedAnnotation = -1;
 static bool sVsDraggingAnnotation = false;
@@ -20908,6 +20955,7 @@ void FrameTick(float dt)
                 ImVec2 mouse = ImGui::GetMousePos();
                 sHudDragPiece = -1;
                 sHudBoxSelecting = false;
+                sHudUndoDragPushed = false;
                 bool clickedPiece = false;
 
                 // Check if clicking on a piece within the selected element
@@ -20924,8 +20972,17 @@ void FrameTick(float dt)
                             el.selectedPiece = pi;
                             sHudPieceDragAccX = 0;
                             sHudPieceDragAccY = 0;
-                            // If this piece is already multi-selected, drag all selected
-                            if (pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi]) {
+                            bool ctrl = ImGui::GetIO().KeyCtrl;
+                            if (ctrl) {
+                                // Ctrl+click: toggle this piece in multi-selection
+                                if (sHudPieceSelected.size() < el.pieces.size())
+                                    sHudPieceSelected.resize(el.pieces.size(), false);
+                                sHudPieceSelected[pi] = !sHudPieceSelected[pi];
+                                // Check if any are selected for drag mode
+                                bool anyMulti = false;
+                                for (bool b : sHudPieceSelected) if (b) { anyMulti = true; break; }
+                                sHudDragPiece = anyMulti ? -2 : -1;
+                            } else if (pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi]) {
                                 sHudDragPiece = -2; // -2 = drag multi-selection
                             } else {
                                 sHudDragPiece = pi;
@@ -20995,6 +21052,10 @@ void FrameTick(float dt)
             // Drag piece(s) or whole element
             if (!sHudBoxSelecting && sHudSelectedIdx >= 0 && sHudSelectedIdx < (int)sHudElements.size() &&
                 ImGui::IsMouseDragging(ImGuiMouseButton_Left) && canvasHovered) {
+                if (!sHudUndoDragPushed) {
+                    HudUndoPush(sHudSelectedIdx);
+                    sHudUndoDragPushed = true;
+                }
                 auto& el = sHudElements[sHudSelectedIdx];
                 ImVec2 delta = ImGui::GetIO().MouseDelta;
 
@@ -21050,6 +21111,7 @@ void FrameTick(float dt)
                 if (ImGui::IsKeyPressed(ImGuiKey_A, true)) dx = -1;
                 if (ImGui::IsKeyPressed(ImGuiKey_D, true)) dx =  1;
                 if (dx != 0 || dy != 0) {
+                    HudUndoPush(sHudSelectedIdx);
                     bool anySelected = false;
                     for (int pi = 0; pi < (int)el.pieces.size() && pi < (int)sHudPieceSelected.size(); pi++)
                         if (sHudPieceSelected[pi]) { anySelected = true; break; }
@@ -21086,6 +21148,7 @@ void FrameTick(float dt)
                     }
                 }
                 if (ctrl && ImGui::IsKeyPressed(ImGuiKey_V, false) && !sHudPieceClipboard.empty()) {
+                    HudUndoPush(sHudSelectedIdx);
                     int base = (int)el.pieces.size();
                     for (auto& cp : sHudPieceClipboard) {
                         HudPiece np = cp;
@@ -21104,6 +21167,7 @@ void FrameTick(float dt)
             // Delete selected pieces
             if (canvasHovered && sHudSelectedIdx >= 0 && sHudSelectedIdx < (int)sHudElements.size() &&
                 ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
+                HudUndoPush(sHudSelectedIdx);
                 auto& el = sHudElements[sHudSelectedIdx];
                 bool anySelected = false;
                 for (int pi = 0; pi < (int)el.pieces.size() && pi < (int)sHudPieceSelected.size(); pi++)
@@ -21120,6 +21184,12 @@ void FrameTick(float dt)
                     el.selectedPiece = -1;
                     sProjectDirty = true;
                 }
+            }
+
+            // Ctrl+Z: undo, Ctrl+Shift+Z: redo HUD edits
+            if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
+                bool ok = ImGui::GetIO().KeyShift ? HudRedo() : HudUndo();
+                if (ok) sProjectDirty = true;
             }
 
             // Pan with middle mouse
