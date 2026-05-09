@@ -3096,6 +3096,7 @@ struct HudPiece {
     int size = 16;           // POT size: 8, 16, 32, or 64
     bool blackTint = false;  // render as solid black silhouette
     int opacity = 16;        // 0-16 (GBA alpha blend, 16 = fully opaque)
+    bool hidden = false;     // editor-only: hide from canvas (not exported)
 };
 
 struct StopModifier {
@@ -3186,11 +3187,26 @@ struct HudElement {
     bool collapseText = false;
     bool collapseCursor = false;
     bool collapseStops = false;
-    // Keyframe animation
+    // Animation layers — each groups items and has its own keyframes
+    enum ItemType : int { It_Piece = 0, It_Sprite = 1, It_Text = 2, It_Cursor = 3 };
+    struct LayerItem {
+        ItemType type;
+        int index; // piece/sprite/text index (-1 for cursor)
+    };
+    struct AnimLayer {
+        char name[32] = "Layer";
+        std::vector<LayerItem> items;
+        std::vector<HudKeyframe> keyframes;
+        bool loop = false;
+        int selectedKeyframe = -1;
+    };
+    std::vector<AnimLayer> animLayers;
+    int selectedLayer = -1;
+    bool collapseKeyframes = false;
+    // Legacy (kept for backward compat loading)
     std::vector<HudKeyframe> keyframes;
     bool animLoop = false;
     int selectedKeyframe = -1;
-    bool collapseKeyframes = false;
 };
 
 static std::vector<HudElement> sHudElements;
@@ -3204,6 +3220,7 @@ static float sHudTimelineScroll = 0.0f;
 static float sHudTimelineZoom = 4.0f;  // pixels per frame (recalculated on first draw)
 static bool sHudTimelinePlaying = false;
 static bool sHudTimelineZoomInit = false;
+static float sHudTimelineScrollY = 0;  // vertical scroll for sub-rows
 static int sHudTimelineSelStart = -1;  // frame range selection start
 static int sHudTimelineSelEnd = -1;    // frame range selection end
 static std::set<int> sHudTimelineSelFrames; // ctrl-click individual frame selection
@@ -4329,7 +4346,7 @@ static bool SaveProject(const std::string& path)
             el.visible ? 1 : 0, el.layer);
         fprintf(f, "elemPieceCount=%d\n", (int)el.pieces.size());
         for (auto& pc : el.pieces)
-            fprintf(f, "elemPiece=%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity);
+            fprintf(f, "elemPiece=%d|%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity, pc.hidden ? 1 : 0);
         fprintf(f, "elemStopCount=%d\n", (int)el.stops.size());
         for (auto& st : el.stops) {
             fprintf(f, "elemStop=%d|%d|%d\n", st.localX, st.localY, st.linkedElement);
@@ -4359,6 +4376,19 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "elemKfLoop=%d\n", el.animLoop ? 1 : 0);
             for (auto& kf : el.keyframes)
                 fprintf(f, "elemKf=%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY);
+        }
+        if (!el.animLayers.empty()) {
+            fprintf(f, "elemLayerCount=%d\n", (int)el.animLayers.size());
+            for (auto& lay : el.animLayers) {
+                fprintf(f, "elemLayer=%s\n", lay.name);
+                fprintf(f, "elemLayerLoop=%d\n", lay.loop ? 1 : 0);
+                fprintf(f, "elemLayerItemCount=%d\n", (int)lay.items.size());
+                for (auto& it : lay.items)
+                    fprintf(f, "elemLayerItem=%d|%d\n", (int)it.type, it.index);
+                fprintf(f, "elemLayerKfCount=%d\n", (int)lay.keyframes.size());
+                for (auto& kf : lay.keyframes)
+                    fprintf(f, "elemLayerKf=%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY);
+            }
         }
     }
     fprintf(f, "\n");
@@ -5357,10 +5387,10 @@ static bool LoadProject(const std::string& path)
                 sHudElements.back().pieces.reserve(ival);
             }
             else if (strncmp(line, "elemPiece=", 10) == 0 && !sHudElements.empty()) {
-                HudPiece pc; int bt = 0, opa = 16;
-                int n = sscanf(line + 10, "%d|%d|%d|%d|%d|%d|%d",
-                    &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size, &bt, &opa);
-                if (n >= 5) { pc.blackTint = (bt != 0); pc.opacity = std::clamp(opa, 0, 16); sHudElements.back().pieces.push_back(pc); }
+                HudPiece pc; int bt = 0, opa = 16, hid = 0;
+                int n = sscanf(line + 10, "%d|%d|%d|%d|%d|%d|%d|%d",
+                    &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size, &bt, &opa, &hid);
+                if (n >= 5) { pc.blackTint = (bt != 0); pc.opacity = std::clamp(opa, 0, 16); pc.hidden = (hid != 0); sHudElements.back().pieces.push_back(pc); }
             }
             else if (sscanf(line, "elemStopCount=%d", &ival) == 1 && !sHudElements.empty()) {
                 sHudElements.back().stops.clear();
@@ -5451,6 +5481,39 @@ static bool LoadProject(const std::string& path)
                 if (sscanf(line + 7, "%d|%d|%d|%d|%d|%d", &kf.frame, &kf.offsetX, &kf.offsetY,
                     &kf.rot, &kf.scaleX, &kf.scaleY) >= 4)
                     sHudElements.back().keyframes.push_back(kf);
+            }
+            else if (sscanf(line, "elemLayerCount=%d", &ival) == 1 && !sHudElements.empty()) {
+                sHudElements.back().animLayers.clear();
+                sHudElements.back().animLayers.reserve(ival);
+            }
+            else if (strncmp(line, "elemLayer=", 10) == 0 && !sHudElements.empty()) {
+                HudElement::AnimLayer lay;
+                strncpy(lay.name, line + 10, sizeof(lay.name) - 1);
+                lay.name[sizeof(lay.name) - 1] = '\0';
+                // Trim newline
+                char* nl = strchr(lay.name, '\n'); if (nl) *nl = '\0';
+                char* cr = strchr(lay.name, '\r'); if (cr) *cr = '\0';
+                sHudElements.back().animLayers.push_back(lay);
+            }
+            else if (sscanf(line, "elemLayerLoop=%d", &ival) == 1 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
+                sHudElements.back().animLayers.back().loop = (ival != 0);
+            }
+            else if (sscanf(line, "elemLayerItemCount=%d", &ival) == 1 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
+                sHudElements.back().animLayers.back().items.reserve(ival);
+            }
+            else if (strncmp(line, "elemLayerItem=", 14) == 0 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
+                int t = 0, idx = 0;
+                if (sscanf(line + 14, "%d|%d", &t, &idx) == 2)
+                    sHudElements.back().animLayers.back().items.push_back({ (HudElement::ItemType)t, idx });
+            }
+            else if (sscanf(line, "elemLayerKfCount=%d", &ival) == 1 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
+                sHudElements.back().animLayers.back().keyframes.reserve(ival);
+            }
+            else if (strncmp(line, "elemLayerKf=", 12) == 0 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
+                HudKeyframe kf;
+                if (sscanf(line + 12, "%d|%d|%d|%d|%d|%d", &kf.frame, &kf.offsetX, &kf.offsetY,
+                    &kf.rot, &kf.scaleX, &kf.scaleY) >= 4)
+                    sHudElements.back().animLayers.back().keyframes.push_back(kf);
             }
         }
         else if (strcmp(section, "Palette") == 0)
@@ -20765,12 +20828,37 @@ void FrameTick(float dt)
                 // Element — pieces/sprites/text drive the visuals
                 (void)hasSprite;
 
+                // Compute per-piece layer offsets from selected keyframe
+                // For each piece, check if it belongs to any layer with a selected keyframe
+                struct LayerTransform { float ox = 0, oy = 0; float sx = 1, sy = 1; };
+                auto getPieceLayerTransform = [&](HudElement::ItemType type, int idx) -> LayerTransform {
+                    LayerTransform t;
+                    for (auto& lay : el.animLayers) {
+                        bool inLayer = false;
+                        for (auto& it : lay.items)
+                            if (it.type == type && it.index == idx) { inLayer = true; break; }
+                        if (!inLayer) continue;
+                        if (lay.selectedKeyframe >= 0 && lay.selectedKeyframe < (int)lay.keyframes.size()) {
+                            auto& kf = lay.keyframes[lay.selectedKeyframe];
+                            t.ox += kf.offsetX;
+                            t.oy += kf.offsetY;
+                            t.sx *= kf.scaleX / 256.0f;
+                            t.sy *= kf.scaleY / 256.0f;
+                        }
+                    }
+                    return t;
+                };
+
                 // Draw composite pieces (with screen wrapping)
                 for (int pi = 0; pi < (int)el.pieces.size(); pi++) {
                     auto& pc = el.pieces[pi];
-                    float baseX = el.x + pc.localX;
-                    float baseY = el.y + pc.localY;
-                    float psz = pc.size * zoom;
+                    if (pc.hidden) continue;
+                    LayerTransform lt = getPieceLayerTransform(HudElement::It_Piece, pi);
+                    float baseX = el.x + pc.localX + lt.ox;
+                    float baseY = el.y + pc.localY + lt.oy;
+                    float pszW = pc.size * lt.sx;
+                    float pszH = pc.size * lt.sy;
+                    float psz = pc.size * zoom; // for wrap check (unscaled)
                     // Wrap at screen edges: pieces sliding off one side appear on the other
                     float wrapX[] = { 0, -240, 240 };
                     float wrapY[] = { 0, -160, 160 };
@@ -20782,15 +20870,17 @@ void FrameTick(float dt)
                         int wi = wy * 3 + wx;
                         float px = cx + wrpX * zoom;
                         float py = cy + wrpY * zoom;
+                        float drawW = pszW * zoom;
+                        float drawH = pszH * zoom;
                         if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sTmSpriteTextures.size() &&
                             sTmSpriteTextures[pc.spriteAssetIdx]) {
                             int alpha = (pc.opacity * 255) / 16;
                             ImU32 tintCol = pc.blackTint ? IM_COL32(0, 0, 0, alpha) : IM_COL32(255, 255, 255, alpha);
                             dl->AddImage((ImTextureID)(intptr_t)sTmSpriteTextures[pc.spriteAssetIdx],
-                                ImVec2(px, py), ImVec2(px + psz, py + psz),
+                                ImVec2(px, py), ImVec2(px + drawW, py + drawH),
                                 ImVec2(0,0), ImVec2(1,1), tintCol);
                         } else {
-                            dl->AddRectFilled(ImVec2(px, py), ImVec2(px + psz, py + psz),
+                            dl->AddRectFilled(ImVec2(px, py), ImVec2(px + drawW, py + drawH),
                                 IM_COL32(80, 80, 120, 100));
                         }
                         if (wi == 0) {
@@ -20798,7 +20888,7 @@ void FrameTick(float dt)
                             ImU32 outlineCol = IM_COL32(100, 100, 150, 120);
                             if (selected && pi == el.selectedPiece) outlineCol = IM_COL32(100, 255, 100, 255);
                             else if (pieceMultiSel) outlineCol = IM_COL32(100, 200, 255, 255);
-                            dl->AddRect(ImVec2(px, py), ImVec2(px + psz, py + psz), outlineCol);
+                            dl->AddRect(ImVec2(px, py), ImVec2(px + drawW, py + drawH), outlineCol);
                         }
                     }}
                 }
@@ -20823,9 +20913,10 @@ void FrameTick(float dt)
                             }
                         }
                     }
+                    LayerTransform slt = getPieceLayerTransform(HudElement::It_Sprite, si);
                     float finalScale = item.scale * modScale;
-                    float baseX = el.x + item.localX + modOX;
-                    float baseY = el.y + item.localY + modOY;
+                    float baseX = el.x + item.localX + modOX + slt.ox;
+                    float baseY = el.y + item.localY + modOY + slt.oy;
                     float isz = item.size * finalScale * zoom;
                     float itemSz = item.size * finalScale;
                     float wrapX[] = { 0, -240, 240 };
@@ -21321,7 +21412,7 @@ void FrameTick(float dt)
                         // Pieces
                         fprintf(cf, "elemPieceCount=%d\n", (int)el.pieces.size());
                         for (auto& pc : el.pieces)
-                            fprintf(cf, "elemPiece=%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity);
+                            fprintf(cf, "elemPiece=%d|%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity, pc.hidden ? 1 : 0);
                         // Stops
                         fprintf(cf, "elemStopCount=%d\n", (int)el.stops.size());
                         for (auto& st : el.stops) {
@@ -21471,10 +21562,10 @@ void FrameTick(float dt)
                                 nel.pieces.clear(); nel.pieces.reserve(ival2);
                             }
                             else if (strncmp(line, "elemPiece=", 10) == 0) {
-                                HudPiece pc; int bt2 = 0, opa2 = 16;
-                                int n2 = sscanf(line + 10, "%d|%d|%d|%d|%d|%d|%d", &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size, &bt2, &opa2);
+                                HudPiece pc; int bt2 = 0, opa2 = 16, hid2 = 0;
+                                int n2 = sscanf(line + 10, "%d|%d|%d|%d|%d|%d|%d|%d", &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size, &bt2, &opa2, &hid2);
                                 if (n2 >= 5) {
-                                    pc.blackTint = (bt2 != 0); pc.opacity = std::clamp(opa2, 0, 16);
+                                    pc.blackTint = (bt2 != 0); pc.opacity = std::clamp(opa2, 0, 16); pc.hidden = (hid2 != 0);
                                     pc.spriteAssetIdx = remapAsset(pc.spriteAssetIdx);
                                     nel.pieces.push_back(pc);
                                 }
@@ -21670,10 +21761,12 @@ void FrameTick(float dt)
                         char plabel[64];
                         const char* pname = (el.pieces[pi].spriteAssetIdx >= 0 && el.pieces[pi].spriteAssetIdx < (int)sSpriteAssets.size())
                             ? sSpriteAssets[el.pieces[pi].spriteAssetIdx].name.c_str() : "empty";
-                        snprintf(plabel, sizeof(plabel), "%d: %s (%dpx)", pi, pname, el.pieces[pi].size);
+                        snprintf(plabel, sizeof(plabel), "%s%d: %s (%dpx)", el.pieces[pi].hidden ? "[H] " : "", pi, pname, el.pieces[pi].size);
+                        if (el.pieces[pi].hidden)
+                            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.4f);
                         if (multiSel && !psel)
                             ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.2f, 0.4f, 0.7f, 0.6f));
-                        if (ImGui::Selectable(plabel, psel || multiSel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0))) {
+                        if (ImGui::Selectable(plabel, psel || multiSel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 50, 0))) {
                             if (ImGui::GetIO().KeyShift && el.selectedPiece >= 0) {
                                 // Shift-click: range select from selectedPiece to pi
                                 int a = std::min(el.selectedPiece, pi);
@@ -21694,6 +21787,8 @@ void FrameTick(float dt)
                         }
                         if (multiSel && !psel)
                             ImGui::PopStyleColor();
+                        if (el.pieces[pi].hidden)
+                            ImGui::PopStyleVar();
                         if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
                             ImGui::SetDragDropPayload("HUD_PIECE", &pi, sizeof(int));
                             if (multiSel) {
@@ -21736,9 +21831,34 @@ void FrameTick(float dt)
                             ImGui::EndDragDropTarget();
                         }
                         ImGui::SameLine();
+                        if (ImGui::SmallButton(el.pieces[pi].hidden ? "O" : "H")) {
+                            bool isMulti = (pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi]);
+                            if (isMulti) {
+                                // Toggle hide for all selected pieces (use clicked piece's new state)
+                                bool newState = !el.pieces[pi].hidden;
+                                for (int k = 0; k < (int)el.pieces.size() && k < (int)sHudPieceSelected.size(); k++)
+                                    if (sHudPieceSelected[k]) el.pieces[k].hidden = newState;
+                            } else {
+                                el.pieces[pi].hidden = !el.pieces[pi].hidden;
+                            }
+                            sProjectDirty = true;
+                        }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip(el.pieces[pi].hidden ? "Show piece" : "Hide piece");
+                        ImGui::SameLine();
                         if (ImGui::SmallButton("-")) {
-                            el.pieces.erase(el.pieces.begin() + pi);
-                            if (el.selectedPiece >= (int)el.pieces.size()) el.selectedPiece = -1;
+                            bool isMulti = (pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi]);
+                            if (isMulti) {
+                                HudUndoPush(sHudSelectedIdx);
+                                for (int k = (int)el.pieces.size() - 1; k >= 0; k--)
+                                    if (k < (int)sHudPieceSelected.size() && sHudPieceSelected[k])
+                                        el.pieces.erase(el.pieces.begin() + k);
+                                sHudPieceSelected.clear();
+                                el.selectedPiece = -1;
+                            } else {
+                                HudUndoPush(sHudSelectedIdx);
+                                el.pieces.erase(el.pieces.begin() + pi);
+                                if (el.selectedPiece >= (int)el.pieces.size()) el.selectedPiece = -1;
+                            }
                             sProjectDirty = true;
                             ImGui::PopID();
                             break;
@@ -22062,56 +22182,141 @@ void FrameTick(float dt)
                     }
                 }
 
-                // ---- Keyframes section ----
+                // ---- Animation Layers section ----
                 ImGui::Separator();
                 if (ImGui::SmallButton(el.collapseKeyframes ? ">##kf" : "v##kf"))
                     el.collapseKeyframes = !el.collapseKeyframes;
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Keyframes");
                 ImGui::SameLine();
-                if (ImGui::SmallButton("+##addkf")) {
-                    HudKeyframe kf;
-                    kf.frame = el.keyframes.empty() ? 0 : (el.keyframes.back().frame + 15);
-                    el.keyframes.push_back(kf);
-                    el.selectedKeyframe = (int)el.keyframes.size() - 1;
-                    sProjectDirty = true;
+                if (ImGui::SmallButton("+##addlayer")) {
+                    // Create a new layer from currently selected items
+                    HudElement::AnimLayer layer;
+                    snprintf(layer.name, sizeof(layer.name), "Layer %d", (int)el.animLayers.size());
+                    // Add selected/multi-selected pieces
+                    for (int pi = 0; pi < (int)el.pieces.size(); pi++) {
+                        bool isSel = (pi == el.selectedPiece) ||
+                            (pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi]);
+                        if (isSel) layer.items.push_back({ HudElement::It_Piece, pi });
+                    }
+                    // Add selected sprite item
+                    if (el.selectedSpriteItem >= 0 && el.selectedSpriteItem < (int)el.spriteItems.size())
+                        layer.items.push_back({ HudElement::It_Sprite, el.selectedSpriteItem });
+                    // Add selected text row
+                    if (el.selectedTextRow >= 0 && el.selectedTextRow < (int)el.textRows.size())
+                        layer.items.push_back({ HudElement::It_Text, el.selectedTextRow });
+                    // Add cursor if it exists and nothing else was selected
+                    if (layer.items.empty() && el.cursorAssetIdx >= 0)
+                        layer.items.push_back({ HudElement::It_Cursor, -1 });
+                    if (!layer.items.empty()) {
+                        el.animLayers.push_back(layer);
+                        el.selectedLayer = (int)el.animLayers.size() - 1;
+                        sProjectDirty = true;
+                    }
                 }
-                ImGui::SameLine();
-                if (ImGui::Checkbox("Loop##kfloop", &el.animLoop)) sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Create layer from selected items");
 
                 if (!el.collapseKeyframes) {
-                    for (int ki = 0; ki < (int)el.keyframes.size(); ki++) {
-                        ImGui::PushID(6000 + ki);
-                        auto& kf = el.keyframes[ki];
-                        bool ksel = (ki == el.selectedKeyframe);
-                        char klabel[64];
-                        snprintf(klabel, sizeof(klabel), "%d: f%d (%+d,%+d) r%d s%.1f,%.1f",
-                            ki, kf.frame, kf.offsetX, kf.offsetY, kf.rot,
-                            kf.scaleX / 256.0f, kf.scaleY / 256.0f);
-                        if (ImGui::Selectable(klabel, ksel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
-                            el.selectedKeyframe = ki;
+                    // Layer list
+                    for (int li = 0; li < (int)el.animLayers.size(); li++) {
+                        ImGui::PushID(7000 + li);
+                        auto& lay = el.animLayers[li];
+                        bool lsel = (li == el.selectedLayer);
+                        // Build summary: layer name + item count
+                        char llabel[64];
+                        snprintf(llabel, sizeof(llabel), "%s (%d items, %d kf)", lay.name,
+                            (int)lay.items.size(), (int)lay.keyframes.size());
+                        if (ImGui::Selectable(llabel, lsel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
+                            el.selectedLayer = li;
                         ImGui::SameLine();
-                        if (ImGui::SmallButton("-##delkf")) {
-                            el.keyframes.erase(el.keyframes.begin() + ki);
-                            if (el.selectedKeyframe >= (int)el.keyframes.size()) el.selectedKeyframe = -1;
+                        if (ImGui::SmallButton("-##dellayer")) {
+                            el.animLayers.erase(el.animLayers.begin() + li);
+                            if (el.selectedLayer >= (int)el.animLayers.size()) el.selectedLayer = -1;
                             sProjectDirty = true;
                             ImGui::PopID(); break;
                         }
                         ImGui::PopID();
                     }
-                    if (el.selectedKeyframe >= 0 && el.selectedKeyframe < (int)el.keyframes.size()) {
-                        auto& kf = el.keyframes[el.selectedKeyframe];
+
+                    // Selected layer properties
+                    if (el.selectedLayer >= 0 && el.selectedLayer < (int)el.animLayers.size()) {
+                        auto& lay = el.animLayers[el.selectedLayer];
                         ImGui::Spacing();
-                        if (ImGui::DragInt("Frame##kf", &kf.frame, 1, 0, 600)) sProjectDirty = true;
-                        if (ImGui::DragInt("Offset X##kf", &kf.offsetX, 1)) sProjectDirty = true;
-                        if (ImGui::DragInt("Offset Y##kf", &kf.offsetY, 1)) sProjectDirty = true;
-                        if (ImGui::DragInt("Rotation##kf", &kf.rot, 1, 0, 359)) sProjectDirty = true;
-                        float sx = kf.scaleX / 256.0f, sy = kf.scaleY / 256.0f;
-                        if (ImGui::DragFloat("Scale X##kf", &sx, 0.01f, 0.1f, 4.0f, "%.2f")) {
-                            kf.scaleX = (int)(sx * 256.0f); sProjectDirty = true;
+                        if (ImGui::InputText("Name##layer", lay.name, sizeof(lay.name))) sProjectDirty = true;
+                        if (ImGui::Checkbox("Loop##layer", &lay.loop)) sProjectDirty = true;
+
+                        // Items in this layer
+                        ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.8f, 1.0f), "Items:");
+                        for (int ii = 0; ii < (int)lay.items.size(); ii++) {
+                            auto& it = lay.items[ii];
+                            char ilabel[48];
+                            switch (it.type) {
+                            case HudElement::It_Piece: {
+                                const char* pn = (it.index >= 0 && it.index < (int)el.pieces.size() &&
+                                    el.pieces[it.index].spriteAssetIdx >= 0 && el.pieces[it.index].spriteAssetIdx < (int)sSpriteAssets.size())
+                                    ? sSpriteAssets[el.pieces[it.index].spriteAssetIdx].name.c_str() : "empty";
+                                snprintf(ilabel, sizeof(ilabel), "Piece %d: %s", it.index, pn);
+                            } break;
+                            case HudElement::It_Sprite: {
+                                const char* sn = (it.index >= 0 && it.index < (int)el.spriteItems.size() &&
+                                    el.spriteItems[it.index].spriteAssetIdx >= 0 && el.spriteItems[it.index].spriteAssetIdx < (int)sSpriteAssets.size())
+                                    ? sSpriteAssets[el.spriteItems[it.index].spriteAssetIdx].name.c_str() : "empty";
+                                snprintf(ilabel, sizeof(ilabel), "Sprite %d: %s", it.index, sn);
+                            } break;
+                            case HudElement::It_Text:
+                                snprintf(ilabel, sizeof(ilabel), "Text %d: %s", it.index,
+                                    (it.index >= 0 && it.index < (int)el.textRows.size()) ? el.textRows[it.index].label : "?");
+                                break;
+                            case HudElement::It_Cursor:
+                                snprintf(ilabel, sizeof(ilabel), "Cursor"); break;
+                            }
+                            ImGui::BulletText("%s", ilabel);
                         }
-                        if (ImGui::DragFloat("Scale Y##kf", &sy, 0.01f, 0.1f, 4.0f, "%.2f")) {
-                            kf.scaleY = (int)(sy * 256.0f); sProjectDirty = true;
+
+                        // Keyframes for this layer
+                        ImGui::Spacing();
+                        ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.8f, 1.0f), "Keyframes:");
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("+##addkf")) {
+                            HudKeyframe kf;
+                            kf.frame = lay.keyframes.empty() ? 0 : (lay.keyframes.back().frame + 15);
+                            lay.keyframes.push_back(kf);
+                            lay.selectedKeyframe = (int)lay.keyframes.size() - 1;
+                            sProjectDirty = true;
+                        }
+                        for (int ki = 0; ki < (int)lay.keyframes.size(); ki++) {
+                            ImGui::PushID(6000 + ki);
+                            auto& kf = lay.keyframes[ki];
+                            bool ksel = (ki == lay.selectedKeyframe);
+                            char klabel[64];
+                            snprintf(klabel, sizeof(klabel), "%d: f%d (%+d,%+d) r%d s%.1f,%.1f",
+                                ki, kf.frame, kf.offsetX, kf.offsetY, kf.rot,
+                                kf.scaleX / 256.0f, kf.scaleY / 256.0f);
+                            if (ImGui::Selectable(klabel, ksel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
+                                lay.selectedKeyframe = ki;
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("-##delkf")) {
+                                lay.keyframes.erase(lay.keyframes.begin() + ki);
+                                if (lay.selectedKeyframe >= (int)lay.keyframes.size()) lay.selectedKeyframe = -1;
+                                sProjectDirty = true;
+                                ImGui::PopID(); break;
+                            }
+                            ImGui::PopID();
+                        }
+                        if (lay.selectedKeyframe >= 0 && lay.selectedKeyframe < (int)lay.keyframes.size()) {
+                            auto& kf = lay.keyframes[lay.selectedKeyframe];
+                            ImGui::Spacing();
+                            if (ImGui::DragInt("Frame##kf", &kf.frame, 1, 0, 600)) sProjectDirty = true;
+                            if (ImGui::DragInt("Offset X##kf", &kf.offsetX, 1)) sProjectDirty = true;
+                            if (ImGui::DragInt("Offset Y##kf", &kf.offsetY, 1)) sProjectDirty = true;
+                            if (ImGui::DragInt("Rotation##kf", &kf.rot, 1, 0, 359)) sProjectDirty = true;
+                            float sx = kf.scaleX / 256.0f, sy = kf.scaleY / 256.0f;
+                            if (ImGui::DragFloat("Scale X##kf", &sx, 0.01f, 0.1f, 4.0f, "%.2f")) {
+                                kf.scaleX = (int)(sx * 256.0f); sProjectDirty = true;
+                            }
+                            if (ImGui::DragFloat("Scale Y##kf", &sy, 0.01f, 0.1f, 4.0f, "%.2f")) {
+                                kf.scaleY = (int)(sy * 256.0f); sProjectDirty = true;
+                            }
                         }
                     }
                 }
@@ -22188,6 +22393,20 @@ void FrameTick(float dt)
                 sHudTimelineScroll -= wheel * 50.0f;
                 if (sHudTimelineScroll < 0) sHudTimelineScroll = 0;
             }
+        }
+
+        // Drag on track area: left/right scrolls frames, up/down scrolls sub-rows
+        if (tlHovered && mouse.y >= tracksTop && mouse.y < tracksBot &&
+            ImGui::IsMouseDragging(ImGuiMouseButton_Right)) {
+            ImVec2 delta = ImGui::GetIO().MouseDelta;
+            sHudTimelineScroll -= delta.x;
+            if (sHudTimelineScroll < 0) sHudTimelineScroll = 0;
+            sHudTimelineScrollY -= delta.y;
+        }
+        // Scroll wheel on timeline: vertical = scroll sub-rows, Ctrl+wheel = zoom
+        if (tlHovered && mouse.y >= tracksTop && mouse.y < tracksBot && !ImGui::GetIO().KeyCtrl) {
+            float wheel = ImGui::GetIO().MouseWheel;
+            sHudTimelineScrollY -= wheel * 40.0f;
         }
 
         // Toolbar button clicks
@@ -22418,32 +22637,20 @@ void FrameTick(float dt)
             dl->AddRectFilled(ImVec2(fx, tracksTop), ImVec2(fx2, tracksBot), IM_COL32(70, 130, 220, 50));
         }
 
-        // Element rows — only show the selected element
-        for (int ii = 0; ii < 1; ii++) {
-            int i = sHudSelectedIdx;
-            if (i < 0 || i >= (int)sHudElements.size()) break;
-            auto& el = sHudElements[i];
+        // Dopesheet rows — element header + sub-rows for pieces, sprites, text, cursor
+        if (sHudSelectedIdx >= 0 && sHudSelectedIdx < (int)sHudElements.size()) {
+            auto& el = sHudElements[sHudSelectedIdx];
+            float subRowH = 22.0f;
             float ry = tracksTop;
-            bool sel = true;
 
-            // Row bg (track area)
-            dl->AddRectFilled(ImVec2(trackX, ry), ImVec2(trackX + trackW, ry + rowH),
-                (i % 2 == 0) ? IM_COL32(34, 34, 36, 255) : IM_COL32(30, 30, 32, 255));
-            if (sel)
-                dl->AddRectFilled(ImVec2(trackX, ry), ImVec2(trackX + trackW, ry + rowH), IM_COL32(45, 55, 80, 120));
-
-            // Label column
-            dl->AddRectFilled(ImVec2(tlX, ry), ImVec2(trackX, ry + rowH),
-                sel ? IM_COL32(55, 65, 90, 255) : IM_COL32(50, 50, 52, 255));
-
-            // Label text — vertically centered
+            // Element header row
+            dl->AddRectFilled(ImVec2(trackX, ry), ImVec2(trackX + trackW, ry + rowH), IM_COL32(45, 55, 80, 120));
+            dl->AddRectFilled(ImVec2(tlX, ry), ImVec2(trackX, ry + rowH), IM_COL32(55, 65, 90, 255));
             float textY = ry + (rowH - ImGui::GetFontSize()) * 0.5f;
-            dl->AddText(ImVec2(tlX + 10, textY),
-                sel ? IM_COL32(255, 230, 130, 255) : IM_COL32(190, 190, 195, 255), el.name);
+            dl->AddText(ImVec2(tlX + 10, textY), IM_COL32(255, 230, 130, 255), el.name);
 
-            // Keyframe dot marker + loop indicator
+            // Keyframe diamonds on element header
             if (!el.keyframes.empty()) {
-                // Thin colored line from first to last keyframe
                 float firstKx = trackX + el.keyframes.front().frame * sHudTimelineZoom - sHudTimelineScroll;
                 float lastKx = trackX + el.keyframes.back().frame * sHudTimelineZoom - sHudTimelineScroll;
                 float lineY = ry + rowH * 0.5f;
@@ -22451,30 +22658,75 @@ void FrameTick(float dt)
                     float clampL = std::max(firstKx, trackX);
                     float clampR = std::min(lastKx, trackX + trackW);
                     if (clampR > clampL)
-                        dl->AddLine(ImVec2(clampL, lineY), ImVec2(clampR, lineY),
-                            sel ? IM_COL32(80, 120, 200, 100) : IM_COL32(180, 130, 40, 60), 2.0f);
+                        dl->AddLine(ImVec2(clampL, lineY), ImVec2(clampR, lineY), IM_COL32(80, 120, 200, 100), 2.0f);
                 }
             }
-
-            // Keyframe diamonds
             for (int ki = 0; ki < (int)el.keyframes.size(); ki++) {
                 float kx = trackX + el.keyframes[ki].frame * sHudTimelineZoom - sHudTimelineScroll;
                 if (kx < trackX - 10 || kx > trackX + trackW + 10) continue;
                 float ky = ry + rowH * 0.5f;
                 float ds = 6.0f;
-                bool kfSel = (sel && ki == el.selectedKeyframe);
+                bool kfSel = (ki == el.selectedKeyframe);
                 ImU32 fill = kfSel ? IM_COL32(255, 255, 255, 255) : IM_COL32(240, 170, 40, 255);
                 ImU32 outline = kfSel ? IM_COL32(70, 150, 255, 255) : IM_COL32(200, 130, 20, 255);
-                dl->AddQuadFilled(
-                    ImVec2(kx, ky - ds), ImVec2(kx + ds, ky),
-                    ImVec2(kx, ky + ds), ImVec2(kx - ds, ky), fill);
-                dl->AddQuad(
-                    ImVec2(kx, ky - ds), ImVec2(kx + ds, ky),
-                    ImVec2(kx, ky + ds), ImVec2(kx - ds, ky), outline, 1.5f);
+                dl->AddQuadFilled(ImVec2(kx, ky - ds), ImVec2(kx + ds, ky), ImVec2(kx, ky + ds), ImVec2(kx - ds, ky), fill);
+                dl->AddQuad(ImVec2(kx, ky - ds), ImVec2(kx + ds, ky), ImVec2(kx, ky + ds), ImVec2(kx - ds, ky), outline, 1.5f);
+            }
+            dl->AddLine(ImVec2(tlX, ry + rowH - 1), ImVec2(tlX + tlW, ry + rowH - 1), IM_COL32(18, 18, 20, 255));
+
+            // Build sub-row list from animation layers
+            struct SubRow { char buf[48]; ImU32 color; int layerIdx; };
+            std::vector<SubRow> subRows;
+            for (int li = 0; li < (int)el.animLayers.size(); li++) {
+                SubRow sr; sr.layerIdx = li;
+                sr.color = (li == el.selectedLayer) ? IM_COL32(255, 220, 100, 255) : IM_COL32(180, 170, 130, 255);
+                snprintf(sr.buf, sizeof(sr.buf), "  %s (%d kf)", el.animLayers[li].name, (int)el.animLayers[li].keyframes.size());
+                subRows.push_back(sr);
             }
 
-            // Bottom row line
-            dl->AddLine(ImVec2(tlX, ry + rowH - 1), ImVec2(tlX + tlW, ry + rowH - 1), IM_COL32(18, 18, 20, 255));
+            // Clamp scroll
+            float totalSubH = (int)subRows.size() * subRowH;
+            float availH = tracksBot - (tracksTop + rowH);
+            float maxScrollY = std::max(0.0f, totalSubH - availH);
+            sHudTimelineScrollY = std::clamp(sHudTimelineScrollY, 0.0f, maxScrollY);
+
+            // Draw sub-rows (layers)
+            float subTop = tracksTop + rowH;
+            for (int ri = 0; ri < (int)subRows.size(); ri++) {
+                float sry = subTop + ri * subRowH - sHudTimelineScrollY;
+                if (sry + subRowH < subTop || sry > tracksBot) continue;
+                int li = subRows[ri].layerIdx;
+                bool lsel = (li == el.selectedLayer);
+                dl->AddRectFilled(ImVec2(trackX, sry), ImVec2(trackX + trackW, sry + subRowH),
+                    lsel ? IM_COL32(40, 50, 70, 255) : ((ri % 2 == 0) ? IM_COL32(30, 30, 32, 255) : IM_COL32(34, 34, 36, 255)));
+                dl->AddRectFilled(ImVec2(tlX, sry), ImVec2(trackX, sry + subRowH),
+                    lsel ? IM_COL32(50, 58, 75, 255) : IM_COL32(42, 42, 48, 255));
+                float sTextY = sry + (subRowH - ImGui::GetFontSize()) * 0.5f;
+                dl->AddText(ImVec2(tlX + 6, sTextY), subRows[ri].color, subRows[ri].buf);
+
+                // Draw keyframe diamonds for this layer
+                auto& lay = el.animLayers[li];
+                for (int ki = 0; ki < (int)lay.keyframes.size(); ki++) {
+                    float kx = trackX + lay.keyframes[ki].frame * sHudTimelineZoom - sHudTimelineScroll;
+                    if (kx < trackX - 10 || kx > trackX + trackW + 10) continue;
+                    float ky = sry + subRowH * 0.5f;
+                    float ds = 5.0f;
+                    bool kfSel = (lsel && ki == lay.selectedKeyframe);
+                    ImU32 fill = kfSel ? IM_COL32(255, 255, 255, 255) : IM_COL32(240, 170, 40, 255);
+                    ImU32 outline = kfSel ? IM_COL32(70, 150, 255, 255) : IM_COL32(200, 130, 20, 255);
+                    dl->AddQuadFilled(ImVec2(kx, ky - ds), ImVec2(kx + ds, ky), ImVec2(kx, ky + ds), ImVec2(kx - ds, ky), fill);
+                    dl->AddQuad(ImVec2(kx, ky - ds), ImVec2(kx + ds, ky), ImVec2(kx, ky + ds), ImVec2(kx - ds, ky), outline, 1.5f);
+                }
+
+                dl->AddLine(ImVec2(tlX, sry + subRowH - 1), ImVec2(tlX + tlW, sry + subRowH - 1), IM_COL32(18, 18, 20, 180));
+            }
+
+            // Click on sub-row to select layer
+            if (ImGui::IsMouseClicked(0) && mouse.y >= subTop && mouse.y < tracksBot && mouse.x >= tlX && mouse.x < tlX + tlW) {
+                int clickRow = (int)((mouse.y - subTop + sHudTimelineScrollY) / subRowH);
+                if (clickRow >= 0 && clickRow < (int)subRows.size())
+                    el.selectedLayer = subRows[clickRow].layerIdx;
+            }
         }
 
         // Label/track vertical divider
