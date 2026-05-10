@@ -3208,8 +3208,9 @@ struct HudElement {
         bool loop = false;
         int selectedKeyframe = -1;
         HudInterpMode interp = Interp_Linear;
-        int fps = 3;        // index into fpsValues (default 24fps)
+        int fps = 24;       // direct fps value
         int length = 60;    // animation length in frames
+        bool collapsed = false;
     };
     std::vector<AnimLayer> animLayers;
     int selectedLayer = -1;
@@ -5524,7 +5525,7 @@ static bool LoadProject(const std::string& path)
                 sHudElements.back().animLayers.back().interp = (HudInterpMode)std::clamp(ival, 0, 2);
             }
             else if (sscanf(line, "elemLayerFps=%d", &ival) == 1 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
-                sHudElements.back().animLayers.back().fps = std::clamp(ival, 0, 7);
+                sHudElements.back().animLayers.back().fps = std::max(1, ival);
             }
             else if (sscanf(line, "elemLayerLength=%d", &ival) == 1 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
                 sHudElements.back().animLayers.back().length = std::max(1, ival);
@@ -11428,11 +11429,7 @@ void FrameTick(float dt)
                         le.name = lay.name;
                         le.interp = (int)lay.interp;
                         le.loop = lay.loop;
-                        {
-                            float fpsValues[] = { 6.0f, 8.0f, 12.0f, 24.0f, 30.0f, 60.0f, 120.0f, 240.0f };
-                            float fps = fpsValues[std::clamp(lay.fps, 0, 7)];
-                            le.speed = (fps > 0) ? std::max(1, (int)(60.0f / fps)) : 1;
-                        }
+                        le.speed = (lay.fps > 0) ? std::max(1, (int)(60.0f / lay.fps)) : 1;
                         le.length = std::max(1, lay.length);
                         for (auto& it : lay.items)
                             le.items.push_back({ (int)it.type, it.index });
@@ -22427,7 +22424,11 @@ void FrameTick(float dt)
                         ImGui::PushID(7000 + li);
                         auto& lay = el.animLayers[li];
                         bool lsel = (li == el.selectedLayer);
-                        // Build summary: layer name + item count
+                        // Collapse arrow
+                        const char* arrow = lay.collapsed ? ">" : "v";
+                        if (ImGui::SmallButton(arrow)) lay.collapsed = !lay.collapsed;
+                        ImGui::SameLine();
+                        // Build summary: layer name
                         char llabel[64];
                         snprintf(llabel, sizeof(llabel), "%s", lay.name);
                         if (ImGui::Selectable(llabel, lsel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
@@ -22442,8 +22443,9 @@ void FrameTick(float dt)
                         ImGui::PopID();
                     }
 
-                    // Selected layer properties
-                    if (el.selectedLayer >= 0 && el.selectedLayer < (int)el.animLayers.size()) {
+                    // Selected layer properties (hidden when collapsed)
+                    if (el.selectedLayer >= 0 && el.selectedLayer < (int)el.animLayers.size()
+                        && !el.animLayers[el.selectedLayer].collapsed) {
                         auto& lay = el.animLayers[el.selectedLayer];
                         ImGui::Spacing();
                         if (ImGui::InputText("Name##layer", lay.name, sizeof(lay.name))) sProjectDirty = true;
@@ -22454,8 +22456,10 @@ void FrameTick(float dt)
                             lay.interp = (HudInterpMode)interpIdx;
                             sProjectDirty = true;
                         }
-                        const char* fpsLabels[] = { "6", "8", "12", "24", "30", "60", "120", "240" };
-                        if (ImGui::Combo("FPS##layer", &lay.fps, fpsLabels, 8)) sProjectDirty = true;
+                        if (ImGui::InputInt("FPS##layer", &lay.fps, 1, 10)) {
+                            if (lay.fps < 1) lay.fps = 1;
+                            sProjectDirty = true;
+                        }
                         if (ImGui::InputInt("Length##layer", &lay.length, 1, 10)) {
                             if (lay.length < 1) lay.length = 1;
                             sProjectDirty = true;
