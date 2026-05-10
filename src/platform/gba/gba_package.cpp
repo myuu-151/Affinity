@@ -7,7 +7,10 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <array>
+#include <iomanip>
 #include <set>
+#include <unordered_map>
 #include <filesystem>
 
 #ifdef _WIN32
@@ -253,6 +256,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                             const std::vector<GBASpriteAssetExport>& assets,
                             const GBACameraExport& camera,
                             const std::vector<GBAMeshExport>& meshes,
+                            const unsigned char* m7FloorPixels, int m7FloorW, int m7FloorH,
                             float orbitDist,
                             const GBAScriptExport& script,
                             const std::vector<GBABlueprintExport>& blueprints,
@@ -5255,6 +5259,115 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "#define AFN_HAS_SOUND 1\n";
     }
 
+    // ---- Mode 7 floor texture (8bpp tiles + palette + map) ----
+    if (m7FloorPixels && m7FloorW > 0 && m7FloorH > 0) {
+        // Quantize RGBA image to 256-color palette (simple popularity)
+        // Build frequency map of GBA RGB555 colors
+        struct Color15 { uint16_t v; };
+        std::unordered_map<uint16_t, int> colorFreq;
+        int totalPx = m7FloorW * m7FloorH;
+        for (int i = 0; i < totalPx; i++) {
+            int r = m7FloorPixels[i * 4 + 0] >> 3;
+            int g = m7FloorPixels[i * 4 + 1] >> 3;
+            int b = m7FloorPixels[i * 4 + 2] >> 3;
+            uint16_t c15 = r | (g << 5) | (b << 10);
+            colorFreq[c15]++;
+        }
+        // Sort by frequency, take top 256
+        std::vector<std::pair<uint16_t, int>> sorted(colorFreq.begin(), colorFreq.end());
+        std::sort(sorted.begin(), sorted.end(), [](auto& a, auto& b) { return a.second > b.second; });
+        uint16_t palette[256] = {};
+        int palCount = std::min(256, (int)sorted.size());
+        std::unordered_map<uint16_t, uint8_t> palLookup;
+        for (int i = 0; i < palCount; i++) {
+            palette[i] = sorted[i].first;
+            palLookup[sorted[i].first] = (uint8_t)i;
+        }
+        // Map pixels to palette indices (nearest for colors not in top 256)
+        std::vector<uint8_t> indexed(totalPx);
+        for (int i = 0; i < totalPx; i++) {
+            int r = m7FloorPixels[i * 4 + 0] >> 3;
+            int g = m7FloorPixels[i * 4 + 1] >> 3;
+            int b = m7FloorPixels[i * 4 + 2] >> 3;
+            uint16_t c15 = r | (g << 5) | (b << 10);
+            auto it = palLookup.find(c15);
+            if (it != palLookup.end()) {
+                indexed[i] = it->second;
+            } else {
+                // Find nearest palette entry
+                int bestDist = 999999, bestIdx = 0;
+                for (int p = 0; p < palCount; p++) {
+                    int pr = palette[p] & 31, pg = (palette[p] >> 5) & 31, pb = (palette[p] >> 10) & 31;
+                    int dr = r - pr, dg = g - pg, db = b - pb;
+                    int d = dr*dr + dg*dg + db*db;
+                    if (d < bestDist) { bestDist = d; bestIdx = p; }
+                }
+                indexed[i] = (uint8_t)bestIdx;
+                palLookup[c15] = (uint8_t)bestIdx; // cache
+            }
+        }
+        // Build 8x8 tiles and deduplicate
+        int tilesX = m7FloorW / 8;
+        int tilesY = m7FloorH / 8;
+        std::vector<std::array<uint8_t, 64>> uniqueTiles;
+        std::unordered_map<size_t, int> tileHash;
+        std::vector<uint8_t> tilemap(tilesX * tilesY, 0);
+        for (int ty = 0; ty < tilesY; ty++) {
+            for (int tx = 0; tx < tilesX; tx++) {
+                std::array<uint8_t, 64> tile = {};
+                for (int py = 0; py < 8; py++)
+                    for (int px = 0; px < 8; px++)
+                        tile[py * 8 + px] = indexed[(ty * 8 + py) * m7FloorW + (tx * 8 + px)];
+                // Hash tile for dedup
+                size_t h = 0;
+                for (int k = 0; k < 64; k++) h = h * 131 + tile[k];
+                auto it = tileHash.find(h);
+                if (it != tileHash.end()) {
+                    tilemap[ty * tilesX + tx] = (uint8_t)it->second;
+                } else {
+                    int idx = (int)uniqueTiles.size();
+                    if (idx < 256) {
+                        tileHash[h] = idx;
+                        uniqueTiles.push_back(tile);
+                        tilemap[ty * tilesX + tx] = (uint8_t)idx;
+                    }
+                }
+            }
+        }
+        // Emit tile data
+        f << "\n// ---- Mode 7 floor tile data ----\n";
+        f << "#define AFFINITY_HAS_MAPDATA\n";
+        f << "static const unsigned char afn_tiles[" << uniqueTiles.size() * 64 << "] = {\n";
+        for (int t = 0; t < (int)uniqueTiles.size(); t++) {
+            f << "    ";
+            for (int k = 0; k < 64; k++) {
+                f << (int)uniqueTiles[t][k] << ",";
+            }
+            f << "\n";
+        }
+        f << "};\n";
+        f << "static const unsigned int afn_tilesLen = " << uniqueTiles.size() * 64 << ";\n\n";
+        // Emit palette
+        f << "static const unsigned short afn_palette[256] = {\n    ";
+        for (int i = 0; i < 256; i++) {
+            f << "0x" << std::hex << std::setw(4) << std::setfill('0') << palette[i] << std::dec << ",";
+            if ((i & 15) == 15) f << "\n    ";
+        }
+        f << "\n};\n";
+        f << "static const unsigned int afn_paletteLen = 512;\n\n";
+        // Emit tilemap
+        f << "static const unsigned char afn_tilemap[" << tilesX * tilesY << "] = {\n";
+        for (int ty = 0; ty < tilesY; ty++) {
+            f << "    ";
+            for (int tx = 0; tx < tilesX; tx++)
+                f << (int)tilemap[ty * tilesX + tx] << ",";
+            f << "\n";
+        }
+        f << "};\n";
+        f << "#define AFN_FLOOR_TILES_X " << tilesX << "\n";
+        f << "#define AFN_FLOOR_TILES_Y " << tilesY << "\n\n";
+    }
+
     f << "\n#endif // MAPDATA_H\n";
     f.close();
     return true;
@@ -5275,7 +5388,9 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBASoundSampleExport>& soundSamples,
                 const std::vector<GBASoundInstanceExport>& soundInstances,
                 int startMode,
-                std::string& errorMsg)
+                std::string& errorMsg,
+                const unsigned char* m7FloorPixels,
+                int m7FloorW, int m7FloorH)
 {
     std::string msysDir = ToMsysPath(runtimeDir);
 
@@ -5290,7 +5405,7 @@ bool PackageGBA(const std::string& runtimeDir,
     }
 
     // --- Step 1: Generate mapdata.h with sprite/camera/asset/player data ---
-    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, script, blueprints, bpInstances, tmScenes, hudElements, soundSamples, soundInstances, startMode))
+    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, m7FloorPixels, m7FloorW, m7FloorH, orbitDist, script, blueprints, bpInstances, tmScenes, hudElements, soundSamples, soundInstances, startMode))
     {
         errorMsg = "Failed to write mapdata.h";
         return false;

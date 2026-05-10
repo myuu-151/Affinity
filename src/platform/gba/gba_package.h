@@ -541,6 +541,8 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBASoundSampleExport>& soundSamples,
                 const std::vector<GBASoundInstanceExport>& soundInstances,
                 int startMode,
-                std::string& errorMsg);
+                std::string& errorMsg,
+                const unsigned char* m7FloorPixels = nullptr,
+                int m7FloorW = 0, int m7FloorH = 0);
 
 } // namespace Affinity

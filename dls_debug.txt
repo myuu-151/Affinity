@@ -1,0 +1,716 @@
+GM 0 [Acoustic Grand Piano] baseNote=64 regions=10
+  rgn[0] keys=0-38 base=36 fineTune=-4 rate=16384
+  rgn[1] keys=39-43 base=41 fineTune=-1 rate=16384
+  rgn[2] keys=44-50 base=48 fineTune=0 rate=16384
+  rgn[3] keys=51-59 base=56 fineTune=0 rate=16384
+  rgn[4] keys=60-67 base=64 fineTune=1 rate=16384
+  rgn[5] keys=68-74 base=73 fineTune=1 rate=16384
+  rgn[6] keys=75-81 base=78 fineTune=-1 rate=16384
+  rgn[7] keys=82-88 base=84 fineTune=-2 rate=16384
+  rgn[8] keys=89-97 base=92 fineTune=1 rate=16384
+  rgn[9] keys=98-127 base=103 fineTune=3 rate=16384
+GM 1 [Bright Acoustic Piano] baseNote=56 regions=10
+  rgn[0] keys=0-41 base=36 fineTune=-4 rate=16384
+  rgn[1] keys=42-46 base=41 fineTune=-1 rate=16384
+  rgn[2] keys=47-53 base=48 fineTune=0 rate=16384
+  rgn[3] keys=54-62 base=56 fineTune=0 rate=16384
+  rgn[4] keys=63-70 base=64 fineTune=1 rate=16384
+  rgn[5] keys=71-77 base=73 fineTune=1 rate=16384
+  rgn[6] keys=78-84 base=78 fineTune=-1 rate=16384
+  rgn[7] keys=85-91 base=84 fineTune=-2 rate=16384
+  rgn[8] keys=92-100 base=92 fineTune=1 rate=16384
+  rgn[9] keys=101-127 base=103 fineTune=3 rate=16384
+GM 2 [Electric Grand Piano] baseNote=56 regions=10
+  rgn[0] keys=0-45 base=36 fineTune=-4 rate=16384
+  rgn[1] keys=46-50 base=41 fineTune=-1 rate=16384
+  rgn[2] keys=51-57 base=48 fineTune=0 rate=16384
+  rgn[3] keys=58-66 base=56 fineTune=0 rate=16384
+  rgn[4] keys=67-74 base=64 fineTune=1 rate=16384
+  rgn[5] keys=75-81 base=73 fineTune=1 rate=16384
+  rgn[6] keys=82-88 base=78 fineTune=-1 rate=16384
+  rgn[7] keys=89-95 base=84 fineTune=-2 rate=16384
+  rgn[8] keys=96-104 base=92 fineTune=1 rate=16384
+  rgn[9] keys=105-127 base=103 fineTune=3 rate=16384
+GM 3 [Honky-tonk Piano] baseNote=62 regions=5
+  rgn[0] keys=0-49 base=42 fineTune=-10 rate=16384
+  rgn[1] keys=50-67 base=62 fineTune=-10 rate=16384
+  rgn[2] keys=68-78 base=71 fineTune=-6 rate=16384
+  rgn[3] keys=79-90 base=84 fineTune=-6 rate=16384
+  rgn[4] keys=91-127 base=96 fineTune=7 rate=16384
+GM 4 [Electric Piano 1] baseNote=56 regions=5
+  rgn[0] keys=0-46 base=49 fineTune=10 rate=16384
+  rgn[1] keys=47-66 base=56 fineTune=13 rate=16384
+  rgn[2] keys=67-80 base=67 fineTune=-8 rate=16384
+  rgn[3] keys=81-101 base=80 fineTune=-3 rate=16384
+  rgn[4] keys=102-127 base=97 fineTune=10 rate=16384
+GM 5 [Electric Piano 2] baseNote=48 regions=7
+  rgn[0] keys=0-60 base=48 fineTune=-6 rate=16384
+  rgn[1] keys=61-68 base=56 fineTune=-3 rate=16384
+  rgn[2] keys=69-76 base=64 fineTune=3 rate=16384
+  rgn[3] keys=77-84 base=72 fineTune=-6 rate=16384
+  rgn[4] keys=85-92 base=80 fineTune=-3 rate=16384
+  rgn[5] keys=93-100 base=88 fineTune=-6 rate=16384
+  rgn[6] keys=101-127 base=96 fineTune=3 rate=16384
+GM 6 [Harpsichord] baseNote=60 regions=5
+  rgn[0] keys=0-54 base=48 fineTune=0 rate=16384
+  rgn[1] keys=55-66 base=60 fineTune=-1 rate=16384
+  rgn[2] keys=67-80 base=72 fineTune=-1 rate=16384
+  rgn[3] keys=81-100 base=87 fineTune=0 rate=16384
+  rgn[4] keys=101-127 base=87 fineTune=0 rate=16384
+GM 7 [Clavinet] baseNote=60 regions=5
+  rgn[0] keys=0-46 base=48 fineTune=-6 rate=16384
+  rgn[1] keys=47-65 base=60 fineTune=-6 rate=16384
+  rgn[2] keys=66-78 base=72 fineTune=-6 rate=16384
+  rgn[3] keys=79-95 base=84 fineTune=-6 rate=16384
+  rgn[4] keys=96-127 base=103 fineTune=-8 rate=16384
+GM 8 [Celesta] baseNote=77 regions=3
+  rgn[0] keys=0-98 base=77 fineTune=-4 rate=16384
+  rgn[1] keys=99-102 base=101 fineTune=-32 rate=16384
+  rgn[2] keys=103-127 base=90 fineTune=12 rate=16384
+GM 9 [Glockenspiel] baseNote=85 regions=3
+  rgn[0] keys=0-87 base=85 fineTune=-19 rate=16384
+  rgn[1] keys=88-91 base=91 fineTune=-8 rate=16384
+  rgn[2] keys=92-127 base=102 fineTune=-27 rate=16384
+GM 10 [Music Box] baseNote=82 regions=4
+  rgn[0] keys=0-57 base=82 fineTune=1 rate=16384
+  rgn[1] keys=58-88 base=82 fineTune=1 rate=16384
+  rgn[2] keys=89-102 base=101 fineTune=-32 rate=16384
+  rgn[3] keys=103-127 base=90 fineTune=12 rate=16384
+GM 11 [Vibraphone] baseNote=64 regions=5
+  rgn[0] keys=0-57 base=52 fineTune=0 rate=16384
+  rgn[1] keys=58-70 base=64 fineTune=3 rate=16384
+  rgn[2] keys=71-82 base=76 fineTune=6 rate=16384
+  rgn[3] keys=83-93 base=88 fineTune=14 rate=16384
+  rgn[4] keys=94-127 base=100 fineTune=14 rate=16384
+GM 12 [Marimba] baseNote=62 regions=3
+  rgn[0] keys=0-48 base=54 fineTune=-6 rate=16384
+  rgn[1] keys=49-81 base=62 fineTune=-25 rate=16384
+  rgn[2] keys=82-127 base=90 fineTune=12 rate=16384
+GM 13 [Xylophone] baseNote=72 regions=3
+  rgn[0] keys=0-88 base=72 fineTune=-20 rate=16384
+  rgn[1] keys=89-101 base=93 fineTune=-39 rate=16384
+  rgn[2] keys=102-127 base=90 fineTune=12 rate=16384
+GM 14 [Tubular Bells] baseNote=84 regions=3
+  rgn[0] keys=0-89 base=84 fineTune=-5 rate=16384
+  rgn[1] keys=90-96 base=84 fineTune=-5 rate=16384
+  rgn[2] keys=97-127 base=84 fineTune=-5 rate=16384
+GM 15 [Dulcimer] baseNote=74 regions=3
+  rgn[0] keys=0-55 base=74 fineTune=-13 rate=16384
+  rgn[1] keys=56-87 base=74 fineTune=-13 rate=16384
+  rgn[2] keys=88-127 base=103 fineTune=-8 rate=16384
+GM 16 [Drawbar Organ] baseNote=73 regions=3
+  rgn[0] keys=0-79 base=73 fineTune=-12 rate=16384
+  rgn[1] keys=80-92 base=85 fineTune=10 rate=16384
+  rgn[2] keys=93-127 base=97 fineTune=10 rate=16384
+GM 17 [Percussive Organ] baseNote=53 regions=3
+  rgn[0] keys=0-64 base=53 fineTune=3 rate=16384
+  rgn[1] keys=65-82 base=68 fineTune=13 rate=16384
+  rgn[2] keys=83-127 base=86 fineTune=-2 rate=16384
+GM 18 [Rock Organ] baseNote=83 regions=3
+  rgn[0] keys=0-55 base=71 fineTune=22 rate=16384
+  rgn[1] keys=56-69 base=83 fineTune=-3 rate=16384
+  rgn[2] keys=70-127 base=95 fineTune=-3 rate=16384
+GM 19 [Church Organ] baseNote=56 regions=5
+  rgn[0] keys=0-52 base=46 fineTune=-30 rate=16384
+  rgn[1] keys=53-60 base=56 fineTune=-28 rate=16384
+  rgn[2] keys=61-73 base=66 fineTune=-25 rate=16384
+  rgn[3] keys=74-86 base=78 fineTune=-17 rate=16384
+  rgn[4] keys=87-127 base=90 fineTune=-47 rate=16384
+GM 20 [Reed Organ] baseNote=53 regions=5
+  rgn[0] keys=0-46 base=53 fineTune=10 rate=16384
+  rgn[1] keys=47-68 base=53 fineTune=10 rate=16384
+  rgn[2] keys=69-83 base=72 fineTune=35 rate=16384
+  rgn[3] keys=93-127 base=88 fineTune=-6 rate=16384
+  rgn[4] keys=84-92 base=72 fineTune=35 rate=16384
+GM 21 [Accordion] baseNote=68 regions=4
+  rgn[0] keys=0-48 base=68 fineTune=0 rate=16384
+  rgn[1] keys=49-84 base=68 fineTune=0 rate=16384
+  rgn[2] keys=85-95 base=96 fineTune=-6 rate=16384
+  rgn[3] keys=96-127 base=95 fineTune=-25 rate=16384
+GM 22 [Harmonica] baseNote=56 regions=6
+  rgn[0] keys=0-68 base=56 fineTune=-3 rate=16384
+  rgn[1] keys=69-76 base=64 fineTune=3 rate=16384
+  rgn[2] keys=77-84 base=72 fineTune=-6 rate=16384
+  rgn[3] keys=85-92 base=80 fineTune=-3 rate=16384
+  rgn[4] keys=93-101 base=88 fineTune=-6 rate=16384
+  rgn[5] keys=102-127 base=96 fineTune=-6 rate=16384
+GM 23 [Tango Accordion] baseNote=64 regions=5
+  rgn[0] keys=0-44 base=64 fineTune=3 rate=16384
+  rgn[1] keys=45-71 base=64 fineTune=3 rate=16384
+  rgn[2] keys=72-82 base=74 fineTune=21 rate=16384
+  rgn[3] keys=96-127 base=88 fineTune=-6 rate=16384
+  rgn[4] keys=83-95 base=72 fineTune=35 rate=16384
+GM 24 [Acoustic Guitar (nylon)] baseNote=57 regions=7
+  rgn[0] keys=0-52 base=48 fineTune=-1 rate=16384
+  rgn[1] keys=53-66 base=57 fineTune=2 rate=16384
+  rgn[2] keys=67-76 base=70 fineTune=-1 rate=16384
+  rgn[3] keys=77-89 base=79 fineTune=8 rate=16384
+  rgn[4] keys=90-91 base=88 fineTune=8 rate=16384
+  rgn[5] keys=92-99 base=97 fineTune=10 rate=16384
+  rgn[6] keys=100-127 base=101 fineTune=0 rate=16384
+GM 25 [Acoustic Guitar (steel)] baseNote=57 regions=7
+  rgn[0] keys=0-44 base=41 fineTune=-4 rate=16384
+  rgn[1] keys=45-52 base=49 fineTune=0 rate=16384
+  rgn[2] keys=53-60 base=57 fineTune=2 rate=16384
+  rgn[3] keys=61-69 base=65 fineTune=3 rate=16384
+  rgn[4] keys=70-81 base=74 fineTune=3 rate=16384
+  rgn[5] keys=89-127 base=84 fineTune=3 rate=16384
+  rgn[6] keys=82-88 base=84 fineTune=3 rate=16384
+GM 26 [Electric Guitar (jazz)] baseNote=59 regions=7
+  rgn[0] keys=0-54 base=50 fineTune=0 rate=16384
+  rgn[1] keys=55-63 base=59 fineTune=0 rate=16384
+  rgn[2] keys=64-71 base=68 fineTune=-1 rate=16384
+  rgn[3] keys=72-79 base=74 fineTune=1 rate=16384
+  rgn[4] keys=80-88 base=84 fineTune=2 rate=16384
+  rgn[5] keys=89-97 base=93 fineTune=1 rate=16384
+  rgn[6] keys=98-127 base=101 fineTune=0 rate=16384
+GM 27 [Electric Guitar (clean)] baseNote=60 regions=6
+  rgn[0] keys=0-54 base=48 fineTune=4 rate=16384
+  rgn[1] keys=55-62 base=60 fineTune=-1 rate=16384
+  rgn[2] keys=63-70 base=67 fineTune=8 rate=16384
+  rgn[3] keys=71-80 base=72 fineTune=-1 rate=16384
+  rgn[4] keys=81-99 base=83 fineTune=-25 rate=16384
+  rgn[5] keys=100-127 base=84 fineTune=3 rate=16384
+GM 28 [Electric Guitar (muted)] baseNote=43 regions=6
+  rgn[0] keys=0-69 base=43 fineTune=0 rate=16384
+  rgn[1] keys=70-72 base=64 fineTune=3 rate=16384
+  rgn[2] keys=73-86 base=81 fineTune=-4 rate=16384
+  rgn[3] keys=87-91 base=88 fineTune=8 rate=16384
+  rgn[4] keys=92-99 base=97 fineTune=10 rate=16384
+  rgn[5] keys=100-127 base=101 fineTune=0 rate=16384
+GM 29 [Overdriven Guitar] baseNote=60 regions=10
+  rgn[0] keys=0-44 base=32 fineTune=-3 rate=16384
+  rgn[1] keys=45-49 base=37 fineTune=-1 rate=16384
+  rgn[2] keys=50-57 base=48 fineTune=4 rate=16384
+  rgn[3] keys=58-63 base=60 fineTune=4 rate=16384
+  rgn[4] keys=64-70 base=59 fineTune=-25 rate=16384
+  rgn[5] keys=71-73 base=61 fineTune=10 rate=16384
+  rgn[6] keys=74-77 base=65 fineTune=-4 rate=16384
+  rgn[7] keys=78-89 base=77 fineTune=-32 rate=16384
+  rgn[8] keys=90-96 base=84 fineTune=-6 rate=16384
+  rgn[9] keys=97-127 base=94 fineTune=-4 rate=16384
+GM 30 [Distortion Guitar] baseNote=52 regions=9
+  rgn[0] keys=0-48 base=36 fineTune=-1 rate=16384
+  rgn[1] keys=49-54 base=42 fineTune=-10 rate=16384
+  rgn[2] keys=55-59 base=47 fineTune=-6 rate=16384
+  rgn[3] keys=60-64 base=52 fineTune=-10 rate=16384
+  rgn[4] keys=65-71 base=59 fineTune=-6 rate=16384
+  rgn[5] keys=72-77 base=65 fineTune=-4 rate=16384
+  rgn[6] keys=78-92 base=80 fineTune=-36 rate=16384
+  rgn[7] keys=93-101 base=89 fineTune=-32 rate=16384
+  rgn[8] keys=102-127 base=97 fineTune=10 rate=16384
+GM 31 [Guitar Harmonics] baseNote=67 regions=4
+  rgn[0] keys=0-64 base=67 fineTune=27 rate=16384
+  rgn[1] keys=65-80 base=82 fineTune=26 rate=16384
+  rgn[2] keys=81-95 base=82 fineTune=26 rate=16384
+  rgn[3] keys=96-127 base=99 fineTune=26 rate=16384
+GM 32 [Acoustic Bass] baseNote=60 regions=6
+  rgn[0] keys=0-37 base=32 fineTune=5 rate=16384
+  rgn[1] keys=38-51 base=43 fineTune=4 rate=16384
+  rgn[2] keys=52-72 base=60 fineTune=15 rate=16384
+  rgn[3] keys=73-84 base=60 fineTune=15 rate=16384
+  rgn[4] keys=85-86 base=83 fineTune=1 rate=16384
+  rgn[5] keys=87-127 base=96 fineTune=6 rate=16384
+GM 33 [Electric Bass (finger)] baseNote=76 regions=5
+  rgn[0] keys=0-43 base=56 fineTune=-3 rate=16384
+  rgn[1] keys=44-54 base=59 fineTune=-6 rate=16384
+  rgn[2] keys=55-80 base=76 fineTune=3 rate=16384
+  rgn[3] keys=81-106 base=76 fineTune=3 rate=16384
+  rgn[4] keys=107-127 base=99 fineTune=27 rate=16384
+GM 34 [Electric Bass (pick)] baseNote=50 regions=6
+  rgn[0] keys=0-35 base=30 fineTune=4 rate=16384
+  rgn[1] keys=36-45 base=40 fineTune=-4 rate=16384
+  rgn[2] keys=46-78 base=50 fineTune=4 rate=16384
+  rgn[3] keys=79-88 base=84 fineTune=2 rate=16384
+  rgn[4] keys=89-97 base=93 fineTune=1 rate=16384
+  rgn[5] keys=98-127 base=101 fineTune=0 rate=16384
+GM 35 [Fretless Bass] baseNote=48 regions=6
+  rgn[0] keys=0-42 base=36 fineTune=-1 rate=16384
+  rgn[1] keys=43-66 base=48 fineTune=4 rate=16384
+  rgn[2] keys=67-78 base=60 fineTune=-6 rate=16384
+  rgn[3] keys=79-88 base=84 fineTune=2 rate=16384
+  rgn[4] keys=89-97 base=93 fineTune=1 rate=16384
+  rgn[5] keys=98-127 base=101 fineTune=0 rate=16384
+GM 36 [Slap Bass 1] baseNote=43 regions=4
+  rgn[0] keys=0-38 base=31 fineTune=10 rate=16384
+  rgn[1] keys=39-67 base=43 fineTune=4 rate=16384
+  rgn[2] keys=68-104 base=83 fineTune=-25 rate=16384
+  rgn[3] keys=105-127 base=84 fineTune=3 rate=16384
+GM 37 [Slap Bass 2] baseNote=52 regions=5
+  rgn[0] keys=0-50 base=52 fineTune=6 rate=16384
+  rgn[1] keys=51-60 base=52 fineTune=6 rate=16384
+  rgn[2] keys=61-69 base=43 fineTune=4 rate=16384
+  rgn[3] keys=70-104 base=83 fineTune=-25 rate=16384
+  rgn[4] keys=105-127 base=84 fineTune=3 rate=16384
+GM 38 [Synth Bass 1] baseNote=48 regions=4
+  rgn[0] keys=0-45 base=33 fineTune=9 rate=16384
+  rgn[1] keys=46-69 base=48 fineTune=15 rate=16384
+  rgn[2] keys=70-90 base=72 fineTune=-6 rate=16384
+  rgn[3] keys=91-127 base=96 fineTune=-6 rate=16384
+GM 39 [Synth Bass 2] baseNote=48 regions=5
+  rgn[0] keys=0-43 base=33 fineTune=0 rate=16384
+  rgn[1] keys=44-66 base=48 fineTune=15 rate=16384
+  rgn[2] keys=67-83 base=72 fineTune=-6 rate=16384
+  rgn[3] keys=84-96 base=72 fineTune=-6 rate=16384
+  rgn[4] keys=97-127 base=84 fineTune=3 rate=16384
+GM 40 [Violin] baseNote=56 regions=9
+  rgn[0] keys=0-68 base=56 fineTune=-3 rate=16384
+  rgn[1] keys=69-70 base=58 fineTune=7 rate=16384
+  rgn[2] keys=71-76 base=64 fineTune=3 rate=16384
+  rgn[3] keys=77-80 base=68 fineTune=-3 rate=16384
+  rgn[4] keys=81-88 base=74 fineTune=-25 rate=16384
+  rgn[5] keys=89-96 base=83 fineTune=-25 rate=16384
+  rgn[6] keys=97-105 base=92 fineTune=-3 rate=16384
+  rgn[7] keys=106-106 base=106 fineTune=25 rate=16384
+  rgn[8] keys=107-127 base=95 fineTune=-25 rate=16384
+GM 41 [Viola] baseNote=56 regions=9
+  rgn[0] keys=0-60 base=56 fineTune=-3 rate=16384
+  rgn[1] keys=61-62 base=58 fineTune=7 rate=16384
+  rgn[2] keys=63-68 base=64 fineTune=3 rate=16384
+  rgn[3] keys=69-72 base=68 fineTune=-3 rate=16384
+  rgn[4] keys=73-78 base=74 fineTune=-25 rate=16384
+  rgn[5] keys=79-84 base=83 fineTune=-25 rate=16384
+  rgn[6] keys=85-105 base=92 fineTune=-3 rate=16384
+  rgn[7] keys=106-106 base=106 fineTune=25 rate=16384
+  rgn[8] keys=107-127 base=95 fineTune=-25 rate=16384
+GM 42 [Cello] baseNote=64 regions=8
+  rgn[0] keys=0-33 base=28 fineTune=-13 rate=16384
+  rgn[1] keys=34-45 base=41 fineTune=3 rate=16384
+  rgn[2] keys=46-55 base=53 fineTune=-14 rate=16384
+  rgn[3] keys=56-65 base=64 fineTune=3 rate=16384
+  rgn[4] keys=66-91 base=76 fineTune=-23 rate=16384
+  rgn[5] keys=106-106 base=106 fineTune=25 rate=16384
+  rgn[6] keys=92-105 base=92 fineTune=-3 rate=16384
+  rgn[7] keys=107-127 base=96 fineTune=-6 rate=16384
+GM 43 [Contrabass] baseNote=59 regions=8
+  rgn[0] keys=0-38 base=29 fineTune=-14 rate=16384
+  rgn[1] keys=39-54 base=42 fineTune=4 rate=16384
+  rgn[2] keys=55-72 base=59 fineTune=14 rate=16384
+  rgn[3] keys=73-87 base=64 fineTune=3 rate=16384
+  rgn[4] keys=88-95 base=72 fineTune=-6 rate=16384
+  rgn[5] keys=107-127 base=96 fineTune=-6 rate=16384
+  rgn[6] keys=96-102 base=80 fineTune=-3 rate=16384
+  rgn[7] keys=103-106 base=88 fineTune=-6 rate=16384
+GM 44 [Tremolo Strings] baseNote=71 regions=3
+  rgn[0] keys=0-55 base=57 fineTune=-7 rate=16384
+  rgn[1] keys=56-83 base=71 fineTune=-7 rate=16384
+  rgn[2] keys=84-127 base=88 fineTune=8 rate=16384
+GM 45 [Pizzicato Strings] baseNote=71 regions=2
+  rgn[0] keys=0-88 base=71 fineTune=-17 rate=16384
+  rgn[1] keys=89-127 base=96 fineTune=1 rate=16384
+GM 46 [Orchestral Harp] baseNote=57 regions=4
+  rgn[0] keys=0-62 base=57 fineTune=0 rate=16384
+  rgn[1] keys=63-76 base=70 fineTune=-1 rate=16384
+  rgn[2] keys=77-86 base=83 fineTune=1 rate=16384
+  rgn[3] keys=87-127 base=96 fineTune=6 rate=16384
+GM 47 [Timpani] baseNote=55 regions=10
+  rgn[0] keys=0-50 base=55 fineTune=-44 rate=16384
+  rgn[1] keys=51-55 base=55 fineTune=-44 rate=16384
+  rgn[2] keys=56-60 base=55 fineTune=-44 rate=16384
+  rgn[3] keys=61-65 base=55 fineTune=-44 rate=16384
+  rgn[4] keys=66-70 base=55 fineTune=-44 rate=16384
+  rgn[5] keys=71-76 base=55 fineTune=-44 rate=16384
+  rgn[6] keys=77-82 base=55 fineTune=-44 rate=16384
+  rgn[7] keys=83-88 base=55 fineTune=-44 rate=16384
+  rgn[8] keys=89-95 base=55 fineTune=-44 rate=16384
+  rgn[9] keys=96-127 base=55 fineTune=-44 rate=16384
+GM 48 [String Ensemble 1] baseNote=71 regions=3
+  rgn[0] keys=0-55 base=57 fineTune=-7 rate=16384
+  rgn[1] keys=56-83 base=71 fineTune=-7 rate=16384
+  rgn[2] keys=84-127 base=88 fineTune=8 rate=16384
+GM 49 [String Ensemble 2] baseNote=71 regions=3
+  rgn[0] keys=0-55 base=57 fineTune=-7 rate=16384
+  rgn[1] keys=56-83 base=71 fineTune=-7 rate=16384
+  rgn[2] keys=84-127 base=88 fineTune=8 rate=16384
+GM 50 [Synth Strings 1] baseNote=69 regions=3
+  rgn[0] keys=0-53 base=48 fineTune=3 rate=16384
+  rgn[1] keys=54-78 base=69 fineTune=3 rate=16384
+  rgn[2] keys=79-127 base=86 fineTune=2 rate=16384
+GM 51 [Synth Strings 2] baseNote=69 regions=3
+  rgn[0] keys=0-52 base=48 fineTune=3 rate=16384
+  rgn[1] keys=53-76 base=69 fineTune=3 rate=16384
+  rgn[2] keys=77-127 base=86 fineTune=2 rate=16384
+GM 52 [Choir Aahs] baseNote=68 regions=3
+  rgn[0] keys=0-85 base=68 fineTune=-20 rate=16384
+  rgn[1] keys=86-95 base=86 fineTune=2 rate=16384
+  rgn[2] keys=96-127 base=86 fineTune=2 rate=16384
+GM 53 [Voice Oohs] baseNote=70 regions=4
+  rgn[0] keys=0-68 base=70 fineTune=48 rate=16384
+  rgn[1] keys=69-84 base=79 fineTune=4 rate=16384
+  rgn[2] keys=85-100 base=90 fineTune=21 rate=16384
+  rgn[3] keys=101-127 base=95 fineTune=-25 rate=16384
+GM 54 [Synth Choir] baseNote=74 regions=4
+  rgn[0] keys=0-55 base=74 fineTune=-27 rate=16384
+  rgn[1] keys=56-89 base=74 fineTune=-27 rate=16384
+  rgn[2] keys=90-102 base=106 fineTune=-27 rate=16384
+  rgn[3] keys=103-127 base=96 fineTune=-6 rate=16384
+GM 55 [Orchestra Hit] baseNote=68 regions=1
+  rgn[0] keys=0-127 base=68 fineTune=-3 rate=16384
+GM 56 [Trumpet] baseNote=53 regions=10
+  rgn[0] keys=0-43 base=40 fineTune=3 rate=16384
+  rgn[1] keys=44-50 base=48 fineTune=4 rate=16384
+  rgn[2] keys=51-57 base=55 fineTune=8 rate=16384
+  rgn[3] keys=58-65 base=53 fineTune=10 rate=16384
+  rgn[4] keys=66-73 base=61 fineTune=10 rate=16384
+  rgn[5] keys=74-81 base=69 fineTune=-4 rate=16384
+  rgn[6] keys=82-86 base=74 fineTune=21 rate=16384
+  rgn[7] keys=87-93 base=80 fineTune=29 rate=16384
+  rgn[8] keys=94-103 base=89 fineTune=23 rate=16384
+  rgn[9] keys=104-127 base=95 fineTune=-25 rate=16384
+GM 57 [Trombone] baseNote=62 regions=10
+  rgn[0] keys=0-43 base=40 fineTune=3 rate=16384
+  rgn[1] keys=44-50 base=48 fineTune=4 rate=16384
+  rgn[2] keys=51-57 base=55 fineTune=8 rate=16384
+  rgn[3] keys=58-64 base=62 fineTune=21 rate=16384
+  rgn[4] keys=65-72 base=68 fineTune=29 rate=16384
+  rgn[5] keys=73-81 base=77 fineTune=23 rate=16384
+  rgn[6] keys=82-88 base=86 fineTune=21 rate=16384
+  rgn[7] keys=89-93 base=92 fineTune=-36 rate=16384
+  rgn[8] keys=94-103 base=89 fineTune=23 rate=16384
+  rgn[9] keys=104-127 base=95 fineTune=-25 rate=16384
+GM 58 [Tuba] baseNote=62 regions=9
+  rgn[0] keys=0-39 base=39 fineTune=-15 rate=16384
+  rgn[1] keys=40-55 base=50 fineTune=-37 rate=16384
+  rgn[2] keys=56-64 base=62 fineTune=21 rate=16384
+  rgn[3] keys=65-72 base=68 fineTune=29 rate=16384
+  rgn[4] keys=73-81 base=77 fineTune=23 rate=16384
+  rgn[5] keys=82-88 base=86 fineTune=21 rate=16384
+  rgn[6] keys=89-93 base=92 fineTune=-36 rate=16384
+  rgn[7] keys=94-103 base=89 fineTune=23 rate=16384
+  rgn[8] keys=104-127 base=95 fineTune=-25 rate=16384
+GM 59 [Muted Trumpet] baseNote=64 regions=7
+  rgn[0] keys=0-66 base=64 fineTune=3 rate=16384
+  rgn[1] keys=67-74 base=73 fineTune=10 rate=16384
+  rgn[2] keys=75-81 base=79 fineTune=8 rate=16384
+  rgn[3] keys=82-87 base=86 fineTune=21 rate=16384
+  rgn[4] keys=88-93 base=80 fineTune=29 rate=16384
+  rgn[5] keys=94-103 base=89 fineTune=23 rate=16384
+  rgn[6] keys=104-127 base=95 fineTune=-25 rate=16384
+GM 60 [French Horn] baseNote=60 regions=5
+  rgn[0] keys=60-67 base=60 fineTune=2 rate=16384
+  rgn[1] keys=68-79 base=72 fineTune=1 rate=16384
+  rgn[2] keys=80-99 base=72 fineTune=1 rate=16384
+  rgn[3] keys=100-127 base=95 fineTune=-25 rate=16384
+  rgn[4] keys=0-59 base=60 fineTune=2 rate=16384
+GM 61 [Brass Section] baseNote=64 regions=4
+  rgn[0] keys=0-68 base=64 fineTune=-23 rate=16384
+  rgn[1] keys=69-80 base=72 fineTune=2 rate=16384
+  rgn[2] keys=81-90 base=84 fineTune=0 rate=16384
+  rgn[3] keys=91-127 base=96 fineTune=35 rate=16384
+GM 62 [Synth Brass 1] baseNote=60 regions=6
+  rgn[0] keys=0-52 base=48 fineTune=0 rate=16384
+  rgn[1] keys=53-64 base=60 fineTune=0 rate=16384
+  rgn[2] keys=65-76 base=72 fineTune=0 rate=16384
+  rgn[3] keys=77-86 base=84 fineTune=0 rate=16384
+  rgn[4] keys=87-97 base=95 fineTune=-25 rate=16384
+  rgn[5] keys=98-127 base=86 fineTune=2 rate=16384
+GM 63 [Synth Brass 2] baseNote=55 regions=4
+  rgn[0] keys=0-47 base=43 fineTune=0 rate=16384
+  rgn[1] keys=48-67 base=55 fineTune=3 rate=16384
+  rgn[2] keys=68-88 base=72 fineTune=35 rate=16384
+  rgn[3] keys=89-127 base=95 fineTune=-25 rate=16384
+GM 64 [Soprano Sax] baseNote=58 regions=7
+  rgn[0] keys=0-70 base=58 fineTune=7 rate=16384
+  rgn[1] keys=71-76 base=64 fineTune=28 rate=16384
+  rgn[2] keys=77-82 base=70 fineTune=25 rate=16384
+  rgn[3] keys=83-88 base=76 fineTune=28 rate=16384
+  rgn[4] keys=89-95 base=83 fineTune=1 rate=16384
+  rgn[5] keys=96-102 base=89 fineTune=23 rate=16384
+  rgn[6] keys=103-127 base=95 fineTune=-25 rate=16384
+GM 65 [Alto Sax] baseNote=51 regions=8
+  rgn[0] keys=0-53 base=41 fineTune=-11 rate=16384
+  rgn[1] keys=54-59 base=47 fineTune=14 rate=16384
+  rgn[2] keys=60-63 base=51 fineTune=27 rate=16384
+  rgn[3] keys=64-69 base=57 fineTune=13 rate=16384
+  rgn[4] keys=70-77 base=65 fineTune=23 rate=16384
+  rgn[5] keys=78-87 base=75 fineTune=-21 rate=16384
+  rgn[6] keys=88-96 base=83 fineTune=-25 rate=16384
+  rgn[7] keys=97-127 base=92 fineTune=-36 rate=16384
+GM 66 [Tenor Sax] baseNote=51 regions=9
+  rgn[0] keys=0-43 base=34 fineTune=7 rate=16384
+  rgn[1] keys=44-54 base=45 fineTune=5 rate=16384
+  rgn[2] keys=55-60 base=51 fineTune=3 rate=16384
+  rgn[3] keys=61-65 base=56 fineTune=-3 rate=16384
+  rgn[4] keys=66-71 base=62 fineTune=21 rate=16384
+  rgn[5] keys=72-78 base=69 fineTune=-4 rate=16384
+  rgn[6] keys=79-86 base=77 fineTune=23 rate=16384
+  rgn[7] keys=87-94 base=85 fineTune=10 rate=16384
+  rgn[8] keys=95-127 base=95 fineTune=-25 rate=16384
+GM 67 [Baritone Sax] baseNote=59 regions=6
+  rgn[0] keys=0-40 base=38 fineTune=-8 rate=16384
+  rgn[1] keys=41-53 base=48 fineTune=-6 rate=16384
+  rgn[2] keys=54-71 base=59 fineTune=14 rate=16384
+  rgn[3] keys=72-88 base=86 fineTune=21 rate=16384
+  rgn[4] keys=89-95 base=109 fineTune=10 rate=16384
+  rgn[5] keys=96-127 base=95 fineTune=-25 rate=16384
+GM 68 [Oboe] baseNote=61 regions=6
+  rgn[0] keys=0-64 base=61 fineTune=10 rate=16384
+  rgn[1] keys=65-72 base=69 fineTune=30 rate=16384
+  rgn[2] keys=73-79 base=77 fineTune=23 rate=16384
+  rgn[3] keys=80-86 base=85 fineTune=10 rate=16384
+  rgn[4] keys=87-102 base=81 fineTune=-4 rate=16384
+  rgn[5] keys=103-127 base=99 fineTune=27 rate=16384
+GM 69 [English Horn] baseNote=61 regions=7
+  rgn[0] keys=0-57 base=53 fineTune=10 rate=16384
+  rgn[1] keys=58-65 base=61 fineTune=10 rate=16384
+  rgn[2] keys=66-75 base=70 fineTune=25 rate=16384
+  rgn[3] keys=76-85 base=82 fineTune=25 rate=16384
+  rgn[4] keys=86-95 base=83 fineTune=1 rate=16384
+  rgn[5] keys=96-102 base=89 fineTune=23 rate=16384
+  rgn[6] keys=103-127 base=95 fineTune=-25 rate=16384
+GM 70 [Bassoon] baseNote=69 regions=5
+  rgn[0] keys=0-50 base=44 fineTune=-3 rate=16384
+  rgn[1] keys=51-68 base=69 fineTune=-39 rate=16384
+  rgn[2] keys=69-86 base=69 fineTune=-39 rate=16384
+  rgn[3] keys=87-95 base=109 fineTune=10 rate=16384
+  rgn[4] keys=96-127 base=95 fineTune=-25 rate=16384
+GM 71 [Clarinet] baseNote=64 regions=6
+  rgn[0] keys=0-56 base=55 fineTune=-8 rate=16384
+  rgn[1] keys=57-70 base=64 fineTune=28 rate=16384
+  rgn[2] keys=71-78 base=70 fineTune=-11 rate=16384
+  rgn[3] keys=79-85 base=75 fineTune=-21 rate=16384
+  rgn[4] keys=86-99 base=87 fineTune=27 rate=16384
+  rgn[5] keys=100-127 base=95 fineTune=-25 rate=16384
+GM 72 [Piccolo] baseNote=79 regions=3
+  rgn[0] keys=0-82 base=79 fineTune=-49 rate=16384
+  rgn[1] keys=83-102 base=84 fineTune=-6 rate=16384
+  rgn[2] keys=103-127 base=95 fineTune=-25 rate=16384
+GM 73 [Flute] baseNote=65 regions=7
+  rgn[0] keys=0-69 base=65 fineTune=23 rate=16384
+  rgn[1] keys=70-77 base=73 fineTune=10 rate=16384
+  rgn[2] keys=78-84 base=78 fineTune=-47 rate=16384
+  rgn[3] keys=85-91 base=88 fineTune=28 rate=16384
+  rgn[4] keys=92-97 base=95 fineTune=-25 rate=16384
+  rgn[5] keys=98-100 base=104 fineTune=-36 rate=16384
+  rgn[6] keys=101-127 base=95 fineTune=-25 rate=16384
+GM 74 [Recorder] baseNote=66 regions=6
+  rgn[0] keys=0-70 base=66 fineTune=-4 rate=16384
+  rgn[1] keys=71-77 base=75 fineTune=11 rate=16384
+  rgn[2] keys=78-88 base=83 fineTune=36 rate=16384
+  rgn[3] keys=89-95 base=93 fineTune=48 rate=16384
+  rgn[4] keys=96-97 base=101 fineTune=8 rate=16384
+  rgn[5] keys=98-127 base=95 fineTune=-25 rate=16384
+GM 75 [Pan Flute] baseNote=73 regions=3
+  rgn[0] keys=0-58 base=73 fineTune=46 rate=16384
+  rgn[1] keys=59-97 base=73 fineTune=46 rate=16384
+  rgn[2] keys=98-127 base=89 fineTune=23 rate=16384
+GM 76 [Blown Bottle] baseNote=72 regions=3
+  rgn[0] keys=0-81 base=72 fineTune=-6 rate=16384
+  rgn[1] keys=82-97 base=84 fineTune=-6 rate=16384
+  rgn[2] keys=98-127 base=89 fineTune=23 rate=16384
+GM 77 [Shakuhachi] baseNote=63 regions=5
+  rgn[0] keys=0-66 base=63 fineTune=-2 rate=16384
+  rgn[1] keys=67-73 base=70 fineTune=-1 rate=16384
+  rgn[2] keys=74-95 base=78 fineTune=-2 rate=16384
+  rgn[3] keys=96-102 base=84 fineTune=-6 rate=16384
+  rgn[4] keys=103-127 base=95 fineTune=-25 rate=16384
+GM 78 [Whistle] baseNote=64 regions=5
+  rgn[0] keys=0-52 base=52 fineTune=-10 rate=16384
+  rgn[1] keys=53-64 base=64 fineTune=3 rate=16384
+  rgn[2] keys=65-84 base=76 fineTune=28 rate=16384
+  rgn[3] keys=85-98 base=88 fineTune=28 rate=16384
+  rgn[4] keys=99-127 base=95 fineTune=-25 rate=16384
+GM 79 [Ocarina] baseNote=72 regions=3
+  rgn[0] keys=0-81 base=72 fineTune=35 rate=16384
+  rgn[1] keys=82-90 base=83 fineTune=-25 rate=16384
+  rgn[2] keys=91-127 base=95 fineTune=-25 rate=16384
+GM 80 [Lead 1 (square)] baseNote=60 regions=6
+  rgn[0] keys=0-38 base=41 fineTune=0 rate=16384
+  rgn[1] keys=39-52 base=48 fineTune=-2 rate=16384
+  rgn[2] keys=53-63 base=60 fineTune=5 rate=16384
+  rgn[3] keys=64-77 base=67 fineTune=8 rate=16384
+  rgn[4] keys=78-97 base=79 fineTune=3 rate=16384
+  rgn[5] keys=98-127 base=96 fineTune=-1 rate=16384
+GM 81 [Lead 2 (sawtooth)] baseNote=60 regions=5
+  rgn[0] keys=0-55 base=48 fineTune=3 rate=16384
+  rgn[1] keys=56-67 base=60 fineTune=1 rate=16384
+  rgn[2] keys=68-85 base=72 fineTune=5 rate=16384
+  rgn[3] keys=86-107 base=86 fineTune=2 rate=16384
+  rgn[4] keys=108-127 base=95 fineTune=-25 rate=16384
+GM 82 [Lead 3 (calliope)] baseNote=72 regions=3
+  rgn[0] keys=0-78 base=72 fineTune=3 rate=16384
+  rgn[1] keys=79-102 base=84 fineTune=-2 rate=16384
+  rgn[2] keys=103-127 base=86 fineTune=2 rate=16384
+GM 83 [Lead 4 (chiff)] baseNote=72 regions=2
+  rgn[0] keys=0-78 base=72 fineTune=-6 rate=16384
+  rgn[1] keys=79-127 base=83 fineTune=-25 rate=16384
+GM 84 [Lead 5 (charang)] baseNote=60 regions=4
+  rgn[0] keys=0-52 base=60 fineTune=1 rate=16384
+  rgn[1] keys=53-72 base=60 fineTune=1 rate=16384
+  rgn[2] keys=73-101 base=84 fineTune=35 rate=16384
+  rgn[3] keys=102-127 base=97 fineTune=10 rate=16384
+GM 85 [Lead 6 (voice)] baseNote=66 regions=2
+  rgn[0] keys=0-69 base=66 fineTune=-6 rate=16384
+  rgn[1] keys=70-127 base=79 fineTune=-4 rate=16384
+GM 86 [Lead 7 (fifths)] baseNote=81 regions=3
+  rgn[0] keys=0-63 base=81 fineTune=6 rate=16384
+  rgn[1] keys=64-105 base=81 fineTune=6 rate=16384
+  rgn[2] keys=106-127 base=91 fineTune=1 rate=16384
+GM 87 [Lead 8 (bass+lead)] baseNote=48 regions=5
+  rgn[0] keys=0-45 base=48 fineTune=4 rate=16384
+  rgn[1] keys=46-61 base=48 fineTune=4 rate=16384
+  rgn[2] keys=62-80 base=72 fineTune=-6 rate=16384
+  rgn[3] keys=81-95 base=72 fineTune=-6 rate=16384
+  rgn[4] keys=96-127 base=96 fineTune=-6 rate=16384
+GM 88 [Pad 1 (new age)] baseNote=53 regions=4
+  rgn[0] keys=0-71 base=53 fineTune=4 rate=16384
+  rgn[1] keys=72-83 base=81 fineTune=-12 rate=16384
+  rgn[2] keys=84-99 base=81 fineTune=-12 rate=16384
+  rgn[3] keys=100-127 base=90 fineTune=12 rate=16384
+GM 89 [Pad 2 (warm)] baseNote=74 regions=3
+  rgn[0] keys=0-63 base=74 fineTune=4 rate=16384
+  rgn[1] keys=64-104 base=74 fineTune=4 rate=16384
+  rgn[2] keys=105-127 base=86 fineTune=-5 rate=16384
+GM 90 [Pad 3 (polysynth)] baseNote=60 regions=5
+  rgn[0] keys=0-52 base=48 fineTune=4 rate=16384
+  rgn[1] keys=53-66 base=60 fineTune=-6 rate=16384
+  rgn[2] keys=67-78 base=72 fineTune=35 rate=16384
+  rgn[3] keys=79-90 base=83 fineTune=-25 rate=16384
+  rgn[4] keys=91-127 base=95 fineTune=-25 rate=16384
+GM 91 [Pad 4 (choir)] baseNote=79 regions=3
+  rgn[0] keys=0-59 base=79 fineTune=-4 rate=16384
+  rgn[1] keys=60-97 base=79 fineTune=-4 rate=16384
+  rgn[2] keys=98-127 base=79 fineTune=-4 rate=16384
+GM 92 [Pad 5 (bowed)] baseNote=56 regions=5
+  rgn[0] keys=0-46 base=49 fineTune=10 rate=16384
+  rgn[1] keys=47-64 base=56 fineTune=13 rate=16384
+  rgn[2] keys=65-80 base=67 fineTune=-8 rate=16384
+  rgn[3] keys=81-93 base=80 fineTune=-3 rate=16384
+  rgn[4] keys=94-127 base=97 fineTune=10 rate=16384
+GM 93 [Pad 6 (metallic)] baseNote=62 regions=5
+  rgn[0] keys=0-49 base=42 fineTune=-10 rate=16384
+  rgn[1] keys=50-67 base=62 fineTune=-10 rate=16384
+  rgn[2] keys=68-78 base=71 fineTune=-6 rate=16384
+  rgn[3] keys=79-90 base=84 fineTune=-6 rate=16384
+  rgn[4] keys=91-127 base=96 fineTune=7 rate=16384
+GM 94 [Pad 7 (halo)] baseNote=68 regions=3
+  rgn[0] keys=0-85 base=68 fineTune=-20 rate=16384
+  rgn[1] keys=86-101 base=86 fineTune=2 rate=16384
+  rgn[2] keys=102-127 base=79 fineTune=-4 rate=16384
+GM 95 [Pad 8 (sweep)] baseNote=69 regions=3
+  rgn[0] keys=0-52 base=48 fineTune=3 rate=16384
+  rgn[1] keys=53-76 base=69 fineTune=3 rate=16384
+  rgn[2] keys=77-127 base=86 fineTune=2 rate=16384
+GM 96 [FX 1 (rain)] baseNote=67 regions=3
+  rgn[0] keys=0-78 base=67 fineTune=-4 rate=16384
+  rgn[1] keys=79-90 base=91 fineTune=1 rate=16384
+  rgn[2] keys=91-127 base=91 fineTune=1 rate=16384
+GM 97 [FX 2 (soundtrack)] baseNote=60 regions=6
+  rgn[0] keys=0-54 base=60 fineTune=2 rate=16384
+  rgn[1] keys=55-68 base=60 fineTune=2 rate=16384
+  rgn[2] keys=78-84 base=84 fineTune=-3 rate=16384
+  rgn[3] keys=96-127 base=84 fineTune=-3 rate=16384
+  rgn[4] keys=85-95 base=84 fineTune=-3 rate=16384
+  rgn[5] keys=69-77 base=60 fineTune=2 rate=16384
+GM 98 [FX 3 (crystal)] baseNote=88 regions=2
+  rgn[0] keys=0-102 base=88 fineTune=3 rate=16384
+  rgn[1] keys=103-127 base=81 fineTune=-12 rate=16384
+GM 99 [FX 4 (atmosphere)] baseNote=60 regions=3
+  rgn[0] keys=0-55 base=60 fineTune=-6 rate=16384
+  rgn[1] keys=56-79 base=60 fineTune=-6 rate=16384
+  rgn[2] keys=80-127 base=84 fineTune=-6 rate=16384
+GM 100 [FX 5 (brightness)] baseNote=66 regions=2
+  rgn[0] keys=0-80 base=66 fineTune=-6 rate=16384
+  rgn[1] keys=81-127 base=86 fineTune=-5 rate=16384
+GM 101 [FX 6 (goblins)] baseNote=84 regions=1
+  rgn[0] keys=0-127 base=84 fineTune=3 rate=16384
+GM 102 [FX 7 (echoes)] baseNote=68 regions=3
+  rgn[0] keys=0-85 base=68 fineTune=-20 rate=16384
+  rgn[1] keys=86-101 base=86 fineTune=2 rate=16384
+  rgn[2] keys=102-127 base=79 fineTune=-4 rate=16384
+GM 103 [FX 8 (sci-fi)] baseNote=61 regions=3
+  rgn[0] keys=0-83 base=61 fineTune=50 rate=16384
+  rgn[1] keys=84-100 base=85 fineTune=40 rate=16384
+  rgn[2] keys=101-127 base=89 fineTune=23 rate=16384
+GM 104 [Sitar] baseNote=60 regions=4
+  rgn[0] keys=0-70 base=60 fineTune=-35 rate=16384
+  rgn[1] keys=71-81 base=76 fineTune=-31 rate=16384
+  rgn[2] keys=82-97 base=95 fineTune=-33 rate=16384
+  rgn[3] keys=98-127 base=95 fineTune=-25 rate=16384
+GM 105 [Banjo] baseNote=60 regions=6
+  rgn[0] keys=0-40 base=60 fineTune=-27 rate=16384
+  rgn[1] keys=41-64 base=60 fineTune=-27 rate=16384
+  rgn[2] keys=65-79 base=70 fineTune=-11 rate=16384
+  rgn[3] keys=80-95 base=83 fineTune=-12 rate=16384
+  rgn[4] keys=96-101 base=87 fineTune=0 rate=16384
+  rgn[5] keys=102-127 base=88 fineTune=-6 rate=16384
+GM 106 [Shamisen] baseNote=68 regions=6
+  rgn[0] keys=0-40 base=57 fineTune=47 rate=16384
+  rgn[1] keys=41-59 base=57 fineTune=47 rate=16384
+  rgn[2] keys=60-74 base=68 fineTune=-36 rate=16384
+  rgn[3] keys=75-85 base=80 fineTune=29 rate=16384
+  rgn[4] keys=86-104 base=90 fineTune=12 rate=16384
+  rgn[5] keys=105-127 base=88 fineTune=-6 rate=16384
+GM 107 [Koto] baseNote=59 regions=5
+  rgn[0] keys=0-47 base=59 fineTune=-25 rate=16384
+  rgn[1] keys=48-73 base=59 fineTune=-25 rate=16384
+  rgn[2] keys=74-97 base=80 fineTune=-36 rate=16384
+  rgn[3] keys=98-101 base=87 fineTune=0 rate=16384
+  rgn[4] keys=102-127 base=88 fineTune=-6 rate=16384
+GM 108 [Kalimba] baseNote=70 regions=2
+  rgn[0] keys=0-103 base=70 fineTune=25 rate=16384
+  rgn[1] keys=104-127 base=96 fineTune=6 rate=16384
+GM 109 [Bagpipe] baseNote=65 regions=6
+  rgn[0] keys=0-57 base=54 fineTune=1 rate=16384
+  rgn[1] keys=58-69 base=65 fineTune=1 rate=16384
+  rgn[2] keys=70-80 base=75 fineTune=19 rate=16384
+  rgn[3] keys=81-85 base=85 fineTune=3 rate=16384
+  rgn[4] keys=86-92 base=94 fineTune=24 rate=16384
+  rgn[5] keys=93-127 base=89 fineTune=-75 rate=16384
+GM 110 [Fiddle] baseNote=56 regions=8
+  rgn[0] keys=0-68 base=56 fineTune=-3 rate=16384
+  rgn[1] keys=69-70 base=58 fineTune=7 rate=16384
+  rgn[2] keys=71-76 base=64 fineTune=3 rate=16384
+  rgn[3] keys=77-80 base=68 fineTune=-3 rate=16384
+  rgn[4] keys=81-88 base=74 fineTune=-25 rate=16384
+  rgn[5] keys=89-96 base=83 fineTune=-25 rate=16384
+  rgn[6] keys=103-127 base=89 fineTune=23 rate=16384
+  rgn[7] keys=97-102 base=92 fineTune=-3 rate=16384
+GM 111 [Shanai] baseNote=74 regions=5
+  rgn[0] keys=0-59 base=64 fineTune=-7 rate=16384
+  rgn[1] keys=60-71 base=74 fineTune=11 rate=16384
+  rgn[2] keys=72-79 base=84 fineTune=-5 rate=16384
+  rgn[3] keys=80-95 base=93 fineTune=16 rate=16384
+  rgn[4] keys=96-127 base=96 fineTune=-15 rate=16384
+GM 112 [Tinkle Bell] baseNote=105 regions=8
+  rgn[0] keys=0-30 base=105 fineTune=42 rate=16384
+  rgn[1] keys=31-40 base=105 fineTune=42 rate=16384
+  rgn[2] keys=41-50 base=105 fineTune=42 rate=16384
+  rgn[3] keys=51-60 base=105 fineTune=42 rate=16384
+  rgn[4] keys=61-70 base=105 fineTune=42 rate=16384
+  rgn[5] keys=71-76 base=105 fineTune=42 rate=16384
+  rgn[6] keys=77-82 base=105 fineTune=42 rate=16384
+  rgn[7] keys=83-127 base=105 fineTune=42 rate=16384
+GM 113 [Agogo] baseNote=79 regions=1
+  rgn[0] keys=0-127 base=79 fineTune=0 rate=16384
+GM 114 [Steel Drums] baseNote=83 regions=2
+  rgn[0] keys=0-106 base=83 fineTune=-29 rate=16384
+  rgn[1] keys=107-127 base=96 fineTune=6 rate=16384
+GM 115 [Woodblock] baseNote=68 regions=1
+  rgn[0] keys=0-127 base=68 fineTune=45 rate=16384
+GM 116 [Taiko Drum] baseNote=72 regions=1
+  rgn[0] keys=0-127 base=72 fineTune=-1 rate=16384
+GM 117 [Melodic Tom] baseNote=64 regions=1
+  rgn[0] keys=0-127 base=64 fineTune=0 rate=16384
+GM 118 [Synth Drum] baseNote=72 regions=1
+  rgn[0] keys=0-127 base=72 fineTune=-36 rate=16384
+GM 119 [Reverse Cymbal] baseNote=63 regions=1
+  rgn[0] keys=0-127 base=63 fineTune=-10 rate=16384
+GM 120 [Guitar Fret Noise] baseNote=69 regions=1
+  rgn[0] keys=0-127 base=69 fineTune=0 rate=16384
+GM 121 [Breath Noise] baseNote=84 regions=3
+  rgn[0] keys=0-88 base=84 fineTune=-6 rate=16384
+  rgn[1] keys=89-108 base=96 fineTune=-6 rate=16384
+  rgn[2] keys=109-127 base=97 fineTune=10 rate=16384
+GM 122 [Seashore] baseNote=70 regions=1
+  rgn[0] keys=0-127 base=70 fineTune=44 rate=16384
+GM 123 [Bird Tweet] baseNote=77 regions=1
+  rgn[0] keys=0-127 base=77 fineTune=13 rate=16384
+GM 124 [Telephone Ring] baseNote=68 regions=1
+  rgn[0] keys=0-127 base=68 fineTune=45 rate=16384
+GM 125 [Helicopter] baseNote=62 regions=1
+  rgn[0] keys=0-127 base=62 fineTune=22 rate=16384
+GM 126 [Applause] baseNote=69 regions=1
+  rgn[0] keys=0-127 base=69 fineTune=44 rate=16384
+GM 127 [Gunshot] baseNote=78 regions=1
+  rgn[0] keys=0-127 base=78 fineTune=0 rate=16384

@@ -31,15 +31,15 @@ typedef struct {
     u16   facing;    // facing angle (brad, used by LookAt/FacePlayer scripts)
 } FloorSpriteGBA;
 
-EWRAM_DATA static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
+static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
 static FIXED player_x, player_z;   // player world position (16.8)
 static FIXED player_y;             // player height (16.8)
 
 // Mode 0 tilemap: forward declarations needed by blueprint codegen
 #define TM_MAX_DIR_OBJS 32
 static int tm_player_tx, tm_player_ty;
-EWRAM_DATA static s16 tm_obj_tx[TM_MAX_DIR_OBJS];
-EWRAM_DATA static s16 tm_obj_ty[TM_MAX_DIR_OBJS];
+static s16 tm_obj_tx[TM_MAX_DIR_OBJS];
+static s16 tm_obj_ty[TM_MAX_DIR_OBJS];
 static int tm_move_frames;
 // Follow system: forward declarations for blueprint nodes
 static int tm_fol_obj;
@@ -51,11 +51,11 @@ static int tm_fol_moving;
 static int tm_fol_facing;
 static int tm_fol_speed;
 static int tm_fol_dist;
-EWRAM_DATA static s16 tm_obj_facing[TM_MAX_DIR_OBJS];
-EWRAM_DATA static s8  tm_obj_anim_play[TM_MAX_DIR_OBJS];
-EWRAM_DATA static s8  tm_obj_anim_idx[TM_MAX_DIR_OBJS];
-EWRAM_DATA static int tm_obj_dir_set[TM_MAX_DIR_OBJS];
-EWRAM_DATA static int tm_obj_dir_facing[TM_MAX_DIR_OBJS];
+static s16 tm_obj_facing[TM_MAX_DIR_OBJS];
+static s8  tm_obj_anim_play[TM_MAX_DIR_OBJS];
+static s8  tm_obj_anim_idx[TM_MAX_DIR_OBJS];
+static int tm_obj_dir_set[TM_MAX_DIR_OBJS];
+static int tm_obj_dir_facing[TM_MAX_DIR_OBJS];
 
 // ---------------------------------------------------------------------------
 // Forward declarations for sound functions (used by mapdata.h script codegen)
@@ -90,8 +90,7 @@ static void afn_stop_sound(void);
 #ifdef AFN_HAS_SOUND
 
 #define SND_BUF_SIZE 304
-#define SND_MAX_VOICES 8  // max allocated; actual count per instance from afn_snd_voices[]
-static int snd_voice_count = 6; // active voice limit (set from afn_snd_voices[] on play)
+#define SND_MAX_VOICES 4
 
 // Sound buffers in EWRAM to save IWRAM space (32KB limit)
 EWRAM_DATA static s8 snd_buf[2][SND_BUF_SIZE] __attribute__((aligned(4)));
@@ -104,16 +103,11 @@ typedef struct {
     int inc;           // fixed 24.8
     int vol;           // 0-127
     int active;
-    int remaining;     // samples left (-1 = in release phase)
-    int loopLen;       // loop end << 8
-    int loopStart;     // loop start << 8
+    int remaining;     // samples left
+    int loopLen;       // length << 8
     int loop;          // 1 = loop (oscillators), 0 = one-shot (drums)
     int interp;        // 0 = nearest, 1 = linear interpolation
     int gainShift;     // volume shift: 7 = normal, 6 = loud
-    int volFade;       // current volume in 8.8 fixed point (decays per frame)
-    int volDec;        // volume decrement per frame in 8.8 fixed point
-    int releaseRem;    // samples left in release (0 = not releasing)
-    int releaseLen;    // total release length in output samples
 } SndVoice;
 
 EWRAM_DATA static SndVoice snd_voices[SND_MAX_VOICES];
@@ -158,14 +152,11 @@ static void afn_play_sound(int instanceId) {
     snd_seq_active = instanceId;
     snd_seq_tick = 0;
     snd_seq_next = 0;
-    snd_voice_count = afn_snd_voices[instanceId];
-    if (snd_voice_count < 4) snd_voice_count = 4;
-    if (snd_voice_count > SND_MAX_VOICES) snd_voice_count = SND_MAX_VOICES;
 }
 
 static void afn_stop_sound(void) {
     snd_seq_active = -1;
-    for (int i = 0; i < snd_voice_count; i++)
+    for (int i = 0; i < SND_MAX_VOICES; i++)
         snd_voices[i].active = 0;
 }
 
@@ -177,7 +168,7 @@ IWRAM_CODE static void afn_sound_mix(void) {
     // Check if any voice is still active — if not, shut down HW
     {
         int anyActive = 0;
-        for (int v = 0; v < snd_voice_count; v++)
+        for (int v = 0; v < SND_MAX_VOICES; v++)
             if (snd_voices[v].active) { anyActive = 1; break; }
         if (!anyActive && snd_seq_active < 0) {
             afn_sound_hw_stop();
@@ -192,116 +183,69 @@ IWRAM_CODE static void afn_sound_mix(void) {
     REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
     snd_cur_buf = play;
 
-    // Mix into IWRAM 16-bit accumulation buffer, clamp to s8 once at end
+    // Mix into the other buffer
     s8* buf = snd_buf[snd_cur_buf ^ 1];
-    static s16 mix_acc[SND_BUF_SIZE];
-    // Clear accumulator (32-bit writes, 2 samples at a time)
-    {
-        u32* a32 = (u32*)mix_acc;
-        for (int i = 0; i < SND_BUF_SIZE / 2; i++) a32[i] = 0;
-    }
+    u32* b32 = (u32*)buf;
+    for (int i = 0; i < SND_BUF_SIZE / 4; i++) b32[i] = 0;
 
-    for (int v = 0; v < snd_voice_count; v++) {
+    for (int v = 0; v < SND_MAX_VOICES; v++) {
         SndVoice* vc = &snd_voices[v];
         if (!vc->active) continue;
-        int n = SND_BUF_SIZE;
-        if (vc->remaining > 0 && vc->remaining < n) n = vc->remaining;
+        int n = vc->remaining < SND_BUF_SIZE ? vc->remaining : SND_BUF_SIZE;
         const s8* wdata = vc->data;
         int pos = vc->pos;
         int inc = vc->inc;
-        // Compute volume once per frame
-        int vol = vc->volFade >> 8;
-        if (vol > vc->vol) vol = vc->vol;
-        if (vol < 0) vol = 0;
-        if (vc->remaining < 0 && vc->releaseRem > 0 && vc->releaseLen > 0)
-            vol = vol * vc->releaseRem / vc->releaseLen; // once per frame, not per sample
-        int gs = vc->gainShift;
+        int vol = vc->vol;
+        int loopLen = vc->loopLen;
+        int isLoop = vc->loop;
+        int useInterp = vc->interp;
         int done = 0;
-        if (vc->loop) {
-            // Looping voice: process in chunks up to loop boundary (no branch in hot path)
-            int loopLen = vc->loopLen;
-            int loopSpan = loopLen - vc->loopStart;
-            int i = 0;
-            while (i < n) {
-                // How many samples until we hit loop end?
-                int samplesUntilWrap = (loopLen - pos + inc - 1) / inc;
-                int chunk = n - i;
-                if (samplesUntilWrap > 0 && samplesUntilWrap < chunk)
-                    chunk = samplesUntilWrap;
-                int end = i + chunk;
-                // Tight inner loop — no branches
-                for (; i < end; i++) {
-                    mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
-                    pos += inc;
-                }
-                if (pos >= loopLen) {
-                    pos -= loopSpan;
-                    if (pos < vc->loopStart) pos = vc->loopStart;
-                }
+        for (int i = 0; i < n; i++) {
+            int idx = pos >> 8;
+            int s;
+            if (useInterp) {
+                int frac = pos & 0xFF;
+                int s0 = (int)wdata[idx];
+                int s1 = (idx + 1 < vc->length) ? (int)wdata[idx + 1] : s0;
+                s = s0 + (((s1 - s0) * frac) >> 8);
+            } else {
+                s = (int)wdata[idx];
             }
-        } else {
-            // Non-looping: straight mix until end of sample
-            int lenFixed = vc->length << 8;
-            for (int i = 0; i < n; i++) {
-                mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
-                pos += inc;
-                if (pos >= lenFixed) { done = 1; break; }
+            s = (s * vol) >> vc->gainShift;
+            int m = (int)buf[i] + s;
+            if (m > 127) m = 127;
+            if (m < -128) m = -128;
+            buf[i] = (s8)m;
+            pos += inc;
+            if (pos >= loopLen) {
+                if (isLoop) pos -= loopLen;
+                else { done = 1; break; }
             }
         }
         vc->pos = pos;
         if (done) { vc->active = 0; continue; }
-        if (vc->remaining > 0) {
-            vc->remaining -= n;
-            if (vc->remaining <= 0) {
-                vc->remaining = -1;
-                vc->releaseRem = vc->releaseLen;
-                // Keep looping during release — fade volume instead
-            }
-        } else if (vc->remaining < 0) {
-            vc->releaseRem -= n;
-            if (vc->releaseRem <= 0) { vc->active = 0; continue; }
-        }
-        if (vc->volDec > 0) vc->volFade -= vc->volDec;
-    }
-
-    // Clamp and write to output buffer (4 samples at a time)
-    for (int i = 0; i < SND_BUF_SIZE; i++) {
-        int m = mix_acc[i];
-        if (m > 127) m = 127;
-        else if (m < -128) m = -128;
-        buf[i] = (s8)m;
+        vc->remaining -= n;
+        if (vc->remaining <= 0) vc->active = 0;
     }
 }
 
 // Trigger a looping sample voice with duration in ticks
 static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     if (smpIdx < 0 || smpIdx >= AFN_SOUND_SAMPLE_COUNT) return;
-    // Find free voice, or steal the one closest to finishing
+    // Find free voice (or steal voice 0)
     int vi = -1;
-    for (int i = 0; i < snd_voice_count; i++) {
+    for (int i = 0; i < SND_MAX_VOICES; i++) {
         if (!snd_voices[i].active) { vi = i; break; }
     }
-    if (vi < 0) {
-        // Prefer stealing releasing voices, then closest to finishing
-        int minScore = 0x7FFFFFFF;
-        vi = 0;
-        for (int i = 0; i < snd_voice_count; i++) {
-            int s = (snd_voices[i].remaining < 0) ? snd_voices[i].releaseRem
-                                                    : snd_voices[i].remaining + 10000;
-            if (s < minScore) { minScore = s; vi = i; }
-        }
-    }
+    if (vi < 0) vi = 0;
     SndVoice* vc = &snd_voices[vi];
     vc->data = afn_pcm_ptrs[smpIdx];
     vc->length = afn_pcm_lens[smpIdx];
+    vc->loopLen = vc->length << 8; // fixed 24.8
 #ifdef AFN_PCM_HAS_LOOP
     vc->loop = afn_pcm_loop[smpIdx];
-    vc->loopStart = afn_pcm_loop_start[smpIdx] << 8;
-    vc->loopLen = afn_pcm_loop_end[smpIdx] << 8;
 #else
     vc->loop = (vc->length <= 64) ? 1 : 0;
-    vc->loopStart = 0;
-    vc->loopLen = vc->length << 8;
 #endif
     vc->pos = 0;
     // Pitch: baseInc = (sampleRate << 8) / outputRate gives 1:1 playback
@@ -330,7 +274,7 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     // Each frame = SND_BUF_SIZE output samples, sequencer advances tpf ticks/frame
     int tpf = afn_snd_tpf[snd_seq_active >= 0 ? snd_seq_active : 0];
     int durSamples = (durTicks * SND_BUF_SIZE) / (tpf > 0 ? tpf : 1);
-    if (durSamples < 5443) durSamples = 5443; // minimum ~300ms (18157 * 0.30)
+    if (durSamples < SND_BUF_SIZE) durSamples = SND_BUF_SIZE; // minimum 1 frame
     // For one-shot samples, ensure remaining covers the full sample playback
     if (!vc->loop) {
         int smpDur = (vc->length << 8) / (baseInc > 0 ? baseInc : 1);
@@ -342,31 +286,6 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     {
         int g = (snd_seq_active >= 0) ? afn_snd_gain[snd_seq_active] : 0;
         vc->gainShift = (g == 1) ? 6 : (g == 2) ? 9 : 7;
-    }
-    vc->releaseRem = 0;
-    {
-        int sf = (snd_seq_active >= 0) ? afn_snd_softfade[snd_seq_active] : 1;
-        if (sf) {
-            vc->releaseLen = afn_pcm_release[smpIdx];
-            if (vc->releaseLen < 304) vc->releaseLen = 304;
-        } else {
-            vc->releaseLen = 0; // hard cut — no release fade
-        }
-    }
-    // Decay: precompute per-frame volume decrement (8.8 fixed point)
-    {
-        int dp = afn_pcm_decay[smpIdx];
-        int minDur = afn_pcm_decay_min[smpIdx];
-        vc->volFade = vel << 8; // initial volume in 8.8
-        if (dp > 0 && durSamples > minDur) {
-            // Total drop = vel * dp / 100 over durSamples
-            // Per-frame drop = (vel * dp * 256) / (100 * durSamples / SND_BUF_SIZE)
-            int totalDrop = (vel * dp * 256) / 100; // in 8.8
-            int numFrames = durSamples / SND_BUF_SIZE;
-            vc->volDec = numFrames > 0 ? totalDrop / numFrames : 0;
-        } else {
-            vc->volDec = 0;
-        }
     }
     vc->active = 1;
 }
@@ -418,7 +337,7 @@ static FIXED g_cosf, g_sinf;
 #define TEX_CACHE_SIZE 4096
 extern u8 tex_iwram[TEX_CACHE_SIZE]; // IWRAM buffer (defined in tex_iwram.c)
 #define tex_cache tex_iwram
-EWRAM_DATA static u8* tex_cache_ptrs[AFN_MESH_COUNT];
+static u8* tex_cache_ptrs[AFN_MESH_COUNT];
 
 // ARM assembly textured scanline inner loop (tex_scanline.s, runs in IWRAM)
 extern void tex_scanline_asm(u16* rp, int pairCount, int su, int sv,
@@ -473,18 +392,18 @@ static int tm_player_use_affine;
 static int tm_player_oam_ready;
 // Compact per-object direction VRAM (Mode 0 only — 1 facing per slot)
 #define TM_MAX_DIR_OBJS 32
-EWRAM_DATA static int tm_obj_vram_slot[TM_MAX_DIR_OBJS];   // VRAM tile start per tilemap object
-EWRAM_DATA static int tm_obj_dir_facing[TM_MAX_DIR_OBJS];  // loaded facing direction (-1 = none)
-EWRAM_DATA static int tm_obj_dir_set[TM_MAX_DIR_OBJS];     // loaded animation set (-1 = none)
+static int tm_obj_vram_slot[TM_MAX_DIR_OBJS];   // VRAM tile start per tilemap object
+static int tm_obj_dir_facing[TM_MAX_DIR_OBJS];  // loaded facing direction (-1 = none)
+static int tm_obj_dir_set[TM_MAX_DIR_OBJS];     // loaded animation set (-1 = none)
 static int tm_dir_slot_count = 0;                // total direction VRAM tiles used
-EWRAM_DATA static s16 tm_obj_tx[TM_MAX_DIR_OBJS];          // mutable object tile X (for FollowPlayer etc.)
-EWRAM_DATA static s16 tm_obj_ty[TM_MAX_DIR_OBJS];          // mutable object tile Y
+static s16 tm_obj_tx[TM_MAX_DIR_OBJS];          // mutable object tile X (for FollowPlayer etc.)
+static s16 tm_obj_ty[TM_MAX_DIR_OBJS];          // mutable object tile Y
 // Generic follow system (single follower for now)
 static int tm_fol_obj = -1;            // which object is following (-1 = none)
 static int tm_fol_active = 0;          // is follow engaged
 #define TM_FOL_TRAIL_LEN 16
-EWRAM_DATA static s16 tm_fol_trail_tx[TM_FOL_TRAIL_LEN];
-EWRAM_DATA static s16 tm_fol_trail_ty[TM_FOL_TRAIL_LEN];
+static s16 tm_fol_trail_tx[TM_FOL_TRAIL_LEN];
+static s16 tm_fol_trail_ty[TM_FOL_TRAIL_LEN];
 static int tm_fol_trail_head = 0;
 static int tm_fol_trail_count = 0;
 static s16 tm_fol_prev_ptx = -1, tm_fol_prev_pty = -1;
@@ -494,9 +413,9 @@ static int tm_fol_lerp_dx = 0, tm_fol_lerp_dy = 0;
 static int tm_fol_offset_x = 0, tm_fol_offset_y = 0;
 static int tm_fol_moving = 0;    // 1 while follower is lerping between tiles
 static int tm_fol_facing = 4;    // direction follower last moved (0/2/4/6), default south
-EWRAM_DATA static s16 tm_obj_facing[TM_MAX_DIR_OBJS]; // mutable facing direction per object
-EWRAM_DATA static s8  tm_obj_anim_play[TM_MAX_DIR_OBJS]; // mutable animPlay per object
-EWRAM_DATA static s8  tm_obj_anim_idx[TM_MAX_DIR_OBJS];  // mutable animIdx per object
+static s16 tm_obj_facing[TM_MAX_DIR_OBJS]; // mutable facing direction per object
+static s8  tm_obj_anim_play[TM_MAX_DIR_OBJS]; // mutable animPlay per object
+static s8  tm_obj_anim_idx[TM_MAX_DIR_OBJS];  // mutable animIdx per object
 static int tm_anim_idx;                 // current animation index (0=idle, 1=walk, ...)
 static int tm_anim_frame;               // current frame within animation
 static int tm_anim_timer;               // frame counter for animation timing
@@ -800,7 +719,7 @@ static void font_glyph_to_tile(u32* dst, const u8* glyph, int colorIdx, int bgId
 // Font tiles placed before HUD static tiles at end of OBJ VRAM
 static int hud_font_tile_base = 0;
 static int hud_font_loaded = 0;
-EWRAM_DATA static int hud_pal_remap[AFN_ASSET_COUNT]; // dynamic palette bank for HUD assets
+static int hud_pal_remap[AFN_ASSET_COUNT]; // dynamic palette bank for HUD assets
 static int hud_need_blend = 0;
 static int hud_blend_alpha = 16;
 
@@ -882,48 +801,48 @@ static int   afn_fade_target;
 static int   afn_fade_frames;
 static int   afn_fade_counter;
 static int   afn_fade_level;
-EWRAM_DATA static int   afn_hp[16];
+static int   afn_hp[16];
 static int   afn_score;
 static FIXED afn_start_x, afn_start_y, afn_start_z;
 static int   afn_frame_count;
-EWRAM_DATA static u8    afn_sprite_flip[16];
+static u8    afn_sprite_flip[16];
 static int   afn_draw_distance;
-EWRAM_DATA static u8    afn_collision_enabled[16];
+static u8    afn_collision_enabled[16];
 static int   afn_cam_locked;
 static int   afn_cam_speed = 256;
 static FIXED afn_force_x, afn_force_z;
 static int   afn_friction = 256;
-EWRAM_DATA static int   afn_vars[16];
+static int   afn_vars[16];
 static int   afn_scripts_stopped;
-EWRAM_DATA static u8    afn_sprite_layer[16];
-EWRAM_DATA static u8    afn_sprite_alpha[16];
-EWRAM_DATA static u8    afn_flash_obj[16];
-EWRAM_DATA static u16   afn_sprite_rot[16];
-EWRAM_DATA static int   afn_max_hp[16];
-EWRAM_DATA static u8    afn_ai_mode[16];
-EWRAM_DATA static u16   afn_sprite_tint[16];
-EWRAM_DATA static u8    afn_sprite_shake[16];
-EWRAM_DATA static int   afn_hud_value[4];
-EWRAM_DATA static u8    afn_hud_visible[4];
-EWRAM_DATA static FIXED afn_patrol_home_x[16];
-EWRAM_DATA static FIXED afn_patrol_home_z[16];
+static u8    afn_sprite_layer[16];
+static u8    afn_sprite_alpha[16];
+static u8    afn_flash_obj[16];
+static u16   afn_sprite_rot[16];
+static int   afn_max_hp[16];
+static u8    afn_ai_mode[16];
+static u16   afn_sprite_tint[16];
+static u8    afn_sprite_shake[16];
+static int   afn_hud_value[4];
+static u8    afn_hud_visible[4];
+static FIXED afn_patrol_home_x[16];
+static FIXED afn_patrol_home_z[16];
 static u16   afn_bg_color;
-EWRAM_DATA static int   afn_inventory[16];
+static int   afn_inventory[16];
 static int   afn_dlg_open;
 static int   afn_dlg_text;
 static int   afn_dlg_line;
 static int   afn_dlg_speaker;
 static int   afn_dlg_choice_a, afn_dlg_choice_b;
 static int   afn_dlg_choosing;
-EWRAM_DATA static int   afn_state[16];
-EWRAM_DATA static int   afn_prev_state[16];
-EWRAM_DATA static int   afn_state_timer[16];
+static int   afn_state[16];
+static int   afn_prev_state[16];
+static int   afn_state_timer[16];
 static u16   afn_text_color;
-EWRAM_DATA static int   afn_collision_size[16];
-EWRAM_DATA static int   afn_collision_ignore[16];
-EWRAM_DATA static int   afn_lifetime[16];
-EWRAM_DATA static u16   afn_bar_color[4];
-EWRAM_DATA static int   afn_bar_max[4];
+static int   afn_collision_size[16];
+static int   afn_collision_ignore[16];
+static int   afn_lifetime[16];
+static u16   afn_bar_color[4];
+static int   afn_bar_max[4];
 static int   afn_timer_visible;
 static FIXED afn_checkpoint_x, afn_checkpoint_z;
 static int   afn_checkpoint_set;
@@ -932,15 +851,15 @@ static int   afn_current_scene;
 #endif /* !AFN_HAS_SCRIPT */
 
 // HUD keyframe animation state (always needed, not script-dependent)
-EWRAM_DATA static u8    afn_hud_prev_visible[4];
-EWRAM_DATA static int   afn_hud_anim_frame[4];
+static u8    afn_hud_prev_visible[4];
+static int   afn_hud_anim_frame[4];
 
 // Direction animation set tracking (for DMA streaming)
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
-EWRAM_DATA static int g_active_dir_set[AFN_ASSET_COUNT]; // currently loaded direction set per asset
+static int   g_active_dir_set[AFN_ASSET_COUNT]; // currently loaded direction set per asset
 static int   g_anim_frame_counter; // VBlank counter for animation frame cycling
-EWRAM_DATA static int g_current_anim[AFN_ASSET_COUNT];  // per-asset: 0=idle, 1=run, 2=sprint
-EWRAM_DATA static u8  g_asset_anim_enabled[AFN_ASSET_COUNT]; // per-asset: any sprite wants animation?
+static int   g_current_anim[AFN_ASSET_COUNT];  // per-asset: 0=idle, 1=run, 2=sprint
+static u8    g_asset_anim_enabled[AFN_ASSET_COUNT]; // per-asset: any sprite wants animation?
 #endif
 
 // FloorSpriteGBA, g_sprites, MAX_FLOOR_SPRITES declared before mapdata.h include
@@ -1028,14 +947,14 @@ static void load_checkerboard(void)
     memset(&tile8_mem[2][1], 1, 64);
     memset(&tile8_mem[2][2], 2, 64);
 
-    // Fill 128x128 map: 2x2 tile checkerboard (each checker = 2x2 tiles = 16x16 px)
+    // Fill 64x64 map: 2x2 tile checkerboard (each checker = 2x2 tiles = 16x16 px)
     {
-        u8 *map = (u8*)se_mem[24];
+        u8 *map = (u8*)se_mem[28];
         int y, x;
-        memset(map, 0, 128 * 128);
-        for (y = 0; y < 64; y++)
-            for (x = 0; x < 64; x++)
-                map[y * 128 + x] = (((x / 2) + (y / 2)) & 1) ? 2 : 1;
+        memset(map, 0, 64 * 64);
+        for (y = 0; y < 32; y++)
+            for (x = 0; x < 32; x++)
+                map[y * 64 + x] = (((x / 2) + (y / 2)) & 1) ? 2 : 1;
     }
 }
 
@@ -1044,15 +963,13 @@ static void load_editor_map(void)
 {
     memcpy(&tile8_mem[2][0], afn_tiles, afn_tilesLen);
     memcpy(pal_bg_mem, afn_palette, afn_paletteLen);
-    // Tile the source map into 128x128 affine map (wrapping at source dimensions)
-    u8 *map = (u8*)se_mem[24];
+    // Tile the 32x32 map into 64x64 (2x2 repeat) to match editor floor density
+    u8 *map = (u8*)se_mem[28];
     const u8 *src = (const u8*)afn_tilemap;
-    int srcW = AFN_FLOOR_TILES_X;
-    int srcH = AFN_FLOOR_TILES_Y;
     int y, x;
-    for (y = 0; y < 128; y++)
-        for (x = 0; x < 128; x++)
-            map[y * 128 + x] = src[(y % srcH) * srcW + (x % srcW)];
+    for (y = 0; y < 64; y++)
+        for (x = 0; x < 64; x++)
+            map[y * 64 + x] = src[(y & 31) * 32 + (x & 31)];
 }
 #endif
 
@@ -1079,13 +996,9 @@ static void init_obj_sprites(void)
         if (afn_current_mode == 1) {
             // Mode 0: place static tiles right after compact direction slots
             dst = (u32*)(0x06010000 + tm_dir_slot_count * 32);
-        } else if (afn_current_mode == 2) {
-            // Mode 7: tile mode, tiles 0-511 are usable — no bitmap overlap
-            // Direction tiles are also shifted down by 512, so place static tiles
-            // at their exported offset minus 512
-            dst = (u32*)(0x06010000 + (AFN_DIR_VRAM_TILES - 512) * 32);
         } else {
-            // Mode 4: skip bitmap overlap region (512 tiles)
+            // Mode 4/7: skip bitmap overlap region (512 tiles) only
+            // Direction tiles are DMA'd separately by switch_dir_anim_set
             dst = (u32*)(0x06010000 + 512 * 32);
         }
 #else
@@ -1259,12 +1172,9 @@ static void switch_dir_anim_set(int assetIdx, int newSet)
     int romOffset = afn_dir_set_offsets[assetIdx][newSet]; // u32 index into ROM array
     if (romOffset < 0) return;
 
-    // In Mode 7 (afn_current_mode==2), tiles 0-511 are usable (not bitmap),
-    // so shift everything down by 512 to fit within the 1024-tile OBJ VRAM
-    int m7Adj = (afn_current_mode == 2) ? 512 : 0;
     // Guard: skip if DMA would overflow OBJ VRAM (1024 tiles max)
-    int dstTile = vramTile0 - tm_dir_adj - m7Adj;
-    if (dstTile < 0 || dstTile + 8 * tpf > 1024) return;
+    int dstTile = vramTile0 - tm_dir_adj;
+    if (dstTile + 8 * tpf > 1024) return;
 
     // Copy 8 directions * tpf tiles * 32 bytes/tile from ROM to VRAM
     int wordCount = 8 * tpf * 8; // 8 dirs * tpf tiles * 8 u32s per tile
@@ -1409,8 +1319,6 @@ static void update_sprites(void)
                         {
                             int adTpf = afn_asset_dir_desc[ai][1];
                             int vramTile0 = afn_asset_dir_desc[ai][5];
-                            // Mode 7 uses tile mode: tiles 0-511 are usable, shift down
-                            if (afn_current_mode == 2) vramTile0 -= 512;
                             tileId = vramTile0 + dirIdx * adTpf;
                             baseSize = afn_asset_dir_desc[ai][2];
                             scaleSize = baseSize;
@@ -1486,7 +1394,7 @@ static void update_sprites(void)
 
 static void init_minimap(void)
 {
-    REG_BG0CNT = BG_CBB(0) | BG_SBB(7) | BG_4BPP | BG_REG_32x32 | BG_PRIO(0);
+    REG_BG0CNT = BG_CBB(0) | BG_SBB(30) | BG_4BPP | BG_REG_32x32 | BG_PRIO(0);
 
     pal_bg_mem[16 + 0] = 0;
     pal_bg_mem[16 + 1] = RGB15(2, 4, 2);
@@ -1510,14 +1418,14 @@ static void init_minimap(void)
     }
 
     {
-        u16 *map = (u16*)se_mem[7];
+        u16 *map = (u16*)se_mem[30];
         int k;
         for (k = 0; k < 32*32; k++)
             map[k] = 0;
     }
 
     {
-        u16 *map = (u16*)se_mem[7];
+        u16 *map = (u16*)se_mem[30];
         int tx, ty;
         for (ty = 0; ty < 4; ty++)
             for (tx = 0; tx < 4; tx++)
@@ -1660,8 +1568,8 @@ IWRAM_CODE static void afn_hline(u16* row, int left, int right, u8 palIdx);
 // Row-level coverage: track widest covered span per scanline.
 // If a new hline falls entirely within the already-covered span, skip it.
 // Much cheaper than per-pixel — just 2 compares per scanline.
-EWRAM_DATA static s16 g_cov_left[160];   // leftmost covered pixel per row (init 240 = empty)
-EWRAM_DATA static s16 g_cov_right[160];  // rightmost covered pixel per row (init -1 = empty)
+static s16 g_cov_left[160];   // leftmost covered pixel per row (init 240 = empty)
+static s16 g_cov_right[160];  // rightmost covered pixel per row (init -1 = empty)
 static int g_coverageOn;      // runtime toggle for coverage buffer
 
 static void coverage_clear(void)
@@ -1695,7 +1603,7 @@ IWRAM_CODE static void afn_hline(u16* row, int left, int right, u8 palIdx)
 
 // Reciprocal lookup table: rcp_table[n] = (1 << 16) / n for n=1..240
 // Used to replace per-scanline division with multiply in texture rasterizer
-EWRAM_DATA static u16 rcp_table[241];
+static u16 rcp_table[241];
 
 static void init_rcp_table(void)
 {
@@ -1708,7 +1616,7 @@ static void init_rcp_table(void)
 // Reciprocal LUT for division-free slope computation (OpenLara style)
 // divLUT[h] = (1 << 16) / h — replaces costly ARM7 software division
 #define AFN_DIV_LUT_SIZE 512
-EWRAM_DATA static u32 divLUT[AFN_DIV_LUT_SIZE];
+static u32 divLUT[AFN_DIV_LUT_SIZE];
 u32* g_divLUT_ptr; /* global pointer for ASM access — set in init_divLUT */
 
 static void init_divLUT(void)
@@ -3156,7 +3064,7 @@ EWRAM_DATA static FIXED g_vRawDepth[MAX_GLOBAL_VERTS];
 EWRAM_DATA static FIXED g_vSide[MAX_GLOBAL_VERTS];
 EWRAM_DATA static FIXED g_vHeight[MAX_GLOBAL_VERTS];
 EWRAM_DATA static TriSort g_triOrder[MAX_GLOBAL_TRIS];
-EWRAM_DATA static MeshSlot g_meshSlots[MAX_FLOOR_SPRITES];
+static MeshSlot g_meshSlots[MAX_FLOOR_SPRITES];
 
 // Render all mesh sprites into the bitmap
 IWRAM_CODE static void render_meshes_sw(u16* buf)
@@ -4212,7 +4120,6 @@ static void scene_load(int sceneMode, int sceneIdx)
     } else if (sceneMode == 0) {
         tm_dir_adj = 0;
         tm_static_adj = AFN_DIR_VRAM_TILES;
-        tm_scene_idx = sceneIdx;
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
         mode4_init_scene();
 #else
@@ -4236,49 +4143,7 @@ static void scene_load(int sceneMode, int sceneIdx)
 #endif
 #endif
     } else {
-        // Mode 1 (Mode 7 affine floor)
-        tm_scene_idx = sceneIdx;
-        REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
-        REG_BG2CNT = BG_CBB(2) | BG_SBB(24) | BG_AFF_128x128 | BG_8BPP | BG_PRIO(2);
-        REG_BG2PA = 0x0100; REG_BG2PB = 0;
-        REG_BG2PC = 0;      REG_BG2PD = 0x0100;
-        REG_BG2X  = 0;      REG_BG2Y  = 0;
-#ifdef AFFINITY_HAS_MAPDATA
-        load_editor_map();
-#else
-        load_checkerboard();
-#endif
-        init_obj_sprites();
-#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-        tm_static_adj = 512; // Mode 7: no bitmap overlap, everything shifts down 512
-#else
-        tm_static_adj = AFN_DIR_VRAM_TILES;
-#endif
-#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_DIR_ANIM_TILES_LEN)
-        { int ai; for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {
-            if (!afn_asset_dir_desc[ai][4]) continue;
-            switch_dir_anim_set(ai, 0);
-        } }
-#endif
-        init_minimap();
-#if defined(AFFINITY_HAS_SPRITES) && AFN_SPRITE_COUNT > 0
-        load_editor_sprites();
-#endif
-        player_sprite_idx = -1;
-#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
-        player_sprite_idx = AFN_PLAYER_IDX;
-        player_x = g_sprites[AFN_PLAYER_IDX].x;
-        player_z = g_sprites[AFN_PLAYER_IDX].z;
-        player_y = g_sprites[AFN_PLAYER_IDX].y;
-        orbit_angle = AFN_CAM_ANGLE;
-        orbit_dist = AFN_ORBIT_DIST;
-        player_moving = 0;
-        player_move_angle = 0x4000;
-#ifdef AFN_HAS_SCRIPT
-        afn_start_x = player_x; afn_start_y = player_y; afn_start_z = player_z;
-#endif
-#endif
-        irq_add(II_HBLANK, m7_hbl);
+        // Mode 1 (legacy Mode 7) — not switching to this at runtime
     }
 
     // Re-run OnStart scripts for new scene
@@ -4409,7 +4274,7 @@ int main(void)
     } else {
         // Mode 1 (legacy Mode 7 floor)
         REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
-        REG_BG2CNT = BG_CBB(2) | BG_SBB(24) | BG_AFF_128x128 | BG_8BPP | BG_PRIO(2);
+        REG_BG2CNT = BG_CBB(2) | BG_SBB(28) | BG_AFF_64x64 | BG_8BPP | BG_PRIO(2);
         REG_BG2PA = 0x0100; REG_BG2PB = 0;
         REG_BG2PC = 0;      REG_BG2PD = 0x0100;
         REG_BG2X  = 0;      REG_BG2Y  = 0;
@@ -4419,11 +4284,7 @@ int main(void)
         load_checkerboard();
 #endif
         init_obj_sprites();
-#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-        tm_static_adj = 512; // Mode 7: no bitmap overlap, everything shifts down 512
-#else
         tm_static_adj = AFN_DIR_VRAM_TILES;
-#endif
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_DIR_ANIM_TILES_LEN)
         { int ai; for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {
             if (!afn_asset_dir_desc[ai][4]) continue;
@@ -4581,17 +4442,19 @@ int main(void)
         }
         key_poll();
 
-        // --- Scene transition state machine ---
-        if (g_scene_transition > 0) {
-            handle_scene_transition();
-            continue;
-        }
+        // --- Scene transition state machine (skip for Mode 4 — no tile scene switching) ---
+        if (afn_current_mode != 0) {
+            if (g_scene_transition > 0) {
+                handle_scene_transition();
+                continue;
+            }
 #ifdef AFN_HAS_SCRIPT
-        if (afn_pending_scene >= 0 && afn_pending_scene_mode >= 0) {
-            start_scene_transition();
-            continue;
-        }
+            if (afn_pending_scene >= 0 && afn_pending_scene_mode >= 0) {
+                start_scene_transition();
+                continue;
+            }
 #endif
+        }
 
         // ============================================================
         // RUNTIME MODE DISPATCH
@@ -5063,18 +4926,6 @@ int main(void)
                     if (afn_hud_visible[ei2])
                         afn_hud_anim_frame[ei2]++;
                 } }
-                // Tick animation layer frames (speed-controlled)
-#ifdef AFN_HUD_HAS_LAYERS
-                { int li; for (li = 0; li < AFN_HUD_LAYER_COUNT; li++) {
-                    if (afn_hud_layer_active[li]) {
-                        afn_hud_layer_tick[li]++;
-                        if (afn_hud_layer_tick[li] >= afn_hud_layer_speed[li]) {
-                            afn_hud_layer_tick[li] = 0;
-                            afn_hud_layer_frame[li]++;
-                        }
-                    }
-                } }
-#endif
                 { int anyHudVisible = 0;
                 { int ei2; for (ei2 = 0; ei2 < AFN_HUD_ELEM_COUNT; ei2++) if (afn_hud_visible[ei2]) anyHudVisible = 1; }
                 if (anyHudVisible) {
@@ -5246,60 +5097,6 @@ int main(void)
                             hudUseAffine = 0;
                         }
                     }
-                    // Compute per-item animation layer offsets
-                    // Max 32 pieces + 16 sprites per element
-                    int layOff[48][2]; // [item][0=x, 1=y]
-                    { int lo; for (lo = 0; lo < 48; lo++) { layOff[lo][0] = 0; layOff[lo][1] = 0; } }
-#ifdef AFN_HUD_HAS_LAYERS
-                    { int li2; for (li2 = 0; li2 < AFN_HUD_LAYER_COUNT; li2++) {
-                        if (!afn_hud_layer_active[li2]) continue;
-                        if (afn_hud_layers[li2].elemIdx != ei) continue;
-                        int lkS = afn_hud_layers[li2].kfStart;
-                        int lkN = afn_hud_layers[li2].kfCount;
-                        if (lkN < 1) continue;
-                        int curF2 = afn_hud_layer_frame[li2];
-                        int layLen = afn_hud_layers[li2].length;
-                        int lastF2 = afn_hud_layer_kf[lkS + lkN - 1].frame;
-                        if (layLen > 0 && afn_hud_layers[li2].loop && curF2 >= layLen)
-                            curF2 = curF2 % layLen;
-                        else if (curF2 > lastF2)
-                            curF2 = lastF2;
-                        // Find surrounding keyframes
-                        int lkA = 0, lkB = 0;
-                        { int lki; for (lki = 0; lki < lkN - 1; lki++) {
-                            if ((int)afn_hud_layer_kf[lkS + lki + 1].frame > curF2) { lkA = lki; lkB = lki + 1; break; }
-                            lkA = lkN - 1; lkB = lkN - 1;
-                        } }
-                        int lox = 0, loy = 0;
-                        int lfA = afn_hud_layer_kf[lkS + lkA].frame;
-                        int lfB = afn_hud_layer_kf[lkS + lkB].frame;
-                        int lspan = lfB - lfA;
-                        if (lspan <= 0 || lkA == lkB || afn_hud_layers[li2].interp == 0) {
-                            lox = afn_hud_layer_kf[lkS + lkA].offX;
-                            loy = afn_hud_layer_kf[lkS + lkA].offY;
-                        } else {
-                            int lt256 = ((curF2 - lfA) * 256) / lspan;
-                            if (afn_hud_layers[li2].interp == 2) {
-                                // Bezier smoothstep: t*t*(3-2t)
-                                lt256 = (lt256 * lt256 * (768 - 2 * lt256)) >> 16;
-                            }
-                            lox = afn_hud_layer_kf[lkS + lkA].offX + ((afn_hud_layer_kf[lkS + lkB].offX - afn_hud_layer_kf[lkS + lkA].offX) * lt256) / 256;
-                            loy = afn_hud_layer_kf[lkS + lkA].offY + ((afn_hud_layer_kf[lkS + lkB].offY - afn_hud_layer_kf[lkS + lkA].offY) * lt256) / 256;
-                        }
-                        // Apply to items in this layer
-                        int liS = afn_hud_layers[li2].itemStart;
-                        int liN = afn_hud_layers[li2].itemCount;
-                        { int lii; for (lii = 0; lii < liN; lii++) {
-                            int itype = afn_hud_layer_items[liS + lii].type;
-                            int iidx = afn_hud_layer_items[liS + lii].index;
-                            int slot = -1;
-                            if (itype == 0 && iidx < 32) slot = iidx;         // piece
-                            else if (itype == 1 && iidx < 16) slot = 32 + iidx; // sprite
-                            if (slot >= 0) { layOff[slot][0] += lox; layOff[slot][1] += loy; }
-                        } }
-                    } }
-#endif
-
                     int pStart = afn_hud_elems[ei].pieceStart;
                     int pCount = afn_hud_elems[ei].pieceCount;
                     // Compute tile adjustment: assets store tileStart as (rawOff + 512 + DIR_VRAM_TILES)
@@ -5379,28 +5176,23 @@ int main(void)
                                 int ai = afn_hud_sprites[spStart + spi].asset;
                                 if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
                                 int fr = afn_hud_sprites[spStart + spi].frame;
-                                int sx = ex + afn_hud_sprites[spStart + spi].x + layOff[32 + spi][0];
-                                int sy = ey + afn_hud_sprites[spStart + spi].y + layOff[32 + spi][1];
+                                int sx = ex + afn_hud_sprites[spStart + spi].x;
+                                int sy = ey + afn_hud_sprites[spStart + spi].y;
                                 int tileBase = afn_asset_desc[ai][0];
                                 int tpf      = afn_asset_desc[ai][1];
                                 int objSz    = afn_asset_desc[ai][3];
                                 int palBank  = hud_pal_remap[ai] ? hud_pal_remap[ai] : afn_asset_desc[ai][4];
                                 int tileCur  = tileBase - hudTileAdj + fr * tpf;
-                                int hasLayAnim = (layOff[32 + spi][0] != 0 || layOff[32 + spi][1] != 0);
-                                int dupPass;
-                                for (dupPass = 0; dupPass < (hasLayAnim ? 2 : 1) && oamSlot < 126; dupPass++) {
-                                    int dx = sx, dy = sy;
-                                    if (dupPass == 1) dx -= 240;
-                                    u16 a0 = ATTR0_SQUARE | ((dy & 0xFF));
-                                    u16 a1 = size_to_attr1(objSz) | ((dx & 0x1FF));
-                                    if (hudUseAffine && hudAffSlot >= 0) {
-                                        a0 |= ATTR0_AFF;
-                                        a1 |= ATTR1_AFF_ID(hudAffSlot);
-                                    }
-                                    u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
-                                    obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
-                                    oamSlot++;
+
+                                u16 a0 = ATTR0_SQUARE | ((sy & 0xFF));
+                                u16 a1 = size_to_attr1(objSz) | ((sx & 0x1FF));
+                                if (hudUseAffine && hudAffSlot >= 0) {
+                                    a0 |= ATTR0_AFF;
+                                    a1 |= ATTR1_AFF_ID(hudAffSlot);
                                 }
+                                u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
+                                obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
+                                oamSlot++;
                             }
                         } else {
                             // Pieces (reverse order: editor draws 0→N back to front, OAM lower slot = on top)
@@ -5408,32 +5200,26 @@ int main(void)
                                 int ai = afn_hud_pieces[pStart + pi].asset;
                                 if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
                                 int fr = afn_hud_pieces[pStart + pi].frame;
-                                int sx = ex + afn_hud_pieces[pStart + pi].x + layOff[pi][0];
-                                int sy = ey + afn_hud_pieces[pStart + pi].y + layOff[pi][1];
+                                int sx = ex + afn_hud_pieces[pStart + pi].x;
+                                int sy = ey + afn_hud_pieces[pStart + pi].y;
                                 int tileBase = afn_asset_desc[ai][0];
                                 int tpf      = afn_asset_desc[ai][1];
                                 int objSz    = afn_asset_desc[ai][3];
                                 int palBank  = afn_hud_pieces[pStart + pi].blackTint ? 0
                                     : (hud_pal_remap[ai] ? hud_pal_remap[ai] : afn_asset_desc[ai][4]);
                                 int tileCur  = tileBase - hudTileAdj + fr * tpf;
-                                int hasLayAnim = (layOff[pi][0] != 0 || layOff[pi][1] != 0);
-                                // Render piece (+ wrapped duplicate if layer-animated)
-                                int dupPass;
-                                for (dupPass = 0; dupPass < (hasLayAnim ? 2 : 1) && oamSlot < 126; dupPass++) {
-                                    int dx = sx, dy = sy;
-                                    if (dupPass == 1) dx -= 240; // wrapped copy from left
-                                    u16 a0 = ATTR0_SQUARE | ((dy & 0xFF));
-                                    u16 a1 = size_to_attr1(objSz) | ((dx & 0x1FF));
-                                    if (hudUseAffine && hudAffSlot >= 0) {
-                                        a0 |= ATTR0_AFF;
-                                        a1 |= ATTR1_AFF_ID(hudAffSlot);
-                                    }
-                                    if (afn_hud_pieces[pStart + pi].opacity < 16)
-                                        a0 |= ATTR0_BLEND;
-                                    u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
-                                    obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
-                                    oamSlot++;
+
+                                u16 a0 = ATTR0_SQUARE | ((sy & 0xFF));
+                                u16 a1 = size_to_attr1(objSz) | ((sx & 0x1FF));
+                                if (hudUseAffine && hudAffSlot >= 0) {
+                                    a0 |= ATTR0_AFF;
+                                    a1 |= ATTR1_AFF_ID(hudAffSlot);
                                 }
+                                if (afn_hud_pieces[pStart + pi].opacity < 16)
+                                    a0 |= ATTR0_BLEND;
+                                u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
+                                obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
+                                oamSlot++;
                             }
                         }
                     }}
@@ -5695,11 +5481,11 @@ int main(void)
             cam_h = AFN_CAM_H + cam_y_smooth;
 #endif
 
-            // Clamp player to map bounds (1024x1024 px = 128x128 tiles)
+            // Clamp player to map bounds (safety net)
             if (player_x < 0) player_x = 0;
-            if (player_x > (1024 << 8)) player_x = 1024 << 8;
+            if (player_x > (256 << 8)) player_x = 256 << 8;
             if (player_z < 0) player_z = 0;
-            if (player_z > (1024 << 8)) player_z = 1024 << 8;
+            if (player_z > (256 << 8)) player_z = 256 << 8;
 
             // Update sprite position
             g_sprites[player_sprite_idx].x = player_x;

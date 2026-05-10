@@ -3832,6 +3832,37 @@ static void LoadMapSceneState(const MapScene& sc)
 static std::vector<MapScene> sM7Scenes;
 static int sM7SelectedScene = 0;
 
+// ---- Mode 7 floor texture ----
+static std::string sM7FloorPath;        // source image path
+static unsigned char* sM7FloorPixels = nullptr; // RGBA pixels
+static int sM7FloorW = 0, sM7FloorH = 0;
+static GLuint sM7FloorTex = 0;          // GL preview texture
+
+static bool IsPOT(int v) { return v > 0 && (v & (v - 1)) == 0; }
+
+static bool LoadM7FloorTexture(const std::string& path)
+{
+    int w, h, ch;
+    unsigned char* img = stbi_load(path.c_str(), &w, &h, &ch, 4);
+    if (!img) return false;
+    if (!IsPOT(w) || !IsPOT(h) || w > 1024 || h > 1024) {
+        stbi_image_free(img);
+        return false;
+    }
+    if (sM7FloorPixels) stbi_image_free(sM7FloorPixels);
+    if (sM7FloorTex) glDeleteTextures(1, &sM7FloorTex);
+    sM7FloorPixels = img;
+    sM7FloorW = w;
+    sM7FloorH = h;
+    sM7FloorPath = path;
+    glGenTextures(1, &sM7FloorTex);
+    glBindTexture(GL_TEXTURE_2D, sM7FloorTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+    return true;
+}
+
 static void SaveM7SceneState(MapScene& sc)
 {
     memcpy(sc.sprites, sSprites, sizeof(sSprites));
@@ -4658,8 +4689,8 @@ static bool SaveProject(const std::string& path)
     }
 
     // ---- Map Scenes (3D Scene tab) ----
-    // Save current state into active scene before writing
-    if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+    // Only flush globals into Map scene if Map tab is active (globals belong to Map)
+    if (sActiveTab == EditorTab::Map && sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
         SaveMapSceneState(sMapScenes[sMapSelectedScene]);
     fprintf(f, "\n[MapScenes]\n");
     fprintf(f, "mapSceneCount=%d\n", (int)sMapScenes.size());
@@ -4743,9 +4774,12 @@ static bool SaveProject(const std::string& path)
     }
 
     // ---- Mode 7 Scenes ----
-    if (sM7SelectedScene >= 0 && sM7SelectedScene < (int)sM7Scenes.size())
+    // Only flush globals into M7 scene if Mode 7 tab is active (globals belong to M7)
+    if (sActiveTab == EditorTab::Mode7 && sM7SelectedScene >= 0 && sM7SelectedScene < (int)sM7Scenes.size())
         SaveM7SceneState(sM7Scenes[sM7SelectedScene]);
     fprintf(f, "\n[M7Scenes]\n");
+    if (!sM7FloorPath.empty())
+        fprintf(f, "m7FloorTex=%s\n", sM7FloorPath.c_str());
     fprintf(f, "m7SceneCount=%d\n", (int)sM7Scenes.size());
     fprintf(f, "m7SelectedScene=%d\n", sM7SelectedScene);
     for (int si = 0; si < (int)sM7Scenes.size(); si++)
@@ -6304,7 +6338,13 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "M7Scenes") == 0)
         {
             // ---- Mode 1 (Mode 7) Scenes ----
-            if (sscanf(line, "m7SceneCount=%d", &ival) == 1) { sM7Scenes.clear(); sM7Scenes.reserve(ival); }
+            if (strncmp(line, "m7FloorTex=", 11) == 0) {
+                char fpath[512]; strncpy(fpath, line + 11, sizeof(fpath) - 1); fpath[511] = '\0';
+                char* nl = strchr(fpath, '\n'); if (nl) *nl = '\0';
+                char* cr = strchr(fpath, '\r'); if (cr) *cr = '\0';
+                LoadM7FloorTexture(fpath);
+            }
+            else if (sscanf(line, "m7SceneCount=%d", &ival) == 1) { sM7Scenes.clear(); sM7Scenes.reserve(ival); }
             else if (sscanf(line, "m7SelectedScene=%d", &ival) == 1) sM7SelectedScene = ival;
             else if (strncmp(line, "m7Scene=", 8) == 0)
             {
@@ -6987,6 +7027,10 @@ static void CloseProject()
 
     sM7Scenes.clear();
     sM7SelectedScene = 0;
+    if (sM7FloorPixels) { stbi_image_free(sM7FloorPixels); sM7FloorPixels = nullptr; }
+    if (sM7FloorTex) { glDeleteTextures(1, &sM7FloorTex); sM7FloorTex = 0; }
+    sM7FloorW = sM7FloorH = 0;
+    sM7FloorPath.clear();
 
     sProjectPath.clear();
     sProjectDirty = false;
@@ -9473,15 +9517,23 @@ static void DrawTilemapPanel(ImVec2 pos, ImVec2 size)
     cursor.x += sTilemapPanX;
     cursor.y += sTilemapPanY;
 
-    for (int row = 0; row < mapRows; row++)
-    {
-        for (int col = 0; col < mapCols; col++)
+    // Draw floor: use imported texture if available (Mode 7), else checkerboard
+    if (sActiveTab == EditorTab::Mode7 && sM7FloorTex) {
+        float mapW = mapCols * cellW;
+        float mapH = mapRows * cellH;
+        dl->AddImage((ImTextureID)(intptr_t)sM7FloorTex,
+            ImVec2(cursor.x, cursor.y),
+            ImVec2(cursor.x + mapW, cursor.y + mapH));
+    } else {
+        for (int row = 0; row < mapRows; row++)
         {
-            ImVec2 cPos(cursor.x + col * cellW, cursor.y + row * cellH);
-            // Checkerboard pattern — matches Mode 4 floor (1 cell = 1 checker square)
-            int check = (col + row) % 2;
-            uint32_t c = check ? 0xFF50A050 : 0xFF285028;
-            dl->AddRectFilled(cPos, ImVec2(cPos.x + cellW, cPos.y + cellH), c);
+            for (int col = 0; col < mapCols; col++)
+            {
+                ImVec2 cPos(cursor.x + col * cellW, cursor.y + row * cellH);
+                int check = (col + row) % 2;
+                uint32_t c = check ? 0xFF50A050 : 0xFF285028;
+                dl->AddRectFilled(cPos, ImVec2(cPos.x + cellW, cPos.y + cellH), c);
+            }
         }
     }
 
@@ -12034,7 +12086,8 @@ void FrameTick(float dt)
                                         exportMeshes, exportOrbitDist, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                                        exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err);
+                                        exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,
+                                        sM7FloorPixels, sM7FloorW, sM7FloorH);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
@@ -13010,11 +13063,14 @@ void FrameTick(float dt)
             if (sPendingSceneSwitch >= 0) {
                 if (sPendingSceneMode == 0 && sPendingSceneSwitch < (int)sMapScenes.size()) {
                     // Switch to a 3D/MapScene
-                    if (sPendingSceneSwitch != sMapSelectedScene || sActiveTab == EditorTab::Tilemap) {
-                        SaveMapSceneState(sMapScenes[sMapSelectedScene]);
+                    if (sPendingSceneSwitch != sMapSelectedScene || sActiveTab != EditorTab::Map) {
+                        if (sActiveTab == EditorTab::Mode7 && sM7SelectedScene >= 0 && sM7SelectedScene < (int)sM7Scenes.size())
+                            SaveM7SceneState(sM7Scenes[sM7SelectedScene]);
+                        else if (sActiveTab == EditorTab::Map && sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+                            SaveMapSceneState(sMapScenes[sMapSelectedScene]);
                         sMapSelectedScene = sPendingSceneSwitch;
                         LoadMapSceneState(sMapScenes[sMapSelectedScene]);
-                        sActiveTab = EditorTab::Mode7;
+                        sActiveTab = EditorTab::Map;
                         sScriptStartRan = false;
                     }
                 } else if (sPendingSceneMode == 1 && sPendingSceneSwitch < (int)sTmScenes.size()) {
@@ -13628,16 +13684,6 @@ void FrameTick(float dt)
         sM7Scenes.push_back(ms);
         sM7SelectedScene = 0;
     }
-    // If M7 scene 0 is empty (no sprites, no blueprint), auto-copy from Map scene 0
-    else if (sM7Scenes.size() == 1 && sM7Scenes[0].spriteCount == 0 &&
-             sM7Scenes[0].blueprintIdx < 0 && sM7Scenes[0].vsNodes.empty() &&
-             !sMapScenes.empty() && sMapScenes[0].spriteCount > 0)
-    {
-        const char* name = "M7 Scene 0";
-        sM7Scenes[0] = sMapScenes[0];
-        strncpy(sM7Scenes[0].name, name, sizeof(sM7Scenes[0].name) - 1);
-    }
-
     // Draw everything
     DrawTabBar();
 
@@ -19630,22 +19676,71 @@ void FrameTick(float dt)
             ImGui::PopStyleColor();
         }
 
+        float m7TilemapH = bodyH * 0.35f;
+        float m7ObjH = bodyH - m7ScenePanH - m7TilemapH;
+
         if (sEditorMode == EditorMode::Edit)
             DrawObjectEditorPanel(
                 ImVec2(vp->WorkPos.x + leftW, bodyY + m7ScenePanH),
-                ImVec2(rightW, tilesetH - m7ScenePanH));
+                ImVec2(rightW, m7ObjH));
         else
             DrawTilesetPanel(
                 ImVec2(vp->WorkPos.x + leftW, bodyY + m7ScenePanH),
-                ImVec2(rightW, tilesetH - m7ScenePanH));
+                ImVec2(rightW, m7ObjH));
 
-        DrawTilemapPanel(
-            ImVec2(vp->WorkPos.x + leftW, bodyY + tilesetH),
-            ImVec2(rightW, tilemapH));
+        {
+            float propsW = Scaled(160);
+            float tmW = rightW - propsW;
+            DrawTilemapPanel(
+                ImVec2(vp->WorkPos.x + leftW, bodyY + m7ScenePanH + m7ObjH),
+                ImVec2(tmW, m7TilemapH));
 
-        DrawPalettePanel(
-            ImVec2(vp->WorkPos.x + leftW, bodyY + tilesetH + tilemapH),
-            ImVec2(rightW, paletteH));
+            // ---- Floor Properties panel ----
+            ImGuiWindowFlags propFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus;
+            ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + leftW + tmW, bodyY + m7ScenePanH + m7ObjH));
+            ImGui::SetNextWindowSize(ImVec2(propsW, m7TilemapH));
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
+            ImGui::Begin("##M7FloorProps", nullptr, propFlags);
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Floor Map");
+            ImGui::Separator();
+            if (sM7FloorTex) {
+                ImGui::Text("%dx%d", sM7FloorW, sM7FloorH);
+                float avail = ImGui::GetContentRegionAvail().x;
+                float aspect = (float)sM7FloorH / (float)sM7FloorW;
+                ImGui::Image((ImTextureID)(intptr_t)sM7FloorTex, ImVec2(avail, avail * aspect));
+            } else {
+                ImGui::TextDisabled("No floor texture");
+            }
+            if (ImGui::Button("Import...##m7floor", ImVec2(-1, 0))) {
+#ifdef _WIN32
+                std::string path = OpenFileDialog("Image Files\0*.png;*.bmp;*.jpg;*.tga\0All\0*.*\0", "png");
+                if (!path.empty()) {
+                    if (!LoadM7FloorTexture(path))
+                        ImGui::OpenPopup("##M7FloorErr");
+                    else
+                        sProjectDirty = true;
+                }
+#endif
+            }
+            if (sM7FloorTex && ImGui::Button("Clear##m7floorclear", ImVec2(-1, 0))) {
+                stbi_image_free(sM7FloorPixels);
+                sM7FloorPixels = nullptr;
+                sM7FloorW = sM7FloorH = 0;
+                glDeleteTextures(1, &sM7FloorTex);
+                sM7FloorTex = 0;
+                sM7FloorPath.clear();
+                sProjectDirty = true;
+            }
+            if (ImGui::BeginPopup("##M7FloorErr")) {
+                ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Invalid image!");
+                ImGui::Text("Must be POT (power of two)");
+                ImGui::Text("up to 1024x1024.");
+                ImGui::EndPopup();
+            }
+            ImGui::End();
+            ImGui::PopStyleColor();
+        }
     }
     else if (sActiveTab == EditorTab::Sprites)
     {
