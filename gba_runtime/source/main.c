@@ -1028,14 +1028,14 @@ static void load_checkerboard(void)
     memset(&tile8_mem[2][1], 1, 64);
     memset(&tile8_mem[2][2], 2, 64);
 
-    // Fill 64x64 map: 2x2 tile checkerboard (each checker = 2x2 tiles = 16x16 px)
+    // Fill 128x128 map: 2x2 tile checkerboard (each checker = 2x2 tiles = 16x16 px)
     {
-        u8 *map = (u8*)se_mem[28];
+        u8 *map = (u8*)se_mem[24];
         int y, x;
-        memset(map, 0, 64 * 64);
-        for (y = 0; y < 32; y++)
-            for (x = 0; x < 32; x++)
-                map[y * 64 + x] = (((x / 2) + (y / 2)) & 1) ? 2 : 1;
+        memset(map, 0, 128 * 128);
+        for (y = 0; y < 64; y++)
+            for (x = 0; x < 64; x++)
+                map[y * 128 + x] = (((x / 2) + (y / 2)) & 1) ? 2 : 1;
     }
 }
 
@@ -1044,13 +1044,13 @@ static void load_editor_map(void)
 {
     memcpy(&tile8_mem[2][0], afn_tiles, afn_tilesLen);
     memcpy(pal_bg_mem, afn_palette, afn_paletteLen);
-    // Tile the 32x32 map into 64x64 (2x2 repeat) to match editor floor density
-    u8 *map = (u8*)se_mem[28];
+    // Tile the 32x32 map into 128x128 (4x4 repeat) for 1024x1024 floor
+    u8 *map = (u8*)se_mem[24];
     const u8 *src = (const u8*)afn_tilemap;
     int y, x;
-    for (y = 0; y < 64; y++)
-        for (x = 0; x < 64; x++)
-            map[y * 64 + x] = src[(y & 31) * 32 + (x & 31)];
+    for (y = 0; y < 128; y++)
+        for (x = 0; x < 128; x++)
+            map[y * 128 + x] = src[(y & 31) * 32 + (x & 31)];
 }
 #endif
 
@@ -1484,7 +1484,7 @@ static void update_sprites(void)
 
 static void init_minimap(void)
 {
-    REG_BG0CNT = BG_CBB(0) | BG_SBB(30) | BG_4BPP | BG_REG_32x32 | BG_PRIO(0);
+    REG_BG0CNT = BG_CBB(0) | BG_SBB(7) | BG_4BPP | BG_REG_32x32 | BG_PRIO(0);
 
     pal_bg_mem[16 + 0] = 0;
     pal_bg_mem[16 + 1] = RGB15(2, 4, 2);
@@ -1508,14 +1508,14 @@ static void init_minimap(void)
     }
 
     {
-        u16 *map = (u16*)se_mem[30];
+        u16 *map = (u16*)se_mem[7];
         int k;
         for (k = 0; k < 32*32; k++)
             map[k] = 0;
     }
 
     {
-        u16 *map = (u16*)se_mem[30];
+        u16 *map = (u16*)se_mem[7];
         int tx, ty;
         for (ty = 0; ty < 4; ty++)
             for (tx = 0; tx < 4; tx++)
@@ -4237,7 +4237,7 @@ static void scene_load(int sceneMode, int sceneIdx)
         // Mode 1 (Mode 7 affine floor)
         tm_scene_idx = sceneIdx;
         REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
-        REG_BG2CNT = BG_CBB(2) | BG_SBB(28) | BG_AFF_64x64 | BG_8BPP | BG_PRIO(2);
+        REG_BG2CNT = BG_CBB(2) | BG_SBB(24) | BG_AFF_128x128 | BG_8BPP | BG_PRIO(2);
         REG_BG2PA = 0x0100; REG_BG2PB = 0;
         REG_BG2PC = 0;      REG_BG2PD = 0x0100;
         REG_BG2X  = 0;      REG_BG2Y  = 0;
@@ -4407,7 +4407,7 @@ int main(void)
     } else {
         // Mode 1 (legacy Mode 7 floor)
         REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
-        REG_BG2CNT = BG_CBB(2) | BG_SBB(28) | BG_AFF_64x64 | BG_8BPP | BG_PRIO(2);
+        REG_BG2CNT = BG_CBB(2) | BG_SBB(24) | BG_AFF_128x128 | BG_8BPP | BG_PRIO(2);
         REG_BG2PA = 0x0100; REG_BG2PB = 0;
         REG_BG2PC = 0;      REG_BG2PD = 0x0100;
         REG_BG2X  = 0;      REG_BG2Y  = 0;
