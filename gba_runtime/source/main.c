@@ -1011,11 +1011,24 @@ static void m7_hbl(void)
 }
 
 // ---------------------------------------------------------------------------
+// Floor size lookup tables
+// ---------------------------------------------------------------------------
+static const int afn_floor_map_dim[] = { 16, 32, 64, 128 };
+static const int afn_floor_px_dim[]  = { 128, 256, 512, 1024 };
+static const u16 afn_floor_bg_aff[]  = {
+    BG_AFF_16x16, BG_AFF_32x32, BG_AFF_64x64, BG_AFF_128x128
+};
+#ifndef AFN_FLOOR_SIZE
+#define AFN_FLOOR_SIZE 3
+#endif
+
+// ---------------------------------------------------------------------------
 // Build checkerboard tiles + tilemap
 // ---------------------------------------------------------------------------
 
 static void load_checkerboard(void)
 {
+    int mapDim = afn_floor_map_dim[AFN_FLOOR_SIZE];
     pal_bg_mem[0] = RGB15(10, 16, 24);  // backdrop = sky blue
     pal_bg_mem[1] = RGB15(4, 10, 4);
     pal_bg_mem[2] = RGB15(8, 18, 8);
@@ -1028,31 +1041,47 @@ static void load_checkerboard(void)
     memset(&tile8_mem[2][1], 1, 64);
     memset(&tile8_mem[2][2], 2, 64);
 
-    // Fill 128x128 map: 2x2 tile checkerboard (each checker = 2x2 tiles = 16x16 px)
+    // Fill map with checkerboard (halfword writes — byte writes corrupt VRAM)
     {
-        u8 *map = (u8*)se_mem[24];
+        int halfDim = mapDim / 2;
+        u16 *map = (u16*)se_mem[24];
         int y, x;
-        memset(map, 0, 128 * 128);
-        for (y = 0; y < 64; y++)
-            for (x = 0; x < 64; x++)
-                map[y * 128 + x] = (((x / 2) + (y / 2)) & 1) ? 2 : 1;
+        memset16(map, 0, mapDim * mapDim / 2);
+        for (y = 0; y < halfDim; y++) {
+            for (x = 0; x < halfDim; x += 2) {
+                u8 a = (((x / 2) + (y / 2)) & 1) ? 2 : 1;
+                u8 b = (x + 1 < halfDim) ? ((((x + 1) / 2) + (y / 2)) & 1) ? 2 : 1 : 0;
+                map[(y * mapDim + x) / 2] = a | (b << 8);
+            }
+        }
     }
 }
 
 #ifdef AFFINITY_HAS_MAPDATA
+
 static void load_editor_map(void)
 {
-    memcpy(&tile8_mem[2][0], afn_tiles, afn_tilesLen);
-    memcpy(pal_bg_mem, afn_palette, afn_paletteLen);
-    // Tile the source map into 128x128 affine map (wrapping at source dimensions)
-    u8 *map = (u8*)se_mem[24];
-    const u8 *src = (const u8*)afn_tilemap;
-    int srcW = AFN_FLOOR_TILES_X;
-    int srcH = AFN_FLOOR_TILES_Y;
-    int y, x;
-    for (y = 0; y < 128; y++)
-        for (x = 0; x < 128; x++)
-            map[y * 128 + x] = src[(y % srcH) * srcW + (x % srcW)];
+    int mapDim = afn_floor_map_dim[AFN_FLOOR_SIZE];
+    // Use word/halfword copies — byte writes to VRAM duplicate to both
+    // halves of the halfword, corrupting tile and palette data
+    memcpy32(&tile8_mem[2][0], afn_tiles, afn_tilesLen / 4);
+    memcpy16(pal_bg_mem, afn_palette, afn_paletteLen / 2);
+    {
+        // Affine tilemap entries are 8-bit, but VRAM only supports
+        // 16/32-bit writes — pack two entries per halfword store
+        u16 *map = (u16*)se_mem[24];
+        const u8 *src = (const u8*)afn_tilemap;
+        int srcW = AFN_FLOOR_TILES_X;
+        int srcH = AFN_FLOOR_TILES_Y;
+        int y, x;
+        for (y = 0; y < mapDim; y++) {
+            for (x = 0; x < mapDim; x += 2) {
+                u8 a = src[(y % srcH) * srcW + ((x) % srcW)];
+                u8 b = src[(y % srcH) * srcW + ((x + 1) % srcW)];
+                map[(y * mapDim + x) / 2] = a | (b << 8);
+            }
+        }
+    }
 }
 #endif
 
@@ -1488,10 +1517,12 @@ static void init_minimap(void)
 {
     REG_BG0CNT = BG_CBB(0) | BG_SBB(7) | BG_4BPP | BG_REG_32x32 | BG_PRIO(0);
 
-    pal_bg_mem[16 + 0] = 0;
-    pal_bg_mem[16 + 1] = RGB15(2, 4, 2);
-    pal_bg_mem[16 + 2] = RGB15(5, 10, 5);
-    pal_bg_mem[16 + 3] = RGB15(31, 31, 31);
+    // Use sub-palette 15 (entries 240-255) so we don't overwrite
+    // the 8bpp floor texture palette entries 16-19
+    pal_bg_mem[240 + 0] = 0;
+    pal_bg_mem[240 + 1] = RGB15(2, 4, 2);
+    pal_bg_mem[240 + 2] = RGB15(5, 10, 5);
+    pal_bg_mem[240 + 3] = RGB15(31, 31, 31);
 
     {
         u32 *t = (u32*)&tile_mem[0][TILE_MINIMAP_BG];
@@ -1521,7 +1552,7 @@ static void init_minimap(void)
         int tx, ty;
         for (ty = 0; ty < 4; ty++)
             for (tx = 0; tx < 4; tx++)
-                map[ty * 32 + tx] = TILE_MINIMAP_GRID | SE_PALBANK(1);
+                map[ty * 32 + tx] = TILE_MINIMAP_GRID | SE_PALBANK(15);
     }
 
     REG_BG0HOFS = (512 - MINIMAP_X) & 0x1FF;
@@ -4239,7 +4270,15 @@ static void scene_load(int sceneMode, int sceneIdx)
         // Mode 1 (Mode 7 affine floor)
         tm_scene_idx = sceneIdx;
         REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
+#if AFN_FLOOR_SIZE == 0
+        REG_BG2CNT = BG_CBB(2) | BG_SBB(24) | BG_AFF_16x16 | BG_8BPP | BG_PRIO(2);
+#elif AFN_FLOOR_SIZE == 1
+        REG_BG2CNT = BG_CBB(2) | BG_SBB(24) | BG_AFF_32x32 | BG_8BPP | BG_PRIO(2);
+#elif AFN_FLOOR_SIZE == 2
+        REG_BG2CNT = BG_CBB(2) | BG_SBB(24) | BG_AFF_64x64 | BG_8BPP | BG_PRIO(2);
+#else
         REG_BG2CNT = BG_CBB(2) | BG_SBB(24) | BG_AFF_128x128 | BG_8BPP | BG_PRIO(2);
+#endif
         REG_BG2PA = 0x0100; REG_BG2PB = 0;
         REG_BG2PC = 0;      REG_BG2PD = 0x0100;
         REG_BG2X  = 0;      REG_BG2Y  = 0;
@@ -4409,7 +4448,15 @@ int main(void)
     } else {
         // Mode 1 (legacy Mode 7 floor)
         REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
+#if AFN_FLOOR_SIZE == 0
+        REG_BG2CNT = BG_CBB(2) | BG_SBB(24) | BG_AFF_16x16 | BG_8BPP | BG_PRIO(2);
+#elif AFN_FLOOR_SIZE == 1
+        REG_BG2CNT = BG_CBB(2) | BG_SBB(24) | BG_AFF_32x32 | BG_8BPP | BG_PRIO(2);
+#elif AFN_FLOOR_SIZE == 2
+        REG_BG2CNT = BG_CBB(2) | BG_SBB(24) | BG_AFF_64x64 | BG_8BPP | BG_PRIO(2);
+#else
         REG_BG2CNT = BG_CBB(2) | BG_SBB(24) | BG_AFF_128x128 | BG_8BPP | BG_PRIO(2);
+#endif
         REG_BG2PA = 0x0100; REG_BG2PB = 0;
         REG_BG2PC = 0;      REG_BG2PD = 0x0100;
         REG_BG2X  = 0;      REG_BG2Y  = 0;
@@ -5695,11 +5742,14 @@ int main(void)
             cam_h = AFN_CAM_H + cam_y_smooth;
 #endif
 
-            // Clamp player to map bounds (1024x1024 px = 128x128 tiles)
-            if (player_x < 0) player_x = 0;
-            if (player_x > (1024 << 8)) player_x = 1024 << 8;
-            if (player_z < 0) player_z = 0;
-            if (player_z > (1024 << 8)) player_z = 1024 << 8;
+            // Clamp player to map bounds
+            {
+                FIXED maxCoord = afn_floor_px_dim[AFN_FLOOR_SIZE] << 8;
+                if (player_x < 0) player_x = 0;
+                if (player_x > maxCoord) player_x = maxCoord;
+                if (player_z < 0) player_z = 0;
+                if (player_z > maxCoord) player_z = maxCoord;
+            }
 
             // Update sprite position
             g_sprites[player_sprite_idx].x = player_x;
