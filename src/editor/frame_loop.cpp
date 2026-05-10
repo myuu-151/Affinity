@@ -10994,7 +10994,18 @@ void FrameTick(float dt)
                     exportMeshes.push_back(me);
                 }
 
-                float exportOrbitDist = sOrbitDist;
+                // Compute orbit distance from camera and player positions
+                // (don't rely on sOrbitDist which only updates during Play)
+                float exportOrbitDist = 60.0f;
+                for (int i = 0; i < sSpriteCount; i++) {
+                    if (sSprites[i].type == SpriteType::Player) {
+                        float dx = sCamObj.x - sSprites[i].x;
+                        float dz = sCamObj.z - sSprites[i].z;
+                        exportOrbitDist = sqrtf(dx * dx + dz * dz);
+                        if (exportOrbitDist < 10.0f) exportOrbitDist = 10.0f;
+                        break;
+                    }
+                }
                 BuildTarget target = sBuildTarget;
 
                 // Build visual script export from node graph
