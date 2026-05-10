@@ -343,6 +343,7 @@ enum class GBAScriptNodeType : int {
     SoundInstance,
     PlayHudAnim,
     StopHudAnim,
+    SetHudAnimSpeed,
     COUNT
 };
 
@@ -462,6 +463,8 @@ struct GBAHudAnimLayerExport {
     std::string name;
     int interp = 1;     // 0=constant, 1=linear, 2=bezier
     bool loop = false;
+    int speed = 5;      // frames-per-tick (60/fps), e.g. 5 = 12fps
+    int length = 60;    // total animation length in frames (from timeline range)
     std::vector<GBAHudAnimLayerItemExport> items;
     std::vector<GBAHudKeyframeExport> keyframes;
 };

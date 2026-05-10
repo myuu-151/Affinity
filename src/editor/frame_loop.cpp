@@ -444,6 +444,7 @@ enum class VsNodeType : int {
     SoundInstance,  // data node: select a sound instance by dropdown
     PlayHudAnim,    // play a HUD animation layer
     StopHudAnim,    // stop a HUD animation layer
+    SetHudAnimSpeed, // set HUD animation layer speed
     COUNT
 };
 
@@ -730,6 +731,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Sound Instance",  0xFF88AACC, 0, 0, 0, 1, {}, {}, {} },
     { "Play Hud Anim",   0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Stop Hud Anim",   0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Set Anim Speed",  0xFF3355AA, 1, 1, 0, 0, {}, {"Speed"}, {} },
 };
 
 struct VsNode {
@@ -11416,6 +11418,12 @@ void FrameTick(float dt)
                         le.name = lay.name;
                         le.interp = (int)lay.interp;
                         le.loop = lay.loop;
+                        {
+                            float fpsValues[] = { 6.0f, 8.0f, 12.0f, 24.0f, 30.0f, 60.0f, 120.0f, 240.0f };
+                            float fps = fpsValues[std::clamp(sHudTimelineFPS, 0, 7)];
+                            le.speed = (fps > 0) ? std::max(1, (int)(60.0f / fps)) : 1;
+                        }
+                        le.length = std::max(1, sHudTimelineRangeEnd - sHudTimelineRangeStart);
                         for (auto& it : lay.items)
                             le.items.push_back({ (int)it.type, it.index });
                         for (auto& kf : lay.keyframes) {
@@ -13523,7 +13531,8 @@ void FrameTick(float dt)
                     break;
                 }
                 case VsNodeType::PlayHudAnim:
-                case VsNodeType::StopHudAnim: {
+                case VsNodeType::StopHudAnim:
+                case VsNodeType::SetHudAnimSpeed: {
                     int gi = n.paramInt[0], cur = 0;
                     bool found = false;
                     for (int ei2 = 0; ei2 < (int)sHudElements.size() && !found; ei2++)
@@ -14576,6 +14585,7 @@ void FrameTick(float dt)
                 case VsNodeType::SoundInstance: desc = "Outputs a sound instance index for PlaySound."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
+                case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -14809,6 +14819,7 @@ void FrameTick(float dt)
                         case VsNodeType::HideHUD:       return "_hide_hud";
                         case VsNodeType::PlayHudAnim:   return "_play_hud_anim";
                         case VsNodeType::StopHudAnim:   return "_stop_hud_anim";
+                        case VsNodeType::SetHudAnimSpeed: return "_set_hud_anim_speed";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -16761,12 +16772,14 @@ void FrameTick(float dt)
                     snprintf(bPA, sizeof(bPA),
                         "#ifdef AFN_HUD_HAS_LAYERS\n"
                         "    afn_hud_layer_frame[%s] = 0;\n"
+                        "    afn_hud_layer_tick[%s] = 0;\n"
                         "    afn_hud_layer_active[%s] = 1;\n"
                         "#endif\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // Each frame: afn_hud_layer_frame[i]++\n"
+                        "    // Tick: if (++tick >= speed) { frame++; tick=0; }\n"
                         "    // Interpolates keyframes (const/linear/bezier)\n"
                         "    // Applies x,y offsets to layer items in OAM",
+                        fmtInt(infoNode.id, 0, "<layer>"),
                         fmtInt(infoNode.id, 0, "<layer>"),
                         fmtInt(infoNode.id, 0, "<layer>"));
                     setActionFunc(infoNode, "_play_hud_anim", bPA);
@@ -16783,6 +16796,21 @@ void FrameTick(float dt)
                         "    // Layer stops ticking; items freeze at current offsets",
                         fmtInt(infoNode.id, 0, "<layer>"));
                     setActionFunc(infoNode, "_stop_hud_anim", bSA);
+                    break;
+                }
+                case VsNodeType::SetHudAnimSpeed: {
+                    editorCode = "// Set HUD animation layer speed";
+                    char bSS[512];
+                    snprintf(bSS, sizeof(bSS),
+                        "#ifdef AFN_HUD_HAS_LAYERS\n"
+                        "    afn_hud_layer_speed[%s] = %s;\n"
+                        "#endif\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Tick counter: if (++ctr >= speed) { frame++; ctr=0; }\n"
+                        "    // 1=60fps, 2=30fps, 5=12fps, etc.",
+                        fmtInt(infoNode.id, 0, "<layer>"),
+                        fmtInt(infoNode.id, 1, "<speed>"));
+                    setActionFunc(infoNode, "_set_hud_anim_speed", bSS);
                     break;
                 }
                 case VsNodeType::GetRandom:
@@ -17831,6 +17859,7 @@ void FrameTick(float dt)
                     case VsNodeType::SoundInstance: suffix = "_snd_inst"; break;
                     case VsNodeType::PlayHudAnim: suffix = "_play_hud_anim"; break;
                     case VsNodeType::StopHudAnim: suffix = "_stop_hud_anim"; break;
+                    case VsNodeType::SetHudAnimSpeed: suffix = "_set_hud_anim_speed"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
                     case VsNodeType::Branch:        suffix = "_branch"; break;
                     case VsNodeType::CompareVar:    suffix = "_compare_var"; break;
@@ -18370,6 +18399,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CursorDown].name)) addNodeAt(VsNodeType::CursorDown);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::PlayHudAnim].name)) addNodeAt(VsNodeType::PlayHudAnim);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopHudAnim].name)) addNodeAt(VsNodeType::StopHudAnim);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHudAnimSpeed].name)) addNodeAt(VsNodeType::SetHudAnimSpeed);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FollowLink].name)) addNodeAt(VsNodeType::FollowLink);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ArraySet].name)) addNodeAt(VsNodeType::ArraySet);
                     ImGui::Separator();
@@ -18635,7 +18665,8 @@ void FrameTick(float dt)
                 break;
             }
             case VsNodeType::PlayHudAnim:
-            case VsNodeType::StopHudAnim: {
+            case VsNodeType::StopHudAnim:
+            case VsNodeType::SetHudAnimSpeed: {
                 ImGui::Text("Animation Layer");
                 // Build flat list of all layers: "ElementName / LayerName"
                 struct LayRef { int ei; int li; char label[64]; };

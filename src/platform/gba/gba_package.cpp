@@ -1661,22 +1661,32 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "    {" << it.type << "," << it.index << "},\n";
             f << "};\n";
 
-            // Layer metadata: {elemIdx, kfStart, kfCount, itemStart, itemCount, interp, loop}
-            f << "static const struct { u8 elemIdx; u16 kfStart,kfCount; u16 itemStart,itemCount; u8 interp; u8 loop; } afn_hud_layers[" << totalAnimLayers << "] = {\n";
+            // Layer metadata: {elemIdx, kfStart, kfCount, itemStart, itemCount, interp, loop, length}
+            f << "static const struct { u8 elemIdx; u16 kfStart,kfCount; u16 itemStart,itemCount; u8 interp; u8 loop; u16 length; } afn_hud_layers[" << totalAnimLayers << "] = {\n";
             int lkfOff = 0, liOff = 0;
             for (int ei = 0; ei < (int)hudElements.size(); ei++)
                 for (auto& lay : hudElements[ei].animLayers) {
                     f << "    {" << ei << "," << lkfOff << "," << (int)lay.keyframes.size() << ","
-                      << liOff << "," << (int)lay.items.size() << "," << lay.interp << "," << (lay.loop ? 1 : 0) << "},\n";
+                      << liOff << "," << (int)lay.items.size() << "," << lay.interp << "," << (lay.loop ? 1 : 0) << "," << lay.length << "},\n";
                     lkfOff += (int)lay.keyframes.size();
                     liOff += (int)lay.items.size();
                 }
             f << "};\n";
             f << "#define AFN_HUD_LAYER_COUNT " << totalAnimLayers << "\n";
 
-            // Runtime state: per-layer animation frame counter + active flag
+            // Runtime state: per-layer animation frame counter + active flag + speed
             f << "static int afn_hud_layer_frame[" << totalAnimLayers << "];\n";
             f << "static u8  afn_hud_layer_active[" << totalAnimLayers << "];\n";
+            f << "static u8  afn_hud_layer_speed[" << totalAnimLayers << "] = {";
+            { int li2 = 0;
+            for (auto& el : hudElements)
+                for (auto& lay : el.animLayers) {
+                    f << (li2 > 0 ? "," : "") << lay.speed;
+                    li2++;
+                }
+            }
+            f << "};\n";
+            f << "static u8  afn_hud_layer_tick[" << totalAnimLayers << "];\n";
             f << "#define AFN_HUD_HAS_LAYERS 1\n";
         }
     }
@@ -1958,6 +1968,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::FollowLink:    return "_follow_link";
         case GBAScriptNodeType::PlayHudAnim:   return "_play_hud_anim";
         case GBAScriptNodeType::StopHudAnim:   return "_stop_hud_anim";
+        case GBAScriptNodeType::SetHudAnimSpeed: return "_set_hud_anim_speed";
         default: return "";
         }
     };
@@ -2843,6 +2854,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     int layIdx = action->paramInt[0];
                     f << "#ifdef AFN_HUD_HAS_LAYERS\n";
                     f << "    afn_hud_layer_frame[" << layIdx << "] = 0;\n";
+                    f << "    afn_hud_layer_tick[" << layIdx << "] = 0;\n";
                     f << "    afn_hud_layer_active[" << layIdx << "] = 1;\n";
                     f << "#endif\n";
                     break;
@@ -2851,6 +2863,16 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     int layIdx = action->paramInt[0];
                     f << "#ifdef AFN_HUD_HAS_LAYERS\n";
                     f << "    afn_hud_layer_active[" << layIdx << "] = 0;\n";
+                    f << "#endif\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetHudAnimSpeed: {
+                    int layIdx = action->paramInt[0];
+                    auto* speedData = findDataIn(action->id, 0);
+                    int spd = speedData ? resolveInt(speedData) : 1;
+                    if (spd < 1) spd = 1;
+                    f << "#ifdef AFN_HUD_HAS_LAYERS\n";
+                    f << "    afn_hud_layer_speed[" << layIdx << "] = " << spd << ";\n";
                     f << "#endif\n";
                     break;
                 }
@@ -4256,6 +4278,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     int layIdx = action->paramInt[0];
                     f << "#ifdef AFN_HUD_HAS_LAYERS\n";
                     f << "    afn_hud_layer_frame[" << layIdx << "] = 0;\n";
+                    f << "    afn_hud_layer_tick[" << layIdx << "] = 0;\n";
                     f << "    afn_hud_layer_active[" << layIdx << "] = 1;\n";
                     f << "#endif\n";
                     break;
@@ -4264,6 +4287,15 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     int layIdx = action->paramInt[0];
                     f << "#ifdef AFN_HUD_HAS_LAYERS\n";
                     f << "    afn_hud_layer_active[" << layIdx << "] = 0;\n";
+                    f << "#endif\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetHudAnimSpeed: {
+                    int layIdx = action->paramInt[0];
+                    auto* speedData = bpFindDataIn(action->id, 0);
+                    std::string spd = speedData ? bpResolveInt(speedData) : "1";
+                    f << "#ifdef AFN_HUD_HAS_LAYERS\n";
+                    f << "    afn_hud_layer_speed[" << layIdx << "] = " << spd << ";\n";
                     f << "#endif\n";
                     break;
                 }

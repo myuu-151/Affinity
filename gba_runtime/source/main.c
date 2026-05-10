@@ -5008,11 +5008,16 @@ int main(void)
                     if (afn_hud_visible[ei2])
                         afn_hud_anim_frame[ei2]++;
                 } }
-                // Tick animation layer frames
+                // Tick animation layer frames (speed-controlled)
 #ifdef AFN_HUD_HAS_LAYERS
                 { int li; for (li = 0; li < AFN_HUD_LAYER_COUNT; li++) {
-                    if (afn_hud_layer_active[li])
-                        afn_hud_layer_frame[li]++;
+                    if (afn_hud_layer_active[li]) {
+                        afn_hud_layer_tick[li]++;
+                        if (afn_hud_layer_tick[li] >= afn_hud_layer_speed[li]) {
+                            afn_hud_layer_tick[li] = 0;
+                            afn_hud_layer_frame[li]++;
+                        }
+                    }
                 } }
 #endif
                 { int anyHudVisible = 0;
@@ -5198,9 +5203,10 @@ int main(void)
                         int lkN = afn_hud_layers[li2].kfCount;
                         if (lkN < 1) continue;
                         int curF2 = afn_hud_layer_frame[li2];
+                        int layLen = afn_hud_layers[li2].length;
                         int lastF2 = afn_hud_layer_kf[lkS + lkN - 1].frame;
-                        if (lastF2 > 0 && afn_hud_layers[li2].loop && curF2 > lastF2)
-                            curF2 = curF2 % (lastF2 + 1);
+                        if (layLen > 0 && afn_hud_layers[li2].loop && curF2 >= layLen)
+                            curF2 = curF2 % layLen;
                         else if (curF2 > lastF2)
                             curF2 = lastF2;
                         // Find surrounding keyframes
