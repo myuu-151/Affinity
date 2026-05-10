@@ -4524,19 +4524,17 @@ int main(void)
         }
         key_poll();
 
-        // --- Scene transition state machine (skip for Mode 4 — no tile scene switching) ---
-        if (afn_current_mode != 0) {
-            if (g_scene_transition > 0) {
-                handle_scene_transition();
-                continue;
-            }
-#ifdef AFN_HAS_SCRIPT
-            if (afn_pending_scene >= 0 && afn_pending_scene_mode >= 0) {
-                start_scene_transition();
-                continue;
-            }
-#endif
+        // --- Scene transition state machine ---
+        if (g_scene_transition > 0) {
+            handle_scene_transition();
+            continue;
         }
+#ifdef AFN_HAS_SCRIPT
+        if (afn_pending_scene >= 0 && afn_pending_scene_mode >= 0) {
+            start_scene_transition();
+            continue;
+        }
+#endif
 
         // ============================================================
         // RUNTIME MODE DISPATCH
