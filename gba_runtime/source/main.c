@@ -5331,16 +5331,21 @@ int main(void)
                                 int objSz    = afn_asset_desc[ai][3];
                                 int palBank  = hud_pal_remap[ai] ? hud_pal_remap[ai] : afn_asset_desc[ai][4];
                                 int tileCur  = tileBase - hudTileAdj + fr * tpf;
-
-                                u16 a0 = ATTR0_SQUARE | ((sy & 0xFF));
-                                u16 a1 = size_to_attr1(objSz) | ((sx & 0x1FF));
-                                if (hudUseAffine && hudAffSlot >= 0) {
-                                    a0 |= ATTR0_AFF;
-                                    a1 |= ATTR1_AFF_ID(hudAffSlot);
+                                int hasLayAnim = (layOff[32 + spi][0] != 0 || layOff[32 + spi][1] != 0);
+                                int dupPass;
+                                for (dupPass = 0; dupPass < (hasLayAnim ? 2 : 1) && oamSlot < 126; dupPass++) {
+                                    int dx = sx, dy = sy;
+                                    if (dupPass == 1) dx -= 240;
+                                    u16 a0 = ATTR0_SQUARE | ((dy & 0xFF));
+                                    u16 a1 = size_to_attr1(objSz) | ((dx & 0x1FF));
+                                    if (hudUseAffine && hudAffSlot >= 0) {
+                                        a0 |= ATTR0_AFF;
+                                        a1 |= ATTR1_AFF_ID(hudAffSlot);
+                                    }
+                                    u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
+                                    obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
+                                    oamSlot++;
                                 }
-                                u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
-                                obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
-                                oamSlot++;
                             }
                         } else {
                             // Pieces (reverse order: editor draws 0→N back to front, OAM lower slot = on top)
@@ -5356,18 +5361,24 @@ int main(void)
                                 int palBank  = afn_hud_pieces[pStart + pi].blackTint ? 0
                                     : (hud_pal_remap[ai] ? hud_pal_remap[ai] : afn_asset_desc[ai][4]);
                                 int tileCur  = tileBase - hudTileAdj + fr * tpf;
-
-                                u16 a0 = ATTR0_SQUARE | ((sy & 0xFF));
-                                u16 a1 = size_to_attr1(objSz) | ((sx & 0x1FF));
-                                if (hudUseAffine && hudAffSlot >= 0) {
-                                    a0 |= ATTR0_AFF;
-                                    a1 |= ATTR1_AFF_ID(hudAffSlot);
+                                int hasLayAnim = (layOff[pi][0] != 0 || layOff[pi][1] != 0);
+                                // Render piece (+ wrapped duplicate if layer-animated)
+                                int dupPass;
+                                for (dupPass = 0; dupPass < (hasLayAnim ? 2 : 1) && oamSlot < 126; dupPass++) {
+                                    int dx = sx, dy = sy;
+                                    if (dupPass == 1) dx -= 240; // wrapped copy from left
+                                    u16 a0 = ATTR0_SQUARE | ((dy & 0xFF));
+                                    u16 a1 = size_to_attr1(objSz) | ((dx & 0x1FF));
+                                    if (hudUseAffine && hudAffSlot >= 0) {
+                                        a0 |= ATTR0_AFF;
+                                        a1 |= ATTR1_AFF_ID(hudAffSlot);
+                                    }
+                                    if (afn_hud_pieces[pStart + pi].opacity < 16)
+                                        a0 |= ATTR0_BLEND;
+                                    u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
+                                    obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
+                                    oamSlot++;
                                 }
-                                if (afn_hud_pieces[pStart + pi].opacity < 16)
-                                    a0 |= ATTR0_BLEND;
-                                u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
-                                obj_set_attr(&oam_mem[oamSlot], a0, a1, a2);
-                                oamSlot++;
                             }
                         }
                     }}
