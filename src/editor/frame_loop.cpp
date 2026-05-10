@@ -442,6 +442,8 @@ enum class VsNodeType : int {
     IsFollowMoving, // gate: passes if follow object is currently moving
     SetFollowFacing,// set follow object's facing direction from follow state
     SoundInstance,  // data node: select a sound instance by dropdown
+    PlayHudAnim,    // play a HUD animation layer
+    StopHudAnim,    // stop a HUD animation layer
     COUNT
 };
 
@@ -726,6 +728,8 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Is Follow Moving",0xFF2266BB, 1, 1, 0, 0, {}, {}, {} },
     { "Set Follow Facing",0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Sound Instance",  0xFF88AACC, 0, 0, 0, 1, {}, {}, {} },
+    { "Play Hud Anim",   0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Stop Hud Anim",   0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -6619,7 +6623,7 @@ void FrameInit()
         char line[600];
         while (fgets(line, sizeof(line), pf))
         {
-            float fval;
+            float fval; int ival;
             char sval[512];
             if (sscanf(line, "ui_scale=%f", &fval) == 1)
             {
@@ -6630,6 +6634,10 @@ void FrameInit()
             {
                 strncpy(sMgbaPath, sval, sizeof(sMgbaPath) - 1);
             }
+            else if (sscanf(line, "tl_fps=%d", &ival) == 1) sHudTimelineFPS = std::clamp(ival, 0, 7);
+            else if (sscanf(line, "tl_range_start=%d", &ival) == 1) sHudTimelineRangeStart = std::max(0, ival);
+            else if (sscanf(line, "tl_range_end=%d", &ival) == 1) sHudTimelineRangeEnd = std::max(0, ival);
+            else if (sscanf(line, "tl_label_w=%f", &fval) == 1) sHudTimelineLabelW = std::clamp(fval, 80.0f, 600.0f);
         }
         fclose(pf);
     }
@@ -11403,6 +11411,25 @@ void FrameTick(float dt)
                         he.keyframes.push_back(ke);
                     }
                     he.animLoop = el.animLoop;
+                    for (auto& lay : el.animLayers) {
+                        GBAHudAnimLayerExport le;
+                        le.name = lay.name;
+                        le.interp = (int)lay.interp;
+                        le.loop = lay.loop;
+                        for (auto& it : lay.items)
+                            le.items.push_back({ (int)it.type, it.index });
+                        for (auto& kf : lay.keyframes) {
+                            GBAHudKeyframeExport ke;
+                            ke.frame = kf.frame;
+                            ke.offX = kf.offsetX;
+                            ke.offY = kf.offsetY;
+                            ke.rot = kf.rot;
+                            ke.scaleX = kf.scaleX;
+                            ke.scaleY = kf.scaleY;
+                            le.keyframes.push_back(ke);
+                        }
+                        he.animLayers.push_back(std::move(le));
+                    }
                     exportHudElements.push_back(std::move(he));
                 }
 
@@ -13495,6 +13522,21 @@ void FrameTick(float dt)
                     else { snprintf(subBuf, sizeof(subBuf), "[%d]", idx); sub = subBuf; }
                     break;
                 }
+                case VsNodeType::PlayHudAnim:
+                case VsNodeType::StopHudAnim: {
+                    int gi = n.paramInt[0], cur = 0;
+                    bool found = false;
+                    for (int ei2 = 0; ei2 < (int)sHudElements.size() && !found; ei2++)
+                        for (int li2 = 0; li2 < (int)sHudElements[ei2].animLayers.size() && !found; li2++) {
+                            if (cur == gi) {
+                                snprintf(subBuf, sizeof(subBuf), "%s/%s", sHudElements[ei2].name, sHudElements[ei2].animLayers[li2].name);
+                                sub = subBuf; found = true;
+                            }
+                            cur++;
+                        }
+                    if (!found) { snprintf(subBuf, sizeof(subBuf), "[%d]", gi); sub = subBuf; }
+                    break;
+                }
                 case VsNodeType::ChangeScene: {
                     sub = (n.paramInt[1] == 1) ? "Mode 0" : "Mode 4";
                     break;
@@ -14532,6 +14574,8 @@ void FrameTick(float dt)
                 case VsNodeType::Animation:     desc = "Outputs an animation index."; break;
                 case VsNodeType::Float:         desc = "Outputs a constant float value."; break;
                 case VsNodeType::SoundInstance: desc = "Outputs a sound instance index for PlaySound."; break;
+                case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
+                case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -14763,6 +14807,8 @@ void FrameTick(float dt)
                         case VsNodeType::SetText:       return "_set_text";
                         case VsNodeType::ShowHUD:       return "_show_hud";
                         case VsNodeType::HideHUD:       return "_hide_hud";
+                        case VsNodeType::PlayHudAnim:   return "_play_hud_anim";
+                        case VsNodeType::StopHudAnim:   return "_stop_hud_anim";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -16709,6 +16755,36 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_hide_hud", b6);
                     break;
                 }
+                case VsNodeType::PlayHudAnim: {
+                    editorCode = "// Start HUD animation layer";
+                    char bPA[512];
+                    snprintf(bPA, sizeof(bPA),
+                        "#ifdef AFN_HUD_HAS_LAYERS\n"
+                        "    afn_hud_layer_frame[%s] = 0;\n"
+                        "    afn_hud_layer_active[%s] = 1;\n"
+                        "#endif\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Each frame: afn_hud_layer_frame[i]++\n"
+                        "    // Interpolates keyframes (const/linear/bezier)\n"
+                        "    // Applies x,y offsets to layer items in OAM",
+                        fmtInt(infoNode.id, 0, "<layer>"),
+                        fmtInt(infoNode.id, 0, "<layer>"));
+                    setActionFunc(infoNode, "_play_hud_anim", bPA);
+                    break;
+                }
+                case VsNodeType::StopHudAnim: {
+                    editorCode = "// Stop HUD animation layer";
+                    char bSA[512];
+                    snprintf(bSA, sizeof(bSA),
+                        "#ifdef AFN_HUD_HAS_LAYERS\n"
+                        "    afn_hud_layer_active[%s] = 0;\n"
+                        "#endif\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Layer stops ticking; items freeze at current offsets",
+                        fmtInt(infoNode.id, 0, "<layer>"));
+                    setActionFunc(infoNode, "_stop_hud_anim", bSA);
+                    break;
+                }
                 case VsNodeType::GetRandom:
                     editorCode = "// Random 0-255";
                     setActionFunc(infoNode, "_get_random",
@@ -17753,6 +17829,8 @@ void FrameTick(float dt)
                     case VsNodeType::Direction:     suffix = "_dir"; break;
                     case VsNodeType::Animation:     suffix = "_anim"; break;
                     case VsNodeType::SoundInstance: suffix = "_snd_inst"; break;
+                    case VsNodeType::PlayHudAnim: suffix = "_play_hud_anim"; break;
+                    case VsNodeType::StopHudAnim: suffix = "_stop_hud_anim"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
                     case VsNodeType::Branch:        suffix = "_branch"; break;
                     case VsNodeType::CompareVar:    suffix = "_compare_var"; break;
@@ -18290,6 +18368,8 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HideHUD].name)) addNodeAt(VsNodeType::HideHUD);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CursorUp].name)) addNodeAt(VsNodeType::CursorUp);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CursorDown].name)) addNodeAt(VsNodeType::CursorDown);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::PlayHudAnim].name)) addNodeAt(VsNodeType::PlayHudAnim);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopHudAnim].name)) addNodeAt(VsNodeType::StopHudAnim);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FollowLink].name)) addNodeAt(VsNodeType::FollowLink);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ArraySet].name)) addNodeAt(VsNodeType::ArraySet);
                     ImGui::Separator();
@@ -18450,7 +18530,7 @@ void FrameTick(float dt)
         // Properties panel overlay — as child window inside canvas (data nodes only)
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
-            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt || n.type == VsNodeType::SoundInstance) {
+            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt || n.type == VsNodeType::SoundInstance || n.type == VsNodeType::PlayHudAnim || n.type == VsNodeType::StopHudAnim) {
             const auto& def = sVsNodeDefs[(int)n.type];
             float propW = 260, propH = 180;
             float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -18547,6 +18627,35 @@ void FrameTick(float dt)
                             bool sel = (si == n.paramInt[0]);
                             if (ImGui::Selectable(sSoundInstances[si].name, sel))
                                 n.paramInt[0] = si;
+                            if (sel) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+                break;
+            }
+            case VsNodeType::PlayHudAnim:
+            case VsNodeType::StopHudAnim: {
+                ImGui::Text("Animation Layer");
+                // Build flat list of all layers: "ElementName / LayerName"
+                struct LayRef { int ei; int li; char label[64]; };
+                std::vector<LayRef> allLayers;
+                for (int ei = 0; ei < (int)sHudElements.size(); ei++)
+                    for (int li = 0; li < (int)sHudElements[ei].animLayers.size(); li++) {
+                        LayRef lr; lr.ei = ei; lr.li = li;
+                        snprintf(lr.label, sizeof(lr.label), "%s / %s", sHudElements[ei].name, sHudElements[ei].animLayers[li].name);
+                        allLayers.push_back(lr);
+                    }
+                if (allLayers.empty()) {
+                    ImGui::Text("(no animation layers)");
+                } else {
+                    const char* preview = (n.paramInt[0] >= 0 && n.paramInt[0] < (int)allLayers.size())
+                        ? allLayers[n.paramInt[0]].label : "None";
+                    if (ImGui::BeginCombo("##HudAnimLayer", preview)) {
+                        for (int ai = 0; ai < (int)allLayers.size(); ai++) {
+                            bool sel = (ai == n.paramInt[0]);
+                            if (ImGui::Selectable(allLayers[ai].label, sel))
+                                n.paramInt[0] = ai;
                             if (sel) ImGui::SetItemDefaultFocus();
                         }
                         ImGui::EndCombo();
@@ -23194,6 +23303,10 @@ void FrameTick(float dt)
             {
                 fprintf(f, "ui_scale=%.2f\n", sUiScale);
                 fprintf(f, "mgba_path=%s\n", sMgbaPath);
+                fprintf(f, "tl_fps=%d\n", sHudTimelineFPS);
+                fprintf(f, "tl_range_start=%d\n", sHudTimelineRangeStart);
+                fprintf(f, "tl_range_end=%d\n", sHudTimelineRangeEnd);
+                fprintf(f, "tl_label_w=%.0f\n", sHudTimelineLabelW);
                 fclose(f);
                 sPrefsSaveTimer = 2.0f;
             }

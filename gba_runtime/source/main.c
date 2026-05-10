@@ -344,8 +344,15 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
         vc->gainShift = (g == 1) ? 6 : (g == 2) ? 9 : 7;
     }
     vc->releaseRem = 0;
-    vc->releaseLen = afn_pcm_release[smpIdx]; // per-sample release in output samples
-    if (vc->releaseLen < 304) vc->releaseLen = 304; // minimum 1 frame
+    {
+        int sf = (snd_seq_active >= 0) ? afn_snd_softfade[snd_seq_active] : 1;
+        if (sf) {
+            vc->releaseLen = afn_pcm_release[smpIdx];
+            if (vc->releaseLen < 304) vc->releaseLen = 304;
+        } else {
+            vc->releaseLen = 0; // hard cut — no release fade
+        }
+    }
     // Decay: precompute per-frame volume decrement (8.8 fixed point)
     {
         int dp = afn_pcm_decay[smpIdx];
@@ -5001,6 +5008,13 @@ int main(void)
                     if (afn_hud_visible[ei2])
                         afn_hud_anim_frame[ei2]++;
                 } }
+                // Tick animation layer frames
+#ifdef AFN_HUD_HAS_LAYERS
+                { int li; for (li = 0; li < AFN_HUD_LAYER_COUNT; li++) {
+                    if (afn_hud_layer_active[li])
+                        afn_hud_layer_frame[li]++;
+                } }
+#endif
                 { int anyHudVisible = 0;
                 { int ei2; for (ei2 = 0; ei2 < AFN_HUD_ELEM_COUNT; ei2++) if (afn_hud_visible[ei2]) anyHudVisible = 1; }
                 if (anyHudVisible) {
@@ -5172,6 +5186,59 @@ int main(void)
                             hudUseAffine = 0;
                         }
                     }
+                    // Compute per-item animation layer offsets
+                    // Max 32 pieces + 16 sprites per element
+                    int layOff[48][2]; // [item][0=x, 1=y]
+                    { int lo; for (lo = 0; lo < 48; lo++) { layOff[lo][0] = 0; layOff[lo][1] = 0; } }
+#ifdef AFN_HUD_HAS_LAYERS
+                    { int li2; for (li2 = 0; li2 < AFN_HUD_LAYER_COUNT; li2++) {
+                        if (!afn_hud_layer_active[li2]) continue;
+                        if (afn_hud_layers[li2].elemIdx != ei) continue;
+                        int lkS = afn_hud_layers[li2].kfStart;
+                        int lkN = afn_hud_layers[li2].kfCount;
+                        if (lkN < 1) continue;
+                        int curF2 = afn_hud_layer_frame[li2];
+                        int lastF2 = afn_hud_layer_kf[lkS + lkN - 1].frame;
+                        if (lastF2 > 0 && afn_hud_layers[li2].loop && curF2 > lastF2)
+                            curF2 = curF2 % (lastF2 + 1);
+                        else if (curF2 > lastF2)
+                            curF2 = lastF2;
+                        // Find surrounding keyframes
+                        int lkA = 0, lkB = 0;
+                        { int lki; for (lki = 0; lki < lkN - 1; lki++) {
+                            if ((int)afn_hud_layer_kf[lkS + lki + 1].frame > curF2) { lkA = lki; lkB = lki + 1; break; }
+                            lkA = lkN - 1; lkB = lkN - 1;
+                        } }
+                        int lox = 0, loy = 0;
+                        int lfA = afn_hud_layer_kf[lkS + lkA].frame;
+                        int lfB = afn_hud_layer_kf[lkS + lkB].frame;
+                        int lspan = lfB - lfA;
+                        if (lspan <= 0 || lkA == lkB || afn_hud_layers[li2].interp == 0) {
+                            lox = afn_hud_layer_kf[lkS + lkA].offX;
+                            loy = afn_hud_layer_kf[lkS + lkA].offY;
+                        } else {
+                            int lt256 = ((curF2 - lfA) * 256) / lspan;
+                            if (afn_hud_layers[li2].interp == 2) {
+                                // Bezier smoothstep: t*t*(3-2t)
+                                lt256 = (lt256 * lt256 * (768 - 2 * lt256)) >> 16;
+                            }
+                            lox = afn_hud_layer_kf[lkS + lkA].offX + ((afn_hud_layer_kf[lkS + lkB].offX - afn_hud_layer_kf[lkS + lkA].offX) * lt256) / 256;
+                            loy = afn_hud_layer_kf[lkS + lkA].offY + ((afn_hud_layer_kf[lkS + lkB].offY - afn_hud_layer_kf[lkS + lkA].offY) * lt256) / 256;
+                        }
+                        // Apply to items in this layer
+                        int liS = afn_hud_layers[li2].itemStart;
+                        int liN = afn_hud_layers[li2].itemCount;
+                        { int lii; for (lii = 0; lii < liN; lii++) {
+                            int itype = afn_hud_layer_items[liS + lii].type;
+                            int iidx = afn_hud_layer_items[liS + lii].index;
+                            int slot = -1;
+                            if (itype == 0 && iidx < 32) slot = iidx;         // piece
+                            else if (itype == 1 && iidx < 16) slot = 32 + iidx; // sprite
+                            if (slot >= 0) { layOff[slot][0] += lox; layOff[slot][1] += loy; }
+                        } }
+                    } }
+#endif
+
                     int pStart = afn_hud_elems[ei].pieceStart;
                     int pCount = afn_hud_elems[ei].pieceCount;
                     // Compute tile adjustment: assets store tileStart as (rawOff + 512 + DIR_VRAM_TILES)
@@ -5251,8 +5318,8 @@ int main(void)
                                 int ai = afn_hud_sprites[spStart + spi].asset;
                                 if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
                                 int fr = afn_hud_sprites[spStart + spi].frame;
-                                int sx = ex + afn_hud_sprites[spStart + spi].x;
-                                int sy = ey + afn_hud_sprites[spStart + spi].y;
+                                int sx = ex + afn_hud_sprites[spStart + spi].x + layOff[32 + spi][0];
+                                int sy = ey + afn_hud_sprites[spStart + spi].y + layOff[32 + spi][1];
                                 int tileBase = afn_asset_desc[ai][0];
                                 int tpf      = afn_asset_desc[ai][1];
                                 int objSz    = afn_asset_desc[ai][3];
@@ -5275,8 +5342,8 @@ int main(void)
                                 int ai = afn_hud_pieces[pStart + pi].asset;
                                 if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
                                 int fr = afn_hud_pieces[pStart + pi].frame;
-                                int sx = ex + afn_hud_pieces[pStart + pi].x;
-                                int sy = ey + afn_hud_pieces[pStart + pi].y;
+                                int sx = ex + afn_hud_pieces[pStart + pi].x + layOff[pi][0];
+                                int sy = ey + afn_hud_pieces[pStart + pi].y + layOff[pi][1];
                                 int tileBase = afn_asset_desc[ai][0];
                                 int tpf      = afn_asset_desc[ai][1];
                                 int objSz    = afn_asset_desc[ai][3];

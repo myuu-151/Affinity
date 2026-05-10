@@ -1632,6 +1632,53 @@ static bool GenerateMapData(const std::string& runtimeDir,
         } else {
             f << "static const int afn_hud_kf[1] = {0};\n";
         }
+
+        // Animation layers
+        int totalAnimLayers = 0, totalLayerKf = 0, totalLayerItems = 0;
+        for (auto& el : hudElements) {
+            totalAnimLayers += (int)el.animLayers.size();
+            for (auto& lay : el.animLayers) {
+                totalLayerKf += (int)lay.keyframes.size();
+                totalLayerItems += (int)lay.items.size();
+            }
+        }
+        if (totalAnimLayers > 0) {
+            // Layer keyframes (same format as legacy kf)
+            f << "static const struct { u16 frame; s16 offX,offY; s16 rot; u16 scaleX,scaleY; } afn_hud_layer_kf[" << totalLayerKf << "] = {\n";
+            for (auto& el : hudElements)
+                for (auto& lay : el.animLayers)
+                    for (auto& kf : lay.keyframes) {
+                        int brad = (kf.rot * 256 + 180) / 360; brad &= 0xFF;
+                        f << "    {" << kf.frame << "," << kf.offX << "," << kf.offY << "," << brad << "," << kf.scaleX << "," << kf.scaleY << "},\n";
+                    }
+            f << "};\n";
+
+            // Layer items: {type, index}
+            f << "static const struct { u8 type; u8 index; } afn_hud_layer_items[" << totalLayerItems << "] = {\n";
+            for (auto& el : hudElements)
+                for (auto& lay : el.animLayers)
+                    for (auto& it : lay.items)
+                        f << "    {" << it.type << "," << it.index << "},\n";
+            f << "};\n";
+
+            // Layer metadata: {elemIdx, kfStart, kfCount, itemStart, itemCount, interp, loop}
+            f << "static const struct { u8 elemIdx; u16 kfStart,kfCount; u16 itemStart,itemCount; u8 interp; u8 loop; } afn_hud_layers[" << totalAnimLayers << "] = {\n";
+            int lkfOff = 0, liOff = 0;
+            for (int ei = 0; ei < (int)hudElements.size(); ei++)
+                for (auto& lay : hudElements[ei].animLayers) {
+                    f << "    {" << ei << "," << lkfOff << "," << (int)lay.keyframes.size() << ","
+                      << liOff << "," << (int)lay.items.size() << "," << lay.interp << "," << (lay.loop ? 1 : 0) << "},\n";
+                    lkfOff += (int)lay.keyframes.size();
+                    liOff += (int)lay.items.size();
+                }
+            f << "};\n";
+            f << "#define AFN_HUD_LAYER_COUNT " << totalAnimLayers << "\n";
+
+            // Runtime state: per-layer animation frame counter + active flag
+            f << "static int afn_hud_layer_frame[" << totalAnimLayers << "];\n";
+            f << "static u8  afn_hud_layer_active[" << totalAnimLayers << "];\n";
+            f << "#define AFN_HUD_HAS_LAYERS 1\n";
+        }
     }
 
     // ---- Generate script code from visual node graph ----
@@ -1909,6 +1956,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::CursorUp:      return "_cursor_up";
         case GBAScriptNodeType::CursorDown:    return "_cursor_down";
         case GBAScriptNodeType::FollowLink:    return "_follow_link";
+        case GBAScriptNodeType::PlayHudAnim:   return "_play_hud_anim";
+        case GBAScriptNodeType::StopHudAnim:   return "_stop_hud_anim";
         default: return "";
         }
     };
@@ -2788,6 +2837,21 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_hud_visible[" << slot << "] = 0;\n";
                     f << "    afn_player_frozen = 0;\n";
                     f << "    afn_play_anim = 0;\n";
+                    break;
+                }
+                case GBAScriptNodeType::PlayHudAnim: {
+                    int layIdx = action->paramInt[0];
+                    f << "#ifdef AFN_HUD_HAS_LAYERS\n";
+                    f << "    afn_hud_layer_frame[" << layIdx << "] = 0;\n";
+                    f << "    afn_hud_layer_active[" << layIdx << "] = 1;\n";
+                    f << "#endif\n";
+                    break;
+                }
+                case GBAScriptNodeType::StopHudAnim: {
+                    int layIdx = action->paramInt[0];
+                    f << "#ifdef AFN_HUD_HAS_LAYERS\n";
+                    f << "    afn_hud_layer_active[" << layIdx << "] = 0;\n";
+                    f << "#endif\n";
                     break;
                 }
                 case GBAScriptNodeType::ArraySet: {
@@ -4186,6 +4250,21 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_hud_visible[" << slot << "] = 0;\n";
                     f << "    afn_player_frozen = 0;\n";
                     f << "    afn_play_anim = 0;\n";
+                    break;
+                }
+                case GBAScriptNodeType::PlayHudAnim: {
+                    int layIdx = action->paramInt[0];
+                    f << "#ifdef AFN_HUD_HAS_LAYERS\n";
+                    f << "    afn_hud_layer_frame[" << layIdx << "] = 0;\n";
+                    f << "    afn_hud_layer_active[" << layIdx << "] = 1;\n";
+                    f << "#endif\n";
+                    break;
+                }
+                case GBAScriptNodeType::StopHudAnim: {
+                    int layIdx = action->paramInt[0];
+                    f << "#ifdef AFN_HUD_HAS_LAYERS\n";
+                    f << "    afn_hud_layer_active[" << layIdx << "] = 0;\n";
+                    f << "#endif\n";
                     break;
                 }
                 case GBAScriptNodeType::ArraySet: {

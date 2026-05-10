@@ -341,6 +341,8 @@ enum class GBAScriptNodeType : int {
     IsFollowMoving,
     SetFollowFacing,
     SoundInstance,
+    PlayHudAnim,
+    StopHudAnim,
     COUNT
 };
 
@@ -451,6 +453,19 @@ struct GBAHudKeyframeExport {
     int scaleX, scaleY; // 8.8 fixed point (256 = 1.0x)
 };
 
+struct GBAHudAnimLayerItemExport {
+    int type;   // 0=piece, 1=sprite, 2=text, 3=cursor
+    int index;
+};
+
+struct GBAHudAnimLayerExport {
+    std::string name;
+    int interp = 1;     // 0=constant, 1=linear, 2=bezier
+    bool loop = false;
+    std::vector<GBAHudAnimLayerItemExport> items;
+    std::vector<GBAHudKeyframeExport> keyframes;
+};
+
 struct GBAHudElementExport {
     int screenX, screenY;
     bool visible;
@@ -465,6 +480,7 @@ struct GBAHudElementExport {
     int layerPieces, layerSprites, layerText, layerCursor;
     std::vector<GBAHudKeyframeExport> keyframes;
     bool animLoop = false;
+    std::vector<GBAHudAnimLayerExport> animLayers;
 };
 
 // Sound export: a single PCM sample (8-bit signed, 16384 Hz)
