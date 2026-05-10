@@ -1077,9 +1077,13 @@ static void init_obj_sprites(void)
         if (afn_current_mode == 1) {
             // Mode 0: place static tiles right after compact direction slots
             dst = (u32*)(0x06010000 + tm_dir_slot_count * 32);
+        } else if (afn_current_mode == 2) {
+            // Mode 7: tile mode, tiles 0-511 are usable — no bitmap overlap
+            // Direction tiles are also shifted down by 512, so place static tiles
+            // at their exported offset minus 512
+            dst = (u32*)(0x06010000 + (AFN_DIR_VRAM_TILES - 512) * 32);
         } else {
-            // Mode 4/7: skip bitmap overlap region (512 tiles) only
-            // Direction tiles are DMA'd separately by switch_dir_anim_set
+            // Mode 4: skip bitmap overlap region (512 tiles)
             dst = (u32*)(0x06010000 + 512 * 32);
         }
 #else
@@ -1253,9 +1257,12 @@ static void switch_dir_anim_set(int assetIdx, int newSet)
     int romOffset = afn_dir_set_offsets[assetIdx][newSet]; // u32 index into ROM array
     if (romOffset < 0) return;
 
+    // In Mode 7 (afn_current_mode==2), tiles 0-511 are usable (not bitmap),
+    // so shift everything down by 512 to fit within the 1024-tile OBJ VRAM
+    int m7Adj = (afn_current_mode == 2) ? 512 : 0;
     // Guard: skip if DMA would overflow OBJ VRAM (1024 tiles max)
-    int dstTile = vramTile0 - tm_dir_adj;
-    if (dstTile + 8 * tpf > 1024) return;
+    int dstTile = vramTile0 - tm_dir_adj - m7Adj;
+    if (dstTile < 0 || dstTile + 8 * tpf > 1024) return;
 
     // Copy 8 directions * tpf tiles * 32 bytes/tile from ROM to VRAM
     int wordCount = 8 * tpf * 8; // 8 dirs * tpf tiles * 8 u32s per tile
@@ -1400,6 +1407,8 @@ static void update_sprites(void)
                         {
                             int adTpf = afn_asset_dir_desc[ai][1];
                             int vramTile0 = afn_asset_dir_desc[ai][5];
+                            // Mode 7 uses tile mode: tiles 0-511 are usable, shift down
+                            if (afn_current_mode == 2) vramTile0 -= 512;
                             tileId = vramTile0 + dirIdx * adTpf;
                             baseSize = afn_asset_dir_desc[ai][2];
                             scaleSize = baseSize;
@@ -4238,7 +4247,11 @@ static void scene_load(int sceneMode, int sceneIdx)
         load_checkerboard();
 #endif
         init_obj_sprites();
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+        tm_static_adj = 512; // Mode 7: no bitmap overlap, everything shifts down 512
+#else
         tm_static_adj = AFN_DIR_VRAM_TILES;
+#endif
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_DIR_ANIM_TILES_LEN)
         { int ai; for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {
             if (!afn_asset_dir_desc[ai][4]) continue;
@@ -4404,7 +4417,11 @@ int main(void)
         load_checkerboard();
 #endif
         init_obj_sprites();
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+        tm_static_adj = 512; // Mode 7: no bitmap overlap, everything shifts down 512
+#else
         tm_static_adj = AFN_DIR_VRAM_TILES;
+#endif
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_DIR_ANIM_TILES_LEN)
         { int ai; for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {
             if (!afn_asset_dir_desc[ai][4]) continue;
