@@ -3208,6 +3208,8 @@ struct HudElement {
         bool loop = false;
         int selectedKeyframe = -1;
         HudInterpMode interp = Interp_Linear;
+        int fps = 3;        // index into fpsValues (default 24fps)
+        int length = 60;    // animation length in frames
     };
     std::vector<AnimLayer> animLayers;
     int selectedLayer = -1;
@@ -4400,6 +4402,8 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "elemLayer=%s\n", lay.name);
                 fprintf(f, "elemLayerLoop=%d\n", lay.loop ? 1 : 0);
                 fprintf(f, "elemLayerInterp=%d\n", (int)lay.interp);
+                fprintf(f, "elemLayerFps=%d\n", lay.fps);
+                fprintf(f, "elemLayerLength=%d\n", lay.length);
                 fprintf(f, "elemLayerItemCount=%d\n", (int)lay.items.size());
                 for (auto& it : lay.items)
                     fprintf(f, "elemLayerItem=%d|%d\n", (int)it.type, it.index);
@@ -5518,6 +5522,12 @@ static bool LoadProject(const std::string& path)
             }
             else if (sscanf(line, "elemLayerInterp=%d", &ival) == 1 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
                 sHudElements.back().animLayers.back().interp = (HudInterpMode)std::clamp(ival, 0, 2);
+            }
+            else if (sscanf(line, "elemLayerFps=%d", &ival) == 1 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
+                sHudElements.back().animLayers.back().fps = std::clamp(ival, 0, 7);
+            }
+            else if (sscanf(line, "elemLayerLength=%d", &ival) == 1 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
+                sHudElements.back().animLayers.back().length = std::max(1, ival);
             }
             else if (sscanf(line, "elemLayerItemCount=%d", &ival) == 1 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
                 sHudElements.back().animLayers.back().items.reserve(ival);
@@ -11420,10 +11430,10 @@ void FrameTick(float dt)
                         le.loop = lay.loop;
                         {
                             float fpsValues[] = { 6.0f, 8.0f, 12.0f, 24.0f, 30.0f, 60.0f, 120.0f, 240.0f };
-                            float fps = fpsValues[std::clamp(sHudTimelineFPS, 0, 7)];
+                            float fps = fpsValues[std::clamp(lay.fps, 0, 7)];
                             le.speed = (fps > 0) ? std::max(1, (int)(60.0f / fps)) : 1;
                         }
-                        le.length = std::max(1, sHudTimelineRangeEnd - sHudTimelineRangeStart);
+                        le.length = std::max(1, lay.length);
                         for (auto& it : lay.items)
                             le.items.push_back({ (int)it.type, it.index });
                         for (auto& kf : lay.keyframes) {
@@ -22442,6 +22452,12 @@ void FrameTick(float dt)
                         int interpIdx = (int)lay.interp;
                         if (ImGui::Combo("Interpolation##layer", &interpIdx, interpNames, 3)) {
                             lay.interp = (HudInterpMode)interpIdx;
+                            sProjectDirty = true;
+                        }
+                        const char* fpsLabels[] = { "6", "8", "12", "24", "30", "60", "120", "240" };
+                        if (ImGui::Combo("FPS##layer", &lay.fps, fpsLabels, 8)) sProjectDirty = true;
+                        if (ImGui::InputInt("Length##layer", &lay.length, 1, 10)) {
+                            if (lay.length < 1) lay.length = 1;
                             sProjectDirty = true;
                         }
 
