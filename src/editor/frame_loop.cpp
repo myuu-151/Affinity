@@ -3827,6 +3827,47 @@ static void LoadMapSceneState(const MapScene& sc)
     sVsSelected = -1;
 }
 
+// ---- Mode 1 (Mode 7) Scenes ----
+// Reuse MapScene struct — Mode 7 has same sprites/camera/scripts, just different runtime renderer
+static std::vector<MapScene> sM7Scenes;
+static int sM7SelectedScene = 0;
+
+static void SaveM7SceneState(MapScene& sc)
+{
+    memcpy(sc.sprites, sSprites, sizeof(sSprites));
+    sc.spriteCount = sSpriteCount;
+    sc.camera = sCamObj;
+    sc.camEditorScale = sCamObjEditorScale;
+    if (sVsEditSource != VsEditSource::Blueprint) {
+        sc.vsNodes = sVsNodes;
+        sc.vsLinks = sVsLinks;
+        sc.vsAnnotations = sVsAnnotations;
+        sc.vsGroupPins = sVsGroupPins;
+        sc.vsNextId = sVsNextId;
+        sc.vsPanX = sVsPanX;
+        sc.vsPanY = sVsPanY;
+        sc.vsZoom = sVsZoom;
+    }
+}
+
+static void LoadM7SceneState(const MapScene& sc)
+{
+    memcpy(sSprites, sc.sprites, sizeof(sSprites));
+    sSpriteCount = sc.spriteCount;
+    sSelectedSprite = -1;
+    sCamObj = sc.camera;
+    sCamObjEditorScale = sc.camEditorScale;
+    sVsNodes = sc.vsNodes;
+    sVsLinks = sc.vsLinks;
+    sVsAnnotations = sc.vsAnnotations;
+    sVsGroupPins = sc.vsGroupPins;
+    sVsNextId = sc.vsNextId;
+    sVsPanX = sc.vsPanX;
+    sVsPanY = sc.vsPanY;
+    sVsZoom = sc.vsZoom;
+    sVsSelected = -1;
+}
+
 // Preferences
 static float sUiScale = 1.0f;
 static bool  sShowPrefs = false;
@@ -4698,6 +4739,87 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "msVsGroupPinCount=%d\n", (int)ms.vsGroupPins.size());
         for (auto& m : ms.vsGroupPins)
             fprintf(f, "msVsGroupPin=%d,%d,%d,%d,%d,%d\n",
+                m.groupNodeId, m.pinType, m.pinIdx, m.innerNodeId, m.innerPinType, m.innerPinIdx);
+    }
+
+    // ---- Mode 7 Scenes ----
+    if (sM7SelectedScene >= 0 && sM7SelectedScene < (int)sM7Scenes.size())
+        SaveM7SceneState(sM7Scenes[sM7SelectedScene]);
+    fprintf(f, "\n[M7Scenes]\n");
+    fprintf(f, "m7SceneCount=%d\n", (int)sM7Scenes.size());
+    fprintf(f, "m7SelectedScene=%d\n", sM7SelectedScene);
+    for (int si = 0; si < (int)sM7Scenes.size(); si++)
+    {
+        const MapScene& ms = sM7Scenes[si];
+        fprintf(f, "m7Scene=%s\n", ms.name);
+        fprintf(f, "m7SpriteCount=%d\n", ms.spriteCount);
+        for (int i = 0; i < ms.spriteCount; i++)
+        {
+            const FloorSprite& sp = ms.sprites[i];
+            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d",
+                    sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
+                    sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
+                    sp.blueprintIdx, sp.instanceParamCount);
+            for (int ip = 0; ip < sp.instanceParamCount; ip++)
+                fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
+            fprintf(f, "\n");
+        }
+        fprintf(f, "m7Cam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f\n",
+                ms.camera.x, ms.camera.z, ms.camera.height, ms.camera.angle, ms.camera.horizon,
+                ms.camera.walkSpeed, ms.camera.sprintSpeed,
+                ms.camera.walkEaseIn, ms.camera.walkEaseOut, ms.camera.sprintEaseIn, ms.camera.sprintEaseOut,
+                ms.camera.jumpForce, ms.camera.gravity, ms.camera.maxFallSpeed,
+                ms.camera.jumpCamLand, ms.camera.jumpCamAir, ms.camera.autoOrbitSpeed, ms.camera.jumpDampen,
+                ms.camera.smallTriCull, ms.camera.skipFloor ? 1 : 0, ms.camera.coverageBuf ? 1 : 0,
+                ms.camera.drawDistance);
+        if (ms.blueprintIdx >= 0) {
+            fprintf(f, "m7SceneBp=%d,%d", ms.blueprintIdx, ms.instanceParamCount);
+            for (int ip = 0; ip < ms.instanceParamCount; ip++)
+                fprintf(f, "|%d:%d", ms.instanceParams[ip].paramIdx, ms.instanceParams[ip].value);
+            fprintf(f, "\n");
+        }
+        fprintf(f, "m7VsNextId=%d\n", ms.vsNextId);
+        fprintf(f, "m7VsPan=%.1f,%.1f\n", ms.vsPanX, ms.vsPanY);
+        fprintf(f, "m7VsZoom=%.3f\n", ms.vsZoom);
+        fprintf(f, "m7VsNodeCount=%d\n", (int)ms.vsNodes.size());
+        for (auto& n : ms.vsNodes)
+        {
+            fprintf(f, "m7VsNode=%d,%d,%.1f,%.1f,%d,%d,%d,%d,%d\n",
+                n.id, (int)n.type, n.x, n.y,
+                n.paramInt[0], n.paramInt[1], n.paramInt[2], n.paramInt[3], n.groupId);
+            if (n.type == VsNodeType::Group || n.type == VsNodeType::CustomCode)
+                fprintf(f, "m7VsGroupDef=%d|%s|%d,%d,%d,%d\n", n.id, n.groupLabel,
+                    n.grpInExec, n.grpOutExec, n.grpInData, n.grpOutData);
+            if (n.type == VsNodeType::CustomCode) {
+                for (int pi = 0; pi < n.grpInData && pi < 8; pi++) {
+                    if (n.ccPinNames[pi][0])
+                        fprintf(f, "m7VsCcPin=%d,%d|%s\n", n.id, pi, n.ccPinNames[pi]);
+                    if (n.ccPinCode[pi][0])
+                        fprintf(f, "m7VsCcCode=%d,%d|%s\n", n.id, pi, n.ccPinCode[pi]);
+                }
+            }
+            if (n.customCode[0])
+                fprintf(f, "m7VsNodeCode=%d|%s\n", n.id, n.customCode);
+            if (n.codeScene[0])
+                fprintf(f, "m7VsSceneCode=%d|%s\n", n.id, n.codeScene);
+            if (n.codeTilemap[0])
+                fprintf(f, "m7VsTilemapCode=%d|%s\n", n.id, n.codeTilemap);
+            if (n.codeRtMode4[0])
+                fprintf(f, "m7VsRtM4Code=%d|%s\n", n.id, n.codeRtMode4);
+            if (n.codeRtMode0[0])
+                fprintf(f, "m7VsRtM0Code=%d|%s\n", n.id, n.codeRtMode0);
+        }
+        fprintf(f, "m7VsLinkCount=%d\n", (int)ms.vsLinks.size());
+        for (auto& lk : ms.vsLinks)
+            fprintf(f, "m7VsLink=%d,%d,%d|%d,%d,%d\n",
+                lk.from.nodeId, lk.from.pinType, lk.from.pinIdx,
+                lk.to.nodeId, lk.to.pinType, lk.to.pinIdx);
+        fprintf(f, "m7VsAnnotCount=%d\n", (int)ms.vsAnnotations.size());
+        for (auto& ann : ms.vsAnnotations)
+            fprintf(f, "m7VsAnnot=%.1f,%.1f,%.1f,%.1f|%s\n", ann.x, ann.y, ann.w, ann.h, ann.label);
+        fprintf(f, "m7VsGroupPinCount=%d\n", (int)ms.vsGroupPins.size());
+        for (auto& m : ms.vsGroupPins)
+            fprintf(f, "m7VsGroupPin=%d,%d,%d,%d,%d,%d\n",
                 m.groupNodeId, m.pinType, m.pinIdx, m.innerNodeId, m.innerPinType, m.innerPinIdx);
     }
 
@@ -6179,6 +6301,240 @@ static bool LoadProject(const std::string& path)
                     sMapScenes.back().vsGroupPins.push_back(m);
             }
         }
+        else if (strcmp(section, "M7Scenes") == 0)
+        {
+            // ---- Mode 1 (Mode 7) Scenes ----
+            if (sscanf(line, "m7SceneCount=%d", &ival) == 1) { sM7Scenes.clear(); sM7Scenes.reserve(ival); }
+            else if (sscanf(line, "m7SelectedScene=%d", &ival) == 1) sM7SelectedScene = ival;
+            else if (strncmp(line, "m7Scene=", 8) == 0)
+            {
+                MapScene ms;
+                strncpy(ms.name, line + 8, sizeof(ms.name) - 1);
+                char* nl = strchr(ms.name, '\n'); if (nl) *nl = '\0';
+                char* cr = strchr(ms.name, '\r'); if (cr) *cr = '\0';
+                sM7Scenes.push_back(ms);
+            }
+            else if (sscanf(line, "m7SpriteCount=%d", &ival) == 1 && !sM7Scenes.empty())
+            {
+                sM7Scenes.back().spriteCount = 0;
+            }
+            else if (strncmp(line, "m7Sprite=", 9) == 0 && !sM7Scenes.empty())
+            {
+                MapScene& ms = sM7Scenes.back();
+                FloorSprite sp = {};
+                int typeVal = 0, animEn = 0, bpIdx = -1, bpParamCnt = 0;
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d",
+                    &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
+                    &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
+                    &bpIdx, &bpParamCnt);
+                if (matched >= 6)
+                {
+                    sp.type = (SpriteType)typeVal;
+                    sp.animEnabled = (animEn != 0);
+                    sp.blueprintIdx = (matched >= 13) ? bpIdx : -1;
+                    sp.instanceParamCount = (matched >= 14) ? std::min(bpParamCnt, 8) : 0;
+                    if (sp.instanceParamCount > 0) {
+                        const char* p = line + 9;
+                        for (int ip = 0; ip < sp.instanceParamCount; ip++) {
+                            p = strchr(p, '|');
+                            if (!p) break;
+                            p++;
+                            int pIdx, pVal;
+                            if (sscanf(p, "%d:%d", &pIdx, &pVal) == 2) {
+                                sp.instanceParams[ip].paramIdx = pIdx;
+                                sp.instanceParams[ip].value = pVal;
+                            }
+                        }
+                    }
+                    if (ms.spriteCount < kMaxFloorSprites)
+                        ms.sprites[ms.spriteCount++] = sp;
+                }
+            }
+            else if (strncmp(line, "m7Cam=", 6) == 0 && !sM7Scenes.empty())
+            {
+                MapScene& ms = sM7Scenes.back();
+                CameraStartObject& c = ms.camera;
+                int sti = 0, sf = 0, cb = 0;
+                sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f",
+                    &c.x, &c.z, &c.height, &c.angle, &c.horizon,
+                    &c.walkSpeed, &c.sprintSpeed,
+                    &c.walkEaseIn, &c.walkEaseOut, &c.sprintEaseIn, &c.sprintEaseOut,
+                    &c.jumpForce, &c.gravity, &c.maxFallSpeed,
+                    &c.jumpCamLand, &c.jumpCamAir, &c.autoOrbitSpeed, &c.jumpDampen,
+                    &sti, &sf, &cb, &c.drawDistance);
+                c.smallTriCull = sti;
+                c.skipFloor = (sf != 0);
+                c.coverageBuf = (cb != 0);
+            }
+            else if (strncmp(line, "m7SceneBp=", 10) == 0 && !sM7Scenes.empty())
+            {
+                MapScene& ms = sM7Scenes.back();
+                int bpIdx = -1, ipc = 0;
+                sscanf(line + 10, "%d,%d", &bpIdx, &ipc);
+                ms.blueprintIdx = bpIdx;
+                ms.instanceParamCount = 0;
+                const char* pipe = strchr(line + 10, '|');
+                while (pipe && ms.instanceParamCount < 8) {
+                    int pi = 0, pv = 0;
+                    if (sscanf(pipe + 1, "%d:%d", &pi, &pv) == 2) {
+                        ms.instanceParams[ms.instanceParamCount].paramIdx = pi;
+                        ms.instanceParams[ms.instanceParamCount].value = pv;
+                        ms.instanceParamCount++;
+                    }
+                    pipe = strchr(pipe + 1, '|');
+                }
+            }
+            else if (sscanf(line, "m7VsNextId=%d", &ival) == 1 && !sM7Scenes.empty())
+                sM7Scenes.back().vsNextId = ival;
+            else if (!sM7Scenes.empty() && strncmp(line, "m7VsPan=", 8) == 0)
+            {
+                float px, py;
+                if (sscanf(line + 8, "%f,%f", &px, &py) == 2) { sM7Scenes.back().vsPanX = px; sM7Scenes.back().vsPanY = py; }
+            }
+            else if (!sM7Scenes.empty() && sscanf(line, "m7VsZoom=%f", &fval) == 1)
+                sM7Scenes.back().vsZoom = fval;
+            else if (sscanf(line, "m7VsNodeCount=%d", &ival) == 1 && !sM7Scenes.empty())
+            {
+                sM7Scenes.back().vsNodes.clear();
+                sM7Scenes.back().vsNodes.reserve(ival);
+            }
+            else if (strncmp(line, "m7VsNode=", 9) == 0 && !sM7Scenes.empty())
+            {
+                VsNode n;
+                int typeInt, gid = 0;
+                if (sscanf(line + 9, "%d,%d,%f,%f,%d,%d,%d,%d,%d",
+                    &n.id, &typeInt, &n.x, &n.y,
+                    &n.paramInt[0], &n.paramInt[1], &n.paramInt[2], &n.paramInt[3], &gid) >= 4)
+                {
+                    n.type = (VsNodeType)typeInt;
+                    n.groupId = gid;
+                    sM7Scenes.back().vsNodes.push_back(n);
+                }
+            }
+            else if (strncmp(line, "m7VsGroupDef=", 13) == 0 && !sM7Scenes.empty())
+            {
+                int nid, ie, oe, id2, od;
+                char lbl[32] = {};
+                if (sscanf(line + 13, "%d|%31[^|]|%d,%d,%d,%d", &nid, lbl, &ie, &oe, &id2, &od) >= 6) {
+                    for (auto& n : sM7Scenes.back().vsNodes)
+                        if (n.id == nid) {
+                            strncpy(n.groupLabel, lbl, sizeof(n.groupLabel) - 1);
+                            n.grpInExec = ie; n.grpOutExec = oe; n.grpInData = id2; n.grpOutData = od;
+                            break;
+                        }
+                }
+            }
+            else if (strncmp(line, "m7VsNodeCode=", 13) == 0 && !sM7Scenes.empty())
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    for (auto& n : sM7Scenes.back().vsNodes)
+                        if (n.id == nid) { strncpy(n.customCode, codeBuf, sizeof(n.customCode) - 1); break; }
+                }
+            }
+            else if (strncmp(line, "m7VsSceneCode=", 14) == 0 && !sM7Scenes.empty())
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 14, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    for (auto& n : sM7Scenes.back().vsNodes)
+                        if (n.id == nid) { strncpy(n.codeScene, codeBuf, sizeof(n.codeScene) - 1); break; }
+                }
+            }
+            else if (strncmp(line, "m7VsTilemapCode=", 16) == 0 && !sM7Scenes.empty())
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 16, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    for (auto& n : sM7Scenes.back().vsNodes)
+                        if (n.id == nid) { strncpy(n.codeTilemap, codeBuf, sizeof(n.codeTilemap) - 1); break; }
+                }
+            }
+            else if (strncmp(line, "m7VsRtM4Code=", 13) == 0 && !sM7Scenes.empty())
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    for (auto& n : sM7Scenes.back().vsNodes)
+                        if (n.id == nid) { strncpy(n.codeRtMode4, codeBuf, sizeof(n.codeRtMode4) - 1); break; }
+                }
+            }
+            else if (strncmp(line, "m7VsRtM0Code=", 13) == 0 && !sM7Scenes.empty())
+            {
+                int nid;
+                char codeBuf[512] = {};
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    for (auto& n : sM7Scenes.back().vsNodes)
+                        if (n.id == nid) { strncpy(n.codeRtMode0, codeBuf, sizeof(n.codeRtMode0) - 1); break; }
+                }
+            }
+            else if (strncmp(line, "m7VsCcPin=", 10) == 0 && !sM7Scenes.empty())
+            {
+                int nid, pi;
+                char pname[16] = {};
+                if (sscanf(line + 10, "%d,%d|%15[^\n]", &nid, &pi, pname) >= 3) {
+                    for (auto& n : sM7Scenes.back().vsNodes)
+                        if (n.id == nid && pi >= 0 && pi < 8) {
+                            strncpy(n.ccPinNames[pi], pname, sizeof(n.ccPinNames[pi]) - 1);
+                            break;
+                        }
+                }
+            }
+            else if (strncmp(line, "m7VsCcCode=", 11) == 0 && !sM7Scenes.empty())
+            {
+                int nid, pi;
+                char codeBuf[128] = {};
+                if (sscanf(line + 11, "%d,%d|%127[^\n]", &nid, &pi, codeBuf) >= 3) {
+                    for (auto& n : sM7Scenes.back().vsNodes)
+                        if (n.id == nid && pi >= 0 && pi < 8) {
+                            strncpy(n.ccPinCode[pi], codeBuf, sizeof(n.ccPinCode[pi]) - 1);
+                            break;
+                        }
+                }
+            }
+            else if (sscanf(line, "m7VsLinkCount=%d", &ival) == 1 && !sM7Scenes.empty())
+            {
+                sM7Scenes.back().vsLinks.clear();
+                sM7Scenes.back().vsLinks.reserve(ival);
+            }
+            else if (strncmp(line, "m7VsLink=", 9) == 0 && !sM7Scenes.empty())
+            {
+                VsLink lk;
+                if (sscanf(line + 9, "%d,%d,%d|%d,%d,%d",
+                    &lk.from.nodeId, &lk.from.pinType, &lk.from.pinIdx,
+                    &lk.to.nodeId, &lk.to.pinType, &lk.to.pinIdx) == 6)
+                    sM7Scenes.back().vsLinks.push_back(lk);
+            }
+            else if (sscanf(line, "m7VsAnnotCount=%d", &ival) == 1 && !sM7Scenes.empty())
+            {
+                sM7Scenes.back().vsAnnotations.clear();
+                sM7Scenes.back().vsAnnotations.reserve(ival);
+            }
+            else if (strncmp(line, "m7VsAnnot=", 10) == 0 && !sM7Scenes.empty())
+            {
+                VsAnnotation ann;
+                float ax, ay, aw, ah;
+                if (sscanf(line + 10, "%f,%f,%f,%f|", &ax, &ay, &aw, &ah) == 4) {
+                    ann.x = ax; ann.y = ay; ann.w = aw; ann.h = ah;
+                    const char* pipe = strchr(line + 10, '|');
+                    if (pipe) strncpy(ann.label, pipe + 1, sizeof(ann.label) - 1);
+                    sM7Scenes.back().vsAnnotations.push_back(ann);
+                }
+            }
+            else if (sscanf(line, "m7VsGroupPinCount=%d", &ival) == 1 && !sM7Scenes.empty())
+            {
+                sM7Scenes.back().vsGroupPins.clear();
+                sM7Scenes.back().vsGroupPins.reserve(ival);
+            }
+            else if (strncmp(line, "m7VsGroupPin=", 13) == 0 && !sM7Scenes.empty())
+            {
+                VsGroupPinMap m;
+                if (sscanf(line + 13, "%d,%d,%d,%d,%d,%d",
+                    &m.groupNodeId, &m.pinType, &m.pinIdx, &m.innerNodeId, &m.innerPinType, &m.innerPinIdx) == 6)
+                    sM7Scenes.back().vsGroupPins.push_back(m);
+            }
+        }
         else if (strcmp(section, "SoundBank") == 0)
         {
             // Legacy format — match by name and load edits into the sound bank
@@ -6565,6 +6921,19 @@ static bool LoadProject(const std::string& path)
     if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
         LoadMapSceneState(sMapScenes[sMapSelectedScene]);
 
+    // Ensure M7 scenes have at least one default scene — copy from Map scene 0
+    if (sM7Scenes.empty()) {
+        MapScene ms;
+        if (!sMapScenes.empty()) {
+            ms = sMapScenes[0];
+        }
+        snprintf(ms.name, sizeof(ms.name), "M7 Scene 0");
+        sM7Scenes.push_back(ms);
+        sM7SelectedScene = 0;
+    }
+    if (sM7SelectedScene < 0 || sM7SelectedScene >= (int)sM7Scenes.size())
+        sM7SelectedScene = 0;
+
     // Load first sound instance overrides (if any)
     if (!sSoundInstances.empty()) {
         sSelectedInstance = 0;
@@ -6615,6 +6984,9 @@ static void CloseProject()
 
     sMapScenes.clear();
     sMapSelectedScene = 0;
+
+    sM7Scenes.clear();
+    sM7SelectedScene = 0;
 
     sProjectPath.clear();
     sProjectDirty = false;
@@ -7067,8 +7439,22 @@ static void DrawTabBar()
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.18f, 0.22f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.65f, 1.0f));
         }
-        if (ImGui::Button(label, ImVec2(btnW, btnH)))
+        if (ImGui::Button(label, ImVec2(btnW, btnH)) && tab != sActiveTab)
+        {
+            // Save current scene state before switching tabs
+            if (sActiveTab == EditorTab::Map && sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+                SaveMapSceneState(sMapScenes[sMapSelectedScene]);
+            else if (sActiveTab == EditorTab::Mode7 && sM7SelectedScene >= 0 && sM7SelectedScene < (int)sM7Scenes.size())
+                SaveM7SceneState(sM7Scenes[sM7SelectedScene]);
+
             sActiveTab = tab;
+
+            // Load scene state for the new tab
+            if (tab == EditorTab::Map && sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+                LoadMapSceneState(sMapScenes[sMapSelectedScene]);
+            else if (tab == EditorTab::Mode7 && sM7SelectedScene >= 0 && sM7SelectedScene < (int)sM7Scenes.size())
+                LoadM7SceneState(sM7Scenes[sM7SelectedScene]);
+        }
         ImGui::PopStyleColor(2);
         ImGui::SameLine();
     };
@@ -11153,6 +11539,27 @@ void FrameTick(float dt)
                     exportBpInstances.push_back(inst);
                 }
 
+                // Collect M7 scene-level blueprint instances (sceneMode=2: Mode1/Mode7)
+                for (int si = 0; si < (int)sM7Scenes.size(); si++) {
+                    const MapScene& ms = sM7Scenes[si];
+                    if (ms.blueprintIdx < 0 || ms.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
+                    const BlueprintAsset& bp = sBlueprintAssets[ms.blueprintIdx];
+                    GBABlueprintInstanceExport inst;
+                    inst.blueprintIdx = ms.blueprintIdx;
+                    inst.spriteIdx = -1;
+                    inst.tmObjIdx = -1;
+                    inst.sceneMode = 2; // Mode 1 (Mode 7)
+                    inst.sceneMask = (1u << si); // this M7 scene
+                    inst.paramCount = bp.paramCount;
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        inst.paramValues[pi] = bp.params[pi].defaultInt;
+                        for (int oi = 0; oi < ms.instanceParamCount; oi++)
+                            if (ms.instanceParams[oi].paramIdx == pi)
+                                inst.paramValues[pi] = ms.instanceParams[oi].value;
+                    }
+                    exportBpInstances.push_back(inst);
+                }
+
                 // Collect element blueprint instances
                 for (int ei = 0; ei < (int)sHudElements.size(); ei++) {
                     const HudElement& el = sHudElements[ei];
@@ -11459,8 +11866,9 @@ void FrameTick(float dt)
                     exportHudElements.push_back(std::move(he));
                 }
 
-                // Determine start mode from active tab: Tilemap=1, 3D/default=0, legacy=2
-                int exportStartMode = (sActiveTab == EditorTab::Tilemap) ? 1 : 0;
+                // Determine start mode from active tab: 0=Mode4/3D, 1=Mode0/Tilemap, 2=Mode1/Mode7
+                int exportStartMode = (sActiveTab == EditorTab::Tilemap) ? 1 :
+                                      (sActiveTab == EditorTab::Mode7)   ? 2 : 0;
 
                 // --- Gather sound data for export ---
                 std::vector<GBASoundSampleExport> exportSoundSamples;
@@ -12618,6 +13026,18 @@ void FrameTick(float dt)
                         sActiveTab = EditorTab::Tilemap;
                         sScriptStartRan = false;
                     }
+                } else if (sPendingSceneMode == 2 && sPendingSceneSwitch < (int)sM7Scenes.size()) {
+                    // Switch to a Mode 7 scene
+                    if (sPendingSceneSwitch != sM7SelectedScene || sActiveTab != EditorTab::Mode7) {
+                        if (sActiveTab == EditorTab::Mode7 && sM7SelectedScene >= 0 && sM7SelectedScene < (int)sM7Scenes.size())
+                            SaveM7SceneState(sM7Scenes[sM7SelectedScene]);
+                        else if (sActiveTab == EditorTab::Map && sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+                            SaveMapSceneState(sMapScenes[sMapSelectedScene]);
+                        sM7SelectedScene = sPendingSceneSwitch;
+                        LoadM7SceneState(sM7Scenes[sM7SelectedScene]);
+                        sActiveTab = EditorTab::Mode7;
+                        sScriptStartRan = false;
+                    }
                 }
                 sPendingSceneSwitch = -1;
             }
@@ -13197,6 +13617,27 @@ void FrameTick(float dt)
         sMapSelectedScene = 0;
     }
 
+    // Create default M7 scene if none exist — copy from Map scene 0
+    if (sM7Scenes.empty())
+    {
+        MapScene ms;
+        if (!sMapScenes.empty()) {
+            ms = sMapScenes[0];
+        }
+        snprintf(ms.name, sizeof(ms.name), "M7 Scene 0");
+        sM7Scenes.push_back(ms);
+        sM7SelectedScene = 0;
+    }
+    // If M7 scene 0 is empty (no sprites, no blueprint), auto-copy from Map scene 0
+    else if (sM7Scenes.size() == 1 && sM7Scenes[0].spriteCount == 0 &&
+             sM7Scenes[0].blueprintIdx < 0 && sM7Scenes[0].vsNodes.empty() &&
+             !sMapScenes.empty() && sMapScenes[0].spriteCount > 0)
+    {
+        const char* name = "M7 Scene 0";
+        sM7Scenes[0] = sMapScenes[0];
+        strncpy(sM7Scenes[0].name, name, sizeof(sM7Scenes[0].name) - 1);
+    }
+
     // Draw everything
     DrawTabBar();
 
@@ -13565,7 +14006,7 @@ void FrameTick(float dt)
                     break;
                 }
                 case VsNodeType::ChangeScene: {
-                    sub = (n.paramInt[1] == 1) ? "Mode 0" : "Mode 4";
+                    sub = (n.paramInt[1] == 2) ? "Mode 1" : (n.paramInt[1] == 1) ? "Mode 0" : "Mode 4";
                     break;
                 }
                 case VsNodeType::BlueprintRef: {
@@ -15250,16 +15691,20 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::ChangeScene:
                     editorCode =
-                        "// ---- 2D Tilemap / 3D Scene ----\n"
+                        "// ---- 2D Tilemap / 3D Scene / Mode 7 ----\n"
                         "sPendingSceneSwitch = scIdx;\n"
-                        "sPendingSceneMode = mode; // 0=3D, 1=Tilemap\n"
+                        "sPendingSceneMode = mode; // 0=3D, 1=Tilemap, 2=Mode7\n"
                         "// Consumed next frame:\n"
                         "//   SaveState -> switch scene index -> LoadState\n"
                         "//   sScriptStartRan = false; // re-run OnStart";
                     setActionFunc(infoNode, "_change_scene",
                         "    afn_pending_scene = <scIdx>;\n"
-                        "    afn_pending_scene_mode = <mode>;\n"
-                        "    // Runtime: triggers scene reload next frame");
+                        "    afn_pending_scene_mode = <mode>; // 0=Mode4, 1=Mode0, 2=Mode1\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // start_scene_transition() -> scene_load()\n"
+                        "    // mode 0: init Mode 4 (3D raycaster)\n"
+                        "    // mode 1: init Mode 0 (tilemap)\n"
+                        "    // mode 2: init Mode 1 (Mode 7 affine floor)");
                     break;
                 case VsNodeType::SetGravity: {
                     editorCode =
@@ -18714,11 +19159,12 @@ void FrameTick(float dt)
             }
             case VsNodeType::ChangeScene: {
                 ImGui::Text("Mode");
-                const char* modeNames[] = { "Mode 4", "Mode 0" };
-                int mode = (n.paramInt[1] == 1) ? 1 : 0;
+                const char* modeNames[] = { "Mode 4", "Mode 0", "Mode 1" };
+                int mode = std::clamp(n.paramInt[1], 0, 2);
                 if (ImGui::BeginCombo("##ModeSel", modeNames[mode])) {
                     if (ImGui::Selectable("Mode 4", mode == 0)) { n.paramInt[1] = 0; }
                     if (ImGui::Selectable("Mode 0", mode == 1)) { n.paramInt[1] = 1; }
+                    if (ImGui::Selectable("Mode 1", mode == 2)) { n.paramInt[1] = 2; }
                     ImGui::EndCombo();
                 }
                 break;
@@ -19026,19 +19472,172 @@ void FrameTick(float dt)
     }
     else if (sActiveTab == EditorTab::Mode7)
     {
-        // Mode 4 tab: viewport + tileset/tilemap/palette panels
+        // Mode 1 tab: viewport + scene panel + tileset/tilemap/palette panels
+        float m7ScenePanH = 0;
+
         DrawViewport(
             ImVec2(vp->WorkPos.x, bodyY),
             ImVec2(leftW, bodyH));
 
+        // Scene panel (top-right)
+        {
+            int bpExtraH = 0;
+            if (sM7SelectedScene >= 0 && sM7SelectedScene < (int)sM7Scenes.size() && sM7Scenes[sM7SelectedScene].blueprintIdx >= 0)
+                bpExtraH = 20 + sM7Scenes[sM7SelectedScene].instanceParamCount * 22;
+            m7ScenePanH = 160 + 50 + bpExtraH;
+            if (m7ScenePanH > bodyH * 0.5f) m7ScenePanH = (float)(int)(bodyH * 0.5f);
+            ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+            ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + leftW, bodyY));
+            ImGui::SetNextWindowSize(ImVec2(rightW, m7ScenePanH));
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.13f, 1.0f));
+            ImGui::Begin("##M7ScenePanel", nullptr, panelFlags);
+
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Mode 7 Scenes");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("+##addm7scene"))
+            {
+                if (sM7SelectedScene >= 0 && sM7SelectedScene < (int)sM7Scenes.size())
+                    SaveM7SceneState(sM7Scenes[sM7SelectedScene]);
+                MapScene ms;
+                snprintf(ms.name, sizeof(ms.name), "M7 Scene %d", (int)sM7Scenes.size());
+                ms.spriteCount = 0;
+                sM7Scenes.push_back(ms);
+                sM7SelectedScene = (int)sM7Scenes.size() - 1;
+                LoadM7SceneState(sM7Scenes[sM7SelectedScene]);
+            }
+            if ((int)sM7Scenes.size() > 1) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("x##delm7scene"))
+                {
+                    sM7Scenes.erase(sM7Scenes.begin() + sM7SelectedScene);
+                    if (sM7SelectedScene >= (int)sM7Scenes.size())
+                        sM7SelectedScene = (int)sM7Scenes.size() - 1;
+                    LoadM7SceneState(sM7Scenes[sM7SelectedScene]);
+                }
+            }
+
+            // Scene list
+            ImGui::BeginChild("##M7SceneList", ImVec2(0, 100));
+            for (int i = 0; i < (int)sM7Scenes.size(); i++)
+            {
+                bool sel = (i == sM7SelectedScene);
+                if (sel)
+                {
+                    ImGui::PushItemWidth(-1);
+                    char idBuf[32]; snprintf(idBuf, sizeof(idBuf), "##m7name%d", i);
+                    ImGui::InputText(idBuf, sM7Scenes[i].name, sizeof(sM7Scenes[i].name));
+                    ImGui::PopItemWidth();
+                }
+                else
+                {
+                    char lbl[64];
+                    snprintf(lbl, sizeof(lbl), "%s##m7s%d", sM7Scenes[i].name, i);
+                    if (ImGui::Selectable(lbl, false))
+                    {
+                        if (sM7SelectedScene >= 0 && sM7SelectedScene < (int)sM7Scenes.size())
+                            SaveM7SceneState(sM7Scenes[sM7SelectedScene]);
+                        sM7SelectedScene = i;
+                        LoadM7SceneState(sM7Scenes[i]);
+                    }
+                }
+                // Drag-drop reorder
+                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
+                    ImGui::SetDragDropPayload("M7_SCENE", &i, sizeof(int));
+                    ImGui::Text("%s", sM7Scenes[i].name);
+                    ImGui::EndDragDropSource();
+                }
+                if (ImGui::BeginDragDropTarget()) {
+                    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("M7_SCENE")) {
+                        int src = *(const int*)payload->Data;
+                        if (src != i && src >= 0 && src < (int)sM7Scenes.size()) {
+                            MapScene tmp = sM7Scenes[src];
+                            sM7Scenes.erase(sM7Scenes.begin() + src);
+                            int dst = (src < i) ? i - 1 : i;
+                            sM7Scenes.insert(sM7Scenes.begin() + dst, tmp);
+                            if (sM7SelectedScene == src) sM7SelectedScene = dst;
+                            else if (src < sM7SelectedScene && dst >= sM7SelectedScene) sM7SelectedScene--;
+                            else if (src > sM7SelectedScene && dst <= sM7SelectedScene) sM7SelectedScene++;
+                            sProjectDirty = true;
+                        }
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+            }
+            ImGui::EndChild();
+
+            // Scene-level blueprint
+            if (sM7SelectedScene >= 0 && sM7SelectedScene < (int)sM7Scenes.size()) {
+                MapScene& ms = sM7Scenes[sM7SelectedScene];
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Scene Blueprint");
+                ImGui::PushItemWidth(-1);
+                const char* bpPreview = (ms.blueprintIdx >= 0 && ms.blueprintIdx < (int)sBlueprintAssets.size())
+                    ? sBlueprintAssets[ms.blueprintIdx].name : "(none)";
+                if (ImGui::BeginCombo("Script##m7scenebp", bpPreview)) {
+                    if (ImGui::Selectable("(none)##m7scenebpnone", ms.blueprintIdx < 0)) {
+                        ms.blueprintIdx = -1;
+                        ms.instanceParamCount = 0;
+                        sProjectDirty = true;
+                    }
+                    for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++) {
+                        bool bsel = (ms.blueprintIdx == bi);
+                        if (ImGui::Selectable(sBlueprintAssets[bi].name, bsel)) {
+                            ms.blueprintIdx = bi;
+                            ms.instanceParamCount = 0;
+                            sProjectDirty = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ms.blueprintIdx >= 0 && ms.blueprintIdx < (int)sBlueprintAssets.size()) {
+                    const BlueprintAsset& bp = sBlueprintAssets[ms.blueprintIdx];
+                    for (int pi = 0; pi < bp.paramCount; pi++) {
+                        const BpParam& param = bp.params[pi];
+                        int overrideIdx = -1;
+                        for (int oi = 0; oi < ms.instanceParamCount; oi++)
+                            if (ms.instanceParams[oi].paramIdx == pi) { overrideIdx = oi; break; }
+                        int val = (overrideIdx >= 0) ? ms.instanceParams[overrideIdx].value : param.defaultInt;
+                        ImGui::PushID(pi + 8000);
+                        char label[48]; snprintf(label, sizeof(label), "%s##m7bp%d", param.name, pi);
+                        if (ImGui::DragInt(label, &val, 1.0f)) {
+                            if (overrideIdx >= 0) {
+                                ms.instanceParams[overrideIdx].value = val;
+                            } else if (ms.instanceParamCount < 8) {
+                                ms.instanceParams[ms.instanceParamCount].paramIdx = pi;
+                                ms.instanceParams[ms.instanceParamCount].value = val;
+                                ms.instanceParamCount++;
+                            }
+                            sProjectDirty = true;
+                        }
+                        if (overrideIdx >= 0) {
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Reset")) {
+                                for (int oi = overrideIdx; oi < ms.instanceParamCount - 1; oi++)
+                                    ms.instanceParams[oi] = ms.instanceParams[oi + 1];
+                                ms.instanceParamCount--;
+                                sProjectDirty = true;
+                            }
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                ImGui::PopItemWidth();
+            }
+
+            ImGui::End();
+            ImGui::PopStyleColor();
+        }
+
         if (sEditorMode == EditorMode::Edit)
             DrawObjectEditorPanel(
-                ImVec2(vp->WorkPos.x + leftW, bodyY),
-                ImVec2(rightW, tilesetH));
+                ImVec2(vp->WorkPos.x + leftW, bodyY + m7ScenePanH),
+                ImVec2(rightW, tilesetH - m7ScenePanH));
         else
             DrawTilesetPanel(
-                ImVec2(vp->WorkPos.x + leftW, bodyY),
-                ImVec2(rightW, tilesetH));
+                ImVec2(vp->WorkPos.x + leftW, bodyY + m7ScenePanH),
+                ImVec2(rightW, tilesetH - m7ScenePanH));
 
         DrawTilemapPanel(
             ImVec2(vp->WorkPos.x + leftW, bodyY + tilesetH),

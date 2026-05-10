@@ -4225,7 +4225,45 @@ static void scene_load(int sceneMode, int sceneIdx)
 #endif
 #endif
     } else {
-        // Mode 1 (legacy Mode 7) — not switching to this at runtime
+        // Mode 1 (Mode 7 affine floor)
+        tm_scene_idx = sceneIdx;
+        REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
+        REG_BG2CNT = BG_CBB(2) | BG_SBB(28) | BG_AFF_64x64 | BG_8BPP | BG_PRIO(2);
+        REG_BG2PA = 0x0100; REG_BG2PB = 0;
+        REG_BG2PC = 0;      REG_BG2PD = 0x0100;
+        REG_BG2X  = 0;      REG_BG2Y  = 0;
+#ifdef AFFINITY_HAS_MAPDATA
+        load_editor_map();
+#else
+        load_checkerboard();
+#endif
+        init_obj_sprites();
+        tm_static_adj = AFN_DIR_VRAM_TILES;
+#if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_DIR_ANIM_TILES_LEN)
+        { int ai; for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {
+            if (!afn_asset_dir_desc[ai][4]) continue;
+            switch_dir_anim_set(ai, 0);
+        } }
+#endif
+        init_minimap();
+#if defined(AFFINITY_HAS_SPRITES) && AFN_SPRITE_COUNT > 0
+        load_editor_sprites();
+#endif
+        player_sprite_idx = -1;
+#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
+        player_sprite_idx = AFN_PLAYER_IDX;
+        player_x = g_sprites[AFN_PLAYER_IDX].x;
+        player_z = g_sprites[AFN_PLAYER_IDX].z;
+        player_y = g_sprites[AFN_PLAYER_IDX].y;
+        orbit_angle = AFN_CAM_ANGLE;
+        orbit_dist = AFN_ORBIT_DIST;
+        player_moving = 0;
+        player_move_angle = 0x4000;
+#ifdef AFN_HAS_SCRIPT
+        afn_start_x = player_x; afn_start_y = player_y; afn_start_z = player_z;
+#endif
+#endif
+        irq_add(II_HBLANK, m7_hbl);
     }
 
     // Re-run OnStart scripts for new scene
