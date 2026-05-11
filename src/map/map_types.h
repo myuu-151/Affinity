@@ -221,6 +221,20 @@ struct FloorSprite
     bool  animEnabled = true; // false = static (no animation cycling)
     uint32_t color = 0xFFFF00FF; // tint color (ABGR) — used for editor preview
     bool  selected = false;
+    // Attached sub-sprites (extra sprite layers with local offsets)
+    struct SubSprite {
+        int   assetIdx = -1;
+        int   animIdx  = 0;
+        bool  animEnabled = true;
+        float offsetX = 0.0f;
+        float offsetY = 0.0f;
+        float offsetZ = 0.0f;
+        int   drawOrder = 1; // 0 = behind parent, 1 = in front
+        float scale = 1.0f;  // size multiplier
+    };
+    static constexpr int kMaxSubSprites = 4;
+    SubSprite subSprites[kMaxSubSprites];
+    int subSpriteCount = 0;
     // Blueprint script attachment
     int   blueprintIdx = -1;         // index into sBlueprintAssets (-1 = none)
     struct { int paramIdx; int value; } instanceParams[8] = {};

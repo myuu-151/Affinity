@@ -171,12 +171,14 @@ static void DrawDiamond(int cx, int cy, int halfW, int halfH,
 // Sprite projection data for sorting
 struct SpriteProj
 {
-    float depth;   // distance from camera (for sorting)
-    int   screenX; // center X on screen
-    int   screenY; // base Y on screen (foot position)
-    float scale;   // size scale factor
-    float fog;     // fog amount
-    int   idx;     // index into sprite array
+    float depth;      // distance from camera (for sorting)
+    int   screenX;    // center X on screen
+    int   screenY;    // base Y on screen (foot position)
+    float scale;      // size scale factor
+    float fog;        // fog amount
+    int   idx;        // index into sprite array
+    int   subIdx;     // -1 = main sprite, 0-3 = sub-sprite index
+    int   drawOrder;  // 0 = behind parent, 1 = parent, 2 = in front
 };
 
 // Draw a filled triangle into the framebuffer (scanline rasterizer)
@@ -648,65 +650,80 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
     if ((!sprites || spriteCount <= 0) && !camObj) return;
     if (!sprites) spriteCount = 0;
 
-    // Project each sprite to screen space
-    SpriteProj projected[kMaxFloorSprites];
+    // Project each sprite (+ sub-sprites) to screen space
+    // Max entries: kMaxFloorSprites * (1 + kMaxSubSprites)
+    SpriteProj projected[kMaxFloorSprites * 5];
     int projCount = 0;
 
     for (int i = 0; i < spriteCount && i < kMaxFloorSprites; i++)
     {
-        // Vector from camera to sprite in world space
-        float dx = sprites[i].x - cam.x;
-        float dz = sprites[i].z - cam.z;
+        // Project parent + sub-sprites: subPass -1 = parent, 0..N = sub-sprites
+        int totalPasses = 1 + sprites[i].subSpriteCount;
+        for (int subPass = -1; subPass < sprites[i].subSpriteCount; subPass++)
+        {
+            float wx = sprites[i].x;
+            float wy = sprites[i].y;
+            float wz = sprites[i].z;
+            if (subPass >= 0) {
+                const auto& sub = sprites[i].subSprites[subPass];
+                wx += sub.offsetX;
+                wy += sub.offsetY;
+                wz += sub.offsetZ;
+            }
 
-        // Invert the Mode 4 floor mapping to find screen position.
-        // Floor forward: wx = cam.x + (px-120)*lambda*cosA + fov*lambda*sinA
-        //                wz = cam.z + (px-120)*lambda*sinA - fov*lambda*cosA
-        // Solving for lambda: fov*lambda = dx*sinA - dz*cosA
-        //   => lambda = (dx*sinA - dz*cosA) / fov
-        // Solving for px: (px-120)*lambda = dx*cosA + dz*sinA
-        //   => px = 120 + (dx*cosA + dz*sinA) / lambda
+            float dx = wx - cam.x;
+            float dz = wz - cam.z;
+            float fovLambda = dx * sinA - dz * cosA;
+            if (fovLambda < 0.1f) fovLambda = 0.1f;
+            float lambda = fovLambda / cam.fov;
+            if (lambda < 0.01f) lambda = 0.01f;
 
-        float fovLambda = dx * sinA - dz * cosA;
+            int screenY = horizon + (int)((cam.height - wy) / lambda);
+            float sideComponent = dx * cosA + dz * sinA;
+            int screenX = 120 + (int)(sideComponent / lambda);
 
-        // Clamp near plane instead of culling
-        if (fovLambda < 0.1f) fovLambda = 0.1f;
+            if (screenY < 0 || screenY >= kGBAHeight) continue;
+            if (screenX < -32 || screenX >= kGBAWidth + 32) continue;
 
-        float lambda = fovLambda / cam.fov;
-        if (lambda < 0.01f) lambda = 0.01f; // prevent overflow when camera is very close
+            float scale = cam.height / lambda;
+            float fog = lambda / 300.0f;
+            if (fog > 1.0f) fog = 1.0f;
+            if (fog > 0.95f) continue;
 
-        // screenY from lambda = height / (y - horizon) => y = horizon + height / lambda
-        int screenY = horizon + (int)((cam.height - sprites[i].y) / lambda);
+            // Draw order: 0 = behind, 1 = parent, 2 = in front
+            int drawOrd = 1; // parent
+            if (subPass >= 0) {
+                int order = sprites[i].subSprites[subPass].drawOrder;
+                drawOrd = (order == 0) ? 0 : 2; // behind or in front
+            }
 
-        // screenX from the side component
-        float sideComponent = dx * cosA + dz * sinA;
-        int screenX = 120 + (int)(sideComponent / lambda);
-
-        // Skip if completely off-screen
-        if (screenY < 0 || screenY >= kGBAHeight) continue;
-        if (screenX < -32 || screenX >= kGBAWidth + 32) continue;
-
-        // Scale: sprite base size is 16px, scaled inversely by distance
-        float scale = cam.height / lambda;
-        float fog = lambda / 300.0f;
-        if (fog > 1.0f) fog = 1.0f;
-
-        // Don't draw if too fogged out
-        if (fog > 0.95f) continue;
-
-        projected[projCount].depth   = lambda;
-        projected[projCount].screenX = screenX;
-        projected[projCount].screenY = screenY;
-        projected[projCount].scale   = scale;
-        projected[projCount].fog     = fog;
-        projected[projCount].idx     = i;
-        projCount++;
+            projected[projCount].depth   = lambda;
+            projected[projCount].screenX = screenX;
+            projected[projCount].screenY = screenY;
+            projected[projCount].scale   = scale;
+            projected[projCount].fog     = fog;
+            projected[projCount].idx     = i;
+            projected[projCount].subIdx  = subPass;
+            projected[projCount].drawOrder = drawOrd;
+            projCount++;
+            if (projCount >= (int)(sizeof(projected) / sizeof(projected[0]))) break;
+        }
+        if (projCount >= (int)(sizeof(projected) / sizeof(projected[0]))) break;
     }
 
-    // Sort back-to-front (farthest first)
+    // Sort back-to-front (farthest first), with drawOrder as tiebreaker for same-parent sprites
     for (int i = 0; i < projCount - 1; i++)
-        for (int j = i + 1; j < projCount; j++)
-            if (projected[i].depth < projected[j].depth)
-                std::swap(projected[i], projected[j]);
+        for (int j = i + 1; j < projCount; j++) {
+            bool swap = false;
+            if (projected[i].idx == projected[j].idx) {
+                // Same parent: sort by drawOrder (lower = behind = drawn first)
+                swap = (projected[i].drawOrder > projected[j].drawOrder);
+            } else {
+                // Different parents: sort by depth (farther = drawn first)
+                swap = (projected[i].depth < projected[j].depth);
+            }
+            if (swap) std::swap(projected[i], projected[j]);
+        }
 
     // Draw each sprite as a diamond billboard (or asset frame) and store projection for click-select
     sLastProjCount = 0;
@@ -715,13 +732,27 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         const SpriteProj& sp = projected[i];
         const FloorSprite& fs = sprites[sp.idx];
 
+        // For sub-sprites, override asset/anim from sub-sprite data
+        int effectiveAssetIdx = fs.assetIdx;
+        int effectiveAnimIdx = fs.animIdx;
+        bool effectiveAnimEnabled = fs.animEnabled;
+        if (sp.subIdx >= 0 && sp.subIdx < fs.subSpriteCount) {
+            const auto& sub = fs.subSprites[sp.subIdx];
+            effectiveAssetIdx = sub.assetIdx;
+            effectiveAnimIdx = sub.animIdx;
+            effectiveAnimEnabled = sub.animEnabled;
+        }
+
         // Extract color (ABGR format)
         uint8_t cr = (fs.color >>  0) & 0xFF;
         uint8_t cg = (fs.color >>  8) & 0xFF;
         uint8_t cb = (fs.color >> 16) & 0xFF;
 
-        int halfW = std::clamp((int)(8.0f * sp.scale / cam.height * 1.6f * fs.scale), 2, 200);
-        int halfH = std::clamp((int)(12.0f * sp.scale / cam.height * 1.6f * fs.scale), 3, 200);
+        float effectiveScale = fs.scale;
+        if (sp.subIdx >= 0 && sp.subIdx < fs.subSpriteCount)
+            effectiveScale = fs.subSprites[sp.subIdx].scale;
+        int halfW = std::clamp((int)(8.0f * sp.scale / cam.height * 1.6f * effectiveScale), 2, 200);
+        int halfH = std::clamp((int)(12.0f * sp.scale / cam.height * 1.6f * effectiveScale), 3, 200);
         int meshSelCX = sp.screenX, meshSelCY = 0;
         bool hasMeshBounds = false;
 
@@ -730,12 +761,12 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
 
         // Check if this sprite has a linked asset with directional images
         bool drewSprite = false;
-        if (fs.assetIdx >= 0 && fs.assetIdx < assetCount && assets
-            && assetDirImages && fs.assetIdx < assetDirCount
-            && assets[fs.assetIdx].hasDirections)
+        if (effectiveAssetIdx >= 0 && effectiveAssetIdx < assetCount && assets
+            && assetDirImages && effectiveAssetIdx < assetDirCount
+            && assets[effectiveAssetIdx].hasDirections)
         {
             int dirIdx;
-            if (fs.type == SpriteType::Player)
+            if (fs.type == SpriteType::Player && sp.subIdx < 0)
             {
                 // Player direction: based on movement/orbit angle (same as GBA runtime)
                 float a = playerOrbitAngle;
@@ -746,7 +777,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             }
             else
             {
-                // Non-player: compute angle from camera to sprite
+                // Non-player / sub-sprite: compute angle from camera to sprite
                 float dx = fs.x - cam.x;
                 float dz = fs.z - cam.z;
                 float angleToSprite = atan2f(dx, -dz);
@@ -760,10 +791,10 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 dirIdx = ((int)((relAngle + 0.39269908f) / 0.78539816f)) % 8;
             }
 
-            // Use per-sprite dir images if available, else fall back to per-asset
-            const PlayerDirImage& adi = (spriteDirImages && sp.idx < spriteDirCount)
+            // Use per-sprite dir images if available (only for parent), else per-asset
+            const PlayerDirImage& adi = (sp.subIdx < 0 && spriteDirImages && sp.idx < spriteDirCount)
                 ? spriteDirImages[sp.idx].dirs[dirIdx]
-                : assetDirImages[fs.assetIdx].dirs[dirIdx];
+                : assetDirImages[effectiveAssetIdx].dirs[dirIdx];
             if (adi.pixels && adi.width > 0 && adi.height > 0)
             {
                 int halfS = std::max(halfW, halfH);
@@ -774,16 +805,16 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         }
 
         // Check if this sprite has a linked asset with frames
-        if (!drewSprite && fs.assetIdx >= 0 && fs.assetIdx < assetCount && assets)
+        if (!drewSprite && effectiveAssetIdx >= 0 && effectiveAssetIdx < assetCount && assets)
         {
-            const SpriteAsset& asset = assets[fs.assetIdx];
+            const SpriteAsset& asset = assets[effectiveAssetIdx];
             if (!asset.frames.empty())
             {
                 // Determine which frame to show (animate if anim linked)
                 int frameIdx = 0;
-                if (fs.animIdx >= 0 && fs.animIdx < (int)asset.anims.size())
+                if (effectiveAnimIdx >= 0 && effectiveAnimIdx < (int)asset.anims.size())
                 {
-                    const SpriteAnim& anim = asset.anims[fs.animIdx];
+                    const SpriteAnim& anim = asset.anims[effectiveAnimIdx];
                     int frameCount = anim.endFrame - anim.startFrame + 1;
                     if (frameCount > 0 && anim.fps > 0)
                     {
@@ -804,8 +835,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 drewSprite = true;
             }
         }
-        // Render mesh geometry for Mesh-type sprites
-        if (!drewSprite && fs.type == SpriteType::Mesh
+        // Render mesh geometry for Mesh-type sprites (skip for sub-sprites)
+        if (!drewSprite && sp.subIdx < 0 && fs.type == SpriteType::Mesh
             && fs.meshIdx >= 0 && fs.meshIdx < meshAssetCount && meshAssets)
         {
             const MeshAsset& ma = meshAssets[fs.meshIdx];
@@ -1004,23 +1035,26 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         if (!drewSprite)
             DrawDiamond(sp.screenX, drawCenterY, halfW, halfH, cr, cg, cb, sp.fog);
 
-        // Selection highlight: bright outline
-        if (fs.selected)
+        // Selection highlight and click-select only for parent sprites
+        if (sp.subIdx < 0)
         {
-            int selCX = hasMeshBounds ? meshSelCX : sp.screenX;
-            DrawRect(selCX - halfW - 1, drawCenterY - halfH - 1,
-                     halfW * 2 + 2, 1, 255, 255, 255);
-            DrawRect(selCX - halfW - 1, drawCenterY + halfH,
-                     halfW * 2 + 2, 1, 255, 255, 255);
-        }
+            if (fs.selected)
+            {
+                int selCX = hasMeshBounds ? meshSelCX : sp.screenX;
+                DrawRect(selCX - halfW - 1, drawCenterY - halfH - 1,
+                         halfW * 2 + 2, 1, 255, 255, 255);
+                DrawRect(selCX - halfW - 1, drawCenterY + halfH,
+                         halfW * 2 + 2, 1, 255, 255, 255);
+            }
 
-        // Store for viewport click-to-select
-        sLastProj[sLastProjCount].screenX = hasMeshBounds ? meshSelCX : sp.screenX;
-        sLastProj[sLastProjCount].screenY = drawCenterY;
-        sLastProj[sLastProjCount].halfW = halfW;
-        sLastProj[sLastProjCount].halfH = halfH;
-        sLastProj[sLastProjCount].spriteIdx = sp.idx;
-        sLastProjCount++;
+            // Store for viewport click-to-select
+            sLastProj[sLastProjCount].screenX = hasMeshBounds ? meshSelCX : sp.screenX;
+            sLastProj[sLastProjCount].screenY = drawCenterY;
+            sLastProj[sLastProjCount].halfW = halfW;
+            sLastProj[sLastProjCount].halfH = halfH;
+            sLastProj[sLastProjCount].spriteIdx = sp.idx;
+            sLastProjCount++;
+        }
     }
 
     // --- Render camera start object on the floor ---

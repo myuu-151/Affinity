@@ -29,6 +29,9 @@ typedef struct {
     FIXED wx;        // world position (used by script codegen for AI/patrol)
     FIXED wz;
     u16   facing;    // facing angle (brad, used by LookAt/FacePlayer scripts)
+    u8    oamPrio;   // OAM priority (0 = on top, 1 = behind parent)
+    s8    parentIdx; // parent sprite index (-1 = standalone)
+    FIXED offX, offY, offZ; // offset from parent (16.8 fixed)
 } FloorSpriteGBA;
 
 EWRAM_DATA static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
@@ -1396,6 +1399,11 @@ static void load_editor_sprites(void)
 #else
         g_sprites[i].meshIdx     = -1;
 #endif
+        g_sprites[i].oamPrio = (u8)afn_sprite_data[i][10];
+        g_sprites[i].parentIdx = (s8)afn_sprite_data[i][11];
+        g_sprites[i].offX = afn_sprite_data[i][12];
+        g_sprites[i].offY = afn_sprite_data[i][13];
+        g_sprites[i].offZ = afn_sprite_data[i][14];
         g_sprites[i].wx = g_sprites[i].x;
         g_sprites[i].wz = g_sprites[i].z;
         g_sprites[i].facing = g_sprites[i].rotation;
@@ -1629,7 +1637,7 @@ static void update_sprites(void)
 
             obj_mem[oamIdx].attr0 = ATTR0_Y(sy & 0xFF) | ATTR0_SQUARE | ATTR0_AFF_DBL;
             obj_mem[oamIdx].attr1 = ATTR1_X(sx & 0x1FF) | size_to_attr1(baseSize) | ATTR1_AFF_ID(affIdx);
-            obj_mem[oamIdx].attr2 = ATTR2_ID(tileId) | ATTR2_PRIO(0) | ATTR2_PALBANK(palBank);
+            obj_mem[oamIdx].attr2 = ATTR2_ID(tileId) | ATTR2_PRIO(g_sprites[sprIdx].oamPrio) | ATTR2_PALBANK(palBank);
         }
     }
 
@@ -6090,6 +6098,19 @@ int main(void)
             cam_angle = 0;
             m7_horizon = 60;
 #endif
+        }
+
+        // Update sub-sprite positions to follow parent
+        {
+            int si;
+            for (si = 0; si < g_spriteCount; si++) {
+                int pi = g_sprites[si].parentIdx;
+                if (pi >= 0 && pi < g_spriteCount) {
+                    g_sprites[si].x = g_sprites[pi].x + g_sprites[si].offX;
+                    g_sprites[si].y = g_sprites[pi].y + g_sprites[si].offY;
+                    g_sprites[si].z = g_sprites[pi].z + g_sprites[si].offZ;
+                }
+            }
         }
 
         // Project and draw sprites

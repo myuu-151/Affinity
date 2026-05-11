@@ -4404,6 +4404,15 @@ static bool SaveProject(const std::string& path)
         for (int ip = 0; ip < sp.instanceParamCount; ip++)
             fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
         fprintf(f, "\n");
+        if (sp.subSpriteCount > 0) {
+            fprintf(f, "subSpriteCount=%d\n", sp.subSpriteCount);
+            for (int si = 0; si < sp.subSpriteCount; si++) {
+                const auto& sub = sp.subSprites[si];
+                fprintf(f, "subSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f\n",
+                    sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
+                    sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale);
+            }
+        }
     }
     fprintf(f, "\n");
 
@@ -4827,6 +4836,15 @@ static bool SaveProject(const std::string& path)
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
+            if (sp.subSpriteCount > 0) {
+                fprintf(f, "msSubSpriteCount=%d\n", sp.subSpriteCount);
+                for (int si = 0; si < sp.subSpriteCount; si++) {
+                    const auto& sub = sp.subSprites[si];
+                    fprintf(f, "msSubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f\n",
+                        sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
+                        sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale);
+                }
+            }
         }
         // Camera
         fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f\n",
@@ -4940,6 +4958,15 @@ static bool SaveProject(const std::string& path)
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
+            if (sp.subSpriteCount > 0) {
+                fprintf(f, "m7SubSpriteCount=%d\n", sp.subSpriteCount);
+                for (int si2 = 0; si2 < sp.subSpriteCount; si2++) {
+                    const auto& sub = sp.subSprites[si2];
+                    fprintf(f, "m7SubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f\n",
+                        sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
+                        sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale);
+                }
+            }
         }
         fprintf(f, "m7Cam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f\n",
                 ms.camera.x, ms.camera.z, ms.camera.height, ms.camera.angle, ms.camera.horizon,
@@ -5283,8 +5310,31 @@ static bool LoadProject(const std::string& path)
                             }
                         }
                     }
+                    sp.subSpriteCount = 0;
                     sp.selected = false;
                     sSpriteCount++;
+                }
+            }
+            else if (strncmp(line, "subSpriteCount=", 15) == 0 && sSpriteCount > 0) {
+                int cnt = 0;
+                sscanf(line + 15, "%d", &cnt);
+                sSprites[sSpriteCount - 1].subSpriteCount = std::min(cnt, (int)FloorSprite::kMaxSubSprites);
+            }
+            else if (strncmp(line, "subSprite=", 10) == 0 && sSpriteCount > 0) {
+                FloorSprite& sp2 = sSprites[sSpriteCount - 1];
+                // subSprite lines are sequential — count loaded so far
+                int loaded = 0;
+                for (int si = 0; si < sp2.subSpriteCount; si++)
+                    if (sp2.subSprites[si].assetIdx != -1) loaded++;
+                if (loaded < sp2.subSpriteCount) {
+                    auto& sub = sp2.subSprites[loaded];
+                    int aEn = 1, dOrder = 1; float sScale = 1.0f;
+                    int m = sscanf(line + 10, "%d,%d,%d,%f,%f,%f,%d,%f",
+                        &sub.assetIdx, &sub.animIdx, &aEn,
+                        &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale);
+                    sub.animEnabled = (aEn != 0);
+                    sub.drawOrder = (m >= 7) ? dOrder : 1;
+                    sub.scale = (m >= 8) ? sScale : 1.0f;
                 }
             }
         }
@@ -6296,6 +6346,32 @@ static bool LoadProject(const std::string& path)
                         ms.sprites[ms.spriteCount++] = sp;
                 }
             }
+            else if (strncmp(line, "msSubSpriteCount=", 17) == 0 && !sMapScenes.empty()) {
+                MapScene& ms = sMapScenes.back();
+                if (ms.spriteCount > 0) {
+                    int cnt = 0; sscanf(line + 17, "%d", &cnt);
+                    ms.sprites[ms.spriteCount - 1].subSpriteCount = std::min(cnt, (int)FloorSprite::kMaxSubSprites);
+                }
+            }
+            else if (strncmp(line, "msSubSprite=", 12) == 0 && !sMapScenes.empty()) {
+                MapScene& ms = sMapScenes.back();
+                if (ms.spriteCount > 0) {
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    int loaded = 0;
+                    for (int si = 0; si < sp2.subSpriteCount; si++)
+                        if (sp2.subSprites[si].assetIdx != -1) loaded++;
+                    if (loaded < sp2.subSpriteCount) {
+                        auto& sub = sp2.subSprites[loaded];
+                        int aEn = 1, dOrder = 1; float sScale = 1.0f;
+                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f",
+                            &sub.assetIdx, &sub.animIdx, &aEn,
+                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale);
+                        sub.animEnabled = (aEn != 0);
+                        sub.drawOrder = (m >= 7) ? dOrder : 1;
+                        sub.scale = (m >= 8) ? sScale : 1.0f;
+                    }
+                }
+            }
             else if (strncmp(line, "msCam=", 6) == 0 && !sMapScenes.empty())
             {
                 MapScene& ms = sMapScenes.back();
@@ -6635,6 +6711,32 @@ static bool LoadProject(const std::string& path)
                     }
                     if (ms.spriteCount < kMaxFloorSprites)
                         ms.sprites[ms.spriteCount++] = sp;
+                }
+            }
+            else if (strncmp(line, "m7SubSpriteCount=", 17) == 0 && !sM7Scenes.empty()) {
+                MapScene& ms = sM7Scenes.back();
+                if (ms.spriteCount > 0) {
+                    int cnt = 0; sscanf(line + 17, "%d", &cnt);
+                    ms.sprites[ms.spriteCount - 1].subSpriteCount = std::min(cnt, (int)FloorSprite::kMaxSubSprites);
+                }
+            }
+            else if (strncmp(line, "m7SubSprite=", 12) == 0 && !sM7Scenes.empty()) {
+                MapScene& ms = sM7Scenes.back();
+                if (ms.spriteCount > 0) {
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    int loaded = 0;
+                    for (int si = 0; si < sp2.subSpriteCount; si++)
+                        if (sp2.subSprites[si].assetIdx != -1) loaded++;
+                    if (loaded < sp2.subSpriteCount) {
+                        auto& sub = sp2.subSprites[loaded];
+                        int aEn = 1, dOrder = 1; float sScale = 1.0f;
+                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f",
+                            &sub.assetIdx, &sub.animIdx, &aEn,
+                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale);
+                        sub.animEnabled = (aEn != 0);
+                        sub.drawOrder = (m >= 7) ? dOrder : 1;
+                        sub.scale = (m >= 8) ? sScale : 1.0f;
+                    }
                 }
             }
             else if (strncmp(line, "m7Cam=", 6) == 0 && !sM7Scenes.empty())
@@ -7755,6 +7857,20 @@ static void DrawTabBar()
         }
         if (ImGui::Button(label, ImVec2(btnW, btnH)) && tab != sActiveTab)
         {
+            // Exit blueprint edit mode before switching tabs
+            if (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0 && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
+                BlueprintAsset& bp = sBlueprintAssets[sVsEditBlueprintIdx];
+                bp.nodes = sVsNodes; bp.links = sVsLinks; bp.annotations = sVsAnnotations;
+                bp.groupPins = sVsGroupPins; bp.nextId = sVsNextId;
+                bp.panX = sVsPanX; bp.panY = sVsPanY; bp.zoom = sVsZoom;
+                if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+                    LoadMapSceneState(sMapScenes[sMapSelectedScene]);
+                sVsEditSource = VsEditSource::Scene;
+                sVsEditBlueprintIdx = -1;
+                sVsSelected = -1;
+                sVsUndoStack.clear();
+            }
+
             // Save current scene state before switching tabs
             if (sActiveTab == EditorTab::Map && sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
                 SaveMapSceneState(sMapScenes[sMapSelectedScene]);
@@ -9617,6 +9733,65 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                 const MeshAsset& ma = sMeshAssets[sp.meshIdx];
                 ImGui::Text("Verts: %d  Tris: %d", (int)ma.vertices.size(), (int)ma.indices.size() / 3);
             }
+        }
+
+        // Attached sub-sprites
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.7f, 1.0f), "Attached Sprites");
+        for (int si = 0; si < sp.subSpriteCount; si++) {
+            auto& sub = sp.subSprites[si];
+            ImGui::PushID(si + 7000);
+            const char* subPreview = (sub.assetIdx >= 0 && sub.assetIdx < (int)sSpriteAssets.size())
+                ? sSpriteAssets[sub.assetIdx].name.c_str() : "(none)";
+            if (ImGui::BeginCombo("Asset##sub", subPreview)) {
+                if (ImGui::Selectable("(none)##subnone", sub.assetIdx < 0))
+                    sub.assetIdx = -1;
+                for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++) {
+                    bool sel = (sub.assetIdx == ai);
+                    if (ImGui::Selectable(sSpriteAssets[ai].name.c_str(), sel))
+                        sub.assetIdx = ai;
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::DragFloat("X##sub", &sub.offsetX, 0.5f, -200.0f, 200.0f);
+            ImGui::DragFloat("Y##sub", &sub.offsetY, 0.5f, -200.0f, 200.0f);
+            ImGui::DragFloat("Z##sub", &sub.offsetZ, 0.5f, -200.0f, 200.0f);
+            ImGui::DragFloat("Scale##sub", &sub.scale, 0.05f, 0.1f, 10.0f, "%.2f");
+            const char* orderNames[] = { "Behind", "In Front" };
+            ImGui::Combo("Draw##sub", &sub.drawOrder, orderNames, 2);
+            // Animation selector for sub-sprite
+            if (sub.assetIdx >= 0 && sub.assetIdx < (int)sSpriteAssets.size()) {
+                SpriteAsset& subAsset = sSpriteAssets[sub.assetIdx];
+                for (int ai = 0; ai < (int)subAsset.anims.size(); ai++) {
+                    ImGui::PushID(ai + 8000);
+                    bool sel = (sub.animEnabled && sub.animIdx == ai);
+                    char slotLabel[64];
+                    snprintf(slotLabel, sizeof(slotLabel), "%s (frames %d)##sub", subAsset.anims[ai].name.c_str(), subAsset.anims[ai].endFrame);
+                    if (ImGui::Selectable(slotLabel, sel, 0, ImVec2(ImGui::GetContentRegionAvail().x - Scaled(30), 0))) {
+                        sub.animIdx = ai;
+                        sub.animEnabled = true;
+                    }
+                    ImGui::SameLine();
+                    bool rowEnabled = (sub.animEnabled && sub.animIdx == ai);
+                    if (ImGui::Checkbox("##subanimrow", &rowEnabled)) {
+                        if (rowEnabled) { sub.animIdx = ai; sub.animEnabled = true; }
+                        else sub.animEnabled = false;
+                    }
+                    ImGui::PopID();
+                }
+            }
+            if (ImGui::SmallButton("Remove##sub")) {
+                for (int j = si; j < sp.subSpriteCount - 1; j++)
+                    sp.subSprites[j] = sp.subSprites[j + 1];
+                sp.subSpriteCount--;
+                si--;
+            }
+            ImGui::Separator();
+            ImGui::PopID();
+        }
+        if (sp.subSpriteCount < FloorSprite::kMaxSubSprites) {
+            if (ImGui::Button("+ Add Sprite##addsub"))
+                sp.subSpriteCount++;
         }
 
         ImGui::PopItemWidth();
@@ -11558,7 +11733,36 @@ void FrameTick(float dt)
                             se.palIdx = sSpriteAssets[se.assetIdx].palBank;
                         else
                             se.palIdx = (i % 5) + 1;
+                        se.oamPrio = 0;
                         exportSprites.push_back(se);
+
+                        // Emit sub-sprites as separate sprite entries
+                        int parentExportIdx = (int)exportSprites.size() - 1;
+                        for (int si = 0; si < sSprites[i].subSpriteCount; si++) {
+                            const auto& sub = sSprites[i].subSprites[si];
+                            if (sub.assetIdx < 0) continue;
+                            GBASpriteExport subSe;
+                            subSe.x = sSprites[i].x + sub.offsetX;
+                            subSe.y = sSprites[i].y + sub.offsetY;
+                            subSe.z = sSprites[i].z + sub.offsetZ;
+                            subSe.scale = sub.scale;
+                            subSe.rotation = sSprites[i].rotation;
+                            subSe.assetIdx = sub.assetIdx;
+                            subSe.animIdx = sub.animIdx;
+                            subSe.animEnabled = sub.animEnabled;
+                            subSe.spriteType = (int)SpriteType::Prop;
+                            subSe.meshIdx = -1;
+                            subSe.oamPrio = (sub.drawOrder == 0) ? 1 : 0;
+                            subSe.parentIdx = parentExportIdx;
+                            subSe.offsetX = sub.offsetX;
+                            subSe.offsetY = sub.offsetY;
+                            subSe.offsetZ = sub.offsetZ;
+                            if (sub.assetIdx >= 0 && sub.assetIdx < (int)sSpriteAssets.size())
+                                subSe.palIdx = sSpriteAssets[sub.assetIdx].palBank;
+                            else
+                                subSe.palIdx = 1;
+                            exportSprites.push_back(subSe);
+                        }
                     }
                 }
                 GBACameraExport exportCam;

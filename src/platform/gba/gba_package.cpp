@@ -925,8 +925,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
     if (!sprites.empty())
     {
-        f << "static const int afn_sprite_data[][10] = {\n";
-        f << "    // { x_fixed, y_fixed, z_fixed, palIdx, assetIdx, scale_8_8, spriteType, rotation_brad, animEnabled, meshIdx }\n";
+        f << "static const int afn_sprite_data[][15] = {\n";
+        f << "    // { x, y, z, pal, asset, scale, type, rot, animEn, mesh, oamPrio, parent, offX, offY, offZ }\n";
         for (size_t i = 0; i < sprites.size(); i++)
         {
             int gx = EditorToGBAFixed(sprites[i].x);
@@ -936,12 +936,17 @@ static bool GenerateMapData(const std::string& runtimeDir,
             int aIdx = sprites[i].assetIdx;
             int scaleFixed = (int)(sprites[i].scale * 256.0f);
             int sType = sprites[i].spriteType;
-            // Convert degrees to brad (0-65535): degrees * 65536 / 360
             int rotBrad = (int)(sprites[i].rotation * 65536.0f / 360.0f) & 0xFFFF;
             int animEn = sprites[i].animEnabled ? 1 : 0;
             int meshIdx2 = sprites[i].meshIdx;
+            int oamPrio = sprites[i].oamPrio;
+            int parentIdx = sprites[i].parentIdx;
+            // Offsets are relative (no origin shift), same scale as EditorSpriteYToGBAFixed
+            int offX = (int)(sprites[i].offsetX / 4.0f * 256.0f);
+            int offY = (int)(sprites[i].offsetY / 4.0f * 256.0f);
+            int offZ = (int)(sprites[i].offsetZ / 4.0f * 256.0f);
             f << "    { " << gx << ", " << gy << ", " << gz << ", "
-              << pal << ", " << aIdx << ", " << scaleFixed << ", " << sType << ", " << rotBrad << ", " << animEn << ", " << meshIdx2 << " },\n";
+              << pal << ", " << aIdx << ", " << scaleFixed << ", " << sType << ", " << rotBrad << ", " << animEn << ", " << meshIdx2 << ", " << oamPrio << ", " << parentIdx << ", " << offX << ", " << offY << ", " << offZ << " },\n";
         }
         f << "};\n";
     }
