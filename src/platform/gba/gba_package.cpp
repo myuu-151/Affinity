@@ -256,7 +256,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                             const std::vector<GBASpriteAssetExport>& assets,
                             const GBACameraExport& camera,
                             const std::vector<GBAMeshExport>& meshes,
-                            const unsigned char* m7FloorPixels, int m7FloorW, int m7FloorH,
+                            const unsigned char* m7FloorPixels, int m7FloorW, int m7FloorH, int m7FloorSize,
+                            const unsigned char* m7SkyPixels, int m7SkyW, int m7SkyH,
                             float orbitDist,
                             const GBAScriptExport& script,
                             const std::vector<GBABlueprintExport>& blueprints,
@@ -5261,42 +5262,65 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
     // ---- Mode 7 floor texture (8bpp tiles + palette + map) ----
     if (m7FloorPixels && m7FloorW > 0 && m7FloorH > 0) {
+        // Resize source image to match floor size (nearest-neighbor)
+        const int floorPxSizes[] = { 128, 256, 512, 1024 };
+        int targetW = floorPxSizes[std::clamp(m7FloorSize, 0, 3)];
+        int targetH = targetW; // square
+        std::vector<unsigned char> resized;
+        const unsigned char* srcPx = m7FloorPixels;
+        int srcW = m7FloorW, srcH = m7FloorH;
+        if (srcW != targetW || srcH != targetH) {
+            resized.resize(targetW * targetH * 4);
+            for (int y = 0; y < targetH; y++) {
+                int sy = y * srcH / targetH;
+                for (int x = 0; x < targetW; x++) {
+                    int sx = x * srcW / targetW;
+                    memcpy(&resized[(y * targetW + x) * 4],
+                           &m7FloorPixels[(sy * srcW + sx) * 4], 4);
+                }
+            }
+            srcPx = resized.data();
+            srcW = targetW;
+            srcH = targetH;
+        }
+
         // Quantize RGBA image to 256-color palette (simple popularity)
         // Build frequency map of GBA RGB555 colors
         struct Color15 { uint16_t v; };
         std::unordered_map<uint16_t, int> colorFreq;
-        int totalPx = m7FloorW * m7FloorH;
+        int totalPx = srcW * srcH;
         for (int i = 0; i < totalPx; i++) {
-            int r = m7FloorPixels[i * 4 + 0] >> 3;
-            int g = m7FloorPixels[i * 4 + 1] >> 3;
-            int b = m7FloorPixels[i * 4 + 2] >> 3;
+            int r = srcPx[i * 4 + 0] >> 3;
+            int g = srcPx[i * 4 + 1] >> 3;
+            int b = srcPx[i * 4 + 2] >> 3;
             uint16_t c15 = r | (g << 5) | (b << 10);
             colorFreq[c15]++;
         }
-        // Sort by frequency, take top 256
+        // Sort by frequency, take top 255 (reserve index 0 as transparent)
         std::vector<std::pair<uint16_t, int>> sorted(colorFreq.begin(), colorFreq.end());
         std::sort(sorted.begin(), sorted.end(), [](auto& a, auto& b) { return a.second > b.second; });
         uint16_t palette[256] = {};
-        int palCount = std::min(256, (int)sorted.size());
+        int palCount = std::min(255, (int)sorted.size());
         std::unordered_map<uint16_t, uint8_t> palLookup;
+        // Index 0 = transparent (backdrop shows through), colors start at 1
         for (int i = 0; i < palCount; i++) {
-            palette[i] = sorted[i].first;
-            palLookup[sorted[i].first] = (uint8_t)i;
+            palette[i + 1] = sorted[i].first;
+            palLookup[sorted[i].first] = (uint8_t)(i + 1);
         }
-        // Map pixels to palette indices (nearest for colors not in top 256)
+        // Map pixels to palette indices (nearest for colors not in top 255)
         std::vector<uint8_t> indexed(totalPx);
         for (int i = 0; i < totalPx; i++) {
-            int r = m7FloorPixels[i * 4 + 0] >> 3;
-            int g = m7FloorPixels[i * 4 + 1] >> 3;
-            int b = m7FloorPixels[i * 4 + 2] >> 3;
+            int r = srcPx[i * 4 + 0] >> 3;
+            int g = srcPx[i * 4 + 1] >> 3;
+            int b = srcPx[i * 4 + 2] >> 3;
             uint16_t c15 = r | (g << 5) | (b << 10);
             auto it = palLookup.find(c15);
             if (it != palLookup.end()) {
                 indexed[i] = it->second;
             } else {
-                // Find nearest palette entry
-                int bestDist = 999999, bestIdx = 0;
-                for (int p = 0; p < palCount; p++) {
+                // Find nearest palette entry (skip index 0)
+                int bestDist = 999999, bestIdx = 1;
+                for (int p = 1; p <= palCount; p++) {
                     int pr = palette[p] & 31, pg = (palette[p] >> 5) & 31, pb = (palette[p] >> 10) & 31;
                     int dr = r - pr, dg = g - pg, db = b - pb;
                     int d = dr*dr + dg*dg + db*db;
@@ -5306,28 +5330,27 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 palLookup[c15] = (uint8_t)bestIdx; // cache
             }
         }
-        // Build 8x8 tiles and deduplicate
-        int tilesX = m7FloorW / 8;
-        int tilesY = m7FloorH / 8;
+        // Build 8x8 tiles and deduplicate (exact comparison, no hash collisions)
+        int tilesX = srcW / 8;
+        int tilesY = srcH / 8;
         std::vector<std::array<uint8_t, 64>> uniqueTiles;
-        std::unordered_map<size_t, int> tileHash;
         std::vector<uint8_t> tilemap(tilesX * tilesY, 0);
         for (int ty = 0; ty < tilesY; ty++) {
             for (int tx = 0; tx < tilesX; tx++) {
                 std::array<uint8_t, 64> tile = {};
                 for (int py = 0; py < 8; py++)
                     for (int px = 0; px < 8; px++)
-                        tile[py * 8 + px] = indexed[(ty * 8 + py) * m7FloorW + (tx * 8 + px)];
-                // Hash tile for dedup
-                size_t h = 0;
-                for (int k = 0; k < 64; k++) h = h * 131 + tile[k];
-                auto it = tileHash.find(h);
-                if (it != tileHash.end()) {
-                    tilemap[ty * tilesX + tx] = (uint8_t)it->second;
+                        tile[py * 8 + px] = indexed[(ty * 8 + py) * srcW + (tx * 8 + px)];
+                // Find existing tile by exact match
+                int found = -1;
+                for (int u = 0; u < (int)uniqueTiles.size(); u++) {
+                    if (uniqueTiles[u] == tile) { found = u; break; }
+                }
+                if (found >= 0) {
+                    tilemap[ty * tilesX + tx] = (uint8_t)found;
                 } else {
                     int idx = (int)uniqueTiles.size();
                     if (idx < 256) {
-                        tileHash[h] = idx;
                         uniqueTiles.push_back(tile);
                         tilemap[ty * tilesX + tx] = (uint8_t)idx;
                     }
@@ -5365,7 +5388,223 @@ static bool GenerateMapData(const std::string& runtimeDir,
         }
         f << "};\n";
         f << "#define AFN_FLOOR_TILES_X " << tilesX << "\n";
-        f << "#define AFN_FLOOR_TILES_Y " << tilesY << "\n\n";
+        f << "#define AFN_FLOOR_TILES_Y " << tilesY << "\n";
+        f << "#define AFN_FLOOR_SIZE " << m7FloorSize << "\n\n";
+    }
+
+    // ---- Mode 7 skybox texture (4bpp tiles, 4 horizontal band sub-palettes) ----
+    // Uses sub-palettes 11-14 (entries 176-239), 15 colors each = 60 total
+    // Each band covers 8 tile-rows (64px) of the 256px-tall sky
+    if (m7SkyPixels && m7SkyW > 0 && m7SkyH > 0) {
+        // Resize to 256x256 for GBA (32x32 tiles)
+        const int skyTargetW = 256, skyTargetH = 256;
+        std::vector<unsigned char> skyResized(skyTargetW * skyTargetH * 4);
+        for (int y = 0; y < skyTargetH; y++) {
+            int sy = y * m7SkyH / skyTargetH;
+            for (int x = 0; x < skyTargetW; x++) {
+                int sx = x * m7SkyW / skyTargetW;
+                memcpy(&skyResized[(y * skyTargetW + x) * 4],
+                       &m7SkyPixels[(sy * m7SkyW + sx) * 4], 4);
+            }
+        }
+
+        const int NUM_BANDS = 4;
+        const int BAND_H = skyTargetH / NUM_BANDS; // 64px per band
+        const int SKY_SUBPAL_BASE = 11; // sub-palettes 11,12,13,14
+        const int COLORS_PER_BAND = 15; // index 0 = transparent
+
+        // Per-band: median-cut quantize to 15 colors
+        uint16_t bandPalettes[NUM_BANDS][16] = {}; // [0]=transparent, [1-15]=colors
+        std::vector<uint8_t> skyIndexed(skyTargetW * skyTargetH, 0);
+
+        for (int band = 0; band < NUM_BANDS; band++) {
+            int bandY0 = band * BAND_H;
+            int bandY1 = bandY0 + BAND_H;
+
+            // Collect unique colors with frequency counts
+            struct ColorEntry { uint16_t color; int freq; };
+            struct ColorBox {
+                std::vector<ColorEntry> entries;
+                int rMin, rMax, gMin, gMax, bMin, bMax;
+                void computeBounds() {
+                    rMin = gMin = bMin = 31; rMax = gMax = bMax = 0;
+                    for (auto& e : entries) {
+                        int r = e.color & 31, g = (e.color >> 5) & 31, b = (e.color >> 10) & 31;
+                        if (r < rMin) rMin = r; if (r > rMax) rMax = r;
+                        if (g < gMin) gMin = g; if (g > gMax) gMax = g;
+                        if (b < bMin) bMin = b; if (b > bMax) bMax = b;
+                    }
+                }
+                int longestAxis() const {
+                    int dr = rMax - rMin, dg = gMax - gMin, db = bMax - bMin;
+                    if (dr >= dg && dr >= db) return 0;
+                    if (dg >= dr && dg >= db) return 1;
+                    return 2;
+                }
+                uint16_t weightedAverage() const {
+                    int64_t sr = 0, sg = 0, sb = 0, tw = 0;
+                    for (auto& e : entries) {
+                        sr += (e.color & 31) * (int64_t)e.freq;
+                        sg += ((e.color >> 5) & 31) * (int64_t)e.freq;
+                        sb += ((e.color >> 10) & 31) * (int64_t)e.freq;
+                        tw += e.freq;
+                    }
+                    if (tw == 0) return 0;
+                    return (uint16_t)((int)(sr/tw) | ((int)(sg/tw) << 5) | ((int)(sb/tw) << 10));
+                }
+                int totalFreq() const {
+                    int t = 0; for (auto& e : entries) t += e.freq; return t;
+                }
+            };
+
+            // Build frequency map
+            std::unordered_map<uint16_t, int> freqMap;
+            for (int y = bandY0; y < bandY1; y++) {
+                for (int x = 0; x < skyTargetW; x++) {
+                    int idx = (y * skyTargetW + x) * 4;
+                    int r = skyResized[idx + 0] >> 3;
+                    int g = skyResized[idx + 1] >> 3;
+                    int b = skyResized[idx + 2] >> 3;
+                    freqMap[r | (g << 5) | (b << 10)]++;
+                }
+            }
+
+            // Populate initial box with unique colors
+            ColorBox initBox;
+            for (auto& kv : freqMap)
+                initBox.entries.push_back({kv.first, kv.second});
+            initBox.computeBounds();
+
+            // Median-cut into COLORS_PER_BAND boxes
+            std::vector<ColorBox> boxes;
+            boxes.push_back(std::move(initBox));
+            while ((int)boxes.size() < COLORS_PER_BAND) {
+                // Find box with largest (unique color count * volume) to split
+                int bestBox = -1, bestScore = -1;
+                for (int i = 0; i < (int)boxes.size(); i++) {
+                    if ((int)boxes[i].entries.size() < 2) continue;
+                    int dr = boxes[i].rMax - boxes[i].rMin;
+                    int dg = boxes[i].gMax - boxes[i].gMin;
+                    int db = boxes[i].bMax - boxes[i].bMin;
+                    int vol = std::max(1, dr) * std::max(1, dg) * std::max(1, db);
+                    int score = vol * (int)boxes[i].entries.size();
+                    if (score > bestScore) { bestScore = score; bestBox = i; }
+                }
+                if (bestBox < 0) break;
+
+                // Sort entries along longest axis and split at median by frequency
+                int axis = boxes[bestBox].longestAxis();
+                auto& ents = boxes[bestBox].entries;
+                if (axis == 0) std::sort(ents.begin(), ents.end(), [](auto& a, auto& b) { return (a.color & 31) < (b.color & 31); });
+                else if (axis == 1) std::sort(ents.begin(), ents.end(), [](auto& a, auto& b) { return ((a.color >> 5) & 31) < ((b.color >> 5) & 31); });
+                else std::sort(ents.begin(), ents.end(), [](auto& a, auto& b) { return ((a.color >> 10) & 31) < ((b.color >> 10) & 31); });
+
+                // Split at midpoint of unique colors (not frequency-weighted)
+                int splitAt = (int)ents.size() / 2;
+
+                ColorBox newBox;
+                newBox.entries.assign(ents.begin() + splitAt, ents.end());
+                ents.resize(splitAt);
+                boxes[bestBox].computeBounds();
+                newBox.computeBounds();
+                boxes.push_back(std::move(newBox));
+            }
+
+            // Extract palette colors (index 1-N, index 0 = transparent)
+            int bandColorCount = std::min((int)boxes.size(), COLORS_PER_BAND);
+            for (int i = 0; i < bandColorCount; i++) {
+                bandPalettes[band][i + 1] = boxes[i].weightedAverage();
+            }
+
+            // Map band pixels to local palette indices (1-N only)
+            for (int y = bandY0; y < bandY1; y++) {
+                for (int x = 0; x < skyTargetW; x++) {
+                    int pi = (y * skyTargetW + x) * 4;
+                    int r = skyResized[pi + 0] >> 3;
+                    int g = skyResized[pi + 1] >> 3;
+                    int b = skyResized[pi + 2] >> 3;
+                    // Find nearest among populated palette entries only
+                    int bestDist = 999999, bestIdx = 1;
+                    for (int p = 1; p <= bandColorCount; p++) {
+                        uint16_t pc = bandPalettes[band][p];
+                        int pr = pc & 31, pg = (pc >> 5) & 31, pb = (pc >> 10) & 31;
+                        int dr2 = r - pr, dg2 = g - pg, db2 = b - pb;
+                        int d = dr2*dr2 + dg2*dg2 + db2*db2;
+                        if (d < bestDist) { bestDist = d; bestIdx = p; }
+                    }
+                    skyIndexed[y * skyTargetW + x] = (uint8_t)bestIdx;
+                }
+            }
+        }
+
+        // Build 4bpp 8x8 tiles (32 bytes each) and deduplicate
+        int skyTilesX = skyTargetW / 8, skyTilesY = skyTargetH / 8;
+        std::vector<std::array<uint8_t, 32>> skyUniqueTiles;
+        std::vector<uint16_t> skyTilemap(skyTilesX * skyTilesY, 0);
+        for (int ty = 0; ty < skyTilesY; ty++) {
+            int band = (ty * 8) / (skyTargetH / NUM_BANDS);
+            if (band >= NUM_BANDS) band = NUM_BANDS - 1;
+            int palBank = SKY_SUBPAL_BASE + band;
+
+            for (int tx = 0; tx < skyTilesX; tx++) {
+                std::array<uint8_t, 32> tile = {};
+                for (int py = 0; py < 8; py++) {
+                    for (int px = 0; px < 8; px += 2) {
+                        uint8_t lo = skyIndexed[(ty * 8 + py) * skyTargetW + (tx * 8 + px)];
+                        uint8_t hi = skyIndexed[(ty * 8 + py) * skyTargetW + (tx * 8 + px + 1)];
+                        tile[py * 4 + px / 2] = (hi << 4) | lo;
+                    }
+                }
+                int found = -1;
+                for (int u = 0; u < (int)skyUniqueTiles.size(); u++) {
+                    if (skyUniqueTiles[u] == tile) { found = u; break; }
+                }
+                if (found >= 0) {
+                    skyTilemap[ty * skyTilesX + tx] = (uint16_t)(found | (palBank << 12));
+                } else {
+                    int idx = (int)skyUniqueTiles.size();
+                    if (idx < 512) { // charblock 1 = 16KB / 32 bytes = 512 4bpp tiles max
+                        skyUniqueTiles.push_back(tile);
+                        skyTilemap[ty * skyTilesX + tx] = (uint16_t)(idx | (palBank << 12));
+                    }
+                }
+            }
+        }
+
+        // Emit sky tile data (4bpp = 32 bytes per tile)
+        f << "\n// ---- Mode 7 skybox tile data (4bpp, 4 band sub-palettes " << SKY_SUBPAL_BASE << "-" << (SKY_SUBPAL_BASE + NUM_BANDS - 1) << ") ----\n";
+        f << "#define AFN_HAS_SKY\n";
+        f << "#define AFN_SKY_BANDS " << NUM_BANDS << "\n";
+        f << "#define AFN_SKY_SUBPAL_BASE " << SKY_SUBPAL_BASE << "\n";
+        f << "static const unsigned char afn_sky_tiles[" << skyUniqueTiles.size() * 32 << "] = {\n";
+        for (int t = 0; t < (int)skyUniqueTiles.size(); t++) {
+            f << "    ";
+            for (int k = 0; k < 32; k++)
+                f << (int)skyUniqueTiles[t][k] << ",";
+            f << "\n";
+        }
+        f << "};\n";
+        f << "static const unsigned int afn_sky_tilesLen = " << skyUniqueTiles.size() * 32 << ";\n\n";
+
+        // Emit per-band palettes (16 entries each, index 0 = transparent)
+        for (int band = 0; band < NUM_BANDS; band++) {
+            f << "static const unsigned short afn_sky_pal" << band << "[16] = {\n    ";
+            for (int i = 0; i < 16; i++) {
+                f << "0x" << std::hex << std::setw(4) << std::setfill('0') << bandPalettes[band][i] << std::dec << ",";
+            }
+            f << "\n};\n";
+        }
+        f << "\n";
+
+        // Emit sky tilemap (16-bit entries with palette bank in bits 12-15)
+        f << "static const unsigned short afn_sky_tilemap[" << skyTilesX * skyTilesY << "] = {\n";
+        for (int ty = 0; ty < skyTilesY; ty++) {
+            f << "    ";
+            for (int tx = 0; tx < skyTilesX; tx++)
+                f << "0x" << std::hex << std::setw(4) << std::setfill('0') << skyTilemap[ty * skyTilesX + tx] << std::dec << ",";
+            f << "\n";
+        }
+        f << "};\n\n";
     }
 
     f << "\n#endif // MAPDATA_H\n";
@@ -5390,7 +5629,10 @@ bool PackageGBA(const std::string& runtimeDir,
                 int startMode,
                 std::string& errorMsg,
                 const unsigned char* m7FloorPixels,
-                int m7FloorW, int m7FloorH)
+                int m7FloorW, int m7FloorH,
+                int m7FloorSize,
+                const unsigned char* m7SkyPixels,
+                int m7SkyW, int m7SkyH)
 {
     std::string msysDir = ToMsysPath(runtimeDir);
 
@@ -5405,7 +5647,7 @@ bool PackageGBA(const std::string& runtimeDir,
     }
 
     // --- Step 1: Generate mapdata.h with sprite/camera/asset/player data ---
-    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, m7FloorPixels, m7FloorW, m7FloorH, orbitDist, script, blueprints, bpInstances, tmScenes, hudElements, soundSamples, soundInstances, startMode))
+    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, m7FloorPixels, m7FloorW, m7FloorH, m7FloorSize, m7SkyPixels, m7SkyW, m7SkyH, orbitDist, script, blueprints, bpInstances, tmScenes, hudElements, soundSamples, soundInstances, startMode))
     {
         errorMsg = "Failed to write mapdata.h";
         return false;

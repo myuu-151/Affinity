@@ -3837,8 +3837,38 @@ static std::string sM7FloorPath;        // source image path
 static unsigned char* sM7FloorPixels = nullptr; // RGBA pixels
 static int sM7FloorW = 0, sM7FloorH = 0;
 static GLuint sM7FloorTex = 0;          // GL preview texture
+static int sM7FloorSize = 3;           // 0=16x16(128px), 1=32x32(256px), 2=64x64(512px), 3=128x128(1024px)
+
+// ---- Mode 7 skybox texture ----
+static std::string sM7SkyPath;
+static unsigned char* sM7SkyPixels = nullptr;
+static int sM7SkyW = 0, sM7SkyH = 0;
+static GLuint sM7SkyTex = 0;
 
 static bool IsPOT(int v) { return v > 0 && (v & (v - 1)) == 0; }
+
+static bool LoadM7SkyTexture(const std::string& path)
+{
+    int w, h, ch;
+    unsigned char* img = stbi_load(path.c_str(), &w, &h, &ch, 4);
+    if (!img) return false;
+    if (!IsPOT(w) || !IsPOT(h) || w > 1024 || h > 1024) {
+        stbi_image_free(img);
+        return false;
+    }
+    if (sM7SkyPixels) stbi_image_free(sM7SkyPixels);
+    if (sM7SkyTex) glDeleteTextures(1, &sM7SkyTex);
+    sM7SkyPixels = img;
+    sM7SkyW = w;
+    sM7SkyH = h;
+    sM7SkyPath = path;
+    glGenTextures(1, &sM7SkyTex);
+    glBindTexture(GL_TEXTURE_2D, sM7SkyTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+    return true;
+}
 
 static bool LoadM7FloorTexture(const std::string& path)
 {
@@ -4780,6 +4810,9 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "\n[M7Scenes]\n");
     if (!sM7FloorPath.empty())
         fprintf(f, "m7FloorTex=%s\n", sM7FloorPath.c_str());
+    fprintf(f, "m7FloorSize=%d\n", sM7FloorSize);
+    if (!sM7SkyPath.empty())
+        fprintf(f, "m7SkyTex=%s\n", sM7SkyPath.c_str());
     fprintf(f, "m7SceneCount=%d\n", (int)sM7Scenes.size());
     fprintf(f, "m7SelectedScene=%d\n", sM7SelectedScene);
     for (int si = 0; si < (int)sM7Scenes.size(); si++)
@@ -6344,6 +6377,13 @@ static bool LoadProject(const std::string& path)
                 char* cr = strchr(fpath, '\r'); if (cr) *cr = '\0';
                 LoadM7FloorTexture(fpath);
             }
+            else if (sscanf(line, "m7FloorSize=%d", &ival) == 1) { sM7FloorSize = std::clamp(ival, 0, 3); }
+            else if (strncmp(line, "m7SkyTex=", 9) == 0) {
+                char fpath[512]; strncpy(fpath, line + 9, sizeof(fpath) - 1); fpath[511] = '\0';
+                char* nl = strchr(fpath, '\n'); if (nl) *nl = '\0';
+                char* cr = strchr(fpath, '\r'); if (cr) *cr = '\0';
+                LoadM7SkyTexture(fpath);
+            }
             else if (sscanf(line, "m7SceneCount=%d", &ival) == 1) { sM7Scenes.clear(); sM7Scenes.reserve(ival); }
             else if (sscanf(line, "m7SelectedScene=%d", &ival) == 1) sM7SelectedScene = ival;
             else if (strncmp(line, "m7Scene=", 8) == 0)
@@ -7031,6 +7071,11 @@ static void CloseProject()
     if (sM7FloorTex) { glDeleteTextures(1, &sM7FloorTex); sM7FloorTex = 0; }
     sM7FloorW = sM7FloorH = 0;
     sM7FloorPath.clear();
+    sM7FloorSize = 3;
+    if (sM7SkyPixels) { stbi_image_free(sM7SkyPixels); sM7SkyPixels = nullptr; }
+    if (sM7SkyTex) { glDeleteTextures(1, &sM7SkyTex); sM7SkyTex = 0; }
+    sM7SkyW = sM7SkyH = 0;
+    sM7SkyPath.clear();
 
     sProjectPath.clear();
     sProjectDirty = false;
@@ -12087,7 +12132,8 @@ void FrameTick(float dt)
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,
-                                        sM7FloorPixels, sM7FloorW, sM7FloorH);
+                                        sM7FloorPixels, sM7FloorW, sM7FloorH, sM7FloorSize,
+                                        sM7SkyPixels, sM7SkyW, sM7SkyH);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
@@ -13695,14 +13741,58 @@ void FrameTick(float dt)
     }
     else if (sActiveTab == EditorTab::Skybox)
     {
-        // Skybox tab: placeholder
         ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
         ImGui::SetNextWindowSize(ImVec2(totalW, bodyH));
         ImGui::Begin("##SkyboxTab", nullptr,
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
-        ImGui::Text("Skybox Editor — coming soon");
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Skybox (Mode 7)");
+        ImGui::Separator();
+        ImGui::Text("Background image for Mode 7 sky. Replaces the flat backdrop color.");
+        ImGui::Text("BG1 4bpp tiled layer, 16 colors, scrolls with camera rotation.");
+        ImGui::Spacing();
+
+        if (sM7SkyTex) {
+            ImGui::Text("Source: %dx%d", sM7SkyW, sM7SkyH);
+            ImGui::Text("Export: 256x256 (32x32 tiles, 4bpp)");
+            float avail = ImGui::GetContentRegionAvail().x;
+            float maxSz = avail < 512.0f ? avail : 512.0f;
+            float aspect = (float)sM7SkyH / (float)sM7SkyW;
+            ImGui::Image((ImTextureID)(intptr_t)sM7SkyTex, ImVec2(maxSz, maxSz * aspect));
+        } else {
+            ImGui::TextDisabled("No skybox texture imported");
+        }
+
+        if (ImGui::Button("Import Skybox...", ImVec2(200, 0))) {
+#ifdef _WIN32
+            std::string path = OpenFileDialog("Image Files\0*.png;*.bmp;*.jpg;*.tga\0All\0*.*\0", "png");
+            if (!path.empty()) {
+                if (!LoadM7SkyTexture(path))
+                    ImGui::OpenPopup("##SkyErr");
+                else
+                    sProjectDirty = true;
+            }
+#endif
+        }
+        if (sM7SkyTex) {
+            ImGui::SameLine();
+            if (ImGui::Button("Clear##skyclear", ImVec2(80, 0))) {
+                stbi_image_free(sM7SkyPixels);
+                sM7SkyPixels = nullptr;
+                sM7SkyW = sM7SkyH = 0;
+                glDeleteTextures(1, &sM7SkyTex);
+                sM7SkyTex = 0;
+                sM7SkyPath.clear();
+                sProjectDirty = true;
+            }
+        }
+        if (ImGui::BeginPopup("##SkyErr")) {
+            ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Invalid image!");
+            ImGui::Text("Must be POT (power of two)");
+            ImGui::Text("up to 1024x1024.");
+            ImGui::EndPopup();
+        }
         ImGui::End();
     }
     else if (sActiveTab == EditorTab::Player)
@@ -19704,11 +19794,15 @@ void FrameTick(float dt)
             ImGui::Begin("##M7FloorProps", nullptr, propFlags);
             ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Floor Map");
             ImGui::Separator();
+            {
+                const char* sizeNames[] = { "128px (16x16)", "256px (32x32)", "512px (64x64)", "1024px (128x128)" };
+                ImGui::PushItemWidth(-1);
+                if (ImGui::Combo("##m7floorsize", &sM7FloorSize, sizeNames, 4))
+                    sProjectDirty = true;
+                ImGui::PopItemWidth();
+            }
             if (sM7FloorTex) {
                 ImGui::Text("%dx%d", sM7FloorW, sM7FloorH);
-                float avail = ImGui::GetContentRegionAvail().x;
-                float aspect = (float)sM7FloorH / (float)sM7FloorW;
-                ImGui::Image((ImTextureID)(intptr_t)sM7FloorTex, ImVec2(avail, avail * aspect));
             } else {
                 ImGui::TextDisabled("No floor texture");
             }

@@ -543,6 +543,9 @@ bool PackageGBA(const std::string& runtimeDir,
                 int startMode,
                 std::string& errorMsg,
                 const unsigned char* m7FloorPixels = nullptr,
-                int m7FloorW = 0, int m7FloorH = 0);
+                int m7FloorW = 0, int m7FloorH = 0,
+                int m7FloorSize = 3,
+                const unsigned char* m7SkyPixels = nullptr,
+                int m7SkyW = 0, int m7SkyH = 0);
 
 } // namespace Affinity

@@ -1066,6 +1066,8 @@ static void load_editor_map(void)
     // halves of the halfword, corrupting tile and palette data
     memcpy32(&tile8_mem[2][0], afn_tiles, afn_tilesLen / 4);
     memcpy16(pal_bg_mem, afn_palette, afn_paletteLen / 2);
+    // Palette index 0 = transparent/backdrop — set to sky blue
+    pal_bg_mem[0] = RGB15(10, 16, 24);
     {
         // Affine tilemap entries are 8-bit, but VRAM only supports
         // 16/32-bit writes — pack two entries per halfword store
@@ -1082,6 +1084,28 @@ static void load_editor_map(void)
             }
         }
     }
+}
+#endif
+
+#ifdef AFN_HAS_SKY
+static void load_sky(void)
+{
+    // BG1: 4bpp tiled, charblock 1, SBB 6, priority 3 (behind floor)
+    REG_BG1CNT = BG_CBB(1) | BG_SBB(6) | BG_4BPP | BG_REG_32x32 | BG_PRIO(3);
+    REG_BG1HOFS = 0;
+    REG_BG1VOFS = 0;
+
+    // Copy sky tiles to charblock 1 (4bpp = 32 bytes/tile)
+    memcpy32(&tile_mem[1][0], afn_sky_tiles, afn_sky_tilesLen / 4);
+
+    // Copy per-band sub-palettes (sub-palettes 11-14, 16 entries each)
+    memcpy16(&pal_bg_mem[AFN_SKY_SUBPAL_BASE * 16], afn_sky_pal0, 16);
+    memcpy16(&pal_bg_mem[(AFN_SKY_SUBPAL_BASE + 1) * 16], afn_sky_pal1, 16);
+    memcpy16(&pal_bg_mem[(AFN_SKY_SUBPAL_BASE + 2) * 16], afn_sky_pal2, 16);
+    memcpy16(&pal_bg_mem[(AFN_SKY_SUBPAL_BASE + 3) * 16], afn_sky_pal3, 16);
+
+    // Copy sky tilemap to SBB 6 (includes palette bank bits per tile)
+    memcpy16(se_mem[6], afn_sky_tilemap, 32 * 32);
 }
 #endif
 
@@ -1109,10 +1133,9 @@ static void init_obj_sprites(void)
             // Mode 0: place static tiles right after compact direction slots
             dst = (u32*)(0x06010000 + tm_dir_slot_count * 32);
         } else if (afn_current_mode == 2) {
-            // Mode 7: tile mode, tiles 0-511 are usable — no bitmap overlap
-            // Direction tiles are also shifted down by 512, so place static tiles
-            // at their exported offset minus 512
-            dst = (u32*)(0x06010000 + (AFN_DIR_VRAM_TILES - 512) * 32);
+            // Mode 7: tile mode, tiles 0-1023 are all usable (no bitmap overlap)
+            // Place static tiles at OBJ VRAM start; tm_static_adj compensates OAM indices
+            dst = (u32*)(0x06010000);
         } else {
             // Mode 4: skip bitmap overlap region (512 tiles)
             dst = (u32*)(0x06010000 + 512 * 32);
@@ -1362,6 +1385,9 @@ static void update_sprites(void)
         side      = (dx * g_cosf + dz * g_sinf) >> 8;
 
         if (fovLambda <= 64) continue;
+#ifdef AFN_DRAW_DISTANCE
+        if (fovLambda > AFN_DRAW_DISTANCE) continue;
+#endif
 
         heightDiff = cam_h - g_sprites[i].y;
         screenY = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
@@ -3924,6 +3950,7 @@ static void scene_teardown(void)
 
     // Clear BG registers
     REG_BG0CNT = 0; REG_BG0HOFS = 0; REG_BG0VOFS = 0;
+    REG_BG1CNT = 0; REG_BG1HOFS = 0; REG_BG1VOFS = 0;
     REG_BG2CNT = 0;
     REG_BG2PA = 0x0100; REG_BG2PB = 0; REG_BG2PC = 0; REG_BG2PD = 0x0100;
     REG_BG2X = 0; REG_BG2Y = 0;
@@ -4269,7 +4296,11 @@ static void scene_load(int sceneMode, int sceneIdx)
     } else {
         // Mode 1 (Mode 7 affine floor)
         tm_scene_idx = sceneIdx;
+#ifdef AFN_HAS_SKY
+        REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG1 | DCNT_BG2;
+#else
         REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
+#endif
 #if AFN_FLOOR_SIZE == 0
         REG_BG2CNT = BG_CBB(2) | BG_SBB(24) | BG_AFF_16x16 | BG_8BPP | BG_PRIO(2);
 #elif AFN_FLOOR_SIZE == 1
@@ -4287,9 +4318,12 @@ static void scene_load(int sceneMode, int sceneIdx)
 #else
         load_checkerboard();
 #endif
+#ifdef AFN_HAS_SKY
+        load_sky();
+#endif
         init_obj_sprites();
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-        tm_static_adj = 512; // Mode 7: no bitmap overlap, everything shifts down 512
+        tm_static_adj = AFN_DIR_VRAM_TILES; // Mode 7: static tiles at OBJ VRAM start
 #else
         tm_static_adj = AFN_DIR_VRAM_TILES;
 #endif
@@ -4447,7 +4481,11 @@ int main(void)
 #endif
     } else {
         // Mode 1 (legacy Mode 7 floor)
+#ifdef AFN_HAS_SKY
+        REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG1 | DCNT_BG2;
+#else
         REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
+#endif
 #if AFN_FLOOR_SIZE == 0
         REG_BG2CNT = BG_CBB(2) | BG_SBB(24) | BG_AFF_16x16 | BG_8BPP | BG_PRIO(2);
 #elif AFN_FLOOR_SIZE == 1
@@ -4465,9 +4503,12 @@ int main(void)
 #else
         load_checkerboard();
 #endif
+#ifdef AFN_HAS_SKY
+        load_sky();
+#endif
         init_obj_sprites();
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-        tm_static_adj = 512; // Mode 7: no bitmap overlap, everything shifts down 512
+        tm_static_adj = AFN_DIR_VRAM_TILES; // Mode 7: static tiles at OBJ VRAM start
 #else
         tm_static_adj = AFN_DIR_VRAM_TILES;
 #endif
@@ -5871,6 +5912,12 @@ int main(void)
         // Update sin/cos for HBlank
         g_cosf = lu_cos(cam_angle) >> 4;
         g_sinf = lu_sin(cam_angle) >> 4;
+
+#ifdef AFN_HAS_SKY
+        // Scroll sky BG1 horizontally with camera rotation
+        // cam_angle is 0-65535 (brad), map to 0-255 pixel scroll
+        REG_BG1HOFS = (cam_angle >> 8) & 0xFF;
+#endif
 
         // Reset to start position
         if (key_hit(KEY_START))
