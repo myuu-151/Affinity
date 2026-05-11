@@ -32,6 +32,7 @@ typedef struct {
     u8    oamPrio;   // OAM priority (0 = on top, 1 = behind parent)
     s8    parentIdx; // parent sprite index (-1 = standalone)
     FIXED offX, offY, offZ; // offset from parent (16.8 fixed)
+    u8    forceStatic; // 1 = force static rendering (ignore directions)
 } FloorSpriteGBA;
 
 EWRAM_DATA static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
@@ -1403,6 +1404,7 @@ static void load_editor_sprites(void)
         g_sprites[i].offX = afn_sprite_data[i][12];
         g_sprites[i].offY = afn_sprite_data[i][13];
         g_sprites[i].offZ = afn_sprite_data[i][14];
+        g_sprites[i].forceStatic = (u8)afn_sprite_data[i][15];
         g_sprites[i].wx = g_sprites[i].x;
         g_sprites[i].wz = g_sprites[i].z;
         g_sprites[i].facing = g_sprites[i].rotation;
@@ -1560,8 +1562,8 @@ static void update_sprites(void)
                 {
                     scaleSize = afn_asset_desc[ai][3];
 #ifdef AFN_HAS_ASSET_DIRS
-                    // Check if this asset has directional sprites
-                    if (afn_asset_dir_desc[ai][4])
+                    // Check if this asset has directional sprites (skip if forceStatic)
+                    if (afn_asset_dir_desc[ai][4] && !g_sprites[sprIdx].forceStatic)
                     {
                         int dirIdx;
                         if (sprIdx == player_sprite_idx)

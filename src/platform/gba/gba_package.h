@@ -22,6 +22,7 @@ struct GBASpriteExport
     int   oamPrio = 0;    // OAM priority (0 = on top, 1 = behind)
     int   parentIdx = -1; // parent sprite index (-1 = standalone)
     float offsetX = 0, offsetY = 0, offsetZ = 0; // offset from parent
+    bool  forceStatic = false; // force static rendering (ignore directions)
 };
 
 // Player direction sprite for GBA export (RGBA8 image)

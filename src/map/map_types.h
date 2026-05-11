@@ -231,6 +231,7 @@ struct FloorSprite
         float offsetZ = 0.0f;
         int   drawOrder = 1; // 0 = behind parent, 1 = in front
         float scale = 1.0f;  // size multiplier
+        bool  forceStatic = false; // render as static (same frame at all angles)
     };
     static constexpr int kMaxSubSprites = 4;
     SubSprite subSprites[kMaxSubSprites];
