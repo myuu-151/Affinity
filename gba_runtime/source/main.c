@@ -1192,34 +1192,41 @@ static void load_sky_m4(void)
     }
 }
 
-// Mode 4 sky: fast render — just copy pre-decoded scanlines with offset
-IWRAM_CODE static void render_sky_m4(u16* buf)
-{
-    int skyW = sky_m4_w;
-    int scrollX = (int)((u32)cam_angle * skyW >> 16);
-    int y;
+// Mode 4 sky: cached full-res frame — only rebuild on camera rotation
+EWRAM_DATA static u8 sky_m4_frame[240 * 160] __attribute__((aligned(4)));
+static int sky_m4_lastScroll = -1;
 
-    for (y = 0; y < M4_SKY_HORIZON && y < 160; y++)
+// Rebuild the cached sky frame (called only when scroll changes)
+static void sky_m4_rebuild(int scrollX)
+{
+    const int skyW = sky_m4_w;
+    int y;
+    for (y = 0; y < 160; y++)
     {
-        // Map screen Y to texture row (0..255)
-        int texV = (y * 256) / M4_SKY_HORIZON;
+        int texV = (y * 255) / 159;
         if (texV > 255) texV = 255;
         const u8* srcRow = &sky_m4_decoded[texV * skyW];
-        u8* dst = (u8*)&buf[y * 120];
-        int offset = scrollX;
-        int remain = 240;
-
-        // First chunk: from offset to end of panorama row
-        int chunk = skyW - offset;
-        if (chunk > remain) chunk = remain;
-        memcpy(dst, srcRow + offset, chunk);
-        dst += chunk;
-        remain -= chunk;
-
-        // Wrap-around chunk
-        if (remain > 0)
-            memcpy(dst, srcRow, remain);
+        u8* dst = &sky_m4_frame[y * 240];
+        int c1 = skyW - scrollX;
+        if (c1 >= 240) {
+            memcpy(dst, srcRow + scrollX, 240);
+        } else {
+            memcpy(dst, srcRow + scrollX, c1);
+            memcpy(dst + c1, srcRow, 240 - c1);
+        }
     }
+    sky_m4_lastScroll = scrollX;
+}
+
+// Per-frame: DMA the cached sky to backbuffer (same cost as flat clear)
+IWRAM_CODE static void render_sky_m4(u16* buf)
+{
+    const int skyW = sky_m4_w;
+    int scrollX = ((int)((u32)cam_angle * skyW >> 16)) & ~3;
+    if (scrollX != sky_m4_lastScroll)
+        sky_m4_rebuild(scrollX);
+    // Single DMA blast: 240*160 bytes = 9600 words
+    DMA_TRANSFER(buf, sky_m4_frame, 240 * 160 / 4, 3, DMA_NOW | DMA_32);
 }
 #endif
 
@@ -4726,9 +4733,10 @@ int main(void)
         {
             u16* vramBuf = g_page ? (u16*)0x06000000 : (u16*)0x0600A000;
             u16* backbuf = g_ewramRender ? g_ewramBuf : vramBuf;
-            afn_clear_fb_stmia(backbuf, 0);
 #ifdef AFN_HAS_SKY
             render_sky_m4(backbuf);
+#else
+            afn_clear_fb_stmia(backbuf, 0);
 #endif
             if (g_coverageOn) coverage_clear();
             dbg_tex_tris = 0;
