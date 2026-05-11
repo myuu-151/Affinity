@@ -319,12 +319,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "#define AFN_COVERAGE_BUF 1\n";
     f << "\n";
 
-    // Find player sprite index
+    // Find player sprite index and asset
     int playerIdx = -1;
+    int playerAssetIdx = -1;
     for (size_t i = 0; i < sprites.size(); i++)
     {
         if (sprites[i].spriteType == 1) // SpriteType::Player
-        { playerIdx = (int)i; break; }
+        { playerIdx = (int)i; playerAssetIdx = sprites[i].assetIdx; break; }
     }
     f << "// Player sprite index (-1 = none)\n";
     f << "#define AFN_PLAYER_IDX " << playerIdx << "\n";
@@ -394,16 +395,23 @@ static bool GenerateMapData(const std::string& runtimeDir,
         assetTileStart.push_back((int)allTiles.size() / 8);
         assetTilesPerFrame.push_back(tilesPerFrame);
 
-        // Skip static frames for direction-based assets — they use DMA direction tiles
-        // (but tilemap-referenced direction assets need static OBJ tiles for Mode 0)
-        if (asset.hasDirections && !asset.dirAnimSets.empty() && !assetReferencedByTilemap[ai]) continue;
-        // Skip unreferenced assets — no sprite uses them, saves OBJ VRAM
+        // Unreferenced assets don't need VRAM
         if (!assetReferencedBySprite[ai]) continue;
 
-        for (size_t fi = 0; fi < asset.frames.size(); fi++)
+        if (asset.frames.empty())
         {
-            auto td = FrameToGBATiles(asset.frames[fi], objSize);
-            allTiles.insert(allTiles.end(), td.begin(), td.end());
+            // Direction-only assets have no static frames — emit blank tiles
+            // so each asset gets a unique tileStart (prevents tile overlap on DMA fallback)
+            int blankWords = tilesPerFrame * 8; // 8 u32s per tile
+            allTiles.insert(allTiles.end(), blankWords, 0);
+        }
+        else
+        {
+            for (size_t fi = 0; fi < asset.frames.size(); fi++)
+            {
+                auto td = FrameToGBATiles(asset.frames[fi], objSize);
+                allTiles.insert(allTiles.end(), td.begin(), td.end());
+            }
         }
     }
 
@@ -560,13 +568,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
         // Quantize and tile each set
         int dirSize = 64;
-        // Only allocate VRAM for assets referenced by sprites — unreferenced assets
-        // get ROM data but vramTile0 stays 0 (DMA skipped at runtime since hasDirs=0
-        // unless we mark them). We still emit ROM tiles for all direction assets.
-        // Direction tiles go first in VRAM (before static tiles) so they get
-        // priority for the limited Mode 4 OBJ VRAM (512 tiles at indices 512-1023).
-        if (assetReferencedBySprite[ai])
-            assetDirInfos[ai].vramTile0 = dirVramNextTile;
+        // ROM tiles are built here for all direction assets; VRAM allocation
+        // (vramTile0) is assigned in a separate pass below to prioritize the player asset.
 
         for (int si = 0; si < setCount; si++)
         {
@@ -607,10 +610,29 @@ static bool GenerateMapData(const std::string& runtimeDir,
             }
         }
 
-        // Advance VRAM offset only for referenced assets
-        int tpf = (dirSize / 8) * (dirSize / 8); // tiles per direction frame
-        if (assetReferencedBySprite[ai])
+        int tpf = (dirSize / 8) * (dirSize / 8); // tiles per direction frame (for ROM data sizing)
+        (void)tpf;
+    }
+
+    // Assign vramTile0 with player asset first so it always fits in OBJ VRAM
+    {
+        // Player asset gets vramTile0 = 0 (guaranteed to fit)
+        if (playerAssetIdx >= 0 && playerAssetIdx < (int)assetDirInfos.size()
+            && assetDirInfos[playerAssetIdx].has && assetReferencedBySprite[playerAssetIdx])
+        {
+            int tpf = (assetDirInfos[playerAssetIdx].dirSize / 8) * (assetDirInfos[playerAssetIdx].dirSize / 8);
+            assetDirInfos[playerAssetIdx].vramTile0 = dirVramNextTile;
             dirVramNextTile += 8 * tpf;
+        }
+        // Then allocate remaining direction assets
+        for (size_t ai = 0; ai < assets.size(); ai++)
+        {
+            if ((int)ai == playerAssetIdx) continue; // already allocated
+            if (!assetDirInfos[ai].has || !assetReferencedBySprite[ai]) continue;
+            int tpf = (assetDirInfos[ai].dirSize / 8) * (assetDirInfos[ai].dirSize / 8);
+            assetDirInfos[ai].vramTile0 = dirVramNextTile;
+            dirVramNextTile += 8 * tpf;
+        }
     }
 
     // Auto-assign unique palBanks for ALL assets to prevent palette overwrites.

@@ -750,7 +750,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
 
         float effectiveScale = fs.scale;
         if (sp.subIdx >= 0 && sp.subIdx < fs.subSpriteCount)
-            effectiveScale = fs.subSprites[sp.subIdx].scale;
+            effectiveScale *= fs.subSprites[sp.subIdx].scale;
         int halfW = std::clamp((int)(8.0f * sp.scale / cam.height * 1.6f * effectiveScale), 2, 200);
         int halfH = std::clamp((int)(12.0f * sp.scale / cam.height * 1.6f * effectiveScale), 3, 200);
         int meshSelCX = sp.screenX, meshSelCY = 0;

@@ -1249,7 +1249,6 @@ static void init_obj_sprites(void)
             dst = (u32*)(0x06010000 + tm_dir_slot_count * 32);
         } else if (afn_current_mode == 2) {
             // Mode 7: tile mode, tiles 0-1023 are all usable (no bitmap overlap)
-            // Place static tiles at OBJ VRAM start; tm_static_adj compensates OAM indices
             dst = (u32*)(0x06010000);
         } else {
             // Mode 4: skip bitmap overlap region (512 tiles)
@@ -1588,10 +1587,17 @@ static void update_sprites(void)
                             int vramTile0 = afn_asset_dir_desc[ai][5];
                             // Mode 7 uses tile mode: tiles 0-511 are usable, shift down
                             if (afn_current_mode == 2) vramTile0 -= 512;
-                            tileId = vramTile0 + dirIdx * adTpf;
-                            baseSize = afn_asset_dir_desc[ai][2];
-                            scaleSize = baseSize;
-                            palBank = afn_asset_dir_desc[ai][3];
+                            // If direction DMA was never loaded (VRAM overflow), fall back to static tiles
+                            if (g_active_dir_set[ai] < 0) {
+                                tileId = afn_asset_desc[ai][0] - tm_static_adj;
+                                baseSize = afn_asset_desc[ai][3];
+                                palBank = afn_asset_desc[ai][4];
+                            } else {
+                                tileId = vramTile0 + dirIdx * adTpf;
+                                baseSize = afn_asset_dir_desc[ai][2];
+                                scaleSize = baseSize;
+                                palBank = afn_asset_dir_desc[ai][3];
+                            }
                         }
                     }
                     else

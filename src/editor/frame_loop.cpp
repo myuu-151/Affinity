@@ -11745,7 +11745,7 @@ void FrameTick(float dt)
                             subSe.x = sSprites[i].x + sub.offsetX;
                             subSe.y = sSprites[i].y + sub.offsetY;
                             subSe.z = sSprites[i].z + sub.offsetZ;
-                            subSe.scale = sub.scale;
+                            subSe.scale = sSprites[i].scale * sub.scale;
                             subSe.rotation = sSprites[i].rotation;
                             subSe.assetIdx = sub.assetIdx;
                             subSe.animIdx = sub.animIdx;
