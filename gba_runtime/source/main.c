@@ -1153,47 +1153,72 @@ static void update_sky_scroll(int cam_ang)
 }
 
 // Mode 4 sky: load sky sub-palettes into palette slots 192-255
-static void load_sky_m4_palette(void)
+// and pre-decode sky tiles into a flat 8bpp scanline buffer in EWRAM
+#define M4_SKY_HORIZON 80
+EWRAM_DATA static u8 sky_m4_decoded[AFN_SKY_MAP_COLS * 8 * 256];
+static int sky_m4_w;
+
+static void load_sky_m4(void)
 {
+    int skyW = AFN_SKY_MAP_COLS * 8;
+    int row, col, py, px;
+    sky_m4_w = skyW;
+
+    // Load sub-palettes into palette 192-255
     memcpy16(&pal_bg_mem[192], afn_sky_pal0, 16);
     memcpy16(&pal_bg_mem[208], afn_sky_pal1, 16);
     memcpy16(&pal_bg_mem[224], afn_sky_pal2, 16);
     memcpy16(&pal_bg_mem[240], afn_sky_pal3, 16);
+
+    // Pre-decode 4bpp tiles → 8bpp flat buffer with palette offsets baked in
+    for (row = 0; row < 32; row++) {
+        int band = (row * 8) / 64;
+        if (band > 3) band = 3;
+        u8 palBase = (u8)(192 + band * 16);
+        for (col = 0; col < AFN_SKY_MAP_COLS; col++) {
+            int tileIdx = afn_sky_tilemap[row * AFN_SKY_MAP_COLS + col] & 0x3FF;
+            const u8* tile = &afn_sky_tiles[tileIdx * 32];
+            for (py = 0; py < 8; py++) {
+                int destY = row * 8 + py;
+                u8* dst = &sky_m4_decoded[destY * skyW + col * 8];
+                const u8* src = &tile[py * 4];
+                for (px = 0; px < 8; px += 2) {
+                    u8 raw = src[px >> 1];
+                    dst[px]     = palBase + (raw & 0xF);
+                    dst[px + 1] = palBase + (raw >> 4);
+                }
+            }
+        }
+    }
 }
 
-// Mode 4 sky: render panorama into bitmap framebuffer (above horizon)
-#define M4_SKY_HORIZON 80
+// Mode 4 sky: fast render — just copy pre-decoded scanlines with offset
 IWRAM_CODE static void render_sky_m4(u16* buf)
 {
-    int skyW = AFN_SKY_MAP_COLS * 8;  // panorama width in pixels
+    int skyW = sky_m4_w;
     int scrollX = (int)((u32)cam_angle * skyW >> 16);
-    int y, x;
+    int y;
 
     for (y = 0; y < M4_SKY_HORIZON && y < 160; y++)
     {
-        // Map screen Y (0..horizon) to texture V (0..255)
+        // Map screen Y to texture row (0..255)
         int texV = (y * 256) / M4_SKY_HORIZON;
         if (texV > 255) texV = 255;
-        int band = texV >> 6;  // /64, 4 bands
-        if (band > 3) band = 3;
-        int palBase = 192 + band * 16;
-        int tileRow = texV >> 3;
-        int pixY = texV & 7;
-        u8* line = (u8*)&buf[y * 120];
-        int u = scrollX % skyW;
+        const u8* srcRow = &sky_m4_decoded[texV * skyW];
+        u8* dst = (u8*)&buf[y * 120];
+        int offset = scrollX;
+        int remain = 240;
 
-        for (x = 0; x < 240; x++)
-        {
-            int tileCol = u >> 3;
-            int pixX = u & 7;
-            // Look up tile index from tilemap (lower 10 bits = tile index)
-            int tileIdx = afn_sky_tilemap[tileRow * AFN_SKY_MAP_COLS + tileCol] & 0x3FF;
-            int byteOff = tileIdx * 32 + pixY * 4 + (pixX >> 1);
-            u8 raw = afn_sky_tiles[byteOff];
-            u8 px = (pixX & 1) ? (raw >> 4) : (raw & 0xF);
-            line[x] = (u8)(palBase + px);
-            if (++u >= skyW) u -= skyW;
-        }
+        // First chunk: from offset to end of panorama row
+        int chunk = skyW - offset;
+        if (chunk > remain) chunk = remain;
+        memcpy(dst, srcRow + offset, chunk);
+        dst += chunk;
+        remain -= chunk;
+
+        // Wrap-around chunk
+        if (remain > 0)
+            memcpy(dst, srcRow, remain);
     }
 }
 #endif
@@ -4106,7 +4131,7 @@ static void mode4_init_scene(void)
     }
 
 #ifdef AFN_HAS_SKY
-    load_sky_m4_palette();
+    load_sky_m4();
 #endif
 
     // Reload OBJ tiles (tile offset 512 for Mode 4)
