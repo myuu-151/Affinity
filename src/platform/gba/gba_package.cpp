@@ -344,9 +344,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
     // OBJ VRAM overflow in Mode 4 where only 512 tiles (16KB) are usable.
     std::vector<bool> assetReferencedBySprite(assets.size(), false);
     std::vector<bool> assetReferencedByTilemap(assets.size(), false);
-    for (size_t si = 0; si < sprites.size(); si++)
+    std::vector<bool> assetNeedsStaticTiles(assets.size(), false); // forceStatic sub-sprites need static tiles
+    for (size_t si = 0; si < sprites.size(); si++) {
         if (sprites[si].assetIdx >= 0 && sprites[si].assetIdx < (int)assets.size())
             assetReferencedBySprite[sprites[si].assetIdx] = true;
+        if (sprites[si].forceStatic && sprites[si].assetIdx >= 0 && sprites[si].assetIdx < (int)assets.size())
+            assetNeedsStaticTiles[sprites[si].assetIdx] = true;
+    }
     // Also mark assets referenced by tilemap objects that need OAM tiles.
     // Tile-type objects (type 6) generate BG tiles — they don't need OBJ VRAM.
     for (const auto& sc : tmScenes)
@@ -383,35 +387,26 @@ static bool GenerateMapData(const std::string& runtimeDir,
     }
 
     std::vector<int> assetObjSize; // snapped OBJ size per asset
+    // Precompute objSize and tilesPerFrame for all assets
+    for (size_t ai = 0; ai < assets.size(); ai++) {
+        int objSize = SnapToOBJSize(assets[ai].baseSize);
+        if (hudMaxSize[ai] > objSize) objSize = SnapToOBJSize(hudMaxSize[ai]);
+        assetObjSize.push_back(objSize);
+        assetTilesPerFrame.push_back((objSize / 8) * (objSize / 8));
+    }
     for (size_t ai = 0; ai < assets.size(); ai++)
     {
-        const auto& asset = assets[ai];
-        int objSize = SnapToOBJSize(asset.baseSize);
-        // If a HUD piece uses this asset at a larger size, expand to fit
-        if (hudMaxSize[ai] > objSize)
-            objSize = SnapToOBJSize(hudMaxSize[ai]);
-        assetObjSize.push_back(objSize);
-        int tilesPerFrame = (objSize / 8) * (objSize / 8);
         assetTileStart.push_back((int)allTiles.size() / 8);
-        assetTilesPerFrame.push_back(tilesPerFrame);
 
         // Unreferenced assets don't need VRAM
         if (!assetReferencedBySprite[ai]) continue;
+        // Direction assets use DMA — skip static tile emission
+        if (assets[ai].hasDirections && !assets[ai].dirAnimSets.empty()) continue;
 
-        if (asset.frames.empty())
+        for (size_t fi = 0; fi < assets[ai].frames.size(); fi++)
         {
-            // Direction-only assets have no static frames — emit blank tiles
-            // so each asset gets a unique tileStart (prevents tile overlap on DMA fallback)
-            int blankWords = tilesPerFrame * 8; // 8 u32s per tile
-            allTiles.insert(allTiles.end(), blankWords, 0);
-        }
-        else
-        {
-            for (size_t fi = 0; fi < asset.frames.size(); fi++)
-            {
-                auto td = FrameToGBATiles(asset.frames[fi], objSize);
-                allTiles.insert(allTiles.end(), td.begin(), td.end());
-            }
+            auto td = FrameToGBATiles(assets[ai].frames[fi], assetObjSize[ai]);
+            allTiles.insert(allTiles.end(), td.begin(), td.end());
         }
     }
 
@@ -624,10 +619,21 @@ static bool GenerateMapData(const std::string& runtimeDir,
             assetDirInfos[playerAssetIdx].vramTile0 = dirVramNextTile;
             dirVramNextTile += 8 * tpf;
         }
+        // Next: allocate forceStatic sub-sprite assets (need DMA for fixed facing)
+        for (size_t ai = 0; ai < assets.size(); ai++)
+        {
+            if ((int)ai == playerAssetIdx) continue;
+            if (!assetDirInfos[ai].has || !assetReferencedBySprite[ai]) continue;
+            if (!assetNeedsStaticTiles[ai]) continue; // only forceStatic assets in this pass
+            int tpf = (assetDirInfos[ai].dirSize / 8) * (assetDirInfos[ai].dirSize / 8);
+            assetDirInfos[ai].vramTile0 = dirVramNextTile;
+            dirVramNextTile += 8 * tpf;
+        }
         // Then allocate remaining direction assets
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
             if ((int)ai == playerAssetIdx) continue; // already allocated
+            if (assetNeedsStaticTiles[ai]) continue; // already allocated above
             if (!assetDirInfos[ai].has || !assetReferencedBySprite[ai]) continue;
             int tpf = (assetDirInfos[ai].dirSize / 8) * (assetDirInfos[ai].dirSize / 8);
             assetDirInfos[ai].vramTile0 = dirVramNextTile;

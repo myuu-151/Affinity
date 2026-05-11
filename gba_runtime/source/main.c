@@ -1249,8 +1249,9 @@ static void init_obj_sprites(void)
             // Mode 0: place static tiles right after compact direction slots
             dst = (u32*)(0x06010000 + tm_dir_slot_count * 32);
         } else if (afn_current_mode == 2) {
-            // Mode 7: tile mode, tiles 0-1023 are all usable (no bitmap overlap)
-            dst = (u32*)(0x06010000);
+            // Mode 7: place static tiles after direction DMA region (tile 512)
+            // Direction DMA uses tiles 0-511 for the player asset
+            dst = (u32*)(0x06010000 + 512 * 32);
         } else {
             // Mode 4: skip bitmap overlap region (512 tiles)
             dst = (u32*)(0x06010000 + 512 * 32);
@@ -1562,11 +1563,15 @@ static void update_sprites(void)
                 {
                     scaleSize = afn_asset_desc[ai][3];
 #ifdef AFN_HAS_ASSET_DIRS
-                    // Check if this asset has directional sprites (skip if forceStatic)
-                    if (afn_asset_dir_desc[ai][4] && !g_sprites[sprIdx].forceStatic)
+                    // Check if this asset has directional sprites
+                    if (afn_asset_dir_desc[ai][4])
                     {
                         int dirIdx;
-                        if (sprIdx == player_sprite_idx)
+                        if (g_sprites[sprIdx].forceStatic)
+                        {
+                            dirIdx = 0; // always show facing 0 (south)
+                        }
+                        else if (sprIdx == player_sprite_idx)
                         {
                             u16 sprAngle;
                             if (player_moving)
@@ -4458,7 +4463,7 @@ static void scene_load(int sceneMode, int sceneIdx)
 #endif
         init_obj_sprites();
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-        tm_static_adj = AFN_DIR_VRAM_TILES + 512; // Mode 7: tiles at 0, but tileStart includes tileOffset(512)
+        tm_static_adj = AFN_DIR_VRAM_TILES; // Mode 7: static tiles at 512, tileStart includes tileOffset(512)
 #else
         tm_static_adj = AFN_DIR_VRAM_TILES;
 #endif
@@ -4644,7 +4649,7 @@ int main(void)
 #endif
         init_obj_sprites();
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-        tm_static_adj = AFN_DIR_VRAM_TILES + 512; // Mode 7: tiles at 0, but tileStart includes tileOffset(512)
+        tm_static_adj = AFN_DIR_VRAM_TILES; // Mode 7: static tiles at 512, tileStart includes tileOffset(512)
 #else
         tm_static_adj = AFN_DIR_VRAM_TILES;
 #endif
