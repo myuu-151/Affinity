@@ -1155,15 +1155,12 @@ static void update_sky_scroll(int cam_ang)
 // Mode 4 sky: load sky sub-palettes into palette slots 192-255
 // and pre-decode sky tiles into a flat 8bpp scanline buffer in EWRAM
 #define M4_SKY_HORIZON 80
-// Pre-padded: each row is (skyW + 240) bytes so we can always do a single memcpy
-#define SKY_M4_STRIDE (AFN_SKY_MAP_COLS * 8 + 240)
-EWRAM_DATA static u8 sky_m4_decoded[SKY_M4_STRIDE * 256];
+EWRAM_DATA static u8 sky_m4_decoded[AFN_SKY_MAP_COLS * 8 * 256];
 static int sky_m4_w;
 
 static void load_sky_m4(void)
 {
     int skyW = AFN_SKY_MAP_COLS * 8;
-    int stride = skyW + 240;
     int row, col, py, px;
     sky_m4_w = skyW;
 
@@ -1183,7 +1180,7 @@ static void load_sky_m4(void)
             const u8* tile = &afn_sky_tiles[tileIdx * 32];
             for (py = 0; py < 8; py++) {
                 int destY = row * 8 + py;
-                u8* dst = &sky_m4_decoded[destY * stride + col * 8];
+                u8* dst = &sky_m4_decoded[destY * skyW + col * 8];
                 const u8* src = &tile[py * 4];
                 for (px = 0; px < 8; px += 2) {
                     u8 raw = src[px >> 1];
@@ -1193,11 +1190,6 @@ static void load_sky_m4(void)
             }
         }
     }
-    // Pad: duplicate first 240 bytes at end of each row for seamless wrap
-    for (row = 0; row < 256; row++) {
-        u8* r = &sky_m4_decoded[row * stride];
-        memcpy(r + skyW, r, 240);
-    }
 }
 
 // Mode 4 sky: cached full-res frame — only rebuild on camera rotation
@@ -1206,16 +1198,23 @@ static int sky_m4_lastScroll = -1;
 static int sky_m4_rebuilding = 0;  // progressive rebuild cursor (0 = idle)
 static int sky_m4_targetScroll;
 
-// Rebuild a range of scanlines [yStart, yEnd) — single memcpy per row (pre-padded)
+// Rebuild a range of scanlines [yStart, yEnd)
 static void sky_m4_rebuild_range(int scrollX, int yStart, int yEnd)
 {
-    const int stride = sky_m4_w + 240;
+    const int skyW = sky_m4_w;
     int y;
     for (y = yStart; y < yEnd; y++)
     {
         int texV = (y * 255) / 159;
-        const u8* srcRow = &sky_m4_decoded[texV * stride + scrollX];
-        memcpy(&sky_m4_frame[y * 240], srcRow, 240);
+        const u8* srcRow = &sky_m4_decoded[texV * skyW];
+        u8* dst = &sky_m4_frame[y * 240];
+        int c1 = skyW - scrollX;
+        if (c1 >= 240) {
+            memcpy(dst, srcRow + scrollX, 240);
+        } else {
+            memcpy(dst, srcRow + scrollX, c1);
+            memcpy(dst + c1, srcRow, 240 - c1);
+        }
     }
 }
 
