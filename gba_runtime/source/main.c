@@ -4456,7 +4456,7 @@ static void scene_load(int sceneMode, int sceneIdx)
 #endif
         init_obj_sprites();
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-        tm_static_adj = AFN_DIR_VRAM_TILES; // Mode 7: static tiles at OBJ VRAM start
+        tm_static_adj = AFN_DIR_VRAM_TILES + 512; // Mode 7: tiles at 0, but tileStart includes tileOffset(512)
 #else
         tm_static_adj = AFN_DIR_VRAM_TILES;
 #endif
@@ -4642,7 +4642,7 @@ int main(void)
 #endif
         init_obj_sprites();
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-        tm_static_adj = AFN_DIR_VRAM_TILES; // Mode 7: static tiles at OBJ VRAM start
+        tm_static_adj = AFN_DIR_VRAM_TILES + 512; // Mode 7: tiles at 0, but tileStart includes tileOffset(512)
 #else
         tm_static_adj = AFN_DIR_VRAM_TILES;
 #endif
