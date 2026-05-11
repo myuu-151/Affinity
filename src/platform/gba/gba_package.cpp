@@ -419,6 +419,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         int vramTile0 = 0;
         uint32_t palette[16] = {};
         std::vector<int> romSetU32Offset; // u32 index into dirAnimAllTiles per set
+        int dirMask = 0; // bitmask of which directions (0-7) have image data (union of all sets)
+        std::vector<int> perSetDirMask; // per-set direction bitmask
     };
     std::vector<AssetDirInfo> assetDirInfos(assets.size());
     std::vector<uint32_t> dirAnimAllTiles; // ROM data for DMA streaming
@@ -428,18 +430,20 @@ static bool GenerateMapData(const std::string& runtimeDir,
     {
         if (!assets[ai].hasDirections || assets[ai].dirAnimSets.empty()) continue;
 
-        // Check if any direction image exists across all sets
+        // Check if any direction image exists across all sets, build direction bitmask
         bool anyDir = false;
-        for (size_t si = 0; si < assets[ai].dirAnimSets.size() && !anyDir; si++)
+        int dirMask = 0;
+        for (size_t si = 0; si < assets[ai].dirAnimSets.size(); si++)
             for (int d = 0; d < 8; d++)
                 if (assets[ai].dirAnimSets[si].dirImages[d].pixels &&
                     assets[ai].dirAnimSets[si].dirImages[d].width > 0)
-                { anyDir = true; break; }
+                { anyDir = true; dirMask |= (1 << d); }
         if (!anyDir) continue;
 
         int setCount = (int)assets[ai].dirAnimSets.size();
         assetDirInfos[ai].has = true;
         assetDirInfos[ai].setCount = setCount;
+        assetDirInfos[ai].dirMask = dirMask;
         assetDirInfos[ai].dirSize = 64;
         // Use source asset's palBank if sharing palette
         int srcPalAsset = assets[ai].paletteSrc;
@@ -570,8 +574,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
         {
             assetDirInfos[ai].romSetU32Offset.push_back((int)dirAnimAllTiles.size());
 
+            int setMask = 0;
             for (int d = 0; d < 8; d++)
             {
+                const auto& imgCheck = assets[ai].dirAnimSets[si].dirImages[d];
+                if (imgCheck.pixels && imgCheck.width > 0 && imgCheck.height > 0)
+                    setMask |= (1 << d);
                 QuantizedDirFrame qf;
                 memset(qf.pixels, 0, sizeof(qf.pixels));
 
@@ -603,6 +611,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 auto td = RawPixelsToGBATiles(qf.pixels, dirSize);
                 dirAnimAllTiles.insert(dirAnimAllTiles.end(), td.begin(), td.end());
             }
+            assetDirInfos[ai].perSetDirMask.push_back(setMask);
         }
 
         int tpf = (dirSize / 8) * (dirSize / 8); // tiles per direction frame (for ROM data sizing)
@@ -825,7 +834,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         if (maxDirSets < 1) maxDirSets = 1;
         f << "#define AFN_HAS_ASSET_DIRS 1\n";
         f << "#define AFN_MAX_DIR_SETS " << maxDirSets << "\n";
-        f << "static const int afn_asset_dir_desc[][6] = {\n";
+        f << "static const int afn_asset_dir_desc[][7] = {\n";
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
             if (assetDirInfos[ai].has && assetReferencedBySprite[ai])
@@ -834,11 +843,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 f << "    { " << assetDirInfos[ai].setCount << ", " << tpf
                   << ", " << assetDirInfos[ai].dirSize
                   << ", " << assetDirInfos[ai].palBank
-                  << ", 1, " << (assetDirInfos[ai].vramTile0 + tileOffset) << " },\n";
+                  << ", 1, " << (assetDirInfos[ai].vramTile0 + tileOffset)
+                  << ", " << assetDirInfos[ai].dirMask << " },\n";
             }
             else
             {
-                f << "    { 0, 0, 0, 0, 0, 0 },\n";
+                f << "    { 0, 0, 0, 0, 0, 0, 0 },\n";
             }
         }
         f << "};\n\n";
@@ -854,6 +864,23 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << assetDirInfos[ai].romSetU32Offset[si];
                 else
                     f << -1;
+                if (si < maxDirSets - 1) f << ", ";
+            }
+            f << " },\n";
+        }
+        f << "};\n\n";
+
+        // Per-set direction bitmask (which of the 8 directions have image data)
+        f << "static const int afn_dir_set_masks[][AFN_MAX_DIR_SETS] = {\n";
+        for (size_t ai = 0; ai < assets.size(); ai++)
+        {
+            f << "    { ";
+            for (int si = 0; si < maxDirSets; si++)
+            {
+                if (assetDirInfos[ai].has && assetReferencedBySprite[ai] && si < (int)assetDirInfos[ai].perSetDirMask.size())
+                    f << assetDirInfos[ai].perSetDirMask[si];
+                else
+                    f << 0;
                 if (si < maxDirSets - 1) f << ", ";
             }
             f << " },\n";

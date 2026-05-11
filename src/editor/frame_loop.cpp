@@ -4841,9 +4841,10 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "msSubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si = 0; si < sp.subSpriteCount; si++) {
                     const auto& sub = sp.subSprites[si];
-                    fprintf(f, "msSubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f\n",
+                    fprintf(f, "msSubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d\n",
                         sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
-                        sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale);
+                        sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
+                        sub.forceStatic ? 1 : 0);
                 }
             }
         }

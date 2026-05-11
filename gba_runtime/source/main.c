@@ -1580,12 +1580,26 @@ static void update_sprites(void)
                                 sprAngle = orbit_angle + player_move_angle;
                             int rawIdx = ((sprAngle + 0xC000 + 4096) >> 13) & 7;
                             dirIdx = (8 - rawIdx) & 7;
-                            // Shift to diagonal frame when orbiting while moving (L/R shoulder)
-                            if (player_moving) {
-                                if (key_is_down(KEY_L))
-                                    dirIdx = (dirIdx - 1 + 8) & 7;
-                                else if (key_is_down(KEY_R))
-                                    dirIdx = (dirIdx + 1) & 7;
+                            // Get per-set direction mask for the active anim set
+                            int curSet = g_active_dir_set[ai];
+                            int setMask = (curSet >= 0) ? afn_dir_set_masks[ai][curSet] : afn_asset_dir_desc[ai][6];
+                            // Shift to diagonal frame when holding L/R (moving or idle)
+                            if (key_is_down(KEY_L)) {
+                                int shifted = (dirIdx - 1 + 8) & 7;
+                                if (setMask & (1 << shifted)) dirIdx = shifted;
+                            } else if (key_is_down(KEY_R)) {
+                                int shifted = (dirIdx + 1) & 7;
+                                if (setMask & (1 << shifted)) dirIdx = shifted;
+                            }
+                            // If current direction not populated, keep nearest populated one
+                            if (!(setMask & (1 << dirIdx))) {
+                                // Find nearest populated direction
+                                int best = dirIdx;
+                                int d2; for (d2 = 1; d2 <= 4; d2++) {
+                                    if (setMask & (1 << ((dirIdx + d2) & 7))) { best = (dirIdx + d2) & 7; break; }
+                                    if (setMask & (1 << ((dirIdx - d2 + 8) & 7))) { best = (dirIdx - d2 + 8) & 7; break; }
+                                }
+                                dirIdx = best;
                             }
                         }
                         else
