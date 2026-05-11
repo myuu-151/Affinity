@@ -1580,6 +1580,13 @@ static void update_sprites(void)
                                 sprAngle = orbit_angle + player_move_angle;
                             int rawIdx = ((sprAngle + 0xC000 + 4096) >> 13) & 7;
                             dirIdx = (8 - rawIdx) & 7;
+                            // Shift to diagonal frame when orbiting while moving (L/R shoulder)
+                            if (player_moving) {
+                                if (key_is_down(KEY_L))
+                                    dirIdx = (dirIdx - 1 + 8) & 7;
+                                else if (key_is_down(KEY_R))
+                                    dirIdx = (dirIdx + 1) & 7;
+                            }
                         }
                         else
                         {
