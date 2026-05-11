@@ -3848,10 +3848,24 @@ struct SkyPanel {
     int w = 0, h = 0;
     GLuint tex = 0;
 };
-static std::vector<SkyPanel> sSkyPanels;
-static int sSkyDragFrom = -1; // for wire-drag reordering
 
-// Legacy single-image pointers for export (stitched from panels)
+// Skybox instance — each has its own panorama panels and scene assignment
+struct SkyboxInstance {
+    char name[48] = "Skybox 0";
+    int modeFilter = 0;          // 0 = All, 1 = Mode 4 only, 2 = Mode 1 only
+    std::vector<SkyPanel> panels;
+    std::vector<bool> m4SceneAssign;  // per Mode 4 scene (true = use this skybox)
+    std::vector<bool> m1SceneAssign;  // per Mode 1 scene (true = use this skybox)
+    int dragFrom = -1;           // for wire-drag reordering within this instance
+    // Stitched pixel data (built from panels)
+    unsigned char* stitchedPixels = nullptr;
+    int stitchedW = 0, stitchedH = 0;
+};
+
+static std::vector<SkyboxInstance> sSkyboxInstances;
+static int sSelectedSkybox = -1;
+
+// Active stitched sky for viewport preview (from selected instance)
 static unsigned char* sM7SkyPixels = nullptr;
 static int sM7SkyW = 0, sM7SkyH = 0;
 
@@ -3887,33 +3901,58 @@ static void FreeSkyPanel(SkyPanel& p) {
     p.path.clear();
 }
 
-// Stitch all panels into a single horizontal image for export
-static void StitchSkyPanels() {
-    if (sM7SkyPixels) { stbi_image_free(sM7SkyPixels); sM7SkyPixels = nullptr; }
-    sM7SkyW = sM7SkyH = 0;
-    if (sSkyPanels.empty()) return;
+// Stitch all panels of one skybox instance into its stitched buffer
+static void StitchSkyboxInstance(SkyboxInstance& inst) {
+    if (inst.stitchedPixels) { free(inst.stitchedPixels); inst.stitchedPixels = nullptr; }
+    inst.stitchedW = inst.stitchedH = 0;
+    if (inst.panels.empty()) return;
 
-    // Find max height, total width
     int totalW = 0, maxH = 0;
-    for (auto& p : sSkyPanels) {
+    for (auto& p : inst.panels) {
         if (!p.pixels) continue;
         totalW += p.w;
         if (p.h > maxH) maxH = p.h;
     }
     if (totalW == 0 || maxH == 0) return;
 
-    sM7SkyPixels = (unsigned char*)malloc(totalW * maxH * 4);
-    memset(sM7SkyPixels, 0, totalW * maxH * 4);
+    inst.stitchedPixels = (unsigned char*)malloc(totalW * maxH * 4);
+    memset(inst.stitchedPixels, 0, totalW * maxH * 4);
     int xOff = 0;
-    for (auto& p : sSkyPanels) {
+    for (auto& p : inst.panels) {
         if (!p.pixels) continue;
         for (int y = 0; y < p.h && y < maxH; y++)
-            memcpy(&sM7SkyPixels[(y * totalW + xOff) * 4],
+            memcpy(&inst.stitchedPixels[(y * totalW + xOff) * 4],
                    &p.pixels[(y * p.w) * 4], p.w * 4);
         xOff += p.w;
     }
-    sM7SkyW = totalW;
-    sM7SkyH = maxH;
+    inst.stitchedW = totalW;
+    inst.stitchedH = maxH;
+}
+
+static void FreeSkyboxInstance(SkyboxInstance& inst) {
+    for (auto& p : inst.panels) FreeSkyPanel(p);
+    inst.panels.clear();
+    if (inst.stitchedPixels) { free(inst.stitchedPixels); inst.stitchedPixels = nullptr; }
+    inst.stitchedW = inst.stitchedH = 0;
+}
+
+// Update sM7SkyPixels from the selected skybox instance (for viewport preview)
+static void UpdateActiveSky() {
+    // Don't free sM7SkyPixels — it's just a pointer to instance data
+    sM7SkyPixels = nullptr;
+    sM7SkyW = sM7SkyH = 0;
+    if (sSelectedSkybox >= 0 && sSelectedSkybox < (int)sSkyboxInstances.size()) {
+        SkyboxInstance& inst = sSkyboxInstances[sSelectedSkybox];
+        sM7SkyPixels = inst.stitchedPixels;
+        sM7SkyW = inst.stitchedW;
+        sM7SkyH = inst.stitchedH;
+    }
+}
+
+// Legacy wrapper — stitch all instances and update active
+static void StitchSkyPanels() {
+    for (auto& inst : sSkyboxInstances) StitchSkyboxInstance(inst);
+    UpdateActiveSky();
 }
 
 static bool LoadM7FloorTexture(const std::string& path)
@@ -4859,12 +4898,29 @@ static bool SaveProject(const std::string& path)
     if (!sM7FloorPath.empty())
         fprintf(f, "m7FloorTex=%s\n", sM7FloorPath.c_str());
     fprintf(f, "m7FloorSize=%d\n", sM7FloorSize);
-    fprintf(f, "m7SkyPanelCount=%d\n", (int)sSkyPanels.size());
-    for (int pi = 0; pi < (int)sSkyPanels.size(); pi++) {
-        if (!sSkyPanels[pi].path.empty())
-            fprintf(f, "m7SkyPanel=%s\n", sSkyPanels[pi].path.c_str());
-        else
-            fprintf(f, "m7SkyPanel=\n");
+    // Skybox instances
+    fprintf(f, "skyboxCount=%d\n", (int)sSkyboxInstances.size());
+    fprintf(f, "skyboxSelected=%d\n", sSelectedSkybox);
+    for (int si = 0; si < (int)sSkyboxInstances.size(); si++) {
+        const SkyboxInstance& sky = sSkyboxInstances[si];
+        fprintf(f, "skyboxInst=%s\n", sky.name);
+        fprintf(f, "skyboxMode=%d\n", sky.modeFilter);
+        fprintf(f, "skyboxPanelCount=%d\n", (int)sky.panels.size());
+        for (int pi = 0; pi < (int)sky.panels.size(); pi++) {
+            if (!sky.panels[pi].path.empty())
+                fprintf(f, "skyboxPanel=%s\n", sky.panels[pi].path.c_str());
+            else
+                fprintf(f, "skyboxPanel=\n");
+        }
+        // Per-scene assignments
+        fprintf(f, "skyboxM4Assign=%d", (int)sky.m4SceneAssign.size());
+        for (int i = 0; i < (int)sky.m4SceneAssign.size(); i++)
+            fprintf(f, ",%d", sky.m4SceneAssign[i] ? 1 : 0);
+        fprintf(f, "\n");
+        fprintf(f, "skyboxM1Assign=%d", (int)sky.m1SceneAssign.size());
+        for (int i = 0; i < (int)sky.m1SceneAssign.size(); i++)
+            fprintf(f, ",%d", sky.m1SceneAssign[i] ? 1 : 0);
+        fprintf(f, "\n");
     }
     fprintf(f, "m7SceneCount=%d\n", (int)sM7Scenes.size());
     fprintf(f, "m7SelectedScene=%d\n", sM7SelectedScene);
@@ -6436,29 +6492,101 @@ static bool LoadProject(const std::string& path)
             }
             else if (sscanf(line, "m7FloorSize=%d", &ival) == 1) { sM7FloorSize = std::clamp(ival, 0, 3); }
             else if (strncmp(line, "m7SkyTex=", 9) == 0) {
-                // Legacy single-image format — import as 1 panel
+                // Legacy single-image format — import as 1 instance with 1 panel
                 char fpath[512]; strncpy(fpath, line + 9, sizeof(fpath) - 1); fpath[511] = '\0';
                 char* nl = strchr(fpath, '\n'); if (nl) *nl = '\0';
                 char* cr = strchr(fpath, '\r'); if (cr) *cr = '\0';
-                sSkyPanels.clear();
-                sSkyPanels.push_back({});
-                LoadSkyPanelImage(sSkyPanels.back(), fpath);
+                for (auto& inst : sSkyboxInstances) FreeSkyboxInstance(inst);
+                sSkyboxInstances.clear();
+                SkyboxInstance inst;
+                snprintf(inst.name, sizeof(inst.name), "Skybox 0");
+                inst.panels.push_back({});
+                LoadSkyPanelImage(inst.panels.back(), fpath);
+                sSkyboxInstances.push_back(std::move(inst));
+                sSelectedSkybox = 0;
             }
             else if (sscanf(line, "m7SkyPanelCount=%d", &ival) == 1) {
-                for (auto& p : sSkyPanels) FreeSkyPanel(p);
-                sSkyPanels.clear();
-                sSkyPanels.resize(std::clamp(ival, 0, 8));
+                // Legacy multi-panel format — import as 1 instance
+                if (sSkyboxInstances.empty()) {
+                    SkyboxInstance inst;
+                    snprintf(inst.name, sizeof(inst.name), "Skybox 0");
+                    sSkyboxInstances.push_back(std::move(inst));
+                    sSelectedSkybox = 0;
+                }
+                SkyboxInstance& inst = sSkyboxInstances.back();
+                for (auto& p : inst.panels) FreeSkyPanel(p);
+                inst.panels.clear();
+                inst.panels.resize(std::clamp(ival, 0, 8));
             }
             else if (strncmp(line, "m7SkyPanel=", 11) == 0) {
                 char fpath[512]; strncpy(fpath, line + 11, sizeof(fpath) - 1); fpath[511] = '\0';
                 char* nl = strchr(fpath, '\n'); if (nl) *nl = '\0';
                 char* cr = strchr(fpath, '\r'); if (cr) *cr = '\0';
-                // Find next empty panel slot
-                for (auto& p : sSkyPanels) {
+                if (!sSkyboxInstances.empty()) {
+                    for (auto& p : sSkyboxInstances.back().panels) {
+                        if (p.path.empty() && fpath[0] != '\0') {
+                            LoadSkyPanelImage(p, fpath);
+                            break;
+                        }
+                    }
+                }
+            }
+            // New skybox instance format
+            else if (sscanf(line, "skyboxCount=%d", &ival) == 1) {
+                for (auto& inst : sSkyboxInstances) FreeSkyboxInstance(inst);
+                sSkyboxInstances.clear();
+                sSkyboxInstances.reserve(ival);
+            }
+            else if (sscanf(line, "skyboxSelected=%d", &ival) == 1) {
+                sSelectedSkybox = ival;
+            }
+            else if (strncmp(line, "skyboxInst=", 11) == 0) {
+                SkyboxInstance inst;
+                strncpy(inst.name, line + 11, sizeof(inst.name) - 1);
+                char* nl = strchr(inst.name, '\n'); if (nl) *nl = '\0';
+                char* cr = strchr(inst.name, '\r'); if (cr) *cr = '\0';
+                sSkyboxInstances.push_back(std::move(inst));
+            }
+            else if (sscanf(line, "skyboxMode=%d", &ival) == 1 && !sSkyboxInstances.empty()) {
+                sSkyboxInstances.back().modeFilter = std::clamp(ival, 0, 2);
+            }
+            else if (sscanf(line, "skyboxPanelCount=%d", &ival) == 1 && !sSkyboxInstances.empty()) {
+                SkyboxInstance& inst = sSkyboxInstances.back();
+                for (auto& p : inst.panels) FreeSkyPanel(p);
+                inst.panels.clear();
+                inst.panels.resize(std::clamp(ival, 0, 8));
+            }
+            else if (strncmp(line, "skyboxPanel=", 12) == 0 && !sSkyboxInstances.empty()) {
+                char fpath[512]; strncpy(fpath, line + 12, sizeof(fpath) - 1); fpath[511] = '\0';
+                char* nl = strchr(fpath, '\n'); if (nl) *nl = '\0';
+                char* cr = strchr(fpath, '\r'); if (cr) *cr = '\0';
+                for (auto& p : sSkyboxInstances.back().panels) {
                     if (p.path.empty() && fpath[0] != '\0') {
                         LoadSkyPanelImage(p, fpath);
                         break;
                     }
+                }
+            }
+            else if (strncmp(line, "skyboxM4Assign=", 15) == 0 && !sSkyboxInstances.empty()) {
+                SkyboxInstance& inst = sSkyboxInstances.back();
+                int cnt = 0;
+                sscanf(line + 15, "%d", &cnt);
+                inst.m4SceneAssign.resize(cnt, false);
+                const char* p = strchr(line + 15, ',');
+                for (int i = 0; i < cnt && p; i++) {
+                    inst.m4SceneAssign[i] = (atoi(p + 1) != 0);
+                    p = strchr(p + 1, ',');
+                }
+            }
+            else if (strncmp(line, "skyboxM1Assign=", 15) == 0 && !sSkyboxInstances.empty()) {
+                SkyboxInstance& inst = sSkyboxInstances.back();
+                int cnt = 0;
+                sscanf(line + 15, "%d", &cnt);
+                inst.m1SceneAssign.resize(cnt, false);
+                const char* p = strchr(line + 15, ',');
+                for (int i = 0; i < cnt && p; i++) {
+                    inst.m1SceneAssign[i] = (atoi(p + 1) != 0);
+                    p = strchr(p + 1, ',');
                 }
             }
             else if (sscanf(line, "m7SceneCount=%d", &ival) == 1) { sM7Scenes.clear(); sM7Scenes.reserve(ival); }
@@ -7100,6 +7228,20 @@ static bool LoadProject(const std::string& path)
     }
 
     // Stitch sky panels so the viewport can display the panorama
+    // Migrate legacy per-scene skyEnabled flags to skybox instance assignments
+    for (auto& sky : sSkyboxInstances) {
+        if (sky.m1SceneAssign.empty() && !sM7Scenes.empty()) {
+            sky.m1SceneAssign.resize(sM7Scenes.size(), false);
+            for (int si = 0; si < (int)sM7Scenes.size(); si++)
+                sky.m1SceneAssign[si] = sM7Scenes[si].skyEnabled;
+        }
+        if (sky.m4SceneAssign.empty() && !sMapScenes.empty()) {
+            sky.m4SceneAssign.resize(sMapScenes.size(), false);
+            for (int si = 0; si < (int)sMapScenes.size(); si++)
+                sky.m4SceneAssign[si] = sMapScenes[si].skyEnabled;
+        }
+    }
+
     StitchSkyPanels();
 
     fclose(f);
@@ -7154,9 +7296,10 @@ static void CloseProject()
     sM7FloorW = sM7FloorH = 0;
     sM7FloorPath.clear();
     sM7FloorSize = 3;
-    for (auto& p : sSkyPanels) FreeSkyPanel(p);
-    sSkyPanels.clear();
-    if (sM7SkyPixels) { stbi_image_free(sM7SkyPixels); sM7SkyPixels = nullptr; }
+    for (auto& inst : sSkyboxInstances) FreeSkyboxInstance(inst);
+    sSkyboxInstances.clear();
+    sSelectedSkybox = -1;
+    sM7SkyPixels = nullptr; // pointer into instance data, don't free
     sM7SkyW = sM7SkyH = 0;
 
     sProjectPath.clear();
@@ -11614,11 +11757,25 @@ void FrameTick(float dt)
                     exportScript.links.push_back(sl);
                 }
 
-                // Per-scene sky enable flags
-                for (auto& ms : sMapScenes)
-                    exportScript.m4SceneSkyEnabled.push_back(ms.skyEnabled);
-                for (auto& ms : sM7Scenes)
-                    exportScript.m1SceneSkyEnabled.push_back(ms.skyEnabled);
+                // Per-scene sky enable flags (derived from skybox instance assignments)
+                for (int si = 0; si < (int)sMapScenes.size(); si++) {
+                    bool enabled = false;
+                    for (auto& sky : sSkyboxInstances) {
+                        if (sky.modeFilter == 2) continue; // Mode 1 only — skip for Mode 4
+                        if (si < (int)sky.m4SceneAssign.size() && sky.m4SceneAssign[si] && !sky.panels.empty())
+                            enabled = true;
+                    }
+                    exportScript.m4SceneSkyEnabled.push_back(enabled);
+                }
+                for (int si = 0; si < (int)sM7Scenes.size(); si++) {
+                    bool enabled = false;
+                    for (auto& sky : sSkyboxInstances) {
+                        if (sky.modeFilter == 1) continue; // Mode 4 only — skip for Mode 1
+                        if (si < (int)sky.m1SceneAssign.size() && sky.m1SceneAssign[si] && !sky.panels.empty())
+                            enabled = true;
+                    }
+                    exportScript.m1SceneSkyEnabled.push_back(enabled);
+                }
 
                 // Build blueprint exports
                 std::vector<GBABlueprintExport> exportBlueprints;
@@ -12212,11 +12369,24 @@ void FrameTick(float dt)
                     }
                 }
 
-                // Stitch sky panels into a single horizontal image for export
+                // Stitch sky panels for all instances
                 StitchSkyPanels();
 
+                // Find first skybox instance with panels for export
+                unsigned char* exportSkyPixels = nullptr;
+                int exportSkyW = 0, exportSkyH = 0;
+                for (auto& sky : sSkyboxInstances) {
+                    if (sky.stitchedPixels && sky.stitchedW > 0) {
+                        exportSkyPixels = sky.stitchedPixels;
+                        exportSkyW = sky.stitchedW;
+                        exportSkyH = sky.stitchedH;
+                        break;
+                    }
+                }
+
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                             exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, target]() {
+                             exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, target,
+                             exportSkyPixels, exportSkyW, exportSkyH]() {
                     std::string err;
                     bool ok;
                     if (target == BuildTarget::NDS)
@@ -12226,7 +12396,7 @@ void FrameTick(float dt)
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,
                                         sM7FloorPixels, sM7FloorW, sM7FloorH, sM7FloorSize,
-                                        sM7SkyPixels, sM7SkyW, sM7SkyH);
+                                        exportSkyPixels, exportSkyW, exportSkyH);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
@@ -13836,193 +14006,277 @@ void FrameTick(float dt)
     }
     else if (sActiveTab == EditorTab::Skybox)
     {
+        // ---- Left panel: Instance list ----
+        float instPanelW = 200.0f;
+        ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus;
         ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x, bodyY));
-        ImGui::SetNextWindowSize(ImVec2(totalW, bodyH));
+        ImGui::SetNextWindowSize(ImVec2(instPanelW, bodyH));
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.09f, 0.11f, 0.13f, 1.0f));
+        ImGui::Begin("##SkyInstList", nullptr, flags);
+
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Skybox Instances");
+        ImGui::Separator();
+
+        // Add / Delete buttons
+        if (ImGui::Button("+##addskybox", ImVec2(Scaled(24), 0))) {
+            SkyboxInstance inst;
+            snprintf(inst.name, sizeof(inst.name), "Skybox %d", (int)sSkyboxInstances.size());
+            sSkyboxInstances.push_back(std::move(inst));
+            sSelectedSkybox = (int)sSkyboxInstances.size() - 1;
+            UpdateActiveSky();
+            sProjectDirty = true;
+        }
+        ImGui::SameLine();
+        if (sSelectedSkybox >= 0 && ImGui::Button("-##delskybox", ImVec2(Scaled(24), 0))) {
+            FreeSkyboxInstance(sSkyboxInstances[sSelectedSkybox]);
+            sSkyboxInstances.erase(sSkyboxInstances.begin() + sSelectedSkybox);
+            if (sSelectedSkybox >= (int)sSkyboxInstances.size())
+                sSelectedSkybox = (int)sSkyboxInstances.size() - 1;
+            UpdateActiveSky();
+            sProjectDirty = true;
+        }
+        ImGui::Spacing();
+
+        // Instance list
+        {
+            float listH = ImGui::GetContentRegionAvail().y;
+            if (listH < Scaled(30)) listH = Scaled(30);
+            ImGui::BeginChild("##SkyInstScroll", ImVec2(-1, listH), false);
+            for (int i = 0; i < (int)sSkyboxInstances.size(); i++) {
+                char label[64];
+                snprintf(label, sizeof(label), "[%d] %s", i, sSkyboxInstances[i].name);
+                bool sel = (sSelectedSkybox == i);
+                if (ImGui::Selectable(label, sel)) {
+                    sSelectedSkybox = i;
+                    UpdateActiveSky();
+                }
+            }
+            ImGui::EndChild();
+        }
+
+        ImGui::End();
+        ImGui::PopStyleColor();
+
+        // ---- Right panel: Selected instance details ----
+        float detailX = vp->WorkPos.x + instPanelW;
+        float detailW = totalW - instPanelW;
+        ImGui::SetNextWindowPos(ImVec2(detailX, bodyY));
+        ImGui::SetNextWindowSize(ImVec2(detailW, bodyH));
         ImGui::Begin("##SkyboxTab", nullptr,
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
-            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
-        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Skybox (Mode 1 / Mode 4)");
-        ImGui::Separator();
-        ImGui::Text("Panoramic sky panels. Add panels and wire them left-to-right.");
-        ImGui::Text("Panels are stitched horizontally and wrap with camera rotation.");
-        ImGui::TextDisabled("Used by Mode 1 (orbit camera) and Mode 4 (3D).");
-        ImGui::Spacing();
+            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-        // Add Panel button
-        if ((int)sSkyPanels.size() < 8) {
-            if (ImGui::Button("+ Add Panel", ImVec2(120, 0))) {
-                sSkyPanels.push_back({});
+        if (sSelectedSkybox >= 0 && sSelectedSkybox < (int)sSkyboxInstances.size()) {
+            SkyboxInstance& sky = sSkyboxInstances[sSelectedSkybox];
+
+            // Instance name
+            ImGui::PushItemWidth(200);
+            if (ImGui::InputText("##skyname", sky.name, sizeof(sky.name)))
                 sProjectDirty = true;
-            }
-        } else {
-            ImGui::TextDisabled("Max 8 panels");
-        }
+            ImGui::PopItemWidth();
+            ImGui::SameLine();
 
-        // Summary
-        {
-            int totalW = 0;
-            for (auto& p : sSkyPanels) if (p.pixels) totalW += p.w;
-            if (totalW > 0) {
-                ImGui::SameLine(0, 20);
-                ImGui::Text("Stitched: %dx256  Export: %s",
-                    totalW, totalW > 256 ? "512x256 (64x32)" : "256x256 (32x32)");
-            }
-        }
-        ImGui::Spacing();
-
-        // Draw panel nodes in a horizontal row with wire connections
-        float nodeW = 120.0f, nodeH = 140.0f, nodeSpacing = 40.0f;
-        ImVec2 canvasStart = ImGui::GetCursorScreenPos();
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        int removeIdx = -1;
-
-        for (int i = 0; i < (int)sSkyPanels.size(); i++) {
-            SkyPanel& p = sSkyPanels[i];
-            float nx = canvasStart.x + i * (nodeW + nodeSpacing);
-            float ny = canvasStart.y;
-
-            // Draw wire from previous node
-            if (i > 0) {
-                float prevRight = canvasStart.x + (i - 1) * (nodeW + nodeSpacing) + nodeW;
-                ImVec2 p1(prevRight + 4, ny + nodeH * 0.5f);
-                ImVec2 p2(nx - 4, ny + nodeH * 0.5f);
-                dl->AddLine(p1, p2, IM_COL32(100, 180, 255, 200), 2.0f);
-                // Arrow head
-                dl->AddTriangleFilled(
-                    ImVec2(p2.x - 8, p2.y - 5),
-                    ImVec2(p2.x - 8, p2.y + 5),
-                    p2, IM_COL32(100, 180, 255, 200));
-            }
-
-            // Node background
-            ImVec2 nodeMin(nx, ny);
-            ImVec2 nodeMax(nx + nodeW, ny + nodeH);
-            dl->AddRectFilled(nodeMin, nodeMax, IM_COL32(40, 45, 55, 240), 4.0f);
-            dl->AddRect(nodeMin, nodeMax, IM_COL32(80, 140, 220, 200), 4.0f, 0, 1.5f);
-
-            // Panel label
-            char label[32];
-            snprintf(label, sizeof(label), "Panel %d", i + 1);
-            dl->AddText(ImVec2(nx + 4, ny + 2), IM_COL32(200, 220, 255, 255), label);
-
-            // Thumbnail or empty slot
-            float thumbY = ny + 18;
-            float thumbH = nodeH - 50;
-            if (p.tex) {
-                float aspect = (float)p.h / (float)p.w;
-                float tw = nodeW - 8, th = tw * aspect;
-                if (th > thumbH) { th = thumbH; tw = th / aspect; }
-                dl->AddImage((ImTextureID)(intptr_t)p.tex,
-                    ImVec2(nx + 4, thumbY), ImVec2(nx + 4 + tw, thumbY + th));
-                char info[64];
-                snprintf(info, sizeof(info), "%dx%d", p.w, p.h);
-                dl->AddText(ImVec2(nx + 4, thumbY + th + 1), IM_COL32(150, 150, 150, 200), info);
-            } else {
-                dl->AddRectFilled(ImVec2(nx + 4, thumbY), ImVec2(nx + nodeW - 4, thumbY + thumbH),
-                    IM_COL32(25, 28, 35, 200), 2.0f);
-                dl->AddText(ImVec2(nx + 12, thumbY + thumbH * 0.4f), IM_COL32(100, 100, 100, 200), "Empty");
-            }
-
-            // Buttons area (use invisible ImGui buttons over the drawn area)
-            ImGui::SetCursorScreenPos(ImVec2(nx, ny + nodeH - 28));
-            ImGui::PushID(i);
-            if (ImGui::InvisibleButton("##import", ImVec2(nodeW * 0.55f, 22))) {
-#ifdef _WIN32
-                std::string path = OpenFileDialog("Image Files\0*.png;*.bmp;*.jpg;*.tga\0All\0*.*\0", "png");
-                if (!path.empty()) {
-                    if (!LoadSkyPanelImage(p, path))
-                        ImGui::OpenPopup("##SkyPanelErr");
-                    else {
+            // Mode filter dropdown
+            const char* modeLabels[] = { "All", "Mode 4", "Mode 1" };
+            ImGui::PushItemWidth(100);
+            if (ImGui::BeginCombo("##skymode", modeLabels[sky.modeFilter])) {
+                for (int m = 0; m < 3; m++) {
+                    if (ImGui::Selectable(modeLabels[m], sky.modeFilter == m)) {
+                        sky.modeFilter = m;
                         sProjectDirty = true;
-                        StitchSkyPanels();
                     }
                 }
-#endif
+                ImGui::EndCombo();
             }
-            dl->AddRectFilled(ImVec2(nx + 2, ny + nodeH - 28), ImVec2(nx + nodeW * 0.55f, ny + nodeH - 6),
-                ImGui::IsItemHovered() ? IM_COL32(60, 100, 180, 255) : IM_COL32(50, 70, 120, 255), 3.0f);
-            dl->AddText(ImVec2(nx + 8, ny + nodeH - 26), IM_COL32(220, 230, 255, 255), "Import");
+            ImGui::PopItemWidth();
 
-            ImGui::SetCursorScreenPos(ImVec2(nx + nodeW * 0.6f, ny + nodeH - 28));
-            if (ImGui::InvisibleButton("##remove", ImVec2(nodeW * 0.35f, 22))) {
-                removeIdx = i;
-            }
-            dl->AddRectFilled(ImVec2(nx + nodeW * 0.6f, ny + nodeH - 28), ImVec2(nx + nodeW - 2, ny + nodeH - 6),
-                ImGui::IsItemHovered() ? IM_COL32(180, 60, 60, 255) : IM_COL32(120, 50, 50, 255), 3.0f);
-            dl->AddText(ImVec2(nx + nodeW * 0.65f, ny + nodeH - 26), IM_COL32(255, 200, 200, 255), "X");
+            ImGui::Separator();
+            ImGui::Text("Panoramic sky panels. Add panels and wire them left-to-right.");
+            ImGui::Spacing();
 
-            // Drag reorder: left connector (except first)
-            if (i > 0) {
-                ImGui::SetCursorScreenPos(ImVec2(nx - 6, ny + nodeH * 0.5f - 6));
-                if (ImGui::InvisibleButton("##lconn", ImVec2(12, 12))) {
-                    if (sSkyDragFrom >= 0 && sSkyDragFrom != i) {
-                        // Swap panels
-                        std::swap(sSkyPanels[sSkyDragFrom], sSkyPanels[i]);
-                        sSkyDragFrom = -1;
-                        sProjectDirty = true;
-                        StitchSkyPanels();
-                    }
-                }
-                dl->AddCircleFilled(ImVec2(nx, ny + nodeH * 0.5f), 5.0f,
-                    ImGui::IsItemHovered() ? IM_COL32(100, 200, 255, 255) : IM_COL32(80, 140, 220, 200));
-            }
-
-            // Right connector (except last)
-            if (i < (int)sSkyPanels.size() - 1) {
-                ImGui::SetCursorScreenPos(ImVec2(nx + nodeW - 6, ny + nodeH * 0.5f - 6));
-                if (ImGui::InvisibleButton("##rconn", ImVec2(12, 12))) {
-                    sSkyDragFrom = i;
-                }
-                dl->AddCircleFilled(ImVec2(nx + nodeW, ny + nodeH * 0.5f), 5.0f,
-                    ImGui::IsItemHovered() ? IM_COL32(255, 200, 100, 255) : IM_COL32(220, 160, 80, 200));
-            }
-
-            if (ImGui::BeginPopup("##SkyPanelErr")) {
-                ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Invalid image!");
-                ImGui::Text("Max 1024x1024.");
-                ImGui::EndPopup();
-            }
-            ImGui::PopID();
-        }
-
-        // Handle removal
-        if (removeIdx >= 0) {
-            FreeSkyPanel(sSkyPanels[removeIdx]);
-            sSkyPanels.erase(sSkyPanels.begin() + removeIdx);
-            sProjectDirty = true;
-            StitchSkyPanels();
-        }
-
-        // Reserve space for the node row
-        float totalNodeW = std::max(1.0f, (float)sSkyPanels.size()) * (nodeW + nodeSpacing);
-        ImGui::SetCursorScreenPos(ImVec2(canvasStart.x, canvasStart.y));
-        ImGui::Dummy(ImVec2(totalNodeW, nodeH + 10));
-
-        // Scene assignment — per-scene sky enable checkboxes
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        if (!sM7Scenes.empty()) {
-            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Mode 1 Scenes");
-            for (int si = 0; si < (int)sM7Scenes.size(); si++) {
-                char label[64];
-                snprintf(label, sizeof(label), "%s##m1sky%d", sM7Scenes[si].name, si);
-                if (ImGui::Checkbox(label, &sM7Scenes[si].skyEnabled))
+            // Add Panel button
+            if ((int)sky.panels.size() < 8) {
+                if (ImGui::Button("+ Add Panel", ImVec2(120, 0))) {
+                    sky.panels.push_back({});
                     sProjectDirty = true;
+                }
+            } else {
+                ImGui::TextDisabled("Max 8 panels");
+            }
+
+            // Summary
+            {
+                int stitchedW = 0;
+                for (auto& p : sky.panels) if (p.pixels) stitchedW += p.w;
+                if (stitchedW > 0) {
+                    ImGui::SameLine(0, 20);
+                    ImGui::Text("Stitched: %dx256  Export: %s",
+                        stitchedW, stitchedW > 256 ? "512x256 (64x32)" : "256x256 (32x32)");
+                }
             }
             ImGui::Spacing();
-        }
 
-        if (!sMapScenes.empty()) {
-            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Mode 4 Scenes");
-            for (int si = 0; si < (int)sMapScenes.size(); si++) {
-                char label[64];
-                snprintf(label, sizeof(label), "%s##m4sky%d", sMapScenes[si].name, si);
-                if (ImGui::Checkbox(label, &sMapScenes[si].skyEnabled))
-                    sProjectDirty = true;
+            // Draw panel nodes
+            float nodeW = 120.0f, nodeH = 140.0f, nodeSpacing = 40.0f;
+            ImVec2 canvasStart = ImGui::GetCursorScreenPos();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            int removeIdx = -1;
+
+            for (int i = 0; i < (int)sky.panels.size(); i++) {
+                SkyPanel& p = sky.panels[i];
+                float nx = canvasStart.x + i * (nodeW + nodeSpacing);
+                float ny = canvasStart.y;
+
+                if (i > 0) {
+                    float prevRight = canvasStart.x + (i - 1) * (nodeW + nodeSpacing) + nodeW;
+                    ImVec2 p1(prevRight + 4, ny + nodeH * 0.5f);
+                    ImVec2 p2(nx - 4, ny + nodeH * 0.5f);
+                    dl->AddLine(p1, p2, IM_COL32(100, 180, 255, 200), 2.0f);
+                    dl->AddTriangleFilled(
+                        ImVec2(p2.x - 8, p2.y - 5),
+                        ImVec2(p2.x - 8, p2.y + 5),
+                        p2, IM_COL32(100, 180, 255, 200));
+                }
+
+                ImVec2 nodeMin(nx, ny);
+                ImVec2 nodeMax(nx + nodeW, ny + nodeH);
+                dl->AddRectFilled(nodeMin, nodeMax, IM_COL32(40, 45, 55, 240), 4.0f);
+                dl->AddRect(nodeMin, nodeMax, IM_COL32(80, 140, 220, 200), 4.0f, 0, 1.5f);
+
+                char label[32];
+                snprintf(label, sizeof(label), "Panel %d", i + 1);
+                dl->AddText(ImVec2(nx + 4, ny + 2), IM_COL32(200, 220, 255, 255), label);
+
+                float thumbY = ny + 18;
+                float thumbH = nodeH - 50;
+                if (p.tex) {
+                    float aspect = (float)p.h / (float)p.w;
+                    float tw = nodeW - 8, th = tw * aspect;
+                    if (th > thumbH) { th = thumbH; tw = th / aspect; }
+                    dl->AddImage((ImTextureID)(intptr_t)p.tex,
+                        ImVec2(nx + 4, thumbY), ImVec2(nx + 4 + tw, thumbY + th));
+                    char info[64];
+                    snprintf(info, sizeof(info), "%dx%d", p.w, p.h);
+                    dl->AddText(ImVec2(nx + 4, thumbY + th + 1), IM_COL32(150, 150, 150, 200), info);
+                } else {
+                    dl->AddRectFilled(ImVec2(nx + 4, thumbY), ImVec2(nx + nodeW - 4, thumbY + thumbH),
+                        IM_COL32(25, 28, 35, 200), 2.0f);
+                    dl->AddText(ImVec2(nx + 12, thumbY + thumbH * 0.4f), IM_COL32(100, 100, 100, 200), "Empty");
+                }
+
+                ImGui::SetCursorScreenPos(ImVec2(nx, ny + nodeH - 28));
+                ImGui::PushID(i);
+                if (ImGui::InvisibleButton("##import", ImVec2(nodeW * 0.55f, 22))) {
+#ifdef _WIN32
+                    std::string path = OpenFileDialog("Image Files\0*.png;*.bmp;*.jpg;*.tga\0All\0*.*\0", "png");
+                    if (!path.empty()) {
+                        if (!LoadSkyPanelImage(p, path))
+                            ImGui::OpenPopup("##SkyPanelErr");
+                        else {
+                            sProjectDirty = true;
+                            StitchSkyboxInstance(sky);
+                            UpdateActiveSky();
+                        }
+                    }
+#endif
+                }
+                dl->AddRectFilled(ImVec2(nx + 2, ny + nodeH - 28), ImVec2(nx + nodeW * 0.55f, ny + nodeH - 6),
+                    ImGui::IsItemHovered() ? IM_COL32(60, 100, 180, 255) : IM_COL32(50, 70, 120, 255), 3.0f);
+                dl->AddText(ImVec2(nx + 8, ny + nodeH - 26), IM_COL32(220, 230, 255, 255), "Import");
+
+                ImGui::SetCursorScreenPos(ImVec2(nx + nodeW * 0.6f, ny + nodeH - 28));
+                if (ImGui::InvisibleButton("##remove", ImVec2(nodeW * 0.35f, 22))) {
+                    removeIdx = i;
+                }
+                dl->AddRectFilled(ImVec2(nx + nodeW * 0.6f, ny + nodeH - 28), ImVec2(nx + nodeW - 2, ny + nodeH - 6),
+                    ImGui::IsItemHovered() ? IM_COL32(180, 60, 60, 255) : IM_COL32(120, 50, 50, 255), 3.0f);
+                dl->AddText(ImVec2(nx + nodeW * 0.65f, ny + nodeH - 26), IM_COL32(255, 200, 200, 255), "X");
+
+                if (i > 0) {
+                    ImGui::SetCursorScreenPos(ImVec2(nx - 6, ny + nodeH * 0.5f - 6));
+                    if (ImGui::InvisibleButton("##lconn", ImVec2(12, 12))) {
+                        if (sky.dragFrom >= 0 && sky.dragFrom != i) {
+                            std::swap(sky.panels[sky.dragFrom], sky.panels[i]);
+                            sky.dragFrom = -1;
+                            sProjectDirty = true;
+                            StitchSkyboxInstance(sky);
+                            UpdateActiveSky();
+                        }
+                    }
+                    dl->AddCircleFilled(ImVec2(nx, ny + nodeH * 0.5f), 5.0f,
+                        ImGui::IsItemHovered() ? IM_COL32(100, 200, 255, 255) : IM_COL32(80, 140, 220, 200));
+                }
+
+                if (i < (int)sky.panels.size() - 1) {
+                    ImGui::SetCursorScreenPos(ImVec2(nx + nodeW - 6, ny + nodeH * 0.5f - 6));
+                    if (ImGui::InvisibleButton("##rconn", ImVec2(12, 12))) {
+                        sky.dragFrom = i;
+                    }
+                    dl->AddCircleFilled(ImVec2(nx + nodeW, ny + nodeH * 0.5f), 5.0f,
+                        ImGui::IsItemHovered() ? IM_COL32(255, 200, 100, 255) : IM_COL32(220, 160, 80, 200));
+                }
+
+                if (ImGui::BeginPopup("##SkyPanelErr")) {
+                    ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Invalid image!");
+                    ImGui::Text("Max 1024x1024.");
+                    ImGui::EndPopup();
+                }
+                ImGui::PopID();
             }
+
+            if (removeIdx >= 0) {
+                FreeSkyPanel(sky.panels[removeIdx]);
+                sky.panels.erase(sky.panels.begin() + removeIdx);
+                sProjectDirty = true;
+                StitchSkyboxInstance(sky);
+                UpdateActiveSky();
+            }
+
+            float totalNodeW = std::max(1.0f, (float)sky.panels.size()) * (nodeW + nodeSpacing);
+            ImGui::SetCursorScreenPos(ImVec2(canvasStart.x, canvasStart.y));
+            ImGui::Dummy(ImVec2(totalNodeW, nodeH + 10));
+
+            // Scene assignment
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // Ensure assignment vectors match scene counts
+            while ((int)sky.m1SceneAssign.size() < (int)sM7Scenes.size()) sky.m1SceneAssign.push_back(false);
+            while ((int)sky.m4SceneAssign.size() < (int)sMapScenes.size()) sky.m4SceneAssign.push_back(false);
+
+            bool showM1 = (sky.modeFilter == 0 || sky.modeFilter == 2);
+            bool showM4 = (sky.modeFilter == 0 || sky.modeFilter == 1);
+
+            if (showM1 && !sM7Scenes.empty()) {
+                ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Mode 1 Scenes");
+                for (int si = 0; si < (int)sM7Scenes.size(); si++) {
+                    char label[64];
+                    snprintf(label, sizeof(label), "%s##m1sky%d", sM7Scenes[si].name, si);
+                    bool val = sky.m1SceneAssign[si];
+                    if (ImGui::Checkbox(label, &val)) {
+                        sky.m1SceneAssign[si] = val;
+                        sProjectDirty = true;
+                    }
+                }
+                ImGui::Spacing();
+            }
+
+            if (showM4 && !sMapScenes.empty()) {
+                ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Mode 4 Scenes");
+                for (int si = 0; si < (int)sMapScenes.size(); si++) {
+                    char label[64];
+                    snprintf(label, sizeof(label), "%s##m4sky%d", sMapScenes[si].name, si);
+                    bool val = sky.m4SceneAssign[si];
+                    if (ImGui::Checkbox(label, &val)) {
+                        sky.m4SceneAssign[si] = val;
+                        sProjectDirty = true;
+                    }
+                }
+            }
+        } else {
+            ImGui::TextDisabled("No skybox instance selected. Click + to create one.");
         }
 
         ImGui::End();

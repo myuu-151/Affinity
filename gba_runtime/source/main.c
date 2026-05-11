@@ -1151,6 +1151,51 @@ static void update_sky_scroll(int cam_ang)
         }
     }
 }
+
+// Mode 4 sky: load sky sub-palettes into palette slots 192-255
+static void load_sky_m4_palette(void)
+{
+    memcpy16(&pal_bg_mem[192], afn_sky_pal0, 16);
+    memcpy16(&pal_bg_mem[208], afn_sky_pal1, 16);
+    memcpy16(&pal_bg_mem[224], afn_sky_pal2, 16);
+    memcpy16(&pal_bg_mem[240], afn_sky_pal3, 16);
+}
+
+// Mode 4 sky: render panorama into bitmap framebuffer (above horizon)
+#define M4_SKY_HORIZON 80
+IWRAM_CODE static void render_sky_m4(u16* buf)
+{
+    int skyW = AFN_SKY_MAP_COLS * 8;  // panorama width in pixels
+    int scrollX = (int)((u32)cam_angle * skyW >> 16);
+    int y, x;
+
+    for (y = 0; y < M4_SKY_HORIZON && y < 160; y++)
+    {
+        // Map screen Y (0..horizon) to texture V (0..255)
+        int texV = (y * 256) / M4_SKY_HORIZON;
+        if (texV > 255) texV = 255;
+        int band = texV >> 6;  // /64, 4 bands
+        if (band > 3) band = 3;
+        int palBase = 192 + band * 16;
+        int tileRow = texV >> 3;
+        int pixY = texV & 7;
+        u8* line = (u8*)&buf[y * 120];
+        int u = scrollX % skyW;
+
+        for (x = 0; x < 240; x++)
+        {
+            int tileCol = u >> 3;
+            int pixX = u & 7;
+            // Look up tile index from tilemap (lower 10 bits = tile index)
+            int tileIdx = afn_sky_tilemap[tileRow * AFN_SKY_MAP_COLS + tileCol] & 0x3FF;
+            int byteOff = tileIdx * 32 + pixY * 4 + (pixX >> 1);
+            u8 raw = afn_sky_tiles[byteOff];
+            u8 px = (pixX & 1) ? (raw >> 4) : (raw & 0xF);
+            line[x] = (u8)(palBase + px);
+            if (++u >= skyW) u -= skyW;
+        }
+    }
+}
 #endif
 
 // ---------------------------------------------------------------------------
@@ -4060,6 +4105,10 @@ static void mode4_init_scene(void)
         }
     }
 
+#ifdef AFN_HAS_SKY
+    load_sky_m4_palette();
+#endif
+
     // Reload OBJ tiles (tile offset 512 for Mode 4)
     init_obj_sprites();
     tm_static_adj = AFN_DIR_VRAM_TILES;
@@ -4653,6 +4702,9 @@ int main(void)
             u16* vramBuf = g_page ? (u16*)0x06000000 : (u16*)0x0600A000;
             u16* backbuf = g_ewramRender ? g_ewramBuf : vramBuf;
             afn_clear_fb_stmia(backbuf, 0);
+#ifdef AFN_HAS_SKY
+            render_sky_m4(backbuf);
+#endif
             if (g_coverageOn) coverage_clear();
             dbg_tex_tris = 0;
             dbg_tex_spans = 0;
