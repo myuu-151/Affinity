@@ -3831,11 +3831,7 @@ static void render_minimap_bg_sw(u16* buf)
 // Collision — wall blocking + slide, floor height tracking
 // ---------------------------------------------------------------------------
 
-#ifdef AFN_COL_FACE_COUNT
-
-#define COL_PLAYER_RADIUS 768   // 3 pixels (16.8)
-#define COL_PLAYER_HEIGHT 3072  // 12 pixels (16.8)
-#define COL_STEP_HEIGHT   1024  // 4 pixels (16.8)
+// Gravity/jump constants and variables (always available for Mode 4 + Mode 1)
 #define COL_GRAVITY       AFN_GRAVITY       // from editor export
 #define COL_TERMINAL_VEL  AFN_TERMINAL_VEL  // from editor export
 #define COL_JUMP_VEL      AFN_JUMP_VEL      // from editor export
@@ -3846,6 +3842,12 @@ static FIXED player_vy;        // vertical velocity (16.8, negative = falling)
 static int   player_on_ground; // 1 if standing on a floor face
 #endif
 static FIXED cam_y_smooth;     // smoothed camera Y offset (16.8)
+
+#ifdef AFN_COL_FACE_COUNT
+
+#define COL_PLAYER_RADIUS 768   // 3 pixels (16.8)
+#define COL_PLAYER_HEIGHT 3072  // 12 pixels (16.8)
+#define COL_STEP_HEIGHT   1024  // 4 pixels (16.8)
 
 // Push player out of wall faces. Modifies *px, *pz in place.
 // Optimized: plane-distance only (no per-edge segment tests, no 64-bit division).
@@ -4075,12 +4077,10 @@ static void mode4_init_scene(void)
     orbit_dist = AFN_ORBIT_DIST;
     player_moving = 0;
     player_move_angle = 0x4000;
-#ifdef AFN_COL_FACE_COUNT
     player_ground_y = 0;
     player_vy = 0;
     player_on_ground = 1;
     cam_y_smooth = 0;
-#endif
 #ifdef AFN_HAS_SCRIPT
     afn_start_x = player_x;
     afn_start_y = player_y;
@@ -4573,9 +4573,7 @@ int main(void)
         orbit_dist = AFN_ORBIT_DIST;
         player_moving = 0;
         player_move_angle = 0x4000;
-#ifdef AFN_COL_FACE_COUNT
         player_ground_y = 0; player_vy = 0; player_on_ground = 1; cam_y_smooth = 0;
-#endif
 #ifdef AFN_HAS_SCRIPT
         afn_start_x = player_x; afn_start_y = player_y; afn_start_z = player_z;
         if (g_spriteCount > 0) {
@@ -5757,7 +5755,7 @@ int main(void)
                 player_move_angle = player_move_angle - orbit_angle;
             }
 
-            // Collision: wall blocking + slide, gravity + floor
+            // Collision: wall blocking + slide
 #ifdef AFN_COL_FACE_COUNT
             collide_walls(&player_x, &player_z, player_y);
 
@@ -5769,6 +5767,7 @@ int main(void)
                 afn_script_collision();
                 afn_bp_dispatch_collision();
             }
+#endif
 #endif
 
             // Jump + dampen are driven by script nodes only
@@ -5786,11 +5785,11 @@ int main(void)
 
             // Floor check
             {
+#ifdef AFN_COL_FACE_COUNT
                 FIXED floorY;
                 int onFloor = collide_floor(player_x, player_z, player_y, &floorY);
                 if (onFloor && player_y <= floorY)
                 {
-                    // Land on floor
                     player_y = floorY;
                     player_vy = 0;
                     player_on_ground = 1;
@@ -5798,10 +5797,24 @@ int main(void)
                 }
                 else
                 {
-                    // Airborne — no floor beneath, keep falling
                     player_on_ground = 0;
                     player_ground_y = player_y;
                 }
+#else
+                // No mesh collision — flat ground at Y=0
+                if (player_y <= 0)
+                {
+                    player_y = 0;
+                    player_vy = 0;
+                    player_on_ground = 1;
+                    player_ground_y = 0;
+                }
+                else
+                {
+                    player_on_ground = 0;
+                    player_ground_y = player_y;
+                }
+#endif
             }
 
             // Smooth camera Y — lag behind player elevation changes
@@ -5817,7 +5830,6 @@ int main(void)
                 if (dy > -4 && dy < 4) cam_y_smooth = target_cam_y;
             }
             cam_h = AFN_CAM_H + cam_y_smooth;
-#endif
 
             // Clamp player to map bounds
             {
@@ -5972,12 +5984,10 @@ int main(void)
                 orbit_angle = AFN_CAM_ANGLE;
                 player_moving = 0;
                 player_move_angle = 0x4000; // face away from camera (show back)
-#ifdef AFN_COL_FACE_COUNT
                 player_ground_y = 0;
                 player_vy = 0;
                 player_on_ground = 1;
                 cam_y_smooth = 0;
-#endif
             }
 #ifdef AFFINITY_HAS_SPRITES
             cam_x     = AFN_CAM_X;
