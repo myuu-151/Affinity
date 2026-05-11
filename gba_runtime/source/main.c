@@ -1088,7 +1088,17 @@ static void load_editor_map(void)
 #endif
 
 #ifdef AFN_HAS_SKY
+static int g_sky_active;     // whether sky is enabled for current scene
 static int sky_vram_src[32]; // which panorama column is in each VRAM slot
+
+static int scene_sky_enabled(int sceneIdx)
+{
+#ifdef AFN_SKY_SCENE_COUNT
+    return (sceneIdx >= 0 && sceneIdx < AFN_SKY_SCENE_COUNT) ? afn_sky_scene_enabled[sceneIdx] : 1;
+#else
+    return 1;
+#endif
+}
 
 static void load_sky(void)
 {
@@ -4333,7 +4343,8 @@ static void scene_load(int sceneMode, int sceneIdx)
         // Mode 1 (Mode 7 affine floor)
         tm_scene_idx = sceneIdx;
 #ifdef AFN_HAS_SKY
-        REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG1 | DCNT_BG2;
+        g_sky_active = scene_sky_enabled(sceneIdx);
+        REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | (g_sky_active ? DCNT_BG1 : 0) | DCNT_BG2;
 #else
         REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
 #endif
@@ -4355,7 +4366,7 @@ static void scene_load(int sceneMode, int sceneIdx)
         load_checkerboard();
 #endif
 #ifdef AFN_HAS_SKY
-        load_sky();
+        if (g_sky_active) load_sky();
 #endif
         init_obj_sprites();
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
@@ -4518,7 +4529,8 @@ int main(void)
     } else {
         // Mode 1 (legacy Mode 7 floor)
 #ifdef AFN_HAS_SKY
-        REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG1 | DCNT_BG2;
+        g_sky_active = scene_sky_enabled(0);
+        REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | (g_sky_active ? DCNT_BG1 : 0) | DCNT_BG2;
 #else
         REG_DISPCNT = DCNT_MODE1 | DCNT_BG0 | DCNT_BG2;
 #endif
@@ -4540,7 +4552,7 @@ int main(void)
         load_checkerboard();
 #endif
 #ifdef AFN_HAS_SKY
-        load_sky();
+        if (g_sky_active) load_sky();
 #endif
         init_obj_sprites();
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
@@ -5963,7 +5975,7 @@ int main(void)
 
 #ifdef AFN_HAS_SKY
         // Dynamically scroll sky columns based on camera rotation
-        update_sky_scroll(cam_angle);
+        if (g_sky_active) update_sky_scroll(cam_angle);
 #endif
 
         // Reset to start position

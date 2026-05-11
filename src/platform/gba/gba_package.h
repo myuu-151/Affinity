@@ -373,6 +373,8 @@ struct GBAScriptLinkExport {
 struct GBAScriptExport {
     std::vector<GBAScriptNodeExport> nodes;
     std::vector<GBAScriptLinkExport> links;
+    std::vector<bool> m4SceneSkyEnabled;  // per Mode 4 scene sky enable
+    std::vector<bool> m1SceneSkyEnabled;  // per Mode 1 scene sky enable
 };
 
 // ---- Blueprint Export ----

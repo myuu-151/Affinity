@@ -5612,6 +5612,17 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "\n";
         }
         f << "};\n\n";
+
+        // Per-scene sky enable flags (Mode 1 scenes only — Mode 4 uses bitmap, no BG sky)
+        if (!script.m1SceneSkyEnabled.empty()) {
+            int m1Count = (int)script.m1SceneSkyEnabled.size();
+            f << "// Per Mode 1 scene sky enable\n";
+            f << "#define AFN_SKY_SCENE_COUNT " << m1Count << "\n";
+            f << "static const unsigned char afn_sky_scene_enabled[" << m1Count << "] = { ";
+            for (int i = 0; i < m1Count; i++)
+                f << (script.m1SceneSkyEnabled[i] ? 1 : 0) << ",";
+            f << "};\n\n";
+        }
     }
 
     f << "\n#endif // MAPDATA_H\n";

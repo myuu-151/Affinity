@@ -3782,6 +3782,8 @@ struct MapScene {
     int vsNextId = 1;
     float vsPanX = 0, vsPanY = 0;
     float vsZoom = 1.0f;
+    // Skybox enabled for this scene
+    bool skyEnabled = true;
     // Scene-level blueprint attachment
     int blueprintIdx = -1;
     struct { int paramIdx; int value; } instanceParams[8] = {};
@@ -4774,6 +4776,7 @@ static bool SaveProject(const std::string& path)
     {
         const MapScene& ms = sMapScenes[si];
         fprintf(f, "mapScene=%s\n", ms.name);
+        fprintf(f, "msSkyEnabled=%d\n", ms.skyEnabled ? 1 : 0);
         fprintf(f, "msSpriteCount=%d\n", ms.spriteCount);
         for (int i = 0; i < ms.spriteCount; i++)
         {
@@ -4869,6 +4872,7 @@ static bool SaveProject(const std::string& path)
     {
         const MapScene& ms = sM7Scenes[si];
         fprintf(f, "m7Scene=%s\n", ms.name);
+        fprintf(f, "m7SkyEnabled=%d\n", ms.skyEnabled ? 1 : 0);
         fprintf(f, "m7SpriteCount=%d\n", ms.spriteCount);
         for (int i = 0; i < ms.spriteCount; i++)
         {
@@ -6197,6 +6201,8 @@ static bool LoadProject(const std::string& path)
                 char* cr = strchr(ms.name, '\r'); if (cr) *cr = '\0';
                 sMapScenes.push_back(ms);
             }
+            else if (sscanf(line, "msSkyEnabled=%d", &ival) == 1 && !sMapScenes.empty())
+                sMapScenes.back().skyEnabled = (ival != 0);
             else if (sscanf(line, "msSpriteCount=%d", &ival) == 1 && !sMapScenes.empty())
             {
                 sMapScenes.back().spriteCount = 0; // reset, will increment as we parse sprites
@@ -6465,6 +6471,8 @@ static bool LoadProject(const std::string& path)
                 char* cr = strchr(ms.name, '\r'); if (cr) *cr = '\0';
                 sM7Scenes.push_back(ms);
             }
+            else if (sscanf(line, "m7SkyEnabled=%d", &ival) == 1 && !sM7Scenes.empty())
+                sM7Scenes.back().skyEnabled = (ival != 0);
             else if (sscanf(line, "m7SpriteCount=%d", &ival) == 1 && !sM7Scenes.empty())
             {
                 sM7Scenes.back().spriteCount = 0;
@@ -11606,6 +11614,12 @@ void FrameTick(float dt)
                     exportScript.links.push_back(sl);
                 }
 
+                // Per-scene sky enable flags
+                for (auto& ms : sMapScenes)
+                    exportScript.m4SceneSkyEnabled.push_back(ms.skyEnabled);
+                for (auto& ms : sM7Scenes)
+                    exportScript.m1SceneSkyEnabled.push_back(ms.skyEnabled);
+
                 // Build blueprint exports
                 std::vector<GBABlueprintExport> exportBlueprints;
                 std::vector<GBABlueprintInstanceExport> exportBpInstances;
@@ -13828,10 +13842,11 @@ void FrameTick(float dt)
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
-        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Skybox (Mode 7)");
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Skybox (Mode 1 / Mode 4)");
         ImGui::Separator();
         ImGui::Text("Panoramic sky panels. Add panels and wire them left-to-right.");
         ImGui::Text("Panels are stitched horizontally and wrap with camera rotation.");
+        ImGui::TextDisabled("Used by Mode 1 (orbit camera) and Mode 4 (3D).");
         ImGui::Spacing();
 
         // Add Panel button
@@ -13983,6 +13998,33 @@ void FrameTick(float dt)
         float totalNodeW = std::max(1.0f, (float)sSkyPanels.size()) * (nodeW + nodeSpacing);
         ImGui::SetCursorScreenPos(ImVec2(canvasStart.x, canvasStart.y));
         ImGui::Dummy(ImVec2(totalNodeW, nodeH + 10));
+
+        // Scene assignment — per-scene sky enable checkboxes
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (!sM7Scenes.empty()) {
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Mode 1 Scenes");
+            for (int si = 0; si < (int)sM7Scenes.size(); si++) {
+                char label[64];
+                snprintf(label, sizeof(label), "%s##m1sky%d", sM7Scenes[si].name, si);
+                if (ImGui::Checkbox(label, &sM7Scenes[si].skyEnabled))
+                    sProjectDirty = true;
+            }
+            ImGui::Spacing();
+        }
+
+        if (!sMapScenes.empty()) {
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Mode 4 Scenes");
+            for (int si = 0; si < (int)sMapScenes.size(); si++) {
+                char label[64];
+                snprintf(label, sizeof(label), "%s##m4sky%d", sMapScenes[si].name, si);
+                if (ImGui::Checkbox(label, &sMapScenes[si].skyEnabled))
+                    sProjectDirty = true;
+            }
+        }
+
         ImGui::End();
     }
     else if (sActiveTab == EditorTab::Player)
