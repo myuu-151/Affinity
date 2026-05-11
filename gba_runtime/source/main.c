@@ -1155,12 +1155,15 @@ static void update_sky_scroll(int cam_ang)
 // Mode 4 sky: load sky sub-palettes into palette slots 192-255
 // and pre-decode sky tiles into a flat 8bpp scanline buffer in EWRAM
 #define M4_SKY_HORIZON 80
-EWRAM_DATA static u8 sky_m4_decoded[AFN_SKY_MAP_COLS * 8 * 256];
+// Pre-padded: each row is (skyW + 240) bytes so we can always do a single memcpy
+#define SKY_M4_STRIDE (AFN_SKY_MAP_COLS * 8 + 240)
+EWRAM_DATA static u8 sky_m4_decoded[SKY_M4_STRIDE * 256];
 static int sky_m4_w;
 
 static void load_sky_m4(void)
 {
     int skyW = AFN_SKY_MAP_COLS * 8;
+    int stride = skyW + 240;
     int row, col, py, px;
     sky_m4_w = skyW;
 
@@ -1180,7 +1183,7 @@ static void load_sky_m4(void)
             const u8* tile = &afn_sky_tiles[tileIdx * 32];
             for (py = 0; py < 8; py++) {
                 int destY = row * 8 + py;
-                u8* dst = &sky_m4_decoded[destY * skyW + col * 8];
+                u8* dst = &sky_m4_decoded[destY * stride + col * 8];
                 const u8* src = &tile[py * 4];
                 for (px = 0; px < 8; px += 2) {
                     u8 raw = src[px >> 1];
@@ -1190,41 +1193,56 @@ static void load_sky_m4(void)
             }
         }
     }
+    // Pad: duplicate first 240 bytes at end of each row for seamless wrap
+    for (row = 0; row < 256; row++) {
+        u8* r = &sky_m4_decoded[row * stride];
+        memcpy(r + skyW, r, 240);
+    }
 }
 
 // Mode 4 sky: cached full-res frame — only rebuild on camera rotation
 EWRAM_DATA static u8 sky_m4_frame[240 * 160] __attribute__((aligned(4)));
 static int sky_m4_lastScroll = -1;
+static int sky_m4_rebuilding = 0;  // progressive rebuild cursor (0 = idle)
+static int sky_m4_targetScroll;
 
-// Rebuild the cached sky frame (called only when scroll changes)
-static void sky_m4_rebuild(int scrollX)
+// Rebuild a range of scanlines [yStart, yEnd) — single memcpy per row (pre-padded)
+static void sky_m4_rebuild_range(int scrollX, int yStart, int yEnd)
 {
-    const int skyW = sky_m4_w;
+    const int stride = sky_m4_w + 240;
     int y;
-    for (y = 0; y < 160; y++)
+    for (y = yStart; y < yEnd; y++)
     {
         int texV = (y * 255) / 159;
-        if (texV > 255) texV = 255;
-        const u8* srcRow = &sky_m4_decoded[texV * skyW];
-        u8* dst = &sky_m4_frame[y * 240];
-        int c1 = skyW - scrollX;
-        if (c1 >= 240) {
-            memcpy(dst, srcRow + scrollX, 240);
-        } else {
-            memcpy(dst, srcRow + scrollX, c1);
-            memcpy(dst + c1, srcRow, 240 - c1);
-        }
+        const u8* srcRow = &sky_m4_decoded[texV * stride + scrollX];
+        memcpy(&sky_m4_frame[y * 240], srcRow, 240);
     }
-    sky_m4_lastScroll = scrollX;
 }
 
-// Per-frame: DMA the cached sky to backbuffer (same cost as flat clear)
+// Per-frame: DMA the cached sky to backbuffer
 IWRAM_CODE static void render_sky_m4(u16* buf)
 {
     const int skyW = sky_m4_w;
     int scrollX = ((int)((u32)cam_angle * skyW >> 16)) & ~3;
-    if (scrollX != sky_m4_lastScroll)
-        sky_m4_rebuild(scrollX);
+    if (scrollX != sky_m4_lastScroll) {
+        if (!sky_m4_rebuilding) {
+            // Start progressive rebuild: 40 rows per frame across 4 frames
+            sky_m4_targetScroll = scrollX;
+            sky_m4_rebuilding = 1;
+        }
+    }
+    if (sky_m4_rebuilding) {
+        int chunk = (sky_m4_rebuilding - 1) * 40;
+        int end = chunk + 40;
+        if (end > 160) end = 160;
+        sky_m4_rebuild_range(sky_m4_targetScroll, chunk, end);
+        if (end >= 160) {
+            sky_m4_lastScroll = sky_m4_targetScroll;
+            sky_m4_rebuilding = 0;
+        } else {
+            sky_m4_rebuilding++;
+        }
+    }
     // Single DMA blast: 240*160 bytes = 9600 words
     DMA_TRANSFER(buf, sky_m4_frame, 240 * 160 / 4, 3, DMA_NOW | DMA_32);
 }
