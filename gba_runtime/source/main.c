@@ -1088,24 +1088,58 @@ static void load_editor_map(void)
 #endif
 
 #ifdef AFN_HAS_SKY
+static int sky_vram_src[32]; // which panorama column is in each VRAM slot
+
 static void load_sky(void)
 {
-    // BG1: 4bpp tiled, charblock 1, SBB 6, priority 3 (behind floor)
-    REG_BG1CNT = BG_CBB(1) | BG_SBB(6) | BG_4BPP | BG_REG_32x32 | BG_PRIO(3);
+    REG_BG1CNT = BG_CBB(1) | BG_SBB(4) | BG_4BPP | BG_REG_32x32 | BG_PRIO(3);
     REG_BG1HOFS = 0;
     REG_BG1VOFS = 0;
 
-    // Copy sky tiles to charblock 1 (4bpp = 32 bytes/tile)
     memcpy32(&tile_mem[1][0], afn_sky_tiles, afn_sky_tilesLen / 4);
 
-    // Copy per-band sub-palettes (sub-palettes 11-14, 16 entries each)
     memcpy16(&pal_bg_mem[AFN_SKY_SUBPAL_BASE * 16], afn_sky_pal0, 16);
     memcpy16(&pal_bg_mem[(AFN_SKY_SUBPAL_BASE + 1) * 16], afn_sky_pal1, 16);
     memcpy16(&pal_bg_mem[(AFN_SKY_SUBPAL_BASE + 2) * 16], afn_sky_pal2, 16);
     memcpy16(&pal_bg_mem[(AFN_SKY_SUBPAL_BASE + 3) * 16], afn_sky_pal3, 16);
 
-    // Copy sky tilemap to SBB 6 (includes palette bank bits per tile)
-    memcpy16(se_mem[6], afn_sky_tilemap, 32 * 32);
+    // Mark all VRAM columns as needing refresh
+    { int i; for (i = 0; i < 32; i++) sky_vram_src[i] = -1; }
+
+    // Fill initial 32 columns
+    {
+        int row, col;
+        u16 *sbb = (u16*)se_mem[4];
+        for (col = 0; col < 32; col++) {
+            sky_vram_src[col] = col % AFN_SKY_MAP_COLS;
+            for (row = 0; row < 32; row++)
+                sbb[row * 32 + col] = afn_sky_tilemap[row * AFN_SKY_MAP_COLS + sky_vram_src[col]];
+        }
+    }
+}
+
+// Update sky — only refreshes columns that actually changed (typically 0-1 per frame)
+static void update_sky_scroll(int cam_ang)
+{
+    int totalCols = AFN_SKY_MAP_COLS;
+    int totalPx = totalCols * 8;
+    int pixScroll = (int)((u32)cam_ang * totalPx >> 16);
+    int colStart = pixScroll >> 3;
+    int i, row;
+    u16 *sbb = (u16*)se_mem[4];
+
+    REG_BG1HOFS = pixScroll & 0xFF;
+
+    // Only update VRAM columns whose source column changed
+    for (i = 0; i < 32; i++) {
+        int srcCol = (colStart + i) % totalCols;
+        int vramCol = (colStart + i) & 31;
+        if (sky_vram_src[vramCol] != srcCol) {
+            sky_vram_src[vramCol] = srcCol;
+            for (row = 0; row < 32; row++)
+                sbb[row * 32 + vramCol] = afn_sky_tilemap[row * totalCols + srcCol];
+        }
+    }
 }
 #endif
 
@@ -1385,7 +1419,9 @@ static void update_sprites(void)
         side      = (dx * g_cosf + dz * g_sinf) >> 8;
 
         if (fovLambda <= 64) continue;
-#ifdef AFN_DRAW_DISTANCE
+#ifdef AFN_SPRITE_DRAW_DISTANCE
+        if (fovLambda > AFN_SPRITE_DRAW_DISTANCE) continue;
+#elif defined(AFN_DRAW_DISTANCE)
         if (fovLambda > AFN_DRAW_DISTANCE) continue;
 #endif
 
@@ -4333,7 +4369,7 @@ static void scene_load(int sceneMode, int sceneIdx)
             switch_dir_anim_set(ai, 0);
         } }
 #endif
-        init_minimap();
+        // init_minimap(); // disabled — minimap not used in Mode 7
 #if defined(AFFINITY_HAS_SPRITES) && AFN_SPRITE_COUNT > 0
         load_editor_sprites();
 #endif
@@ -4518,7 +4554,7 @@ int main(void)
             switch_dir_anim_set(ai, 0);
         } }
 #endif
-        init_minimap();
+        // init_minimap(); // disabled — minimap not used in Mode 7
 #if defined(AFFINITY_HAS_SPRITES) && AFN_SPRITE_COUNT > 0
         load_editor_sprites();
 #else
@@ -5914,9 +5950,8 @@ int main(void)
         g_sinf = lu_sin(cam_angle) >> 4;
 
 #ifdef AFN_HAS_SKY
-        // Scroll sky BG1 horizontally with camera rotation
-        // cam_angle is 0-65535 (brad), map to 0-255 pixel scroll
-        REG_BG1HOFS = (cam_angle >> 8) & 0xFF;
+        // Dynamically scroll sky columns based on camera rotation
+        update_sky_scroll(cam_angle);
 #endif
 
         // Reset to start position
@@ -5962,12 +5997,8 @@ int main(void)
         // Project and draw sprites
         update_sprites();
 
-        // Update minimap (Mode 1/Mode 7 only — no BG0 in mesh mode, not in Mode 0)
-        if (afn_current_mode == 2) {
-#if !defined(AFN_HAS_MESHES) || !defined(AFN_HAS_MODE0)
-            update_minimap();
-#endif
-        }
+        // Minimap disabled in Mode 7
+        // if (afn_current_mode == 2) { update_minimap(); }
 
 #ifdef AFN_HAS_MODE0
         } /* end Mode 4/7 else block */

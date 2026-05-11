@@ -153,6 +153,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     f << "#define AFN_SPRINT_EASE_OUT " << (int)(camera.sprintEaseOut * 256.0f / 100.0f) << "\n";
     if (camera.drawDistance > 0.0f)
         f << "#define AFN_DRAW_DISTANCE " << (int)(camera.drawDistance / 4.0f * 256.0f) << "\n";
+    if (camera.spriteDrawDistance > 0.0f)
+        f << "#define AFN_SPRITE_DRAW_DISTANCE " << (int)(camera.spriteDrawDistance / 4.0f * 256.0f) << "\n";
     if (camera.smallTriCull > 0)
         f << "#define AFN_SMALL_TRI_CULL " << camera.smallTriCull << "\n";
     f << "\n";

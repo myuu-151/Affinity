@@ -52,7 +52,7 @@ static void SampleFloor(float wx, float wz, const Mode7Map* map,
         static constexpr float kHalf = 512.0f;
         if (wx < -kHalf || wx > kHalf || wz < -kHalf || wz > kHalf)
         {
-            r = 30; g = 30; b = 35;
+            r = kSkyCol[0]; g = kSkyCol[1]; b = kSkyCol[2];
             return;
         }
         int px = ((int)floorf(wx) % mapW + mapW) % mapW;
@@ -83,7 +83,7 @@ static void SampleFloor(float wx, float wz, const Mode7Map* map,
         static constexpr float defHalf = 512.0f;
         if (wx < -defHalf || wx > defHalf || wz < -defHalf || wz > defHalf)
         {
-            r = 30; g = 30; b = 35;
+            r = kSkyCol[0]; g = kSkyCol[1]; b = kSkyCol[2];
             return;
         }
         int cx = ((int)floorf(wx / 32.0f)) & 1;
@@ -451,7 +451,9 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             const AssetDirImages* assetDirImages, int assetDirCount,
             const AssetDirImages* spriteDirImages, int spriteDirCount,
             const MeshAsset* meshAssets, int meshAssetCount,
-            bool mode7Floor)
+            bool mode7Floor,
+            const unsigned char* skyPixels, int skyW, int skyH,
+            const unsigned char* floorPixels, int floorW, int floorH)
 {
     float cosA = cosf(-cam.angle);
     float sinA = sinf(-cam.angle);
@@ -468,12 +470,33 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
 
             if (y <= horizon)
             {
-                // Sky
-                for (int x = 0; x < kGBAWidth; x++)
+                // Sky — sample from panorama texture if available
+                if (skyPixels && skyW > 0 && skyH > 0)
                 {
-                    row[x * 3 + 0] = kSkyCol[0];
-                    row[x * 3 + 1] = kSkyCol[1];
-                    row[x * 3 + 2] = kSkyCol[2];
+                    float angNorm = cam.angle / (2.0f * 3.14159265f);
+                    angNorm = angNorm - floorf(angNorm);
+                    int skyBaseX = (int)(angNorm * skyW);
+                    // Map y [0..horizon] to texture row: bottom of sky texture at horizon
+                    int skyRow = (horizon > 0) ? (y * skyH / (horizon + 1)) : 0;
+                    if (skyRow >= skyH) skyRow = skyH - 1;
+                    for (int x = 0; x < kGBAWidth; x++)
+                    {
+                        // Map screen x [0..240) to panorama with wrapping
+                        int skyX = (skyBaseX + x * skyW / kGBAWidth) % skyW;
+                        int idx = (skyRow * skyW + skyX) * 4;
+                        row[x * 3 + 0] = skyPixels[idx + 0];
+                        row[x * 3 + 1] = skyPixels[idx + 1];
+                        row[x * 3 + 2] = skyPixels[idx + 2];
+                    }
+                }
+                else
+                {
+                    for (int x = 0; x < kGBAWidth; x++)
+                    {
+                        row[x * 3 + 0] = kSkyCol[0];
+                        row[x * 3 + 1] = kSkyCol[1];
+                        row[x * 3 + 2] = kSkyCol[2];
+                    }
                 }
                 continue;
             }
@@ -496,7 +519,25 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             for (int x = 0; x < kGBAWidth; x++)
             {
                 uint8_t r, g, b;
-                SampleFloor(wx, wz, map, r, g, b);
+                if (floorPixels && floorW > 0 && floorH > 0)
+                {
+                    // Sample from floor image — world ±512 maps to image
+                    static constexpr float kHalf = 512.0f;
+                    if (wx < -kHalf || wx > kHalf || wz < -kHalf || wz > kHalf) {
+                        r = kSkyCol[0]; g = kSkyCol[1]; b = kSkyCol[2];
+                    } else {
+                        int px = (int)(((wx + kHalf) / (2.0f * kHalf)) * floorW);
+                        int py = (int)(((wz + kHalf) / (2.0f * kHalf)) * floorH);
+                        if (px < 0) px = 0; if (px >= floorW) px = floorW - 1;
+                        if (py < 0) py = 0; if (py >= floorH) py = floorH - 1;
+                        int idx = (py * floorW + px) * 4;
+                        r = floorPixels[idx + 0];
+                        g = floorPixels[idx + 1];
+                        b = floorPixels[idx + 2];
+                    }
+                }
+                else
+                    SampleFloor(wx, wz, map, r, g, b);
 
                 float fog = lambda / 300.0f;
                 if (fog > 1.0f) fog = 1.0f;
@@ -519,11 +560,30 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         for (int y = 0; y < kGBAHeight; y++)
         {
             uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
-            for (int x = 0; x < kGBAWidth; x++)
+            if (skyPixels && skyW > 0 && skyH > 0 && y <= horizon)
             {
-                row[x * 3 + 0] = kSkyCol[0];
-                row[x * 3 + 1] = kSkyCol[1];
-                row[x * 3 + 2] = kSkyCol[2];
+                float angNorm = cam.angle / (2.0f * 3.14159265f);
+                angNorm = angNorm - floorf(angNorm);
+                int skyBaseX = (int)(angNorm * skyW);
+                int skyRow = (horizon > 0) ? (y * skyH / (horizon + 1)) : 0;
+                if (skyRow >= skyH) skyRow = skyH - 1;
+                for (int x = 0; x < kGBAWidth; x++)
+                {
+                    int skyX = (skyBaseX + x * skyW / kGBAWidth) % skyW;
+                    int idx = (skyRow * skyW + skyX) * 4;
+                    row[x * 3 + 0] = skyPixels[idx + 0];
+                    row[x * 3 + 1] = skyPixels[idx + 1];
+                    row[x * 3 + 2] = skyPixels[idx + 2];
+                }
+            }
+            else
+            {
+                for (int x = 0; x < kGBAWidth; x++)
+                {
+                    row[x * 3 + 0] = kSkyCol[0];
+                    row[x * 3 + 1] = kSkyCol[1];
+                    row[x * 3 + 2] = kSkyCol[2];
+                }
             }
         }
 

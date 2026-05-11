@@ -258,6 +258,7 @@ struct CameraStartObject
     float jumpDampen = 0.75f;
     // Draw distance (0 = unlimited)
     float drawDistance = 0.0f;
+    float spriteDrawDistance = 0.0f;
     // Performance toggles
     int smallTriCull = 0;   // min screen-space area to render (0=off)
     bool skipFloor = false; // skip floor rendering entirely

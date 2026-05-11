@@ -3839,35 +3839,79 @@ static int sM7FloorW = 0, sM7FloorH = 0;
 static GLuint sM7FloorTex = 0;          // GL preview texture
 static int sM7FloorSize = 3;           // 0=16x16(128px), 1=32x32(256px), 2=64x64(512px), 3=128x128(1024px)
 
-// ---- Mode 7 skybox texture ----
-static std::string sM7SkyPath;
+// ---- Mode 7 skybox panels (node-based multi-panel panorama) ----
+struct SkyPanel {
+    std::string path;
+    unsigned char* pixels = nullptr;
+    int w = 0, h = 0;
+    GLuint tex = 0;
+};
+static std::vector<SkyPanel> sSkyPanels;
+static int sSkyDragFrom = -1; // for wire-drag reordering
+
+// Legacy single-image pointers for export (stitched from panels)
 static unsigned char* sM7SkyPixels = nullptr;
 static int sM7SkyW = 0, sM7SkyH = 0;
-static GLuint sM7SkyTex = 0;
 
 static bool IsPOT(int v) { return v > 0 && (v & (v - 1)) == 0; }
 
-static bool LoadM7SkyTexture(const std::string& path)
+static bool LoadSkyPanelImage(SkyPanel& panel, const std::string& path)
 {
     int w, h, ch;
     unsigned char* img = stbi_load(path.c_str(), &w, &h, &ch, 4);
     if (!img) return false;
-    if (!IsPOT(w) || !IsPOT(h) || w > 1024 || h > 1024) {
+    if (w < 8 || h < 8 || w > 1024 || h > 1024) {
         stbi_image_free(img);
         return false;
     }
-    if (sM7SkyPixels) stbi_image_free(sM7SkyPixels);
-    if (sM7SkyTex) glDeleteTextures(1, &sM7SkyTex);
-    sM7SkyPixels = img;
-    sM7SkyW = w;
-    sM7SkyH = h;
-    sM7SkyPath = path;
-    glGenTextures(1, &sM7SkyTex);
-    glBindTexture(GL_TEXTURE_2D, sM7SkyTex);
+    if (panel.pixels) stbi_image_free(panel.pixels);
+    if (panel.tex) glDeleteTextures(1, &panel.tex);
+    panel.pixels = img;
+    panel.w = w;
+    panel.h = h;
+    panel.path = path;
+    glGenTextures(1, &panel.tex);
+    glBindTexture(GL_TEXTURE_2D, panel.tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
     return true;
+}
+
+static void FreeSkyPanel(SkyPanel& p) {
+    if (p.pixels) { stbi_image_free(p.pixels); p.pixels = nullptr; }
+    if (p.tex) { glDeleteTextures(1, &p.tex); p.tex = 0; }
+    p.w = p.h = 0;
+    p.path.clear();
+}
+
+// Stitch all panels into a single horizontal image for export
+static void StitchSkyPanels() {
+    if (sM7SkyPixels) { stbi_image_free(sM7SkyPixels); sM7SkyPixels = nullptr; }
+    sM7SkyW = sM7SkyH = 0;
+    if (sSkyPanels.empty()) return;
+
+    // Find max height, total width
+    int totalW = 0, maxH = 0;
+    for (auto& p : sSkyPanels) {
+        if (!p.pixels) continue;
+        totalW += p.w;
+        if (p.h > maxH) maxH = p.h;
+    }
+    if (totalW == 0 || maxH == 0) return;
+
+    sM7SkyPixels = (unsigned char*)malloc(totalW * maxH * 4);
+    memset(sM7SkyPixels, 0, totalW * maxH * 4);
+    int xOff = 0;
+    for (auto& p : sSkyPanels) {
+        if (!p.pixels) continue;
+        for (int y = 0; y < p.h && y < maxH; y++)
+            memcpy(&sM7SkyPixels[(y * totalW + xOff) * 4],
+                   &p.pixels[(y * p.w) * 4], p.w * 4);
+        xOff += p.w;
+    }
+    sM7SkyW = totalW;
+    sM7SkyH = maxH;
 }
 
 static bool LoadM7FloorTexture(const std::string& path)
@@ -4290,6 +4334,7 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "auto_orbit_speed=%.1f\n", sCamObj.autoOrbitSpeed);
     fprintf(f, "jump_dampen=%.2f\n", sCamObj.jumpDampen);
     fprintf(f, "draw_distance=%.1f\n", sCamObj.drawDistance);
+    fprintf(f, "sprite_draw_distance=%.1f\n", sCamObj.spriteDrawDistance);
     fprintf(f, "small_tri_cull=%d\n", sCamObj.smallTriCull);
     fprintf(f, "skip_floor=%d\n", sCamObj.skipFloor ? 1 : 0);
     fprintf(f, "coverage_buf=%d\n", sCamObj.coverageBuf ? 1 : 0);
@@ -4811,8 +4856,13 @@ static bool SaveProject(const std::string& path)
     if (!sM7FloorPath.empty())
         fprintf(f, "m7FloorTex=%s\n", sM7FloorPath.c_str());
     fprintf(f, "m7FloorSize=%d\n", sM7FloorSize);
-    if (!sM7SkyPath.empty())
-        fprintf(f, "m7SkyTex=%s\n", sM7SkyPath.c_str());
+    fprintf(f, "m7SkyPanelCount=%d\n", (int)sSkyPanels.size());
+    for (int pi = 0; pi < (int)sSkyPanels.size(); pi++) {
+        if (!sSkyPanels[pi].path.empty())
+            fprintf(f, "m7SkyPanel=%s\n", sSkyPanels[pi].path.c_str());
+        else
+            fprintf(f, "m7SkyPanel=\n");
+    }
     fprintf(f, "m7SceneCount=%d\n", (int)sM7Scenes.size());
     fprintf(f, "m7SelectedScene=%d\n", sM7SelectedScene);
     for (int si = 0; si < (int)sM7Scenes.size(); si++)
@@ -5115,6 +5165,7 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "auto_orbit_speed=%f", &fval) == 1) sCamObj.autoOrbitSpeed = fval;
             else if (sscanf(line, "jump_dampen=%f", &fval) == 1) sCamObj.jumpDampen = fval;
             else if (sscanf(line, "draw_distance=%f", &fval) == 1) sCamObj.drawDistance = fval;
+            else if (sscanf(line, "sprite_draw_distance=%f", &fval) == 1) sCamObj.spriteDrawDistance = fval;
             else if (sscanf(line, "small_tri_cull=%d", &ival) == 1) sCamObj.smallTriCull = ival;
             else if (sscanf(line, "skip_floor=%d", &ival) == 1) sCamObj.skipFloor = (ival != 0);
             else if (sscanf(line, "coverage_buf=%d", &ival) == 1) sCamObj.coverageBuf = (ival != 0);
@@ -6379,10 +6430,30 @@ static bool LoadProject(const std::string& path)
             }
             else if (sscanf(line, "m7FloorSize=%d", &ival) == 1) { sM7FloorSize = std::clamp(ival, 0, 3); }
             else if (strncmp(line, "m7SkyTex=", 9) == 0) {
+                // Legacy single-image format — import as 1 panel
                 char fpath[512]; strncpy(fpath, line + 9, sizeof(fpath) - 1); fpath[511] = '\0';
                 char* nl = strchr(fpath, '\n'); if (nl) *nl = '\0';
                 char* cr = strchr(fpath, '\r'); if (cr) *cr = '\0';
-                LoadM7SkyTexture(fpath);
+                sSkyPanels.clear();
+                sSkyPanels.push_back({});
+                LoadSkyPanelImage(sSkyPanels.back(), fpath);
+            }
+            else if (sscanf(line, "m7SkyPanelCount=%d", &ival) == 1) {
+                for (auto& p : sSkyPanels) FreeSkyPanel(p);
+                sSkyPanels.clear();
+                sSkyPanels.resize(std::clamp(ival, 0, 8));
+            }
+            else if (strncmp(line, "m7SkyPanel=", 11) == 0) {
+                char fpath[512]; strncpy(fpath, line + 11, sizeof(fpath) - 1); fpath[511] = '\0';
+                char* nl = strchr(fpath, '\n'); if (nl) *nl = '\0';
+                char* cr = strchr(fpath, '\r'); if (cr) *cr = '\0';
+                // Find next empty panel slot
+                for (auto& p : sSkyPanels) {
+                    if (p.path.empty() && fpath[0] != '\0') {
+                        LoadSkyPanelImage(p, fpath);
+                        break;
+                    }
+                }
             }
             else if (sscanf(line, "m7SceneCount=%d", &ival) == 1) { sM7Scenes.clear(); sM7Scenes.reserve(ival); }
             else if (sscanf(line, "m7SelectedScene=%d", &ival) == 1) sM7SelectedScene = ival;
@@ -7020,6 +7091,9 @@ static bool LoadProject(const std::string& path)
         LoadInstanceOverrides(sSoundInstances[0]);
     }
 
+    // Stitch sky panels so the viewport can display the panorama
+    StitchSkyPanels();
+
     fclose(f);
     sProjectPath = path;
     sProjectDirty = false;
@@ -7072,10 +7146,10 @@ static void CloseProject()
     sM7FloorW = sM7FloorH = 0;
     sM7FloorPath.clear();
     sM7FloorSize = 3;
+    for (auto& p : sSkyPanels) FreeSkyPanel(p);
+    sSkyPanels.clear();
     if (sM7SkyPixels) { stbi_image_free(sM7SkyPixels); sM7SkyPixels = nullptr; }
-    if (sM7SkyTex) { glDeleteTextures(1, &sM7SkyTex); sM7SkyTex = 0; }
     sM7SkyW = sM7SkyH = 0;
-    sM7SkyPath.clear();
 
     sProjectPath.clear();
     sProjectDirty = false;
@@ -9258,7 +9332,8 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::Separator();
         ImGui::Separator();
         ImGui::Text("Rendering");
-        ImGui::DragFloat("Draw Distance##cam", &sCamObj.drawDistance, 1.0f, 0.0f, 2000.0f, "%.0f");
+        ImGui::DragFloat("Mesh Draw Distance##cam", &sCamObj.drawDistance, 1.0f, 0.0f, 2000.0f, "%.0f");
+        ImGui::DragFloat("Sprite Draw Distance##cam", &sCamObj.spriteDrawDistance, 1.0f, 0.0f, 2000.0f, "%.0f");
         ImGui::DragInt("Small Tri Cull##cam", &sCamObj.smallTriCull, 1.0f, 0, 500, "%d");
         if (sCamObj.smallTriCull > 0)
             ImGui::TextDisabled("Skip tris with screen area < %d", sCamObj.smallTriCull);
@@ -11355,6 +11430,7 @@ void FrameTick(float dt)
                 exportCam.autoOrbitSpeed = sCamObj.autoOrbitSpeed;
                 exportCam.jumpDampen = sCamObj.jumpDampen;
                 exportCam.drawDistance = sCamObj.drawDistance;
+                exportCam.spriteDrawDistance = sCamObj.spriteDrawDistance;
                 exportCam.smallTriCull = sCamObj.smallTriCull;
                 exportCam.skipFloor = sCamObj.skipFloor;
                 exportCam.coverageBuf = sCamObj.coverageBuf;
@@ -12121,6 +12197,9 @@ void FrameTick(float dt)
                         exportSoundInstances.push_back(std::move(ie));
                     }
                 }
+
+                // Stitch sky panels into a single horizontal image for export
+                StitchSkyPanels();
 
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                              exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, target]() {
@@ -13677,7 +13756,9 @@ void FrameTick(float dt)
                   spriteDirImgs.empty() ? nullptr : spriteDirImgs.data(), (int)spriteDirImgs.size(),
                   (useMode7Floor || sMeshAssets.empty()) ? nullptr : sMeshAssets.data(),
                   useMode7Floor ? 0 : (int)sMeshAssets.size(),
-                  useMode7Floor);
+                  useMode7Floor,
+                  sM7SkyPixels, sM7SkyW, sM7SkyH,
+                  useMode7Floor ? sM7FloorPixels : nullptr, sM7FloorW, sM7FloorH);
 
     // Draw axis guide line when transforming a selected sprite
     if (sTransformAxis && sTransformAxis != 'S'
@@ -13749,50 +13830,159 @@ void FrameTick(float dt)
             ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus);
         ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Skybox (Mode 7)");
         ImGui::Separator();
-        ImGui::Text("Background image for Mode 7 sky. Replaces the flat backdrop color.");
-        ImGui::Text("BG1 4bpp tiled layer, 16 colors, scrolls with camera rotation.");
+        ImGui::Text("Panoramic sky panels. Add panels and wire them left-to-right.");
+        ImGui::Text("Panels are stitched horizontally and wrap with camera rotation.");
         ImGui::Spacing();
 
-        if (sM7SkyTex) {
-            ImGui::Text("Source: %dx%d", sM7SkyW, sM7SkyH);
-            ImGui::Text("Export: 256x256 (32x32 tiles, 4bpp)");
-            float avail = ImGui::GetContentRegionAvail().x;
-            float maxSz = avail < 512.0f ? avail : 512.0f;
-            float aspect = (float)sM7SkyH / (float)sM7SkyW;
-            ImGui::Image((ImTextureID)(intptr_t)sM7SkyTex, ImVec2(maxSz, maxSz * aspect));
-        } else {
-            ImGui::TextDisabled("No skybox texture imported");
-        }
-
-        if (ImGui::Button("Import Skybox...", ImVec2(200, 0))) {
-#ifdef _WIN32
-            std::string path = OpenFileDialog("Image Files\0*.png;*.bmp;*.jpg;*.tga\0All\0*.*\0", "png");
-            if (!path.empty()) {
-                if (!LoadM7SkyTexture(path))
-                    ImGui::OpenPopup("##SkyErr");
-                else
-                    sProjectDirty = true;
-            }
-#endif
-        }
-        if (sM7SkyTex) {
-            ImGui::SameLine();
-            if (ImGui::Button("Clear##skyclear", ImVec2(80, 0))) {
-                stbi_image_free(sM7SkyPixels);
-                sM7SkyPixels = nullptr;
-                sM7SkyW = sM7SkyH = 0;
-                glDeleteTextures(1, &sM7SkyTex);
-                sM7SkyTex = 0;
-                sM7SkyPath.clear();
+        // Add Panel button
+        if ((int)sSkyPanels.size() < 8) {
+            if (ImGui::Button("+ Add Panel", ImVec2(120, 0))) {
+                sSkyPanels.push_back({});
                 sProjectDirty = true;
             }
+        } else {
+            ImGui::TextDisabled("Max 8 panels");
         }
-        if (ImGui::BeginPopup("##SkyErr")) {
-            ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Invalid image!");
-            ImGui::Text("Must be POT (power of two)");
-            ImGui::Text("up to 1024x1024.");
-            ImGui::EndPopup();
+
+        // Summary
+        {
+            int totalW = 0;
+            for (auto& p : sSkyPanels) if (p.pixels) totalW += p.w;
+            if (totalW > 0) {
+                ImGui::SameLine(0, 20);
+                ImGui::Text("Stitched: %dx256  Export: %s",
+                    totalW, totalW > 256 ? "512x256 (64x32)" : "256x256 (32x32)");
+            }
         }
+        ImGui::Spacing();
+
+        // Draw panel nodes in a horizontal row with wire connections
+        float nodeW = 120.0f, nodeH = 140.0f, nodeSpacing = 40.0f;
+        ImVec2 canvasStart = ImGui::GetCursorScreenPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        int removeIdx = -1;
+
+        for (int i = 0; i < (int)sSkyPanels.size(); i++) {
+            SkyPanel& p = sSkyPanels[i];
+            float nx = canvasStart.x + i * (nodeW + nodeSpacing);
+            float ny = canvasStart.y;
+
+            // Draw wire from previous node
+            if (i > 0) {
+                float prevRight = canvasStart.x + (i - 1) * (nodeW + nodeSpacing) + nodeW;
+                ImVec2 p1(prevRight + 4, ny + nodeH * 0.5f);
+                ImVec2 p2(nx - 4, ny + nodeH * 0.5f);
+                dl->AddLine(p1, p2, IM_COL32(100, 180, 255, 200), 2.0f);
+                // Arrow head
+                dl->AddTriangleFilled(
+                    ImVec2(p2.x - 8, p2.y - 5),
+                    ImVec2(p2.x - 8, p2.y + 5),
+                    p2, IM_COL32(100, 180, 255, 200));
+            }
+
+            // Node background
+            ImVec2 nodeMin(nx, ny);
+            ImVec2 nodeMax(nx + nodeW, ny + nodeH);
+            dl->AddRectFilled(nodeMin, nodeMax, IM_COL32(40, 45, 55, 240), 4.0f);
+            dl->AddRect(nodeMin, nodeMax, IM_COL32(80, 140, 220, 200), 4.0f, 0, 1.5f);
+
+            // Panel label
+            char label[32];
+            snprintf(label, sizeof(label), "Panel %d", i + 1);
+            dl->AddText(ImVec2(nx + 4, ny + 2), IM_COL32(200, 220, 255, 255), label);
+
+            // Thumbnail or empty slot
+            float thumbY = ny + 18;
+            float thumbH = nodeH - 50;
+            if (p.tex) {
+                float aspect = (float)p.h / (float)p.w;
+                float tw = nodeW - 8, th = tw * aspect;
+                if (th > thumbH) { th = thumbH; tw = th / aspect; }
+                dl->AddImage((ImTextureID)(intptr_t)p.tex,
+                    ImVec2(nx + 4, thumbY), ImVec2(nx + 4 + tw, thumbY + th));
+                char info[64];
+                snprintf(info, sizeof(info), "%dx%d", p.w, p.h);
+                dl->AddText(ImVec2(nx + 4, thumbY + th + 1), IM_COL32(150, 150, 150, 200), info);
+            } else {
+                dl->AddRectFilled(ImVec2(nx + 4, thumbY), ImVec2(nx + nodeW - 4, thumbY + thumbH),
+                    IM_COL32(25, 28, 35, 200), 2.0f);
+                dl->AddText(ImVec2(nx + 12, thumbY + thumbH * 0.4f), IM_COL32(100, 100, 100, 200), "Empty");
+            }
+
+            // Buttons area (use invisible ImGui buttons over the drawn area)
+            ImGui::SetCursorScreenPos(ImVec2(nx, ny + nodeH - 28));
+            ImGui::PushID(i);
+            if (ImGui::InvisibleButton("##import", ImVec2(nodeW * 0.55f, 22))) {
+#ifdef _WIN32
+                std::string path = OpenFileDialog("Image Files\0*.png;*.bmp;*.jpg;*.tga\0All\0*.*\0", "png");
+                if (!path.empty()) {
+                    if (!LoadSkyPanelImage(p, path))
+                        ImGui::OpenPopup("##SkyPanelErr");
+                    else {
+                        sProjectDirty = true;
+                        StitchSkyPanels();
+                    }
+                }
+#endif
+            }
+            dl->AddRectFilled(ImVec2(nx + 2, ny + nodeH - 28), ImVec2(nx + nodeW * 0.55f, ny + nodeH - 6),
+                ImGui::IsItemHovered() ? IM_COL32(60, 100, 180, 255) : IM_COL32(50, 70, 120, 255), 3.0f);
+            dl->AddText(ImVec2(nx + 8, ny + nodeH - 26), IM_COL32(220, 230, 255, 255), "Import");
+
+            ImGui::SetCursorScreenPos(ImVec2(nx + nodeW * 0.6f, ny + nodeH - 28));
+            if (ImGui::InvisibleButton("##remove", ImVec2(nodeW * 0.35f, 22))) {
+                removeIdx = i;
+            }
+            dl->AddRectFilled(ImVec2(nx + nodeW * 0.6f, ny + nodeH - 28), ImVec2(nx + nodeW - 2, ny + nodeH - 6),
+                ImGui::IsItemHovered() ? IM_COL32(180, 60, 60, 255) : IM_COL32(120, 50, 50, 255), 3.0f);
+            dl->AddText(ImVec2(nx + nodeW * 0.65f, ny + nodeH - 26), IM_COL32(255, 200, 200, 255), "X");
+
+            // Drag reorder: left connector (except first)
+            if (i > 0) {
+                ImGui::SetCursorScreenPos(ImVec2(nx - 6, ny + nodeH * 0.5f - 6));
+                if (ImGui::InvisibleButton("##lconn", ImVec2(12, 12))) {
+                    if (sSkyDragFrom >= 0 && sSkyDragFrom != i) {
+                        // Swap panels
+                        std::swap(sSkyPanels[sSkyDragFrom], sSkyPanels[i]);
+                        sSkyDragFrom = -1;
+                        sProjectDirty = true;
+                        StitchSkyPanels();
+                    }
+                }
+                dl->AddCircleFilled(ImVec2(nx, ny + nodeH * 0.5f), 5.0f,
+                    ImGui::IsItemHovered() ? IM_COL32(100, 200, 255, 255) : IM_COL32(80, 140, 220, 200));
+            }
+
+            // Right connector (except last)
+            if (i < (int)sSkyPanels.size() - 1) {
+                ImGui::SetCursorScreenPos(ImVec2(nx + nodeW - 6, ny + nodeH * 0.5f - 6));
+                if (ImGui::InvisibleButton("##rconn", ImVec2(12, 12))) {
+                    sSkyDragFrom = i;
+                }
+                dl->AddCircleFilled(ImVec2(nx + nodeW, ny + nodeH * 0.5f), 5.0f,
+                    ImGui::IsItemHovered() ? IM_COL32(255, 200, 100, 255) : IM_COL32(220, 160, 80, 200));
+            }
+
+            if (ImGui::BeginPopup("##SkyPanelErr")) {
+                ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Invalid image!");
+                ImGui::Text("Max 1024x1024.");
+                ImGui::EndPopup();
+            }
+            ImGui::PopID();
+        }
+
+        // Handle removal
+        if (removeIdx >= 0) {
+            FreeSkyPanel(sSkyPanels[removeIdx]);
+            sSkyPanels.erase(sSkyPanels.begin() + removeIdx);
+            sProjectDirty = true;
+            StitchSkyPanels();
+        }
+
+        // Reserve space for the node row
+        float totalNodeW = std::max(1.0f, (float)sSkyPanels.size()) * (nodeW + nodeSpacing);
+        ImGui::SetCursorScreenPos(ImVec2(canvasStart.x, canvasStart.y));
+        ImGui::Dummy(ImVec2(totalNodeW, nodeH + 10));
         ImGui::End();
     }
     else if (sActiveTab == EditorTab::Player)

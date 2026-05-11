@@ -36,7 +36,9 @@ void Render(const Mode7Camera& cam, const Mode7Map* map = nullptr,
             const AssetDirImages* assetDirImages = nullptr, int assetDirCount = 0,
             const AssetDirImages* spriteDirImages = nullptr, int spriteDirCount = 0,
             const MeshAsset* meshAssets = nullptr, int meshAssetCount = 0,
-            bool mode7Floor = false);
+            bool mode7Floor = false,
+            const unsigned char* skyPixels = nullptr, int skyW = 0, int skyH = 0,
+            const unsigned char* floorPixels = nullptr, int floorW = 0, int floorH = 0);
 
 // Projected sprite screen position (set after Render)
 struct SpriteScreenPos { int screenX, screenY, halfW, halfH, spriteIdx; };

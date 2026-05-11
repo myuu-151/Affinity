@@ -311,6 +311,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
     // Draw distance as 16.8 fixed-point (editor units / 4 * 256), 0 = unlimited
     if (camera.drawDistance > 0.0f)
         f << "#define AFN_DRAW_DISTANCE " << (int)(camera.drawDistance / 4.0f * 256.0f) << "\n";
+    if (camera.spriteDrawDistance > 0.0f)
+        f << "#define AFN_SPRITE_DRAW_DISTANCE " << (int)(camera.spriteDrawDistance / 4.0f * 256.0f) << "\n";
     if (camera.smallTriCull > 0)
         f << "#define AFN_SMALL_TRI_CULL " << camera.smallTriCull << "\n";
     if (camera.coverageBuf)
@@ -5396,8 +5398,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
     // Uses sub-palettes 11-14 (entries 176-239), 15 colors each = 60 total
     // Each band covers 8 tile-rows (64px) of the 256px-tall sky
     if (m7SkyPixels && m7SkyW > 0 && m7SkyH > 0) {
-        // Resize to 256x256 for GBA (32x32 tiles)
-        const int skyTargetW = 256, skyTargetH = 256;
+        // Keep full panorama width (rounded to 8-pixel tile boundary), height=256
+        // Runtime dynamically scrolls a 32-column window through the full tilemap
+        const bool skyWide = false; // not used; dynamic scrolling handles any width
+        int skyTargetW = (m7SkyW + 7) & ~7; // round up to tile boundary
+        if (skyTargetW < 256) skyTargetW = 256;
+        const int skyTargetH = 256;
         std::vector<unsigned char> skyResized(skyTargetW * skyTargetH * 4);
         for (int y = 0; y < skyTargetH; y++) {
             int sy = y * m7SkyH / skyTargetH;
@@ -5574,6 +5580,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         // Emit sky tile data (4bpp = 32 bytes per tile)
         f << "\n// ---- Mode 7 skybox tile data (4bpp, 4 band sub-palettes " << SKY_SUBPAL_BASE << "-" << (SKY_SUBPAL_BASE + NUM_BANDS - 1) << ") ----\n";
         f << "#define AFN_HAS_SKY\n";
+        f << "#define AFN_SKY_MAP_COLS " << skyTilesX << "\n";
         f << "#define AFN_SKY_BANDS " << NUM_BANDS << "\n";
         f << "#define AFN_SKY_SUBPAL_BASE " << SKY_SUBPAL_BASE << "\n";
         f << "static const unsigned char afn_sky_tiles[" << skyUniqueTiles.size() * 32 << "] = {\n";
@@ -5596,7 +5603,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         }
         f << "\n";
 
-        // Emit sky tilemap (16-bit entries with palette bank in bits 12-15)
+        // Emit full-width sky tilemap (runtime scrolls a 32-col window through it)
         f << "static const unsigned short afn_sky_tilemap[" << skyTilesX * skyTilesY << "] = {\n";
         for (int ty = 0; ty < skyTilesY; ty++) {
             f << "    ";
