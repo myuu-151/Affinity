@@ -1152,100 +1152,74 @@ static void update_sky_scroll(int cam_ang)
     }
 }
 
-// Mode 4 sky: load sky sub-palettes into palette slots 192-255
-// and pre-decode sky tiles into a flat 8bpp scanline buffer in EWRAM
-#define M4_SKY_HORIZON 80
-EWRAM_DATA static u8 sky_m4_decoded[AFN_SKY_MAP_COLS * 8 * 256];
-static int sky_m4_w;
+// Mode 4 sky: decode from ROM tiles into cached frame — only 38KB EWRAM
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+EWRAM_DATA static u8 sky_m4_frame[240 * 160] __attribute__((aligned(4)));
+static int sky_m4_lastScroll = -1;
+static u8 sky_m4_palBase[32];
 
 static void load_sky_m4(void)
 {
-    int skyW = AFN_SKY_MAP_COLS * 8;
-    int row, col, py, px;
-    sky_m4_w = skyW;
-
-    // Load sub-palettes into palette 192-255
+    int row;
     memcpy16(&pal_bg_mem[192], afn_sky_pal0, 16);
     memcpy16(&pal_bg_mem[208], afn_sky_pal1, 16);
     memcpy16(&pal_bg_mem[224], afn_sky_pal2, 16);
     memcpy16(&pal_bg_mem[240], afn_sky_pal3, 16);
-
-    // Pre-decode 4bpp tiles → 8bpp flat buffer with palette offsets baked in
     for (row = 0; row < 32; row++) {
         int band = (row * 8) / 64;
         if (band > 3) band = 3;
-        u8 palBase = (u8)(192 + band * 16);
-        for (col = 0; col < AFN_SKY_MAP_COLS; col++) {
-            int tileIdx = afn_sky_tilemap[row * AFN_SKY_MAP_COLS + col] & 0x3FF;
-            const u8* tile = &afn_sky_tiles[tileIdx * 32];
-            for (py = 0; py < 8; py++) {
-                int destY = row * 8 + py;
-                u8* dst = &sky_m4_decoded[destY * skyW + col * 8];
-                const u8* src = &tile[py * 4];
-                for (px = 0; px < 8; px += 2) {
-                    u8 raw = src[px >> 1];
-                    dst[px]     = palBase + (raw & 0xF);
-                    dst[px + 1] = palBase + (raw >> 4);
-                }
-            }
-        }
+        sky_m4_palBase[row] = (u8)(192 + band * 16);
     }
+    sky_m4_lastScroll = -1;
 }
 
-// Mode 4 sky: cached full-res frame — only rebuild on camera rotation
-EWRAM_DATA static u8 sky_m4_frame[240 * 160] __attribute__((aligned(4)));
-static int sky_m4_lastScroll = -1;
-static int sky_m4_rebuilding = 0;  // progressive rebuild cursor (0 = idle)
-static int sky_m4_targetScroll;
-
-// Rebuild a range of scanlines [yStart, yEnd)
-static void sky_m4_rebuild_range(int scrollX, int yStart, int yEnd)
+// Decode tiles from ROM directly into the 38KB frame cache
+static void sky_m4_rebuild(int scrollX)
 {
-    const int skyW = sky_m4_w;
+    const int skyW = AFN_SKY_MAP_COLS * 8;
     int y;
-    for (y = yStart; y < yEnd; y++)
+    for (y = 0; y < 160; y++)
     {
         int texV = (y * 255) / 159;
-        const u8* srcRow = &sky_m4_decoded[texV * skyW];
+        int tileRow = texV >> 3;
+        int tileY   = texV & 7;
+        u8 palBase  = sky_m4_palBase[tileRow];
         u8* dst = &sky_m4_frame[y * 240];
-        int c1 = skyW - scrollX;
-        if (c1 >= 240) {
-            memcpy(dst, srcRow + scrollX, 240);
-        } else {
-            memcpy(dst, srcRow + scrollX, c1);
-            memcpy(dst + c1, srcRow, 240 - c1);
+        int x = 0;
+        int srcX = scrollX;
+
+        while (x < 240)
+        {
+            int tileCol = srcX >> 3;
+            int tileX   = srcX & 7;
+            int tileIdx = afn_sky_tilemap[tileRow * AFN_SKY_MAP_COLS + tileCol] & 0x3FF;
+            const u8* tile = &afn_sky_tiles[tileIdx * 32 + tileY * 4];
+            int remain = 8 - tileX;
+            if (x + remain > 240) remain = 240 - x;
+            int px;
+            for (px = 0; px < remain; px++) {
+                int tx = tileX + px;
+                u8 raw = tile[tx >> 1];
+                dst[x + px] = palBase + ((tx & 1) ? (raw >> 4) : (raw & 0xF));
+            }
+            x += remain;
+            srcX += remain;
+            if (srcX >= skyW) srcX -= skyW;
         }
     }
+    sky_m4_lastScroll = scrollX;
 }
 
-// Per-frame: DMA the cached sky to backbuffer
 IWRAM_CODE static void render_sky_m4(u16* buf)
 {
-    const int skyW = sky_m4_w;
+    const int skyW = AFN_SKY_MAP_COLS * 8;
     int scrollX = ((int)((u32)cam_angle * skyW >> 16)) & ~3;
-    if (scrollX != sky_m4_lastScroll) {
-        if (!sky_m4_rebuilding) {
-            // Start progressive rebuild: 40 rows per frame across 4 frames
-            sky_m4_targetScroll = scrollX;
-            sky_m4_rebuilding = 1;
-        }
-    }
-    if (sky_m4_rebuilding) {
-        int chunk = (sky_m4_rebuilding - 1) * 40;
-        int end = chunk + 40;
-        if (end > 160) end = 160;
-        sky_m4_rebuild_range(sky_m4_targetScroll, chunk, end);
-        if (end >= 160) {
-            sky_m4_lastScroll = sky_m4_targetScroll;
-            sky_m4_rebuilding = 0;
-        } else {
-            sky_m4_rebuilding++;
-        }
-    }
-    // Single DMA blast: 240*160 bytes = 9600 words
+    if (scrollX != sky_m4_lastScroll)
+        sky_m4_rebuild(scrollX);
     DMA_TRANSFER(buf, sky_m4_frame, 240 * 160 / 4, 3, DMA_NOW | DMA_32);
 }
-#endif
+#endif // AFN_MESH_COUNT > 0
+#endif // AFN_HAS_SKY
 
 // ---------------------------------------------------------------------------
 // OBJ sprite setup
