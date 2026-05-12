@@ -127,6 +127,13 @@ extern int afn_mix_voice_fast(s16* mix_acc, const s8* wdata, int count,
                               int pos, int inc, int vol, int gainShift);
 extern int afn_mix_voice_fast16(s16* mix_acc, const s16* wdata, int count,
                                 int pos, int inc, int vol, int gainShift);
+// Loop-aware versions: wrap internally, no chunk dispatch overhead
+extern int afn_mix_voice_loop(s16* mix_acc, const s8* wdata, int count,
+                              int pos, int inc, int vol, int gainShift,
+                              int loopLen, int loopSpan);
+extern int afn_mix_voice_loop16(s16* mix_acc, const s16* wdata, int count,
+                                int pos, int inc, int vol, int gainShift,
+                                int loopLen, int loopSpan);
 extern void afn_mix_clamp_fast(s8* buf, const s16* mix_acc, int count, int shift);
 
 static int snd_seq_active = -1;
@@ -252,29 +259,16 @@ IWRAM_CODE static void afn_sound_mix(void) {
         int gs = vc->gainShift;
         int done = 0;
         if (vc->loop) {
-            // Mix in chunks up to loop boundary, wrap in C, continue
+            // Single call — loop wrapping handled inside assembly
             int loopLen = vc->loopLen;
             int loopSpan = loopLen - vc->loopStart;
             if (loopSpan <= 0) loopSpan = loopLen > 0 ? loopLen : (1 << 8);
-            int rem = n;
-            s16* acc = mix_acc;
-            while (rem > 0) {
-                // How many samples until we hit loop end?
-                int samplesUntilEnd = (loopLen - pos + inc - 1) / inc;
-                if (samplesUntilEnd < 1) samplesUntilEnd = 1;
-                int chunk = (samplesUntilEnd < rem) ? samplesUntilEnd : rem;
-                if (vc->is16)
-                    pos = afn_mix_voice_fast16(acc, (const s16*)vc->data, chunk,
-                                               pos, inc, vol, gs);
-                else
-                    pos = afn_mix_voice_fast(acc, (const s8*)vc->data, chunk,
-                                              pos, inc, vol, gs);
-                // Wrap loop
-                while (pos >= loopLen) pos -= loopSpan;
-                if (pos < vc->loopStart) pos = vc->loopStart;
-                acc += chunk;
-                rem -= chunk;
-            }
+            if (vc->is16)
+                pos = afn_mix_voice_loop16(mix_acc, (const s16*)vc->data, n,
+                                            pos, inc, vol, gs, loopLen, loopSpan);
+            else
+                pos = afn_mix_voice_loop(mix_acc, (const s8*)vc->data, n,
+                                          pos, inc, vol, gs, loopLen, loopSpan);
         } else {
             int lenFixed = vc->length << 8;
             // Limit mix count to not read past sample end

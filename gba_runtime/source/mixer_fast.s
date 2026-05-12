@@ -119,6 +119,142 @@ afn_mix_voice_fast:
 .size afn_mix_voice_fast, .-afn_mix_voice_fast
 
 @ ---------------------------------------------------------------------------
+@ afn_mix_voice_loop — 8-bit mixer with loop wrapping handled internally
+@ One call per voice per frame — no chunk dispatch overhead.
+@
+@ int afn_mix_voice_loop(s16* mix_acc, const s8* wdata, int count,
+@                        int pos, int inc, int vol, int gainShift,
+@                        int loopLen, int loopSpan);
+@ Returns: new pos value (in r0)
+@ ---------------------------------------------------------------------------
+    .global afn_mix_voice_loop
+    .type   afn_mix_voice_loop, %function
+
+afn_mix_voice_loop:
+    stmfd   sp!, {r4-r12, lr}
+
+    @ r0=mix_acc, r1=wdata, r2=count, r3=pos
+    @ Stack after 10 regs saved (40 bytes):
+    ldr     r4, [sp, #40]           @ inc
+    ldr     r5, [sp, #44]           @ vol
+    ldr     r6, [sp, #48]           @ gainShift
+    ldr     r11, [sp, #52]          @ loopLen
+    ldr     r12, [sp, #56]          @ loopSpan
+
+    cmp     r2, #0
+    ble     .Lloop_done
+    cmp     r5, #0
+    beq     .Lloop_skip
+
+.Lloop_main:
+    @ --- Mix one sample ---
+    mov     r7, r3, asr #8         @ idx = pos >> 8
+    ldrsb   r8, [r1, r7]           @ s0 = wdata[idx]
+    add     r7, r7, #1
+    ldrsb   r9, [r1, r7]           @ s1 = wdata[idx+1]
+    sub     r9, r9, r8             @ s1 - s0
+    and     r7, r3, #0xFF          @ frac = pos & 0xFF
+    mul     r9, r7, r9             @ (s1-s0) * frac
+    add     r8, r8, r9, asr #8    @ interpolated sample
+    mul     r8, r5, r8             @ * vol
+    mov     r8, r8, asr r6         @ >> gainShift
+    ldrsh   r10, [r0]
+    add     r10, r10, r8
+    strh    r10, [r0], #2
+    add     r3, r3, r4             @ pos += inc
+    @ Wrap loop
+1:  cmp     r3, r11
+    subge   r3, r3, r12
+    bge     1b
+
+    subs    r2, r2, #1
+    bgt     .Lloop_main
+
+.Lloop_done:
+    mov     r0, r3
+    ldmfd   sp!, {r4-r12, lr}
+    bx      lr
+
+.Lloop_skip:
+    mul     r7, r2, r4
+    add     r3, r3, r7
+1:  cmp     r3, r11
+    subge   r3, r3, r12
+    bge     1b
+    mov     r0, r3
+    ldmfd   sp!, {r4-r12, lr}
+    bx      lr
+
+.size afn_mix_voice_loop, .-afn_mix_voice_loop
+
+@ ---------------------------------------------------------------------------
+@ afn_mix_voice_loop16 — 16-bit mixer with loop wrapping handled internally
+@
+@ int afn_mix_voice_loop16(s16* mix_acc, const s16* wdata, int count,
+@                          int pos, int inc, int vol, int gainShift,
+@                          int loopLen, int loopSpan);
+@ Returns: new pos value (in r0)
+@ ---------------------------------------------------------------------------
+    .global afn_mix_voice_loop16
+    .type   afn_mix_voice_loop16, %function
+
+afn_mix_voice_loop16:
+    stmfd   sp!, {r4-r12, lr}
+
+    ldr     r4, [sp, #40]           @ inc
+    ldr     r5, [sp, #44]           @ vol
+    ldr     r6, [sp, #48]           @ gainShift
+    ldr     r11, [sp, #52]          @ loopLen
+    ldr     r12, [sp, #56]          @ loopSpan
+
+    cmp     r2, #0
+    ble     .Lloop16_done
+    cmp     r5, #0
+    beq     .Lloop16_skip
+
+.Lloop16_main:
+    mov     r7, r3, asr #8         @ idx = pos >> 8
+    mov     r8, r7, lsl #1         @ byte offset = idx * 2
+    ldrsh   r8, [r1, r8]           @ s0 = wdata[idx]
+    add     r7, r7, #1
+    mov     r9, r7, lsl #1
+    ldrsh   r9, [r1, r9]           @ s1 = wdata[idx+1]
+    sub     r9, r9, r8
+    and     r7, r3, #0xFF          @ frac
+    mul     r9, r7, r9
+    add     r8, r8, r9, asr #8    @ interpolated
+    mul     r8, r5, r8             @ * vol
+    mov     r8, r8, asr r6         @ >> gainShift
+    ldrsh   r10, [r0]
+    add     r10, r10, r8
+    strh    r10, [r0], #2
+    add     r3, r3, r4             @ pos += inc
+    @ Wrap loop
+1:  cmp     r3, r11
+    subge   r3, r3, r12
+    bge     1b
+
+    subs    r2, r2, #1
+    bgt     .Lloop16_main
+
+.Lloop16_done:
+    mov     r0, r3
+    ldmfd   sp!, {r4-r12, lr}
+    bx      lr
+
+.Lloop16_skip:
+    mul     r7, r2, r4
+    add     r3, r3, r7
+1:  cmp     r3, r11
+    subge   r3, r3, r12
+    bge     1b
+    mov     r0, r3
+    ldmfd   sp!, {r4-r12, lr}
+    bx      lr
+
+.size afn_mix_voice_loop16, .-afn_mix_voice_loop16
+
+@ ---------------------------------------------------------------------------
 @ afn_mix_voice_fast16 — Same as above but reads s16 sample data
 @ Linear interpolation in 16-bit precision for high-quality mixing.
 @
