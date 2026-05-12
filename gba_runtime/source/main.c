@@ -978,11 +978,15 @@ typedef struct {
     s32 bgx, bgy;
 } M7Scanline;
 
-EWRAM_DATA static M7Scanline m7_table[SCREEN_HEIGHT];
+EWRAM_DATA static M7Scanline m7_tables[2][SCREEN_HEIGHT];
+static int m7_write_idx = 0;  // game loop writes to this index
+static const M7Scanline* m7_read_ptr = m7_tables[0]; // ISR reads from this pointer
 
 // Build the full scanline table — call once per frame after camera update
+// Writes to back buffer, then swaps pointer atomically during VBlank
 static void m7_build_table(void)
 {
+    M7Scanline* tbl = m7_tables[m7_write_idx];
     int hz = m7_horizon;
     FIXED ch = cam_h;
     FIXED cf = g_cosf;
@@ -994,10 +998,10 @@ static void m7_build_table(void)
     int vc;
     for (vc = 0; vc < SCREEN_HEIGHT; vc++) {
         if (vc < hz) {
-            m7_table[vc].pa = 0;
-            m7_table[vc].pc = 0;
-            m7_table[vc].bgx = 0;
-            m7_table[vc].bgy = 0;
+            tbl[vc].pa = 0;
+            tbl[vc].pc = 0;
+            tbl[vc].bgx = 0;
+            tbl[vc].bgy = 0;
             continue;
         }
         FIXED lam = ch * lu_div(vc - hz) >> 12;
@@ -1005,11 +1009,18 @@ static void m7_build_table(void)
         FIXED lsf = lam * sf >> 8;
         s16 pa = lcf >> 4;
         s16 pc = lsf >> 4;
-        m7_table[vc].pa = pa;
-        m7_table[vc].pc = pc;
-        m7_table[vc].bgx = cx - 120 * pa + fov * pc;
-        m7_table[vc].bgy = cz - 120 * pc - fov * pa;
+        tbl[vc].pa = pa;
+        tbl[vc].pc = pc;
+        tbl[vc].bgx = cx - 120 * pa + fov * pc;
+        tbl[vc].bgy = cz - 120 * pc - fov * pa;
     }
+}
+
+// Swap the read pointer to the freshly built table — call during VBlank only
+static void m7_swap_table(void)
+{
+    m7_read_ptr = m7_tables[m7_write_idx];
+    m7_write_idx ^= 1;
 }
 
 // Fast HBlank ISR — just reads from pre-computed table (no math)
@@ -1022,7 +1033,7 @@ IWRAM_CODE static void m7_hbl(void)
     }
     if (vc >= SCREEN_HEIGHT) return;
     REG_DISPCNT |= DCNT_BG2;
-    const M7Scanline* sl = &m7_table[vc];
+    const M7Scanline* sl = &m7_read_ptr[vc];
     REG_BG2PA = sl->pa;
     REG_BG2PB = 0;
     REG_BG2PC = sl->pc;
@@ -4252,6 +4263,7 @@ static void mode4_init_scene(void)
     g_cosf = lu_cos(cam_angle) >> 4;
     g_sinf = lu_sin(cam_angle) >> 4;
     m7_build_table();
+    m7_swap_table();
 }
 #endif /* AFN_MESH_COUNT */
 
@@ -4754,6 +4766,7 @@ int main(void)
     g_cosf = lu_cos(cam_angle) >> 4;
     g_sinf = lu_sin(cam_angle) >> 4;
     m7_build_table();
+    m7_swap_table();
 
     // --- Set up HBlank interrupt ---
     // Start Timer 3 for FPS measurement (prescaler=1024, ~16384 Hz)
@@ -4839,6 +4852,9 @@ int main(void)
         }
 #endif
         VBlankIntrWait();
+        // Swap scanline table pointer atomically at VBlank — ISR reads new table
+        // from now on, game loop will build the next frame into the other buffer
+        if (afn_current_mode == 0 || afn_current_mode == 2) m7_swap_table();
         // Page flip / display mode — MUST happen immediately after VBlank
         // before sound processing, which can take multiple scanlines with 5+ voices
         if (afn_current_mode == 0) {
