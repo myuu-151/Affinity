@@ -142,7 +142,7 @@ static int snd_seq_tick = 0;
 static int snd_seq_next = 0;
 static int snd_initialized = 0;
 static int snd_compat = 0;       // 1 = compatibility mode (halved rate, less CPU)
-static int snd_mix_samples = SND_SAMPLES_PER_FRAME; // actual samples consumed by timer per frame
+static int snd_mix_samples = SND_SAMPLES_PER_FRAME; // samples to mix per frame
 
 static void afn_sound_hw_start(void) {
     // Enable sound hardware, timer, and FIFO DMA
@@ -150,8 +150,8 @@ static void afn_sound_hw_start(void) {
     REG_SNDDSCNT = SDS_A100 | SDS_AL | SDS_AR | SDS_ATMR0 | SDS_ARESET;
     REG_TM0CNT_H = 0;
     if (snd_compat) {
-        REG_TM0CNT_L = 65536 - 1344; // ~12485 Hz (compat mode — half rate)
-        snd_mix_samples = 209;
+        REG_TM0CNT_L = 65536 - 1254; // ~13378 Hz (compat mode — 224 samples, multiple of 4)
+        snd_mix_samples = 224;
     } else {
         REG_TM0CNT_L = 65536 - 672;  // ~24970 Hz
         snd_mix_samples = SND_SAMPLES_PER_FRAME;
@@ -187,8 +187,8 @@ static void afn_play_sound(int instanceId) {
         // Reinit timer for new compat setting
         REG_TM0CNT_H = 0;
         if (snd_compat) {
-            REG_TM0CNT_L = 65536 - 1344;
-            snd_mix_samples = 209;
+            REG_TM0CNT_L = 65536 - 1254;
+            snd_mix_samples = 224;
         } else {
             REG_TM0CNT_L = 65536 - 672;
             snd_mix_samples = SND_SAMPLES_PER_FRAME;
@@ -227,11 +227,15 @@ IWRAM_CODE static void afn_sound_mix(void) {
         }
     }
 
-    // Point DMA to the buffer we mixed last frame
+    // Swap buffer atomically: stop timer so FIFO isn't consumed during reset,
+    // flush FIFO to discard residual bytes, point DMA to new buffer, restart.
     int play = snd_cur_buf ^ 1;
-    REG_DMA1CNT = 0;
-    REG_DMA1SAD = (u32)snd_buf[play];
+    REG_TM0CNT_H = 0;                   // pause timer (no FIFO reads during swap)
+    REG_DMA1CNT = 0;                     // stop DMA
+    REG_SNDDSCNT = SDS_A100 | SDS_AL | SDS_AR | SDS_ATMR0 | SDS_ARESET; // flush FIFO
+    REG_DMA1SAD = (u32)snd_buf[play];    // point to new buffer
     REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
+    REG_TM0CNT_H = TM_ENABLE;           // resume timer (FIFO already refilled by DMA)
     snd_cur_buf = play;
 
     s8* buf = snd_buf[snd_cur_buf ^ 1];
@@ -307,14 +311,6 @@ IWRAM_CODE static void afn_sound_mix(void) {
         int v = snd_voice_count;
         while (v > 1) { v >>= 1; outShift++; }
         afn_mix_clamp_fast(buf, mix_acc, mixN, outShift);
-        // Fill tail with last sample value (DMA reads 420 bytes in 4-byte
-        // chunks but only 418 are consumed per frame — the 2 residual bytes
-        // stay in FIFO and play at the start of the next frame, so they must
-        // be continuous with the audio to avoid clicking)
-        {
-            s8 last = (mixN > 0) ? buf[mixN - 1] : 0;
-            for (int i = mixN; i < SND_BUF_SIZE; i++) buf[i] = last;
-        }
     }
 }
 
@@ -352,7 +348,7 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     vc->pos = 0;
     // Pitch: baseInc = (sampleRate << 8) / outputRate gives 1:1 playback
     // Output rate = ~24970 Hz (CPU_FREQ / 672)
-    int outRate = snd_compat ? 12485 : 24970;
+    int outRate = snd_compat ? 13378 : 24970;
     int baseInc = (afn_pcm_rates[smpIdx] << 8) / outRate;
     // Pitch-shift all samples (note 60 = original pitch)
     {
@@ -377,7 +373,7 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     // Each frame = snd_mix_samples output samples, sequencer advances tpf ticks/frame
     int tpf = afn_snd_tpf[snd_seq_active >= 0 ? snd_seq_active : 0];
     int durSamples = (durTicks * snd_mix_samples) / (tpf > 0 ? tpf : 1);
-    int minDurSmp = snd_compat ? 3746 : 7491; // minimum ~300ms at respective rate
+    int minDurSmp = snd_compat ? 4013 : 7491; // minimum ~300ms at respective rate
     if (durSamples < minDurSmp) durSamples = minDurSmp;
     // For one-shot samples, ensure remaining covers the full sample playback
     if (!vc->loop) {
@@ -396,7 +392,7 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     }
     vc->releaseRem = 0;
     if (snd_compat) {
-        vc->releaseLen = 105; // compat: short ~5ms fade (smooth cutoffs, minimal CPU)
+        vc->releaseLen = 112; // compat: short ~8ms fade (smooth cutoffs, minimal CPU)
     } else {
         int sf = (snd_seq_active >= 0) ? afn_snd_softfade[snd_seq_active] : 1;
         if (sf) {
