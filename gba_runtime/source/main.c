@@ -234,7 +234,7 @@ IWRAM_CODE static void afn_sound_mix(void) {
     snd_cur_buf = play;
 
     s8* buf = snd_buf[snd_cur_buf ^ 1];
-    int mixN = snd_mix_samples; // 304 normal, 152 compat
+    int mixN = snd_mix_samples;
     // Stack-allocated in IWRAM (function is IWRAM_CODE, stack is in IWRAM)
     s16 mix_acc[SND_BUF_SIZE];
     // Clear accumulator (32-bit writes, 2 samples at a time)
