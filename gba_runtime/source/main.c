@@ -175,6 +175,8 @@ static void afn_stop_sound(void) {
 
 // Called at VBlank: swap DMA to the buffer we just finished mixing,
 // then mix the next frame into the other buffer.
+// Note: mix_acc is stack-allocated inside afn_sound_mix (IWRAM stack = fast)
+
 IWRAM_CODE static void afn_sound_mix(void) {
     if (!snd_initialized) return;
 
@@ -196,13 +198,13 @@ IWRAM_CODE static void afn_sound_mix(void) {
     REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
     snd_cur_buf = play;
 
-    // Mix into IWRAM 16-bit accumulation buffer, clamp to s8 once at end
     s8* buf = snd_buf[snd_cur_buf ^ 1];
-    static s16 mix_acc[SND_BUF_SIZE];
+    // Stack-allocated in IWRAM (function is IWRAM_CODE, stack is in IWRAM)
+    s16 mix_acc[SND_BUF_SIZE];
     // Clear accumulator (32-bit writes, 2 samples at a time)
     {
         u32* a32 = (u32*)mix_acc;
-        for (int i = 0; i < SND_BUF_SIZE / 2; i++) a32[i] = 0;
+        int i; for (i = 0; i < SND_BUF_SIZE / 2; i++) a32[i] = 0;
     }
 
     for (int v = 0; v < snd_voice_count; v++) {
@@ -218,22 +220,19 @@ IWRAM_CODE static void afn_sound_mix(void) {
         if (vol > vc->vol) vol = vc->vol;
         if (vol < 0) vol = 0;
         if (vc->remaining < 0 && vc->releaseRem > 0 && vc->releaseLen > 0)
-            vol = vol * vc->releaseRem / vc->releaseLen; // once per frame, not per sample
+            vol = vol * vc->releaseRem / vc->releaseLen;
         int gs = vc->gainShift;
         int done = 0;
         if (vc->loop) {
-            // Looping voice: process in chunks up to loop boundary (no branch in hot path)
             int loopLen = vc->loopLen;
             int loopSpan = loopLen - vc->loopStart;
             int i = 0;
             while (i < n) {
-                // How many samples until we hit loop end?
                 int samplesUntilWrap = (loopLen - pos + inc - 1) / inc;
                 int chunk = n - i;
                 if (samplesUntilWrap > 0 && samplesUntilWrap < chunk)
                     chunk = samplesUntilWrap;
                 int end = i + chunk;
-                // Tight inner loop — no branches
                 for (; i < end; i++) {
                     mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
                     pos += inc;
@@ -244,7 +243,6 @@ IWRAM_CODE static void afn_sound_mix(void) {
                 }
             }
         } else {
-            // Non-looping: straight mix until end of sample
             int lenFixed = vc->length << 8;
             for (int i = 0; i < n; i++) {
                 mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
@@ -259,7 +257,6 @@ IWRAM_CODE static void afn_sound_mix(void) {
             if (vc->remaining <= 0) {
                 vc->remaining = -1;
                 vc->releaseRem = vc->releaseLen;
-                // Keep looping during release — fade volume instead
             }
         } else if (vc->remaining < 0) {
             vc->releaseRem -= n;
@@ -268,12 +265,14 @@ IWRAM_CODE static void afn_sound_mix(void) {
         if (vc->volDec > 0) vc->volFade -= vc->volDec;
     }
 
-    // Clamp and write to output buffer (4 samples at a time)
-    for (int i = 0; i < SND_BUF_SIZE; i++) {
-        int m = mix_acc[i];
-        if (m > 127) m = 127;
-        else if (m < -128) m = -128;
-        buf[i] = (s8)m;
+    // Clamp and write to output buffer
+    {
+        int i; for (i = 0; i < SND_BUF_SIZE; i++) {
+            int m = mix_acc[i];
+            if (m > 127) m = 127;
+            else if (m < -128) m = -128;
+            buf[i] = (s8)m;
+        }
     }
 }
 
@@ -1445,7 +1444,6 @@ static void switch_dir_anim_set(int assetIdx, int newSet)
     const u32 *src = &afn_dir_anim_tiles[romOffset];
     u32 *dst = (u32*)(0x06010000 + dstTile * 32);
 
-    // Use DMA3 for fast ROM→VRAM copy (runs at ~2 cycles per word)
     DMA_TRANSFER(dst, src, wordCount, 3, DMA_NOW | DMA_32);
 
     g_active_dir_set[assetIdx] = newSet;
@@ -4749,8 +4747,9 @@ int main(void)
     irq_init(NULL);
     irq_add(II_VBLANK, NULL);
     // HBlank ISR only for Mode 1 (legacy Mode 7 floor)
-    if (afn_current_mode == 2)
+    if (afn_current_mode == 2) {
         irq_add(II_HBLANK, m7_hbl);
+    }
 
 #ifdef AFN_COVERAGE_BUF
     g_coverageOn = 1;
@@ -4820,9 +4819,8 @@ int main(void)
         }
 #endif
         VBlankIntrWait();
-        afn_sound_tick();
-        afn_sound_mix();
-        // Page flip / display mode
+        // Page flip / display mode — MUST happen immediately after VBlank
+        // before sound processing, which can take multiple scanlines with 5+ voices
         if (afn_current_mode == 0) {
             g_page ^= 1;
             REG_DISPCNT = DCNT_MODE4 | DCNT_BG2 | DCNT_OBJ | DCNT_OBJ_1D | (g_page ? DCNT_PAGE : 0);
@@ -4831,6 +4829,8 @@ int main(void)
                 REG_DISPCNT &= ~DCNT_BG2; // Mode 7: BG2 managed by HBlank ISR
             }
         }
+        afn_sound_tick();
+        afn_sound_mix();
         key_poll();
 
         // --- Scene transition state machine ---

@@ -21917,6 +21917,25 @@ void FrameTick(float dt)
                 snprintf(volId, sizeof(volId), "##vol%d", ch);
                 ImGui::SliderInt(volId, &mf.channelVolume[ch], 0, 100, "%d%%");
                 ImGui::PopItemWidth();
+
+                // Delete channel button
+                ImGui::SameLine();
+                char delId[32];
+                snprintf(delId, sizeof(delId), "X##delch%d", ch);
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.1f, 0.1f, 1.0f));
+                if (ImGui::SmallButton(delId)) {
+                    // Remove all notes on this channel from all tracks
+                    for (auto& t : mf.tracks) {
+                        t.notes.erase(
+                            std::remove_if(t.notes.begin(), t.notes.end(),
+                                [ch](const auto& n) { return n.channel == ch; }),
+                            t.notes.end());
+                    }
+                    mf.channelUsed[ch] = false;
+                    sProjectDirty = true;
+                }
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete all notes on this channel");
             }
 
             // Piano roll preview
@@ -22201,7 +22220,23 @@ void FrameTick(float dt)
                         newDur = bestSnap - n.tick;
                         if (newDur < 1) newDur = 1;
                     }
-                    n.duration = newDur;
+                    // Apply duration delta to all selected notes
+                    int durDelta = newDur - sMidiDragOrigDur;
+                    bool draggedIsSelected = false;
+                    for (auto& sel : sMidiSelectedNotes)
+                        if (sel.first == sMidiDragTrack && sel.second == sMidiDragNote) { draggedIsSelected = true; break; }
+                    if (draggedIsSelected && sMidiSelectedNotes.size() > 1) {
+                        for (auto& sel : sMidiSelectedNotes) {
+                            if (sel.first >= 0 && sel.first < (int)mf.tracks.size() &&
+                                sel.second >= 0 && sel.second < (int)mf.tracks[sel.first].notes.size()) {
+                                auto& sn = mf.tracks[sel.first].notes[sel.second];
+                                sn.duration = sMidiDragOrigDur + durDelta; // same absolute duration
+                                if (sn.duration < 1) sn.duration = 1;
+                            }
+                        }
+                    } else {
+                        n.duration = newDur;
+                    }
                     ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
                 } else {
                     if (sMidiDragTrack >= 0) sProjectDirty = true;
