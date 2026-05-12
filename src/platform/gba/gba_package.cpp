@@ -5271,12 +5271,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
         // Minimum note duration for decay (in output samples, pre-converted from ms)
         f << "static const int afn_pcm_decay_min[" << soundSamples.size() << "] = {\n";
         for (int i = 0; i < (int)soundSamples.size(); i++)
-            f << "    " << (soundSamples[i].decayMinMs * 18157 / 1000) << ",\n";
+            f << "    " << (soundSamples[i].decayMinMs * 24970 / 1000) << ",\n";
         f << "};\n\n";
 
         f << "static const int afn_pcm_release[" << soundSamples.size() << "] = {\n";
         for (int i = 0; i < (int)soundSamples.size(); i++)
-            f << "    " << (soundSamples[i].releaseMs * 18157 / 1000) << ",\n";
+            f << "    " << (soundSamples[i].releaseMs * 24970 / 1000) << ",\n";
         f << "};\n";
         f << "static const u8 afn_pcm_vol_scale[" << soundSamples.size() << "] = {\n";
         for (int i = 0; i < (int)soundSamples.size(); i++)

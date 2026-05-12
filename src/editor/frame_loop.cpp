@@ -1505,30 +1505,16 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         // Keep original sample rate and 16-bit data (like SF2) for editor preview quality
         out.data16.resize(numSamples);
         out.data.resize(numSamples);
-        // First pass: read 16-bit data and find peak amplitude
-        int peak = 0;
         for (int i = 0; i < numSamples; i++) {
             if (wi.bitsPerSample == 16) {
                 const int16_t* s16 = (const int16_t*)(wi.data + i * 2 * wi.channels);
                 out.data16[i] = s16[0];
-                int a = s16[0] < 0 ? -s16[0] : s16[0];
-                if (a > peak) peak = a;
+                out.data[i] = (int8_t)(s16[0] >> 8);
             } else {
                 int val = (int)wi.data[i * wi.channels] - 128;
                 out.data16[i] = (int16_t)(val << 8);
-                int a = val < 0 ? -val : val;
-                if (a > peak) peak = a;
+                out.data[i] = (int8_t)val;
             }
-        }
-        // Second pass: normalize to full 8-bit range
-        // Scale so peak maps to 127, maximizing dynamic range
-        out.peakAmplitude = peak;
-        if (peak < 256) peak = 256; // avoid division issues for near-silent samples
-        for (int i = 0; i < numSamples; i++) {
-            int scaled = (out.data16[i] * 127) / peak;
-            if (scaled > 127) scaled = 127;
-            if (scaled < -128) scaled = -128;
-            out.data[i] = (int8_t)scaled;
         }
         out.sampleRate = wi.sampleRate;
         out.baseNote = unityNote;
@@ -12517,6 +12503,22 @@ void FrameTick(float dt)
                                         se.decayPct = smp.decayPct;
                                         se.decayMinMs = smp.decayMinMs;
                                         se.releaseMs = smp.releaseMs;
+                                        // Auto-compute decay from SF2 envelope if not manually set
+                                        if (se.decayPct == 0 && best->envDecaySec > 0.01f && smp.category == SmpCat_SF2) {
+                                            float sustainLin = powf(10.0f, -best->envSustainDb / 20.0f);
+                                            se.decayPct = (int)((1.0f - sustainLin) * 100.0f);
+                                            if (se.decayPct < 5) se.decayPct = 0;
+                                            if (se.decayPct > 95) se.decayPct = 95;
+                                            // Decay kicks in after the attack portion
+                                            se.decayMinMs = (int)(best->envDecaySec * 200.0f);
+                                            if (se.decayMinMs < 100) se.decayMinMs = 100;
+                                            if (se.decayMinMs > 2000) se.decayMinMs = 2000;
+                                        }
+                                        if (se.releaseMs <= 0 && best->envReleaseSec > 0.01f && smp.category == SmpCat_SF2) {
+                                            se.releaseMs = (int)(best->envReleaseSec * 1000.0f);
+                                            if (se.releaseMs < 50) se.releaseMs = 50;
+                                            if (se.releaseMs > 2000) se.releaseMs = 2000;
+                                        }
                                         exportSoundSamples.push_back(std::move(se));
                                     }
                                 } else {

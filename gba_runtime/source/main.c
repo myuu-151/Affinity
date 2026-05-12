@@ -93,7 +93,7 @@ static void afn_stop_sound(void);
 // ---------------------------------------------------------------------------
 #ifdef AFN_HAS_SOUND
 
-#define SND_BUF_SIZE 304
+#define SND_BUF_SIZE 418
 #define SND_MAX_VOICES 8  // max allocated; actual count per instance from afn_snd_voices[]
 static int snd_voice_count = 6; // active voice limit (set from afn_snd_voices[] on play)
 
@@ -149,10 +149,10 @@ static void afn_sound_hw_start(void) {
     REG_SNDDSCNT = SDS_A100 | SDS_AL | SDS_AR | SDS_ATMR0 | SDS_ARESET;
     REG_TM0CNT_H = 0;
     if (snd_compat) {
-        REG_TM0CNT_L = 65536 - 1848; // ~9079 Hz (compat mode — half rate)
-        snd_mix_samples = SND_BUF_SIZE / 2; // 152 samples per frame
+        REG_TM0CNT_L = 65536 - 1344; // ~12485 Hz (compat mode — half rate)
+        snd_mix_samples = SND_BUF_SIZE / 2; // 209 samples per frame
     } else {
-        REG_TM0CNT_L = 65536 - 924;  // 18157 Hz
+        REG_TM0CNT_L = 65536 - 672;  // ~24970 Hz
         snd_mix_samples = SND_BUF_SIZE;
     }
     REG_TM0CNT_H = TM_ENABLE;
@@ -186,10 +186,10 @@ static void afn_play_sound(int instanceId) {
         // Reinit timer for new compat setting
         REG_TM0CNT_H = 0;
         if (snd_compat) {
-            REG_TM0CNT_L = 65536 - 1848;
+            REG_TM0CNT_L = 65536 - 1344;
             snd_mix_samples = SND_BUF_SIZE / 2;
         } else {
-            REG_TM0CNT_L = 65536 - 924;
+            REG_TM0CNT_L = 65536 - 672;
             snd_mix_samples = SND_BUF_SIZE;
         }
         REG_TM0CNT_H = TM_ENABLE;
@@ -346,8 +346,8 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
 #endif
     vc->pos = 0;
     // Pitch: baseInc = (sampleRate << 8) / outputRate gives 1:1 playback
-    // Output rate = 18157 Hz (CPU_FREQ / 924)
-    int outRate = snd_compat ? 9079 : 18157;
+    // Output rate = ~24970 Hz (CPU_FREQ / 672)
+    int outRate = snd_compat ? 12485 : 24970;
     int baseInc = (afn_pcm_rates[smpIdx] << 8) / outRate;
     // Pitch-shift all samples (note 60 = original pitch)
     {
@@ -372,7 +372,7 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     // Each frame = snd_mix_samples output samples, sequencer advances tpf ticks/frame
     int tpf = afn_snd_tpf[snd_seq_active >= 0 ? snd_seq_active : 0];
     int durSamples = (durTicks * snd_mix_samples) / (tpf > 0 ? tpf : 1);
-    int minDurSmp = snd_compat ? 2722 : 5443; // minimum ~300ms at respective rate
+    int minDurSmp = snd_compat ? 3746 : 7491; // minimum ~300ms at respective rate
     if (durSamples < minDurSmp) durSamples = minDurSmp;
     // For one-shot samples, ensure remaining covers the full sample playback
     if (!vc->loop) {
@@ -391,12 +391,12 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     }
     vc->releaseRem = 0;
     if (snd_compat) {
-        vc->releaseLen = 76; // compat: short ~5ms fade (smooth cutoffs, minimal CPU)
+        vc->releaseLen = 105; // compat: short ~5ms fade (smooth cutoffs, minimal CPU)
     } else {
         int sf = (snd_seq_active >= 0) ? afn_snd_softfade[snd_seq_active] : 1;
         if (sf) {
             vc->releaseLen = afn_pcm_release[smpIdx];
-            if (vc->releaseLen < 304) vc->releaseLen = 304;
+            if (vc->releaseLen < 418) vc->releaseLen = 418;
         } else {
             vc->releaseLen = 0;
         }
