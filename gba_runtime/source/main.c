@@ -152,7 +152,7 @@ static void afn_sound_hw_start(void) {
     REG_TM0CNT_H = 0;
     if (snd_compat) {
         REG_TM0CNT_L = 65536 - 1344; // ~12485 Hz (compat mode — half rate)
-        snd_mix_samples = SND_MIX_COUNT / 2; // 224 samples per frame
+        snd_mix_samples = SND_MIX_COUNT / 2; // 209 samples per frame
     } else {
         REG_TM0CNT_L = 65536 - 672;  // ~24970 Hz
         snd_mix_samples = SND_MIX_COUNT;
@@ -214,9 +214,9 @@ static void afn_stop_sound(void) {
 // then mix the next frame into the other buffer.
 // Note: mix_acc is stack-allocated inside afn_sound_mix (IWRAM stack = fast)
 
-IWRAM_CODE static void afn_sound_mix(void) {
+// Quick DMA swap — must run immediately after VBlank
+static void afn_sound_swap(void) {
     if (!snd_initialized) return;
-
     // Check if any voice is still active — if not, shut down HW
     {
         int anyActive = 0;
@@ -227,13 +227,19 @@ IWRAM_CODE static void afn_sound_mix(void) {
             return;
         }
     }
-
     // Point DMA to the buffer we mixed last frame
+    // Flush FIFO residual bytes to prevent boundary clicking
     int play = snd_cur_buf ^ 1;
     REG_DMA1CNT = 0;
+    REG_SNDDSCNT |= SDS_ARESET; // reset FIFO — flushes residual bytes
     REG_DMA1SAD = (u32)snd_buf[play];
     REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
     snd_cur_buf = play;
+}
+
+// Heavy mixing — can run anytime during the frame
+IWRAM_CODE static void afn_sound_mix(void) {
+    if (!snd_initialized) return;
 
     s8* buf = snd_buf[snd_cur_buf ^ 1];
     int mixN = snd_mix_samples;
@@ -308,8 +314,8 @@ IWRAM_CODE static void afn_sound_mix(void) {
         int v = snd_voice_count;
         while (v > 1) { v >>= 1; outShift++; }
         afn_mix_clamp_fast(buf, mix_acc, mixN, outShift);
-        // Pad tail with last sample (DMA reads 420 bytes = 105 x 4,
-        // residual 2 bytes stay in FIFO and play at next frame start)
+        // Pad tail with last sample (DMA reads extra bytes as 4-byte chunks,
+        // residual bytes stay in FIFO and play at next frame start)
         if (mixN < SND_BUF_SIZE) {
             s8 last = (mixN > 0) ? buf[mixN - 1] : 0;
             for (int i = mixN; i < SND_BUF_SIZE; i++) buf[i] = last;
@@ -4881,6 +4887,8 @@ int main(void)
             afn_clear_fb_stmia(vramBuf, 0);
         }
 #endif
+        // Mix audio using leftover frame time (after rendering, before VBlank)
+        afn_sound_mix();
         // FPS measurement: count frames, update every ~1 second using Timer 3
         // Timer 3: prescaler=1024, ticks at 16384 Hz. 16384 ticks ≈ 1 second.
         dbg_fps_frames++;
@@ -4914,8 +4922,8 @@ int main(void)
                 REG_DISPCNT &= ~DCNT_BG2; // Mode 7: BG2 managed by HBlank ISR
             }
         }
+        afn_sound_swap(); // DMA swap — fast, must be at VBlank
         afn_sound_tick();
-        afn_sound_mix();
         key_poll();
 
         // --- Scene transition state machine ---
