@@ -1008,6 +1008,7 @@ struct SoundInstance {
     int mixerGain = 0;         // 0 = Normal (>>7), 1 = Loud (>>6), 2 = Mid (>>8), 3 = Quiet (>>9)
     int voiceCount = 6;        // max simultaneous voices on GBA (4-8)
     int softFade = 1;          // 0 = hard cutoff, 1 = 256-sample fadeout at end of notes
+    int compatMode = 0;        // 0 = normal, 1 = compatibility (halved rate, no interp, no release — less CPU)
     std::vector<SampleOverride> overrides; // per-sample edits
 };
 static std::vector<SoundInstance> sSoundInstances;
@@ -5096,6 +5097,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "instGain=%d\n", si.mixerGain);
         fprintf(f, "instVoices=%d\n", si.voiceCount);
         fprintf(f, "instSoftFade=%d\n", si.softFade);
+        fprintf(f, "instCompat=%d\n", si.compatMode);
         fprintf(f, "instBanks=");
         for (int ch = 0; ch < 16; ch++) {
             if (ch > 0) fprintf(f, ",");
@@ -7116,6 +7118,7 @@ static bool LoadProject(const std::string& path)
                 else if (sscanf(line, "instGain=%d", &ival) == 1) curInst->mixerGain = ival;
                 else if (sscanf(line, "instVoices=%d", &ival) == 1) curInst->voiceCount = ival;
                 else if (sscanf(line, "instSoftFade=%d", &ival) == 1) curInst->softFade = ival;
+                else if (sscanf(line, "instCompat=%d", &ival) == 1) curInst->compatMode = ival;
                 else if (strncmp(line, "instBanks=", 10) == 0) {
                     sscanf(line + 10, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
                         &curInst->channelBank[0], &curInst->channelBank[1], &curInst->channelBank[2], &curInst->channelBank[3],
@@ -12539,6 +12542,7 @@ void FrameTick(float dt)
                         ie.mixerGain = inst.mixerGain;
                         ie.voiceCount = inst.voiceCount;
                         ie.softFade = inst.softFade;
+                        ie.compatMode = inst.compatMode;
                         for (auto& track : midi.tracks) {
                             for (auto& n : track.notes) {
                                 if (midi.channelMuted[n.channel]) continue;
@@ -21731,6 +21735,12 @@ void FrameTick(float dt)
                 sProjectDirty = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("256-sample fadeout at end of notes (smoother but softer endings)");
+            bool cm = inst.compatMode != 0;
+            if (ImGui::Checkbox("Compatibility", &cm)) {
+                inst.compatMode = cm ? 1 : 0;
+                sProjectDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Halved sample rate + no interpolation + no release fade.\nUses ~50%% less CPU — fixes floor tearing with many voices.");
         }
 
         ImGui::End();

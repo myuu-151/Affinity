@@ -126,13 +126,21 @@ static int snd_seq_active = -1;
 static int snd_seq_tick = 0;
 static int snd_seq_next = 0;
 static int snd_initialized = 0;
+static int snd_compat = 0;       // 1 = compatibility mode (halved rate, less CPU)
+static int snd_mix_samples = SND_BUF_SIZE; // actual samples to mix per frame
 
 static void afn_sound_hw_start(void) {
     // Enable sound hardware, timer, and FIFO DMA
     REG_SNDSTAT = SSTAT_ENABLE;
     REG_SNDDSCNT = SDS_A100 | SDS_AL | SDS_AR | SDS_ATMR0 | SDS_ARESET;
     REG_TM0CNT_H = 0;
-    REG_TM0CNT_L = 65536 - 924;  // 18157 Hz
+    if (snd_compat) {
+        REG_TM0CNT_L = 65536 - 1848; // ~9079 Hz (compat mode — half rate)
+        snd_mix_samples = SND_BUF_SIZE / 2; // 152 samples per frame
+    } else {
+        REG_TM0CNT_L = 65536 - 924;  // 18157 Hz
+        snd_mix_samples = SND_BUF_SIZE;
+    }
     REG_TM0CNT_H = TM_ENABLE;
     snd_cur_buf = 0;
     REG_DMA1CNT = 0;
@@ -158,7 +166,20 @@ static void afn_sound_init(void) {
 }
 
 static void afn_play_sound(int instanceId) {
+    snd_compat = afn_snd_compat[instanceId];
     if (!snd_initialized) afn_sound_hw_start();
+    else {
+        // Reinit timer for new compat setting
+        REG_TM0CNT_H = 0;
+        if (snd_compat) {
+            REG_TM0CNT_L = 65536 - 1848;
+            snd_mix_samples = SND_BUF_SIZE / 2;
+        } else {
+            REG_TM0CNT_L = 65536 - 924;
+            snd_mix_samples = SND_BUF_SIZE;
+        }
+        REG_TM0CNT_H = TM_ENABLE;
+    }
     snd_seq_active = instanceId;
     snd_seq_tick = 0;
     snd_seq_next = 0;
@@ -199,18 +220,19 @@ IWRAM_CODE static void afn_sound_mix(void) {
     snd_cur_buf = play;
 
     s8* buf = snd_buf[snd_cur_buf ^ 1];
+    int mixN = snd_mix_samples; // 304 normal, 152 compat
     // Stack-allocated in IWRAM (function is IWRAM_CODE, stack is in IWRAM)
     s16 mix_acc[SND_BUF_SIZE];
     // Clear accumulator (32-bit writes, 2 samples at a time)
     {
         u32* a32 = (u32*)mix_acc;
-        int i; for (i = 0; i < SND_BUF_SIZE / 2; i++) a32[i] = 0;
+        int i; for (i = 0; i < mixN / 2; i++) a32[i] = 0;
     }
 
     for (int v = 0; v < snd_voice_count; v++) {
         SndVoice* vc = &snd_voices[v];
         if (!vc->active) continue;
-        int n = SND_BUF_SIZE;
+        int n = mixN;
         if (vc->remaining > 0 && vc->remaining < n) n = vc->remaining;
         const s8* wdata = vc->data;
         int pos = vc->pos;
@@ -219,7 +241,7 @@ IWRAM_CODE static void afn_sound_mix(void) {
         int vol = vc->volFade >> 8;
         if (vol > vc->vol) vol = vc->vol;
         if (vol < 0) vol = 0;
-        if (vc->remaining < 0 && vc->releaseRem > 0 && vc->releaseLen > 0)
+        if (!snd_compat && vc->remaining < 0 && vc->releaseRem > 0 && vc->releaseLen > 0)
             vol = vol * vc->releaseRem / vc->releaseLen;
         int gs = vc->gainShift;
         int done = 0;
@@ -255,10 +277,12 @@ IWRAM_CODE static void afn_sound_mix(void) {
         if (vc->remaining > 0) {
             vc->remaining -= n;
             if (vc->remaining <= 0) {
+                if (snd_compat) { vc->active = 0; continue; } // no release in compat
                 vc->remaining = -1;
                 vc->releaseRem = vc->releaseLen;
             }
         } else if (vc->remaining < 0) {
+            if (snd_compat) { vc->active = 0; continue; } // no release in compat
             vc->releaseRem -= n;
             if (vc->releaseRem <= 0) { vc->active = 0; continue; }
         }
@@ -267,11 +291,15 @@ IWRAM_CODE static void afn_sound_mix(void) {
 
     // Clamp and write to output buffer
     {
-        int i; for (i = 0; i < SND_BUF_SIZE; i++) {
+        int i; for (i = 0; i < mixN; i++) {
             int m = mix_acc[i];
             if (m > 127) m = 127;
             else if (m < -128) m = -128;
             buf[i] = (s8)m;
+        }
+        // Zero-fill remainder in compat mode (DMA still reads full 304)
+        if (snd_compat) {
+            for (; i < SND_BUF_SIZE; i++) buf[i] = 0;
         }
     }
 }
@@ -309,7 +337,8 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     vc->pos = 0;
     // Pitch: baseInc = (sampleRate << 8) / outputRate gives 1:1 playback
     // Output rate = 18157 Hz (CPU_FREQ / 924)
-    int baseInc = (afn_pcm_rates[smpIdx] << 8) / 18157;
+    int outRate = snd_compat ? 9079 : 18157;
+    int baseInc = (afn_pcm_rates[smpIdx] << 8) / outRate;
     // Pitch-shift all samples (note 60 = original pitch)
     {
         // Semitone table (12-TET, 256 = 1.0 in 8-bit fixed)
@@ -330,30 +359,33 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     vc->inc = baseInc;
     vc->vol = vel; // 0-127
     // Convert tick duration to output samples
-    // Each frame = SND_BUF_SIZE output samples, sequencer advances tpf ticks/frame
+    // Each frame = snd_mix_samples output samples, sequencer advances tpf ticks/frame
     int tpf = afn_snd_tpf[snd_seq_active >= 0 ? snd_seq_active : 0];
-    int durSamples = (durTicks * SND_BUF_SIZE) / (tpf > 0 ? tpf : 1);
-    if (durSamples < 5443) durSamples = 5443; // minimum ~300ms (18157 * 0.30)
+    int durSamples = (durTicks * snd_mix_samples) / (tpf > 0 ? tpf : 1);
+    int minDurSmp = snd_compat ? 2722 : 5443; // minimum ~300ms at respective rate
+    if (durSamples < minDurSmp) durSamples = minDurSmp;
     // For one-shot samples, ensure remaining covers the full sample playback
     if (!vc->loop) {
         int smpDur = (vc->length << 8) / (baseInc > 0 ? baseInc : 1);
         if (smpDur > durSamples) durSamples = smpDur;
     }
     vc->remaining = durSamples;
-    vc->interp = (snd_seq_active >= 0) ? afn_snd_interp[snd_seq_active] : 0;
+    vc->interp = (snd_compat) ? 0 : ((snd_seq_active >= 0) ? afn_snd_interp[snd_seq_active] : 0);
     // gainShift: 0=Normal(>>7), 1=Loud(>>6), 2=Quiet(>>9)
     {
         int g = (snd_seq_active >= 0) ? afn_snd_gain[snd_seq_active] : 0;
         vc->gainShift = (g == 1) ? 6 : (g == 2) ? 9 : 7;
     }
     vc->releaseRem = 0;
-    {
+    if (snd_compat) {
+        vc->releaseLen = 0; // compat: no release fade (saves CPU)
+    } else {
         int sf = (snd_seq_active >= 0) ? afn_snd_softfade[snd_seq_active] : 1;
         if (sf) {
             vc->releaseLen = afn_pcm_release[smpIdx];
             if (vc->releaseLen < 304) vc->releaseLen = 304;
         } else {
-            vc->releaseLen = 0; // hard cut — no release fade
+            vc->releaseLen = 0;
         }
     }
     // Decay: precompute per-frame volume decrement (8.8 fixed point)
@@ -365,7 +397,7 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
             // Total drop = vel * dp / 100 over durSamples
             // Per-frame drop = (vel * dp * 256) / (100 * durSamples / SND_BUF_SIZE)
             int totalDrop = (vel * dp * 256) / 100; // in 8.8
-            int numFrames = durSamples / SND_BUF_SIZE;
+            int numFrames = durSamples / snd_mix_samples;
             vc->volDec = numFrames > 0 ? totalDrop / numFrames : 0;
         } else {
             vc->volDec = 0;
