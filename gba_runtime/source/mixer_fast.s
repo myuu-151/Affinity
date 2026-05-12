@@ -222,10 +222,11 @@ afn_mix_voice_fast16:
 .size afn_mix_voice_fast16, .-afn_mix_voice_fast16
 
 @ ---------------------------------------------------------------------------
-@ afn_mix_clamp_fast — Clamp s16 accumulator to s8 output buffer
+@ afn_mix_clamp_fast — Shift s16 accumulator right, then clamp to s8 output
 @ Processes 4 samples per iteration, packs into 32-bit writes.
+@ The shift allows mixing at full per-voice precision, scaling once at output.
 @
-@ void afn_mix_clamp_fast(s8* buf, const s16* mix_acc, int count);
+@ void afn_mix_clamp_fast(s8* buf, const s16* mix_acc, int count, int shift);
 @ ---------------------------------------------------------------------------
     .global afn_mix_clamp_fast
     .type   afn_mix_clamp_fast, %function
@@ -233,7 +234,7 @@ afn_mix_voice_fast16:
 afn_mix_clamp_fast:
     stmfd   sp!, {r4-r7, lr}
 
-    @ r0 = buf (s8*), r1 = mix_acc (s16*), r2 = count
+    @ r0 = buf (s8*), r1 = mix_acc (s16*), r2 = count, r3 = shift
     cmp     r2, #0
     ble     .Lclamp_done
 
@@ -242,18 +243,17 @@ afn_mix_clamp_fast:
     blt     .Lclamp_tail
 
 .Lclamp_loop4:
-    @ Load 4 s16 values
-    ldrsh   r3, [r1], #2
+    @ Load 4 s16 values and shift right
     ldrsh   r4, [r1], #2
     ldrsh   r5, [r1], #2
     ldrsh   r6, [r1], #2
+    ldrsh   r7, [r1], #2
+    mov     r4, r4, asr r3
+    mov     r5, r5, asr r3
+    mov     r6, r6, asr r3
+    mov     r7, r7, asr r3
 
     @ Clamp each to -128..127
-    cmp     r3, #127
-    movgt   r3, #127
-    cmn     r3, #128
-    mvnlt   r3, #127              @ r3 = -128
-
     cmp     r4, #127
     movgt   r4, #127
     cmn     r4, #128
@@ -269,15 +269,20 @@ afn_mix_clamp_fast:
     cmn     r6, #128
     mvnlt   r6, #127
 
+    cmp     r7, #127
+    movgt   r7, #127
+    cmn     r7, #128
+    mvnlt   r7, #127
+
     @ Pack 4 bytes into one word: buf[0..3]
-    and     r3, r3, #0xFF
     and     r4, r4, #0xFF
     and     r5, r5, #0xFF
     and     r6, r6, #0xFF
-    orr     r3, r3, r4, lsl #8
-    orr     r3, r3, r5, lsl #16
-    orr     r3, r3, r6, lsl #24
-    str     r3, [r0], #4
+    and     r7, r7, #0xFF
+    orr     r4, r4, r5, lsl #8
+    orr     r4, r4, r6, lsl #16
+    orr     r4, r4, r7, lsl #24
+    str     r4, [r0], #4
 
     subs    r2, r2, #4
     bge     .Lclamp_loop4
@@ -287,12 +292,13 @@ afn_mix_clamp_fast:
     beq     .Lclamp_done
 
 .Lclamp_tail_loop:
-    ldrsh   r3, [r1], #2
-    cmp     r3, #127
-    movgt   r3, #127
-    cmn     r3, #128
-    mvnlt   r3, #127
-    strb    r3, [r0], #1
+    ldrsh   r4, [r1], #2
+    mov     r4, r4, asr r3
+    cmp     r4, #127
+    movgt   r4, #127
+    cmn     r4, #128
+    mvnlt   r4, #127
+    strb    r4, [r0], #1
     subs    r2, r2, #1
     bne     .Lclamp_tail_loop
 
