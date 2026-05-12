@@ -119,6 +119,109 @@ afn_mix_voice_fast:
 .size afn_mix_voice_fast, .-afn_mix_voice_fast
 
 @ ---------------------------------------------------------------------------
+@ afn_mix_voice_fast16 — Same as above but reads s16 sample data
+@ Linear interpolation in 16-bit precision for high-quality mixing.
+@
+@ int afn_mix_voice_fast16(s16* mix_acc, const s16* wdata, int count,
+@                          int pos, int inc, int vol, int gainShift);
+@ Returns: new pos value (in r0)
+@ ---------------------------------------------------------------------------
+    .global afn_mix_voice_fast16
+    .type   afn_mix_voice_fast16, %function
+
+afn_mix_voice_fast16:
+    stmfd   sp!, {r4-r10, lr}
+
+    ldr     r4, [sp, #32]           @ inc
+    ldr     r5, [sp, #36]           @ vol
+    ldr     r6, [sp, #40]           @ gainShift
+
+    cmp     r2, #0
+    ble     .Lmix16_done
+    cmp     r5, #0
+    beq     .Lmix16_skip_voice
+
+    @ Main loop: 2 samples per iteration
+    subs    r2, r2, #2
+    blt     .Lmix16_tail
+
+.Lmix16_loop2:
+    @ --- Sample 0 ---
+    mov     r7, r3, asr #8         @ idx = pos >> 8
+    mov     r8, r7, lsl #1         @ byte offset = idx * 2
+    ldrsh   r8, [r1, r8]           @ s0 = wdata[idx] (signed halfword)
+    add     r7, r7, #1
+    mov     r9, r7, lsl #1
+    ldrsh   r9, [r1, r9]           @ s1 = wdata[idx+1]
+    sub     r9, r9, r8             @ s1 - s0
+    and     r7, r3, #0xFF          @ frac = pos & 0xFF
+    mul     r9, r7, r9             @ (s1-s0) * frac
+    add     r8, r8, r9, asr #8    @ s0 + interpolated
+    mul     r8, r5, r8             @ * vol
+    mov     r8, r8, asr r6         @ >> gainShift
+    ldrsh   r10, [r0]
+    add     r10, r10, r8
+    strh    r10, [r0], #2
+    add     r3, r3, r4             @ pos += inc
+
+    @ --- Sample 1 ---
+    mov     r7, r3, asr #8
+    mov     r8, r7, lsl #1
+    ldrsh   r8, [r1, r8]
+    add     r7, r7, #1
+    mov     r9, r7, lsl #1
+    ldrsh   r9, [r1, r9]
+    sub     r9, r9, r8
+    and     r7, r3, #0xFF
+    mul     r9, r7, r9
+    add     r8, r8, r9, asr #8
+    mul     r8, r5, r8
+    mov     r8, r8, asr r6
+    ldrsh   r10, [r0]
+    add     r10, r10, r8
+    strh    r10, [r0], #2
+    add     r3, r3, r4
+
+    subs    r2, r2, #2
+    bge     .Lmix16_loop2
+
+.Lmix16_tail:
+    adds    r2, r2, #2
+    beq     .Lmix16_done
+
+    @ One remaining sample
+    mov     r7, r3, asr #8
+    mov     r8, r7, lsl #1
+    ldrsh   r8, [r1, r8]
+    add     r7, r7, #1
+    mov     r9, r7, lsl #1
+    ldrsh   r9, [r1, r9]
+    sub     r9, r9, r8
+    and     r7, r3, #0xFF
+    mul     r9, r7, r9
+    add     r8, r8, r9, asr #8
+    mul     r8, r5, r8
+    mov     r8, r8, asr r6
+    ldrsh   r10, [r0]
+    add     r10, r10, r8
+    strh    r10, [r0], #2
+    add     r3, r3, r4
+
+.Lmix16_done:
+    mov     r0, r3
+    ldmfd   sp!, {r4-r10, lr}
+    bx      lr
+
+.Lmix16_skip_voice:
+    mul     r7, r2, r4
+    add     r3, r3, r7
+    mov     r0, r3
+    ldmfd   sp!, {r4-r10, lr}
+    bx      lr
+
+.size afn_mix_voice_fast16, .-afn_mix_voice_fast16
+
+@ ---------------------------------------------------------------------------
 @ afn_mix_clamp_fast — Clamp s16 accumulator to s8 output buffer
 @ Processes 4 samples per iteration, packs into 32-bit writes.
 @

@@ -5195,28 +5195,49 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "#define AFN_SOUND_SAMPLE_COUNT " << soundSamples.size() << "\n";
         f << "#define AFN_SOUND_INSTANCE_COUNT " << soundInstances.size() << "\n\n";
 
-        // Emit each sample as a const s8 array (+1 padding byte for interpolation)
+        // Emit each sample as s16 (if 16-bit source available) or s8 array
+        // +1 padding sample for interpolation
         for (int i = 0; i < (int)soundSamples.size(); i++) {
             auto& smp = soundSamples[i];
-            f << "static const s8 afn_pcm_" << i << "[] __attribute__((aligned(4))) = {\n    ";
-            for (int j = 0; j < (int)smp.data.size(); j++) {
-                f << (int)smp.data[j];
-                f << ",";
-                if ((j & 31) == 31) f << "\n    ";
+            bool use16 = !smp.data16.empty() && (int)smp.data16.size() == (int)smp.data.size();
+            if (use16) {
+                f << "static const s16 afn_pcm_" << i << "[] __attribute__((aligned(4))) = {\n    ";
+                for (int j = 0; j < (int)smp.data16.size(); j++) {
+                    f << (int)smp.data16[j];
+                    f << ",";
+                    if ((j & 15) == 15) f << "\n    ";
+                }
+                int padVal = 0;
+                if (smp.loop && smp.loopStart >= 0 && smp.loopStart < (int)smp.data16.size())
+                    padVal = (int)smp.data16[smp.loopStart];
+                f << padVal << "\n};\n";
+            } else {
+                f << "static const s8 afn_pcm_" << i << "[] __attribute__((aligned(4))) = {\n    ";
+                for (int j = 0; j < (int)smp.data.size(); j++) {
+                    f << (int)smp.data[j];
+                    f << ",";
+                    if ((j & 31) == 31) f << "\n    ";
+                }
+                int padVal = 0;
+                if (smp.loop && smp.loopStart >= 0 && smp.loopStart < (int)smp.data.size())
+                    padVal = (int)smp.data[smp.loopStart];
+                f << padVal << "\n};\n";
             }
-            // Padding byte for interpolation: use loop start sample for seamless loop
-            int padVal = 0;
-            if (smp.loop && smp.loopStart >= 0 && smp.loopStart < (int)smp.data.size())
-                padVal = (int)smp.data[smp.loopStart];
-            f << padVal << "\n};\n";
             f << "#define AFN_PCM_" << i << "_LEN " << smp.data.size() << "\n";
-            f << "#define AFN_PCM_" << i << "_RATE " << smp.sampleRate << "\n\n";
+            f << "#define AFN_PCM_" << i << "_RATE " << smp.sampleRate << "\n";
+            f << "#define AFN_PCM_" << i << "_16BIT " << (use16 ? 1 : 0) << "\n\n";
         }
 
-        // Sample pointer + length table
-        f << "static const s8* const afn_pcm_ptrs[" << soundSamples.size() << "] = {\n";
+        // Sample pointer + length + 16-bit flag tables
+        f << "static const void* const afn_pcm_ptrs[" << soundSamples.size() << "] = {\n";
         for (int i = 0; i < (int)soundSamples.size(); i++)
             f << "    afn_pcm_" << i << ",\n";
+        f << "};\n";
+        f << "static const u8 afn_pcm_is16[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++) {
+            bool use16 = !soundSamples[i].data16.empty() && (int)soundSamples[i].data16.size() == (int)soundSamples[i].data.size();
+            f << "    " << (use16 ? 1 : 0) << ",\n";
+        }
         f << "};\n";
         f << "static const int afn_pcm_lens[" << soundSamples.size() << "] = {\n";
         for (int i = 0; i < (int)soundSamples.size(); i++)

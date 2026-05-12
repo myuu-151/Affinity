@@ -497,6 +497,7 @@ struct GBAHudElementExport {
 struct GBASoundSampleExport {
     std::string name;
     std::vector<int8_t> data;
+    std::vector<int16_t> data16; // 16-bit source for high-quality export
     int sampleRate = 16384;
     bool loop = true;
     int loopStart = 0; // in samples (0 = loop from start)

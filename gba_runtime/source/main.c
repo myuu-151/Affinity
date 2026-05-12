@@ -102,7 +102,7 @@ EWRAM_DATA static s8 snd_buf[2][SND_BUF_SIZE] __attribute__((aligned(4)));
 static int snd_cur_buf = 0;
 
 typedef struct {
-    const s8* data;
+    const void* data;  // s8* or s16* depending on is16
     int length;
     int pos;           // fixed 24.8
     int inc;           // fixed 24.8
@@ -112,7 +112,7 @@ typedef struct {
     int loopLen;       // loop end << 8
     int loopStart;     // loop start << 8
     int loop;          // 1 = loop (oscillators), 0 = one-shot (drums)
-    int interp;        // 0 = nearest, 1 = linear interpolation
+    int is16;          // 1 = 16-bit sample data, 0 = 8-bit
     int gainShift;     // volume shift: 7 = normal, 6 = loud
     int volFade;       // current volume in 8.8 fixed point (decays per frame)
     int volDec;        // volume decrement per frame in 8.8 fixed point
@@ -125,6 +125,8 @@ EWRAM_DATA static SndVoice snd_voices[SND_MAX_VOICES];
 // ARM assembly mixer (mixer_fast.s, IWRAM)
 extern int afn_mix_voice_fast(s16* mix_acc, const s8* wdata, int count,
                               int pos, int inc, int vol, int gainShift);
+extern int afn_mix_voice_fast16(s16* mix_acc, const s16* wdata, int count,
+                                int pos, int inc, int vol, int gainShift);
 extern void afn_mix_clamp_fast(s8* buf, const s16* mix_acc, int count);
 
 static int snd_seq_active = -1;
@@ -239,7 +241,6 @@ IWRAM_CODE static void afn_sound_mix(void) {
         if (!vc->active) continue;
         int n = mixN;
         if (vc->remaining > 0 && vc->remaining < n) n = vc->remaining;
-        const s8* wdata = vc->data;
         int pos = vc->pos;
         int inc = vc->inc;
         // Compute volume once per frame
@@ -250,6 +251,8 @@ IWRAM_CODE static void afn_sound_mix(void) {
             vol = vol * vc->releaseRem / vc->releaseLen;
         int gs = vc->gainShift;
         int done = 0;
+        // For 16-bit samples, shift gainShift up by 8 to compensate for 16-bit range
+        int gs_actual = vc->is16 ? (gs + 8) : gs;
         if (vc->loop) {
             int loopLen = vc->loopLen;
             int loopSpan = loopLen - vc->loopStart;
@@ -261,7 +264,10 @@ IWRAM_CODE static void afn_sound_mix(void) {
                 int chunk = (loopLen - pos) / inc;
                 if (chunk < 1) chunk = 1;
                 if (chunk > rem) chunk = rem;
-                pos = afn_mix_voice_fast(dst, wdata, chunk, pos, inc, vol, gs);
+                if (vc->is16)
+                    pos = afn_mix_voice_fast16(dst, (const s16*)vc->data, chunk, pos, inc, vol, gs_actual);
+                else
+                    pos = afn_mix_voice_fast(dst, (const s8*)vc->data, chunk, pos, inc, vol, gs_actual);
                 dst += chunk;
                 rem -= chunk;
                 while (pos >= loopLen) pos -= loopSpan;
@@ -272,11 +278,18 @@ IWRAM_CODE static void afn_sound_mix(void) {
             // How many samples before end of data?
             int maxChunk = (lenFixed - pos) / inc;
             if (maxChunk < n) {
-                if (maxChunk > 0)
-                    pos = afn_mix_voice_fast(mix_acc, wdata, maxChunk, pos, inc, vol, gs);
+                if (maxChunk > 0) {
+                    if (vc->is16)
+                        pos = afn_mix_voice_fast16(mix_acc, (const s16*)vc->data, maxChunk, pos, inc, vol, gs_actual);
+                    else
+                        pos = afn_mix_voice_fast(mix_acc, (const s8*)vc->data, maxChunk, pos, inc, vol, gs_actual);
+                }
                 done = 1;
             } else {
-                pos = afn_mix_voice_fast(mix_acc, wdata, n, pos, inc, vol, gs);
+                if (vc->is16)
+                    pos = afn_mix_voice_fast16(mix_acc, (const s16*)vc->data, n, pos, inc, vol, gs_actual);
+                else
+                    pos = afn_mix_voice_fast(mix_acc, (const s8*)vc->data, n, pos, inc, vol, gs_actual);
             }
         }
         vc->pos = pos;
@@ -325,6 +338,7 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     SndVoice* vc = &snd_voices[vi];
     vc->data = afn_pcm_ptrs[smpIdx];
     vc->length = afn_pcm_lens[smpIdx];
+    vc->is16 = afn_pcm_is16[smpIdx];
 #ifdef AFN_PCM_HAS_LOOP
     vc->loop = afn_pcm_loop[smpIdx];
     vc->loopStart = afn_pcm_loop_start[smpIdx] << 8;
@@ -370,7 +384,7 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
         if (smpDur > durSamples) durSamples = smpDur;
     }
     vc->remaining = durSamples;
-    vc->interp = (snd_compat) ? 0 : ((snd_seq_active >= 0) ? afn_snd_interp[snd_seq_active] : 0);
+    // interpolation is always on via assembly mixer
     // gainShift: 0=Normal(>>7), 1=Loud(>>6), 2=Quiet(>>9)
     {
         int g = (snd_seq_active >= 0) ? afn_snd_gain[snd_seq_active] : 0;

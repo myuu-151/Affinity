@@ -12494,6 +12494,7 @@ void FrameTick(float dt)
                                         GBASoundSampleExport se;
                                         se.name = std::string(smp.name) + "_" + std::to_string(best->baseNote);
                                         se.data = best->data;
+                                        se.data16 = best->data16;
                                         se.sampleRate = best->sampleRate;
                                         se.volScale = (best->peakAmplitude * 256) / 32768;
                                         if (se.volScale < 1) se.volScale = 1;
