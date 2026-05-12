@@ -169,8 +169,8 @@ static int snd_seq_tick = 0;
 static int snd_seq_next = 0;
 static int snd_initialized = 0;
 static int snd_compat = 0;       // 1 = compatibility mode (halved rate, less CPU)
-static int snd_hifi = 0;        // 1 = clean mode (timer 660, ~25.4kHz)
-static int snd_mix_samples = SND_MIX_COUNT; // actual samples to mix per frame
+static int snd_hifi = 0;        // 1 = hi-fi mode (timer 672, ~25kHz — may trill on some samples)
+static int snd_mix_samples = 304; // default for 18kHz (timer 924)
 
 // Compute timer reload and mix count from current settings + fix mode override
 static void afn_sound_set_rate(void) {
@@ -181,16 +181,20 @@ static void afn_sound_set_rate(void) {
     } else if (snd_compat) {
         timer = 1344; // ~12485 Hz
     } else if (snd_hifi) {
-        timer = 660;  // ~25424 Hz (clean mode)
+        timer = 672;  // ~24970 Hz (hi-fi — higher quality but may trill)
     } else {
-        timer = 672;  // ~24970 Hz
+        timer = 924;  // ~18157 Hz (default — clean, no trilling)
     }
     REG_TM0CNT_H = 0;
     REG_TM0CNT_L = 65536 - timer;
     // mix samples = CPU_FREQ / timer / 60fps ≈ 280896 / timer
-    int mix = 280896 / timer;
-    if (mix > SND_BUF_SIZE - 2) mix = SND_BUF_SIZE - 2;
-    snd_mix_samples = mix & ~3; // align to 4
+    if (timer == 672) {
+        snd_mix_samples = SND_MIX_COUNT; // 418 — exact for 25kHz
+    } else {
+        int mix = 280896 / timer;
+        if (mix > SND_BUF_SIZE - 2) mix = SND_BUF_SIZE - 2;
+        snd_mix_samples = mix & ~3; // align to 4
+    }
     REG_TM0CNT_H = TM_ENABLE;
 }
 
@@ -392,8 +396,8 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     if (snd_fix_mode > 0 && snd_fix_mode < 100)
         outRate = 16780000 / snd_rate_table[snd_fix_mode];
     else if (snd_compat) outRate = 12485;
-    else if (snd_hifi) outRate = 16777216 / 660; // 25420
-    else outRate = 24970;
+    else if (snd_hifi) outRate = 24970; // timer 672
+    else outRate = 18157; // timer 924
     int baseInc = (afn_pcm_rates[smpIdx] << 8) / outRate;
     // Pitch-shift all samples (note 60 = original pitch)
     {
