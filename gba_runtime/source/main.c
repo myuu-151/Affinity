@@ -122,6 +122,11 @@ typedef struct {
 
 EWRAM_DATA static SndVoice snd_voices[SND_MAX_VOICES];
 
+// ARM assembly mixer (mixer_fast.s, IWRAM)
+extern int afn_mix_voice_fast(s16* mix_acc, const s8* wdata, int count,
+                              int pos, int inc, int vol, int gainShift);
+extern void afn_mix_clamp_fast(s8* buf, const s16* mix_acc, int count);
+
 static int snd_seq_active = -1;
 static int snd_seq_tick = 0;
 static int snd_seq_next = 0;
@@ -241,7 +246,7 @@ IWRAM_CODE static void afn_sound_mix(void) {
         int vol = vc->volFade >> 8;
         if (vol > vc->vol) vol = vc->vol;
         if (vol < 0) vol = 0;
-        if (!snd_compat && vc->remaining < 0 && vc->releaseRem > 0 && vc->releaseLen > 0)
+        if (vc->remaining < 0 && vc->releaseRem > 0 && vc->releaseLen > 0)
             vol = vol * vc->releaseRem / vc->releaseLen;
         int gs = vc->gainShift;
         int done = 0;
@@ -254,11 +259,8 @@ IWRAM_CODE static void afn_sound_mix(void) {
                 int chunk = n - i;
                 if (samplesUntilWrap > 0 && samplesUntilWrap < chunk)
                     chunk = samplesUntilWrap;
-                int end = i + chunk;
-                for (; i < end; i++) {
-                    mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
-                    pos += inc;
-                }
+                pos = afn_mix_voice_fast(&mix_acc[i], wdata, chunk, pos, inc, vol, gs);
+                i += chunk;
                 if (pos >= loopLen) {
                     pos -= loopSpan;
                     if (pos < vc->loopStart) pos = vc->loopStart;
@@ -266,41 +268,33 @@ IWRAM_CODE static void afn_sound_mix(void) {
             }
         } else {
             int lenFixed = vc->length << 8;
-            for (int i = 0; i < n; i++) {
-                mix_acc[i] += ((int)wdata[pos >> 8] * vol) >> gs;
-                pos += inc;
-                if (pos >= lenFixed) { done = 1; break; }
-            }
+            // Compute max samples before end of waveform
+            int maxSmp = (lenFixed - pos + inc - 1) / inc;
+            if (maxSmp < n) { n = maxSmp; done = 1; }
+            if (n > 0)
+                pos = afn_mix_voice_fast(mix_acc, wdata, n, pos, inc, vol, gs);
         }
         vc->pos = pos;
         if (done) { vc->active = 0; continue; }
         if (vc->remaining > 0) {
             vc->remaining -= n;
             if (vc->remaining <= 0) {
-                if (snd_compat) { vc->active = 0; continue; } // no release in compat
                 vc->remaining = -1;
                 vc->releaseRem = vc->releaseLen;
             }
         } else if (vc->remaining < 0) {
-            if (snd_compat) { vc->active = 0; continue; } // no release in compat
             vc->releaseRem -= n;
             if (vc->releaseRem <= 0) { vc->active = 0; continue; }
         }
         if (vc->volDec > 0) vc->volFade -= vc->volDec;
     }
 
-    // Clamp and write to output buffer
-    {
-        int i; for (i = 0; i < mixN; i++) {
-            int m = mix_acc[i];
-            if (m > 127) m = 127;
-            else if (m < -128) m = -128;
-            buf[i] = (s8)m;
-        }
-        // Zero-fill remainder in compat mode (DMA still reads full 304)
-        if (snd_compat) {
-            for (; i < SND_BUF_SIZE; i++) buf[i] = 0;
-        }
+    // Clamp and write to output buffer (ARM asm: 4 samples packed per word write)
+    afn_mix_clamp_fast(buf, mix_acc, mixN);
+    // Zero-fill remainder in compat mode (DMA still reads full 304)
+    if (snd_compat && mixN < SND_BUF_SIZE) {
+        u32* z = (u32*)&buf[mixN];
+        int i; for (i = 0; i < (SND_BUF_SIZE - mixN) / 4; i++) z[i] = 0;
     }
 }
 
@@ -378,7 +372,7 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     }
     vc->releaseRem = 0;
     if (snd_compat) {
-        vc->releaseLen = 0; // compat: no release fade (saves CPU)
+        vc->releaseLen = 76; // compat: short ~5ms fade (smooth cutoffs, minimal CPU)
     } else {
         int sf = (snd_seq_active >= 0) ? afn_snd_softfade[snd_seq_active] : 1;
         if (sf) {
