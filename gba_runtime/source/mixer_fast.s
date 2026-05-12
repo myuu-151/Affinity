@@ -1,10 +1,11 @@
-@ mixer_fast.s — ARM assembly sound mixer inner loop for GBA
+@ mixer_fast.s — ARM assembly sound mixer with linear interpolation for GBA
 @ Runs in IWRAM (0 wait-state, ARM mode) for maximum throughput.
 @ Processes one voice: mixes waveform data into s16 accumulator buffer.
-@ Unrolled 4x with pre-computed volume*gain shift.
+@ Linear interpolation between samples for smooth sustained tones.
+@ Samples must have +1 padding byte at end for safe interpolation read.
 @
-@ void afn_mix_voice_fast(s16* mix_acc, const s8* wdata, int count,
-@                         int pos, int inc, int vol, int gainShift);
+@ int afn_mix_voice_fast(s16* mix_acc, const s8* wdata, int count,
+@                        int pos, int inc, int vol, int gainShift);
 @ Returns: new pos value (in r0)
 @
 @ Register plan:
@@ -15,10 +16,10 @@
 @   r4  = inc (24.8 fixed point)
 @   r5  = vol (0-127)
 @   r6  = gainShift
-@   r7  = temp sample value
-@   r8  = temp accumulator value
-@   r9  = temp sample 2
-@   r10 = temp acc 2
+@   r7  = idx (pos >> 8)
+@   r8  = s0 (current sample)
+@   r9  = s1 (next sample) / frac
+@   r10 = temp accumulator / interpolated value
 
     .section .iwram, "ax", %progbits
     .arm
@@ -29,9 +30,9 @@
 afn_mix_voice_fast:
     stmfd   sp!, {r4-r10, lr}
 
-    @ Load stack args: pos, inc, vol, gainShift
+    @ Load stack args: inc, vol, gainShift
     @ r0=mix_acc, r1=wdata, r2=count, r3=pos
-    ldr     r4, [sp, #32]           @ inc (5th arg, after 4 saved + lr = offset 32)
+    ldr     r4, [sp, #32]           @ inc
     ldr     r5, [sp, #36]           @ vol
     ldr     r6, [sp, #40]           @ gainShift
 
@@ -41,70 +42,66 @@ afn_mix_voice_fast:
     cmp     r5, #0
     beq     .Lmix_skip_voice
 
-    @ Main loop: process 4 samples per iteration
-    subs    r2, r2, #4
+    @ Main loop: process 2 samples per iteration
+    subs    r2, r2, #2
     blt     .Lmix_tail
 
-.Lmix_loop4:
-    @ Sample 0
-    mov     r7, r3, asr #8         @ sampleIdx = pos >> 8
-    ldrsb   r7, [r1, r7]           @ wdata[sampleIdx] (signed byte)
-    mul     r7, r5, r7             @ sample * vol
-    mov     r7, r7, asr r6         @ >> gainShift
-    ldrsh   r8, [r0]               @ load current acc
-    add     r8, r8, r7             @ accumulate
-    strh    r8, [r0], #2           @ store and advance
+.Lmix_loop2:
+    @ --- Sample 0 ---
+    mov     r7, r3, asr #8         @ idx = pos >> 8
+    ldrsb   r8, [r1, r7]           @ s0 = wdata[idx]
+    add     r7, r7, #1
+    ldrsb   r9, [r1, r7]           @ s1 = wdata[idx+1]
+    sub     r9, r9, r8             @ s1 - s0
+    and     r7, r3, #0xFF          @ frac = pos & 0xFF
+    mul     r9, r7, r9             @ (s1-s0) * frac
+    add     r8, r8, r9, asr #8    @ s0 + ((s1-s0)*frac >> 8)
+    mul     r8, r5, r8             @ * vol
+    mov     r8, r8, asr r6         @ >> gainShift
+    ldrsh   r10, [r0]              @ load accumulator
+    add     r10, r10, r8           @ accumulate
+    strh    r10, [r0], #2          @ store and advance
     add     r3, r3, r4             @ pos += inc
 
-    @ Sample 1
+    @ --- Sample 1 ---
     mov     r7, r3, asr #8
-    ldrsb   r7, [r1, r7]
-    mul     r7, r5, r7
-    mov     r7, r7, asr r6
-    ldrsh   r8, [r0]
-    add     r8, r8, r7
-    strh    r8, [r0], #2
+    ldrsb   r8, [r1, r7]
+    add     r7, r7, #1
+    ldrsb   r9, [r1, r7]
+    sub     r9, r9, r8
+    and     r7, r3, #0xFF
+    mul     r9, r7, r9
+    add     r8, r8, r9, asr #8
+    mul     r8, r5, r8
+    mov     r8, r8, asr r6
+    ldrsh   r10, [r0]
+    add     r10, r10, r8
+    strh    r10, [r0], #2
     add     r3, r3, r4
 
-    @ Sample 2
-    mov     r7, r3, asr #8
-    ldrsb   r7, [r1, r7]
-    mul     r7, r5, r7
-    mov     r7, r7, asr r6
-    ldrsh   r8, [r0]
-    add     r8, r8, r7
-    strh    r8, [r0], #2
-    add     r3, r3, r4
-
-    @ Sample 3
-    mov     r7, r3, asr #8
-    ldrsb   r7, [r1, r7]
-    mul     r7, r5, r7
-    mov     r7, r7, asr r6
-    ldrsh   r8, [r0]
-    add     r8, r8, r7
-    strh    r8, [r0], #2
-    add     r3, r3, r4
-
-    subs    r2, r2, #4
-    bge     .Lmix_loop4
+    subs    r2, r2, #2
+    bge     .Lmix_loop2
 
 .Lmix_tail:
-    @ Handle remaining 0-3 samples
-    adds    r2, r2, #4
+    @ Handle remaining 0-1 samples
+    adds    r2, r2, #2
     beq     .Lmix_done
 
-.Lmix_tail_loop:
+    @ One remaining sample
     mov     r7, r3, asr #8
-    ldrsb   r7, [r1, r7]
-    mul     r7, r5, r7
-    mov     r7, r7, asr r6
-    ldrsh   r8, [r0]
-    add     r8, r8, r7
-    strh    r8, [r0], #2
+    ldrsb   r8, [r1, r7]
+    add     r7, r7, #1
+    ldrsb   r9, [r1, r7]
+    sub     r9, r9, r8
+    and     r7, r3, #0xFF
+    mul     r9, r7, r9
+    add     r8, r8, r9, asr #8
+    mul     r8, r5, r8
+    mov     r8, r8, asr r6
+    ldrsh   r10, [r0]
+    add     r10, r10, r8
+    strh    r10, [r0], #2
     add     r3, r3, r4
-    subs    r2, r2, #1
-    bne     .Lmix_tail_loop
 
 .Lmix_done:
     mov     r0, r3                  @ return new pos

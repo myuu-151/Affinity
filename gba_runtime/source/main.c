@@ -254,26 +254,30 @@ IWRAM_CODE static void afn_sound_mix(void) {
             int loopLen = vc->loopLen;
             int loopSpan = loopLen - vc->loopStart;
             if (loopSpan <= 0) loopSpan = loopLen > 0 ? loopLen : (1 << 8);
-            int i = 0;
-            while (i < n) {
-                if (pos >= loopLen) {
-                    pos -= loopSpan;
-                    if (pos < vc->loopStart) pos = vc->loopStart;
-                }
-                int samplesUntilWrap = (loopLen - pos) / inc;
-                if (samplesUntilWrap < 1) samplesUntilWrap = 1;
-                int chunk = n - i;
-                if (samplesUntilWrap < chunk) chunk = samplesUntilWrap;
-                pos = afn_mix_voice_fast(&mix_acc[i], wdata, chunk, pos, inc, vol, gs);
-                i += chunk;
+            int rem = n;
+            s16* dst = mix_acc;
+            while (rem > 0) {
+                // How many samples can we mix before hitting loop end?
+                int chunk = (loopLen - pos) / inc;
+                if (chunk < 1) chunk = 1;
+                if (chunk > rem) chunk = rem;
+                pos = afn_mix_voice_fast(dst, wdata, chunk, pos, inc, vol, gs);
+                dst += chunk;
+                rem -= chunk;
+                while (pos >= loopLen) pos -= loopSpan;
+                if (pos < vc->loopStart) pos = vc->loopStart;
             }
         } else {
             int lenFixed = vc->length << 8;
-            // Compute max samples before end of waveform
-            int maxSmp = (lenFixed - pos + inc - 1) / inc;
-            if (maxSmp < n) { n = maxSmp; done = 1; }
-            if (n > 0)
+            // How many samples before end of data?
+            int maxChunk = (lenFixed - pos) / inc;
+            if (maxChunk < n) {
+                if (maxChunk > 0)
+                    pos = afn_mix_voice_fast(mix_acc, wdata, maxChunk, pos, inc, vol, gs);
+                done = 1;
+            } else {
                 pos = afn_mix_voice_fast(mix_acc, wdata, n, pos, inc, vol, gs);
+            }
         }
         vc->pos = pos;
         if (done) { vc->active = 0; continue; }
@@ -290,12 +294,13 @@ IWRAM_CODE static void afn_sound_mix(void) {
         if (vc->volDec > 0) vc->volFade -= vc->volDec;
     }
 
-    // Clamp and write to output buffer (ARM asm: 4 samples packed per word write)
-    afn_mix_clamp_fast(buf, mix_acc, mixN);
-    // Zero-fill remainder in compat mode (DMA still reads full 304)
-    if (snd_compat && mixN < SND_BUF_SIZE) {
-        u32* z = (u32*)&buf[mixN];
-        int i; for (i = 0; i < (SND_BUF_SIZE - mixN) / 4; i++) z[i] = 0;
+    // Clamp and write to output buffer (ARM assembly, 4-at-a-time)
+    {
+        afn_mix_clamp_fast(buf, mix_acc, mixN);
+        // Zero-fill remainder in compat mode (DMA still reads full 304)
+        if (snd_compat) {
+            for (int i = mixN; i < SND_BUF_SIZE; i++) buf[i] = 0;
+        }
     }
 }
 

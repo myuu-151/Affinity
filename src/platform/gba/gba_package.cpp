@@ -5195,16 +5195,16 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "#define AFN_SOUND_SAMPLE_COUNT " << soundSamples.size() << "\n";
         f << "#define AFN_SOUND_INSTANCE_COUNT " << soundInstances.size() << "\n\n";
 
-        // Emit each sample as a const s8 array
+        // Emit each sample as a const s8 array (+1 padding byte for interpolation)
         for (int i = 0; i < (int)soundSamples.size(); i++) {
             auto& smp = soundSamples[i];
             f << "static const s8 afn_pcm_" << i << "[] __attribute__((aligned(4))) = {\n    ";
             for (int j = 0; j < (int)smp.data.size(); j++) {
                 f << (int)smp.data[j];
-                if (j < (int)smp.data.size() - 1) f << ",";
+                f << ",";
                 if ((j & 31) == 31) f << "\n    ";
             }
-            f << "\n};\n";
+            f << "0\n};\n"; // padding byte for safe interpolation read
             f << "#define AFN_PCM_" << i << "_LEN " << smp.data.size() << "\n";
             f << "#define AFN_PCM_" << i << "_RATE " << smp.sampleRate << "\n\n";
         }
