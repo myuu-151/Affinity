@@ -93,12 +93,13 @@ static void afn_stop_sound(void);
 // ---------------------------------------------------------------------------
 #ifdef AFN_HAS_SOUND
 
-#define SND_BUF_SIZE 420  // 418 mixed + 2 preview bytes for FIFO continuity
-#define SND_MIX_COUNT 418 // actual samples mixed per frame (280896/672)
+#define SND_BUF_SIZE 420  // 418 samples + 2 pad (must be multiple of 4 for DMA alignment)
+#define SND_MIX_COUNT 418 // actual samples per frame (280896/672)
 #define SND_MAX_VOICES 8  // max allocated; actual count per instance from afn_snd_voices[]
 static int snd_voice_count = 6; // active voice limit (set from afn_snd_voices[] on play)
 
-// Sound buffers in EWRAM to save IWRAM space (32KB limit)
+// Sound buffers — each buffer MUST be a multiple of 4 bytes so DMA_32
+// starts at the correct aligned address for both buf[0] and buf[1].
 EWRAM_DATA static s8 snd_buf[2][SND_BUF_SIZE] __attribute__((aligned(4)));
 static int snd_cur_buf = 0;
 
@@ -151,7 +152,7 @@ static void afn_sound_hw_start(void) {
     REG_TM0CNT_H = 0;
     if (snd_compat) {
         REG_TM0CNT_L = 65536 - 1344; // ~12485 Hz (compat mode — half rate)
-        snd_mix_samples = SND_MIX_COUNT / 2; // 209 samples per frame
+        snd_mix_samples = SND_MIX_COUNT / 2; // 224 samples per frame
     } else {
         REG_TM0CNT_L = 65536 - 672;  // ~24970 Hz
         snd_mix_samples = SND_MIX_COUNT;
@@ -227,15 +228,11 @@ IWRAM_CODE static void afn_sound_mix(void) {
         }
     }
 
-    // Swap buffer: stop timer so FIFO isn't consumed during reset,
-    // flush FIFO to discard residual bytes, restart cleanly.
+    // Point DMA to the buffer we mixed last frame
     int play = snd_cur_buf ^ 1;
-    REG_TM0CNT_H = 0;
     REG_DMA1CNT = 0;
-    REG_SNDDSCNT = SDS_A100 | SDS_AL | SDS_AR | SDS_ATMR0 | SDS_ARESET;
     REG_DMA1SAD = (u32)snd_buf[play];
     REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
-    REG_TM0CNT_H = TM_ENABLE;
     snd_cur_buf = play;
 
     s8* buf = snd_buf[snd_cur_buf ^ 1];
@@ -311,6 +308,12 @@ IWRAM_CODE static void afn_sound_mix(void) {
         int v = snd_voice_count;
         while (v > 1) { v >>= 1; outShift++; }
         afn_mix_clamp_fast(buf, mix_acc, mixN, outShift);
+        // Pad tail with last sample (DMA reads 420 bytes = 105 x 4,
+        // residual 2 bytes stay in FIFO and play at next frame start)
+        if (mixN < SND_BUF_SIZE) {
+            s8 last = (mixN > 0) ? buf[mixN - 1] : 0;
+            for (int i = mixN; i < SND_BUF_SIZE; i++) buf[i] = last;
+        }
     }
 }
 
