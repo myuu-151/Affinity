@@ -5256,6 +5256,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static const int afn_pcm_release[" << soundSamples.size() << "] = {\n";
         for (int i = 0; i < (int)soundSamples.size(); i++)
             f << "    " << (soundSamples[i].releaseMs * 18157 / 1000) << ",\n";
+        f << "};\n";
+        f << "static const u8 afn_pcm_vol_scale[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << (soundSamples[i].volScale > 255 ? 255 : soundSamples[i].volScale) << ",\n";
         f << "};\n\n";
 
         // Note event struct type definition (must come before note arrays)

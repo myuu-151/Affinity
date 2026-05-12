@@ -357,7 +357,7 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     }
     if (baseInc < 1) baseInc = 1;
     vc->inc = baseInc;
-    vc->vol = vel; // 0-127
+    vc->vol = (vel * afn_pcm_vol_scale[smpIdx]) >> 8; // scale by normalization factor
     // Convert tick duration to output samples
     // Each frame = snd_mix_samples output samples, sequencer advances tpf ticks/frame
     int tpf = afn_snd_tpf[snd_seq_active >= 0 ? snd_seq_active : 0];

@@ -857,6 +857,7 @@ struct SampleRegion {
     bool hasLoop = false;
     int loopStart = 0;
     int loopEnd = 0;
+    int peakAmplitude = 32768; // peak amplitude for normalization (16-bit scale)
     int fineTune = 0;     // fine tuning in cents (-100 to +100)
     // SF2 volume envelope (timecents, -12000 = 1ms, 0 = 1s, 1200 = 2s)
     float envDecaySec = 0;    // decay time in seconds (0 = not set)
@@ -1504,16 +1505,30 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         // Keep original sample rate and 16-bit data (like SF2) for editor preview quality
         out.data16.resize(numSamples);
         out.data.resize(numSamples);
+        // First pass: read 16-bit data and find peak amplitude
+        int peak = 0;
         for (int i = 0; i < numSamples; i++) {
             if (wi.bitsPerSample == 16) {
                 const int16_t* s16 = (const int16_t*)(wi.data + i * 2 * wi.channels);
                 out.data16[i] = s16[0];
-                out.data[i] = (int8_t)(s16[0] >> 8);
+                int a = s16[0] < 0 ? -s16[0] : s16[0];
+                if (a > peak) peak = a;
             } else {
                 int val = (int)wi.data[i * wi.channels] - 128;
                 out.data16[i] = (int16_t)(val << 8);
-                out.data[i] = (int8_t)val;
+                int a = val < 0 ? -val : val;
+                if (a > peak) peak = a;
             }
+        }
+        // Second pass: normalize to full 8-bit range
+        // Scale so peak maps to 127, maximizing dynamic range
+        out.peakAmplitude = peak;
+        if (peak < 256) peak = 256; // avoid division issues for near-silent samples
+        for (int i = 0; i < numSamples; i++) {
+            int scaled = (out.data16[i] * 127) / peak;
+            if (scaled > 127) scaled = 127;
+            if (scaled < -128) scaled = -128;
+            out.data[i] = (int8_t)scaled;
         }
         out.sampleRate = wi.sampleRate;
         out.baseNote = unityNote;
@@ -12480,6 +12495,8 @@ void FrameTick(float dt)
                                         se.name = std::string(smp.name) + "_" + std::to_string(best->baseNote);
                                         se.data = best->data;
                                         se.sampleRate = best->sampleRate;
+                                        se.volScale = (best->peakAmplitude * 256) / 32768;
+                                        if (se.volScale < 1) se.volScale = 1;
                                         if (smp.loop) {
                                             // User override sustain loop — scale from reference to this region
                                             int dl = (int)best->data.size();

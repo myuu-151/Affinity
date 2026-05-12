@@ -504,6 +504,7 @@ struct GBASoundSampleExport {
     int decayPct = 0;  // volume decay over note duration (0-100)
     int decayMinMs = 500; // minimum note length for decay (ms)
     int releaseMs = 250; // release fade-out time in ms
+    int volScale = 256;  // 8.8 fixed-point volume scale (256 = 1.0, for normalization compensation)
 };
 
 // Sound export: a note event in a sequence
