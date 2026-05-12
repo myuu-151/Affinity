@@ -93,7 +93,8 @@ static void afn_stop_sound(void);
 // ---------------------------------------------------------------------------
 #ifdef AFN_HAS_SOUND
 
-#define SND_BUF_SIZE 418
+#define SND_BUF_SIZE 420  // must be multiple of 4 for DMA_32 alignment
+#define SND_SAMPLES_PER_FRAME 418  // 280896 cycles/frame / 672 cycles/sample (for sequencer timing)
 #define SND_MAX_VOICES 8  // max allocated; actual count per instance from afn_snd_voices[]
 static int snd_voice_count = 6; // active voice limit (set from afn_snd_voices[] on play)
 
@@ -141,7 +142,7 @@ static int snd_seq_tick = 0;
 static int snd_seq_next = 0;
 static int snd_initialized = 0;
 static int snd_compat = 0;       // 1 = compatibility mode (halved rate, less CPU)
-static int snd_mix_samples = SND_BUF_SIZE; // actual samples to mix per frame
+static int snd_mix_samples = SND_SAMPLES_PER_FRAME; // actual samples consumed by timer per frame
 
 static void afn_sound_hw_start(void) {
     // Enable sound hardware, timer, and FIFO DMA
@@ -150,10 +151,10 @@ static void afn_sound_hw_start(void) {
     REG_TM0CNT_H = 0;
     if (snd_compat) {
         REG_TM0CNT_L = 65536 - 1344; // ~12485 Hz (compat mode — half rate)
-        snd_mix_samples = SND_BUF_SIZE / 2; // 209 samples per frame
+        snd_mix_samples = 209;
     } else {
         REG_TM0CNT_L = 65536 - 672;  // ~24970 Hz
-        snd_mix_samples = SND_BUF_SIZE;
+        snd_mix_samples = SND_SAMPLES_PER_FRAME;
     }
     REG_TM0CNT_H = TM_ENABLE;
     snd_cur_buf = 0;
@@ -187,10 +188,10 @@ static void afn_play_sound(int instanceId) {
         REG_TM0CNT_H = 0;
         if (snd_compat) {
             REG_TM0CNT_L = 65536 - 1344;
-            snd_mix_samples = SND_BUF_SIZE / 2;
+            snd_mix_samples = 209;
         } else {
             REG_TM0CNT_L = 65536 - 672;
-            snd_mix_samples = SND_BUF_SIZE;
+            snd_mix_samples = SND_SAMPLES_PER_FRAME;
         }
         REG_TM0CNT_H = TM_ENABLE;
     }
@@ -306,9 +307,13 @@ IWRAM_CODE static void afn_sound_mix(void) {
         int v = snd_voice_count;
         while (v > 1) { v >>= 1; outShift++; }
         afn_mix_clamp_fast(buf, mix_acc, mixN, outShift);
-        // Zero-fill remainder in compat mode (DMA still reads full 304)
-        if (snd_compat) {
-            for (int i = mixN; i < SND_BUF_SIZE; i++) buf[i] = 0;
+        // Fill tail with last sample value (DMA reads 420 bytes in 4-byte
+        // chunks but only 418 are consumed per frame — the 2 residual bytes
+        // stay in FIFO and play at the start of the next frame, so they must
+        // be continuous with the audio to avoid clicking)
+        {
+            s8 last = (mixN > 0) ? buf[mixN - 1] : 0;
+            for (int i = mixN; i < SND_BUF_SIZE; i++) buf[i] = last;
         }
     }
 }
