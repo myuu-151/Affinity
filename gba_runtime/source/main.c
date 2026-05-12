@@ -93,8 +93,8 @@ static void afn_stop_sound(void);
 // ---------------------------------------------------------------------------
 #ifdef AFN_HAS_SOUND
 
-#define SND_BUF_SIZE 420  // 418 samples + 2 pad (must be multiple of 4 for DMA alignment)
-#define SND_MIX_COUNT 418 // actual samples per frame (280896/672)
+#define SND_BUF_SIZE 548  // must hold max rate for fix mode sweep
+#define SND_MIX_COUNT 418 // normal rate samples per frame (16780000/672/60 ≈ 418)
 #define SND_MAX_VOICES 8  // max allocated; actual count per instance from afn_snd_voices[]
 static int snd_voice_count = 6; // active voice limit (set from afn_snd_voices[] on play)
 
@@ -102,22 +102,30 @@ static int snd_voice_count = 6; // active voice limit (set from afn_snd_voices[]
 // starts at the correct aligned address for both buf[0] and buf[1].
 EWRAM_DATA static s8 snd_buf[2][SND_BUF_SIZE] __attribute__((aligned(4)));
 static int snd_cur_buf = 0;
-// Audio fix mode — cycle with SELECT to find best strategy
-// Modes 0-19: original set
-// All modes use mix 416 as base (mode 14 was the best)
-// Mode 0: baseline — mix 416, zero-fill, no FIFO, no extra release
-// Modes 1-9: force min release on ALL voices (override softFade): 8,16,24,32,48,64,96,128,256
-// Modes 10-19: force min release + attack ramp 2 frames
-// Modes 20-29: force min release + attack ramp 1 frame
-// Modes 30-39: per-sample voice fade (last N samples of voice ramp to 0): 4,8,16,24,32,48,64,96,128,256
-// Modes 40-49: force release + outShift=0
-// Modes 50-59: force release + outShift=1
-// Modes 60-69: force release + last-sample fill
-// Modes 70-79: force release + FIFO reset
-// Modes 80-89: voice fade frames (1-10 frames hold-off before kill)
-// Modes 90-99: mix count fine-tune (410-419) with force release=32
+// Audio fix mode — cycle with SELECT to sweep sample rates
+// Mode 0: default (use instance setting: normal/hifi/compat)
+// Modes 1-99: timer reload sweep (various sample rates)
+//   1-20:  low rates   (timer 1344→720) ~12.5kHz→23.3kHz
+//   21-40: normal range (timer 710→520) ~23.6kHz→32.3kHz
+//   41-60: high range   (timer 512→400) ~32.8kHz→42.0kHz
+//   61-80: very high    (timer 396→300) ~42.4kHz→55.9kHz
+//   81-99: extreme      (timer 296→200) ~56.7kHz→83.9kHz
 #define SND_FIX_COUNT 100
 static int snd_fix_mode = 0;
+// Timer reload lookup — 100 entries from 1344 (lowest) down to 200 (highest)
+static const u16 snd_rate_table[100] = {
+    0,    // mode 0: use instance default
+    1344, 1312, 1280, 1248, 1216, 1184, 1152, 1120, 1088, 1056, // 1-10
+    1024,  992,  960,  928,  896,  864,  832,  800,  768,  736, // 11-20
+     710,  700,  690,  680,  670,  660,  650,  640,  630,  620, // 21-30
+     610,  600,  590,  580,  570,  560,  550,  540,  530,  520, // 31-40
+     512,  504,  496,  488,  480,  472,  464,  456,  448,  440, // 41-50
+     432,  424,  416,  408,  400,  396,  392,  388,  384,  380, // 51-60
+     376,  372,  368,  364,  360,  356,  352,  348,  344,  340, // 61-70
+     336,  332,  328,  324,  320,  316,  312,  308,  304,  300, // 71-80
+     296,  292,  288,  284,  280,  276,  272,  268,  264,  260, // 81-90
+     256,  252,  248,  240,  232,  224,  216,  208,  200,       // 91-99
+};
 
 typedef struct {
     const void* data;  // s8* or s16* depending on is16
@@ -161,21 +169,36 @@ static int snd_seq_tick = 0;
 static int snd_seq_next = 0;
 static int snd_initialized = 0;
 static int snd_compat = 0;       // 1 = compatibility mode (halved rate, less CPU)
+static int snd_hifi = 0;        // 1 = clean mode (timer 660, ~25.4kHz)
 static int snd_mix_samples = SND_MIX_COUNT; // actual samples to mix per frame
+
+// Compute timer reload and mix count from current settings + fix mode override
+static void afn_sound_set_rate(void) {
+    int timer;
+    if (snd_fix_mode > 0 && snd_fix_mode < 100) {
+        // Fix mode overrides: use rate table
+        timer = snd_rate_table[snd_fix_mode];
+    } else if (snd_compat) {
+        timer = 1344; // ~12485 Hz
+    } else if (snd_hifi) {
+        timer = 660;  // ~25424 Hz (clean mode)
+    } else {
+        timer = 672;  // ~24970 Hz
+    }
+    REG_TM0CNT_H = 0;
+    REG_TM0CNT_L = 65536 - timer;
+    // mix samples = CPU_FREQ / timer / 60fps ≈ 280896 / timer
+    int mix = 280896 / timer;
+    if (mix > SND_BUF_SIZE - 2) mix = SND_BUF_SIZE - 2;
+    snd_mix_samples = mix & ~3; // align to 4
+    REG_TM0CNT_H = TM_ENABLE;
+}
 
 static void afn_sound_hw_start(void) {
     // Enable sound hardware, timer, and FIFO DMA
     REG_SNDSTAT = SSTAT_ENABLE;
     REG_SNDDSCNT = SDS_A100 | SDS_AL | SDS_AR | SDS_ATMR0 | SDS_ARESET;
-    REG_TM0CNT_H = 0;
-    if (snd_compat) {
-        REG_TM0CNT_L = 65536 - 1344; // ~12485 Hz (compat mode — half rate)
-        snd_mix_samples = SND_MIX_COUNT / 2; // 209 samples per frame
-    } else {
-        REG_TM0CNT_L = 65536 - 672;  // ~24970 Hz
-        snd_mix_samples = SND_MIX_COUNT;
-    }
-    REG_TM0CNT_H = TM_ENABLE;
+    afn_sound_set_rate();
     snd_cur_buf = 0;
     REG_DMA1CNT = 0;
     REG_DMA1SAD = (u32)snd_buf[0];
@@ -201,18 +224,10 @@ static void afn_sound_init(void) {
 
 static void afn_play_sound(int instanceId) {
     snd_compat = afn_snd_compat[instanceId];
+    snd_hifi = afn_snd_hifi[instanceId];
     if (!snd_initialized) afn_sound_hw_start();
     else {
-        // Reinit timer for new compat setting
-        REG_TM0CNT_H = 0;
-        if (snd_compat) {
-            REG_TM0CNT_L = 65536 - 1344;
-            snd_mix_samples = SND_MIX_COUNT / 2;
-        } else {
-            REG_TM0CNT_L = 65536 - 672;
-            snd_mix_samples = SND_MIX_COUNT;
-        }
-        REG_TM0CNT_H = TM_ENABLE;
+        afn_sound_set_rate();
     }
     snd_seq_active = instanceId;
     snd_seq_tick = 0;
@@ -248,10 +263,6 @@ static void afn_sound_swap(void) {
     // Point DMA to the buffer we mixed last frame
     int play = snd_cur_buf ^ 1;
     REG_DMA1CNT = 0;
-    // FIFO reset only for modes 70-79
-    int doFifoReset = (snd_fix_mode >= 70 && snd_fix_mode <= 79);
-    if (doFifoReset)
-        REG_SNDDSCNT |= SDS_ARESET;
     REG_DMA1SAD = (u32)snd_buf[play];
     REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
     snd_cur_buf = play;
@@ -262,12 +273,7 @@ IWRAM_CODE static void afn_sound_mix(void) {
     if (!snd_initialized) return;
 
     s8* buf = snd_buf[snd_cur_buf ^ 1];
-    // Mix count: all modes use 416 (aligned to 4), except 90-99 fine-tune
-    int mixN;
-    if (snd_fix_mode >= 90 && snd_fix_mode <= 99)
-        mixN = 410 + (snd_fix_mode - 90); // 410-419
-    else
-        mixN = snd_mix_samples & ~3; // 416 (418 rounded down to mult of 4)
+    int mixN = snd_mix_samples & ~3;
     // Stack-allocated in IWRAM (function is IWRAM_CODE, stack is in IWRAM)
     s16 mix_acc[SND_BUF_SIZE];
     // Clear accumulator (32-bit writes, 2 samples at a time)
@@ -337,41 +343,13 @@ IWRAM_CODE static void afn_sound_mix(void) {
     }
 
     // Scale accumulator down by voice count, then clamp to s8
-    // Each voice mixes at full precision (gainShift=base only),
-    // global shift applied once at output for better SNR.
     {
         int outShift = 0;
         int v = snd_voice_count;
         while (v > 1) { v >>= 1; outShift++; }
-        // outShift overrides
-        if (snd_fix_mode >= 40 && snd_fix_mode <= 49)
-            outShift = 0;
-        else if (snd_fix_mode >= 50 && snd_fix_mode <= 59)
-            outShift = 1;
         afn_mix_clamp_fast(buf, mix_acc, mixN, outShift);
-        // Tail fill strategy depends on fix mode
         if (mixN < SND_BUF_SIZE) {
-            // Modes with last-sample fill: 60-69
-            int doLastFill = (snd_fix_mode >= 60 && snd_fix_mode <= 69);
-            if (doLastFill) {
-                s8 last = (mixN > 0) ? buf[mixN - 1] : 0;
-                for (int i = mixN; i < SND_BUF_SIZE; i++) buf[i] = last;
-            } else {
-                // Zero-fill tail (default)
-                for (int i = mixN; i < SND_BUF_SIZE; i++) buf[i] = 0;
-            }
-        }
-        // Bridge crossfade
-        {
-            int bridgeN = 0; // no bridge in new mode set
-            if (bridgeN > 0) {
-                s8* playBuf = snd_buf[snd_cur_buf];
-                s8 prev = playBuf[SND_BUF_SIZE - 1];
-                for (int i = 0; i < bridgeN && i < mixN; i++) {
-                    int w = i + 1;
-                    buf[i] = (s8)((prev * (bridgeN - w) + buf[i] * w) / bridgeN);
-                }
-            }
+            for (int i = mixN; i < SND_BUF_SIZE; i++) buf[i] = 0;
         }
     }
 }
@@ -409,8 +387,13 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
 #endif
     vc->pos = 0;
     // Pitch: baseInc = (sampleRate << 8) / outputRate gives 1:1 playback
-    // Output rate = ~24970 Hz (CPU_FREQ / 672)
-    int outRate = snd_compat ? 12485 : 24970;
+    // outRate = CPU_FREQ / timer_reload ≈ 16780000 / timer
+    int outRate;
+    if (snd_fix_mode > 0 && snd_fix_mode < 100)
+        outRate = 16780000 / snd_rate_table[snd_fix_mode];
+    else if (snd_compat) outRate = 12485;
+    else if (snd_hifi) outRate = 16777216 / 660; // 25420
+    else outRate = 24970;
     int baseInc = (afn_pcm_rates[smpIdx] << 8) / outRate;
     // Pitch-shift all samples (note 60 = original pitch)
     {
@@ -435,7 +418,7 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     // Each frame = snd_mix_samples output samples, sequencer advances tpf ticks/frame
     int tpf = afn_snd_tpf[snd_seq_active >= 0 ? snd_seq_active : 0];
     int durSamples = (durTicks * snd_mix_samples) / (tpf > 0 ? tpf : 1);
-    int minDurSmp = snd_compat ? 3746 : 7491; // minimum ~300ms at respective rate
+    int minDurSmp = outRate * 3 / 10; // minimum ~300ms at current rate
     if (durSamples < minDurSmp) durSamples = minDurSmp;
     // For one-shot samples, ensure remaining covers the full sample playback
     if (!vc->loop) {
@@ -453,11 +436,8 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
         vc->gainShift = base + (vc->is16 ? 8 : 0);
     }
     vc->releaseRem = 0;
-    // Attack ramp: modes 10-19 = 2 frames, 20-29 = 1 frame
-    vc->attackRamp = (snd_fix_mode >= 10 && snd_fix_mode <= 19) ? 2 :
-                     (snd_fix_mode >= 20 && snd_fix_mode <= 29) ? 1 : 0;
-    // Voice fade samples (modes 30-39): stored for per-sample fade at end
-    vc->voiceFade = 0; // will be set below
+    vc->attackRamp = 0;
+    vc->voiceFade = 0;
     if (snd_compat) {
         vc->releaseLen = 105;
     } else {
@@ -472,25 +452,6 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     // Long Release toggle: force minimum 1672-sample (~67ms) release tail
     if (snd_seq_active >= 0 && afn_snd_longrelease[snd_seq_active]) {
         if (vc->releaseLen < 1672) vc->releaseLen = 1672;
-    }
-    // Force minimum release for modes 1-29, 40-79, 90-99
-    // This OVERRIDES the softFade setting — ensures all voices fade out
-    {
-        static const int relSweep[10] = {0, 8, 16, 24, 32, 48, 64, 96, 128, 256};
-        int forceRel = 0;
-        if (snd_fix_mode >= 1 && snd_fix_mode <= 29)
-            forceRel = relSweep[((snd_fix_mode - 1) % 10) + 1]; // 8..256
-        else if (snd_fix_mode >= 40 && snd_fix_mode <= 79)
-            forceRel = relSweep[snd_fix_mode % 10];
-        else if (snd_fix_mode >= 90 && snd_fix_mode <= 99)
-            forceRel = 32; // fixed release for mix count sweep
-        if (forceRel > 0 && vc->releaseLen < forceRel)
-            vc->releaseLen = forceRel;
-    }
-    // Per-sample voice fade for modes 30-39
-    if (snd_fix_mode >= 30 && snd_fix_mode <= 39) {
-        static const int fadeSweep[10] = {4, 8, 16, 24, 32, 48, 64, 96, 128, 256};
-        vc->voiceFade = fadeSweep[snd_fix_mode - 30];
     }
     // Decay: precompute per-frame volume decrement (8.8 fixed point)
     {
@@ -5950,6 +5911,7 @@ int main(void)
 #ifdef AFN_HAS_SOUND
             if (key_is_down(KEY_L)) {
                 snd_fix_mode = (snd_fix_mode + 1) % SND_FIX_COUNT;
+                if (snd_initialized) afn_sound_set_rate();
             } else
 #endif
             {

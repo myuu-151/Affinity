@@ -528,6 +528,7 @@ struct GBASoundInstanceExport {
     int voiceCount = 6;                    // max simultaneous voices (4-8)
     int softFade = 1;                      // 256-sample fadeout at end of notes
     int longRelease = 0;                   // force minimum 1672-sample release tail
+    int hifiMode = 0;                      // 0 = normal (~25kHz), 1 = hi-fi (~32kHz)
     int compatMode = 0;                    // 0 = normal, 1 = compat (halved rate, less CPU)
     std::vector<GBASoundNoteExport> notes; // all notes merged
     std::vector<int> sampleIndices;        // which samples this instance uses

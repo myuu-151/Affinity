@@ -1010,6 +1010,7 @@ struct SoundInstance {
     int voiceCount = 6;        // max simultaneous voices on GBA (4-8)
     int softFade = 1;          // 0 = hard cutoff, 1 = 256-sample fadeout at end of notes
     int longRelease = 0;       // 0 = normal, 1 = force minimum 1672-sample (~67ms) release tail
+    int hifiMode = 0;          // 0 = normal (timer 672, ~25kHz), 1 = clean (timer 660, ~25.4kHz)
     int compatMode = 0;        // 0 = normal, 1 = compatibility (halved rate, no interp, no release — less CPU)
     std::vector<SampleOverride> overrides; // per-sample edits
 };
@@ -5101,6 +5102,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "instVoices=%d\n", si.voiceCount);
         fprintf(f, "instSoftFade=%d\n", si.softFade);
         fprintf(f, "instLongRelease=%d\n", si.longRelease);
+        fprintf(f, "instHifi=%d\n", si.hifiMode);
         fprintf(f, "instCompat=%d\n", si.compatMode);
         fprintf(f, "instBanks=");
         for (int ch = 0; ch < 16; ch++) {
@@ -7123,6 +7125,7 @@ static bool LoadProject(const std::string& path)
                 else if (sscanf(line, "instVoices=%d", &ival) == 1) curInst->voiceCount = ival;
                 else if (sscanf(line, "instSoftFade=%d", &ival) == 1) curInst->softFade = ival;
                 else if (sscanf(line, "instLongRelease=%d", &ival) == 1) curInst->longRelease = ival;
+                else if (sscanf(line, "instHifi=%d", &ival) == 1) curInst->hifiMode = ival;
                 else if (sscanf(line, "instCompat=%d", &ival) == 1) curInst->compatMode = ival;
                 else if (strncmp(line, "instBanks=", 10) == 0) {
                     sscanf(line + 10, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
@@ -12581,6 +12584,7 @@ void FrameTick(float dt)
                         ie.voiceCount = inst.voiceCount;
                         ie.softFade = inst.softFade;
                         ie.longRelease = inst.longRelease;
+                        ie.hifiMode = inst.hifiMode;
                         ie.compatMode = inst.compatMode;
                         for (auto& track : midi.tracks) {
                             for (auto& n : track.notes) {
@@ -21780,6 +21784,12 @@ void FrameTick(float dt)
                 sProjectDirty = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Force minimum ~67ms release tail (1672 samples).\nReduces popping on note-off — like fix mode 28.");
+            bool hf = inst.hifiMode != 0;
+            if (ImGui::Checkbox("Clean Rate", &hf)) {
+                inst.hifiMode = hf ? 1 : 0;
+                sProjectDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Timer 660 (~25.4kHz) instead of default 672 (~25kHz).\nReduces sample trilling artifacts.");
             bool cm = inst.compatMode != 0;
             if (ImGui::Checkbox("Lo-Fi Drums", &cm)) {
                 inst.compatMode = cm ? 1 : 0;
