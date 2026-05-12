@@ -21736,11 +21736,11 @@ void FrameTick(float dt)
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("256-sample fadeout at end of notes (smoother but softer endings)");
             bool cm = inst.compatMode != 0;
-            if (ImGui::Checkbox("Compatibility", &cm)) {
+            if (ImGui::Checkbox("Lo-Fi Drums", &cm)) {
                 inst.compatMode = cm ? 1 : 0;
                 sProjectDirty = true;
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Halved sample rate + no interpolation + no release fade.\nUses ~50%% less CPU — fixes floor tearing with many voices.");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Halved sample rate + crunchy output.\nGreat for percussion — uses ~50%% less CPU.");
         }
 
         ImGui::End();
@@ -21953,11 +21953,14 @@ void FrameTick(float dt)
             // Piano roll preview
             ImGui::Spacing();
             ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Piano Roll");
-            float rollW = ImGui::GetContentRegionAvail().x;
+            float labelW = Scaled(30);
+            float totalW_pr = ImGui::GetContentRegionAvail().x;
+            float rollW = totalW_pr - labelW;
             float rollH = Scaled(200);
-            ImVec2 rp = ImGui::GetCursorScreenPos();
+            ImVec2 rp0 = ImGui::GetCursorScreenPos();
+            ImVec2 rp = ImVec2(rp0.x + labelW, rp0.y); // roll starts after labels
             ImDrawList* dl = ImGui::GetWindowDrawList();
-            dl->AddRectFilled(rp, ImVec2(rp.x + rollW, rp.y + rollH), 0xFF0D0D0D);
+            dl->AddRectFilled(rp0, ImVec2(rp0.x + totalW_pr, rp0.y + rollH), 0xFF0D0D0D);
 
             // Find tick range and note range
             int minNote = 127, maxNote = 0, contentTick = 1;
@@ -21983,8 +21986,24 @@ void FrameTick(float dt)
             int noteRange = maxNote - minNote + 1;
             if (noteRange < 24) { minNote -= (24 - noteRange) / 2; if (minNote < 0) minNote = 0; noteRange = 24; }
 
-            // Draw note grid lines
+            // Note label column on the left
+            static const char* noteNames[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
             float noteH = rollH / noteRange;
+            for (int n = 0; n < noteRange; n++) {
+                int midiNote = maxNote - n;
+                float y = rp.y + n * noteH;
+                // Draw label for every C and every note if zoomed enough
+                int noteName = midiNote % 12;
+                int octave = midiNote / 12 - 1;
+                if (noteH >= Scaled(6) || noteName == 0 || noteName == 4 || noteName == 7) {
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "%s%d", noteNames[noteName], octave);
+                    float textY = y + noteH * 0.5f - Scaled(4);
+                    dl->AddText(ImVec2(rp0.x + Scaled(2), textY), 0xFF888888, buf);
+                }
+            }
+
+            // Draw note grid lines
             for (int n = 0; n <= noteRange; n++) {
                 float y = rp.y + n * noteH;
                 dl->AddLine(ImVec2(rp.x, y), ImVec2(rp.x + rollW, y), 0xFF1A1A1A);
@@ -22029,7 +22048,7 @@ void FrameTick(float dt)
             }
 
             // Piano roll interaction area
-            ImGui::InvisibleButton("##pianoroll", ImVec2(rollW, rollH));
+            ImGui::InvisibleButton("##pianoroll", ImVec2(totalW_pr, rollH));
             bool pianoHovered = ImGui::IsItemHovered();
             // Prevent parent window from consuming scroll when over piano roll
             if (pianoHovered) ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);

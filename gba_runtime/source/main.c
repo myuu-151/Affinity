@@ -253,18 +253,19 @@ IWRAM_CODE static void afn_sound_mix(void) {
         if (vc->loop) {
             int loopLen = vc->loopLen;
             int loopSpan = loopLen - vc->loopStart;
+            if (loopSpan <= 0) loopSpan = loopLen > 0 ? loopLen : (1 << 8);
             int i = 0;
             while (i < n) {
-                int samplesUntilWrap = (loopLen - pos + inc - 1) / inc;
-                int chunk = n - i;
-                if (samplesUntilWrap > 0 && samplesUntilWrap < chunk)
-                    chunk = samplesUntilWrap;
-                pos = afn_mix_voice_fast(&mix_acc[i], wdata, chunk, pos, inc, vol, gs);
-                i += chunk;
                 if (pos >= loopLen) {
                     pos -= loopSpan;
                     if (pos < vc->loopStart) pos = vc->loopStart;
                 }
+                int samplesUntilWrap = (loopLen - pos) / inc;
+                if (samplesUntilWrap < 1) samplesUntilWrap = 1;
+                int chunk = n - i;
+                if (samplesUntilWrap < chunk) chunk = samplesUntilWrap;
+                pos = afn_mix_voice_fast(&mix_acc[i], wdata, chunk, pos, inc, vol, gs);
+                i += chunk;
             }
         } else {
             int lenFixed = vc->length << 8;
