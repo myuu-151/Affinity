@@ -972,45 +972,63 @@ typedef struct {
 // ---------------------------------------------------------------------------
 // Mode 7 HBlank interrupt — per-scanline affine update
 // ---------------------------------------------------------------------------
+// Pre-computed scanline table: built once per frame, read by fast HBlank ISR
+typedef struct {
+    s16 pa, pc;
+    s32 bgx, bgy;
+} M7Scanline;
 
-static void m7_hbl(void)
+EWRAM_DATA static M7Scanline m7_table[SCREEN_HEIGHT];
+
+// Build the full scanline table — call once per frame after camera update
+static void m7_build_table(void)
+{
+    int hz = m7_horizon;
+    FIXED ch = cam_h;
+    FIXED cf = g_cosf;
+    FIXED sf = g_sinf;
+    FIXED cx = cam_x;
+    FIXED cz = cam_z;
+    FIXED fov = cam_fov;
+
+    int vc;
+    for (vc = 0; vc < SCREEN_HEIGHT; vc++) {
+        if (vc < hz) {
+            m7_table[vc].pa = 0;
+            m7_table[vc].pc = 0;
+            m7_table[vc].bgx = 0;
+            m7_table[vc].bgy = 0;
+            continue;
+        }
+        FIXED lam = ch * lu_div(vc - hz) >> 12;
+        FIXED lcf = lam * cf >> 8;
+        FIXED lsf = lam * sf >> 8;
+        s16 pa = lcf >> 4;
+        s16 pc = lsf >> 4;
+        m7_table[vc].pa = pa;
+        m7_table[vc].pc = pc;
+        m7_table[vc].bgx = cx - 120 * pa + fov * pc;
+        m7_table[vc].bgy = cz - 120 * pc - fov * pa;
+    }
+}
+
+// Fast HBlank ISR — just reads from pre-computed table (no math)
+IWRAM_CODE static void m7_hbl(void)
 {
     int vc = REG_VCOUNT;
-
-    // Above horizon: disable BG2 so backdrop color (sky) shows
-    if (vc < m7_horizon)
-    {
+    if (vc < m7_horizon) {
         REG_DISPCNT &= ~DCNT_BG2;
         return;
     }
-    if (vc >= SCREEN_HEIGHT)
-        return;
-
-    // Re-enable BG2 at horizon
+    if (vc >= SCREEN_HEIGHT) return;
     REG_DISPCNT |= DCNT_BG2;
-
-    // lambda = cam_height / (scanline - horizon)
-    FIXED lam = cam_h * lu_div(vc - m7_horizon) >> 12;
-
-    FIXED lcf = lam * g_cosf >> 8;
-    FIXED lsf = lam * g_sinf >> 8;
-
-    // Affine matrix — only PA and PC matter for per-scanline Mode 7
-    REG_BG2PA =  lcf >> 4;
+    const M7Scanline* sl = &m7_table[vc];
+    REG_BG2PA = sl->pa;
     REG_BG2PB = 0;
-    REG_BG2PC =  lsf >> 4;
+    REG_BG2PC = sl->pc;
     REG_BG2PD = 0;
-
-    // Reference point
-    FIXED lxr, lyr;
-
-    lxr = 120 * (lcf >> 4);
-    lyr = cam_fov * (lsf >> 4);
-    REG_BG2X = cam_x - lxr + lyr;
-
-    lxr = 120 * (lsf >> 4);
-    lyr = cam_fov * (lcf >> 4);
-    REG_BG2Y = cam_z - lxr - lyr;
+    REG_BG2X  = sl->bgx;
+    REG_BG2Y  = sl->bgy;
 }
 
 // ---------------------------------------------------------------------------
@@ -4233,6 +4251,7 @@ static void mode4_init_scene(void)
     g_page = 0;
     g_cosf = lu_cos(cam_angle) >> 4;
     g_sinf = lu_sin(cam_angle) >> 4;
+    m7_build_table();
 }
 #endif /* AFN_MESH_COUNT */
 
@@ -4734,6 +4753,7 @@ int main(void)
     // Precompute initial sin/cos
     g_cosf = lu_cos(cam_angle) >> 4;
     g_sinf = lu_sin(cam_angle) >> 4;
+    m7_build_table();
 
     // --- Set up HBlank interrupt ---
     // Start Timer 3 for FPS measurement (prescaler=1024, ~16384 Hz)
@@ -6090,6 +6110,8 @@ int main(void)
         // Update sin/cos for HBlank
         g_cosf = lu_cos(cam_angle) >> 4;
         g_sinf = lu_sin(cam_angle) >> 4;
+        // Build scanline table for tear-free Mode 7 floor
+        m7_build_table();
 
 #ifdef AFN_HAS_SKY
         // Dynamically scroll sky columns based on camera rotation

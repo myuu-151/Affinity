@@ -12440,6 +12440,7 @@ void FrameTick(float dt)
                         auto& midi = sMidiFiles[inst.midiIdx];
                         for (auto& track : midi.tracks) {
                             for (auto& n : track.notes) {
+                                if (midi.channelMuted[n.channel]) continue;
                                 int bankIdx = midi.channelBank[n.channel];
                                 if (bankIdx < 0 || bankIdx >= (int)sSoundBank.size()) continue;
                                 auto& smp = sSoundBank[bankIdx];
@@ -12540,6 +12541,7 @@ void FrameTick(float dt)
                         ie.softFade = inst.softFade;
                         for (auto& track : midi.tracks) {
                             for (auto& n : track.notes) {
+                                if (midi.channelMuted[n.channel]) continue;
                                 int bankIdx = midi.channelBank[n.channel];
                                 if (bankIdx < 0 || bankIdx >= (int)sSoundBank.size()) continue;
                                 GBASoundNoteExport ne;
@@ -22109,6 +22111,7 @@ void FrameTick(float dt)
                         for (int ni = 0; ni < (int)mf.tracks[ti].notes.size(); ni++) {
                             auto& n = mf.tracks[ti].notes[ni];
                             float nEnd = (float)(n.tick + n.duration);
+                            if (mf.channelMuted[n.channel]) continue;
                             if (nEnd > tickA && n.tick < tickB && n.note >= noteLo && n.note <= noteHi)
                                 sMidiSelectedNotes.push_back({ti, ni});
                         }
