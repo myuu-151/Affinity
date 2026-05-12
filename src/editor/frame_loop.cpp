@@ -12529,6 +12529,20 @@ void FrameTick(float dt)
                             }
                         }
                     }
+                    // Fix loop interpolation: ensure sample at loopEnd = sample at loopStart
+                    // so linear interpolation at the loop boundary is seamless
+                    for (auto& se : exportSoundSamples) {
+                        if (!se.loop) continue;
+                        int ls = se.loopStart;
+                        int le = se.loopEnd > 0 ? se.loopEnd : (int)se.data.size();
+                        if (ls < 0 || ls >= (int)se.data.size()) continue;
+                        if (le > 0 && le < (int)se.data.size()) {
+                            // loopEnd is inside the array — overwrite with loopStart value
+                            se.data[le] = se.data[ls];
+                        }
+                        // If loopEnd == data.size(), the padding byte in gba_package.cpp handles it
+                    }
+
                     // Build instance exports
                     for (int i = 0; i < (int)sSoundInstances.size(); i++) {
                         auto& inst = sSoundInstances[i];

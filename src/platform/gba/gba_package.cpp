@@ -5204,7 +5204,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 f << ",";
                 if ((j & 31) == 31) f << "\n    ";
             }
-            f << "0\n};\n"; // padding byte for safe interpolation read
+            // Padding byte for interpolation: use loop start sample for seamless loop
+            int padVal = 0;
+            if (smp.loop && smp.loopStart >= 0 && smp.loopStart < (int)smp.data.size())
+                padVal = (int)smp.data[smp.loopStart];
+            f << padVal << "\n};\n";
             f << "#define AFN_PCM_" << i << "_LEN " << smp.data.size() << "\n";
             f << "#define AFN_PCM_" << i << "_RATE " << smp.sampleRate << "\n\n";
         }
