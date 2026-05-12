@@ -102,6 +102,22 @@ static int snd_voice_count = 6; // active voice limit (set from afn_snd_voices[]
 // starts at the correct aligned address for both buf[0] and buf[1].
 EWRAM_DATA static s8 snd_buf[2][SND_BUF_SIZE] __attribute__((aligned(4)));
 static int snd_cur_buf = 0;
+// Audio fix mode — cycle with SELECT to find best strategy
+// Modes 0-19: original set
+// All modes use mix 416 as base (mode 14 was the best)
+// Mode 0: baseline — mix 416, zero-fill, no FIFO, no extra release
+// Modes 1-9: force min release on ALL voices (override softFade): 8,16,24,32,48,64,96,128,256
+// Modes 10-19: force min release + attack ramp 2 frames
+// Modes 20-29: force min release + attack ramp 1 frame
+// Modes 30-39: per-sample voice fade (last N samples of voice ramp to 0): 4,8,16,24,32,48,64,96,128,256
+// Modes 40-49: force release + outShift=0
+// Modes 50-59: force release + outShift=1
+// Modes 60-69: force release + last-sample fill
+// Modes 70-79: force release + FIFO reset
+// Modes 80-89: voice fade frames (1-10 frames hold-off before kill)
+// Modes 90-99: mix count fine-tune (410-419) with force release=32
+#define SND_FIX_COUNT 100
+static int snd_fix_mode = 0;
 
 typedef struct {
     const void* data;  // s8* or s16* depending on is16
@@ -120,6 +136,8 @@ typedef struct {
     int volDec;        // volume decrement per frame in 8.8 fixed point
     int releaseRem;    // samples left in release (0 = not releasing)
     int releaseLen;    // total release length in output samples
+    int attackRamp;    // frames remaining in attack ramp (0 = done)
+    int voiceFade;     // per-sample fade length at end of voice (0 = disabled)
 } SndVoice;
 
 EWRAM_DATA static SndVoice snd_voices[SND_MAX_VOICES];
@@ -228,10 +246,12 @@ static void afn_sound_swap(void) {
         }
     }
     // Point DMA to the buffer we mixed last frame
-    // Flush FIFO residual bytes to prevent boundary clicking
     int play = snd_cur_buf ^ 1;
     REG_DMA1CNT = 0;
-    REG_SNDDSCNT |= SDS_ARESET; // reset FIFO — flushes residual bytes
+    // FIFO reset only for modes 70-79
+    int doFifoReset = (snd_fix_mode >= 70 && snd_fix_mode <= 79);
+    if (doFifoReset)
+        REG_SNDDSCNT |= SDS_ARESET;
     REG_DMA1SAD = (u32)snd_buf[play];
     REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
     snd_cur_buf = play;
@@ -242,7 +262,12 @@ IWRAM_CODE static void afn_sound_mix(void) {
     if (!snd_initialized) return;
 
     s8* buf = snd_buf[snd_cur_buf ^ 1];
-    int mixN = snd_mix_samples;
+    // Mix count: all modes use 416 (aligned to 4), except 90-99 fine-tune
+    int mixN;
+    if (snd_fix_mode >= 90 && snd_fix_mode <= 99)
+        mixN = 410 + (snd_fix_mode - 90); // 410-419
+    else
+        mixN = snd_mix_samples & ~3; // 416 (418 rounded down to mult of 4)
     // Stack-allocated in IWRAM (function is IWRAM_CODE, stack is in IWRAM)
     s16 mix_acc[SND_BUF_SIZE];
     // Clear accumulator (32-bit writes, 2 samples at a time)
@@ -264,6 +289,11 @@ IWRAM_CODE static void afn_sound_mix(void) {
         if (vol < 0) vol = 0;
         if (vc->remaining < 0 && vc->releaseRem > 0 && vc->releaseLen > 0)
             vol = vol * vc->releaseRem / vc->releaseLen;
+        // Attack ramp: fade in over 3 frames (25%→50%→75%→full)
+        if (vc->attackRamp > 0) {
+            vol = vol * (4 - vc->attackRamp) / 4;
+            vc->attackRamp--;
+        }
         int gs = vc->gainShift;
         int done = 0;
         if (vc->loop) {
@@ -313,12 +343,35 @@ IWRAM_CODE static void afn_sound_mix(void) {
         int outShift = 0;
         int v = snd_voice_count;
         while (v > 1) { v >>= 1; outShift++; }
+        // outShift overrides
+        if (snd_fix_mode >= 40 && snd_fix_mode <= 49)
+            outShift = 0;
+        else if (snd_fix_mode >= 50 && snd_fix_mode <= 59)
+            outShift = 1;
         afn_mix_clamp_fast(buf, mix_acc, mixN, outShift);
-        // Pad tail with last sample (DMA reads extra bytes as 4-byte chunks,
-        // residual bytes stay in FIFO and play at next frame start)
+        // Tail fill strategy depends on fix mode
         if (mixN < SND_BUF_SIZE) {
-            s8 last = (mixN > 0) ? buf[mixN - 1] : 0;
-            for (int i = mixN; i < SND_BUF_SIZE; i++) buf[i] = last;
+            // Modes with last-sample fill: 60-69
+            int doLastFill = (snd_fix_mode >= 60 && snd_fix_mode <= 69);
+            if (doLastFill) {
+                s8 last = (mixN > 0) ? buf[mixN - 1] : 0;
+                for (int i = mixN; i < SND_BUF_SIZE; i++) buf[i] = last;
+            } else {
+                // Zero-fill tail (default)
+                for (int i = mixN; i < SND_BUF_SIZE; i++) buf[i] = 0;
+            }
+        }
+        // Bridge crossfade
+        {
+            int bridgeN = 0; // no bridge in new mode set
+            if (bridgeN > 0) {
+                s8* playBuf = snd_buf[snd_cur_buf];
+                s8 prev = playBuf[SND_BUF_SIZE - 1];
+                for (int i = 0; i < bridgeN && i < mixN; i++) {
+                    int w = i + 1;
+                    buf[i] = (s8)((prev * (bridgeN - w) + buf[i] * w) / bridgeN);
+                }
+            }
         }
     }
 }
@@ -400,8 +453,13 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
         vc->gainShift = base + (vc->is16 ? 8 : 0);
     }
     vc->releaseRem = 0;
+    // Attack ramp: modes 10-19 = 2 frames, 20-29 = 1 frame
+    vc->attackRamp = (snd_fix_mode >= 10 && snd_fix_mode <= 19) ? 2 :
+                     (snd_fix_mode >= 20 && snd_fix_mode <= 29) ? 1 : 0;
+    // Voice fade samples (modes 30-39): stored for per-sample fade at end
+    vc->voiceFade = 0; // will be set below
     if (snd_compat) {
-        vc->releaseLen = 105; // compat: short ~5ms fade (smooth cutoffs, minimal CPU)
+        vc->releaseLen = 105;
     } else {
         int sf = (snd_seq_active >= 0) ? afn_snd_softfade[snd_seq_active] : 1;
         if (sf) {
@@ -410,6 +468,25 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
         } else {
             vc->releaseLen = 0;
         }
+    }
+    // Force minimum release for modes 1-29, 40-79, 90-99
+    // This OVERRIDES the softFade setting — ensures all voices fade out
+    {
+        static const int relSweep[10] = {0, 8, 16, 24, 32, 48, 64, 96, 128, 256};
+        int forceRel = 0;
+        if (snd_fix_mode >= 1 && snd_fix_mode <= 29)
+            forceRel = relSweep[((snd_fix_mode - 1) % 10) + 1]; // 8..256
+        else if (snd_fix_mode >= 40 && snd_fix_mode <= 79)
+            forceRel = relSweep[snd_fix_mode % 10];
+        else if (snd_fix_mode >= 90 && snd_fix_mode <= 99)
+            forceRel = 32; // fixed release for mix count sweep
+        if (forceRel > 0 && vc->releaseLen < forceRel)
+            vc->releaseLen = forceRel;
+    }
+    // Per-sample voice fade for modes 30-39
+    if (snd_fix_mode >= 30 && snd_fix_mode <= 39) {
+        static const int fadeSweep[10] = {4, 8, 16, 24, 32, 48, 64, 96, 128, 256};
+        vc->voiceFade = fadeSweep[snd_fix_mode - 30];
     }
     // Decay: precompute per-frame volume decrement (8.8 fixed point)
     {
@@ -1776,6 +1853,59 @@ static void update_sprites(void)
 #define TILE_MINIMAP_BG    1
 #define TILE_MINIMAP_GRID  2
 #define TILE_MINIMAP_CAM   3
+
+// Init BG0 digit tiles for debug display (called from Mode 7 init)
+#ifdef AFN_HAS_SOUND
+static void init_dbg_digits(void)
+{
+    // Digit tiles (4-13) for debug display using 4bpp, palette 15
+    static const u8 digitBmp[10][7] = {
+        {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}, // 0
+        {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E}, // 1
+        {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F}, // 2
+        {0x0E,0x11,0x01,0x06,0x01,0x11,0x0E}, // 3
+        {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02}, // 4
+        {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E}, // 5
+        {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}, // 6
+        {0x1F,0x01,0x02,0x04,0x08,0x08,0x08}, // 7
+        {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}, // 8
+        {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}, // 9
+    };
+    // Setup BG0 for digit overlay
+    REG_BG0CNT = BG_CBB(0) | BG_SBB(7) | BG_4BPP | BG_REG_32x32 | BG_PRIO(0);
+    // White text on transparent bg using sub-palette 15
+    pal_bg_mem[240 + 0] = 0;
+    pal_bg_mem[240 + 3] = RGB15(31, 31, 31);
+    int d;
+    for (d = 0; d < 10; d++) {
+        u32 *t = (u32*)&tile_mem[0][4 + d];
+        int row;
+        for (row = 0; row < 8; row++) {
+            u32 px = 0;
+            if (row < 7) {
+                u8 bits = digitBmp[d][row];
+                int col;
+                for (col = 0; col < 5; col++) {
+                    if (bits & (1 << (4 - col)))
+                        px |= (3u << (col * 4));
+                }
+            }
+            t[row] = px;
+        }
+    }
+    // Clear BG0 map
+    {
+        u16 *map = (u16*)se_mem[7];
+        int k;
+        for (k = 0; k < 32*32; k++)
+            map[k] = 0;
+    }
+    // Position BG0 so tile (28,0) maps to screen top-right
+    REG_BG0HOFS = 0;
+    REG_BG0VOFS = 0;
+}
+static int snd_dbg_digits_inited = 0;
+#endif
 
 static void init_minimap(void)
 {
@@ -4878,6 +5008,9 @@ int main(void)
             dbg_int(vramBuf, 102, 2, dbg_total_kcy, 1);
             dbg_int(vramBuf, 240 - 20, 160 - 7, dbg_fps, 1);
             dbg_int(vramBuf, 2, 160 - 7, g_texFixMode, 2);
+#ifdef AFN_HAS_SOUND
+            dbg_int(vramBuf, 240 - 40, 2, snd_fix_mode, 3);
+#endif
         }
 #else
         // No meshes — still clear the Mode 4 framebuffer so it's not garbage
@@ -5784,6 +5917,17 @@ int main(void)
                     }}
                 }}
 #endif
+                // Show audio fix mode number via OAM text (top-right)
+#ifdef AFN_HAS_SOUND
+                if (hud_font_loaded) {
+                    char fixStr[5];
+                    fixStr[0] = '0' + (snd_fix_mode / 100) % 10;
+                    fixStr[1] = '0' + (snd_fix_mode / 10) % 10;
+                    fixStr[2] = '0' + (snd_fix_mode % 10);
+                    fixStr[3] = 0;
+                    oamSlot += hud_text_oam(oamSlot, 240 - 28, 2, fixStr, 15);
+                }
+#endif
                 // Hide remaining OAM slots
                 {
                     int i;
@@ -5796,10 +5940,17 @@ int main(void)
         { /* Mode 4 / Mode 7 update */
 #endif /* AFN_HAS_MODE0 */
 
-        // SELECT: cycle perf mode
+        // SELECT: cycle perf mode / L+SELECT: cycle audio fix
         if (key_hit(KEY_SELECT))
         {
-            g_texFixMode = (g_texFixMode % TEX_FIX_COUNT) + 1;
+#ifdef AFN_HAS_SOUND
+            if (key_is_down(KEY_L)) {
+                snd_fix_mode = (snd_fix_mode + 1) % SND_FIX_COUNT;
+            } else
+#endif
+            {
+                g_texFixMode = (g_texFixMode % TEX_FIX_COUNT) + 1;
+            }
         }
 
         if (player_sprite_idx >= 0)
@@ -6247,6 +6398,26 @@ int main(void)
 
         // Minimap disabled in Mode 7
         // if (afn_current_mode == 2) { update_minimap(); }
+
+        // Show snd_fix_mode on BG0 tilemap (top-right corner)
+#ifdef AFN_HAS_SOUND
+        {
+            if (!snd_dbg_digits_inited) {
+                init_dbg_digits();
+                snd_dbg_digits_inited = 1;
+            }
+            u16 *map = (u16*)se_mem[7];
+            // BG0 scroll is 0,0 so tile coords = screen coords / 8
+            int tileX = 27; // 3 digits starting at pixel 216
+            int tileY = 0;
+            int d100 = (snd_fix_mode / 100) % 10;
+            int d10 = (snd_fix_mode / 10) % 10;
+            int d1 = snd_fix_mode % 10;
+            map[tileY * 32 + tileX] = (4 + d100) | SE_PALBANK(15);
+            map[tileY * 32 + tileX + 1] = (4 + d10) | SE_PALBANK(15);
+            map[tileY * 32 + tileX + 2] = (4 + d1) | SE_PALBANK(15);
+        }
+#endif
 
 #ifdef AFN_HAS_MODE0
         } /* end Mode 4/7 else block */
