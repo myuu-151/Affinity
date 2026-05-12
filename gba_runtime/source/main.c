@@ -469,6 +469,10 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
             vc->releaseLen = 0;
         }
     }
+    // Long Release toggle: force minimum 1672-sample (~67ms) release tail
+    if (snd_seq_active >= 0 && afn_snd_longrelease[snd_seq_active]) {
+        if (vc->releaseLen < 1672) vc->releaseLen = 1672;
+    }
     // Force minimum release for modes 1-29, 40-79, 90-99
     // This OVERRIDES the softFade setting — ensures all voices fade out
     {

@@ -1009,6 +1009,7 @@ struct SoundInstance {
     int mixerGain = 0;         // 0 = Normal (>>7), 1 = Loud (>>6), 2 = Mid (>>8), 3 = Quiet (>>9)
     int voiceCount = 6;        // max simultaneous voices on GBA (4-8)
     int softFade = 1;          // 0 = hard cutoff, 1 = 256-sample fadeout at end of notes
+    int longRelease = 0;       // 0 = normal, 1 = force minimum 1672-sample (~67ms) release tail
     int compatMode = 0;        // 0 = normal, 1 = compatibility (halved rate, no interp, no release — less CPU)
     std::vector<SampleOverride> overrides; // per-sample edits
 };
@@ -4966,9 +4967,10 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "m7SubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si2 = 0; si2 < sp.subSpriteCount; si2++) {
                     const auto& sub = sp.subSprites[si2];
-                    fprintf(f, "m7SubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f\n",
+                    fprintf(f, "m7SubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d\n",
                         sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
-                        sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale);
+                        sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
+                        sub.forceStatic ? 1 : 0);
                 }
             }
         }
@@ -5098,6 +5100,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "instGain=%d\n", si.mixerGain);
         fprintf(f, "instVoices=%d\n", si.voiceCount);
         fprintf(f, "instSoftFade=%d\n", si.softFade);
+        fprintf(f, "instLongRelease=%d\n", si.longRelease);
         fprintf(f, "instCompat=%d\n", si.compatMode);
         fprintf(f, "instBanks=");
         for (int ch = 0; ch < 16; ch++) {
@@ -7119,6 +7122,7 @@ static bool LoadProject(const std::string& path)
                 else if (sscanf(line, "instGain=%d", &ival) == 1) curInst->mixerGain = ival;
                 else if (sscanf(line, "instVoices=%d", &ival) == 1) curInst->voiceCount = ival;
                 else if (sscanf(line, "instSoftFade=%d", &ival) == 1) curInst->softFade = ival;
+                else if (sscanf(line, "instLongRelease=%d", &ival) == 1) curInst->longRelease = ival;
                 else if (sscanf(line, "instCompat=%d", &ival) == 1) curInst->compatMode = ival;
                 else if (strncmp(line, "instBanks=", 10) == 0) {
                     sscanf(line + 10, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
@@ -12576,6 +12580,7 @@ void FrameTick(float dt)
                         ie.mixerGain = inst.mixerGain;
                         ie.voiceCount = inst.voiceCount;
                         ie.softFade = inst.softFade;
+                        ie.longRelease = inst.longRelease;
                         ie.compatMode = inst.compatMode;
                         for (auto& track : midi.tracks) {
                             for (auto& n : track.notes) {
@@ -21769,6 +21774,12 @@ void FrameTick(float dt)
                 sProjectDirty = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("256-sample fadeout at end of notes (smoother but softer endings)");
+            bool lr = inst.longRelease != 0;
+            if (ImGui::Checkbox("Long Release", &lr)) {
+                inst.longRelease = lr ? 1 : 0;
+                sProjectDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Force minimum ~67ms release tail (1672 samples).\nReduces popping on note-off — like fix mode 28.");
             bool cm = inst.compatMode != 0;
             if (ImGui::Checkbox("Lo-Fi Drums", &cm)) {
                 inst.compatMode = cm ? 1 : 0;
