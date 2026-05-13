@@ -4536,7 +4536,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide);
     }
     fprintf(f, "\n");
 
@@ -5577,10 +5577,10 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "MeshAssets") == 0)
         {
             char mname[256], mpath[512], mtexpath[512] = {};
-            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1;
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1, mperspcorr = 0, msubdiv = 0;
             float mdrawdist = 0.0f;
-            // Try newest format: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath|usequads|drawdist|collision|drawpriority
-            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d|%f|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible);
+            // Try newest format: ...visible|perspcorrect|subdivide
+            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d|%f|%d|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv);
             if (matched < 2)
             {
                 // Try format without usequads: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath
@@ -5625,6 +5625,10 @@ static bool LoadProject(const std::string& path)
                     ma.drawPriority = mdrawpri;
                 if (matched >= 15)
                     ma.visible = (mvisible != 0);
+                if (matched >= 16)
+                    ma.perspCorrect = (mperspcorr != 0);
+                if (matched >= 17)
+                    ma.subdivide = msubdiv;
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -7830,7 +7834,22 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = draws on top, higher = draws behind");
 
         ImGui::Separator();
+        {
+            const char* subLabels[] = { "Off", "2x2", "3x3", "4x4" };
+            int subIdx = (ma.subdivide == 2) ? 1 : (ma.subdivide == 3) ? 2 : (ma.subdivide == 4) ? 3 : 0;
+            ImGui::SetNextItemWidth(Scaled(60));
+            if (ImGui::Combo("Subdivide##meshSub", &subIdx, subLabels, 4)) {
+                const int subVals[] = { 0, 2, 3, 4 };
+                ma.subdivide = subVals[subIdx];
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Split each face into NxN sub-faces at export (reduces texture warping on large polygons)");
+        }
         ImGui::Checkbox("Textured##meshTex", &ma.textured);
+        if (ma.textured) {
+            ImGui::SameLine();
+            ImGui::Checkbox("Persp. Correct##meshPC", &ma.perspCorrect);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Perspective-corrected texture mapping (slower, fixes warping on large faces)");
+        }
         if (ma.textured)
         {
             if (ma.texW > 0)
@@ -12021,6 +12040,7 @@ void FrameTick(float dt)
                     me.drawPriority = ma.drawPriority;
                     me.visible = ma.visible ? 1 : 0;
                     me.textured = ma.textured ? 1 : 0;
+                    me.perspCorrect = ma.perspCorrect ? 1 : 0;
                     me.texW = ma.texW;
                     me.texH = ma.texH;
                     me.texPixels = ma.texturePixels;
@@ -12033,6 +12053,146 @@ void FrameTick(float dt)
                         int b = ((c >> 16) & 0xFF) >> 3;
                         me.texPalette[pi] = (uint16_t)(r | (g << 5) | (b << 10));
                     }
+                    // Subdivide faces if requested
+                    if (ma.subdivide >= 2 && ma.subdivide <= 4)
+                    {
+                        int N = ma.subdivide;
+                        std::vector<float> newPos, newNorm, newUV;
+                        std::vector<int> newObjIdx;
+                        std::vector<uint32_t> newQuadIdx, newTriIdx;
+
+                        // Helper: add a vertex by bilinear interpolation of a quad
+                        auto addVert = [&](int vi) -> uint32_t {
+                            // Just reference existing vertex — return new index
+                            uint32_t idx = (uint32_t)(newPos.size() / 3);
+                            newPos.push_back(me.positions[vi*3+0]);
+                            newPos.push_back(me.positions[vi*3+1]);
+                            newPos.push_back(me.positions[vi*3+2]);
+                            newNorm.push_back(me.normals[vi*3+0]);
+                            newNorm.push_back(me.normals[vi*3+1]);
+                            newNorm.push_back(me.normals[vi*3+2]);
+                            newObjIdx.push_back(me.objPosIdx[vi]);
+                            if (!me.uvs.empty()) {
+                                newUV.push_back(me.uvs[vi*2+0]);
+                                newUV.push_back(me.uvs[vi*2+1]);
+                            }
+                            return idx;
+                        };
+                        auto lerpVert = [&](int v0, int v1, float t) -> uint32_t {
+                            uint32_t idx = (uint32_t)(newPos.size() / 3);
+                            float s = 1.0f - t;
+                            newPos.push_back(me.positions[v0*3+0]*s + me.positions[v1*3+0]*t);
+                            newPos.push_back(me.positions[v0*3+1]*s + me.positions[v1*3+1]*t);
+                            newPos.push_back(me.positions[v0*3+2]*s + me.positions[v1*3+2]*t);
+                            newNorm.push_back(me.normals[v0*3+0]*s + me.normals[v1*3+0]*t);
+                            newNorm.push_back(me.normals[v0*3+1]*s + me.normals[v1*3+1]*t);
+                            newNorm.push_back(me.normals[v0*3+2]*s + me.normals[v1*3+2]*t);
+                            newObjIdx.push_back(me.objPosIdx[v0]);
+                            if (!me.uvs.empty()) {
+                                newUV.push_back(me.uvs[v0*2+0]*s + me.uvs[v1*2+0]*t);
+                                newUV.push_back(me.uvs[v0*2+1]*s + me.uvs[v1*2+1]*t);
+                            }
+                            return idx;
+                        };
+                        auto bilerp = [&](int v0, int v1, int v2, int v3, float u, float v) -> uint32_t {
+                            // Bilinear: lerp(lerp(v0,v1,u), lerp(v3,v2,u), v)
+                            uint32_t idx = (uint32_t)(newPos.size() / 3);
+                            float su = 1.0f - u, sv = 1.0f - v;
+                            float w0 = su*sv, w1 = u*sv, w2 = u*v, w3 = su*v;
+                            newPos.push_back(me.positions[v0*3+0]*w0 + me.positions[v1*3+0]*w1 + me.positions[v2*3+0]*w2 + me.positions[v3*3+0]*w3);
+                            newPos.push_back(me.positions[v0*3+1]*w0 + me.positions[v1*3+1]*w1 + me.positions[v2*3+1]*w2 + me.positions[v3*3+1]*w3);
+                            newPos.push_back(me.positions[v0*3+2]*w0 + me.positions[v1*3+2]*w1 + me.positions[v2*3+2]*w2 + me.positions[v3*3+2]*w3);
+                            newNorm.push_back(me.normals[v0*3+0]*w0 + me.normals[v1*3+0]*w1 + me.normals[v2*3+0]*w2 + me.normals[v3*3+0]*w3);
+                            newNorm.push_back(me.normals[v0*3+1]*w0 + me.normals[v1*3+1]*w1 + me.normals[v2*3+1]*w2 + me.normals[v3*3+1]*w3);
+                            newNorm.push_back(me.normals[v0*3+2]*w0 + me.normals[v1*3+2]*w1 + me.normals[v2*3+2]*w2 + me.normals[v3*3+2]*w3);
+                            newObjIdx.push_back(me.objPosIdx[v0]);
+                            if (!me.uvs.empty()) {
+                                newUV.push_back(me.uvs[v0*2+0]*w0 + me.uvs[v1*2+0]*w1 + me.uvs[v2*2+0]*w2 + me.uvs[v3*2+0]*w3);
+                                newUV.push_back(me.uvs[v0*2+1]*w0 + me.uvs[v1*2+1]*w1 + me.uvs[v2*2+1]*w2 + me.uvs[v3*2+1]*w3);
+                            }
+                            return idx;
+                        };
+
+                        // Subdivide quads: each quad -> NxN sub-quads
+                        for (size_t qi = 0; qi + 4 <= me.quadIndices.size(); qi += 4)
+                        {
+                            int q0 = me.quadIndices[qi+0], q1 = me.quadIndices[qi+1];
+                            int q2 = me.quadIndices[qi+2], q3 = me.quadIndices[qi+3];
+                            // Build (N+1)x(N+1) grid of vertex indices
+                            uint32_t grid[5][5]; // max 4+1=5
+                            for (int gy = 0; gy <= N; gy++)
+                                for (int gx = 0; gx <= N; gx++)
+                                    grid[gy][gx] = bilerp(q0, q1, q2, q3, (float)gx/N, (float)gy/N);
+                            // Emit NxN quads
+                            for (int gy = 0; gy < N; gy++)
+                                for (int gx = 0; gx < N; gx++) {
+                                    newQuadIdx.push_back(grid[gy][gx]);
+                                    newQuadIdx.push_back(grid[gy][gx+1]);
+                                    newQuadIdx.push_back(grid[gy+1][gx+1]);
+                                    newQuadIdx.push_back(grid[gy+1][gx]);
+                                }
+                        }
+
+                        // Subdivide triangles: each tri -> N*N sub-tris
+                        for (size_t ti = 0; ti + 3 <= me.indices.size(); ti += 3)
+                        {
+                            int t0 = me.indices[ti+0], t1 = me.indices[ti+1], t2 = me.indices[ti+2];
+                            // Build (N+1) rows of vertices using barycentric coords
+                            // Row r has (r+1) vertices
+                            std::vector<std::vector<uint32_t>> rows(N+1);
+                            for (int r = 0; r <= N; r++) {
+                                rows[r].resize(r+1);
+                                for (int c = 0; c <= r; c++) {
+                                    float w2 = (float)r / N;
+                                    float w1 = (r > 0) ? (float)c / r * w2 : 0.0f;
+                                    float w0r = 1.0f - w2;
+                                    // Barycentric: lerp along edges
+                                    // v = v0*(1-w2) + lerp(v2,v1, c/r)*w2
+                                    // Simpler: use direct barycentric
+                                    float b0 = 1.0f - (float)r/N;
+                                    float brem = (float)r/N;
+                                    float b1 = (r > 0) ? brem * (float)c / r : 0.0f;
+                                    float b2 = brem - b1;
+                                    uint32_t idx = (uint32_t)(newPos.size() / 3);
+                                    newPos.push_back(me.positions[t0*3+0]*b0 + me.positions[t1*3+0]*b1 + me.positions[t2*3+0]*b2);
+                                    newPos.push_back(me.positions[t0*3+1]*b0 + me.positions[t1*3+1]*b1 + me.positions[t2*3+1]*b2);
+                                    newPos.push_back(me.positions[t0*3+2]*b0 + me.positions[t1*3+2]*b1 + me.positions[t2*3+2]*b2);
+                                    newNorm.push_back(me.normals[t0*3+0]*b0 + me.normals[t1*3+0]*b1 + me.normals[t2*3+0]*b2);
+                                    newNorm.push_back(me.normals[t0*3+1]*b0 + me.normals[t1*3+1]*b1 + me.normals[t2*3+1]*b2);
+                                    newNorm.push_back(me.normals[t0*3+2]*b0 + me.normals[t1*3+2]*b1 + me.normals[t2*3+2]*b2);
+                                    newObjIdx.push_back(me.objPosIdx[t0]);
+                                    if (!me.uvs.empty()) {
+                                        newUV.push_back(me.uvs[t0*2+0]*b0 + me.uvs[t1*2+0]*b1 + me.uvs[t2*2+0]*b2);
+                                        newUV.push_back(me.uvs[t0*2+1]*b0 + me.uvs[t1*2+1]*b1 + me.uvs[t2*2+1]*b2);
+                                    }
+                                    rows[r][c] = idx;
+                                }
+                            }
+                            // Emit sub-triangles
+                            for (int r = 0; r < N; r++) {
+                                for (int c = 0; c <= r; c++) {
+                                    // Upward triangle
+                                    newTriIdx.push_back(rows[r][c]);
+                                    newTriIdx.push_back(rows[r+1][c+1]);
+                                    newTriIdx.push_back(rows[r+1][c]);
+                                    // Downward triangle (if not at edge)
+                                    if (c < r) {
+                                        newTriIdx.push_back(rows[r][c]);
+                                        newTriIdx.push_back(rows[r][c+1]);
+                                        newTriIdx.push_back(rows[r+1][c+1]);
+                                    }
+                                }
+                            }
+                        }
+
+                        me.positions = newPos;
+                        me.normals = newNorm;
+                        me.objPosIdx = newObjIdx;
+                        me.uvs = newUV;
+                        me.indices = newTriIdx;
+                        me.quadIndices = newQuadIdx;
+                    }
+
                     exportMeshes.push_back(me);
                 }
 

@@ -126,6 +126,7 @@ struct GBAMeshExport
     int texW = 0, texH = 0;      // texture dimensions
     std::vector<uint8_t> texPixels;   // quantized indexed pixels (texW * texH)
     uint16_t texPalette[16] = {}; // RGB15 palette for this texture
+    int perspCorrect = 0;         // 1=perspective-corrected texture mapping
 };
 
 // ---- Visual Script Export ----

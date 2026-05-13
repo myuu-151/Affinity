@@ -656,6 +656,7 @@ static inline void afn_sound_init(void) {}
 static inline void afn_play_sound(int id) { (void)id; }
 static inline void afn_stop_sound(void) {}
 static inline void afn_sound_mix(void) {}
+static inline void afn_sound_swap(void) {}
 static inline void afn_sound_tick(void) {}
 #endif // AFN_HAS_SOUND
 
@@ -2754,9 +2755,9 @@ IWRAM_CODE static void rasterize_convex_tex(u16* buf, int* px, int* py, int* pu,
 }
 
 // Perspective-corrected textured convex polygon rasterizer.
-// Same as rasterize_convex_tex but interpolates Z along edges and corrects
-// horizontal UV stepping per scanline to eliminate affine texture bending.
-// Only used for faces with large depth ratio where distortion is visible.
+// Subdivides each scanline every 16 pixels, computing perspective-correct
+// UV at each subdivision point using Z interpolation. Affine between points.
+#define PCORR_STEP 16
 IWRAM_CODE static void rasterize_convex_tex_pcorr(u16* buf, int* px, int* py,
     int* pu, int* pv, int* pz, int count,
     const u8* tex, int texMask, int texShift, u8 palBase)
@@ -2856,82 +2857,87 @@ IWRAM_CODE static void rasterize_convex_tex_pcorr(u16* buf, int* px, int* py,
                     int fullSpan = xr - xl;
                     if (fullSpan > 0)
                     {
-                        // Perspective-correct UV at midpoint:
-                        // u_mid = (ul*zr + ur*zl) / (zl+zr)
-                        int zsum = zl + zr;
-                        if (zsum < 1) zsum = 1;
-                        int u_mid = ((ul * (zr >> 4)) + (ur * (zl >> 4))) / (zsum >> 4);
-                        int v_mid = ((vl * (zr >> 4)) + (vr * (zl >> 4))) / (zsum >> 4);
-                        int xmid = (xl + xr) >> 1;
-                        int spanL = xmid - xl;
-                        int spanR = xr - xmid;
+                        u16* row = buf + y * 120;
+                        // Compute 1/Z at left and right edges for perspective interpolation
+                        // Use 16.16 fixed: invZ = 65536 / z (clamped)
+                        int izl = (zl > 0) ? (65536 / zl) : 65536;
+                        int izr = (zr > 0) ? (65536 / zr) : 65536;
+                        // U/Z and V/Z at edges (16.8 * 16.16 >> 8 = 16.16)
+                        int uzl = (ul * izl) >> 8;
+                        int vzl = (vl * izl) >> 8;
+                        int uzr = (ur * izr) >> 8;
+                        int vzr = (vr * izr) >> 8;
+                        // Delta per pixel in UZ/VZ/IZ space
+                        int rcp = (fullSpan <= 240) ? rcp_table[fullSpan] : (int)(65536 / fullSpan);
+                        int duz = (int)(((long long)(uzr - uzl) * rcp) >> 16);
+                        int dvz = (int)(((long long)(vzr - vzl) * rcp) >> 16);
+                        int diz = (int)(((long long)(izr - izl) * rcp) >> 16);
 
-                        // Left half: xl to xmid
-                        if (spanL > 0)
-                        {
-                            int rcpL = (spanL <= 240) ? rcp_table[spanL] : (int)(65536 / spanL);
-                            int du2 = ((u_mid - ul) * rcpL) >> 8;
-                            int dv2 = ((v_mid - vl) * rcpL) >> 8;
-                            int su = ul << 8, sv = vl << 8;
-                            int xStart = xl;
-                            if (xStart < 0) { su -= du2 * xStart; sv -= dv2 * xStart; xStart = 0; }
-                            if (xStart <= xmid) {
-                                u16* row = buf + y * 120;
-                                int x = xStart;
-                                u16* rp = row + (x >> 1);
-                                int ti;
-                                if ((x & 1) && x <= xmid) {
-                                    ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
-                                    *rp = (*rp & 0x00FF) | ((u16)(palBase + tex[ti]) << 8);
-                                    su += du2; sv += dv2; x++; rp = row + (x >> 1);
-                                }
-                                int pc = (xmid - x + 1) >> 1;
-                                if (pc > 120) pc = 120;
-                                if (pc > 0) {
-                                    tex_scanline_asm(rp, pc, su, sv, du2<<1, dv2<<1,
-                                        tex, texMask, texShift, palBase, 0);
-                                    su += (du2<<1)*pc; sv += (dv2<<1)*pc;
-                                    x += pc*2; rp += pc;
-                                }
-                                if (x <= xmid) {
-                                    ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
-                                    *rp = (*rp & 0xFF00) | (palBase + tex[ti]);
-                                }
-                            }
+                        // Walk scanline in PCORR_STEP segments
+                        int segX = xl;
+                        int curUZ = uzl, curVZ = vzl, curIZ = izl;
+                        // Clamp to screen left
+                        if (segX < 0) {
+                            curUZ += duz * (-segX);
+                            curVZ += dvz * (-segX);
+                            curIZ += diz * (-segX);
+                            segX = 0;
                         }
 
-                        // Right half: xmid+1 to xr
-                        if (spanR > 0)
+                        while (segX <= xr)
                         {
-                            int rcpR = (spanR <= 240) ? rcp_table[spanR] : (int)(65536 / spanR);
-                            int du2 = ((ur - u_mid) * rcpR) >> 8;
-                            int dv2 = ((vr - v_mid) * rcpR) >> 8;
-                            int su = u_mid << 8, sv = v_mid << 8;
-                            int xStart = xmid + 1;
-                            if (xStart < 0) { su -= du2 * xStart; sv -= dv2 * xStart; xStart = 0; }
-                            if (xStart <= xr) {
-                                u16* row = buf + y * 120;
-                                int x = xStart;
-                                u16* rp = row + (x >> 1);
-                                int ti;
-                                if ((x & 1) && x <= xr) {
-                                    ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
-                                    *rp = (*rp & 0x00FF) | ((u16)(palBase + tex[ti]) << 8);
-                                    su += du2; sv += dv2; x++; rp = row + (x >> 1);
-                                }
-                                int pc = (xr - x + 1) >> 1;
-                                if (pc > 120) pc = 120;
-                                if (pc > 0) {
-                                    tex_scanline_asm(rp, pc, su, sv, du2<<1, dv2<<1,
-                                        tex, texMask, texShift, palBase, 0);
-                                    su += (du2<<1)*pc; sv += (dv2<<1)*pc;
-                                    x += pc*2; rp += pc;
-                                }
-                                if (x <= xr) {
-                                    ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
-                                    *rp = (*rp & 0xFF00) | (palBase + tex[ti]);
-                                }
+                            int segEnd = segX + PCORR_STEP - 1;
+                            if (segEnd > xr) segEnd = xr;
+                            int segW = segEnd - segX;
+
+                            // Recover UV at segment start
+                            int z0 = (curIZ > 0) ? (65536 / curIZ) : 1;
+                            int u0 = (int)(((long long)curUZ * z0) >> 16);
+                            int v0 = (int)(((long long)curVZ * z0) >> 16);
+                            // Recover UV at segment end
+                            int endUZ = curUZ + duz * segW;
+                            int endVZ = curVZ + dvz * segW;
+                            int endIZ = curIZ + diz * segW;
+                            int z1 = (endIZ > 0) ? (65536 / endIZ) : 1;
+                            int u1 = (int)(((long long)endUZ * z1) >> 16);
+                            int v1 = (int)(((long long)endVZ * z1) >> 16);
+
+                            // Affine interpolation within segment
+                            int du2 = 0, dv2 = 0;
+                            if (segW > 0) {
+                                int sr = (segW <= 240) ? rcp_table[segW] : (int)(65536 / segW);
+                                du2 = ((u1 - u0) * sr) >> 8;
+                                dv2 = ((v1 - v0) * sr) >> 8;
                             }
+                            int su = u0 << 8, sv = v0 << 8;
+                            int x = segX;
+                            u16* rp = row + (x >> 1);
+                            int ti;
+                            // Odd pixel
+                            if ((x & 1) && x <= segEnd) {
+                                ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
+                                *rp = (*rp & 0x00FF) | ((u16)(palBase + tex[ti]) << 8);
+                                su += du2; sv += dv2; x++; rp = row + (x >> 1);
+                            }
+                            // Pixel pairs via ASM
+                            int pc = (segEnd - x + 1) >> 1;
+                            if (pc > 120) pc = 120;
+                            if (pc > 0) {
+                                tex_scanline_asm(rp, pc, su, sv, du2<<1, dv2<<1,
+                                    tex, texMask, texShift, palBase, 0);
+                                su += (du2<<1)*pc; sv += (dv2<<1)*pc;
+                                x += pc*2; rp += pc;
+                            }
+                            // Trailing odd pixel
+                            if (x <= segEnd) {
+                                ti = ((sv >> 16) & texMask) << texShift; ti |= ((su >> 16) & texMask);
+                                *rp = (*rp & 0xFF00) | (palBase + tex[ti]);
+                            }
+
+                            segX = segEnd + 1;
+                            curUZ = endUZ + duz;
+                            curVZ = endVZ + dvz;
+                            curIZ = endIZ + diz;
                         }
                     }
                 }
@@ -3744,7 +3750,7 @@ typedef struct {
     const s16* uvs;
     const u8* tex;
     FIXED cosR, sinR;
-    int cullMode, meshLit, meshHalfRes, meshTextured, meshWireframe, meshGrayscale;
+    int cullMode, meshLit, meshHalfRes, meshTextured, meshWireframe, meshGrayscale, meshPerspCorr;
     int texW, texShift, texMask, texPalBase;
     int vertCount, idxCount, quadIdxCount;
     int drawDist;
@@ -3821,6 +3827,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         ms->drawDist = afn_mesh_desc[mi][14];
         ms->drawPriority = afn_mesh_desc[mi][15];
         ms->visible = afn_mesh_desc[mi][16];
+        ms->meshPerspCorr = afn_mesh_desc[mi][17];
         ms->texMask = ms->texW > 0 ? ms->texW - 1 : 0;
         ms->uvs = afn_mesh_uv_ptrs[mi];
         ms->tex = tex_cache_ptrs[mi];
@@ -4272,6 +4279,10 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 }
                 if (needClip) {
                     clip_render_poly_tex(buf, tpx, tpy, tpu, tpv, nc,
+                        tex, ms->texMask, ms->texShift, (u8)ms->texPalBase);
+                } else if (ms->meshPerspCorr) {
+                    int tpz[] = {g_vsz[vb+i0], g_vsz[vb+i1], g_vsz[vb+i2], isQuad ? g_vsz[vb+i3] : 0};
+                    rasterize_convex_tex_pcorr(buf, tpx, tpy, tpu, tpv, tpz, nc,
                         tex, ms->texMask, ms->texShift, (u8)ms->texPalBase);
                 } else {
                     rasterize_convex_tex(buf, tpx, tpy, tpu, tpv, nc,

@@ -201,6 +201,8 @@ struct MeshAsset
     int texW = 0, texH = 0;                  // texture dimensions (power of 2, max 256)
     unsigned int glTexID = 0;                 // OpenGL texture for editor preview
     bool texFiltered = false;                 // true = GL_LINEAR, false = GL_NEAREST
+    bool perspCorrect = false;               // true = perspective-corrected texture mapping (slower)
+    int subdivide = 0;                       // 0=off, N=subdivide each face into NxN grid at export
 };
 
 static constexpr int kMaxMeshAssets = 32;
