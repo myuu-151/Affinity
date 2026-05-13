@@ -66,6 +66,8 @@ EWRAM_DATA static int tm_obj_dir_facing[TM_MAX_DIR_OBJS];
 // Forward declarations for sound functions (used by mapdata.h script codegen)
 // ---------------------------------------------------------------------------
 static void afn_play_sound(int instanceId);
+static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch);
+static void afn_play_sfx(int smpIdx, int gain);
 static void afn_stop_sound(void);
 
 // ---------------------------------------------------------------------------
@@ -177,6 +179,7 @@ static int snd_pitch_bend[16]; // per-channel pitch bend (-8192..+8191)
 static int snd_initialized = 0;
 static int snd_compat = 0;       // 1 = compatibility mode (halved rate, less CPU)
 static int snd_hifi = 0;        // 1 = hi-fi mode (timer 672, ~25kHz — may trill on some samples)
+static int snd_sfx_gain = 1;    // gain for SFX one-shots (0=Normal, 1=Loud, 2=Mid, 3=Quiet)
 static int snd_mix_samples = 304; // default for 18kHz (timer 924)
 
 // Compute timer reload and mix count from current settings + fix mode override
@@ -247,6 +250,14 @@ static void afn_play_sound(int instanceId) {
     snd_voice_count = afn_snd_voices[instanceId];
     if (snd_voice_count < 4) snd_voice_count = 4;
     if (snd_voice_count > SND_MAX_VOICES) snd_voice_count = SND_MAX_VOICES;
+}
+
+// Play a one-shot sample without disrupting the active sequence
+static void afn_play_sfx(int smpIdx, int gain) {
+    if (smpIdx < 0 || smpIdx >= AFN_SOUND_SAMPLE_COUNT) return;
+    if (!snd_initialized) afn_sound_hw_start();
+    snd_sfx_gain = gain;
+    afn_trigger_sample(smpIdx, 60, 127, 60, 15);
 }
 
 static void afn_stop_sound(void) {
@@ -451,8 +462,8 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int 
     // +8 for 16-bit samples (256x larger values than 8-bit)
     // No polyphony headroom — clamp stage handles occasional peaks
     {
-        int g = (snd_seq_active >= 0) ? afn_snd_gain[snd_seq_active] : 0;
-        int base = (g == 1) ? 6 : (g == 2) ? 9 : 7;
+        int g = (ch == 15) ? snd_sfx_gain : ((snd_seq_active >= 0) ? afn_snd_gain[snd_seq_active] : snd_sfx_gain);
+        int base = (g == 5) ? 4 : (g == 4) ? 5 : (g == 1) ? 6 : (g == 2) ? 8 : (g == 3) ? 9 : 7;
         vc->gainShift = base + (vc->is16 ? 8 : 0);
     }
     vc->releaseRem = 0;

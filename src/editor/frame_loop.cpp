@@ -1011,7 +1011,7 @@ struct SoundInstance {
     int channelBank[16] = {};   // per-channel sample bank override
     int volume = 100;           // master volume 0-100
     int interpolation = 0;     // 0 = nearest, 1 = smooth (linear)
-    int mixerGain = 0;         // 0 = Normal (>>7), 1 = Loud (>>6), 2 = Mid (>>8), 3 = Quiet (>>9)
+    int mixerGain = 0;         // 0=Normal(>>7), 1=Loud(>>6), 2=Mid(>>8), 3=Quiet(>>9), 4=Louder(>>5), 5=Loudest(>>4)
     int voiceCount = 6;        // max simultaneous voices on GBA (4-8)
     int softFade = 1;          // 0 = hard cutoff, 1 = 256-sample fadeout at end of notes
     int longRelease = 0;       // 0 = normal, 1 = force minimum 1672-sample (~67ms) release tail
@@ -12560,31 +12560,48 @@ void FrameTick(float dt)
                                 GBASoundSampleExport se;
                                 se.name = smp.name;
                                 if (!smp.srcData16.empty() && smp.srcRate > 0) {
-                                    // Export 16-bit at original rate with low-pass smoothing
+                                    // Resample to GBA output rate (18157 Hz) to avoid nearest-neighbor aliasing
                                     float gain = (smp.ampGainDb != 0.0f) ? powf(10.0f, smp.ampGainDb / 20.0f) : 1.0f;
-                                    int n16 = (int)smp.srcData16.size();
-                                    se.data.resize(n16);
-                                    se.data16.resize(n16);
-                                    // Apply gain first into a temp buffer
-                                    std::vector<float> tmp(n16);
-                                    for (int j = 0; j < n16; j++)
-                                        tmp[j] = smp.srcData16[j] * gain;
-                                    // Single-pole IIR low-pass: cutoff ~8kHz at native rate
-                                    // alpha = 1 / (1 + sampleRate / (2*pi*cutoff))
-                                    float cutoff = 8000.0f;
-                                    float alpha = 1.0f / (1.0f + smp.srcRate / (6.2832f * cutoff));
-                                    float prev = tmp[0];
-                                    for (int j = 0; j < n16; j++) {
-                                        prev += alpha * (tmp[j] - prev);
-                                        tmp[j] = prev;
+                                    int targetRate = 18157;
+                                    if (smp.srcRate <= targetRate) {
+                                        // Already at or below target rate — export as-is
+                                        se.data.resize(smp.srcData16.size());
+                                        se.data16.resize(smp.srcData16.size());
+                                        for (int j = 0; j < (int)smp.srcData16.size(); j++) {
+                                            int v = (int)(smp.srcData16[j] * gain);
+                                            if (v > 32767) v = 32767; if (v < -32768) v = -32768;
+                                            se.data16[j] = (int16_t)v;
+                                            se.data[j] = (int8_t)(v >> 8);
+                                        }
+                                        se.sampleRate = smp.srcRate;
+                                    } else {
+                                        // Downsample with averaging anti-alias filter
+                                        double ratio = (double)smp.srcRate / targetRate;
+                                        int srcLen = (int)smp.srcData16.size();
+                                        int dstLen = (int)(srcLen / ratio);
+                                        if (dstLen < 1) dstLen = 1;
+                                        se.data.resize(dstLen);
+                                        se.data16.resize(dstLen);
+                                        for (int j = 0; j < dstLen; j++) {
+                                            double srcPos = j * ratio;
+                                            int lo = (int)srcPos;
+                                            int hi = (int)(srcPos + ratio);
+                                            if (hi > srcLen) hi = srcLen;
+                                            if (lo >= srcLen) lo = srcLen - 1;
+                                            // Average all source samples in this output sample's window
+                                            double sum = 0;
+                                            int count = 0;
+                                            for (int k = lo; k < hi; k++) {
+                                                sum += smp.srcData16[k];
+                                                count++;
+                                            }
+                                            int v = (int)((sum / (count > 0 ? count : 1)) * gain);
+                                            if (v > 32767) v = 32767; if (v < -32768) v = -32768;
+                                            se.data16[j] = (int16_t)v;
+                                            se.data[j] = (int8_t)(v >> 8);
+                                        }
+                                        se.sampleRate = targetRate;
                                     }
-                                    for (int j = 0; j < n16; j++) {
-                                        int v = (int)tmp[j];
-                                        if (v > 32767) v = 32767; if (v < -32768) v = -32768;
-                                        se.data16[j] = (int16_t)v;
-                                        se.data[j] = (int8_t)(v >> 8);
-                                    }
-                                    se.sampleRate = smp.srcRate;
                                 } else {
                                     se.data = smp.data;
                                     se.sampleRate = smp.sampleRate;
@@ -22088,10 +22105,10 @@ void FrameTick(float dt)
                 ImGui::EndCombo();
             }
             ImGui::PopItemWidth();
-            const char* gainNames[] = { "Normal", "Loud", "Mid", "Quiet" };
+            const char* gainNames[] = { "Normal", "Loud", "Mid", "Quiet", "Louder", "Loudest" };
             ImGui::PushItemWidth(-1);
             if (ImGui::BeginCombo("##mixgain", gainNames[inst.mixerGain])) {
-                for (int gi = 0; gi < 4; gi++) {
+                for (int gi = 0; gi < 6; gi++) {
                     if (ImGui::Selectable(gainNames[gi], inst.mixerGain == gi)) {
                         inst.mixerGain = gi;
                         sProjectDirty = true;
