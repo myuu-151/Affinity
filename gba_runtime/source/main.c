@@ -105,6 +105,7 @@ static int snd_voice_count = 6; // active voice limit (set from afn_snd_voices[]
 // starts at the correct aligned address for both buf[0] and buf[1].
 EWRAM_DATA static s8 snd_buf[2][SND_BUF_SIZE] __attribute__((aligned(4)));
 EWRAM_DATA static s8 snd_buf_b[2][SND_BUF_SIZE] __attribute__((aligned(4)));
+EWRAM_DATA static s16 snd_acc_b[SND_BUF_SIZE]; // FIFO B accumulator (EWRAM to save IWRAM stack)
 static int snd_cur_buf = 0;
 static int snd_fifo_b = 0;  // 1 = FIFO B enabled (dual channel)
 // Audio fix mode — cycle with SELECT to sweep sample rates
@@ -293,9 +294,10 @@ static void afn_play_sfx(int smpIdx, int gain, int fifo) {
     }
     if (fifo) snd_fifo_b = 1;
     if (!snd_initialized) afn_sound_hw_start();
-    else if (fifo && !(REG_DMA2CNT & DMA_ENABLE)) {
+    if (fifo) {
+        // Always re-init FIFO B — reset FIFO, restart DMA2
         REG_DMA2CNT = 0;
-        REG_DMA2SAD = (u32)snd_buf_b[snd_cur_buf];
+        REG_DMA2SAD = (u32)snd_buf_b[snd_cur_buf ^ 1];
         REG_DMA2DAD = (u32)&REG_FIFO_B;
         REG_DMA2CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
         REG_SNDDSCNT |= SDS_B100 | SDS_BL | SDS_BR | SDS_BTMR0 | SDS_BRESET;
@@ -352,22 +354,21 @@ IWRAM_CODE static void afn_sound_mix(void) {
     int mixN = snd_mix_samples & ~3;
     // Stack-allocated in IWRAM (function is IWRAM_CODE, stack is in IWRAM)
     s16 mix_acc[SND_BUF_SIZE];
-    s16 mix_acc_b[SND_BUF_SIZE];
-    // Clear accumulators (32-bit writes, 2 samples at a time)
+    // Clear accumulator (32-bit writes, 2 samples at a time)
     {
         u32* a32 = (u32*)mix_acc;
         int i; for (i = 0; i < mixN / 2; i++) a32[i] = 0;
-        if (snd_fifo_b) {
-            u32* b32 = (u32*)mix_acc_b;
-            for (i = 0; i < mixN / 2; i++) b32[i] = 0;
-        }
     }
     int hasB = 0;
+    if (snd_fifo_b) {
+        u32* b32 = (u32*)snd_acc_b;
+        int i; for (i = 0; i < mixN / 2; i++) b32[i] = 0;
+    }
 
     for (int v = 0; v < snd_voice_count; v++) {
         SndVoice* vc = &snd_voices[v];
         if (!vc->active) continue;
-        s16* acc = (vc->fifo && snd_fifo_b) ? mix_acc_b : mix_acc;
+        s16* acc = (vc->fifo && snd_fifo_b) ? snd_acc_b : mix_acc;
         if (vc->fifo) hasB = 1;
         int n = mixN;
         if (vc->remaining > 0 && vc->remaining < n) n = vc->remaining;
@@ -434,7 +435,7 @@ IWRAM_CODE static void afn_sound_mix(void) {
         afn_mix_clamp_fast(buf, mix_acc, mixN, outShift);
         if (snd_fifo_b && buf_b) {
             if (hasB) {
-                afn_mix_clamp_fast(buf_b, mix_acc_b, mixN, 0); // FIFO B: no voice-count shift
+                afn_mix_clamp_fast(buf_b, snd_acc_b, mixN, 0); // FIFO B: no voice-count shift
             } else {
                 // No active FIFO B voices — shut down DMA2 and disable FIFO B output
                 REG_DMA2CNT = 0;
