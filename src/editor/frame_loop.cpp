@@ -878,8 +878,10 @@ enum SampleCategory { SmpCat_Oscillator = 0, SmpCat_Noise = 1, SmpCat_GM = 2, Sm
 
 struct SoundSample {
     char name[32] = "Sample";
-    std::vector<int8_t> data;   // 8-bit signed PCM
-    int sampleRate = 16384;     // Hz
+    std::vector<int8_t> data;   // 8-bit signed PCM (downsampled for MIDI instruments)
+    std::vector<int16_t> srcData16; // original 16-bit data at srcRate (for SFX export)
+    int sampleRate = 16384;     // Hz (for MIDI instrument playback)
+    int srcRate = 0;            // original WAV sample rate (0 = no hi-res data)
     bool loop = false;
     int loopStart = 0;          // sample offset (actual position, not percentage)
     int loopEnd = 0;            // sample offset (0 = end of sample)
@@ -1005,6 +1007,7 @@ struct SampleOverride {
 struct SoundInstance {
     char name[48] = "Untitled";
     int midiIdx = -1;           // index into sMidiFiles (-1 = none)
+    int sfxSampleIdx = -1;      // index into sSoundBank (-1 = MIDI mode, >=0 = SFX one-shot)
     int channelBank[16] = {};   // per-channel sample bank override
     int volume = 100;           // master volume 0-100
     int interpolation = 0;     // 0 = nearest, 1 = smooth (linear)
@@ -5132,6 +5135,22 @@ static bool SaveProject(const std::string& path)
                     fprintf(f, "\n");
                 }
             }
+            // Save 16-bit source data for SFX export
+            if (s.srcRate > 0 && !s.srcData16.empty()) {
+                fprintf(f, "impSrcRate=%d\n", s.srcRate);
+                fprintf(f, "impSrc16Len=%d\n", (int)s.srcData16.size());
+                const int chunkSize = 2000;
+                for (int off = 0; off < (int)s.srcData16.size(); off += chunkSize) {
+                    int end = off + chunkSize;
+                    if (end > (int)s.srcData16.size()) end = (int)s.srcData16.size();
+                    fprintf(f, "impSrc16=");
+                    for (int di = off; di < end; di++) {
+                        if (di > off) fprintf(f, ",");
+                        fprintf(f, "%d", (int)s.srcData16[di]);
+                    }
+                    fprintf(f, "\n");
+                }
+            }
             fprintf(f, "imp_end\n");
         }
     }
@@ -5143,6 +5162,7 @@ static bool SaveProject(const std::string& path)
         const SoundInstance& si = sSoundInstances[i];
         fprintf(f, "inst_begin=%s\n", si.name);
         fprintf(f, "instMidi=%d\n", si.midiIdx);
+        fprintf(f, "instSfx=%d\n", si.sfxSampleIdx);
         fprintf(f, "instVol=%d\n", si.volume);
         fprintf(f, "instInterp=%d\n", si.interpolation);
         fprintf(f, "instGain=%d\n", si.mixerGain);
@@ -7114,6 +7134,20 @@ static bool LoadProject(const std::string& path)
                         if (*p == ',') p++;
                     }
                 }
+                else if (sscanf(line, "impSrcRate=%d", &ival) == 1) curImp->srcRate = ival;
+                else if (sscanf(line, "impSrc16Len=%d", &ival) == 1) {
+                    curImp->srcData16.clear();
+                    curImp->srcData16.reserve(ival);
+                }
+                else if (strncmp(line, "impSrc16=", 9) == 0) {
+                    const char* p = line + 9;
+                    while (*p) {
+                        int v = atoi(p);
+                        curImp->srcData16.push_back((int16_t)v);
+                        while (*p && *p != ',') p++;
+                        if (*p == ',') p++;
+                    }
+                }
             }
         }
         else if (strcmp(section, "SoundInstances") == 0)
@@ -7180,6 +7214,7 @@ static bool LoadProject(const std::string& path)
             }
             else if (curInst) {
                 if (sscanf(line, "instMidi=%d", &ival) == 1) curInst->midiIdx = ival;
+                else if (sscanf(line, "instSfx=%d", &ival) == 1) curInst->sfxSampleIdx = ival;
                 else if (sscanf(line, "instVol=%d", &ival) == 1) curInst->volume = ival;
                 else if (sscanf(line, "instInterp=%d", &ival) == 1) curInst->interpolation = ival;
                 else if (sscanf(line, "instGain=%d", &ival) == 1) curInst->mixerGain = ival;
@@ -12516,6 +12551,51 @@ void FrameTick(float dt)
 
                     // Collect all samples used by any sound instance
                     for (auto& inst : sSoundInstances) {
+                        // SFX mode: single imported sample (use 16-bit at original rate if available)
+                        if (inst.sfxSampleIdx >= 0 && inst.sfxSampleIdx < (int)sSoundBank.size()) {
+                            if (!sampleRemap.count(inst.sfxSampleIdx)) {
+                                int exportIdx = (int)exportSoundSamples.size();
+                                sampleRemap[inst.sfxSampleIdx] = exportIdx;
+                                auto& smp = sSoundBank[inst.sfxSampleIdx];
+                                GBASoundSampleExport se;
+                                se.name = smp.name;
+                                if (!smp.srcData16.empty() && smp.srcRate > 0) {
+                                    // Export 16-bit at original rate with low-pass smoothing
+                                    float gain = (smp.ampGainDb != 0.0f) ? powf(10.0f, smp.ampGainDb / 20.0f) : 1.0f;
+                                    int n16 = (int)smp.srcData16.size();
+                                    se.data.resize(n16);
+                                    se.data16.resize(n16);
+                                    // Apply gain first into a temp buffer
+                                    std::vector<float> tmp(n16);
+                                    for (int j = 0; j < n16; j++)
+                                        tmp[j] = smp.srcData16[j] * gain;
+                                    // Single-pole IIR low-pass: cutoff ~8kHz at native rate
+                                    // alpha = 1 / (1 + sampleRate / (2*pi*cutoff))
+                                    float cutoff = 8000.0f;
+                                    float alpha = 1.0f / (1.0f + smp.srcRate / (6.2832f * cutoff));
+                                    float prev = tmp[0];
+                                    for (int j = 0; j < n16; j++) {
+                                        prev += alpha * (tmp[j] - prev);
+                                        tmp[j] = prev;
+                                    }
+                                    for (int j = 0; j < n16; j++) {
+                                        int v = (int)tmp[j];
+                                        if (v > 32767) v = 32767; if (v < -32768) v = -32768;
+                                        se.data16[j] = (int16_t)v;
+                                        se.data[j] = (int8_t)(v >> 8);
+                                    }
+                                    se.sampleRate = smp.srcRate;
+                                } else {
+                                    se.data = smp.data;
+                                    se.sampleRate = smp.sampleRate;
+                                }
+                                se.loop = false;
+                                se.releaseMs = 0;
+                                se.decayPct = 0;
+                                exportSoundSamples.push_back(std::move(se));
+                            }
+                            continue;
+                        }
                         if (inst.midiIdx < 0 || inst.midiIdx >= (int)sMidiFiles.size()) continue;
                         auto& midi = sMidiFiles[inst.midiIdx];
                         for (auto& track : midi.tracks) {
@@ -12649,6 +12729,20 @@ void FrameTick(float dt)
                     // Build instance exports
                     for (int i = 0; i < (int)sSoundInstances.size(); i++) {
                         auto& inst = sSoundInstances[i];
+
+                        // SFX instance: one-shot sample playback (no sequencer)
+                        if (inst.sfxSampleIdx >= 0 && inst.sfxSampleIdx < (int)sSoundBank.size()) {
+                            auto it = sampleRemap.find(inst.sfxSampleIdx);
+                            if (it == sampleRemap.end()) continue;
+                            GBASoundInstanceExport ie;
+                            ie.name = inst.name;
+                            ie.isSfx = true;
+                            ie.sfxSampleIdx = it->second;
+                            ie.mixerGain = inst.mixerGain;
+                            exportSoundInstances.push_back(std::move(ie));
+                            continue;
+                        }
+
                         if (inst.midiIdx < 0 || inst.midiIdx >= (int)sMidiFiles.size()) continue;
                         auto& midi = sMidiFiles[inst.midiIdx];
                         GBASoundInstanceExport ie;
@@ -20887,6 +20981,18 @@ void FrameTick(float dt)
                         snprintf(s.name, sizeof(s.name), "%s", fname.c_str());
                         s.data = std::move(pcm);
                         s.sampleRate = 16384;
+                        // Keep original 16-bit data at native rate for SFX export
+                        s.srcRate = srcRate;
+                        if (bitsPerSample == 16 && dataPtr && numSamples > 0) {
+                            s.srcData16.resize(numSamples);
+                            const int16_t* raw = (const int16_t*)dataPtr;
+                            for (int i = 0; i < numSamples; i++)
+                                s.srcData16[i] = raw[i * channels]; // mono from first channel
+                        } else if (bitsPerSample == 8 && dataPtr && numSamples > 0) {
+                            s.srcData16.resize(numSamples);
+                            for (int i = 0; i < numSamples; i++)
+                                s.srcData16[i] = (int16_t)(((int)dataPtr[i * channels] - 128) << 8);
+                        }
                         s.builtIn = false;
                         s.category = SmpCat_Import;
                         sSoundBank.push_back(std::move(s));
@@ -21910,26 +22016,65 @@ void FrameTick(float dt)
             SoundInstance& inst = sSoundInstances[sSelectedInstance];
             ImGui::InputText("##instname", inst.name, sizeof(inst.name));
 
-            // MIDI assignment dropdown
-            const char* midiPreview = (inst.midiIdx >= 0 && inst.midiIdx < (int)sMidiFiles.size())
-                ? sMidiFiles[inst.midiIdx].name : "None";
+            // Source type: MIDI or SFX (imported sample)
+            bool isSfx = (inst.sfxSampleIdx >= 0);
+            const char* srcNames[] = { "MIDI", "SFX" };
+            int srcType = isSfx ? 1 : 0;
             ImGui::PushItemWidth(-1);
-            if (ImGui::BeginCombo("##instmidi", midiPreview)) {
-                if (ImGui::Selectable("None", inst.midiIdx < 0)) {
-                    inst.midiIdx = -1;
+            if (ImGui::BeginCombo("##instsrc", srcNames[srcType])) {
+                if (ImGui::Selectable("MIDI", srcType == 0)) {
+                    inst.sfxSampleIdx = -1;
                     sProjectDirty = true;
                 }
-                for (int mi = 0; mi < (int)sMidiFiles.size(); mi++) {
-                    char ml[64];
-                    snprintf(ml, sizeof(ml), "[%d] %s", mi, sMidiFiles[mi].name);
-                    if (ImGui::Selectable(ml, inst.midiIdx == mi)) {
-                        inst.midiIdx = mi;
-                        sProjectDirty = true;
-                    }
+                if (ImGui::Selectable("SFX", srcType == 1)) {
+                    if (inst.sfxSampleIdx < 0) inst.sfxSampleIdx = 0;
+                    inst.midiIdx = -1;
+                    sProjectDirty = true;
                 }
                 ImGui::EndCombo();
             }
             ImGui::PopItemWidth();
+
+            if (isSfx) {
+                // SFX sample assignment dropdown
+                const char* sfxPreview = (inst.sfxSampleIdx >= 0 && inst.sfxSampleIdx < (int)sSoundBank.size())
+                    ? sSoundBank[inst.sfxSampleIdx].name : "None";
+                ImGui::PushItemWidth(-1);
+                if (ImGui::BeginCombo("##instsfx", sfxPreview)) {
+                    for (int si = 0; si < (int)sSoundBank.size(); si++) {
+                        if (sSoundBank[si].category != SmpCat_Import) continue;
+                        char sl[64];
+                        snprintf(sl, sizeof(sl), "[%d] %s", si, sSoundBank[si].name);
+                        if (ImGui::Selectable(sl, inst.sfxSampleIdx == si)) {
+                            inst.sfxSampleIdx = si;
+                            sProjectDirty = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopItemWidth();
+            } else {
+                // MIDI assignment dropdown
+                const char* midiPreview = (inst.midiIdx >= 0 && inst.midiIdx < (int)sMidiFiles.size())
+                    ? sMidiFiles[inst.midiIdx].name : "None";
+                ImGui::PushItemWidth(-1);
+                if (ImGui::BeginCombo("##instmidi", midiPreview)) {
+                    if (ImGui::Selectable("None", inst.midiIdx < 0)) {
+                        inst.midiIdx = -1;
+                        sProjectDirty = true;
+                    }
+                    for (int mi = 0; mi < (int)sMidiFiles.size(); mi++) {
+                        char ml[64];
+                        snprintf(ml, sizeof(ml), "[%d] %s", mi, sMidiFiles[mi].name);
+                        if (ImGui::Selectable(ml, inst.midiIdx == mi)) {
+                            inst.midiIdx = mi;
+                            sProjectDirty = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::PopItemWidth();
+            }
             ImGui::SliderInt("Vol##inst", &inst.volume, 0, 100, "%d%%");
             const char* interpNames[] = { "Nearest", "Smooth" };
             ImGui::PushItemWidth(-1);
