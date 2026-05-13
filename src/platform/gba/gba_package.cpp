@@ -5284,7 +5284,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "};\n\n";
 
         // Note event struct type definition (must come before note arrays)
-        f << "typedef struct { int tick; u8 note; u8 vel; u8 smpIdx; int dur; } AfnSndNote;\n\n";
+        f << "typedef struct { int tick; u8 note; u8 vel; u8 smpIdx; u8 channel; int dur; } AfnSndNote;\n\n";
 
         // Emit note sequences per instance
         for (int i = 0; i < (int)soundInstances.size(); i++) {
@@ -5293,7 +5293,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "// Instance " << i << ": " << inst.name << "\n";
             f << "static const AfnSndNote afn_snd_notes_" << i << "[] = {\n";
             for (auto& n : inst.notes) {
-                f << "    {" << n.tick << "," << n.note << "," << n.velocity << "," << n.sampleIdx << "," << n.duration << "},\n";
+                f << "    {" << n.tick << "," << n.note << "," << n.velocity << "," << n.sampleIdx << "," << n.channel << "," << n.duration << "},\n";
             }
             f << "};\n";
             f << "#define AFN_SND_" << i << "_NOTE_COUNT " << inst.notes.size() << "\n";

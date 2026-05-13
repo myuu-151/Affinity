@@ -12521,7 +12521,8 @@ void FrameTick(float dt)
                                         se.name = std::string(smp.name) + "_" + std::to_string(best->baseNote);
                                         se.data = best->data;
                                         se.data16 = best->data16;
-                                        se.sampleRate = best->sampleRate;
+                                        // Bake fineTune into rate (baseNote already handled by note rebasing)
+                                        se.sampleRate = (int)(best->sampleRate * powf(2.0f, (best->fineTune / 100.0f) / 12.0f));
                                         se.volScale = (best->peakAmplitude * 256) / 32768;
                                         if (se.volScale < 1) se.volScale = 1;
                                         if (smp.loop) {
@@ -12653,11 +12654,25 @@ void FrameTick(float dt)
                                 ne.note = n.note + smp.octaveShift * 12 - noteBase + 60;
                                 ie.notes.push_back(ne);
                             }
+                            // Export pitch bend events (smpIdx=255 sentinel)
+                            for (auto& pb : track.bends) {
+                                if (midi.channelMuted[pb.channel]) continue;
+                                GBASoundNoteExport ne;
+                                ne.tick = pb.tick;
+                                ne.channel = pb.channel;
+                                // Encode bend value (-8192..+8191) as note(hi) + vel(lo)
+                                int bv = pb.value + 8192; // 0..16383
+                                ne.note = (bv >> 7) & 127;
+                                ne.velocity = bv & 127;
+                                ne.duration = 0;
+                                ne.sampleIdx = 255; // pitch bend sentinel
+                                ie.notes.push_back(ne);
+                            }
                         }
                         std::sort(ie.notes.begin(), ie.notes.end(),
                             [](const GBASoundNoteExport& a, const GBASoundNoteExport& b) { return a.tick < b.tick; });
                         std::set<int> instSamples;
-                        for (auto& n : ie.notes) instSamples.insert(n.sampleIdx);
+                        for (auto& n : ie.notes) if (n.sampleIdx != 255) instSamples.insert(n.sampleIdx);
                         for (int si : instSamples) ie.sampleIndices.push_back(si);
                         exportSoundInstances.push_back(std::move(ie));
                     }

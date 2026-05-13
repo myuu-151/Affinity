@@ -147,6 +147,8 @@ typedef struct {
     int releaseLen;    // total release length in output samples
     int attackRamp;    // frames remaining in attack ramp (0 = done)
     int voiceFade;     // per-sample fade length at end of voice (0 = disabled)
+    int baseInc;       // inc without pitch bend (for recalculating)
+    int channel;       // MIDI channel (for pitch bend)
 } SndVoice;
 
 EWRAM_DATA static SndVoice snd_voices[SND_MAX_VOICES];
@@ -168,6 +170,7 @@ extern void afn_mix_clamp_fast(s8* buf, const s16* mix_acc, int count, int shift
 static int snd_seq_active = -1;
 static int snd_seq_tick = 0;   // fixed-point 8.8 tick accumulator
 static int snd_seq_next = 0;
+static int snd_pitch_bend[16]; // per-channel pitch bend (-8192..+8191)
 static int snd_initialized = 0;
 static int snd_compat = 0;       // 1 = compatibility mode (halved rate, less CPU)
 static int snd_hifi = 0;        // 1 = hi-fi mode (timer 672, ~25kHz — may trill on some samples)
@@ -237,6 +240,7 @@ static void afn_play_sound(int instanceId) {
     snd_seq_active = instanceId;
     snd_seq_tick = 0;
     snd_seq_next = 0;
+    for (int i = 0; i < 16; i++) snd_pitch_bend[i] = 0;
     snd_voice_count = afn_snd_voices[instanceId];
     if (snd_voice_count < 4) snd_voice_count = 4;
     if (snd_voice_count > SND_MAX_VOICES) snd_voice_count = SND_MAX_VOICES;
@@ -360,7 +364,7 @@ IWRAM_CODE static void afn_sound_mix(void) {
 }
 
 // Trigger a looping sample voice with duration in ticks
-static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
+static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch) {
     if (smpIdx < 0 || smpIdx >= AFN_SOUND_SAMPLE_COUNT) return;
     // Find free voice, or steal the one closest to finishing
     int vi = -1;
@@ -417,7 +421,9 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
         else if (octaves < 0) baseInc >>= (-octaves);
     }
     if (baseInc < 1) baseInc = 1;
+    vc->baseInc = baseInc;
     vc->inc = baseInc;
+    vc->channel = ch;
     vc->vol = vel; // 0-127
     // Convert tick duration to output samples
     // Each frame = snd_mix_samples output samples, sequencer advances tpf ticks/frame
@@ -484,12 +490,41 @@ static void afn_sound_tick(void) {
     int tpf = afn_snd_tpf[snd_seq_active];
     if (!notes || count == 0) { snd_seq_active = -1; return; }
     snd_seq_tick += tpf;  // fixed-point 8.8
+    int bendDirty = 0;
     while (snd_seq_next < count && (notes[snd_seq_next].tick << 8) <= snd_seq_tick) {
-        afn_trigger_sample(notes[snd_seq_next].smpIdx,
-                           notes[snd_seq_next].note,
-                           notes[snd_seq_next].vel,
-                           notes[snd_seq_next].dur);
+        if (notes[snd_seq_next].smpIdx == 255) {
+            // Pitch bend event: decode value from note(hi) + vel(lo)
+            int ch = notes[snd_seq_next].channel;
+            int bv = (notes[snd_seq_next].note << 7) | notes[snd_seq_next].vel;
+            snd_pitch_bend[ch] = bv - 8192;
+            bendDirty = 1;
+        } else {
+            afn_trigger_sample(notes[snd_seq_next].smpIdx,
+                               notes[snd_seq_next].note,
+                               notes[snd_seq_next].vel,
+                               notes[snd_seq_next].dur,
+                               notes[snd_seq_next].channel);
+        }
         snd_seq_next++;
+    }
+    // Apply pitch bend to active voices
+    if (bendDirty) {
+        // Semitone table for ±2 semitone range (bend/8192 * 2 semitones)
+        // Precompute: inc * 2^(bend/8192 * 2/12) ≈ inc * (1 + bend * 0.0001442)
+        for (int i = 0; i < snd_voice_count; i++) {
+            if (!snd_voices[i].active) continue;
+            int bend = snd_pitch_bend[snd_voices[i].channel];
+            if (bend == 0) {
+                snd_voices[i].inc = snd_voices[i].baseInc;
+            } else {
+                // ±2 semitones: ratio = 2^(bend/8192 * 2/12)
+                // Linear approx: ratio ≈ 1 + bend * (2/12/8192) = 1 + bend/49152
+                // Better: use (256 + bend * 256 / 49152) >> 8 as 8.8 multiplier
+                int adj = 256 + (bend * 256) / 49152;
+                if (adj < 128) adj = 128; // clamp to ±1 octave
+                snd_voices[i].inc = (snd_voices[i].baseInc * adj) >> 8;
+            }
+        }
     }
     if (snd_seq_next >= count) snd_seq_active = -1;
 }
