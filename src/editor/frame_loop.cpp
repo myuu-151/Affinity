@@ -218,6 +218,7 @@ enum class VsNodeType : int {
     IsMoving,       // condition gate: passes exec only if player is moving
     IsOnGround,     // condition gate: passes exec only if player is on ground
     IsJumping,      // condition gate: passes exec only if player is airborne + rising
+    IsFalling,      // condition gate: passes exec only if player is airborne + falling
     CheckFlag,      // condition: branch on flag set/clear (2 exec outs)
     SetFlag,        // set a flag bit (0-31)
     ToggleFlag,     // toggle a flag bit
@@ -505,6 +506,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Is Moving",      0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is On Ground",   0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is Jumping",     0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Falling",     0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Check Flag",     0xFF885533, 1, 2, 1, 0, {"Flag (int)"}, {}, {"Set", "Clear"} },
     { "Set Flag",       0xFF3355AA, 1, 1, 2, 0, {"Flag (int)", "Value (int)"}, {}, {} },
     { "Toggle Flag",    0xFF3355AA, 1, 1, 1, 0, {"Flag (int)"}, {}, {} },
@@ -13097,6 +13099,10 @@ void FrameTick(float dt)
                         // TODO: editor has no vertical physics, never pass through
                         continue;
                     }
+                    if (an->type == VsNodeType::IsFalling) {
+                        // TODO: editor has no vertical physics, never pass through
+                        continue;
+                    }
                     if (an->type == VsNodeType::IsFlagSet) {
                         // Check flag bit - always pass through in editor preview
                         for (auto& lk : sVsLinks)
@@ -15899,6 +15905,7 @@ void FrameTick(float dt)
                 case VsNodeType::IsMoving:      desc = "Gate: only passes execution through if the player is currently moving (d-pad held)."; break;
                 case VsNodeType::IsOnGround:    desc = "Gate: only passes execution through if the player is on the ground."; break;
                 case VsNodeType::IsJumping:     desc = "Gate: only passes execution through if the player is airborne and rising."; break;
+                case VsNodeType::IsFalling:     desc = "Gate: only passes execution through if the player is airborne and falling."; break;
                 case VsNodeType::CheckFlag:     desc = "Branches on whether a flag (0-31) is set or clear."; break;
                 case VsNodeType::SetFlag:       desc = "Sets a flag bit (0-31) to a value (0 or 1)."; break;
                 case VsNodeType::ToggleFlag:    desc = "Toggles a flag bit (0-31)."; break;
@@ -16249,6 +16256,7 @@ void FrameTick(float dt)
                         case VsNodeType::IsMoving:      return "_is_moving";
                         case VsNodeType::IsOnGround:    return "_is_grounded";
                         case VsNodeType::IsJumping:     return "_is_jumping";
+                        case VsNodeType::IsFalling:     return "_is_falling";
                         case VsNodeType::CheckFlag:     return "_check_flag";
                         case VsNodeType::SetFlag:       return "_set_flag";
                         case VsNodeType::ToggleFlag:    return "_toggle_flag";
@@ -16907,11 +16915,21 @@ void FrameTick(float dt)
                     editorCode =
                         "// Gate: passes execution only if player is airborne + rising";
                     setActionFunc(infoNode, "_is_jumping",
-                        "    if (!player_on_ground && player_vy > 0) {\n"
+                        "    if (player_vy > 0) {\n"
                         "        /* downstream actions */\n"
                         "    }\n"
                         "    // --- Runtime (main.c) ---\n"
                         "    // player_vy > 0 means ascending; gravity decreases vy each frame");
+                    break;
+                case VsNodeType::IsFalling:
+                    editorCode =
+                        "// Gate: passes execution only if player is airborne + falling";
+                    setActionFunc(infoNode, "_is_falling",
+                        "    if (!player_on_ground && player_vy <= 0) {\n"
+                        "        /* downstream actions */\n"
+                        "    }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // player_vy <= 0 means descending or at apex; gravity pulls down");
                     break;
                 case VsNodeType::CheckFlag:
                     editorCode =
@@ -19302,6 +19320,7 @@ void FrameTick(float dt)
                     case VsNodeType::IsMoving:      suffix = "_is_moving"; break;
                     case VsNodeType::IsOnGround:    suffix = "_is_grounded"; break;
                     case VsNodeType::IsJumping:     suffix = "_is_jumping"; break;
+                    case VsNodeType::IsFalling:     suffix = "_is_falling"; break;
                     case VsNodeType::CheckFlag:     suffix = "_check_flag"; break;
                     case VsNodeType::SetFlag:       suffix = "_set_flag"; break;
                     case VsNodeType::ToggleFlag:    suffix = "_toggle_flag"; break;
@@ -19815,6 +19834,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsMoving].name)) addNodeAt(VsNodeType::IsMoving);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsOnGround].name)) addNodeAt(VsNodeType::IsOnGround);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsJumping].name)) addNodeAt(VsNodeType::IsJumping);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsFalling].name)) addNodeAt(VsNodeType::IsFalling);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CheckFlag].name)) addNodeAt(VsNodeType::CheckFlag);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::DoOnce].name)) addNodeAt(VsNodeType::DoOnce);

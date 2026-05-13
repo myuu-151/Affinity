@@ -148,6 +148,7 @@ enum class GBAScriptNodeType : int {
     IsMoving,
     IsOnGround,
     IsJumping,
+    IsFalling,
     CheckFlag,
     SetFlag,
     ToggleFlag,

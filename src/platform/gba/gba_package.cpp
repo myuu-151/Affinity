@@ -10,6 +10,7 @@
 #include <array>
 #include <iomanip>
 #include <set>
+#include <functional>
 #include <unordered_map>
 #include <filesystem>
 
@@ -1907,6 +1908,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::IsMoving:      return "_is_moving";
         case GBAScriptNodeType::IsOnGround:    return "_is_grounded";
         case GBAScriptNodeType::IsJumping:     return "_is_jumping";
+        case GBAScriptNodeType::IsFalling:     return "_is_falling";
         case GBAScriptNodeType::CheckFlag:     return "_check_flag";
         case GBAScriptNodeType::SetFlag:       return "_set_flag";
         case GBAScriptNodeType::ToggleFlag:    return "_toggle_flag";
@@ -3186,7 +3188,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
             // First pass: emit each action as its own function (deduplicate by node ID)
             auto isGateNode = [](GBAScriptNodeType t) {
-                return t == GBAScriptNodeType::IsMoving || t == GBAScriptNodeType::IsOnGround || t == GBAScriptNodeType::IsJumping
+                return t == GBAScriptNodeType::IsMoving || t == GBAScriptNodeType::IsOnGround || t == GBAScriptNodeType::IsJumping || t == GBAScriptNodeType::IsFalling
                     || t == GBAScriptNodeType::IsFlagSet || t == GBAScriptNodeType::IsHPZero || t == GBAScriptNodeType::IsNear
                     || t == GBAScriptNodeType::Countdown || t == GBAScriptNodeType::IsAlive
                     || t == GBAScriptNodeType::HasItem || t == GBAScriptNodeType::IsDialogueOpen
@@ -3296,7 +3298,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsJumping) {
-                        f << "    if (!player_on_ground && player_vy > 0) {\n";
+                        f << "    if (player_vy > 0) {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsFalling) {
+                        f << "    if (!player_on_ground && player_vy <= 0) {\n";
                         gateDepth++;
                         continue;
                     }
@@ -4602,7 +4609,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
             // First pass: emit each blueprint action as its own function (deduplicate by node ID)
             auto bpIsGateNode = [](GBAScriptNodeType t) {
-                return t == GBAScriptNodeType::IsMoving || t == GBAScriptNodeType::IsOnGround || t == GBAScriptNodeType::IsJumping
+                return t == GBAScriptNodeType::IsMoving || t == GBAScriptNodeType::IsOnGround || t == GBAScriptNodeType::IsJumping || t == GBAScriptNodeType::IsFalling
                     || t == GBAScriptNodeType::IsFlagSet || t == GBAScriptNodeType::IsHPZero || t == GBAScriptNodeType::IsNear
                     || t == GBAScriptNodeType::Countdown || t == GBAScriptNodeType::IsAlive
                     || t == GBAScriptNodeType::HasItem || t == GBAScriptNodeType::IsDialogueOpen
@@ -4684,33 +4691,47 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 f << "    " << callName << "(" << paramArgs << ");\n";
             };
 
-            // Emit blueprint actions with IsMoving gate support
-            auto bpEmitActionsWithGates = [&](const std::vector<const GBAScriptNodeExport*>& actions) {
-                int gateDepth = 0;
+            // Emit blueprint actions with gate support
+            // Gate nodes collect their downstream actions via the link graph
+            // and emit them inside the if-block, rather than relying on flat-list ordering.
+            std::function<void(const std::vector<const GBAScriptNodeExport*>&, std::set<int>&)> bpEmitActionsWithGatesImpl;
+            bpEmitActionsWithGatesImpl = [&](const std::vector<const GBAScriptNodeExport*>& actions, std::set<int>& emitted) {
                 for (auto* a : actions) {
+                    if (emitted.count(a->id)) continue;
+                    emitted.insert(a->id);
+
+                    // Helper: emit a gate node — open if-block, recursively emit branch, close
+                    auto emitGateBranch = [&](const char* condition) {
+                        f << "    if (" << condition << ") {\n";
+                        auto branch = bpCollectBranch(a->id, 0);
+                        bpEmitActionsWithGatesImpl(branch, emitted);
+                        f << "    }\n";
+                    };
+
                     if (a->type == GBAScriptNodeType::IsMoving) {
-                        f << "    if (player_moving) {\n";
-                        gateDepth++;
+                        emitGateBranch("player_moving");
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsOnGround) {
-                        f << "    if (player_on_ground) {\n";
-                        gateDepth++;
+                        emitGateBranch("player_on_ground");
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsJumping) {
-                        f << "    if (!player_on_ground && player_vy > 0) {\n";
-                        gateDepth++;
+                        emitGateBranch("player_vy > 0");
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsFalling) {
+                        emitGateBranch("!player_on_ground && player_vy <= 0");
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsFlagSet) {
-                        f << "    if (afn_flags & (1u << " << a->paramInt[0] << ")) {\n";
-                        gateDepth++;
+                        char buf[64]; snprintf(buf, sizeof(buf), "afn_flags & (1u << %d)", a->paramInt[0]);
+                        emitGateBranch(buf);
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsHPZero) {
-                        f << "    if (afn_hp[" << a->paramInt[0] << "] == 0) {\n";
-                        gateDepth++;
+                        char buf[64]; snprintf(buf, sizeof(buf), "afn_hp[%d] == 0", a->paramInt[0]);
+                        emitGateBranch(buf);
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsNear) {
@@ -4718,33 +4739,36 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "      FIXED dz = g_sprites[" << a->paramInt[0] << "].wz - g_sprites[" << a->paramInt[1] << "].wz;\n";
                         f << "      if (dx<0) dx=-dx; if (dz<0) dz=-dz;\n";
                         f << "      if (((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8 < " << a->paramInt[2] << ") {\n";
-                        gateDepth++;
+                        auto branch = bpCollectBranch(a->id, 0);
+                        bpEmitActionsWithGatesImpl(branch, emitted);
+                        f << "    } }\n";
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::Countdown) {
                         f << "    { static int afn_cd_" << a->id << " = " << a->paramInt[0] << ";\n";
                         f << "      if (--afn_cd_" << a->id << " <= 0) { afn_cd_" << a->id << " = " << a->paramInt[0] << ";\n";
-                        gateDepth += 2;
+                        auto branch = bpCollectBranch(a->id, 0);
+                        bpEmitActionsWithGatesImpl(branch, emitted);
+                        f << "    } }\n";
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsAlive) {
-                        f << "    if (afn_hp[" << a->paramInt[0] << "] > 0) {\n";
-                        gateDepth++;
+                        char buf[64]; snprintf(buf, sizeof(buf), "afn_hp[%d] > 0", a->paramInt[0]);
+                        emitGateBranch(buf);
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::HasItem) {
-                        f << "    if (afn_inventory[" << a->paramInt[0] << " & 15] > 0) {\n";
-                        gateDepth++;
+                        char buf[64]; snprintf(buf, sizeof(buf), "afn_inventory[%d & 15] > 0", a->paramInt[0]);
+                        emitGateBranch(buf);
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsDialogueOpen) {
-                        f << "    if (afn_dlg_open) {\n";
-                        gateDepth++;
+                        emitGateBranch("afn_dlg_open");
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsInState) {
-                        f << "    if (afn_state[" << a->paramInt[0] << " & 15] == " << a->paramInt[1] << ") {\n";
-                        gateDepth++;
+                        char buf[64]; snprintf(buf, sizeof(buf), "afn_state[%d & 15] == %d", a->paramInt[0], a->paramInt[1]);
+                        emitGateBranch(buf);
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsColliding) {
@@ -4754,24 +4778,24 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "      int cr = afn_collision_size[" << a->paramInt[0] << "] + afn_collision_size[" << a->paramInt[1] << "];\n";
                         f << "      if (cr <= 0) cr = 16;\n";
                         f << "      if (((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8 < cr) {\n";
-                        gateDepth++;
+                        auto branch = bpCollectBranch(a->id, 0);
+                        bpEmitActionsWithGatesImpl(branch, emitted);
+                        f << "    } }\n";
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsTrue) {
                         auto* valData = bpFindDataIn(a->id, 0);
                         std::string val = valData ? bpResolveInt(valData) : "0";
-                        f << "    if (" << val << ") {\n";
-                        gateDepth++;
+                        char buf[256]; snprintf(buf, sizeof(buf), "%s", val.c_str());
+                        emitGateBranch(buf);
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsNear2D) {
-                        f << "    if (afn_collided_tm_obj == afn_bp_cur_tm_obj && afn_bp_cur_tm_obj >= 0) {\n";
-                        gateDepth++;
+                        emitGateBranch("afn_collided_tm_obj == afn_bp_cur_tm_obj && afn_bp_cur_tm_obj >= 0");
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsFollowMoving) {
-                        f << "    if (tm_fol_moving) {\n";
-                        gateDepth++;
+                        emitGateBranch("tm_fol_moving");
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::CheckFlag) {
@@ -4780,25 +4804,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         auto brSet = bpCollectBranch(a->id, 0);
                         auto brClear = bpCollectBranch(a->id, 1);
                         f << "    if (afn_flags & (1u << " << flag << ")) {\n";
-                        for (auto* a2 : brSet) {
-                            if (bpIsGateNode(a2->type)) {
-                                if (a2->type == GBAScriptNodeType::IsFollowMoving)
-                                    f << "    if (tm_fol_moving) {\n";
-                                else if (a2->type == GBAScriptNodeType::IsMoving)
-                                    f << "    if (player_moving) {\n";
-                                else if (a2->type == GBAScriptNodeType::IsOnGround)
-                                    f << "    if (player_on_ground) {\n";
-                                else if (a2->type == GBAScriptNodeType::IsFlagSet)
-                                    f << "    if (afn_flags & (1u << " << a2->paramInt[0] << ")) {\n";
-                                else bpEmitActionCall(a2);
-                                gateDepth++;
-                            } else bpEmitActionCall(a2);
-                        }
-                        for (int g2 = 0; g2 < gateDepth; g2++) f << "    }\n";
-                        gateDepth = 0;
+                        bpEmitActionsWithGatesImpl(brSet, emitted);
                         if (!brClear.empty()) {
                             f << "    } else {\n";
-                            for (auto* a2 : brClear) bpEmitActionCall(a2);
+                            bpEmitActionsWithGatesImpl(brClear, emitted);
                         }
                         f << "    }\n";
                         continue;
@@ -4809,16 +4818,18 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         auto brA = bpCollectBranch(a->id, 0);
                         auto brB = bpCollectBranch(a->id, 1);
                         f << "      if (afn_ff_" << a->id << ") {\n";
-                        for (auto* a2 : brA) bpEmitActionCall(a2);
+                        bpEmitActionsWithGatesImpl(brA, emitted);
                         f << "      } else {\n";
-                        for (auto* a2 : brB) bpEmitActionCall(a2);
+                        bpEmitActionsWithGatesImpl(brB, emitted);
                         f << "      } }\n";
                         continue;
                     }
                     bpEmitActionCall(a);
                 }
-                for (int g = 0; g < gateDepth; g++)
-                    f << "    }\n";
+            };
+            auto bpEmitActionsWithGates = [&](const std::vector<const GBAScriptNodeExport*>& actions) {
+                std::set<int> emitted;
+                bpEmitActionsWithGatesImpl(actions, emitted);
             };
 
             auto bpEmitKeyBlock = [&](const BpChain& c, const char* keyCheck) {

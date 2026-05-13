@@ -5311,10 +5311,10 @@ int main(void)
             }}
 
             // Blueprint instance dispatch
-            afn_bp_dispatch_update();
             afn_bp_dispatch_key_held();
             afn_bp_dispatch_key_pressed();
             afn_bp_dispatch_key_released();
+            afn_bp_dispatch_update();
 
             // --- Generic follow system tick (driven by FollowPlayer node) ---
             if (tm_fol_active && tm_fol_obj >= 0 && tm_fol_obj < TM_MAX_DIR_OBJS) {
@@ -6107,10 +6107,10 @@ int main(void)
                 afn_bp_dispatch_collision();
             }
             // Blueprint instance dispatch
-            afn_bp_dispatch_update();
             afn_bp_dispatch_key_held();
             afn_bp_dispatch_key_pressed();
             afn_bp_dispatch_key_released();
+            afn_bp_dispatch_update();
 
             // Scene switch is now handled by the transition state machine above
 
