@@ -2039,6 +2039,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::PlayHudAnim:   return "_play_hud_anim";
         case GBAScriptNodeType::StopHudAnim:   return "_stop_hud_anim";
         case GBAScriptNodeType::SetHudAnimSpeed: return "_set_hud_anim_speed";
+        case GBAScriptNodeType::OnRise:        return "_on_rise";
         default: return "";
         }
     };
@@ -3198,7 +3199,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     || t == GBAScriptNodeType::HasItem || t == GBAScriptNodeType::IsDialogueOpen
                     || t == GBAScriptNodeType::IsInState || t == GBAScriptNodeType::IsColliding
                     || t == GBAScriptNodeType::IsTrue || t == GBAScriptNodeType::IsNear2D
-                    || t == GBAScriptNodeType::IsFollowMoving;
+                    || t == GBAScriptNodeType::IsFollowMoving || t == GBAScriptNodeType::OnRise;
             };
             std::set<int> emittedActionIds;
             for (auto& c : chains) {
@@ -3380,6 +3381,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     if (a->type == GBAScriptNodeType::IsFollowMoving) {
                         f << "    if (tm_fol_moving) {\n";
                         gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::OnRise) {
+                        f << "    { static int afn_rise_" << a->id << " = -2;\n";
+                        f << "      if (afn_rise_" << a->id << " == afn_frame_count - 1) { afn_rise_" << a->id << " = afn_frame_count; }\n";
+                        f << "      else { afn_rise_" << a->id << " = afn_frame_count;\n";
+                        gateDepth += 2;
                         continue;
                     }
                     emitActionCall(a);
@@ -4627,7 +4635,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     || t == GBAScriptNodeType::IsInState || t == GBAScriptNodeType::IsColliding
                     || t == GBAScriptNodeType::IsTrue || t == GBAScriptNodeType::FlipFlop
                     || t == GBAScriptNodeType::CheckFlag || t == GBAScriptNodeType::IsNear2D
-                    || t == GBAScriptNodeType::IsFollowMoving;
+                    || t == GBAScriptNodeType::IsFollowMoving || t == GBAScriptNodeType::OnRise;
             };
             std::set<int> bpEmittedIds;
             for (auto& c : bpChains) {
@@ -4807,6 +4815,15 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     }
                     if (a->type == GBAScriptNodeType::IsFollowMoving) {
                         emitGateBranch("tm_fol_moving");
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::OnRise) {
+                        f << "    { static int afn_rise_" << a->id << " = -2;\n";
+                        f << "      if (afn_rise_" << a->id << " == afn_frame_count - 1) { afn_rise_" << a->id << " = afn_frame_count; }\n";
+                        f << "      else { afn_rise_" << a->id << " = afn_frame_count;\n";
+                        auto branch = bpCollectBranch(a->id, 0);
+                        bpEmitActionsWithGatesImpl(branch, emitted);
+                        f << "    } }\n";
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::CheckFlag) {

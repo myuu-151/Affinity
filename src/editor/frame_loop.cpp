@@ -446,6 +446,7 @@ enum class VsNodeType : int {
     PlayHudAnim,    // play a HUD animation layer
     StopHudAnim,    // stop a HUD animation layer
     SetHudAnimSpeed, // set HUD animation layer speed
+    OnRise,         // gate: passes exec only on frame condition becomes true (rising edge)
     COUNT
 };
 
@@ -734,6 +735,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Play Hud Anim",   0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Stop Hud Anim",   0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Set Anim Speed",  0xFF3355AA, 1, 1, 0, 0, {}, {"Speed"}, {} },
+    { "On Rise",         0xFF885533, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -16185,6 +16187,7 @@ void FrameTick(float dt)
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
+                case VsNodeType::OnRise:        desc = "Rising-edge gate: only passes execution on the first frame the upstream condition becomes true. Blocks while it keeps firing. Resets when it stops."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -16420,6 +16423,7 @@ void FrameTick(float dt)
                         case VsNodeType::PlayHudAnim:   return "_play_hud_anim";
                         case VsNodeType::StopHudAnim:   return "_stop_hud_anim";
                         case VsNodeType::SetHudAnimSpeed: return "_set_hud_anim_speed";
+                        case VsNodeType::OnRise:        return "_on_rise";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -18427,6 +18431,18 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_set_hud_anim_speed", bSS);
                     break;
                 }
+                case VsNodeType::OnRise:
+                    editorCode = "// Rising edge — fires once when upstream starts";
+                    setActionFunc(infoNode, "_on_rise",
+                        "    static int prev = 0;\n"
+                        "    int cur = 1; // (was called this frame)\n"
+                        "    if (prev) { prev = cur; return; }\n"
+                        "    prev = cur;\n"
+                        "    /* downstream actions */\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // prev resets to 0 each frame; set to 1 when reached\n"
+                        "    // Only passes on the frame the chain first fires");
+                    break;
                 case VsNodeType::GetRandom:
                     editorCode = "// Random 0-255";
                     setActionFunc(infoNode, "_get_random",
@@ -19475,6 +19491,7 @@ void FrameTick(float dt)
                     case VsNodeType::PlayHudAnim: suffix = "_play_hud_anim"; break;
                     case VsNodeType::StopHudAnim: suffix = "_stop_hud_anim"; break;
                     case VsNodeType::SetHudAnimSpeed: suffix = "_set_hud_anim_speed"; break;
+                    case VsNodeType::OnRise:        suffix = "_on_rise"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
                     case VsNodeType::Branch:        suffix = "_branch"; break;
                     case VsNodeType::CompareVar:    suffix = "_compare_var"; break;
@@ -19914,6 +19931,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Gate].name)) addNodeAt(VsNodeType::Gate);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ForLoop].name)) addNodeAt(VsNodeType::ForLoop);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Sequence].name)) addNodeAt(VsNodeType::Sequence);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OnRise].name)) addNodeAt(VsNodeType::OnRise);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CustomCode].name)) addNodeAt(VsNodeType::CustomCode);
                     ImGui::PopStyleColor();
