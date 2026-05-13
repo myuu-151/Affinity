@@ -1010,7 +1010,7 @@ struct SoundInstance {
     int voiceCount = 6;        // max simultaneous voices on GBA (4-8)
     int softFade = 1;          // 0 = hard cutoff, 1 = 256-sample fadeout at end of notes
     int longRelease = 0;       // 0 = normal, 1 = force minimum 1672-sample (~67ms) release tail
-    int hifiMode = 0;          // 0 = normal (timer 672, ~25kHz), 1 = clean (timer 660, ~25.4kHz)
+    int hifiMode = 0;          // 0 = normal (~18kHz), 1 = hi-fi (~25kHz, may trill)
     int compatMode = 0;        // 0 = normal, 1 = compatibility (halved rate, no interp, no release — less CPU)
     std::vector<SampleOverride> overrides; // per-sample edits
 };
@@ -3853,15 +3853,16 @@ struct SkyPanel {
     GLuint tex = 0;
 };
 
-// Skybox instance — each has its own panorama panels and scene assignment
+// Skybox instance — each has its own animation frames and scene assignment
 struct SkyboxInstance {
     char name[48] = "Skybox 0";
     int modeFilter = 0;          // 0 = All, 1 = Mode 4 only, 2 = Mode 1 only
-    std::vector<SkyPanel> panels;
+    int animSpeed = 8;           // VBlanks between frame changes (1-60, default 8 = ~7.5fps)
+    std::vector<SkyPanel> panels;  // each panel = one animation frame
     std::vector<bool> m4SceneAssign;  // per Mode 4 scene (true = use this skybox)
     std::vector<bool> m1SceneAssign;  // per Mode 1 scene (true = use this skybox)
     int dragFrom = -1;           // for wire-drag reordering within this instance
-    // Stitched pixel data (built from panels)
+    // Stitched pixel data (built from panels — single panel or animation preview)
     unsigned char* stitchedPixels = nullptr;
     int stitchedW = 0, stitchedH = 0;
 };
@@ -4929,6 +4930,7 @@ static bool SaveProject(const std::string& path)
         const SkyboxInstance& sky = sSkyboxInstances[si];
         fprintf(f, "skyboxInst=%s\n", sky.name);
         fprintf(f, "skyboxMode=%d\n", sky.modeFilter);
+        fprintf(f, "skyboxAnimSpeed=%d\n", sky.animSpeed);
         fprintf(f, "skyboxPanelCount=%d\n", (int)sky.panels.size());
         for (int pi = 0; pi < (int)sky.panels.size(); pi++) {
             if (!sky.panels[pi].path.empty())
@@ -6637,6 +6639,9 @@ static bool LoadProject(const std::string& path)
             }
             else if (sscanf(line, "skyboxMode=%d", &ival) == 1 && !sSkyboxInstances.empty()) {
                 sSkyboxInstances.back().modeFilter = std::clamp(ival, 0, 2);
+            }
+            else if (sscanf(line, "skyboxAnimSpeed=%d", &ival) == 1 && !sSkyboxInstances.empty()) {
+                sSkyboxInstances.back().animSpeed = std::clamp(ival, 1, 60);
             }
             else if (sscanf(line, "skyboxPanelCount=%d", &ival) == 1 && !sSkyboxInstances.empty()) {
                 SkyboxInstance& inst = sSkyboxInstances.back();
@@ -12630,24 +12635,29 @@ void FrameTick(float dt)
                     }
                 }
 
-                // Stitch sky panels for all instances
-                StitchSkyPanels();
-
-                // Find first skybox instance with panels for export
-                unsigned char* exportSkyPixels = nullptr;
-                int exportSkyW = 0, exportSkyH = 0;
+                // Build per-frame sky data for export
+                std::vector<GBASkyFrameExport> exportSkyFrames;
+                int exportSkyAnimSpeed = 8;
                 for (auto& sky : sSkyboxInstances) {
-                    if (sky.stitchedPixels && sky.stitchedW > 0) {
-                        exportSkyPixels = sky.stitchedPixels;
-                        exportSkyW = sky.stitchedW;
-                        exportSkyH = sky.stitchedH;
-                        break;
+                    bool hasPanels = false;
+                    for (auto& p : sky.panels) if (p.pixels) { hasPanels = true; break; }
+                    if (!hasPanels) continue;
+                    exportSkyAnimSpeed = sky.animSpeed;
+                    for (auto& p : sky.panels) {
+                        if (p.pixels) {
+                            GBASkyFrameExport frame;
+                            frame.pixels = p.pixels;
+                            frame.w = p.w;
+                            frame.h = p.h;
+                            exportSkyFrames.push_back(frame);
+                        }
                     }
+                    break; // use first instance with panels
                 }
 
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                              exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, target,
-                             exportSkyPixels, exportSkyW, exportSkyH]() {
+                             exportSkyFrames, exportSkyAnimSpeed]() {
                     std::string err;
                     bool ok;
                     if (target == BuildTarget::NDS)
@@ -12657,7 +12667,7 @@ void FrameTick(float dt)
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,
                                         sM7FloorPixels, sM7FloorW, sM7FloorH, sM7FloorSize,
-                                        exportSkyPixels, exportSkyW, exportSkyH);
+                                        exportSkyFrames, exportSkyAnimSpeed);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
@@ -14333,15 +14343,16 @@ void FrameTick(float dt)
 
             // Instance name
             ImGui::PushItemWidth(200);
-            if (ImGui::InputText("##skyname", sky.name, sizeof(sky.name)))
+            if (ImGui::InputText("Name##skyname", sky.name, sizeof(sky.name)))
                 sProjectDirty = true;
             ImGui::PopItemWidth();
-            ImGui::SameLine();
+
+            ImGui::Spacing();
 
             // Mode filter dropdown
             const char* modeLabels[] = { "All", "Mode 4", "Mode 1" };
             ImGui::PushItemWidth(100);
-            if (ImGui::BeginCombo("##skymode", modeLabels[sky.modeFilter])) {
+            if (ImGui::BeginCombo("Mode##skymode", modeLabels[sky.modeFilter])) {
                 for (int m = 0; m < 3; m++) {
                     if (ImGui::Selectable(modeLabels[m], sky.modeFilter == m)) {
                         sky.modeFilter = m;
@@ -14351,9 +14362,29 @@ void FrameTick(float dt)
                 ImGui::EndCombo();
             }
             ImGui::PopItemWidth();
+            ImGui::SameLine(0, 30);
 
+            // Animation speed
+            ImGui::PushItemWidth(100);
+            if (ImGui::InputInt("Speed##skyspeed", &sky.animSpeed, 1, 5)) {
+                if (sky.animSpeed < 1) sky.animSpeed = 1;
+                if (sky.animSpeed > 60) sky.animSpeed = 60;
+                sProjectDirty = true;
+            }
+            ImGui::PopItemWidth();
+            ImGui::SameLine(0, 10);
+            {
+                float fps = 60.0f / sky.animSpeed;
+                char fpsLabel[32];
+                snprintf(fpsLabel, sizeof(fpsLabel), "(%.1f fps)", fps);
+                ImGui::TextDisabled("%s", fpsLabel);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("VBlanks between animation frames.\n1 = 60fps, 8 = ~7.5fps, 30 = 2fps");
+
+            ImGui::Spacing();
             ImGui::Separator();
-            ImGui::Text("Panoramic sky panels. Add panels and wire them left-to-right.");
+            ImGui::Spacing();
+            ImGui::Text("Animation frames. Each panel = one frame, linked left-to-right.");
             ImGui::Spacing();
 
             // Add Panel button
@@ -14497,6 +14528,67 @@ void FrameTick(float dt)
             float totalNodeW = std::max(1.0f, (float)sky.panels.size()) * (nodeW + nodeSpacing);
             ImGui::SetCursorScreenPos(ImVec2(canvasStart.x, canvasStart.y));
             ImGui::Dummy(ImVec2(totalNodeW, nodeH + 10));
+
+            // Animation playback preview
+            {
+                int loadedCount = 0;
+                for (auto& p : sky.panels) if (p.tex) loadedCount++;
+                if (loadedCount >= 1) {
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+
+                    static int skyPreviewFrame = 0;
+                    static float skyPreviewTimer = 0.0f;
+                    static bool skyPreviewPlaying = true;
+
+                    // Advance timer
+                    if (skyPreviewPlaying) {
+                        skyPreviewTimer += ImGui::GetIO().DeltaTime;
+                        float interval = sky.animSpeed / 60.0f;
+                        if (skyPreviewTimer >= interval) {
+                            skyPreviewTimer -= interval;
+                            skyPreviewFrame++;
+                        }
+                    }
+                    // Wrap frame index to valid loaded panels
+                    if (skyPreviewFrame >= (int)sky.panels.size()) skyPreviewFrame = 0;
+                    // Skip to next loaded panel
+                    for (int tries = 0; tries < (int)sky.panels.size(); tries++) {
+                        if (sky.panels[skyPreviewFrame].tex) break;
+                        skyPreviewFrame = (skyPreviewFrame + 1) % (int)sky.panels.size();
+                    }
+
+                    // Controls
+                    if (ImGui::Button(skyPreviewPlaying ? "Pause" : "Play", ImVec2(60, 0)))
+                        skyPreviewPlaying = !skyPreviewPlaying;
+                    ImGui::SameLine();
+                    if (ImGui::Button("|<##skyrw", ImVec2(30, 0))) {
+                        skyPreviewFrame = 0;
+                        skyPreviewTimer = 0.0f;
+                    }
+                    ImGui::SameLine();
+                    char frameLabel[32];
+                    snprintf(frameLabel, sizeof(frameLabel), "Frame %d / %d", skyPreviewFrame + 1, loadedCount);
+                    ImGui::Text("%s", frameLabel);
+                    ImGui::SameLine();
+                    float fps = 60.0f / sky.animSpeed;
+                    char fpsLabel[32];
+                    snprintf(fpsLabel, sizeof(fpsLabel), "(%.1f fps)", fps);
+                    ImGui::TextDisabled("%s", fpsLabel);
+
+                    // Draw preview
+                    SkyPanel& previewPanel = sky.panels[skyPreviewFrame];
+                    if (previewPanel.tex) {
+                        float aspect = (float)previewPanel.h / (float)previewPanel.w;
+                        float previewW = 256.0f;
+                        float previewH = previewW * aspect;
+                        if (previewH > 160.0f) { previewH = 160.0f; previewW = previewH / aspect; }
+                        ImGui::Image((ImTextureID)(intptr_t)previewPanel.tex,
+                            ImVec2(previewW, previewH));
+                    }
+                }
+            }
 
             // Scene assignment
             ImGui::Spacing();
@@ -21785,11 +21877,11 @@ void FrameTick(float dt)
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Force minimum ~67ms release tail (1672 samples).\nReduces popping on note-off — like fix mode 28.");
             bool hf = inst.hifiMode != 0;
-            if (ImGui::Checkbox("Clean Rate", &hf)) {
+            if (ImGui::Checkbox("Hi-Fi", &hf)) {
                 inst.hifiMode = hf ? 1 : 0;
                 sProjectDirty = true;
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Timer 660 (~25.4kHz) instead of default 672 (~25kHz).\nReduces sample trilling artifacts.");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("~25kHz sample rate (default ~18kHz).\nBetter treble but may cause trilling on some instruments.");
             bool cm = inst.compatMode != 0;
             if (ImGui::Checkbox("Lo-Fi Drums", &cm)) {
                 inst.compatMode = cm ? 1 : 0;

@@ -1224,6 +1224,12 @@ static void load_editor_map(void)
 static int g_sky_active;     // whether sky is enabled for current scene
 static int sky_vram_src[32]; // which panorama column is in each VRAM slot
 
+// Animation state
+#if AFN_SKY_ANIM_FRAMES > 1
+static int sky_anim_frame = 0;
+static int sky_anim_timer = 0;
+#endif
+
 static int scene_sky_enabled(int sceneIdx)
 {
 #ifdef AFN_SKY_SCENE_COUNT
@@ -1233,13 +1239,29 @@ static int scene_sky_enabled(int sceneIdx)
 #endif
 }
 
+// Load tiles + tilemap for a specific animation frame
+static void load_sky_frame(int frame)
+{
+    int row, col;
+    u16 *sbb = (u16*)se_mem[4];
+    const unsigned char* tiles = afn_sky_frame_tiles[frame];
+    unsigned int tilesLen = afn_sky_frame_tile_lens[frame];
+    const unsigned short* map = afn_sky_frame_maps[frame];
+
+    memcpy32(&tile_mem[1][0], tiles, tilesLen / 4);
+
+    for (col = 0; col < 32; col++) {
+        sky_vram_src[col] = col % AFN_SKY_MAP_COLS;
+        for (row = 0; row < 32; row++)
+            sbb[row * 32 + col] = map[row * AFN_SKY_MAP_COLS + sky_vram_src[col]];
+    }
+}
+
 static void load_sky(void)
 {
     REG_BG1CNT = BG_CBB(1) | BG_SBB(4) | BG_4BPP | BG_REG_32x32 | BG_PRIO(3);
     REG_BG1HOFS = 0;
     REG_BG1VOFS = 0;
-
-    memcpy32(&tile_mem[1][0], afn_sky_tiles, afn_sky_tilesLen / 4);
 
     memcpy16(&pal_bg_mem[AFN_SKY_SUBPAL_BASE * 16], afn_sky_pal0, 16);
     memcpy16(&pal_bg_mem[(AFN_SKY_SUBPAL_BASE + 1) * 16], afn_sky_pal1, 16);
@@ -1249,19 +1271,16 @@ static void load_sky(void)
     // Mark all VRAM columns as needing refresh
     { int i; for (i = 0; i < 32; i++) sky_vram_src[i] = -1; }
 
-    // Fill initial 32 columns
-    {
-        int row, col;
-        u16 *sbb = (u16*)se_mem[4];
-        for (col = 0; col < 32; col++) {
-            sky_vram_src[col] = col % AFN_SKY_MAP_COLS;
-            for (row = 0; row < 32; row++)
-                sbb[row * 32 + col] = afn_sky_tilemap[row * AFN_SKY_MAP_COLS + sky_vram_src[col]];
-        }
-    }
+#if AFN_SKY_ANIM_FRAMES > 1
+    sky_anim_frame = 0;
+    sky_anim_timer = 0;
+#endif
+
+    // Load first frame
+    load_sky_frame(0);
 }
 
-// Update sky — only refreshes columns that actually changed (typically 0-1 per frame)
+// Update sky — animation cycling + column scroll
 static void update_sky_scroll(int cam_ang)
 {
     int totalCols = AFN_SKY_MAP_COLS;
@@ -1270,17 +1289,38 @@ static void update_sky_scroll(int cam_ang)
     int colStart = pixScroll >> 3;
     int i, row;
     u16 *sbb = (u16*)se_mem[4];
+    int fullReload = 0;
+
+#if AFN_SKY_ANIM_FRAMES > 1
+    // Advance animation timer
+    if (++sky_anim_timer >= AFN_SKY_ANIM_SPEED) {
+        sky_anim_timer = 0;
+        sky_anim_frame = (sky_anim_frame + 1) % AFN_SKY_ANIM_FRAMES;
+        // Reload tiles + full tilemap for new frame
+        load_sky_frame(sky_anim_frame);
+        fullReload = 1;
+    }
+#endif
 
     REG_BG1HOFS = pixScroll & 0xFF;
 
     // Only update VRAM columns whose source column changed
-    for (i = 0; i < 32; i++) {
-        int srcCol = (colStart + i) % totalCols;
-        int vramCol = (colStart + i) & 31;
-        if (sky_vram_src[vramCol] != srcCol) {
-            sky_vram_src[vramCol] = srcCol;
-            for (row = 0; row < 32; row++)
-                sbb[row * 32 + vramCol] = afn_sky_tilemap[row * totalCols + srcCol];
+    if (!fullReload) {
+        const unsigned short* curMap = afn_sky_frame_maps[
+#if AFN_SKY_ANIM_FRAMES > 1
+            sky_anim_frame
+#else
+            0
+#endif
+        ];
+        for (i = 0; i < 32; i++) {
+            int srcCol = (colStart + i) % totalCols;
+            int vramCol = (colStart + i) & 31;
+            if (sky_vram_src[vramCol] != srcCol) {
+                sky_vram_src[vramCol] = srcCol;
+                for (row = 0; row < 32; row++)
+                    sbb[row * 32 + vramCol] = curMap[row * totalCols + srcCol];
+            }
         }
     }
 }
@@ -1290,6 +1330,8 @@ static void update_sky_scroll(int cam_ang)
 EWRAM_DATA static u8 sky_m4_frame[240 * 160] __attribute__((aligned(4)));
 static int sky_m4_lastScroll = -1;
 static u8 sky_m4_palBase[32];
+
+static int sky_m4_lastFrame = -1;
 
 static void load_sky_m4(void)
 {
@@ -1304,12 +1346,15 @@ static void load_sky_m4(void)
         sky_m4_palBase[row] = (u8)(192 + band * 16);
     }
     sky_m4_lastScroll = -1;
+    sky_m4_lastFrame = -1;
 }
 
 // Decode tiles from ROM directly into the 38KB frame cache
-static void sky_m4_rebuild(int scrollX)
+static void sky_m4_rebuild(int scrollX, int animFrame)
 {
     const int skyW = AFN_SKY_MAP_COLS * 8;
+    const unsigned short* curMap = afn_sky_frame_maps[animFrame];
+    const unsigned char* curTiles = afn_sky_frame_tiles[animFrame];
     int y;
     for (y = 0; y < 160; y++)
     {
@@ -1325,8 +1370,8 @@ static void sky_m4_rebuild(int scrollX)
         {
             int tileCol = srcX >> 3;
             int tileX   = srcX & 7;
-            int tileIdx = afn_sky_tilemap[tileRow * AFN_SKY_MAP_COLS + tileCol] & 0x3FF;
-            const u8* tile = &afn_sky_tiles[tileIdx * 32 + tileY * 4];
+            int tileIdx = curMap[tileRow * AFN_SKY_MAP_COLS + tileCol] & 0x3FF;
+            const u8* tile = &curTiles[tileIdx * 32 + tileY * 4];
             int remain = 8 - tileX;
             if (x + remain > 240) remain = 240 - x;
             int px;
@@ -1341,14 +1386,24 @@ static void sky_m4_rebuild(int scrollX)
         }
     }
     sky_m4_lastScroll = scrollX;
+    sky_m4_lastFrame = animFrame;
 }
 
 IWRAM_CODE static void render_sky_m4(u16* buf)
 {
     const int skyW = AFN_SKY_MAP_COLS * 8;
     int scrollX = ((int)((u32)cam_angle * skyW >> 16)) & ~3;
-    if (scrollX != sky_m4_lastScroll)
-        sky_m4_rebuild(scrollX);
+    int animFrame = 0;
+#if AFN_SKY_ANIM_FRAMES > 1
+    // Advance animation timer (shared with Mode 1)
+    if (++sky_anim_timer >= AFN_SKY_ANIM_SPEED) {
+        sky_anim_timer = 0;
+        sky_anim_frame = (sky_anim_frame + 1) % AFN_SKY_ANIM_FRAMES;
+    }
+    animFrame = sky_anim_frame;
+#endif
+    if (scrollX != sky_m4_lastScroll || animFrame != sky_m4_lastFrame)
+        sky_m4_rebuild(scrollX, animFrame);
     DMA_TRANSFER(buf, sky_m4_frame, 240 * 160 / 4, 3, DMA_NOW | DMA_32);
 }
 #endif // AFN_MESH_COUNT > 0

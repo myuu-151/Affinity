@@ -534,6 +534,12 @@ struct GBASoundInstanceExport {
     std::vector<int> sampleIndices;        // which samples this instance uses
 };
 
+// Sky animation frame for export
+struct GBASkyFrameExport {
+    const unsigned char* pixels = nullptr; // RGBA pixels
+    int w = 0, h = 0;
+};
+
 // Package the current map into a .gba ROM.
 // runtimeDir: path to gba_runtime/ directory
 // outputPath: where to write the final .gba
@@ -557,7 +563,7 @@ bool PackageGBA(const std::string& runtimeDir,
                 const unsigned char* m7FloorPixels = nullptr,
                 int m7FloorW = 0, int m7FloorH = 0,
                 int m7FloorSize = 3,
-                const unsigned char* m7SkyPixels = nullptr,
-                int m7SkyW = 0, int m7SkyH = 0);
+                const std::vector<GBASkyFrameExport>& skyFrames = {},
+                int skyAnimSpeed = 8);
 
 } // namespace Affinity
