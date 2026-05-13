@@ -5319,7 +5319,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
         f << "static const int afn_snd_tpf[" << soundInstances.size() << "] = {\n";
         for (int i = 0; i < (int)soundInstances.size(); i++) {
-            int tpf = soundInstances[i].tempo * soundInstances[i].ticksPerBeat / 3600;
+            // Fixed-point 8.8 ticks-per-frame for precise BPM
+            int tpf = soundInstances[i].tempo * soundInstances[i].ticksPerBeat * 256 / 3600;
             if (tpf < 1) tpf = 1;
             f << "    " << tpf << ",\n";
         }

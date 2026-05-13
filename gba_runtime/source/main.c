@@ -166,7 +166,7 @@ extern int afn_mix_voice_loop16(s16* mix_acc, const s16* wdata, int count,
 extern void afn_mix_clamp_fast(s8* buf, const s16* mix_acc, int count, int shift);
 
 static int snd_seq_active = -1;
-static int snd_seq_tick = 0;
+static int snd_seq_tick = 0;   // fixed-point 8.8 tick accumulator
 static int snd_seq_next = 0;
 static int snd_initialized = 0;
 static int snd_compat = 0;       // 1 = compatibility mode (halved rate, less CPU)
@@ -421,8 +421,8 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks) {
     vc->vol = vel; // 0-127
     // Convert tick duration to output samples
     // Each frame = snd_mix_samples output samples, sequencer advances tpf ticks/frame
-    int tpf = afn_snd_tpf[snd_seq_active >= 0 ? snd_seq_active : 0];
-    int durSamples = (durTicks * snd_mix_samples) / (tpf > 0 ? tpf : 1);
+    int tpf = afn_snd_tpf[snd_seq_active >= 0 ? snd_seq_active : 0]; // 8.8 fixed-point
+    int durSamples = (durTicks * snd_mix_samples) / ((tpf + 128) >> 8); // round tpf to int for duration
     int minDurSmp = outRate * 3 / 10; // minimum ~300ms at current rate
     if (durSamples < minDurSmp) durSamples = minDurSmp;
     // For one-shot samples, ensure remaining covers the full sample playback
@@ -483,8 +483,8 @@ static void afn_sound_tick(void) {
     int count = afn_snd_note_counts[snd_seq_active];
     int tpf = afn_snd_tpf[snd_seq_active];
     if (!notes || count == 0) { snd_seq_active = -1; return; }
-    snd_seq_tick += tpf;
-    while (snd_seq_next < count && notes[snd_seq_next].tick <= snd_seq_tick) {
+    snd_seq_tick += tpf;  // fixed-point 8.8
+    while (snd_seq_next < count && (notes[snd_seq_next].tick << 8) <= snd_seq_tick) {
         afn_trigger_sample(notes[snd_seq_next].smpIdx,
                            notes[snd_seq_next].note,
                            notes[snd_seq_next].vel,
