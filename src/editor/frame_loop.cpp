@@ -1012,6 +1012,7 @@ struct SoundInstance {
     int volume = 100;           // master volume 0-100
     int interpolation = 0;     // 0 = nearest, 1 = smooth (linear)
     int mixerGain = 0;         // 0=Normal(>>7), 1=Loud(>>6), 2=Mid(>>8), 3=Quiet(>>9), 4=Louder(>>5), 5=Loudest(>>4)
+    int fifoChannel = 0;       // 0 = FIFO A, 1 = FIFO B
     int voiceCount = 6;        // max simultaneous voices on GBA (4-8)
     int softFade = 1;          // 0 = hard cutoff, 1 = 256-sample fadeout at end of notes
     int longRelease = 0;       // 0 = normal, 1 = force minimum 1672-sample (~67ms) release tail
@@ -5166,6 +5167,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "instVol=%d\n", si.volume);
         fprintf(f, "instInterp=%d\n", si.interpolation);
         fprintf(f, "instGain=%d\n", si.mixerGain);
+        fprintf(f, "instFifo=%d\n", si.fifoChannel);
         fprintf(f, "instVoices=%d\n", si.voiceCount);
         fprintf(f, "instSoftFade=%d\n", si.softFade);
         fprintf(f, "instLongRelease=%d\n", si.longRelease);
@@ -7218,6 +7220,7 @@ static bool LoadProject(const std::string& path)
                 else if (sscanf(line, "instVol=%d", &ival) == 1) curInst->volume = ival;
                 else if (sscanf(line, "instInterp=%d", &ival) == 1) curInst->interpolation = ival;
                 else if (sscanf(line, "instGain=%d", &ival) == 1) curInst->mixerGain = ival;
+                else if (sscanf(line, "instFifo=%d", &ival) == 1) curInst->fifoChannel = ival;
                 else if (sscanf(line, "instVoices=%d", &ival) == 1) curInst->voiceCount = ival;
                 else if (sscanf(line, "instSoftFade=%d", &ival) == 1) curInst->softFade = ival;
                 else if (sscanf(line, "instLongRelease=%d", &ival) == 1) curInst->longRelease = ival;
@@ -12559,53 +12562,9 @@ void FrameTick(float dt)
                                 auto& smp = sSoundBank[inst.sfxSampleIdx];
                                 GBASoundSampleExport se;
                                 se.name = smp.name;
-                                if (!smp.srcData16.empty() && smp.srcRate > 0) {
-                                    // Resample to GBA output rate (18157 Hz) to avoid nearest-neighbor aliasing
-                                    float gain = (smp.ampGainDb != 0.0f) ? powf(10.0f, smp.ampGainDb / 20.0f) : 1.0f;
-                                    int targetRate = 18157;
-                                    if (smp.srcRate <= targetRate) {
-                                        // Already at or below target rate — export as-is
-                                        se.data.resize(smp.srcData16.size());
-                                        se.data16.resize(smp.srcData16.size());
-                                        for (int j = 0; j < (int)smp.srcData16.size(); j++) {
-                                            int v = (int)(smp.srcData16[j] * gain);
-                                            if (v > 32767) v = 32767; if (v < -32768) v = -32768;
-                                            se.data16[j] = (int16_t)v;
-                                            se.data[j] = (int8_t)(v >> 8);
-                                        }
-                                        se.sampleRate = smp.srcRate;
-                                    } else {
-                                        // Downsample with averaging anti-alias filter
-                                        double ratio = (double)smp.srcRate / targetRate;
-                                        int srcLen = (int)smp.srcData16.size();
-                                        int dstLen = (int)(srcLen / ratio);
-                                        if (dstLen < 1) dstLen = 1;
-                                        se.data.resize(dstLen);
-                                        se.data16.resize(dstLen);
-                                        for (int j = 0; j < dstLen; j++) {
-                                            double srcPos = j * ratio;
-                                            int lo = (int)srcPos;
-                                            int hi = (int)(srcPos + ratio);
-                                            if (hi > srcLen) hi = srcLen;
-                                            if (lo >= srcLen) lo = srcLen - 1;
-                                            // Average all source samples in this output sample's window
-                                            double sum = 0;
-                                            int count = 0;
-                                            for (int k = lo; k < hi; k++) {
-                                                sum += smp.srcData16[k];
-                                                count++;
-                                            }
-                                            int v = (int)((sum / (count > 0 ? count : 1)) * gain);
-                                            if (v > 32767) v = 32767; if (v < -32768) v = -32768;
-                                            se.data16[j] = (int16_t)v;
-                                            se.data[j] = (int8_t)(v >> 8);
-                                        }
-                                        se.sampleRate = targetRate;
-                                    }
-                                } else {
-                                    se.data = smp.data;
-                                    se.sampleRate = smp.sampleRate;
-                                }
+                                // Use 8-bit downsampled data (same as MIDI instruments) to save CPU
+                                se.data = smp.data;
+                                se.sampleRate = smp.sampleRate;
                                 se.loop = false;
                                 se.releaseMs = 0;
                                 se.decayPct = 0;
@@ -12756,6 +12715,7 @@ void FrameTick(float dt)
                             ie.isSfx = true;
                             ie.sfxSampleIdx = it->second;
                             ie.mixerGain = inst.mixerGain;
+                            ie.fifoChannel = inst.fifoChannel;
                             exportSoundInstances.push_back(std::move(ie));
                             continue;
                         }
@@ -12768,6 +12728,7 @@ void FrameTick(float dt)
                         ie.tempo = midi.tempo;
                         ie.interpolation = inst.interpolation;
                         ie.mixerGain = inst.mixerGain;
+                        ie.fifoChannel = inst.fifoChannel;
                         ie.voiceCount = inst.voiceCount;
                         ie.softFade = inst.softFade;
                         ie.longRelease = inst.longRelease;
@@ -22111,6 +22072,18 @@ void FrameTick(float dt)
                 for (int gi = 0; gi < 6; gi++) {
                     if (ImGui::Selectable(gainNames[gi], inst.mixerGain == gi)) {
                         inst.mixerGain = gi;
+                        sProjectDirty = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopItemWidth();
+            const char* fifoNames[] = { "FIFO A", "FIFO B" };
+            ImGui::PushItemWidth(-1);
+            if (ImGui::BeginCombo("##fifo", fifoNames[inst.fifoChannel])) {
+                for (int fi = 0; fi < 2; fi++) {
+                    if (ImGui::Selectable(fifoNames[fi], inst.fifoChannel == fi)) {
+                        inst.fifoChannel = fi;
                         sProjectDirty = true;
                     }
                 }

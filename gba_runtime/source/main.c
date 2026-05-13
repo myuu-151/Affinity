@@ -67,7 +67,7 @@ EWRAM_DATA static int tm_obj_dir_facing[TM_MAX_DIR_OBJS];
 // ---------------------------------------------------------------------------
 static void afn_play_sound(int instanceId);
 static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch);
-static void afn_play_sfx(int smpIdx, int gain);
+static void afn_play_sfx(int smpIdx, int gain, int fifo);
 static void afn_stop_sound(void);
 
 // ---------------------------------------------------------------------------
@@ -104,7 +104,9 @@ static int snd_voice_count = 6; // active voice limit (set from afn_snd_voices[]
 // Sound buffers — each buffer MUST be a multiple of 4 bytes so DMA_32
 // starts at the correct aligned address for both buf[0] and buf[1].
 EWRAM_DATA static s8 snd_buf[2][SND_BUF_SIZE] __attribute__((aligned(4)));
+EWRAM_DATA static s8 snd_buf_b[2][SND_BUF_SIZE] __attribute__((aligned(4)));
 static int snd_cur_buf = 0;
+static int snd_fifo_b = 0;  // 1 = FIFO B enabled (dual channel)
 // Audio fix mode — cycle with SELECT to sweep sample rates
 // Mode 0: default (use instance setting: normal/hifi/compat)
 // Modes 1-99: timer reload sweep (various sample rates)
@@ -154,6 +156,7 @@ typedef struct {
     int vibPhase;      // LFO phase (0..255 = full cycle)
     int vibInc;        // LFO phase increment per frame
     int vibDepth;      // vibrato depth in cents
+    int fifo;          // 0 = FIFO A, 1 = FIFO B
 } SndVoice;
 
 EWRAM_DATA static SndVoice snd_voices[SND_MAX_VOICES];
@@ -211,19 +214,29 @@ static void afn_sound_set_rate(void) {
 static void afn_sound_hw_start(void) {
     // Enable sound hardware, timer, and FIFO DMA
     REG_SNDSTAT = SSTAT_ENABLE;
-    REG_SNDDSCNT = SDS_A100 | SDS_AL | SDS_AR | SDS_ATMR0 | SDS_ARESET;
+    u16 dscnt = SDS_A100 | SDS_AL | SDS_AR | SDS_ATMR0 | SDS_ARESET;
+    if (snd_fifo_b)
+        dscnt |= SDS_B100 | SDS_BL | SDS_BR | SDS_BTMR0 | SDS_BRESET;
+    REG_SNDDSCNT = dscnt;
     afn_sound_set_rate();
     snd_cur_buf = 0;
     REG_DMA1CNT = 0;
     REG_DMA1SAD = (u32)snd_buf[0];
     REG_DMA1DAD = (u32)&REG_FIFO_A;
     REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
+    if (snd_fifo_b) {
+        REG_DMA2CNT = 0;
+        REG_DMA2SAD = (u32)snd_buf_b[0];
+        REG_DMA2DAD = (u32)&REG_FIFO_B;
+        REG_DMA2CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
+    }
     snd_initialized = 1;
 }
 
 static void afn_sound_hw_stop(void) {
     // Shut down timer and DMA to free bus bandwidth
     REG_DMA1CNT = 0;
+    if (snd_fifo_b) REG_DMA2CNT = 0;
     REG_TM0CNT_H = 0;
     snd_initialized = 0;
 }
@@ -233,14 +246,25 @@ static void afn_sound_init(void) {
     for (int i = 0; i < SND_BUF_SIZE; i++) {
         snd_buf[0][i] = 0;
         snd_buf[1][i] = 0;
+        snd_buf_b[0][i] = 0;
+        snd_buf_b[1][i] = 0;
     }
 }
 
 static void afn_play_sound(int instanceId) {
     snd_compat = afn_snd_compat[instanceId];
     snd_hifi = afn_snd_hifi[instanceId];
+    if (afn_snd_fifo[instanceId]) snd_fifo_b = 1;
     if (!snd_initialized) afn_sound_hw_start();
     else {
+        // Re-init FIFO B if newly needed
+        if (snd_fifo_b && !(REG_DMA2CNT & DMA_ENABLE)) {
+            REG_DMA2CNT = 0;
+            REG_DMA2SAD = (u32)snd_buf_b[snd_cur_buf];
+            REG_DMA2DAD = (u32)&REG_FIFO_B;
+            REG_DMA2CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
+            REG_SNDDSCNT |= SDS_B100 | SDS_BL | SDS_BR | SDS_BTMR0 | SDS_BRESET;
+        }
         afn_sound_set_rate();
     }
     snd_seq_active = instanceId;
@@ -259,15 +283,25 @@ static void afn_play_sound(int instanceId) {
 static int snd_sfx_last = -1;    // last SFX sample index
 static int snd_sfx_frame = 0;    // frame counter when last SFX played
 static int snd_frame = 0;        // global frame counter
-static void afn_play_sfx(int smpIdx, int gain) {
+static int snd_sfx_fifo = 0;     // FIFO channel for current SFX (0=A, 1=B)
+static void afn_play_sfx(int smpIdx, int gain, int fifo) {
     if (smpIdx < 0 || smpIdx >= AFN_SOUND_SAMPLE_COUNT) return;
     // Block retrigger of same sample on consecutive frames
     if (smpIdx == snd_sfx_last && snd_frame == snd_sfx_frame + 1) {
         snd_sfx_frame = snd_frame; // keep blocking
         return;
     }
+    if (fifo) snd_fifo_b = 1;
     if (!snd_initialized) afn_sound_hw_start();
+    else if (fifo && !(REG_DMA2CNT & DMA_ENABLE)) {
+        REG_DMA2CNT = 0;
+        REG_DMA2SAD = (u32)snd_buf_b[snd_cur_buf];
+        REG_DMA2DAD = (u32)&REG_FIFO_B;
+        REG_DMA2CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
+        REG_SNDDSCNT |= SDS_B100 | SDS_BL | SDS_BR | SDS_BTMR0 | SDS_BRESET;
+    }
     snd_sfx_gain = gain;
+    snd_sfx_fifo = fifo;
     snd_sfx_last = smpIdx;
     snd_sfx_frame = snd_frame;
     afn_trigger_sample(smpIdx, 60, 127, 60, 15);
@@ -301,6 +335,11 @@ static void afn_sound_swap(void) {
     REG_DMA1CNT = 0;
     REG_DMA1SAD = (u32)snd_buf[play];
     REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
+    if (snd_fifo_b) {
+        REG_DMA2CNT = 0;
+        REG_DMA2SAD = (u32)snd_buf_b[play];
+        REG_DMA2CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
+    }
     snd_cur_buf = play;
 }
 
@@ -309,18 +348,27 @@ IWRAM_CODE static void afn_sound_mix(void) {
     if (!snd_initialized) return;
 
     s8* buf = snd_buf[snd_cur_buf ^ 1];
+    s8* buf_b = snd_fifo_b ? snd_buf_b[snd_cur_buf ^ 1] : 0;
     int mixN = snd_mix_samples & ~3;
     // Stack-allocated in IWRAM (function is IWRAM_CODE, stack is in IWRAM)
     s16 mix_acc[SND_BUF_SIZE];
-    // Clear accumulator (32-bit writes, 2 samples at a time)
+    s16 mix_acc_b[SND_BUF_SIZE];
+    // Clear accumulators (32-bit writes, 2 samples at a time)
     {
         u32* a32 = (u32*)mix_acc;
         int i; for (i = 0; i < mixN / 2; i++) a32[i] = 0;
+        if (snd_fifo_b) {
+            u32* b32 = (u32*)mix_acc_b;
+            for (i = 0; i < mixN / 2; i++) b32[i] = 0;
+        }
     }
+    int hasB = 0;
 
     for (int v = 0; v < snd_voice_count; v++) {
         SndVoice* vc = &snd_voices[v];
         if (!vc->active) continue;
+        s16* acc = (vc->fifo && snd_fifo_b) ? mix_acc_b : mix_acc;
+        if (vc->fifo) hasB = 1;
         int n = mixN;
         if (vc->remaining > 0 && vc->remaining < n) n = vc->remaining;
         int pos = vc->pos;
@@ -344,10 +392,10 @@ IWRAM_CODE static void afn_sound_mix(void) {
             int loopSpan = loopLen - vc->loopStart;
             if (loopSpan <= 0) loopSpan = loopLen > 0 ? loopLen : (1 << 8);
             if (vc->is16)
-                pos = afn_mix_voice_loop16(mix_acc, (const s16*)vc->data, n,
+                pos = afn_mix_voice_loop16(acc, (const s16*)vc->data, n,
                                             pos, inc, vol, gs, loopLen, loopSpan);
             else
-                pos = afn_mix_voice_loop(mix_acc, (const s8*)vc->data, n,
+                pos = afn_mix_voice_loop(acc, (const s8*)vc->data, n,
                                           pos, inc, vol, gs, loopLen, loopSpan);
         } else {
             int lenFixed = vc->length << 8;
@@ -356,10 +404,10 @@ IWRAM_CODE static void afn_sound_mix(void) {
             if (maxSamples < n) { n = maxSamples; done = 1; }
             if (n > 0) {
                 if (vc->is16)
-                    pos = afn_mix_voice_fast16(mix_acc, (const s16*)vc->data, n,
+                    pos = afn_mix_voice_fast16(acc, (const s16*)vc->data, n,
                                                pos, inc, vol, gs);
                 else
-                    pos = afn_mix_voice_fast(mix_acc, (const s8*)vc->data, n,
+                    pos = afn_mix_voice_fast(acc, (const s8*)vc->data, n,
                                               pos, inc, vol, gs);
             }
         }
@@ -384,8 +432,17 @@ IWRAM_CODE static void afn_sound_mix(void) {
         int v = snd_voice_count;
         while (v > 1) { v >>= 1; outShift++; }
         afn_mix_clamp_fast(buf, mix_acc, mixN, outShift);
+        if (snd_fifo_b && buf_b) {
+            if (hasB)
+                afn_mix_clamp_fast(buf_b, mix_acc_b, mixN, 0); // FIFO B: no voice-count shift
+            else
+                for (int i = 0; i < mixN; i++) buf_b[i] = 0;
+        }
         if (mixN < SND_BUF_SIZE) {
-            for (int i = mixN; i < SND_BUF_SIZE; i++) buf[i] = 0;
+            for (int i = mixN; i < SND_BUF_SIZE; i++) {
+                buf[i] = 0;
+                if (buf_b) buf_b[i] = 0;
+            }
         }
     }
 }
@@ -399,13 +456,26 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int 
         if (!snd_voices[i].active) { vi = i; break; }
     }
     if (vi < 0) {
-        // Prefer stealing releasing voices, then closest to finishing
+        // Prefer stealing same-type voices (MIDI steals MIDI, SFX steals SFX)
         int minScore = 0x7FFFFFFF;
-        vi = 0;
+        vi = -1;
         for (int i = 0; i < snd_voice_count; i++) {
+            int isSfx = (snd_voices[i].channel == 15);
+            int wantSfx = (ch == 15);
+            if (isSfx != wantSfx) continue;
             int s = (snd_voices[i].remaining < 0) ? snd_voices[i].releaseRem
                                                     : snd_voices[i].remaining + 10000;
             if (s < minScore) { minScore = s; vi = i; }
+        }
+        if (vi < 0) {
+            // Fallback: steal any voice closest to finishing
+            minScore = 0x7FFFFFFF;
+            vi = 0;
+            for (int i = 0; i < snd_voice_count; i++) {
+                int s = (snd_voices[i].remaining < 0) ? snd_voices[i].releaseRem
+                                                        : snd_voices[i].remaining + 10000;
+                if (s < minScore) { minScore = s; vi = i; }
+            }
         }
     }
     SndVoice* vc = &snd_voices[vi];
@@ -451,6 +521,8 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int 
     vc->baseInc = baseInc;
     vc->inc = baseInc;
     vc->channel = ch;
+    // Set FIFO channel: SFX uses snd_sfx_fifo, MIDI uses instance fifo setting
+    vc->fifo = (ch == 15) ? snd_sfx_fifo : (snd_seq_active >= 0 ? afn_snd_fifo[snd_seq_active] : 0);
     // Vibrato LFO
     vc->vibDepth = afn_pcm_vib_depth[smpIdx];
     vc->vibPhase = 0;

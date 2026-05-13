@@ -539,6 +539,9 @@ struct GBASoundInstanceExport {
     int loopEndTick = 0;                   // MIDI tick to trigger loop (0 = end of sequence)
     std::vector<GBASoundNoteExport> notes; // all notes merged
     std::vector<int> sampleIndices;        // which samples this instance uses
+    bool isSfx = false;                    // true = one-shot SFX (uses afn_play_sfx)
+    int sfxSampleIdx = -1;                 // exported sample index for SFX mode
+    int fifoChannel = 0;                   // 0 = FIFO A, 1 = FIFO B
 };
 
 // Sky animation frame for export

@@ -2409,7 +2409,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 case GBAScriptNodeType::PlaySound: {
                     auto* sndData = findDataIn(action->id, 0);
                     int sndId = sndData ? resolveInt(sndData) : 0;
-                    f << "    afn_play_sound(" << sndId << ");\n";
+                    if (sndId >= 0 && sndId < (int)soundInstances.size() && soundInstances[sndId].isSfx) {
+                        f << "    afn_play_sfx(" << soundInstances[sndId].sfxSampleIdx << ", " << soundInstances[sndId].mixerGain << ", " << soundInstances[sndId].fifoChannel << ");\n";
+                    } else {
+                        f << "    afn_play_sound(" << sndId << ");\n";
+                    }
                     break;
                 }
                 case GBAScriptNodeType::StopSound:
@@ -3873,7 +3877,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 case GBAScriptNodeType::PlaySound: {
                     auto* sndData = bpFindDataIn(action->id, 0);
                     std::string sndId = sndData ? bpResolveInt(sndData) : "0";
-                    f << "    afn_play_sound(" << sndId << ");\n";
+                    // Check if this is an SFX instance (one-shot sample, no sequencer)
+                    int sndIdInt = -1;
+                    try { sndIdInt = std::stoi(sndId); } catch (...) {}
+                    if (sndIdInt >= 0 && sndIdInt < (int)soundInstances.size() && soundInstances[sndIdInt].isSfx) {
+                        f << "    afn_play_sfx(" << soundInstances[sndIdInt].sfxSampleIdx << ", " << soundInstances[sndIdInt].mixerGain << ", " << soundInstances[sndIdInt].fifoChannel << ");\n";
+                    } else {
+                        f << "    afn_play_sound(" << sndId << ");\n";
+                    }
                     break;
                 }
                 case GBAScriptNodeType::StopSound:
@@ -5385,6 +5396,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static const u8 afn_snd_compat[" << soundInstances.size() << "] = {\n";
         for (int i = 0; i < (int)soundInstances.size(); i++) {
             f << "    " << soundInstances[i].compatMode << ",\n";
+        }
+        f << "};\n";
+
+        f << "static const u8 afn_snd_fifo[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            f << "    " << soundInstances[i].fifoChannel << ",\n";
         }
         f << "};\n\n";
 
