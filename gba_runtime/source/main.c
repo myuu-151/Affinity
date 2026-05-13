@@ -149,6 +149,9 @@ typedef struct {
     int voiceFade;     // per-sample fade length at end of voice (0 = disabled)
     int baseInc;       // inc without pitch bend (for recalculating)
     int channel;       // MIDI channel (for pitch bend)
+    int vibPhase;      // LFO phase (0..255 = full cycle)
+    int vibInc;        // LFO phase increment per frame
+    int vibDepth;      // vibrato depth in cents
 } SndVoice;
 
 EWRAM_DATA static SndVoice snd_voices[SND_MAX_VOICES];
@@ -424,6 +427,12 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int 
     vc->baseInc = baseInc;
     vc->inc = baseInc;
     vc->channel = ch;
+    // Vibrato LFO
+    vc->vibDepth = afn_pcm_vib_depth[smpIdx];
+    vc->vibPhase = 0;
+    // Phase increment: rate Hz * 256 / 60 fps
+    vc->vibInc = afn_pcm_vib_rate[smpIdx] * 256 / 60;
+    if (vc->vibInc < 1 && vc->vibDepth > 0) vc->vibInc = 1;
     vc->vol = vel; // 0-127
     // Convert tick duration to output samples
     // Each frame = snd_mix_samples output samples, sequencer advances tpf ticks/frame
@@ -507,23 +516,36 @@ static void afn_sound_tick(void) {
         }
         snd_seq_next++;
     }
-    // Apply pitch bend to active voices
-    if (bendDirty) {
-        // Semitone table for ±2 semitone range (bend/8192 * 2 semitones)
-        // Precompute: inc * 2^(bend/8192 * 2/12) ≈ inc * (1 + bend * 0.0001442)
+    // Apply pitch bend + vibrato LFO to active voices
+    {
+        // Sine LUT (quarter wave, 0..255 = 0..1.0 in 8.8 fixed)
+        static const s16 sin_lut[65] = {
+            0,6,13,19,25,31,37,44,50,56,62,68,74,79,85,91,
+            97,102,108,113,118,124,129,134,139,143,148,152,157,161,165,169,
+            173,177,181,184,188,191,194,197,200,203,205,208,210,212,214,216,
+            218,219,221,222,223,224,225,226,226,227,227,227,227,227,227
+        };
         for (int i = 0; i < snd_voice_count; i++) {
             if (!snd_voices[i].active) continue;
+            int adj = 256; // 8.8 multiplier (256 = 1.0)
+            // Pitch bend (±2 semitones)
             int bend = snd_pitch_bend[snd_voices[i].channel];
-            if (bend == 0) {
-                snd_voices[i].inc = snd_voices[i].baseInc;
-            } else {
-                // ±2 semitones: ratio = 2^(bend/8192 * 2/12)
-                // Linear approx: ratio ≈ 1 + bend * (2/12/8192) = 1 + bend/49152
-                // Better: use (256 + bend * 256 / 49152) >> 8 as 8.8 multiplier
-                int adj = 256 + (bend * 256) / 49152;
-                if (adj < 128) adj = 128; // clamp to ±1 octave
-                snd_voices[i].inc = (snd_voices[i].baseInc * adj) >> 8;
+            if (bend != 0)
+                adj += (bend * 256) / 49152;
+            // Vibrato LFO
+            if (snd_voices[i].vibDepth > 0) {
+                snd_voices[i].vibPhase = (snd_voices[i].vibPhase + snd_voices[i].vibInc) & 255;
+                // Quarter-wave lookup: phase 0..63 = 0..+1, 64..127 = +1..0, 128..191 = 0..-1, 192..255 = -1..0
+                int p = snd_voices[i].vibPhase;
+                int idx = (p < 64) ? p : (p < 128) ? (127 - p) : (p < 192) ? (p - 128) : (255 - p);
+                int sinVal = sin_lut[idx]; // 0..227 (8.8 scale)
+                if (p >= 128) sinVal = -sinVal;
+                // depth in cents → pitch adjustment: cents/100/12 semitones → adj offset
+                // adj offset = sinVal * depth * 256 / (100 * 12 * 256) = sinVal * depth / 1200
+                adj += (sinVal * snd_voices[i].vibDepth) / 1200;
             }
+            if (adj < 128) adj = 128;
+            snd_voices[i].inc = (snd_voices[i].baseInc * adj) >> 8;
         }
     }
     if (snd_seq_next >= count) snd_seq_active = -1;

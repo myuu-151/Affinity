@@ -507,6 +507,8 @@ struct GBASoundSampleExport {
     int decayMinMs = 500; // minimum note length for decay (ms)
     int releaseMs = 250; // release fade-out time in ms
     int volScale = 256;  // 8.8 fixed-point volume scale (256 = 1.0, for normalization compensation)
+    int vibratoDepth = 0; // vibrato depth in cents (0 = off)
+    int vibratoRate = 5;  // vibrato LFO rate in Hz
 };
 
 // Sound export: a note event in a sequence

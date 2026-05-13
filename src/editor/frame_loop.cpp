@@ -12560,6 +12560,12 @@ void FrameTick(float dt)
                                             if (se.releaseMs < 50) se.releaseMs = 50;
                                             if (se.releaseMs > 2000) se.releaseMs = 2000;
                                         }
+                                        // Vibrato LFO
+                                        if (smp.vibratoEnabled && smp.lfoDepthCents > 0.1f) {
+                                            se.vibratoDepth = (int)smp.lfoDepthCents;
+                                            se.vibratoRate = (int)smp.lfoFreqHz;
+                                            if (se.vibratoRate < 1) se.vibratoRate = 1;
+                                        }
                                         exportSoundSamples.push_back(std::move(se));
                                     }
                                 } else {

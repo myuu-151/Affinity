@@ -5281,6 +5281,15 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static const u8 afn_pcm_vol_scale[" << soundSamples.size() << "] = {\n";
         for (int i = 0; i < (int)soundSamples.size(); i++)
             f << "    " << (soundSamples[i].volScale > 255 ? 255 : soundSamples[i].volScale) << ",\n";
+        f << "};\n";
+        // Vibrato LFO: depth in cents, rate in Hz
+        f << "static const u8 afn_pcm_vib_depth[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << std::min(soundSamples[i].vibratoDepth, 255) << ",\n";
+        f << "};\n";
+        f << "static const u8 afn_pcm_vib_rate[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << std::min(soundSamples[i].vibratoRate, 255) << ",\n";
         f << "};\n\n";
 
         // Note event struct type definition (must come before note arrays)
