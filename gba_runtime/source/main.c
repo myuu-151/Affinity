@@ -253,10 +253,23 @@ static void afn_play_sound(int instanceId) {
 }
 
 // Play a one-shot sample without disrupting the active sequence
+// Tracks last-played sample to prevent retriggering on consecutive frames
+// Resets when a different sample plays or when the same sample is requested
+// after at least one frame of silence (no SFX call)
+static int snd_sfx_last = -1;    // last SFX sample index
+static int snd_sfx_frame = 0;    // frame counter when last SFX played
+static int snd_frame = 0;        // global frame counter
 static void afn_play_sfx(int smpIdx, int gain) {
     if (smpIdx < 0 || smpIdx >= AFN_SOUND_SAMPLE_COUNT) return;
+    // Block retrigger of same sample on consecutive frames
+    if (smpIdx == snd_sfx_last && snd_frame == snd_sfx_frame + 1) {
+        snd_sfx_frame = snd_frame; // keep blocking
+        return;
+    }
     if (!snd_initialized) afn_sound_hw_start();
     snd_sfx_gain = gain;
+    snd_sfx_last = smpIdx;
+    snd_sfx_frame = snd_frame;
     afn_trigger_sample(smpIdx, 60, 127, 60, 15);
 }
 
@@ -5128,6 +5141,7 @@ int main(void)
         }
 #endif
         // Mix audio using leftover frame time (after rendering, before VBlank)
+        snd_frame++;
         afn_sound_mix();
         // FPS measurement: count frames, update every ~1 second using Timer 3
         // Timer 3: prescaler=1024, ticks at 16384 Hz. 16384 ticks ≈ 1 second.
