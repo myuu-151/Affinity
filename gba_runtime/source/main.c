@@ -1492,13 +1492,42 @@ static void update_sky_scroll(int cam_ang)
     }
 }
 
-// Mode 4 sky: decode from ROM tiles into cached frame — only 38KB EWRAM
+// Mode 4 sky: pre-decoded doubled panorama — scroll is a single DMA per row
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-EWRAM_DATA static u8 sky_m4_frame[240 * 160] __attribute__((aligned(4)));
-static int sky_m4_lastScroll = -1;
+#define SKY_PAN_W (AFN_SKY_MAP_COLS * 8)
+// Doubled panorama: [row0: 0..W-1 | 0..W-1] so any 240px window is contiguous
+EWRAM_DATA static u8 sky_m4_pan[SKY_PAN_W * 2 * 160] __attribute__((aligned(4)));
+static int sky_m4_lastFrame = -1;
 static u8 sky_m4_palBase[32];
 
-static int sky_m4_lastFrame = -1;
+// Pre-decode entire panorama from tiles, doubled for wrap-free scroll
+static void sky_m4_decode_pan(int animFrame)
+{
+    const unsigned short* curMap = afn_sky_frame_maps[animFrame];
+    const unsigned char* curTiles = afn_sky_frame_tiles[animFrame];
+    int y;
+    for (y = 0; y < 160; y++)
+    {
+        int texV = (y * 255) / 159;
+        int tileRow = texV >> 3;
+        int tileY   = texV & 7;
+        u8 palBase  = sky_m4_palBase[tileRow];
+        u8* dst = &sky_m4_pan[y * SKY_PAN_W * 2];
+        int x;
+        for (x = 0; x < SKY_PAN_W; x++)
+        {
+            int tileCol = x >> 3;
+            int tileX   = x & 7;
+            int tileIdx = curMap[tileRow * AFN_SKY_MAP_COLS + tileCol] & 0x3FF;
+            const u8* tile = &curTiles[tileIdx * 32 + tileY * 4];
+            u8 raw = tile[tileX >> 1];
+            u8 px = palBase + ((tileX & 1) ? (raw >> 4) : (raw & 0xF));
+            dst[x] = px;
+            dst[x + SKY_PAN_W] = px; // duplicate for wrap
+        }
+    }
+    sky_m4_lastFrame = animFrame;
+}
 
 static void load_sky_m4(void)
 {
@@ -1512,66 +1541,33 @@ static void load_sky_m4(void)
         if (band > 3) band = 3;
         sky_m4_palBase[row] = (u8)(192 + band * 16);
     }
-    sky_m4_lastScroll = -1;
     sky_m4_lastFrame = -1;
+    sky_m4_decode_pan(0);
 }
 
-// Decode tiles from ROM directly into the 38KB frame cache
-static void sky_m4_rebuild(int scrollX, int animFrame)
-{
-    const int skyW = AFN_SKY_MAP_COLS * 8;
-    const unsigned short* curMap = afn_sky_frame_maps[animFrame];
-    const unsigned char* curTiles = afn_sky_frame_tiles[animFrame];
-    int y;
-    for (y = 0; y < 160; y++)
-    {
-        int texV = (y * 255) / 159;
-        int tileRow = texV >> 3;
-        int tileY   = texV & 7;
-        u8 palBase  = sky_m4_palBase[tileRow];
-        u8* dst = &sky_m4_frame[y * 240];
-        int x = 0;
-        int srcX = scrollX;
-
-        while (x < 240)
-        {
-            int tileCol = srcX >> 3;
-            int tileX   = srcX & 7;
-            int tileIdx = curMap[tileRow * AFN_SKY_MAP_COLS + tileCol] & 0x3FF;
-            const u8* tile = &curTiles[tileIdx * 32 + tileY * 4];
-            int remain = 8 - tileX;
-            if (x + remain > 240) remain = 240 - x;
-            int px;
-            for (px = 0; px < remain; px++) {
-                int tx = tileX + px;
-                u8 raw = tile[tx >> 1];
-                dst[x + px] = palBase + ((tx & 1) ? (raw >> 4) : (raw & 0xF));
-            }
-            x += remain;
-            srcX += remain;
-            if (srcX >= skyW) srcX -= skyW;
-        }
-    }
-    sky_m4_lastScroll = scrollX;
-    sky_m4_lastFrame = animFrame;
-}
-
+// Render sky: blit 240px window from pre-decoded doubled panorama directly to VRAM
 IWRAM_CODE static void render_sky_m4(u16* buf)
 {
-    const int skyW = AFN_SKY_MAP_COLS * 8;
-    int scrollX = ((int)((u32)cam_angle * skyW >> 16)) & ~3;
-    int animFrame = 0;
+    // Align scroll to 4 bytes for DMA32 compatibility
+    int scrollX = ((int)((u32)cam_angle * SKY_PAN_W >> 16)) & ~3;
+    if (scrollX < 0) scrollX += SKY_PAN_W;
+    if (scrollX >= SKY_PAN_W) scrollX -= SKY_PAN_W;
 #if AFN_SKY_ANIM_FRAMES > 1
-    // Advance animation timer (shared with Mode 1)
     if (++sky_anim_timer >= AFN_SKY_ANIM_SPEED) {
         sky_anim_timer = 0;
         sky_anim_frame = (sky_anim_frame + 1) % AFN_SKY_ANIM_FRAMES;
     }
-    animFrame = sky_anim_frame;
+    if (sky_anim_frame != sky_m4_lastFrame)
+        sky_m4_decode_pan(sky_anim_frame);
 #endif
-    if (scrollX != sky_m4_lastScroll || animFrame != sky_m4_lastFrame)
-        sky_m4_rebuild(scrollX, animFrame);
-    DMA_TRANSFER(buf, sky_m4_frame, 240 * 160 / 4, 3, DMA_NOW | DMA_32);
+    // Blit 160 rows — each row is a contiguous 240-byte span in the doubled panorama
+    int y;
+    for (y = 0; y < 160; y++)
+    {
+        const u8* src = &sky_m4_pan[y * SKY_PAN_W * 2 + scrollX];
+        u16* dst = buf + y * 120; // 240 bytes = 120 u16s in Mode 4
+        DMA_TRANSFER(dst, src, 240 / 4, 3, DMA_NOW | DMA_32);
+    }
 }
 #endif // AFN_MESH_COUNT > 0
 #endif // AFN_HAS_SKY
@@ -5265,33 +5261,15 @@ int main(void)
         afn_sound_tick();
         key_poll();
 
-#ifdef AFN_DELTA_TIME
-        // Compute how many VBlanks elapsed since last frame (1 = normal, 2+ = slowdown)
-        int afn_delta = afn_vblank_counter - afn_last_vblank;
-        afn_last_vblank = afn_vblank_counter;
-        if (afn_delta < 1) afn_delta = 1;
-        if (afn_delta > 4) afn_delta = 4; // cap to prevent spiral of death
-        int afn_dt_tick;
-        for (afn_dt_tick = 0; afn_dt_tick < afn_delta; afn_dt_tick++) {
-#endif
-
         // --- Scene transition state machine ---
         if (g_scene_transition > 0) {
             handle_scene_transition();
-#ifdef AFN_DELTA_TIME
-            break; // transitions run once per render
-#else
             continue;
-#endif
         }
 #ifdef AFN_HAS_SCRIPT
         if (afn_pending_scene >= 0 && afn_pending_scene_mode >= 0) {
             start_scene_transition();
-#ifdef AFN_DELTA_TIME
-            break;
-#else
             continue;
-#endif
         }
 #endif
 
@@ -6164,6 +6142,16 @@ int main(void)
         { /* Mode 4 / Mode 7 update */
 #endif /* AFN_HAS_MODE0 */
 
+#ifdef AFN_DELTA_TIME
+        // Compute how many VBlanks elapsed since last frame (1 = normal, 2+ = slowdown)
+        { int afn_delta = afn_vblank_counter - afn_last_vblank;
+        afn_last_vblank = afn_vblank_counter;
+        if (afn_delta < 1) afn_delta = 1;
+        if (afn_delta > 4) afn_delta = 4; // cap to prevent spiral of death
+        int afn_dt_tick;
+        for (afn_dt_tick = 0; afn_dt_tick < afn_delta; afn_dt_tick++) {
+#endif
+
         // SELECT: cycle perf mode / L+SELECT: cycle audio fix
         if (key_hit(KEY_SELECT))
         {
@@ -6561,6 +6549,11 @@ int main(void)
 
         // No camera bounds — free movement
 
+#ifdef AFN_DELTA_TIME
+        } /* end delta-time tick loop */
+        } /* end afn_delta scope */
+#endif
+
         // Update sin/cos for HBlank
         g_cosf = lu_cos(cam_angle) >> 4;
         g_sinf = lu_sin(cam_angle) >> 4;
@@ -6651,10 +6644,6 @@ int main(void)
 
 #ifdef AFN_HAS_MODE0
         } /* end Mode 4/7 else block */
-#endif
-
-#ifdef AFN_DELTA_TIME
-        } /* end delta-time tick loop */
 #endif
     }
 
