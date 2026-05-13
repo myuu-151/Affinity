@@ -1267,6 +1267,20 @@ static bool LoadGMDrumKit(SoundSample& kit) {
                             hit.data[i] = (int8_t)val;
                         }
 
+                        // Tame open hi-hat decay (note 46) — truncate + fade out
+                        if (note == 46 && dstLen > 0) {
+                            int maxLen = (int)(16384 * 0.35f); // ~350ms
+                            if (dstLen > maxLen) {
+                                hit.data.resize(maxLen);
+                                dstLen = maxLen;
+                            }
+                            int fadeLen = dstLen / 3;
+                            for (int fi = 0; fi < fadeLen; fi++) {
+                                float t = 1.0f - (float)fi / fadeLen;
+                                hit.data[dstLen - fadeLen + fi] = (int8_t)(hit.data[dstLen - fadeLen + fi] * t);
+                            }
+                        }
+
                         // Name
                         if (note >= 35 && note <= 81)
                             snprintf(hit.name, sizeof(hit.name), "%s", sGMDrumNames[note - 35]);
