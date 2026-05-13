@@ -12634,7 +12634,7 @@ void FrameTick(float dt)
                                 GBASoundNoteExport ne;
                                 ne.tick = n.tick;
                                 ne.channel = n.channel;
-                                ne.velocity = n.velocity;
+                                ne.velocity = n.velocity * midi.channelVolume[n.channel] / 100;
                                 ne.duration = n.duration;
                                 auto& smp = sSoundBank[bankIdx];
                                 // Look up correct sample index
