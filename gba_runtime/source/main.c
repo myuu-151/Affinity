@@ -6479,7 +6479,12 @@ int main(void)
             {
                 // Frame-rate independent: scale animation step by how many 60Hz ticks elapsed
                 // e.g. at 30fps each frame = 2 ticks, at 20fps = 3 ticks
+#ifdef AFN_DELTA_TIME
+                // Delta-time loop already compensates — just tick once per iteration
+                g_anim_frame_counter += 1;
+#else
                 g_anim_frame_counter += (dbg_fps > 0) ? (60 / dbg_fps) : 1;
+#endif
 
                 int ai;
                 for (ai = 0; ai < AFN_ASSET_COUNT; ai++)
