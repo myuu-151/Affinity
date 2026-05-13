@@ -1012,6 +1012,9 @@ struct SoundInstance {
     int longRelease = 0;       // 0 = normal, 1 = force minimum 1672-sample (~67ms) release tail
     int hifiMode = 0;          // 0 = normal (~18kHz), 1 = hi-fi (~25kHz, may trill)
     int compatMode = 0;        // 0 = normal, 1 = compatibility (halved rate, no interp, no release — less CPU)
+    bool loop = false;          // loop playback between loopStart and loopEnd ticks
+    int loopStartTick = 0;      // loop region start (MIDI ticks)
+    int loopEndTick = 0;        // loop region end (MIDI ticks, 0 = end of sequence)
     std::vector<SampleOverride> overrides; // per-sample edits
 };
 static std::vector<SoundInstance> sSoundInstances;
@@ -2705,8 +2708,33 @@ static void AudioMixBuffer(int8_t* buf, int len) {
             for (auto& n : t.notes)
                 if (n.tick + n.duration > maxTick) maxTick = n.tick + n.duration;
         if (sMidiPlayTick > maxTick) {
-            sMidiPlaying = false;
-            for (auto& v : sVoices) v.active = false;
+            // Check if current instance has loop enabled
+            bool looped = false;
+            if (sSelectedInstance >= 0 && sSelectedInstance < (int)sSoundInstances.size()) {
+                auto& inst = sSoundInstances[sSelectedInstance];
+                if (inst.loop && inst.midiIdx == sMidiPlayIdx) {
+                    int loopEnd = inst.loopEndTick > 0 ? inst.loopEndTick : maxTick;
+                    if (sMidiPlayTick >= loopEnd) {
+                        sMidiPlayTick = inst.loopStartTick;
+                        sMidiPlayTime = (double)sMidiPlayTick / (mf.ticksPerBeat * mf.tempo / 60.0);
+                        for (auto& v : sVoices) v.active = false;
+                        looped = true;
+                    }
+                }
+            }
+            if (!looped) {
+                sMidiPlaying = false;
+                for (auto& v : sVoices) v.active = false;
+            }
+        }
+        // Also check mid-sequence loop end
+        else if (sSelectedInstance >= 0 && sSelectedInstance < (int)sSoundInstances.size()) {
+            auto& inst = sSoundInstances[sSelectedInstance];
+            if (inst.loop && inst.midiIdx == sMidiPlayIdx && inst.loopEndTick > 0 && sMidiPlayTick >= inst.loopEndTick) {
+                sMidiPlayTick = inst.loopStartTick;
+                sMidiPlayTime = (double)sMidiPlayTick / (mf.ticksPerBeat * mf.tempo / 60.0);
+                for (auto& v : sVoices) v.active = false;
+            }
         }
     }
 
@@ -5121,6 +5149,9 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "instLongRelease=%d\n", si.longRelease);
         fprintf(f, "instHifi=%d\n", si.hifiMode);
         fprintf(f, "instCompat=%d\n", si.compatMode);
+        fprintf(f, "instLoop=%d\n", si.loop ? 1 : 0);
+        fprintf(f, "instLoopStart=%d\n", si.loopStartTick);
+        fprintf(f, "instLoopEnd=%d\n", si.loopEndTick);
         fprintf(f, "instBanks=");
         for (int ch = 0; ch < 16; ch++) {
             if (ch > 0) fprintf(f, ",");
@@ -7155,6 +7186,9 @@ static bool LoadProject(const std::string& path)
                 else if (sscanf(line, "instLongRelease=%d", &ival) == 1) curInst->longRelease = ival;
                 else if (sscanf(line, "instHifi=%d", &ival) == 1) curInst->hifiMode = ival;
                 else if (sscanf(line, "instCompat=%d", &ival) == 1) curInst->compatMode = ival;
+                else if (sscanf(line, "instLoop=%d", &ival) == 1) curInst->loop = (ival != 0);
+                else if (sscanf(line, "instLoopStart=%d", &ival) == 1) curInst->loopStartTick = ival;
+                else if (sscanf(line, "instLoopEnd=%d", &ival) == 1) curInst->loopEndTick = ival;
                 else if (strncmp(line, "instBanks=", 10) == 0) {
                     sscanf(line + 10, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
                         &curInst->channelBank[0], &curInst->channelBank[1], &curInst->channelBank[2], &curInst->channelBank[3],
@@ -12626,6 +12660,9 @@ void FrameTick(float dt)
                         ie.longRelease = inst.longRelease;
                         ie.hifiMode = inst.hifiMode;
                         ie.compatMode = inst.compatMode;
+                        ie.loop = inst.loop;
+                        ie.loopStartTick = inst.loopStartTick;
+                        ie.loopEndTick = inst.loopEndTick;
                         for (auto& track : midi.tracks) {
                             for (auto& n : track.notes) {
                                 if (midi.channelMuted[n.channel]) continue;
@@ -21937,6 +21974,25 @@ void FrameTick(float dt)
                 sProjectDirty = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Halved sample rate + crunchy output.\nGreat for percussion — uses ~50%% less CPU.");
+            ImGui::Separator();
+            if (ImGui::Checkbox("Loop", &inst.loop)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Loop playback between start and end tick markers.");
+            if (inst.loop) {
+                // Determine max tick from assigned MIDI
+                int maxLoopTick = 10000;
+                if (inst.midiIdx >= 0 && inst.midiIdx < (int)sMidiFiles.size()) {
+                    auto& mf = sMidiFiles[inst.midiIdx];
+                    for (auto& t : mf.tracks)
+                        for (auto& n : t.notes)
+                            if (n.tick + n.duration > maxLoopTick) maxLoopTick = n.tick + n.duration;
+                }
+                ImGui::PushItemWidth(-1);
+                if (ImGui::DragInt("Start##loopS", &inst.loopStartTick, 10.0f, 0, maxLoopTick)) sProjectDirty = true;
+                if (ImGui::DragInt("End##loopE", &inst.loopEndTick, 10.0f, 0, maxLoopTick)) sProjectDirty = true;
+                ImGui::PopItemWidth();
+                if (inst.loopEndTick > 0 && inst.loopEndTick <= inst.loopStartTick)
+                    inst.loopEndTick = inst.loopStartTick + 1;
+            }
         }
 
         ImGui::End();
@@ -22241,6 +22297,33 @@ void FrameTick(float dt)
                 float px = rp.x + ((float)sMidiPlayTick - scrollOff) / viewTicks * rollW;
                 if (px >= rp.x && px <= rp.x + rollW)
                     dl->AddLine(ImVec2(px, rp.y), ImVec2(px, rp.y + rollH), 0xFFFFFFFF, 2.0f);
+            }
+
+            // Draw loop region markers
+            if (sSelectedInstance >= 0 && sSelectedInstance < (int)sSoundInstances.size()) {
+                auto& li = sSoundInstances[sSelectedInstance];
+                if (li.loop && li.midiIdx == sSelectedMidi) {
+                    // Loop start line (green)
+                    float lsx = rp.x + ((float)li.loopStartTick - scrollOff) / viewTicks * rollW;
+                    if (lsx >= rp.x && lsx <= rp.x + rollW) {
+                        dl->AddLine(ImVec2(lsx, rp.y), ImVec2(lsx, rp.y + rollH), 0xFF00FF00, 2.0f);
+                        dl->AddTriangleFilled(ImVec2(lsx, rp.y), ImVec2(lsx + 8, rp.y), ImVec2(lsx, rp.y + 8), 0xFF00FF00);
+                    }
+                    // Loop end line (red) — 0 = end of content
+                    int loopE = li.loopEndTick > 0 ? li.loopEndTick : contentTick;
+                    float lex = rp.x + ((float)loopE - scrollOff) / viewTicks * rollW;
+                    if (lex >= rp.x && lex <= rp.x + rollW) {
+                        dl->AddLine(ImVec2(lex, rp.y), ImVec2(lex, rp.y + rollH), 0xFF4444FF, 2.0f);
+                        dl->AddTriangleFilled(ImVec2(lex, rp.y), ImVec2(lex - 8, rp.y), ImVec2(lex, rp.y + 8), 0xFF4444FF);
+                    }
+                    // Tint the loop region
+                    if (lsx < lex) {
+                        float clampL = lsx < rp.x ? rp.x : lsx;
+                        float clampR = lex > rp.x + rollW ? rp.x + rollW : lex;
+                        if (clampL < clampR)
+                            dl->AddRectFilled(ImVec2(clampL, rp.y), ImVec2(clampR, rp.y + rollH), 0x1800FF80);
+                    }
+                }
             }
 
             // Piano roll interaction area

@@ -548,7 +548,20 @@ static void afn_sound_tick(void) {
             snd_voices[i].inc = (snd_voices[i].baseInc * adj) >> 8;
         }
     }
-    if (snd_seq_next >= count) snd_seq_active = -1;
+    if (afn_snd_loop[snd_seq_active]) {
+        int loopEnd = afn_snd_loop_end[snd_seq_active];
+        if (loopEnd > 0 && (snd_seq_tick >> 8) >= loopEnd) {
+            int loopStart = afn_snd_loop_start[snd_seq_active];
+            snd_seq_tick = loopStart << 8;
+            snd_seq_next = 0;
+            while (snd_seq_next < count && notes[snd_seq_next].tick < loopStart)
+                snd_seq_next++;
+            for (int i = 0; i < 16; i++) snd_pitch_bend[i] = 0;
+        }
+        // All notes consumed but haven't reached loopEnd yet — keep ticking (let tail ring out)
+    } else if (snd_seq_next >= count) {
+        snd_seq_active = -1;
+    }
 }
 
 #else

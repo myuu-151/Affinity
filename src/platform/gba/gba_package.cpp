@@ -5377,6 +5377,28 @@ static bool GenerateMapData(const std::string& runtimeDir,
         }
         f << "};\n\n";
 
+        f << "static const u8 afn_snd_loop[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            f << "    " << (soundInstances[i].loop ? 1 : 0) << ",\n";
+        }
+        f << "};\n";
+
+        f << "static const int afn_snd_loop_start[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            f << "    " << soundInstances[i].loopStartTick << ",\n";
+        }
+        f << "};\n";
+
+        f << "static const int afn_snd_loop_end[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            // 0 = end of sequence: use last note's tick as loop end
+            int loopEnd = soundInstances[i].loopEndTick;
+            if (loopEnd <= 0 && !soundInstances[i].notes.empty())
+                loopEnd = soundInstances[i].notes.back().tick + soundInstances[i].notes.back().duration;
+            f << "    " << loopEnd << ",\n";
+        }
+        f << "};\n\n";
+
         f << "#define AFN_HAS_SOUND 1\n";
     }
 
