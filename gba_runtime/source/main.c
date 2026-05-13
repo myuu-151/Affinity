@@ -92,6 +92,15 @@ static void afn_stop_sound(void);
 #endif
 
 // ---------------------------------------------------------------------------
+// Delta-time: decouple game speed from framerate
+// ---------------------------------------------------------------------------
+#ifdef AFN_DELTA_TIME
+static volatile int afn_vblank_counter = 0;
+static int afn_last_vblank = 0;
+static void afn_vblank_isr(void) { afn_vblank_counter++; }
+#endif
+
+// ---------------------------------------------------------------------------
 // DMA Audio Mixer (Timer 0 + DMA1/DMA2, double-buffered 8-bit signed PCM)
 // ---------------------------------------------------------------------------
 #ifdef AFN_HAS_SOUND
@@ -5156,7 +5165,11 @@ int main(void)
     dbg_fps = 0;
 
     irq_init(NULL);
+#ifdef AFN_DELTA_TIME
+    irq_add(II_VBLANK, afn_vblank_isr);
+#else
     irq_add(II_VBLANK, NULL);
+#endif
     // HBlank ISR only for Mode 1 (legacy Mode 7 floor)
     if (afn_current_mode == 2) {
         irq_add(II_HBLANK, m7_hbl);
@@ -5252,15 +5265,33 @@ int main(void)
         afn_sound_tick();
         key_poll();
 
+#ifdef AFN_DELTA_TIME
+        // Compute how many VBlanks elapsed since last frame (1 = normal, 2+ = slowdown)
+        int afn_delta = afn_vblank_counter - afn_last_vblank;
+        afn_last_vblank = afn_vblank_counter;
+        if (afn_delta < 1) afn_delta = 1;
+        if (afn_delta > 4) afn_delta = 4; // cap to prevent spiral of death
+        int afn_dt_tick;
+        for (afn_dt_tick = 0; afn_dt_tick < afn_delta; afn_dt_tick++) {
+#endif
+
         // --- Scene transition state machine ---
         if (g_scene_transition > 0) {
             handle_scene_transition();
+#ifdef AFN_DELTA_TIME
+            break; // transitions run once per render
+#else
             continue;
+#endif
         }
 #ifdef AFN_HAS_SCRIPT
         if (afn_pending_scene >= 0 && afn_pending_scene_mode >= 0) {
             start_scene_transition();
+#ifdef AFN_DELTA_TIME
+            break;
+#else
             continue;
+#endif
         }
 #endif
 
@@ -6615,6 +6646,10 @@ int main(void)
 
 #ifdef AFN_HAS_MODE0
         } /* end Mode 4/7 else block */
+#endif
+
+#ifdef AFN_DELTA_TIME
+        } /* end delta-time tick loop */
 #endif
     }
 

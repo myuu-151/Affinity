@@ -3838,6 +3838,7 @@ struct MapScene {
     float vsZoom = 1.0f;
     // Skybox enabled for this scene
     bool skyEnabled = true;
+    bool deltaTime = false;   // true = decouple game speed from framerate
     // Scene-level blueprint attachment
     int blueprintIdx = -1;
     struct { int paramIdx; int value; } instanceParams[8] = {};
@@ -4882,6 +4883,7 @@ static bool SaveProject(const std::string& path)
         const MapScene& ms = sMapScenes[si];
         fprintf(f, "mapScene=%s\n", ms.name);
         fprintf(f, "msSkyEnabled=%d\n", ms.skyEnabled ? 1 : 0);
+        fprintf(f, "msDeltaTime=%d\n", ms.deltaTime ? 1 : 0);
         fprintf(f, "msSpriteCount=%d\n", ms.spriteCount);
         for (int i = 0; i < ms.spriteCount; i++)
         {
@@ -6404,6 +6406,8 @@ static bool LoadProject(const std::string& path)
             }
             else if (sscanf(line, "msSkyEnabled=%d", &ival) == 1 && !sMapScenes.empty())
                 sMapScenes.back().skyEnabled = (ival != 0);
+            else if (sscanf(line, "msDeltaTime=%d", &ival) == 1 && !sMapScenes.empty())
+                sMapScenes.back().deltaTime = (ival != 0);
             else if (sscanf(line, "msSpriteCount=%d", &ival) == 1 && !sMapScenes.empty())
             {
                 sMapScenes.back().spriteCount = 0; // reset, will increment as we parse sprites
@@ -12705,6 +12709,8 @@ void FrameTick(float dt)
                 // Determine start mode from active tab: 0=Mode4/3D, 1=Mode0/Tilemap, 2=Mode1/Mode7
                 int exportStartMode = (sActiveTab == EditorTab::Tilemap) ? 1 :
                                       (sActiveTab == EditorTab::Mode7)   ? 2 : 0;
+                bool exportDeltaTime = (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+                                       ? sMapScenes[sMapSelectedScene].deltaTime : false;
 
                 // --- Gather sound data for export ---
                 std::vector<GBASoundSampleExport> exportSoundSamples;
@@ -12979,7 +12985,7 @@ void FrameTick(float dt)
 
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                              exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, target,
-                             exportSkyFrames, exportSkyAnimSpeed]() {
+                             exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime]() {
                     std::string err;
                     bool ok;
                     if (target == BuildTarget::NDS)
@@ -12989,7 +12995,7 @@ void FrameTick(float dt)
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,
                                         sM7FloorPixels, sM7FloorW, sM7FloorH, sM7FloorSize,
-                                        exportSkyFrames, exportSkyAnimSpeed);
+                                        exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
@@ -25432,6 +25438,10 @@ void FrameTick(float dt)
                     }
                 }
                 ImGui::PopItemWidth();
+                ImGui::Separator();
+                if (ImGui::Checkbox("Delta Time##msDelta", &ms.deltaTime))
+                    sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Decouple game speed from framerate — game runs at consistent speed even at low FPS");
             }
 
             ImGui::End();
