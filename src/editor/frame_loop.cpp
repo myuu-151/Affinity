@@ -4413,10 +4413,10 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "subSpriteCount=%d\n", sp.subSpriteCount);
             for (int si = 0; si < sp.subSpriteCount; si++) {
                 const auto& sub = sp.subSprites[si];
-                fprintf(f, "subSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d\n",
+                fprintf(f, "subSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d\n",
                     sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
                     sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
-                    sub.forceStatic ? 1 : 0);
+                    sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0);
             }
         }
     }
@@ -5340,14 +5340,15 @@ static bool LoadProject(const std::string& path)
                     if (sp2.subSprites[si].assetIdx != -1) loaded++;
                 if (loaded < sp2.subSpriteCount) {
                     auto& sub = sp2.subSprites[loaded];
-                    int aEn = 1, dOrder = 1, fStatic = 0; float sScale = 1.0f;
-                    int m = sscanf(line + 10, "%d,%d,%d,%f,%f,%f,%d,%f,%d",
+                    int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0; float sScale = 1.0f;
+                    int m = sscanf(line + 10, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d",
                         &sub.assetIdx, &sub.animIdx, &aEn,
-                        &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic);
+                        &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded);
                     sub.animEnabled = (aEn != 0);
                     sub.drawOrder = (m >= 7) ? dOrder : 1;
                     sub.scale = (m >= 8) ? sScale : 1.0f;
                     sub.forceStatic = (m >= 9) ? (fStatic != 0) : false;
+                    sub.grounded = (m >= 10) ? (fGrounded != 0) : false;
                 }
             }
         }
@@ -9782,6 +9783,8 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             ImGui::Combo("Draw##sub", &sub.drawOrder, orderNames, 2);
             ImGui::Checkbox("Static##sub", &sub.forceStatic);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Force static rendering (same frame at all angles)");
+            ImGui::Checkbox("Grounded##sub", &sub.grounded);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stay on the ground (Y=0) instead of following parent height");
             // Animation selector for sub-sprite
             if (sub.assetIdx >= 0 && sub.assetIdx < (int)sSpriteAssets.size()) {
                 SpriteAsset& subAsset = sSpriteAssets[sub.assetIdx];
@@ -11777,6 +11780,7 @@ void FrameTick(float dt)
                             subSe.meshIdx = -1;
                             subSe.oamPrio = (sub.drawOrder == 0) ? 1 : 0;
                             subSe.forceStatic = sub.forceStatic;
+                            subSe.grounded = sub.grounded;
                             subSe.parentIdx = parentExportIdx;
                             subSe.offsetX = sub.offsetX;
                             subSe.offsetY = sub.offsetY;

@@ -33,6 +33,7 @@ typedef struct {
     s8    parentIdx; // parent sprite index (-1 = standalone)
     FIXED offX, offY, offZ; // offset from parent (16.8 fixed)
     u8    forceStatic; // 1 = force static rendering (ignore directions)
+    u8    grounded;    // 1 = stay on ground (Y=0) instead of following parent Y
 } FloorSpriteGBA;
 
 EWRAM_DATA static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
@@ -1590,6 +1591,7 @@ static void load_editor_sprites(void)
         g_sprites[i].offY = afn_sprite_data[i][13];
         g_sprites[i].offZ = afn_sprite_data[i][14];
         g_sprites[i].forceStatic = (u8)afn_sprite_data[i][15];
+        g_sprites[i].grounded = (u8)afn_sprite_data[i][16];
         g_sprites[i].wx = g_sprites[i].x;
         g_sprites[i].wz = g_sprites[i].z;
         g_sprites[i].facing = g_sprites[i].rotation;
@@ -6412,7 +6414,7 @@ int main(void)
                 int pi = g_sprites[si].parentIdx;
                 if (pi >= 0 && pi < g_spriteCount) {
                     g_sprites[si].x = g_sprites[pi].x + g_sprites[si].offX;
-                    g_sprites[si].y = g_sprites[pi].y + g_sprites[si].offY;
+                    g_sprites[si].y = g_sprites[si].grounded ? g_sprites[si].offY : (g_sprites[pi].y + g_sprites[si].offY);
                     g_sprites[si].z = g_sprites[pi].z + g_sprites[si].offZ;
                 }
             }

@@ -23,6 +23,7 @@ struct GBASpriteExport
     int   parentIdx = -1; // parent sprite index (-1 = standalone)
     float offsetX = 0, offsetY = 0, offsetZ = 0; // offset from parent
     bool  forceStatic = false; // force static rendering (ignore directions)
+    bool  grounded = false;    // stay on ground (Y=0) instead of following parent Y
 };
 
 // Player direction sprite for GBA export (RGBA8 image)
