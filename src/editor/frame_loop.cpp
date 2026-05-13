@@ -4357,7 +4357,8 @@ static bool SaveProject(const std::string& path)
     if (!f) return false;
 
     fprintf(f, "[Affinity Project]\n");
-    fprintf(f, "version=1\n\n");
+    fprintf(f, "version=1\n");
+    fprintf(f, "activeTab=%d\n\n", (int)sActiveTab);
 
     // Camera start object
     fprintf(f, "[CameraStart]\n");
@@ -4846,10 +4847,10 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "msSubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si = 0; si < sp.subSpriteCount; si++) {
                     const auto& sub = sp.subSprites[si];
-                    fprintf(f, "msSubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d\n",
+                    fprintf(f, "msSubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d\n",
                         sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
                         sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
-                        sub.forceStatic ? 1 : 0);
+                        sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0);
                 }
             }
         }
@@ -4970,10 +4971,10 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "m7SubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si2 = 0; si2 < sp.subSpriteCount; si2++) {
                     const auto& sub = sp.subSprites[si2];
-                    fprintf(f, "m7SubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d\n",
+                    fprintf(f, "m7SubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d\n",
                         sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
                         sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
-                        sub.forceStatic ? 1 : 0);
+                        sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0);
                 }
             }
         }
@@ -5243,7 +5244,12 @@ static bool LoadProject(const std::string& path)
         int ival;
         unsigned int uval;
 
-        if (strcmp(section, "CameraStart") == 0)
+        if (strcmp(section, "Affinity Project") == 0)
+        {
+            if (sscanf(line, "activeTab=%d", &ival) == 1)
+                sActiveTab = (EditorTab)std::clamp(ival, 0, (int)EditorTab::Sound);
+        }
+        else if (strcmp(section, "CameraStart") == 0)
         {
             if (sscanf(line, "x=%f", &fval) == 1) sCamObj.x = fval;
             else if (sscanf(line, "z=%f", &fval) == 1) sCamObj.z = fval;
@@ -6376,14 +6382,15 @@ static bool LoadProject(const std::string& path)
                         if (sp2.subSprites[si].assetIdx != -1) loaded++;
                     if (loaded < sp2.subSpriteCount) {
                         auto& sub = sp2.subSprites[loaded];
-                        int aEn = 1, dOrder = 1, fStatic = 0; float sScale = 1.0f;
-                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f,%d",
+                        int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0; float sScale = 1.0f;
+                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d",
                             &sub.assetIdx, &sub.animIdx, &aEn,
-                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic);
+                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded);
                         sub.animEnabled = (aEn != 0);
                         sub.drawOrder = (m >= 7) ? dOrder : 1;
                         sub.scale = (m >= 8) ? sScale : 1.0f;
                         sub.forceStatic = (m >= 9) ? (fStatic != 0) : false;
+                        sub.grounded = (m >= 10) ? (fGrounded != 0) : false;
                     }
                 }
             }
@@ -6747,14 +6754,15 @@ static bool LoadProject(const std::string& path)
                         if (sp2.subSprites[si].assetIdx != -1) loaded++;
                     if (loaded < sp2.subSpriteCount) {
                         auto& sub = sp2.subSprites[loaded];
-                        int aEn = 1, dOrder = 1, fStatic = 0; float sScale = 1.0f;
-                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f,%d",
+                        int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0; float sScale = 1.0f;
+                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d",
                             &sub.assetIdx, &sub.animIdx, &aEn,
-                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic);
+                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded);
                         sub.animEnabled = (aEn != 0);
                         sub.drawOrder = (m >= 7) ? dOrder : 1;
                         sub.scale = (m >= 8) ? sScale : 1.0f;
                         sub.forceStatic = (m >= 9) ? (fStatic != 0) : false;
+                        sub.grounded = (m >= 10) ? (fGrounded != 0) : false;
                     }
                 }
             }
@@ -7328,8 +7336,10 @@ static bool LoadProject(const std::string& path)
         }
     }
 
-    // Load selected map scene into active editor state
-    if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+    // Load selected scene into active editor state (both modes share sSprites[])
+    if (sActiveTab == EditorTab::Mode7 && sM7SelectedScene >= 0 && sM7SelectedScene < (int)sM7Scenes.size())
+        LoadM7SceneState(sM7Scenes[sM7SelectedScene]);
+    else if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
         LoadMapSceneState(sMapScenes[sMapSelectedScene]);
 
     // Ensure M7 scenes have at least one default scene — copy from Map scene 0
