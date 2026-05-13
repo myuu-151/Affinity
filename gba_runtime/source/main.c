@@ -433,10 +433,13 @@ IWRAM_CODE static void afn_sound_mix(void) {
         while (v > 1) { v >>= 1; outShift++; }
         afn_mix_clamp_fast(buf, mix_acc, mixN, outShift);
         if (snd_fifo_b && buf_b) {
-            if (hasB)
+            if (hasB) {
                 afn_mix_clamp_fast(buf_b, mix_acc_b, mixN, 0); // FIFO B: no voice-count shift
-            else
-                for (int i = 0; i < mixN; i++) buf_b[i] = 0;
+            } else {
+                // No active FIFO B voices — shut down DMA2 and disable FIFO B output
+                REG_DMA2CNT = 0;
+                REG_SNDDSCNT &= ~(SDS_B100 | SDS_BL | SDS_BR | SDS_BTMR0 | SDS_BRESET);
+            }
         }
         if (mixN < SND_BUF_SIZE) {
             for (int i = mixN; i < SND_BUF_SIZE; i++) {
