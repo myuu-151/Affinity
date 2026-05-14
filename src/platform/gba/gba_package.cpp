@@ -1516,21 +1516,63 @@ static bool GenerateMapData(const std::string& runtimeDir,
             int totalFaces = (int)collFaces.size();
             const int GRID_SIZE = 8;
 
+            // Compute grid bounds from actual mesh extents
+            auto toGBAPx = [](float ec) { return (ec + 512.0f) / 4.0f; };
+            float meshMinX = 1e9f, meshMaxX = -1e9f;
+            float meshMinZ = 1e9f, meshMaxZ = -1e9f;
+            for (int fi = 0; fi < totalFaces; fi++)
+            {
+                const auto& cf = collFaces[fi];
+                float xs[] = { toGBAPx(cf.v0x), toGBAPx(cf.v1x), toGBAPx(cf.v2x) };
+                float zs[] = { toGBAPx(cf.v0z), toGBAPx(cf.v1z), toGBAPx(cf.v2z) };
+                for (int k = 0; k < 3; k++) {
+                    if (xs[k] < meshMinX) meshMinX = xs[k];
+                    if (xs[k] > meshMaxX) meshMaxX = xs[k];
+                    if (zs[k] < meshMinZ) meshMinZ = zs[k];
+                    if (zs[k] > meshMaxZ) meshMaxZ = zs[k];
+                }
+            }
+            // Also include the standard scene area (0-256)
+            if (meshMinX > 0.0f) meshMinX = 0.0f;
+            if (meshMaxX < 256.0f) meshMaxX = 256.0f;
+            if (meshMinZ > 0.0f) meshMinZ = 0.0f;
+            if (meshMaxZ < 256.0f) meshMaxZ = 256.0f;
+
+            // Grid origin (in pixels) and cell size
+            float gridOriginX = floorf(meshMinX);
+            float gridOriginZ = floorf(meshMinZ);
+            float gridSpanX = meshMaxX - gridOriginX + 1.0f;
+            float gridSpanZ = meshMaxZ - gridOriginZ + 1.0f;
+            float gridSpan = std::max(gridSpanX, gridSpanZ);
+            float cellSize = ceilf(gridSpan / (float)GRID_SIZE);
+            if (cellSize < 1.0f) cellSize = 1.0f;
+
+            // Compute grid shift (cell size in 16.8 fixed = cellSize * 256)
+            int cellSizeFx = (int)ceilf(cellSize * 256.0f);
+            int gridShift = 0;
+            { int v = cellSizeFx; while (v > 1) { v >>= 1; gridShift++; } }
+            // Round cell size UP to next power of 2 for shift-based lookup
+            if ((1 << gridShift) < cellSizeFx) gridShift++;
+            cellSizeFx = 1 << gridShift;
+            cellSize = cellSizeFx / 256.0f;
+
+            int gridOriginXFx = (int)(gridOriginX * 256.0f);
+            int gridOriginZFx = (int)(gridOriginZ * 256.0f);
+
             std::vector<std::vector<int>> gridCells(GRID_SIZE * GRID_SIZE);
             for (int fi = 0; fi < totalFaces; fi++)
             {
                 const auto& cf = collFaces[fi];
-                auto toGBAPx = [](float ec) { return (ec + 512.0f) / 4.0f; };
 
                 float minX = std::min({toGBAPx(cf.v0x), toGBAPx(cf.v1x), toGBAPx(cf.v2x)});
                 float maxX = std::max({toGBAPx(cf.v0x), toGBAPx(cf.v1x), toGBAPx(cf.v2x)});
                 float minZ = std::min({toGBAPx(cf.v0z), toGBAPx(cf.v1z), toGBAPx(cf.v2z)});
                 float maxZ = std::max({toGBAPx(cf.v0z), toGBAPx(cf.v1z), toGBAPx(cf.v2z)});
 
-                int cMinX = std::max(0, (int)(minX / 32.0f));
-                int cMaxX = std::min(GRID_SIZE - 1, (int)(maxX / 32.0f));
-                int cMinZ = std::max(0, (int)(minZ / 32.0f));
-                int cMaxZ = std::min(GRID_SIZE - 1, (int)(maxZ / 32.0f));
+                int cMinX = std::max(0, (int)((minX - gridOriginX) / cellSize));
+                int cMaxX = std::min(GRID_SIZE - 1, (int)((maxX - gridOriginX) / cellSize));
+                int cMinZ = std::max(0, (int)((minZ - gridOriginZ) / cellSize));
+                int cMaxZ = std::min(GRID_SIZE - 1, (int)((maxZ - gridOriginZ) / cellSize));
 
                 for (int gz = cMinZ; gz <= cMaxZ; gz++)
                     for (int gx = cMinX; gx <= cMaxX; gx++)
@@ -1551,7 +1593,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
               << gridFaceList.size() << " grid refs) ----\n";
             f << "#define AFN_COL_FACE_COUNT " << totalFaces << "\n";
             f << "#define AFN_COL_GRID_SIZE 8\n";
-            f << "#define AFN_COL_GRID_SHIFT 13\n\n";
+            f << "#define AFN_COL_GRID_SHIFT " << gridShift << "\n";
+            f << "#define AFN_COL_GRID_ORIGIN_X " << gridOriginXFx << "\n";
+            f << "#define AFN_COL_GRID_ORIGIN_Z " << gridOriginZFx << "\n\n";
 
             f << "typedef struct {\n";
             f << "    int v0x, v0z, v1x, v1z, v2x, v2z;\n";

@@ -4460,11 +4460,17 @@ static FIXED cam_y_smooth;     // smoothed camera Y offset (16.8)
 // Optimized: plane-distance only (no per-edge segment tests, no 64-bit division).
 static int afn_wall_collided_sprite = -1; // sprite index touched via mesh wall collision
 
+// Default grid origin to 0 if not defined (backwards compat)
+#ifndef AFN_COL_GRID_ORIGIN_X
+#define AFN_COL_GRID_ORIGIN_X 0
+#define AFN_COL_GRID_ORIGIN_Z 0
+#endif
+
 IWRAM_CODE static void collide_walls(FIXED *px, FIXED *pz, FIXED py)
 {
     afn_wall_collided_sprite = -1;
-    int gx = *px >> AFN_COL_GRID_SHIFT;
-    int gz = *pz >> AFN_COL_GRID_SHIFT;
+    int gx = (*px - AFN_COL_GRID_ORIGIN_X) >> AFN_COL_GRID_SHIFT;
+    int gz = (*pz - AFN_COL_GRID_ORIGIN_Z) >> AFN_COL_GRID_SHIFT;
     if (gx < 0) gx = 0; if (gx >= AFN_COL_GRID_SIZE) gx = AFN_COL_GRID_SIZE - 1;
     if (gz < 0) gz = 0; if (gz >= AFN_COL_GRID_SIZE) gz = AFN_COL_GRID_SIZE - 1;
 
@@ -4527,12 +4533,13 @@ IWRAM_CODE static void collide_walls(FIXED *px, FIXED *pz, FIXED py)
 // Optimized: integer cross-product PIT test, no 64-bit division.
 IWRAM_CODE static int collide_floor(FIXED px, FIXED pz, FIXED py, FIXED *outY)
 {
-    int gx = px >> AFN_COL_GRID_SHIFT;
-    int gz = pz >> AFN_COL_GRID_SHIFT;
-    if (gx < 0) gx = 0; if (gx >= AFN_COL_GRID_SIZE) gx = AFN_COL_GRID_SIZE - 1;
-    if (gz < 0) gz = 0; if (gz >= AFN_COL_GRID_SIZE) gz = AFN_COL_GRID_SIZE - 1;
+    int gx0 = (px - AFN_COL_GRID_ORIGIN_X) >> AFN_COL_GRID_SHIFT;
+    int gz0 = (pz - AFN_COL_GRID_ORIGIN_Z) >> AFN_COL_GRID_SHIFT;
 
-    int ci = gz * AFN_COL_GRID_SIZE + gx;
+    if (gx0 < 0) gx0 = 0; if (gx0 >= AFN_COL_GRID_SIZE) gx0 = AFN_COL_GRID_SIZE - 1;
+    if (gz0 < 0) gz0 = 0; if (gz0 >= AFN_COL_GRID_SIZE) gz0 = AFN_COL_GRID_SIZE - 1;
+
+    int ci = gz0 * AFN_COL_GRID_SIZE + gx0;
     int start = afn_col_grid_start[ci];
     int count = afn_col_grid_count[ci];
 
@@ -4559,26 +4566,24 @@ IWRAM_CODE static int collide_floor(FIXED px, FIXED pz, FIXED py, FIXED *outY)
             continue;
 
         // Floor height: barycentric interpolation at player XZ
-        // c0,c1,c2 are proportional to barycentric weights for v2,v0,v1
         {
         int cSum = c0 + c1 + c2;
         FIXED floorY;
         if (cSum == 0) {
             floorY = ((face->v0y + face->v1y + face->v2y) * 341) >> 10;
         } else {
-            // c0 = weight for v2, c1 = weight for v0, c2 = weight for v1
-            // Use >>8 to avoid overflow on large faces
-            int c0s = c0 >> 8, c1s = c1 >> 8, c2s = c2 >> 8;
+            // >>4 on weights for precision; Y stays full fixed-point
+            // Max intermediate: ~4096 * 14000 = 57M per term, fits 32-bit
+            int c0s = c0 >> 4, c1s = c1 >> 4, c2s = c2 >> 4;
             int cs = c0s + c1s + c2s;
             if (cs == 0) {
                 floorY = ((face->v0y + face->v1y + face->v2y) * 341) >> 10;
             } else {
-                floorY = (c1s * (face->v0y >> 8) + c2s * (face->v1y >> 8) + c0s * (face->v2y >> 8)) / cs;
-                floorY <<= 8;
+                floorY = (c1s * (face->v0y >> 4) + c2s * (face->v1y >> 4) + c0s * (face->v2y >> 4)) / cs;
+                floorY <<= 4;
             }
         }
 
-        // Accept highest floor at this XZ position
         if (!found || floorY > bestY)
         {
             bestY = floorY;
