@@ -22327,6 +22327,13 @@ void FrameTick(float dt)
                 sProjectDirty = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Halved sample rate + crunchy output.\nGreat for percussion — uses ~50%% less CPU.");
+            // Delta Time toggle — affects Mode 4 scene this instance plays in
+            if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size()) {
+                auto& ms = sMapScenes[sMapSelectedScene];
+                if (ImGui::Checkbox("Delta Time##sndDelta", &ms.deltaTime))
+                    sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Decouple game speed from framerate.\nDisable if sound lags at low FPS.");
+            }
             ImGui::Separator();
             if (ImGui::Checkbox("Loop", &inst.loop)) sProjectDirty = true;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Loop playback between start and end tick markers.");
