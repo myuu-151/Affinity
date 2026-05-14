@@ -1482,9 +1482,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 fnx /= len; fny /= len; fnz /= len;
 
                 int flags;
-                if (fny > 0.7f)       flags = 1; // floor
+                if (fny > 0.05f)      flags = 1; // floor (any upward-facing surface, even steep)
                 else if (fny < -0.7f) flags = 2; // ceiling
-                else                   flags = 4; // wall
+                else                   flags = 4; // wall (vertical/overhanging only)
 
                 float nxzLen = sqrtf(fnx*fnx + fnz*fnz);
                 float nnx = 0, nnz = 0;

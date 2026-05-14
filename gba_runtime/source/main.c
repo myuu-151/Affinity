@@ -4454,7 +4454,7 @@ static FIXED cam_y_smooth;     // smoothed camera Y offset (16.8)
 
 #define COL_PLAYER_RADIUS 768   // 3 pixels (16.8)
 #define COL_PLAYER_HEIGHT 3072  // 12 pixels (16.8)
-#define COL_STEP_HEIGHT   1024  // 4 pixels (16.8)
+#define COL_STEP_HEIGHT   4096  // 16 pixels (16.8) — allow steep slopes
 
 // Push player out of wall faces. Modifies *px, *pz in place.
 // Optimized: plane-distance only (no per-edge segment tests, no 64-bit division).
@@ -4578,14 +4578,11 @@ IWRAM_CODE static int collide_floor(FIXED px, FIXED pz, FIXED py, FIXED *outY)
             }
         }
 
-        // Accept highest floor that's below player + step threshold
-        if (floorY <= py + COL_STEP_HEIGHT)
+        // Accept highest floor at this XZ position
+        if (!found || floorY > bestY)
         {
-            if (!found || floorY > bestY)
-            {
-                bestY = floorY;
-                found = 1;
-            }
+            bestY = floorY;
+            found = 1;
         }
         } // end barycentric scope
     }
