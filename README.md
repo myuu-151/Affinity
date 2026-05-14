@@ -21,11 +21,17 @@
 | **Software 3D Renderer** | Flat-shaded and textured polygon rasterizer with ARM ASM inner loops |
 | **Dual Target** | Build for GBA or NDS from the same project |
 | **OBJ Mesh Import** | Load .obj files with per-mesh culling, draw distance, LOD, and texture mapping |
+| **Perspective Texturing** | Optional perspective-correct texturing with automatic mesh subdivision |
 | **Live Viewport** | Real-time perspective preview matching GBA/NDS rendering |
 | **Tilemap Editor** | Draggable grid with sprite tile painting, object placement, and save/load |
 | **Visual Script Nodes** | Event-driven node graph for game logic — key input, movement, animation, branching |
-| **Collision System** | Pre-baked world-space collision with spatial grid, wall slide, floor snapping, and gravity |
+| **Blueprint Scripts** | Reusable script assets with per-instance parameters, attachable to objects and scenes |
+| **Collision System** | Pre-baked world-space collision with adaptive spatial grid, wall slide, barycentric floor height, and gravity |
 | **OAM Sprites** | 8-directional animated sprites with LOD, running alongside 3D meshes |
+| **MIDI Sound Engine** | DMA FIFO audio with SF2/DLS instruments, ARM ASM mixer, pitch bend, vibrato, and per-instance tuning |
+| **SFX System** | Import WAV samples with waveform editor, trim, amplify, and one-shot playback via script nodes |
+| **Delta Time** | Decouple game speed from framerate — consistent gameplay at any FPS |
+| **Animated Skybox** | Panoramic sky with smooth scrolling and optional frame animation |
 | **One-Click Build** | Package a `.gba` or `.nds` ROM directly from the editor |
 | **mGBA Integration** | Launch ROMs directly in mGBA from the editor |
 | **Blender-style Tools** | G to grab, S to scale, X/Y/Z axis constraints with visual guides |
