@@ -10897,6 +10897,15 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
             }
             ImGui::PopItemWidth();
 
+            // Delta Time toggle for this scene
+            if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size()) {
+                ImGui::Separator();
+                auto& ms = sMapScenes[sMapSelectedScene];
+                if (ImGui::Checkbox("Delta Time##sceneDelta", &ms.deltaTime))
+                    sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Decouple game speed from framerate — game runs at consistent speed even at low FPS");
+            }
+
             ImGui::Spacing();
             if (ImGui::Button("Delete##delscene") && sTmScenes.size() > 1)
             {
@@ -25340,7 +25349,7 @@ void FrameTick(float dt)
             int bpExtraH = 0;
             if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size() && sMapScenes[sMapSelectedScene].blueprintIdx >= 0)
                 bpExtraH = 20 + sMapScenes[sMapSelectedScene].instanceParamCount * 22;
-            scenePanH = 160 + 50 + bpExtraH;
+            scenePanH = 160 + 50 + 52 + bpExtraH;
             if (scenePanH > bodyH * 0.5f) scenePanH = (float)(int)(bodyH * 0.5f);
             ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
