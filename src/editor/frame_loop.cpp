@@ -5312,6 +5312,15 @@ static bool LoadProject(const std::string& path)
         if (line[0] == '[')
         {
             sscanf(line, "[%63[^]]]", section);
+            // Clear non-built-in samples before loading imports to prevent duplication
+            if (strcmp(section, "ImportedSamples") == 0) {
+                for (int si = (int)sSoundBank.size() - 1; si >= 0; si--) {
+                    if (!sSoundBank[si].builtIn) {
+                        sSampleOriginal.erase(si);
+                        sSoundBank.erase(sSoundBank.begin() + si);
+                    }
+                }
+            }
             continue;
         }
 
@@ -21776,6 +21785,10 @@ void FrameTick(float dt)
                     if (sWaveSelStart <= sWaveSelEnd) {
                         // Normal selection: delete [selA, selB)
                         s.data.erase(s.data.begin() + selA, s.data.begin() + selB);
+                        // Also trim the un-amplified original so save preserves the trim
+                        auto& orig = sSampleOriginal[sSelectedSample];
+                        if (selA < (int)orig.size() && selB <= (int)orig.size())
+                            orig.erase(orig.begin() + selA, orig.begin() + selB);
                     } else {
                         // Inverted selection: keep [selB, selA), delete the rest
                         int keepStart = sWaveSelEnd; // smaller value after invert
@@ -21784,6 +21797,14 @@ void FrameTick(float dt)
                         if (keepEnd > n) keepEnd = n;
                         std::vector<int8_t> kept(s.data.begin() + keepStart, s.data.begin() + keepEnd);
                         s.data = std::move(kept);
+                        // Also trim the un-amplified original
+                        auto& orig = sSampleOriginal[sSelectedSample];
+                        if (!orig.empty()) {
+                            int oKeepStart = keepStart < (int)orig.size() ? keepStart : (int)orig.size();
+                            int oKeepEnd = keepEnd < (int)orig.size() ? keepEnd : (int)orig.size();
+                            std::vector<int8_t> keptOrig(orig.begin() + oKeepStart, orig.begin() + oKeepEnd);
+                            orig = std::move(keptOrig);
+                        }
                     }
                     sWaveSelStart = -1;
                     sWaveSelEnd = -1;
