@@ -1020,6 +1020,7 @@ struct SoundInstance {
     int longRelease = 0;       // 0 = normal, 1 = force minimum 1672-sample (~67ms) release tail
     int hifiMode = 0;          // 0 = normal (~18kHz), 1 = hi-fi (~25kHz, may trill)
     int compatMode = 0;        // 0 = normal, 1 = compatibility (halved rate, no interp, no release — less CPU)
+    int bufferScale = 0;       // 0 = normal (1 VBlank), 1 = scale buffer to match frame time (for low FPS)
     bool loop = false;          // loop playback between loopStart and loopEnd ticks
     int loopStartTick = 0;      // loop region start (MIDI ticks)
     int loopEndTick = 0;        // loop region end (MIDI ticks, 0 = end of sequence)
@@ -5179,6 +5180,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "instLongRelease=%d\n", si.longRelease);
         fprintf(f, "instHifi=%d\n", si.hifiMode);
         fprintf(f, "instCompat=%d\n", si.compatMode);
+        fprintf(f, "instBufScale=%d\n", si.bufferScale);
         fprintf(f, "instLoop=%d\n", si.loop ? 1 : 0);
         fprintf(f, "instLoopStart=%d\n", si.loopStartTick);
         fprintf(f, "instLoopEnd=%d\n", si.loopEndTick);
@@ -7250,6 +7252,7 @@ static bool LoadProject(const std::string& path)
                 else if (sscanf(line, "instLongRelease=%d", &ival) == 1) curInst->longRelease = ival;
                 else if (sscanf(line, "instHifi=%d", &ival) == 1) curInst->hifiMode = ival;
                 else if (sscanf(line, "instCompat=%d", &ival) == 1) curInst->compatMode = ival;
+                else if (sscanf(line, "instBufScale=%d", &ival) == 1) curInst->bufferScale = ival;
                 else if (sscanf(line, "instLoop=%d", &ival) == 1) curInst->loop = (ival != 0);
                 else if (sscanf(line, "instLoopStart=%d", &ival) == 1) curInst->loopStartTick = ival;
                 else if (sscanf(line, "instLoopEnd=%d", &ival) == 1) curInst->loopEndTick = ival;
@@ -12929,6 +12932,7 @@ void FrameTick(float dt)
                         ie.longRelease = inst.longRelease;
                         ie.hifiMode = inst.hifiMode;
                         ie.compatMode = inst.compatMode;
+                        ie.bufferScale = inst.bufferScale;
                         ie.loop = inst.loop;
                         ie.loopStartTick = inst.loopStartTick;
                         ie.loopEndTick = inst.loopEndTick;
@@ -22357,6 +22361,12 @@ void FrameTick(float dt)
                 sProjectDirty = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Halved sample rate + crunchy output.\nGreat for percussion — uses ~50%% less CPU.");
+            bool bs = inst.bufferScale != 0;
+            if (ImGui::Checkbox("Buffer Scale", &bs)) {
+                inst.bufferScale = bs ? 1 : 0;
+                sProjectDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scale audio buffer to match frame time.\nPrevents stuttering at low FPS (~20fps).");
             // Delta Time toggle — affects Mode 4 scene this instance plays in
             if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size()) {
                 auto& ms = sMapScenes[sMapSelectedScene];

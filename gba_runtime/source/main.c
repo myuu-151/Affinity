@@ -197,6 +197,7 @@ static int snd_hifi = 0;        // 1 = hi-fi mode (timer 672, ~25kHz — may tri
 static int snd_sfx_gain = 1;    // gain for SFX one-shots (0=Normal, 1=Loud, 2=Mid, 3=Quiet)
 static int snd_mix_samples = 304; // default for 18kHz (timer 924)
 static int snd_frame_scale = 1;  // VBlanks per frame (1=60fps, 2=30fps, 3=20fps)
+static int snd_buf_scale = 0;    // 1 = scale buffer to match frame time (toggle)
 static int snd_last_vblank = 0;  // separate from delta-time's afn_last_vblank
 
 // Compute timer reload and mix count from current settings + fix mode override
@@ -268,6 +269,7 @@ static void afn_sound_init(void) {
 static void afn_play_sound(int instanceId) {
     snd_compat = afn_snd_compat[instanceId];
     snd_hifi = afn_snd_hifi[instanceId];
+    snd_buf_scale = afn_snd_bufscale[instanceId];
     if (afn_snd_fifo[instanceId]) snd_fifo_b = 1;
     if (!snd_initialized) afn_sound_hw_start();
     else {
@@ -5319,13 +5321,17 @@ int main(void)
             afn_clear_fb_stmia(vramBuf, 0);
         }
 #endif
-        // Scale sound buffer to cover multiple VBlanks at low FPS
+        // Scale sound buffer to cover multiple VBlanks at low FPS (when enabled)
 #ifdef AFN_HAS_SOUND
         {
-            int elapsed = afn_vblank_counter - snd_last_vblank;
-            if (elapsed < 1) elapsed = 1;
-            if (elapsed > 4) elapsed = 4;
-            snd_frame_scale = elapsed;
+            if (snd_buf_scale) {
+                int elapsed = afn_vblank_counter - snd_last_vblank;
+                if (elapsed < 1) elapsed = 1;
+                if (elapsed > 4) elapsed = 4;
+                snd_frame_scale = elapsed;
+            } else {
+                snd_frame_scale = 1;
+            }
             snd_last_vblank = afn_vblank_counter;
         }
 #endif

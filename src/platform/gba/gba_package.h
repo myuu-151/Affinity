@@ -536,6 +536,7 @@ struct GBASoundInstanceExport {
     int longRelease = 0;                   // force minimum 1672-sample release tail
     int hifiMode = 0;                      // 0 = normal (~25kHz), 1 = hi-fi (~32kHz)
     int compatMode = 0;                    // 0 = normal, 1 = compat (halved rate, less CPU)
+    int bufferScale = 0;                   // 0 = normal, 1 = scale buffer to match frame time
     bool loop = false;                     // loop between loopStartTick and loopEndTick
     int loopStartTick = 0;                 // MIDI tick to jump back to
     int loopEndTick = 0;                   // MIDI tick to trigger loop (0 = end of sequence)
