@@ -3226,6 +3226,7 @@ struct HudElement {
         char label[32] = "";
         int localX = 0, localY = 0;
         uint32_t color = 0xFFFFFFFF; // RGBA8
+        int font = 0; // 0=normal 8x8, 1=small pixel 4x5
     };
     std::vector<TextRow> textRows;
     int selectedTextRow = -1;
@@ -3840,6 +3841,7 @@ struct MapScene {
     // Skybox enabled for this scene
     bool skyEnabled = true;
     bool deltaTime = false;   // true = decouple game speed from framerate
+    bool showFps = false;     // true = display FPS counter using HUD font
     // Scene-level blueprint attachment
     int blueprintIdx = -1;
     struct { int paramIdx; int value; } instanceParams[8] = {};
@@ -4635,7 +4637,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "elemCursor=%d|%d|%d|%d\n", el.cursorAssetIdx, el.cursorFrame, el.cursorOffX, el.cursorOffY);
         fprintf(f, "elemTextCount=%d\n", (int)el.textRows.size());
         for (auto& tr : el.textRows)
-            fprintf(f, "elemText=%d|%d|%u|%s\n", tr.localX, tr.localY, tr.color, tr.label);
+            fprintf(f, "elemText=%d|%d|%u|%d|%s\n", tr.localX, tr.localY, tr.color, tr.font, tr.label);
         fprintf(f, "elemSpriteCount=%d\n", (int)el.spriteItems.size());
         for (auto& si : el.spriteItems)
             fprintf(f, "elemSprite=%d|%d|%d|%d|%d|%.2f\n", si.spriteAssetIdx, si.frame, si.localX, si.localY, si.size, si.scale);
@@ -4886,6 +4888,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "mapScene=%s\n", ms.name);
         fprintf(f, "msSkyEnabled=%d\n", ms.skyEnabled ? 1 : 0);
         fprintf(f, "msDeltaTime=%d\n", ms.deltaTime ? 1 : 0);
+        fprintf(f, "msShowFps=%d\n", ms.showFps ? 1 : 0);
         fprintf(f, "msSpriteCount=%d\n", ms.spriteCount);
         for (int i = 0; i < ms.spriteCount; i++)
         {
@@ -5907,12 +5910,22 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "elemText=", 9) == 0 && !sHudElements.empty()) {
                 HudElement::TextRow tr;
                 unsigned int col = 0xFFFFFFFF;
+                int font = 0;
                 int n = 0;
-                if (sscanf(line + 9, "%d|%d|%u|%n", &tr.localX, &tr.localY, &col, &n) >= 3) {
+                // Try new format: x|y|color|font|label
+                if (sscanf(line + 9, "%d|%d|%u|%d|%n", &tr.localX, &tr.localY, &col, &font, &n) >= 4 && n > 0) {
                     tr.color = col;
-                    if (n > 0) strncpy(tr.label, line + 9 + n, sizeof(tr.label) - 1);
-                    sHudElements.back().textRows.push_back(tr);
+                    tr.font = font;
+                    strncpy(tr.label, line + 9 + n, sizeof(tr.label) - 1);
+                } else {
+                    // Old format: x|y|color|label
+                    n = 0;
+                    if (sscanf(line + 9, "%d|%d|%u|%n", &tr.localX, &tr.localY, &col, &n) >= 3) {
+                        tr.color = col;
+                        if (n > 0) strncpy(tr.label, line + 9 + n, sizeof(tr.label) - 1);
+                    }
                 }
+                sHudElements.back().textRows.push_back(tr);
             }
             else if (sscanf(line, "elemSpriteCount=%d", &ival) == 1 && !sHudElements.empty()) {
                 sHudElements.back().spriteItems.clear();
@@ -6421,6 +6434,8 @@ static bool LoadProject(const std::string& path)
                 sMapScenes.back().skyEnabled = (ival != 0);
             else if (sscanf(line, "msDeltaTime=%d", &ival) == 1 && !sMapScenes.empty())
                 sMapScenes.back().deltaTime = (ival != 0);
+            else if (sscanf(line, "msShowFps=%d", &ival) == 1 && !sMapScenes.empty())
+                sMapScenes.back().showFps = (ival != 0);
             else if (sscanf(line, "msSpriteCount=%d", &ival) == 1 && !sMapScenes.empty())
             {
                 sMapScenes.back().spriteCount = 0; // reset, will increment as we parse sprites
@@ -10907,6 +10922,9 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 if (ImGui::Checkbox("Delta Time##sceneDelta", &ms.deltaTime))
                     sProjectDirty = true;
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Decouple game speed from framerate — game runs at consistent speed even at low FPS");
+                if (ImGui::Checkbox("Show FPS##sceneFps", &ms.showFps))
+                    sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Display FPS counter on screen using HUD font");
             }
 
             ImGui::Spacing();
@@ -12678,6 +12696,7 @@ void FrameTick(float dt)
                         int g = ((tr.color >> 8) & 0xFF) >> 3;
                         int b = ((tr.color >> 16) & 0xFF) >> 3;
                         te.colorRGB15 = (uint16_t)(r | (g << 5) | (b << 10));
+                        te.font = tr.font;
                         he.textRows.push_back(te);
                     }
                     he.cursorAssetIdx = el.cursorAssetIdx;
@@ -12737,6 +12756,8 @@ void FrameTick(float dt)
                                       (sActiveTab == EditorTab::Mode7)   ? 2 : 0;
                 bool exportDeltaTime = (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
                                        ? sMapScenes[sMapSelectedScene].deltaTime : false;
+                bool exportShowFps = (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+                                       ? sMapScenes[sMapSelectedScene].showFps : false;
                 bool exportSmoothSky = false;
                 for (const auto& sky : sSkyboxInstances) {
                     if (sky.smoothSky) { exportSmoothSky = true; break; }
@@ -13016,7 +13037,7 @@ void FrameTick(float dt)
 
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                              exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, target,
-                             exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportSmoothSky]() {
+                             exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportShowFps, exportSmoothSky]() {
                     std::string err;
                     bool ok;
                     if (target == BuildTarget::NDS)
@@ -13026,7 +13047,7 @@ void FrameTick(float dt)
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,
                                         sM7FloorPixels, sM7FloorW, sM7FloorH, sM7FloorSize,
-                                        exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportSmoothSky);
+                                        exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportShowFps, exportSmoothSky);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
@@ -24470,6 +24491,8 @@ void FrameTick(float dt)
                             tr.color = ImGui::ColorConvertFloat4ToU32(tcf);
                             sProjectDirty = true;
                         }
+                        const char* fontNames[] = { "Normal", "Pixel" };
+                        if (ImGui::Combo("Font##txt", &tr.font, fontNames, 2)) sProjectDirty = true;
                     }
                 }
 
@@ -25359,7 +25382,7 @@ void FrameTick(float dt)
             int bpExtraH = 0;
             if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size() && sMapScenes[sMapSelectedScene].blueprintIdx >= 0)
                 bpExtraH = 20 + sMapScenes[sMapSelectedScene].instanceParamCount * 22;
-            scenePanH = 160 + 50 + 52 + bpExtraH;
+            scenePanH = 160 + 50 + 78 + bpExtraH;
             if (scenePanH > bodyH * 0.5f) scenePanH = (float)(int)(bodyH * 0.5f);
             ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
@@ -25503,6 +25526,9 @@ void FrameTick(float dt)
                 if (ImGui::Checkbox("Delta Time##msDelta", &ms.deltaTime))
                     sProjectDirty = true;
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Decouple game speed from framerate — game runs at consistent speed even at low FPS");
+                if (ImGui::Checkbox("Show FPS##msFps", &ms.showFps))
+                    sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Display FPS counter on screen using HUD font");
             }
 
             ImGui::End();

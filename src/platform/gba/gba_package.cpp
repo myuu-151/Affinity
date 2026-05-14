@@ -269,6 +269,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                             const std::vector<GBASoundInstanceExport>& soundInstances,
                             int startMode,
                             bool deltaTime,
+                            bool showFps,
                             bool smoothSky)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
@@ -322,6 +323,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "#define AFN_COVERAGE_BUF 1\n";
     if (deltaTime)
         f << "#define AFN_DELTA_TIME 1\n";
+    if (showFps)
+        f << "#define AFN_SHOW_FPS 1\n";
     if (smoothSky)
         f << "#define AFN_SKY_SMOOTH 1\n";
     f << "\n";
@@ -1717,12 +1720,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "static const int afn_hud_stops[1] = {0}; // no stops\n";
         }
 
-        // Text rows: {localX, localY, colorRGB15, text}
+        // Text rows: {localX, localY, colorRGB15, font, text}
         if (totalText > 0) {
-            f << "static const struct { s16 x,y; u16 color; char text[32]; } afn_hud_texts[" << totalText << "] = {\n";
+            f << "static const struct { s16 x,y; u16 color; u8 font; char text[32]; } afn_hud_texts[" << totalText << "] = {\n";
             for (auto& el : hudElements)
                 for (auto& tr : el.textRows) {
-                    f << "    {" << tr.localX << "," << tr.localY << ",0x" << std::hex << tr.colorRGB15 << std::dec << ",\"";
+                    f << "    {" << tr.localX << "," << tr.localY << ",0x" << std::hex << tr.colorRGB15 << std::dec << "," << tr.font << ",\"";
                     // Escape the text
                     for (int ci = 0; tr.text[ci] && ci < 31; ci++) {
                         char c = tr.text[ci];
@@ -5928,6 +5931,7 @@ bool PackageGBA(const std::string& runtimeDir,
                 const std::vector<GBASkyFrameExport>& skyFrames,
                 int skyAnimSpeed,
                 bool deltaTime,
+                bool showFps,
                 bool smoothSky)
 {
     std::string msysDir = ToMsysPath(runtimeDir);
@@ -5943,7 +5947,7 @@ bool PackageGBA(const std::string& runtimeDir,
     }
 
     // --- Step 1: Generate mapdata.h with sprite/camera/asset/player data ---
-    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, m7FloorPixels, m7FloorW, m7FloorH, m7FloorSize, skyFrames, skyAnimSpeed, orbitDist, script, blueprints, bpInstances, tmScenes, hudElements, soundSamples, soundInstances, startMode, deltaTime, smoothSky))
+    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, m7FloorPixels, m7FloorW, m7FloorH, m7FloorSize, skyFrames, skyAnimSpeed, orbitDist, script, blueprints, bpInstances, tmScenes, hudElements, soundSamples, soundInstances, startMode, deltaTime, showFps, smoothSky))
     {
         errorMsg = "Failed to write mapdata.h";
         return false;
