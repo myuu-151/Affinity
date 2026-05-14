@@ -1529,6 +1529,40 @@ static void sky_m4_decode_pan(int animFrame)
     sky_m4_lastFrame = animFrame;
 }
 
+#ifdef AFN_SKY_SMOOTH
+// Blend LUT: sky_blend[a][b] = nearest palette index for 50% blend of indices a,b
+// a,b are offsets 0-63 within the sky palette range (192-255)
+EWRAM_DATA static u8 sky_blend[64][64];
+
+static void sky_m4_build_blend_lut(void)
+{
+    int a, b;
+    for (a = 0; a < 64; a++) {
+        for (b = 0; b <= a; b++) {
+            u16 ca = pal_bg_mem[192 + a];
+            u16 cb = pal_bg_mem[192 + b];
+            // Extract RGB555 and average
+            int r = (((ca & 0x1F) + (cb & 0x1F)) + 1) >> 1;
+            int g = ((((ca >> 5) & 0x1F) + ((cb >> 5) & 0x1F)) + 1) >> 1;
+            int bl = ((((ca >> 10) & 0x1F) + ((cb >> 10) & 0x1F)) + 1) >> 1;
+            // Find nearest color in sky palette
+            int bestIdx = a, bestDist = 99999;
+            int i;
+            for (i = 0; i < 64; i++) {
+                u16 ci = pal_bg_mem[192 + i];
+                int dr = (ci & 0x1F) - r;
+                int dg = ((ci >> 5) & 0x1F) - g;
+                int db = ((ci >> 10) & 0x1F) - bl;
+                int dist = dr*dr + dg*dg + db*db;
+                if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+            }
+            sky_blend[a][b] = (u8)(192 + bestIdx);
+            sky_blend[b][a] = (u8)(192 + bestIdx);
+        }
+    }
+}
+#endif
+
 static void load_sky_m4(void)
 {
     int row;
@@ -1543,15 +1577,14 @@ static void load_sky_m4(void)
     }
     sky_m4_lastFrame = -1;
     sky_m4_decode_pan(0);
+#ifdef AFN_SKY_SMOOTH
+    sky_m4_build_blend_lut();
+#endif
 }
 
 // Render sky: blit 240px window from pre-decoded doubled panorama directly to VRAM
 IWRAM_CODE static void render_sky_m4(u16* buf)
 {
-    // Align scroll to 4 bytes for DMA32 compatibility
-    int scrollX = ((int)((u32)cam_angle * SKY_PAN_W >> 16)) & ~3;
-    if (scrollX < 0) scrollX += SKY_PAN_W;
-    if (scrollX >= SKY_PAN_W) scrollX -= SKY_PAN_W;
 #if AFN_SKY_ANIM_FRAMES > 1
     if (++sky_anim_timer >= AFN_SKY_ANIM_SPEED) {
         sky_anim_timer = 0;
@@ -1560,14 +1593,58 @@ IWRAM_CODE static void render_sky_m4(u16* buf)
     if (sky_anim_frame != sky_m4_lastFrame)
         sky_m4_decode_pan(sky_anim_frame);
 #endif
-    // Blit 160 rows — each row is a contiguous 240-byte span in the doubled panorama
+
+#ifdef AFN_SKY_SMOOTH
+    // Sub-pixel scroll with horizontal interpolation via blend LUT
+    // Use 8.8 fixed-point for sub-pixel precision
+    int scrollFix = (int)((u32)cam_angle * SKY_PAN_W >> 8) & ((SKY_PAN_W << 8) - 1);
+    int scrollInt = scrollFix >> 8;
+    int frac = scrollFix & 0xFF; // 0-255 sub-pixel fraction
+    int y;
+    for (y = 0; y < 160; y++)
+    {
+        const u8* src = &sky_m4_pan[y * SKY_PAN_W * 2 + scrollInt];
+        u8* dst = (u8*)(buf + y * 120);
+        int x;
+        if (frac < 16) {
+            // Nearly aligned — just copy (avoid blend overhead for tiny fractions)
+            for (x = 0; x < 240; x++)
+                dst[x] = src[x];
+        } else if (frac > 240) {
+            // Nearly next pixel — copy shifted
+            for (x = 0; x < 240; x++)
+                dst[x] = src[x + 1];
+        } else {
+            // Blend: lerp between src[x] and src[x+1]
+            for (x = 0; x < 240; x++) {
+                u8 c0 = src[x];
+                u8 c1 = src[x + 1];
+                if (c0 == c1) {
+                    dst[x] = c0;
+                } else {
+                    // Use blend LUT (50% blend) — approximation but fast
+                    int a = c0 - 192, b = c1 - 192;
+                    if (a >= 0 && a < 64 && b >= 0 && b < 64)
+                        dst[x] = sky_blend[a][b];
+                    else
+                        dst[x] = (frac < 128) ? c0 : c1;
+                }
+            }
+        }
+    }
+#else
+    // Fast path: aligned DMA scroll (4-pixel snap)
+    int scrollX = ((int)((u32)cam_angle * SKY_PAN_W >> 16)) & ~3;
+    if (scrollX < 0) scrollX += SKY_PAN_W;
+    if (scrollX >= SKY_PAN_W) scrollX -= SKY_PAN_W;
     int y;
     for (y = 0; y < 160; y++)
     {
         const u8* src = &sky_m4_pan[y * SKY_PAN_W * 2 + scrollX];
-        u16* dst = buf + y * 120; // 240 bytes = 120 u16s in Mode 4
+        u16* dst = buf + y * 120;
         DMA_TRANSFER(dst, src, 240 / 4, 3, DMA_NOW | DMA_32);
     }
+#endif
 }
 #endif // AFN_MESH_COUNT > 0
 #endif // AFN_HAS_SKY
@@ -4481,8 +4558,25 @@ IWRAM_CODE static int collide_floor(FIXED px, FIXED pz, FIXED py, FIXED *outY)
         if (!((c0 >= 0 && c1 >= 0 && c2 >= 0) || (c0 <= 0 && c1 <= 0 && c2 <= 0)))
             continue;
 
-        // Floor height: average of 3 verts (no division — *341>>10 ≈ /3)
-        FIXED floorY = ((face->v0y + face->v1y + face->v2y) * 341) >> 10;
+        // Floor height: barycentric interpolation at player XZ
+        // c0,c1,c2 are proportional to barycentric weights for v2,v0,v1
+        {
+        int cSum = c0 + c1 + c2;
+        FIXED floorY;
+        if (cSum == 0) {
+            floorY = ((face->v0y + face->v1y + face->v2y) * 341) >> 10;
+        } else {
+            // c0 = weight for v2, c1 = weight for v0, c2 = weight for v1
+            // Use >>8 to avoid overflow on large faces
+            int c0s = c0 >> 8, c1s = c1 >> 8, c2s = c2 >> 8;
+            int cs = c0s + c1s + c2s;
+            if (cs == 0) {
+                floorY = ((face->v0y + face->v1y + face->v2y) * 341) >> 10;
+            } else {
+                floorY = (c1s * (face->v0y >> 8) + c2s * (face->v1y >> 8) + c0s * (face->v2y >> 8)) / cs;
+                floorY <<= 8;
+            }
+        }
 
         // Accept highest floor that's below player + step threshold
         if (floorY <= py + COL_STEP_HEIGHT)
@@ -4493,6 +4587,7 @@ IWRAM_CODE static int collide_floor(FIXED px, FIXED pz, FIXED py, FIXED *outY)
                 found = 1;
             }
         }
+        } // end barycentric scope
     }
 
     *outY = bestY;

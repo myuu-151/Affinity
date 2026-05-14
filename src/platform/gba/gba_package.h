@@ -577,6 +577,7 @@ bool PackageGBA(const std::string& runtimeDir,
                 int m7FloorSize = 3,
                 const std::vector<GBASkyFrameExport>& skyFrames = {},
                 int skyAnimSpeed = 8,
-                bool deltaTime = false);
+                bool deltaTime = false,
+                bool smoothSky = false);
 
 } // namespace Affinity

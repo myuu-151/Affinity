@@ -3909,6 +3909,7 @@ struct SkyboxInstance {
     char name[48] = "Skybox 0";
     int modeFilter = 0;          // 0 = All, 1 = Mode 4 only, 2 = Mode 1 only
     int animSpeed = 8;           // VBlanks between frame changes (1-60, default 8 = ~7.5fps)
+    bool smoothSky = false;      // true = interpolated sub-pixel scrolling
     std::vector<SkyPanel> panels;  // each panel = one animation frame
     std::vector<bool> m4SceneAssign;  // per Mode 4 scene (true = use this skybox)
     std::vector<bool> m1SceneAssign;  // per Mode 1 scene (true = use this skybox)
@@ -4984,6 +4985,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "skyboxInst=%s\n", sky.name);
         fprintf(f, "skyboxMode=%d\n", sky.modeFilter);
         fprintf(f, "skyboxAnimSpeed=%d\n", sky.animSpeed);
+        fprintf(f, "skyboxSmoothSky=%d\n", sky.smoothSky ? 1 : 0);
         fprintf(f, "skyboxPanelCount=%d\n", (int)sky.panels.size());
         for (int pi = 0; pi < (int)sky.panels.size(); pi++) {
             if (!sky.panels[pi].path.empty())
@@ -6729,6 +6731,9 @@ static bool LoadProject(const std::string& path)
             }
             else if (sscanf(line, "skyboxAnimSpeed=%d", &ival) == 1 && !sSkyboxInstances.empty()) {
                 sSkyboxInstances.back().animSpeed = std::clamp(ival, 1, 60);
+            }
+            else if (sscanf(line, "skyboxSmoothSky=%d", &ival) == 1 && !sSkyboxInstances.empty()) {
+                sSkyboxInstances.back().smoothSky = (ival != 0);
             }
             else if (sscanf(line, "skyboxPanelCount=%d", &ival) == 1 && !sSkyboxInstances.empty()) {
                 SkyboxInstance& inst = sSkyboxInstances.back();
@@ -12711,6 +12716,10 @@ void FrameTick(float dt)
                                       (sActiveTab == EditorTab::Mode7)   ? 2 : 0;
                 bool exportDeltaTime = (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
                                        ? sMapScenes[sMapSelectedScene].deltaTime : false;
+                bool exportSmoothSky = false;
+                for (const auto& sky : sSkyboxInstances) {
+                    if (sky.smoothSky) { exportSmoothSky = true; break; }
+                }
 
                 // --- Gather sound data for export ---
                 std::vector<GBASoundSampleExport> exportSoundSamples;
@@ -12985,7 +12994,7 @@ void FrameTick(float dt)
 
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                              exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, target,
-                             exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime]() {
+                             exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportSmoothSky]() {
                     std::string err;
                     bool ok;
                     if (target == BuildTarget::NDS)
@@ -12995,7 +13004,7 @@ void FrameTick(float dt)
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,
                                         sM7FloorPixels, sM7FloorW, sM7FloorH, sM7FloorSize,
-                                        exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime);
+                                        exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportSmoothSky);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
@@ -14712,6 +14721,11 @@ void FrameTick(float dt)
                 ImGui::TextDisabled("%s", fpsLabel);
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("VBlanks between animation frames.\n1 = 60fps, 8 = ~7.5fps, 30 = 2fps");
+
+            ImGui::Spacing();
+            if (ImGui::Checkbox("Smooth##skySmoothSky", &sky.smoothSky))
+                sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Interpolated sub-pixel scrolling — smoother sky rotation (costs some FPS)");
 
             ImGui::Spacing();
             ImGui::Separator();

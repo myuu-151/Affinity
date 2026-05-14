@@ -268,7 +268,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                             const std::vector<GBASoundSampleExport>& soundSamples,
                             const std::vector<GBASoundInstanceExport>& soundInstances,
                             int startMode,
-                            bool deltaTime)
+                            bool deltaTime,
+                            bool smoothSky)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
     std::ofstream f(outPath);
@@ -321,6 +322,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "#define AFN_COVERAGE_BUF 1\n";
     if (deltaTime)
         f << "#define AFN_DELTA_TIME 1\n";
+    if (smoothSky)
+        f << "#define AFN_SKY_SMOOTH 1\n";
     f << "\n";
 
     // Find player sprite index and asset
@@ -5874,7 +5877,8 @@ bool PackageGBA(const std::string& runtimeDir,
                 int m7FloorSize,
                 const std::vector<GBASkyFrameExport>& skyFrames,
                 int skyAnimSpeed,
-                bool deltaTime)
+                bool deltaTime,
+                bool smoothSky)
 {
     std::string msysDir = ToMsysPath(runtimeDir);
 
@@ -5889,7 +5893,7 @@ bool PackageGBA(const std::string& runtimeDir,
     }
 
     // --- Step 1: Generate mapdata.h with sprite/camera/asset/player data ---
-    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, m7FloorPixels, m7FloorW, m7FloorH, m7FloorSize, skyFrames, skyAnimSpeed, orbitDist, script, blueprints, bpInstances, tmScenes, hudElements, soundSamples, soundInstances, startMode, deltaTime))
+    if (!GenerateMapData(runtimeDir, sprites, assets, camera, meshes, m7FloorPixels, m7FloorW, m7FloorH, m7FloorSize, skyFrames, skyAnimSpeed, orbitDist, script, blueprints, bpInstances, tmScenes, hudElements, soundSamples, soundInstances, startMode, deltaTime, smoothSky))
     {
         errorMsg = "Failed to write mapdata.h";
         return false;
