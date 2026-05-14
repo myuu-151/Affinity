@@ -5492,7 +5492,9 @@ int main(void)
         }
         afn_sound_swap(); // DMA swap — fast, must be at VBlank
         // Tick sequencer once per VBlank-equivalent to keep tempo correct
+#ifdef AFN_HAS_SOUND
         { int st; for (st = 0; st < snd_frame_scale; st++) afn_sound_tick(); }
+#endif
         key_poll();
 
         // --- Scene transition state machine ---
