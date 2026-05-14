@@ -4572,16 +4572,15 @@ IWRAM_CODE static int collide_floor(FIXED px, FIXED pz, FIXED py, FIXED *outY)
         if (cSum == 0) {
             floorY = ((face->v0y + face->v1y + face->v2y) * 341) >> 10;
         } else {
-            // >>4 on weights for precision; Y stays full fixed-point
-            // Max intermediate: ~4096 * 14000 = 57M per term, fits 32-bit
+            // >>4 on cross products only; Y stays full fixed-point
+            // Max: 4096 * 50000 = 204M per term, 614M total — fits 32-bit
+            // >>4 cancels in numerator/denominator so result is in fixed-point
             int c0s = c0 >> 4, c1s = c1 >> 4, c2s = c2 >> 4;
             int cs = c0s + c1s + c2s;
-            if (cs == 0) {
+            if (cs == 0)
                 floorY = ((face->v0y + face->v1y + face->v2y) * 341) >> 10;
-            } else {
-                floorY = (c1s * (face->v0y >> 4) + c2s * (face->v1y >> 4) + c0s * (face->v2y >> 4)) / cs;
-                floorY <<= 4;
-            }
+            else
+                floorY = (c1s * face->v0y + c2s * face->v1y + c0s * face->v2y) / cs;
         }
 
         if (!found || floorY > bestY)
