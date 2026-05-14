@@ -4412,7 +4412,7 @@ static bool SaveProject(const std::string& path)
     if (!f) return false;
 
     fprintf(f, "[Affinity Project]\n");
-    fprintf(f, "version=1\n");
+    fprintf(f, "version=2\n");
     fprintf(f, "activeTab=%d\n\n", (int)sActiveTab);
 
     // Camera start object
@@ -5301,6 +5301,7 @@ static bool LoadProject(const std::string& path)
     char line[32768]; // large buffer for frame pixel data lines (64x64 = ~16KB worst case)
     char section[64] = {};
     int tmSubdivLevel = 0; // 0=old, 1=first 2x, 2=current 4x
+    int projectVersion = 1; // v1 = pre-IsFalling enum, v2 = current
 
     while (fgets(line, sizeof(line), f))
     {
@@ -5335,7 +5336,9 @@ static bool LoadProject(const std::string& path)
 
         if (strcmp(section, "Affinity Project") == 0)
         {
-            if (sscanf(line, "activeTab=%d", &ival) == 1)
+            if (sscanf(line, "version=%d", &ival) == 1)
+                projectVersion = ival;
+            else if (sscanf(line, "activeTab=%d", &ival) == 1)
                 sActiveTab = (EditorTab)std::clamp(ival, 0, (int)EditorTab::Sound);
         }
         else if (strcmp(section, "CameraStart") == 0)
@@ -5707,6 +5710,7 @@ static bool LoadProject(const std::string& path)
                 if (sscanf(line + 9, "%d,%d,%f,%f,%d,%d,%d,%d,%d",
                     &n.id, &typeInt, &n.x, &n.y,
                     &n.paramInt[0], &n.paramInt[1], &n.paramInt[2], &n.paramInt[3], &gid) >= 4) {
+                    if (projectVersion < 2 && typeInt >= 36) typeInt++; // migrate: IsFalling inserted at 36
                     n.type = (VsNodeType)typeInt; n.groupId = gid;
                     sBlueprintAssets.back().nodes.push_back(n);
                 }
@@ -6284,6 +6288,7 @@ static bool LoadProject(const std::string& path)
                     &n.paramInt[0], &n.paramInt[1], &n.paramInt[2], &n.paramInt[3], &gid);
                 if (nread >= 4)
                 {
+                    if (projectVersion < 2 && typeInt >= 36) typeInt++; // migrate: IsFalling inserted at 36
                     n.type = (VsNodeType)typeInt;
                     n.groupId = gid;
                     sVsNodes.push_back(n);
@@ -6557,6 +6562,7 @@ static bool LoadProject(const std::string& path)
                     &n.id, &typeInt, &n.x, &n.y,
                     &n.paramInt[0], &n.paramInt[1], &n.paramInt[2], &n.paramInt[3], &gid) >= 4)
                 {
+                    if (projectVersion < 2 && typeInt >= 36) typeInt++; // migrate: IsFalling inserted at 36
                     n.type = (VsNodeType)typeInt;
                     n.groupId = gid;
                     sMapScenes.back().vsNodes.push_back(n);
@@ -6932,6 +6938,7 @@ static bool LoadProject(const std::string& path)
                     &n.id, &typeInt, &n.x, &n.y,
                     &n.paramInt[0], &n.paramInt[1], &n.paramInt[2], &n.paramInt[3], &gid) >= 4)
                 {
+                    if (projectVersion < 2 && typeInt >= 36) typeInt++; // migrate: IsFalling inserted at 36
                     n.type = (VsNodeType)typeInt;
                     n.groupId = gid;
                     sM7Scenes.back().vsNodes.push_back(n);
@@ -12935,6 +12942,7 @@ void FrameTick(float dt)
                             ie.sfxSampleIdx = it->second;
                             ie.mixerGain = inst.mixerGain;
                             ie.fifoChannel = inst.fifoChannel;
+                            ie.bufferScale = inst.bufferScale;
                             exportSoundInstances.push_back(std::move(ie));
                             continue;
                         }

@@ -40,6 +40,15 @@ setActionFunc(infoNode, "_sprint",
 - `gba_runtime/source/main.c` — GBA runtime (consumes the generated variables)
 - `gba_runtime/include/mapdata.h` — Generated header (output of exporter, read-only)
 
+### GBAScriptNodeType Enum Ordering
+
+**NEVER insert new entries in the middle of the `GBAScriptNodeType` enum** in `gba_package.h`. Always append new node types immediately before `COUNT`. Inserting in the middle shifts all subsequent integer values, which breaks every saved project file that references those node types.
+
+If a middle insertion has already shipped (e.g. `IsFalling` at position 36), it must stay — add **version-based migration** instead:
+1. Bump the save version in `fprintf(f, "version=N\n")`
+2. At **all 4 node-load sites** in `frame_loop.cpp` (blueprint nodes, Mode 0 scene nodes, Mode 4 scene nodes, Mode 7 scene nodes), add: `if (projectVersion < N && typeInt >= POS) typeInt++;`
+3. The `VsNodeType` enum in `frame_loop.cpp` must match `GBAScriptNodeType` in `gba_package.h` exactly
+
 ### Export Ordering in mapdata.h
 
 HUD data arrays (`afn_hud_elems`, `afn_hud_stops`, etc.) are emitted BEFORE script and blueprint functions so that ShowHUD/CursorUp/CursorDown can reference them. Do not move the HUD section after the script/blueprint codegen sections.

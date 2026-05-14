@@ -1827,6 +1827,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static FIXED afn_move_speed;\n";
         f << "static int   afn_auto_orbit_speed;\n";
         f << "static int   afn_play_anim;\n";
+        f << "static int   afn_anim_prio;\n";
         f << "static int   afn_pending_scene = -1;\n";
         f << "static int   afn_pending_scene_mode = -1;\n";
         f << "static int   afn_collided_sprite;\n";
@@ -2102,6 +2103,19 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int afn_bp_def_frozen[" << (int)blueprints.size() << "];\n\n";
     else
         f << "static int afn_bp_def_frozen[1];\n\n";
+
+    // OnRise edge-detect variables — file-scope so they're shared across dispatch handlers
+    {
+        std::set<int> riseIds;
+        for (auto& n : script.nodes)
+            if (n.type == GBAScriptNodeType::OnRise) riseIds.insert(n.id);
+        for (auto& bp : blueprints)
+            for (auto& n : bp.script.nodes)
+                if (n.type == GBAScriptNodeType::OnRise) riseIds.insert(n.id);
+        for (int rid : riseIds)
+            f << "static int afn_rise_" << rid << " = -2;\n";
+        if (!riseIds.empty()) f << "\n";
+    }
 
     if (!script.nodes.empty())
     {
@@ -2464,6 +2478,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* sndData = findDataIn(action->id, 0);
                     int sndId = sndData ? resolveInt(sndData) : 0;
                     if (sndId >= 0 && sndId < (int)soundInstances.size() && soundInstances[sndId].isSfx) {
+                        if (soundInstances[sndId].bufferScale)
+                            f << "    snd_buf_scale = 1;\n";
                         f << "    afn_play_sfx(" << soundInstances[sndId].sfxSampleIdx << ", " << soundInstances[sndId].mixerGain << ", " << soundInstances[sndId].fifoChannel << ");\n";
                     } else {
                         f << "    afn_play_sound(" << sndId << ");\n";
@@ -3341,9 +3357,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "#define " << defaultName << " " << custom << "\n";
             };
 
-            // Emit action calls with IsMoving gate support
+            // Emit action calls with gate support
             auto emitActionsWithGates = [&](const std::vector<const GBAScriptNodeExport*>& actions) {
                 int gateDepth = 0;
+                bool inJumpGate = false;
                 for (auto* a : actions) {
                     if (a->type == GBAScriptNodeType::IsMoving) {
                         f << "    if (player_moving) {\n";
@@ -3358,11 +3375,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     if (a->type == GBAScriptNodeType::IsJumping) {
                         f << "    if (player_vy > 0) {\n";
                         gateDepth++;
+                        inJumpGate = true;
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsFalling) {
                         f << "    if (!player_on_ground && player_vy <= 0) {\n";
                         gateDepth++;
+                        inJumpGate = true;
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsFlagSet) {
@@ -3437,10 +3456,24 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::OnRise) {
-                        f << "    { static int afn_rise_" << a->id << " = -2;\n";
-                        f << "      if (afn_rise_" << a->id << " == afn_frame_count - 1) { afn_rise_" << a->id << " = afn_frame_count; }\n";
+                        f << "    { if (afn_rise_" << a->id << " >= afn_frame_count - 1) { afn_rise_" << a->id << " = afn_frame_count; }\n";
                         f << "      else { afn_rise_" << a->id << " = afn_frame_count;\n";
                         gateDepth += 2;
+                        continue;
+                    }
+                    // PlayAnim: respect animation priority from IsJumping/IsFalling gates
+                    if (a->type == GBAScriptNodeType::PlayAnim) {
+                        char callName[64];
+                        if (a->funcName[0])
+                            snprintf(callName, sizeof(callName), "%s", a->funcName);
+                        else
+                            snprintf(callName, sizeof(callName), "afn_script%s_%d", actionSuffix(a->type), a->id);
+                        if (inJumpGate) {
+                            f << "    " << callName << "();\n";
+                            f << "    afn_anim_prio = 1;\n";
+                        } else {
+                            f << "    if (!afn_anim_prio) " << callName << "();\n";
+                        }
                         continue;
                     }
                     emitActionCall(a);
@@ -3942,6 +3975,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     int sndIdInt = -1;
                     try { sndIdInt = std::stoi(sndId); } catch (...) {}
                     if (sndIdInt >= 0 && sndIdInt < (int)soundInstances.size() && soundInstances[sndIdInt].isSfx) {
+                        if (soundInstances[sndIdInt].bufferScale)
+                            f << "    snd_buf_scale = 1;\n";
                         f << "    afn_play_sfx(" << soundInstances[sndIdInt].sfxSampleIdx << ", " << soundInstances[sndIdInt].mixerGain << ", " << soundInstances[sndIdInt].fifoChannel << ");\n";
                     } else {
                         f << "    afn_play_sound(" << sndId << ");\n";
@@ -4766,17 +4801,17 @@ static bool GenerateMapData(const std::string& runtimeDir,
             // Emit blueprint actions with gate support
             // Gate nodes collect their downstream actions via the link graph
             // and emit them inside the if-block, rather than relying on flat-list ordering.
-            std::function<void(const std::vector<const GBAScriptNodeExport*>&, std::set<int>&)> bpEmitActionsWithGatesImpl;
-            bpEmitActionsWithGatesImpl = [&](const std::vector<const GBAScriptNodeExport*>& actions, std::set<int>& emitted) {
+            std::function<void(const std::vector<const GBAScriptNodeExport*>&, std::set<int>&, bool)> bpEmitActionsWithGatesImpl;
+            bpEmitActionsWithGatesImpl = [&](const std::vector<const GBAScriptNodeExport*>& actions, std::set<int>& emitted, bool inJumpGate) {
                 for (auto* a : actions) {
                     if (emitted.count(a->id)) continue;
                     emitted.insert(a->id);
 
                     // Helper: emit a gate node — open if-block, recursively emit branch, close
-                    auto emitGateBranch = [&](const char* condition) {
+                    auto emitGateBranch = [&](const char* condition, bool jumpGate = false) {
                         f << "    if (" << condition << ") {\n";
                         auto branch = bpCollectBranch(a->id, 0);
-                        bpEmitActionsWithGatesImpl(branch, emitted);
+                        bpEmitActionsWithGatesImpl(branch, emitted, inJumpGate || jumpGate);
                         f << "    }\n";
                     };
 
@@ -4789,11 +4824,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsJumping) {
-                        emitGateBranch("player_vy > 0");
+                        emitGateBranch("player_vy > 0", true);
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsFalling) {
-                        emitGateBranch("!player_on_ground && player_vy <= 0");
+                        emitGateBranch("!player_on_ground && player_vy <= 0", true);
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::IsFlagSet) {
@@ -4812,7 +4847,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "      if (dx<0) dx=-dx; if (dz<0) dz=-dz;\n";
                         f << "      if (((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8 < " << a->paramInt[2] << ") {\n";
                         auto branch = bpCollectBranch(a->id, 0);
-                        bpEmitActionsWithGatesImpl(branch, emitted);
+                        bpEmitActionsWithGatesImpl(branch, emitted, inJumpGate);
                         f << "    } }\n";
                         continue;
                     }
@@ -4820,7 +4855,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "    { static int afn_cd_" << a->id << " = " << a->paramInt[0] << ";\n";
                         f << "      if (--afn_cd_" << a->id << " <= 0) { afn_cd_" << a->id << " = " << a->paramInt[0] << ";\n";
                         auto branch = bpCollectBranch(a->id, 0);
-                        bpEmitActionsWithGatesImpl(branch, emitted);
+                        bpEmitActionsWithGatesImpl(branch, emitted, inJumpGate);
                         f << "    } }\n";
                         continue;
                     }
@@ -4851,7 +4886,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "      if (cr <= 0) cr = 16;\n";
                         f << "      if (((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8 < cr) {\n";
                         auto branch = bpCollectBranch(a->id, 0);
-                        bpEmitActionsWithGatesImpl(branch, emitted);
+                        bpEmitActionsWithGatesImpl(branch, emitted, inJumpGate);
                         f << "    } }\n";
                         continue;
                     }
@@ -4871,11 +4906,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         continue;
                     }
                     if (a->type == GBAScriptNodeType::OnRise) {
-                        f << "    { static int afn_rise_" << a->id << " = -2;\n";
-                        f << "      if (afn_rise_" << a->id << " == afn_frame_count - 1) { afn_rise_" << a->id << " = afn_frame_count; }\n";
+                        f << "    { if (afn_rise_" << a->id << " >= afn_frame_count - 1) { afn_rise_" << a->id << " = afn_frame_count; }\n";
                         f << "      else { afn_rise_" << a->id << " = afn_frame_count;\n";
                         auto branch = bpCollectBranch(a->id, 0);
-                        bpEmitActionsWithGatesImpl(branch, emitted);
+                        bpEmitActionsWithGatesImpl(branch, emitted, inJumpGate);
                         f << "    } }\n";
                         continue;
                     }
@@ -4885,10 +4919,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         auto brSet = bpCollectBranch(a->id, 0);
                         auto brClear = bpCollectBranch(a->id, 1);
                         f << "    if (afn_flags & (1u << " << flag << ")) {\n";
-                        bpEmitActionsWithGatesImpl(brSet, emitted);
+                        bpEmitActionsWithGatesImpl(brSet, emitted, inJumpGate);
                         if (!brClear.empty()) {
                             f << "    } else {\n";
-                            bpEmitActionsWithGatesImpl(brClear, emitted);
+                            bpEmitActionsWithGatesImpl(brClear, emitted, inJumpGate);
                         }
                         f << "    }\n";
                         continue;
@@ -4899,10 +4933,25 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         auto brA = bpCollectBranch(a->id, 0);
                         auto brB = bpCollectBranch(a->id, 1);
                         f << "      if (afn_ff_" << a->id << ") {\n";
-                        bpEmitActionsWithGatesImpl(brA, emitted);
+                        bpEmitActionsWithGatesImpl(brA, emitted, inJumpGate);
                         f << "      } else {\n";
-                        bpEmitActionsWithGatesImpl(brB, emitted);
+                        bpEmitActionsWithGatesImpl(brB, emitted, inJumpGate);
                         f << "      } }\n";
+                        continue;
+                    }
+                    // PlayAnim: respect animation priority from IsJumping/IsFalling gates
+                    if (a->type == GBAScriptNodeType::PlayAnim) {
+                        char callName[64];
+                        if (a->funcName[0])
+                            snprintf(callName, sizeof(callName), "%s", a->funcName);
+                        else
+                            snprintf(callName, sizeof(callName), "afn_bp%d%s_%d", bi, actionSuffix(a->type), a->id);
+                        if (inJumpGate) {
+                            f << "    " << callName << "(" << paramArgs << ");\n";
+                            f << "    afn_anim_prio = 1;\n";
+                        } else {
+                            f << "    if (!afn_anim_prio) " << callName << "(" << paramArgs << ");\n";
+                        }
                         continue;
                     }
                     bpEmitActionCall(a);
@@ -4910,7 +4959,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             };
             auto bpEmitActionsWithGates = [&](const std::vector<const GBAScriptNodeExport*>& actions) {
                 std::set<int> emitted;
-                bpEmitActionsWithGatesImpl(actions, emitted);
+                bpEmitActionsWithGatesImpl(actions, emitted, false);
             };
 
             auto bpEmitKeyBlock = [&](const BpChain& c, const char* keyCheck) {
