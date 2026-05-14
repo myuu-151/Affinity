@@ -6434,21 +6434,6 @@ int main(void)
                 player_move_angle = player_move_angle - orbit_angle;
             }
 
-            // Collision: wall blocking + slide
-#ifdef AFN_COL_FACE_COUNT
-            collide_walls(&player_x, &player_z, player_y);
-
-            // Mesh collision event (wall-contact-based)
-            // Skip first 10 frames after scene load to prevent ping-pong
-#ifdef AFN_HAS_SCRIPT
-            if (afn_wall_collided_sprite >= 0 && afn_frame_count > 10) {
-                afn_collided_sprite = afn_wall_collided_sprite;
-                afn_script_collision();
-                afn_bp_dispatch_collision();
-            }
-#endif
-#endif
-
             // Jump + dampen are driven by script nodes only
 
             // Gravity: accelerate downward, clamp to terminal velocity
@@ -6462,7 +6447,7 @@ int main(void)
 #endif
             player_y += player_vy;
 
-            // Floor check
+            // Floor check (before walls so player_y is correct for Y overlap)
             {
 #ifdef AFN_COL_FACE_COUNT
                 FIXED floorY;
@@ -6496,6 +6481,21 @@ int main(void)
 #endif
             }
 
+            // Collision: wall blocking + slide
+#ifdef AFN_COL_FACE_COUNT
+            collide_walls(&player_x, &player_z, player_y);
+
+            // Mesh collision event (wall-contact-based)
+            // Skip first 10 frames after scene load to prevent ping-pong
+#ifdef AFN_HAS_SCRIPT
+            if (afn_wall_collided_sprite >= 0 && afn_frame_count > 10) {
+                afn_collided_sprite = afn_wall_collided_sprite;
+                afn_script_collision();
+                afn_bp_dispatch_collision();
+            }
+#endif
+#endif
+
             // Smooth camera Y — lag behind player elevation changes
             {
                 FIXED target_cam_y = player_y;
@@ -6510,7 +6510,8 @@ int main(void)
             }
             cam_h = AFN_CAM_H + cam_y_smooth;
 
-            // Clamp player to map bounds
+            // Clamp player to map bounds (skip if collision mesh defines boundaries)
+#ifndef AFN_COL_FACE_COUNT
             {
                 FIXED maxCoord = afn_floor_px_dim[AFN_FLOOR_SIZE] << 8;
                 if (player_x < 0) player_x = 0;
@@ -6518,6 +6519,7 @@ int main(void)
                 if (player_z < 0) player_z = 0;
                 if (player_z > maxCoord) player_z = maxCoord;
             }
+#endif
 
             // Update sprite position
             g_sprites[player_sprite_idx].x = player_x;
