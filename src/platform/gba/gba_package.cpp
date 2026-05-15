@@ -660,15 +660,26 @@ static bool GenerateMapData(const std::string& runtimeDir,
             {
                 // Update tileStart to point to current end of allTiles
                 assetTileStart[ai] = (int)allTiles.size() / 8;
-                // Copy direction 0 tiles from set 0 ROM data
-                int tpf = (assetDirInfos[ai].dirSize / 8) * (assetDirInfos[ai].dirSize / 8);
-                int romOff = assetDirInfos[ai].romSetU32Offset[0]; // set 0 start
-                // Direction 0 is the first tpf tiles (tpf * 8 u32s)
-                int u32Count = tpf * 8;
-                if (romOff >= 0 && romOff + u32Count <= (int)dirAnimAllTiles.size())
-                    allTiles.insert(allTiles.end(),
-                        dirAnimAllTiles.begin() + romOff,
-                        dirAnimAllTiles.begin() + romOff + u32Count);
+                // Generate test pattern tiles for debugging
+                int dirSize = assetDirInfos[ai].dirSize;
+                int tpf = (dirSize / 8) * (dirSize / 8);
+                int tilesPerRow = dirSize / 8;
+                for (int t = 0; t < tpf; t++) {
+                    int tileRow = t / tilesPerRow;
+                    int tileCol = t % tilesPerRow;
+                    uint8_t palIdx = (tileRow < tilesPerRow/2)
+                        ? ((tileCol < tilesPerRow/2) ? 1 : 2)
+                        : ((tileCol < tilesPerRow/2) ? 3 : 4);
+                    for (int row = 0; row < 8; row++) {
+                        uint32_t val = 0;
+                        for (int px = 0; px < 8; px++)
+                            val |= ((uint32_t)palIdx << (px * 4));
+                        allTiles.push_back(val);
+                    }
+                }
+                // Update objSize/tpf to match direction size
+                assetObjSize[ai] = assetDirInfos[ai].dirSize;
+                assetTilesPerFrame[ai] = tpf;
                 assetDirInfos[ai].has = false; // will use static tile path instead
             }
         }
@@ -827,8 +838,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "    { ";
         for (int c = 0; c < 16; c++)
         {
+            // ForceStatic direction assets: use direction palette (tiles were quantized with it)
             char hex[8];
-            snprintf(hex, sizeof(hex), "0x%04X", EditorColorToRGB15(assets[ai].palette[c]));
+            if (assetNeedsStaticTiles[ai])
+                snprintf(hex, sizeof(hex), "0x%04X", EditorColorToRGB15(assetDirInfos[ai].palette[c]));
+            else
+                snprintf(hex, sizeof(hex), "0x%04X", EditorColorToRGB15(assets[ai].palette[c]));
             f << hex;
             if (c < 15) f << ", ";
         }
