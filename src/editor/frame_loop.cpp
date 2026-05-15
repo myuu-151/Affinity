@@ -4461,7 +4461,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d",
                 sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                 sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0,
-                sp.meshIdx, sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0);
+                sp.meshIdx, sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0);
         for (int ip = 0; ip < sp.instanceParamCount; ip++)
             fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
         fprintf(f, "\n");
@@ -4876,8 +4876,9 @@ static bool SaveProject(const std::string& path)
     }
 
     // ---- Map Scenes (3D Scene tab) ----
-    // Only flush globals into Map scene if Map tab is active (globals belong to Map)
-    if (sActiveTab == EditorTab::Map && sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+    // Only flush globals into Map scene if Map/3D tab is active (globals belong to Map)
+    if ((sActiveTab == EditorTab::Map || sActiveTab == EditorTab::ThreeD)
+        && sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
         SaveMapSceneState(sMapScenes[sMapSelectedScene]);
     fprintf(f, "\n[MapScenes]\n");
     fprintf(f, "mapSceneCount=%d\n", (int)sMapScenes.size());
@@ -4893,7 +4894,7 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d",
+            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
                     sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0);
@@ -5018,7 +5019,7 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d",
+            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
                     sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0);
@@ -5388,8 +5389,8 @@ static bool LoadProject(const std::string& path)
                 unsigned int col;
                 // Try extended format (with assetIdx, animIdx, type, rotation, animEnabled, meshIdx)
                 float rot = 0.0f;
-                int bpIdx = -1, bpParamCnt = 0, fStatic = 0;
-                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic);
+                int bpIdx = -1, bpParamCnt = 0, fStatic = 0, dBehind = 0;
+                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic, &dBehind);
                 if (matched >= 6)
                 {
                     FloorSprite& sp = sSprites[sSpriteCount];
@@ -5409,6 +5410,7 @@ static bool LoadProject(const std::string& path)
                     sp.blueprintIdx = (matched >= 13) ? bpIdx : -1;
                     sp.instanceParamCount = (matched >= 14) ? std::min(bpParamCnt, 8) : 0;
                     sp.forceStatic = (matched >= 15) ? (fStatic != 0) : false;
+                    sp.drawBehind = (matched >= 16) ? (dBehind != 0) : false;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line;
@@ -6450,11 +6452,11 @@ static bool LoadProject(const std::string& path)
             {
                 MapScene& ms = sMapScenes.back();
                 FloorSprite sp = {};
-                int typeVal = 0, animEn = 0, bpIdx = -1, bpParamCnt = 0, fStatic = 0;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d",
+                int typeVal = 0, animEn = 0, bpIdx = -1, bpParamCnt = 0, fStatic = 0, dBehind = 0;
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt, &fStatic);
+                    &bpIdx, &bpParamCnt, &fStatic, &dBehind);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
@@ -6462,6 +6464,7 @@ static bool LoadProject(const std::string& path)
                     sp.blueprintIdx = (matched >= 13) ? bpIdx : -1;
                     sp.instanceParamCount = (matched >= 14) ? std::min(bpParamCnt, 8) : 0;
                     sp.forceStatic = (matched >= 15) ? (fStatic != 0) : false;
+                    sp.drawBehind = (matched >= 16) ? (dBehind != 0) : false;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
@@ -6828,11 +6831,11 @@ static bool LoadProject(const std::string& path)
             {
                 MapScene& ms = sM7Scenes.back();
                 FloorSprite sp = {};
-                int typeVal = 0, animEn = 0, bpIdx = -1, bpParamCnt = 0, fStatic = 0;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d",
+                int typeVal = 0, animEn = 0, bpIdx = -1, bpParamCnt = 0, fStatic = 0, dBehind = 0;
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt, &fStatic);
+                    &bpIdx, &bpParamCnt, &fStatic, &dBehind);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
@@ -6840,6 +6843,7 @@ static bool LoadProject(const std::string& path)
                     sp.blueprintIdx = (matched >= 13) ? bpIdx : -1;
                     sp.instanceParamCount = (matched >= 14) ? std::min(bpParamCnt, 8) : 0;
                     sp.forceStatic = (matched >= 15) ? (fStatic != 0) : false;
+                    sp.drawBehind = (matched >= 16) ? (dBehind != 0) : false;
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
                         for (int ip = 0; ip < sp.instanceParamCount; ip++) {
@@ -7709,6 +7713,74 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         }
     }
 
+    // Right-click to select mesh object via ray picking
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+    {
+        // Camera position
+        float camX = s3DTargetX + s3DOrbitDist * cosf(s3DOrbitPitch) * sinf(s3DOrbitYaw);
+        float camY = s3DTargetY + s3DOrbitDist * sinf(s3DOrbitPitch);
+        float camZ = s3DTargetZ + s3DOrbitDist * cosf(s3DOrbitPitch) * cosf(s3DOrbitYaw);
+        // Forward, right, up vectors
+        float fx = s3DTargetX - camX, fy = s3DTargetY - camY, fz = s3DTargetZ - camZ;
+        float fLen = sqrtf(fx*fx + fy*fy + fz*fz);
+        if (fLen > 0) { fx /= fLen; fy /= fLen; fz /= fLen; }
+        float rx = -fz, ry = 0.0f, rz = fx;
+        float rLen = sqrtf(rx*rx + rz*rz);
+        if (rLen > 0) { rx /= rLen; rz /= rLen; }
+        float ux = ry*fz - rz*fy, uy = rz*fx - rx*fz, uz = rx*fy - ry*fx;
+        // NDC from mouse
+        float ndcX = (mpos.x - pos.x) / vpAreaW * 2.0f - 1.0f;
+        float ndcY = 1.0f - (mpos.y - pos.y) / size.y * 2.0f;
+        float fovY = 45.0f * 3.14159265f / 360.0f;
+        float aspect = vpAreaW / size.y;
+        float tanH = tanf(fovY);
+        // Ray direction in world space
+        float rdx = fx + rx * ndcX * tanH * aspect + ux * ndcY * tanH;
+        float rdy = fy + ry * ndcX * tanH * aspect + uy * ndcY * tanH;
+        float rdz = fz + rz * ndcX * tanH * aspect + uz * ndcY * tanH;
+        float rdLen = sqrtf(rdx*rdx + rdy*rdy + rdz*rdz);
+        if (rdLen > 0) { rdx /= rdLen; rdy /= rdLen; rdz /= rdLen; }
+        // Find closest sprite to ray
+        int bestIdx = -1;
+        float bestDist = 1e9f;
+        for (int i = 0; i < sSpriteCount; i++)
+        {
+            float ox = sSprites[i].x - camX, oy = sSprites[i].y - camY, oz = sSprites[i].z - camZ;
+            float t = ox*rdx + oy*rdy + oz*rdz; // project onto ray
+            if (t < 0) continue;
+            float px = ox - rdx*t, py = oy - rdy*t, pz = oz - rdz*t;
+            float dist = sqrtf(px*px + py*py + pz*pz);
+            // Hit radius based on mesh bounds or a default
+            float hitR = 20.0f * sSprites[i].scale;
+            if (sSprites[i].type == SpriteType::Mesh && sSprites[i].meshIdx >= 0
+                && sSprites[i].meshIdx < (int)sMeshAssets.size()) {
+                const MeshAsset& ma = sMeshAssets[sSprites[i].meshIdx];
+                float bx = (ma.boundsMax[0] - ma.boundsMin[0]) * sSprites[i].scale;
+                float by = (ma.boundsMax[1] - ma.boundsMin[1]) * sSprites[i].scale;
+                float bz = (ma.boundsMax[2] - ma.boundsMin[2]) * sSprites[i].scale;
+                hitR = sqrtf(bx*bx + by*by + bz*bz) * 0.5f;
+                if (hitR < 5.0f) hitR = 5.0f;
+            }
+            if (dist < hitR && t < bestDist) {
+                bestDist = t;
+                bestIdx = i;
+            }
+        }
+        if (bestIdx >= 0) {
+            if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
+                sSprites[sSelectedSprite].selected = false;
+            sSelectedSprite = bestIdx;
+            sSelectedObjType = SelectedObjType::Sprite;
+            sSprites[bestIdx].selected = true;
+            if (sSprites[bestIdx].meshIdx >= 0 && sSprites[bestIdx].meshIdx < (int)sMeshAssets.size())
+                sSelectedMesh = sSprites[bestIdx].meshIdx;
+        } else {
+            if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
+                sSprites[sSelectedSprite].selected = false;
+            sSelectedSprite = -1;
+        }
+    }
+
     // Store viewport rect for post-ImGui GL rendering (exclude side panel)
     s3DRenderNeeded = true;
     s3DViewPos = pos;
@@ -7716,7 +7788,7 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
 
     // Overlay info text
     ImGui::SetCursorPos(ImVec2(8, 8));
-    ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.8f, 0.8f), "LMB: Orbit  |  MMB: Pan  |  Scroll: Zoom");
+    ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.8f, 0.8f), "LMB: Orbit  |  MMB: Pan  |  Scroll: Zoom  |  RMB: Select");
 
     ImGui::End();
 
@@ -8059,7 +8131,9 @@ static void DrawTabBar()
             }
 
             // Save current scene state before switching tabs
-            if (sActiveTab == EditorTab::Map && sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+            // 3D tab shares sprites with Map (Mode 4), so save to Map scene
+            if ((sActiveTab == EditorTab::Map || sActiveTab == EditorTab::ThreeD)
+                && sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
                 SaveMapSceneState(sMapScenes[sMapSelectedScene]);
             else if (sActiveTab == EditorTab::Mode7 && sM7SelectedScene >= 0 && sM7SelectedScene < (int)sM7Scenes.size())
                 SaveM7SceneState(sM7Scenes[sM7SelectedScene]);
@@ -8067,7 +8141,9 @@ static void DrawTabBar()
             sActiveTab = tab;
 
             // Load scene state for the new tab
-            if (tab == EditorTab::Map && sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
+            // 3D tab shares sprites with Map (Mode 4), so load from Map scene
+            if ((tab == EditorTab::Map || tab == EditorTab::ThreeD)
+                && sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
                 LoadMapSceneState(sMapScenes[sMapSelectedScene]);
             else if (tab == EditorTab::Mode7 && sM7SelectedScene >= 0 && sM7SelectedScene < (int)sM7Scenes.size())
                 LoadM7SceneState(sM7Scenes[sM7SelectedScene]);
@@ -9886,6 +9962,8 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         {
             if (ImGui::Checkbox("Static##sprMain", &sp.forceStatic)) sProjectDirty = true;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show same frame at all angles (compact — saves OBJ VRAM)");
+            if (ImGui::Checkbox("Draw Behind##sprMain", &sp.drawBehind)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Draw behind meshes (OAM priority 2)");
         }
         // Mesh asset link (only for Mesh type)
         if (sp.type == SpriteType::Mesh)
@@ -11942,7 +12020,7 @@ void FrameTick(float dt)
                             se.palIdx = sSpriteAssets[se.assetIdx].palBank;
                         else
                             se.palIdx = (i % 5) + 1;
-                        se.oamPrio = 0;
+                        se.oamPrio = sSprites[i].drawBehind ? 2 : 0;
                         se.forceStatic = sSprites[i].forceStatic;
                         exportSprites.push_back(se);
 
@@ -14524,9 +14602,9 @@ void FrameTick(float dt)
             }
         }
 
-        // Clamp camera to world bounds
-        sCamera.x = std::clamp(sCamera.x, -kWorldHalf, kWorldHalf);
-        sCamera.z = std::clamp(sCamera.z, -kWorldHalf, kWorldHalf);
+        // Clamp camera to generous bounds (allow exploring beyond the map edge)
+        sCamera.x = std::clamp(sCamera.x, -kWorldHalf * 4.0f, kWorldHalf * 4.0f);
+        sCamera.z = std::clamp(sCamera.z, -kWorldHalf * 4.0f, kWorldHalf * 4.0f);
     }
 
     // Player position is freely editable — only set on creation, not per-frame

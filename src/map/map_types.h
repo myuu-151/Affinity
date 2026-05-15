@@ -222,6 +222,7 @@ struct FloorSprite
     int   animIdx  = 0;      // which animation to play
     bool  animEnabled = true; // false = static (no animation cycling)
     bool  forceStatic = false; // compact: show same frame at all angles (saves VRAM)
+    bool  drawBehind = false;  // true = draw behind meshes (OAM priority 2)
     uint32_t color = 0xFFFF00FF; // tint color (ABGR) — used for editor preview
     bool  selected = false;
     // Attached sub-sprites (extra sprite layers with local offsets)

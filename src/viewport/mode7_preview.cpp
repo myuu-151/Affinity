@@ -682,13 +682,18 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             float sideComponent = dx * cosA + dz * sinA;
             int screenX = 120 + (int)(sideComponent / lambda);
 
-            if (screenY < 0 || screenY >= kGBAHeight) continue;
-            if (screenX < -32 || screenX >= kGBAWidth + 32) continue;
+            bool isMesh = (subPass < 0 && sprites[i].type == SpriteType::Mesh
+                          && sprites[i].meshIdx >= 0);
+            // Skip screen-bounds culling for mesh sprites — their vertices are projected independently
+            if (!isMesh) {
+                if (screenY < 0 || screenY >= kGBAHeight) continue;
+                if (screenX < -32 || screenX >= kGBAWidth + 32) continue;
+            }
 
             float scale = cam.height / lambda;
             float fog = lambda / 300.0f;
             if (fog > 1.0f) fog = 1.0f;
-            if (fog > 0.95f) continue;
+            if (!isMesh && fog > 0.95f) continue;
 
             // Draw order: 0 = behind, 1 = parent, 2 = in front
             int drawOrd = 1; // parent
@@ -761,12 +766,18 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
 
         // Check if this sprite has a linked asset with directional images
         bool drewSprite = false;
+        bool isForceStatic = (sp.subIdx < 0) ? fs.forceStatic
+            : (sp.subIdx < fs.subSpriteCount && fs.subSprites[sp.subIdx].forceStatic);
         if (effectiveAssetIdx >= 0 && effectiveAssetIdx < assetCount && assets
             && assetDirImages && effectiveAssetIdx < assetDirCount
             && assets[effectiveAssetIdx].hasDirections)
         {
             int dirIdx;
-            if (fs.type == SpriteType::Player && sp.subIdx < 0)
+            if (isForceStatic)
+            {
+                dirIdx = 0; // static: always show facing 0
+            }
+            else if (fs.type == SpriteType::Player && sp.subIdx < 0)
             {
                 // Player direction: based on movement/orbit angle (same as GBA runtime)
                 float a = playerOrbitAngle;
@@ -792,9 +803,20 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             }
 
             // Use per-sprite dir images if available (only for parent), else per-asset
-            const PlayerDirImage& adi = (sp.subIdx < 0 && spriteDirImages && sp.idx < spriteDirCount)
-                ? spriteDirImages[sp.idx].dirs[dirIdx]
-                : assetDirImages[effectiveAssetIdx].dirs[dirIdx];
+            const AssetDirImages& dirImgs = (sp.subIdx < 0 && spriteDirImages && sp.idx < spriteDirCount)
+                ? spriteDirImages[sp.idx]
+                : assetDirImages[effectiveAssetIdx];
+            // If requested direction has no pixels, find nearest available
+            if (!(dirImgs.dirs[dirIdx].pixels && dirImgs.dirs[dirIdx].width > 0))
+            {
+                for (int d = 1; d <= 4; d++) {
+                    int fwd = (dirIdx + d) & 7;
+                    int bwd = (dirIdx - d + 8) & 7;
+                    if (dirImgs.dirs[fwd].pixels && dirImgs.dirs[fwd].width > 0) { dirIdx = fwd; break; }
+                    if (dirImgs.dirs[bwd].pixels && dirImgs.dirs[bwd].width > 0) { dirIdx = bwd; break; }
+                }
+            }
+            const PlayerDirImage& adi = dirImgs.dirs[dirIdx];
             if (adi.pixels && adi.width > 0 && adi.height > 0)
             {
                 int halfS = std::max(halfW, halfH);
