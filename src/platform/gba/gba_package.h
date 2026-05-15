@@ -456,7 +456,7 @@ struct GBAHudTextRowExport {
     char text[32];
     int localX, localY;
     uint16_t colorRGB15;
-    int font; // 0=normal 8x8, 1=small pixel 4x5
+    int font; // 0=normal 8x8, 1=small pixel 4x5, 2=5x7 debug
 };
 
 struct GBAHudKeyframeExport {

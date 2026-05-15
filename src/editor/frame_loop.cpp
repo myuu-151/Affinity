@@ -24499,8 +24499,8 @@ void FrameTick(float dt)
                             tr.color = ImGui::ColorConvertFloat4ToU32(tcf);
                             sProjectDirty = true;
                         }
-                        const char* fontNames[] = { "Normal", "Pixel" };
-                        if (ImGui::Combo("Font##txt", &tr.font, fontNames, 2)) sProjectDirty = true;
+                        const char* fontNames[] = { "Normal", "Pixel", "5x7" };
+                        if (ImGui::Combo("Font##txt", &tr.font, fontNames, 3)) sProjectDirty = true;
                     }
                 }
 
