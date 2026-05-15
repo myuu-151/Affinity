@@ -660,22 +660,22 @@ static bool GenerateMapData(const std::string& runtimeDir,
             {
                 // Update tileStart to point to current end of allTiles
                 assetTileStart[ai] = (int)allTiles.size() / 8;
-                // Generate test pattern tiles for debugging
+                // Copy direction 0 of set 0 from dirAnimAllTiles into static tiles
                 int dirSize = assetDirInfos[ai].dirSize;
                 int tpf = (dirSize / 8) * (dirSize / 8);
-                int tilesPerRow = dirSize / 8;
-                for (int t = 0; t < tpf; t++) {
-                    int tileRow = t / tilesPerRow;
-                    int tileCol = t % tilesPerRow;
-                    uint8_t palIdx = (tileRow < tilesPerRow/2)
-                        ? ((tileCol < tilesPerRow/2) ? 1 : 2)
-                        : ((tileCol < tilesPerRow/2) ? 3 : 4);
-                    for (int row = 0; row < 8; row++) {
-                        uint32_t val = 0;
-                        for (int px = 0; px < 8; px++)
-                            val |= ((uint32_t)palIdx << (px * 4));
-                        allTiles.push_back(val);
-                    }
+                if (!assetDirInfos[ai].romSetU32Offset.empty())
+                {
+                    int romOff = assetDirInfos[ai].romSetU32Offset[0]; // set 0 start
+                    // Direction 0 is the first direction in the set (tpf*8 u32 values)
+                    int wordsPerDir = tpf * 8;
+                    for (int w = 0; w < wordsPerDir && (romOff + w) < (int)dirAnimAllTiles.size(); w++)
+                        allTiles.push_back(dirAnimAllTiles[romOff + w]);
+                }
+                else
+                {
+                    // Fallback: emit blank tiles
+                    for (int w = 0; w < tpf * 8; w++)
+                        allTiles.push_back(0);
                 }
                 // Update objSize/tpf to match direction size
                 assetObjSize[ai] = assetDirInfos[ai].dirSize;
@@ -812,7 +812,19 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static const u32 afn_all_tiles[1] = { 0 };\n";
     }
     f << "#define AFN_ALL_TILES_LEN " << (int)allTiles.size() * 4 << "\n";
-    f << "#define AFN_DIR_VRAM_TILES " << dirVramNextTile << "\n\n";
+    f << "#define AFN_DIR_VRAM_TILES " << dirVramNextTile << "\n";
+    // Mode 4 compact: only 1 facing per asset in VRAM at a time
+    {
+        int m4DirTiles = 0;
+        for (size_t ai = 0; ai < assets.size(); ai++) {
+            if (assetDirInfos[ai].has && assetReferencedBySprite[ai]) {
+                int tpf = (assetDirInfos[ai].dirSize / 8) * (assetDirInfos[ai].dirSize / 8);
+                m4DirTiles += tpf; // 1 facing only
+            }
+        }
+        f << "#define AFN_DIR_VRAM_TILES_M4 " << m4DirTiles << "\n";
+    }
+    f << "\n";
 
     // Emit direction animation ROM tile data (for DMA streaming)
     if (!dirAnimAllTiles.empty())
