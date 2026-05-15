@@ -5298,6 +5298,12 @@ static bool LoadProject(const std::string& path)
     sSelectedInstance = -1;
     sMidiFiles.clear();
     sSelectedMidi = -1;
+    // Remove imported samples from sound bank (built-in stay), then re-snapshot
+    sSoundBank.erase(
+        std::remove_if(sSoundBank.begin(), sSoundBank.end(),
+            [](const SoundSample& s) { return !s.builtIn; }),
+        sSoundBank.end());
+    SnapshotCleanBank();
 
     char line[32768]; // large buffer for frame pixel data lines (64x64 = ~16KB worst case)
     char section[64] = {};
@@ -7499,11 +7505,16 @@ static bool LoadProject(const std::string& path)
     if (sM7SelectedScene < 0 || sM7SelectedScene >= (int)sM7Scenes.size())
         sM7SelectedScene = 0;
 
+    // Re-snapshot sound bank after imported samples are loaded
+    SnapshotCleanBank();
     // Load first sound instance overrides (if any)
     if (!sSoundInstances.empty()) {
         sSelectedInstance = 0;
         LoadInstanceOverrides(sSoundInstances[0]);
     }
+    // Select first MIDI file so playback works immediately after load
+    if (!sMidiFiles.empty())
+        sSelectedMidi = 0;
 
     // Stitch sky panels so the viewport can display the panorama
     // Migrate legacy per-scene skyEnabled flags to skybox instance assignments
