@@ -2143,18 +2143,20 @@ static void switch_dir_anim_set(int assetIdx, int newSet)
 
     int tpf = afn_asset_dir_desc[assetIdx][1];       // tiles per direction frame
     int vramTile0 = afn_asset_dir_desc[assetIdx][5];  // VRAM destination tile index
+    int compact = afn_asset_dir_desc[assetIdx][7];    // compact: 1 facing only
     int romOffset = afn_dir_set_offsets[assetIdx][newSet]; // u32 index into ROM array
     if (romOffset < 0) return;
 
     // In Mode 7 (afn_current_mode==2), tiles 0-511 are usable (not bitmap),
     // so shift everything down by 512 to fit within the 1024-tile OBJ VRAM
     int m7Adj = (afn_current_mode == 2) ? 512 : 0;
+    int dirs = compact ? 1 : 8;
     // Guard: skip if DMA would overflow OBJ VRAM (1024 tiles max)
     int dstTile = vramTile0 - tm_dir_adj - m7Adj;
-    if (dstTile < 0 || dstTile + 8 * tpf > 1024) return;
+    if (dstTile < 0 || dstTile + dirs * tpf > 1024) return;
 
-    // Copy 8 directions * tpf tiles * 32 bytes/tile from ROM to VRAM
-    int wordCount = 8 * tpf * 8; // 8 dirs * tpf tiles * 8 u32s per tile
+    // Copy dirs * tpf tiles * 32 bytes/tile from ROM to VRAM
+    int wordCount = dirs * tpf * 8;
     const u32 *src = &afn_dir_anim_tiles[romOffset];
     u32 *dst = (u32*)(0x06010000 + dstTile * 32);
 
@@ -5019,8 +5021,7 @@ static void mode4_init_scene(void)
         for (si = 0; si < g_spriteCount; si++)
         {
             int aidx = g_sprites[si].assetIdx;
-            if (aidx >= 0 && aidx < AFN_ASSET_COUNT && g_sprites[si].animEnabled
-                && g_sprites[si].spriteType == 1)
+            if (aidx >= 0 && aidx < AFN_ASSET_COUNT && g_sprites[si].animEnabled)
                 g_asset_anim_enabled[aidx] = 1;
         }
     }
@@ -5522,8 +5523,7 @@ int main(void)
         for (si = 0; si < g_spriteCount; si++)
         {
             int aidx = g_sprites[si].assetIdx;
-            if (aidx >= 0 && aidx < AFN_ASSET_COUNT && g_sprites[si].animEnabled
-                && g_sprites[si].spriteType == 1)
+            if (aidx >= 0 && aidx < AFN_ASSET_COUNT && g_sprites[si].animEnabled)
                 g_asset_anim_enabled[aidx] = 1;
         }
     }

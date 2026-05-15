@@ -221,6 +221,7 @@ struct FloorSprite
     int   meshIdx  = -1;     // index into mesh asset list (-1 = none, used when type==Mesh)
     int   animIdx  = 0;      // which animation to play
     bool  animEnabled = true; // false = static (no animation cycling)
+    bool  forceStatic = false; // compact: show same frame at all angles (saves VRAM)
     uint32_t color = 0xFFFF00FF; // tint color (ABGR) — used for editor preview
     bool  selected = false;
     // Attached sub-sprites (extra sprite layers with local offsets)

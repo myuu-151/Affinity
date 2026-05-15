@@ -4458,10 +4458,10 @@ static bool SaveProject(const std::string& path)
     for (int i = 0; i < sSpriteCount; i++)
     {
         const FloorSprite& sp = sSprites[i];
-        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d",
+        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d",
                 sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                 sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0,
-                sp.meshIdx, sp.blueprintIdx, sp.instanceParamCount);
+                sp.meshIdx, sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0);
         for (int ip = 0; ip < sp.instanceParamCount; ip++)
             fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
         fprintf(f, "\n");
@@ -4893,10 +4893,10 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d",
+            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
-                    sp.blueprintIdx, sp.instanceParamCount);
+                    sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0);
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
@@ -5018,10 +5018,10 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d",
+            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
-                    sp.blueprintIdx, sp.instanceParamCount);
+                    sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0);
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
@@ -5388,8 +5388,8 @@ static bool LoadProject(const std::string& path)
                 unsigned int col;
                 // Try extended format (with assetIdx, animIdx, type, rotation, animEnabled, meshIdx)
                 float rot = 0.0f;
-                int bpIdx = -1, bpParamCnt = 0;
-                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt);
+                int bpIdx = -1, bpParamCnt = 0, fStatic = 0;
+                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic);
                 if (matched >= 6)
                 {
                     FloorSprite& sp = sSprites[sSpriteCount];
@@ -5408,6 +5408,7 @@ static bool LoadProject(const std::string& path)
                     sp.meshIdx = (matched >= 12) ? mIdx : -1;
                     sp.blueprintIdx = (matched >= 13) ? bpIdx : -1;
                     sp.instanceParamCount = (matched >= 14) ? std::min(bpParamCnt, 8) : 0;
+                    sp.forceStatic = (matched >= 15) ? (fStatic != 0) : false;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line;
@@ -6449,17 +6450,18 @@ static bool LoadProject(const std::string& path)
             {
                 MapScene& ms = sMapScenes.back();
                 FloorSprite sp = {};
-                int typeVal = 0, animEn = 0, bpIdx = -1, bpParamCnt = 0;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d",
+                int typeVal = 0, animEn = 0, bpIdx = -1, bpParamCnt = 0, fStatic = 0;
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt);
+                    &bpIdx, &bpParamCnt, &fStatic);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
                     sp.animEnabled = (animEn != 0);
                     sp.blueprintIdx = (matched >= 13) ? bpIdx : -1;
                     sp.instanceParamCount = (matched >= 14) ? std::min(bpParamCnt, 8) : 0;
+                    sp.forceStatic = (matched >= 15) ? (fStatic != 0) : false;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
@@ -6826,17 +6828,18 @@ static bool LoadProject(const std::string& path)
             {
                 MapScene& ms = sM7Scenes.back();
                 FloorSprite sp = {};
-                int typeVal = 0, animEn = 0, bpIdx = -1, bpParamCnt = 0;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d",
+                int typeVal = 0, animEn = 0, bpIdx = -1, bpParamCnt = 0, fStatic = 0;
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt);
+                    &bpIdx, &bpParamCnt, &fStatic);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
                     sp.animEnabled = (animEn != 0);
                     sp.blueprintIdx = (matched >= 13) ? bpIdx : -1;
                     sp.instanceParamCount = (matched >= 14) ? std::min(bpParamCnt, 8) : 0;
+                    sp.forceStatic = (matched >= 15) ? (fStatic != 0) : false;
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
                         for (int ip = 0; ip < sp.instanceParamCount; ip++) {
@@ -9878,6 +9881,12 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                 }
             }
         }
+        // Compact mode: show same frame at all camera angles (saves OBJ VRAM)
+        if (sp.type == SpriteType::Prop || sp.type == SpriteType::NPC || sp.type == SpriteType::Enemy)
+        {
+            if (ImGui::Checkbox("Static##sprMain", &sp.forceStatic)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show same frame at all angles (compact — saves OBJ VRAM)");
+        }
         // Mesh asset link (only for Mesh type)
         if (sp.type == SpriteType::Mesh)
         {
@@ -11934,6 +11943,7 @@ void FrameTick(float dt)
                         else
                             se.palIdx = (i % 5) + 1;
                         se.oamPrio = 0;
+                        se.forceStatic = sSprites[i].forceStatic;
                         exportSprites.push_back(se);
 
                         // Emit sub-sprites as separate sprite entries

@@ -411,7 +411,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
         // Unreferenced assets don't need VRAM
         if (!assetReferencedBySprite[ai]) continue;
         // Direction assets use DMA — skip static tile emission
-        if (assets[ai].hasDirections && !assets[ai].dirAnimSets.empty()) continue;
+        // EXCEPT forceStatic assets: they only show 1 facing, emit as static tiles
+        if (assets[ai].hasDirections && !assets[ai].dirAnimSets.empty()
+            && !assetNeedsStaticTiles[ai]) continue;
 
         for (size_t fi = 0; fi < assets[ai].frames.size(); fi++)
         {
@@ -431,6 +433,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         std::vector<int> romSetU32Offset; // u32 index into dirAnimAllTiles per set
         int dirMask = 0; // bitmask of which directions (0-7) have image data (union of all sets)
         std::vector<int> perSetDirMask; // per-set direction bitmask
+        bool compact = false; // true = only 1 facing in VRAM (forceStatic props)
     };
     std::vector<AssetDirInfo> assetDirInfos(assets.size());
     std::vector<uint32_t> dirAnimAllTiles; // ROM data for DMA streaming
@@ -454,7 +457,18 @@ static bool GenerateMapData(const std::string& runtimeDir,
         assetDirInfos[ai].has = true;
         assetDirInfos[ai].setCount = setCount;
         assetDirInfos[ai].dirMask = dirMask;
-        assetDirInfos[ai].dirSize = 64;
+        // Derive dirSize from first valid direction image (snapped to OBJ size)
+        int detectedSize = 64;
+        for (size_t si2 = 0; si2 < assets[ai].dirAnimSets.size() && detectedSize == 64; si2++)
+            for (int d = 0; d < 8; d++) {
+                const auto& img = assets[ai].dirAnimSets[si2].dirImages[d];
+                if (img.pixels && img.width > 0 && img.height > 0) {
+                    int maxDim = img.width > img.height ? img.width : img.height;
+                    detectedSize = SnapToOBJSize(maxDim);
+                    break;
+                }
+            }
+        assetDirInfos[ai].dirSize = detectedSize;
         // Use source asset's palBank if sharing palette
         int srcPalAsset = assets[ai].paletteSrc;
         if (srcPalAsset >= 0 && srcPalAsset < (int)assets.size() && srcPalAsset != (int)ai)
@@ -576,7 +590,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         };
 
         // Quantize and tile each set
-        int dirSize = 64;
+        int dirSize = assetDirInfos[ai].dirSize;
         // ROM tiles are built here for all direction assets; VRAM allocation
         // (vramTile0) is assigned in a separate pass below to prioritize the player asset.
 
@@ -638,15 +652,25 @@ static bool GenerateMapData(const std::string& runtimeDir,
             assetDirInfos[playerAssetIdx].vramTile0 = dirVramNextTile;
             dirVramNextTile += 8 * tpf;
         }
-        // Next: allocate forceStatic sub-sprite assets (need DMA for fixed facing)
+        // ForceStatic assets use static tiles — exclude from direction VRAM
+        // Copy direction 0 of set 0 into the static tile array
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
-            if ((int)ai == playerAssetIdx) continue;
-            if (!assetDirInfos[ai].has || !assetReferencedBySprite[ai]) continue;
-            if (!assetNeedsStaticTiles[ai]) continue; // only forceStatic assets in this pass
-            int tpf = (assetDirInfos[ai].dirSize / 8) * (assetDirInfos[ai].dirSize / 8);
-            assetDirInfos[ai].vramTile0 = dirVramNextTile;
-            dirVramNextTile += 8 * tpf;
+            if (assetNeedsStaticTiles[ai] && assetDirInfos[ai].has)
+            {
+                // Update tileStart to point to current end of allTiles
+                assetTileStart[ai] = (int)allTiles.size() / 8;
+                // Copy direction 0 tiles from set 0 ROM data
+                int tpf = (assetDirInfos[ai].dirSize / 8) * (assetDirInfos[ai].dirSize / 8);
+                int romOff = assetDirInfos[ai].romSetU32Offset[0]; // set 0 start
+                // Direction 0 is the first tpf tiles (tpf * 8 u32s)
+                int u32Count = tpf * 8;
+                if (romOff >= 0 && romOff + u32Count <= (int)dirAnimAllTiles.size())
+                    allTiles.insert(allTiles.end(),
+                        dirAnimAllTiles.begin() + romOff,
+                        dirAnimAllTiles.begin() + romOff + u32Count);
+                assetDirInfos[ai].has = false; // will use static tile path instead
+            }
         }
         // Then allocate remaining direction assets
         for (size_t ai = 0; ai < assets.size(); ai++)
@@ -844,7 +868,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         if (maxDirSets < 1) maxDirSets = 1;
         f << "#define AFN_HAS_ASSET_DIRS 1\n";
         f << "#define AFN_MAX_DIR_SETS " << maxDirSets << "\n";
-        f << "static const int afn_asset_dir_desc[][7] = {\n";
+        f << "static const int afn_asset_dir_desc[][8] = {\n";
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
             if (assetDirInfos[ai].has && assetReferencedBySprite[ai])
@@ -854,11 +878,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                   << ", " << assetDirInfos[ai].dirSize
                   << ", " << assetDirInfos[ai].palBank
                   << ", 1, " << (assetDirInfos[ai].vramTile0 + tileOffset)
-                  << ", " << assetDirInfos[ai].dirMask << " },\n";
+                  << ", " << assetDirInfos[ai].dirMask
+                  << ", " << (assetDirInfos[ai].compact ? 1 : 0) << " },\n";
             }
             else
             {
-                f << "    { 0, 0, 0, 0, 0, 0, 0 },\n";
+                f << "    { 0, 0, 0, 0, 0, 0, 0, 0 },\n";
             }
         }
         f << "};\n\n";
@@ -5063,6 +5088,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "  for (int i = 0; i < " << (int)bpInstances.size() << "; i++) {\n";
             f << "    if (afn_bp_instances[i].sceneMode != afn_current_mode) continue;\n";
             f << "    if (afn_bp_instances[i].sceneMask != 0xFFFFFFFFu && !(afn_bp_instances[i].sceneMask & (1u << tm_scene_idx))) continue;\n";
+            f << "    afn_bp_cur_tm_obj = afn_bp_instances[i].tmObjIdx;\n";
+            f << "    afn_bp_cur_spr_idx = afn_bp_instances[i].sprIdx;\n";
             f << "    switch (afn_bp_instances[i].bpIdx) {\n";
             for (int bi = 0; bi < (int)blueprints.size(); bi++) {
                 int pc = (int)blueprints[bi].params.size();
