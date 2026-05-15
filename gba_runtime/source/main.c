@@ -1962,9 +1962,8 @@ static void init_obj_sprites(void)
             // Mode 0: place static tiles right after compact direction slots
             dst = (u32*)(0x06010000 + tm_dir_slot_count * 32);
         } else if (afn_current_mode == 2) {
-            // Mode 7: place static tiles after direction DMA region (tile 512)
-            // Direction DMA uses tiles 0-511 for the player asset
-            dst = (u32*)(0x06010000 + 512 * 32);
+            // Mode 7 compact: place static tiles after compact direction slots
+            dst = (u32*)(0x06010000 + AFN_DIR_VRAM_TILES * 32);
         } else {
             // Mode 4: skip bitmap overlap (512 tiles) + compact direction VRAM
 #ifdef AFN_DIR_VRAM_TILES_M4
@@ -2156,17 +2155,18 @@ static void switch_dir_anim_set(int assetIdx, int newSet)
     // In Mode 7 (afn_current_mode==2), tiles 0-511 are usable (not bitmap),
     // so shift everything down by 512 to fit within the 1024-tile OBJ VRAM
     int m7Adj = (afn_current_mode == 2) ? 512 : 0;
-    // Mode 4 (afn_current_mode==0): force compact — only DMA 1 facing at a time
-    // to avoid overflowing the 512-tile usable OBJ VRAM window (tiles 512-1023)
-    int m4Compact = (afn_current_mode == 0) ? 1 : 0;
-    int dirs = (compact || m4Compact) ? 1 : 8;
+    // Mode 4 & Mode 7: force compact — only DMA 1 facing at a time
+    // Mode 4: 512-tile usable window (tiles 512-1023)
+    // Mode 7: 1024 tiles total, compact saves VRAM for static tiles
+    int forceCompact = (afn_current_mode == 0 || afn_current_mode == 2) ? 1 : 0;
+    int dirs = (compact || forceCompact) ? 1 : 8;
     // Guard: skip if DMA would overflow OBJ VRAM (1024 tiles max)
     int dstTile = vramTile0 - tm_dir_adj - m7Adj;
     if (dstTile < 0 || dstTile + dirs * tpf > 1024) return;
 
-    // In Mode 4 compact, DMA the current facing direction (or dir 0 if unknown)
+    // In compact mode (Mode 4/Mode 7), DMA the current facing direction (or dir 0 if unknown)
     const u32 *src;
-    if (m4Compact && !compact) {
+    if (forceCompact && !compact) {
         int facing = g_m4_dir_facing[assetIdx];
         if (facing < 0 || facing > 7) facing = 0;
         src = &afn_dir_anim_tiles[romOffset + facing * tpf * 8];
@@ -2181,12 +2181,12 @@ static void switch_dir_anim_set(int assetIdx, int newSet)
     DMA_TRANSFER(dst, src, wordCount, 3, DMA_NOW | DMA_32);
 
     g_active_dir_set[assetIdx] = newSet;
-    // In Mode 4 compact, invalidate facing so mode4_dma_dir_facing re-DMAs from new set
-    if (afn_current_mode == 0) g_m4_dir_facing[assetIdx] = -1;
+    // In compact mode, invalidate facing so DMA re-loads from new set
+    if (afn_current_mode == 0 || afn_current_mode == 2) g_m4_dir_facing[assetIdx] = -1;
 }
 
-// Mode 4: DMA a single facing direction for an asset (called per-frame when facing changes)
-static void mode4_dma_dir_facing(int assetIdx, int facing)
+// Compact DMA: stream a single facing direction for an asset (Mode 4 & Mode 7)
+static void compact_dma_dir_facing(int assetIdx, int facing)
 {
     if (assetIdx < 0 || assetIdx >= AFN_ASSET_COUNT) return;
     if (!afn_asset_dir_desc[assetIdx][4]) return;
@@ -2196,6 +2196,8 @@ static void mode4_dma_dir_facing(int assetIdx, int facing)
 
     int tpf = afn_asset_dir_desc[assetIdx][1];
     int vramTile0 = afn_asset_dir_desc[assetIdx][5];
+    // Mode 7: tiles 0-511 usable, shift down by 512
+    if (afn_current_mode == 2) vramTile0 -= 512;
     int curSet = g_active_dir_set[assetIdx];
     if (curSet < 0) return; // no set loaded yet
 
@@ -2383,9 +2385,9 @@ static void update_sprites(void)
                                 tileId = afn_asset_desc[ai][0] - tm_static_adj;
                                 baseSize = afn_asset_desc[ai][3];
                                 palBank = afn_asset_desc[ai][4];
-                            } else if (afn_current_mode == 0 && !adCompact) {
-                                // Mode 4 compact: only 1 facing in VRAM, DMA the right one
-                                mode4_dma_dir_facing(ai, dirIdx);
+                            } else if ((afn_current_mode == 0 || afn_current_mode == 2) && !adCompact) {
+                                // Mode 4/Mode 7 compact: only 1 facing in VRAM, DMA the right one
+                                compact_dma_dir_facing(ai, dirIdx);
                                 tileId = vramTile0;
                                 baseSize = afn_asset_dir_desc[ai][2];
                                 scaleSize = baseSize;
@@ -5346,11 +5348,10 @@ static void scene_load(int sceneMode, int sceneIdx)
         if (g_sky_active) load_sky();
 #endif
         init_obj_sprites();
-#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-        tm_static_adj = AFN_DIR_VRAM_TILES; // Mode 7: static tiles at 512, tileStart includes tileOffset(512)
-#else
-        tm_static_adj = AFN_DIR_VRAM_TILES;
-#endif
+        // Mode 7: tileStart in export = assetTileStart + tileOffset(512) + dirVramNextTile
+        // physical VRAM tile = dirVramNextTile + assetTileStart (compact, no bitmap overlap)
+        // so tm_static_adj = tileOffset(512) = baked offset from exporter
+        tm_static_adj = 512;
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_DIR_ANIM_TILES_LEN)
         { int ai; for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {
             if (!afn_asset_dir_desc[ai][4]) continue;
@@ -5532,11 +5533,10 @@ int main(void)
         if (g_sky_active) load_sky();
 #endif
         init_obj_sprites();
-#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-        tm_static_adj = AFN_DIR_VRAM_TILES; // Mode 7: static tiles at 512, tileStart includes tileOffset(512)
-#else
-        tm_static_adj = AFN_DIR_VRAM_TILES;
-#endif
+        // Mode 7: tileStart in export = assetTileStart + tileOffset(512) + dirVramNextTile
+        // physical VRAM tile = dirVramNextTile + assetTileStart (compact, no bitmap overlap)
+        // so tm_static_adj = tileOffset(512) = baked offset from exporter
+        tm_static_adj = 512;
 #if defined(AFN_HAS_ASSET_DIRS) && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_DIR_ANIM_TILES_LEN)
         { int ai; for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {
             if (!afn_asset_dir_desc[ai][4]) continue;

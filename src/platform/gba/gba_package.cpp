@@ -645,12 +645,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
     // Assign vramTile0 with player asset first so it always fits in OBJ VRAM
     {
         // Player asset gets vramTile0 = 0 (guaranteed to fit)
+        // All modes now use compact DMA (1 facing at a time), so allocate 1 tpf per asset
         if (playerAssetIdx >= 0 && playerAssetIdx < (int)assetDirInfos.size()
             && assetDirInfos[playerAssetIdx].has && assetReferencedBySprite[playerAssetIdx])
         {
             int tpf = (assetDirInfos[playerAssetIdx].dirSize / 8) * (assetDirInfos[playerAssetIdx].dirSize / 8);
             assetDirInfos[playerAssetIdx].vramTile0 = dirVramNextTile;
-            dirVramNextTile += 8 * tpf;
+            dirVramNextTile += tpf; // compact: 1 facing only
         }
         // ForceStatic assets use static tiles — exclude from direction VRAM
         // Copy direction 0 of set 0 into the static tile array
@@ -683,7 +684,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 assetDirInfos[ai].has = false; // will use static tile path instead
             }
         }
-        // Then allocate remaining direction assets
+        // Then allocate remaining direction assets (compact: 1 facing per asset)
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
             if ((int)ai == playerAssetIdx) continue; // already allocated
@@ -691,7 +692,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             if (!assetDirInfos[ai].has || !assetReferencedBySprite[ai]) continue;
             int tpf = (assetDirInfos[ai].dirSize / 8) * (assetDirInfos[ai].dirSize / 8);
             assetDirInfos[ai].vramTile0 = dirVramNextTile;
-            dirVramNextTile += 8 * tpf;
+            dirVramNextTile += tpf; // compact: 1 facing only
         }
     }
 
