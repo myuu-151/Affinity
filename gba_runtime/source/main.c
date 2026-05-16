@@ -2441,14 +2441,16 @@ static void update_sprites(void)
             int sx = proj[i].screenX - canvasHalf;
             int sy = proj[i].screenY - canvasHalf - visHalfH;
 
-            // Hide sprite if OAM coords would cause wrapping
-            // OAM Y is 8-bit unsigned (0-255). If sy < 0 the sprite wraps to
-            // bottom; if sy + canvasSize > 255 the canvas wraps past 255 and
-            // appears at the top. Both cases must be hidden.
-            // OAM X is 9-bit signed — negative X works correctly on hardware.
+            // Hide sprite if OAM coords would cause visible wrapping
+            // Top edge: sy < 0 is OK — GBA wraps Y into 160-255 (off-screen bottom)
+            //   and the canvas renders correctly back into the visible area.
+            //   Only hide when fully off-screen (sy + canvasSize <= 0).
+            // Bottom edge: if sy + canvasSize > 255 the canvas wraps past the
+            //   8-bit Y range and pixels appear at the top of screen — hide these.
             {
                 int canvasSize = canvasHalf * 2;
-                if (sy < 0 || sy + canvasSize > 255 || sy >= 160 ||
+                if (sy + canvasSize <= 0 || sy >= 160 ||
+                    (sy >= 0 && sy + canvasSize > 255) ||
                     sx + canvasSize <= 0 || sx >= 240) {
                     obj_mem[oamIdx].attr0 = ATTR0_HIDE;
                     continue;
@@ -6721,11 +6723,10 @@ int main(void)
             if (afn_collided_sprite >= 0 && afn_frame_count > 10 &&
                 g_sprites[afn_collided_sprite].meshIdx < 0) {
                 afn_script_collision();
-                // Skip bp collision dispatch for spring sprite (handled by hardcoded check below)
                 if (afn_collided_sprite != 5)
                     afn_bp_dispatch_collision();
             }
-            // Spring launch — direct distance check (bypass collision loop)
+            // Spring launch — direct distance check
             {
                 static int spring_launched = 0;
                 if (g_spriteCount > 5) {
