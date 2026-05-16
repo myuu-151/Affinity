@@ -1880,6 +1880,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static FIXED afn_move_speed;\n";
         f << "static int   afn_auto_orbit_speed;\n";
         f << "static int   afn_play_anim;\n";
+        f << "static int   afn_set_sprite_anim_req[16]; // per-sprite anim override (0=none, N=anim+1)\n";
         f << "static int   afn_anim_prio;\n";
         f << "static int   afn_pending_scene = -1;\n";
         f << "static int   afn_pending_scene_mode = -1;\n";
@@ -4105,7 +4106,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     std::string obj = objData ? bpResolveInt(objData) : "0";
                     std::string anim = animData ? bpResolveInt(animData) : "0";
                     f << "    if (afn_current_mode == 1) { tm_obj_anim_idx[" << obj << "] = " << anim << "; tm_obj_anim_play[" << obj << "] = 1; }\n";
-                    f << "    else { afn_play_anim = " << anim << "; }\n";
+                    f << "    else { afn_set_sprite_anim_req[" << obj << "] = " << anim << " + 1; }\n";
                     break;
                 }
                 case GBAScriptNodeType::SpawnEffect: {
@@ -5080,9 +5081,20 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "}\n";
 
             f << "static inline void afn_bp" << bi << "_collision(" << paramSig << ") {\n";
-            for (auto& c : bpChains)
-                if (c.event->type == GBAScriptNodeType::OnCollision)
+            for (auto& c : bpChains) {
+                if (c.event->type == GBAScriptNodeType::OnCollision) {
+                    // Emit radius guard if OnCollision has a Radius data input connected
+                    auto* radData = bpFindDataIn(c.event->id, 0);
+                    if (radData) {
+                        std::string rad = bpResolveInt(radData);
+                        f << "    { FIXED _dx = player_x - g_sprites[afn_collided_sprite].x;\n";
+                        f << "      FIXED _dz = player_z - g_sprites[afn_collided_sprite].z;\n";
+                        f << "      if (_dx < 0) _dx = -_dx; if (_dz < 0) _dz = -_dz;\n";
+                        f << "      if ((_dx >> 8) >= " << rad << " || (_dz >> 8) >= " << rad << ") return; }\n";
+                    }
                     bpEmitActionsWithGates(c.actions);
+                }
+            }
             f << "}\n";
 
             f << "static inline void afn_bp" << bi << "_collision2d(" << paramSig << ") {\n";

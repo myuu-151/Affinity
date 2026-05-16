@@ -472,7 +472,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "On Key Pressed",  0xFF338833, 0, 1, 1, 0, {"Key"}, {}, {} },
     { "On Key Released", 0xFF338833, 0, 1, 1, 0, {"Key"}, {}, {} },
     { "On Key Held",     0xFF338833, 0, 1, 1, 0, {"Key"}, {}, {} },
-    { "On Collision",    0xFF338833, 0, 1, 0, 0, {}, {}, {} },
+    { "On Collision",    0xFF338833, 0, 1, 1, 0, {"Radius (int)"}, {}, {} },
     { "On Start",        0xFF338833, 0, 1, 0, 0, {}, {}, {} },
     // Logic (blue)
     { "Branch",          0xFF885533, 1, 2, 1, 0, {"Condition"}, {}, {"True", "False"} },

@@ -6723,24 +6723,7 @@ int main(void)
             if (afn_collided_sprite >= 0 && afn_frame_count > 10 &&
                 g_sprites[afn_collided_sprite].meshIdx < 0) {
                 afn_script_collision();
-                if (afn_collided_sprite != 5)
-                    afn_bp_dispatch_collision();
-            }
-            // Spring launch — direct distance check
-            {
-                static int spring_launched = 0;
-                if (g_spriteCount > 5) {
-                    FIXED dx = player_x - g_sprites[5].x;
-                    FIXED dz = player_z - g_sprites[5].z;
-                    if (dx < 0) dx = -dx;
-                    if (dz < 0) dz = -dz;
-                    int inRange = (dx >> 8) < 10 && (dz >> 8) < 10;
-                    if (inRange && player_on_ground && !spring_launched) {
-                        player_vy = 1024;
-                        spring_launched = 1;
-                    }
-                    if (!inRange && player_on_ground) spring_launched = 0;
-                }
+                afn_bp_dispatch_collision();
             }
             // Blueprint instance dispatch
             afn_anim_prio = 0;
@@ -7030,6 +7013,14 @@ int main(void)
                         if (afn_play_anim >= 0 && afn_play_anim < AFN_MAX_ANIMS)
                             targetAnim = afn_play_anim;
 
+                        // Per-sprite anim override (SetSpriteAnim node)
+                        for (int _si = 0; _si < g_spriteCount && _si < 16; _si++) {
+                            if (afn_set_sprite_anim_req[_si] > 0 && g_sprites[_si].assetIdx == ai) {
+                                targetAnim = afn_set_sprite_anim_req[_si] - 1;
+                                afn_set_sprite_anim_req[_si] = 0;
+                            }
+                        }
+
                         if (targetAnim != g_current_anim[ai])
                         {
                             g_current_anim[ai] = targetAnim;
@@ -7088,8 +7079,8 @@ int main(void)
         if (g_sky_active) update_sky_scroll(cam_angle);
 #endif
 
-        // Reset to start position (disabled for debug)
-        if (0 && key_hit(KEY_START))
+        // Reset to start position
+        if (key_hit(KEY_START))
         {
             if (player_sprite_idx >= 0)
             {
