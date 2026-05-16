@@ -228,6 +228,11 @@ static void afn_sound_set_rate(void) {
 }
 
 static void afn_sound_hw_start(void) {
+    // Clear buffers to prevent startup noise from uninitialized data
+    for (int i = 0; i < SND_BUF_SIZE; i++) {
+        snd_buf[0][i] = 0; snd_buf[1][i] = 0;
+        snd_buf_b[0][i] = 0; snd_buf_b[1][i] = 0;
+    }
     // Enable sound hardware, timer, and FIFO DMA
     REG_SNDSTAT = SSTAT_ENABLE;
     u16 dscnt = SDS_A100 | SDS_AL | SDS_AR | SDS_ATMR0 | SDS_ARESET;
@@ -349,10 +354,12 @@ static void afn_sound_swap(void) {
     int play = snd_cur_buf ^ 1;
     REG_DMA1CNT = 0;
     REG_DMA1SAD = (u32)snd_buf[play];
+    REG_DMA1DAD = (u32)&REG_FIFO_A;
     REG_DMA1CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
     if (snd_fifo_b) {
         REG_DMA2CNT = 0;
         REG_DMA2SAD = (u32)snd_buf_b[play];
+        REG_DMA2DAD = (u32)&REG_FIFO_B;
         REG_DMA2CNT = DMA_DST_FIXED | DMA_SRC_INC | DMA_REPEAT | DMA_32 | DMA_AT_FIFO | DMA_ENABLE;
     }
     snd_cur_buf = play;
@@ -451,9 +458,8 @@ IWRAM_CODE static void afn_sound_mix(void) {
             if (hasB) {
                 afn_mix_clamp_fast(buf_b, snd_acc_b, mixN, 0); // FIFO B: no voice-count shift
             } else {
-                // No active FIFO B voices — shut down DMA2 and disable FIFO B output
-                REG_DMA2CNT = 0;
-                REG_SNDDSCNT &= ~(SDS_B100 | SDS_BL | SDS_BR | SDS_BTMR0 | SDS_BRESET);
+                // No active FIFO B voices — output silence (keep DMA alive for MIDI gaps)
+                for (int i = 0; i < mixN; i++) buf_b[i] = 0;
             }
         }
         if (mixN < SND_BUF_SIZE) {
