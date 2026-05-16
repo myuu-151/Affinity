@@ -151,7 +151,9 @@ afn_mix_voice_loop:
     mov     r7, r3, asr #8         @ idx = pos >> 8
     ldrsb   r8, [r1, r7]           @ s0 = wdata[idx]
     add     r7, r7, #1
-    ldrsb   r9, [r1, r7]           @ s1 = wdata[idx+1]
+    cmp     r7, r11, asr #8        @ if idx+1 >= loopLen>>8
+    subge   r7, r7, r12, asr #8   @   wrap to loop start
+    ldrsb   r9, [r1, r7]           @ s1 = wdata[idx+1] (wrapped)
     sub     r9, r9, r8             @ s1 - s0
     and     r7, r3, #0xFF          @ frac = pos & 0xFF
     mul     r9, r7, r9             @ (s1-s0) * frac
@@ -217,8 +219,10 @@ afn_mix_voice_loop16:
     mov     r8, r7, lsl #1         @ byte offset = idx * 2
     ldrsh   r8, [r1, r8]           @ s0 = wdata[idx]
     add     r7, r7, #1
+    cmp     r7, r11, asr #8        @ if idx+1 >= loopLen>>8
+    subge   r7, r7, r12, asr #8   @   wrap to loop start
     mov     r9, r7, lsl #1
-    ldrsh   r9, [r1, r9]           @ s1 = wdata[idx+1]
+    ldrsh   r9, [r1, r9]           @ s1 = wdata[idx+1] (wrapped)
     sub     r9, r9, r8
     and     r7, r3, #0xFF          @ frac
     mul     r9, r7, r9
