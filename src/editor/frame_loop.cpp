@@ -3764,7 +3764,7 @@ static bool sRDragUndoPushed = false;
 struct UndoEntry
 {
     int spriteIdx;
-    float x, y, z, scale, rotation;
+    float x, y, z, scale, rotation, rotationX, rotationZ;
 };
 static constexpr int kMaxUndo = 64;
 static UndoEntry sUndoStack[kMaxUndo];
@@ -3775,7 +3775,7 @@ static void UndoPush(int idx, const FloorSprite& sp)
 {
     if (sUndoCursor < kMaxUndo)
     {
-        sUndoStack[sUndoCursor] = { idx, sp.x, sp.y, sp.z, sp.scale, sp.rotation };
+        sUndoStack[sUndoCursor] = { idx, sp.x, sp.y, sp.z, sp.scale, sp.rotation, sp.rotationX, sp.rotationZ };
         sUndoCursor++;
         sUndoCount = sUndoCursor; // discard redo history
     }
@@ -3784,7 +3784,7 @@ static void UndoPush(int idx, const FloorSprite& sp)
         // Shift stack left by 1
         for (int i = 0; i < kMaxUndo - 1; i++)
             sUndoStack[i] = sUndoStack[i + 1];
-        sUndoStack[kMaxUndo - 1] = { idx, sp.x, sp.y, sp.z, sp.scale, sp.rotation };
+        sUndoStack[kMaxUndo - 1] = { idx, sp.x, sp.y, sp.z, sp.scale, sp.rotation, sp.rotationX, sp.rotationZ };
         sUndoCount = kMaxUndo;
     }
 }
@@ -3798,10 +3798,10 @@ static void UndoPop()
     {
         FloorSprite& sp = sSprites[e.spriteIdx];
         // Save current state for redo before restoring
-        float cx = sp.x, cy = sp.y, cz = sp.z, cs = sp.scale, cr = sp.rotation;
-        sp.x = e.x; sp.y = e.y; sp.z = e.z; sp.scale = e.scale; sp.rotation = e.rotation;
+        float cx = sp.x, cy = sp.y, cz = sp.z, cs = sp.scale, cr = sp.rotation, crx = sp.rotationX, crz = sp.rotationZ;
+        sp.x = e.x; sp.y = e.y; sp.z = e.z; sp.scale = e.scale; sp.rotation = e.rotation; sp.rotationX = e.rotationX; sp.rotationZ = e.rotationZ;
         // Overwrite the entry with what we just replaced (for redo)
-        e = { e.spriteIdx, cx, cy, cz, cs, cr };
+        e = { e.spriteIdx, cx, cy, cz, cs, cr, crx, crz };
     }
 }
 
@@ -3812,9 +3812,9 @@ static void RedoPush()
     if (e.spriteIdx >= 0 && e.spriteIdx < sSpriteCount)
     {
         FloorSprite& sp = sSprites[e.spriteIdx];
-        float cx = sp.x, cy = sp.y, cz = sp.z, cs = sp.scale, cr = sp.rotation;
-        sp.x = e.x; sp.y = e.y; sp.z = e.z; sp.scale = e.scale; sp.rotation = e.rotation;
-        e = { e.spriteIdx, cx, cy, cz, cs, cr };
+        float cx = sp.x, cy = sp.y, cz = sp.z, cs = sp.scale, cr = sp.rotation, crx = sp.rotationX, crz = sp.rotationZ;
+        sp.x = e.x; sp.y = e.y; sp.z = e.z; sp.scale = e.scale; sp.rotation = e.rotation; sp.rotationX = e.rotationX; sp.rotationZ = e.rotationZ;
+        e = { e.spriteIdx, cx, cy, cz, cs, cr, crx, crz };
     }
     sUndoCursor++;
 }
@@ -4460,10 +4460,11 @@ static bool SaveProject(const std::string& path)
     for (int i = 0; i < sSpriteCount; i++)
     {
         const FloorSprite& sp = sSprites[i];
-        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d",
+        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f",
                 sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                 sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0,
-                sp.meshIdx, sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0);
+                sp.meshIdx, sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
+                sp.rotationX, sp.rotationZ);
         for (int ip = 0; ip < sp.instanceParamCount; ip++)
             fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
         fprintf(f, "\n");
@@ -4896,10 +4897,11 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d",
+            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
-                    sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0);
+                    sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
+                    sp.rotationX, sp.rotationZ);
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
@@ -5021,10 +5023,11 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d",
+            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
-                    sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0);
+                    sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
+                    sp.rotationX, sp.rotationZ);
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
@@ -5398,7 +5401,8 @@ static bool LoadProject(const std::string& path)
                 // Try extended format (with assetIdx, animIdx, type, rotation, animEnabled, meshIdx)
                 float rot = 0.0f;
                 int bpIdx = -1, bpParamCnt = 0, fStatic = 0, dBehind = 0;
-                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic, &dBehind);
+                float rotX = 0.0f, rotZ = 0.0f;
+                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ);
                 if (matched >= 6)
                 {
                     FloorSprite& sp = sSprites[sSpriteCount];
@@ -5419,6 +5423,8 @@ static bool LoadProject(const std::string& path)
                     sp.instanceParamCount = (matched >= 14) ? std::min(bpParamCnt, 8) : 0;
                     sp.forceStatic = (matched >= 15) ? (fStatic != 0) : false;
                     sp.drawBehind = (matched >= 16) ? (dBehind != 0) : false;
+                    sp.rotationX = (matched >= 17) ? rotX : 0.0f;
+                    sp.rotationZ = (matched >= 18) ? rotZ : 0.0f;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line;
@@ -6461,10 +6467,11 @@ static bool LoadProject(const std::string& path)
                 MapScene& ms = sMapScenes.back();
                 FloorSprite sp = {};
                 int typeVal = 0, animEn = 0, bpIdx = -1, bpParamCnt = 0, fStatic = 0, dBehind = 0;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d",
+                float rotX = 0.0f, rotZ = 0.0f;
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt, &fStatic, &dBehind);
+                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
@@ -6473,6 +6480,8 @@ static bool LoadProject(const std::string& path)
                     sp.instanceParamCount = (matched >= 14) ? std::min(bpParamCnt, 8) : 0;
                     sp.forceStatic = (matched >= 15) ? (fStatic != 0) : false;
                     sp.drawBehind = (matched >= 16) ? (dBehind != 0) : false;
+                    sp.rotationX = (matched >= 17) ? rotX : 0.0f;
+                    sp.rotationZ = (matched >= 18) ? rotZ : 0.0f;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
@@ -6840,10 +6849,11 @@ static bool LoadProject(const std::string& path)
                 MapScene& ms = sM7Scenes.back();
                 FloorSprite sp = {};
                 int typeVal = 0, animEn = 0, bpIdx = -1, bpParamCnt = 0, fStatic = 0, dBehind = 0;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d",
+                float rotX = 0.0f, rotZ = 0.0f;
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt, &fStatic, &dBehind);
+                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
@@ -6852,6 +6862,8 @@ static bool LoadProject(const std::string& path)
                     sp.instanceParamCount = (matched >= 14) ? std::min(bpParamCnt, 8) : 0;
                     sp.forceStatic = (matched >= 15) ? (fStatic != 0) : false;
                     sp.drawBehind = (matched >= 16) ? (dBehind != 0) : false;
+                    sp.rotationX = (matched >= 17) ? rotX : 0.0f;
+                    sp.rotationZ = (matched >= 18) ? rotZ : 0.0f;
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
                         for (int ip = 0; ip < sp.instanceParamCount; ip++) {
@@ -8081,7 +8093,11 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         ImGui::DragFloat("Scale##m3d", &sp.scale, 0.1f, 0.01f, 100.0f);
         if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
-        ImGui::DragFloat("Rotation##m3d", &sp.rotation, 1.0f, 0.0f, 360.0f, "%.0f deg");
+        ImGui::DragFloat("Rot X##m3d", &sp.rotationX, 1.0f, -360.0f, 360.0f, "%.0f deg");
+        if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
+        ImGui::DragFloat("Rot Y##m3d", &sp.rotation, 1.0f, 0.0f, 360.0f, "%.0f deg");
+        if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
+        ImGui::DragFloat("Rot Z##m3d", &sp.rotationZ, 1.0f, -360.0f, 360.0f, "%.0f deg");
         if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         ImGui::PopItemWidth();
 
@@ -9919,8 +9935,17 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         ImGui::DragFloat("Scale##spr", &sp.scale, 0.1f, 0.1f, 50.0f);
         if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
-        ImGui::DragFloat("Rotation##spr", &sp.rotation, 1.0f, 0.0f, 360.0f, "%.0f deg");
-        if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
+        if (sp.type == SpriteType::Mesh) {
+            ImGui::DragFloat("Rot X##spr", &sp.rotationX, 1.0f, -360.0f, 360.0f, "%.0f deg");
+            if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
+            ImGui::DragFloat("Rot Y##spr", &sp.rotation, 1.0f, 0.0f, 360.0f, "%.0f deg");
+            if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
+            ImGui::DragFloat("Rot Z##spr", &sp.rotationZ, 1.0f, -360.0f, 360.0f, "%.0f deg");
+            if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
+        } else {
+            ImGui::DragFloat("Rotation##spr", &sp.rotation, 1.0f, 0.0f, 360.0f, "%.0f deg");
+            if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
+        }
 
         // Sprite asset link
         {
@@ -12028,6 +12053,8 @@ void FrameTick(float dt)
                         se.z = sSprites[i].z;
                         se.scale = sSprites[i].scale;
                         se.rotation = sSprites[i].rotation;
+                        se.rotationX = sSprites[i].rotationX;
+                        se.rotationZ = sSprites[i].rotationZ;
                         se.assetIdx = sSprites[i].assetIdx;
                         se.animIdx = sSprites[i].animIdx;
                         se.animEnabled = sSprites[i].animEnabled;
@@ -26015,6 +26042,8 @@ void Render3DViewport()
             glPushMatrix();
             glTranslatef(sx, sy, sz);
             glRotatef(fs.rotation, 0, 1, 0);
+            glRotatef(fs.rotationX, 1, 0, 0);
+            glRotatef(fs.rotationZ, 0, 0, 1);
             glScalef(fs.scale, fs.scale, fs.scale);
 
             // Backface culling matching mesh settings

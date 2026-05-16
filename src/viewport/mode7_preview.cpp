@@ -865,8 +865,12 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             if (!ma.vertices.empty() && (!ma.indices.empty() || !ma.quadIndices.empty()))
             {
                 float meshScale = fs.scale;
-                float rotRad = fs.rotation * 3.14159265f / 180.0f;
-                float cr2 = cosf(rotRad), sr = sinf(rotRad);
+                float rY = fs.rotation * 3.14159265f / 180.0f;
+                float rX = fs.rotationX * 3.14159265f / 180.0f;
+                float rZ = fs.rotationZ * 3.14159265f / 180.0f;
+                float cY = cosf(rY), sY = sinf(rY);
+                float cX = cosf(rX), sX = sinf(rX);
+                float cZ = cosf(rZ), sZ = sinf(rZ);
 
                 // Project all vertices to screen space
                 int nv = (int)ma.vertices.size();
@@ -881,13 +885,22 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 for (int v = 0; v < nv; v++)
                 {
                     const MeshVertex& mv = ma.vertices[v];
-                    // Local -> world: rotate around Y axis, scale, translate
                     float lx = mv.px * meshScale;
                     float ly = mv.py * meshScale;
                     float lz = mv.pz * meshScale;
-                    float wx = fs.x + lx * cr2 + lz * sr;
-                    float wy = fs.y + ly;
-                    float wz = fs.z - lx * sr + lz * cr2;
+                    // Y rotation
+                    float rx = lx * cY + lz * sY;
+                    float rz = -lx * sY + lz * cY;
+                    float ry = ly;
+                    // X rotation
+                    float ry2 = ry * cX - rz * sX;
+                    float rz2 = ry * sX + rz * cX;
+                    // Z rotation
+                    float rx2 = rx * cZ - ry2 * sZ;
+                    float ry3 = rx * sZ + ry2 * cZ;
+                    float wx = fs.x + rx2;
+                    float wy = fs.y + ry3;
+                    float wz = fs.z + rz2;
                     pVis[v] = ProjectPoint(wx, wy, wz, cam, cosA, sinA, pSX[v], pSY[v]);
                     // View-space depth for sorting
                     float dx = wx - cam.x;
@@ -974,9 +987,15 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                         fny = (ma.vertices[i0].ny + ma.vertices[i1].ny + ma.vertices[i2].ny) / 3.0f;
                         fnz = (ma.vertices[i0].nz + ma.vertices[i1].nz + ma.vertices[i2].nz) / 3.0f;
                     }
-                    float rnx = fnx * cr2 + fnz * sr;
-                    float rny = fny;
-                    float rnz = -fnx * sr + fnz * cr2;
+                    // Rotate normal: Y, then X, then Z
+                    float nx1 = fnx * cY + fnz * sY;
+                    float nz1 = -fnx * sY + fnz * cY;
+                    float ny1 = fny;
+                    float ny2 = ny1 * cX - nz1 * sX;
+                    float nz2 = ny1 * sX + nz1 * cX;
+                    float rnx = nx1 * cZ - ny2 * sZ;
+                    float rny = nx1 * sZ + ny2 * cZ;
+                    float rnz = nz2;
                     float dot = -(rnx * lightDirX + rny * lightDirY + rnz * lightDirZ);
                     float shade = 0.3f + 0.7f * std::max(0.0f, dot);
 

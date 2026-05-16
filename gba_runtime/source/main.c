@@ -4835,7 +4835,7 @@ static FIXED cam_y_smooth;     // smoothed camera Y offset (16.8)
 
 // Push player out of wall faces. Modifies *px, *pz in place.
 // Optimized: plane-distance only (no per-edge segment tests, no 64-bit division).
-static int afn_wall_collided_sprite = -1; // sprite index touched via mesh wall collision
+static int afn_wall_collided_sprite = -1; // sprite index touched via mesh wall/floor collision
 
 // Default grid origin to 0 if not defined (backwards compat)
 #ifndef AFN_COL_GRID_ORIGIN_X
@@ -6706,12 +6706,11 @@ int main(void)
             afn_collided_sprite = -1;
             afn_play_anim = -1;
 
-            // Collision detection: player vs all non-player flat sprites
+            // Collision detection: player vs all non-player sprites (flat + mesh)
             if (player_sprite_idx >= 0) {
                 int ci;
                 for (ci = 0; ci < g_spriteCount; ci++) {
                     if (ci == player_sprite_idx) continue;
-                    if (g_sprites[ci].meshIdx >= 0) continue;
                     FIXED dx = player_x - g_sprites[ci].x;
                     FIXED dz = player_z - g_sprites[ci].z;
                     // Distance squared in 16.8 fixed point — compare against radius^2
@@ -6731,10 +6730,9 @@ int main(void)
             afn_script_key_held();
             afn_script_key_pressed();
             afn_script_key_released();
-            // Collision event (radius-based, non-mesh sprites only)
+            // Collision event (radius-based, all sprites including mesh)
             // Skip first 10 frames after scene load to prevent ping-pong
-            if (afn_collided_sprite >= 0 && afn_frame_count > 10 &&
-                g_sprites[afn_collided_sprite].meshIdx < 0) {
+            if (afn_collided_sprite >= 0 && afn_frame_count > 10) {
                 afn_script_collision();
                 afn_bp_dispatch_collision();
             }
@@ -6910,7 +6908,7 @@ int main(void)
 #ifdef AFN_COL_FACE_COUNT
             collide_walls(&player_x, &player_z, player_y);
 
-            // Mesh collision event (wall-contact-based)
+            // Mesh collision event (wall or floor contact)
             // Skip first 10 frames after scene load to prevent ping-pong
 #ifdef AFN_HAS_SCRIPT
             if (afn_wall_collided_sprite >= 0 && afn_frame_count > 10) {

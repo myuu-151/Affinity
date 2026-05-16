@@ -1521,9 +1521,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
             const auto& spr = sprites[si];
 
             float sprScale = spr.scale;
-            float rotRad = spr.rotation * 3.14159265f / 180.0f;
-            float cosR = cosf(rotRad);
-            float sinR = sinf(rotRad);
+            float rotY = spr.rotation * 3.14159265f / 180.0f;
+            float rotX = spr.rotationX * 3.14159265f / 180.0f;
+            float rotZ = spr.rotationZ * 3.14159265f / 180.0f;
+            float cosY = cosf(rotY), sinY = sinf(rotY);
+            float cosX = cosf(rotX), sinX = sinf(rotX);
+            float cosZ = cosf(rotZ), sinZ = sinf(rotZ);
 
             int vc = (int)mesh.positions.size() / 3;
             std::vector<float> wp(vc * 3);
@@ -1532,9 +1535,19 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 float lx = mesh.positions[v * 3 + 0] * sprScale;
                 float ly = mesh.positions[v * 3 + 1] * sprScale;
                 float lz = mesh.positions[v * 3 + 2] * sprScale;
-                wp[v * 3 + 0] = lx * cosR - lz * sinR + spr.x;
-                wp[v * 3 + 1] = ly + spr.y;
-                wp[v * 3 + 2] = lx * sinR + lz * cosR + spr.z;
+                // Apply rotations: Y first, then X, then Z (matches editor glRotatef order)
+                float rx = lx * cosY - lz * sinY;
+                float rz = lx * sinY + lz * cosY;
+                float ry = ly;
+                // X rotation
+                float ry2 = ry * cosX - rz * sinX;
+                float rz2 = ry * sinX + rz * cosX;
+                // Z rotation
+                float rx2 = rx * cosZ - ry2 * sinZ;
+                float ry3 = rx * sinZ + ry2 * cosZ;
+                wp[v * 3 + 0] = rx2 + spr.x;
+                wp[v * 3 + 1] = ry3 + spr.y;
+                wp[v * 3 + 2] = rz2 + spr.z;
             }
 
             auto emitTri = [&](int i0, int i1, int i2) {
