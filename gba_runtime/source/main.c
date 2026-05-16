@@ -7043,7 +7043,18 @@ int main(void)
                         // Compute frame index from VBlank counter (60Hz / fps)
                         int framesPerTick = 60 / fps;
                         if (framesPerTick < 1) framesPerTick = 1;
-                        int frame = (g_anim_frame_counter / framesPerTick) % fc;
+                        int rawFrame = g_anim_frame_counter / framesPerTick;
+                        int frame = rawFrame % fc;
+
+                        // One-shot: if sprite anim override finished one cycle, revert to idle
+                        if (spriteAnimOverride && rawFrame >= fc) {
+                            afn_sprite_anim_spr = -1;
+                            g_current_anim[ai] = 0;
+                            g_anim_frame_counter = 0;
+                            switch_dir_anim_set(ai, afn_anim_desc[ai][0][0]);
+                            continue;
+                        }
+
                         int targetSet = baseSet + frame;
                         int setCount = afn_asset_dir_desc[ai][0];
                         if (targetSet < setCount)
