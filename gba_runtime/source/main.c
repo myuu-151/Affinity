@@ -2441,6 +2441,20 @@ static void update_sprites(void)
             int sx = proj[i].screenX - canvasHalf;
             int sy = proj[i].screenY - canvasHalf - visHalfH;
 
+            // Hide sprite if OAM coords would cause wrapping
+            // OAM Y is 8-bit unsigned (0-255). If sy < 0 the sprite wraps to
+            // bottom; if sy + canvasSize > 255 the canvas wraps past 255 and
+            // appears at the top. Both cases must be hidden.
+            // OAM X is 9-bit signed — negative X works correctly on hardware.
+            {
+                int canvasSize = canvasHalf * 2;
+                if (sy < 0 || sy + canvasSize > 255 || sy >= 160 ||
+                    sx + canvasSize <= 0 || sx >= 240) {
+                    obj_mem[oamIdx].attr0 = ATTR0_HIDE;
+                    continue;
+                }
+            }
+
             obj_mem[oamIdx].attr0 = ATTR0_Y(sy & 0xFF) | ATTR0_SQUARE | ATTR0_AFF_DBL;
             obj_mem[oamIdx].attr1 = ATTR1_X(sx & 0x1FF) | size_to_attr1(baseSize) | ATTR1_AFF_ID(affIdx);
             obj_mem[oamIdx].attr2 = ATTR2_ID(tileId) | ATTR2_PRIO(g_sprites[sprIdx].oamPrio) | ATTR2_PALBANK(palBank);
