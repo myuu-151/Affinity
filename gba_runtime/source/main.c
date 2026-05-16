@@ -7016,8 +7016,9 @@ int main(void)
                             }
                         }
 #endif
-                        // PlayAnim node override (if script explicitly set one)
-                        if (afn_play_anim >= 0 && afn_play_anim < AFN_MAX_ANIMS)
+                        // PlayAnim node override (player asset only)
+                        if (afn_play_anim >= 0 && afn_play_anim < AFN_MAX_ANIMS &&
+                            player_sprite_idx >= 0 && g_sprites[player_sprite_idx].assetIdx == ai)
                             targetAnim = afn_play_anim;
 
                         // Per-sprite anim override (SetSpriteAnim node)
