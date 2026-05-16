@@ -6707,16 +6707,24 @@ int main(void)
             if (afn_collided_sprite >= 0 && afn_frame_count > 10 &&
                 g_sprites[afn_collided_sprite].meshIdx < 0) {
                 afn_script_collision();
-                afn_bp_dispatch_collision();
+                // Skip bp collision dispatch for spring sprite (handled by hardcoded check below)
+                if (afn_collided_sprite != 5)
+                    afn_bp_dispatch_collision();
             }
             // Spring launch — direct distance check (bypass collision loop)
-            if (g_spriteCount > 5 && player_on_ground) {
-                FIXED dx = player_x - g_sprites[5].x;
-                FIXED dz = player_z - g_sprites[5].z;
-                if (dx < 0) dx = -dx;
-                if (dz < 0) dz = -dz;
-                if ((dx >> 8) < 10 && (dz >> 8) < 10) {
-                    player_vy = 32768;
+            {
+                static int spring_launched = 0;
+                if (g_spriteCount > 5) {
+                    FIXED dx = player_x - g_sprites[5].x;
+                    FIXED dz = player_z - g_sprites[5].z;
+                    if (dx < 0) dx = -dx;
+                    if (dz < 0) dz = -dz;
+                    int inRange = (dx >> 8) < 10 && (dz >> 8) < 10;
+                    if (inRange && player_on_ground && !spring_launched) {
+                        player_vy = 32768;
+                        spring_launched = 1;
+                    }
+                    if (!inRange && player_on_ground) spring_launched = 0;
                 }
             }
             // Blueprint instance dispatch
