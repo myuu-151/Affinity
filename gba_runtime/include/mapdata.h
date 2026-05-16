@@ -16794,19 +16794,11 @@ static inline void afn_bp0_collision2d() {
 static inline void afn_bp1_play_anim_2() {
     afn_play_anim = 0;
 }
-static inline void afn_bp1_do_once_9() {
-    { static int afn_done_9 = 0;
-      if (afn_done_9) return;
-      afn_done_9 = 1; }
-}
-static inline void afn_bp1_sequence_10() {
-    // unsupported bp action: type 83
-}
-static inline void afn_bp1_set_sprite_anim_11() {
+static inline void afn_bp1_set_sprite_anim_5() {
     if (afn_current_mode == 1) { tm_obj_anim_idx[5] = 1; tm_obj_anim_play[5] = 1; }
     else { afn_play_anim = 1; }
 }
-static inline void afn_bp1_set_vel_y_12() {
+static inline void afn_bp1_set_vel_y_8() {
     player_vy = -32768;
 }
 static inline void afn_bp1_start() {
@@ -16819,17 +16811,10 @@ static inline void afn_bp1_key_pressed() {
 static inline void afn_bp1_key_released() {
 }
 static inline void afn_bp1_update() {
-    { FIXED dx = g_sprites[0].wx - g_sprites[5].wx;
-      FIXED dz = g_sprites[0].wz - g_sprites[5].wz;
-      if (dx<0) dx=-dx; if (dz<0) dz=-dz;
-      if (((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8 < 40) {
-    afn_bp1_do_once_9();
-    afn_bp1_sequence_10();
-    afn_bp1_set_sprite_anim_11();
-    afn_bp1_set_vel_y_12();
-    } }
 }
 static inline void afn_bp1_collision() {
+    afn_bp1_set_sprite_anim_5();
+    afn_bp1_set_vel_y_8();
 }
 static inline void afn_bp1_collision2d() {
 }

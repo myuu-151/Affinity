@@ -6677,11 +6677,12 @@ int main(void)
             afn_collided_sprite = -1;
             afn_play_anim = -1;
 
-            // Collision detection: player vs all non-player sprites
+            // Collision detection: player vs all non-player flat sprites
             if (player_sprite_idx >= 0) {
                 int ci;
                 for (ci = 0; ci < g_spriteCount; ci++) {
                     if (ci == player_sprite_idx) continue;
+                    if (g_sprites[ci].meshIdx >= 0) continue;
                     FIXED dx = player_x - g_sprites[ci].x;
                     FIXED dz = player_z - g_sprites[ci].z;
                     // Distance squared in 16.8 fixed point — compare against radius^2
@@ -6707,6 +6708,16 @@ int main(void)
                 g_sprites[afn_collided_sprite].meshIdx < 0) {
                 afn_script_collision();
                 afn_bp_dispatch_collision();
+            }
+            // DEBUG: launch when near sprite 5 (only when on ground)
+            {
+                FIXED dx = player_x - g_sprites[5].x;
+                FIXED dz = player_z - g_sprites[5].z;
+                if (dx < 0) dx = -dx;
+                if (dz < 0) dz = -dz;
+                if ((dx >> 8) < 20 && (dz >> 8) < 20 && player_on_ground) {
+                    player_vy = 32768;
+                }
             }
             // Blueprint instance dispatch
             afn_anim_prio = 0;
@@ -7054,8 +7065,8 @@ int main(void)
         if (g_sky_active) update_sky_scroll(cam_angle);
 #endif
 
-        // Reset to start position
-        if (key_hit(KEY_START))
+        // Reset to start position (disabled for debug)
+        if (0 && key_hit(KEY_START))
         {
             if (player_sprite_idx >= 0)
             {
