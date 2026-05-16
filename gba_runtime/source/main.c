@@ -7038,6 +7038,7 @@ int main(void)
                         int baseSet = afn_anim_desc[ai][g_current_anim[ai]][0];
                         int fc      = afn_anim_desc[ai][g_current_anim[ai]][1];
                         int fps     = afn_anim_desc[ai][g_current_anim[ai]][2];
+                        int looping = afn_anim_desc[ai][g_current_anim[ai]][3];
                         if (fc <= 0) continue;
                         if (fps <= 0) fps = 8;
                         // Compute frame index from VBlank counter (60Hz / fps)
@@ -7046,8 +7047,8 @@ int main(void)
                         int rawFrame = g_anim_frame_counter / framesPerTick;
                         int frame = rawFrame % fc;
 
-                        // One-shot: if sprite anim override finished one cycle, revert to idle
-                        if (spriteAnimOverride && rawFrame >= fc) {
+                        // One-shot: if sprite anim override finished one cycle and not looping, revert
+                        if (spriteAnimOverride && rawFrame >= fc && !looping) {
                             afn_sprite_anim_spr = -1;
                             g_current_anim[ai] = 0;
                             g_anim_frame_counter = 0;

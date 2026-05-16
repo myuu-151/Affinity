@@ -964,7 +964,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "};\n\n";
     }
 
-    // Per-asset animation descriptors: { baseSetIdx, frameCount, fps }
+    // Per-asset animation descriptors: { baseSetIdx, frameCount, fps, loop }
     // Allows runtime to cycle through direction frames within an animation
     if (!assets.empty())
     {
@@ -974,7 +974,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 maxAnims = (int)assets[ai].anims.size();
         if (maxAnims < 1) maxAnims = 1;
         f << "#define AFN_MAX_ANIMS " << maxAnims << "\n";
-        f << "static const int afn_anim_desc[][AFN_MAX_ANIMS][3] = {\n";
+        f << "static const int afn_anim_desc[][AFN_MAX_ANIMS][4] = {\n";
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
             f << "    { ";
@@ -991,12 +991,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     int effectiveFps = (int)(fps * spd);
                     if (effectiveFps < 1) effectiveFps = 1;
                     if (fc < 1) fc = 1;
-                    f << "{ " << base << ", " << fc << ", " << effectiveFps << " }";
+                    int loopFlag = assets[ai].anims[an].loop ? 1 : 0;
+                    f << "{ " << base << ", " << fc << ", " << effectiveFps << ", " << loopFlag << " }";
                     base += fc;
                 }
                 else
                 {
-                    f << "{ 0, 0, 8 }";
+                    f << "{ 0, 0, 8, 0 }";
                 }
                 if (an < maxAnims - 1) f << ", ";
             }
