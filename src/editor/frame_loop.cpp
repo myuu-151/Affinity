@@ -12912,10 +12912,21 @@ void FrameTick(float dt)
                                                 break;
                                             }
                                         }
-                                        // Clamp and apply
                                         if (level < 0.0f) level = 0.0f;
                                         if (level > 1.0f) level = 1.0f;
                                         se.data[i] = (int8_t)(se.data[i] * level);
+                                    }
+                                }
+                                // Bake soft fade: smooth fade-out over last 20% of sample
+                                if (inst.softFade) {
+                                    int len = (int)se.data.size();
+                                    int fadeStart = len * 4 / 5; // last 20%
+                                    int fadeLen = len - fadeStart;
+                                    if (fadeLen > 0) {
+                                        for (int i = fadeStart; i < len; i++) {
+                                            float t = (float)(len - 1 - i) / (float)(fadeLen - 1);
+                                            se.data[i] = (int8_t)(se.data[i] * t);
+                                        }
                                     }
                                 }
                                 exportSoundSamples.push_back(std::move(se));

@@ -68,6 +68,7 @@ EWRAM_DATA static int tm_obj_dir_facing[TM_MAX_DIR_OBJS];
 static void afn_play_sound(int instanceId);
 static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch);
 static void afn_play_sfx(int smpIdx, int gain, int fifo);
+static int snd_sfx_inst = -1; // sound instance index for SFX softfade lookup
 static void afn_stop_sound(void);
 static int snd_buf_scale = 0;  // buffer scale flag (used by mapdata.h, set by sound code)
 
@@ -574,7 +575,13 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int 
     if (snd_compat) {
         vc->releaseLen = 105;
     } else {
-        int sf = (snd_seq_active >= 0) ? afn_snd_softfade[snd_seq_active] : 1;
+        int sf;
+        if (ch == 15 && snd_sfx_inst >= 0)
+            sf = afn_snd_softfade[snd_sfx_inst];
+        else if (snd_seq_active >= 0)
+            sf = afn_snd_softfade[snd_seq_active];
+        else
+            sf = 1;
         if (sf) {
             vc->releaseLen = afn_pcm_release[smpIdx];
             if (vc->releaseLen < 418) vc->releaseLen = 418;
