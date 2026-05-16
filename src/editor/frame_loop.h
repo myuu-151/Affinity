@@ -5,8 +5,8 @@
 namespace Affinity
 {
 
-// Initialize editor state
-void FrameInit();
+// Initialize editor state (optional path to .afnproj to open on startup)
+void FrameInit(const char* openPath = nullptr);
 
 // Run one editor frame (called every frame from main loop)
 void FrameTick(float dt);

@@ -7595,7 +7595,7 @@ static void CloseProject()
     sProjectDirty = false;
 }
 
-void FrameInit()
+void FrameInit(const char* openPath)
 {
     sCamera.x      = 0.0f;
     sCamera.z      = 0.0f;
@@ -7634,6 +7634,10 @@ void FrameInit()
     SnapshotCleanBank();
 
     sInitialized = true;
+
+    // Auto-open project from command line (e.g. double-click .afnproj)
+    if (openPath && openPath[0])
+        LoadProject(openPath);
 }
 
 // Helper: draw a colored rect in ImGui drawlist

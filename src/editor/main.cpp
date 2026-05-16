@@ -17,11 +17,25 @@
 #pragma comment(lib, "dwmapi.lib")
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
-int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int)
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR lpCmdLine, int)
 #else
-int main(int, char**)
+int main(int argc, char** argv)
 #endif
 {
+    // Parse command-line path to .afnproj (from double-click or shell open)
+    const char* openPath = nullptr;
+#ifdef _WIN32
+    // lpCmdLine may be quoted: strip surrounding quotes
+    static char cmdBuf[1024];
+    if (lpCmdLine && lpCmdLine[0]) {
+        const char* src = lpCmdLine;
+        if (*src == '"') { src++; char* dst = cmdBuf; while (*src && *src != '"') *dst++ = *src++; *dst = 0; }
+        else strncpy(cmdBuf, src, sizeof(cmdBuf) - 1);
+        openPath = cmdBuf;
+    }
+#else
+    if (argc > 1) openPath = argv[1];
+#endif
     // ---- GLFW init ----
     if (!glfwInit())
     {
@@ -72,7 +86,7 @@ int main(int, char**)
     ImGui_ImplOpenGL2_Init();
 
     // ---- Editor init ----
-    Affinity::FrameInit();
+    Affinity::FrameInit(openPath);
 
     // ---- Main loop ----
     double lastTime = glfwGetTime();
