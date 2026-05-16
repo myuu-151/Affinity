@@ -6721,7 +6721,7 @@ int main(void)
                     if (dz < 0) dz = -dz;
                     int inRange = (dx >> 8) < 10 && (dz >> 8) < 10;
                     if (inRange && player_on_ground && !spring_launched) {
-                        player_vy = 32768;
+                        player_vy = 1024;
                         spring_launched = 1;
                     }
                     if (!inRange && player_on_ground) spring_launched = 0;
