@@ -6983,10 +6983,17 @@ int main(void)
                 int ai;
                 for (ai = 0; ai < AFN_ASSET_COUNT; ai++)
                 {
-                    if (!afn_asset_dir_desc[ai][4]) continue;
+                    // Per-sprite anim override (SetSpriteAnim node) — check before early continues
+                    // so assets without dir_desc or anim_enabled can still be overridden
+                    int spriteAnimOverride = 0;
+                    if (afn_sprite_anim_spr >= 0 && afn_sprite_anim_spr != player_sprite_idx &&
+                        afn_sprite_anim_spr < g_spriteCount && g_sprites[afn_sprite_anim_spr].assetIdx == ai)
+                        spriteAnimOverride = 1;
+
+                    if (!afn_asset_dir_desc[ai][4] && !spriteAnimOverride) continue;
 
                     // Only animate assets that have animation-enabled sprites
-                    if (!g_asset_anim_enabled[ai])
+                    if (!g_asset_anim_enabled[ai] && !spriteAnimOverride)
                         continue;
 
                     // Determine target anim: PlayAnim override, or auto state machine
@@ -7014,12 +7021,8 @@ int main(void)
                             targetAnim = afn_play_anim;
 
                         // Per-sprite anim override (SetSpriteAnim node)
-                        for (int _si = 0; _si < g_spriteCount && _si < 16; _si++) {
-                            if (afn_set_sprite_anim_req[_si] > 0 && g_sprites[_si].assetIdx == ai) {
-                                targetAnim = afn_set_sprite_anim_req[_si] - 1;
-                                afn_set_sprite_anim_req[_si] = 0;
-                            }
-                        }
+                        if (spriteAnimOverride)
+                            targetAnim = afn_sprite_anim_val;
 
                         if (targetAnim != g_current_anim[ai])
                         {
@@ -7079,8 +7082,8 @@ int main(void)
         if (g_sky_active) update_sky_scroll(cam_angle);
 #endif
 
-        // Reset to start position
-        if (key_hit(KEY_START))
+        // Reset to start position (disabled — START used by blueprint)
+        if (0 && key_hit(KEY_START))
         {
             if (player_sprite_idx >= 0)
             {

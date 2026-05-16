@@ -681,14 +681,27 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 // Update objSize/tpf to match direction size
                 assetObjSize[ai] = assetDirInfos[ai].dirSize;
                 assetTilesPerFrame[ai] = tpf;
-                assetDirInfos[ai].has = false; // will use static tile path instead
+
+                // If the asset has multiple anim sets (animation frames), keep DMA path
+                // alive so switch_dir_anim_set can swap tile frames at runtime.
+                // The static tiles serve as the initial frame; DMA overwrites them.
+                if (assetDirInfos[ai].setCount > 1)
+                {
+                    assetDirInfos[ai].compact = true;
+                    // Keep .has = true; vramTile0 assigned below in normal direction pass
+                    // (assetNeedsStaticTiles check removed there for animated assets)
+                }
+                else
+                {
+                    assetDirInfos[ai].has = false; // single frame, no DMA needed
+                }
             }
         }
         // Then allocate remaining direction assets (compact: 1 facing per asset)
         for (size_t ai = 0; ai < assets.size(); ai++)
         {
             if ((int)ai == playerAssetIdx) continue; // already allocated
-            if (assetNeedsStaticTiles[ai]) continue; // already allocated above
+            if (assetNeedsStaticTiles[ai] && !assetDirInfos[ai].has) continue; // truly static
             if (!assetDirInfos[ai].has || !assetReferencedBySprite[ai]) continue;
             int tpf = (assetDirInfos[ai].dirSize / 8) * (assetDirInfos[ai].dirSize / 8);
             assetDirInfos[ai].vramTile0 = dirVramNextTile;
@@ -1880,7 +1893,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static FIXED afn_move_speed;\n";
         f << "static int   afn_auto_orbit_speed;\n";
         f << "static int   afn_play_anim;\n";
-        f << "static int   afn_set_sprite_anim_req[16]; // per-sprite anim override (0=none, N=anim+1)\n";
+        f << "static int   afn_sprite_anim_spr = -1; // SetSpriteAnim target sprite (-1=none)\n";
+        f << "static int   afn_sprite_anim_val = -1; // SetSpriteAnim anim index\n";
         f << "static int   afn_anim_prio;\n";
         f << "static int   afn_pending_scene = -1;\n";
         f << "static int   afn_pending_scene_mode = -1;\n";
@@ -4106,7 +4120,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     std::string obj = objData ? bpResolveInt(objData) : "0";
                     std::string anim = animData ? bpResolveInt(animData) : "0";
                     f << "    if (afn_current_mode == 1) { tm_obj_anim_idx[" << obj << "] = " << anim << "; tm_obj_anim_play[" << obj << "] = 1; }\n";
-                    f << "    else { afn_set_sprite_anim_req[" << obj << "] = " << anim << " + 1; }\n";
+                    f << "    else { afn_sprite_anim_spr = " << obj << "; afn_sprite_anim_val = " << anim << "; }\n";
                     break;
                 }
                 case GBAScriptNodeType::SpawnEffect: {
