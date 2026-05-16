@@ -2163,6 +2163,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::StopHudAnim:   return "_stop_hud_anim";
         case GBAScriptNodeType::SetHudAnimSpeed: return "_set_hud_anim_speed";
         case GBAScriptNodeType::OnRise:        return "_on_rise";
+        case GBAScriptNodeType::ResetScene:    return "_reset_scene";
         default: return "";
         }
     };
@@ -2448,6 +2449,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_pending_scene_mode = " << scMode << ";\n";
                     break;
                 }
+                case GBAScriptNodeType::ResetScene: {
+                    f << "    afn_pending_scene = afn_current_scene;\n";
+                    f << "    afn_pending_scene_mode = afn_current_mode;\n";
+                    break;
+                }
                 case GBAScriptNodeType::SetFlag: {
                     auto* flagData = findDataIn(action->id, 0);
                     auto* valData = findDataIn(action->id, 1);
@@ -2549,6 +2555,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     if (sndId >= 0 && sndId < (int)soundInstances.size() && soundInstances[sndId].isSfx) {
                         if (soundInstances[sndId].bufferScale)
                             f << "    snd_buf_scale = 1;\n";
+                        f << "    snd_sfx_inst = " << sndId << ";\n";
                         f << "    afn_play_sfx(" << soundInstances[sndId].sfxSampleIdx << ", " << soundInstances[sndId].mixerGain << ", " << soundInstances[sndId].fifoChannel << ");\n";
                     } else {
                         f << "    afn_play_sound(" << sndId << ");\n";
@@ -3943,6 +3950,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_pending_scene_mode = " << scMode << ";\n";
                     break;
                 }
+                case GBAScriptNodeType::ResetScene: {
+                    f << "    afn_pending_scene = afn_current_scene;\n";
+                    f << "    afn_pending_scene_mode = afn_current_mode;\n";
+                    break;
+                }
                 case GBAScriptNodeType::SetFlag: {
                     auto* flagData = bpFindDataIn(action->id, 0);
                     auto* valData = bpFindDataIn(action->id, 1);
@@ -4046,6 +4058,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     if (sndIdInt >= 0 && sndIdInt < (int)soundInstances.size() && soundInstances[sndIdInt].isSfx) {
                         if (soundInstances[sndIdInt].bufferScale)
                             f << "    snd_buf_scale = 1;\n";
+                        f << "    snd_sfx_inst = " << sndIdInt << ";\n";
                         f << "    afn_play_sfx(" << soundInstances[sndIdInt].sfxSampleIdx << ", " << soundInstances[sndIdInt].mixerGain << ", " << soundInstances[sndIdInt].fifoChannel << ");\n";
                     } else {
                         f << "    afn_play_sound(" << sndId << ");\n";

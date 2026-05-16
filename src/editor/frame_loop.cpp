@@ -447,6 +447,7 @@ enum class VsNodeType : int {
     StopHudAnim,    // stop a HUD animation layer
     SetHudAnimSpeed, // set HUD animation layer speed
     OnRise,         // gate: passes exec only on frame condition becomes true (rising edge)
+    ResetScene,     // action: reload the current scene (respawn)
     COUNT
 };
 
@@ -736,6 +737,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Stop Hud Anim",   0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Set Anim Speed",  0xFF3355AA, 1, 1, 0, 0, {}, {"Speed"}, {} },
     { "On Rise",         0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Reset Scene",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -13661,6 +13663,10 @@ void FrameTick(float dt)
                     sPendingSceneSwitch = scIdx;
                     sPendingSceneMode = action->paramInt[1];
                 }
+                else if (t == VsNodeType::ResetScene) {
+                    sPendingSceneSwitch = sMapSelectedScene;
+                    sPendingSceneMode = 0;
+                }
                 // Jump, DampenJump, SetGravity, SetMaxFall — editor has no vertical physics
                 else if (t == VsNodeType::PlayAnim) {
                     if (execEventType == VsNodeType::OnStart)
@@ -13999,6 +14005,10 @@ void FrameTick(float dt)
                         sPendingSceneSwitch = scIdx;
                         sPendingSceneMode = action->paramInt[1];
                     }
+                    else if (t == VsNodeType::ResetScene) {
+                        sPendingSceneSwitch = sMapSelectedScene;
+                        sPendingSceneMode = 0;
+                    }
                 };
 
                 // Run blueprint events
@@ -14137,6 +14147,10 @@ void FrameTick(float dt)
                                 int scIdx = sd ? sd->paramInt[0] : action->paramInt[0];
                                 sPendingSceneSwitch = scIdx;
                                 sPendingSceneMode = action->paramInt[1];
+                            }
+                            else if (t == VsNodeType::ResetScene) {
+                                sPendingSceneSwitch = sMapSelectedScene;
+                                sPendingSceneMode = 0;
                             }
                         };
                         for (auto& ev : bpNodes) {
@@ -14519,6 +14533,10 @@ void FrameTick(float dt)
                             int scIdx = sd ? sd->paramInt[0] : action->paramInt[0];
                             sPendingSceneSwitch = scIdx;
                             sPendingSceneMode = action->paramInt[1];
+                        }
+                        else if (t == VsNodeType::ResetScene) {
+                            sPendingSceneSwitch = sTmSelectedScene;
+                            sPendingSceneMode = 1;
                         }
                         else if (t == VsNodeType::PlayAnim) {
                             auto* sd = tmFindDataIn(action->id, 0);
@@ -16554,6 +16572,7 @@ void FrameTick(float dt)
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
                 case VsNodeType::OnRise:        desc = "Rising-edge gate: only passes execution on the first frame the upstream condition becomes true. Blocks while it keeps firing. Resets when it stops."; break;
+                case VsNodeType::ResetScene:    desc = "Reloads the current scene. Player respawns at start position."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -16790,6 +16809,7 @@ void FrameTick(float dt)
                         case VsNodeType::StopHudAnim:   return "_stop_hud_anim";
                         case VsNodeType::SetHudAnimSpeed: return "_set_hud_anim_speed";
                         case VsNodeType::OnRise:        return "_on_rise";
+                        case VsNodeType::ResetScene:    return "_reset_scene";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -17200,6 +17220,14 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_orbit", bodyBuf);
                     break;
                 }
+                case VsNodeType::ResetScene:
+                    setActionFunc(infoNode, "_reset_scene",
+                        "    afn_pending_scene = afn_current_scene;\n"
+                        "    afn_pending_scene_mode = afn_current_mode;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // scene_load(afn_current_mode, afn_current_scene);\n"
+                        "    // Reloads scene: respawns player, resets sprites, re-runs OnStart");
+                    break;
                 case VsNodeType::ChangeScene:
                     editorCode =
                         "// ---- 2D Tilemap / 3D Scene / Mode 7 ----\n"
@@ -19858,6 +19886,7 @@ void FrameTick(float dt)
                     case VsNodeType::StopHudAnim: suffix = "_stop_hud_anim"; break;
                     case VsNodeType::SetHudAnimSpeed: suffix = "_set_hud_anim_speed"; break;
                     case VsNodeType::OnRise:        suffix = "_on_rise"; break;
+                    case VsNodeType::ResetScene:    suffix = "_reset_scene"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
                     case VsNodeType::Branch:        suffix = "_branch"; break;
                     case VsNodeType::CompareVar:    suffix = "_compare_var"; break;
