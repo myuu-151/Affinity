@@ -6709,13 +6709,13 @@ int main(void)
                 afn_script_collision();
                 afn_bp_dispatch_collision();
             }
-            // DEBUG: launch when near sprite 5 (only when on ground)
-            {
+            // Spring launch — direct distance check (bypass collision loop)
+            if (g_spriteCount > 5 && player_on_ground) {
                 FIXED dx = player_x - g_sprites[5].x;
                 FIXED dz = player_z - g_sprites[5].z;
                 if (dx < 0) dx = -dx;
                 if (dz < 0) dz = -dz;
-                if ((dx >> 8) < 20 && (dz >> 8) < 20 && player_on_ground) {
+                if ((dx >> 8) < 10 && (dz >> 8) < 10) {
                     player_vy = 32768;
                 }
             }
