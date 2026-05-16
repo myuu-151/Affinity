@@ -12897,6 +12897,27 @@ void FrameTick(float dt)
                                 se.loop = false;
                                 se.releaseMs = 0;
                                 se.decayPct = 0;
+                                // Bake envelope curve into PCM data
+                                if (smp.envEnabled && smp.envelope.size() >= 2) {
+                                    int len = (int)se.data.size();
+                                    for (int i = 0; i < len; i++) {
+                                        float t = (float)i / (float)(len - 1);
+                                        // Find envelope segment
+                                        float level = 1.0f;
+                                        for (int e = 0; e < (int)smp.envelope.size() - 1; e++) {
+                                            if (t >= smp.envelope[e].time && t <= smp.envelope[e+1].time) {
+                                                float segLen = smp.envelope[e+1].time - smp.envelope[e].time;
+                                                float frac = (segLen > 0.0f) ? (t - smp.envelope[e].time) / segLen : 0.0f;
+                                                level = smp.envelope[e].level + frac * (smp.envelope[e+1].level - smp.envelope[e].level);
+                                                break;
+                                            }
+                                        }
+                                        // Clamp and apply
+                                        if (level < 0.0f) level = 0.0f;
+                                        if (level > 1.0f) level = 1.0f;
+                                        se.data[i] = (int8_t)(se.data[i] * level);
+                                    }
+                                }
                                 exportSoundSamples.push_back(std::move(se));
                             }
                             continue;
