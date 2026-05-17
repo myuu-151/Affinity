@@ -2156,6 +2156,23 @@ static void load_editor_sprites(void)
         if (g_sprites[i].meshIdx >= 0)
             g_meshSpriteMask |= (1u << i);
     }
+    // Copy OBJ palettes used by draw-behind exception sprites into BG palette 128+
+    // so bitmap blit can reference them without palette conflicts
+    {
+        u16 palCopied = 0;
+        for (i = 0; i < count; i++) {
+            int ai, palBank;
+            if (g_sprites[i].meshIdx >= 0) continue;
+            if (g_sprites[i].drawBehindExc == 0) continue;
+            ai = g_sprites[i].assetIdx;
+            if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
+            palBank = afn_asset_desc[ai][4];
+            if (palBank > 15) palBank = 1;
+            if (palCopied & (1u << palBank)) continue;
+            memcpy16(&pal_bg_mem[128 + palBank * 16], &pal_obj_mem[palBank * 16], 16);
+            palCopied |= (1u << palBank);
+        }
+    }
 }
 #endif
 #endif
@@ -4815,35 +4832,6 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 // sprite (oamPrio=2, behind BG2) then shows through the cleared pixels.
 // Uses 16-bit framebuffer access (required for VRAM compatibility on GBA).
 // ---------------------------------------------------------------------------
-static u8  db_remap[16][16];   /* cached OBJ->BG palette remap per palBank */
-static u16 db_remap_built = 0; /* bitmask: which palBanks have been built */
-
-static void db_build_remap(int palBank)
-{
-    int p, j;
-    const u16* objPal = &pal_obj_mem[palBank * 16];
-    db_remap[palBank][0] = 0;
-    for (p = 1; p < 16; p++)
-    {
-        u16 target = objPal[p];
-        int tr = target & 31;
-        int tg = (target >> 5) & 31;
-        int tb = (target >> 10) & 31;
-        int bestIdx = 1, bestDist = 0x7FFFFFFF;
-        for (j = 1; j < 256; j++)
-        {
-            u16 c = pal_bg_mem[j];
-            int dr = (c & 31) - tr;
-            int dg = ((c >> 5) & 31) - tg;
-            int db = ((c >> 10) & 31) - tb;
-            int dist = dr*dr + dg*dg + db*db;
-            if (dist < bestDist) { bestDist = dist; bestIdx = j; }
-        }
-        db_remap[palBank][p] = (u8)bestIdx;
-    }
-    db_remap_built |= (1u << palBank);
-}
-
 static void apply_draw_behind_exceptions(u16* buf)
 {
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
@@ -4858,7 +4846,7 @@ static void apply_draw_behind_exceptions(u16* buf)
         int dy2, dx2;
         const u8* objVram = (const u8*)0x06010000;
         int tilesPerRow;
-        const u8* remap;
+        int dbPalBase;
 
         if (g_sprites[i].meshIdx >= 0) continue;
         if (g_sprites[i].drawBehindExc == 0) continue;
@@ -4897,10 +4885,8 @@ static void apply_draw_behind_exceptions(u16* buf)
         palBank = afn_asset_desc[ai][4];
         if (palBank > 15) palBank = 1;
 
-        /* Use cached remap table (built once per palBank) */
-        if (!(db_remap_built & (1u << palBank)))
-            db_build_remap(palBank);
-        remap = db_remap[palBank];
+        /* OBJ palette was copied to BG palette 128+palBank*16 at init */
+        dbPalBase = 128 + palBank * 16;
 
         /* Project sprite to screen */
         dx = g_sprites[i].x - cam_x;
@@ -4968,8 +4954,8 @@ static void apply_draw_behind_exceptions(u16* buf)
                     if (existing && keepPal[existing]) continue;
                 }
 
-                /* Write sprite pixel using remapped BG palette index */
-                bgIdx = remap[pixel];
+                /* Write sprite pixel using BG palette copy at 128+ */
+                bgIdx = dbPalBase + pixel;
                 if (px & 1)
                     row[addr] = (val & 0x00FF) | ((u16)bgIdx << 8);
                 else
