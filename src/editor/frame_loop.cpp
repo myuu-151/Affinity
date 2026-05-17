@@ -473,7 +473,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "On Key Pressed",  0xFF338833, 0, 1, 1, 0, {"Key"}, {}, {} },
     { "On Key Released", 0xFF338833, 0, 1, 1, 0, {"Key"}, {}, {} },
     { "On Key Held",     0xFF338833, 0, 1, 1, 0, {"Key"}, {}, {} },
-    { "On Collision",    0xFF338833, 0, 1, 1, 0, {"Radius (int)"}, {}, {} },
+    { "On Collision",    0xFF338833, 0, 1, 2, 0, {"Radius (int)", "Object"}, {}, {} },
     { "On Start",        0xFF338833, 0, 1, 0, 0, {}, {}, {} },
     // Logic (blue)
     { "Branch",          0xFF885533, 1, 2, 1, 0, {"Condition"}, {}, {"True", "False"} },
@@ -15577,8 +15577,11 @@ void FrameTick(float dt)
                         sub = sMeshAssets[oi].name.c_str();
                     else if (kind == 2 && oi >= 0 && oi < sSpriteCount) {
                         int ai2 = sSprites[oi].assetIdx;
+                        int mi2 = sSprites[oi].meshIdx;
                         if (ai2 >= 0 && ai2 < (int)sSpriteAssets.size())
                             sub = sSpriteAssets[ai2].name.c_str();
+                        else if (mi2 >= 0 && mi2 < (int)sMeshAssets.size())
+                            sub = sMeshAssets[mi2].name.c_str();
                         else { snprintf(subBuf, sizeof(subBuf), "[%d]", oi); sub = subBuf; }
                     }
                     else if (kind == 3 && oi >= 0 && oi < (int)sTmObjects.size()) {
@@ -20812,19 +20815,24 @@ void FrameTick(float dt)
                         ImGui::EndCombo();
                     }
                 } else if (objKind == 2) {
-                    // Scene sprite instances (original behavior)
-                    const char* preview = (n.paramInt[0] >= 0 && n.paramInt[0] < sSpriteCount)
-                        ? (sSprites[n.paramInt[0]].assetIdx >= 0 && sSprites[n.paramInt[0]].assetIdx < (int)sSpriteAssets.size()
-                            ? sSpriteAssets[sSprites[n.paramInt[0]].assetIdx].name.c_str() : "(no asset)")
-                        : "None";
+                    // Scene sprite instances — show sprite asset name or mesh name
+                    auto getInstanceName = [](int si) -> const char* {
+                        if (si < 0 || si >= sSpriteCount) return "None";
+                        const auto& sp = sSprites[si];
+                        if (sp.assetIdx >= 0 && sp.assetIdx < (int)sSpriteAssets.size())
+                            return sSpriteAssets[sp.assetIdx].name.c_str();
+                        if (sp.meshIdx >= 0 && sp.meshIdx < (int)sMeshAssets.size())
+                            return sMeshAssets[sp.meshIdx].name.c_str();
+                        return "(no asset)";
+                    };
+                    const char* preview = getInstanceName(n.paramInt[0]);
                     char objLabel[64];
                     if (n.paramInt[0] >= 0 && n.paramInt[0] < sSpriteCount)
                         snprintf(objLabel, sizeof(objLabel), "[%d] %s", n.paramInt[0], preview);
                     else snprintf(objLabel, sizeof(objLabel), "None");
                     if (ImGui::BeginCombo("##ObjInst", objLabel)) {
                         for (int si = 0; si < sSpriteCount; si++) {
-                            const char* assetName = (sSprites[si].assetIdx >= 0 && sSprites[si].assetIdx < (int)sSpriteAssets.size())
-                                ? sSpriteAssets[sSprites[si].assetIdx].name.c_str() : "(no asset)";
+                            const char* assetName = getInstanceName(si);
                             char itemLabel[64];
                             snprintf(itemLabel, sizeof(itemLabel), "[%d] %s", si, assetName);
                             if (ImGui::Selectable(itemLabel, si == n.paramInt[0]))

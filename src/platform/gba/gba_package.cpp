@@ -5119,11 +5119,33 @@ static bool GenerateMapData(const std::string& runtimeDir,
             for (auto& c : bpChains)
                 if (c.event->type == GBAScriptNodeType::OnUpdate)
                     bpEmitActionsWithGates(c.actions);
+            // OnCollision with Object pin — emit bounds check in update
+            for (auto& c : bpChains) {
+                if (c.event->type != GBAScriptNodeType::OnCollision) continue;
+                auto* objData = bpFindDataIn(c.event->id, 1);
+                if (!objData) continue; // no Object pin, handled in _collision
+                std::string objIdx = bpResolveInt(objData);
+                auto* radData = bpFindDataIn(c.event->id, 0);
+                std::string rad = radData ? bpResolveInt(radData) : "16";
+                // XZ bounds check scaled by object's scale, plus Y proximity
+                f << "    { FIXED _dx = player_x - g_sprites[" << objIdx << "].x;\n";
+                f << "      FIXED _dz = player_z - g_sprites[" << objIdx << "].z;\n";
+                f << "      FIXED _dy = player_y - g_sprites[" << objIdx << "].y;\n";
+                f << "      if (_dx < 0) _dx = -_dx; if (_dz < 0) _dz = -_dz;\n";
+                f << "      if (_dy < 0) _dy = -_dy;\n";
+                f << "      int _rad = (g_sprites[" << objIdx << "].scale * " << rad << ") >> 8;\n";
+                f << "      if ((_dx >> 8) < _rad && (_dz >> 8) < _rad && (_dy >> 8) < 16) {\n";
+                bpEmitActionsWithGates(c.actions);
+                f << "    } }\n";
+            }
             f << "}\n";
 
             f << "static inline void afn_bp" << bi << "_collision(" << paramSig << ") {\n";
             for (auto& c : bpChains) {
                 if (c.event->type == GBAScriptNodeType::OnCollision) {
+                    // Skip if Object pin is connected (handled in _update)
+                    auto* objData = bpFindDataIn(c.event->id, 1);
+                    if (objData) continue;
                     // Emit radius guard if OnCollision has a Radius data input connected
                     auto* radData = bpFindDataIn(c.event->id, 0);
                     if (radData) {
