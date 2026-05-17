@@ -4913,53 +4913,61 @@ static void apply_draw_behind_exceptions(u16* buf)
 
         tilesPerRow = baseSize / 8;
 
-        /* Blit sprite to bitmap: nearest-neighbor scaled 4bpp tile read */
-        for (dy2 = 0; dy2 < dstSize; dy2++)
+        /* Pre-clamp blit bounds */
         {
-            int py = screenY - dstSize + dy2; /* anchor at bottom */
-            int srcY, tileY, localY;
-            if (py < 0 || py >= 160) continue;
+            int x0 = screenX - (dstSize >> 1);
+            int y0 = screenY - dstSize;
+            int startX = (x0 < 0) ? -x0 : 0;
+            int startY = (y0 < 0) ? -y0 : 0;
+            int endX = (x0 + dstSize > 240) ? 240 - x0 : dstSize;
+            int endY = (y0 + dstSize > 160) ? 160 - y0 : dstSize;
+            int hasKeep = (g_sprites[i].drawBehindExc & 0x7FFFFFFFu) != g_sprites[i].drawBehindExc
+                        ? 0 : 1; /* 0 if only bit31 (no-sky), skip keepPal check */
 
-            srcY = (dy2 * invScale) >> 8;
-            if (srcY >= baseSize) continue;
-            tileY = srcY >> 3;
-            localY = srcY & 7;
-
-            for (dx2 = 0; dx2 < dstSize; dx2++)
+            for (dy2 = startY; dy2 < endY; dy2++)
             {
-                int px = screenX - (dstSize >> 1) + dx2;
-                int srcX, tileX, localX, tId;
-                u8 byte, pixel, bgIdx;
-                u16 *row, val;
-                int addr;
-
-                if (px < 0 || px >= 240) continue;
-
-                srcX = (dx2 * invScale) >> 8;
-                if (srcX >= baseSize) continue;
-                tileX = srcX >> 3;
-                localX = srcX & 7;
-
-                tId = tileId + tileY * tilesPerRow + tileX;
-                byte = objVram[tId * 32 + localY * 4 + (localX >> 1)];
-                pixel = (localX & 1) ? (byte >> 4) : (byte & 0xF);
-                if (pixel == 0) continue; /* transparent */
-
-                /* Check if existing pixel is a non-excepted mesh — skip it */
+                int py = y0 + dy2;
+                int srcY = (dy2 * invScale) >> 8;
+                int tileY, localY, tileRowBase;
+                u16 *row;
+                if (srcY >= baseSize) break;
+                tileY = srcY >> 3;
+                localY = srcY & 7;
+                tileRowBase = tileId + tileY * tilesPerRow;
                 row = buf + py * 120;
-                addr = px >> 1;
-                val = row[addr];
-                {
-                    u8 existing = (px & 1) ? (val >> 8) : (val & 0xFF);
-                    if (existing && keepPal[existing]) continue;
-                }
 
-                /* Write sprite pixel using BG palette copy at 128+ */
-                bgIdx = dbPalBase + pixel;
-                if (px & 1)
-                    row[addr] = (val & 0x00FF) | ((u16)bgIdx << 8);
-                else
-                    row[addr] = (val & 0xFF00) | bgIdx;
+                for (dx2 = startX; dx2 < endX; dx2++)
+                {
+                    int px = x0 + dx2;
+                    int srcX = (dx2 * invScale) >> 8;
+                    int tileX, localX, tId;
+                    u8 byte, pixel, bgIdx;
+                    u16 val;
+                    int addr;
+
+                    if (srcX >= baseSize) break;
+                    tileX = srcX >> 3;
+                    localX = srcX & 7;
+
+                    tId = tileRowBase + tileX;
+                    byte = objVram[tId * 32 + localY * 4 + (localX >> 1)];
+                    pixel = (localX & 1) ? (byte >> 4) : (byte & 0xF);
+                    if (pixel == 0) continue;
+
+                    addr = px >> 1;
+                    val = row[addr];
+
+                    if (hasKeep) {
+                        u8 existing = (px & 1) ? (val >> 8) : (val & 0xFF);
+                        if (existing && keepPal[existing]) continue;
+                    }
+
+                    bgIdx = dbPalBase + pixel;
+                    if (px & 1)
+                        row[addr] = (val & 0x00FF) | ((u16)bgIdx << 8);
+                    else
+                        row[addr] = (val & 0xFF00) | bgIdx;
+                }
             }
         }
     }
