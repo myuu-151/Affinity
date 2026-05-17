@@ -4960,6 +4960,8 @@ IWRAM_CODE static int collide_floor(FIXED px, FIXED pz, FIXED py, FIXED *outY)
                 floorY = (c1s * face->v0y + c2s * face->v1y + c0s * face->v2y) / cs;
         }
 
+        // Only consider floors at or below the player (+ headroom for landing)
+        if (floorY > py + COL_PLAYER_HEIGHT) continue;
         if (!found || floorY > bestY)
         {
             bestY = floorY;
