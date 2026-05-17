@@ -4827,23 +4827,21 @@ static void apply_draw_behind_exceptions(u16* buf)
         if (g_sprites[i].meshIdx >= 0) continue;
         if (g_sprites[i].drawBehindExc == 0) continue;
 
-        /* Build keep table: mark palette indices of NON-excepted meshes.
-           Everything else (sky, floor, excepted meshes) gets cleared so
-           the draw-behind sprite shows through.
-           Bit 31 = "don't draw behind sky" — clear sky pixels too.
-           Lower bits = per-mesh exceptions. */
+        /* Build clear table: mark palette indices of EXCEPTED meshes.
+           Only excepted mesh pixels get cleared to transparent (palette 0),
+           letting the draw-behind sprite show through those meshes.
+           Sky, floor, and non-excepted mesh pixels are kept intact. */
         memset(clearPal, 0, 256);
         {
-            u32 excBits = g_sprites[i].drawBehindExc & 0x7FFFFFFFu; /* mask off bit 31 */
+            u32 excBits = g_sprites[i].drawBehindExc & 0x7FFFFFFFu;
             for (si = 0; si < g_spriteCount; si++)
             {
                 int mi, base, k;
+                if (!(excBits & (1u << si))) continue;
                 if (g_sprites[si].meshIdx < 0) continue;
                 mi = g_sprites[si].meshIdx;
                 if (mi >= AFN_MESH_COUNT) continue;
-                /* Skip excepted meshes — their pixels will be cleared */
-                if (excBits & (1u << si)) continue;
-                /* Mark NON-excepted mesh palettes as "keep" (clearPal=1 means keep) */
+                /* Mark excepted mesh palettes for clearing */
                 base = AFN_MESH_PAL_BASE + mi * 8;
                 for (k = 0; k < 8 && base + k < 256; k++)
                     clearPal[base + k] = 1;
@@ -4890,9 +4888,8 @@ static void apply_draw_behind_exceptions(u16* buf)
         if (y1 > 160) y1 = 160;
         x0 &= ~1; /* align to u16 boundary */
 
-        /* Clear all pixels EXCEPT non-excepted mesh pixels.
-           Sky, floor, and excepted mesh pixels become transparent,
-           letting the draw-behind sprite show through. */
+        /* Clear excepted mesh pixels to transparent (palette 0).
+           The draw-behind sprite (oamPrio=2) shows through the gaps. */
         for (y = y0; y < y1; y++)
         {
             u16* row = buf + y * 120;
@@ -4903,8 +4900,8 @@ static void apply_draw_behind_exceptions(u16* buf)
                 u8 lo = px & 0xFF;
                 u8 hi = (px >> 8) & 0xFF;
                 int changed = 0;
-                if (lo && !clearPal[lo]) { lo = 0; changed = 1; }
-                if (hi && !clearPal[hi]) { hi = 0; changed = 1; }
+                if (lo && clearPal[lo]) { lo = 0; changed = 1; }
+                if (hi && clearPal[hi]) { hi = 0; changed = 1; }
                 if (changed) row[x >> 1] = lo | (hi << 8);
             }
         }
