@@ -4868,8 +4868,11 @@ static void apply_draw_behind_exceptions(u16* buf)
         palBank = afn_asset_desc[ai][4];
         if (palBank > 15) palBank = 1;
 
-        /* Copy OBJ palette to reserved BG palette range */
-        memcpy16(&pal_bg_mem[DB_BG_PAL_BASE], &pal_obj_mem[palBank * 16], 16);
+        /* Save BG palette, copy OBJ palette into reserved BG range for blit */
+        {
+            u16 savedPal[16];
+            memcpy16(savedPal, &pal_bg_mem[DB_BG_PAL_BASE], 16);
+            memcpy16(&pal_bg_mem[DB_BG_PAL_BASE], &pal_obj_mem[palBank * 16], 16);
 
         /* Project sprite to screen */
         dx = g_sprites[i].x - cam_x;
@@ -4945,6 +4948,9 @@ static void apply_draw_behind_exceptions(u16* buf)
                     row[addr] = (val & 0xFF00) | bgIdx;
             }
         }
+        /* Restore original BG palette */
+        memcpy16(&pal_bg_mem[DB_BG_PAL_BASE], savedPal, 16);
+        } /* end savedPal scope */
     }
     #undef DB_BG_PAL_BASE
 #else
