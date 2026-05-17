@@ -4827,31 +4827,37 @@ static void apply_draw_behind_exceptions(u16* buf)
         if (g_sprites[i].meshIdx >= 0) continue;
         if (g_sprites[i].drawBehindExc == 0) continue;
 
-        /* Build palette clear table: mark palette indices belonging to excepted meshes */
+        /* Build keep table: mark palette indices of NON-excepted meshes.
+           Everything else (sky, floor, excepted meshes) gets cleared so
+           the draw-behind sprite shows through.
+           Bit 31 = "don't draw behind sky" — clear sky pixels too.
+           Lower bits = per-mesh exceptions. */
         memset(clearPal, 0, 256);
-        for (si = 0; si < g_spriteCount; si++)
         {
-            int mi, base, k;
-            if (!(g_sprites[i].drawBehindExc & (1u << si))) continue;
-            if (g_sprites[si].meshIdx < 0) continue;
-            mi = g_sprites[si].meshIdx;
-            if (mi >= AFN_MESH_COUNT) continue;
-            /* flat-shaded palette: AFN_MESH_PAL_BASE + mi*8 .. +7 */
-            base = AFN_MESH_PAL_BASE + mi * 8;
-            for (k = 0; k < 8 && base + k < 256; k++)
-                clearPal[base + k] = 1;
-            /* textured palette: texPalBase .. +15 */
-            base = afn_mesh_desc[mi][11];
-            if (base > 0)
-                for (k = 0; k < 16 && base + k < 256; k++)
+            u32 excBits = g_sprites[i].drawBehindExc & 0x7FFFFFFFu; /* mask off bit 31 */
+            for (si = 0; si < g_spriteCount; si++)
+            {
+                int mi, base, k;
+                if (g_sprites[si].meshIdx < 0) continue;
+                mi = g_sprites[si].meshIdx;
+                if (mi >= AFN_MESH_COUNT) continue;
+                /* Skip excepted meshes — their pixels will be cleared */
+                if (excBits & (1u << si)) continue;
+                /* Mark NON-excepted mesh palettes as "keep" (clearPal=1 means keep) */
+                base = AFN_MESH_PAL_BASE + mi * 8;
+                for (k = 0; k < 8 && base + k < 256; k++)
                     clearPal[base + k] = 1;
-            /* grayscale: palette 5..12 */
-            if (afn_mesh_desc[mi][13])
-                for (k = 5; k <= 12; k++)
-                    clearPal[k] = 1;
+                base = afn_mesh_desc[mi][11];
+                if (base > 0)
+                    for (k = 0; k < 16 && base + k < 256; k++)
+                        clearPal[base + k] = 1;
+                if (afn_mesh_desc[mi][13])
+                    for (k = 5; k <= 12; k++)
+                        clearPal[k] = 1;
+            }
         }
 
-        /* Project sprite to screen */
+        /* Project sprite to screen (same math as update_sprites) */
         dx = g_sprites[i].x - cam_x;
         dz = g_sprites[i].z - cam_z;
         fovLambda = (dx * g_sinf - dz * g_cosf) >> 8;
@@ -4862,11 +4868,21 @@ static void apply_draw_behind_exceptions(u16* buf)
         screenY = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
         screenX = 120 + (int)((side * cam_fov) / fovLambda);
 
-        /* Generous bounding box covering AFF_DBL 64x64 canvas */
-        x0 = screenX - 32;
-        y0 = screenY - 64;
-        x1 = screenX + 32;
-        y1 = screenY + 32;
+        /* Compute projected sprite size matching update_sprites */
+        {
+            int sprScale = g_sprites[i].scale;
+            int invScale, visHalf;
+            if (sprScale <= 0) sprScale = 256;
+            invScale = (fovLambda * 14 * 32) / (sprScale * 32);
+            if (invScale < 128) invScale = 128;
+            visHalf = (32 * 128) / invScale;
+            if (visHalf < 4) visHalf = 4;
+
+            x0 = screenX - visHalf;
+            y0 = screenY - visHalf * 2;
+            x1 = screenX + visHalf;
+            y1 = screenY;
+        }
 
         if (x0 < 0) x0 = 0;
         if (y0 < 0) y0 = 0;
@@ -4874,7 +4890,9 @@ static void apply_draw_behind_exceptions(u16* buf)
         if (y1 > 160) y1 = 160;
         x0 &= ~1; /* align to u16 boundary */
 
-        /* Clear excepted mesh pixels so the draw-behind sprite shows through */
+        /* Clear all pixels EXCEPT non-excepted mesh pixels.
+           Sky, floor, and excepted mesh pixels become transparent,
+           letting the draw-behind sprite show through. */
         for (y = y0; y < y1; y++)
         {
             u16* row = buf + y * 120;
@@ -4885,8 +4903,8 @@ static void apply_draw_behind_exceptions(u16* buf)
                 u8 lo = px & 0xFF;
                 u8 hi = (px >> 8) & 0xFF;
                 int changed = 0;
-                if (lo && clearPal[lo]) { lo = 0; changed = 1; }
-                if (hi && clearPal[hi]) { hi = 0; changed = 1; }
+                if (lo && !clearPal[lo]) { lo = 0; changed = 1; }
+                if (hi && !clearPal[hi]) { hi = 0; changed = 1; }
                 if (changed) row[x >> 1] = lo | (hi << 8);
             }
         }
