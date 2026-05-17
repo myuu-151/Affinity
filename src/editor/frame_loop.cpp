@@ -448,6 +448,7 @@ enum class VsNodeType : int {
     SetHudAnimSpeed, // set HUD animation layer speed
     OnRise,         // gate: passes exec only on frame condition becomes true (rising edge)
     ResetScene,     // action: reload the current scene (respawn)
+    SetPlayerHeight, // set player collision height
     COUNT
 };
 
@@ -738,6 +739,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Set Anim Speed",  0xFF3355AA, 1, 1, 0, 0, {}, {"Speed"}, {} },
     { "On Rise",         0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Reset Scene",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Set Player Height",0xFF3355AA, 1, 1, 1, 0, {"Value (float)"}, {}, {} },
 };
 
 struct VsNode {
@@ -16603,6 +16605,7 @@ void FrameTick(float dt)
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
                 case VsNodeType::OnRise:        desc = "Rising-edge gate: only passes execution on the first frame the upstream condition becomes true. Blocks while it keeps firing. Resets when it stops."; break;
                 case VsNodeType::ResetScene:    desc = "Reloads the current scene. Player respawns at start position."; break;
+                case VsNodeType::SetPlayerHeight: desc = "Sets the player collision height (pixels). Controls wall Y-overlap and floor snap-up distance. Default 12."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -16840,6 +16843,7 @@ void FrameTick(float dt)
                         case VsNodeType::SetHudAnimSpeed: return "_set_hud_anim_speed";
                         case VsNodeType::OnRise:        return "_on_rise";
                         case VsNodeType::ResetScene:    return "_reset_scene";
+                        case VsNodeType::SetPlayerHeight: return "_set_player_height";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -17258,6 +17262,20 @@ void FrameTick(float dt)
                         "    // scene_load(afn_current_mode, afn_current_scene);\n"
                         "    // Reloads scene: respawns player, resets sprites, re-runs OnStart");
                     break;
+                case VsNodeType::SetPlayerHeight: {
+                    editorCode =
+                        "// ---- 3D Scene ----\n"
+                        "// (no editor vertical physics)";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_player_height = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // collide_walls: py + afn_player_height Y-overlap check\n"
+                        "    // collide_floor: skip floors above py + afn_player_height",
+                        fmtFloat(infoNode.id, 0, "<height>"));
+                    setActionFunc(infoNode, "_set_player_height", bodyBuf);
+                    break;
+                }
                 case VsNodeType::ChangeScene:
                     editorCode =
                         "// ---- 2D Tilemap / 3D Scene / Mode 7 ----\n"
@@ -19917,6 +19935,7 @@ void FrameTick(float dt)
                     case VsNodeType::SetHudAnimSpeed: suffix = "_set_hud_anim_speed"; break;
                     case VsNodeType::OnRise:        suffix = "_on_rise"; break;
                     case VsNodeType::ResetScene:    suffix = "_reset_scene"; break;
+                    case VsNodeType::SetPlayerHeight: suffix = "_set_player_height"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
                     case VsNodeType::Branch:        suffix = "_branch"; break;
                     case VsNodeType::CompareVar:    suffix = "_compare_var"; break;
@@ -20381,6 +20400,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopAnim].name)) addNodeAt(VsNodeType::StopAnim);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetAnimSpeed].name)) addNodeAt(VsNodeType::SetAnimSpeed);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetVelocityY].name)) addNodeAt(VsNodeType::SetVelocityY);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetPlayerHeight].name)) addNodeAt(VsNodeType::SetPlayerHeight);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopSound].name)) addNodeAt(VsNodeType::StopSound);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetScale].name)) addNodeAt(VsNodeType::SetScale);

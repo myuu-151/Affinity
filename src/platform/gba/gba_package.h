@@ -356,6 +356,7 @@ enum class GBAScriptNodeType : int {
     SetHudAnimSpeed,
     OnRise,
     ResetScene,
+    SetPlayerHeight,
     COUNT
 };
 

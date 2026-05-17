@@ -1918,6 +1918,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int   afn_bp_cur_spr_idx = -1;\n";
         f << "static FIXED afn_gravity;\n";
         f << "static FIXED afn_terminal_vel;\n";
+        f << "// afn_player_height declared in main.c (before mapdata.h include)\n";
         f << "static FIXED player_vy;\n";
         f << "static int   player_on_ground;\n";
         f << "static u16   orbit_angle;\n";
@@ -2177,6 +2178,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::SetHudAnimSpeed: return "_set_hud_anim_speed";
         case GBAScriptNodeType::OnRise:        return "_on_rise";
         case GBAScriptNodeType::ResetScene:    return "_reset_scene";
+        case GBAScriptNodeType::SetPlayerHeight: return "_set_player_height";
         default: return "";
         }
     };
@@ -2465,6 +2467,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 case GBAScriptNodeType::ResetScene: {
                     f << "    afn_pending_scene = afn_current_scene;\n";
                     f << "    afn_pending_scene_mode = afn_current_mode;\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetPlayerHeight: {
+                    auto* valData = findDataIn(action->id, 0);
+                    float val = valData ? resolveFloat(valData) : 12.0f;
+                    int valFixed = (int)(val * 256.0f);
+                    f << "    afn_player_height = " << valFixed << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::SetFlag: {
@@ -3966,6 +3975,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 case GBAScriptNodeType::ResetScene: {
                     f << "    afn_pending_scene = afn_current_scene;\n";
                     f << "    afn_pending_scene_mode = afn_current_mode;\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetPlayerHeight: {
+                    auto* valData = bpFindDataIn(action->id, 0);
+                    std::string val = valData ? bpResolveFloat(valData) : std::to_string((int)(12.0f * 256.0f));
+                    f << "    afn_player_height = " << val << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::SetFlag: {
