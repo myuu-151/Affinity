@@ -4878,11 +4878,21 @@ static void apply_draw_behind_exceptions(u16* buf)
             }
         }
 
-        /* Get tile/palette from asset */
+        /* Get tile/palette from asset — use direction VRAM if animated */
         tileId = afn_asset_desc[ai][0] - tm_static_adj;
         baseSize = afn_asset_desc[ai][3];
         scaleSize = baseSize;
         palBank = afn_asset_desc[ai][4];
+#ifdef AFN_HAS_ASSET_DIRS
+        if (afn_asset_dir_desc[ai][4] && g_active_dir_set[ai] >= 0)
+        {
+            int vramTile0 = afn_asset_dir_desc[ai][5];
+            tileId = vramTile0;
+            baseSize = afn_asset_dir_desc[ai][2];
+            scaleSize = baseSize;
+            palBank = afn_asset_dir_desc[ai][3];
+        }
+#endif
         if (palBank > 15) palBank = 1;
 
         /* OBJ palette was copied to BG palette 128+palBank*16 at init */
