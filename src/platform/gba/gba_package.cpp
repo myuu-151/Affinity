@@ -1057,8 +1057,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
     if (!sprites.empty())
     {
-        f << "static const int afn_sprite_data[][17] = {\n";
-        f << "    // { x, y, z, pal, asset, scale, type, rot, animEn, mesh, oamPrio, parent, offX, offY, offZ, forceStatic, grounded }\n";
+        f << "static const int afn_sprite_data[][18] = {\n";
+        f << "    // { x, y, z, pal, asset, scale, type, rot, animEn, mesh, oamPrio, parent, offX, offY, offZ, forceStatic, grounded, drawBehindExc }\n";
         for (size_t i = 0; i < sprites.size(); i++)
         {
             int gx = EditorToGBAFixed(sprites[i].x);
@@ -1078,8 +1078,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
             int offZ = (int)(sprites[i].offsetZ / 4.0f * 256.0f);
             int fStatic = sprites[i].forceStatic ? 1 : 0;
             int fGrounded = sprites[i].grounded ? 1 : 0;
+            int dbExc = (int)sprites[i].drawBehindExc;
             f << "    { " << gx << ", " << gy << ", " << gz << ", "
-              << pal << ", " << aIdx << ", " << scaleFixed << ", " << sType << ", " << rotBrad << ", " << animEn << ", " << meshIdx2 << ", " << oamPrio << ", " << parentIdx << ", " << offX << ", " << offY << ", " << offZ << ", " << fStatic << ", " << fGrounded << " },\n";
+              << pal << ", " << aIdx << ", " << scaleFixed << ", " << sType << ", " << rotBrad << ", " << animEn << ", " << meshIdx2 << ", " << oamPrio << ", " << parentIdx << ", " << offX << ", " << offY << ", " << offZ << ", " << fStatic << ", " << fGrounded << ", " << dbExc << " },\n";
         }
         f << "};\n";
     }

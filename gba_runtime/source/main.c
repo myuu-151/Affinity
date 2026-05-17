@@ -34,9 +34,11 @@ typedef struct {
     FIXED offX, offY, offZ; // offset from parent (16.8 fixed)
     u8    forceStatic; // 1 = force static rendering (ignore directions)
     u8    grounded;    // 1 = stay on ground (Y=0) instead of following parent Y
+    u32   drawBehindExc; // bitmask: bit N = mesh sprite[N] is exempt from draw-behind
 } FloorSpriteGBA;
 
 EWRAM_DATA static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
+static u32 g_meshSpriteMask;       // bitmask: bit N = sprite[N] is a mesh sprite
 static FIXED player_x, player_z;   // player world position (16.8)
 static FIXED player_y;             // player height (16.8)
 
@@ -2142,11 +2144,18 @@ static void load_editor_sprites(void)
         g_sprites[i].offZ = afn_sprite_data[i][14];
         g_sprites[i].forceStatic = (u8)afn_sprite_data[i][15];
         g_sprites[i].grounded = (u8)afn_sprite_data[i][16];
+        g_sprites[i].drawBehindExc = (u32)afn_sprite_data[i][17];
         g_sprites[i].wx = g_sprites[i].x;
         g_sprites[i].wz = g_sprites[i].z;
         g_sprites[i].facing = g_sprites[i].rotation;
     }
     g_spriteCount = count;
+    // Build mesh sprite bitmask for draw-behind exception checks
+    g_meshSpriteMask = 0;
+    for (i = 0; i < count; i++) {
+        if (g_sprites[i].meshIdx >= 0)
+            g_meshSpriteMask |= (1u << i);
+    }
 }
 #endif
 #endif
@@ -2477,7 +2486,9 @@ static void update_sprites(void)
 
             obj_mem[oamIdx].attr0 = ATTR0_Y(sy & 0xFF) | ATTR0_SQUARE | ATTR0_AFF_DBL;
             obj_mem[oamIdx].attr1 = ATTR1_X(sx & 0x1FF) | size_to_attr1(baseSize) | ATTR1_AFF_ID(affIdx);
-            obj_mem[oamIdx].attr2 = ATTR2_ID(tileId) | ATTR2_PRIO(g_sprites[sprIdx].oamPrio) | ATTR2_PALBANK(palBank);
+            {
+                obj_mem[oamIdx].attr2 = ATTR2_ID(tileId) | ATTR2_PRIO(g_sprites[sprIdx].oamPrio) | ATTR2_PALBANK(palBank);
+            }
         }
     }
 
@@ -2841,7 +2852,7 @@ IWRAM_CODE static void rasterize_tri_quarter(u16* buf, int x0, int y0, int x1, i
 
 // Sutherland-Hodgman viewport clipping with UV interpolation.
 // Clips a convex polygon against one axis-aligned edge, carrying U/V.
-IWRAM_CODE static int clip_edge_uv(const int* inX, const int* inY, const int* inU, const int* inV,
+static int clip_edge_uv(const int* inX, const int* inY, const int* inU, const int* inV,
                         int inCount, int* outX, int* outY, int* outU, int* outV,
                         int axis, int limit, int isMax)
 {
@@ -2927,7 +2938,7 @@ static int clip_edge(const int* inX, const int* inY, int inCount,
 // Clip a triangle to the screen (0,0)-(239,159) and rasterize the result.
 // Produces 0-7 vertex polygon, fan-triangulated for rendering.
 // lodLevel: 0=full, 1=half, 2=quarter
-IWRAM_CODE static void rasterize_tri_clipped(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx, int lodLevel)
+static void rasterize_tri_clipped(u16* buf, int x0, int y0, int x1, int y1, int x2, int y2, u8 palIdx, int lodLevel)
 {
     int polyX[8], polyY[8];
     int tmpX[8], tmpY[8];
@@ -3425,7 +3436,7 @@ static void rasterize_quad(u16* buf, int x0, int y0, int x1, int y1,
 }
 
 // Clip and rasterize a quad (Sutherland-Hodgman viewport clipping + convex fill)
-IWRAM_CODE static void rasterize_quad_clipped(u16* buf, int x0, int y0, int x1, int y1,
+static void rasterize_quad_clipped(u16* buf, int x0, int y0, int x1, int y1,
                                                int x2, int y2, int x3, int y3, u8 palIdx)
 {
     int polyX[10], polyY[10], tmpX[10], tmpY[10];
@@ -3833,7 +3844,7 @@ static int cs_code(int x, int y)
     return c;
 }
 
-IWRAM_CODE static void draw_line(u16* buf, int x0, int y0, int x1, int y1, u8 palIdx)
+static void draw_line(u16* buf, int x0, int y0, int x1, int y1, u8 palIdx)
 {
     int c0, c1, co, x, y;
     int dx, dy, sx, sy, err, steps;
@@ -4172,7 +4183,7 @@ static void clip_render_poly_flat(u16* buf,
 // OpenLara-style textured polygon clip+render.
 // Z is already clamped during projection — no 3D near-plane clip needed.
 // Just 2D screen-space Sutherland-Hodgman with UV interpolation, then rasterize.
-IWRAM_CODE static void clip_render_poly_tex(u16* buf,
+static void clip_render_poly_tex(u16* buf,
     const int* sx, const int* sy, const int* uIn, const int* vIn,
     int inCount, const u8* tex, int texMask, int texShift, u8 palBase)
 {
@@ -4793,6 +4804,96 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 rasterize_tri_clipped(buf, g_vsx[vb+i0], g_vsy[vb+i0], g_vsx[vb+i1], g_vsy[vb+i1], g_vsx[vb+i2], g_vsy[vb+i2], palIdx, lodLevel);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Draw-behind exception: clear excepted mesh pixels in sprite screen rects
+// After mesh rendering, scan sprite screen areas and erase pixels belonging
+// to excepted meshes (identified by palette index range). The draw-behind
+// sprite (oamPrio=2, behind BG2) then shows through the cleared pixels.
+// Uses 16-bit framebuffer access (required for VRAM compatibility on GBA).
+// ---------------------------------------------------------------------------
+static void apply_draw_behind_exceptions(u16* buf)
+{
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+    int i, si, y;
+    u8 clearPal[256];
+
+    for (i = 0; i < g_spriteCount; i++)
+    {
+        FIXED dx, dz, fovLambda, side, heightDiff;
+        int screenX, screenY, x0, y0, x1, y1;
+
+        if (g_sprites[i].meshIdx >= 0) continue;
+        if (g_sprites[i].drawBehindExc == 0) continue;
+
+        /* Build palette clear table: mark palette indices belonging to excepted meshes */
+        memset(clearPal, 0, 256);
+        for (si = 0; si < g_spriteCount; si++)
+        {
+            int mi, base, k;
+            if (!(g_sprites[i].drawBehindExc & (1u << si))) continue;
+            if (g_sprites[si].meshIdx < 0) continue;
+            mi = g_sprites[si].meshIdx;
+            if (mi >= AFN_MESH_COUNT) continue;
+            /* flat-shaded palette: AFN_MESH_PAL_BASE + mi*8 .. +7 */
+            base = AFN_MESH_PAL_BASE + mi * 8;
+            for (k = 0; k < 8 && base + k < 256; k++)
+                clearPal[base + k] = 1;
+            /* textured palette: texPalBase .. +15 */
+            base = afn_mesh_desc[mi][11];
+            if (base > 0)
+                for (k = 0; k < 16 && base + k < 256; k++)
+                    clearPal[base + k] = 1;
+            /* grayscale: palette 5..12 */
+            if (afn_mesh_desc[mi][13])
+                for (k = 5; k <= 12; k++)
+                    clearPal[k] = 1;
+        }
+
+        /* Project sprite to screen */
+        dx = g_sprites[i].x - cam_x;
+        dz = g_sprites[i].z - cam_z;
+        fovLambda = (dx * g_sinf - dz * g_cosf) >> 8;
+        if (fovLambda <= 64) continue;
+
+        side = (dx * g_cosf + dz * g_sinf) >> 8;
+        heightDiff = cam_h - g_sprites[i].y;
+        screenY = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
+        screenX = 120 + (int)((side * cam_fov) / fovLambda);
+
+        /* Generous bounding box covering AFF_DBL 64x64 canvas */
+        x0 = screenX - 32;
+        y0 = screenY - 64;
+        x1 = screenX + 32;
+        y1 = screenY + 32;
+
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > 240) x1 = 240;
+        if (y1 > 160) y1 = 160;
+        x0 &= ~1; /* align to u16 boundary */
+
+        /* Clear excepted mesh pixels so the draw-behind sprite shows through */
+        for (y = y0; y < y1; y++)
+        {
+            u16* row = buf + y * 120;
+            int x;
+            for (x = x0; x < x1; x += 2)
+            {
+                u16 px = row[x >> 1];
+                u8 lo = px & 0xFF;
+                u8 hi = (px >> 8) & 0xFF;
+                int changed = 0;
+                if (lo && clearPal[lo]) { lo = 0; changed = 1; }
+                if (hi && clearPal[hi]) { hi = 0; changed = 1; }
+                if (changed) row[x >> 1] = lo | (hi << 8);
+            }
+        }
+    }
+#else
+    (void)buf;
+#endif
 }
 
 // Draw minimap background into bitmap (since BG0 not available in Mode 4)
@@ -5683,6 +5784,7 @@ int main(void)
                 REG_TM2CNT_L = 0;
                 REG_TM2CNT_H = 0x0081;
                 render_meshes_sw(backbuf);
+                apply_draw_behind_exceptions(backbuf);
                 dbg_vcount = (int)REG_TM2CNT_L;
             }
             if (g_ewramRender)
