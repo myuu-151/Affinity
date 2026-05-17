@@ -4546,7 +4546,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide);
     }
     fprintf(f, "\n");
 
@@ -5621,6 +5621,18 @@ static bool LoadProject(const std::string& path)
             float mdrawdist = 0.0f;
             // Try newest format: ...visible|perspcorrect|subdivide
             int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d|%f|%d|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv);
+            if (matched == 9) {
+                // Empty texture path — sscanf stopped at ||, skip it and parse remaining fields
+                mtexpath[0] = '\0';
+                // Find the empty texpath field (9th pipe) and parse from after it
+                const char* p = line;
+                int pipes = 0;
+                while (*p && pipes < 9) { if (*p == '|') pipes++; p++; }
+                if (*p == '|') p++; // skip the empty field's trailing pipe
+                int m2 = sscanf(p, "%d|%f|%d|%d|%d|%d|%d", &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv);
+                matched = 9 + m2; // total fields parsed (skip texpath in count, add 1 for it)
+                if (m2 > 0) matched++; // account for the texpath slot
+            }
             if (matched < 2)
             {
                 // Try format without usequads: name|path|cull|export|lit|halfres|textured|wireframe|grayscale|texpath
@@ -5674,6 +5686,7 @@ static bool LoadProject(const std::string& path)
                     LoadOBJ(ma.sourcePath, ma);
                 ma.name = mname; // restore name in case LoadOBJ overwrote it
                 // Reload texture if textured
+                if (strcmp(mtexpath, "(none)") == 0) mtexpath[0] = '\0';
                 if (ma.textured && mtexpath[0])
                     LoadMeshTexture(std::string(mtexpath), ma);
                 sMeshAssets.push_back(std::move(ma));
