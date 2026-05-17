@@ -5708,7 +5708,11 @@ int main(void)
     afn_auto_orbit_speed = 0;
     afn_gravity = AFN_GRAVITY;
     afn_terminal_vel = AFN_TERMINAL_VEL;
+#ifdef COL_PLAYER_HEIGHT_DEFAULT
     afn_player_height = COL_PLAYER_HEIGHT_DEFAULT;
+#else
+    afn_player_height = 3072;
+#endif
     afn_play_anim = -1;
     afn_pending_scene = -1;
     afn_pending_scene_mode = -1;
