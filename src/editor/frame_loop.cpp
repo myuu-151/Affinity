@@ -12113,8 +12113,8 @@ void FrameTick(float dt)
                             se.palIdx = (i % 5) + 1;
                         se.oamPrio = sSprites[i].drawBehind ? 2 : 0;
                         se.drawBehindExc = sSprites[i].drawBehindExceptions;
-                        if (sSprites[i].drawBehind && sSprites[i].drawBehindNoSky)
-                            se.drawBehindExc |= (1u << 31); // bit 31 = don't draw behind sky
+                        if (sSprites[i].drawBehind && sSprites[i].drawBehindNoSky && se.drawBehindExc == 0)
+                            se.drawBehindExc = (1u << 31); /* trigger bitmap blit path */
                         se.forceStatic = sSprites[i].forceStatic;
                         exportSprites.push_back(se);
 

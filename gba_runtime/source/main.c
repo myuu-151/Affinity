@@ -2290,6 +2290,8 @@ static void update_sprites(void)
 
         // Skip mesh sprites (rendered into bitmap, not OAM)
         if (g_sprites[i].meshIdx >= 0) continue;
+        // Skip draw-behind exception sprites (blitted directly to bitmap)
+        if (g_sprites[i].drawBehindExc != 0) continue;
 
         dx = g_sprites[i].x - cam_x;
         dz = g_sprites[i].z - cam_z;
@@ -4815,47 +4817,61 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 // ---------------------------------------------------------------------------
 static void apply_draw_behind_exceptions(u16* buf)
 {
-#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-    int i, si, y;
-    u8 clearPal[256];
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+    int i, si;
+    u8 keepPal[256]; /* 1 = non-excepted mesh pixel, don't overwrite */
+    #define DB_BG_PAL_BASE 192 /* reserved BG palette range for sprite blit */
 
     for (i = 0; i < g_spriteCount; i++)
     {
         FIXED dx, dz, fovLambda, side, heightDiff;
-        int screenX, screenY, x0, y0, x1, y1;
+        int screenX, screenY, invScale, dstSize, baseSize, scaleSize;
+        int tileId, palBank, ai;
+        int dy2, dx2;
+        const u8* objVram = (const u8*)0x06010000;
+        int tilesPerRow;
 
         if (g_sprites[i].meshIdx >= 0) continue;
         if (g_sprites[i].drawBehindExc == 0) continue;
+        ai = g_sprites[i].assetIdx;
+        if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
 
-        /* Build clear table: mark palette indices of EXCEPTED meshes.
-           Only excepted mesh pixels get cleared to transparent (palette 0),
-           letting the draw-behind sprite show through those meshes.
-           Sky, floor, and non-excepted mesh pixels are kept intact. */
-        memset(clearPal, 0, 256);
+        /* Build keep table: non-excepted mesh palettes that the sprite stays behind */
+        memset(keepPal, 0, 256);
         {
             u32 excBits = g_sprites[i].drawBehindExc & 0x7FFFFFFFu;
             for (si = 0; si < g_spriteCount; si++)
             {
                 int mi, base, k;
-                if (!(excBits & (1u << si))) continue;
                 if (g_sprites[si].meshIdx < 0) continue;
                 mi = g_sprites[si].meshIdx;
                 if (mi >= AFN_MESH_COUNT) continue;
-                /* Mark excepted mesh palettes for clearing */
+                if (excBits & (1u << si)) continue; /* excepted = sprite in front */
+                /* Non-excepted: sprite stays behind these */
                 base = AFN_MESH_PAL_BASE + mi * 8;
                 for (k = 0; k < 8 && base + k < 256; k++)
-                    clearPal[base + k] = 1;
+                    keepPal[base + k] = 1;
                 base = afn_mesh_desc[mi][11];
                 if (base > 0)
                     for (k = 0; k < 16 && base + k < 256; k++)
-                        clearPal[base + k] = 1;
+                        keepPal[base + k] = 1;
                 if (afn_mesh_desc[mi][13])
                     for (k = 5; k <= 12; k++)
-                        clearPal[k] = 1;
+                        keepPal[k] = 1;
             }
         }
 
-        /* Project sprite to screen (same math as update_sprites) */
+        /* Get tile/palette from asset */
+        tileId = afn_asset_desc[ai][0] - tm_static_adj;
+        baseSize = afn_asset_desc[ai][3];
+        scaleSize = baseSize;
+        palBank = afn_asset_desc[ai][4];
+        if (palBank > 15) palBank = 1;
+
+        /* Copy OBJ palette to reserved BG palette range */
+        memcpy16(&pal_bg_mem[DB_BG_PAL_BASE], &pal_obj_mem[palBank * 16], 16);
+
+        /* Project sprite to screen */
         dx = g_sprites[i].x - cam_x;
         dz = g_sprites[i].z - cam_z;
         fovLambda = (dx * g_sinf - dz * g_cosf) >> 8;
@@ -4866,46 +4882,71 @@ static void apply_draw_behind_exceptions(u16* buf)
         screenY = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
         screenX = 120 + (int)((side * cam_fov) / fovLambda);
 
-        /* Compute projected sprite size matching update_sprites */
+        /* Compute scale */
         {
             int sprScale = g_sprites[i].scale;
-            int invScale, visHalf;
             if (sprScale <= 0) sprScale = 256;
-            invScale = (fovLambda * 14 * 32) / (sprScale * 32);
-            if (invScale < 128) invScale = 128;
-            visHalf = (32 * 128) / invScale;
-            if (visHalf < 4) visHalf = 4;
-
-            x0 = screenX - visHalf;
-            y0 = screenY - visHalf * 2;
-            x1 = screenX + visHalf;
-            y1 = screenY;
+            invScale = (fovLambda * 14 * baseSize) / (sprScale * scaleSize);
+            if (invScale < 64) invScale = 64;
+            if (invScale > 2048) invScale = 2048;
         }
+        dstSize = (baseSize * 256) / invScale;
+        if (dstSize < 2) continue;
+        if (dstSize > 128) dstSize = 128;
 
-        if (x0 < 0) x0 = 0;
-        if (y0 < 0) y0 = 0;
-        if (x1 > 240) x1 = 240;
-        if (y1 > 160) y1 = 160;
-        x0 &= ~1; /* align to u16 boundary */
+        tilesPerRow = baseSize / 8;
 
-        /* Clear excepted mesh pixels to transparent (palette 0).
-           The draw-behind sprite (oamPrio=2) shows through the gaps. */
-        for (y = y0; y < y1; y++)
+        /* Blit sprite to bitmap: nearest-neighbor scaled 4bpp tile read */
+        for (dy2 = 0; dy2 < dstSize; dy2++)
         {
-            u16* row = buf + y * 120;
-            int x;
-            for (x = x0; x < x1; x += 2)
+            int py = screenY - dstSize + dy2; /* anchor at bottom */
+            int srcY, tileY, localY;
+            if (py < 0 || py >= 160) continue;
+
+            srcY = (dy2 * invScale) >> 8;
+            if (srcY >= baseSize) continue;
+            tileY = srcY >> 3;
+            localY = srcY & 7;
+
+            for (dx2 = 0; dx2 < dstSize; dx2++)
             {
-                u16 px = row[x >> 1];
-                u8 lo = px & 0xFF;
-                u8 hi = (px >> 8) & 0xFF;
-                int changed = 0;
-                if (lo && clearPal[lo]) { lo = 0; changed = 1; }
-                if (hi && clearPal[hi]) { hi = 0; changed = 1; }
-                if (changed) row[x >> 1] = lo | (hi << 8);
+                int px = screenX - (dstSize >> 1) + dx2;
+                int srcX, tileX, localX, tId;
+                u8 byte, pixel, bgIdx;
+                u16 *row, val;
+                int addr;
+
+                if (px < 0 || px >= 240) continue;
+
+                srcX = (dx2 * invScale) >> 8;
+                if (srcX >= baseSize) continue;
+                tileX = srcX >> 3;
+                localX = srcX & 7;
+
+                tId = tileId + tileY * tilesPerRow + tileX;
+                byte = objVram[tId * 32 + localY * 4 + (localX >> 1)];
+                pixel = (localX & 1) ? (byte >> 4) : (byte & 0xF);
+                if (pixel == 0) continue; /* transparent */
+
+                /* Check if existing pixel is a non-excepted mesh — skip it */
+                row = buf + py * 120;
+                addr = px >> 1;
+                val = row[addr];
+                {
+                    u8 existing = (px & 1) ? (val >> 8) : (val & 0xFF);
+                    if (existing && keepPal[existing]) continue;
+                }
+
+                /* Write sprite pixel using reserved BG palette */
+                bgIdx = DB_BG_PAL_BASE + pixel;
+                if (px & 1)
+                    row[addr] = (val & 0x00FF) | ((u16)bgIdx << 8);
+                else
+                    row[addr] = (val & 0xFF00) | bgIdx;
             }
         }
     }
+    #undef DB_BG_PAL_BASE
 #else
     (void)buf;
 #endif
