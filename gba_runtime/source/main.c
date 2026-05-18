@@ -4265,18 +4265,32 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         sprScale = g_sprites[si].scale;
         if (sprScale <= 0) sprScale = 256;
 
-        // Clamp Above: find max world Y across mesh, raise effective cam_h so
-        // the entire mesh stays below horizon while preserving its shape
+        // Clamp Above: raise effective cam_h based on NEARBY vertices only,
+        // so far-away high geometry (ahead of you going uphill) still projects normally
         {
             FIXED effectiveCamH = cam_h;
             if (ms->clampAbove) {
                 FIXED wyMax = -0x7FFFFFFF;
+                FIXED cx = cam_x >> 4, cz = cam_z >> 4;
+                int clampRadius = cam_fov * 3; // only consider nearby verts
+                int clampRadSq = (clampRadius >> 4) * (clampRadius >> 4);
                 for (v = 0; v < vertCount; v++) {
+                    FIXED vx2 = (verts[v * 3 + 0] * sprScale) >> 8;
                     FIXED vy2 = (verts[v * 3 + 1] * sprScale) >> 8;
-                    FIXED wy2 = g_sprites[si].y + vy2;
-                    if (wy2 > wyMax) wyMax = wy2;
+                    FIXED vz2 = (verts[v * 3 + 2] * sprScale) >> 8;
+                    FIXED rx2 = (vx2 * cosR + vz2 * sinR) >> 8;
+                    FIXED rz2 = (-vx2 * sinR + vz2 * cosR) >> 8;
+                    FIXED wx2 = (g_sprites[si].x + rx2) >> 4;
+                    FIXED wz2 = (g_sprites[si].z + rz2) >> 4;
+                    int ddx = wx2 - cx, ddz = wz2 - cz;
+                    int distSq = ddx * ddx + ddz * ddz;
+                    if (distSq < clampRadSq) {
+                        FIXED wy2 = g_sprites[si].y + vy2;
+                        if (wy2 > wyMax) wyMax = wy2;
+                    }
                 }
-                if (effectiveCamH <= wyMax) effectiveCamH = wyMax + 1;
+                if (wyMax > -0x7FFFFFFF && effectiveCamH <= wyMax)
+                    effectiveCamH = wyMax + 1;
             }
 
         // Project vertices into global arrays
