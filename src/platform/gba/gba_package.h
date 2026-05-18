@@ -466,6 +466,7 @@ struct GBAHudTextRowExport {
     int sourceSlot; // -1=static, 0-3=afn_hud_value[N]
     int pad; // minimum digits for counter mode
     int spacing; // extra spacing adjustment added to font advance
+    int scale;   // 1=normal, 2=double size
 };
 
 struct GBAHudKeyframeExport {

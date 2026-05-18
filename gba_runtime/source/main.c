@@ -1398,26 +1398,46 @@ static void hud_font_load(int staticTileCount)
 // Render a text string as OAM sprites, one 8x8 sprite per character
 // fontType: 0=normal 8x8, 1=small pixel 5px advance, 2=5x7 6px advance
 // Returns number of OAM slots used
-static int hud_text_oam_ex(int oamStart, int px, int py, const char* str, int palBank, int fontType, int extraSpacing)
+static int hud_text_oam_scaled(int oamStart, int px, int py, const char* str, int palBank, int fontType, int extraSpacing, int scale)
 {
     int slot = oamStart;
     int tileBase = (fontType == 2) ? hud_font_5x7_tile_base : (fontType ? hud_font_small_tile_base : hud_font_tile_base);
-    int advance = ((fontType == 2) ? 6 : (fontType ? 5 : 8)) + extraSpacing;
-    if (advance < 1) advance = 1;
+    int baseAdv = ((fontType == 2) ? 6 : (fontType ? 5 : 8)) + extraSpacing;
+    if (baseAdv < 1) baseAdv = 1;
+    int advance = baseAdv * scale;
+    int useAffine = (scale >= 2);
     while (*str && slot < 126) {
         int ch = (unsigned char)*str;
         if (ch > 32 && ch < 128) {
             int tileIdx = tileBase + (ch - 32);
-            u16 a0 = ATTR0_SQUARE | ((py & 0xFF));
-            u16 a1 = ATTR1_SIZE_8 | ((px & 0x1FF));
-            u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileIdx & 0x3FF);
-            obj_set_attr(&oam_mem[slot], a0, a1, a2);
+            if (useAffine && slot < 32) {
+                // Use affine OAM to scale 8x8 tile
+                int invScale = 256 / scale;
+                obj_aff_mem[slot].pa = (s16)invScale;
+                obj_aff_mem[slot].pb = 0;
+                obj_aff_mem[slot].pc = 0;
+                obj_aff_mem[slot].pd = (s16)invScale;
+                u16 a0 = ATTR0_SQUARE | ATTR0_AFF_DBL | ((py & 0xFF));
+                u16 a1 = ATTR1_SIZE_8 | ATTR1_AFF_ID(slot) | ((px & 0x1FF));
+                u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileIdx & 0x3FF);
+                obj_set_attr(&oam_mem[slot], a0, a1, a2);
+            } else {
+                u16 a0 = ATTR0_SQUARE | ((py & 0xFF));
+                u16 a1 = ATTR1_SIZE_8 | ((px & 0x1FF));
+                u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileIdx & 0x3FF);
+                obj_set_attr(&oam_mem[slot], a0, a1, a2);
+            }
             slot++;
         }
         px += advance;
         str++;
     }
     return slot - oamStart;
+}
+
+static int hud_text_oam_ex(int oamStart, int px, int py, const char* str, int palBank, int fontType, int extraSpacing)
+{
+    return hud_text_oam_scaled(oamStart, px, py, str, palBank, fontType, extraSpacing, 1);
 }
 
 static int hud_text_oam(int oamStart, int px, int py, const char* str, int palBank)
@@ -6642,7 +6662,7 @@ int main(void)
                                 }
                                 // Apply per-text color
                                 ((u16*)0x05000200)[15 * 16 + 1] = afn_hud_texts[tStart2 + ti2].color;
-                                oamSlot += hud_text_oam_ex(oamSlot, tpx, tpy, tstr, 15, afn_hud_texts[tStart2 + ti2].font, afn_hud_texts[tStart2 + ti2].spacing);
+                                oamSlot += hud_text_oam_scaled(oamSlot, tpx, tpy, tstr, 15, afn_hud_texts[tStart2 + ti2].font, afn_hud_texts[tStart2 + ti2].spacing, afn_hud_texts[tStart2 + ti2].scale);
                             }
                         } else if (layerOrder[pass] == 1 && spCount2 > 0) {
                             // Sprites (reverse order like pieces)
@@ -7470,7 +7490,7 @@ int main(void)
                                     afn_hud_value[slot], afn_hud_texts[tStart2 + ti2].pad);
                             }
                             ((u16*)0x05000200)[15 * 16 + 1] = afn_hud_texts[tStart2 + ti2].color;
-                            m4HudOamSlot += hud_text_oam_ex(m4HudOamSlot, tpx, tpy, tstr, 15, afn_hud_texts[tStart2 + ti2].font, afn_hud_texts[tStart2 + ti2].spacing);
+                            m4HudOamSlot += hud_text_oam_scaled(m4HudOamSlot, tpx, tpy, tstr, 15, afn_hud_texts[tStart2 + ti2].font, afn_hud_texts[tStart2 + ti2].spacing, afn_hud_texts[tStart2 + ti2].scale);
                         }
                     } else if (layerOrder[pass] == 1 && spCount2 > 0) {
                         int spi;

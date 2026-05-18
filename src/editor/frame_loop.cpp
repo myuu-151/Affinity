@@ -3236,6 +3236,7 @@ struct HudElement {
         int sourceSlot = -1; // -1=static text, 0-3=afn_hud_value[N]
         int pad = 0; // minimum digits for counter mode
         int spacing = 0; // extra spacing adjustment (-4 to +8, added to font advance)
+        int scale = 1;   // 1=normal, 2=double size
     };
     std::vector<TextRow> textRows;
     int selectedTextRow = -1;
@@ -4647,7 +4648,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "elemCursor=%d|%d|%d|%d\n", el.cursorAssetIdx, el.cursorFrame, el.cursorOffX, el.cursorOffY);
         fprintf(f, "elemTextCount=%d\n", (int)el.textRows.size());
         for (auto& tr : el.textRows)
-            fprintf(f, "elemText=%d|%d|%u|%d|%d|%d|%d|%s\n", tr.localX, tr.localY, tr.color, tr.font, tr.sourceSlot, tr.pad, tr.spacing, tr.label);
+            fprintf(f, "elemText=%d|%d|%u|%d|%d|%d|%d|%d|%s\n", tr.localX, tr.localY, tr.color, tr.font, tr.sourceSlot, tr.pad, tr.spacing, tr.scale, tr.label);
         fprintf(f, "elemSpriteCount=%d\n", (int)el.spriteItems.size());
         for (auto& si : el.spriteItems)
             fprintf(f, "elemSprite=%d|%d|%d|%d|%d|%.2f\n", si.spriteAssetIdx, si.frame, si.localX, si.localY, si.size, si.scale);
@@ -5957,9 +5958,20 @@ static bool LoadProject(const std::string& path)
                 unsigned int col = 0xFFFFFFFF;
                 int font = 0, srcSlot = -1, padVal = 0;
                 int spacingVal = 0;
+                int scaleVal = 1;
                 int n = 0;
-                // Try newest format: x|y|color|font|sourceSlot|pad|spacing|label
-                if (sscanf(line + 9, "%d|%d|%u|%d|%d|%d|%d|%n", &tr.localX, &tr.localY, &col, &font, &srcSlot, &padVal, &spacingVal, &n) >= 7 && n > 0) {
+                // Try newest format: x|y|color|font|sourceSlot|pad|spacing|scale|label
+                if (sscanf(line + 9, "%d|%d|%u|%d|%d|%d|%d|%d|%n", &tr.localX, &tr.localY, &col, &font, &srcSlot, &padVal, &spacingVal, &scaleVal, &n) >= 8 && n > 0) {
+                    tr.color = col;
+                    tr.font = font;
+                    tr.sourceSlot = srcSlot;
+                    tr.pad = padVal;
+                    tr.spacing = spacingVal;
+                    tr.scale = scaleVal;
+                    strncpy(tr.label, line + 9 + n, sizeof(tr.label) - 1);
+                }
+                // Previous format: x|y|color|font|sourceSlot|pad|spacing|label
+                else if (sscanf(line + 9, "%d|%d|%u|%d|%d|%d|%d|%n", &tr.localX, &tr.localY, &col, &font, &srcSlot, &padVal, &spacingVal, &n) >= 7 && n > 0) {
                     tr.color = col;
                     tr.font = font;
                     tr.sourceSlot = srcSlot;
@@ -12961,6 +12973,7 @@ void FrameTick(float dt)
                         te.sourceSlot = tr.sourceSlot;
                         te.pad = tr.pad;
                         te.spacing = tr.spacing;
+                        te.scale = tr.scale;
                         he.textRows.push_back(te);
                     }
                     he.cursorAssetIdx = el.cursorAssetIdx;
@@ -24258,7 +24271,7 @@ void FrameTick(float dt)
                         // Text rows
                         fprintf(cf, "elemTextCount=%d\n", (int)el.textRows.size());
                         for (auto& tr : el.textRows)
-                            fprintf(cf, "elemText=%d|%d|%u|%d|%d|%d|%s\n", tr.localX, tr.localY, tr.color, tr.font, tr.sourceSlot, tr.pad, tr.label);
+                            fprintf(cf, "elemText=%d|%d|%u|%d|%d|%d|%d|%d|%s\n", tr.localX, tr.localY, tr.color, tr.font, tr.sourceSlot, tr.pad, tr.spacing, tr.scale, tr.label);
                         // Sprite items
                         fprintf(cf, "elemSpriteCount=%d\n", (int)el.spriteItems.size());
                         for (auto& si : el.spriteItems)
@@ -24872,6 +24885,8 @@ void FrameTick(float dt)
                         if (ImGui::Combo("Font##txt", &tr.font, fontNames, 3)) sProjectDirty = true;
                         if (ImGui::SliderInt("Spacing##txt", &tr.spacing, -4, 8)) sProjectDirty = true;
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Extra spacing between characters (added to font advance)");
+                        if (ImGui::SliderInt("Scale##txt", &tr.scale, 1, 2)) sProjectDirty = true;
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("1 = normal, 2 = double size (uses affine OAM)");
                     }
                 }
 

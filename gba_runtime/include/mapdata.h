@@ -17113,8 +17113,8 @@ static const struct { s16 x,y; u16 pieceStart,pieceCount,spriteStart,spriteCount
 static const struct { s8 asset; u8 frame; s16 x,y; u8 size; u8 blackTint; u8 opacity; } afn_hud_pieces[1] = {{0}}; // no pieces
 static const struct { s8 asset; u8 frame; s16 x,y; u8 size; } afn_hud_sprites[1] = {{0}};
 static const struct { s16 x,y; s8 link; } afn_hud_stops[1] = {{0}}; // no stops
-static const struct { s16 x,y; u16 color; u8 font; s8 sourceSlot; u8 pad; s8 spacing; char text[32]; } afn_hud_texts[1] = {
-    {215,-6,0x7fff,2,0,3,0,""},
+static const struct { s16 x,y; u16 color; u8 font; s8 sourceSlot; u8 pad; s8 spacing; u8 scale; char text[32]; } afn_hud_texts[1] = {
+    {215,-6,0x7fff,2,0,3,0,1,""},
 };
 static const int afn_hud_kf[1] = {0};
 #define AFN_HAS_SCRIPT 1
@@ -17454,7 +17454,7 @@ static inline void afn_bp2_key_released() {
 }
 static inline void afn_bp2_update() {
     { int _si = afn_bp_cur_spr_idx;
-      if (_si >= 0 && _si < 16 && !afn_sprite_visible[_si]) goto _skip_col_2;
+      if (_si >= 0 && _si < 64 && !afn_sprite_visible[_si]) goto _skip_col_2;
       FIXED _dx = player_x - g_sprites[_si].x;
       FIXED _dz = player_z - g_sprites[_si].z;
       FIXED _dy = player_y - g_sprites[_si].y;
@@ -17496,7 +17496,7 @@ static inline void afn_bp3_key_released() {
 }
 static inline void afn_bp3_update() {
     { int _si = afn_bp_cur_spr_idx;
-      if (_si >= 0 && _si < 16 && !afn_sprite_visible[_si]) goto _skip_col_3;
+      if (_si >= 0 && _si < 64 && !afn_sprite_visible[_si]) goto _skip_col_3;
       FIXED _dx = player_x - g_sprites[_si].x;
       FIXED _dz = player_z - g_sprites[_si].z;
       FIXED _dy = player_y - g_sprites[_si].y;
@@ -17650,7 +17650,7 @@ static inline void afn_bp_dispatch_collision(void) {
     if (afn_bp_instances[i].sceneMask != 0xFFFFFFFFu && !(afn_bp_instances[i].sceneMask & (1u << tm_scene_idx))) continue;
     if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;
     if (afn_bp_instances[i].sprIdx != afn_collided_sprite) continue;
-    if (afn_bp_instances[i].sprIdx >= 0 && afn_bp_instances[i].sprIdx < 16 && !afn_sprite_visible[afn_bp_instances[i].sprIdx]) continue;
+    if (afn_bp_instances[i].sprIdx >= 0 && afn_bp_instances[i].sprIdx < 64 && !afn_sprite_visible[afn_bp_instances[i].sprIdx]) continue;
     afn_bp_cur_spr_idx = afn_bp_instances[i].sprIdx;
     afn_bp_cur_tm_obj = afn_bp_instances[i].tmObjIdx;
     switch (afn_bp_instances[i].bpIdx) {
