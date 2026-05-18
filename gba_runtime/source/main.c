@@ -1376,21 +1376,21 @@ static void hud_font_load(int staticTileCount)
     ((u16*)0x05000200)[15 * 16 + 1] = afn_text_color;
     ((u16*)0x05000200)[15 * 16 + 2] = RGB15(31, 31, 31); // white background
 
-    // Convert 96 normal glyphs into 4bpp tiles
+    // Convert 96 normal glyphs into 4bpp tiles (bgIdx=0 for transparent background)
     u32* dst = (u32*)(0x06010000 + hud_font_tile_base * 32);
     int gi;
     for (gi = 0; gi < 96; gi++) {
-        font_glyph_to_tile(dst + gi * 8, hud_font[gi], 1, 2);
+        font_glyph_to_tile(dst + gi * 8, hud_font[gi], 1, 0);
     }
     // Convert 96 small pixel glyphs into 4bpp tiles
     dst = (u32*)(0x06010000 + hud_font_small_tile_base * 32);
     for (gi = 0; gi < 96; gi++) {
-        font_glyph_to_tile(dst + gi * 8, hud_font_small[gi], 1, 2);
+        font_glyph_to_tile(dst + gi * 8, hud_font_small[gi], 1, 0);
     }
     // Convert 96 5x7 glyphs into 4bpp tiles
     dst = (u32*)(0x06010000 + hud_font_5x7_tile_base * 32);
     for (gi = 0; gi < 96; gi++) {
-        font_glyph_to_tile(dst + gi * 8, hud_font_5x7[gi], 1, 2);
+        font_glyph_to_tile(dst + gi * 8, hud_font_5x7[gi], 1, 0);
     }
     hud_font_loaded = 1;
 }
