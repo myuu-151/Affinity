@@ -8107,7 +8107,8 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
     // Mesh object list
     ImGui::Separator();
     ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.7f, 1.0f), "Placed Meshes");
-    ImGui::BeginChild("##MeshObjList", ImVec2(0, 0), true);
+    float listH3d = ImGui::GetContentRegionAvail().y * 0.3f;
+    ImGui::BeginChild("##MeshObjList", ImVec2(0, listH3d), true);
     for (int i = 0; i < sSpriteCount; i++)
     {
         if (sSprites[i].type != SpriteType::Mesh) continue;
@@ -8129,8 +8130,35 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
     }
     ImGui::EndChild();
 
-    // Properties for selected mesh object
-    if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount && sSprites[sSelectedSprite].type == SpriteType::Mesh)
+    // Placed Sprites list (non-mesh)
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.7f, 1.0f), "Placed Sprites");
+    ImGui::BeginChild("##SpriteObjList3D", ImVec2(0, listH3d), true);
+    for (int i = 0; i < sSpriteCount; i++)
+    {
+        if (sSprites[i].type == SpriteType::Mesh) continue;
+        char label[64];
+        const char* tname = kSpriteTypeNames[(int)sSprites[i].type];
+        const char* aname = (sSprites[i].assetIdx >= 0 && sSprites[i].assetIdx < (int)sSpriteAssets.size())
+            ? sSpriteAssets[sSprites[i].assetIdx].name.c_str() : nullptr;
+        if (aname)
+            snprintf(label, sizeof(label), "%s (%s) [%d]##sprobj%d", aname, tname, i, i);
+        else
+            snprintf(label, sizeof(label), "%s [%d]##sprobj%d", tname, i, i);
+        bool sel = (sSelectedSprite == i);
+        if (ImGui::Selectable(label, sel))
+        {
+            if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
+                sSprites[sSelectedSprite].selected = false;
+            sSelectedSprite = i;
+            sSelectedObjType = SelectedObjType::Sprite;
+            sSprites[i].selected = true;
+        }
+    }
+    ImGui::EndChild();
+
+    // Properties for selected object (mesh or sprite)
+    if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
     {
         FloorSprite& sp = sSprites[sSelectedSprite];
         ImGui::Separator();
@@ -8143,12 +8171,17 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         ImGui::DragFloat("Scale##m3d", &sp.scale, 0.1f, 0.01f, 100.0f);
         if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
-        ImGui::DragFloat("Rot X##m3d", &sp.rotationX, 1.0f, -360.0f, 360.0f, "%.0f deg");
-        if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
-        ImGui::DragFloat("Rot Y##m3d", &sp.rotation, 1.0f, 0.0f, 360.0f, "%.0f deg");
-        if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
-        ImGui::DragFloat("Rot Z##m3d", &sp.rotationZ, 1.0f, -360.0f, 360.0f, "%.0f deg");
-        if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
+        if (sp.type == SpriteType::Mesh) {
+            ImGui::DragFloat("Rot X##m3d", &sp.rotationX, 1.0f, -360.0f, 360.0f, "%.0f deg");
+            if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
+            ImGui::DragFloat("Rot Y##m3d", &sp.rotation, 1.0f, 0.0f, 360.0f, "%.0f deg");
+            if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
+            ImGui::DragFloat("Rot Z##m3d", &sp.rotationZ, 1.0f, -360.0f, 360.0f, "%.0f deg");
+            if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
+        } else {
+            ImGui::DragFloat("Rotation##m3d", &sp.rotation, 1.0f, 0.0f, 360.0f, "%.0f deg");
+            if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
+        }
         ImGui::PopItemWidth();
 
         if (ImGui::Button("Delete##meshObjDel"))

@@ -1930,34 +1930,34 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "extern int   tm_move_timer;\n";
         f << "static int   afn_anim_speed = 1;\n";
         f << "static u32   afn_rng = 12345;\n";
-        f << "static u8    afn_sprite_visible[16];\n";
+        f << "static u8    afn_sprite_visible[64];\n";
         f << "static int   afn_shake_intensity;\n";
         f << "static int   afn_shake_frames;\n";
         f << "static int   afn_fade_target;\n";
         f << "static int   afn_fade_frames;\n";
         f << "static int   afn_fade_counter;\n";
         f << "static int   afn_fade_level;\n";
-        f << "static int   afn_hp[16];\n";
+        f << "static int   afn_hp[64];\n";
         f << "static int   afn_score;\n";
         f << "static FIXED afn_start_x, afn_start_y, afn_start_z;\n";
         f << "static int   afn_frame_count;\n";
-        f << "static u8    afn_sprite_flip[16];\n";
+        f << "static u8    afn_sprite_flip[64];\n";
         f << "static int   afn_draw_distance;\n";
-        f << "static u8    afn_collision_enabled[16];\n";
+        f << "static u8    afn_collision_enabled[64];\n";
         f << "static int   afn_cam_locked;\n";
         f << "static int   afn_cam_speed = 256;\n";
         f << "static FIXED afn_force_x, afn_force_z;\n";
         f << "static int   afn_friction = 256;\n";
         f << "static int   afn_vars[16];\n";
         f << "static int   afn_scripts_stopped;\n";
-        f << "static u8    afn_sprite_layer[16];\n";
-        f << "static u8    afn_sprite_alpha[16];\n";
-        f << "static u8    afn_flash_obj[16];\n";
-        f << "static u16   afn_sprite_rot[16];\n";
-        f << "static int   afn_max_hp[16];\n";
-        f << "static u8    afn_ai_mode[16];\n";
-        f << "static u16   afn_sprite_tint[16];\n";
-        f << "static u8    afn_sprite_shake[16];\n";
+        f << "static u8    afn_sprite_layer[64];\n";
+        f << "static u8    afn_sprite_alpha[64];\n";
+        f << "static u8    afn_flash_obj[64];\n";
+        f << "static u16   afn_sprite_rot[64];\n";
+        f << "static int   afn_max_hp[64];\n";
+        f << "static u8    afn_ai_mode[64];\n";
+        f << "static u16   afn_sprite_tint[64];\n";
+        f << "static u8    afn_sprite_shake[64];\n";
         f << "static int   afn_hud_value[4];\n";
         f << "static u8    afn_hud_visible[4];\n";
         f << "static int   afn_cursor_stop;\n";
@@ -1965,8 +1965,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int   afn_stop_links[8];\n";
         f << "static int   afn_elem_idx;\n";
         f << "static int   afn_active_element;\n";
-        f << "static FIXED afn_patrol_home_x[16];\n";
-        f << "static FIXED afn_patrol_home_z[16];\n";
+        f << "static FIXED afn_patrol_home_x[64];\n";
+        f << "static FIXED afn_patrol_home_z[64];\n";
         f << "static u16   afn_bg_color;\n";
         // Inventory
         f << "static int   afn_inventory[16];\n";
@@ -1978,16 +1978,16 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int   afn_dlg_choice_a, afn_dlg_choice_b;\n";
         f << "static int   afn_dlg_choosing;\n";
         // State machine
-        f << "static int   afn_state[16];\n";
-        f << "static int   afn_prev_state[16];\n";
-        f << "static int   afn_state_timer[16];\n";
+        f << "static int   afn_state[64];\n";
+        f << "static int   afn_prev_state[64];\n";
+        f << "static int   afn_state_timer[64];\n";
         // Text rendering
         f << "static u16   afn_text_color = 0x7FFF;\n";
         // Collision
-        f << "static int   afn_collision_size[16];\n";
-        f << "static int   afn_collision_ignore[16];\n";
+        f << "static int   afn_collision_size[64];\n";
+        f << "static int   afn_collision_ignore[64];\n";
         // Lifetime / spawning
-        f << "static int   afn_lifetime[16];\n";
+        f << "static int   afn_lifetime[64];\n";
         // HUD bars
         f << "static u16   afn_bar_color[4];\n";
         f << "static int   afn_bar_max[4];\n";

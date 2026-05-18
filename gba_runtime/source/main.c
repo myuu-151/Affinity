@@ -13,7 +13,7 @@
 // Map data — forward declarations needed by mapdata.h blueprint codegen
 // ---------------------------------------------------------------------------
 
-#define MAX_FLOOR_SPRITES 16
+#define MAX_FLOOR_SPRITES 64
 
 typedef struct {
     FIXED x;
@@ -2159,7 +2159,7 @@ static void load_editor_sprites(void)
     }
     g_spriteCount = count;
     // Initialize all sprites as visible
-    for (i = 0; i < count && i < 16; i++)
+    for (i = 0; i < count && i < 64; i++)
         afn_sprite_visible[i] = 1;
     // Build mesh sprite bitmask for draw-behind exception checks
     g_meshSpriteMask = 0;
@@ -2317,7 +2317,7 @@ static void update_sprites(void)
         int screenY, screenX, scale;
 
         // Skip destroyed/hidden sprites
-        if (i < 16 && !afn_sprite_visible[i]) continue;
+        if (i < 64 && !afn_sprite_visible[i]) continue;
         // Skip mesh sprites (rendered into bitmap, not OAM)
         if (g_sprites[i].meshIdx >= 0) continue;
         // Skip draw-behind exception sprites (blitted directly to bitmap)
@@ -2366,7 +2366,7 @@ static void update_sprites(void)
             }
 
     // Render projected sprites as affine OBJs
-    for (i = 0; i < projCount && i < 16; i++)
+    for (i = 0; i < projCount && i < 32; i++)
     {
         int oamIdx = 16 + i;
         int affIdx = i;
@@ -2525,7 +2525,7 @@ static void update_sprites(void)
     }
 
     // Hide remaining floor sprite OBJ slots
-    for (; i < 16; i++)
+    for (; i < 32; i++)
     {
         obj_mem[16 + i].attr0 = ATTR0_HIDE;
     }
@@ -4172,7 +4172,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         if (g_sprites[si].meshIdx < 0 || g_sprites[si].meshIdx >= AFN_MESH_COUNT)
             continue;
         // Skip destroyed/hidden sprites
-        if (si < 16 && !afn_sprite_visible[si]) continue;
+        if (si < 64 && !afn_sprite_visible[si]) continue;
 
         mi = g_sprites[si].meshIdx;
         // Skip invisible meshes (collision-only)
@@ -5166,7 +5166,7 @@ static void mode4_init_scene(void)
     afn_start_x = player_x;
     afn_start_y = player_y;
     afn_start_z = player_z;
-    { int i; for (i = 0; i < 16 && i < NUM_SPRITES; i++) {
+    { int i; for (i = 0; i < 64 && i < NUM_SPRITES; i++) {
         afn_patrol_home_x[i] = g_sprites[i].wx;
         afn_patrol_home_z[i] = g_sprites[i].wz;
     } }
@@ -5369,7 +5369,7 @@ static void scene_load(int sceneMode, int sceneIdx)
     { int ei; for (ei = 0; ei < 4; ei++) { afn_hud_visible[ei] = 0; afn_hud_prev_visible[ei] = 0; afn_hud_anim_frame[ei] = 0; } }
     hud_font_loaded = 0;
     tm_hud_was_visible = 0;
-    { int i; for (i = 0; i < 16; i++) {
+    { int i; for (i = 0; i < 64; i++) {
         afn_hp[i] = 100; afn_max_hp[i] = 100;
         afn_collision_enabled[i] = 1; afn_sprite_alpha[i] = 16;
         afn_state[i] = 0; afn_prev_state[i] = 0; afn_state_timer[i] = 0;
@@ -5588,7 +5588,7 @@ int main(void)
     afn_pending_scene_mode = -1;
     afn_frame_count = 0;
     afn_score = 0;
-    { int i; for (i = 0; i < 16; i++) {
+    { int i; for (i = 0; i < 64; i++) {
         afn_hp[i] = 100; afn_max_hp[i] = 100; afn_collision_enabled[i] = 1; afn_sprite_alpha[i] = 16;
     } }
     afn_text_color = 0x0000; // black text on white background
@@ -5668,7 +5668,7 @@ int main(void)
 #ifdef AFN_HAS_SCRIPT
         afn_start_x = player_x; afn_start_y = player_y; afn_start_z = player_z;
         if (g_spriteCount > 0) {
-            int i; for (i = 0; i < 16 && i < NUM_SPRITES; i++) {
+            int i; for (i = 0; i < 64 && i < NUM_SPRITES; i++) {
                 afn_patrol_home_x[i] = g_sprites[i].wx; afn_patrol_home_z[i] = g_sprites[i].wz;
             }
         }
@@ -6775,7 +6775,7 @@ int main(void)
                 int ci;
                 for (ci = 0; ci < g_spriteCount; ci++) {
                     if (ci == player_sprite_idx) continue;
-                    if (ci < 16 && !afn_sprite_visible[ci]) continue;
+                    if (ci < 64 && !afn_sprite_visible[ci]) continue;
                     FIXED dx = player_x - g_sprites[ci].x;
                     FIXED dz = player_z - g_sprites[ci].z;
                     // Distance squared in 16.8 fixed point — compare against radius^2
@@ -6814,7 +6814,7 @@ int main(void)
             afn_frame_count++;
 
             // State machine timers
-            { int i; for (i = 0; i < 16; i++) afn_state_timer[i]++; }
+            { int i; for (i = 0; i < 64; i++) afn_state_timer[i]++; }
 
             // Screen shake processing
             if (afn_shake_frames > 0) {
