@@ -10263,6 +10263,20 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             ImGui::PopItemWidth();
         }
 
+        if (ImGui::Button("Duplicate") && sSpriteCount < kMaxFloorSprites)
+        {
+            int src = sSelectedSprite;
+            int dst = sSpriteCount;
+            sSprites[dst] = sSprites[src];
+            sSprites[dst].selected = false;
+            sSprites[dst].color = kSpriteColors[dst % kNumSpriteColors];
+            sSpriteCount++;
+            sSprites[src].selected = false;
+            sSelectedSprite = dst;
+            sSprites[dst].selected = true;
+            sProjectDirty = true;
+        }
+        ImGui::SameLine();
         if (ImGui::Button("Delete Sprite"))
         {
             for (int j = sSelectedSprite; j < sSpriteCount - 1; j++)
