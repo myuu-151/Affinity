@@ -11207,6 +11207,14 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 if (ImGui::Checkbox("Show FPS##sceneFps", &ms.showFps))
                     sProjectDirty = true;
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Display FPS counter on screen using HUD font");
+                {
+                    bool proxLoading = sCamObj.spriteDrawDistance > 0.0f;
+                    if (ImGui::Checkbox("Proximity Loading##sceneProx", &proxLoading)) {
+                        sCamObj.spriteDrawDistance = proxLoading ? 500.0f : 0.0f;
+                        sProjectDirty = true;
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Only render sprites within draw distance.\nNearest 32 get OAM slots — allows unlimited sprites per scene.\nAdjust distance in Camera Properties.");
+                }
             }
 
             ImGui::Spacing();
@@ -25952,6 +25960,14 @@ void FrameTick(float dt)
                 if (ImGui::Checkbox("Show FPS##msFps", &ms.showFps))
                     sProjectDirty = true;
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Display FPS counter on screen using HUD font");
+                {
+                    bool proxLoading = sCamObj.spriteDrawDistance > 0.0f;
+                    if (ImGui::Checkbox("Proximity Loading##msProx", &proxLoading)) {
+                        sCamObj.spriteDrawDistance = proxLoading ? 500.0f : 0.0f;
+                        sProjectDirty = true;
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Only render sprites within draw distance.\nNearest 32 get OAM slots — allows unlimited sprites per scene.\nAdjust distance in Camera Properties.");
+                }
             }
 
             ImGui::End();
