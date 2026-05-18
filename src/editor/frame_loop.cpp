@@ -11204,9 +11204,6 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                 if (ImGui::Checkbox("Delta Time##sceneDelta", &ms.deltaTime))
                     sProjectDirty = true;
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Decouple game speed from framerate — game runs at consistent speed even at low FPS");
-                if (ImGui::Checkbox("Show FPS##sceneFps", &ms.showFps))
-                    sProjectDirty = true;
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Display FPS counter on screen using HUD font");
                 {
                     bool proxLoading = sCamObj.spriteDrawDistance > 0.0f;
                     if (ImGui::Checkbox("Proximity Loading##sceneProx", &proxLoading)) {
@@ -25957,9 +25954,6 @@ void FrameTick(float dt)
                 if (ImGui::Checkbox("Delta Time##msDelta", &ms.deltaTime))
                     sProjectDirty = true;
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Decouple game speed from framerate — game runs at consistent speed even at low FPS");
-                if (ImGui::Checkbox("Show FPS##msFps", &ms.showFps))
-                    sProjectDirty = true;
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Display FPS counter on screen using HUD font");
                 {
                     bool proxLoading = sCamObj.spriteDrawDistance > 0.0f;
                     if (ImGui::Checkbox("Proximity Loading##msProx", &proxLoading)) {
