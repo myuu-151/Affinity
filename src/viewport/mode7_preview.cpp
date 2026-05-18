@@ -717,6 +717,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
     }
 
     // Sort back-to-front (farthest first), with drawOrder as tiebreaker for same-parent sprites
+    // Meshes draw before (behind) non-mesh sprites so sprites appear on top like GBA OBJ layer
     for (int i = 0; i < projCount - 1; i++)
         for (int j = i + 1; j < projCount; j++) {
             bool swap = false;
@@ -724,8 +725,13 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 // Same parent: sort by drawOrder (lower = behind = drawn first)
                 swap = (projected[i].drawOrder > projected[j].drawOrder);
             } else {
-                // Different parents: sort by depth (farther = drawn first)
-                swap = (projected[i].depth < projected[j].depth);
+                // Different parents: meshes draw first (behind), then sort by depth
+                bool iMesh = (projected[i].subIdx < 0 && sprites[projected[i].idx].type == SpriteType::Mesh);
+                bool jMesh = (projected[j].subIdx < 0 && sprites[projected[j].idx].type == SpriteType::Mesh);
+                if (iMesh != jMesh)
+                    swap = !iMesh && jMesh; // mesh should come first (drawn behind)
+                else
+                    swap = (projected[i].depth < projected[j].depth);
             }
             if (swap) std::swap(projected[i], projected[j]);
         }
@@ -756,8 +762,13 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         float effectiveScale = fs.scale;
         if (sp.subIdx >= 0 && sp.subIdx < fs.subSpriteCount)
             effectiveScale *= fs.subSprites[sp.subIdx].scale;
-        int halfW = std::clamp((int)(8.0f * sp.scale / cam.height * 1.6f * effectiveScale), 2, 200);
-        int halfH = std::clamp((int)(12.0f * sp.scale / cam.height * 1.6f * effectiveScale), 3, 200);
+        // Use asset baseSize for proportional sprite rendering in editor
+        float baseSzF = 16.0f; // default fallback
+        if (effectiveAssetIdx >= 0 && effectiveAssetIdx < assetCount && assets)
+            baseSzF = (float)assets[effectiveAssetIdx].baseSize;
+        float szFactor = sp.scale / cam.height * 1.6f * effectiveScale;
+        int halfW = std::clamp((int)(baseSzF * 0.25f * szFactor), 2, 200);
+        int halfH = std::clamp((int)(baseSzF * 0.25f * szFactor), 2, 200);
         int meshSelCX = sp.screenX, meshSelCY = 0;
         bool hasMeshBounds = false;
 
