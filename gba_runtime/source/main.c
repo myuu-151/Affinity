@@ -5746,17 +5746,8 @@ int main(void)
             }
             if (g_ewramRender)
                 DMA_TRANSFER(vramBuf, g_ewramBuf, 120 * 160 / 2, 3, DMA_NOW | DMA_32);
-            dbg_int(vramBuf, 2, 2, dbg_tex_tris, 1);
-            dbg_int(vramBuf, 30, 2, dbg_tex_spans, 1);
-            dbg_int(vramBuf, 62, 2, (dbg_vcount * 64) / 1000, 1);
-            dbg_int(vramBuf, 102, 2, dbg_total_kcy, 1);
-
 #ifdef AFN_SHOW_FPS
             dbg_int(vramBuf, 240 - 20, 160 - 7, dbg_fps, 1);
-#endif
-            dbg_int(vramBuf, 2, 160 - 7, g_texFixMode, 2);
-#ifdef AFN_HAS_SOUND
-            dbg_int7_pad3(vramBuf, 240 - 20, 2, snd_fix_mode, 15);
 #endif
         }
 #else
@@ -5765,10 +5756,6 @@ int main(void)
         {
             u16* vramBuf = g_page ? (u16*)0x06000000 : (u16*)0x0600A000;
             afn_clear_fb_stmia(vramBuf, 0);
-#ifdef AFN_HAS_SOUND
-            pal_bg_mem[15] = RGB15(31, 31, 31);
-            dbg_int7_pad3(vramBuf, 240 - 20, 2, snd_fix_mode, 15);
-#endif
         }
 #endif
         // Scale sound buffer to cover multiple VBlanks at low FPS (when enabled)
@@ -6751,20 +6738,6 @@ int main(void)
         for (afn_dt_tick = 0; afn_dt_tick < afn_delta; afn_dt_tick++) {
 #endif
 
-        // SELECT: cycle perf mode / L+SELECT: cycle audio fix
-        if (key_hit(KEY_SELECT))
-        {
-#ifdef AFN_HAS_SOUND
-            if (key_is_down(KEY_L)) {
-                snd_fix_mode = (snd_fix_mode + 1) % SND_FIX_COUNT;
-                if (snd_initialized) afn_sound_set_rate();
-            } else
-#endif
-            {
-                g_texFixMode = (g_texFixMode % TEX_FIX_COUNT) + 1;
-            }
-        }
-
         if (player_sprite_idx >= 0)
         {
             // ============================================================
@@ -7190,43 +7163,6 @@ int main(void)
         if (g_sky_active) update_sky_scroll(cam_angle);
 #endif
 
-        // Reset to start position (disabled — START used by blueprint)
-        if (0 && key_hit(KEY_START))
-        {
-            if (player_sprite_idx >= 0)
-            {
-                // Reset player and orbit
-#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
-                player_x = g_sprites[AFN_PLAYER_IDX].x;
-                player_z = g_sprites[AFN_PLAYER_IDX].z;
-                // Reload original sprite positions
-                load_editor_sprites();
-                player_x = g_sprites[AFN_PLAYER_IDX].x;
-                player_z = g_sprites[AFN_PLAYER_IDX].z;
-                player_y = g_sprites[AFN_PLAYER_IDX].y;
-#endif
-                orbit_angle = AFN_CAM_ANGLE;
-                player_moving = 0;
-                player_move_angle = 0x4000; // face away from camera (show back)
-                player_ground_y = 0;
-                player_vy = 0;
-                player_on_ground = 1;
-                cam_y_smooth = 0;
-            }
-#ifdef AFFINITY_HAS_SPRITES
-            cam_x     = AFN_CAM_X;
-            cam_z     = AFN_CAM_Z;
-            cam_h     = AFN_CAM_H;
-            cam_angle = AFN_CAM_ANGLE;
-            m7_horizon = AFN_CAM_HORIZON;
-#else
-            cam_x     = 128 << 8;
-            cam_z     = 128 << 8;
-            cam_h     = 14 << 8;
-            cam_angle = 0;
-            m7_horizon = 60;
-#endif
-        }
 
         // Update sub-sprite positions to follow parent
         {
