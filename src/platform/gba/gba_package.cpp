@@ -5180,7 +5180,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 std::string rad = radData ? bpResolveInt(radData) : "16";
                 // Use instance sprite (afn_bp_cur_spr_idx) instead of hardcoded index
                 f << "    { int _si = afn_bp_cur_spr_idx;\n";
-                f << "      if (_si >= 0 && _si < 16 && !afn_sprite_visible[_si]) goto _skip_col_" << bi << ";\n";
+                f << "      if (_si >= 0 && _si < 64 && !afn_sprite_visible[_si]) goto _skip_col_" << bi << ";\n";
                 f << "      FIXED _dx = player_x - g_sprites[_si].x;\n";
                 f << "      FIXED _dz = player_z - g_sprites[_si].z;\n";
                 f << "      FIXED _dy = player_y - g_sprites[_si].y;\n";
@@ -5284,7 +5284,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "    if (afn_bp_instances[i].sceneMask != 0xFFFFFFFFu && !(afn_bp_instances[i].sceneMask & (1u << tm_scene_idx))) continue;\n";
             f << "    if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;\n";
             f << "    if (afn_bp_instances[i].sprIdx != afn_collided_sprite) continue;\n";
-            f << "    if (afn_bp_instances[i].sprIdx >= 0 && afn_bp_instances[i].sprIdx < 16 && !afn_sprite_visible[afn_bp_instances[i].sprIdx]) continue;\n";
+            f << "    if (afn_bp_instances[i].sprIdx >= 0 && afn_bp_instances[i].sprIdx < 64 && !afn_sprite_visible[afn_bp_instances[i].sprIdx]) continue;\n";
             f << "    afn_bp_cur_spr_idx = afn_bp_instances[i].sprIdx;\n";
             f << "    afn_bp_cur_tm_obj = afn_bp_instances[i].tmObjIdx;\n";
             f << "    switch (afn_bp_instances[i].bpIdx) {\n";
