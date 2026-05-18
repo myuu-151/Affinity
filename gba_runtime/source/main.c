@@ -6506,18 +6506,39 @@ int main(void)
                     int bankOwner[16];
                     { int bi; for (bi = 0; bi < 16; bi++) bankOwner[bi] = -1; }
                     { int ai2; for (ai2 = 0; ai2 < AFN_ASSET_COUNT; ai2++) hud_pal_remap[ai2] = 0; }
+                    // Reserve palette banks used by active world sprites (mark with -2 = world-reserved)
+                    // HUD palette matching only checks HUD-assigned banks (bankOwner >= 0), skips world banks
+#ifdef AFN_HAS_MODE0
+                    { int ri; for (ri = 0; ri < tm_cur_obj_count; ri++) {
+                        int ai = tm_cur_objs[ri].assetIdx;
+                        if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
+                        int rpb = afn_asset_desc[ai][4];
+                        if (rpb > 0 && rpb < 15 && bankOwner[rpb] < 0)
+                            bankOwner[rpb] = -2; // world-reserved
+                    } }
+#else
+                    { int ri; for (ri = 0; ri < MAX_FLOOR_SPRITES; ri++) {
+                        int ai = g_sprites[ri].assetIdx;
+                        if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
+                        int rpb = afn_asset_desc[ai][4];
+                        if (rpb > 0 && rpb < 15 && bankOwner[rpb] < 0)
+                            bankOwner[rpb] = -2; // world-reserved
+                    } }
+#endif
                     { int ei3; for (ei3 = 0; ei3 < AFN_HUD_ELEM_COUNT; ei3++) {
                         if (!afn_hud_visible[ei3]) continue;
                         int ps = afn_hud_elems[ei3].pieceStart;
                         int pc = afn_hud_elems[ei3].pieceCount;
                         int ss = afn_hud_elems[ei3].spriteStart;
                         int sc2 = afn_hud_elems[ei3].spriteCount;
-                        int pass2; for (pass2 = 0; pass2 < 2; pass2++) {
-                            int cnt = (pass2 == 0) ? pc : sc2;
+                        // pass2: 0=pieces, 1=sprites, 2=cursor
+                        int pass2; for (pass2 = 0; pass2 < 3; pass2++) {
+                            int cnt = (pass2 == 0) ? pc : (pass2 == 1) ? sc2 : 1;
                             int ji; for (ji = 0; ji < cnt; ji++) {
                                 int ai2 = (pass2 == 0)
                                     ? afn_hud_pieces[ps + ji].asset
-                                    : afn_hud_sprites[ss + ji].asset;
+                                    : (pass2 == 1) ? afn_hud_sprites[ss + ji].asset
+                                    : afn_hud_elems[ei3].curAsset;
                                 if (ai2 < 0 || ai2 >= AFN_ASSET_COUNT) continue;
                                 if (hud_pal_remap[ai2] > 0) continue; // already assigned
                                 // Check if an existing bank has an identical palette
@@ -6533,8 +6554,8 @@ int main(void)
                                 if (found >= 0) {
                                     hud_pal_remap[ai2] = found;
                                 } else {
-                                    // Skip reserved banks: 0 (transparent), 6 (minimap), 15 (font)
-                                    while (nextBank == 6) nextBank++;
+                                    // Skip reserved banks: 0 (transparent), 6 (minimap), 15 (font), world/HUD-occupied banks
+                                    while (nextBank < 15 && (nextBank == 6 || bankOwner[nextBank] != -1)) nextBank++;
                                     if (nextBank >= 15) nextBank = 14; // cap at last usable
                                     hud_pal_remap[ai2] = nextBank;
                                     bankOwner[nextBank] = ai2;
