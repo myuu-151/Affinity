@@ -449,6 +449,7 @@ enum class VsNodeType : int {
     OnRise,         // gate: passes exec only on frame condition becomes true (rising edge)
     ResetScene,     // action: reload the current scene (respawn)
     SetPlayerHeight, // set player collision height
+    SetHudValue,    // action: set afn_hud_value[slot] for counter display
     COUNT
 };
 
@@ -740,6 +741,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "On Rise",         0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Reset Scene",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Set Player Height",0xFF3355AA, 1, 1, 1, 0, {"Value (float)"}, {}, {} },
+    { "Set HUD Value",   0xFF3355AA, 1, 1, 1, 0, {"Value"}, {"Slot"}, {} },
 };
 
 struct VsNode {
@@ -3231,6 +3233,8 @@ struct HudElement {
         int localX = 0, localY = 0;
         uint32_t color = 0xFFFFFFFF; // RGBA8
         int font = 0; // 0=normal 8x8, 1=small pixel 4x5
+        int sourceSlot = -1; // -1=static text, 0-3=afn_hud_value[N]
+        int pad = 0; // minimum digits for counter mode
     };
     std::vector<TextRow> textRows;
     int selectedTextRow = -1;
@@ -4642,7 +4646,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "elemCursor=%d|%d|%d|%d\n", el.cursorAssetIdx, el.cursorFrame, el.cursorOffX, el.cursorOffY);
         fprintf(f, "elemTextCount=%d\n", (int)el.textRows.size());
         for (auto& tr : el.textRows)
-            fprintf(f, "elemText=%d|%d|%u|%d|%s\n", tr.localX, tr.localY, tr.color, tr.font, tr.label);
+            fprintf(f, "elemText=%d|%d|%u|%d|%d|%d|%s\n", tr.localX, tr.localY, tr.color, tr.font, tr.sourceSlot, tr.pad, tr.label);
         fprintf(f, "elemSpriteCount=%d\n", (int)el.spriteItems.size());
         for (auto& si : el.spriteItems)
             fprintf(f, "elemSprite=%d|%d|%d|%d|%d|%.2f\n", si.spriteAssetIdx, si.frame, si.localX, si.localY, si.size, si.scale);
@@ -5950,10 +5954,18 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "elemText=", 9) == 0 && !sHudElements.empty()) {
                 HudElement::TextRow tr;
                 unsigned int col = 0xFFFFFFFF;
-                int font = 0;
+                int font = 0, srcSlot = -1, padVal = 0;
                 int n = 0;
-                // Try new format: x|y|color|font|label
-                if (sscanf(line + 9, "%d|%d|%u|%d|%n", &tr.localX, &tr.localY, &col, &font, &n) >= 4 && n > 0) {
+                // Try newest format: x|y|color|font|sourceSlot|pad|label
+                if (sscanf(line + 9, "%d|%d|%u|%d|%d|%d|%n", &tr.localX, &tr.localY, &col, &font, &srcSlot, &padVal, &n) >= 6 && n > 0) {
+                    tr.color = col;
+                    tr.font = font;
+                    tr.sourceSlot = srcSlot;
+                    tr.pad = padVal;
+                    strncpy(tr.label, line + 9 + n, sizeof(tr.label) - 1);
+                }
+                // Try format: x|y|color|font|label
+                else if (sscanf(line + 9, "%d|%d|%u|%d|%n", &tr.localX, &tr.localY, &col, &font, &n) >= 4 && n > 0) {
                     tr.color = col;
                     tr.font = font;
                     strncpy(tr.label, line + 9 + n, sizeof(tr.label) - 1);
@@ -12886,6 +12898,8 @@ void FrameTick(float dt)
                         int b = ((tr.color >> 16) & 0xFF) >> 3;
                         te.colorRGB15 = (uint16_t)(r | (g << 5) | (b << 10));
                         te.font = tr.font;
+                        te.sourceSlot = tr.sourceSlot;
+                        te.pad = tr.pad;
                         he.textRows.push_back(te);
                     }
                     he.cursorAssetIdx = el.cursorAssetIdx;
@@ -16892,6 +16906,7 @@ void FrameTick(float dt)
                         case VsNodeType::OnRise:        return "_on_rise";
                         case VsNodeType::ResetScene:    return "_reset_scene";
                         case VsNodeType::SetPlayerHeight: return "_set_player_height";
+                        case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -17322,6 +17337,18 @@ void FrameTick(float dt)
                         "    // collide_floor: skip floors above py + afn_player_height",
                         fmtFloat(infoNode.id, 0, "<height>"));
                     setActionFunc(infoNode, "_set_player_height", bodyBuf);
+                    break;
+                }
+                case VsNodeType::SetHudValue: {
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_hud_value[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // HUD text with sourceSlot >= 0 reads afn_hud_value[slot]\n"
+                        "    // fmt_counter(prefix, value, pad) -> OAM text",
+                        fmtInt(infoNode.id, 1, "<slot>"),
+                        fmtInt(infoNode.id, 0, "<value>"));
+                    setActionFunc(infoNode, "_set_hud_value", bodyBuf);
                     break;
                 }
                 case VsNodeType::ChangeScene:
@@ -19984,6 +20011,7 @@ void FrameTick(float dt)
                     case VsNodeType::OnRise:        suffix = "_on_rise"; break;
                     case VsNodeType::ResetScene:    suffix = "_reset_scene"; break;
                     case VsNodeType::SetPlayerHeight: suffix = "_set_player_height"; break;
+                    case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
                     case VsNodeType::Branch:        suffix = "_branch"; break;
                     case VsNodeType::CompareVar:    suffix = "_compare_var"; break;
@@ -24168,7 +24196,7 @@ void FrameTick(float dt)
                         // Text rows
                         fprintf(cf, "elemTextCount=%d\n", (int)el.textRows.size());
                         for (auto& tr : el.textRows)
-                            fprintf(cf, "elemText=%s|%d|%d|%u\n", tr.label, tr.localX, tr.localY, tr.color);
+                            fprintf(cf, "elemText=%d|%d|%u|%d|%d|%d|%s\n", tr.localX, tr.localY, tr.color, tr.font, tr.sourceSlot, tr.pad, tr.label);
                         // Sprite items
                         fprintf(cf, "elemSpriteCount=%d\n", (int)el.spriteItems.size());
                         for (auto& si : el.spriteItems)
@@ -24758,7 +24786,19 @@ void FrameTick(float dt)
                     if (el.selectedTextRow >= 0 && el.selectedTextRow < (int)el.textRows.size()) {
                         auto& tr = el.textRows[el.selectedTextRow];
                         ImGui::Spacing();
-                        if (ImGui::InputText("Label##txt", tr.label, sizeof(tr.label))) sProjectDirty = true;
+                        const char* modeNames[] = { "Static", "Counter" };
+                        int curMode = (tr.sourceSlot >= 0) ? 1 : 0;
+                        if (ImGui::Combo("Mode##txt", &curMode, modeNames, 2)) {
+                            tr.sourceSlot = (curMode == 1) ? 0 : -1;
+                            sProjectDirty = true;
+                        }
+                        if (tr.sourceSlot >= 0) {
+                            if (ImGui::InputText("Prefix##txt", tr.label, sizeof(tr.label))) sProjectDirty = true;
+                            if (ImGui::SliderInt("Slot##txt", &tr.sourceSlot, 0, 3, "hud_value[%d]")) sProjectDirty = true;
+                            if (ImGui::SliderInt("Min Digits##txt", &tr.pad, 0, 6)) sProjectDirty = true;
+                        } else {
+                            if (ImGui::InputText("Label##txt", tr.label, sizeof(tr.label))) sProjectDirty = true;
+                        }
                         if (ImGui::DragInt("X##txt", &tr.localX, 1)) sProjectDirty = true;
                         if (ImGui::DragInt("Y##txt", &tr.localY, 1)) sProjectDirty = true;
                         ImVec4 tcf = ImGui::ColorConvertU32ToFloat4(tr.color);

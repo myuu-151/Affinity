@@ -1776,7 +1776,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    {" << pc.spriteAssetIdx << "," << pc.frame << "," << pc.localX << "," << pc.localY << "," << pc.size << "," << (pc.blackTint ? 1 : 0) << "," << pc.opacity << "},\n";
             f << "};\n";
         } else {
-            f << "static const int afn_hud_pieces[1] = {0}; // no pieces\n";
+            f << "static const struct { s8 asset; u8 frame; s16 x,y; u8 size; u8 blackTint; u8 opacity; } afn_hud_pieces[1] = {{0}}; // no pieces\n";
         }
 
         // Sprites: {assetIdx, frame, localX, localY, size}
@@ -1798,15 +1798,15 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    {" << st.localX << "," << st.localY << "," << st.linkedElement << "},\n";
             f << "};\n";
         } else {
-            f << "static const int afn_hud_stops[1] = {0}; // no stops\n";
+            f << "static const struct { s16 x,y; s8 link; } afn_hud_stops[1] = {{0}}; // no stops\n";
         }
 
         // Text rows: {localX, localY, colorRGB15, font, text}
         if (totalText > 0) {
-            f << "static const struct { s16 x,y; u16 color; u8 font; char text[32]; } afn_hud_texts[" << totalText << "] = {\n";
+            f << "static const struct { s16 x,y; u16 color; u8 font; s8 sourceSlot; u8 pad; char text[32]; } afn_hud_texts[" << totalText << "] = {\n";
             for (auto& el : hudElements)
                 for (auto& tr : el.textRows) {
-                    f << "    {" << tr.localX << "," << tr.localY << ",0x" << std::hex << tr.colorRGB15 << std::dec << "," << tr.font << ",\"";
+                    f << "    {" << tr.localX << "," << tr.localY << ",0x" << std::hex << tr.colorRGB15 << std::dec << "," << tr.font << "," << tr.sourceSlot << "," << tr.pad << ",\"";
                     // Escape the text
                     for (int ci = 0; tr.text[ci] && ci < 31; ci++) {
                         char c = tr.text[ci];
@@ -2180,6 +2180,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::OnRise:        return "_on_rise";
         case GBAScriptNodeType::ResetScene:    return "_reset_scene";
         case GBAScriptNodeType::SetPlayerHeight: return "_set_player_height";
+        case GBAScriptNodeType::SetHudValue:    return "_set_hud_value";
         default: return "";
         }
     };
@@ -2475,6 +2476,15 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     float val = valData ? resolveFloat(valData) : 12.0f;
                     int valFixed = (int)(val * 256.0f);
                     f << "    afn_player_height = " << valFixed << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetHudValue: {
+                    auto* valData = findDataIn(action->id, 0);
+                    auto* slotData = findDataIn(action->id, 1);
+                    std::string val = valData ? resolveIntExpr(valData) : "0";
+                    int slot = slotData ? resolveInt(slotData) : 0;
+                    if (slot < 0) slot = 0; if (slot > 3) slot = 3;
+                    f << "    afn_hud_value[" << slot << "] = " << val << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::SetFlag: {
@@ -3982,6 +3992,16 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* valData = bpFindDataIn(action->id, 0);
                     std::string val = valData ? bpResolveFloat(valData) : std::to_string((int)(12.0f * 256.0f));
                     f << "    afn_player_height = " << val << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetHudValue: {
+                    auto* valData = bpFindDataIn(action->id, 0);
+                    auto* slotData = bpFindDataIn(action->id, 1);
+                    std::string val = valData ? bpResolveInt(valData) : "0";
+                    int slot = 0;
+                    if (slotData) { try { slot = std::stoi(bpResolveInt(slotData)); } catch(...) {} }
+                    if (slot < 0) slot = 0; if (slot > 3) slot = 3;
+                    f << "    afn_hud_value[" << slot << "] = " << val << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::SetFlag: {

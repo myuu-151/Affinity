@@ -1423,6 +1423,31 @@ static int hud_text_oam(int oamStart, int px, int py, const char* str, int palBa
     return hud_text_oam_ex(oamStart, px, py, str, palBank, 0);
 }
 
+// Format integer into buffer with optional prefix and zero-padding
+// Returns pointer to formatted string in buf
+static char* fmt_counter(char* buf, int bufSize, const char* prefix, int val, int pad)
+{
+    char numBuf[12];
+    int neg = 0, i = 0, len;
+    char* p = buf;
+
+    // Copy prefix
+    while (*prefix && p < buf + bufSize - 12) *p++ = *prefix++;
+
+    // Format number
+    if (val < 0) { neg = 1; val = -val; }
+    if (val == 0) { numBuf[i++] = '0'; }
+    else { while (val > 0) { numBuf[i++] = '0' + (val % 10); val /= 10; } }
+
+    // Zero-pad
+    if (neg && p < buf + bufSize - 1) *p++ = '-';
+    len = i;
+    while (len < pad && p < buf + bufSize - 1) { *p++ = '0'; len++; }
+    while (i > 0) { *p++ = numBuf[--i]; }
+    *p = '\0';
+    return buf;
+}
+
 // ---------------------------------------------------------------------------
 // Orbit camera state (used when player sprite exists)
 // ---------------------------------------------------------------------------
@@ -6755,9 +6780,17 @@ int main(void)
                             for (ti2 = 0; ti2 < tCount2 && oamSlot < 126; ti2++) {
                                 int tpx = ex + afn_hud_texts[tStart2 + ti2].x;
                                 int tpy = ey + afn_hud_texts[tStart2 + ti2].y;
+                                const char* tstr = afn_hud_texts[tStart2 + ti2].text;
+                                char cntBuf[32];
+                                if (afn_hud_texts[tStart2 + ti2].sourceSlot >= 0) {
+                                    int slot = afn_hud_texts[tStart2 + ti2].sourceSlot;
+                                    if (slot > 3) slot = 3;
+                                    tstr = fmt_counter(cntBuf, sizeof(cntBuf), afn_hud_texts[tStart2 + ti2].text,
+                                        afn_hud_value[slot], afn_hud_texts[tStart2 + ti2].pad);
+                                }
                                 // Apply per-text color
                                 ((u16*)0x05000200)[15 * 16 + 1] = afn_hud_texts[tStart2 + ti2].color;
-                                oamSlot += hud_text_oam_ex(oamSlot, tpx, tpy, afn_hud_texts[tStart2 + ti2].text, 15, afn_hud_texts[tStart2 + ti2].font);
+                                oamSlot += hud_text_oam_ex(oamSlot, tpx, tpy, tstr, 15, afn_hud_texts[tStart2 + ti2].font);
                             }
                         } else if (layerOrder[pass] == 1 && spCount2 > 0) {
                             // Sprites (reverse order like pieces)
@@ -6825,17 +6858,6 @@ int main(void)
                         }
                     }}
                 }}
-#endif
-                // Show audio fix mode number via OAM text (top-right)
-#ifdef AFN_HAS_SOUND
-                if (hud_font_loaded) {
-                    char fixStr[5];
-                    fixStr[0] = '0' + (snd_fix_mode / 100) % 10;
-                    fixStr[1] = '0' + (snd_fix_mode / 10) % 10;
-                    fixStr[2] = '0' + (snd_fix_mode % 10);
-                    fixStr[3] = 0;
-                    oamSlot += hud_text_oam(oamSlot, 240 - 28, 2, fixStr, 15);
-                }
 #endif
 #ifdef AFN_SHOW_FPS
                 if (hud_font_loaded) {
