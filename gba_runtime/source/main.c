@@ -119,7 +119,11 @@ static void afn_vblank_isr(void) { afn_vblank_counter++; }
 // ---------------------------------------------------------------------------
 #ifdef AFN_HAS_SOUND
 
-#define SND_BUF_SIZE 1680 // large enough for 4x VBlanks at hi-fi rate (4*418)
+// Sound buffer must hold enough samples for the worst-case frame time.
+// At 5 FPS (~12 VBlanks/frame) with 18kHz (304 samples/VBlank): 12*304 = 3648.
+// At hi-fi 25kHz (418 samples/VBlank): 12*418 = 5016.
+// Rounded up to 5120 for alignment headroom.
+#define SND_BUF_SIZE 5120
 #define SND_MIX_COUNT 418 // normal rate samples per frame (16780000/672/60 ≈ 418)
 #define SND_MAX_VOICES 8  // max allocated; actual count per instance from afn_snd_voices[]
 static int snd_voice_count = 6; // active voice limit (set from afn_snd_voices[] on play)
@@ -209,7 +213,7 @@ static int snd_compat = 0;       // 1 = compatibility mode (halved rate, less CP
 static int snd_hifi = 0;        // 1 = hi-fi mode (timer 672, ~25kHz — may trill on some samples)
 static int snd_sfx_gain = 1;    // gain for SFX one-shots (0=Normal, 1=Loud, 2=Mid, 3=Quiet)
 static int snd_mix_samples = 304; // default for 18kHz (timer 924)
-static int snd_frame_scale = 1;  // VBlanks per frame (1=60fps, 2=30fps, 3=20fps)
+static int snd_frame_scale = 1;  // VBlanks per frame (1=60fps, 2=30fps, ..., 12=5fps)
 static int snd_last_vblank = 0;  // separate from delta-time's afn_last_vblank
 
 // Compute timer reload and mix count from current settings + fix mode override
@@ -5801,7 +5805,7 @@ int main(void)
             if (snd_buf_scale) {
                 int elapsed = afn_vblank_counter - snd_last_vblank;
                 if (elapsed < 1) elapsed = 1;
-                if (elapsed > 4) elapsed = 4;
+                if (elapsed > 12) elapsed = 12; // covers down to ~5 FPS
                 snd_frame_scale = elapsed;
             } else {
                 snd_frame_scale = 1;
