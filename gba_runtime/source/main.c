@@ -1398,11 +1398,12 @@ static void hud_font_load(int staticTileCount)
 // Render a text string as OAM sprites, one 8x8 sprite per character
 // fontType: 0=normal 8x8, 1=small pixel 5px advance, 2=5x7 6px advance
 // Returns number of OAM slots used
-static int hud_text_oam_ex(int oamStart, int px, int py, const char* str, int palBank, int fontType)
+static int hud_text_oam_ex(int oamStart, int px, int py, const char* str, int palBank, int fontType, int extraSpacing)
 {
     int slot = oamStart;
     int tileBase = (fontType == 2) ? hud_font_5x7_tile_base : (fontType ? hud_font_small_tile_base : hud_font_tile_base);
-    int advance = (fontType == 2) ? 6 : (fontType ? 5 : 8);
+    int advance = ((fontType == 2) ? 6 : (fontType ? 5 : 8)) + extraSpacing;
+    if (advance < 1) advance = 1;
     while (*str && slot < 126) {
         int ch = (unsigned char)*str;
         if (ch > 32 && ch < 128) {
@@ -1421,7 +1422,7 @@ static int hud_text_oam_ex(int oamStart, int px, int py, const char* str, int pa
 
 static int hud_text_oam(int oamStart, int px, int py, const char* str, int palBank)
 {
-    return hud_text_oam_ex(oamStart, px, py, str, palBank, 0);
+    return hud_text_oam_ex(oamStart, px, py, str, palBank, 0, 0);
 }
 
 // Format integer into buffer with optional prefix and zero-padding
@@ -6647,7 +6648,7 @@ int main(void)
                                 }
                                 // Apply per-text color
                                 ((u16*)0x05000200)[15 * 16 + 1] = afn_hud_texts[tStart2 + ti2].color;
-                                oamSlot += hud_text_oam_ex(oamSlot, tpx, tpy, tstr, 15, afn_hud_texts[tStart2 + ti2].font);
+                                oamSlot += hud_text_oam_ex(oamSlot, tpx, tpy, tstr, 15, afn_hud_texts[tStart2 + ti2].font, afn_hud_texts[tStart2 + ti2].spacing);
                             }
                         } else if (layerOrder[pass] == 1 && spCount2 > 0) {
                             // Sprites (reverse order like pieces)
@@ -7525,7 +7526,7 @@ int main(void)
                                     afn_hud_value[slot], afn_hud_texts[tStart2 + ti2].pad);
                             }
                             ((u16*)0x05000200)[15 * 16 + 1] = afn_hud_texts[tStart2 + ti2].color;
-                            m4HudOamSlot += hud_text_oam_ex(m4HudOamSlot, tpx, tpy, tstr, 15, afn_hud_texts[tStart2 + ti2].font);
+                            m4HudOamSlot += hud_text_oam_ex(m4HudOamSlot, tpx, tpy, tstr, 15, afn_hud_texts[tStart2 + ti2].font, afn_hud_texts[tStart2 + ti2].spacing);
                         }
                     } else if (layerOrder[pass] == 1 && spCount2 > 0) {
                         int spi;

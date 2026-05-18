@@ -1803,10 +1803,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
         // Text rows: {localX, localY, colorRGB15, font, text}
         if (totalText > 0) {
-            f << "static const struct { s16 x,y; u16 color; u8 font; s8 sourceSlot; u8 pad; char text[32]; } afn_hud_texts[" << totalText << "] = {\n";
+            f << "static const struct { s16 x,y; u16 color; u8 font; s8 sourceSlot; u8 pad; s8 spacing; char text[32]; } afn_hud_texts[" << totalText << "] = {\n";
             for (auto& el : hudElements)
                 for (auto& tr : el.textRows) {
-                    f << "    {" << tr.localX << "," << tr.localY << ",0x" << std::hex << tr.colorRGB15 << std::dec << "," << tr.font << "," << tr.sourceSlot << "," << tr.pad << ",\"";
+                    f << "    {" << tr.localX << "," << tr.localY << ",0x" << std::hex << tr.colorRGB15 << std::dec << "," << tr.font << "," << tr.sourceSlot << "," << tr.pad << "," << tr.spacing << ",\"";
                     // Escape the text
                     for (int ci = 0; tr.text[ci] && ci < 31; ci++) {
                         char c = tr.text[ci];

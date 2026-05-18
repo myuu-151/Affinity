@@ -465,6 +465,7 @@ struct GBAHudTextRowExport {
     int font; // 0=normal 8x8, 1=small pixel 4x5, 2=5x7 debug
     int sourceSlot; // -1=static, 0-3=afn_hud_value[N]
     int pad; // minimum digits for counter mode
+    int spacing; // extra spacing adjustment added to font advance
 };
 
 struct GBAHudKeyframeExport {
