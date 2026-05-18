@@ -203,6 +203,7 @@ struct MeshAsset
     bool texFiltered = false;                 // true = GL_LINEAR, false = GL_NEAREST
     bool perspCorrect = false;               // true = perspective-corrected texture mapping (slower)
     int subdivide = 0;                       // 0=off, N=subdivide each face into NxN grid at export
+    bool clampAbove = false;                 // true = clamp vertices to never project above horizon (prevents "under mesh" warp)
 };
 
 static constexpr int kMaxMeshAssets = 32;

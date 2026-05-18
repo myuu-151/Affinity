@@ -130,6 +130,7 @@ struct GBAMeshExport
     std::vector<uint8_t> texPixels;   // quantized indexed pixels (texW * texH)
     uint16_t texPalette[16] = {}; // RGB15 palette for this texture
     int perspCorrect = 0;         // 1=perspective-corrected texture mapping
+    int clampAbove = 0;           // 1=clamp vertices to never project above horizon
 };
 
 // ---- Visual Script Export ----

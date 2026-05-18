@@ -91,6 +91,8 @@ static int snd_low_rate = 0;  // ultra-low rate flag: 1 = ~10kHz sample rate for
 // definition wins for static variables in the same TU.
 static FIXED afn_player_height = 3072; // 12 pixels (16.8 fixed)
 
+#define NUM_SPRITES MAX_FLOOR_SPRITES
+
 #include "mapdata.h"
 
 // libtonc has key_hit (press edge) but no release edge — define it here
@@ -1589,8 +1591,7 @@ EWRAM_DATA static u8  g_asset_anim_enabled[AFN_ASSET_COUNT]; // per-asset: any s
 #endif
 
 // FloorSpriteGBA, g_sprites, MAX_FLOOR_SPRITES declared before mapdata.h include
-
-#define NUM_SPRITES MAX_FLOOR_SPRITES
+// NUM_SPRITES defined before mapdata.h include (line 94)
 
 static int g_spriteCount = 0;
 
@@ -4177,6 +4178,7 @@ typedef struct {
     int drawDist;
     int drawPriority;
     int visible;
+    int clampAbove;
     int centerDepth;
 } MeshSlot;
 
@@ -4251,6 +4253,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         ms->drawPriority = afn_mesh_desc[mi][15];
         ms->visible = afn_mesh_desc[mi][16];
         ms->meshPerspCorr = afn_mesh_desc[mi][17];
+        ms->clampAbove = afn_mesh_desc[mi][18];
         ms->texMask = ms->texW > 0 ? ms->texW - 1 : 0;
         ms->uvs = afn_mesh_uv_ptrs[mi];
         ms->tex = tex_cache_ptrs[mi];
@@ -4295,6 +4298,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             g_vsz[vb + v] = fovLambda;
 
             heightDiff = cam_h - wy;
+            // Clamp Above: prevent vertices from projecting above horizon
+            if (ms->clampAbove && heightDiff < 1) heightDiff = 1;
             side = (dx * g_cosf + dz * g_sinf) >> 8;
             g_vSide[vb + v] = side;
             g_vHeight[vb + v] = heightDiff;

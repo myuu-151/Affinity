@@ -4554,7 +4554,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide, ma.clampAbove ? 1 : 0);
     }
     fprintf(f, "\n");
 
@@ -5631,10 +5631,10 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "MeshAssets") == 0)
         {
             char mname[256], mpath[512], mtexpath[512] = {};
-            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1, mperspcorr = 0, msubdiv = 0;
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1, mperspcorr = 0, msubdiv = 0, mclampabove = 0;
             float mdrawdist = 0.0f;
-            // Try newest format: ...visible|perspcorrect|subdivide
-            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d|%f|%d|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv);
+            // Try newest format: ...visible|perspcorrect|subdivide|clampabove
+            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d|%f|%d|%d|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove);
             if (matched == 9) {
                 // Empty texture path — sscanf stopped at ||, skip it and parse remaining fields
                 mtexpath[0] = '\0';
@@ -5643,7 +5643,7 @@ static bool LoadProject(const std::string& path)
                 int pipes = 0;
                 while (*p && pipes < 9) { if (*p == '|') pipes++; p++; }
                 if (*p == '|') p++; // skip the empty field's trailing pipe
-                int m2 = sscanf(p, "%d|%f|%d|%d|%d|%d|%d", &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv);
+                int m2 = sscanf(p, "%d|%f|%d|%d|%d|%d|%d|%d", &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove);
                 matched = 9 + m2; // total fields parsed (skip texpath in count, add 1 for it)
                 if (m2 > 0) matched++; // account for the texpath slot
             }
@@ -5695,6 +5695,8 @@ static bool LoadProject(const std::string& path)
                     ma.perspCorrect = (mperspcorr != 0);
                 if (matched >= 17)
                     ma.subdivide = msubdiv;
+                if (matched >= 18)
+                    ma.clampAbove = (mclampabove != 0);
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -8059,6 +8061,8 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Split each face into NxN sub-faces at export (reduces texture warping on large polygons)");
         }
+        ImGui::Checkbox("Clamp Above##meshClamp", &ma.clampAbove);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Prevent mesh from projecting above the camera horizon.\nFixes 'under the mesh' warp on large flat surfaces like paths.");
         ImGui::Checkbox("Textured##meshTex", &ma.textured);
         if (ma.textured) {
             ImGui::SameLine();
@@ -12382,6 +12386,7 @@ void FrameTick(float dt)
                     me.visible = ma.visible ? 1 : 0;
                     me.textured = ma.textured ? 1 : 0;
                     me.perspCorrect = ma.perspCorrect ? 1 : 0;
+                    me.clampAbove = ma.clampAbove ? 1 : 0;
                     me.texW = ma.texW;
                     me.texH = ma.texH;
                     me.texPixels = ma.texturePixels;
