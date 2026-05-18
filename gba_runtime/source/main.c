@@ -13,6 +13,10 @@
 // Map data — forward declarations needed by mapdata.h blueprint codegen
 // ---------------------------------------------------------------------------
 
+// Max sprite/object instances per scene. All per-sprite arrays (visibility,
+// HP, state, collision, etc.) are sized to this. GBA OAM can display up to
+// 32 of these on screen at once (using affine slots 0-31, OAM entries 16-47).
+// HUD elements start at OAM slot 48 to avoid overlap.
 #define MAX_FLOOR_SPRITES 64
 
 typedef struct {
@@ -1395,9 +1399,13 @@ static void hud_font_load(int staticTileCount)
     hud_font_loaded = 1;
 }
 
-// Render a text string as OAM sprites, one 8x8 sprite per character
+// Render a text string as OAM sprites, one 8x8 sprite per character.
 // fontType: 0=normal 8x8, 1=small pixel 5px advance, 2=5x7 6px advance
-// Returns number of OAM slots used
+// scale: 1=normal size, 2=double size. Scale >= 2 uses GBA affine OAM
+//   (ATTR0_AFF_DBL) to stretch each 8x8 character tile to 16x16 on screen.
+//   Each scaled character consumes one affine parameter set (max 32 on GBA).
+//   The character advance is also multiplied by scale so spacing stays correct.
+// Returns number of OAM slots used.
 static int hud_text_oam_scaled(int oamStart, int px, int py, const char* str, int palBank, int fontType, int extraSpacing, int scale)
 {
     int slot = oamStart;
@@ -2385,11 +2393,13 @@ static void update_sprites(void)
                 proj[j] = tmp;
             }
 
-    // Render projected sprites as affine OBJs
+    // Render projected sprites as affine OBJs (OAM slots 16-47, affine sets 0-31).
+    // GBA has 32 affine parameter sets total — each floor sprite uses one for
+    // distance-based scaling. HUD starts at slot 48 to avoid conflicts.
     for (i = 0; i < projCount && i < 32; i++)
     {
-        int oamIdx = 16 + i;
-        int affIdx = i;
+        int oamIdx = 16 + i;  // OAM entry index (0-15 reserved, 48+ for HUD)
+        int affIdx = i;       // affine parameter set index (0-31)
         int sprIdx = proj[i].idx;
         int palBank = g_sprites[sprIdx].palIdx;
         int tileId = 0;
@@ -7208,7 +7218,7 @@ int main(void)
         // Project and draw sprites
         update_sprites();
 
-        // Mode 4/7 HUD element rendering (OAM slots 32+)
+        // Mode 4/7 HUD element rendering (OAM slots 48+, after floor sprites at 16-47)
 #if defined(AFN_HUD_ELEM_COUNT) && AFN_HUD_ELEM_COUNT > 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
         {
             // Tick HUD keyframe animations
@@ -7232,7 +7242,7 @@ int main(void)
 #endif
             int anyHudVisible = 0;
             { int ei2; for (ei2 = 0; ei2 < AFN_HUD_ELEM_COUNT; ei2++) if (afn_hud_visible[ei2]) anyHudVisible = 1; }
-            int m4HudOamSlot = 48;
+            int m4HudOamSlot = 48; // starts after floor sprite OAM slots (16-47)
             if (anyHudVisible) {
                 // DMA all static tiles to end of OBJ VRAM
                 int staticTiles = AFN_ALL_TILES_LEN / 32;
