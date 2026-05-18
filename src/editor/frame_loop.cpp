@@ -1027,6 +1027,8 @@ struct SoundInstance {
     int hifiMode = 0;          // 0 = normal (~18kHz), 1 = hi-fi (~25kHz, may trill)
     int compatMode = 0;        // 0 = normal, 1 = compatibility (halved rate, no interp, no release — less CPU)
     int bufferScale = 0;       // 0 = normal (1 VBlank), 1 = scale buffer to match frame time (for low FPS)
+    int mixPadding = 0;        // 0 = exact buffer, 1 = mix 25% extra samples as overflow protection
+    int lowRate = 0;           // 0 = normal, 1 = ultra-low sample rate (~10kHz) for extreme low-FPS
     bool loop = false;          // loop playback between loopStart and loopEnd ticks
     int loopStartTick = 0;      // loop region start (MIDI ticks)
     int loopEndTick = 0;        // loop region end (MIDI ticks, 0 = end of sequence)
@@ -5198,6 +5200,8 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "instHifi=%d\n", si.hifiMode);
         fprintf(f, "instCompat=%d\n", si.compatMode);
         fprintf(f, "instBufScale=%d\n", si.bufferScale);
+        fprintf(f, "instMixPad=%d\n", si.mixPadding);
+        fprintf(f, "instLowRate=%d\n", si.lowRate);
         fprintf(f, "instLoop=%d\n", si.loop ? 1 : 0);
         fprintf(f, "instLoopStart=%d\n", si.loopStartTick);
         fprintf(f, "instLoopEnd=%d\n", si.loopEndTick);
@@ -7364,6 +7368,8 @@ static bool LoadProject(const std::string& path)
                 else if (sscanf(line, "instHifi=%d", &ival) == 1) curInst->hifiMode = ival;
                 else if (sscanf(line, "instCompat=%d", &ival) == 1) curInst->compatMode = ival;
                 else if (sscanf(line, "instBufScale=%d", &ival) == 1) curInst->bufferScale = ival;
+                else if (sscanf(line, "instMixPad=%d", &ival) == 1) curInst->mixPadding = ival;
+                else if (sscanf(line, "instLowRate=%d", &ival) == 1) curInst->lowRate = ival;
                 else if (sscanf(line, "instLoop=%d", &ival) == 1) curInst->loop = (ival != 0);
                 else if (sscanf(line, "instLoopStart=%d", &ival) == 1) curInst->loopStartTick = ival;
                 else if (sscanf(line, "instLoopEnd=%d", &ival) == 1) curInst->loopEndTick = ival;
@@ -13264,6 +13270,8 @@ void FrameTick(float dt)
                         ie.hifiMode = inst.hifiMode;
                         ie.compatMode = inst.compatMode;
                         ie.bufferScale = inst.bufferScale;
+                        ie.mixPadding = inst.mixPadding;
+                        ie.lowRate = inst.lowRate;
                         ie.loop = inst.loop;
                         ie.loopStartTick = inst.loopStartTick;
                         ie.loopEndTick = inst.loopEndTick;
@@ -22766,6 +22774,18 @@ void FrameTick(float dt)
                 sProjectDirty = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scale audio buffer to match frame time.\nPrevents stuttering at low FPS (~20fps).");
+            bool mp = inst.mixPadding != 0;
+            if (ImGui::Checkbox("Mix Padding", &mp)) {
+                inst.mixPadding = mp ? 1 : 0;
+                sProjectDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mix 25%% extra samples each frame as overflow padding.\nHelps cover timing jitter between frames at low FPS.");
+            bool lrate = inst.lowRate != 0;
+            if (ImGui::Checkbox("Low Rate", &lrate)) {
+                inst.lowRate = lrate ? 1 : 0;
+                sProjectDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ultra-low sample rate (~10kHz).\nUses ~45%% less CPU than default — best for heavy scenes\nwhere audio quality can be sacrificed for stability.");
             // Delta Time toggle — affects Mode 4 scene this instance plays in
             if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size()) {
                 auto& ms = sMapScenes[sMapSelectedScene];
