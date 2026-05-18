@@ -730,7 +730,15 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 bool jMesh = (projected[j].subIdx < 0 && sprites[projected[j].idx].type == SpriteType::Mesh);
                 if (iMesh != jMesh)
                     swap = !iMesh && jMesh; // mesh should come first (drawn behind)
-                else
+                else if (iMesh && jMesh) {
+                    // Both meshes: sort by drawPriority (higher = drawn first/behind)
+                    int iPri = meshAssets[sprites[projected[i].idx].meshIdx].drawPriority;
+                    int jPri = meshAssets[sprites[projected[j].idx].meshIdx].drawPriority;
+                    if (iPri != jPri)
+                        swap = (iPri < jPri); // higher priority draws first
+                    else
+                        swap = (projected[i].depth < projected[j].depth);
+                } else
                     swap = (projected[i].depth < projected[j].depth);
             }
             if (swap) std::swap(projected[i], projected[j]);
