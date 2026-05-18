@@ -2484,7 +2484,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     std::string val = valData ? resolveIntExpr(valData) : "0";
                     int slot = slotData ? resolveInt(slotData) : 0;
                     if (slot < 0) slot = 0; if (slot > 3) slot = 3;
-                    f << "    afn_hud_value[" << slot << "] = " << val << ";\n";
+                    f << "    afn_hud_value[" << slot << "] += " << val << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::SetFlag: {
@@ -3084,7 +3084,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* valData = findDataIn(action->id, 1);
                     int slot = slotData ? resolveInt(slotData) : 0;
                     int val = valData ? resolveInt(valData) : 0;
-                    f << "    afn_hud_value[" << slot << "] = " << val << ";\n";
+                    f << "    afn_hud_value[" << slot << "] += " << val << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::ShowHUD: {
@@ -4009,7 +4009,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     int slot = 0;
                     if (slotData) { try { slot = std::stoi(bpResolveInt(slotData)); } catch(...) {} }
                     if (slot < 0) slot = 0; if (slot > 3) slot = 3;
-                    f << "    afn_hud_value[" << slot << "] = " << val << ";\n";
+                    f << "    afn_hud_value[" << slot << "] += " << val << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::SetFlag: {
@@ -4576,7 +4576,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* valData = bpFindDataIn(action->id, 1);
                     std::string slot = slotData ? bpResolveInt(slotData) : "0";
                     std::string val = valData ? bpResolveInt(valData) : "0";
-                    f << "    afn_hud_value[" << slot << "] = " << val << ";\n";
+                    f << "    afn_hud_value[" << slot << "] += " << val << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::ShowHUD: {
@@ -5171,24 +5171,25 @@ static bool GenerateMapData(const std::string& runtimeDir,
             for (auto& c : bpChains)
                 if (c.event->type == GBAScriptNodeType::OnUpdate)
                     bpEmitActionsWithGates(c.actions);
-            // OnCollision with Object pin — emit bounds check in update
+            // OnCollision with Object pin — emit bounds check in update using instance sprite
             for (auto& c : bpChains) {
                 if (c.event->type != GBAScriptNodeType::OnCollision) continue;
                 auto* objData = bpFindDataIn(c.event->id, 1);
                 if (!objData) continue; // no Object pin, handled in _collision
-                std::string objIdx = bpResolveInt(objData);
                 auto* radData = bpFindDataIn(c.event->id, 0);
                 std::string rad = radData ? bpResolveInt(radData) : "16";
-                // XZ bounds check scaled by object's scale, plus Y proximity
-                f << "    { FIXED _dx = player_x - g_sprites[" << objIdx << "].x;\n";
-                f << "      FIXED _dz = player_z - g_sprites[" << objIdx << "].z;\n";
-                f << "      FIXED _dy = player_y - g_sprites[" << objIdx << "].y;\n";
+                // Use instance sprite (afn_bp_cur_spr_idx) instead of hardcoded index
+                f << "    { int _si = afn_bp_cur_spr_idx;\n";
+                f << "      if (_si >= 0 && _si < 16 && !afn_sprite_visible[_si]) goto _skip_col_" << bi << ";\n";
+                f << "      FIXED _dx = player_x - g_sprites[_si].x;\n";
+                f << "      FIXED _dz = player_z - g_sprites[_si].z;\n";
+                f << "      FIXED _dy = player_y - g_sprites[_si].y;\n";
                 f << "      if (_dx < 0) _dx = -_dx; if (_dz < 0) _dz = -_dz;\n";
                 f << "      if (_dy < 0) _dy = -_dy;\n";
-                f << "      int _rad = (g_sprites[" << objIdx << "].scale * " << rad << ") >> 8;\n";
+                f << "      int _rad = (g_sprites[_si].scale * " << rad << ") >> 8;\n";
                 f << "      if ((_dx >> 8) < _rad && (_dz >> 8) < _rad && (_dy >> 8) < 16) {\n";
                 bpEmitActionsWithGates(c.actions);
-                f << "    } }\n";
+                f << "    } _skip_col_" << bi << ":; }\n";
             }
             f << "}\n";
 
