@@ -773,6 +773,7 @@ static int tm_cur_logical_w, tm_cur_logical_h;
 static int tm_dir_adj = 0;              // tile ID adjustment for direction sprites (Mode 4 only)
 static int tm_static_adj = 0;           // tile ID adjustment for static/HUD tiles
 static int tm_hud_was_visible = 0;      // track HUD visibility for direction tile restore
+static int m4_hud_was_visible = 0;      // track HUD visibility in Mode 4/7
 static int tm_dir_needs_reload = 0;     // force direction tile re-DMA after first VBlank
 // tm_player_facing is declared in mapdata.h (set by MovePlayer node)
 // Saved player OAM attributes for layer-sorted rendering
@@ -2078,25 +2079,6 @@ static void init_obj_sprites(void)
     pal_obj_mem[5*16 + 1] = RGB15(31, 16, 31);
 #endif
 
-    // Minimap dot tile
-    {
-#ifdef AFN_MINIMAP_TILE
-        u32 *dot = (u32*)&tile_mem[4][AFN_MINIMAP_TILE];
-#else
-        u32 *dot = (u32*)&tile_mem[4][16];
-#endif
-        int k;
-        for (k = 0; k < 8; k++) dot[k] = 0;
-        dot[0] = 0x00000011;
-        dot[1] = 0x00000011;
-    }
-
-    // Minimap palette bank (bank 6)
-    pal_obj_mem[6*16 + 0] = 0;
-    pal_obj_mem[6*16 + 1] = RGB15(31, 31, 31);
-    pal_obj_mem[6*16 + 2] = RGB15(20, 20, 20);
-    pal_obj_mem[6*16 + 3] = RGB15(31, 0, 0);
-
     oam_init(obj_mem, 128);
 }
 
@@ -2544,38 +2526,25 @@ static void update_sprites(void)
 }
 
 // ---------------------------------------------------------------------------
-// Minimap
+// Debug digit display (Mode 7 sound fix overlay)
 // ---------------------------------------------------------------------------
 
-#define MINIMAP_X  4
-#define MINIMAP_Y  124
-#define MINIMAP_W  32
-#define MINIMAP_H  32
-
-#define TILE_MINIMAP_BG    1
-#define TILE_MINIMAP_GRID  2
-#define TILE_MINIMAP_CAM   3
-
-// Init BG0 digit tiles for debug display (called from Mode 7 init)
 #ifdef AFN_HAS_SOUND
 static void init_dbg_digits(void)
 {
-    // Digit tiles (4-13) for debug display using 4bpp, palette 15
     static const u8 digitBmp[10][7] = {
-        {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E}, // 0
-        {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E}, // 1
-        {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F}, // 2
-        {0x0E,0x11,0x01,0x06,0x01,0x11,0x0E}, // 3
-        {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02}, // 4
-        {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E}, // 5
-        {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E}, // 6
-        {0x1F,0x01,0x02,0x04,0x08,0x08,0x08}, // 7
-        {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E}, // 8
-        {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C}, // 9
+        {0x0E,0x11,0x13,0x15,0x19,0x11,0x0E},
+        {0x04,0x0C,0x04,0x04,0x04,0x04,0x0E},
+        {0x0E,0x11,0x01,0x02,0x04,0x08,0x1F},
+        {0x0E,0x11,0x01,0x06,0x01,0x11,0x0E},
+        {0x02,0x06,0x0A,0x12,0x1F,0x02,0x02},
+        {0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E},
+        {0x06,0x08,0x10,0x1E,0x11,0x11,0x0E},
+        {0x1F,0x01,0x02,0x04,0x08,0x08,0x08},
+        {0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E},
+        {0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C},
     };
-    // Setup BG0 for digit overlay
     REG_BG0CNT = BG_CBB(0) | BG_SBB(7) | BG_4BPP | BG_REG_32x32 | BG_PRIO(0);
-    // White text on transparent bg using sub-palette 15
     pal_bg_mem[240 + 0] = 0;
     pal_bg_mem[240 + 3] = RGB15(31, 31, 31);
     int d;
@@ -2595,125 +2564,12 @@ static void init_dbg_digits(void)
             t[row] = px;
         }
     }
-    // Clear BG0 map
-    {
-        u16 *map = (u16*)se_mem[7];
-        int k;
-        for (k = 0; k < 32*32; k++)
-            map[k] = 0;
-    }
-    // Position BG0 so tile (28,0) maps to screen top-right
+    { u16 *map = (u16*)se_mem[7]; int k; for (k = 0; k < 32*32; k++) map[k] = 0; }
     REG_BG0HOFS = 0;
     REG_BG0VOFS = 0;
 }
 static int snd_dbg_digits_inited = 0;
 #endif
-
-static void init_minimap(void)
-{
-    REG_BG0CNT = BG_CBB(0) | BG_SBB(7) | BG_4BPP | BG_REG_32x32 | BG_PRIO(0);
-
-    // Use sub-palette 15 (entries 240-255) so we don't overwrite
-    // the 8bpp floor texture palette entries 16-19
-    pal_bg_mem[240 + 0] = 0;
-    pal_bg_mem[240 + 1] = RGB15(2, 4, 2);
-    pal_bg_mem[240 + 2] = RGB15(5, 10, 5);
-    pal_bg_mem[240 + 3] = RGB15(31, 31, 31);
-
-    {
-        u32 *t = (u32*)&tile_mem[0][TILE_MINIMAP_BG];
-        int k;
-        for (k = 0; k < 8; k++)
-            t[k] = 0x11111111;
-    }
-
-    {
-        u32 *t = (u32*)&tile_mem[0][TILE_MINIMAP_GRID];
-        int k;
-        t[0] = 0x22222222;
-        for (k = 1; k < 7; k++)
-            t[k] = 0x11111112;
-        t[7] = 0x22222222;
-    }
-
-    {
-        u16 *map = (u16*)se_mem[7];
-        int k;
-        for (k = 0; k < 32*32; k++)
-            map[k] = 0;
-    }
-
-    {
-        u16 *map = (u16*)se_mem[7];
-        int tx, ty;
-        for (ty = 0; ty < 4; ty++)
-            for (tx = 0; tx < 4; tx++)
-                map[ty * 32 + tx] = TILE_MINIMAP_GRID | SE_PALBANK(15);
-    }
-
-    REG_BG0HOFS = (512 - MINIMAP_X) & 0x1FF;
-    REG_BG0VOFS = (512 - MINIMAP_Y) & 0x1FF;
-}
-
-static void update_minimap(void)
-{
-    int i;
-    int oamIdx = 0;
-
-    // Camera/player position dot
-    FIXED dotX = (player_sprite_idx >= 0) ? player_x : cam_x;
-    FIXED dotZ = (player_sprite_idx >= 0) ? player_z : cam_z;
-
-    int camMX = MINIMAP_X + ((dotX >> 8) >> 3);
-    int camMY = MINIMAP_Y + ((dotZ >> 8) >> 3);
-
-    if (camMX < MINIMAP_X) camMX = MINIMAP_X;
-    if (camMX > MINIMAP_X + MINIMAP_W - 1) camMX = MINIMAP_X + MINIMAP_W - 1;
-    if (camMY < MINIMAP_Y) camMY = MINIMAP_Y;
-    if (camMY > MINIMAP_Y + MINIMAP_H - 1) camMY = MINIMAP_Y + MINIMAP_H - 1;
-
-    {
-#ifdef AFN_MINIMAP_TILE
-        int dotTile = AFN_MINIMAP_TILE;
-#else
-        int dotTile = 16;
-#endif
-        obj_mem[oamIdx].attr0 = ATTR0_Y(camMY & 0xFF) | ATTR0_SQUARE;
-        obj_mem[oamIdx].attr1 = ATTR1_X(camMX & 0x1FF) | ATTR1_SIZE_8;
-        obj_mem[oamIdx].attr2 = ATTR2_ID(dotTile) | ATTR2_PRIO(0) | ATTR2_PALBANK(6);
-    }
-    oamIdx++;
-
-    for (i = 0; i < g_spriteCount && oamIdx < 16; i++)
-    {
-        if (i == player_sprite_idx) continue; // player already shown as main dot
-        int smx = MINIMAP_X + ((g_sprites[i].x >> 8) >> 3);
-        int smy = MINIMAP_Y + ((g_sprites[i].z >> 8) >> 3);
-
-        if (smx < MINIMAP_X || smx > MINIMAP_X + MINIMAP_W - 1) continue;
-        if (smy < MINIMAP_Y || smy > MINIMAP_Y + MINIMAP_H - 1) continue;
-
-        int palBank = g_sprites[i].palIdx;
-        if (palBank > 5) palBank = 1;
-
-        {
-#ifdef AFN_MINIMAP_TILE
-            int dotTile = AFN_MINIMAP_TILE;
-#else
-            int dotTile = 16;
-#endif
-            obj_mem[oamIdx].attr0 = ATTR0_Y(smy & 0xFF) | ATTR0_SQUARE;
-            obj_mem[oamIdx].attr1 = ATTR1_X(smx & 0x1FF) | ATTR1_SIZE_8;
-            obj_mem[oamIdx].attr2 = ATTR2_ID(dotTile) | ATTR2_PRIO(0) | ATTR2_PALBANK(palBank);
-        }
-        oamIdx++;
-    }
-
-    for (; oamIdx < 16; oamIdx++)
-    {
-        obj_mem[oamIdx].attr0 = ATTR0_HIDE;
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Software 3D mesh rendering (Mode 4 bitmap)
@@ -5011,25 +4867,6 @@ static void apply_draw_behind_exceptions(u16* buf)
 #endif
 }
 
-// Draw minimap background into bitmap (since BG0 not available in Mode 4)
-static void render_minimap_bg_sw(u16* buf)
-{
-    int ty, tx;
-    // Draw 32x32 minimap background at (4, 124)
-    for (ty = 0; ty < 32; ty++)
-    {
-        int py = 124 + ty;
-        if (py >= 160) break;
-        for (tx = 0; tx < 32; tx++)
-        {
-            int px = 4 + tx;
-            // Grid lines every 8 pixels
-            u8 col = ((tx & 7) == 0 || (ty & 7) == 0) ? 4 : 3;
-            m4_plot_buf(buf, px, py, col);
-        }
-    }
-}
-
 #endif /* AFN_MESH_COUNT > 0 */
 
 // ---------------------------------------------------------------------------
@@ -5610,7 +5447,7 @@ static void scene_load(int sceneMode, int sceneIdx)
             switch_dir_anim_set(ai, 0);
         } }
 #endif
-        // init_minimap(); // disabled — minimap not used in Mode 7
+
 #if defined(AFFINITY_HAS_SPRITES) && AFN_SPRITE_COUNT > 0
         load_editor_sprites();
 #endif
@@ -5800,7 +5637,7 @@ int main(void)
             switch_dir_anim_set(ai, 0);
         } }
 #endif
-        // init_minimap(); // disabled — minimap not used in Mode 7
+
 #if defined(AFFINITY_HAS_SPRITES) && AFN_SPRITE_COUNT > 0
         load_editor_sprites();
 #else
@@ -6554,15 +6391,14 @@ int main(void)
                                 if (found >= 0) {
                                     hud_pal_remap[ai2] = found;
                                 } else {
-                                    // Skip reserved banks: 0 (transparent), 6 (minimap), 15 (font), world/HUD-occupied banks
-                                    while (nextBank < 15 && (nextBank == 6 || bankOwner[nextBank] != -1)) nextBank++;
+                                    // Skip reserved banks: 0 (transparent), 15 (font), world/HUD-occupied banks
+                                    while (nextBank < 15 && bankOwner[nextBank] != -1) nextBank++;
                                     if (nextBank >= 15) nextBank = 14; // cap at last usable
                                     hud_pal_remap[ai2] = nextBank;
                                     bankOwner[nextBank] = ai2;
                                     { int c; for (c = 0; c < 16; c++)
                                         pal_obj_mem[nextBank * 16 + c] = afn_pal[ai2][c]; }
                                     nextBank++;
-                                    while (nextBank == 6) nextBank++;
                                 }
                             }
                         }
@@ -7407,8 +7243,338 @@ int main(void)
         // Project and draw sprites
         update_sprites();
 
-        // Minimap disabled in Mode 7
-        // if (afn_current_mode == 2) { update_minimap(); }
+        // Mode 4/7 HUD element rendering (OAM slots 32+)
+#if defined(AFN_HUD_ELEM_COUNT) && AFN_HUD_ELEM_COUNT > 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+        {
+            // Tick HUD keyframe animations
+            { int ei2; for (ei2 = 0; ei2 < AFN_HUD_ELEM_COUNT && ei2 < 4; ei2++) {
+                if (afn_hud_visible[ei2] && !afn_hud_prev_visible[ei2])
+                    afn_hud_anim_frame[ei2] = 0;
+                afn_hud_prev_visible[ei2] = afn_hud_visible[ei2];
+                if (afn_hud_visible[ei2])
+                    afn_hud_anim_frame[ei2]++;
+            } }
+#ifdef AFN_HUD_HAS_LAYERS
+            { int li; for (li = 0; li < AFN_HUD_LAYER_COUNT; li++) {
+                if (afn_hud_layer_active[li]) {
+                    afn_hud_layer_tick[li]++;
+                    if (afn_hud_layer_tick[li] >= afn_hud_layer_speed[li]) {
+                        afn_hud_layer_tick[li] = 0;
+                        afn_hud_layer_frame[li]++;
+                    }
+                }
+            } }
+#endif
+            int anyHudVisible = 0;
+            { int ei2; for (ei2 = 0; ei2 < AFN_HUD_ELEM_COUNT; ei2++) if (afn_hud_visible[ei2]) anyHudVisible = 1; }
+            int m4HudOamSlot = 32;
+            if (anyHudVisible) {
+                // DMA all static tiles to end of OBJ VRAM
+                int staticTiles = AFN_ALL_TILES_LEN / 32;
+                int vramStart = 1024 - staticTiles;
+                if (vramStart < 512) vramStart = 512; // Mode 4: OBJ tiles start at 512
+                {
+                    const u32 *tsrc = afn_all_tiles;
+                    u32 *tdst = (u32*)(0x06010000 + vramStart * 32);
+                    int w; for (w = 0; w < (int)(AFN_ALL_TILES_LEN / 4); w++) tdst[w] = tsrc[w];
+                }
+                // Dynamic palette remap for HUD assets
+                { int nextBank = 1;
+                int bankOwner[16];
+                { int bi; for (bi = 0; bi < 16; bi++) bankOwner[bi] = -1; }
+                { int ai2; for (ai2 = 0; ai2 < AFN_ASSET_COUNT; ai2++) hud_pal_remap[ai2] = 0; }
+                // Reserve world sprite banks
+                { int ri; for (ri = 0; ri < MAX_FLOOR_SPRITES; ri++) {
+                    int ai = g_sprites[ri].assetIdx;
+                    if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
+                    int rpb = afn_asset_desc[ai][4];
+                    if (rpb > 0 && rpb < 15 && bankOwner[rpb] < 0)
+                        bankOwner[rpb] = -2;
+                } }
+                { int ei3; for (ei3 = 0; ei3 < AFN_HUD_ELEM_COUNT; ei3++) {
+                    if (!afn_hud_visible[ei3]) continue;
+                    int ps = afn_hud_elems[ei3].pieceStart;
+                    int pc = afn_hud_elems[ei3].pieceCount;
+                    int ss = afn_hud_elems[ei3].spriteStart;
+                    int sc2 = afn_hud_elems[ei3].spriteCount;
+                    int pass2; for (pass2 = 0; pass2 < 3; pass2++) {
+                        int cnt = (pass2 == 0) ? pc : (pass2 == 1) ? sc2 : 1;
+                        int ji; for (ji = 0; ji < cnt; ji++) {
+                            int ai2 = (pass2 == 0)
+                                ? afn_hud_pieces[ps + ji].asset
+                                : (pass2 == 1) ? afn_hud_sprites[ss + ji].asset
+                                : afn_hud_elems[ei3].curAsset;
+                            if (ai2 < 0 || ai2 >= AFN_ASSET_COUNT) continue;
+                            if (hud_pal_remap[ai2] > 0) continue;
+                            int found = -1;
+                            { int b; for (b = 1; b < 15 && found < 0; b++) {
+                                if (bankOwner[b] < 0) continue;
+                                int match = 1;
+                                int c; for (c = 0; c < 16; c++) {
+                                    if (afn_pal[ai2][c] != afn_pal[bankOwner[b]][c]) { match = 0; break; }
+                                }
+                                if (match) found = b;
+                            } }
+                            if (found >= 0) {
+                                hud_pal_remap[ai2] = found;
+                            } else {
+                                while (nextBank < 15 && (nextBank == 6 || bankOwner[nextBank] != -1)) nextBank++;
+                                if (nextBank >= 15) nextBank = 14;
+                                hud_pal_remap[ai2] = nextBank;
+                                bankOwner[nextBank] = ai2;
+                                { int c; for (c = 0; c < 16; c++)
+                                    pal_obj_mem[nextBank * 16 + c] = afn_pal[ai2][c]; }
+                                nextBank++;
+                                while (nextBank == 6) nextBank++;
+                            }
+                        }
+                    }
+                } }
+                { int c; for (c = 1; c < 16; c++) pal_obj_mem[c] = 0x0000; }
+                // Blend support
+                { int needBlend = 0, blendAlpha = 16;
+                int ei5; for (ei5 = 0; ei5 < AFN_HUD_ELEM_COUNT; ei5++) {
+                    if (!afn_hud_visible[ei5]) continue;
+                    int ps3 = afn_hud_elems[ei5].pieceStart;
+                    int pc3 = afn_hud_elems[ei5].pieceCount;
+                    int pi4; for (pi4 = 0; pi4 < pc3; pi4++) {
+                        if (afn_hud_pieces[ps3 + pi4].opacity < 16) {
+                            needBlend = 1;
+                            if (afn_hud_pieces[ps3 + pi4].opacity < blendAlpha)
+                                blendAlpha = afn_hud_pieces[ps3 + pi4].opacity;
+                        }
+                    }
+                }
+                hud_need_blend = needBlend;
+                hud_blend_alpha = blendAlpha;
+                if (needBlend) {
+                    REG_BLDCNT = BLD_STD | BLD_BOT(BLD_BG0 | BLD_BG1 | BLD_BG2 | BLD_BG3 | BLD_OBJ | BLD_BACKDROP);
+                    REG_BLDALPHA = BLD_EVA(blendAlpha) | BLD_EVB(16 - blendAlpha);
+                } }
+                }
+                if (!hud_font_loaded) hud_font_load(staticTiles);
+                m4_hud_was_visible = 1;
+            } else if (m4_hud_was_visible) {
+                hud_font_loaded = 0;
+                m4_hud_was_visible = 0;
+            }
+            // Render HUD elements to OAM
+            { int ei;
+            for (ei = 0; ei < AFN_HUD_ELEM_COUNT && m4HudOamSlot < 126; ei++) {
+                if (!afn_hud_visible[ei]) continue;
+                int ex = afn_hud_elems[ei].x;
+                int ey = afn_hud_elems[ei].y;
+                int hudKfRot = 0, hudKfSx = 256, hudKfSy = 256;
+#ifdef AFN_HUD_HAS_KF
+                if (ei < 4 && afn_hud_elems[ei].kfCount >= 2) {
+                    int kfS = afn_hud_elems[ei].kfStart;
+                    int kfN = afn_hud_elems[ei].kfCount;
+                    int curF = afn_hud_anim_frame[ei];
+                    int lastF = afn_hud_kf[kfS + kfN - 1].frame;
+                    if (lastF > 0 && afn_hud_elems[ei].kfLoop && curF > lastF)
+                        curF = curF % (lastF + 1);
+                    else if (curF > lastF)
+                        curF = lastF;
+                    int kA = 0, kB = 0;
+                    { int ki; for (ki = 0; ki < kfN - 1; ki++) {
+                        if ((int)afn_hud_kf[kfS + ki + 1].frame > curF) { kA = ki; kB = ki + 1; break; }
+                        kA = kfN - 1; kB = kfN - 1;
+                    } }
+                    int fA = afn_hud_kf[kfS + kA].frame;
+                    int fB = afn_hud_kf[kfS + kB].frame;
+                    int span = fB - fA;
+                    if (span <= 0 || kA == kB) {
+                        ex += afn_hud_kf[kfS + kA].offX; ey += afn_hud_kf[kfS + kA].offY;
+                        hudKfRot = afn_hud_kf[kfS + kA].rot;
+                        hudKfSx = afn_hud_kf[kfS + kA].scaleX; hudKfSy = afn_hud_kf[kfS + kA].scaleY;
+                    } else {
+                        int t256 = ((curF - fA) * 256) / span;
+                        ex += afn_hud_kf[kfS + kA].offX + ((afn_hud_kf[kfS + kB].offX - afn_hud_kf[kfS + kA].offX) * t256) / 256;
+                        ey += afn_hud_kf[kfS + kA].offY + ((afn_hud_kf[kfS + kB].offY - afn_hud_kf[kfS + kA].offY) * t256) / 256;
+                        hudKfRot = afn_hud_kf[kfS + kA].rot + ((afn_hud_kf[kfS + kB].rot - afn_hud_kf[kfS + kA].rot) * t256) / 256;
+                        hudKfSx = afn_hud_kf[kfS + kA].scaleX + (((int)afn_hud_kf[kfS + kB].scaleX - (int)afn_hud_kf[kfS + kA].scaleX) * t256) / 256;
+                        hudKfSy = afn_hud_kf[kfS + kA].scaleY + (((int)afn_hud_kf[kfS + kB].scaleY - (int)afn_hud_kf[kfS + kA].scaleY) * t256) / 256;
+                    }
+                }
+#endif
+                int hudUseAffine = (hudKfRot != 0 || hudKfSx != 256 || hudKfSy != 256) ? 1 : 0;
+                int hudAffSlot = -1;
+                if (hudUseAffine) {
+                    hudAffSlot = m4HudOamSlot < 32 ? m4HudOamSlot : -1;
+                    if (hudAffSlot >= 0 && hudAffSlot < 32) {
+                        u16 angle16 = (u16)(hudKfRot << 8);
+                        int cosV = lu_cos(angle16) >> 4;
+                        int sinV = lu_sin(angle16) >> 4;
+                        int invSx = (hudKfSx > 0) ? (256 * 256) / hudKfSx : 256;
+                        int invSy = (hudKfSy > 0) ? (256 * 256) / hudKfSy : 256;
+                        OBJ_AFFINE *oa = &obj_aff_mem[hudAffSlot];
+                        oa->pa = (s16)((cosV * invSx) >> 12);
+                        oa->pb = (s16)((sinV * invSx) >> 12);
+                        oa->pc = (s16)((-sinV * invSy) >> 12);
+                        oa->pd = (s16)((cosV * invSy) >> 12);
+                    } else hudUseAffine = 0;
+                }
+                int layOff[80][2];
+                { int lo; for (lo = 0; lo < 80; lo++) { layOff[lo][0] = 0; layOff[lo][1] = 0; } }
+#ifdef AFN_HUD_HAS_LAYERS
+                { int li2; for (li2 = 0; li2 < AFN_HUD_LAYER_COUNT; li2++) {
+                    if (!afn_hud_layer_active[li2]) continue;
+                    if (afn_hud_layers[li2].elemIdx != ei) continue;
+                    int lkS = afn_hud_layers[li2].kfStart;
+                    int lkN = afn_hud_layers[li2].kfCount;
+                    if (lkN < 1) continue;
+                    int curF2 = afn_hud_layer_frame[li2];
+                    int layLen = afn_hud_layers[li2].length;
+                    int lastF2 = afn_hud_layer_kf[lkS + lkN - 1].frame;
+                    if (layLen > 0 && afn_hud_layers[li2].loop && curF2 >= layLen)
+                        curF2 = curF2 % layLen;
+                    else if (curF2 > lastF2) curF2 = lastF2;
+                    int lkA = 0, lkB = 0;
+                    { int lki; for (lki = 0; lki < lkN - 1; lki++) {
+                        if ((int)afn_hud_layer_kf[lkS + lki + 1].frame > curF2) { lkA = lki; lkB = lki + 1; break; }
+                        lkA = lkN - 1; lkB = lkN - 1;
+                    } }
+                    int lox = 0, loy = 0;
+                    int lfA = afn_hud_layer_kf[lkS + lkA].frame;
+                    int lfB = afn_hud_layer_kf[lkS + lkB].frame;
+                    int lspan = lfB - lfA;
+                    if (lspan <= 0 || lkA == lkB || afn_hud_layers[li2].interp == 0) {
+                        lox = afn_hud_layer_kf[lkS + lkA].offX; loy = afn_hud_layer_kf[lkS + lkA].offY;
+                    } else {
+                        int lt256 = ((curF2 - lfA) * 256) / lspan;
+                        if (afn_hud_layers[li2].interp == 2)
+                            lt256 = (lt256 * lt256 * (768 - 2 * lt256)) >> 16;
+                        lox = afn_hud_layer_kf[lkS + lkA].offX + ((afn_hud_layer_kf[lkS + lkB].offX - afn_hud_layer_kf[lkS + lkA].offX) * lt256) / 256;
+                        loy = afn_hud_layer_kf[lkS + lkA].offY + ((afn_hud_layer_kf[lkS + lkB].offY - afn_hud_layer_kf[lkS + lkA].offY) * lt256) / 256;
+                    }
+                    int liS = afn_hud_layers[li2].itemStart;
+                    int liN = afn_hud_layers[li2].itemCount;
+                    { int lii; for (lii = 0; lii < liN; lii++) {
+                        int itype = afn_hud_layer_items[liS + lii].type;
+                        int iidx = afn_hud_layer_items[liS + lii].index;
+                        int slot = -1;
+                        if (itype == 0 && iidx < 64) slot = iidx;
+                        else if (itype == 1 && iidx < 16) slot = 64 + iidx;
+                        if (slot >= 0) { layOff[slot][0] += lox; layOff[slot][1] += loy; }
+                    } }
+                } }
+#endif
+                int pStart = afn_hud_elems[ei].pieceStart;
+                int pCount = afn_hud_elems[ei].pieceCount;
+                int staticTiles2 = AFN_ALL_TILES_LEN / 32;
+                int hudTileAdj = 512 + AFN_DIR_VRAM_TILES - (1024 - staticTiles2);
+                int pi;
+                int layerOrder[4];
+                { int lp = afn_hud_elems[ei].layerPieces;
+                  int ls = afn_hud_elems[ei].layerSprites;
+                  int lt = afn_hud_elems[ei].layerText;
+                  int lc = afn_hud_elems[ei].layerCursor;
+                  int sortType[4] = {0, 1, 2, 3};
+                  int sortVal[4]  = {lp, ls, lt, lc};
+                  int si3, sj;
+                  for (si3 = 1; si3 < 4; si3++) {
+                      int tmpT = sortType[si3], tmpV = sortVal[si3];
+                      sj = si3 - 1;
+                      while (sj >= 0 && sortVal[sj] < tmpV) {
+                          sortType[sj+1] = sortType[sj]; sortVal[sj+1] = sortVal[sj]; sj--;
+                      }
+                      sortType[sj+1] = tmpT; sortVal[sj+1] = tmpV;
+                  }
+                  layerOrder[0] = sortType[0]; layerOrder[1] = sortType[1]; layerOrder[2] = sortType[2]; layerOrder[3] = sortType[3];
+                }
+                int spStart = afn_hud_elems[ei].spriteStart;
+                int spCount2 = afn_hud_elems[ei].spriteCount;
+                { int pass;
+                for (pass = 0; pass < 4 && m4HudOamSlot < 126; pass++) {
+                    if (layerOrder[pass] == 3) {
+                        if (ei == afn_active_element && afn_hud_elems[ei].stopCount > 0 && afn_hud_elems[ei].curAsset >= 0 && m4HudOamSlot < 128) {
+                            int stopIdx = afn_cursor_stop;
+                            int maxStops = afn_hud_elems[ei].stopCount;
+                            if (stopIdx < 0 || stopIdx >= maxStops) stopIdx = 0;
+                            int si2 = afn_hud_elems[ei].stopStart + stopIdx;
+                            int csx = ex + (int)afn_hud_stops[si2].x + (int)afn_hud_elems[ei].curOffX;
+                            int csy = ey + (int)afn_hud_stops[si2].y + (int)afn_hud_elems[ei].curOffY;
+                            int cai = afn_hud_elems[ei].curAsset;
+                            int cfr = afn_hud_elems[ei].curFrame;
+                            if (cai >= 0 && cai < AFN_ASSET_COUNT) {
+                                int ctb = afn_asset_desc[cai][0];
+                                int ctpf = afn_asset_desc[cai][1];
+                                int csz = afn_asset_desc[cai][3];
+                                int cpb = hud_pal_remap[cai] ? hud_pal_remap[cai] : afn_asset_desc[cai][4];
+                                u16 ca0 = ATTR0_SQUARE | ((csy & 0xFF));
+                                u16 ca1 = size_to_attr1(csz) | ((csx & 0x1FF));
+                                if (hudUseAffine && hudAffSlot >= 0) { ca0 |= ATTR0_AFF; ca1 |= ATTR1_AFF_ID(hudAffSlot); }
+                                u16 ca2 = ATTR2_PALBANK(cpb) | ATTR2_PRIO(0) | ((ctb - hudTileAdj + cfr * ctpf) & 0x3FF);
+                                obj_set_attr(&oam_mem[m4HudOamSlot], ca0, ca1, ca2);
+                                m4HudOamSlot++;
+                            }
+                        }
+                    } else if (layerOrder[pass] == 2) {
+                        int tStart2 = afn_hud_elems[ei].textStart;
+                        int tCount2 = afn_hud_elems[ei].textCount;
+                        int ti2;
+                        for (ti2 = 0; ti2 < tCount2 && m4HudOamSlot < 126; ti2++) {
+                            int tpx = ex + afn_hud_texts[tStart2 + ti2].x;
+                            int tpy = ey + afn_hud_texts[tStart2 + ti2].y;
+                            const char* tstr = afn_hud_texts[tStart2 + ti2].text;
+                            char cntBuf[32];
+                            if (afn_hud_texts[tStart2 + ti2].sourceSlot >= 0) {
+                                int slot = afn_hud_texts[tStart2 + ti2].sourceSlot;
+                                if (slot > 3) slot = 3;
+                                tstr = fmt_counter(cntBuf, sizeof(cntBuf), afn_hud_texts[tStart2 + ti2].text,
+                                    afn_hud_value[slot], afn_hud_texts[tStart2 + ti2].pad);
+                            }
+                            ((u16*)0x05000200)[15 * 16 + 1] = afn_hud_texts[tStart2 + ti2].color;
+                            m4HudOamSlot += hud_text_oam_ex(m4HudOamSlot, tpx, tpy, tstr, 15, afn_hud_texts[tStart2 + ti2].font);
+                        }
+                    } else if (layerOrder[pass] == 1 && spCount2 > 0) {
+                        int spi;
+                        for (spi = spCount2 - 1; spi >= 0 && m4HudOamSlot < 126; spi--) {
+                            int ai = afn_hud_sprites[spStart + spi].asset;
+                            if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
+                            int fr = afn_hud_sprites[spStart + spi].frame;
+                            int sx = ex + afn_hud_sprites[spStart + spi].x + layOff[64 + spi][0];
+                            int sy = ey + afn_hud_sprites[spStart + spi].y + layOff[64 + spi][1];
+                            int tileBase = afn_asset_desc[ai][0];
+                            int tpf      = afn_asset_desc[ai][1];
+                            int objSz    = afn_asset_desc[ai][3];
+                            int palBank  = hud_pal_remap[ai] ? hud_pal_remap[ai] : afn_asset_desc[ai][4];
+                            int tileCur  = tileBase - hudTileAdj + fr * tpf;
+                            u16 a0 = ATTR0_SQUARE | ((sy & 0xFF));
+                            u16 a1 = size_to_attr1(objSz) | ((sx & 0x1FF));
+                            if (hudUseAffine && hudAffSlot >= 0) { a0 |= ATTR0_AFF; a1 |= ATTR1_AFF_ID(hudAffSlot); }
+                            u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
+                            obj_set_attr(&oam_mem[m4HudOamSlot], a0, a1, a2);
+                            m4HudOamSlot++;
+                        }
+                    } else {
+                        for (pi = pCount - 1; pi >= 0 && m4HudOamSlot < 126; pi--) {
+                            int ai = afn_hud_pieces[pStart + pi].asset;
+                            if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
+                            int fr = afn_hud_pieces[pStart + pi].frame;
+                            int sx = ex + afn_hud_pieces[pStart + pi].x + layOff[pi][0];
+                            int sy = ey + afn_hud_pieces[pStart + pi].y + layOff[pi][1];
+                            int tileBase = afn_asset_desc[ai][0];
+                            int tpf      = afn_asset_desc[ai][1];
+                            int objSz    = afn_asset_desc[ai][3];
+                            int palBank  = afn_hud_pieces[pStart + pi].blackTint ? 0
+                                : (hud_pal_remap[ai] ? hud_pal_remap[ai] : afn_asset_desc[ai][4]);
+                            int tileCur  = tileBase - hudTileAdj + fr * tpf;
+                            u16 a0 = ATTR0_SQUARE | ((sy & 0xFF));
+                            u16 a1 = size_to_attr1(objSz) | ((sx & 0x1FF));
+                            if (hudUseAffine && hudAffSlot >= 0) { a0 |= ATTR0_AFF; a1 |= ATTR1_AFF_ID(hudAffSlot); }
+                            if (afn_hud_pieces[pStart + pi].opacity < 16) a0 |= ATTR0_BLEND;
+                            u16 a2 = ATTR2_PALBANK(palBank) | ATTR2_PRIO(0) | (tileCur & 0x3FF);
+                            obj_set_attr(&oam_mem[m4HudOamSlot], a0, a1, a2);
+                            m4HudOamSlot++;
+                        }
+                    }
+                }}
+            }}
+            // Hide remaining HUD OAM slots
+            { int i; for (i = m4HudOamSlot; i < 128; i++) obj_hide(&oam_mem[i]); }
+        }
+#endif
 
         // Show snd_fix_mode on BG0 tilemap (top-right corner, Mode 7 only)
 #ifdef AFN_HAS_SOUND
