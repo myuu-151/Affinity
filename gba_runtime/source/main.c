@@ -2158,6 +2158,9 @@ static void load_editor_sprites(void)
         g_sprites[i].facing = g_sprites[i].rotation;
     }
     g_spriteCount = count;
+    // Initialize all sprites as visible
+    for (i = 0; i < count && i < 16; i++)
+        afn_sprite_visible[i] = 1;
     // Build mesh sprite bitmask for draw-behind exception checks
     g_meshSpriteMask = 0;
     for (i = 0; i < count; i++) {
@@ -2313,6 +2316,8 @@ static void update_sprites(void)
         FIXED dx, dz, fovLambda, side, heightDiff;
         int screenY, screenX, scale;
 
+        // Skip destroyed/hidden sprites
+        if (i < 16 && !afn_sprite_visible[i]) continue;
         // Skip mesh sprites (rendered into bitmap, not OAM)
         if (g_sprites[i].meshIdx >= 0) continue;
         // Skip draw-behind exception sprites (blitted directly to bitmap)
@@ -4166,6 +4171,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 
         if (g_sprites[si].meshIdx < 0 || g_sprites[si].meshIdx >= AFN_MESH_COUNT)
             continue;
+        // Skip destroyed/hidden sprites
+        if (si < 16 && !afn_sprite_visible[si]) continue;
 
         mi = g_sprites[si].meshIdx;
         // Skip invisible meshes (collision-only)
@@ -6768,6 +6775,7 @@ int main(void)
                 int ci;
                 for (ci = 0; ci < g_spriteCount; ci++) {
                     if (ci == player_sprite_idx) continue;
+                    if (ci < 16 && !afn_sprite_visible[ci]) continue;
                     FIXED dx = player_x - g_sprites[ci].x;
                     FIXED dz = player_z - g_sprites[ci].z;
                     // Distance squared in 16.8 fixed point — compare against radius^2

@@ -741,7 +741,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "On Rise",         0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Reset Scene",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Set Player Height",0xFF3355AA, 1, 1, 1, 0, {"Value (float)"}, {}, {} },
-    { "Set HUD Value",   0xFF3355AA, 1, 1, 1, 0, {"Value"}, {"Slot"}, {} },
+    { "Set HUD Value",   0xFF3355AA, 1, 1, 2, 0, {"Value", "Slot"}, {}, {} },
 };
 
 struct VsNode {

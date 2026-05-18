@@ -2547,6 +2547,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    player_z = " << z << " << 8;\n";
                     break;
                 }
+                case GBAScriptNodeType::DestroyObject: {
+                    auto* objData = findDataIn(action->id, 0);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    f << "    afn_sprite_visible[" << obj << "] = 0;\n";
+                    break;
+                }
                 case GBAScriptNodeType::SetVisible: {
                     auto* objData = findDataIn(action->id, 0);
                     auto* visData = findDataIn(action->id, 1);
@@ -4066,6 +4072,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    player_z = " << z << " << 8;\n";
                     break;
                 }
+                case GBAScriptNodeType::DestroyObject: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    std::string obj = objData ? bpResolveInt(objData) : "afn_bp_cur_spr_idx";
+                    f << "    afn_sprite_visible[" << obj << "] = 0;\n";
+                    break;
+                }
                 case GBAScriptNodeType::SetVisible: {
                     auto* objData = bpFindDataIn(action->id, 0);
                     auto* visData = bpFindDataIn(action->id, 1);
@@ -5271,6 +5283,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "    if (afn_bp_instances[i].sceneMask != 0xFFFFFFFFu && !(afn_bp_instances[i].sceneMask & (1u << tm_scene_idx))) continue;\n";
             f << "    if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;\n";
             f << "    if (afn_bp_instances[i].sprIdx != afn_collided_sprite) continue;\n";
+            f << "    if (afn_bp_instances[i].sprIdx >= 0 && afn_bp_instances[i].sprIdx < 16 && !afn_sprite_visible[afn_bp_instances[i].sprIdx]) continue;\n";
+            f << "    afn_bp_cur_spr_idx = afn_bp_instances[i].sprIdx;\n";
+            f << "    afn_bp_cur_tm_obj = afn_bp_instances[i].tmObjIdx;\n";
             f << "    switch (afn_bp_instances[i].bpIdx) {\n";
             for (int bi = 0; bi < (int)blueprints.size(); bi++) {
                 int pc = (int)blueprints[bi].params.size();
