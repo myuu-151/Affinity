@@ -4178,7 +4178,6 @@ typedef struct {
     int drawDist;
     int drawPriority;
     int visible;
-    int clampAbove;
     int centerDepth;
 } MeshSlot;
 
@@ -4253,7 +4252,6 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         ms->drawPriority = afn_mesh_desc[mi][15];
         ms->visible = afn_mesh_desc[mi][16];
         ms->meshPerspCorr = afn_mesh_desc[mi][17];
-        ms->clampAbove = afn_mesh_desc[mi][18];
         ms->texMask = ms->texW > 0 ? ms->texW - 1 : 0;
         ms->uvs = afn_mesh_uv_ptrs[mi];
         ms->tex = tex_cache_ptrs[mi];
@@ -4299,9 +4297,6 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             g_vsz[vb + v] = fovLambda;
 
             heightDiff = cam_h - wy;
-            // Clamp Above: per-vertex, prevent any vertex from going above horizon
-            if (ms->clampAbove && heightDiff < 1)
-                heightDiff = 1;
             side = (dx * g_cosf + dz * g_sinf) >> 8;
             g_vSide[vb + v] = side;
             g_vHeight[vb + v] = heightDiff;

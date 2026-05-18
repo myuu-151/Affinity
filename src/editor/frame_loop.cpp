@@ -8061,8 +8061,6 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Split each face into NxN sub-faces at export (reduces texture warping on large polygons)");
         }
-        ImGui::Checkbox("Clamp Above##meshClamp", &ma.clampAbove);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Prevent mesh from projecting above the camera horizon.\nFixes 'under the mesh' warp on large flat surfaces like paths.");
         ImGui::Checkbox("Textured##meshTex", &ma.textured);
         if (ma.textured) {
             ImGui::SameLine();
