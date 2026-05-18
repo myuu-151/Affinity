@@ -3088,11 +3088,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_elem_idx = " << slot << ";\n";
                     f << "    afn_active_element = " << slot << ";\n";
                     f << "    afn_cursor_stop = 0;\n";
-                    f << "    afn_player_frozen = 1;\n";
-                    f << "    afn_play_anim = -1;\n";
-                    f << "    afn_move_speed = 0;\n";
                     f << "    afn_stop_count = afn_hud_elems[" << slot << "].stopCount;\n";
-                    f << "    { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[" << slot << "].stopStart + si].link; }\n";
+                    f << "    if (afn_stop_count > 0) {\n";
+                    f << "      afn_player_frozen = 1;\n";
+                    f << "      afn_play_anim = -1;\n";
+                    f << "      afn_move_speed = 0;\n";
+                    f << "      { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[" << slot << "].stopStart + si].link; }\n";
+                    f << "    }\n";
                     break;
                 }
                 case GBAScriptNodeType::HideHUD: {

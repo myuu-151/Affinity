@@ -18877,14 +18877,15 @@ void FrameTick(float dt)
                     break;
                 }
                 case VsNodeType::ShowHUD: {
-                    editorCode = "// Show HUD element + freeze player";
+                    editorCode = "// Show HUD element (freeze player only if interactive)";
                     char b6[512];
                     snprintf(b6, sizeof(b6),
                         "    afn_hud_visible[%s] = 1;\n"
-                        "    afn_player_frozen = 1;\n"
+                        "    if (stopCount > 0) afn_player_frozen = 1;\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // DMA static HUD tiles to OBJ VRAM; init cursor at stop 0\n"
-                        "    // Player input blocked while afn_player_frozen == 1",
+                        "    // DMA static HUD tiles to OBJ VRAM\n"
+                        "    // If element has cursor stops: freeze player, init cursor at stop 0\n"
+                        "    // Non-interactive elements (counters) don't freeze",
                         fmtInt(infoNode.id, 0, "<slot>"));
                     setActionFunc(infoNode, "_show_hud", b6);
                     break;
