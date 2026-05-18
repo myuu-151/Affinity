@@ -7212,7 +7212,7 @@ int main(void)
 #endif
             int anyHudVisible = 0;
             { int ei2; for (ei2 = 0; ei2 < AFN_HUD_ELEM_COUNT; ei2++) if (afn_hud_visible[ei2]) anyHudVisible = 1; }
-            int m4HudOamSlot = 32;
+            int m4HudOamSlot = 48;
             if (anyHudVisible) {
                 // DMA all static tiles to end of OBJ VRAM
                 int staticTiles = AFN_ALL_TILES_LEN / 32;
