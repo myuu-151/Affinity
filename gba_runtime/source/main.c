@@ -4265,6 +4265,20 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         sprScale = g_sprites[si].scale;
         if (sprScale <= 0) sprScale = 256;
 
+        // Clamp Above: find max world Y across mesh, raise effective cam_h so
+        // the entire mesh stays below horizon while preserving its shape
+        {
+            FIXED effectiveCamH = cam_h;
+            if (ms->clampAbove) {
+                FIXED wyMax = -0x7FFFFFFF;
+                for (v = 0; v < vertCount; v++) {
+                    FIXED vy2 = (verts[v * 3 + 1] * sprScale) >> 8;
+                    FIXED wy2 = g_sprites[si].y + vy2;
+                    if (wy2 > wyMax) wyMax = wy2;
+                }
+                if (effectiveCamH <= wyMax) effectiveCamH = wyMax + 1;
+            }
+
         // Project vertices into global arrays
         for (v = 0; v < vertCount; v++)
         {
@@ -4297,9 +4311,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             }
             g_vsz[vb + v] = fovLambda;
 
-            heightDiff = cam_h - wy;
-            // Clamp Above: prevent vertices from projecting above horizon
-            if (ms->clampAbove && heightDiff < 1) heightDiff = 1;
+            heightDiff = effectiveCamH - wy;
             side = (dx * g_cosf + dz * g_sinf) >> 8;
             g_vSide[vb + v] = side;
             g_vHeight[vb + v] = heightDiff;
@@ -4309,6 +4321,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 g_vsy[vb + v] = m7_horizon + ((heightDiff * projScale) >> 12);
                 g_vsx[vb + v] = 120 + ((side * projScale) >> 12);
             }
+        }
         }
 
         // Mesh center depth (sprite origin projected along camera forward)
