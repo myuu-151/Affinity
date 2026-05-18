@@ -251,7 +251,7 @@ struct FloorSprite
     int   instanceParamCount = 0;
 };
 
-static constexpr int kMaxFloorSprites = 64; // GBA OAM has 128 slots, reserve half
+static constexpr int kMaxFloorSprites = 256; // supports up to 256 objects per scene, nearest 32 rendered via OAM
 
 // Camera start object — the "game camera" position for Play mode
 struct CameraStartObject

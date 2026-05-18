@@ -1930,34 +1930,34 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "extern int   tm_move_timer;\n";
         f << "static int   afn_anim_speed = 1;\n";
         f << "static u32   afn_rng = 12345;\n";
-        f << "static u8    afn_sprite_visible[64];\n";
+        f << "static u8    afn_sprite_visible[NUM_SPRITES];\n";
         f << "static int   afn_shake_intensity;\n";
         f << "static int   afn_shake_frames;\n";
         f << "static int   afn_fade_target;\n";
         f << "static int   afn_fade_frames;\n";
         f << "static int   afn_fade_counter;\n";
         f << "static int   afn_fade_level;\n";
-        f << "static int   afn_hp[64];\n";
+        f << "static int   afn_hp[NUM_SPRITES];\n";
         f << "static int   afn_score;\n";
         f << "static FIXED afn_start_x, afn_start_y, afn_start_z;\n";
         f << "static int   afn_frame_count;\n";
-        f << "static u8    afn_sprite_flip[64];\n";
+        f << "static u8    afn_sprite_flip[NUM_SPRITES];\n";
         f << "static int   afn_draw_distance;\n";
-        f << "static u8    afn_collision_enabled[64];\n";
+        f << "static u8    afn_collision_enabled[NUM_SPRITES];\n";
         f << "static int   afn_cam_locked;\n";
         f << "static int   afn_cam_speed = 256;\n";
         f << "static FIXED afn_force_x, afn_force_z;\n";
         f << "static int   afn_friction = 256;\n";
         f << "static int   afn_vars[16];\n";
         f << "static int   afn_scripts_stopped;\n";
-        f << "static u8    afn_sprite_layer[64];\n";
-        f << "static u8    afn_sprite_alpha[64];\n";
-        f << "static u8    afn_flash_obj[64];\n";
-        f << "static u16   afn_sprite_rot[64];\n";
-        f << "static int   afn_max_hp[64];\n";
-        f << "static u8    afn_ai_mode[64];\n";
-        f << "static u16   afn_sprite_tint[64];\n";
-        f << "static u8    afn_sprite_shake[64];\n";
+        f << "static u8    afn_sprite_layer[NUM_SPRITES];\n";
+        f << "static u8    afn_sprite_alpha[NUM_SPRITES];\n";
+        f << "static u8    afn_flash_obj[NUM_SPRITES];\n";
+        f << "static u16   afn_sprite_rot[NUM_SPRITES];\n";
+        f << "static int   afn_max_hp[NUM_SPRITES];\n";
+        f << "static u8    afn_ai_mode[NUM_SPRITES];\n";
+        f << "static u16   afn_sprite_tint[NUM_SPRITES];\n";
+        f << "static u8    afn_sprite_shake[NUM_SPRITES];\n";
         f << "static int   afn_hud_value[4];\n";
         f << "static u8    afn_hud_visible[4];\n";
         f << "static int   afn_cursor_stop;\n";
@@ -1965,8 +1965,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int   afn_stop_links[8];\n";
         f << "static int   afn_elem_idx;\n";
         f << "static int   afn_active_element;\n";
-        f << "static FIXED afn_patrol_home_x[64];\n";
-        f << "static FIXED afn_patrol_home_z[64];\n";
+        f << "static FIXED afn_patrol_home_x[NUM_SPRITES];\n";
+        f << "static FIXED afn_patrol_home_z[NUM_SPRITES];\n";
         f << "static u16   afn_bg_color;\n";
         // Inventory
         f << "static int   afn_inventory[16];\n";
@@ -1978,16 +1978,16 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int   afn_dlg_choice_a, afn_dlg_choice_b;\n";
         f << "static int   afn_dlg_choosing;\n";
         // State machine
-        f << "static int   afn_state[64];\n";
-        f << "static int   afn_prev_state[64];\n";
-        f << "static int   afn_state_timer[64];\n";
+        f << "static int   afn_state[NUM_SPRITES];\n";
+        f << "static int   afn_prev_state[NUM_SPRITES];\n";
+        f << "static int   afn_state_timer[NUM_SPRITES];\n";
         // Text rendering
         f << "static u16   afn_text_color = 0x7FFF;\n";
         // Collision
-        f << "static int   afn_collision_size[64];\n";
-        f << "static int   afn_collision_ignore[64];\n";
+        f << "static int   afn_collision_size[NUM_SPRITES];\n";
+        f << "static int   afn_collision_ignore[NUM_SPRITES];\n";
         // Lifetime / spawning
-        f << "static int   afn_lifetime[64];\n";
+        f << "static int   afn_lifetime[NUM_SPRITES];\n";
         // HUD bars
         f << "static u16   afn_bar_color[4];\n";
         f << "static int   afn_bar_max[4];\n";
@@ -5180,7 +5180,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 std::string rad = radData ? bpResolveInt(radData) : "16";
                 // Use instance sprite (afn_bp_cur_spr_idx) instead of hardcoded index
                 f << "    { int _si = afn_bp_cur_spr_idx;\n";
-                f << "      if (_si >= 0 && _si < 64 && !afn_sprite_visible[_si]) goto _skip_col_" << bi << ";\n";
+                f << "      if (_si >= 0 && _si < NUM_SPRITES && !afn_sprite_visible[_si]) goto _skip_col_" << bi << ";\n";
                 f << "      FIXED _dx = player_x - g_sprites[_si].x;\n";
                 f << "      FIXED _dz = player_z - g_sprites[_si].z;\n";
                 f << "      FIXED _dy = player_y - g_sprites[_si].y;\n";
@@ -5284,7 +5284,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             f << "    if (afn_bp_instances[i].sceneMask != 0xFFFFFFFFu && !(afn_bp_instances[i].sceneMask & (1u << tm_scene_idx))) continue;\n";
             f << "    if (afn_bp_def_frozen[afn_bp_instances[i].bpIdx]) continue;\n";
             f << "    if (afn_bp_instances[i].sprIdx != afn_collided_sprite) continue;\n";
-            f << "    if (afn_bp_instances[i].sprIdx >= 0 && afn_bp_instances[i].sprIdx < 64 && !afn_sprite_visible[afn_bp_instances[i].sprIdx]) continue;\n";
+            f << "    if (afn_bp_instances[i].sprIdx >= 0 && afn_bp_instances[i].sprIdx < NUM_SPRITES && !afn_sprite_visible[afn_bp_instances[i].sprIdx]) continue;\n";
             f << "    afn_bp_cur_spr_idx = afn_bp_instances[i].sprIdx;\n";
             f << "    afn_bp_cur_tm_obj = afn_bp_instances[i].tmObjIdx;\n";
             f << "    switch (afn_bp_instances[i].bpIdx) {\n";

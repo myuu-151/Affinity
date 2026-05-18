@@ -9999,7 +9999,16 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::Separator();
         ImGui::Text("Rendering");
         ImGui::DragFloat("Mesh Draw Distance##cam", &sCamObj.drawDistance, 1.0f, 0.0f, 2000.0f, "%.0f");
-        ImGui::DragFloat("Sprite Draw Distance##cam", &sCamObj.spriteDrawDistance, 1.0f, 0.0f, 2000.0f, "%.0f");
+        {
+            bool proxLoading = sCamObj.spriteDrawDistance > 0.0f;
+            if (ImGui::Checkbox("Proximity Loading##cam", &proxLoading)) {
+                sCamObj.spriteDrawDistance = proxLoading ? 500.0f : 0.0f;
+                sProjectDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Only render sprites within draw distance.\nNearest 32 get OAM slots — allows unlimited sprites per scene.\nSet distance below, or disable to show all.");
+        }
+        if (sCamObj.spriteDrawDistance > 0.0f)
+            ImGui::DragFloat("Sprite Draw Distance##cam", &sCamObj.spriteDrawDistance, 1.0f, 1.0f, 2000.0f, "%.0f");
         ImGui::DragInt("Small Tri Cull##cam", &sCamObj.smallTriCull, 1.0f, 0, 500, "%d");
         if (sCamObj.smallTriCull > 0)
             ImGui::TextDisabled("Skip tris with screen area < %d", sCamObj.smallTriCull);
