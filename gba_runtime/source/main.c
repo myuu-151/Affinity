@@ -4267,14 +4267,12 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 
         {
         // Project vertices into global arrays
-        int clampFwdLimit = cam_fov * 4; // only clamp verts not far ahead
         for (v = 0; v < vertCount; v++)
         {
             FIXED vx = verts[v * 3 + 0];
             FIXED vy = verts[v * 3 + 1];
             FIXED vz = verts[v * 3 + 2];
             FIXED rx, ry, rz, wx, wy, wz, dx, dz, fovLambda, heightDiff, side;
-            int rawDepth;
 
             vx = (vx * sprScale) >> 8;
             vy = (vy * sprScale) >> 8;
@@ -4291,7 +4289,6 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             dx = wx - cam_x;
             dz = wz - cam_z;
             fovLambda = (dx * g_sinf - dz * g_cosf) >> 8;
-            rawDepth = fovLambda;
             g_vRawDepth[vb + v] = fovLambda;
 
             {
@@ -4302,9 +4299,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             g_vsz[vb + v] = fovLambda;
 
             heightDiff = cam_h - wy;
-            // Clamp Above: per-vertex, only for verts behind/beside camera
-            // Verts far ahead (uphill) keep natural projection
-            if (ms->clampAbove && heightDiff < 1 && rawDepth < clampFwdLimit)
+            // Clamp Above: per-vertex, prevent any vertex from going above horizon
+            if (ms->clampAbove && heightDiff < 1)
                 heightDiff = 1;
             side = (dx * g_cosf + dz * g_sinf) >> 8;
             g_vSide[vb + v] = side;
