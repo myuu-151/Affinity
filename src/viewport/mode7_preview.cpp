@@ -1122,17 +1122,18 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
 
                     if (ma.textured && !ma.texturePixels.empty() && ma.texW > 0 && ma.texH > 0)
                     {
+                        // Flip V to match OpenGL convention (3D tab uses 1-v)
                         DrawTriangleTex(
-                            pSX[i0], pSY[i0], verts[i0].u, verts[i0].v,
-                            pSX[i1], pSY[i1], verts[i1].u, verts[i1].v,
-                            pSX[i2], pSY[i2], verts[i2].u, verts[i2].v,
+                            pSX[i0], pSY[i0], verts[i0].u, 1.0f - verts[i0].v,
+                            pSX[i1], pSY[i1], verts[i1].u, 1.0f - verts[i1].v,
+                            pSX[i2], pSY[i2], verts[i2].u, 1.0f - verts[i2].v,
                             ma.texturePixels.data(), ma.texturePalette,
                             ma.texW, ma.texH, sp.fog);
                         if (isQuad)
                             DrawTriangleTex(
-                                pSX[i0], pSY[i0], verts[i0].u, verts[i0].v,
-                                pSX[i2], pSY[i2], verts[i2].u, verts[i2].v,
-                                pSX[i3], pSY[i3], verts[i3].u, verts[i3].v,
+                                pSX[i0], pSY[i0], verts[i0].u, 1.0f - verts[i0].v,
+                                pSX[i2], pSY[i2], verts[i2].u, 1.0f - verts[i2].v,
+                                pSX[i3], pSY[i3], verts[i3].u, 1.0f - verts[i3].v,
                                 ma.texturePixels.data(), ma.texturePalette,
                                 ma.texW, ma.texH, sp.fog);
                     }

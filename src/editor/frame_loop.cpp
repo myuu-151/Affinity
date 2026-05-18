@@ -8253,7 +8253,9 @@ static void DrawTabBar()
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
         if (ImGui::Button("Play", ImVec2(btnW, btnH)))
         {
-            // Save blueprint working set back before playing so bp.nodes/links are current
+            // Play mode disabled — runtime has diverged too far from editor preview
+        }
+        if (false) { // Play mode init (disabled)
             if (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0 && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
                 sBlueprintAssets[sVsEditBlueprintIdx].nodes = sVsNodes;
                 sBlueprintAssets[sVsEditBlueprintIdx].links = sVsLinks;
