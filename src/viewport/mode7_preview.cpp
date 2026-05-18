@@ -862,6 +862,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             && fs.meshIdx >= 0 && fs.meshIdx < meshAssetCount && meshAssets)
         {
             const MeshAsset& ma = meshAssets[fs.meshIdx];
+            if (!ma.visible) continue;
             if (!ma.vertices.empty() && (!ma.indices.empty() || !ma.quadIndices.empty()))
             {
                 float meshScale = fs.scale;

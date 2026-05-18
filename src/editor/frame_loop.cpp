@@ -26170,6 +26170,7 @@ void Render3DViewport()
         if (fs.type == SpriteType::Mesh && fs.meshIdx >= 0 && fs.meshIdx < (int)sMeshAssets.size())
         {
             const MeshAsset& ma = sMeshAssets[fs.meshIdx];
+            if (!ma.visible) continue;
             glPushMatrix();
             glTranslatef(sx, sy, sz);
             glRotatef(fs.rotation, 0, 1, 0);
