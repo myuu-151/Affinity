@@ -876,6 +876,107 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             if (!ma.visible) continue;
             if (!ma.vertices.empty() && (!ma.indices.empty() || !ma.quadIndices.empty()))
             {
+                // Subdivide mesh data if requested (fixes texture distortion on large faces)
+                const std::vector<MeshVertex>* useVerts = &ma.vertices;
+                const std::vector<uint32_t>* useIndices = &ma.indices;
+                const std::vector<uint32_t>* useQuadIndices = &ma.quadIndices;
+                std::vector<MeshVertex> subVerts;
+                std::vector<uint32_t> subIndices, subQuadIndices;
+                if (ma.subdivide >= 2 && ma.subdivide <= 4)
+                {
+                    int N = ma.subdivide;
+                    subVerts = ma.vertices; // start with original verts
+                    // Subdivide quads: each quad -> NxN sub-quads
+                    for (size_t qi = 0; qi + 4 <= ma.quadIndices.size(); qi += 4)
+                    {
+                        int q0 = ma.quadIndices[qi+0], q1 = ma.quadIndices[qi+1];
+                        int q2 = ma.quadIndices[qi+2], q3 = ma.quadIndices[qi+3];
+                        const MeshVertex& v0 = ma.vertices[q0];
+                        const MeshVertex& v1 = ma.vertices[q1];
+                        const MeshVertex& v2 = ma.vertices[q2];
+                        const MeshVertex& v3 = ma.vertices[q3];
+                        uint32_t grid[5][5];
+                        for (int gy = 0; gy <= N; gy++)
+                            for (int gx = 0; gx <= N; gx++) {
+                                float fu = (float)gx/N, fv = (float)gy/N;
+                                float su = 1.0f-fu, sv = 1.0f-fv;
+                                float w0 = su*sv, w1 = fu*sv, w2 = fu*fv, w3 = su*fv;
+                                MeshVertex mv;
+                                mv.px = v0.px*w0 + v1.px*w1 + v2.px*w2 + v3.px*w3;
+                                mv.py = v0.py*w0 + v1.py*w1 + v2.py*w2 + v3.py*w3;
+                                mv.pz = v0.pz*w0 + v1.pz*w1 + v2.pz*w2 + v3.pz*w3;
+                                mv.nx = v0.nx*w0 + v1.nx*w1 + v2.nx*w2 + v3.nx*w3;
+                                mv.ny = v0.ny*w0 + v1.ny*w1 + v2.ny*w2 + v3.ny*w3;
+                                mv.nz = v0.nz*w0 + v1.nz*w1 + v2.nz*w2 + v3.nz*w3;
+                                mv.r = v0.r*w0 + v1.r*w1 + v2.r*w2 + v3.r*w3;
+                                mv.g = v0.g*w0 + v1.g*w1 + v2.g*w2 + v3.g*w3;
+                                mv.b = v0.b*w0 + v1.b*w1 + v2.b*w2 + v3.b*w3;
+                                mv.u = v0.u*w0 + v1.u*w1 + v2.u*w2 + v3.u*w3;
+                                mv.v = v0.v*w0 + v1.v*w1 + v2.v*w2 + v3.v*w3;
+                                mv.objPosIdx = v0.objPosIdx;
+                                grid[gy][gx] = (uint32_t)subVerts.size();
+                                subVerts.push_back(mv);
+                            }
+                        for (int gy = 0; gy < N; gy++)
+                            for (int gx = 0; gx < N; gx++) {
+                                subQuadIndices.push_back(grid[gy][gx]);
+                                subQuadIndices.push_back(grid[gy][gx+1]);
+                                subQuadIndices.push_back(grid[gy+1][gx+1]);
+                                subQuadIndices.push_back(grid[gy+1][gx]);
+                            }
+                    }
+                    // Subdivide triangles: each tri -> N*N sub-tris
+                    for (size_t ti = 0; ti + 3 <= ma.indices.size(); ti += 3)
+                    {
+                        int t0 = ma.indices[ti+0], t1 = ma.indices[ti+1], t2 = ma.indices[ti+2];
+                        const MeshVertex& vt0 = ma.vertices[t0];
+                        const MeshVertex& vt1 = ma.vertices[t1];
+                        const MeshVertex& vt2 = ma.vertices[t2];
+                        std::vector<std::vector<uint32_t>> rows(N+1);
+                        for (int r = 0; r <= N; r++) {
+                            rows[r].resize(r+1);
+                            for (int c = 0; c <= r; c++) {
+                                float b0 = 1.0f - (float)r/N;
+                                float brem = (float)r/N;
+                                float b1 = (r > 0) ? brem * (float)c / r : 0.0f;
+                                float b2 = brem - b1;
+                                MeshVertex mv;
+                                mv.px = vt0.px*b0 + vt1.px*b1 + vt2.px*b2;
+                                mv.py = vt0.py*b0 + vt1.py*b1 + vt2.py*b2;
+                                mv.pz = vt0.pz*b0 + vt1.pz*b1 + vt2.pz*b2;
+                                mv.nx = vt0.nx*b0 + vt1.nx*b1 + vt2.nx*b2;
+                                mv.ny = vt0.ny*b0 + vt1.ny*b1 + vt2.ny*b2;
+                                mv.nz = vt0.nz*b0 + vt1.nz*b1 + vt2.nz*b2;
+                                mv.r = vt0.r*b0 + vt1.r*b1 + vt2.r*b2;
+                                mv.g = vt0.g*b0 + vt1.g*b1 + vt2.g*b2;
+                                mv.b = vt0.b*b0 + vt1.b*b1 + vt2.b*b2;
+                                mv.u = vt0.u*b0 + vt1.u*b1 + vt2.u*b2;
+                                mv.v = vt0.v*b0 + vt1.v*b1 + vt2.v*b2;
+                                mv.objPosIdx = vt0.objPosIdx;
+                                rows[r][c] = (uint32_t)subVerts.size();
+                                subVerts.push_back(mv);
+                            }
+                        }
+                        for (int r = 0; r < N; r++)
+                            for (int c = 0; c <= r; c++) {
+                                subIndices.push_back(rows[r][c]);
+                                subIndices.push_back(rows[r+1][c+1]);
+                                subIndices.push_back(rows[r+1][c]);
+                                if (c < r) {
+                                    subIndices.push_back(rows[r][c]);
+                                    subIndices.push_back(rows[r][c+1]);
+                                    subIndices.push_back(rows[r+1][c+1]);
+                                }
+                            }
+                    }
+                    useVerts = &subVerts;
+                    useIndices = &subIndices;
+                    useQuadIndices = &subQuadIndices;
+                }
+                const std::vector<MeshVertex>& verts = *useVerts;
+                const std::vector<uint32_t>& triIdx = *useIndices;
+                const std::vector<uint32_t>& quadIdx = *useQuadIndices;
+
                 float meshScale = fs.scale;
                 float rY = fs.rotation * 3.14159265f / 180.0f;
                 float rX = fs.rotationX * 3.14159265f / 180.0f;
@@ -885,7 +986,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 float cZ = cosf(rZ), sZ = sinf(rZ);
 
                 // Project all vertices to screen space
-                int nv = (int)ma.vertices.size();
+                int nv = (int)verts.size();
                 // Use dynamic alloc only for large meshes, stack for small
                 float scrX[256], scrY[256], depth[256];
                 bool  vis[256];
@@ -896,7 +997,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
 
                 for (int v = 0; v < nv; v++)
                 {
-                    const MeshVertex& mv = ma.vertices[v];
+                    const MeshVertex& mv = verts[v];
                     float lx = mv.px * meshScale;
                     float ly = mv.py * meshScale;
                     float lz = mv.pz * meshScale;
@@ -927,8 +1028,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
 
                 // Build sort list: each entry is a face (tri or quad) with depth
                 // Negative index = quad, positive = tri
-                int nTriFaces = (int)ma.indices.size() / 3;
-                int nQuadFaces = (int)ma.quadIndices.size() / 4;
+                int nTriFaces = (int)triIdx.size() / 3;
+                int nQuadFaces = (int)quadIdx.size() / 4;
                 int nFaces = nTriFaces + nQuadFaces;
                 int sortIdx[512];
                 float faceDepth[512];
@@ -937,14 +1038,14 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
 
                 for (int t = 0; t < nTriFaces; t++)
                 {
-                    int i0 = ma.indices[t*3], i1 = ma.indices[t*3+1], i2 = ma.indices[t*3+2];
+                    int i0 = triIdx[t*3], i1 = triIdx[t*3+1], i2 = triIdx[t*3+2];
                     pFaceDepth[t] = pDepth[i0] + pDepth[i1] + pDepth[i2];
                     pSort[t] = t;
                 }
                 for (int q = 0; q < nQuadFaces; q++)
                 {
-                    int i0 = ma.quadIndices[q*4], i1 = ma.quadIndices[q*4+1];
-                    int i2 = ma.quadIndices[q*4+2], i3 = ma.quadIndices[q*4+3];
+                    int i0 = quadIdx[q*4], i1 = quadIdx[q*4+1];
+                    int i2 = quadIdx[q*4+2], i3 = quadIdx[q*4+3];
                     pFaceDepth[nTriFaces + q] = pDepth[i0] + pDepth[i1] + pDepth[i2] + pDepth[i3];
                     pSort[nTriFaces + q] = nTriFaces + q;
                 }
@@ -965,12 +1066,12 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                     if (isQuad)
                     {
                         int q = f - nTriFaces;
-                        i0 = ma.quadIndices[q*4]; i1 = ma.quadIndices[q*4+1];
-                        i2 = ma.quadIndices[q*4+2]; i3 = ma.quadIndices[q*4+3];
+                        i0 = quadIdx[q*4]; i1 = quadIdx[q*4+1];
+                        i2 = quadIdx[q*4+2]; i3 = quadIdx[q*4+3];
                     }
                     else
                     {
-                        i0 = ma.indices[f*3]; i1 = ma.indices[f*3+1]; i2 = ma.indices[f*3+2];
+                        i0 = triIdx[f*3]; i1 = triIdx[f*3+1]; i2 = triIdx[f*3+2];
                     }
 
                     if (i0 >= nv || i1 >= nv || i2 >= nv) continue;
@@ -989,15 +1090,15 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                     float fnx, fny, fnz;
                     if (isQuad)
                     {
-                        fnx = (ma.vertices[i0].nx + ma.vertices[i1].nx + ma.vertices[i2].nx + ma.vertices[i3].nx) * 0.25f;
-                        fny = (ma.vertices[i0].ny + ma.vertices[i1].ny + ma.vertices[i2].ny + ma.vertices[i3].ny) * 0.25f;
-                        fnz = (ma.vertices[i0].nz + ma.vertices[i1].nz + ma.vertices[i2].nz + ma.vertices[i3].nz) * 0.25f;
+                        fnx = (verts[i0].nx + verts[i1].nx + verts[i2].nx + verts[i3].nx) * 0.25f;
+                        fny = (verts[i0].ny + verts[i1].ny + verts[i2].ny + verts[i3].ny) * 0.25f;
+                        fnz = (verts[i0].nz + verts[i1].nz + verts[i2].nz + verts[i3].nz) * 0.25f;
                     }
                     else
                     {
-                        fnx = (ma.vertices[i0].nx + ma.vertices[i1].nx + ma.vertices[i2].nx) / 3.0f;
-                        fny = (ma.vertices[i0].ny + ma.vertices[i1].ny + ma.vertices[i2].ny) / 3.0f;
-                        fnz = (ma.vertices[i0].nz + ma.vertices[i1].nz + ma.vertices[i2].nz) / 3.0f;
+                        fnx = (verts[i0].nx + verts[i1].nx + verts[i2].nx) / 3.0f;
+                        fny = (verts[i0].ny + verts[i1].ny + verts[i2].ny) / 3.0f;
+                        fnz = (verts[i0].nz + verts[i1].nz + verts[i2].nz) / 3.0f;
                     }
                     // Rotate normal: Y, then X, then Z
                     float nx1 = fnx * cY + fnz * sY;
@@ -1014,16 +1115,16 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                     if (ma.textured && !ma.texturePixels.empty() && ma.texW > 0 && ma.texH > 0)
                     {
                         DrawTriangleTex(
-                            pSX[i0], pSY[i0], ma.vertices[i0].u, ma.vertices[i0].v,
-                            pSX[i1], pSY[i1], ma.vertices[i1].u, ma.vertices[i1].v,
-                            pSX[i2], pSY[i2], ma.vertices[i2].u, ma.vertices[i2].v,
+                            pSX[i0], pSY[i0], verts[i0].u, verts[i0].v,
+                            pSX[i1], pSY[i1], verts[i1].u, verts[i1].v,
+                            pSX[i2], pSY[i2], verts[i2].u, verts[i2].v,
                             ma.texturePixels.data(), ma.texturePalette,
                             ma.texW, ma.texH, sp.fog);
                         if (isQuad)
                             DrawTriangleTex(
-                                pSX[i0], pSY[i0], ma.vertices[i0].u, ma.vertices[i0].v,
-                                pSX[i2], pSY[i2], ma.vertices[i2].u, ma.vertices[i2].v,
-                                pSX[i3], pSY[i3], ma.vertices[i3].u, ma.vertices[i3].v,
+                                pSX[i0], pSY[i0], verts[i0].u, verts[i0].v,
+                                pSX[i2], pSY[i2], verts[i2].u, verts[i2].v,
+                                pSX[i3], pSY[i3], verts[i3].u, verts[i3].v,
                                 ma.texturePixels.data(), ma.texturePalette,
                                 ma.texW, ma.texH, sp.fog);
                     }
