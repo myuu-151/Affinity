@@ -4452,6 +4452,8 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "small_tri_cull=%d\n", sCamObj.smallTriCull);
     fprintf(f, "skip_floor=%d\n", sCamObj.skipFloor ? 1 : 0);
     fprintf(f, "coverage_buf=%d\n", sCamObj.coverageBuf ? 1 : 0);
+    fprintf(f, "cam_pitch=%.1f\n", sCamObj.camPitch);
+    fprintf(f, "auto_pitch=%d\n", sCamObj.autoPitch ? 1 : 0);
     fprintf(f, "icon_scale=%.6f\n", sCamObjEditorScale);
     fprintf(f, "build_target=%d\n\n", (int)sBuildTarget);
 
@@ -4927,14 +4929,14 @@ static bool SaveProject(const std::string& path)
             }
         }
         // Camera
-        fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f\n",
+        fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d\n",
                 ms.camera.x, ms.camera.z, ms.camera.height, ms.camera.angle, ms.camera.horizon,
                 ms.camera.walkSpeed, ms.camera.sprintSpeed,
                 ms.camera.walkEaseIn, ms.camera.walkEaseOut, ms.camera.sprintEaseIn, ms.camera.sprintEaseOut,
                 ms.camera.jumpForce, ms.camera.gravity, ms.camera.maxFallSpeed,
                 ms.camera.jumpCamLand, ms.camera.jumpCamAir, ms.camera.autoOrbitSpeed, ms.camera.jumpDampen,
                 ms.camera.smallTriCull, ms.camera.skipFloor ? 1 : 0, ms.camera.coverageBuf ? 1 : 0,
-                ms.camera.drawDistance);
+                ms.camera.drawDistance, ms.camera.camPitch, ms.camera.autoPitch ? 1 : 0);
         // Scene-level blueprint
         if (ms.blueprintIdx >= 0) {
             fprintf(f, "msSceneBp=%d,%d", ms.blueprintIdx, ms.instanceParamCount);
@@ -5052,14 +5054,14 @@ static bool SaveProject(const std::string& path)
                 }
             }
         }
-        fprintf(f, "m7Cam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f\n",
+        fprintf(f, "m7Cam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d\n",
                 ms.camera.x, ms.camera.z, ms.camera.height, ms.camera.angle, ms.camera.horizon,
                 ms.camera.walkSpeed, ms.camera.sprintSpeed,
                 ms.camera.walkEaseIn, ms.camera.walkEaseOut, ms.camera.sprintEaseIn, ms.camera.sprintEaseOut,
                 ms.camera.jumpForce, ms.camera.gravity, ms.camera.maxFallSpeed,
                 ms.camera.jumpCamLand, ms.camera.jumpCamAir, ms.camera.autoOrbitSpeed, ms.camera.jumpDampen,
                 ms.camera.smallTriCull, ms.camera.skipFloor ? 1 : 0, ms.camera.coverageBuf ? 1 : 0,
-                ms.camera.drawDistance);
+                ms.camera.drawDistance, ms.camera.camPitch, ms.camera.autoPitch ? 1 : 0);
         if (ms.blueprintIdx >= 0) {
             fprintf(f, "m7SceneBp=%d,%d", ms.blueprintIdx, ms.instanceParamCount);
             for (int ip = 0; ip < ms.instanceParamCount; ip++)
@@ -5390,6 +5392,8 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "small_tri_cull=%d", &ival) == 1) sCamObj.smallTriCull = ival;
             else if (sscanf(line, "skip_floor=%d", &ival) == 1) sCamObj.skipFloor = (ival != 0);
             else if (sscanf(line, "coverage_buf=%d", &ival) == 1) sCamObj.coverageBuf = (ival != 0);
+            else if (sscanf(line, "cam_pitch=%f", &fval) == 1) sCamObj.camPitch = fval;
+            else if (sscanf(line, "auto_pitch=%d", &ival) == 1) sCamObj.autoPitch = (ival != 0);
             else if (sscanf(line, "icon_scale=%f", &fval) == 1) sCamObjEditorScale = fval;
             else if (sscanf(line, "build_target=%d", &ival) == 1) sBuildTarget = (BuildTarget)ival;
         }
@@ -6596,17 +6600,18 @@ static bool LoadProject(const std::string& path)
             {
                 MapScene& ms = sMapScenes.back();
                 CameraStartObject& c = ms.camera;
-                int sti = 0, sf = 0, cb = 0;
-                sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f",
+                int sti = 0, sf = 0, cb = 0, ap = 0;
+                sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d",
                     &c.x, &c.z, &c.height, &c.angle, &c.horizon,
                     &c.walkSpeed, &c.sprintSpeed,
                     &c.walkEaseIn, &c.walkEaseOut, &c.sprintEaseIn, &c.sprintEaseOut,
                     &c.jumpForce, &c.gravity, &c.maxFallSpeed,
                     &c.jumpCamLand, &c.jumpCamAir, &c.autoOrbitSpeed, &c.jumpDampen,
-                    &sti, &sf, &cb, &c.drawDistance);
+                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap);
                 c.smallTriCull = sti;
                 c.skipFloor = (sf != 0);
                 c.coverageBuf = (cb != 0);
+                c.autoPitch = (ap != 0);
             }
             else if (strncmp(line, "msSceneBp=", 10) == 0 && !sMapScenes.empty())
             {
@@ -6981,17 +6986,18 @@ static bool LoadProject(const std::string& path)
             {
                 MapScene& ms = sM7Scenes.back();
                 CameraStartObject& c = ms.camera;
-                int sti = 0, sf = 0, cb = 0;
-                sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f",
+                int sti = 0, sf = 0, cb = 0, ap = 0;
+                sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d",
                     &c.x, &c.z, &c.height, &c.angle, &c.horizon,
                     &c.walkSpeed, &c.sprintSpeed,
                     &c.walkEaseIn, &c.walkEaseOut, &c.sprintEaseIn, &c.sprintEaseOut,
                     &c.jumpForce, &c.gravity, &c.maxFallSpeed,
                     &c.jumpCamLand, &c.jumpCamAir, &c.autoOrbitSpeed, &c.jumpDampen,
-                    &sti, &sf, &cb, &c.drawDistance);
+                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap);
                 c.smallTriCull = sti;
                 c.skipFloor = (sf != 0);
                 c.coverageBuf = (cb != 0);
+                c.autoPitch = (ap != 0);
             }
             else if (strncmp(line, "m7SceneBp=", 10) == 0 && !sM7Scenes.empty())
             {
@@ -10018,6 +10024,12 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::Checkbox("Coverage Buffer##cam", &sCamObj.coverageBuf);
         if (sCamObj.coverageBuf)
             ImGui::TextDisabled("Front-to-back render, skip covered pixels");
+        ImGui::DragFloat("Camera Pitch##cam", &sCamObj.camPitch, 0.5f, -200.0f, 200.0f, "%.0f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Static per-vertex depth-based tilt.\nPositive = look down, negative = look up.");
+        ImGui::Checkbox("Auto Pitch##cam", &sCamObj.autoPitch);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Dynamically tilt camera based on floor slope.\nAdds to static Camera Pitch value.");
         ImGui::Separator();
         ImGui::DragFloat("Icon Size##cam", &sCamObjEditorScale, 0.01f, 0.1f, 2.0f, "%.2f");
         ImGui::PopItemWidth();
@@ -12279,6 +12291,8 @@ void FrameTick(float dt)
                 exportCam.smallTriCull = sCamObj.smallTriCull;
                 exportCam.skipFloor = sCamObj.skipFloor;
                 exportCam.coverageBuf = sCamObj.coverageBuf;
+                exportCam.camPitch = sCamObj.camPitch;
+                exportCam.autoPitch = sCamObj.autoPitch;
 
                 // Collect sprite assets for export
                 std::vector<GBASpriteAssetExport> exportAssets;

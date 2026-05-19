@@ -102,6 +102,8 @@ struct GBACameraExport
     int   smallTriCull  = 0;      // min screen-space area to render (0=off)
     bool  skipFloor     = false;  // skip floor rendering entirely
     bool  coverageBuf   = false;  // front-to-back rendering with coverage buffer
+    float camPitch      = 0.0f;  // per-vertex depth-based pitch tilt
+    bool  autoPitch     = false; // dynamically compute pitch from floor slope
 };
 
 // Mesh asset for GBA export
