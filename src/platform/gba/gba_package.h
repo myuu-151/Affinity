@@ -104,6 +104,8 @@ struct GBACameraExport
     bool  coverageBuf   = false;  // front-to-back rendering with coverage buffer
     float camPitch      = 0.0f;  // per-vertex depth-based pitch tilt
     bool  autoPitch     = false; // dynamically compute pitch from floor slope
+    bool  horizonClamp  = false; // clamp vertices above camera to horizon
+    bool  dynamicHorizon = false; // shift horizon line based on floor slope
 };
 
 // Mesh asset for GBA export

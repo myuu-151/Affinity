@@ -1051,6 +1051,9 @@ static int cam_pitch = 0;
 #ifdef AFN_AUTO_PITCH
 static int cam_pitch_smooth = 0; // smoothed auto-pitch for gradual transition
 #endif
+#ifdef AFN_DYNAMIC_HORIZON
+static int horizon_smooth = 60;  // smoothed horizon for dynamic shifting
+#endif
 
 // ---------------------------------------------------------------------------
 // 8x8 1bpp pixel font for HUD text (ASCII 32-127, 96 glyphs)
@@ -4309,6 +4312,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             heightDiff = cam_h - wy;
             side = (dx * g_cosf + dz * g_sinf) >> 8;
             heightDiff += (fovLambda * cam_pitch) >> 8;
+#ifdef AFN_HORIZON_CLAMP
+            if (heightDiff < 0) heightDiff = 0;
+#endif
             g_vSide[vb + v] = side;
             g_vHeight[vb + v] = heightDiff;
 
@@ -7082,6 +7088,36 @@ int main(void)
 #else
                 cam_pitch = cam_pitch_smooth;
 #endif
+            }
+#endif
+
+            // Dynamic horizon: shift horizon line based on floor slope
+#if defined(AFN_DYNAMIC_HORIZON) && defined(AFN_COL_FACE_COUNT)
+            {
+                FIXED sampleDist = 30 << 8;
+                FIXED fwdX = (g_sinf * sampleDist) >> 8;
+                FIXED fwdZ = (-g_cosf * sampleDist) >> 8;
+                FIXED yAhead, yBehind;
+                int hasAhead  = collide_floor(player_x + fwdX, player_z + fwdZ, player_y + (30 << 8), &yAhead);
+                int hasBehind = collide_floor(player_x - fwdX, player_z - fwdZ, player_y + (30 << 8), &yBehind);
+                int targetHorizon = AFN_CAM_HORIZON;
+                if (hasAhead && hasBehind) {
+                    int slopeY = (yAhead - yBehind) >> 8;
+                    int shift = slopeY / 3;
+                    if (shift > 30) shift = 30;
+                    if (shift < -30) shift = -30;
+                    targetHorizon = AFN_CAM_HORIZON + shift;
+                } else if (hasAhead) {
+                    int slopeY = (yAhead - player_y) >> 8;
+                    int shift = slopeY / 2;
+                    if (shift > 30) shift = 30;
+                    if (shift < -30) shift = -30;
+                    targetHorizon = AFN_CAM_HORIZON + shift;
+                }
+                int hDiff = targetHorizon - horizon_smooth;
+                horizon_smooth += (hDiff * 40) >> 8;
+                if (hDiff > -2 && hDiff < 2) horizon_smooth = targetHorizon;
+                m7_horizon = horizon_smooth;
             }
 #endif
 

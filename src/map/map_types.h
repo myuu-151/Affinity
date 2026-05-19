@@ -290,7 +290,9 @@ struct CameraStartObject
     bool coverageBuf = false; // front-to-back with coverage buffer (reduces overdraw)
     // Camera pitch (per-vertex depth-based tilt, .8 fixed on GBA)
     float camPitch = 0.0f;
-    bool autoPitch = false; // dynamically compute pitch from floor slope
+    bool autoPitch = false;    // dynamically compute pitch from floor slope
+    bool horizonClamp = false; // clamp vertices above camera to horizon
+    bool dynamicHorizon = false; // shift horizon line based on floor slope
 };
 
 // Map data — the floor plane rendered by Mode 4

@@ -296,6 +296,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "#define AFN_CAM_PITCH " << (int)camera.camPitch << "\n";
     if (camera.autoPitch)
         f << "#define AFN_AUTO_PITCH\n";
+    if (camera.horizonClamp)
+        f << "#define AFN_HORIZON_CLAMP\n";
+    if (camera.dynamicHorizon)
+        f << "#define AFN_DYNAMIC_HORIZON\n";
     // Movement speeds (GBA fixed-point, scaled from editor units)
     // Editor 35 -> GBA 37, so scale factor is ~37/35 = 1.057
     f << "#define AFN_WALK_SPEED "   << (int)(camera.walkSpeed * 37.0f / 35.0f) << "\n";
