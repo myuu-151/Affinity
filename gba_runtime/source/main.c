@@ -2839,11 +2839,11 @@ static int clip_edge_uv(const int* inX, const int* inY, const int* inU, const in
             int d = (axis ? dy : dx);
             if (d != 0) {
                 int t = limit - (axis ? inY[i] : inX[i]);
-                // 32-bit fixed: (val * t) / d — values fit since screen coords < 16K, UVs < 9K
-                outX[out] = axis ? (inX[i] + dx * t / d) : limit;
-                outY[out] = axis ? limit : (inY[i] + dy * t / d);
-                outU[out] = inU[i] + du * t / d;
-                outV[out] = inV[i] + dv * t / d;
+                // Use 64-bit to avoid overflow with extreme vertex positions
+                outX[out] = axis ? (inX[i] + (int)((long long)dx * t / d)) : limit;
+                outY[out] = axis ? limit : (inY[i] + (int)((long long)dy * t / d));
+                outU[out] = inU[i] + (int)((long long)du * t / d);
+                outV[out] = inV[i] + (int)((long long)dv * t / d);
             } else {
                 outX[out] = inX[i]; outY[out] = inY[i];
                 outU[out] = inU[i]; outV[out] = inV[i];
@@ -4317,28 +4317,11 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             if (heightDiff < 0) heightDiff = 0;
 #endif
             g_vSide[vb + v] = side;
-            /* When a vertex is very close (depth near clamp) AND above camera,
-               the projection explodes upward causing walls. Flatten heightDiff
-               for close vertices to prevent this. */
-            {
-                int dc = g_texFixDefs[g_texFixMode - 1].depthClamp;
-                if (dc <= 0) dc = 16;
-                g_vClamped[vb + v] = 0;
-                if (heightDiff < 0) {
-                    int scale = fovLambda - dc;
-                    int maxScale = dc * 12;
-                    if (scale < 0) scale = 0;
-                    if (scale > maxScale) scale = maxScale;
-                    heightDiff = (heightDiff * scale) / maxScale;
-                    if (scale < maxScale) g_vClamped[vb + v] = 1;
-                }
-            }
             g_vHeight[vb + v] = heightDiff;
-
             {
                 int projScale = (cam_fov << 12) / fovLambda;
                 int sy = m7_horizon + ((heightDiff * projScale) >> 12);
-                if (sy < -32) sy = -32;
+                g_vClamped[vb + v] = 0;
                 g_vsy[vb + v] = sy;
                 g_vsx[vb + v] = 120 + ((side * projScale) >> 12);
             }
@@ -4380,16 +4363,19 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     (g_vsy[vb+i0] >= 160 && g_vsy[vb+i1] >= 160 && g_vsy[vb+i2] >= 160))
                     continue;
 
-                cross = (g_vsx[vb+i1] - g_vsx[vb+i0]) * (g_vsy[vb+i2] - g_vsy[vb+i0])
-                      - (g_vsy[vb+i1] - g_vsy[vb+i0]) * (g_vsx[vb+i2] - g_vsx[vb+i0]);
-                if (cullMode == 0 && cross >= 0) continue;
-                else if (cullMode == 1 && cross <= 0) continue;
+                {
+                    long long cx = (long long)(g_vsx[vb+i1] - g_vsx[vb+i0]) * (g_vsy[vb+i2] - g_vsy[vb+i0])
+                                 - (long long)(g_vsy[vb+i1] - g_vsy[vb+i0]) * (g_vsx[vb+i2] - g_vsx[vb+i0]);
+                    cross = (int)(cx >> 8); // scale down to avoid overflow in area check
+                    if (cullMode == 0 && cx >= 0) continue;
+                    else if (cullMode == 1 && cx <= 0) continue;
+                }
             }
 
 #ifdef AFN_SMALL_TRI_CULL
             {
                 int area = cross < 0 ? -cross : cross;
-                if (area < AFN_SMALL_TRI_CULL) continue;
+                if (area < (AFN_SMALL_TRI_CULL >> 8)) continue;
             }
 #endif
 
@@ -4404,6 +4390,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 #endif
                 g_triOrder[totalTris].triIdx = t;
                 g_triOrder[totalTris].depth = (d0 + d1 + d2) / 3 + (ms->drawPriority << 16);
+                if (g_vClamped[vb+i0] || g_vClamped[vb+i1] || g_vClamped[vb+i2])
+                    g_triOrder[totalTris].depth = 0x7FFF;
                 g_triOrder[totalTris].slot = (u8)slotCount;
                 totalTris++;
             }
@@ -4437,10 +4425,13 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                         (g_vsy[vb+i0] >= 160 && g_vsy[vb+i1] >= 160 && g_vsy[vb+i2] >= 160 && g_vsy[vb+i3] >= 160))
                         continue;
 
-                    cross = (g_vsx[vb+i1] - g_vsx[vb+i0]) * (g_vsy[vb+i2] - g_vsy[vb+i0])
-                          - (g_vsy[vb+i1] - g_vsy[vb+i0]) * (g_vsx[vb+i2] - g_vsx[vb+i0]);
-                    if (cullMode == 0 && cross >= 0) continue;
-                    else if (cullMode == 1 && cross <= 0) continue;
+                    {
+                        long long cx = (long long)(g_vsx[vb+i1] - g_vsx[vb+i0]) * (g_vsy[vb+i2] - g_vsy[vb+i0])
+                                     - (long long)(g_vsy[vb+i1] - g_vsy[vb+i0]) * (g_vsx[vb+i2] - g_vsx[vb+i0]);
+                        cross = (int)(cx >> 8);
+                        if (cullMode == 0 && cx >= 0) continue;
+                        else if (cullMode == 1 && cx <= 0) continue;
+                    }
                 }
 
                 {
@@ -4454,6 +4445,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 #endif
                     g_triOrder[totalTris].triIdx = t | 0x8000;
                     g_triOrder[totalTris].depth = (d0 + d1 + d2 + d3) / 4 + (ms->drawPriority << 16);
+                    if (g_vClamped[vb+i0] || g_vClamped[vb+i1] || g_vClamped[vb+i2] || g_vClamped[vb+i3])
+                        g_triOrder[totalTris].depth = 0x7FFF;
                     g_triOrder[totalTris].slot = (u8)slotCount;
                     totalTris++;
                 }
@@ -4668,9 +4661,6 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         }
         else if (ms->meshTextured && uvs && tex)
         {
-            /* Skip textured faces with flattened vertices — UV distortion makes walls visible */
-            if (g_vClamped[vb+i0] || g_vClamped[vb+i1] || g_vClamped[vb+i2] || (isQuad && g_vClamped[vb+i3]))
-                continue;
             if (anyNear) {
                 // Near faces: 2D screen clip with UVs
                 int cx[] = {g_vsx[vb+i0], g_vsx[vb+i1], g_vsx[vb+i2], g_vsx[vb+i3]};
@@ -4685,12 +4675,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 int tpu[] = {uvs[i0*2+0], uvs[i1*2+0], uvs[i2*2+0], isQuad ? uvs[i3*2+0] : 0};
                 int tpv[] = {uvs[i0*2+1], uvs[i1*2+1], uvs[i2*2+1], isQuad ? uvs[i3*2+1] : 0};
                 int nc = isQuad ? 4 : 3;
-                int needClip = 0;
-                /* Force clip path when any vertex is off-screen —
-                   ASM rasterizer can't handle extreme coords */
-                if (tpy[0] < 0 || tpy[1] < 0 || tpy[2] < 0 || (isQuad && tpy[3] < 0) ||
-                    tpy[0] > 159 || tpy[1] > 159 || tpy[2] > 159 || (isQuad && tpy[3] > 159))
-                    needClip = 1;
+                int needClip = 1;
                 {
                     const TexFixDef *fd = &g_texFixDefs[g_texFixMode - 1];
                     // Screen clip margin check
