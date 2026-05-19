@@ -4320,7 +4320,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 
             {
                 int projScale = (cam_fov << 12) / fovLambda;
-                g_vsy[vb + v] = m7_horizon + ((heightDiff * projScale) >> 12);
+                int sy = m7_horizon + ((heightDiff * projScale) >> 12);
+                if (sy < -32) sy = -32;
+                g_vsy[vb + v] = sy;
                 g_vsx[vb + v] = 120 + ((side * projScale) >> 12);
             }
         }
@@ -4504,6 +4506,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             anyNear = (g_vRawDepth[vb+i0] < CLIP_NEAR_Z) | (g_vRawDepth[vb+i1] < CLIP_NEAR_Z) | (g_vRawDepth[vb+i2] < CLIP_NEAR_Z);
         }
         lodLevel = ms->meshHalfRes ? 1 : (avgD < 64 ? 2 : (avgD < 192 ? 1 : 0));
+
 
         // Perf mode overrides
         // Classify floor vs wall by vertex height extent
@@ -7058,6 +7061,33 @@ int main(void)
                 if (dy > -4 && dy < 4) cam_y_smooth = target_cam_y;
             }
             cam_h = AFN_CAM_H + cam_y_smooth;
+
+            // Camera above geometry: sample floor in all directions, raise cam_h if needed
+#if defined(AFN_FACE_CULL) && defined(AFN_COL_FACE_COUNT)
+            {
+                FIXED maxFloorY = player_y;
+                int d;
+                for (d = 0; d < 8; d++) {
+                    // 8 directions, sample at distance 40
+                    static const s16 dirX[] = {256,181,0,-181,-256,-181,0,181};
+                    static const s16 dirZ[] = {0,-181,-256,-181,0,181,256,181};
+                    FIXED sx = player_x + (dirX[d] * 40);
+                    FIXED sz = player_z + (dirZ[d] * 40);
+                    FIXED fy;
+                    if (collide_floor(sx, sz, player_y + (60 << 8), &fy)) {
+                        if (fy > maxFloorY) maxFloorY = fy;
+                    }
+                }
+                // If nearby floor is higher, boost cam_h so camera stays above
+                {
+                    FIXED camWorldY = player_y + cam_h;
+                    FIXED minCamY = maxFloorY + AFN_CAM_H;
+                    if (minCamY > camWorldY) {
+                        cam_h += (minCamY - camWorldY);
+                    }
+                }
+            }
+#endif
 
             // Auto-pitch: dynamically tilt camera based on floor slope
 #if defined(AFN_AUTO_PITCH) && defined(AFN_COL_FACE_COUNT)
