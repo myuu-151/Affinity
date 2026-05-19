@@ -1,0 +1,60 @@
+## Deep Analysis: View-Space Near-Plane Clipping Fix
+
+### The Problem
+When walking downhill on sloped 3D mesh geometry in Mode 4, textured faces would
+"wall" — bending upward and covering the entire screen with distorted texture.
+Greyscale (flat-color) rendering of the same geometry at the same camera position
+never exhibited this issue.
+
+### Root Cause
+The projection math `sy = horizon + (heightDiff * projScale) >> 12` produces
+extreme negative screen Y values when a vertex is above the camera (negative
+heightDiff) at shallow depth. A face with one vertex at screen Y=-5000 and
+others at Y=100 spans the entire screen after clipping.
+
+Previously, the textured path handled near-camera faces with **screen-space
+Sutherland-Hodgman clipping** (clip_render_poly_tex) — this clips the polygon
+at screen edges [0,239]x[0,159] and interpolates UVs at the clip boundaries.
+But the underlying polygon is still geometrically wrong: the vertex that should
+be "above and behind" the camera is instead projected to an extreme screen
+position, creating a massive polygon that fills the screen with stretched UVs.
+
+The greyscale path handled the same faces with **view-space near-plane clipping**
+(clip_render_poly_flat) — this clips the polygon against a depth threshold in
+3D view space (side, height, depth), interpolates position at the clip point,
+then RE-PROJECTS the clipped vertices to screen space. This produces correct
+screen positions because the clipped vertices are at the near plane with
+properly interpolated view-space coordinates.
+
+### Why Greyscale Looked Fine
+Two reasons:
+1. For anyNear faces (rawDepth < 8), greyscale used clip_render_poly_flat which
+   does proper view-space clipping. Textured used clip_render_poly_tex which
+   only does screen-space clipping — same polygon, wrong approach.
+2. For faces that aren't anyNear but have extreme heightDiff, both modes clip
+   to screen bounds. But flat color on flat color is visually invisible (wall
+   face painted first, near faces paint identical-looking flat color on top).
+   Textured faces show UV distortion that makes the wall visible.
+
+### The Fix
+New function `clip_render_poly_tex_vs` — identical to clip_render_poly_flat's
+view-space clipping approach but carries texture UVs through all clip operations:
+
+1. Sutherland-Hodgman clip against near plane (depth >= CLIP_NEAR_Z) in view
+   space, interpolating side, height, AND UVs at clip boundaries using LERP16
+2. Re-project all clipped vertices to screen space via project_vertex()
+3. Screen-space S-H clip with UV interpolation via clip_render_poly_tex()
+4. Rasterize with rasterize_convex_tex (ASM textured rasterizer)
+
+Trigger condition: any vertex projects to screen Y < -10. This catches faces
+with vertices above the camera that would cause walling, without affecting
+normal geometry.
+
+### Supporting Changes
+- clip_edge_uv: upgraded to 64-bit multiply to prevent overflow with extreme
+  vertex positions (vertices can project to Y=-5000+ without Y clamping)
+- Backface cull cross product: upgraded to 64-bit (long long) to prevent
+  overflow with extreme screen coordinates
+- Removed vertex-level Y clamping (was masking the problem, not fixing it)
+- Forward declaration of clip_render_poly_tex for use by clip_render_poly_tex_vs
+- Runtime SELECT toggle (g_forceGrayscale) for A/B comparison debugging
