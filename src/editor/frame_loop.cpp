@@ -4455,6 +4455,7 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "cam_pitch=%.1f\n", sCamObj.camPitch);
     fprintf(f, "auto_pitch=%d\n", sCamObj.autoPitch ? 1 : 0);
     fprintf(f, "horizon_clamp=%d\n", sCamObj.horizonClamp ? 1 : 0);
+    fprintf(f, "face_cull=%d\n", sCamObj.faceCull ? 1 : 0);
     fprintf(f, "dynamic_horizon=%d\n", sCamObj.dynamicHorizon ? 1 : 0);
     fprintf(f, "icon_scale=%.6f\n", sCamObjEditorScale);
     fprintf(f, "build_target=%d\n\n", (int)sBuildTarget);
@@ -4558,7 +4559,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide, ma.clampAbove ? 1 : 0);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide, ma.clampAbove ? 1 : 0, ma.nearClip ? 1 : 0, ma.faceCull ? 1 : 0);
     }
     fprintf(f, "\n");
 
@@ -4931,7 +4932,7 @@ static bool SaveProject(const std::string& path)
             }
         }
         // Camera
-        fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d\n",
+        fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d,%d\n",
                 ms.camera.x, ms.camera.z, ms.camera.height, ms.camera.angle, ms.camera.horizon,
                 ms.camera.walkSpeed, ms.camera.sprintSpeed,
                 ms.camera.walkEaseIn, ms.camera.walkEaseOut, ms.camera.sprintEaseIn, ms.camera.sprintEaseOut,
@@ -4939,7 +4940,7 @@ static bool SaveProject(const std::string& path)
                 ms.camera.jumpCamLand, ms.camera.jumpCamAir, ms.camera.autoOrbitSpeed, ms.camera.jumpDampen,
                 ms.camera.smallTriCull, ms.camera.skipFloor ? 1 : 0, ms.camera.coverageBuf ? 1 : 0,
                 ms.camera.drawDistance, ms.camera.camPitch, ms.camera.autoPitch ? 1 : 0,
-                ms.camera.horizonClamp ? 1 : 0, ms.camera.dynamicHorizon ? 1 : 0);
+                ms.camera.horizonClamp ? 1 : 0, ms.camera.dynamicHorizon ? 1 : 0, ms.camera.faceCull ? 1 : 0);
         // Scene-level blueprint
         if (ms.blueprintIdx >= 0) {
             fprintf(f, "msSceneBp=%d,%d", ms.blueprintIdx, ms.instanceParamCount);
@@ -5065,7 +5066,7 @@ static bool SaveProject(const std::string& path)
                 ms.camera.jumpCamLand, ms.camera.jumpCamAir, ms.camera.autoOrbitSpeed, ms.camera.jumpDampen,
                 ms.camera.smallTriCull, ms.camera.skipFloor ? 1 : 0, ms.camera.coverageBuf ? 1 : 0,
                 ms.camera.drawDistance, ms.camera.camPitch, ms.camera.autoPitch ? 1 : 0,
-                ms.camera.horizonClamp ? 1 : 0, ms.camera.dynamicHorizon ? 1 : 0);
+                ms.camera.horizonClamp ? 1 : 0, ms.camera.dynamicHorizon ? 1 : 0, ms.camera.faceCull ? 1 : 0);
         if (ms.blueprintIdx >= 0) {
             fprintf(f, "m7SceneBp=%d,%d", ms.blueprintIdx, ms.instanceParamCount);
             for (int ip = 0; ip < ms.instanceParamCount; ip++)
@@ -5399,6 +5400,7 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "cam_pitch=%f", &fval) == 1) sCamObj.camPitch = fval;
             else if (sscanf(line, "auto_pitch=%d", &ival) == 1) sCamObj.autoPitch = (ival != 0);
             else if (sscanf(line, "horizon_clamp=%d", &ival) == 1) sCamObj.horizonClamp = (ival != 0);
+            else if (sscanf(line, "face_cull=%d", &ival) == 1) sCamObj.faceCull = (ival != 0);
             else if (sscanf(line, "dynamic_horizon=%d", &ival) == 1) sCamObj.dynamicHorizon = (ival != 0);
             else if (sscanf(line, "icon_scale=%f", &fval) == 1) sCamObjEditorScale = fval;
             else if (sscanf(line, "build_target=%d", &ival) == 1) sBuildTarget = (BuildTarget)ival;
@@ -5641,10 +5643,10 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "MeshAssets") == 0)
         {
             char mname[256], mpath[512], mtexpath[512] = {};
-            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1, mperspcorr = 0, msubdiv = 0, mclampabove = 0;
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1, mperspcorr = 0, msubdiv = 0, mclampabove = 0, mnearclip = 0, mfacecull = 0;
             float mdrawdist = 0.0f;
             // Try newest format: ...visible|perspcorrect|subdivide|clampabove
-            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d|%f|%d|%d|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove);
+            int matched = sscanf(line, "mesh=%255[^|]|%511[^|]|%d|%d|%d|%d|%d|%d|%d|%511[^|\n]|%d|%f|%d|%d|%d|%d|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull);
             if (matched == 9) {
                 // Empty texture path — sscanf stopped at ||, skip it and parse remaining fields
                 mtexpath[0] = '\0';
@@ -5653,7 +5655,7 @@ static bool LoadProject(const std::string& path)
                 int pipes = 0;
                 while (*p && pipes < 9) { if (*p == '|') pipes++; p++; }
                 if (*p == '|') p++; // skip the empty field's trailing pipe
-                int m2 = sscanf(p, "%d|%f|%d|%d|%d|%d|%d|%d", &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove);
+                int m2 = sscanf(p, "%d|%f|%d|%d|%d|%d|%d|%d|%d|%d", &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull);
                 matched = 9 + m2; // total fields parsed (skip texpath in count, add 1 for it)
                 if (m2 > 0) matched++; // account for the texpath slot
             }
@@ -5707,6 +5709,10 @@ static bool LoadProject(const std::string& path)
                     ma.subdivide = msubdiv;
                 if (matched >= 18)
                     ma.clampAbove = (mclampabove != 0);
+                if (matched >= 19)
+                    ma.nearClip = (mnearclip != 0);
+                if (matched >= 20)
+                    ma.faceCull = (mfacecull != 0);
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -6606,20 +6612,21 @@ static bool LoadProject(const std::string& path)
             {
                 MapScene& ms = sMapScenes.back();
                 CameraStartObject& c = ms.camera;
-                int sti = 0, sf = 0, cb = 0, ap = 0, hc = 0, dh = 0;
-                sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d",
+                int sti = 0, sf = 0, cb = 0, ap = 0, hc = 0, dh = 0, fc = 0;
+                sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d",
                     &c.x, &c.z, &c.height, &c.angle, &c.horizon,
                     &c.walkSpeed, &c.sprintSpeed,
                     &c.walkEaseIn, &c.walkEaseOut, &c.sprintEaseIn, &c.sprintEaseOut,
                     &c.jumpForce, &c.gravity, &c.maxFallSpeed,
                     &c.jumpCamLand, &c.jumpCamAir, &c.autoOrbitSpeed, &c.jumpDampen,
-                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh);
+                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc);
                 c.smallTriCull = sti;
                 c.skipFloor = (sf != 0);
                 c.coverageBuf = (cb != 0);
                 c.autoPitch = (ap != 0);
                 c.horizonClamp = (hc != 0);
                 c.dynamicHorizon = (dh != 0);
+                c.faceCull = (fc != 0);
             }
             else if (strncmp(line, "msSceneBp=", 10) == 0 && !sMapScenes.empty())
             {
@@ -6994,20 +7001,21 @@ static bool LoadProject(const std::string& path)
             {
                 MapScene& ms = sM7Scenes.back();
                 CameraStartObject& c = ms.camera;
-                int sti = 0, sf = 0, cb = 0, ap = 0, hc = 0, dh = 0;
-                sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d",
+                int sti = 0, sf = 0, cb = 0, ap = 0, hc = 0, dh = 0, fc = 0;
+                sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d",
                     &c.x, &c.z, &c.height, &c.angle, &c.horizon,
                     &c.walkSpeed, &c.sprintSpeed,
                     &c.walkEaseIn, &c.walkEaseOut, &c.sprintEaseIn, &c.sprintEaseOut,
                     &c.jumpForce, &c.gravity, &c.maxFallSpeed,
                     &c.jumpCamLand, &c.jumpCamAir, &c.autoOrbitSpeed, &c.jumpDampen,
-                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh);
+                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc);
                 c.smallTriCull = sti;
                 c.skipFloor = (sf != 0);
                 c.coverageBuf = (cb != 0);
                 c.autoPitch = (ap != 0);
                 c.horizonClamp = (hc != 0);
                 c.dynamicHorizon = (dh != 0);
+                c.faceCull = (fc != 0);
             }
             else if (strncmp(line, "m7SceneBp=", 10) == 0 && !sM7Scenes.empty())
             {
@@ -8056,8 +8064,12 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         ImGui::Checkbox("Wireframe##meshWire", &ma.wireframe);
         ImGui::SameLine();
         ImGui::Checkbox("Grayscale##meshGray", &ma.grayscale);
-        if (!ma.quadIndices.empty())
-            ImGui::Checkbox("Use Quads##meshQuad", &ma.useQuads);
+        if (!ma.quadIndices.empty()) {
+            bool triangulate = !ma.useQuads;
+            if (ImGui::Checkbox("Triangulate##meshTri", &triangulate))
+                ma.useQuads = !triangulate;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Convert quads to triangles at export");
+        }
         ImGui::DragFloat("Draw Distance##mesh", &ma.drawDistance, 1.0f, 0.0f, 2000.0f, "%.0f");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = use global draw distance");
         ImGui::Checkbox("Visible##meshVis", &ma.visible);
@@ -8080,8 +8092,11 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         ImGui::Checkbox("Textured##meshTex", &ma.textured);
         if (ma.textured) {
             ImGui::SameLine();
-            ImGui::Checkbox("Persp. Correct##meshPC", &ma.perspCorrect);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Perspective-corrected texture mapping (slower, fixes warping on large faces)");
+            ImGui::Checkbox("Near Clip##meshNC", &ma.nearClip);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("View-space near-plane clipping — fixes slope walling (geometry bending over camera)");
+            ImGui::SameLine();
+            ImGui::Checkbox("Face Cull##meshFC", &ma.faceCull);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Skip faces with vertices above camera — hard cutoff (faces disappear instead of distorting)");
         }
         if (ma.textured)
         {
@@ -10043,6 +10058,9 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::Checkbox("Horizon Clamp##cam", &sCamObj.horizonClamp);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Flatten vertices above the camera to the horizon.\nPrevents mesh from bending over the camera on slopes.");
+        ImGui::Checkbox("Camera Above##cam", &sCamObj.faceCull);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Raise camera to stay above nearby geometry.\nPrevents mesh from bending over the camera on slopes.");
         ImGui::Checkbox("Dynamic Horizon##cam", &sCamObj.dynamicHorizon);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Shift the horizon line based on floor slope.\nTilts the entire viewport on slopes.");
@@ -12311,6 +12329,7 @@ void FrameTick(float dt)
                 exportCam.autoPitch = sCamObj.autoPitch;
                 exportCam.horizonClamp = sCamObj.horizonClamp;
                 exportCam.dynamicHorizon = sCamObj.dynamicHorizon;
+                exportCam.faceCull = sCamObj.faceCull;
 
                 // Collect sprite assets for export
                 std::vector<GBASpriteAssetExport> exportAssets;
@@ -12417,6 +12436,8 @@ void FrameTick(float dt)
                     me.textured = ma.textured ? 1 : 0;
                     me.perspCorrect = ma.perspCorrect ? 1 : 0;
                     me.clampAbove = ma.clampAbove ? 1 : 0;
+                    me.nearClip = ma.nearClip ? 1 : 0;
+                    me.faceCull = ma.faceCull ? 1 : 0;
                     me.texW = ma.texW;
                     me.texH = ma.texH;
                     me.texPixels = ma.texturePixels;

@@ -204,6 +204,8 @@ struct MeshAsset
     bool perspCorrect = false;               // true = perspective-corrected texture mapping (slower)
     int subdivide = 0;                       // 0=off, N=subdivide each face into NxN grid at export
     bool clampAbove = false;                 // true = clamp vertices to never project above horizon (prevents "under mesh" warp)
+    bool nearClip = false;                   // true = view-space near-plane clipping (fixes slope walling)
+    bool faceCull = false;                   // true = skip faces with vertices above camera (hard cutoff)
 };
 
 static constexpr int kMaxMeshAssets = 32;
@@ -292,6 +294,7 @@ struct CameraStartObject
     float camPitch = 0.0f;
     bool autoPitch = false;    // dynamically compute pitch from floor slope
     bool horizonClamp = false; // clamp vertices above camera to horizon
+    bool faceCull = false;     // skip faces with any vertex above camera
     bool dynamicHorizon = false; // shift horizon line based on floor slope
 };
 

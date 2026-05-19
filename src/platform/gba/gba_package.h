@@ -106,6 +106,7 @@ struct GBACameraExport
     bool  autoPitch     = false; // dynamically compute pitch from floor slope
     bool  horizonClamp  = false; // clamp vertices above camera to horizon
     bool  dynamicHorizon = false; // shift horizon line based on floor slope
+    bool  faceCull       = false; // skip faces with any vertex above camera
 };
 
 // Mesh asset for GBA export
@@ -135,6 +136,8 @@ struct GBAMeshExport
     uint16_t texPalette[16] = {}; // RGB15 palette for this texture
     int perspCorrect = 0;         // 1=perspective-corrected texture mapping
     int clampAbove = 0;           // 1=clamp vertices to never project above horizon
+    int nearClip = 0;             // 1=view-space near-plane clipping (fixes slope walling)
+    int faceCull = 0;             // 1=skip faces with vertices above camera (hard cutoff)
 };
 
 // ---- Visual Script Export ----

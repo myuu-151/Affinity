@@ -300,6 +300,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "#define AFN_HORIZON_CLAMP\n";
     if (camera.dynamicHorizon)
         f << "#define AFN_DYNAMIC_HORIZON\n";
+    if (camera.faceCull)
+        f << "#define AFN_FACE_CULL\n";
     // Movement speeds (GBA fixed-point, scaled from editor units)
     // Editor 35 -> GBA 37, so scale factor is ~37/35 = 1.057
     f << "#define AFN_WALK_SPEED "   << (int)(camera.walkSpeed * 37.0f / 35.0f) << "\n";
@@ -1368,8 +1370,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
             }
         }
 
-        // Mesh descriptor table: { vertCount, indexCount, quadIndexCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase, wireframe, grayscale, drawDist, drawPriority, visible, perspCorrect }
-        f << "static const int afn_mesh_desc[][18] = {\n";
+        // Mesh descriptor table: { vertCount, indexCount, quadIndexCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase, wireframe, grayscale, drawDist, drawPriority, visible, perspCorrect, nearClip, faceCull }
+        f << "static const int afn_mesh_desc[][20] = {\n";
         for (size_t mi = 0; mi < meshes.size(); mi++)
         {
             int vc = finalVertCounts[mi];
@@ -1391,7 +1393,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 drawDist = (int)(meshes[mi].drawDistance / 4.0f * 256.0f);
             char hex[8];
             snprintf(hex, sizeof(hex), "0x%04X", meshes[mi].colorRGB15);
-            f << "    { " << vc << ", " << ic << ", " << qic << ", " << hex << ", " << meshes[mi].cullMode << ", " << lit << ", " << sorted << ", " << halfRes << ", " << textured << ", " << texW << ", " << texShift << ", " << texPalBases[mi] << ", " << wireframe << ", " << grayscale << ", " << drawDist << ", " << meshes[mi].drawPriority << ", " << meshes[mi].visible << ", " << meshes[mi].perspCorrect << " },\n";
+            f << "    { " << vc << ", " << ic << ", " << qic << ", " << hex << ", " << meshes[mi].cullMode << ", " << lit << ", " << sorted << ", " << halfRes << ", " << textured << ", " << texW << ", " << texShift << ", " << texPalBases[mi] << ", " << wireframe << ", " << grayscale << ", " << drawDist << ", " << meshes[mi].drawPriority << ", " << meshes[mi].visible << ", " << meshes[mi].perspCorrect << ", " << meshes[mi].nearClip << ", " << meshes[mi].faceCull << " },\n";
         }
         f << "};\n\n";
 

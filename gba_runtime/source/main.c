@@ -4251,7 +4251,7 @@ typedef struct {
     const s16* uvs;
     const u8* tex;
     FIXED cosR, sinR;
-    int cullMode, meshLit, meshHalfRes, meshTextured, meshWireframe, meshGrayscale, meshPerspCorr;
+    int cullMode, meshLit, meshHalfRes, meshTextured, meshWireframe, meshGrayscale, meshPerspCorr, meshNearClip, meshFaceCull;
     int texW, texShift, texMask, texPalBase;
     int vertCount, idxCount, quadIdxCount;
     int drawDist;
@@ -4332,6 +4332,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         ms->drawPriority = afn_mesh_desc[mi][15];
         ms->visible = afn_mesh_desc[mi][16];
         ms->meshPerspCorr = afn_mesh_desc[mi][17];
+        ms->meshNearClip = afn_mesh_desc[mi][18];
+        ms->meshFaceCull = afn_mesh_desc[mi][19];
         ms->texMask = ms->texW > 0 ? ms->texW - 1 : 0;
         ms->uvs = afn_mesh_uv_ptrs[mi];
         ms->tex = tex_cache_ptrs[mi];
@@ -4727,11 +4729,16 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         }
         else if (ms->meshTextured && uvs && tex)
         {
-            // Check if any vertex has extreme screen Y (above horizon)
-            // — these faces need view-space clipping to avoid walling
-            int needVSClip = anyNear ||
-                g_vsy[vb+i0] < -10 || g_vsy[vb+i1] < -10 || g_vsy[vb+i2] < -10 ||
+            // Check if any vertex has extreme screen Y (above screen)
+            int hasExtremeY = g_vsy[vb+i0] < -10 || g_vsy[vb+i1] < -10 || g_vsy[vb+i2] < -10 ||
                 (isQuad && g_vsy[vb+i3] < -10);
+
+            // Face Cull: skip faces with vertices above camera entirely
+            if (ms->meshFaceCull && hasExtremeY)
+                continue;
+
+            // Near Clip: view-space near-plane clipping for extreme faces
+            int needVSClip = ms->meshNearClip && (anyNear || hasExtremeY);
             if (needVSClip) {
                 // View-space near-plane clip with UV interpolation
                 int cs[] = {g_vSide[vb+i0], g_vSide[vb+i1], g_vSide[vb+i2], isQuad ? g_vSide[vb+i3] : 0};
