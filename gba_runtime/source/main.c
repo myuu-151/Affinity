@@ -1043,6 +1043,8 @@ static void dbg_int(u16* buf, int px, int py, int val, u8 ci)
 
 // Horizon scanline — variable for pitch control (A/B buttons)
 static int m7_horizon = 60;
+static int   cam_pitch;        // camera pitch (vertical tilt) in .8 fixed: positive = look down
+static int   cam_pitch_smooth; // smoothed pitch for gradual transition
 
 // ---------------------------------------------------------------------------
 // 8x8 1bpp pixel font for HUD text (ASCII 32-127, 96 glyphs)
@@ -4942,8 +4944,6 @@ static FIXED player_vy;        // vertical velocity (16.8, negative = falling)
 static int   player_on_ground; // 1 if standing on a floor face
 #endif
 static FIXED cam_y_smooth;     // smoothed camera Y offset (16.8)
-static int   cam_pitch;        // camera pitch (vertical tilt) in .8 fixed: positive = look down
-static int   cam_pitch_smooth; // smoothed pitch for gradual transition
 
 #ifdef AFN_COL_FACE_COUNT
 
