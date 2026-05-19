@@ -4203,6 +4203,7 @@ EWRAM_DATA static FIXED g_vsz[MAX_GLOBAL_VERTS];
 EWRAM_DATA static FIXED g_vRawDepth[MAX_GLOBAL_VERTS];
 EWRAM_DATA static FIXED g_vSide[MAX_GLOBAL_VERTS];
 EWRAM_DATA static FIXED g_vHeight[MAX_GLOBAL_VERTS];
+EWRAM_DATA static u8    g_vClamped[MAX_GLOBAL_VERTS];
 EWRAM_DATA static TriSort g_triOrder[MAX_GLOBAL_TRIS];
 EWRAM_DATA static MeshSlot g_meshSlots[MAX_FLOOR_SPRITES];
 
@@ -4322,12 +4323,14 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             {
                 int dc = g_texFixDefs[g_texFixMode - 1].depthClamp;
                 if (dc <= 0) dc = 16;
+                g_vClamped[vb + v] = 0;
                 if (heightDiff < 0) {
                     int scale = fovLambda - dc;
                     int maxScale = dc * 12;
                     if (scale < 0) scale = 0;
                     if (scale > maxScale) scale = maxScale;
                     heightDiff = (heightDiff * scale) / maxScale;
+                    if (scale < maxScale) g_vClamped[vb + v] = 1;
                 }
             }
             g_vHeight[vb + v] = heightDiff;
@@ -4665,6 +4668,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         }
         else if (ms->meshTextured && uvs && tex)
         {
+            /* Skip textured faces with flattened vertices — UV distortion makes walls visible */
+            if (g_vClamped[vb+i0] || g_vClamped[vb+i1] || g_vClamped[vb+i2] || (isQuad && g_vClamped[vb+i3]))
+                continue;
             if (anyNear) {
                 // Near faces: 2D screen clip with UVs
                 int cx[] = {g_vsx[vb+i0], g_vsx[vb+i1], g_vsx[vb+i2], g_vsx[vb+i3]};
@@ -4680,6 +4686,11 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 int tpv[] = {uvs[i0*2+1], uvs[i1*2+1], uvs[i2*2+1], isQuad ? uvs[i3*2+1] : 0};
                 int nc = isQuad ? 4 : 3;
                 int needClip = 0;
+                /* Force clip path when any vertex is off-screen —
+                   ASM rasterizer can't handle extreme coords */
+                if (tpy[0] < 0 || tpy[1] < 0 || tpy[2] < 0 || (isQuad && tpy[3] < 0) ||
+                    tpy[0] > 159 || tpy[1] > 159 || tpy[2] > 159 || (isQuad && tpy[3] > 159))
+                    needClip = 1;
                 {
                     const TexFixDef *fd = &g_texFixDefs[g_texFixMode - 1];
                     // Screen clip margin check
