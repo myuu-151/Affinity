@@ -19,6 +19,7 @@ static GLuint        sTexture = 0;
 static SpriteScreenPos sLastProj[kMaxFloorSprites];
 static int sLastProjCount = 0;
 
+
 // Default checkerboard palette
 static const uint8_t kCheckA[3] = { 80, 160, 80 };   // green
 static const uint8_t kCheckB[3] = { 40,  80, 40 };   // dark green
@@ -713,6 +714,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             projCount++;
             if (projCount >= (int)(sizeof(projected) / sizeof(projected[0]))) break;
         }
+
         if (projCount >= (int)(sizeof(projected) / sizeof(projected[0]))) break;
     }
 

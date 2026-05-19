@@ -42,6 +42,7 @@ typedef struct {
     u8    grounded;    // 1 = stay on ground (Y=0) instead of following parent Y
     u32   drawBehindExc; // bitmask: bit N = mesh sprite[N] is exempt from draw-behind
     u8    skipProximity; // 1 = always render regardless of draw distance
+    u8    billboard;     // 1 = mesh always faces camera (Y-axis billboard)
 } FloorSpriteGBA;
 
 EWRAM_DATA static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
@@ -2206,6 +2207,7 @@ static void load_editor_sprites(void)
         g_sprites[i].grounded = (u8)afn_sprite_data[i][16];
         g_sprites[i].drawBehindExc = (u32)afn_sprite_data[i][17];
         g_sprites[i].skipProximity = (u8)afn_sprite_data[i][18];
+        g_sprites[i].billboard = (u8)afn_sprite_data[i][19];
         g_sprites[i].wx = g_sprites[i].x;
         g_sprites[i].wz = g_sprites[i].z;
         g_sprites[i].facing = g_sprites[i].rotation;
@@ -4342,8 +4344,17 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         ms->uvs = afn_mesh_uv_ptrs[mi];
         ms->tex = tex_cache_ptrs[mi];
 
-        cosR = lu_cos(g_sprites[si].rotation) >> 4;
-        sinR = lu_sin(g_sprites[si].rotation) >> 4;
+        if (g_sprites[si].billboard) {
+            // Billboard: face the camera. Compute angle from sprite to camera.
+            FIXED bdx = cam_x - g_sprites[si].x;
+            FIXED bdz = cam_z - g_sprites[si].z;
+            u16 ang = ArcTan2(bdx >> 4, -(bdz >> 4));
+            cosR = lu_cos(ang) >> 4;
+            sinR = lu_sin(ang) >> 4;
+        } else {
+            cosR = lu_cos(g_sprites[si].rotation) >> 4;
+            sinR = lu_sin(g_sprites[si].rotation) >> 4;
+        }
         ms->cosR = cosR;
         ms->sinR = sinR;
         sprScale = g_sprites[si].scale;
@@ -4898,28 +4909,42 @@ static void apply_draw_behind_exceptions(u16* buf)
         ai = g_sprites[i].assetIdx;
         if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
 
-        /* Build keep table: non-excepted mesh palettes that the sprite stays behind */
-        memset(keepPal, 0, 256);
+        /* Compute sprite depth for dynamic mesh sorting */
         {
-            u32 excBits = g_sprites[i].drawBehindExc & 0x7FFFFFFFu;
-            for (si = 0; si < g_spriteCount; si++)
+            FIXED spDx = g_sprites[i].x - cam_x;
+            FIXED spDz = g_sprites[i].z - cam_z;
+            FIXED spDepth = (spDx * g_sinf - spDz * g_cosf) >> 8;
+
+            /* Build keep table: meshes CLOSER than sprite block it, meshes FARTHER are excepted */
+            memset(keepPal, 0, 256);
             {
-                int mi, base, k;
-                if (g_sprites[si].meshIdx < 0) continue;
-                mi = g_sprites[si].meshIdx;
-                if (mi >= AFN_MESH_COUNT) continue;
-                if (excBits & (1u << si)) continue; /* excepted = sprite in front */
-                /* Non-excepted: sprite stays behind these */
-                base = AFN_MESH_PAL_BASE + mi * 8;
-                for (k = 0; k < 8 && base + k < 256; k++)
-                    keepPal[base + k] = 1;
-                base = afn_mesh_desc[mi][11];
-                if (base > 0)
-                    for (k = 0; k < 16 && base + k < 256; k++)
+                u32 staticExc = g_sprites[i].drawBehindExc & 0x7FFFFFFFu;
+                for (si = 0; si < g_spriteCount; si++)
+                {
+                    int mi, base, k;
+                    FIXED mDx, mDz, mDepth;
+                    if (g_sprites[si].meshIdx < 0) continue;
+                    mi = g_sprites[si].meshIdx;
+                    if (mi >= AFN_MESH_COUNT) continue;
+                    /* Static exception bit always takes precedence (sprite forced in front) */
+                    if (staticExc & (1u << si)) continue;
+                    /* Dynamic depth compare: if mesh is farther than sprite, sprite is in front */
+                    mDx = g_sprites[si].x - cam_x;
+                    mDz = g_sprites[si].z - cam_z;
+                    mDepth = (mDx * g_sinf - mDz * g_cosf) >> 8;
+                    if (mDepth > spDepth) continue; /* mesh farther → sprite in front */
+                    /* Mesh closer: sprite stays behind these palettes */
+                    base = AFN_MESH_PAL_BASE + mi * 8;
+                    for (k = 0; k < 8 && base + k < 256; k++)
                         keepPal[base + k] = 1;
-                if (afn_mesh_desc[mi][13])
-                    for (k = 5; k <= 12; k++)
-                        keepPal[k] = 1;
+                    base = afn_mesh_desc[mi][11];
+                    if (base > 0)
+                        for (k = 0; k < 16 && base + k < 256; k++)
+                            keepPal[base + k] = 1;
+                    if (afn_mesh_desc[mi][13])
+                        for (k = 5; k <= 12; k++)
+                            keepPal[k] = 1;
+                }
             }
         }
 

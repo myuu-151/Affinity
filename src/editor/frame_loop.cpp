@@ -4417,6 +4417,136 @@ static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh)
     return true;
 }
 
+// Bake a sprite asset into a mesh asset's texture (overwrites texture)
+// Uses directional image (front-facing RGBA8) if available, else frames[0]
+static void LoadSpriteIntoMeshTexture(int spriteAssetIdx, MeshAsset& mesh)
+{
+    if (spriteAssetIdx < 0 || spriteAssetIdx >= (int)sSpriteAssets.size()) return;
+    const SpriteAsset& spr = sSpriteAssets[spriteAssetIdx];
+
+    // Prefer directional image (RGBA8) — the sprite's actual displayed pixels
+    const unsigned char* srcRGBA = nullptr;
+    int w = 0, h = 0;
+    if (spriteAssetIdx < (int)sAssetDirSprites.size() && !sAssetDirSprites[spriteAssetIdx].empty()) {
+        const auto& dir0 = sAssetDirSprites[spriteAssetIdx][0][0]; // anim 0, direction 0
+        if (dir0.pixels && dir0.width > 0 && dir0.height > 0) {
+            srcRGBA = dir0.pixels;
+            w = dir0.width;
+            h = dir0.height;
+        }
+    }
+
+    std::vector<uint8_t> srcIndexed;
+    if (!srcRGBA) {
+        // Fallback to frames[0] indexed pixels
+        if (spr.frames.empty()) return;
+        const SpriteFrame& fr = spr.frames[0];
+        w = fr.width; h = fr.height;
+        if (w <= 0 || h <= 0) return;
+        srcIndexed.resize(w * h);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                srcIndexed[y * w + x] = fr.pixels[y * kMaxFrameSize + x];
+    }
+
+    // Build a palette from the RGBA data (top 15 unique opaque colors + index 0 = transparent)
+    uint32_t builtPal[16] = {};
+    int builtPalCount = 1; // start at 1; index 0 reserved for transparent
+    if (srcRGBA) {
+        struct ColorCount { uint32_t rgb; int count; };
+        std::vector<ColorCount> hist;
+        for (int i = 0; i < w * h; i++) {
+            const unsigned char* p = srcRGBA + i * 4;
+            if (p[3] == 0) continue; // skip transparent
+            uint32_t rgb = p[0] | (p[1] << 8) | (p[2] << 16);
+            bool found = false;
+            for (auto& hc : hist)
+                if (hc.rgb == rgb) { hc.count++; found = true; break; }
+            if (!found) hist.push_back({ rgb, 1 });
+        }
+        std::sort(hist.begin(), hist.end(), [](const ColorCount& a, const ColorCount& b) { return a.count > b.count; });
+        int cap = (int)hist.size(); if (cap > 15) cap = 15;
+        for (int i = 0; i < cap; i++)
+            builtPal[i + 1] = hist[i].rgb | 0xFF000000;
+        builtPalCount = cap + 1;
+    }
+
+    // Convert RGBA → indexed (find nearest palette entry per pixel; alpha=0 → index 0)
+    auto pixelIdxAt = [&](int x, int y) -> uint8_t {
+        if (srcRGBA) {
+            const unsigned char* p = srcRGBA + (y * w + x) * 4;
+            if (p[3] == 0) return 0;
+            int bestIdx = 1, bestDist = 0x7FFFFFFF;
+            for (int c = 1; c < builtPalCount; c++) {
+                uint32_t pc = builtPal[c];
+                int dr = (int)p[0] - (int)(pc & 0xFF);
+                int dg = (int)p[1] - (int)((pc >> 8) & 0xFF);
+                int db = (int)p[2] - (int)((pc >> 16) & 0xFF);
+                int d = dr*dr + dg*dg + db*db;
+                if (d < bestDist) { bestDist = d; bestIdx = c; }
+            }
+            return (uint8_t)bestIdx;
+        }
+        return srcIndexed[y * w + x];
+    };
+
+    // Find bounding box of non-transparent pixels
+    int x0 = w, y0 = h, x1 = -1, y1 = -1;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+            if (pixelIdxAt(x, y) != 0) {
+                if (x < x0) x0 = x;
+                if (y < y0) y0 = y;
+                if (x > x1) x1 = x;
+                if (y > y1) y1 = y;
+            }
+    if (x1 < 0) { x0 = 0; y0 = 0; x1 = w - 1; y1 = h - 1; }
+    int cropW = x1 - x0 + 1;
+    int cropH = y1 - y0 + 1;
+
+    // Round up to power-of-2
+    int tw = 1, th = 1;
+    while (tw < cropW && tw < 256) tw <<= 1;
+    while (th < cropH && th < 256) th <<= 1;
+
+    // Stretch cropped region to fill the POT texture
+    std::vector<uint8_t> indexed(tw * th, 0);
+    for (int y = 0; y < th; y++)
+        for (int x = 0; x < tw; x++) {
+            int sx = x0 + (x * cropW) / tw;
+            int sy = y0 + (y * cropH) / th;
+            if (sx < 0) sx = 0; if (sx >= w) sx = w - 1;
+            if (sy < 0) sy = 0; if (sy >= h) sy = h - 1;
+            indexed[y * tw + x] = pixelIdxAt(sx, sy);
+        }
+
+    mesh.texturePath = "(sprite:" + spr.name + ")";
+    mesh.texW = tw;
+    mesh.texH = th;
+    mesh.texturePixels = std::move(indexed);
+    if (srcRGBA)
+        memcpy(mesh.texturePalette, builtPal, sizeof(mesh.texturePalette));
+    else
+        memcpy(mesh.texturePalette, spr.palette, sizeof(mesh.texturePalette));
+    // Replace transparent palette[0] with sky color so it blends with background
+    mesh.texturePalette[0] = 0xFFC88C64;
+    mesh.textured = true;
+
+    // Upload GL texture for editor preview
+    std::vector<uint32_t> rgba(tw * th);
+    for (int i = 0; i < tw * th; i++)
+        rgba[i] = mesh.texturePalette[mesh.texturePixels[i]];
+    if (mesh.glTexID) glDeleteTextures(1, &mesh.glTexID);
+    glGenTextures(1, &mesh.glTexID);
+    glBindTexture(GL_TEXTURE_2D, mesh.glTexID);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
 // ---- Project save/load ----
 static bool SaveProject(const std::string& path)
 {
@@ -4475,11 +4605,11 @@ static bool SaveProject(const std::string& path)
     for (int i = 0; i < sSpriteCount; i++)
     {
         const FloorSprite& sp = sSprites[i];
-        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d",
+        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d",
                 sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                 sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0,
                 sp.meshIdx, sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
-                sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0);
+                sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx);
         for (int ip = 0; ip < sp.instanceParamCount; ip++)
             fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
         fprintf(f, "\n");
@@ -4912,11 +5042,11 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d",
+            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
                     sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
-                    sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0);
+                    sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx);
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
@@ -5039,11 +5169,11 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d",
+            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
                     sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
-                    sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0);
+                    sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx);
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
@@ -5427,8 +5557,8 @@ static bool LoadProject(const std::string& path)
                 int bpIdx = -1, bpParamCnt = 0, fStatic = 0, dBehind = 0;
                 float rotX = 0.0f, rotZ = 0.0f;
                 unsigned int dbExc = 0;
-                int dbNoSky = 0, skipProx = 0;
-                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx);
+                int dbNoSky = 0, skipProx = 0, billb = 0, mSprIdx = -1;
+                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx);
                 if (matched >= 6)
                 {
                     FloorSprite& sp = sSprites[sSpriteCount];
@@ -5454,6 +5584,8 @@ static bool LoadProject(const std::string& path)
                     sp.drawBehindExceptions = (matched >= 19) ? dbExc : 0;
                     sp.drawBehindNoSky = (matched >= 20) ? (dbNoSky != 0) : false;
                     sp.skipProximity = (matched >= 21) ? (skipProx != 0) : false;
+                    sp.billboard = (matched >= 22) ? (billb != 0) : false;
+                    sp.meshSpriteIdx = (matched >= 23) ? mSprIdx : -1;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line;
@@ -6546,11 +6678,11 @@ static bool LoadProject(const std::string& path)
                 int typeVal = 0, animEn = 0, bpIdx = -1, bpParamCnt = 0, fStatic = 0, dBehind = 0;
                 float rotX = 0.0f, rotZ = 0.0f;
                 unsigned int dbExc = 0;
-                int dbNoSky = 0, skipProx = 0;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d",
+                int dbNoSky = 0, skipProx = 0, billb = 0, mSprIdx = -1;
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx);
+                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
@@ -6564,6 +6696,8 @@ static bool LoadProject(const std::string& path)
                     sp.drawBehindExceptions = (matched >= 19) ? dbExc : 0;
                     sp.drawBehindNoSky = (matched >= 20) ? (dbNoSky != 0) : false;
                     sp.skipProximity = (matched >= 21) ? (skipProx != 0) : false;
+                    sp.billboard = (matched >= 22) ? (billb != 0) : false;
+                    sp.meshSpriteIdx = (matched >= 23) ? mSprIdx : -1;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
@@ -6937,11 +7071,11 @@ static bool LoadProject(const std::string& path)
                 int typeVal = 0, animEn = 0, bpIdx = -1, bpParamCnt = 0, fStatic = 0, dBehind = 0;
                 float rotX = 0.0f, rotZ = 0.0f;
                 unsigned int dbExc = 0;
-                int dbNoSky = 0, skipProx = 0;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d",
+                int dbNoSky = 0, skipProx = 0, billb = 0, mSprIdx = -1;
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx);
+                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
@@ -6955,6 +7089,8 @@ static bool LoadProject(const std::string& path)
                     sp.drawBehindExceptions = (matched >= 19) ? dbExc : 0;
                     sp.drawBehindNoSky = (matched >= 20) ? (dbNoSky != 0) : false;
                     sp.skipProximity = (matched >= 21) ? (skipProx != 0) : false;
+                    sp.billboard = (matched >= 22) ? (billb != 0) : false;
+                    sp.meshSpriteIdx = (matched >= 23) ? mSprIdx : -1;
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
                         for (int ip = 0; ip < sp.instanceParamCount; ip++) {
@@ -8219,7 +8355,7 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         ImGui::PushItemWidth(-1);
         ImGui::DragFloat("X##m3d", &sp.x, 1.0f, -kWorldHalf, kWorldHalf);
         if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
-        ImGui::DragFloat("Y##m3d", &sp.y, 0.5f, -200.0f, 200.0f);
+        ImGui::DragFloat("Y##m3d", &sp.y, 0.5f, -9999.0f, 9999.0f);
         if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         ImGui::DragFloat("Z##m3d", &sp.z, 1.0f, -kWorldHalf, kWorldHalf);
         if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
@@ -8232,6 +8368,8 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
             ImGui::DragFloat("Rot Z##m3d", &sp.rotationZ, 1.0f, -360.0f, 360.0f, "%.0f deg");
             if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
+            if (ImGui::Checkbox("Billboard##m3d", &sp.billboard)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Always face the camera (overrides Rot Y at runtime)");
         } else {
             ImGui::DragFloat("Rotation##m3d", &sp.rotation, 1.0f, 0.0f, 360.0f, "%.0f deg");
             if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
@@ -10092,7 +10230,7 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         }
         ImGui::DragFloat("X##spr", &sp.x, 1.0f, -kWorldHalf, kWorldHalf);
         if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
-        ImGui::DragFloat("Y##spr", &sp.y, 0.5f, 0.0f, 200.0f);
+        ImGui::DragFloat("Y##spr", &sp.y, 0.5f, -9999.0f, 9999.0f);
         if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         ImGui::DragFloat("Z##spr", &sp.z, 1.0f, -kWorldHalf, kWorldHalf);
         if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
@@ -10210,6 +10348,29 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                         sp.meshIdx = mi;
                 }
                 ImGui::EndCombo();
+            }
+            // Sprite displayed ON the mesh (renders as OAM sprite at mesh position)
+            {
+                const char* sprPreview = (sp.meshSpriteIdx >= 0 && sp.meshSpriteIdx < (int)sSpriteAssets.size())
+                    ? sSpriteAssets[sp.meshSpriteIdx].name.c_str() : "(none)";
+                if (ImGui::BeginCombo("Sprite##meshspr", sprPreview)) {
+                    if (ImGui::Selectable("(none)##meshsprnone", sp.meshSpriteIdx < 0)) {
+                        sp.meshSpriteIdx = -1;
+                        sProjectDirty = true;
+                    }
+                    for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++) {
+                        bool sel = (sp.meshSpriteIdx == ai);
+                        if (ImGui::Selectable(sSpriteAssets[ai].name.c_str(), sel)) {
+                            sp.meshSpriteIdx = ai;
+                            // Bake sprite asset's image as the mesh's texture
+                            if (sp.meshIdx >= 0 && sp.meshIdx < (int)sMeshAssets.size())
+                                LoadSpriteIntoMeshTexture(ai, sMeshAssets[sp.meshIdx]);
+                            sProjectDirty = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Bakes sprite asset's image as the mesh's texture (uses mesh UVs)");
             }
             if (ImGui::Button("Import OBJ...##mesh"))
             {
@@ -10733,7 +10894,7 @@ static void DrawPalettePanel(ImVec2 pos, ImVec2 size)
     ImGui::DragFloat("X",  &sCamera.x, 1.0f);
     ImGui::SameLine();
     ImGui::DragFloat("Z",  &sCamera.z, 1.0f);
-    ImGui::DragFloat("H",  &sCamera.height, 0.5f, 4.0f, 256.0f);
+    ImGui::DragFloat("H",  &sCamera.height, 0.5f, -9999.0f, 9999.0f);
     ImGui::SameLine();
     ImGui::SliderAngle("A", &sCamera.angle, -180.0f, 180.0f);
     ImGui::DragFloat("Pitch", &sCamera.horizon, 0.5f, 10.0f, 120.0f, "%.1f");
@@ -12274,6 +12435,7 @@ void FrameTick(float dt)
                             se.drawBehindExc = (1u << 31); /* trigger bitmap blit path */
                         se.forceStatic = sSprites[i].forceStatic;
                         se.skipProximity = sSprites[i].skipProximity;
+                        se.billboard = sSprites[i].billboard;
                         exportSprites.push_back(se);
 
                         // Emit sub-sprites as separate sprite entries
@@ -13519,9 +13681,9 @@ void FrameTick(float dt)
                 sCamera.horizon = std::max(10.0f, sCamera.horizon - 60.0f * dt);
 
             if (ImGui::IsKeyDown(ImGuiKey_Q))
-                sCamera.height = std::max(4.0f, sCamera.height - 40.0f * dt);
+                sCamera.height = std::max(-9999.0f, sCamera.height - 40.0f * dt);
             if (ImGui::IsKeyDown(ImGuiKey_E))
-                sCamera.height = std::min(256.0f, sCamera.height + 40.0f * dt);
+                sCamera.height = std::min(9999.0f, sCamera.height + 40.0f * dt);
 
             // Cancel grab if sprite deselected
             if (sGrabMode && (sSelectedSprite < 0 || sSelectedSprite >= sSpriteCount))
@@ -14595,9 +14757,9 @@ void FrameTick(float dt)
 
             // Q/E height, I/K horizon still work
             if (ImGui::IsKeyDown(ImGuiKey_Q))
-                sCamera.height = std::max(4.0f, sCamera.height - 20.0f * dt);
+                sCamera.height = std::max(-9999.0f, sCamera.height - 20.0f * dt);
             if (ImGui::IsKeyDown(ImGuiKey_E))
-                sCamera.height = std::min(200.0f, sCamera.height + 20.0f * dt);
+                sCamera.height = std::min(9999.0f, sCamera.height + 20.0f * dt);
 
             if (ImGui::IsKeyDown(ImGuiKey_I))
                 sCamera.horizon = std::min(120.0f, sCamera.horizon + 40.0f * dt);
