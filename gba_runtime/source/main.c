@@ -4316,6 +4316,17 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             if (heightDiff < 0) heightDiff = 0;
 #endif
             g_vSide[vb + v] = side;
+            /* When a vertex is very close (depth near clamp) AND above camera,
+               the projection explodes upward causing walls. Flatten heightDiff
+               for close vertices to prevent this. */
+            {
+                int dc = g_texFixDefs[g_texFixMode - 1].depthClamp;
+                if (dc <= 0) dc = 16;
+                if (heightDiff < 0 && fovLambda < dc * 3) {
+                    heightDiff = (heightDiff * (fovLambda - dc)) / (dc * 2);
+                    if (heightDiff > 0) heightDiff = 0;
+                }
+            }
             g_vHeight[vb + v] = heightDiff;
 
             {
