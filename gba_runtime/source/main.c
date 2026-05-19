@@ -2376,6 +2376,7 @@ static void update_sprites(void)
 #endif
 
         heightDiff = cam_h - g_sprites[i].y;
+        heightDiff += (fovLambda * cam_pitch) >> 8; // camera pitch
         screenY = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
         screenX = 120 + (int)((side * cam_fov) / fovLambda);
 
@@ -2762,6 +2763,8 @@ static inline void project_vertex(int side, int height, int depth, int* osx, int
 {
     int px, py, projScale;
     if (depth < 16) depth = 16;
+    // Apply camera pitch: tilt height based on depth
+    height += (depth * cam_pitch) >> 8;
     projScale = (cam_fov << 12) / depth;
     px = 120 + ((side * projScale) >> 12);
     py = m7_horizon + ((height * projScale) >> 12);
@@ -4298,6 +4301,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
 
             heightDiff = cam_h - wy;
             side = (dx * g_cosf + dz * g_sinf) >> 8;
+            // Camera pitch: tilt heightDiff based on depth
+            // Positive pitch = looking down slope → far verts shift down (heightDiff increases)
+            heightDiff += (fovLambda * cam_pitch) >> 8;
             g_vSide[vb + v] = side;
             g_vHeight[vb + v] = heightDiff;
 
@@ -4838,6 +4844,7 @@ static void apply_draw_behind_exceptions(u16* buf)
 
         side = (dx * g_cosf + dz * g_sinf) >> 8;
         heightDiff = cam_h - g_sprites[i].y;
+        heightDiff += (fovLambda * cam_pitch) >> 8; // camera pitch
         screenY = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
         screenX = 120 + (int)((side * cam_fov) / fovLambda);
 
@@ -4935,6 +4942,8 @@ static FIXED player_vy;        // vertical velocity (16.8, negative = falling)
 static int   player_on_ground; // 1 if standing on a floor face
 #endif
 static FIXED cam_y_smooth;     // smoothed camera Y offset (16.8)
+static int   cam_pitch;        // camera pitch (vertical tilt) in .8 fixed: positive = look down
+static int   cam_pitch_smooth; // smoothed pitch for gradual transition
 
 #ifdef AFN_COL_FACE_COUNT
 
@@ -5204,7 +5213,7 @@ static void mode4_init_scene(void)
     player_ground_y = 0;
     player_vy = 0;
     player_on_ground = 1;
-    cam_y_smooth = 0;
+    cam_y_smooth = 0; cam_pitch = 0; cam_pitch_smooth = 0;
 #ifdef AFN_HAS_SCRIPT
     afn_start_x = player_x;
     afn_start_y = player_y;
@@ -5707,7 +5716,7 @@ int main(void)
         orbit_dist = AFN_ORBIT_DIST;
         player_moving = 0;
         player_move_angle = 0x4000;
-        player_ground_y = 0; player_vy = 0; player_on_ground = 1; cam_y_smooth = 0;
+        player_ground_y = 0; player_vy = 0; player_on_ground = 1; cam_y_smooth = 0; cam_pitch = 0; cam_pitch_smooth = 0;
 #ifdef AFN_HAS_SCRIPT
         afn_start_x = player_x; afn_start_y = player_y; afn_start_z = player_z;
         if (g_spriteCount > 0) {
@@ -7040,6 +7049,41 @@ int main(void)
                 if (dy > -4 && dy < 4) cam_y_smooth = target_cam_y;
             }
             cam_h = AFN_CAM_H + cam_y_smooth;
+
+            // Auto-pitch: sample floor height ahead and behind to get slope
+#ifdef AFN_COL_FACE_COUNT
+            {
+                FIXED sampleDist = 20 << 8; // 20 pixels ahead/behind
+                FIXED fwdX = (g_sinf * sampleDist) >> 8;
+                FIXED fwdZ = (-g_cosf * sampleDist) >> 8;
+                FIXED yAhead, yBehind;
+                int hasAhead  = collide_floor(player_x + fwdX, player_z + fwdZ, player_y + (30 << 8), &yAhead);
+                int hasBehind = collide_floor(player_x - fwdX, player_z - fwdZ, player_y + (30 << 8), &yBehind);
+                int targetPitch = 0;
+                if (hasAhead && hasBehind) {
+                    // Slope = (yAhead - yBehind) / (2 * sampleDist)
+                    // Pitch in .8 fixed: atan approximated as linear for small angles
+                    int slopeY = yAhead - yBehind; // 16.8 fixed
+                    // pitch ≈ slopeY / (2 * sampleDist) * 256 (scale to .8)
+                    // = slopeY * 256 / (2 * sampleDist) = slopeY * 256 / (40 << 8)
+                    // = (slopeY << 8) / (40 << 8) = slopeY / 40
+                    targetPitch = slopeY / 40;
+                    // Clamp pitch range
+                    if (targetPitch > 80) targetPitch = 80;
+                    if (targetPitch < -80) targetPitch = -80;
+                } else if (hasAhead) {
+                    int slopeY = yAhead - player_y;
+                    targetPitch = slopeY / 20;
+                    if (targetPitch > 80) targetPitch = 80;
+                    if (targetPitch < -80) targetPitch = -80;
+                }
+                // Smooth the pitch transition
+                int pitchDiff = targetPitch - cam_pitch_smooth;
+                cam_pitch_smooth += (pitchDiff * 30) >> 8; // ~12% per frame
+                if (pitchDiff > -2 && pitchDiff < 2) cam_pitch_smooth = targetPitch;
+                cam_pitch = cam_pitch_smooth;
+            }
+#endif
 
             // Clamp player to map bounds (skip if collision mesh defines boundaries)
 #ifndef AFN_COL_FACE_COUNT
