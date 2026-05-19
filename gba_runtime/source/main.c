@@ -846,6 +846,7 @@ static int perf_mode;
 // Texture fix mode (cycled with SELECT, 1-200)
 #define TEX_FIX_COUNT 200
 static int g_texFixMode = 1;
+static int g_forceGrayscale = 0; // runtime toggle: force all meshes to greyscale
 
 // Each mode is encoded as: { clipMargin, depthClamp, rawDepthThresh, depthRatioNum, depthRatioDen, uvCorr }
 // clipMargin: -1=no clip, -2=always clip, >=0 = margin in pixels around screen
@@ -4140,6 +4141,71 @@ static void clip_render_poly_flat(u16* buf,
     }
 }
 
+static void clip_render_poly_tex(u16* buf,
+    const int* sx, const int* sy, const int* uIn, const int* vIn,
+    int inCount, const u8* tex, int texMask, int texShift, u8 palBase);
+
+// View-space near-plane clip with UV interpolation, then screen clip, then textured rasterize.
+// Same approach as clip_render_poly_flat but carries UVs through clipping.
+static void clip_render_poly_tex_vs(u16* buf,
+    const int* sideIn, const int* heightIn, const int* depthIn,
+    const int* uIn, const int* vIn,
+    int inCount, const u8* tex, int texMask, int texShift, u8 palBase)
+{
+    int sOut[8], hOut[8], dOut[8], uOut[8], vOut[8];
+    int outCount = 0;
+    int i, j;
+
+    if (inCount < 3) return;
+
+    // Sutherland-Hodgman: clip polygon against near plane (depth >= CLIP_NEAR_Z)
+    for (i = 0; i < inCount; i++)
+    {
+        j = (i + 1 < inCount) ? i + 1 : 0;
+        int inI = depthIn[i] >= CLIP_NEAR_Z;
+        int inJ = depthIn[j] >= CLIP_NEAR_Z;
+
+        if (inI) {
+            sOut[outCount] = sideIn[i];
+            hOut[outCount] = heightIn[i];
+            dOut[outCount] = depthIn[i];
+            uOut[outCount] = uIn[i];
+            vOut[outCount] = vIn[i];
+            outCount++;
+        }
+        if (inI != inJ) {
+            int t = (inI) ? near_clip_t(depthIn[i], depthIn[j])
+                          : near_clip_t(depthIn[j], depthIn[i]);
+            if (inI) {
+                sOut[outCount] = LERP16(sideIn[i], sideIn[j], t);
+                hOut[outCount] = LERP16(heightIn[i], heightIn[j], t);
+                uOut[outCount] = LERP16(uIn[i], uIn[j], t);
+                vOut[outCount] = LERP16(vIn[i], vIn[j], t);
+            } else {
+                sOut[outCount] = LERP16(sideIn[j], sideIn[i], t);
+                hOut[outCount] = LERP16(heightIn[j], heightIn[i], t);
+                uOut[outCount] = LERP16(uIn[j], uIn[i], t);
+                vOut[outCount] = LERP16(vIn[j], vIn[i], t);
+            }
+            dOut[outCount] = CLIP_NEAR_Z;
+            outCount++;
+        }
+    }
+
+    if (outCount < 3) return;
+
+    // Project all clipped vertices to screen space
+    {
+        int px[8], py[8];
+        for (i = 0; i < outCount; i++)
+            project_vertex(sOut[i], hOut[i], dOut[i], &px[i], &py[i]);
+
+        // Screen-space clip with UV interpolation, then textured rasterize
+        clip_render_poly_tex(buf, px, py, uOut, vOut, outCount,
+                             tex, texMask, texShift, palBase);
+    }
+}
+
 // OpenLara-style textured polygon clip+render.
 // Z is already clamped during projection — no 3D near-plane clip needed.
 // Just 2D screen-space Sutherland-Hodgman with UV interpolation, then rasterize.
@@ -4261,7 +4327,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         ms->texShift = afn_mesh_desc[mi][10];
         ms->texPalBase = afn_mesh_desc[mi][11];
         ms->meshWireframe = afn_mesh_desc[mi][12];
-        ms->meshGrayscale = afn_mesh_desc[mi][13];
+        ms->meshGrayscale = afn_mesh_desc[mi][13] || g_forceGrayscale;
         ms->drawDist = afn_mesh_desc[mi][14];
         ms->drawPriority = afn_mesh_desc[mi][15];
         ms->visible = afn_mesh_desc[mi][16];
@@ -4661,13 +4727,19 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         }
         else if (ms->meshTextured && uvs && tex)
         {
-            if (anyNear) {
-                // Near faces: 2D screen clip with UVs
-                int cx[] = {g_vsx[vb+i0], g_vsx[vb+i1], g_vsx[vb+i2], g_vsx[vb+i3]};
-                int cy[] = {g_vsy[vb+i0], g_vsy[vb+i1], g_vsy[vb+i2], g_vsy[vb+i3]};
+            // Check if any vertex has extreme screen Y (above horizon)
+            // — these faces need view-space clipping to avoid walling
+            int needVSClip = anyNear ||
+                g_vsy[vb+i0] < -10 || g_vsy[vb+i1] < -10 || g_vsy[vb+i2] < -10 ||
+                (isQuad && g_vsy[vb+i3] < -10);
+            if (needVSClip) {
+                // View-space near-plane clip with UV interpolation
+                int cs[] = {g_vSide[vb+i0], g_vSide[vb+i1], g_vSide[vb+i2], isQuad ? g_vSide[vb+i3] : 0};
+                int ch[] = {g_vHeight[vb+i0], g_vHeight[vb+i1], g_vHeight[vb+i2], isQuad ? g_vHeight[vb+i3] : 0};
+                int cd[] = {g_vRawDepth[vb+i0], g_vRawDepth[vb+i1], g_vRawDepth[vb+i2], isQuad ? g_vRawDepth[vb+i3] : 0};
                 int cu[] = {uvs[i0*2+0], uvs[i1*2+0], uvs[i2*2+0], isQuad ? uvs[i3*2+0] : 0};
                 int cv[] = {uvs[i0*2+1], uvs[i1*2+1], uvs[i2*2+1], isQuad ? uvs[i3*2+1] : 0};
-                clip_render_poly_tex(buf, cx, cy, cu, cv, isQuad ? 4 : 3,
+                clip_render_poly_tex_vs(buf, cs, ch, cd, cu, cv, isQuad ? 4 : 3,
                     tex, ms->texMask, ms->texShift, (u8)ms->texPalBase);
             } else {
                 int tpx[] = {g_vsx[vb+i0], g_vsx[vb+i1], g_vsx[vb+i2], isQuad ? g_vsx[vb+i3] : 0};
@@ -5897,6 +5969,10 @@ int main(void)
         { int st; for (st = 0; st < snd_frame_scale; st++) afn_sound_tick(); }
 #endif
         key_poll();
+
+        // SELECT toggles greyscale for debugging slope walling
+        if (key_hit(KEY_SELECT))
+            g_forceGrayscale ^= 1;
 
         // --- Scene transition state machine ---
         if (g_scene_transition > 0) {
