@@ -4322,9 +4322,12 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             {
                 int dc = g_texFixDefs[g_texFixMode - 1].depthClamp;
                 if (dc <= 0) dc = 16;
-                if (heightDiff < 0 && fovLambda < dc * 3) {
-                    heightDiff = (heightDiff * (fovLambda - dc)) / (dc * 2);
-                    if (heightDiff > 0) heightDiff = 0;
+                if (heightDiff < 0) {
+                    int scale = fovLambda - dc;
+                    int maxScale = dc * 12;
+                    if (scale < 0) scale = 0;
+                    if (scale > maxScale) scale = maxScale;
+                    heightDiff = (heightDiff * scale) / maxScale;
                 }
             }
             g_vHeight[vb + v] = heightDiff;
