@@ -27,6 +27,7 @@ struct GBASpriteExport
     bool  forceStatic = false; // force static rendering (ignore directions)
     bool  grounded = false;    // stay on ground (Y=0) instead of following parent Y
     uint32_t drawBehindExc = 0; // bitmask: bit N = mesh sprite[N] is exempt from draw-behind
+    bool skipProximity = false; // true = always render regardless of draw distance
 };
 
 // Player direction sprite for GBA export (RGBA8 image)

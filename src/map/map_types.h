@@ -230,6 +230,7 @@ struct FloorSprite
     bool  drawBehind = false;  // true = draw behind meshes (OAM priority 2)
     bool  drawBehindNoSky = false; // true = don't draw behind skybox (clear sky pixels in sprite rect)
     uint32_t drawBehindExceptions = 0; // bitmask: bit N = sprite[N] is exempt (draw in front of)
+    bool  skipProximity = false; // true = always render regardless of draw distance
     uint32_t color = 0xFFFF00FF; // tint color (ABGR) — used for editor preview
     bool  selected = false;
     // Attached sub-sprites (extra sprite layers with local offsets)

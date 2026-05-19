@@ -41,6 +41,7 @@ typedef struct {
     u8    forceStatic; // 1 = force static rendering (ignore directions)
     u8    grounded;    // 1 = stay on ground (Y=0) instead of following parent Y
     u32   drawBehindExc; // bitmask: bit N = mesh sprite[N] is exempt from draw-behind
+    u8    skipProximity; // 1 = always render regardless of draw distance
 } FloorSpriteGBA;
 
 EWRAM_DATA static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
@@ -2204,6 +2205,7 @@ static void load_editor_sprites(void)
         g_sprites[i].forceStatic = (u8)afn_sprite_data[i][15];
         g_sprites[i].grounded = (u8)afn_sprite_data[i][16];
         g_sprites[i].drawBehindExc = (u32)afn_sprite_data[i][17];
+        g_sprites[i].skipProximity = (u8)afn_sprite_data[i][18];
         g_sprites[i].wx = g_sprites[i].x;
         g_sprites[i].wz = g_sprites[i].z;
         g_sprites[i].facing = g_sprites[i].rotation;
@@ -2381,11 +2383,13 @@ static void update_sprites(void)
         side      = (dx * g_cosf + dz * g_sinf) >> 8;
 
         if (fovLambda <= 64) continue;
+        if (!g_sprites[i].skipProximity) {
 #ifdef AFN_SPRITE_DRAW_DISTANCE
-        if (fovLambda > AFN_SPRITE_DRAW_DISTANCE) continue;
+            if (fovLambda > AFN_SPRITE_DRAW_DISTANCE) continue;
 #elif defined(AFN_DRAW_DISTANCE)
-        if (fovLambda > AFN_DRAW_DISTANCE) continue;
+            if (fovLambda > AFN_DRAW_DISTANCE) continue;
 #endif
+        }
 
         heightDiff = cam_h - g_sprites[i].y;
         heightDiff += (fovLambda * cam_pitch) >> 8;
@@ -4944,6 +4948,13 @@ static void apply_draw_behind_exceptions(u16* buf)
         dz = g_sprites[i].z - cam_z;
         fovLambda = (dx * g_sinf - dz * g_cosf) >> 8;
         if (fovLambda <= 64) continue;
+        if (!g_sprites[i].skipProximity) {
+#ifdef AFN_SPRITE_DRAW_DISTANCE
+            if (fovLambda > AFN_SPRITE_DRAW_DISTANCE) continue;
+#elif defined(AFN_DRAW_DISTANCE)
+            if (fovLambda > AFN_DRAW_DISTANCE) continue;
+#endif
+        }
 
         side = (dx * g_cosf + dz * g_sinf) >> 8;
         heightDiff = cam_h - g_sprites[i].y;
