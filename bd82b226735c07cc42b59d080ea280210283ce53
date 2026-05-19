@@ -58,3 +58,19 @@ normal geometry.
 - Removed vertex-level Y clamping (was masking the problem, not fixing it)
 - Forward declaration of clip_render_poly_tex for use by clip_render_poly_tex_vs
 - Runtime SELECT toggle (g_forceGrayscale) for A/B comparison debugging
+
+## ELI5 Addendum
+
+Before any pixel is drawn, each 3D vertex gets turned into a 2D screen position
+(projection). If a vertex is above the camera and close, projection sends it to
+screen Y = -5000. The polygon becomes enormous. Cutting it at the screen edges
+doesn't help — the shape is already distorted.
+
+"Cut in 3D" means: before doing that projection, check if any vertex is too
+close/above the camera, and clip the polygon there — in the original 3D
+coordinates (side, height, depth). Then project the clipped result to screen.
+Now the screen positions are reasonable, and the polygon looks correct.
+
+Think of it like trimming a branch before photographing a tree, vs photographing
+first and then cropping the photo. The photo crop can't fix perspective
+distortion, but trimming the branch first gives you a clean photo.
