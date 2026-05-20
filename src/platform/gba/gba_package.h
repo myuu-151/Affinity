@@ -29,6 +29,8 @@ struct GBASpriteExport
     uint32_t drawBehindExc = 0; // bitmask: bit N = mesh sprite[N] is exempt from draw-behind
     bool skipProximity = false; // true = always render regardless of draw distance
     bool billboard = false;     // mesh: always face camera (Y-axis billboard)
+    float drawBehindThreshold = 0.0f; // Y offset for above/below mesh check
+    uint32_t drawBehindClipPlane = 0; // bitmask: bit N = clip-by-plane for that mesh
 };
 
 // Player direction sprite for GBA export (RGBA8 image)

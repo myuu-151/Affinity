@@ -43,6 +43,8 @@ typedef struct {
     u32   drawBehindExc; // bitmask: bit N = mesh sprite[N] is exempt from draw-behind
     u8    skipProximity; // 1 = always render regardless of draw distance
     u8    billboard;     // 1 = mesh always faces camera (Y-axis billboard)
+    FIXED dbThreshold;   // Y offset for dynamic above/below mesh check (16.8 fixed)
+    u32   dbClipPlane;   // bitmask: bit N = use plane clip for mesh sprite[N]
 } FloorSpriteGBA;
 
 EWRAM_DATA static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
@@ -2208,6 +2210,8 @@ static void load_editor_sprites(void)
         g_sprites[i].drawBehindExc = (u32)afn_sprite_data[i][17];
         g_sprites[i].skipProximity = (u8)afn_sprite_data[i][18];
         g_sprites[i].billboard = (u8)afn_sprite_data[i][19];
+        g_sprites[i].dbThreshold = (FIXED)afn_sprite_data[i][20];
+        g_sprites[i].dbClipPlane = (u32)afn_sprite_data[i][21];
         g_sprites[i].wx = g_sprites[i].x;
         g_sprites[i].wz = g_sprites[i].z;
         g_sprites[i].facing = g_sprites[i].rotation;
@@ -2391,6 +2395,20 @@ static void update_sprites(void)
 #elif defined(AFN_DRAW_DISTANCE)
             if (fovLambda > AFN_DRAW_DISTANCE) continue;
 #endif
+        }
+
+        /* Hide OAM when occluded by a clip-plane mesh (camera and sprite on opposite sides) */
+        if (g_sprites[i].dbClipPlane != 0) {
+            int occluded = 0;
+            int csi;
+            for (csi = 0; csi < g_spriteCount; csi++) {
+                FIXED effMY;
+                if (!(g_sprites[i].dbClipPlane & (1u << csi))) continue;
+                if (g_sprites[csi].meshIdx < 0) continue;
+                effMY = g_sprites[csi].y + g_sprites[i].dbThreshold;
+                if ((g_sprites[i].y > effMY) != (cam_h > effMY)) { occluded = 1; break; }
+            }
+            if (occluded) continue;
         }
 
         heightDiff = cam_h - g_sprites[i].y;
@@ -4909,6 +4927,20 @@ static void apply_draw_behind_exceptions(u16* buf)
         ai = g_sprites[i].assetIdx;
         if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
 
+        /* Skip blit entirely if occluded by a clip-plane mesh (matches OAM hide logic) */
+        if (g_sprites[i].dbClipPlane != 0) {
+            int occluded = 0;
+            int csi;
+            for (csi = 0; csi < g_spriteCount; csi++) {
+                FIXED effMY;
+                if (!(g_sprites[i].dbClipPlane & (1u << csi))) continue;
+                if (g_sprites[csi].meshIdx < 0) continue;
+                effMY = g_sprites[csi].y + g_sprites[i].dbThreshold;
+                if ((g_sprites[i].y > effMY) != (cam_h > effMY)) { occluded = 1; break; }
+            }
+            if (occluded) continue;
+        }
+
         /* Compute sprite depth for dynamic mesh sorting */
         {
             FIXED spDx = g_sprites[i].x - cam_x;
@@ -4928,11 +4960,16 @@ static void apply_draw_behind_exceptions(u16* buf)
                     if (mi >= AFN_MESH_COUNT) continue;
                     /* Static exception bit always takes precedence (sprite forced in front) */
                     if (staticExc & (1u << si)) continue;
-                    /* Dynamic depth compare: if mesh is farther than sprite, sprite is in front */
-                    mDx = g_sprites[si].x - cam_x;
-                    mDz = g_sprites[si].z - cam_z;
-                    mDepth = (mDx * g_sinf - mDz * g_cosf) >> 8;
-                    if (mDepth > spDepth) continue; /* mesh farther → sprite in front */
+                    /* Per-mesh sort: check the clip-plane bitmask for this specific mesh */
+                    if (g_sprites[i].dbClipPlane & (1u << si)) {
+                        /* Plane clip: visible if camera and sprite are on the same side of the mesh's plane */
+                        FIXED effMY = g_sprites[si].y + g_sprites[i].dbThreshold;
+                        int spriteAbove = (g_sprites[i].y > effMY);
+                        int cameraAbove = (cam_h > effMY);
+                        if (spriteAbove == cameraAbove) continue; /* same side → in front */
+                        /* opposite sides → mesh occludes */
+                    }
+                    /* Default (no clip flag): sprite stays behind mesh */
                     /* Mesh closer: sprite stays behind these palettes */
                     base = AFN_MESH_PAL_BASE + mi * 8;
                     for (k = 0; k < 8 && base + k < 256; k++)

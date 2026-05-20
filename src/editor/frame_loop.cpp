@@ -4605,11 +4605,11 @@ static bool SaveProject(const std::string& path)
     for (int i = 0; i < sSpriteCount; i++)
     {
         const FloorSprite& sp = sSprites[i];
-        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d",
+        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u",
                 sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                 sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0,
                 sp.meshIdx, sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
-                sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx);
+                sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane);
         for (int ip = 0; ip < sp.instanceParamCount; ip++)
             fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
         fprintf(f, "\n");
@@ -5042,11 +5042,11 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d",
+            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
                     sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
-                    sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx);
+                    sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane);
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
@@ -5169,11 +5169,11 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d",
+            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
                     sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
-                    sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx);
+                    sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane);
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
@@ -5558,7 +5558,9 @@ static bool LoadProject(const std::string& path)
                 float rotX = 0.0f, rotZ = 0.0f;
                 unsigned int dbExc = 0;
                 int dbNoSky = 0, skipProx = 0, billb = 0, mSprIdx = -1;
-                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx);
+                float dbThresh = 0.0f;
+                unsigned int dbClip = 0;
+                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip);
                 if (matched >= 6)
                 {
                     FloorSprite& sp = sSprites[sSpriteCount];
@@ -5586,6 +5588,8 @@ static bool LoadProject(const std::string& path)
                     sp.skipProximity = (matched >= 21) ? (skipProx != 0) : false;
                     sp.billboard = (matched >= 22) ? (billb != 0) : false;
                     sp.meshSpriteIdx = (matched >= 23) ? mSprIdx : -1;
+                    sp.drawBehindThreshold = (matched >= 24) ? dbThresh : 0.0f;
+                    sp.drawBehindClipPlane = (matched >= 25) ? dbClip : 0;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line;
@@ -6679,10 +6683,12 @@ static bool LoadProject(const std::string& path)
                 float rotX = 0.0f, rotZ = 0.0f;
                 unsigned int dbExc = 0;
                 int dbNoSky = 0, skipProx = 0, billb = 0, mSprIdx = -1;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d",
+                float dbThresh = 0.0f;
+                unsigned int dbClip = 0;
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx);
+                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
@@ -6698,6 +6704,8 @@ static bool LoadProject(const std::string& path)
                     sp.skipProximity = (matched >= 21) ? (skipProx != 0) : false;
                     sp.billboard = (matched >= 22) ? (billb != 0) : false;
                     sp.meshSpriteIdx = (matched >= 23) ? mSprIdx : -1;
+                    sp.drawBehindThreshold = (matched >= 24) ? dbThresh : 0.0f;
+                    sp.drawBehindClipPlane = (matched >= 25) ? dbClip : 0;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
@@ -7072,10 +7080,12 @@ static bool LoadProject(const std::string& path)
                 float rotX = 0.0f, rotZ = 0.0f;
                 unsigned int dbExc = 0;
                 int dbNoSky = 0, skipProx = 0, billb = 0, mSprIdx = -1;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d",
+                float dbThresh = 0.0f;
+                unsigned int dbClip = 0;
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx);
+                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
@@ -7091,6 +7101,8 @@ static bool LoadProject(const std::string& path)
                     sp.skipProximity = (matched >= 21) ? (skipProx != 0) : false;
                     sp.billboard = (matched >= 22) ? (billb != 0) : false;
                     sp.meshSpriteIdx = (matched >= 23) ? mSprIdx : -1;
+                    sp.drawBehindThreshold = (matched >= 24) ? dbThresh : 0.0f;
+                    sp.drawBehindClipPlane = (matched >= 25) ? dbClip : 0;
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
                         for (int ip = 0; ip < sp.instanceParamCount; ip++) {
@@ -10312,20 +10324,34 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             if (sp.drawBehind) {
                 ImGui::Indent();
                 if (ImGui::Checkbox("Don't draw behind sky##dbSky", &sp.drawBehindNoSky)) sProjectDirty = true;
-                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Exceptions (draw in front of):");
+                if (sp.drawBehindNoSky) {
+                    if (ImGui::DragFloat("Height Threshold##dbThresh", &sp.drawBehindThreshold, 0.5f, -500.0f, 500.0f, "%.1f"))
+                        sProjectDirty = true;
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Y offset added to mesh's effective top for above/below check — tune to match mesh's visual height (higher = mesh treated as taller)");
+                }
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Per-mesh: Front = always in front, Clip = use plane (same side as camera = visible)");
                 for (int mi = 0; mi < sSpriteCount; mi++) {
                     if (mi == sSelectedSprite) continue;
                     if (sSprites[mi].type != SpriteType::Mesh) continue;
                     const char* meshName = (sSprites[mi].meshIdx >= 0 && sSprites[mi].meshIdx < (int)sMeshAssets.size())
                         ? sMeshAssets[sSprites[mi].meshIdx].name.c_str() : "(no mesh)";
-                    char label[80];
-                    snprintf(label, sizeof(label), "[%d] %s##dbx%d", mi, meshName, mi);
+                    ImGui::PushID(mi);
                     bool exc = (sp.drawBehindExceptions & (1u << mi)) != 0;
-                    if (ImGui::Checkbox(label, &exc)) {
+                    if (ImGui::Checkbox("Front##dbx", &exc)) {
                         if (exc) sp.drawBehindExceptions |= (1u << mi);
                         else sp.drawBehindExceptions &= ~(1u << mi);
                         sProjectDirty = true;
                     }
+                    ImGui::SameLine();
+                    bool clip = (sp.drawBehindClipPlane & (1u << mi)) != 0;
+                    if (ImGui::Checkbox("Clip##dbcp", &clip)) {
+                        if (clip) sp.drawBehindClipPlane |= (1u << mi);
+                        else sp.drawBehindClipPlane &= ~(1u << mi);
+                        sProjectDirty = true;
+                    }
+                    ImGui::SameLine();
+                    ImGui::Text("[%d] %s", mi, meshName);
+                    ImGui::PopID();
                 }
                 ImGui::Unindent();
             }
@@ -12436,6 +12462,8 @@ void FrameTick(float dt)
                         se.forceStatic = sSprites[i].forceStatic;
                         se.skipProximity = sSprites[i].skipProximity;
                         se.billboard = sSprites[i].billboard;
+                        se.drawBehindThreshold = sSprites[i].drawBehindThreshold;
+                        se.drawBehindClipPlane = sSprites[i].drawBehindClipPlane;
                         exportSprites.push_back(se);
 
                         // Emit sub-sprites as separate sprite entries

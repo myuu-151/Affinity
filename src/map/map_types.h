@@ -230,8 +230,10 @@ struct FloorSprite
     bool  drawBehind = false;  // true = draw behind meshes (OAM priority 2)
     bool  drawBehindNoSky = false; // true = don't draw behind skybox (clear sky pixels in sprite rect)
     uint32_t drawBehindExceptions = 0; // bitmask: bit N = sprite[N] is exempt (draw in front of)
+    uint32_t drawBehindClipPlane = 0;  // bitmask: bit N = sprite[N] clips via plane (same-side check)
     bool  skipProximity = false; // true = always render regardless of draw distance
     bool  billboard = false;     // mesh only: always face camera (Y-axis billboard)
+    float drawBehindThreshold = 0.0f; // Y offset added to sprite for above/below mesh check
     int   meshSpriteIdx = -1;    // mesh only: sprite asset to display on top of the mesh (-1 = none)
     uint32_t color = 0xFFFF00FF; // tint color (ABGR) — used for editor preview
     bool  selected = false;
