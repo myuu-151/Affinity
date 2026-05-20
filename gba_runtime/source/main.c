@@ -4978,6 +4978,45 @@ static void apply_draw_behind_exceptions(u16* buf)
     int i, si;
     u8 keepPal[256]; /* 1 = non-excepted mesh pixel, don't overwrite */
 
+    /* Dynamic blit slot assignment (per-frame): for sprites with blitSlot=-2 (Draw Distance),
+       assign palette slots based on which are currently within draw distance. */
+    {
+        int slotInUse[3] = {0, 0, 0};
+        int b;
+        for (b = 0; b < 16; b++) {
+            int s = g_blitPalSlot[b];
+            if (s >= 0 && s < 3) slotInUse[s] = 1;
+        }
+        for (i = 0; i < g_spriteCount; i++) {
+            int ai, srcBank;
+            FIXED dx, dz, lam;
+            if (g_sprites[i].meshIdx >= 0) continue;
+            if (g_sprites[i].drawBehindExc == 0) continue;
+            if ((s8)g_sprites[i].blitSlot != -2) continue;
+            ai = g_sprites[i].assetIdx;
+            if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
+            dx = g_sprites[i].x - cam_x;
+            dz = g_sprites[i].z - cam_z;
+            lam = (dx * g_sinf - dz * g_cosf) >> 8;
+            if (lam <= 64) continue;
+#ifdef AFN_SPRITE_DRAW_DISTANCE
+            if (lam > AFN_SPRITE_DRAW_DISTANCE) continue;
+#elif defined(AFN_DRAW_DISTANCE)
+            if (lam > AFN_DRAW_DISTANCE) continue;
+#endif
+            srcBank = afn_asset_desc[ai][4];
+            if (srcBank < 0 || srcBank >= 16) srcBank = 0;
+            if (g_blitPalSlot[srcBank] >= 0) continue;
+            { int s; for (s = 0; s < 3; s++) {
+                if (!slotInUse[s]) {
+                    g_blitPalSlot[srcBank] = s;
+                    memcpy16(&pal_bg_mem[128 + s * 16], &pal_obj_mem[srcBank * 16], 16);
+                    slotInUse[s] = 1;
+                    break;
+                }
+            }}
+        }
+    }
 
     /* Pre-compute mesh sprite info once per frame (avoids re-scanning g_sprites per blit sprite) */
     typedef struct {
