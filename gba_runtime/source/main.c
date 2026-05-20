@@ -1610,6 +1610,8 @@ EWRAM_DATA static u8  g_asset_anim_enabled[AFN_ASSET_COUNT]; // per-asset: any s
 // NUM_SPRITES defined before mapdata.h include (line 94)
 
 static int g_spriteCount = 0;
+// Source-palBank → BG-bank slot mapping for blit OBJ palette copies (-1 = unassigned)
+static s8 g_blitPalSlot[16];
 
 static int g_page = 0;
 
@@ -2227,20 +2229,28 @@ static void load_editor_sprites(void)
             g_meshSpriteMask |= (1u << i);
     }
     // Copy OBJ palettes used by draw-behind exception sprites into BG palette 128+
-    // so bitmap blit can reference them without palette conflicts
+    // so bitmap blit can reference them without palette conflicts.
+    // Sky uses 176-239; safe range is 128-175 (3 slots: BG banks 8, 9, 10).
+    // Assign each distinct source palBank to the next free slot.
+    { int b; for (b = 0; b < 16; b++) g_blitPalSlot[b] = -1; }
     {
-        u16 palCopied = 0;
+        int slotsUsed = 0;
         for (i = 0; i < count; i++) {
-            int ai, palBank;
+            int ai;
             if (g_sprites[i].meshIdx >= 0) continue;
             if (g_sprites[i].drawBehindExc == 0) continue;
             ai = g_sprites[i].assetIdx;
             if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
-            palBank = afn_asset_desc[ai][4];
-            if (palBank > 15) palBank = 1;
-            if (palCopied & (1u << palBank)) continue;
-            memcpy16(&pal_bg_mem[128 + palBank * 16], &pal_obj_mem[palBank * 16], 16);
-            palCopied |= (1u << palBank);
+            {
+                int srcBank = afn_asset_desc[ai][4];
+                if (srcBank < 0 || srcBank >= 16) srcBank = 0;
+                if (g_blitPalSlot[srcBank] < 0) {
+                    int slot = (slotsUsed < 3) ? slotsUsed : (srcBank % 3);
+                    g_blitPalSlot[srcBank] = slot;
+                    memcpy16(&pal_bg_mem[128 + slot * 16], &pal_obj_mem[srcBank * 16], 16);
+                    if (slotsUsed < 3) slotsUsed++;
+                }
+            }
         }
     }
 }
@@ -5036,10 +5046,12 @@ static void apply_draw_behind_exceptions(u16* buf)
             palBank = afn_asset_dir_desc[ai][3];
         }
 #endif
-        if (palBank > 15) palBank = 1;
-
-        /* OBJ palette was copied to BG palette 128+palBank*16 at init */
-        dbPalBase = 128 + palBank * 16;
+        /* Use slot assignment built at sprite load time */
+        {
+            int slot = (palBank >= 0 && palBank < 16) ? g_blitPalSlot[palBank] : -1;
+            if (slot < 0) slot = palBank % 3; /* fallback */
+            dbPalBase = 128 + slot * 16;
+        }
 
         /* Project sprite to screen */
         dx = g_sprites[i].x - cam_x;
