@@ -46,6 +46,7 @@ typedef struct {
     FIXED dbThreshold;   // Y offset for dynamic above/below mesh check (16.8 fixed)
     u32   dbClipPlane;   // bitmask: bit N = use plane clip for mesh sprite[N]
     s8    spriteDrawPri; // OAM ordering tiebreaker (-8..+8)
+    s8    blitSlot;      // -1 = auto-assigned, 0/1/2 = manual BG palette slot
 } FloorSpriteGBA;
 
 EWRAM_DATA static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
@@ -2215,6 +2216,7 @@ static void load_editor_sprites(void)
         g_sprites[i].dbThreshold = (FIXED)afn_sprite_data[i][20];
         g_sprites[i].dbClipPlane = (u32)afn_sprite_data[i][21];
         g_sprites[i].spriteDrawPri = (s8)afn_sprite_data[i][22];
+        g_sprites[i].blitSlot = (s8)afn_sprite_data[i][23];
         g_sprites[i].wx = g_sprites[i].x;
         g_sprites[i].wz = g_sprites[i].z;
         g_sprites[i].facing = g_sprites[i].rotation;
@@ -2230,16 +2232,33 @@ static void load_editor_sprites(void)
             g_meshSpriteMask |= (1u << i);
     }
     // Copy OBJ palettes used by draw-behind exception sprites into BG palette 128+
-    // so bitmap blit can reference them without palette conflicts.
     // Sky uses 176-239; safe range is 128-175 (3 slots: BG banks 8, 9, 10).
-    // Assign each distinct source palBank to the next free slot.
+    // Manual blitSlot (0/1/2) takes precedence; auto (-1) assigns next free slot.
     { int b; for (b = 0; b < 16; b++) g_blitPalSlot[b] = -1; }
     {
         int slotsUsed = 0;
+        /* First pass: honor manually-assigned slots */
+        for (i = 0; i < count; i++) {
+            int ai, srcBank, manualSlot;
+            if (g_sprites[i].meshIdx >= 0) continue;
+            if (g_sprites[i].drawBehindExc == 0) continue;
+            ai = g_sprites[i].assetIdx;
+            if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
+            manualSlot = (s8)g_sprites[i].blitSlot;
+            if (manualSlot < 0 || manualSlot > 2) continue;
+            srcBank = afn_asset_desc[ai][4];
+            if (srcBank < 0 || srcBank >= 16) srcBank = 0;
+            if (g_blitPalSlot[srcBank] < 0) {
+                g_blitPalSlot[srcBank] = manualSlot;
+                memcpy16(&pal_bg_mem[128 + manualSlot * 16], &pal_obj_mem[srcBank * 16], 16);
+            }
+        }
+        /* Second pass: auto-assign remaining (skip blitSlot=-2 = Dynamic mode) */
         for (i = 0; i < count; i++) {
             int ai;
             if (g_sprites[i].meshIdx >= 0) continue;
             if (g_sprites[i].drawBehindExc == 0) continue;
+            if ((s8)g_sprites[i].blitSlot == -2) continue; /* dynamic — assigned per-frame */
             ai = g_sprites[i].assetIdx;
             if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
             {
@@ -4958,6 +4977,7 @@ static void apply_draw_behind_exceptions(u16* buf)
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
     int i, si;
     u8 keepPal[256]; /* 1 = non-excepted mesh pixel, don't overwrite */
+
 
     /* Pre-compute mesh sprite info once per frame (avoids re-scanning g_sprites per blit sprite) */
     typedef struct {
