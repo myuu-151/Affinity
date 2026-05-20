@@ -4800,18 +4800,28 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             int fcY0 = g_vsy[vb+i0], fcY1 = g_vsy[vb+i1], fcY2 = g_vsy[vb+i2];
             int fcY3 = isQuad ? g_vsy[vb+i3] : 0;
             int faceCullClamp = 0;
-            /* Only mirror if at least one vertex of this face is still grounded
-               (at/below horizon). If ALL vertices are above horizon, the camera
-               is below the mesh (falling/jumping) and we shouldn't fold it down. */
+            /* Smooth mirror: blend gradually from original to mirrored sy as vertex
+               crosses below the threshold. Avoids snap-to-mirror flicker on descents. */
             if (ms->meshFaceCull) {
                 int anyGrounded = (fcY0 >= m7_horizon) || (fcY1 >= m7_horizon) ||
                                   (fcY2 >= m7_horizon) || (isQuad && fcY3 >= m7_horizon);
                 if (anyGrounded) {
-                    const int mirThresh = -50;
-                    if (fcY0 < mirThresh) { fcY0 = 2*m7_horizon - fcY0; faceCullClamp = 1; }
-                    if (fcY1 < mirThresh) { fcY1 = 2*m7_horizon - fcY1; faceCullClamp = 1; }
-                    if (fcY2 < mirThresh) { fcY2 = 2*m7_horizon - fcY2; faceCullClamp = 1; }
-                    if (isQuad && fcY3 < mirThresh) { fcY3 = 2*m7_horizon - fcY3; faceCullClamp = 1; }
+                    const int mirThresh = -50;  /* blend starts here */
+                    const int mirFull = -200;   /* blend reaches full mirror here */
+                    #define SMOOTH_MIR(sy) do { \
+                        if ((sy) < mirThresh) { \
+                            int mirrored = 2 * m7_horizon - (sy); \
+                            int s = (sy) < mirFull ? 256 \
+                                  : ((mirThresh - (sy)) * 256) / (mirThresh - mirFull); \
+                            (sy) = (sy) + ((mirrored - (sy)) * s) / 256; \
+                            faceCullClamp = 1; \
+                        } \
+                    } while(0)
+                    SMOOTH_MIR(fcY0);
+                    SMOOTH_MIR(fcY1);
+                    SMOOTH_MIR(fcY2);
+                    if (isQuad) SMOOTH_MIR(fcY3);
+                    #undef SMOOTH_MIR
                 }
             }
 
