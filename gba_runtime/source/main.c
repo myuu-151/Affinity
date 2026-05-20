@@ -4304,6 +4304,7 @@ typedef struct {
     const u8* tex;
     FIXED cosR, sinR;
     int cullMode, meshLit, meshHalfRes, meshTextured, meshWireframe, meshGrayscale, meshPerspCorr, meshNearClip, meshFaceCull;
+    int meshAnyGrounded; /* true if any vertex of this mesh projects at/below horizon */
     int texW, texShift, texMask, texPalBase;
     int vertCount, idxCount, quadIdxCount;
     int drawDist;
@@ -4462,6 +4463,15 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             FIXED cdx = g_sprites[si].x - cam_x;
             FIXED cdz = g_sprites[si].z - cam_z;
             ms->centerDepth = (cdx * g_sinf - cdz * g_cosf) >> 8;
+        }
+
+        /* Check if any vertex of this mesh projects at/below horizon (mesh has visible footing). */
+        {
+            int gv;
+            ms->meshAnyGrounded = 0;
+            for (gv = 0; gv < vertCount; gv++) {
+                if (g_vsy[vb + gv] >= m7_horizon) { ms->meshAnyGrounded = 1; break; }
+            }
         }
 
         // Whole-mesh screen cull
@@ -4801,11 +4811,10 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             int fcY3 = isQuad ? g_vsy[vb+i3] : 0;
             int faceCullClamp = 0;
             /* Smooth mirror: blend gradually from original to mirrored sy as vertex
-               crosses below the threshold. Avoids snap-to-mirror flicker on descents. */
+               crosses below the threshold. Avoids snap-to-mirror flicker on descents.
+               Use per-MESH grounded check so subdivided sub-faces still mirror. */
             if (ms->meshFaceCull) {
-                int anyGrounded = (fcY0 >= m7_horizon) || (fcY1 >= m7_horizon) ||
-                                  (fcY2 >= m7_horizon) || (isQuad && fcY3 >= m7_horizon);
-                if (anyGrounded) {
+                if (ms->meshAnyGrounded) {
                     const int mirThresh = -50;  /* blend starts here */
                     const int mirFull = -200;   /* blend reaches full mirror here */
                     #define SMOOTH_MIR(sy) do { \
