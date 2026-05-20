@@ -2379,8 +2379,27 @@ static void update_sprites(void)
         if (i < NUM_SPRITES && !afn_sprite_visible[i]) continue;
         // Skip mesh sprites (rendered into bitmap, not OAM)
         if (g_sprites[i].meshIdx >= 0) continue;
-        // Skip draw-behind exception sprites (blitted directly to bitmap)
-        if (g_sprites[i].drawBehindExc != 0) continue;
+        // Skip draw-behind exception sprites (handled by blit) — UNLESS they are
+        // fully in front of all clip-plane meshes (then emit as OAM priority 0 to skip blit)
+        if (g_sprites[i].drawBehindExc != 0) {
+            u32 clipMask = g_sprites[i].dbClipPlane;
+            int inFront = 0;
+            if (clipMask != 0) {
+                int csi;
+                FIXED spY2 = g_sprites[i].y;
+                FIXED thr = g_sprites[i].dbThreshold;
+                inFront = 1;
+                for (csi = 0; csi < g_spriteCount; csi++) {
+                    FIXED effMY;
+                    if (!(clipMask & (1u << csi))) continue;
+                    if (g_sprites[csi].meshIdx < 0) continue;
+                    effMY = g_sprites[csi].y + thr;
+                    if ((spY2 > effMY) != (cam_h > effMY)) { inFront = 0; break; }
+                }
+            }
+            if (!inFront) continue; /* let blit handle it */
+            /* fall through: emit OAM at priority 0 (in front of mesh) */
+        }
 
         dx = g_sprites[i].x - cam_x;
         dz = g_sprites[i].z - cam_z;
@@ -2583,7 +2602,11 @@ static void update_sprites(void)
             obj_mem[oamIdx].attr0 = ATTR0_Y(sy & 0xFF) | ATTR0_SQUARE | ATTR0_AFF_DBL;
             obj_mem[oamIdx].attr1 = ATTR1_X(sx & 0x1FF) | size_to_attr1(baseSize) | ATTR1_AFF_ID(affIdx);
             {
-                obj_mem[oamIdx].attr2 = ATTR2_ID(tileId) | ATTR2_PRIO(g_sprites[sprIdx].oamPrio) | ATTR2_PALBANK(palBank);
+                /* Blit sprites that fell through (sprite in front of all clip-plane meshes)
+                   get OAM priority 0 to draw above the mesh bitmap */
+                int effPrio = (g_sprites[sprIdx].drawBehindExc != 0 && g_sprites[sprIdx].dbClipPlane != 0)
+                              ? 0 : g_sprites[sprIdx].oamPrio;
+                obj_mem[oamIdx].attr2 = ATTR2_ID(tileId) | ATTR2_PRIO(effPrio) | ATTR2_PALBANK(palBank);
             }
         }
     }
@@ -4898,6 +4921,27 @@ static void apply_draw_behind_exceptions(u16* buf)
     int i, si;
     u8 keepPal[256]; /* 1 = non-excepted mesh pixel, don't overwrite */
 
+    /* Pre-compute mesh sprite info once per frame (avoids re-scanning g_sprites per blit sprite) */
+    typedef struct {
+        u8  spriteIdx;     /* index into g_sprites */
+        u8  meshIdx;
+        u8  texPalBase;    /* 0 if not textured */
+        u8  isGreyscale;
+        FIXED y;
+    } MeshInfo;
+    MeshInfo meshList[MAX_FLOOR_SPRITES];
+    int meshCount = 0;
+    for (si = 0; si < g_spriteCount && meshCount < MAX_FLOOR_SPRITES; si++) {
+        int mi = g_sprites[si].meshIdx;
+        if (mi < 0 || mi >= AFN_MESH_COUNT) continue;
+        meshList[meshCount].spriteIdx = (u8)si;
+        meshList[meshCount].meshIdx = (u8)mi;
+        meshList[meshCount].texPalBase = (u8)afn_mesh_desc[mi][11];
+        meshList[meshCount].isGreyscale = (u8)afn_mesh_desc[mi][13];
+        meshList[meshCount].y = g_sprites[si].y;
+        meshCount++;
+    }
+
     for (i = 0; i < g_spriteCount; i++)
     {
         FIXED dx, dz, fovLambda, side, heightDiff;
@@ -4907,54 +4951,74 @@ static void apply_draw_behind_exceptions(u16* buf)
         const u8* objVram = (const u8*)0x06010000;
         int tilesPerRow;
         int dbPalBase;
+        u32 staticExc, clipMask;
+        FIXED spY, spThresh;
+        int m;
 
         if (g_sprites[i].meshIdx >= 0) continue;
         if (g_sprites[i].drawBehindExc == 0) continue;
         ai = g_sprites[i].assetIdx;
         if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
 
-        /* Compute sprite depth for dynamic mesh sorting */
+        /* Build keep table from pre-computed mesh list.
+           First pass: check if any mesh actually occludes this sprite.
+           If none do, we can skip the blit entirely (sprite is fully in front). */
+        staticExc = g_sprites[i].drawBehindExc & 0x7FFFFFFFu;
+        clipMask = g_sprites[i].dbClipPlane;
+        spY = g_sprites[i].y;
+        spThresh = g_sprites[i].dbThreshold;
         {
-            FIXED spDx = g_sprites[i].x - cam_x;
-            FIXED spDz = g_sprites[i].z - cam_z;
-            FIXED spDepth = (spDx * g_sinf - spDz * g_cosf) >> 8;
-
-            /* Build keep table: meshes CLOSER than sprite block it, meshes FARTHER are excepted */
-            memset(keepPal, 0, 256);
-            {
-                u32 staticExc = g_sprites[i].drawBehindExc & 0x7FFFFFFFu;
-                for (si = 0; si < g_spriteCount; si++)
-                {
-                    int mi, base, k;
-                    FIXED mDx, mDz, mDepth;
-                    if (g_sprites[si].meshIdx < 0) continue;
-                    mi = g_sprites[si].meshIdx;
-                    if (mi >= AFN_MESH_COUNT) continue;
-                    /* Static exception bit always takes precedence (sprite forced in front) */
-                    if (staticExc & (1u << si)) continue;
-                    /* Per-mesh sort: check the clip-plane bitmask for this specific mesh */
-                    if (g_sprites[i].dbClipPlane & (1u << si)) {
-                        /* Plane clip: visible if camera and sprite are on the same side of the mesh's plane */
-                        FIXED effMY = g_sprites[si].y + g_sprites[i].dbThreshold;
-                        int spriteAbove = (g_sprites[i].y > effMY);
-                        int cameraAbove = (cam_h > effMY);
-                        if (spriteAbove == cameraAbove) continue; /* same side → in front */
-                        /* opposite sides → mesh occludes */
+            int anyOccluder = 0;
+            /* If user has set Clip on any mesh, only consider clip-plane meshes as occluders.
+               Other meshes are handled by OAM priority 2 (no blit needed for them).
+               If no clip set, fall back to legacy "all meshes occlude" mode. */
+            if (clipMask != 0) {
+                for (m = 0; m < meshCount; m++) {
+                    int si2 = meshList[m].spriteIdx;
+                    if (!(clipMask & (1u << si2))) continue; /* skip non-clip meshes */
+                    if (staticExc & (1u << si2)) continue;
+                    {
+                        FIXED effMY = meshList[m].y + spThresh;
+                        if ((spY > effMY) == (cam_h > effMY)) continue; /* same side → in front */
                     }
-                    /* Default (no clip flag): sprite stays behind mesh */
-                    /* Mesh closer: sprite stays behind these palettes */
-                    base = AFN_MESH_PAL_BASE + mi * 8;
-                    for (k = 0; k < 8 && base + k < 256; k++)
-                        keepPal[base + k] = 1;
-                    base = afn_mesh_desc[mi][11];
-                    if (base > 0)
-                        for (k = 0; k < 16 && base + k < 256; k++)
-                            keepPal[base + k] = 1;
-                    if (afn_mesh_desc[mi][13])
-                        for (k = 5; k <= 12; k++)
-                            keepPal[k] = 1;
+                    anyOccluder = 1; break;
+                }
+            } else {
+                /* Legacy: all non-excepted meshes occlude */
+                if (meshCount > 0) {
+                    if (staticExc == 0) anyOccluder = 1;
+                    else {
+                        for (m = 0; m < meshCount; m++) {
+                            if (!(staticExc & (1u << meshList[m].spriteIdx))) { anyOccluder = 1; break; }
+                        }
+                    }
                 }
             }
+            if (!anyOccluder) continue; /* sprite fully in front — skip blit */
+        }
+        memset(keepPal, 0, 256);
+        for (m = 0; m < meshCount; m++)
+        {
+            int mi, base, k;
+            int si2 = meshList[m].spriteIdx;
+            /* Match the occluder check: when clipMask is set, only protect clip-plane meshes */
+            if (clipMask != 0 && !(clipMask & (1u << si2))) continue;
+            if (staticExc & (1u << si2)) continue;
+            if (clipMask & (1u << si2)) {
+                FIXED effMY = meshList[m].y + spThresh;
+                if ((spY > effMY) == (cam_h > effMY)) continue;
+            }
+            mi = meshList[m].meshIdx;
+            base = AFN_MESH_PAL_BASE + mi * 8;
+            for (k = 0; k < 8 && base + k < 256; k++)
+                keepPal[base + k] = 1;
+            base = meshList[m].texPalBase;
+            if (base > 0)
+                for (k = 0; k < 16 && base + k < 256; k++)
+                    keepPal[base + k] = 1;
+            if (meshList[m].isGreyscale)
+                for (k = 5; k <= 12; k++)
+                    keepPal[k] = 1;
         }
 
         /* Get tile/palette from asset — use direction VRAM if animated */
