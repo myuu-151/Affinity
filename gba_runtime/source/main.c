@@ -851,7 +851,6 @@ static int perf_mode;
 // Texture fix mode (cycled with SELECT, 1-200)
 #define TEX_FIX_COUNT 200
 static int g_texFixMode = 1;
-static int g_slopeFixMode = 0; // 0-99 cycled via START
 
 // Each mode is encoded as: { clipMargin, depthClamp, rawDepthThresh, depthRatioNum, depthRatioDen, uvCorr }
 // clipMargin: -1=no clip, -2=always clip, >=0 = margin in pixels around screen
@@ -4801,17 +4800,19 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             int fcY0 = g_vsy[vb+i0], fcY1 = g_vsy[vb+i1], fcY2 = g_vsy[vb+i2];
             int fcY3 = isQuad ? g_vsy[vb+i3] : 0;
             int faceCullClamp = 0;
+            /* Only mirror if at least one vertex of this face is still grounded
+               (at/below horizon). If ALL vertices are above horizon, the camera
+               is below the mesh (falling/jumping) and we shouldn't fold it down. */
             if (ms->meshFaceCull) {
-                int offset = (g_slopeFixMode % 10) * 16;
-                int extThresh = m7_horizon - 16;
-                /* Only mirror when sy is VERY negative (extreme attack), not mildly above horizon.
-                   This naturally limits the effect to close-attacking vertices. */
-                int mirThresh = -50 - (g_slopeFixMode / 10) * 30;
-                if (fcY0 < mirThresh) { fcY0 = 2*m7_horizon - fcY0 + offset; faceCullClamp = 1; }
-                if (fcY1 < mirThresh) { fcY1 = 2*m7_horizon - fcY1 + offset; faceCullClamp = 1; }
-                if (fcY2 < mirThresh) { fcY2 = 2*m7_horizon - fcY2 + offset; faceCullClamp = 1; }
-                if (isQuad && fcY3 < mirThresh) { fcY3 = 2*m7_horizon - fcY3 + offset; faceCullClamp = 1; }
-                (void)extThresh;
+                int anyGrounded = (fcY0 >= m7_horizon) || (fcY1 >= m7_horizon) ||
+                                  (fcY2 >= m7_horizon) || (isQuad && fcY3 >= m7_horizon);
+                if (anyGrounded) {
+                    const int mirThresh = -50;
+                    if (fcY0 < mirThresh) { fcY0 = 2*m7_horizon - fcY0; faceCullClamp = 1; }
+                    if (fcY1 < mirThresh) { fcY1 = 2*m7_horizon - fcY1; faceCullClamp = 1; }
+                    if (fcY2 < mirThresh) { fcY2 = 2*m7_horizon - fcY2; faceCullClamp = 1; }
+                    if (isQuad && fcY3 < mirThresh) { fcY3 = 2*m7_horizon - fcY3; faceCullClamp = 1; }
+                }
             }
 
             // Near Clip: view-space near-plane clipping for extreme faces
@@ -6168,9 +6169,6 @@ int main(void)
         { int st; for (st = 0; st < snd_frame_scale; st++) afn_sound_tick(); }
 #endif
         key_poll();
-
-        if (key_hit(KEY_START))
-            g_slopeFixMode = (g_slopeFixMode + 1) % 100;
 
         // --- Scene transition state machine ---
         if (g_scene_transition > 0) {
