@@ -4241,16 +4241,11 @@ static void clip_render_poly_tex_vs(u16* buf,
 
     if (outCount < 3) return;
 
-    // Project all clipped vertices to screen space.
-    // NOTE: hOut already includes cam_pitch contribution from the per-vertex transform,
-    // so subtract it out before calling project_vertex (which adds cam_pitch itself).
+    // Project all clipped vertices to screen space
     {
         int px[8], py[8];
-        for (i = 0; i < outCount; i++) {
-            int d = dOut[i]; if (d < 16) d = 16;
-            int hAdj = hOut[i] - ((d * cam_pitch) >> 8);
-            project_vertex(sOut[i], hAdj, dOut[i], &px[i], &py[i]);
-        }
+        for (i = 0; i < outCount; i++)
+            project_vertex(sOut[i], hOut[i], dOut[i], &px[i], &py[i]);
 
         // Screen-space clip with UV interpolation, then textured rasterize
         clip_render_poly_tex(buf, px, py, uOut, vOut, outCount,
