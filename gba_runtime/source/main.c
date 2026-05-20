@@ -2397,20 +2397,6 @@ static void update_sprites(void)
 #endif
         }
 
-        /* Hide OAM when occluded by a clip-plane mesh (camera and sprite on opposite sides) */
-        if (g_sprites[i].dbClipPlane != 0) {
-            int occluded = 0;
-            int csi;
-            for (csi = 0; csi < g_spriteCount; csi++) {
-                FIXED effMY;
-                if (!(g_sprites[i].dbClipPlane & (1u << csi))) continue;
-                if (g_sprites[csi].meshIdx < 0) continue;
-                effMY = g_sprites[csi].y + g_sprites[i].dbThreshold;
-                if ((g_sprites[i].y > effMY) != (cam_h > effMY)) { occluded = 1; break; }
-            }
-            if (occluded) continue;
-        }
-
         heightDiff = cam_h - g_sprites[i].y;
         heightDiff += (fovLambda * cam_pitch) >> 8;
         screenY = m7_horizon + (int)((heightDiff * cam_fov) / fovLambda);
@@ -4927,20 +4913,6 @@ static void apply_draw_behind_exceptions(u16* buf)
         ai = g_sprites[i].assetIdx;
         if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
 
-        /* Skip blit entirely if occluded by a clip-plane mesh (matches OAM hide logic) */
-        if (g_sprites[i].dbClipPlane != 0) {
-            int occluded = 0;
-            int csi;
-            for (csi = 0; csi < g_spriteCount; csi++) {
-                FIXED effMY;
-                if (!(g_sprites[i].dbClipPlane & (1u << csi))) continue;
-                if (g_sprites[csi].meshIdx < 0) continue;
-                effMY = g_sprites[csi].y + g_sprites[i].dbThreshold;
-                if ((g_sprites[i].y > effMY) != (cam_h > effMY)) { occluded = 1; break; }
-            }
-            if (occluded) continue;
-        }
-
         /* Compute sprite depth for dynamic mesh sorting */
         {
             FIXED spDx = g_sprites[i].x - cam_x;
@@ -5046,8 +5018,11 @@ static void apply_draw_behind_exceptions(u16* buf)
             int startY = (y0 < 0) ? -y0 : 0;
             int endX = (x0 + dstSize > 240) ? 240 - x0 : dstSize;
             int endY = (y0 + dstSize > 160) ? 160 - y0 : dstSize;
-            int hasKeep = (g_sprites[i].drawBehindExc & 0x7FFFFFFFu) != g_sprites[i].drawBehindExc
-                        ? 0 : 1; /* 0 if only bit31 (no-sky), skip keepPal check */
+            /* hasKeep = 1 when keepPal might have entries:
+               - manual exception bits set (per-mesh "Front" off → that mesh is in keepPal), OR
+               - clip-plane bits set (per-mesh "Clip" check sets keepPal when occluded) */
+            int hasKeep = ((g_sprites[i].drawBehindExc & 0x7FFFFFFFu) != 0)
+                       || (g_sprites[i].dbClipPlane != 0);
 
             for (dy2 = startY; dy2 < endY; dy2++)
             {
