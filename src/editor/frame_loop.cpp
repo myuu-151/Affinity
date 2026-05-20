@@ -4605,11 +4605,11 @@ static bool SaveProject(const std::string& path)
     for (int i = 0; i < sSpriteCount; i++)
     {
         const FloorSprite& sp = sSprites[i];
-        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u",
+        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d",
                 sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                 sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0,
                 sp.meshIdx, sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
-                sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane);
+                sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane, sp.spriteDrawPriority);
         for (int ip = 0; ip < sp.instanceParamCount; ip++)
             fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
         fprintf(f, "\n");
@@ -5042,11 +5042,11 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u",
+            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
                     sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
-                    sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane);
+                    sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane, sp.spriteDrawPriority);
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
@@ -5169,11 +5169,11 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u",
+            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
                     sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
-                    sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane);
+                    sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane, sp.spriteDrawPriority);
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
@@ -5560,7 +5560,8 @@ static bool LoadProject(const std::string& path)
                 int dbNoSky = 0, skipProx = 0, billb = 0, mSprIdx = -1;
                 float dbThresh = 0.0f;
                 unsigned int dbClip = 0;
-                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip);
+                int sprPri = 0;
+                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri);
                 if (matched >= 6)
                 {
                     FloorSprite& sp = sSprites[sSpriteCount];
@@ -5590,6 +5591,7 @@ static bool LoadProject(const std::string& path)
                     sp.meshSpriteIdx = (matched >= 23) ? mSprIdx : -1;
                     sp.drawBehindThreshold = (matched >= 24) ? dbThresh : 0.0f;
                     sp.drawBehindClipPlane = (matched >= 25) ? dbClip : 0;
+                    sp.spriteDrawPriority = (matched >= 26) ? sprPri : 0;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line;
@@ -6685,10 +6687,11 @@ static bool LoadProject(const std::string& path)
                 int dbNoSky = 0, skipProx = 0, billb = 0, mSprIdx = -1;
                 float dbThresh = 0.0f;
                 unsigned int dbClip = 0;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u",
+                int sprPri = 0;
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip);
+                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
@@ -6706,6 +6709,7 @@ static bool LoadProject(const std::string& path)
                     sp.meshSpriteIdx = (matched >= 23) ? mSprIdx : -1;
                     sp.drawBehindThreshold = (matched >= 24) ? dbThresh : 0.0f;
                     sp.drawBehindClipPlane = (matched >= 25) ? dbClip : 0;
+                    sp.spriteDrawPriority = (matched >= 26) ? sprPri : 0;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
@@ -7082,10 +7086,11 @@ static bool LoadProject(const std::string& path)
                 int dbNoSky = 0, skipProx = 0, billb = 0, mSprIdx = -1;
                 float dbThresh = 0.0f;
                 unsigned int dbClip = 0;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u",
+                int sprPri = 0;
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip);
+                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
@@ -7103,6 +7108,7 @@ static bool LoadProject(const std::string& path)
                     sp.meshSpriteIdx = (matched >= 23) ? mSprIdx : -1;
                     sp.drawBehindThreshold = (matched >= 24) ? dbThresh : 0.0f;
                     sp.drawBehindClipPlane = (matched >= 25) ? dbClip : 0;
+                    sp.spriteDrawPriority = (matched >= 26) ? sprPri : 0;
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
                         for (int ip = 0; ip < sp.instanceParamCount; ip++) {
@@ -8247,7 +8253,7 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("View-space near-plane clipping — fixes slope walling (geometry bending over camera)");
             ImGui::SameLine();
             ImGui::Checkbox("Face Cull##meshFC", &ma.faceCull);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Skip faces with vertices above camera — hard cutoff (faces disappear instead of distorting)");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Bend down vertices that project too far above horizon — prevents geometry from attacking the screen");
         }
         if (ma.textured)
         {
@@ -10319,6 +10325,9 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show same frame at all angles (compact — saves OBJ VRAM)");
             if (ImGui::Checkbox("Skip Proximity##sprMain", &sp.skipProximity)) sProjectDirty = true;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Always render this sprite regardless of draw distance");
+            if (ImGui::DragInt("Draw Priority##sprPri", &sp.spriteDrawPriority, 0.1f, -8, 8))
+                sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Higher = drawn over other sprites (OAM ordering tiebreaker)");
             if (ImGui::Checkbox("Draw Behind##sprMain", &sp.drawBehind)) sProjectDirty = true;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Draw behind meshes (OAM priority 2)");
             if (sp.drawBehind) {
@@ -12464,6 +12473,7 @@ void FrameTick(float dt)
                         se.billboard = sSprites[i].billboard;
                         se.drawBehindThreshold = sSprites[i].drawBehindThreshold;
                         se.drawBehindClipPlane = sSprites[i].drawBehindClipPlane;
+                        se.spriteDrawPriority = sSprites[i].spriteDrawPriority;
                         exportSprites.push_back(se);
 
                         // Emit sub-sprites as separate sprite entries

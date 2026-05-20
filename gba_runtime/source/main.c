@@ -45,6 +45,7 @@ typedef struct {
     u8    billboard;     // 1 = mesh always faces camera (Y-axis billboard)
     FIXED dbThreshold;   // Y offset for dynamic above/below mesh check (16.8 fixed)
     u32   dbClipPlane;   // bitmask: bit N = use plane clip for mesh sprite[N]
+    s8    spriteDrawPri; // OAM ordering tiebreaker (-8..+8)
 } FloorSpriteGBA;
 
 EWRAM_DATA static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
@@ -850,7 +851,7 @@ static int perf_mode;
 // Texture fix mode (cycled with SELECT, 1-200)
 #define TEX_FIX_COUNT 200
 static int g_texFixMode = 1;
-static int g_forceGrayscale = 0; // runtime toggle: force all meshes to greyscale
+static int g_slopeFixMode = 0; // 0-99 cycled via START
 
 // Each mode is encoded as: { clipMargin, depthClamp, rawDepthThresh, depthRatioNum, depthRatioDen, uvCorr }
 // clipMargin: -1=no clip, -2=always clip, >=0 = margin in pixels around screen
@@ -2214,6 +2215,7 @@ static void load_editor_sprites(void)
         g_sprites[i].billboard = (u8)afn_sprite_data[i][19];
         g_sprites[i].dbThreshold = (FIXED)afn_sprite_data[i][20];
         g_sprites[i].dbClipPlane = (u32)afn_sprite_data[i][21];
+        g_sprites[i].spriteDrawPri = (s8)afn_sprite_data[i][22];
         g_sprites[i].wx = g_sprites[i].x;
         g_sprites[i].wz = g_sprites[i].z;
         g_sprites[i].facing = g_sprites[i].rotation;
@@ -2446,15 +2448,18 @@ static void update_sprites(void)
         projCount++;
     }
 
-    // Sort front-to-back
+    // Sort: higher spriteDrawPri first (drawn on top), then front-to-back by depth
     for (i = 0; i < projCount - 1; i++)
-        for (j = i + 1; j < projCount; j++)
-            if (proj[i].depth > proj[j].depth)
-            {
+        for (j = i + 1; j < projCount; j++) {
+            s8 pi = g_sprites[proj[i].idx].spriteDrawPri;
+            s8 pj = g_sprites[proj[j].idx].spriteDrawPri;
+            int swap = (pi < pj) || (pi == pj && proj[i].depth > proj[j].depth);
+            if (swap) {
                 tmp = proj[i];
                 proj[i] = proj[j];
                 proj[j] = tmp;
             }
+        }
 
     // Render projected sprites as affine OBJs (OAM slots 16-47, affine sets 0-31).
     // GBA has 32 affine parameter sets total — each floor sprite uses one for
@@ -4237,11 +4242,16 @@ static void clip_render_poly_tex_vs(u16* buf,
 
     if (outCount < 3) return;
 
-    // Project all clipped vertices to screen space
+    // Project all clipped vertices to screen space.
+    // NOTE: hOut already includes cam_pitch contribution from the per-vertex transform,
+    // so subtract it out before calling project_vertex (which adds cam_pitch itself).
     {
         int px[8], py[8];
-        for (i = 0; i < outCount; i++)
-            project_vertex(sOut[i], hOut[i], dOut[i], &px[i], &py[i]);
+        for (i = 0; i < outCount; i++) {
+            int d = dOut[i]; if (d < 16) d = 16;
+            int hAdj = hOut[i] - ((d * cam_pitch) >> 8);
+            project_vertex(sOut[i], hAdj, dOut[i], &px[i], &py[i]);
+        }
 
         // Screen-space clip with UV interpolation, then textured rasterize
         clip_render_poly_tex(buf, px, py, uOut, vOut, outCount,
@@ -4370,7 +4380,7 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
         ms->texShift = afn_mesh_desc[mi][10];
         ms->texPalBase = afn_mesh_desc[mi][11];
         ms->meshWireframe = afn_mesh_desc[mi][12];
-        ms->meshGrayscale = afn_mesh_desc[mi][13] || g_forceGrayscale;
+        ms->meshGrayscale = afn_mesh_desc[mi][13];
         ms->drawDist = afn_mesh_desc[mi][14];
         ms->drawPriority = afn_mesh_desc[mi][15];
         ms->visible = afn_mesh_desc[mi][16];
@@ -4785,9 +4795,24 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             int hasExtremeY = g_vsy[vb+i0] < -10 || g_vsy[vb+i1] < -10 || g_vsy[vb+i2] < -10 ||
                 (isQuad && g_vsy[vb+i3] < -10);
 
-            // Face Cull: skip faces with vertices above camera entirely
-            if (ms->meshFaceCull && hasExtremeY)
-                continue;
+            // Face Cull: mirror above-horizon vertices to below-horizon, but ONLY
+            // for vertices that are close (low raw depth) — distant geometry untouched.
+            // mode/10 = depth threshold (close cutoff), mode%10 = mirror offset.
+            int fcY0 = g_vsy[vb+i0], fcY1 = g_vsy[vb+i1], fcY2 = g_vsy[vb+i2];
+            int fcY3 = isQuad ? g_vsy[vb+i3] : 0;
+            int faceCullClamp = 0;
+            if (ms->meshFaceCull) {
+                int offset = (g_slopeFixMode % 10) * 16;
+                int extThresh = m7_horizon - 16;
+                /* Only mirror when sy is VERY negative (extreme attack), not mildly above horizon.
+                   This naturally limits the effect to close-attacking vertices. */
+                int mirThresh = -50 - (g_slopeFixMode / 10) * 30;
+                if (fcY0 < mirThresh) { fcY0 = 2*m7_horizon - fcY0 + offset; faceCullClamp = 1; }
+                if (fcY1 < mirThresh) { fcY1 = 2*m7_horizon - fcY1 + offset; faceCullClamp = 1; }
+                if (fcY2 < mirThresh) { fcY2 = 2*m7_horizon - fcY2 + offset; faceCullClamp = 1; }
+                if (isQuad && fcY3 < mirThresh) { fcY3 = 2*m7_horizon - fcY3 + offset; faceCullClamp = 1; }
+                (void)extThresh;
+            }
 
             // Near Clip: view-space near-plane clipping for extreme faces
             int needVSClip = ms->meshNearClip && (anyNear || hasExtremeY);
@@ -4796,13 +4821,20 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                 int cs[] = {g_vSide[vb+i0], g_vSide[vb+i1], g_vSide[vb+i2], isQuad ? g_vSide[vb+i3] : 0};
                 int ch[] = {g_vHeight[vb+i0], g_vHeight[vb+i1], g_vHeight[vb+i2], isQuad ? g_vHeight[vb+i3] : 0};
                 int cd[] = {g_vRawDepth[vb+i0], g_vRawDepth[vb+i1], g_vRawDepth[vb+i2], isQuad ? g_vRawDepth[vb+i3] : 0};
+                /* Face Cull also clamps view-space height to 0 (vertex on horizon plane) */
+                if (faceCullClamp) {
+                    if (ch[0] < 0) ch[0] = 0;
+                    if (ch[1] < 0) ch[1] = 0;
+                    if (ch[2] < 0) ch[2] = 0;
+                    if (isQuad && ch[3] < 0) ch[3] = 0;
+                }
                 int cu[] = {uvs[i0*2+0], uvs[i1*2+0], uvs[i2*2+0], isQuad ? uvs[i3*2+0] : 0};
                 int cv[] = {uvs[i0*2+1], uvs[i1*2+1], uvs[i2*2+1], isQuad ? uvs[i3*2+1] : 0};
                 clip_render_poly_tex_vs(buf, cs, ch, cd, cu, cv, isQuad ? 4 : 3,
                     tex, ms->texMask, ms->texShift, (u8)ms->texPalBase);
             } else {
                 int tpx[] = {g_vsx[vb+i0], g_vsx[vb+i1], g_vsx[vb+i2], isQuad ? g_vsx[vb+i3] : 0};
-                int tpy[] = {g_vsy[vb+i0], g_vsy[vb+i1], g_vsy[vb+i2], isQuad ? g_vsy[vb+i3] : 0};
+                int tpy[] = {fcY0, fcY1, fcY2, fcY3};
                 int tpu[] = {uvs[i0*2+0], uvs[i1*2+0], uvs[i2*2+0], isQuad ? uvs[i3*2+0] : 0};
                 int tpv[] = {uvs[i0*2+1], uvs[i1*2+1], uvs[i2*2+1], isQuad ? uvs[i3*2+1] : 0};
                 int nc = isQuad ? 4 : 3;
@@ -4952,8 +4984,44 @@ static void apply_draw_behind_exceptions(u16* buf)
         meshCount++;
     }
 
-    for (i = 0; i < g_spriteCount; i++)
+    /* Pre-sort blit-eligible sprites: lowest priority first, far-to-near within priority */
+    static int blitOrder[MAX_FLOOR_SPRITES];
+    static FIXED blitKey[MAX_FLOOR_SPRITES];
+    int blitN = 0;
+    for (i = 0; i < g_spriteCount && blitN < MAX_FLOOR_SPRITES; i++) {
+        if (g_sprites[i].meshIdx >= 0) continue;
+        if (g_sprites[i].drawBehindExc == 0) continue;
+        {
+            FIXED dx2 = g_sprites[i].x - cam_x;
+            FIXED dz2 = g_sprites[i].z - cam_z;
+            FIXED dep = (dx2 * g_sinf - dz2 * g_cosf) >> 8;
+            int pri = (int)g_sprites[i].spriteDrawPri;
+            /* Key: pri primary (low first), depth secondary (far first = LARGE depth first → use negative) */
+            blitKey[blitN] = ((FIXED)(pri + 128) << 20) - dep;
+            blitOrder[blitN] = i;
+            blitN++;
+        }
+    }
+    /* Insertion sort (faster than bubble for small N, common case) */
+    if (blitN > 1) {
+        int a;
+        for (a = 1; a < blitN; a++) {
+            FIXED kk = blitKey[a]; int oo = blitOrder[a];
+            int b = a;
+            while (b > 0 && blitKey[b-1] > kk) {
+                blitKey[b] = blitKey[b-1];
+                blitOrder[b] = blitOrder[b-1];
+                b--;
+            }
+            blitKey[b] = kk;
+            blitOrder[b] = oo;
+        }
+    }
+
+    int bn;
+    for (bn = 0; bn < blitN; bn++)
     {
+        i = blitOrder[bn];
         FIXED dx, dz, fovLambda, side, heightDiff;
         int screenX, screenY, invScale, dstSize, baseSize, scaleSize;
         int tileId, palBank, ai;
@@ -6101,9 +6169,8 @@ int main(void)
 #endif
         key_poll();
 
-        // SELECT toggles greyscale for debugging slope walling
-        if (key_hit(KEY_SELECT))
-            g_forceGrayscale ^= 1;
+        if (key_hit(KEY_START))
+            g_slopeFixMode = (g_slopeFixMode + 1) % 100;
 
         // --- Scene transition state machine ---
         if (g_scene_transition > 0) {

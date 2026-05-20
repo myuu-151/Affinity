@@ -31,6 +31,7 @@ struct GBASpriteExport
     bool billboard = false;     // mesh: always face camera (Y-axis billboard)
     float drawBehindThreshold = 0.0f; // Y offset for above/below mesh check
     uint32_t drawBehindClipPlane = 0; // bitmask: bit N = clip-by-plane for that mesh
+    int spriteDrawPriority = 0; // OAM ordering tiebreaker (-8..+8)
 };
 
 // Player direction sprite for GBA export (RGBA8 image)

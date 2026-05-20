@@ -235,6 +235,7 @@ struct FloorSprite
     bool  billboard = false;     // mesh only: always face camera (Y-axis billboard)
     float drawBehindThreshold = 0.0f; // Y offset added to sprite for above/below mesh check
     int   meshSpriteIdx = -1;    // mesh only: sprite asset to display on top of the mesh (-1 = none)
+    int   spriteDrawPriority = 0; // -8..+8: higher = drawn over other sprites (OAM order)
     uint32_t color = 0xFFFF00FF; // tint color (ABGR) — used for editor preview
     bool  selected = false;
     // Attached sub-sprites (extra sprite layers with local offsets)
