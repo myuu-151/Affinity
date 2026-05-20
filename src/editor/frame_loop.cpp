@@ -8249,11 +8249,11 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         ImGui::Checkbox("Textured##meshTex", &ma.textured);
         if (ma.textured) {
             ImGui::SameLine();
-            ImGui::Checkbox("Near Clip##meshNC", &ma.nearClip);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("View-space near-plane clipping — fixes slope walling (geometry bending over camera)");
+            ImGui::Checkbox("Edge Wrap 1##meshNC", &ma.nearClip);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("View-space near-plane clip with UV interpolation (may bloat uphill, prevents downhill attack)");
             ImGui::SameLine();
-            ImGui::Checkbox("Face Cull##meshFC", &ma.faceCull);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Bend down vertices that project too far above horizon — prevents geometry from attacking the screen");
+            ImGui::Checkbox("Edge Wrap 2##meshFC", &ma.faceCull);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mirror above-horizon vertices to below — smooth slope fold without bloat");
         }
         if (ma.textured)
         {
