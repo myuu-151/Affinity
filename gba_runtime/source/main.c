@@ -4325,6 +4325,7 @@ typedef struct {
     const u8* tex;
     FIXED cosR, sinR;
     int cullMode, meshLit, meshHalfRes, meshTextured, meshWireframe, meshGrayscale, meshPerspCorr, meshNearClip, meshFaceCull;
+    int meshAnyGrounded;
     int texW, texShift, texMask, texPalBase;
     int vertCount, idxCount, quadIdxCount;
     int drawDist;
@@ -4485,6 +4486,16 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             ms->centerDepth = (cdx * g_sinf - cdz * g_cosf) >> 8;
         }
 
+        /* Check if any vertex of this mesh projects at/below horizon (mesh has visible footing).
+           Used by Edge Wrap 2 mirror so subdivided meshes still mirror correctly. */
+        {
+            int gv;
+            ms->meshAnyGrounded = 0;
+            for (gv = 0; gv < vertCount; gv++) {
+                if (g_vsy[vb + gv] >= m7_horizon) { ms->meshAnyGrounded = 1; break; }
+            }
+        }
+
         // Whole-mesh screen cull
         anyVisible = 0;
         for (v = 0; v < vertCount; v++)
@@ -4519,6 +4530,10 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     cross = (int)(cx >> 8); // scale down to avoid overflow in area check
                     if (cullMode == 0 && cx >= 0) continue;
                     else if (cullMode == 1 && cx <= 0) continue;
+                    if (ms->meshFaceCull) {
+                        int absCr = cross < 0 ? -cross : cross;
+                        if (absCr < 1) continue;
+                    }
                 }
             }
 
@@ -4825,9 +4840,9 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                (at/below horizon). If ALL vertices are above horizon, the camera
                is below the mesh (falling/jumping) and we shouldn't fold it down. */
             if (ms->meshFaceCull) {
-                int anyGrounded = (fcY0 >= m7_horizon) || (fcY1 >= m7_horizon) ||
-                                  (fcY2 >= m7_horizon) || (isQuad && fcY3 >= m7_horizon);
-                if (anyGrounded) {
+                /* Per-mesh grounded check — mirror activates if ANY mesh vertex is grounded.
+                   Lets subdivided faces (no grounded vertex themselves) still mirror. */
+                if (ms->meshAnyGrounded) {
                     const int mirThresh = -50;
                     if (fcY0 < mirThresh) { fcY0 = 2*m7_horizon - fcY0; faceCullClamp = 1; }
                     if (fcY1 < mirThresh) { fcY1 = 2*m7_horizon - fcY1; faceCullClamp = 1; }
