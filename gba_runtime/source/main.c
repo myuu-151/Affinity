@@ -852,6 +852,7 @@ static int perf_mode;
 // Texture fix mode (cycled with SELECT, 1-200)
 #define TEX_FIX_COUNT 200
 static int g_texFixMode = 1;
+static int g_slopeFixMode = 0; // 0-99 cycled via START
 
 // Each mode is encoded as: { clipMargin, depthClamp, rawDepthThresh, depthRatioNum, depthRatioDen, uvCorr }
 // clipMargin: -1=no clip, -2=always clip, >=0 = margin in pixels around screen
@@ -4260,11 +4261,17 @@ static void clip_render_poly_tex_vs(u16* buf,
 
     if (outCount < 3) return;
 
-    // Project all clipped vertices to screen space
+    // Project all clipped vertices to screen space.
+    // hOut already has cam_pitch * ORIGINAL_depth baked in, but the depth has been
+    // changed by clipping. Subtract using the CURRENT depth so project_vertex's re-add
+    // doesn't double-count.
     {
         int px[8], py[8];
-        for (i = 0; i < outCount; i++)
-            project_vertex(sOut[i], hOut[i], dOut[i], &px[i], &py[i]);
+        for (i = 0; i < outCount; i++) {
+            int d = dOut[i]; if (d < 16) d = 16;
+            int hAdj = hOut[i] - ((d * cam_pitch) >> 8);
+            project_vertex(sOut[i], hAdj, dOut[i], &px[i], &py[i]);
+        }
 
         // Screen-space clip with UV interpolation, then textured rasterize
         clip_render_poly_tex(buf, px, py, uOut, vOut, outCount,
@@ -6223,6 +6230,9 @@ int main(void)
         { int st; for (st = 0; st < snd_frame_scale; st++) afn_sound_tick(); }
 #endif
         key_poll();
+
+        if (key_hit(KEY_START))
+            g_slopeFixMode = (g_slopeFixMode + 1) % 100;
 
         // --- Scene transition state machine ---
         if (g_scene_transition > 0) {
