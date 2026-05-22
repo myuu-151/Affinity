@@ -20211,8 +20211,10 @@ void FrameTick(float dt)
                 }
 
                 // Split editor code into Mode 4 / Mode 0 sections
-                // and store GBA runtime code separately
-                if (editorCode[0]) {
+                // and store GBA runtime code separately.
+                // Nodes that only set setActionFunc (no editorCode) still need
+                // their preview generated — gate on either signal.
+                if (editorCode[0] || funcSigBuf[0]) {
                     // Parse editorCode to split "2D Tilemap" and "3D Scene" sections
                     const char* tmMarker = strstr(editorCode, "// ---- 2D Tilemap");
                     const char* scMarker = strstr(editorCode, "// ---- 3D Scene");
