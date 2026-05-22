@@ -1395,10 +1395,6 @@ static int hud_font_loaded = 0;
 EWRAM_DATA static int hud_pal_remap[AFN_ASSET_COUNT]; // dynamic palette bank for HUD assets
 static int g_spriteCount; /* tentative decl; defined later */
 
-/* Weak default — mapdata.h provides the real array if assets have streamable flag set.
-   If no real array exists (old mapdata), this all-zero default keeps all assets static. */
-__attribute__((weak)) const u8 afn_asset_streamable[AFN_ASSET_COUNT] = {0};
-
 /* Asset streaming: tileBase indirection so streamable assets can swap into shared slots.
    Phase 1: every asset's tileBase mirrors g_assetSlot[ai].tileBase (no behavior change).
    Phase 2+: streamable assets get dynamic tileBase from a pool, others stay fixed. */
@@ -1415,15 +1411,8 @@ static inline void asset_slots_init(void) {
     int i;
     for (i = 0; i < AFN_ASSET_COUNT; i++) {
         g_assetSlot[i].tileBase = (s16)afn_asset_desc[i][0];
-#ifdef AFN_ASSET_COUNT
-        /* afn_asset_streamable[] is emitted alongside afn_asset_desc when there are assets */
-        extern const u8 afn_asset_streamable[];
         g_assetSlot[i].isStreamable = afn_asset_streamable[i];
         g_assetSlot[i].loaded = afn_asset_streamable[i] ? 0 : 1; /* streamable starts unloaded */
-#else
-        g_assetSlot[i].isStreamable = 0;
-        g_assetSlot[i].loaded = 1;
-#endif
         g_assetSlot[i].inUseThisFrame = 0;
         g_assetSlot[i].cooldown = 0;
     }
@@ -1432,8 +1421,10 @@ static inline void asset_slots_init(void) {
 /* Streaming tile pool. Uses a u8 bitmap: 1 = used, 0 = free.
    Pool covers OBJ tile slots 128..712 (matches typical static-asset range).
    Slot 0..127 reserved for HUD/backdrop tiles; 713+ reserved for HUD fonts. */
-#define STREAM_POOL_BASE 128
-#define STREAM_POOL_END  712
+/* Pool ends BEFORE the HUD font tile base (~571 with default staticTiles).
+   Going higher conflicts with fonts when HUD is shown. */
+#define STREAM_POOL_BASE 256
+#define STREAM_POOL_END  560
 #define STREAM_POOL_SIZE (STREAM_POOL_END - STREAM_POOL_BASE)
 #define STREAM_UNLOAD_COOLDOWN 90  /* frames before unloading after last use */
 EWRAM_DATA static u8 g_streamPool[STREAM_POOL_SIZE];
@@ -1535,13 +1526,33 @@ static int hud_blend_alpha = 16;
 
 static void hud_font_load(int staticTileCount)
 {
-    // Place 96+96+96 font tiles right before static tiles (normal + small + 5x7)
-    hud_font_5x7_tile_base = 1024 - staticTileCount - 96;
-    hud_font_small_tile_base = hud_font_5x7_tile_base - 96;
-    hud_font_tile_base = hud_font_small_tile_base - 96;
-    if (hud_font_tile_base < 0) hud_font_tile_base = 0;
-    if (hud_font_small_tile_base < 0) hud_font_small_tile_base = 0;
-    if (hud_font_5x7_tile_base < 0) hud_font_5x7_tile_base = 0;
+    /* Place font tiles AFTER static asset tiles in OBJ VRAM.
+       Mode 4: static tiles start at slot 512 + AFN_DIR_VRAM_TILES_M4 (e.g. 724).
+       Mode 0/Mode 7: start right after dir tile region.
+       Falls back to 0 if it'd run past the 1024-tile cap. */
+    int staticEnd;
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+    if (afn_current_mode == 1) {
+        staticEnd = tm_dir_slot_count + staticTileCount;
+    } else if (afn_current_mode == 2) {
+        staticEnd = AFN_DIR_VRAM_TILES + staticTileCount;
+    } else {
+#ifdef AFN_DIR_VRAM_TILES_M4
+        staticEnd = 512 + AFN_DIR_VRAM_TILES_M4 + staticTileCount;
+#else
+        staticEnd = 512 + staticTileCount;
+#endif
+    }
+#else
+    staticEnd = AFN_DIR_VRAM_TILES + staticTileCount;
+#endif
+    hud_font_tile_base       = staticEnd;
+    hud_font_small_tile_base = hud_font_tile_base + 96;
+    hud_font_5x7_tile_base   = hud_font_small_tile_base + 96;
+    /* Clamp: if a font would overflow past 1023, place it at 0 (safe but invisible) */
+    if (hud_font_tile_base + 96 > 1024)       hud_font_tile_base = 0;
+    if (hud_font_small_tile_base + 96 > 1024) hud_font_small_tile_base = 0;
+    if (hud_font_5x7_tile_base + 96 > 1024)   hud_font_5x7_tile_base = 0;
 
     // Set OBJ palette bank 15: entry 1 = text color, entry 2 = background fill
     ((u16*)0x05000200)[15 * 16 + 1] = afn_text_color;
@@ -2221,7 +2232,6 @@ static void init_obj_sprites(void)
         /* Per-asset DMA so streamable assets can be skipped (they'll be loaded on demand
            into pool slots). dst points at base VRAM slot; src is afn_all_tiles[]. */
         {
-            extern const u8 afn_asset_streamable[];
             int srcBaseSlot = (int)((u32)dst - 0x06010000) / 32;
             int ai;
             for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {

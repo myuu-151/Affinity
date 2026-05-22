@@ -9076,12 +9076,6 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
         }
         ImGui::PopItemWidth();
 
-        ImGui::SameLine();
-        if (ImGui::Checkbox("Streamable##assetStream", &asset.streamable))
-            sProjectDirty = true;
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Stream tile data into OBJ VRAM on demand based on proximity to player. Saves VRAM when many unique sprite types exist but aren't all visible at once.");
-
         ImGui::Separator();
 
         // ---- Frame Grid: pixel editor / animation preview ----
@@ -9589,6 +9583,13 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                 asset.lodCount--;
         }
 
+        ImGui::Spacing();
+
+        // ---- Streamable toggle ----
+        if (ImGui::Checkbox("Streamable##assetStreamRight", &asset.streamable))
+            sProjectDirty = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Stream this asset's tile data into OBJ VRAM on demand based on proximity to player. Saves VRAM when many unique sprite types exist but aren't all visible at once.");
         ImGui::Spacing();
 
         // ---- Palette Editor ----
@@ -12583,6 +12584,7 @@ void FrameTick(float dt)
                     ea.baseSize = sa.baseSize;
                     ea.palBank = sa.palBank;
                     ea.paletteSrc = sa.paletteSrc;
+                    ea.streamable = sa.streamable;
                     ea.defaultAnim = sa.defaultAnim;
                     memcpy(ea.palette, sa.palette, sizeof(ea.palette));
                     for (const auto& fr : sa.frames)
