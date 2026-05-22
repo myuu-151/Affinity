@@ -1730,8 +1730,9 @@ static const M7Scanline* m7_read_ptr = m7_tables[0]; // ISR reads from this poin
 // Writes to back buffer, then swaps pointer atomically during VBlank
 // Mode 7 floor render offset — shifts the visible floor pixels so Mode-4-scale
 // cam coords (0..256 px world) land at the floor's center area. Computed per
-// floor size: (floor_dim - 256) / 2 * 256 (in 16.8 fixed). Clamps to 0 if the
-// floor is the same size as or smaller than the player world.
+// floor size: (floor_dim - 256) / 2 * 256 (in 16.8 fixed). Can be negative
+// when the floor is smaller than the player world (pulls player coords back
+// onto the floor).
 // (Inlined floor_dim lookup since afn_floor_px_dim is declared later in this TU.)
 #ifndef AFN_FLOOR_SIZE
 #define AFN_FLOOR_SIZE 3
@@ -1744,8 +1745,7 @@ static inline FIXED m7_floor_offset(void) {
         case 2: floor_dim = 512;  break;
         default: floor_dim = 1024; break;
     }
-    int o = (floor_dim - 256) / 2;
-    return (o > 0) ? (o << 8) : 0;
+    return ((floor_dim - 256) / 2) << 8;
 }
 
 static void m7_build_table(void)
@@ -1838,16 +1838,15 @@ static void load_checkerboard(void)
     memset(&tile8_mem[2][1], 1, 64);
     memset(&tile8_mem[2][2], 2, 64);
 
-    // Fill map with checkerboard (halfword writes — byte writes corrupt VRAM)
+    // Fill full map with checkerboard (halfword writes — byte writes corrupt VRAM)
     {
-        int halfDim = mapDim / 2;
         u16 *map = (u16*)se_mem[24];
         int y, x;
         memset16(map, 0, mapDim * mapDim / 2);
-        for (y = 0; y < halfDim; y++) {
-            for (x = 0; x < halfDim; x += 2) {
+        for (y = 0; y < mapDim; y++) {
+            for (x = 0; x < mapDim; x += 2) {
                 u8 a = (((x / 2) + (y / 2)) & 1) ? 2 : 1;
-                u8 b = (x + 1 < halfDim) ? ((((x + 1) / 2) + (y / 2)) & 1) ? 2 : 1 : 0;
+                u8 b = (x + 1 < mapDim) ? ((((x + 1) / 2) + (y / 2)) & 1) ? 2 : 1 : 0;
                 map[(y * mapDim + x) / 2] = a | (b << 8);
             }
         }
