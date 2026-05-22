@@ -101,15 +101,27 @@ static FIXED afn_player_height = 3072; // 12 pixels (16.8 fixed)
 
 #include "mapdata.h"
 
-/* Stubs for projects with no sprite assets — keeps unguarded asset reads compiling.
-   With no sprites/assets, loops are bounded by AFN_SPRITE_COUNT=0 so the stubs aren't
-   actually iterated; they just need to exist for the linker. */
-#if !defined(AFN_ASSET_COUNT) || AFN_ASSET_COUNT == 0
-#undef AFN_ASSET_COUNT
+/* Stubs for projects missing optional mapdata symbols — keeps unguarded reads compiling.
+   Loops over these are bounded by 0 counts so the stubs aren't actually iterated. */
+#if !defined(AFN_ASSET_COUNT)
 #define AFN_ASSET_COUNT 1
 static const int afn_asset_desc[1][5] = {{0,0,0,8,0}};
 static const u8 afn_asset_streamable[1] = {0};
 static const u16 afn_pal[1][16] = {{0}};
+#elif AFN_ASSET_COUNT == 0
+#undef AFN_ASSET_COUNT
+#define AFN_ASSET_COUNT 1
+static const int afn_asset_desc[1][5] = {{0,0,0,8,0}};
+static const u8 afn_asset_streamable[1] = {0};
+/* afn_pal[0][16] is already emitted by mapdata.h when AFN_ASSET_COUNT==0; don't redefine */
+#endif
+
+/* Script symbol stubs — when no scripts/blueprints exist, mapdata.h doesn't emit these
+   but several runtime paths reference them. */
+#ifndef AFN_HAS_SCRIPT
+typedef struct { int x, y, assetIdx, animIdx, animPlay, facing, vis, pal; } AfnTmObj;
+static u8  afn_sprite_visible[MAX_FLOOR_SPRITES];
+static u16 afn_text_color = 0x7FFF;
 #endif
 
 // libtonc has key_hit (press edge) but no release edge — define it here
