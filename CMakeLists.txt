@@ -57,3 +57,11 @@ target_link_libraries(AffinityEditor PRIVATE
 
 # ImGui docking branch define
 target_compile_definitions(AffinityEditor PRIVATE IMGUI_ENABLE_DOCKING=1)
+
+# Bump stack reserve to 8 MB — LoadProject stack frame is large
+# (32 KB line buffer + multiple VsNode locals at ~20 KB each with 4096-byte
+# code fields) and File > Open's deep ImGui call stack pushes it close to
+# the 1 MB default.
+if(MSVC)
+    target_link_options(AffinityEditor PRIVATE /STACK:8388608)
+endif()
