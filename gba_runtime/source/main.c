@@ -99,6 +99,23 @@ static FIXED afn_player_height = 3072; // 12 pixels (16.8 fixed)
 
 #define NUM_SPRITES MAX_FLOOR_SPRITES
 
+// --- Forward declarations exposed to custom code in mapdata.h ---
+// Curated set of state vars custom node bodies often want to read/write.
+// Pipeline internals (rasterizers, mixer, scene_load, etc.) intentionally
+// remain hidden — call them via the afn_pending_* style hooks instead.
+// See docs/REFERENCE.md.
+static FIXED cam_x;                // camera world X (16.8)
+static FIXED cam_h;                // camera height above floor (16.8)
+static FIXED cam_y_smooth;         // smoothed camera Y offset (16.8)
+static int   tm_anim_idx;          // current player anim index (0=idle, 1=walk...)
+static int   tm_anim_frame;        // frame within anim
+static int   tm_anim_timer;        // anim tick counter
+static int   tm_cam_x, tm_cam_y;   // Mode 0 camera scroll (pixels)
+static int   auto_orbit_smooth;    // smoothed auto-orbit value
+static int   player_on_ground;     // 1 if standing on a floor face
+static FIXED player_ground_y;      // floor height under player (16.8)
+// --- end forward declarations ---
+
 #include "mapdata.h"
 
 /* Stubs for projects missing optional mapdata symbols — keeps unguarded reads compiling.

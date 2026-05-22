@@ -190,20 +190,39 @@ These are usable from any custom node without modifying `main.c`.
 | `OAM` | Sprite attribute table (`(volatile u16*)0x07000000`) |
 | `obj_aff_mem[]` | OAM affine matrices |
 
+### Sprite array
+
+| Symbol | Type | Notes |
+| --- | --- | --- |
+| `g_sprites[]` | `FloorSpriteGBA[]` | Per-instance sprite state (`.wx`, `.wz`, `.wy`, `.asset`, `.anim`, `.scale`, `.facing`, ...) |
+
+### Camera / anim / collision state (forward-declared)
+
+These live in `main.c` after the include point but are forward-declared above it so custom code can use them:
+
+| Symbol | Type | Notes |
+| --- | --- | --- |
+| `cam_x` | `FIXED` | Camera world X |
+| `cam_h` | `FIXED` | Camera height above floor |
+| `cam_y_smooth` | `FIXED` | Smoothed camera Y offset |
+| `tm_anim_idx` | `int` | Player anim index (0=idle, 1=walk, ...) |
+| `tm_anim_frame` | `int` | Frame within current anim |
+| `tm_anim_timer` | `int` | Anim tick counter |
+| `tm_cam_x`, `tm_cam_y` | `int` | Mode 0 camera scroll in pixels |
+| `tm_player_tx`, `tm_player_ty` | `int` | Mode 0 player tile coords |
+| `tm_obj_tx[]`, `tm_obj_ty[]` | `s16[]` | Mode 0 mutable object tile coords |
+| `auto_orbit_smooth` | `int` | Smoothed auto-orbit value |
+| `player_on_ground` | `int` | 1 if standing on a floor face |
+| `player_ground_y` | `FIXED` | Floor height under player |
+
 ## NOT visible by default
 
-Declared in `main.c` AFTER the `mapdata.h` include — out of scope for custom code.
+Declared in `main.c` after the `mapdata.h` include and not forward-declared — out of scope for custom code.
 
 ### Globals
 
-- `tm_anim_idx`, `tm_anim_frame`, `tm_anim_timer` — player anim cycling
-- `auto_orbit_smooth` — smoothed orbit value
-- `cam_x`, `cam_y`, `cam_h` — derived camera position
-- `g_sprites[]` — full sprite array with per-instance state (wx, wz, asset, anim, scale, facing, etc.)
-- `tm_player_tx`, `tm_player_ty` — Mode 0 tile coordinates
-- `tm_obj_tx[]`, `tm_obj_ty[]`, `tm_obj_facing[]` — Mode 0 object tile coordinates
+- `tm_obj_facing[]` — Mode 0 object facing
 - `tm_fol_*` — Mode 0 follower trail state
-- `player_on_ground`, `player_ground_y` — collision query results
 - `g_m4_dir_facing[]` — sprite direction tables
 - `g_scene_transition`, debug counters
 
