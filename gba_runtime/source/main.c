@@ -1728,6 +1728,11 @@ static const M7Scanline* m7_read_ptr = m7_tables[0]; // ISR reads from this poin
 
 // Build the full scanline table — call once per frame after camera update
 // Writes to back buffer, then swaps pointer atomically during VBlank
+// Mode 7 floor render offset — shifts the visible floor pixels so Mode-4-scale
+// cam coords (0..256 px world) land at the floor's center area (0..1024 px tilemap).
+// Editor world origin maps to floor center (512, 512) instead of edge.
+#define M7_FLOOR_OFFSET ((1024 - 256) / 2 * 256)   // = 98304 in 16.8 fixed
+
 static void m7_build_table(void)
 {
     M7Scanline* tbl = m7_tables[m7_write_idx];
@@ -1735,8 +1740,8 @@ static void m7_build_table(void)
     FIXED ch = cam_h;
     FIXED cf = g_cosf;
     FIXED sf = g_sinf;
-    FIXED cx = cam_x;
-    FIXED cz = cam_z;
+    FIXED cx = cam_x + M7_FLOOR_OFFSET;
+    FIXED cz = cam_z + M7_FLOOR_OFFSET;
     FIXED fov = cam_fov;
 
     int vc;
@@ -5963,13 +5968,21 @@ static void scene_load(int sceneMode, int sceneIdx)
         load_editor_sprites();
 #endif
         player_sprite_idx = -1;
+        // Initialize camera from mapdata defaults (Mode 7 init didn't set these).
+        cam_x     = AFN_CAM_X;
+        cam_z     = AFN_CAM_Z;
+        cam_h     = AFN_CAM_H;
+        cam_angle = AFN_CAM_ANGLE;
+        m7_horizon = AFN_CAM_HORIZON;
+#ifdef AFN_ORBIT_DIST
+        orbit_dist = AFN_ORBIT_DIST;
+#endif
 #if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
         player_sprite_idx = AFN_PLAYER_IDX;
         player_x = g_sprites[AFN_PLAYER_IDX].x;
         player_z = g_sprites[AFN_PLAYER_IDX].z;
         player_y = g_sprites[AFN_PLAYER_IDX].y;
         orbit_angle = AFN_CAM_ANGLE;
-        orbit_dist = AFN_ORBIT_DIST;
         player_moving = 0;
         player_move_angle = 0x4000;
 #ifdef AFN_HAS_SCRIPT
