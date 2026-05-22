@@ -5062,7 +5062,7 @@ static bool SaveProject(const std::string& path)
             }
         }
         // Camera
-        fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d,%d\n",
+        fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d,%d,%.1f\n",
                 ms.camera.x, ms.camera.z, ms.camera.height, ms.camera.angle, ms.camera.horizon,
                 ms.camera.walkSpeed, ms.camera.sprintSpeed,
                 ms.camera.walkEaseIn, ms.camera.walkEaseOut, ms.camera.sprintEaseIn, ms.camera.sprintEaseOut,
@@ -5070,7 +5070,8 @@ static bool SaveProject(const std::string& path)
                 ms.camera.jumpCamLand, ms.camera.jumpCamAir, ms.camera.autoOrbitSpeed, ms.camera.jumpDampen,
                 ms.camera.smallTriCull, ms.camera.skipFloor ? 1 : 0, ms.camera.coverageBuf ? 1 : 0,
                 ms.camera.drawDistance, ms.camera.camPitch, ms.camera.autoPitch ? 1 : 0,
-                ms.camera.horizonClamp ? 1 : 0, ms.camera.dynamicHorizon ? 1 : 0, ms.camera.faceCull ? 1 : 0);
+                ms.camera.horizonClamp ? 1 : 0, ms.camera.dynamicHorizon ? 1 : 0, ms.camera.faceCull ? 1 : 0,
+                ms.camera.spriteDrawDistance);
         // Scene-level blueprint
         if (ms.blueprintIdx >= 0) {
             fprintf(f, "msSceneBp=%d,%d", ms.blueprintIdx, ms.instanceParamCount);
@@ -6765,13 +6766,14 @@ static bool LoadProject(const std::string& path)
                 MapScene& ms = sMapScenes.back();
                 CameraStartObject& c = ms.camera;
                 int sti = 0, sf = 0, cb = 0, ap = 0, hc = 0, dh = 0, fc = 0;
-                sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d",
+                float sdd = 0.0f;
+                int matched = sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d,%f",
                     &c.x, &c.z, &c.height, &c.angle, &c.horizon,
                     &c.walkSpeed, &c.sprintSpeed,
                     &c.walkEaseIn, &c.walkEaseOut, &c.sprintEaseIn, &c.sprintEaseOut,
                     &c.jumpForce, &c.gravity, &c.maxFallSpeed,
                     &c.jumpCamLand, &c.jumpCamAir, &c.autoOrbitSpeed, &c.jumpDampen,
-                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc);
+                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc, &sdd);
                 c.smallTriCull = sti;
                 c.skipFloor = (sf != 0);
                 c.coverageBuf = (cb != 0);
@@ -6779,6 +6781,7 @@ static bool LoadProject(const std::string& path)
                 c.horizonClamp = (hc != 0);
                 c.dynamicHorizon = (dh != 0);
                 c.faceCull = (fc != 0);
+                if (matched >= 28) c.spriteDrawDistance = sdd;
             }
             else if (strncmp(line, "msSceneBp=", 10) == 0 && !sMapScenes.empty())
             {
@@ -7165,13 +7168,14 @@ static bool LoadProject(const std::string& path)
                 MapScene& ms = sM7Scenes.back();
                 CameraStartObject& c = ms.camera;
                 int sti = 0, sf = 0, cb = 0, ap = 0, hc = 0, dh = 0, fc = 0;
-                sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d",
+                float sdd = 0.0f;
+                int matched = sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d,%f",
                     &c.x, &c.z, &c.height, &c.angle, &c.horizon,
                     &c.walkSpeed, &c.sprintSpeed,
                     &c.walkEaseIn, &c.walkEaseOut, &c.sprintEaseIn, &c.sprintEaseOut,
                     &c.jumpForce, &c.gravity, &c.maxFallSpeed,
                     &c.jumpCamLand, &c.jumpCamAir, &c.autoOrbitSpeed, &c.jumpDampen,
-                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc);
+                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc, &sdd);
                 c.smallTriCull = sti;
                 c.skipFloor = (sf != 0);
                 c.coverageBuf = (cb != 0);
@@ -7179,6 +7183,7 @@ static bool LoadProject(const std::string& path)
                 c.horizonClamp = (hc != 0);
                 c.dynamicHorizon = (dh != 0);
                 c.faceCull = (fc != 0);
+                if (matched >= 28) c.spriteDrawDistance = sdd;
             }
             else if (strncmp(line, "m7SceneBp=", 10) == 0 && !sM7Scenes.empty())
             {
