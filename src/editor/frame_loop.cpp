@@ -4670,10 +4670,15 @@ static bool SaveProject(const std::string& path)
             const SpriteLOD& lod = sa.lod[li];
             fprintf(f, "lod=%d,%d,%d,%.1f\n", lod.size, lod.frameStart, lod.frameCount, lod.maxDist);
         }
-        // Directional animation sets
+        // Directional animation sets — skip ones with no dir paths so loading doesn't
+        // create empty dir sets that flag the asset as directional with no tile data
         for (int si = 0; si < (int)sa.dirAnimSets.size(); si++)
         {
             const auto& das = sa.dirAnimSets[si];
+            bool hasAnyPath = false;
+            for (int d = 0; d < 8; d++)
+                if (!das.dirPaths[d].empty()) { hasAnyPath = true; break; }
+            if (!hasAnyPath) continue;
             fprintf(f, "diranimset=%s\n", das.name.c_str());
             for (int d = 0; d < 8; d++)
             {

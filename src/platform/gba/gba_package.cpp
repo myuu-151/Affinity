@@ -810,8 +810,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
     }
 
     int totalTileCount = (int)allTiles.size() / 8;
-    // In Mode 4 (meshes present), tiles 0-511 overlap bitmap — offset by 512
-    int tileOffset = meshes.empty() ? 0 : 512;
+    // Always offset by 512 — Mode 4 needs it (tiles 0-511 overlap bitmap), Mode 7
+    // runtime expects it (tm_static_adj=512), Mode 0 runtime also expects 512+ base.
+    // Previous `meshes.empty() ? 0 : 512` left Mode 7 sprite tileIds negative.
+    int tileOffset = 512;
     int minimapTile = totalTileCount + dirVramNextTile + tileOffset;
 
     // Emit combined tile data (always emit even if empty — runtime expects the symbol)
