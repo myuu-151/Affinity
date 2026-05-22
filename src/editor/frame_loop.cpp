@@ -450,6 +450,7 @@ enum class VsNodeType : int {
     ResetScene,     // action: reload the current scene (respawn)
     SetPlayerHeight, // set player collision height
     SetHudValue,    // action: set afn_hud_value[slot] for counter display
+    UpdateRespawnPos, // action: set Respawn start position to an object's world position
     COUNT
 };
 
@@ -742,6 +743,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Reset Scene",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Set Player Height",0xFF3355AA, 1, 1, 1, 0, {"Value (float)"}, {}, {} },
     { "Set HUD Value",   0xFF3355AA, 1, 1, 2, 0, {"Value", "Slot"}, {}, {} },
+    { "Update Respawn Pos",0xFF3355AA, 1, 1, 1, 0, {"Object"}, {}, {} },
 };
 
 struct VsNode {
@@ -4638,6 +4640,7 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "srcImg=%s\n", sa.sourceImagePath.c_str());
         fprintf(f, "palBank=%d\n", sa.palBank);
         fprintf(f, "paletteSrc=%d\n", sa.paletteSrc);
+        fprintf(f, "streamable=%d\n", sa.streamable ? 1 : 0);
         // Palette
         for (int c = 0; c < 16; c++)
             fprintf(f, "pal=%d,%u\n", c, sa.palette[c]);
@@ -5062,7 +5065,7 @@ static bool SaveProject(const std::string& path)
             }
         }
         // Camera
-        fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d,%d\n",
+        fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d,%d,%.1f\n",
                 ms.camera.x, ms.camera.z, ms.camera.height, ms.camera.angle, ms.camera.horizon,
                 ms.camera.walkSpeed, ms.camera.sprintSpeed,
                 ms.camera.walkEaseIn, ms.camera.walkEaseOut, ms.camera.sprintEaseIn, ms.camera.sprintEaseOut,
@@ -5070,7 +5073,8 @@ static bool SaveProject(const std::string& path)
                 ms.camera.jumpCamLand, ms.camera.jumpCamAir, ms.camera.autoOrbitSpeed, ms.camera.jumpDampen,
                 ms.camera.smallTriCull, ms.camera.skipFloor ? 1 : 0, ms.camera.coverageBuf ? 1 : 0,
                 ms.camera.drawDistance, ms.camera.camPitch, ms.camera.autoPitch ? 1 : 0,
-                ms.camera.horizonClamp ? 1 : 0, ms.camera.dynamicHorizon ? 1 : 0, ms.camera.faceCull ? 1 : 0);
+                ms.camera.horizonClamp ? 1 : 0, ms.camera.dynamicHorizon ? 1 : 0, ms.camera.faceCull ? 1 : 0,
+                ms.camera.spriteDrawDistance);
         // Scene-level blueprint
         if (ms.blueprintIdx >= 0) {
             fprintf(f, "msSceneBp=%d,%d", ms.blueprintIdx, ms.instanceParamCount);
@@ -5666,6 +5670,7 @@ static bool LoadProject(const std::string& path)
                     else if (strncmp(line, "srcImg=", 7) == 0) sa.sourceImagePath = line + 7;
                     else if (sscanf(line, "palBank=%d", &iv) == 1) sa.palBank = iv;
                     else if (sscanf(line, "paletteSrc=%d", &iv) == 1) sa.paletteSrc = iv;
+                    else if (sscanf(line, "streamable=%d", &iv) == 1) sa.streamable = (iv != 0);
                     else if (sscanf(line, "pal=%d,%u", &iv, &uv) == 2 && iv >= 0 && iv < 16) sa.palette[iv] = uv;
                     else if (sscanf(line, "frameCount=%d", &iv) == 1) { /* informational */ }
                     else if (strncmp(line, "frame=", 6) == 0)
@@ -6765,13 +6770,14 @@ static bool LoadProject(const std::string& path)
                 MapScene& ms = sMapScenes.back();
                 CameraStartObject& c = ms.camera;
                 int sti = 0, sf = 0, cb = 0, ap = 0, hc = 0, dh = 0, fc = 0;
-                sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d",
+                float sdd = 0.0f;
+                int matched = sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d,%f",
                     &c.x, &c.z, &c.height, &c.angle, &c.horizon,
                     &c.walkSpeed, &c.sprintSpeed,
                     &c.walkEaseIn, &c.walkEaseOut, &c.sprintEaseIn, &c.sprintEaseOut,
                     &c.jumpForce, &c.gravity, &c.maxFallSpeed,
                     &c.jumpCamLand, &c.jumpCamAir, &c.autoOrbitSpeed, &c.jumpDampen,
-                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc);
+                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc, &sdd);
                 c.smallTriCull = sti;
                 c.skipFloor = (sf != 0);
                 c.coverageBuf = (cb != 0);
@@ -6779,6 +6785,7 @@ static bool LoadProject(const std::string& path)
                 c.horizonClamp = (hc != 0);
                 c.dynamicHorizon = (dh != 0);
                 c.faceCull = (fc != 0);
+                if (matched >= 28) c.spriteDrawDistance = sdd;
             }
             else if (strncmp(line, "msSceneBp=", 10) == 0 && !sMapScenes.empty())
             {
@@ -7165,13 +7172,14 @@ static bool LoadProject(const std::string& path)
                 MapScene& ms = sM7Scenes.back();
                 CameraStartObject& c = ms.camera;
                 int sti = 0, sf = 0, cb = 0, ap = 0, hc = 0, dh = 0, fc = 0;
-                sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d",
+                float sdd = 0.0f;
+                int matched = sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d,%f",
                     &c.x, &c.z, &c.height, &c.angle, &c.horizon,
                     &c.walkSpeed, &c.sprintSpeed,
                     &c.walkEaseIn, &c.walkEaseOut, &c.sprintEaseIn, &c.sprintEaseOut,
                     &c.jumpForce, &c.gravity, &c.maxFallSpeed,
                     &c.jumpCamLand, &c.jumpCamAir, &c.autoOrbitSpeed, &c.jumpDampen,
-                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc);
+                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc, &sdd);
                 c.smallTriCull = sti;
                 c.skipFloor = (sf != 0);
                 c.coverageBuf = (cb != 0);
@@ -7179,6 +7187,7 @@ static bool LoadProject(const std::string& path)
                 c.horizonClamp = (hc != 0);
                 c.dynamicHorizon = (dh != 0);
                 c.faceCull = (fc != 0);
+                if (matched >= 28) c.spriteDrawDistance = sdd;
             }
             else if (strncmp(line, "m7SceneBp=", 10) == 0 && !sM7Scenes.empty())
             {
@@ -9066,6 +9075,12 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             }
         }
         ImGui::PopItemWidth();
+
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Streamable##assetStream", &asset.streamable))
+            sProjectDirty = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Stream tile data into OBJ VRAM on demand based on proximity to player. Saves VRAM when many unique sprite types exist but aren't all visible at once.");
 
         ImGui::Separator();
 
@@ -17057,6 +17072,7 @@ void FrameTick(float dt)
                 case VsNodeType::OnRise:        desc = "Rising-edge gate: only passes execution on the first frame the upstream condition becomes true. Blocks while it keeps firing. Resets when it stops."; break;
                 case VsNodeType::ResetScene:    desc = "Reloads the current scene. Player respawns at start position."; break;
                 case VsNodeType::SetPlayerHeight: desc = "Sets the player collision height (pixels). Controls wall Y-overlap and floor snap-up distance. Default 12."; break;
+                case VsNodeType::UpdateRespawnPos: desc = "Updates the Respawn start position to the given object's world position. Use on checkpoint trigger."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -17296,6 +17312,7 @@ void FrameTick(float dt)
                         case VsNodeType::ResetScene:    return "_reset_scene";
                         case VsNodeType::SetPlayerHeight: return "_set_player_height";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
+                        case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -17738,6 +17755,22 @@ void FrameTick(float dt)
                         fmtInt(infoNode.id, 1, "<slot>"),
                         fmtInt(infoNode.id, 0, "<value>"));
                     setActionFunc(infoNode, "_set_hud_value", bodyBuf);
+                    break;
+                }
+                case VsNodeType::UpdateRespawnPos: {
+                    char bodyBuf[320];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_start_x = g_sprites[%s].x;\n"
+                        "    afn_start_y = g_sprites[%s].y;\n"
+                        "    afn_start_z = g_sprites[%s].z;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Respawn node reads afn_start_x/y/z:\n"
+                        "    //   player_x = afn_start_x; player_y = afn_start_y;\n"
+                        "    //   player_z = afn_start_z; player_vy = 0;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 0, "<obj>"));
+                    setActionFunc(infoNode, "_update_respawn_pos", bodyBuf);
                     break;
                 }
                 case VsNodeType::ChangeScene:
@@ -20402,6 +20435,7 @@ void FrameTick(float dt)
                     case VsNodeType::ResetScene:    suffix = "_reset_scene"; break;
                     case VsNodeType::SetPlayerHeight: suffix = "_set_player_height"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
+                    case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
                     case VsNodeType::Branch:        suffix = "_branch"; break;
                     case VsNodeType::CompareVar:    suffix = "_compare_var"; break;

@@ -120,6 +120,7 @@ struct SpriteAsset
 
     std::vector<DirAnimSet> dirAnimSets;
     bool hasDirections = false;        // true if any direction image is loaded
+    bool streamable = false;           // true = DMA tile data on-demand based on proximity (saves VRAM)
 };
 
 // Object types for Mode 4 scene entities

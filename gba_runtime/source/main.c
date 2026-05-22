@@ -1395,6 +1395,10 @@ static int hud_font_loaded = 0;
 EWRAM_DATA static int hud_pal_remap[AFN_ASSET_COUNT]; // dynamic palette bank for HUD assets
 static int g_spriteCount; /* tentative decl; defined later */
 
+/* Weak default — mapdata.h provides the real array if assets have streamable flag set.
+   If no real array exists (old mapdata), this all-zero default keeps all assets static. */
+__attribute__((weak)) const u8 afn_asset_streamable[AFN_ASSET_COUNT] = {0};
+
 /* Asset streaming: tileBase indirection so streamable assets can swap into shared slots.
    Phase 1: every asset's tileBase mirrors g_assetSlot[ai].tileBase (no behavior change).
    Phase 2+: streamable assets get dynamic tileBase from a pool, others stay fixed. */
@@ -1411,10 +1415,17 @@ static inline void asset_slots_init(void) {
     int i;
     for (i = 0; i < AFN_ASSET_COUNT; i++) {
         g_assetSlot[i].tileBase = (s16)afn_asset_desc[i][0];
+#ifdef AFN_ASSET_COUNT
+        /* afn_asset_streamable[] is emitted alongside afn_asset_desc when there are assets */
+        extern const u8 afn_asset_streamable[];
+        g_assetSlot[i].isStreamable = afn_asset_streamable[i];
+        g_assetSlot[i].loaded = afn_asset_streamable[i] ? 0 : 1; /* streamable starts unloaded */
+#else
         g_assetSlot[i].isStreamable = 0;
+        g_assetSlot[i].loaded = 1;
+#endif
         g_assetSlot[i].inUseThisFrame = 0;
         g_assetSlot[i].cooldown = 0;
-        g_assetSlot[i].loaded = 1;
     }
 }
 
@@ -2207,8 +2218,27 @@ static void init_obj_sprites(void)
 #else
         u32 *dst = (u32*)(0x06010000 + AFN_DIR_VRAM_TILES * 32);
 #endif
-        for (i = 0; i < (int)(AFN_ALL_TILES_LEN / 4); i++)
-            dst[i] = src[i];
+        /* Per-asset DMA so streamable assets can be skipped (they'll be loaded on demand
+           into pool slots). dst points at base VRAM slot; src is afn_all_tiles[]. */
+        {
+            extern const u8 afn_asset_streamable[];
+            int srcBaseSlot = (int)((u32)dst - 0x06010000) / 32;
+            int ai;
+            for (ai = 0; ai < AFN_ASSET_COUNT; ai++) {
+                if (afn_asset_streamable[ai]) continue; /* skip — loaded on demand */
+                int tileCount = afn_asset_desc[ai][1] * afn_asset_desc[ai][2];
+                if (tileCount <= 0) continue;
+                int slotOffset = afn_asset_desc[ai][0] - srcBaseSlot;
+                if (slotOffset < 0) continue;
+                int srcWord = slotOffset * 8;
+                int dstWord = slotOffset * 8;
+                int nWords  = tileCount * 8;
+                if (srcWord + nWords > (int)(AFN_ALL_TILES_LEN / 4)) continue;
+                int w;
+                for (w = 0; w < nWords; w++)
+                    dst[dstWord + w] = src[srcWord + w];
+            }
+        }
     }
 
     // Load per-asset palettes into OBJ palette banks

@@ -1060,6 +1060,15 @@ static bool GenerateMapData(const std::string& runtimeDir,
               << ", " << resolvedPalBank[ai] << " },\n";
         }
         f << "};\n\n";
+
+        // Per-asset streamable flag — 1 = DMA tiles in/out on proximity (saves VRAM)
+        f << "static const u8 afn_asset_streamable[] = {\n   ";
+        for (size_t ai = 0; ai < assets.size(); ai++)
+        {
+            f << " " << (assets[ai].streamable ? 1 : 0);
+            if (ai + 1 < assets.size()) f << ",";
+        }
+        f << "\n};\n\n";
     }
 
     // Sprites
@@ -1351,13 +1360,17 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 }
                 f << "\n};\n";
 
-                // Texture pixel data
-                f << "static const u8 afn_mesh" << mi << "_tex[" << mesh.texW * mesh.texH << "] = {";
-                for (int p = 0; p < mesh.texW * mesh.texH; p++)
+                // Texture pixel data — pad to texW * texW so runtime's square-size memcpy
+                // (sz = tw * tw) doesn't read past the array into adjacent ROM data.
+                int padSize = mesh.texW * mesh.texW;
+                int realSize = mesh.texW * mesh.texH;
+                f << "static const u8 afn_mesh" << mi << "_tex[" << padSize << "] = {";
+                for (int p = 0; p < padSize; p++)
                 {
                     if (p % 16 == 0) f << "\n    ";
-                    f << (int)mesh.texPixels[p];
-                    if (p + 1 < mesh.texW * mesh.texH) f << ", ";
+                    int v = (p < realSize) ? (int)mesh.texPixels[p] : 0;
+                    f << v;
+                    if (p + 1 < padSize) f << ", ";
                 }
                 f << "\n};\n";
             }
@@ -2200,6 +2213,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::ResetScene:    return "_reset_scene";
         case GBAScriptNodeType::SetPlayerHeight: return "_set_player_height";
         case GBAScriptNodeType::SetHudValue:    return "_set_hud_value";
+        case GBAScriptNodeType::UpdateRespawnPos: return "_update_respawn_pos";
         default: return "";
         }
     };
@@ -2504,6 +2518,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     int slot = slotData ? resolveInt(slotData) : 0;
                     if (slot < 0) slot = 0; if (slot > 3) slot = 3;
                     f << "    afn_hud_value[" << slot << "] += " << val << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::UpdateRespawnPos: {
+                    auto* objData = findDataIn(action->id, 0);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    f << "    afn_start_x = g_sprites[" << obj << "].x;\n";
+                    f << "    afn_start_y = g_sprites[" << obj << "].y;\n";
+                    f << "    afn_start_z = g_sprites[" << obj << "].z;\n";
                     break;
                 }
                 case GBAScriptNodeType::SetFlag: {
@@ -4029,6 +4051,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     if (slotData) { try { slot = std::stoi(bpResolveInt(slotData)); } catch(...) {} }
                     if (slot < 0) slot = 0; if (slot > 3) slot = 3;
                     f << "    afn_hud_value[" << slot << "] += " << val << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::UpdateRespawnPos: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    f << "    afn_start_x = g_sprites[" << obj << "].x;\n";
+                    f << "    afn_start_y = g_sprites[" << obj << "].y;\n";
+                    f << "    afn_start_z = g_sprites[" << obj << "].z;\n";
                     break;
                 }
                 case GBAScriptNodeType::SetFlag: {
