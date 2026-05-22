@@ -35,6 +35,31 @@
 namespace Affinity
 {
 
+// Replace newlines with SOH (0x01) so multi-line code fields survive the
+// single-line save format. SOH never appears in C source. Length-preserving.
+static void encodeNL(char* s) {
+    if (!s) return;
+    for (size_t i = 0; s[i]; i++) {
+        if (s[i] == '\n') s[i] = 0x01;
+        else if (s[i] == '\r') s[i] = 0x01; // collapse CRLF
+    }
+}
+static void decodeNL(char* s) {
+    if (!s) return;
+    for (size_t i = 0; s[i]; i++) {
+        if (s[i] == 0x01) s[i] = '\n';
+    }
+}
+// Copy src into static buffer with newlines encoded — for fprintf %s.
+static const char* encNL(const char* src) {
+    static char buf[512];
+    if (!src) { buf[0] = '\0'; return buf; }
+    strncpy(buf, src, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    encodeNL(buf);
+    return buf;
+}
+
 static Mode7Camera sCamera;
 static bool sInitialized = false;
 
@@ -4740,15 +4765,15 @@ static bool SaveProject(const std::string& path)
                 }
             }
             if (n.customCode[0])
-                fprintf(f, "bpVsNodeCode=%d|%s\n", n.id, n.customCode);
+                fprintf(f, "bpVsNodeCode=%d|%s\n", n.id, encNL(n.customCode));
             if (n.codeScene[0])
-                fprintf(f, "bpVsSceneCode=%d|%s\n", n.id, n.codeScene);
+                fprintf(f, "bpVsSceneCode=%d|%s\n", n.id, encNL(n.codeScene));
             if (n.codeTilemap[0])
-                fprintf(f, "bpVsTilemapCode=%d|%s\n", n.id, n.codeTilemap);
+                fprintf(f, "bpVsTilemapCode=%d|%s\n", n.id, encNL(n.codeTilemap));
             if (n.codeRtMode4[0])
-                fprintf(f, "bpVsRtM4Code=%d|%s\n", n.id, n.codeRtMode4);
+                fprintf(f, "bpVsRtM4Code=%d|%s\n", n.id, encNL(n.codeRtMode4));
             if (n.codeRtMode0[0])
-                fprintf(f, "bpVsRtM0Code=%d|%s\n", n.id, n.codeRtMode0);
+                fprintf(f, "bpVsRtM0Code=%d|%s\n", n.id, encNL(n.codeRtMode0));
             if (n.funcName[0])
                 fprintf(f, "bpVsNodeFunc=%d|%s\n", n.id, n.funcName);
         }
@@ -4998,15 +5023,15 @@ static bool SaveProject(const std::string& path)
             }
         }
         if (n.customCode[0])
-            fprintf(f, "vsNodeCode=%d|%s\n", n.id, n.customCode);
+            fprintf(f, "vsNodeCode=%d|%s\n", n.id, encNL(n.customCode));
         if (n.codeScene[0])
-            fprintf(f, "vsSceneCode=%d|%s\n", n.id, n.codeScene);
+            fprintf(f, "vsSceneCode=%d|%s\n", n.id, encNL(n.codeScene));
         if (n.codeTilemap[0])
-            fprintf(f, "vsTilemapCode=%d|%s\n", n.id, n.codeTilemap);
+            fprintf(f, "vsTilemapCode=%d|%s\n", n.id, encNL(n.codeTilemap));
         if (n.codeRtMode4[0])
-            fprintf(f, "vsRtM4Code=%d|%s\n", n.id, n.codeRtMode4);
+            fprintf(f, "vsRtM4Code=%d|%s\n", n.id, encNL(n.codeRtMode4));
         if (n.codeRtMode0[0])
-            fprintf(f, "vsRtM0Code=%d|%s\n", n.id, n.codeRtMode0);
+            fprintf(f, "vsRtM0Code=%d|%s\n", n.id, encNL(n.codeRtMode0));
         if (n.funcName[0])
             fprintf(f, "vsNodeFunc=%d|%s\n", n.id, n.funcName);
     }
@@ -5109,15 +5134,15 @@ static bool SaveProject(const std::string& path)
                 }
             }
             if (n.customCode[0])
-                fprintf(f, "msVsNodeCode=%d|%s\n", n.id, n.customCode);
+                fprintf(f, "msVsNodeCode=%d|%s\n", n.id, encNL(n.customCode));
             if (n.codeScene[0])
-                fprintf(f, "msVsSceneCode=%d|%s\n", n.id, n.codeScene);
+                fprintf(f, "msVsSceneCode=%d|%s\n", n.id, encNL(n.codeScene));
             if (n.codeTilemap[0])
-                fprintf(f, "msVsTilemapCode=%d|%s\n", n.id, n.codeTilemap);
+                fprintf(f, "msVsTilemapCode=%d|%s\n", n.id, encNL(n.codeTilemap));
             if (n.codeRtMode4[0])
-                fprintf(f, "msVsRtM4Code=%d|%s\n", n.id, n.codeRtMode4);
+                fprintf(f, "msVsRtM4Code=%d|%s\n", n.id, encNL(n.codeRtMode4));
             if (n.codeRtMode0[0])
-                fprintf(f, "msVsRtM0Code=%d|%s\n", n.id, n.codeRtMode0);
+                fprintf(f, "msVsRtM0Code=%d|%s\n", n.id, encNL(n.codeRtMode0));
         }
         fprintf(f, "msVsLinkCount=%d\n", (int)ms.vsLinks.size());
         for (auto& lk : ms.vsLinks)
@@ -5233,15 +5258,15 @@ static bool SaveProject(const std::string& path)
                 }
             }
             if (n.customCode[0])
-                fprintf(f, "m7VsNodeCode=%d|%s\n", n.id, n.customCode);
+                fprintf(f, "m7VsNodeCode=%d|%s\n", n.id, encNL(n.customCode));
             if (n.codeScene[0])
-                fprintf(f, "m7VsSceneCode=%d|%s\n", n.id, n.codeScene);
+                fprintf(f, "m7VsSceneCode=%d|%s\n", n.id, encNL(n.codeScene));
             if (n.codeTilemap[0])
-                fprintf(f, "m7VsTilemapCode=%d|%s\n", n.id, n.codeTilemap);
+                fprintf(f, "m7VsTilemapCode=%d|%s\n", n.id, encNL(n.codeTilemap));
             if (n.codeRtMode4[0])
-                fprintf(f, "m7VsRtM4Code=%d|%s\n", n.id, n.codeRtMode4);
+                fprintf(f, "m7VsRtM4Code=%d|%s\n", n.id, encNL(n.codeRtMode4));
             if (n.codeRtMode0[0])
-                fprintf(f, "m7VsRtM0Code=%d|%s\n", n.id, n.codeRtMode0);
+                fprintf(f, "m7VsRtM0Code=%d|%s\n", n.id, encNL(n.codeRtMode0));
         }
         fprintf(f, "m7VsLinkCount=%d\n", (int)ms.vsLinks.size());
         for (auto& lk : ms.vsLinks)
@@ -5949,7 +5974,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     for (auto& n : sBlueprintAssets.back().nodes)
                         if (n.id == nid) { strncpy(n.customCode, codeBuf, sizeof(n.customCode) - 1); break; }
                 }
@@ -5958,7 +5983,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 14, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 14, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     for (auto& n : sBlueprintAssets.back().nodes)
                         if (n.id == nid) { strncpy(n.codeScene, codeBuf, sizeof(n.codeScene) - 1); break; }
                 }
@@ -5967,7 +5992,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 16, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 16, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     for (auto& n : sBlueprintAssets.back().nodes)
                         if (n.id == nid) { strncpy(n.codeTilemap, codeBuf, sizeof(n.codeTilemap) - 1); break; }
                 }
@@ -5976,7 +6001,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     for (auto& n : sBlueprintAssets.back().nodes)
                         if (n.id == nid) { strncpy(n.codeRtMode4, codeBuf, sizeof(n.codeRtMode4) - 1); break; }
                 }
@@ -5985,7 +6010,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     for (auto& n : sBlueprintAssets.back().nodes)
                         if (n.id == nid) { strncpy(n.codeRtMode0, codeBuf, sizeof(n.codeRtMode0) - 1); break; }
                 }
@@ -6559,7 +6584,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 11, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 11, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     int gi = VsFindNode(nid);
                     if (gi >= 0)
                         strncpy(sVsNodes[gi].customCode, codeBuf, sizeof(sVsNodes[gi].customCode) - 1);
@@ -6589,7 +6614,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 12, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 12, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     int gi = VsFindNode(nid);
                     if (gi >= 0)
                         strncpy(sVsNodes[gi].codeScene, codeBuf, sizeof(sVsNodes[gi].codeScene) - 1);
@@ -6599,7 +6624,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 14, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 14, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     int gi = VsFindNode(nid);
                     if (gi >= 0)
                         strncpy(sVsNodes[gi].codeTilemap, codeBuf, sizeof(sVsNodes[gi].codeTilemap) - 1);
@@ -6609,7 +6634,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 11, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 11, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     int gi = VsFindNode(nid);
                     if (gi >= 0)
                         strncpy(sVsNodes[gi].codeRtMode4, codeBuf, sizeof(sVsNodes[gi].codeRtMode4) - 1);
@@ -6619,7 +6644,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 11, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 11, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     int gi = VsFindNode(nid);
                     if (gi >= 0)
                         strncpy(sVsNodes[gi].codeRtMode0, codeBuf, sizeof(sVsNodes[gi].codeRtMode0) - 1);
@@ -6857,7 +6882,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     for (auto& n : sMapScenes.back().vsNodes)
                         if (n.id == nid) { strncpy(n.customCode, codeBuf, sizeof(n.customCode) - 1); break; }
                 }
@@ -6866,7 +6891,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 14, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 14, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     for (auto& n : sMapScenes.back().vsNodes)
                         if (n.id == nid) { strncpy(n.codeScene, codeBuf, sizeof(n.codeScene) - 1); break; }
                 }
@@ -6875,7 +6900,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 16, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 16, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     for (auto& n : sMapScenes.back().vsNodes)
                         if (n.id == nid) { strncpy(n.codeTilemap, codeBuf, sizeof(n.codeTilemap) - 1); break; }
                 }
@@ -6884,7 +6909,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     for (auto& n : sMapScenes.back().vsNodes)
                         if (n.id == nid) { strncpy(n.codeRtMode4, codeBuf, sizeof(n.codeRtMode4) - 1); break; }
                 }
@@ -6893,7 +6918,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     for (auto& n : sMapScenes.back().vsNodes)
                         if (n.id == nid) { strncpy(n.codeRtMode0, codeBuf, sizeof(n.codeRtMode0) - 1); break; }
                 }
@@ -7259,7 +7284,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     for (auto& n : sM7Scenes.back().vsNodes)
                         if (n.id == nid) { strncpy(n.customCode, codeBuf, sizeof(n.customCode) - 1); break; }
                 }
@@ -7268,7 +7293,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 14, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 14, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     for (auto& n : sM7Scenes.back().vsNodes)
                         if (n.id == nid) { strncpy(n.codeScene, codeBuf, sizeof(n.codeScene) - 1); break; }
                 }
@@ -7277,7 +7302,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 16, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 16, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     for (auto& n : sM7Scenes.back().vsNodes)
                         if (n.id == nid) { strncpy(n.codeTilemap, codeBuf, sizeof(n.codeTilemap) - 1); break; }
                 }
@@ -7286,7 +7311,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     for (auto& n : sM7Scenes.back().vsNodes)
                         if (n.id == nid) { strncpy(n.codeRtMode4, codeBuf, sizeof(n.codeRtMode4) - 1); break; }
                 }
@@ -7295,7 +7320,7 @@ static bool LoadProject(const std::string& path)
             {
                 int nid;
                 char codeBuf[512] = {};
-                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                if (sscanf(line + 13, "%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                     for (auto& n : sM7Scenes.back().vsNodes)
                         if (n.id == nid) { strncpy(n.codeRtMode0, codeBuf, sizeof(n.codeRtMode0) - 1); break; }
                 }
@@ -16640,15 +16665,15 @@ void FrameTick(float dt)
                     }
                 }
                 if (n.customCode[0]) {
-                    snprintf(buf, sizeof(buf), "vsNodeCode=%d|%s\n", n.id, n.customCode);
+                    snprintf(buf, sizeof(buf), "vsNodeCode=%d|%s\n", n.id, encNL(n.customCode));
                     cb += buf;
                 }
                 if (n.codeScene[0]) {
-                    snprintf(buf, sizeof(buf), "vsSceneCode=%d|%s\n", n.id, n.codeScene);
+                    snprintf(buf, sizeof(buf), "vsSceneCode=%d|%s\n", n.id, encNL(n.codeScene));
                     cb += buf;
                 }
                 if (n.codeTilemap[0]) {
-                    snprintf(buf, sizeof(buf), "vsTilemapCode=%d|%s\n", n.id, n.codeTilemap);
+                    snprintf(buf, sizeof(buf), "vsTilemapCode=%d|%s\n", n.id, encNL(n.codeTilemap));
                     cb += buf;
                 }
             }
@@ -16716,17 +16741,17 @@ void FrameTick(float dt)
 
                     int nid;
                     char codeBuf[512] = {};
-                    if (sscanf(l, "vsNodeCode=%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    if (sscanf(l, "vsNodeCode=%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                         for (auto& pn : pasteNodes)
                             if (pn.id == nid) { strncpy(pn.customCode, codeBuf, sizeof(pn.customCode) - 1); break; }
                         continue;
                     }
-                    if (sscanf(l, "vsSceneCode=%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    if (sscanf(l, "vsSceneCode=%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                         for (auto& pn : pasteNodes)
                             if (pn.id == nid) { strncpy(pn.codeScene, codeBuf, sizeof(pn.codeScene) - 1); break; }
                         continue;
                     }
-                    if (sscanf(l, "vsTilemapCode=%d|%511[^\n]", &nid, codeBuf) >= 2) {
+                    if (sscanf(l, "vsTilemapCode=%d|%511[^\n]", &nid, codeBuf) >= 2) { decodeNL(codeBuf);
                         for (auto& pn : pasteNodes)
                             if (pn.id == nid) { strncpy(pn.codeTilemap, codeBuf, sizeof(pn.codeTilemap) - 1); break; }
                         continue;
