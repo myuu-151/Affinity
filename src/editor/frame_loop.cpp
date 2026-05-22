@@ -12867,6 +12867,29 @@ void FrameTick(float dt)
                     sceneNodes = &sMapScenes[sMapSelectedScene].vsNodes;
                     sceneLinks = &sMapScenes[sMapSelectedScene].vsLinks;
                 }
+                // For CustomCode nodes, the only UI-visible edit surface is the Mode 4/0
+                // Runtime panes (bound to codeRtMode4/codeRtMode0). The legacy customCode
+                // pane has no UI. Extract the function body from a wrapped override so the
+                // user's edits actually reach the exporter.
+                auto extractCustomBody = [](const char* src, char* out, size_t outSize) -> bool {
+                    if (!src || !src[0]) return false;
+                    const char* open = strchr(src, '{');
+                    if (!open) {
+                        strncpy(out, src, outSize - 1);
+                        out[outSize - 1] = '\0';
+                        return true;
+                    }
+                    open++;
+                    const char* close = strrchr(open, '}');
+                    if (!close) close = src + strlen(src);
+                    while (open < close && (*open == ' ' || *open == '\t' || *open == '\n' || *open == '\r')) open++;
+                    while (close > open && (close[-1] == ' ' || close[-1] == '\t' || close[-1] == '\n' || close[-1] == '\r')) close--;
+                    size_t len = (size_t)(close - open);
+                    if (len >= outSize) len = outSize - 1;
+                    memcpy(out, open, len);
+                    out[len] = '\0';
+                    return len > 0;
+                };
                 GBAScriptExport exportScript;
                 for (auto& n : *sceneNodes)
                 {
@@ -12883,6 +12906,10 @@ void FrameTick(float dt)
                         sn.ccDataOut = n.grpOutData;
                         for (int pi = 0; pi < n.grpInData && pi < 8; pi++)
                             memcpy(sn.ccPinCode[pi], n.ccPinCode[pi], sizeof(sn.ccPinCode[pi]));
+                        if (n.codeRtMode4[0])
+                            extractCustomBody(n.codeRtMode4, sn.customCode, sizeof(sn.customCode));
+                        else if (n.codeRtMode0[0])
+                            extractCustomBody(n.codeRtMode0, sn.customCode, sizeof(sn.customCode));
                     }
                     exportScript.nodes.push_back(sn);
                 }
@@ -12939,6 +12966,10 @@ void FrameTick(float dt)
                             sn.ccDataOut = n.grpOutData;
                             for (int pi2 = 0; pi2 < n.grpInData && pi2 < 8; pi2++)
                                 memcpy(sn.ccPinCode[pi2], n.ccPinCode[pi2], sizeof(sn.ccPinCode[pi2]));
+                            if (n.codeRtMode4[0])
+                                extractCustomBody(n.codeRtMode4, sn.customCode, sizeof(sn.customCode));
+                            else if (n.codeRtMode0[0])
+                                extractCustomBody(n.codeRtMode0, sn.customCode, sizeof(sn.customCode));
                         }
                         // Mark parameter-exposed nodes with sentinel in paramInt[3]
                         for (int pi = 0; pi < bp.paramCount; pi++)
