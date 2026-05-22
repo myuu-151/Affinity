@@ -1393,6 +1393,132 @@ static int hud_font_small_tile_base = 0;
 static int hud_font_5x7_tile_base = 0;
 static int hud_font_loaded = 0;
 EWRAM_DATA static int hud_pal_remap[AFN_ASSET_COUNT]; // dynamic palette bank for HUD assets
+static int g_spriteCount; /* tentative decl; defined later */
+
+/* Asset streaming: tileBase indirection so streamable assets can swap into shared slots.
+   Phase 1: every asset's tileBase mirrors g_assetSlot[ai].tileBase (no behavior change).
+   Phase 2+: streamable assets get dynamic tileBase from a pool, others stay fixed. */
+typedef struct {
+    s16 tileBase;       /* current VRAM tile slot (mirrors g_assetSlot[ai].tileBase until streaming enables) */
+    u8  isStreamable;   /* 1 = managed dynamically; 0 = static (always loaded at fixed tileBase) */
+    u8  inUseThisFrame; /* set by proximity scan when any sprite of this asset is near */
+    u8  cooldown;       /* frames since last needed; once > threshold, slot is freed */
+    u8  loaded;         /* 1 = tile data currently DMA'd to tileBase, 0 = needs DMA next time */
+} AssetSlot;
+EWRAM_DATA static AssetSlot g_assetSlot[AFN_ASSET_COUNT];
+
+static inline void asset_slots_init(void) {
+    int i;
+    for (i = 0; i < AFN_ASSET_COUNT; i++) {
+        g_assetSlot[i].tileBase = (s16)afn_asset_desc[i][0];
+        g_assetSlot[i].isStreamable = 0;
+        g_assetSlot[i].inUseThisFrame = 0;
+        g_assetSlot[i].cooldown = 0;
+        g_assetSlot[i].loaded = 1;
+    }
+}
+
+/* Streaming tile pool. Uses a u8 bitmap: 1 = used, 0 = free.
+   Pool covers OBJ tile slots 128..712 (matches typical static-asset range).
+   Slot 0..127 reserved for HUD/backdrop tiles; 713+ reserved for HUD fonts. */
+#define STREAM_POOL_BASE 128
+#define STREAM_POOL_END  712
+#define STREAM_POOL_SIZE (STREAM_POOL_END - STREAM_POOL_BASE)
+#define STREAM_UNLOAD_COOLDOWN 90  /* frames before unloading after last use */
+EWRAM_DATA static u8 g_streamPool[STREAM_POOL_SIZE];
+
+static int stream_alloc(int n) {
+    int i, run = 0, start = -1;
+    for (i = 0; i < STREAM_POOL_SIZE; i++) {
+        if (!g_streamPool[i]) {
+            if (run == 0) start = i;
+            run++;
+            if (run >= n) {
+                int j; for (j = start; j < start + n; j++) g_streamPool[j] = 1;
+                return STREAM_POOL_BASE + start;
+            }
+        } else {
+            run = 0; start = -1;
+        }
+    }
+    return -1; /* no contiguous block available */
+}
+
+static void stream_free(int tileBase, int n) {
+    int start = tileBase - STREAM_POOL_BASE;
+    if (start < 0 || start + n > STREAM_POOL_SIZE) return;
+    int j; for (j = start; j < start + n; j++) g_streamPool[j] = 0;
+}
+
+#if defined(AFN_HAS_ASSET_TILES) || 1
+extern const u32 afn_all_tiles[];
+#endif
+
+/* Per-frame: scan sprites within draw distance, mark assets in use,
+   then load/unload streamable asset tile data accordingly. */
+static void asset_streaming_update(void) {
+    int i;
+    /* Reset per-frame flags */
+    for (i = 0; i < AFN_ASSET_COUNT; i++)
+        g_assetSlot[i].inUseThisFrame = 0;
+
+    /* Mark assets needed (any sprite within draw distance) */
+#if defined(AFFINITY_HAS_SPRITES) && AFN_SPRITE_COUNT > 0
+    {
+        FIXED maxDist = 0;
+#ifdef AFN_SPRITE_DRAW_DISTANCE
+        maxDist = AFN_SPRITE_DRAW_DISTANCE;
+#elif defined(AFN_DRAW_DISTANCE)
+        maxDist = AFN_DRAW_DISTANCE;
+#endif
+        for (i = 0; i < g_spriteCount; i++) {
+            int ai = g_sprites[i].assetIdx;
+            if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
+            if (!g_assetSlot[ai].isStreamable) continue;
+            if (maxDist > 0) {
+                FIXED dx = g_sprites[i].x - cam_x;
+                FIXED dz = g_sprites[i].z - cam_z;
+                FIXED ad = (dx < 0 ? -dx : dx) + (dz < 0 ? -dz : dz);
+                if (ad > maxDist) continue;
+            }
+            g_assetSlot[ai].inUseThisFrame = 1;
+        }
+    }
+#endif
+
+    /* Update load/unload state for streamable assets */
+    for (i = 0; i < AFN_ASSET_COUNT; i++) {
+        if (!g_assetSlot[i].isStreamable) continue;
+        if (g_assetSlot[i].inUseThisFrame) {
+            g_assetSlot[i].cooldown = 0;
+            if (!g_assetSlot[i].loaded) {
+                int n = afn_asset_desc[i][1] * afn_asset_desc[i][2]; /* tilesPerFrame * frameCount */
+                if (n <= 0) n = 1;
+                int slot = stream_alloc(n);
+                if (slot >= 0) {
+                    /* afn_all_tiles is placed at VRAM slot 512 in Mode 4 (after the bitmap
+                       framebuffer region). Source offset (in tiles) = original slot - 512. */
+                    int origSlot = afn_asset_desc[i][0];
+                    int srcTileOff = origSlot - 512;
+                    if (srcTileOff < 0) srcTileOff = 0;
+                    u32* dst = (u32*)(0x06010000 + slot * 32);
+                    const u32* src = &afn_all_tiles[srcTileOff * 8];
+                    DMA_TRANSFER(dst, src, n * 8, 3, DMA_NOW | DMA_32);
+                    g_assetSlot[i].tileBase = (s16)slot;
+                    g_assetSlot[i].loaded = 1;
+                }
+            }
+        } else if (g_assetSlot[i].loaded) {
+            if (g_assetSlot[i].cooldown < 255) g_assetSlot[i].cooldown++;
+            if (g_assetSlot[i].cooldown >= STREAM_UNLOAD_COOLDOWN) {
+                int n = afn_asset_desc[i][1] * afn_asset_desc[i][2];
+                if (n <= 0) n = 1;
+                stream_free(g_assetSlot[i].tileBase, n);
+                g_assetSlot[i].loaded = 0;
+            }
+        }
+    }
+}
 static int hud_need_blend = 0;
 static int hud_blend_alpha = 16;
 
@@ -2558,7 +2684,7 @@ static void update_sprites(void)
                             if (afn_current_mode == 2) vramTile0 -= 512;
                             // If direction DMA was never loaded (VRAM overflow), fall back to static tiles
                             if (g_active_dir_set[ai] < 0) {
-                                tileId = afn_asset_desc[ai][0] - tm_static_adj;
+                                tileId = g_assetSlot[ai].tileBase - tm_static_adj;
                                 baseSize = afn_asset_desc[ai][3];
                                 palBank = afn_asset_desc[ai][4];
                             } else if ((afn_current_mode == 0 || afn_current_mode == 2) && !adCompact) {
@@ -2579,7 +2705,7 @@ static void update_sprites(void)
                     else
 #endif
                     {
-                        tileId = afn_asset_desc[ai][0] - tm_static_adj;
+                        tileId = g_assetSlot[ai].tileBase - tm_static_adj;
                         baseSize = afn_asset_desc[ai][3];
                         palBank = afn_asset_desc[ai][4];
                     }
@@ -5177,7 +5303,7 @@ static void apply_draw_behind_exceptions(u16* buf)
         }
 
         /* Get tile/palette from asset — use direction VRAM if animated */
-        tileId = afn_asset_desc[ai][0] - tm_static_adj;
+        tileId = g_assetSlot[ai].tileBase - tm_static_adj;
         baseSize = afn_asset_desc[ai][3];
         scaleSize = baseSize;
         palBank = afn_asset_desc[ai][4];
@@ -5572,6 +5698,7 @@ static void mode4_init_scene(void)
     player_sprite_idx = AFN_PLAYER_IDX;
 #if defined(AFFINITY_HAS_SPRITES) && AFN_SPRITE_COUNT > 0
     load_editor_sprites();
+    asset_slots_init();
     player_x = g_sprites[AFN_PLAYER_IDX].x;
     player_z = g_sprites[AFN_PLAYER_IDX].z;
     player_y = g_sprites[AFN_PLAYER_IDX].y;
@@ -6171,6 +6298,7 @@ int main(void)
                 REG_TM2CNT_H = 0x0081;
                 render_meshes_sw(backbuf);
                 apply_draw_behind_exceptions(backbuf);
+                asset_streaming_update();
                 dbg_vcount = (int)REG_TM2CNT_L;
             }
             if (g_ewramRender)
@@ -6584,7 +6712,7 @@ int main(void)
                         }
 
                         int curFrame = baseSet + tm_anim_frame;
-                        int tileBase = afn_asset_desc[playerAsset][0];
+                        int tileBase = g_assetSlot[playerAsset].tileBase;
                         int tpf     = afn_asset_desc[playerAsset][1];
                         int objSz   = afn_asset_desc[playerAsset][3];
                         int palBank = afn_asset_desc[playerAsset][4];
@@ -6675,7 +6803,7 @@ int main(void)
                     } else
 #endif
                     {
-                        int tileBase = afn_asset_desc[ai][0];
+                        int tileBase = g_assetSlot[ai].tileBase;
                         int tpf     = afn_asset_desc[ai][1];
                         objSz = afn_asset_desc[ai][3];
                         palBank = afn_asset_desc[ai][4];
@@ -7034,7 +7162,7 @@ int main(void)
                                 int cai = afn_hud_elems[ei].curAsset;
                                 int cfr = afn_hud_elems[ei].curFrame;
                                 if (cai >= 0 && cai < AFN_ASSET_COUNT) {
-                                    int ctb = afn_asset_desc[cai][0];
+                                    int ctb = g_assetSlot[cai].tileBase;
                                     int ctpf = afn_asset_desc[cai][1];
                                     int csz = afn_asset_desc[cai][3];
                                     int cpb = hud_pal_remap[cai] ? hud_pal_remap[cai] : afn_asset_desc[cai][4];
@@ -7078,7 +7206,7 @@ int main(void)
                                 int fr = afn_hud_sprites[spStart + spi].frame;
                                 int sx = ex + afn_hud_sprites[spStart + spi].x + layOff[64 + spi][0];
                                 int sy = ey + afn_hud_sprites[spStart + spi].y + layOff[64 + spi][1];
-                                int tileBase = afn_asset_desc[ai][0];
+                                int tileBase = g_assetSlot[ai].tileBase;
                                 int tpf      = afn_asset_desc[ai][1];
                                 int objSz    = afn_asset_desc[ai][3];
                                 int palBank  = hud_pal_remap[ai] ? hud_pal_remap[ai] : afn_asset_desc[ai][4];
@@ -7107,7 +7235,7 @@ int main(void)
                                 int fr = afn_hud_pieces[pStart + pi].frame;
                                 int sx = ex + afn_hud_pieces[pStart + pi].x + layOff[pi][0];
                                 int sy = ey + afn_hud_pieces[pStart + pi].y + layOff[pi][1];
-                                int tileBase = afn_asset_desc[ai][0];
+                                int tileBase = g_assetSlot[ai].tileBase;
                                 int tpf      = afn_asset_desc[ai][1];
                                 int objSz    = afn_asset_desc[ai][3];
                                 int palBank  = afn_hud_pieces[pStart + pi].blackTint ? 0
@@ -7956,7 +8084,7 @@ int main(void)
                             int cai = afn_hud_elems[ei].curAsset;
                             int cfr = afn_hud_elems[ei].curFrame;
                             if (cai >= 0 && cai < AFN_ASSET_COUNT) {
-                                int ctb = afn_asset_desc[cai][0];
+                                int ctb = g_assetSlot[cai].tileBase;
                                 int ctpf = afn_asset_desc[cai][1];
                                 int csz = afn_asset_desc[cai][3];
                                 int cpb = hud_pal_remap[cai] ? hud_pal_remap[cai] : afn_asset_desc[cai][4];
@@ -7994,7 +8122,7 @@ int main(void)
                             int fr = afn_hud_sprites[spStart + spi].frame;
                             int sx = ex + afn_hud_sprites[spStart + spi].x + layOff[64 + spi][0];
                             int sy = ey + afn_hud_sprites[spStart + spi].y + layOff[64 + spi][1];
-                            int tileBase = afn_asset_desc[ai][0];
+                            int tileBase = g_assetSlot[ai].tileBase;
                             int tpf      = afn_asset_desc[ai][1];
                             int objSz    = afn_asset_desc[ai][3];
                             int palBank  = hud_pal_remap[ai] ? hud_pal_remap[ai] : afn_asset_desc[ai][4];
@@ -8013,7 +8141,7 @@ int main(void)
                             int fr = afn_hud_pieces[pStart + pi].frame;
                             int sx = ex + afn_hud_pieces[pStart + pi].x + layOff[pi][0];
                             int sy = ey + afn_hud_pieces[pStart + pi].y + layOff[pi][1];
-                            int tileBase = afn_asset_desc[ai][0];
+                            int tileBase = g_assetSlot[ai].tileBase;
                             int tpf      = afn_asset_desc[ai][1];
                             int objSz    = afn_asset_desc[ai][3];
                             int palBank  = afn_hud_pieces[pStart + pi].blackTint ? 0
