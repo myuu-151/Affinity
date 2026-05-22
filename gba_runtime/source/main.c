@@ -116,6 +116,24 @@ static const u8 afn_asset_streamable[1] = {0};
 /* afn_pal[0][16] is already emitted by mapdata.h when AFN_ASSET_COUNT==0; don't redefine */
 #endif
 
+/* afn_anim_desc stub — only emitted when assets have animations */
+#ifndef AFN_MAX_ANIMS
+#define AFN_MAX_ANIMS 1
+static const int afn_anim_desc[1][AFN_MAX_ANIMS][4] = {{{0}}};
+#endif
+/* AfnTmObj stub — only emitted when tilemap data exists */
+#ifndef AFN_TM_SCENE_COUNT
+typedef struct { s16 tx,ty; u8 type; s8 assetIdx; u8 camFollow; u8 collision; s8 teleScene; u16 scale8; u8 layer; u8 animPlay; s8 animIdx; u8 facing; } AfnTmObj;
+#endif
+/* Script symbol stubs — only emitted when scripts/blueprints exist */
+#ifndef AFN_HAS_SCRIPT
+static u8  afn_sprite_visible[MAX_FLOOR_SPRITES];
+static u16 afn_text_color = 0x7FFF;
+static int tm_player_facing = 4;
+static int afn_sprite_anim_spr = -1;
+static int afn_sprite_anim_val = -1;
+#endif
+
 
 // libtonc has key_hit (press edge) but no release edge — define it here
 #define key_released(k) (~__key_curr & __key_prev & (k))
