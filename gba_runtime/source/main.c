@@ -1729,9 +1729,24 @@ static const M7Scanline* m7_read_ptr = m7_tables[0]; // ISR reads from this poin
 // Build the full scanline table — call once per frame after camera update
 // Writes to back buffer, then swaps pointer atomically during VBlank
 // Mode 7 floor render offset — shifts the visible floor pixels so Mode-4-scale
-// cam coords (0..256 px world) land at the floor's center area (0..1024 px tilemap).
-// Editor world origin maps to floor center (512, 512) instead of edge.
-#define M7_FLOOR_OFFSET ((1024 - 256) / 2 * 256)   // = 98304 in 16.8 fixed
+// cam coords (0..256 px world) land at the floor's center area. Computed per
+// floor size: (floor_dim - 256) / 2 * 256 (in 16.8 fixed). Clamps to 0 if the
+// floor is the same size as or smaller than the player world.
+// (Inlined floor_dim lookup since afn_floor_px_dim is declared later in this TU.)
+#ifndef AFN_FLOOR_SIZE
+#define AFN_FLOOR_SIZE 3
+#endif
+static inline FIXED m7_floor_offset(void) {
+    int floor_dim;
+    switch (AFN_FLOOR_SIZE) {
+        case 0: floor_dim = 128;  break;
+        case 1: floor_dim = 256;  break;
+        case 2: floor_dim = 512;  break;
+        default: floor_dim = 1024; break;
+    }
+    int o = (floor_dim - 256) / 2;
+    return (o > 0) ? (o << 8) : 0;
+}
 
 static void m7_build_table(void)
 {
@@ -1740,8 +1755,9 @@ static void m7_build_table(void)
     FIXED ch = cam_h;
     FIXED cf = g_cosf;
     FIXED sf = g_sinf;
-    FIXED cx = cam_x + M7_FLOOR_OFFSET;
-    FIXED cz = cam_z + M7_FLOOR_OFFSET;
+    FIXED off = m7_floor_offset();
+    FIXED cx = cam_x + off;
+    FIXED cz = cam_z + off;
     FIXED fov = cam_fov;
 
     int vc;
@@ -5968,7 +5984,10 @@ static void scene_load(int sceneMode, int sceneIdx)
         load_editor_sprites();
 #endif
         player_sprite_idx = -1;
-        // Initialize camera from mapdata defaults (Mode 7 init didn't set these).
+        // Initialize camera from mapdata defaults. Player/sprite/cam stay in
+        // Mode-4 export scale (256 px world). The visible floor is shifted by
+        // M7_FLOOR_OFFSET in m7_build_table so the player's editor coords land
+        // on the 1024 px tilemap center.
         cam_x     = AFN_CAM_X;
         cam_z     = AFN_CAM_Z;
         cam_h     = AFN_CAM_H;
@@ -7606,14 +7625,20 @@ int main(void)
             }
 #endif
 
-            // Clamp player to map bounds (skip if collision mesh defines boundaries)
+            // Clamp player to map bounds (skip if collision mesh defines boundaries).
+            // Clamp player to map bounds (skip if collision mesh defines boundaries).
+            // For Mode 7, player coords are Mode-4 scale and the floor render
+            // shifts by m7_floor_offset() so the player's effective floor position
+            // is player_x + offset. Clamp shifted accordingly so the perimeter
+            // matches the actual tilemap edges (works for any floor size).
 #ifndef AFN_COL_FACE_COUNT
             {
                 FIXED maxCoord = afn_floor_px_dim[AFN_FLOOR_SIZE] << 8;
-                if (player_x < 0) player_x = 0;
-                if (player_x > maxCoord) player_x = maxCoord;
-                if (player_z < 0) player_z = 0;
-                if (player_z > maxCoord) player_z = maxCoord;
+                FIXED shift = (afn_current_mode == 2) ? m7_floor_offset() : 0;
+                if (player_x < -shift) player_x = -shift;
+                if (player_x > maxCoord - shift) player_x = maxCoord - shift;
+                if (player_z < -shift) player_z = -shift;
+                if (player_z > maxCoord - shift) player_z = maxCoord - shift;
             }
 #endif
 
