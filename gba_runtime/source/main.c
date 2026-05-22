@@ -125,6 +125,11 @@ static const int afn_anim_desc[1][AFN_MAX_ANIMS][4] = {{{0}}};
 #ifndef AFN_TM_SCENE_COUNT
 typedef struct { s16 tx,ty; u8 type; s8 assetIdx; u8 camFollow; u8 collision; s8 teleScene; u16 scale8; u8 layer; u8 animPlay; s8 animIdx; u8 facing; } AfnTmObj;
 #endif
+/* afn_dir_anim_tiles stub — only emitted when at least one asset has directional tile data */
+#ifndef AFN_DIR_ANIM_TILES_LEN
+#define AFN_DIR_ANIM_TILES_LEN 0
+static const u32 afn_dir_anim_tiles[1] = {0};
+#endif
 /* Script symbol stubs — only emitted when scripts/blueprints exist */
 #ifndef AFN_HAS_SCRIPT
 static u8  afn_sprite_visible[MAX_FLOOR_SPRITES];
