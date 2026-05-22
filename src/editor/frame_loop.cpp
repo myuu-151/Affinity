@@ -1024,7 +1024,7 @@ struct SoundInstance {
     int voiceCount = 6;        // max simultaneous voices on GBA (4-8)
     int softFade = 1;          // legacy single flag — load-time migrates to softFadeA + softFadeB
     int softFadeA = 1;         // fade enabled when voice routes to FIFO A (polyphony-shifted mix)
-    int softFadeB = 1;         // fade enabled when voice routes to FIFO B (flat mix)
+    int softFadeB = 0;         // fade enabled when voice routes to FIFO B (flat mix)
     int attenuateFifoA = 0;    // FIFO A polyphony attenuation: 0 = off (louder, may clip), 1 = on (safer)
     int longRelease = 0;       // 0 = normal, 1 = force minimum 1672-sample (~67ms) release tail
     int hifiMode = 0;          // 0 = normal (~18kHz), 1 = hi-fi (~25kHz, may trill)
@@ -17948,17 +17948,21 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_check_flag",
                         "    int flag = findDataIn(0)->paramInt[0];\n"
                         "    if (afn_flags & (1u << flag)) { /* Set chain */ }\n"
-                        "    else { /* Clear chain */ }");
+                        "    else { /* Clear chain */ }\n"
+                        "    // --- Runtime --- gate node, exec branches based on afn_flags bit at codegen time");
                     break;
                 case VsNodeType::SetFlag: {
                     editorCode =
                         "// Set flag bit to value (0 or 1)";
-                    char bodyBuf[256];
+                    char bodyBuf[320];
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    int flag = %s;\n"
                         "    int val = %s;\n"
                         "    if (val) afn_flags |= (1u << flag);\n"
-                        "    else afn_flags &= ~(1u << flag);",
+                        "    else afn_flags &= ~(1u << flag);\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // CheckFlag / IsFlagSet read this bitmask:\n"
+                        "    //   if (afn_flags & (1u << flag)) { ... }",
                         fmtInt(infoNode.id, 0, "<flag>"), fmtInt(infoNode.id, 1, "<value>"));
                     setActionFunc(infoNode, "_set_flag", bodyBuf);
                     break;
@@ -17968,7 +17972,10 @@ void FrameTick(float dt)
                         "// Toggle flag bit";
                     char bodyBuf[256];
                     snprintf(bodyBuf, sizeof(bodyBuf),
-                        "    afn_flags ^= (1u << %s);",
+                        "    afn_flags ^= (1u << %s);\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // CheckFlag / IsFlagSet read this bitmask:\n"
+                        "    //   if (afn_flags & (1u << flag)) { ... }",
                         fmtInt(infoNode.id, 0, "<flag>"));
                     setActionFunc(infoNode, "_toggle_flag", bodyBuf);
                     break;
@@ -18144,86 +18151,101 @@ void FrameTick(float dt)
                     editorCode = "// Random integer in [Min, Max]";
                     setActionFunc(infoNode, "_random",
                         "    afn_rng = afn_rng * 1103515245 + 12345;\n"
-                        "    return min + ((afn_rng >> 16) % (max - min + 1));");
+                        "    return min + ((afn_rng >> 16) % (max - min + 1));\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (mutates afn_rng)");
                     break;
                 case VsNodeType::GetFlag:
                     editorCode = "// Read flag bit (0-31)";
                     setActionFunc(infoNode, "_get_flag",
-                        "    return (afn_flags >> flag) & 1;");
+                        "    return (afn_flags >> flag) & 1;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::AbsMath:
                     editorCode = "// Absolute value";
                     setActionFunc(infoNode, "_abs",
                         "    int v = value;\n"
-                        "    return (v < 0) ? -v : v;");
+                        "    return (v < 0) ? -v : v;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::MinMath:
                     editorCode = "// Minimum of A and B";
                     setActionFunc(infoNode, "_min",
-                        "    return (a < b) ? a : b;");
+                        "    return (a < b) ? a : b;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::MaxMath:
                     editorCode = "// Maximum of A and B";
                     setActionFunc(infoNode, "_max",
-                        "    return (a > b) ? a : b;");
+                        "    return (a > b) ? a : b;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::ModuloMath:
                     editorCode = "// A % B (remainder)";
                     setActionFunc(infoNode, "_mod",
-                        "    return (b != 0) ? (a % b) : 0;");
+                        "    return (b != 0) ? (a % b) : 0;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::ClampMath:
                     editorCode = "// Clamp value to [min, max]";
                     setActionFunc(infoNode, "_clamp",
                         "    if (val < lo) return lo;\n"
                         "    if (val > hi) return hi;\n"
-                        "    return val;");
+                        "    return val;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::SignMath:
                     editorCode = "// Sign: -1, 0, or 1";
                     setActionFunc(infoNode, "_sign",
-                        "    return (v > 0) ? 1 : (v < 0) ? -1 : 0;");
+                        "    return (v > 0) ? 1 : (v < 0) ? -1 : 0;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::CompareInt: {
                     const char* ops[] = { "==", "!=", "<", ">", "<=", ">=" };
                     int op = infoNode.paramInt[0];
                     if (op < 0 || op > 5) op = 0;
                     editorCode = "// Compare A and B";
-                    char bodyBuf[128];
+                    char bodyBuf[160];
                     snprintf(bodyBuf, sizeof(bodyBuf),
-                        "    return (a %s b) ? 1 : 0;", ops[op]);
+                        "    return (a %s b) ? 1 : 0;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site", ops[op]);
                     setActionFunc(infoNode, "_compare", bodyBuf);
                     break;
                 }
                 case VsNodeType::AndLogic:
                     editorCode = "// Logical AND";
                     setActionFunc(infoNode, "_and",
-                        "    return (a && b) ? 1 : 0;");
+                        "    return (a && b) ? 1 : 0;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::OrLogic:
                     editorCode = "// Logical OR";
                     setActionFunc(infoNode, "_or",
-                        "    return (a || b) ? 1 : 0;");
+                        "    return (a || b) ? 1 : 0;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::NotLogic:
                     editorCode = "// Logical NOT";
                     setActionFunc(infoNode, "_not",
-                        "    return (value == 0) ? 1 : 0;");
+                        "    return (value == 0) ? 1 : 0;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::GetVariable:
                     editorCode = "// Read variable slot";
                     setActionFunc(infoNode, "_get_var",
-                        "    return afn_vars[slot];");
+                        "    return afn_vars[slot];\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (afn_vars[16] is shared mutable state)");
                     break;
                 case VsNodeType::GetPlayerX:
                     editorCode = "// Read player X position";
                     setActionFunc(infoNode, "_get_px",
-                        "    return player_x >> 8;");
+                        "    return player_x >> 8;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (player_x is 16.8 fixed-point)");
                     break;
                 case VsNodeType::GetPlayerZ:
                     editorCode = "// Read player Z position";
                     setActionFunc(infoNode, "_get_pz",
-                        "    return player_z >> 8;");
+                        "    return player_z >> 8;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (player_z is 16.8 fixed-point)");
                     break;
                 case VsNodeType::OnTimer: {
                     setEventFunc(infoNode, "afn_script_timer");
@@ -18430,13 +18452,15 @@ void FrameTick(float dt)
                 case VsNodeType::Select:
                     editorCode = "// If cond != 0 return A, else B";
                     setActionFunc(infoNode, "_select",
-                        "    return cond ? a : b;");
+                        "    return cond ? a : b;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::Lerp:
                     editorCode = "// Lerp from A to B by T (0-256)";
                     setActionFunc(infoNode, "_lerp",
                         "    // result = a + ((b - a) * t) >> 8\n"
-                        "    return a + (((b - a) * t) >> 8);");
+                        "    return a + (((b - a) * t) >> 8);\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (t in 0..256 fixed)");
                     break;
                 case VsNodeType::Distance:
                     editorCode = "// Approximate distance between two sprites";
@@ -18446,34 +18470,40 @@ void FrameTick(float dt)
                         "    // Manhattan approx: max(|dx|,|dz|) + min(|dx|,|dz|)/2\n"
                         "    if (dx < 0) dx = -dx;\n"
                         "    if (dz < 0) dz = -dz;\n"
-                        "    return ((dx > dz) ? dx + (dz >> 1) : dz + (dx >> 1)) >> 8;");
+                        "    return ((dx > dz) ? dx + (dz >> 1) : dz + (dx >> 1)) >> 8;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (reads g_sprites[] world coords)");
                     break;
                 case VsNodeType::GetSpriteX:
                     editorCode = "// Read sprite X position";
                     setActionFunc(infoNode, "_get_sx",
-                        "    return g_sprites[obj].wx >> 8;");
+                        "    return g_sprites[obj].wx >> 8;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (wx is 16.8 fixed-point)");
                     break;
                 case VsNodeType::GetSpriteZ:
                     editorCode = "// Read sprite Z position";
                     setActionFunc(infoNode, "_get_sz",
-                        "    return g_sprites[obj].wz >> 8;");
+                        "    return g_sprites[obj].wz >> 8;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (wz is 16.8 fixed-point)");
                     break;
                 case VsNodeType::IsKeyDown:
                     editorCode = "// 1 if key held, 0 otherwise";
                     setActionFunc(infoNode, "_is_key_down",
-                        "    return key_is_down(key) ? 1 : 0;");
+                        "    return key_is_down(key) ? 1 : 0;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (reads REG_KEYINPUT bitmap)");
                     break;
                 case VsNodeType::SinWave:
                     editorCode = "// Oscillating value using sin LUT";
                     setActionFunc(infoNode, "_sin_wave",
                         "    // amplitude * lu_sin(frame * 65536 / period) >> 12\n"
                         "    int phase = (afn_frame_count * 65536 / period) & 0xFFFF;\n"
-                        "    return (amplitude * lu_sin(phase)) >> 12;");
+                        "    return (amplitude * lu_sin(phase)) >> 12;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (afn_frame_count ticks each VBlank)");
                     break;
                 case VsNodeType::GetTime:
                     editorCode = "// Frame counter since boot";
                     setActionFunc(infoNode, "_get_time",
-                        "    return afn_frame_count;");
+                        "    return afn_frame_count;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (afn_frame_count++ each VBlank)");
                     break;
                 // Game systems
                 case VsNodeType::SetHP: {
@@ -18491,7 +18521,8 @@ void FrameTick(float dt)
                 case VsNodeType::GetHP:
                     editorCode = "// Read sprite HP";
                     setActionFunc(infoNode, "_get_hp",
-                        "    return afn_hp[obj];");
+                        "    return afn_hp[obj];\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (afn_hp[] init 100, mutated by DamageHP/SetHP)");
                     break;
                 case VsNodeType::DamageHP: {
                     editorCode = "// Subtract from HP (clamp to 0)";
@@ -18509,9 +18540,12 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::AddScore: {
                     editorCode = "// Add to score counter";
-                    char bodyBuf2[256];
+                    char bodyBuf2[320];
                     snprintf(bodyBuf2, sizeof(bodyBuf2),
-                        "    afn_score += %s;",
+                        "    afn_score += %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_score read by GetScore / HUD value bindings;\n"
+                        "    // persisted by SaveData to SRAM",
                         fmtInt(infoNode.id, 0, "<amount>"));
                     setActionFunc(infoNode, "_add_score", bodyBuf2);
                     break;
@@ -18519,7 +18553,8 @@ void FrameTick(float dt)
                 case VsNodeType::GetScore:
                     editorCode = "// Read current score";
                     setActionFunc(infoNode, "_get_score",
-                        "    return afn_score;");
+                        "    return afn_score;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (afn_score is global counter)");
                     break;
                 case VsNodeType::Respawn:
                     editorCode = "// Reset player to start position";
@@ -18587,14 +18622,16 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_is_flag_set",
                         "    if (afn_flags & (1u << flag)) {\n"
                         "        /* downstream */\n"
-                        "    }");
+                        "    }\n"
+                        "    // --- Runtime --- gate node, condition evaluated inline at call site");
                     break;
                 case VsNodeType::IsHPZero:
                     editorCode = "// Gate: passes if HP == 0";
                     setActionFunc(infoNode, "_is_hp_zero",
                         "    if (afn_hp[obj] == 0) {\n"
                         "        /* downstream */\n"
-                        "    }");
+                        "    }\n"
+                        "    // --- Runtime --- gate node, reads afn_hp[obj] (mutated by DamageHP / SetHP)");
                     break;
                 case VsNodeType::IsNear:
                     editorCode = "// Gate: passes if objects within radius";
@@ -18604,14 +18641,16 @@ void FrameTick(float dt)
                         "    if (dx < 0) dx = -dx;\n"
                         "    if (dz < 0) dz = -dz;\n"
                         "    int dist = ((dx > dz) ? dx + (dz>>1) : dz + (dx>>1)) >> 8;\n"
-                        "    if (dist < radius) { /* downstream */ }");
+                        "    if (dist < radius) { /* downstream */ }\n"
+                        "    // --- Runtime --- gate node, Manhattan approx distance evaluated inline (3D scene)");
                     break;
                 case VsNodeType::IsTrue:
                     editorCode = "// Gate: passes if value != 0";
                     setActionFunc(infoNode, "_is_true",
                         "    if ($0) {\n"
                         "        /* downstream */\n"
-                        "    }");
+                        "    }\n"
+                        "    // --- Runtime --- gate node, truthy data input gates downstream chain");
                     break;
                 case VsNodeType::CursorUp:
                     editorCode = "// Move cursor to previous stop (wraps)";
@@ -18661,7 +18700,9 @@ void FrameTick(float dt)
                 case VsNodeType::ResetTimer:
                     editorCode = "// Reset countdown timers";
                     setActionFunc(infoNode, "_reset_timer",
-                        "    // Resets internal countdown counters");
+                        "    // Resets internal countdown counters\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Each Countdown node owns a static afn_cd_<id> int reset to its initial value");
                     break;
                 case VsNodeType::Increment: {
                     editorCode = "// Add 1 to variable slot";
@@ -18688,9 +18729,11 @@ void FrameTick(float dt)
                 // Camera
                 case VsNodeType::SetFOV: {
                     editorCode = "// Set camera FOV";
-                    char bodyBuf3[256];
+                    char bodyBuf3[320];
                     snprintf(bodyBuf3, sizeof(bodyBuf3),
-                        "    cam_fov = %s;",
+                        "    cam_fov = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Mode 4 projection scales screen X by cam_fov / depth",
                         fmtInt(infoNode.id, 0, "<fov>"));
                     setActionFunc(infoNode, "_set_fov", bodyBuf3);
                     break;
@@ -18700,23 +18743,31 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_shake_stop",
                         "    afn_shake_frames = 0;\n"
                         "    REG_BG_OFS[2].x = 0;\n"
-                        "    REG_BG_OFS[2].y = 0;");
+                        "    REG_BG_OFS[2].y = 0;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // ScreenShake countdown halted; BG scroll cleared next frame");
                     break;
                 case VsNodeType::LockCamera:
                     editorCode = "// Lock camera rotation";
                     setActionFunc(infoNode, "_lock_cam",
-                        "    afn_cam_locked = 1;");
+                        "    afn_cam_locked = 1;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Orbit input handler skips orbit_angle updates while afn_cam_locked");
                     break;
                 case VsNodeType::UnlockCamera:
                     editorCode = "// Unlock camera rotation";
                     setActionFunc(infoNode, "_unlock_cam",
-                        "    afn_cam_locked = 0;");
+                        "    afn_cam_locked = 0;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Orbit input handler resumes orbit_angle updates");
                     break;
                 case VsNodeType::SetCamSpeed: {
                     editorCode = "// Set camera follow speed";
-                    char bodyBuf3[256];
+                    char bodyBuf3[320];
                     snprintf(bodyBuf3, sizeof(bodyBuf3),
-                        "    afn_cam_speed = %s;",
+                        "    afn_cam_speed = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // cam_x += ((player_x - cam_x) * afn_cam_speed) >> 8; // smoothing factor",
                         fmtInt(infoNode.id, 0, "<speed>"));
                     setActionFunc(infoNode, "_set_cam_speed", bodyBuf3);
                     break;
@@ -18724,10 +18775,13 @@ void FrameTick(float dt)
                 // Physics
                 case VsNodeType::ApplyForce: {
                     editorCode = "// Add force to player velocity";
-                    char bodyBuf3[256];
+                    char bodyBuf3[320];
                     snprintf(bodyBuf3, sizeof(bodyBuf3),
                         "    afn_force_x += %s;\n"
-                        "    afn_force_z += %s;",
+                        "    afn_force_z += %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // player_x += afn_force_x; player_z += afn_force_z;\n"
+                        "    // afn_force_x = (afn_force_x * afn_friction) >> 8; // decays each frame",
                         fmtInt(infoNode.id, 0, "<fx>"),
                         fmtInt(infoNode.id, 1, "<fz>"));
                     setActionFunc(infoNode, "_apply_force", bodyBuf3);
@@ -18749,9 +18803,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::SetFriction: {
                     editorCode = "// Set ground friction";
-                    char bodyBuf3[256];
+                    char bodyBuf3[320];
                     snprintf(bodyBuf3, sizeof(bodyBuf3),
-                        "    afn_friction = %s;",
+                        "    afn_friction = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_force_x = (afn_force_x * afn_friction) >> 8; // applied each frame",
                         fmtFloat(infoNode.id, 0, "<friction>"));
                     setActionFunc(infoNode, "_set_friction", bodyBuf3);
                     break;
@@ -18759,9 +18815,11 @@ void FrameTick(float dt)
                 // Object spawning
                 case VsNodeType::CloneSprite: {
                     editorCode = "// Duplicate sprite at current position";
-                    char bodyBuf3[256];
+                    char bodyBuf3[320];
                     snprintf(bodyBuf3, sizeof(bodyBuf3),
-                        "    afn_clone_sprite(%s);",
+                        "    afn_clone_sprite(%s);\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Stub helper; copies g_sprites[source] into a free slot",
                         fmtInt(infoNode.id, 0, "<source>"));
                     setActionFunc(infoNode, "_clone", bodyBuf3);
                     break;
@@ -18769,62 +18827,76 @@ void FrameTick(float dt)
                 case VsNodeType::HideAll:
                     editorCode = "// Hide all sprites";
                     setActionFunc(infoNode, "_hide_all",
-                        "    { int i; for (i=0;i<16;i++) afn_sprite_visible[i]=0; }");
+                        "    { int i; for (i=0;i<16;i++) afn_sprite_visible[i]=0; }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // OAM update loop hides any sprite with afn_sprite_visible[i] == 0");
                     break;
                 case VsNodeType::ShowAll:
                     editorCode = "// Show all sprites";
                     setActionFunc(infoNode, "_show_all",
-                        "    { int i; for (i=0;i<16;i++) afn_sprite_visible[i]=1; }");
+                        "    { int i; for (i=0;i<16;i++) afn_sprite_visible[i]=1; }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // OAM update loop shows any sprite with afn_sprite_visible[i] == 1");
                     break;
                 // Data nodes
                 case VsNodeType::Divide:
                     editorCode = "// A / B (0 if B==0)";
                     setActionFunc(infoNode, "_div",
-                        "    return (b != 0) ? (a / b) : 0;");
+                        "    return (b != 0) ? (a / b) : 0;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::Power:
                     editorCode = "// Base^Exp (integer)";
                     setActionFunc(infoNode, "_pow",
                         "    int r = 1, i;\n"
                         "    for (i = 0; i < exp; i++) r *= base;\n"
-                        "    return r;");
+                        "    return r;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (integer power)");
                     break;
                 case VsNodeType::Remap:
                     editorCode = "// Remap [0,inMax] -> [0,outMax]";
                     setActionFunc(infoNode, "_remap",
-                        "    return (inMax != 0) ? (val * outMax / inMax) : 0;");
+                        "    return (inMax != 0) ? (val * outMax / inMax) : 0;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::Average:
                     editorCode = "// (A + B) / 2";
                     setActionFunc(infoNode, "_avg",
-                        "    return (a + b) >> 1;");
+                        "    return (a + b) >> 1;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::GetHP2:
                     editorCode = "// 1 if HP > 0, 0 if dead";
                     setActionFunc(infoNode, "_is_alive",
-                        "    return (afn_hp[obj] > 0) ? 1 : 0;");
+                        "    return (afn_hp[obj] > 0) ? 1 : 0;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (afn_hp[] init 100)");
                     break;
                 case VsNodeType::PingPong:
                     editorCode = "// Value bouncing between 0 and range";
                     setActionFunc(infoNode, "_ping_pong",
                         "    int t = (afn_frame_count * speed) % (range * 2);\n"
-                        "    return (t < range) ? t : (range * 2 - t);");
+                        "    return (t < range) ? t : (range * 2 - t);\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (afn_frame_count drives the wave)");
                     break;
                 // Batch 5
                 case VsNodeType::Print: {
                     editorCode = "// Debug print to mGBA log";
-                    char bodyBuf5[256];
+                    char bodyBuf5[320];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
-                        "    mgba_printf(\"val=%%d\", %s);",
+                        "    mgba_printf(\"val=%%d\", %s);\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // mgba_printf writes to mGBA's 0x4FFF780 log register; ignored on hardware",
                         fmtInt(infoNode.id, 0, "<value>"));
                     setActionFunc(infoNode, "_print", bodyBuf5);
                     break;
                 }
                 case VsNodeType::SetColor: {
                     editorCode = "// Change sprite palette color";
-                    char bodyBuf5[256];
+                    char bodyBuf5[320];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
-                        "    g_sprites[%s].pal = %s;",
+                        "    g_sprites[%s].pal = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // OAM .attr2 bits 12-15 select palette bank from afn_pal[]",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<color>"));
                     setActionFunc(infoNode, "_set_color", bodyBuf5);
@@ -18832,9 +18904,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::SwapSprite: {
                     editorCode = "// Swap sprite asset";
-                    char bodyBuf5[256];
+                    char bodyBuf5[320];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
-                        "    g_sprites[%s].asset = %s;",
+                        "    g_sprites[%s].asset = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_asset_desc[asset] re-loaded; tiles DMA'd into VRAM next anim switch",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<asset>"));
                     setActionFunc(infoNode, "_swap_sprite", bodyBuf5);
@@ -18845,27 +18919,32 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_get_angle",
                         "    FIXED dx = g_sprites[b].wx - g_sprites[a].wx;\n"
                         "    FIXED dz = g_sprites[b].wz - g_sprites[a].wz;\n"
-                        "    return ArcTan2(dz, dx);");
+                        "    return ArcTan2(dz, dx);\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (returns brads 0-65535)");
                     break;
                 case VsNodeType::GetPlayerY:
                     editorCode = "// Read player Y (height)";
                     setActionFunc(infoNode, "_get_player_y",
-                        "    return player_y >> 8;");
+                        "    return player_y >> 8;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (player_y is 16.8 fixed-point)");
                     break;
                 case VsNodeType::GetSpriteY: {
                     editorCode = "// Read sprite Y position";
                     char bodyBuf5[256];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
-                        "    return g_sprites[%s].wy >> 8;",
+                        "    return g_sprites[%s].wy >> 8;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (wy is 16.8 fixed-point)",
                         fmtInt(infoNode.id, 0, "<obj>"));
                     setActionFunc(infoNode, "_get_sprite_y", bodyBuf5);
                     break;
                 }
                 case VsNodeType::SetSpriteY: {
                     editorCode = "// Set sprite Y position";
-                    char bodyBuf5[256];
+                    char bodyBuf5[320];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
-                        "    g_sprites[%s].wy = %s << 8;",
+                        "    g_sprites[%s].wy = %s << 8;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // wy used by project_vertex for screen Y position (3D scene)",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<y>"));
                     setActionFunc(infoNode, "_set_sprite_y", bodyBuf5);
@@ -18874,24 +18953,30 @@ void FrameTick(float dt)
                 case VsNodeType::WaitUntil:
                     editorCode = "// Block until condition is true";
                     setActionFunc(infoNode, "_wait_until",
-                        "    if (!condition) return; // re-check next frame");
+                        "    if (!condition) return; // re-check next frame\n"
+                        "    // --- Runtime --- gate node, condition is re-polled each frame until true");
                     break;
                 case VsNodeType::RepeatWhile:
                     editorCode = "// Repeat while condition is true";
                     setActionFunc(infoNode, "_repeat_while",
                         "    if (!condition) return;\n"
-                        "    // fire downstream, re-check next frame");
+                        "    // fire downstream, re-check next frame\n"
+                        "    // --- Runtime --- gate node, downstream fires each frame while condition holds");
                     break;
                 case VsNodeType::StopAll:
                     editorCode = "// Stop all scripts";
                     setActionFunc(infoNode, "_stop_all",
-                        "    afn_scripts_stopped = 1;");
+                        "    afn_scripts_stopped = 1;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Script dispatch loop short-circuits when afn_scripts_stopped is set");
                     break;
                 case VsNodeType::SetLayer: {
                     editorCode = "// Set sprite draw priority";
-                    char bodyBuf5[256];
+                    char bodyBuf5[320];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
-                        "    afn_sprite_layer[%s] = %s;",
+                        "    afn_sprite_layer[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // OAM .attr2 priority bits 10-11 set from afn_sprite_layer[] (0=front, 3=back)",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<layer>"));
                     setActionFunc(infoNode, "_set_layer", bodyBuf5);
@@ -18901,16 +18986,19 @@ void FrameTick(float dt)
                     editorCode = "// Read sprite draw priority";
                     char bodyBuf5[256];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
-                        "    return afn_sprite_layer[%s];",
+                        "    return afn_sprite_layer[%s];\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site",
                         fmtInt(infoNode.id, 0, "<obj>"));
                     setActionFunc(infoNode, "_get_layer", bodyBuf5);
                     break;
                 }
                 case VsNodeType::SetAlpha: {
                     editorCode = "// Set sprite alpha blend";
-                    char bodyBuf5[256];
+                    char bodyBuf5[320];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
-                        "    afn_sprite_alpha[%s] = %s;",
+                        "    afn_sprite_alpha[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // REG_BLDALPHA EVA/EVB updated when sprite renders; 16=opaque, 0=transparent",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<alpha>"));
                     setActionFunc(infoNode, "_set_alpha", bodyBuf5);
@@ -18918,9 +19006,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::Flash: {
                     editorCode = "// Flash sprite white";
-                    char bodyBuf5[256];
+                    char bodyBuf5[320];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
-                        "    afn_flash_obj[%s] = %s;",
+                        "    afn_flash_obj[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // While afn_flash_obj[i] > 0, sprite palette overridden to white; decrements per frame",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<frames>"));
                     setActionFunc(infoNode, "_flash", bodyBuf5);
@@ -18928,11 +19018,13 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::Delay: {
                     editorCode = "// Delay downstream by N frames";
-                    char bodyBuf5[256];
+                    char bodyBuf5[384];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
                         "    static int afn_delay_%d = 0;\n"
                         "    if (afn_delay_%d > 0) { afn_delay_%d--; return; }\n"
-                        "    afn_delay_%d = %s;",
+                        "    afn_delay_%d = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Static counter ticks each frame; downstream gated until counter reaches 0",
                         infoNode.id, infoNode.id, infoNode.id,
                         infoNode.id, fmtInt(infoNode.id, 0, "<frames>"));
                     setActionFunc(infoNode, "_delay", bodyBuf5);
@@ -18941,7 +19033,8 @@ void FrameTick(float dt)
                 case VsNodeType::GetVelocityY:
                     editorCode = "// Read player vertical velocity";
                     setActionFunc(infoNode, "_get_vel_y",
-                        "    return player_vy;");
+                        "    return player_vy;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (8.8 fixed; gravity decreases each frame)");
                     break;
                 case VsNodeType::SetSpriteScale: {
                     editorCode = "// Set sprite scale";
@@ -18958,9 +19051,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::RotateSprite: {
                     editorCode = "// Rotate sprite by angle";
-                    char bodyBuf5[256];
+                    char bodyBuf5[320];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
-                        "    afn_sprite_rot[%s] = %s;",
+                        "    afn_sprite_rot[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // obj_aff_mem[idx].pa/pb/pc/pd recomputed from angle (16-bit brads)",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<angle>"));
                     setActionFunc(infoNode, "_rotate_sprite", bodyBuf5);
@@ -18970,7 +19065,8 @@ void FrameTick(float dt)
                     editorCode = "// Read sprite rotation";
                     char bodyBuf5[256];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
-                        "    return afn_sprite_rot[%s];",
+                        "    return afn_sprite_rot[%s];\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (angle in brads)",
                         fmtInt(infoNode.id, 0, "<obj>"));
                     setActionFunc(infoNode, "_get_rotation", bodyBuf5);
                     break;
@@ -19009,7 +19105,8 @@ void FrameTick(float dt)
                     editorCode = "// Read max HP";
                     char bodyBuf5[256];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
-                        "    return afn_max_hp[%s];",
+                        "    return afn_max_hp[%s];\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (afn_max_hp[] init 100)",
                         fmtInt(infoNode.id, 0, "<obj>"));
                     setActionFunc(infoNode, "_get_max_hp", bodyBuf5);
                     break;
@@ -19031,27 +19128,34 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_is_alive_gate",
                         "    if (afn_hp[obj] > 0) {\n"
                         "        /* downstream */\n"
-                        "    }");
+                        "    }\n"
+                        "    // --- Runtime --- gate node, reads afn_hp[obj] (mutated by DamageHP/HealHP)");
                     break;
                 // Batch 6
                 case VsNodeType::SetBGColor: {
                     editorCode = "// Set background color";
-                    char b6[256];
-                    snprintf(b6, sizeof(b6), "    afn_bg_color = %s;",
+                    char b6[320];
+                    snprintf(b6, sizeof(b6),
+                        "    afn_bg_color = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // pal_bg_mem[0] = afn_bg_color; // backdrop color",
                         fmtInt(infoNode.id, 0, "<color>"));
                     setActionFunc(infoNode, "_set_bg_color", b6);
                     break;
                 }
                 case VsNodeType::GetDeltaTime:
                     editorCode = "// Frame delta (always 1)";
-                    setActionFunc(infoNode, "_get_dt", "    return 1;");
+                    setActionFunc(infoNode, "_get_dt",
+                        "    return 1;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (fixed-step VBlank)");
                     break;
                 case VsNodeType::MapValue:
                     editorCode = "// Map [inMin,inMax] -> [outMin,outMax]";
                     setActionFunc(infoNode, "_map_value",
                         "    int range_in = inMax - inMin;\n"
                         "    if (range_in == 0) return outMin;\n"
-                        "    return outMin + ((val - inMin) * (outMax - outMin)) / range_in;");
+                        "    return outMin + ((val - inMin) * (outMax - outMin)) / range_in;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::Wrap:
                     editorCode = "// Wrap value within range";
@@ -19059,34 +19163,39 @@ void FrameTick(float dt)
                         "    int range = max - min;\n"
                         "    if (range <= 0) return min;\n"
                         "    int r = (val - min) % range;\n"
-                        "    return (r < 0) ? r + max : r + min;");
+                        "    return (r < 0) ? r + max : r + min;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::SmoothStep:
                     editorCode = "// Hermite smoothstep A->B by T";
                     setActionFunc(infoNode, "_smoothstep",
                         "    int t = ((T - a) << 8) / (b - a);\n"
                         "    if (t < 0) t = 0; if (t > 256) t = 256;\n"
-                        "    return (t * t * (768 - 2 * t)) >> 16;");
+                        "    return (t * t * (768 - 2 * t)) >> 16;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (256 = full step)");
                     break;
                 case VsNodeType::EaseIn:
                     editorCode = "// Quadratic ease-in";
                     setActionFunc(infoNode, "_ease_in",
-                        "    return (t * t) >> 8;");
+                        "    return (t * t) >> 8;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (t in 0..256 fixed)");
                     break;
                 case VsNodeType::EaseOut:
                     editorCode = "// Quadratic ease-out";
                     setActionFunc(infoNode, "_ease_out",
                         "    int inv = 256 - t;\n"
-                        "    return 256 - ((inv * inv) >> 8);");
+                        "    return 256 - ((inv * inv) >> 8);\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (t in 0..256 fixed)");
                     break;
                 case VsNodeType::DistToPlayer: {
                     editorCode = "// Distance from sprite to player";
-                    char b6[256];
+                    char b6[320];
                     snprintf(b6, sizeof(b6),
                         "    FIXED dx = g_sprites[%s].wx - player_x;\n"
                         "    FIXED dz = g_sprites[%s].wz - player_z;\n"
                         "    if (dx<0) dx=-dx; if (dz<0) dz=-dz;\n"
-                        "    return ((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8;",
+                        "    return ((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8;\n"
+                        "    // --- Runtime --- inline data node, Manhattan-approx distance (Mode 4)",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 0, "<obj>"));
                     setActionFunc(infoNode, "_dist_to_player", b6);
@@ -19094,11 +19203,13 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::FacePlayer: {
                     editorCode = "// Face sprite toward player";
-                    char b6[256];
+                    char b6[320];
                     snprintf(b6, sizeof(b6),
                         "    afn_sprite_rot[%s] = ArcTan2(\n"
                         "        player_z - g_sprites[%s].wz,\n"
-                        "        player_x - g_sprites[%s].wx);",
+                        "        player_x - g_sprites[%s].wx);\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_sprite_rot[] drives sprite direction set / OAM affine angle",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 0, "<obj>"));
@@ -19111,7 +19222,9 @@ void FrameTick(float dt)
                     snprintf(b6, sizeof(b6),
                         "    int ang = afn_sprite_rot[%s];\n"
                         "    g_sprites[%s].wx += (lu_cos(ang) * %s) >> 12;\n"
-                        "    g_sprites[%s].wz -= (lu_sin(ang) * %s) >> 12;",
+                        "    g_sprites[%s].wz -= (lu_sin(ang) * %s) >> 12;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // wx/wz used by project_vertex; afn_sprite_rot is in brads (0-65535)",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 1, "<speed>"),
                         fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 1, "<speed>"));
@@ -19123,7 +19236,9 @@ void FrameTick(float dt)
                     char b6[512];
                     snprintf(b6, sizeof(b6),
                         "    // Move sprite %s toward (%s,%s) at speed %s\n"
-                        "    // Reverses direction upon reaching target",
+                        "    // Reverses direction upon reaching target\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Stub helper; updates g_sprites[obj].wx/wz each frame, flips dir at target",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<x1>"),
                         fmtInt(infoNode.id, 2, "<z1>"),
@@ -19133,7 +19248,7 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::ChasePlayer: {
                     editorCode = "// Chase toward player";
-                    char b6[512];
+                    char b6[640];
                     snprintf(b6, sizeof(b6),
                         "    FIXED dx = player_x - g_sprites[%s].wx;\n"
                         "    FIXED dz = player_z - g_sprites[%s].wz;\n"
@@ -19142,7 +19257,9 @@ void FrameTick(float dt)
                         "    if (dist > 0) {\n"
                         "        g_sprites[%s].wx += (dx * %s) / (dist >> 8);\n"
                         "        g_sprites[%s].wz += (dz * %s) / (dist >> 8);\n"
-                        "    }",
+                        "    }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Updates wx/wz each frame; re-projected to OAM in render loop",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 1, "<speed>"),
@@ -19152,7 +19269,7 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::FleePlayer: {
                     editorCode = "// Flee from player";
-                    char b6[512];
+                    char b6[640];
                     snprintf(b6, sizeof(b6),
                         "    FIXED dx = g_sprites[%s].wx - player_x;\n"
                         "    FIXED dz = g_sprites[%s].wz - player_z;\n"
@@ -19161,7 +19278,9 @@ void FrameTick(float dt)
                         "    if (dist > 0) {\n"
                         "        g_sprites[%s].wx += (dx * %s) / (dist >> 8);\n"
                         "        g_sprites[%s].wz += (dz * %s) / (dist >> 8);\n"
-                        "    }",
+                        "    }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Updates wx/wz each frame moving away from player",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 1, "<speed>"),
@@ -19224,9 +19343,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::SetAI: {
                     editorCode = "// Set AI behavior mode";
-                    char b6[256];
+                    char b6[320];
                     snprintf(b6, sizeof(b6),
-                        "    afn_ai_mode[%s] = %s;",
+                        "    afn_ai_mode[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_ai_mode[obj] read by per-frame AI dispatch loop to pick behavior",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<mode>"));
                     setActionFunc(infoNode, "_set_ai", b6);
@@ -19236,7 +19357,8 @@ void FrameTick(float dt)
                     editorCode = "// Read AI behavior mode";
                     char b6[256];
                     snprintf(b6, sizeof(b6),
-                        "    return afn_ai_mode[%s];",
+                        "    return afn_ai_mode[%s];\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site",
                         fmtInt(infoNode.id, 0, "<obj>"));
                     setActionFunc(infoNode, "_get_ai", b6);
                     break;
@@ -19244,18 +19366,24 @@ void FrameTick(float dt)
                 case VsNodeType::OnDeath:
                     editorCode = "// Event: fires when HP reaches 0";
                     setActionFunc(infoNode, "_on_death",
-                        "    // triggered by DamageHP when HP hits 0");
+                        "    // triggered by DamageHP when HP hits 0\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Event node: registered with afn_on_death_func; DamageHP invokes when HP transitions to 0");
                     break;
                 case VsNodeType::OnHit:
                     editorCode = "// Event: fires when damage taken";
                     setActionFunc(infoNode, "_on_hit",
-                        "    // triggered by DamageHP");
+                        "    // triggered by DamageHP\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Event node: registered with afn_on_hit_func; DamageHP invokes after subtraction");
                     break;
                 case VsNodeType::EmitParticle: {
                     editorCode = "// Spawn particle at position";
-                    char b6[256];
+                    char b6[320];
                     snprintf(b6, sizeof(b6),
-                        "    afn_emit_particle(%s, %s << 8, %s << 8);",
+                        "    afn_emit_particle(%s, %s << 8, %s << 8);\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Stub helper; particle system not implemented in current runtime",
                         fmtInt(infoNode.id, 0, "<type>"),
                         fmtInt(infoNode.id, 1, "<x>"),
                         fmtInt(infoNode.id, 2, "<z>"));
@@ -19264,9 +19392,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::SetTint: {
                     editorCode = "// Set sprite color tint";
-                    char b6[256];
+                    char b6[320];
                     snprintf(b6, sizeof(b6),
-                        "    afn_sprite_tint[%s] = %s;",
+                        "    afn_sprite_tint[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Tinted sprites blended with afn_sprite_tint[i] via REG_BLDCNT each frame",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<color>"));
                     setActionFunc(infoNode, "_set_tint", b6);
@@ -19274,9 +19404,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::Shake: {
                     editorCode = "// Shake a sprite";
-                    char b6[256];
+                    char b6[320];
                     snprintf(b6, sizeof(b6),
-                        "    afn_sprite_shake[%s] = %s;",
+                        "    afn_sprite_shake[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // While shake > 0, OAM x/y offset by rand jitter; decrements each frame",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<frames>"));
                     setActionFunc(infoNode, "_shake_sprite", b6);
@@ -19284,9 +19416,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::SetText: {
                     editorCode = "// Set HUD text value";
-                    char b6[256];
+                    char b6[320];
                     snprintf(b6, sizeof(b6),
-                        "    afn_hud_value[%s] = %s;",
+                        "    afn_hud_value[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // HUD text element with sourceSlot reads afn_hud_value[slot] each frame",
                         fmtInt(infoNode.id, 0, "<slot>"),
                         fmtInt(infoNode.id, 1, "<value>"));
                     setActionFunc(infoNode, "_set_text", b6);
@@ -19381,22 +19515,26 @@ void FrameTick(float dt)
                     editorCode = "// Random 0-255";
                     setActionFunc(infoNode, "_get_random",
                         "    afn_rng = afn_rng * 1103515245 + 12345;\n"
-                        "    return (afn_rng >> 16) & 0xFF;");
+                        "    return (afn_rng >> 16) & 0xFF;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (mutates afn_rng)");
                     break;
                 case VsNodeType::ArrayGet: {
                     editorCode = "// Read variable array";
                     char b6[256];
                     snprintf(b6, sizeof(b6),
-                        "    return afn_vars[%s & 15];",
+                        "    return afn_vars[%s & 15];\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (afn_vars[16] global)",
                         fmtInt(infoNode.id, 0, "<index>"));
                     setActionFunc(infoNode, "_array_get", b6);
                     break;
                 }
                 case VsNodeType::ArraySet: {
                     editorCode = "// Write variable array";
-                    char b6[256];
+                    char b6[320];
                     snprintf(b6, sizeof(b6),
-                        "    afn_vars[%s & 15] = %s;",
+                        "    afn_vars[%s & 15] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_vars[0..15] read by GetVariable / ArrayGet / CompareVar",
                         fmtInt(infoNode.id, 0, "<index>"),
                         fmtInt(infoNode.id, 1, "<value>"));
                     setActionFunc(infoNode, "_array_set", b6);
@@ -19405,9 +19543,11 @@ void FrameTick(float dt)
                 // Batch 7: Text rendering
                 case VsNodeType::DrawNumber: {
                     editorCode = "// Draw number at screen pos";
-                    char b7[256];
+                    char b7[320];
                     snprintf(b7, sizeof(b7),
-                        "    afn_draw_number(%s, %s, %s);",
+                        "    afn_draw_number(%s, %s, %s);\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Stub helper; digit glyphs blit to BG via font tile DMA",
                         fmtInt(infoNode.id, 0, "<value>"),
                         fmtInt(infoNode.id, 1, "<x>"),
                         fmtInt(infoNode.id, 2, "<y>"));
@@ -19416,9 +19556,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::DrawTextID: {
                     editorCode = "// Draw text string at screen pos";
-                    char b7[256];
+                    char b7[320];
                     snprintf(b7, sizeof(b7),
-                        "    afn_draw_text(%s, %s, %s);",
+                        "    afn_draw_text(%s, %s, %s);\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Stub helper; glyphs blit via font tile DMA to BG layer",
                         fmtInt(infoNode.id, 0, "<textID>"),
                         fmtInt(infoNode.id, 1, "<x>"),
                         fmtInt(infoNode.id, 2, "<y>"));
@@ -19428,13 +19570,17 @@ void FrameTick(float dt)
                 case VsNodeType::ClearText:
                     editorCode = "// Clear all text";
                     setActionFunc(infoNode, "_clear_text",
-                        "    afn_clear_text();");
+                        "    afn_clear_text();\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Clears text BG tilemap to space glyph");
                     break;
                 case VsNodeType::SetTextColor: {
                     editorCode = "// Set text draw color";
-                    char b7[256];
+                    char b7[320];
                     snprintf(b7, sizeof(b7),
-                        "    afn_text_color = %s;",
+                        "    afn_text_color = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // pal_bg_mem[textPalIdx] = afn_text_color (used by draw_text/draw_number)",
                         fmtInt(infoNode.id, 0, "<color>"));
                     setActionFunc(infoNode, "_set_text_color", b7);
                     break;
@@ -19442,9 +19588,11 @@ void FrameTick(float dt)
                 // Inventory
                 case VsNodeType::AddItem: {
                     editorCode = "// Add to inventory slot";
-                    char b7[256];
+                    char b7[320];
                     snprintf(b7, sizeof(b7),
-                        "    afn_inventory[%s & 15] += %s;",
+                        "    afn_inventory[%s & 15] += %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_inventory[0..15] read by HasItem / GetItemCount / UseItem",
                         fmtInt(infoNode.id, 0, "<slot>"),
                         fmtInt(infoNode.id, 1, "<amount>"));
                     setActionFunc(infoNode, "_add_item", b7);
@@ -19452,10 +19600,12 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::RemoveItem: {
                     editorCode = "// Remove from inventory slot";
-                    char b7[256];
+                    char b7[384];
                     snprintf(b7, sizeof(b7),
                         "    afn_inventory[%s & 15] -= %s;\n"
-                        "    if (afn_inventory[%s & 15] < 0) afn_inventory[%s & 15] = 0;",
+                        "    if (afn_inventory[%s & 15] < 0) afn_inventory[%s & 15] = 0;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_inventory[0..15] clamped to 0; queried by HasItem gate",
                         fmtInt(infoNode.id, 0, "<slot>"),
                         fmtInt(infoNode.id, 1, "<amount>"),
                         fmtInt(infoNode.id, 0, "<slot>"),
@@ -19468,22 +19618,26 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_has_item",
                         "    if (afn_inventory[slot & 15] > 0) {\n"
                         "        /* downstream */\n"
-                        "    }");
+                        "    }\n"
+                        "    // --- Runtime --- gate node, reads afn_inventory[slot] (mutated by AddItem/UseItem)");
                     break;
                 case VsNodeType::GetItemCount: {
                     editorCode = "// Read inventory slot count";
                     char b7[256];
                     snprintf(b7, sizeof(b7),
-                        "    return afn_inventory[%s & 15];",
+                        "    return afn_inventory[%s & 15];\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site",
                         fmtInt(infoNode.id, 0, "<slot>"));
                     setActionFunc(infoNode, "_get_item_count", b7);
                     break;
                 }
                 case VsNodeType::SetItemCount: {
                     editorCode = "// Set inventory slot count";
-                    char b7[256];
+                    char b7[320];
                     snprintf(b7, sizeof(b7),
-                        "    afn_inventory[%s & 15] = %s;",
+                        "    afn_inventory[%s & 15] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Overwrites slot; HUD count bindings re-read each frame",
                         fmtInt(infoNode.id, 0, "<slot>"),
                         fmtInt(infoNode.id, 1, "<count>"));
                     setActionFunc(infoNode, "_set_item_count", b7);
@@ -19491,9 +19645,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::UseItem: {
                     editorCode = "// Consume one item";
-                    char b7[256];
+                    char b7[320];
                     snprintf(b7, sizeof(b7),
-                        "    if (afn_inventory[%s & 15] > 0) afn_inventory[%s & 15]--;",
+                        "    if (afn_inventory[%s & 15] > 0) afn_inventory[%s & 15]--;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Decrements slot if non-zero; safe to call when empty",
                         fmtInt(infoNode.id, 0, "<slot>"),
                         fmtInt(infoNode.id, 0, "<slot>"));
                     setActionFunc(infoNode, "_use_item", b7);
@@ -19502,11 +19658,13 @@ void FrameTick(float dt)
                 // Dialogue
                 case VsNodeType::ShowDialogue: {
                     editorCode = "// Open dialogue box";
-                    char b7[256];
+                    char b7[320];
                     snprintf(b7, sizeof(b7),
                         "    afn_dlg_text = %s;\n"
                         "    afn_dlg_open = 1;\n"
-                        "    afn_dlg_line = 0;",
+                        "    afn_dlg_line = 0;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_dlg_open gates IsDialogueOpen; dialogue box rendered to BG each frame",
                         fmtInt(infoNode.id, 0, "<textID>"));
                     setActionFunc(infoNode, "_show_dialogue", b7);
                     break;
@@ -19514,25 +19672,32 @@ void FrameTick(float dt)
                 case VsNodeType::HideDialogue:
                     editorCode = "// Close dialogue box";
                     setActionFunc(infoNode, "_hide_dialogue",
-                        "    afn_dlg_open = 0;");
+                        "    afn_dlg_open = 0;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Dialogue BG hidden; IsDialogueOpen gate closes");
                     break;
                 case VsNodeType::NextLine:
                     editorCode = "// Advance dialogue line";
                     setActionFunc(infoNode, "_next_line",
-                        "    afn_dlg_line++;");
+                        "    afn_dlg_line++;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_dlg_line indexes into dialogue script lines");
                     break;
                 case VsNodeType::IsDialogueOpen:
                     editorCode = "// Gate: passes if dialogue open";
                     setActionFunc(infoNode, "_is_dlg_open",
                         "    if (afn_dlg_open) {\n"
                         "        /* downstream */\n"
-                        "    }");
+                        "    }\n"
+                        "    // --- Runtime --- gate node, reads afn_dlg_open (set by ShowDialogue, cleared by HideDialogue)");
                     break;
                 case VsNodeType::SetSpeaker: {
                     editorCode = "// Set dialogue speaker";
-                    char b7[256];
+                    char b7[320];
                     snprintf(b7, sizeof(b7),
-                        "    afn_dlg_speaker = %s;",
+                        "    afn_dlg_speaker = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Speaker portrait/name tile rendered above dialogue box",
                         fmtInt(infoNode.id, 0, "<speaker>"));
                     setActionFunc(infoNode, "_set_speaker", b7);
                     break;
@@ -19543,16 +19708,20 @@ void FrameTick(float dt)
                         "    afn_dlg_choice_a = choiceA;\n"
                         "    afn_dlg_choice_b = choiceB;\n"
                         "    afn_dlg_choosing = 1;\n"
-                        "    // branches to A or B output");
+                        "    // branches to A or B output\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_dlg_choosing prompts the user; A/B input dispatched to chains");
                     break;
                 // State Machine
                 case VsNodeType::SetState: {
                     editorCode = "// Set sprite state";
-                    char b7[256];
+                    char b7[384];
                     snprintf(b7, sizeof(b7),
                         "    afn_prev_state[%s & 15] = afn_state[%s & 15];\n"
                         "    afn_state[%s & 15] = %s;\n"
-                        "    afn_state_timer[%s & 15] = 0;",
+                        "    afn_state_timer[%s & 15] = 0;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // OnStateEnter/Exit detect transitions via prev != cur each frame",
                         fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 1, "<state>"),
                         fmtInt(infoNode.id, 0, "<obj>"));
@@ -19563,7 +19732,8 @@ void FrameTick(float dt)
                     editorCode = "// Read sprite state";
                     char b7[256];
                     snprintf(b7, sizeof(b7),
-                        "    return afn_state[%s & 15];",
+                        "    return afn_state[%s & 15];\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site",
                         fmtInt(infoNode.id, 0, "<obj>"));
                     setActionFunc(infoNode, "_get_state", b7);
                     break;
@@ -19571,30 +19741,37 @@ void FrameTick(float dt)
                 case VsNodeType::OnStateEnter:
                     editorCode = "// Event: fires on state enter";
                     setActionFunc(infoNode, "_on_state_enter",
-                        "    // checked each frame: if state just changed to target");
+                        "    // checked each frame: if state just changed to target\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Compares afn_state[obj] vs afn_prev_state[obj]; fires once on entry");
                     break;
                 case VsNodeType::OnStateExit:
                     editorCode = "// Event: fires on state exit";
                     setActionFunc(infoNode, "_on_state_exit",
-                        "    // checked each frame: if state just changed from target");
+                        "    // checked each frame: if state just changed from target\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Compares afn_state[obj] vs afn_prev_state[obj]; fires once on exit");
                     break;
                 case VsNodeType::IsInState:
                     editorCode = "// Gate: passes if in state";
                     setActionFunc(infoNode, "_is_in_state",
                         "    if (afn_state[obj & 15] == state) {\n"
                         "        /* downstream */\n"
-                        "    }");
+                        "    }\n"
+                        "    // --- Runtime --- gate node, reads afn_state[obj] (mutated by SetState/TransitionState)");
                     break;
                 case VsNodeType::TransitionState: {
                     editorCode = "// Transition state with delay";
-                    char b7[512];
+                    char b7[640];
                     snprintf(b7, sizeof(b7),
                         "    static int afn_trans_%d = 0;\n"
                         "    if (afn_trans_%d > 0) { afn_trans_%d--; return; }\n"
                         "    afn_trans_%d = %s;\n"
                         "    afn_prev_state[%s & 15] = afn_state[%s & 15];\n"
                         "    afn_state[%s & 15] = %s;\n"
-                        "    afn_state_timer[%s & 15] = 0;",
+                        "    afn_state_timer[%s & 15] = 0;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Static delay counter gates state change; OnStateEnter/Exit fire on transition",
                         infoNode.id, infoNode.id, infoNode.id, infoNode.id,
                         fmtInt(infoNode.id, 2, "<delay>"),
                         fmtInt(infoNode.id, 0, "<obj>"), fmtInt(infoNode.id, 0, "<obj>"),
@@ -19607,7 +19784,8 @@ void FrameTick(float dt)
                     editorCode = "// Read previous state";
                     char b7[256];
                     snprintf(b7, sizeof(b7),
-                        "    return afn_prev_state[%s & 15];",
+                        "    return afn_prev_state[%s & 15];\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site",
                         fmtInt(infoNode.id, 0, "<obj>"));
                     setActionFunc(infoNode, "_prev_state", b7);
                     break;
@@ -19616,7 +19794,8 @@ void FrameTick(float dt)
                     editorCode = "// Frames in current state";
                     char b7[256];
                     snprintf(b7, sizeof(b7),
-                        "    return afn_state_timer[%s & 15];",
+                        "    return afn_state_timer[%s & 15];\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (ticks each frame, reset on SetState)",
                         fmtInt(infoNode.id, 0, "<obj>"));
                     setActionFunc(infoNode, "_state_timer", b7);
                     break;
@@ -19640,9 +19819,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::SetCollisionSize: {
                     editorCode = "// Set collision radius";
-                    char b8[256];
+                    char b8[320];
                     snprintf(b8, sizeof(b8),
-                        "    afn_collision_size[%s] = %s;",
+                        "    afn_collision_size[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Used by sprites_colliding(a,b): bounding-box radius check",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<radius>"));
                     setActionFunc(infoNode, "_set_col_size", b8);
@@ -19650,9 +19831,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::IgnoreCollision: {
                     editorCode = "// Disable collision between two sprites";
-                    char b8[256];
+                    char b8[320];
                     snprintf(b8, sizeof(b8),
-                        "    afn_collision_ignore[%s] = %s;",
+                        "    afn_collision_ignore[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Collision dispatch skips pairs marked in afn_collision_ignore[]",
                         fmtInt(infoNode.id, 0, "<objA>"),
                         fmtInt(infoNode.id, 1, "<objB>"));
                     setActionFunc(infoNode, "_ignore_col", b8);
@@ -19663,13 +19846,16 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_is_colliding",
                         "    if (sprites_colliding(objA, objB)) {\n"
                         "        /* downstream */\n"
-                        "    }");
+                        "    }\n"
+                        "    // --- Runtime --- gate node, sprites_colliding does AABB overlap test on g_sprites[]");
                     break;
                 case VsNodeType::SpawnAt: {
                     editorCode = "// Spawn sprite at position";
                     char b8[512];
                     snprintf(b8, sizeof(b8),
-                        "    afn_spawn_sprite(%s, %s << 8, %s << 8);",
+                        "    afn_spawn_sprite(%s, %s << 8, %s << 8);\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Stub helper; finds free g_sprites slot, sets asset+wx+wz",
                         fmtInt(infoNode.id, 0, "<asset>"),
                         fmtInt(infoNode.id, 1, "<x>"),
                         fmtInt(infoNode.id, 2, "<z>"));
@@ -19678,9 +19864,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::DestroyAfter: {
                     editorCode = "// Destroy sprite after delay";
-                    char b8[256];
+                    char b8[320];
                     snprintf(b8, sizeof(b8),
-                        "    afn_lifetime[%s] = %s;",
+                        "    afn_lifetime[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_lifetime[i] decrements each frame; hides sprite when reaches 0",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<frames>"));
                     setActionFunc(infoNode, "_destroy_after", b8);
@@ -19690,7 +19878,9 @@ void FrameTick(float dt)
                     editorCode = "// Spawn projectile from sprite";
                     char b8[512];
                     snprintf(b8, sizeof(b8),
-                        "    afn_spawn_projectile(%s, %s, %s);",
+                        "    afn_spawn_projectile(%s, %s, %s);\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Stub helper; spawns sprite with velocity along facing direction",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<asset>"),
                         fmtInt(infoNode.id, 2, "<speed>"));
@@ -19699,9 +19889,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::SetLifetime: {
                     editorCode = "// Set sprite lifetime";
-                    char b8[256];
+                    char b8[320];
                     snprintf(b8, sizeof(b8),
-                        "    afn_lifetime[%s] = %s;",
+                        "    afn_lifetime[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // afn_lifetime[i] decrements each frame; sprite hidden at 0",
                         fmtInt(infoNode.id, 0, "<obj>"),
                         fmtInt(infoNode.id, 1, "<frames>"));
                     setActionFunc(infoNode, "_set_lifetime", b8);
@@ -19711,7 +19903,8 @@ void FrameTick(float dt)
                     editorCode = "// Read sprite lifetime";
                     char b8[256];
                     snprintf(b8, sizeof(b8),
-                        "    return afn_lifetime[%s];",
+                        "    return afn_lifetime[%s];\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site",
                         fmtInt(infoNode.id, 0, "<obj>"));
                     setActionFunc(infoNode, "_get_lifetime", b8);
                     break;
@@ -19720,7 +19913,9 @@ void FrameTick(float dt)
                     editorCode = "// Draw HUD bar";
                     char b8[512];
                     snprintf(b8, sizeof(b8),
-                        "    afn_draw_bar(%s, %s, %s, %s);",
+                        "    afn_draw_bar(%s, %s, %s, %s);\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Stub helper; tile-based fill blit at (x,y) of length width*fill",
                         fmtInt(infoNode.id, 0, "<x>"),
                         fmtInt(infoNode.id, 1, "<y>"),
                         fmtInt(infoNode.id, 2, "<width>"),
@@ -19730,9 +19925,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::DrawSpriteIcon: {
                     editorCode = "// Draw sprite icon on HUD";
-                    char b8[256];
+                    char b8[320];
                     snprintf(b8, sizeof(b8),
-                        "    afn_draw_sprite_icon(%s, %s, %s);",
+                        "    afn_draw_sprite_icon(%s, %s, %s);\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Stub helper; OBJ tile DMA from asset to HUD-reserved OAM slot",
                         fmtInt(infoNode.id, 0, "<asset>"),
                         fmtInt(infoNode.id, 1, "<x>"),
                         fmtInt(infoNode.id, 2, "<y>"));
@@ -19742,18 +19939,24 @@ void FrameTick(float dt)
                 case VsNodeType::ShowTimer:
                     editorCode = "// Show countdown timer";
                     setActionFunc(infoNode, "_show_timer",
-                        "    afn_timer_visible = 1;");
+                        "    afn_timer_visible = 1;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Timer OAM glyphs blit each frame while afn_timer_visible");
                     break;
                 case VsNodeType::HideTimer:
                     editorCode = "// Hide countdown timer";
                     setActionFunc(infoNode, "_hide_timer",
-                        "    afn_timer_visible = 0;");
+                        "    afn_timer_visible = 0;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Timer OAM hidden");
                     break;
                 case VsNodeType::SetBarColor: {
                     editorCode = "// Set bar color";
-                    char b8[256];
+                    char b8[320];
                     snprintf(b8, sizeof(b8),
-                        "    afn_bar_color[%s] = %s;",
+                        "    afn_bar_color[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Bar fill color read by DrawBar via pal_bg_mem",
                         fmtInt(infoNode.id, 0, "<bar>"),
                         fmtInt(infoNode.id, 1, "<color>"));
                     setActionFunc(infoNode, "_set_bar_color", b8);
@@ -19761,9 +19964,11 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::SetBarMax: {
                     editorCode = "// Set bar max value";
-                    char b8[256];
+                    char b8[320];
                     snprintf(b8, sizeof(b8),
-                        "    afn_bar_max[%s] = %s;",
+                        "    afn_bar_max[%s] = %s;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Bar fill ratio = fill / afn_bar_max[bar]",
                         fmtInt(infoNode.id, 0, "<bar>"),
                         fmtInt(infoNode.id, 1, "<max>"));
                     setActionFunc(infoNode, "_set_bar_max", b8);
@@ -19773,19 +19978,24 @@ void FrameTick(float dt)
                     editorCode = "// Reload current scene";
                     setActionFunc(infoNode, "_reload_scene",
                         "    afn_pending_scene = afn_current_scene;\n"
-                        "    // Triggers scene reload next frame");
+                        "    // Triggers scene reload next frame\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // start_scene_transition() reinitializes scene from saved state");
                     break;
                 case VsNodeType::GetScene:
                     editorCode = "// Read current scene index";
                     setActionFunc(infoNode, "_get_scene",
-                        "    return afn_current_scene;");
+                        "    return afn_current_scene;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site");
                     break;
                 case VsNodeType::SetCheckpoint: {
                     editorCode = "// Save checkpoint";
                     setActionFunc(infoNode, "_set_checkpoint",
                         "    afn_checkpoint_x = player_x;\n"
                         "    afn_checkpoint_z = player_z;\n"
-                        "    afn_checkpoint_set = 1;");
+                        "    afn_checkpoint_set = 1;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Snapshot consumed by LoadCheckpoint; not persisted to SRAM (use SaveData for that)");
                     break;
                 }
                 case VsNodeType::LoadCheckpoint:
@@ -19794,13 +20004,16 @@ void FrameTick(float dt)
                         "    if (afn_checkpoint_set) {\n"
                         "        player_x = afn_checkpoint_x;\n"
                         "        player_z = afn_checkpoint_z;\n"
-                        "    }");
+                        "    }\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Restores player position to last SetCheckpoint snapshot");
                     break;
                 case VsNodeType::GetInputAxis:
                     editorCode = "// Read D-pad axis value";
                     setActionFunc(infoNode, "_get_input_axis",
                         "    // 0=horizontal, 1=vertical\n"
-                        "    return (axis==0) ? afn_input_right : afn_input_fwd;");
+                        "    return (axis==0) ? afn_input_right : afn_input_fwd;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (afn_input_* set by key handler each frame)");
                     break;
                 case VsNodeType::OnAnyKey: {
                     setEventFunc(infoNode, "afn_script_any_key");
@@ -19813,7 +20026,8 @@ void FrameTick(float dt)
                 case VsNodeType::GetLastKey:
                     editorCode = "// Read last key pressed";
                     setActionFunc(infoNode, "_get_last_key",
-                        "    return afn_last_key;");
+                        "    return afn_last_key;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (afn_last_key updated each VBlank)");
                     break;
                 case VsNodeType::CustomCode:
                     editorCode = "// Custom C code (emitted to GBA/NDS runtime)";
@@ -19855,57 +20069,82 @@ void FrameTick(float dt)
                 // Data nodes
                 case VsNodeType::Integer: {
                     editorCode = "// Constant integer value";
-                    char body[128];
-                    snprintf(body, sizeof(body), "    return %d;", infoNode.paramInt[0]);
+                    char body[192];
+                    snprintf(body, sizeof(body),
+                        "    return %d;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (compile-time constant)",
+                        infoNode.paramInt[0]);
                     setActionFunc(infoNode, "_int", body);
                     break;
                 }
                 case VsNodeType::Float: {
                     float fv; memcpy(&fv, &infoNode.paramInt[0], sizeof(float));
                     editorCode = "// Constant float value (fixed-point on GBA)";
-                    char body[128];
-                    snprintf(body, sizeof(body), "    return %d; // %.3g * 256", (int)(fv * 256.0f), fv);
+                    char body[192];
+                    snprintf(body, sizeof(body),
+                        "    return %d; // %.3g * 256\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (float baked to 8.8 fixed-point)",
+                        (int)(fv * 256.0f), fv);
                     setActionFunc(infoNode, "_float", body);
                     break;
                 }
                 case VsNodeType::Key: {
                     editorCode = "// Constant key value";
-                    char body[128];
+                    char body[192];
                     if (infoNode.paramInt[0] >= 0 && infoNode.paramInt[0] < kVsKeyCount)
-                        snprintf(body, sizeof(body), "    return KEY_%s;", sVsKeyNames[infoNode.paramInt[0]]);
+                        snprintf(body, sizeof(body),
+                            "    return KEY_%s;\n"
+                            "    // --- Runtime --- inline data node, evaluated at call site (KEY_* macros from libgba)",
+                            sVsKeyNames[infoNode.paramInt[0]]);
                     else
-                        snprintf(body, sizeof(body), "    return 0; // <unset>");
+                        snprintf(body, sizeof(body),
+                            "    return 0; // <unset>\n"
+                            "    // --- Runtime --- inline data node, evaluated at call site");
                     setActionFunc(infoNode, "_key", body);
                     break;
                 }
                 case VsNodeType::Direction: {
                     editorCode = "// Constant direction value";
-                    char body[128];
+                    char body[192];
                     if (infoNode.paramInt[0] >= 0 && infoNode.paramInt[0] < kVsAxisCount)
-                        snprintf(body, sizeof(body), "    return %d; // %s", infoNode.paramInt[0], sVsAxisNames[infoNode.paramInt[0]]);
+                        snprintf(body, sizeof(body),
+                            "    return %d; // %s\n"
+                            "    // --- Runtime --- inline data node, evaluated at call site",
+                            infoNode.paramInt[0], sVsAxisNames[infoNode.paramInt[0]]);
                     else
-                        snprintf(body, sizeof(body), "    return 0; // <unset>");
+                        snprintf(body, sizeof(body),
+                            "    return 0; // <unset>\n"
+                            "    // --- Runtime --- inline data node, evaluated at call site");
                     setActionFunc(infoNode, "_dir", body);
                     break;
                 }
                 case VsNodeType::Animation: {
                     editorCode = "// Constant animation index";
-                    char body[128];
-                    snprintf(body, sizeof(body), "    return %d; // anim index", infoNode.paramInt[1]);
+                    char body[192];
+                    snprintf(body, sizeof(body),
+                        "    return %d; // anim index\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (indexes afn_anim_desc[asset])",
+                        infoNode.paramInt[1]);
                     setActionFunc(infoNode, "_anim", body);
                     break;
                 }
                 case VsNodeType::SoundInstance: {
                     editorCode = "// Sound instance index";
-                    char body[128];
-                    snprintf(body, sizeof(body), "    return %d; // sound instance", infoNode.paramInt[0]);
+                    char body[192];
+                    snprintf(body, sizeof(body),
+                        "    return %d; // sound instance\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (indexes afn_snd_inst[])",
+                        infoNode.paramInt[0]);
                     setActionFunc(infoNode, "_snd_inst", body);
                     break;
                 }
                 case VsNodeType::Object: {
                     editorCode = "// Constant object/sprite index";
-                    char body[128];
-                    snprintf(body, sizeof(body), "    return %d;", infoNode.paramInt[0]);
+                    char body[192];
+                    snprintf(body, sizeof(body),
+                        "    return %d;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (indexes g_sprites[])",
+                        infoNode.paramInt[0]);
                     setActionFunc(infoNode, "_obj", body);
                     break;
                 }
@@ -19918,7 +20157,8 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_branch",
                         "    int cond = findDataIn(0)->paramInt[0];\n"
                         "    if (cond) { /* true chain */ }\n"
-                        "    else { /* false chain */ }");
+                        "    else { /* false chain */ }\n"
+                        "    // --- Runtime --- gate node, exec routed to True/False output at codegen time");
                     break;
                 case VsNodeType::CompareVar:
                     editorCode =
@@ -19927,14 +20167,17 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_compare_var",
                         "    int slot = findDataIn(0)->paramInt[0];\n"
                         "    int value = findDataIn(1)->paramInt[0];\n"
-                        "    return (afn_vars[slot] == value) ? 1 : 0;");
+                        "    return (afn_vars[slot] == value) ? 1 : 0;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site (reads afn_vars[slot])");
                     break;
                 case VsNodeType::LookDirection:
                     editorCode =
                         "// Set player facing direction";
                     setActionFunc(infoNode, "_look",
                         "    int dir = findDataIn(0)->paramInt[0];\n"
-                        "    player_facing = dir;");
+                        "    player_facing = dir;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // tm_player_facing drives Mode 0 direction set; player_facing for Mode 4");
                     break;
                 case VsNodeType::PlaySound:
                     editorCode =
@@ -19953,12 +20196,16 @@ void FrameTick(float dt)
                         "// Pause execution for N frames";
                     setActionFunc(infoNode, "_wait",
                         "    int frames = findDataIn(0)->paramInt[0];\n"
-                        "    wait_counter = frames;");
+                        "    wait_counter = frames;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // wait_counter decremented each frame; downstream gated until reaches 0");
                     break;
                 case VsNodeType::Group:
                     editorCode = "// Contains a subgraph of nodes";
                     setActionFunc(infoNode, "_group",
-                        "    // subgraph execution");
+                        "    // subgraph execution\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Group is a compile-time container; child nodes emit inline at this point");
                     break;
                 default: break;
                 }
