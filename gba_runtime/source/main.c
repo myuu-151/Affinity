@@ -1398,13 +1398,33 @@ static int hud_blend_alpha = 16;
 
 static void hud_font_load(int staticTileCount)
 {
-    // Place 96+96+96 font tiles right before static tiles (normal + small + 5x7)
-    hud_font_5x7_tile_base = 1024 - staticTileCount - 96;
-    hud_font_small_tile_base = hud_font_5x7_tile_base - 96;
-    hud_font_tile_base = hud_font_small_tile_base - 96;
-    if (hud_font_tile_base < 0) hud_font_tile_base = 0;
-    if (hud_font_small_tile_base < 0) hud_font_small_tile_base = 0;
-    if (hud_font_5x7_tile_base < 0) hud_font_5x7_tile_base = 0;
+    /* Place font tiles AFTER static asset tiles in OBJ VRAM.
+       Mode 4: static tiles start at slot 512 + AFN_DIR_VRAM_TILES_M4 (e.g. 724).
+       Mode 0/Mode 7: start right after dir tile region.
+       Falls back to 0 if it'd run past the 1024-tile cap. */
+    int staticEnd;
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+    if (afn_current_mode == 1) {
+        staticEnd = tm_dir_slot_count + staticTileCount;
+    } else if (afn_current_mode == 2) {
+        staticEnd = AFN_DIR_VRAM_TILES + staticTileCount;
+    } else {
+#ifdef AFN_DIR_VRAM_TILES_M4
+        staticEnd = 512 + AFN_DIR_VRAM_TILES_M4 + staticTileCount;
+#else
+        staticEnd = 512 + staticTileCount;
+#endif
+    }
+#else
+    staticEnd = AFN_DIR_VRAM_TILES + staticTileCount;
+#endif
+    hud_font_tile_base       = staticEnd;
+    hud_font_small_tile_base = hud_font_tile_base + 96;
+    hud_font_5x7_tile_base   = hud_font_small_tile_base + 96;
+    /* Clamp: if a font would overflow past 1023, place it at 0 (safe but invisible) */
+    if (hud_font_tile_base + 96 > 1024)       hud_font_tile_base = 0;
+    if (hud_font_small_tile_base + 96 > 1024) hud_font_small_tile_base = 0;
+    if (hud_font_5x7_tile_base + 96 > 1024)   hud_font_5x7_tile_base = 0;
 
     // Set OBJ palette bank 15: entry 1 = text color, entry 2 = background fill
     ((u16*)0x05000200)[15 * 16 + 1] = afn_text_color;
