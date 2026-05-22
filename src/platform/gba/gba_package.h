@@ -557,7 +557,10 @@ struct GBASoundInstanceExport {
     int interpolation = 0;                 // 0 = nearest, 1 = linear
     int mixerGain = 0;                     // 0 = Normal (>>7), 1 = Loud (>>6)
     int voiceCount = 6;                    // max simultaneous voices (4-8)
-    int softFade = 1;                      // 256-sample fadeout at end of notes
+    int softFade = 1;                      // legacy combined flag
+    int softFadeA = 1;                     // fade when routed to FIFO A (polyphony-shifted)
+    int softFadeB = 1;                     // fade when routed to FIFO B (flat)
+    int attenuateFifoA = 0;                // FIFO A polyphony attenuation: 0 = off (louder), 1 = on
     int longRelease = 0;                   // force minimum 1672-sample release tail
     int hifiMode = 0;                      // 0 = normal (~25kHz), 1 = hi-fi (~32kHz)
     int compatMode = 0;                    // 0 = normal, 1 = compat (halved rate, less CPU)

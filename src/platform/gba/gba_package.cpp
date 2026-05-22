@@ -5705,6 +5705,24 @@ static bool GenerateMapData(const std::string& runtimeDir,
         }
         f << "};\n";
 
+        f << "static const u8 afn_snd_softfade_a[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            f << "    " << soundInstances[i].softFadeA << ",\n";
+        }
+        f << "};\n";
+
+        f << "static const u8 afn_snd_softfade_b[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            f << "    " << soundInstances[i].softFadeB << ",\n";
+        }
+        f << "};\n";
+
+        f << "static const u8 afn_snd_attenuate_a[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            f << "    " << soundInstances[i].attenuateFifoA << ",\n";
+        }
+        f << "};\n";
+
         f << "static const u8 afn_snd_longrelease[" << soundInstances.size() << "] = {\n";
         for (int i = 0; i < (int)soundInstances.size(); i++) {
             f << "    " << soundInstances[i].longRelease << ",\n";

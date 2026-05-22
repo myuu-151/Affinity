@@ -1022,7 +1022,10 @@ struct SoundInstance {
     int mixerGain = 0;         // 0=Normal(>>7), 1=Loud(>>6), 2=Mid(>>8), 3=Quiet(>>9), 4=Louder(>>5), 5=Loudest(>>4)
     int fifoChannel = 0;       // 0 = FIFO A, 1 = FIFO B
     int voiceCount = 6;        // max simultaneous voices on GBA (4-8)
-    int softFade = 1;          // 0 = hard cutoff, 1 = 256-sample fadeout at end of notes
+    int softFade = 1;          // legacy single flag — load-time migrates to softFadeA + softFadeB
+    int softFadeA = 1;         // fade enabled when voice routes to FIFO A (polyphony-shifted mix)
+    int softFadeB = 1;         // fade enabled when voice routes to FIFO B (flat mix)
+    int attenuateFifoA = 0;    // FIFO A polyphony attenuation: 0 = off (louder, may clip), 1 = on (safer)
     int longRelease = 0;       // 0 = normal, 1 = force minimum 1672-sample (~67ms) release tail
     int hifiMode = 0;          // 0 = normal (~18kHz), 1 = hi-fi (~25kHz, may trill)
     int compatMode = 0;        // 0 = normal, 1 = compatibility (halved rate, no interp, no release — less CPU)
@@ -5334,6 +5337,9 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "instFifo=%d\n", si.fifoChannel);
         fprintf(f, "instVoices=%d\n", si.voiceCount);
         fprintf(f, "instSoftFade=%d\n", si.softFade);
+        fprintf(f, "instSoftFadeA=%d\n", si.softFadeA);
+        fprintf(f, "instSoftFadeB=%d\n", si.softFadeB);
+        fprintf(f, "instAttenuateFifoA=%d\n", si.attenuateFifoA);
         fprintf(f, "instLongRelease=%d\n", si.longRelease);
         fprintf(f, "instHifi=%d\n", si.hifiMode);
         fprintf(f, "instCompat=%d\n", si.compatMode);
@@ -7557,7 +7563,15 @@ static bool LoadProject(const std::string& path)
                 else if (sscanf(line, "instGain=%d", &ival) == 1) curInst->mixerGain = ival;
                 else if (sscanf(line, "instFifo=%d", &ival) == 1) curInst->fifoChannel = ival;
                 else if (sscanf(line, "instVoices=%d", &ival) == 1) curInst->voiceCount = ival;
-                else if (sscanf(line, "instSoftFade=%d", &ival) == 1) curInst->softFade = ival;
+                else if (sscanf(line, "instSoftFade=%d", &ival) == 1) {
+                    curInst->softFade = ival;
+                    /* Migrate legacy single flag to both A and B if explicit A/B fields not present */
+                    curInst->softFadeA = ival;
+                    curInst->softFadeB = ival;
+                }
+                else if (sscanf(line, "instSoftFadeA=%d", &ival) == 1) curInst->softFadeA = ival;
+                else if (sscanf(line, "instSoftFadeB=%d", &ival) == 1) curInst->softFadeB = ival;
+                else if (sscanf(line, "instAttenuateFifoA=%d", &ival) == 1) curInst->attenuateFifoA = ival;
                 else if (sscanf(line, "instLongRelease=%d", &ival) == 1) curInst->longRelease = ival;
                 else if (sscanf(line, "instHifi=%d", &ival) == 1) curInst->hifiMode = ival;
                 else if (sscanf(line, "instCompat=%d", &ival) == 1) curInst->compatMode = ival;
@@ -13569,6 +13583,9 @@ void FrameTick(float dt)
                         ie.fifoChannel = inst.fifoChannel;
                         ie.voiceCount = inst.voiceCount;
                         ie.softFade = inst.softFade;
+                        ie.softFadeA = inst.softFadeA;
+                        ie.softFadeB = inst.softFadeB;
+                        ie.attenuateFifoA = inst.attenuateFifoA;
                         ie.longRelease = inst.longRelease;
                         ie.hifiMode = inst.hifiMode;
                         ie.compatMode = inst.compatMode;
@@ -23056,12 +23073,27 @@ void FrameTick(float dt)
                 ImGui::EndCombo();
             }
             ImGui::PopItemWidth();
-            bool sf = inst.softFade != 0;
-            if (ImGui::Checkbox("Soft Fade", &sf)) {
-                inst.softFade = sf ? 1 : 0;
+            bool sfA = inst.softFadeA != 0;
+            if (ImGui::Checkbox("Soft Fade A", &sfA)) {
+                inst.softFadeA = sfA ? 1 : 0;
+                inst.softFade  = (inst.softFadeA || inst.softFadeB) ? 1 : 0;
                 sProjectDirty = true;
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("256-sample fadeout at end of notes (smoother but softer endings)");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Soft fade applied when this voice routes to FIFO A (polyphony-shifted release tail)");
+            ImGui::SameLine();
+            bool sfB = inst.softFadeB != 0;
+            if (ImGui::Checkbox("Soft Fade B", &sfB)) {
+                inst.softFadeB = sfB ? 1 : 0;
+                inst.softFade  = (inst.softFadeA || inst.softFadeB) ? 1 : 0;
+                sProjectDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Soft fade applied when this voice routes to FIFO B (flat-volume release tail, no polyphony attenuation)");
+            bool atten = inst.attenuateFifoA != 0;
+            if (ImGui::Checkbox("Attenuate FIFO A", &atten)) {
+                inst.attenuateFifoA = atten ? 1 : 0;
+                sProjectDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Divide FIFO A mix by polyphony count to prevent clipping. Off = much louder + cleaner SNR, but stacked voices may clip. On = quieter + hiss, but safe from overflow.");
             bool lr = inst.longRelease != 0;
             if (ImGui::Checkbox("Long Release", &lr)) {
                 inst.longRelease = lr ? 1 : 0;

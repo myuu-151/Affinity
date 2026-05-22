@@ -116,13 +116,6 @@ static const u8 afn_asset_streamable[1] = {0};
 /* afn_pal[0][16] is already emitted by mapdata.h when AFN_ASSET_COUNT==0; don't redefine */
 #endif
 
-/* Script symbol stubs — when no scripts/blueprints exist, mapdata.h doesn't emit these
-   but several runtime paths reference them. */
-#ifndef AFN_HAS_SCRIPT
-typedef struct { int x, y, assetIdx, animIdx, animPlay, facing, vis, pal; } AfnTmObj;
-static u8  afn_sprite_visible[MAX_FLOOR_SPRITES];
-static u16 afn_text_color = 0x7FFF;
-#endif
 
 // libtonc has key_hit (press edge) but no release edge — define it here
 #define key_released(k) (~__key_curr & __key_prev & (k))
@@ -158,6 +151,7 @@ static void afn_vblank_isr(void) { afn_vblank_counter++; }
 #define SND_MIX_COUNT 418 // normal rate samples per frame (16780000/672/60 ≈ 418)
 #define SND_MAX_VOICES 8  // max allocated; actual count per instance from afn_snd_voices[]
 static int snd_voice_count = 6; // active voice limit (set from afn_snd_voices[] on play)
+static int snd_attenuate_a = 0; // 1 = apply polyphony shift to FIFO A mix (set from afn_snd_attenuate_a[])
 
 // Sound buffers — each buffer MUST be a multiple of 4 bytes so DMA_32
 // starts at the correct aligned address for both buf[0] and buf[1].
@@ -346,6 +340,7 @@ static void afn_play_sound(int instanceId) {
     snd_voice_count = afn_snd_voices[instanceId];
     if (snd_voice_count < 4) snd_voice_count = 4;
     if (snd_voice_count > SND_MAX_VOICES) snd_voice_count = SND_MAX_VOICES;
+    snd_attenuate_a = afn_snd_attenuate_a[instanceId];
 }
 
 static int snd_sfx_fifo = 0;     // FIFO channel for current SFX (0=A, 1=B)
@@ -503,8 +498,10 @@ IWRAM_CODE static void afn_sound_mix(void) {
     // Scale accumulator down by voice count, then clamp to s8
     {
         int outShift = 0;
-        int v = snd_voice_count;
-        while (v > 1) { v >>= 1; outShift++; }
+        if (snd_attenuate_a) {
+            int v = snd_voice_count;
+            while (v > 1) { v >>= 1; outShift++; }
+        }
         afn_mix_clamp_fast(buf, mix_acc, mixN, outShift);
         if (snd_fifo_b && buf_b) {
             if (hasB) {
@@ -633,13 +630,14 @@ static void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int 
     if (snd_compat) {
         vc->releaseLen = 105;
     } else {
+        /* Pick fade flag per FIFO so each FIFO can be toggled independently. */
+        int inst = (ch == 15 && snd_sfx_inst >= 0) ? snd_sfx_inst : snd_seq_active;
         int sf;
-        if (ch == 15 && snd_sfx_inst >= 0)
-            sf = afn_snd_softfade[snd_sfx_inst];
-        else if (snd_seq_active >= 0)
-            sf = afn_snd_softfade[snd_seq_active];
-        else
+        if (inst >= 0) {
+            sf = vc->fifo ? afn_snd_softfade_b[inst] : afn_snd_softfade_a[inst];
+        } else {
             sf = 1;
+        }
         if (sf) {
             vc->releaseLen = afn_pcm_release[smpIdx];
             if (vc->releaseLen < 418) vc->releaseLen = 418;
