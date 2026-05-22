@@ -32,6 +32,7 @@ struct GBASpriteExport
     float drawBehindThreshold = 0.0f; // Y offset for above/below mesh check
     uint32_t drawBehindClipPlane = 0; // bitmask: bit N = clip-by-plane for that mesh
     int spriteDrawPriority = 0; // OAM ordering tiebreaker (-8..+8)
+    int blitSlot = -1;          // -1 = auto-assign, 0/1/2 = manual BG palette slot
 };
 
 // Player direction sprite for GBA export (RGBA8 image)

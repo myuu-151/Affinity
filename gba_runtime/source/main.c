@@ -46,6 +46,7 @@ typedef struct {
     FIXED dbThreshold;   // Y offset for dynamic above/below mesh check (16.8 fixed)
     u32   dbClipPlane;   // bitmask: bit N = use plane clip for mesh sprite[N]
     s8    spriteDrawPri; // OAM ordering tiebreaker (-8..+8)
+    s8    blitSlot;      // -1 = auto-assigned, 0/1/2 = manual BG palette slot
 } FloorSpriteGBA;
 
 EWRAM_DATA static FloorSpriteGBA g_sprites[MAX_FLOOR_SPRITES];
@@ -851,6 +852,7 @@ static int perf_mode;
 // Texture fix mode (cycled with SELECT, 1-200)
 #define TEX_FIX_COUNT 200
 static int g_texFixMode = 1;
+static int g_slopeFixMode = 0; // 0-99 cycled via START
 
 // Each mode is encoded as: { clipMargin, depthClamp, rawDepthThresh, depthRatioNum, depthRatioDen, uvCorr }
 // clipMargin: -1=no clip, -2=always clip, >=0 = margin in pixels around screen
@@ -1396,13 +1398,33 @@ static int hud_blend_alpha = 16;
 
 static void hud_font_load(int staticTileCount)
 {
-    // Place 96+96+96 font tiles right before static tiles (normal + small + 5x7)
-    hud_font_5x7_tile_base = 1024 - staticTileCount - 96;
-    hud_font_small_tile_base = hud_font_5x7_tile_base - 96;
-    hud_font_tile_base = hud_font_small_tile_base - 96;
-    if (hud_font_tile_base < 0) hud_font_tile_base = 0;
-    if (hud_font_small_tile_base < 0) hud_font_small_tile_base = 0;
-    if (hud_font_5x7_tile_base < 0) hud_font_5x7_tile_base = 0;
+    /* Place font tiles AFTER static asset tiles in OBJ VRAM.
+       Mode 4: static tiles start at slot 512 + AFN_DIR_VRAM_TILES_M4 (e.g. 724).
+       Mode 0/Mode 7: start right after dir tile region.
+       Falls back to 0 if it'd run past the 1024-tile cap. */
+    int staticEnd;
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+    if (afn_current_mode == 1) {
+        staticEnd = tm_dir_slot_count + staticTileCount;
+    } else if (afn_current_mode == 2) {
+        staticEnd = AFN_DIR_VRAM_TILES + staticTileCount;
+    } else {
+#ifdef AFN_DIR_VRAM_TILES_M4
+        staticEnd = 512 + AFN_DIR_VRAM_TILES_M4 + staticTileCount;
+#else
+        staticEnd = 512 + staticTileCount;
+#endif
+    }
+#else
+    staticEnd = AFN_DIR_VRAM_TILES + staticTileCount;
+#endif
+    hud_font_tile_base       = staticEnd;
+    hud_font_small_tile_base = hud_font_tile_base + 96;
+    hud_font_5x7_tile_base   = hud_font_small_tile_base + 96;
+    /* Clamp: if a font would overflow past 1023, place it at 0 (safe but invisible) */
+    if (hud_font_tile_base + 96 > 1024)       hud_font_tile_base = 0;
+    if (hud_font_small_tile_base + 96 > 1024) hud_font_small_tile_base = 0;
+    if (hud_font_5x7_tile_base + 96 > 1024)   hud_font_5x7_tile_base = 0;
 
     // Set OBJ palette bank 15: entry 1 = text color, entry 2 = background fill
     ((u16*)0x05000200)[15 * 16 + 1] = afn_text_color;
@@ -2215,6 +2237,7 @@ static void load_editor_sprites(void)
         g_sprites[i].dbThreshold = (FIXED)afn_sprite_data[i][20];
         g_sprites[i].dbClipPlane = (u32)afn_sprite_data[i][21];
         g_sprites[i].spriteDrawPri = (s8)afn_sprite_data[i][22];
+        g_sprites[i].blitSlot = (s8)afn_sprite_data[i][23];
         g_sprites[i].wx = g_sprites[i].x;
         g_sprites[i].wz = g_sprites[i].z;
         g_sprites[i].facing = g_sprites[i].rotation;
@@ -2230,16 +2253,33 @@ static void load_editor_sprites(void)
             g_meshSpriteMask |= (1u << i);
     }
     // Copy OBJ palettes used by draw-behind exception sprites into BG palette 128+
-    // so bitmap blit can reference them without palette conflicts.
     // Sky uses 176-239; safe range is 128-175 (3 slots: BG banks 8, 9, 10).
-    // Assign each distinct source palBank to the next free slot.
+    // Manual blitSlot (0/1/2) takes precedence; auto (-1) assigns next free slot.
     { int b; for (b = 0; b < 16; b++) g_blitPalSlot[b] = -1; }
     {
         int slotsUsed = 0;
+        /* First pass: honor manually-assigned slots */
+        for (i = 0; i < count; i++) {
+            int ai, srcBank, manualSlot;
+            if (g_sprites[i].meshIdx >= 0) continue;
+            if (g_sprites[i].drawBehindExc == 0) continue;
+            ai = g_sprites[i].assetIdx;
+            if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
+            manualSlot = (s8)g_sprites[i].blitSlot;
+            if (manualSlot < 0 || manualSlot > 2) continue;
+            srcBank = afn_asset_desc[ai][4];
+            if (srcBank < 0 || srcBank >= 16) srcBank = 0;
+            if (g_blitPalSlot[srcBank] < 0) {
+                g_blitPalSlot[srcBank] = manualSlot;
+                memcpy16(&pal_bg_mem[128 + manualSlot * 16], &pal_obj_mem[srcBank * 16], 16);
+            }
+        }
+        /* Second pass: auto-assign remaining (skip blitSlot=-2 = Dynamic mode) */
         for (i = 0; i < count; i++) {
             int ai;
             if (g_sprites[i].meshIdx >= 0) continue;
             if (g_sprites[i].drawBehindExc == 0) continue;
+            if ((s8)g_sprites[i].blitSlot == -2) continue; /* dynamic — assigned per-frame */
             ai = g_sprites[i].assetIdx;
             if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
             {
@@ -4241,11 +4281,17 @@ static void clip_render_poly_tex_vs(u16* buf,
 
     if (outCount < 3) return;
 
-    // Project all clipped vertices to screen space
+    // Project all clipped vertices to screen space.
+    // hOut already has cam_pitch * ORIGINAL_depth baked in, but the depth has been
+    // changed by clipping. Subtract using the CURRENT depth so project_vertex's re-add
+    // doesn't double-count.
     {
         int px[8], py[8];
-        for (i = 0; i < outCount; i++)
-            project_vertex(sOut[i], hOut[i], dOut[i], &px[i], &py[i]);
+        for (i = 0; i < outCount; i++) {
+            int d = dOut[i]; if (d < 16) d = 16;
+            int hAdj = hOut[i] - ((d * cam_pitch) >> 8);
+            project_vertex(sOut[i], hAdj, dOut[i], &px[i], &py[i]);
+        }
 
         // Screen-space clip with UV interpolation, then textured rasterize
         clip_render_poly_tex(buf, px, py, uOut, vOut, outCount,
@@ -4299,7 +4345,7 @@ typedef struct {
     const u8* tex;
     FIXED cosR, sinR;
     int cullMode, meshLit, meshHalfRes, meshTextured, meshWireframe, meshGrayscale, meshPerspCorr, meshNearClip, meshFaceCull;
-    int meshAnyGrounded; /* true if any vertex of this mesh projects at/below horizon */
+    int meshAnyGrounded;
     int texW, texShift, texMask, texPalBase;
     int vertCount, idxCount, quadIdxCount;
     int drawDist;
@@ -4460,7 +4506,8 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             ms->centerDepth = (cdx * g_sinf - cdz * g_cosf) >> 8;
         }
 
-        /* Check if any vertex of this mesh projects at/below horizon (mesh has visible footing). */
+        /* Check if any vertex of this mesh projects at/below horizon (mesh has visible footing).
+           Used by Edge Wrap 2 mirror so subdivided meshes still mirror correctly. */
         {
             int gv;
             ms->meshAnyGrounded = 0;
@@ -4503,6 +4550,10 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
                     cross = (int)(cx >> 8); // scale down to avoid overflow in area check
                     if (cullMode == 0 && cx >= 0) continue;
                     else if (cullMode == 1 && cx <= 0) continue;
+                    if (ms->meshFaceCull) {
+                        int absCr = cross < 0 ? -cross : cross;
+                        if (absCr < 1) continue;
+                    }
                 }
             }
 
@@ -4805,27 +4856,18 @@ IWRAM_CODE static void render_meshes_sw(u16* buf)
             int fcY0 = g_vsy[vb+i0], fcY1 = g_vsy[vb+i1], fcY2 = g_vsy[vb+i2];
             int fcY3 = isQuad ? g_vsy[vb+i3] : 0;
             int faceCullClamp = 0;
-            /* Smooth mirror: blend gradually from original to mirrored sy as vertex
-               crosses below the threshold. Avoids snap-to-mirror flicker on descents.
-               Use per-MESH grounded check so subdivided sub-faces still mirror. */
+            /* Only mirror if at least one vertex of this face is still grounded
+               (at/below horizon). If ALL vertices are above horizon, the camera
+               is below the mesh (falling/jumping) and we shouldn't fold it down. */
             if (ms->meshFaceCull) {
+                /* Per-mesh grounded check — mirror activates if ANY mesh vertex is grounded.
+                   Lets subdivided faces (no grounded vertex themselves) still mirror. */
                 if (ms->meshAnyGrounded) {
-                    const int mirThresh = -50;  /* blend starts here */
-                    const int mirFull = -200;   /* blend reaches full mirror here */
-                    #define SMOOTH_MIR(sy) do { \
-                        if ((sy) < mirThresh) { \
-                            int mirrored = 2 * m7_horizon - (sy); \
-                            int s = (sy) < mirFull ? 256 \
-                                  : ((mirThresh - (sy)) * 256) / (mirThresh - mirFull); \
-                            (sy) = (sy) + ((mirrored - (sy)) * s) / 256; \
-                            faceCullClamp = 1; \
-                        } \
-                    } while(0)
-                    SMOOTH_MIR(fcY0);
-                    SMOOTH_MIR(fcY1);
-                    SMOOTH_MIR(fcY2);
-                    if (isQuad) SMOOTH_MIR(fcY3);
-                    #undef SMOOTH_MIR
+                    const int mirThresh = -50;
+                    if (fcY0 < mirThresh) { fcY0 = 2*m7_horizon - fcY0; faceCullClamp = 1; }
+                    if (fcY1 < mirThresh) { fcY1 = 2*m7_horizon - fcY1; faceCullClamp = 1; }
+                    if (fcY2 < mirThresh) { fcY2 = 2*m7_horizon - fcY2; faceCullClamp = 1; }
+                    if (isQuad && fcY3 < mirThresh) { fcY3 = 2*m7_horizon - fcY3; faceCullClamp = 1; }
                 }
             }
 
@@ -4977,6 +5019,46 @@ static void apply_draw_behind_exceptions(u16* buf)
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0 && defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
     int i, si;
     u8 keepPal[256]; /* 1 = non-excepted mesh pixel, don't overwrite */
+
+    /* Dynamic blit slot assignment (per-frame): for sprites with blitSlot=-2 (Draw Distance),
+       assign palette slots based on which are currently within draw distance. */
+    {
+        int slotInUse[3] = {0, 0, 0};
+        int b;
+        for (b = 0; b < 16; b++) {
+            int s = g_blitPalSlot[b];
+            if (s >= 0 && s < 3) slotInUse[s] = 1;
+        }
+        for (i = 0; i < g_spriteCount; i++) {
+            int ai, srcBank;
+            FIXED dx, dz, lam;
+            if (g_sprites[i].meshIdx >= 0) continue;
+            if (g_sprites[i].drawBehindExc == 0) continue;
+            if ((s8)g_sprites[i].blitSlot != -2) continue;
+            ai = g_sprites[i].assetIdx;
+            if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
+            dx = g_sprites[i].x - cam_x;
+            dz = g_sprites[i].z - cam_z;
+            lam = (dx * g_sinf - dz * g_cosf) >> 8;
+            if (lam <= 64) continue;
+#ifdef AFN_SPRITE_DRAW_DISTANCE
+            if (lam > AFN_SPRITE_DRAW_DISTANCE) continue;
+#elif defined(AFN_DRAW_DISTANCE)
+            if (lam > AFN_DRAW_DISTANCE) continue;
+#endif
+            srcBank = afn_asset_desc[ai][4];
+            if (srcBank < 0 || srcBank >= 16) srcBank = 0;
+            if (g_blitPalSlot[srcBank] >= 0) continue;
+            { int s; for (s = 0; s < 3; s++) {
+                if (!slotInUse[s]) {
+                    g_blitPalSlot[srcBank] = s;
+                    memcpy16(&pal_bg_mem[128 + s * 16], &pal_obj_mem[srcBank * 16], 16);
+                    slotInUse[s] = 1;
+                    break;
+                }
+            }}
+        }
+    }
 
     /* Pre-compute mesh sprite info once per frame (avoids re-scanning g_sprites per blit sprite) */
     typedef struct {
@@ -6183,6 +6265,9 @@ int main(void)
         { int st; for (st = 0; st < snd_frame_scale; st++) afn_sound_tick(); }
 #endif
         key_poll();
+
+        if (key_hit(KEY_START))
+            g_slopeFixMode = (g_slopeFixMode + 1) % 100;
 
         // --- Scene transition state machine ---
         if (g_scene_transition > 0) {
