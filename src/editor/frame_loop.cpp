@@ -5557,12 +5557,18 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "midi_end\n");
     }
 
-    // ---- Packed assets (one base64 blob per packed file path) ----
+    // ---- Packed assets (chunked base64 to stay under LoadProject's line buffer) ----
     if (!sPackedAssets.empty()) {
         fprintf(f, "\n[PackedAssets]\n");
+        const size_t kChunk = 16000; // well under LoadProject's 32K line buffer
         for (auto& kv : sPackedAssets) {
             std::string enc = b64Encode(kv.second.data(), kv.second.size());
-            fprintf(f, "pack_blob=%s|%s\n", kv.first.c_str(), enc.c_str());
+            fprintf(f, "pack_blob_begin=%s\n", kv.first.c_str());
+            for (size_t off = 0; off < enc.size(); off += kChunk) {
+                size_t n = std::min(kChunk, enc.size() - off);
+                fprintf(f, "pack_blob_data=%.*s\n", (int)n, enc.data() + off);
+            }
+            fprintf(f, "pack_blob_end\n");
         }
     }
 
@@ -5629,20 +5635,38 @@ static bool LoadProject(const std::string& path)
     int tmSubdivLevel = 0; // 0=old, 1=first 2x, 2=current 4x
     int projectVersion = 1; // v1 = pre-IsFalling enum, v2 = current
 
-    // Pre-pass: collect pack_blob lines into sPackedAssets so asset loaders
+    // Pre-pass: collect packed asset blobs into sPackedAssets so asset loaders
     // can find them when their reference lines (diranimdir=, m7FloorTex=) are
-    // processed below. Blobs are emitted at the end of the file, so without
-    // this pre-pass the on-load asset readers would miss them.
-    while (fgets(line, sizeof(line), f)) {
-        char* nl = strchr(line, '\n'); if (nl) *nl = '\0';
-        nl = strchr(line, '\r'); if (nl) *nl = '\0';
-        if (strncmp(line, "pack_blob=", 10) == 0) {
-            char* sep = strchr(line + 10, '|');
-            if (sep) {
-                *sep = '\0';
-                std::string key = line + 10;
-                std::vector<unsigned char> bytes = b64Decode(sep + 1);
-                if (!bytes.empty()) sPackedAssets[key] = std::move(bytes);
+    // processed below. Blobs are emitted at the end of the file in chunked
+    // form (begin/data*/end) to stay under this line buffer; the legacy single
+    // -line `pack_blob=KEY|DATA` form is still accepted for old saves.
+    {
+        std::string packKey;
+        std::string packB64;
+        while (fgets(line, sizeof(line), f)) {
+            char* nl = strchr(line, '\n'); if (nl) *nl = '\0';
+            nl = strchr(line, '\r'); if (nl) *nl = '\0';
+            if (strncmp(line, "pack_blob_begin=", 16) == 0) {
+                packKey = line + 16;
+                packB64.clear();
+            } else if (strncmp(line, "pack_blob_data=", 15) == 0) {
+                packB64.append(line + 15);
+            } else if (strncmp(line, "pack_blob_end", 13) == 0) {
+                if (!packKey.empty()) {
+                    std::vector<unsigned char> bytes = b64Decode(packB64.c_str());
+                    if (!bytes.empty()) sPackedAssets[packKey] = std::move(bytes);
+                }
+                packKey.clear();
+                packB64.clear();
+            } else if (strncmp(line, "pack_blob=", 10) == 0) {
+                // Legacy single-line form (truncates for large assets, kept for old saves).
+                char* sep = strchr(line + 10, '|');
+                if (sep) {
+                    *sep = '\0';
+                    std::string key = line + 10;
+                    std::vector<unsigned char> bytes = b64Decode(sep + 1);
+                    if (!bytes.empty()) sPackedAssets[key] = std::move(bytes);
+                }
             }
         }
     }
@@ -5659,17 +5683,11 @@ static bool LoadProject(const std::string& path)
         // Skip empty/comment
         if (line[0] == '\0' || line[0] == '#') continue;
 
-        // Packed asset blob — decode and stash by original path key.
-        if (strncmp(line, "pack_blob=", 10) == 0) {
-            char* sep = strchr(line + 10, '|');
-            if (sep) {
-                *sep = '\0';
-                std::string key = line + 10;
-                std::vector<unsigned char> bytes = b64Decode(sep + 1);
-                if (!bytes.empty()) sPackedAssets[key] = std::move(bytes);
-            }
-            continue;
-        }
+        // Packed asset blobs — already absorbed by the pre-pass; just skip here.
+        if (strncmp(line, "pack_blob_begin=", 16) == 0) continue;
+        if (strncmp(line, "pack_blob_data=", 15) == 0) continue;
+        if (strncmp(line, "pack_blob_end", 13) == 0) continue;
+        if (strncmp(line, "pack_blob=", 10) == 0) continue; // legacy
 
         // Section header
         if (line[0] == '[')
