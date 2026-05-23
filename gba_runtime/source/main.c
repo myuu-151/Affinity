@@ -281,15 +281,12 @@ static int snd_sfx_gain = 1;    // gain for SFX one-shots (0=Normal, 1=Loud, 2=M
 static int snd_mix_samples = 304; // default for 18kHz (timer 924)
 static int snd_frame_scale = 1;  // VBlanks per frame (1=60fps, 2=30fps, 3=20fps)
 static int snd_last_vblank = 0;  // separate from delta-time's afn_last_vblank
+// 0 in normal play; > 0 only when actual elapsed VBlanks exceed snd_frame_scale
+// (snd_frame_scale is clamped at 4 / growth-capped). Mix Padding gates on this
+// so the +25% only applies when the clamp is genuinely hiding DMA-consumed
+// time — at FPS values where snd_frame_scale matches actual (e.g. 15 FPS = 4
+// VBlanks = clamp value), padding would just overshoot and skip samples.
 static int snd_extra_vblanks = 0;
-// Smoothed estimate of how much padding the mixer should add (in 8.8 fixed,
-// 0..256 representing 0..100% of base mixN). Tracks snd_extra_vblanks > 0
-// with an EMA so padding ramps in/out across ~30 frames instead of flipping
-// per-frame when FPS fluctuates (12-15-20 chatter would otherwise stutter as
-// the gate slammed on/off). At high FPS the smoothed value sits at ~0 and
-// padding does nothing; under sustained low FPS it climbs to full +25% and
-// stays there until the rate recovers.
-static int snd_pad_smoothed_q8 = 0;
 
 // Compute timer reload and mix count from current settings + fix mode override
 static void afn_sound_set_rate(void) {
@@ -476,13 +473,17 @@ IWRAM_CODE static void afn_sound_mix(void) {
     s8* buf_b = snd_fifo_b ? snd_buf_b[snd_cur_buf ^ 1] : 0;
     // Scale mix count by frame time so buffer covers multiple VBlanks
     int mixN = (snd_mix_samples * snd_frame_scale) & ~3;
-    // Mix padding: add 25% extra samples to absorb timing jitter between frames
-    // Pad by the EMA-smoothed amount (0..25% of base mixN). Ramps in/out
-    // gradually so frame-rate chatter (12-15-20 FPS) doesn't flip between
-    // padded and non-padded modes per frame — that flipping is what caused
-    // the stutter the binary gate introduced.
-    if (snd_mix_pad && snd_pad_smoothed_q8 > 0) {
-        mixN = (mixN + ((mixN * snd_pad_smoothed_q8) >> 8)) & ~3;
+    // Pad when the snd_frame_scale clamp is hiding elapsed VBlanks, AND keep
+    // padding on for ~3 frames after — the FPS transition stutter happens
+    // because the PREVIOUS mix (one iter ago) sized its buffer for the lower
+    // VBlank count, then the current iter actually took more VBlanks and DMA
+    // ran out before swap. A short post-dip hold pre-emptively sizes those
+    // buffers wider so the next transition doesn't underrun.
+    {
+        static int snd_pad_hold = 0;
+        if (snd_extra_vblanks > 0) snd_pad_hold = 3;
+        else if (snd_pad_hold > 0) snd_pad_hold--;
+        if (snd_mix_pad && snd_pad_hold > 0) mixN = (mixN + (mixN >> 2)) & ~3;
     }
     if (mixN > SND_BUF_SIZE) mixN = SND_BUF_SIZE;
     s16* mix_acc = snd_acc_a;
@@ -6350,29 +6351,6 @@ int main(void)
                 snd_extra_vblanks = 0;
             }
             snd_last_vblank = afn_vblank_counter;
-            // Padding target ramps with FPS severity so the whole 12-30 FPS
-            // range gets cushion (was 0 at 30 FPS — chatter there sounded
-            // jarring). Trade-off: slight speedup at any FPS < 60.
-            //   frame_scale 1 (60 FPS):       0  (no pad, no speedup)
-            //   frame_scale 2 (30 FPS):    ~12%  (heavy cushion across all
-            //   frame_scale 3 (20 FPS):    ~19%   sub-30 FPS values so the
-            //   frame_scale 4 (15 FPS):    ~22%   transition between them is
-            //   frame_scale 4 + clamp (≤12 FPS): full 25% — no crackle)
-            {
-                int target;
-                if (snd_extra_vblanks > 0) target = 64;          // 25%
-                else if (snd_frame_scale >= 4) target = 56;      // ~22%
-                else if (snd_frame_scale >= 3) target = 48;      // ~19%
-                else if (snd_frame_scale >= 2) target = 32;      // ~12.5%
-                else target = 0;
-                int diff = target - snd_pad_smoothed_q8;
-                if (diff > 0)
-                    snd_pad_smoothed_q8 += diff;        // attack: snap up immediately
-                else
-                    snd_pad_smoothed_q8 += diff >> 5;   // release: ~32 frame decay
-                if (snd_pad_smoothed_q8 < 0) snd_pad_smoothed_q8 = 0;
-                if (snd_pad_smoothed_q8 > 64) snd_pad_smoothed_q8 = 64;
-            }
         }
 #endif
         // Mix audio using leftover frame time (after rendering, before VBlank).
