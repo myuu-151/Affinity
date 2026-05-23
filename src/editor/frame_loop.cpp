@@ -1153,6 +1153,7 @@ struct SoundInstance {
     int bufferScale = 0;       // 0 = normal (1 VBlank), 1 = scale buffer to match frame time (for low FPS)
     int mixPadding = 0;        // 0 = exact buffer, 1 = mix 25% extra samples as overflow protection
     int lowRate = 0;           // 0 = normal, 1 = ultra-low sample rate (~10kHz) for extreme low-FPS
+    int preMix = 0;            // 0 = mix after render, 1 = mix right after VBlank swap (1 frame audio latency, survives heavy render frames)
     bool loop = false;          // loop playback between loopStart and loopEnd ticks
     int loopStartTick = 0;      // loop region start (MIDI ticks)
     int loopEndTick = 0;        // loop region end (MIDI ticks, 0 = end of sequence)
@@ -5524,6 +5525,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "instBufScale=%d\n", si.bufferScale);
         fprintf(f, "instMixPad=%d\n", si.mixPadding);
         fprintf(f, "instLowRate=%d\n", si.lowRate);
+        fprintf(f, "instPreMix=%d\n", si.preMix);
         fprintf(f, "instLoop=%d\n", si.loop ? 1 : 0);
         fprintf(f, "instLoopStart=%d\n", si.loopStartTick);
         fprintf(f, "instLoopEnd=%d\n", si.loopEndTick);
@@ -7815,6 +7817,7 @@ static bool LoadProject(const std::string& path)
                 else if (sscanf(line, "instBufScale=%d", &ival) == 1) curInst->bufferScale = ival;
                 else if (sscanf(line, "instMixPad=%d", &ival) == 1) curInst->mixPadding = ival;
                 else if (sscanf(line, "instLowRate=%d", &ival) == 1) curInst->lowRate = ival;
+                else if (sscanf(line, "instPreMix=%d", &ival) == 1) curInst->preMix = ival;
                 else if (sscanf(line, "instLoop=%d", &ival) == 1) curInst->loop = (ival != 0);
                 else if (sscanf(line, "instLoopStart=%d", &ival) == 1) curInst->loopStartTick = ival;
                 else if (sscanf(line, "instLoopEnd=%d", &ival) == 1) curInst->loopEndTick = ival;
@@ -13861,6 +13864,7 @@ void FrameTick(float dt)
                         ie.bufferScale = inst.bufferScale;
                         ie.mixPadding = inst.mixPadding;
                         ie.lowRate = inst.lowRate;
+                        ie.preMix = inst.preMix;
                         ie.loop = inst.loop;
                         ie.loopStartTick = inst.loopStartTick;
                         ie.loopEndTick = inst.loopEndTick;
@@ -23704,6 +23708,12 @@ void FrameTick(float dt)
                 sProjectDirty = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ultra-low sample rate (~10kHz).\nUses ~45%% less CPU than default — best for heavy scenes\nwhere audio quality can be sacrificed for stability.");
+            bool pm = inst.preMix != 0;
+            if (ImGui::Checkbox("Pre-Mix", &pm)) {
+                inst.preMix = pm ? 1 : 0;
+                sProjectDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mix audio right after VBlank swap instead of after render.\nGives audio a full frame of headroom so heavy-render frames\nno longer starve the mixer. Costs ~1 frame (~16ms) of audio latency.");
             // Delta Time toggle — affects Mode 4 scene this instance plays in
             if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size()) {
                 auto& ms = sMapScenes[sMapSelectedScene];

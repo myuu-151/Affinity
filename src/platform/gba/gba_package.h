@@ -568,6 +568,7 @@ struct GBASoundInstanceExport {
     int bufferScale = 0;                   // 0 = normal, 1 = scale buffer to match frame time
     int mixPadding = 0;                    // 0 = exact buffer, 1 = mix 25% extra samples
     int lowRate = 0;                       // 0 = normal, 1 = ultra-low rate (~10kHz)
+    int preMix = 0;                        // 0 = mix after render, 1 = mix right after VBlank swap
     bool loop = false;                     // loop between loopStartTick and loopEndTick
     int loopStartTick = 0;                 // MIDI tick to jump back to
     int loopEndTick = 0;                   // MIDI tick to trigger loop (0 = end of sequence)

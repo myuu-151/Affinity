@@ -5780,6 +5780,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
         }
         f << "};\n";
 
+        f << "static const u8 afn_snd_premix[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            f << "    " << soundInstances[i].preMix << ",\n";
+        }
+        f << "};\n";
+
         f << "static const u8 afn_snd_fifo[" << soundInstances.size() << "] = {\n";
         for (int i = 0; i < (int)soundInstances.size(); i++) {
             f << "    " << soundInstances[i].fifoChannel << ",\n";
