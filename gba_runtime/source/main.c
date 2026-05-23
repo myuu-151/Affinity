@@ -6350,14 +6350,24 @@ int main(void)
                 snd_extra_vblanks = 0;
             }
             snd_last_vblank = afn_vblank_counter;
-            // Asymmetric smoothing — fast attack so sustained low FPS hits full
-            // padding in 1-2 frames (no startup crackle), slow release so frame
-            // rate recovery briefly speeds music up but tapers smoothly.
+            // Padding target ramps with FPS severity so the whole 12-30 FPS
+            // range gets cushion (was 0 at 30 FPS — chatter there sounded
+            // jarring). Trade-off: slight speedup at any FPS < 60.
+            //   frame_scale 1 (60 FPS):       0  (no pad, no speedup)
+            //   frame_scale 2 (30 FPS):    ~12%  (heavy cushion across all
+            //   frame_scale 3 (20 FPS):    ~19%   sub-30 FPS values so the
+            //   frame_scale 4 (15 FPS):    ~22%   transition between them is
+            //   frame_scale 4 + clamp (≤12 FPS): full 25% — no crackle)
             {
-                int target = (snd_extra_vblanks > 0) ? 64 : 0;
+                int target;
+                if (snd_extra_vblanks > 0) target = 64;          // 25%
+                else if (snd_frame_scale >= 4) target = 56;      // ~22%
+                else if (snd_frame_scale >= 3) target = 48;      // ~19%
+                else if (snd_frame_scale >= 2) target = 32;      // ~12.5%
+                else target = 0;
                 int diff = target - snd_pad_smoothed_q8;
                 if (diff > 0)
-                    snd_pad_smoothed_q8 += diff;        // attack: snap to full immediately
+                    snd_pad_smoothed_q8 += diff;        // attack: snap up immediately
                 else
                     snd_pad_smoothed_q8 += diff >> 5;   // release: ~32 frame decay
                 if (snd_pad_smoothed_q8 < 0) snd_pad_smoothed_q8 = 0;
