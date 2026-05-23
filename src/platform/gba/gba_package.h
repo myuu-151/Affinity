@@ -141,6 +141,7 @@ struct GBAMeshExport
     std::vector<uint8_t> texPixels;   // quantized indexed pixels (texW * texH)
     uint16_t texPalette[16] = {}; // RGB15 palette for this texture
     int perspCorrect = 0;         // 1=perspective-corrected texture mapping
+    int texInIwram = 0;           // 1 = copy texture into IWRAM cache at boot
     int clampAbove = 0;           // 1=clamp vertices to never project above horizon
     int nearClip = 0;             // 1=view-space near-plane clipping (fixes slope walling)
     int faceCull = 0;             // 1=skip faces with vertices above camera (hard cutoff)
