@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <climits>
 #include <array>
 #include <iomanip>
 #include <set>
@@ -2202,6 +2203,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::ResetScene:    return "_reset_scene";
         case GBAScriptNodeType::SetPlayerHeight: return "_set_player_height";
         case GBAScriptNodeType::SetHudValue:    return "_set_hud_value";
+        case GBAScriptNodeType::UpdateRespawnPos: return "_update_respawn_pos";
         default: return "";
         }
     };
@@ -2506,6 +2508,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     int slot = slotData ? resolveInt(slotData) : 0;
                     if (slot < 0) slot = 0; if (slot > 3) slot = 3;
                     f << "    afn_hud_value[" << slot << "] += " << val << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::UpdateRespawnPos: {
+                    auto* objData = findDataIn(action->id, 0);
+                    int obj = objData ? resolveInt(objData) : 0;
+                    f << "    afn_start_x = g_sprites[" << obj << "].x;\n";
+                    f << "    afn_start_y = g_sprites[" << obj << "].y;\n";
+                    f << "    afn_start_z = g_sprites[" << obj << "].z;\n";
                     break;
                 }
                 case GBAScriptNodeType::SetFlag: {
@@ -4031,6 +4041,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     if (slotData) { try { slot = std::stoi(bpResolveInt(slotData)); } catch(...) {} }
                     if (slot < 0) slot = 0; if (slot > 3) slot = 3;
                     f << "    afn_hud_value[" << slot << "] += " << val << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::UpdateRespawnPos: {
+                    auto* objData = bpFindDataIn(action->id, 0);
+                    std::string obj = objData ? bpResolveInt(objData) : "0";
+                    f << "    afn_start_x = g_sprites[" << obj << "].x;\n";
+                    f << "    afn_start_y = g_sprites[" << obj << "].y;\n";
+                    f << "    afn_start_z = g_sprites[" << obj << "].z;\n";
                     break;
                 }
                 case GBAScriptNodeType::SetFlag: {
@@ -5862,31 +5880,73 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 palLookup[c15] = (uint8_t)bestIdx; // cache
             }
         }
-        // Build 8x8 tiles and deduplicate (exact comparison, no hash collisions)
+        // Build 8x8 tiles. GBA affine BG can only address 256 unique tiles, so
+        // when the source has more, we keep the 256 most-common ones and remap
+        // the rest to the nearest match (sum of squared pixel differences).
+        // Without this, the dedup ran greedily and silently mapped overflow
+        // tiles to index 0 — large heterogeneous bitmaps came out mostly blank.
         int tilesX = srcW / 8;
         int tilesY = srcH / 8;
-        std::vector<std::array<uint8_t, 64>> uniqueTiles;
-        std::vector<uint8_t> tilemap(tilesX * tilesY, 0);
+        int totalTiles = tilesX * tilesY;
+        // First pass: collect every unique tile with its occurrence count.
+        std::vector<std::array<uint8_t, 64>> allTiles;
+        allTiles.reserve(totalTiles);
+        std::vector<int> tileSourceIdx(totalTiles, -1);  // per-source-tile -> index into allTiles
+        std::vector<int> tileCounts;
         for (int ty = 0; ty < tilesY; ty++) {
             for (int tx = 0; tx < tilesX; tx++) {
                 std::array<uint8_t, 64> tile = {};
                 for (int py = 0; py < 8; py++)
                     for (int px = 0; px < 8; px++)
                         tile[py * 8 + px] = indexed[(ty * 8 + py) * srcW + (tx * 8 + px)];
-                // Find existing tile by exact match
                 int found = -1;
+                for (int u = 0; u < (int)allTiles.size(); u++) {
+                    if (allTiles[u] == tile) { found = u; break; }
+                }
+                if (found < 0) {
+                    found = (int)allTiles.size();
+                    allTiles.push_back(tile);
+                    tileCounts.push_back(0);
+                }
+                tileSourceIdx[ty * tilesX + tx] = found;
+                tileCounts[found]++;
+            }
+        }
+        // Pick top-256 by frequency.
+        std::vector<int> orderByFreq(allTiles.size());
+        for (size_t i = 0; i < allTiles.size(); i++) orderByFreq[i] = (int)i;
+        std::sort(orderByFreq.begin(), orderByFreq.end(),
+                  [&](int a, int b) { return tileCounts[a] > tileCounts[b]; });
+        std::vector<std::array<uint8_t, 64>> uniqueTiles;
+        std::vector<int> origToCache(allTiles.size(), -1);  // allTiles index -> uniqueTiles index
+        int keepCount = (int)std::min<size_t>(256, allTiles.size());
+        uniqueTiles.reserve(keepCount);
+        for (int i = 0; i < keepCount; i++) {
+            origToCache[orderByFreq[i]] = i;
+            uniqueTiles.push_back(allTiles[orderByFreq[i]]);
+        }
+        // Second pass: build the tilemap. Tiles in the top-256 map directly;
+        // the rest snap to the nearest cached tile by sum-of-squared pixel diff.
+        std::vector<uint8_t> tilemap(totalTiles, 0);
+        for (int srcIdx = 0; srcIdx < totalTiles; srcIdx++) {
+            int origIdx = tileSourceIdx[srcIdx];
+            int cached = origToCache[origIdx];
+            if (cached >= 0) {
+                tilemap[srcIdx] = (uint8_t)cached;
+            } else {
+                // Nearest-match in palette-index space (cheap, no RGB lookup needed)
+                const auto& src = allTiles[origIdx];
+                int bestDist = INT_MAX, bestIdx = 0;
                 for (int u = 0; u < (int)uniqueTiles.size(); u++) {
-                    if (uniqueTiles[u] == tile) { found = u; break; }
-                }
-                if (found >= 0) {
-                    tilemap[ty * tilesX + tx] = (uint8_t)found;
-                } else {
-                    int idx = (int)uniqueTiles.size();
-                    if (idx < 256) {
-                        uniqueTiles.push_back(tile);
-                        tilemap[ty * tilesX + tx] = (uint8_t)idx;
+                    int d = 0;
+                    for (int p = 0; p < 64; p++) {
+                        int diff = (int)src[p] - (int)uniqueTiles[u][p];
+                        d += diff * diff;
+                        if (d >= bestDist) break;
                     }
+                    if (d < bestDist) { bestDist = d; bestIdx = u; }
                 }
+                tilemap[srcIdx] = (uint8_t)bestIdx;
             }
         }
         // Emit tile data

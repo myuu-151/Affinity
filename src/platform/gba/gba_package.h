@@ -373,6 +373,7 @@ enum class GBAScriptNodeType : int {
     ResetScene,
     SetPlayerHeight,
     SetHudValue,
+    UpdateRespawnPos,
     COUNT
 };
 

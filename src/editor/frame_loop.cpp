@@ -475,6 +475,7 @@ enum class VsNodeType : int {
     ResetScene,     // action: reload the current scene (respawn)
     SetPlayerHeight, // set player collision height
     SetHudValue,    // action: set afn_hud_value[slot] for counter display
+    UpdateRespawnPos, // action: set Respawn start position to an object's world position
     COUNT
 };
 
@@ -767,6 +768,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Reset Scene",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Set Player Height",0xFF3355AA, 1, 1, 1, 0, {"Value (float)"}, {}, {} },
     { "Set HUD Value",   0xFF3355AA, 1, 1, 2, 0, {"Value", "Slot"}, {}, {} },
+    { "Update Respawn Pos",0xFF3355AA, 1, 1, 1, 0, {"Object (int)"}, {}, {} },
 };
 
 struct VsNode {
@@ -17140,6 +17142,7 @@ void FrameTick(float dt)
                 case VsNodeType::OnRise:        desc = "Rising-edge gate: only passes execution on the first frame the upstream condition becomes true. Blocks while it keeps firing. Resets when it stops."; break;
                 case VsNodeType::ResetScene:    desc = "Reloads the current scene. Player respawns at start position."; break;
                 case VsNodeType::SetPlayerHeight: desc = "Sets the player collision height (pixels). Controls wall Y-overlap and floor snap-up distance. Default 12."; break;
+                case VsNodeType::UpdateRespawnPos: desc = "Updates the Respawn start position to the given object's world position. Use on checkpoint trigger."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -17379,6 +17382,7 @@ void FrameTick(float dt)
                         case VsNodeType::ResetScene:    return "_reset_scene";
                         case VsNodeType::SetPlayerHeight: return "_set_player_height";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
+                        case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -17821,6 +17825,23 @@ void FrameTick(float dt)
                         fmtInt(infoNode.id, 1, "<slot>"),
                         fmtInt(infoNode.id, 0, "<value>"));
                     setActionFunc(infoNode, "_set_hud_value", bodyBuf);
+                    break;
+                }
+                case VsNodeType::UpdateRespawnPos: {
+                    editorCode = "// Update Respawn start position (e.g. on checkpoint touch)";
+                    char bodyBuf[384];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_start_x = g_sprites[%s].x;\n"
+                        "    afn_start_y = g_sprites[%s].y;\n"
+                        "    afn_start_z = g_sprites[%s].z;\n"
+                        "    // --- Runtime (main.c) ---\n"
+                        "    // Respawn node reads afn_start_x/y/z next time it fires:\n"
+                        "    //   player_x = afn_start_x; player_y = afn_start_y;\n"
+                        "    //   player_z = afn_start_z; player_vy = 0;",
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 0, "<obj>"),
+                        fmtInt(infoNode.id, 0, "<obj>"));
+                    setActionFunc(infoNode, "_update_respawn_pos", bodyBuf);
                     break;
                 }
                 case VsNodeType::ChangeScene:
@@ -20734,6 +20755,7 @@ void FrameTick(float dt)
                     case VsNodeType::ResetScene:    suffix = "_reset_scene"; break;
                     case VsNodeType::SetPlayerHeight: suffix = "_set_player_height"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
+                    case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
                     case VsNodeType::Branch:        suffix = "_branch"; break;
                     case VsNodeType::CompareVar:    suffix = "_compare_var"; break;
@@ -22108,6 +22130,42 @@ void FrameTick(float dt)
                 sM7FloorTex = 0;
                 sM7FloorPath.clear();
                 sProjectDirty = true;
+            }
+            // Reduce detail — bilinear downsample + nearest upsample to halve
+            // the effective resolution. Use when the 256-tile cap is overflowing
+            // (visible as repeating "nearest-match" artifacts in the runtime).
+            if (sM7FloorPixels && ImGui::Button("Reduce Detail##m7floorreduce", ImVec2(-1, 0))) {
+                int w = sM7FloorW, h = sM7FloorH;
+                int hw = w / 2, hh = h / 2;
+                if (hw >= 8 && hh >= 8) {
+                    std::vector<unsigned char> reduced(hw * hh * 4);
+                    for (int y = 0; y < hh; y++) {
+                        for (int x = 0; x < hw; x++) {
+                            int sx = x * 2, sy = y * 2;
+                            int r=0, g=0, b=0, a=0;
+                            for (int dy = 0; dy < 2; dy++)
+                                for (int dx = 0; dx < 2; dx++) {
+                                    const unsigned char* p = &sM7FloorPixels[((sy+dy) * w + (sx+dx)) * 4];
+                                    r += p[0]; g += p[1]; b += p[2]; a += p[3];
+                                }
+                            unsigned char* d = &reduced[(y * hw + x) * 4];
+                            d[0] = (unsigned char)(r >> 2);
+                            d[1] = (unsigned char)(g >> 2);
+                            d[2] = (unsigned char)(b >> 2);
+                            d[3] = (unsigned char)(a >> 2);
+                        }
+                    }
+                    for (int y = 0; y < h; y++) {
+                        for (int x = 0; x < w; x++) {
+                            const unsigned char* s = &reduced[((y/2) * hw + (x/2)) * 4];
+                            unsigned char* d = &sM7FloorPixels[(y * w + x) * 4];
+                            d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
+                        }
+                    }
+                    glBindTexture(GL_TEXTURE_2D, sM7FloorTex);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, sM7FloorPixels);
+                    sProjectDirty = true;
+                }
             }
             if (ImGui::BeginPopup("##M7FloorErr")) {
                 ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "Invalid image!");
