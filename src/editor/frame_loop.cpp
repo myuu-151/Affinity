@@ -42,6 +42,25 @@ namespace Affinity
 // and asset loaders check this map before falling back to disk.
 static std::map<std::string, std::vector<unsigned char>> sPackedAssets;
 
+// When true, loaders that fall through to disk redirect the path to the
+// `external/` folder next to the editor exe (mirroring the layout written
+// by "Export all assets"). Lets a user ship editor + external/ instead of
+// the absolute paths burned into the project file.
+static bool sUseExternalAssets = false;
+
+static std::string ResolveAssetPath(const std::string& path) {
+    if (!sUseExternalAssets || path.empty()) return path;
+    namespace fs = std::filesystem;
+    fs::path src(path);
+    fs::path base = fs::current_path() / "external";
+    fs::path candidate = src.parent_path().filename().empty()
+        ? (base / src.filename())
+        : (base / src.parent_path().filename() / src.filename());
+    std::error_code ec;
+    if (fs::exists(candidate, ec)) return candidate.string();
+    return path;
+}
+
 static const char* B64_TABLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 static std::string b64Encode(const unsigned char* data, size_t len) {
@@ -3780,7 +3799,8 @@ static void LoadAssetDirImage(int assetIdx, int setIdx, int dir, const std::stri
     if (pit != sPackedAssets.end() && !pit->second.empty()) {
         data = stbi_load_from_memory(pit->second.data(), (int)pit->second.size(), &w, &h, &channels, 4);
     } else {
-        data = stbi_load(filepath.c_str(), &w, &h, &channels, 4);
+        std::string resolved = ResolveAssetPath(filepath);
+        data = stbi_load(resolved.c_str(), &w, &h, &channels, 4);
     }
     if (!data) return;
 
@@ -4057,7 +4077,14 @@ static bool IsPOT(int v) { return v > 0 && (v & (v - 1)) == 0; }
 static bool LoadSkyPanelImage(SkyPanel& panel, const std::string& path)
 {
     int w, h, ch;
-    unsigned char* img = stbi_load(path.c_str(), &w, &h, &ch, 4);
+    auto pit = sPackedAssets.find(path);
+    unsigned char* img = nullptr;
+    if (pit != sPackedAssets.end() && !pit->second.empty()) {
+        img = stbi_load_from_memory(pit->second.data(), (int)pit->second.size(), &w, &h, &ch, 4);
+    } else {
+        std::string resolved = ResolveAssetPath(path);
+        img = stbi_load(resolved.c_str(), &w, &h, &ch, 4);
+    }
     if (!img) return false;
     if (w < 8 || h < 8 || w > 1024 || h > 1024) {
         stbi_image_free(img);
@@ -4147,7 +4174,8 @@ static bool LoadM7FloorTexture(const std::string& path)
     if (it != sPackedAssets.end() && !it->second.empty()) {
         img = stbi_load_from_memory(it->second.data(), (int)it->second.size(), &w, &h, &ch, 4);
     } else {
-        img = stbi_load(path.c_str(), &w, &h, &ch, 4);
+        std::string resolved = ResolveAssetPath(path);
+        img = stbi_load(resolved.c_str(), &w, &h, &ch, 4);
     }
     if (!img) return false;
     if (!IsPOT(w) || !IsPOT(h) || w > 1024 || h > 1024) {
@@ -4330,7 +4358,8 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
             f = fopen(tempPath.c_str(), "r");
         }
     } else {
-        f = fopen(path.c_str(), "r");
+        std::string resolved = ResolveAssetPath(path);
+        f = fopen(resolved.c_str(), "r");
     }
     if (!f) {
         if (!tempPath.empty()) std::remove(tempPath.c_str());
@@ -4477,7 +4506,8 @@ static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh)
     if (pit != sPackedAssets.end() && !pit->second.empty()) {
         img = stbi_load_from_memory(pit->second.data(), (int)pit->second.size(), &w, &h, &ch, 4);
     } else {
-        img = stbi_load(path.c_str(), &w, &h, &ch, 4);
+        std::string resolved = ResolveAssetPath(path);
+        img = stbi_load(resolved.c_str(), &w, &h, &ch, 4);
     }
     if (!img) return false;
 
@@ -8123,6 +8153,7 @@ void FrameInit(const char* openPath)
             else if (sscanf(line, "tl_range_start=%d", &ival) == 1) sHudTimelineRangeStart = std::max(0, ival);
             else if (sscanf(line, "tl_range_end=%d", &ival) == 1) sHudTimelineRangeEnd = std::max(0, ival);
             else if (sscanf(line, "tl_label_w=%f", &fval) == 1) sHudTimelineLabelW = std::clamp(fval, 80.0f, 600.0f);
+            else if (sscanf(line, "use_external_assets=%d", &ival) == 1) sUseExternalAssets = (ival != 0);
         }
         fclose(pf);
     }
@@ -26965,6 +26996,15 @@ void FrameTick(float dt)
                     if (!bytes.empty()) sPackedAssets[ma.texturePath] = std::move(bytes);
                 }
             }
+            // Skybox panel images
+            for (auto& inst : sSkyboxInstances) {
+                for (auto& panel : inst.panels) {
+                    if (panel.path.empty()) continue;
+                    if (sPackedAssets.count(panel.path)) continue;
+                    auto bytes = readFileBytes(panel.path);
+                    if (!bytes.empty()) sPackedAssets[panel.path] = std::move(bytes);
+                }
+            }
             sPackedCount = (int)sPackedAssets.size();
             sPackResult = sPackedCount > 0 ? 1 : 2;
             sProjectDirty = true;
@@ -26999,6 +27039,40 @@ void FrameTick(float dt)
         if (!sPackedAssets.empty()) {
             ImGui::TextDisabled("%d asset(s) currently packed", (int)sPackedAssets.size());
         }
+        bool prevUseExternal = sUseExternalAssets;
+        ImGui::Checkbox("Load from external/ folder", &sUseExternalAssets);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "When on, asset loaders look for files under external/<parent>/<file>\n"
+                "next to the editor exe before falling back to the original absolute path.\n"
+                "Use this together with \"Export all assets\" to ship a portable bundle.");
+        }
+        if (sUseExternalAssets != prevUseExternal) {
+            // Reload every cached asset so the new resolution rule takes effect now.
+            for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++) {
+                auto& sa = sSpriteAssets[ai];
+                for (int si = 0; si < (int)sa.dirAnimSets.size(); si++) {
+                    for (int d = 0; d < 8; d++) {
+                        const std::string& p = sa.dirAnimSets[si].dirPaths[d];
+                        if (!p.empty()) LoadAssetDirImage(ai, si, d, p);
+                    }
+                }
+            }
+            for (auto& ma : sMeshAssets) {
+                if (!ma.sourcePath.empty()) LoadOBJ(ma.sourcePath, ma);
+                if (!ma.texturePath.empty() && ma.texturePath[0] != '(')
+                    LoadMeshTexture(ma.texturePath, ma);
+            }
+            if (!sM7FloorPath.empty()) {
+                std::string p = sM7FloorPath;
+                LoadM7FloorTexture(p);
+            }
+            for (auto& inst : sSkyboxInstances) {
+                for (auto& panel : inst.panels) {
+                    if (!panel.path.empty()) LoadSkyPanelImage(panel, panel.path);
+                }
+            }
+        }
 
         ImGui::Spacing();
         ImGui::Separator();
@@ -27014,6 +27088,7 @@ void FrameTick(float dt)
                 fprintf(f, "tl_range_start=%d\n", sHudTimelineRangeStart);
                 fprintf(f, "tl_range_end=%d\n", sHudTimelineRangeEnd);
                 fprintf(f, "tl_label_w=%.0f\n", sHudTimelineLabelW);
+                fprintf(f, "use_external_assets=%d\n", sUseExternalAssets ? 1 : 0);
                 fclose(f);
                 sPrefsSaveTimer = 2.0f;
             }
