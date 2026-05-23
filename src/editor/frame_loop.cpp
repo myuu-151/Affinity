@@ -35,6 +35,81 @@
 namespace Affinity
 {
 
+// ---- Asset packing ----
+// When the user clicks "Pack all assets", every referenced external file
+// (sprite PNGs, M7 floor, etc.) is read into bytes and stashed here keyed
+// by its original path. The save format emits these as `pack_blob=` lines,
+// and asset loaders check this map before falling back to disk.
+static std::map<std::string, std::vector<unsigned char>> sPackedAssets;
+
+static const char* B64_TABLE = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static std::string b64Encode(const unsigned char* data, size_t len) {
+    std::string out;
+    out.reserve(((len + 2) / 3) * 4);
+    for (size_t i = 0; i < len; i += 3) {
+        unsigned v = data[i] << 16;
+        if (i + 1 < len) v |= data[i+1] << 8;
+        if (i + 2 < len) v |= data[i+2];
+        out += B64_TABLE[(v >> 18) & 0x3F];
+        out += B64_TABLE[(v >> 12) & 0x3F];
+        out += (i + 1 < len) ? B64_TABLE[(v >> 6) & 0x3F] : '=';
+        out += (i + 2 < len) ? B64_TABLE[v & 0x3F] : '=';
+    }
+    return out;
+}
+
+static std::vector<unsigned char> b64Decode(const char* s) {
+    static int rev[256];
+    static bool init = false;
+    if (!init) {
+        for (int i = 0; i < 256; i++) rev[i] = -1;
+        for (int i = 0; i < 64; i++) rev[(int)(unsigned char)B64_TABLE[i]] = i;
+        init = true;
+    }
+    std::vector<unsigned char> out;
+    int v = 0, bits = 0;
+    for (const char* p = s; *p && *p != '\n' && *p != '\r'; p++) {
+        if (*p == '=') break;
+        int c = rev[(unsigned char)*p];
+        if (c < 0) continue;
+        v = (v << 6) | c;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back((unsigned char)((v >> bits) & 0xFF));
+        }
+    }
+    return out;
+}
+
+// Read full file into a byte vector. Returns empty on failure.
+static std::vector<unsigned char> readFileBytes(const std::string& path) {
+    std::vector<unsigned char> out;
+    FILE* fp = fopen(path.c_str(), "rb");
+    if (!fp) return out;
+    fseek(fp, 0, SEEK_END);
+    long sz = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (sz > 0) {
+        out.resize((size_t)sz);
+        if (fread(out.data(), 1, sz, fp) != (size_t)sz) out.clear();
+    }
+    fclose(fp);
+    return out;
+}
+
+// Write bytes to disk, creating parent directories as needed.
+static bool writeFileBytes(const std::string& path, const unsigned char* data, size_t len) {
+    namespace fs = std::filesystem;
+    fs::create_directories(fs::path(path).parent_path());
+    FILE* fp = fopen(path.c_str(), "wb");
+    if (!fp) return false;
+    bool ok = (fwrite(data, 1, len, fp) == len);
+    fclose(fp);
+    return ok;
+}
+
 // Replace newlines with SOH (0x01) so multi-line code fields survive the
 // single-line save format. SOH never appears in C source. Length-preserving.
 static void encodeNL(char* s) {
@@ -3700,7 +3775,13 @@ static void LoadAssetDirImage(int assetIdx, int setIdx, int dir, const std::stri
     if (d.texture) { glDeleteTextures(1, &d.texture); d.texture = 0; }
 
     int w, h, channels;
-    unsigned char* data = stbi_load(filepath.c_str(), &w, &h, &channels, 4);
+    unsigned char* data = nullptr;
+    auto pit = sPackedAssets.find(filepath);
+    if (pit != sPackedAssets.end() && !pit->second.empty()) {
+        data = stbi_load_from_memory(pit->second.data(), (int)pit->second.size(), &w, &h, &channels, 4);
+    } else {
+        data = stbi_load(filepath.c_str(), &w, &h, &channels, 4);
+    }
     if (!data) return;
 
     d.pixels = data;
@@ -4060,7 +4141,14 @@ static void StitchSkyPanels() {
 static bool LoadM7FloorTexture(const std::string& path)
 {
     int w, h, ch;
-    unsigned char* img = stbi_load(path.c_str(), &w, &h, &ch, 4);
+    unsigned char* img = nullptr;
+    // If this path is packed, decode from memory instead of disk.
+    auto it = sPackedAssets.find(path);
+    if (it != sPackedAssets.end() && !it->second.empty()) {
+        img = stbi_load_from_memory(it->second.data(), (int)it->second.size(), &w, &h, &ch, 4);
+    } else {
+        img = stbi_load(path.c_str(), &w, &h, &ch, 4);
+    }
     if (!img) return false;
     if (!IsPOT(w) || !IsPOT(h) || w > 1024 || h > 1024) {
         stbi_image_free(img);
@@ -4225,8 +4313,29 @@ static std::string OpenFolderDialog()
 // ---- OBJ mesh loader ----
 static bool LoadOBJ(const std::string& path, MeshAsset& out)
 {
-    FILE* f = fopen(path.c_str(), "r");
-    if (!f) return false;
+    FILE* f = nullptr;
+    std::string tempPath;
+    // If this OBJ is packed, materialize it to a temp file and open that.
+    // LoadOBJ uses fopen+fgets, so this is the least-invasive way to feed
+    // packed bytes without refactoring the parser.
+    auto pit = sPackedAssets.find(path);
+    if (pit != sPackedAssets.end() && !pit->second.empty()) {
+        namespace fs = std::filesystem;
+        fs::path tp = fs::temp_directory_path() / ("affn_packed_" + std::to_string((uintptr_t)pit->second.data()) + ".obj");
+        tempPath = tp.string();
+        FILE* tf = fopen(tempPath.c_str(), "wb");
+        if (tf) {
+            fwrite(pit->second.data(), 1, pit->second.size(), tf);
+            fclose(tf);
+            f = fopen(tempPath.c_str(), "r");
+        }
+    } else {
+        f = fopen(path.c_str(), "r");
+    }
+    if (!f) {
+        if (!tempPath.empty()) std::remove(tempPath.c_str());
+        return false;
+    }
 
     struct V3 { float x, y, z; };
     struct V2 { float u, v; };
@@ -4326,6 +4435,7 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
         }
     }
     fclose(f);
+    if (!tempPath.empty()) std::remove(tempPath.c_str());
 
     if (verts.empty()) return false;
 
@@ -4362,7 +4472,13 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
 static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh)
 {
     int w, h, ch;
-    unsigned char* img = stbi_load(path.c_str(), &w, &h, &ch, 4);
+    unsigned char* img = nullptr;
+    auto pit = sPackedAssets.find(path);
+    if (pit != sPackedAssets.end() && !pit->second.empty()) {
+        img = stbi_load_from_memory(pit->second.data(), (int)pit->second.size(), &w, &h, &ch, 4);
+    } else {
+        img = stbi_load(path.c_str(), &w, &h, &ch, 4);
+    }
     if (!img) return false;
 
     // Resize to nearest power-of-2, max 256
@@ -5441,6 +5557,15 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "midi_end\n");
     }
 
+    // ---- Packed assets (one base64 blob per packed file path) ----
+    if (!sPackedAssets.empty()) {
+        fprintf(f, "\n[PackedAssets]\n");
+        for (auto& kv : sPackedAssets) {
+            std::string enc = b64Encode(kv.second.data(), kv.second.size());
+            fprintf(f, "pack_blob=%s|%s\n", kv.first.c_str(), enc.c_str());
+        }
+    }
+
     fclose(f);
     sProjectPath = path;
     sProjectDirty = false;
@@ -5463,6 +5588,7 @@ static bool LoadProject(const std::string& path)
     sTmDragObj = -1;
     sTmStampAsset = -1;
     sTmStampObj = -1;
+    sPackedAssets.clear();
     sTilemapDataInit = false;
     sTilemapData.floor.width = 2;
     sTilemapData.floor.height = 2;
@@ -5503,6 +5629,25 @@ static bool LoadProject(const std::string& path)
     int tmSubdivLevel = 0; // 0=old, 1=first 2x, 2=current 4x
     int projectVersion = 1; // v1 = pre-IsFalling enum, v2 = current
 
+    // Pre-pass: collect pack_blob lines into sPackedAssets so asset loaders
+    // can find them when their reference lines (diranimdir=, m7FloorTex=) are
+    // processed below. Blobs are emitted at the end of the file, so without
+    // this pre-pass the on-load asset readers would miss them.
+    while (fgets(line, sizeof(line), f)) {
+        char* nl = strchr(line, '\n'); if (nl) *nl = '\0';
+        nl = strchr(line, '\r'); if (nl) *nl = '\0';
+        if (strncmp(line, "pack_blob=", 10) == 0) {
+            char* sep = strchr(line + 10, '|');
+            if (sep) {
+                *sep = '\0';
+                std::string key = line + 10;
+                std::vector<unsigned char> bytes = b64Decode(sep + 1);
+                if (!bytes.empty()) sPackedAssets[key] = std::move(bytes);
+            }
+        }
+    }
+    fseek(f, 0, SEEK_SET);
+
     while (fgets(line, sizeof(line), f))
     {
         // Strip newline
@@ -5513,6 +5658,18 @@ static bool LoadProject(const std::string& path)
 
         // Skip empty/comment
         if (line[0] == '\0' || line[0] == '#') continue;
+
+        // Packed asset blob — decode and stash by original path key.
+        if (strncmp(line, "pack_blob=", 10) == 0) {
+            char* sep = strchr(line + 10, '|');
+            if (sep) {
+                *sep = '\0';
+                std::string key = line + 10;
+                std::vector<unsigned char> bytes = b64Decode(sep + 1);
+                if (!bytes.empty()) sPackedAssets[key] = std::move(bytes);
+            }
+            continue;
+        }
 
         // Section header
         if (line[0] == '[')
@@ -26746,6 +26903,83 @@ void FrameTick(float dt)
         {
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "OK!");
+        }
+
+        // ---- Asset Packing ----
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Assets");
+        ImGui::Separator();
+        ImGui::TextWrapped("Pack embeds referenced files into the project file (one-time snapshot). Export writes them back out to external/ next to the editor.");
+        static int sPackResult = 0;        // 0 = none, 1 = OK, 2 = nothing to pack
+        static int sPackedCount = 0;
+        static int sExportResult = 0;
+        static int sExportedCount = 0;
+        if (ImGui::Button("Pack all assets")) {
+            sPackedAssets.clear();
+            // Sprite directional images
+            for (auto& sa : sSpriteAssets) {
+                for (auto& das : sa.dirAnimSets) {
+                    for (int d = 0; d < 8; d++) {
+                        const std::string& p = das.dirPaths[d];
+                        if (p.empty()) continue;
+                        if (sPackedAssets.count(p)) continue;
+                        auto bytes = readFileBytes(p);
+                        if (!bytes.empty()) sPackedAssets[p] = std::move(bytes);
+                    }
+                }
+            }
+            // Mode 7 floor texture
+            if (!sM7FloorPath.empty() && !sPackedAssets.count(sM7FloorPath)) {
+                auto bytes = readFileBytes(sM7FloorPath);
+                if (!bytes.empty()) sPackedAssets[sM7FloorPath] = std::move(bytes);
+            }
+            // Mesh OBJ + texture files
+            for (auto& ma : sMeshAssets) {
+                if (!ma.sourcePath.empty() && !sPackedAssets.count(ma.sourcePath)) {
+                    auto bytes = readFileBytes(ma.sourcePath);
+                    if (!bytes.empty()) sPackedAssets[ma.sourcePath] = std::move(bytes);
+                }
+                // Skip the internal "(sprite:NAME)" pseudo-paths and "(none)" sentinel.
+                if (!ma.texturePath.empty()
+                    && ma.texturePath[0] != '('
+                    && !sPackedAssets.count(ma.texturePath)) {
+                    auto bytes = readFileBytes(ma.texturePath);
+                    if (!bytes.empty()) sPackedAssets[ma.texturePath] = std::move(bytes);
+                }
+            }
+            sPackedCount = (int)sPackedAssets.size();
+            sPackResult = sPackedCount > 0 ? 1 : 2;
+            sProjectDirty = true;
+        }
+        if (sPackResult == 1) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Packed %d", sPackedCount);
+        } else if (sPackResult == 2) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Nothing to pack");
+        }
+        if (ImGui::Button("Export all assets")) {
+            sExportedCount = 0;
+            namespace fs = std::filesystem;
+            fs::path base = fs::current_path() / "external";
+            for (auto& kv : sPackedAssets) {
+                fs::path src(kv.first);
+                fs::path dst = base / src.parent_path().filename() / src.filename();
+                // If parent_path is empty or has no useful name, just use filename.
+                if (src.parent_path().filename().empty()) dst = base / src.filename();
+                if (writeFileBytes(dst.string(), kv.second.data(), kv.second.size())) sExportedCount++;
+            }
+            sExportResult = sExportedCount > 0 ? 1 : 2;
+        }
+        if (sExportResult == 1) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Wrote %d to external/", sExportedCount);
+        } else if (sExportResult == 2) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "No packed assets");
+        }
+        if (!sPackedAssets.empty()) {
+            ImGui::TextDisabled("%d asset(s) currently packed", (int)sPackedAssets.size());
         }
 
         ImGui::Spacing();
