@@ -577,21 +577,7 @@ IWRAM_CODE static void afn_sound_mix(void) {
             }
         }
         if (mixN < SND_BUF_SIZE) {
-            // Fade-out tail: if DMA reads past mixN (under-mixed frame), the
-            // hard-zero transition was an audible click → silence → click on
-            // resume. Now the 64 samples after mixN ramp from the last real
-            // sample down to 0, so an underflow becomes a gentle fade-out.
-            // Doesn't change playback rate — just makes stutter less audible.
-            int fadeLen = 64;
-            if (fadeLen > SND_BUF_SIZE - mixN) fadeLen = SND_BUF_SIZE - mixN;
-            s8 last_a = mixN > 0 ? buf[mixN - 1] : 0;
-            s8 last_b = (buf_b && mixN > 0) ? buf_b[mixN - 1] : 0;
-            for (int i = 0; i < fadeLen; i++) {
-                int t = 64 - i;        // 64..1 → ramp down
-                buf[mixN + i] = (s8)((last_a * t) >> 6);
-                if (buf_b) buf_b[mixN + i] = (s8)((last_b * t) >> 6);
-            }
-            for (int i = mixN + fadeLen; i < SND_BUF_SIZE; i++) {
+            for (int i = mixN; i < SND_BUF_SIZE; i++) {
                 buf[i] = 0;
                 if (buf_b) buf_b[i] = 0;
             }
