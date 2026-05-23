@@ -11742,6 +11742,9 @@ static void DrawTilemapTab(ImVec2 pos, ImVec2 size)
                     }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Only render sprites within draw distance.\nNearest 32 get OAM slots — allows unlimited sprites per scene.\nAdjust distance in Camera Properties.");
                 }
+                if (ImGui::Checkbox("Show FPS##sceneShowFps", &ms.showFps))
+                    sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Render FPS counter in the bottom-right corner at runtime using the HUD font.");
             }
 
             ImGui::Spacing();
@@ -26876,6 +26879,9 @@ void FrameTick(float dt)
                     }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Only render sprites within draw distance.\nNearest 32 get OAM slots — allows unlimited sprites per scene.\nAdjust distance in Camera Properties.");
                 }
+                if (ImGui::Checkbox("Show FPS##msShowFps", &ms.showFps))
+                    sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Render FPS counter in the bottom-right corner at runtime using the HUD font.");
             }
 
             ImGui::End();
