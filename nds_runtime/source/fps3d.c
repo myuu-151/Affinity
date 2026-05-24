@@ -122,6 +122,7 @@ static void render_meshes(void)
         int wx = afn_sprite_data[si][0];
         int wy = afn_sprite_data[si][1];
         int wz = afn_sprite_data[si][2];
+        int spriteScale = afn_sprite_data[si][5];  // 256 = 1.0
         int rot = afn_sprite_data[si][7];
 
         const int16_t* verts = afn_mesh_vert_ptrs[meshIdx];
@@ -143,11 +144,11 @@ static void render_meshes(void)
                        fx8_to_f32(wz));
         if (rot != 0)
             glRotateYi(rot << 16 >> 6);
-        // Mesh local vertex coords are ±64 fx8 max — at the identity scale
-        // they're 0.016 DS world units across (≈0.2 px on screen). Scale up
-        // so meshes have meaningful extent. 64× engulfed the camera; 8× is
-        // a reasonable starting point — tune per-project later.
-        glScalef32(inttof32(8), inttof32(8), inttof32(8));
+        // Per-sprite scale (8.8 fixed, 256 = 1.0). gluPerspective + identity
+        // fx8→v16 alone makes meshes microscopic — multiply by the sprite's
+        // own scale field which the editor uses for the same purpose on GBA.
+        int s32 = spriteScale << 4;  // 8.8 → 20.12 f32
+        glScalef32(s32, s32, s32);
 
         uint32_t polyFmt = POLY_ALPHA(31);
         if (cullMode == 0) polyFmt |= POLY_CULL_BACK;
@@ -235,7 +236,11 @@ static void update_camera(void)
     }
 
     int speed = AFN_WALK_SPEED;
-    if (held & KEY_R) speed = AFN_SPRINT_SPEED;
+
+    // Q (KEY_L) ascend, E (KEY_R) descend — useful for poking at meshes from
+    // different heights while we tune the NDS scene scale.
+    if (held & KEY_L) cam_h += AFN_WALK_SPEED;
+    if (held & KEY_R) cam_h -= AFN_WALK_SPEED;
 
     if (held & KEY_LEFT)  cam_angle -= 512;
     if (held & KEY_RIGHT) cam_angle += 512;
