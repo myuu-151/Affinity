@@ -85,6 +85,8 @@ static void afn_play_sfx(int smpIdx, int gain, int fifo);
 static int snd_sfx_inst = -1; // sound instance index for SFX softfade lookup
 static void afn_stop_sound(void);
 static void afn_sound_swap(void); // fwd — VBlank ISR may call it via snd_swap_pending
+static void afn_chunked_hbl(void); // fwd — registered as HBlank ISR for chunked path
+static int snd_chunked_hbl_active; // fwd — Stage 2 chunked HBlank ISR flag
 static int snd_buf_scale = 0;  // buffer scale flag (used by mapdata.h, set by sound code)
 static int snd_mix_pad = 0;   // mix padding flag: 1 = mix 25% extra samples as overflow protection
 static int snd_low_rate = 0;  // ultra-low rate flag: 1 = ~10kHz sample rate for extreme low-FPS
@@ -406,6 +408,10 @@ static void afn_play_sound(int instanceId) {
     snd_premix = afn_snd_premix[instanceId];
     snd_isr_swap = afn_snd_isrswap[instanceId];
     snd_chunked = afn_snd_chunked[instanceId];
+    // Stage 2 HBlank-driven chunked path is DISABLED — caused FPS crash + visual
+    // corruption depending on IWRAM placement. Stage 1 (the setup+chunk(all)+
+    // finalize refactor) still runs via the shim. snd_chunked_hbl_active stays 0
+    // so the main loop dispatcher uses the Stage 1 shim path.
     if (afn_snd_fifo[instanceId]) snd_fifo_b = 1;
     if (!snd_initialized) afn_sound_hw_start();
     else {
@@ -737,14 +743,34 @@ static void afn_sound_chunk_finalize(void) {
     s_mix_total = 0;
 }
 
-// Stage-1 shim: setup → chunk(all) → finalize sequentially. Stage 2 will
-// move chunk() to the HBlank ISR (mix in slices across scanlines).
+// Stage-1 shim — fallback when Mode 7 owns HBlank for scanline scrolling
+// (m7_hbl can't share with mix work). Sequential setup + chunk(all) + finalize.
 static void afn_sound_mix_chunked(void) {
     afn_sound_chunk_setup();
     if (s_mix_total > 0) {
         afn_sound_chunk_mix(s_mix_total);
         afn_sound_chunk_finalize();
     }
+}
+
+// ---- Stage 2: HBlank-driven chunked mixer ----
+// HBlank ISR fires 228 times per frame and mixes ~2 samples each call → ~456
+// samples per frame (more than enough for 18 kHz @ 304/frame). Chunk_mix
+// self-limits once s_mix_offset hits s_mix_total so over-firing is harmless.
+// Main loop dispatcher (further below) drops the in-line mix call when this
+// path is active, and instead calls finalize before swap + setup after swap.
+// Mix bigger chunks less often: VBlank scanlines only (160-227) AND only
+// every 4th — 17 calls/frame × 20 samples = 340 samples (enough for 18 kHz).
+// chunk_mix is in EWRAM (IWRAM_CODE broke Mode 4 display), so per-call cost
+// is heavy. Fewer, bigger calls amortize the EWRAM function-fetch overhead.
+#define CHUNK_SAMPLES_PER_HBLANK 20
+static int snd_chunked_hbl_active = 0; // 1 = HBlank ISR is registered + driving chunks
+
+IWRAM_CODE static void afn_chunked_hbl(void) {
+    int vc = REG_VCOUNT;
+    if (vc < 160) return;        // skip visible scanlines
+    if (vc & 3) return;          // every 4th VBlank scanline
+    afn_sound_chunk_mix(CHUNK_SAMPLES_PER_HBLANK);
 }
 
 // Trigger a looping sample voice with duration in ticks
@@ -6520,7 +6546,12 @@ int main(void)
 #ifdef AFN_HAS_SOUND
         snd_frame++;
 #endif
-        if (!snd_premix) { if (snd_chunked) afn_sound_mix_chunked(); else afn_sound_mix(); }
+        // Mix dispatch (pre-vblank slot):
+        //   chunked+hbl: skip — HBlanks have been mixing across the frame
+        //   chunked+no hbl: Stage 1 shim runs all-in-one
+        //   else !premix: legacy mix
+        if (snd_chunked_hbl_active) { /* HBlanks did the work */ }
+        else if (!snd_premix) { if (snd_chunked) afn_sound_mix_chunked(); else afn_sound_mix(); }
         // FPS measurement: count frames, update every ~1 second using Timer 3
         // Timer 3: prescaler=1024, ticks at 16384 Hz. 16384 ticks ≈ 1 second.
         dbg_fps_frames++;
@@ -6554,9 +6585,21 @@ int main(void)
                 REG_DISPCNT &= ~DCNT_BG2; // Mode 7: BG2 managed by HBlank ISR
             }
         }
+        // Chunked HBlank path: finalize the accumulator (HBlanks filled it
+        // during this iter) BEFORE the swap, so the swap rotates DMA to the
+        // freshly clamped buffer.
+        if (snd_chunked_hbl_active) afn_sound_chunk_finalize();
         // ISR-swap path: VBlank ISR handles the swap directly so it lands
         // exactly on VBlank even when render busts the budget. Else swap here.
         if (!(snd_premix && snd_isr_swap)) afn_sound_swap();
+        // Chunked HBlank path: re-setup AFTER swap, clears the accumulator for
+        // the next frame's HBlank chunks (which will mix into the buffer that
+        // becomes the NEXT-NEXT play buffer). Also re-register our HBlank ISR
+        // — scene transitions call irq_delete(II_HBLANK) which removes it.
+        if (snd_chunked_hbl_active) {
+            if (afn_current_mode == 0) irq_add(II_HBLANK, afn_chunked_hbl);
+            afn_sound_chunk_setup();
+        }
         // Tick sequencer once per VBlank-equivalent to keep tempo correct
 #ifdef AFN_HAS_SOUND
         { int st; for (st = 0; st < snd_frame_scale; st++) afn_sound_tick(); }
@@ -6564,7 +6607,8 @@ int main(void)
         // Pre-mix path: fill the next audio buffer immediately, before render.
         // Costs ~1 frame of audio latency but guarantees the buffer is ready
         // even if the upcoming render frame overshoots VBlank.
-        if (snd_premix) { if (snd_chunked) afn_sound_mix_chunked(); else afn_sound_mix(); }
+        if (snd_chunked_hbl_active) { /* HBlanks will mix during next iter */ }
+        else if (snd_premix) { if (snd_chunked) afn_sound_mix_chunked(); else afn_sound_mix(); }
         key_poll();
 
         if (key_hit(KEY_START))
