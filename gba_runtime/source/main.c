@@ -1690,8 +1690,7 @@ static void hud_font_load(int staticTileCount)
     /* Place font tiles AFTER static asset tiles in OBJ VRAM.
        Mode 4: static tiles start at slot 512 + AFN_DIR_VRAM_TILES_M4 (e.g. 724).
        Mode 0/Mode 7: start right after dir tile region.
-       To stay inside the 1024-tile cap, only the font types actually
-       referenced by HUD text rows are loaded (each font = 96 tiles). */
+       Falls back to 0 if it'd run past the 1024-tile cap. */
     int staticEnd;
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
     if (afn_current_mode == 1) {
@@ -1708,42 +1707,33 @@ static void hud_font_load(int staticTileCount)
 #else
     staticEnd = AFN_DIR_VRAM_TILES + staticTileCount;
 #endif
-
-    /* Scan referenced font types so unused fonts don't burn 96 tiles each. */
-    u8 fontUsed[3] = {0, 0, 0};
-#if defined(AFN_HUD_TEXT_COUNT) && AFN_HUD_TEXT_COUNT > 0
-    { int ti; for (ti = 0; ti < AFN_HUD_TEXT_COUNT; ti++) {
-        u8 ft = afn_hud_texts[ti].font;
-        if (ft < 3) fontUsed[ft] = 1;
-    } }
-#else
-    /* No HUD text rows — nothing to load. Slots stay at 0. */
-#endif
-
-    hud_font_tile_base       = 0;
-    hud_font_small_tile_base = 0;
-    hud_font_5x7_tile_base   = 0;
-    int cursor = staticEnd;
-    if (fontUsed[0] && cursor + 96 <= 1024) { hud_font_tile_base       = cursor; cursor += 96; }
-    if (fontUsed[1] && cursor + 96 <= 1024) { hud_font_small_tile_base = cursor; cursor += 96; }
-    if (fontUsed[2] && cursor + 96 <= 1024) { hud_font_5x7_tile_base   = cursor; cursor += 96; }
+    hud_font_tile_base       = staticEnd;
+    hud_font_small_tile_base = hud_font_tile_base + 96;
+    hud_font_5x7_tile_base   = hud_font_small_tile_base + 96;
+    /* Clamp: if a font would overflow past 1023, place it at 0 (safe but invisible) */
+    if (hud_font_tile_base + 96 > 1024)       hud_font_tile_base = 0;
+    if (hud_font_small_tile_base + 96 > 1024) hud_font_small_tile_base = 0;
+    if (hud_font_5x7_tile_base + 96 > 1024)   hud_font_5x7_tile_base = 0;
 
     // Set OBJ palette bank 15: entry 1 = text color, entry 2 = background fill
     ((u16*)0x05000200)[15 * 16 + 1] = afn_text_color;
     ((u16*)0x05000200)[15 * 16 + 2] = RGB15(31, 31, 31); // white background
 
+    // Convert 96 normal glyphs into 4bpp tiles (bgIdx=0 for transparent background)
+    u32* dst = (u32*)(0x06010000 + hud_font_tile_base * 32);
     int gi;
-    if (hud_font_tile_base) {
-        u32* dst = (u32*)(0x06010000 + hud_font_tile_base * 32);
-        for (gi = 0; gi < 96; gi++) font_glyph_to_tile(dst + gi * 8, hud_font[gi], 1, 0);
+    for (gi = 0; gi < 96; gi++) {
+        font_glyph_to_tile(dst + gi * 8, hud_font[gi], 1, 0);
     }
-    if (hud_font_small_tile_base) {
-        u32* dst = (u32*)(0x06010000 + hud_font_small_tile_base * 32);
-        for (gi = 0; gi < 96; gi++) font_glyph_to_tile(dst + gi * 8, hud_font_small[gi], 1, 0);
+    // Convert 96 small pixel glyphs into 4bpp tiles
+    dst = (u32*)(0x06010000 + hud_font_small_tile_base * 32);
+    for (gi = 0; gi < 96; gi++) {
+        font_glyph_to_tile(dst + gi * 8, hud_font_small[gi], 1, 0);
     }
-    if (hud_font_5x7_tile_base) {
-        u32* dst = (u32*)(0x06010000 + hud_font_5x7_tile_base * 32);
-        for (gi = 0; gi < 96; gi++) font_glyph_to_tile(dst + gi * 8, hud_font_5x7[gi], 1, 0);
+    // Convert 96 5x7 glyphs into 4bpp tiles
+    dst = (u32*)(0x06010000 + hud_font_5x7_tile_base * 32);
+    for (gi = 0; gi < 96; gi++) {
+        font_glyph_to_tile(dst + gi * 8, hud_font_5x7[gi], 1, 0);
     }
     hud_font_loaded = 1;
 }
@@ -7134,10 +7124,15 @@ int main(void)
                 { int anyHudVisible = 0;
                 { int ei2; for (ei2 = 0; ei2 < AFN_HUD_ELEM_COUNT; ei2++) if (afn_hud_visible[ei2]) anyHudVisible = 1; }
                 if (anyHudVisible) {
-                    // Static tiles are already DMA'd by init_obj_sprites at the
-                    // post-direction slot; no per-frame re-DMA needed. (Re-DMAing
-                    // to 1024-staticTiles used to clobber the font tiles placed by
-                    // hud_font_load after commit 048968a moved fonts after static.)
+                    // DMA all static tiles from ROM into end of OBJ VRAM
+                    int staticTiles = AFN_ALL_TILES_LEN / 32;
+                    int vramStart = 1024 - staticTiles;
+                    if (vramStart < 0) vramStart = 0;
+                    {
+                        const u32 *tsrc = afn_all_tiles;
+                        u32 *tdst = (u32*)(0x06010000 + vramStart * 32);
+                        int w; for (w = 0; w < (int)(AFN_ALL_TILES_LEN / 4); w++) tdst[w] = tsrc[w];
+                    }
                     // Dynamic palette bank assignment for visible HUD assets
                     // Assigns unique palette banks at runtime so assets don't
                     // fight over shared banks from export time
@@ -7230,7 +7225,7 @@ int main(void)
                     } }
                     }
                     // Load font into OBJ VRAM if not yet loaded
-                    if (!hud_font_loaded) hud_font_load(AFN_ALL_TILES_LEN / 32);
+                    if (!hud_font_loaded) hud_font_load(staticTiles);
                     tm_hud_was_visible = 1;
                 } else if (tm_hud_was_visible) {
                     // HUD just closed — force re-DMA of direction facings
@@ -7373,9 +7368,10 @@ int main(void)
 
                     int pStart = afn_hud_elems[ei].pieceStart;
                     int pCount = afn_hud_elems[ei].pieceCount;
-                    // HUD pieces now reference the init_obj_sprites layout
-                    // directly, so no remap needed.
-                    int hudTileAdj = 0;
+                    // Compute tile adjustment: assets store tileStart as (rawOff + 512 + DIR_VRAM_TILES)
+                    // We placed tiles at VRAM (1024 - staticTiles), so adjustment = 512 + DIR_VRAM_TILES - (1024 - staticTiles)
+                    int staticTiles2 = AFN_ALL_TILES_LEN / 32;
+                    int hudTileAdj = 512 + AFN_DIR_VRAM_TILES - (1024 - staticTiles2);
                     int pi;
                     // Render layers in order: highest layer value first (lowest OAM slot = on top)
                     // layers[0..3] map to: 0=pieces, 1=sprites, 2=text, 3=cursor
@@ -8115,10 +8111,15 @@ int main(void)
             { int ei2; for (ei2 = 0; ei2 < AFN_HUD_ELEM_COUNT; ei2++) if (afn_hud_visible[ei2]) anyHudVisible = 1; }
             int m4HudOamSlot = 48; // starts after floor sprite OAM slots (16-47)
             if (anyHudVisible) {
-                // Static tiles are already DMA'd by init_obj_sprites at the
-                // post-direction slot; no per-frame re-DMA needed. (Re-DMAing
-                // to 1024-staticTiles used to clobber the font tiles placed by
-                // hud_font_load after commit 048968a moved fonts after static.)
+                // DMA all static tiles to end of OBJ VRAM
+                int staticTiles = AFN_ALL_TILES_LEN / 32;
+                int vramStart = 1024 - staticTiles;
+                if (vramStart < 512) vramStart = 512; // Mode 4: OBJ tiles start at 512
+                {
+                    const u32 *tsrc = afn_all_tiles;
+                    u32 *tdst = (u32*)(0x06010000 + vramStart * 32);
+                    int w; for (w = 0; w < (int)(AFN_ALL_TILES_LEN / 4); w++) tdst[w] = tsrc[w];
+                }
                 // Dynamic palette remap for HUD assets
                 { int nextBank = 1;
                 int bankOwner[16];
@@ -8193,7 +8194,7 @@ int main(void)
                     REG_BLDALPHA = BLD_EVA(blendAlpha) | BLD_EVB(16 - blendAlpha);
                 } }
                 }
-                if (!hud_font_loaded) hud_font_load(AFN_ALL_TILES_LEN / 32);
+                if (!hud_font_loaded) hud_font_load(staticTiles);
                 m4_hud_was_visible = 1;
             } else if (m4_hud_was_visible) {
                 hud_font_loaded = 0;
@@ -8302,7 +8303,8 @@ int main(void)
 #endif
                 int pStart = afn_hud_elems[ei].pieceStart;
                 int pCount = afn_hud_elems[ei].pieceCount;
-                int hudTileAdj = 0; // pieces reference init_obj_sprites layout directly
+                int staticTiles2 = AFN_ALL_TILES_LEN / 32;
+                int hudTileAdj = 512 + AFN_DIR_VRAM_TILES - (1024 - staticTiles2);
                 int pi;
                 int layerOrder[4];
                 { int lp = afn_hud_elems[ei].layerPieces;
