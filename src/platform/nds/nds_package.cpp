@@ -127,7 +127,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                                 const std::vector<GBASpriteAssetExport>& assets,
                                 const GBACameraExport& camera,
                                 const std::vector<GBAMeshExport>& meshes,
-                                float orbitDist)
+                                float orbitDist,
+                                const std::vector<GBASoundSampleExport>& soundSamples,
+                                const std::vector<GBASoundInstanceExport>& soundInstances)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
     std::ofstream f(outPath);
@@ -365,6 +367,138 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "};\n\n";
     }
 
+    // ---- Sound / PCM Audio Data (NDS path — hardware mixer on ARM7) ----
+    // GBA-only mixer toggles (compat/hifi/lowrate/bufscale/mixpad/premix/
+    // isrswap/chunked/attenuate_a/triplebuf) are NOT emitted — there is no
+    // ARM9 software mixer to tune.
+    if (!soundSamples.empty()) {
+        f << "\n// ---- PCM Samples ----\n";
+        f << "#define AFN_SOUND_SAMPLE_COUNT " << soundSamples.size() << "\n";
+        f << "#define AFN_SOUND_INSTANCE_COUNT " << soundInstances.size() << "\n\n";
+
+        for (int i = 0; i < (int)soundSamples.size(); i++) {
+            auto& smp = soundSamples[i];
+            bool use16 = !smp.data16.empty() && (int)smp.data16.size() == (int)smp.data.size();
+            if (use16) {
+                f << "static const s16 afn_pcm_" << i << "[] __attribute__((aligned(4))) = {\n    ";
+                for (int j = 0; j < (int)smp.data16.size(); j++) {
+                    f << (int)smp.data16[j] << ",";
+                    if ((j & 15) == 15) f << "\n    ";
+                }
+                int padVal = 0;
+                if (smp.loop && smp.loopStart >= 0 && smp.loopStart < (int)smp.data16.size())
+                    padVal = (int)smp.data16[smp.loopStart];
+                f << padVal << "\n};\n";
+            } else {
+                f << "static const s8 afn_pcm_" << i << "[] __attribute__((aligned(4))) = {\n    ";
+                for (int j = 0; j < (int)smp.data.size(); j++) {
+                    f << (int)smp.data[j] << ",";
+                    if ((j & 31) == 31) f << "\n    ";
+                }
+                int padVal = 0;
+                if (smp.loop && smp.loopStart >= 0 && smp.loopStart < (int)smp.data.size())
+                    padVal = (int)smp.data[smp.loopStart];
+                f << padVal << "\n};\n";
+            }
+            f << "#define AFN_PCM_" << i << "_LEN " << smp.data.size() << "\n";
+            f << "#define AFN_PCM_" << i << "_RATE " << smp.sampleRate << "\n";
+            f << "#define AFN_PCM_" << i << "_16BIT " << (use16 ? 1 : 0) << "\n\n";
+        }
+
+        f << "static const void* const afn_pcm_ptrs[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    afn_pcm_" << i << ",\n";
+        f << "};\n";
+        f << "static const u8 afn_pcm_is16[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++) {
+            bool use16 = !soundSamples[i].data16.empty() && (int)soundSamples[i].data16.size() == (int)soundSamples[i].data.size();
+            f << "    " << (use16 ? 1 : 0) << ",\n";
+        }
+        f << "};\n";
+        f << "static const int afn_pcm_lens[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    AFN_PCM_" << i << "_LEN,\n";
+        f << "};\n";
+        f << "static const int afn_pcm_rates[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    AFN_PCM_" << i << "_RATE,\n";
+        f << "};\n";
+        f << "static const u8 afn_pcm_loop[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << (soundSamples[i].loop ? 1 : 0) << ",\n";
+        f << "};\n";
+        f << "static const int afn_pcm_loop_start[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << soundSamples[i].loopStart << ",\n";
+        f << "};\n";
+        f << "static const int afn_pcm_loop_end[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++) {
+            int le = soundSamples[i].loopEnd > 0 ? soundSamples[i].loopEnd : (int)soundSamples[i].data.size();
+            f << "    " << le << ",\n";
+        }
+        f << "};\n";
+        f << "static const u8 afn_pcm_vol_scale[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << (soundSamples[i].volScale > 255 ? 255 : soundSamples[i].volScale) << ",\n";
+        f << "};\n\n";
+
+        f << "typedef struct { int tick; u8 note; u8 vel; u8 smpIdx; u8 channel; int dur; } AfnSndNote;\n\n";
+
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            auto& inst = soundInstances[i];
+            if (inst.notes.empty()) continue;
+            f << "// Instance " << i << ": " << inst.name << "\n";
+            f << "static const AfnSndNote afn_snd_notes_" << i << "[] = {\n";
+            for (auto& n : inst.notes) {
+                f << "    {" << n.tick << "," << n.note << "," << n.velocity << "," << n.sampleIdx << "," << n.channel << "," << n.duration << "},\n";
+            }
+            f << "};\n";
+            f << "#define AFN_SND_" << i << "_NOTE_COUNT " << inst.notes.size() << "\n";
+            f << "#define AFN_SND_" << i << "_TEMPO " << inst.tempo << "\n";
+            f << "#define AFN_SND_" << i << "_TPB " << inst.ticksPerBeat << "\n\n";
+        }
+
+        f << "static const AfnSndNote* const afn_snd_note_ptrs[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            if (soundInstances[i].notes.empty()) f << "    0,\n";
+            else                                 f << "    afn_snd_notes_" << i << ",\n";
+        }
+        f << "};\n";
+        f << "static const int afn_snd_note_counts[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++)
+            f << "    " << soundInstances[i].notes.size() << ",\n";
+        f << "};\n";
+        f << "static const int afn_snd_tpf[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            int tpf = soundInstances[i].tempo * soundInstances[i].ticksPerBeat * 256 / 3600;
+            if (tpf < 1) tpf = 1;
+            f << "    " << tpf << ",\n";
+        }
+        f << "};\n";
+        f << "static const u8 afn_snd_voices[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++)
+            f << "    " << soundInstances[i].voiceCount << ",\n";
+        f << "};\n";
+        f << "static const u8 afn_snd_loop[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++)
+            f << "    " << (soundInstances[i].loop ? 1 : 0) << ",\n";
+        f << "};\n";
+        f << "static const int afn_snd_loop_start[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++)
+            f << "    " << soundInstances[i].loopStartTick << ",\n";
+        f << "};\n";
+        f << "static const int afn_snd_loop_end[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            int loopEnd = soundInstances[i].loopEndTick;
+            if (loopEnd <= 0 && !soundInstances[i].notes.empty())
+                loopEnd = soundInstances[i].notes.back().tick + soundInstances[i].notes.back().duration;
+            f << "    " << loopEnd << ",\n";
+        }
+        f << "};\n\n";
+
+        f << "#define AFN_HAS_SOUND 1\n";
+    }
+
     f << "#endif // MAPDATA_H\n";
     f.close();
     return true;
@@ -380,13 +514,15 @@ bool PackageNDS(const std::string& runtimeDir,
                 const GBACameraExport& camera,
                 const std::vector<GBAMeshExport>& meshes,
                 float orbitDist,
+                const std::vector<GBASoundSampleExport>& soundSamples,
+                const std::vector<GBASoundInstanceExport>& soundInstances,
                 std::string& errorMsg)
 {
     std::string buildOutput;
     std::string msysDir = ToMsysPath(runtimeDir);
 
     // Step 0: Generate mapdata.h
-    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist))
+    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances))
     {
         errorMsg = "Failed to write mapdata.h to " + runtimeDir + "/include/";
         return false;

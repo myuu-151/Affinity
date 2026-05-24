@@ -13964,7 +13964,8 @@ void FrameTick(float dt)
                     bool ok;
                     if (target == BuildTarget::NDS)
                         ok = PackageNDS(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                                        exportMeshes, exportOrbitDist, err);
+                                        exportMeshes, exportOrbitDist,
+                                        exportSoundSamples, exportSoundInstances, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,
