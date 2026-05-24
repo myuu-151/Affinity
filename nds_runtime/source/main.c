@@ -27,17 +27,25 @@ static void init_video(void)
 
     glInit();
     glEnable(GL_ANTIALIAS | GL_TEXTURE_2D);
-    glClearColor(8, 12, 20, 31);
+    glClearColor(0, 0, 0, 31);  // black backdrop
     glClearPolyID(63);
     glClearDepth(0x7FFF);
     glViewport(0, 0, 255, 191);
 
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    gluPerspective(70, 256.0 / 192.0, 0.1, 100);
+    // Far plane bumped from 100 → 1024. Our coords are 16.8 fixed scaled
+    // through fx8_to_f32 (shift-left-4), so a 256-unit-wide scene maps to
+    // ~256 in f32 world units after the matrix — easy to put the far plane
+    // inside the scene with the default value of 100.
+    gluPerspective(70, 256.0 / 192.0, 0.1, 1024);
 
-    m7_bg = bgInit(2, BgType_Rotation, BgSize_R_256x256, 4, 0);
-    bgSetPriority(m7_bg, 3);
+    // Warm up the geometry engine: it needs the projection matrix to settle
+    // before the first user draw, otherwise the first frame renders with a
+    // stale (often identity) projection — the cube appears as a single dot
+    // until the next D-pad input forces a fresh frame.
+    glFlush(0);
+    swiWaitForVBlank();
 }
 
 int main(void)
@@ -54,6 +62,15 @@ int main(void)
     irqEnable(IRQ_HBLANK);
 
     iprintf("Affinity NDS\n");
+
+    // Pre-roll the GPU pipeline: submit-display latency means the first user
+    // frame appears with stale state (cube collapses to a 1-pixel dot until
+    // input forces a re-render). A few warmup frames push valid geometry +
+    // matrices through before the player sees anything.
+    for (int w = 0; w < 4; w++) {
+        afn_fps3d_update();
+        swiWaitForVBlank();
+    }
 
     while (pmMainLoop())
     {

@@ -4,6 +4,7 @@
 #include "affinity.h"
 #include "mapdata.h"
 #include <nds/arm9/videoGL.h>
+#include <stdio.h>
 
 // ---------------------------------------------------------------------------
 // Camera state — definitions (extern in affinity.h)
@@ -135,11 +136,18 @@ static void render_meshes(void)
         int grayscale     = afn_mesh_desc[meshIdx][13];
 
         glPushMatrix();
-        glTranslatef32(fx8_to_f32(wx - cam_x),
+        // Absolute world coords — gluLookAtf32 already applied the camera
+        // transform.
+        glTranslatef32(fx8_to_f32(wx),
                        fx8_to_f32(wy),
-                       fx8_to_f32(wz - cam_z));
+                       fx8_to_f32(wz));
         if (rot != 0)
             glRotateYi(rot << 16 >> 6);
+        // Mesh local vertex coords are ±64 fx8 max — at the identity scale
+        // they're 0.016 DS world units across (≈0.2 px on screen). Scale up
+        // so meshes have meaningful extent. 64× engulfed the camera; 8× is
+        // a reasonable starting point — tune per-project later.
+        glScalef32(inttof32(8), inttof32(8), inttof32(8));
 
         uint32_t polyFmt = POLY_ALPHA(31);
         if (cullMode == 0) polyFmt |= POLY_CULL_BACK;
@@ -155,7 +163,6 @@ static void render_meshes(void)
         int g = (cg << 3) | (cg >> 2);
         int b = (cb << 3) | (cb >> 2);
         if (grayscale) {
-            // ITU-R BT.601 luma — matches what GBA's grayscale path produces.
             int y = (r * 76 + g * 150 + b * 29) >> 8;
             r = g = b = y;
         }
@@ -212,12 +219,20 @@ static void render_meshes(void)
 #endif
 
 // ---------------------------------------------------------------------------
-// Input + camera tick
+// Input + camera tick (WASD = D-pad: W/S = walk fwd/back, A/D = turn)
 // ---------------------------------------------------------------------------
 static void update_camera(void)
 {
     scanKeys();
     uint32_t held = keysHeld();
+    {
+        static int s_dbgFrame = 0;
+        s_dbgFrame++;
+        if ((s_dbgFrame & 15) == 0) {
+            iprintf("\x1b[10;0Hkeys=%04x cx=%d cz=%d ca=%d   ",
+                    (unsigned)held, cam_x >> FX_SHIFT, cam_z >> FX_SHIFT, (int)cam_angle);
+        }
+    }
 
     int speed = AFN_WALK_SPEED;
     if (held & KEY_R) speed = AFN_SPRINT_SPEED;
@@ -263,11 +278,9 @@ void afn_fps3d_init(void)
     g_cosf    = brad_cos(cam_angle);
     g_sinf    = brad_sin(cam_angle);
 
-    // Default directional light (front-top, white). Only takes effect on
-    // meshes with the per-mesh `lit` flag set (POLY_FORMAT_LIGHT0).
     glLight(0,
             RGB15(31, 31, 31),
-            floattov10(-0.5f),  // light from camera-front-down
+            floattov10(-0.5f),
             floattov10(-0.7f),
             floattov10(-0.5f));
     glMaterialf(GL_AMBIENT,  RGB15(8, 8, 8));
@@ -278,8 +291,6 @@ void afn_fps3d_init(void)
 
 // ---------------------------------------------------------------------------
 // Scene transitions — brightness-ramp fade out → swap → fade back in.
-// The actual scene swap is a no-op stub right now (Phase 3 wires it to the
-// scripted scene loader). This gives us the fade infrastructure on its own.
 // ---------------------------------------------------------------------------
 void afn_scene_start_transition(int sceneIdx, int sceneMode, int fadeFrames)
 {
@@ -288,14 +299,13 @@ void afn_scene_start_transition(int sceneIdx, int sceneMode, int fadeFrames)
     afn_pending_scene_mode = sceneMode;
     afn_fade_frames        = fadeFrames;
     afn_fade_counter       = fadeFrames;
-    afn_fade_target        = -16;   // -16 = full black on NDS master bright
-    s_fade_phase           = 1;     // fading out
+    afn_fade_target        = -16;
+    s_fade_phase           = 1;
 }
 
 void afn_scene_tick(void)
 {
     if (s_fade_phase == 0) {
-        // Idle — no fade in progress.
         REG_MASTER_BRIGHT = 0;
         return;
     }
@@ -304,11 +314,9 @@ void afn_scene_tick(void)
     if (afn_fade_counter > 0) afn_fade_counter--;
 
     if (s_fade_phase == 1) {
-        // Fade out: brightness 0 → -16 over afn_fade_frames frames.
         int t = afn_fade_frames - afn_fade_counter;
         cur = (afn_fade_target * t) / (afn_fade_frames ? afn_fade_frames : 1);
         if (afn_fade_counter == 0) {
-            // Reached black — perform the swap, flip to fade-in.
             afn_current_scene = afn_pending_scene;
             afn_current_mode  = afn_pending_scene_mode;
             afn_pending_scene = -1;
@@ -316,24 +324,30 @@ void afn_scene_tick(void)
             s_fade_phase      = 2;
         }
     } else {
-        // Fade in: brightness -16 → 0.
         int t = afn_fade_counter;
         cur = (afn_fade_target * t) / (afn_fade_frames ? afn_fade_frames : 1);
         if (afn_fade_counter == 0) s_fade_phase = 0;
     }
 
-    // NDS REG_MASTER_BRIGHT: low 5 bits = level (0..16), bits 14-15 = mode
-    // (1 = darken, 2 = lighten). Encode our signed cur into that layout.
     int level = cur < 0 ? -cur : cur;
     if (level > 16) level = 16;
     REG_MASTER_BRIGHT = (cur < 0)
-        ? (level | (1 << 14))   // darken
+        ? (level | (1 << 14))
         : (cur > 0 ? (level | (2 << 14)) : 0);
 }
 
+// ---------------------------------------------------------------------------
+// Per-frame render: FPS camera + project meshes.
+// ---------------------------------------------------------------------------
 void afn_fps3d_update(void)
 {
     update_camera();
+
+    // Re-set projection every frame (init-time set doesn't survive to first
+    // user frame — cheap to redo each frame and always correct).
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(70, 256.0 / 192.0, 0.1, 1024);
 
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
@@ -343,8 +357,8 @@ void afn_fps3d_update(void)
 
     gluLookAtf32(
         fx8_to_f32(cam_x), fx8_to_f32(cam_h), fx8_to_f32(cam_z),
-        fx8_to_f32(lookX), 0,                 fx8_to_f32(lookZ),
-        0,                 inttof32(1),       0
+        fx8_to_f32(lookX), fx8_to_f32(cam_h), fx8_to_f32(lookZ),
+        0, inttof32(1), 0
     );
 
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0

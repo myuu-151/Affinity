@@ -15,8 +15,16 @@
 #define FX_ONE    (1 << FX_SHIFT)
 #define FX_MUL(a, b) (((a) * (b)) >> FX_SHIFT)
 
-static inline int32_t fx8_to_f32(int fx8) { return fx8 << 4; }  // 8.8  -> 20.12
-static inline int16_t fx8_to_v16(int fx8) { return (int16_t)(fx8 << 4); } // 8.8 -> 4.12
+// Project coords are 8.8 fixed where 256 = 1 editor pixel. Max scene extent
+// ~32767 fx8 = 128 px — shifting left 4 into f32/v16 wraps int16. Treat
+// 1 fx8 = 1 v16/f32 unit directly: 4096 fx8 = 1.0 DS world unit ≈ 16 px.
+// Whole 128-px scene → 8 DS world units → fits v16's ±8 range.
+static inline int32_t fx8_to_f32(int fx8) { return fx8; }
+static inline int16_t fx8_to_v16(int fx8) {
+    if (fx8 >  32767) return  32767;
+    if (fx8 < -32768) return -32768;
+    return (int16_t)fx8;
+}
 
 // libnds sin/cos return .12, we operate in .8 — wrap once.
 static inline int brad_sin(uint16_t a) { return sinLerp(a) >> 4; }
