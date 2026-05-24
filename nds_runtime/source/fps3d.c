@@ -112,6 +112,11 @@ static void load_mesh_textures(void)
 
         glGenTextures(1, &gl_tex_ids[i]);
         glBindTexture(0, gl_tex_ids[i]);
+        // Texture parameter flags:
+        //   TEXGEN_TEXCOORD         — use UVs from glTexCoord2t16
+        //   GL_TEXTURE_WRAP_S/_T    — tile when UVs go past 0..texSize
+        //                             (default is CLAMP → bricks stop at edges)
+        //   GL_TEXTURE_COLOR0_TRANSPARENT — palette index 0 = transparent
         glTexImage2D(0, 0, GL_RGB16, sizeEnum, sizeEnum, 0,
                      TEXGEN_TEXCOORD, afn_mesh_tex_ptrs[i]);
         glColorTableEXT(0, 0, 16, 0, 0, afn_mesh_tex_pal_ptrs[i]);

@@ -269,15 +269,21 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             if (qic == 0) f << "0";
             f << "\n};\n";
 
-            // Texture data (if textured)
+            // Texture data (if textured). NDS GL_RGB16 (4bpp paletted) packs
+            // 2 pixels per byte (low nibble = even pixel, high nibble = odd).
+            // GBA texture pixels in the source vector are 1 per byte, so we
+            // pair them up here.
             if (mesh.textured && mesh.texW > 0 && mesh.texH > 0 && !mesh.texPixels.empty())
             {
                 f << "static const u8 afn_mesh" << mi << "_tex[] = {\n    ";
-                int texSize = mesh.texW * mesh.texH;
-                for (int i = 0; i < texSize && i < (int)mesh.texPixels.size(); i++)
+                int texPx = mesh.texW * mesh.texH;
+                int packed = (texPx + 1) / 2;
+                for (int i = 0; i < packed; i++)
                 {
-                    f << (int)mesh.texPixels[i];
-                    if (i + 1 < texSize) f << ", ";
+                    int lo = (i * 2 + 0 < (int)mesh.texPixels.size()) ? (mesh.texPixels[i*2+0] & 0xF) : 0;
+                    int hi = (i * 2 + 1 < (int)mesh.texPixels.size()) ? (mesh.texPixels[i*2+1] & 0xF) : 0;
+                    f << ((hi << 4) | lo);
+                    if (i + 1 < packed) f << ", ";
                     if ((i + 1) % 16 == 0) f << "\n    ";
                 }
                 f << "\n};\n";
