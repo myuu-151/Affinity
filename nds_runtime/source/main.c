@@ -58,6 +58,7 @@ int main(void)
     while (pmMainLoop())
     {
         afn_script_tick();
+        afn_scene_tick();      // fade state machine
         afn_fps3d_update();
         afn_hud_draw();
         afn_audio_tick();

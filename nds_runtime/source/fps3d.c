@@ -23,6 +23,18 @@ int m7_horizon = 60;
 int m7_bg;
 
 // ---------------------------------------------------------------------------
+// Scene-transition state (defs match affinity.h externs)
+// ---------------------------------------------------------------------------
+int afn_pending_scene      = -1;
+int afn_pending_scene_mode = 0;
+int afn_current_scene      = 0;
+int afn_current_mode       = 0;
+int afn_fade_target        = 0;
+int afn_fade_counter       = 0;
+int afn_fade_frames        = 0;
+static int s_fade_phase    = 0;   // 0 = idle, 1 = fading out, 2 = fading in
+
+// ---------------------------------------------------------------------------
 // Mode 7 floor — HBlank driven affine BG
 // ---------------------------------------------------------------------------
 void m7_hbl(void)
@@ -118,7 +130,9 @@ static void render_meshes(void)
         int quadIdxCount  = afn_mesh_desc[meshIdx][2];
         uint16_t color    = afn_mesh_desc[meshIdx][3];
         int cullMode      = afn_mesh_desc[meshIdx][4];
+        int lit           = afn_mesh_desc[meshIdx][5];
         int textured      = afn_mesh_desc[meshIdx][8];
+        int grayscale     = afn_mesh_desc[meshIdx][13];
 
         glPushMatrix();
         glTranslatef32(fx8_to_f32(wx - cam_x),
@@ -131,14 +145,21 @@ static void render_meshes(void)
         if (cullMode == 0) polyFmt |= POLY_CULL_BACK;
         else if (cullMode == 1) polyFmt |= POLY_CULL_FRONT;
         else polyFmt |= POLY_CULL_NONE;
+        if (lit) polyFmt |= POLY_FORMAT_LIGHT0;
         glPolyFmt(polyFmt);
 
         int cr = (color & 0x1F);
         int cg = ((color >> 5) & 0x1F);
         int cb = ((color >> 10) & 0x1F);
-        glColor3b((cr << 3) | (cr >> 2),
-                  (cg << 3) | (cg >> 2),
-                  (cb << 3) | (cb >> 2));
+        int r = (cr << 3) | (cr >> 2);
+        int g = (cg << 3) | (cg >> 2);
+        int b = (cb << 3) | (cb >> 2);
+        if (grayscale) {
+            // ITU-R BT.601 luma — matches what GBA's grayscale path produces.
+            int y = (r * 76 + g * 150 + b * 29) >> 8;
+            r = g = b = y;
+        }
+        glColor3b(r, g, b);
 
         if (textured && gl_tex_ids[meshIdx])
             glBindTexture(0, gl_tex_ids[meshIdx]);
@@ -238,6 +259,73 @@ void afn_fps3d_init(void)
     cam_angle = AFN_CAM_ANGLE;
     g_cosf    = brad_cos(cam_angle);
     g_sinf    = brad_sin(cam_angle);
+
+    // Default directional light (front-top, white). Only takes effect on
+    // meshes with the per-mesh `lit` flag set (POLY_FORMAT_LIGHT0).
+    glLight(0,
+            RGB15(31, 31, 31),
+            floattov10(-0.5f),  // light from camera-front-down
+            floattov10(-0.7f),
+            floattov10(-0.5f));
+    glMaterialf(GL_AMBIENT,  RGB15(8, 8, 8));
+    glMaterialf(GL_DIFFUSE,  RGB15(28, 28, 28));
+    glMaterialf(GL_SPECULAR, RGB15(0, 0, 0));
+    glMaterialf(GL_EMISSION, RGB15(0, 0, 0));
+}
+
+// ---------------------------------------------------------------------------
+// Scene transitions — brightness-ramp fade out → swap → fade back in.
+// The actual scene swap is a no-op stub right now (Phase 3 wires it to the
+// scripted scene loader). This gives us the fade infrastructure on its own.
+// ---------------------------------------------------------------------------
+void afn_scene_start_transition(int sceneIdx, int sceneMode, int fadeFrames)
+{
+    if (fadeFrames < 1) fadeFrames = 15;
+    afn_pending_scene      = sceneIdx;
+    afn_pending_scene_mode = sceneMode;
+    afn_fade_frames        = fadeFrames;
+    afn_fade_counter       = fadeFrames;
+    afn_fade_target        = -16;   // -16 = full black on NDS master bright
+    s_fade_phase           = 1;     // fading out
+}
+
+void afn_scene_tick(void)
+{
+    if (s_fade_phase == 0) {
+        // Idle — no fade in progress.
+        REG_MASTER_BRIGHT = 0;
+        return;
+    }
+
+    int cur;
+    if (afn_fade_counter > 0) afn_fade_counter--;
+
+    if (s_fade_phase == 1) {
+        // Fade out: brightness 0 → -16 over afn_fade_frames frames.
+        int t = afn_fade_frames - afn_fade_counter;
+        cur = (afn_fade_target * t) / (afn_fade_frames ? afn_fade_frames : 1);
+        if (afn_fade_counter == 0) {
+            // Reached black — perform the swap, flip to fade-in.
+            afn_current_scene = afn_pending_scene;
+            afn_current_mode  = afn_pending_scene_mode;
+            afn_pending_scene = -1;
+            afn_fade_counter  = afn_fade_frames;
+            s_fade_phase      = 2;
+        }
+    } else {
+        // Fade in: brightness -16 → 0.
+        int t = afn_fade_counter;
+        cur = (afn_fade_target * t) / (afn_fade_frames ? afn_fade_frames : 1);
+        if (afn_fade_counter == 0) s_fade_phase = 0;
+    }
+
+    // NDS REG_MASTER_BRIGHT: low 5 bits = level (0..16), bits 14-15 = mode
+    // (1 = darken, 2 = lighten). Encode our signed cur into that layout.
+    int level = cur < 0 ? -cur : cur;
+    if (level > 16) level = 16;
+    REG_MASTER_BRIGHT = (cur < 0)
+        ? (level | (1 << 14))   // darken
+        : (cur > 0 ? (level | (2 << 14)) : 0);
 }
 
 void afn_fps3d_update(void)

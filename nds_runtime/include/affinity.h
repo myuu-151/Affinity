@@ -47,6 +47,25 @@ extern int m7_bg;
 void m7_hbl(void);
 
 // ---------------------------------------------------------------------------
+// Scene-transition state (defined in fps3d.c — Phase 3 will move to scene.c)
+//
+// setActionFunc bodies for ChangeScene set afn_pending_scene + start a fade.
+// Brightness ramps from 0 → -16 (full black) over afn_fade_frames, swaps the
+// scene, then ramps back. Matches GBA semantics; uses NDS hardware brightness
+// (REG_MASTER_BRIGHT) instead of REG_BLDCNT.
+// ---------------------------------------------------------------------------
+extern int afn_pending_scene;       // next scene index, -1 = no pending
+extern int afn_pending_scene_mode;  // 0 = FPS, 1 = tilemap, 2 = legacy Mode 7
+extern int afn_current_scene;
+extern int afn_current_mode;
+extern int afn_fade_target;         // -16..0 desired brightness (0 = full bright)
+extern int afn_fade_counter;        // frames remaining in current fade
+extern int afn_fade_frames;         // duration of fade in frames
+
+void afn_scene_start_transition(int sceneIdx, int sceneMode, int fadeFrames);
+void afn_scene_tick(void);          // called per-frame from main loop
+
+// ---------------------------------------------------------------------------
 // Per-module init / per-frame entry points
 //   - main.c calls these in a fixed order each frame
 //   - modules that aren't ported yet supply no-op stubs (see their .c file)
