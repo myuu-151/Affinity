@@ -247,6 +247,9 @@ static void update_camera(void)
 void afn_fps3d_init(void)
 {
 #if defined(AFN_HAS_FLOOR) && AFN_HAS_FLOOR
+    vramSetBankB(VRAM_B_MAIN_BG);
+    m7_bg = bgInit(2, BgType_Rotation, BgSize_R_256x256, 4, 0);
+    bgSetPriority(m7_bg, 3);
     load_floor();
 #endif
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
