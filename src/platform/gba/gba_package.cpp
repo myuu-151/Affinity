@@ -1838,6 +1838,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
         } else {
             f << "static const int afn_hud_texts[1] = {0}; // no text\n";
         }
+        // Runtime uses this to scan afn_hud_texts[] for referenced fonts so
+        // hud_font_load only burns 96 OBJ tiles per font that's actually used.
+        f << "#define AFN_HUD_TEXT_COUNT " << totalText << "\n";
 
         // Keyframes: {frame, offX, offY, rot(brad8), scaleX(8.8), scaleY(8.8)}
         if (totalKf > 0) {

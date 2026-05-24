@@ -1687,53 +1687,48 @@ static int hud_blend_alpha = 16;
 
 static void hud_font_load(int staticTileCount)
 {
-    /* Place font tiles AFTER static asset tiles in OBJ VRAM.
-       Mode 4: static tiles start at slot 512 + AFN_DIR_VRAM_TILES_M4 (e.g. 724).
-       Mode 0/Mode 7: start right after dir tile region.
-       Falls back to 0 if it'd run past the 1024-tile cap. */
-    int staticEnd;
-#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-    if (afn_current_mode == 1) {
-        staticEnd = tm_dir_slot_count + staticTileCount;
-    } else if (afn_current_mode == 2) {
-        staticEnd = AFN_DIR_VRAM_TILES + staticTileCount;
-    } else {
-#ifdef AFN_DIR_VRAM_TILES_M4
-        staticEnd = 512 + AFN_DIR_VRAM_TILES_M4 + staticTileCount;
-#else
-        staticEnd = 512 + staticTileCount;
+    /* Place fonts JUST BELOW the re-DMA static region (which lives at
+       1024-staticTileCount). This is the pre-048968a layout that survived
+       tight-VRAM projects (e.g. Mode 4 with a 64x64 prop pushing static past
+       the 512-tile usable OBJ budget). The "place AFTER static" idea from
+       048968a was logically cleaner but didn't fit when static_end > 1024.
+       Also only load fonts actually referenced by afn_hud_texts[] (e219c96's
+       fix) so unused fonts don't burn 96 OBJ tiles each. */
+    u8 fontUsed[3] = {0, 0, 0};
+#if defined(AFN_HUD_TEXT_COUNT) && AFN_HUD_TEXT_COUNT > 0
+    { int ti; for (ti = 0; ti < AFN_HUD_TEXT_COUNT; ti++) {
+        u8 ft = afn_hud_texts[ti].font;
+        if (ft < 3) fontUsed[ft] = 1;
+    } }
 #endif
-    }
-#else
-    staticEnd = AFN_DIR_VRAM_TILES + staticTileCount;
-#endif
-    hud_font_tile_base       = staticEnd;
-    hud_font_small_tile_base = hud_font_tile_base + 96;
-    hud_font_5x7_tile_base   = hud_font_small_tile_base + 96;
-    /* Clamp: if a font would overflow past 1023, place it at 0 (safe but invisible) */
-    if (hud_font_tile_base + 96 > 1024)       hud_font_tile_base = 0;
-    if (hud_font_small_tile_base + 96 > 1024) hud_font_small_tile_base = 0;
-    if (hud_font_5x7_tile_base + 96 > 1024)   hud_font_5x7_tile_base = 0;
+
+    hud_font_tile_base       = 0;
+    hud_font_small_tile_base = 0;
+    hud_font_5x7_tile_base   = 0;
+    /* Allocate downward from the re-DMA region's lower edge. Order matches
+       pre-048968a (5x7 highest, normal lowest) so any tile-ID math that ever
+       baked in that ordering doesn't shift. */
+    int cursor = 1024 - staticTileCount;
+    if (fontUsed[2] && cursor - 96 >= 0) { cursor -= 96; hud_font_5x7_tile_base   = cursor; }
+    if (fontUsed[1] && cursor - 96 >= 0) { cursor -= 96; hud_font_small_tile_base = cursor; }
+    if (fontUsed[0] && cursor - 96 >= 0) { cursor -= 96; hud_font_tile_base       = cursor; }
 
     // Set OBJ palette bank 15: entry 1 = text color, entry 2 = background fill
     ((u16*)0x05000200)[15 * 16 + 1] = afn_text_color;
     ((u16*)0x05000200)[15 * 16 + 2] = RGB15(31, 31, 31); // white background
 
-    // Convert 96 normal glyphs into 4bpp tiles (bgIdx=0 for transparent background)
-    u32* dst = (u32*)(0x06010000 + hud_font_tile_base * 32);
     int gi;
-    for (gi = 0; gi < 96; gi++) {
-        font_glyph_to_tile(dst + gi * 8, hud_font[gi], 1, 0);
+    if (fontUsed[0]) {
+        u32* dst = (u32*)(0x06010000 + hud_font_tile_base * 32);
+        for (gi = 0; gi < 96; gi++) font_glyph_to_tile(dst + gi * 8, hud_font[gi], 1, 0);
     }
-    // Convert 96 small pixel glyphs into 4bpp tiles
-    dst = (u32*)(0x06010000 + hud_font_small_tile_base * 32);
-    for (gi = 0; gi < 96; gi++) {
-        font_glyph_to_tile(dst + gi * 8, hud_font_small[gi], 1, 0);
+    if (fontUsed[1]) {
+        u32* dst = (u32*)(0x06010000 + hud_font_small_tile_base * 32);
+        for (gi = 0; gi < 96; gi++) font_glyph_to_tile(dst + gi * 8, hud_font_small[gi], 1, 0);
     }
-    // Convert 96 5x7 glyphs into 4bpp tiles
-    dst = (u32*)(0x06010000 + hud_font_5x7_tile_base * 32);
-    for (gi = 0; gi < 96; gi++) {
-        font_glyph_to_tile(dst + gi * 8, hud_font_5x7[gi], 1, 0);
+    if (fontUsed[2]) {
+        u32* dst = (u32*)(0x06010000 + hud_font_5x7_tile_base * 32);
+        for (gi = 0; gi < 96; gi++) font_glyph_to_tile(dst + gi * 8, hud_font_5x7[gi], 1, 0);
     }
     hud_font_loaded = 1;
 }
