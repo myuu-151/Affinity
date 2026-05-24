@@ -1009,11 +1009,15 @@ static void afn_sound_tick(void) {
 }
 
 #else
-// No sound — stubs
+// No sound — stubs. Cover EVERY symbol the main loop references so projects
+// with zero audio (no PCM samples, no MIDI instances) still link cleanly.
 static inline void afn_sound_init(void) {}
 static inline void afn_play_sound(int id) { (void)id; }
 static inline void afn_stop_sound(void) {}
 static inline void afn_sound_mix(void) {}
+static inline void afn_sound_mix_chunked(void) {}
+static inline void afn_sound_chunk_setup(void) {}
+static inline void afn_sound_chunk_finalize(void) {}
 static inline void afn_sound_swap(void) {}
 static inline void afn_sound_tick(void) {}
 #endif // AFN_HAS_SOUND
