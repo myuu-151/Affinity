@@ -233,6 +233,20 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             }
             f << "};\n";
 
+            // Texture coordinates as t16 (4.12 fixed = u * texW * 16, v * texH * 16).
+            // Only meaningful when textured; emit zeros otherwise so the runtime
+            // can unconditionally read afn_meshN_uvs without an extra null check.
+            f << "static const s16 afn_mesh" << mi << "_uvs[] = {\n";
+            for (int v = 0; v < vc; v++)
+            {
+                float u = (v * 2 + 0 < (int)mesh.uvs.size()) ? mesh.uvs[v * 2 + 0] : 0.0f;
+                float vv = (v * 2 + 1 < (int)mesh.uvs.size()) ? mesh.uvs[v * 2 + 1] : 0.0f;
+                int16_t tu = (int16_t)(u * mesh.texW * 16.0f);
+                int16_t tv = (int16_t)(vv * mesh.texH * 16.0f);
+                f << "    " << tu << ", " << tv << ",\n";
+            }
+            f << "};\n";
+
             // Triangle indices
             f << "static const u16 afn_mesh" << mi << "_idx[] = {\n    ";
             for (int i = 0; i < ic; i++)
@@ -312,6 +326,14 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         for (size_t mi = 0; mi < meshes.size(); mi++)
         {
             f << "afn_mesh" << mi << "_qidx";
+            if (mi + 1 < meshes.size()) f << ", ";
+        }
+        f << " };\n";
+
+        f << "static const s16* afn_mesh_uv_ptrs[] = { ";
+        for (size_t mi = 0; mi < meshes.size(); mi++)
+        {
+            f << "afn_mesh" << mi << "_uvs";
             if (mi + 1 < meshes.size()) f << ", ";
         }
         f << " };\n";

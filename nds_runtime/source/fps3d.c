@@ -104,9 +104,15 @@ static void load_mesh_textures(void)
         int texH = afn_mesh_desc[i][9];
         if (texW == 0) continue;
 
+        // glTexImage2D wants size as the TEXTURE_SIZE_* enum
+        // (TEXTURE_SIZE_8=0, _16=1, _32=2, _64=3, _128=4, _256=5, _512=6, _1024=7),
+        // not the raw pixel count. log2(texW) - 3 gets us there for power-of-2 sizes.
+        int sizeEnum = 0, tw = texW;
+        while (tw > 8) { tw >>= 1; sizeEnum++; }
+
         glGenTextures(1, &gl_tex_ids[i]);
         glBindTexture(0, gl_tex_ids[i]);
-        glTexImage2D(0, 0, GL_RGB16, texW, texH, 0,
+        glTexImage2D(0, 0, GL_RGB16, sizeEnum, sizeEnum, 0,
                      TEXGEN_TEXCOORD, afn_mesh_tex_ptrs[i]);
         glColorTableEXT(0, 0, 16, 0, 0, afn_mesh_tex_pal_ptrs[i]);
     }
@@ -127,6 +133,7 @@ static void render_meshes(void)
 
         const int16_t* verts = afn_mesh_vert_ptrs[meshIdx];
         const uint16_t* idx  = afn_mesh_idx_ptrs[meshIdx];
+        const int16_t* uvs   = afn_mesh_uv_ptrs[meshIdx];
 
         int indexCount    = afn_mesh_desc[meshIdx][1];
         int quadIdxCount  = afn_mesh_desc[meshIdx][2];
@@ -157,36 +164,42 @@ static void render_meshes(void)
         if (lit) polyFmt |= POLY_FORMAT_LIGHT0;
         glPolyFmt(polyFmt);
 
-        int cr = (color & 0x1F);
-        int cg = ((color >> 5) & 0x1F);
-        int cb = ((color >> 10) & 0x1F);
-        int r = (cr << 3) | (cr >> 2);
-        int g = (cg << 3) | (cg >> 2);
-        int b = (cb << 3) | (cb >> 2);
-        if (grayscale) {
-            int y = (r * 76 + g * 150 + b * 29) >> 8;
-            r = g = b = y;
+        int r, g, b;
+        if (textured && gl_tex_ids[meshIdx]) {
+            // Texture color is modulated by glColor; force white so the
+            // texture comes through unmodified. Per-mesh color is ignored
+            // for textured meshes (matches GBA behavior).
+            r = g = b = 255;
+            glBindTexture(0, gl_tex_ids[meshIdx]);
+        } else {
+            int cr = (color & 0x1F);
+            int cg = ((color >> 5) & 0x1F);
+            int cb = ((color >> 10) & 0x1F);
+            r = (cr << 3) | (cr >> 2);
+            g = (cg << 3) | (cg >> 2);
+            b = (cb << 3) | (cb >> 2);
+            if (grayscale) {
+                int y = (r * 76 + g * 150 + b * 29) >> 8;
+                r = g = b = y;
+            }
         }
         glColor3b(r, g, b);
 
-        if (textured && gl_tex_ids[meshIdx])
-            glBindTexture(0, gl_tex_ids[meshIdx]);
+        // Helper macro: emit (UV, vertex) for index i. UVs come from the
+        // exporter in t16 format (.4 fixed texel units) so we pass directly.
+        #define EMIT(i) do { \
+            if (textured) glTexCoord2t16(uvs[(i)*2+0], uvs[(i)*2+1]); \
+            glVertex3v16(fx8_to_v16(verts[(i)*3+0]), \
+                         fx8_to_v16(verts[(i)*3+1]), \
+                         fx8_to_v16(verts[(i)*3+2])); \
+        } while (0)
 
         if (indexCount > 0)
         {
             glBegin(GL_TRIANGLES);
             for (int t = 0; t + 3 <= indexCount; t += 3)
             {
-                int i0 = idx[t + 0], i1 = idx[t + 1], i2 = idx[t + 2];
-                glVertex3v16(fx8_to_v16(verts[i0 * 3 + 0]),
-                             fx8_to_v16(verts[i0 * 3 + 1]),
-                             fx8_to_v16(verts[i0 * 3 + 2]));
-                glVertex3v16(fx8_to_v16(verts[i1 * 3 + 0]),
-                             fx8_to_v16(verts[i1 * 3 + 1]),
-                             fx8_to_v16(verts[i1 * 3 + 2]));
-                glVertex3v16(fx8_to_v16(verts[i2 * 3 + 0]),
-                             fx8_to_v16(verts[i2 * 3 + 1]),
-                             fx8_to_v16(verts[i2 * 3 + 2]));
+                EMIT(idx[t + 0]); EMIT(idx[t + 1]); EMIT(idx[t + 2]);
             }
             glEnd();
         }
@@ -197,22 +210,12 @@ static void render_meshes(void)
             glBegin(GL_QUADS);
             for (int q = 0; q + 4 <= quadIdxCount; q += 4)
             {
-                int i0 = qidx[q + 0], i1 = qidx[q + 1], i2 = qidx[q + 2], i3 = qidx[q + 3];
-                glVertex3v16(fx8_to_v16(verts[i0 * 3 + 0]),
-                             fx8_to_v16(verts[i0 * 3 + 1]),
-                             fx8_to_v16(verts[i0 * 3 + 2]));
-                glVertex3v16(fx8_to_v16(verts[i1 * 3 + 0]),
-                             fx8_to_v16(verts[i1 * 3 + 1]),
-                             fx8_to_v16(verts[i1 * 3 + 2]));
-                glVertex3v16(fx8_to_v16(verts[i2 * 3 + 0]),
-                             fx8_to_v16(verts[i2 * 3 + 1]),
-                             fx8_to_v16(verts[i2 * 3 + 2]));
-                glVertex3v16(fx8_to_v16(verts[i3 * 3 + 0]),
-                             fx8_to_v16(verts[i3 * 3 + 1]),
-                             fx8_to_v16(verts[i3 * 3 + 2]));
+                EMIT(qidx[q + 0]); EMIT(qidx[q + 1]);
+                EMIT(qidx[q + 2]); EMIT(qidx[q + 3]);
             }
             glEnd();
         }
+        #undef EMIT
 
         glPopMatrix(1);
     }
