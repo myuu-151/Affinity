@@ -419,7 +419,7 @@ static void afn_play_sound(int instanceId) {
         // dispatcher reads. Write the slot at the literal address (0x03006de4 =
         // __isr_table + 8 = slot 1) which GDB proved is the live table.
         REG_TM1CNT_H = 0;
-        REG_TM1CNT_L = 65536 - 262;
+        REG_TM1CNT_L = 65536 - 2096; // ~8ms intervals (was 262 = 1ms then 1048 = 4ms; chunk_mix per-call overhead is heavy in EWRAM, fewer-bigger calls win)
         *(volatile u32*)0x03006de4 = 0x10;
         *(volatile u32*)0x03006de8 = (u32)afn_chunked_timer_isr;
         REG_IE |= 0x10;
@@ -530,12 +530,9 @@ IWRAM_CODE static void afn_sound_mix(void) {
     s8* buf = snd_buf[snd_cur_buf ^ 1];
     s8* buf_b = snd_fifo_b ? snd_buf_b[snd_cur_buf ^ 1] : 0;
     int mixN = (snd_mix_samples * snd_frame_scale) & ~3;
-    {
-        static int snd_pad_hold = 0;
-        if (snd_extra_vblanks > 0) snd_pad_hold = 3;
-        else if (snd_pad_hold > 0) snd_pad_hold--;
-        if (snd_mix_pad && snd_pad_hold > 0) mixN = (mixN + (mixN >> 2)) & ~3;
-    }
+    // Mix Padding (2a792ca form): pad only on the actual clamp frame, no hold.
+    // User-validated as the version that does NOT pitch-up audio.
+    if (snd_mix_pad && snd_extra_vblanks > 0) mixN = (mixN + (mixN >> 2)) & ~3;
     if (mixN > SND_BUF_SIZE) mixN = SND_BUF_SIZE;
     s16* mix_acc = snd_acc_a;
     {
@@ -646,12 +643,9 @@ static void afn_sound_chunk_setup(void) {
     s_mix_buf  = snd_buf[snd_cur_buf ^ 1];
     s_mix_bufB = snd_fifo_b ? snd_buf_b[snd_cur_buf ^ 1] : 0;
     int mixN = (snd_mix_samples * snd_frame_scale) & ~3;
-    {
-        static int hold = 0;
-        if (snd_extra_vblanks > 0) hold = 3;
-        else if (hold > 0) hold--;
-        if (snd_mix_pad && hold > 0) mixN = (mixN + (mixN >> 2)) & ~3;
-    }
+    // Mix Padding (2a792ca form): pad only on the actual clamp frame, no hold.
+    // User-validated as the version that does NOT pitch-up audio.
+    if (snd_mix_pad && snd_extra_vblanks > 0) mixN = (mixN + (mixN >> 2)) & ~3;
     if (mixN > SND_BUF_SIZE) mixN = SND_BUF_SIZE;
     s_mix_total = mixN;
     s_mix_offset = 0;
@@ -783,7 +777,7 @@ static void afn_sound_mix_chunked(void) {
 // scanlines and DISPSTAT (HBlank-based attempt broke Mode 4 display).
 // Prescaler 64, reload for ~1ms = ~16 calls/frame at 60fps × 20 samples
 // = ~320 samples (enough for 18 kHz).
-#define CHUNK_SAMPLES_PER_TIMER 20
+#define CHUNK_SAMPLES_PER_TIMER 160 // 2 IRQs/frame × 160 = 320 samples; deliberately *not* sized to cover Mix Padding's +25% headroom — letting the padding samples stay unmixed kills the pitch-up artifact MixPad used to introduce, which the user prefers.
 static int snd_chunked_hbl_active = 0; // kept name for back-compat with main loop dispatcher; "1 = chunked stage 2 active (HBlank or Timer1 variant)"
 
 IWRAM_CODE static void afn_chunked_hbl(void) {
@@ -6618,10 +6612,14 @@ int main(void)
         // Also re-assert Timer1 control bits AND the __isr_table[1] slot every
         // frame — something clears them after our setup call. Brute force.
         if (snd_chunked_hbl_active) {
-            REG_TM1CNT_H = 0x00C1;
-            *(volatile u32*)0x03006de4 = 0x10;
-            *(volatile u32*)0x03006de8 = (u32)afn_chunked_timer_isr;
-            REG_IE |= 0x10;
+            // Only re-assert Timer1 + __isr_table[1] when something cleared them
+            // (saves a handful of memory writes per frame; adds up at 60fps).
+            if (*(volatile u32*)0x03006de4 != 0x10) {
+                *(volatile u32*)0x03006de4 = 0x10;
+                *(volatile u32*)0x03006de8 = (u32)afn_chunked_timer_isr;
+            }
+            if ((REG_TM1CNT_H & 0xC1) != 0xC1) REG_TM1CNT_H = 0x00C1;
+            if (!(REG_IE & 0x10)) REG_IE |= 0x10;
             afn_sound_chunk_setup();
         }
         // Tick sequencer once per VBlank-equivalent to keep tempo correct
