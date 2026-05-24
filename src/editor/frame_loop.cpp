@@ -1155,6 +1155,7 @@ struct SoundInstance {
     int lowRate = 0;           // 0 = normal, 1 = ultra-low sample rate (~10kHz) for extreme low-FPS
     int preMix = 0;            // 0 = mix after render, 1 = mix right after VBlank swap (1 frame audio latency, survives heavy render frames)
     int isrSwap = 0;           // 0 = swap DMA in main loop, 1 = swap in VBlank ISR (only effective with Pre-Mix; swap lands exactly on VBlank even when render busts the budget)
+    int chunkedMixer = 0;      // 0 = single-call mix, 1 = chunked from HBlank ISR (Stage 2 — Stage 1 is no-op while we validate the refactor)
     bool loop = false;          // loop playback between loopStart and loopEnd ticks
     int loopStartTick = 0;      // loop region start (MIDI ticks)
     int loopEndTick = 0;        // loop region end (MIDI ticks, 0 = end of sequence)
@@ -5528,6 +5529,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "instLowRate=%d\n", si.lowRate);
         fprintf(f, "instPreMix=%d\n", si.preMix);
         fprintf(f, "instIsrSwap=%d\n", si.isrSwap);
+        fprintf(f, "instChunkedMixer=%d\n", si.chunkedMixer);
         fprintf(f, "instLoop=%d\n", si.loop ? 1 : 0);
         fprintf(f, "instLoopStart=%d\n", si.loopStartTick);
         fprintf(f, "instLoopEnd=%d\n", si.loopEndTick);
@@ -7821,6 +7823,7 @@ static bool LoadProject(const std::string& path)
                 else if (sscanf(line, "instLowRate=%d", &ival) == 1) curInst->lowRate = ival;
                 else if (sscanf(line, "instPreMix=%d", &ival) == 1) curInst->preMix = ival;
                 else if (sscanf(line, "instIsrSwap=%d", &ival) == 1) curInst->isrSwap = ival;
+                else if (sscanf(line, "instChunkedMixer=%d", &ival) == 1) curInst->chunkedMixer = ival;
                 else if (sscanf(line, "instLoop=%d", &ival) == 1) curInst->loop = (ival != 0);
                 else if (sscanf(line, "instLoopStart=%d", &ival) == 1) curInst->loopStartTick = ival;
                 else if (sscanf(line, "instLoopEnd=%d", &ival) == 1) curInst->loopEndTick = ival;
@@ -13872,6 +13875,7 @@ void FrameTick(float dt)
                         ie.lowRate = inst.lowRate;
                         ie.preMix = inst.preMix;
                         ie.isrSwap = inst.isrSwap;
+                        ie.chunkedMixer = inst.chunkedMixer;
                         ie.loop = inst.loop;
                         ie.loopStartTick = inst.loopStartTick;
                         ie.loopEndTick = inst.loopEndTick;
@@ -23727,6 +23731,12 @@ void FrameTick(float dt)
                 sProjectDirty = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Swap audio DMA from the VBlank interrupt handler instead of\nthe main loop, so the swap lands exactly on VBlank even when\nrender busts the frame budget. Only takes effect with Pre-Mix on.\nExperimental — if audio breaks weirdly, turn this off.");
+            bool cmix = inst.chunkedMixer != 0;
+            if (ImGui::Checkbox("Chunked Mixer", &cmix)) {
+                inst.chunkedMixer = cmix ? 1 : 0;
+                sProjectDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stage 1: refactored mixer into chunk-capable pieces (no\nbehavior change yet — Stage 2 will drive chunks from HBlank ISR\nso a heavy render frame can't starve the mixer). Experimental.");
             // Delta Time toggle — affects Mode 4 scene this instance plays in
             if (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size()) {
                 auto& ms = sMapScenes[sMapSelectedScene];
