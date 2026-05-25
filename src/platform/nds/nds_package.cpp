@@ -955,6 +955,43 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_score;\n";
         f << "extern int  afn_frame_count;\n";
         f << "extern int  afn_draw_distance;\n";
+        // Phase 3b adds: state expected by most script node bodies.
+        f << "extern int  afn_bg_color;\n";
+        f << "extern int  afn_cam_locked;\n";
+        f << "extern int  afn_cam_speed;\n";
+        f << "extern int  afn_checkpoint_set;\n";
+        f << "extern int  afn_checkpoint_x;\n";
+        f << "extern int  afn_checkpoint_y;\n";
+        f << "extern int  afn_checkpoint_z;\n";
+        f << "extern int  afn_dt_tick;\n";
+        f << "extern unsigned int afn_flags;\n";
+        f << "extern int  afn_force_x;\n";
+        f << "extern int  afn_force_z;\n";
+        f << "extern int  afn_friction;\n";
+        f << "extern int  afn_last_key;\n";
+        f << "extern int  afn_player_height;\n";
+        f << "extern int  afn_scripts_stopped;\n";
+        f << "extern int  afn_start_x;\n";
+        f << "extern int  afn_start_y;\n";
+        f << "extern int  afn_start_z;\n";
+        f << "extern int  afn_text_color;\n";
+        f << "extern int  afn_timer_visible;\n";
+        f << "extern int  afn_wall_collided_sprite;\n";
+        f << "extern int  afn_fade_target;\n";
+        f << "extern int  afn_fade_frames;\n";
+        f << "extern int  afn_fade_counter;\n";
+        // Per-sprite state arrays — sized to AFN_SPRITE_COUNT at most.
+        f << "#ifndef NUM_SPRITES\n";
+        f << "#define NUM_SPRITES " << (sprites.empty() ? 1 : (int)sprites.size()) << "\n";
+        f << "#endif\n";
+        f << "extern unsigned char afn_sprite_visible[NUM_SPRITES];\n";
+        f << "extern unsigned char afn_sprite_flip[NUM_SPRITES];\n";
+        f << "extern unsigned char afn_collision_enabled[NUM_SPRITES];\n";
+        f << "extern int afn_hp[NUM_SPRITES];\n";
+        f << "extern int afn_state_timer[NUM_SPRITES];\n";
+        // Player physics (defined in fps3d.c under AFN_HAS_SCRIPT — exported so scripts can read/write).
+        f << "extern int player_vy;\n";
+        f << "extern int player_ground_y;\n";
     }
     // Dispatcher stubs — replaced by per-node emission in a follow-up pass.
     f << "\n// Script dispatchers — stubs until per-node code emission lands.\n";

@@ -34,9 +34,13 @@ int afn_pending_scene      = -1;
 int afn_pending_scene_mode = 0;
 int afn_current_scene      = 0;
 int afn_current_mode       = 0;
+// Fade state lives in script_glue.c when scripts are on (so SceneChange /
+// FadeTo nodes can write it directly); fallback here otherwise.
+#ifndef AFN_HAS_SCRIPT
 int afn_fade_target        = 0;
 int afn_fade_counter       = 0;
 int afn_fade_frames        = 0;
+#endif
 static int s_fade_phase    = 0;   // 0 = idle, 1 = fading out, 2 = fading in
 
 // ---------------------------------------------------------------------------
@@ -242,7 +246,11 @@ static void render_meshes(void)
 // base cam_h — jump impulse pushes it up, gravity pulls it back, cam_h
 // follows with a separate smoothing delay (land vs air).
 static int s_moveSpeed;             // current smoothed speed
-static int s_playerVy;              // 16.8 vertical velocity (+up, -down)
+// player_vy lives in script_glue.c when scripts are on (so scripts can
+// read/write it); local fallback otherwise.
+#ifndef AFN_HAS_SCRIPT
+int player_vy;
+#endif
 static int s_playerY;               // 16.8 vertical offset from ground
 static int s_camYSmooth;            // smoothed cam_h follow of s_playerY
 // player_on_ground is the script-side global (defined in script_glue.c when
@@ -332,15 +340,15 @@ static void update_camera(void)
 
     // Jump (A button) + gravity. Jump only when grounded.
     if ((down & KEY_A) && player_on_ground) {
-        s_playerVy = AFN_JUMP_VEL;
+        player_vy = AFN_JUMP_VEL;
         player_on_ground = 0;
     }
-    s_playerVy -= AFN_GRAVITY;
-    if (s_playerVy < -AFN_TERMINAL_VEL) s_playerVy = -AFN_TERMINAL_VEL;
-    s_playerY += s_playerVy;
+    player_vy -= AFN_GRAVITY;
+    if (player_vy < -AFN_TERMINAL_VEL) player_vy = -AFN_TERMINAL_VEL;
+    s_playerY += player_vy;
     if (s_playerY <= 0) {
         s_playerY = 0;
-        s_playerVy = 0;
+        player_vy = 0;
         player_on_ground = 1;
     }
     player_y = afn_sprite_data[AFN_PLAYER_IDX][1] + s_playerY;

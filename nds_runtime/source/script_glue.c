@@ -42,14 +42,66 @@ int  afn_score;
 int  afn_frame_count;
 int  afn_draw_distance;
 
+// Phase 3b additions — script-side state expected by emitted node bodies.
+int  afn_bg_color;
+int  afn_cam_locked;
+int  afn_cam_speed;
+int  afn_checkpoint_set;
+int  afn_checkpoint_x;
+int  afn_checkpoint_y;
+int  afn_checkpoint_z;
+int  afn_dt_tick = 1;             // ticks per frame (1 = no DT scaling)
+unsigned int afn_flags;
+int  afn_force_x;
+int  afn_force_z;
+int  afn_friction;
+int  afn_last_key;
+int  afn_player_height = 3072;    // 12 editor px in 16.8 (matches GBA default)
+int  afn_scripts_stopped;
+int  afn_start_x;
+int  afn_start_y;
+int  afn_start_z;
+int  afn_text_color = 0x7FFF;     // RGB15 white
+int  afn_timer_visible;
+int  afn_wall_collided_sprite = -1;
+int  afn_fade_target;
+int  afn_fade_frames;
+int  afn_fade_counter;
+unsigned char afn_sprite_visible[NUM_SPRITES];
+unsigned char afn_sprite_flip[NUM_SPRITES];
+unsigned char afn_collision_enabled[NUM_SPRITES];
+int  afn_hp[NUM_SPRITES];
+int  afn_state_timer[NUM_SPRITES];
+
+// Player physics shared with fps3d.c — defined here when scripts are on so
+// emitted code can read/write them. fps3d.c uses its file-static fallbacks
+// in script-less builds.
+int  player_vy;
+int  player_ground_y;
+
 // Mode 0 tilemap state — referenced by emitted scripts even on 3D scenes.
-int  tm_player_facing = 4;   // 4 = south, matches GBA default
+int  tm_player_facing = 4;        // 4 = south, matches GBA default
 int  tm_move_timer;
 int  player_on_ground = 1;
+
+void afn_script_state_init(void)
+{
+    int i;
+    for (i = 0; i < NUM_SPRITES; i++) {
+        afn_sprite_visible[i]    = 1;
+        afn_sprite_flip[i]       = 0;
+        afn_collision_enabled[i] = 1;
+        afn_hp[i]                = 0;
+        afn_state_timer[i]       = 0;
+    }
+}
 #endif
 
 void afn_script_init(void)
 {
+#ifdef AFN_HAS_SCRIPT
+    afn_script_state_init();
+#endif
     afn_emitted_script_init();
 }
 

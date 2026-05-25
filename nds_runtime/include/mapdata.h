@@ -9900,6 +9900,40 @@ extern int  afn_fade_level;
 extern int  afn_score;
 extern int  afn_frame_count;
 extern int  afn_draw_distance;
+extern int  afn_bg_color;
+extern int  afn_cam_locked;
+extern int  afn_cam_speed;
+extern int  afn_checkpoint_set;
+extern int  afn_checkpoint_x;
+extern int  afn_checkpoint_y;
+extern int  afn_checkpoint_z;
+extern int  afn_dt_tick;
+extern unsigned int afn_flags;
+extern int  afn_force_x;
+extern int  afn_force_z;
+extern int  afn_friction;
+extern int  afn_last_key;
+extern int  afn_player_height;
+extern int  afn_scripts_stopped;
+extern int  afn_start_x;
+extern int  afn_start_y;
+extern int  afn_start_z;
+extern int  afn_text_color;
+extern int  afn_timer_visible;
+extern int  afn_wall_collided_sprite;
+extern int  afn_fade_target;
+extern int  afn_fade_frames;
+extern int  afn_fade_counter;
+#ifndef NUM_SPRITES
+#define NUM_SPRITES 22
+#endif
+extern unsigned char afn_sprite_visible[NUM_SPRITES];
+extern unsigned char afn_sprite_flip[NUM_SPRITES];
+extern unsigned char afn_collision_enabled[NUM_SPRITES];
+extern int afn_hp[NUM_SPRITES];
+extern int afn_state_timer[NUM_SPRITES];
+extern int player_vy;
+extern int player_ground_y;
 
 // Script dispatchers — stubs until per-node code emission lands.
 static inline void afn_emitted_script_init(void)         {}
