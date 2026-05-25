@@ -418,14 +418,17 @@ static void update_camera(void)
             // Ease rate based on whether the player is actually moving.
             // Without scripts we have a richer state (wantSprint), with
             // scripts we just use afn_move_speed as a heuristic.
+            int moving, sprintLike;
 #ifdef AFN_HAS_SCRIPT
-            int moving = (afn_input_fwd != 0 || afn_input_right != 0);
-            int sprintLike = (afn_move_speed > AFN_WALK_SPEED + 4);
+            // GBA reads KEY_B directly for sprint here (afn_move_speed is
+            // sticky — Walk/Sprint nodes set it but nothing resets it).
+            moving = (afn_input_fwd != 0 || afn_input_right != 0);
+            sprintLike = (held & KEY_B) != 0;
 #else
             int wantMove2   = (held & (KEY_UP | KEY_DOWN)) != 0;
             int wantSprint2 = (held & KEY_B) && wantMove2;
-            int moving = wantMove2;
-            int sprintLike = wantSprint2;
+            moving = wantMove2;
+            sprintLike = wantSprint2;
 #endif
             int ease = sprintLike
                 ? (moving ? AFN_SPRINT_EASE_IN : AFN_SPRINT_EASE_OUT)

@@ -327,27 +327,30 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 for (size_t i = 0; i < freqs.size() && i < 15; i++)
                     assetPal[ai][i + 1] = freqs[i].c;
 
-                // Two indexing models depending on whether the asset is
-                // truly multi-directional or just animated:
-                //   dirCount==8 (full directional, e.g. Sonic): anim indices
-                //     are direct dirAnimSets[] indices. frames[0] is a
-                //     placeholder we ignore.
-                //   dirCount==1 (forceStatic / single-dir like spinning ring):
-                //     combined indexing — anim frame 0 = frames[0], 1+ =
-                //     dirAnimSets[N-1]. Editor anim "3,4" on a 1-frames +
-                //     4-dirAnimSets asset means dirAnimSets[2..3].
-                bool useCombined = assetForceStatic[ai] || !a.hasDirections;
-                int framesBaseCount = useCombined ? (int)a.frames.size() : 0;
-                int totalFramesRef  = framesBaseCount + (int)a.dirAnimSets.size();
-                if (totalFramesRef < 1) totalFramesRef = 1;
+                // GBA convention (gba_package.cpp:492-501): anim.endFrame is
+                // the FRAME COUNT, not an end index. Anims are laid out
+                // contiguously in dirAnimSets in declaration order — anim N
+                // plays dirAnimSets[base..base + endFrame - 1] where
+                // base = sum of prior endFrames. anim.startFrame is ignored
+                // for tile lookup.
+                int framesBaseCount = 0;
+                std::vector<int> animBase(a.anims.size(), 0);
+                {
+                    int base = 0;
+                    for (size_t an = 0; an < a.anims.size(); an++) {
+                        animBase[an] = base;
+                        base += a.anims[an].endFrame;
+                    }
+                }
+                // uniqueFrames = every dirAnimSets index touched by any anim.
                 std::vector<int> uniqueFrames;
                 if (!a.anims.empty()) {
-                    std::vector<bool> seen(totalFramesRef + 1, false);
-                    for (const auto& anim : a.anims) {
-                        int s = anim.startFrame, e = anim.endFrame;
-                        if (s < 0) s = 0;
-                        if (e >= totalFramesRef) e = totalFramesRef - 1;
-                        for (int fr = s; fr <= e; fr++) {
+                    std::vector<bool> seen(a.dirAnimSets.size() + 1, false);
+                    for (size_t an = 0; an < a.anims.size(); an++) {
+                        int base = animBase[an];
+                        int cnt  = a.anims[an].endFrame;
+                        for (int f2 = 0; f2 < cnt; f2++) {
+                            int fr = base + f2;
                             if (fr >= 0 && fr < (int)seen.size() && !seen[fr]) {
                                 seen[fr] = true;
                                 uniqueFrames.push_back(fr);
@@ -371,18 +374,20 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 assetAnimCount[ai]   = (int)a.anims.size();
                 assetDefaultAnim[ai] = (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size())
                                        ? a.defaultAnim : 0;
-                for (const auto& anim : a.anims) {
-                    int s = anim.startFrame, e = anim.endFrame;
-                    if (s < 0) s = 0;
-                    if (e >= (int)a.dirAnimSets.size()) e = (int)a.dirAnimSets.size() - 1;
-                    int remappedStart = (s < (int)remap.size()) ? remap[s] : 0;
-                    int remappedEnd   = (e < (int)remap.size()) ? remap[e] : 0;
+                // GBA convention: anim N plays dirAnimSets[animBase[N] ..
+                // animBase[N] + endFrame - 1]. Map base into the remapped
+                // (deduplicated) tile index space; count is the raw endFrame.
+                for (size_t an = 0; an < a.anims.size(); an++) {
+                    int base = animBase[an];
+                    int cnt  = a.anims[an].endFrame;
+                    if (cnt < 1) cnt = 1;
+                    if (base < 0) base = 0;
+                    if (base >= (int)remap.size()) base = (int)remap.size() - 1;
                     AnimEntry ae;
-                    ae.start = remappedStart;
-                    ae.count = remappedEnd - remappedStart + 1;
-                    if (ae.count < 1) ae.count = 1;
-                    ae.fps   = (int)(anim.fps * anim.speed);
-                    ae.loop  = anim.loop ? 1 : 0;
+                    ae.start = remap[base];
+                    ae.count = cnt;
+                    ae.fps   = (int)(a.anims[an].fps * a.anims[an].speed);
+                    ae.loop  = a.anims[an].loop ? 1 : 0;
                     animTable.push_back(ae);
                 }
 
@@ -483,18 +488,27 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 assetAnimCount[ai]   = (int)a.anims.size();
                 assetDefaultAnim[ai] = (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size())
                                        ? a.defaultAnim : 0;
+                // GBA convention (gba_package.cpp:994-1009): per anim,
+                // baseSet = cumulative sum of prior endFrames, fc = endFrame.
+                // Anim plays dirAnimSets[base .. base+fc-1]. In our combined
+                // tile layout, dirAnimSets[k] sits at tile-slot
+                // (framesFromBase + k). Ring "idle, 3, 4" → base=0, fc=4 →
+                // plays dirAnimSets[0..3] = combined slots [1..4].
+                int baseSet = 0;
                 for (const auto& anim : a.anims) {
-                    int s = anim.startFrame, e = anim.endFrame;
-                    if (s < 0) s = 0;
-                    if (e >= totalFrames) e = totalFrames - 1;
-                    if (s > e) s = e;
+                    int fc = anim.endFrame;
+                    if (fc < 1) fc = 1;
                     AnimEntry ae;
-                    ae.start = s;
-                    ae.count = e - s + 1;
+                    ae.start = framesFromBase + baseSet;
+                    ae.count = fc;
+                    if (ae.start >= totalFrames) ae.start = totalFrames - 1;
+                    if (ae.start + ae.count > totalFrames)
+                        ae.count = totalFrames - ae.start;
                     if (ae.count < 1) ae.count = 1;
                     ae.fps   = (int)(anim.fps * anim.speed);
                     ae.loop  = anim.loop ? 1 : 0;
                     animTable.push_back(ae);
+                    baseSet += fc;
                 }
             }
         }
