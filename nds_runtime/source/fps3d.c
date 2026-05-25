@@ -422,9 +422,10 @@ static void render_sky(void)
     // Match GBA's update_sky_scroll exactly: pixScroll = (cam_ang * 256) >> 16
     // and 1:1 panorama-to-screen mapping (one texture pixel = one screen
     // pixel, full 256-px panorama spans full 256-px screen).
+    // -1280 t16 = -80 px shift in source = panorama appears 80 px RIGHT.
     int uOffset = ((int)cam_angle * 4096) >> 16;
-    int uLeft  = uOffset;
-    int uRight = uOffset + 4096;  // 1:1 panorama mapping (matches GBA)
+    int uLeft  = uOffset - 1280;
+    int uRight = uOffset - 1280 + 4096;  // 1:1 panorama mapping (matches GBA)
     int vTop   = 0;
     int vBot   = 4096;             // full 256-row panorama — anything smaller stretches each texel taller
 
