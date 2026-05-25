@@ -307,19 +307,35 @@ static void update_camera(void)
         }
     }
 
-    // Q (KEY_L) ascend, E (KEY_R) descend — keep this for tuning camera Y.
+#ifndef AFN_HAS_SCRIPT
+    // Debug free-cam controls — only when no scripts. Once nodes exist,
+    // OrbitCamera / Jump / etc. are the only thing that touches camera state.
     if (held & KEY_L) cam_h += AFN_WALK_SPEED;
     if (held & KEY_R) cam_h -= AFN_WALK_SPEED;
-
     if (held & KEY_LEFT)  cam_angle += 512;
     if (held & KEY_RIGHT) cam_angle -= 512;
+#endif
 
     g_cosf = brad_cos(cam_angle);
     g_sinf = brad_sin(cam_angle);
 
-    // Speed easing: ramp moveSpeed toward target. B = sprint. Movement input
-    // (UP/DOWN) sets the active target — releasing decays back to 0 via
-    // ease_out. Mirrors gba_runtime's main.c movement model, simplified.
+#ifdef AFN_HAS_SCRIPT
+    // Script-driven path: MovePlayer nodes set afn_input_fwd/right, Walk/
+    // Sprint nodes set afn_move_speed. Map view-space input → world XZ via
+    // the camera basis (forward = (sin,cos), right = (cos,-sin) for our
+    // gluLookAt convention). script_tick ran before fps3d_update so the
+    // values are fresh.
+    int fwd = afn_input_fwd, right = afn_input_right;
+    if (fwd && right) { fwd = (fwd * 181) >> 8; right = (right * 181) >> 8; }
+    int spd = afn_move_speed;
+    int dx = ((g_sinf * fwd + g_cosf * right) >> 8);
+    int dz = ((g_cosf * fwd - g_sinf * right) >> 8);
+    player_x += FX_MUL(dx, spd);
+    player_z += FX_MUL(dz, spd);
+    player_moving = (fwd != 0 || right != 0);
+    (void)s_moveSpeed;
+#else
+    // No scripts — built-in WASD-style movement with ease ramp + sprint.
     int wantMove   = (held & (KEY_UP | KEY_DOWN)) != 0;
     int wantSprint = (held & KEY_B) && wantMove;
     int targetSpeed = wantMove ? (wantSprint ? AFN_SPRINT_SPEED : AFN_WALK_SPEED) : 0;
@@ -329,22 +345,33 @@ static void update_camera(void)
     s_moveSpeed += ((targetSpeed - s_moveSpeed) * easeNum) >> 8;
     if (s_moveSpeed < 0) s_moveSpeed = 0;
 
-    // Move the PLAYER (not the camera directly) — camera follows behind via
-    // orbit math below. cam_x/z get derived from player_x/z + orbit offset.
     int dx = 0, dz = 0;
     if (held & KEY_UP)    { dx += g_sinf; dz += g_cosf; }
     if (held & KEY_DOWN)  { dx -= g_sinf; dz -= g_cosf; }
     player_x += FX_MUL(dx, s_moveSpeed);
     player_z += FX_MUL(dz, s_moveSpeed);
     player_moving = (dx != 0 || dz != 0);
+#endif
 
-    // Jump (A button) + gravity.
+#ifndef AFN_HAS_SCRIPT
+    // Built-in jump on KEY_A. With scripts, a Jump node sets player_vy.
     if ((down & KEY_A) && player_on_ground) {
         player_vy = AFN_JUMP_VEL;
         player_on_ground = 0;
     }
+#else
+    (void)down;
+#endif
+    // Gravity: scripts can override via SetGravity (afn_gravity); fallback
+    // to the editor-exported AFN_GRAVITY constant otherwise.
+#ifdef AFN_HAS_SCRIPT
+    player_vy -= afn_gravity ? afn_gravity : AFN_GRAVITY;
+    int term = afn_terminal_vel ? afn_terminal_vel : AFN_TERMINAL_VEL;
+    if (player_vy < -term) player_vy = -term;
+#else
     player_vy -= AFN_GRAVITY;
     if (player_vy < -AFN_TERMINAL_VEL) player_vy = -AFN_TERMINAL_VEL;
+#endif
     player_y += player_vy;
 
     // Floor + wall collision against mesh data when the project exports it.
