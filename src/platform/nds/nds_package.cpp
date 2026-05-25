@@ -218,10 +218,16 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         std::vector<int> assetTileStart(assets.size(), 0);
         std::vector<int> assetTilesPerFrame(assets.size(), 0);
         std::vector<int> assetObjSize(assets.size(), 0);
-        std::vector<int> assetDirCount(assets.size(), 1);   // 1 = static, 8 = directional
-        std::vector<int> assetAnimCount(assets.size(), 1);  // # anim frames emitted
-        std::vector<int> assetAnimFps(assets.size(), 0);    // 0 = no anim cycle
-        std::vector<int> assetAnimLoop(assets.size(), 1);
+        std::vector<int> assetDirCount(assets.size(), 1);    // 1 = static, 8 = directional
+        std::vector<int> assetFrameCount(assets.size(), 1);  // unique frames emitted
+        std::vector<int> assetAnimBase(assets.size(), 0);    // index into afn_anim_table
+        std::vector<int> assetAnimCount(assets.size(), 0);   // # anims defined
+        std::vector<int> assetDefaultAnim(assets.size(), 0);
+
+        // Global flat table of {startFrame, frameCount, fps, loop} for every
+        // anim of every directional asset.
+        struct AnimEntry { int start, count, fps, loop; };
+        std::vector<AnimEntry> animTable;
         // Per-asset derived palette in RGB15. For directional assets the
         // editor's a.palette[] is empty (real colors live in dirImages RGBA);
         // we build a 15-color palette by counting unique RGB15 pixels and
@@ -321,41 +327,64 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 for (size_t i = 0; i < freqs.size() && i < 15; i++)
                     assetPal[ai][i + 1] = freqs[i].c;
 
-                // Animation range: emit the default anim's frame span so the
-                // runtime can cycle. Falls back to just frame 0 if there are
-                // no anims defined.
-                int animStart = 0;
-                int animEnd   = (int)a.dirAnimSets.size() - 1;
-                if (!a.anims.empty()) {
-                    int ai2 = (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size())
-                              ? a.defaultAnim : 0;
-                    const auto& anim = a.anims[ai2];
-                    animStart = anim.startFrame;
-                    animEnd   = anim.endFrame;
-                    if (animStart < 0) animStart = 0;
-                    if (animEnd >= (int)a.dirAnimSets.size())
-                        animEnd = (int)a.dirAnimSets.size() - 1;
-                    // Apply anim.speed: effective fps = base fps * speed.
-                    assetAnimFps[ai]  = (int)(anim.fps * anim.speed);
-                    assetAnimLoop[ai] = anim.loop ? 1 : 0;
+                // Collect unique source-frame indices referenced by ANY anim
+                // (so PlayAnim/SetSpriteAnim nodes can switch). ForceStatic
+                // assets emit just frame 0.
+                std::vector<int> uniqueFrames;
+                if (assetForceStatic[ai]) {
+                    uniqueFrames.push_back(0);
+                } else if (!a.anims.empty()) {
+                    std::vector<bool> seen((int)a.dirAnimSets.size() + 1, false);
+                    for (const auto& anim : a.anims) {
+                        int s = anim.startFrame, e = anim.endFrame;
+                        if (s < 0) s = 0;
+                        if (e >= (int)a.dirAnimSets.size()) e = (int)a.dirAnimSets.size() - 1;
+                        for (int fr = s; fr <= e; fr++) {
+                            if (fr >= 0 && fr < (int)seen.size() && !seen[fr]) {
+                                seen[fr] = true;
+                                uniqueFrames.push_back(fr);
+                            }
+                        }
+                    }
+                    std::sort(uniqueFrames.begin(), uniqueFrames.end());
+                    if (uniqueFrames.empty()) uniqueFrames.push_back(0);
+                } else {
+                    uniqueFrames.push_back(0);
                 }
-                int animCount = animEnd - animStart + 1;
-                if (animCount < 1) animCount = 1;
-                assetAnimCount[ai] = animCount;
+                // Remap: original frame idx → emitted slot.
+                std::vector<int> remap((int)a.dirAnimSets.size() + 1, 0);
+                for (size_t f = 0; f < uniqueFrames.size(); f++)
+                    if (uniqueFrames[f] < (int)remap.size())
+                        remap[uniqueFrames[f]] = (int)f;
+                assetFrameCount[ai] = (int)uniqueFrames.size();
 
-                // ForceStatic = direction 0 only, no animation cycle.
+                // Build per-anim table entries (using remapped indices).
+                assetAnimBase[ai]    = (int)animTable.size();
+                assetAnimCount[ai]   = (int)a.anims.size();
+                assetDefaultAnim[ai] = (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size())
+                                       ? a.defaultAnim : 0;
+                for (const auto& anim : a.anims) {
+                    int s = anim.startFrame, e = anim.endFrame;
+                    if (s < 0) s = 0;
+                    if (e >= (int)a.dirAnimSets.size()) e = (int)a.dirAnimSets.size() - 1;
+                    int remappedStart = (s < (int)remap.size()) ? remap[s] : 0;
+                    int remappedEnd   = (e < (int)remap.size()) ? remap[e] : 0;
+                    AnimEntry ae;
+                    ae.start = remappedStart;
+                    ae.count = remappedEnd - remappedStart + 1;
+                    if (ae.count < 1) ae.count = 1;
+                    ae.fps   = (int)(anim.fps * anim.speed);
+                    ae.loop  = anim.loop ? 1 : 0;
+                    animTable.push_back(ae);
+                }
+
                 int dirCount = assetForceStatic[ai] ? 1 : 8;
                 assetDirCount[ai] = dirCount;
-                int emitAnimCount = assetForceStatic[ai] ? 1 : animCount;
-                if (assetForceStatic[ai]) {
-                    assetAnimCount[ai] = 1;
-                    assetAnimFps[ai] = 0;
-                }
 
                 // Tile layout: frame-major (frame 0 dirs 0..7, frame 1 dirs 0..7, ...).
                 // Runtime tileIdx = tileStart + (frame * dirCount + dir) * tpf.
-                for (int f = 0; f < emitAnimCount; f++) {
-                    int srcFrame = animStart + f;
+                for (size_t fi = 0; fi < uniqueFrames.size(); fi++) {
+                    int srcFrame = uniqueFrames[fi];
                     if (srcFrame >= (int)a.dirAnimSets.size())
                         srcFrame = (int)a.dirAnimSets.size() - 1;
                     for (int d = 0; d < dirCount; d++) {
@@ -394,19 +423,25 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 for (auto& fr : a.frames)
                     emitFrame(fr.pixels, fr.width > 0 ? fr.width : sz,
                               fr.height > 0 ? fr.height : sz, true);
-                // Pull anim cycle params for non-directional assets too.
-                assetAnimCount[ai] = (int)a.frames.size();
-                if (!a.anims.empty()) {
-                    int ai2 = (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size())
-                              ? a.defaultAnim : 0;
-                    const auto& anim = a.anims[ai2];
+                // Non-directional assets: emit each defined anim 1:1 (no
+                // frame-dedup since frames map directly to a.frames index).
+                assetFrameCount[ai] = (int)a.frames.size();
+                if (assetFrameCount[ai] < 1) assetFrameCount[ai] = 1;
+                assetAnimBase[ai]    = (int)animTable.size();
+                assetAnimCount[ai]   = (int)a.anims.size();
+                assetDefaultAnim[ai] = (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size())
+                                       ? a.defaultAnim : 0;
+                for (const auto& anim : a.anims) {
                     int s = anim.startFrame, e = anim.endFrame;
                     if (s < 0) s = 0;
                     if (e >= (int)a.frames.size()) e = (int)a.frames.size() - 1;
-                    assetAnimCount[ai] = e - s + 1;
-                    if (assetAnimCount[ai] < 1) assetAnimCount[ai] = 1;
-                    assetAnimFps[ai]  = (int)(anim.fps * anim.speed);
-                    assetAnimLoop[ai] = anim.loop ? 1 : 0;
+                    AnimEntry ae;
+                    ae.start = s;
+                    ae.count = e - s + 1;
+                    if (ae.count < 1) ae.count = 1;
+                    ae.fps   = (int)(anim.fps * anim.speed);
+                    ae.loop  = anim.loop ? 1 : 0;
+                    animTable.push_back(ae);
                 }
             }
         }
@@ -441,26 +476,39 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "};\n";
 
         // Per-asset descriptor:
-        //  [0] tileStart  — first tile index (in 32-byte units)
-        //  [1] tilesPerFrame  — tiles per direction frame
-        //  [2] animCount  — # frames in the cycling animation
-        //  [3] objSize    — OAM sprite size (8/16/32/64)
-        //  [4] palBank    — OBJ palette bank
-        //  [5] dirCount   — 1 (static) or 8 (directional)
-        //  [6] animFps    — frames per second (0 = no anim)
-        //  [7] animLoop   — 1 = loop, 0 = stop on last frame
+        //  [0] tileStart       — first tile index (in 32-byte units)
+        //  [1] tilesPerFrame   — tiles per direction frame
+        //  [2] frameCount      — unique frames emitted per direction
+        //  [3] objSize         — OAM sprite size (8/16/32/64)
+        //  [4] palBank         — OBJ palette bank
+        //  [5] dirCount        — 1 (static) or 8 (directional)
+        //  [6] animBase        — offset into afn_anim_table
+        //  [7] animCount       — # anims in afn_anim_table for this asset
+        //  [8] defaultAnim     — index of the anim to cycle by default
         // Tile layout (directional + animated): tileStart +
         //   (frame * dirCount + dir) * tilesPerFrame  — frame-major so all
         //   8 directions for frame N are contiguous in VRAM.
-        f << "static const int afn_asset_desc[][8] = {\n";
+        f << "static const int afn_asset_desc[][9] = {\n";
         for (size_t ai = 0; ai < assets.size(); ai++) {
             int palBank = (int)ai & 0xF;
             f << "    { " << assetTileStart[ai] << ", " << assetTilesPerFrame[ai] << ", "
-              << assetAnimCount[ai] << ", " << assetObjSize[ai] << ", "
+              << assetFrameCount[ai] << ", " << assetObjSize[ai] << ", "
               << palBank << ", " << assetDirCount[ai] << ", "
-              << assetAnimFps[ai] << ", " << assetAnimLoop[ai] << " },\n";
+              << assetAnimBase[ai] << ", " << assetAnimCount[ai] << ", "
+              << assetDefaultAnim[ai] << " },\n";
         }
         f << "};\n\n";
+
+        // Per-anim table: {start, count, fps, loop}. Indexed by
+        // afn_asset_desc[asset][6] + anim_idx. Empty if no asset has anims.
+        f << "#define AFN_ANIM_TABLE_LEN " << (int)animTable.size() << "\n";
+        if (!animTable.empty()) {
+            f << "static const int afn_anim_table[" << (int)animTable.size() << "][4] = {\n";
+            for (const auto& ae : animTable)
+                f << "    { " << ae.start << ", " << ae.count << ", "
+                  << ae.fps << ", " << ae.loop << " },\n";
+            f << "};\n\n";
+        }
     }
 
     // ---- Mesh assets ----

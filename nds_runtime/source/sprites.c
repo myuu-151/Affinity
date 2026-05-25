@@ -157,10 +157,11 @@ void afn_sprite_update(void)
         // use dir 0.
         int tileStart  = afn_asset_desc[aIdx][0];
         int tilesPerFr = afn_asset_desc[aIdx][1];
-        int animCount  = afn_asset_desc[aIdx][2];
+        int frameCount = afn_asset_desc[aIdx][2];
         int dirCount   = afn_asset_desc[aIdx][5];
-        int animFps    = afn_asset_desc[aIdx][6];
-        int animLoop   = afn_asset_desc[aIdx][7];
+        int animBase   = afn_asset_desc[aIdx][6];
+        int animCount  = afn_asset_desc[aIdx][7];
+        int defaultAn  = afn_asset_desc[aIdx][8];
         int fStatic    = afn_sprite_data[si][10];
         int dir = 0;
         if (dirCount > 1 && !fStatic) {
@@ -187,15 +188,39 @@ void afn_sprite_update(void)
             if (dir >= dirCount) dir = 0;
         }
 
-        // Animation cycle. Each anim frame holds for (60 / animFps) game
-        // frames. Non-looping anims clamp at the last frame.
-        int animFrame = 0;
-        if (animCount > 1 && animFps > 0) {
+        // Pick which anim to play. Player sprite obeys afn_play_anim
+        // (PlayAnim node); other sprites that match afn_sprite_anim_spr
+        // obey afn_sprite_anim_val (SetSpriteAnim). Else asset default.
+        int animIdx = defaultAn;
+#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
+        if (si == AFN_PLAYER_IDX && afn_play_anim >= 0)
+            animIdx = afn_play_anim;
+#endif
+        if (afn_sprite_anim_spr == si && afn_sprite_anim_val >= 0)
+            animIdx = afn_sprite_anim_val;
+        if (animIdx < 0 || animIdx >= animCount) animIdx = defaultAn;
+
+        // Resolve anim → {startFrame, count, fps, loop} via the global table.
+        int frameStart = 0, animLen = frameCount, animFps = 0, animLoop = 1;
+#if AFN_ANIM_TABLE_LEN > 0
+        if (animCount > 0 && animIdx >= 0 && animIdx < animCount) {
+            const int* row = afn_anim_table[animBase + animIdx];
+            frameStart = row[0];
+            animLen    = row[1];
+            animFps    = row[2];
+            animLoop   = row[3];
+        }
+#endif
+        // Compute current frame within the anim's range.
+        int animFrame = frameStart;
+        if (animLen > 1 && animFps > 0) {
             int hold = 60 / animFps; if (hold < 1) hold = 1;
             int step = s_animTick / hold;
-            animFrame = animLoop ? (step % animCount)
-                                 : (step >= animCount ? animCount - 1 : step);
+            int local = animLoop ? (step % animLen)
+                                 : (step >= animLen ? animLen - 1 : step);
+            animFrame = frameStart + local;
         }
+        if (animFrame >= frameCount) animFrame = frameCount - 1;
 
         proj[projCount].idx     = si;
         proj[projCount].depth   = depth;

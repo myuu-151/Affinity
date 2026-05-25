@@ -415,9 +415,21 @@ static void update_camera(void)
             cam_x = targetX;
             cam_z = targetZ;
         } else {
-            int ease = wantSprint
-                ? (wantMove ? AFN_SPRINT_EASE_IN : AFN_SPRINT_EASE_OUT)
-                : (wantMove ? AFN_WALK_EASE_IN   : AFN_WALK_EASE_OUT);
+            // Ease rate based on whether the player is actually moving.
+            // Without scripts we have a richer state (wantSprint), with
+            // scripts we just use afn_move_speed as a heuristic.
+#ifdef AFN_HAS_SCRIPT
+            int moving = (afn_input_fwd != 0 || afn_input_right != 0);
+            int sprintLike = (afn_move_speed > AFN_WALK_SPEED + 4);
+#else
+            int wantMove2   = (held & (KEY_UP | KEY_DOWN)) != 0;
+            int wantSprint2 = (held & KEY_B) && wantMove2;
+            int moving = wantMove2;
+            int sprintLike = wantSprint2;
+#endif
+            int ease = sprintLike
+                ? (moving ? AFN_SPRINT_EASE_IN : AFN_SPRINT_EASE_OUT)
+                : (moving ? AFN_WALK_EASE_IN   : AFN_WALK_EASE_OUT);
             cam_x += (ddx * ease) >> 8;
             cam_z += (ddz * ease) >> 8;
         }
