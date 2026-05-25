@@ -215,6 +215,20 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             assetTileStart[ai] = (int)allTiles.size() / 8;
             const auto& a = assets[ai];
             int sz = a.baseSize > 0 ? a.baseSize : 16;
+            // If a directional asset's dirImage is bigger than baseSize, the
+            // baseSize is just the runtime-streamed slot — the source image
+            // is the real OBJ size. Round up to OBJ-allowed sizes {8,16,32,64}
+            // so the OAM sprite covers the whole picture, not just the corner.
+            if (a.hasDirections && !a.dirAnimSets.empty()
+                && a.dirAnimSets[0].dirImages[0].pixels) {
+                int dw = a.dirAnimSets[0].dirImages[0].width;
+                int dh = a.dirAnimSets[0].dirImages[0].height;
+                int big = dw > dh ? dw : dh;
+                int objSz =  big <= 8  ? 8  :
+                             big <= 16 ? 16 :
+                             big <= 32 ? 32 : 64;
+                if (objSz > sz) sz = objSz;
+            }
             assetObjSize[ai] = sz;
             int tilesPerSide = sz / 8;
             int tilesPerFrame = tilesPerSide * tilesPerSide;

@@ -97,13 +97,28 @@ void afn_sprite_update(void)
         SpriteSize sz = objSize == 8  ? SpriteSize_8x8  :
                         objSize == 16 ? SpriteSize_16x16 :
                         objSize == 32 ? SpriteSize_32x32 : SpriteSize_64x64;
-        // Bottom-anchored: sprite feet at (screenX, screenY). Matches GBA's
-        // proj[i].screenY semantics — projection returns the ground contact.
+
+        // Distance scale via OAM affine. NDS matrix scale is .8 fixed where
+        // 256 = 1:1, bigger value = sprite SHRUNK, smaller value = enlarged.
+        // S_pixels = objSize * 256 / matScale, and we want S ∝ 1/depth, so
+        // matScale = 256 * depth / K. K ≈ 3750 fx8 tuned by hand so Sonic
+        // (objSize 64) reads at ~60 px at depth ≈ 4000 fx8.
+        int matScale = depth >> 4;              // = 256 * depth / 4096, K ≈ 4096
+        if (matScale < 64)   matScale = 64;     // ≤4× enlargement (canvas cap)
+        if (matScale > 4096) matScale = 4096;   // ≥1/16 reduction
+        oamRotateScale(&oamMain, affineSlot, 0, matScale, matScale);
+
+        // Double-canvas render box is 2× objSize centered on the sprite's
+        // visual center. With affine, the scaled sprite ALSO centers in the
+        // box — so the scaled bottom is at (box_center_Y + objSize*256/(2*matScale)).
+        // We want scaled bottom == screenY, so box_center_Y must lift with scale.
+        int scaledHalfH = (objSize * 256) / (matScale * 2);
+        int topLeftY = screenY - scaledHalfH - objSize;
         oamSet(&oamMain, oamSlot,
-               screenX - objSize/2, screenY - objSize,
+               screenX - objSize, topLeftY,
                0, palBank, sz, SpriteColorFormat_16Color,
                (void*)((u8*)0x06400000 + tileIdx * 32),
-               -1, false, false, false, false, false);
+               affineSlot, true, false, false, false, false);
 
         if (oamSlot == 0) {
             static int s_f = 0;
