@@ -8,7 +8,7 @@
 #define AFN_CAM_X     32768
 #define AFN_CAM_Z     32768
 #define AFN_CAM_H     3232
-#define AFN_CAM_ANGLE 1820
+#define AFN_CAM_ANGLE 14381
 #define AFN_CAM_HORIZON 60
 #define AFN_WALK_SPEED 37
 #define AFN_SPRINT_SPEED 56
@@ -4008,15 +4008,15 @@ static const u16* afn_mesh_qidx_ptrs[] = { afn_mesh0_qidx, afn_mesh1_qidx, afn_m
 static const s16* afn_mesh_uv_ptrs[] = { afn_mesh0_uvs, afn_mesh1_uvs, afn_mesh2_uvs, afn_mesh3_uvs, afn_mesh4_uvs, afn_mesh5_uvs, afn_mesh6_uvs, afn_mesh7_uvs };
 static const u8* afn_mesh_tex_ptrs[] = { (const u8*)0, afn_mesh1_tex, afn_mesh2_tex, afn_mesh3_tex, (const u8*)0, (const u8*)0, afn_mesh6_tex, afn_mesh7_tex };
 static const u16* afn_mesh_tex_pal_ptrs[] = { (const u16*)0, afn_mesh1_texpal, afn_mesh2_texpal, afn_mesh3_texpal, (const u16*)0, (const u16*)0, afn_mesh6_texpal, afn_mesh7_texpal };
-static const int afn_mesh_desc[][16] = {
-    { 4, 0, 4, 31775, 2, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1 },
-    { 4, 0, 4, 31775, 0, 0, 0, 0, 1, 64, 6, 0, 0, 0, 0, 1 },
-    { 25, 0, 64, 31775, 0, 0, 0, 0, 1, 64, 6, 0, 0, 0, 0, 1 },
-    { 260, 0, 260, 31775, 0, 0, 0, 0, 1, 64, 6, 0, 0, 0, 0, 1 },
-    { 4, 0, 4, 31775, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
-    { 4, 0, 4, 31775, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
-    { 28, 0, 28, 31775, 0, 0, 0, 0, 1, 64, 6, 0, 0, 0, 0, 1 },
-    { 25, 0, 64, 31775, 2, 0, 0, 0, 1, 64, 6, 0, 0, 0, 0, 1 },
+static const int afn_mesh_desc[][17] = {
+    { 4, 0, 4, 31775, 2, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0 },
+    { 4, 0, 4, 31775, 0, 0, 0, 0, 1, 64, 6, 0, 0, 0, 0, 1, 0 },
+    { 25, 0, 64, 31775, 0, 0, 0, 0, 1, 64, 6, 0, 0, 0, 0, 1, 1 },
+    { 260, 0, 260, 31775, 0, 0, 0, 0, 1, 64, 6, 0, 0, 0, 0, 1, 0 },
+    { 4, 0, 4, 31775, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 4, 0, 4, 31775, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0 },
+    { 28, 0, 28, 31775, 0, 0, 0, 0, 1, 64, 6, 0, 0, 0, 0, 1, 0 },
+    { 25, 0, 64, 31775, 2, 0, 0, 0, 1, 64, 6, 0, 0, 0, 0, 1, 0 },
 };
 
 

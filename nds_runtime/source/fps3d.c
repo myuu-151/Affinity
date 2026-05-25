@@ -129,13 +129,33 @@ static void load_mesh_textures(void)
 
 static void render_meshes(void)
 {
-    for (int si = 0; si < AFN_SPRITE_COUNT; si++)
-    {
+    // Sort mesh sprites by drawPriority — higher priority renders FIRST
+    // (so it sits underneath in painter's order; matters for blended /
+    // transparent surfaces where the depth buffer alone isn't enough).
+    static int s_order[AFN_SPRITE_COUNT];
+    int meshCount = 0;
+    for (int si = 0; si < AFN_SPRITE_COUNT; si++) {
         int meshIdx = afn_sprite_data[si][9];
         if (meshIdx < 0 || meshIdx >= AFN_MESH_COUNT) continue;
-        // visible == 0 → collision-only geometry; skip rendering (matches
-        // the editor's "hidden" toggle that's already respected on GBA).
         if (!afn_mesh_desc[meshIdx][15]) continue;
+        s_order[meshCount++] = si;
+    }
+    // Insertion sort by descending drawPriority.
+    for (int i = 1; i < meshCount; i++) {
+        int key = s_order[i];
+        int keyPrio = afn_mesh_desc[afn_sprite_data[key][9]][16];
+        int j = i - 1;
+        while (j >= 0 && afn_mesh_desc[afn_sprite_data[s_order[j]][9]][16] < keyPrio) {
+            s_order[j + 1] = s_order[j];
+            j--;
+        }
+        s_order[j + 1] = key;
+    }
+
+    for (int oi = 0; oi < meshCount; oi++)
+    {
+        int si = s_order[oi];
+        int meshIdx = afn_sprite_data[si][9];
 
         int wx = afn_sprite_data[si][0];
         int wy = afn_sprite_data[si][1];
@@ -156,6 +176,19 @@ static void render_meshes(void)
         int grayscale     = afn_mesh_desc[meshIdx][13];
 
         glPushMatrix();
+        // Higher drawPriority → push the mesh slightly AWAY from the
+        // camera in view space so its coplanar pixels lose the depth test
+        // to lower-priority overlapping meshes. Without this Z-bias two
+        // coplanar surfaces Z-fight regardless of draw order.
+        int prio = afn_mesh_desc[meshIdx][16];
+        if (prio > 0) {
+            // 8 fx8 units (= 1/32 editor unit) per priority, along -view forward.
+            int bias = prio * 8;
+            glTranslatef32(fx8_to_f32(-((g_sinf * bias) >> 8)),
+                           0,
+                           fx8_to_f32(-((g_cosf * bias) >> 8)));
+        }
+
         // Absolute world coords — gluLookAtf32 already applied the camera
         // transform.
         glTranslatef32(fx8_to_f32(wx),
