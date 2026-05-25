@@ -79,6 +79,12 @@ void afn_sprite_update(void)
 #if defined(HAS_SPRITES)
     oamClear(&oamMain, 0, 128);
 
+    // Global animation tick — assets sharing a default-anim fps stay in sync
+    // across all instances. Per-sprite animation state would let different
+    // instances diverge; punt that until script-driven anims (Phase 3) need it.
+    static int s_animTick = 0;
+    s_animTick++;
+
     static ProjSpr proj[AFN_SPRITE_COUNT];
     int projCount = 0;
 
@@ -131,7 +137,10 @@ void afn_sprite_update(void)
         // use dir 0.
         int tileStart  = afn_asset_desc[aIdx][0];
         int tilesPerFr = afn_asset_desc[aIdx][1];
+        int animCount  = afn_asset_desc[aIdx][2];
         int dirCount   = afn_asset_desc[aIdx][5];
+        int animFps    = afn_asset_desc[aIdx][6];
+        int animLoop   = afn_asset_desc[aIdx][7];
         int fStatic    = afn_sprite_data[si][10];
         int dir = 0;
         if (dirCount > 1 && !fStatic) {
@@ -158,6 +167,16 @@ void afn_sprite_update(void)
             if (dir >= dirCount) dir = 0;
         }
 
+        // Animation cycle. Each anim frame holds for (60 / animFps) game
+        // frames. Non-looping anims clamp at the last frame.
+        int animFrame = 0;
+        if (animCount > 1 && animFps > 0) {
+            int hold = 60 / animFps; if (hold < 1) hold = 1;
+            int step = s_animTick / hold;
+            animFrame = animLoop ? (step % animCount)
+                                 : (step >= animCount ? animCount - 1 : step);
+        }
+
         proj[projCount].idx     = si;
         proj[projCount].depth   = depth;
         proj[projCount].screenX = screenX;
@@ -165,7 +184,7 @@ void afn_sprite_update(void)
         proj[projCount].matScale = matScale;
         proj[projCount].objSize = objSize;
         proj[projCount].palBank = afn_asset_desc[aIdx][4] & 0xF;
-        proj[projCount].tileIdx = tileStart + dir * tilesPerFr;
+        proj[projCount].tileIdx = tileStart + (animFrame * dirCount + dir) * tilesPerFr;
         projCount++;
         if (projCount >= AFN_SPRITE_COUNT) break;
     }

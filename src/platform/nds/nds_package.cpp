@@ -215,7 +215,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         std::vector<int> assetTileStart(assets.size(), 0);
         std::vector<int> assetTilesPerFrame(assets.size(), 0);
         std::vector<int> assetObjSize(assets.size(), 0);
-        std::vector<int> assetDirCount(assets.size(), 1);  // 1 = static, 8 = directional
+        std::vector<int> assetDirCount(assets.size(), 1);   // 1 = static, 8 = directional
+        std::vector<int> assetAnimCount(assets.size(), 1);  // # anim frames emitted
+        std::vector<int> assetAnimFps(assets.size(), 0);    // 0 = no anim cycle
+        std::vector<int> assetAnimLoop(assets.size(), 1);
         // Per-asset derived palette in RGB15. For directional assets the
         // editor's a.palette[] is empty (real colors live in dirImages RGBA);
         // we build a 15-color palette by counting unique RGB15 pixels and
@@ -315,36 +318,70 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 for (size_t i = 0; i < freqs.size() && i < 15; i++)
                     assetPal[ai][i + 1] = freqs[i].c;
 
-                // Quantize + emit every direction. ForceStatic assets only
-                // need direction 0 (1 frame). All others get all 8 dirs.
+                // Animation range: emit the default anim's frame span so the
+                // runtime can cycle. Falls back to just frame 0 if there are
+                // no anims defined.
+                int animStart = 0;
+                int animEnd   = (int)a.dirAnimSets.size() - 1;
+                if (!a.anims.empty()) {
+                    int ai2 = (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size())
+                              ? a.defaultAnim : 0;
+                    const auto& anim = a.anims[ai2];
+                    animStart = anim.startFrame;
+                    animEnd   = anim.endFrame;
+                    if (animStart < 0) animStart = 0;
+                    if (animEnd >= (int)a.dirAnimSets.size())
+                        animEnd = (int)a.dirAnimSets.size() - 1;
+                    // Apply anim.speed: effective fps = base fps * speed.
+                    assetAnimFps[ai]  = (int)(anim.fps * anim.speed);
+                    assetAnimLoop[ai] = anim.loop ? 1 : 0;
+                }
+                int animCount = animEnd - animStart + 1;
+                if (animCount < 1) animCount = 1;
+                assetAnimCount[ai] = animCount;
+
+                // ForceStatic = direction 0 only, no animation cycle.
                 int dirCount = assetForceStatic[ai] ? 1 : 8;
                 assetDirCount[ai] = dirCount;
-                for (int d = 0; d < dirCount; d++) {
-                    const auto& img = a.dirAnimSets[0].dirImages[d];
-                    int fw = (img.pixels ? img.width  : 0);
-                    int fh = (img.pixels ? img.height : 0);
-                    // Empty direction (e.g. only N/S/E/W populated) → fall
-                    // back to direction 0 so the slot still has data.
-                    const auto* src = img.pixels ? &img : &a.dirAnimSets[0].dirImages[0];
-                    fw = src->width;
-                    fh = src->height;
-                    std::vector<uint8_t> palIdx(fw * fh, 0);
-                    for (int yy = 0; yy < fh; yy++)
-                    for (int xx = 0; xx < fw; xx++) {
-                        const uint8_t* p = src->pixels + (yy * fw + xx) * 4;
-                        if (p[3] < 128) { palIdx[yy*fw+xx] = 0; continue; }
-                        int r5 = p[0] >> 3, g5 = p[1] >> 3, b5 = p[2] >> 3;
-                        int best = 1, bestD = 1 << 30;
-                        for (size_t i = 0; i < freqs.size(); i++) {
-                            int pr = freqs[i].c & 31;
-                            int pg = (freqs[i].c >> 5) & 31;
-                            int pb = (freqs[i].c >> 10) & 31;
-                            int dd = (r5-pr)*(r5-pr) + (g5-pg)*(g5-pg) + (b5-pb)*(b5-pb);
-                            if (dd < bestD) { bestD = dd; best = (int)i + 1; }
+                int emitAnimCount = assetForceStatic[ai] ? 1 : animCount;
+                if (assetForceStatic[ai]) {
+                    assetAnimCount[ai] = 1;
+                    assetAnimFps[ai] = 0;
+                }
+
+                // Tile layout: frame-major (frame 0 dirs 0..7, frame 1 dirs 0..7, ...).
+                // Runtime tileIdx = tileStart + (frame * dirCount + dir) * tpf.
+                for (int f = 0; f < emitAnimCount; f++) {
+                    int srcFrame = animStart + f;
+                    if (srcFrame >= (int)a.dirAnimSets.size())
+                        srcFrame = (int)a.dirAnimSets.size() - 1;
+                    for (int d = 0; d < dirCount; d++) {
+                        const auto& img = a.dirAnimSets[srcFrame].dirImages[d];
+                        // Empty direction (e.g. only N/S/E/W populated) → fall
+                        // back to direction 0 of THIS frame so the slot has data.
+                        const auto* src = img.pixels
+                            ? &img : &a.dirAnimSets[srcFrame].dirImages[0];
+                        if (!src->pixels)
+                            src = &a.dirAnimSets[0].dirImages[0];
+                        int fw = src->width, fh = src->height;
+                        std::vector<uint8_t> palIdx(fw * fh, 0);
+                        for (int yy = 0; yy < fh; yy++)
+                        for (int xx = 0; xx < fw; xx++) {
+                            const uint8_t* p = src->pixels + (yy * fw + xx) * 4;
+                            if (p[3] < 128) { palIdx[yy*fw+xx] = 0; continue; }
+                            int r5 = p[0] >> 3, g5 = p[1] >> 3, b5 = p[2] >> 3;
+                            int best = 1, bestD = 1 << 30;
+                            for (size_t i = 0; i < freqs.size(); i++) {
+                                int pr = freqs[i].c & 31;
+                                int pg = (freqs[i].c >> 5) & 31;
+                                int pb = (freqs[i].c >> 10) & 31;
+                                int dd = (r5-pr)*(r5-pr) + (g5-pg)*(g5-pg) + (b5-pb)*(b5-pb);
+                                if (dd < bestD) { bestD = dd; best = (int)i + 1; }
+                            }
+                            palIdx[yy*fw+xx] = (uint8_t)best;
                         }
-                        palIdx[yy*fw+xx] = (uint8_t)best;
+                        emitFrame(palIdx.data(), fw, fh, false);
                     }
-                    emitFrame(palIdx.data(), fw, fh, false);
                 }
                 usedDir = true;
             }
@@ -354,6 +391,20 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 for (auto& fr : a.frames)
                     emitFrame(fr.pixels, fr.width > 0 ? fr.width : sz,
                               fr.height > 0 ? fr.height : sz, true);
+                // Pull anim cycle params for non-directional assets too.
+                assetAnimCount[ai] = (int)a.frames.size();
+                if (!a.anims.empty()) {
+                    int ai2 = (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size())
+                              ? a.defaultAnim : 0;
+                    const auto& anim = a.anims[ai2];
+                    int s = anim.startFrame, e = anim.endFrame;
+                    if (s < 0) s = 0;
+                    if (e >= (int)a.frames.size()) e = (int)a.frames.size() - 1;
+                    assetAnimCount[ai] = e - s + 1;
+                    if (assetAnimCount[ai] < 1) assetAnimCount[ai] = 1;
+                    assetAnimFps[ai]  = (int)(anim.fps * anim.speed);
+                    assetAnimLoop[ai] = anim.loop ? 1 : 0;
+                }
             }
         }
         f << "static const u32 afn_all_tiles[" << (allTiles.empty() ? 1 : (int)allTiles.size()) << "] = {";
@@ -386,17 +437,25 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         }
         f << "};\n";
 
-        // Per-asset descriptor: {tileStart, tilesPerFrame, frameCount, objSize, palBank, dirCount}
-        // NDS has 16 OBJ palette banks — assign each asset a unique bank (0..15)
-        // so palettes don't overwrite each other on upload. dirCount = 8 for
-        // directional assets (Sonic, etc), 1 for static — runtime indexes into
-        // tile data as tileStart + dir * tilesPerFrame.
-        f << "static const int afn_asset_desc[][6] = {\n";
+        // Per-asset descriptor:
+        //  [0] tileStart  — first tile index (in 32-byte units)
+        //  [1] tilesPerFrame  — tiles per direction frame
+        //  [2] animCount  — # frames in the cycling animation
+        //  [3] objSize    — OAM sprite size (8/16/32/64)
+        //  [4] palBank    — OBJ palette bank
+        //  [5] dirCount   — 1 (static) or 8 (directional)
+        //  [6] animFps    — frames per second (0 = no anim)
+        //  [7] animLoop   — 1 = loop, 0 = stop on last frame
+        // Tile layout (directional + animated): tileStart +
+        //   (frame * dirCount + dir) * tilesPerFrame  — frame-major so all
+        //   8 directions for frame N are contiguous in VRAM.
+        f << "static const int afn_asset_desc[][8] = {\n";
         for (size_t ai = 0; ai < assets.size(); ai++) {
             int palBank = (int)ai & 0xF;
             f << "    { " << assetTileStart[ai] << ", " << assetTilesPerFrame[ai] << ", "
-              << (int)assets[ai].frames.size() << ", " << assetObjSize[ai] << ", "
-              << palBank << ", " << assetDirCount[ai] << " },\n";
+              << assetAnimCount[ai] << ", " << assetObjSize[ai] << ", "
+              << palBank << ", " << assetDirCount[ai] << ", "
+              << assetAnimFps[ai] << ", " << assetAnimLoop[ai] << " },\n";
         }
         f << "};\n\n";
     }
