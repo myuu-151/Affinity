@@ -12155,8 +12155,8 @@ static void afn_bp0_update(void) {
     if (!player_on_ground && player_vy <= 0) {
     if (player_on_ground) {
     if (player_on_ground) {
-    afn_play_anim = 3;
-    afn_play_anim = 4;
+    afn_play_anim = 3; afn_anim_prio = 1;
+    afn_play_anim = 4; afn_anim_prio = 1;
     afn_flags |= (1u << 0);
     if (afn_flags & (1u << 0)) {
     }
@@ -12171,7 +12171,7 @@ static void afn_bp0_key_held(void) {
     if (!afn_player_frozen && key_is_down(KEY_DOWN)) afn_input_fwd -= 256;
     if (!afn_player_frozen && key_is_down(KEY_UP)) afn_input_fwd += 256;
     if (!afn_player_frozen && key_is_down(KEY_RIGHT)) afn_input_right += 256;
-    afn_play_anim = 1;
+    if (!afn_anim_prio) afn_play_anim = 1;
     afn_move_speed = 158;
     }
     if (key_is_down(KEY_R) || key_is_down(KEY_L)) {
@@ -12181,7 +12181,7 @@ static void afn_bp0_key_held(void) {
     if (key_is_down(KEY_B)) {
     afn_move_speed = 264;
     if (player_moving) {
-    afn_play_anim = 2;
+    if (!afn_anim_prio) afn_play_anim = 2;
     }
     }
 }
@@ -12190,7 +12190,7 @@ static void afn_bp0_key_pressed(void) {
     if (player_vy > 0) {
     if (player_on_ground) player_vy = 486;
     if (player_on_ground) {
-    afn_play_anim = 3;
+    afn_play_anim = 3; afn_anim_prio = 1;
     if (afn_flags & (1u << 0)) {
     }
     }
@@ -12201,11 +12201,11 @@ static void afn_bp0_key_released(void) {
     if (key_released(KEY_A)) {
     if (player_vy > 0) player_vy = (player_vy * 51) >> 8;
     if (!player_on_ground && player_vy <= 0) {
-    afn_play_anim = 4;
+    afn_play_anim = 4; afn_anim_prio = 1;
     }
     }
     if (key_released(KEY_UP) || key_released(KEY_LEFT) || key_released(KEY_RIGHT) || key_released(KEY_DOWN)) {
-    afn_play_anim = 0;
+    if (!afn_anim_prio) afn_play_anim = 0;
     }
 }
 static void afn_bp0_collision(void) {
@@ -12219,7 +12219,7 @@ static void afn_bp1_key_pressed(void) {
     /* TODO: emit node type 77 */
     }
     if (key_hit(KEY_START)) {
-    afn_play_anim = 1;
+    if (!afn_anim_prio) afn_play_anim = 1;
     }
 }
 static void afn_bp1_key_released(void) {

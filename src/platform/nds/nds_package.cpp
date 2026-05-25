@@ -1334,6 +1334,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         };
         buildChains();
 
+        // Mirrors GBA: track whether emitAction is currently inside an
+        // IsJumping / IsFalling gate so PlayAnim can lock with afn_anim_prio.
+        bool inJumpGate = false;
+
         // Per-action emit. Subset of GBA's switch — covers the common
         // movement / animation / state nodes. Unsupported types fall through
         // to a comment so we know what's missing on NDS.
@@ -1385,7 +1389,15 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             }
             case GBAScriptNodeType::PlayAnim: {
                 auto* d = findDataIn(a->id, 0);
-                if (d) f << "    afn_play_anim = " << resolveInt(d) << ";\n";
+                int idx = d ? resolveInt(d) : 0;
+                // Inside an IsJumping/IsFalling gate, PlayAnim wins and
+                // claims priority; outside, it defers to whatever already
+                // set afn_play_anim this frame (afn_anim_prio gates it).
+                if (inJumpGate) {
+                    f << "    afn_play_anim = " << idx << "; afn_anim_prio = 1;\n";
+                } else {
+                    f << "    if (!afn_anim_prio) afn_play_anim = " << idx << ";\n";
+                }
                 break;
             }
             case GBAScriptNodeType::FreezePlayer:
@@ -1434,9 +1446,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             case GBAScriptNodeType::IsOnGround:
                 f << "    if (player_on_ground) {\n"; break;
             case GBAScriptNodeType::IsJumping:
-                f << "    if (player_vy > 0) {\n"; break;
+                f << "    if (player_vy > 0) {\n"; inJumpGate = true; break;
             case GBAScriptNodeType::IsFalling:
-                f << "    if (!player_on_ground && player_vy <= 0) {\n"; break;
+                f << "    if (!player_on_ground && player_vy <= 0) {\n"; inJumpGate = true; break;
             case GBAScriptNodeType::CheckFlag:
                 f << "    if (afn_flags & (1u << " << a->paramInt[0] << ")) {\n"; break;
             default:
@@ -1446,7 +1458,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         };
 
         auto emitChain = [&](const Chain& c) {
-            // Count gates so we can close them at the end.
+            // Reset inJumpGate per chain so a previous chain's gate doesn't
+            // leak into this one (each event is its own scope).
+            inJumpGate = false;
             int gates = 0;
             for (auto* a : c.actions)
                 if (a->type == GBAScriptNodeType::IsMoving  ||

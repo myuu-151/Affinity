@@ -142,6 +142,7 @@ void afn_script_tick(void)
     afn_input_fwd   = 0;
     afn_input_right = 0;
     afn_play_anim   = -1;
+    afn_anim_prio   = 0;
 #endif
     afn_emitted_script_update();
     afn_emitted_script_key_held();
