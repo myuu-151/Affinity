@@ -219,26 +219,58 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             int tilesPerSide = sz / 8;
             int tilesPerFrame = tilesPerSide * tilesPerSide;
             assetTilesPerFrame[ai] = tilesPerFrame;
-            for (auto& fr : a.frames) {
-                int fw = fr.width  > 0 ? fr.width  : sz;
-                int fh = fr.height > 0 ? fr.height : sz;
+            // Pick a source for the tile data: prefer a.frames; if empty and
+            // the asset has directions (player character etc.), fall back to
+            // direction 0 of dirAnimSets[0] (RGBA → nearest-palette quantized).
+            auto emitFrame = [&](const uint8_t* pixels, int fw, int fh, bool stride64) {
+                int stride = stride64 ? kExportMaxFrameSize : fw;
                 for (int ty = 0; ty < tilesPerSide; ty++)
                 for (int tx = 0; tx < tilesPerSide; tx++) {
-                    // Emit one 8x8 tile = 8 u32 (each u32 = 8 pixels of 4 bits).
-                    // The editor stores pixels with a fixed row stride of
-                    // kExportMaxFrameSize (64), NOT fr.width — easy bug to hit
-                    // because the visible content uses fr.width × fr.height.
                     for (int py = 0; py < 8; py++) {
                         uint32_t word = 0;
                         for (int px = 0; px < 8; px++) {
                             int sx = tx * 8 + px;
                             int sy = ty * 8 + py;
-                            uint8_t pix = (sx < fw && sy < fh) ? fr.pixels[sy * kExportMaxFrameSize + sx] : 0;
+                            uint8_t pix = (sx < fw && sy < fh) ? pixels[sy * stride + sx] : 0;
                             word |= ((uint32_t)(pix & 0xF)) << (px * 4);
                         }
                         allTiles.push_back(word);
                     }
                 }
+            };
+
+            // Prefer directional data when present — frames[] may be a zero
+            // placeholder for directional assets (the real pixels live in
+            // dirAnimSets and get DMA-streamed at runtime on GBA).
+            bool usedDir = false;
+            if (a.hasDirections && !a.dirAnimSets.empty()
+                && a.dirAnimSets[0].dirImages[0].pixels) {
+                // Quantize RGBA8 → asset palette index per pixel (nearest color
+                // in RGB15). One direction = one frame on NDS for now.
+                const auto& img = a.dirAnimSets[0].dirImages[0];
+                int fw = img.width, fh = img.height;
+                std::vector<uint8_t> palIdx(fw * fh, 0);
+                for (int yy = 0; yy < fh; yy++)
+                for (int xx = 0; xx < fw; xx++) {
+                    const uint8_t* p = img.pixels + (yy * fw + xx) * 4;
+                    if (p[3] == 0) { palIdx[yy*fw+xx] = 0; continue; }  // transparent
+                    int r5 = p[0] >> 3, g5 = p[1] >> 3, b5 = p[2] >> 3;
+                    int best = 0, bestD = 1 << 30;
+                    for (int c = 1; c < 16; c++) {  // start at 1; 0 = transparent
+                        uint16_t pc = EditorColorToRGB15(a.palette[c]);
+                        int pr = pc & 31, pg = (pc >> 5) & 31, pb = (pc >> 10) & 31;
+                        int d = (r5-pr)*(r5-pr) + (g5-pg)*(g5-pg) + (b5-pb)*(b5-pb);
+                        if (d < bestD) { bestD = d; best = c; }
+                    }
+                    palIdx[yy*fw+xx] = (uint8_t)best;
+                }
+                emitFrame(palIdx.data(), fw, fh, false);
+                usedDir = true;
+            }
+            if (!usedDir) {
+                for (auto& fr : a.frames)
+                    emitFrame(fr.pixels, fr.width > 0 ? fr.width : sz,
+                              fr.height > 0 ? fr.height : sz, true);
             }
         }
         f << "static const u32 afn_all_tiles[" << (allTiles.empty() ? 1 : (int)allTiles.size()) << "] = {";

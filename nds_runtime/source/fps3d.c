@@ -257,8 +257,8 @@ static void update_camera(void)
     if (held & KEY_L) cam_h += AFN_WALK_SPEED;
     if (held & KEY_R) cam_h -= AFN_WALK_SPEED;
 
-    if (held & KEY_LEFT)  cam_angle -= 512;
-    if (held & KEY_RIGHT) cam_angle += 512;
+    if (held & KEY_LEFT)  cam_angle += 512;
+    if (held & KEY_RIGHT) cam_angle -= 512;
 
     g_cosf = brad_cos(cam_angle);
     g_sinf = brad_sin(cam_angle);
