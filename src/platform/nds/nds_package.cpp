@@ -1227,20 +1227,22 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     }
     // ---- Per-node script emission (Phase 3a complete) ----
     if (hasAnyScript) {
-        // Lambdas: find a node / its exec-out targets / its data-in source.
+        // curScript = which graph (inline scene or a blueprint) the lambdas
+        // operate on; swapped before each blueprint emit pass below.
+        const GBAScriptExport* curScript = &script;
         auto findNode = [&](int id) -> const GBAScriptNodeExport* {
-            for (auto& n : script.nodes) if (n.id == id) return &n;
+            for (auto& n : curScript->nodes) if (n.id == id) return &n;
             return nullptr;
         };
         auto findExecOuts = [&](int nodeId, int pinIdx) -> std::vector<int> {
             std::vector<int> targets;
-            for (auto& l : script.links)
+            for (auto& l : curScript->links)
                 if (l.fromNodeId == nodeId && l.fromPinType == 0 && l.fromPinIdx == pinIdx)
                     targets.push_back(l.toNodeId);
             return targets;
         };
         auto findDataIn = [&](int nodeId, int pinIdx) -> const GBAScriptNodeExport* {
-            for (auto& l : script.links)
+            for (auto& l : curScript->links)
                 if (l.toNodeId == nodeId && l.toPinType == 3 && l.toPinIdx == pinIdx)
                     return findNode(l.fromNodeId);
             return nullptr;
@@ -1264,35 +1266,41 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         };
 
         // Collect chains per event type (BFS from each event node through exec links).
+        // Re-runnable: blueprint emit passes call buildChains() after pointing
+        // curScript at the blueprint's graph.
         struct Chain { const GBAScriptNodeExport* event; std::vector<const GBAScriptNodeExport*> actions; };
         std::vector<Chain> chains;
-        for (auto& n : script.nodes) {
-            auto et = n.type;
-            if (et != GBAScriptNodeType::OnUpdate &&
-                et != GBAScriptNodeType::OnStart &&
-                et != GBAScriptNodeType::OnKeyHeld &&
-                et != GBAScriptNodeType::OnKeyPressed &&
-                et != GBAScriptNodeType::OnKeyReleased &&
-                et != GBAScriptNodeType::OnCollision &&
-                et != GBAScriptNodeType::OnCollision2D)
-                continue;
-            Chain ch; ch.event = &n;
-            std::vector<int> frontier = findExecOuts(n.id, 0);
-            std::vector<bool> seen(10000, false);
-            int safety = 0;
-            while (!frontier.empty() && safety < 256) {
-                int nid = frontier.front();
-                frontier.erase(frontier.begin());
-                if (nid < 0 || nid >= (int)seen.size() || seen[nid]) continue;
-                seen[nid] = true;
-                safety++;
-                auto* an = findNode(nid);
-                if (!an) continue;
-                ch.actions.push_back(an);
-                for (int t : findExecOuts(an->id, 0)) frontier.push_back(t);
+        auto buildChains = [&]() {
+            chains.clear();
+            for (auto& n : curScript->nodes) {
+                auto et = n.type;
+                if (et != GBAScriptNodeType::OnUpdate &&
+                    et != GBAScriptNodeType::OnStart &&
+                    et != GBAScriptNodeType::OnKeyHeld &&
+                    et != GBAScriptNodeType::OnKeyPressed &&
+                    et != GBAScriptNodeType::OnKeyReleased &&
+                    et != GBAScriptNodeType::OnCollision &&
+                    et != GBAScriptNodeType::OnCollision2D)
+                    continue;
+                Chain ch; ch.event = &n;
+                std::vector<int> frontier = findExecOuts(n.id, 0);
+                std::vector<bool> seen(10000, false);
+                int safety = 0;
+                while (!frontier.empty() && safety < 256) {
+                    int nid = frontier.front();
+                    frontier.erase(frontier.begin());
+                    if (nid < 0 || nid >= (int)seen.size() || seen[nid]) continue;
+                    seen[nid] = true;
+                    safety++;
+                    auto* an = findNode(nid);
+                    if (!an) continue;
+                    ch.actions.push_back(an);
+                    for (int t : findExecOuts(an->id, 0)) frontier.push_back(t);
+                }
+                if (!ch.actions.empty()) chains.push_back(ch);
             }
-            if (!ch.actions.empty()) chains.push_back(ch);
-        }
+        };
+        buildChains();
 
         // Per-action emit. Subset of GBA's switch — covers the common
         // movement / animation / state nodes. Unsupported types fall through
@@ -1419,15 +1427,28 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         };
 
         // Emit each dispatcher function with the matching chains inlined.
+        // Key events may have multiple key data inputs wired (e.g. "any of
+        // LEFT/RIGHT/UP/DOWN"); OR them together when present, fall back to
+        // event->paramInt[0] otherwise. Mirrors gba_package.cpp resolveEventKey.
         auto emitDispatcher = [&](const char* fname, GBAScriptNodeType evType,
-                                  const char* keyCheck /* "key_is_down" etc, null for non-key */) {
+                                  const char* keyCheck) {
             f << "static void " << fname << "(void) {\n";
             for (auto& c : chains) {
                 if (c.event->type != evType) continue;
                 if (keyCheck) {
-                    auto* keyData = findDataIn(c.event->id, 0);
-                    int k = keyData ? keyData->paramInt[0] : c.event->paramInt[0];
-                    f << "    if (" << keyCheck << "(" << keyName(k) << ")) {\n";
+                    std::vector<int> keys;
+                    for (auto& l : curScript->links)
+                        if (l.toNodeId == c.event->id && l.toPinType == 3 && l.toPinIdx == 0) {
+                            auto* dn = findNode(l.fromNodeId);
+                            if (dn) keys.push_back(dn->paramInt[0]);
+                        }
+                    if (keys.empty()) keys.push_back(c.event->paramInt[0]);
+                    f << "    if (";
+                    for (size_t ki = 0; ki < keys.size(); ki++) {
+                        if (ki) f << " || ";
+                        f << keyCheck << "(" << keyName(keys[ki]) << ")";
+                    }
+                    f << ") {\n";
                     emitChain(c);
                     f << "    }\n";
                 } else {
@@ -1445,6 +1466,60 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         emitDispatcher("afn_emitted_script_key_released", GBAScriptNodeType::OnKeyReleased,  "key_released");
         emitDispatcher("afn_emitted_script_collision",    GBAScriptNodeType::OnCollision,    nullptr);
         emitDispatcher("afn_emitted_script_collision2d",  GBAScriptNodeType::OnCollision2D,  nullptr);
+
+        // Blueprint event handlers — one set of named functions per blueprint.
+        // Per-instance state (current sprite/tm-obj) lives in afn_bp_cur_*.
+        for (size_t bi = 0; bi < blueprints.size(); bi++) {
+            curScript = &blueprints[bi].script;
+            buildChains();
+            char fn[64];
+            snprintf(fn, sizeof(fn), "afn_bp%zu_update",       bi);
+            emitDispatcher(fn, GBAScriptNodeType::OnUpdate, nullptr);
+            snprintf(fn, sizeof(fn), "afn_bp%zu_key_held",     bi);
+            emitDispatcher(fn, GBAScriptNodeType::OnKeyHeld, "key_is_down");
+            snprintf(fn, sizeof(fn), "afn_bp%zu_key_pressed",  bi);
+            emitDispatcher(fn, GBAScriptNodeType::OnKeyPressed, "key_hit");
+            snprintf(fn, sizeof(fn), "afn_bp%zu_key_released", bi);
+            emitDispatcher(fn, GBAScriptNodeType::OnKeyReleased, "key_released");
+            snprintf(fn, sizeof(fn), "afn_bp%zu_collision",    bi);
+            emitDispatcher(fn, GBAScriptNodeType::OnCollision, nullptr);
+        }
+        curScript = &script;  // restore so any later helpers behave
+
+        // Blueprint instance table + dispatchers. Each dispatcher iterates
+        // instances, sets afn_bp_cur_spr_idx (so emitted code can reference
+        // its owning sprite), and calls the matching bp's handler.
+        f << "\n#define AFN_BP_COUNT "     << (int)blueprints.size() << "\n";
+        f << "#define AFN_BP_INSTANCE_COUNT " << (int)bpInstances.size() << "\n";
+        if (!bpInstances.empty()) {
+            // Row: { bpIdx, spriteIdx }
+            f << "static const int afn_bp_instances[" << (int)bpInstances.size() << "][2] = {\n";
+            for (const auto& inst : bpInstances)
+                f << "    { " << inst.blueprintIdx << ", " << inst.spriteIdx << " },\n";
+            f << "};\n";
+        }
+        // Per-event bp dispatcher. Emits a switch on bpIdx so each instance
+        // calls into the right blueprint's handler with cur_spr_idx set.
+        auto emitBpDispatcher = [&](const char* fname, const char* suffix) {
+            f << "static void " << fname << "(void) {\n";
+            if (!bpInstances.empty()) {
+                f << "    for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {\n";
+                f << "        int bpIdx = afn_bp_instances[i][0];\n";
+                f << "        afn_bp_cur_spr_idx = afn_bp_instances[i][1];\n";
+                f << "        switch (bpIdx) {\n";
+                for (size_t bi = 0; bi < blueprints.size(); bi++)
+                    f << "            case " << bi << ": afn_bp" << bi << "_" << suffix << "(); break;\n";
+                f << "        }\n";
+                f << "    }\n";
+                f << "    afn_bp_cur_spr_idx = -1;\n";
+            }
+            f << "}\n";
+        };
+        emitBpDispatcher("afn_bp_dispatch_update",       "update");
+        emitBpDispatcher("afn_bp_dispatch_key_held",     "key_held");
+        emitBpDispatcher("afn_bp_dispatch_key_pressed",  "key_pressed");
+        emitBpDispatcher("afn_bp_dispatch_key_released", "key_released");
+        emitBpDispatcher("afn_bp_dispatch_collision",    "collision");
     } else {
         // No scripts in this build — empty stubs keep script_glue.c linkable.
         f << "\n// Script dispatchers — no scripts in this build.\n";
@@ -1455,6 +1530,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "static inline void afn_emitted_script_key_released(void) {}\n";
         f << "static inline void afn_emitted_script_collision(void)    {}\n";
         f << "static inline void afn_emitted_script_collision2d(void)  {}\n";
+        f << "static inline void afn_bp_dispatch_update(void)          {}\n";
+        f << "static inline void afn_bp_dispatch_key_held(void)        {}\n";
+        f << "static inline void afn_bp_dispatch_key_pressed(void)     {}\n";
+        f << "static inline void afn_bp_dispatch_key_released(void)    {}\n";
+        f << "static inline void afn_bp_dispatch_collision(void)       {}\n";
     }
 
     f << "#endif // MAPDATA_H\n";

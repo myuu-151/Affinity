@@ -148,6 +148,12 @@ void afn_script_tick(void)
     afn_emitted_script_key_pressed();
     afn_emitted_script_key_released();
 #ifdef AFN_HAS_SCRIPT
+    // Blueprint instance dispatch — handlers per blueprint with the
+    // current sprite slot in afn_bp_cur_spr_idx.
+    afn_bp_dispatch_update();
+    afn_bp_dispatch_key_held();
+    afn_bp_dispatch_key_pressed();
+    afn_bp_dispatch_key_released();
     afn_script_check_collisions();
     afn_frame_count++;
 #endif

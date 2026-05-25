@@ -222,6 +222,16 @@ void afn_sprite_update(void)
         }
         if (animFrame >= frameCount) animFrame = frameCount - 1;
 
+#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
+        if (si == AFN_PLAYER_IDX) {
+            static int s_animDbgF = 0;
+            s_animDbgF++;
+            if ((s_animDbgF & 15) == 0)
+                iprintf("\x1b[12;0Hply pa=%d ai=%d fs=%d al=%d fp=%d fr=%d  ",
+                        afn_play_anim, animIdx, frameStart, animLen, animFps, animFrame);
+        }
+#endif
+
         proj[projCount].idx     = si;
         proj[projCount].depth   = depth;
         proj[projCount].screenX = screenX;

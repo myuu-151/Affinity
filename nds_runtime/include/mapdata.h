@@ -12150,4 +12150,237 @@ static void afn_emitted_script_collision(void) {
 }
 static void afn_emitted_script_collision2d(void) {
 }
+static void afn_bp0_update(void) {
+    if (player_vy > 0) {
+    if (!player_on_ground && player_vy <= 0) {
+    if (player_on_ground) {
+    if (player_on_ground) {
+    afn_play_anim = 3;
+    afn_play_anim = 4;
+    afn_flags |= (1u << 0);
+    if (afn_flags & (1u << 0)) {
+    }
+    }
+    }
+    }
+    }
+}
+static void afn_bp0_key_held(void) {
+    if (key_is_down(KEY_LEFT) || key_is_down(KEY_DOWN) || key_is_down(KEY_UP) || key_is_down(KEY_RIGHT)) {
+    if (!afn_player_frozen && key_is_down(KEY_LEFT)) afn_input_right -= 256;
+    if (!afn_player_frozen && key_is_down(KEY_DOWN)) afn_input_fwd -= 256;
+    if (!afn_player_frozen && key_is_down(KEY_UP)) afn_input_fwd += 256;
+    if (!afn_player_frozen && key_is_down(KEY_RIGHT)) afn_input_right += 256;
+    afn_play_anim = 1;
+    afn_move_speed = 158;
+    }
+    if (key_is_down(KEY_R) || key_is_down(KEY_L)) {
+    /* TODO: emit node type 17 */
+    /* TODO: emit node type 17 */
+    }
+    if (key_is_down(KEY_B)) {
+    afn_move_speed = 264;
+    if (player_moving) {
+    afn_play_anim = 2;
+    }
+    }
+}
+static void afn_bp0_key_pressed(void) {
+    if (key_hit(KEY_A)) {
+    if (player_vy > 0) {
+    if (player_on_ground) player_vy = 486;
+    if (player_on_ground) {
+    afn_play_anim = 3;
+    if (afn_flags & (1u << 0)) {
+    }
+    }
+    }
+    }
+}
+static void afn_bp0_key_released(void) {
+    if (key_released(KEY_A)) {
+    if (player_vy > 0) player_vy = (player_vy * 51) >> 8;
+    if (!player_on_ground && player_vy <= 0) {
+    afn_play_anim = 4;
+    }
+    }
+    if (key_released(KEY_UP) || key_released(KEY_LEFT) || key_released(KEY_RIGHT) || key_released(KEY_DOWN)) {
+    afn_play_anim = 0;
+    }
+}
+static void afn_bp0_collision(void) {
+}
+static void afn_bp1_update(void) {
+}
+static void afn_bp1_key_held(void) {
+}
+static void afn_bp1_key_pressed(void) {
+    if (key_hit(KEY_START)) {
+    /* TODO: emit node type 77 */
+    }
+    if (key_hit(KEY_START)) {
+    afn_play_anim = 1;
+    }
+}
+static void afn_bp1_key_released(void) {
+}
+static void afn_bp1_collision(void) {
+    /* TODO: emit node type 239 */
+    /* TODO: emit node type 12 */
+    /* TODO: emit node type 49 */
+    /* TODO: emit node type 77 */
+    afn_flags |= (1u << 0);
+}
+static void afn_bp2_update(void) {
+}
+static void afn_bp2_key_held(void) {
+}
+static void afn_bp2_key_pressed(void) {
+}
+static void afn_bp2_key_released(void) {
+}
+static void afn_bp2_collision(void) {
+    /* TODO: emit node type 97 */
+}
+static void afn_bp3_update(void) {
+}
+static void afn_bp3_key_held(void) {
+}
+static void afn_bp3_key_pressed(void) {
+}
+static void afn_bp3_key_released(void) {
+}
+static void afn_bp3_collision(void) {
+    if ((unsigned)0 < NUM_SPRITES) {
+        afn_sprite_visible[0] = 0;
+        afn_collision_enabled[0] = 0;
+    }
+    /* TODO: emit node type 242 */
+    /* TODO: emit node type 12 */
+}
+static void afn_bp4_update(void) {
+}
+static void afn_bp4_key_held(void) {
+}
+static void afn_bp4_key_pressed(void) {
+}
+static void afn_bp4_key_released(void) {
+}
+static void afn_bp4_collision(void) {
+}
+static void afn_bp5_update(void) {
+    if (afn_flags & (1u << 1)) {
+    /* TODO: emit node type 106 */
+    /* TODO: emit node type 77 */
+    }
+}
+static void afn_bp5_key_held(void) {
+}
+static void afn_bp5_key_pressed(void) {
+}
+static void afn_bp5_key_released(void) {
+}
+static void afn_bp5_collision(void) {
+    if (afn_flags & (1u << 1)) {
+    }
+}
+
+#define AFN_BP_COUNT 6
+#define AFN_BP_INSTANCE_COUNT 19
+static const int afn_bp_instances[19][2] = {
+    { 1, 3 },
+    { 2, 4 },
+    { 3, 6 },
+    { 3, 7 },
+    { 3, 8 },
+    { 3, 9 },
+    { 3, 10 },
+    { 3, 11 },
+    { 3, 12 },
+    { 3, 13 },
+    { 3, 14 },
+    { 3, 15 },
+    { 3, 16 },
+    { 3, 17 },
+    { 3, 18 },
+    { 5, 21 },
+    { 0, -1 },
+    { 0, -1 },
+    { 4, -1 },
+};
+static void afn_bp_dispatch_update(void) {
+    for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
+        int bpIdx = afn_bp_instances[i][0];
+        afn_bp_cur_spr_idx = afn_bp_instances[i][1];
+        switch (bpIdx) {
+            case 0: afn_bp0_update(); break;
+            case 1: afn_bp1_update(); break;
+            case 2: afn_bp2_update(); break;
+            case 3: afn_bp3_update(); break;
+            case 4: afn_bp4_update(); break;
+            case 5: afn_bp5_update(); break;
+        }
+    }
+    afn_bp_cur_spr_idx = -1;
+}
+static void afn_bp_dispatch_key_held(void) {
+    for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
+        int bpIdx = afn_bp_instances[i][0];
+        afn_bp_cur_spr_idx = afn_bp_instances[i][1];
+        switch (bpIdx) {
+            case 0: afn_bp0_key_held(); break;
+            case 1: afn_bp1_key_held(); break;
+            case 2: afn_bp2_key_held(); break;
+            case 3: afn_bp3_key_held(); break;
+            case 4: afn_bp4_key_held(); break;
+            case 5: afn_bp5_key_held(); break;
+        }
+    }
+    afn_bp_cur_spr_idx = -1;
+}
+static void afn_bp_dispatch_key_pressed(void) {
+    for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
+        int bpIdx = afn_bp_instances[i][0];
+        afn_bp_cur_spr_idx = afn_bp_instances[i][1];
+        switch (bpIdx) {
+            case 0: afn_bp0_key_pressed(); break;
+            case 1: afn_bp1_key_pressed(); break;
+            case 2: afn_bp2_key_pressed(); break;
+            case 3: afn_bp3_key_pressed(); break;
+            case 4: afn_bp4_key_pressed(); break;
+            case 5: afn_bp5_key_pressed(); break;
+        }
+    }
+    afn_bp_cur_spr_idx = -1;
+}
+static void afn_bp_dispatch_key_released(void) {
+    for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
+        int bpIdx = afn_bp_instances[i][0];
+        afn_bp_cur_spr_idx = afn_bp_instances[i][1];
+        switch (bpIdx) {
+            case 0: afn_bp0_key_released(); break;
+            case 1: afn_bp1_key_released(); break;
+            case 2: afn_bp2_key_released(); break;
+            case 3: afn_bp3_key_released(); break;
+            case 4: afn_bp4_key_released(); break;
+            case 5: afn_bp5_key_released(); break;
+        }
+    }
+    afn_bp_cur_spr_idx = -1;
+}
+static void afn_bp_dispatch_collision(void) {
+    for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
+        int bpIdx = afn_bp_instances[i][0];
+        afn_bp_cur_spr_idx = afn_bp_instances[i][1];
+        switch (bpIdx) {
+            case 0: afn_bp0_collision(); break;
+            case 1: afn_bp1_collision(); break;
+            case 2: afn_bp2_collision(); break;
+            case 3: afn_bp3_collision(); break;
+            case 4: afn_bp4_collision(); break;
+            case 5: afn_bp5_collision(); break;
+        }
+    }
+    afn_bp_cur_spr_idx = -1;
+}
 #endif // MAPDATA_H
