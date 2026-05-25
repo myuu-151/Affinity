@@ -25,12 +25,15 @@ void afn_sprite_init(void)
     // asset rendered correctly, the rest were missing or scrambled).
     vramSetBankF(VRAM_F_LCD);
     vramSetBankB(VRAM_B_MAIN_SPRITE);
-    // 1D_64: OAM tile slot is 10 bits, so the addressable VRAM range is
-    // 1024 × boundary. 1D_32 caps at 32KB — fine for one or two assets,
-    // but per-asset 8-direction sprites blow past that. 1D_64 reaches
-    // 64KB at the cost of 32 bytes of padding per 4bpp tile (OAM expects
-    // one tile per slot, but the data is only half a slot wide).
-    oamInit(&oamMain, SpriteMapping_1D_64, false);
+    // 1D_128: OAM tile slot is 10 bits → max addressable byte = 1024 ×
+    // boundary. 1D_32 caps at 32KB, 1D_64 at 64KB; once per-asset
+    // animation frames join the directional tiles, even 64KB is too
+    // little (Sonic's 2 idle frames × 8 dirs × 64 tiles already fills
+    // 32KB by itself). 1D_128 covers the full 128KB of bank B.
+    // Per-asset byte start must be 128-byte aligned (multiple of 4 in
+    // 32-byte tile units); the exporter aligns naturally because each
+    // emitted unit is a frame × dir × tpf chunk.
+    oamInit(&oamMain, SpriteMapping_1D_128, false);
 
     // Push the 3D layer (BG0) to the lowest priority so OBJ (default
     // priority 0) renders on top of the 3D scene.
