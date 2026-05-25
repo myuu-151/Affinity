@@ -993,15 +993,237 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int player_vy;\n";
         f << "extern int player_ground_y;\n";
     }
-    // Dispatcher stubs — replaced by per-node emission in a follow-up pass.
-    f << "\n// Script dispatchers — stubs until per-node code emission lands.\n";
-    f << "static inline void afn_emitted_script_init(void)         {}\n";
-    f << "static inline void afn_emitted_script_update(void)       {}\n";
-    f << "static inline void afn_emitted_script_key_held(void)     {}\n";
-    f << "static inline void afn_emitted_script_key_pressed(void)  {}\n";
-    f << "static inline void afn_emitted_script_key_released(void) {}\n";
-    f << "static inline void afn_emitted_script_collision(void)    {}\n";
-    f << "static inline void afn_emitted_script_collision2d(void)  {}\n";
+    // ---- Per-node script emission (Phase 3a complete) ----
+    if (hasAnyScript) {
+        // Lambdas: find a node / its exec-out targets / its data-in source.
+        auto findNode = [&](int id) -> const GBAScriptNodeExport* {
+            for (auto& n : script.nodes) if (n.id == id) return &n;
+            return nullptr;
+        };
+        auto findExecOuts = [&](int nodeId, int pinIdx) -> std::vector<int> {
+            std::vector<int> targets;
+            for (auto& l : script.links)
+                if (l.fromNodeId == nodeId && l.fromPinType == 0 && l.fromPinIdx == pinIdx)
+                    targets.push_back(l.toNodeId);
+            return targets;
+        };
+        auto findDataIn = [&](int nodeId, int pinIdx) -> const GBAScriptNodeExport* {
+            for (auto& l : script.links)
+                if (l.toNodeId == nodeId && l.toPinType == 3 && l.toPinIdx == pinIdx)
+                    return findNode(l.fromNodeId);
+            return nullptr;
+        };
+        auto resolveInt = [&](const GBAScriptNodeExport* dn) -> int {
+            if (!dn) return 0;
+            if (dn->type == GBAScriptNodeType::Animation) return dn->paramInt[1];
+            return dn->paramInt[0];
+        };
+        auto resolveFloat = [&](const GBAScriptNodeExport* dn) -> float {
+            if (!dn) return 0.0f;
+            float fv;
+            memcpy(&fv, &dn->paramInt[0], sizeof(float));
+            return fv;
+        };
+        auto keyName = [](int k) -> const char* {
+            static const char* keys[] = { "KEY_A","KEY_B","KEY_L","KEY_R",
+                                          "KEY_START","KEY_SELECT",
+                                          "KEY_UP","KEY_DOWN","KEY_LEFT","KEY_RIGHT" };
+            return (k >= 0 && k < 10) ? keys[k] : "KEY_A";
+        };
+
+        // Collect chains per event type (BFS from each event node through exec links).
+        struct Chain { const GBAScriptNodeExport* event; std::vector<const GBAScriptNodeExport*> actions; };
+        std::vector<Chain> chains;
+        for (auto& n : script.nodes) {
+            auto et = n.type;
+            if (et != GBAScriptNodeType::OnUpdate &&
+                et != GBAScriptNodeType::OnStart &&
+                et != GBAScriptNodeType::OnKeyHeld &&
+                et != GBAScriptNodeType::OnKeyPressed &&
+                et != GBAScriptNodeType::OnKeyReleased &&
+                et != GBAScriptNodeType::OnCollision &&
+                et != GBAScriptNodeType::OnCollision2D)
+                continue;
+            Chain ch; ch.event = &n;
+            std::vector<int> frontier = findExecOuts(n.id, 0);
+            std::vector<bool> seen(10000, false);
+            int safety = 0;
+            while (!frontier.empty() && safety < 256) {
+                int nid = frontier.front();
+                frontier.erase(frontier.begin());
+                if (nid < 0 || nid >= (int)seen.size() || seen[nid]) continue;
+                seen[nid] = true;
+                safety++;
+                auto* an = findNode(nid);
+                if (!an) continue;
+                ch.actions.push_back(an);
+                for (int t : findExecOuts(an->id, 0)) frontier.push_back(t);
+            }
+            if (!ch.actions.empty()) chains.push_back(ch);
+        }
+
+        // Per-action emit. Subset of GBA's switch — covers the common
+        // movement / animation / state nodes. Unsupported types fall through
+        // to a comment so we know what's missing on NDS.
+        auto emitAction = [&](const GBAScriptNodeExport* a) {
+            switch (a->type) {
+            case GBAScriptNodeType::Walk: {
+                auto* d = findDataIn(a->id, 0);
+                if (d) f << "    afn_move_speed = " << (int)(resolveInt(d) * 37.0f / 35.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::Sprint: {
+                auto* d = findDataIn(a->id, 0);
+                if (d) f << "    afn_move_speed = " << (int)(resolveInt(d) * 37.0f / 35.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::Jump: {
+                auto* d = findDataIn(a->id, 0);
+                float force = d ? resolveFloat(d) : 2.0f;
+                f << "    if (player_on_ground) player_vy = " << (int)(force * 256.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::SetGravity: {
+                auto* d = findDataIn(a->id, 0);
+                float v = d ? resolveFloat(d) : 0.09f;
+                f << "    afn_gravity = " << (int)(v * 256.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::SetMaxFall: {
+                auto* d = findDataIn(a->id, 0);
+                float v = d ? resolveFloat(d) : 6.0f;
+                f << "    afn_terminal_vel = " << (int)(v * 256.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::AutoOrbit: {
+                auto* d = findDataIn(a->id, 0);
+                f << "    afn_auto_orbit_speed = " << (d ? resolveInt(d) : 205) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::MovePlayer: {
+                auto* dirData = findDataIn(a->id, 0);
+                int dir = dirData ? dirData->paramInt[0] : 0;
+                static const char* dirKeys[] = { "KEY_LEFT","KEY_RIGHT","KEY_UP","KEY_DOWN" };
+                static const char* dirVars[] = { "afn_input_right -= 256","afn_input_right += 256",
+                                                 "afn_input_fwd += 256","afn_input_fwd -= 256" };
+                if (dir >= 0 && dir < 4)
+                    f << "    if (!afn_player_frozen && key_is_down(" << dirKeys[dir] << ")) "
+                      << dirVars[dir] << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::PlayAnim: {
+                auto* d = findDataIn(a->id, 0);
+                if (d) f << "    afn_play_anim = " << resolveInt(d) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::FreezePlayer:
+                f << "    afn_player_frozen = 1; afn_play_anim = -1;\n";
+                break;
+            case GBAScriptNodeType::SetVisible: {
+                auto* sprData = findDataIn(a->id, 0);
+                auto* visData = findDataIn(a->id, 1);
+                int sIdx = sprData ? resolveInt(sprData) : a->paramInt[0];
+                int vis  = visData ? resolveInt(visData) : a->paramInt[1];
+                f << "    if ((unsigned)" << sIdx << " < NUM_SPRITES) afn_sprite_visible["
+                  << sIdx << "] = " << (vis ? 1 : 0) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::DestroyObject: {
+                auto* d = findDataIn(a->id, 0);
+                int sIdx = d ? resolveInt(d) : a->paramInt[0];
+                f << "    if ((unsigned)" << sIdx << " < NUM_SPRITES) {\n";
+                f << "        afn_sprite_visible[" << sIdx << "] = 0;\n";
+                f << "        afn_collision_enabled[" << sIdx << "] = 0;\n";
+                f << "    }\n";
+                break;
+            }
+            case GBAScriptNodeType::SetFlag:
+                f << "    afn_flags |= (1u << " << a->paramInt[0] << ");\n";
+                break;
+            case GBAScriptNodeType::ToggleFlag:
+                f << "    afn_flags ^= (1u << " << a->paramInt[0] << ");\n";
+                break;
+            case GBAScriptNodeType::ScreenShake: {
+                auto* d0 = findDataIn(a->id, 0);
+                auto* d1 = findDataIn(a->id, 1);
+                f << "    afn_shake_intensity = " << (d0 ? resolveInt(d0) : 4) << ";\n";
+                f << "    afn_shake_frames    = " << (d1 ? resolveInt(d1) : 20) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::DampenJump: {
+                auto* d = findDataIn(a->id, 0);
+                float factor = d ? resolveFloat(d) : 0.75f;
+                f << "    if (player_vy > 0) player_vy = (player_vy * " << (int)(factor*256.0f) << ") >> 8;\n";
+                break;
+            }
+            // --- Gate nodes (open a brace; closed by the chain's tail logic) ---
+            case GBAScriptNodeType::IsMoving:
+                f << "    if (player_moving) {\n"; break;
+            case GBAScriptNodeType::IsOnGround:
+                f << "    if (player_on_ground) {\n"; break;
+            case GBAScriptNodeType::IsJumping:
+                f << "    if (player_vy > 0) {\n"; break;
+            case GBAScriptNodeType::IsFalling:
+                f << "    if (!player_on_ground && player_vy <= 0) {\n"; break;
+            case GBAScriptNodeType::CheckFlag:
+                f << "    if (afn_flags & (1u << " << a->paramInt[0] << ")) {\n"; break;
+            default:
+                f << "    /* TODO: emit node type " << (int)a->type << " */\n";
+                break;
+            }
+        };
+
+        auto emitChain = [&](const Chain& c) {
+            // Count gates so we can close them at the end.
+            int gates = 0;
+            for (auto* a : c.actions)
+                if (a->type == GBAScriptNodeType::IsMoving  ||
+                    a->type == GBAScriptNodeType::IsOnGround ||
+                    a->type == GBAScriptNodeType::IsJumping ||
+                    a->type == GBAScriptNodeType::IsFalling ||
+                    a->type == GBAScriptNodeType::CheckFlag) gates++;
+            for (auto* a : c.actions) emitAction(a);
+            for (int g = 0; g < gates; g++) f << "    }\n";
+        };
+
+        // Emit each dispatcher function with the matching chains inlined.
+        auto emitDispatcher = [&](const char* fname, GBAScriptNodeType evType,
+                                  const char* keyCheck /* "key_is_down" etc, null for non-key */) {
+            f << "static void " << fname << "(void) {\n";
+            for (auto& c : chains) {
+                if (c.event->type != evType) continue;
+                if (keyCheck) {
+                    auto* keyData = findDataIn(c.event->id, 0);
+                    int k = keyData ? keyData->paramInt[0] : c.event->paramInt[0];
+                    f << "    if (" << keyCheck << "(" << keyName(k) << ")) {\n";
+                    emitChain(c);
+                    f << "    }\n";
+                } else {
+                    emitChain(c);
+                }
+            }
+            f << "}\n";
+        };
+
+        f << "\n// ---- Generated script code from visual node graph ----\n";
+        f << "static void afn_emitted_script_init(void)         {}\n";
+        emitDispatcher("afn_emitted_script_update",       GBAScriptNodeType::OnUpdate,       nullptr);
+        emitDispatcher("afn_emitted_script_key_held",     GBAScriptNodeType::OnKeyHeld,      "key_is_down");
+        emitDispatcher("afn_emitted_script_key_pressed",  GBAScriptNodeType::OnKeyPressed,   "key_hit");
+        emitDispatcher("afn_emitted_script_key_released", GBAScriptNodeType::OnKeyReleased,  "key_released");
+        emitDispatcher("afn_emitted_script_collision",    GBAScriptNodeType::OnCollision,    nullptr);
+        emitDispatcher("afn_emitted_script_collision2d",  GBAScriptNodeType::OnCollision2D,  nullptr);
+    } else {
+        // No scripts in this build — empty stubs keep script_glue.c linkable.
+        f << "\n// Script dispatchers — no scripts in this build.\n";
+        f << "static inline void afn_emitted_script_init(void)         {}\n";
+        f << "static inline void afn_emitted_script_update(void)       {}\n";
+        f << "static inline void afn_emitted_script_key_held(void)     {}\n";
+        f << "static inline void afn_emitted_script_key_pressed(void)  {}\n";
+        f << "static inline void afn_emitted_script_key_released(void) {}\n";
+        f << "static inline void afn_emitted_script_collision(void)    {}\n";
+        f << "static inline void afn_emitted_script_collision2d(void)  {}\n";
+    }
 
     f << "#endif // MAPDATA_H\n";
     f.close();
