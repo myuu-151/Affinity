@@ -9875,6 +9875,32 @@ static const u8 afn_sky_tex[65536] = {
     
 };
 
+#define AFN_HAS_SCRIPT 1
+// Script state variables (defined in script_glue.c)
+extern int  afn_input_fwd;
+extern int  afn_input_right;
+extern int  afn_move_speed;
+extern int  afn_auto_orbit_speed;
+extern int  afn_play_anim;
+extern int  afn_sprite_anim_spr;
+extern int  afn_sprite_anim_val;
+extern int  afn_anim_prio;
+extern int  afn_collided_sprite;
+extern int  afn_collided_tm_obj;
+extern int  afn_bp_cur_tm_obj;
+extern int  afn_bp_cur_spr_idx;
+extern int  afn_gravity;
+extern int  afn_terminal_vel;
+extern int  afn_player_frozen;
+extern int  afn_anim_speed;
+extern unsigned int afn_rng;
+extern int  afn_shake_intensity;
+extern int  afn_shake_frames;
+extern int  afn_fade_level;
+extern int  afn_score;
+extern int  afn_frame_count;
+extern int  afn_draw_distance;
+
 // Script dispatchers — stubs until per-node code emission lands.
 static inline void afn_emitted_script_init(void)         {}
 static inline void afn_emitted_script_update(void)       {}

@@ -134,7 +134,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                                 const std::vector<GBASoundSampleExport>& soundSamples,
                                 const std::vector<GBASoundInstanceExport>& soundInstances,
                                 const std::vector<GBASkyFrameExport>& skyFrames,
-                                bool ndsAntialiasing)
+                                bool ndsAntialiasing,
+                                const GBAScriptExport& script,
+                                const std::vector<GBABlueprintExport>& blueprints,
+                                const std::vector<GBABlueprintInstanceExport>& bpInstances)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
     std::ofstream f(outPath);
@@ -919,10 +922,41 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "\n};\n";
     }
 
-    // ---- Phase 3a framework: script stubs ----
-    // Empty stubs so script_glue.c can call into the script entrypoints.
-    // Actual node-by-node code emission is the follow-up phase — until then
-    // these dispatchers do nothing, but the runtime compiles and links.
+    // ---- Phase 3a framework: script declarations + stubs ----
+    bool hasAnyScript = !script.nodes.empty() || !blueprints.empty();
+    if (hasAnyScript) {
+        f << "\n#define AFN_HAS_SCRIPT 1\n";
+        // Script-side globals the emitted node bodies will reference. These
+        // are DECLARATIONS only — definitions live in nds_runtime/source/
+        // script_glue.c so multiple .c files including mapdata.h don't each
+        // get their own copy. (GBA's main.c is the sole includer of
+        // mapdata.h so it can use `static` here; NDS can't.)
+        f << "// Script state variables (defined in script_glue.c)\n";
+        f << "extern int  afn_input_fwd;\n";
+        f << "extern int  afn_input_right;\n";
+        f << "extern int  afn_move_speed;\n";
+        f << "extern int  afn_auto_orbit_speed;\n";
+        f << "extern int  afn_play_anim;\n";
+        f << "extern int  afn_sprite_anim_spr;\n";
+        f << "extern int  afn_sprite_anim_val;\n";
+        f << "extern int  afn_anim_prio;\n";
+        f << "extern int  afn_collided_sprite;\n";
+        f << "extern int  afn_collided_tm_obj;\n";
+        f << "extern int  afn_bp_cur_tm_obj;\n";
+        f << "extern int  afn_bp_cur_spr_idx;\n";
+        f << "extern int  afn_gravity;\n";
+        f << "extern int  afn_terminal_vel;\n";
+        f << "extern int  afn_player_frozen;\n";
+        f << "extern int  afn_anim_speed;\n";
+        f << "extern unsigned int afn_rng;\n";
+        f << "extern int  afn_shake_intensity;\n";
+        f << "extern int  afn_shake_frames;\n";
+        f << "extern int  afn_fade_level;\n";
+        f << "extern int  afn_score;\n";
+        f << "extern int  afn_frame_count;\n";
+        f << "extern int  afn_draw_distance;\n";
+    }
+    // Dispatcher stubs — replaced by per-node emission in a follow-up pass.
     f << "\n// Script dispatchers — stubs until per-node code emission lands.\n";
     f << "static inline void afn_emitted_script_init(void)         {}\n";
     f << "static inline void afn_emitted_script_update(void)       {}\n";
@@ -951,13 +985,16 @@ bool PackageNDS(const std::string& runtimeDir,
                 const std::vector<GBASoundInstanceExport>& soundInstances,
                 const std::vector<GBASkyFrameExport>& skyFrames,
                 bool ndsAntialiasing,
+                const GBAScriptExport& script,
+                const std::vector<GBABlueprintExport>& blueprints,
+                const std::vector<GBABlueprintInstanceExport>& bpInstances,
                 std::string& errorMsg)
 {
     std::string buildOutput;
     std::string msysDir = ToMsysPath(runtimeDir);
 
     // Step 0: Generate mapdata.h
-    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames, ndsAntialiasing))
+    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames, ndsAntialiasing, script, blueprints, bpInstances))
     {
         errorMsg = "Failed to write mapdata.h to " + runtimeDir + "/include/";
         return false;

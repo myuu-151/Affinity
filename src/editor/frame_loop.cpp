@@ -13975,7 +13975,8 @@ void FrameTick(float dt)
                         ok = PackageNDS(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist,
                                         exportSoundSamples, exportSoundInstances,
-                                        exportSkyFrames, exportNdsAa, err);
+                                        exportSkyFrames, exportNdsAa,
+                                        exportScript, exportBlueprints, exportBpInstances, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,
