@@ -140,14 +140,23 @@ void afn_sprite_update(void)
                         p->objSize == 16 ? SpriteSize_16x16 :
                         p->objSize == 32 ? SpriteSize_32x32 : SpriteSize_64x64;
 
-        oamRotateScale(&oamMain, affineSlot, 0, p->matScale, p->matScale);
-
         // Double-canvas: bottom-anchor needs scale compensation so feet stay
         // on the ground when the affine shrinks the sprite.
         int scaledHalfH = (p->objSize * 256) / (p->matScale * 2);
         int topLeftY = p->screenY - scaledHalfH - p->objSize;
+        int topLeftX = p->screenX - p->objSize;
+        int canvasSize = p->objSize * 2;
+
+        // OAM Y is 8-bit (0–255) and wraps. A sprite whose render box
+        // crosses the wrap edge gets its bottom half torn to the top of
+        // the screen. Drop sprites in the unsafe zone instead of drawing.
+        if (topLeftY + canvasSize <= 0 || topLeftY >= 192) continue;
+        if (topLeftY >= 0 && topLeftY + canvasSize > 255) continue;
+        if (topLeftX + canvasSize <= 0 || topLeftX >= 256) continue;
+
+        oamRotateScale(&oamMain, affineSlot, 0, p->matScale, p->matScale);
         oamSet(&oamMain, oamSlot,
-               p->screenX - p->objSize, topLeftY,
+               topLeftX, topLeftY,
                0, p->palBank, sz, SpriteColorFormat_16Color,
                (void*)((u8*)0x06400000 + p->tileIdx * 32),
                affineSlot, true, false, false, false, false);
