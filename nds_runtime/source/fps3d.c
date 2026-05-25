@@ -333,13 +333,15 @@ static void render_sky(void)
     // Then the quad's X/Y extent must be large enough to fill the screen at
     // that depth: with 70° FOV, halfTan ≈ 0.7 → half-extent = 7.9 * 0.7 ≈ 5.5.
     // Use 7.9 to be safe.
-    // Local v16 coords scaled by 200x. Quad covers the full visible
-    // screen at depth 900: half-width ≈ 840, half-height ≈ 630
-    // (70° FOV vertical, 4:3 aspect). Using ±5 v16 → ±1000 world, a
-    // tad over-covers to avoid black edges.
+    // Local v16 coords scaled by 200x. Quad sized to EXACTLY match the
+    // visible screen at depth 900 (half-width = 900*tan(43°) ≈ 840 DS,
+    // half-height = 900*tan(35°) ≈ 630). With the quad exactly visible,
+    // uRight-uLeft = 4096 maps the full 256-px panorama 1:1 to screen
+    // width (was ~215 px visible before because the over-sized quad
+    // wasted texture coords past the screen edges).
     int16_t qZ  = floattov16( 0.0f);
-    int16_t qXl = floattov16(-5.0f), qXr = floattov16( 5.0f);
-    int16_t qYt = floattov16( 3.5f), qYb = floattov16(-3.5f);
+    int16_t qXl = floattov16(-4.2f), qXr = floattov16( 4.2f);
+    int16_t qYt = floattov16( 3.15f), qYb = floattov16(-3.15f);
 
     glBegin(GL_QUADS);
         glTexCoord2t16(uLeft,  vTop); glVertex3v16(qXl, qYt, qZ);
