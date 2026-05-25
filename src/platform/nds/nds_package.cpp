@@ -919,6 +919,19 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "\n};\n";
     }
 
+    // ---- Phase 3a framework: script stubs ----
+    // Empty stubs so script_glue.c can call into the script entrypoints.
+    // Actual node-by-node code emission is the follow-up phase — until then
+    // these dispatchers do nothing, but the runtime compiles and links.
+    f << "\n// Script dispatchers — stubs until per-node code emission lands.\n";
+    f << "static inline void afn_emitted_script_init(void)         {}\n";
+    f << "static inline void afn_emitted_script_update(void)       {}\n";
+    f << "static inline void afn_emitted_script_key_held(void)     {}\n";
+    f << "static inline void afn_emitted_script_key_pressed(void)  {}\n";
+    f << "static inline void afn_emitted_script_key_released(void) {}\n";
+    f << "static inline void afn_emitted_script_collision(void)    {}\n";
+    f << "static inline void afn_emitted_script_collision2d(void)  {}\n";
+
     f << "#endif // MAPDATA_H\n";
     f.close();
     return true;

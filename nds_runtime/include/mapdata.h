@@ -7,7 +7,7 @@
 // Camera start position (16.8 fixed-point)
 #define AFN_CAM_X     32768
 #define AFN_CAM_Z     32768
-#define AFN_CAM_H     3232
+#define AFN_CAM_H     3200
 #define AFN_CAM_ANGLE 1820
 #define AFN_CAM_HORIZON 60
 #define AFN_WALK_SPEED 37
@@ -20,12 +20,12 @@
 #define AFN_SPRITE_DRAW_DISTANCE 51840
 
 #define AFN_PLAYER_IDX 0
-#define AFN_ORBIT_DIST 5760
+#define AFN_ORBIT_DIST 4608
 
 #define AFN_SPRITE_COUNT 22
 
 static const int afn_sprite_data[][11] = {
-    { 32768, 9600, 27008, 1, 0, 409, 1, 0, 1, -1, 0 },
+    { 32768, 9600, 28160, 1, 0, 409, 1, 0, 1, -1, 0 },
     { 32596, 9600, 25421, 2, -1, 12339, 6, 0, 1, 2, 0 },
     { 37384, 9600, 12388, 3, -1, 624, 6, 0, 1, 6, 0 },
     { 42650, 9600, 29651, 1, 2, 512, 0, 0, 1, -1, 1 },
@@ -9874,4 +9874,13 @@ static const u8 afn_sky_tex[65536] = {
     42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42
     
 };
+
+// Script dispatchers — stubs until per-node code emission lands.
+static inline void afn_emitted_script_init(void)         {}
+static inline void afn_emitted_script_update(void)       {}
+static inline void afn_emitted_script_key_held(void)     {}
+static inline void afn_emitted_script_key_pressed(void)  {}
+static inline void afn_emitted_script_key_released(void) {}
+static inline void afn_emitted_script_collision(void)    {}
+static inline void afn_emitted_script_collision2d(void)  {}
 #endif // MAPDATA_H
