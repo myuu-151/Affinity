@@ -237,10 +237,55 @@ static void render_meshes(void)
 // ---------------------------------------------------------------------------
 // Input + camera tick (WASD = D-pad: W/S = walk fwd/back, A/D = turn)
 // ---------------------------------------------------------------------------
+// Movement/jump state. Walk speed ramps with AFN_WALK_EASE_IN/OUT toward
+// the target (walk or sprint). player_y is a vertical offset added to the
+// base cam_h — jump impulse pushes it up, gravity pulls it back, cam_h
+// follows with a separate smoothing delay (land vs air).
+static int s_moveSpeed;             // current smoothed speed
+static int s_playerVy;              // 16.8 vertical velocity (+up, -down)
+static int s_playerY;               // 16.8 vertical offset from ground
+static int s_camYSmooth;            // smoothed cam_h follow of s_playerY
+static int s_onGround = 1;
+
+#ifndef AFN_WALK_SPEED
+#define AFN_WALK_SPEED 37
+#endif
+#ifndef AFN_SPRINT_SPEED
+#define AFN_SPRINT_SPEED 56
+#endif
+#ifndef AFN_WALK_EASE_IN
+#define AFN_WALK_EASE_IN 25
+#endif
+#ifndef AFN_WALK_EASE_OUT
+#define AFN_WALK_EASE_OUT 25
+#endif
+#ifndef AFN_SPRINT_EASE_IN
+#define AFN_SPRINT_EASE_IN 15
+#endif
+#ifndef AFN_SPRINT_EASE_OUT
+#define AFN_SPRINT_EASE_OUT 10
+#endif
+#ifndef AFN_JUMP_VEL
+#define AFN_JUMP_VEL 512
+#endif
+#ifndef AFN_GRAVITY
+#define AFN_GRAVITY 23
+#endif
+#ifndef AFN_TERMINAL_VEL
+#define AFN_TERMINAL_VEL 1536
+#endif
+#ifndef AFN_JUMP_CAM_LAND
+#define AFN_JUMP_CAM_LAND 94
+#endif
+#ifndef AFN_JUMP_CAM_AIR
+#define AFN_JUMP_CAM_AIR 30
+#endif
+
 static void update_camera(void)
 {
     scanKeys();
     uint32_t held = keysHeld();
+    uint32_t down = keysDown();
     {
         static int s_dbgFrame = 0;
         s_dbgFrame++;
@@ -250,10 +295,7 @@ static void update_camera(void)
         }
     }
 
-    int speed = AFN_WALK_SPEED;
-
-    // Q (KEY_L) ascend, E (KEY_R) descend — useful for poking at meshes from
-    // different heights while we tune the NDS scene scale.
+    // Q (KEY_L) ascend, E (KEY_R) descend — keep this for tuning camera Y.
     if (held & KEY_L) cam_h += AFN_WALK_SPEED;
     if (held & KEY_R) cam_h -= AFN_WALK_SPEED;
 
@@ -263,17 +305,75 @@ static void update_camera(void)
     g_cosf = brad_cos(cam_angle);
     g_sinf = brad_sin(cam_angle);
 
+    // Speed easing: ramp moveSpeed toward target. B = sprint. Movement input
+    // (UP/DOWN) sets the active target — releasing decays back to 0 via
+    // ease_out. Mirrors gba_runtime's main.c movement model, simplified.
+    int wantMove   = (held & (KEY_UP | KEY_DOWN)) != 0;
+    int wantSprint = (held & KEY_B) && wantMove;
+    int targetSpeed = wantMove ? (wantSprint ? AFN_SPRINT_SPEED : AFN_WALK_SPEED) : 0;
+    int easeNum    = wantMove
+        ? (wantSprint ? AFN_SPRINT_EASE_IN : AFN_WALK_EASE_IN)
+        : (s_moveSpeed > AFN_WALK_SPEED ? AFN_SPRINT_EASE_OUT : AFN_WALK_EASE_OUT);
+    s_moveSpeed += ((targetSpeed - s_moveSpeed) * easeNum) >> 8;
+    if (s_moveSpeed < 0) s_moveSpeed = 0;
+
+    // Move the PLAYER (not the camera directly) — camera follows behind via
+    // orbit math below. cam_x/z get derived from player_x/z + orbit offset.
     int dx = 0, dz = 0;
     if (held & KEY_UP)    { dx += g_sinf; dz += g_cosf; }
     if (held & KEY_DOWN)  { dx -= g_sinf; dz -= g_cosf; }
+    player_x += FX_MUL(dx, s_moveSpeed);
+    player_z += FX_MUL(dz, s_moveSpeed);
+    player_moving = (dx != 0 || dz != 0);
 
-    cam_x += FX_MUL(dx, speed);
-    cam_z += FX_MUL(dz, speed);
+    // Jump (A button) + gravity. Jump only when grounded.
+    if ((down & KEY_A) && s_onGround) {
+        s_playerVy = AFN_JUMP_VEL;
+        s_onGround = 0;
+    }
+    s_playerVy -= AFN_GRAVITY;
+    if (s_playerVy < -AFN_TERMINAL_VEL) s_playerVy = -AFN_TERMINAL_VEL;
+    s_playerY += s_playerVy;
+    if (s_playerY <= 0) {
+        s_playerY = 0;
+        s_playerVy = 0;
+        s_onGround = 1;
+    }
+    player_y = afn_sprite_data[AFN_PLAYER_IDX][1] + s_playerY;
 
-    if (held & KEY_A) m7_horizon++;
-    if (held & KEY_B) m7_horizon--;
-    if (m7_horizon < 10) m7_horizon = 10;
-    if (m7_horizon > 180) m7_horizon = 180;
+    // 3rd-person camera: target = player - orbit_dist * view-forward. Lerp
+    // cam_x/z toward target with the same ease rate as movement so the cam
+    // glides into position rather than rubber-banding.
+    {
+        int targetX = player_x - ((g_sinf * orbit_dist) >> 8);
+        int targetZ = player_z - ((g_cosf * orbit_dist) >> 8);
+        int ddx = targetX - cam_x;
+        int ddz = targetZ - cam_z;
+        if (ddx > -16 && ddx < 16 && ddz > -16 && ddz < 16) {
+            cam_x = targetX;
+            cam_z = targetZ;
+        } else {
+            int ease = wantSprint
+                ? (wantMove ? AFN_SPRINT_EASE_IN : AFN_SPRINT_EASE_OUT)
+                : (wantMove ? AFN_WALK_EASE_IN   : AFN_WALK_EASE_OUT);
+            cam_x += (ddx * ease) >> 8;
+            cam_z += (ddz * ease) >> 8;
+        }
+    }
+
+    // Smooth cam_h Y follow — quick on the way down (landing), lazy in the
+    // air so the camera lags a beat behind a jump's apex.
+    {
+        int dy = s_playerY - s_camYSmooth;
+        int rate = s_onGround ? AFN_JUMP_CAM_LAND : AFN_JUMP_CAM_AIR;
+        s_camYSmooth += (dy * rate) >> 8;
+        if (dy > -4 && dy < 4) s_camYSmooth = s_playerY;
+    }
+    // cam_h is the camera's world Y. AFN_CAM_H is reinterpreted as the
+    // camera's offset ABOVE the player (the GBA Mode 7 version treated it
+    // as an absolute height above Y=0, but our 3D scenes have meshes
+    // floating in the air, so the camera must follow the player's world Y).
+    cam_h = player_y + AFN_CAM_H;
 }
 
 // ---------------------------------------------------------------------------
@@ -370,12 +470,27 @@ void afn_fps3d_init(void)
     load_sky_texture();
 #endif
 
-    cam_x     = AFN_CAM_X;
-    cam_z     = AFN_CAM_Z;
     cam_h     = AFN_CAM_H;
     cam_angle = AFN_CAM_ANGLE;
     g_cosf    = brad_cos(cam_angle);
     g_sinf    = brad_sin(cam_angle);
+
+    // Initialize player position from the player sprite (3rd-person camera
+    // follows). Fall back to AFN_CAM_X/Z (free-cam start) if no player sprite.
+#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0 && defined(AFN_SPRITE_COUNT) && AFN_SPRITE_COUNT > 0
+    player_x = afn_sprite_data[AFN_PLAYER_IDX][0];
+    player_y = afn_sprite_data[AFN_PLAYER_IDX][1];
+    player_z = afn_sprite_data[AFN_PLAYER_IDX][2];
+#else
+    player_x = AFN_CAM_X;
+    player_z = AFN_CAM_Z;
+    player_y = 0;
+#endif
+    orbit_dist = AFN_ORBIT_DIST;
+    // Camera = player - orbit_dist along view forward. NDS convention:
+    // forward = (sin, cos), so camera sits at -(sin, cos) * dist behind player.
+    cam_x = player_x - ((g_sinf * orbit_dist) >> 8);
+    cam_z = player_z - ((g_cosf * orbit_dist) >> 8);
 
     glLight(0,
             RGB15(31, 31, 31),

@@ -105,6 +105,15 @@ void afn_sprite_update(void)
         int wx = afn_sprite_data[si][0];
         int wy = afn_sprite_data[si][1];
         int wz = afn_sprite_data[si][2];
+#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
+        // Player sprite — read its mutable runtime position from fps3d.c so
+        // the visible Sonic moves with the input that drives the camera.
+        if (si == AFN_PLAYER_IDX) {
+            wx = player_x;
+            wy = player_y;
+            wz = player_z;
+        }
+#endif
 
         int dx = wx - cam_x;
         int dy = wy - cam_h;
