@@ -105,13 +105,47 @@ void afn_script_init(void)
     afn_emitted_script_init();
 }
 
+// Collision detection: mirror GBA's radius-based check in main.c. Walks all
+// non-player sprites once per frame and flags the first one inside the
+// player's interaction radius into afn_collided_sprite, then fires the
+// OnCollision dispatcher. The 10-frame post-load grace window matches GBA
+// so the player doesn't ping-pong on a sprite they started inside of.
+#ifdef AFN_HAS_SCRIPT
+static void afn_script_check_collisions(void)
+{
+#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0 && defined(AFN_SPRITE_COUNT) && AFN_SPRITE_COUNT > 0
+    afn_collided_sprite = -1;
+    for (int i = 0; i < AFN_SPRITE_COUNT; i++) {
+        if (i == AFN_PLAYER_IDX) continue;
+        if (!afn_sprite_visible[i]) continue;
+        if (!afn_collision_enabled[i]) continue;
+        int dx = (player_x - afn_sprite_data[i][0]) >> 4;
+        int dz = (player_z - afn_sprite_data[i][2]) >> 4;
+        // Threshold mirrors gba_runtime/main.c:7592 — (24px radius)^2 in 12.4.
+        if (dx * dx + dz * dz < 147456) {
+            afn_collided_sprite = i;
+            break;
+        }
+    }
+    if (afn_collided_sprite >= 0 && afn_frame_count > 10)
+        afn_emitted_script_collision();
+#endif
+}
+#endif
+
 void afn_script_tick(void)
 {
+#ifdef AFN_HAS_SCRIPT
+    afn_input_fwd   = 0;
+    afn_input_right = 0;
+    afn_play_anim   = -1;
+#endif
     afn_emitted_script_update();
     afn_emitted_script_key_held();
     afn_emitted_script_key_pressed();
     afn_emitted_script_key_released();
 #ifdef AFN_HAS_SCRIPT
+    afn_script_check_collisions();
     afn_frame_count++;
 #endif
 }
