@@ -46,20 +46,34 @@ void afn_sprite_init(void)
 #endif
 }
 
+// Pass-1 result: a sprite that passed depth+screen culling, ready for OAM
+// emission once we sort by depth so nearer sprites get lower OAM slots
+// (NDS OAM draws lower-indexed OBJs on top of higher-indexed ones).
+typedef struct {
+    int idx;          // sprite_data row index
+    int depth;        // sort key (smaller = nearer = lower slot)
+    int screenX, screenY;
+    int matScale;
+    int objSize;
+    int palBank;
+    int tileIdx;
+} ProjSpr;
+
 void afn_sprite_update(void)
 {
 #if defined(HAS_SPRITES)
     oamClear(&oamMain, 0, 128);
 
-    int oamSlot = 0;
-    int affineSlot = 0;
+    static ProjSpr proj[AFN_SPRITE_COUNT];
+    int projCount = 0;
+
     // Match gluPerspective(70°, 256/192): focal_px = 96/tan(35°) ≈ 137 in
     // both axes (the aspect ratio cancels through the X-axis half-width).
     const int focalLen = 137;
     const int screenHalfX = 128;
     const int screenHalfY = 96;   // 3D scene horizon is always screen center
 
-    for (int si = 0; si < AFN_SPRITE_COUNT && oamSlot < 96 && affineSlot < 32; si++) {
+    for (int si = 0; si < AFN_SPRITE_COUNT; si++) {
         if (afn_sprite_data[si][9] >= 0) continue;  // mesh sprite — fps3d draws it
         int aIdx = afn_sprite_data[si][4];
         if (aIdx < 0 || aIdx >= AFN_ASSET_COUNT) continue;
@@ -81,53 +95,62 @@ void afn_sprite_update(void)
         int viewX  = (-dx * g_cosf + dz * g_sinf) >> 8;
         int screenX = screenHalfX + (viewX * focalLen) / depth;
         int screenY = screenHalfY - (dy    * focalLen) / depth;
-        int scale   = (FX_ONE   * focalLen) / depth;  // 1 world unit at this depth
 
         int objSize = afn_asset_desc[aIdx][3];
         if (objSize <= 0) objSize = 16;
-        if (screenX < -objSize || screenX > 256 + objSize) continue;
-        if (screenY < -objSize || screenY > 192 + objSize) continue;
-        if (scale < 1) continue;
+        // Screen bounds: keep sprites that have any chance of being visible.
+        // OAM silently no-ops fully off-screen sprites, so bounds are only
+        // here to avoid wasting OAM slots — no `scale < 1` far-distance cull,
+        // which caused sprites to pop out when crossing depth > 137 editor px.
+        if (screenX < -128 || screenX > 256 + 128) continue;
+        if (screenY < -128 || screenY > 192 + 128) continue;
 
-        int tileStart  = afn_asset_desc[aIdx][0];
-        int tilesPerFr = afn_asset_desc[aIdx][1];
-        int palBank    = afn_asset_desc[aIdx][4] & 0xF;
-        int tileIdx    = tileStart + 0 * tilesPerFr;   // frame 0 for now
+        int matScale = depth / 32;
+        if (matScale < 128)  matScale = 128;
+        if (matScale > 4096) matScale = 4096;
 
-        SpriteSize sz = objSize == 8  ? SpriteSize_8x8  :
-                        objSize == 16 ? SpriteSize_16x16 :
-                        objSize == 32 ? SpriteSize_32x32 : SpriteSize_64x64;
+        proj[projCount].idx     = si;
+        proj[projCount].depth   = depth;
+        proj[projCount].screenX = screenX;
+        proj[projCount].screenY = screenY;
+        proj[projCount].matScale = matScale;
+        proj[projCount].objSize = objSize;
+        proj[projCount].palBank = afn_asset_desc[aIdx][4] & 0xF;
+        proj[projCount].tileIdx = afn_asset_desc[aIdx][0]; // frame 0
+        projCount++;
+        if (projCount >= AFN_SPRITE_COUNT) break;
+    }
 
-        // Distance scale via OAM affine. NDS matrix scale is .8 fixed where
-        // 256 = 1:1, bigger value = sprite SHRUNK, smaller value = enlarged.
-        // S_pixels = objSize * 256 / matScale, and we want S ∝ 1/depth, so
-        // matScale = 256 * depth / K. K ≈ 3750 fx8 tuned by hand so Sonic
-        // (objSize 64) reads at ~60 px at depth ≈ 4000 fx8.
-        int matScale = depth / 48;              // bigger divisor = bigger sprites
-        if (matScale < 64)   matScale = 64;     // ≤4× enlargement (canvas cap)
-        if (matScale > 4096) matScale = 4096;   // ≥1/16 reduction
-        oamRotateScale(&oamMain, affineSlot, 0, matScale, matScale);
-
-        // Double-canvas render box is 2× objSize centered on the sprite's
-        // visual center. With affine, the scaled sprite ALSO centers in the
-        // box — so the scaled bottom is at (box_center_Y + objSize*256/(2*matScale)).
-        // We want scaled bottom == screenY, so box_center_Y must lift with scale.
-        int scaledHalfH = (objSize * 256) / (matScale * 2);
-        int topLeftY = screenY - scaledHalfH - objSize;
-        oamSet(&oamMain, oamSlot,
-               screenX - objSize, topLeftY,
-               0, palBank, sz, SpriteColorFormat_16Color,
-               (void*)((u8*)0x06400000 + tileIdx * 32),
-               affineSlot, true, false, false, false, false);
-
-        if (oamSlot == 0) {
-            static int s_f = 0;
-            s_f++;
-            if ((s_f & 15) == 0)
-                iprintf("\x1b[17;0Hsp0 sX=%d sY=%d d=%d ms=%d osz=%d  ",
-                        screenX, screenY, depth, matScale, objSize);
+    // Sort nearest first → lower OAM slot → drawn on top of farther sprites.
+    // Insertion sort: N is small (≤ AFN_SPRITE_COUNT, typically <30).
+    for (int i = 1; i < projCount; i++) {
+        ProjSpr key = proj[i];
+        int j = i - 1;
+        while (j >= 0 && proj[j].depth > key.depth) {
+            proj[j + 1] = proj[j];
+            j--;
         }
+        proj[j + 1] = key;
+    }
 
+    int oamSlot = 0, affineSlot = 0;
+    for (int i = 0; i < projCount && oamSlot < 96 && affineSlot < 32; i++) {
+        ProjSpr* p = &proj[i];
+        SpriteSize sz = p->objSize == 8  ? SpriteSize_8x8   :
+                        p->objSize == 16 ? SpriteSize_16x16 :
+                        p->objSize == 32 ? SpriteSize_32x32 : SpriteSize_64x64;
+
+        oamRotateScale(&oamMain, affineSlot, 0, p->matScale, p->matScale);
+
+        // Double-canvas: bottom-anchor needs scale compensation so feet stay
+        // on the ground when the affine shrinks the sprite.
+        int scaledHalfH = (p->objSize * 256) / (p->matScale * 2);
+        int topLeftY = p->screenY - scaledHalfH - p->objSize;
+        oamSet(&oamMain, oamSlot,
+               p->screenX - p->objSize, topLeftY,
+               0, p->palBank, sz, SpriteColorFormat_16Color,
+               (void*)((u8*)0x06400000 + p->tileIdx * 32),
+               affineSlot, true, false, false, false, false);
         oamSlot++;
         affineSlot++;
     }
