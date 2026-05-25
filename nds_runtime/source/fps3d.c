@@ -569,22 +569,18 @@ void afn_fps3d_update(void)
     int lookX = cam_x + (g_sinf << 2);
     int lookZ = cam_z + (g_cosf << 2);
 
-    // Pitch the camera down so the horizon lands where AFN_CAM_HORIZON
-    // expects (GBA Mode 7 puts the horizon at that screen Y in a 160-px
-    // tall screen — we map it to 192-px NDS by scaling 6/5). For a 70°
-    // vertical FOV: pitch_deg = (96 - horizon_nds) * 70/192. Convert that
-    // pitch into a Y-offset on the lookAt point (look_dist * tan(pitch)).
-    // tan ≈ pitch_radians for our small pitch range — close enough.
+    // Pitch the camera down so the horizon lands at m7_horizon (in NDS
+    // screen pixels). sprites.c reads the same m7_horizon to align its
+    // sprite projection — single source of truth keeps meshes + OAM
+    // sprites lined up regardless of the pitch tuning constant.
+    //   pitch_rad = screenOffPx * (70° / 192) * (π/180) ≈ screenOffPx * 0.00637
+    //   lookY_offset_fx8 = look_dist_fx8 * pitch_rad
+    //                    = 1024 * 0.00637 * screenOffPx ≈ 6.5 * screenOffPx
+    // Round to 7 for cheap integer math (~6% high but visually fine).
     int lookY = cam_h;
     {
-        int horizonNds = (AFN_CAM_HORIZON * 6) / 5;     // GBA px → NDS px
-        int screenOffPx = 96 - horizonNds;              // +ve = look down
-        // tilt_at_look_dist (fx8) = look_dist_fx8 * pitch_rad
-        //   pitch_rad = screenOffPx * (70°/192) * (π/180)
-        //   ≈ screenOffPx * 0.00637
-        // look_dist (in fx8) = 1024 (=4 fx8). So tilt_fx8 ≈ 1024 * 0.00637 * off.
-        // Pre-compute the per-pixel multiplier in fx8: 1024 * 0.00637 ≈ 6.5.
-        // Round to 7 for cheap integer math.
+        m7_horizon = (AFN_CAM_HORIZON * 6) / 5;     // GBA px → NDS px
+        int screenOffPx = 96 - m7_horizon;          // +ve = look down
         lookY -= screenOffPx * 7;
     }
 

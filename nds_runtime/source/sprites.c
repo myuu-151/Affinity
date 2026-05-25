@@ -95,10 +95,10 @@ void afn_sprite_update(void)
     // both axes (the aspect ratio cancels through the X-axis half-width).
     const int focalLen = 137;
     const int screenHalfX = 128;
-    // Horizon line slides up when fps3d.c pitches the camera down for
-    // Mode-7-equivalent ground area. Match the same horizonNds the camera
-    // uses so sprites land on the meshes, not above/below them.
-    const int screenHalfY = (AFN_CAM_HORIZON * 6) / 5;
+    // fps3d.c sets m7_horizon to the screen Y where the camera's horizon
+    // lands after its downward pitch. Sharing that variable keeps sprites
+    // glued to the meshes regardless of how the pitch multiplier is tuned.
+    int screenHalfY = m7_horizon;
 
     for (int si = 0; si < AFN_SPRITE_COUNT; si++) {
         if (afn_sprite_data[si][9] >= 0) continue;  // mesh sprite — fps3d draws it
