@@ -109,6 +109,40 @@ void afn_sprite_update(void)
         if (matScale < 128)  matScale = 128;
         if (matScale > 4096) matScale = 4096;
 
+        // Direction picking: camera-space angle into the sprite's 8 facings.
+        // Convention: dir 0 = sprite seen from south (+Z relative to sprite,
+        // i.e. camera at +Z of sprite). Walking CCW around the sprite advances
+        // through dirs 0..7. ForceStatic sprites (sprite_data[10]==1) always
+        // use dir 0.
+        int tileStart  = afn_asset_desc[aIdx][0];
+        int tilesPerFr = afn_asset_desc[aIdx][1];
+        int dirCount   = afn_asset_desc[aIdx][5];
+        int fStatic    = afn_sprite_data[si][10];
+        int dir = 0;
+        if (dirCount > 1 && !fStatic) {
+            // 8-way direction from sprite-to-camera vector (-dx, -dz). Octant
+            // 0 = camera at +Z (south of sprite), advancing CCW (looking down
+            // +Y) through 1..7. Tan(22.5°) ≈ 0.414 ≈ 53/128 — used to test
+            // whether a diagonal or a cardinal octant wins.
+            int vx = -dx, vz = -dz;
+            int ax = vx < 0 ? -vx : vx;
+            int az = vz < 0 ? -vz : vz;
+            // Compare ax vs az*tan(22.5°) and az vs ax*tan(22.5°) to find
+            // which of the 8 octants holds the vector.
+            int tanLo = (ax * 128) < (az * 53);   // ax dominated by az
+            int tanHi = (az * 128) < (ax * 53);   // az dominated by ax
+            if (vz >= 0 && vx >= 0) {                          // NE quadrant
+                dir = tanLo ? 0 : (tanHi ? 2 : 1);
+            } else if (vz < 0 && vx >= 0) {                    // SE quadrant
+                dir = tanHi ? 2 : (tanLo ? 4 : 3);
+            } else if (vz < 0 && vx < 0) {                     // SW quadrant
+                dir = tanLo ? 4 : (tanHi ? 6 : 5);
+            } else {                                           // NW quadrant
+                dir = tanHi ? 6 : (tanLo ? 0 : 7);
+            }
+            if (dir >= dirCount) dir = 0;
+        }
+
         proj[projCount].idx     = si;
         proj[projCount].depth   = depth;
         proj[projCount].screenX = screenX;
@@ -116,7 +150,7 @@ void afn_sprite_update(void)
         proj[projCount].matScale = matScale;
         proj[projCount].objSize = objSize;
         proj[projCount].palBank = afn_asset_desc[aIdx][4] & 0xF;
-        proj[projCount].tileIdx = afn_asset_desc[aIdx][0]; // frame 0
+        proj[projCount].tileIdx = tileStart + dir * tilesPerFr;
         projCount++;
         if (projCount >= AFN_SPRITE_COUNT) break;
     }

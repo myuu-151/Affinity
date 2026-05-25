@@ -178,7 +178,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     f << "#define AFN_SPRITE_COUNT " << (int)sprites.size() << "\n\n";
     if (!sprites.empty())
     {
-        f << "static const int afn_sprite_data[][10] = {\n";
+        // Sprite row: x, y, z, pal, asset, scale, type, rot, animEn, meshIdx, forceStatic
+        f << "static const int afn_sprite_data[][11] = {\n";
         for (size_t i = 0; i < sprites.size(); i++)
         {
             int gx = EditorToFixed(sprites[i].x);
@@ -191,9 +192,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             int rotBrad = (int)(sprites[i].rotation * 65536.0f / 360.0f) & 0xFFFF;
             int animEn = sprites[i].animEnabled ? 1 : 0;
             int meshIdx2 = sprites[i].meshIdx;
+            int fStatic = sprites[i].forceStatic ? 1 : 0;
             f << "    { " << gx << ", " << gy << ", " << gz << ", "
               << pal << ", " << aIdx << ", " << scaleFixed << ", "
-              << sType << ", " << rotBrad << ", " << animEn << ", " << meshIdx2 << " },\n";
+              << sType << ", " << rotBrad << ", " << animEn << ", "
+              << meshIdx2 << ", " << fStatic << " },\n";
         }
         f << "};\n\n";
     }
@@ -212,12 +215,20 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         std::vector<int> assetTileStart(assets.size(), 0);
         std::vector<int> assetTilesPerFrame(assets.size(), 0);
         std::vector<int> assetObjSize(assets.size(), 0);
+        std::vector<int> assetDirCount(assets.size(), 1);  // 1 = static, 8 = directional
         // Per-asset derived palette in RGB15. For directional assets the
         // editor's a.palette[] is empty (real colors live in dirImages RGBA);
         // we build a 15-color palette by counting unique RGB15 pixels and
         // merging nearest pairs until ≤15 remain — mirrors gba_package.cpp:584.
         std::vector<std::array<uint16_t, 16>> assetPal(assets.size());
         for (auto& p : assetPal) p.fill(0);
+
+        // Which assets need static emission only (some sprite using them has
+        // forceStatic=true). Mirrors gba_package.cpp:368-373.
+        std::vector<bool> assetForceStatic(assets.size(), false);
+        for (const auto& s : sprites)
+            if (s.forceStatic && s.assetIdx >= 0 && s.assetIdx < (int)assets.size())
+                assetForceStatic[s.assetIdx] = true;
         for (size_t ai = 0; ai < assets.size(); ai++) {
             assetTileStart[ai] = (int)allTiles.size() / 8;
             const auto& a = assets[ai];
@@ -266,24 +277,25 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             bool usedDir = false;
             if (a.hasDirections && !a.dirAnimSets.empty()
                 && a.dirAnimSets[0].dirImages[0].pixels) {
-                const auto& img = a.dirAnimSets[0].dirImages[0];
-                int fw = img.width, fh = img.height;
 
-                // Build palette from dirImage RGB15 histogram: collect
-                // unique colors (alpha-tested), merge nearest pairs until
-                // ≤15. Mirrors gba_package.cpp:505-585.
+                // Build palette from ALL non-empty dirImages (palette must
+                // cover every direction's colors, not just direction 0).
                 struct CF { uint16_t c; int n; };
                 std::vector<CF> freqs;
                 auto addColor = [&](uint16_t c) {
                     for (auto& f : freqs) if (f.c == c) { f.n++; return; }
                     freqs.push_back({c, 1});
                 };
-                for (int yy = 0; yy < fh; yy++)
-                for (int xx = 0; xx < fw; xx++) {
-                    const uint8_t* p = img.pixels + (yy * fw + xx) * 4;
-                    if (p[3] < 128) continue;
-                    uint16_t c15 = (p[0] >> 3) | ((p[1] >> 3) << 5) | ((p[2] >> 3) << 10);
-                    addColor(c15);
+                for (int d = 0; d < 8; d++) {
+                    const auto& img = a.dirAnimSets[0].dirImages[d];
+                    if (!img.pixels || img.width <= 0 || img.height <= 0) continue;
+                    for (int yy = 0; yy < img.height; yy++)
+                    for (int xx = 0; xx < img.width; xx++) {
+                        const uint8_t* p = img.pixels + (yy * img.width + xx) * 4;
+                        if (p[3] < 128) continue;
+                        uint16_t c15 = (p[0] >> 3) | ((p[1] >> 3) << 5) | ((p[2] >> 3) << 10);
+                        addColor(c15);
+                    }
                 }
                 while ((int)freqs.size() > 15) {
                     int bI = 0, bJ = 1, bD = 1 << 30;
@@ -303,24 +315,37 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 for (size_t i = 0; i < freqs.size() && i < 15; i++)
                     assetPal[ai][i + 1] = freqs[i].c;
 
-                // Quantize each pixel to nearest palette entry (1..N).
-                std::vector<uint8_t> palIdx(fw * fh, 0);
-                for (int yy = 0; yy < fh; yy++)
-                for (int xx = 0; xx < fw; xx++) {
-                    const uint8_t* p = img.pixels + (yy * fw + xx) * 4;
-                    if (p[3] < 128) { palIdx[yy*fw+xx] = 0; continue; }
-                    int r5 = p[0] >> 3, g5 = p[1] >> 3, b5 = p[2] >> 3;
-                    int best = 1, bestD = 1 << 30;
-                    for (size_t i = 0; i < freqs.size(); i++) {
-                        int pr = freqs[i].c & 31;
-                        int pg = (freqs[i].c >> 5) & 31;
-                        int pb = (freqs[i].c >> 10) & 31;
-                        int d = (r5-pr)*(r5-pr) + (g5-pg)*(g5-pg) + (b5-pb)*(b5-pb);
-                        if (d < bestD) { bestD = d; best = (int)i + 1; }
+                // Quantize + emit every direction. ForceStatic assets only
+                // need direction 0 (1 frame). All others get all 8 dirs.
+                int dirCount = assetForceStatic[ai] ? 1 : 8;
+                assetDirCount[ai] = dirCount;
+                for (int d = 0; d < dirCount; d++) {
+                    const auto& img = a.dirAnimSets[0].dirImages[d];
+                    int fw = (img.pixels ? img.width  : 0);
+                    int fh = (img.pixels ? img.height : 0);
+                    // Empty direction (e.g. only N/S/E/W populated) → fall
+                    // back to direction 0 so the slot still has data.
+                    const auto* src = img.pixels ? &img : &a.dirAnimSets[0].dirImages[0];
+                    fw = src->width;
+                    fh = src->height;
+                    std::vector<uint8_t> palIdx(fw * fh, 0);
+                    for (int yy = 0; yy < fh; yy++)
+                    for (int xx = 0; xx < fw; xx++) {
+                        const uint8_t* p = src->pixels + (yy * fw + xx) * 4;
+                        if (p[3] < 128) { palIdx[yy*fw+xx] = 0; continue; }
+                        int r5 = p[0] >> 3, g5 = p[1] >> 3, b5 = p[2] >> 3;
+                        int best = 1, bestD = 1 << 30;
+                        for (size_t i = 0; i < freqs.size(); i++) {
+                            int pr = freqs[i].c & 31;
+                            int pg = (freqs[i].c >> 5) & 31;
+                            int pb = (freqs[i].c >> 10) & 31;
+                            int dd = (r5-pr)*(r5-pr) + (g5-pg)*(g5-pg) + (b5-pb)*(b5-pb);
+                            if (dd < bestD) { bestD = dd; best = (int)i + 1; }
+                        }
+                        palIdx[yy*fw+xx] = (uint8_t)best;
                     }
-                    palIdx[yy*fw+xx] = (uint8_t)best;
+                    emitFrame(palIdx.data(), fw, fh, false);
                 }
-                emitFrame(palIdx.data(), fw, fh, false);
                 usedDir = true;
             }
             if (!usedDir) {
@@ -361,16 +386,17 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         }
         f << "};\n";
 
-        // Per-asset descriptor: {tileStart, tilesPerFrame, frameCount, objSize, palBank}
+        // Per-asset descriptor: {tileStart, tilesPerFrame, frameCount, objSize, palBank, dirCount}
         // NDS has 16 OBJ palette banks — assign each asset a unique bank (0..15)
-        // so palettes don't overwrite each other on upload. GBA's palBank was
-        // shared across assets that fit the same merged-palette; we have plenty
-        // of room on NDS to avoid that complexity for the first 16 assets.
-        f << "static const int afn_asset_desc[][5] = {\n";
+        // so palettes don't overwrite each other on upload. dirCount = 8 for
+        // directional assets (Sonic, etc), 1 for static — runtime indexes into
+        // tile data as tileStart + dir * tilesPerFrame.
+        f << "static const int afn_asset_desc[][6] = {\n";
         for (size_t ai = 0; ai < assets.size(); ai++) {
             int palBank = (int)ai & 0xF;
             f << "    { " << assetTileStart[ai] << ", " << assetTilesPerFrame[ai] << ", "
-              << (int)assets[ai].frames.size() << ", " << assetObjSize[ai] << ", " << palBank << " },\n";
+              << (int)assets[ai].frames.size() << ", " << assetObjSize[ai] << ", "
+              << palBank << ", " << assetDirCount[ai] << " },\n";
         }
         f << "};\n\n";
     }
