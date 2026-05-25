@@ -242,6 +242,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             if (s.forceStatic && s.assetIdx >= 0 && s.assetIdx < (int)assets.size())
                 assetForceStatic[s.assetIdx] = true;
         for (size_t ai = 0; ai < assets.size(); ai++) {
+            int prevSize = (int)allTiles.size();
             assetTileStart[ai] = (int)allTiles.size() / 8;
             const auto& a = assets[ai];
             int sz = a.baseSize > 0 ? a.baseSize : 16;
@@ -511,6 +512,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                     baseSet += fc;
                 }
             }
+            f << "// asset " << ai << " emitted " << ((int)allTiles.size() - prevSize)
+              << " u32, total now " << (int)allTiles.size()
+              << " (frames=" << assetFrameCount[ai] << " dirs=" << assetDirCount[ai]
+              << " tpf=" << assetTilesPerFrame[ai] << ")\n";
         }
         f << "static const u32 afn_all_tiles[" << (allTiles.empty() ? 1 : (int)allTiles.size()) << "] = {";
         if (allTiles.empty()) f << " 0 ";

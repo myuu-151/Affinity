@@ -14,8 +14,8 @@
 #define AFN_SPRINT_SPEED 56
 #define AFN_WALK_EASE_IN 25
 #define AFN_WALK_EASE_OUT 25
-#define AFN_SPRINT_EASE_IN 40
-#define AFN_SPRINT_EASE_OUT 30
+#define AFN_SPRINT_EASE_IN 20
+#define AFN_SPRINT_EASE_OUT 20
 #define AFN_DRAW_DISTANCE 128000
 #define AFN_SPRITE_DRAW_DISTANCE 51840
 
@@ -51,6 +51,12 @@ static const int afn_sprite_data[][11] = {
 
 #define AFN_ASSET_COUNT 6
 
+// asset 0 emitted 86016 u32, total now 86016 (frames=21 dirs=8 tpf=64)
+// asset 1 emitted 4096 u32, total now 90112 (frames=1 dirs=8 tpf=64)
+// asset 2 emitted 1408 u32, total now 91520 (frames=11 dirs=1 tpf=16)
+// asset 3 emitted 128 u32, total now 91648 (frames=4 dirs=1 tpf=4)
+// asset 4 emitted 4096 u32, total now 95744 (frames=1 dirs=8 tpf=64)
+// asset 5 emitted 9728 u32, total now 105472 (frames=19 dirs=1 tpf=64)
 static const u32 afn_all_tiles[105472] = {
     0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,
     0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,0x00000000,

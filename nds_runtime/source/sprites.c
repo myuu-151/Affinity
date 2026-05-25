@@ -236,13 +236,10 @@ void afn_sprite_update(void)
             static int s_animDbgF = 0;
             s_animDbgF++;
             if ((s_animDbgF & 15) == 0) {
-                int tIdx = tileStart + (animFrame * dirCount + dir) * tilesPerFr;
-                // Sample u32 in the MIDDLE of the sprite — top-left tiles
-                // of OBJ sprites are usually transparent corners, so check
-                // tile (4,4) of an 8x8 grid (tile index 36 within sprite).
-                volatile uint32_t* vmid = (volatile uint32_t*)(0x06400000 + (tIdx + 36) * 32 + 16);
-                iprintf("\x1b[12;0Hai=%d aIdx=%d pa=%d fr=%d ts=%d ti=%d v=%08lx",
-                        aIdx, animIdx, afn_play_anim, animFrame, tileStart, tIdx, (long)vmid[0]);
+                iprintf("\x1b[12;0HaIdx=%d aB=%d aC=%d fS=%d aL=%d aF=%d fc=%d",
+                        aIdx, animBase, animCount, frameStart, animLen, animFrame, frameCount);
+                iprintf("\x1b[13;0Hpa=%d animIdx=%d ms=%d dep=%d",
+                        afn_play_anim, animIdx, matScale, depth);
             }
         }
 #endif
