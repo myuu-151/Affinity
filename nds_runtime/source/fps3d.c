@@ -303,6 +303,13 @@ static void render_sky(void)
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
     glLoadIdentity();
+    // Push the quad to ~900 DS units away (near the far plane = 1024) so
+    // meshes in the normal scene scale always pass depth test against it.
+    // Then scale by 200x so the small v16 vertex coords cover the screen
+    // at that depth: visible half-width at depth 900 with 70°fov+4:3 ≈ 840
+    // DS units, so verts of ±5 × 200 = ±1000 over-covers slightly.
+    glTranslatef32(0, 0, -inttof32(900));
+    glScalef32(inttof32(200), inttof32(200), inttof32(200));
     glBindTexture(0, gl_sky_tex_id);
     glColor3b(255, 255, 255);
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE);
@@ -323,13 +330,13 @@ static void render_sky(void)
     // Then the quad's X/Y extent must be large enough to fill the screen at
     // that depth: with 70° FOV, halfTan ≈ 0.7 → half-extent = 7.9 * 0.7 ≈ 5.5.
     // Use 7.9 to be safe.
-    int16_t qZ  = floattov16(-7.9f);
-    int16_t qXl = floattov16(-7.9f), qXr = floattov16( 7.9f);
-    // qYt sized so the top of the screen aligns with vTop=0:
-    //   visible halfHeight at z=-7.9 = 7.9 * tan(35°) ≈ 5.53.
-    // Previously qYt was 7.9 (taller than screen), so the top of the
-    // texture got cut off above the visible area.
-    int16_t qYt = floattov16( 5.53f), qYb = floattov16(-7.9f);
+    // Local v16 coords are scaled by 200x via the matrix above, so ±5
+    // becomes ±1000 in world space (a tad bigger than the visible 840-DS
+    // half-width at depth 900). qYt aligns the top texture row with the
+    // top of the screen (visible half-height = 700 → qYt * 200 ≈ 700).
+    int16_t qZ  = floattov16( 0.0f);
+    int16_t qXl = floattov16(-5.0f), qXr = floattov16( 5.0f);
+    int16_t qYt = floattov16( 3.5f), qYb = floattov16(-5.0f);
 
     glBegin(GL_QUADS);
         glTexCoord2t16(uLeft,  vTop); glVertex3v16(qXl, qYt, qZ);

@@ -4250,6 +4250,7 @@ static std::string sPackageOutputPath;
 
 enum class BuildTarget { GBA = 0, NDS = 1 };
 static BuildTarget sBuildTarget = BuildTarget::NDS; // default to NDS
+static bool sNdsAntialiasing = false; // NDS-only — adds smooth mesh edges but fringes textures
 static bool sBuildRequested = false; // set by toolbar Build button
 
 // Project file
@@ -12688,6 +12689,13 @@ void FrameTick(float dt)
         ImGui::SameLine();
         if (ImGui::RadioButton("GBA", sBuildTarget == BuildTarget::GBA))
             sBuildTarget = BuildTarget::GBA;
+        if (sBuildTarget == BuildTarget::NDS) {
+            ImGui::SameLine();
+            if (ImGui::Checkbox("AA", &sNdsAntialiasing)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "NDS hardware anti-alias: smooths mesh edges but fringes\n"
+                "textured polys (incl. sky panorama).");
+        }
         bool buildFromMenu = false;
         if (buildFromMenu || sBuildRequested)
         {
@@ -13957,16 +13965,17 @@ void FrameTick(float dt)
                     break; // use first instance with panels
                 }
 
+                bool exportNdsAa = sNdsAntialiasing;
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                              exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, target,
-                             exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportShowFps, exportSmoothSky]() {
+                             exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportShowFps, exportSmoothSky, exportNdsAa]() {
                     std::string err;
                     bool ok;
                     if (target == BuildTarget::NDS)
                         ok = PackageNDS(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist,
                                         exportSoundSamples, exportSoundInstances,
-                                        exportSkyFrames, err);
+                                        exportSkyFrames, exportNdsAa, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,

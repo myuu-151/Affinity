@@ -22,6 +22,7 @@ bool PackageNDS(const std::string& runtimeDir,
                 const std::vector<GBASoundSampleExport>& soundSamples,
                 const std::vector<GBASoundInstanceExport>& soundInstances,
                 const std::vector<GBASkyFrameExport>& skyFrames,
+                bool ndsAntialiasing,
                 std::string& errorMsg);
 
 } // namespace Affinity

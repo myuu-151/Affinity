@@ -132,7 +132,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                                 float orbitDist,
                                 const std::vector<GBASoundSampleExport>& soundSamples,
                                 const std::vector<GBASoundInstanceExport>& soundInstances,
-                                const std::vector<GBASkyFrameExport>& skyFrames)
+                                const std::vector<GBASkyFrameExport>& skyFrames,
+                                bool ndsAntialiasing)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
     std::ofstream f(outPath);
@@ -142,6 +143,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     f << "#ifndef MAPDATA_H\n";
     f << "#define MAPDATA_H\n\n";
     f << "#include <nds.h>\n\n";
+    if (ndsAntialiasing) f << "#define AFN_NDS_AA 1\n\n";
 
     // Camera start (same 16.8 fixed-point as GBA)
     f << "// Camera start position (16.8 fixed-point)\n";
@@ -672,13 +674,14 @@ bool PackageNDS(const std::string& runtimeDir,
                 const std::vector<GBASoundSampleExport>& soundSamples,
                 const std::vector<GBASoundInstanceExport>& soundInstances,
                 const std::vector<GBASkyFrameExport>& skyFrames,
+                bool ndsAntialiasing,
                 std::string& errorMsg)
 {
     std::string buildOutput;
     std::string msysDir = ToMsysPath(runtimeDir);
 
     // Step 0: Generate mapdata.h
-    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames))
+    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames, ndsAntialiasing))
     {
         errorMsg = "Failed to write mapdata.h to " + runtimeDir + "/include/";
         return false;
