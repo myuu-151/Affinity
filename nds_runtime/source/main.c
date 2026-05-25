@@ -27,7 +27,11 @@ static void init_video(void)
 
     glInit();
     glEnable(GL_ANTIALIAS | GL_TEXTURE_2D);
-    glClearColor(0, 0, 0, 31);  // black backdrop
+    // First-pass sky: solid blue clear-color. A proper textured skybox would
+    // need the editor's panorama re-quantized for NDS (4bpp/8bpp single
+    // palette instead of the GBA's 4-band sub-palette encoding) and rendered
+    // as a view-space fullscreen quad. Phase 2c-full.
+    glClearColor(10, 18, 31, 31);
     glClearPolyID(63);
     glClearDepth(0x7FFF);
     glViewport(0, 0, 255, 191);

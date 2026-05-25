@@ -8,6 +8,8 @@
 #include <cstring>
 #include <algorithm>
 #include <filesystem>
+#include <map>
+#include <vector>
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -129,7 +131,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                                 const std::vector<GBAMeshExport>& meshes,
                                 float orbitDist,
                                 const std::vector<GBASoundSampleExport>& soundSamples,
-                                const std::vector<GBASoundInstanceExport>& soundInstances)
+                                const std::vector<GBASoundInstanceExport>& soundInstances,
+                                const std::vector<GBASkyFrameExport>& skyFrames)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
     std::ofstream f(outPath);
@@ -528,6 +531,95 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "#define AFN_HAS_SOUND 1\n";
     }
 
+    // ---- Sky panorama (NDS: single 256x256 8bpp paletted texture) ----
+    // GBA emits this as 4-band 4bpp tiles + 4 sub-palettes for Mode 7 BG2.
+    // NDS gets a flat 256-color paletted texture rendered as a wrapping
+    // view-space quad behind the 3D layer.
+    if (!skyFrames.empty() && skyFrames[0].pixels && skyFrames[0].w > 0 && skyFrames[0].h > 0) {
+        const int SKY_W = 256, SKY_H = 256;
+        // Resize source frame to 256x256 via nearest-neighbor
+        std::vector<unsigned char> rgba(SKY_W * SKY_H * 4);
+        int srcW = skyFrames[0].w, srcH = skyFrames[0].h;
+        const unsigned char* srcPx = skyFrames[0].pixels;
+        for (int y = 0; y < SKY_H; y++) {
+            int sy = y * srcH / SKY_H;
+            for (int x = 0; x < SKY_W; x++) {
+                int sx = x * srcW / SKY_W;
+                memcpy(&rgba[(y * SKY_W + x) * 4], &srcPx[(sy * srcW + sx) * 4], 4);
+            }
+        }
+        // 256-color quantization: bucket RGB15 colors into RGB12 buckets,
+        // then within each bucket use the MEAN RGB5 of the actual pixels.
+        // Bucket span is only ±1 RGB5 per channel so the mean can't wander
+        // out of color space (no cream-in-blue artifacts), and using actual
+        // pixel data per palette entry tracks white/highlight pixels much
+        // better than a fixed bucket center (which always darkens whites).
+        std::map<uint16_t, int> bucketHist;
+        std::map<uint16_t, uint64_t> bucketRsum, bucketGsum, bucketBsum;
+        for (int i = 0; i < SKY_W * SKY_H; i++) {
+            unsigned r5 = rgba[i*4+0] >> 3, g5 = rgba[i*4+1] >> 3, b5 = rgba[i*4+2] >> 3;
+            unsigned r4 = r5 >> 1, g4 = g5 >> 1, b4 = b5 >> 1;
+            uint16_t bkey = (uint16_t)(r4 | (g4 << 4) | (b4 << 8));
+            bucketHist[bkey]++;
+            bucketRsum[bkey] += r5;
+            bucketGsum[bkey] += g5;
+            bucketBsum[bkey] += b5;
+        }
+        std::vector<std::pair<int, uint16_t>> sorted; sorted.reserve(bucketHist.size());
+        for (auto& kv : bucketHist) sorted.push_back({kv.second, kv.first});
+        std::sort(sorted.begin(), sorted.end(), [](auto& a, auto& b){ return a.first > b.first; });
+        int palN = std::min<int>(256, (int)sorted.size());
+        std::vector<uint16_t> palette(256, 0);
+        for (int i = 0; i < palN; i++) {
+            uint16_t bkey = sorted[i].second;
+            int n = bucketHist[bkey];
+            unsigned r5 = (unsigned)((bucketRsum[bkey] + n/2) / n);
+            unsigned g5 = (unsigned)((bucketGsum[bkey] + n/2) / n);
+            unsigned b5 = (unsigned)((bucketBsum[bkey] + n/2) / n);
+            if (r5 > 31) r5 = 31;
+            if (g5 > 31) g5 = 31;
+            if (b5 > 31) b5 = 31;
+            palette[i] = (uint16_t)(r5 | (g5 << 5) | (b5 << 10));
+        }
+        // Build mapping table: each unique input color → palette index of
+        // the nearest entry (computed once, applied to every pixel).
+        std::map<uint16_t, uint8_t> nearest;
+        auto dist2 = [](uint16_t a, uint16_t b) {
+            int ar=a&31, ag=(a>>5)&31, ab=(a>>10)&31;
+            int br=b&31, bg=(b>>5)&31, bb=(b>>10)&31;
+            return (ar-br)*(ar-br) + (ag-bg)*(ag-bg) + (ab-bb)*(ab-bb);
+        };
+        for (auto& kv : hist) {
+            uint16_t want = kv.first;
+            int best = 0, bestD = 1<<30;
+            for (int p = 0; p < palN; p++) {
+                int d = dist2(want, palette[p]);
+                if (d < bestD) { bestD = d; best = p; }
+            }
+            nearest[want] = (uint8_t)best;
+        }
+
+        f << "\n// ---- Sky panorama (256x256 8bpp paletted) ----\n";
+        f << "#define AFN_HAS_SKY 1\n";
+        f << "static const u16 afn_sky_pal[256] = {\n    ";
+        for (int i = 0; i < 256; i++) {
+            char hex[8]; snprintf(hex, sizeof(hex), "0x%04X", palette[i]);
+            f << hex;
+            if (i + 1 < 256) f << ", ";
+            if ((i + 1) % 8 == 0) f << "\n    ";
+        }
+        f << "\n};\n";
+        f << "static const u8 afn_sky_tex[" << (SKY_W * SKY_H) << "] = {\n    ";
+        for (int i = 0; i < SKY_W * SKY_H; i++) {
+            unsigned r = rgba[i*4+0] >> 3, g = rgba[i*4+1] >> 3, b = rgba[i*4+2] >> 3;
+            uint16_t c15 = (r) | (g << 5) | (b << 10);
+            f << (int)nearest[c15];
+            if (i + 1 < SKY_W * SKY_H) f << ", ";
+            if ((i + 1) % 16 == 0) f << "\n    ";
+        }
+        f << "\n};\n";
+    }
+
     f << "#endif // MAPDATA_H\n";
     f.close();
     return true;
@@ -545,13 +637,14 @@ bool PackageNDS(const std::string& runtimeDir,
                 float orbitDist,
                 const std::vector<GBASoundSampleExport>& soundSamples,
                 const std::vector<GBASoundInstanceExport>& soundInstances,
+                const std::vector<GBASkyFrameExport>& skyFrames,
                 std::string& errorMsg)
 {
     std::string buildOutput;
     std::string msysDir = ToMsysPath(runtimeDir);
 
     // Step 0: Generate mapdata.h
-    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances))
+    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames))
     {
         errorMsg = "Failed to write mapdata.h to " + runtimeDir + "/include/";
         return false;

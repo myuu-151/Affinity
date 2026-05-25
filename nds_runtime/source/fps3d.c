@@ -23,6 +23,10 @@ uint16_t player_move_angle;
 int m7_horizon = 60;
 int m7_bg;
 
+#if defined(AFN_HAS_SKY) && AFN_HAS_SKY
+static int gl_sky_tex_id = 0;
+#endif
+
 // ---------------------------------------------------------------------------
 // Scene-transition state (defs match affinity.h externs)
 // ---------------------------------------------------------------------------
@@ -275,6 +279,66 @@ static void update_camera(void)
 // ---------------------------------------------------------------------------
 // Public entry points
 // ---------------------------------------------------------------------------
+#if defined(AFN_HAS_SKY) && AFN_HAS_SKY
+static void load_sky_texture(void)
+{
+    glGenTextures(1, &gl_sky_tex_id);
+    glBindTexture(0, gl_sky_tex_id);
+    // 256x256 8bpp paletted (GL_RGB256). TEXTURE_SIZE_256 = 5.
+    glTexImage2D(0, 0, GL_RGB256, 5, 5, 0, TEXGEN_TEXCOORD, afn_sky_tex);
+    glColorTableEXT(0, 0, 256, 0, 0, afn_sky_pal);
+}
+
+// Draw the sky panorama as a view-space quad behind the 3D scene.
+// UV.u scrolls with cam_angle so the panorama appears to wrap as you turn.
+// UV.v covers the top half of the 256-tall texture, mapped to the top
+// portion of the screen (above the horizon).
+static void render_sky(void)
+{
+    if (!gl_sky_tex_id) return;
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    glBindTexture(0, gl_sky_tex_id);
+    glColor3b(255, 255, 255);
+    glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE);
+
+    // cam_angle 0..65535 = full 360° panorama wrap.
+    // Map to t16 (.4 fixed texel units): one full wrap = 256 px = 4096 t16.
+    // Screen shows the full 256-px panorama at 1:1 (matches GBA's Mode 7
+    // sky which just scrolls a 256-px tilemap; a perspective-correct
+    // ~86°/360° slice looked too stretched compared to the reference).
+    int uOffset = ((int)cam_angle * 4096) >> 16;
+    int uLeft  = uOffset;
+    int uRight = uOffset + 3200;   // tune: smaller = more zoom, bigger = less stretched
+    int vTop   = 0;
+    int vBot   = 4096;             // full 256 px panorama height
+
+    // Quad pushed to the far depth so all meshes draw on top.
+    // v16 range is ±8 (4.12 fixed); z = -7.9 is as far as a vertex can go.
+    // Then the quad's X/Y extent must be large enough to fill the screen at
+    // that depth: with 70° FOV, halfTan ≈ 0.7 → half-extent = 7.9 * 0.7 ≈ 5.5.
+    // Use 7.9 to be safe.
+    int16_t qZ  = floattov16(-7.9f);
+    int16_t qXl = floattov16(-7.9f), qXr = floattov16( 7.9f);
+    // qYt sized so the top of the screen aligns with vTop=0:
+    //   visible halfHeight at z=-7.9 = 7.9 * tan(35°) ≈ 5.53.
+    // Previously qYt was 7.9 (taller than screen), so the top of the
+    // texture got cut off above the visible area.
+    int16_t qYt = floattov16( 5.53f), qYb = floattov16(-7.9f);
+
+    glBegin(GL_QUADS);
+        glTexCoord2t16(uLeft,  vTop); glVertex3v16(qXl, qYt, qZ);
+        glTexCoord2t16(uRight, vTop); glVertex3v16(qXr, qYt, qZ);
+        glTexCoord2t16(uRight, vBot); glVertex3v16(qXr, qYb, qZ);
+        glTexCoord2t16(uLeft,  vBot); glVertex3v16(qXl, qYb, qZ);
+    glEnd();
+
+    glPopMatrix(1);
+    glBindTexture(0, 0);
+}
+#endif
+
 void afn_fps3d_init(void)
 {
 #if defined(AFN_HAS_FLOOR) && AFN_HAS_FLOOR
@@ -285,6 +349,9 @@ void afn_fps3d_init(void)
 #endif
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
     load_mesh_textures();
+#endif
+#if defined(AFN_HAS_SKY) && AFN_HAS_SKY
+    load_sky_texture();
 #endif
 
     cam_x     = AFN_CAM_X;
@@ -377,6 +444,9 @@ void afn_fps3d_update(void)
         0, inttof32(1), 0
     );
 
+#if defined(AFN_HAS_SKY) && AFN_HAS_SKY
+    render_sky();
+#endif
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
     render_meshes();
 #endif

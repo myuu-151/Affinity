@@ -21,6 +21,7 @@ bool PackageNDS(const std::string& runtimeDir,
                 float orbitDist,
                 const std::vector<GBASoundSampleExport>& soundSamples,
                 const std::vector<GBASoundInstanceExport>& soundInstances,
+                const std::vector<GBASkyFrameExport>& skyFrames,
                 std::string& errorMsg);
 
 } // namespace Affinity
