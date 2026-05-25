@@ -1397,6 +1397,19 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "    afn_auto_orbit_speed = " << (d ? resolveInt(d) : 205) << ";\n";
                 break;
             }
+            case GBAScriptNodeType::OrbitCamera: {
+                auto* dirData = findDataIn(a->id, 0);
+                auto* speedData = findDataIn(a->id, 1);
+                int dir   = dirData   ? dirData->paramInt[0] : 1;
+                int speed = speedData ? resolveInt(speedData) : 512;
+                // Halve on NDS — matches GBA feel best in practice; faster
+                // overshoots the orbit ease and sprite leaves the screen.
+                speed /= 2;
+                const char* key  = (dir == 0) ? "KEY_L" : "KEY_R";
+                const char* sign = (dir == 0) ? "-" : "+";
+                f << "    if (key_is_down(" << key << ")) cam_angle " << sign << "= " << speed << ";\n";
+                break;
+            }
             case GBAScriptNodeType::MovePlayer: {
                 auto* dirData = findDataIn(a->id, 0);
                 int dir = dirData ? dirData->paramInt[0] : 0;

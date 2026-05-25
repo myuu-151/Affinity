@@ -432,6 +432,14 @@ static void update_camera(void)
                 : (moving ? AFN_WALK_EASE_IN   : AFN_WALK_EASE_OUT);
             cam_x += (ddx * ease) >> 8;
             cam_z += (ddz * ease) >> 8;
+            {
+                static int s_dbgF = 0;
+                s_dbgF++;
+                if ((s_dbgF & 15) == 0)
+                    iprintf("\x1b[14;0Hca=%d e=%d dx=%d dz=%d cx=%d cz=%d  ",
+                            (int)cam_angle, ease, ddx >> 8, ddz >> 8,
+                            cam_x >> 8, cam_z >> 8);
+            }
         }
     }
 

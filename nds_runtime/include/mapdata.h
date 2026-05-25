@@ -12547,8 +12547,8 @@ static void afn_bp0_key_held(void) {
     afn_move_speed = 158;
     }
     if (key_is_down(KEY_R) || key_is_down(KEY_L)) {
-    /* TODO: emit node type 17 */
-    /* TODO: emit node type 17 */
+    if (key_is_down(KEY_R)) cam_angle += 128;
+    if (key_is_down(KEY_L)) cam_angle -= 128;
     }
     if (key_is_down(KEY_B)) {
     afn_move_speed = 264;
