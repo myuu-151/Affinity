@@ -96,4 +96,27 @@ void afn_hud_draw(void);       // hud.c     — Phase 5
 void afn_script_init(void);    // script_glue.c — Phase 3
 void afn_script_tick(void);    // script_glue.c — Phase 3 (OnUpdate, key hooks)
 
+// ---------------------------------------------------------------------------
+// GBA script-emission shims
+//
+// The script generator emits GBA-flavoured C: FIXED (16.8 fixed-point ints),
+// key_is_down/key_hit/key_released using GBA's KEY_* bitmasks, and lu_sin /
+// lu_cos returning .12 fixed. NDS uses int/keysHeld()/sinLerp() — these
+// shims map between them so emitted script code compiles unchanged.
+// ---------------------------------------------------------------------------
+typedef int FIXED;
+static inline int key_is_down(int mask)  { return (keysHeld()     & mask) != 0; }
+static inline int key_hit(int mask)      { return (keysDown()     & mask) != 0; }
+static inline int key_released(int mask) { return (keysUp()       & mask) != 0; }
+// libtonc's lu_sin/lu_cos return 4.12 fixed (4096 = 1.0). libnds sinLerp
+// returns the same .12 format, so they're a direct match.
+static inline int lu_sin(unsigned short angle) { return sinLerp(angle); }
+static inline int lu_cos(unsigned short angle) { return cosLerp(angle); }
+// Brad → sprite atan2 lookup (gba uses ArcTan2). libnds: atan2Lerp doesn't
+// exist (we already learned this); skip until a script node actually needs it.
+// Mode 0 tilemap-state vars used by some emitted scripts.
+extern int  tm_player_facing;
+extern int  tm_move_timer;
+extern int  player_on_ground;
+
 #endif // AFFINITY_H

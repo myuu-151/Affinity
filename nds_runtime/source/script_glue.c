@@ -41,6 +41,11 @@ int  afn_fade_level;
 int  afn_score;
 int  afn_frame_count;
 int  afn_draw_distance;
+
+// Mode 0 tilemap state — referenced by emitted scripts even on 3D scenes.
+int  tm_player_facing = 4;   // 4 = south, matches GBA default
+int  tm_move_timer;
+int  player_on_ground = 1;
 #endif
 
 void afn_script_init(void)

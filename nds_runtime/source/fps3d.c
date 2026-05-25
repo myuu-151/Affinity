@@ -245,7 +245,11 @@ static int s_moveSpeed;             // current smoothed speed
 static int s_playerVy;              // 16.8 vertical velocity (+up, -down)
 static int s_playerY;               // 16.8 vertical offset from ground
 static int s_camYSmooth;            // smoothed cam_h follow of s_playerY
-static int s_onGround = 1;
+// player_on_ground is the script-side global (defined in script_glue.c when
+// AFN_HAS_SCRIPT, else here as a fallback so fps3d.c always has it).
+#ifndef AFN_HAS_SCRIPT
+int player_on_ground = 1;
+#endif
 
 #ifndef AFN_WALK_SPEED
 #define AFN_WALK_SPEED 37
@@ -327,9 +331,9 @@ static void update_camera(void)
     player_moving = (dx != 0 || dz != 0);
 
     // Jump (A button) + gravity. Jump only when grounded.
-    if ((down & KEY_A) && s_onGround) {
+    if ((down & KEY_A) && player_on_ground) {
         s_playerVy = AFN_JUMP_VEL;
-        s_onGround = 0;
+        player_on_ground = 0;
     }
     s_playerVy -= AFN_GRAVITY;
     if (s_playerVy < -AFN_TERMINAL_VEL) s_playerVy = -AFN_TERMINAL_VEL;
@@ -337,7 +341,7 @@ static void update_camera(void)
     if (s_playerY <= 0) {
         s_playerY = 0;
         s_playerVy = 0;
-        s_onGround = 1;
+        player_on_ground = 1;
     }
     player_y = afn_sprite_data[AFN_PLAYER_IDX][1] + s_playerY;
 
@@ -365,7 +369,7 @@ static void update_camera(void)
     // air so the camera lags a beat behind a jump's apex.
     {
         int dy = s_playerY - s_camYSmooth;
-        int rate = s_onGround ? AFN_JUMP_CAM_LAND : AFN_JUMP_CAM_AIR;
+        int rate = player_on_ground ? AFN_JUMP_CAM_LAND : AFN_JUMP_CAM_AIR;
         s_camYSmooth += (dy * rate) >> 8;
         if (dy > -4 && dy < 4) s_camYSmooth = s_playerY;
     }
