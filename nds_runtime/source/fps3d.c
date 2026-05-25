@@ -319,24 +319,27 @@ static void render_sky(void)
     // Screen shows the full 256-px panorama at 1:1 (matches GBA's Mode 7
     // sky which just scrolls a 256-px tilemap; a perspective-correct
     // ~86°/360° slice looked too stretched compared to the reference).
+    // Match GBA's update_sky_scroll exactly: pixScroll = (cam_ang * 256) >> 16
+    // and 1:1 panorama-to-screen mapping (one texture pixel = one screen
+    // pixel, full 256-px panorama spans full 256-px screen).
     int uOffset = ((int)cam_angle * 4096) >> 16;
     int uLeft  = uOffset;
-    int uRight = uOffset + 3200;   // tune: smaller = more zoom, bigger = less stretched
+    int uRight = uOffset + 4096;
     int vTop   = 0;
-    int vBot   = 4096;             // full 256 px panorama height
+    int vBot   = 4096;             // full 256-row panorama — anything smaller stretches each texel taller
 
     // Quad pushed to the far depth so all meshes draw on top.
     // v16 range is ±8 (4.12 fixed); z = -7.9 is as far as a vertex can go.
     // Then the quad's X/Y extent must be large enough to fill the screen at
     // that depth: with 70° FOV, halfTan ≈ 0.7 → half-extent = 7.9 * 0.7 ≈ 5.5.
     // Use 7.9 to be safe.
-    // Local v16 coords are scaled by 200x via the matrix above, so ±5
-    // becomes ±1000 in world space (a tad bigger than the visible 840-DS
-    // half-width at depth 900). qYt aligns the top texture row with the
-    // top of the screen (visible half-height = 700 → qYt * 200 ≈ 700).
+    // Local v16 coords scaled by 200x. Quad covers the full visible
+    // screen at depth 900: half-width ≈ 840, half-height ≈ 630
+    // (70° FOV vertical, 4:3 aspect). Using ±5 v16 → ±1000 world, a
+    // tad over-covers to avoid black edges.
     int16_t qZ  = floattov16( 0.0f);
     int16_t qXl = floattov16(-5.0f), qXr = floattov16( 5.0f);
-    int16_t qYt = floattov16( 3.5f), qYb = floattov16(-5.0f);
+    int16_t qYt = floattov16( 3.5f), qYb = floattov16(-3.5f);
 
     glBegin(GL_QUADS);
         glTexCoord2t16(uLeft,  vTop); glVertex3v16(qXl, qYt, qZ);
