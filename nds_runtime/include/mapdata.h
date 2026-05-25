@@ -14,18 +14,18 @@
 #define AFN_SPRINT_SPEED 56
 #define AFN_WALK_EASE_IN 25
 #define AFN_WALK_EASE_OUT 25
-#define AFN_SPRINT_EASE_IN 15
-#define AFN_SPRINT_EASE_OUT 10
+#define AFN_SPRINT_EASE_IN 40
+#define AFN_SPRINT_EASE_OUT 30
 #define AFN_DRAW_DISTANCE 128000
 #define AFN_SPRITE_DRAW_DISTANCE 51840
 
 #define AFN_PLAYER_IDX 0
-#define AFN_ORBIT_DIST 4608
+#define AFN_ORBIT_DIST 5760
 
 #define AFN_SPRITE_COUNT 22
 
 static const int afn_sprite_data[][11] = {
-    { 32768, 9600, 28160, 1, 0, 409, 1, 0, 1, -1, 0 },
+    { 32768, 9600, 27008, 1, 0, 409, 1, 0, 1, -1, 0 },
     { 32596, 9600, 25421, 2, -1, 12339, 6, 0, 1, 2, 0 },
     { 37384, 9600, 12388, 3, -1, 624, 6, 0, 1, 6, 0 },
     { 42650, 9600, 29651, 1, 2, 512, 0, 0, 1, -1, 1 },
@@ -21176,14 +21176,14 @@ static void afn_bp0_key_held(void) {
     if (!afn_player_frozen && key_is_down(KEY_UP)) afn_input_fwd += 256;
     if (!afn_player_frozen && key_is_down(KEY_RIGHT)) afn_input_right += 256;
     if (!afn_anim_prio) afn_play_anim = 1;
-    afn_move_speed = 158;
+    afn_move_speed = 105;
     }
     if (key_is_down(KEY_R) || key_is_down(KEY_L)) {
     if (key_is_down(KEY_R)) cam_angle += 256;
     if (key_is_down(KEY_L)) cam_angle -= 256;
     }
     if (key_is_down(KEY_B)) {
-    afn_move_speed = 264;
+    afn_move_speed = 158;
     if (player_moving) {
     if (!afn_anim_prio) afn_play_anim = 2;
     }

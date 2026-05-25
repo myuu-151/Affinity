@@ -241,8 +241,8 @@ void afn_sprite_update(void)
                 // of OBJ sprites are usually transparent corners, so check
                 // tile (4,4) of an 8x8 grid (tile index 36 within sprite).
                 volatile uint32_t* vmid = (volatile uint32_t*)(0x06400000 + (tIdx + 36) * 32 + 16);
-                iprintf("\x1b[12;0Hpa=%d ai=%d fr=%d ti=%d d=%d v=%08lx",
-                        afn_play_anim, animIdx, animFrame, tIdx, dir, (long)vmid[0]);
+                iprintf("\x1b[12;0Hai=%d aIdx=%d pa=%d fr=%d ts=%d ti=%d v=%08lx",
+                        aIdx, animIdx, afn_play_anim, animFrame, tileStart, tIdx, (long)vmid[0]);
             }
         }
 #endif
