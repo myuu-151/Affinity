@@ -24,16 +24,21 @@ void afn_sprite_init(void)
     // are undefined and we saw exactly that symptom: only the first
     // asset rendered correctly, the rest were missing or scrambled).
     vramSetBankF(VRAM_F_LCD);
-    vramSetBankB(VRAM_B_MAIN_SPRITE);
-    // 1D_128: OAM tile slot is 10 bits → max addressable byte = 1024 ×
-    // boundary. 1D_32 caps at 32KB, 1D_64 at 64KB; once per-asset
-    // animation frames join the directional tiles, even 64KB is too
-    // little (Sonic's 2 idle frames × 8 dirs × 64 tiles already fills
-    // 32KB by itself). 1D_128 covers the full 128KB of bank B.
-    // Per-asset byte start must be 128-byte aligned (multiple of 4 in
-    // 32-byte tile units); the exporter aligns naturally because each
-    // emitted unit is a frame × dir × tpf chunk.
-    oamInit(&oamMain, SpriteMapping_1D_128, false);
+    // Main sprite VRAM = bank B (slot 0 = 0x06400000) + bank A (slot 1 =
+    // 0x06420000) = 256KB. Textures get relocated to bank D in main.c so A
+    // can come here. Without A, sonic's 5-anim × 8-dir tile data (~336KB)
+    // overflows the 128KB single-bank ceiling, dropping every frame past
+    // slot 8 — visible as walk frames going garbage when sonic is near
+    // other sprites.
+    vramSetBankA(VRAM_A_MAIN_SPRITE_0x06420000);
+    vramSetBankB(VRAM_B_MAIN_SPRITE_0x06400000);
+    // 1D_256: OAM tile field is 10 bits, byte_addr = tile_field × boundary.
+    // 1D_128 capped at 128KB which fit bank B alone; once bank A is also
+    // mapped to MAIN_SPRITE (256KB total) we need 1D_256 boundary to
+    // address the upper 128KB. Per-asset byte start must be 256-byte
+    // aligned (multiple of 8 tiles); each emitted dir-frame is 64 tiles
+    // so alignment is natural.
+    oamInit(&oamMain, SpriteMapping_1D_256, false);
 
     // Push the 3D layer (BG0) to the lowest priority so OBJ (default
     // priority 0) renders on top of the 3D scene.
@@ -251,7 +256,20 @@ void afn_sprite_update(void)
         proj[projCount].matScale = matScale;
         proj[projCount].objSize = objSize;
         proj[projCount].palBank = afn_asset_desc[aIdx][4] & 0xF;
-        proj[projCount].tileIdx = tileStart + (animFrame * dirCount + dir) * tilesPerFr;
+        // Frame-dir indirection: per-frame, per-dir tile offset. Lets us
+        // emit only painted dirs (walk has 3, jump has 1) and falls back to
+        // nearest painted dir at runtime when the requested facing wasn't
+        // painted.
+        {
+            int frameBase = afn_asset_desc[aIdx][9];
+            int globalFrame = frameBase + animFrame;
+#if AFN_FRAME_DIR_TILE_LEN > 0
+            int dirOff = afn_frame_dir_tile[globalFrame][dir];
+#else
+            int dirOff = (animFrame * dirCount + dir) * tilesPerFr;
+#endif
+            proj[projCount].tileIdx = tileStart + dirOff;
+        }
         projCount++;
         if (projCount >= AFN_SPRITE_COUNT) break;
     }

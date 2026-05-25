@@ -223,6 +223,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         std::vector<int> assetAnimBase(assets.size(), 0);    // index into afn_anim_table
         std::vector<int> assetAnimCount(assets.size(), 0);   // # anims defined
         std::vector<int> assetDefaultAnim(assets.size(), 0);
+        std::vector<int> assetFrameBase(assets.size(), 0); // index into afn_frame_dir_tile
+
+        // Per-frame dir → tile-offset table (offsets relative to asset's
+        // tileStart, in tile units). Lets us emit only painted directions
+        // per frame and have the runtime fall back to the nearest painted
+        // dir without baking duplicates into VRAM.
+        std::vector<std::array<uint16_t, 8>> frameDirTile;
 
         // Global flat table of {startFrame, frameCount, fps, loop} for every
         // anim of every directional asset.
@@ -263,7 +270,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             assetObjSize[ai] = sz;
             int tilesPerSide = sz / 8;
             int tilesPerFrame = tilesPerSide * tilesPerSide;
-            assetTilesPerFrame[ai] = tilesPerFrame;
+            // 1D_256 sprite mapping needs 8-tile alignment per dir-frame.
+            // A 16x16 sprite is 4 tiles — pad stride to 8 so OAM addressing
+            // doesn't round down. Cheap: only adds 128 bytes per 16x16 frame.
+            int tilesPerFrameStride = ((tilesPerFrame + 7) / 8) * 8;
+            assetTilesPerFrame[ai] = tilesPerFrameStride;
             // Pick a source for the tile data: prefer a.frames; if empty and
             // the asset has directions (player character etc.), fall back to
             // direction 0 of dirAnimSets[0] (RGBA → nearest-palette quantized).
@@ -282,6 +293,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                         allTiles.push_back(word);
                     }
                 }
+                // Zero-pad up to tilesPerFrameStride for 1D_256 alignment.
+                int padTiles = tilesPerFrameStride - tilesPerFrame;
+                for (int i = 0; i < padTiles * 8; i++) allTiles.push_back(0);
             };
 
             // Prefer directional data when present — frames[] may be a zero
@@ -395,38 +409,82 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 int dirCount = assetForceStatic[ai] ? 1 : 8;
                 assetDirCount[ai] = dirCount;
 
-                // Tile layout: frame-major. Per frame, emit `dirCount` tile
-                // chunks. frames[] entries are single-direction (palette-
-                // indexed already); dirAnimSets[N] entries have per-dir RGBA.
+                // Record this asset's start in the global frame-dir lookup
+                // table so the runtime can index it via assetFrameBase[ai] +
+                // local frame index.
+                assetFrameBase[ai] = (int)frameDirTile.size();
+
+                // Tile layout: emit only PAINTED directions per frame (was: all
+                // 8 even if 5 were copies of dir 0). For walk/sprint that's 3
+                // dirs instead of 8 — sonic's full anim set shrinks from 336KB
+                // to ~104KB. Per-frame dir→slot mapping baked into
+                // afn_frame_dir_tile so runtime can fall back to nearest
+                // populated dir when the requested facing isn't painted.
+                int tileOffsetWithinAsset = 0;
                 for (size_t fi = 0; fi < uniqueFrames.size(); fi++) {
                     int srcFrameIdx = uniqueFrames[fi];
+                    std::array<uint16_t, 8> dirTileOff;
                     if (srcFrameIdx < framesBaseCount) {
-                        // a.frames[] image — already palette-indexed. Duplicate
-                        // across dirs so the runtime's (frame*dirCount + dir)*tpf
-                        // arithmetic still lands on valid tile data.
                         const auto& fr = a.frames[srcFrameIdx];
                         int fw = fr.width > 0 ? fr.width : sz;
                         int fh = fr.height > 0 ? fr.height : sz;
-                        for (int d = 0; d < dirCount; d++)
-                            emitFrame(fr.pixels, fw, fh, true);
+                        // frames[] entries are single-direction; emit once and
+                        // alias all dirs to slot 0.
+                        emitFrame(fr.pixels, fw, fh, true);
+                        for (int d = 0; d < 8; d++)
+                            dirTileOff[d] = (uint16_t)tileOffsetWithinAsset;
+                        tileOffsetWithinAsset += tilesPerFrameStride;
+                        frameDirTile.push_back(dirTileOff);
                         continue;
                     }
                     int setIdx = srcFrameIdx - framesBaseCount;
                     if (setIdx < 0) setIdx = 0;
                     if (setIdx >= (int)a.dirAnimSets.size())
                         setIdx = (int)a.dirAnimSets.size() - 1;
-                    for (int d = 0; d < dirCount; d++) {
+
+                    // First pass: figure out which dirs are populated.
+                    int populated[8];
+                    int popCount = 0;
+                    for (int d = 0; d < 8; d++) {
                         const auto& img = a.dirAnimSets[setIdx].dirImages[d];
-                        const auto* src = img.pixels
-                            ? &img : &a.dirAnimSets[setIdx].dirImages[0];
-                        if (!src->pixels && !a.dirAnimSets.empty())
-                            src = &a.dirAnimSets[0].dirImages[0];
-                        if (!src->pixels) { emitFrame(nullptr, 0, 0, false); continue; }
-                        int sw = src->width, sh = src->height;
+                        if (img.pixels && img.width > 0 && img.height > 0)
+                            populated[popCount++] = d;
+                    }
+                    if (popCount == 0) {
+                        // No dirs painted — emit dir 0 of dirAnimSets[0] as fallback
+                        emitFrame(nullptr, 0, 0, false);
+                        for (int d = 0; d < 8; d++)
+                            dirTileOff[d] = (uint16_t)tileOffsetWithinAsset;
+                        tileOffsetWithinAsset += tilesPerFrameStride;
+                        frameDirTile.push_back(dirTileOff);
+                        continue;
+                    }
+
+                    // For each requested dir, pick nearest populated slot.
+                    int slotForDir[8];
+                    for (int d = 0; d < 8; d++) {
+                        int bestSlot = 0, bestDist = 100;
+                        for (int s = 0; s < popCount; s++) {
+                            int diff = populated[s] - d;
+                            if (diff < 0) diff = -diff;
+                            if (diff > 4) diff = 8 - diff;
+                            if (diff < bestDist) { bestDist = diff; bestSlot = s; }
+                        }
+                        slotForDir[d] = bestSlot;
+                        dirTileOff[d] = (uint16_t)(tileOffsetWithinAsset +
+                                                   bestSlot * tilesPerFrameStride);
+                    }
+                    frameDirTile.push_back(dirTileOff);
+
+                    // Emit each populated dir's tile data sequentially.
+                    for (int s = 0; s < popCount; s++) {
+                        int d = populated[s];
+                        const auto& img = a.dirAnimSets[setIdx].dirImages[d];
+                        int sw = img.width, sh = img.height;
                         std::vector<uint8_t> palIdx(sw * sh, 0);
                         for (int yy = 0; yy < sh; yy++)
                         for (int xx = 0; xx < sw; xx++) {
-                            const uint8_t* p = src->pixels + (yy * sw + xx) * 4;
+                            const uint8_t* p = img.pixels + (yy * sw + xx) * 4;
                             if (p[3] < 128) { palIdx[yy*sw+xx] = 0; continue; }
                             int r5 = p[0] >> 3, g5 = p[1] >> 3, b5 = p[2] >> 3;
                             int best = 1, bestD = 1 << 30;
@@ -441,7 +499,12 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                         }
                         emitFrame(palIdx.data(), sw, sh, false);
                     }
+                    tileOffsetWithinAsset += popCount * tilesPerFrameStride;
+                    (void)slotForDir;
                 }
+                // assetDirCount stays 8 so the runtime still picks a facing
+                // for sprite-direction logic. Tile addressing skips the *8
+                // multiply entirely now (uses afn_frame_dir_tile[]).
                 usedDir = true;
             }
             if (!usedDir) {
@@ -457,10 +520,27 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 int framesFromDir  = (int)a.dirAnimSets.size();
                 int totalFrames = framesFromBase + framesFromDir;
                 if (totalFrames < 1) totalFrames = 1;
-                for (auto& fr : a.frames)
+                // Single-dir asset (ring, checkpoint, etc.) — still goes
+                // through the indirection table so the runtime addressing
+                // is uniform. Every requested dir maps to the same slot
+                // (the only painted one).
+                assetFrameBase[ai] = (int)frameDirTile.size();
+                int tileOffsetWithinAsset2 = 0;
+                for (auto& fr : a.frames) {
+                    std::array<uint16_t, 8> dirTileOff;
+                    for (int d = 0; d < 8; d++)
+                        dirTileOff[d] = (uint16_t)tileOffsetWithinAsset2;
+                    frameDirTile.push_back(dirTileOff);
                     emitFrame(fr.pixels, fr.width > 0 ? fr.width : sz,
                               fr.height > 0 ? fr.height : sz, true);
+                    tileOffsetWithinAsset2 += tilesPerFrameStride;
+                }
                 for (const auto& dset : a.dirAnimSets) {
+                    std::array<uint16_t, 8> dirTileOff;
+                    for (int d = 0; d < 8; d++)
+                        dirTileOff[d] = (uint16_t)tileOffsetWithinAsset2;
+                    frameDirTile.push_back(dirTileOff);
+                    tileOffsetWithinAsset2 += tilesPerFrameStride;
                     const auto& img = dset.dirImages[0];
                     if (!img.pixels) { emitFrame(nullptr, 0, 0, false); continue; }
                     // Quantize this RGBA frame into the asset palette built
@@ -557,19 +637,37 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         //  [6] animBase        — offset into afn_anim_table
         //  [7] animCount       — # anims in afn_anim_table for this asset
         //  [8] defaultAnim     — index of the anim to cycle by default
-        // Tile layout (directional + animated): tileStart +
-        //   (frame * dirCount + dir) * tilesPerFrame  — frame-major so all
-        //   8 directions for frame N are contiguous in VRAM.
-        f << "static const int afn_asset_desc[][9] = {\n";
+        // Tile layout: tileStart + afn_frame_dir_tile[assetFrameBase + frame][dir].
+        // Indirection table handles per-frame dir count (walk has 3 dirs,
+        // jump has 1, idle has 8) and runtime fallback to nearest painted
+        // dir. asset_desc[9] is now assetFrameBase (was unused dirCount=1
+        // marker for new path).
+        f << "static const int afn_asset_desc[][10] = {\n";
         for (size_t ai = 0; ai < assets.size(); ai++) {
             int palBank = (int)ai & 0xF;
             f << "    { " << assetTileStart[ai] << ", " << assetTilesPerFrame[ai] << ", "
               << assetFrameCount[ai] << ", " << assetObjSize[ai] << ", "
               << palBank << ", " << assetDirCount[ai] << ", "
               << assetAnimBase[ai] << ", " << assetAnimCount[ai] << ", "
-              << assetDefaultAnim[ai] << " },\n";
+              << assetDefaultAnim[ai] << ", " << assetFrameBase[ai] << " },\n";
         }
         f << "};\n\n";
+
+        // Per-frame dir → tile-offset (relative to asset's tileStart).
+        // Runtime: tileIdx = tileStart + afn_frame_dir_tile[base + frame][dir]
+        f << "#define AFN_FRAME_DIR_TILE_LEN " << (int)frameDirTile.size() << "\n";
+        if (!frameDirTile.empty()) {
+            f << "static const u16 afn_frame_dir_tile[" << (int)frameDirTile.size() << "][8] = {\n";
+            for (const auto& row : frameDirTile) {
+                f << "    { ";
+                for (int d = 0; d < 8; d++) {
+                    f << row[d];
+                    if (d < 7) f << ", ";
+                }
+                f << " },\n";
+            }
+            f << "};\n\n";
+        }
 
         // Per-anim table: {start, count, fps, loop}. Indexed by
         // afn_asset_desc[asset][6] + anim_idx. Empty if no asset has anims.

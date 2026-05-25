@@ -19,10 +19,14 @@ static void init_video(void)
     vramSetBankC(VRAM_C_SUB_BG);
     consoleDemoInit();
 
-    vramSetBankA(VRAM_A_TEXTURE);
+    // 3D textures live on bank D (slot 0) so bank A is free for sprite VRAM.
+    // Without this, sprite VRAM is just bank B (128KB) which sonic alone
+    // overflows once he has more than ~8 directional frames. Pairing A+B
+    // gives 256KB main sprite VRAM (A at 0x06420000, B at 0x06400000).
+    vramSetBankD(VRAM_D_TEXTURE_SLOT0);
     vramSetBankE(VRAM_E_TEX_PALETTE);
-    // Bank B reassigned to MAIN_SPRITE in afn_sprite_init (3D engine on BG0
-    // doesn't actually need a tile/map VRAM bank).
+    // Bank A + B reassigned to MAIN_SPRITE in afn_sprite_init (3D engine on
+    // BG0 doesn't actually need a tile/map VRAM bank).
 
     // OAM init + sprite VRAM moved to sprites.c (afn_sprite_init).
 
