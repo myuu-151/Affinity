@@ -141,7 +141,12 @@ void afn_sprite_update(void)
         if (screenX < -128 || screenX > 256 + 128) continue;
         if (screenY < -128 || screenY > 192 + 128) continue;
 
-        int matScale = depth / 32;
+        // GBA formula: invScale = depth * 14 / sprScale (when scaleSize ==
+        // baseSize). Per-sprite scale = 256 → 1×; larger sprScale → bigger
+        // sprite. Mirrors the rendering in gba_runtime/main.c:2946.
+        int sprScale = afn_sprite_data[si][5];
+        if (sprScale <= 0) sprScale = 256;
+        int matScale = (depth * 14) / sprScale;
         if (matScale < 128)  matScale = 128;
         if (matScale > 2048) matScale = 2048;
 
