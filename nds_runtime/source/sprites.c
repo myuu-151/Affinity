@@ -103,7 +103,7 @@ void afn_sprite_update(void)
         // S_pixels = objSize * 256 / matScale, and we want S ∝ 1/depth, so
         // matScale = 256 * depth / K. K ≈ 3750 fx8 tuned by hand so Sonic
         // (objSize 64) reads at ~60 px at depth ≈ 4000 fx8.
-        int matScale = depth >> 4;              // = 256 * depth / 4096, K ≈ 4096
+        int matScale = depth / 24;              // bigger divisor = bigger sprites
         if (matScale < 64)   matScale = 64;     // ≤4× enlargement (canvas cap)
         if (matScale > 4096) matScale = 4096;   // ≥1/16 reduction
         oamRotateScale(&oamMain, affineSlot, 0, matScale, matScale);
@@ -124,8 +124,8 @@ void afn_sprite_update(void)
             static int s_f = 0;
             s_f++;
             if ((s_f & 15) == 0)
-                iprintf("\x1b[17;0Hsp0 sX=%d sY=%d aI=%d ti=%d  ",
-                        screenX, screenY, aIdx, tileIdx);
+                iprintf("\x1b[17;0Hsp0 sX=%d sY=%d d=%d ms=%d osz=%d  ",
+                        screenX, screenY, depth, matScale, objSize);
         }
 
         oamSlot++;
