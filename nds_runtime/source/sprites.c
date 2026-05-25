@@ -25,11 +25,11 @@ void afn_sprite_init(void)
     // asset rendered correctly, the rest were missing or scrambled).
     vramSetBankF(VRAM_F_LCD);
     vramSetBankB(VRAM_B_MAIN_SPRITE);
-    // 1D_128: OAM tile field is 10 bits → max addressable byte =
-    // 1024 × 128 = 128KB, exactly bank B's size. Per-asset byte start
-    // needs 128-byte alignment (4-tile chunks). Each emitted dir-frame
-    // is at least 4 tiles (the smallest sprite is 16x16 = 4 tiles after
-    // the indirection table's per-asset padding).
+    // 1D_128 mapping: 10-bit OAM tile field × 128-byte boundary = 128KB
+    // addressable, matching bank B alone. Going wider would require
+    // mapping bank A as the second sprite slot, but bank A is currently
+    // tied up serving 3D textures (see main.c) and bank C/D both fail
+    // as texture banks.
     oamInit(&oamMain, SpriteMapping_1D_128, false);
 
     // Push the 3D layer (BG0) to the lowest priority so OBJ (default
