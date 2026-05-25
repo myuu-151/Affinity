@@ -270,10 +270,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             assetObjSize[ai] = sz;
             int tilesPerSide = sz / 8;
             int tilesPerFrame = tilesPerSide * tilesPerSide;
-            // 1D_256 sprite mapping needs 8-tile alignment per dir-frame.
-            // A 16x16 sprite is 4 tiles — pad stride to 8 so OAM addressing
-            // doesn't round down. Cheap: only adds 128 bytes per 16x16 frame.
-            int tilesPerFrameStride = ((tilesPerFrame + 7) / 8) * 8;
+            // 1D_128 sprite mapping needs 4-tile alignment per dir-frame.
+            // 16x16 sprite is exactly 4 tiles so no padding; 8x8 (1 tile)
+            // would pad to 4 but we don't emit anything smaller than 16x16.
+            int tilesPerFrameStride = ((tilesPerFrame + 3) / 4) * 4;
             assetTilesPerFrame[ai] = tilesPerFrameStride;
             // Pick a source for the tile data: prefer a.frames; if empty and
             // the asset has directions (player character etc.), fall back to

@@ -24,21 +24,13 @@ void afn_sprite_init(void)
     // are undefined and we saw exactly that symptom: only the first
     // asset rendered correctly, the rest were missing or scrambled).
     vramSetBankF(VRAM_F_LCD);
-    // Main sprite VRAM = bank B (slot 0 = 0x06400000) + bank A (slot 1 =
-    // 0x06420000) = 256KB. Textures get relocated to bank D in main.c so A
-    // can come here. Without A, sonic's 5-anim × 8-dir tile data (~336KB)
-    // overflows the 128KB single-bank ceiling, dropping every frame past
-    // slot 8 — visible as walk frames going garbage when sonic is near
-    // other sprites.
-    vramSetBankA(VRAM_A_MAIN_SPRITE_0x06420000);
-    vramSetBankB(VRAM_B_MAIN_SPRITE_0x06400000);
-    // 1D_256: OAM tile field is 10 bits, byte_addr = tile_field × boundary.
-    // 1D_128 capped at 128KB which fit bank B alone; once bank A is also
-    // mapped to MAIN_SPRITE (256KB total) we need 1D_256 boundary to
-    // address the upper 128KB. Per-asset byte start must be 256-byte
-    // aligned (multiple of 8 tiles); each emitted dir-frame is 64 tiles
-    // so alignment is natural.
-    oamInit(&oamMain, SpriteMapping_1D_256, false);
+    vramSetBankB(VRAM_B_MAIN_SPRITE);
+    // 1D_128: OAM tile field is 10 bits → max addressable byte =
+    // 1024 × 128 = 128KB, exactly bank B's size. Per-asset byte start
+    // needs 128-byte alignment (4-tile chunks). Each emitted dir-frame
+    // is at least 4 tiles (the smallest sprite is 16x16 = 4 tiles after
+    // the indirection table's per-asset padding).
+    oamInit(&oamMain, SpriteMapping_1D_128, false);
 
     // Push the 3D layer (BG0) to the lowest priority so OBJ (default
     // priority 0) renders on top of the 3D scene.
