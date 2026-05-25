@@ -420,13 +420,44 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             if (!usedDir) {
                 for (int c = 0; c < 16; c++)
                     assetPal[ai][c] = EditorColorToRGB15(a.palette[c]);
+                // The editor lets non-directional assets stash extra animation
+                // frames inside dirAnimSets[].dirImages[0] (e.g. a 1-direction
+                // ring with 4 spin frames). Anim frame indices count
+                // a.frames first, then dirAnimSets in order — anim "3..4"
+                // for a ring with frames.size()=1 and 4 dirAnimSets means
+                // dirAnimSets[2] and dirAnimSets[3].
+                int framesFromBase = (int)a.frames.size();
+                int framesFromDir  = (int)a.dirAnimSets.size();
+                int totalFrames = framesFromBase + framesFromDir;
+                if (totalFrames < 1) totalFrames = 1;
                 for (auto& fr : a.frames)
                     emitFrame(fr.pixels, fr.width > 0 ? fr.width : sz,
                               fr.height > 0 ? fr.height : sz, true);
-                // Non-directional assets: emit each defined anim 1:1 (no
-                // frame-dedup since frames map directly to a.frames index).
-                assetFrameCount[ai] = (int)a.frames.size();
-                if (assetFrameCount[ai] < 1) assetFrameCount[ai] = 1;
+                for (const auto& dset : a.dirAnimSets) {
+                    const auto& img = dset.dirImages[0];
+                    if (!img.pixels) { emitFrame(nullptr, 0, 0, false); continue; }
+                    // Quantize this RGBA frame into the asset palette built
+                    // above (a.palette already populated).
+                    int fw = img.width, fh = img.height;
+                    std::vector<uint8_t> palIdx(fw * fh, 0);
+                    for (int yy = 0; yy < fh; yy++)
+                    for (int xx = 0; xx < fw; xx++) {
+                        const uint8_t* p = img.pixels + (yy * fw + xx) * 4;
+                        if (p[3] < 128) { palIdx[yy*fw+xx] = 0; continue; }
+                        int r5 = p[0] >> 3, g5 = p[1] >> 3, b5 = p[2] >> 3;
+                        int best = 1, bestD = 1 << 30;
+                        for (int c = 1; c < 16; c++) {
+                            uint16_t pc = assetPal[ai][c];
+                            if (pc == 0) continue;
+                            int pr = pc & 31, pg = (pc >> 5) & 31, pb = (pc >> 10) & 31;
+                            int d = (r5-pr)*(r5-pr) + (g5-pg)*(g5-pg) + (b5-pb)*(b5-pb);
+                            if (d < bestD) { bestD = d; best = c; }
+                        }
+                        palIdx[yy*fw+xx] = (uint8_t)best;
+                    }
+                    emitFrame(palIdx.data(), fw, fh, false);
+                }
+                assetFrameCount[ai] = totalFrames;
                 assetAnimBase[ai]    = (int)animTable.size();
                 assetAnimCount[ai]   = (int)a.anims.size();
                 assetDefaultAnim[ai] = (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size())
@@ -434,7 +465,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 for (const auto& anim : a.anims) {
                     int s = anim.startFrame, e = anim.endFrame;
                     if (s < 0) s = 0;
-                    if (e >= (int)a.frames.size()) e = (int)a.frames.size() - 1;
+                    if (e >= totalFrames) e = totalFrames - 1;
+                    if (s > e) s = e;
                     AnimEntry ae;
                     ae.start = s;
                     ae.count = e - s + 1;

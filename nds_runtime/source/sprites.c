@@ -82,11 +82,13 @@ void afn_sprite_update(void)
 #if defined(HAS_SPRITES)
     oamClear(&oamMain, 0, 128);
 
-    // Global animation tick — assets sharing a default-anim fps stay in sync
-    // across all instances. Per-sprite animation state would let different
-    // instances diverge; punt that until script-driven anims (Phase 3) need it.
+    // Per-sprite anim state — accumulator resets when the chosen anim
+    // changes so each instance starts at its own frame 0 instead of jumping
+    // to a global tick's modulo (which causes visible stutter on switch).
     static int s_animTick = 0;
     s_animTick++;
+    static int s_animPrev[AFN_SPRITE_COUNT];   // last animIdx per sprite
+    static int s_animStart[AFN_SPRITE_COUNT];  // tick when current anim started
 
     static ProjSpr proj[AFN_SPRITE_COUNT];
     int projCount = 0;
@@ -211,11 +213,18 @@ void afn_sprite_update(void)
             animLoop   = row[3];
         }
 #endif
-        // Compute current frame within the anim's range.
+        // Per-sprite anim phase. Reset start tick when the anim changes
+        // so cycling begins from frame 0 of the new range, not from a
+        // global modulo that'd jump mid-cycle.
+        if (s_animPrev[si] != animIdx) {
+            s_animPrev[si]  = animIdx;
+            s_animStart[si] = s_animTick;
+        }
         int animFrame = frameStart;
         if (animLen > 1 && animFps > 0) {
             int hold = 60 / animFps; if (hold < 1) hold = 1;
-            int step = s_animTick / hold;
+            int elapsed = s_animTick - s_animStart[si];
+            int step = elapsed / hold;
             int local = animLoop ? (step % animLen)
                                  : (step >= animLen ? animLen - 1 : step);
             animFrame = frameStart + local;
@@ -226,9 +235,15 @@ void afn_sprite_update(void)
         if (si == AFN_PLAYER_IDX) {
             static int s_animDbgF = 0;
             s_animDbgF++;
-            if ((s_animDbgF & 15) == 0)
-                iprintf("\x1b[12;0Hply pa=%d ai=%d fs=%d al=%d fp=%d fr=%d  ",
-                        afn_play_anim, animIdx, frameStart, animLen, animFps, animFrame);
+            if ((s_animDbgF & 15) == 0) {
+                int tIdx = tileStart + (animFrame * dirCount + dir) * tilesPerFr;
+                // Sample u32 in the MIDDLE of the sprite — top-left tiles
+                // of OBJ sprites are usually transparent corners, so check
+                // tile (4,4) of an 8x8 grid (tile index 36 within sprite).
+                volatile uint32_t* vmid = (volatile uint32_t*)(0x06400000 + (tIdx + 36) * 32 + 16);
+                iprintf("\x1b[12;0Hpa=%d ai=%d fr=%d ti=%d d=%d v=%08lx",
+                        afn_play_anim, animIdx, animFrame, tIdx, dir, (long)vmid[0]);
+            }
         }
 #endif
 
