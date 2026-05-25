@@ -327,18 +327,26 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 for (size_t i = 0; i < freqs.size() && i < 15; i++)
                     assetPal[ai][i + 1] = freqs[i].c;
 
-                // Collect unique source-frame indices referenced by ANY anim
-                // (so PlayAnim/SetSpriteAnim nodes can switch). ForceStatic
-                // assets emit just frame 0.
+                // Two indexing models depending on whether the asset is
+                // truly multi-directional or just animated:
+                //   dirCount==8 (full directional, e.g. Sonic): anim indices
+                //     are direct dirAnimSets[] indices. frames[0] is a
+                //     placeholder we ignore.
+                //   dirCount==1 (forceStatic / single-dir like spinning ring):
+                //     combined indexing — anim frame 0 = frames[0], 1+ =
+                //     dirAnimSets[N-1]. Editor anim "3,4" on a 1-frames +
+                //     4-dirAnimSets asset means dirAnimSets[2..3].
+                bool useCombined = assetForceStatic[ai] || !a.hasDirections;
+                int framesBaseCount = useCombined ? (int)a.frames.size() : 0;
+                int totalFramesRef  = framesBaseCount + (int)a.dirAnimSets.size();
+                if (totalFramesRef < 1) totalFramesRef = 1;
                 std::vector<int> uniqueFrames;
-                if (assetForceStatic[ai]) {
-                    uniqueFrames.push_back(0);
-                } else if (!a.anims.empty()) {
-                    std::vector<bool> seen((int)a.dirAnimSets.size() + 1, false);
+                if (!a.anims.empty()) {
+                    std::vector<bool> seen(totalFramesRef + 1, false);
                     for (const auto& anim : a.anims) {
                         int s = anim.startFrame, e = anim.endFrame;
                         if (s < 0) s = 0;
-                        if (e >= (int)a.dirAnimSets.size()) e = (int)a.dirAnimSets.size() - 1;
+                        if (e >= totalFramesRef) e = totalFramesRef - 1;
                         for (int fr = s; fr <= e; fr++) {
                             if (fr >= 0 && fr < (int)seen.size() && !seen[fr]) {
                                 seen[fr] = true;
@@ -381,26 +389,39 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 int dirCount = assetForceStatic[ai] ? 1 : 8;
                 assetDirCount[ai] = dirCount;
 
-                // Tile layout: frame-major (frame 0 dirs 0..7, frame 1 dirs 0..7, ...).
-                // Runtime tileIdx = tileStart + (frame * dirCount + dir) * tpf.
+                // Tile layout: frame-major. Per frame, emit `dirCount` tile
+                // chunks. frames[] entries are single-direction (palette-
+                // indexed already); dirAnimSets[N] entries have per-dir RGBA.
                 for (size_t fi = 0; fi < uniqueFrames.size(); fi++) {
-                    int srcFrame = uniqueFrames[fi];
-                    if (srcFrame >= (int)a.dirAnimSets.size())
-                        srcFrame = (int)a.dirAnimSets.size() - 1;
+                    int srcFrameIdx = uniqueFrames[fi];
+                    if (srcFrameIdx < framesBaseCount) {
+                        // a.frames[] image — already palette-indexed. Duplicate
+                        // across dirs so the runtime's (frame*dirCount + dir)*tpf
+                        // arithmetic still lands on valid tile data.
+                        const auto& fr = a.frames[srcFrameIdx];
+                        int fw = fr.width > 0 ? fr.width : sz;
+                        int fh = fr.height > 0 ? fr.height : sz;
+                        for (int d = 0; d < dirCount; d++)
+                            emitFrame(fr.pixels, fw, fh, true);
+                        continue;
+                    }
+                    int setIdx = srcFrameIdx - framesBaseCount;
+                    if (setIdx < 0) setIdx = 0;
+                    if (setIdx >= (int)a.dirAnimSets.size())
+                        setIdx = (int)a.dirAnimSets.size() - 1;
                     for (int d = 0; d < dirCount; d++) {
-                        const auto& img = a.dirAnimSets[srcFrame].dirImages[d];
-                        // Empty direction (e.g. only N/S/E/W populated) → fall
-                        // back to direction 0 of THIS frame so the slot has data.
+                        const auto& img = a.dirAnimSets[setIdx].dirImages[d];
                         const auto* src = img.pixels
-                            ? &img : &a.dirAnimSets[srcFrame].dirImages[0];
-                        if (!src->pixels)
+                            ? &img : &a.dirAnimSets[setIdx].dirImages[0];
+                        if (!src->pixels && !a.dirAnimSets.empty())
                             src = &a.dirAnimSets[0].dirImages[0];
-                        int fw = src->width, fh = src->height;
-                        std::vector<uint8_t> palIdx(fw * fh, 0);
-                        for (int yy = 0; yy < fh; yy++)
-                        for (int xx = 0; xx < fw; xx++) {
-                            const uint8_t* p = src->pixels + (yy * fw + xx) * 4;
-                            if (p[3] < 128) { palIdx[yy*fw+xx] = 0; continue; }
+                        if (!src->pixels) { emitFrame(nullptr, 0, 0, false); continue; }
+                        int sw = src->width, sh = src->height;
+                        std::vector<uint8_t> palIdx(sw * sh, 0);
+                        for (int yy = 0; yy < sh; yy++)
+                        for (int xx = 0; xx < sw; xx++) {
+                            const uint8_t* p = src->pixels + (yy * sw + xx) * 4;
+                            if (p[3] < 128) { palIdx[yy*sw+xx] = 0; continue; }
                             int r5 = p[0] >> 3, g5 = p[1] >> 3, b5 = p[2] >> 3;
                             int best = 1, bestD = 1 << 30;
                             for (size_t i = 0; i < freqs.size(); i++) {
@@ -410,9 +431,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                                 int dd = (r5-pr)*(r5-pr) + (g5-pg)*(g5-pg) + (b5-pb)*(b5-pb);
                                 if (dd < bestD) { bestD = dd; best = (int)i + 1; }
                             }
-                            palIdx[yy*fw+xx] = (uint8_t)best;
+                            palIdx[yy*sw+xx] = (uint8_t)best;
                         }
-                        emitFrame(palIdx.data(), fw, fh, false);
+                        emitFrame(palIdx.data(), sw, sh, false);
                     }
                 }
                 usedDir = true;
