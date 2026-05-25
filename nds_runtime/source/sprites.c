@@ -72,14 +72,15 @@ void afn_sprite_update(void)
         int dy = wy - cam_h;
         int dz = wz - cam_z;
 
-        // View basis (gluLookAt look = cam + (sin,cos)*k, up = +Y):
-        //   forward = (sin, 0, +cos)   side = (cos, 0, -sin)   up = (0,1,0)
+        // gluLookAt(eye, eye+(sin,0,cos), +Y) builds view_x = -cos*dx + sin*dz
+        // (forward × up = (-cos,0,sin), so the camera's world-space right is
+        // -X at cam_angle=0). Depth = -view_z = sin*dx + cos*dz.
         int depth = (dx * g_sinf + dz * g_cosf) >> 8;
         if (depth <= 64) continue;
 
-        int side = (dx * g_cosf - dz * g_sinf) >> 8;
-        int screenX = screenHalfX + (side * focalLen) / depth;
-        int screenY = screenHalfY - (dy   * focalLen) / depth;
+        int viewX  = (-dx * g_cosf + dz * g_sinf) >> 8;
+        int screenX = screenHalfX + (viewX * focalLen) / depth;
+        int screenY = screenHalfY - (dy    * focalLen) / depth;
         int scale   = (FX_ONE   * focalLen) / depth;  // 1 world unit at this depth
 
         int objSize = afn_asset_desc[aIdx][3];
