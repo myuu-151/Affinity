@@ -95,7 +95,10 @@ void afn_sprite_update(void)
     // both axes (the aspect ratio cancels through the X-axis half-width).
     const int focalLen = 137;
     const int screenHalfX = 128;
-    const int screenHalfY = 96;   // 3D scene horizon is always screen center
+    // Horizon line slides up when fps3d.c pitches the camera down for
+    // Mode-7-equivalent ground area. Match the same horizonNds the camera
+    // uses so sprites land on the meshes, not above/below them.
+    const int screenHalfY = (AFN_CAM_HORIZON * 6) / 5;
 
     for (int si = 0; si < AFN_SPRITE_COUNT; si++) {
         if (afn_sprite_data[si][9] >= 0) continue;  // mesh sprite — fps3d draws it
@@ -140,7 +143,7 @@ void afn_sprite_update(void)
 
         int matScale = depth / 32;
         if (matScale < 128)  matScale = 128;
-        if (matScale > 4096) matScale = 4096;
+        if (matScale > 2048) matScale = 2048;
 
         // Direction picking: camera-space angle into the sprite's 8 facings.
         // Convention: dir 0 = sprite seen from south (+Z relative to sprite,
