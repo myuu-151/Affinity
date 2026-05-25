@@ -548,55 +548,89 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 memcpy(&rgba[(y * SKY_W + x) * 4], &srcPx[(sy * srcW + sx) * 4], 4);
             }
         }
-        // 256-color quantization: bucket RGB15 colors into RGB12 buckets,
-        // then within each bucket use the MEAN RGB5 of the actual pixels.
-        // Bucket span is only ±1 RGB5 per channel so the mean can't wander
-        // out of color space (no cream-in-blue artifacts), and using actual
-        // pixel data per palette entry tracks white/highlight pixels much
-        // better than a fixed bucket center (which always darkens whites).
-        std::map<uint16_t, int> bucketHist;
-        std::map<uint16_t, uint64_t> bucketRsum, bucketGsum, bucketBsum;
+        // Median-cut 256-color quantization. The standard algorithm for
+        // natural images: recursively split color boxes along their longest
+        // axis at the median, until you have 256 boxes. Each palette entry
+        // becomes the mean of its box's pixels. Much better than top-N
+        // histogram bucketing for sky gradients (which left rogue pixels
+        // because rare-but-distinct colors got their own palette slots).
+        struct Px { uint8_t r, g, b; };
+        std::vector<Px> pixels; pixels.reserve(SKY_W * SKY_H);
         for (int i = 0; i < SKY_W * SKY_H; i++) {
-            unsigned r5 = rgba[i*4+0] >> 3, g5 = rgba[i*4+1] >> 3, b5 = rgba[i*4+2] >> 3;
-            unsigned r4 = r5 >> 1, g4 = g5 >> 1, b4 = b5 >> 1;
-            uint16_t bkey = (uint16_t)(r4 | (g4 << 4) | (b4 << 8));
-            bucketHist[bkey]++;
-            bucketRsum[bkey] += r5;
-            bucketGsum[bkey] += g5;
-            bucketBsum[bkey] += b5;
+            pixels.push_back({(uint8_t)(rgba[i*4+0] >> 3),
+                              (uint8_t)(rgba[i*4+1] >> 3),
+                              (uint8_t)(rgba[i*4+2] >> 3)});
         }
-        std::vector<std::pair<int, uint16_t>> sorted; sorted.reserve(bucketHist.size());
-        for (auto& kv : bucketHist) sorted.push_back({kv.second, kv.first});
-        std::sort(sorted.begin(), sorted.end(), [](auto& a, auto& b){ return a.first > b.first; });
-        int palN = std::min<int>(256, (int)sorted.size());
+        struct Box { int lo, hi; }; // index range into `pixels`
+        std::vector<Box> boxes; boxes.push_back({0, (int)pixels.size()});
+        while ((int)boxes.size() < 256) {
+            // Find box with largest color-axis range.
+            int bestBox = -1, bestRange = 0, bestAxis = 0;
+            for (int bi = 0; bi < (int)boxes.size(); bi++) {
+                int lo = boxes[bi].lo, hi = boxes[bi].hi;
+                if (hi - lo <= 1) continue;
+                uint8_t rMin=31, rMax=0, gMin=31, gMax=0, bMin=31, bMax=0;
+                for (int j = lo; j < hi; j++) {
+                    Px p = pixels[j];
+                    if (p.r < rMin) rMin = p.r; if (p.r > rMax) rMax = p.r;
+                    if (p.g < gMin) gMin = p.g; if (p.g > gMax) gMax = p.g;
+                    if (p.b < bMin) bMin = p.b; if (p.b > bMax) bMax = p.b;
+                }
+                int rR = rMax - rMin, gR = gMax - gMin, bR = bMax - bMin;
+                int axis = 0, range = rR;
+                if (gR > range) { range = gR; axis = 1; }
+                if (bR > range) { range = bR; axis = 2; }
+                if (range > bestRange) { bestRange = range; bestBox = bi; bestAxis = axis; }
+            }
+            if (bestBox < 0) break; // all boxes single-pixel
+            // Sort the box along the chosen axis and split at the median.
+            Box b = boxes[bestBox];
+            std::sort(pixels.begin() + b.lo, pixels.begin() + b.hi,
+                      [bestAxis](const Px& a, const Px& c) {
+                          uint8_t av = bestAxis == 0 ? a.r : bestAxis == 1 ? a.g : a.b;
+                          uint8_t cv = bestAxis == 0 ? c.r : bestAxis == 1 ? c.g : c.b;
+                          return av < cv;
+                      });
+            int mid = b.lo + (b.hi - b.lo) / 2;
+            boxes[bestBox].hi = mid;
+            boxes.push_back({mid, b.hi});
+        }
         std::vector<uint16_t> palette(256, 0);
-        for (int i = 0; i < palN; i++) {
-            uint16_t bkey = sorted[i].second;
-            int n = bucketHist[bkey];
-            unsigned r5 = (unsigned)((bucketRsum[bkey] + n/2) / n);
-            unsigned g5 = (unsigned)((bucketGsum[bkey] + n/2) / n);
-            unsigned b5 = (unsigned)((bucketBsum[bkey] + n/2) / n);
+        for (int i = 0; i < (int)boxes.size(); i++) {
+            int lo = boxes[i].lo, hi = boxes[i].hi;
+            if (hi <= lo) continue;
+            uint64_t rs=0, gs=0, bs=0;
+            for (int j = lo; j < hi; j++) { rs += pixels[j].r; gs += pixels[j].g; bs += pixels[j].b; }
+            int n = hi - lo;
+            unsigned r5 = (unsigned)((rs + n/2) / n);
+            unsigned g5 = (unsigned)((gs + n/2) / n);
+            unsigned b5 = (unsigned)((bs + n/2) / n);
             if (r5 > 31) r5 = 31;
             if (g5 > 31) g5 = 31;
             if (b5 > 31) b5 = 31;
             palette[i] = (uint16_t)(r5 | (g5 << 5) | (b5 << 10));
         }
+        int palN = (int)boxes.size();
         // Build mapping table: each unique input color → palette index of
-        // the nearest entry (computed once, applied to every pixel).
+        // Map each unique input color → nearest palette index. Build the
+        // unique-color set fresh (the histogram from before median-cut was
+        // dropped); a map keyed on RGB15 dedup pixels.
         std::map<uint16_t, uint8_t> nearest;
         auto dist2 = [](uint16_t a, uint16_t b) {
             int ar=a&31, ag=(a>>5)&31, ab=(a>>10)&31;
             int br=b&31, bg=(b>>5)&31, bb=(b>>10)&31;
             return (ar-br)*(ar-br) + (ag-bg)*(ag-bg) + (ab-bb)*(ab-bb);
         };
-        for (auto& kv : hist) {
-            uint16_t want = kv.first;
+        for (int i = 0; i < SKY_W * SKY_H; i++) {
+            unsigned r = rgba[i*4+0] >> 3, g = rgba[i*4+1] >> 3, b = rgba[i*4+2] >> 3;
+            uint16_t c15 = (uint16_t)(r | (g << 5) | (b << 10));
+            if (nearest.count(c15)) continue;
             int best = 0, bestD = 1<<30;
             for (int p = 0; p < palN; p++) {
-                int d = dist2(want, palette[p]);
+                int d = dist2(c15, palette[p]);
                 if (d < bestD) { bestD = d; best = p; }
             }
-            nearest[want] = (uint8_t)best;
+            nearest[c15] = (uint8_t)best;
         }
 
         f << "\n// ---- Sky panorama (256x256 8bpp paletted) ----\n";

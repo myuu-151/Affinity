@@ -26,7 +26,10 @@ static void init_video(void)
     vramSetBankF(VRAM_F_MAIN_SPRITE);
 
     glInit();
-    glEnable(GL_ANTIALIAS | GL_TEXTURE_2D);
+    // Anti-alias OFF — it edge-fringes textured polygons and the sky panorama
+    // showed faint blended pixels along texel boundaries.
+    glEnable(GL_TEXTURE_2D);
+    glDisable(GL_ANTIALIAS);
     // First-pass sky: solid blue clear-color. A proper textured skybox would
     // need the editor's panorama re-quantized for NDS (4bpp/8bpp single
     // palette instead of the GBA's 4-band sub-palette encoding) and rendered

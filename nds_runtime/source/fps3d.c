@@ -285,7 +285,11 @@ static void load_sky_texture(void)
     glGenTextures(1, &gl_sky_tex_id);
     glBindTexture(0, gl_sky_tex_id);
     // 256x256 8bpp paletted (GL_RGB256). TEXTURE_SIZE_256 = 5.
-    glTexImage2D(0, 0, GL_RGB256, 5, 5, 0, TEXGEN_TEXCOORD, afn_sky_tex);
+    // GL_TEXTURE_WRAP_S = horizontal wrap so the panorama can scroll past
+    // its 256-px edge as cam_angle rotates past 360° without clamping or
+    // garbage. Vertical wrap intentionally off (top of sky is top).
+    glTexImage2D(0, 0, GL_RGB256, 5, 5, 0,
+                 TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S, afn_sky_tex);
     glColorTableEXT(0, 0, 256, 0, 0, afn_sky_pal);
 }
 
