@@ -16,9 +16,21 @@
 void afn_sprite_init(void)
 {
 #if defined(HAS_SPRITES)
-    vramSetBankF(VRAM_F_MAIN_SPRITE);
-    // 1D_32 matches our packed-4bpp emission (32 bytes per 8x8 tile).
-    oamInit(&oamMain, SpriteMapping_1D_32, false);
+    // Bank B (128KB) instead of bank F (16KB). Per-asset 8-direction
+    // sprites overflow F immediately — 6 assets × ~16KB = ~96KB at the
+    // 64x64-with-8-dirs upper bound.
+    // Disable F first so it doesn't shadow B's first 16KB (NDS allows
+    // multiple banks at the same MST address; reads from the overlap
+    // are undefined and we saw exactly that symptom: only the first
+    // asset rendered correctly, the rest were missing or scrambled).
+    vramSetBankF(VRAM_F_LCD);
+    vramSetBankB(VRAM_B_MAIN_SPRITE);
+    // 1D_64: OAM tile slot is 10 bits, so the addressable VRAM range is
+    // 1024 × boundary. 1D_32 caps at 32KB — fine for one or two assets,
+    // but per-asset 8-direction sprites blow past that. 1D_64 reaches
+    // 64KB at the cost of 32 bytes of padding per 4bpp tile (OAM expects
+    // one tile per slot, but the data is only half a slot wide).
+    oamInit(&oamMain, SpriteMapping_1D_64, false);
 
     // Push the 3D layer (BG0) to the lowest priority so OBJ (default
     // priority 0) renders on top of the 3D scene.
@@ -27,7 +39,10 @@ void afn_sprite_init(void)
 
 #if AFN_ALL_TILES_LEN > 0
     {
-        // VRAM rejects 8-bit writes — must copy as 32-bit words.
+        // Tightly-packed 4bpp tile data: each 8x8 tile = 32 bytes, sub-tiles
+        // within a sprite read at 32-byte increments. The 1D_64 boundary only
+        // scales the OAM tile-INDEX field (byte_addr = slot_index * 64), not
+        // the inter-sub-tile stride. NDS VRAM rejects 8-bit writes → u32 copy.
         const uint32_t* src = afn_all_tiles;
         uint32_t* dst = (uint32_t*)0x06400000;
         int words = (AFN_ALL_TILES_LEN + 3) / 4;

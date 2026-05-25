@@ -20,8 +20,9 @@ static void init_video(void)
     consoleDemoInit();
 
     vramSetBankA(VRAM_A_TEXTURE);
-    vramSetBankB(VRAM_B_MAIN_BG);
     vramSetBankE(VRAM_E_TEX_PALETTE);
+    // Bank B reassigned to MAIN_SPRITE in afn_sprite_init (3D engine on BG0
+    // doesn't actually need a tile/map VRAM bank).
 
     // OAM init + sprite VRAM moved to sprites.c (afn_sprite_init).
 
