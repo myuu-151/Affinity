@@ -520,7 +520,11 @@ void afn_fps3d_init(void)
     player_z = AFN_CAM_Z;
     player_y = 0;
 #endif
-    orbit_dist = AFN_ORBIT_DIST;
+    // -640 fx8 (= 10 editor units closer to player) so the visible depth
+    // matches GBA at the same editor Z values. Without this, NDS
+    // exaggerated the apparent distance — Z=-80 visually matched GBA's
+    // Z=-90 because the camera was sitting too far back.
+    orbit_dist = AFN_ORBIT_DIST - 640;
     // Camera = player - orbit_dist along view forward. NDS convention:
     // forward = (sin, cos), so camera sits at -(sin, cos) * dist behind player.
     cam_x = player_x - ((g_sinf * orbit_dist) >> 8);
@@ -613,7 +617,11 @@ void afn_fps3d_update(void)
     // Round to 7 for cheap integer math (~6% high but visually fine).
     int lookY = cam_h;
     {
-        m7_horizon = (AFN_CAM_HORIZON * 6) / 5;     // GBA px → NDS px
+        // GBA px → NDS px is *6/5 in principle, but measured against the
+        // GBA reference the horizon still landed 5-6 px too high on NDS.
+        // +6 fudge so editor horizon=60 visually matches GBA at the same
+        // value (instead of needing 65 to compensate).
+        m7_horizon = ((AFN_CAM_HORIZON * 6) / 5) + 6;
         int screenOffPx = 96 - m7_horizon;          // +ve = look down
         lookY -= screenOffPx * 7;
     }
