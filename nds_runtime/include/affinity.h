@@ -119,4 +119,9 @@ extern int  tm_player_facing;
 extern int  tm_move_timer;
 extern int  player_on_ground;
 
+// Mesh collision (collision.c). Both no-op if AFN_COL_FACE_COUNT undefined.
+void afn_collide_walls(int *px, int *pz, int py);
+int  afn_collide_floor(int px, int pz, int py, int *outY);
+extern int afn_wall_collided_sprite;
+
 #endif // AFFINITY_H

@@ -667,6 +667,190 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "};\n\n";
     }
 
+    // ---- Collision data: pre-baked world-space faces + spatial grid ----
+    // Ported verbatim from gba_package.cpp:1521 — same data layout works on
+    // NDS because the runtime collision math is pure integer fixed-point.
+    {
+        struct CollFaceExp {
+            float v0x, v0z, v1x, v1z, v2x, v2z;
+            float v0y, v1y, v2y;
+            float nx, nz;
+            int flags;     // 1=floor, 2=ceiling, 4=wall
+            int sprIdx;
+        };
+        std::vector<CollFaceExp> collFaces;
+        for (size_t si = 0; si < sprites.size(); si++) {
+            if (sprites[si].meshIdx < 0) continue;
+            int mi = sprites[si].meshIdx;
+            if (mi >= (int)meshes.size()) continue;
+            if (!meshes[mi].collision) continue;
+            const auto& mesh = meshes[mi];
+            const auto& spr = sprites[si];
+            float sprScale = spr.scale;
+            float rotY = spr.rotation * 3.14159265f / 180.0f;
+            float rotX = spr.rotationX * 3.14159265f / 180.0f;
+            float rotZ = spr.rotationZ * 3.14159265f / 180.0f;
+            float cosY = cosf(rotY), sinY = sinf(rotY);
+            float cosX = cosf(rotX), sinX = sinf(rotX);
+            float cosZ = cosf(rotZ), sinZ = sinf(rotZ);
+            int vc = (int)mesh.positions.size() / 3;
+            std::vector<float> wp(vc * 3);
+            for (int v = 0; v < vc; v++) {
+                float lx = mesh.positions[v*3+0] * sprScale;
+                float ly = mesh.positions[v*3+1] * sprScale;
+                float lz = mesh.positions[v*3+2] * sprScale;
+                float rx = lx*cosY - lz*sinY;
+                float rz = lx*sinY + lz*cosY;
+                float ry = ly;
+                float ry2 = ry*cosX - rz*sinX;
+                float rz2 = ry*sinX + rz*cosX;
+                float rx2 = rx*cosZ - ry2*sinZ;
+                float ry3 = rx*sinZ + ry2*cosZ;
+                wp[v*3+0] = rx2 + spr.x;
+                wp[v*3+1] = ry3 + spr.y;
+                wp[v*3+2] = rz2 + spr.z;
+            }
+            auto emitTri = [&](int i0, int i1, int i2) {
+                float ax=wp[i0*3], ay=wp[i0*3+1], az=wp[i0*3+2];
+                float bx=wp[i1*3], by=wp[i1*3+1], bz=wp[i1*3+2];
+                float cx=wp[i2*3], cy=wp[i2*3+1], cz=wp[i2*3+2];
+                float e1x=bx-ax, e1y=by-ay, e1z=bz-az;
+                float e2x=cx-ax, e2y=cy-ay, e2z=cz-az;
+                float fnx = e1y*e2z - e1z*e2y;
+                float fny = e1z*e2x - e1x*e2z;
+                float fnz = e1x*e2y - e1y*e2x;
+                float len = sqrtf(fnx*fnx + fny*fny + fnz*fnz);
+                if (len < 0.0001f) return;
+                fnx/=len; fny/=len; fnz/=len;
+                int flags = (fny > 0.017f) ? 1 : (fny < -0.7f) ? 2 : 4;
+                float nxzLen = sqrtf(fnx*fnx + fnz*fnz);
+                float nnx = 0, nnz = 0;
+                if (nxzLen > 0.001f) { nnx = fnx/nxzLen; nnz = fnz/nxzLen; }
+                CollFaceExp cf;
+                cf.v0x=ax; cf.v0z=az; cf.v1x=bx; cf.v1z=bz; cf.v2x=cx; cf.v2z=cz;
+                cf.v0y=ay; cf.v1y=by; cf.v2y=cy;
+                cf.nx=nnx; cf.nz=nnz; cf.flags=flags; cf.sprIdx=(int)si;
+                collFaces.push_back(cf);
+            };
+            for (int t = 0; t < (int)mesh.indices.size()/3; t++)
+                emitTri(mesh.indices[t*3], mesh.indices[t*3+1], mesh.indices[t*3+2]);
+            for (int q = 0; q < (int)mesh.quadIndices.size()/4; q++) {
+                int q0=mesh.quadIndices[q*4], q1=mesh.quadIndices[q*4+1];
+                int q2=mesh.quadIndices[q*4+2], q3=mesh.quadIndices[q*4+3];
+                emitTri(q0,q1,q2);
+                emitTri(q0,q2,q3);
+            }
+        }
+        if (!collFaces.empty()) {
+            int totalFaces = (int)collFaces.size();
+            const int GRID_SIZE = 8;
+            auto toNdsPx = [](float ec) { return (ec + 512.0f) / 4.0f; };
+            float meshMinX=1e9f, meshMaxX=-1e9f, meshMinZ=1e9f, meshMaxZ=-1e9f;
+            for (int fi = 0; fi < totalFaces; fi++) {
+                const auto& cf = collFaces[fi];
+                float xs[]={toNdsPx(cf.v0x),toNdsPx(cf.v1x),toNdsPx(cf.v2x)};
+                float zs[]={toNdsPx(cf.v0z),toNdsPx(cf.v1z),toNdsPx(cf.v2z)};
+                for (int k=0;k<3;k++) {
+                    if (xs[k]<meshMinX) meshMinX=xs[k];
+                    if (xs[k]>meshMaxX) meshMaxX=xs[k];
+                    if (zs[k]<meshMinZ) meshMinZ=zs[k];
+                    if (zs[k]>meshMaxZ) meshMaxZ=zs[k];
+                }
+            }
+            if (meshMinX>0) meshMinX=0; if (meshMaxX<256) meshMaxX=256;
+            if (meshMinZ>0) meshMinZ=0; if (meshMaxZ<256) meshMaxZ=256;
+            float gridOriginX = floorf(meshMinX);
+            float gridOriginZ = floorf(meshMinZ);
+            float gridSpan = std::max(meshMaxX-gridOriginX+1.0f, meshMaxZ-gridOriginZ+1.0f);
+            float cellSize = ceilf(gridSpan / (float)GRID_SIZE);
+            if (cellSize < 1.0f) cellSize = 1.0f;
+            int cellSizeFx = (int)ceilf(cellSize * 256.0f);
+            int gridShift = 0;
+            { int v = cellSizeFx; while (v>1) { v>>=1; gridShift++; } }
+            if ((1<<gridShift) < cellSizeFx) gridShift++;
+            cellSizeFx = 1 << gridShift;
+            cellSize = cellSizeFx / 256.0f;
+            int gridOriginXFx = (int)(gridOriginX * 256.0f);
+            int gridOriginZFx = (int)(gridOriginZ * 256.0f);
+
+            std::vector<std::vector<int>> gridCells(GRID_SIZE * GRID_SIZE);
+            for (int fi = 0; fi < totalFaces; fi++) {
+                const auto& cf = collFaces[fi];
+                float minX=std::min({toNdsPx(cf.v0x),toNdsPx(cf.v1x),toNdsPx(cf.v2x)});
+                float maxX=std::max({toNdsPx(cf.v0x),toNdsPx(cf.v1x),toNdsPx(cf.v2x)});
+                float minZ=std::min({toNdsPx(cf.v0z),toNdsPx(cf.v1z),toNdsPx(cf.v2z)});
+                float maxZ=std::max({toNdsPx(cf.v0z),toNdsPx(cf.v1z),toNdsPx(cf.v2z)});
+                int cMinX=std::max(0,(int)((minX-gridOriginX)/cellSize));
+                int cMaxX=std::min(GRID_SIZE-1,(int)((maxX-gridOriginX)/cellSize));
+                int cMinZ=std::max(0,(int)((minZ-gridOriginZ)/cellSize));
+                int cMaxZ=std::min(GRID_SIZE-1,(int)((maxZ-gridOriginZ)/cellSize));
+                for (int gz=cMinZ; gz<=cMaxZ; gz++)
+                    for (int gx=cMinX; gx<=cMaxX; gx++)
+                        gridCells[gz*GRID_SIZE+gx].push_back(fi);
+            }
+            std::vector<int> gridStart(GRID_SIZE*GRID_SIZE), gridCount(GRID_SIZE*GRID_SIZE);
+            std::vector<int> gridFaceList;
+            for (int c=0; c<GRID_SIZE*GRID_SIZE; c++) {
+                gridStart[c] = (int)gridFaceList.size();
+                gridCount[c] = (int)gridCells[c].size();
+                for (int fi : gridCells[c]) gridFaceList.push_back(fi);
+            }
+
+            f << "// ---- Collision data (" << totalFaces << " faces, "
+              << gridFaceList.size() << " grid refs) ----\n";
+            f << "#define AFN_COL_FACE_COUNT " << totalFaces << "\n";
+            f << "#define AFN_COL_GRID_SIZE 8\n";
+            f << "#define AFN_COL_GRID_SHIFT " << gridShift << "\n";
+            f << "#define AFN_COL_GRID_ORIGIN_X " << gridOriginXFx << "\n";
+            f << "#define AFN_COL_GRID_ORIGIN_Z " << gridOriginZFx << "\n\n";
+            f << "typedef struct {\n";
+            f << "    int v0x, v0z, v1x, v1z, v2x, v2z;\n";
+            f << "    int v0y, v1y, v2y;\n";
+            f << "    int nx, nz;\n";
+            f << "    int flags;\n";
+            f << "    int sprIdx;\n";
+            f << "} CollFace;\n\n";
+            f << "static const CollFace afn_col_faces[" << totalFaces << "] = {\n";
+            for (int fi = 0; fi < totalFaces; fi++) {
+                const auto& cf = collFaces[fi];
+                auto toFx = [](float ec) { return (int)((ec + 512.0f) / 4.0f * 256.0f); };
+                auto toFy = [](float ey) { return (int)(ey / 4.0f * 256.0f); };
+                f << "    { "
+                  << toFx(cf.v0x) << "," << toFx(cf.v0z) << ", "
+                  << toFx(cf.v1x) << "," << toFx(cf.v1z) << ", "
+                  << toFx(cf.v2x) << "," << toFx(cf.v2z) << ", "
+                  << toFy(cf.v0y) << "," << toFy(cf.v1y) << "," << toFy(cf.v2y) << ", "
+                  << (int)(cf.nx * 256.0f) << "," << (int)(cf.nz * 256.0f) << ", "
+                  << cf.flags << ", " << cf.sprIdx << " },\n";
+            }
+            f << "};\n";
+            f << "static const u16 afn_col_grid_start[" << GRID_SIZE*GRID_SIZE << "] = {\n    ";
+            for (int c=0; c<GRID_SIZE*GRID_SIZE; c++) {
+                f << gridStart[c];
+                if (c+1 < GRID_SIZE*GRID_SIZE) f << ",";
+                if ((c+1)%8 == 0 && c+1 < GRID_SIZE*GRID_SIZE) f << "\n    ";
+            }
+            f << "\n};\n";
+            f << "static const u16 afn_col_grid_count[" << GRID_SIZE*GRID_SIZE << "] = {\n    ";
+            for (int c=0; c<GRID_SIZE*GRID_SIZE; c++) {
+                f << gridCount[c];
+                if (c+1 < GRID_SIZE*GRID_SIZE) f << ",";
+                if ((c+1)%8 == 0 && c+1 < GRID_SIZE*GRID_SIZE) f << "\n    ";
+            }
+            f << "\n};\n";
+            if (!gridFaceList.empty()) {
+                f << "static const u16 afn_col_grid_faces[" << gridFaceList.size() << "] = {\n    ";
+                for (size_t i=0; i<gridFaceList.size(); i++) {
+                    f << gridFaceList[i];
+                    if (i+1 < gridFaceList.size()) f << ",";
+                    if ((i+1)%16 == 0 && i+1 < gridFaceList.size()) f << "\n    ";
+                }
+                f << "\n};\n";
+            }
+            f << "\n";
+        }
+    }
+
     // ---- Sound / PCM Audio Data (NDS path — hardware mixer on ARM7) ----
     // GBA-only mixer toggles (compat/hifi/lowrate/bufscale/mixpad/premix/
     // isrswap/chunked/attenuate_a/triplebuf) are NOT emitted — there is no

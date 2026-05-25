@@ -63,7 +63,10 @@ int  afn_start_y;
 int  afn_start_z;
 int  afn_text_color = 0x7FFF;     // RGB15 white
 int  afn_timer_visible;
+// afn_wall_collided_sprite lives in collision.c when collision data exists.
+#ifndef AFN_COL_FACE_COUNT
 int  afn_wall_collided_sprite = -1;
+#endif
 int  afn_fade_target;
 int  afn_fade_frames;
 int  afn_fade_counter;

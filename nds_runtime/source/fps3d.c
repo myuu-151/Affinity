@@ -338,20 +338,43 @@ static void update_camera(void)
     player_z += FX_MUL(dz, s_moveSpeed);
     player_moving = (dx != 0 || dz != 0);
 
-    // Jump (A button) + gravity. Jump only when grounded.
+    // Jump (A button) + gravity.
     if ((down & KEY_A) && player_on_ground) {
         player_vy = AFN_JUMP_VEL;
         player_on_ground = 0;
     }
     player_vy -= AFN_GRAVITY;
     if (player_vy < -AFN_TERMINAL_VEL) player_vy = -AFN_TERMINAL_VEL;
-    s_playerY += player_vy;
-    if (s_playerY <= 0) {
-        s_playerY = 0;
-        player_vy = 0;
-        player_on_ground = 1;
+    player_y += player_vy;
+
+    // Floor + wall collision against mesh data when the project exports it.
+#ifdef AFN_COL_FACE_COUNT
+    {
+        int floorY;
+        int onFloor = afn_collide_floor(player_x, player_z, player_y, &floorY);
+        if (onFloor && player_y <= floorY) {
+            player_y = floorY;
+            player_vy = 0;
+            player_on_ground = 1;
+        } else {
+            player_on_ground = 0;
+        }
     }
-    player_y = afn_sprite_data[AFN_PLAYER_IDX][1] + s_playerY;
+    afn_collide_walls(&player_x, &player_z, player_y);
+#else
+    {
+        // No mesh collision data — fall back to flat ground at player init Y.
+        int groundY = afn_sprite_data[AFN_PLAYER_IDX][1];
+        if (player_y <= groundY) {
+            player_y = groundY;
+            player_vy = 0;
+            player_on_ground = 1;
+        } else {
+            player_on_ground = 0;
+        }
+    }
+#endif
+    s_playerY = player_y - afn_sprite_data[AFN_PLAYER_IDX][1];
 
     // 3rd-person camera: target = player - orbit_dist * view-forward. Lerp
     // cam_x/z toward target with the same ease rate as movement so the cam
