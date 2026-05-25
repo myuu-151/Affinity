@@ -129,6 +129,9 @@ static void render_meshes(void)
     {
         int meshIdx = afn_sprite_data[si][9];
         if (meshIdx < 0 || meshIdx >= AFN_MESH_COUNT) continue;
+        // visible == 0 → collision-only geometry; skip rendering (matches
+        // the editor's "hidden" toggle that's already respected on GBA).
+        if (!afn_mesh_desc[meshIdx][15]) continue;
 
         int wx = afn_sprite_data[si][0];
         int wy = afn_sprite_data[si][1];
@@ -177,16 +180,16 @@ static void render_meshes(void)
             r = g = b = 255;
             glBindTexture(0, gl_tex_ids[meshIdx]);
         } else {
-            int cr = (color & 0x1F);
-            int cg = ((color >> 5) & 0x1F);
-            int cb = ((color >> 10) & 0x1F);
-            r = (cr << 3) | (cr >> 2);
-            g = (cg << 3) | (cg >> 2);
-            b = (cb << 3) | (cb >> 2);
-            if (grayscale) {
-                int y = (r * 76 + g * 150 + b * 29) >> 8;
-                r = g = b = y;
-            }
+            // Unbind any leftover texture from a previous mesh, otherwise the
+            // texture lookup still happens with stale UVs/binding and the
+            // mesh inherits a tint from whatever was last drawn.
+            glBindTexture(0, 0);
+            // Untextured meshes render WHITE by default — per-mesh RGB15 tints
+            // were producing dark blues/greens because the editor stores its
+            // "default" color as a dark hue and lighting on NDS makes it
+            // worse. White lets the geometry's silhouette read clearly.
+            r = g = b = 255;
+            (void)color; (void)grayscale;
         }
         glColor3b(r, g, b);
 

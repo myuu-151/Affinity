@@ -367,8 +367,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         }
         f << " };\n";
 
-        // Mesh descriptor: { vertCount, indexCount, quadIdxCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase, wireframe, grayscale, drawDist }
-        f << "static const int afn_mesh_desc[][15] = {\n";
+        // Mesh descriptor: { vertCount, indexCount, quadIdxCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase, wireframe, grayscale, drawDist, visible }
+        f << "static const int afn_mesh_desc[][16] = {\n";
         for (size_t mi = 0; mi < meshes.size(); mi++)
         {
             const auto& mesh = meshes[mi];
@@ -390,7 +390,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
               << mesh.lit << ", 0, " << mesh.halfRes << ", "
               << mesh.textured << ", " << mesh.texW << ", "
               << texShift << ", 0, "
-              << mesh.wireframe << ", " << mesh.grayscale << ", " << drawDist << " },\n";
+              << mesh.wireframe << ", " << mesh.grayscale << ", " << drawDist << ", "
+              << mesh.visible << " },\n";
         }
         f << "};\n\n";
     }
