@@ -324,7 +324,7 @@ static void render_sky(void)
     // pixel, full 256-px panorama spans full 256-px screen).
     int uOffset = ((int)cam_angle * 4096) >> 16;
     int uLeft  = uOffset;
-    int uRight = uOffset + 4096;
+    int uRight = uOffset + 4096;  // 1:1 panorama mapping (matches GBA)
     int vTop   = 0;
     int vBot   = 4096;             // full 256-row panorama — anything smaller stretches each texel taller
 

@@ -10,8 +10,9 @@ static void init_video(void)
 {
     powerOn(POWER_ALL_2D);
 
-    // Top screen: Mode 0 with 3D on BG0
-    videoSetMode(MODE_0_3D);
+    // Top screen: Mode 0 with 3D on BG0 + OBJ for OAM sprites.
+    // Without DISPLAY_SPR_ACTIVE the OAM table writes have no visible effect.
+    videoSetMode(MODE_0_3D | DISPLAY_SPR_ACTIVE | DISPLAY_SPR_1D_LAYOUT);
 
     // Bottom screen: console for debug output (Phase 5 will replace)
     videoSetModeSub(MODE_0_2D);
@@ -22,8 +23,7 @@ static void init_video(void)
     vramSetBankB(VRAM_B_MAIN_BG);
     vramSetBankE(VRAM_E_TEX_PALETTE);
 
-    oamInit(&oamMain, SpriteMapping_1D_32, false);
-    vramSetBankF(VRAM_F_MAIN_SPRITE);
+    // OAM init + sprite VRAM moved to sprites.c (afn_sprite_init).
 
     glInit();
     // Anti-alias smooths mesh edges but fringes textured polygons (incl. the
@@ -66,6 +66,7 @@ int main(void)
 
     afn_audio_init();
     afn_fps3d_init();
+    afn_sprite_init();
     afn_hud_init();
     afn_script_init();
     // afn_mode0_init() called by scene loader once Phase 4 lands.
@@ -89,6 +90,7 @@ int main(void)
         afn_script_tick();
         afn_scene_tick();      // fade state machine
         afn_fps3d_update();
+        afn_sprite_update();   // OAM projection (after 3D so OAM goes on top)
         afn_hud_draw();
         afn_audio_tick();
         swiWaitForVBlank();

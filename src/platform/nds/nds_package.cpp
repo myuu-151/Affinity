@@ -197,6 +197,87 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "};\n\n";
     }
 
+    // ---- Sprite assets (OAM tiles + palette + descriptor) ----
+    // Simplified vs GBA: skip directional animation streaming and tile-reference
+    // optimization. Every asset's frames get tiles in afn_all_tiles, every asset
+    // gets one palette in afn_pal[][16]. NDS OBJ VRAM is 128KB (4× GBA) so we
+    // can afford the wasteful layout for a first cut.
+    f << "#define AFN_ASSET_COUNT " << (int)assets.size() << "\n\n";
+    if (!assets.empty()) {
+        // Pack each asset's frames into 8x8 4bpp tiles. Per-frame: tiles laid
+        // out in row-major tile order (left-to-right tile columns, top-to-bottom
+        // tile rows) so OBJ_1D mapping reads consecutive tiles for one sprite.
+        std::vector<uint32_t> allTiles;
+        std::vector<int> assetTileStart(assets.size(), 0);
+        std::vector<int> assetTilesPerFrame(assets.size(), 0);
+        std::vector<int> assetObjSize(assets.size(), 0);
+        for (size_t ai = 0; ai < assets.size(); ai++) {
+            assetTileStart[ai] = (int)allTiles.size() / 8;
+            const auto& a = assets[ai];
+            int sz = a.baseSize > 0 ? a.baseSize : 16;
+            assetObjSize[ai] = sz;
+            int tilesPerSide = sz / 8;
+            int tilesPerFrame = tilesPerSide * tilesPerSide;
+            assetTilesPerFrame[ai] = tilesPerFrame;
+            for (auto& fr : a.frames) {
+                int fw = fr.width  > 0 ? fr.width  : sz;
+                int fh = fr.height > 0 ? fr.height : sz;
+                for (int ty = 0; ty < tilesPerSide; ty++)
+                for (int tx = 0; tx < tilesPerSide; tx++) {
+                    // Emit one 8x8 tile = 8 u32 (each u32 = 8 pixels of 4 bits).
+                    // The editor stores pixels with a fixed row stride of
+                    // kExportMaxFrameSize (64), NOT fr.width — easy bug to hit
+                    // because the visible content uses fr.width × fr.height.
+                    for (int py = 0; py < 8; py++) {
+                        uint32_t word = 0;
+                        for (int px = 0; px < 8; px++) {
+                            int sx = tx * 8 + px;
+                            int sy = ty * 8 + py;
+                            uint8_t pix = (sx < fw && sy < fh) ? fr.pixels[sy * kExportMaxFrameSize + sx] : 0;
+                            word |= ((uint32_t)(pix & 0xF)) << (px * 4);
+                        }
+                        allTiles.push_back(word);
+                    }
+                }
+            }
+        }
+        f << "static const u32 afn_all_tiles[" << (allTiles.empty() ? 1 : (int)allTiles.size()) << "] = {";
+        if (allTiles.empty()) f << " 0 ";
+        else {
+            for (size_t i = 0; i < allTiles.size(); i++) {
+                if (i % 8 == 0) f << "\n    ";
+                char hex[12]; snprintf(hex, sizeof(hex), "0x%08X", allTiles[i]);
+                f << hex;
+                if (i + 1 < allTiles.size()) f << ",";
+            }
+            f << "\n";
+        }
+        f << "};\n";
+        f << "#define AFN_ALL_TILES_LEN " << (int)allTiles.size() * 4 << "\n\n";
+
+        // Per-asset RGB15 palette (16 entries, index 0 = transparent).
+        f << "static const u16 afn_pal[" << assets.size() << "][16] = {\n";
+        for (size_t ai = 0; ai < assets.size(); ai++) {
+            f << "    { ";
+            for (int c = 0; c < 16; c++) {
+                char hex[8]; snprintf(hex, sizeof(hex), "0x%04X", EditorColorToRGB15(assets[ai].palette[c]));
+                f << hex;
+                if (c < 15) f << ", ";
+            }
+            f << " },\n";
+        }
+        f << "};\n";
+
+        // Per-asset descriptor: {tileStart, tilesPerFrame, frameCount, objSize, palBank}
+        f << "static const int afn_asset_desc[][5] = {\n";
+        for (size_t ai = 0; ai < assets.size(); ai++) {
+            int palBank = assets[ai].palBank;
+            f << "    { " << assetTileStart[ai] << ", " << assetTilesPerFrame[ai] << ", "
+              << (int)assets[ai].frames.size() << ", " << assetObjSize[ai] << ", " << palBank << " },\n";
+        }
+        f << "};\n\n";
+    }
+
     // ---- Mesh assets ----
     f << "#define AFN_MESH_COUNT " << (int)meshes.size() << "\n\n";
 

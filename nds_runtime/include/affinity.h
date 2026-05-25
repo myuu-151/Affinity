@@ -84,6 +84,9 @@ void afn_audio_tick(void);     // audio.c   — Phase 1 (per VBlank: advance MID
 void afn_fps3d_init(void);     // fps3d.c   — boot scene (current behavior)
 void afn_fps3d_update(void);   // fps3d.c   — per frame: input + camera + render
 
+void afn_sprite_init(void);    // sprites.c — upload OBJ tiles + palettes at boot
+void afn_sprite_update(void);  // sprites.c — per frame: project + emit OAM
+
 void afn_mode0_init(void);     // mode0.c   — Phase 4
 void afn_mode0_update(void);   // mode0.c   — Phase 4
 
