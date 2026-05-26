@@ -141,7 +141,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                                 bool ndsAntialiasing,
                                 const GBAScriptExport& script,
                                 const std::vector<GBABlueprintExport>& blueprints,
-                                const std::vector<GBABlueprintInstanceExport>& bpInstances)
+                                const std::vector<GBABlueprintInstanceExport>& bpInstances,
+                                const std::vector<GBAHudElementExport>& hudElements)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
     std::ofstream f(outPath);
@@ -1452,6 +1453,38 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_player_height;\n";
         f << "extern int  afn_hud_value[4];\n";
         f << "extern unsigned char afn_hud_visible[4];\n";
+        // HUD element table (minimal subset of GBA fields: position + text
+        // rows with sourceSlot for counter display). Composite pieces /
+        // cursor menus not yet rendered on NDS.
+        if (!hudElements.empty()) {
+            int totalText = 0;
+            for (const auto& he : hudElements) totalText += (int)he.textRows.size();
+            f << "#define AFN_HUD_ELEM_COUNT " << (int)hudElements.size() << "\n";
+            f << "#define AFN_HUD_TEXT_COUNT " << totalText << "\n";
+            f << "static const struct { short x, y; unsigned short textStart, textCount; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
+            int textCursor = 0;
+            for (const auto& he : hudElements) {
+                f << "    { " << he.screenX << ", " << he.screenY << ", "
+                  << textCursor << ", " << (int)he.textRows.size() << " },\n";
+                textCursor += (int)he.textRows.size();
+            }
+            f << "};\n";
+            if (totalText > 0) {
+                f << "static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; } afn_hud_texts[" << totalText << "] = {\n";
+                for (const auto& he : hudElements) {
+                    for (const auto& tr : he.textRows) {
+                        f << "    { " << tr.localX << ", " << tr.localY << ", "
+                          << tr.sourceSlot << ", " << tr.pad << ", " << tr.scale << " },\n";
+                    }
+                }
+                f << "};\n";
+            } else {
+                f << "static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; } afn_hud_texts[1] = {{0}};\n";
+            }
+        } else {
+            f << "#define AFN_HUD_ELEM_COUNT 0\n";
+            f << "#define AFN_HUD_TEXT_COUNT 0\n";
+        }
         f << "extern int  afn_scripts_stopped;\n";
         f << "extern int  afn_start_x;\n";
         f << "extern int  afn_start_y;\n";
@@ -2031,13 +2064,14 @@ bool PackageNDS(const std::string& runtimeDir,
                 const GBAScriptExport& script,
                 const std::vector<GBABlueprintExport>& blueprints,
                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
+                const std::vector<GBAHudElementExport>& hudElements,
                 std::string& errorMsg)
 {
     std::string buildOutput;
     std::string msysDir = ToMsysPath(runtimeDir);
 
     // Step 0: Generate mapdata.h
-    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames, ndsAntialiasing, script, blueprints, bpInstances))
+    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames, ndsAntialiasing, script, blueprints, bpInstances, hudElements))
     {
         errorMsg = "Failed to write mapdata.h to " + runtimeDir + "/include/";
         return false;

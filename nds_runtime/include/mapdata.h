@@ -13785,6 +13785,14 @@ extern int  afn_last_key;
 extern int  afn_player_height;
 extern int  afn_hud_value[4];
 extern unsigned char afn_hud_visible[4];
+#define AFN_HUD_ELEM_COUNT 1
+#define AFN_HUD_TEXT_COUNT 1
+static const struct { short x, y; unsigned short textStart, textCount; } afn_hud_elems[1] = {
+    { 3, 7, 0, 1 },
+};
+static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; } afn_hud_texts[1] = {
+    { 215, -6, 0, 3, 1 },
+};
 extern int  afn_scripts_stopped;
 extern int  afn_start_x;
 extern int  afn_start_y;

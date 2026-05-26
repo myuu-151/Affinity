@@ -26,6 +26,7 @@ bool PackageNDS(const std::string& runtimeDir,
                 const GBAScriptExport& script,
                 const std::vector<GBABlueprintExport>& blueprints,
                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
+                const std::vector<GBAHudElementExport>& hudElements,
                 std::string& errorMsg);
 
 } // namespace Affinity
