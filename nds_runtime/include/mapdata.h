@@ -13962,8 +13962,10 @@ static void afn_bp4_collision(void) {
 }
 static void afn_bp5_update(void) {
     if (afn_flags & (1u << 1)) {
-    /* TODO: emit node type 106 */
+    { static int afn_cd_29 = 60;
+      if (--afn_cd_29 <= 0) { afn_cd_29 = 60;
     afn_sprite_anim_spr = 21; afn_sprite_anim_val = 2;
+    } }
     }
 }
 static void afn_bp5_key_held(void) {
@@ -13980,7 +13982,9 @@ static void afn_bp5_collision(void) {
         if ((_dx >> 8) < 10 && (_dz >> 8) < 10) {
     if (afn_flags & (1u << 1)) {
     } else {
-    /* TODO: emit node type 243 */
+    afn_start_x = afn_sprite_data[afn_bp_cur_spr_idx][0];
+    afn_start_y = afn_sprite_data[afn_bp_cur_spr_idx][1];
+    afn_start_z = afn_sprite_data[afn_bp_cur_spr_idx][2];
     afn_sprite_anim_spr = 21; afn_sprite_anim_val = 1;
     afn_play_sfx(3, 0, 0);
     afn_flags |=  (1u << 1);

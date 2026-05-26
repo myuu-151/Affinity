@@ -1760,6 +1760,17 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             case GBAScriptNodeType::StopSound:
                 f << "    afn_stop_sound();\n";
                 break;
+            case GBAScriptNodeType::UpdateRespawnPos: {
+                auto* objData = findDataIn(a->id, 0);
+                std::string obj;
+                if (objData) obj = std::to_string(resolveInt(objData));
+                else if (curScript != &script) obj = "afn_bp_cur_spr_idx";
+                else obj = std::to_string(a->paramInt[0]);
+                f << "    afn_start_x = afn_sprite_data[" << obj << "][0];\n";
+                f << "    afn_start_y = afn_sprite_data[" << obj << "][1];\n";
+                f << "    afn_start_z = afn_sprite_data[" << obj << "][2];\n";
+                break;
+            }
             default:
                 f << "    /* TODO: emit node type " << (int)a->type << " */\n";
                 break;
@@ -1800,6 +1811,17 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "    else { afn_rise_" << a->id << " = afn_frame_count;\n";
                 walkExec(a->id, 0);
                 f << "    }\n";
+                return;
+            }
+            if (a->type == GBAScriptNodeType::Countdown) {
+                // Per-node static counter; downstream fires when it hits 0
+                // (then auto-resets so the gate repeats).
+                auto* cntData = findDataIn(a->id, 0);
+                int cnt = cntData ? resolveInt(cntData) : 60;
+                f << "    { static int afn_cd_" << a->id << " = " << cnt << ";\n";
+                f << "      if (--afn_cd_" << a->id << " <= 0) { afn_cd_" << a->id << " = " << cnt << ";\n";
+                walkExec(a->id, 0);
+                f << "    } }\n";
                 return;
             }
             bool isGate = (a->type == GBAScriptNodeType::IsMoving ||
