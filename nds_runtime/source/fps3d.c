@@ -324,6 +324,21 @@ static void update_camera(void)
     if (held & KEY_RIGHT) orbit_angle -= 512;
 #endif
 
+#ifdef AFN_ORBIT_MAX_DELTA
+    // Clamp this frame's orbit_angle change so the camera lerp can keep
+    // up and the player sprite stays centered. OrbitCamera scripts have
+    // already applied their requested delta; we re-anchor to the prev
+    // value and let through at most ±AFN_ORBIT_MAX_DELTA brads.
+    {
+        static uint16_t s_prev_orbit_angle = 0xFFFF;
+        if (s_prev_orbit_angle == 0xFFFF) s_prev_orbit_angle = orbit_angle;
+        int delta = (int16_t)(orbit_angle - s_prev_orbit_angle);
+        if (delta >  AFN_ORBIT_MAX_DELTA) delta =  AFN_ORBIT_MAX_DELTA;
+        if (delta < -AFN_ORBIT_MAX_DELTA) delta = -AFN_ORBIT_MAX_DELTA;
+        orbit_angle = (uint16_t)(s_prev_orbit_angle + delta);
+        s_prev_orbit_angle = orbit_angle;
+    }
+#endif
     // GBA writes cam_angle = orbit_angle once per frame (main.c:7946) — that's
     // how OrbitCamera scripts (which modify orbit_angle) actually propagate
     // to camera-direction-dependent code paths. Without this, manual orbit
@@ -476,15 +491,17 @@ static void update_camera(void)
             int ease = sprintLike
                 ? (moving ? AFN_SPRINT_EASE_IN : AFN_SPRINT_EASE_OUT)
                 : (moving ? AFN_WALK_EASE_IN   : AFN_WALK_EASE_OUT);
-            // While orbiting (L/R held), prefer the project's
-            // orbit-camera lerp speed instead of the walk/sprint ease.
-            // Without this the camera can't keep up with fast orbit
-            // changes and the player sprite drifts to the screen edge.
+            // Orbit-camera ease: in-rate while L/R held (ramping into
+            // orbit), out-rate after release (settling). Picks the max
+            // vs the walk/sprint ease so the camera never lags BEHIND
+            // those defaults — only catches up faster when orbiting.
+#ifdef AFN_ORBIT_EASE_IN
             if (held & (KEY_L | KEY_R)) {
-#ifdef AFN_ORBIT_CAM_EASE
-                if (AFN_ORBIT_CAM_EASE > ease) ease = AFN_ORBIT_CAM_EASE;
-#endif
+                if (AFN_ORBIT_EASE_IN > ease) ease = AFN_ORBIT_EASE_IN;
+            } else {
+                if (AFN_ORBIT_EASE_OUT > ease) ease = AFN_ORBIT_EASE_OUT;
             }
+#endif
             cam_x += (ddx * ease) >> 8;
             cam_z += (ddz * ease) >> 8;
             {

@@ -103,10 +103,10 @@ struct GBACameraExport
     float jumpCamAir    = 12.0f;  // camera Y catch-up % when airborne
     float autoOrbitSpeed = 205.0f; // brads per frame when strafing (0 = disabled)
     float jumpDampen = 0.75f;     // velocity multiplier per frame while A released + rising
-    float orbitCamEase = 50.0f;   // % of orbit-position lerp per frame
-                                  // (higher = camera catches up faster,
-                                  // sprite stays more centered at higher
-                                  // orbit speeds). NDS-only for now.
+    float orbitCamEaseIn  = 25.0f; // orbit lerp while L/R held (ramping in)
+    float orbitCamEaseOut = 50.0f; // orbit lerp after L/R released (settle)
+    int   orbitMaxDelta   = 0;     // per-frame cap on orbit_angle change (brad). 0 = uncapped.
+    bool  orbitSnapCam    = false; // legacy/unused
     float drawDistance  = 0.0f;   // 0 = unlimited (mesh)
     float spriteDrawDistance = 0.0f; // 0 = unlimited (sprite)
     int   smallTriCull  = 0;      // min screen-space area to render (0=off)

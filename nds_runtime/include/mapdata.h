@@ -14,8 +14,11 @@
 #define AFN_SPRINT_SPEED 56
 #define AFN_WALK_EASE_IN 25
 #define AFN_WALK_EASE_OUT 25
-#define AFN_SPRINT_EASE_IN 20
-#define AFN_SPRINT_EASE_OUT 20
+#define AFN_SPRINT_EASE_IN 15
+#define AFN_SPRINT_EASE_OUT 15
+#define AFN_ORBIT_EASE_IN 0
+#define AFN_ORBIT_EASE_OUT 0
+#define AFN_ORBIT_MAX_DELTA 280
 #define AFN_DRAW_DISTANCE 128000
 #define AFN_SPRITE_DRAW_DISTANCE 51840
 
@@ -13822,8 +13825,8 @@ static void afn_bp0_key_held(void) {
     afn_move_speed = 79;
     }
     if (key_is_down(KEY_R) || key_is_down(KEY_L)) {
-    if (key_is_down(KEY_R)) orbit_angle -= 128;
-    if (key_is_down(KEY_L)) orbit_angle += 128;
+    if (key_is_down(KEY_R)) orbit_angle -= 256;
+    if (key_is_down(KEY_L)) orbit_angle += 256;
     }
     if (key_is_down(KEY_B)) {
     afn_move_speed = 132;

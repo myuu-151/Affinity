@@ -4757,7 +4757,9 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "jump_cam_air=%.1f\n", sCamObj.jumpCamAir);
     fprintf(f, "auto_orbit_speed=%.1f\n", sCamObj.autoOrbitSpeed);
     fprintf(f, "jump_dampen=%.2f\n", sCamObj.jumpDampen);
-    fprintf(f, "orbit_cam_ease=%.1f\n", sCamObj.orbitCamEase);
+    fprintf(f, "orbit_cam_ease_in=%.1f\n",  sCamObj.orbitCamEaseIn);
+    fprintf(f, "orbit_cam_ease_out=%.1f\n", sCamObj.orbitCamEaseOut);
+    fprintf(f, "orbit_max_delta=%d\n",      sCamObj.orbitMaxDelta);
     fprintf(f, "draw_distance=%.1f\n", sCamObj.drawDistance);
     fprintf(f, "sprite_draw_distance=%.1f\n", sCamObj.spriteDrawDistance);
     fprintf(f, "small_tri_cull=%d\n", sCamObj.smallTriCull);
@@ -5774,7 +5776,9 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "jump_cam_air=%f", &fval) == 1) sCamObj.jumpCamAir = fval;
             else if (sscanf(line, "auto_orbit_speed=%f", &fval) == 1) sCamObj.autoOrbitSpeed = fval;
             else if (sscanf(line, "jump_dampen=%f", &fval) == 1) sCamObj.jumpDampen = fval;
-            else if (sscanf(line, "orbit_cam_ease=%f", &fval) == 1) sCamObj.orbitCamEase = fval;
+            else if (sscanf(line, "orbit_cam_ease_in=%f",  &fval) == 1) sCamObj.orbitCamEaseIn  = fval;
+            else if (sscanf(line, "orbit_cam_ease_out=%f", &fval) == 1) sCamObj.orbitCamEaseOut = fval;
+            else if (sscanf(line, "orbit_max_delta=%d",    &ival) == 1) sCamObj.orbitMaxDelta   = ival;
             else if (sscanf(line, "draw_distance=%f", &fval) == 1) sCamObj.drawDistance = fval;
             else if (sscanf(line, "sprite_draw_distance=%f", &fval) == 1) sCamObj.spriteDrawDistance = fval;
             else if (sscanf(line, "small_tri_cull=%d", &ival) == 1) sCamObj.smallTriCull = ival;
@@ -10464,8 +10468,12 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::DragFloat("Cam Delay (Air)##cam",  &sCamObj.jumpCamAir,  0.5f, 1.0f, 100.0f, "%.0f%%");
         ImGui::Separator();
         ImGui::Text("Orbit Camera");
-        ImGui::DragFloat("Orbit Lerp Speed##cam", &sCamObj.orbitCamEase, 1.0f, 1.0f, 100.0f, "%.0f%%");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Camera-position catch-up rate while orbiting.\nHigher = camera tracks the target faster, keeping the\nplayer sprite more centered at faster orbit speeds.\nNDS-only — GBA uses fixed orbit ease.");
+        ImGui::DragFloat("Orbit Ease In##cam",  &sCamObj.orbitCamEaseIn,  1.0f, 1.0f, 100.0f, "%.0f%%");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Camera lerp while L/R is held (ramping into orbit).\nLower = more intro lag (sprite drifts to side at first).\nNDS-only — GBA uses fixed orbit ease.");
+        ImGui::DragFloat("Orbit Ease Out##cam", &sCamObj.orbitCamEaseOut, 1.0f, 1.0f, 100.0f, "%.0f%%");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Camera lerp after L/R is released (settling).\nHigher = camera snaps to ideal orbit-distance faster.");
+        ImGui::DragInt("Orbit Max Speed##cam", &sCamObj.orbitMaxDelta, 4.0f, 0, 1024, "%d brad/frame (0=uncapped)");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-frame cap on the orbit_angle change.\nLower = forces orbit to ramp smoothly so the\ncamera lerp can keep up and the player sprite\nstays more centered. 0 = no cap (script controls).");
         ImGui::Separator();
         ImGui::Separator();
         ImGui::Text("Rendering");
@@ -12831,7 +12839,9 @@ void FrameTick(float dt)
                 exportCam.jumpCamAir = sCamObj.jumpCamAir;
                 exportCam.autoOrbitSpeed = sCamObj.autoOrbitSpeed;
                 exportCam.jumpDampen = sCamObj.jumpDampen;
-                exportCam.orbitCamEase = sCamObj.orbitCamEase;
+                exportCam.orbitCamEaseIn  = sCamObj.orbitCamEaseIn;
+                exportCam.orbitCamEaseOut = sCamObj.orbitCamEaseOut;
+                exportCam.orbitMaxDelta   = sCamObj.orbitMaxDelta;
                 exportCam.drawDistance = sCamObj.drawDistance;
                 exportCam.spriteDrawDistance = sCamObj.spriteDrawDistance;
                 exportCam.smallTriCull = sCamObj.smallTriCull;

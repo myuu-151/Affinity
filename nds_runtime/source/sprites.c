@@ -176,9 +176,14 @@ void afn_sprite_update(void)
                     : (uint16_t)(player_move_angle - (orbit_angle << 1));
                 int rawIdx = ((sprAngle + 0xC000 + 4096) >> 13) & 7;
                 dir = (8 - rawIdx) & 7;
-                int held = keysHeld();
-                if (held & KEY_L)      dir = (dir - 1 + 8) & 7;  // UP+L → NW
-                else if (held & KEY_R) dir = (dir + 1) & 7;      // UP+R → NE
+                // L/R shift only while moving — otherwise pressing L for
+                // orbit would instantly slap the idle sprite to NE/NW
+                // before the orbit-rotation actually moves the dir.
+                if (player_moving) {
+                    int held = keysHeld();
+                    if (held & KEY_L)      dir = (dir - 1 + 8) & 7;  // UP+L → NW
+                    else if (held & KEY_R) dir = (dir + 1) & 7;      // UP+R → NE
+                }
                 static int s_pickDbg = 0;
                 s_pickDbg++;
                 if ((s_pickDbg & 15) == 0) {

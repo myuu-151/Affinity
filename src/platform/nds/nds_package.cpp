@@ -162,7 +162,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     f << "#define AFN_WALK_EASE_OUT "   << (int)(camera.walkEaseOut * 256.0f / 100.0f) << "\n";
     f << "#define AFN_SPRINT_EASE_IN "  << (int)(camera.sprintEaseIn * 256.0f / 100.0f) << "\n";
     f << "#define AFN_SPRINT_EASE_OUT " << (int)(camera.sprintEaseOut * 256.0f / 100.0f) << "\n";
-    f << "#define AFN_ORBIT_CAM_EASE "  << (int)(camera.orbitCamEase * 256.0f / 100.0f) << "\n";
+    f << "#define AFN_ORBIT_EASE_IN "   << (int)(camera.orbitCamEaseIn  * 256.0f / 100.0f) << "\n";
+    f << "#define AFN_ORBIT_EASE_OUT "  << (int)(camera.orbitCamEaseOut * 256.0f / 100.0f) << "\n";
+    if (camera.orbitMaxDelta > 0) f << "#define AFN_ORBIT_MAX_DELTA " << camera.orbitMaxDelta << "\n";
     if (camera.drawDistance > 0.0f)
         f << "#define AFN_DRAW_DISTANCE " << (int)(camera.drawDistance / 4.0f * 256.0f) << "\n";
     if (camera.spriteDrawDistance > 0.0f)
