@@ -16,8 +16,11 @@
 #define AFN_WALK_EASE_OUT 25
 #define AFN_SPRINT_EASE_IN 15
 #define AFN_SPRINT_EASE_OUT 15
-#define AFN_ORBIT_EASE_IN 64
-#define AFN_ORBIT_EASE_OUT 128
+#define AFN_ORBIT_EASE_IN 0
+#define AFN_ORBIT_EASE_OUT 0
+#define AFN_ORBIT_MAX_DELTA 244
+#define AFN_JUMP_CAM_LAND 94
+#define AFN_JUMP_CAM_AIR 30
 #define AFN_DRAW_DISTANCE 128000
 #define AFN_SPRITE_DRAW_DISTANCE 51840
 
@@ -13800,6 +13803,10 @@ extern int afn_hp[NUM_SPRITES];
 extern int afn_state_timer[NUM_SPRITES];
 extern int player_vy;
 extern int player_ground_y;
+void afn_play_sound(int id);
+void afn_play_sfx(int smpIdx, int gain, int fifo);
+void afn_stop_sound(void);
+static int afn_rise_17 = -2;
 
 // ---- Generated script code from visual node graph ----
 static void afn_emitted_script_init(void)         {}
@@ -13816,18 +13823,20 @@ static void afn_emitted_script_collision(void) {
 static void afn_emitted_script_collision2d(void) {
 }
 static void afn_bp0_update(void) {
-    if (player_vy > 0) {
-    if (!player_on_ground && player_vy <= 0) {
+    if (!player_on_ground && player_vy > 0) {
     if (player_on_ground) {
-    if (player_on_ground) {
-    afn_play_anim = 3; afn_anim_prio = 1;
-    afn_play_anim = 4; afn_anim_prio = 1;
-    afn_flags |= (1u << 0);
     if (afn_flags & (1u << 0)) {
+    } else {
+    afn_play_sfx(0, 0, 0);
     }
     }
+    afn_play_anim = 3; afn_anim_prio = 1;
     }
+    if (!player_on_ground && player_vy <= 0) {
+    afn_play_anim = 4; afn_anim_prio = 1;
     }
+    if (player_on_ground) {
+    afn_flags |= (1u << 0);
     }
 }
 static void afn_bp0_key_held(void) {
@@ -13852,14 +13861,16 @@ static void afn_bp0_key_held(void) {
 }
 static void afn_bp0_key_pressed(void) {
     if (key_hit(KEY_A)) {
-    if (player_vy > 0) {
-    if (player_on_ground) player_vy = 486;
+    if (!player_on_ground && player_vy > 0) {
     if (player_on_ground) {
-    afn_play_anim = 3; afn_anim_prio = 1;
     if (afn_flags & (1u << 0)) {
+    } else {
+    afn_play_sfx(0, 0, 0);
     }
     }
+    afn_play_anim = 3; afn_anim_prio = 1;
     }
+    if (player_on_ground) player_vy = 486;
     }
 }
 static void afn_bp0_key_released(void) {
@@ -13881,7 +13892,7 @@ static void afn_bp1_key_held(void) {
 }
 static void afn_bp1_key_pressed(void) {
     if (key_hit(KEY_START)) {
-    /* TODO: emit node type 77 */
+    afn_sprite_anim_spr = 3; afn_sprite_anim_val = 1;
     }
     if (key_hit(KEY_START)) {
     if (!afn_anim_prio) afn_play_anim = 1;
@@ -13890,11 +13901,13 @@ static void afn_bp1_key_pressed(void) {
 static void afn_bp1_key_released(void) {
 }
 static void afn_bp1_collision(void) {
-    /* TODO: emit node type 239 */
-    /* TODO: emit node type 12 */
-    /* TODO: emit node type 49 */
-    /* TODO: emit node type 77 */
+    if (afn_rise_17 >= afn_frame_count - 1) { afn_rise_17 = afn_frame_count; }
+    else { afn_rise_17 = afn_frame_count;
+    afn_play_sfx(1, 0, 0);
+    player_vy = 1024;
+    afn_sprite_anim_spr = 3; afn_sprite_anim_val = 1;
     afn_flags |= (1u << 0);
+    }
 }
 static void afn_bp2_update(void) {
 }
@@ -13921,7 +13934,7 @@ static void afn_bp3_collision(void) {
         afn_collision_enabled[0] = 0;
     }
     /* TODO: emit node type 242 */
-    /* TODO: emit node type 12 */
+    afn_play_sfx(2, 0, 0);
 }
 static void afn_bp4_update(void) {
 }
@@ -13936,7 +13949,7 @@ static void afn_bp4_collision(void) {
 static void afn_bp5_update(void) {
     if (afn_flags & (1u << 1)) {
     /* TODO: emit node type 106 */
-    /* TODO: emit node type 77 */
+    afn_sprite_anim_spr = 21; afn_sprite_anim_val = 2;
     }
 }
 static void afn_bp5_key_held(void) {
@@ -13947,6 +13960,11 @@ static void afn_bp5_key_released(void) {
 }
 static void afn_bp5_collision(void) {
     if (afn_flags & (1u << 1)) {
+    } else {
+    /* TODO: emit node type 243 */
+    afn_sprite_anim_spr = 21; afn_sprite_anim_val = 1;
+    afn_play_sfx(3, 0, 0);
+    afn_flags |= (1u << 1);
     }
 }
 

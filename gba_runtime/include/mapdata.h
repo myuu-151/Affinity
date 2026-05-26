@@ -10,7 +10,7 @@ static int tm_scene_idx;
 // Camera start position
 #define AFN_CAM_X     32768
 #define AFN_CAM_Z     32768
-#define AFN_CAM_H     3232
+#define AFN_CAM_H     3200
 #define AFN_CAM_ANGLE 1820
 #define AFN_CAM_HORIZON 60
 #define AFN_WALK_SPEED 37
@@ -18,7 +18,7 @@ static int tm_scene_idx;
 #define AFN_WALK_EASE_IN 25
 #define AFN_WALK_EASE_OUT 25
 #define AFN_SPRINT_EASE_IN 15
-#define AFN_SPRINT_EASE_OUT 10
+#define AFN_SPRINT_EASE_OUT 15
 #define AFN_JUMP_VEL 512
 #define AFN_GRAVITY 23
 #define AFN_TERMINAL_VEL 1536
@@ -25213,7 +25213,7 @@ static inline void afn_bp0_play_anim_36() {
     afn_play_anim = 1;
 }
 static inline void afn_bp0_walk_46() {
-    afn_move_speed = 150;
+    afn_move_speed = 75;
 }
 static inline void afn_bp0_jump_7() {
     if (player_on_ground) player_vy = 486;
@@ -25231,7 +25231,7 @@ static inline void afn_bp0_set_gravity_29() {
     afn_gravity = 23;
 }
 static inline void afn_bp0_sprint_34() {
-    afn_move_speed = 250;
+    afn_move_speed = 125;
 }
 static inline void afn_bp0_play_anim_35() {
     afn_play_anim = 2;

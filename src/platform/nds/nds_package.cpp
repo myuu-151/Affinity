@@ -9,12 +9,16 @@
 #include <algorithm>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <vector>
 #include <array>
+#include <functional>
 
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+// winmm.h defines PlaySound as PlaySoundA/W — collides with our enum value.
+#undef PlaySound
 #endif
 
 namespace fs = std::filesystem;
@@ -165,6 +169,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     f << "#define AFN_ORBIT_EASE_IN "   << (int)(camera.orbitCamEaseIn  * 256.0f / 100.0f) << "\n";
     f << "#define AFN_ORBIT_EASE_OUT "  << (int)(camera.orbitCamEaseOut * 256.0f / 100.0f) << "\n";
     if (camera.orbitMaxDelta > 0) f << "#define AFN_ORBIT_MAX_DELTA " << camera.orbitMaxDelta << "\n";
+    f << "#define AFN_JUMP_CAM_LAND "   << (int)(camera.jumpCamLand * 256.0f / 100.0f) << "\n";
+    f << "#define AFN_JUMP_CAM_AIR "    << (int)(camera.jumpCamAir  * 256.0f / 100.0f) << "\n";
     if (camera.drawDistance > 0.0f)
         f << "#define AFN_DRAW_DISTANCE " << (int)(camera.drawDistance / 4.0f * 256.0f) << "\n";
     if (camera.spriteDrawDistance > 0.0f)
@@ -1466,6 +1472,24 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         // Player physics (defined in fps3d.c under AFN_HAS_SCRIPT — exported so scripts can read/write).
         f << "extern int player_vy;\n";
         f << "extern int player_ground_y;\n";
+        // Audio entry points (audio.c) used by PlaySound / StopSound emit.
+        f << "void afn_play_sound(int id);\n";
+        f << "void afn_play_sfx(int smpIdx, int gain, int fifo);\n";
+        f << "void afn_stop_sound(void);\n";
+        // OnRise edge-detect state — one int per OnRise node, init -2 so first
+        // rising edge fires. Static here means each TU that includes mapdata.h
+        // gets a private copy; only script_glue.c's copy is ever mutated (it's
+        // the sole caller of afn_emitted_script_update et al).
+        {
+            std::set<int> riseIds;
+            for (auto& n : script.nodes)
+                if (n.type == GBAScriptNodeType::OnRise) riseIds.insert(n.id);
+            for (auto& bp : blueprints)
+                for (auto& n : bp.script.nodes)
+                    if (n.type == GBAScriptNodeType::OnRise) riseIds.insert(n.id);
+            for (int rid : riseIds)
+                f << "static int afn_rise_" << rid << " = -2;\n";
+        }
     }
     // ---- Per-node script emission (Phase 3a complete) ----
     if (hasAnyScript) {
@@ -1537,6 +1561,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                     auto* an = findNode(nid);
                     if (!an) continue;
                     ch.actions.push_back(an);
+                    // Don't follow exec outs of CheckFlag (dual-pin) or OnRise
+                    // (edge-detect wrapper) — those collect their own branches
+                    // inside emitChain so siblings don't bleed across pins.
+                    if (an->type == GBAScriptNodeType::CheckFlag ||
+                        an->type == GBAScriptNodeType::OnRise) continue;
                     for (int t : findExecOuts(an->id, 0)) frontier.push_back(t);
                 }
                 if (!ch.actions.empty()) chains.push_back(ch);
@@ -1675,30 +1704,109 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             case GBAScriptNodeType::IsOnGround:
                 f << "    if (player_on_ground) {\n"; break;
             case GBAScriptNodeType::IsJumping:
-                f << "    if (player_vy > 0) {\n"; inJumpGate = true; break;
+                // "airborne AND rising" (matches node tooltip + GBA semantics)
+                f << "    if (!player_on_ground && player_vy > 0) {\n"; inJumpGate = true; break;
             case GBAScriptNodeType::IsFalling:
                 f << "    if (!player_on_ground && player_vy <= 0) {\n"; inJumpGate = true; break;
-            case GBAScriptNodeType::CheckFlag:
-                f << "    if (afn_flags & (1u << " << a->paramInt[0] << ")) {\n"; break;
+            // CheckFlag is handled specially in emitChain (dual-pin Set/Clear branches).
+            case GBAScriptNodeType::SetVelocityY: {
+                auto* d = findDataIn(a->id, 0);
+                float v = d ? resolveFloat(d) : 0.0f;
+                f << "    player_vy = " << (int)(v * 256.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::SetPlayerHeight: {
+                auto* d = findDataIn(a->id, 0);
+                float v = d ? resolveFloat(d) : 1.0f;
+                f << "    afn_player_height = " << (int)(v * 256.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::SetSpriteAnim: {
+                auto* objData  = findDataIn(a->id, 0);
+                auto* animData = findDataIn(a->id, 1);
+                int obj  = objData  ? resolveInt(objData)  : 0;
+                int anim = animData ? resolveInt(animData) : 0;
+                // NDS has no tilemap mode — direct per-sprite anim only.
+                f << "    afn_sprite_anim_spr = " << obj << "; afn_sprite_anim_val = " << anim << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::PlaySound: {
+                auto* d = findDataIn(a->id, 0);
+                int sId = d ? resolveInt(d) : 0;
+                if (sId >= 0 && sId < (int)soundInstances.size() && soundInstances[sId].isSfx) {
+                    f << "    afn_play_sfx(" << soundInstances[sId].sfxSampleIdx
+                      << ", " << soundInstances[sId].mixerGain
+                      << ", " << soundInstances[sId].fifoChannel << ");\n";
+                } else {
+                    f << "    afn_play_sound(" << sId << ");\n";
+                }
+                break;
+            }
+            case GBAScriptNodeType::StopSound:
+                f << "    afn_stop_sound();\n";
+                break;
             default:
                 f << "    /* TODO: emit node type " << (int)a->type << " */\n";
                 break;
             }
         };
 
+        // Recursive emit: walk exec links from a node as a tree, not a flat
+        // list. Each gate/CheckFlag/OnRise scopes its own downstream subtree;
+        // siblings (multiple exec-out targets from same pin) emit as separate
+        // top-level blocks. Visited-set prevents repeat emission when two
+        // parents wire to the same action.
+        std::set<int> emitVisited;
+        std::function<void(const GBAScriptNodeExport*)> emitOne;
+        auto walkExec = [&](int nodeId, int pinIdx) {
+            for (int t : findExecOuts(nodeId, pinIdx)) {
+                if (emitVisited.count(t)) continue;
+                emitVisited.insert(t);
+                auto* n = findNode(t);
+                if (n) emitOne(n);
+            }
+        };
+        emitOne = [&](const GBAScriptNodeExport* a) {
+            if (a->type == GBAScriptNodeType::CheckFlag) {
+                auto* fd = findDataIn(a->id, 0);
+                int flag = fd ? resolveInt(fd) : a->paramInt[0];
+                f << "    if (afn_flags & (1u << " << flag << ")) {\n";
+                walkExec(a->id, 0);
+                auto clearTargets = findExecOuts(a->id, 1);
+                if (!clearTargets.empty()) {
+                    f << "    } else {\n";
+                    walkExec(a->id, 1);
+                }
+                f << "    }\n";
+                return;
+            }
+            if (a->type == GBAScriptNodeType::OnRise) {
+                f << "    if (afn_rise_" << a->id << " >= afn_frame_count - 1) { afn_rise_" << a->id << " = afn_frame_count; }\n";
+                f << "    else { afn_rise_" << a->id << " = afn_frame_count;\n";
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            bool isGate = (a->type == GBAScriptNodeType::IsMoving ||
+                           a->type == GBAScriptNodeType::IsOnGround ||
+                           a->type == GBAScriptNodeType::IsJumping ||
+                           a->type == GBAScriptNodeType::IsFalling);
+            if (isGate) {
+                bool wasJump = inJumpGate;
+                emitAction(a);  // emits "if (cond) {\n" and updates inJumpGate
+                walkExec(a->id, 0);
+                f << "    }\n";
+                inJumpGate = wasJump;
+                return;
+            }
+            emitAction(a);
+            walkExec(a->id, 0);
+        };
+
         auto emitChain = [&](const Chain& c) {
-            // Reset inJumpGate per chain so a previous chain's gate doesn't
-            // leak into this one (each event is its own scope).
             inJumpGate = false;
-            int gates = 0;
-            for (auto* a : c.actions)
-                if (a->type == GBAScriptNodeType::IsMoving  ||
-                    a->type == GBAScriptNodeType::IsOnGround ||
-                    a->type == GBAScriptNodeType::IsJumping ||
-                    a->type == GBAScriptNodeType::IsFalling ||
-                    a->type == GBAScriptNodeType::CheckFlag) gates++;
-            for (auto* a : c.actions) emitAction(a);
-            for (int g = 0; g < gates; g++) f << "    }\n";
+            emitVisited.clear();
+            walkExec(c.event->id, 0);
         };
 
         // Emit each dispatcher function with the matching chains inlined.

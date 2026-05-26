@@ -526,11 +526,12 @@ static void update_camera(void)
         s_camYSmooth += (dy * rate) >> 8;
         if (dy > -4 && dy < 4) s_camYSmooth = s_playerY;
     }
-    // cam_h is the camera's world Y. AFN_CAM_H is reinterpreted as the
-    // camera's offset ABOVE the player (the GBA Mode 7 version treated it
-    // as an absolute height above Y=0, but our 3D scenes have meshes
-    // floating in the air, so the camera must follow the player's world Y).
-    cam_h = player_y + AFN_CAM_H;
+    // cam_h is the camera's world Y. AFN_CAM_H is the camera's offset above
+    // the player. s_camYSmooth is the SMOOTHED player-Y offset (driven by
+    // AFN_JUMP_CAM_LAND / AFN_JUMP_CAM_AIR rates) so the camera lags through
+    // jumps instead of snapping. baseline = the player's spawn Y; adding the
+    // smoothed delta gives the camera's tracked world Y.
+    cam_h = afn_sprite_data[AFN_PLAYER_IDX][1] + s_camYSmooth + AFN_CAM_H;
 }
 
 // ---------------------------------------------------------------------------

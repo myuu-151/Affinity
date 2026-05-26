@@ -12,7 +12,8 @@
 #ifdef AFN_COL_FACE_COUNT
 
 #define COL_PLAYER_RADIUS 768   // 3 px in 16.8
-#define COL_PLAYER_HEIGHT 3072  // 12 px in 16.8
+// afn_player_height moved to script-side afn_player_height (set by
+// SetPlayerHeight node). Default lives in script_glue.c at 3072.
 
 int afn_wall_collided_sprite = -1;
 
@@ -41,7 +42,7 @@ void afn_collide_walls(int *px, int *pz, int py)
         int y0 = face->v0y, y1 = face->v1y, y2 = face->v2y;
         int fMinY = y0 < y1 ? y0 : y1; if (y2 < fMinY) fMinY = y2;
         int fMaxY = y0 > y1 ? y0 : y1; if (y2 > fMaxY) fMaxY = y2;
-        if (py + COL_PLAYER_HEIGHT < fMinY || py > fMaxY) continue;
+        if (py + afn_player_height < fMinY || py > fMaxY) continue;
 
         int dist = (((ppx - face->v0x) >> 4) * face->nx +
                     ((ppz - face->v0z) >> 4) * face->nz) >> 4;
@@ -112,7 +113,7 @@ int afn_collide_floor(int px, int pz, int py, int *outY)
                 floorY = (c1s * face->v0y + c2s * face->v1y + c0s * face->v2y) / cs;
         }
 
-        if (floorY > py + COL_PLAYER_HEIGHT) continue;
+        if (floorY > py + afn_player_height) continue;
         if (!found || floorY > bestY) { bestY = floorY; found = 1; }
     }
     *outY = bestY;
