@@ -1973,6 +1973,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
 
         f << "\n// ---- Generated script code from visual node graph ----\n";
         f << "static void afn_emitted_script_init(void)         {}\n";
+        emitDispatcher("afn_emitted_script_start",        GBAScriptNodeType::OnStart,        nullptr);
         emitDispatcher("afn_emitted_script_update",       GBAScriptNodeType::OnUpdate,       nullptr);
         emitDispatcher("afn_emitted_script_key_held",     GBAScriptNodeType::OnKeyHeld,      "key_is_down");
         emitDispatcher("afn_emitted_script_key_pressed",  GBAScriptNodeType::OnKeyPressed,   "key_hit");
@@ -1986,6 +1987,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             curScript = &blueprints[bi].script;
             buildChains();
             char fn[64];
+            snprintf(fn, sizeof(fn), "afn_bp%zu_start",        bi);
+            emitDispatcher(fn, GBAScriptNodeType::OnStart, nullptr);
             snprintf(fn, sizeof(fn), "afn_bp%zu_update",       bi);
             emitDispatcher(fn, GBAScriptNodeType::OnUpdate, nullptr);
             snprintf(fn, sizeof(fn), "afn_bp%zu_key_held",     bi);
@@ -2033,6 +2036,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             }
             f << "}\n";
         };
+        emitBpDispatcher("afn_bp_dispatch_start",        "start",        nullptr);
         emitBpDispatcher("afn_bp_dispatch_update",       "update",       nullptr);
         emitBpDispatcher("afn_bp_dispatch_key_held",     "key_held",     nullptr);
         emitBpDispatcher("afn_bp_dispatch_key_pressed",  "key_pressed",  nullptr);
@@ -2043,12 +2047,14 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         // No scripts in this build — empty stubs keep script_glue.c linkable.
         f << "\n// Script dispatchers — no scripts in this build.\n";
         f << "static inline void afn_emitted_script_init(void)         {}\n";
+        f << "static inline void afn_emitted_script_start(void)        {}\n";
         f << "static inline void afn_emitted_script_update(void)       {}\n";
         f << "static inline void afn_emitted_script_key_held(void)     {}\n";
         f << "static inline void afn_emitted_script_key_pressed(void)  {}\n";
         f << "static inline void afn_emitted_script_key_released(void) {}\n";
         f << "static inline void afn_emitted_script_collision(void)    {}\n";
         f << "static inline void afn_emitted_script_collision2d(void)  {}\n";
+        f << "static inline void afn_bp_dispatch_start(void)           {}\n";
         f << "static inline void afn_bp_dispatch_update(void)          {}\n";
         f << "static inline void afn_bp_dispatch_key_held(void)        {}\n";
         f << "static inline void afn_bp_dispatch_key_pressed(void)     {}\n";

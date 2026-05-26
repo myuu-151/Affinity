@@ -108,6 +108,13 @@ void afn_script_init(void)
     afn_script_state_init();
 #endif
     afn_emitted_script_init();
+    // Fire OnStart chains once at boot — scene-level and per-bp-instance.
+    // Drives blueprints that auto-trigger setup like background music
+    // (PlaySound on the song instance) or initial HUD config.
+    afn_emitted_script_start();
+#ifdef AFN_HAS_SCRIPT
+    afn_bp_dispatch_start();
+#endif
 }
 
 // Collision detection: mirror GBA's radius-based check in main.c. Walks all

@@ -28762,6 +28762,8 @@ static int afn_rise_17 = -2;
 
 // ---- Generated script code from visual node graph ----
 static void afn_emitted_script_init(void)         {}
+static void afn_emitted_script_start(void) {
+}
 static void afn_emitted_script_update(void) {
 }
 static void afn_emitted_script_key_held(void) {
@@ -28773,6 +28775,12 @@ static void afn_emitted_script_key_released(void) {
 static void afn_emitted_script_collision(void) {
 }
 static void afn_emitted_script_collision2d(void) {
+}
+static void afn_bp0_start(void) {
+    afn_gravity = 23;
+    afn_auto_orbit_speed = 205;
+    afn_player_height = 3072;
+    afn_play_sound(4);
 }
 static void afn_bp0_update(void) {
     if (player_vy > 0) {
@@ -28838,6 +28846,8 @@ static void afn_bp0_key_released(void) {
 }
 static void afn_bp0_collision(void) {
 }
+static void afn_bp1_start(void) {
+}
 static void afn_bp1_update(void) {
 }
 static void afn_bp1_key_held(void) {
@@ -28868,6 +28878,8 @@ static void afn_bp1_collision(void) {
         }
     }
 }
+static void afn_bp2_start(void) {
+}
 static void afn_bp2_update(void) {
 }
 static void afn_bp2_key_held(void) {
@@ -28879,6 +28891,9 @@ static void afn_bp2_key_released(void) {
 static void afn_bp2_collision(void) {
     player_x = afn_start_x; player_y = afn_start_y; player_z = afn_start_z;
     player_vy = 0;
+}
+static void afn_bp3_start(void) {
+    afn_sprite_anim_spr = 7; afn_sprite_anim_val = 0;
 }
 static void afn_bp3_update(void) {
 }
@@ -28903,6 +28918,9 @@ static void afn_bp3_collision(void) {
         }
     }
 }
+static void afn_bp4_start(void) {
+    afn_hud_visible[0] = 1;
+}
 static void afn_bp4_update(void) {
 }
 static void afn_bp4_key_held(void) {
@@ -28912,6 +28930,8 @@ static void afn_bp4_key_pressed(void) {
 static void afn_bp4_key_released(void) {
 }
 static void afn_bp4_collision(void) {
+}
+static void afn_bp5_start(void) {
 }
 static void afn_bp5_update(void) {
     if (afn_flags & (1u << 1)) {
@@ -28969,6 +28989,21 @@ static const int afn_bp_instances[19][2] = {
     { 0, -1 },
     { 4, -1 },
 };
+static void afn_bp_dispatch_start(void) {
+    for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
+        int bpIdx = afn_bp_instances[i][0];
+        afn_bp_cur_spr_idx = afn_bp_instances[i][1];
+        switch (bpIdx) {
+            case 0: afn_bp0_start(); break;
+            case 1: afn_bp1_start(); break;
+            case 2: afn_bp2_start(); break;
+            case 3: afn_bp3_start(); break;
+            case 4: afn_bp4_start(); break;
+            case 5: afn_bp5_start(); break;
+        }
+    }
+    afn_bp_cur_spr_idx = -1;
+}
 static void afn_bp_dispatch_update(void) {
     for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
         int bpIdx = afn_bp_instances[i][0];

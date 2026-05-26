@@ -97,9 +97,6 @@ void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch)
 {
     if (smpIdx < 0 || smpIdx >= AFN_SOUND_SAMPLE_COUNT) return;
 
-    int v = alloc_voice();
-    SndVoice* vc = &snd_voices[v];
-
     int baseHz = afn_pcm_rates[smpIdx];
     int hz = note_to_hz(baseHz, note, 60); // assume baseNote=60; multi-sample regions are baked into 'note' by exporter
 
@@ -125,12 +122,22 @@ void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch)
         loopStart
     );
 
+    // Fire-and-forget for SFX (durTicks <= 0): don't reserve a slot in
+    // snd_voices[] — libnds owns the 16 hardware channels and will recycle
+    // them when the sample ends. We only track in the voice table when
+    // we need pitch-bend or note-off bookkeeping (sequenced MIDI notes).
+    // Without this, every collected ring's SFX held a voice slot
+    // forever, eventually stealing voice 0 = the MIDI sustain.
+    if (durTicks <= 0) return;
+
+    int v = alloc_voice();
+    SndVoice* vc = &snd_voices[v];
     vc->handle      = handle;
     vc->smpIdx      = smpIdx;
     vc->channel     = ch;
     vc->note        = note;
     vc->baseHz      = baseHz;
-    vc->noteOffTick = (durTicks > 0) ? ((snd_seq_tick >> 8) + durTicks) : 0;
+    vc->noteOffTick = (snd_seq_tick >> 8) + durTicks;
 }
 
 // ---------------------------------------------------------------------------
