@@ -1883,10 +1883,15 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         }
         // Per-event bp dispatcher. Emits a switch on bpIdx so each instance
         // calls into the right blueprint's handler with cur_spr_idx set.
-        auto emitBpDispatcher = [&](const char* fname, const char* suffix) {
+        // gateExpr (optional) is a C expression evaluated per-instance —
+        // skip the instance if it's false. Collision uses
+        // "afn_bp_instances[i][1] == afn_collided_sprite" so only the
+        // bp owning the hit sprite fires, mirroring GBA.
+        auto emitBpDispatcher = [&](const char* fname, const char* suffix, const char* gateExpr) {
             f << "static void " << fname << "(void) {\n";
             if (!bpInstances.empty()) {
                 f << "    for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {\n";
+                if (gateExpr) f << "        if (!(" << gateExpr << ")) continue;\n";
                 f << "        int bpIdx = afn_bp_instances[i][0];\n";
                 f << "        afn_bp_cur_spr_idx = afn_bp_instances[i][1];\n";
                 f << "        switch (bpIdx) {\n";
@@ -1898,11 +1903,12 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             }
             f << "}\n";
         };
-        emitBpDispatcher("afn_bp_dispatch_update",       "update");
-        emitBpDispatcher("afn_bp_dispatch_key_held",     "key_held");
-        emitBpDispatcher("afn_bp_dispatch_key_pressed",  "key_pressed");
-        emitBpDispatcher("afn_bp_dispatch_key_released", "key_released");
-        emitBpDispatcher("afn_bp_dispatch_collision",    "collision");
+        emitBpDispatcher("afn_bp_dispatch_update",       "update",       nullptr);
+        emitBpDispatcher("afn_bp_dispatch_key_held",     "key_held",     nullptr);
+        emitBpDispatcher("afn_bp_dispatch_key_pressed",  "key_pressed",  nullptr);
+        emitBpDispatcher("afn_bp_dispatch_key_released", "key_released", nullptr);
+        emitBpDispatcher("afn_bp_dispatch_collision",    "collision",
+                         "afn_bp_instances[i][1] == afn_collided_sprite");
     } else {
         // No scripts in this build — empty stubs keep script_glue.c linkable.
         f << "\n// Script dispatchers — no scripts in this build.\n";

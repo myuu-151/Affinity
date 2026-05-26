@@ -130,8 +130,10 @@ static void afn_script_check_collisions(void)
             break;
         }
     }
-    if (afn_collided_sprite >= 0 && afn_frame_count > 10)
+    if (afn_collided_sprite >= 0 && afn_frame_count > 10) {
         afn_emitted_script_collision();
+        afn_bp_dispatch_collision();
+    }
 #endif
 }
 #endif

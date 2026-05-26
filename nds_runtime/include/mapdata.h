@@ -14053,6 +14053,7 @@ static void afn_bp_dispatch_key_released(void) {
 }
 static void afn_bp_dispatch_collision(void) {
     for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
+        if (!(afn_bp_instances[i][1] == afn_collided_sprite)) continue;
         int bpIdx = afn_bp_instances[i][0];
         afn_bp_cur_spr_idx = afn_bp_instances[i][1];
         switch (bpIdx) {
