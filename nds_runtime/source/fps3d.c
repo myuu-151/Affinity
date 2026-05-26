@@ -352,19 +352,18 @@ static void update_camera(void)
     // at the moment of stopping. orbit_angle stays fixed at AFN_CAM_ANGLE
     // (matches GBA — manual L/R orbit modifies cam_angle, not orbit_angle).
     if (player_moving) {
-        // atan2 in brad: x-axis = inputFwd (so DPAD-up = brad 0).
-        // 4-way + diagonal blend matches the 8 sprite dirs.
-        uint16_t ang = 0x4000; // default = "right of input" before any move
-        if (afn_input_fwd == 0 && afn_input_right == 0) {
-            // shouldn't hit (player_moving guard) but be safe
-        } else if (afn_input_fwd > 0 && afn_input_right == 0) ang = 0x0000; // UP
-        else if (afn_input_fwd > 0 && afn_input_right > 0) ang = 0x2000;    // UP+RIGHT
-        else if (afn_input_fwd == 0 && afn_input_right > 0) ang = 0x4000;   // RIGHT
-        else if (afn_input_fwd < 0 && afn_input_right > 0) ang = 0x6000;    // DOWN+RIGHT
-        else if (afn_input_fwd < 0 && afn_input_right == 0) ang = 0x8000;   // DOWN
-        else if (afn_input_fwd < 0 && afn_input_right < 0) ang = 0xA000;    // DOWN+LEFT
-        else if (afn_input_fwd == 0 && afn_input_right < 0) ang = 0xC000;   // LEFT
-        else if (afn_input_fwd > 0 && afn_input_right < 0) ang = 0xE000;    // UP+LEFT
+        // Brad ArcTan2(inputRight=x, inputFwd=y). GBA convention: angle
+        // measured from +X axis, so atan2(0,+y) = 0x4000 (DPAD-up = N
+        // brad). Picker formula then maps brad 0x4000 → dir 0 (N image).
+        uint16_t ang = 0x4000;
+        if (afn_input_fwd > 0 && afn_input_right == 0)      ang = 0x4000; // UP
+        else if (afn_input_fwd > 0 && afn_input_right > 0)  ang = 0x2000; // UP+RIGHT
+        else if (afn_input_fwd == 0 && afn_input_right > 0) ang = 0x0000; // RIGHT
+        else if (afn_input_fwd < 0 && afn_input_right > 0)  ang = 0xE000; // DOWN+RIGHT
+        else if (afn_input_fwd < 0 && afn_input_right == 0) ang = 0xC000; // DOWN
+        else if (afn_input_fwd < 0 && afn_input_right < 0)  ang = 0xA000; // DOWN+LEFT
+        else if (afn_input_fwd == 0 && afn_input_right < 0) ang = 0x8000; // LEFT
+        else if (afn_input_fwd > 0 && afn_input_right < 0)  ang = 0x6000; // UP+LEFT
         player_move_angle = ang;
     } else if (s_wasMoving) {
         // Just stopped: convert input-space angle to world-space so the

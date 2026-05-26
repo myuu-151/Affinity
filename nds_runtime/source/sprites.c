@@ -172,8 +172,8 @@ void afn_sprite_update(void)
                 int rawIdx = ((sprAngle + 0xC000 + 4096) >> 13) & 7;
                 dir = (8 - rawIdx) & 7;
                 int held = keysHeld();
-                if (held & KEY_L)      dir = (dir - 1 + 8) & 7;
-                else if (held & KEY_R) dir = (dir + 1) & 7;
+                if (held & KEY_L)      dir = (dir + 1) & 7;
+                else if (held & KEY_R) dir = (dir - 1 + 8) & 7;
                 static int s_pickDbg = 0;
                 s_pickDbg++;
                 if ((s_pickDbg & 15) == 0) {
