@@ -19,10 +19,7 @@ int orbit_dist;
 int player_sprite_idx = -1;
 int player_moving;
 uint16_t player_move_angle = 0x4000;  // GBA's default — back-facing camera
-uint16_t orbit_angle = AFN_CAM_ANGLE; // GBA: init at AFN_CAM_ANGLE, only
-                                      // modified by strafe auto-orbit (not
-                                      // by manual L/R OrbitCamera). NDS
-                                      // has no auto-orbit so it stays put.
+uint16_t orbit_angle = AFN_CAM_ANGLE;
 // Last frame's world-space movement direction (un-normalized). The sprite
 // dir picker reads these to face the player in the direction of motion.
 int s_lastMoveDX, s_lastMoveDZ;
