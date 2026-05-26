@@ -1672,7 +1672,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             }
             case GBAScriptNodeType::DestroyObject: {
                 auto* d = findDataIn(a->id, 0);
-                int sIdx = d ? resolveInt(d) : a->paramInt[0];
+                // In BP context with no Object wired, default to the instance's
+                // own sprite (afn_bp_cur_spr_idx). Scene scripts fall back to
+                // the node's literal paramInt[0]. Mirrors GBA semantics.
+                std::string sIdx;
+                if (d) sIdx = std::to_string(resolveInt(d));
+                else if (curScript != &script) sIdx = "afn_bp_cur_spr_idx";
+                else sIdx = std::to_string(a->paramInt[0]);
                 f << "    if ((unsigned)" << sIdx << " < NUM_SPRITES) {\n";
                 f << "        afn_sprite_visible[" << sIdx << "] = 0;\n";
                 f << "        afn_collision_enabled[" << sIdx << "] = 0;\n";

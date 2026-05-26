@@ -13941,9 +13941,9 @@ static void afn_bp3_collision(void) {
         int _dz = player_z - afn_sprite_data[afn_collided_sprite][2];
         if (_dx < 0) _dx = -_dx; if (_dz < 0) _dz = -_dz;
         if ((_dx >> 8) < 2 && (_dz >> 8) < 2) {
-    if ((unsigned)0 < NUM_SPRITES) {
-        afn_sprite_visible[0] = 0;
-        afn_collision_enabled[0] = 0;
+    if ((unsigned)afn_bp_cur_spr_idx < NUM_SPRITES) {
+        afn_sprite_visible[afn_bp_cur_spr_idx] = 0;
+        afn_collision_enabled[afn_bp_cur_spr_idx] = 0;
     }
     /* TODO: emit node type 242 */
     afn_play_sfx(2, 0, 0);
