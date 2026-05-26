@@ -57,6 +57,8 @@ int  afn_force_z;
 int  afn_friction;
 int  afn_last_key;
 int  afn_player_height = 3072;    // 12 editor px in 16.8 (matches GBA default)
+int  afn_hud_value[4];            // counters; SetHudValue accumulates
+unsigned char afn_hud_visible[4]; // ShowHUD/HideHUD toggles
 int  afn_scripts_stopped;
 int  afn_start_x;
 int  afn_start_y;

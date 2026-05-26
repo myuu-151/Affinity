@@ -1450,6 +1450,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_friction;\n";
         f << "extern int  afn_last_key;\n";
         f << "extern int  afn_player_height;\n";
+        f << "extern int  afn_hud_value[4];\n";
+        f << "extern unsigned char afn_hud_visible[4];\n";
         f << "extern int  afn_scripts_stopped;\n";
         f << "extern int  afn_start_x;\n";
         f << "extern int  afn_start_y;\n";
@@ -1764,6 +1766,29 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "    player_x = afn_start_x; player_y = afn_start_y; player_z = afn_start_z;\n";
                 f << "    player_vy = 0;\n";
                 break;
+            case GBAScriptNodeType::SetHudValue: {
+                auto* valData  = findDataIn(a->id, 0);
+                auto* slotData = findDataIn(a->id, 1);
+                int val  = valData  ? resolveInt(valData)  : 0;
+                int slot = slotData ? resolveInt(slotData) : 0;
+                if (slot < 0) slot = 0; if (slot > 3) slot = 3;
+                f << "    afn_hud_value[" << slot << "] += " << val << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::ShowHUD: {
+                auto* slotData = findDataIn(a->id, 0);
+                int slot = slotData ? resolveInt(slotData) : a->paramInt[0];
+                if (slot < 0) slot = 0; if (slot > 3) slot = 3;
+                f << "    afn_hud_visible[" << slot << "] = 1;\n";
+                break;
+            }
+            case GBAScriptNodeType::HideHUD: {
+                auto* slotData = findDataIn(a->id, 0);
+                int slot = slotData ? resolveInt(slotData) : a->paramInt[0];
+                if (slot < 0) slot = 0; if (slot > 3) slot = 3;
+                f << "    afn_hud_visible[" << slot << "] = 0;\n";
+                break;
+            }
             case GBAScriptNodeType::UpdateRespawnPos: {
                 auto* objData = findDataIn(a->id, 0);
                 std::string obj;

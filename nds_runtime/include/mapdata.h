@@ -13783,6 +13783,8 @@ extern int  afn_force_z;
 extern int  afn_friction;
 extern int  afn_last_key;
 extern int  afn_player_height;
+extern int  afn_hud_value[4];
+extern unsigned char afn_hud_visible[4];
 extern int  afn_scripts_stopped;
 extern int  afn_start_x;
 extern int  afn_start_y;
@@ -13946,7 +13948,7 @@ static void afn_bp3_collision(void) {
         afn_sprite_visible[afn_bp_cur_spr_idx] = 0;
         afn_collision_enabled[afn_bp_cur_spr_idx] = 0;
     }
-    /* TODO: emit node type 242 */
+    afn_hud_value[0] += 1;
     afn_play_sfx(2, 0, 0);
         }
     }
