@@ -166,10 +166,6 @@ void afn_sprite_update(void)
         if (dirCount > 1 && !fStatic) {
 #if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
             if (si == AFN_PLAYER_IDX) {
-                // Idle rotates the sprite as the camera orbits so the
-                // user sees different directional frames. NDS subtracts
-                // orbit_angle (opposite sign vs GBA) because manual
-                // L/R orbit feels reversed otherwise.
                 uint16_t sprAngle = player_moving
                     ? player_move_angle
                     : (uint16_t)(player_move_angle - orbit_angle);

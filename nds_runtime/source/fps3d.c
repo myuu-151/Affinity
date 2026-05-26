@@ -355,15 +355,17 @@ static void update_camera(void)
         // Brad ArcTan2(inputRight=x, inputFwd=y). GBA convention: angle
         // measured from +X axis, so atan2(0,+y) = 0x4000 (DPAD-up = N
         // brad). Picker formula then maps brad 0x4000 → dir 0 (N image).
+        // L/R swapped on NDS (RIGHT picks the W-image, LEFT picks the E)
+        // — what the user wants for this project's orientation.
         uint16_t ang = 0x4000;
         if (afn_input_fwd > 0 && afn_input_right == 0)      ang = 0x4000; // UP
-        else if (afn_input_fwd > 0 && afn_input_right > 0)  ang = 0x2000; // UP+RIGHT
-        else if (afn_input_fwd == 0 && afn_input_right > 0) ang = 0x0000; // RIGHT
-        else if (afn_input_fwd < 0 && afn_input_right > 0)  ang = 0xE000; // DOWN+RIGHT
+        else if (afn_input_fwd > 0 && afn_input_right > 0)  ang = 0x6000; // UP+RIGHT
+        else if (afn_input_fwd == 0 && afn_input_right > 0) ang = 0x8000; // RIGHT
+        else if (afn_input_fwd < 0 && afn_input_right > 0)  ang = 0xA000; // DOWN+RIGHT
         else if (afn_input_fwd < 0 && afn_input_right == 0) ang = 0xC000; // DOWN
-        else if (afn_input_fwd < 0 && afn_input_right < 0)  ang = 0xA000; // DOWN+LEFT
-        else if (afn_input_fwd == 0 && afn_input_right < 0) ang = 0x8000; // LEFT
-        else if (afn_input_fwd > 0 && afn_input_right < 0)  ang = 0x6000; // UP+LEFT
+        else if (afn_input_fwd < 0 && afn_input_right < 0)  ang = 0xE000; // DOWN+LEFT
+        else if (afn_input_fwd == 0 && afn_input_right < 0) ang = 0x0000; // LEFT
+        else if (afn_input_fwd > 0 && afn_input_right < 0)  ang = 0x2000; // UP+LEFT
         player_move_angle = ang;
     } else if (s_wasMoving) {
         // Just stopped: convert input-space angle to world-space so the
