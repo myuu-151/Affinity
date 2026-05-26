@@ -214,6 +214,14 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "};\n\n";
     }
 
+    // HUD piece tile blob — populated inside the asset block (we need
+    // allTiles + frameRomU32Offset) and emitted later in the HUD block.
+    // Declared at function scope so both blocks can see them.
+    struct AfnBakedHudPiece { int srcX, srcY, size, vramTile, palBank; };
+    std::vector<AfnBakedHudPiece> bakedHudPieces;
+    std::vector<AfnBakedHudPiece> bakedHudSprites;
+    std::vector<uint32_t> hudPieceTiles;
+
     // ---- Sprite assets (OAM tiles + palette + descriptor) ----
     // Simplified vs GBA: skip directional animation streaming and tile-reference
     // optimization. Every asset's frames get tiles in afn_all_tiles, every asset
@@ -757,6 +765,46 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "    { " << ae.start << ", " << ae.count << ", "
                   << ae.fps << ", " << ae.loop << " },\n";
             f << "};\n\n";
+        }
+
+        // Bake HUD pieces + sprite items from their referenced asset
+        // frames into a HUD-only tile blob. Each piece occupies one or
+        // more 128-byte (1D_128) slots in HUD VRAM. Palette bank reuses
+        // the gameplay asset's bank since the same per-asset palette
+        // already lives there post-init.
+        auto bakeHudPiece = [&](const GBAHudPieceExport& pc, std::vector<AfnBakedHudPiece>& out) {
+            int ai = pc.spriteAssetIdx;
+            int sz = pc.size; if (sz < 8) sz = 8; if (sz > 64) sz = 64;
+            int tilesNeeded;
+            switch (sz) { case 8: tilesNeeded = 1; break; case 16: tilesNeeded = 4; break;
+                          case 32: tilesNeeded = 16; break; case 64: tilesNeeded = 64; break;
+                          default: tilesNeeded = 1; break; }
+            int slotsNeeded = (tilesNeeded * 32 + 127) / 128;
+            if (slotsNeeded < 1) slotsNeeded = 1;
+            while (hudPieceTiles.size() % 32 != 0) hudPieceTiles.push_back(0);
+            int vramTile = (int)(hudPieceTiles.size() / 32);
+            if (ai >= 0 && ai < (int)assets.size()) {
+                int gf = assetFrameBase[ai] + pc.frame;
+                if (gf >= 0 && gf < (int)frameRomU32Offset.size()) {
+                    int srcU32 = (int)frameRomU32Offset[gf];
+                    int srcTiles = (int)frameTileCount[gf];
+                    int t = (srcTiles < tilesNeeded) ? srcTiles : tilesNeeded;
+                    for (int i = 0; i < t * 8 && srcU32 + i < (int)allTiles.size(); i++)
+                        hudPieceTiles.push_back(allTiles[srcU32 + i]);
+                }
+            }
+            int totalU32 = slotsNeeded * 32;
+            while ((int)hudPieceTiles.size() < vramTile * 32 + totalU32)
+                hudPieceTiles.push_back(0);
+            AfnBakedHudPiece bp;
+            bp.srcX = pc.localX; bp.srcY = pc.localY; bp.size = sz;
+            bp.vramTile = vramTile;
+            bp.palBank = (ai >= 0) ? (ai & 0xF) : 15;
+            out.push_back(bp);
+        };
+        for (const auto& he : hudElements) {
+            for (const auto& pc : he.pieces)  bakeHudPiece(pc, bakedHudPieces);
+            for (const auto& sp : he.sprites) bakeHudPiece(sp, bakedHudSprites);
         }
     }
 
@@ -1461,43 +1509,117 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         // rows with sourceSlot for counter display). Composite pieces /
         // cursor menus not yet rendered on NDS.
         if (!hudElements.empty()) {
-            int totalText = 0, totalPieces = 0;
+            int totalText = 0, totalPieces = 0, totalSprites = 0, totalKf = 0;
             for (const auto& he : hudElements) {
-                totalText   += (int)he.textRows.size();
-                totalPieces += (int)he.pieces.size();
+                totalText    += (int)he.textRows.size();
+                totalPieces  += (int)he.pieces.size();
+                totalSprites += (int)he.sprites.size();
+                totalKf      += (int)he.keyframes.size();
             }
-            f << "#define AFN_HUD_ELEM_COUNT " << (int)hudElements.size() << "\n";
-            f << "#define AFN_HUD_TEXT_COUNT " << totalText << "\n";
-            f << "#define AFN_HUD_PIECE_COUNT " << totalPieces << "\n";
-            // Piece tile blob is empty for now — the per-asset frame
-            // extraction + palette baking lives in a follow-up. Element /
-            // text rendering doesn't depend on it.
-            f << "#define AFN_HUD_PIECE_TILE_LEN 0\n";
-            f << "struct AfnHudPiece { short x, y; unsigned short vramTile; unsigned char size; unsigned char palBank; };\n";
-            if (totalPieces > 0) {
-                f << "static const struct AfnHudPiece afn_hud_pieces[" << totalPieces << "] = {\n";
-                for (const auto& he : hudElements) {
-                    for (const auto& pc : he.pieces) {
-                        f << "    { " << pc.localX << ", " << pc.localY << ", 0, "
-                          << pc.size << ", 15 },\n"; // vramTile=0/palBank=15 placeholder
+
+            // Tile data + per-piece metadata baked above (alongside the
+            // sprite-asset emit so we have access to allTiles +
+            // frameRomU32Offset). Here we just emit the resulting tables.
+            // Per-row text colors: dedupe across all rows, assign palette
+            // banks 14..11 (font is 15, asset banks 0..AFN_ASSET_COUNT-1).
+            // Caps at 4 unique colors; extras fall back to the font bank.
+            std::vector<unsigned short> uniqueColors;
+            std::vector<int> rowPalBank; // size == totalText
+            const int kFontBank = 15;
+            const int kFirstColorBank = 14, kLastColorBank = 11;
+            for (const auto& he : hudElements) {
+                for (const auto& tr : he.textRows) {
+                    unsigned short c = tr.colorRGB15 & 0x7FFF;
+                    int bank = -1;
+                    for (size_t i = 0; i < uniqueColors.size(); i++)
+                        if (uniqueColors[i] == c) { bank = kFirstColorBank - (int)i; break; }
+                    if (bank < 0) {
+                        int slotIdx = (int)uniqueColors.size();
+                        if (slotIdx <= (kFirstColorBank - kLastColorBank)) {
+                            uniqueColors.push_back(c);
+                            bank = kFirstColorBank - slotIdx;
+                        } else {
+                            bank = kFontBank; // overflow → white
+                        }
                     }
+                    rowPalBank.push_back(bank);
                 }
+            }
+
+            f << "#define AFN_HUD_ELEM_COUNT "    << (int)hudElements.size() << "\n";
+            f << "#define AFN_HUD_TEXT_COUNT "    << totalText << "\n";
+            f << "#define AFN_HUD_PIECE_COUNT "   << (int)bakedHudPieces.size() << "\n";
+            f << "#define AFN_HUD_SPRITE_COUNT "  << (int)bakedHudSprites.size() << "\n";
+            f << "#define AFN_HUD_KF_COUNT "      << totalKf << "\n";
+            f << "#define AFN_HUD_PIECE_TILE_LEN " << (int)hudPieceTiles.size() << "\n";
+            f << "#define AFN_HUD_TEXT_PAL_COUNT " << (int)uniqueColors.size() << "\n";
+            // (palBank, rgb15) pairs uploaded once at boot.
+            if (!uniqueColors.empty()) {
+                f << "static const struct { unsigned char bank; unsigned short color; } afn_hud_text_palettes[" << (int)uniqueColors.size() << "] = {\n";
+                for (size_t i = 0; i < uniqueColors.size(); i++)
+                    f << "    { " << (kFirstColorBank - (int)i) << ", 0x"
+                      << std::hex << uniqueColors[i] << std::dec << " },\n";
+                f << "};\n";
+            }
+
+            // Piece tile blob — uploaded to HUD VRAM at boot (hud.c).
+            if (!hudPieceTiles.empty()) {
+                f << "const unsigned int afn_hud_piece_tiles[" << (int)hudPieceTiles.size() << "] = {";
+                for (size_t i = 0; i < hudPieceTiles.size(); i++) {
+                    if (i % 8 == 0) f << "\n    ";
+                    char hex[16]; snprintf(hex, sizeof(hex), "0x%08X", hudPieceTiles[i]);
+                    f << hex;
+                    if (i + 1 < hudPieceTiles.size()) f << ",";
+                }
+                f << "\n};\n";
+            }
+
+            f << "struct AfnHudPiece { short x, y; unsigned short vramTile; unsigned char size; unsigned char palBank; };\n";
+            auto emitPieceArray = [&](const char* name, const std::vector<AfnBakedHudPiece>& bps) {
+                if (bps.empty()) {
+                    f << "static const struct AfnHudPiece " << name << "[1] = {{0}};\n";
+                    return;
+                }
+                f << "static const struct AfnHudPiece " << name << "[" << (int)bps.size() << "] = {\n";
+                for (const auto& bp : bps)
+                    f << "    { " << bp.srcX << ", " << bp.srcY << ", " << bp.vramTile << ", "
+                      << bp.size << ", " << bp.palBank << " },\n";
+                f << "};\n";
+            };
+            emitPieceArray("afn_hud_pieces",  bakedHudPieces);
+            emitPieceArray("afn_hud_sprites", bakedHudSprites);
+
+            // Keyframes — applied as per-frame (offX, offY) bias on the
+            // element. Linear interp between keyframes; loops when the
+            // element's kfLoop flag is set.
+            if (totalKf > 0) {
+                f << "static const struct { short frame, offX, offY; } afn_hud_kf[" << totalKf << "] = {\n";
+                for (const auto& he : hudElements)
+                    for (const auto& kf : he.keyframes)
+                        f << "    { " << kf.frame << ", " << kf.offX << ", " << kf.offY << " },\n";
                 f << "};\n";
             } else {
-                f << "static const struct AfnHudPiece afn_hud_pieces[1] = {{0}};\n";
+                f << "static const struct { short frame, offX, offY; } afn_hud_kf[1] = {{0}};\n";
             }
-            f << "static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
-            int textCursor = 0, pieceCursor = 0;
+
+            f << "static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned char kfLoop; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
+            int textCursor = 0, pieceCursor = 0, sprCursor = 0, kfCursor = 0;
             for (const auto& he : hudElements) {
                 f << "    { " << he.screenX << ", " << he.screenY << ", "
-                  << textCursor << ", " << (int)he.textRows.size() << ", "
-                  << pieceCursor << ", " << (int)he.pieces.size() << " },\n";
-                textCursor  += (int)he.textRows.size();
-                pieceCursor += (int)he.pieces.size();
+                  << textCursor   << ", " << (int)he.textRows.size() << ", "
+                  << pieceCursor  << ", " << (int)he.pieces.size() << ", "
+                  << sprCursor    << ", " << (int)he.sprites.size() << ", "
+                  << kfCursor     << ", " << (int)he.keyframes.size() << ", "
+                  << (he.animLoop ? 1 : 0) << " },\n";
+                textCursor   += (int)he.textRows.size();
+                pieceCursor  += (int)he.pieces.size();
+                sprCursor    += (int)he.sprites.size();
+                kfCursor     += (int)he.keyframes.size();
             }
             f << "};\n";
             if (totalText > 0) {
-                f << "static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; char text[32]; } afn_hud_texts[" << totalText << "] = {\n";
+                f << "static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; unsigned char palBank; char text[32]; } afn_hud_texts[" << totalText << "] = {\n";
+                int row = 0;
                 for (const auto& he : hudElements) {
                     for (const auto& tr : he.textRows) {
                         // Quote-escape the text field; truncate to 31 chars + NUL.
@@ -1512,17 +1634,21 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                         }
                         f << "    { " << tr.localX << ", " << tr.localY << ", "
                           << tr.sourceSlot << ", " << tr.pad << ", " << tr.scale
+                          << ", " << rowPalBank[row]
                           << ", \"" << escaped << "\" },\n";
+                        row++;
                     }
                 }
                 f << "};\n";
             } else {
-                f << "static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; char text[32]; } afn_hud_texts[1] = {{0}};\n";
+                f << "static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; unsigned char palBank; char text[32]; } afn_hud_texts[1] = {{0}};\n";
             }
         } else {
             f << "#define AFN_HUD_ELEM_COUNT 0\n";
             f << "#define AFN_HUD_TEXT_COUNT 0\n";
             f << "#define AFN_HUD_PIECE_COUNT 0\n";
+            f << "#define AFN_HUD_SPRITE_COUNT 0\n";
+            f << "#define AFN_HUD_KF_COUNT 0\n";
             f << "#define AFN_HUD_PIECE_TILE_LEN 0\n";
         }
         f << "extern int  afn_scripts_stopped;\n";

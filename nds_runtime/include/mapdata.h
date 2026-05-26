@@ -28729,11 +28729,23 @@ extern int  afn_current_mode;
 void afn_scene_start_transition(int sceneIdx, int sceneMode, int fadeFrames);
 #define AFN_HUD_ELEM_COUNT 1
 #define AFN_HUD_TEXT_COUNT 1
-static const struct { short x, y; unsigned short textStart, textCount; } afn_hud_elems[1] = {
-    { 3, 7, 0, 1 },
+#define AFN_HUD_PIECE_COUNT 0
+#define AFN_HUD_SPRITE_COUNT 0
+#define AFN_HUD_KF_COUNT 0
+#define AFN_HUD_PIECE_TILE_LEN 0
+#define AFN_HUD_TEXT_PAL_COUNT 1
+static const struct { unsigned char bank; unsigned short color; } afn_hud_text_palettes[1] = {
+    { 14, 0x7fff },
 };
-static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; } afn_hud_texts[1] = {
-    { 215, -6, 0, 3, 1 },
+struct AfnHudPiece { short x, y; unsigned short vramTile; unsigned char size; unsigned char palBank; };
+static const struct AfnHudPiece afn_hud_pieces[1] = {{0}};
+static const struct AfnHudPiece afn_hud_sprites[1] = {{0}};
+static const struct { short frame, offX, offY; } afn_hud_kf[1] = {{0}};
+static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned char kfLoop; } afn_hud_elems[1] = {
+    { 3, 7, 0, 1, 0, 0, 0, 0, 0, 0, 0 },
+};
+static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; unsigned char palBank; char text[32]; } afn_hud_texts[1] = {
+    { 215, -6, 0, 3, 1, 14, "" },
 };
 extern int  afn_scripts_stopped;
 extern int  afn_start_x;

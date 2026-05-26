@@ -56,11 +56,14 @@ static void hud_bake_font(void)
             (0x06400000 + AFN_HUD_VRAM_OFFSET + g * AFN_HUD_TILE_STRIDE);
         for (int row = 0; row < 8; row++) {
             unsigned char bits = default_font_bin[srcCh * 8 + row];
+            // libnds default_font_bin packs pixels with bit 0 = leftmost.
+            // 4bpp tile bytes want low nibble = leftmost screen pixel,
+            // so read the 1bpp bits from LSB upward.
             for (int half = 0; half < 2; half++) {
-                int p0 = (bits >> (7 - half*4 - 0)) & 1;
-                int p1 = (bits >> (7 - half*4 - 1)) & 1;
-                int p2 = (bits >> (7 - half*4 - 2)) & 1;
-                int p3 = (bits >> (7 - half*4 - 3)) & 1;
+                int p0 = (bits >> (half*4 + 0)) & 1;
+                int p1 = (bits >> (half*4 + 1)) & 1;
+                int p2 = (bits >> (half*4 + 2)) & 1;
+                int p3 = (bits >> (half*4 + 3)) & 1;
                 unsigned short word =
                     ((p0 ? 1 : 0)      ) |
                     ((p1 ? 1 : 0) <<  4) |
@@ -94,19 +97,29 @@ void afn_hud_init(void) {
 #if defined(AFN_HUD_PIECE_TILE_LEN) && AFN_HUD_PIECE_TILE_LEN > 0
     hud_bake_pieces();
 #endif
-    // Palette bank 15 (HUD): index 0 transparent, index 1 white.
+    // Palette bank 15 (HUD font): index 0 transparent, index 1 white.
     // Pointer arithmetic (not int + cast) so +16 advances 16 u16-words
     // = 32 bytes per palette bank.
     unsigned short* pal = (unsigned short*)0x05000200 + AFN_HUD_PAL_BANK * 16;
     pal[0] = 0;
     pal[1] = RGB15(31, 31, 31);
+#if defined(AFN_HUD_TEXT_PAL_COUNT) && AFN_HUD_TEXT_PAL_COUNT > 0
+    // Per-text-row RGB color: dedup'd by the exporter into a small pool
+    // of OBJ palette banks (14, 13, 12, 11). index 0 transparent,
+    // index 1 = the row's color.
+    for (int i = 0; i < AFN_HUD_TEXT_PAL_COUNT; i++) {
+        unsigned short* p = (unsigned short*)0x05000200 + afn_hud_text_palettes[i].bank * 16;
+        p[0] = 0;
+        p[1] = afn_hud_text_palettes[i].color;
+    }
+#endif
 #endif
 }
 
 #if defined(AFN_HAS_SCRIPT) && defined(AFN_HUD_ELEM_COUNT) && AFN_HUD_ELEM_COUNT > 0
 // Place a single 8x8 glyph at (sx, sy). Clamps to the printable-ASCII
 // font range; codes outside it render as a transparent slot (no glyph).
-static int hud_blit_glyph(int oamSlot, int sx, int sy, int ch)
+static int hud_blit_glyph(int oamSlot, int sx, int sy, int ch, int palBank)
 {
     if (oamSlot >= 128) return oamSlot;
     if (ch < AFN_HUD_FONT_FIRST || ch > AFN_HUD_FONT_LAST) return oamSlot;
@@ -114,7 +127,7 @@ static int hud_blit_glyph(int oamSlot, int sx, int sy, int ch)
     oamSet(&oamMain, oamSlot,
            sx, sy,
            0,                                  // priority
-           AFN_HUD_PAL_BANK,                   // palette
+           palBank,                            // per-row palette
            SpriteSize_8x8,
            SpriteColorFormat_16Color,
            (void*)(0x06400000 + AFN_HUD_VRAM_OFFSET + g * AFN_HUD_TILE_STRIDE),
@@ -122,15 +135,84 @@ static int hud_blit_glyph(int oamSlot, int sx, int sy, int ch)
     return oamSlot + 1;
 }
 
-static int hud_blit_string(int oamSlot, int sx, int sy, const char* s)
+static int hud_blit_string(int oamSlot, int sx, int sy, const char* s, int palBank)
 {
     int n = 0;
     while (s[n] && n < 32) {
-        oamSlot = hud_blit_glyph(oamSlot, sx + n * 8, sy, (unsigned char)s[n]);
+        oamSlot = hud_blit_glyph(oamSlot, sx + n * 8, sy, (unsigned char)s[n], palBank);
         if (oamSlot >= 128) break;
         n++;
     }
     return oamSlot;
+}
+#endif
+
+#if defined(AFN_HUD_PIECE_COUNT) && AFN_HUD_PIECE_COUNT > 0
+static int hud_blit_piece(int oamSlot, int sx, int sy, const struct AfnHudPiece* pi)
+{
+    if (oamSlot >= 128) return oamSlot;
+    int sz;
+    switch (pi->size) {
+        case 8:  sz = SpriteSize_8x8;   break;
+        case 16: sz = SpriteSize_16x16; break;
+        case 32: sz = SpriteSize_32x32; break;
+        case 64: sz = SpriteSize_64x64; break;
+        default: sz = SpriteSize_16x16; break;
+    }
+    oamSet(&oamMain, oamSlot++,
+           sx, sy,
+           1,                                              // priority below text
+           pi->palBank,                                    // reuse asset's palette bank
+           sz,
+           SpriteColorFormat_16Color,
+           (void*)(0x06400000 + AFN_HUD_PIECE_VRAM_OFFSET + pi->vramTile * AFN_HUD_TILE_STRIDE),
+           -1, false, false, false, false, false);
+    return oamSlot;
+}
+#endif
+
+#if defined(AFN_HUD_KF_COUNT) && AFN_HUD_KF_COUNT > 0
+// Resolve (offX, offY) at the given absolute frame by walking the
+// element's keyframe range and linearly interpolating between the
+// surrounding two. Loops when kfLoop is set and t exceeds the last kf.
+extern int afn_frame_count;
+static void hud_kf_at(int e, int* outOffX, int* outOffY)
+{
+    *outOffX = 0; *outOffY = 0;
+    int ks = afn_hud_elems[e].kfStart;
+    int kc = afn_hud_elems[e].kfCount;
+    if (kc <= 0) return;
+    int t = afn_frame_count;
+    if (afn_hud_elems[e].kfLoop) {
+        int last = afn_hud_kf[ks + kc - 1].frame;
+        if (last > 0) t = t % (last + 1);
+    }
+    // Before first keyframe → snap to its value.
+    if (t <= afn_hud_kf[ks].frame) {
+        *outOffX = afn_hud_kf[ks].offX;
+        *outOffY = afn_hud_kf[ks].offY;
+        return;
+    }
+    // After last keyframe → snap to it.
+    if (t >= afn_hud_kf[ks + kc - 1].frame) {
+        *outOffX = afn_hud_kf[ks + kc - 1].offX;
+        *outOffY = afn_hud_kf[ks + kc - 1].offY;
+        return;
+    }
+    // Find the surrounding pair.
+    for (int i = 0; i + 1 < kc; i++) {
+        int f0 = afn_hud_kf[ks + i].frame;
+        int f1 = afn_hud_kf[ks + i + 1].frame;
+        if (t >= f0 && t <= f1) {
+            int span = f1 - f0; if (span < 1) span = 1;
+            int u = ((t - f0) * 256) / span; // 0..256
+            int x0 = afn_hud_kf[ks + i].offX, x1 = afn_hud_kf[ks + i + 1].offX;
+            int y0 = afn_hud_kf[ks + i].offY, y1 = afn_hud_kf[ks + i + 1].offY;
+            *outOffX = x0 + ((x1 - x0) * u >> 8);
+            *outOffY = y0 + ((y1 - y0) * u >> 8);
+            return;
+        }
+    }
 }
 #endif
 
@@ -142,31 +224,27 @@ void afn_hud_draw(void) {
         if (slot < 4 && !afn_hud_visible[slot]) continue;
         int ex = afn_hud_elems[e].x;
         int ey = afn_hud_elems[e].y;
+#if defined(AFN_HUD_KF_COUNT) && AFN_HUD_KF_COUNT > 0
+        int kfX = 0, kfY = 0;
+        hud_kf_at(e, &kfX, &kfY);
+        ex += kfX; ey += kfY;
+#endif
 #if defined(AFN_HUD_PIECE_COUNT) && AFN_HUD_PIECE_COUNT > 0
-        // Pieces render BELOW text rows (lower OAM slot = drawn on top
-        // for NDS-1D, but priority is what actually sorts). Same palette
-        // bank (15) for now — composite tints / per-piece palettes TODO.
         int ps = afn_hud_elems[e].pieceStart;
         int pc = afn_hud_elems[e].pieceCount;
         for (int p = 0; p < pc; p++) {
             if (oamSlot >= 128) break;
             const struct AfnHudPiece* pi = &afn_hud_pieces[ps + p];
-            int sz;
-            switch (pi->size) {
-                case 8:  sz = SpriteSize_8x8;   break;
-                case 16: sz = SpriteSize_16x16; break;
-                case 32: sz = SpriteSize_32x32; break;
-                case 64: sz = SpriteSize_64x64; break;
-                default: sz = SpriteSize_16x16; break;
-            }
-            oamSet(&oamMain, oamSlot++,
-                   ex + pi->x, ey + pi->y,
-                   1,                                    // priority below text
-                   pi->palBank,                          // baked HUD palette bank
-                   sz,
-                   SpriteColorFormat_16Color,
-                   (void*)(0x06400000 + AFN_HUD_PIECE_VRAM_OFFSET + pi->vramTile * AFN_HUD_TILE_STRIDE),
-                   -1, false, false, false, false, false);
+            oamSlot = hud_blit_piece(oamSlot, ex + pi->x, ey + pi->y, pi);
+        }
+#endif
+#if defined(AFN_HUD_SPRITE_COUNT) && AFN_HUD_SPRITE_COUNT > 0
+        int ss2 = afn_hud_elems[e].sprStart;
+        int sc2 = afn_hud_elems[e].sprCount;
+        for (int p = 0; p < sc2; p++) {
+            if (oamSlot >= 128) break;
+            const struct AfnHudPiece* pi = &afn_hud_sprites[ss2 + p];
+            oamSlot = hud_blit_piece(oamSlot, ex + pi->x, ey + pi->y, pi);
         }
 #endif
         int ts = afn_hud_elems[e].textStart;
@@ -188,7 +266,9 @@ void afn_hud_draw(void) {
                 // sourceSlot >= 0 so this path only fires for label rows.
                 s = afn_hud_texts[ts + t].text;
             }
-            oamSlot = hud_blit_string(oamSlot, tx, ty, s);
+            int palBank = afn_hud_texts[ts + t].palBank;
+            if (palBank < 0 || palBank > 15) palBank = AFN_HUD_PAL_BANK;
+            oamSlot = hud_blit_string(oamSlot, tx, ty, s, palBank);
             if (oamSlot >= 128) break;
         }
     }
