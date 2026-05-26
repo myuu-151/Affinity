@@ -4250,6 +4250,7 @@ static std::string sPackageOutputPath;
 
 enum class BuildTarget { GBA = 0, NDS = 1 };
 static BuildTarget sBuildTarget = BuildTarget::NDS; // default to NDS
+static bool sNdsAntialiasing = false; // NDS-only — adds smooth mesh edges but fringes textures
 static bool sBuildRequested = false; // set by toolbar Build button
 
 // Project file
@@ -4756,6 +4757,9 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "jump_cam_air=%.1f\n", sCamObj.jumpCamAir);
     fprintf(f, "auto_orbit_speed=%.1f\n", sCamObj.autoOrbitSpeed);
     fprintf(f, "jump_dampen=%.2f\n", sCamObj.jumpDampen);
+    fprintf(f, "orbit_cam_ease_in=%.1f\n",  sCamObj.orbitCamEaseIn);
+    fprintf(f, "orbit_cam_ease_out=%.1f\n", sCamObj.orbitCamEaseOut);
+    fprintf(f, "orbit_max_delta=%d\n",      sCamObj.orbitMaxDelta);
     fprintf(f, "draw_distance=%.1f\n", sCamObj.drawDistance);
     fprintf(f, "sprite_draw_distance=%.1f\n", sCamObj.spriteDrawDistance);
     fprintf(f, "small_tri_cull=%d\n", sCamObj.smallTriCull);
@@ -5246,7 +5250,7 @@ static bool SaveProject(const std::string& path)
             }
         }
         // Camera
-        fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d,%d,%.1f\n",
+        fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d,%d,%.1f,%.1f,%.1f,%d\n",
                 ms.camera.x, ms.camera.z, ms.camera.height, ms.camera.angle, ms.camera.horizon,
                 ms.camera.walkSpeed, ms.camera.sprintSpeed,
                 ms.camera.walkEaseIn, ms.camera.walkEaseOut, ms.camera.sprintEaseIn, ms.camera.sprintEaseOut,
@@ -5255,7 +5259,8 @@ static bool SaveProject(const std::string& path)
                 ms.camera.smallTriCull, ms.camera.skipFloor ? 1 : 0, ms.camera.coverageBuf ? 1 : 0,
                 ms.camera.drawDistance, ms.camera.camPitch, ms.camera.autoPitch ? 1 : 0,
                 ms.camera.horizonClamp ? 1 : 0, ms.camera.dynamicHorizon ? 1 : 0, ms.camera.faceCull ? 1 : 0,
-                ms.camera.spriteDrawDistance);
+                ms.camera.spriteDrawDistance,
+                ms.camera.orbitCamEaseIn, ms.camera.orbitCamEaseOut, ms.camera.orbitMaxDelta);
         // Scene-level blueprint
         if (ms.blueprintIdx >= 0) {
             fprintf(f, "msSceneBp=%d,%d", ms.blueprintIdx, ms.instanceParamCount);
@@ -5772,6 +5777,9 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "jump_cam_air=%f", &fval) == 1) sCamObj.jumpCamAir = fval;
             else if (sscanf(line, "auto_orbit_speed=%f", &fval) == 1) sCamObj.autoOrbitSpeed = fval;
             else if (sscanf(line, "jump_dampen=%f", &fval) == 1) sCamObj.jumpDampen = fval;
+            else if (sscanf(line, "orbit_cam_ease_in=%f",  &fval) == 1) sCamObj.orbitCamEaseIn  = fval;
+            else if (sscanf(line, "orbit_cam_ease_out=%f", &fval) == 1) sCamObj.orbitCamEaseOut = fval;
+            else if (sscanf(line, "orbit_max_delta=%d",    &ival) == 1) sCamObj.orbitMaxDelta   = ival;
             else if (sscanf(line, "draw_distance=%f", &fval) == 1) sCamObj.drawDistance = fval;
             else if (sscanf(line, "sprite_draw_distance=%f", &fval) == 1) sCamObj.spriteDrawDistance = fval;
             else if (sscanf(line, "small_tri_cull=%d", &ival) == 1) sCamObj.smallTriCull = ival;
@@ -7016,13 +7024,16 @@ static bool LoadProject(const std::string& path)
                 CameraStartObject& c = ms.camera;
                 int sti = 0, sf = 0, cb = 0, ap = 0, hc = 0, dh = 0, fc = 0;
                 float sdd = 0.0f;
-                int matched = sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d,%f",
+                float oei = c.orbitCamEaseIn, oeo = c.orbitCamEaseOut;
+                int omd = c.orbitMaxDelta;
+                int matched = sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d,%f,%f,%f,%d",
                     &c.x, &c.z, &c.height, &c.angle, &c.horizon,
                     &c.walkSpeed, &c.sprintSpeed,
                     &c.walkEaseIn, &c.walkEaseOut, &c.sprintEaseIn, &c.sprintEaseOut,
                     &c.jumpForce, &c.gravity, &c.maxFallSpeed,
                     &c.jumpCamLand, &c.jumpCamAir, &c.autoOrbitSpeed, &c.jumpDampen,
-                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc, &sdd);
+                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc, &sdd,
+                    &oei, &oeo, &omd);
                 c.smallTriCull = sti;
                 c.skipFloor = (sf != 0);
                 c.coverageBuf = (cb != 0);
@@ -7031,6 +7042,9 @@ static bool LoadProject(const std::string& path)
                 c.dynamicHorizon = (dh != 0);
                 c.faceCull = (fc != 0);
                 if (matched >= 28) c.spriteDrawDistance = sdd;
+                if (matched >= 29) c.orbitCamEaseIn  = oei;
+                if (matched >= 30) c.orbitCamEaseOut = oeo;
+                if (matched >= 31) c.orbitMaxDelta   = omd;
             }
             else if (strncmp(line, "msSceneBp=", 10) == 0 && !sMapScenes.empty())
             {
@@ -7418,13 +7432,16 @@ static bool LoadProject(const std::string& path)
                 CameraStartObject& c = ms.camera;
                 int sti = 0, sf = 0, cb = 0, ap = 0, hc = 0, dh = 0, fc = 0;
                 float sdd = 0.0f;
-                int matched = sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d,%f",
+                float oei = c.orbitCamEaseIn, oeo = c.orbitCamEaseOut;
+                int omd = c.orbitMaxDelta;
+                int matched = sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d,%f,%f,%f,%d",
                     &c.x, &c.z, &c.height, &c.angle, &c.horizon,
                     &c.walkSpeed, &c.sprintSpeed,
                     &c.walkEaseIn, &c.walkEaseOut, &c.sprintEaseIn, &c.sprintEaseOut,
                     &c.jumpForce, &c.gravity, &c.maxFallSpeed,
                     &c.jumpCamLand, &c.jumpCamAir, &c.autoOrbitSpeed, &c.jumpDampen,
-                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc, &sdd);
+                    &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc, &sdd,
+                    &oei, &oeo, &omd);
                 c.smallTriCull = sti;
                 c.skipFloor = (sf != 0);
                 c.coverageBuf = (cb != 0);
@@ -7433,6 +7450,9 @@ static bool LoadProject(const std::string& path)
                 c.dynamicHorizon = (dh != 0);
                 c.faceCull = (fc != 0);
                 if (matched >= 28) c.spriteDrawDistance = sdd;
+                if (matched >= 29) c.orbitCamEaseIn  = oei;
+                if (matched >= 30) c.orbitCamEaseOut = oeo;
+                if (matched >= 31) c.orbitMaxDelta   = omd;
             }
             else if (strncmp(line, "m7SceneBp=", 10) == 0 && !sM7Scenes.empty())
             {
@@ -10460,6 +10480,14 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::DragFloat("Cam Delay (Land)##cam", &sCamObj.jumpCamLand, 0.5f, 1.0f, 100.0f, "%.0f%%");
         ImGui::DragFloat("Cam Delay (Air)##cam",  &sCamObj.jumpCamAir,  0.5f, 1.0f, 100.0f, "%.0f%%");
         ImGui::Separator();
+        ImGui::Text("Orbit Camera");
+        ImGui::DragFloat("Orbit Ease In##cam",  &sCamObj.orbitCamEaseIn,  1.0f, 1.0f, 100.0f, "%.0f%%");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Camera lerp while L/R is held (ramping into orbit).\nLower = more intro lag (sprite drifts to side at first).\nNDS-only — GBA uses fixed orbit ease.");
+        ImGui::DragFloat("Orbit Ease Out##cam", &sCamObj.orbitCamEaseOut, 1.0f, 1.0f, 100.0f, "%.0f%%");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Camera lerp after L/R is released (settling).\nHigher = camera snaps to ideal orbit-distance faster.");
+        ImGui::DragInt("Orbit Max Speed##cam", &sCamObj.orbitMaxDelta, 4.0f, 0, 1024, "%d brad/frame (0=uncapped)");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-frame cap on the orbit_angle change.\nLower = forces orbit to ramp smoothly so the\ncamera lerp can keep up and the player sprite\nstays more centered. 0 = no cap (script controls).");
+        ImGui::Separator();
         ImGui::Separator();
         ImGui::Text("Rendering");
         ImGui::DragFloat("Mesh Draw Distance##cam", &sCamObj.drawDistance, 1.0f, 0.0f, 2000.0f, "%.0f");
@@ -12688,6 +12716,13 @@ void FrameTick(float dt)
         ImGui::SameLine();
         if (ImGui::RadioButton("GBA", sBuildTarget == BuildTarget::GBA))
             sBuildTarget = BuildTarget::GBA;
+        if (sBuildTarget == BuildTarget::NDS) {
+            ImGui::SameLine();
+            if (ImGui::Checkbox("AA", &sNdsAntialiasing)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "NDS hardware anti-alias: smooths mesh edges but fringes\n"
+                "textured polys (incl. sky panorama).");
+        }
         bool buildFromMenu = false;
         if (buildFromMenu || sBuildRequested)
         {
@@ -12817,6 +12852,9 @@ void FrameTick(float dt)
                 exportCam.jumpCamAir = sCamObj.jumpCamAir;
                 exportCam.autoOrbitSpeed = sCamObj.autoOrbitSpeed;
                 exportCam.jumpDampen = sCamObj.jumpDampen;
+                exportCam.orbitCamEaseIn  = sCamObj.orbitCamEaseIn;
+                exportCam.orbitCamEaseOut = sCamObj.orbitCamEaseOut;
+                exportCam.orbitMaxDelta   = sCamObj.orbitMaxDelta;
                 exportCam.drawDistance = sCamObj.drawDistance;
                 exportCam.spriteDrawDistance = sCamObj.spriteDrawDistance;
                 exportCam.smallTriCull = sCamObj.smallTriCull;
@@ -13957,14 +13995,19 @@ void FrameTick(float dt)
                     break; // use first instance with panels
                 }
 
+                bool exportNdsAa = sNdsAntialiasing;
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                              exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, target,
-                             exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportShowFps, exportSmoothSky]() {
+                             exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportShowFps, exportSmoothSky, exportNdsAa]() {
                     std::string err;
                     bool ok;
                     if (target == BuildTarget::NDS)
                         ok = PackageNDS(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                                        exportMeshes, exportOrbitDist, err);
+                                        exportMeshes, exportOrbitDist,
+                                        exportSoundSamples, exportSoundInstances,
+                                        exportSkyFrames, exportNdsAa,
+                                        exportScript, exportBlueprints, exportBpInstances,
+                                        exportHudElements, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,

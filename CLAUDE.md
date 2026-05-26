@@ -105,3 +105,12 @@ Older mGBA builds grey out **Start GDB server**. Fall back to **Open debugger co
 - **Don't make ISRs heavy or call non-trivial work from them.** Even moving `afn_sound_swap` into the VBlank ISR caused freezes — the ISR dispatcher couldn't keep up.
 - **Don't modify the buffer DMA is currently or about-to-be reading.** Crossfading the start of `snd_buf[next]` before kicking the DMA reload caused the ISR storm.
 - **Don't iterate on GBA crashes blind.** If the loop is "edit → build → freeze → revert", stop and attach GDB; the answer is usually one `bt` away.
+
+## NDS Runtime (Phase 0+) — Reference Engines
+
+When porting features to `nds_runtime/` or designing libnds usage, check these working engines before reinventing:
+
+- **Nitro Engine** — https://github.com/AntonioND/nitro-engine — Mature, well-documented NDS 3D engine on top of libnds. Good source for: VRAM bank assignment patterns, 3D matrix stack management, texture upload helpers, animation systems, sprite billboarding through the 3D engine.
+- **StarDust-DS** — https://github.com/Yackerw/StarDust-DS — Full game engine. Useful for: scene graph patterns, audio integration, file-streaming, full-game architecture decisions.
+
+Don't blindly copy — these are GPL/MIT and we don't want license entanglement. Read for patterns and idioms, write our own version that fits Affinity's exported-data model. When in doubt about a libnds API edge case (e.g. "does soundSetFreq take Hz or ARM7 timer ticks"), grep these repos for working usage.

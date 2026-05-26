@@ -291,6 +291,19 @@ struct CameraStartObject
     float autoOrbitSpeed = 205.0f;
     // Jump dampen factor (0-1, applied each frame while A released and rising)
     float jumpDampen = 0.75f;
+    // Orbit camera lerp speed (% per frame). Ease-in applies while L/R
+    // is held (camera follows the moving orbit target). Ease-out applies
+    // after release so the camera settles. Higher = camera tracks the
+    // target faster, keeping the player sprite more centered. NDS-only.
+    float orbitCamEaseIn  = 25.0f;
+    float orbitCamEaseOut = 50.0f;
+    // Per-frame cap on orbit_angle change. The OrbitCamera script can
+    // request a large rotation per frame, but if the camera lerp can't
+    // keep up the player sprite drifts toward the screen edge. Capping
+    // the per-frame delta forces orbit to ramp smoothly within what the
+    // lerp can handle. 0 = uncapped, higher = faster max orbit.
+    int orbitMaxDelta = 0;
+    bool orbitSnapCam = false;  // legacy field (unused)
     // Draw distance (0 = unlimited)
     float drawDistance = 0.0f;
     float spriteDrawDistance = 0.0f;

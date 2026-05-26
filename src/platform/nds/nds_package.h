@@ -19,6 +19,14 @@ bool PackageNDS(const std::string& runtimeDir,
                 const GBACameraExport& camera,
                 const std::vector<GBAMeshExport>& meshes,
                 float orbitDist,
+                const std::vector<GBASoundSampleExport>& soundSamples,
+                const std::vector<GBASoundInstanceExport>& soundInstances,
+                const std::vector<GBASkyFrameExport>& skyFrames,
+                bool ndsAntialiasing,
+                const GBAScriptExport& script,
+                const std::vector<GBABlueprintExport>& blueprints,
+                const std::vector<GBABlueprintInstanceExport>& bpInstances,
+                const std::vector<GBAHudElementExport>& hudElements,
                 std::string& errorMsg);
 
 } // namespace Affinity

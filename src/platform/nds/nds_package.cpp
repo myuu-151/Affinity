@@ -8,10 +8,17 @@
 #include <cstring>
 #include <algorithm>
 #include <filesystem>
+#include <map>
+#include <set>
+#include <vector>
+#include <array>
+#include <functional>
 
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+// winmm.h defines PlaySound as PlaySoundA/W — collides with our enum value.
+#undef PlaySound
 #endif
 
 namespace fs = std::filesystem;
@@ -127,7 +134,15 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                                 const std::vector<GBASpriteAssetExport>& assets,
                                 const GBACameraExport& camera,
                                 const std::vector<GBAMeshExport>& meshes,
-                                float orbitDist)
+                                float orbitDist,
+                                const std::vector<GBASoundSampleExport>& soundSamples,
+                                const std::vector<GBASoundInstanceExport>& soundInstances,
+                                const std::vector<GBASkyFrameExport>& skyFrames,
+                                bool ndsAntialiasing,
+                                const GBAScriptExport& script,
+                                const std::vector<GBABlueprintExport>& blueprints,
+                                const std::vector<GBABlueprintInstanceExport>& bpInstances,
+                                const std::vector<GBAHudElementExport>& hudElements)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
     std::ofstream f(outPath);
@@ -137,6 +152,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     f << "#ifndef MAPDATA_H\n";
     f << "#define MAPDATA_H\n\n";
     f << "#include <nds.h>\n\n";
+    if (ndsAntialiasing) f << "#define AFN_NDS_AA 1\n\n";
 
     // Camera start (same 16.8 fixed-point as GBA)
     f << "// Camera start position (16.8 fixed-point)\n";
@@ -151,6 +167,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     f << "#define AFN_WALK_EASE_OUT "   << (int)(camera.walkEaseOut * 256.0f / 100.0f) << "\n";
     f << "#define AFN_SPRINT_EASE_IN "  << (int)(camera.sprintEaseIn * 256.0f / 100.0f) << "\n";
     f << "#define AFN_SPRINT_EASE_OUT " << (int)(camera.sprintEaseOut * 256.0f / 100.0f) << "\n";
+    f << "#define AFN_ORBIT_EASE_IN "   << (int)(camera.orbitCamEaseIn  * 256.0f / 100.0f) << "\n";
+    f << "#define AFN_ORBIT_EASE_OUT "  << (int)(camera.orbitCamEaseOut * 256.0f / 100.0f) << "\n";
+    if (camera.orbitMaxDelta > 0) f << "#define AFN_ORBIT_MAX_DELTA " << camera.orbitMaxDelta << "\n";
+    f << "#define AFN_JUMP_CAM_LAND "   << (int)(camera.jumpCamLand * 256.0f / 100.0f) << "\n";
+    f << "#define AFN_JUMP_CAM_AIR "    << (int)(camera.jumpCamAir  * 256.0f / 100.0f) << "\n";
     if (camera.drawDistance > 0.0f)
         f << "#define AFN_DRAW_DISTANCE " << (int)(camera.drawDistance / 4.0f * 256.0f) << "\n";
     if (camera.spriteDrawDistance > 0.0f)
@@ -170,7 +191,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     f << "#define AFN_SPRITE_COUNT " << (int)sprites.size() << "\n\n";
     if (!sprites.empty())
     {
-        f << "static const int afn_sprite_data[][10] = {\n";
+        // Sprite row: x, y, z, pal, asset, scale, type, rot, animEn, meshIdx, forceStatic
+        f << "static const int afn_sprite_data[][11] = {\n";
         for (size_t i = 0; i < sprites.size(); i++)
         {
             int gx = EditorToFixed(sprites[i].x);
@@ -183,11 +205,559 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             int rotBrad = (int)(sprites[i].rotation * 65536.0f / 360.0f) & 0xFFFF;
             int animEn = sprites[i].animEnabled ? 1 : 0;
             int meshIdx2 = sprites[i].meshIdx;
+            int fStatic = sprites[i].forceStatic ? 1 : 0;
             f << "    { " << gx << ", " << gy << ", " << gz << ", "
               << pal << ", " << aIdx << ", " << scaleFixed << ", "
-              << sType << ", " << rotBrad << ", " << animEn << ", " << meshIdx2 << " },\n";
+              << sType << ", " << rotBrad << ", " << animEn << ", "
+              << meshIdx2 << ", " << fStatic << " },\n";
         }
         f << "};\n\n";
+    }
+
+    // ---- Sprite assets (OAM tiles + palette + descriptor) ----
+    // Simplified vs GBA: skip directional animation streaming and tile-reference
+    // optimization. Every asset's frames get tiles in afn_all_tiles, every asset
+    // gets one palette in afn_pal[][16]. NDS OBJ VRAM is 128KB (4× GBA) so we
+    // can afford the wasteful layout for a first cut.
+    f << "#define AFN_ASSET_COUNT " << (int)assets.size() << "\n\n";
+    if (!assets.empty()) {
+        // Pack each asset's frames into 8x8 4bpp tiles. Per-frame: tiles laid
+        // out in row-major tile order (left-to-right tile columns, top-to-bottom
+        // tile rows) so OBJ_1D mapping reads consecutive tiles for one sprite.
+        std::vector<uint32_t> allTiles;
+        std::vector<int> assetTileStart(assets.size(), 0);
+        std::vector<int> assetTilesPerFrame(assets.size(), 0);
+        std::vector<int> assetObjSize(assets.size(), 0);
+        std::vector<int> assetDirCount(assets.size(), 1);    // 1 = static, 8 = directional
+        std::vector<int> assetFrameCount(assets.size(), 1);  // unique frames emitted
+        std::vector<int> assetAnimBase(assets.size(), 0);    // index into afn_anim_table
+        std::vector<int> assetAnimCount(assets.size(), 0);   // # anims defined
+        std::vector<int> assetDefaultAnim(assets.size(), 0);
+        std::vector<int> assetFrameBase(assets.size(), 0); // index into afn_frame_dir_tile
+        // DMA-streaming bookkeeping: each asset gets a fixed VRAM tile slot
+        // sized to its largest frame (in dir-slots × tpf). The runtime DMAs
+        // the active frame's tile data into that slot on each frame change.
+        std::vector<int> assetMaxFrameTiles(assets.size(), 0);  // tiles
+        std::vector<int> assetVramTileBase(assets.size(), 0);   // tiles within sprite VRAM
+        // Per-frame: u32 offset into afn_all_tiles where this frame's data
+        // begins, and tile count so the runtime knows the DMA length.
+        std::vector<uint32_t> frameRomU32Offset;
+        std::vector<uint16_t> frameTileCount;
+
+        // Per-frame dir → tile-offset table (offsets relative to the asset's
+        // VRAM tile base — runtime adds those to vramTileBase). Lets us emit
+        // only painted directions per frame and have the runtime fall back
+        // to the nearest painted dir without baking duplicates into VRAM.
+        std::vector<std::array<uint16_t, 8>> frameDirTile;
+
+        // Global flat table of {startFrame, frameCount, fps, loop} for every
+        // anim of every directional asset.
+        struct AnimEntry { int start, count, fps, loop; };
+        std::vector<AnimEntry> animTable;
+        // Per-asset derived palette in RGB15. For directional assets the
+        // editor's a.palette[] is empty (real colors live in dirImages RGBA);
+        // we build a 15-color palette by counting unique RGB15 pixels and
+        // merging nearest pairs until ≤15 remain — mirrors gba_package.cpp:584.
+        std::vector<std::array<uint16_t, 16>> assetPal(assets.size());
+        for (auto& p : assetPal) p.fill(0);
+
+        // Which assets need static emission only (some sprite using them has
+        // forceStatic=true). Mirrors gba_package.cpp:368-373.
+        std::vector<bool> assetForceStatic(assets.size(), false);
+        for (const auto& s : sprites)
+            if (s.forceStatic && s.assetIdx >= 0 && s.assetIdx < (int)assets.size())
+                assetForceStatic[s.assetIdx] = true;
+        for (size_t ai = 0; ai < assets.size(); ai++) {
+            int prevSize = (int)allTiles.size();
+            assetTileStart[ai] = (int)allTiles.size() / 8;
+            const auto& a = assets[ai];
+            int sz = a.baseSize > 0 ? a.baseSize : 16;
+            // If a directional asset's dirImage is bigger than baseSize, the
+            // baseSize is just the runtime-streamed slot — the source image
+            // is the real OBJ size. Round up to OBJ-allowed sizes {8,16,32,64}
+            // so the OAM sprite covers the whole picture, not just the corner.
+            if (a.hasDirections && !a.dirAnimSets.empty()
+                && a.dirAnimSets[0].dirImages[0].pixels) {
+                int dw = a.dirAnimSets[0].dirImages[0].width;
+                int dh = a.dirAnimSets[0].dirImages[0].height;
+                int big = dw > dh ? dw : dh;
+                int objSz =  big <= 8  ? 8  :
+                             big <= 16 ? 16 :
+                             big <= 32 ? 32 : 64;
+                if (objSz > sz) sz = objSz;
+            }
+            assetObjSize[ai] = sz;
+            int tilesPerSide = sz / 8;
+            int tilesPerFrame = tilesPerSide * tilesPerSide;
+            // 1D_128 needs 4-tile alignment per dir-frame. 16x16 sprite
+            // (4 tiles) needs no padding. Larger sprites are naturally
+            // aligned because tilesPerSide × tilesPerSide is a multiple
+            // of 4 for objSize >= 16.
+            int tilesPerFrameStride = ((tilesPerFrame + 3) / 4) * 4;
+            assetTilesPerFrame[ai] = tilesPerFrameStride;
+            // Pick a source for the tile data: prefer a.frames; if empty and
+            // the asset has directions (player character etc.), fall back to
+            // direction 0 of dirAnimSets[0] (RGBA → nearest-palette quantized).
+            auto emitFrame = [&](const uint8_t* pixels, int fw, int fh, bool stride64) {
+                int stride = stride64 ? kExportMaxFrameSize : fw;
+                for (int ty = 0; ty < tilesPerSide; ty++)
+                for (int tx = 0; tx < tilesPerSide; tx++) {
+                    for (int py = 0; py < 8; py++) {
+                        uint32_t word = 0;
+                        for (int px = 0; px < 8; px++) {
+                            int sx = tx * 8 + px;
+                            int sy = ty * 8 + py;
+                            uint8_t pix = (sx < fw && sy < fh) ? pixels[sy * stride + sx] : 0;
+                            word |= ((uint32_t)(pix & 0xF)) << (px * 4);
+                        }
+                        allTiles.push_back(word);
+                    }
+                }
+                // Zero-pad up to tilesPerFrameStride for 1D_256 alignment.
+                int padTiles = tilesPerFrameStride - tilesPerFrame;
+                for (int i = 0; i < padTiles * 8; i++) allTiles.push_back(0);
+            };
+
+            // Prefer directional data when present — frames[] may be a zero
+            // placeholder for directional assets (the real pixels live in
+            // dirAnimSets and get DMA-streamed at runtime on GBA).
+            bool usedDir = false;
+            if (a.hasDirections && !a.dirAnimSets.empty()
+                && a.dirAnimSets[0].dirImages[0].pixels) {
+
+                // Build palette from ALL non-empty dirImages (palette must
+                // cover every direction's colors, not just direction 0).
+                struct CF { uint16_t c; int n; };
+                std::vector<CF> freqs;
+                auto addColor = [&](uint16_t c) {
+                    for (auto& f : freqs) if (f.c == c) { f.n++; return; }
+                    freqs.push_back({c, 1});
+                };
+                for (int d = 0; d < 8; d++) {
+                    const auto& img = a.dirAnimSets[0].dirImages[d];
+                    if (!img.pixels || img.width <= 0 || img.height <= 0) continue;
+                    for (int yy = 0; yy < img.height; yy++)
+                    for (int xx = 0; xx < img.width; xx++) {
+                        const uint8_t* p = img.pixels + (yy * img.width + xx) * 4;
+                        if (p[3] < 128) continue;
+                        uint16_t c15 = (p[0] >> 3) | ((p[1] >> 3) << 5) | ((p[2] >> 3) << 10);
+                        addColor(c15);
+                    }
+                }
+                while ((int)freqs.size() > 15) {
+                    int bI = 0, bJ = 1, bD = 1 << 30;
+                    for (size_t i = 0; i < freqs.size(); i++)
+                    for (size_t j = i + 1; j < freqs.size(); j++) {
+                        int dr = (int)(freqs[i].c & 31) - (int)(freqs[j].c & 31);
+                        int dg = (int)((freqs[i].c >> 5) & 31) - (int)((freqs[j].c >> 5) & 31);
+                        int db = (int)((freqs[i].c >> 10) & 31) - (int)((freqs[j].c >> 10) & 31);
+                        int d = dr*dr + dg*dg + db*db;
+                        if (d < bD) { bD = d; bI = (int)i; bJ = (int)j; }
+                    }
+                    if (freqs[bI].n < freqs[bJ].n) freqs[bI].c = freqs[bJ].c;
+                    freqs[bI].n += freqs[bJ].n;
+                    freqs.erase(freqs.begin() + bJ);
+                }
+                assetPal[ai][0] = 0;
+                for (size_t i = 0; i < freqs.size() && i < 15; i++)
+                    assetPal[ai][i + 1] = freqs[i].c;
+
+                // GBA convention (gba_package.cpp:492-501): anim.endFrame is
+                // the FRAME COUNT, not an end index. Anims are laid out
+                // contiguously in dirAnimSets in declaration order — anim N
+                // plays dirAnimSets[base..base + endFrame - 1] where
+                // base = sum of prior endFrames. anim.startFrame is ignored
+                // for tile lookup.
+                int framesBaseCount = 0;
+                std::vector<int> animBase(a.anims.size(), 0);
+                {
+                    int base = 0;
+                    for (size_t an = 0; an < a.anims.size(); an++) {
+                        animBase[an] = base;
+                        base += a.anims[an].endFrame;
+                    }
+                }
+                // uniqueFrames = every dirAnimSets index touched by any anim.
+                std::vector<int> uniqueFrames;
+                if (!a.anims.empty()) {
+                    std::vector<bool> seen(a.dirAnimSets.size() + 1, false);
+                    for (size_t an = 0; an < a.anims.size(); an++) {
+                        int base = animBase[an];
+                        int cnt  = a.anims[an].endFrame;
+                        for (int f2 = 0; f2 < cnt; f2++) {
+                            int fr = base + f2;
+                            if (fr >= 0 && fr < (int)seen.size() && !seen[fr]) {
+                                seen[fr] = true;
+                                uniqueFrames.push_back(fr);
+                            }
+                        }
+                    }
+                    std::sort(uniqueFrames.begin(), uniqueFrames.end());
+                    if (uniqueFrames.empty()) uniqueFrames.push_back(0);
+                } else {
+                    uniqueFrames.push_back(0);
+                }
+                // Remap: original frame idx → emitted slot.
+                std::vector<int> remap((int)a.dirAnimSets.size() + 1, 0);
+                for (size_t f = 0; f < uniqueFrames.size(); f++)
+                    if (uniqueFrames[f] < (int)remap.size())
+                        remap[uniqueFrames[f]] = (int)f;
+                assetFrameCount[ai] = (int)uniqueFrames.size();
+
+                // Build per-anim table entries (using remapped indices).
+                assetAnimBase[ai]    = (int)animTable.size();
+                assetAnimCount[ai]   = (int)a.anims.size();
+                assetDefaultAnim[ai] = (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size())
+                                       ? a.defaultAnim : 0;
+                // GBA convention: anim N plays dirAnimSets[animBase[N] ..
+                // animBase[N] + endFrame - 1]. Map base into the remapped
+                // (deduplicated) tile index space; count is the raw endFrame.
+                for (size_t an = 0; an < a.anims.size(); an++) {
+                    int base = animBase[an];
+                    int cnt  = a.anims[an].endFrame;
+                    if (cnt < 1) cnt = 1;
+                    if (base < 0) base = 0;
+                    if (base >= (int)remap.size()) base = (int)remap.size() - 1;
+                    AnimEntry ae;
+                    ae.start = remap[base];
+                    ae.count = cnt;
+                    ae.fps   = (int)(a.anims[an].fps * a.anims[an].speed);
+                    ae.loop  = a.anims[an].loop ? 1 : 0;
+                    animTable.push_back(ae);
+                }
+
+                int dirCount = assetForceStatic[ai] ? 1 : 8;
+                assetDirCount[ai] = dirCount;
+
+                // Record this asset's start in the global frame-dir lookup
+                // table so the runtime can index it via assetFrameBase[ai] +
+                // local frame index.
+                assetFrameBase[ai] = (int)frameDirTile.size();
+
+                // Tile layout: emit only PAINTED directions per frame (was: all
+                // 8 even if 5 were copies of dir 0). For walk/sprint that's 3
+                // dirs instead of 8 — sonic's full anim set shrinks from 336KB
+                // to ~104KB. Per-frame dir→slot mapping baked into
+                // afn_frame_dir_tile so runtime can fall back to nearest
+                // populated dir when the requested facing isn't painted.
+                // DMA streaming: per frame, record ROM u32 offset + tile
+                // count so the runtime can DMA only the active frame into
+                // the asset's fixed VRAM slot. dirTileOff values become
+                // relative to the VRAM slot (not the asset's ROM region).
+                for (size_t fi = 0; fi < uniqueFrames.size(); fi++) {
+                    int srcFrameIdx = uniqueFrames[fi];
+                    std::array<uint16_t, 8> dirTileOff;
+                    size_t romU32Before = allTiles.size();
+                    frameRomU32Offset.push_back((uint32_t)romU32Before);
+                    if (srcFrameIdx < framesBaseCount) {
+                        const auto& fr = a.frames[srcFrameIdx];
+                        int fw = fr.width > 0 ? fr.width : sz;
+                        int fh = fr.height > 0 ? fr.height : sz;
+                        emitFrame(fr.pixels, fw, fh, true);
+                        for (int d = 0; d < 8; d++) dirTileOff[d] = 0;
+                        frameDirTile.push_back(dirTileOff);
+                        int tiles = (int)((allTiles.size() - romU32Before) / 8);
+                        frameTileCount.push_back((uint16_t)tiles);
+                        if (tiles > assetMaxFrameTiles[ai]) assetMaxFrameTiles[ai] = tiles;
+                        continue;
+                    }
+                    int setIdx = srcFrameIdx - framesBaseCount;
+                    if (setIdx < 0) setIdx = 0;
+                    if (setIdx >= (int)a.dirAnimSets.size())
+                        setIdx = (int)a.dirAnimSets.size() - 1;
+
+                    int populated[8];
+                    int popCount = 0;
+                    for (int d = 0; d < 8; d++) {
+                        const auto& img = a.dirAnimSets[setIdx].dirImages[d];
+                        if (img.pixels && img.width > 0 && img.height > 0)
+                            populated[popCount++] = d;
+                    }
+                    if (popCount == 0) {
+                        emitFrame(nullptr, 0, 0, false);
+                        for (int d = 0; d < 8; d++) dirTileOff[d] = 0;
+                        frameDirTile.push_back(dirTileOff);
+                        int tiles = (int)((allTiles.size() - romU32Before) / 8);
+                        frameTileCount.push_back((uint16_t)tiles);
+                        if (tiles > assetMaxFrameTiles[ai]) assetMaxFrameTiles[ai] = tiles;
+                        continue;
+                    }
+
+                    int slotForDir[8];
+                    for (int d = 0; d < 8; d++) {
+                        int bestSlot = 0, bestDist = 100;
+                        for (int s = 0; s < popCount; s++) {
+                            int diff = populated[s] - d;
+                            if (diff < 0) diff = -diff;
+                            if (diff > 4) diff = 8 - diff;
+                            if (diff < bestDist) { bestDist = diff; bestSlot = s; }
+                        }
+                        slotForDir[d] = bestSlot;
+                        // Relative to asset's VRAM slot — runtime adds the
+                        // asset's vramTileBase.
+                        dirTileOff[d] = (uint16_t)(bestSlot * tilesPerFrameStride);
+                    }
+                    frameDirTile.push_back(dirTileOff);
+
+                    // Emit each populated dir's tile data sequentially.
+                    for (int s = 0; s < popCount; s++) {
+                        int d = populated[s];
+                        const auto& img = a.dirAnimSets[setIdx].dirImages[d];
+                        int sw = img.width, sh = img.height;
+                        std::vector<uint8_t> palIdx(sw * sh, 0);
+                        for (int yy = 0; yy < sh; yy++)
+                        for (int xx = 0; xx < sw; xx++) {
+                            const uint8_t* p = img.pixels + (yy * sw + xx) * 4;
+                            if (p[3] < 128) { palIdx[yy*sw+xx] = 0; continue; }
+                            int r5 = p[0] >> 3, g5 = p[1] >> 3, b5 = p[2] >> 3;
+                            int best = 1, bestD = 1 << 30;
+                            for (size_t i = 0; i < freqs.size(); i++) {
+                                int pr = freqs[i].c & 31;
+                                int pg = (freqs[i].c >> 5) & 31;
+                                int pb = (freqs[i].c >> 10) & 31;
+                                int dd = (r5-pr)*(r5-pr) + (g5-pg)*(g5-pg) + (b5-pb)*(b5-pb);
+                                if (dd < bestD) { bestD = dd; best = (int)i + 1; }
+                            }
+                            palIdx[yy*sw+xx] = (uint8_t)best;
+                        }
+                        emitFrame(palIdx.data(), sw, sh, false);
+                    }
+                    (void)slotForDir;
+                    int tiles = popCount * tilesPerFrameStride;
+                    frameTileCount.push_back((uint16_t)tiles);
+                    if (tiles > assetMaxFrameTiles[ai]) assetMaxFrameTiles[ai] = tiles;
+                }
+                // assetDirCount stays 8 so the runtime still picks a facing
+                // for sprite-direction logic. Tile addressing skips the *8
+                // multiply entirely now (uses afn_frame_dir_tile[]).
+                usedDir = true;
+            }
+            if (!usedDir) {
+                for (int c = 0; c < 16; c++)
+                    assetPal[ai][c] = EditorColorToRGB15(a.palette[c]);
+                // The editor lets non-directional assets stash extra animation
+                // frames inside dirAnimSets[].dirImages[0] (e.g. a 1-direction
+                // ring with 4 spin frames). Anim frame indices count
+                // a.frames first, then dirAnimSets in order — anim "3..4"
+                // for a ring with frames.size()=1 and 4 dirAnimSets means
+                // dirAnimSets[2] and dirAnimSets[3].
+                int framesFromBase = (int)a.frames.size();
+                int framesFromDir  = (int)a.dirAnimSets.size();
+                int totalFrames = framesFromBase + framesFromDir;
+                if (totalFrames < 1) totalFrames = 1;
+                // Single-dir asset (ring, checkpoint, etc.) — still goes
+                // through the indirection table so the runtime addressing
+                // is uniform. Every requested dir maps to the same slot
+                // (the only painted one).
+                assetFrameBase[ai] = (int)frameDirTile.size();
+                for (auto& fr : a.frames) {
+                    std::array<uint16_t, 8> dirTileOff;
+                    for (int d = 0; d < 8; d++) dirTileOff[d] = 0;
+                    frameDirTile.push_back(dirTileOff);
+                    size_t romU32Before = allTiles.size();
+                    frameRomU32Offset.push_back((uint32_t)romU32Before);
+                    emitFrame(fr.pixels, fr.width > 0 ? fr.width : sz,
+                              fr.height > 0 ? fr.height : sz, true);
+                    int tiles = (int)((allTiles.size() - romU32Before) / 8);
+                    frameTileCount.push_back((uint16_t)tiles);
+                    if (tiles > assetMaxFrameTiles[ai]) assetMaxFrameTiles[ai] = tiles;
+                }
+                for (const auto& dset : a.dirAnimSets) {
+                    std::array<uint16_t, 8> dirTileOff;
+                    for (int d = 0; d < 8; d++) dirTileOff[d] = 0;
+                    frameDirTile.push_back(dirTileOff);
+                    size_t romU32Before = allTiles.size();
+                    frameRomU32Offset.push_back((uint32_t)romU32Before);
+                    const auto& img = dset.dirImages[0];
+                    if (!img.pixels) {
+                        emitFrame(nullptr, 0, 0, false);
+                        int tiles = (int)((allTiles.size() - romU32Before) / 8);
+                        frameTileCount.push_back((uint16_t)tiles);
+                        if (tiles > assetMaxFrameTiles[ai]) assetMaxFrameTiles[ai] = tiles;
+                        continue;
+                    }
+                    // Quantize this RGBA frame into the asset palette built
+                    // above (a.palette already populated).
+                    int fw = img.width, fh = img.height;
+                    std::vector<uint8_t> palIdx(fw * fh, 0);
+                    for (int yy = 0; yy < fh; yy++)
+                    for (int xx = 0; xx < fw; xx++) {
+                        const uint8_t* p = img.pixels + (yy * fw + xx) * 4;
+                        if (p[3] < 128) { palIdx[yy*fw+xx] = 0; continue; }
+                        int r5 = p[0] >> 3, g5 = p[1] >> 3, b5 = p[2] >> 3;
+                        int best = 1, bestD = 1 << 30;
+                        for (int c = 1; c < 16; c++) {
+                            uint16_t pc = assetPal[ai][c];
+                            if (pc == 0) continue;
+                            int pr = pc & 31, pg = (pc >> 5) & 31, pb = (pc >> 10) & 31;
+                            int d = (r5-pr)*(r5-pr) + (g5-pg)*(g5-pg) + (b5-pb)*(b5-pb);
+                            if (d < bestD) { bestD = d; best = c; }
+                        }
+                        palIdx[yy*fw+xx] = (uint8_t)best;
+                    }
+                    emitFrame(palIdx.data(), fw, fh, false);
+                    int tiles = (int)((allTiles.size() - romU32Before) / 8);
+                    frameTileCount.push_back((uint16_t)tiles);
+                    if (tiles > assetMaxFrameTiles[ai]) assetMaxFrameTiles[ai] = tiles;
+                }
+                assetFrameCount[ai] = totalFrames;
+                assetAnimBase[ai]    = (int)animTable.size();
+                assetAnimCount[ai]   = (int)a.anims.size();
+                assetDefaultAnim[ai] = (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size())
+                                       ? a.defaultAnim : 0;
+                // GBA convention (gba_package.cpp:994-1009): per anim,
+                // baseSet = cumulative sum of prior endFrames, fc = endFrame.
+                // Anim plays dirAnimSets[base .. base+fc-1]. In our combined
+                // tile layout, dirAnimSets[k] sits at tile-slot
+                // (framesFromBase + k). Ring "idle, 3, 4" → base=0, fc=4 →
+                // plays dirAnimSets[0..3] = combined slots [1..4].
+                int baseSet = 0;
+                for (const auto& anim : a.anims) {
+                    int fc = anim.endFrame;
+                    if (fc < 1) fc = 1;
+                    AnimEntry ae;
+                    ae.start = framesFromBase + baseSet;
+                    ae.count = fc;
+                    if (ae.start >= totalFrames) ae.start = totalFrames - 1;
+                    if (ae.start + ae.count > totalFrames)
+                        ae.count = totalFrames - ae.start;
+                    if (ae.count < 1) ae.count = 1;
+                    ae.fps   = (int)(anim.fps * anim.speed);
+                    ae.loop  = anim.loop ? 1 : 0;
+                    animTable.push_back(ae);
+                    baseSet += fc;
+                }
+            }
+            f << "// asset " << ai << " emitted " << ((int)allTiles.size() - prevSize)
+              << " u32, total now " << (int)allTiles.size()
+              << " (frames=" << assetFrameCount[ai] << " dirs=" << assetDirCount[ai]
+              << " tpf=" << assetTilesPerFrame[ai]
+              << " maxFrameTiles=" << assetMaxFrameTiles[ai] << ")\n";
+        }
+        // DMA streaming VRAM placement: each asset gets a fixed slot sized
+        // to its largest frame (max tile-count across all its frames).
+        // Greedy bin-pack into the 128KB main sprite VRAM (4096 tiles, with
+        // 1D_128 mapping requiring 4-tile alignment). Total active usage
+        // is the sum of max-frame-sizes (~1600 tiles ≈ 51KB for this
+        // project) — well under the 128KB ceiling that bulk-loading hit.
+        {
+            int vramCursor = 0;
+            for (size_t ai = 0; ai < assets.size(); ai++) {
+                // 4-tile alignment for 1D_128 sprite mapping
+                vramCursor = (vramCursor + 3) & ~3;
+                assetVramTileBase[ai] = vramCursor;
+                int sz2 = assetMaxFrameTiles[ai];
+                if (sz2 < 1) sz2 = 1;
+                vramCursor += sz2;
+            }
+            f << "// VRAM tile usage: " << vramCursor << " tiles ("
+              << (vramCursor * 32) << " bytes of " << (128 * 1024) << ")\n";
+        }
+        f << "static const u32 afn_all_tiles[" << (allTiles.empty() ? 1 : (int)allTiles.size()) << "] = {";
+        if (allTiles.empty()) f << " 0 ";
+        else {
+            for (size_t i = 0; i < allTiles.size(); i++) {
+                if (i % 8 == 0) f << "\n    ";
+                char hex[12]; snprintf(hex, sizeof(hex), "0x%08X", allTiles[i]);
+                f << hex;
+                if (i + 1 < allTiles.size()) f << ",";
+            }
+            f << "\n";
+        }
+        f << "};\n";
+        f << "#define AFN_ALL_TILES_LEN " << (int)allTiles.size() * 4 << "\n\n";
+
+        // Per-asset RGB15 palette (16 entries, index 0 = transparent).
+        // assetPal was built per-asset during tile emission — directional
+        // assets get a histogram-derived palette, non-directional reuse
+        // the editor's a.palette[].
+        f << "static const u16 afn_pal[" << assets.size() << "][16] = {\n";
+        for (size_t ai = 0; ai < assets.size(); ai++) {
+            f << "    { ";
+            for (int c = 0; c < 16; c++) {
+                char hex[8]; snprintf(hex, sizeof(hex), "0x%04X", assetPal[ai][c]);
+                f << hex;
+                if (c < 15) f << ", ";
+            }
+            f << " },\n";
+        }
+        f << "};\n";
+
+        // Per-asset descriptor:
+        //  [0] tileStart       — first tile index (in 32-byte units)
+        //  [1] tilesPerFrame   — tiles per direction frame
+        //  [2] frameCount      — unique frames emitted per direction
+        //  [3] objSize         — OAM sprite size (8/16/32/64)
+        //  [4] palBank         — OBJ palette bank
+        //  [5] dirCount        — 1 (static) or 8 (directional)
+        //  [6] animBase        — offset into afn_anim_table
+        //  [7] animCount       — # anims in afn_anim_table for this asset
+        //  [8] defaultAnim     — index of the anim to cycle by default
+        // Tile layout: tileStart + afn_frame_dir_tile[assetFrameBase + frame][dir].
+        // Indirection table handles per-frame dir count (walk has 3 dirs,
+        // jump has 1, idle has 8) and runtime fallback to nearest painted
+        // dir. asset_desc[9] is now assetFrameBase (was unused dirCount=1
+        // marker for new path).
+        // asset_desc[0] is now vramTileBase (where the asset's per-frame
+        // streamed data lands in sprite VRAM), not a ROM tile index.
+        f << "static const int afn_asset_desc[][10] = {\n";
+        for (size_t ai = 0; ai < assets.size(); ai++) {
+            int palBank = (int)ai & 0xF;
+            f << "    { " << assetVramTileBase[ai] << ", " << assetTilesPerFrame[ai] << ", "
+              << assetFrameCount[ai] << ", " << assetObjSize[ai] << ", "
+              << palBank << ", " << assetDirCount[ai] << ", "
+              << assetAnimBase[ai] << ", " << assetAnimCount[ai] << ", "
+              << assetDefaultAnim[ai] << ", " << assetFrameBase[ai] << " },\n";
+        }
+        f << "};\n\n";
+
+        // DMA streaming: per-frame ROM u32 offset (into afn_all_tiles) and
+        // tile-count (bytes / 32). Runtime reads these to DMA the active
+        // frame into the asset's VRAM slot whenever the frame changes.
+        f << "#define AFN_FRAME_STREAM_LEN " << (int)frameRomU32Offset.size() << "\n";
+        if (!frameRomU32Offset.empty()) {
+            f << "static const u32 afn_frame_rom_off[" << (int)frameRomU32Offset.size() << "] = {\n    ";
+            for (size_t i = 0; i < frameRomU32Offset.size(); i++) {
+                f << frameRomU32Offset[i];
+                if (i + 1 < frameRomU32Offset.size()) f << ", ";
+                if ((i + 1) % 12 == 0) f << "\n    ";
+            }
+            f << "\n};\n";
+            f << "static const u16 afn_frame_tile_count[" << (int)frameTileCount.size() << "] = {\n    ";
+            for (size_t i = 0; i < frameTileCount.size(); i++) {
+                f << frameTileCount[i];
+                if (i + 1 < frameTileCount.size()) f << ", ";
+                if ((i + 1) % 16 == 0) f << "\n    ";
+            }
+            f << "\n};\n\n";
+        }
+
+        // Per-frame dir → tile-offset (relative to asset's tileStart).
+        // Runtime: tileIdx = tileStart + afn_frame_dir_tile[base + frame][dir]
+        f << "#define AFN_FRAME_DIR_TILE_LEN " << (int)frameDirTile.size() << "\n";
+        if (!frameDirTile.empty()) {
+            f << "static const u16 afn_frame_dir_tile[" << (int)frameDirTile.size() << "][8] = {\n";
+            for (const auto& row : frameDirTile) {
+                f << "    { ";
+                for (int d = 0; d < 8; d++) {
+                    f << row[d];
+                    if (d < 7) f << ", ";
+                }
+                f << " },\n";
+            }
+            f << "};\n\n";
+        }
+
+        // Per-anim table: {start, count, fps, loop}. Indexed by
+        // afn_asset_desc[asset][6] + anim_idx. Empty if no asset has anims.
+        f << "#define AFN_ANIM_TABLE_LEN " << (int)animTable.size() << "\n";
+        if (!animTable.empty()) {
+            f << "static const int afn_anim_table[" << (int)animTable.size() << "][4] = {\n";
+            for (const auto& ae : animTable)
+                f << "    { " << ae.start << ", " << ae.count << ", "
+                  << ae.fps << ", " << ae.loop << " },\n";
+            f << "};\n\n";
+        }
     }
 
     // ---- Mesh assets ----
@@ -231,6 +801,20 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             }
             f << "};\n";
 
+            // Texture coordinates as t16 (4.12 fixed = u * texW * 16, v * texH * 16).
+            // Only meaningful when textured; emit zeros otherwise so the runtime
+            // can unconditionally read afn_meshN_uvs without an extra null check.
+            f << "static const s16 afn_mesh" << mi << "_uvs[] = {\n";
+            for (int v = 0; v < vc; v++)
+            {
+                float u = (v * 2 + 0 < (int)mesh.uvs.size()) ? mesh.uvs[v * 2 + 0] : 0.0f;
+                float vv = (v * 2 + 1 < (int)mesh.uvs.size()) ? mesh.uvs[v * 2 + 1] : 0.0f;
+                int16_t tu = (int16_t)(u * mesh.texW * 16.0f);
+                int16_t tv = (int16_t)(vv * mesh.texH * 16.0f);
+                f << "    " << tu << ", " << tv << ",\n";
+            }
+            f << "};\n";
+
             // Triangle indices
             f << "static const u16 afn_mesh" << mi << "_idx[] = {\n    ";
             for (int i = 0; i < ic; i++)
@@ -253,15 +837,21 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             if (qic == 0) f << "0";
             f << "\n};\n";
 
-            // Texture data (if textured)
+            // Texture data (if textured). NDS GL_RGB16 (4bpp paletted) packs
+            // 2 pixels per byte (low nibble = even pixel, high nibble = odd).
+            // GBA texture pixels in the source vector are 1 per byte, so we
+            // pair them up here.
             if (mesh.textured && mesh.texW > 0 && mesh.texH > 0 && !mesh.texPixels.empty())
             {
                 f << "static const u8 afn_mesh" << mi << "_tex[] = {\n    ";
-                int texSize = mesh.texW * mesh.texH;
-                for (int i = 0; i < texSize && i < (int)mesh.texPixels.size(); i++)
+                int texPx = mesh.texW * mesh.texH;
+                int packed = (texPx + 1) / 2;
+                for (int i = 0; i < packed; i++)
                 {
-                    f << (int)mesh.texPixels[i];
-                    if (i + 1 < texSize) f << ", ";
+                    int lo = (i * 2 + 0 < (int)mesh.texPixels.size()) ? (mesh.texPixels[i*2+0] & 0xF) : 0;
+                    int hi = (i * 2 + 1 < (int)mesh.texPixels.size()) ? (mesh.texPixels[i*2+1] & 0xF) : 0;
+                    f << ((hi << 4) | lo);
+                    if (i + 1 < packed) f << ", ";
                     if ((i + 1) % 16 == 0) f << "\n    ";
                 }
                 f << "\n};\n";
@@ -314,6 +904,14 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         }
         f << " };\n";
 
+        f << "static const s16* afn_mesh_uv_ptrs[] = { ";
+        for (size_t mi = 0; mi < meshes.size(); mi++)
+        {
+            f << "afn_mesh" << mi << "_uvs";
+            if (mi + 1 < meshes.size()) f << ", ";
+        }
+        f << " };\n";
+
         // Texture data pointers
         f << "static const u8* afn_mesh_tex_ptrs[] = { ";
         for (size_t mi = 0; mi < meshes.size(); mi++)
@@ -337,8 +935,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         }
         f << " };\n";
 
-        // Mesh descriptor: { vertCount, indexCount, quadIdxCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase, wireframe, grayscale, drawDist }
-        f << "static const int afn_mesh_desc[][15] = {\n";
+        // Mesh descriptor: { vertCount, indexCount, quadIdxCount, colorRGB15, cullMode, lit, sorted, halfRes, textured, texW, texShift, texPalBase, wireframe, grayscale, drawDist, visible }
+        f << "static const int afn_mesh_desc[][16] = {\n";
         for (size_t mi = 0; mi < meshes.size(); mi++)
         {
             const auto& mesh = meshes[mi];
@@ -360,9 +958,1102 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
               << mesh.lit << ", 0, " << mesh.halfRes << ", "
               << mesh.textured << ", " << mesh.texW << ", "
               << texShift << ", 0, "
-              << mesh.wireframe << ", " << mesh.grayscale << ", " << drawDist << " },\n";
+              << mesh.wireframe << ", " << mesh.grayscale << ", " << drawDist << ", "
+              << mesh.visible << " },\n";
         }
         f << "};\n\n";
+    }
+
+    // ---- Collision data: pre-baked world-space faces + spatial grid ----
+    // Ported verbatim from gba_package.cpp:1521 — same data layout works on
+    // NDS because the runtime collision math is pure integer fixed-point.
+    {
+        struct CollFaceExp {
+            float v0x, v0z, v1x, v1z, v2x, v2z;
+            float v0y, v1y, v2y;
+            float nx, nz;
+            int flags;     // 1=floor, 2=ceiling, 4=wall
+            int sprIdx;
+        };
+        std::vector<CollFaceExp> collFaces;
+        for (size_t si = 0; si < sprites.size(); si++) {
+            if (sprites[si].meshIdx < 0) continue;
+            int mi = sprites[si].meshIdx;
+            if (mi >= (int)meshes.size()) continue;
+            if (!meshes[mi].collision) continue;
+            const auto& mesh = meshes[mi];
+            const auto& spr = sprites[si];
+            float sprScale = spr.scale;
+            float rotY = spr.rotation * 3.14159265f / 180.0f;
+            float rotX = spr.rotationX * 3.14159265f / 180.0f;
+            float rotZ = spr.rotationZ * 3.14159265f / 180.0f;
+            float cosY = cosf(rotY), sinY = sinf(rotY);
+            float cosX = cosf(rotX), sinX = sinf(rotX);
+            float cosZ = cosf(rotZ), sinZ = sinf(rotZ);
+            int vc = (int)mesh.positions.size() / 3;
+            std::vector<float> wp(vc * 3);
+            for (int v = 0; v < vc; v++) {
+                float lx = mesh.positions[v*3+0] * sprScale;
+                float ly = mesh.positions[v*3+1] * sprScale;
+                float lz = mesh.positions[v*3+2] * sprScale;
+                float rx = lx*cosY - lz*sinY;
+                float rz = lx*sinY + lz*cosY;
+                float ry = ly;
+                float ry2 = ry*cosX - rz*sinX;
+                float rz2 = ry*sinX + rz*cosX;
+                float rx2 = rx*cosZ - ry2*sinZ;
+                float ry3 = rx*sinZ + ry2*cosZ;
+                wp[v*3+0] = rx2 + spr.x;
+                wp[v*3+1] = ry3 + spr.y;
+                wp[v*3+2] = rz2 + spr.z;
+            }
+            auto emitTri = [&](int i0, int i1, int i2) {
+                float ax=wp[i0*3], ay=wp[i0*3+1], az=wp[i0*3+2];
+                float bx=wp[i1*3], by=wp[i1*3+1], bz=wp[i1*3+2];
+                float cx=wp[i2*3], cy=wp[i2*3+1], cz=wp[i2*3+2];
+                float e1x=bx-ax, e1y=by-ay, e1z=bz-az;
+                float e2x=cx-ax, e2y=cy-ay, e2z=cz-az;
+                float fnx = e1y*e2z - e1z*e2y;
+                float fny = e1z*e2x - e1x*e2z;
+                float fnz = e1x*e2y - e1y*e2x;
+                float len = sqrtf(fnx*fnx + fny*fny + fnz*fnz);
+                if (len < 0.0001f) return;
+                fnx/=len; fny/=len; fnz/=len;
+                int flags = (fny > 0.017f) ? 1 : (fny < -0.7f) ? 2 : 4;
+                float nxzLen = sqrtf(fnx*fnx + fnz*fnz);
+                float nnx = 0, nnz = 0;
+                if (nxzLen > 0.001f) { nnx = fnx/nxzLen; nnz = fnz/nxzLen; }
+                CollFaceExp cf;
+                cf.v0x=ax; cf.v0z=az; cf.v1x=bx; cf.v1z=bz; cf.v2x=cx; cf.v2z=cz;
+                cf.v0y=ay; cf.v1y=by; cf.v2y=cy;
+                cf.nx=nnx; cf.nz=nnz; cf.flags=flags; cf.sprIdx=(int)si;
+                collFaces.push_back(cf);
+            };
+            for (int t = 0; t < (int)mesh.indices.size()/3; t++)
+                emitTri(mesh.indices[t*3], mesh.indices[t*3+1], mesh.indices[t*3+2]);
+            for (int q = 0; q < (int)mesh.quadIndices.size()/4; q++) {
+                int q0=mesh.quadIndices[q*4], q1=mesh.quadIndices[q*4+1];
+                int q2=mesh.quadIndices[q*4+2], q3=mesh.quadIndices[q*4+3];
+                emitTri(q0,q1,q2);
+                emitTri(q0,q2,q3);
+            }
+        }
+        if (!collFaces.empty()) {
+            int totalFaces = (int)collFaces.size();
+            const int GRID_SIZE = 8;
+            auto toNdsPx = [](float ec) { return (ec + 512.0f) / 4.0f; };
+            float meshMinX=1e9f, meshMaxX=-1e9f, meshMinZ=1e9f, meshMaxZ=-1e9f;
+            for (int fi = 0; fi < totalFaces; fi++) {
+                const auto& cf = collFaces[fi];
+                float xs[]={toNdsPx(cf.v0x),toNdsPx(cf.v1x),toNdsPx(cf.v2x)};
+                float zs[]={toNdsPx(cf.v0z),toNdsPx(cf.v1z),toNdsPx(cf.v2z)};
+                for (int k=0;k<3;k++) {
+                    if (xs[k]<meshMinX) meshMinX=xs[k];
+                    if (xs[k]>meshMaxX) meshMaxX=xs[k];
+                    if (zs[k]<meshMinZ) meshMinZ=zs[k];
+                    if (zs[k]>meshMaxZ) meshMaxZ=zs[k];
+                }
+            }
+            if (meshMinX>0) meshMinX=0; if (meshMaxX<256) meshMaxX=256;
+            if (meshMinZ>0) meshMinZ=0; if (meshMaxZ<256) meshMaxZ=256;
+            float gridOriginX = floorf(meshMinX);
+            float gridOriginZ = floorf(meshMinZ);
+            float gridSpan = std::max(meshMaxX-gridOriginX+1.0f, meshMaxZ-gridOriginZ+1.0f);
+            float cellSize = ceilf(gridSpan / (float)GRID_SIZE);
+            if (cellSize < 1.0f) cellSize = 1.0f;
+            int cellSizeFx = (int)ceilf(cellSize * 256.0f);
+            int gridShift = 0;
+            { int v = cellSizeFx; while (v>1) { v>>=1; gridShift++; } }
+            if ((1<<gridShift) < cellSizeFx) gridShift++;
+            cellSizeFx = 1 << gridShift;
+            cellSize = cellSizeFx / 256.0f;
+            int gridOriginXFx = (int)(gridOriginX * 256.0f);
+            int gridOriginZFx = (int)(gridOriginZ * 256.0f);
+
+            std::vector<std::vector<int>> gridCells(GRID_SIZE * GRID_SIZE);
+            for (int fi = 0; fi < totalFaces; fi++) {
+                const auto& cf = collFaces[fi];
+                float minX=std::min({toNdsPx(cf.v0x),toNdsPx(cf.v1x),toNdsPx(cf.v2x)});
+                float maxX=std::max({toNdsPx(cf.v0x),toNdsPx(cf.v1x),toNdsPx(cf.v2x)});
+                float minZ=std::min({toNdsPx(cf.v0z),toNdsPx(cf.v1z),toNdsPx(cf.v2z)});
+                float maxZ=std::max({toNdsPx(cf.v0z),toNdsPx(cf.v1z),toNdsPx(cf.v2z)});
+                int cMinX=std::max(0,(int)((minX-gridOriginX)/cellSize));
+                int cMaxX=std::min(GRID_SIZE-1,(int)((maxX-gridOriginX)/cellSize));
+                int cMinZ=std::max(0,(int)((minZ-gridOriginZ)/cellSize));
+                int cMaxZ=std::min(GRID_SIZE-1,(int)((maxZ-gridOriginZ)/cellSize));
+                for (int gz=cMinZ; gz<=cMaxZ; gz++)
+                    for (int gx=cMinX; gx<=cMaxX; gx++)
+                        gridCells[gz*GRID_SIZE+gx].push_back(fi);
+            }
+            std::vector<int> gridStart(GRID_SIZE*GRID_SIZE), gridCount(GRID_SIZE*GRID_SIZE);
+            std::vector<int> gridFaceList;
+            for (int c=0; c<GRID_SIZE*GRID_SIZE; c++) {
+                gridStart[c] = (int)gridFaceList.size();
+                gridCount[c] = (int)gridCells[c].size();
+                for (int fi : gridCells[c]) gridFaceList.push_back(fi);
+            }
+
+            f << "// ---- Collision data (" << totalFaces << " faces, "
+              << gridFaceList.size() << " grid refs) ----\n";
+            f << "#define AFN_COL_FACE_COUNT " << totalFaces << "\n";
+            f << "#define AFN_COL_GRID_SIZE 8\n";
+            f << "#define AFN_COL_GRID_SHIFT " << gridShift << "\n";
+            f << "#define AFN_COL_GRID_ORIGIN_X " << gridOriginXFx << "\n";
+            f << "#define AFN_COL_GRID_ORIGIN_Z " << gridOriginZFx << "\n\n";
+            f << "typedef struct {\n";
+            f << "    int v0x, v0z, v1x, v1z, v2x, v2z;\n";
+            f << "    int v0y, v1y, v2y;\n";
+            f << "    int nx, nz;\n";
+            f << "    int flags;\n";
+            f << "    int sprIdx;\n";
+            f << "} CollFace;\n\n";
+            f << "static const CollFace afn_col_faces[" << totalFaces << "] = {\n";
+            for (int fi = 0; fi < totalFaces; fi++) {
+                const auto& cf = collFaces[fi];
+                auto toFx = [](float ec) { return (int)((ec + 512.0f) / 4.0f * 256.0f); };
+                auto toFy = [](float ey) { return (int)(ey / 4.0f * 256.0f); };
+                f << "    { "
+                  << toFx(cf.v0x) << "," << toFx(cf.v0z) << ", "
+                  << toFx(cf.v1x) << "," << toFx(cf.v1z) << ", "
+                  << toFx(cf.v2x) << "," << toFx(cf.v2z) << ", "
+                  << toFy(cf.v0y) << "," << toFy(cf.v1y) << "," << toFy(cf.v2y) << ", "
+                  << (int)(cf.nx * 256.0f) << "," << (int)(cf.nz * 256.0f) << ", "
+                  << cf.flags << ", " << cf.sprIdx << " },\n";
+            }
+            f << "};\n";
+            f << "static const u16 afn_col_grid_start[" << GRID_SIZE*GRID_SIZE << "] = {\n    ";
+            for (int c=0; c<GRID_SIZE*GRID_SIZE; c++) {
+                f << gridStart[c];
+                if (c+1 < GRID_SIZE*GRID_SIZE) f << ",";
+                if ((c+1)%8 == 0 && c+1 < GRID_SIZE*GRID_SIZE) f << "\n    ";
+            }
+            f << "\n};\n";
+            f << "static const u16 afn_col_grid_count[" << GRID_SIZE*GRID_SIZE << "] = {\n    ";
+            for (int c=0; c<GRID_SIZE*GRID_SIZE; c++) {
+                f << gridCount[c];
+                if (c+1 < GRID_SIZE*GRID_SIZE) f << ",";
+                if ((c+1)%8 == 0 && c+1 < GRID_SIZE*GRID_SIZE) f << "\n    ";
+            }
+            f << "\n};\n";
+            if (!gridFaceList.empty()) {
+                f << "static const u16 afn_col_grid_faces[" << gridFaceList.size() << "] = {\n    ";
+                for (size_t i=0; i<gridFaceList.size(); i++) {
+                    f << gridFaceList[i];
+                    if (i+1 < gridFaceList.size()) f << ",";
+                    if ((i+1)%16 == 0 && i+1 < gridFaceList.size()) f << "\n    ";
+                }
+                f << "\n};\n";
+            }
+            f << "\n";
+        }
+    }
+
+    // ---- Sound / PCM Audio Data (NDS path — hardware mixer on ARM7) ----
+    // GBA-only mixer toggles (compat/hifi/lowrate/bufscale/mixpad/premix/
+    // isrswap/chunked/attenuate_a/triplebuf) are NOT emitted — there is no
+    // ARM9 software mixer to tune.
+    if (!soundSamples.empty()) {
+        f << "\n// ---- PCM Samples ----\n";
+        f << "#define AFN_SOUND_SAMPLE_COUNT " << soundSamples.size() << "\n";
+        f << "#define AFN_SOUND_INSTANCE_COUNT " << soundInstances.size() << "\n\n";
+
+        for (int i = 0; i < (int)soundSamples.size(); i++) {
+            auto& smp = soundSamples[i];
+            bool use16 = !smp.data16.empty() && (int)smp.data16.size() == (int)smp.data.size();
+            if (use16) {
+                f << "static const s16 afn_pcm_" << i << "[] __attribute__((aligned(4))) = {\n    ";
+                for (int j = 0; j < (int)smp.data16.size(); j++) {
+                    f << (int)smp.data16[j] << ",";
+                    if ((j & 15) == 15) f << "\n    ";
+                }
+                int padVal = 0;
+                if (smp.loop && smp.loopStart >= 0 && smp.loopStart < (int)smp.data16.size())
+                    padVal = (int)smp.data16[smp.loopStart];
+                f << padVal << "\n};\n";
+            } else {
+                f << "static const s8 afn_pcm_" << i << "[] __attribute__((aligned(4))) = {\n    ";
+                for (int j = 0; j < (int)smp.data.size(); j++) {
+                    f << (int)smp.data[j] << ",";
+                    if ((j & 31) == 31) f << "\n    ";
+                }
+                int padVal = 0;
+                if (smp.loop && smp.loopStart >= 0 && smp.loopStart < (int)smp.data.size())
+                    padVal = (int)smp.data[smp.loopStart];
+                f << padVal << "\n};\n";
+            }
+            f << "#define AFN_PCM_" << i << "_LEN " << smp.data.size() << "\n";
+            f << "#define AFN_PCM_" << i << "_RATE " << smp.sampleRate << "\n";
+            f << "#define AFN_PCM_" << i << "_16BIT " << (use16 ? 1 : 0) << "\n\n";
+        }
+
+        f << "static const void* const afn_pcm_ptrs[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    afn_pcm_" << i << ",\n";
+        f << "};\n";
+        f << "static const u8 afn_pcm_is16[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++) {
+            bool use16 = !soundSamples[i].data16.empty() && (int)soundSamples[i].data16.size() == (int)soundSamples[i].data.size();
+            f << "    " << (use16 ? 1 : 0) << ",\n";
+        }
+        f << "};\n";
+        f << "static const int afn_pcm_lens[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    AFN_PCM_" << i << "_LEN,\n";
+        f << "};\n";
+        f << "static const int afn_pcm_rates[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    AFN_PCM_" << i << "_RATE,\n";
+        f << "};\n";
+        f << "static const u8 afn_pcm_loop[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << (soundSamples[i].loop ? 1 : 0) << ",\n";
+        f << "};\n";
+        f << "static const int afn_pcm_loop_start[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << soundSamples[i].loopStart << ",\n";
+        f << "};\n";
+        f << "static const int afn_pcm_loop_end[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++) {
+            int le = soundSamples[i].loopEnd > 0 ? soundSamples[i].loopEnd : (int)soundSamples[i].data.size();
+            f << "    " << le << ",\n";
+        }
+        f << "};\n";
+        f << "static const u8 afn_pcm_vol_scale[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << (soundSamples[i].volScale > 255 ? 255 : soundSamples[i].volScale) << ",\n";
+        f << "};\n\n";
+
+        f << "typedef struct { int tick; u8 note; u8 vel; u8 smpIdx; u8 channel; int dur; } AfnSndNote;\n\n";
+
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            auto& inst = soundInstances[i];
+            if (inst.notes.empty()) continue;
+            f << "// Instance " << i << ": " << inst.name << "\n";
+            f << "static const AfnSndNote afn_snd_notes_" << i << "[] = {\n";
+            for (auto& n : inst.notes) {
+                f << "    {" << n.tick << "," << n.note << "," << n.velocity << "," << n.sampleIdx << "," << n.channel << "," << n.duration << "},\n";
+            }
+            f << "};\n";
+            f << "#define AFN_SND_" << i << "_NOTE_COUNT " << inst.notes.size() << "\n";
+            f << "#define AFN_SND_" << i << "_TEMPO " << inst.tempo << "\n";
+            f << "#define AFN_SND_" << i << "_TPB " << inst.ticksPerBeat << "\n\n";
+        }
+
+        f << "static const AfnSndNote* const afn_snd_note_ptrs[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            if (soundInstances[i].notes.empty()) f << "    0,\n";
+            else                                 f << "    afn_snd_notes_" << i << ",\n";
+        }
+        f << "};\n";
+        f << "static const int afn_snd_note_counts[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++)
+            f << "    " << soundInstances[i].notes.size() << ",\n";
+        f << "};\n";
+        f << "static const int afn_snd_tpf[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            int tpf = soundInstances[i].tempo * soundInstances[i].ticksPerBeat * 256 / 3600;
+            if (tpf < 1) tpf = 1;
+            f << "    " << tpf << ",\n";
+        }
+        f << "};\n";
+        f << "static const u8 afn_snd_voices[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++)
+            f << "    " << soundInstances[i].voiceCount << ",\n";
+        f << "};\n";
+        f << "static const u8 afn_snd_loop[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++)
+            f << "    " << (soundInstances[i].loop ? 1 : 0) << ",\n";
+        f << "};\n";
+        f << "static const int afn_snd_loop_start[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++)
+            f << "    " << soundInstances[i].loopStartTick << ",\n";
+        f << "};\n";
+        f << "static const int afn_snd_loop_end[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++) {
+            int loopEnd = soundInstances[i].loopEndTick;
+            if (loopEnd <= 0 && !soundInstances[i].notes.empty())
+                loopEnd = soundInstances[i].notes.back().tick + soundInstances[i].notes.back().duration;
+            f << "    " << loopEnd << ",\n";
+        }
+        f << "};\n\n";
+
+        f << "#define AFN_HAS_SOUND 1\n";
+    }
+
+    // ---- Sky panorama (NDS: single 256x256 8bpp paletted texture) ----
+    // GBA emits this as 4-band 4bpp tiles + 4 sub-palettes for Mode 7 BG2.
+    // NDS gets a flat 256-color paletted texture rendered as a wrapping
+    // view-space quad behind the 3D layer.
+    if (!skyFrames.empty() && skyFrames[0].pixels && skyFrames[0].w > 0 && skyFrames[0].h > 0) {
+        const int SKY_W = 256, SKY_H = 256;
+        // Resize source frame to 256x256 via nearest-neighbor
+        std::vector<unsigned char> rgba(SKY_W * SKY_H * 4);
+        int srcW = skyFrames[0].w, srcH = skyFrames[0].h;
+        const unsigned char* srcPx = skyFrames[0].pixels;
+        for (int y = 0; y < SKY_H; y++) {
+            int sy = y * srcH / SKY_H;
+            for (int x = 0; x < SKY_W; x++) {
+                int sx = x * srcW / SKY_W;
+                memcpy(&rgba[(y * SKY_W + x) * 4], &srcPx[(sy * srcW + sx) * 4], 4);
+            }
+        }
+        // Median-cut 256-color quantization. The standard algorithm for
+        // natural images: recursively split color boxes along their longest
+        // axis at the median, until you have 256 boxes. Each palette entry
+        // becomes the mean of its box's pixels. Much better than top-N
+        // histogram bucketing for sky gradients (which left rogue pixels
+        // because rare-but-distinct colors got their own palette slots).
+        struct Px { uint8_t r, g, b; };
+        std::vector<Px> pixels; pixels.reserve(SKY_W * SKY_H);
+        for (int i = 0; i < SKY_W * SKY_H; i++) {
+            pixels.push_back({(uint8_t)(rgba[i*4+0] >> 3),
+                              (uint8_t)(rgba[i*4+1] >> 3),
+                              (uint8_t)(rgba[i*4+2] >> 3)});
+        }
+        struct Box { int lo, hi; }; // index range into `pixels`
+        std::vector<Box> boxes; boxes.push_back({0, (int)pixels.size()});
+        while ((int)boxes.size() < 256) {
+            // Find box with largest color-axis range.
+            int bestBox = -1, bestRange = 0, bestAxis = 0;
+            for (int bi = 0; bi < (int)boxes.size(); bi++) {
+                int lo = boxes[bi].lo, hi = boxes[bi].hi;
+                if (hi - lo <= 1) continue;
+                uint8_t rMin=31, rMax=0, gMin=31, gMax=0, bMin=31, bMax=0;
+                for (int j = lo; j < hi; j++) {
+                    Px p = pixels[j];
+                    if (p.r < rMin) rMin = p.r; if (p.r > rMax) rMax = p.r;
+                    if (p.g < gMin) gMin = p.g; if (p.g > gMax) gMax = p.g;
+                    if (p.b < bMin) bMin = p.b; if (p.b > bMax) bMax = p.b;
+                }
+                int rR = rMax - rMin, gR = gMax - gMin, bR = bMax - bMin;
+                int axis = 0, range = rR;
+                if (gR > range) { range = gR; axis = 1; }
+                if (bR > range) { range = bR; axis = 2; }
+                if (range > bestRange) { bestRange = range; bestBox = bi; bestAxis = axis; }
+            }
+            if (bestBox < 0) break; // all boxes single-pixel
+            // Sort the box along the chosen axis and split at the median.
+            Box b = boxes[bestBox];
+            std::sort(pixels.begin() + b.lo, pixels.begin() + b.hi,
+                      [bestAxis](const Px& a, const Px& c) {
+                          uint8_t av = bestAxis == 0 ? a.r : bestAxis == 1 ? a.g : a.b;
+                          uint8_t cv = bestAxis == 0 ? c.r : bestAxis == 1 ? c.g : c.b;
+                          return av < cv;
+                      });
+            int mid = b.lo + (b.hi - b.lo) / 2;
+            boxes[bestBox].hi = mid;
+            boxes.push_back({mid, b.hi});
+        }
+        std::vector<uint16_t> palette(256, 0);
+        for (int i = 0; i < (int)boxes.size(); i++) {
+            int lo = boxes[i].lo, hi = boxes[i].hi;
+            if (hi <= lo) continue;
+            uint64_t rs=0, gs=0, bs=0;
+            for (int j = lo; j < hi; j++) { rs += pixels[j].r; gs += pixels[j].g; bs += pixels[j].b; }
+            int n = hi - lo;
+            unsigned r5 = (unsigned)((rs + n/2) / n);
+            unsigned g5 = (unsigned)((gs + n/2) / n);
+            unsigned b5 = (unsigned)((bs + n/2) / n);
+            if (r5 > 31) r5 = 31;
+            if (g5 > 31) g5 = 31;
+            if (b5 > 31) b5 = 31;
+            palette[i] = (uint16_t)(r5 | (g5 << 5) | (b5 << 10));
+        }
+        int palN = (int)boxes.size();
+        // Build mapping table: each unique input color → palette index of
+        // Map each unique input color → nearest palette index. Build the
+        // unique-color set fresh (the histogram from before median-cut was
+        // dropped); a map keyed on RGB15 dedup pixels.
+        std::map<uint16_t, uint8_t> nearest;
+        auto dist2 = [](uint16_t a, uint16_t b) {
+            int ar=a&31, ag=(a>>5)&31, ab=(a>>10)&31;
+            int br=b&31, bg=(b>>5)&31, bb=(b>>10)&31;
+            return (ar-br)*(ar-br) + (ag-bg)*(ag-bg) + (ab-bb)*(ab-bb);
+        };
+        for (int i = 0; i < SKY_W * SKY_H; i++) {
+            unsigned r = rgba[i*4+0] >> 3, g = rgba[i*4+1] >> 3, b = rgba[i*4+2] >> 3;
+            uint16_t c15 = (uint16_t)(r | (g << 5) | (b << 10));
+            if (nearest.count(c15)) continue;
+            int best = 0, bestD = 1<<30;
+            for (int p = 0; p < palN; p++) {
+                int d = dist2(c15, palette[p]);
+                if (d < bestD) { bestD = d; best = p; }
+            }
+            nearest[c15] = (uint8_t)best;
+        }
+
+        f << "\n// ---- Sky panorama (256x256 8bpp paletted) ----\n";
+        f << "#define AFN_HAS_SKY 1\n";
+        f << "static const u16 afn_sky_pal[256] = {\n    ";
+        for (int i = 0; i < 256; i++) {
+            char hex[8]; snprintf(hex, sizeof(hex), "0x%04X", palette[i]);
+            f << hex;
+            if (i + 1 < 256) f << ", ";
+            if ((i + 1) % 8 == 0) f << "\n    ";
+        }
+        f << "\n};\n";
+        f << "static const u8 afn_sky_tex[" << (SKY_W * SKY_H) << "] = {\n    ";
+        for (int i = 0; i < SKY_W * SKY_H; i++) {
+            unsigned r = rgba[i*4+0] >> 3, g = rgba[i*4+1] >> 3, b = rgba[i*4+2] >> 3;
+            uint16_t c15 = (r) | (g << 5) | (b << 10);
+            f << (int)nearest[c15];
+            if (i + 1 < SKY_W * SKY_H) f << ", ";
+            if ((i + 1) % 16 == 0) f << "\n    ";
+        }
+        f << "\n};\n";
+    }
+
+    // ---- Phase 3a framework: script declarations + stubs ----
+    bool hasAnyScript = !script.nodes.empty() || !blueprints.empty();
+    if (hasAnyScript) {
+        f << "\n#define AFN_HAS_SCRIPT 1\n";
+        // Script-side globals the emitted node bodies will reference. These
+        // are DECLARATIONS only — definitions live in nds_runtime/source/
+        // script_glue.c so multiple .c files including mapdata.h don't each
+        // get their own copy. (GBA's main.c is the sole includer of
+        // mapdata.h so it can use `static` here; NDS can't.)
+        f << "// Script state variables (defined in script_glue.c)\n";
+        f << "extern int  afn_input_fwd;\n";
+        f << "extern int  afn_input_right;\n";
+        f << "extern int  afn_move_speed;\n";
+        f << "extern int  afn_auto_orbit_speed;\n";
+        f << "extern int  afn_play_anim;\n";
+        f << "extern int  afn_sprite_anim_spr;\n";
+        f << "extern int  afn_sprite_anim_val;\n";
+        f << "extern int  afn_anim_prio;\n";
+        f << "extern int  afn_collided_sprite;\n";
+        f << "extern int  afn_collided_tm_obj;\n";
+        f << "extern int  afn_bp_cur_tm_obj;\n";
+        f << "extern int  afn_bp_cur_spr_idx;\n";
+        f << "extern int  afn_gravity;\n";
+        f << "extern int  afn_terminal_vel;\n";
+        f << "extern int  afn_player_frozen;\n";
+        f << "extern int  afn_anim_speed;\n";
+        f << "extern unsigned int afn_rng;\n";
+        f << "extern int  afn_shake_intensity;\n";
+        f << "extern int  afn_shake_frames;\n";
+        f << "extern int  afn_fade_level;\n";
+        f << "extern int  afn_score;\n";
+        f << "extern int  afn_frame_count;\n";
+        f << "extern int  afn_draw_distance;\n";
+        // Phase 3b adds: state expected by most script node bodies.
+        f << "extern int  afn_bg_color;\n";
+        f << "extern int  afn_cam_locked;\n";
+        f << "extern int  afn_cam_speed;\n";
+        f << "extern int  afn_checkpoint_set;\n";
+        f << "extern int  afn_checkpoint_x;\n";
+        f << "extern int  afn_checkpoint_y;\n";
+        f << "extern int  afn_checkpoint_z;\n";
+        f << "extern int  afn_dt_tick;\n";
+        f << "extern unsigned int afn_flags;\n";
+        f << "extern int  afn_force_x;\n";
+        f << "extern int  afn_force_z;\n";
+        f << "extern int  afn_friction;\n";
+        f << "extern int  afn_last_key;\n";
+        f << "extern int  afn_player_height;\n";
+        f << "extern int  afn_hud_value[4];\n";
+        f << "extern unsigned char afn_hud_visible[4];\n";
+        // Scene-transition entry point (defined in fps3d.c) + current-scene state.
+        f << "extern int  afn_current_scene;\n";
+        f << "extern int  afn_current_mode;\n";
+        f << "void afn_scene_start_transition(int sceneIdx, int sceneMode, int fadeFrames);\n";
+        // HUD element table (minimal subset of GBA fields: position + text
+        // rows with sourceSlot for counter display). Composite pieces /
+        // cursor menus not yet rendered on NDS.
+        if (!hudElements.empty()) {
+            int totalText = 0;
+            for (const auto& he : hudElements) totalText += (int)he.textRows.size();
+            f << "#define AFN_HUD_ELEM_COUNT " << (int)hudElements.size() << "\n";
+            f << "#define AFN_HUD_TEXT_COUNT " << totalText << "\n";
+            f << "static const struct { short x, y; unsigned short textStart, textCount; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
+            int textCursor = 0;
+            for (const auto& he : hudElements) {
+                f << "    { " << he.screenX << ", " << he.screenY << ", "
+                  << textCursor << ", " << (int)he.textRows.size() << " },\n";
+                textCursor += (int)he.textRows.size();
+            }
+            f << "};\n";
+            if (totalText > 0) {
+                f << "static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; } afn_hud_texts[" << totalText << "] = {\n";
+                for (const auto& he : hudElements) {
+                    for (const auto& tr : he.textRows) {
+                        f << "    { " << tr.localX << ", " << tr.localY << ", "
+                          << tr.sourceSlot << ", " << tr.pad << ", " << tr.scale << " },\n";
+                    }
+                }
+                f << "};\n";
+            } else {
+                f << "static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; } afn_hud_texts[1] = {{0}};\n";
+            }
+        } else {
+            f << "#define AFN_HUD_ELEM_COUNT 0\n";
+            f << "#define AFN_HUD_TEXT_COUNT 0\n";
+        }
+        f << "extern int  afn_scripts_stopped;\n";
+        f << "extern int  afn_start_x;\n";
+        f << "extern int  afn_start_y;\n";
+        f << "extern int  afn_start_z;\n";
+        f << "extern int  afn_text_color;\n";
+        f << "extern int  afn_timer_visible;\n";
+        f << "extern int  afn_wall_collided_sprite;\n";
+        f << "extern int  afn_fade_target;\n";
+        f << "extern int  afn_fade_frames;\n";
+        f << "extern int  afn_fade_counter;\n";
+        // Per-sprite state arrays — sized to AFN_SPRITE_COUNT at most.
+        f << "#ifndef NUM_SPRITES\n";
+        f << "#define NUM_SPRITES " << (sprites.empty() ? 1 : (int)sprites.size()) << "\n";
+        f << "#endif\n";
+        f << "extern unsigned char afn_sprite_visible[NUM_SPRITES];\n";
+        f << "extern unsigned char afn_sprite_flip[NUM_SPRITES];\n";
+        f << "extern unsigned char afn_collision_enabled[NUM_SPRITES];\n";
+        f << "extern int afn_hp[NUM_SPRITES];\n";
+        f << "extern int afn_state_timer[NUM_SPRITES];\n";
+        // Player physics (defined in fps3d.c under AFN_HAS_SCRIPT — exported so scripts can read/write).
+        f << "extern int player_vy;\n";
+        f << "extern int player_ground_y;\n";
+        // Audio entry points (audio.c) used by PlaySound / StopSound emit.
+        f << "void afn_play_sound(int id);\n";
+        f << "void afn_play_sfx(int smpIdx, int gain, int fifo);\n";
+        f << "void afn_stop_sound(void);\n";
+        // OnRise edge-detect state — one int per OnRise node, init -2 so first
+        // rising edge fires. Static here means each TU that includes mapdata.h
+        // gets a private copy; only script_glue.c's copy is ever mutated (it's
+        // the sole caller of afn_emitted_script_update et al).
+        {
+            std::set<int> riseIds;
+            for (auto& n : script.nodes)
+                if (n.type == GBAScriptNodeType::OnRise) riseIds.insert(n.id);
+            for (auto& bp : blueprints)
+                for (auto& n : bp.script.nodes)
+                    if (n.type == GBAScriptNodeType::OnRise) riseIds.insert(n.id);
+            for (int rid : riseIds)
+                f << "static int afn_rise_" << rid << " = -2;\n";
+        }
+    }
+    // ---- Per-node script emission (Phase 3a complete) ----
+    if (hasAnyScript) {
+        // curScript = which graph (inline scene or a blueprint) the lambdas
+        // operate on; swapped before each blueprint emit pass below.
+        const GBAScriptExport* curScript = &script;
+        auto findNode = [&](int id) -> const GBAScriptNodeExport* {
+            for (auto& n : curScript->nodes) if (n.id == id) return &n;
+            return nullptr;
+        };
+        auto findExecOuts = [&](int nodeId, int pinIdx) -> std::vector<int> {
+            std::vector<int> targets;
+            for (auto& l : curScript->links)
+                if (l.fromNodeId == nodeId && l.fromPinType == 0 && l.fromPinIdx == pinIdx)
+                    targets.push_back(l.toNodeId);
+            return targets;
+        };
+        auto findDataIn = [&](int nodeId, int pinIdx) -> const GBAScriptNodeExport* {
+            for (auto& l : curScript->links)
+                if (l.toNodeId == nodeId && l.toPinType == 3 && l.toPinIdx == pinIdx)
+                    return findNode(l.fromNodeId);
+            return nullptr;
+        };
+        auto resolveInt = [&](const GBAScriptNodeExport* dn) -> int {
+            if (!dn) return 0;
+            if (dn->type == GBAScriptNodeType::Animation) return dn->paramInt[1];
+            return dn->paramInt[0];
+        };
+        auto resolveFloat = [&](const GBAScriptNodeExport* dn) -> float {
+            if (!dn) return 0.0f;
+            float fv;
+            memcpy(&fv, &dn->paramInt[0], sizeof(float));
+            return fv;
+        };
+        auto keyName = [](int k) -> const char* {
+            static const char* keys[] = { "KEY_A","KEY_B","KEY_L","KEY_R",
+                                          "KEY_START","KEY_SELECT",
+                                          "KEY_UP","KEY_DOWN","KEY_LEFT","KEY_RIGHT" };
+            return (k >= 0 && k < 10) ? keys[k] : "KEY_A";
+        };
+
+        // Collect chains per event type (BFS from each event node through exec links).
+        // Re-runnable: blueprint emit passes call buildChains() after pointing
+        // curScript at the blueprint's graph.
+        struct Chain { const GBAScriptNodeExport* event; std::vector<const GBAScriptNodeExport*> actions; };
+        std::vector<Chain> chains;
+        auto buildChains = [&]() {
+            chains.clear();
+            for (auto& n : curScript->nodes) {
+                auto et = n.type;
+                if (et != GBAScriptNodeType::OnUpdate &&
+                    et != GBAScriptNodeType::OnStart &&
+                    et != GBAScriptNodeType::OnKeyHeld &&
+                    et != GBAScriptNodeType::OnKeyPressed &&
+                    et != GBAScriptNodeType::OnKeyReleased &&
+                    et != GBAScriptNodeType::OnCollision &&
+                    et != GBAScriptNodeType::OnCollision2D)
+                    continue;
+                Chain ch; ch.event = &n;
+                std::vector<int> frontier = findExecOuts(n.id, 0);
+                std::vector<bool> seen(10000, false);
+                int safety = 0;
+                while (!frontier.empty() && safety < 256) {
+                    int nid = frontier.front();
+                    frontier.erase(frontier.begin());
+                    if (nid < 0 || nid >= (int)seen.size() || seen[nid]) continue;
+                    seen[nid] = true;
+                    safety++;
+                    auto* an = findNode(nid);
+                    if (!an) continue;
+                    ch.actions.push_back(an);
+                    // Don't follow exec outs of CheckFlag (dual-pin) or OnRise
+                    // (edge-detect wrapper) — those collect their own branches
+                    // inside emitChain so siblings don't bleed across pins.
+                    if (an->type == GBAScriptNodeType::CheckFlag ||
+                        an->type == GBAScriptNodeType::OnRise) continue;
+                    for (int t : findExecOuts(an->id, 0)) frontier.push_back(t);
+                }
+                if (!ch.actions.empty()) chains.push_back(ch);
+            }
+        };
+        buildChains();
+
+        // Mirrors GBA: track whether emitAction is currently inside an
+        // IsJumping / IsFalling gate so PlayAnim can lock with afn_anim_prio.
+        bool inJumpGate = false;
+
+        // Per-action emit. Subset of GBA's switch — covers the common
+        // movement / animation / state nodes. Unsupported types fall through
+        // to a comment so we know what's missing on NDS.
+        auto emitAction = [&](const GBAScriptNodeExport* a) {
+            switch (a->type) {
+            case GBAScriptNodeType::Walk: {
+                auto* d = findDataIn(a->id, 0);
+                if (d) f << "    afn_move_speed = " << (int)(resolveInt(d) * 37.0f / 35.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::Sprint: {
+                auto* d = findDataIn(a->id, 0);
+                if (d) f << "    afn_move_speed = " << (int)(resolveInt(d) * 37.0f / 35.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::Jump: {
+                auto* d = findDataIn(a->id, 0);
+                float force = d ? resolveFloat(d) : 2.0f;
+                f << "    if (player_on_ground) player_vy = " << (int)(force * 256.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::SetGravity: {
+                auto* d = findDataIn(a->id, 0);
+                float v = d ? resolveFloat(d) : 0.09f;
+                f << "    afn_gravity = " << (int)(v * 256.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::SetMaxFall: {
+                auto* d = findDataIn(a->id, 0);
+                float v = d ? resolveFloat(d) : 6.0f;
+                f << "    afn_terminal_vel = " << (int)(v * 256.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::AutoOrbit: {
+                auto* d = findDataIn(a->id, 0);
+                f << "    afn_auto_orbit_speed = " << (d ? resolveInt(d) : 205) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::OrbitCamera: {
+                auto* dirData = findDataIn(a->id, 0);
+                auto* speedData = findDataIn(a->id, 1);
+                int dir   = dirData   ? dirData->paramInt[0] : 1;
+                int speed = speedData ? resolveInt(speedData) : 512;
+                speed /= 2;  // halve orbit speed on NDS
+                const char* key  = (dir == 0) ? "KEY_L" : "KEY_R";
+                // Flipped sign vs older NDS commits — pre-DMA work, L
+                // (dir=0) used to decrement cam_angle, but the picker
+                // changes made the visible orbit direction feel reversed.
+                // Going +/- in the opposite direction keeps the same
+                // L/R feel users had while still feeding the picker.
+                const char* sign = (dir == 0) ? "+" : "-";
+                f << "    if (key_is_down(" << key << ")) orbit_angle " << sign << "= " << speed << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::MovePlayer: {
+                auto* dirData = findDataIn(a->id, 0);
+                int dir = dirData ? dirData->paramInt[0] : 0;
+                // Physical L/R keys swapped: pressing the LEFT key emits
+                // what the editor's RIGHT script wanted, and vice versa.
+                // Matches the user's preferred control mapping on NDS.
+                static const char* dirKeys[] = { "KEY_RIGHT","KEY_LEFT","KEY_UP","KEY_DOWN" };
+                static const char* dirVars[] = { "afn_input_right -= 256","afn_input_right += 256",
+                                                 "afn_input_fwd += 256","afn_input_fwd -= 256" };
+                if (dir >= 0 && dir < 4)
+                    f << "    if (!afn_player_frozen && key_is_down(" << dirKeys[dir] << ")) "
+                      << dirVars[dir] << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::PlayAnim: {
+                auto* d = findDataIn(a->id, 0);
+                int idx = d ? resolveInt(d) : 0;
+                // Inside an IsJumping/IsFalling gate, PlayAnim wins and
+                // claims priority; outside, it defers to whatever already
+                // set afn_play_anim this frame (afn_anim_prio gates it).
+                if (inJumpGate) {
+                    f << "    afn_play_anim = " << idx << "; afn_anim_prio = 1;\n";
+                } else {
+                    f << "    if (!afn_anim_prio) afn_play_anim = " << idx << ";\n";
+                }
+                break;
+            }
+            case GBAScriptNodeType::FreezePlayer:
+                f << "    afn_player_frozen = 1; afn_play_anim = -1;\n";
+                break;
+            case GBAScriptNodeType::SetVisible: {
+                auto* sprData = findDataIn(a->id, 0);
+                auto* visData = findDataIn(a->id, 1);
+                int sIdx = sprData ? resolveInt(sprData) : a->paramInt[0];
+                int vis  = visData ? resolveInt(visData) : a->paramInt[1];
+                f << "    if ((unsigned)" << sIdx << " < NUM_SPRITES) afn_sprite_visible["
+                  << sIdx << "] = " << (vis ? 1 : 0) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::DestroyObject: {
+                auto* d = findDataIn(a->id, 0);
+                // In BP context with no Object wired, default to the instance's
+                // own sprite (afn_bp_cur_spr_idx). Scene scripts fall back to
+                // the node's literal paramInt[0]. Mirrors GBA semantics.
+                std::string sIdx;
+                if (d) sIdx = std::to_string(resolveInt(d));
+                else if (curScript != &script) sIdx = "afn_bp_cur_spr_idx";
+                else sIdx = std::to_string(a->paramInt[0]);
+                f << "    if ((unsigned)" << sIdx << " < NUM_SPRITES) {\n";
+                f << "        afn_sprite_visible[" << sIdx << "] = 0;\n";
+                f << "        afn_collision_enabled[" << sIdx << "] = 0;\n";
+                f << "    }\n";
+                break;
+            }
+            case GBAScriptNodeType::SetFlag: {
+                auto* flagData = findDataIn(a->id, 0);
+                auto* valData  = findDataIn(a->id, 1);
+                int flag = flagData ? resolveInt(flagData) : a->paramInt[0];
+                int val  = valData  ? resolveInt(valData)  : a->paramInt[1];
+                if (val) f << "    afn_flags |=  (1u << " << flag << ");\n";
+                else     f << "    afn_flags &= ~(1u << " << flag << ");\n";
+                break;
+            }
+            case GBAScriptNodeType::ToggleFlag:
+                f << "    afn_flags ^= (1u << " << a->paramInt[0] << ");\n";
+                break;
+            case GBAScriptNodeType::ScreenShake: {
+                auto* d0 = findDataIn(a->id, 0);
+                auto* d1 = findDataIn(a->id, 1);
+                f << "    afn_shake_intensity = " << (d0 ? resolveInt(d0) : 4) << ";\n";
+                f << "    afn_shake_frames    = " << (d1 ? resolveInt(d1) : 20) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::DampenJump: {
+                auto* d = findDataIn(a->id, 0);
+                float factor = d ? resolveFloat(d) : 0.75f;
+                f << "    if (player_vy > 0) player_vy = (player_vy * " << (int)(factor*256.0f) << ") >> 8;\n";
+                break;
+            }
+            // --- Gate nodes (open a brace; closed by the chain's tail logic) ---
+            case GBAScriptNodeType::IsMoving:
+                f << "    if (player_moving) {\n"; break;
+            case GBAScriptNodeType::IsOnGround:
+                f << "    if (player_on_ground) {\n"; break;
+            case GBAScriptNodeType::IsJumping:
+                // Matches GBA: just "rising," no airborne guard. Sounds wrong
+                // vs the editor tooltip but the BP idioms (e.g. jump SFX on
+                // the same frame Jump sets player_vy while still grounded)
+                // depend on this looser check.
+                f << "    if (player_vy > 0) {\n"; inJumpGate = true; break;
+            case GBAScriptNodeType::IsFalling:
+                f << "    if (!player_on_ground && player_vy <= 0) {\n"; inJumpGate = true; break;
+            // CheckFlag is handled specially in emitChain (dual-pin Set/Clear branches).
+            case GBAScriptNodeType::SetVelocityY: {
+                auto* d = findDataIn(a->id, 0);
+                float v = d ? resolveFloat(d) : 0.0f;
+                f << "    player_vy = " << (int)(v * 256.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::SetPlayerHeight: {
+                auto* d = findDataIn(a->id, 0);
+                float v = d ? resolveFloat(d) : 1.0f;
+                f << "    afn_player_height = " << (int)(v * 256.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::SetSpriteAnim: {
+                auto* objData  = findDataIn(a->id, 0);
+                auto* animData = findDataIn(a->id, 1);
+                int obj  = objData  ? resolveInt(objData)  : 0;
+                int anim = animData ? resolveInt(animData) : 0;
+                // NDS has no tilemap mode — direct per-sprite anim only.
+                f << "    afn_sprite_anim_spr = " << obj << "; afn_sprite_anim_val = " << anim << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::PlaySound: {
+                auto* d = findDataIn(a->id, 0);
+                int sId = d ? resolveInt(d) : 0;
+                if (sId >= 0 && sId < (int)soundInstances.size() && soundInstances[sId].isSfx) {
+                    f << "    afn_play_sfx(" << soundInstances[sId].sfxSampleIdx
+                      << ", " << soundInstances[sId].mixerGain
+                      << ", " << soundInstances[sId].fifoChannel << ");\n";
+                } else {
+                    f << "    afn_play_sound(" << sId << ");\n";
+                }
+                break;
+            }
+            case GBAScriptNodeType::StopSound:
+                f << "    afn_stop_sound();\n";
+                break;
+            case GBAScriptNodeType::Respawn:
+                f << "    player_x = afn_start_x; player_y = afn_start_y; player_z = afn_start_z;\n";
+                f << "    player_vy = 0;\n";
+                break;
+            case GBAScriptNodeType::ChangeScene: {
+                auto* scData = findDataIn(a->id, 0);
+                int scIdx = scData ? resolveInt(scData) : a->paramInt[0];
+                int scMode = a->paramInt[1]; // 0 = 3D / Mode 4
+                f << "    afn_scene_start_transition(" << scIdx << ", " << scMode << ", 15);\n";
+                break;
+            }
+            case GBAScriptNodeType::ReloadScene:
+                f << "    afn_scene_start_transition(afn_current_scene, afn_current_mode, 15);\n";
+                break;
+            case GBAScriptNodeType::SetHudValue: {
+                auto* valData  = findDataIn(a->id, 0);
+                auto* slotData = findDataIn(a->id, 1);
+                int val  = valData  ? resolveInt(valData)  : 0;
+                int slot = slotData ? resolveInt(slotData) : 0;
+                if (slot < 0) slot = 0; if (slot > 3) slot = 3;
+                f << "    afn_hud_value[" << slot << "] += " << val << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::ShowHUD: {
+                auto* slotData = findDataIn(a->id, 0);
+                int slot = slotData ? resolveInt(slotData) : a->paramInt[0];
+                if (slot < 0) slot = 0; if (slot > 3) slot = 3;
+                f << "    afn_hud_visible[" << slot << "] = 1;\n";
+                break;
+            }
+            case GBAScriptNodeType::HideHUD: {
+                auto* slotData = findDataIn(a->id, 0);
+                int slot = slotData ? resolveInt(slotData) : a->paramInt[0];
+                if (slot < 0) slot = 0; if (slot > 3) slot = 3;
+                f << "    afn_hud_visible[" << slot << "] = 0;\n";
+                break;
+            }
+            case GBAScriptNodeType::UpdateRespawnPos: {
+                auto* objData = findDataIn(a->id, 0);
+                std::string obj;
+                if (objData) obj = std::to_string(resolveInt(objData));
+                else if (curScript != &script) obj = "afn_bp_cur_spr_idx";
+                else obj = std::to_string(a->paramInt[0]);
+                f << "    afn_start_x = afn_sprite_data[" << obj << "][0];\n";
+                f << "    afn_start_y = afn_sprite_data[" << obj << "][1];\n";
+                f << "    afn_start_z = afn_sprite_data[" << obj << "][2];\n";
+                break;
+            }
+            default:
+                f << "    /* TODO: emit node type " << (int)a->type << " */\n";
+                break;
+            }
+        };
+
+        // Recursive emit: walk exec links from a node as a tree, not a flat
+        // list. Each gate/CheckFlag/OnRise scopes its own downstream subtree;
+        // siblings (multiple exec-out targets from same pin) emit as separate
+        // top-level blocks. Visited-set prevents repeat emission when two
+        // parents wire to the same action.
+        std::set<int> emitVisited;
+        std::function<void(const GBAScriptNodeExport*)> emitOne;
+        auto walkExec = [&](int nodeId, int pinIdx) {
+            for (int t : findExecOuts(nodeId, pinIdx)) {
+                if (emitVisited.count(t)) continue;
+                emitVisited.insert(t);
+                auto* n = findNode(t);
+                if (n) emitOne(n);
+            }
+        };
+        emitOne = [&](const GBAScriptNodeExport* a) {
+            if (a->type == GBAScriptNodeType::CheckFlag) {
+                auto* fd = findDataIn(a->id, 0);
+                int flag = fd ? resolveInt(fd) : a->paramInt[0];
+                f << "    if (afn_flags & (1u << " << flag << ")) {\n";
+                walkExec(a->id, 0);
+                auto clearTargets = findExecOuts(a->id, 1);
+                if (!clearTargets.empty()) {
+                    f << "    } else {\n";
+                    walkExec(a->id, 1);
+                }
+                f << "    }\n";
+                return;
+            }
+            if (a->type == GBAScriptNodeType::OnRise) {
+                f << "    if (afn_rise_" << a->id << " >= afn_frame_count - 1) { afn_rise_" << a->id << " = afn_frame_count; }\n";
+                f << "    else { afn_rise_" << a->id << " = afn_frame_count;\n";
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            if (a->type == GBAScriptNodeType::Countdown) {
+                // Per-node static counter; downstream fires when it hits 0
+                // (then auto-resets so the gate repeats).
+                auto* cntData = findDataIn(a->id, 0);
+                int cnt = cntData ? resolveInt(cntData) : 60;
+                f << "    { static int afn_cd_" << a->id << " = " << cnt << ";\n";
+                f << "      if (--afn_cd_" << a->id << " <= 0) { afn_cd_" << a->id << " = " << cnt << ";\n";
+                walkExec(a->id, 0);
+                f << "    } }\n";
+                return;
+            }
+            bool isGate = (a->type == GBAScriptNodeType::IsMoving ||
+                           a->type == GBAScriptNodeType::IsOnGround ||
+                           a->type == GBAScriptNodeType::IsJumping ||
+                           a->type == GBAScriptNodeType::IsFalling);
+            if (isGate) {
+                bool wasJump = inJumpGate;
+                emitAction(a);  // emits "if (cond) {\n" and updates inJumpGate
+                walkExec(a->id, 0);
+                f << "    }\n";
+                inJumpGate = wasJump;
+                return;
+            }
+            emitAction(a);
+            walkExec(a->id, 0);
+        };
+
+        auto emitChain = [&](const Chain& c) {
+            inJumpGate = false;
+            emitVisited.clear();
+            walkExec(c.event->id, 0);
+        };
+
+        // Emit each dispatcher function with the matching chains inlined.
+        // Key events may have multiple key data inputs wired (e.g. "any of
+        // LEFT/RIGHT/UP/DOWN"); OR them together when present, fall back to
+        // event->paramInt[0] otherwise. Mirrors gba_package.cpp resolveEventKey.
+        auto emitDispatcher = [&](const char* fname, GBAScriptNodeType evType,
+                                  const char* keyCheck) {
+            f << "static void " << fname << "(void) {\n";
+            for (auto& c : chains) {
+                if (c.event->type != evType) continue;
+                if (keyCheck) {
+                    std::vector<int> keys;
+                    for (auto& l : curScript->links)
+                        if (l.toNodeId == c.event->id && l.toPinType == 3 && l.toPinIdx == 0) {
+                            auto* dn = findNode(l.fromNodeId);
+                            if (dn) keys.push_back(dn->paramInt[0]);
+                        }
+                    if (keys.empty()) keys.push_back(c.event->paramInt[0]);
+                    f << "    if (";
+                    for (size_t ki = 0; ki < keys.size(); ki++) {
+                        if (ki) f << " || ";
+                        f << keyCheck << "(" << keyName(keys[ki]) << ")";
+                    }
+                    f << ") {\n";
+                    emitChain(c);
+                    f << "    }\n";
+                } else if (evType == GBAScriptNodeType::OnCollision) {
+                    // Optional Radius pin (pin 0): per-bp axis-aligned gate
+                    // tighter than the outer 24px afn_collided_sprite trigger.
+                    auto* radData = findDataIn(c.event->id, 0);
+                    if (radData) {
+                        int rad = resolveInt(radData);
+                        f << "    if (afn_collided_sprite >= 0) {\n";
+                        f << "        int _dx = player_x - afn_sprite_data[afn_collided_sprite][0];\n";
+                        f << "        int _dz = player_z - afn_sprite_data[afn_collided_sprite][2];\n";
+                        f << "        if (_dx < 0) _dx = -_dx; if (_dz < 0) _dz = -_dz;\n";
+                        f << "        if ((_dx >> 8) < " << rad << " && (_dz >> 8) < " << rad << ") {\n";
+                        emitChain(c);
+                        f << "        }\n";
+                        f << "    }\n";
+                    } else {
+                        emitChain(c);
+                    }
+                } else {
+                    emitChain(c);
+                }
+            }
+            f << "}\n";
+        };
+
+        f << "\n// ---- Generated script code from visual node graph ----\n";
+        f << "static void afn_emitted_script_init(void)         {}\n";
+        emitDispatcher("afn_emitted_script_update",       GBAScriptNodeType::OnUpdate,       nullptr);
+        emitDispatcher("afn_emitted_script_key_held",     GBAScriptNodeType::OnKeyHeld,      "key_is_down");
+        emitDispatcher("afn_emitted_script_key_pressed",  GBAScriptNodeType::OnKeyPressed,   "key_hit");
+        emitDispatcher("afn_emitted_script_key_released", GBAScriptNodeType::OnKeyReleased,  "key_released");
+        emitDispatcher("afn_emitted_script_collision",    GBAScriptNodeType::OnCollision,    nullptr);
+        emitDispatcher("afn_emitted_script_collision2d",  GBAScriptNodeType::OnCollision2D,  nullptr);
+
+        // Blueprint event handlers — one set of named functions per blueprint.
+        // Per-instance state (current sprite/tm-obj) lives in afn_bp_cur_*.
+        for (size_t bi = 0; bi < blueprints.size(); bi++) {
+            curScript = &blueprints[bi].script;
+            buildChains();
+            char fn[64];
+            snprintf(fn, sizeof(fn), "afn_bp%zu_update",       bi);
+            emitDispatcher(fn, GBAScriptNodeType::OnUpdate, nullptr);
+            snprintf(fn, sizeof(fn), "afn_bp%zu_key_held",     bi);
+            emitDispatcher(fn, GBAScriptNodeType::OnKeyHeld, "key_is_down");
+            snprintf(fn, sizeof(fn), "afn_bp%zu_key_pressed",  bi);
+            emitDispatcher(fn, GBAScriptNodeType::OnKeyPressed, "key_hit");
+            snprintf(fn, sizeof(fn), "afn_bp%zu_key_released", bi);
+            emitDispatcher(fn, GBAScriptNodeType::OnKeyReleased, "key_released");
+            snprintf(fn, sizeof(fn), "afn_bp%zu_collision",    bi);
+            emitDispatcher(fn, GBAScriptNodeType::OnCollision, nullptr);
+        }
+        curScript = &script;  // restore so any later helpers behave
+
+        // Blueprint instance table + dispatchers. Each dispatcher iterates
+        // instances, sets afn_bp_cur_spr_idx (so emitted code can reference
+        // its owning sprite), and calls the matching bp's handler.
+        f << "\n#define AFN_BP_COUNT "     << (int)blueprints.size() << "\n";
+        f << "#define AFN_BP_INSTANCE_COUNT " << (int)bpInstances.size() << "\n";
+        if (!bpInstances.empty()) {
+            // Row: { bpIdx, spriteIdx }
+            f << "static const int afn_bp_instances[" << (int)bpInstances.size() << "][2] = {\n";
+            for (const auto& inst : bpInstances)
+                f << "    { " << inst.blueprintIdx << ", " << inst.spriteIdx << " },\n";
+            f << "};\n";
+        }
+        // Per-event bp dispatcher. Emits a switch on bpIdx so each instance
+        // calls into the right blueprint's handler with cur_spr_idx set.
+        // gateExpr (optional) is a C expression evaluated per-instance —
+        // skip the instance if it's false. Collision uses
+        // "afn_bp_instances[i][1] == afn_collided_sprite" so only the
+        // bp owning the hit sprite fires, mirroring GBA.
+        auto emitBpDispatcher = [&](const char* fname, const char* suffix, const char* gateExpr) {
+            f << "static void " << fname << "(void) {\n";
+            if (!bpInstances.empty()) {
+                f << "    for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {\n";
+                if (gateExpr) f << "        if (!(" << gateExpr << ")) continue;\n";
+                f << "        int bpIdx = afn_bp_instances[i][0];\n";
+                f << "        afn_bp_cur_spr_idx = afn_bp_instances[i][1];\n";
+                f << "        switch (bpIdx) {\n";
+                for (size_t bi = 0; bi < blueprints.size(); bi++)
+                    f << "            case " << bi << ": afn_bp" << bi << "_" << suffix << "(); break;\n";
+                f << "        }\n";
+                f << "    }\n";
+                f << "    afn_bp_cur_spr_idx = -1;\n";
+            }
+            f << "}\n";
+        };
+        emitBpDispatcher("afn_bp_dispatch_update",       "update",       nullptr);
+        emitBpDispatcher("afn_bp_dispatch_key_held",     "key_held",     nullptr);
+        emitBpDispatcher("afn_bp_dispatch_key_pressed",  "key_pressed",  nullptr);
+        emitBpDispatcher("afn_bp_dispatch_key_released", "key_released", nullptr);
+        emitBpDispatcher("afn_bp_dispatch_collision",    "collision",
+                         "afn_bp_instances[i][1] == afn_collided_sprite");
+    } else {
+        // No scripts in this build — empty stubs keep script_glue.c linkable.
+        f << "\n// Script dispatchers — no scripts in this build.\n";
+        f << "static inline void afn_emitted_script_init(void)         {}\n";
+        f << "static inline void afn_emitted_script_update(void)       {}\n";
+        f << "static inline void afn_emitted_script_key_held(void)     {}\n";
+        f << "static inline void afn_emitted_script_key_pressed(void)  {}\n";
+        f << "static inline void afn_emitted_script_key_released(void) {}\n";
+        f << "static inline void afn_emitted_script_collision(void)    {}\n";
+        f << "static inline void afn_emitted_script_collision2d(void)  {}\n";
+        f << "static inline void afn_bp_dispatch_update(void)          {}\n";
+        f << "static inline void afn_bp_dispatch_key_held(void)        {}\n";
+        f << "static inline void afn_bp_dispatch_key_pressed(void)     {}\n";
+        f << "static inline void afn_bp_dispatch_key_released(void)    {}\n";
+        f << "static inline void afn_bp_dispatch_collision(void)       {}\n";
     }
 
     f << "#endif // MAPDATA_H\n";
@@ -380,13 +2071,21 @@ bool PackageNDS(const std::string& runtimeDir,
                 const GBACameraExport& camera,
                 const std::vector<GBAMeshExport>& meshes,
                 float orbitDist,
+                const std::vector<GBASoundSampleExport>& soundSamples,
+                const std::vector<GBASoundInstanceExport>& soundInstances,
+                const std::vector<GBASkyFrameExport>& skyFrames,
+                bool ndsAntialiasing,
+                const GBAScriptExport& script,
+                const std::vector<GBABlueprintExport>& blueprints,
+                const std::vector<GBABlueprintInstanceExport>& bpInstances,
+                const std::vector<GBAHudElementExport>& hudElements,
                 std::string& errorMsg)
 {
     std::string buildOutput;
     std::string msysDir = ToMsysPath(runtimeDir);
 
     // Step 0: Generate mapdata.h
-    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist))
+    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames, ndsAntialiasing, script, blueprints, bpInstances, hudElements))
     {
         errorMsg = "Failed to write mapdata.h to " + runtimeDir + "/include/";
         return false;
