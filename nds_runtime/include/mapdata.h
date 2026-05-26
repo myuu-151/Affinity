@@ -24488,7 +24488,7 @@ typedef struct { int tick; u8 note; u8 vel; u8 smpIdx; u8 channel; int dur; } Af
 
 // Instance 4: Sound 4
 static const AfnSndNote afn_snd_notes_4[] = {
-    {0,60,100,4,0,43901},
+    {0,60,100,4,0,28139},
 };
 #define AFN_SND_4_NOTE_COUNT 1
 #define AFN_SND_4_TEMPO 120
@@ -24541,7 +24541,7 @@ static const int afn_snd_loop_end[5] = {
     0,
     0,
     0,
-    43901,
+    28139,
 };
 
 #define AFN_HAS_SOUND 1

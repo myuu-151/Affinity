@@ -1461,33 +1461,69 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         // rows with sourceSlot for counter display). Composite pieces /
         // cursor menus not yet rendered on NDS.
         if (!hudElements.empty()) {
-            int totalText = 0;
-            for (const auto& he : hudElements) totalText += (int)he.textRows.size();
+            int totalText = 0, totalPieces = 0;
+            for (const auto& he : hudElements) {
+                totalText   += (int)he.textRows.size();
+                totalPieces += (int)he.pieces.size();
+            }
             f << "#define AFN_HUD_ELEM_COUNT " << (int)hudElements.size() << "\n";
             f << "#define AFN_HUD_TEXT_COUNT " << totalText << "\n";
-            f << "static const struct { short x, y; unsigned short textStart, textCount; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
-            int textCursor = 0;
-            for (const auto& he : hudElements) {
-                f << "    { " << he.screenX << ", " << he.screenY << ", "
-                  << textCursor << ", " << (int)he.textRows.size() << " },\n";
-                textCursor += (int)he.textRows.size();
-            }
-            f << "};\n";
-            if (totalText > 0) {
-                f << "static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; } afn_hud_texts[" << totalText << "] = {\n";
+            f << "#define AFN_HUD_PIECE_COUNT " << totalPieces << "\n";
+            // Piece tile blob is empty for now — the per-asset frame
+            // extraction + palette baking lives in a follow-up. Element /
+            // text rendering doesn't depend on it.
+            f << "#define AFN_HUD_PIECE_TILE_LEN 0\n";
+            f << "struct AfnHudPiece { short x, y; unsigned short vramTile; unsigned char size; unsigned char palBank; };\n";
+            if (totalPieces > 0) {
+                f << "static const struct AfnHudPiece afn_hud_pieces[" << totalPieces << "] = {\n";
                 for (const auto& he : hudElements) {
-                    for (const auto& tr : he.textRows) {
-                        f << "    { " << tr.localX << ", " << tr.localY << ", "
-                          << tr.sourceSlot << ", " << tr.pad << ", " << tr.scale << " },\n";
+                    for (const auto& pc : he.pieces) {
+                        f << "    { " << pc.localX << ", " << pc.localY << ", 0, "
+                          << pc.size << ", 15 },\n"; // vramTile=0/palBank=15 placeholder
                     }
                 }
                 f << "};\n";
             } else {
-                f << "static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; } afn_hud_texts[1] = {{0}};\n";
+                f << "static const struct AfnHudPiece afn_hud_pieces[1] = {{0}};\n";
+            }
+            f << "static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
+            int textCursor = 0, pieceCursor = 0;
+            for (const auto& he : hudElements) {
+                f << "    { " << he.screenX << ", " << he.screenY << ", "
+                  << textCursor << ", " << (int)he.textRows.size() << ", "
+                  << pieceCursor << ", " << (int)he.pieces.size() << " },\n";
+                textCursor  += (int)he.textRows.size();
+                pieceCursor += (int)he.pieces.size();
+            }
+            f << "};\n";
+            if (totalText > 0) {
+                f << "static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; char text[32]; } afn_hud_texts[" << totalText << "] = {\n";
+                for (const auto& he : hudElements) {
+                    for (const auto& tr : he.textRows) {
+                        // Quote-escape the text field; truncate to 31 chars + NUL.
+                        std::string escaped;
+                        for (int i = 0; i < 31 && tr.text[i]; i++) {
+                            char c = tr.text[i];
+                            if (c == '\\' || c == '"') { escaped += '\\'; escaped += c; }
+                            else if (c == '\n') escaped += "\\n";
+                            else if (c == '\t') escaped += "\\t";
+                            else if (c < 0x20 || c > 0x7E) escaped += '?';
+                            else escaped += c;
+                        }
+                        f << "    { " << tr.localX << ", " << tr.localY << ", "
+                          << tr.sourceSlot << ", " << tr.pad << ", " << tr.scale
+                          << ", \"" << escaped << "\" },\n";
+                    }
+                }
+                f << "};\n";
+            } else {
+                f << "static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; char text[32]; } afn_hud_texts[1] = {{0}};\n";
             }
         } else {
             f << "#define AFN_HUD_ELEM_COUNT 0\n";
             f << "#define AFN_HUD_TEXT_COUNT 0\n";
+            f << "#define AFN_HUD_PIECE_COUNT 0\n";
+            f << "#define AFN_HUD_PIECE_TILE_LEN 0\n";
         }
         f << "extern int  afn_scripts_stopped;\n";
         f << "extern int  afn_start_x;\n";
