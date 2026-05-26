@@ -13925,7 +13925,8 @@ static void afn_bp2_key_pressed(void) {
 static void afn_bp2_key_released(void) {
 }
 static void afn_bp2_collision(void) {
-    /* TODO: emit node type 97 */
+    player_x = afn_start_x; player_y = afn_start_y; player_z = afn_start_z;
+    player_vy = 0;
 }
 static void afn_bp3_update(void) {
 }

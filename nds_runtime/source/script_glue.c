@@ -114,30 +114,88 @@ void afn_script_init(void)
 // OnCollision dispatcher. The 10-frame post-load grace window matches GBA
 // so the player doesn't ping-pong on a sprite they started inside of.
 #ifdef AFN_HAS_SCRIPT
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+// Per-mesh local-space AABB, lazily computed on first collision check.
+// Verts are 16.8 fixed pixels (s16). Bounds get scaled by the sprite's
+// scale field (8.8 fixed, 256 = 1.0) and translated by sprite pos at
+// query time so each instance gets its own world AABB without per-instance
+// recompute cost.
+static int s_mesh_min[AFN_MESH_COUNT][3];
+static int s_mesh_max[AFN_MESH_COUNT][3];
+static int s_mesh_bounds_ready = 0;
+static void compute_mesh_bounds(void)
+{
+    for (int m = 0; m < AFN_MESH_COUNT; m++) {
+        int vc = afn_mesh_desc[m][0];
+        const short* v = afn_mesh_vert_ptrs[m];
+        if (vc <= 0 || !v) {
+            s_mesh_min[m][0] = s_mesh_min[m][1] = s_mesh_min[m][2] = 0;
+            s_mesh_max[m][0] = s_mesh_max[m][1] = s_mesh_max[m][2] = 0;
+            continue;
+        }
+        int minX = v[0], maxX = v[0];
+        int minY = v[1], maxY = v[1];
+        int minZ = v[2], maxZ = v[2];
+        for (int i = 1; i < vc; i++) {
+            int x = v[i*3+0], y = v[i*3+1], z = v[i*3+2];
+            if (x < minX) minX = x; if (x > maxX) maxX = x;
+            if (y < minY) minY = y; if (y > maxY) maxY = y;
+            if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+        }
+        s_mesh_min[m][0] = minX; s_mesh_max[m][0] = maxX;
+        s_mesh_min[m][1] = minY; s_mesh_max[m][1] = maxY;
+        s_mesh_min[m][2] = minZ; s_mesh_max[m][2] = maxZ;
+    }
+    s_mesh_bounds_ready = 1;
+}
+#endif
+
 static void afn_script_check_collisions(void)
 {
 #if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0 && defined(AFN_SPRITE_COUNT) && AFN_SPRITE_COUNT > 0
     if (afn_frame_count <= 10) { afn_collided_sprite = -1; return; }
-    // Dispatch once per overlapping sprite (not just the first). With a single
-    // afn_collided_sprite slot + early-break, walking through a cluster of
-    // rings only collects the lowest-slot one per frame; the rest age out of
-    // the 24px outer ring before their turn comes. Iterate and re-fire the
-    // bp dispatcher for each match — the dispatcher already gates by
-    // afn_bp_instances[i][1] == afn_collided_sprite so only the right bp runs.
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+    if (!s_mesh_bounds_ready) compute_mesh_bounds();
+#endif
     int firstHit = -1;
     for (int i = 0; i < AFN_SPRITE_COUNT; i++) {
         if (i == AFN_PLAYER_IDX) continue;
         if (!afn_sprite_visible[i]) continue;
         if (!afn_collision_enabled[i]) continue;
-        int dx = (player_x - afn_sprite_data[i][0]) >> 4;
-        int dz = (player_z - afn_sprite_data[i][2]) >> 4;
-        if (dx * dx + dz * dz < 147456) {
+
+        int hit = 0;
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+        int meshIdx = afn_sprite_data[i][9];
+        if (meshIdx >= 0 && meshIdx < AFN_MESH_COUNT) {
+            // Mesh sprite — AABB test on the scaled local bounds in world space.
+            // Skipping rotation; reset/zone meshes are axis-aligned in practice.
+            int sx = afn_sprite_data[i][0];
+            int sy = afn_sprite_data[i][1];
+            int sz = afn_sprite_data[i][2];
+            int s  = afn_sprite_data[i][5]; if (s <= 0) s = 256;
+            int mnX = sx + ((s_mesh_min[meshIdx][0] * s) >> 8);
+            int mxX = sx + ((s_mesh_max[meshIdx][0] * s) >> 8);
+            int mnY = sy + ((s_mesh_min[meshIdx][1] * s) >> 8);
+            int mxY = sy + ((s_mesh_max[meshIdx][1] * s) >> 8);
+            int mnZ = sz + ((s_mesh_min[meshIdx][2] * s) >> 8);
+            int mxZ = sz + ((s_mesh_max[meshIdx][2] * s) >> 8);
+            if (player_x >= mnX && player_x <= mxX &&
+                player_y >= mnY && player_y <= mxY &&
+                player_z >= mnZ && player_z <= mxZ) hit = 1;
+        } else
+#endif
+        {
+            // Plain sprite — XZ radius test (24px circle, matches GBA).
+            int dx = (player_x - afn_sprite_data[i][0]) >> 4;
+            int dz = (player_z - afn_sprite_data[i][2]) >> 4;
+            if (dx * dx + dz * dz < 147456) hit = 1;
+        }
+        if (hit) {
             afn_collided_sprite = i;
             if (firstHit < 0) firstHit = i;
             afn_bp_dispatch_collision();
         }
     }
-    // Scene-level OnCollision still fires once with the first hit (matches GBA).
     if (firstHit >= 0) {
         afn_collided_sprite = firstHit;
         afn_emitted_script_collision();

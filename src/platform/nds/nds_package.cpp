@@ -1760,6 +1760,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             case GBAScriptNodeType::StopSound:
                 f << "    afn_stop_sound();\n";
                 break;
+            case GBAScriptNodeType::Respawn:
+                f << "    player_x = afn_start_x; player_y = afn_start_y; player_z = afn_start_z;\n";
+                f << "    player_vy = 0;\n";
+                break;
             case GBAScriptNodeType::UpdateRespawnPos: {
                 auto* objData = findDataIn(a->id, 0);
                 std::string obj;

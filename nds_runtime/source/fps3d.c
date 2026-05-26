@@ -645,6 +645,13 @@ void afn_fps3d_init(void)
     player_z = AFN_CAM_Z;
     player_y = 0;
 #endif
+#ifdef AFN_HAS_SCRIPT
+    // Seed Respawn defaults at player spawn so the Respawn node works
+    // before any UpdateRespawnPos / checkpoint hit.
+    afn_start_x = player_x;
+    afn_start_y = player_y;
+    afn_start_z = player_z;
+#endif
     orbit_dist = AFN_ORBIT_DIST;
     // Camera = player - orbit_dist along view forward. NDS convention:
     // forward = (sin, cos), so camera sits at -(sin, cos) * dist behind player.
