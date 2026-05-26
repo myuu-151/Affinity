@@ -8,7 +8,7 @@
 #define AFN_CAM_X     32768
 #define AFN_CAM_Z     32768
 #define AFN_CAM_H     3200
-#define AFN_CAM_ANGLE 1820
+#define AFN_CAM_ANGLE 16383
 #define AFN_CAM_HORIZON 60
 #define AFN_WALK_SPEED 37
 #define AFN_SPRINT_SPEED 56
@@ -13823,7 +13823,7 @@ static void afn_emitted_script_collision(void) {
 static void afn_emitted_script_collision2d(void) {
 }
 static void afn_bp0_update(void) {
-    if (!player_on_ground && player_vy > 0) {
+    if (player_vy > 0) {
     if (player_on_ground) {
     if (afn_flags & (1u << 0)) {
     } else {
@@ -13836,7 +13836,7 @@ static void afn_bp0_update(void) {
     afn_play_anim = 4; afn_anim_prio = 1;
     }
     if (player_on_ground) {
-    afn_flags |= (1u << 0);
+    afn_flags &= ~(1u << 0);
     }
 }
 static void afn_bp0_key_held(void) {
@@ -13861,7 +13861,7 @@ static void afn_bp0_key_held(void) {
 }
 static void afn_bp0_key_pressed(void) {
     if (key_hit(KEY_A)) {
-    if (!player_on_ground && player_vy > 0) {
+    if (player_vy > 0) {
     if (player_on_ground) {
     if (afn_flags & (1u << 0)) {
     } else {
@@ -13911,7 +13911,7 @@ static void afn_bp1_collision(void) {
     afn_play_sfx(1, 0, 0);
     player_vy = 1024;
     afn_sprite_anim_spr = 3; afn_sprite_anim_val = 1;
-    afn_flags |= (1u << 0);
+    afn_flags |=  (1u << 0);
     }
         }
     }
@@ -13983,7 +13983,7 @@ static void afn_bp5_collision(void) {
     /* TODO: emit node type 243 */
     afn_sprite_anim_spr = 21; afn_sprite_anim_val = 1;
     afn_play_sfx(3, 0, 0);
-    afn_flags |= (1u << 1);
+    afn_flags |=  (1u << 1);
     }
         }
     }

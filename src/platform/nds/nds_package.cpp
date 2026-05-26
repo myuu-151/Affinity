@@ -1685,9 +1685,15 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "    }\n";
                 break;
             }
-            case GBAScriptNodeType::SetFlag:
-                f << "    afn_flags |= (1u << " << a->paramInt[0] << ");\n";
+            case GBAScriptNodeType::SetFlag: {
+                auto* flagData = findDataIn(a->id, 0);
+                auto* valData  = findDataIn(a->id, 1);
+                int flag = flagData ? resolveInt(flagData) : a->paramInt[0];
+                int val  = valData  ? resolveInt(valData)  : a->paramInt[1];
+                if (val) f << "    afn_flags |=  (1u << " << flag << ");\n";
+                else     f << "    afn_flags &= ~(1u << " << flag << ");\n";
                 break;
+            }
             case GBAScriptNodeType::ToggleFlag:
                 f << "    afn_flags ^= (1u << " << a->paramInt[0] << ");\n";
                 break;
@@ -1710,8 +1716,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             case GBAScriptNodeType::IsOnGround:
                 f << "    if (player_on_ground) {\n"; break;
             case GBAScriptNodeType::IsJumping:
-                // "airborne AND rising" (matches node tooltip + GBA semantics)
-                f << "    if (!player_on_ground && player_vy > 0) {\n"; inJumpGate = true; break;
+                // Matches GBA: just "rising," no airborne guard. Sounds wrong
+                // vs the editor tooltip but the BP idioms (e.g. jump SFX on
+                // the same frame Jump sets player_vy while still grounded)
+                // depend on this looser check.
+                f << "    if (player_vy > 0) {\n"; inJumpGate = true; break;
             case GBAScriptNodeType::IsFalling:
                 f << "    if (!player_on_ground && player_vy <= 0) {\n"; inJumpGate = true; break;
             // CheckFlag is handled specially in emitChain (dual-pin Set/Clear branches).
