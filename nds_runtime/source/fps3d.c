@@ -469,11 +469,12 @@ static void load_sky_texture(void)
 {
     glGenTextures(1, &gl_sky_tex_id);
     glBindTexture(0, gl_sky_tex_id);
-    // 256x256 8bpp paletted (GL_RGB256). TEXTURE_SIZE_256 = 5.
-    // GL_TEXTURE_WRAP_S = horizontal wrap so the panorama can scroll past
-    // its 256-px edge as cam_angle rotates past 360° without clamping or
-    // garbage. Vertical wrap intentionally off (top of sky is top).
-    glTexImage2D(0, 0, GL_RGB256, 5, 5, 0,
+    // Texture size + dimensions come from the exporter — using the
+    // panorama's native PNG size avoids the 2x4 nearest-neighbour
+    // upsample that previously gave the sky visible speckle artefacts.
+    // GL_TEXTURE_WRAP_S = horizontal wrap so the panorama can scroll
+    // past its texel-width edge as cam_angle rotates past 360°.
+    glTexImage2D(0, 0, GL_RGB256, AFN_SKY_TEX_SIZE_W, AFN_SKY_TEX_SIZE_H, 0,
                  TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S, afn_sky_tex);
     glColorTableEXT(0, 0, 256, 0, 0, afn_sky_pal);
 }
@@ -500,19 +501,15 @@ static void render_sky(void)
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE);
 
     // cam_angle 0..65535 = full 360° panorama wrap.
-    // Map to t16 (.4 fixed texel units): one full wrap = 256 px = 4096 t16.
-    // Screen shows the full 256-px panorama at 1:1 (matches GBA's Mode 7
-    // sky which just scrolls a 256-px tilemap; a perspective-correct
-    // ~86°/360° slice looked too stretched compared to the reference).
-    // Match GBA's update_sky_scroll exactly: pixScroll = (cam_ang * 256) >> 16
-    // and 1:1 panorama-to-screen mapping (one texture pixel = one screen
-    // pixel, full 256-px panorama spans full 256-px screen).
-    // -1280 t16 = -80 px shift in source = panorama appears 80 px RIGHT.
-    int uOffset = ((int)cam_angle * 4096) >> 16;
-    int uLeft  = uOffset - 1280;
-    int uRight = uOffset - 1280 + 4096;  // 1:1 panorama mapping (matches GBA)
+    // Map to t16 (.4 fixed texel units): one full wrap = AFN_SKY_W texels
+    // = AFN_SKY_W*16 t16 units. -80 px shift in source ≈ -SKY_W*5 t16.
+    int fullWrap = AFN_SKY_W * 16;
+    int shiftRight = (AFN_SKY_W * 5);    // ~80px on a 256-w pano scales down
+    int uOffset = ((int)cam_angle * fullWrap) >> 16;
+    int uLeft  = uOffset - shiftRight;
+    int uRight = uOffset - shiftRight + fullWrap;
     int vTop   = 0;
-    int vBot   = 4096;             // full 256-row panorama — anything smaller stretches each texel taller
+    int vBot   = AFN_SKY_H * 16;   // full pano height in t16 units
 
     // Quad pushed to the far depth so all meshes draw on top.
     // v16 range is ±8 (4.12 fixed); z = -7.9 is as far as a vertex can go.
