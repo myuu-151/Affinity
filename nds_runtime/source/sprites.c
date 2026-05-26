@@ -235,15 +235,40 @@ void afn_sprite_update(void)
             s_animStart[si] = s_animTick;
         }
         int animFrame = frameStart;
+        int oneShotDone = 0;
         if (animLen > 1 && animFps > 0) {
             int hold = 60 / animFps; if (hold < 1) hold = 1;
             int elapsed = s_animTick - s_animStart[si];
             int step = elapsed / hold;
+            if (!animLoop && step >= animLen) oneShotDone = 1;
             int local = animLoop ? (step % animLen)
                                  : (step >= animLen ? animLen - 1 : step);
             animFrame = frameStart + local;
         }
         if (animFrame >= frameCount) animFrame = frameCount - 1;
+        // SetSpriteAnim one-shot revert (mirrors GBA main.c:8028-8033):
+        // when a script-driven override finishes its non-looping cycle, clear
+        // the override and snap back to the asset's default anim so it
+        // doesn't stick on the last frame forever.
+        if (oneShotDone && afn_sprite_anim_spr == si && afn_sprite_anim_val >= 0) {
+            afn_sprite_anim_spr = -1;
+            afn_sprite_anim_val = -1;
+            animIdx = defaultAn;
+            s_animPrev[si] = animIdx;
+            s_animStart[si] = s_animTick;
+            // Re-resolve frame to defaultAn's start so this frame already
+            // renders the reverted anim, not the override's last frame.
+#if AFN_ANIM_TABLE_LEN > 0
+            if (animCount > 0 && animIdx >= 0 && animIdx < animCount) {
+                const int* row2 = afn_anim_table[animBase + animIdx];
+                animFrame = row2[0];
+            } else {
+                animFrame = 0;
+            }
+#else
+            animFrame = 0;
+#endif
+        }
 
 #if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
         if (si == AFN_PLAYER_IDX) {
