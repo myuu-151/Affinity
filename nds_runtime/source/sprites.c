@@ -166,9 +166,10 @@ void afn_sprite_update(void)
         if (dirCount > 1 && !fStatic) {
 #if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
             if (si == AFN_PLAYER_IDX) {
-                uint16_t sprAngle = player_moving
-                    ? player_move_angle
-                    : (uint16_t)(player_move_angle - orbit_angle);
+                // Multiply orbit_angle by 2 so 90° physical orbit gives
+                // a 180° dir flip — user wanted sprite to "land on the
+                // opposite side" with shorter L/R holds.
+                uint16_t sprAngle = (uint16_t)(player_move_angle - (orbit_angle << 1));
                 int rawIdx = ((sprAngle + 0xC000 + 4096) >> 13) & 7;
                 dir = (8 - rawIdx) & 7;
                 int held = keysHeld();

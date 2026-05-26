@@ -1520,9 +1520,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 auto* speedData = findDataIn(a->id, 1);
                 int dir   = dirData   ? dirData->paramInt[0] : 1;
                 int speed = speedData ? resolveInt(speedData) : 512;
-                // Halve on NDS — matches GBA feel best in practice; faster
-                // overshoots the orbit ease and sprite leaves the screen.
-                speed /= 2;
+                speed /= 2;  // halve orbit speed on NDS
                 const char* key  = (dir == 0) ? "KEY_L" : "KEY_R";
                 // Flipped sign vs older NDS commits — pre-DMA work, L
                 // (dir=0) used to decrement cam_angle, but the picker

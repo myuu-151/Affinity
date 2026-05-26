@@ -367,12 +367,10 @@ static void update_camera(void)
         else if (afn_input_fwd == 0 && afn_input_right < 0) ang = 0x0000; // LEFT
         else if (afn_input_fwd > 0 && afn_input_right < 0)  ang = 0x2000; // UP+LEFT
         player_move_angle = ang;
-    } else if (s_wasMoving) {
-        // Just stopped: convert input-space angle to world-space so the
-        // idle formula's (orbit_angle + move_angle) keeps sprite back-
-        // facing the camera even if user later orbits.
-        player_move_angle = player_move_angle - orbit_angle;
     }
+    // No on-stop adjustment: idle formula `player_move_angle - orbit_angle`
+    // already subtracts orbit_angle once. Re-subtracting here doubled the
+    // sensitivity (90° orbit produced a 180° dir shift instead of 90°).
     s_wasMoving = player_moving;
     (void)s_moveSpeed;
 #else
