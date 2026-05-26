@@ -702,6 +702,30 @@ void afn_scene_tick(void)
             afn_pending_scene = -1;
             afn_fade_counter  = afn_fade_frames;
             s_fade_phase      = 2;
+#ifdef AFN_HAS_SCRIPT
+            // Scene-load reset: respawn player, clear momentum + transient
+            // anim state, restore sprite visibility / collision so the new
+            // scene starts fresh. Mirrors GBA's scene_load() but keeps
+            // afn_flags / afn_score / afn_vars persistent across scenes.
+            player_x = afn_start_x;
+            player_y = afn_start_y;
+            player_z = afn_start_z;
+            player_vy = 0;
+            player_moving = 0;
+            afn_play_anim = -1;
+            afn_anim_prio = 0;
+            afn_collided_sprite = -1;
+            afn_frame_count = 0;
+            afn_player_frozen = 0;
+            afn_shake_frames = 0;
+            for (int i = 0; i < NUM_SPRITES; i++) {
+                afn_sprite_visible[i] = 1;
+                afn_collision_enabled[i] = 1;
+                afn_hp[i] = 100;
+                afn_state_timer[i] = 0;
+                afn_sprite_flip[i] = 0;
+            }
+#endif
         }
     } else {
         int t = afn_fade_counter;

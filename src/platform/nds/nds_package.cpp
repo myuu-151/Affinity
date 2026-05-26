@@ -1453,6 +1453,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_player_height;\n";
         f << "extern int  afn_hud_value[4];\n";
         f << "extern unsigned char afn_hud_visible[4];\n";
+        // Scene-transition entry point (defined in fps3d.c) + current-scene state.
+        f << "extern int  afn_current_scene;\n";
+        f << "extern int  afn_current_mode;\n";
+        f << "void afn_scene_start_transition(int sceneIdx, int sceneMode, int fadeFrames);\n";
         // HUD element table (minimal subset of GBA fields: position + text
         // rows with sourceSlot for counter display). Composite pieces /
         // cursor menus not yet rendered on NDS.
@@ -1798,6 +1802,16 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             case GBAScriptNodeType::Respawn:
                 f << "    player_x = afn_start_x; player_y = afn_start_y; player_z = afn_start_z;\n";
                 f << "    player_vy = 0;\n";
+                break;
+            case GBAScriptNodeType::ChangeScene: {
+                auto* scData = findDataIn(a->id, 0);
+                int scIdx = scData ? resolveInt(scData) : a->paramInt[0];
+                int scMode = a->paramInt[1]; // 0 = 3D / Mode 4
+                f << "    afn_scene_start_transition(" << scIdx << ", " << scMode << ", 15);\n";
+                break;
+            }
+            case GBAScriptNodeType::ReloadScene:
+                f << "    afn_scene_start_transition(afn_current_scene, afn_current_mode, 15);\n";
                 break;
             case GBAScriptNodeType::SetHudValue: {
                 auto* valData  = findDataIn(a->id, 0);
