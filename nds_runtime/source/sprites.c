@@ -99,6 +99,10 @@ void afn_sprite_update(void)
         if (afn_sprite_data[si][9] >= 0) continue;  // mesh sprite — fps3d draws it
         int aIdx = afn_sprite_data[si][4];
         if (aIdx < 0 || aIdx >= AFN_ASSET_COUNT) continue;
+#if defined(AFN_HAS_SCRIPT) && defined(NUM_SPRITES)
+        // DestroyObject / SetVisible toggle this; skip rendering when hidden.
+        if (si < NUM_SPRITES && !afn_sprite_visible[si]) continue;
+#endif
 
         int wx = afn_sprite_data[si][0];
         int wy = afn_sprite_data[si][1];
