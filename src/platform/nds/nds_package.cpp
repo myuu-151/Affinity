@@ -227,11 +227,20 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         std::vector<int> assetAnimCount(assets.size(), 0);   // # anims defined
         std::vector<int> assetDefaultAnim(assets.size(), 0);
         std::vector<int> assetFrameBase(assets.size(), 0); // index into afn_frame_dir_tile
+        // DMA-streaming bookkeeping: each asset gets a fixed VRAM tile slot
+        // sized to its largest frame (in dir-slots × tpf). The runtime DMAs
+        // the active frame's tile data into that slot on each frame change.
+        std::vector<int> assetMaxFrameTiles(assets.size(), 0);  // tiles
+        std::vector<int> assetVramTileBase(assets.size(), 0);   // tiles within sprite VRAM
+        // Per-frame: u32 offset into afn_all_tiles where this frame's data
+        // begins, and tile count so the runtime knows the DMA length.
+        std::vector<uint32_t> frameRomU32Offset;
+        std::vector<uint16_t> frameTileCount;
 
-        // Per-frame dir → tile-offset table (offsets relative to asset's
-        // tileStart, in tile units). Lets us emit only painted directions
-        // per frame and have the runtime fall back to the nearest painted
-        // dir without baking duplicates into VRAM.
+        // Per-frame dir → tile-offset table (offsets relative to the asset's
+        // VRAM tile base — runtime adds those to vramTileBase). Lets us emit
+        // only painted directions per frame and have the runtime fall back
+        // to the nearest painted dir without baking duplicates into VRAM.
         std::vector<std::array<uint16_t, 8>> frameDirTile;
 
         // Global flat table of {startFrame, frameCount, fps, loop} for every
@@ -424,21 +433,25 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 // to ~104KB. Per-frame dir→slot mapping baked into
                 // afn_frame_dir_tile so runtime can fall back to nearest
                 // populated dir when the requested facing isn't painted.
-                int tileOffsetWithinAsset = 0;
+                // DMA streaming: per frame, record ROM u32 offset + tile
+                // count so the runtime can DMA only the active frame into
+                // the asset's fixed VRAM slot. dirTileOff values become
+                // relative to the VRAM slot (not the asset's ROM region).
                 for (size_t fi = 0; fi < uniqueFrames.size(); fi++) {
                     int srcFrameIdx = uniqueFrames[fi];
                     std::array<uint16_t, 8> dirTileOff;
+                    size_t romU32Before = allTiles.size();
+                    frameRomU32Offset.push_back((uint32_t)romU32Before);
                     if (srcFrameIdx < framesBaseCount) {
                         const auto& fr = a.frames[srcFrameIdx];
                         int fw = fr.width > 0 ? fr.width : sz;
                         int fh = fr.height > 0 ? fr.height : sz;
-                        // frames[] entries are single-direction; emit once and
-                        // alias all dirs to slot 0.
                         emitFrame(fr.pixels, fw, fh, true);
-                        for (int d = 0; d < 8; d++)
-                            dirTileOff[d] = (uint16_t)tileOffsetWithinAsset;
-                        tileOffsetWithinAsset += tilesPerFrameStride;
+                        for (int d = 0; d < 8; d++) dirTileOff[d] = 0;
                         frameDirTile.push_back(dirTileOff);
+                        int tiles = (int)((allTiles.size() - romU32Before) / 8);
+                        frameTileCount.push_back((uint16_t)tiles);
+                        if (tiles > assetMaxFrameTiles[ai]) assetMaxFrameTiles[ai] = tiles;
                         continue;
                     }
                     int setIdx = srcFrameIdx - framesBaseCount;
@@ -446,7 +459,6 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                     if (setIdx >= (int)a.dirAnimSets.size())
                         setIdx = (int)a.dirAnimSets.size() - 1;
 
-                    // First pass: figure out which dirs are populated.
                     int populated[8];
                     int popCount = 0;
                     for (int d = 0; d < 8; d++) {
@@ -455,16 +467,15 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                             populated[popCount++] = d;
                     }
                     if (popCount == 0) {
-                        // No dirs painted — emit dir 0 of dirAnimSets[0] as fallback
                         emitFrame(nullptr, 0, 0, false);
-                        for (int d = 0; d < 8; d++)
-                            dirTileOff[d] = (uint16_t)tileOffsetWithinAsset;
-                        tileOffsetWithinAsset += tilesPerFrameStride;
+                        for (int d = 0; d < 8; d++) dirTileOff[d] = 0;
                         frameDirTile.push_back(dirTileOff);
+                        int tiles = (int)((allTiles.size() - romU32Before) / 8);
+                        frameTileCount.push_back((uint16_t)tiles);
+                        if (tiles > assetMaxFrameTiles[ai]) assetMaxFrameTiles[ai] = tiles;
                         continue;
                     }
 
-                    // For each requested dir, pick nearest populated slot.
                     int slotForDir[8];
                     for (int d = 0; d < 8; d++) {
                         int bestSlot = 0, bestDist = 100;
@@ -475,8 +486,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                             if (diff < bestDist) { bestDist = diff; bestSlot = s; }
                         }
                         slotForDir[d] = bestSlot;
-                        dirTileOff[d] = (uint16_t)(tileOffsetWithinAsset +
-                                                   bestSlot * tilesPerFrameStride);
+                        // Relative to asset's VRAM slot — runtime adds the
+                        // asset's vramTileBase.
+                        dirTileOff[d] = (uint16_t)(bestSlot * tilesPerFrameStride);
                     }
                     frameDirTile.push_back(dirTileOff);
 
@@ -503,8 +515,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                         }
                         emitFrame(palIdx.data(), sw, sh, false);
                     }
-                    tileOffsetWithinAsset += popCount * tilesPerFrameStride;
                     (void)slotForDir;
+                    int tiles = popCount * tilesPerFrameStride;
+                    frameTileCount.push_back((uint16_t)tiles);
+                    if (tiles > assetMaxFrameTiles[ai]) assetMaxFrameTiles[ai] = tiles;
                 }
                 // assetDirCount stays 8 so the runtime still picks a facing
                 // for sprite-direction logic. Tile addressing skips the *8
@@ -529,24 +543,32 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 // is uniform. Every requested dir maps to the same slot
                 // (the only painted one).
                 assetFrameBase[ai] = (int)frameDirTile.size();
-                int tileOffsetWithinAsset2 = 0;
                 for (auto& fr : a.frames) {
                     std::array<uint16_t, 8> dirTileOff;
-                    for (int d = 0; d < 8; d++)
-                        dirTileOff[d] = (uint16_t)tileOffsetWithinAsset2;
+                    for (int d = 0; d < 8; d++) dirTileOff[d] = 0;
                     frameDirTile.push_back(dirTileOff);
+                    size_t romU32Before = allTiles.size();
+                    frameRomU32Offset.push_back((uint32_t)romU32Before);
                     emitFrame(fr.pixels, fr.width > 0 ? fr.width : sz,
                               fr.height > 0 ? fr.height : sz, true);
-                    tileOffsetWithinAsset2 += tilesPerFrameStride;
+                    int tiles = (int)((allTiles.size() - romU32Before) / 8);
+                    frameTileCount.push_back((uint16_t)tiles);
+                    if (tiles > assetMaxFrameTiles[ai]) assetMaxFrameTiles[ai] = tiles;
                 }
                 for (const auto& dset : a.dirAnimSets) {
                     std::array<uint16_t, 8> dirTileOff;
-                    for (int d = 0; d < 8; d++)
-                        dirTileOff[d] = (uint16_t)tileOffsetWithinAsset2;
+                    for (int d = 0; d < 8; d++) dirTileOff[d] = 0;
                     frameDirTile.push_back(dirTileOff);
-                    tileOffsetWithinAsset2 += tilesPerFrameStride;
+                    size_t romU32Before = allTiles.size();
+                    frameRomU32Offset.push_back((uint32_t)romU32Before);
                     const auto& img = dset.dirImages[0];
-                    if (!img.pixels) { emitFrame(nullptr, 0, 0, false); continue; }
+                    if (!img.pixels) {
+                        emitFrame(nullptr, 0, 0, false);
+                        int tiles = (int)((allTiles.size() - romU32Before) / 8);
+                        frameTileCount.push_back((uint16_t)tiles);
+                        if (tiles > assetMaxFrameTiles[ai]) assetMaxFrameTiles[ai] = tiles;
+                        continue;
+                    }
                     // Quantize this RGBA frame into the asset palette built
                     // above (a.palette already populated).
                     int fw = img.width, fh = img.height;
@@ -567,6 +589,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                         palIdx[yy*fw+xx] = (uint8_t)best;
                     }
                     emitFrame(palIdx.data(), fw, fh, false);
+                    int tiles = (int)((allTiles.size() - romU32Before) / 8);
+                    frameTileCount.push_back((uint16_t)tiles);
+                    if (tiles > assetMaxFrameTiles[ai]) assetMaxFrameTiles[ai] = tiles;
                 }
                 assetFrameCount[ai] = totalFrames;
                 assetAnimBase[ai]    = (int)animTable.size();
@@ -599,7 +624,27 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             f << "// asset " << ai << " emitted " << ((int)allTiles.size() - prevSize)
               << " u32, total now " << (int)allTiles.size()
               << " (frames=" << assetFrameCount[ai] << " dirs=" << assetDirCount[ai]
-              << " tpf=" << assetTilesPerFrame[ai] << ")\n";
+              << " tpf=" << assetTilesPerFrame[ai]
+              << " maxFrameTiles=" << assetMaxFrameTiles[ai] << ")\n";
+        }
+        // DMA streaming VRAM placement: each asset gets a fixed slot sized
+        // to its largest frame (max tile-count across all its frames).
+        // Greedy bin-pack into the 128KB main sprite VRAM (4096 tiles, with
+        // 1D_128 mapping requiring 4-tile alignment). Total active usage
+        // is the sum of max-frame-sizes (~1600 tiles ≈ 51KB for this
+        // project) — well under the 128KB ceiling that bulk-loading hit.
+        {
+            int vramCursor = 0;
+            for (size_t ai = 0; ai < assets.size(); ai++) {
+                // 4-tile alignment for 1D_128 sprite mapping
+                vramCursor = (vramCursor + 3) & ~3;
+                assetVramTileBase[ai] = vramCursor;
+                int sz2 = assetMaxFrameTiles[ai];
+                if (sz2 < 1) sz2 = 1;
+                vramCursor += sz2;
+            }
+            f << "// VRAM tile usage: " << vramCursor << " tiles ("
+              << (vramCursor * 32) << " bytes of " << (128 * 1024) << ")\n";
         }
         f << "static const u32 afn_all_tiles[" << (allTiles.empty() ? 1 : (int)allTiles.size()) << "] = {";
         if (allTiles.empty()) f << " 0 ";
@@ -646,16 +691,39 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         // jump has 1, idle has 8) and runtime fallback to nearest painted
         // dir. asset_desc[9] is now assetFrameBase (was unused dirCount=1
         // marker for new path).
+        // asset_desc[0] is now vramTileBase (where the asset's per-frame
+        // streamed data lands in sprite VRAM), not a ROM tile index.
         f << "static const int afn_asset_desc[][10] = {\n";
         for (size_t ai = 0; ai < assets.size(); ai++) {
             int palBank = (int)ai & 0xF;
-            f << "    { " << assetTileStart[ai] << ", " << assetTilesPerFrame[ai] << ", "
+            f << "    { " << assetVramTileBase[ai] << ", " << assetTilesPerFrame[ai] << ", "
               << assetFrameCount[ai] << ", " << assetObjSize[ai] << ", "
               << palBank << ", " << assetDirCount[ai] << ", "
               << assetAnimBase[ai] << ", " << assetAnimCount[ai] << ", "
               << assetDefaultAnim[ai] << ", " << assetFrameBase[ai] << " },\n";
         }
         f << "};\n\n";
+
+        // DMA streaming: per-frame ROM u32 offset (into afn_all_tiles) and
+        // tile-count (bytes / 32). Runtime reads these to DMA the active
+        // frame into the asset's VRAM slot whenever the frame changes.
+        f << "#define AFN_FRAME_STREAM_LEN " << (int)frameRomU32Offset.size() << "\n";
+        if (!frameRomU32Offset.empty()) {
+            f << "static const u32 afn_frame_rom_off[" << (int)frameRomU32Offset.size() << "] = {\n    ";
+            for (size_t i = 0; i < frameRomU32Offset.size(); i++) {
+                f << frameRomU32Offset[i];
+                if (i + 1 < frameRomU32Offset.size()) f << ", ";
+                if ((i + 1) % 12 == 0) f << "\n    ";
+            }
+            f << "\n};\n";
+            f << "static const u16 afn_frame_tile_count[" << (int)frameTileCount.size() << "] = {\n    ";
+            for (size_t i = 0; i < frameTileCount.size(); i++) {
+                f << frameTileCount[i];
+                if (i + 1 < frameTileCount.size()) f << ", ";
+                if ((i + 1) % 16 == 0) f << "\n    ";
+            }
+            f << "\n};\n\n";
+        }
 
         // Per-frame dir → tile-offset (relative to asset's tileStart).
         // Runtime: tileIdx = tileStart + afn_frame_dir_tile[base + frame][dir]

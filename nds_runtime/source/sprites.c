@@ -11,6 +11,9 @@
 
 #if defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
 #define HAS_SPRITES 1
+// Per-asset currently-loaded VRAM frame, -1 = none. sprite_update() DMAs
+// the active frame in when it changes (drives the streaming pipeline).
+int g_active_frame[AFN_ASSET_COUNT];
 #endif
 
 void afn_sprite_init(void)
@@ -37,18 +40,11 @@ void afn_sprite_init(void)
     REG_BG0CNT = (REG_BG0CNT & ~3) | 3;
     REG_DISPCNT |= DISPLAY_SPR_ACTIVE | DISPLAY_SPR_1D_LAYOUT;
 
-#if AFN_ALL_TILES_LEN > 0
-    {
-        // Tightly-packed 4bpp tile data: each 8x8 tile = 32 bytes, sub-tiles
-        // within a sprite read at 32-byte increments. The 1D_64 boundary only
-        // scales the OAM tile-INDEX field (byte_addr = slot_index * 64), not
-        // the inter-sub-tile stride. NDS VRAM rejects 8-bit writes → u32 copy.
-        const uint32_t* src = afn_all_tiles;
-        uint32_t* dst = (uint32_t*)0x06400000;
-        int words = (AFN_ALL_TILES_LEN + 3) / 4;
-        for (int i = 0; i < words; i++) dst[i] = src[i];
-    }
-#endif
+    // DMA streaming: no bulk upload of afn_all_tiles. The runtime DMAs
+    // each asset's active frame into its fixed VRAM slot on demand —
+    // sprite_update() below tracks g_active_frame[] per asset and pushes
+    // the current frame's tile data when it changes.
+    for (int ai = 0; ai < AFN_ASSET_COUNT; ai++) g_active_frame[ai] = -1;
 
 #if AFN_ASSET_COUNT > 0
     // Upload each asset's 16-color palette into its OBJ palette bank.
@@ -262,6 +258,27 @@ void afn_sprite_update(void)
         }
 #endif
 
+        // DMA streaming: if this asset's currently-loaded VRAM frame
+        // doesn't match the frame we want to render, DMA in the new one.
+        // g_active_frame tracks per-asset; the DMA only fires on frame
+        // changes (which happens at the anim's fps cadence — every 5-12
+        // game frames, not every frame).
+        {
+            int frameBase = afn_asset_desc[aIdx][9];
+            int globalFrame = frameBase + animFrame;
+            int vramTileBase = afn_asset_desc[aIdx][0];
+#if AFN_FRAME_STREAM_LEN > 0
+            extern int g_active_frame[AFN_ASSET_COUNT];
+            if (g_active_frame[aIdx] != globalFrame) {
+                const u32* src = afn_all_tiles + afn_frame_rom_off[globalFrame];
+                u32* dst = (u32*)(0x06400000 + vramTileBase * 32);
+                int tiles = afn_frame_tile_count[globalFrame];
+                dmaCopy(src, dst, tiles * 32);
+                g_active_frame[aIdx] = globalFrame;
+            }
+#endif
+        }
+
         proj[projCount].idx     = si;
         proj[projCount].depth   = depth;
         proj[projCount].screenX = screenX;
@@ -269,19 +286,20 @@ void afn_sprite_update(void)
         proj[projCount].matScale = matScale;
         proj[projCount].objSize = objSize;
         proj[projCount].palBank = afn_asset_desc[aIdx][4] & 0xF;
-        // Frame-dir indirection: per-frame, per-dir tile offset. Lets us
-        // emit only painted dirs (walk has 3, jump has 1) and falls back to
-        // nearest painted dir at runtime when the requested facing wasn't
-        // painted.
+        // tileIdx = vramTileBase + frame_dir_tile[frame][dir]  (frame_dir
+        // is now VRAM-slot-relative since DMA put the frame's data at
+        // vramTileBase). Per-frame dir-fallback baked in by exporter.
         {
             int frameBase = afn_asset_desc[aIdx][9];
             int globalFrame = frameBase + animFrame;
+            int vramTileBase = afn_asset_desc[aIdx][0];
 #if AFN_FRAME_DIR_TILE_LEN > 0
             int dirOff = afn_frame_dir_tile[globalFrame][dir];
 #else
             int dirOff = (animFrame * dirCount + dir) * tilesPerFr;
 #endif
-            proj[projCount].tileIdx = tileStart + dirOff;
+            proj[projCount].tileIdx = vramTileBase + dirOff;
+            (void)tileStart;
         }
         projCount++;
         if (projCount >= AFN_SPRITE_COUNT) break;
