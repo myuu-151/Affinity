@@ -164,25 +164,36 @@ void afn_sprite_update(void)
         int fStatic    = afn_sprite_data[si][10];
         int dir = 0;
         if (dirCount > 1 && !fStatic) {
-            // 8-way direction from sprite-to-camera vector (-dx, -dz). Octant
-            // 0 = camera at +Z (south of sprite), advancing CCW (looking down
-            // +Y) through 1..7. Tan(22.5°) ≈ 0.414 ≈ 53/128 — used to test
-            // whether a diagonal or a cardinal octant wins.
-            int vx = -dx, vz = -dz;
-            int ax = vx < 0 ? -vx : vx;
-            int az = vz < 0 ? -vz : vz;
-            // Compare ax vs az*tan(22.5°) and az vs ax*tan(22.5°) to find
-            // which of the 8 octants holds the vector.
-            int tanLo = (ax * 128) < (az * 53);   // ax dominated by az
-            int tanHi = (az * 128) < (ax * 53);   // az dominated by ax
-            if (vz >= 0 && vx >= 0) {                          // NE quadrant
-                dir = tanLo ? 0 : (tanHi ? 2 : 1);
-            } else if (vz < 0 && vx >= 0) {                    // SE quadrant
-                dir = tanHi ? 2 : (tanLo ? 4 : 3);
-            } else if (vz < 0 && vx < 0) {                     // SW quadrant
-                dir = tanLo ? 4 : (tanHi ? 6 : 5);
-            } else {                                           // NW quadrant
-                dir = tanHi ? 6 : (tanLo ? 0 : 7);
+#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
+            if (si == AFN_PLAYER_IDX) {
+                uint16_t sprAngle = player_moving
+                    ? player_move_angle
+                    : (uint16_t)(orbit_angle + player_move_angle);
+                int rawIdx = ((sprAngle + 0xC000 + 4096) >> 13) & 7;
+                dir = (8 - rawIdx) & 7;
+                int held = keysHeld();
+                if (held & KEY_L)      dir = (dir - 1 + 8) & 7;
+                else if (held & KEY_R) dir = (dir + 1) & 7;
+                static int s_pickDbg = 0;
+                s_pickDbg++;
+                if ((s_pickDbg & 15) == 0) {
+                    iprintf("\x1b[18;0Hmv=%d pma=%04X ora=%04X sa=%04X raw=%d dir=%d ",
+                            player_moving, (unsigned)player_move_angle,
+                            (unsigned)orbit_angle, (unsigned)sprAngle, rawIdx, dir);
+                }
+            } else
+#endif
+            {
+                // Non-player: camera-position billboard (back-facing camera).
+                int vx = -dx, vz = -dz;
+                int ax = vx < 0 ? -vx : vx;
+                int az = vz < 0 ? -vz : vz;
+                int tanLo = (ax * 128) < (az * 53);
+                int tanHi = (az * 128) < (ax * 53);
+                if (vz >= 0 && vx >= 0) dir = tanLo ? 0 : (tanHi ? 2 : 1);
+                else if (vz < 0 && vx >= 0) dir = tanHi ? 2 : (tanLo ? 4 : 3);
+                else if (vz < 0 && vx < 0) dir = tanLo ? 4 : (tanHi ? 6 : 5);
+                else dir = tanHi ? 6 : (tanLo ? 0 : 7);
             }
             if (dir >= dirCount) dir = 0;
         }

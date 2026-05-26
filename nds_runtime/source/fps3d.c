@@ -18,7 +18,15 @@ uint16_t orbit_angle;
 int orbit_dist;
 int player_sprite_idx = -1;
 int player_moving;
-uint16_t player_move_angle;
+uint16_t player_move_angle = 0x4000;  // GBA's default — back-facing camera
+uint16_t orbit_angle = AFN_CAM_ANGLE; // GBA: init at AFN_CAM_ANGLE, only
+                                      // modified by strafe auto-orbit (not
+                                      // by manual L/R OrbitCamera). NDS
+                                      // has no auto-orbit so it stays put.
+// Last frame's world-space movement direction (un-normalized). The sprite
+// dir picker reads these to face the player in the direction of motion.
+int s_lastMoveDX, s_lastMoveDZ;
+static int s_wasMoving = 0;
 
 int m7_horizon = 60;
 int m7_bg;
@@ -312,10 +320,15 @@ static void update_camera(void)
     // OrbitCamera / Jump / etc. are the only thing that touches camera state.
     if (held & KEY_L) cam_h += AFN_WALK_SPEED;
     if (held & KEY_R) cam_h -= AFN_WALK_SPEED;
-    if (held & KEY_LEFT)  cam_angle += 512;
-    if (held & KEY_RIGHT) cam_angle -= 512;
+    if (held & KEY_LEFT)  orbit_angle += 512;
+    if (held & KEY_RIGHT) orbit_angle -= 512;
 #endif
 
+    // GBA writes cam_angle = orbit_angle once per frame (main.c:7946) — that's
+    // how OrbitCamera scripts (which modify orbit_angle) actually propagate
+    // to camera-direction-dependent code paths. Without this, manual orbit
+    // changes orbit_angle but cam_angle / g_sinf / g_cosf stay stale.
+    cam_angle = orbit_angle;
     g_cosf = brad_cos(cam_angle);
     g_sinf = brad_sin(cam_angle);
 
@@ -333,6 +346,33 @@ static void update_camera(void)
     player_x += FX_MUL(dx, spd);
     player_z += FX_MUL(dz, spd);
     player_moving = (fwd != 0 || right != 0);
+    if (player_moving) { s_lastMoveDX = dx; s_lastMoveDZ = dz; }
+    // GBA-style player facing tracking. player_move_angle is INPUT-space
+    // while moving (atan2 of dpad input), then converted to world-space
+    // at the moment of stopping. orbit_angle stays fixed at AFN_CAM_ANGLE
+    // (matches GBA — manual L/R orbit modifies cam_angle, not orbit_angle).
+    if (player_moving) {
+        // atan2 in brad: x-axis = inputFwd (so DPAD-up = brad 0).
+        // 4-way + diagonal blend matches the 8 sprite dirs.
+        uint16_t ang = 0x4000; // default = "right of input" before any move
+        if (afn_input_fwd == 0 && afn_input_right == 0) {
+            // shouldn't hit (player_moving guard) but be safe
+        } else if (afn_input_fwd > 0 && afn_input_right == 0) ang = 0x0000; // UP
+        else if (afn_input_fwd > 0 && afn_input_right > 0) ang = 0x2000;    // UP+RIGHT
+        else if (afn_input_fwd == 0 && afn_input_right > 0) ang = 0x4000;   // RIGHT
+        else if (afn_input_fwd < 0 && afn_input_right > 0) ang = 0x6000;    // DOWN+RIGHT
+        else if (afn_input_fwd < 0 && afn_input_right == 0) ang = 0x8000;   // DOWN
+        else if (afn_input_fwd < 0 && afn_input_right < 0) ang = 0xA000;    // DOWN+LEFT
+        else if (afn_input_fwd == 0 && afn_input_right < 0) ang = 0xC000;   // LEFT
+        else if (afn_input_fwd > 0 && afn_input_right < 0) ang = 0xE000;    // UP+LEFT
+        player_move_angle = ang;
+    } else if (s_wasMoving) {
+        // Just stopped: convert input-space angle to world-space so the
+        // idle formula's (orbit_angle + move_angle) keeps sprite back-
+        // facing the camera even if user later orbits.
+        player_move_angle = player_move_angle - orbit_angle;
+    }
+    s_wasMoving = player_moving;
     (void)s_moveSpeed;
 #else
     // No scripts — built-in WASD-style movement with ease ramp + sprint.
@@ -469,12 +509,11 @@ static void load_sky_texture(void)
 {
     glGenTextures(1, &gl_sky_tex_id);
     glBindTexture(0, gl_sky_tex_id);
-    // Texture size + dimensions come from the exporter — using the
-    // panorama's native PNG size avoids the 2x4 nearest-neighbour
-    // upsample that previously gave the sky visible speckle artefacts.
-    // GL_TEXTURE_WRAP_S = horizontal wrap so the panorama can scroll
-    // past its texel-width edge as cam_angle rotates past 360°.
-    glTexImage2D(0, 0, GL_RGB256, AFN_SKY_TEX_SIZE_W, AFN_SKY_TEX_SIZE_H, 0,
+    // 256x256 8bpp paletted (GL_RGB256). TEXTURE_SIZE_256 = 5.
+    // GL_TEXTURE_WRAP_S = horizontal wrap so the panorama can scroll past
+    // its 256-px edge as cam_angle rotates past 360° without clamping or
+    // garbage. Vertical wrap intentionally off (top of sky is top).
+    glTexImage2D(0, 0, GL_RGB256, 5, 5, 0,
                  TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S, afn_sky_tex);
     glColorTableEXT(0, 0, 256, 0, 0, afn_sky_pal);
 }
@@ -501,15 +540,19 @@ static void render_sky(void)
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE);
 
     // cam_angle 0..65535 = full 360° panorama wrap.
-    // Map to t16 (.4 fixed texel units): one full wrap = AFN_SKY_W texels
-    // = AFN_SKY_W*16 t16 units. -80 px shift in source ≈ -SKY_W*5 t16.
-    int fullWrap = AFN_SKY_W * 16;
-    int shiftRight = (AFN_SKY_W * 5);    // ~80px on a 256-w pano scales down
-    int uOffset = ((int)cam_angle * fullWrap) >> 16;
-    int uLeft  = uOffset - shiftRight;
-    int uRight = uOffset - shiftRight + fullWrap;
+    // Map to t16 (.4 fixed texel units): one full wrap = 256 px = 4096 t16.
+    // Screen shows the full 256-px panorama at 1:1 (matches GBA's Mode 7
+    // sky which just scrolls a 256-px tilemap; a perspective-correct
+    // ~86°/360° slice looked too stretched compared to the reference).
+    // Match GBA's update_sky_scroll exactly: pixScroll = (cam_ang * 256) >> 16
+    // and 1:1 panorama-to-screen mapping (one texture pixel = one screen
+    // pixel, full 256-px panorama spans full 256-px screen).
+    // -1280 t16 = -80 px shift in source = panorama appears 80 px RIGHT.
+    int uOffset = ((int)cam_angle * 4096) >> 16;
+    int uLeft  = uOffset - 1280;
+    int uRight = uOffset - 1280 + 4096;  // 1:1 panorama mapping (matches GBA)
     int vTop   = 0;
-    int vBot   = AFN_SKY_H * 16;   // full pano height in t16 units
+    int vBot   = 4096;             // full 256-row panorama — anything smaller stretches each texel taller
 
     // Quad pushed to the far depth so all meshes draw on top.
     // v16 range is ±8 (4.12 fixed); z = -7.9 is as far as a vertex can go.

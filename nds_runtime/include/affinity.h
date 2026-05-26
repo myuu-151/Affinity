@@ -46,6 +46,8 @@ extern int orbit_dist;
 extern int player_sprite_idx;
 extern int player_moving;
 extern uint16_t player_move_angle;
+extern uint16_t orbit_angle;
+extern int s_lastMoveDX, s_lastMoveDZ;
 
 // ---------------------------------------------------------------------------
 // Mode 7 floor (defined in fps3d.c — Phase 6 may split into floor.c)

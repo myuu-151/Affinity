@@ -1207,152 +1207,105 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     // NDS gets a flat 256-color paletted texture rendered as a wrapping
     // view-space quad behind the 3D layer.
     if (!skyFrames.empty() && skyFrames[0].pixels && skyFrames[0].w > 0 && skyFrames[0].h > 0) {
-        // Use the source PNG at its native size (rounded up to the next
-        // power of two for NDS texture-size requirements). Previously the
-        // exporter nearest-neighbour-upsampled to 256x256, which turned
-        // every source pixel into a 2x4 block — that's what was reading
-        // as "speckle / scanlines" in the sky. GPU-side sampling of the
-        // native-size texture is cleaner: each source texel covers more
-        // screen pixels but is rendered as one solid block, matching what
-        // GBA does.
-        auto pow2up = [](int v) {
-            int p = 8;
-            while (p < v && p < 1024) p <<= 1;
-            return p;
-        };
+        const int SKY_W = 256, SKY_H = 256;
+        // Resize source frame to 256x256 via nearest-neighbor
+        std::vector<unsigned char> rgba(SKY_W * SKY_H * 4);
         int srcW = skyFrames[0].w, srcH = skyFrames[0].h;
-        const int SKY_W = pow2up(srcW);
-        const int SKY_H = pow2up(srcH);
-        std::vector<unsigned char> rgba(SKY_W * SKY_H * 4, 0);
         const unsigned char* srcPx = skyFrames[0].pixels;
-        // Copy source 1:1 into the top-left of the (possibly padded)
-        // texture canvas. If source is already pow2, no padding occurs.
-        for (int y = 0; y < srcH && y < SKY_H; y++) {
-            memcpy(&rgba[y * SKY_W * 4], &srcPx[y * srcW * 4], srcW * 4);
+        for (int y = 0; y < SKY_H; y++) {
+            int sy = y * srcH / SKY_H;
+            for (int x = 0; x < SKY_W; x++) {
+                int sx = x * srcW / SKY_W;
+                memcpy(&rgba[(y * SKY_W + x) * 4], &srcPx[(sy * srcW + sx) * 4], 4);
+            }
         }
-        // Per-Y-band sub-palettes (matches GBA's 4-band Mode 7 sky). Each
-        // 64-row vertical band gets 64 palette slots reserved for it. Per-
-        // pixel texture indices land in their band's slot range, so the
-        // 256-entry palette acts as four independent 64-colour palettes.
-        // This is the trick GBA uses to avoid the speckle that whole-image
-        // 256-colour quantisation produces — each band's tight colour set
-        // gets its own palette space instead of competing with the whole
-        // gradient.
-        const int NUM_BANDS = 4;
-        const int BAND_H = SKY_H / NUM_BANDS;
-        const int COLORS_PER_BAND = 256 / NUM_BANDS;
+        // Median-cut 256-color quantization. The standard algorithm for
+        // natural images: recursively split color boxes along their longest
+        // axis at the median, until you have 256 boxes. Each palette entry
+        // becomes the mean of its box's pixels. Much better than top-N
+        // histogram bucketing for sky gradients (which left rogue pixels
+        // because rare-but-distinct colors got their own palette slots).
+        struct Px { uint8_t r, g, b; };
+        std::vector<Px> pixels; pixels.reserve(SKY_W * SKY_H);
+        for (int i = 0; i < SKY_W * SKY_H; i++) {
+            pixels.push_back({(uint8_t)(rgba[i*4+0] >> 3),
+                              (uint8_t)(rgba[i*4+1] >> 3),
+                              (uint8_t)(rgba[i*4+2] >> 3)});
+        }
+        struct Box { int lo, hi; }; // index range into `pixels`
+        std::vector<Box> boxes; boxes.push_back({0, (int)pixels.size()});
+        while ((int)boxes.size() < 256) {
+            // Find box with largest color-axis range.
+            int bestBox = -1, bestRange = 0, bestAxis = 0;
+            for (int bi = 0; bi < (int)boxes.size(); bi++) {
+                int lo = boxes[bi].lo, hi = boxes[bi].hi;
+                if (hi - lo <= 1) continue;
+                uint8_t rMin=31, rMax=0, gMin=31, gMax=0, bMin=31, bMax=0;
+                for (int j = lo; j < hi; j++) {
+                    Px p = pixels[j];
+                    if (p.r < rMin) rMin = p.r; if (p.r > rMax) rMax = p.r;
+                    if (p.g < gMin) gMin = p.g; if (p.g > gMax) gMax = p.g;
+                    if (p.b < bMin) bMin = p.b; if (p.b > bMax) bMax = p.b;
+                }
+                int rR = rMax - rMin, gR = gMax - gMin, bR = bMax - bMin;
+                int axis = 0, range = rR;
+                if (gR > range) { range = gR; axis = 1; }
+                if (bR > range) { range = bR; axis = 2; }
+                if (range > bestRange) { bestRange = range; bestBox = bi; bestAxis = axis; }
+            }
+            if (bestBox < 0) break; // all boxes single-pixel
+            // Sort the box along the chosen axis and split at the median.
+            Box b = boxes[bestBox];
+            std::sort(pixels.begin() + b.lo, pixels.begin() + b.hi,
+                      [bestAxis](const Px& a, const Px& c) {
+                          uint8_t av = bestAxis == 0 ? a.r : bestAxis == 1 ? a.g : a.b;
+                          uint8_t cv = bestAxis == 0 ? c.r : bestAxis == 1 ? c.g : c.b;
+                          return av < cv;
+                      });
+            int mid = b.lo + (b.hi - b.lo) / 2;
+            boxes[bestBox].hi = mid;
+            boxes.push_back({mid, b.hi});
+        }
         std::vector<uint16_t> palette(256, 0);
-        std::map<uint16_t, uint8_t> nearest; // unused in band path; kept for fallback only
+        for (int i = 0; i < (int)boxes.size(); i++) {
+            int lo = boxes[i].lo, hi = boxes[i].hi;
+            if (hi <= lo) continue;
+            uint64_t rs=0, gs=0, bs=0;
+            for (int j = lo; j < hi; j++) { rs += pixels[j].r; gs += pixels[j].g; bs += pixels[j].b; }
+            int n = hi - lo;
+            unsigned r5 = (unsigned)((rs + n/2) / n);
+            unsigned g5 = (unsigned)((gs + n/2) / n);
+            unsigned b5 = (unsigned)((bs + n/2) / n);
+            if (r5 > 31) r5 = 31;
+            if (g5 > 31) g5 = 31;
+            if (b5 > 31) b5 = 31;
+            palette[i] = (uint16_t)(r5 | (g5 << 5) | (b5 << 10));
+        }
+        int palN = (int)boxes.size();
+        // Build mapping table: each unique input color → palette index of
+        // Map each unique input color → nearest palette index. Build the
+        // unique-color set fresh (the histogram from before median-cut was
+        // dropped); a map keyed on RGB15 dedup pixels.
+        std::map<uint16_t, uint8_t> nearest;
         auto dist2 = [](uint16_t a, uint16_t b) {
             int ar=a&31, ag=(a>>5)&31, ab=(a>>10)&31;
             int br=b&31, bg=(b>>5)&31, bb=(b>>10)&31;
             return (ar-br)*(ar-br) + (ag-bg)*(ag-bg) + (ab-bb)*(ab-bb);
         };
-        // Per-band: gather pixels, build subpalette via direct enumeration
-        // if ≤ 64 unique colours, else median-cut. Store per-pixel-index in
-        // a buffer we'll dump as afn_sky_tex.
-        std::vector<uint8_t> texData(SKY_W * SKY_H, 0);
-        for (int band = 0; band < NUM_BANDS; band++) {
-            int y0 = band * BAND_H, y1 = y0 + BAND_H;
-            std::map<uint16_t, int> bandFreq;
-            for (int y = y0; y < y1; y++)
-            for (int x = 0; x < SKY_W; x++) {
-                int i = y * SKY_W + x;
-                int r5 = rgba[i*4+0] >> 3, g5 = rgba[i*4+1] >> 3, b5 = rgba[i*4+2] >> 3;
-                bandFreq[(uint16_t)(r5 | (g5 << 5) | (b5 << 10))]++;
+        for (int i = 0; i < SKY_W * SKY_H; i++) {
+            unsigned r = rgba[i*4+0] >> 3, g = rgba[i*4+1] >> 3, b = rgba[i*4+2] >> 3;
+            uint16_t c15 = (uint16_t)(r | (g << 5) | (b << 10));
+            if (nearest.count(c15)) continue;
+            int best = 0, bestD = 1<<30;
+            for (int p = 0; p < palN; p++) {
+                int d = dist2(c15, palette[p]);
+                if (d < bestD) { bestD = d; best = p; }
             }
-            int palBase = band * COLORS_PER_BAND;
-            std::map<uint16_t, uint8_t> bandNearest;
-            if ((int)bandFreq.size() <= COLORS_PER_BAND) {
-                int idx = 0;
-                for (auto& kv : bandFreq) {
-                    palette[palBase + idx] = kv.first;
-                    bandNearest[kv.first] = (uint8_t)(palBase + idx);
-                    idx++;
-                }
-            } else {
-                // Band has too many colours — median-cut within this band.
-                struct Px { uint8_t r, g, b; };
-                std::vector<Px> bp; bp.reserve((y1-y0) * SKY_W);
-                for (int y = y0; y < y1; y++)
-                for (int x = 0; x < SKY_W; x++) {
-                    int i = y * SKY_W + x;
-                    bp.push_back({(uint8_t)(rgba[i*4+0]>>3),
-                                  (uint8_t)(rgba[i*4+1]>>3),
-                                  (uint8_t)(rgba[i*4+2]>>3)});
-                }
-                struct Bx { int lo, hi; };
-                std::vector<Bx> bs; bs.push_back({0, (int)bp.size()});
-                while ((int)bs.size() < COLORS_PER_BAND) {
-                    int bestBi = -1, bestR = 0, bestAx = 0;
-                    for (int bi = 0; bi < (int)bs.size(); bi++) {
-                        int lo = bs[bi].lo, hi = bs[bi].hi;
-                        if (hi - lo <= 1) continue;
-                        uint8_t rN=31,rX=0,gN=31,gX=0,bN=31,bX=0;
-                        for (int j = lo; j < hi; j++) {
-                            Px p = bp[j];
-                            if (p.r<rN)rN=p.r; if (p.r>rX)rX=p.r;
-                            if (p.g<gN)gN=p.g; if (p.g>gX)gX=p.g;
-                            if (p.b<bN)bN=p.b; if (p.b>bX)bX=p.b;
-                        }
-                        int rr=rX-rN, gr=gX-gN, br=bX-bN;
-                        int ax=0, rg=rr;
-                        if (gr>rg){rg=gr;ax=1;}
-                        if (br>rg){rg=br;ax=2;}
-                        if (rg>bestR){bestR=rg;bestBi=bi;bestAx=ax;}
-                    }
-                    if (bestBi < 0) break;
-                    Bx b = bs[bestBi];
-                    std::sort(bp.begin()+b.lo, bp.begin()+b.hi,
-                              [bestAx](const Px& a, const Px& c){
-                                  uint8_t av = bestAx==0?a.r:bestAx==1?a.g:a.b;
-                                  uint8_t cv = bestAx==0?c.r:bestAx==1?c.g:c.b;
-                                  return av < cv;
-                              });
-                    int mid = b.lo + (b.hi-b.lo)/2;
-                    bs[bestBi].hi = mid;
-                    bs.push_back({mid, b.hi});
-                }
-                for (int i = 0; i < (int)bs.size(); i++) {
-                    int lo = bs[i].lo, hi = bs[i].hi;
-                    if (hi <= lo) continue;
-                    uint64_t rs=0,gs=0,bbs=0;
-                    for (int j = lo; j < hi; j++) { rs+=bp[j].r; gs+=bp[j].g; bbs+=bp[j].b; }
-                    int n = hi-lo;
-                    unsigned r5=(unsigned)((rs+n/2)/n), g5=(unsigned)((gs+n/2)/n), b5=(unsigned)((bbs+n/2)/n);
-                    if (r5>31)r5=31; if (g5>31)g5=31; if (b5>31)b5=31;
-                    palette[palBase + i] = (uint16_t)(r5 | (g5<<5) | (b5<<10));
-                }
-                for (auto& kv : bandFreq) {
-                    uint16_t c15 = kv.first;
-                    int best = 0, bestD = 1<<30;
-                    for (int p = 0; p < COLORS_PER_BAND; p++) {
-                        int d = dist2(c15, palette[palBase + p]);
-                        if (d < bestD) { bestD = d; best = p; }
-                    }
-                    bandNearest[c15] = (uint8_t)(palBase + best);
-                }
-            }
-            // Write pixel indices for this band.
-            for (int y = y0; y < y1; y++)
-            for (int x = 0; x < SKY_W; x++) {
-                int i = y * SKY_W + x;
-                int r5 = rgba[i*4+0] >> 3, g5 = rgba[i*4+1] >> 3, b5 = rgba[i*4+2] >> 3;
-                uint16_t c15 = (uint16_t)(r5 | (g5 << 5) | (b5 << 10));
-                texData[i] = bandNearest[c15];
-            }
+            nearest[c15] = (uint8_t)best;
         }
-        (void)nearest; (void)dist2;
 
-        // TEXTURE_SIZE_N enum: 0=8, 1=16, 2=32, 3=64, 4=128, 5=256...
-        int sizeEnumW = 0, w = SKY_W; while (w > 8) { w >>= 1; sizeEnumW++; }
-        int sizeEnumH = 0, h = SKY_H; while (h > 8) { h >>= 1; sizeEnumH++; }
-        f << "\n// ---- Sky panorama (" << SKY_W << "x" << SKY_H << " 8bpp paletted) ----\n";
+        f << "\n// ---- Sky panorama (256x256 8bpp paletted) ----\n";
         f << "#define AFN_HAS_SKY 1\n";
-        f << "#define AFN_SKY_W " << SKY_W << "\n";
-        f << "#define AFN_SKY_H " << SKY_H << "\n";
-        f << "#define AFN_SKY_TEX_SIZE_W " << sizeEnumW << "\n";
-        f << "#define AFN_SKY_TEX_SIZE_H " << sizeEnumH << "\n";
         f << "static const u16 afn_sky_pal[256] = {\n    ";
         for (int i = 0; i < 256; i++) {
             char hex[8]; snprintf(hex, sizeof(hex), "0x%04X", palette[i]);
@@ -1363,7 +1316,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "\n};\n";
         f << "static const u8 afn_sky_tex[" << (SKY_W * SKY_H) << "] = {\n    ";
         for (int i = 0; i < SKY_W * SKY_H; i++) {
-            f << (int)texData[i];
+            unsigned r = rgba[i*4+0] >> 3, g = rgba[i*4+1] >> 3, b = rgba[i*4+2] >> 3;
+            uint16_t c15 = (r) | (g << 5) | (b << 10);
+            f << (int)nearest[c15];
             if (i + 1 < SKY_W * SKY_H) f << ", ";
             if ((i + 1) % 16 == 0) f << "\n    ";
         }
@@ -1570,7 +1525,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 speed /= 2;
                 const char* key  = (dir == 0) ? "KEY_L" : "KEY_R";
                 const char* sign = (dir == 0) ? "-" : "+";
-                f << "    if (key_is_down(" << key << ")) cam_angle " << sign << "= " << speed << ";\n";
+                // Modify orbit_angle (not cam_angle). fps3d copies
+                // orbit_angle → cam_angle each frame; that's how GBA's
+                // orbit + sprite picker logic stays in sync.
+                f << "    if (key_is_down(" << key << ")) orbit_angle " << sign << "= " << speed << ";\n";
                 break;
             }
             case GBAScriptNodeType::MovePlayer: {
