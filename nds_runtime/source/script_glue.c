@@ -117,22 +117,32 @@ void afn_script_init(void)
 static void afn_script_check_collisions(void)
 {
 #if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0 && defined(AFN_SPRITE_COUNT) && AFN_SPRITE_COUNT > 0
-    afn_collided_sprite = -1;
+    if (afn_frame_count <= 10) { afn_collided_sprite = -1; return; }
+    // Dispatch once per overlapping sprite (not just the first). With a single
+    // afn_collided_sprite slot + early-break, walking through a cluster of
+    // rings only collects the lowest-slot one per frame; the rest age out of
+    // the 24px outer ring before their turn comes. Iterate and re-fire the
+    // bp dispatcher for each match — the dispatcher already gates by
+    // afn_bp_instances[i][1] == afn_collided_sprite so only the right bp runs.
+    int firstHit = -1;
     for (int i = 0; i < AFN_SPRITE_COUNT; i++) {
         if (i == AFN_PLAYER_IDX) continue;
         if (!afn_sprite_visible[i]) continue;
         if (!afn_collision_enabled[i]) continue;
         int dx = (player_x - afn_sprite_data[i][0]) >> 4;
         int dz = (player_z - afn_sprite_data[i][2]) >> 4;
-        // Threshold mirrors gba_runtime/main.c:7592 — (24px radius)^2 in 12.4.
         if (dx * dx + dz * dz < 147456) {
             afn_collided_sprite = i;
-            break;
+            if (firstHit < 0) firstHit = i;
+            afn_bp_dispatch_collision();
         }
     }
-    if (afn_collided_sprite >= 0 && afn_frame_count > 10) {
+    // Scene-level OnCollision still fires once with the first hit (matches GBA).
+    if (firstHit >= 0) {
+        afn_collided_sprite = firstHit;
         afn_emitted_script_collision();
-        afn_bp_dispatch_collision();
+    } else {
+        afn_collided_sprite = -1;
     }
 #endif
 }
