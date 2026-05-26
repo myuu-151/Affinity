@@ -1834,6 +1834,23 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                     f << ") {\n";
                     emitChain(c);
                     f << "    }\n";
+                } else if (evType == GBAScriptNodeType::OnCollision) {
+                    // Optional Radius pin (pin 0): per-bp axis-aligned gate
+                    // tighter than the outer 24px afn_collided_sprite trigger.
+                    auto* radData = findDataIn(c.event->id, 0);
+                    if (radData) {
+                        int rad = resolveInt(radData);
+                        f << "    if (afn_collided_sprite >= 0) {\n";
+                        f << "        int _dx = player_x - afn_sprite_data[afn_collided_sprite][0];\n";
+                        f << "        int _dz = player_z - afn_sprite_data[afn_collided_sprite][2];\n";
+                        f << "        if (_dx < 0) _dx = -_dx; if (_dz < 0) _dz = -_dz;\n";
+                        f << "        if ((_dx >> 8) < " << rad << " && (_dz >> 8) < " << rad << ") {\n";
+                        emitChain(c);
+                        f << "        }\n";
+                        f << "    }\n";
+                    } else {
+                        emitChain(c);
+                    }
                 } else {
                     emitChain(c);
                 }

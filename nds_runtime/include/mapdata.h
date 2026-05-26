@@ -13901,12 +13901,19 @@ static void afn_bp1_key_pressed(void) {
 static void afn_bp1_key_released(void) {
 }
 static void afn_bp1_collision(void) {
+    if (afn_collided_sprite >= 0) {
+        int _dx = player_x - afn_sprite_data[afn_collided_sprite][0];
+        int _dz = player_z - afn_sprite_data[afn_collided_sprite][2];
+        if (_dx < 0) _dx = -_dx; if (_dz < 0) _dz = -_dz;
+        if ((_dx >> 8) < 10 && (_dz >> 8) < 10) {
     if (afn_rise_17 >= afn_frame_count - 1) { afn_rise_17 = afn_frame_count; }
     else { afn_rise_17 = afn_frame_count;
     afn_play_sfx(1, 0, 0);
     player_vy = 1024;
     afn_sprite_anim_spr = 3; afn_sprite_anim_val = 1;
     afn_flags |= (1u << 0);
+    }
+        }
     }
 }
 static void afn_bp2_update(void) {
@@ -13929,12 +13936,19 @@ static void afn_bp3_key_pressed(void) {
 static void afn_bp3_key_released(void) {
 }
 static void afn_bp3_collision(void) {
+    if (afn_collided_sprite >= 0) {
+        int _dx = player_x - afn_sprite_data[afn_collided_sprite][0];
+        int _dz = player_z - afn_sprite_data[afn_collided_sprite][2];
+        if (_dx < 0) _dx = -_dx; if (_dz < 0) _dz = -_dz;
+        if ((_dx >> 8) < 2 && (_dz >> 8) < 2) {
     if ((unsigned)0 < NUM_SPRITES) {
         afn_sprite_visible[0] = 0;
         afn_collision_enabled[0] = 0;
     }
     /* TODO: emit node type 242 */
     afn_play_sfx(2, 0, 0);
+        }
+    }
 }
 static void afn_bp4_update(void) {
 }
@@ -13959,12 +13973,19 @@ static void afn_bp5_key_pressed(void) {
 static void afn_bp5_key_released(void) {
 }
 static void afn_bp5_collision(void) {
+    if (afn_collided_sprite >= 0) {
+        int _dx = player_x - afn_sprite_data[afn_collided_sprite][0];
+        int _dz = player_z - afn_sprite_data[afn_collided_sprite][2];
+        if (_dx < 0) _dx = -_dx; if (_dz < 0) _dz = -_dz;
+        if ((_dx >> 8) < 10 && (_dz >> 8) < 10) {
     if (afn_flags & (1u << 1)) {
     } else {
     /* TODO: emit node type 243 */
     afn_sprite_anim_spr = 21; afn_sprite_anim_val = 1;
     afn_play_sfx(3, 0, 0);
     afn_flags |= (1u << 1);
+    }
+        }
     }
 }
 
