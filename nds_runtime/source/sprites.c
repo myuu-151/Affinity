@@ -166,15 +166,19 @@ void afn_sprite_update(void)
         if (dirCount > 1 && !fStatic) {
 #if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
             if (si == AFN_PLAYER_IDX) {
-                // Multiply orbit_angle by 2 so 90° physical orbit gives
-                // a 180° dir flip — user wanted sprite to "land on the
-                // opposite side" with shorter L/R holds.
-                uint16_t sprAngle = (uint16_t)(player_move_angle - (orbit_angle << 1));
+                // Moving sprite is input-only (no orbit_angle) so holding
+                // L/R while walking doesn't flicker NW/NE — base dir
+                // stays stable, only the explicit L/R shift below changes
+                // it. Idle has the 2x orbit multiplier so the sprite
+                // rotates visibly as the camera orbits.
+                uint16_t sprAngle = player_moving
+                    ? player_move_angle
+                    : (uint16_t)(player_move_angle - (orbit_angle << 1));
                 int rawIdx = ((sprAngle + 0xC000 + 4096) >> 13) & 7;
                 dir = (8 - rawIdx) & 7;
                 int held = keysHeld();
-                if (held & KEY_L)      dir = (dir - 1 + 8) & 7;
-                else if (held & KEY_R) dir = (dir + 1) & 7;
+                if (held & KEY_L)      dir = (dir - 1 + 8) & 7;  // UP+L → NW
+                else if (held & KEY_R) dir = (dir + 1) & 7;      // UP+R → NE
                 static int s_pickDbg = 0;
                 s_pickDbg++;
                 if ((s_pickDbg & 15) == 0) {
