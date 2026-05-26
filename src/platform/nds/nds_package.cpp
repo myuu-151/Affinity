@@ -1534,7 +1534,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             case GBAScriptNodeType::MovePlayer: {
                 auto* dirData = findDataIn(a->id, 0);
                 int dir = dirData ? dirData->paramInt[0] : 0;
-                static const char* dirKeys[] = { "KEY_LEFT","KEY_RIGHT","KEY_UP","KEY_DOWN" };
+                // Physical L/R keys swapped: pressing the LEFT key emits
+                // what the editor's RIGHT script wanted, and vice versa.
+                // Matches the user's preferred control mapping on NDS.
+                static const char* dirKeys[] = { "KEY_RIGHT","KEY_LEFT","KEY_UP","KEY_DOWN" };
                 static const char* dirVars[] = { "afn_input_right -= 256","afn_input_right += 256",
                                                  "afn_input_fwd += 256","afn_input_fwd -= 256" };
                 if (dir >= 0 && dir < 4)

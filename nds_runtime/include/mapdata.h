@@ -13814,10 +13814,10 @@ static void afn_bp0_update(void) {
 }
 static void afn_bp0_key_held(void) {
     if (key_is_down(KEY_LEFT) || key_is_down(KEY_DOWN) || key_is_down(KEY_UP) || key_is_down(KEY_RIGHT)) {
-    if (!afn_player_frozen && key_is_down(KEY_LEFT)) afn_input_right -= 256;
+    if (!afn_player_frozen && key_is_down(KEY_RIGHT)) afn_input_right -= 256;
     if (!afn_player_frozen && key_is_down(KEY_DOWN)) afn_input_fwd -= 256;
     if (!afn_player_frozen && key_is_down(KEY_UP)) afn_input_fwd += 256;
-    if (!afn_player_frozen && key_is_down(KEY_RIGHT)) afn_input_right += 256;
+    if (!afn_player_frozen && key_is_down(KEY_LEFT)) afn_input_right += 256;
     if (!afn_anim_prio) afn_play_anim = 1;
     afn_move_speed = 79;
     }
