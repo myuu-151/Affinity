@@ -291,6 +291,10 @@ struct CameraStartObject
     float autoOrbitSpeed = 205.0f;
     // Jump dampen factor (0-1, applied each frame while A released and rising)
     float jumpDampen = 0.75f;
+    // Orbit camera lerp speed (% per frame). Higher = camera tracks the
+    // orbit target faster, keeping the player sprite more centered at
+    // faster orbit speeds. NDS-only — GBA uses fixed orbit ease.
+    float orbitCamEase = 50.0f;
     // Draw distance (0 = unlimited)
     float drawDistance = 0.0f;
     float spriteDrawDistance = 0.0f;

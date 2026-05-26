@@ -476,6 +476,15 @@ static void update_camera(void)
             int ease = sprintLike
                 ? (moving ? AFN_SPRINT_EASE_IN : AFN_SPRINT_EASE_OUT)
                 : (moving ? AFN_WALK_EASE_IN   : AFN_WALK_EASE_OUT);
+            // While orbiting (L/R held), prefer the project's
+            // orbit-camera lerp speed instead of the walk/sprint ease.
+            // Without this the camera can't keep up with fast orbit
+            // changes and the player sprite drifts to the screen edge.
+            if (held & (KEY_L | KEY_R)) {
+#ifdef AFN_ORBIT_CAM_EASE
+                if (AFN_ORBIT_CAM_EASE > ease) ease = AFN_ORBIT_CAM_EASE;
+#endif
+            }
             cam_x += (ddx * ease) >> 8;
             cam_z += (ddz * ease) >> 8;
             {

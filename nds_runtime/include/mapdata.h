@@ -13822,8 +13822,8 @@ static void afn_bp0_key_held(void) {
     afn_move_speed = 79;
     }
     if (key_is_down(KEY_R) || key_is_down(KEY_L)) {
-    if (key_is_down(KEY_R)) orbit_angle -= 256;
-    if (key_is_down(KEY_L)) orbit_angle += 256;
+    if (key_is_down(KEY_R)) orbit_angle -= 128;
+    if (key_is_down(KEY_L)) orbit_angle += 128;
     }
     if (key_is_down(KEY_B)) {
     afn_move_speed = 132;
