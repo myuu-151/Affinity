@@ -1524,10 +1524,12 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 // overshoots the orbit ease and sprite leaves the screen.
                 speed /= 2;
                 const char* key  = (dir == 0) ? "KEY_L" : "KEY_R";
-                const char* sign = (dir == 0) ? "-" : "+";
-                // Modify orbit_angle (not cam_angle). fps3d copies
-                // orbit_angle → cam_angle each frame; that's how GBA's
-                // orbit + sprite picker logic stays in sync.
+                // Flipped sign vs older NDS commits — pre-DMA work, L
+                // (dir=0) used to decrement cam_angle, but the picker
+                // changes made the visible orbit direction feel reversed.
+                // Going +/- in the opposite direction keeps the same
+                // L/R feel users had while still feeding the picker.
+                const char* sign = (dir == 0) ? "+" : "-";
                 f << "    if (key_is_down(" << key << ")) orbit_angle " << sign << "= " << speed << ";\n";
                 break;
             }

@@ -166,14 +166,18 @@ void afn_sprite_update(void)
         if (dirCount > 1 && !fStatic) {
 #if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
             if (si == AFN_PLAYER_IDX) {
+                // Idle rotates the sprite as the camera orbits so the
+                // user sees different directional frames. NDS subtracts
+                // orbit_angle (opposite sign vs GBA) because manual
+                // L/R orbit feels reversed otherwise.
                 uint16_t sprAngle = player_moving
                     ? player_move_angle
-                    : (uint16_t)(orbit_angle + player_move_angle);
+                    : (uint16_t)(player_move_angle - orbit_angle);
                 int rawIdx = ((sprAngle + 0xC000 + 4096) >> 13) & 7;
                 dir = (8 - rawIdx) & 7;
                 int held = keysHeld();
-                if (held & KEY_L)      dir = (dir + 1) & 7;
-                else if (held & KEY_R) dir = (dir - 1 + 8) & 7;
+                if (held & KEY_L)      dir = (dir - 1 + 8) & 7;
+                else if (held & KEY_R) dir = (dir + 1) & 7;
                 static int s_pickDbg = 0;
                 s_pickDbg++;
                 if ((s_pickDbg & 15) == 0) {
