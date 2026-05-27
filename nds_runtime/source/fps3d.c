@@ -761,7 +761,17 @@ void afn_scene_tick(void)
                 // the right ~64px render black.
                 REG_BG0HOFS = 0;
                 REG_BG0VOFS = 0;
-                glInit();
+                // Don't re-call glInit() — second invocation leaves the
+                // GE half-initialised. But the texture allocator's
+                // internal bookkeeping still points at VRAM_A from before
+                // it was reassigned to MAIN_BG, so glGenTextures returns
+                // handles backed by stale/unmapped memory and the next
+                // load_mesh_textures uploads silently fail (the whole
+                // backdrop renders white on the 2nd Mode 0 -> Mode 4 swap
+                // even though meshes are still drawn). glResetTextures
+                // wipes that bookkeeping so the re-upload lands cleanly.
+                glResetTextures();
+                glResetMatrixStack();
                 glEnable(GL_TEXTURE_2D);
 #if defined(AFN_NDS_AA) && AFN_NDS_AA
                 glEnable(GL_ANTIALIAS);
