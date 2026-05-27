@@ -24488,7 +24488,7 @@ typedef struct { int tick; u8 note; u8 vel; u8 smpIdx; u8 channel; int dur; } Af
 
 // Instance 4: Sound 4
 static const AfnSndNote afn_snd_notes_4[] = {
-    {0,60,100,4,0,43901},
+    {0,60,100,4,0,28139},
 };
 #define AFN_SND_4_NOTE_COUNT 1
 #define AFN_SND_4_TEMPO 120
@@ -24541,7 +24541,7 @@ static const int afn_snd_loop_end[5] = {
     0,
     0,
     0,
-    43901,
+    28139,
 };
 
 #define AFN_HAS_SOUND 1
@@ -28729,11 +28729,23 @@ extern int  afn_current_mode;
 void afn_scene_start_transition(int sceneIdx, int sceneMode, int fadeFrames);
 #define AFN_HUD_ELEM_COUNT 1
 #define AFN_HUD_TEXT_COUNT 1
-static const struct { short x, y; unsigned short textStart, textCount; } afn_hud_elems[1] = {
-    { 3, 7, 0, 1 },
+#define AFN_HUD_PIECE_COUNT 0
+#define AFN_HUD_SPRITE_COUNT 0
+#define AFN_HUD_KF_COUNT 0
+#define AFN_HUD_PIECE_TILE_LEN 0
+#define AFN_HUD_TEXT_PAL_COUNT 1
+static const struct { unsigned char bank; unsigned short color; } afn_hud_text_palettes[1] = {
+    { 14, 0x7fff },
 };
-static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; } afn_hud_texts[1] = {
-    { 215, -6, 0, 3, 1 },
+struct AfnHudPiece { short x, y; unsigned short vramTile; unsigned char size; unsigned char palBank; };
+static const struct AfnHudPiece afn_hud_pieces[1] = {{0}};
+static const struct AfnHudPiece afn_hud_sprites[1] = {{0}};
+static const struct { short frame, offX, offY; } afn_hud_kf[1] = {{0}};
+static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned char kfLoop; } afn_hud_elems[1] = {
+    { 3, 7, 0, 1, 0, 0, 0, 0, 0, 0, 0 },
+};
+static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; unsigned char palBank; char text[32]; } afn_hud_texts[1] = {
+    { 215, -6, 0, 3, 1, 14, "" },
 };
 extern int  afn_scripts_stopped;
 extern int  afn_start_x;
@@ -28762,6 +28774,8 @@ static int afn_rise_17 = -2;
 
 // ---- Generated script code from visual node graph ----
 static void afn_emitted_script_init(void)         {}
+static void afn_emitted_script_start(void) {
+}
 static void afn_emitted_script_update(void) {
 }
 static void afn_emitted_script_key_held(void) {
@@ -28773,6 +28787,12 @@ static void afn_emitted_script_key_released(void) {
 static void afn_emitted_script_collision(void) {
 }
 static void afn_emitted_script_collision2d(void) {
+}
+static void afn_bp0_start(void) {
+    afn_gravity = 23;
+    afn_auto_orbit_speed = 205;
+    afn_player_height = 3072;
+    afn_play_sound(4);
 }
 static void afn_bp0_update(void) {
     if (player_vy > 0) {
@@ -28838,6 +28858,8 @@ static void afn_bp0_key_released(void) {
 }
 static void afn_bp0_collision(void) {
 }
+static void afn_bp1_start(void) {
+}
 static void afn_bp1_update(void) {
 }
 static void afn_bp1_key_held(void) {
@@ -28868,6 +28890,8 @@ static void afn_bp1_collision(void) {
         }
     }
 }
+static void afn_bp2_start(void) {
+}
 static void afn_bp2_update(void) {
 }
 static void afn_bp2_key_held(void) {
@@ -28879,6 +28903,9 @@ static void afn_bp2_key_released(void) {
 static void afn_bp2_collision(void) {
     player_x = afn_start_x; player_y = afn_start_y; player_z = afn_start_z;
     player_vy = 0;
+}
+static void afn_bp3_start(void) {
+    afn_sprite_anim_spr = 7; afn_sprite_anim_val = 0;
 }
 static void afn_bp3_update(void) {
 }
@@ -28903,6 +28930,9 @@ static void afn_bp3_collision(void) {
         }
     }
 }
+static void afn_bp4_start(void) {
+    afn_hud_visible[0] = 1;
+}
 static void afn_bp4_update(void) {
 }
 static void afn_bp4_key_held(void) {
@@ -28912,6 +28942,8 @@ static void afn_bp4_key_pressed(void) {
 static void afn_bp4_key_released(void) {
 }
 static void afn_bp4_collision(void) {
+}
+static void afn_bp5_start(void) {
 }
 static void afn_bp5_update(void) {
     if (afn_flags & (1u << 1)) {
@@ -28969,6 +29001,21 @@ static const int afn_bp_instances[19][2] = {
     { 0, -1 },
     { 4, -1 },
 };
+static void afn_bp_dispatch_start(void) {
+    for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
+        int bpIdx = afn_bp_instances[i][0];
+        afn_bp_cur_spr_idx = afn_bp_instances[i][1];
+        switch (bpIdx) {
+            case 0: afn_bp0_start(); break;
+            case 1: afn_bp1_start(); break;
+            case 2: afn_bp2_start(); break;
+            case 3: afn_bp3_start(); break;
+            case 4: afn_bp4_start(); break;
+            case 5: afn_bp5_start(); break;
+        }
+    }
+    afn_bp_cur_spr_idx = -1;
+}
 static void afn_bp_dispatch_update(void) {
     for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
         int bpIdx = afn_bp_instances[i][0];
