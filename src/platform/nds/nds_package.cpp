@@ -2244,10 +2244,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 // Inside an IsJumping/IsFalling gate, PlayAnim wins and
                 // claims priority; outside, it defers to whatever already
                 // set afn_play_anim this frame (afn_anim_prio gates it).
+                // Always honour afn_player_frozen — when a menu freezes the
+                // player, cursor nav (DPAD up/down) shouldn't restart the
+                // walk anim from a still-firing OnKeyHeld → PlayAnim chain.
                 if (inJumpGate) {
-                    f << "    afn_play_anim = " << idx << "; afn_anim_prio = 1;\n";
+                    f << "    if (!afn_player_frozen) { afn_play_anim = " << idx << "; afn_anim_prio = 1; }\n";
                 } else {
-                    f << "    if (!afn_anim_prio) afn_play_anim = " << idx << ";\n";
+                    f << "    if (!afn_player_frozen && !afn_anim_prio) afn_play_anim = " << idx << ";\n";
                 }
                 break;
             }
