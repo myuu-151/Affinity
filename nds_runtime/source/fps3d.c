@@ -106,6 +106,16 @@ static void load_floor(void)
 }
 #endif
 
+// AFN_PLAYER_BASE_Y: spawn-Y of the player sprite (used as the ground
+// reference for camera height + flat-ground fallback). Falls back to 0
+// when a project has no sprites or no Player-typed sprite — keeps
+// fps3d.c linkable for empty scenes that boot straight into Mode 0.
+#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0 && defined(AFN_SPRITE_COUNT) && AFN_SPRITE_COUNT > 0
+#define AFN_PLAYER_BASE_Y  afn_sprite_data[AFN_PLAYER_IDX][1]
+#else
+#define AFN_PLAYER_BASE_Y  0
+#endif
+
 // ---------------------------------------------------------------------------
 // Mesh textures → VRAM
 // ---------------------------------------------------------------------------
@@ -144,6 +154,7 @@ static void load_mesh_textures(void)
 
 static void render_meshes(void)
 {
+#if defined(AFN_SPRITE_COUNT) && AFN_SPRITE_COUNT > 0
     for (int si = 0; si < AFN_SPRITE_COUNT; si++)
     {
         int meshIdx = afn_sprite_data[si][9];
@@ -246,6 +257,7 @@ static void render_meshes(void)
 
         glPopMatrix(1);
     }
+#endif
 }
 #endif
 
@@ -452,7 +464,7 @@ static void update_camera(void)
 #else
     {
         // No mesh collision data — fall back to flat ground at player init Y.
-        int groundY = afn_sprite_data[AFN_PLAYER_IDX][1];
+        int groundY = AFN_PLAYER_BASE_Y;
         if (player_y <= groundY) {
             player_y = groundY;
             player_vy = 0;
@@ -462,7 +474,7 @@ static void update_camera(void)
         }
     }
 #endif
-    s_playerY = player_y - afn_sprite_data[AFN_PLAYER_IDX][1];
+    s_playerY = player_y - AFN_PLAYER_BASE_Y;
 
     // 3rd-person camera: target = player - orbit_dist * view-forward. Lerp
     // cam_x/z toward target with the same ease rate as movement so the cam
@@ -531,7 +543,7 @@ static void update_camera(void)
     // AFN_JUMP_CAM_LAND / AFN_JUMP_CAM_AIR rates) so the camera lags through
     // jumps instead of snapping. baseline = the player's spawn Y; adding the
     // smoothed delta gives the camera's tracked world Y.
-    cam_h = afn_sprite_data[AFN_PLAYER_IDX][1] + s_camYSmooth + AFN_CAM_H;
+    cam_h = AFN_PLAYER_BASE_Y + s_camYSmooth + AFN_CAM_H;
 }
 
 // ---------------------------------------------------------------------------
@@ -674,6 +686,14 @@ void afn_fps3d_init(void)
 // ---------------------------------------------------------------------------
 void afn_scene_start_transition(int sceneIdx, int sceneMode, int fadeFrames)
 {
+    // Idempotent: if a transition is already running toward the same
+    // target, don't restart the fade counter. ChangeScene fires from
+    // OnCollision2D every frame the player stays in the radius — without
+    // this guard the counter never reached 0 and the swap only happened
+    // after the player backed out of the trigger.
+    if (s_fade_phase != 0 &&
+        afn_pending_scene == sceneIdx && afn_pending_scene_mode == sceneMode)
+        return;
     if (fadeFrames < 1) fadeFrames = 15;
     afn_pending_scene      = sceneIdx;
     afn_pending_scene_mode = sceneMode;
@@ -735,6 +755,67 @@ void afn_scene_tick(void)
                 afn_mode0_init_scene(afn_current_scene);
             }
 #endif
+            // If swapping back into Mode 4 from Mode 0, restore the 3D
+            // video mode + texture VRAM and re-run fps3d_init so all
+            // textures / floor / sky reload. mode0_init clobbered VRAM_A
+            // (it was MAIN_BG holding tilemap tiles). Re-init OAM too —
+            // videoSetMode clears the sprite mapping size bits to 1D_32
+            // default, which made our 1D_128-addressed sprite tile
+            // pointers land on garbage data (sprites rendered "snapped
+            // in half"). oamInit reasserts SpriteMapping_1D_128 and the
+            // OBJ-on-top priority dance.
+            if (afn_current_mode == 0) {
+                // Replay the full boot 3D init sequence — videoSetMode +
+                // glInit leaves the geometry engine in a state that needs
+                // every step. Earlier attempts that only restored viewport
+                // / VRAM / OAM left the right ~64px of the screen black
+                // (3D output drew into only the first 192px wide region).
+                videoSetMode(MODE_0_3D | DISPLAY_SPR_ACTIVE | DISPLAY_SPR_1D_LAYOUT);
+                vramSetBankA(VRAM_A_TEXTURE);
+                vramSetBankE(VRAM_E_TEX_PALETTE);
+                oamInit(&oamMain, SpriteMapping_1D_128, false);
+                REG_BG0CNT = (REG_BG0CNT & ~3) | 3;
+                // Mode 0 was scrolling BG0 to track the player camera; for
+                // Mode 4 the same BG0 is the 3D layer, and a non-zero scroll
+                // shifts the entire 3D output sideways — that's what made
+                // the right ~64px render black.
+                REG_BG0HOFS = 0;
+                REG_BG0VOFS = 0;
+                // Don't re-call glInit() — second invocation leaves the
+                // GE half-initialised. But the texture allocator's
+                // internal bookkeeping still points at VRAM_A from before
+                // it was reassigned to MAIN_BG, so glGenTextures returns
+                // handles backed by stale/unmapped memory and the next
+                // load_mesh_textures uploads silently fail (the whole
+                // backdrop renders white on the 2nd Mode 0 -> Mode 4 swap
+                // even though meshes are still drawn). glResetTextures
+                // wipes that bookkeeping so the re-upload lands cleanly.
+                glResetTextures();
+                glResetMatrixStack();
+                glEnable(GL_TEXTURE_2D);
+#if defined(AFN_NDS_AA) && AFN_NDS_AA
+                glEnable(GL_ANTIALIAS);
+#else
+                glDisable(GL_ANTIALIAS);
+#endif
+                glClearColor(10, 18, 31, 31);
+                glClearPolyID(63);
+                glClearDepth(0x7FFF);
+                glViewport(0, 0, 255, 191);
+                glMatrixMode(GL_PROJECTION);
+                glLoadIdentity();
+                gluPerspective(70, 256.0 / 192.0, 0.1, 1024);
+                glFlush(0);
+                afn_fps3d_init();
+                // Sprite VRAM still holds whatever Mode 0 last DMA'd, but
+                // sprite_update / mode0 share g_active_frame[] as their
+                // "what's loaded" cache. Reset so each asset re-DMAs its
+                // proper Mode-4 frame on the next render.
+#if defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+                extern int g_active_frame[AFN_ASSET_COUNT];
+                for (int ai = 0; ai < AFN_ASSET_COUNT; ai++) g_active_frame[ai] = -1;
+#endif
+            }
 #ifdef AFN_HAS_SCRIPT
             // Re-fire OnStart for BPs that live in the new scene. Without
             // this, scene-1 BPs only ran once at boot and never re-armed on

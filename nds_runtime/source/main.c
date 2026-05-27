@@ -105,12 +105,14 @@ int main(void)
     {
         afn_script_tick();
         afn_scene_tick();      // fade state machine
-#if AFN_START_MODE == 0
-        afn_fps3d_update();
-        afn_sprite_update();   // OAM projection (after 3D so OAM goes on top)
-#else
-        afn_mode0_update();
-#endif
+        // Dispatch on runtime mode so ChangeScene transitions can flip
+        // between Mode 0 / Mode 4 without recompiling.
+        if (afn_current_mode == 1) {
+            afn_mode0_update();
+        } else {
+            afn_fps3d_update();
+            afn_sprite_update();
+        }
         afn_hud_draw();
         afn_audio_tick();
         swiWaitForVBlank();

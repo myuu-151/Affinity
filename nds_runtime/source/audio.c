@@ -90,11 +90,28 @@ static int alloc_voice(void)
     for (int i = 0; i < snd_voice_count; i++) {
         if (snd_voices[i].handle < 0) return i;
     }
-    // All in use: steal voice 0 (simplest; GBA does similar with a round-robin
-    // — refine later if it becomes audible).
-    if (snd_voices[0].handle >= 0) soundKill(snd_voices[0].handle);
-    snd_voices[0].handle = -1;
-    return 0;
+    // All in use. Prefer voices already in their release ramp (they'd
+    // fall to silence soon anyway), then fall back to the oldest sustain.
+    // Multi-channel MIDI saturates the 16-voice pool fast; always-steal-0
+    // ate the same melodic voice over and over and cut active sustains.
+    int best = -1, bestAge = -1;
+    for (int i = 0; i < snd_voice_count; i++) {
+        if (snd_voices[i].releaseLeft > 0 && snd_voices[i].ageFrames > bestAge) {
+            best = i; bestAge = snd_voices[i].ageFrames;
+        }
+    }
+    if (best < 0) {
+        bestAge = -1;
+        for (int i = 0; i < snd_voice_count; i++) {
+            if (snd_voices[i].ageFrames > bestAge) {
+                best = i; bestAge = snd_voices[i].ageFrames;
+            }
+        }
+    }
+    if (best < 0) best = 0;
+    if (snd_voices[best].handle >= 0) soundKill(snd_voices[best].handle);
+    snd_voices[best].handle = -1;
+    return best;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +252,15 @@ void afn_audio_tick(void)
     for (int i = 0; i < SND_MAX_VOICES; i++) {
         SndVoice* vc = &snd_voices[i];
         if (vc->handle < 0) continue;
+        // Drop voices whose sample played out naturally — libnds has no
+        // soundActive() helper, but soundGetActiveChannels() returns a
+        // bitmask of channels still running. Without this check drum hits
+        // (which finish in ~50ms) keep their slot in snd_voices forever
+        // and chew through the 16-voice budget.
+        if (!(soundGetActiveChannels() & (1u << vc->handle))) {
+            vc->handle = -1;
+            continue;
+        }
         vc->ageFrames++;
 
         // Decay (during sustained hold). Sample decays its initial peak by

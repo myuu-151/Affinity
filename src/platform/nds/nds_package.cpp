@@ -196,10 +196,17 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
 
     // Sprites
     f << "#define AFN_SPRITE_COUNT " << (int)sprites.size() << "\n\n";
+    if (sprites.empty()) {
+        // Empty stub so runtime files that include mapdata.h still see the
+        // symbol — every iterating site is gated on AFN_SPRITE_COUNT > 0 so
+        // the placeholder row never gets read.
+        f << "static const int afn_sprite_data[1][17] = { {0,0,0,0,-1,256,0,0,0,-1,0,0,-1,0,0,0,0} };\n\n";
+    }
     if (!sprites.empty())
     {
-        // Sprite row: x, y, z, pal, asset, scale, type, rot, animEn, meshIdx, forceStatic
-        f << "static const int afn_sprite_data[][11] = {\n";
+        // Sprite row: x, y, z, pal, asset, scale, type, rot, animEn, meshIdx,
+        //             forceStatic, oamPrio, parentIdx, offX, offY, offZ, grounded
+        f << "static const int afn_sprite_data[][17] = {\n";
         for (size_t i = 0; i < sprites.size(); i++)
         {
             int gx = EditorToFixed(sprites[i].x);
@@ -213,10 +220,18 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             int animEn = sprites[i].animEnabled ? 1 : 0;
             int meshIdx2 = sprites[i].meshIdx;
             int fStatic = sprites[i].forceStatic ? 1 : 0;
+            int oamPrio = sprites[i].oamPrio;
+            int parentIdx = sprites[i].parentIdx;
+            int offX = (int)(sprites[i].offsetX / 4.0f * 256.0f);
+            int offY = (int)(sprites[i].offsetY / 4.0f * 256.0f);
+            int offZ = (int)(sprites[i].offsetZ / 4.0f * 256.0f);
+            int fGrounded = sprites[i].grounded ? 1 : 0;
             f << "    { " << gx << ", " << gy << ", " << gz << ", "
               << pal << ", " << aIdx << ", " << scaleFixed << ", "
               << sType << ", " << rotBrad << ", " << animEn << ", "
-              << meshIdx2 << ", " << fStatic << " },\n";
+              << meshIdx2 << ", " << fStatic << ", "
+              << oamPrio << ", " << parentIdx << ", "
+              << offX << ", " << offY << ", " << offZ << ", " << fGrounded << " },\n";
         }
         f << "};\n\n";
     }
@@ -912,6 +927,22 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         // more 128-byte (1D_128) slots in HUD VRAM. Palette bank reuses
         // the gameplay asset's bank since the same per-asset palette
         // already lives there post-init.
+        // Cache of (assetIdx, frame, size) -> vramTile so identical pieces
+        // share the same baked tile data instead of re-emitting it. A
+        // splash with 12 copies of the same bg piece was eating ~24KB of
+        // HUD VRAM in this user's project just on duplicates — pushing
+        // later pieces past the HUD region and clipping the lower half
+        // of the screen.
+        struct HudPieceKey { int ai, frame, size; };
+        std::vector<HudPieceKey> hudPieceKeys;
+        std::vector<int>         hudPieceKeyVramTile;
+        auto findCachedVramTile = [&](int ai, int frame, int size) -> int {
+            for (size_t i = 0; i < hudPieceKeys.size(); i++)
+                if (hudPieceKeys[i].ai == ai && hudPieceKeys[i].frame == frame &&
+                    hudPieceKeys[i].size == size)
+                    return hudPieceKeyVramTile[i];
+            return -1;
+        };
         auto bakeHudPiece = [&](const GBAHudPieceExport& pc, std::vector<AfnBakedHudPiece>& out) {
             int ai = pc.spriteAssetIdx;
             int sz = pc.size; if (sz < 8) sz = 8; if (sz > 64) sz = 64;
@@ -921,21 +952,29 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                           default: tilesNeeded = 1; break; }
             int slotsNeeded = (tilesNeeded * 32 + 127) / 128;
             if (slotsNeeded < 1) slotsNeeded = 1;
-            while (hudPieceTiles.size() % 32 != 0) hudPieceTiles.push_back(0);
-            int vramTile = (int)(hudPieceTiles.size() / 32);
-            if (ai >= 0 && ai < (int)assets.size()) {
-                int gf = assetFrameBase[ai] + pc.frame;
-                if (gf >= 0 && gf < (int)frameRomU32Offset.size()) {
-                    int srcU32 = (int)frameRomU32Offset[gf];
-                    int srcTiles = (int)frameTileCount[gf];
-                    int t = (srcTiles < tilesNeeded) ? srcTiles : tilesNeeded;
-                    for (int i = 0; i < t * 8 && srcU32 + i < (int)allTiles.size(); i++)
-                        hudPieceTiles.push_back(allTiles[srcU32 + i]);
+            int vramTile;
+            int cached = findCachedVramTile(ai, pc.frame, sz);
+            if (cached >= 0) {
+                vramTile = cached;
+            } else {
+                while (hudPieceTiles.size() % 32 != 0) hudPieceTiles.push_back(0);
+                vramTile = (int)(hudPieceTiles.size() / 32);
+                if (ai >= 0 && ai < (int)assets.size()) {
+                    int gf = assetFrameBase[ai] + pc.frame;
+                    if (gf >= 0 && gf < (int)frameRomU32Offset.size()) {
+                        int srcU32 = (int)frameRomU32Offset[gf];
+                        int srcTiles = (int)frameTileCount[gf];
+                        int t = (srcTiles < tilesNeeded) ? srcTiles : tilesNeeded;
+                        for (int i = 0; i < t * 8 && srcU32 + i < (int)allTiles.size(); i++)
+                            hudPieceTiles.push_back(allTiles[srcU32 + i]);
+                    }
                 }
+                int totalU32 = slotsNeeded * 32;
+                while ((int)hudPieceTiles.size() < vramTile * 32 + totalU32)
+                    hudPieceTiles.push_back(0);
+                hudPieceKeys.push_back({ai, pc.frame, sz});
+                hudPieceKeyVramTile.push_back(vramTile);
             }
-            int totalU32 = slotsNeeded * 32;
-            while ((int)hudPieceTiles.size() < vramTile * 32 + totalU32)
-                hudPieceTiles.push_back(0);
             AfnBakedHudPiece bp;
             bp.srcX = pc.localX; bp.srcY = pc.localY; bp.size = sz;
             bp.vramTile = vramTile;
@@ -1346,6 +1385,12 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     // GBA-only mixer toggles (compat/hifi/lowrate/bufscale/mixpad/premix/
     // isrswap/chunked/attenuate_a/triplebuf) are NOT emitted — there is no
     // ARM9 software mixer to tune.
+    if (soundSamples.empty()) {
+        // No audio in this project — emit stub counts so audio.c's
+        // #ifndef AFN_HAS_SOUND path links without referencing missing arrays.
+        f << "\n#define AFN_SOUND_SAMPLE_COUNT 0\n";
+        f << "#define AFN_SOUND_INSTANCE_COUNT 0\n";
+    }
     if (!soundSamples.empty()) {
         f << "\n// ---- PCM Samples ----\n";
         f << "#define AFN_SOUND_SAMPLE_COUNT " << soundSamples.size() << "\n";
@@ -1624,6 +1669,12 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     // NDS configures BG layer + VRAM bank differently at runtime, but the
     // data shape is byte-identical so the editor's tile/pal build stays the
     // single source of truth.
+    if (tmScenes.empty()) {
+        // No tilemap scenes — emit stub count so any code that probes
+        // AFN_TM_SCENE_COUNT (mode0.c is gated on AFN_HAS_MODE0 which we
+        // leave undefined) sees a defined symbol.
+        f << "\n#define AFN_TM_SCENE_COUNT 0\n";
+    }
     if (!tmScenes.empty())
     {
         f << "\n// ---- Mode 0 Tilemap ----\n";
@@ -1788,8 +1839,20 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_anim_prio;\n";
         f << "extern int  afn_collided_sprite;\n";
         f << "extern int  afn_collided_tm_obj;\n";
+        f << "extern int  afn_collided_tm_obj;\n";
         f << "extern int  afn_bp_cur_tm_obj;\n";
         f << "extern int  afn_bp_cur_spr_idx;\n";
+        f << "extern int  afn_bp_cur_tm_obj;\n";
+        // Follow system state (FollowPlayer / SetFollowFacing / IsFollowMoving)
+        f << "extern int  tm_fol_active;\n";
+        f << "extern int  tm_fol_obj;\n";
+        f << "extern int  tm_fol_dist;\n";
+        f << "extern int  tm_fol_speed;\n";
+        f << "extern int  tm_fol_facing;\n";
+        f << "extern int  tm_fol_moving;\n";
+        f << "extern short tm_obj_facing[];\n";
+        f << "extern int  tm_player_tx;\n";
+        f << "extern int  tm_player_ty;\n";
         f << "extern int  afn_gravity;\n";
         f << "extern int  afn_terminal_vel;\n";
         f << "extern int  afn_player_frozen;\n";
@@ -2355,6 +2418,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "    if (player_vy > 0) {\n"; inJumpGate = true; break;
             case GBAScriptNodeType::IsFalling:
                 f << "    if (!player_on_ground && player_vy <= 0) {\n"; inJumpGate = true; break;
+            case GBAScriptNodeType::IsNear2D:
+                // Mirrors GBA: fires when the player just collided with
+                // THIS BP's tm_object. Combined with OnKeyPressed(A) this
+                // is the "press A near NPC" idiom.
+                f << "    if (afn_collided_tm_obj == afn_bp_cur_tm_obj && afn_bp_cur_tm_obj >= 0) {\n"; break;
+            case GBAScriptNodeType::IsFollowMoving:
+                f << "    if (tm_fol_moving) {\n"; break;
             // CheckFlag is handled specially in emitChain (dual-pin Set/Clear branches).
             case GBAScriptNodeType::SetVelocityY: {
                 auto* d = findDataIn(a->id, 0);
@@ -2373,10 +2443,38 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 auto* animData = findDataIn(a->id, 1);
                 int obj  = objData  ? resolveInt(objData)  : 0;
                 int anim = animData ? resolveInt(animData) : 0;
-                // NDS has no tilemap mode — direct per-sprite anim only.
-                f << "    afn_sprite_anim_spr = " << obj << "; afn_sprite_anim_val = " << anim << ";\n";
+                // Mode 4: per-sprite override via afn_sprite_anim_spr/val.
+                // Mode 0 tm_object: write directly to its mutable anim slot
+                // (the FollowPlayer / AIFollow BPs rely on this to switch
+                // a follower between idle and walk sprites).
+                f << "    if (afn_current_mode == 1) { extern int tm_obj_anim_idx[]; extern int tm_obj_anim_play[]; tm_obj_anim_idx[" << obj << "] = " << anim << "; tm_obj_anim_play[" << obj << "] = 1; }\n";
+                f << "    else { afn_sprite_anim_spr = " << obj << "; afn_sprite_anim_val = " << anim << "; }\n";
                 break;
             }
+            case GBAScriptNodeType::FollowPlayer: {
+                auto* objData   = findDataIn(a->id, 0);
+                auto* distData  = findDataIn(a->id, 1);
+                auto* speedData = findDataIn(a->id, 2);
+                int obj   = objData   ? resolveInt(objData)   : 0;
+                int dist  = distData  ? resolveInt(distData)  : 0;
+                int speed = speedData ? resolveInt(speedData) : 0;
+                f << "    if (!tm_fol_active) {\n";
+                f << "      tm_fol_obj = " << obj << ";\n";
+                f << "      extern int tm_fol_prev_ptx, tm_fol_prev_pty;\n";
+                f << "      tm_fol_prev_ptx = tm_player_tx;\n";
+                f << "      tm_fol_prev_pty = tm_player_ty;\n";
+                f << "      extern int tm_fol_trail_count, tm_fol_trail_head;\n";
+                f << "      tm_fol_trail_count = 0; tm_fol_trail_head = 0;\n";
+                f << "      tm_fol_active = 1;\n";
+                f << "    }\n";
+                f << "    tm_fol_dist = " << dist << ";\n";
+                f << "    tm_fol_speed = " << speed << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::SetFollowFacing:
+                f << "    if (tm_fol_active && tm_fol_obj >= 0)\n";
+                f << "      tm_obj_facing[tm_fol_obj] = tm_fol_facing;\n";
+                break;
             case GBAScriptNodeType::PlaySound: {
                 auto* d = findDataIn(a->id, 0);
                 int sId = d ? resolveInt(d) : 0;
@@ -2555,7 +2653,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             bool isGate = (a->type == GBAScriptNodeType::IsMoving ||
                            a->type == GBAScriptNodeType::IsOnGround ||
                            a->type == GBAScriptNodeType::IsJumping ||
-                           a->type == GBAScriptNodeType::IsFalling);
+                           a->type == GBAScriptNodeType::IsFalling ||
+                           a->type == GBAScriptNodeType::IsNear2D ||
+                           a->type == GBAScriptNodeType::IsFollowMoving);
             if (isGate) {
                 bool wasJump = inJumpGate;
                 emitAction(a);  // emits "if (cond) {\n" and updates inJumpGate
@@ -2651,6 +2751,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             emitDispatcher(fn, GBAScriptNodeType::OnKeyReleased, "key_released");
             snprintf(fn, sizeof(fn), "afn_bp%zu_collision",    bi);
             emitDispatcher(fn, GBAScriptNodeType::OnCollision, nullptr);
+            snprintf(fn, sizeof(fn), "afn_bp%zu_collision2d",  bi);
+            emitDispatcher(fn, GBAScriptNodeType::OnCollision2D, nullptr);
         }
         curScript = &script;  // restore so any later helpers behave
 
@@ -2660,12 +2762,15 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "\n#define AFN_BP_COUNT "     << (int)blueprints.size() << "\n";
         f << "#define AFN_BP_INSTANCE_COUNT " << (int)bpInstances.size() << "\n";
         if (!bpInstances.empty()) {
-            // Row: { bpIdx, spriteIdx, sceneMode, sceneMask }.
-            // sceneMode: 0 = Mode 4 (3D), 1 = Mode 0 (tilemap), -1 = any.
+            // Row: { bpIdx, spriteIdx, tmObjIdx, sceneMode, sceneMask }.
+            // tmObjIdx: -1 if instance is a 3D sprite, else index into the
+            // scene's tm_objects (used by collision2d dispatch).
+            // sceneMode: 0 = Mode 4 (3D), 1 = Mode 0 (tilemap), 2 = Mode 7.
             // sceneMask: bit N set = instance lives in scene N (0xFFFFFFFF = all).
-            f << "static const unsigned int afn_bp_instances[" << (int)bpInstances.size() << "][4] = {\n";
+            f << "static const unsigned int afn_bp_instances[" << (int)bpInstances.size() << "][5] = {\n";
             for (const auto& inst : bpInstances)
                 f << "    { " << inst.blueprintIdx << ", " << (unsigned)(int)inst.spriteIdx
+                  << ", " << (unsigned)(int)inst.tmObjIdx
                   << ", " << inst.sceneMode << ", 0x" << std::hex << inst.sceneMask << "u" << std::dec << " },\n";
             f << "};\n";
         }
@@ -2682,20 +2787,22 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "    extern int afn_current_scene;\n";
                 f << "    for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {\n";
                 if (sceneGate) {
-                    f << "        int instMode = (int)afn_bp_instances[i][2];\n";
+                    f << "        int instMode = (int)afn_bp_instances[i][3];\n";
                     f << "        if (instMode >= 0 && instMode != afn_current_mode) continue;\n";
-                    f << "        unsigned int mask = afn_bp_instances[i][3];\n";
+                    f << "        unsigned int mask = afn_bp_instances[i][4];\n";
                     f << "        if (mask != 0xFFFFFFFFu && !(mask & (1u << afn_current_scene))) continue;\n";
                 }
                 if (gateExpr) f << "        if (!(" << gateExpr << ")) continue;\n";
                 f << "        int bpIdx = afn_bp_instances[i][0];\n";
                 f << "        afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];\n";
+                f << "        afn_bp_cur_tm_obj  = (int)afn_bp_instances[i][2];\n";
                 f << "        switch (bpIdx) {\n";
                 for (size_t bi = 0; bi < blueprints.size(); bi++)
                     f << "            case " << bi << ": afn_bp" << bi << "_" << suffix << "(); break;\n";
                 f << "        }\n";
                 f << "    }\n";
                 f << "    afn_bp_cur_spr_idx = -1;\n";
+                f << "    afn_bp_cur_tm_obj  = -1;\n";
             }
             f << "}\n";
         };
@@ -2711,6 +2818,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         emitBpDispatcher("afn_bp_dispatch_key_released", "key_released", nullptr, true);
         emitBpDispatcher("afn_bp_dispatch_collision",    "collision",
                          "(int)afn_bp_instances[i][1] == afn_collided_sprite", true);
+        // Mode 0 collision: gate on this instance's tmObjIdx matching the
+        // tm_object the player just walked into (set by mode0 movement).
+        emitBpDispatcher("afn_bp_dispatch_collision2d",  "collision2d",
+                         "(int)afn_bp_instances[i][2] == afn_collided_tm_obj", true);
     } else {
         // No scripts in this build — empty stubs keep script_glue.c linkable.
         f << "\n// Script dispatchers — no scripts in this build.\n";
@@ -2728,6 +2839,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "static inline void afn_bp_dispatch_key_pressed(void)     {}\n";
         f << "static inline void afn_bp_dispatch_key_released(void)    {}\n";
         f << "static inline void afn_bp_dispatch_collision(void)       {}\n";
+        f << "static inline void afn_bp_dispatch_collision2d(void)     {}\n";
     }
 
     f << "#endif // MAPDATA_H\n";
