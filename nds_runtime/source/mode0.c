@@ -132,6 +132,26 @@ static u16 mode0_bg0cnt(int bgSize)
 void afn_mode0_init_scene(int sceneIdx)
 {
     if (sceneIdx < 0 || sceneIdx >= AFN_TM_SCENE_COUNT) sceneIdx = 0;
+
+    // Mode-entry setup — also runs when switching IN from Mode 4. Flips
+    // VRAM_A back to MAIN_BG (Mode 4 had it as TEXTURE) and forces the
+    // 2D video mode so the 3D engine's purple-sky backdrop stops
+    // bleeding through behind the tilemap.
+    vramSetBankA(VRAM_A_MAIN_BG);
+    videoSetMode(MODE_0_2D | DISPLAY_BG0_ACTIVE |
+                 DISPLAY_SPR_ACTIVE | DISPLAY_SPR_1D_LAYOUT);
+    // videoSetMode resets the sprite-mapping size bits to 1D_32 — reassert
+    // 1D_128 (matches what sprites.c set up at boot) so OAM tile offsets
+    // land on the right 128-byte-aligned addresses. Mirrors the reverse
+    // Mode 0 -> Mode 4 fixup in fps3d.c.
+    oamInit(&oamMain, SpriteMapping_1D_128, false);
+#if defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+    // Sprite VRAM still holds whatever Mode 4 last DMA'd. Reset the
+    // per-asset frame cache so the next render re-DMAs the proper Mode 0
+    // tm_object frames into the right VRAM slots.
+    extern int g_active_frame[AFN_ASSET_COUNT];
+    for (int ai = 0; ai < AFN_ASSET_COUNT; ai++) g_active_frame[ai] = -1;
+#endif
     tm_scene_idx     = sceneIdx;
     tm_cur_objs      = afn_tm_scene_objs[sceneIdx];
     tm_cur_obj_count = afn_tm_scene_obj_count[sceneIdx];
