@@ -44,6 +44,10 @@ extern const unsigned char default_font_bin[];
 // Pieces start after the font slots (95 * 128 = 12160 bytes).
 #define AFN_HUD_PIECE_VRAM_OFFSET (AFN_HUD_VRAM_OFFSET + AFN_HUD_FONT_COUNT * AFN_HUD_TILE_STRIDE)
 #define AFN_HUD_PAL_BANK      15
+// Dedicated all-black palette for HUD pieces with blackTint set
+// (drop shadows). All 15 colour slots populated so any palette index
+// used by the source tile data renders as solid black.
+#define AFN_HUD_BLACK_BANK    10
 #define AFN_HUD_OAM_BASE      100
 
 static void hud_bake_font(void)
@@ -109,6 +113,22 @@ void afn_hud_init(void) {
     unsigned short* pal = (unsigned short*)0x05000200 + AFN_HUD_PAL_BANK * 16;
     pal[0] = 0;
     pal[1] = RGB15(31, 31, 31);
+    // Bank 10 — all-black for blackTint pieces (drop shadows). Index 0
+    // stays transparent; indices 1-15 all render solid black so the
+    // piece's tile data shape blits as a silhouette.
+    // dmaCopy avoids any cache / write-ordering surprises that plain
+    // pointer stores hit (sprite_init's asset palette upload was
+    // somehow winning over my plain writes here).
+    {
+        static const u16 black_bank[16] = {
+            0,
+            RGB15(0,0,0), RGB15(0,0,0), RGB15(0,0,0), RGB15(0,0,0),
+            RGB15(0,0,0), RGB15(0,0,0), RGB15(0,0,0), RGB15(0,0,0),
+            RGB15(0,0,0), RGB15(0,0,0), RGB15(0,0,0), RGB15(0,0,0),
+            RGB15(0,0,0), RGB15(0,0,0), RGB15(0,0,0),
+        };
+        dmaCopy(black_bank, SPRITE_PALETTE + AFN_HUD_BLACK_BANK * 16, 32);
+    }
 #if defined(AFN_HUD_TEXT_PAL_COUNT) && AFN_HUD_TEXT_PAL_COUNT > 0
     // Per-text-row RGB color: dedup'd by the exporter into a small pool
     // of OBJ palette banks (14, 13, 12, 11). index 0 transparent,
@@ -165,10 +185,15 @@ static int hud_blit_piece(int oamSlot, int sx, int sy, const struct AfnHudPiece*
         case 64: sz = SpriteSize_64x64; break;
         default: sz = SpriteSize_16x16; break;
     }
+    // blackTint pieces (drop shadows) override the asset palette with the
+    // dedicated all-black bank — index 1..15 all render solid black so
+    // the shape's silhouette draws regardless of which colour index the
+    // source tile data used.
+    int palBank = pi->blackTint ? AFN_HUD_BLACK_BANK : pi->palBank;
     oamSet(&oamMain, oamSlot++,
            sx, sy,
            0,                                              // priority 0 — same as font
-           pi->palBank,                                    // reuse asset's palette bank
+           palBank,
            sz,
            SpriteColorFormat_16Color,
            (void*)(0x06400000 + AFN_HUD_PIECE_VRAM_OFFSET + pi->vramTile * AFN_HUD_TILE_STRIDE),
@@ -227,8 +252,6 @@ void afn_hud_draw(void) {
     extern int afn_current_mode;
     extern int afn_current_scene;
     int oamSlot = AFN_HUD_OAM_BASE;
-    static int s_dbgF = 0; s_dbgF++;
-    int dbgRendered = 0;
     for (int e = 0; e < AFN_HUD_ELEM_COUNT; e++) {
         int slot = e;
         if (slot < 4 && !afn_hud_visible[slot]) continue;
@@ -280,7 +303,6 @@ void afn_hud_draw(void) {
                     if (oamSlot >= 128) break;
                     const struct AfnHudPiece* pi = &afn_hud_pieces[ps + p];
                     oamSlot = hud_blit_piece(oamSlot, ex + pi->x, ey + pi->y, pi);
-                    dbgRendered++;
                 }
 #endif
             } else if (cat == 1) {
@@ -326,8 +348,5 @@ void afn_hud_draw(void) {
     // sprite_update flushed oamMain already; without our own flush the
     // HUD writes only land in the user buffer and get wiped next frame.
     oamUpdate(&oamMain);
-    if ((s_dbgF & 31) == 0)
-        iprintf("\x1b[20;0Hhud cm=%d cs=%d r=%d s=%d  ",
-                afn_current_mode, afn_current_scene, dbgRendered, oamSlot);
 #endif
 }

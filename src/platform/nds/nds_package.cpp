@@ -223,7 +223,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     // HUD piece tile blob — populated inside the asset block (we need
     // allTiles + frameRomU32Offset) and emitted later in the HUD block.
     // Declared at function scope so both blocks can see them.
-    struct AfnBakedHudPiece { int srcX, srcY, size, vramTile, palBank; };
+    struct AfnBakedHudPiece { int srcX, srcY, size, vramTile, palBank, blackTint, opacity; };
     std::vector<AfnBakedHudPiece> bakedHudPieces;
     std::vector<AfnBakedHudPiece> bakedHudSprites;
     std::vector<uint32_t> hudPieceTiles;
@@ -812,6 +812,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             bp.srcX = pc.localX; bp.srcY = pc.localY; bp.size = sz;
             bp.vramTile = vramTile;
             bp.palBank = (ai >= 0) ? (ai & 0xF) : 15;
+            bp.blackTint = pc.blackTint ? 1 : 0;
+            bp.opacity   = (pc.opacity < 0) ? 0 : (pc.opacity > 16 ? 16 : pc.opacity);
             out.push_back(bp);
         };
         for (const auto& he : hudElements) {
@@ -1589,7 +1591,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "\n};\n";
             }
 
-            f << "struct AfnHudPiece { short x, y; unsigned short vramTile; unsigned char size; unsigned char palBank; };\n";
+            f << "struct AfnHudPiece { short x, y; unsigned short vramTile; unsigned char size; unsigned char palBank; unsigned char blackTint; unsigned char opacity; };\n";
             auto emitPieceArray = [&](const char* name, const std::vector<AfnBakedHudPiece>& bps) {
                 if (bps.empty()) {
                     f << "static const struct AfnHudPiece " << name << "[1] = {{0}};\n";
@@ -1598,7 +1600,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "static const struct AfnHudPiece " << name << "[" << (int)bps.size() << "] = {\n";
                 for (const auto& bp : bps)
                     f << "    { " << bp.srcX << ", " << bp.srcY << ", " << bp.vramTile << ", "
-                      << bp.size << ", " << bp.palBank << " },\n";
+                      << bp.size << ", " << bp.palBank << ", "
+                      << bp.blackTint << ", " << bp.opacity << " },\n";
                 f << "};\n";
             };
             emitPieceArray("afn_hud_pieces",  bakedHudPieces);
