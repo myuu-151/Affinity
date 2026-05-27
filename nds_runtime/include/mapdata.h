@@ -16706,6 +16706,10 @@ extern int  afn_last_key;
 extern int  afn_player_height;
 extern int  afn_hud_value[4];
 extern unsigned char afn_hud_visible[4];
+extern int  afn_hud_layer_frame[];
+extern int  afn_hud_layer_tick[];
+extern unsigned char afn_hud_layer_active[];
+extern unsigned char afn_hud_layer_speed_override[];
 extern int  afn_current_scene;
 extern int  afn_current_mode;
 void afn_scene_start_transition(int sceneIdx, int sceneMode, int fadeFrames);
@@ -18823,7 +18827,9 @@ static void afn_bp6_collision(void) {
 }
 static void afn_bp7_start(void) {
     afn_hud_visible[1] = 1;
-    /* TODO: emit node type 236 */
+    afn_hud_layer_frame[0] = 0;
+    afn_hud_layer_tick[0] = 0;
+    afn_hud_layer_active[0] = 1;
     /* TODO: emit node type 48 */
 }
 static void afn_bp7_update(void) {

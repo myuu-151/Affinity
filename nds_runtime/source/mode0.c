@@ -11,6 +11,7 @@
 #include <nds/arm9/background.h>
 #include <nds/arm9/sprite.h>
 #include <nds/arm9/cache.h>
+#include <nds/arm9/input.h>
 
 extern int afn_current_mode;
 extern int afn_current_scene;
@@ -38,4 +39,8 @@ void afn_mode0_update(void)
     // No tilemap render yet — HUD draw in main.c handles everything
     // visible. When the tilemap subsystem lands, scroll + per-scene
     // map update happens here.
+    // CRITICAL: scanKeys() drives keysDown/Held/Up. fps3d_update calls
+    // it for Mode 4; we have to do the same in Mode 0 or every script
+    // key check (BP OnKeyPressed, etc.) is a no-op.
+    scanKeys();
 }

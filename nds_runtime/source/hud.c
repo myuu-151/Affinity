@@ -204,22 +204,29 @@ static int hud_blit_piece(int oamSlot, int sx, int sy, const struct AfnHudPiece*
 
 #if defined(AFN_HUD_LAYER_COUNT) && AFN_HUD_LAYER_COUNT > 0
 // Per-layer animation state — frame counter (driven by speed = 60/fps)
-// plus a sub-frame tick to slow advance to the layer's authored fps.
-static int s_layer_frame[AFN_HUD_LAYER_COUNT];
-static int s_layer_tick[AFN_HUD_LAYER_COUNT];
+// plus a sub-frame tick. NOT static so emitted PlayHudAnim /
+// StopHudAnim / SetHudAnimSpeed bodies can mutate them via extern decls
+// in mapdata.h.
+int afn_hud_layer_frame [AFN_HUD_LAYER_COUNT];
+int afn_hud_layer_tick  [AFN_HUD_LAYER_COUNT];
+unsigned char afn_hud_layer_active[AFN_HUD_LAYER_COUNT];
+unsigned char afn_hud_layer_speed_override[AFN_HUD_LAYER_COUNT]; // 0 = use exporter's speed
 
 static void hud_layer_advance(void)
 {
     for (int li = 0; li < AFN_HUD_LAYER_COUNT; li++) {
-        int spd = afn_hud_layers[li].speed;
+        if (!afn_hud_layer_active[li]) continue;
+        int spd = afn_hud_layer_speed_override[li]
+                ? afn_hud_layer_speed_override[li]
+                : afn_hud_layers[li].speed;
         if (spd < 1) spd = 1;
-        s_layer_tick[li]++;
-        if (s_layer_tick[li] >= spd) {
-            s_layer_tick[li] = 0;
-            s_layer_frame[li]++;
+        afn_hud_layer_tick[li]++;
+        if (afn_hud_layer_tick[li] >= spd) {
+            afn_hud_layer_tick[li] = 0;
+            afn_hud_layer_frame[li]++;
             int len = afn_hud_layers[li].length;
-            if (afn_hud_layers[li].loop && len > 0 && s_layer_frame[li] >= len)
-                s_layer_frame[li] = 0;
+            if (afn_hud_layers[li].loop && len > 0 && afn_hud_layer_frame[li] >= len)
+                afn_hud_layer_frame[li] = 0;
         }
     }
 }
@@ -232,7 +239,7 @@ static void hud_layer_offset(int li, int* outX, int* outY)
     int kS = afn_hud_layers[li].kfStart;
     int kN = afn_hud_layers[li].kfCount;
     if (kN < 1) return;
-    int t = s_layer_frame[li];
+    int t = afn_hud_layer_frame[li];
     int lastF = afn_hud_layer_kf[kS + kN - 1].frame;
     // After the last keyframe, freeze on the last value (until loop wraps).
     if (t >= lastF) { *outX = afn_hud_layer_kf[kS + kN - 1].offX;

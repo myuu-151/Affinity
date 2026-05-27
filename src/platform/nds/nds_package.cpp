@@ -1515,6 +1515,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_player_height;\n";
         f << "extern int  afn_hud_value[4];\n";
         f << "extern unsigned char afn_hud_visible[4];\n";
+        // Anim layer mutators (PlayHudAnim / StopHudAnim / SetHudAnimSpeed).
+        // The arrays are sized at runtime by AFN_HUD_LAYER_COUNT; emit
+        // unbounded extern declarations and rely on the runtime to size them.
+        f << "extern int  afn_hud_layer_frame[];\n";
+        f << "extern int  afn_hud_layer_tick[];\n";
+        f << "extern unsigned char afn_hud_layer_active[];\n";
+        f << "extern unsigned char afn_hud_layer_speed_override[];\n";
         // Scene-transition entry point (defined in fps3d.c) + current-scene state.
         f << "extern int  afn_current_scene;\n";
         f << "extern int  afn_current_mode;\n";
@@ -2060,6 +2067,25 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 int slot = slotData ? resolveInt(slotData) : a->paramInt[0];
                 if (slot < 0) slot = 0; if (slot > 3) slot = 3;
                 f << "    afn_hud_visible[" << slot << "] = 0;\n";
+                break;
+            }
+            case GBAScriptNodeType::PlayHudAnim: {
+                int li = a->paramInt[0];
+                f << "    afn_hud_layer_frame[" << li << "] = 0;\n";
+                f << "    afn_hud_layer_tick[" << li << "] = 0;\n";
+                f << "    afn_hud_layer_active[" << li << "] = 1;\n";
+                break;
+            }
+            case GBAScriptNodeType::StopHudAnim: {
+                int li = a->paramInt[0];
+                f << "    afn_hud_layer_active[" << li << "] = 0;\n";
+                break;
+            }
+            case GBAScriptNodeType::SetHudAnimSpeed: {
+                int li = a->paramInt[0];
+                auto* sd = findDataIn(a->id, 0);
+                int spd = sd ? resolveInt(sd) : 1;
+                f << "    afn_hud_layer_speed_override[" << li << "] = " << spd << ";\n";
                 break;
             }
             case GBAScriptNodeType::UpdateRespawnPos: {
