@@ -27,10 +27,12 @@ int snd_seq_next = 0;
 // ---------------------------------------------------------------------------
 // Voice table — mirrors GBA's snd_voices but each slot is just an NDS channel
 // handle plus enough state to track note-off + pitch bend follow-up.
-// We cap at SND_MAX_VOICES even though hardware has 16, so project polyphony
-// numbers from the editor mean the same thing on both targets.
+// Cap matches NDS hardware — 16 channels. Earlier 8-voice cap mirrored
+// GBA's polyphony, but with envelope-driven release tails a busy piano
+// over-steals into active sustains. Spending the other 8 channels we
+// already have lets notes play out their full release.
 // ---------------------------------------------------------------------------
-#define SND_MAX_VOICES 8
+#define SND_MAX_VOICES 16
 
 typedef struct {
     int   handle;        // libnds channel id, or -1 if free
@@ -173,9 +175,15 @@ void afn_play_sound(int instanceId)
     snd_seq_tick   = 0;
     snd_seq_next   = 0;
     for (int i = 0; i < 16; i++) snd_pitch_bend[i] = 0;
-    snd_voice_count = afn_snd_voices[instanceId];
-    if (snd_voice_count < 4) snd_voice_count = 4;
-    if (snd_voice_count > SND_MAX_VOICES) snd_voice_count = SND_MAX_VOICES;
+    // Editor's voiceCount was a GBA CPU-mixing budget; on NDS each voice
+    // is a free hardware channel, so override to the full cap unless the
+    // editor explicitly asked for less than half. That extends polyphony
+    // headroom past what the editor stored and stops aggressive steals
+    // from cutting active piano notes during release tails.
+    int editorVoices = afn_snd_voices[instanceId];
+    snd_voice_count = SND_MAX_VOICES;
+    if (editorVoices > 0 && editorVoices < SND_MAX_VOICES / 2)
+        snd_voice_count = editorVoices;
 }
 
 // ---------------------------------------------------------------------------
