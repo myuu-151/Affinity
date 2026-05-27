@@ -16953,6 +16953,7 @@ extern int  afn_sprite_anim_val;
 extern int  afn_anim_prio;
 extern int  afn_collided_sprite;
 extern int  afn_collided_tm_obj;
+extern int  afn_collided_tm_obj;
 extern int  afn_bp_cur_tm_obj;
 extern int  afn_bp_cur_spr_idx;
 extern int  afn_gravity;
@@ -18991,6 +18992,8 @@ static void afn_bp0_key_released(void) {
 }
 static void afn_bp0_collision(void) {
 }
+static void afn_bp0_collision2d(void) {
+}
 static void afn_bp1_start(void) {
 }
 static void afn_bp1_update(void) {
@@ -19003,6 +19006,8 @@ static void afn_bp1_key_released(void) {
 }
 static void afn_bp1_collision(void) {
     afn_scene_start_transition(1, 1, 15);
+}
+static void afn_bp1_collision2d(void) {
 }
 static void afn_bp2_start(void) {
     if (!afn_player_frozen && !afn_anim_prio) afn_play_anim = 0;
@@ -19032,6 +19037,8 @@ static void afn_bp2_key_released(void) {
 }
 static void afn_bp2_collision(void) {
 }
+static void afn_bp2_collision2d(void) {
+}
 static void afn_bp3_start(void) {
 }
 static void afn_bp3_update(void) {
@@ -19043,6 +19050,9 @@ static void afn_bp3_key_pressed(void) {
 static void afn_bp3_key_released(void) {
 }
 static void afn_bp3_collision(void) {
+}
+static void afn_bp3_collision2d(void) {
+    afn_scene_start_transition(0, 0, 15);
 }
 static void afn_bp4_start(void) {
 }
@@ -19099,6 +19109,8 @@ static void afn_bp4_key_released(void) {
 }
 static void afn_bp4_collision(void) {
 }
+static void afn_bp4_collision2d(void) {
+}
 static void afn_bp5_start(void) {
 }
 static void afn_bp5_update(void) {
@@ -19122,6 +19134,8 @@ static void afn_bp5_key_released(void) {
 }
 static void afn_bp5_collision(void) {
 }
+static void afn_bp5_collision2d(void) {
+}
 static void afn_bp6_start(void) {
     afn_play_sound(0);
 }
@@ -19134,6 +19148,8 @@ static void afn_bp6_key_pressed(void) {
 static void afn_bp6_key_released(void) {
 }
 static void afn_bp6_collision(void) {
+}
+static void afn_bp6_collision2d(void) {
 }
 static void afn_bp7_start(void) {
     afn_hud_visible[1] = 1;
@@ -19165,26 +19181,28 @@ static void afn_bp7_key_released(void) {
 }
 static void afn_bp7_collision(void) {
 }
+static void afn_bp7_collision2d(void) {
+}
 
 #define AFN_BP_COUNT 8
 #define AFN_BP_INSTANCE_COUNT 8
-static const unsigned int afn_bp_instances[8][4] = {
-    { 2, 4294967295, 1, 0x2u },
-    { 3, 4294967295, 1, 0x2u },
-    { 5, 4294967295, 1, 0x2u },
-    { 0, 4294967295, 0, 0x1u },
-    { 0, 4294967295, 2, 0x1u },
-    { 4, 4294967295, 1, 0x2u },
-    { 7, 4294967295, 1, 0x1u },
-    { 6, 4294967295, 1, 0x2u },
+static const unsigned int afn_bp_instances[8][5] = {
+    { 2, 4294967295, 0, 1, 0x2u },
+    { 3, 4294967295, 4, 1, 0x2u },
+    { 5, 4294967295, 5, 1, 0x2u },
+    { 0, 4294967295, 4294967295, 0, 0x1u },
+    { 0, 4294967295, 4294967295, 2, 0x1u },
+    { 4, 4294967295, 4294967295, 1, 0x2u },
+    { 7, 4294967295, 4294967295, 1, 0x1u },
+    { 6, 4294967295, 4294967295, 1, 0x2u },
 };
 static void afn_bp_dispatch_start(void) {
     extern int afn_current_mode;
     extern int afn_current_scene;
     for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
-        int instMode = (int)afn_bp_instances[i][2];
+        int instMode = (int)afn_bp_instances[i][3];
         if (instMode >= 0 && instMode != afn_current_mode) continue;
-        unsigned int mask = afn_bp_instances[i][3];
+        unsigned int mask = afn_bp_instances[i][4];
         if (mask != 0xFFFFFFFFu && !(mask & (1u << afn_current_scene))) continue;
         int bpIdx = afn_bp_instances[i][0];
         afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];
@@ -19205,9 +19223,9 @@ static void afn_bp_dispatch_update(void) {
     extern int afn_current_mode;
     extern int afn_current_scene;
     for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
-        int instMode = (int)afn_bp_instances[i][2];
+        int instMode = (int)afn_bp_instances[i][3];
         if (instMode >= 0 && instMode != afn_current_mode) continue;
-        unsigned int mask = afn_bp_instances[i][3];
+        unsigned int mask = afn_bp_instances[i][4];
         if (mask != 0xFFFFFFFFu && !(mask & (1u << afn_current_scene))) continue;
         int bpIdx = afn_bp_instances[i][0];
         afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];
@@ -19228,9 +19246,9 @@ static void afn_bp_dispatch_key_held(void) {
     extern int afn_current_mode;
     extern int afn_current_scene;
     for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
-        int instMode = (int)afn_bp_instances[i][2];
+        int instMode = (int)afn_bp_instances[i][3];
         if (instMode >= 0 && instMode != afn_current_mode) continue;
-        unsigned int mask = afn_bp_instances[i][3];
+        unsigned int mask = afn_bp_instances[i][4];
         if (mask != 0xFFFFFFFFu && !(mask & (1u << afn_current_scene))) continue;
         int bpIdx = afn_bp_instances[i][0];
         afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];
@@ -19251,9 +19269,9 @@ static void afn_bp_dispatch_key_pressed(void) {
     extern int afn_current_mode;
     extern int afn_current_scene;
     for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
-        int instMode = (int)afn_bp_instances[i][2];
+        int instMode = (int)afn_bp_instances[i][3];
         if (instMode >= 0 && instMode != afn_current_mode) continue;
-        unsigned int mask = afn_bp_instances[i][3];
+        unsigned int mask = afn_bp_instances[i][4];
         if (mask != 0xFFFFFFFFu && !(mask & (1u << afn_current_scene))) continue;
         int bpIdx = afn_bp_instances[i][0];
         afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];
@@ -19274,9 +19292,9 @@ static void afn_bp_dispatch_key_released(void) {
     extern int afn_current_mode;
     extern int afn_current_scene;
     for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
-        int instMode = (int)afn_bp_instances[i][2];
+        int instMode = (int)afn_bp_instances[i][3];
         if (instMode >= 0 && instMode != afn_current_mode) continue;
-        unsigned int mask = afn_bp_instances[i][3];
+        unsigned int mask = afn_bp_instances[i][4];
         if (mask != 0xFFFFFFFFu && !(mask & (1u << afn_current_scene))) continue;
         int bpIdx = afn_bp_instances[i][0];
         afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];
@@ -19297,9 +19315,9 @@ static void afn_bp_dispatch_collision(void) {
     extern int afn_current_mode;
     extern int afn_current_scene;
     for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
-        int instMode = (int)afn_bp_instances[i][2];
+        int instMode = (int)afn_bp_instances[i][3];
         if (instMode >= 0 && instMode != afn_current_mode) continue;
-        unsigned int mask = afn_bp_instances[i][3];
+        unsigned int mask = afn_bp_instances[i][4];
         if (mask != 0xFFFFFFFFu && !(mask & (1u << afn_current_scene))) continue;
         if (!((int)afn_bp_instances[i][1] == afn_collided_sprite)) continue;
         int bpIdx = afn_bp_instances[i][0];
@@ -19313,6 +19331,30 @@ static void afn_bp_dispatch_collision(void) {
             case 5: afn_bp5_collision(); break;
             case 6: afn_bp6_collision(); break;
             case 7: afn_bp7_collision(); break;
+        }
+    }
+    afn_bp_cur_spr_idx = -1;
+}
+static void afn_bp_dispatch_collision2d(void) {
+    extern int afn_current_mode;
+    extern int afn_current_scene;
+    for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {
+        int instMode = (int)afn_bp_instances[i][3];
+        if (instMode >= 0 && instMode != afn_current_mode) continue;
+        unsigned int mask = afn_bp_instances[i][4];
+        if (mask != 0xFFFFFFFFu && !(mask & (1u << afn_current_scene))) continue;
+        if (!((int)afn_bp_instances[i][2] == afn_collided_tm_obj)) continue;
+        int bpIdx = afn_bp_instances[i][0];
+        afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];
+        switch (bpIdx) {
+            case 0: afn_bp0_collision2d(); break;
+            case 1: afn_bp1_collision2d(); break;
+            case 2: afn_bp2_collision2d(); break;
+            case 3: afn_bp3_collision2d(); break;
+            case 4: afn_bp4_collision2d(); break;
+            case 5: afn_bp5_collision2d(); break;
+            case 6: afn_bp6_collision2d(); break;
+            case 7: afn_bp7_collision2d(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;

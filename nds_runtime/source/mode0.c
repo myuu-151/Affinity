@@ -364,6 +364,29 @@ void afn_mode0_update(void)
             tm_player_ty += tm_move_dy;
             tm_move_dx = 0;
             tm_move_dy = 0;
+
+            // Just arrived at a new tile — check overlap with any non-Tile
+            // tm_object and fire its OnCollision2D BP. tm_obj_anim_idx /
+            // sceneobj cells use the same scale8 cell footprint as the
+            // movement collision check.
+#if defined(AFN_HAS_SCRIPT)
+            extern int afn_collided_tm_obj;
+            extern void afn_bp_dispatch_collision2d(void);
+            for (int ci = 0; ci < tm_cur_obj_count; ci++) {
+                if (ci == AFN_TM_PLAYER_OBJ) continue;
+                if (tm_cur_objs[ci].type == 6) continue; // Tile decoration
+                int sc = tm_cur_objs[ci].scale8;
+                int cells = sc >> 8; if (cells < 1) cells = 1;
+                int ddx = tm_player_tx - tm_cur_objs[ci].tx; if (ddx < 0) ddx = -ddx;
+                int ddy = tm_player_ty - tm_cur_objs[ci].ty; if (ddy < 0) ddy = -ddy;
+                if (ddx < cells && ddy < cells) {
+                    afn_collided_tm_obj = ci;
+                    afn_bp_dispatch_collision2d();
+                    afn_collided_tm_obj = -1;
+                    break;
+                }
+            }
+#endif
         }
     }
     if (tm_move_timer == 0 && !afn_player_frozen) {

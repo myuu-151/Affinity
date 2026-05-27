@@ -1788,6 +1788,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_anim_prio;\n";
         f << "extern int  afn_collided_sprite;\n";
         f << "extern int  afn_collided_tm_obj;\n";
+        f << "extern int  afn_collided_tm_obj;\n";
         f << "extern int  afn_bp_cur_tm_obj;\n";
         f << "extern int  afn_bp_cur_spr_idx;\n";
         f << "extern int  afn_gravity;\n";
@@ -2651,6 +2652,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             emitDispatcher(fn, GBAScriptNodeType::OnKeyReleased, "key_released");
             snprintf(fn, sizeof(fn), "afn_bp%zu_collision",    bi);
             emitDispatcher(fn, GBAScriptNodeType::OnCollision, nullptr);
+            snprintf(fn, sizeof(fn), "afn_bp%zu_collision2d",  bi);
+            emitDispatcher(fn, GBAScriptNodeType::OnCollision2D, nullptr);
         }
         curScript = &script;  // restore so any later helpers behave
 
@@ -2660,12 +2663,15 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "\n#define AFN_BP_COUNT "     << (int)blueprints.size() << "\n";
         f << "#define AFN_BP_INSTANCE_COUNT " << (int)bpInstances.size() << "\n";
         if (!bpInstances.empty()) {
-            // Row: { bpIdx, spriteIdx, sceneMode, sceneMask }.
-            // sceneMode: 0 = Mode 4 (3D), 1 = Mode 0 (tilemap), -1 = any.
+            // Row: { bpIdx, spriteIdx, tmObjIdx, sceneMode, sceneMask }.
+            // tmObjIdx: -1 if instance is a 3D sprite, else index into the
+            // scene's tm_objects (used by collision2d dispatch).
+            // sceneMode: 0 = Mode 4 (3D), 1 = Mode 0 (tilemap), 2 = Mode 7.
             // sceneMask: bit N set = instance lives in scene N (0xFFFFFFFF = all).
-            f << "static const unsigned int afn_bp_instances[" << (int)bpInstances.size() << "][4] = {\n";
+            f << "static const unsigned int afn_bp_instances[" << (int)bpInstances.size() << "][5] = {\n";
             for (const auto& inst : bpInstances)
                 f << "    { " << inst.blueprintIdx << ", " << (unsigned)(int)inst.spriteIdx
+                  << ", " << (unsigned)(int)inst.tmObjIdx
                   << ", " << inst.sceneMode << ", 0x" << std::hex << inst.sceneMask << "u" << std::dec << " },\n";
             f << "};\n";
         }
@@ -2682,9 +2688,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "    extern int afn_current_scene;\n";
                 f << "    for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {\n";
                 if (sceneGate) {
-                    f << "        int instMode = (int)afn_bp_instances[i][2];\n";
+                    f << "        int instMode = (int)afn_bp_instances[i][3];\n";
                     f << "        if (instMode >= 0 && instMode != afn_current_mode) continue;\n";
-                    f << "        unsigned int mask = afn_bp_instances[i][3];\n";
+                    f << "        unsigned int mask = afn_bp_instances[i][4];\n";
                     f << "        if (mask != 0xFFFFFFFFu && !(mask & (1u << afn_current_scene))) continue;\n";
                 }
                 if (gateExpr) f << "        if (!(" << gateExpr << ")) continue;\n";
@@ -2711,6 +2717,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         emitBpDispatcher("afn_bp_dispatch_key_released", "key_released", nullptr, true);
         emitBpDispatcher("afn_bp_dispatch_collision",    "collision",
                          "(int)afn_bp_instances[i][1] == afn_collided_sprite", true);
+        // Mode 0 collision: gate on this instance's tmObjIdx matching the
+        // tm_object the player just walked into (set by mode0 movement).
+        emitBpDispatcher("afn_bp_dispatch_collision2d",  "collision2d",
+                         "(int)afn_bp_instances[i][2] == afn_collided_tm_obj", true);
     } else {
         // No scripts in this build — empty stubs keep script_glue.c linkable.
         f << "\n// Script dispatchers — no scripts in this build.\n";
@@ -2728,6 +2738,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "static inline void afn_bp_dispatch_key_pressed(void)     {}\n";
         f << "static inline void afn_bp_dispatch_key_released(void)    {}\n";
         f << "static inline void afn_bp_dispatch_collision(void)       {}\n";
+        f << "static inline void afn_bp_dispatch_collision2d(void)     {}\n";
     }
 
     f << "#endif // MAPDATA_H\n";

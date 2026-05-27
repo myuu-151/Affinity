@@ -735,6 +735,15 @@ void afn_scene_tick(void)
                 afn_mode0_init_scene(afn_current_scene);
             }
 #endif
+            // If swapping back into Mode 4 from Mode 0, restore the 3D
+            // video mode + texture VRAM and re-run fps3d_init so all
+            // textures / floor / sky reload. mode0_init clobbered VRAM_A
+            // (it was MAIN_BG holding tilemap tiles).
+            if (afn_current_mode == 0) {
+                videoSetMode(MODE_0_3D | DISPLAY_SPR_ACTIVE | DISPLAY_SPR_1D_LAYOUT);
+                vramSetBankA(VRAM_A_TEXTURE);
+                afn_fps3d_init();
+            }
 #ifdef AFN_HAS_SCRIPT
             // Re-fire OnStart for BPs that live in the new scene. Without
             // this, scene-1 BPs only ran once at boot and never re-armed on
