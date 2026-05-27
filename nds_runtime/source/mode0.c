@@ -414,6 +414,7 @@ void afn_mode0_update(void)
                 if (nx >= 0 && nx < tm_cur_logical_w &&
                     ny >= 0 && ny < tm_cur_logical_h) {
                     int blocked = 0;
+                    int blockedBy = -1;
                     for (int ci = 0; ci < tm_cur_obj_count; ci++) {
                         if (ci == AFN_TM_PLAYER_OBJ) continue;
                         if (!tm_cur_objs[ci].collision) continue;
@@ -424,12 +425,26 @@ void afn_mode0_update(void)
                         int oy = tm_cur_objs[ci].ty;
                         int ddx = nx - ox; if (ddx < 0) ddx = -ddx;
                         int ddy = ny - oy; if (ddy < 0) ddy = -ddy;
-                        if (ddx < cells && ddy < cells) { blocked = 1; break; }
+                        if (ddx < cells && ddy < cells) { blocked = 1; blockedBy = ci; break; }
                     }
                     if (!blocked) {
                         tm_move_dx = dx;
                         tm_move_dy = dy;
                         tm_move_timer = tm_move_frames;
+                    } else {
+                        // Player tried to walk into a collidable tm_object —
+                        // fire its OnCollision2D BP even though the move is
+                        // blocked. Without this, collision-enabled objects
+                        // could never trigger ChangeScene / dialogue etc.
+#if defined(AFN_HAS_SCRIPT)
+                        extern int afn_collided_tm_obj;
+                        extern void afn_bp_dispatch_collision2d(void);
+                        if (blockedBy >= 0 && tm_cur_objs[blockedBy].type != 6) {
+                            afn_collided_tm_obj = blockedBy;
+                            afn_bp_dispatch_collision2d();
+                            afn_collided_tm_obj = -1;
+                        }
+#endif
                     }
                 }
             }
