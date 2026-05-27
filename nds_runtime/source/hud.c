@@ -202,6 +202,69 @@ static int hud_blit_piece(int oamSlot, int sx, int sy, const struct AfnHudPiece*
 }
 #endif
 
+#if defined(AFN_HUD_LAYER_COUNT) && AFN_HUD_LAYER_COUNT > 0
+// Per-layer animation state — frame counter (driven by speed = 60/fps)
+// plus a sub-frame tick to slow advance to the layer's authored fps.
+static int s_layer_frame[AFN_HUD_LAYER_COUNT];
+static int s_layer_tick[AFN_HUD_LAYER_COUNT];
+
+static void hud_layer_advance(void)
+{
+    for (int li = 0; li < AFN_HUD_LAYER_COUNT; li++) {
+        int spd = afn_hud_layers[li].speed;
+        if (spd < 1) spd = 1;
+        s_layer_tick[li]++;
+        if (s_layer_tick[li] >= spd) {
+            s_layer_tick[li] = 0;
+            s_layer_frame[li]++;
+            int len = afn_hud_layers[li].length;
+            if (afn_hud_layers[li].loop && len > 0 && s_layer_frame[li] >= len)
+                s_layer_frame[li] = 0;
+        }
+    }
+}
+
+// Resolve (offX, offY) for layer li at its current frame, lerping
+// between the surrounding two keyframes.
+static void hud_layer_offset(int li, int* outX, int* outY)
+{
+    *outX = 0; *outY = 0;
+    int kS = afn_hud_layers[li].kfStart;
+    int kN = afn_hud_layers[li].kfCount;
+    if (kN < 1) return;
+    int t = s_layer_frame[li];
+    int lastF = afn_hud_layer_kf[kS + kN - 1].frame;
+    // After the last keyframe, freeze on the last value (until loop wraps).
+    if (t >= lastF) { *outX = afn_hud_layer_kf[kS + kN - 1].offX;
+                      *outY = afn_hud_layer_kf[kS + kN - 1].offY; return; }
+    if (t <= afn_hud_layer_kf[kS].frame) { *outX = afn_hud_layer_kf[kS].offX;
+                                           *outY = afn_hud_layer_kf[kS].offY; return; }
+    for (int i = 0; i + 1 < kN; i++) {
+        int f0 = afn_hud_layer_kf[kS + i].frame;
+        int f1 = afn_hud_layer_kf[kS + i + 1].frame;
+        if (t >= f0 && t <= f1) {
+            int span = f1 - f0; if (span < 1) span = 1;
+            int interp = afn_hud_layers[li].interp;
+            int x0 = afn_hud_layer_kf[kS + i].offX, x1 = afn_hud_layer_kf[kS + i + 1].offX;
+            int y0 = afn_hud_layer_kf[kS + i].offY, y1 = afn_hud_layer_kf[kS + i + 1].offY;
+            if (interp == 0) {
+                // Constant — snap to f0's value.
+                *outX = x0; *outY = y0;
+            } else {
+                int u = ((t - f0) * 256) / span; // 0..256
+                if (interp == 2) {
+                    // Smoothstep t*t*(3-2t)
+                    u = (u * u * (768 - 2 * u)) >> 16;
+                }
+                *outX = x0 + ((x1 - x0) * u >> 8);
+                *outY = y0 + ((y1 - y0) * u >> 8);
+            }
+            return;
+        }
+    }
+}
+#endif
+
 #if defined(AFN_HUD_KF_COUNT) && AFN_HUD_KF_COUNT > 0
 // Resolve (offX, offY) at the given absolute frame by walking the
 // element's keyframe range and linearly interpolating between the
@@ -251,6 +314,9 @@ void afn_hud_draw(void) {
 #if defined(AFN_HAS_SCRIPT) && defined(AFN_HUD_ELEM_COUNT) && AFN_HUD_ELEM_COUNT > 0
     extern int afn_current_mode;
     extern int afn_current_scene;
+#if defined(AFN_HUD_LAYER_COUNT) && AFN_HUD_LAYER_COUNT > 0
+    hud_layer_advance();
+#endif
     int oamSlot = AFN_HUD_OAM_BASE;
     for (int e = 0; e < AFN_HUD_ELEM_COUNT; e++) {
         int slot = e;
@@ -295,14 +361,38 @@ void afn_hud_draw(void) {
 #if defined(AFN_HUD_PIECE_COUNT) && AFN_HUD_PIECE_COUNT > 0
                 int ps = afn_hud_elems[e].pieceStart;
                 int pc = afn_hud_elems[e].pieceCount;
-                // Render pieces back-to-front. NDS OAM: lower slot = on top,
-                // so the LAST piece in the list (drawn on top in the editor)
-                // needs the LOWEST OAM slot. Iterate reverse so piece N-1
-                // takes oamSlot first.
                 for (int p = pc - 1; p >= 0; p--) {
                     if (oamSlot >= 128) break;
                     const struct AfnHudPiece* pi = &afn_hud_pieces[ps + p];
-                    oamSlot = hud_blit_piece(oamSlot, ex + pi->x, ey + pi->y, pi);
+                    int aox = 0, aoy = 0;
+#if defined(AFN_HUD_LAYER_COUNT) && AFN_HUD_LAYER_COUNT > 0
+                    // Find any anim layer that targets this piece, accumulate offsets.
+                    for (int li = 0; li < AFN_HUD_LAYER_COUNT; li++) {
+                        if (afn_hud_layers[li].elemIdx != e) continue;
+                        int iS = afn_hud_layers[li].itemStart;
+                        int iN = afn_hud_layers[li].itemCount;
+                        for (int ii = 0; ii < iN; ii++) {
+                            if (afn_hud_layer_items[iS + ii].type == 0 &&
+                                afn_hud_layer_items[iS + ii].index == p) {
+                                int lx, ly; hud_layer_offset(li, &lx, &ly);
+                                aox += lx; aoy += ly;
+                                break;
+                            }
+                        }
+                    }
+#endif
+                    int px = ex + pi->x + aox;
+                    int py = ey + pi->y + aoy;
+                    oamSlot = hud_blit_piece(oamSlot, px, py, pi);
+                    // Screen-wrap: if the piece's right edge crosses the screen,
+                    // draw a second copy shifted by -256 so the wrapped portion
+                    // appears on the left. Same for left edge.
+                    if (aox != 0 || aoy != 0) {
+                        if (px + pi->size > 256 && oamSlot < 128)
+                            oamSlot = hud_blit_piece(oamSlot, px - 256, py, pi);
+                        else if (px < 0 && oamSlot < 128)
+                            oamSlot = hud_blit_piece(oamSlot, px + 256, py, pi);
+                    }
                 }
 #endif
             } else if (cat == 1) {

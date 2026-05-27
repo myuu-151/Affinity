@@ -1620,6 +1620,47 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "static const struct { short frame, offX, offY; } afn_hud_kf[1] = {{0}};\n";
             }
 
+            // ---- Anim layers ----
+            // Per-layer animation that targets specific pieces/sprite-items
+            // within an element. Each layer has its own keyframe set, length,
+            // loop flag, fps (= frames-per-tick = 60/fps_value), and interp
+            // mode. Mirrors GBA's afn_hud_layer_* tables.
+            int totalLayers = 0, totalLayerKf = 0, totalLayerItems = 0;
+            for (const auto& he : hudElements) {
+                totalLayers += (int)he.animLayers.size();
+                for (const auto& lay : he.animLayers) {
+                    totalLayerKf    += (int)lay.keyframes.size();
+                    totalLayerItems += (int)lay.items.size();
+                }
+            }
+            f << "#define AFN_HUD_LAYER_COUNT " << totalLayers << "\n";
+            if (totalLayers > 0) {
+                f << "static const struct { short frame, offX, offY; } afn_hud_layer_kf[" << totalLayerKf << "] = {\n";
+                for (const auto& he : hudElements)
+                    for (const auto& lay : he.animLayers)
+                        for (const auto& kf : lay.keyframes)
+                            f << "    { " << kf.frame << ", " << kf.offX << ", " << kf.offY << " },\n";
+                f << "};\n";
+                f << "static const struct { unsigned char type, index; } afn_hud_layer_items[" << totalLayerItems << "] = {\n";
+                for (const auto& he : hudElements)
+                    for (const auto& lay : he.animLayers)
+                        for (const auto& it : lay.items)
+                            f << "    { " << it.type << ", " << it.index << " },\n";
+                f << "};\n";
+                f << "static const struct { unsigned char elemIdx; unsigned short kfStart, kfCount; unsigned short itemStart, itemCount; unsigned char interp; unsigned char loop; unsigned short length; unsigned char speed; } afn_hud_layers[" << totalLayers << "] = {\n";
+                int lkfOff = 0, liOff = 0;
+                for (int ei = 0; ei < (int)hudElements.size(); ei++)
+                    for (const auto& lay : hudElements[ei].animLayers) {
+                        f << "    { " << ei << ", " << lkfOff << ", " << (int)lay.keyframes.size() << ", "
+                          << liOff << ", " << (int)lay.items.size() << ", "
+                          << lay.interp << ", " << (lay.loop ? 1 : 0) << ", "
+                          << lay.length << ", " << lay.speed << " },\n";
+                        lkfOff += (int)lay.keyframes.size();
+                        liOff  += (int)lay.items.size();
+                    }
+                f << "};\n";
+            }
+
             f << "static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned char kfLoop; signed char layerPieces, layerSprites, layerText; unsigned char runtimeMode; unsigned int mode0Mask, mode4Mask; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
             int textCursor = 0, pieceCursor = 0, sprCursor = 0, kfCursor = 0;
             for (const auto& he : hudElements) {
@@ -1671,6 +1712,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             f << "#define AFN_HUD_PIECE_COUNT 0\n";
             f << "#define AFN_HUD_SPRITE_COUNT 0\n";
             f << "#define AFN_HUD_KF_COUNT 0\n";
+            f << "#define AFN_HUD_LAYER_COUNT 0\n";
             f << "#define AFN_HUD_PIECE_TILE_LEN 0\n";
         }
         f << "extern int  afn_scripts_stopped;\n";
