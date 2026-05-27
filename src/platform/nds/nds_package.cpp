@@ -1969,7 +1969,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             int totalStops = 0;
             for (const auto& he : hudElements) totalStops += (int)he.stops.size();
 
-            f << "static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned short stopStart, stopCount; unsigned char kfLoop; signed char layerPieces, layerSprites, layerText; unsigned char runtimeMode; unsigned int mode0Mask, mode4Mask; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
+            f << "static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned short stopStart, stopCount; unsigned char kfLoop; signed char layerPieces, layerSprites, layerText, layerCursor; unsigned char runtimeMode; short curAsset; unsigned char curFrame; signed char curOffX, curOffY; unsigned int mode0Mask, mode4Mask; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
             int textCursor = 0, pieceCursor = 0, sprCursor = 0, kfCursor = 0, stopCursor = 0;
             for (const auto& he : hudElements) {
                 f << "    { " << he.screenX << ", " << he.screenY << ", "
@@ -1979,8 +1979,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                   << kfCursor     << ", " << (int)he.keyframes.size() << ", "
                   << stopCursor   << ", " << (int)he.stops.size() << ", "
                   << (he.animLoop ? 1 : 0) << ", "
-                  << he.layerPieces << ", " << he.layerSprites << ", " << he.layerText << ", "
-                  << he.runtimeMode << ", 0x"
+                  << he.layerPieces << ", " << he.layerSprites << ", " << he.layerText << ", " << he.layerCursor << ", "
+                  << he.runtimeMode << ", "
+                  << he.cursorAssetIdx << ", " << he.cursorFrame << ", "
+                  << he.cursorOffX << ", " << he.cursorOffY << ", 0x"
                   << std::hex << he.mode0SceneMask << "u, 0x" << he.mode4SceneMask << "u" << std::dec
                   << " },\n";
                 textCursor   += (int)he.textRows.size();

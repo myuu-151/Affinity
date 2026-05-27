@@ -18859,9 +18859,9 @@ static const struct { unsigned char type, index; } afn_hud_layer_items[2] = {
 static const struct { unsigned char elemIdx; unsigned short kfStart, kfCount; unsigned short itemStart, itemCount; unsigned char interp; unsigned char loop; unsigned short length; unsigned char speed; } afn_hud_layers[1] = {
     { 1, 0, 2, 0, 2, 1, 1, 60, 2 },
 };
-static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned short stopStart, stopCount; unsigned char kfLoop; signed char layerPieces, layerSprites, layerText; unsigned char runtimeMode; unsigned int mode0Mask, mode4Mask; } afn_hud_elems[2] = {
-    { 76, 50, 0, 2, 0, 50, 0, 0, 0, 0, 0, 2, 0, 0, 1, 2, 2, 0x2u, 0x1u },
-    { 8, 8, 2, 0, 50, 25, 0, 0, 0, 0, 2, 0, 0, 0, 1, 2, 2, 0x1u, 0x1u },
+static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned short stopStart, stopCount; unsigned char kfLoop; signed char layerPieces, layerSprites, layerText, layerCursor; unsigned char runtimeMode; short curAsset; unsigned char curFrame; signed char curOffX, curOffY; unsigned int mode0Mask, mode4Mask; } afn_hud_elems[2] = {
+    { 76, 50, 0, 2, 0, 50, 0, 0, 0, 0, 0, 2, 0, 0, 1, 2, 3, 2, 6, 0, 0, -1, 0x2u, 0x1u },
+    { 8, 8, 2, 0, 50, 25, 0, 0, 0, 0, 2, 0, 0, 0, 1, 2, 3, 2, -1, 0, -8, 0, 0x1u, 0x1u },
 };
 static const struct { short x, y; signed char link; } afn_hud_stops[2] = {
     { 86, 9, -1 },
