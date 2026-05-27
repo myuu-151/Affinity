@@ -431,6 +431,18 @@ void afn_mode0_update(void)
         tm_player_pixel_y = tm_player_ty * tm_tile_size;
     }
 
+    // Player walk/idle anim. tm_objects without their own blueprint
+    // (most map-placed Player tokens) used to inherit afn_play_anim from
+    // whatever Mode-4 player BP happened to run in parallel; with scene
+    // gating that side-channel is gone, so drive it explicitly: anim 1
+    // while moving, anim 0 when idle. Asset convention is anim 0 = idle,
+    // anim 1 = walk for player-style direction sprites.
+#if defined(AFN_HAS_SCRIPT)
+    extern int afn_play_anim;
+    if (!afn_player_frozen)
+        afn_play_anim = (tm_move_timer > 0) ? 1 : 0;
+#endif
+
     // Camera follows player, centered on the 256x192 screen.
     tm_cam_x = tm_player_pixel_x - 128 + tm_tile_size / 2;
     tm_cam_y = tm_player_pixel_y -  96 + tm_tile_size / 2;

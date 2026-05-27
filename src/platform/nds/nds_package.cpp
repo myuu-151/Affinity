@@ -2660,25 +2660,36 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "\n#define AFN_BP_COUNT "     << (int)blueprints.size() << "\n";
         f << "#define AFN_BP_INSTANCE_COUNT " << (int)bpInstances.size() << "\n";
         if (!bpInstances.empty()) {
-            // Row: { bpIdx, spriteIdx }
-            f << "static const int afn_bp_instances[" << (int)bpInstances.size() << "][2] = {\n";
+            // Row: { bpIdx, spriteIdx, sceneMode, sceneMask }.
+            // sceneMode: 0 = Mode 4 (3D), 1 = Mode 0 (tilemap), -1 = any.
+            // sceneMask: bit N set = instance lives in scene N (0xFFFFFFFF = all).
+            f << "static const unsigned int afn_bp_instances[" << (int)bpInstances.size() << "][4] = {\n";
             for (const auto& inst : bpInstances)
-                f << "    { " << inst.blueprintIdx << ", " << inst.spriteIdx << " },\n";
+                f << "    { " << inst.blueprintIdx << ", " << (unsigned)(int)inst.spriteIdx
+                  << ", " << inst.sceneMode << ", 0x" << std::hex << inst.sceneMask << "u" << std::dec << " },\n";
             f << "};\n";
         }
         // Per-event bp dispatcher. Emits a switch on bpIdx so each instance
         // calls into the right blueprint's handler with cur_spr_idx set.
-        // gateExpr (optional) is a C expression evaluated per-instance —
-        // skip the instance if it's false. Collision uses
-        // "afn_bp_instances[i][1] == afn_collided_sprite" so only the
-        // bp owning the hit sprite fires, mirroring GBA.
-        auto emitBpDispatcher = [&](const char* fname, const char* suffix, const char* gateExpr) {
+        // sceneGate: true → skip instances that don't match the current
+        // (afn_current_mode, afn_current_scene). gateExpr is an additional
+        // C expression evaluated per-instance.
+        auto emitBpDispatcher = [&](const char* fname, const char* suffix,
+                                    const char* gateExpr, bool sceneGate) {
             f << "static void " << fname << "(void) {\n";
             if (!bpInstances.empty()) {
+                f << "    extern int afn_current_mode;\n";
+                f << "    extern int afn_current_scene;\n";
                 f << "    for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {\n";
+                if (sceneGate) {
+                    f << "        int instMode = (int)afn_bp_instances[i][2];\n";
+                    f << "        if (instMode >= 0 && instMode != afn_current_mode) continue;\n";
+                    f << "        unsigned int mask = afn_bp_instances[i][3];\n";
+                    f << "        if (mask != 0xFFFFFFFFu && !(mask & (1u << afn_current_scene))) continue;\n";
+                }
                 if (gateExpr) f << "        if (!(" << gateExpr << ")) continue;\n";
                 f << "        int bpIdx = afn_bp_instances[i][0];\n";
-                f << "        afn_bp_cur_spr_idx = afn_bp_instances[i][1];\n";
+                f << "        afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];\n";
                 f << "        switch (bpIdx) {\n";
                 for (size_t bi = 0; bi < blueprints.size(); bi++)
                     f << "            case " << bi << ": afn_bp" << bi << "_" << suffix << "(); break;\n";
@@ -2688,13 +2699,18 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             }
             f << "}\n";
         };
-        emitBpDispatcher("afn_bp_dispatch_start",        "start",        nullptr);
-        emitBpDispatcher("afn_bp_dispatch_update",       "update",       nullptr);
-        emitBpDispatcher("afn_bp_dispatch_key_held",     "key_held",     nullptr);
-        emitBpDispatcher("afn_bp_dispatch_key_pressed",  "key_pressed",  nullptr);
-        emitBpDispatcher("afn_bp_dispatch_key_released", "key_released", nullptr);
+        // OnStart: scene-gated so re-firing on scene swap only triggers BPs
+        // that belong to the new scene (e.g. a scene-1 song doesn't start
+        // playing during the scene-0 splash).
+        emitBpDispatcher("afn_bp_dispatch_start",        "start",        nullptr, true);
+        // Per-frame / input / collision events: also scene-gated so menu
+        // BPs don't react to keys outside their scene, etc.
+        emitBpDispatcher("afn_bp_dispatch_update",       "update",       nullptr, true);
+        emitBpDispatcher("afn_bp_dispatch_key_held",     "key_held",     nullptr, true);
+        emitBpDispatcher("afn_bp_dispatch_key_pressed",  "key_pressed",  nullptr, true);
+        emitBpDispatcher("afn_bp_dispatch_key_released", "key_released", nullptr, true);
         emitBpDispatcher("afn_bp_dispatch_collision",    "collision",
-                         "afn_bp_instances[i][1] == afn_collided_sprite");
+                         "(int)afn_bp_instances[i][1] == afn_collided_sprite", true);
     } else {
         // No scripts in this build — empty stubs keep script_glue.c linkable.
         f << "\n// Script dispatchers — no scripts in this build.\n";

@@ -735,6 +735,13 @@ void afn_scene_tick(void)
                 afn_mode0_init_scene(afn_current_scene);
             }
 #endif
+#ifdef AFN_HAS_SCRIPT
+            // Re-fire OnStart for BPs that live in the new scene. Without
+            // this, scene-1 BPs only ran once at boot and never re-armed on
+            // ChangeScene (e.g. the song never restarted in the new scene).
+            extern void afn_bp_dispatch_start(void);
+            afn_bp_dispatch_start();
+#endif
         }
     } else {
         int t = afn_fade_counter;
