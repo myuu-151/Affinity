@@ -196,6 +196,12 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
 
     // Sprites
     f << "#define AFN_SPRITE_COUNT " << (int)sprites.size() << "\n\n";
+    if (sprites.empty()) {
+        // Empty stub so runtime files that include mapdata.h still see the
+        // symbol — every iterating site is gated on AFN_SPRITE_COUNT > 0 so
+        // the placeholder row never gets read.
+        f << "static const int afn_sprite_data[1][17] = { {0,0,0,0,-1,256,0,0,0,-1,0,0,-1,0,0,0,0} };\n\n";
+    }
     if (!sprites.empty())
     {
         // Sprite row: x, y, z, pal, asset, scale, type, rot, animEn, meshIdx,
@@ -1379,6 +1385,12 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     // GBA-only mixer toggles (compat/hifi/lowrate/bufscale/mixpad/premix/
     // isrswap/chunked/attenuate_a/triplebuf) are NOT emitted — there is no
     // ARM9 software mixer to tune.
+    if (soundSamples.empty()) {
+        // No audio in this project — emit stub counts so audio.c's
+        // #ifndef AFN_HAS_SOUND path links without referencing missing arrays.
+        f << "\n#define AFN_SOUND_SAMPLE_COUNT 0\n";
+        f << "#define AFN_SOUND_INSTANCE_COUNT 0\n";
+    }
     if (!soundSamples.empty()) {
         f << "\n// ---- PCM Samples ----\n";
         f << "#define AFN_SOUND_SAMPLE_COUNT " << soundSamples.size() << "\n";
@@ -1657,6 +1669,12 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     // NDS configures BG layer + VRAM bank differently at runtime, but the
     // data shape is byte-identical so the editor's tile/pal build stays the
     // single source of truth.
+    if (tmScenes.empty()) {
+        // No tilemap scenes — emit stub count so any code that probes
+        // AFN_TM_SCENE_COUNT (mode0.c is gated on AFN_HAS_MODE0 which we
+        // leave undefined) sees a defined symbol.
+        f << "\n#define AFN_TM_SCENE_COUNT 0\n";
+    }
     if (!tmScenes.empty())
     {
         f << "\n// ---- Mode 0 Tilemap ----\n";

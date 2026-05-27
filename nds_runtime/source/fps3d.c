@@ -106,6 +106,16 @@ static void load_floor(void)
 }
 #endif
 
+// AFN_PLAYER_BASE_Y: spawn-Y of the player sprite (used as the ground
+// reference for camera height + flat-ground fallback). Falls back to 0
+// when a project has no sprites or no Player-typed sprite — keeps
+// fps3d.c linkable for empty scenes that boot straight into Mode 0.
+#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0 && defined(AFN_SPRITE_COUNT) && AFN_SPRITE_COUNT > 0
+#define AFN_PLAYER_BASE_Y  afn_sprite_data[AFN_PLAYER_IDX][1]
+#else
+#define AFN_PLAYER_BASE_Y  0
+#endif
+
 // ---------------------------------------------------------------------------
 // Mesh textures → VRAM
 // ---------------------------------------------------------------------------
@@ -144,6 +154,7 @@ static void load_mesh_textures(void)
 
 static void render_meshes(void)
 {
+#if defined(AFN_SPRITE_COUNT) && AFN_SPRITE_COUNT > 0
     for (int si = 0; si < AFN_SPRITE_COUNT; si++)
     {
         int meshIdx = afn_sprite_data[si][9];
@@ -246,6 +257,7 @@ static void render_meshes(void)
 
         glPopMatrix(1);
     }
+#endif
 }
 #endif
 
@@ -452,7 +464,7 @@ static void update_camera(void)
 #else
     {
         // No mesh collision data — fall back to flat ground at player init Y.
-        int groundY = afn_sprite_data[AFN_PLAYER_IDX][1];
+        int groundY = AFN_PLAYER_BASE_Y;
         if (player_y <= groundY) {
             player_y = groundY;
             player_vy = 0;
@@ -462,7 +474,7 @@ static void update_camera(void)
         }
     }
 #endif
-    s_playerY = player_y - afn_sprite_data[AFN_PLAYER_IDX][1];
+    s_playerY = player_y - AFN_PLAYER_BASE_Y;
 
     // 3rd-person camera: target = player - orbit_dist * view-forward. Lerp
     // cam_x/z toward target with the same ease rate as movement so the cam
@@ -531,7 +543,7 @@ static void update_camera(void)
     // AFN_JUMP_CAM_LAND / AFN_JUMP_CAM_AIR rates) so the camera lags through
     // jumps instead of snapping. baseline = the player's spawn Y; adding the
     // smoothed delta gives the camera's tracked world Y.
-    cam_h = afn_sprite_data[AFN_PLAYER_IDX][1] + s_camYSmooth + AFN_CAM_H;
+    cam_h = AFN_PLAYER_BASE_Y + s_camYSmooth + AFN_CAM_H;
 }
 
 // ---------------------------------------------------------------------------

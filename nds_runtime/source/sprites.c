@@ -9,7 +9,7 @@
 #include <nds/arm9/cache.h>
 #include <stdio.h>
 
-#if defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+#if defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && defined(AFN_SPRITE_COUNT) && AFN_SPRITE_COUNT > 0
 #define HAS_SPRITES 1
 // Per-asset currently-loaded VRAM frame, -1 = none. sprite_update() DMAs
 // the active frame in when it changes (drives the streaming pipeline).
@@ -416,7 +416,3 @@ void afn_sprite_update(void)
 #endif
 }
 
-#if !defined(HAS_SPRITES)
-void afn_sprite_init(void) {}
-void afn_sprite_update(void) {}
-#endif

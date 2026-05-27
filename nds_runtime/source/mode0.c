@@ -25,6 +25,16 @@ extern int afn_current_scene;
 
 #ifdef AFN_HAS_MODE0
 
+// Script-side globals that mode0.c reads/writes. When AFN_HAS_SCRIPT is on,
+// these live in script_glue.c so emitted node code can share them. When the
+// project has no scripts/blueprints, define them here so Mode 0 still links
+// (an empty-script project can still have a tilemap scene to render).
+#ifndef AFN_HAS_SCRIPT
+int tm_move_timer = 0;
+int tm_player_facing = 4;        // 4 = south, matches GBA default
+int afn_player_frozen = 0;
+#endif
+
 // VRAM_A layout in Mode 0:
 //   0x06000000 .. 0x06004000 (16KB)  — BG0 tile gfx (CBB 0)
 //   0x06004000 .. 0x06006000 (8KB)   — BG0 screen map (SBBs 8..11 for 64x64 4bpp)
