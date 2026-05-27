@@ -1767,7 +1767,6 @@ static bool GenerateMapData(const std::string& runtimeDir,
         // Emit element descriptors
         int totalPieces = 0, totalSprites = 0, totalStops = 0, totalText = 0, totalKf = 0;
         for (auto& el : hudElements) { totalPieces += (int)el.pieces.size(); totalSprites += (int)el.sprites.size(); totalStops += (int)el.stops.size(); totalText += (int)el.textRows.size(); totalKf += (int)el.keyframes.size(); }
-        f << "#define AFN_HUD_TEXT_COUNT " << totalText << "\n";
 
         f << "static const struct { s16 x,y; u16 pieceStart,pieceCount,spriteStart,spriteCount,stopStart,stopCount,textStart,textCount; s8 curAsset,curFrame,curOffX,curOffY; u8 layerPieces,layerSprites,layerText,layerCursor; u16 kfStart,kfCount; u8 kfLoop; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
         int pOff = 0, spOff = 0, sOff = 0, tOff = 0, kfOff = 0;
@@ -1839,6 +1838,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
         } else {
             f << "static const int afn_hud_texts[1] = {0}; // no text\n";
         }
+        // Runtime uses this to scan afn_hud_texts[] for referenced fonts so
+        // hud_font_load only burns 96 OBJ tiles per font that's actually used.
+        f << "#define AFN_HUD_TEXT_COUNT " << totalText << "\n";
 
         // Keyframes: {frame, offX, offY, rot(brad8), scaleX(8.8), scaleY(8.8)}
         if (totalKf > 0) {
