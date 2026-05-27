@@ -738,11 +738,53 @@ void afn_scene_tick(void)
             // If swapping back into Mode 4 from Mode 0, restore the 3D
             // video mode + texture VRAM and re-run fps3d_init so all
             // textures / floor / sky reload. mode0_init clobbered VRAM_A
-            // (it was MAIN_BG holding tilemap tiles).
+            // (it was MAIN_BG holding tilemap tiles). Re-init OAM too —
+            // videoSetMode clears the sprite mapping size bits to 1D_32
+            // default, which made our 1D_128-addressed sprite tile
+            // pointers land on garbage data (sprites rendered "snapped
+            // in half"). oamInit reasserts SpriteMapping_1D_128 and the
+            // OBJ-on-top priority dance.
             if (afn_current_mode == 0) {
+                // Replay the full boot 3D init sequence — videoSetMode +
+                // glInit leaves the geometry engine in a state that needs
+                // every step. Earlier attempts that only restored viewport
+                // / VRAM / OAM left the right ~64px of the screen black
+                // (3D output drew into only the first 192px wide region).
                 videoSetMode(MODE_0_3D | DISPLAY_SPR_ACTIVE | DISPLAY_SPR_1D_LAYOUT);
                 vramSetBankA(VRAM_A_TEXTURE);
+                vramSetBankE(VRAM_E_TEX_PALETTE);
+                oamInit(&oamMain, SpriteMapping_1D_128, false);
+                REG_BG0CNT = (REG_BG0CNT & ~3) | 3;
+                // Mode 0 was scrolling BG0 to track the player camera; for
+                // Mode 4 the same BG0 is the 3D layer, and a non-zero scroll
+                // shifts the entire 3D output sideways — that's what made
+                // the right ~64px render black.
+                REG_BG0HOFS = 0;
+                REG_BG0VOFS = 0;
+                glInit();
+                glEnable(GL_TEXTURE_2D);
+#if defined(AFN_NDS_AA) && AFN_NDS_AA
+                glEnable(GL_ANTIALIAS);
+#else
+                glDisable(GL_ANTIALIAS);
+#endif
+                glClearColor(10, 18, 31, 31);
+                glClearPolyID(63);
+                glClearDepth(0x7FFF);
+                glViewport(0, 0, 255, 191);
+                glMatrixMode(GL_PROJECTION);
+                glLoadIdentity();
+                gluPerspective(70, 256.0 / 192.0, 0.1, 1024);
+                glFlush(0);
                 afn_fps3d_init();
+                // Sprite VRAM still holds whatever Mode 0 last DMA'd, but
+                // sprite_update / mode0 share g_active_frame[] as their
+                // "what's loaded" cache. Reset so each asset re-DMAs its
+                // proper Mode-4 frame on the next render.
+#if defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+                extern int g_active_frame[AFN_ASSET_COUNT];
+                for (int ai = 0; ai < AFN_ASSET_COUNT; ai++) g_active_frame[ai] = -1;
+#endif
             }
 #ifdef AFN_HAS_SCRIPT
             // Re-fire OnStart for BPs that live in the new scene. Without
