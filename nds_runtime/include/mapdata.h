@@ -4,7 +4,7 @@
 
 #include <nds.h>
 
-#define AFN_START_MODE 1
+#define AFN_START_MODE 2
 
 // Camera start position (16.8 fixed-point)
 #define AFN_CAM_X     32768
@@ -29,9 +29,9 @@
 
 #define AFN_SPRITE_COUNT 2
 
-static const int afn_sprite_data[][11] = {
-    { 32768, 0, 27008, 1, 26, 409, 1, 0, 1, -1, 0 },
-    { 32768, -96, 27008, 1, 27, 450, 0, 0, 1, -1, 1 },
+static const int afn_sprite_data[][17] = {
+    { 32768, 0, 27008, 1, 26, 409, 1, 0, 1, -1, 0, 0, -1, 0, 0, 0, 0 },
+    { 32768, -96, 27008, 1, 27, 450, 0, 0, 1, -1, 1, 1, 0, 0, -96, 0, 1 },
 };
 
 #define AFN_ASSET_COUNT 28

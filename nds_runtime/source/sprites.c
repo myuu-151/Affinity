@@ -68,6 +68,7 @@ typedef struct {
     int objSize;
     int palBank;
     int tileIdx;
+    int oamPrio;
 } ProjSpr;
 
 void afn_sprite_update(void)
@@ -116,6 +117,30 @@ void afn_sprite_update(void)
             wz = player_z;
         }
 #endif
+        // Attached (sub) sprite: follow its parent every frame. parentIdx
+        // is sprite_data column 12; offX/Y/Z in 13/14/15, grounded in 16.
+        // Grounded subs (shadows) stay at offY in world space so they
+        // stick to the ground while the parent jumps.
+        {
+            int parentIdx = afn_sprite_data[si][12];
+            if (parentIdx >= 0 && parentIdx < AFN_SPRITE_COUNT) {
+                int px = afn_sprite_data[parentIdx][0];
+                int py = afn_sprite_data[parentIdx][1];
+                int pz = afn_sprite_data[parentIdx][2];
+#if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
+                if (parentIdx == AFN_PLAYER_IDX) {
+                    px = player_x; py = player_y; pz = player_z;
+                }
+#endif
+                int offX = afn_sprite_data[si][13];
+                int offY = afn_sprite_data[si][14];
+                int offZ = afn_sprite_data[si][15];
+                int grounded = afn_sprite_data[si][16];
+                wx = px + offX;
+                wy = grounded ? offY : (py + offY);
+                wz = pz + offZ;
+            }
+        }
 
         int dx = wx - cam_x;
         int dy = wy - cam_h;
@@ -315,6 +340,7 @@ void afn_sprite_update(void)
         proj[projCount].matScale = matScale;
         proj[projCount].objSize = objSize;
         proj[projCount].palBank = afn_asset_desc[aIdx][4] & 0xF;
+        proj[projCount].oamPrio = afn_sprite_data[si][11] & 3;
         // tileIdx = vramTileBase + frame_dir_tile[frame][dir]  (frame_dir
         // is now VRAM-slot-relative since DMA put the frame's data at
         // vramTileBase). Per-frame dir-fallback baked in by exporter.
@@ -370,7 +396,7 @@ void afn_sprite_update(void)
         oamRotateScale(&oamMain, affineSlot, 0, p->matScale, p->matScale);
         oamSet(&oamMain, oamSlot,
                topLeftX, topLeftY,
-               0, p->palBank, sz, SpriteColorFormat_16Color,
+               p->oamPrio, p->palBank, sz, SpriteColorFormat_16Color,
                (void*)((u8*)0x06400000 + p->tileIdx * 32),
                affineSlot, true, false, false, false, false);
         oamSlot++;

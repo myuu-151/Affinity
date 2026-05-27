@@ -198,8 +198,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     f << "#define AFN_SPRITE_COUNT " << (int)sprites.size() << "\n\n";
     if (!sprites.empty())
     {
-        // Sprite row: x, y, z, pal, asset, scale, type, rot, animEn, meshIdx, forceStatic
-        f << "static const int afn_sprite_data[][11] = {\n";
+        // Sprite row: x, y, z, pal, asset, scale, type, rot, animEn, meshIdx,
+        //             forceStatic, oamPrio, parentIdx, offX, offY, offZ, grounded
+        f << "static const int afn_sprite_data[][17] = {\n";
         for (size_t i = 0; i < sprites.size(); i++)
         {
             int gx = EditorToFixed(sprites[i].x);
@@ -213,10 +214,18 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             int animEn = sprites[i].animEnabled ? 1 : 0;
             int meshIdx2 = sprites[i].meshIdx;
             int fStatic = sprites[i].forceStatic ? 1 : 0;
+            int oamPrio = sprites[i].oamPrio;
+            int parentIdx = sprites[i].parentIdx;
+            int offX = (int)(sprites[i].offsetX / 4.0f * 256.0f);
+            int offY = (int)(sprites[i].offsetY / 4.0f * 256.0f);
+            int offZ = (int)(sprites[i].offsetZ / 4.0f * 256.0f);
+            int fGrounded = sprites[i].grounded ? 1 : 0;
             f << "    { " << gx << ", " << gy << ", " << gz << ", "
               << pal << ", " << aIdx << ", " << scaleFixed << ", "
               << sType << ", " << rotBrad << ", " << animEn << ", "
-              << meshIdx2 << ", " << fStatic << " },\n";
+              << meshIdx2 << ", " << fStatic << ", "
+              << oamPrio << ", " << parentIdx << ", "
+              << offX << ", " << offY << ", " << offZ << ", " << fGrounded << " },\n";
         }
         f << "};\n\n";
     }
