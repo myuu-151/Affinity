@@ -220,6 +220,16 @@ static void afn_script_check_collisions(void)
     } else {
         afn_collided_sprite = -1;
     }
+    // Wall-collision path: collision.c flags afn_wall_collided_sprite when
+    // the player's swept-AABB hits a mesh face tagged with a sprite index.
+    // GBA fires the BP collision dispatcher off that too (main.c:7781-7783)
+    // — otherwise walking into a wall sprite never triggers its BP
+    // (e.g. a Mode-4 ChangeScene attached to a wall mesh).
+    if (afn_wall_collided_sprite >= 0 && afn_frame_count > 10) {
+        afn_collided_sprite = afn_wall_collided_sprite;
+        afn_bp_dispatch_collision();
+        afn_emitted_script_collision();
+    }
 #endif
 }
 #endif
