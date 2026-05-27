@@ -1415,6 +1415,20 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "static const u8 afn_pcm_vol_scale[" << soundSamples.size() << "] = {\n";
         for (int i = 0; i < (int)soundSamples.size(); i++)
             f << "    " << (soundSamples[i].volScale > 255 ? 255 : soundSamples[i].volScale) << ",\n";
+        f << "};\n";
+        // Envelope tables — drive audio.c's soft-fade release + decay path so
+        // notes don't snap off at noteOffTick.
+        f << "static const int afn_pcm_release_ms[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << soundSamples[i].releaseMs << ",\n";
+        f << "};\n";
+        f << "static const int afn_pcm_decay_pct[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << soundSamples[i].decayPct << ",\n";
+        f << "};\n";
+        f << "static const int afn_pcm_decay_min_ms[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << soundSamples[i].decayMinMs << ",\n";
         f << "};\n\n";
 
         f << "typedef struct { int tick; u8 note; u8 vel; u8 smpIdx; u8 channel; int dur; } AfnSndNote;\n\n";
@@ -1453,6 +1467,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "static const u8 afn_snd_voices[" << soundInstances.size() << "] = {\n";
         for (int i = 0; i < (int)soundInstances.size(); i++)
             f << "    " << soundInstances[i].voiceCount << ",\n";
+        f << "};\n";
+        // softFade gates whether melodic voices ramp out at noteOff (vs.
+        // snap-cut). softFadeA from GBA maps directly — sequenced voices
+        // are the analogue of FIFO A's polyphony lane.
+        f << "static const u8 afn_snd_soft_fade[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++)
+            f << "    " << (soundInstances[i].softFadeA ? 1 : 0) << ",\n";
         f << "};\n";
         f << "static const u8 afn_snd_loop[" << soundInstances.size() << "] = {\n";
         for (int i = 0; i < (int)soundInstances.size(); i++)

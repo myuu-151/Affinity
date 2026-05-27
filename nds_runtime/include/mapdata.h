@@ -9742,6 +9742,42 @@ static const u8 afn_pcm_vol_scale[10] = {
     255,
     255,
 };
+static const int afn_pcm_release_ms[10] = {
+    436,
+    436,
+    436,
+    436,
+    436,
+    436,
+    436,
+    436,
+    436,
+    436,
+};
+static const int afn_pcm_decay_pct[10] = {
+    35,
+    35,
+    35,
+    35,
+    35,
+    35,
+    35,
+    35,
+    35,
+    35,
+};
+static const int afn_pcm_decay_min_ms[10] = {
+    385,
+    385,
+    385,
+    385,
+    385,
+    385,
+    385,
+    385,
+    385,
+    385,
+};
 
 typedef struct { int tick; u8 note; u8 vel; u8 smpIdx; u8 channel; int dur; } AfnSndNote;
 
@@ -12515,6 +12551,9 @@ static const int afn_snd_tpf[1] = {
 };
 static const u8 afn_snd_voices[1] = {
     8,
+};
+static const u8 afn_snd_soft_fade[1] = {
+    1,
 };
 static const u8 afn_snd_loop[1] = {
     0,
