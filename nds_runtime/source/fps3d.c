@@ -674,6 +674,14 @@ void afn_fps3d_init(void)
 // ---------------------------------------------------------------------------
 void afn_scene_start_transition(int sceneIdx, int sceneMode, int fadeFrames)
 {
+    // Idempotent: if a transition is already running toward the same
+    // target, don't restart the fade counter. ChangeScene fires from
+    // OnCollision2D every frame the player stays in the radius — without
+    // this guard the counter never reached 0 and the swap only happened
+    // after the player backed out of the trigger.
+    if (s_fade_phase != 0 &&
+        afn_pending_scene == sceneIdx && afn_pending_scene_mode == sceneMode)
+        return;
     if (fadeFrames < 1) fadeFrames = 15;
     afn_pending_scene      = sceneIdx;
     afn_pending_scene_mode = sceneMode;
