@@ -58,28 +58,19 @@ static unsigned int tm_frame_count = 0;              // anim ticker
 // Per-tm_object anim state, mutable copies seeded from the scene's const
 // AfnTmObj table on scene load. Lets scripts mutate animIdx/animPlay/etc.
 #define TM_MAX_OBJS 64
-static int  tm_obj_anim_idx[TM_MAX_OBJS];
-static int  tm_obj_anim_play[TM_MAX_OBJS];
-static int  tm_obj_facing[TM_MAX_OBJS];
+int  tm_obj_anim_idx[TM_MAX_OBJS];
+int  tm_obj_anim_play[TM_MAX_OBJS];
+int  tm_obj_facing[TM_MAX_OBJS];
 
-// Per-tm_object active VRAM frame, -1 = none. Each object owns its own
-// streaming slot rather than sharing with sprites.c's g_active_frame[ai]
-// (two objects on the same asset would otherwise fight over which frame's
-// data lives in VRAM).
-static int  tm_obj_active_frame[TM_MAX_OBJS];
-
-// Each tm_object that uses a direction asset gets a compact VRAM slot
-// (1 facing's worth of tiles) so all NPCs fit alongside the player without
-// chewing up VRAM at the 8-facings rate the bulk upload would need.
-static int  tm_obj_vram_slot[TM_MAX_OBJS];
-static int  tm_obj_vram_tiles[TM_MAX_OBJS];
-
-// AFN_HUD_VRAM_OFFSET is the byte offset in sprite VRAM where the HUD reserves
-// its area. Anything before that is tm_object territory.
-#ifndef AFN_HUD_VRAM_OFFSET
-#define AFN_HUD_VRAM_OFFSET 98304
+// Per-asset active VRAM frame, mirrors sprites.c's g_active_frame[ai]:
+// each asset has a fixed VRAM region assigned by the exporter
+// (afn_asset_desc[ai][0]), and the streaming step DMAs the current
+// frame's tile data into that region on change. Two tm_objects sharing
+// an asset will read the same frame slot — acceptable for now since
+// editor projects typically use one asset per object class.
+#if defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+extern int g_active_frame[AFN_ASSET_COUNT];
 #endif
-#define TM_OBJ_VRAM_BUDGET_TILES ((AFN_HUD_VRAM_OFFSET) / 32)
 
 void afn_mode0_init_scene(int sceneIdx);
 
@@ -172,32 +163,21 @@ void afn_mode0_init_scene(int sceneIdx)
             }
     }
 
-    // Seed mutable per-object state. Compact-allocate VRAM slots for any
-    // direction-sprite object so all NPCs co-exist within our budget; the
-    // streaming step DMAs the chosen facing's tiles into that slot each
-    // time the facing/anim changes.
-    int nextSlot = 0;
+    // Seed mutable per-object state. VRAM slots come from the asset's
+    // exporter-assigned base (afn_asset_desc[ai][0]) — no compact pack,
+    // since stomping the sprite-asset region was clobbering the HUD's
+    // piece VRAM and any Mode-4 sprite that happens to live below the
+    // HUD's offset.
     for (int oi = 0; oi < tm_cur_obj_count && oi < TM_MAX_OBJS; oi++) {
-        tm_obj_anim_idx[oi]    = tm_cur_objs[oi].animIdx;
-        tm_obj_anim_play[oi]   = tm_cur_objs[oi].animPlay;
-        tm_obj_facing[oi]      = tm_cur_objs[oi].facing;
-        tm_obj_active_frame[oi] = -1;
-        int ai = tm_cur_objs[oi].assetIdx;
-        int tpf = 0;
-#if defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
-        if (ai >= 0 && ai < AFN_ASSET_COUNT)
-            tpf = afn_asset_desc[ai][1];
-#endif
-        if (tpf > 0 && tm_cur_objs[oi].type != 6 /*Tile*/ &&
-            nextSlot + tpf <= TM_OBJ_VRAM_BUDGET_TILES) {
-            tm_obj_vram_slot[oi]  = nextSlot;
-            tm_obj_vram_tiles[oi] = tpf;
-            nextSlot += tpf;
-        } else {
-            tm_obj_vram_slot[oi]  = -1;
-            tm_obj_vram_tiles[oi] = 0;
-        }
+        tm_obj_anim_idx[oi]  = tm_cur_objs[oi].animIdx;
+        tm_obj_anim_play[oi] = tm_cur_objs[oi].animPlay;
+        tm_obj_facing[oi]    = tm_cur_objs[oi].facing;
     }
+#if defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+    // Force each asset to re-DMA on the next render so the new scene's
+    // tm_objects don't draw last-frame's stale tile data.
+    for (int ai = 0; ai < AFN_ASSET_COUNT; ai++) g_active_frame[ai] = -1;
+#endif
 
     // Player init from the scene's player object (if any).
 #if AFN_TM_PLAYER_OBJ >= 0
@@ -223,18 +203,18 @@ void afn_mode0_init_scene(int sceneIdx)
 }
 
 #if defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0 && AFN_FRAME_STREAM_LEN > 0
-// Stream one tm_object's frame data into its dedicated VRAM slot.
-// globalFrame indexes afn_frame_rom_off/afn_frame_tile_count.
-static void tm_stream_frame(int oi, int globalFrame)
+// Stream an asset's frame data into its exporter-assigned VRAM region.
+// Mirrors sprites.c — tracked per-asset so multiple tm_objects on the same
+// asset don't redundantly DMA the same frame each draw call.
+static void tm_stream_frame(int ai, int globalFrame)
 {
-    if (tm_obj_vram_slot[oi] < 0) return;
-    if (tm_obj_active_frame[oi] == globalFrame) return;
+    if (g_active_frame[ai] == globalFrame) return;
     const u32 *src = afn_all_tiles + afn_frame_rom_off[globalFrame];
-    u32 *dst = (u32*)(0x06400000 + tm_obj_vram_slot[oi] * 32);
+    int vramTileBase = afn_asset_desc[ai][0];
+    u32 *dst = (u32*)(0x06400000 + vramTileBase * 32);
     int tiles = afn_frame_tile_count[globalFrame];
-    if (tiles > tm_obj_vram_tiles[oi]) tiles = tm_obj_vram_tiles[oi];
     dmaCopy(src, dst, tiles * 32);
-    tm_obj_active_frame[oi] = globalFrame;
+    g_active_frame[ai] = globalFrame;
 }
 #endif
 
@@ -261,7 +241,6 @@ static void mode0_render_objects(int oamSlotStart, int *outOamSlot)
         if (obj->type == 6) continue;            // Tile — already in BG
         int ai = obj->assetIdx;
         if (ai < 0 || ai >= AFN_ASSET_COUNT) continue;
-        if (tm_obj_vram_slot[oi] < 0) continue;  // no VRAM budget
 
         int objPx, objPy;
         if (oi == AFN_TM_PLAYER_OBJ && tm_scene_idx == AFN_TM_PLAYER_SCENE) {
@@ -318,19 +297,21 @@ static void mode0_render_objects(int oamSlotStart, int *outOamSlot)
         if (animFrame >= frameCount) animFrame = frameCount - 1;
         if (animFrame < 0) animFrame = 0;
 
-        // DMA the chosen frame into this object's VRAM slot.
+        // DMA the chosen frame into the asset's exporter-assigned VRAM
+        // region. globalFrame indexes the per-frame streaming tables.
         int globalFrame = frameBase + animFrame;
 #if AFN_FRAME_STREAM_LEN > 0
-        tm_stream_frame(oi, globalFrame);
+        tm_stream_frame(ai, globalFrame);
 #endif
         // Tile index inside the asset's frame (picks the right facing's
         // tiles within the frame layout the exporter baked).
+        int vramTileBase = afn_asset_desc[ai][0];
 #if AFN_FRAME_DIR_TILE_LEN > 0
         int dirOff = afn_frame_dir_tile[globalFrame][dir];
 #else
         int dirOff = dir * tilesPerFr;
 #endif
-        int tileBaseSlot = tm_obj_vram_slot[oi] + dirOff;
+        int tileBaseSlot = vramTileBase + dirOff;
 
         // Off-screen cull.
         if (screenX < -64 || screenX > 256 + 32) continue;
