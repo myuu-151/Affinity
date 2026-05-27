@@ -912,6 +912,22 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         // more 128-byte (1D_128) slots in HUD VRAM. Palette bank reuses
         // the gameplay asset's bank since the same per-asset palette
         // already lives there post-init.
+        // Cache of (assetIdx, frame, size) -> vramTile so identical pieces
+        // share the same baked tile data instead of re-emitting it. A
+        // splash with 12 copies of the same bg piece was eating ~24KB of
+        // HUD VRAM in this user's project just on duplicates — pushing
+        // later pieces past the HUD region and clipping the lower half
+        // of the screen.
+        struct HudPieceKey { int ai, frame, size; };
+        std::vector<HudPieceKey> hudPieceKeys;
+        std::vector<int>         hudPieceKeyVramTile;
+        auto findCachedVramTile = [&](int ai, int frame, int size) -> int {
+            for (size_t i = 0; i < hudPieceKeys.size(); i++)
+                if (hudPieceKeys[i].ai == ai && hudPieceKeys[i].frame == frame &&
+                    hudPieceKeys[i].size == size)
+                    return hudPieceKeyVramTile[i];
+            return -1;
+        };
         auto bakeHudPiece = [&](const GBAHudPieceExport& pc, std::vector<AfnBakedHudPiece>& out) {
             int ai = pc.spriteAssetIdx;
             int sz = pc.size; if (sz < 8) sz = 8; if (sz > 64) sz = 64;
@@ -921,21 +937,29 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                           default: tilesNeeded = 1; break; }
             int slotsNeeded = (tilesNeeded * 32 + 127) / 128;
             if (slotsNeeded < 1) slotsNeeded = 1;
-            while (hudPieceTiles.size() % 32 != 0) hudPieceTiles.push_back(0);
-            int vramTile = (int)(hudPieceTiles.size() / 32);
-            if (ai >= 0 && ai < (int)assets.size()) {
-                int gf = assetFrameBase[ai] + pc.frame;
-                if (gf >= 0 && gf < (int)frameRomU32Offset.size()) {
-                    int srcU32 = (int)frameRomU32Offset[gf];
-                    int srcTiles = (int)frameTileCount[gf];
-                    int t = (srcTiles < tilesNeeded) ? srcTiles : tilesNeeded;
-                    for (int i = 0; i < t * 8 && srcU32 + i < (int)allTiles.size(); i++)
-                        hudPieceTiles.push_back(allTiles[srcU32 + i]);
+            int vramTile;
+            int cached = findCachedVramTile(ai, pc.frame, sz);
+            if (cached >= 0) {
+                vramTile = cached;
+            } else {
+                while (hudPieceTiles.size() % 32 != 0) hudPieceTiles.push_back(0);
+                vramTile = (int)(hudPieceTiles.size() / 32);
+                if (ai >= 0 && ai < (int)assets.size()) {
+                    int gf = assetFrameBase[ai] + pc.frame;
+                    if (gf >= 0 && gf < (int)frameRomU32Offset.size()) {
+                        int srcU32 = (int)frameRomU32Offset[gf];
+                        int srcTiles = (int)frameTileCount[gf];
+                        int t = (srcTiles < tilesNeeded) ? srcTiles : tilesNeeded;
+                        for (int i = 0; i < t * 8 && srcU32 + i < (int)allTiles.size(); i++)
+                            hudPieceTiles.push_back(allTiles[srcU32 + i]);
+                    }
                 }
+                int totalU32 = slotsNeeded * 32;
+                while ((int)hudPieceTiles.size() < vramTile * 32 + totalU32)
+                    hudPieceTiles.push_back(0);
+                hudPieceKeys.push_back({ai, pc.frame, sz});
+                hudPieceKeyVramTile.push_back(vramTile);
             }
-            int totalU32 = slotsNeeded * 32;
-            while ((int)hudPieceTiles.size() < vramTile * 32 + totalU32)
-                hudPieceTiles.push_back(0);
             AfnBakedHudPiece bp;
             bp.srcX = pc.localX; bp.srcY = pc.localY; bp.size = sz;
             bp.vramTile = vramTile;

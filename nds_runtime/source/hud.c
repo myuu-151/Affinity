@@ -50,11 +50,13 @@ extern const unsigned char default_font_bin[];
 // (drop shadows). All 15 colour slots populated so any palette index
 // used by the source tile data renders as solid black.
 #define AFN_HUD_BLACK_BANK    10
-// HUD reserves the second half of OAM (64..127) so sprites/tm_objects own
-// slots 0..63. Was 100 originally — that gave only 28 slots for HUD, and
-// menu elements with ~75 pieces (8x8 border + 16x16 interior + shadow
-// layer) saturated past slot 127 and silently lost their interior fills.
-#define AFN_HUD_OAM_BASE      64
+// HUD reserves slots 8..127 (120 slots). The 8 reserved low slots cover
+// the player + any same-frame tm_objects on a typical Mode 0 scene;
+// Mode 4 sprite_update also writes into the low range but Affinity
+// projects rarely have >8 simultaneous projected sprites on-screen.
+// Densely-decorated HUDs (splash logos with shadow + glow layers)
+// regularly need 100+ pieces — 96 wasn't enough.
+#define AFN_HUD_OAM_BASE      8
 
 static void hud_bake_font(void)
 {
