@@ -1688,6 +1688,12 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_player_height;\n";
         f << "extern int  afn_hud_value[4];\n";
         f << "extern unsigned char afn_hud_visible[4];\n";
+        // HUD cursor state — Cursor{Up,Down}/FollowLink nodes read/write these.
+        f << "extern int  afn_cursor_stop;\n";
+        f << "extern int  afn_stop_count;\n";
+        f << "extern int  afn_stop_links[8];\n";
+        f << "extern int  afn_elem_idx;\n";
+        f << "extern int  afn_active_element;\n";
         // Anim layer mutators (PlayHudAnim / StopHudAnim / SetHudAnimSpeed).
         // The arrays are sized at runtime by AFN_HUD_LAYER_COUNT; emit
         // unbounded extern declarations and rely on the runtime to size them.
@@ -1841,14 +1847,20 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "};\n";
             }
 
-            f << "static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned char kfLoop; signed char layerPieces, layerSprites, layerText; unsigned char runtimeMode; unsigned int mode0Mask, mode4Mask; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
-            int textCursor = 0, pieceCursor = 0, sprCursor = 0, kfCursor = 0;
+            // Total stop count + per-element stop range so ShowHUD / CursorUp
+            // / CursorDown / FollowLink can index into afn_hud_stops below.
+            int totalStops = 0;
+            for (const auto& he : hudElements) totalStops += (int)he.stops.size();
+
+            f << "static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned short stopStart, stopCount; unsigned char kfLoop; signed char layerPieces, layerSprites, layerText; unsigned char runtimeMode; unsigned int mode0Mask, mode4Mask; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
+            int textCursor = 0, pieceCursor = 0, sprCursor = 0, kfCursor = 0, stopCursor = 0;
             for (const auto& he : hudElements) {
                 f << "    { " << he.screenX << ", " << he.screenY << ", "
                   << textCursor   << ", " << (int)he.textRows.size() << ", "
                   << pieceCursor  << ", " << (int)he.pieces.size() << ", "
                   << sprCursor    << ", " << (int)he.sprites.size() << ", "
                   << kfCursor     << ", " << (int)he.keyframes.size() << ", "
+                  << stopCursor   << ", " << (int)he.stops.size() << ", "
                   << (he.animLoop ? 1 : 0) << ", "
                   << he.layerPieces << ", " << he.layerSprites << ", " << he.layerText << ", "
                   << he.runtimeMode << ", 0x"
@@ -1858,8 +1870,21 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 pieceCursor  += (int)he.pieces.size();
                 sprCursor    += (int)he.sprites.size();
                 kfCursor     += (int)he.keyframes.size();
+                stopCursor   += (int)he.stops.size();
             }
             f << "};\n";
+
+            // Cursor stops: each entry's link is the HUD element index to
+            // jump to when FollowLink fires (or -1 if the stop terminates).
+            if (totalStops > 0) {
+                f << "static const struct { short x, y; signed char link; } afn_hud_stops[" << totalStops << "] = {\n";
+                for (const auto& he : hudElements)
+                    for (const auto& st : he.stops)
+                        f << "    { " << st.localX << ", " << st.localY << ", " << st.linkedElement << " },\n";
+                f << "};\n";
+            } else {
+                f << "static const struct { short x, y; signed char link; } afn_hud_stops[1] = {{0,0,-1}};\n";
+            }
             if (totalText > 0) {
                 f << "static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; unsigned char palBank; char text[32]; } afn_hud_texts[" << totalText << "] = {\n";
                 int row = 0;
@@ -2006,11 +2031,15 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                     auto* an = findNode(nid);
                     if (!an) continue;
                     ch.actions.push_back(an);
-                    // Don't follow exec outs of CheckFlag (dual-pin) or OnRise
-                    // (edge-detect wrapper) — those collect their own branches
-                    // inside emitChain so siblings don't bleed across pins.
+                    // Don't follow exec outs of CheckFlag (dual-pin), OnRise
+                    // (edge-detect wrapper), FlipFlop (toggles between two
+                    // exec pins), or IsFlagSet (single-pin gate) — those
+                    // recurse into their own branches inside emitOne so
+                    // siblings don't bleed across pins.
                     if (an->type == GBAScriptNodeType::CheckFlag ||
-                        an->type == GBAScriptNodeType::OnRise) continue;
+                        an->type == GBAScriptNodeType::OnRise ||
+                        an->type == GBAScriptNodeType::FlipFlop ||
+                        an->type == GBAScriptNodeType::IsFlagSet) continue;
                     for (int t : findExecOuts(an->id, 0)) frontier.push_back(t);
                 }
                 if (!ch.actions.empty()) chains.push_back(ch);
@@ -2105,6 +2134,21 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             }
             case GBAScriptNodeType::FreezePlayer:
                 f << "    afn_player_frozen = 1; afn_play_anim = -1;\n";
+                break;
+            case GBAScriptNodeType::UnfreezePlayer:
+                f << "    afn_player_frozen = 0;\n";
+                break;
+            case GBAScriptNodeType::CursorUp:
+                f << "    if (afn_cursor_stop > 0) afn_cursor_stop--;\n";
+                f << "    else afn_cursor_stop = afn_stop_count - 1;\n";
+                break;
+            case GBAScriptNodeType::CursorDown:
+                f << "    afn_cursor_stop++;\n";
+                f << "    if (afn_cursor_stop >= afn_stop_count) afn_cursor_stop = 0;\n";
+                break;
+            case GBAScriptNodeType::FollowLink:
+                f << "    { int link = afn_stop_links[afn_cursor_stop];\n";
+                f << "      if (link >= 0) { afn_hud_visible[afn_elem_idx] = 0; afn_hud_visible[link] = 1; afn_active_element = link; } }\n";
                 break;
             case GBAScriptNodeType::SetVisible: {
                 auto* sprData = findDataIn(a->id, 0);
@@ -2233,6 +2277,19 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 int slot = slotData ? resolveInt(slotData) : a->paramInt[0];
                 if (slot < 0) slot = 0; if (slot > 3) slot = 3;
                 f << "    afn_hud_visible[" << slot << "] = 1;\n";
+                // Mirror GBA: showing a menu element with cursor stops
+                // freezes the player + primes the cursor nav state so
+                // CursorUp/Down/FollowLink have something to walk.
+                f << "    afn_elem_idx = " << slot << ";\n";
+                f << "    afn_active_element = " << slot << ";\n";
+                f << "    afn_cursor_stop = 0;\n";
+                f << "    afn_stop_count = afn_hud_elems[" << slot << "].stopCount;\n";
+                f << "    if (afn_stop_count > 0) {\n";
+                f << "      afn_player_frozen = 1;\n";
+                f << "      afn_play_anim = -1;\n";
+                f << "      afn_move_speed = 0;\n";
+                f << "      { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[" << slot << "].stopStart + si].link; }\n";
+                f << "    }\n";
                 break;
             }
             case GBAScriptNodeType::HideHUD: {
@@ -2240,6 +2297,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 int slot = slotData ? resolveInt(slotData) : a->paramInt[0];
                 if (slot < 0) slot = 0; if (slot > 3) slot = 3;
                 f << "    afn_hud_visible[" << slot << "] = 0;\n";
+                // Hiding a menu auto-unfreezes / clears the anim hold so
+                // gameplay resumes without needing an explicit UnfreezePlayer
+                // wire. Matches GBA HideHUD semantics.
+                f << "    afn_player_frozen = 0;\n";
+                f << "    afn_play_anim = 0;\n";
                 break;
             }
             case GBAScriptNodeType::PlayHudAnim: {
@@ -2305,6 +2367,28 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                     walkExec(a->id, 1);
                 }
                 f << "    }\n";
+                return;
+            }
+            if (a->type == GBAScriptNodeType::IsFlagSet) {
+                // Gate-only (single exec out). True branch walks pin 0.
+                auto* fd = findDataIn(a->id, 0);
+                int flag = fd ? resolveInt(fd) : a->paramInt[0];
+                f << "    if (afn_flags & (1u << " << flag << ")) {\n";
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            if (a->type == GBAScriptNodeType::FlipFlop) {
+                // Per-node static toggle: alternates A/B exec on each call.
+                // Without this the editor's "toggle menu open/close" pattern
+                // never reaches the B (HideHUD/UnfreezePlayer) branch.
+                f << "    { static int afn_ff_" << a->id << " = 0;\n";
+                f << "      afn_ff_" << a->id << " = !afn_ff_" << a->id << ";\n";
+                f << "      if (afn_ff_" << a->id << ") {\n";
+                walkExec(a->id, 0);
+                f << "      } else {\n";
+                walkExec(a->id, 1);
+                f << "      } }\n";
                 return;
             }
             if (a->type == GBAScriptNodeType::OnRise) {

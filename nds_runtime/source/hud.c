@@ -99,10 +99,11 @@ static void hud_bake_pieces(void)
 
 void afn_hud_init(void) {
 #ifdef AFN_HAS_SCRIPT
-    // Default ALL element slots visible. The editor's per-element visible
-    // flag could be exported per-slot, but for now matching the GBA
-    // default (everything visible until a HideHUD node fires) is simpler.
-    for (int i = 0; i < 4; i++) afn_hud_visible[i] = 1;
+    // All slots start hidden — matches GBA, where afn_hud_visible[] is
+    // BSS-zero and ShowHUD/HideHUD nodes drive what's on screen. The old
+    // "default all visible" was a stopgap for when ShowHUD didn't emit; it
+    // pinned things like menu elements on at boot.
+    for (int i = 0; i < 4; i++) afn_hud_visible[i] = 0;
     hud_bake_font();
 #if defined(AFN_HUD_PIECE_TILE_LEN) && AFN_HUD_PIECE_TILE_LEN > 0
     hud_bake_pieces();

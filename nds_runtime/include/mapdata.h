@@ -3359,7 +3359,7 @@ static const int afn_anim_table[30][4] = {
     { 0, 1, 8, 1 },
     { 0, 1, 8, 1 },
     { 0, 1, 8, 1 },
-    { 0, 2, 0, 1 },
+    { 0, 2, 1, 1 },
     { 0, 1, 8, 1 },
     { 1, 4, 8, 1 },
     { 0, 2, 2, 1 },
@@ -16943,6 +16943,11 @@ extern int  afn_last_key;
 extern int  afn_player_height;
 extern int  afn_hud_value[4];
 extern unsigned char afn_hud_visible[4];
+extern int  afn_cursor_stop;
+extern int  afn_stop_count;
+extern int  afn_stop_links[8];
+extern int  afn_elem_idx;
+extern int  afn_active_element;
 extern int  afn_hud_layer_frame[];
 extern int  afn_hud_layer_tick[];
 extern unsigned char afn_hud_layer_active[];
@@ -18854,9 +18859,13 @@ static const struct { unsigned char type, index; } afn_hud_layer_items[2] = {
 static const struct { unsigned char elemIdx; unsigned short kfStart, kfCount; unsigned short itemStart, itemCount; unsigned char interp; unsigned char loop; unsigned short length; unsigned char speed; } afn_hud_layers[1] = {
     { 1, 0, 2, 0, 2, 1, 1, 60, 2 },
 };
-static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned char kfLoop; signed char layerPieces, layerSprites, layerText; unsigned char runtimeMode; unsigned int mode0Mask, mode4Mask; } afn_hud_elems[2] = {
-    { 76, 50, 0, 2, 0, 50, 0, 0, 0, 0, 0, 0, 1, 2, 2, 0x2u, 0x1u },
-    { 8, 8, 2, 0, 50, 25, 0, 0, 0, 0, 0, 0, 1, 2, 2, 0x1u, 0x1u },
+static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned short stopStart, stopCount; unsigned char kfLoop; signed char layerPieces, layerSprites, layerText; unsigned char runtimeMode; unsigned int mode0Mask, mode4Mask; } afn_hud_elems[2] = {
+    { 76, 50, 0, 2, 0, 50, 0, 0, 0, 0, 0, 2, 0, 0, 1, 2, 2, 0x2u, 0x1u },
+    { 8, 8, 2, 0, 50, 25, 0, 0, 0, 0, 2, 0, 0, 0, 1, 2, 2, 0x1u, 0x1u },
+};
+static const struct { short x, y; signed char link; } afn_hud_stops[2] = {
+    { 86, 9, -1 },
+    { 86, 28, -1 },
 };
 static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; unsigned char palBank; char text[32]; } afn_hud_texts[2] = {
     { 103, 8, -1, 0, 1, 14, "Bag" },
@@ -19004,22 +19013,47 @@ static void afn_bp4_key_held(void) {
 }
 static void afn_bp4_key_pressed(void) {
     if (key_hit(KEY_START)) {
-    /* TODO: emit node type 80 */
+    { static int afn_ff_8 = 0;
+      afn_ff_8 = !afn_ff_8;
+      if (afn_ff_8) {
     afn_hud_visible[0] = 1;
+    afn_elem_idx = 0;
+    afn_active_element = 0;
+    afn_cursor_stop = 0;
+    afn_stop_count = afn_hud_elems[0].stopCount;
+    if (afn_stop_count > 0) {
+      afn_player_frozen = 1;
+      afn_play_anim = -1;
+      afn_move_speed = 0;
+      { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[0].stopStart + si].link; }
+    }
     afn_player_frozen = 1; afn_play_anim = -1;
     afn_flags |=  (1u << 0);
+      } else {
+    afn_hud_visible[0] = 0;
+    afn_player_frozen = 0;
+    afn_play_anim = 0;
+    afn_player_frozen = 0;
+    afn_flags &= ~(1u << 0);
+      } }
     }
     if (key_hit(KEY_UP)) {
-    /* TODO: emit node type 103 */
-    /* TODO: emit node type 226 */
+    if (afn_flags & (1u << 0)) {
+    if (afn_cursor_stop > 0) afn_cursor_stop--;
+    else afn_cursor_stop = afn_stop_count - 1;
+    }
     }
     if (key_hit(KEY_DOWN)) {
-    /* TODO: emit node type 103 */
-    /* TODO: emit node type 227 */
+    if (afn_flags & (1u << 0)) {
+    afn_cursor_stop++;
+    if (afn_cursor_stop >= afn_stop_count) afn_cursor_stop = 0;
+    }
     }
     if (key_hit(KEY_A)) {
-    /* TODO: emit node type 103 */
-    /* TODO: emit node type 228 */
+    if (afn_flags & (1u << 0)) {
+    { int link = afn_stop_links[afn_cursor_stop];
+      if (link >= 0) { afn_hud_visible[afn_elem_idx] = 0; afn_hud_visible[link] = 1; afn_active_element = link; } }
+    }
     }
 }
 static void afn_bp4_key_released(void) {
@@ -19064,6 +19098,16 @@ static void afn_bp6_collision(void) {
 }
 static void afn_bp7_start(void) {
     afn_hud_visible[1] = 1;
+    afn_elem_idx = 1;
+    afn_active_element = 1;
+    afn_cursor_stop = 0;
+    afn_stop_count = afn_hud_elems[1].stopCount;
+    if (afn_stop_count > 0) {
+      afn_player_frozen = 1;
+      afn_play_anim = -1;
+      afn_move_speed = 0;
+      { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[1].stopStart + si].link; }
+    }
     afn_hud_layer_frame[0] = 0;
     afn_hud_layer_tick[0] = 0;
     afn_hud_layer_active[0] = 1;

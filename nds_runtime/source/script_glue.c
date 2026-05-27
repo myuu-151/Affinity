@@ -59,6 +59,15 @@ int  afn_last_key;
 int  afn_player_height = 3072;    // 12 editor px in 16.8 (matches GBA default)
 int  afn_hud_value[4];            // counters; SetHudValue accumulates
 unsigned char afn_hud_visible[4]; // ShowHUD/HideHUD toggles
+
+// HUD cursor navigation — CursorUp/Down/FollowLink nodes index into the
+// active element's stop list. afn_stop_count / afn_stop_links are wired up
+// by ShowHUD when the menu element is shown (TODO Mode 0 cursor work).
+int  afn_cursor_stop;
+int  afn_stop_count;
+int  afn_stop_links[8];
+int  afn_elem_idx;
+int  afn_active_element;
 int  afn_scripts_stopped;
 int  afn_start_x;
 int  afn_start_y;
