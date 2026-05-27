@@ -329,12 +329,12 @@ static void mode0_render_objects(int oamSlotStart, int *outOamSlot)
                         objSize == 16 ? SpriteSize_16x16 :
                         objSize == 32 ? SpriteSize_32x32 : SpriteSize_64x64;
 
-        // Bottom-anchor the sprite to its tile, then expand to canvas
-        // (double-size) so the affine matrix doesn't clip at the edges.
-        int scaledH = (objSize * 256) / matScale;
+        // Center the affine canvas on the tile — matches GBA's mode 0
+        // adjY = osy + (tile_size - canvas) / 2. Bottom-anchoring would
+        // float the sprite half a canvas above its tile.
         int canvasSize = objSize * 2;
         int topLeftX = screenX + (tm_tile_size - canvasSize) / 2;
-        int topLeftY = screenY + tm_tile_size - scaledH - canvasSize / 2;
+        int topLeftY = screenY + (tm_tile_size - canvasSize) / 2;
 
         oamRotateScale(&oamMain, oamSlot, 0, matScale, matScale);
         oamSet(&oamMain, oamSlot,
