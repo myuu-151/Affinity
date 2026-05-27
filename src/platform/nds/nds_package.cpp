@@ -143,6 +143,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                                 const std::vector<GBABlueprintExport>& blueprints,
                                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
                                 const std::vector<GBAHudElementExport>& hudElements,
+                                const std::vector<GBATmSceneExport>& tmScenes,
                                 int startMode)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
@@ -234,6 +235,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     // gets one palette in afn_pal[][16]. NDS OBJ VRAM is 128KB (4× GBA) so we
     // can afford the wasteful layout for a first cut.
     f << "#define AFN_ASSET_COUNT " << (int)assets.size() << "\n\n";
+    // Declared at function scope so the HUD-text bank allocator further down
+    // can avoid stealing a bank an asset already owns.
+    std::vector<bool> bankClaimedByAsset(16, false);
     if (!assets.empty()) {
         // Pack each asset's frames into 8x8 4bpp tiles. Per-frame: tiles laid
         // out in row-major tile order (left-to-right tile columns, top-to-bottom
@@ -281,6 +285,23 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         for (const auto& s : sprites)
             if (s.forceStatic && s.assetIdx >= 0 && s.assetIdx < (int)assets.size())
                 assetForceStatic[s.assetIdx] = true;
+        // Mirrors GBA's hudMaxSize bump (gba_package.cpp:397) — if any HUD
+        // piece uses this asset at a bigger size than the asset's native
+        // baseSize, bump the emitted objSize so the asset's tile data
+        // fills the whole piece instead of leaving 3 transparent quadrants
+        // for an 8x8 asset used as a 16x16 piece.
+        std::vector<int> hudMaxSize(assets.size(), 0);
+        for (const auto& el : hudElements) {
+            for (const auto& pc : el.pieces)
+                if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)assets.size())
+                    if (pc.size > hudMaxSize[pc.spriteAssetIdx])
+                        hudMaxSize[pc.spriteAssetIdx] = pc.size;
+            for (const auto& sp : el.sprites)
+                if (sp.spriteAssetIdx >= 0 && sp.spriteAssetIdx < (int)assets.size())
+                    if (sp.size > hudMaxSize[sp.spriteAssetIdx])
+                        hudMaxSize[sp.spriteAssetIdx] = sp.size;
+        }
+
         for (size_t ai = 0; ai < assets.size(); ai++) {
             int prevSize = (int)allTiles.size();
             assetTileStart[ai] = (int)allTiles.size() / 8;
@@ -300,6 +321,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                              big <= 32 ? 32 : 64;
                 if (objSz > sz) sz = objSz;
             }
+            // Bump to hudMaxSize (snapped to OBJ-valid {8,16,32,64}) so the
+            // emitted tile blob covers the whole HUD piece footprint.
+            if (hudMaxSize[ai] > sz) {
+                int hms = hudMaxSize[ai];
+                int objSz = hms <= 8 ? 8 : hms <= 16 ? 16 : hms <= 32 ? 32 : 64;
+                if (objSz > sz) sz = objSz;
+            }
             assetObjSize[ai] = sz;
             int tilesPerSide = sz / 8;
             int tilesPerFrame = tilesPerSide * tilesPerSide;
@@ -314,14 +342,24 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             // direction 0 of dirAnimSets[0] (RGBA → nearest-palette quantized).
             auto emitFrame = [&](const uint8_t* pixels, int fw, int fh, bool stride64) {
                 int stride = stride64 ? kExportMaxFrameSize : fw;
+                // Nearest-neighbour scale src(fw×fh) → out(sz×sz). Matches GBA's
+                // FrameToGBATiles (gba_package.cpp:165) so an 8x8 asset used as
+                // a 16x16 HUD piece renders pixel-doubled into the bigger
+                // sprite area instead of leaving 3 transparent quadrants.
+                int outDim = tilesPerSide * 8;
+                if (outDim < 1) outDim = 1;
                 for (int ty = 0; ty < tilesPerSide; ty++)
                 for (int tx = 0; tx < tilesPerSide; tx++) {
                     for (int py = 0; py < 8; py++) {
                         uint32_t word = 0;
                         for (int px = 0; px < 8; px++) {
-                            int sx = tx * 8 + px;
-                            int sy = ty * 8 + py;
-                            uint8_t pix = (sx < fw && sy < fh) ? pixels[sy * stride + sx] : 0;
+                            int outX = tx * 8 + px;
+                            int outY = ty * 8 + py;
+                            int sx = (fw > 0) ? (outX * fw / outDim) : 0;
+                            int sy = (fh > 0) ? (outY * fh / outDim) : 0;
+                            if (sx >= fw) sx = fw - 1;
+                            if (sy >= fh) sy = fh - 1;
+                            uint8_t pix = (pixels && fw > 0 && fh > 0) ? pixels[sy * stride + sx] : 0;
                             word |= ((uint32_t)(pix & 0xF)) << (px * 4);
                         }
                         allTiles.push_back(word);
@@ -435,7 +473,18 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                     AnimEntry ae;
                     ae.start = remap[base];
                     ae.count = cnt;
-                    ae.fps   = (int)(a.anims[an].fps * a.anims[an].speed);
+                    // Match GBA exporter: unset fps falls back to 8 so the
+                    // editor's "Animate" toggle still produces motion without
+                    // forcing the user to dial in a per-anim fps.
+                    {
+                        int fpsRaw = a.anims[an].fps;
+                        if (fpsRaw <= 0) fpsRaw = 8;
+                        float spd = a.anims[an].speed;
+                        if (spd <= 0.0f) spd = 1.0f;
+                        int eff = (int)(fpsRaw * spd);
+                        if (eff < 1) eff = 1;
+                        ae.fps = eff;
+                    }
                     ae.loop  = a.anims[an].loop ? 1 : 0;
                     animTable.push_back(ae);
                 }
@@ -636,7 +685,18 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                     if (ae.start + ae.count > totalFrames)
                         ae.count = totalFrames - ae.start;
                     if (ae.count < 1) ae.count = 1;
-                    ae.fps   = (int)(anim.fps * anim.speed);
+                    // Match GBA exporter (gba_package.cpp:1001): fps==0
+                    // falls back to 8 so the editor's "Animate" toggle works
+                    // even when the user never picked an explicit fps.
+                    {
+                        int fpsRaw = anim.fps;
+                        if (fpsRaw <= 0) fpsRaw = 8;
+                        float spd = anim.speed;
+                        if (spd <= 0.0f) spd = 1.0f;
+                        int eff = (int)(fpsRaw * spd);
+                        if (eff < 1) eff = 1;
+                        ae.fps = eff;
+                    }
                     ae.loop  = anim.loop ? 1 : 0;
                     animTable.push_back(ae);
                     baseSet += fc;
@@ -720,9 +780,77 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         // marker for new path).
         // asset_desc[0] is now vramTileBase (where the asset's per-frame
         // streamed data lands in sprite VRAM), not a ROM tile index.
+        // Palette bank dedup: `ai & 0xF` collides any time two assets share
+        // the low 4 bits (asset 23 over asset 7 etc.), and sprite_init's
+        // upload loop lets the later one win — silently corrupting the HUD
+        // pieces baked against the earlier asset's palette.
+        // Pass 1: any two assets with identical 16-color palettes share a
+        // bank. Pass 2: distinct palettes get the next free bank. If we run
+        // out of banks (>16 unique palettes), fall back to wraparound (the
+        // pre-dedup behaviour) for the overflow.
+        std::vector<int> assetPalBank(assets.size(), 0);
+        // Bank 10 = HUD black-tint palette (hud_init dmaCopy's black over
+        // anything sprite_init wrote there), bank 15 = HUD font.
+        // Allocate banks 0..14 (skip 10, 15). Dedup priority:
+        //   1. paletteSrc — editor's explicit "share this palette"
+        //   2. content equality — same 16-color array → same bank
+        // Boxes all have [trans, white, 0..0] so content dedup collapses
+        // them to one bank, leaving room for distinct logos / NPCs. The
+        // collapse is correct: assets with truly identical palettes also
+        // share OAM palette data, so combining them costs nothing.
+        // Overflow wraps; the wrap target may clobber another asset's
+        // bank (acceptable for projects with > 13 truly-distinct palettes).
+        {
+            auto isReserved = [](int b) { return b == 10 || b == 15; };
+            std::vector<int> bankOfPal;
+            std::vector<int> palToBank;
+            int nextBank = 0;
+            auto advance = [&]() { while (isReserved(nextBank)) nextBank++; };
+            advance();
+            for (size_t ai = 0; ai < assets.size(); ai++) {
+                int src = assets[ai].paletteSrc;
+                if (src >= 0 && src < (int)ai) {
+                    assetPalBank[ai] = assetPalBank[src];
+                    continue;
+                }
+                int found = -1;
+                for (size_t bi = 0; bi < bankOfPal.size(); bi++) {
+                    bool same = true;
+                    for (int c = 0; c < 16; c++)
+                        if (assetPal[ai][c] != assetPal[bankOfPal[bi]][c]) { same = false; break; }
+                    if (same) { found = (int)bi; break; }
+                }
+                if (found >= 0) {
+                    assetPalBank[ai] = palToBank[found];
+                } else if (nextBank < 16) {
+                    assetPalBank[ai] = nextBank;
+                    bankClaimedByAsset[nextBank] = true;
+                    bankOfPal.push_back((int)ai);
+                    palToBank.push_back(nextBank);
+                    nextBank++;
+                    advance();
+                } else {
+                    // Overflow: 14 banks aren't enough. `ai % 16` would
+                    // wrap onto whichever bank that arithmetic picks, which
+                    // is usually a still-visible asset (e.g. logo7 (ai=25)
+                    // → bank 9 → clobbers logo2). Pick the bank with the
+                    // fewest assets already pointing at it — clobbering a
+                    // small, often-unused asset slot is less destructive.
+                    int counts[16] = {0};
+                    for (size_t pi = 0; pi < ai; pi++) counts[assetPalBank[pi]]++;
+                    int best = -1, bestCount = 0x7FFFFFFF;
+                    for (int b = 0; b < 16; b++) {
+                        if (isReserved(b)) continue;
+                        if (counts[b] < bestCount) { bestCount = counts[b]; best = b; }
+                    }
+                    assetPalBank[ai] = best >= 0 ? best : 0;
+                }
+            }
+        }
+
         f << "static const int afn_asset_desc[][10] = {\n";
         for (size_t ai = 0; ai < assets.size(); ai++) {
-            int palBank = (int)ai & 0xF;
+            int palBank = assetPalBank[ai];
             f << "    { " << assetVramTileBase[ai] << ", " << assetTilesPerFrame[ai] << ", "
               << assetFrameCount[ai] << ", " << assetObjSize[ai] << ", "
               << palBank << ", " << assetDirCount[ai] << ", "
@@ -811,7 +939,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             AfnBakedHudPiece bp;
             bp.srcX = pc.localX; bp.srcY = pc.localY; bp.size = sz;
             bp.vramTile = vramTile;
-            bp.palBank = (ai >= 0) ? (ai & 0xF) : 15;
+            // Match the asset's dedupped palBank — `ai & 0xF` would clobber
+            // banks shared with a higher-index asset (e.g. asset 23's
+            // palette overwriting asset 7's) and break HUD pieces baked
+            // against asset 7's colors.
+            bp.palBank = (ai >= 0 && ai < (int)assetPalBank.size()) ? assetPalBank[ai] : 15;
             bp.blackTint = pc.blackTint ? 1 : 0;
             bp.opacity   = (pc.opacity < 0) ? 0 : (pc.opacity > 16 ? 16 : pc.opacity);
             out.push_back(bp);
@@ -1283,6 +1415,20 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "static const u8 afn_pcm_vol_scale[" << soundSamples.size() << "] = {\n";
         for (int i = 0; i < (int)soundSamples.size(); i++)
             f << "    " << (soundSamples[i].volScale > 255 ? 255 : soundSamples[i].volScale) << ",\n";
+        f << "};\n";
+        // Envelope tables — drive audio.c's soft-fade release + decay path so
+        // notes don't snap off at noteOffTick.
+        f << "static const int afn_pcm_release_ms[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << soundSamples[i].releaseMs << ",\n";
+        f << "};\n";
+        f << "static const int afn_pcm_decay_pct[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << soundSamples[i].decayPct << ",\n";
+        f << "};\n";
+        f << "static const int afn_pcm_decay_min_ms[" << soundSamples.size() << "] = {\n";
+        for (int i = 0; i < (int)soundSamples.size(); i++)
+            f << "    " << soundSamples[i].decayMinMs << ",\n";
         f << "};\n\n";
 
         f << "typedef struct { int tick; u8 note; u8 vel; u8 smpIdx; u8 channel; int dur; } AfnSndNote;\n\n";
@@ -1321,6 +1467,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "static const u8 afn_snd_voices[" << soundInstances.size() << "] = {\n";
         for (int i = 0; i < (int)soundInstances.size(); i++)
             f << "    " << soundInstances[i].voiceCount << ",\n";
+        f << "};\n";
+        // softFade gates whether melodic voices ramp out at noteOff (vs.
+        // snap-cut). softFadeA from GBA maps directly — sequenced voices
+        // are the analogue of FIFO A's polyphony lane.
+        f << "static const u8 afn_snd_soft_fade[" << soundInstances.size() << "] = {\n";
+        for (int i = 0; i < (int)soundInstances.size(); i++)
+            f << "    " << (soundInstances[i].softFadeA ? 1 : 0) << ",\n";
         f << "};\n";
         f << "static const u8 afn_snd_loop[" << soundInstances.size() << "] = {\n";
         for (int i = 0; i < (int)soundInstances.size(); i++)
@@ -1465,6 +1618,156 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "\n};\n";
     }
 
+    // ---- Mode 0 Tilemap (tile gfx + palette + map + objects per scene) ----
+    // Mirrors the GBA exporter (gba_package.cpp ~line 5370) — same packed
+    // 4bpp tile blob, same screen-entry format (tile bits 0-9, palBank 12-15).
+    // NDS configures BG layer + VRAM bank differently at runtime, but the
+    // data shape is byte-identical so the editor's tile/pal build stays the
+    // single source of truth.
+    if (!tmScenes.empty())
+    {
+        f << "\n// ---- Mode 0 Tilemap ----\n";
+        f << "#define AFN_HAS_MODE0 1\n";
+        f << "#define AFN_TM_SCENE_COUNT " << (int)tmScenes.size() << "\n\n";
+
+        f << "typedef struct { s16 tx,ty; u8 type; s8 assetIdx; u8 camFollow; u8 collision; s8 teleScene; u16 scale8; u8 layer; u8 animPlay; s8 animIdx; u8 facing; } AfnTmObj;\n\n";
+
+        for (int si = 0; si < (int)tmScenes.size(); si++)
+        {
+            const auto& sc = tmScenes[si];
+            f << "// Scene " << si << ": " << sc.mapW << "x" << sc.mapH << "\n";
+            f << "#define AFN_TM" << si << "_W " << sc.mapW << "\n";
+            f << "#define AFN_TM" << si << "_H " << sc.mapH << "\n";
+            f << "#define AFN_TM" << si << "_TILE_SIZE " << (8 * sc.pixelScale) << "\n";
+            // BG size: 0=32x32, 1=64x32, 2=32x64, 3=64x64
+            int bgSz = 0;
+            if (sc.mapW > 32 && sc.mapH > 32) bgSz = 3;
+            else if (sc.mapW > 32) bgSz = 1;
+            else if (sc.mapH > 32) bgSz = 2;
+            f << "#define AFN_TM" << si << "_BG_SIZE " << bgSz << "\n";
+
+            f << "static const u16 afn_tm" << si << "_pal[256] = {\n";
+            for (int bank = 0; bank < 16; bank++)
+            {
+                f << "    ";
+                for (int pi = 0; pi < 16; pi++)
+                {
+                    uint32_t c = sc.palette[bank * 16 + pi];
+                    int r = (c & 0xFF) >> 3;
+                    int g = ((c >> 8) & 0xFF) >> 3;
+                    int b = ((c >> 16) & 0xFF) >> 3;
+                    uint16_t rgb15 = (uint16_t)(r | (g << 5) | (b << 10));
+                    f << "0x" << std::hex << rgb15 << std::dec;
+                    if (bank < 15 || pi < 15) f << ",";
+                }
+                f << "\n";
+            }
+            f << "};\n";
+
+            int nTiles = sc.tileCount;
+            if (nTiles < 1) nTiles = 1;
+            f << "#define AFN_TM" << si << "_TILE_COUNT " << nTiles << "\n";
+            int tileU32Count = nTiles * 8; // 4bpp packed: 8 u32 per tile
+            f << "static const u32 afn_tm" << si << "_tiles[" << tileU32Count << "] = {\n";
+            for (int ti = 0; ti < nTiles; ti++)
+            {
+                f << "    ";
+                for (int row = 0; row < 8; row++)
+                {
+                    uint32_t packed = 0;
+                    for (int col = 0; col < 8; col++)
+                    {
+                        int srcIdx = ti * 64 + row * 8 + col;
+                        uint8_t pix = (srcIdx < (int)sc.tilePixels.size()) ? (sc.tilePixels[srcIdx] & 0x0F) : 0;
+                        packed |= ((uint32_t)pix) << (col * 4);
+                    }
+                    f << "0x" << std::hex << packed << std::dec;
+                    if (row < 7 || ti < nTiles - 1) f << ",";
+                }
+                f << "\n";
+            }
+            f << "};\n";
+            f << "#define AFN_TM" << si << "_TILES_LEN " << (tileU32Count * 4) << "\n";
+
+            int mapSize = sc.mapW * sc.mapH;
+            f << "static const u16 afn_tm" << si << "_map[" << mapSize << "] = {\n    ";
+            for (int mi = 0; mi < mapSize; mi++)
+            {
+                uint16_t idx = (mi < (int)sc.tileIndices.size()) ? sc.tileIndices[mi] : 0;
+                f << "0x" << std::hex << idx << std::dec;
+                if (mi < mapSize - 1) f << ",";
+                if ((mi & 31) == 31 && mi < mapSize - 1) f << "\n    ";
+            }
+            f << "\n};\n";
+
+            int objCount = (int)sc.objects.size();
+            f << "#define AFN_TM" << si << "_OBJ_COUNT " << objCount << "\n";
+            {
+                int arrSize = (objCount > 0) ? objCount : 1;
+                f << "static const AfnTmObj afn_tm" << si << "_objs[" << arrSize << "] = {\n";
+                for (int oi = 0; oi < objCount; oi++)
+                {
+                    const auto& obj = sc.objects[oi];
+                    int scale8 = (int)(obj.displayScale * 256.0f);
+                    if (scale8 < 1) scale8 = 256;
+                    f << "    {" << obj.tileX << "," << obj.tileY << ","
+                      << obj.type << "," << obj.spriteAssetIdx << ","
+                      << (obj.camFollow ? 1 : 0) << "," << (obj.collision ? 1 : 0) << ","
+                      << obj.teleportScene << "," << scale8 << "," << obj.layer << ","
+                      << (obj.animPlay ? 1 : 0) << "," << obj.animIdx << "," << obj.facing << "},\n";
+                }
+                if (objCount == 0)
+                    f << "    {0,0,0,0,0,0,0,256,0,0,0,0},\n";
+                f << "};\n\n";
+            }
+        }
+
+        // Scene indirection tables
+        {
+            int nsc = (int)tmScenes.size();
+            f << "static const u16 * const afn_tm_scene_pal[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "afn_tm" << si << "_pal";
+            f << "};\n";
+            f << "static const u32 * const afn_tm_scene_tiles[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "afn_tm" << si << "_tiles";
+            f << "};\n";
+            f << "static const int afn_tm_scene_tiles_len[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_TILES_LEN";
+            f << "};\n";
+            f << "static const u16 * const afn_tm_scene_map[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "afn_tm" << si << "_map";
+            f << "};\n";
+            f << "static const int afn_tm_scene_w[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_W";
+            f << "};\n";
+            f << "static const int afn_tm_scene_h[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_H";
+            f << "};\n";
+            f << "static const int afn_tm_scene_bg_size[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_BG_SIZE";
+            f << "};\n";
+            f << "static const int afn_tm_scene_tile_size[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_TILE_SIZE";
+            f << "};\n";
+            f << "static const AfnTmObj * const afn_tm_scene_objs[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "afn_tm" << si << "_objs";
+            f << "};\n";
+            f << "static const int afn_tm_scene_obj_count[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_OBJ_COUNT";
+            f << "};\n\n";
+        }
+
+        // Locate Player object (first across scenes)
+        int tmPlayerScene = -1, tmPlayerObj = -1;
+        for (int si = 0; si < (int)tmScenes.size() && tmPlayerScene < 0; si++)
+            for (int oi = 0; oi < (int)tmScenes[si].objects.size(); oi++)
+                if (tmScenes[si].objects[oi].type == 0) // Player
+                { tmPlayerScene = si; tmPlayerObj = oi; break; }
+        f << "#define AFN_TM_PLAYER_SCENE " << tmPlayerScene << "\n";
+        f << "#define AFN_TM_PLAYER_OBJ " << tmPlayerObj << "\n";
+        f << "#define AFN_TM_START_SCENE 0\n\n";
+    }
+
     // ---- Phase 3a framework: script declarations + stubs ----
     bool hasAnyScript = !script.nodes.empty() || !blueprints.empty();
     if (hasAnyScript) {
@@ -1515,6 +1818,19 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_player_height;\n";
         f << "extern int  afn_hud_value[4];\n";
         f << "extern unsigned char afn_hud_visible[4];\n";
+        // HUD cursor state — Cursor{Up,Down}/FollowLink nodes read/write these.
+        f << "extern int  afn_cursor_stop;\n";
+        f << "extern int  afn_stop_count;\n";
+        f << "extern int  afn_stop_links[8];\n";
+        f << "extern int  afn_elem_idx;\n";
+        f << "extern int  afn_active_element;\n";
+        // Anim layer mutators (PlayHudAnim / StopHudAnim / SetHudAnimSpeed).
+        // The arrays are sized at runtime by AFN_HUD_LAYER_COUNT; emit
+        // unbounded extern declarations and rely on the runtime to size them.
+        f << "extern int  afn_hud_layer_frame[];\n";
+        f << "extern int  afn_hud_layer_tick[];\n";
+        f << "extern unsigned char afn_hud_layer_active[];\n";
+        f << "extern unsigned char afn_hud_layer_speed_override[];\n";
         // Scene-transition entry point (defined in fps3d.c) + current-scene state.
         f << "extern int  afn_current_scene;\n";
         f << "extern int  afn_current_mode;\n";
@@ -1538,23 +1854,31 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             // banks 14..11 (font is 15, asset banks 0..AFN_ASSET_COUNT-1).
             // Caps at 4 unique colors; extras fall back to the font bank.
             std::vector<unsigned short> uniqueColors;
-            std::vector<int> rowPalBank; // size == totalText
+            std::vector<int> uniqueColorBanks; // bank assigned per uniqueColor
+            std::vector<int> rowPalBank;       // size == totalText
             const int kFontBank = 15;
-            const int kFirstColorBank = 14, kLastColorBank = 11;
+            // Skip banks already claimed by an asset (sprite_init's upload
+            // would clobber whatever text color we put there). Walk down
+            // from 14 looking for free banks.
+            auto allocTextBank = [&]() -> int {
+                for (int b = 14; b >= 11; b--)
+                    if (!bankClaimedByAsset[b]) {
+                        bool taken = false;
+                        for (int ub : uniqueColorBanks) if (ub == b) { taken = true; break; }
+                        if (!taken) return b;
+                    }
+                return kFontBank; // overflow → render in font palette (white)
+            };
             for (const auto& he : hudElements) {
                 for (const auto& tr : he.textRows) {
                     unsigned short c = tr.colorRGB15 & 0x7FFF;
                     int bank = -1;
                     for (size_t i = 0; i < uniqueColors.size(); i++)
-                        if (uniqueColors[i] == c) { bank = kFirstColorBank - (int)i; break; }
+                        if (uniqueColors[i] == c) { bank = uniqueColorBanks[i]; break; }
                     if (bank < 0) {
-                        int slotIdx = (int)uniqueColors.size();
-                        if (slotIdx <= (kFirstColorBank - kLastColorBank)) {
-                            uniqueColors.push_back(c);
-                            bank = kFirstColorBank - slotIdx;
-                        } else {
-                            bank = kFontBank; // overflow → white
-                        }
+                        bank = allocTextBank();
+                        uniqueColors.push_back(c);
+                        uniqueColorBanks.push_back(bank);
                     }
                     rowPalBank.push_back(bank);
                 }
@@ -1571,7 +1895,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             if (!uniqueColors.empty()) {
                 f << "static const struct { unsigned char bank; unsigned short color; } afn_hud_text_palettes[" << (int)uniqueColors.size() << "] = {\n";
                 for (size_t i = 0; i < uniqueColors.size(); i++)
-                    f << "    { " << (kFirstColorBank - (int)i) << ", 0x"
+                    f << "    { " << uniqueColorBanks[i] << ", 0x"
                       << std::hex << uniqueColors[i] << std::dec << " },\n";
                 f << "};\n";
             }
@@ -1661,25 +1985,46 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "};\n";
             }
 
-            f << "static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned char kfLoop; signed char layerPieces, layerSprites, layerText; unsigned char runtimeMode; unsigned int mode0Mask, mode4Mask; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
-            int textCursor = 0, pieceCursor = 0, sprCursor = 0, kfCursor = 0;
+            // Total stop count + per-element stop range so ShowHUD / CursorUp
+            // / CursorDown / FollowLink can index into afn_hud_stops below.
+            int totalStops = 0;
+            for (const auto& he : hudElements) totalStops += (int)he.stops.size();
+
+            f << "static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned short stopStart, stopCount; unsigned char kfLoop; signed char layerPieces, layerSprites, layerText, layerCursor; unsigned char runtimeMode; short curAsset; unsigned char curFrame; signed char curOffX, curOffY; unsigned int mode0Mask, mode4Mask; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
+            int textCursor = 0, pieceCursor = 0, sprCursor = 0, kfCursor = 0, stopCursor = 0;
             for (const auto& he : hudElements) {
                 f << "    { " << he.screenX << ", " << he.screenY << ", "
                   << textCursor   << ", " << (int)he.textRows.size() << ", "
                   << pieceCursor  << ", " << (int)he.pieces.size() << ", "
                   << sprCursor    << ", " << (int)he.sprites.size() << ", "
                   << kfCursor     << ", " << (int)he.keyframes.size() << ", "
+                  << stopCursor   << ", " << (int)he.stops.size() << ", "
                   << (he.animLoop ? 1 : 0) << ", "
-                  << he.layerPieces << ", " << he.layerSprites << ", " << he.layerText << ", "
-                  << he.runtimeMode << ", 0x"
+                  << he.layerPieces << ", " << he.layerSprites << ", " << he.layerText << ", " << he.layerCursor << ", "
+                  << he.runtimeMode << ", "
+                  << he.cursorAssetIdx << ", " << he.cursorFrame << ", "
+                  << he.cursorOffX << ", " << he.cursorOffY << ", 0x"
                   << std::hex << he.mode0SceneMask << "u, 0x" << he.mode4SceneMask << "u" << std::dec
                   << " },\n";
                 textCursor   += (int)he.textRows.size();
                 pieceCursor  += (int)he.pieces.size();
                 sprCursor    += (int)he.sprites.size();
                 kfCursor     += (int)he.keyframes.size();
+                stopCursor   += (int)he.stops.size();
             }
             f << "};\n";
+
+            // Cursor stops: each entry's link is the HUD element index to
+            // jump to when FollowLink fires (or -1 if the stop terminates).
+            if (totalStops > 0) {
+                f << "static const struct { short x, y; signed char link; } afn_hud_stops[" << totalStops << "] = {\n";
+                for (const auto& he : hudElements)
+                    for (const auto& st : he.stops)
+                        f << "    { " << st.localX << ", " << st.localY << ", " << st.linkedElement << " },\n";
+                f << "};\n";
+            } else {
+                f << "static const struct { short x, y; signed char link; } afn_hud_stops[1] = {{0,0,-1}};\n";
+            }
             if (totalText > 0) {
                 f << "static const struct { short x, y; signed char sourceSlot; unsigned char pad; unsigned char scale; unsigned char palBank; char text[32]; } afn_hud_texts[" << totalText << "] = {\n";
                 int row = 0;
@@ -1826,11 +2171,15 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                     auto* an = findNode(nid);
                     if (!an) continue;
                     ch.actions.push_back(an);
-                    // Don't follow exec outs of CheckFlag (dual-pin) or OnRise
-                    // (edge-detect wrapper) — those collect their own branches
-                    // inside emitChain so siblings don't bleed across pins.
+                    // Don't follow exec outs of CheckFlag (dual-pin), OnRise
+                    // (edge-detect wrapper), FlipFlop (toggles between two
+                    // exec pins), or IsFlagSet (single-pin gate) — those
+                    // recurse into their own branches inside emitOne so
+                    // siblings don't bleed across pins.
                     if (an->type == GBAScriptNodeType::CheckFlag ||
-                        an->type == GBAScriptNodeType::OnRise) continue;
+                        an->type == GBAScriptNodeType::OnRise ||
+                        an->type == GBAScriptNodeType::FlipFlop ||
+                        an->type == GBAScriptNodeType::IsFlagSet) continue;
                     for (int t : findExecOuts(an->id, 0)) frontier.push_back(t);
                 }
                 if (!ch.actions.empty()) chains.push_back(ch);
@@ -1916,15 +2265,33 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 // Inside an IsJumping/IsFalling gate, PlayAnim wins and
                 // claims priority; outside, it defers to whatever already
                 // set afn_play_anim this frame (afn_anim_prio gates it).
+                // Always honour afn_player_frozen — when a menu freezes the
+                // player, cursor nav (DPAD up/down) shouldn't restart the
+                // walk anim from a still-firing OnKeyHeld → PlayAnim chain.
                 if (inJumpGate) {
-                    f << "    afn_play_anim = " << idx << "; afn_anim_prio = 1;\n";
+                    f << "    if (!afn_player_frozen) { afn_play_anim = " << idx << "; afn_anim_prio = 1; }\n";
                 } else {
-                    f << "    if (!afn_anim_prio) afn_play_anim = " << idx << ";\n";
+                    f << "    if (!afn_player_frozen && !afn_anim_prio) afn_play_anim = " << idx << ";\n";
                 }
                 break;
             }
             case GBAScriptNodeType::FreezePlayer:
                 f << "    afn_player_frozen = 1; afn_play_anim = -1;\n";
+                break;
+            case GBAScriptNodeType::UnfreezePlayer:
+                f << "    afn_player_frozen = 0;\n";
+                break;
+            case GBAScriptNodeType::CursorUp:
+                f << "    if (afn_cursor_stop > 0) afn_cursor_stop--;\n";
+                f << "    else afn_cursor_stop = afn_stop_count - 1;\n";
+                break;
+            case GBAScriptNodeType::CursorDown:
+                f << "    afn_cursor_stop++;\n";
+                f << "    if (afn_cursor_stop >= afn_stop_count) afn_cursor_stop = 0;\n";
+                break;
+            case GBAScriptNodeType::FollowLink:
+                f << "    { int link = afn_stop_links[afn_cursor_stop];\n";
+                f << "      if (link >= 0) { afn_hud_visible[afn_elem_idx] = 0; afn_hud_visible[link] = 1; afn_active_element = link; } }\n";
                 break;
             case GBAScriptNodeType::SetVisible: {
                 auto* sprData = findDataIn(a->id, 0);
@@ -2053,6 +2420,19 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 int slot = slotData ? resolveInt(slotData) : a->paramInt[0];
                 if (slot < 0) slot = 0; if (slot > 3) slot = 3;
                 f << "    afn_hud_visible[" << slot << "] = 1;\n";
+                // Mirror GBA: showing a menu element with cursor stops
+                // freezes the player + primes the cursor nav state so
+                // CursorUp/Down/FollowLink have something to walk.
+                f << "    afn_elem_idx = " << slot << ";\n";
+                f << "    afn_active_element = " << slot << ";\n";
+                f << "    afn_cursor_stop = 0;\n";
+                f << "    afn_stop_count = afn_hud_elems[" << slot << "].stopCount;\n";
+                f << "    if (afn_stop_count > 0) {\n";
+                f << "      afn_player_frozen = 1;\n";
+                f << "      afn_play_anim = -1;\n";
+                f << "      afn_move_speed = 0;\n";
+                f << "      { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[" << slot << "].stopStart + si].link; }\n";
+                f << "    }\n";
                 break;
             }
             case GBAScriptNodeType::HideHUD: {
@@ -2060,6 +2440,30 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 int slot = slotData ? resolveInt(slotData) : a->paramInt[0];
                 if (slot < 0) slot = 0; if (slot > 3) slot = 3;
                 f << "    afn_hud_visible[" << slot << "] = 0;\n";
+                // Hiding a menu auto-unfreezes / clears the anim hold so
+                // gameplay resumes without needing an explicit UnfreezePlayer
+                // wire. Matches GBA HideHUD semantics.
+                f << "    afn_player_frozen = 0;\n";
+                f << "    afn_play_anim = 0;\n";
+                break;
+            }
+            case GBAScriptNodeType::PlayHudAnim: {
+                int li = a->paramInt[0];
+                f << "    afn_hud_layer_frame[" << li << "] = 0;\n";
+                f << "    afn_hud_layer_tick[" << li << "] = 0;\n";
+                f << "    afn_hud_layer_active[" << li << "] = 1;\n";
+                break;
+            }
+            case GBAScriptNodeType::StopHudAnim: {
+                int li = a->paramInt[0];
+                f << "    afn_hud_layer_active[" << li << "] = 0;\n";
+                break;
+            }
+            case GBAScriptNodeType::SetHudAnimSpeed: {
+                int li = a->paramInt[0];
+                auto* sd = findDataIn(a->id, 0);
+                int spd = sd ? resolveInt(sd) : 1;
+                f << "    afn_hud_layer_speed_override[" << li << "] = " << spd << ";\n";
                 break;
             }
             case GBAScriptNodeType::UpdateRespawnPos: {
@@ -2106,6 +2510,28 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                     walkExec(a->id, 1);
                 }
                 f << "    }\n";
+                return;
+            }
+            if (a->type == GBAScriptNodeType::IsFlagSet) {
+                // Gate-only (single exec out). True branch walks pin 0.
+                auto* fd = findDataIn(a->id, 0);
+                int flag = fd ? resolveInt(fd) : a->paramInt[0];
+                f << "    if (afn_flags & (1u << " << flag << ")) {\n";
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            if (a->type == GBAScriptNodeType::FlipFlop) {
+                // Per-node static toggle: alternates A/B exec on each call.
+                // Without this the editor's "toggle menu open/close" pattern
+                // never reaches the B (HideHUD/UnfreezePlayer) branch.
+                f << "    { static int afn_ff_" << a->id << " = 0;\n";
+                f << "      afn_ff_" << a->id << " = !afn_ff_" << a->id << ";\n";
+                f << "      if (afn_ff_" << a->id << ") {\n";
+                walkExec(a->id, 0);
+                f << "      } else {\n";
+                walkExec(a->id, 1);
+                f << "      } }\n";
                 return;
             }
             if (a->type == GBAScriptNodeType::OnRise) {
@@ -2234,25 +2660,36 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "\n#define AFN_BP_COUNT "     << (int)blueprints.size() << "\n";
         f << "#define AFN_BP_INSTANCE_COUNT " << (int)bpInstances.size() << "\n";
         if (!bpInstances.empty()) {
-            // Row: { bpIdx, spriteIdx }
-            f << "static const int afn_bp_instances[" << (int)bpInstances.size() << "][2] = {\n";
+            // Row: { bpIdx, spriteIdx, sceneMode, sceneMask }.
+            // sceneMode: 0 = Mode 4 (3D), 1 = Mode 0 (tilemap), -1 = any.
+            // sceneMask: bit N set = instance lives in scene N (0xFFFFFFFF = all).
+            f << "static const unsigned int afn_bp_instances[" << (int)bpInstances.size() << "][4] = {\n";
             for (const auto& inst : bpInstances)
-                f << "    { " << inst.blueprintIdx << ", " << inst.spriteIdx << " },\n";
+                f << "    { " << inst.blueprintIdx << ", " << (unsigned)(int)inst.spriteIdx
+                  << ", " << inst.sceneMode << ", 0x" << std::hex << inst.sceneMask << "u" << std::dec << " },\n";
             f << "};\n";
         }
         // Per-event bp dispatcher. Emits a switch on bpIdx so each instance
         // calls into the right blueprint's handler with cur_spr_idx set.
-        // gateExpr (optional) is a C expression evaluated per-instance —
-        // skip the instance if it's false. Collision uses
-        // "afn_bp_instances[i][1] == afn_collided_sprite" so only the
-        // bp owning the hit sprite fires, mirroring GBA.
-        auto emitBpDispatcher = [&](const char* fname, const char* suffix, const char* gateExpr) {
+        // sceneGate: true → skip instances that don't match the current
+        // (afn_current_mode, afn_current_scene). gateExpr is an additional
+        // C expression evaluated per-instance.
+        auto emitBpDispatcher = [&](const char* fname, const char* suffix,
+                                    const char* gateExpr, bool sceneGate) {
             f << "static void " << fname << "(void) {\n";
             if (!bpInstances.empty()) {
+                f << "    extern int afn_current_mode;\n";
+                f << "    extern int afn_current_scene;\n";
                 f << "    for (int i = 0; i < AFN_BP_INSTANCE_COUNT; i++) {\n";
+                if (sceneGate) {
+                    f << "        int instMode = (int)afn_bp_instances[i][2];\n";
+                    f << "        if (instMode >= 0 && instMode != afn_current_mode) continue;\n";
+                    f << "        unsigned int mask = afn_bp_instances[i][3];\n";
+                    f << "        if (mask != 0xFFFFFFFFu && !(mask & (1u << afn_current_scene))) continue;\n";
+                }
                 if (gateExpr) f << "        if (!(" << gateExpr << ")) continue;\n";
                 f << "        int bpIdx = afn_bp_instances[i][0];\n";
-                f << "        afn_bp_cur_spr_idx = afn_bp_instances[i][1];\n";
+                f << "        afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];\n";
                 f << "        switch (bpIdx) {\n";
                 for (size_t bi = 0; bi < blueprints.size(); bi++)
                     f << "            case " << bi << ": afn_bp" << bi << "_" << suffix << "(); break;\n";
@@ -2262,13 +2699,18 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             }
             f << "}\n";
         };
-        emitBpDispatcher("afn_bp_dispatch_start",        "start",        nullptr);
-        emitBpDispatcher("afn_bp_dispatch_update",       "update",       nullptr);
-        emitBpDispatcher("afn_bp_dispatch_key_held",     "key_held",     nullptr);
-        emitBpDispatcher("afn_bp_dispatch_key_pressed",  "key_pressed",  nullptr);
-        emitBpDispatcher("afn_bp_dispatch_key_released", "key_released", nullptr);
+        // OnStart: scene-gated so re-firing on scene swap only triggers BPs
+        // that belong to the new scene (e.g. a scene-1 song doesn't start
+        // playing during the scene-0 splash).
+        emitBpDispatcher("afn_bp_dispatch_start",        "start",        nullptr, true);
+        // Per-frame / input / collision events: also scene-gated so menu
+        // BPs don't react to keys outside their scene, etc.
+        emitBpDispatcher("afn_bp_dispatch_update",       "update",       nullptr, true);
+        emitBpDispatcher("afn_bp_dispatch_key_held",     "key_held",     nullptr, true);
+        emitBpDispatcher("afn_bp_dispatch_key_pressed",  "key_pressed",  nullptr, true);
+        emitBpDispatcher("afn_bp_dispatch_key_released", "key_released", nullptr, true);
         emitBpDispatcher("afn_bp_dispatch_collision",    "collision",
-                         "afn_bp_instances[i][1] == afn_collided_sprite");
+                         "(int)afn_bp_instances[i][1] == afn_collided_sprite", true);
     } else {
         // No scripts in this build — empty stubs keep script_glue.c linkable.
         f << "\n// Script dispatchers — no scripts in this build.\n";
@@ -2311,6 +2753,7 @@ bool PackageNDS(const std::string& runtimeDir,
                 const std::vector<GBABlueprintExport>& blueprints,
                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
                 const std::vector<GBAHudElementExport>& hudElements,
+                const std::vector<GBATmSceneExport>& tmScenes,
                 int startMode,
                 std::string& errorMsg)
 {
@@ -2318,7 +2761,7 @@ bool PackageNDS(const std::string& runtimeDir,
     std::string msysDir = ToMsysPath(runtimeDir);
 
     // Step 0: Generate mapdata.h
-    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames, ndsAntialiasing, script, blueprints, bpInstances, hudElements, startMode))
+    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames, ndsAntialiasing, script, blueprints, bpInstances, hudElements, tmScenes, startMode))
     {
         errorMsg = "Failed to write mapdata.h to " + runtimeDir + "/include/";
         return false;

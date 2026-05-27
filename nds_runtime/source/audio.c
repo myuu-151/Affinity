@@ -27,10 +27,12 @@ int snd_seq_next = 0;
 // ---------------------------------------------------------------------------
 // Voice table — mirrors GBA's snd_voices but each slot is just an NDS channel
 // handle plus enough state to track note-off + pitch bend follow-up.
-// We cap at SND_MAX_VOICES even though hardware has 16, so project polyphony
-// numbers from the editor mean the same thing on both targets.
+// Cap matches NDS hardware — 16 channels. Earlier 8-voice cap mirrored
+// GBA's polyphony, but with envelope-driven release tails a busy piano
+// over-steals into active sustains. Spending the other 8 channels we
+// already have lets notes play out their full release.
 // ---------------------------------------------------------------------------
-#define SND_MAX_VOICES 8
+#define SND_MAX_VOICES 16
 
 typedef struct {
     int   handle;        // libnds channel id, or -1 if free
@@ -39,6 +41,12 @@ typedef struct {
     int   noteOffTick;   // tick (8.8 fixed) when we should stop, or 0 = let sample finish
     int   note;          // active MIDI note, for pitch bend recompute
     int   baseHz;        // freq we issued (for pitch bend recompute)
+    // Envelope state (soft-fade release + decay):
+    int   volHead;       // current volume (0..127) — what's on the channel now
+    int   volPeak;       // initial volume issued at note-on (decay/release baseline)
+    int   ageFrames;     // frames since note-on (for decay countdown)
+    int   releaseFrames; // total frames in release ramp (set when releasing)
+    int   releaseLeft;   // frames remaining in release; 0 = not releasing
 } SndVoice;
 
 static SndVoice snd_voices[SND_MAX_VOICES];
@@ -108,18 +116,29 @@ void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch)
 
     SoundFormat fmt = afn_pcm_is16[smpIdx] ? SoundFormat_16Bit : SoundFormat_8Bit;
     int loop = afn_pcm_loop[smpIdx];
-    int loopStart = afn_pcm_loop_start[smpIdx];
-    int sampleSize = afn_pcm_lens[smpIdx];
+    // NDS hardware SCHANNEL_LENGTH counts words AFTER the loop point, not
+    // total. libnds soundPlaySample stuffs dataSize/4 straight into it
+    // and passes loopPoint as RAW words. So:
+    //   loopPoint = loop_start_samples * bytes_per_sample / 4
+    //   dataSize  = (sample_count - loop_start) * bytes_per_sample   (for loop)
+    //             = sample_count * bytes_per_sample                  (for one-shot)
+    // The earlier "pass total size" version made the hardware play past
+    // the end of the sample into the next sample's memory — exactly the
+    // rogue extra notes the user heard echoing the real melody.
+    int bytesPerSample = afn_pcm_is16[smpIdx] ? 2 : 1;
+    int loopStart = loop ? afn_pcm_loop_start[smpIdx] : 0;
+    int sampleBytes = (afn_pcm_lens[smpIdx] - loopStart) * bytesPerSample;
+    int loopWords   = (loopStart * bytesPerSample) / 4;
 
     int handle = soundPlaySample(
         (void*)afn_pcm_ptrs[smpIdx],
         fmt,
-        sampleSize,
+        sampleBytes,
         hz,
         vol,
         64,                         // pan center
         loop ? true : false,
-        loopStart
+        loopWords
     );
 
     // Fire-and-forget for SFX (durTicks <= 0): don't reserve a slot in
@@ -132,12 +151,17 @@ void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch)
 
     int v = alloc_voice();
     SndVoice* vc = &snd_voices[v];
-    vc->handle      = handle;
-    vc->smpIdx      = smpIdx;
-    vc->channel     = ch;
-    vc->note        = note;
-    vc->baseHz      = baseHz;
-    vc->noteOffTick = (snd_seq_tick >> 8) + durTicks;
+    vc->handle        = handle;
+    vc->smpIdx        = smpIdx;
+    vc->channel       = ch;
+    vc->note          = note;
+    vc->baseHz        = baseHz;
+    vc->noteOffTick   = (snd_seq_tick >> 8) + durTicks;
+    vc->volHead       = vol;
+    vc->volPeak       = vol;
+    vc->ageFrames     = 0;
+    vc->releaseFrames = 0;
+    vc->releaseLeft   = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -162,9 +186,15 @@ void afn_play_sound(int instanceId)
     snd_seq_tick   = 0;
     snd_seq_next   = 0;
     for (int i = 0; i < 16; i++) snd_pitch_bend[i] = 0;
-    snd_voice_count = afn_snd_voices[instanceId];
-    if (snd_voice_count < 4) snd_voice_count = 4;
-    if (snd_voice_count > SND_MAX_VOICES) snd_voice_count = SND_MAX_VOICES;
+    // Editor's voiceCount was a GBA CPU-mixing budget; on NDS each voice
+    // is a free hardware channel, so override to the full cap unless the
+    // editor explicitly asked for less than half. That extends polyphony
+    // headroom past what the editor stored and stops aggressive steals
+    // from cutting active piano notes during release tails.
+    int editorVoices = afn_snd_voices[instanceId];
+    snd_voice_count = SND_MAX_VOICES;
+    if (editorVoices > 0 && editorVoices < SND_MAX_VOICES / 2)
+        snd_voice_count = editorVoices;
 }
 
 // ---------------------------------------------------------------------------
@@ -193,14 +223,65 @@ void afn_audio_init(void)
 // ---------------------------------------------------------------------------
 void afn_audio_tick(void)
 {
-    // Note-off pass — kill voices whose duration is up.
+    // Envelope pass — advance decay while held, ramp during release, kill on
+    // release end. Snap-cut only when the instance opts out of soft-fade
+    // (afn_snd_soft_fade[instance] == 0) or the sample doesn't declare a
+    // release tail. Tick runs at 60 Hz; convert *ms / 16 (≈*60/1000) to
+    // frames cheaply.
     int nowTick = snd_seq_tick >> 8;
+    int softFade = 1;
+    if (snd_seq_active >= 0 && snd_seq_active < AFN_SOUND_INSTANCE_COUNT)
+        softFade = afn_snd_soft_fade[snd_seq_active];
     for (int i = 0; i < SND_MAX_VOICES; i++) {
         SndVoice* vc = &snd_voices[i];
         if (vc->handle < 0) continue;
-        if (vc->noteOffTick > 0 && nowTick >= vc->noteOffTick) {
-            soundKill(vc->handle);
-            vc->handle = -1;
+        vc->ageFrames++;
+
+        // Decay (during sustained hold). Sample decays its initial peak by
+        // decay_pct over (note duration - decay_min_ms). Computed as a
+        // simple linear ramp on volHead.
+        if (vc->releaseLeft == 0 && vc->smpIdx >= 0 && vc->smpIdx < AFN_SOUND_SAMPLE_COUNT) {
+            int decayPct = afn_pcm_decay_pct[vc->smpIdx];
+            int decayMin = afn_pcm_decay_min_ms[vc->smpIdx];
+            int decayMinF = (decayMin * 60 + 999) / 1000;
+            if (decayPct > 0 && vc->ageFrames > decayMinF) {
+                int span = vc->ageFrames - decayMinF;
+                // Drop to (1 - decayPct/100) over the next 60 frames (1s).
+                int drop = (vc->volPeak * decayPct * span) / (100 * 60);
+                int target = vc->volPeak - drop;
+                if (target < 0) target = 0;
+                if (target != vc->volHead) {
+                    vc->volHead = target;
+                    soundSetVolume(vc->handle, target);
+                }
+            }
+        }
+
+        // Start release once duration is up.
+        if (vc->releaseLeft == 0 && vc->noteOffTick > 0 && nowTick >= vc->noteOffTick) {
+            int rms = (vc->smpIdx >= 0 && vc->smpIdx < AFN_SOUND_SAMPLE_COUNT)
+                      ? afn_pcm_release_ms[vc->smpIdx] : 0;
+            int rframes = (rms * 60 + 999) / 1000;
+            if (!softFade) rframes = 0;
+            if (rframes <= 0) {
+                soundKill(vc->handle);
+                vc->handle = -1;
+                continue;
+            }
+            vc->releaseFrames = rframes;
+            vc->releaseLeft   = rframes;
+        }
+
+        // Tick release ramp.
+        if (vc->releaseLeft > 0) {
+            vc->releaseLeft--;
+            int target = (vc->volHead * vc->releaseLeft) / vc->releaseFrames;
+            if (target < 0) target = 0;
+            soundSetVolume(vc->handle, target);
+            if (vc->releaseLeft == 0) {
+                soundKill(vc->handle);
+                vc->handle = -1;
+            }
         }
     }
 

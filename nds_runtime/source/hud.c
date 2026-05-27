@@ -17,6 +17,8 @@
 
 #ifdef AFN_HAS_SCRIPT
 extern int afn_hud_value[4];
+extern int afn_cursor_stop;
+extern int afn_active_element;
 extern unsigned char afn_hud_visible[4];
 #endif
 
@@ -48,7 +50,11 @@ extern const unsigned char default_font_bin[];
 // (drop shadows). All 15 colour slots populated so any palette index
 // used by the source tile data renders as solid black.
 #define AFN_HUD_BLACK_BANK    10
-#define AFN_HUD_OAM_BASE      100
+// HUD reserves the second half of OAM (64..127) so sprites/tm_objects own
+// slots 0..63. Was 100 originally — that gave only 28 slots for HUD, and
+// menu elements with ~75 pieces (8x8 border + 16x16 interior + shadow
+// layer) saturated past slot 127 and silently lost their interior fills.
+#define AFN_HUD_OAM_BASE      64
 
 static void hud_bake_font(void)
 {
@@ -99,10 +105,11 @@ static void hud_bake_pieces(void)
 
 void afn_hud_init(void) {
 #ifdef AFN_HAS_SCRIPT
-    // Default ALL element slots visible. The editor's per-element visible
-    // flag could be exported per-slot, but for now matching the GBA
-    // default (everything visible until a HideHUD node fires) is simpler.
-    for (int i = 0; i < 4; i++) afn_hud_visible[i] = 1;
+    // All slots start hidden — matches GBA, where afn_hud_visible[] is
+    // BSS-zero and ShowHUD/HideHUD nodes drive what's on screen. The old
+    // "default all visible" was a stopgap for when ShowHUD didn't emit; it
+    // pinned things like menu elements on at boot.
+    for (int i = 0; i < 4; i++) afn_hud_visible[i] = 0;
     hud_bake_font();
 #if defined(AFN_HUD_PIECE_TILE_LEN) && AFN_HUD_PIECE_TILE_LEN > 0
     hud_bake_pieces();
@@ -204,22 +211,29 @@ static int hud_blit_piece(int oamSlot, int sx, int sy, const struct AfnHudPiece*
 
 #if defined(AFN_HUD_LAYER_COUNT) && AFN_HUD_LAYER_COUNT > 0
 // Per-layer animation state — frame counter (driven by speed = 60/fps)
-// plus a sub-frame tick to slow advance to the layer's authored fps.
-static int s_layer_frame[AFN_HUD_LAYER_COUNT];
-static int s_layer_tick[AFN_HUD_LAYER_COUNT];
+// plus a sub-frame tick. NOT static so emitted PlayHudAnim /
+// StopHudAnim / SetHudAnimSpeed bodies can mutate them via extern decls
+// in mapdata.h.
+int afn_hud_layer_frame [AFN_HUD_LAYER_COUNT];
+int afn_hud_layer_tick  [AFN_HUD_LAYER_COUNT];
+unsigned char afn_hud_layer_active[AFN_HUD_LAYER_COUNT];
+unsigned char afn_hud_layer_speed_override[AFN_HUD_LAYER_COUNT]; // 0 = use exporter's speed
 
 static void hud_layer_advance(void)
 {
     for (int li = 0; li < AFN_HUD_LAYER_COUNT; li++) {
-        int spd = afn_hud_layers[li].speed;
+        if (!afn_hud_layer_active[li]) continue;
+        int spd = afn_hud_layer_speed_override[li]
+                ? afn_hud_layer_speed_override[li]
+                : afn_hud_layers[li].speed;
         if (spd < 1) spd = 1;
-        s_layer_tick[li]++;
-        if (s_layer_tick[li] >= spd) {
-            s_layer_tick[li] = 0;
-            s_layer_frame[li]++;
+        afn_hud_layer_tick[li]++;
+        if (afn_hud_layer_tick[li] >= spd) {
+            afn_hud_layer_tick[li] = 0;
+            afn_hud_layer_frame[li]++;
             int len = afn_hud_layers[li].length;
-            if (afn_hud_layers[li].loop && len > 0 && s_layer_frame[li] >= len)
-                s_layer_frame[li] = 0;
+            if (afn_hud_layers[li].loop && len > 0 && afn_hud_layer_frame[li] >= len)
+                afn_hud_layer_frame[li] = 0;
         }
     }
 }
@@ -232,7 +246,7 @@ static void hud_layer_offset(int li, int* outX, int* outY)
     int kS = afn_hud_layers[li].kfStart;
     int kN = afn_hud_layers[li].kfCount;
     if (kN < 1) return;
-    int t = s_layer_frame[li];
+    int t = afn_hud_layer_frame[li];
     int lastF = afn_hud_layer_kf[kS + kN - 1].frame;
     // After the last keyframe, freeze on the last value (until loop wraps).
     if (t >= lastF) { *outX = afn_hud_layer_kf[kS + kN - 1].offX;
@@ -340,21 +354,22 @@ void afn_hud_draw(void) {
 #endif
         // Layer ordering — render the higher-layer category FIRST so it
         // takes the lower OAM slot (NDS draws lower slot on top within
-        // the same priority). Tie-break order: pieces, sprites, text.
-        signed char layers[3] = {
+        // the same priority). Tie-break order: pieces, sprites, text, cursor.
+        signed char layers[4] = {
             afn_hud_elems[e].layerPieces,
             afn_hud_elems[e].layerSprites,
-            afn_hud_elems[e].layerText
+            afn_hud_elems[e].layerText,
+            afn_hud_elems[e].layerCursor
         };
-        int order[3] = { 0, 1, 2 };
+        int order[4] = { 0, 1, 2, 3 };
         // Tiny insertion sort, descending by layer.
-        for (int a = 1; a < 3; a++) {
+        for (int a = 1; a < 4; a++) {
             int k = order[a]; signed char kl = layers[k];
             int b = a;
             while (b > 0 && layers[order[b-1]] < kl) { order[b] = order[b-1]; b--; }
             order[b] = k;
         }
-        for (int oi = 0; oi < 3; oi++) {
+        for (int oi = 0; oi < 4; oi++) {
             if (oamSlot >= 128) break;
             int cat = order[oi];
             if (cat == 0) {
@@ -407,7 +422,7 @@ void afn_hud_draw(void) {
                     oamSlot = hud_blit_piece(oamSlot, ex + pi->x, ey + pi->y, pi);
                 }
 #endif
-            } else {
+            } else if (cat == 2) {
                 int ts = afn_hud_elems[e].textStart;
                 int tc = afn_hud_elems[e].textCount;
                 for (int t = 0; t < tc; t++) {
@@ -431,6 +446,57 @@ void afn_hud_draw(void) {
                     oamSlot = hud_blit_string(oamSlot, tx, ty, s, palBank);
                     if (oamSlot >= 128) break;
                 }
+            } else {
+                // Cursor: render the active element's selected stop. The
+                // cursor is a normal sprite asset (curAsset / curFrame in
+                // the element) streamed into its asset's VRAM slot via the
+                // shared sprite DMA cache.
+#if defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
+                if (e == afn_active_element && oamSlot < 128) {
+                    int stopCount = afn_hud_elems[e].stopCount;
+                    int cAi = afn_hud_elems[e].curAsset;
+                    if (stopCount > 0 && cAi >= 0 && cAi < AFN_ASSET_COUNT) {
+                        int stopIdx = afn_cursor_stop;
+                        if (stopIdx < 0 || stopIdx >= stopCount) stopIdx = 0;
+                        int si = afn_hud_elems[e].stopStart + stopIdx;
+                        int csx = ex + afn_hud_stops[si].x + afn_hud_elems[e].curOffX;
+                        int csy = ey + afn_hud_stops[si].y + afn_hud_elems[e].curOffY;
+
+                        int cFrame   = afn_hud_elems[e].curFrame;
+                        int vramBase = afn_asset_desc[cAi][0];
+                        int tpf      = afn_asset_desc[cAi][1];
+                        int objSize  = afn_asset_desc[cAi][3];
+                        int palBank  = afn_asset_desc[cAi][4] & 0xF;
+                        int frameBase = afn_asset_desc[cAi][9];
+
+                        // DMA the cursor frame into the asset's VRAM slot
+                        // (same per-asset streaming sprites.c uses). Skip
+                        // when the active frame already matches.
+                        extern int g_active_frame[AFN_ASSET_COUNT];
+#if AFN_FRAME_STREAM_LEN > 0
+                        int globalFrame = frameBase + cFrame;
+                        if (globalFrame >= 0 && globalFrame < AFN_FRAME_STREAM_LEN
+                            && g_active_frame[cAi] != globalFrame) {
+                            const u32* src = afn_all_tiles + afn_frame_rom_off[globalFrame];
+                            u32* dst = (u32*)(0x06400000 + vramBase * 32);
+                            int tiles = afn_frame_tile_count[globalFrame];
+                            dmaCopy(src, dst, tiles * 32);
+                            g_active_frame[cAi] = globalFrame;
+                        }
+#endif
+                        SpriteSize sz = objSize == 8  ? SpriteSize_8x8   :
+                                        objSize == 16 ? SpriteSize_16x16 :
+                                        objSize == 32 ? SpriteSize_32x32 : SpriteSize_64x64;
+                        int tileSlot = vramBase + cFrame * tpf;
+                        oamSet(&oamMain, oamSlot,
+                               csx, csy,
+                               0, palBank, sz, SpriteColorFormat_16Color,
+                               (void*)((u8*)0x06400000 + tileSlot * 32),
+                               -1, false, false, false, false, false);
+                        oamSlot++;
+                    }
+                }
+#endif
             }
         }
     }
