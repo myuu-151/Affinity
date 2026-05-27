@@ -143,6 +143,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                                 const std::vector<GBABlueprintExport>& blueprints,
                                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
                                 const std::vector<GBAHudElementExport>& hudElements,
+                                const std::vector<GBATmSceneExport>& tmScenes,
                                 int startMode)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
@@ -1465,6 +1466,156 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "\n};\n";
     }
 
+    // ---- Mode 0 Tilemap (tile gfx + palette + map + objects per scene) ----
+    // Mirrors the GBA exporter (gba_package.cpp ~line 5370) — same packed
+    // 4bpp tile blob, same screen-entry format (tile bits 0-9, palBank 12-15).
+    // NDS configures BG layer + VRAM bank differently at runtime, but the
+    // data shape is byte-identical so the editor's tile/pal build stays the
+    // single source of truth.
+    if (!tmScenes.empty())
+    {
+        f << "\n// ---- Mode 0 Tilemap ----\n";
+        f << "#define AFN_HAS_MODE0 1\n";
+        f << "#define AFN_TM_SCENE_COUNT " << (int)tmScenes.size() << "\n\n";
+
+        f << "typedef struct { s16 tx,ty; u8 type; s8 assetIdx; u8 camFollow; u8 collision; s8 teleScene; u16 scale8; u8 layer; u8 animPlay; s8 animIdx; u8 facing; } AfnTmObj;\n\n";
+
+        for (int si = 0; si < (int)tmScenes.size(); si++)
+        {
+            const auto& sc = tmScenes[si];
+            f << "// Scene " << si << ": " << sc.mapW << "x" << sc.mapH << "\n";
+            f << "#define AFN_TM" << si << "_W " << sc.mapW << "\n";
+            f << "#define AFN_TM" << si << "_H " << sc.mapH << "\n";
+            f << "#define AFN_TM" << si << "_TILE_SIZE " << (8 * sc.pixelScale) << "\n";
+            // BG size: 0=32x32, 1=64x32, 2=32x64, 3=64x64
+            int bgSz = 0;
+            if (sc.mapW > 32 && sc.mapH > 32) bgSz = 3;
+            else if (sc.mapW > 32) bgSz = 1;
+            else if (sc.mapH > 32) bgSz = 2;
+            f << "#define AFN_TM" << si << "_BG_SIZE " << bgSz << "\n";
+
+            f << "static const u16 afn_tm" << si << "_pal[256] = {\n";
+            for (int bank = 0; bank < 16; bank++)
+            {
+                f << "    ";
+                for (int pi = 0; pi < 16; pi++)
+                {
+                    uint32_t c = sc.palette[bank * 16 + pi];
+                    int r = (c & 0xFF) >> 3;
+                    int g = ((c >> 8) & 0xFF) >> 3;
+                    int b = ((c >> 16) & 0xFF) >> 3;
+                    uint16_t rgb15 = (uint16_t)(r | (g << 5) | (b << 10));
+                    f << "0x" << std::hex << rgb15 << std::dec;
+                    if (bank < 15 || pi < 15) f << ",";
+                }
+                f << "\n";
+            }
+            f << "};\n";
+
+            int nTiles = sc.tileCount;
+            if (nTiles < 1) nTiles = 1;
+            f << "#define AFN_TM" << si << "_TILE_COUNT " << nTiles << "\n";
+            int tileU32Count = nTiles * 8; // 4bpp packed: 8 u32 per tile
+            f << "static const u32 afn_tm" << si << "_tiles[" << tileU32Count << "] = {\n";
+            for (int ti = 0; ti < nTiles; ti++)
+            {
+                f << "    ";
+                for (int row = 0; row < 8; row++)
+                {
+                    uint32_t packed = 0;
+                    for (int col = 0; col < 8; col++)
+                    {
+                        int srcIdx = ti * 64 + row * 8 + col;
+                        uint8_t pix = (srcIdx < (int)sc.tilePixels.size()) ? (sc.tilePixels[srcIdx] & 0x0F) : 0;
+                        packed |= ((uint32_t)pix) << (col * 4);
+                    }
+                    f << "0x" << std::hex << packed << std::dec;
+                    if (row < 7 || ti < nTiles - 1) f << ",";
+                }
+                f << "\n";
+            }
+            f << "};\n";
+            f << "#define AFN_TM" << si << "_TILES_LEN " << (tileU32Count * 4) << "\n";
+
+            int mapSize = sc.mapW * sc.mapH;
+            f << "static const u16 afn_tm" << si << "_map[" << mapSize << "] = {\n    ";
+            for (int mi = 0; mi < mapSize; mi++)
+            {
+                uint16_t idx = (mi < (int)sc.tileIndices.size()) ? sc.tileIndices[mi] : 0;
+                f << "0x" << std::hex << idx << std::dec;
+                if (mi < mapSize - 1) f << ",";
+                if ((mi & 31) == 31 && mi < mapSize - 1) f << "\n    ";
+            }
+            f << "\n};\n";
+
+            int objCount = (int)sc.objects.size();
+            f << "#define AFN_TM" << si << "_OBJ_COUNT " << objCount << "\n";
+            {
+                int arrSize = (objCount > 0) ? objCount : 1;
+                f << "static const AfnTmObj afn_tm" << si << "_objs[" << arrSize << "] = {\n";
+                for (int oi = 0; oi < objCount; oi++)
+                {
+                    const auto& obj = sc.objects[oi];
+                    int scale8 = (int)(obj.displayScale * 256.0f);
+                    if (scale8 < 1) scale8 = 256;
+                    f << "    {" << obj.tileX << "," << obj.tileY << ","
+                      << obj.type << "," << obj.spriteAssetIdx << ","
+                      << (obj.camFollow ? 1 : 0) << "," << (obj.collision ? 1 : 0) << ","
+                      << obj.teleportScene << "," << scale8 << "," << obj.layer << ","
+                      << (obj.animPlay ? 1 : 0) << "," << obj.animIdx << "," << obj.facing << "},\n";
+                }
+                if (objCount == 0)
+                    f << "    {0,0,0,0,0,0,0,256,0,0,0,0},\n";
+                f << "};\n\n";
+            }
+        }
+
+        // Scene indirection tables
+        {
+            int nsc = (int)tmScenes.size();
+            f << "static const u16 * const afn_tm_scene_pal[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "afn_tm" << si << "_pal";
+            f << "};\n";
+            f << "static const u32 * const afn_tm_scene_tiles[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "afn_tm" << si << "_tiles";
+            f << "};\n";
+            f << "static const int afn_tm_scene_tiles_len[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_TILES_LEN";
+            f << "};\n";
+            f << "static const u16 * const afn_tm_scene_map[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "afn_tm" << si << "_map";
+            f << "};\n";
+            f << "static const int afn_tm_scene_w[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_W";
+            f << "};\n";
+            f << "static const int afn_tm_scene_h[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_H";
+            f << "};\n";
+            f << "static const int afn_tm_scene_bg_size[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_BG_SIZE";
+            f << "};\n";
+            f << "static const int afn_tm_scene_tile_size[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_TILE_SIZE";
+            f << "};\n";
+            f << "static const AfnTmObj * const afn_tm_scene_objs[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "afn_tm" << si << "_objs";
+            f << "};\n";
+            f << "static const int afn_tm_scene_obj_count[" << nsc << "] = {";
+            for (int si = 0; si < nsc; si++) f << (si?",":"") << "AFN_TM" << si << "_OBJ_COUNT";
+            f << "};\n\n";
+        }
+
+        // Locate Player object (first across scenes)
+        int tmPlayerScene = -1, tmPlayerObj = -1;
+        for (int si = 0; si < (int)tmScenes.size() && tmPlayerScene < 0; si++)
+            for (int oi = 0; oi < (int)tmScenes[si].objects.size(); oi++)
+                if (tmScenes[si].objects[oi].type == 0) // Player
+                { tmPlayerScene = si; tmPlayerObj = oi; break; }
+        f << "#define AFN_TM_PLAYER_SCENE " << tmPlayerScene << "\n";
+        f << "#define AFN_TM_PLAYER_OBJ " << tmPlayerObj << "\n";
+        f << "#define AFN_TM_START_SCENE 0\n\n";
+    }
+
     // ---- Phase 3a framework: script declarations + stubs ----
     bool hasAnyScript = !script.nodes.empty() || !blueprints.empty();
     if (hasAnyScript) {
@@ -2337,6 +2488,7 @@ bool PackageNDS(const std::string& runtimeDir,
                 const std::vector<GBABlueprintExport>& blueprints,
                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
                 const std::vector<GBAHudElementExport>& hudElements,
+                const std::vector<GBATmSceneExport>& tmScenes,
                 int startMode,
                 std::string& errorMsg)
 {
@@ -2344,7 +2496,7 @@ bool PackageNDS(const std::string& runtimeDir,
     std::string msysDir = ToMsysPath(runtimeDir);
 
     // Step 0: Generate mapdata.h
-    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames, ndsAntialiasing, script, blueprints, bpInstances, hudElements, startMode))
+    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames, ndsAntialiasing, script, blueprints, bpInstances, hudElements, tmScenes, startMode))
     {
         errorMsg = "Failed to write mapdata.h to " + runtimeDir + "/include/";
         return false;

@@ -726,6 +726,15 @@ void afn_scene_tick(void)
                 afn_sprite_flip[i] = 0;
             }
 #endif
+#ifdef AFN_HAS_MODE0
+            // If swapping into Mode 0, load the destination scene's tilemap
+            // (tile gfx + palette + map) into BG VRAM. Without this the BG
+            // still shows the previous scene (or boot scene).
+            if (afn_current_mode == 1) {
+                extern void afn_mode0_init_scene(int sceneIdx);
+                afn_mode0_init_scene(afn_current_scene);
+            }
+#endif
         }
     } else {
         int t = afn_fade_counter;
