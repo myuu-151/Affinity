@@ -66,37 +66,51 @@ static void init_video(void)
     swiWaitForVBlank();
 }
 
+// Project's start mode (0=Mode 4 / 3D, 1=Mode 0 / HUD+tilemap, 2=Mode 1 /
+// Mode 7). Defaults to Mode 4 so older builds without the macro link.
+#ifndef AFN_START_MODE
+#define AFN_START_MODE 0
+#endif
+
 int main(void)
 {
     init_video();
 
     afn_audio_init();
+#if AFN_START_MODE == 0
     afn_fps3d_init();
+#else
+    afn_mode0_init();
+#endif
     afn_sprite_init();
     afn_hud_init();
     afn_script_init();
-    // afn_mode0_init() called by scene loader once Phase 4 lands.
 
     irqSet(IRQ_HBLANK, m7_hbl);
     irqEnable(IRQ_HBLANK);
 
     iprintf("Affinity NDS\n");
 
+#if AFN_START_MODE == 0
     // Pre-roll the GPU pipeline: submit-display latency means the first user
-    // frame appears with stale state (cube collapses to a 1-pixel dot until
-    // input forces a re-render). A few warmup frames push valid geometry +
-    // matrices through before the player sees anything.
+    // frame appears with stale state. A few warmup frames push valid geometry
+    // through before the player sees anything.
     for (int w = 0; w < 4; w++) {
         afn_fps3d_update();
         swiWaitForVBlank();
     }
+#endif
 
     while (pmMainLoop())
     {
         afn_script_tick();
         afn_scene_tick();      // fade state machine
+#if AFN_START_MODE == 0
         afn_fps3d_update();
         afn_sprite_update();   // OAM projection (after 3D so OAM goes on top)
+#else
+        afn_mode0_update();
+#endif
         afn_hud_draw();
         afn_audio_tick();
         swiWaitForVBlank();

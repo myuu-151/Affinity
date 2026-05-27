@@ -31,11 +31,12 @@ extern const unsigned char default_font_bin[];
 // so font glyphs are spaced 128 bytes apart. Bytes 32..127 of each slot
 // are wasted but unavoidable.
 //
-// Base byte offset 98304 (slot 768 in 128-byte units), well above the
-// gameplay-sprite cursor (1620 raw tiles ≈ 51840 bytes). 256 glyphs *
-// 128 bytes = 32768 bytes, ending at byte 131072 = the bank-B limit.
-// If the gameplay cursor ever crosses 768 we need a different region.
-#define AFN_HUD_VRAM_OFFSET   98304          // bytes into sprite VRAM
+// AFN_HUD_VRAM_OFFSET is emitted by the exporter, sized to start
+// immediately after the gameplay-sprite pool. Fallback 98304 covers
+// builds without the macro.
+#ifndef AFN_HUD_VRAM_OFFSET
+#define AFN_HUD_VRAM_OFFSET   98304
+#endif
 #define AFN_HUD_TILE_STRIDE   128             // 1D_128 OAM addressing
 #define AFN_HUD_FONT_FIRST    0x20            // space
 #define AFN_HUD_FONT_LAST     0x7E            // ~
@@ -76,7 +77,9 @@ static void hud_bake_font(void)
 }
 
 #if defined(AFN_HUD_PIECE_TILE_LEN) && AFN_HUD_PIECE_TILE_LEN > 0
-extern const unsigned int afn_hud_piece_tiles[];
+// afn_hud_piece_tiles[] is defined as `static const` in mapdata.h (so
+// every TU including it gets its own copy without link conflicts).
+// This TU's copy is the one we upload.
 static void hud_bake_pieces(void)
 {
     // Piece tile data is baked into mapdata.h as a flat u32 blob,
@@ -92,7 +95,10 @@ static void hud_bake_pieces(void)
 
 void afn_hud_init(void) {
 #ifdef AFN_HAS_SCRIPT
-    afn_hud_visible[0] = 1;
+    // Default ALL element slots visible. The editor's per-element visible
+    // flag could be exported per-slot, but for now matching the GBA
+    // default (everything visible until a HideHUD node fires) is simpler.
+    for (int i = 0; i < 4; i++) afn_hud_visible[i] = 1;
     hud_bake_font();
 #if defined(AFN_HUD_PIECE_TILE_LEN) && AFN_HUD_PIECE_TILE_LEN > 0
     hud_bake_pieces();
@@ -161,7 +167,7 @@ static int hud_blit_piece(int oamSlot, int sx, int sy, const struct AfnHudPiece*
     }
     oamSet(&oamMain, oamSlot++,
            sx, sy,
-           1,                                              // priority below text
+           0,                                              // priority 0 — same as font
            pi->palBank,                                    // reuse asset's palette bank
            sz,
            SpriteColorFormat_16Color,
@@ -218,10 +224,24 @@ static void hud_kf_at(int e, int* outOffX, int* outOffY)
 
 void afn_hud_draw(void) {
 #if defined(AFN_HAS_SCRIPT) && defined(AFN_HUD_ELEM_COUNT) && AFN_HUD_ELEM_COUNT > 0
+    extern int afn_current_mode;
+    extern int afn_current_scene;
     int oamSlot = AFN_HUD_OAM_BASE;
+    static int s_dbgF = 0; s_dbgF++;
+    int dbgRendered = 0;
     for (int e = 0; e < AFN_HUD_ELEM_COUNT; e++) {
         int slot = e;
         if (slot < 4 && !afn_hud_visible[slot]) continue;
+        // runtimeMode: 0 = both, 1 = Mode 4 only, 2 = Mode 0 only.
+        // afn_current_mode: 0 = Mode 4 (3D), 1 = Mode 0 (tilemap).
+        int rm = afn_hud_elems[e].runtimeMode;
+        if (rm == 1 && afn_current_mode != 0) continue;
+        if (rm == 2 && afn_current_mode != 1) continue;
+        // Per-scene mask: skip if current scene's bit isn't set.
+        unsigned int mask = (afn_current_mode == 0)
+            ? afn_hud_elems[e].mode4Mask
+            : afn_hud_elems[e].mode0Mask;
+        if (!(mask & (1u << afn_current_scene))) continue;
         int ex = afn_hud_elems[e].x;
         int ey = afn_hud_elems[e].y;
 #if defined(AFN_HUD_KF_COUNT) && AFN_HUD_KF_COUNT > 0
@@ -252,17 +272,22 @@ void afn_hud_draw(void) {
 #if defined(AFN_HUD_PIECE_COUNT) && AFN_HUD_PIECE_COUNT > 0
                 int ps = afn_hud_elems[e].pieceStart;
                 int pc = afn_hud_elems[e].pieceCount;
-                for (int p = 0; p < pc; p++) {
+                // Render pieces back-to-front. NDS OAM: lower slot = on top,
+                // so the LAST piece in the list (drawn on top in the editor)
+                // needs the LOWEST OAM slot. Iterate reverse so piece N-1
+                // takes oamSlot first.
+                for (int p = pc - 1; p >= 0; p--) {
                     if (oamSlot >= 128) break;
                     const struct AfnHudPiece* pi = &afn_hud_pieces[ps + p];
                     oamSlot = hud_blit_piece(oamSlot, ex + pi->x, ey + pi->y, pi);
+                    dbgRendered++;
                 }
 #endif
             } else if (cat == 1) {
 #if defined(AFN_HUD_SPRITE_COUNT) && AFN_HUD_SPRITE_COUNT > 0
                 int ss2 = afn_hud_elems[e].sprStart;
                 int sc2 = afn_hud_elems[e].sprCount;
-                for (int p = 0; p < sc2; p++) {
+                for (int p = sc2 - 1; p >= 0; p--) {
                     if (oamSlot >= 128) break;
                     const struct AfnHudPiece* pi = &afn_hud_sprites[ss2 + p];
                     oamSlot = hud_blit_piece(oamSlot, ex + pi->x, ey + pi->y, pi);
@@ -301,5 +326,8 @@ void afn_hud_draw(void) {
     // sprite_update flushed oamMain already; without our own flush the
     // HUD writes only land in the user buffer and get wiped next frame.
     oamUpdate(&oamMain);
+    if ((s_dbgF & 31) == 0)
+        iprintf("\x1b[20;0Hhud cm=%d cs=%d r=%d s=%d  ",
+                afn_current_mode, afn_current_scene, dbgRendered, oamSlot);
 #endif
 }

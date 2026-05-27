@@ -13582,6 +13582,8 @@ void FrameTick(float dt)
                     he.screenY = el.y;
                     he.visible = el.visible;
                     he.runtimeMode = el.runtimeMode;
+                    he.mode0SceneMask = el.mode0SceneMask;
+                    he.mode4SceneMask = el.mode4SceneMask;
                     for (auto& pc : el.pieces) {
                         GBAHudPieceExport pe;
                         pe.spriteAssetIdx = pc.spriteAssetIdx;
@@ -14007,7 +14009,7 @@ void FrameTick(float dt)
                                         exportSoundSamples, exportSoundInstances,
                                         exportSkyFrames, exportNdsAa,
                                         exportScript, exportBlueprints, exportBpInstances,
-                                        exportHudElements, err);
+                                        exportHudElements, exportStartMode, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,

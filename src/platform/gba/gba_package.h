@@ -515,6 +515,8 @@ struct GBAHudElementExport {
     int screenX, screenY;
     bool visible;
     int runtimeMode;     // 0=Both, 1=Mode4, 2=Mode0
+    uint32_t mode0SceneMask = 0xFFFFFFFF; // which Mode 0 scenes the element shows in
+    uint32_t mode4SceneMask = 0xFFFFFFFF; // which Mode 4 scenes the element shows in
     std::vector<GBAHudPieceExport> pieces;
     std::vector<GBAHudPieceExport> sprites;
     std::vector<GBAHudStopExport> stops;
