@@ -1602,7 +1602,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "static const struct { short frame, offX, offY; } afn_hud_kf[1] = {{0}};\n";
             }
 
-            f << "static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned char kfLoop; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
+            f << "static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned char kfLoop; signed char layerPieces, layerSprites, layerText; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
             int textCursor = 0, pieceCursor = 0, sprCursor = 0, kfCursor = 0;
             for (const auto& he : hudElements) {
                 f << "    { " << he.screenX << ", " << he.screenY << ", "
@@ -1610,7 +1610,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                   << pieceCursor  << ", " << (int)he.pieces.size() << ", "
                   << sprCursor    << ", " << (int)he.sprites.size() << ", "
                   << kfCursor     << ", " << (int)he.keyframes.size() << ", "
-                  << (he.animLoop ? 1 : 0) << " },\n";
+                  << (he.animLoop ? 1 : 0) << ", "
+                  << he.layerPieces << ", " << he.layerSprites << ", " << he.layerText
+                  << " },\n";
                 textCursor   += (int)he.textRows.size();
                 pieceCursor  += (int)he.pieces.size();
                 sprCursor    += (int)he.sprites.size();

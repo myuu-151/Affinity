@@ -229,47 +229,70 @@ void afn_hud_draw(void) {
         hud_kf_at(e, &kfX, &kfY);
         ex += kfX; ey += kfY;
 #endif
+        // Layer ordering — render the higher-layer category FIRST so it
+        // takes the lower OAM slot (NDS draws lower slot on top within
+        // the same priority). Tie-break order: pieces, sprites, text.
+        signed char layers[3] = {
+            afn_hud_elems[e].layerPieces,
+            afn_hud_elems[e].layerSprites,
+            afn_hud_elems[e].layerText
+        };
+        int order[3] = { 0, 1, 2 };
+        // Tiny insertion sort, descending by layer.
+        for (int a = 1; a < 3; a++) {
+            int k = order[a]; signed char kl = layers[k];
+            int b = a;
+            while (b > 0 && layers[order[b-1]] < kl) { order[b] = order[b-1]; b--; }
+            order[b] = k;
+        }
+        for (int oi = 0; oi < 3; oi++) {
+            if (oamSlot >= 128) break;
+            int cat = order[oi];
+            if (cat == 0) {
 #if defined(AFN_HUD_PIECE_COUNT) && AFN_HUD_PIECE_COUNT > 0
-        int ps = afn_hud_elems[e].pieceStart;
-        int pc = afn_hud_elems[e].pieceCount;
-        for (int p = 0; p < pc; p++) {
-            if (oamSlot >= 128) break;
-            const struct AfnHudPiece* pi = &afn_hud_pieces[ps + p];
-            oamSlot = hud_blit_piece(oamSlot, ex + pi->x, ey + pi->y, pi);
-        }
+                int ps = afn_hud_elems[e].pieceStart;
+                int pc = afn_hud_elems[e].pieceCount;
+                for (int p = 0; p < pc; p++) {
+                    if (oamSlot >= 128) break;
+                    const struct AfnHudPiece* pi = &afn_hud_pieces[ps + p];
+                    oamSlot = hud_blit_piece(oamSlot, ex + pi->x, ey + pi->y, pi);
+                }
 #endif
+            } else if (cat == 1) {
 #if defined(AFN_HUD_SPRITE_COUNT) && AFN_HUD_SPRITE_COUNT > 0
-        int ss2 = afn_hud_elems[e].sprStart;
-        int sc2 = afn_hud_elems[e].sprCount;
-        for (int p = 0; p < sc2; p++) {
-            if (oamSlot >= 128) break;
-            const struct AfnHudPiece* pi = &afn_hud_sprites[ss2 + p];
-            oamSlot = hud_blit_piece(oamSlot, ex + pi->x, ey + pi->y, pi);
-        }
+                int ss2 = afn_hud_elems[e].sprStart;
+                int sc2 = afn_hud_elems[e].sprCount;
+                for (int p = 0; p < sc2; p++) {
+                    if (oamSlot >= 128) break;
+                    const struct AfnHudPiece* pi = &afn_hud_sprites[ss2 + p];
+                    oamSlot = hud_blit_piece(oamSlot, ex + pi->x, ey + pi->y, pi);
+                }
 #endif
-        int ts = afn_hud_elems[e].textStart;
-        int tc = afn_hud_elems[e].textCount;
-        for (int t = 0; t < tc; t++) {
-            int tx = ex + afn_hud_texts[ts + t].x;
-            int ty = ey + afn_hud_texts[ts + t].y;
-            int ss = afn_hud_texts[ts + t].sourceSlot;
-            char buf[40];
-            const char* s;
-            if (ss >= 0 && ss <= 3) {
-                int pad = afn_hud_texts[ts + t].pad;
-                if (pad < 1) pad = 1;
-                int v = afn_hud_value[ss]; if (v < 0) v = 0;
-                snprintf(buf, sizeof(buf), "%0*d", pad, v);
-                s = buf;
             } else {
-                // Static string from the text field. Exported empty when
-                // sourceSlot >= 0 so this path only fires for label rows.
-                s = afn_hud_texts[ts + t].text;
+                int ts = afn_hud_elems[e].textStart;
+                int tc = afn_hud_elems[e].textCount;
+                for (int t = 0; t < tc; t++) {
+                    int tx = ex + afn_hud_texts[ts + t].x;
+                    int ty = ey + afn_hud_texts[ts + t].y;
+                    int ss = afn_hud_texts[ts + t].sourceSlot;
+                    char buf[40];
+                    const char* s;
+                    if (ss >= 0 && ss <= 3) {
+                        int pad = afn_hud_texts[ts + t].pad;
+                        if (pad < 1) pad = 1;
+                        int v = afn_hud_value[ss]; if (v < 0) v = 0;
+                        snprintf(buf, sizeof(buf), "%0*d", pad, v);
+                        s = buf;
+                    } else {
+                        // Static string from the text field.
+                        s = afn_hud_texts[ts + t].text;
+                    }
+                    int palBank = afn_hud_texts[ts + t].palBank;
+                    if (palBank < 0 || palBank > 15) palBank = AFN_HUD_PAL_BANK;
+                    oamSlot = hud_blit_string(oamSlot, tx, ty, s, palBank);
+                    if (oamSlot >= 128) break;
+                }
             }
-            int palBank = afn_hud_texts[ts + t].palBank;
-            if (palBank < 0 || palBank > 15) palBank = AFN_HUD_PAL_BANK;
-            oamSlot = hud_blit_string(oamSlot, tx, ty, s, palBank);
-            if (oamSlot >= 128) break;
         }
     }
     // Park unused HUD slots so stale entries from earlier frames don't render.
