@@ -282,6 +282,23 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         for (const auto& s : sprites)
             if (s.forceStatic && s.assetIdx >= 0 && s.assetIdx < (int)assets.size())
                 assetForceStatic[s.assetIdx] = true;
+        // Mirrors GBA's hudMaxSize bump (gba_package.cpp:397) — if any HUD
+        // piece uses this asset at a bigger size than the asset's native
+        // baseSize, bump the emitted objSize so the asset's tile data
+        // fills the whole piece instead of leaving 3 transparent quadrants
+        // for an 8x8 asset used as a 16x16 piece.
+        std::vector<int> hudMaxSize(assets.size(), 0);
+        for (const auto& el : hudElements) {
+            for (const auto& pc : el.pieces)
+                if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)assets.size())
+                    if (pc.size > hudMaxSize[pc.spriteAssetIdx])
+                        hudMaxSize[pc.spriteAssetIdx] = pc.size;
+            for (const auto& sp : el.sprites)
+                if (sp.spriteAssetIdx >= 0 && sp.spriteAssetIdx < (int)assets.size())
+                    if (sp.size > hudMaxSize[sp.spriteAssetIdx])
+                        hudMaxSize[sp.spriteAssetIdx] = sp.size;
+        }
+
         for (size_t ai = 0; ai < assets.size(); ai++) {
             int prevSize = (int)allTiles.size();
             assetTileStart[ai] = (int)allTiles.size() / 8;
@@ -301,6 +318,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                              big <= 32 ? 32 : 64;
                 if (objSz > sz) sz = objSz;
             }
+            // Bump to hudMaxSize (snapped to OBJ-valid {8,16,32,64}) so the
+            // emitted tile blob covers the whole HUD piece footprint.
+            if (hudMaxSize[ai] > sz) {
+                int hms = hudMaxSize[ai];
+                int objSz = hms <= 8 ? 8 : hms <= 16 ? 16 : hms <= 32 ? 32 : 64;
+                if (objSz > sz) sz = objSz;
+            }
             assetObjSize[ai] = sz;
             int tilesPerSide = sz / 8;
             int tilesPerFrame = tilesPerSide * tilesPerSide;
@@ -315,14 +339,24 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             // direction 0 of dirAnimSets[0] (RGBA → nearest-palette quantized).
             auto emitFrame = [&](const uint8_t* pixels, int fw, int fh, bool stride64) {
                 int stride = stride64 ? kExportMaxFrameSize : fw;
+                // Nearest-neighbour scale src(fw×fh) → out(sz×sz). Matches GBA's
+                // FrameToGBATiles (gba_package.cpp:165) so an 8x8 asset used as
+                // a 16x16 HUD piece renders pixel-doubled into the bigger
+                // sprite area instead of leaving 3 transparent quadrants.
+                int outDim = tilesPerSide * 8;
+                if (outDim < 1) outDim = 1;
                 for (int ty = 0; ty < tilesPerSide; ty++)
                 for (int tx = 0; tx < tilesPerSide; tx++) {
                     for (int py = 0; py < 8; py++) {
                         uint32_t word = 0;
                         for (int px = 0; px < 8; px++) {
-                            int sx = tx * 8 + px;
-                            int sy = ty * 8 + py;
-                            uint8_t pix = (sx < fw && sy < fh) ? pixels[sy * stride + sx] : 0;
+                            int outX = tx * 8 + px;
+                            int outY = ty * 8 + py;
+                            int sx = (fw > 0) ? (outX * fw / outDim) : 0;
+                            int sy = (fh > 0) ? (outY * fh / outDim) : 0;
+                            if (sx >= fw) sx = fw - 1;
+                            if (sy >= fh) sy = fh - 1;
+                            uint8_t pix = (pixels && fw > 0 && fh > 0) ? pixels[sy * stride + sx] : 0;
                             word |= ((uint32_t)(pix & 0xF)) << (px * 4);
                         }
                         allTiles.push_back(word);
@@ -743,9 +777,42 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         // marker for new path).
         // asset_desc[0] is now vramTileBase (where the asset's per-frame
         // streamed data lands in sprite VRAM), not a ROM tile index.
+        // Palette bank dedup: `ai & 0xF` collides any time two assets share
+        // the low 4 bits (asset 23 over asset 7 etc.), and sprite_init's
+        // upload loop lets the later one win — silently corrupting the HUD
+        // pieces baked against the earlier asset's palette.
+        // Pass 1: any two assets with identical 16-color palettes share a
+        // bank. Pass 2: distinct palettes get the next free bank. If we run
+        // out of banks (>16 unique palettes), fall back to wraparound (the
+        // pre-dedup behaviour) for the overflow.
+        std::vector<int> assetPalBank(assets.size(), 0);
+        {
+            std::vector<int> bankOfPal; // representative asset for each allocated bank
+            int nextBank = 0;
+            for (size_t ai = 0; ai < assets.size(); ai++) {
+                int found = -1;
+                for (size_t bi = 0; bi < bankOfPal.size(); bi++) {
+                    bool same = true;
+                    for (int c = 0; c < 16; c++)
+                        if (assetPal[ai][c] != assetPal[bankOfPal[bi]][c]) { same = false; break; }
+                    if (same) { found = (int)bi; break; }
+                }
+                if (found >= 0) {
+                    assetPalBank[ai] = found;
+                } else if (nextBank < 16) {
+                    assetPalBank[ai] = nextBank;
+                    bankOfPal.push_back((int)ai);
+                    nextBank++;
+                } else {
+                    // Out of banks — fall back to wraparound.
+                    assetPalBank[ai] = (int)ai & 0xF;
+                }
+            }
+        }
+
         f << "static const int afn_asset_desc[][10] = {\n";
         for (size_t ai = 0; ai < assets.size(); ai++) {
-            int palBank = (int)ai & 0xF;
+            int palBank = assetPalBank[ai];
             f << "    { " << assetVramTileBase[ai] << ", " << assetTilesPerFrame[ai] << ", "
               << assetFrameCount[ai] << ", " << assetObjSize[ai] << ", "
               << palBank << ", " << assetDirCount[ai] << ", "
@@ -834,7 +901,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             AfnBakedHudPiece bp;
             bp.srcX = pc.localX; bp.srcY = pc.localY; bp.size = sz;
             bp.vramTile = vramTile;
-            bp.palBank = (ai >= 0) ? (ai & 0xF) : 15;
+            // Match the asset's dedupped palBank — `ai & 0xF` would clobber
+            // banks shared with a higher-index asset (e.g. asset 23's
+            // palette overwriting asset 7's) and break HUD pieces baked
+            // against asset 7's colors.
+            bp.palBank = (ai >= 0 && ai < (int)assetPalBank.size()) ? assetPalBank[ai] : 15;
             bp.blackTint = pc.blackTint ? 1 : 0;
             bp.opacity   = (pc.opacity < 0) ? 0 : (pc.opacity > 16 ? 16 : pc.opacity);
             out.push_back(bp);

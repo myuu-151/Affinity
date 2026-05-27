@@ -48,7 +48,11 @@ extern const unsigned char default_font_bin[];
 // (drop shadows). All 15 colour slots populated so any palette index
 // used by the source tile data renders as solid black.
 #define AFN_HUD_BLACK_BANK    10
-#define AFN_HUD_OAM_BASE      100
+// HUD reserves the second half of OAM (64..127) so sprites/tm_objects own
+// slots 0..63. Was 100 originally — that gave only 28 slots for HUD, and
+// menu elements with ~75 pieces (8x8 border + 16x16 interior + shadow
+// layer) saturated past slot 127 and silently lost their interior fills.
+#define AFN_HUD_OAM_BASE      64
 
 static void hud_bake_font(void)
 {
