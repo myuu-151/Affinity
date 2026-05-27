@@ -116,18 +116,29 @@ void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch)
 
     SoundFormat fmt = afn_pcm_is16[smpIdx] ? SoundFormat_16Bit : SoundFormat_8Bit;
     int loop = afn_pcm_loop[smpIdx];
-    int loopStart = afn_pcm_loop_start[smpIdx];
-    int sampleSize = afn_pcm_lens[smpIdx];
+    // NDS hardware SCHANNEL_LENGTH counts words AFTER the loop point, not
+    // total. libnds soundPlaySample stuffs dataSize/4 straight into it
+    // and passes loopPoint as RAW words. So:
+    //   loopPoint = loop_start_samples * bytes_per_sample / 4
+    //   dataSize  = (sample_count - loop_start) * bytes_per_sample   (for loop)
+    //             = sample_count * bytes_per_sample                  (for one-shot)
+    // The earlier "pass total size" version made the hardware play past
+    // the end of the sample into the next sample's memory — exactly the
+    // rogue extra notes the user heard echoing the real melody.
+    int bytesPerSample = afn_pcm_is16[smpIdx] ? 2 : 1;
+    int loopStart = loop ? afn_pcm_loop_start[smpIdx] : 0;
+    int sampleBytes = (afn_pcm_lens[smpIdx] - loopStart) * bytesPerSample;
+    int loopWords   = (loopStart * bytesPerSample) / 4;
 
     int handle = soundPlaySample(
         (void*)afn_pcm_ptrs[smpIdx],
         fmt,
-        sampleSize,
+        sampleBytes,
         hz,
         vol,
         64,                         // pan center
         loop ? true : false,
-        loopStart
+        loopWords
     );
 
     // Fire-and-forget for SFX (durTicks <= 0): don't reserve a slot in
