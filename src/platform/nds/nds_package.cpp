@@ -235,6 +235,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     // gets one palette in afn_pal[][16]. NDS OBJ VRAM is 128KB (4× GBA) so we
     // can afford the wasteful layout for a first cut.
     f << "#define AFN_ASSET_COUNT " << (int)assets.size() << "\n\n";
+    // Declared at function scope so the HUD-text bank allocator further down
+    // can avoid stealing a bank an asset already owns.
+    std::vector<bool> bankClaimedByAsset(16, false);
     if (!assets.empty()) {
         // Pack each asset's frames into 8x8 4bpp tiles. Per-frame: tiles laid
         // out in row-major tile order (left-to-right tile columns, top-to-bottom
@@ -786,10 +789,30 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         // out of banks (>16 unique palettes), fall back to wraparound (the
         // pre-dedup behaviour) for the overflow.
         std::vector<int> assetPalBank(assets.size(), 0);
+        // Bank 10 = HUD black-tint palette (hud_init dmaCopy's black over
+        // anything sprite_init wrote there), bank 15 = HUD font.
+        // Allocate banks 0..14 (skip 10, 15). Dedup priority:
+        //   1. paletteSrc — editor's explicit "share this palette"
+        //   2. content equality — same 16-color array → same bank
+        // Boxes all have [trans, white, 0..0] so content dedup collapses
+        // them to one bank, leaving room for distinct logos / NPCs. The
+        // collapse is correct: assets with truly identical palettes also
+        // share OAM palette data, so combining them costs nothing.
+        // Overflow wraps; the wrap target may clobber another asset's
+        // bank (acceptable for projects with > 13 truly-distinct palettes).
         {
-            std::vector<int> bankOfPal; // representative asset for each allocated bank
+            auto isReserved = [](int b) { return b == 10 || b == 15; };
+            std::vector<int> bankOfPal;
+            std::vector<int> palToBank;
             int nextBank = 0;
+            auto advance = [&]() { while (isReserved(nextBank)) nextBank++; };
+            advance();
             for (size_t ai = 0; ai < assets.size(); ai++) {
+                int src = assets[ai].paletteSrc;
+                if (src >= 0 && src < (int)ai) {
+                    assetPalBank[ai] = assetPalBank[src];
+                    continue;
+                }
                 int found = -1;
                 for (size_t bi = 0; bi < bankOfPal.size(); bi++) {
                     bool same = true;
@@ -798,14 +821,29 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                     if (same) { found = (int)bi; break; }
                 }
                 if (found >= 0) {
-                    assetPalBank[ai] = found;
+                    assetPalBank[ai] = palToBank[found];
                 } else if (nextBank < 16) {
                     assetPalBank[ai] = nextBank;
+                    bankClaimedByAsset[nextBank] = true;
                     bankOfPal.push_back((int)ai);
+                    palToBank.push_back(nextBank);
                     nextBank++;
+                    advance();
                 } else {
-                    // Out of banks — fall back to wraparound.
-                    assetPalBank[ai] = (int)ai & 0xF;
+                    // Overflow: 14 banks aren't enough. `ai % 16` would
+                    // wrap onto whichever bank that arithmetic picks, which
+                    // is usually a still-visible asset (e.g. logo7 (ai=25)
+                    // → bank 9 → clobbers logo2). Pick the bank with the
+                    // fewest assets already pointing at it — clobbering a
+                    // small, often-unused asset slot is less destructive.
+                    int counts[16] = {0};
+                    for (size_t pi = 0; pi < ai; pi++) counts[assetPalBank[pi]]++;
+                    int best = -1, bestCount = 0x7FFFFFFF;
+                    for (int b = 0; b < 16; b++) {
+                        if (isReserved(b)) continue;
+                        if (counts[b] < bestCount) { bestCount = counts[b]; best = b; }
+                    }
+                    assetPalBank[ai] = best >= 0 ? best : 0;
                 }
             }
         }
@@ -1795,23 +1833,31 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             // banks 14..11 (font is 15, asset banks 0..AFN_ASSET_COUNT-1).
             // Caps at 4 unique colors; extras fall back to the font bank.
             std::vector<unsigned short> uniqueColors;
-            std::vector<int> rowPalBank; // size == totalText
+            std::vector<int> uniqueColorBanks; // bank assigned per uniqueColor
+            std::vector<int> rowPalBank;       // size == totalText
             const int kFontBank = 15;
-            const int kFirstColorBank = 14, kLastColorBank = 11;
+            // Skip banks already claimed by an asset (sprite_init's upload
+            // would clobber whatever text color we put there). Walk down
+            // from 14 looking for free banks.
+            auto allocTextBank = [&]() -> int {
+                for (int b = 14; b >= 11; b--)
+                    if (!bankClaimedByAsset[b]) {
+                        bool taken = false;
+                        for (int ub : uniqueColorBanks) if (ub == b) { taken = true; break; }
+                        if (!taken) return b;
+                    }
+                return kFontBank; // overflow → render in font palette (white)
+            };
             for (const auto& he : hudElements) {
                 for (const auto& tr : he.textRows) {
                     unsigned short c = tr.colorRGB15 & 0x7FFF;
                     int bank = -1;
                     for (size_t i = 0; i < uniqueColors.size(); i++)
-                        if (uniqueColors[i] == c) { bank = kFirstColorBank - (int)i; break; }
+                        if (uniqueColors[i] == c) { bank = uniqueColorBanks[i]; break; }
                     if (bank < 0) {
-                        int slotIdx = (int)uniqueColors.size();
-                        if (slotIdx <= (kFirstColorBank - kLastColorBank)) {
-                            uniqueColors.push_back(c);
-                            bank = kFirstColorBank - slotIdx;
-                        } else {
-                            bank = kFontBank; // overflow → white
-                        }
+                        bank = allocTextBank();
+                        uniqueColors.push_back(c);
+                        uniqueColorBanks.push_back(bank);
                     }
                     rowPalBank.push_back(bank);
                 }
@@ -1828,7 +1874,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             if (!uniqueColors.empty()) {
                 f << "static const struct { unsigned char bank; unsigned short color; } afn_hud_text_palettes[" << (int)uniqueColors.size() << "] = {\n";
                 for (size_t i = 0; i < uniqueColors.size(); i++)
-                    f << "    { " << (kFirstColorBank - (int)i) << ", 0x"
+                    f << "    { " << uniqueColorBanks[i] << ", 0x"
                       << std::hex << uniqueColors[i] << std::dec << " },\n";
                 f << "};\n";
             }
