@@ -1,5 +1,13 @@
 # Affinity Editor — Development Conventions
 
+## Editor canvas is GBA-native (240×160)
+
+All editor authoring — HUD element x/y, piece localX/localY, animation keyframe offsets, sprite world positions — is in **GBA units (240 wide × 160 tall)**. The NDS port renders content at the same coords with extra blank space on the right/bottom of its 256×192 screen.
+
+**When porting NDS code that does positional math against "screen width/height" for editor-authored content, use 240/160, not 256/192.** Common bite: HUD anim keyframes like `+240, +0` mean "slide one full GBA screen and wrap back to start." Wrapping that at the NDS width (256) leaves a 16 px gap. The same rule applies vertically (use 160 for any future Y wrap).
+
+Per-frame HUD anim ticking matches GBA's 60 Hz; the editor's FPS slider value N translates to `speed = 60/N` frames per tick.
+
 ## Visual Script Node Code Previews
 
 Every action node in `src/editor/frame_loop.cpp` has a `setActionFunc()` call that defines the **actual C implementation** shown in the editor's "Mode 0 Runtime" code window. This is NOT a preview — it is the real generated code.

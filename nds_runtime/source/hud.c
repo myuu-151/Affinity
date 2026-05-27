@@ -381,18 +381,20 @@ void afn_hud_draw(void) {
                         }
                     }
 #endif
-                    int px = ex + pi->x + aox;
+                    // Wrap the LAYER offset itself at GBA screen width (240)
+                    // so animations authored against the editor's 240-px canvas
+                    // end where they started — a +240 keyframe means "one full
+                    // screen of slide." Wrapping at 256 (NDS) leaves a 16-px gap.
+                    int wrapMod = 240;
+                    int aoxW = aox % wrapMod;
+                    if (aoxW < 0) aoxW += wrapMod;
+                    int px = ex + pi->x + aoxW;
                     int py = ey + pi->y + aoy;
                     oamSlot = hud_blit_piece(oamSlot, px, py, pi);
-                    // Screen-wrap: if the piece's right edge crosses the screen,
-                    // draw a second copy shifted by -256 so the wrapped portion
-                    // appears on the left. Same for left edge.
-                    if (aox != 0 || aoy != 0) {
-                        if (px + pi->size > 256 && oamSlot < 128)
-                            oamSlot = hud_blit_piece(oamSlot, px - 256, py, pi);
-                        else if (px < 0 && oamSlot < 128)
-                            oamSlot = hud_blit_piece(oamSlot, px + 256, py, pi);
-                    }
+                    // Draw a second copy at px - wrapMod so the wrapped portion
+                    // appears as the piece's "left half" sliding off the right.
+                    if (aoxW != 0 && oamSlot < 128)
+                        oamSlot = hud_blit_piece(oamSlot, px - wrapMod, py, pi);
                 }
 #endif
             } else if (cat == 1) {
