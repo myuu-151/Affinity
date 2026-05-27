@@ -14,10 +14,10 @@
 #define AFN_CAM_HORIZON 60
 #define AFN_WALK_SPEED 37
 #define AFN_SPRINT_SPEED 56
-#define AFN_WALK_EASE_IN 46
-#define AFN_WALK_EASE_OUT 46
+#define AFN_WALK_EASE_IN 25
+#define AFN_WALK_EASE_OUT 25
 #define AFN_SPRINT_EASE_IN 15
-#define AFN_SPRINT_EASE_OUT 30
+#define AFN_SPRINT_EASE_OUT 10
 #define AFN_ORBIT_EASE_IN 64
 #define AFN_ORBIT_EASE_OUT 128
 #define AFN_JUMP_CAM_LAND 94
@@ -25,12 +25,12 @@
 #define AFN_DRAW_DISTANCE 11712
 
 #define AFN_PLAYER_IDX 0
-#define AFN_ORBIT_DIST 4480
+#define AFN_ORBIT_DIST 5760
 
 #define AFN_SPRITE_COUNT 2
 
 static const int afn_sprite_data[][11] = {
-    { 32768, 0, 28288, 1, 0, 256, 1, 0, 1, -1, 0 },
+    { 32768, 0, 27008, 1, 0, 256, 1, 0, 1, -1, 0 },
     { 32768, 0, 23174, 1, 1, 256, 3, 0, 1, -1, 0 },
 };
 
@@ -16956,6 +16956,16 @@ extern int  afn_collided_tm_obj;
 extern int  afn_collided_tm_obj;
 extern int  afn_bp_cur_tm_obj;
 extern int  afn_bp_cur_spr_idx;
+extern int  afn_bp_cur_tm_obj;
+extern int  tm_fol_active;
+extern int  tm_fol_obj;
+extern int  tm_fol_dist;
+extern int  tm_fol_speed;
+extern int  tm_fol_facing;
+extern int  tm_fol_moving;
+extern short tm_obj_facing[];
+extern int  tm_player_tx;
+extern int  tm_player_ty;
 extern int  afn_gravity;
 extern int  afn_terminal_vel;
 extern int  afn_player_frozen;
@@ -19115,19 +19125,34 @@ static void afn_bp5_start(void) {
 }
 static void afn_bp5_update(void) {
     if (afn_flags & (1u << 1)) {
-    /* TODO: emit node type 231 */
-    /* TODO: emit node type 234 */
-    afn_sprite_anim_spr = 5; afn_sprite_anim_val = 0;
-    /* TODO: emit node type 233 */
-    afn_sprite_anim_spr = 5; afn_sprite_anim_val = 1;
+    if (!tm_fol_active) {
+      tm_fol_obj = 5;
+      extern int tm_fol_prev_ptx, tm_fol_prev_pty;
+      tm_fol_prev_ptx = tm_player_tx;
+      tm_fol_prev_pty = tm_player_ty;
+      extern int tm_fol_trail_count, tm_fol_trail_head;
+      tm_fol_trail_count = 0; tm_fol_trail_head = 0;
+      tm_fol_active = 1;
+    }
+    tm_fol_dist = 1;
+    tm_fol_speed = 0;
+    if (tm_fol_active && tm_fol_obj >= 0)
+      tm_obj_facing[tm_fol_obj] = tm_fol_facing;
+    if (afn_current_mode == 1) { extern int tm_obj_anim_idx[]; extern int tm_obj_anim_play[]; tm_obj_anim_idx[5] = 0; tm_obj_anim_play[5] = 1; }
+    else { afn_sprite_anim_spr = 5; afn_sprite_anim_val = 0; }
+    if (tm_fol_moving) {
+    if (afn_current_mode == 1) { extern int tm_obj_anim_idx[]; extern int tm_obj_anim_play[]; tm_obj_anim_idx[5] = 1; tm_obj_anim_play[5] = 1; }
+    else { afn_sprite_anim_spr = 5; afn_sprite_anim_val = 1; }
+    }
     }
 }
 static void afn_bp5_key_held(void) {
 }
 static void afn_bp5_key_pressed(void) {
     if (key_hit(KEY_A)) {
-    /* TODO: emit node type 232 */
+    if (afn_collided_tm_obj == afn_bp_cur_tm_obj && afn_bp_cur_tm_obj >= 0) {
     afn_flags |=  (1u << 1);
+    }
     }
 }
 static void afn_bp5_key_released(void) {
@@ -19206,6 +19231,7 @@ static void afn_bp_dispatch_start(void) {
         if (mask != 0xFFFFFFFFu && !(mask & (1u << afn_current_scene))) continue;
         int bpIdx = afn_bp_instances[i][0];
         afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];
+        afn_bp_cur_tm_obj  = (int)afn_bp_instances[i][2];
         switch (bpIdx) {
             case 0: afn_bp0_start(); break;
             case 1: afn_bp1_start(); break;
@@ -19218,6 +19244,7 @@ static void afn_bp_dispatch_start(void) {
         }
     }
     afn_bp_cur_spr_idx = -1;
+    afn_bp_cur_tm_obj  = -1;
 }
 static void afn_bp_dispatch_update(void) {
     extern int afn_current_mode;
@@ -19229,6 +19256,7 @@ static void afn_bp_dispatch_update(void) {
         if (mask != 0xFFFFFFFFu && !(mask & (1u << afn_current_scene))) continue;
         int bpIdx = afn_bp_instances[i][0];
         afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];
+        afn_bp_cur_tm_obj  = (int)afn_bp_instances[i][2];
         switch (bpIdx) {
             case 0: afn_bp0_update(); break;
             case 1: afn_bp1_update(); break;
@@ -19241,6 +19269,7 @@ static void afn_bp_dispatch_update(void) {
         }
     }
     afn_bp_cur_spr_idx = -1;
+    afn_bp_cur_tm_obj  = -1;
 }
 static void afn_bp_dispatch_key_held(void) {
     extern int afn_current_mode;
@@ -19252,6 +19281,7 @@ static void afn_bp_dispatch_key_held(void) {
         if (mask != 0xFFFFFFFFu && !(mask & (1u << afn_current_scene))) continue;
         int bpIdx = afn_bp_instances[i][0];
         afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];
+        afn_bp_cur_tm_obj  = (int)afn_bp_instances[i][2];
         switch (bpIdx) {
             case 0: afn_bp0_key_held(); break;
             case 1: afn_bp1_key_held(); break;
@@ -19264,6 +19294,7 @@ static void afn_bp_dispatch_key_held(void) {
         }
     }
     afn_bp_cur_spr_idx = -1;
+    afn_bp_cur_tm_obj  = -1;
 }
 static void afn_bp_dispatch_key_pressed(void) {
     extern int afn_current_mode;
@@ -19275,6 +19306,7 @@ static void afn_bp_dispatch_key_pressed(void) {
         if (mask != 0xFFFFFFFFu && !(mask & (1u << afn_current_scene))) continue;
         int bpIdx = afn_bp_instances[i][0];
         afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];
+        afn_bp_cur_tm_obj  = (int)afn_bp_instances[i][2];
         switch (bpIdx) {
             case 0: afn_bp0_key_pressed(); break;
             case 1: afn_bp1_key_pressed(); break;
@@ -19287,6 +19319,7 @@ static void afn_bp_dispatch_key_pressed(void) {
         }
     }
     afn_bp_cur_spr_idx = -1;
+    afn_bp_cur_tm_obj  = -1;
 }
 static void afn_bp_dispatch_key_released(void) {
     extern int afn_current_mode;
@@ -19298,6 +19331,7 @@ static void afn_bp_dispatch_key_released(void) {
         if (mask != 0xFFFFFFFFu && !(mask & (1u << afn_current_scene))) continue;
         int bpIdx = afn_bp_instances[i][0];
         afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];
+        afn_bp_cur_tm_obj  = (int)afn_bp_instances[i][2];
         switch (bpIdx) {
             case 0: afn_bp0_key_released(); break;
             case 1: afn_bp1_key_released(); break;
@@ -19310,6 +19344,7 @@ static void afn_bp_dispatch_key_released(void) {
         }
     }
     afn_bp_cur_spr_idx = -1;
+    afn_bp_cur_tm_obj  = -1;
 }
 static void afn_bp_dispatch_collision(void) {
     extern int afn_current_mode;
@@ -19322,6 +19357,7 @@ static void afn_bp_dispatch_collision(void) {
         if (!((int)afn_bp_instances[i][1] == afn_collided_sprite)) continue;
         int bpIdx = afn_bp_instances[i][0];
         afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];
+        afn_bp_cur_tm_obj  = (int)afn_bp_instances[i][2];
         switch (bpIdx) {
             case 0: afn_bp0_collision(); break;
             case 1: afn_bp1_collision(); break;
@@ -19334,6 +19370,7 @@ static void afn_bp_dispatch_collision(void) {
         }
     }
     afn_bp_cur_spr_idx = -1;
+    afn_bp_cur_tm_obj  = -1;
 }
 static void afn_bp_dispatch_collision2d(void) {
     extern int afn_current_mode;
@@ -19346,6 +19383,7 @@ static void afn_bp_dispatch_collision2d(void) {
         if (!((int)afn_bp_instances[i][2] == afn_collided_tm_obj)) continue;
         int bpIdx = afn_bp_instances[i][0];
         afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];
+        afn_bp_cur_tm_obj  = (int)afn_bp_instances[i][2];
         switch (bpIdx) {
             case 0: afn_bp0_collision2d(); break;
             case 1: afn_bp1_collision2d(); break;
@@ -19358,5 +19396,6 @@ static void afn_bp_dispatch_collision2d(void) {
         }
     }
     afn_bp_cur_spr_idx = -1;
+    afn_bp_cur_tm_obj  = -1;
 }
 #endif // MAPDATA_H

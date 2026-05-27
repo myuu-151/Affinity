@@ -47,7 +47,7 @@ static int tm_cam_y = 0;
 
 // Player tile-grid state. tm_move_timer lives in script_glue.c so emitted
 // scripts can read it (IsMoving gate etc.); the rest is local.
-static int tm_player_tx = 0, tm_player_ty = 0;
+int tm_player_tx = 0, tm_player_ty = 0;
 static int tm_move_dx = 0, tm_move_dy = 0;
 static int tm_move_frames = 8;                       // frames per tile step
 static int tm_player_pixel_x = 0, tm_player_pixel_y = 0;
@@ -60,7 +60,32 @@ static unsigned int tm_frame_count = 0;              // anim ticker
 #define TM_MAX_OBJS 64
 int  tm_obj_anim_idx[TM_MAX_OBJS];
 int  tm_obj_anim_play[TM_MAX_OBJS];
-int  tm_obj_facing[TM_MAX_OBJS];
+short tm_obj_facing[TM_MAX_OBJS];
+
+// Mutable tile coords for follow targets — initialised from tm_cur_objs[oi].tx/ty,
+// then FollowPlayer's per-tick logic walks them along the player's trail.
+short tm_obj_tx[TM_MAX_OBJS];
+short tm_obj_ty[TM_MAX_OBJS];
+
+// FollowPlayer / SetFollowFacing / IsFollowMoving state. Mirrors GBA
+// gba_runtime/source/main.c ~6791 — same breadcrumb-trail follow.
+#define TM_FOL_TRAIL_LEN 32
+int   tm_fol_active = 0;
+int   tm_fol_obj    = -1;
+int   tm_fol_dist   = 0;
+int   tm_fol_speed  = 0;
+int   tm_fol_facing = 4;
+int   tm_fol_moving = 0;
+int   tm_fol_prev_ptx = 0;
+int   tm_fol_prev_pty = 0;
+int   tm_fol_trail_count = 0;
+int   tm_fol_trail_head  = 0;
+short tm_fol_trail_tx[TM_FOL_TRAIL_LEN];
+short tm_fol_trail_ty[TM_FOL_TRAIL_LEN];
+int   tm_fol_lerp_timer = 0;
+int   tm_fol_lerp_total = 1;
+int   tm_fol_lerp_dx = 0, tm_fol_lerp_dy = 0;
+int   tm_fol_offset_x = 0, tm_fol_offset_y = 0;
 
 // Per-asset active VRAM frame, mirrors sprites.c's g_active_frame[ai]:
 // each asset has a fixed VRAM region assigned by the exporter
@@ -172,7 +197,15 @@ void afn_mode0_init_scene(int sceneIdx)
         tm_obj_anim_idx[oi]  = tm_cur_objs[oi].animIdx;
         tm_obj_anim_play[oi] = tm_cur_objs[oi].animPlay;
         tm_obj_facing[oi]    = tm_cur_objs[oi].facing;
+        tm_obj_tx[oi]        = tm_cur_objs[oi].tx;
+        tm_obj_ty[oi]        = tm_cur_objs[oi].ty;
     }
+    // Reset follow state on scene load.
+    tm_fol_active = 0; tm_fol_obj = -1;
+    tm_fol_trail_count = 0; tm_fol_trail_head = 0;
+    tm_fol_lerp_timer = 0;
+    tm_fol_offset_x = 0; tm_fol_offset_y = 0;
+    tm_fol_moving = 0;
 #if defined(AFN_ASSET_COUNT) && AFN_ASSET_COUNT > 0
     // Force each asset to re-DMA on the next render so the new scene's
     // tm_objects don't draw last-frame's stale tile data.
@@ -247,8 +280,14 @@ static void mode0_render_objects(int oamSlotStart, int *outOamSlot)
             objPx = tm_player_pixel_x;
             objPy = tm_player_pixel_y;
         } else {
-            objPx = obj->tx * tm_tile_size;
-            objPy = obj->ty * tm_tile_size;
+            objPx = tm_obj_tx[oi] * tm_tile_size;
+            objPy = tm_obj_ty[oi] * tm_tile_size;
+            // FollowPlayer adds a per-frame lerp offset for the followed obj
+            // so it glides between its previous and current trail tile.
+            if (oi == tm_fol_obj && tm_fol_active) {
+                objPx += tm_fol_offset_x;
+                objPy += tm_fol_offset_y;
+            }
         }
         int screenX = objPx - tm_cam_x;
         int screenY = objPy - tm_cam_y;
@@ -356,6 +395,35 @@ void afn_mode0_update(void)
 
     extern int afn_player_frozen;
 
+    // Per-frame collision-adjacency scan. Sets afn_collided_tm_obj to the
+    // first non-Tile tm_object within (cells) of the player, so BP
+    // IsNear2D gates (e.g. AIFollow's OnKeyPressed(A) chain) see it
+    // during the same frame's BP dispatch. Mirrors GBA's mode 0 loop —
+    // without this, collided_tm_obj only briefly flickered set on the
+    // tile-arrival or blocked-move frame and missed almost every key
+    // press from the player.
+#if defined(AFN_HAS_SCRIPT)
+    extern int afn_collided_tm_obj;
+    afn_collided_tm_obj = -1;
+    for (int ci = 0; ci < tm_cur_obj_count; ci++) {
+        if (ci == AFN_TM_PLAYER_OBJ) continue;
+        if (tm_cur_objs[ci].type == 6) continue;
+        int sc = tm_cur_objs[ci].scale8;
+        if (sc < 256) sc = 256;
+        int cells = sc >> 8; if (cells < 1) cells = 1;
+        int ox = tm_obj_tx[ci];
+        int oy = tm_obj_ty[ci];
+        int ddx = tm_player_tx - ox; if (ddx < 0) ddx = -ddx;
+        int ddy = tm_player_ty - oy; if (ddy < 0) ddy = -ddy;
+        if (ddx <= cells && ddy <= cells) {
+            afn_collided_tm_obj = ci;
+            extern void afn_bp_dispatch_collision2d(void);
+            afn_bp_dispatch_collision2d();
+            break;
+        }
+    }
+#endif
+
     // Grid-step state machine. Mirrors GBA's mode0 update verbatim.
     if (tm_move_timer > 0) {
         tm_move_timer--;
@@ -365,28 +433,9 @@ void afn_mode0_update(void)
             tm_move_dx = 0;
             tm_move_dy = 0;
 
-            // Just arrived at a new tile — check overlap with any non-Tile
-            // tm_object and fire its OnCollision2D BP. tm_obj_anim_idx /
-            // sceneobj cells use the same scale8 cell footprint as the
-            // movement collision check.
-#if defined(AFN_HAS_SCRIPT)
-            extern int afn_collided_tm_obj;
-            extern void afn_bp_dispatch_collision2d(void);
-            for (int ci = 0; ci < tm_cur_obj_count; ci++) {
-                if (ci == AFN_TM_PLAYER_OBJ) continue;
-                if (tm_cur_objs[ci].type == 6) continue; // Tile decoration
-                int sc = tm_cur_objs[ci].scale8;
-                int cells = sc >> 8; if (cells < 1) cells = 1;
-                int ddx = tm_player_tx - tm_cur_objs[ci].tx; if (ddx < 0) ddx = -ddx;
-                int ddy = tm_player_ty - tm_cur_objs[ci].ty; if (ddy < 0) ddy = -ddy;
-                if (ddx < cells && ddy < cells) {
-                    afn_collided_tm_obj = ci;
-                    afn_bp_dispatch_collision2d();
-                    afn_collided_tm_obj = -1;
-                    break;
-                }
-            }
-#endif
+            // (per-frame adjacency scan at top of mode0_update sets
+            //  afn_collided_tm_obj + fires collision2d — no extra dispatch
+            //  needed here.)
         }
     }
     if (tm_move_timer == 0 && !afn_player_frozen) {
@@ -431,21 +480,8 @@ void afn_mode0_update(void)
                         tm_move_dx = dx;
                         tm_move_dy = dy;
                         tm_move_timer = tm_move_frames;
-                    } else {
-                        // Player tried to walk into a collidable tm_object —
-                        // fire its OnCollision2D BP even though the move is
-                        // blocked. Without this, collision-enabled objects
-                        // could never trigger ChangeScene / dialogue etc.
-#if defined(AFN_HAS_SCRIPT)
-                        extern int afn_collided_tm_obj;
-                        extern void afn_bp_dispatch_collision2d(void);
-                        if (blockedBy >= 0 && tm_cur_objs[blockedBy].type != 6) {
-                            afn_collided_tm_obj = blockedBy;
-                            afn_bp_dispatch_collision2d();
-                            afn_collided_tm_obj = -1;
-                        }
-#endif
                     }
+                    (void)blockedBy;
                 }
             }
         } else {
@@ -480,6 +516,42 @@ void afn_mode0_update(void)
     if (!afn_player_frozen)
         afn_play_anim = (tm_move_timer > 0) ? 1 : 0;
 #endif
+
+    // FollowPlayer tick (mirrors GBA gba_runtime/source/main.c ~6791):
+    // record each new player tile, replay the trail at distance N.
+    if (tm_fol_active && tm_fol_obj >= 0 && tm_fol_obj < TM_MAX_OBJS) {
+        int oi = tm_fol_obj;
+        if (tm_player_tx != tm_fol_prev_ptx || tm_player_ty != tm_fol_prev_pty) {
+            tm_fol_trail_tx[tm_fol_trail_head] = tm_fol_prev_ptx;
+            tm_fol_trail_ty[tm_fol_trail_head] = tm_fol_prev_pty;
+            tm_fol_trail_head = (tm_fol_trail_head + 1) % TM_FOL_TRAIL_LEN;
+            if (tm_fol_trail_count < TM_FOL_TRAIL_LEN) tm_fol_trail_count++;
+            tm_fol_prev_ptx = tm_player_tx;
+            tm_fol_prev_pty = tm_player_ty;
+            if (tm_fol_trail_count > (tm_fol_dist > 0 ? tm_fol_dist : 1)) {
+                int tail = (tm_fol_trail_head - tm_fol_trail_count + TM_FOL_TRAIL_LEN) % TM_FOL_TRAIL_LEN;
+                int ntx = tm_fol_trail_tx[tail];
+                int nty = tm_fol_trail_ty[tail];
+                tm_fol_lerp_dx = (tm_obj_tx[oi] - ntx) * tm_tile_size;
+                tm_fol_lerp_dy = (tm_obj_ty[oi] - nty) * tm_tile_size;
+                tm_fol_lerp_total = (tm_fol_speed > 0) ? tm_fol_speed : tm_move_frames;
+                if (tm_fol_lerp_total < 1) tm_fol_lerp_total = 1;
+                tm_fol_lerp_timer = tm_fol_lerp_total;
+                int mdx = ntx - tm_obj_tx[oi], mdy = nty - tm_obj_ty[oi];
+                if      (mdy < 0) tm_fol_facing = 0;
+                else if (mdy > 0) tm_fol_facing = 4;
+                else if (mdx < 0) tm_fol_facing = 6;
+                else if (mdx > 0) tm_fol_facing = 2;
+                tm_obj_tx[oi] = ntx;
+                tm_obj_ty[oi] = nty;
+                tm_fol_trail_count--;
+            }
+        }
+        if (tm_fol_lerp_timer > 0) tm_fol_lerp_timer--;
+        tm_fol_moving = (tm_fol_lerp_timer > 0) ? 1 : 0;
+    }
+    tm_fol_offset_x = (tm_fol_lerp_timer > 0) ? (tm_fol_lerp_dx * tm_fol_lerp_timer / tm_fol_lerp_total) : 0;
+    tm_fol_offset_y = (tm_fol_lerp_timer > 0) ? (tm_fol_lerp_dy * tm_fol_lerp_timer / tm_fol_lerp_total) : 0;
 
     // Camera follows player, centered on the 256x192 screen.
     tm_cam_x = tm_player_pixel_x - 128 + tm_tile_size / 2;

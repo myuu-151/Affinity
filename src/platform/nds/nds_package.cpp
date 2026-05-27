@@ -1791,6 +1791,17 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_collided_tm_obj;\n";
         f << "extern int  afn_bp_cur_tm_obj;\n";
         f << "extern int  afn_bp_cur_spr_idx;\n";
+        f << "extern int  afn_bp_cur_tm_obj;\n";
+        // Follow system state (FollowPlayer / SetFollowFacing / IsFollowMoving)
+        f << "extern int  tm_fol_active;\n";
+        f << "extern int  tm_fol_obj;\n";
+        f << "extern int  tm_fol_dist;\n";
+        f << "extern int  tm_fol_speed;\n";
+        f << "extern int  tm_fol_facing;\n";
+        f << "extern int  tm_fol_moving;\n";
+        f << "extern short tm_obj_facing[];\n";
+        f << "extern int  tm_player_tx;\n";
+        f << "extern int  tm_player_ty;\n";
         f << "extern int  afn_gravity;\n";
         f << "extern int  afn_terminal_vel;\n";
         f << "extern int  afn_player_frozen;\n";
@@ -2356,6 +2367,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "    if (player_vy > 0) {\n"; inJumpGate = true; break;
             case GBAScriptNodeType::IsFalling:
                 f << "    if (!player_on_ground && player_vy <= 0) {\n"; inJumpGate = true; break;
+            case GBAScriptNodeType::IsNear2D:
+                // Mirrors GBA: fires when the player just collided with
+                // THIS BP's tm_object. Combined with OnKeyPressed(A) this
+                // is the "press A near NPC" idiom.
+                f << "    if (afn_collided_tm_obj == afn_bp_cur_tm_obj && afn_bp_cur_tm_obj >= 0) {\n"; break;
+            case GBAScriptNodeType::IsFollowMoving:
+                f << "    if (tm_fol_moving) {\n"; break;
             // CheckFlag is handled specially in emitChain (dual-pin Set/Clear branches).
             case GBAScriptNodeType::SetVelocityY: {
                 auto* d = findDataIn(a->id, 0);
@@ -2374,10 +2392,38 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 auto* animData = findDataIn(a->id, 1);
                 int obj  = objData  ? resolveInt(objData)  : 0;
                 int anim = animData ? resolveInt(animData) : 0;
-                // NDS has no tilemap mode — direct per-sprite anim only.
-                f << "    afn_sprite_anim_spr = " << obj << "; afn_sprite_anim_val = " << anim << ";\n";
+                // Mode 4: per-sprite override via afn_sprite_anim_spr/val.
+                // Mode 0 tm_object: write directly to its mutable anim slot
+                // (the FollowPlayer / AIFollow BPs rely on this to switch
+                // a follower between idle and walk sprites).
+                f << "    if (afn_current_mode == 1) { extern int tm_obj_anim_idx[]; extern int tm_obj_anim_play[]; tm_obj_anim_idx[" << obj << "] = " << anim << "; tm_obj_anim_play[" << obj << "] = 1; }\n";
+                f << "    else { afn_sprite_anim_spr = " << obj << "; afn_sprite_anim_val = " << anim << "; }\n";
                 break;
             }
+            case GBAScriptNodeType::FollowPlayer: {
+                auto* objData   = findDataIn(a->id, 0);
+                auto* distData  = findDataIn(a->id, 1);
+                auto* speedData = findDataIn(a->id, 2);
+                int obj   = objData   ? resolveInt(objData)   : 0;
+                int dist  = distData  ? resolveInt(distData)  : 0;
+                int speed = speedData ? resolveInt(speedData) : 0;
+                f << "    if (!tm_fol_active) {\n";
+                f << "      tm_fol_obj = " << obj << ";\n";
+                f << "      extern int tm_fol_prev_ptx, tm_fol_prev_pty;\n";
+                f << "      tm_fol_prev_ptx = tm_player_tx;\n";
+                f << "      tm_fol_prev_pty = tm_player_ty;\n";
+                f << "      extern int tm_fol_trail_count, tm_fol_trail_head;\n";
+                f << "      tm_fol_trail_count = 0; tm_fol_trail_head = 0;\n";
+                f << "      tm_fol_active = 1;\n";
+                f << "    }\n";
+                f << "    tm_fol_dist = " << dist << ";\n";
+                f << "    tm_fol_speed = " << speed << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::SetFollowFacing:
+                f << "    if (tm_fol_active && tm_fol_obj >= 0)\n";
+                f << "      tm_obj_facing[tm_fol_obj] = tm_fol_facing;\n";
+                break;
             case GBAScriptNodeType::PlaySound: {
                 auto* d = findDataIn(a->id, 0);
                 int sId = d ? resolveInt(d) : 0;
@@ -2556,7 +2602,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             bool isGate = (a->type == GBAScriptNodeType::IsMoving ||
                            a->type == GBAScriptNodeType::IsOnGround ||
                            a->type == GBAScriptNodeType::IsJumping ||
-                           a->type == GBAScriptNodeType::IsFalling);
+                           a->type == GBAScriptNodeType::IsFalling ||
+                           a->type == GBAScriptNodeType::IsNear2D ||
+                           a->type == GBAScriptNodeType::IsFollowMoving);
             if (isGate) {
                 bool wasJump = inJumpGate;
                 emitAction(a);  // emits "if (cond) {\n" and updates inJumpGate
@@ -2696,12 +2744,14 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 if (gateExpr) f << "        if (!(" << gateExpr << ")) continue;\n";
                 f << "        int bpIdx = afn_bp_instances[i][0];\n";
                 f << "        afn_bp_cur_spr_idx = (int)afn_bp_instances[i][1];\n";
+                f << "        afn_bp_cur_tm_obj  = (int)afn_bp_instances[i][2];\n";
                 f << "        switch (bpIdx) {\n";
                 for (size_t bi = 0; bi < blueprints.size(); bi++)
                     f << "            case " << bi << ": afn_bp" << bi << "_" << suffix << "(); break;\n";
                 f << "        }\n";
                 f << "    }\n";
                 f << "    afn_bp_cur_spr_idx = -1;\n";
+                f << "    afn_bp_cur_tm_obj  = -1;\n";
             }
             f << "}\n";
         };
