@@ -436,7 +436,18 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                     AnimEntry ae;
                     ae.start = remap[base];
                     ae.count = cnt;
-                    ae.fps   = (int)(a.anims[an].fps * a.anims[an].speed);
+                    // Match GBA exporter: unset fps falls back to 8 so the
+                    // editor's "Animate" toggle still produces motion without
+                    // forcing the user to dial in a per-anim fps.
+                    {
+                        int fpsRaw = a.anims[an].fps;
+                        if (fpsRaw <= 0) fpsRaw = 8;
+                        float spd = a.anims[an].speed;
+                        if (spd <= 0.0f) spd = 1.0f;
+                        int eff = (int)(fpsRaw * spd);
+                        if (eff < 1) eff = 1;
+                        ae.fps = eff;
+                    }
                     ae.loop  = a.anims[an].loop ? 1 : 0;
                     animTable.push_back(ae);
                 }
@@ -637,7 +648,18 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                     if (ae.start + ae.count > totalFrames)
                         ae.count = totalFrames - ae.start;
                     if (ae.count < 1) ae.count = 1;
-                    ae.fps   = (int)(anim.fps * anim.speed);
+                    // Match GBA exporter (gba_package.cpp:1001): fps==0
+                    // falls back to 8 so the editor's "Animate" toggle works
+                    // even when the user never picked an explicit fps.
+                    {
+                        int fpsRaw = anim.fps;
+                        if (fpsRaw <= 0) fpsRaw = 8;
+                        float spd = anim.speed;
+                        if (spd <= 0.0f) spd = 1.0f;
+                        int eff = (int)(fpsRaw * spd);
+                        if (eff < 1) eff = 1;
+                        ae.fps = eff;
+                    }
                     ae.loop  = anim.loop ? 1 : 0;
                     animTable.push_back(ae);
                     baseSet += fc;
