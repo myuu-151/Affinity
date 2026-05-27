@@ -503,8 +503,13 @@ void afn_hud_draw(void) {
         }
     }
     // Park unused HUD slots so stale entries from earlier frames don't render.
-    for (int i = oamSlot; i < 128; i++)
+    // Skip slots flagged RotateScale — those belong to sprite_update (called
+    // earlier this frame) and oamSetHidden asserts on RotateScale entries.
+    // sprite_update's oamClear next frame will retire them properly.
+    for (int i = oamSlot; i < 128; i++) {
+        if (oamMain.oamMemory[i].isRotateScale) continue;
         oamSetHidden(&oamMain, i, true);
+    }
     // sprite_update flushed oamMain already; without our own flush the
     // HUD writes only land in the user buffer and get wiped next frame.
     oamUpdate(&oamMain);
