@@ -31,11 +31,12 @@ extern const unsigned char default_font_bin[];
 // so font glyphs are spaced 128 bytes apart. Bytes 32..127 of each slot
 // are wasted but unavoidable.
 //
-// Base byte offset 98304 (slot 768 in 128-byte units), well above the
-// gameplay-sprite cursor (1620 raw tiles ≈ 51840 bytes). 256 glyphs *
-// 128 bytes = 32768 bytes, ending at byte 131072 = the bank-B limit.
-// If the gameplay cursor ever crosses 768 we need a different region.
-#define AFN_HUD_VRAM_OFFSET   98304          // bytes into sprite VRAM
+// AFN_HUD_VRAM_OFFSET is emitted by the exporter, sized to start
+// immediately after the gameplay-sprite pool. Fallback 98304 covers
+// builds without the macro.
+#ifndef AFN_HUD_VRAM_OFFSET
+#define AFN_HUD_VRAM_OFFSET   98304
+#endif
 #define AFN_HUD_TILE_STRIDE   128             // 1D_128 OAM addressing
 #define AFN_HUD_FONT_FIRST    0x20            // space
 #define AFN_HUD_FONT_LAST     0x7E            // ~
@@ -43,6 +44,10 @@ extern const unsigned char default_font_bin[];
 // Pieces start after the font slots (95 * 128 = 12160 bytes).
 #define AFN_HUD_PIECE_VRAM_OFFSET (AFN_HUD_VRAM_OFFSET + AFN_HUD_FONT_COUNT * AFN_HUD_TILE_STRIDE)
 #define AFN_HUD_PAL_BANK      15
+// Dedicated all-black palette for HUD pieces with blackTint set
+// (drop shadows). All 15 colour slots populated so any palette index
+// used by the source tile data renders as solid black.
+#define AFN_HUD_BLACK_BANK    10
 #define AFN_HUD_OAM_BASE      100
 
 static void hud_bake_font(void)
@@ -76,7 +81,9 @@ static void hud_bake_font(void)
 }
 
 #if defined(AFN_HUD_PIECE_TILE_LEN) && AFN_HUD_PIECE_TILE_LEN > 0
-extern const unsigned int afn_hud_piece_tiles[];
+// afn_hud_piece_tiles[] is defined as `static const` in mapdata.h (so
+// every TU including it gets its own copy without link conflicts).
+// This TU's copy is the one we upload.
 static void hud_bake_pieces(void)
 {
     // Piece tile data is baked into mapdata.h as a flat u32 blob,
@@ -92,7 +99,10 @@ static void hud_bake_pieces(void)
 
 void afn_hud_init(void) {
 #ifdef AFN_HAS_SCRIPT
-    afn_hud_visible[0] = 1;
+    // Default ALL element slots visible. The editor's per-element visible
+    // flag could be exported per-slot, but for now matching the GBA
+    // default (everything visible until a HideHUD node fires) is simpler.
+    for (int i = 0; i < 4; i++) afn_hud_visible[i] = 1;
     hud_bake_font();
 #if defined(AFN_HUD_PIECE_TILE_LEN) && AFN_HUD_PIECE_TILE_LEN > 0
     hud_bake_pieces();
@@ -103,6 +113,22 @@ void afn_hud_init(void) {
     unsigned short* pal = (unsigned short*)0x05000200 + AFN_HUD_PAL_BANK * 16;
     pal[0] = 0;
     pal[1] = RGB15(31, 31, 31);
+    // Bank 10 — all-black for blackTint pieces (drop shadows). Index 0
+    // stays transparent; indices 1-15 all render solid black so the
+    // piece's tile data shape blits as a silhouette.
+    // dmaCopy avoids any cache / write-ordering surprises that plain
+    // pointer stores hit (sprite_init's asset palette upload was
+    // somehow winning over my plain writes here).
+    {
+        static const u16 black_bank[16] = {
+            0,
+            RGB15(0,0,0), RGB15(0,0,0), RGB15(0,0,0), RGB15(0,0,0),
+            RGB15(0,0,0), RGB15(0,0,0), RGB15(0,0,0), RGB15(0,0,0),
+            RGB15(0,0,0), RGB15(0,0,0), RGB15(0,0,0), RGB15(0,0,0),
+            RGB15(0,0,0), RGB15(0,0,0), RGB15(0,0,0),
+        };
+        dmaCopy(black_bank, SPRITE_PALETTE + AFN_HUD_BLACK_BANK * 16, 32);
+    }
 #if defined(AFN_HUD_TEXT_PAL_COUNT) && AFN_HUD_TEXT_PAL_COUNT > 0
     // Per-text-row RGB color: dedup'd by the exporter into a small pool
     // of OBJ palette banks (14, 13, 12, 11). index 0 transparent,
@@ -159,15 +185,83 @@ static int hud_blit_piece(int oamSlot, int sx, int sy, const struct AfnHudPiece*
         case 64: sz = SpriteSize_64x64; break;
         default: sz = SpriteSize_16x16; break;
     }
+    // blackTint pieces (drop shadows) override the asset palette with the
+    // dedicated all-black bank — index 1..15 all render solid black so
+    // the shape's silhouette draws regardless of which colour index the
+    // source tile data used.
+    int palBank = pi->blackTint ? AFN_HUD_BLACK_BANK : pi->palBank;
     oamSet(&oamMain, oamSlot++,
            sx, sy,
-           1,                                              // priority below text
-           pi->palBank,                                    // reuse asset's palette bank
+           0,                                              // priority 0 — same as font
+           palBank,
            sz,
            SpriteColorFormat_16Color,
            (void*)(0x06400000 + AFN_HUD_PIECE_VRAM_OFFSET + pi->vramTile * AFN_HUD_TILE_STRIDE),
            -1, false, false, false, false, false);
     return oamSlot;
+}
+#endif
+
+#if defined(AFN_HUD_LAYER_COUNT) && AFN_HUD_LAYER_COUNT > 0
+// Per-layer animation state — frame counter (driven by speed = 60/fps)
+// plus a sub-frame tick to slow advance to the layer's authored fps.
+static int s_layer_frame[AFN_HUD_LAYER_COUNT];
+static int s_layer_tick[AFN_HUD_LAYER_COUNT];
+
+static void hud_layer_advance(void)
+{
+    for (int li = 0; li < AFN_HUD_LAYER_COUNT; li++) {
+        int spd = afn_hud_layers[li].speed;
+        if (spd < 1) spd = 1;
+        s_layer_tick[li]++;
+        if (s_layer_tick[li] >= spd) {
+            s_layer_tick[li] = 0;
+            s_layer_frame[li]++;
+            int len = afn_hud_layers[li].length;
+            if (afn_hud_layers[li].loop && len > 0 && s_layer_frame[li] >= len)
+                s_layer_frame[li] = 0;
+        }
+    }
+}
+
+// Resolve (offX, offY) for layer li at its current frame, lerping
+// between the surrounding two keyframes.
+static void hud_layer_offset(int li, int* outX, int* outY)
+{
+    *outX = 0; *outY = 0;
+    int kS = afn_hud_layers[li].kfStart;
+    int kN = afn_hud_layers[li].kfCount;
+    if (kN < 1) return;
+    int t = s_layer_frame[li];
+    int lastF = afn_hud_layer_kf[kS + kN - 1].frame;
+    // After the last keyframe, freeze on the last value (until loop wraps).
+    if (t >= lastF) { *outX = afn_hud_layer_kf[kS + kN - 1].offX;
+                      *outY = afn_hud_layer_kf[kS + kN - 1].offY; return; }
+    if (t <= afn_hud_layer_kf[kS].frame) { *outX = afn_hud_layer_kf[kS].offX;
+                                           *outY = afn_hud_layer_kf[kS].offY; return; }
+    for (int i = 0; i + 1 < kN; i++) {
+        int f0 = afn_hud_layer_kf[kS + i].frame;
+        int f1 = afn_hud_layer_kf[kS + i + 1].frame;
+        if (t >= f0 && t <= f1) {
+            int span = f1 - f0; if (span < 1) span = 1;
+            int interp = afn_hud_layers[li].interp;
+            int x0 = afn_hud_layer_kf[kS + i].offX, x1 = afn_hud_layer_kf[kS + i + 1].offX;
+            int y0 = afn_hud_layer_kf[kS + i].offY, y1 = afn_hud_layer_kf[kS + i + 1].offY;
+            if (interp == 0) {
+                // Constant — snap to f0's value.
+                *outX = x0; *outY = y0;
+            } else {
+                int u = ((t - f0) * 256) / span; // 0..256
+                if (interp == 2) {
+                    // Smoothstep t*t*(3-2t)
+                    u = (u * u * (768 - 2 * u)) >> 16;
+                }
+                *outX = x0 + ((x1 - x0) * u >> 8);
+                *outY = y0 + ((y1 - y0) * u >> 8);
+            }
+            return;
+        }
+    }
 }
 #endif
 
@@ -218,10 +312,25 @@ static void hud_kf_at(int e, int* outOffX, int* outOffY)
 
 void afn_hud_draw(void) {
 #if defined(AFN_HAS_SCRIPT) && defined(AFN_HUD_ELEM_COUNT) && AFN_HUD_ELEM_COUNT > 0
+    extern int afn_current_mode;
+    extern int afn_current_scene;
+#if defined(AFN_HUD_LAYER_COUNT) && AFN_HUD_LAYER_COUNT > 0
+    hud_layer_advance();
+#endif
     int oamSlot = AFN_HUD_OAM_BASE;
     for (int e = 0; e < AFN_HUD_ELEM_COUNT; e++) {
         int slot = e;
         if (slot < 4 && !afn_hud_visible[slot]) continue;
+        // runtimeMode: 0 = both, 1 = Mode 4 only, 2 = Mode 0 only.
+        // afn_current_mode: 0 = Mode 4 (3D), 1 = Mode 0 (tilemap).
+        int rm = afn_hud_elems[e].runtimeMode;
+        if (rm == 1 && afn_current_mode != 0) continue;
+        if (rm == 2 && afn_current_mode != 1) continue;
+        // Per-scene mask: skip if current scene's bit isn't set.
+        unsigned int mask = (afn_current_mode == 0)
+            ? afn_hud_elems[e].mode4Mask
+            : afn_hud_elems[e].mode0Mask;
+        if (!(mask & (1u << afn_current_scene))) continue;
         int ex = afn_hud_elems[e].x;
         int ey = afn_hud_elems[e].y;
 #if defined(AFN_HUD_KF_COUNT) && AFN_HUD_KF_COUNT > 0
@@ -252,17 +361,47 @@ void afn_hud_draw(void) {
 #if defined(AFN_HUD_PIECE_COUNT) && AFN_HUD_PIECE_COUNT > 0
                 int ps = afn_hud_elems[e].pieceStart;
                 int pc = afn_hud_elems[e].pieceCount;
-                for (int p = 0; p < pc; p++) {
+                for (int p = pc - 1; p >= 0; p--) {
                     if (oamSlot >= 128) break;
                     const struct AfnHudPiece* pi = &afn_hud_pieces[ps + p];
-                    oamSlot = hud_blit_piece(oamSlot, ex + pi->x, ey + pi->y, pi);
+                    int aox = 0, aoy = 0;
+#if defined(AFN_HUD_LAYER_COUNT) && AFN_HUD_LAYER_COUNT > 0
+                    // Find any anim layer that targets this piece, accumulate offsets.
+                    for (int li = 0; li < AFN_HUD_LAYER_COUNT; li++) {
+                        if (afn_hud_layers[li].elemIdx != e) continue;
+                        int iS = afn_hud_layers[li].itemStart;
+                        int iN = afn_hud_layers[li].itemCount;
+                        for (int ii = 0; ii < iN; ii++) {
+                            if (afn_hud_layer_items[iS + ii].type == 0 &&
+                                afn_hud_layer_items[iS + ii].index == p) {
+                                int lx, ly; hud_layer_offset(li, &lx, &ly);
+                                aox += lx; aoy += ly;
+                                break;
+                            }
+                        }
+                    }
+#endif
+                    // Wrap the LAYER offset itself at GBA screen width (240)
+                    // so animations authored against the editor's 240-px canvas
+                    // end where they started — a +240 keyframe means "one full
+                    // screen of slide." Wrapping at 256 (NDS) leaves a 16-px gap.
+                    int wrapMod = 240;
+                    int aoxW = aox % wrapMod;
+                    if (aoxW < 0) aoxW += wrapMod;
+                    int px = ex + pi->x + aoxW;
+                    int py = ey + pi->y + aoy;
+                    oamSlot = hud_blit_piece(oamSlot, px, py, pi);
+                    // Draw a second copy at px - wrapMod so the wrapped portion
+                    // appears as the piece's "left half" sliding off the right.
+                    if (aoxW != 0 && oamSlot < 128)
+                        oamSlot = hud_blit_piece(oamSlot, px - wrapMod, py, pi);
                 }
 #endif
             } else if (cat == 1) {
 #if defined(AFN_HUD_SPRITE_COUNT) && AFN_HUD_SPRITE_COUNT > 0
                 int ss2 = afn_hud_elems[e].sprStart;
                 int sc2 = afn_hud_elems[e].sprCount;
-                for (int p = 0; p < sc2; p++) {
+                for (int p = sc2 - 1; p >= 0; p--) {
                     if (oamSlot >= 128) break;
                     const struct AfnHudPiece* pi = &afn_hud_sprites[ss2 + p];
                     oamSlot = hud_blit_piece(oamSlot, ex + pi->x, ey + pi->y, pi);

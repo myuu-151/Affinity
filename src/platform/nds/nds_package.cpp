@@ -142,7 +142,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                                 const GBAScriptExport& script,
                                 const std::vector<GBABlueprintExport>& blueprints,
                                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
-                                const std::vector<GBAHudElementExport>& hudElements)
+                                const std::vector<GBAHudElementExport>& hudElements,
+                                int startMode)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
     std::ofstream f(outPath);
@@ -153,6 +154,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     f << "#define MAPDATA_H\n\n";
     f << "#include <nds.h>\n\n";
     if (ndsAntialiasing) f << "#define AFN_NDS_AA 1\n\n";
+    // Start mode (matches GBA convention): 0 = Mode 4 (3D), 1 = Mode 0
+    // (tilemap / HUD-only), 2 = Mode 1 (Mode 7). NDS branches its main
+    // loop on this so a Mode 0 splash scene doesn't try to spin up the
+    // 3D engine and a Mode 4 scene doesn't skip it.
+    f << "#define AFN_START_MODE " << startMode << "\n\n";
 
     // Camera start (same 16.8 fixed-point as GBA)
     f << "// Camera start position (16.8 fixed-point)\n";
@@ -217,7 +223,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     // HUD piece tile blob — populated inside the asset block (we need
     // allTiles + frameRomU32Offset) and emitted later in the HUD block.
     // Declared at function scope so both blocks can see them.
-    struct AfnBakedHudPiece { int srcX, srcY, size, vramTile, palBank; };
+    struct AfnBakedHudPiece { int srcX, srcY, size, vramTile, palBank, blackTint, opacity; };
     std::vector<AfnBakedHudPiece> bakedHudPieces;
     std::vector<AfnBakedHudPiece> bakedHudSprites;
     std::vector<uint32_t> hudPieceTiles;
@@ -660,6 +666,12 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             }
             f << "// VRAM tile usage: " << vramCursor << " tiles ("
               << (vramCursor * 32) << " bytes of " << (128 * 1024) << ")\n";
+            // HUD VRAM starts immediately after the gameplay-sprite pool,
+            // aligned to a 128-byte 1D_128 slot. Computed at export time so
+            // projects with bigger sprite pools don't crash the HUD.
+            int hudVramByteOffset = vramCursor * 32;
+            hudVramByteOffset = (hudVramByteOffset + 127) & ~127;
+            f << "#define AFN_HUD_VRAM_OFFSET " << hudVramByteOffset << "\n";
         }
         f << "static const u32 afn_all_tiles[" << (allTiles.empty() ? 1 : (int)allTiles.size()) << "] = {";
         if (allTiles.empty()) f << " 0 ";
@@ -800,6 +812,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             bp.srcX = pc.localX; bp.srcY = pc.localY; bp.size = sz;
             bp.vramTile = vramTile;
             bp.palBank = (ai >= 0) ? (ai & 0xF) : 15;
+            bp.blackTint = pc.blackTint ? 1 : 0;
+            bp.opacity   = (pc.opacity < 0) ? 0 : (pc.opacity > 16 ? 16 : pc.opacity);
             out.push_back(bp);
         };
         for (const auto& he : hudElements) {
@@ -1563,8 +1577,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             }
 
             // Piece tile blob — uploaded to HUD VRAM at boot (hud.c).
+            // static so multiple .c files including mapdata.h don't each
+            // get a competing definition (link error). hud.c is the only
+            // user; the unused-warning in other TUs is benign.
             if (!hudPieceTiles.empty()) {
-                f << "const unsigned int afn_hud_piece_tiles[" << (int)hudPieceTiles.size() << "] = {";
+                f << "static const unsigned int afn_hud_piece_tiles[" << (int)hudPieceTiles.size() << "] = {";
                 for (size_t i = 0; i < hudPieceTiles.size(); i++) {
                     if (i % 8 == 0) f << "\n    ";
                     char hex[16]; snprintf(hex, sizeof(hex), "0x%08X", hudPieceTiles[i]);
@@ -1574,7 +1591,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "\n};\n";
             }
 
-            f << "struct AfnHudPiece { short x, y; unsigned short vramTile; unsigned char size; unsigned char palBank; };\n";
+            f << "struct AfnHudPiece { short x, y; unsigned short vramTile; unsigned char size; unsigned char palBank; unsigned char blackTint; unsigned char opacity; };\n";
             auto emitPieceArray = [&](const char* name, const std::vector<AfnBakedHudPiece>& bps) {
                 if (bps.empty()) {
                     f << "static const struct AfnHudPiece " << name << "[1] = {{0}};\n";
@@ -1583,7 +1600,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "static const struct AfnHudPiece " << name << "[" << (int)bps.size() << "] = {\n";
                 for (const auto& bp : bps)
                     f << "    { " << bp.srcX << ", " << bp.srcY << ", " << bp.vramTile << ", "
-                      << bp.size << ", " << bp.palBank << " },\n";
+                      << bp.size << ", " << bp.palBank << ", "
+                      << bp.blackTint << ", " << bp.opacity << " },\n";
                 f << "};\n";
             };
             emitPieceArray("afn_hud_pieces",  bakedHudPieces);
@@ -1602,7 +1620,48 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "static const struct { short frame, offX, offY; } afn_hud_kf[1] = {{0}};\n";
             }
 
-            f << "static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned char kfLoop; signed char layerPieces, layerSprites, layerText; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
+            // ---- Anim layers ----
+            // Per-layer animation that targets specific pieces/sprite-items
+            // within an element. Each layer has its own keyframe set, length,
+            // loop flag, fps (= frames-per-tick = 60/fps_value), and interp
+            // mode. Mirrors GBA's afn_hud_layer_* tables.
+            int totalLayers = 0, totalLayerKf = 0, totalLayerItems = 0;
+            for (const auto& he : hudElements) {
+                totalLayers += (int)he.animLayers.size();
+                for (const auto& lay : he.animLayers) {
+                    totalLayerKf    += (int)lay.keyframes.size();
+                    totalLayerItems += (int)lay.items.size();
+                }
+            }
+            f << "#define AFN_HUD_LAYER_COUNT " << totalLayers << "\n";
+            if (totalLayers > 0) {
+                f << "static const struct { short frame, offX, offY; } afn_hud_layer_kf[" << totalLayerKf << "] = {\n";
+                for (const auto& he : hudElements)
+                    for (const auto& lay : he.animLayers)
+                        for (const auto& kf : lay.keyframes)
+                            f << "    { " << kf.frame << ", " << kf.offX << ", " << kf.offY << " },\n";
+                f << "};\n";
+                f << "static const struct { unsigned char type, index; } afn_hud_layer_items[" << totalLayerItems << "] = {\n";
+                for (const auto& he : hudElements)
+                    for (const auto& lay : he.animLayers)
+                        for (const auto& it : lay.items)
+                            f << "    { " << it.type << ", " << it.index << " },\n";
+                f << "};\n";
+                f << "static const struct { unsigned char elemIdx; unsigned short kfStart, kfCount; unsigned short itemStart, itemCount; unsigned char interp; unsigned char loop; unsigned short length; unsigned char speed; } afn_hud_layers[" << totalLayers << "] = {\n";
+                int lkfOff = 0, liOff = 0;
+                for (int ei = 0; ei < (int)hudElements.size(); ei++)
+                    for (const auto& lay : hudElements[ei].animLayers) {
+                        f << "    { " << ei << ", " << lkfOff << ", " << (int)lay.keyframes.size() << ", "
+                          << liOff << ", " << (int)lay.items.size() << ", "
+                          << lay.interp << ", " << (lay.loop ? 1 : 0) << ", "
+                          << lay.length << ", " << lay.speed << " },\n";
+                        lkfOff += (int)lay.keyframes.size();
+                        liOff  += (int)lay.items.size();
+                    }
+                f << "};\n";
+            }
+
+            f << "static const struct { short x, y; unsigned short textStart, textCount; unsigned short pieceStart, pieceCount; unsigned short sprStart, sprCount; unsigned short kfStart, kfCount; unsigned char kfLoop; signed char layerPieces, layerSprites, layerText; unsigned char runtimeMode; unsigned int mode0Mask, mode4Mask; } afn_hud_elems[" << (int)hudElements.size() << "] = {\n";
             int textCursor = 0, pieceCursor = 0, sprCursor = 0, kfCursor = 0;
             for (const auto& he : hudElements) {
                 f << "    { " << he.screenX << ", " << he.screenY << ", "
@@ -1611,7 +1670,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                   << sprCursor    << ", " << (int)he.sprites.size() << ", "
                   << kfCursor     << ", " << (int)he.keyframes.size() << ", "
                   << (he.animLoop ? 1 : 0) << ", "
-                  << he.layerPieces << ", " << he.layerSprites << ", " << he.layerText
+                  << he.layerPieces << ", " << he.layerSprites << ", " << he.layerText << ", "
+                  << he.runtimeMode << ", 0x"
+                  << std::hex << he.mode0SceneMask << "u, 0x" << he.mode4SceneMask << "u" << std::dec
                   << " },\n";
                 textCursor   += (int)he.textRows.size();
                 pieceCursor  += (int)he.pieces.size();
@@ -1651,6 +1712,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             f << "#define AFN_HUD_PIECE_COUNT 0\n";
             f << "#define AFN_HUD_SPRITE_COUNT 0\n";
             f << "#define AFN_HUD_KF_COUNT 0\n";
+            f << "#define AFN_HUD_LAYER_COUNT 0\n";
             f << "#define AFN_HUD_PIECE_TILE_LEN 0\n";
         }
         f << "extern int  afn_scripts_stopped;\n";
@@ -2249,13 +2311,14 @@ bool PackageNDS(const std::string& runtimeDir,
                 const std::vector<GBABlueprintExport>& blueprints,
                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
                 const std::vector<GBAHudElementExport>& hudElements,
+                int startMode,
                 std::string& errorMsg)
 {
     std::string buildOutput;
     std::string msysDir = ToMsysPath(runtimeDir);
 
     // Step 0: Generate mapdata.h
-    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames, ndsAntialiasing, script, blueprints, bpInstances, hudElements))
+    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames, ndsAntialiasing, script, blueprints, bpInstances, hudElements, startMode))
     {
         errorMsg = "Failed to write mapdata.h to " + runtimeDir + "/include/";
         return false;
