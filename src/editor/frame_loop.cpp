@@ -570,6 +570,9 @@ enum class VsNodeType : int {
     SetPlayerHeight, // set player collision height
     SetHudValue,    // action: set afn_hud_value[slot] for counter display
     UpdateRespawnPos, // action: set Respawn start position to an object's world position
+    SetVelocityX,    // action: set world-X velocity (independent of input; decays via VelocityFalloff)
+    SetVelocityZ,    // action: set world-Z velocity (independent of input; decays via VelocityFalloff)
+    VelocityFalloff, // action: linear decay of vx/vz to 0 over N frames (Mode 4 boost pad style)
     COUNT
 };
 
@@ -863,6 +866,9 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Set Player Height",0xFF3355AA, 1, 1, 1, 0, {"Value (float)"}, {}, {} },
     { "Set HUD Value",   0xFF3355AA, 1, 1, 2, 0, {"Value", "Slot"}, {}, {} },
     { "Update Respawn Pos",0xFF3355AA, 1, 1, 1, 0, {"Object (int)"}, {}, {} },
+    { "Set Velocity X", 0xFF3355AA, 1, 1, 1, 0, {"Velocity (float)"}, {}, {} },
+    { "Set Velocity Z", 0xFF3355AA, 1, 1, 1, 0, {"Velocity (float)"}, {}, {} },
+    { "Velocity Falloff",0xFF3355AA, 1, 1, 1, 0, {"Frames (int)"}, {}, {} },
 };
 
 struct VsNode {
@@ -17476,6 +17482,9 @@ void FrameTick(float dt)
                 case VsNodeType::ResetScene:    desc = "Reloads the current scene. Player respawns at start position."; break;
                 case VsNodeType::SetPlayerHeight: desc = "Sets the player collision height (pixels). Controls wall Y-overlap and floor snap-up distance. Default 12."; break;
                 case VsNodeType::UpdateRespawnPos: desc = "Updates the Respawn start position to the given object's world position. Use on checkpoint trigger."; break;
+                case VsNodeType::SetVelocityX:  desc = "Adds a world-X velocity to the player every frame, independent of input. Pair with Velocity Falloff to decay it (boost pads, knockback, wind)."; break;
+                case VsNodeType::SetVelocityZ:  desc = "Adds a world-Z velocity to the player every frame, independent of input. Pair with Velocity Falloff to decay it."; break;
+                case VsNodeType::VelocityFalloff: desc = "Linearly decays current vx/vz to 0 over N frames. Set after Set Velocity X/Z to define how quickly the boost/push fades."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -17716,6 +17725,9 @@ void FrameTick(float dt)
                         case VsNodeType::SetPlayerHeight: return "_set_player_height";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
+                        case VsNodeType::SetVelocityX:  return "_set_vel_x";
+                        case VsNodeType::SetVelocityZ:  return "_set_vel_z";
+                        case VsNodeType::VelocityFalloff: return "_velocity_falloff";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -18522,6 +18534,52 @@ void FrameTick(float dt)
                         "    // if (player_y <= floor_y) { player_y = floor_y; player_on_ground = 1; player_vy = 0; }",
                         fmtFloat(infoNode.id, 0, "<velocity>"));
                     setActionFunc(infoNode, "_set_vel_y", bodyBuf);
+                    break;
+                }
+                case VsNodeType::SetVelocityX: {
+                    editorCode =
+                        "// Set world-X velocity. Player moves regardless of input until decayed.";
+                    char bodyBuf[512];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_player_vx_world = %s;\n"
+                        "    // --- Runtime (main.c, Mode 4 only) ---\n"
+                        "    // each frame: player_x += afn_player_vx_world;\n"
+                        "    // VelocityFalloff(N) ramps vx to 0 over N frames:\n"
+                        "    //   afn_player_vx_world -= afn_player_vx_world / afn_velocity_falloff;\n"
+                        "    //   --afn_velocity_falloff;",
+                        fmtFloat(infoNode.id, 0, "<velocity>"));
+                    setActionFunc(infoNode, "_set_vel_x", bodyBuf);
+                    break;
+                }
+                case VsNodeType::SetVelocityZ: {
+                    editorCode =
+                        "// Set world-Z velocity. Player moves regardless of input until decayed.";
+                    char bodyBuf[512];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_player_vz_world = %s;\n"
+                        "    // --- Runtime (main.c, Mode 4 only) ---\n"
+                        "    // each frame: player_z += afn_player_vz_world;\n"
+                        "    // VelocityFalloff(N) ramps vz to 0 over N frames:\n"
+                        "    //   afn_player_vz_world -= afn_player_vz_world / afn_velocity_falloff;\n"
+                        "    //   --afn_velocity_falloff;",
+                        fmtFloat(infoNode.id, 0, "<velocity>"));
+                    setActionFunc(infoNode, "_set_vel_z", bodyBuf);
+                    break;
+                }
+                case VsNodeType::VelocityFalloff: {
+                    editorCode =
+                        "// Linearly decay world vx/vz to 0 over N frames.";
+                    char bodyBuf[512];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_velocity_falloff = %s;\n"
+                        "    // --- Runtime (main.c, Mode 4 only) ---\n"
+                        "    // each frame while afn_velocity_falloff > 0:\n"
+                        "    //   afn_player_vx_world -= afn_player_vx_world / afn_velocity_falloff;\n"
+                        "    //   afn_player_vz_world -= afn_player_vz_world / afn_velocity_falloff;\n"
+                        "    //   if (--afn_velocity_falloff == 0) vx = vz = 0;\n"
+                        "    // (vx/N decremented as N shrinks gives true linear lerp to 0)",
+                        fmtInt(infoNode.id, 0, "<frames>"));
+                    setActionFunc(infoNode, "_velocity_falloff", bodyBuf);
                     break;
                 }
                 case VsNodeType::StopSound:
@@ -21015,6 +21073,9 @@ void FrameTick(float dt)
                     case VsNodeType::StopAnim:      suffix = "_stop_anim"; break;
                     case VsNodeType::SetAnimSpeed:  suffix = "_set_anim_speed"; break;
                     case VsNodeType::SetVelocityY:  suffix = "_set_vel_y"; break;
+                    case VsNodeType::SetVelocityX:  suffix = "_set_vel_x"; break;
+                    case VsNodeType::SetVelocityZ:  suffix = "_set_vel_z"; break;
+                    case VsNodeType::VelocityFalloff: suffix = "_velocity_falloff"; break;
                     case VsNodeType::StopSound:     suffix = "_stop_sound"; break;
                     case VsNodeType::AddMath:       suffix = "_add"; break;
                     case VsNodeType::SubtractMath:  suffix = "_sub"; break;
@@ -21553,6 +21614,9 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopAnim].name)) addNodeAt(VsNodeType::StopAnim);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetAnimSpeed].name)) addNodeAt(VsNodeType::SetAnimSpeed);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetVelocityY].name)) addNodeAt(VsNodeType::SetVelocityY);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetVelocityX].name)) addNodeAt(VsNodeType::SetVelocityX);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetVelocityZ].name)) addNodeAt(VsNodeType::SetVelocityZ);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::VelocityFalloff].name)) addNodeAt(VsNodeType::VelocityFalloff);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetPlayerHeight].name)) addNodeAt(VsNodeType::SetPlayerHeight);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopSound].name)) addNodeAt(VsNodeType::StopSound);
                     ImGui::Separator();

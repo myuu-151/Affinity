@@ -1946,6 +1946,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static FIXED afn_terminal_vel;\n";
         f << "// afn_player_height declared in main.c (before mapdata.h include)\n";
         f << "static FIXED player_vy;\n";
+        f << "// World-axis push velocity (boost pads / knockback). Mode 4 only.\n";
+        f << "// SetVelocityX/Z write these; main.c adds them to player_x/z every\n";
+        f << "// frame. VelocityFalloff sets a frame counter that linearly lerps\n";
+        f << "// vx/vz to zero (vx -= vx/falloff; --falloff).\n";
+        f << "#define AFN_HAS_VEL_XZ 1\n";
+        f << "static int   afn_player_vx_world;\n";
+        f << "static int   afn_player_vz_world;\n";
+        f << "static int   afn_velocity_falloff;\n";
         f << "static int   player_on_ground;\n";
         f << "static u16   orbit_angle;\n";
         f << "extern int player_moving;\n";
@@ -2620,6 +2628,27 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     float vel = vData ? resolveFloat(vData) : 0.0f;
                     int velFixed = (int)(vel * 256.0f);
                     f << "    player_vy = " << velFixed << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetVelocityX: {
+                    auto* vData = findDataIn(action->id, 0);
+                    float vel = vData ? resolveFloat(vData) : 0.0f;
+                    int velFixed = (int)(vel * 256.0f);
+                    f << "    afn_player_vx_world = " << velFixed << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetVelocityZ: {
+                    auto* vData = findDataIn(action->id, 0);
+                    float vel = vData ? resolveFloat(vData) : 0.0f;
+                    int velFixed = (int)(vel * 256.0f);
+                    f << "    afn_player_vz_world = " << velFixed << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::VelocityFalloff: {
+                    auto* fData = findDataIn(action->id, 0);
+                    int frames = fData ? resolveInt(fData) : 0;
+                    if (frames < 1) frames = 1;
+                    f << "    afn_velocity_falloff = " << frames << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::PlaySound: {
@@ -4152,6 +4181,24 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* vData = bpFindDataIn(action->id, 0);
                     std::string vel = vData ? bpResolveFloat(vData) : "0";
                     f << "    player_vy = " << vel << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetVelocityX: {
+                    auto* vData = bpFindDataIn(action->id, 0);
+                    std::string vel = vData ? bpResolveFloat(vData) : "0";
+                    f << "    afn_player_vx_world = " << vel << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetVelocityZ: {
+                    auto* vData = bpFindDataIn(action->id, 0);
+                    std::string vel = vData ? bpResolveFloat(vData) : "0";
+                    f << "    afn_player_vz_world = " << vel << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::VelocityFalloff: {
+                    auto* fData = bpFindDataIn(action->id, 0);
+                    std::string frames = fData ? bpResolveInt(fData) : "1";
+                    f << "    afn_velocity_falloff = " << frames << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::PlaySound: {
