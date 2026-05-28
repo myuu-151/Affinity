@@ -1042,8 +1042,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             {
                 float u = (v * 2 + 0 < (int)mesh.uvs.size()) ? mesh.uvs[v * 2 + 0] : 0.0f;
                 float vv = (v * 2 + 1 < (int)mesh.uvs.size()) ? mesh.uvs[v * 2 + 1] : 0.0f;
+                // Flip V: OBJ V=0 is bottom-left (Blender / OpenGL convention),
+                // but NDS hardware reads texture data top-down so its V=0 is the
+                // top row of the texture array. Without this flip, content in
+                // the upper half of an image-space texture maps to the lower
+                // half in OBJ-space and faces sample empty/transparent pixels.
                 int16_t tu = (int16_t)(u * mesh.texW * 16.0f);
-                int16_t tv = (int16_t)(vv * mesh.texH * 16.0f);
+                int16_t tv = (int16_t)((1.0f - vv) * mesh.texH * 16.0f);
                 f << "    " << tu << ", " << tv << ",\n";
             }
             f << "};\n";
@@ -1186,11 +1191,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             if (mesh.drawDistance > 0.0f)
                 drawDist = (int)(mesh.drawDistance / 4.0f * 256.0f);
 
+            // Index 11 (texPalBase placeholder) reused as textureHasAlpha so
+            // the runtime can conditionally set GL_TEXTURE_COLOR0_TRANSPARENT.
             f << "    { " << vc << ", " << ic << ", " << qic << ", "
               << mesh.colorRGB15 << ", " << mesh.cullMode << ", "
               << mesh.lit << ", 0, " << mesh.halfRes << ", "
               << mesh.textured << ", " << mesh.texW << ", "
-              << texShift << ", 0, "
+              << texShift << ", " << mesh.textureHasAlpha << ", "
               << mesh.wireframe << ", " << mesh.grayscale << ", " << drawDist << ", "
               << mesh.visible << " },\n";
         }

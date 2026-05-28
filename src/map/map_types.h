@@ -199,6 +199,12 @@ struct MeshAsset
     std::vector<uint8_t> texturePixels;       // quantized indexed pixels (texW * texH)
     uint32_t texturePalette[16] = {};         // RGBA8 palette for the texture
     int texW = 0, texH = 0;                  // texture dimensions (power of 2, max 256)
+    bool textureUseAlpha = false;             // true = treat alpha=0 as transparent (NDS reserves
+                                              // palette[0] and sets GL_TEXTURE_COLOR0_TRANSPARENT).
+                                              // Off by default — leave it off unless you actually want
+                                              // cutout transparency. Textures with transparent padding
+                                              // around opaque content should keep this off so the padding
+                                              // doesn't bleed into face UVs near the edge.
     unsigned int glTexID = 0;                 // OpenGL texture for editor preview
     bool texFiltered = false;                 // true = GL_LINEAR, false = GL_NEAREST
     bool texInIwram = false;                  // true = copy this texture into the IWRAM cache at boot (faster ldrb, shared 4KB budget)
