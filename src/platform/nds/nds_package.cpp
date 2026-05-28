@@ -2182,6 +2182,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int afn_player_vx_world;\n";
         f << "extern int afn_player_vz_world;\n";
         f << "extern int afn_velocity_falloff;\n";
+        f << "extern int afn_pending_boost_fwd;\n";
         // Audio entry points (audio.c) used by PlaySound / StopSound emit.
         f << "void afn_play_sound(int id);\n";
         f << "void afn_play_sfx(int smpIdx, int gain, int fifo);\n";
@@ -2230,6 +2231,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         };
         auto resolveFloat = [&](const GBAScriptNodeExport* dn) -> float {
             if (!dn) return 0.0f;
+            // Integer nodes store their value in paramInt[0] as a raw int.
+            // Bit-casting that as float gives a denormal (≈ 0), so when the
+            // user wires an Integer literal to a Float pin we must convert
+            // rather than reinterpret. Float nodes already stored their
+            // value bit-cast in paramInt[0] so the memcpy path is correct.
+            if (dn->type == GBAScriptNodeType::Integer)
+                return (float)dn->paramInt[0];
             float fv;
             memcpy(&fv, &dn->paramInt[0], sizeof(float));
             return fv;
@@ -2486,6 +2494,12 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 int frames = d ? resolveInt(d) : 0;
                 if (frames < 1) frames = 1;
                 f << "    afn_velocity_falloff = " << frames << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::BoostForward: {
+                auto* d = findDataIn(a->id, 0);
+                float v = d ? resolveFloat(d) : 0.0f;
+                f << "    afn_pending_boost_fwd = " << (int)(v * 256.0f) << ";\n";
                 break;
             }
             case GBAScriptNodeType::SetPlayerHeight: {

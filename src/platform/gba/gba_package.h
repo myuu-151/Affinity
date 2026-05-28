@@ -383,6 +383,7 @@ enum class GBAScriptNodeType : int {
     SetVelocityX,
     SetVelocityZ,
     VelocityFalloff,
+    BoostForward,
     COUNT
 };
 

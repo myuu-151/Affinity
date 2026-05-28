@@ -573,6 +573,7 @@ enum class VsNodeType : int {
     SetVelocityX,    // action: set world-X velocity (independent of input; decays via VelocityFalloff)
     SetVelocityZ,    // action: set world-Z velocity (independent of input; decays via VelocityFalloff)
     VelocityFalloff, // action: linear decay of vx/vz to 0 over N frames (Mode 4 boost pad style)
+    BoostForward,    // action: push the player along their current view direction (vx/vz = sin/cos(viewAngle) * speed)
     COUNT
 };
 
@@ -869,6 +870,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Set Velocity X", 0xFF3355AA, 1, 1, 1, 0, {"Velocity (float)"}, {}, {} },
     { "Set Velocity Z", 0xFF3355AA, 1, 1, 1, 0, {"Velocity (float)"}, {}, {} },
     { "Velocity Falloff",0xFF3355AA, 1, 1, 1, 0, {"Frames (int)"}, {}, {} },
+    { "Boost Forward", 0xFF3355AA, 1, 1, 1, 0, {"Speed (float)"}, {}, {} },
 };
 
 struct VsNode {
@@ -17485,6 +17487,7 @@ void FrameTick(float dt)
                 case VsNodeType::SetVelocityX:  desc = "Adds a world-X velocity to the player every frame, independent of input. Pair with Velocity Falloff to decay it (boost pads, knockback, wind)."; break;
                 case VsNodeType::SetVelocityZ:  desc = "Adds a world-Z velocity to the player every frame, independent of input. Pair with Velocity Falloff to decay it."; break;
                 case VsNodeType::VelocityFalloff: desc = "Linearly decays current vx/vz to 0 over N frames. Set after Set Velocity X/Z to define how quickly the boost/push fades."; break;
+                case VsNodeType::BoostForward:   desc = "Pushes the player along their current view direction at the given speed. Runtime decomposes into world vx/vz using sin/cos(viewAngle). Pair with Velocity Falloff to decay."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -17728,6 +17731,7 @@ void FrameTick(float dt)
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
                         case VsNodeType::SetVelocityZ:  return "_set_vel_z";
                         case VsNodeType::VelocityFalloff: return "_velocity_falloff";
+                        case VsNodeType::BoostForward:  return "_boost_forward";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -18580,6 +18584,26 @@ void FrameTick(float dt)
                         "    // (vx/N decremented as N shrinks gives true linear lerp to 0)",
                         fmtInt(infoNode.id, 0, "<frames>"));
                     setActionFunc(infoNode, "_velocity_falloff", bodyBuf);
+                    break;
+                }
+                case VsNodeType::BoostForward: {
+                    editorCode =
+                        "// Push the player along their current view direction.";
+                    char bodyBuf[640];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_pending_boost_fwd = %s;\n"
+                        "    // --- Runtime (main.c, Mode 4 only) ---\n"
+                        "    // Next frame, before velocity application:\n"
+                        "    //   if (afn_pending_boost_fwd) {\n"
+                        "    //     GBA: afn_player_vx_world =  (viewSin * fwd) >> 16;\n"
+                        "    //          afn_player_vz_world = -(viewCos * fwd) >> 16;\n"
+                        "    //     NDS: afn_player_vx_world = FX_MUL(g_sinf, fwd);\n"
+                        "    //          afn_player_vz_world = FX_MUL(g_cosf, fwd);\n"
+                        "    //     afn_pending_boost_fwd = 0;\n"
+                        "    //   }\n"
+                        "    // Pair with VelocityFalloff for a smooth fade out.",
+                        fmtFloat(infoNode.id, 0, "<speed>"));
+                    setActionFunc(infoNode, "_boost_forward", bodyBuf);
                     break;
                 }
                 case VsNodeType::StopSound:
@@ -21076,6 +21100,7 @@ void FrameTick(float dt)
                     case VsNodeType::SetVelocityX:  suffix = "_set_vel_x"; break;
                     case VsNodeType::SetVelocityZ:  suffix = "_set_vel_z"; break;
                     case VsNodeType::VelocityFalloff: suffix = "_velocity_falloff"; break;
+                    case VsNodeType::BoostForward:  suffix = "_boost_forward"; break;
                     case VsNodeType::StopSound:     suffix = "_stop_sound"; break;
                     case VsNodeType::AddMath:       suffix = "_add"; break;
                     case VsNodeType::SubtractMath:  suffix = "_sub"; break;
@@ -21617,6 +21642,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetVelocityX].name)) addNodeAt(VsNodeType::SetVelocityX);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetVelocityZ].name)) addNodeAt(VsNodeType::SetVelocityZ);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::VelocityFalloff].name)) addNodeAt(VsNodeType::VelocityFalloff);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::BoostForward].name)) addNodeAt(VsNodeType::BoostForward);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetPlayerHeight].name)) addNodeAt(VsNodeType::SetPlayerHeight);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopSound].name)) addNodeAt(VsNodeType::StopSound);
                     ImGui::Separator();

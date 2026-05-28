@@ -28,14 +28,14 @@
 #define AFN_PLAYER_IDX 0
 #define AFN_ORBIT_DIST 5760
 
-#define AFN_SPRITE_COUNT 25
+#define AFN_SPRITE_COUNT 26
 
 static const int afn_sprite_data[][17] = {
     { 32768, 9600, 27008, 1, 0, 409, 1, 0, 1, -1, 0, 0, -1, 0, 0, 0, 0 },
     { 32596, 9600, 25421, 2, -1, 12339, 6, 0, 1, 2, 0, 0, -1, 0, 0, 0, 0 },
     { 37384, 9600, 12388, 3, -1, 624, 6, 0, 1, 6, 0, 0, -1, 0, 0, 0, 0 },
     { 42650, 9600, 29651, 1, 2, 512, 0, 0, 1, -1, 1, 0, -1, 0, 0, 0, 0 },
-    { 38197, 0, 23355, 5, -1, 5724, 6, 0, 1, 4, 0, 0, -1, 0, 0, 0, 0 },
+    { 38197, 0, 23355, 5, -1, 153600, 6, 0, 1, 4, 0, 0, -1, 0, 0, 0, 0 },
     { 37939, 24200, 39197, 1, -1, 12800, 6, 0, 1, 0, 0, 0, -1, 0, 0, 0, 0 },
     { 36938, 10496, 34816, 1, 3, 512, 0, 0, 1, -1, 1, 0, -1, 0, 0, 0, 0 },
     { 36938, 10496, 30131, 1, 3, 512, 0, 0, 1, -1, 1, 0, -1, 0, 0, 0, 0 },
@@ -56,6 +56,7 @@ static const int afn_sprite_data[][17] = {
     { 23915, 14208, 24739, 3, -1, 12800, 6, 0, 1, 8, 0, 0, -1, 0, 0, 0, 0 },
     { 197796, 23098, -21773, 4, -1, 12800, 6, 0, 1, 9, 0, 0, -1, 0, 0, 0, 0 },
     { 100119, 23225, -21556, 5, -1, 1766, 6, 0, 1, 10, 1, 0, -1, 0, 0, 0, 0 },
+    { 396292, 23098, -21773, 1, -1, 12800, 6, 0, 1, 9, 0, 0, -1, 0, 0, 0, 0 },
 };
 
 #define AFN_ASSET_COUNT 7
@@ -11076,12 +11077,12 @@ static const int afn_mesh_desc[][16] = {
     { 4, 0, 4, 31775, 0, 1, 128, 0, 1, 64, 6, 1, 0, 0, 0, 1 },
 };
 
-// ---- Collision data (166 faces, 214 grid refs) ----
-#define AFN_COL_FACE_COUNT 166
+// ---- Collision data (168 faces, 240 grid refs) ----
+#define AFN_COL_FACE_COUNT 168
 #define AFN_COL_GRID_SIZE 8
-#define AFN_COL_GRID_SHIFT 16
-#define AFN_COL_GRID_ORIGIN_X -76288
-#define AFN_COL_GRID_ORIGIN_Z -91136
+#define AFN_COL_GRID_SHIFT 20
+#define AFN_COL_GRID_ORIGIN_X -3028480
+#define AFN_COL_GRID_ORIGIN_Z -3043328
 
 typedef struct {
     int v0x, v0z, v1x, v1z, v2x, v2z;
@@ -11091,7 +11092,7 @@ typedef struct {
     int sprIdx;
 } CollFace;
 
-static const CollFace afn_col_faces[166] = {
+static const CollFace afn_col_faces[168] = {
     { 19893,38124, 26244,38124, 26244,31773, 9600,9600,9600, 0,0, 1, 1 },
     { 19893,38124, 26244,31773, 19893,31773, 9600,9600,9600, 0,0, 1, 1 },
     { 26244,38124, 32596,38124, 32596,31773, 9600,9600,9600, 0,0, 1, 1 },
@@ -11138,8 +11139,8 @@ static const CollFace afn_col_faces[166] = {
     { 72109,-19070, 76954,-24825, 72109,-24825, 23111,23111,23111, 0,0, 1, 2 },
     { 50449,-21985, 52592,-17278, 62155,-18609, 18426,18047,20704, -202,156, 1, 2 },
     { 50449,-21985, 62155,-18609, 61474,-24130, 18426,20704,20832, -249,58, 1, 2 },
-    { -76080,137633, 152475,137633, 152475,-90922, 0,0,0, 0,0, 1, 4 },
-    { -76080,137633, 152475,-90922, -76080,-90922, 0,0,0, 0,0, 1, 4 },
+    { -3028293,3089846, 3104688,3089846, 3104688,-3043135, 0,0,0, 0,0, 1, 4 },
+    { -3028293,3089846, 3104688,-3043135, -3028293,-3043135, 0,0,0, 0,0, 1, 4 },
     { 34739,42397, 41139,42397, 41139,35997, 24200,24200,24200, 0,0, 1, 5 },
     { 34739,42397, 41139,35997, 34739,35997, 24200,24200,24200, 0,0, 1, 5 },
     { 72619,-1899, 78970,-1899, 78970,-8250, 23098,23098,23098, 0,0, 1, 20 },
@@ -11258,42 +11259,45 @@ static const CollFace afn_col_faces[166] = {
     { 297963,-25186, 97629,-18360, 297963,-18360, 23098,23098,23098, 0,0, 1, 23 },
     { 98385,-22702, 98385,-20410, 101497,-20410, 23225,23225,23225, 0,0, 1, 24 },
     { 98385,-22702, 101497,-20410, 101497,-22702, 23225,23225,23225, 0,0, 1, 24 },
+    { 496460,-25186, 296125,-25186, 296125,-18360, 23098,23098,23098, 0,0, 1, 25 },
+    { 496460,-25186, 296125,-18360, 496460,-18360, 23098,23098,23098, 0,0, 1, 25 },
 };
 static const u16 afn_col_grid_start[64] = {
-    0,2,4,14,16,16,16,16,
-    16,18,144,188,192,194,196,196,
-    196,198,202,204,206,206,206,206,
-    206,208,210,212,214,214,214,214,
-    214,214,214,214,214,214,214,214,
-    214,214,214,214,214,214,214,214,
-    214,214,214,214,214,214,214,214,
-    214,214,214,214,214,214,214,214
+    0,2,4,6,8,10,12,12,
+    12,14,16,18,20,22,24,24,
+    24,26,28,194,200,202,204,204,
+    204,206,208,210,212,214,216,216,
+    216,218,220,222,224,226,228,228,
+    228,230,232,234,236,238,240,240,
+    240,240,240,240,240,240,240,240,
+    240,240,240,240,240,240,240,240
 };
 static const u16 afn_col_grid_count[64] = {
-    2,2,10,2,0,0,0,0,
-    2,126,44,4,2,2,0,0,
-    2,4,2,2,0,0,0,0,
-    2,2,2,2,0,0,0,0,
-    0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,
+    2,2,2,2,2,2,0,0,
+    2,2,2,2,2,2,0,0,
+    2,2,166,6,2,2,0,0,
+    2,2,2,2,2,2,0,0,
+    2,2,2,2,2,2,0,0,
+    2,2,2,2,2,2,0,0,
     0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0
 };
-static const u16 afn_col_grid_faces[214] = {
-    46,47,46,47,46,47,74,75,76,77,78,79,80,81,46,47,
-    46,47,0,1,2,3,4,5,6,7,8,9,10,11,12,13,
-    14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,
-    30,31,32,33,34,35,36,37,38,39,44,45,46,47,48,49,
-    82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,
-    98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,
-    114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,
-    130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,
-    146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,
-    40,41,42,43,44,45,46,47,50,51,52,53,54,55,56,57,
-    58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,
-    74,75,76,77,78,79,80,81,162,163,164,165,46,47,162,163,
-    162,163,162,163,46,47,46,47,48,49,46,47,46,47,46,47,
-    46,47,46,47,46,47
+static const u16 afn_col_grid_faces[240] = {
+    46,47,46,47,46,47,46,47,46,47,46,47,46,47,46,47,
+    46,47,46,47,46,47,46,47,46,47,46,47,0,1,2,3,
+    4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,
+    20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,
+    36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,
+    52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,
+    68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,
+    84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,
+    100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,
+    116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,
+    132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,
+    148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,
+    164,165,46,47,162,163,166,167,46,47,46,47,46,47,46,47,
+    46,47,46,47,46,47,46,47,46,47,46,47,46,47,46,47,
+    46,47,46,47,46,47,46,47,46,47,46,47,46,47,46,47
 };
 
 
@@ -18135,7 +18139,7 @@ static const u8 afn_pcm_vol_scale[27] = {
     255,
 };
 #define AFN_HAS_FINE_FACTOR 1
-#define AFN_MIDI_MASTER_VOL_FIX 46
+#define AFN_MIDI_MASTER_VOL_FIX 26
 static const unsigned int afn_pcm_fine_factor[27] = {
     65536,
     65536,
@@ -26026,7 +26030,7 @@ extern int  afn_fade_target;
 extern int  afn_fade_frames;
 extern int  afn_fade_counter;
 #ifndef NUM_SPRITES
-#define NUM_SPRITES 25
+#define NUM_SPRITES 26
 #endif
 extern unsigned char afn_sprite_visible[NUM_SPRITES];
 extern unsigned char afn_sprite_flip[NUM_SPRITES];
@@ -26038,6 +26042,7 @@ extern int player_ground_y;
 extern int afn_player_vx_world;
 extern int afn_player_vz_world;
 extern int afn_velocity_falloff;
+extern int afn_pending_boost_fwd;
 void afn_play_sound(int id);
 void afn_play_sfx(int smpIdx, int gain, int fifo);
 void afn_stop_sound(void);
@@ -26275,10 +26280,26 @@ static void afn_bp5_collision(void) {
 }
 static void afn_bp5_collision2d(void) {
 }
+static void afn_bp6_start(void) {
+}
+static void afn_bp6_update(void) {
+}
+static void afn_bp6_key_held(void) {
+}
+static void afn_bp6_key_pressed(void) {
+}
+static void afn_bp6_key_released(void) {
+}
+static void afn_bp6_collision(void) {
+    afn_pending_boost_fwd = 2560;
+    afn_velocity_falloff = 200;
+}
+static void afn_bp6_collision2d(void) {
+}
 
-#define AFN_BP_COUNT 6
-#define AFN_BP_INSTANCE_COUNT 19
-static const unsigned int afn_bp_instances[19][5] = {
+#define AFN_BP_COUNT 7
+#define AFN_BP_INSTANCE_COUNT 20
+static const unsigned int afn_bp_instances[20][5] = {
     { 1, 3, 4294967295, 0, 0xffffffffu },
     { 2, 4, 4294967295, 0, 0xffffffffu },
     { 3, 6, 4294967295, 0, 0xffffffffu },
@@ -26295,6 +26316,7 @@ static const unsigned int afn_bp_instances[19][5] = {
     { 3, 17, 4294967295, 0, 0xffffffffu },
     { 3, 18, 4294967295, 0, 0xffffffffu },
     { 5, 21, 4294967295, 0, 0xffffffffu },
+    { 6, 24, 4294967295, 0, 0xffffffffu },
     { 0, 4294967295, 4294967295, 0, 0x1u },
     { 0, 4294967295, 4294967295, 2, 0x1u },
     { 4, 4294967295, 4294967295, 0, 0xffffffffu },
@@ -26317,6 +26339,7 @@ static void afn_bp_dispatch_start(void) {
             case 3: afn_bp3_start(); break;
             case 4: afn_bp4_start(); break;
             case 5: afn_bp5_start(); break;
+            case 6: afn_bp6_start(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -26340,6 +26363,7 @@ static void afn_bp_dispatch_update(void) {
             case 3: afn_bp3_update(); break;
             case 4: afn_bp4_update(); break;
             case 5: afn_bp5_update(); break;
+            case 6: afn_bp6_update(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -26363,6 +26387,7 @@ static void afn_bp_dispatch_key_held(void) {
             case 3: afn_bp3_key_held(); break;
             case 4: afn_bp4_key_held(); break;
             case 5: afn_bp5_key_held(); break;
+            case 6: afn_bp6_key_held(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -26386,6 +26411,7 @@ static void afn_bp_dispatch_key_pressed(void) {
             case 3: afn_bp3_key_pressed(); break;
             case 4: afn_bp4_key_pressed(); break;
             case 5: afn_bp5_key_pressed(); break;
+            case 6: afn_bp6_key_pressed(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -26409,6 +26435,7 @@ static void afn_bp_dispatch_key_released(void) {
             case 3: afn_bp3_key_released(); break;
             case 4: afn_bp4_key_released(); break;
             case 5: afn_bp5_key_released(); break;
+            case 6: afn_bp6_key_released(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -26433,6 +26460,7 @@ static void afn_bp_dispatch_collision(void) {
             case 3: afn_bp3_collision(); break;
             case 4: afn_bp4_collision(); break;
             case 5: afn_bp5_collision(); break;
+            case 6: afn_bp6_collision(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -26457,6 +26485,7 @@ static void afn_bp_dispatch_collision2d(void) {
             case 3: afn_bp3_collision2d(); break;
             case 4: afn_bp4_collision2d(); break;
             case 5: afn_bp5_collision2d(); break;
+            case 6: afn_bp6_collision2d(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
