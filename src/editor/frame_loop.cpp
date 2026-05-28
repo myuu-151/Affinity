@@ -14072,7 +14072,8 @@ void FrameTick(float dt)
                                         exportSoundSamples, exportSoundInstances,
                                         exportSkyFrames, exportNdsAa,
                                         exportScript, exportBlueprints, exportBpInstances,
-                                        exportHudElements, exportTmScenes, exportStartMode, err);
+                                        exportHudElements, exportTmScenes, exportStartMode,
+                                        sMidiMasterDb, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,

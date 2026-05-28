@@ -144,7 +144,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                                 const std::vector<GBABlueprintInstanceExport>& bpInstances,
                                 const std::vector<GBAHudElementExport>& hudElements,
                                 const std::vector<GBATmSceneExport>& tmScenes,
-                                int startMode)
+                                int startMode,
+                                float midiMasterDb)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
     std::ofstream f(outPath);
@@ -1477,6 +1478,14 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         // multiplier path is a no-op, and AFN_HAS_FINE_FACTOR still keeps
         // older runtimes that read the array linking.
         f << "#define AFN_HAS_FINE_FACTOR 1\n";
+        // Editor master dB → 8.8 fixed multiplier applied to BGM velocity at
+        // playback (256 = unity). Lets the user pull MIDI down without
+        // touching SFX so SFX can sit clearly above the music.
+        {
+            int masterFix = (int)(std::pow(10.0, (double)midiMasterDb / 20.0) * 256.0 + 0.5);
+            if (masterFix < 0) masterFix = 0;
+            f << "#define AFN_MIDI_MASTER_VOL_FIX " << masterFix << "\n";
+        }
         f << "static const unsigned int afn_pcm_fine_factor[" << soundSamples.size() << "] = {\n";
         for (int i = 0; i < (int)soundSamples.size(); i++) {
             f << "    65536,\n";
@@ -2912,13 +2921,14 @@ bool PackageNDS(const std::string& runtimeDir,
                 const std::vector<GBAHudElementExport>& hudElements,
                 const std::vector<GBATmSceneExport>& tmScenes,
                 int startMode,
+                float midiMasterDb,
                 std::string& errorMsg)
 {
     std::string buildOutput;
     std::string msysDir = ToMsysPath(runtimeDir);
 
     // Step 0: Generate mapdata.h
-    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames, ndsAntialiasing, script, blueprints, bpInstances, hudElements, tmScenes, startMode))
+    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames, ndsAntialiasing, script, blueprints, bpInstances, hudElements, tmScenes, startMode, midiMasterDb))
     {
         errorMsg = "Failed to write mapdata.h to " + runtimeDir + "/include/";
         return false;

@@ -29,6 +29,7 @@ bool PackageNDS(const std::string& runtimeDir,
                 const std::vector<GBAHudElementExport>& hudElements,
                 const std::vector<GBATmSceneExport>& tmScenes,
                 int startMode,
+                float midiMasterDb,
                 std::string& errorMsg);
 
 } // namespace Affinity

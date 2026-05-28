@@ -213,6 +213,37 @@ void afn_play_sfx(int smpIdx, int gain, int fifo)
 {
     (void)fifo;
     if (gain <= 0) gain = 127;
+    // Ensure there's a free hardware channel for the SFX. libnds's
+    // soundPlaySample silently fails when all 16 channels are busy —
+    // that's how SFX go missing when MIDI BGM is dense. First reclaim
+    // any tracked voice whose channel has already gone silent, then if
+    // still saturated steal the oldest BGM voice already in release
+    // (it would have rung out shortly anyway) so the SFX can play.
+    unsigned int active = soundGetActiveChannels();
+    for (int i = 0; i < SND_MAX_VOICES; i++) {
+        if (snd_voices[i].handle >= 0 &&
+            !(active & (1u << snd_voices[i].handle)))
+            snd_voices[i].handle = -1;
+    }
+    if (active == 0xFFFFu) {
+        int best = -1, bestAge = -1;
+        for (int i = 0; i < SND_MAX_VOICES; i++) {
+            if (snd_voices[i].releaseLeft > 0 && snd_voices[i].ageFrames > bestAge) {
+                best = i; bestAge = snd_voices[i].ageFrames;
+            }
+        }
+        if (best < 0) {
+            for (int i = 0; i < SND_MAX_VOICES; i++) {
+                if (snd_voices[i].handle >= 0 && snd_voices[i].ageFrames > bestAge) {
+                    best = i; bestAge = snd_voices[i].ageFrames;
+                }
+            }
+        }
+        if (best >= 0) {
+            soundKill(snd_voices[best].handle);
+            snd_voices[best].handle = -1;
+        }
+    }
     afn_trigger_sample(smpIdx, 60, gain, 0, 15);
 }
 
@@ -363,7 +394,16 @@ void afn_audio_tick(void)
                 soundSetFreq(vc->handle, hz);
             }
         } else {
-            afn_trigger_sample(n->smpIdx, n->note, n->vel, n->dur, n->channel);
+            // Scale BGM velocity by the editor's master dB so the user can
+            // pull MIDI down (or up) at export time without touching SFX.
+            // Fallback for older mapdata.h files without the macro is unity.
+#ifdef AFN_MIDI_MASTER_VOL_FIX
+            int bgmVel = (n->vel * AFN_MIDI_MASTER_VOL_FIX) >> 8;
+            if (bgmVel > 127) bgmVel = 127;
+#else
+            int bgmVel = n->vel;
+#endif
+            afn_trigger_sample(n->smpIdx, n->note, bgmVel, n->dur, n->channel);
         }
         snd_seq_next++;
     }
@@ -378,6 +418,22 @@ void afn_audio_tick(void)
             while (snd_seq_next < count && notes[snd_seq_next].tick < loopStart)
                 snd_seq_next++;
             for (int i = 0; i < 16; i++) snd_pitch_bend[i] = 0;
+            // Voices that were sustaining when the loop wrapped have a
+            // noteOffTick relative to the pre-wrap tick — that's now way
+            // in the future, so they'd never release on their own. Force
+            // each one into its release ramp so old notes ring out
+            // properly instead of sustaining forever across the seam.
+            for (int i = 0; i < SND_MAX_VOICES; i++) {
+                SndVoice* vc = &snd_voices[i];
+                if (vc->handle < 0 || vc->releaseLeft > 0) continue;
+                int relFrames = 0;
+                if (vc->smpIdx >= 0 && vc->smpIdx < AFN_SOUND_SAMPLE_COUNT)
+                    relFrames = (afn_pcm_release_ms[vc->smpIdx] * 60 + 999) / 1000;
+                if (relFrames < 1) relFrames = 1;
+                vc->releaseFrames = relFrames;
+                vc->releaseLeft   = relFrames;
+                vc->noteOffTick   = snd_seq_tick >> 8;
+            }
         }
     } else if (snd_seq_next >= count) {
         // Wait for tails to finish before clearing the active slot — once all
