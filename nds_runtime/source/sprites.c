@@ -372,13 +372,12 @@ void afn_sprite_update(void)
         proj[j + 1] = key;
     }
 
-    // NDS has 32 affine matrices but 128 OAM entries. Allocating one matrix
-    // per sprite caps visible sprites at 32 — mid-distance rings dropped out
-    // because Sonic + shadow + the nearest rings consumed all 32 first.
-    // Bucket matScale into one of 32 buckets so similarly-scaled sprites
-    // share a matrix; visually identical at this resolution.
-    static int bucketSet[32];
-    for (int b = 0; b < 32; b++) bucketSet[b] = 0;
+    // NDS has 32 affine matrices but 128 OAM entries. Give each sprite its
+    // own matrix when slots are free (so scale stays exact and doesn't pop
+    // as the camera eases toward the player); only fall back to sharing the
+    // nearest existing matrix when all 32 are used.
+    int slotMatScale[32];
+    int slotsUsed = 0;
 
     int oamSlot = 0;
     for (int i = 0; i < projCount && oamSlot < 128; i++) {
@@ -401,20 +400,35 @@ void afn_sprite_update(void)
         if (topLeftY >= 0 && topLeftY + canvasSize > 255) continue;
         if (topLeftX + canvasSize <= 0 || topLeftX >= 256) continue;
 
-        // Quantize matScale (128..2048) into a 0..31 bucket. Set the matrix
-        // the first time each bucket is touched this frame.
-        int bucket = ((p->matScale - 128) * 32) / (2048 - 128);
-        if (bucket < 0)  bucket = 0;
-        if (bucket > 31) bucket = 31;
-        if (!bucketSet[bucket]) {
-            oamRotateScale(&oamMain, bucket, 0, p->matScale, p->matScale);
-            bucketSet[bucket] = 1;
+        // Allocate an affine slot for this sprite. Reuse an existing slot
+        // with an exact matScale match if one is already set; allocate a
+        // fresh slot if any of the 32 remain; otherwise pick the slot
+        // whose matScale is closest (visually negligible at fine scale).
+        int slot = -1;
+        for (int s = 0; s < slotsUsed; s++)
+            if (slotMatScale[s] == p->matScale) { slot = s; break; }
+        if (slot < 0) {
+            if (slotsUsed < 32) {
+                slot = slotsUsed++;
+                slotMatScale[slot] = p->matScale;
+                oamRotateScale(&oamMain, slot, 0, p->matScale, p->matScale);
+            } else {
+                int bestSlot = 0;
+                int bestDiff = slotMatScale[0] - p->matScale;
+                if (bestDiff < 0) bestDiff = -bestDiff;
+                for (int s = 1; s < 32; s++) {
+                    int d = slotMatScale[s] - p->matScale;
+                    if (d < 0) d = -d;
+                    if (d < bestDiff) { bestDiff = d; bestSlot = s; }
+                }
+                slot = bestSlot;
+            }
         }
         oamSet(&oamMain, oamSlot,
                topLeftX, topLeftY,
                p->oamPrio, p->palBank, sz, SpriteColorFormat_16Color,
                (void*)((u8*)0x06400000 + p->tileIdx * 32),
-               bucket, true, false, false, false, false);
+               slot, true, false, false, false, false);
         oamSlot++;
     }
 
