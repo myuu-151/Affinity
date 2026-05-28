@@ -97,6 +97,12 @@ routes to lift that ceiling:
     music probably double-buffers.
   - Makefile: add `nitrofiles/` dir, pass it to `ndstool` so the
     filesystem is packed into the ROM.
+  - **Testing caveat:** DSMA's docs flag that NitroFS built with
+    devkitPro doesn't work in melonDS due to a melonDS bug, so the
+    main NDS-testing emulator can't validate the streaming path.
+    Either test under a different emulator (no$gba / iDeaS), build
+    against BlocksDS to dodge the devkitPro bug, or run on hardware
+    via flashcart. Worth confirming before committing to the rewrite.
 - **DSi extended RAM build.** DSi mode exposes 16 MB main RAM vs the
   original DS's 4 MB. devkitPro has a `DSi mode` Makefile template
   that bumps the linker region and emits a `.dsi` instead of `.nds`.
