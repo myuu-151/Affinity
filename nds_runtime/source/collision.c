@@ -42,7 +42,12 @@ void afn_collide_walls(int *px, int *pz, int py)
         int y0 = face->v0y, y1 = face->v1y, y2 = face->v2y;
         int fMinY = y0 < y1 ? y0 : y1; if (y2 < fMinY) fMinY = y2;
         int fMaxY = y0 > y1 ? y0 : y1; if (y2 > fMaxY) fMaxY = y2;
-        if (py + afn_player_height < fMinY || py > fMaxY) continue;
+        // py > fMaxY: player above the wall entirely. Use >= so a wall whose
+        // top is flush with the player's feet (e.g. you standing on top of a
+        // submesh box, trying to step onto the adjacent submesh) doesn't
+        // block — without this the 90° side wall of each submesh stops you
+        // from walking off the top edge of a separated-but-coplanar mesh.
+        if (py + afn_player_height < fMinY || py >= fMaxY) continue;
 
         int dist = (((ppx - face->v0x) >> 4) * face->nx +
                     ((ppz - face->v0z) >> 4) * face->nz) >> 4;

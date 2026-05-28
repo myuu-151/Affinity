@@ -4545,12 +4545,20 @@ static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh)
         }
     stbi_image_free(img);
 
-    // Median-cut quantize to 16 colors
-    // Simple approach: collect unique colors, pick 16 most common
+    // Only reserve palette[0] for transparency when the mesh has explicitly
+    // opted in. Auto-detect kept getting fooled by textures with transparent
+    // padding around opaque content (faces near the texture edge sampled
+    // padding and rendered transparent). Keep this off by default.
+    bool useAlpha = mesh.textureUseAlpha;
+    int palStart = useAlpha ? 1 : 0;
+    int palMax   = useAlpha ? 15 : 16;
+
+    // Median-cut quantize: collect opaque unique colors, pick top N most common
     struct ColorCount { uint32_t rgb; int count; };
     std::vector<ColorCount> hist;
     for (auto px : resized)
     {
+        if (useAlpha && (px >> 24) == 0) continue;   // transparent → index 0
         uint32_t rgb = px & 0x00FFFFFF;
         bool found = false;
         for (auto& hc : hist)
@@ -4560,20 +4568,22 @@ static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh)
     }
     std::sort(hist.begin(), hist.end(), [](const ColorCount& a, const ColorCount& b) { return a.count > b.count; });
 
-    // Build 16-color palette
+    // Build palette
     int palCount = (int)hist.size();
-    if (palCount > 16) palCount = 16;
+    if (palCount > palMax) palCount = palMax;
     uint32_t pal[16] = {};
+    if (useAlpha) pal[0] = 0;
     for (int i = 0; i < palCount; i++)
-        pal[i] = hist[i].rgb | 0xFF000000;
+        pal[palStart + i] = hist[i].rgb | 0xFF000000;
 
-    // Map each pixel to nearest palette entry
+    // Map each pixel to nearest palette entry (transparent → 0 if hasAlpha)
     std::vector<uint8_t> indexed(tw * th);
     for (int i = 0; i < tw * th; i++)
     {
+        if (useAlpha && (resized[i] >> 24) == 0) { indexed[i] = 0; continue; }
         uint32_t px = resized[i] & 0x00FFFFFF;
-        int bestIdx = 0, bestDist = 0x7FFFFFFF;
-        for (int c = 0; c < palCount; c++)
+        int bestIdx = palStart, bestDist = 0x7FFFFFFF;
+        for (int c = palStart; c < palStart + palCount; c++)
         {
             int dr = (int)(px & 0xFF) - (int)(pal[c] & 0xFF);
             int dg = (int)((px >> 8) & 0xFF) - (int)((pal[c] >> 8) & 0xFF);
@@ -4888,7 +4898,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide, ma.clampAbove ? 1 : 0, ma.nearClip ? 1 : 0, ma.faceCull ? 1 : 0, ma.texInIwram ? 1 : 0);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide, ma.clampAbove ? 1 : 0, ma.nearClip ? 1 : 0, ma.faceCull ? 1 : 0, ma.texInIwram ? 1 : 0, ma.textureUseAlpha ? 1 : 0);
     }
     fprintf(f, "\n");
 
@@ -6053,10 +6063,10 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "MeshAssets") == 0)
         {
             char mname[256], mpath[512], mtexpath[512] = {};
-            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1, mperspcorr = 0, msubdiv = 0, mclampabove = 0, mnearclip = 0, mfacecull = 0;
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1, mperspcorr = 0, msubdiv = 0, mclampabove = 0, mnearclip = 0, mfacecull = 0, mtexiwram = 0, mtexalpha = 0;
             float mdrawdist = 0.0f;
-            // Try newest format: ...visible|perspcorrect|subdivide|clampabove
-            int matched = sscanf(line, "mesh=%255[^|]|%4095[^|]|%d|%d|%d|%d|%d|%d|%d|%4095[^|\n]|%d|%f|%d|%d|%d|%d|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull);
+            // Try newest format: ...|texInIwram|textureUseAlpha
+            int matched = sscanf(line, "mesh=%255[^|]|%4095[^|]|%d|%d|%d|%d|%d|%d|%d|%4095[^|\n]|%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha);
             if (matched == 9) {
                 // Empty texture path — sscanf stopped at ||, skip it and parse remaining fields
                 mtexpath[0] = '\0';
@@ -6123,6 +6133,10 @@ static bool LoadProject(const std::string& path)
                     ma.nearClip = (mnearclip != 0);
                 if (matched >= 20)
                     ma.faceCull = (mfacecull != 0);
+                if (matched >= 21)
+                    ma.texInIwram = (mtexiwram != 0);
+                if (matched >= 22)
+                    ma.textureUseAlpha = (mtexalpha != 0);
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -8580,6 +8594,14 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
                     glBindTexture(GL_TEXTURE_2D, 0);
                 }
+                ImGui::SameLine();
+                if (ImGui::Checkbox("Use Alpha##meshTexAlpha", &ma.textureUseAlpha)) {
+                    // Re-quantize so palette[0] is reserved/freed based on toggle.
+                    if (!ma.texturePath.empty() && ma.texturePath[0] != '(')
+                        LoadMeshTexture(ma.texturePath, ma);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("NDS: reserve palette[0] for transparent (alpha=0) source pixels.\nLeave off unless your texture has actual cutout transparency.");
             }
         }
     }
@@ -12980,6 +13002,7 @@ void FrameTick(float dt)
                     me.drawPriority = ma.drawPriority;
                     me.visible = ma.visible ? 1 : 0;
                     me.textured = ma.textured ? 1 : 0;
+                    me.textureHasAlpha = ma.textureUseAlpha ? 1 : 0;
                     me.perspCorrect = ma.perspCorrect ? 1 : 0;
                     me.clampAbove = ma.clampAbove ? 1 : 0;
                     me.nearClip = ma.nearClip ? 1 : 0;

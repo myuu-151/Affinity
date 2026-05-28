@@ -146,8 +146,9 @@ static void load_mesh_textures(void)
         //   GL_TEXTURE_WRAP_S/_T    — tile when UVs go past 0..texSize
         //                             (default is CLAMP → bricks stop at edges)
         //   GL_TEXTURE_COLOR0_TRANSPARENT — palette index 0 = transparent
-        glTexImage2D(0, 0, GL_RGB16, sizeEnum, sizeEnum, 0,
-                     TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T,
+        int flags = TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T;
+        if (afn_mesh_desc[i][11]) flags |= GL_TEXTURE_COLOR0_TRANSPARENT;
+        glTexImage2D(0, 0, GL_RGB16, sizeEnum, sizeEnum, 0, flags,
                      afn_mesh_tex_ptrs[i]);
         glColorTableEXT(0, 0, 16, 0, 0, afn_mesh_tex_pal_ptrs[i]);
     }
