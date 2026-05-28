@@ -1954,6 +1954,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int   afn_player_vx_world;\n";
         f << "static int   afn_player_vz_world;\n";
         f << "static int   afn_velocity_falloff;\n";
+        // Pending forward-boost magnitude. BoostForward writes this; runtime
+        // consumes it during the player update by decomposing into vx/vz via
+        // sin/cos(viewAngle), then clears it. Lets the node be view-relative
+        // without leaking view-angle access into emitted script code.
+        f << "static int   afn_pending_boost_fwd;\n";
         f << "static int   player_on_ground;\n";
         f << "static u16   orbit_angle;\n";
         f << "extern int player_moving;\n";
@@ -2289,6 +2294,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         // Helper: resolve float from a data node (stored as IEEE754 bits in paramInt[0])
         auto resolveFloat = [&](const GBAScriptNodeExport* dn) -> float {
             if (!dn) return 0.0f;
+            if (dn->type == GBAScriptNodeType::Integer)
+                return (float)dn->paramInt[0];
             float fv;
             memcpy(&fv, &dn->paramInt[0], sizeof(float));
             return fv;
@@ -2649,6 +2656,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     int frames = fData ? resolveInt(fData) : 0;
                     if (frames < 1) frames = 1;
                     f << "    afn_velocity_falloff = " << frames << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::BoostForward: {
+                    auto* vData = findDataIn(action->id, 0);
+                    float vel = vData ? resolveFloat(vData) : 0.0f;
+                    int velFixed = (int)(vel * 256.0f);
+                    f << "    afn_pending_boost_fwd = " << velFixed << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::PlaySound: {
@@ -3857,6 +3871,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     if (n->paramInt[3] == -(pi + 1))
                         return "p" + std::to_string(pi);
                 }
+                // Integer literals on a Float pin: cast int -> int*256 directly.
+                if (n->type == GBAScriptNodeType::Integer)
+                    return std::to_string(n->paramInt[0] * 256);
                 float fv; memcpy(&fv, &n->paramInt[0], sizeof(float));
                 return std::to_string((int)(fv * 256.0f));
             };
@@ -4199,6 +4216,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* fData = bpFindDataIn(action->id, 0);
                     std::string frames = fData ? bpResolveInt(fData) : "1";
                     f << "    afn_velocity_falloff = " << frames << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::BoostForward: {
+                    auto* vData = bpFindDataIn(action->id, 0);
+                    std::string vel = vData ? bpResolveFloat(vData) : "0";
+                    f << "    afn_pending_boost_fwd = " << vel << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::PlaySound: {

@@ -5647,6 +5647,7 @@ static int   player_on_ground; // 1 if standing on a floor face
 static int   afn_player_vx_world;
 static int   afn_player_vz_world;
 static int   afn_velocity_falloff;
+static int   afn_pending_boost_fwd;
 #endif
 static FIXED cam_y_smooth;     // smoothed camera Y offset (16.8)
 
@@ -7731,6 +7732,14 @@ int main(void)
             }
 
 #ifdef AFN_HAS_SCRIPT
+            // BoostForward(speed) wrote a pending magnitude — decompose it
+            // here using the *current* view angle, then clear. Doing this in
+            // the runtime keeps the emitted script code view-agnostic.
+            if (afn_pending_boost_fwd) {
+                afn_player_vx_world =  (viewSin * afn_pending_boost_fwd) >> 16;
+                afn_player_vz_world = -(viewCos * afn_pending_boost_fwd) >> 16;
+                afn_pending_boost_fwd = 0;
+            }
             // Node-driven world-axis push velocity (boost pads / knockback).
             // SetVelocityX/Z write afn_player_v[xz]_world; we add it here every
             // frame regardless of input. VelocityFalloff(N) ramps to zero —

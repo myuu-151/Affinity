@@ -385,6 +385,15 @@ static void update_camera(void)
     extern int afn_player_vx_world;
     extern int afn_player_vz_world;
     extern int afn_velocity_falloff;
+    extern int afn_pending_boost_fwd;
+    // BoostForward(speed) wrote a pending magnitude — decompose it here
+    // using the *current* view angle, then clear. Keeps emitted script
+    // code view-agnostic.
+    if (afn_pending_boost_fwd) {
+        afn_player_vx_world = FX_MUL(g_sinf, afn_pending_boost_fwd);
+        afn_player_vz_world = FX_MUL(g_cosf, afn_pending_boost_fwd);
+        afn_pending_boost_fwd = 0;
+    }
     // Node-driven world-axis push velocity (boost pads / knockback).
     // SetVelocityX/Z write the globals; VelocityFalloff(N) linearly ramps
     // them to 0 over N frames (vx -= vx/N as N decrements gives true linear).

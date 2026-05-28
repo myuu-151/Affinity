@@ -98,6 +98,7 @@ int  player_ground_y;
 int  afn_player_vx_world;
 int  afn_player_vz_world;
 int  afn_velocity_falloff;
+int  afn_pending_boost_fwd;
 
 // Mode 0 tilemap state — referenced by emitted scripts even on 3D scenes.
 int  tm_player_facing = 4;        // 4 = south, matches GBA default
