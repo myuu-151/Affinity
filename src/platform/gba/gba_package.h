@@ -380,6 +380,9 @@ enum class GBAScriptNodeType : int {
     SetPlayerHeight,
     SetHudValue,
     UpdateRespawnPos,
+    SetVelocityX,
+    SetVelocityZ,
+    VelocityFalloff,
     COUNT
 };
 

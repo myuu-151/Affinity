@@ -1192,11 +1192,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             if (mesh.drawDistance > 0.0f)
                 drawDist = (int)(mesh.drawDistance / 4.0f * 256.0f);
 
+            // Index 6 (was placeholder 0) now carries texH so non-square
+            // textures load correctly; runtime falls back to texW when 0.
             // Index 11 (texPalBase placeholder) reused as textureHasAlpha so
             // the runtime can conditionally set GL_TEXTURE_COLOR0_TRANSPARENT.
             f << "    { " << vc << ", " << ic << ", " << qic << ", "
               << mesh.colorRGB15 << ", " << mesh.cullMode << ", "
-              << mesh.lit << ", 0, " << mesh.halfRes << ", "
+              << mesh.lit << ", " << mesh.texH << ", " << mesh.halfRes << ", "
               << mesh.textured << ", " << mesh.texW << ", "
               << texShift << ", " << mesh.textureHasAlpha << ", "
               << mesh.wireframe << ", " << mesh.grayscale << ", " << drawDist << ", "
@@ -2175,6 +2177,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         // Player physics (defined in fps3d.c under AFN_HAS_SCRIPT — exported so scripts can read/write).
         f << "extern int player_vy;\n";
         f << "extern int player_ground_y;\n";
+        // Mode-4 boost/knockback velocity (set by SetVelocityX/Z, decayed by
+        // VelocityFalloff). Defined in script_glue.c so emitted code can write.
+        f << "extern int afn_player_vx_world;\n";
+        f << "extern int afn_player_vz_world;\n";
+        f << "extern int afn_velocity_falloff;\n";
         // Audio entry points (audio.c) used by PlaySound / StopSound emit.
         f << "void afn_play_sound(int id);\n";
         f << "void afn_play_sfx(int smpIdx, int gain, int fifo);\n";
@@ -2460,6 +2467,25 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 auto* d = findDataIn(a->id, 0);
                 float v = d ? resolveFloat(d) : 0.0f;
                 f << "    player_vy = " << (int)(v * 256.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::SetVelocityX: {
+                auto* d = findDataIn(a->id, 0);
+                float v = d ? resolveFloat(d) : 0.0f;
+                f << "    afn_player_vx_world = " << (int)(v * 256.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::SetVelocityZ: {
+                auto* d = findDataIn(a->id, 0);
+                float v = d ? resolveFloat(d) : 0.0f;
+                f << "    afn_player_vz_world = " << (int)(v * 256.0f) << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::VelocityFalloff: {
+                auto* d = findDataIn(a->id, 0);
+                int frames = d ? resolveInt(d) : 0;
+                if (frames < 1) frames = 1;
+                f << "    afn_velocity_falloff = " << frames << ";\n";
                 break;
             }
             case GBAScriptNodeType::SetPlayerHeight: {

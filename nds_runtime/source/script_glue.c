@@ -92,6 +92,12 @@ int  afn_state_timer[NUM_SPRITES];
 // in script-less builds.
 int  player_vy;
 int  player_ground_y;
+// World-axis boost/knockback velocity (Mode 4). SetVelocityX/Z write these;
+// fps3d.c adds them to player_x/z every frame; VelocityFalloff linearly
+// decays them to 0 over N frames.
+int  afn_player_vx_world;
+int  afn_player_vz_world;
+int  afn_velocity_falloff;
 
 // Mode 0 tilemap state — referenced by emitted scripts even on 3D scenes.
 int  tm_player_facing = 4;        // 4 = south, matches GBA default

@@ -130,14 +130,16 @@ static void load_mesh_textures(void)
         if (!afn_mesh_desc[i][8]) continue;
 
         int texW = afn_mesh_desc[i][9];
-        int texH = afn_mesh_desc[i][9];
+        // Slot [6] carries texH for non-square textures; fall back to
+        // texW when 0 (older mapdata.h that pre-dates the split).
+        int texH = afn_mesh_desc[i][6] > 0 ? afn_mesh_desc[i][6] : texW;
         if (texW == 0) continue;
 
         // glTexImage2D wants size as the TEXTURE_SIZE_* enum
         // (TEXTURE_SIZE_8=0, _16=1, _32=2, _64=3, _128=4, _256=5, _512=6, _1024=7),
-        // not the raw pixel count. log2(texW) - 3 gets us there for power-of-2 sizes.
-        int sizeEnum = 0, tw = texW;
-        while (tw > 8) { tw >>= 1; sizeEnum++; }
+        // not the raw pixel count. log2(N) - 3 gets us there for power-of-2 sizes.
+        int sizeW = 0, tw = texW; while (tw > 8) { tw >>= 1; sizeW++; }
+        int sizeH = 0, th = texH; while (th > 8) { th >>= 1; sizeH++; }
 
         glGenTextures(1, &gl_tex_ids[i]);
         glBindTexture(0, gl_tex_ids[i]);
@@ -148,7 +150,7 @@ static void load_mesh_textures(void)
         //   GL_TEXTURE_COLOR0_TRANSPARENT — palette index 0 = transparent
         int flags = TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T;
         if (afn_mesh_desc[i][11]) flags |= GL_TEXTURE_COLOR0_TRANSPARENT;
-        glTexImage2D(0, 0, GL_RGB16, sizeEnum, sizeEnum, 0, flags,
+        glTexImage2D(0, 0, GL_RGB16, sizeW, sizeH, 0, flags,
                      afn_mesh_tex_ptrs[i]);
         glColorTableEXT(0, 0, 16, 0, 0, afn_mesh_tex_pal_ptrs[i]);
     }
@@ -377,6 +379,26 @@ static void update_camera(void)
     int dz = ((g_cosf * fwd - g_sinf * right) >> 8);
     player_x += FX_MUL(dx, spd);
     player_z += FX_MUL(dz, spd);
+#ifdef AFN_HAS_SCRIPT
+    // Forward decls in case the loaded mapdata.h was generated before
+    // these externs were emitted. Real defs live in script_glue.c.
+    extern int afn_player_vx_world;
+    extern int afn_player_vz_world;
+    extern int afn_velocity_falloff;
+    // Node-driven world-axis push velocity (boost pads / knockback).
+    // SetVelocityX/Z write the globals; VelocityFalloff(N) linearly ramps
+    // them to 0 over N frames (vx -= vx/N as N decrements gives true linear).
+    player_x += afn_player_vx_world;
+    player_z += afn_player_vz_world;
+    if (afn_velocity_falloff > 0) {
+        afn_player_vx_world -= afn_player_vx_world / afn_velocity_falloff;
+        afn_player_vz_world -= afn_player_vz_world / afn_velocity_falloff;
+        if (--afn_velocity_falloff == 0) {
+            afn_player_vx_world = 0;
+            afn_player_vz_world = 0;
+        }
+    }
+#endif
     player_moving = (fwd != 0 || right != 0);
     if (player_moving) { s_lastMoveDX = dx; s_lastMoveDZ = dz; }
     // GBA-style player facing tracking. player_move_angle is INPUT-space

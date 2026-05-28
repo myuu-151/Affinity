@@ -5641,6 +5641,13 @@ static FIXED player_ground_y;  // current floor height under player
 static FIXED player_vy;        // vertical velocity (16.8, negative = falling)
 static int   player_on_ground; // 1 if standing on a floor face
 #endif
+// Fallback for projects exported before SetVelocityX/Z/VelocityFalloff existed.
+// New mapdata.h defines AFN_HAS_VEL_XZ and emits these as statics itself.
+#ifndef AFN_HAS_VEL_XZ
+static int   afn_player_vx_world;
+static int   afn_player_vz_world;
+static int   afn_velocity_falloff;
+#endif
 static FIXED cam_y_smooth;     // smoothed camera Y offset (16.8)
 
 #ifdef AFN_COL_FACE_COUNT
@@ -7722,6 +7729,24 @@ int main(void)
                 // Just stopped moving — freeze sprite direction relative to orbit
                 player_move_angle = player_move_angle - orbit_angle;
             }
+
+#ifdef AFN_HAS_SCRIPT
+            // Node-driven world-axis push velocity (boost pads / knockback).
+            // SetVelocityX/Z write afn_player_v[xz]_world; we add it here every
+            // frame regardless of input. VelocityFalloff(N) ramps to zero —
+            // `vx -= vx/N; --N` is a true linear decay because (N-k)/N * (N-k-1)/(N-k)
+            // telescopes to (N-k-1)/N (constant 1/N drop per step).
+            player_x += afn_player_vx_world;
+            player_z += afn_player_vz_world;
+            if (afn_velocity_falloff > 0) {
+                afn_player_vx_world -= afn_player_vx_world / afn_velocity_falloff;
+                afn_player_vz_world -= afn_player_vz_world / afn_velocity_falloff;
+                if (--afn_velocity_falloff == 0) {
+                    afn_player_vx_world = 0;
+                    afn_player_vz_world = 0;
+                }
+            }
+#endif
 
             // Jump + dampen are driven by script nodes only
 
