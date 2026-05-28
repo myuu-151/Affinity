@@ -61,6 +61,21 @@ when a project uses them. Add a case in
   needs the same VRAM-bank dance treatment when entered from a
   different mode.
 
+## Skeletal mesh animation
+
+Meshes are currently static — `afn_mesh*_verts[]` is one fixed pose
+per mesh. The editor has no skeletal/bone data and the runtime has
+nowhere to put it. For future work, the
+[DSMA library](https://codeberg.org/SkyLyrac/dsma-library) is a
+ready-made skeletal animation system for NDS: takes MD5 source models
+through its converter, emits compact `.dsm` (geometry) + `.dsa`
+(animation) files, and the runtime loader supports frame interpolation
+and animation blending. Built on libnds, MIT-ish license, devkitPro/
+BlocksDS compatible. Would need a parallel asset pipeline in the
+editor (import MD5, run dsma converter, treat .dsm/.dsa as new asset
+types) plus a new draw path in `fps3d.c` that calls into DSMA instead
+of the current static-vertex submission.
+
 ## Large-project memory budget
 
 Right now every asset (PCM samples, mesh data, generated script blob)
