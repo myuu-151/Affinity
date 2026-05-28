@@ -88,28 +88,30 @@ static int note_to_hz(int baseHz, int noteFrom60Like, int baseNote)
 // ---------------------------------------------------------------------------
 static int alloc_voice(void)
 {
+    // First, reclaim any slot whose hardware channel has gone silent
+    // since the last audio_tick — audio_tick only runs once per frame
+    // (~16ms), and a fast piano can fire several notes in a single frame.
+    // Without mid-frame reclaim, slot count drifts and we steal active
+    // sustains while channels are already free.
+    unsigned int active = soundGetActiveChannels();
+    for (int i = 0; i < snd_voice_count; i++) {
+        if (snd_voices[i].handle >= 0 &&
+            !(active & (1u << snd_voices[i].handle)))
+            snd_voices[i].handle = -1;
+    }
     for (int i = 0; i < snd_voice_count; i++) {
         if (snd_voices[i].handle < 0) return i;
     }
     // All in use. Prefer voices already in their release ramp (they'd
-    // fall to silence soon anyway), then fall back to the oldest sustain.
-    // Multi-channel MIDI saturates the 16-voice pool fast; always-steal-0
-    // ate the same melodic voice over and over and cut active sustains.
+    // fall to silence soon anyway). If nothing is releasing, refuse to
+    // allocate — drop the new note instead of cutting an active sustain.
     int best = -1, bestAge = -1;
     for (int i = 0; i < snd_voice_count; i++) {
         if (snd_voices[i].releaseLeft > 0 && snd_voices[i].ageFrames > bestAge) {
             best = i; bestAge = snd_voices[i].ageFrames;
         }
     }
-    if (best < 0) {
-        bestAge = -1;
-        for (int i = 0; i < snd_voice_count; i++) {
-            if (snd_voices[i].ageFrames > bestAge) {
-                best = i; bestAge = snd_voices[i].ageFrames;
-            }
-        }
-    }
-    if (best < 0) best = 0;
+    if (best < 0) return -1;   // every voice still actively sustaining
     if (snd_voices[best].handle >= 0) soundKill(snd_voices[best].handle);
     snd_voices[best].handle = -1;
     return best;
@@ -181,6 +183,14 @@ void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch)
     if (durTicks <= 0) return;
 
     int v = alloc_voice();
+    if (v < 0) {
+        // Every slot still actively sustaining — drop the new note rather
+        // than killing one. The hardware channel we already kicked via
+        // soundPlaySample will keep going untracked, but since we won't
+        // pitch-bend or release it, that's effectively a fire-and-forget
+        // SFX. soundGetActiveChannels-based reclaim picks it up later.
+        return;
+    }
     SndVoice* vc = &snd_voices[v];
     vc->handle        = handle;
     vc->smpIdx        = smpIdx;
