@@ -2588,8 +2588,32 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         // parents wire to the same action.
         std::set<int> emitVisited;
         std::function<void(const GBAScriptNodeExport*)> emitOne;
+        // Sibling exec targets fan out in link declaration order, but gates
+        // (IsJumping, IsOnGround, ...) READ state that sibling action nodes
+        // (Jump, SetVelocityY, ...) WRITE on the same frame. Walking gates
+        // first means they see stale state — jump SFX gated by IsJumping
+        // never fires because Jump hasn't run yet. Sort action nodes before
+        // gate nodes so writers run before readers.
+        auto isGateType = [](GBAScriptNodeType t) -> bool {
+            return t == GBAScriptNodeType::IsMoving ||
+                   t == GBAScriptNodeType::IsOnGround ||
+                   t == GBAScriptNodeType::IsJumping ||
+                   t == GBAScriptNodeType::IsFalling ||
+                   t == GBAScriptNodeType::IsNear2D ||
+                   t == GBAScriptNodeType::IsFollowMoving ||
+                   t == GBAScriptNodeType::CheckFlag ||
+                   t == GBAScriptNodeType::IsFlagSet ||
+                   t == GBAScriptNodeType::FlipFlop ||
+                   t == GBAScriptNodeType::OnRise ||
+                   t == GBAScriptNodeType::Countdown;
+        };
         auto walkExec = [&](int nodeId, int pinIdx) {
-            for (int t : findExecOuts(nodeId, pinIdx)) {
+            auto targets = findExecOuts(nodeId, pinIdx);
+            std::stable_partition(targets.begin(), targets.end(), [&](int t) {
+                auto* n = findNode(t);
+                return n && !isGateType(n->type);
+            });
+            for (int t : targets) {
                 if (emitVisited.count(t)) continue;
                 emitVisited.insert(t);
                 auto* n = findNode(t);
