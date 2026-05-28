@@ -372,8 +372,16 @@ void afn_sprite_update(void)
         proj[j + 1] = key;
     }
 
-    int oamSlot = 0, affineSlot = 0;
-    for (int i = 0; i < projCount && oamSlot < 96 && affineSlot < 32; i++) {
+    // NDS has 32 affine matrices but 128 OAM entries. Allocating one matrix
+    // per sprite caps visible sprites at 32 — mid-distance rings dropped out
+    // because Sonic + shadow + the nearest rings consumed all 32 first.
+    // Bucket matScale into one of 32 buckets so similarly-scaled sprites
+    // share a matrix; visually identical at this resolution.
+    static int bucketSet[32];
+    for (int b = 0; b < 32; b++) bucketSet[b] = 0;
+
+    int oamSlot = 0;
+    for (int i = 0; i < projCount && oamSlot < 128; i++) {
         ProjSpr* p = &proj[i];
         SpriteSize sz = p->objSize == 8  ? SpriteSize_8x8   :
                         p->objSize == 16 ? SpriteSize_16x16 :
@@ -393,14 +401,21 @@ void afn_sprite_update(void)
         if (topLeftY >= 0 && topLeftY + canvasSize > 255) continue;
         if (topLeftX + canvasSize <= 0 || topLeftX >= 256) continue;
 
-        oamRotateScale(&oamMain, affineSlot, 0, p->matScale, p->matScale);
+        // Quantize matScale (128..2048) into a 0..31 bucket. Set the matrix
+        // the first time each bucket is touched this frame.
+        int bucket = ((p->matScale - 128) * 32) / (2048 - 128);
+        if (bucket < 0)  bucket = 0;
+        if (bucket > 31) bucket = 31;
+        if (!bucketSet[bucket]) {
+            oamRotateScale(&oamMain, bucket, 0, p->matScale, p->matScale);
+            bucketSet[bucket] = 1;
+        }
         oamSet(&oamMain, oamSlot,
                topLeftX, topLeftY,
                p->oamPrio, p->palBank, sz, SpriteColorFormat_16Color,
                (void*)((u8*)0x06400000 + p->tileIdx * 32),
-               affineSlot, true, false, false, false, false);
+               bucket, true, false, false, false, false);
         oamSlot++;
-        affineSlot++;
     }
 
     {

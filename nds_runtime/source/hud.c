@@ -56,7 +56,15 @@ extern const unsigned char default_font_bin[];
 // projects rarely have >8 simultaneous projected sprites on-screen.
 // Densely-decorated HUDs (splash logos with shadow + glow layers)
 // regularly need 100+ pieces — 96 wasn't enough.
-#define AFN_HUD_OAM_BASE      8
+// HUD starts well above the sprite range. Sprites fill OAM from slot 0
+// upward (depth-sorted, nearest first); HUD writes from this slot up.
+// With the prior value of 8 the user's project (22 sprites + 75 HUD
+// pieces) had mid-depth rings get stomped — sprites 0..7 survived,
+// slots 8..N got overwritten by HUD pieces, leaving holes that shifted
+// as the camera rotated and depth-sort shuffled which sprite landed where.
+// Cap is 128 - max_hud_count; 32 leaves 96 HUD slots which fits the
+// current project comfortably.
+#define AFN_HUD_OAM_BASE      32
 
 static void hud_bake_font(void)
 {
