@@ -1573,6 +1573,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
         float lfoFreqHz = 5.0f;     // LFO rate (default 5 Hz)
         float lfoDepthCents = 0.0f; // LFO → pitch depth (default vibrato, cents)
         float lfoCC1Cents = 0.0f;   // LFO → pitch depth controlled by CC#1 (cents)
+        float staticPitchCents = 0.0f; // ART1 None→Pitch static offset (cents)
     };
     std::vector<InsInfo> instruments;
     {
@@ -1589,6 +1590,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                 const uint8_t* rgn = nullptr;
                 uint32_t rgnSize = 0;
                 float lfoFreq = 5.0f, lfoDepth = 0.0f, lfoCC1 = 0.0f;
+                float staticPitchCents = 0.0f;  // ART1 None→Pitch static offset
                 while (ip + 8 <= iEnd) {
                     uint32_t ickId = rd32(ip);
                     uint32_t ickSize = rd32(ip + 4);
@@ -1619,7 +1621,15 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                                         // uint16_t xform = rd16(cp + 6);
                                         int32_t scale = (int32_t)rd32(cp + 8);
                                         // DLS: CONN_DST_ATTENUATION=0x0001, CONN_DST_PITCH=0x0003
-                                        if (src == 0x0001 && dst == 0x0003 && ctrl == 0x0000) {
+                                        if (src == 0x0000 && dst == 0x0003 && ctrl == 0x0000) {
+                                            // None → Pitch (no control) = static pitch offset in cents.
+                                            // gm.dls encodes per-instrument tuning here (overdriven
+                                            // guitar etc. use it to nudge the sample's effective base
+                                            // pitch). scale is 65536 per cent, signed.
+                                            // Accumulate into a static-cents offset; the caller folds
+                                            // it into the region's fineTune below.
+                                            staticPitchCents += (float)scale / 65536.0f;
+                                        } else if (src == 0x0001 && dst == 0x0003 && ctrl == 0x0000) {
                                             // LFO → Pitch (no control) = default vibrato depth in cents
                                             lfoDepth = (float)scale / 65536.0f;
                                         } else if (src == 0x0001 && dst == 0x0003 && ctrl == 0x0081) {
@@ -1649,6 +1659,7 @@ static int LoadGMInstruments(std::vector<SoundSample>& bank) {
                     info.lfoFreqHz = lfoFreq;
                     info.lfoDepthCents = lfoDepth;
                     info.lfoCC1Cents = lfoCC1;
+                    info.staticPitchCents = staticPitchCents;
                     instruments.push_back(info);
                 }
             }

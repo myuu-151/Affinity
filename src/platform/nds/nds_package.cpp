@@ -1421,10 +1421,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << padVal << "\n};\n";
             }
             f << "#define AFN_PCM_" << i << "_LEN " << smp.data.size() << "\n";
-            // Use raw rate (without fineTune baked) and emit the cents factor
-            // as 16.16 fixed so the runtime can apply fineTune at higher
-            // precision than the integer sampleRate field allows.
-            f << "#define AFN_PCM_" << i << "_RATE " << smp.rawSampleRate << "\n";
+            // Use the editor-baked rate (sampleRate, not rawSampleRate). GBA
+            // reads the same baked rate and sounds correct; the raw/factor
+            // split for NDS rounded slightly differently and drifted ~30
+            // cents on some samples. Matching GBA exactly is the priority.
+            f << "#define AFN_PCM_" << i << "_RATE " << smp.sampleRate << "\n";
             f << "#define AFN_PCM_" << i << "_16BIT " << (use16 ? 1 : 0) << "\n\n";
         }
 
@@ -1464,17 +1465,14 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         for (int i = 0; i < (int)soundSamples.size(); i++)
             f << "    " << (soundSamples[i].volScale > 255 ? 255 : soundSamples[i].volScale) << ",\n";
         f << "};\n";
-        // Fine-tune multiplier as 16.16 fixed: factor = 2^(cents/1200).
-        // Runtime: hz_final = (hz * factor + 32768) >> 16 — keeps per-cent
-        // precision instead of losing it to int truncation in sampleRate.
-        // Guard macro lets audio.c skip the lookup on older mapdata.h files
-        // that predate this array.
+        // fineTune is already baked into AFN_PCM_*_RATE above (matches GBA).
+        // Emit a stub fine_factor table of 65536 (= 1.0) so audio.c's
+        // multiplier path is a no-op, and AFN_HAS_FINE_FACTOR still keeps
+        // older runtimes that read the array linking.
         f << "#define AFN_HAS_FINE_FACTOR 1\n";
         f << "static const unsigned int afn_pcm_fine_factor[" << soundSamples.size() << "] = {\n";
         for (int i = 0; i < (int)soundSamples.size(); i++) {
-            double factor = pow(2.0, (double)soundSamples[i].fineTuneCents / 1200.0);
-            unsigned int fixed = (unsigned int)(factor * 65536.0 + 0.5);
-            f << "    " << fixed << ",\n";
+            f << "    65536,\n";
         }
         f << "};\n";
         // Envelope tables — drive audio.c's soft-fade release + decay path so
