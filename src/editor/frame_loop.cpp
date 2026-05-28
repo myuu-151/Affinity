@@ -13705,6 +13705,8 @@ void FrameTick(float dt)
                                 // Use 8-bit downsampled data (same as MIDI instruments) to save CPU
                                 se.data = smp.data;
                                 se.sampleRate = smp.sampleRate;
+                                se.rawSampleRate = smp.sampleRate;
+                                se.fineTuneCents = 0;
                                 se.loop = false;
                                 se.releaseMs = 0;
                                 se.decayPct = 0;
@@ -13767,17 +13769,30 @@ void FrameTick(float dt)
                                     // Runtime does: rate * 2^((note-60)/12), we want native rate
                                     // So: exportedRate = nativeRate * 2^((60-note)/12)
                                     se.sampleRate = (int)(hit.sampleRate * powf(2.0f, (60 - (n.note & 127)) / 12.0f));
+                                    // Mirror sampleRate into rawSampleRate so NDS (which uses
+                                    // raw + fine_factor) gets the same per-note calibration the
+                                    // baked sampleRate already encodes. fineTune is 0 for drums.
+                                    se.rawSampleRate = se.sampleRate;
+                                    se.fineTuneCents = 0;
                                     se.loop = false;
                                     exportSoundSamples.push_back(std::move(se));
                                 } else if (!smp.regions.empty()) {
                                     // Multi-sample GM: each note maps to a region sample
                                     // Find region for this note
                                     SampleRegion* best = nullptr;
-                                    for (auto& rgn : smp.regions)
-                                        if (n.note >= rgn.keyLo && n.note <= rgn.keyHi) { best = &rgn; break; }
-                                    if (!best) best = &smp.regions[0];
-                                    // Key by bankIdx + region baseNote to deduplicate
-                                    int key = (bankIdx << 8) | (best->baseNote & 127);
+                                    int bestIdx = 0;
+                                    for (int ri = 0; ri < (int)smp.regions.size(); ri++) {
+                                        auto& rgn = smp.regions[ri];
+                                        if (n.note >= rgn.keyLo && n.note <= rgn.keyHi) {
+                                            best = &rgn; bestIdx = ri; break;
+                                        }
+                                    }
+                                    if (!best) { best = &smp.regions[0]; bestIdx = 0; }
+                                    // Key by bankIdx + region INDEX (not just baseNote) — banks like
+                                    // overdriven guitar have multiple regions sharing the same baseNote
+                                    // with different fineTune (cents). Keying on baseNote alone
+                                    // collapsed them to one sample and the wrong cents got baked in.
+                                    int key = (bankIdx << 16) | (bestIdx & 0xFFFF);
                                     if (!sampleRemap.count(key)) {
                                         int exportIdx = (int)exportSoundSamples.size();
                                         sampleRemap[key] = exportIdx;
@@ -13785,8 +13800,14 @@ void FrameTick(float dt)
                                         se.name = std::string(smp.name) + "_" + std::to_string(best->baseNote);
                                         se.data = best->data;
                                         se.data16 = best->data16;
-                                        // Bake fineTune into rate (baseNote already handled by note rebasing)
-                                        se.sampleRate = (int)(best->sampleRate * powf(2.0f, (best->fineTune / 100.0f) / 12.0f));
+                                        // Bake fineTune into rate (baseNote already handled by note rebasing).
+                                        // Round to nearest instead of truncating — `(int)x` was floor'ing
+                                        // up to ~1 Hz off, audible as a few cents flat on busy instruments.
+                                        se.sampleRate = (int)(best->sampleRate * powf(2.0f, (best->fineTune / 100.0f) / 12.0f) + 0.5f);
+                                        // Also keep the raw rate + cents so NDS can apply fineTune at
+                                        // runtime instead of relying on the int sampleRate's precision.
+                                        se.rawSampleRate = best->sampleRate;
+                                        se.fineTuneCents = best->fineTune;
                                         se.volScale = (best->peakAmplitude * 256) / 32768;
                                         if (se.volScale < 1) se.volScale = 1;
                                         if (smp.loop) {
@@ -13847,6 +13868,8 @@ void FrameTick(float dt)
                                         se.sampleRate = smp.sampleRate;
                                         se.loop = smp.loop || (int)se.data.size() <= 64;
                                     }
+                                    se.rawSampleRate = se.sampleRate;
+                                    se.fineTuneCents = 0;
                                     if (smp.loop) {
                                         // Exact sample positions
                                         se.loopStart = smp.loopStart;
@@ -13936,12 +13959,18 @@ void FrameTick(float dt)
                                 if (smp.isDrumKit) {
                                     key = (bankIdx << 8) | (n.note & 127);
                                 } else if (!smp.regions.empty()) {
-                                    // Multi-sample: find region for this note
+                                    // Multi-sample: find region for this note (must match the
+                                    // sample-emit lookup above so the dedup key + noteBase agree)
                                     SampleRegion* best = nullptr;
-                                    for (auto& rgn : smp.regions)
-                                        if (n.note >= rgn.keyLo && n.note <= rgn.keyHi) { best = &rgn; break; }
-                                    if (!best) best = &smp.regions[0];
-                                    key = (bankIdx << 8) | (best->baseNote & 127);
+                                    int bestIdx = 0;
+                                    for (int ri = 0; ri < (int)smp.regions.size(); ri++) {
+                                        auto& rgn = smp.regions[ri];
+                                        if (n.note >= rgn.keyLo && n.note <= rgn.keyHi) {
+                                            best = &rgn; bestIdx = ri; break;
+                                        }
+                                    }
+                                    if (!best) { best = &smp.regions[0]; bestIdx = 0; }
+                                    key = (bankIdx << 16) | (bestIdx & 0xFFFF);
                                     noteBase = best->baseNote;
                                 } else {
                                     key = bankIdx;

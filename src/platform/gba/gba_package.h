@@ -545,6 +545,11 @@ struct GBASoundSampleExport {
     int volScale = 256;  // 8.8 fixed-point volume scale (256 = 1.0, for normalization compensation)
     int vibratoDepth = 0; // vibrato depth in cents (0 = off)
     int vibratoRate = 5;  // vibrato LFO rate in Hz
+    // sampleRate above is the GBA-targeted rate with fineTune already baked
+    // in via *2^(fineTuneCents/1200). NDS keeps the raw rate + cents
+    // separate so it can apply finer-precision pitch math at runtime.
+    int rawSampleRate = 16384; // sample rate without fineTune baked
+    int fineTuneCents = 0;     // signed cents to apply on top of rawSampleRate
 };
 
 // Sound export: a note event in a sequence

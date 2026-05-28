@@ -63,9 +63,10 @@ static int snd_pitch_bend[16];  // per-channel bend (-8192..+8191)
 // 12-entry table of 2^(n/12) in 16.16 fixed. We index by (note-base) % 12 and
 // shift by octaves to handle the rest. Faster than pow() and avoids float.
 // ---------------------------------------------------------------------------
+// 2^(n/12) in 16.16 fixed, rounded to nearest.
 static const uint32_t k_semi_2_16[12] = {
-    65536,    69433,    73562,    77936,    82570,    87480,
-    92682,    98193,    104032,   110218,   116772,   123715
+    65536,    69433,    73562,    77937,    82570,    87480,
+    92682,    98193,    104031,   110217,   116771,   123716
 };
 
 static int note_to_hz(int baseHz, int noteFrom60Like, int baseNote)
@@ -124,6 +125,19 @@ void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch)
 
     int baseHz = afn_pcm_rates[smpIdx];
     int hz = note_to_hz(baseHz, note, 60); // assume baseNote=60; multi-sample regions are baked into 'note' by exporter
+#ifdef AFN_HAS_FINE_FACTOR
+    // Apply per-sample fineTune as a 16.16 multiplier. The exporter emits
+    // factor = round(2^(cents/1200) * 65536), keeping sub-cent precision
+    // that the int sampleRate field couldn't carry. Older mapdata.h files
+    // without AFN_HAS_FINE_FACTOR fall back to the rate-baked precision.
+    {
+        unsigned int fine = afn_pcm_fine_factor[smpIdx];
+        if (fine != 65536) {
+            unsigned long long h = (unsigned long long)hz * fine + 32768ULL;
+            hz = (int)(h >> 16);
+        }
+    }
+#endif
 
     // Volume: combine MIDI velocity (0..127) with per-sample scale (0..255).
     // libnds wants 0..127.
