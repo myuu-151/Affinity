@@ -4756,7 +4756,8 @@ static bool SaveProject(const std::string& path)
 
     fprintf(f, "[Affinity Project]\n");
     fprintf(f, "version=2\n");
-    fprintf(f, "activeTab=%d\n\n", (int)sActiveTab);
+    fprintf(f, "activeTab=%d\n", (int)sActiveTab);
+    fprintf(f, "midiMasterDb=%.4f\n\n", sMidiMasterDb);
 
     // Camera start object
     fprintf(f, "[CameraStart]\n");
@@ -5777,6 +5778,8 @@ static bool LoadProject(const std::string& path)
                 projectVersion = ival;
             else if (sscanf(line, "activeTab=%d", &ival) == 1)
                 sActiveTab = (EditorTab)std::clamp(ival, 0, (int)EditorTab::Sound);
+            else if (sscanf(line, "midiMasterDb=%f", &fval) == 1)
+                sMidiMasterDb = fval;
         }
         else if (strcmp(section, "CameraStart") == 0)
         {
