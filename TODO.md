@@ -60,3 +60,33 @@ when a project uses them. Add a case in
   hasn't been re-validated since the multi-mode swap landed. Likely
   needs the same VRAM-bank dance treatment when entered from a
   different mode.
+
+## Large-project memory budget
+
+Right now every asset (PCM samples, mesh data, generated script blob)
+is `static const` in `mapdata.h` and lands in the ARM9's 4 MB main RAM
+(`lma9`). Usable `.main` cap after stack/heap is roughly 3 MB. Projects
+with long music samples, dense scripts, or many meshes hit
+`region lma9 overflowed by N bytes` at link time. Two complementary
+routes to lift that ceiling:
+
+- **NitroFS streaming.** Move big assets out of `mapdata.h` into files
+  packed into the .nds ROM, accessed at runtime via libnds `fopen`/
+  `fread`. ROM cap is 256 MB. Requires:
+  - Exporter split: write large blobs (PCM samples first, then mesh
+    textures and tile data) to `nds_runtime/nitrofiles/` instead of
+    emitting them as `static const`; `mapdata.h` keeps only IDs/paths.
+  - Runtime loader: small ring buffer + `fread` for streaming samples
+    (`audio.c`), on-demand load for textures/meshes (`fps3d.c`,
+    `sprites.c`). `soundPlaySample` still needs a RAM pointer, so
+    music probably double-buffers.
+  - Makefile: add `nitrofiles/` dir, pass it to `ndstool` so the
+    filesystem is packed into the ROM.
+- **DSi extended RAM build.** DSi mode exposes 16 MB main RAM vs the
+  original DS's 4 MB. devkitPro has a `DSi mode` Makefile template
+  that bumps the linker region and emits a `.dsi` instead of `.nds`.
+  Won't run on original DS hardware (works in melonDS / on physical
+  DSi), so probably needs a separate "DSi target" alongside the
+  existing NDS export rather than replacing it. Much smaller code
+  change than NitroFS — single Makefile + header tweak — but trades
+  off compatibility for the extra headroom.
