@@ -16,6 +16,7 @@
 // SetPlayerHeight node). Default lives in script_glue.c at 3072.
 
 int afn_wall_collided_sprite = -1;
+int afn_floor_sprite = -1;   // sprite index of the floor face under the player (-1 = none)
 
 #ifndef AFN_COL_GRID_ORIGIN_X
 #define AFN_COL_GRID_ORIGIN_X 0
@@ -89,7 +90,7 @@ int afn_collide_floor(int px, int pz, int py, int *outY)
     int start = afn_col_grid_start[ci];
     int count = afn_col_grid_count[ci];
 
-    int bestY = 0, found = 0;
+    int bestY = 0, found = 0, bestSpr = -1;
     int ppx = px >> 8, ppz = pz >> 8;       // integer pixels for cross-product math
 
     for (int i = 0; i < count; i++) {
@@ -119,9 +120,10 @@ int afn_collide_floor(int px, int pz, int py, int *outY)
         }
 
         if (floorY > py + afn_player_height) continue;
-        if (!found || floorY > bestY) { bestY = floorY; found = 1; }
+        if (!found || floorY > bestY) { bestY = floorY; found = 1; bestSpr = face->sprIdx; }
     }
     *outY = bestY;
+    afn_floor_sprite = found ? bestSpr : -1;   // which sprite's floor we're on (grind needs this)
     return found;
 }
 
