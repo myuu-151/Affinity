@@ -267,6 +267,20 @@ static void render_meshes(void)
 
 // ---------------------------------------------------------------------------
 // Input + camera tick (WASD = D-pad: W/S = walk fwd/back, A/D = turn)
+// Integer square root (for normalizing the rail-grind direction vector).
+static int afn_isqrt(int n) {
+    if (n <= 0) return 0;
+    int x = n, r = 0;
+    int b = 1 << 30;
+    while (b > x) b >>= 2;
+    while (b) {
+        if (x >= r + b) { x -= r + b; r = (r >> 1) + b; }
+        else r >>= 1;
+        b >>= 2;
+    }
+    return r;
+}
+
 // ---------------------------------------------------------------------------
 // Movement/jump state. Walk speed ramps with AFN_WALK_EASE_IN/OUT toward
 // the target (walk or sprint). player_y is a vertical offset added to the
@@ -373,13 +387,28 @@ static void update_camera(void)
     // the camera basis (forward = (sin,cos), right = (cos,-sin) for our
     // gluLookAt convention). script_tick ran before fps3d_update so the
     // values are fresh.
+    // Rail grinding: when afn_grinding, the player is locked to the rail
+    // direction and slides on momentum instead of taking input movement.
+    extern int afn_grinding, afn_grind_dx, afn_grind_dz, afn_grind_vel;
+    extern int afn_player_vx_world, afn_player_vz_world;
     int fwd = afn_input_fwd, right = afn_input_right;
     if (fwd && right) { fwd = (fwd * 181) >> 8; right = (right * 181) >> 8; }
     int spd = afn_move_speed;
     int dx = ((g_sinf * fwd + g_cosf * right) >> 8);
     int dz = ((g_cosf * fwd - g_sinf * right) >> 8);
-    int mvX = FX_MUL(dx, spd);
-    int mvZ = FX_MUL(dz, spd);
+    extern int afn_grind_rail;
+    int mvX, mvZ;
+    if (afn_grind_vel != 0) {
+        // Engaged grind: locked to the rail axis, sliding on momentum. Player
+        // input is FROZEN here (dx/dz ignored) — only the jump (handled below)
+        // gets you off. Engage + direction seeding happen in the floor block,
+        // once we confirm the player is actually standing on the rail's floor.
+        mvX = FX_MUL(afn_grind_dx, afn_grind_vel);
+        mvZ = FX_MUL(afn_grind_dz, afn_grind_vel);
+    } else {
+        mvX = FX_MUL(dx, spd);
+        mvZ = FX_MUL(dz, spd);
+    }
     player_x += mvX;
     player_z += mvZ;
     // Horizontal distance moved this frame (Manhattan) — used as the
@@ -491,25 +520,91 @@ static void update_camera(void)
     // Floor + wall collision against mesh data when the project exports it.
 #ifdef AFN_COL_FACE_COUNT
     {
+        extern int afn_floor_sprite;
         int wasGround = player_on_ground;
         int floorY;
         int onFloor = afn_collide_floor(player_x, player_z, player_y, &floorY);
-        if (onFloor && player_y <= floorY) {
-            // At or below the floor — land normally.
-            player_y = floorY;
-            player_vy = 0;
-            player_on_ground = 1;
-        } else if (onFloor && wasGround && player_vy <= 0
-                   && (player_y - floorY) <= s_groundSnapTol) {
-            // Walking down a slope: the floor dropped below us but only by a
-            // slope-step (within the horizontal distance moved this frame).
-            // Snap to it and stay grounded instead of going airborne for a
-            // frame, which would flicker Is Falling and stutter the anim.
-            player_y = floorY;
-            player_vy = 0;
-            player_on_ground = 1;
+        // "On the rail" = standing on a floor face that belongs to the rail
+        // sprite (afn_grind_rail), captured by StartGrind. This is what makes
+        // the grind follow JUST the pipe and end the instant you leave it.
+        int onRail = (onFloor && afn_grind_rail >= 0 && afn_floor_sprite == afn_grind_rail);
+        static int s_grindPrevFloorY = 0;
+
+        if (afn_grind_vel != 0) {
+            // --- Currently grinding ---
+            if (player_vy > 0) {
+                // Jump node fired → hop off, carry momentum into world velocity.
+                afn_player_vx_world = FX_MUL(afn_grind_dx, afn_grind_vel);
+                afn_player_vz_world = FX_MUL(afn_grind_dz, afn_grind_vel);
+                if (afn_velocity_falloff <= 0) afn_velocity_falloff = 30;
+                afn_grind_vel = 0; afn_grinding = 0;
+            } else if (!onRail) {
+                // Slid off the edge / end of the rail — release momentum and let
+                // it decay so you fly off keeping speed then ramp down (Sonic rail
+                // launch), instead of sliding forever. A VelocityFalloff node can
+                // override the 30-frame default.
+                afn_player_vx_world = FX_MUL(afn_grind_dx, afn_grind_vel);
+                afn_player_vz_world = FX_MUL(afn_grind_dz, afn_grind_vel);
+                if (afn_velocity_falloff <= 0) afn_velocity_falloff = 30;
+                afn_grind_vel = 0; afn_grinding = 0;
+            } else {
+                // Stick to the rail; slope drives momentum (downhill speeds up).
+                int slope = s_grindPrevFloorY - floorY;
+                s_grindPrevFloorY = floorY;
+                afn_grind_vel += slope >> 2;          // slope acceleration (tunable)
+                afn_grind_vel -= afn_grind_vel >> 8;  // minimal friction (slippery)
+                if (afn_grind_vel < (AFN_WALK_SPEED >> 3)) afn_grind_vel = (AFN_WALK_SPEED >> 3);
+                player_y = floorY; player_vy = 0; player_on_ground = 1;
+            }
+        } else if (afn_grinding && onRail && player_vy <= 0) {
+            // --- Engage: StartGrind fired AND we're standing on the rail ---
+            // Lock the slide to the rail's mesh axis (so you follow the pipe even
+            // if you landed at an angle), seed speed from current move speed.
+            int rdx = s_lastMoveDX, rdz = s_lastMoveDZ;
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+            if (afn_grind_rail < AFN_SPRITE_COUNT) {
+                int mi = afn_sprite_data[afn_grind_rail][9];
+                if (mi >= 0 && mi < AFN_MESH_COUNT) {
+                    const short* v = afn_mesh_vert_ptrs[mi];
+                    int vc = afn_mesh_desc[mi][0];
+                    if (v && vc > 0) {
+                        int mnx=v[0],mxx=v[0],mnz=v[2],mxz=v[2];
+                        for (int k = 1; k < vc; k++) {
+                            int x=v[k*3], z=v[k*3+2];
+                            if(x<mnx)mnx=x; if(x>mxx)mxx=x;
+                            if(z<mnz)mnz=z; if(z>mxz)mxz=z;
+                        }
+                        int ex = mxx-mnx, ez = mxz-mnz;
+                        long d1 = (long)ex*s_lastMoveDX + (long)ez*s_lastMoveDZ;
+                        long d2 = (long)ex*s_lastMoveDX - (long)ez*s_lastMoveDZ;
+                        int ddx = ex, ddz = (d1 >= d2) ? ez : -ez;
+                        long dot = (long)ddx*s_lastMoveDX + (long)ddz*s_lastMoveDZ;
+                        if (dot < 0) { ddx = -ddx; ddz = -ddz; }
+                        int len = afn_isqrt(ddx*ddx + ddz*ddz); if (len < 1) len = 1;
+                        rdx = (ddx * 256) / len;
+                        rdz = (ddz * 256) / len;
+                    }
+                }
+            }
+#endif
+            afn_grind_dx = rdx; afn_grind_dz = rdz;
+            afn_grind_vel = (afn_move_speed > 0 ? afn_move_speed : AFN_WALK_SPEED);
+            s_grindPrevFloorY = floorY;
+            player_y = floorY; player_vy = 0; player_on_ground = 1;
         } else {
-            player_on_ground = 0;
+            // --- Not grinding: normal floor resolution ---
+            if (onFloor && player_y <= floorY) {
+                player_y = floorY; player_vy = 0; player_on_ground = 1;
+            } else if (onFloor && wasGround && player_vy <= 0
+                       && (player_y - floorY) <= s_groundSnapTol) {
+                player_y = floorY; player_vy = 0; player_on_ground = 1;
+            } else {
+                player_on_ground = 0;
+            }
+            // Don't let a StartGrind intent linger when we're not on the rail
+            // (e.g. brushed the rail's bounding box from the side without
+            // standing on it) — otherwise IsGrinding would stay true.
+            if (!onRail) afn_grinding = 0;
         }
     }
     afn_collide_walls(&player_x, &player_z, player_y);
