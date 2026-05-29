@@ -163,6 +163,27 @@ void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch)
     int sampleBytes = (afn_pcm_lens[smpIdx] - loopStart) * bytesPerSample;
     int loopWords   = (loopStart * bytesPerSample) / 4;
 
+    // Fire-and-forget for SFX (durTicks <= 0): don't reserve a slot in
+    // snd_voices[] — libnds owns the 16 hardware channels and will recycle
+    // them when the (one-shot) sample ends. We only track in the voice table
+    // when we need pitch-bend or note-off bookkeeping (sequenced MIDI notes).
+    if (durTicks <= 0) {
+        soundPlaySample((void*)afn_pcm_ptrs[smpIdx], fmt, sampleBytes, hz,
+                        vol, 64, loop ? true : false, loopWords);
+        return;
+    }
+
+    // Sequenced note — secure a tracking voice BEFORE starting the channel.
+    // Critical for LOOPING (sustained-instrument) samples: a looping channel
+    // never ends on its own, so if we started it without a voice nothing
+    // would ever soundKill it and the note would sustain forever. That was
+    // the "notes hang forever at points in the scene" bug — it triggered in
+    // dense passages where all 16 voices were busy and alloc_voice failed.
+    // If no voice is available, drop the note (play nothing) rather than
+    // orphan a hardware channel.
+    int v = alloc_voice();
+    if (v < 0) return;
+
     int handle = soundPlaySample(
         (void*)afn_pcm_ptrs[smpIdx],
         fmt,
@@ -174,23 +195,6 @@ void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch)
         loopWords
     );
 
-    // Fire-and-forget for SFX (durTicks <= 0): don't reserve a slot in
-    // snd_voices[] — libnds owns the 16 hardware channels and will recycle
-    // them when the sample ends. We only track in the voice table when
-    // we need pitch-bend or note-off bookkeeping (sequenced MIDI notes).
-    // Without this, every collected ring's SFX held a voice slot
-    // forever, eventually stealing voice 0 = the MIDI sustain.
-    if (durTicks <= 0) return;
-
-    int v = alloc_voice();
-    if (v < 0) {
-        // Every slot still actively sustaining — drop the new note rather
-        // than killing one. The hardware channel we already kicked via
-        // soundPlaySample will keep going untracked, but since we won't
-        // pitch-bend or release it, that's effectively a fire-and-forget
-        // SFX. soundGetActiveChannels-based reclaim picks it up later.
-        return;
-    }
     SndVoice* vc = &snd_voices[v];
     vc->handle        = handle;
     vc->smpIdx        = smpIdx;
