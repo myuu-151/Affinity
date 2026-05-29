@@ -191,31 +191,18 @@ void afn_sprite_update(void)
         if (dirCount > 1 && !fStatic) {
 #if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
             if (si == AFN_PLAYER_IDX) {
-                // Moving sprite is input-only (no orbit_angle) so holding
-                // L/R while walking doesn't flicker NW/NE — base dir
-                // stays stable, only the explicit L/R shift below changes
-                // it. Idle has the 2x orbit multiplier so the sprite
-                // rotates visibly as the camera orbits.
+                // Facing comes purely from movement direction (player_move_angle,
+                // set by MovePlayer nodes via afn_input_fwd/right). Idle adds the
+                // 2x orbit multiplier so the sprite rotates with the camera.
+                // NOTE: a hardcoded KEY_L/KEY_R "lean" shift used to live here for
+                // the orbit-camera scheme, but it broke remapped controls (e.g.
+                // L mapped to Move Player(Up) showed NW instead of N). Removed —
+                // facing is now fully node-driven.
                 uint16_t sprAngle = player_moving
                     ? player_move_angle
                     : (uint16_t)(player_move_angle - (orbit_angle << 1));
                 int rawIdx = ((sprAngle + 0xC000 + 4096) >> 13) & 7;
                 dir = (8 - rawIdx) & 7;
-                // L/R shift only while moving — otherwise pressing L for
-                // orbit would instantly slap the idle sprite to NE/NW
-                // before the orbit-rotation actually moves the dir.
-                if (player_moving) {
-                    int held = keysHeld();
-                    if (held & KEY_L)      dir = (dir - 1 + 8) & 7;  // UP+L → NW
-                    else if (held & KEY_R) dir = (dir + 1) & 7;      // UP+R → NE
-                }
-                static int s_pickDbg = 0;
-                s_pickDbg++;
-                if ((s_pickDbg & 15) == 0) {
-                    iprintf("\x1b[18;0Hmv=%d pma=%04X ora=%04X sa=%04X raw=%d dir=%d ",
-                            player_moving, (unsigned)player_move_angle,
-                            (unsigned)orbit_angle, (unsigned)sprAngle, rawIdx, dir);
-                }
             } else
 #endif
             {

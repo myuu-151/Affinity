@@ -1869,6 +1869,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_sprite_anim_spr;\n";
         f << "extern int  afn_sprite_anim_val;\n";
         f << "extern int  afn_anim_prio;\n";
+        f << "extern int  afn_speed_prio;\n";
         f << "extern int  afn_collided_sprite;\n";
         f << "extern int  afn_collided_tm_obj;\n";
         f << "extern int  afn_collided_tm_obj;\n";
@@ -2245,8 +2246,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         auto keyName = [](int k) -> const char* {
             static const char* keys[] = { "KEY_A","KEY_B","KEY_L","KEY_R",
                                           "KEY_START","KEY_SELECT",
-                                          "KEY_UP","KEY_DOWN","KEY_LEFT","KEY_RIGHT" };
-            return (k >= 0 && k < 10) ? keys[k] : "KEY_A";
+                                          "KEY_UP","KEY_DOWN","KEY_LEFT","KEY_RIGHT",
+                                          "KEY_X","KEY_Y" };
+            return (k >= 0 && k < 12) ? keys[k] : "KEY_A";
         };
 
         // Collect chains per event type (BFS from each event node through exec links).
@@ -2298,6 +2300,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         // Mirrors GBA: track whether emitAction is currently inside an
         // IsJumping / IsFalling gate so PlayAnim can lock with afn_anim_prio.
         bool inJumpGate = false;
+        int  gateDepth = 0;   // >0 while emitting inside any gate (Is Moving etc.)
 
         // Per-action emit. Subset of GBA's switch — covers the common
         // movement / animation / state nodes. Unsupported types fall through
@@ -2305,13 +2308,19 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         auto emitAction = [&](const GBAScriptNodeExport* a) {
             switch (a->type) {
             case GBAScriptNodeType::Walk: {
+                // Walk is the LOW-priority speed. If a Sprint already set the
+                // speed this frame (afn_speed_prio), don't clobber it — so
+                // holding B (sprint) while also holding a direction (which
+                // fires Walk) stays at sprint speed regardless of node order.
                 auto* d = findDataIn(a->id, 0);
-                if (d) f << "    afn_move_speed = " << (int)(resolveInt(d) * 37.0f / 35.0f) << ";\n";
+                if (d) f << "    if (!afn_speed_prio) afn_move_speed = " << (int)(resolveInt(d) * 37.0f / 35.0f) << ";\n";
                 break;
             }
             case GBAScriptNodeType::Sprint: {
+                // Sprint is HIGH priority — sets the speed and locks out Walk
+                // for the rest of this frame.
                 auto* d = findDataIn(a->id, 0);
-                if (d) f << "    afn_move_speed = " << (int)(resolveInt(d) * 37.0f / 35.0f) << ";\n";
+                if (d) f << "    afn_move_speed = " << (int)(resolveInt(d) * 37.0f / 35.0f) << "; afn_speed_prio = 1;\n";
                 break;
             }
             case GBAScriptNodeType::Jump: {
@@ -2343,28 +2352,27 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 int dir   = dirData   ? dirData->paramInt[0] : 1;
                 int speed = speedData ? resolveInt(speedData) : 512;
                 speed /= 2;  // halve orbit speed on NDS
-                const char* key  = (dir == 0) ? "KEY_L" : "KEY_R";
-                // Flipped sign vs older NDS commits — pre-DMA work, L
-                // (dir=0) used to decrement cam_angle, but the picker
-                // changes made the visible orbit direction feel reversed.
-                // Going +/- in the opposite direction keeps the same
-                // L/R feel users had while still feeding the picker.
+                // Orbit when this exec runs — the chain (e.g. On Key Held)
+                // decides when. The Direction input (Left=0/Right=1) only sets
+                // which way to orbit. Previously self-checked a hardcoded
+                // KEY_L/KEY_R, which ignored the wired key (so binding Up/Down
+                // to orbit did nothing).
                 const char* sign = (dir == 0) ? "+" : "-";
-                f << "    if (key_is_down(" << key << ")) orbit_angle " << sign << "= " << speed << ";\n";
+                f << "    orbit_angle " << sign << "= " << speed << ";\n";
                 break;
             }
             case GBAScriptNodeType::MovePlayer: {
                 auto* dirData = findDataIn(a->id, 0);
                 int dir = dirData ? dirData->paramInt[0] : 0;
-                // Physical L/R keys swapped: pressing the LEFT key emits
-                // what the editor's RIGHT script wanted, and vice versa.
-                // Matches the user's preferred control mapping on NDS.
-                static const char* dirKeys[] = { "KEY_RIGHT","KEY_LEFT","KEY_UP","KEY_DOWN" };
+                // Apply the movement in the chosen Direction when this exec
+                // runs. WHEN it runs is the chain's job — wire it after an
+                // On Key Held(key) to bind it to a button. The old code
+                // re-checked the matching DPAD key here, double-gating:
+                // On Key Held(A) -> Move Player(Up) required BOTH A and Up.
                 static const char* dirVars[] = { "afn_input_right -= 256","afn_input_right += 256",
                                                  "afn_input_fwd += 256","afn_input_fwd -= 256" };
                 if (dir >= 0 && dir < 4)
-                    f << "    if (!afn_player_frozen && key_is_down(" << dirKeys[dir] << ")) "
-                      << dirVars[dir] << ";\n";
+                    f << "    if (!afn_player_frozen) " << dirVars[dir] << ";\n";
                 break;
             }
             case GBAScriptNodeType::PlayAnim: {
@@ -2376,7 +2384,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 // Always honour afn_player_frozen — when a menu freezes the
                 // player, cursor nav (DPAD up/down) shouldn't restart the
                 // walk anim from a still-firing OnKeyHeld → PlayAnim chain.
-                if (inJumpGate) {
+                // A PlayAnim inside ANY gate (Is Moving, Is Jumping, ...) is a
+                // CONDITIONAL animation and claims priority over an ungated one.
+                // So the sprint anim (behind Is Moving) wins over the walk anim
+                // (ungated, fed by every directional On Key Held) when B is held.
+                if (gateDepth > 0) {
                     f << "    if (!afn_player_frozen) { afn_play_anim = " << idx << "; afn_anim_prio = 1; }\n";
                 } else {
                     f << "    if (!afn_player_frozen && !afn_anim_prio) afn_play_anim = " << idx << ";\n";
@@ -2760,9 +2772,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                            a->type == GBAScriptNodeType::IsFollowMoving);
             if (isGate) {
                 bool wasJump = inJumpGate;
+                gateDepth++;
                 emitAction(a);  // emits "if (cond) {\n" and updates inJumpGate
                 walkExec(a->id, 0);
                 f << "    }\n";
+                gateDepth--;
                 inJumpGate = wasJump;
                 return;
             }
@@ -2772,6 +2786,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
 
         auto emitChain = [&](const Chain& c) {
             inJumpGate = false;
+            gateDepth = 0;
             emitVisited.clear();
             walkExec(c.event->id, 0);
         };

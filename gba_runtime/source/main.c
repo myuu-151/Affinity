@@ -5649,6 +5649,10 @@ static int   afn_player_vz_world;
 static int   afn_velocity_falloff;
 static int   afn_pending_boost_fwd;
 #endif
+// Fallback for projects exported before Sprint-over-Walk priority existed.
+#ifndef AFN_HAS_SPEED_PRIO
+static int   afn_speed_prio;
+#endif
 static FIXED cam_y_smooth;     // smoothed camera Y offset (16.8)
 
 #ifdef AFN_COL_FACE_COUNT
@@ -6758,6 +6762,7 @@ int main(void)
             afn_pending_scene_mode = -1;
             afn_collided_sprite = -1;
             afn_play_anim = -1;
+            afn_speed_prio = 0;   // Sprint sets this so Walk can't clobber speed
 
             // Run per-frame script event handlers
             afn_script_update();
@@ -6790,6 +6795,7 @@ int main(void)
 
             // Blueprint instance dispatch
             afn_anim_prio = 0;
+            afn_speed_prio = 0;
             afn_bp_dispatch_update();
             afn_bp_dispatch_key_held();
             afn_bp_dispatch_key_pressed();
@@ -7578,6 +7584,7 @@ int main(void)
             afn_pending_scene_mode = -1;
             afn_collided_sprite = -1;
             afn_play_anim = -1;
+            afn_speed_prio = 0;   // Sprint sets this so Walk can't clobber speed
 
             // Collision detection: player vs all non-player sprites (flat + mesh)
             if (player_sprite_idx >= 0) {

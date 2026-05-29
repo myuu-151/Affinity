@@ -26,6 +26,7 @@ int  afn_play_anim;
 int  afn_sprite_anim_spr = -1;
 int  afn_sprite_anim_val = -1;
 int  afn_anim_prio;
+int  afn_speed_prio;   // set by Sprint so Walk can't overwrite speed this frame
 int  afn_collided_sprite = -1;
 int  afn_collided_tm_obj = -1;
 int  afn_bp_cur_tm_obj   = -1;
@@ -248,6 +249,7 @@ void afn_script_tick(void)
     afn_input_right = 0;
     afn_play_anim   = -1;
     afn_anim_prio   = 0;
+    afn_speed_prio  = 0;
 #endif
     afn_emitted_script_update();
     afn_emitted_script_key_held();
