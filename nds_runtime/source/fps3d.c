@@ -280,6 +280,7 @@ int player_vy;
 #endif
 static int s_playerY;               // 16.8 vertical offset from ground
 static int s_camYSmooth;            // smoothed cam_h follow of s_playerY
+static int s_groundSnapTol;         // per-frame ground-snap distance (downhill slopes)
 // player_on_ground is the script-side global (defined in script_glue.c when
 // AFN_HAS_SCRIPT, else here as a fallback so fps3d.c always has it).
 #ifndef AFN_HAS_SCRIPT
@@ -377,8 +378,18 @@ static void update_camera(void)
     int spd = afn_move_speed;
     int dx = ((g_sinf * fwd + g_cosf * right) >> 8);
     int dz = ((g_cosf * fwd - g_sinf * right) >> 8);
-    player_x += FX_MUL(dx, spd);
-    player_z += FX_MUL(dz, spd);
+    int mvX = FX_MUL(dx, spd);
+    int mvZ = FX_MUL(dz, spd);
+    player_x += mvX;
+    player_z += mvZ;
+    // Horizontal distance moved this frame (Manhattan) — used as the
+    // ground-snap tolerance so walking DOWN a slope keeps the player glued
+    // to the floor instead of float-then-landing each frame (which flickered
+    // Is Jumping / Is Falling and stuttered the anim). A 45° slope drops ~one
+    // horizontal step per frame, so this tolerance covers it; a real ledge
+    // drop is far larger than one frame's move, so we won't snap off cliffs.
+    s_groundSnapTol = (mvX < 0 ? -mvX : mvX) + (mvZ < 0 ? -mvZ : mvZ);
+    s_groundSnapTol += s_groundSnapTol >> 1;  // ~1.5x margin
 #ifdef AFN_HAS_SCRIPT
     // Forward decls in case the loaded mapdata.h was generated before
     // these externs were emitted. Real defs live in script_glue.c.
@@ -480,9 +491,20 @@ static void update_camera(void)
     // Floor + wall collision against mesh data when the project exports it.
 #ifdef AFN_COL_FACE_COUNT
     {
+        int wasGround = player_on_ground;
         int floorY;
         int onFloor = afn_collide_floor(player_x, player_z, player_y, &floorY);
         if (onFloor && player_y <= floorY) {
+            // At or below the floor — land normally.
+            player_y = floorY;
+            player_vy = 0;
+            player_on_ground = 1;
+        } else if (onFloor && wasGround && player_vy <= 0
+                   && (player_y - floorY) <= s_groundSnapTol) {
+            // Walking down a slope: the floor dropped below us but only by a
+            // slope-step (within the horizontal distance moved this frame).
+            // Snap to it and stay grounded instead of going airborne for a
+            // frame, which would flicker Is Falling and stutter the anim.
             player_y = floorY;
             player_vy = 0;
             player_on_ground = 1;

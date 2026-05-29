@@ -211,10 +211,16 @@ static void afn_script_check_collisions(void)
         } else
 #endif
         {
-            // Plain sprite — XZ radius test (24px circle, matches GBA).
+            // Plain sprite — XZ radius test (24px circle, matches GBA) PLUS a
+            // vertical band so you don't collect/trigger a sprite you're flying
+            // over. The band is the player's collision height (afn_player_height,
+            // set by Set Player Height) — so jumping clearly above a ring misses
+            // it, but walking into / passing through it at body height collects.
             int dx = (player_x - afn_sprite_data[i][0]) >> 4;
             int dz = (player_z - afn_sprite_data[i][2]) >> 4;
-            if (dx * dx + dz * dz < 147456) hit = 1;
+            int dy = player_y - afn_sprite_data[i][1];
+            if (dy < 0) dy = -dy;
+            if (dx * dx + dz * dz < 147456 && dy <= afn_player_height) hit = 1;
         }
         if (hit) {
             afn_collided_sprite = i;
