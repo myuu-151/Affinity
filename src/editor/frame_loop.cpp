@@ -4319,6 +4319,15 @@ static ImVec2 s3DGrabStartMouse = {};
 struct s3DGrabSnap { int idx; float x, y, z; };
 static std::vector<s3DGrabSnap> s3DGrabOrig;
 
+// Blender-style rotate mode (R). Each selected sprite spins around its
+// own anchor on the chosen axis. Stored angles feed sp.rotation /
+// rotationX / rotationZ which the exporter already applies at runtime.
+static bool   s3DRotMode      = false;
+static char   s3DRotAxis      = 'Z';      // default axis on R: Z spin
+static ImVec2 s3DRotStartMouse = {};
+struct s3DRotSnap { int idx; float rotX, rotY, rotZ; };
+static std::vector<s3DRotSnap> s3DRotOrig;
+
 // ---- Win32 file dialogs ----
 #ifdef _WIN32
 static std::string OpenFileDialog(const char* filter, const char* defaultExt)
@@ -8799,6 +8808,64 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         }
     }
 
+    // ---- R rotate: Blender-style spin of the whole selection ----
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        // Enter rotate mode on R (default axis = Z so R alone spins around Z).
+        if (hovered && !s3DRotMode && !s3DGrabMode
+            && ImGui::IsKeyPressed(ImGuiKey_R, false)
+            && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt)
+        {
+            s3DRotOrig.clear();
+            for (int i = 0; i < sSpriteCount; i++)
+                if (sSprites[i].selected)
+                    s3DRotOrig.push_back({ i, sSprites[i].rotationX, sSprites[i].rotation, sSprites[i].rotationZ });
+            if (!s3DRotOrig.empty()) {
+                s3DRotMode = true;
+                s3DRotAxis = 'Z';
+                s3DRotStartMouse = mpos;
+            }
+        }
+        if (s3DRotMode)
+        {
+            auto resetAnchor = [&]() {
+                for (auto& r : s3DRotOrig) {
+                    sSprites[r.idx].rotationX = r.rotX;
+                    sSprites[r.idx].rotation  = r.rotY;
+                    sSprites[r.idx].rotationZ = r.rotZ;
+                }
+                s3DRotStartMouse = mpos;
+            };
+            if (ImGui::IsKeyPressed(ImGuiKey_X, false)) { s3DRotAxis = 'X'; resetAnchor(); }
+            if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) { s3DRotAxis = 'Y'; resetAnchor(); }
+            if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) { s3DRotAxis = 'Z'; resetAnchor(); }
+
+            // Mouse horizontal motion drives the spin — 1 pixel = 0.5° feels
+            // about right. Each sprite rotates around ITS OWN anchor, not the
+            // group centroid, so a stack of pillars all spin in place.
+            float dpx = mpos.x - s3DRotStartMouse.x;
+            float angleDelta = dpx * 0.5f;
+            for (auto& r : s3DRotOrig) {
+                FloorSprite& sp2 = sSprites[r.idx];
+                if (s3DRotAxis == 'X') sp2.rotationX = r.rotX + angleDelta;
+                else if (s3DRotAxis == 'Y') sp2.rotation  = r.rotY + angleDelta;
+                else                       sp2.rotationZ = r.rotZ + angleDelta;
+            }
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                s3DRotMode = false;
+                sProjectDirty = true;
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                for (auto& r : s3DRotOrig) {
+                    sSprites[r.idx].rotationX = r.rotX;
+                    sSprites[r.idx].rotation  = r.rotY;
+                    sSprites[r.idx].rotationZ = r.rotZ;
+                }
+                s3DRotMode = false;
+            }
+        }
+    }
+
     // Overlay info text
     ImGui::SetCursorPos(ImVec2(8, 8));
     if (s3DGrabMode) {
@@ -8808,9 +8875,12 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             s3DGrabAxis == 'Z' ? "Z" : "Free";
         ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f),
             "GRAB %s — X/Y/Z: lock axis  |  LMB: confirm  |  Esc: cancel", axisLabel);
+    } else if (s3DRotMode) {
+        ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.8f, 1.0f),
+            "ROTATE %c — X/Y/Z: lock axis  |  LMB: confirm  |  Esc: cancel", s3DRotAxis);
     } else {
         ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.8f, 0.8f),
-            "LMB: Orbit  |  MMB: Pan  |  Scroll: Zoom  |  RMB: Select  |  G: Grab  |  Ctrl+C/V: Copy/Paste");
+            "LMB: Orbit  |  MMB: Pan  |  Scroll: Zoom  |  RMB: Select  |  G: Grab  |  R: Rotate  |  Ctrl+C/V: Copy/Paste");
     }
 
     ImGui::End();
