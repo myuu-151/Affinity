@@ -2384,15 +2384,15 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 // Always honour afn_player_frozen — when a menu freezes the
                 // player, cursor nav (DPAD up/down) shouldn't restart the
                 // walk anim from a still-firing OnKeyHeld → PlayAnim chain.
-                // A PlayAnim inside ANY gate (Is Moving, Is Jumping, ...) is a
-                // CONDITIONAL animation and claims priority over an ungated one.
-                // So the sprint anim (behind Is Moving) wins over the walk anim
-                // (ungated, fed by every directional On Key Held) when B is held.
-                if (gateDepth > 0) {
-                    f << "    if (!afn_player_frozen) { afn_play_anim = " << idx << "; afn_anim_prio = 1; }\n";
-                } else {
-                    f << "    if (!afn_player_frozen && !afn_anim_prio) afn_play_anim = " << idx << ";\n";
-                }
+                // Tiered animation priority (afn_anim_prio is a LEVEL, not a flag):
+                //   0 = ungated (walk),  1 = inside a normal gate (sprint behind
+                //   Is Moving),  2 = inside a jump/fall gate (airborne anims).
+                // A PlayAnim plays only if its level >= the level already claimed
+                // this frame, then claims its own level — so jump beats sprint
+                // beats walk regardless of node emission order.
+                int animLvl = inJumpGate ? 2 : (gateDepth > 0 ? 1 : 0);
+                f << "    if (!afn_player_frozen && " << animLvl << " >= afn_anim_prio) { afn_play_anim = "
+                  << idx << "; afn_anim_prio = " << animLvl << "; }\n";
                 break;
             }
             case GBAScriptNodeType::FreezePlayer:

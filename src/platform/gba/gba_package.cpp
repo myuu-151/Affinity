@@ -3680,12 +3680,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                             snprintf(callName, sizeof(callName), "%s", a->funcName);
                         else
                             snprintf(callName, sizeof(callName), "afn_script%s_%d", actionSuffix(a->type), a->id);
-                        if (inJumpGate || gateDepth > 0) {
-                            f << "    " << callName << "();\n";
-                            f << "    afn_anim_prio = 1;\n";
-                        } else {
-                            f << "    if (!afn_anim_prio) " << callName << "();\n";
-                        }
+                        // Tiered priority (afn_anim_prio is a level): jump/fall=2,
+                        // other gate (sprint behind Is Moving)=1, ungated (walk)=0.
+                        // Plays only if its level >= the level claimed this frame.
+                        int animLvl = inJumpGate ? 2 : (gateDepth > 0 ? 1 : 0);
+                        f << "    if (" << animLvl << " >= afn_anim_prio) { " << callName
+                          << "(); afn_anim_prio = " << animLvl << "; }\n";
                         continue;
                     }
                     emitActionCall(a);
@@ -5087,22 +5087,24 @@ static bool GenerateMapData(const std::string& runtimeDir,
             // Emit blueprint actions with gate support
             // Gate nodes collect their downstream actions via the link graph
             // and emit them inside the if-block, rather than relying on flat-list ordering.
-            // inGate = true while emitting inside ANY condition gate (Is Moving,
-            // Is Jumping, ...). A PlayAnim inside a gate is a conditional anim and
-            // claims priority over an ungated one (so sprint anim beats walk anim).
-            std::function<void(const std::vector<const GBAScriptNodeExport*>&, std::set<int>&, bool)> bpEmitActionsWithGatesImpl;
-            bpEmitActionsWithGatesImpl = [&](const std::vector<const GBAScriptNodeExport*>& actions, std::set<int>& emitted, bool inGate) {
+            // gateLevel = tiered animation priority of the enclosing gates:
+            //   0 = ungated (walk),  1 = inside a normal condition gate (sprint
+            //   behind Is Moving),  2 = inside a jump/fall gate (airborne anims).
+            // A PlayAnim plays only if its level >= the level claimed this frame,
+            // so jump beats sprint beats walk regardless of node order.
+            std::function<void(const std::vector<const GBAScriptNodeExport*>&, std::set<int>&, int)> bpEmitActionsWithGatesImpl;
+            bpEmitActionsWithGatesImpl = [&](const std::vector<const GBAScriptNodeExport*>& actions, std::set<int>& emitted, int gateLevel) {
                 for (auto* a : actions) {
                     if (emitted.count(a->id)) continue;
                     emitted.insert(a->id);
 
                     // Helper: emit a gate node — open if-block, recursively emit branch, close.
-                    // Branch is always "inside a gate" for anim-priority purposes.
+                    // Jump/fall gates raise the level to 2; other condition gates to 1.
                     auto emitGateBranch = [&](const char* condition, bool jumpGate = false) {
-                        (void)jumpGate;
                         f << "    if (" << condition << ") {\n";
                         auto branch = bpCollectBranch(a->id, 0);
-                        bpEmitActionsWithGatesImpl(branch, emitted, true);
+                        int lvl = jumpGate ? 2 : (gateLevel > 1 ? gateLevel : 1);
+                        bpEmitActionsWithGatesImpl(branch, emitted, lvl);
                         f << "    }\n";
                     };
 
@@ -5138,7 +5140,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "      if (dx<0) dx=-dx; if (dz<0) dz=-dz;\n";
                         f << "      if (((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8 < " << a->paramInt[2] << ") {\n";
                         auto branch = bpCollectBranch(a->id, 0);
-                        bpEmitActionsWithGatesImpl(branch, emitted, true);
+                        bpEmitActionsWithGatesImpl(branch, emitted, (gateLevel > 1 ? gateLevel : 1));
                         f << "    } }\n";
                         continue;
                     }
@@ -5146,7 +5148,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "    { static int afn_cd_" << a->id << " = " << a->paramInt[0] << ";\n";
                         f << "      if (--afn_cd_" << a->id << " <= 0) { afn_cd_" << a->id << " = " << a->paramInt[0] << ";\n";
                         auto branch = bpCollectBranch(a->id, 0);
-                        bpEmitActionsWithGatesImpl(branch, emitted, inGate);
+                        bpEmitActionsWithGatesImpl(branch, emitted, gateLevel);
                         f << "    } }\n";
                         continue;
                     }
@@ -5177,7 +5179,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "      if (cr <= 0) cr = 16;\n";
                         f << "      if (((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8 < cr) {\n";
                         auto branch = bpCollectBranch(a->id, 0);
-                        bpEmitActionsWithGatesImpl(branch, emitted, true);
+                        bpEmitActionsWithGatesImpl(branch, emitted, (gateLevel > 1 ? gateLevel : 1));
                         f << "    } }\n";
                         continue;
                     }
@@ -5200,7 +5202,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "    { if (afn_rise_" << a->id << " >= afn_frame_count - 1) { afn_rise_" << a->id << " = afn_frame_count; }\n";
                         f << "      else { afn_rise_" << a->id << " = afn_frame_count;\n";
                         auto branch = bpCollectBranch(a->id, 0);
-                        bpEmitActionsWithGatesImpl(branch, emitted, inGate);
+                        bpEmitActionsWithGatesImpl(branch, emitted, gateLevel);
                         f << "    } }\n";
                         continue;
                     }
@@ -5210,10 +5212,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         auto brSet = bpCollectBranch(a->id, 0);
                         auto brClear = bpCollectBranch(a->id, 1);
                         f << "    if (afn_flags & (1u << " << flag << ")) {\n";
-                        bpEmitActionsWithGatesImpl(brSet, emitted, inGate);
+                        bpEmitActionsWithGatesImpl(brSet, emitted, gateLevel);
                         if (!brClear.empty()) {
                             f << "    } else {\n";
-                            bpEmitActionsWithGatesImpl(brClear, emitted, inGate);
+                            bpEmitActionsWithGatesImpl(brClear, emitted, gateLevel);
                         }
                         f << "    }\n";
                         continue;
@@ -5224,26 +5226,22 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         auto brA = bpCollectBranch(a->id, 0);
                         auto brB = bpCollectBranch(a->id, 1);
                         f << "      if (afn_ff_" << a->id << ") {\n";
-                        bpEmitActionsWithGatesImpl(brA, emitted, inGate);
+                        bpEmitActionsWithGatesImpl(brA, emitted, gateLevel);
                         f << "      } else {\n";
-                        bpEmitActionsWithGatesImpl(brB, emitted, inGate);
+                        bpEmitActionsWithGatesImpl(brB, emitted, gateLevel);
                         f << "      } }\n";
                         continue;
                     }
-                    // PlayAnim: a conditional anim (inside ANY gate) claims priority
-                    // over an ungated one — sprint anim (behind Is Moving) beats walk.
+                    // PlayAnim: tiered priority — plays only if its gate level >=
+                    // the level claimed this frame (jump=2 > sprint=1 > walk=0).
                     if (a->type == GBAScriptNodeType::PlayAnim) {
                         char callName[64];
                         if (a->funcName[0])
                             snprintf(callName, sizeof(callName), "%s", a->funcName);
                         else
                             snprintf(callName, sizeof(callName), "afn_bp%d%s_%d", bi, actionSuffix(a->type), a->id);
-                        if (inGate) {
-                            f << "    " << callName << "(" << paramArgs << ");\n";
-                            f << "    afn_anim_prio = 1;\n";
-                        } else {
-                            f << "    if (!afn_anim_prio) " << callName << "(" << paramArgs << ");\n";
-                        }
+                        f << "    if (" << gateLevel << " >= afn_anim_prio) { " << callName
+                          << "(" << paramArgs << "); afn_anim_prio = " << gateLevel << "; }\n";
                         continue;
                     }
                     bpEmitActionCall(a);
@@ -5251,7 +5249,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
             };
             auto bpEmitActionsWithGates = [&](const std::vector<const GBAScriptNodeExport*>& actions) {
                 std::set<int> emitted;
-                bpEmitActionsWithGatesImpl(actions, emitted, false);
+                bpEmitActionsWithGatesImpl(actions, emitted, 0);
             };
 
             auto bpEmitKeyBlock = [&](const BpChain& c, const char* keyCheck) {
