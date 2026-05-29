@@ -574,6 +574,7 @@ enum class VsNodeType : int {
     SetVelocityZ,    // action: set world-Z velocity (independent of input; decays via VelocityFalloff)
     VelocityFalloff, // action: linear decay of vx/vz to 0 over N frames (Mode 4 boost pad style)
     BoostForward,    // action: push the player along their current view direction (vx/vz = sin/cos(viewAngle) * speed)
+    HaltMomentum,    // action: zero all player velocity (vx, vz, vy, pending boost, falloff) — use on respawn
     COUNT
 };
 
@@ -871,6 +872,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Set Velocity Z", 0xFF3355AA, 1, 1, 1, 0, {"Velocity (float)"}, {}, {} },
     { "Velocity Falloff",0xFF3355AA, 1, 1, 1, 0, {"Frames (int)"}, {}, {} },
     { "Boost Forward", 0xFF3355AA, 1, 1, 1, 0, {"Speed (float)"}, {}, {} },
+    { "Halt Momentum", 0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -8730,6 +8732,20 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         }
         ImGui::PopItemWidth();
 
+        if (ImGui::Button("Duplicate##meshObjDup") && sSpriteCount < kMaxFloorSprites)
+        {
+            int src = sSelectedSprite;
+            int dst = sSpriteCount;
+            sSprites[dst] = sSprites[src];
+            sSprites[dst].selected = false;
+            sSprites[dst].color = kSpriteColors[dst % kNumSpriteColors];
+            sSpriteCount++;
+            sSprites[src].selected = false;
+            sSelectedSprite = dst;
+            sSprites[dst].selected = true;
+            sProjectDirty = true;
+        }
+        ImGui::SameLine();
         if (ImGui::Button("Delete##meshObjDel"))
         {
             for (int j = sSelectedSprite; j < sSpriteCount - 1; j++)
@@ -14147,6 +14163,10 @@ void FrameTick(float dt)
         {
             // ---- EDIT MODE: free camera ----
             float moveSpeed = 80.0f * dt;
+            // Hold Shift to sprint — 4x base speed when flying around the
+            // editor preview. Either Shift modifier triggers it.
+            if (ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift))
+                moveSpeed *= 4.0f;
             float rotSpeed  = 2.0f * dt;
 
             if (!sGrabMode && !sScaleMode)
@@ -15130,6 +15150,11 @@ void FrameTick(float dt)
 
             // --- Apply results ---
             float moveSpeed = (sScriptMoveSpeed > 0.0f ? sScriptMoveSpeed : sCamObj.walkSpeed) * dt;
+            // Hold Shift to sprint the free camera (only applies in no-player
+            // fallback below — when a player sprite is present, movement comes
+            // from script and Shift is a no-op here).
+            if (ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift))
+                moveSpeed *= 4.0f;
 
             int playerIdx = -1;
             for (int i = 0; i < sSpriteCount; i++)
@@ -15573,9 +15598,8 @@ void FrameTick(float dt)
             }
         }
 
-        // Clamp camera to generous bounds (allow exploring beyond the map edge)
-        sCamera.x = std::clamp(sCamera.x, -kWorldHalf * 4.0f, kWorldHalf * 4.0f);
-        sCamera.z = std::clamp(sCamera.z, -kWorldHalf * 4.0f, kWorldHalf * 4.0f);
+        // (Previously clamped to ±kWorldHalf * 4 — removed so users can fly
+        // the preview camera arbitrarily far without hitting an invisible wall.)
     }
 
     // Player position is freely editable — only set on creation, not per-frame
@@ -17488,6 +17512,7 @@ void FrameTick(float dt)
                 case VsNodeType::SetVelocityZ:  desc = "Adds a world-Z velocity to the player every frame, independent of input. Pair with Velocity Falloff to decay it."; break;
                 case VsNodeType::VelocityFalloff: desc = "Linearly decays current vx/vz to 0 over N frames. Set after Set Velocity X/Z to define how quickly the boost/push fades."; break;
                 case VsNodeType::BoostForward:   desc = "Pushes the player along their current view direction at the given speed. Runtime decomposes into world vx/vz using sin/cos(viewAngle). Pair with Velocity Falloff to decay."; break;
+                case VsNodeType::HaltMomentum:   desc = "Zeros all player velocity (vx, vz, vy, pending boost, falloff). Use after respawn so leftover boost-pad momentum doesn't carry over."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -17732,6 +17757,7 @@ void FrameTick(float dt)
                         case VsNodeType::SetVelocityZ:  return "_set_vel_z";
                         case VsNodeType::VelocityFalloff: return "_velocity_falloff";
                         case VsNodeType::BoostForward:  return "_boost_forward";
+                        case VsNodeType::HaltMomentum:  return "_halt_momentum";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -18604,6 +18630,23 @@ void FrameTick(float dt)
                         "    // Pair with VelocityFalloff for a smooth fade out.",
                         fmtFloat(infoNode.id, 0, "<speed>"));
                     setActionFunc(infoNode, "_boost_forward", bodyBuf);
+                    break;
+                }
+                case VsNodeType::HaltMomentum: {
+                    editorCode =
+                        "// Stop all player motion. Use on respawn so leftover boost\n"
+                        "// pad velocity doesn't carry over and slide you off.";
+                    setActionFunc(infoNode, "_halt_momentum",
+                        "    afn_player_vx_world  = 0;\n"
+                        "    afn_player_vz_world  = 0;\n"
+                        "    afn_pending_boost_fwd = 0;\n"
+                        "    afn_velocity_falloff = 0;\n"
+                        "    player_vy            = 0;\n"
+                        "    // --- Runtime (main.c, Mode 4) ---\n"
+                        "    // No further consumption — clearing these stops the\n"
+                        "    // per-frame `player_x += vx; player_z += vz;` step\n"
+                        "    // and cancels any in-progress VelocityFalloff lerp.\n"
+                        "    // player_vy=0 also halts mid-air rise/fall.");
                     break;
                 }
                 case VsNodeType::StopSound:
@@ -21101,6 +21144,7 @@ void FrameTick(float dt)
                     case VsNodeType::SetVelocityZ:  suffix = "_set_vel_z"; break;
                     case VsNodeType::VelocityFalloff: suffix = "_velocity_falloff"; break;
                     case VsNodeType::BoostForward:  suffix = "_boost_forward"; break;
+                    case VsNodeType::HaltMomentum:  suffix = "_halt_momentum"; break;
                     case VsNodeType::StopSound:     suffix = "_stop_sound"; break;
                     case VsNodeType::AddMath:       suffix = "_add"; break;
                     case VsNodeType::SubtractMath:  suffix = "_sub"; break;
@@ -21643,6 +21687,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetVelocityZ].name)) addNodeAt(VsNodeType::SetVelocityZ);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::VelocityFalloff].name)) addNodeAt(VsNodeType::VelocityFalloff);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::BoostForward].name)) addNodeAt(VsNodeType::BoostForward);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HaltMomentum].name)) addNodeAt(VsNodeType::HaltMomentum);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetPlayerHeight].name)) addNodeAt(VsNodeType::SetPlayerHeight);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopSound].name)) addNodeAt(VsNodeType::StopSound);
                     ImGui::Separator();

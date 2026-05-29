@@ -14,6 +14,13 @@ namespace Mode7
 
 static unsigned char sFrameBuf[kGBAWidth * kGBAHeight * 3];
 static GLuint        sTexture = 0;
+// Per-pixel depth buffer for the mesh rasterizer. We store 1/z (smaller = farther)
+// to skip a divide per pixel — the existing perspective-correct interp already
+// produces 1/z linearly. A pixel passes the test iff its 1/z >= the stored value
+// (i.e. closer than what's already there). Cleared to 0.0 each frame so the
+// first opaque pixel always wins. Used only by the mesh path; sprites and HUD
+// still composite on top in their existing painter order.
+static float sZBuf[kGBAWidth * kGBAHeight];
 
 // Last frame's projected sprites for viewport click-to-select
 static SpriteScreenPos sLastProj[kMaxFloorSprites];
@@ -234,10 +241,94 @@ static void DrawTriangle(float x0, float y0, float x1, float y1, float x2, float
     }
 }
 
-// Draw a textured triangle with UV interpolation
-static void DrawTriangleTex(float x0, float y0, float u0, float v0,
-                            float x1, float y1, float u1, float v1,
-                            float x2, float y2, float u2, float v2,
+// ---------------------------------------------------------------------------
+// Near-plane clipping. ProjectPoint clamps fovLambda to 0.1 to avoid /0,
+// but for triangles with a vertex BEHIND the camera the clamp pulls that
+// vertex onto the near plane at an arbitrary screen position — the triangle
+// then stretches across the viewport ("geometry bends" at certain angles).
+// Proper fix: clip in view space against z = NEAR before projection.
+// ---------------------------------------------------------------------------
+struct ClipVtx {
+    float vx, vy, vz;  // view-space (cam-relative) position
+    float u,  v;       // texture coords (post-V-flip)
+};
+
+static constexpr float kNearPlane = 0.1f;
+
+static ClipVtx clip_lerp(const ClipVtx& a, const ClipVtx& b, float t)
+{
+    ClipVtx o;
+    o.vx = a.vx + (b.vx - a.vx) * t;
+    o.vy = a.vy + (b.vy - a.vy) * t;
+    o.vz = a.vz + (b.vz - a.vz) * t;
+    o.u  = a.u  + (b.u  - a.u ) * t;
+    o.v  = a.v  + (b.v  - a.v ) * t;
+    return o;
+}
+
+// Returns the number of output triangles (0, 1, or 2). out[] is filled with
+// 3*N vertices in the same winding as the input.
+static int clip_tri_near(const ClipVtx& a, const ClipVtx& b, const ClipVtx& c,
+                         ClipVtx out[6])
+{
+    bool ia = a.vz >= kNearPlane;
+    bool ib = b.vz >= kNearPlane;
+    bool ic = c.vz >= kNearPlane;
+    int n = (int)ia + (int)ib + (int)ic;
+    if (n == 0) return 0;
+    if (n == 3) { out[0]=a; out[1]=b; out[2]=c; return 1; }
+
+    if (n == 1) {
+        // One vertex in front; emit one tri with the two clipped edges.
+        const ClipVtx *p, *q, *r;   // p in front, q and r behind
+        if (ia)      { p=&a; q=&b; r=&c; }
+        else if (ib) { p=&b; q=&c; r=&a; }
+        else         { p=&c; q=&a; r=&b; }
+        float tq = (p->vz - kNearPlane) / (p->vz - q->vz);
+        float tr = (p->vz - kNearPlane) / (p->vz - r->vz);
+        out[0] = *p;
+        out[1] = clip_lerp(*p, *q, tq);
+        out[2] = clip_lerp(*p, *r, tr);
+        return 1;
+    }
+    // n == 2: two in front, one behind → quad → two tris.
+    const ClipVtx *p, *q, *r;   // p behind, q and r in front
+    if (!ia)      { p=&a; q=&b; r=&c; }
+    else if (!ib) { p=&b; q=&c; r=&a; }
+    else          { p=&c; q=&a; r=&b; }
+    float tq = (q->vz - kNearPlane) / (q->vz - p->vz);   // along q→p
+    float tr = (r->vz - kNearPlane) / (r->vz - p->vz);   // along r→p
+    ClipVtx clipQ = clip_lerp(*q, *p, tq);
+    ClipVtx clipR = clip_lerp(*r, *p, tr);
+    out[0] = *q;      out[1] = *r;    out[2] = clipR;
+    out[3] = *q;      out[4] = clipR; out[5] = clipQ;
+    return 2;
+}
+
+// Project a view-space ClipVtx to screen coords using current camera params.
+static inline void project_vs(const ClipVtx& vtx, const Mode7Camera& cam,
+                              float& sx, float& sy)
+{
+    float lambda = vtx.vz / cam.fov;
+    if (lambda < 0.01f) lambda = 0.01f;
+    sx = 120.0f + vtx.vx / lambda;
+    sy = cam.horizon - vtx.vy / lambda;
+}
+
+// Draw a textured triangle with perspective-correct UV interpolation.
+// d0/d1/d2 are per-vertex view-space depths (must be positive — caller is
+// responsible for near-clipping). If any depth is tiny we fall back to
+// affine to avoid divide-by-zero; for typical scene meshes that's rare.
+//
+// Why perspective-correct: at oblique angles, plain affine UV interp warps
+// the texture in screen space because a linear u,v across screen-x is NOT
+// the same as a linear u,v across world-space-x once a perspective camera
+// is involved. The fix is to interpolate u/z, v/z, and 1/z linearly across
+// screen, then divide u/z by 1/z at each pixel to recover the world-space
+// u. Cost: 2 extra divides per pixel and 3 reciprocals per vertex.
+static void DrawTriangleTex(float x0, float y0, float u0, float v0, float d0,
+                            float x1, float y1, float u1, float v1, float d1,
+                            float x2, float y2, float u2, float v2, float d2,
                             const uint8_t* texPixels, const uint32_t* texPal,
                             int texW, int texH, float fogAlpha)
 {
@@ -251,6 +342,14 @@ static void DrawTriangleTex(float x0, float y0, float u0, float v0,
     if (fabsf(denom) < 0.001f) return;
     float invD = 1.0f / denom;
 
+    // Guard against near-zero / negative depth (vertex behind/at camera).
+    bool perspOk = d0 > 0.01f && d1 > 0.01f && d2 > 0.01f;
+    float iz0 = perspOk ? 1.0f / d0 : 1.0f;
+    float iz1 = perspOk ? 1.0f / d1 : 1.0f;
+    float iz2 = perspOk ? 1.0f / d2 : 1.0f;
+    float uz0 = u0 * iz0, uz1 = u1 * iz1, uz2 = u2 * iz2;
+    float vz0 = v0 * iz0, vz1 = v1 * iz1, vz2 = v2 * iz2;
+
     for (int y = minY; y <= maxY; y++)
     {
         uint8_t* row = sFrameBuf + y * kGBAWidth * 3;
@@ -261,8 +360,30 @@ static void DrawTriangleTex(float x0, float y0, float u0, float v0,
             float w2 = 1.0f - w0 - w1;
             if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
 
-            float su = u0 * w0 + u1 * w1 + u2 * w2;
-            float sv = v0 * w0 + v1 * w1 + v2 * w2;
+            float su, sv;
+            float pixInvZ;
+            if (perspOk) {
+                pixInvZ = w0 * iz0 + w1 * iz1 + w2 * iz2;
+                float invInvZ = 1.0f / pixInvZ;
+                su = (w0 * uz0 + w1 * uz1 + w2 * uz2) * invInvZ;
+                sv = (w0 * vz0 + w1 * vz1 + w2 * vz2) * invInvZ;
+            } else {
+                pixInvZ = w0 * iz0 + w1 * iz1 + w2 * iz2; // iz* are 1.0 here
+                su = u0 * w0 + u1 * w1 + u2 * w2;
+                sv = v0 * w0 + v1 * w1 + v2 * w2;
+            }
+            // Z-test with a small relative bias: skip only if this pixel is
+            // measurably farther than what's stored. Float precision on
+            // coplanar surfaces makes each pixel's interpolated 1/z jitter
+            // around an ideal value, so a strict `<` was giving a speckled
+            // half-and-half result for coplanar meshes. The `* 1.001f`
+            // tolerance means "within 0.1% counts as equal," so the later-
+            // drawn mesh (smaller-volume, by our sort) reliably wins
+            // coplanar ties. Non-coplanar cases differ by far more than
+            // this and still resolve normally.
+            float* zSlot = &sZBuf[y * kGBAWidth + x];
+            if (pixInvZ * 1.01f < *zSlot) continue;
+            *zSlot = pixInvZ;
             int tu = (int)floorf(su * texW) % texW; if (tu < 0) tu += texW;
             int tv = (int)floorf(sv * texH) % texH; if (tv < 0) tv += texH;
             uint8_t idx = texPixels[tv * texW + tu];
@@ -294,6 +415,45 @@ static void DrawLine(int ax, int ay, int bx, int by,
         int e2 = 2 * err;
         if (e2 > -dy) { err -= dy; ax += sx; }
         if (e2 <  dx) { err += dx; ay += sy; }
+    }
+}
+
+// Z-tested line. Interpolates 1/z along the line and skips pixels that are
+// farther than what's already in the depth buffer. Test is `>=` so an edge
+// co-planar with its own filled triangle still draws — no constant bias,
+// because in 1/z space a fixed bias is huge for far surfaces (1% of value
+// when z=100) and that was letting far wireframe edges leak through closer
+// surfaces.
+static void DrawLineZ(int ax, int ay, float az,
+                      int bx, int by, float bz,
+                      uint8_t cr, uint8_t cg, uint8_t cb)
+{
+    int dx = abs(bx - ax), dy = abs(by - ay);
+    int sx = (ax < bx) ? 1 : -1;
+    int sy = (ay < by) ? 1 : -1;
+    int err = dx - dy;
+    int steps = std::max(dx, dy);
+    if (steps < 1) steps = 1;
+    float invZa = (az > 0.01f) ? 1.0f / az : 1.0f;
+    float invZb = (bz > 0.01f) ? 1.0f / bz : 1.0f;
+    float invZ = invZa;
+    float invZStep = (invZb - invZa) / (float)steps;
+    for (int s = 0; s <= steps; s++)
+    {
+        if (ax >= 0 && ax < kGBAWidth && ay >= 0 && ay < kGBAHeight)
+        {
+            float* zSlot = &sZBuf[ay * kGBAWidth + ax];
+            if (invZ >= *zSlot)
+            {
+                uint8_t* p = sFrameBuf + (ay * kGBAWidth + ax) * 3;
+                p[0] = cr; p[1] = cg; p[2] = cb;
+            }
+        }
+        if (ax == bx && ay == by) break;
+        int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; ax += sx; }
+        if (e2 <  dx) { err += dx; ay += sy; }
+        invZ += invZStep;
     }
 }
 
@@ -460,6 +620,10 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
 {
     float cosA = cosf(-cam.angle);
     float sinA = sinf(-cam.angle);
+
+    // Clear the depth buffer. 0.0 represents "infinitely far" since we store
+    // 1/z and test "this pixel's 1/z >= stored." First mesh pixel always wins.
+    memset(sZBuf, 0, sizeof(sZBuf));
 
     // Horizon line — controlled by camera pitch (I/K keys)
     int horizon = (int)cam.horizon;
@@ -733,13 +897,37 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 if (iMesh != jMesh)
                     swap = !iMesh && jMesh; // mesh should come first (drawn behind)
                 else if (iMesh && jMesh) {
-                    // Both meshes: sort by drawPriority (higher = drawn first/behind)
-                    int iPri = meshAssets[sprites[projected[i].idx].meshIdx].drawPriority;
-                    int jPri = meshAssets[sprites[projected[j].idx].meshIdx].drawPriority;
+                    // Both meshes: sort by drawPriority (higher = drawn first/behind),
+                    // then by AABB volume (larger first → smaller "props" draw
+                    // last so they win z-buffer ties when coplanar with bigger
+                    // surfaces — e.g. boost pad sitting on grass). Falling
+                    // back to depth would flip the winner whenever you orbit
+                    // 180°, which is exactly the bug. Z-buffer still resolves
+                    // non-coplanar occlusion correctly within each tier.
+                    const auto& iMa = meshAssets[sprites[projected[i].idx].meshIdx];
+                    const auto& jMa = meshAssets[sprites[projected[j].idx].meshIdx];
+                    int iPri = iMa.drawPriority;
+                    int jPri = jMa.drawPriority;
                     if (iPri != jPri)
                         swap = (iPri < jPri); // higher priority draws first
-                    else
-                        swap = (projected[i].depth < projected[j].depth);
+                    else {
+                        // XZ footprint, not full volume — flat surfaces have
+                        // ~0 Y extent so volume collapses to 0 and can't
+                        // distinguish a large grass plane from a small pad
+                        // mesh sitting on it. Footprint area DOES separate
+                        // them (grass huge, pad small) and gives a stable
+                        // sort that doesn't flip with camera orbit angle.
+                        auto areaOf = [](const MeshAsset& m) {
+                            float dx = m.boundsMax[0] - m.boundsMin[0];
+                            float dz = m.boundsMax[2] - m.boundsMin[2];
+                            return dx * dz;
+                        };
+                        float iA = areaOf(iMa), jA = areaOf(jMa);
+                        if (iA != jA)
+                            swap = (iA < jA); // larger footprint first
+                        else
+                            swap = (projected[i].depth < projected[j].depth);
+                    }
                 } else
                     swap = (projected[i].depth < projected[j].depth);
             }
@@ -999,10 +1187,13 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 int nv = (int)verts.size();
                 // Use dynamic alloc only for large meshes, stack for small
                 float scrX[256], scrY[256], depth[256];
+                float vsX[256], vsY[256];   // view-space side (X) and vertical
                 bool  vis[256];
                 float* pSX = (nv <= 256) ? scrX : new float[nv];
                 float* pSY = (nv <= 256) ? scrY : new float[nv];
                 float* pDepth = (nv <= 256) ? depth : new float[nv];
+                float* pVX = (nv <= 256) ? vsX : new float[nv];
+                float* pVY = (nv <= 256) ? vsY : new float[nv];
                 bool*  pVis = (nv <= 256) ? vis : new bool[nv];
 
                 for (int v = 0; v < nv; v++)
@@ -1025,10 +1216,17 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                     float wy = fs.y + ry3;
                     float wz = fs.z + rz2;
                     pVis[v] = ProjectPoint(wx, wy, wz, cam, cosA, sinA, pSX[v], pSY[v]);
-                    // View-space depth for sorting
+                    // View-space coords (cam-relative, rotated by view angle).
+                    // Z = forward depth; X = side; Y = vertical offset.
+                    // Used by the near-plane clipper to handle triangles that
+                    // straddle the camera plane — without this, ProjectPoint's
+                    // fovLambda clamp produces hugely-stretched screen positions
+                    // that show up as bent/distorted geometry near the camera.
                     float dx = wx - cam.x;
                     float dz = wz - cam.z;
                     pDepth[v] = dx * sinA - dz * cosA;
+                    pVX[v]    = dx * cosA + dz * sinA;
+                    pVY[v]    = wy - cam.height;
                 }
 
                 // Simple flat shading: use a directional light
@@ -1046,17 +1244,27 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 int* pSort = (nFaces <= 512) ? sortIdx : new int[nFaces];
                 float* pFaceDepth = (nFaces <= 512) ? faceDepth : new float[nFaces];
 
+                // Face-depth = average of vertex depths, but CLAMP each vertex
+                // depth to the near plane first. A vertex behind the camera has
+                // negative pDepth; summed unclamped, it pulls a face's sort key
+                // toward 0 and the face ends up drawn LAST (on top of every
+                // other face) — that's what was making far geometry appear to
+                // poke through nearer surfaces.
+                auto depthFor = [&](int idx) {
+                    float d = pDepth[idx];
+                    return d > kNearPlane ? d : kNearPlane;
+                };
                 for (int t = 0; t < nTriFaces; t++)
                 {
                     int i0 = triIdx[t*3], i1 = triIdx[t*3+1], i2 = triIdx[t*3+2];
-                    pFaceDepth[t] = pDepth[i0] + pDepth[i1] + pDepth[i2];
+                    pFaceDepth[t] = depthFor(i0) + depthFor(i1) + depthFor(i2);
                     pSort[t] = t;
                 }
                 for (int q = 0; q < nQuadFaces; q++)
                 {
                     int i0 = quadIdx[q*4], i1 = quadIdx[q*4+1];
                     int i2 = quadIdx[q*4+2], i3 = quadIdx[q*4+3];
-                    pFaceDepth[nTriFaces + q] = pDepth[i0] + pDepth[i1] + pDepth[i2] + pDepth[i3];
+                    pFaceDepth[nTriFaces + q] = depthFor(i0) + depthFor(i1) + depthFor(i2) + depthFor(i3);
                     pSort[nTriFaces + q] = nTriFaces + q;
                 }
                 std::sort(pSort, pSort + nFaces, [&](int a, int b) {
@@ -1088,13 +1296,14 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                     if (isQuad && i3 >= nv) continue;
                     if (!pVis[i0] && !pVis[i1] && !pVis[i2] && !(isQuad && pVis[i3])) continue;
 
-                    // Backface culling via screen-space cross product (use first 3 verts)
-                    if (ma.cullMode != CullMode::None) {
-                        float cross = (pSX[i1] - pSX[i0]) * (pSY[i2] - pSY[i0])
-                                    - (pSY[i1] - pSY[i0]) * (pSX[i2] - pSX[i0]);
-                        if (ma.cullMode == CullMode::Back  && cross >= 0.0f) continue;
-                        if (ma.cullMode == CullMode::Front && cross <= 0.0f) continue;
-                    }
+                    // Backface culling deferred: pSX values for vertices
+                    // behind the near plane are clamped extreme positions, so
+                    // the screen-space cross product flips sign unreliably —
+                    // legitimately front-facing triangles would get culled
+                    // (mesh "disappears at certain angles") and back faces
+                    // could leak through. The rasterizeTri lambda below now
+                    // runs the cull on the POST-CLIP projected coords, which
+                    // are guaranteed valid.
 
                     // Face normal for shading
                     float fnx, fny, fnz;
@@ -1124,20 +1333,42 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
 
                     if (ma.textured && !ma.texturePixels.empty() && ma.texW > 0 && ma.texH > 0)
                     {
-                        // Flip V to match OpenGL convention (3D tab uses 1-v)
-                        DrawTriangleTex(
-                            pSX[i0], pSY[i0], verts[i0].u, 1.0f - verts[i0].v,
-                            pSX[i1], pSY[i1], verts[i1].u, 1.0f - verts[i1].v,
-                            pSX[i2], pSY[i2], verts[i2].u, 1.0f - verts[i2].v,
-                            ma.texturePixels.data(), ma.texturePalette,
-                            ma.texW, ma.texH, sp.fog);
+                        // Flip V to match OpenGL convention (3D tab uses 1-v).
+                        // Build view-space ClipVtx, clip against near plane,
+                        // re-project the (possibly new) vertices, and rasterize.
+                        // This is what stops geometry from bending when a triangle
+                        // straddles the camera plane — the old path passed clamped
+                        // screen coords directly to DrawTriangleTex.
+                        auto rasterizeTri = [&](int a, int b, int c) {
+                            ClipVtx ca{ pVX[a], pVY[a], pDepth[a], verts[a].u, 1.0f - verts[a].v };
+                            ClipVtx cb{ pVX[b], pVY[b], pDepth[b], verts[b].u, 1.0f - verts[b].v };
+                            ClipVtx cc{ pVX[c], pVY[c], pDepth[c], verts[c].u, 1.0f - verts[c].v };
+                            ClipVtx out[6];
+                            int n = clip_tri_near(ca, cb, cc, out);
+                            for (int k = 0; k < n; k++) {
+                                float sx0, sy0, sx1, sy1, sx2, sy2;
+                                project_vs(out[k*3+0], cam, sx0, sy0);
+                                project_vs(out[k*3+1], cam, sx1, sy1);
+                                project_vs(out[k*3+2], cam, sx2, sy2);
+                                // Back-face cull on the clipped/projected
+                                // coords (all post-near-plane, so reliable).
+                                if (ma.cullMode != CullMode::None) {
+                                    float cr2 = (sx1 - sx0) * (sy2 - sy0)
+                                              - (sy1 - sy0) * (sx2 - sx0);
+                                    if (ma.cullMode == CullMode::Back  && cr2 >= 0.0f) continue;
+                                    if (ma.cullMode == CullMode::Front && cr2 <= 0.0f) continue;
+                                }
+                                DrawTriangleTex(
+                                    sx0, sy0, out[k*3+0].u, out[k*3+0].v, out[k*3+0].vz,
+                                    sx1, sy1, out[k*3+1].u, out[k*3+1].v, out[k*3+1].vz,
+                                    sx2, sy2, out[k*3+2].u, out[k*3+2].v, out[k*3+2].vz,
+                                    ma.texturePixels.data(), ma.texturePalette,
+                                    ma.texW, ma.texH, sp.fog);
+                            }
+                        };
+                        rasterizeTri(i0, i1, i2);
                         if (isQuad)
-                            DrawTriangleTex(
-                                pSX[i0], pSY[i0], verts[i0].u, 1.0f - verts[i0].v,
-                                pSX[i2], pSY[i2], verts[i2].u, 1.0f - verts[i2].v,
-                                pSX[i3], pSY[i3], verts[i3].u, 1.0f - verts[i3].v,
-                                ma.texturePixels.data(), ma.texturePalette,
-                                ma.texW, ma.texH, sp.fog);
+                            rasterizeTri(i0, i2, i3);
                     }
                     else
                     {
@@ -1151,22 +1382,26 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                                          tr, tg, tb, sp.fog);
                     }
 
-                    // Wireframe: draw actual face edges (4 for quads, 3 for tris)
+                    // Wireframe: draw actual face edges (z-tested so edges
+                    // behind another mesh don't punch through it). Skip an
+                    // edge if either endpoint is behind the near plane —
+                    // that endpoint's pSX is the clamped ±8192 value and
+                    // would draw a line across the whole screen.
+                    auto edgeOk = [&](int va, int vb) {
+                        return pDepth[va] >= kNearPlane && pDepth[vb] >= kNearPlane;
+                    };
                     if (isQuad)
                     {
-                        if (pVis[i0] && pVis[i1]) DrawLine((int)pSX[i0], (int)pSY[i0], (int)pSX[i1], (int)pSY[i1], wr, wg, wb);
-                        if (pVis[i1] && pVis[i2]) DrawLine((int)pSX[i1], (int)pSY[i1], (int)pSX[i2], (int)pSY[i2], wr, wg, wb);
-                        if (pVis[i2] && pVis[i3]) DrawLine((int)pSX[i2], (int)pSY[i2], (int)pSX[i3], (int)pSY[i3], wr, wg, wb);
-                        if (pVis[i3] && pVis[i0]) DrawLine((int)pSX[i3], (int)pSY[i3], (int)pSX[i0], (int)pSY[i0], wr, wg, wb);
+                        if (edgeOk(i0,i1)) DrawLineZ((int)pSX[i0],(int)pSY[i0],pDepth[i0], (int)pSX[i1],(int)pSY[i1],pDepth[i1], wr,wg,wb);
+                        if (edgeOk(i1,i2)) DrawLineZ((int)pSX[i1],(int)pSY[i1],pDepth[i1], (int)pSX[i2],(int)pSY[i2],pDepth[i2], wr,wg,wb);
+                        if (edgeOk(i2,i3)) DrawLineZ((int)pSX[i2],(int)pSY[i2],pDepth[i2], (int)pSX[i3],(int)pSY[i3],pDepth[i3], wr,wg,wb);
+                        if (edgeOk(i3,i0)) DrawLineZ((int)pSX[i3],(int)pSY[i3],pDepth[i3], (int)pSX[i0],(int)pSY[i0],pDepth[i0], wr,wg,wb);
                     }
                     else
                     {
-                        if (pVis[i0] && pVis[i1] && pVis[i2])
-                        {
-                            DrawLine((int)pSX[i0], (int)pSY[i0], (int)pSX[i1], (int)pSY[i1], wr, wg, wb);
-                            DrawLine((int)pSX[i1], (int)pSY[i1], (int)pSX[i2], (int)pSY[i2], wr, wg, wb);
-                            DrawLine((int)pSX[i2], (int)pSY[i2], (int)pSX[i0], (int)pSY[i0], wr, wg, wb);
-                        }
+                        if (edgeOk(i0,i1)) DrawLineZ((int)pSX[i0],(int)pSY[i0],pDepth[i0], (int)pSX[i1],(int)pSY[i1],pDepth[i1], wr,wg,wb);
+                        if (edgeOk(i1,i2)) DrawLineZ((int)pSX[i1],(int)pSY[i1],pDepth[i1], (int)pSX[i2],(int)pSY[i2],pDepth[i2], wr,wg,wb);
+                        if (edgeOk(i2,i0)) DrawLineZ((int)pSX[i2],(int)pSY[i2],pDepth[i2], (int)pSX[i0],(int)pSY[i0],pDepth[i0], wr,wg,wb);
                     }
                 }
                 int ntri = nTriFaces + nQuadFaces * 2; // for cleanup check
