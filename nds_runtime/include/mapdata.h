@@ -32883,6 +32883,7 @@ extern int  afn_play_anim;
 extern int  afn_sprite_anim_spr;
 extern int  afn_sprite_anim_val;
 extern int  afn_anim_prio;
+extern int  afn_speed_prio;
 extern int  afn_collided_sprite;
 extern int  afn_collided_tm_obj;
 extern int  afn_collided_tm_obj;
@@ -33029,27 +33030,41 @@ static void afn_bp0_update(void) {
     }
 }
 static void afn_bp0_key_held(void) {
-    if (key_is_down(KEY_LEFT) || key_is_down(KEY_DOWN) || key_is_down(KEY_UP) || key_is_down(KEY_RIGHT)) {
-    if (!afn_player_frozen && key_is_down(KEY_RIGHT)) afn_input_right -= 256;
-    if (!afn_player_frozen && key_is_down(KEY_DOWN)) afn_input_fwd -= 256;
-    if (!afn_player_frozen && key_is_down(KEY_UP)) afn_input_fwd += 256;
-    if (!afn_player_frozen && key_is_down(KEY_LEFT)) afn_input_right += 256;
-    if (!afn_player_frozen && !afn_anim_prio) afn_play_anim = 1;
-    afn_move_speed = 158;
-    }
-    if (key_is_down(KEY_R) || key_is_down(KEY_L)) {
-    if (key_is_down(KEY_R)) orbit_angle -= 256;
-    if (key_is_down(KEY_L)) orbit_angle += 256;
+    if (key_is_down(KEY_DOWN)) {
+    orbit_angle -= 256;
     }
     if (key_is_down(KEY_B)) {
-    afn_move_speed = 264;
+    afn_move_speed = 264; afn_speed_prio = 1;
     if (player_moving) {
-    if (!afn_player_frozen && !afn_anim_prio) afn_play_anim = 2;
+    if (!afn_player_frozen) { afn_play_anim = 2; afn_anim_prio = 1; }
     }
+    }
+    if (key_is_down(KEY_A)) {
+    if (!afn_player_frozen) afn_input_right += 256;
+    if (!afn_player_frozen && !afn_anim_prio) afn_play_anim = 1;
+    if (!afn_speed_prio) afn_move_speed = 158;
+    }
+    if (key_is_down(KEY_A)) {
+    if (!afn_player_frozen) afn_input_right -= 256;
+    if (!afn_player_frozen && !afn_anim_prio) afn_play_anim = 1;
+    if (!afn_speed_prio) afn_move_speed = 158;
+    }
+    if (key_is_down(KEY_R)) {
+    if (!afn_player_frozen) afn_input_fwd -= 256;
+    if (!afn_player_frozen && !afn_anim_prio) afn_play_anim = 1;
+    if (!afn_speed_prio) afn_move_speed = 158;
+    }
+    if (key_is_down(KEY_L)) {
+    if (!afn_player_frozen) afn_input_fwd += 256;
+    if (!afn_player_frozen && !afn_anim_prio) afn_play_anim = 1;
+    if (!afn_speed_prio) afn_move_speed = 158;
+    }
+    if (key_is_down(KEY_UP)) {
+    orbit_angle += 256;
     }
 }
 static void afn_bp0_key_pressed(void) {
-    if (key_hit(KEY_A)) {
+    if (key_hit(KEY_LEFT)) {
     if (player_on_ground) player_vy = 486;
     if (player_vy > 0) {
     if (!afn_player_frozen) { afn_play_anim = 3; afn_anim_prio = 1; }
@@ -33063,13 +33078,13 @@ static void afn_bp0_key_pressed(void) {
     }
 }
 static void afn_bp0_key_released(void) {
-    if (key_released(KEY_A)) {
+    if (key_released(KEY_LEFT)) {
     if (player_vy > 0) player_vy = (player_vy * 51) >> 8;
     if (!player_on_ground && player_vy <= 0) {
     if (!afn_player_frozen) { afn_play_anim = 4; afn_anim_prio = 1; }
     }
     }
-    if (key_released(KEY_UP) || key_released(KEY_LEFT) || key_released(KEY_RIGHT) || key_released(KEY_DOWN)) {
+    if (key_released(KEY_L) || key_released(KEY_R)) {
     if (!afn_player_frozen && !afn_anim_prio) afn_play_anim = 0;
     }
 }

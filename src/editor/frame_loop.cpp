@@ -590,8 +590,11 @@ struct VsNodeTypeDef {
     const char* outExecNames[4];
 };
 
-static const char* sVsKeyNames[] = { "A", "B", "L", "R", "Start", "Select", "Up", "Down", "Left", "Right" };
-static constexpr int kVsKeyCount = 10;
+// X and Y are NDS-only buttons (GBA has no X/Y — the exporter maps them to a
+// harmless fallback on that target). Order must stay stable: these indices are
+// serialized into project files and consumed by the runtime keyName() tables.
+static const char* sVsKeyNames[] = { "A", "B", "L", "R", "Start", "Select", "Up", "Down", "Left", "Right", "X", "Y" };
+static constexpr int kVsKeyCount = 12;
 static const char* sVsAxisNames[] = { "Left", "Right", "Up", "Down" };
 static constexpr int kVsAxisCount = 4;
 
@@ -14862,6 +14865,8 @@ void FrameTick(float dt)
                 case 7: return ImGui::IsKeyDown(ImGuiKey_S);
                 case 8: return ImGui::IsKeyDown(ImGuiKey_A);
                 case 9: return ImGui::IsKeyDown(ImGuiKey_D);
+                case 10: return ImGui::IsKeyDown(ImGuiKey_X); // NDS X
+                case 11: return ImGui::IsKeyDown(ImGuiKey_C); // NDS Y (C key; Y is the up-axis)
                 default: return false;
                 }
             };
@@ -14877,6 +14882,8 @@ void FrameTick(float dt)
                 case 7: return ImGui::IsKeyPressed(ImGuiKey_S);
                 case 8: return ImGui::IsKeyPressed(ImGuiKey_A);
                 case 9: return ImGui::IsKeyPressed(ImGuiKey_D);
+                case 10: return ImGui::IsKeyPressed(ImGuiKey_X); // NDS X
+                case 11: return ImGui::IsKeyPressed(ImGuiKey_C); // NDS Y
                 default: return false;
                 }
             };
@@ -15026,6 +15033,9 @@ void FrameTick(float dt)
             // Script state for this frame
             float scInputFwd = 0.0f, scInputRight = 0.0f;
             float scOrbitDelta = 0.0f;
+            // Mirror the runtime's afn_speed_prio: once a Sprint sets the speed
+            // this frame, Walk can't overwrite it (so B+direction sprints).
+            bool scSpeedPrio = false;
 
             // Action interpreter
             // execEventType tracks which event type is currently driving actions
@@ -15033,34 +15043,34 @@ void FrameTick(float dt)
             auto execActionPlay = [&](const VsNode* action) {
                 VsNodeType t = action->type;
                 if (t == VsNodeType::MovePlayer) {
+                    // Apply direction when this exec runs — the event (e.g.
+                    // On Key Held) already gated us. No DPAD re-check.
                     auto* dd = findDataInPlay(action->id, 0);
                     int dir = dd ? dd->paramInt[0] : 0;
-                    int dirKeys[] = { 8, 9, 6, 7 }; // Left,Right,Up,Down
-                    if (dir >= 0 && dir < 4 && editorKeyDown(dirKeys[dir])) {
-                        if (dir == 0) scInputRight -= 1.0f;
-                        if (dir == 1) scInputRight += 1.0f;
-                        if (dir == 2) scInputFwd   += 1.0f;
-                        if (dir == 3) scInputFwd   -= 1.0f;
-                    }
+                    if (dir == 0) scInputRight -= 1.0f;
+                    else if (dir == 1) scInputRight += 1.0f;
+                    else if (dir == 2) scInputFwd   += 1.0f;
+                    else if (dir == 3) scInputFwd   -= 1.0f;
                 }
                 else if (t == VsNodeType::Walk) {
-                    auto* sd = findDataInPlay(action->id, 0);
-                    sScriptMoveSpeed = sd ? (float)resolveIntPlay(sd) : sCamObj.walkSpeed;
+                    if (!scSpeedPrio) {
+                        auto* sd = findDataInPlay(action->id, 0);
+                        sScriptMoveSpeed = sd ? (float)resolveIntPlay(sd) : sCamObj.walkSpeed;
+                    }
                 }
                 else if (t == VsNodeType::Sprint) {
                     auto* sd = findDataInPlay(action->id, 0);
                     sScriptMoveSpeed = sd ? (float)resolveIntPlay(sd) : sCamObj.sprintSpeed;
+                    scSpeedPrio = true;
                 }
                 else if (t == VsNodeType::OrbitCamera) {
+                    // Orbit when this exec runs (event gates it); Direction picks sign.
                     auto* dd = findDataInPlay(action->id, 0);
                     auto* sd = findDataInPlay(action->id, 1);
                     int dir = dd ? dd->paramInt[0] : 1;
                     int speed = sd ? resolveIntPlay(sd) : 512;
-                    int key = (dir == 0) ? 2 : 3;
-                    if (editorKeyDown(key)) {
-                        float radPerFrame = (float)speed / 65536.0f * 6.28318f;
-                        scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;
-                    }
+                    float radPerFrame = (float)speed / 65536.0f * 6.28318f;
+                    scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;
                 }
                 else if (t == VsNodeType::AutoOrbit) {
                     auto* sd = findDataInPlay(action->id, 0);
@@ -15158,7 +15168,7 @@ void FrameTick(float dt)
             }
 
             // Track previous key state for release edge detection (10 GBA keys)
-            static bool sPrevKeyState[10] = {};
+            static bool sPrevKeyState[kVsKeyCount] = {};
 
             // Walk all event nodes, track which fire for surge animation
             for (auto& ev : sVsNodes)
@@ -15178,12 +15188,19 @@ void FrameTick(float dt)
                         shouldFire = editorKeyDown(key);
                         shouldSurge = shouldFire;
                     } else {
-                        // Ambiguous key — always run actions (they have own checks),
-                        // but only surge if any d-pad or shoulder key is actually pressed
-                        shouldFire = true;
-                        shouldSurge = editorKeyDown(6) || editorKeyDown(7) ||
-                                      editorKeyDown(8) || editorKeyDown(9) ||
-                                      editorKeyDown(2) || editorKeyDown(3);
+                        // Ambiguous: multiple Key nodes wired to one event (means
+                        // "any of these"). Actions no longer self-check the DPAD,
+                        // so fire only if one of the wired keys is actually held.
+                        bool anyHeld = false;
+                        for (auto& lk : sVsLinks) {
+                            if (lk.to.nodeId == ev.id && lk.to.pinType == 3) {
+                                auto* kn = findNodePlay(lk.from.nodeId);
+                                if (kn && kn->type == VsNodeType::Key
+                                    && editorKeyDown(kn->paramInt[0])) { anyHeld = true; break; }
+                            }
+                        }
+                        shouldFire = anyHeld;
+                        shouldSurge = anyHeld;
                     }
                 }
                 else if (ev.type == VsNodeType::OnKeyPressed) {
@@ -15202,7 +15219,7 @@ void FrameTick(float dt)
                                 auto* kn = findNodePlay(lk.from.nodeId);
                                 if (kn && kn->type == VsNodeType::Key) {
                                     int k = kn->paramInt[0];
-                                    if (k >= 0 && k < 10 && sPrevKeyState[k] && !editorKeyDown(k)) {
+                                    if (k >= 0 && k < kVsKeyCount && sPrevKeyState[k] && !editorKeyDown(k)) {
                                         shouldFire = true;
                                         shouldSurge = true;
                                         break;
@@ -15221,18 +15238,11 @@ void FrameTick(float dt)
                 if (shouldSurge) {
                     bool anyActionSurged = false;
                     for (auto* a : acts) {
-                        // For actions with built-in key checks, only surge if their key is held
+                        // MovePlayer fires with its event (no DPAD self-check),
+                        // Both MovePlayer and OrbitCamera now fire with their
+                        // event (no hardcoded key self-check), so they always
+                        // surge when the event fires.
                         bool actionSurge = true;
-                        if (a->type == VsNodeType::MovePlayer) {
-                            auto* dd = findDataInPlay(a->id, 0);
-                            int dir = dd ? dd->paramInt[0] : 0;
-                            int dirKeys[] = { 8, 9, 6, 7 }; // Left,Right,Up,Down
-                            actionSurge = (dir >= 0 && dir < 4 && editorKeyDown(dirKeys[dir]));
-                        } else if (a->type == VsNodeType::OrbitCamera) {
-                            auto* dd = findDataInPlay(a->id, 0);
-                            int dir = dd ? dd->paramInt[0] : 1;
-                            actionSurge = editorKeyDown((dir == 0) ? 2 : 3);
-                        }
                         if (!actionSurge) continue;
                         anyActionSurged = true;
                         sVsFiredNodes.push_back(a->id);
@@ -15375,34 +15385,32 @@ void FrameTick(float dt)
                 auto bpExecAction = [&](const VsNode* action) {
                     VsNodeType t = action->type;
                     if (t == VsNodeType::MovePlayer) {
+                        // Apply direction when exec runs (event gates it).
                         auto* dd = bpFindDataIn(action->id, 0);
                         int dir = dd ? dd->paramInt[0] : 0;
-                        int dirKeys[] = { 8, 9, 6, 7 };
-                        if (dir >= 0 && dir < 4 && editorKeyDown(dirKeys[dir])) {
-                            if (dir == 0) scInputRight -= 1.0f;
-                            if (dir == 1) scInputRight += 1.0f;
-                            if (dir == 2) scInputFwd   += 1.0f;
-                            if (dir == 3) scInputFwd   -= 1.0f;
-                        }
+                        if (dir == 0) scInputRight -= 1.0f;
+                        else if (dir == 1) scInputRight += 1.0f;
+                        else if (dir == 2) scInputFwd   += 1.0f;
+                        else if (dir == 3) scInputFwd   -= 1.0f;
                     }
                     else if (t == VsNodeType::Walk) {
-                        auto* sd = bpFindDataIn(action->id, 0);
-                        sScriptMoveSpeed = sd ? (float)sd->paramInt[0] : sCamObj.walkSpeed;
+                        if (!scSpeedPrio) {
+                            auto* sd = bpFindDataIn(action->id, 0);
+                            sScriptMoveSpeed = sd ? (float)sd->paramInt[0] : sCamObj.walkSpeed;
+                        }
                     }
                     else if (t == VsNodeType::Sprint) {
                         auto* sd = bpFindDataIn(action->id, 0);
                         sScriptMoveSpeed = sd ? (float)sd->paramInt[0] : sCamObj.sprintSpeed;
+                        scSpeedPrio = true;
                     }
                     else if (t == VsNodeType::OrbitCamera) {
                         auto* dd = bpFindDataIn(action->id, 0);
                         auto* sd = bpFindDataIn(action->id, 1);
                         int dir = dd ? dd->paramInt[0] : 1;
                         int speed = sd ? sd->paramInt[0] : 512;
-                        int key = (dir == 0) ? 2 : 3;
-                        if (editorKeyDown(key)) {
-                            float radPerFrame = (float)speed / 65536.0f * 6.28318f;
-                            scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;
-                        }
+                        float radPerFrame = (float)speed / 65536.0f * 6.28318f;
+                        scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;
                     }
                     else if (t == VsNodeType::AutoOrbit) {
                         auto* sd = bpFindDataIn(action->id, 0);
@@ -15446,7 +15454,7 @@ void FrameTick(float dt)
                     }
                     if (ev.type == VsNodeType::OnKeyReleased) {
                         int key = bpResolveEventKey(ev);
-                        if (key >= 0 && key < 10 && sPrevKeyState[key] && !editorKeyDown(key)) {
+                        if (key >= 0 && key < kVsKeyCount && sPrevKeyState[key] && !editorKeyDown(key)) {
                             auto acts = bpCollectActions(ev.id);
                             for (auto* a : acts) bpExecAction(a);
                         }
@@ -15518,34 +15526,32 @@ void FrameTick(float dt)
                         auto bpExecAction = [&](const VsNode* action) {
                             VsNodeType t = action->type;
                             if (t == VsNodeType::MovePlayer) {
+                                // Apply direction when exec runs (event gates it).
                                 auto* dd = bpFindDataIn(action->id, 0);
                                 int dir = dd ? dd->paramInt[0] : 0;
-                                int dirKeys[] = { 8, 9, 6, 7 };
-                                if (dir >= 0 && dir < 4 && editorKeyDown(dirKeys[dir])) {
-                                    if (dir == 0) scInputRight -= 1.0f;
-                                    if (dir == 1) scInputRight += 1.0f;
-                                    if (dir == 2) scInputFwd   += 1.0f;
-                                    if (dir == 3) scInputFwd   -= 1.0f;
-                                }
+                                if (dir == 0) scInputRight -= 1.0f;
+                                else if (dir == 1) scInputRight += 1.0f;
+                                else if (dir == 2) scInputFwd   += 1.0f;
+                                else if (dir == 3) scInputFwd   -= 1.0f;
                             }
                             else if (t == VsNodeType::Walk) {
-                                auto* sd = bpFindDataIn(action->id, 0);
-                                sScriptMoveSpeed = sd ? (float)sd->paramInt[0] : sCamObj.walkSpeed;
+                                if (!scSpeedPrio) {
+                                    auto* sd = bpFindDataIn(action->id, 0);
+                                    sScriptMoveSpeed = sd ? (float)sd->paramInt[0] : sCamObj.walkSpeed;
+                                }
                             }
                             else if (t == VsNodeType::Sprint) {
                                 auto* sd = bpFindDataIn(action->id, 0);
                                 sScriptMoveSpeed = sd ? (float)sd->paramInt[0] : sCamObj.sprintSpeed;
+                                scSpeedPrio = true;
                             }
                             else if (t == VsNodeType::OrbitCamera) {
                                 auto* dd = bpFindDataIn(action->id, 0);
                                 auto* sd = bpFindDataIn(action->id, 1);
                                 int dir = dd ? dd->paramInt[0] : 1;
                                 int speed = sd ? sd->paramInt[0] : 512;
-                                int key = (dir == 0) ? 2 : 3;
-                                if (editorKeyDown(key)) {
-                                    float radPerFrame = (float)speed / 65536.0f * 6.28318f;
-                                    scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;
-                                }
+                                float radPerFrame = (float)speed / 65536.0f * 6.28318f;
+                                scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;
                             }
                             else if (t == VsNodeType::AutoOrbit) {
                                 auto* sd = bpFindDataIn(action->id, 0);
@@ -15578,7 +15584,7 @@ void FrameTick(float dt)
                             }
                             if (ev.type == VsNodeType::OnKeyReleased) {
                                 int key = bpResolveEventKey(ev);
-                                if (key >= 0 && key < 10 && sPrevKeyState[key] && !editorKeyDown(key)) { auto acts = bpCollectActions(ev.id); for (auto* a : acts) bpExecAction(a); }
+                                if (key >= 0 && key < kVsKeyCount && sPrevKeyState[key] && !editorKeyDown(key)) { auto acts = bpCollectActions(ev.id); for (auto* a : acts) bpExecAction(a); }
                             }
                             if (ev.type == VsNodeType::OnCollision && collidedSprite >= 0) {
                                 auto acts = bpCollectActions(ev.id);
@@ -15629,7 +15635,7 @@ void FrameTick(float dt)
             }
 
             // Update previous key state
-            for (int ki = 0; ki < 10; ki++) sPrevKeyState[ki] = editorKeyDown(ki);
+            for (int ki = 0; ki < kVsKeyCount; ki++) sPrevKeyState[ki] = editorKeyDown(ki);
 
             // --- Apply results ---
             float moveSpeed = (sScriptMoveSpeed > 0.0f ? sScriptMoveSpeed : sCamObj.walkSpeed) * dt;
@@ -17759,7 +17765,7 @@ void FrameTick(float dt)
                 case VsNodeType::OnUpdate:      desc = "Fires every frame."; break;
                 case VsNodeType::Branch:        desc = "If condition is true, execute True path; otherwise False."; break;
                 case VsNodeType::CompareVar:    desc = "Compares a variable slot against a value. Outputs 1 or 0."; break;
-                case VsNodeType::MovePlayer:    desc = "Moves the player in a direction while its key is held."; break;
+                case VsNodeType::MovePlayer:    desc = "Moves the player in the given Direction whenever this runs. Wire it after On Key Held(key) to bind movement to that button — e.g. On Key Held(A) -> Move Player(Up) moves up while A is held (remappable)."; break;
                 case VsNodeType::LookDirection: desc = "Sets the player's facing direction."; break;
                 case VsNodeType::ChangeScene:   desc = "Loads a different scene by index."; break;
                 case VsNodeType::SetVariable:   desc = "Sets a variable slot to a value."; break;
@@ -17769,7 +17775,7 @@ void FrameTick(float dt)
                 case VsNodeType::Jump:          desc = "Makes the player jump with the given force. Only works when grounded."; break;
                 case VsNodeType::Walk:          desc = "Sets the player's movement speed (walk)."; break;
                 case VsNodeType::Sprint:        desc = "Sets the player's movement speed (sprint)."; break;
-                case VsNodeType::OrbitCamera:   desc = "Rotates the orbit camera in a direction at a speed."; break;
+                case VsNodeType::OrbitCamera:   desc = "Rotates the orbit camera in a direction at a speed whenever this runs. Gate it with On Key Held(key) to bind orbiting to a button (any key, remappable)."; break;
                 case VsNodeType::PlayAnim:      desc = "Plays an animation on the player sprite."; break;
                 case VsNodeType::SetGravity:    desc = "Sets gravity strength (pixels per frame^2)."; break;
                 case VsNodeType::SetMaxFall:    desc = "Sets the maximum fall speed (terminal velocity)."; break;
@@ -18471,21 +18477,22 @@ void FrameTick(float dt)
                         "// player.z += (fwdZ*inputX + rightZ*inputZ) * moveSpeed;";
                     auto* dirData = resolveDataIn(infoNode.id, 0);
                     int dir = dirData ? dirData->paramInt[0] : 0;
-                    const char* dirKeysGba[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
                     const char* dirVarsGba[] = { "afn_input_right -= 256", "afn_input_right += 256",
                                                  "afn_input_fwd += 256", "afn_input_fwd -= 256" };
                     const int dirFacingGba[] = { 6, 2, 0, 4 }; // L=W, R=E, U=N, D=S
                     char bodyBuf[512];
                     if (dir >= 0 && dir < 4)
                         snprintf(bodyBuf, sizeof(bodyBuf),
-                            "    if (!afn_player_frozen && key_is_down(%s)) {\n"
+                            "    if (!afn_player_frozen) {\n"
                             "        %s;\n"
                             "        if (tm_move_timer == 0) tm_player_facing = %d; }\n"
                             "    // --- Runtime (main.c) ---\n"
-                            "    // Frozen: skips input, facing, and anim cycling\n"
+                            "    // Applied when this exec runs — gate it with\n"
+                            "    // On Key Held(key). No DPAD re-check, so holding\n"
+                            "    // any bound key moves this Direction (remap-friendly).\n"
                             "    // Mode 0: tap = turn in place, hold = walk\n"
                             "    // Mode 4: player_x += (viewSin * moveFwd) >> 8;",
-                            dirKeysGba[dir], dirVarsGba[dir], dirFacingGba[dir]);
+                            dirVarsGba[dir], dirFacingGba[dir]);
                     else
                         snprintf(bodyBuf, sizeof(bodyBuf), "    // MovePlayer (no direction set)");
                     setActionFunc(infoNode, "_move", bodyBuf);
@@ -18511,11 +18518,13 @@ void FrameTick(float dt)
                         editorCode = edBuf;
                         char bodyBuf[512];
                         snprintf(bodyBuf, sizeof(bodyBuf),
-                            "    afn_move_speed = %d;\n"
+                            "    if (!afn_speed_prio) afn_move_speed = %d;\n"
                             "    // --- Runtime (main.c) ---\n"
+                            "    // Walk is low priority: skipped if a Sprint already set\n"
+                            "    // the speed this frame (afn_speed_prio), so holding B +\n"
+                            "    // a direction stays at sprint speed regardless of order.\n"
                             "    // Mode 0: tm_move_frames = 48 / afn_move_speed; // = %d frames/tile\n"
-                            "    //         tm_move_timer = tm_move_frames; // countdown per tile move\n"
-                            "    //         px = lerp(fromX, toX, t / tm_move_frames);\n"
+                            "    //         tm_move_timer = tm_move_frames; px = lerp(...);\n"
                             "    // Mode 4: moveSpeed = afn_move_speed; // = %d\n"
                             "    //         player_x += (viewSin * inputFwd * moveSpeed) >> 16;",
                             gbaSpeed, (gbaSpeed > 0 ? 48 / gbaSpeed : 8), gbaSpeed);
@@ -18528,11 +18537,10 @@ void FrameTick(float dt)
                             "// ---- 3D Scene ----\n"
                             "sScriptMoveSpeed = $0;";
                         setActionFunc(infoNode, "_walk",
-                            "    afn_move_speed = $0;\n"
+                            "    if (!afn_speed_prio) afn_move_speed = $0;\n"
                             "    // --- Runtime (main.c) ---\n"
+                            "    // Low priority: a Sprint this frame wins over Walk.\n"
                             "    // Mode 0: tm_move_frames = 48 / afn_move_speed;\n"
-                            "    //         tm_move_timer = tm_move_frames;\n"
-                            "    //         px = lerp(fromX, toX, t / tm_move_frames);\n"
                             "    // Mode 4: moveSpeed = afn_move_speed;\n"
                             "    //         player_x += (viewSin * inputFwd * moveSpeed) >> 16;");
                     }
@@ -18558,11 +18566,12 @@ void FrameTick(float dt)
                         editorCode = edBuf;
                         char bodyBuf[512];
                         snprintf(bodyBuf, sizeof(bodyBuf),
-                            "    afn_move_speed = %d;\n"
+                            "    afn_move_speed = %d; afn_speed_prio = 1;\n"
                             "    // --- Runtime (main.c) ---\n"
+                            "    // Sprint is high priority: sets the speed and locks out\n"
+                            "    // Walk (afn_speed_prio) for the rest of this frame, so\n"
+                            "    // B + direction reliably sprints over the walk speed.\n"
                             "    // Mode 0: tm_move_frames = 48 / afn_move_speed; // = %d frames/tile\n"
-                            "    //         tm_move_timer = tm_move_frames;\n"
-                            "    //         px = lerp(fromX, toX, t / tm_move_frames);\n"
                             "    // Mode 4: moveSpeed = afn_move_speed; // = %d\n"
                             "    //         player_x += (viewSin * inputFwd * moveSpeed) >> 16;",
                             gbaSpeed, (gbaSpeed > 0 ? 48 / gbaSpeed : 8), gbaSpeed);
@@ -18575,11 +18584,10 @@ void FrameTick(float dt)
                             "// ---- 3D Scene ----\n"
                             "sScriptMoveSpeed = $0;";
                         setActionFunc(infoNode, "_sprint",
-                            "    afn_move_speed = $0;\n"
+                            "    afn_move_speed = $0; afn_speed_prio = 1;\n"
                             "    // --- Runtime (main.c) ---\n"
+                            "    // High priority: locks out Walk for this frame.\n"
                             "    // Mode 0: tm_move_frames = 48 / afn_move_speed;\n"
-                            "    //         tm_move_timer = tm_move_frames;\n"
-                            "    //         px = lerp(fromX, toX, t / tm_move_frames);\n"
                             "    // Mode 4: moveSpeed = afn_move_speed;\n"
                             "    //         player_x += (viewSin * inputFwd * moveSpeed) >> 16;");
                     }
@@ -18628,26 +18636,25 @@ void FrameTick(float dt)
                 case VsNodeType::OrbitCamera: {
                     editorCode =
                         "// ---- 3D Scene ----\n"
-                        "if (editorKeyDown(key)) {\n"
-                        "    float radPerFrame = speed / 65536.0f * 6.28318f;\n"
-                        "    scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;\n"
-                        "}\n"
+                        "// Orbits when this exec runs (gate with On Key Held).\n"
+                        "float radPerFrame = speed / 65536.0f * 6.28318f;\n"
+                        "scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;\n"
                         "// Consumed: sManualOrbitCurrent += (scOrbitDelta - current) * 6*dt;\n"
                         "// sOrbitAngle += sManualOrbitCurrent;";
                     auto* dd = resolveDataIn(infoNode.id, 0);
                     auto* sd = resolveDataIn(infoNode.id, 1);
                     int odir = dd ? dd->paramInt[0] : 1;
                     int ospeed = sd ? sd->paramInt[0] : 512;
-                    const char* okey = (odir == 0) ? "KEY_L" : "KEY_R";
                     const char* osign = (odir == 0) ? "-" : "+";
                     char bodyBuf[256];
                     snprintf(bodyBuf, sizeof(bodyBuf),
-                        "    if (key_is_down(%s)) orbit_angle %s= %d;\n"
+                        "    orbit_angle %s= %d;\n"
                         "    // --- Runtime (main.c) ---\n"
+                        "    // Applied when exec runs; Direction picks the sign.\n"
+                        "    // Gate with On Key Held(key) to bind orbiting to a button.\n"
                         "    // viewAngle = orbit_angle;\n"
-                        "    // viewSin = lu_sin(viewAngle); viewCos = lu_cos(viewAngle);\n"
                         "    // cam_x = player_x - (orbSin * AFN_ORBIT_DIST) >> 8;",
-                        okey, osign, ospeed);
+                        osign, ospeed);
                     setActionFunc(infoNode, "_orbit", bodyBuf);
                     break;
                 }

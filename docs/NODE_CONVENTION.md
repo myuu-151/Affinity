@@ -1,5 +1,7 @@
 # Node Implementation Convention
 
+> **Looking for what each node does?** See [`NODE_REFERENCE.md`](NODE_REFERENCE.md) — a per-node catalog of all ~249 nodes with descriptions and pins. This document is about *implementing* nodes, not using them.
+
 This doc is the cold-start guide for adding, modifying, and debugging Visual Script nodes in Affinity. Read this first if a session was compacted, you've never touched the node system, or you're about to add a node and want to do it right the first time.
 
 The system is small but it touches a lot of files. Get any one of them wrong and the symptom is usually "node visible in editor, does nothing at runtime" or "node compiles but bricks every saved project from before the change." Both are fixable but both waste a build cycle. Read the relevant section before editing.

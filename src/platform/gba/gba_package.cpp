@@ -1936,6 +1936,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int   afn_sprite_anim_spr = -1; // SetSpriteAnim target sprite (-1=none)\n";
         f << "static int   afn_sprite_anim_val = -1; // SetSpriteAnim anim index\n";
         f << "static int   afn_anim_prio;\n";
+        f << "#define AFN_HAS_SPEED_PRIO 1\n";
+        f << "static int   afn_speed_prio;\n";
         f << "static int   afn_pending_scene = -1;\n";
         f << "static int   afn_pending_scene_mode = -1;\n";
         f << "static int   afn_collided_sprite;\n";
@@ -2303,6 +2305,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
 
         // Helper: resolve key name from a data node or event node's key param
         auto resolveKeyName = [&](int keyIdx) -> const char* {
+            // GBA has no X/Y buttons; indices 10/11 (NDS X/Y) fall through to
+            // the KEY_A fallback so projects authored for NDS still compile.
             static const char* keys[] = { "KEY_A", "KEY_B", "KEY_L", "KEY_R",
                                            "KEY_START", "KEY_SELECT",
                                            "KEY_UP", "KEY_DOWN", "KEY_LEFT", "KEY_RIGHT" };
@@ -2419,14 +2423,15 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 case GBAScriptNodeType::MovePlayer: {
                     auto* dirData = findDataIn(action->id, 0);
                     int dir = dirData ? dirData->paramInt[0] : 0;
-                    // 0=Left, 1=Right, 2=Up, 3=Down
-                    const char* dirKeys[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
+                    // 0=Left, 1=Right, 2=Up, 3=Down. Apply when the exec runs —
+                    // the chain (e.g. On Key Held) decides when. Previously
+                    // re-checked the matching DPAD key, double-gating remaps.
                     const char* dirVars[] = { "afn_input_right -= 256", "afn_input_right += 256",
                                               "afn_input_fwd += 256", "afn_input_fwd -= 256" };
                     // facing: Left=6(W), Right=2(E), Up=0(N), Down=4(S)
                     const int dirFacing[] = { 6, 2, 0, 4 };
                     if (dir >= 0 && dir < 4)
-                        f << "    if (!afn_player_frozen && key_is_down(" << dirKeys[dir] << ")) { " << dirVars[dir] << "; if (tm_move_timer == 0) tm_player_facing = " << dirFacing[dir] << "; }\n";
+                        f << "    if (!afn_player_frozen) { " << dirVars[dir] << "; if (tm_move_timer == 0) tm_player_facing = " << dirFacing[dir] << "; }\n";
                     break;
                 }
                 case GBAScriptNodeType::Jump: {
@@ -2437,20 +2442,22 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     break;
                 }
                 case GBAScriptNodeType::Walk: {
+                    // Low priority: don't overwrite a Sprint set this frame.
                     auto* speedData = findDataIn(action->id, 0);
                     if (speedData) {
                         int speed = resolveInt(speedData);
                         int gbaSpeed = (int)(speed * 37.0f / 35.0f);
-                        f << "    afn_move_speed = " << gbaSpeed << ";\n";
+                        f << "    if (!afn_speed_prio) afn_move_speed = " << gbaSpeed << ";\n";
                     }
                     break;
                 }
                 case GBAScriptNodeType::Sprint: {
+                    // High priority: sets speed and locks out Walk this frame.
                     auto* speedData = findDataIn(action->id, 0);
                     if (speedData) {
                         int speed = resolveInt(speedData);
                         int gbaSpeed = (int)(speed * 37.0f / 35.0f);
-                        f << "    afn_move_speed = " << gbaSpeed << ";\n";
+                        f << "    afn_move_speed = " << gbaSpeed << "; afn_speed_prio = 1;\n";
                     }
                     break;
                 }
@@ -2459,10 +2466,11 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* speedData = findDataIn(action->id, 1);
                     int dir = dirData ? dirData->paramInt[0] : 1;
                     int speed = speedData ? resolveInt(speedData) : 512;
-                    // Map direction to L/R shoulder key check
-                    const char* key = (dir == 0) ? "KEY_L" : "KEY_R";
+                    // Orbit when this exec runs (gate via On Key Held); Direction
+                    // only picks the sign. Was hardcoded to KEY_L/KEY_R, which
+                    // ignored the wired key.
                     const char* sign = (dir == 0) ? "-" : "+";
-                    f << "    if (key_is_down(" << key << ")) orbit_angle " << sign << "= " << speed << ";\n";
+                    f << "    orbit_angle " << sign << "= " << speed << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::DampenJump: {
@@ -3663,14 +3671,16 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         gateDepth += 2;
                         continue;
                     }
-                    // PlayAnim: respect animation priority from IsJumping/IsFalling gates
+                    // PlayAnim: a conditional anim (inside ANY gate — Is Moving,
+                    // Is Jumping, ...) claims priority over an ungated one, so the
+                    // sprint anim (behind Is Moving) beats the walk anim (ungated).
                     if (a->type == GBAScriptNodeType::PlayAnim) {
                         char callName[64];
                         if (a->funcName[0])
                             snprintf(callName, sizeof(callName), "%s", a->funcName);
                         else
                             snprintf(callName, sizeof(callName), "afn_script%s_%d", actionSuffix(a->type), a->id);
-                        if (inJumpGate) {
+                        if (inJumpGate || gateDepth > 0) {
                             f << "    " << callName << "();\n";
                             f << "    afn_anim_prio = 1;\n";
                         } else {
@@ -3991,12 +4001,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 case GBAScriptNodeType::MovePlayer: {
                     auto* dirData = bpFindDataIn(action->id, 0);
                     int dir = dirData ? dirData->paramInt[0] : 0;
-                    const char* dirKeys[] = { "KEY_LEFT", "KEY_RIGHT", "KEY_UP", "KEY_DOWN" };
+                    // Apply when exec runs; gate via On Key Held.
                     const char* dirVars[] = { "afn_input_right -= 256", "afn_input_right += 256",
                                               "afn_input_fwd += 256", "afn_input_fwd -= 256" };
                     const int dirFacing[] = { 6, 2, 0, 4 };
                     if (dir >= 0 && dir < 4)
-                        f << "    if (!afn_player_frozen && key_is_down(" << dirKeys[dir] << ")) { " << dirVars[dir] << "; if (tm_move_timer == 0) tm_player_facing = " << dirFacing[dir] << "; }\n";
+                        f << "    if (!afn_player_frozen) { " << dirVars[dir] << "; if (tm_move_timer == 0) tm_player_facing = " << dirFacing[dir] << "; }\n";
                     break;
                 }
                 case GBAScriptNodeType::Jump: {
@@ -4008,13 +4018,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 case GBAScriptNodeType::Walk: {
                     auto* speedData = bpFindDataIn(action->id, 0);
                     std::string speed = speedData ? bpResolveInt(speedData) : "37";
-                    f << "    afn_move_speed = " << speed << ";\n";
+                    f << "    if (!afn_speed_prio) afn_move_speed = " << speed << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::Sprint: {
                     auto* speedData = bpFindDataIn(action->id, 0);
                     std::string speed = speedData ? bpResolveInt(speedData) : "56";
-                    f << "    afn_move_speed = " << speed << ";\n";
+                    f << "    afn_move_speed = " << speed << "; afn_speed_prio = 1;\n";
                     break;
                 }
                 case GBAScriptNodeType::OrbitCamera: {
@@ -4022,9 +4032,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* speedData = bpFindDataIn(action->id, 1);
                     int dir = dirData ? dirData->paramInt[0] : 1;
                     std::string speed = speedData ? bpResolveInt(speedData) : "512";
-                    const char* key = (dir == 0) ? "KEY_L" : "KEY_R";
+                    // Orbit when exec runs (gate via On Key Held); Direction
+                    // picks the sign. No hardcoded L/R key check.
                     const char* sign = (dir == 0) ? "-" : "+";
-                    f << "    if (key_is_down(" << key << ")) orbit_angle " << sign << "= " << speed << ";\n";
+                    f << "    orbit_angle " << sign << "= " << speed << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::AutoOrbit: {
@@ -5076,17 +5087,22 @@ static bool GenerateMapData(const std::string& runtimeDir,
             // Emit blueprint actions with gate support
             // Gate nodes collect their downstream actions via the link graph
             // and emit them inside the if-block, rather than relying on flat-list ordering.
+            // inGate = true while emitting inside ANY condition gate (Is Moving,
+            // Is Jumping, ...). A PlayAnim inside a gate is a conditional anim and
+            // claims priority over an ungated one (so sprint anim beats walk anim).
             std::function<void(const std::vector<const GBAScriptNodeExport*>&, std::set<int>&, bool)> bpEmitActionsWithGatesImpl;
-            bpEmitActionsWithGatesImpl = [&](const std::vector<const GBAScriptNodeExport*>& actions, std::set<int>& emitted, bool inJumpGate) {
+            bpEmitActionsWithGatesImpl = [&](const std::vector<const GBAScriptNodeExport*>& actions, std::set<int>& emitted, bool inGate) {
                 for (auto* a : actions) {
                     if (emitted.count(a->id)) continue;
                     emitted.insert(a->id);
 
-                    // Helper: emit a gate node — open if-block, recursively emit branch, close
+                    // Helper: emit a gate node — open if-block, recursively emit branch, close.
+                    // Branch is always "inside a gate" for anim-priority purposes.
                     auto emitGateBranch = [&](const char* condition, bool jumpGate = false) {
+                        (void)jumpGate;
                         f << "    if (" << condition << ") {\n";
                         auto branch = bpCollectBranch(a->id, 0);
-                        bpEmitActionsWithGatesImpl(branch, emitted, inJumpGate || jumpGate);
+                        bpEmitActionsWithGatesImpl(branch, emitted, true);
                         f << "    }\n";
                     };
 
@@ -5122,7 +5138,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "      if (dx<0) dx=-dx; if (dz<0) dz=-dz;\n";
                         f << "      if (((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8 < " << a->paramInt[2] << ") {\n";
                         auto branch = bpCollectBranch(a->id, 0);
-                        bpEmitActionsWithGatesImpl(branch, emitted, inJumpGate);
+                        bpEmitActionsWithGatesImpl(branch, emitted, true);
                         f << "    } }\n";
                         continue;
                     }
@@ -5130,7 +5146,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "    { static int afn_cd_" << a->id << " = " << a->paramInt[0] << ";\n";
                         f << "      if (--afn_cd_" << a->id << " <= 0) { afn_cd_" << a->id << " = " << a->paramInt[0] << ";\n";
                         auto branch = bpCollectBranch(a->id, 0);
-                        bpEmitActionsWithGatesImpl(branch, emitted, inJumpGate);
+                        bpEmitActionsWithGatesImpl(branch, emitted, inGate);
                         f << "    } }\n";
                         continue;
                     }
@@ -5161,7 +5177,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "      if (cr <= 0) cr = 16;\n";
                         f << "      if (((dx>dz)?dx+(dz>>1):dz+(dx>>1))>>8 < cr) {\n";
                         auto branch = bpCollectBranch(a->id, 0);
-                        bpEmitActionsWithGatesImpl(branch, emitted, inJumpGate);
+                        bpEmitActionsWithGatesImpl(branch, emitted, true);
                         f << "    } }\n";
                         continue;
                     }
@@ -5184,7 +5200,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "    { if (afn_rise_" << a->id << " >= afn_frame_count - 1) { afn_rise_" << a->id << " = afn_frame_count; }\n";
                         f << "      else { afn_rise_" << a->id << " = afn_frame_count;\n";
                         auto branch = bpCollectBranch(a->id, 0);
-                        bpEmitActionsWithGatesImpl(branch, emitted, inJumpGate);
+                        bpEmitActionsWithGatesImpl(branch, emitted, inGate);
                         f << "    } }\n";
                         continue;
                     }
@@ -5194,10 +5210,10 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         auto brSet = bpCollectBranch(a->id, 0);
                         auto brClear = bpCollectBranch(a->id, 1);
                         f << "    if (afn_flags & (1u << " << flag << ")) {\n";
-                        bpEmitActionsWithGatesImpl(brSet, emitted, inJumpGate);
+                        bpEmitActionsWithGatesImpl(brSet, emitted, inGate);
                         if (!brClear.empty()) {
                             f << "    } else {\n";
-                            bpEmitActionsWithGatesImpl(brClear, emitted, inJumpGate);
+                            bpEmitActionsWithGatesImpl(brClear, emitted, inGate);
                         }
                         f << "    }\n";
                         continue;
@@ -5208,20 +5224,21 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         auto brA = bpCollectBranch(a->id, 0);
                         auto brB = bpCollectBranch(a->id, 1);
                         f << "      if (afn_ff_" << a->id << ") {\n";
-                        bpEmitActionsWithGatesImpl(brA, emitted, inJumpGate);
+                        bpEmitActionsWithGatesImpl(brA, emitted, inGate);
                         f << "      } else {\n";
-                        bpEmitActionsWithGatesImpl(brB, emitted, inJumpGate);
+                        bpEmitActionsWithGatesImpl(brB, emitted, inGate);
                         f << "      } }\n";
                         continue;
                     }
-                    // PlayAnim: respect animation priority from IsJumping/IsFalling gates
+                    // PlayAnim: a conditional anim (inside ANY gate) claims priority
+                    // over an ungated one — sprint anim (behind Is Moving) beats walk.
                     if (a->type == GBAScriptNodeType::PlayAnim) {
                         char callName[64];
                         if (a->funcName[0])
                             snprintf(callName, sizeof(callName), "%s", a->funcName);
                         else
                             snprintf(callName, sizeof(callName), "afn_bp%d%s_%d", bi, actionSuffix(a->type), a->id);
-                        if (inJumpGate) {
+                        if (inGate) {
                             f << "    " << callName << "(" << paramArgs << ");\n";
                             f << "    afn_anim_prio = 1;\n";
                         } else {
