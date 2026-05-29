@@ -574,6 +574,7 @@ enum class VsNodeType : int {
     SetVelocityZ,    // action: set world-Z velocity (independent of input; decays via VelocityFalloff)
     VelocityFalloff, // action: linear decay of vx/vz to 0 over N frames (Mode 4 boost pad style)
     BoostForward,    // action: push the player along their current view direction (vx/vz = sin/cos(viewAngle) * speed)
+    HaltMomentum,    // action: zero all player velocity (vx, vz, vy, pending boost, falloff) — use on respawn
     COUNT
 };
 
@@ -871,6 +872,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Set Velocity Z", 0xFF3355AA, 1, 1, 1, 0, {"Velocity (float)"}, {}, {} },
     { "Velocity Falloff",0xFF3355AA, 1, 1, 1, 0, {"Frames (int)"}, {}, {} },
     { "Boost Forward", 0xFF3355AA, 1, 1, 1, 0, {"Speed (float)"}, {}, {} },
+    { "Halt Momentum", 0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -4296,6 +4298,35 @@ static GLuint s3DFloorTex  = 0;
 static bool  s3DRenderNeeded = false; // set true during FrameTick, consumed by Render3DViewport
 static ImVec2 s3DViewPos = {};        // viewport position for GL rendering
 static ImVec2 s3DViewSize = {};       // viewport size for GL rendering
+// Clipboard for Ctrl+C / Ctrl+V on the 3D viewport. Stores copies of
+// every currently-selected sprite so paste recreates the whole group
+// (with a small XZ nudge so the paste sits visibly offset from the
+// source). Empty vector means nothing to paste.
+static std::vector<FloorSprite> s3DSpriteClipboard;
+// Right-mouse box-select state. When dragging past a small pixel
+// threshold we treat it as a box select; otherwise it's a single click.
+static bool   s3DRMBDown      = false;
+static ImVec2 s3DRMBStart     = {};
+static bool   s3DRMBCtrlAtDown = false;
+
+// Blender-style grab mode for the 3D viewport, operating on the WHOLE
+// current multi-selection. G enters Free mode, X/Y/Z constrains, mouse
+// drives the delta, LMB commits, Escape reverts. Original positions are
+// kept in a parallel array so cancel/axis-switch can restore them.
+static bool  s3DGrabMode      = false;
+static char  s3DGrabAxis      = 0;        // 0 = free, 'X'/'Y'/'Z' = locked
+static ImVec2 s3DGrabStartMouse = {};
+struct s3DGrabSnap { int idx; float x, y, z; };
+static std::vector<s3DGrabSnap> s3DGrabOrig;
+
+// Blender-style rotate mode (R). Each selected sprite spins around its
+// own anchor on the chosen axis. Stored angles feed sp.rotation /
+// rotationX / rotationZ which the exporter already applies at runtime.
+static bool   s3DRotMode      = false;
+static char   s3DRotAxis      = 'Z';      // default axis on R: Z spin
+static ImVec2 s3DRotStartMouse = {};
+struct s3DRotSnap { int idx; float rotX, rotY, rotZ; };
+static std::vector<s3DRotSnap> s3DRotOrig;
 
 // ---- Win32 file dialogs ----
 #ifdef _WIN32
@@ -8321,20 +8352,137 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         }
     }
 
-    // Right-click to select mesh object via ray picking
-    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+    // ---- Right-mouse selection: click for single pick, drag for box select ----
+    // Camera position + basis (shared by ray pick AND screen projection
+    // for box select).
+    auto computeCamBasis = [&](float& camX, float& camY, float& camZ,
+                               float& fx, float& fy, float& fz,
+                               float& rx, float& ry, float& rz,
+                               float& ux, float& uy, float& uz)
+    {
+        camX = s3DTargetX + s3DOrbitDist * cosf(s3DOrbitPitch) * sinf(s3DOrbitYaw);
+        camY = s3DTargetY + s3DOrbitDist * sinf(s3DOrbitPitch);
+        camZ = s3DTargetZ + s3DOrbitDist * cosf(s3DOrbitPitch) * cosf(s3DOrbitYaw);
+        fx = s3DTargetX - camX; fy = s3DTargetY - camY; fz = s3DTargetZ - camZ;
+        float fLen = sqrtf(fx*fx + fy*fy + fz*fz);
+        if (fLen > 0) { fx /= fLen; fy /= fLen; fz /= fLen; }
+        float upRefX = 0.0f, upRefY = 1.0f, upRefZ = 0.0f;
+        if (fabsf(fy) > 0.9f) { upRefX = 0.0f; upRefY = 0.0f; upRefZ = 1.0f; }
+        rx = fy * upRefZ - fz * upRefY;
+        ry = fz * upRefX - fx * upRefZ;
+        rz = fx * upRefY - fy * upRefX;
+        float rLen = sqrtf(rx*rx + ry*ry + rz*rz);
+        if (rLen > 0) { rx /= rLen; ry /= rLen; rz /= rLen; }
+        ux = ry*fz - rz*fy; uy = rz*fx - rx*fz; uz = rx*fy - ry*fx;
+    };
+
+    // Track right-mouse down.
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        s3DRMBDown  = true;
+        s3DRMBStart = mpos;
+        s3DRMBCtrlAtDown = ImGui::GetIO().KeyCtrl;
+    }
+
+    // Draw rubber-band while dragging past the click threshold.
+    bool rmbDragging = s3DRMBDown
+        && ImGui::IsMouseDown(ImGuiMouseButton_Right)
+        && (fabsf(mpos.x - s3DRMBStart.x) > 4.0f || fabsf(mpos.y - s3DRMBStart.y) > 4.0f);
+    if (rmbDragging) {
+        ImDrawList* dlBox = ImGui::GetWindowDrawList();
+        ImVec2 a = s3DRMBStart, b = mpos;
+        if (a.x > b.x) std::swap(a.x, b.x);
+        if (a.y > b.y) std::swap(a.y, b.y);
+        ImU32 fill  = s3DRMBCtrlAtDown ? IM_COL32(255,80,80,40)  : IM_COL32(80,180,255,40);
+        ImU32 edge  = s3DRMBCtrlAtDown ? IM_COL32(255,80,80,200) : IM_COL32(80,180,255,200);
+        dlBox->AddRectFilled(a, b, fill);
+        dlBox->AddRect(a, b, edge, 0.0f, 0, 1.5f);
+    }
+
+    // Decide what to do on release: drag → box select, click → single pick.
+    bool doSinglePick = false;
+    bool singlePickCtrl = false;
+    if (s3DRMBDown && ImGui::IsMouseReleased(ImGuiMouseButton_Right))
+    {
+        bool wasDrag = (fabsf(mpos.x - s3DRMBStart.x) > 4.0f || fabsf(mpos.y - s3DRMBStart.y) > 4.0f);
+        bool ctrlNow = s3DRMBCtrlAtDown;
+        s3DRMBDown = false;
+
+        if (wasDrag)
+        {
+            // Box select: project each sprite anchor to NDC, test inside box.
+            ImVec2 a = s3DRMBStart, b = mpos;
+            if (a.x > b.x) std::swap(a.x, b.x);
+            if (a.y > b.y) std::swap(a.y, b.y);
+            float camX, camY, camZ, fxv, fyv, fzv, rxv, ryv, rzv, uxv, uyv, uzv;
+            computeCamBasis(camX, camY, camZ, fxv, fyv, fzv, rxv, ryv, rzv, uxv, uyv, uzv);
+            float fovY = 45.0f * 3.14159265f / 360.0f;
+            float aspect = vpAreaW / size.y;
+            float tanH = tanf(fovY);
+
+            if (!ctrlNow) {
+                for (int i = 0; i < sSpriteCount; i++) sSprites[i].selected = false;
+                sSelectedSprite = -1;
+            }
+            int firstHit = -1;
+            for (int i = 0; i < sSpriteCount; i++) {
+                const FloorSprite& sp = sSprites[i];
+                float dx = sp.x - camX, dy = sp.y - camY, dz = sp.z - camZ;
+                float zCam = dx*fxv + dy*fyv + dz*fzv;
+                if (zCam <= 0.01f) continue;
+                float xCam = dx*rxv + dy*ryv + dz*rzv;
+                float yCam = dx*uxv + dy*uyv + dz*uzv;
+                float ndcX = xCam / (zCam * tanH * aspect);
+                float ndcY = yCam / (zCam * tanH);
+                float sxScreen = pos.x + (ndcX + 1.0f) * 0.5f * vpAreaW;
+                float syScreen = pos.y + (1.0f - ndcY) * 0.5f * size.y;
+                if (sxScreen < a.x || sxScreen > b.x) continue;
+                if (syScreen < a.y || syScreen > b.y) continue;
+                if (ctrlNow) {
+                    sSprites[i].selected = false;
+                    if (sSelectedSprite == i) sSelectedSprite = -1;
+                } else {
+                    sSprites[i].selected = true;
+                    if (firstHit < 0) firstHit = i;
+                }
+            }
+            if (!ctrlNow && firstHit >= 0) {
+                sSelectedSprite = firstHit;
+                sSelectedObjType = SelectedObjType::Sprite;
+                if (sSprites[firstHit].meshIdx >= 0 && sSprites[firstHit].meshIdx < (int)sMeshAssets.size())
+                    sSelectedMesh = sSprites[firstHit].meshIdx;
+            }
+        }
+        else
+        {
+            doSinglePick   = true;
+            singlePickCtrl = ctrlNow;
+        }
+    }
+
+    if (doSinglePick)
     {
         // Camera position
         float camX = s3DTargetX + s3DOrbitDist * cosf(s3DOrbitPitch) * sinf(s3DOrbitYaw);
         float camY = s3DTargetY + s3DOrbitDist * sinf(s3DOrbitPitch);
         float camZ = s3DTargetZ + s3DOrbitDist * cosf(s3DOrbitPitch) * cosf(s3DOrbitYaw);
-        // Forward, right, up vectors
+        // Forward, right, up vectors. The previous right = (-fz, 0, fx)
+        // collapses to ~0 when forward is mostly vertical (looking straight
+        // down/up), making the ray basis degenerate and click-picking miss
+        // every mesh. Build right = forward × worldUp instead, and fall
+        // back to a different reference axis if forward is parallel to up.
         float fx = s3DTargetX - camX, fy = s3DTargetY - camY, fz = s3DTargetZ - camZ;
         float fLen = sqrtf(fx*fx + fy*fy + fz*fz);
         if (fLen > 0) { fx /= fLen; fy /= fLen; fz /= fLen; }
-        float rx = -fz, ry = 0.0f, rz = fx;
-        float rLen = sqrtf(rx*rx + rz*rz);
-        if (rLen > 0) { rx /= rLen; rz /= rLen; }
+        // worldUp = (0,1,0) unless forward is too close to it, then use Z.
+        float upRefX = 0.0f, upRefY = 1.0f, upRefZ = 0.0f;
+        if (fabsf(fy) > 0.9f) { upRefX = 0.0f; upRefY = 0.0f; upRefZ = 1.0f; }
+        // right = forward × upRef
+        float rx = fy * upRefZ - fz * upRefY;
+        float ry = fz * upRefX - fx * upRefZ;
+        float rz = fx * upRefY - fy * upRefX;
+        float rLen = sqrtf(rx*rx + ry*ry + rz*rz);
+        if (rLen > 0) { rx /= rLen; ry /= rLen; rz /= rLen; }
+        // up = right × forward (already orthonormal)
         float ux = ry*fz - rz*fy, uy = rz*fx - rx*fz, uz = rx*fy - ry*fx;
         // NDC from mouse
         float ndcX = (mpos.x - pos.x) / vpAreaW * 2.0f - 1.0f;
@@ -8348,43 +8496,191 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         float rdz = fz + rz * ndcX * tanH * aspect + uz * ndcY * tanH;
         float rdLen = sqrtf(rdx*rdx + rdy*rdy + rdz*rdz);
         if (rdLen > 0) { rdx /= rdLen; rdy /= rdLen; rdz /= rdLen; }
-        // Find closest sprite to ray
+        // Find closest sprite hit. For meshes: project the 8 corners of
+        // the bbox to screen, build a screen-space rect, and test if the
+        // mouse is inside it (plus depth-sort by view-space Z of the sprite
+        // anchor). Screen-space hit-testing is robust at any distance —
+        // a previous local-space ray-AABB test missed far meshes by a
+        // handful of pixels because tiny mouse-direction errors translate
+        // to missing the box entirely far from camera.
         int bestIdx = -1;
         float bestDist = 1e9f;
+        constexpr float kPI = 3.14159265f;
+        // Screen pixel position of the mouse, relative to viewport.
+        float mouseSX = mpos.x;
+        float mouseSY = mpos.y;
+        float viewFovY = 45.0f * 3.14159265f / 360.0f;
+        float viewAspect = vpAreaW / size.y;
+        float viewTanH = tanf(viewFovY);
+        auto worldToScreen = [&](float wx, float wy, float wz, float& sx_, float& sy_, float& zCam) -> bool {
+            float dxc = wx - camX, dyc = wy - camY, dzc = wz - camZ;
+            zCam = dxc*fx + dyc*fy + dzc*fz;
+            if (zCam <= 0.01f) return false; // behind camera
+            float xCam = dxc*rx + dyc*ry + dzc*rz;
+            float yCam = dxc*ux + dyc*uy + dzc*uz;
+            float ndcX = xCam / (zCam * viewTanH * viewAspect);
+            float ndcY = yCam / (zCam * viewTanH);
+            sx_ = pos.x + (ndcX + 1.0f) * 0.5f * vpAreaW;
+            sy_ = pos.y + (1.0f - ndcY) * 0.5f * size.y;
+            return true;
+        };
         for (int i = 0; i < sSpriteCount; i++)
         {
-            float ox = sSprites[i].x - camX, oy = sSprites[i].y - camY, oz = sSprites[i].z - camZ;
-            float t = ox*rdx + oy*rdy + oz*rdz; // project onto ray
-            if (t < 0) continue;
-            float px = ox - rdx*t, py = oy - rdy*t, pz = oz - rdz*t;
-            float dist = sqrtf(px*px + py*py + pz*pz);
-            // Hit radius based on mesh bounds or a default
-            float hitR = 20.0f * sSprites[i].scale;
-            if (sSprites[i].type == SpriteType::Mesh && sSprites[i].meshIdx >= 0
-                && sSprites[i].meshIdx < (int)sMeshAssets.size()) {
-                const MeshAsset& ma = sMeshAssets[sSprites[i].meshIdx];
-                float bx = (ma.boundsMax[0] - ma.boundsMin[0]) * sSprites[i].scale;
-                float by = (ma.boundsMax[1] - ma.boundsMin[1]) * sSprites[i].scale;
-                float bz = (ma.boundsMax[2] - ma.boundsMin[2]) * sSprites[i].scale;
-                hitR = sqrtf(bx*bx + by*by + bz*bz) * 0.5f;
-                if (hitR < 5.0f) hitR = 5.0f;
+            const FloorSprite& sp = sSprites[i];
+            bool isMesh = (sp.type == SpriteType::Mesh
+                           && sp.meshIdx >= 0
+                           && sp.meshIdx < (int)sMeshAssets.size());
+            if (isMesh)
+            {
+                const MeshAsset& ma = sMeshAssets[sp.meshIdx];
+                const float bMin[3] = { ma.boundsMin[0], ma.boundsMin[1], ma.boundsMin[2] };
+                const float bMax[3] = { ma.boundsMax[0], ma.boundsMax[1], ma.boundsMax[2] };
+                float s = sp.scale > 0.001f ? sp.scale : 1.0f;
+                float cY = cosf(sp.rotation  * kPI / 180.0f), sY = sinf(sp.rotation  * kPI / 180.0f);
+                float cX = cosf(sp.rotationX * kPI / 180.0f), sX = sinf(sp.rotationX * kPI / 180.0f);
+                float cZ = cosf(sp.rotationZ * kPI / 180.0f), sZ = sinf(sp.rotationZ * kPI / 180.0f);
+                auto localToWorld = [&](float lx, float ly, float lz, float& wx, float& wy, float& wz) {
+                    lx *= s; ly *= s; lz *= s;
+                    float r1x = lx*cY + lz*sY,   r1y = ly,                r1z = -lx*sY + lz*cY;
+                    float r2x = r1x,             r2y = r1y*cX - r1z*sX,   r2z = r1y*sX + r1z*cX;
+                    float r3x = r2x*cZ - r2y*sZ, r3y = r2x*sZ + r2y*cZ,   r3z = r2z;
+                    wx = r3x + sp.x; wy = r3y + sp.y; wz = r3z + sp.z;
+                };
+                // Project 8 bbox corners. Track how many are in front of camera.
+                float sxMin = 1e30f, syMin = 1e30f, sxMax = -1e30f, syMax = -1e30f, zMin = 1e30f;
+                int   inFrontCount = 0;
+                float worldCorners[8][3];
+                for (int corner = 0; corner < 8; corner++) {
+                    float lx = (corner & 1) ? bMax[0] : bMin[0];
+                    float ly = (corner & 2) ? bMax[1] : bMin[1];
+                    float lz = (corner & 4) ? bMax[2] : bMin[2];
+                    localToWorld(lx, ly, lz,
+                                 worldCorners[corner][0],
+                                 worldCorners[corner][1],
+                                 worldCorners[corner][2]);
+                    float sx_, sy_, zCam;
+                    if (worldToScreen(worldCorners[corner][0], worldCorners[corner][1], worldCorners[corner][2], sx_, sy_, zCam)) {
+                        if (sx_ < sxMin) sxMin = sx_;
+                        if (sy_ < syMin) syMin = sy_;
+                        if (sx_ > sxMax) sxMax = sx_;
+                        if (sy_ > syMax) syMax = sy_;
+                        if (zCam < zMin) zMin = zCam;
+                        inFrontCount++;
+                    }
+                }
+                bool hit = false;
+                float hitDist = 1e9f;
+                if (inFrontCount == 8) {
+                    // All corners visible: screen-rect test (with a small
+                    // pixel slop so edge clicks register).
+                    const float kSlop = 6.0f;
+                    if (mouseSX >= sxMin - kSlop && mouseSX <= sxMax + kSlop
+                        && mouseSY >= syMin - kSlop && mouseSY <= syMax + kSlop) {
+                        hit = true;
+                        hitDist = zMin;
+                    }
+                }
+                // Also try the ray-AABB path as a SECOND chance — the screen
+                // rect can be a strict over-approximation, and missing a
+                // click on a clearly-visible mesh feels broken even if
+                // technically the bbox edge was a few pixels off. Hits
+                // from this path use the world-space tHit for depth.
+                if (!hit && inFrontCount > 0) {
+                    // Some corners behind camera (mesh straddles near plane).
+                    // Fall back to world-space ray-vs-AABB: build a ray from
+                    // camera through the mouse pixel, slab-test against the
+                    // world-space oriented box transformed back into local
+                    // space (inverse rotate / scale).
+                    float ndcX = (mpos.x - pos.x) / vpAreaW * 2.0f - 1.0f;
+                    float ndcY = 1.0f - (mpos.y - pos.y) / size.y * 2.0f;
+                    float rdx = fx + rx * ndcX * viewTanH * viewAspect + ux * ndcY * viewTanH;
+                    float rdy = fy + ry * ndcX * viewTanH * viewAspect + uy * ndcY * viewTanH;
+                    float rdz = fz + rz * ndcX * viewTanH * viewAspect + uz * ndcY * viewTanH;
+                    float rdLen = sqrtf(rdx*rdx + rdy*rdy + rdz*rdz);
+                    if (rdLen > 0) { rdx /= rdLen; rdy /= rdLen; rdz /= rdLen; }
+                    float ox = camX - sp.x, oy = camY - sp.y, oz = camZ - sp.z;
+                    float dxR = rdx, dyR = rdy, dzR = rdz;
+                    // Inverse rotation (Z^-1 * X^-1 * Y^-1) using -angles.
+                    float icY = cosf(-sp.rotation  * kPI / 180.0f), isY = sinf(-sp.rotation  * kPI / 180.0f);
+                    float icX = cosf(-sp.rotationX * kPI / 180.0f), isX = sinf(-sp.rotationX * kPI / 180.0f);
+                    float icZ = cosf(-sp.rotationZ * kPI / 180.0f), isZ = sinf(-sp.rotationZ * kPI / 180.0f);
+                    auto invRot = [&](float& vx, float& vy, float& vz) {
+                        float ax = vx*icZ - vy*isZ, ay = vx*isZ + vy*icZ, az = vz;
+                        float by2 = ay*icX - az*isX, bz2 = ay*isX + az*icX, bx2 = ax;
+                        vx = bx2*icY + bz2*isY; vy = by2; vz = -bx2*isY + bz2*icY;
+                    };
+                    invRot(ox, oy, oz);
+                    invRot(dxR, dyR, dzR);
+                    ox /= s; oy /= s; oz /= s;
+                    float tNear = -1e30f, tFar = 1e30f;
+                    const float o[3] = { ox, oy, oz };
+                    const float d[3] = { dxR, dyR, dzR };
+                    bool miss = false;
+                    for (int a = 0; a < 3; a++) {
+                        if (fabsf(d[a]) < 1e-6f) {
+                            if (o[a] < bMin[a] || o[a] > bMax[a]) { miss = true; break; }
+                        } else {
+                            float t1 = (bMin[a] - o[a]) / d[a];
+                            float t2 = (bMax[a] - o[a]) / d[a];
+                            if (t1 > t2) std::swap(t1, t2);
+                            if (t1 > tNear) tNear = t1;
+                            if (t2 < tFar)  tFar  = t2;
+                            if (tNear > tFar) { miss = true; break; }
+                        }
+                    }
+                    if (!miss && tFar >= 0.0f) {
+                        hit = true;
+                        float tHit = tNear >= 0.0f ? tNear : tFar;
+                        hitDist = tHit * s;
+                    }
+                }
+                if (hit && hitDist < bestDist) { bestDist = hitDist; bestIdx = i; }
             }
-            if (dist < hitR && t < bestDist) {
-                bestDist = t;
-                bestIdx = i;
+            else
+            {
+                // Non-mesh sprites: keep the cheaper sphere-distance test.
+                float ox = sp.x - camX, oy = sp.y - camY, oz = sp.z - camZ;
+                float t = ox*rdx + oy*rdy + oz*rdz;
+                if (t < 0) continue;
+                float px = ox - rdx*t, py = oy - rdy*t, pz = oz - rdz*t;
+                float dist = sqrtf(px*px + py*py + pz*pz);
+                float hitR = 20.0f * sp.scale;
+                if (dist < hitR && t < bestDist) {
+                    bestDist = t;
+                    bestIdx = i;
+                }
             }
         }
         if (bestIdx >= 0) {
-            if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
-                sSprites[sSelectedSprite].selected = false;
-            sSelectedSprite = bestIdx;
-            sSelectedObjType = SelectedObjType::Sprite;
-            sSprites[bestIdx].selected = true;
-            if (sSprites[bestIdx].meshIdx >= 0 && sSprites[bestIdx].meshIdx < (int)sMeshAssets.size())
-                sSelectedMesh = sSprites[bestIdx].meshIdx;
-        } else {
-            if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
-                sSprites[sSelectedSprite].selected = false;
+            if (singlePickCtrl) {
+                // Ctrl+RMB click: toggle that mesh in/out of the multi-selection
+                // without disturbing the others.
+                if (sSprites[bestIdx].selected) {
+                    sSprites[bestIdx].selected = false;
+                    if (sSelectedSprite == bestIdx) {
+                        sSelectedSprite = -1;
+                        for (int i = 0; i < sSpriteCount; i++)
+                            if (sSprites[i].selected) { sSelectedSprite = i; break; }
+                    }
+                } else {
+                    sSprites[bestIdx].selected = true;
+                    sSelectedSprite = bestIdx;
+                    sSelectedObjType = SelectedObjType::Sprite;
+                    if (sSprites[bestIdx].meshIdx >= 0 && sSprites[bestIdx].meshIdx < (int)sMeshAssets.size())
+                        sSelectedMesh = sSprites[bestIdx].meshIdx;
+                }
+            } else {
+                // Plain RMB click: replace selection with just this one.
+                for (int i = 0; i < sSpriteCount; i++) sSprites[i].selected = false;
+                sSelectedSprite = bestIdx;
+                sSelectedObjType = SelectedObjType::Sprite;
+                sSprites[bestIdx].selected = true;
+                if (sSprites[bestIdx].meshIdx >= 0 && sSprites[bestIdx].meshIdx < (int)sMeshAssets.size())
+                    sSelectedMesh = sSprites[bestIdx].meshIdx;
+            }
+        } else if (!singlePickCtrl) {
+            // Click on empty space (no Ctrl): clear selection.
+            for (int i = 0; i < sSpriteCount; i++) sSprites[i].selected = false;
             sSelectedSprite = -1;
         }
     }
@@ -8394,9 +8690,198 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
     s3DViewPos = pos;
     s3DViewSize = ImVec2(vpAreaW, size.y);
 
+    // Ctrl+C / Ctrl+V on the hovered 3D viewport: copy the WHOLE current
+    // selection (multi-select aware), paste creates the same number of
+    // sprites all nudged by the same XZ offset so they sit visibly off
+    // the source. The new instances become the active selection.
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        if (hovered && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false))
+        {
+            s3DSpriteClipboard.clear();
+            for (int i = 0; i < sSpriteCount; i++)
+                if (sSprites[i].selected) s3DSpriteClipboard.push_back(sSprites[i]);
+        }
+        if (hovered && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false)
+            && !s3DSpriteClipboard.empty())
+        {
+            for (int i = 0; i < sSpriteCount; i++) sSprites[i].selected = false;
+            int newPrimary = -1;
+            for (const auto& src : s3DSpriteClipboard) {
+                if (sSpriteCount >= kMaxFloorSprites) break;
+                int dst = sSpriteCount;
+                sSprites[dst] = src;
+                sSprites[dst].selected = true;
+                sSprites[dst].color = kSpriteColors[dst % kNumSpriteColors];
+                sSprites[dst].x += 16.0f;
+                sSprites[dst].z += 16.0f;
+                if (newPrimary < 0) newPrimary = dst;
+                sSpriteCount++;
+            }
+            if (newPrimary >= 0) {
+                sSelectedSprite = newPrimary;
+                sSelectedObjType = SelectedObjType::Sprite;
+                if (sSprites[newPrimary].meshIdx >= 0 && sSprites[newPrimary].meshIdx < (int)sMeshAssets.size())
+                    sSelectedMesh = sSprites[newPrimary].meshIdx;
+                sProjectDirty = true;
+            }
+        }
+    }
+
+    // ---- G grab: Blender-style move of the whole selection ----
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        // Enter grab mode on G when something's selected and no other key is held.
+        if (hovered && !s3DGrabMode
+            && ImGui::IsKeyPressed(ImGuiKey_G, false)
+            && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt)
+        {
+            s3DGrabOrig.clear();
+            for (int i = 0; i < sSpriteCount; i++)
+                if (sSprites[i].selected)
+                    s3DGrabOrig.push_back({ i, sSprites[i].x, sSprites[i].y, sSprites[i].z });
+            if (!s3DGrabOrig.empty()) {
+                s3DGrabMode = true;
+                s3DGrabAxis = 0;
+                s3DGrabStartMouse = mpos;
+            }
+        }
+        if (s3DGrabMode)
+        {
+            auto resetAnchor = [&]() {
+                for (auto& g : s3DGrabOrig) {
+                    sSprites[g.idx].x = g.x;
+                    sSprites[g.idx].y = g.y;
+                    sSprites[g.idx].z = g.z;
+                }
+                s3DGrabStartMouse = mpos;
+            };
+            if (ImGui::IsKeyPressed(ImGuiKey_X, false)) {
+                s3DGrabAxis = (s3DGrabAxis == 'X') ? 0 : 'X'; resetAnchor();
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) {
+                s3DGrabAxis = (s3DGrabAxis == 'Y') ? 0 : 'Y'; resetAnchor();
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
+                s3DGrabAxis = (s3DGrabAxis == 'Z') ? 0 : 'Z'; resetAnchor();
+            }
+            // Pixel-to-world scale tracks orbit distance so motion feels
+            // consistent when zoomed in vs out.
+            float scale = s3DOrbitDist * 0.002f;
+            float dpx = mpos.x - s3DGrabStartMouse.x;
+            float dpy = mpos.y - s3DGrabStartMouse.y;
+            float dx = 0.0f, dy = 0.0f, dz = 0.0f;
+            if (s3DGrabAxis == 'X') {
+                dx = dpx * scale;
+            } else if (s3DGrabAxis == 'Y') {
+                dy = -dpy * scale; // mouse up = +Y
+            } else if (s3DGrabAxis == 'Z') {
+                dz = dpx * scale;
+            } else {
+                // Free: pan in the camera's right/forward plane (world XZ).
+                float yawC = cosf(s3DOrbitYaw), yawS = sinf(s3DOrbitYaw);
+                // camera "right" in world XZ = (cos yaw, 0, -sin yaw)
+                // camera "forward (flat)" in XZ = (sin yaw, 0,  cos yaw)
+                float right_x =  yawC, right_z = -yawS;
+                float fwd_x   =  yawS, fwd_z   =  yawC;
+                dx = ( dpx * right_x + dpy * fwd_x) * scale;
+                dz = ( dpx * right_z + dpy * fwd_z) * scale;
+            }
+            for (auto& g : s3DGrabOrig) {
+                sSprites[g.idx].x = g.x + dx;
+                sSprites[g.idx].y = g.y + dy;
+                sSprites[g.idx].z = g.z + dz;
+            }
+            // Commit on LMB, revert on Escape.
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                s3DGrabMode = false;
+                sProjectDirty = true;
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                for (auto& g : s3DGrabOrig) {
+                    sSprites[g.idx].x = g.x;
+                    sSprites[g.idx].y = g.y;
+                    sSprites[g.idx].z = g.z;
+                }
+                s3DGrabMode = false;
+            }
+        }
+    }
+
+    // ---- R rotate: Blender-style spin of the whole selection ----
+    {
+        ImGuiIO& io = ImGui::GetIO();
+        // Enter rotate mode on R (default axis = Z so R alone spins around Z).
+        if (hovered && !s3DRotMode && !s3DGrabMode
+            && ImGui::IsKeyPressed(ImGuiKey_R, false)
+            && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt)
+        {
+            s3DRotOrig.clear();
+            for (int i = 0; i < sSpriteCount; i++)
+                if (sSprites[i].selected)
+                    s3DRotOrig.push_back({ i, sSprites[i].rotationX, sSprites[i].rotation, sSprites[i].rotationZ });
+            if (!s3DRotOrig.empty()) {
+                s3DRotMode = true;
+                s3DRotAxis = 'Z';
+                s3DRotStartMouse = mpos;
+            }
+        }
+        if (s3DRotMode)
+        {
+            auto resetAnchor = [&]() {
+                for (auto& r : s3DRotOrig) {
+                    sSprites[r.idx].rotationX = r.rotX;
+                    sSprites[r.idx].rotation  = r.rotY;
+                    sSprites[r.idx].rotationZ = r.rotZ;
+                }
+                s3DRotStartMouse = mpos;
+            };
+            if (ImGui::IsKeyPressed(ImGuiKey_X, false)) { s3DRotAxis = 'X'; resetAnchor(); }
+            if (ImGui::IsKeyPressed(ImGuiKey_Y, false)) { s3DRotAxis = 'Y'; resetAnchor(); }
+            if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) { s3DRotAxis = 'Z'; resetAnchor(); }
+
+            // Mouse horizontal motion drives the spin — 1 pixel = 0.5° feels
+            // about right. Each sprite rotates around ITS OWN anchor, not the
+            // group centroid, so a stack of pillars all spin in place.
+            float dpx = mpos.x - s3DRotStartMouse.x;
+            float angleDelta = dpx * 0.5f;
+            for (auto& r : s3DRotOrig) {
+                FloorSprite& sp2 = sSprites[r.idx];
+                if (s3DRotAxis == 'X') sp2.rotationX = r.rotX + angleDelta;
+                else if (s3DRotAxis == 'Y') sp2.rotation  = r.rotY + angleDelta;
+                else                       sp2.rotationZ = r.rotZ + angleDelta;
+            }
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                s3DRotMode = false;
+                sProjectDirty = true;
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                for (auto& r : s3DRotOrig) {
+                    sSprites[r.idx].rotationX = r.rotX;
+                    sSprites[r.idx].rotation  = r.rotY;
+                    sSprites[r.idx].rotationZ = r.rotZ;
+                }
+                s3DRotMode = false;
+            }
+        }
+    }
+
     // Overlay info text
     ImGui::SetCursorPos(ImVec2(8, 8));
-    ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.8f, 0.8f), "LMB: Orbit  |  MMB: Pan  |  Scroll: Zoom  |  RMB: Select");
+    if (s3DGrabMode) {
+        const char* axisLabel =
+            s3DGrabAxis == 'X' ? "X" :
+            s3DGrabAxis == 'Y' ? "Y" :
+            s3DGrabAxis == 'Z' ? "Z" : "Free";
+        ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f),
+            "GRAB %s — X/Y/Z: lock axis  |  LMB: confirm  |  Esc: cancel", axisLabel);
+    } else if (s3DRotMode) {
+        ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.8f, 1.0f),
+            "ROTATE %c — X/Y/Z: lock axis  |  LMB: confirm  |  Esc: cancel", s3DRotAxis);
+    } else {
+        ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.8f, 0.8f),
+            "LMB: Orbit  |  MMB: Pan  |  Scroll: Zoom  |  RMB: Select  |  G: Grab  |  R: Rotate  |  Ctrl+C/V: Copy/Paste");
+    }
 
     ImGui::End();
 
@@ -8730,6 +9215,20 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         }
         ImGui::PopItemWidth();
 
+        if (ImGui::Button("Duplicate##meshObjDup") && sSpriteCount < kMaxFloorSprites)
+        {
+            int src = sSelectedSprite;
+            int dst = sSpriteCount;
+            sSprites[dst] = sSprites[src];
+            sSprites[dst].selected = false;
+            sSprites[dst].color = kSpriteColors[dst % kNumSpriteColors];
+            sSpriteCount++;
+            sSprites[src].selected = false;
+            sSelectedSprite = dst;
+            sSprites[dst].selected = true;
+            sProjectDirty = true;
+        }
+        ImGui::SameLine();
         if (ImGui::Button("Delete##meshObjDel"))
         {
             for (int j = sSelectedSprite; j < sSpriteCount - 1; j++)
@@ -14147,6 +14646,10 @@ void FrameTick(float dt)
         {
             // ---- EDIT MODE: free camera ----
             float moveSpeed = 80.0f * dt;
+            // Hold Shift to sprint — 4x base speed when flying around the
+            // editor preview. Either Shift modifier triggers it.
+            if (ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift))
+                moveSpeed *= 4.0f;
             float rotSpeed  = 2.0f * dt;
 
             if (!sGrabMode && !sScaleMode)
@@ -14257,7 +14760,7 @@ void FrameTick(float dt)
                 if (sGrabAxis == 'X')
                     gsp.x = sGrabOrigX + (dgbaX * cosA - dgbaY * sinA) * lateralScale;
                 else if (sGrabAxis == 'Y')
-                    gsp.y = std::max(0.0f, sGrabOrigY - dgbaY * verticalScale);
+                    gsp.y = sGrabOrigY - dgbaY * verticalScale; // no floor clamp — Y can go negative
                 else if (sGrabAxis == 'Z')
                     gsp.z = sGrabOrigZ + (dgbaX * sinA + dgbaY * cosA) * lateralScale;
                 else
@@ -15130,6 +15633,11 @@ void FrameTick(float dt)
 
             // --- Apply results ---
             float moveSpeed = (sScriptMoveSpeed > 0.0f ? sScriptMoveSpeed : sCamObj.walkSpeed) * dt;
+            // Hold Shift to sprint the free camera (only applies in no-player
+            // fallback below — when a player sprite is present, movement comes
+            // from script and Shift is a no-op here).
+            if (ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift))
+                moveSpeed *= 4.0f;
 
             int playerIdx = -1;
             for (int i = 0; i < sSpriteCount; i++)
@@ -15573,9 +16081,8 @@ void FrameTick(float dt)
             }
         }
 
-        // Clamp camera to generous bounds (allow exploring beyond the map edge)
-        sCamera.x = std::clamp(sCamera.x, -kWorldHalf * 4.0f, kWorldHalf * 4.0f);
-        sCamera.z = std::clamp(sCamera.z, -kWorldHalf * 4.0f, kWorldHalf * 4.0f);
+        // (Previously clamped to ±kWorldHalf * 4 — removed so users can fly
+        // the preview camera arbitrarily far without hitting an invisible wall.)
     }
 
     // Player position is freely editable — only set on creation, not per-frame
@@ -17488,6 +17995,7 @@ void FrameTick(float dt)
                 case VsNodeType::SetVelocityZ:  desc = "Adds a world-Z velocity to the player every frame, independent of input. Pair with Velocity Falloff to decay it."; break;
                 case VsNodeType::VelocityFalloff: desc = "Linearly decays current vx/vz to 0 over N frames. Set after Set Velocity X/Z to define how quickly the boost/push fades."; break;
                 case VsNodeType::BoostForward:   desc = "Pushes the player along their current view direction at the given speed. Runtime decomposes into world vx/vz using sin/cos(viewAngle). Pair with Velocity Falloff to decay."; break;
+                case VsNodeType::HaltMomentum:   desc = "Zeros all player velocity (vx, vz, vy, pending boost, falloff). Use after respawn so leftover boost-pad momentum doesn't carry over."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -17732,6 +18240,7 @@ void FrameTick(float dt)
                         case VsNodeType::SetVelocityZ:  return "_set_vel_z";
                         case VsNodeType::VelocityFalloff: return "_velocity_falloff";
                         case VsNodeType::BoostForward:  return "_boost_forward";
+                        case VsNodeType::HaltMomentum:  return "_halt_momentum";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -18604,6 +19113,23 @@ void FrameTick(float dt)
                         "    // Pair with VelocityFalloff for a smooth fade out.",
                         fmtFloat(infoNode.id, 0, "<speed>"));
                     setActionFunc(infoNode, "_boost_forward", bodyBuf);
+                    break;
+                }
+                case VsNodeType::HaltMomentum: {
+                    editorCode =
+                        "// Stop all player motion. Use on respawn so leftover boost\n"
+                        "// pad velocity doesn't carry over and slide you off.";
+                    setActionFunc(infoNode, "_halt_momentum",
+                        "    afn_player_vx_world  = 0;\n"
+                        "    afn_player_vz_world  = 0;\n"
+                        "    afn_pending_boost_fwd = 0;\n"
+                        "    afn_velocity_falloff = 0;\n"
+                        "    player_vy            = 0;\n"
+                        "    // --- Runtime (main.c, Mode 4) ---\n"
+                        "    // No further consumption — clearing these stops the\n"
+                        "    // per-frame `player_x += vx; player_z += vz;` step\n"
+                        "    // and cancels any in-progress VelocityFalloff lerp.\n"
+                        "    // player_vy=0 also halts mid-air rise/fall.");
                     break;
                 }
                 case VsNodeType::StopSound:
@@ -21101,6 +21627,7 @@ void FrameTick(float dt)
                     case VsNodeType::SetVelocityZ:  suffix = "_set_vel_z"; break;
                     case VsNodeType::VelocityFalloff: suffix = "_velocity_falloff"; break;
                     case VsNodeType::BoostForward:  suffix = "_boost_forward"; break;
+                    case VsNodeType::HaltMomentum:  suffix = "_halt_momentum"; break;
                     case VsNodeType::StopSound:     suffix = "_stop_sound"; break;
                     case VsNodeType::AddMath:       suffix = "_add"; break;
                     case VsNodeType::SubtractMath:  suffix = "_sub"; break;
@@ -21643,6 +22170,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetVelocityZ].name)) addNodeAt(VsNodeType::SetVelocityZ);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::VelocityFalloff].name)) addNodeAt(VsNodeType::VelocityFalloff);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::BoostForward].name)) addNodeAt(VsNodeType::BoostForward);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HaltMomentum].name)) addNodeAt(VsNodeType::HaltMomentum);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetPlayerHeight].name)) addNodeAt(VsNodeType::SetPlayerHeight);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopSound].name)) addNodeAt(VsNodeType::StopSound);
                     ImGui::Separator();
@@ -27466,7 +27994,10 @@ void Render3DViewport()
     glLoadIdentity();
     float aspect = (float)vpW / (float)vpH;
     float fovY = 45.0f;
-    float nearP = 1.0f, farP = 3000.0f;
+    // Far plane pushed way out so tall buildings / distant geometry don't
+    // get sliced off in the 3D tab preview. Near stays at 1.0 so the
+    // depth-buffer precision near the camera is still usable.
+    float nearP = 1.0f, farP = 1000000.0f;
     float top = nearP * tanf(fovY * 3.14159265f / 360.0f);
     float right = top * aspect;
     glFrustum(-right, right, -top, top, nearP, farP);
@@ -27638,21 +28169,48 @@ void Render3DViewport()
 
             if (fs.selected)
             {
-                glColor3f(1, 1, 1);
+                // Thicker, animated-rainbow selection AABB. Hue cycles over
+                // time and around the box so the outline reads as obviously
+                // "this is selected" even on busy scenes.
                 float x0 = ma.boundsMin[0], y0 = ma.boundsMin[1], z0 = ma.boundsMin[2];
                 float x1 = ma.boundsMax[0], y1 = ma.boundsMax[1], z1 = ma.boundsMax[2];
+                float t = (float)ImGui::GetTime();
+                auto hsv = [](float h, float& r, float& g, float& b) {
+                    h = h - floorf(h);              // wrap to [0,1)
+                    float k = h * 6.0f;
+                    int   s = (int)k;
+                    float f = k - s;
+                    switch (s % 6) {
+                        case 0: r=1;     g=f;     b=0;     break;
+                        case 1: r=1-f;   g=1;     b=0;     break;
+                        case 2: r=0;     g=1;     b=f;     break;
+                        case 3: r=0;     g=1-f;   b=1;     break;
+                        case 4: r=f;     g=0;     b=1;     break;
+                        default:r=1;     g=0;     b=1-f;   break;
+                    }
+                };
+                glLineWidth(4.0f);
+                int vi = 0;
+                auto rv = [&](float vx, float vy, float vz) {
+                    float r, g, b;
+                    hsv(t * 0.4f + vi * 0.06f, r, g, b);
+                    vi++;
+                    glColor3f(r, g, b);
+                    glVertex3f(vx, vy, vz);
+                };
                 glBegin(GL_LINE_LOOP);
-                glVertex3f(x0,y0,z0); glVertex3f(x1,y0,z0); glVertex3f(x1,y0,z1); glVertex3f(x0,y0,z1);
+                rv(x0,y0,z0); rv(x1,y0,z0); rv(x1,y0,z1); rv(x0,y0,z1);
                 glEnd();
                 glBegin(GL_LINE_LOOP);
-                glVertex3f(x0,y1,z0); glVertex3f(x1,y1,z0); glVertex3f(x1,y1,z1); glVertex3f(x0,y1,z1);
+                rv(x0,y1,z0); rv(x1,y1,z0); rv(x1,y1,z1); rv(x0,y1,z1);
                 glEnd();
                 glBegin(GL_LINES);
-                glVertex3f(x0,y0,z0); glVertex3f(x0,y1,z0);
-                glVertex3f(x1,y0,z0); glVertex3f(x1,y1,z0);
-                glVertex3f(x1,y0,z1); glVertex3f(x1,y1,z1);
-                glVertex3f(x0,y0,z1); glVertex3f(x0,y1,z1);
+                rv(x0,y0,z0); rv(x0,y1,z0);
+                rv(x1,y0,z0); rv(x1,y1,z0);
+                rv(x1,y0,z1); rv(x1,y1,z1);
+                rv(x0,y0,z1); rv(x0,y1,z1);
                 glEnd();
+                glLineWidth(1.0f);
             }
             glDisable(GL_CULL_FACE);
             glPopMatrix();

@@ -2502,6 +2502,14 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "    afn_pending_boost_fwd = " << (int)(v * 256.0f) << ";\n";
                 break;
             }
+            case GBAScriptNodeType::HaltMomentum: {
+                f << "    afn_player_vx_world = 0;\n";
+                f << "    afn_player_vz_world = 0;\n";
+                f << "    afn_pending_boost_fwd = 0;\n";
+                f << "    afn_velocity_falloff = 0;\n";
+                f << "    player_vy = 0;\n";
+                break;
+            }
             case GBAScriptNodeType::SetPlayerHeight: {
                 auto* d = findDataIn(a->id, 0);
                 float v = d ? resolveFloat(d) : 1.0f;

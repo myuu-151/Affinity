@@ -2665,6 +2665,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_pending_boost_fwd = " << velFixed << ";\n";
                     break;
                 }
+                case GBAScriptNodeType::HaltMomentum: {
+                    f << "    afn_player_vx_world = 0;\n";
+                    f << "    afn_player_vz_world = 0;\n";
+                    f << "    afn_pending_boost_fwd = 0;\n";
+                    f << "    afn_velocity_falloff = 0;\n";
+                    f << "    player_vy = 0;\n";
+                    break;
+                }
                 case GBAScriptNodeType::PlaySound: {
                     auto* sndData = findDataIn(action->id, 0);
                     int sndId = sndData ? resolveInt(sndData) : 0;
@@ -4222,6 +4230,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* vData = bpFindDataIn(action->id, 0);
                     std::string vel = vData ? bpResolveFloat(vData) : "0";
                     f << "    afn_pending_boost_fwd = " << vel << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::HaltMomentum: {
+                    f << "    afn_player_vx_world = 0;\n";
+                    f << "    afn_player_vz_world = 0;\n";
+                    f << "    afn_pending_boost_fwd = 0;\n";
+                    f << "    afn_velocity_falloff = 0;\n";
+                    f << "    player_vy = 0;\n";
                     break;
                 }
                 case GBAScriptNodeType::PlaySound: {
