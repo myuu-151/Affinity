@@ -191,18 +191,30 @@ void afn_sprite_update(void)
         if (dirCount > 1 && !fStatic) {
 #if defined(AFN_PLAYER_IDX) && AFN_PLAYER_IDX >= 0
             if (si == AFN_PLAYER_IDX) {
-                // Facing comes purely from movement direction (player_move_angle,
-                // set by MovePlayer nodes via afn_input_fwd/right). Idle adds the
-                // 2x orbit multiplier so the sprite rotates with the camera.
-                // NOTE: a hardcoded KEY_L/KEY_R "lean" shift used to live here for
-                // the orbit-camera scheme, but it broke remapped controls (e.g.
-                // L mapped to Move Player(Up) showed NW instead of N). Removed —
-                // facing is now fully node-driven.
+                // Facing comes from movement direction (player_move_angle, set
+                // by MovePlayer via afn_input_fwd/right). Idle applies the 2x
+                // orbit so the sprite rotates with the camera; moving uses pure
+                // input.
                 uint16_t sprAngle = player_moving
                     ? player_move_angle
                     : (uint16_t)(player_move_angle - (orbit_angle << 1));
                 int rawIdx = ((sprAngle + 0xC000 + 4096) >> 13) & 7;
                 dir = (8 - rawIdx) & 7;
+                // Lean into a turn: while moving, if the camera is orbiting this
+                // frame, shift the facing one step toward the turn (NW/NE). This
+                // is driven by the actual orbit change (sign of the per-frame
+                // orbit_angle delta), NOT a hardcoded L/R key — so whatever key
+                // is wired to Orbit Camera produces the lean. OrbitCamera(Left)
+                // increments orbit_angle (+delta → lean NW); Right decrements
+                // (-delta → lean NE). prevOrbit updates every frame so the first
+                // moving frame after idle never sees a stale (huge) delta.
+                static uint16_t s_leanPrevOrbit = 0;
+                int16_t orbitDelta = (int16_t)(orbit_angle - s_leanPrevOrbit);
+                s_leanPrevOrbit = orbit_angle;
+                if (player_moving) {
+                    if (orbitDelta > 32)       dir = (dir - 1 + 8) & 7;  // orbiting left  → NW
+                    else if (orbitDelta < -32) dir = (dir + 1) & 7;      // orbiting right → NE
+                }
             } else
 #endif
             {

@@ -432,10 +432,7 @@ static void update_camera(void)
     } else if (s_wasMoving) {
         // On stop: bake current orbit into player_move_angle so the idle
         // formula `player_move_angle - 2*orbit_angle` gives the same dir
-        // the moving picker just gave (`player_move_angle` alone).
-        // Otherwise releasing the DPAD at a non-zero orbit causes a
-        // visible "snap" as the sprite jumps to the orbit-affected idle
-        // dir. Matches the picker's 2x multiplier.
+        // the moving picker just gave. Prevents a snap on key release.
         player_move_angle = player_move_angle + (orbit_angle << 1);
     }
     s_wasMoving = player_moving;
