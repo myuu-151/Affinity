@@ -588,7 +588,24 @@ static void update_camera(void)
             }
 #endif
             afn_grind_dx = rdx; afn_grind_dz = rdz;
-            afn_grind_vel = (afn_move_speed > 0 ? afn_move_speed : AFN_WALK_SPEED);
+            // Seed the grind speed from the player's ACTUAL momentum entering the
+            // rail (input movement + any boost-pad world velocity), projected
+            // onto the rail axis — so sprinting / boosting onto a rail carries
+            // that speed instead of snapping to a flat default. rdx/rdz are
+            // 256-normalized, so the >>8 yields displacement units (same as
+            // afn_grind_vel). Fold the world velocity in and clear it so it
+            // doesn't keep adding drift off the rail while grinding.
+            {
+                int tvx = mvX + afn_player_vx_world;
+                int tvz = mvZ + afn_player_vz_world;
+                int mom = (tvx * rdx + tvz * rdz) >> 8;
+                if (mom < 0) mom = -mom;
+                afn_grind_vel = mom;
+                if (afn_grind_vel < (AFN_WALK_SPEED >> 3))
+                    afn_grind_vel = (AFN_WALK_SPEED >> 3);
+                afn_player_vx_world = 0; afn_player_vz_world = 0;
+                afn_velocity_falloff = 0;
+            }
             s_grindPrevFloorY = floorY;
             player_y = floorY; player_vy = 0; player_on_ground = 1;
         } else {
