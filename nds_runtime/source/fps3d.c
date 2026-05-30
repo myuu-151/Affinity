@@ -546,6 +546,14 @@ static void update_camera(void)
             }
         }
         static int s_grindPrevFloorY = 0;
+        // Centerline anchor (captured at engage) + a continuous vertical
+        // tracker. With wall collision off during a grind, sideways drift would
+        // walk the player off a thin pipe, so each frame we remove perpendicular
+        // offset past a deadzone. And the player's height is moved toward the
+        // sampled floorY at a CAPPED rate (not snapped) so faceted floor samples
+        // descend as a steady glide instead of bobbing "down stairs".
+        static int s_grindOriginX = 0, s_grindOriginZ = 0;
+        static int s_grindY = 0;
 
         if (afn_grind_vel != 0) {
             // --- Currently grinding ---
@@ -577,7 +585,42 @@ static void update_camera(void)
                 if (afn_grind_vel < (AFN_WALK_SPEED >> 3)) afn_grind_vel = (AFN_WALK_SPEED >> 3);
                 // Cap so a long steep rail doesn't fling you uncontrollably.
                 if (afn_grind_vel > AFN_SPRINT_SPEED * 3) afn_grind_vel = AFN_SPRINT_SPEED * 3;
-                player_y = floorY; player_vy = 0; player_on_ground = 1;
+                // Vertical follow. The bob isn't temporal noise — it's the pipe's
+                // faceted top: collide_floor returns the HIGHEST face under the
+                // player, and as you slide, which overlapping facet wins flips,
+                // so a single sample steps up/down. Smooth it SPATIALLY instead of
+                // in time: sample the rail height a few px ahead and behind along
+                // the axis and average. That low-passes the facet steps at the
+                // source, so we can set player_y directly — no temporal lag means
+                // no float and no bob. dx/dz are 256-normalized; <<2 ≈ 4px in 16.8.
+                {
+                    int offx = afn_grind_dx << 2;
+                    int offz = afn_grind_dz << 2;
+                    int probeBias = afn_player_height + s_groundSnapTol;
+                    int sumY = floorY, nS = 1, fy;
+                    if (afn_collide_floor(player_x + offx, player_z + offz, player_y + probeBias, &fy)
+                        && afn_floor_sprite == afn_grind_rail) { sumY += fy; nS++; }
+                    if (afn_collide_floor(player_x - offx, player_z - offz, player_y + probeBias, &fy)
+                        && afn_floor_sprite == afn_grind_rail) { sumY += fy; nS++; }
+                    s_grindY = sumY / nS;
+                    player_y = s_grindY;
+                }
+                player_vy = 0; player_on_ground = 1;
+                // Centerline: only correct REAL perpendicular drift (past a ~3px
+                // deadzone), not the sub-pixel jitter of the projection itself —
+                // re-deriving X/Z exactly every frame wobbled ±1px and flipped
+                // which pipe facet floorY sampled, which also caused bobbing.
+                {
+                    int relx = player_x - s_grindOriginX;
+                    int relz = player_z - s_grindOriginZ;
+                    int along = (relx * afn_grind_dx + relz * afn_grind_dz) >> 8;
+                    int perpx = relx - ((afn_grind_dx * along) >> 8);
+                    int perpz = relz - ((afn_grind_dz * along) >> 8);
+                    if (perpx * perpx + perpz * perpz > 768 * 768) {
+                        player_x -= perpx;
+                        player_z -= perpz;
+                    }
+                }
             }
         } else if (afn_grinding && onRail && player_vy <= 0) {
             // --- Engage: StartGrind fired AND we're standing on the rail ---
@@ -630,6 +673,10 @@ static void update_camera(void)
                 afn_velocity_falloff = 0;
             }
             s_grindPrevFloorY = floorY;
+            // Anchor centerline + seed the vertical tracker at the mount height.
+            s_grindOriginX = player_x;
+            s_grindOriginZ = player_z;
+            s_grindY = floorY;
             player_y = floorY; player_vy = 0; player_on_ground = 1;
         } else {
             // --- Not grinding: normal floor resolution ---
@@ -647,7 +694,10 @@ static void update_camera(void)
             if (!onRail) afn_grinding = 0;
         }
     }
-    afn_collide_walls(&player_x, &player_z, player_y);
+    // Skip wall collision WHILE grinding — a thin pipe's own side walls would
+    // shove the player off the rail. The grind already locks XZ to the axis.
+    if (afn_grind_vel == 0)
+        afn_collide_walls(&player_x, &player_z, player_y);
 #else
     {
         // No mesh collision data — fall back to flat ground at player init Y.
