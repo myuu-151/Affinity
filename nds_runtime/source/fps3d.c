@@ -528,6 +528,23 @@ static void update_camera(void)
         // sprite (afn_grind_rail), captured by StartGrind. This is what makes
         // the grind follow JUST the pipe and end the instant you leave it.
         int onRail = (onFloor && afn_grind_rail >= 0 && afn_floor_sprite == afn_grind_rail);
+        // Slope fix: collide_floor only accepts a floor within afn_player_height
+        // (~12px) of the player's feet, so a tilted rail's surface — which moves
+        // up or down by a whole horizontal grind step each frame — falls outside
+        // that window and the grind detaches (only a flat beam stayed in range).
+        // While grinding, re-query with the player Y biased UP by the horizontal
+        // step (+margin) so an uphill OR downhill rail surface stays in range.
+        // Gated on the rail sprite, so a non-rail floor that sneaks into the
+        // wider window won't be mistaken for the rail.
+        if (!onRail && (afn_grind_vel != 0 || afn_grinding) && afn_grind_rail >= 0) {
+            int stepMag = (mvX < 0 ? -mvX : mvX) + (mvZ < 0 ? -mvZ : mvZ);
+            int probeY = player_y + stepMag + stepMag / 2 + afn_player_height;
+            int fY2;
+            if (afn_collide_floor(player_x, player_z, probeY, &fY2) &&
+                afn_floor_sprite == afn_grind_rail) {
+                onFloor = 1; floorY = fY2; onRail = 1;
+            }
+        }
         static int s_grindPrevFloorY = 0;
 
         if (afn_grind_vel != 0) {
@@ -548,12 +565,18 @@ static void update_camera(void)
                 if (afn_velocity_falloff <= 0) afn_velocity_falloff = 30;
                 afn_grind_vel = 0; afn_grinding = 0;
             } else {
-                // Stick to the rail; slope drives momentum (downhill speeds up).
+                // Stick to the rail; slope drives momentum. slope > 0 means the
+                // floor dropped this frame (going DOWNHILL) → accelerate harder;
+                // slope < 0 is uphill → bleed speed. Asymmetric so a downhill
+                // run visibly ramps up like a Sonic rail.
                 int slope = s_grindPrevFloorY - floorY;
                 s_grindPrevFloorY = floorY;
-                afn_grind_vel += slope >> 2;          // slope acceleration (tunable)
-                afn_grind_vel -= afn_grind_vel >> 8;  // minimal friction (slippery)
+                if (slope > 0) afn_grind_vel += slope;       // downhill: full slope gain
+                else           afn_grind_vel += slope >> 1;  // uphill: lose half the climb
+                afn_grind_vel -= afn_grind_vel >> 9;         // tiny friction (very slippery)
                 if (afn_grind_vel < (AFN_WALK_SPEED >> 3)) afn_grind_vel = (AFN_WALK_SPEED >> 3);
+                // Cap so a long steep rail doesn't fling you uncontrollably.
+                if (afn_grind_vel > AFN_SPRINT_SPEED * 3) afn_grind_vel = AFN_SPRINT_SPEED * 3;
                 player_y = floorY; player_vy = 0; player_on_ground = 1;
             }
         } else if (afn_grinding && onRail && player_vy <= 0) {
