@@ -798,11 +798,20 @@ void afn_fps3d_init(void)
     bgSetPriority(m7_bg, 3);
     load_floor();
 #endif
-#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-    load_mesh_textures();
-#endif
+    // Load the sky panorama FIRST. It's a single 256x256 texture (64KB) and
+    // needs one CONTIGUOUS 64KB block in texture VRAM bank A (128KB total).
+    // The mesh textures are small 4bpp tiles (~46KB total); if they load first
+    // they scatter across bank A and leave no contiguous 64KB hole, so the sky
+    // upload fails silently (glGenTextures succeeds but glTexImage2D can't
+    // place it) and the sky vanishes once a scene has enough meshes. Grabbing
+    // the big block first guarantees it; the small mesh textures then fill the
+    // remaining ~64KB. (Bank B is the Mode-7 floor, banks C/D fail as 3D
+    // texture banks, so we can't just add VRAM — order is what matters here.)
 #if defined(AFN_HAS_SKY) && AFN_HAS_SKY
     load_sky_texture();
+#endif
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+    load_mesh_textures();
 #endif
 
     cam_h     = AFN_CAM_H;
