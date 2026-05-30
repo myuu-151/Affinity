@@ -9264,6 +9264,93 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         }
         ImGui::PopItemWidth();
 
+        // ---- Grind Rail ----
+        if (sp.type == SpriteType::Mesh) {
+            ImGui::Separator();
+            if (ImGui::Checkbox("Grind Rail##m3d", &sp.isGrindRail)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "Make this mesh a grindable rail. Generate a centerline path\n"
+                "the player slides along (exact, follows curves/thin pipes).");
+            if (sp.isGrindRail) {
+                ImGui::Text("Path points: %d", sp.railPointCount);
+                if (ImGui::Button("Generate From Mesh##railgen") &&
+                    sp.meshIdx >= 0 && sp.meshIdx < (int)sMeshAssets.size())
+                {
+                    // Build the rail centerline by greedy-walking the mesh's own
+                    // verts in WORLD space (scale + Y/X/Z rotation + translate),
+                    // same as the renderer. Start at the far end along the longest
+                    // axis, step forward, take the centroid of nearby verts ahead,
+                    // re-aim each step so the path bends through turns. Float math
+                    // here is reliable; the runtime just follows these points.
+                    const MeshAsset& ma = sMeshAssets[sp.meshIdx];
+                    float ry = sp.rotation   * 3.14159265f / 180.0f;
+                    float rx = sp.rotationX  * 3.14159265f / 180.0f;
+                    float rz = sp.rotationZ  * 3.14159265f / 180.0f;
+                    float cyr=cosf(ry), syr=sinf(ry), cxr=cosf(rx), sxr=sinf(rx), czr=cosf(rz), szr=sinf(rz);
+                    auto xform = [&](float lx, float ly, float lz, float& ox, float& oy, float& oz){
+                        lx*=sp.scale; ly*=sp.scale; lz*=sp.scale;
+                        // Y rotation
+                        float x1 =  lx*cyr + lz*syr, y1 = ly, z1 = -lx*syr + lz*cyr;
+                        // X rotation
+                        float x2 = x1, y2 = y1*cxr - z1*sxr, z2 = y1*sxr + z1*cxr;
+                        // Z rotation
+                        float x3 = x2*czr - y2*szr, y3 = x2*szr + y2*czr, z3 = z2;
+                        ox = x3 + sp.x; oy = y3 + sp.y; oz = z3 + sp.z;
+                    };
+                    int nv = (int)ma.vertices.size();
+                    if (nv >= 2) {
+                        // World-space verts.
+                        static std::vector<float> wx, wy, wz; wx.clear(); wy.clear(); wz.clear();
+                        wx.reserve(nv); wy.reserve(nv); wz.reserve(nv);
+                        float mnx=1e30f,mxx=-1e30f,mnz=1e30f,mxz=-1e30f;
+                        float ccx=0,ccz=0;
+                        for (int v=0; v<nv; v++) {
+                            float ox,oy,oz; xform(ma.vertices[v].px, ma.vertices[v].py, ma.vertices[v].pz, ox,oy,oz);
+                            wx.push_back(ox); wy.push_back(oy); wz.push_back(oz);
+                            if(ox<mnx)mnx=ox; if(ox>mxx)mxx=ox; if(oz<mnz)mnz=oz; if(oz>mxz)mxz=oz;
+                            ccx+=ox; ccz+=oz;
+                        }
+                        ccx/=nv; ccz/=nv;
+                        bool domX = (mxx-mnx) >= (mxz-mnz);
+                        // Start = vert minimizing the dominant axis.
+                        int si0=0; float bk=1e30f;
+                        for (int v=0; v<nv; v++){ float k = domX?wx[v]:wz[v]; if(k<bk){bk=k;si0=v;} }
+                        float curx=wx[si0], cury=wy[si0], curz=wz[si0];
+                        float dirx=ccx-curx, dirz=ccz-curz;
+                        float dl=sqrtf(dirx*dirx+dirz*dirz); if(dl<0.001f)dl=1; dirx/=dl; dirz/=dl;
+                        float diag = sqrtf((mxx-mnx)*(mxx-mnx)+(mxz-mnz)*(mxz-mnz));
+                        float STEP = diag/40.0f; if(STEP<1.0f)STEP=1.0f;
+                        float R = STEP*1.8f, R2=R*R;
+                        sp.railPointCount=0;
+                        { auto& _rp = sp.railPath[sp.railPointCount++]; _rp.x = curx; _rp.y = cury; _rp.z = curz; }
+                        for (int it=0; it<FloorSprite::kMaxRailPoints-1; it++) {
+                            float tx=curx+dirx*STEP, tz=curz+dirz*STEP;
+                            float sx2=0,sy2=0,sz2=0; int n2=0;
+                            for (int v=0; v<nv; v++){
+                                float rxd=wx[v]-tx, rzd=wz[v]-tz;
+                                if(rxd*rxd+rzd*rzd>R2) continue;
+                                float ahead=(wx[v]-curx)*dirx+(wz[v]-curz)*dirz;
+                                if(ahead<=0) continue;
+                                sx2+=wx[v]; sy2+=wy[v]; sz2+=wz[v]; n2++;
+                            }
+                            if(n2==0) break;
+                            float nx=sx2/n2, ny=sy2/n2, nz=sz2/n2;
+                            float ndx=nx-curx, ndz=nz-curz;
+                            float nl=sqrtf(ndx*ndx+ndz*ndz);
+                            if(nl<STEP*0.25f) break;
+                            dirx=ndx/nl; dirz=ndz/nl;
+                            curx=nx; cury=ny; curz=nz;
+                            { auto& _rp = sp.railPath[sp.railPointCount++]; _rp.x = curx; _rp.y = cury; _rp.z = curz; }
+                        }
+                        sProjectDirty = true;
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Clear##railclr")) { sp.railPointCount = 0; sProjectDirty = true; }
+            }
+            ImGui::Separator();
+        }
+
         if (ImGui::Button("Duplicate##meshObjDup") && sSpriteCount < kMaxFloorSprites)
         {
             int src = sSelectedSprite;
