@@ -546,14 +546,6 @@ static void update_camera(void)
             }
         }
         static int s_grindPrevFloorY = 0;
-        // Centerline anchor (captured at engage) + a continuous vertical
-        // tracker. With wall collision off during a grind, sideways drift would
-        // walk the player off a thin pipe, so each frame we remove perpendicular
-        // offset past a deadzone. And the player's height is moved toward the
-        // sampled floorY at a CAPPED rate (not snapped) so faceted floor samples
-        // descend as a steady glide instead of bobbing "down stairs".
-        static int s_grindOriginX = 0, s_grindOriginZ = 0;
-        static int s_grindY = 0;
 
         if (afn_grind_vel != 0) {
             // --- Currently grinding ---
@@ -585,42 +577,75 @@ static void update_camera(void)
                 if (afn_grind_vel < (AFN_WALK_SPEED >> 3)) afn_grind_vel = (AFN_WALK_SPEED >> 3);
                 // Cap so a long steep rail doesn't fling you uncontrollably.
                 if (afn_grind_vel > AFN_SPRINT_SPEED * 3) afn_grind_vel = AFN_SPRINT_SPEED * 3;
-                // Vertical follow. The bob isn't temporal noise — it's the pipe's
-                // faceted top: collide_floor returns the HIGHEST face under the
-                // player, and as you slide, which overlapping facet wins flips,
-                // so a single sample steps up/down. Smooth it SPATIALLY instead of
-                // in time: sample the rail height a few px ahead and behind along
-                // the axis and average. That low-passes the facet steps at the
-                // source, so we can set player_y directly — no temporal lag means
-                // no float and no bob. dx/dz are 256-normalized; <<2 ≈ 4px in 16.8.
+
+                // --- Re-center between rail edges + steer to follow the curve ---
+                // The grind heading is frozen at entry, so on a CURVED rail going
+                // straight walks you off the side — that's why a long-turn rail
+                // drops you immediately. Fix both every frame by probing the rail
+                // surface itself:
+                //   1. Lateral re-center: scan perpendicular to the heading, find
+                //      how far the rail extends each way, snap to the midpoint.
+                //      This ALONE makes falling off the side impossible — you're
+                //      always pinned to the rail's middle, curve or not.
+                //   2. Steer: re-center a probe ~16px ahead; the vector from the
+                //      player to that ahead-center is the rail's local tangent.
+                //      Adopt it as the new heading so we round the bend.
+                // afn_collide_floor sets afn_floor_sprite as a side effect; the
+                // final height sample below is at the player center, so it leaves
+                // afn_floor_sprite correctly pointing at the rail for next frame.
                 {
-                    int offx = afn_grind_dx << 2;
-                    int offz = afn_grind_dz << 2;
-                    int probeBias = afn_player_height + s_groundSnapTol;
-                    int sumY = floorY, nS = 1, fy;
-                    if (afn_collide_floor(player_x + offx, player_z + offz, player_y + probeBias, &fy)
-                        && afn_floor_sprite == afn_grind_rail) { sumY += fy; nS++; }
-                    if (afn_collide_floor(player_x - offx, player_z - offz, player_y + probeBias, &fy)
-                        && afn_floor_sprite == afn_grind_rail) { sumY += fy; nS++; }
-                    s_grindY = sumY / nS;
-                    player_y = s_grindY;
-                }
-                player_vy = 0; player_on_ground = 1;
-                // Centerline: only correct REAL perpendicular drift (past a ~3px
-                // deadzone), not the sub-pixel jitter of the projection itself —
-                // re-deriving X/Z exactly every frame wobbled ±1px and flipped
-                // which pipe facet floorY sampled, which also caused bobbing.
-                {
-                    int relx = player_x - s_grindOriginX;
-                    int relz = player_z - s_grindOriginZ;
-                    int along = (relx * afn_grind_dx + relz * afn_grind_dz) >> 8;
-                    int perpx = relx - ((afn_grind_dx * along) >> 8);
-                    int perpz = relz - ((afn_grind_dz * along) >> 8);
-                    if (perpx * perpx + perpz * perpz > 768 * 768) {
-                        player_x -= perpx;
-                        player_z -= perpz;
+                    int probeBias = afn_player_height + 4096;   // search well above feet
+                    int perpx = -afn_grind_dz, perpz = afn_grind_dx; // 256-normalized
+                    int rfy;
+                    const int STEP = 512, MAXW = 20 * 256;       // 2px steps, 20px half-width
+                    // Helper inline: find rail-center offset (in +perp units) at (cx,cz).
+                    #define GRIND_CENTER_OFF(cx, cz, outOff) do {                       \
+                        int mp = 0, mn = 0;                                              \
+                        for (int s = STEP; s <= MAXW; s += STEP) {                       \
+                            int tx = (cx) + ((perpx * s) >> 8);                          \
+                            int tz = (cz) + ((perpz * s) >> 8);                          \
+                            if (afn_collide_floor(tx, tz, player_y + probeBias, &rfy)    \
+                                && afn_floor_sprite == afn_grind_rail) mp = s; else break;\
+                        }                                                                \
+                        for (int s = STEP; s <= MAXW; s += STEP) {                       \
+                            int tx = (cx) - ((perpx * s) >> 8);                          \
+                            int tz = (cz) - ((perpz * s) >> 8);                          \
+                            if (afn_collide_floor(tx, tz, player_y + probeBias, &rfy)    \
+                                && afn_floor_sprite == afn_grind_rail) mn = s; else break;\
+                        }                                                                \
+                        (outOff) = (mp - mn) / 2;                                        \
+                    } while (0)
+
+                    // 1. Lateral re-center at the player.
+                    int offHere;
+                    GRIND_CENTER_OFF(player_x, player_z, offHere);
+                    player_x += (perpx * offHere) >> 8;
+                    player_z += (perpz * offHere) >> 8;
+
+                    // 2. Steer toward the rail center ~16px ahead.
+                    int ahead = 16 * 256;
+                    int acx = player_x + ((afn_grind_dx * ahead) >> 8);
+                    int acz = player_z + ((afn_grind_dz * ahead) >> 8);
+                    int offAhead;
+                    GRIND_CENTER_OFF(acx, acz, offAhead);
+                    acx += (perpx * offAhead) >> 8;
+                    acz += (perpz * offAhead) >> 8;
+                    int ndx = acx - player_x, ndz = acz - player_z;
+                    int nlen = afn_isqrt(ndx * ndx + ndz * ndz);
+                    if (nlen > 0) {
+                        afn_grind_dx = (ndx * 256) / nlen;
+                        afn_grind_dz = (ndz * 256) / nlen;
                     }
+                    #undef GRIND_CENTER_OFF
+
+                    // Height: sample at the centered position. The tube-top center
+                    // is the consistent crest, so this is far steadier than an
+                    // off-center read. Leaves afn_floor_sprite = rail for next frame.
+                    if (afn_collide_floor(player_x, player_z, player_y + probeBias, &rfy)
+                        && afn_floor_sprite == afn_grind_rail)
+                        floorY = rfy;
                 }
+                player_y = floorY; player_vy = 0; player_on_ground = 1;
             }
         } else if (afn_grinding && onRail && player_vy <= 0) {
             // --- Engage: StartGrind fired AND we're standing on the rail ---
@@ -673,10 +698,9 @@ static void update_camera(void)
                 afn_velocity_falloff = 0;
             }
             s_grindPrevFloorY = floorY;
-            // Anchor centerline + seed the vertical tracker at the mount height.
-            s_grindOriginX = player_x;
-            s_grindOriginZ = player_z;
-            s_grindY = floorY;
+            // Initial heading is the rail axis (rdx/rdz, set above). From here the
+            // grind frames re-center + steer off the rail surface each frame, so
+            // no analytic anchor is needed — the curve is followed live.
             player_y = floorY; player_vy = 0; player_on_ground = 1;
         } else {
             // --- Not grinding: normal floor resolution ---
