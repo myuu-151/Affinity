@@ -14,6 +14,12 @@ uint16_t cam_angle;
 int g_cosf, g_sinf;
 
 int player_x, player_z, player_y;
+// Render-smoothed player position. Physics (player_x/y/z) stays exactly on the
+// rail for collision + camera; sprites.c draws the player from these instead so
+// the sharp heading/Y kink at each hand-placed rail joint doesn't make the
+// sprite snap against the smoothly-eased camera. Off the rail these track the
+// exact position 1:1 (no input lag).
+int player_render_x, player_render_y, player_render_z;
 uint16_t orbit_angle;
 int orbit_dist;
 int player_sprite_idx = -1;
@@ -648,6 +654,16 @@ static void update_camera(void)
         static int s_grindPrevFloorY = 0;
 #ifdef AFN_HAS_RAIL_PATH
         static int s_railArc=0, s_railDir=1, s_railHas=0, s_railPrevY=0;
+        // Smoothed arc-advance speed. afn_grind_vel is the PHYSICS velocity
+        // (slope kicks + decay + cap), which jitters frame-to-frame on long
+        // hand-placed segments where the slope changes abruptly at each point.
+        // Advancing the arc by the raw value makes the step size oscillate; the
+        // camera lag then amplifies that into a visible side-to-side shake on
+        // the sprite (worse the faster you go). Advancing by a low-passed copy
+        // gives a steady step so the slide reads smooth. Generated-from-mesh
+        // rails never showed this because their many short segments already
+        // keep the slope gradual.
+        static int s_railVelSmooth = 0;
 #endif
 
         if (afn_grind_vel != 0) {
@@ -661,7 +677,10 @@ static void update_camera(void)
                     afn_grind_vel = 0; afn_grinding = 0; s_railHas = 0;
                 } else {
                     int total = afn_railpath_len(afn_grind_rail);
-                    s_railArc += s_railDir * afn_grind_vel;
+                    // Advance by the smoothed speed (see s_railVelSmooth note).
+                    s_railVelSmooth += (afn_grind_vel - s_railVelSmooth) >> 3;
+                    if (s_railVelSmooth < 1) s_railVelSmooth = 1;
+                    s_railArc += s_railDir * s_railVelSmooth;
                     if (s_railArc <= 0 || s_railArc >= total) {
                         afn_player_vx_world = FX_MUL(afn_grind_dx, afn_grind_vel);
                         afn_player_vz_world = FX_MUL(afn_grind_dz, afn_grind_vel);
@@ -670,8 +689,21 @@ static void update_camera(void)
                     } else {
                         int gx,gy,gz,tdx,tdz;
                         afn_railpath_sample(afn_grind_rail, s_railArc, &gx,&gy,&gz,&tdx,&tdz);
-                        int slope = s_railPrevY - gy; s_railPrevY = gy;
-                        if (slope > 0) afn_grind_vel += slope; else afn_grind_vel += slope >> 1;
+                        // Accelerate by GRADE (Y drop per unit arc), not by the
+                        // raw per-frame Y delta. The per-frame delta scales with
+                        // velocity (faster -> longer step -> bigger drop), so
+                        // `vel += drop` was a positive-feedback loop that rang
+                        // and shook the sprite on undulating hand-drawn rails.
+                        // Dividing the drop by the arc step taken makes it a
+                        // velocity-independent slope, so velocity converges.
+                        int step = s_railVelSmooth; if (step < 1) step = 1;
+                        int grade = ((s_railPrevY - gy) << 8) / step; // .8: +down/-up
+                        s_railPrevY = gy;
+                        if (grade >  256) grade =  256;
+                        if (grade < -256) grade = -256;
+                        // Bounded gentle accel (<= ~6/frame) + slippery friction.
+                        if (grade > 0) afn_grind_vel += (grade * 6) >> 8;
+                        else           afn_grind_vel += (grade * 3) >> 8;
                         afn_grind_vel -= afn_grind_vel >> 9;
                         if (afn_grind_vel < (AFN_WALK_SPEED >> 3)) afn_grind_vel = (AFN_WALK_SPEED >> 3);
                         if (afn_grind_vel > AFN_SPRINT_SPEED * 3) afn_grind_vel = AFN_SPRINT_SPEED * 3;
@@ -844,6 +876,11 @@ static void update_camera(void)
                     afn_grind_vel = (AFN_WALK_SPEED >> 3);
                 afn_player_vx_world = 0; afn_player_vz_world = 0;
                 afn_velocity_falloff = 0;
+#ifdef AFN_HAS_RAIL_PATH
+                // Seed the smoothed arc speed so the first frames don't ramp
+                // up from zero (which would look like a brief stall on engage).
+                s_railVelSmooth = afn_grind_vel;
+#endif
             }
             s_grindPrevFloorY = floorY;
             // Initial heading is the rail axis (rdx/rdz, set above). From here the
@@ -884,6 +921,30 @@ static void update_camera(void)
     }
 #endif
     s_playerY = player_y - AFN_PLAYER_BASE_Y;
+
+    // Render-smoothed player position. While grinding, low-pass toward the exact
+    // position so the sharp per-vertex kink in a straight-segment rail path
+    // doesn't snap the sprite against the eased camera. Off the rail, snap 1:1
+    // (full input responsiveness — no smoothing lag when walking/jumping).
+    {
+        extern int afn_grinding, afn_grind_vel;
+        int grinding = (afn_grinding || afn_grind_vel != 0);
+        static int inited = 0;
+        if (!inited) {
+            player_render_x = player_x; player_render_y = player_y; player_render_z = player_z;
+            inited = 1;
+        }
+        if (grinding) {
+            // ~1/4 catch-up per frame: smooths vertex kinks without visible lag.
+            player_render_x += (player_x - player_render_x) >> 2;
+            player_render_y += (player_y - player_render_y) >> 2;
+            player_render_z += (player_z - player_render_z) >> 2;
+        } else {
+            player_render_x = player_x;
+            player_render_y = player_y;
+            player_render_z = player_z;
+        }
+    }
 
     // 3rd-person camera: target = player - orbit_dist * view-forward. Lerp
     // cam_x/z toward target with the same ease rate as movement so the cam

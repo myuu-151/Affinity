@@ -112,9 +112,12 @@ void afn_sprite_update(void)
         // Player sprite — read its mutable runtime position from fps3d.c so
         // the visible Sonic moves with the input that drives the camera.
         if (si == AFN_PLAYER_IDX) {
-            wx = player_x;
-            wy = player_y;
-            wz = player_z;
+            // Render-smoothed during grind (see fps3d.c) so the sprite glides
+            // through hand-placed rail vertex kinks; exact otherwise.
+            extern int player_render_x, player_render_y, player_render_z;
+            wx = player_render_x;
+            wy = player_render_y;
+            wz = player_render_z;
         }
 #endif
         // Attached (sub) sprite: follow its parent every frame. parentIdx

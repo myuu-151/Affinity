@@ -28,7 +28,7 @@
 #define AFN_PLAYER_IDX 0
 #define AFN_ORBIT_DIST 5760
 
-#define AFN_SPRITE_COUNT 47
+#define AFN_SPRITE_COUNT 51
 
 static const int afn_sprite_data[][17] = {
     { 32768, 9600, 27008, 1, 0, 409, 1, 0, 1, -1, 0, 0, -1, 0, 0, 0, 0 },
@@ -78,18 +78,28 @@ static const int afn_sprite_data[][17] = {
     { 382837, -111925, -254108, 5, -1, 384000, 6, 0, 1, 10, 0, 0, -1, 0, 0, 0, 0 },
     { 471301, -146375, -133032, 1, -1, 307200, 6, 49608, 1, 11, 0, 0, -1, 0, 0, 0, 0 },
     { 58412, 10251, 20611, 2, -1, 768, 6, 0, 1, 14, 0, 0, -1, 0, 0, 0, 0 },
+    { 77736, 9302, 20600, 1, 3, 512, 0, 0, 1, -1, 1, 0, -1, 0, 0, 0, 0 },
+    { 82057, 6460, 20635, 1, 3, 512, 0, 0, 1, -1, 1, 0, -1, 0, 0, 0, 0 },
+    { 86336, 3601, 20635, 1, 3, 512, 0, 0, 1, -1, 1, 0, -1, 0, 0, 0, 0 },
+    { 91443, 719, 20635, 1, 3, 512, 0, 0, 1, -1, 1, 0, -1, 0, 0, 0, 0 },
 };
 
 #define AFN_HAS_RAIL_PATH 1
-static const int afn_rail_pts[4][3] = {
-    { 42476, 10443, 20611 },
-    { 74860, 10443, 20611 },
-    { 108012, -10036, 20611 },
-    { 137324, -10036, 20611 },
+static const int afn_rail_pts[10][3] = {
+    { 42412, 10443, 20611 },
+    { 74840, 10464, 20594 },
+    { 108174, -10036, 20592 },
+    { 137584, -10036, 20608 },
+    { 139111, -10182, 20302 },
+    { 140355, -10352, 19631 },
+    { 141336, -10630, 18721 },
+    { 141952, -10912, 17500 },
+    { 142230, -11148, 15838 },
+    { 142271, -13749, -2156 },
 };
-static const int afn_rail_start[47] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-static const int afn_rail_count[47] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4};
-static const int afn_rail_spline[47] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+static const int afn_rail_start[51] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,10,10,10,10};
+static const int afn_rail_count[51] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,10,0,0,0,0};
+static const int afn_rail_spline[51] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 
 #define AFN_ASSET_COUNT 7
 
@@ -32382,7 +32392,7 @@ extern int  afn_fade_target;
 extern int  afn_fade_frames;
 extern int  afn_fade_counter;
 #ifndef NUM_SPRITES
-#define NUM_SPRITES 47
+#define NUM_SPRITES 51
 #endif
 extern unsigned char afn_sprite_visible[NUM_SPRITES];
 extern unsigned char afn_sprite_flip[NUM_SPRITES];
@@ -32674,6 +32684,16 @@ static void afn_bp6_collision2d(void) {
 static void afn_bp7_start(void) {
 }
 static void afn_bp7_update(void) {
+    if (!afn_grinding) {
+    afn_stop_sfx_sample(28);
+    }
+    if (afn_grinding) {
+    if (!afn_player_frozen && 1 >= afn_anim_prio) { afn_play_anim = 5; afn_anim_prio = 1; }
+    if (afn_rise_12 >= afn_frame_count - 1) { afn_rise_12 = afn_frame_count; }
+    else { afn_rise_12 = afn_frame_count;
+    afn_play_sfx(28, 0, 0);
+    }
+    }
 }
 static void afn_bp7_key_held(void) {
 }
@@ -32695,8 +32715,8 @@ static void afn_bp7_collision2d(void) {
 }
 
 #define AFN_BP_COUNT 8
-#define AFN_BP_INSTANCE_COUNT 21
-static const unsigned int afn_bp_instances[21][5] = {
+#define AFN_BP_INSTANCE_COUNT 25
+static const unsigned int afn_bp_instances[25][5] = {
     { 1, 3, 4294967295, 0, 0xffffffffu },
     { 3, 6, 4294967295, 0, 0xffffffffu },
     { 3, 7, 4294967295, 0, 0xffffffffu },
@@ -32715,6 +32735,10 @@ static const unsigned int afn_bp_instances[21][5] = {
     { 6, 24, 4294967295, 0, 0xffffffffu },
     { 2, 40, 4294967295, 0, 0xffffffffu },
     { 7, 46, 4294967295, 0, 0xffffffffu },
+    { 3, 47, 4294967295, 0, 0xffffffffu },
+    { 3, 48, 4294967295, 0, 0xffffffffu },
+    { 3, 49, 4294967295, 0, 0xffffffffu },
+    { 3, 50, 4294967295, 0, 0xffffffffu },
     { 0, 4294967295, 4294967295, 0, 0x1u },
     { 0, 4294967295, 4294967295, 2, 0x1u },
     { 4, 4294967295, 4294967295, 0, 0xffffffffu },
