@@ -3950,28 +3950,41 @@ struct UndoEntry
 {
     int spriteIdx;
     float x, y, z, scale, rotation, rotationX, rotationZ;
+    // >=0 means this entry is a single rail-point move on sprite spriteIdx:
+    // x,y,z hold the point's saved position; scale/rotation* are unused.
+    int railPointIdx = -1;
 };
 static constexpr int kMaxUndo = 64;
 static UndoEntry sUndoStack[kMaxUndo];
 static int sUndoCount = 0;
 static int sUndoCursor = 0; // points to next write slot; redo goes forward
 
-static void UndoPush(int idx, const FloorSprite& sp)
+static void UndoPushEntry(const UndoEntry& e)
 {
     if (sUndoCursor < kMaxUndo)
     {
-        sUndoStack[sUndoCursor] = { idx, sp.x, sp.y, sp.z, sp.scale, sp.rotation, sp.rotationX, sp.rotationZ };
+        sUndoStack[sUndoCursor] = e;
         sUndoCursor++;
         sUndoCount = sUndoCursor; // discard redo history
     }
     else
     {
-        // Shift stack left by 1
         for (int i = 0; i < kMaxUndo - 1; i++)
             sUndoStack[i] = sUndoStack[i + 1];
-        sUndoStack[kMaxUndo - 1] = { idx, sp.x, sp.y, sp.z, sp.scale, sp.rotation, sp.rotationX, sp.rotationZ };
+        sUndoStack[kMaxUndo - 1] = e;
         sUndoCount = kMaxUndo;
     }
+}
+
+static void UndoPush(int idx, const FloorSprite& sp)
+{
+    UndoPushEntry({ idx, sp.x, sp.y, sp.z, sp.scale, sp.rotation, sp.rotationX, sp.rotationZ, -1 });
+}
+
+// Snapshot one rail point's position before it's moved (G-grab in the 3D tab).
+static void UndoPushRailPoint(int spriteIdx, int pointIdx, float x, float y, float z)
+{
+    UndoPushEntry({ spriteIdx, x, y, z, 0, 0, 0, 0, pointIdx });
 }
 
 static void UndoPop()
@@ -3979,6 +3992,18 @@ static void UndoPop()
     if (sUndoCursor <= 0) return;
     sUndoCursor--;
     UndoEntry& e = sUndoStack[sUndoCursor];
+    if (e.railPointIdx >= 0)
+    {
+        if (e.spriteIdx >= 0 && e.spriteIdx < sSpriteCount
+            && e.railPointIdx < sSprites[e.spriteIdx].railPointCount)
+        {
+            auto& rp = sSprites[e.spriteIdx].railPath[e.railPointIdx];
+            float cx = rp.x, cy = rp.y, cz = rp.z;
+            rp.x = e.x; rp.y = e.y; rp.z = e.z;
+            e.x = cx; e.y = cy; e.z = cz; // stash current for redo
+        }
+        return;
+    }
     if (e.spriteIdx >= 0 && e.spriteIdx < sSpriteCount)
     {
         FloorSprite& sp = sSprites[e.spriteIdx];
@@ -3986,7 +4011,7 @@ static void UndoPop()
         float cx = sp.x, cy = sp.y, cz = sp.z, cs = sp.scale, cr = sp.rotation, crx = sp.rotationX, crz = sp.rotationZ;
         sp.x = e.x; sp.y = e.y; sp.z = e.z; sp.scale = e.scale; sp.rotation = e.rotation; sp.rotationX = e.rotationX; sp.rotationZ = e.rotationZ;
         // Overwrite the entry with what we just replaced (for redo)
-        e = { e.spriteIdx, cx, cy, cz, cs, cr, crx, crz };
+        e = { e.spriteIdx, cx, cy, cz, cs, cr, crx, crz, -1 };
     }
 }
 
@@ -3994,12 +4019,25 @@ static void RedoPush()
 {
     if (sUndoCursor >= sUndoCount) return;
     UndoEntry& e = sUndoStack[sUndoCursor];
+    if (e.railPointIdx >= 0)
+    {
+        if (e.spriteIdx >= 0 && e.spriteIdx < sSpriteCount
+            && e.railPointIdx < sSprites[e.spriteIdx].railPointCount)
+        {
+            auto& rp = sSprites[e.spriteIdx].railPath[e.railPointIdx];
+            float cx = rp.x, cy = rp.y, cz = rp.z;
+            rp.x = e.x; rp.y = e.y; rp.z = e.z;
+            e.x = cx; e.y = cy; e.z = cz;
+        }
+        sUndoCursor++;
+        return;
+    }
     if (e.spriteIdx >= 0 && e.spriteIdx < sSpriteCount)
     {
         FloorSprite& sp = sSprites[e.spriteIdx];
         float cx = sp.x, cy = sp.y, cz = sp.z, cs = sp.scale, cr = sp.rotation, crx = sp.rotationX, crz = sp.rotationZ;
         sp.x = e.x; sp.y = e.y; sp.z = e.z; sp.scale = e.scale; sp.rotation = e.rotation; sp.rotationX = e.rotationX; sp.rotationZ = e.rotationZ;
-        e = { e.spriteIdx, cx, cy, cz, cs, cr, crx, crz };
+        e = { e.spriteIdx, cx, cy, cz, cs, cr, crx, crz, -1 };
     }
     sUndoCursor++;
 }
@@ -4338,6 +4376,12 @@ static char  s3DGrabAxis      = 0;        // 0 = free, 'X'/'Y'/'Z' = locked
 static ImVec2 s3DGrabStartMouse = {};
 struct s3DGrabSnap { int idx; float x, y, z; };
 static std::vector<s3DGrabSnap> s3DGrabOrig;
+// Rail-point editing: right-click a rail point to select it, then G/X/Y/Z grabs
+// just that point (Blender-style). -1 = no rail point selected.
+static int   s3DSelRailSprite   = -1;  // sprite index whose rail point is selected
+static int   s3DSelRailPoint    = -1;  // point index within that rail's railPath
+static bool  s3DGrabIsRailPoint = false; // current G grab moves a rail point, not sprites
+static float s3DRailGrabOrig[3] = { 0, 0, 0 };
 
 // Blender-style rotate mode (R). Each selected sprite spins around its
 // own anchor on the chosen axis. Stored angles feed sp.rotation /
@@ -5336,6 +5380,13 @@ static bool SaveProject(const std::string& path)
                         sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0);
                 }
             }
+            // Grind rail path (per mesh object) — 3D/Map scenes round-trip here.
+            if (sp.isGrindRail || sp.railPointCount > 0) {
+                fprintf(f, "msRailPath=%d,%d,%d\n", sp.isGrindRail ? 1 : 0, sp.railPointCount, sp.railSpline ? 1 : 0);
+                for (int rp = 0; rp < sp.railPointCount; rp++)
+                    fprintf(f, "msRailPt=%.6f,%.6f,%.6f\n",
+                        sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z);
+            }
         }
         // Camera
         fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d,%d,%.1f,%.1f,%.1f,%d\n",
@@ -5464,6 +5515,13 @@ static bool SaveProject(const std::string& path)
                         sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
                         sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0);
                 }
+            }
+            // Grind rail path (per mesh object) — M7 scenes round-trip here.
+            if (sp.isGrindRail || sp.railPointCount > 0) {
+                fprintf(f, "m7RailPath=%d,%d,%d\n", sp.isGrindRail ? 1 : 0, sp.railPointCount, sp.railSpline ? 1 : 0);
+                for (int rp = 0; rp < sp.railPointCount; rp++)
+                    fprintf(f, "m7RailPt=%.6f,%.6f,%.6f\n",
+                        sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z);
             }
         }
         fprintf(f, "m7Cam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d\n",
@@ -7130,6 +7188,29 @@ static bool LoadProject(const std::string& path)
                     }
                 }
             }
+            else if (strncmp(line, "msRailPath=", 11) == 0 && !sMapScenes.empty()) {
+                MapScene& ms = sMapScenes.back();
+                if (ms.spriteCount > 0) {
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    int isr = 0, cnt = 0, spl = 0;
+                    sscanf(line + 11, "%d,%d,%d", &isr, &cnt, &spl);
+                    sp2.isGrindRail = (isr != 0);
+                    sp2.railSpline = (spl != 0);
+                    sp2.railPointCount = 0;
+                    (void)cnt;
+                }
+            }
+            else if (strncmp(line, "msRailPt=", 9) == 0 && !sMapScenes.empty()) {
+                MapScene& ms = sMapScenes.back();
+                if (ms.spriteCount > 0) {
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    if (sp2.railPointCount < FloorSprite::kMaxRailPoints) {
+                        auto& rp = sp2.railPath[sp2.railPointCount];
+                        if (sscanf(line + 9, "%f,%f,%f", &rp.x, &rp.y, &rp.z) == 3)
+                            sp2.railPointCount++;
+                    }
+                }
+            }
             else if (strncmp(line, "msCam=", 6) == 0 && !sMapScenes.empty())
             {
                 MapScene& ms = sMapScenes.back();
@@ -7535,6 +7616,29 @@ static bool LoadProject(const std::string& path)
                         sub.scale = (m >= 8) ? sScale : 1.0f;
                         sub.forceStatic = (m >= 9) ? (fStatic != 0) : false;
                         sub.grounded = (m >= 10) ? (fGrounded != 0) : false;
+                    }
+                }
+            }
+            else if (strncmp(line, "m7RailPath=", 11) == 0 && !sM7Scenes.empty()) {
+                MapScene& ms = sM7Scenes.back();
+                if (ms.spriteCount > 0) {
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    int isr = 0, cnt = 0, spl = 0;
+                    sscanf(line + 11, "%d,%d,%d", &isr, &cnt, &spl);
+                    sp2.isGrindRail = (isr != 0);
+                    sp2.railSpline = (spl != 0);
+                    sp2.railPointCount = 0;
+                    (void)cnt;
+                }
+            }
+            else if (strncmp(line, "m7RailPt=", 9) == 0 && !sM7Scenes.empty()) {
+                MapScene& ms = sM7Scenes.back();
+                if (ms.spriteCount > 0) {
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    if (sp2.railPointCount < FloorSprite::kMaxRailPoints) {
+                        auto& rp = sp2.railPath[sp2.railPointCount];
+                        if (sscanf(line + 9, "%f,%f,%f", &rp.x, &rp.y, &rp.z) == 3)
+                            sp2.railPointCount++;
                     }
                 }
             }
@@ -8574,7 +8678,69 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             sy_ = pos.y + (1.0f - ndcY) * 0.5f * size.y;
             return true;
         };
-        for (int i = 0; i < sSpriteCount; i++)
+        // ---- Rail-point pick (takes priority over mesh pick when close) ----
+        // Right-clicking near a drawn rail point selects THAT point so G/X/Y/Z
+        // grabs it alone. A fresh pick clears any prior point selection unless a
+        // point is hit. Keeps the parent rail sprite selected so its panel shows.
+        bool railHit = false;
+        s3DSelRailSprite = -1; s3DSelRailPoint = -1;
+        {
+            // Generous radius so dots are easy to grab; condition matches the
+            // wireframe render (railPointCount>0) so every VISIBLE dot is pickable.
+            // IMPORTANT: the dots are drawn by Render3DViewport's GL look-at, whose
+            // right/up basis differs from doSinglePick's worldToScreen (that one
+            // flips upRef to Z when pitched). Projecting with the wrong basis put
+            // the pick position off the visible dot when the camera looked down, so
+            // clicks fell through to the mesh. Replicate the GL projection here:
+            //   right = (-fz,0,fx) normalized in XZ; up = right x fwd.
+            float pcx = s3DTargetX + s3DOrbitDist * cosf(s3DOrbitPitch) * sinf(s3DOrbitYaw);
+            float pcy = s3DTargetY + s3DOrbitDist * sinf(s3DOrbitPitch);
+            float pcz = s3DTargetZ + s3DOrbitDist * cosf(s3DOrbitPitch) * cosf(s3DOrbitYaw);
+            float pfx = s3DTargetX - pcx, pfy = s3DTargetY - pcy, pfz = s3DTargetZ - pcz;
+            { float l = sqrtf(pfx*pfx+pfy*pfy+pfz*pfz); if (l>0){pfx/=l;pfy/=l;pfz/=l;} }
+            float psx = -pfz, psy = 0.0f, psz = pfx;
+            { float l = sqrtf(psx*psx+psz*psz); if (l>0){psx/=l;psz/=l;} }
+            float pux = psy*pfz - psz*pfy, puy = psz*pfx - psx*pfz, puz = psx*pfy - psy*pfx;
+            float pTanH = tanf(45.0f * 3.14159265f / 360.0f);
+            float pAsp  = vpAreaW / size.y;
+            auto railToScreen = [&](float wx, float wy, float wz, float& sx_, float& sy_) -> bool {
+                float ex = wx-pcx, ey = wy-pcy, ez = wz-pcz;
+                float vz = -(pfx*ex + pfy*ey + pfz*ez); // GL view z (visible: vz<0)
+                if (vz >= -0.01f) return false;
+                float vx = psx*ex + psy*ey + psz*ez;
+                float vy = pux*ex + puy*ey + puz*ez;
+                float ndcX = (vx / (-vz)) / (pTanH * pAsp);
+                float ndcY = (vy / (-vz)) / pTanH;
+                sx_ = pos.x + (ndcX + 1.0f) * 0.5f * vpAreaW;
+                sy_ = pos.y + (1.0f - ndcY) * 0.5f * size.y;
+                return true;
+            };
+            const float kRailPickPx = 22.0f;
+            float bestPx = kRailPickPx;
+            int   bestSp = -1, bestPt = -1;
+            for (int i = 0; i < sSpriteCount; i++) {
+                const FloorSprite& sp = sSprites[i];
+                if (sp.railPointCount <= 0) continue;
+                for (int rp = 0; rp < sp.railPointCount; rp++) {
+                    float sx_, sy_;
+                    if (!railToScreen(sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z, sx_, sy_))
+                        continue;
+                    float d = sqrtf((sx_-mpos.x)*(sx_-mpos.x) + (sy_-mpos.y)*(sy_-mpos.y));
+                    if (d < bestPx) { bestPx = d; bestSp = i; bestPt = rp; }
+                }
+            }
+            if (bestSp >= 0) {
+                railHit = true;
+                s3DSelRailSprite = bestSp; s3DSelRailPoint = bestPt;
+                for (int i = 0; i < sSpriteCount; i++) sSprites[i].selected = false;
+                sSprites[bestSp].selected = true;
+                sSelectedSprite = bestSp;
+                sSelectedObjType = SelectedObjType::Sprite;
+                if (sSprites[bestSp].meshIdx >= 0 && sSprites[bestSp].meshIdx < (int)sMeshAssets.size())
+                    sSelectedMesh = sSprites[bestSp].meshIdx;
+            }
+        }
+        for (int i = 0; !railHit && i < sSpriteCount; i++)
         {
             const FloorSprite& sp = sSprites[i];
             bool isMesh = (sp.type == SpriteType::Mesh
@@ -8701,7 +8867,7 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 }
             }
         }
-        if (bestIdx >= 0) {
+        if (!railHit && bestIdx >= 0) {
             if (singlePickCtrl) {
                 // Ctrl+RMB click: toggle that mesh in/out of the multi-selection
                 // without disturbing the others.
@@ -8728,7 +8894,7 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 if (sSprites[bestIdx].meshIdx >= 0 && sSprites[bestIdx].meshIdx < (int)sMeshAssets.size())
                     sSelectedMesh = sSprites[bestIdx].meshIdx;
             }
-        } else if (!singlePickCtrl) {
+        } else if (!railHit && !singlePickCtrl) {
             // Click on empty space (no Ctrl): clear selection.
             for (int i = 0; i < sSpriteCount; i++) sSprites[i].selected = false;
             sSelectedSprite = -1;
@@ -8786,23 +8952,48 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             && ImGui::IsKeyPressed(ImGuiKey_G, false)
             && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt)
         {
-            s3DGrabOrig.clear();
-            for (int i = 0; i < sSpriteCount; i++)
-                if (sSprites[i].selected)
-                    s3DGrabOrig.push_back({ i, sSprites[i].x, sSprites[i].y, sSprites[i].z });
-            if (!s3DGrabOrig.empty()) {
+            // A selected rail point takes priority: G grabs just that point.
+            if (s3DSelRailSprite >= 0 && s3DSelRailSprite < sSpriteCount
+                && s3DSelRailPoint >= 0 && s3DSelRailPoint < sSprites[s3DSelRailSprite].railPointCount)
+            {
+                const auto& p = sSprites[s3DSelRailSprite].railPath[s3DSelRailPoint];
+                s3DRailGrabOrig[0] = p.x; s3DRailGrabOrig[1] = p.y; s3DRailGrabOrig[2] = p.z;
+                // Snapshot for Ctrl+Z (restores this point's pre-grab position).
+                UndoPushRailPoint(s3DSelRailSprite, s3DSelRailPoint, p.x, p.y, p.z);
+                s3DGrabIsRailPoint = true;
                 s3DGrabMode = true;
                 s3DGrabAxis = 0;
                 s3DGrabStartMouse = mpos;
+            } else {
+                s3DGrabIsRailPoint = false;
+                s3DGrabOrig.clear();
+                for (int i = 0; i < sSpriteCount; i++)
+                    if (sSprites[i].selected)
+                        s3DGrabOrig.push_back({ i, sSprites[i].x, sSprites[i].y, sSprites[i].z });
+                if (!s3DGrabOrig.empty()) {
+                    s3DGrabMode = true;
+                    s3DGrabAxis = 0;
+                    s3DGrabStartMouse = mpos;
+                }
             }
         }
         if (s3DGrabMode)
         {
+            auto railPt = [&]() -> FloorSprite::RailPoint* {
+                if (s3DGrabIsRailPoint && s3DSelRailSprite >= 0 && s3DSelRailSprite < sSpriteCount
+                    && s3DSelRailPoint >= 0 && s3DSelRailPoint < sSprites[s3DSelRailSprite].railPointCount)
+                    return &sSprites[s3DSelRailSprite].railPath[s3DSelRailPoint];
+                return nullptr;
+            };
             auto resetAnchor = [&]() {
-                for (auto& g : s3DGrabOrig) {
-                    sSprites[g.idx].x = g.x;
-                    sSprites[g.idx].y = g.y;
-                    sSprites[g.idx].z = g.z;
+                if (auto* p = railPt()) {
+                    p->x = s3DRailGrabOrig[0]; p->y = s3DRailGrabOrig[1]; p->z = s3DRailGrabOrig[2];
+                } else {
+                    for (auto& g : s3DGrabOrig) {
+                        sSprites[g.idx].x = g.x;
+                        sSprites[g.idx].y = g.y;
+                        sSprites[g.idx].z = g.z;
+                    }
                 }
                 s3DGrabStartMouse = mpos;
             };
@@ -8837,23 +9028,35 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 dx = ( dpx * right_x + dpy * fwd_x) * scale;
                 dz = ( dpx * right_z + dpy * fwd_z) * scale;
             }
-            for (auto& g : s3DGrabOrig) {
-                sSprites[g.idx].x = g.x + dx;
-                sSprites[g.idx].y = g.y + dy;
-                sSprites[g.idx].z = g.z + dz;
+            if (auto* p = railPt()) {
+                p->x = s3DRailGrabOrig[0] + dx;
+                p->y = s3DRailGrabOrig[1] + dy;
+                p->z = s3DRailGrabOrig[2] + dz;
+            } else {
+                for (auto& g : s3DGrabOrig) {
+                    sSprites[g.idx].x = g.x + dx;
+                    sSprites[g.idx].y = g.y + dy;
+                    sSprites[g.idx].z = g.z + dz;
+                }
             }
             // Commit on LMB, revert on Escape.
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 s3DGrabMode = false;
+                s3DGrabIsRailPoint = false;
                 sProjectDirty = true;
             }
             if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-                for (auto& g : s3DGrabOrig) {
-                    sSprites[g.idx].x = g.x;
-                    sSprites[g.idx].y = g.y;
-                    sSprites[g.idx].z = g.z;
+                if (auto* p = railPt()) {
+                    p->x = s3DRailGrabOrig[0]; p->y = s3DRailGrabOrig[1]; p->z = s3DRailGrabOrig[2];
+                } else {
+                    for (auto& g : s3DGrabOrig) {
+                        sSprites[g.idx].x = g.x;
+                        sSprites[g.idx].y = g.y;
+                        sSprites[g.idx].z = g.z;
+                    }
                 }
                 s3DGrabMode = false;
+                s3DGrabIsRailPoint = false;
             }
         }
     }
@@ -9331,6 +9534,11 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 "the player slides along (exact, follows curves/thin pipes).");
             if (sp.isGrindRail) {
                 ImGui::Text("Path points: %d", sp.railPointCount);
+                if (s3DSelRailSprite == sSelectedSprite && s3DSelRailPoint >= 0)
+                    ImGui::TextColored(ImVec4(1.0f,0.4f,1.0f,1.0f),
+                        "Point %d selected — G to grab (X/Y/Z axis)", s3DSelRailPoint);
+                else
+                    ImGui::TextDisabled("Right-click a point, then G to move it");
                 if (ImGui::Checkbox("Spline Runtime##railspline", &sp.railSpline)) sProjectDirty = true;
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip(
                     "ON: player follows a smooth Catmull-Rom curve through the points\n"
@@ -14981,9 +15189,14 @@ void FrameTick(float dt)
             if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y))
                 RedoPush();
 
-            // G key: enter grab mode (Blender-style translate)
+            // G key: enter grab mode (Blender-style translate).
+            // Skip when a rail point is the active selection — the 3D tab's own
+            // grab handler moves just that point; without this guard THIS handler
+            // also fires (sSelectedSprite is the rail's parent mesh) and drags the
+            // whole mesh alongside the point.
             if (wantKeys && ImGui::IsKeyPressed(ImGuiKey_G) && !sGrabMode && !sScaleMode
-                && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
+                && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount
+                && s3DSelRailPoint < 0 && !s3DGrabIsRailPoint)
             {
                 UndoPush(sSelectedSprite, sSprites[sSelectedSprite]);
                 sGrabMode = true;
@@ -28768,13 +28981,24 @@ void Render3DViewport()
                         glVertex3f(fs.railPath[rp].x, fs.railPath[rp].y, fs.railPath[rp].z);
                 }
                 glEnd();
+                // Point handles. The right-click-selected point is drawn bigger +
+                // magenta so you can see what G/X/Y/Z will move.
                 if (sel) glColor3f(1.0f, 1.0f, 0.4f);
                 else     glColor3f(0.7f, 0.9f, 1.0f);
                 glPointSize(sel ? 9.0f : 6.0f);
                 glBegin(GL_POINTS);
-                for (int rp = 0; rp < fs.railPointCount; rp++)
+                for (int rp = 0; rp < fs.railPointCount; rp++) {
+                    if (i == s3DSelRailSprite && rp == s3DSelRailPoint) continue;
                     glVertex3f(fs.railPath[rp].x, fs.railPath[rp].y, fs.railPath[rp].z);
+                }
                 glEnd();
+                if (i == s3DSelRailSprite && s3DSelRailPoint >= 0 && s3DSelRailPoint < fs.railPointCount) {
+                    glColor3f(1.0f, 0.2f, 1.0f);
+                    glPointSize(13.0f);
+                    glBegin(GL_POINTS);
+                    glVertex3f(fs.railPath[s3DSelRailPoint].x, fs.railPath[s3DSelRailPoint].y, fs.railPath[s3DSelRailPoint].z);
+                    glEnd();
+                }
             }
             glLineWidth(1.0f);
             glPointSize(1.0f);
