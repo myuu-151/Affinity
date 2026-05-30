@@ -281,6 +281,55 @@ static int afn_isqrt(int n) {
     return r;
 }
 
+#ifdef AFN_HAS_RAIL_PATH
+// Hand-authored grind rail path (exported per rail sprite). Deterministic slide
+// along the exported centerline so thin/curved rails grind cleanly (no probe).
+static int afn_railpath_len(int rail) {
+    if (rail < 0 || rail >= AFN_SPRITE_COUNT) return 0;
+    int n = afn_rail_count[rail]; if (n < 2) return 0;
+    int start = afn_rail_start[rail]; long total = 0;
+    for (int i = 1; i < n; i++) {
+        int dx = afn_rail_pts[start+i][0]-afn_rail_pts[start+i-1][0];
+        int dz = afn_rail_pts[start+i][2]-afn_rail_pts[start+i-1][2];
+        total += afn_isqrt(dx*dx+dz*dz);
+    }
+    return (int)total;
+}
+static void afn_railpath_sample(int rail, int s, int* ox, int* oy, int* oz, int* tdx, int* tdz) {
+    int n = afn_rail_count[rail]; int start = afn_rail_start[rail];
+    if (n < 2) { *ox=*oy=*oz=0; *tdx=256; *tdz=0; return; }
+    if (s < 0) s = 0; int acc = 0;
+    for (int i = 1; i < n; i++) {
+        int ax=afn_rail_pts[start+i-1][0],ay=afn_rail_pts[start+i-1][1],az=afn_rail_pts[start+i-1][2];
+        int bx=afn_rail_pts[start+i][0],by=afn_rail_pts[start+i][1],bz=afn_rail_pts[start+i][2];
+        int dx=bx-ax, dz=bz-az; int seg=afn_isqrt(dx*dx+dz*dz); if(seg<1)seg=1;
+        if (s <= acc+seg || i==n-1) {
+            int t=((s-acc)<<8)/seg; if(t<0)t=0; if(t>256)t=256;
+            *ox=ax+(((bx-ax)*t)>>8); *oy=ay+(((by-ay)*t)>>8); *oz=az+(((bz-az)*t)>>8);
+            int l=afn_isqrt(dx*dx+dz*dz); if(l<1)l=1; *tdx=(dx*256)/l; *tdz=(dz*256)/l; return;
+        }
+        acc+=seg;
+    }
+}
+static int afn_railpath_nearest(int rail, int px, int pz) {
+    int n=afn_rail_count[rail]; int start=afn_rail_start[rail];
+    if(n<2) return 0; long bestD=0x7fffffffffffLL; int bestArc=0, acc=0;
+    for(int i=1;i<n;i++){
+        int ax=afn_rail_pts[start+i-1][0],az=afn_rail_pts[start+i-1][2];
+        int bx=afn_rail_pts[start+i][0],bz=afn_rail_pts[start+i][2];
+        int ex=bx-ax,ez=bz-az; long el2=(long)ex*ex+(long)ez*ez; if(el2<1)el2=1;
+        long tn=(long)(px-ax)*ex+(long)(pz-az)*ez; int t=(int)((tn<<8)/el2);
+        if(t<0)t=0; if(t>256)t=256;
+        int cx=ax+((ex*t)>>8),cz=az+((ez*t)>>8);
+        long dd=(long)(px-cx)*(px-cx)+(long)(pz-cz)*(pz-cz);
+        int seg=afn_isqrt(ex*ex+ez*ez);
+        if(dd<bestD){bestD=dd; bestArc=acc+((seg*t)>>8);}
+        acc+=seg;
+    }
+    return bestArc;
+}
+#endif
+
 // ---------------------------------------------------------------------------
 // Movement/jump state. Walk speed ramps with AFN_WALK_EASE_IN/OUT toward
 // the target (walk or sprint). player_y is a vertical offset added to the
@@ -546,9 +595,43 @@ static void update_camera(void)
             }
         }
         static int s_grindPrevFloorY = 0;
+#ifdef AFN_HAS_RAIL_PATH
+        static int s_railArc=0, s_railDir=1, s_railHas=0, s_railPrevY=0;
+#endif
 
         if (afn_grind_vel != 0) {
             // --- Currently grinding ---
+#ifdef AFN_HAS_RAIL_PATH
+            if (s_railHas) {
+                if (player_vy > 0) {
+                    afn_player_vx_world = FX_MUL(afn_grind_dx, afn_grind_vel);
+                    afn_player_vz_world = FX_MUL(afn_grind_dz, afn_grind_vel);
+                    if (afn_velocity_falloff <= 0) afn_velocity_falloff = 30;
+                    afn_grind_vel = 0; afn_grinding = 0; s_railHas = 0;
+                } else {
+                    int total = afn_railpath_len(afn_grind_rail);
+                    s_railArc += s_railDir * afn_grind_vel;
+                    if (s_railArc <= 0 || s_railArc >= total) {
+                        afn_player_vx_world = FX_MUL(afn_grind_dx, afn_grind_vel);
+                        afn_player_vz_world = FX_MUL(afn_grind_dz, afn_grind_vel);
+                        if (afn_velocity_falloff <= 0) afn_velocity_falloff = 30;
+                        afn_grind_vel = 0; afn_grinding = 0; s_railHas = 0;
+                    } else {
+                        int gx,gy,gz,tdx,tdz;
+                        afn_railpath_sample(afn_grind_rail, s_railArc, &gx,&gy,&gz,&tdx,&tdz);
+                        int slope = s_railPrevY - gy; s_railPrevY = gy;
+                        if (slope > 0) afn_grind_vel += slope; else afn_grind_vel += slope >> 1;
+                        afn_grind_vel -= afn_grind_vel >> 9;
+                        if (afn_grind_vel < (AFN_WALK_SPEED >> 3)) afn_grind_vel = (AFN_WALK_SPEED >> 3);
+                        if (afn_grind_vel > AFN_SPRINT_SPEED * 3) afn_grind_vel = AFN_SPRINT_SPEED * 3;
+                        player_x = gx; player_z = gz; player_y = gy;
+                        player_vy = 0; player_on_ground = 1;
+                        afn_grind_dx = tdx * s_railDir; afn_grind_dz = tdz * s_railDir;
+                    }
+                }
+            } else
+#endif
+
             if (player_vy > 0) {
                 // Jump node fired → hop off, carry momentum into world velocity.
                 afn_player_vx_world = FX_MUL(afn_grind_dx, afn_grind_vel);
@@ -676,6 +759,19 @@ static void update_camera(void)
                         rdz = (ddz * 256) / len;
                     }
                 }
+            }
+#endif
+#ifdef AFN_HAS_RAIL_PATH
+            s_railHas = (afn_grind_rail >= 0 && afn_railpath_len(afn_grind_rail) > 0);
+            if (s_railHas) {
+                s_railArc = afn_railpath_nearest(afn_grind_rail, player_x, player_z);
+                int gx,gy,gz,tdx,tdz;
+                afn_railpath_sample(afn_grind_rail, s_railArc, &gx,&gy,&gz,&tdx,&tdz);
+                long fdot = (long)s_lastMoveDX*tdx + (long)s_lastMoveDZ*tdz;
+                s_railDir = (fdot >= 0) ? 1 : -1;
+                rdx = tdx * s_railDir; rdz = tdz * s_railDir;
+                s_railPrevY = gy;
+                player_x = gx; player_z = gz; player_y = gy;
             }
 #endif
             afn_grind_dx = rdx; afn_grind_dz = rdz;
