@@ -575,6 +575,10 @@ enum class VsNodeType : int {
     VelocityFalloff, // action: linear decay of vx/vz to 0 over N frames (Mode 4 boost pad style)
     BoostForward,    // action: push the player along their current view direction (vx/vz = sin/cos(viewAngle) * speed)
     HaltMomentum,    // action: zero all player velocity (vx, vz, vy, pending boost, falloff) — use on respawn
+    StartGrind,      // action: begin rail grinding — lock to entry direction, slide on momentum (Mode 4)
+    StopGrind,       // action: end rail grinding
+    IsGrinding,      // gate: passes exec while the player is grinding
+    IsNotGrinding,   // gate: passes exec while the player is NOT grinding
     COUNT
 };
 
@@ -652,7 +656,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Stop Anim",      0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Set Anim Speed", 0xFF3355AA, 1, 1, 1, 0, {"Speed (int)"}, {}, {} },
     { "Set Velocity Y", 0xFF3355AA, 1, 1, 1, 0, {"Velocity (float)"}, {}, {} },
-    { "Stop Sound",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Stop Sound",     0xFF3355AA, 1, 1, 1, 0, {"Sound Instance"}, {}, {} },
     { "Add",            0xFF666688, 0, 0, 2, 1, {"A", "B"}, {"Result"}, {} },
     { "Subtract",       0xFF666688, 0, 0, 2, 1, {"A", "B"}, {"Result"}, {} },
     { "Multiply",       0xFF666688, 0, 0, 2, 1, {"A", "B"}, {"Result"}, {} },
@@ -876,6 +880,10 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Velocity Falloff",0xFF3355AA, 1, 1, 1, 0, {"Frames (int)"}, {}, {} },
     { "Boost Forward", 0xFF3355AA, 1, 1, 1, 0, {"Speed (float)"}, {}, {} },
     { "Halt Momentum", 0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Start Grind",   0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Stop Grind",    0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Grinding",   0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Not Grinding", 0xFF885533, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -1125,6 +1133,7 @@ struct MidiFile {
     bool channelUsed[16] = {};  // whether channel has any notes
     bool channelMuted[16] = {}; // mute toggle per channel
     int channelVolume[16];      // per-channel volume 0-100 (default 100)
+    float masterDb = 0.0f;      // per-sequence master volume in dB (-20..+20)
 };
 
 static std::vector<SoundSample> sSoundBank;
@@ -2617,7 +2626,12 @@ static AudioVoice sVoices[kMaxVoices] = {};
 static bool sAudioOpen = false;
 
 // MIDI playback state
+// sMidiMasterDb is the LIVE playback master volume (the mixer reads it). It's
+// set from the currently-playing sequence's own masterDb when playback starts,
+// so each sequence slot has its own master level. It also doubles as the
+// legacy/global default for projects saved before per-sequence masterDb existed.
 static float sMidiMasterDb = 0.0f; // master volume in dB (-20 to +20)
+static int sMidiActiveChannel = 0; // channel new piano-roll notes are drawn on
 static bool sMidiPlaying = false;
 static int sMidiPlayIdx = -1;     // index into sMidiFiles
 static double sMidiPlayTime = 0;  // seconds elapsed
@@ -3279,6 +3293,9 @@ static void AudioPlayMidi(int midiIdx) {
     if (midiIdx < 0 || midiIdx >= (int)sMidiFiles.size()) return;
     AudioStopAll();
     sMidiPlayIdx = midiIdx;
+    // Drive the mixer's master volume from THIS sequence's own setting so each
+    // sequence slot plays back at its own master level.
+    sMidiMasterDb = sMidiFiles[midiIdx].masterDb;
     sMidiPlayTime = 0;
     sMidiPlayTick = 0;
     memset(sMidiPitchBend, 0, sizeof(sMidiPitchBend));
@@ -5645,6 +5662,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "midi_begin=%s\n", mf.name);
         fprintf(f, "tpb=%d\n", mf.ticksPerBeat);
         fprintf(f, "tempo=%d\n", mf.tempo);
+        fprintf(f, "masterDb=%.4f\n", mf.masterDb);
         // Channel config
         for (int ch = 0; ch < 16; ch++) {
             if (mf.channelUsed[ch])
@@ -7969,6 +7987,10 @@ static bool LoadProject(const std::string& path)
                 curMidi = &sMidiFiles.back();
                 strncpy(curMidi->name, line + 11, sizeof(curMidi->name) - 1);
                 for (int ch = 0; ch < 16; ch++) curMidi->channelVolume[ch] = 100;
+                // Backward-compat: seed from the legacy global master dB (parsed
+                // earlier in the file). A per-sequence masterDb= line below will
+                // override this for projects saved after the per-sequence split.
+                curMidi->masterDb = sMidiMasterDb;
             }
             else if (strcmp(line, "midi_end") == 0) {
                 curMidi = nullptr;
@@ -7977,6 +7999,7 @@ static bool LoadProject(const std::string& path)
             else if (curMidi) {
                 if (sscanf(line, "tpb=%d", &ival) == 1) curMidi->ticksPerBeat = ival;
                 else if (sscanf(line, "tempo=%d", &ival) == 1) curMidi->tempo = ival;
+                else if (sscanf(line, "masterDb=%f", &fval) == 1) curMidi->masterDb = fval;
                 else if (strncmp(line, "ch=", 3) == 0) {
                     int ch, bank, muted, vol;
                     char chName[48] = {};
@@ -14254,7 +14277,26 @@ void FrameTick(float dt)
                                 se.sampleRate = smp.sampleRate;
                                 se.rawSampleRate = smp.sampleRate;
                                 se.fineTuneCents = 0;
-                                se.loop = false;
+                                // Honor the sample's Sustain Loop so imported SFX loop
+                                // on hardware. NDS SCHANNEL loops from the data END
+                                // back to loopStart, so loopEnd must BE the data end:
+                                // truncate the exported PCM to loopEnd. A crossfade
+                                // (below, after the fade block) smooths the wrap.
+                                se.loop = smp.loop;
+                                if (se.loop) {
+                                    int ls = smp.loopStart;
+                                    int le = smp.loopEnd > 0 ? smp.loopEnd : (int)se.data.size();
+                                    if (le > (int)se.data.size()) le = (int)se.data.size();
+                                    if (ls < 0) ls = 0;
+                                    if (ls >= le) {
+                                        se.loop = false;  // degenerate range — fall back to one-shot
+                                    } else {
+                                        if (le < (int)se.data.size()) se.data.resize(le);
+                                        se.loopStart = ls;
+                                        se.loopEnd = le;
+                                    }
+                                }
+                                if (!se.loop) { se.loopStart = 0; se.loopEnd = 0; }
                                 se.releaseMs = 0;
                                 se.decayPct = 0;
                                 // Bake envelope curve into PCM data
@@ -14277,8 +14319,10 @@ void FrameTick(float dt)
                                         se.data[i] = (int8_t)(se.data[i] * level);
                                     }
                                 }
-                                // Bake soft fade: smooth fade-out over last 20% of sample
-                                if (inst.softFade) {
+                                // Bake soft fade: smooth fade-out over last 20% of
+                                // sample. Skip when looping — a sustained loop must
+                                // not fade to silence at the loop boundary.
+                                if (inst.softFade && !se.loop) {
                                     int len = (int)se.data.size();
                                     int fadeStart = len * 4 / 5; // last 20%
                                     int fadeLen = len - fadeStart;
@@ -14497,7 +14541,17 @@ void FrameTick(float dt)
                                 GBASoundNoteExport ne;
                                 ne.tick = n.tick;
                                 ne.channel = n.channel;
-                                ne.velocity = n.velocity * midi.channelVolume[n.channel] / 100;
+                                // Bake this sequence's own master dB into the note
+                                // velocity so each sequence slot exports at its own
+                                // master level (the global AFN_MIDI_MASTER_VOL_FIX
+                                // macro is unity now — see the 0.0f passed to
+                                // PackageNDS). 256 = unity in the fixed factor.
+                                int seqMasterFix = (int)(std::pow(10.0, (double)midi.masterDb / 20.0) * 256.0 + 0.5);
+                                int vel = n.velocity * midi.channelVolume[n.channel] / 100;
+                                vel = (vel * seqMasterFix) >> 8;
+                                if (vel > 127) vel = 127;
+                                if (vel < 0) vel = 0;
+                                ne.velocity = vel;
                                 ne.duration = n.duration;
                                 auto& smp = sSoundBank[bankIdx];
                                 // Look up correct sample index
@@ -14586,7 +14640,10 @@ void FrameTick(float dt)
                                         exportSkyFrames, exportNdsAa,
                                         exportScript, exportBlueprints, exportBpInstances,
                                         exportHudElements, exportTmScenes, exportStartMode,
-                                        sMidiMasterDb, err);
+                                        // Per-sequence master dB is baked into each
+                                        // note's velocity above, so the global macro
+                                        // stays at unity (0 dB).
+                                        0.0f, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,
@@ -18002,6 +18059,10 @@ void FrameTick(float dt)
                 case VsNodeType::VelocityFalloff: desc = "Linearly decays current vx/vz to 0 over N frames. Set after Set Velocity X/Z to define how quickly the boost/push fades."; break;
                 case VsNodeType::BoostForward:   desc = "Pushes the player along their current view direction at the given speed. Runtime decomposes into world vx/vz using sin/cos(viewAngle). Pair with Velocity Falloff to decay."; break;
                 case VsNodeType::HaltMomentum:   desc = "Zeros all player velocity (vx, vz, vy, pending boost, falloff). Use after respawn so leftover boost-pad momentum doesn't carry over."; break;
+                case VsNodeType::StartGrind:     desc = "Begin rail grinding (Mode 4). The player locks to its entry direction and slides on momentum — accelerating downhill, slowing uphill. Wire it to On Collision(rail mesh). Jumping or running off the end ends the grind."; break;
+                case VsNodeType::StopGrind:      desc = "End rail grinding immediately (restores normal input movement)."; break;
+                case VsNodeType::IsGrinding:     desc = "Gate: passes exec while the player is currently grinding a rail. Use to play a grind animation or gate a jump-off."; break;
+                case VsNodeType::IsNotGrinding:  desc = "Gate: passes exec while the player is NOT grinding. Wire On Update -> Is Not Grinding -> On Rise -> Stop Sound to kill a looping grind SFX the instant you leave the rail."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -18247,6 +18308,10 @@ void FrameTick(float dt)
                         case VsNodeType::VelocityFalloff: return "_velocity_falloff";
                         case VsNodeType::BoostForward:  return "_boost_forward";
                         case VsNodeType::HaltMomentum:  return "_halt_momentum";
+                        case VsNodeType::StartGrind:    return "_start_grind";
+                        case VsNodeType::StopGrind:     return "_stop_grind";
+                        case VsNodeType::IsGrinding:    return "_is_grinding";
+                        case VsNodeType::IsNotGrinding: return "_is_not_grinding";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -19139,14 +19204,58 @@ void FrameTick(float dt)
                         "    // player_vy=0 also halts mid-air rise/fall.");
                     break;
                 }
+                case VsNodeType::StartGrind: {
+                    editorCode =
+                        "// Begin rail grinding — lock to entry direction, slide on momentum.";
+                    setActionFunc(infoNode, "_start_grind",
+                        "    afn_grinding = 1;\n"
+                        "    // --- Runtime (fps3d.c, Mode 4) ---\n"
+                        "    // On the first grind frame the runtime seeds the locked\n"
+                        "    // direction from the player's entry heading (s_lastMoveDX/DZ)\n"
+                        "    // and the grind speed from afn_move_speed. While afn_grinding:\n"
+                        "    //   player_x += grind_dx * grind_vel; player_z += grind_dz * grind_vel;\n"
+                        "    //   grind_vel += (prevFloorY - floorY) >> k;  // downhill = faster\n"
+                        "    //   player_y = floorY;                         // stick to rail\n"
+                        "    //   if (player_vy > 0 || no floor) afn_grinding = 0; // jump / ran off end");
+                    break;
+                }
+                case VsNodeType::StopGrind: {
+                    editorCode = "// End rail grinding (restore normal input movement).";
+                    setActionFunc(infoNode, "_stop_grind",
+                        "    afn_grinding = 0;\n"
+                        "    // --- Runtime (fps3d.c, Mode 4) ---\n"
+                        "    // Clears the grind state; input movement resumes next frame.\n"
+                        "    // Carried momentum (grind_vel) is released into the normal\n"
+                        "    // world velocity so you keep speed when stepping off.");
+                    break;
+                }
+                case VsNodeType::IsGrinding: {
+                    editorCode = "// Gate: true while grinding a rail.";
+                    setActionFunc(infoNode, "_is_grinding",
+                        "    if (afn_grinding) {\n"
+                        "    // --- Runtime --- gate; downstream runs only while grinding\n");
+                    break;
+                }
+                case VsNodeType::IsNotGrinding: {
+                    editorCode = "// Gate: true while NOT grinding a rail.";
+                    setActionFunc(infoNode, "_is_not_grinding",
+                        "    if (!afn_grinding) {\n"
+                        "    // --- Runtime --- gate; downstream runs only while not grinding.\n"
+                        "    // Pair with On Rise to fire once on the frame grinding ends\n"
+                        "    // (e.g. Stop Sound to kill a looping grind SFX).\n");
+                    break;
+                }
                 case VsNodeType::StopSound:
                     editorCode =
-                        "// Stop all sound channels";
+                        "// Stop sound. With a Sound Instance wired, stops ONLY\n"
+                        "// that SFX's voices; unwired, stops everything.";
                     setActionFunc(infoNode, "_stop_sound",
-                        "    afn_stop_sound();\n"
-                        "    // --- Runtime (main.c) ---\n"
-                        "    // snd_seq_active = -1;\n"
-                        "    // All voices deactivated, DMA continues silent");
+                        "    afn_stop_sfx_sample(<sfxSampleIdx>); // when a Sound Instance is wired\n"
+                        "    // afn_stop_sound();                // when nothing is wired\n"
+                        "    // --- Runtime (audio.c, NDS) ---\n"
+                        "    // afn_stop_sfx_sample: soundKill every hardware channel whose\n"
+                        "    //   voice is playing that sample's smpIdx (BGM untouched).\n"
+                        "    // afn_stop_sound: kills all voices, sequence stops.");
                     break;
                 case VsNodeType::AddMath:
                     editorCode = "// A + B";
@@ -21635,6 +21744,10 @@ void FrameTick(float dt)
                     case VsNodeType::VelocityFalloff: suffix = "_velocity_falloff"; break;
                     case VsNodeType::BoostForward:  suffix = "_boost_forward"; break;
                     case VsNodeType::HaltMomentum:  suffix = "_halt_momentum"; break;
+                    case VsNodeType::StartGrind:    suffix = "_start_grind"; break;
+                    case VsNodeType::StopGrind:     suffix = "_stop_grind"; break;
+                    case VsNodeType::IsGrinding:    suffix = "_is_grinding"; break;
+                    case VsNodeType::IsNotGrinding: suffix = "_is_not_grinding"; break;
                     case VsNodeType::StopSound:     suffix = "_stop_sound"; break;
                     case VsNodeType::AddMath:       suffix = "_add"; break;
                     case VsNodeType::SubtractMath:  suffix = "_sub"; break;
@@ -22178,6 +22291,10 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::VelocityFalloff].name)) addNodeAt(VsNodeType::VelocityFalloff);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::BoostForward].name)) addNodeAt(VsNodeType::BoostForward);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HaltMomentum].name)) addNodeAt(VsNodeType::HaltMomentum);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StartGrind].name)) addNodeAt(VsNodeType::StartGrind);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopGrind].name)) addNodeAt(VsNodeType::StopGrind);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsGrinding].name)) addNodeAt(VsNodeType::IsGrinding);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNotGrinding].name)) addNodeAt(VsNodeType::IsNotGrinding);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetPlayerHeight].name)) addNodeAt(VsNodeType::SetPlayerHeight);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopSound].name)) addNodeAt(VsNodeType::StopSound);
                     ImGui::Separator();
@@ -23753,13 +23870,15 @@ void FrameTick(float dt)
                 dl->AddRectFilled(ImVec2(leX, wp.y), ImVec2(wp.x + availW, wp.y + waveH), 0x60000000);
                 // Loop region tint
                 dl->AddRectFilled(ImVec2(lsX, wp.y), ImVec2(leX, wp.y + waveH), 0x1800FF88);
-                // Loop start line (green)
-                dl->AddLine(ImVec2(lsX, wp.y), ImVec2(lsX, wp.y + waveH), 0xFF00FF88, 2.0f);
-                // Loop end line (red)
-                dl->AddLine(ImVec2(leX, wp.y), ImVec2(leX, wp.y + waveH), 0xFF4466FF, 2.0f);
+                // Sequencer-style reticles: 2px vertical line + a triangle flag
+                // at the top for each end (green=start, red=end).
+                dl->AddLine(ImVec2(lsX, wp.y), ImVec2(lsX, wp.y + waveH), 0xFF00FF00, 2.0f);
+                dl->AddTriangleFilled(ImVec2(lsX, wp.y), ImVec2(lsX + 8, wp.y), ImVec2(lsX, wp.y + 8), 0xFF00FF00);
+                dl->AddLine(ImVec2(leX, wp.y), ImVec2(leX, wp.y + waveH), 0xFF4444FF, 2.0f);
+                dl->AddTriangleFilled(ImVec2(leX, wp.y), ImVec2(leX - 8, wp.y), ImVec2(leX, wp.y + 8), 0xFF4444FF);
                 // Labels
-                dl->AddText(ImVec2(lsX + 2, wp.y + 1), 0xFF00FF88, "S");
-                dl->AddText(ImVec2(leX - 10, wp.y + 1), 0xFF4466FF, "E");
+                dl->AddText(ImVec2(lsX + 10, wp.y + 1), 0xFF00FF88, "S");
+                dl->AddText(ImVec2(leX - 14, wp.y + 1), 0xFF4466FF, "E");
             }
             }
 
@@ -24598,7 +24717,13 @@ void FrameTick(float dt)
             ImGui::PopItemWidth();
 
             ImGui::PushItemWidth(-1);
-            ImGui::SliderFloat("##masterDb", &sMidiMasterDb, -20.0f, 20.0f, "Master: %.1f dB");
+            // Per-sequence master volume. Editing it also updates the live
+            // mixer level (sMidiMasterDb) so you hear the change immediately
+            // while this sequence is the selected/playing one.
+            if (ImGui::SliderFloat("##masterDb", &mf.masterDb, -20.0f, 20.0f, "Master: %.1f dB")) {
+                sMidiMasterDb = mf.masterDb;
+                sProjectDirty = true;
+            }
             ImGui::PopItemWidth();
 
             ImGui::Spacing();
@@ -24655,10 +24780,21 @@ void FrameTick(float dt)
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("LMB: Mute | RMB: Solo | Shift+LMB: Add to solo");
                 ImGui::SameLine();
 
-                // Channel name (dimmed if muted)
+                // Channel name — click to make this the ACTIVE channel that new
+                // piano-roll notes are drawn on. The active channel gets a
+                // ">" marker and a brighter tint.
+                bool isActive = (sMidiActiveChannel == ch);
                 if (mf.channelMuted[ch]) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
-                ImGui::Text("%s", mf.channelName[ch]);
-                if (mf.channelMuted[ch]) ImGui::PopStyleColor();
+                else if (isActive)       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                else                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 0.75f, 0.8f, 1.0f));
+                char nameLbl[64];
+                snprintf(nameLbl, sizeof(nameLbl), "%s%s##chsel%d",
+                         isActive ? "> " : "  ", mf.channelName[ch], ch);
+                if (ImGui::Selectable(nameLbl, isActive, 0, ImVec2(Scaled(120), 0)))
+                    sMidiActiveChannel = ch;
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Click to draw new notes on this channel");
                 ImGui::SameLine();
 
                 // Sample bank dropdown
@@ -24707,6 +24843,31 @@ void FrameTick(float dt)
                 }
                 ImGui::PopStyleColor();
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete all notes on this channel");
+            }
+
+            // Add a fresh channel: claim the first unused slot (a deleted
+            // channel just clears channelUsed, so this also revives slots).
+            {
+                int freeCh = -1;
+                for (int c = 0; c < 16; c++) { if (!mf.channelUsed[c]) { freeCh = c; break; } }
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.4f, 0.15f, 1.0f));
+                if (freeCh < 0) ImGui::BeginDisabled();
+                if (ImGui::SmallButton("+ New Channel") && freeCh >= 0) {
+                    mf.channelUsed[freeCh]   = true;
+                    mf.channelMuted[freeCh]  = 0;
+                    mf.channelVolume[freeCh] = 100;
+                    mf.channelBank[freeCh]   = -1;   // None until assigned
+                    snprintf(mf.channelName[freeCh], sizeof(mf.channelName[freeCh]),
+                             "Channel %d", freeCh + 1);
+                    sMidiActiveChannel = freeCh;     // draw on it immediately
+                    sProjectDirty = true;
+                }
+                if (freeCh < 0) ImGui::EndDisabled();
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(freeCh < 0
+                        ? "All 16 MIDI channels are in use"
+                        : "Add an empty channel you can draw notes on in the piano roll");
             }
 
             // Piano roll preview
@@ -25001,16 +25162,24 @@ void FrameTick(float dt)
                             strncpy(t.name, "Track 1", sizeof(t.name));
                             mf.tracks.push_back(t);
                         }
+                        // New notes go on the active channel (defaults to a
+                        // used channel if the active one was deleted).
+                        int newCh = sMidiActiveChannel;
+                        if (newCh < 0 || newCh > 15 || !mf.channelUsed[newCh]) {
+                            newCh = 0;
+                            for (int c = 0; c < 16; c++) { if (mf.channelUsed[c]) { newCh = c; break; } }
+                            sMidiActiveChannel = newCh;
+                        }
                         MidiNote nn;
                         nn.tick = (int)mouseTick;
-                        nn.channel = 0;
+                        nn.channel = newCh;
                         nn.note = (int)(mouseNote + 0.5f);
                         if (nn.note < 0) nn.note = 0;
                         if (nn.note > 127) nn.note = 127;
                         nn.velocity = 100;
                         nn.duration = mf.ticksPerBeat;
                         mf.tracks[0].notes.push_back(nn);
-                        mf.channelUsed[0] = true;
+                        mf.channelUsed[newCh] = true;
                         sProjectDirty = true;
                     }
                 }

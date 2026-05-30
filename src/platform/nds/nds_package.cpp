@@ -2184,10 +2184,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int afn_player_vz_world;\n";
         f << "extern int afn_velocity_falloff;\n";
         f << "extern int afn_pending_boost_fwd;\n";
+        f << "extern int afn_grinding;\n";
+        f << "extern int afn_grind_rail;\n";
         // Audio entry points (audio.c) used by PlaySound / StopSound emit.
         f << "void afn_play_sound(int id);\n";
         f << "void afn_play_sfx(int smpIdx, int gain, int fifo);\n";
         f << "void afn_stop_sound(void);\n";
+        f << "void afn_stop_sfx_sample(int smpIdx);\n";
         // OnRise edge-detect state — one int per OnRise node, init -2 so first
         // rising edge fires. Static here means each TU that includes mapdata.h
         // gets a private copy; only script_glue.c's copy is ever mutated (it's
@@ -2462,7 +2465,17 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "    if (player_vy > 0) player_vy = (player_vy * " << (int)(factor*256.0f) << ") >> 8;\n";
                 break;
             }
+            case GBAScriptNodeType::StartGrind:
+                // Capture the rail we collided with — the runtime reads its
+                // mesh axis to lock the grind direction along the rail.
+                f << "    afn_grinding = 1; afn_grind_rail = afn_collided_sprite;\n"; break;
+            case GBAScriptNodeType::StopGrind:
+                f << "    afn_grinding = 0;\n"; break;
             // --- Gate nodes (open a brace; closed by the chain's tail logic) ---
+            case GBAScriptNodeType::IsGrinding:
+                f << "    if (afn_grinding) {\n"; break;
+            case GBAScriptNodeType::IsNotGrinding:
+                f << "    if (!afn_grinding) {\n"; break;
             case GBAScriptNodeType::IsMoving:
                 f << "    if (player_moving) {\n"; break;
             case GBAScriptNodeType::IsOnGround:
@@ -2577,9 +2590,22 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 }
                 break;
             }
-            case GBAScriptNodeType::StopSound:
-                f << "    afn_stop_sound();\n";
+            case GBAScriptNodeType::StopSound: {
+                // With a Sound Instance wired, stop ONLY that SFX's voices so
+                // BGM keeps playing (e.g. kill a looping grind SFX when you
+                // leave the rail). Unwired -> stop everything (legacy).
+                auto* sd = findDataIn(a->id, 0);
+                if (sd) {
+                    int sId = resolveInt(sd);
+                    if (sId >= 0 && sId < (int)soundInstances.size() && soundInstances[sId].isSfx)
+                        f << "    afn_stop_sfx_sample(" << soundInstances[sId].sfxSampleIdx << ");\n";
+                    else
+                        f << "    afn_stop_sound();\n";
+                } else {
+                    f << "    afn_stop_sound();\n";
+                }
                 break;
+            }
             case GBAScriptNodeType::Respawn:
                 f << "    player_x = afn_start_x; player_y = afn_start_y; player_z = afn_start_z;\n";
                 f << "    player_vy = 0;\n";
@@ -2769,7 +2795,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                            a->type == GBAScriptNodeType::IsJumping ||
                            a->type == GBAScriptNodeType::IsFalling ||
                            a->type == GBAScriptNodeType::IsNear2D ||
-                           a->type == GBAScriptNodeType::IsFollowMoving);
+                           a->type == GBAScriptNodeType::IsFollowMoving ||
+                           a->type == GBAScriptNodeType::IsGrinding ||
+                           a->type == GBAScriptNodeType::IsNotGrinding);
             if (isGate) {
                 bool wasJump = inJumpGate;
                 gateDepth++;

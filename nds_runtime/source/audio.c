@@ -14,6 +14,7 @@ void afn_audio_init(void) {}
 void afn_audio_tick(void) {}
 void afn_play_sound(int id) { (void)id; }
 void afn_stop_sound(void) {}
+void afn_stop_sfx_sample(int smpIdx) { (void)smpIdx; }
 void afn_play_sfx(int smpIdx, int gain, int fifo) { (void)smpIdx; (void)gain; (void)fifo; }
 void afn_trigger_sample(int smpIdx, int note, int vel, int dur, int ch) {
     (void)smpIdx; (void)note; (void)vel; (void)dur; (void)ch;
@@ -47,6 +48,7 @@ typedef struct {
     int   ageFrames;     // frames since note-on (for decay countdown)
     int   releaseFrames; // total frames in release ramp (set when releasing)
     int   releaseLeft;   // frames remaining in release; 0 = not releasing
+    int   isSfxLoop;     // 1 = looping SFX tracked for targeted stop (afn_stop_sfx_sample)
 } SndVoice;
 
 static SndVoice snd_voices[SND_MAX_VOICES];
@@ -168,8 +170,25 @@ void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch)
     // them when the (one-shot) sample ends. We only track in the voice table
     // when we need pitch-bend or note-off bookkeeping (sequenced MIDI notes).
     if (durTicks <= 0) {
-        soundPlaySample((void*)afn_pcm_ptrs[smpIdx], fmt, sampleBytes, hz,
+        int h = soundPlaySample((void*)afn_pcm_ptrs[smpIdx], fmt, sampleBytes, hz,
                         vol, 64, loop ? true : false, loopWords);
+        // A LOOPING SFX never ends on its own. If we left it fire-and-forget
+        // its channel handle would be lost and nothing could ever stop it
+        // (that's exactly the "grind loop persists after leaving the rail"
+        // bug). Track it in a voice slot so afn_stop_sfx_sample can kill it.
+        // noteOffTick = 0 keeps the sequencer's note-off logic from touching
+        // it; isSfxLoop = 1 marks it for targeted stop. One-shot SFX stay
+        // untracked — libnds recycles their channel when the sample ends.
+        if (loop && h >= 0) {
+            int v = alloc_voice();
+            if (v >= 0) {
+                SndVoice* vc = &snd_voices[v];
+                vc->handle = h; vc->smpIdx = smpIdx; vc->channel = ch;
+                vc->note = note; vc->baseHz = baseHz; vc->noteOffTick = 0;
+                vc->volHead = vol; vc->volPeak = vol; vc->ageFrames = 0;
+                vc->releaseFrames = 0; vc->releaseLeft = 0; vc->isSfxLoop = 1;
+            }
+        }
         return;
     }
 
@@ -207,6 +226,7 @@ void afn_trigger_sample(int smpIdx, int note, int vel, int durTicks, int ch)
     vc->ageFrames     = 0;
     vc->releaseFrames = 0;
     vc->releaseLeft   = 0;
+    vc->isSfxLoop     = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +302,23 @@ void afn_stop_sound(void)
     for (int i = 0; i < SND_MAX_VOICES; i++) {
         if (snd_voices[i].handle >= 0) soundKill(snd_voices[i].handle);
         snd_voices[i].handle = -1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stop only the voices playing a specific sample (Stop Sound node with a Sound
+// Instance wired). BGM and other SFX keep playing — this is what kills a
+// looping grind SFX the instant Is Not Grinding -> On Rise fires. Only looping
+// SFX are tracked (afn_trigger_sample reserves a voice for them), so this hits
+// them; one-shot SFX sharing the smpIdx would already have ended.
+// ---------------------------------------------------------------------------
+void afn_stop_sfx_sample(int smpIdx)
+{
+    for (int i = 0; i < SND_MAX_VOICES; i++) {
+        if (snd_voices[i].handle >= 0 && snd_voices[i].smpIdx == smpIdx) {
+            soundKill(snd_voices[i].handle);
+            snd_voices[i].handle = -1;
+        }
     }
 }
 

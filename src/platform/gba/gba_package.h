@@ -385,6 +385,10 @@ enum class GBAScriptNodeType : int {
     VelocityFalloff,
     BoostForward,
     HaltMomentum,
+    StartGrind,
+    StopGrind,
+    IsGrinding,
+    IsNotGrinding,
     COUNT
 };
 

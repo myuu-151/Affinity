@@ -1956,6 +1956,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int   afn_player_vx_world;\n";
         f << "static int   afn_player_vz_world;\n";
         f << "static int   afn_velocity_falloff;\n";
+        f << "static int   afn_grinding;  // rail grind state (Mode 4 runtime)\n";
+        f << "static int   afn_grind_rail = -1;\n";
         // Pending forward-boost magnitude. BoostForward writes this; runtime
         // consumes it during the player update by decomposing into vx/vz via
         // sin/cos(viewAngle), then clears it. Lets the node be view-relative
@@ -2681,6 +2683,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    player_vy = 0;\n";
                     break;
                 }
+                case GBAScriptNodeType::StartGrind:
+                    f << "    afn_grinding = 1; afn_grind_rail = afn_collided_sprite;\n";
+                    break;
+                case GBAScriptNodeType::StopGrind:
+                    f << "    afn_grinding = 0;\n";
+                    break;
                 case GBAScriptNodeType::PlaySound: {
                     auto* sndData = findDataIn(action->id, 0);
                     int sndId = sndData ? resolveInt(sndData) : 0;
@@ -3478,7 +3486,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     || t == GBAScriptNodeType::HasItem || t == GBAScriptNodeType::IsDialogueOpen
                     || t == GBAScriptNodeType::IsInState || t == GBAScriptNodeType::IsColliding
                     || t == GBAScriptNodeType::IsTrue || t == GBAScriptNodeType::IsNear2D
-                    || t == GBAScriptNodeType::IsFollowMoving || t == GBAScriptNodeType::OnRise;
+                    || t == GBAScriptNodeType::IsFollowMoving || t == GBAScriptNodeType::OnRise
+                    || t == GBAScriptNodeType::IsGrinding || t == GBAScriptNodeType::IsNotGrinding;
             };
             std::set<int> emittedActionIds;
             for (auto& c : chains) {
@@ -3572,6 +3581,16 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 int gateDepth = 0;
                 bool inJumpGate = false;
                 for (auto* a : actions) {
+                    if (a->type == GBAScriptNodeType::IsGrinding) {
+                        f << "    if (afn_grinding) {\n";
+                        gateDepth++;
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsNotGrinding) {
+                        f << "    if (!afn_grinding) {\n";
+                        gateDepth++;
+                        continue;
+                    }
                     if (a->type == GBAScriptNodeType::IsMoving) {
                         f << "    if (player_moving) {\n";
                         gateDepth++;
@@ -4251,6 +4270,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    player_vy = 0;\n";
                     break;
                 }
+                case GBAScriptNodeType::StartGrind:
+                    f << "    afn_grinding = 1; afn_grind_rail = afn_collided_sprite;\n";
+                    break;
+                case GBAScriptNodeType::StopGrind:
+                    f << "    afn_grinding = 0;\n";
+                    break;
                 case GBAScriptNodeType::PlaySound: {
                     auto* sndData = bpFindDataIn(action->id, 0);
                     std::string sndId = sndData ? bpResolveInt(sndData) : "0";
@@ -5108,6 +5133,14 @@ static bool GenerateMapData(const std::string& runtimeDir,
                         f << "    }\n";
                     };
 
+                    if (a->type == GBAScriptNodeType::IsGrinding) {
+                        emitGateBranch("afn_grinding");
+                        continue;
+                    }
+                    if (a->type == GBAScriptNodeType::IsNotGrinding) {
+                        emitGateBranch("!afn_grinding");
+                        continue;
+                    }
                     if (a->type == GBAScriptNodeType::IsMoving) {
                         emitGateBranch("player_moving");
                         continue;
