@@ -4887,6 +4887,13 @@ static bool SaveProject(const std::string& path)
                     sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0);
             }
         }
+        // Grind rail path (per mesh object). One header + one line per point.
+        if (sp.isGrindRail || sp.railPointCount > 0) {
+            fprintf(f, "railPath=%d,%d\n", sp.isGrindRail ? 1 : 0, sp.railPointCount);
+            for (int rp = 0; rp < sp.railPointCount; rp++)
+                fprintf(f, "railPt=%.6f,%.6f,%.6f\n",
+                    sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z);
+        }
     }
     fprintf(f, "\n");
 
@@ -5975,6 +5982,22 @@ static bool LoadProject(const std::string& path)
                     sub.scale = (m >= 8) ? sScale : 1.0f;
                     sub.forceStatic = (m >= 9) ? (fStatic != 0) : false;
                     sub.grounded = (m >= 10) ? (fGrounded != 0) : false;
+                }
+            }
+            else if (strncmp(line, "railPath=", 9) == 0 && sSpriteCount > 0) {
+                FloorSprite& sp2 = sSprites[sSpriteCount - 1];
+                int isr = 0, cnt = 0;
+                sscanf(line + 9, "%d,%d", &isr, &cnt);
+                sp2.isGrindRail = (isr != 0);
+                sp2.railPointCount = 0;   // railPt lines below fill up to cnt
+                (void)cnt;
+            }
+            else if (strncmp(line, "railPt=", 7) == 0 && sSpriteCount > 0) {
+                FloorSprite& sp2 = sSprites[sSpriteCount - 1];
+                if (sp2.railPointCount < FloorSprite::kMaxRailPoints) {
+                    auto& rp = sp2.railPath[sp2.railPointCount];
+                    if (sscanf(line + 7, "%f,%f,%f", &rp.x, &rp.y, &rp.z) == 3)
+                        sp2.railPointCount++;
                 }
             }
         }
