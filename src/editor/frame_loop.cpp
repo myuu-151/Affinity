@@ -575,6 +575,10 @@ enum class VsNodeType : int {
     VelocityFalloff, // action: linear decay of vx/vz to 0 over N frames (Mode 4 boost pad style)
     BoostForward,    // action: push the player along their current view direction (vx/vz = sin/cos(viewAngle) * speed)
     HaltMomentum,    // action: zero all player velocity (vx, vz, vy, pending boost, falloff) — use on respawn
+    StartGrind,      // action: begin rail grinding — lock to entry direction, slide on momentum (Mode 4)
+    StopGrind,       // action: end rail grinding
+    IsGrinding,      // gate: passes exec while the player is grinding
+    IsNotGrinding,   // gate: passes exec while the player is NOT grinding
     COUNT
 };
 
@@ -652,7 +656,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Stop Anim",      0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Set Anim Speed", 0xFF3355AA, 1, 1, 1, 0, {"Speed (int)"}, {}, {} },
     { "Set Velocity Y", 0xFF3355AA, 1, 1, 1, 0, {"Velocity (float)"}, {}, {} },
-    { "Stop Sound",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Stop Sound",     0xFF3355AA, 1, 1, 1, 0, {"Sound Instance"}, {}, {} },
     { "Add",            0xFF666688, 0, 0, 2, 1, {"A", "B"}, {"Result"}, {} },
     { "Subtract",       0xFF666688, 0, 0, 2, 1, {"A", "B"}, {"Result"}, {} },
     { "Multiply",       0xFF666688, 0, 0, 2, 1, {"A", "B"}, {"Result"}, {} },
@@ -876,6 +880,10 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Velocity Falloff",0xFF3355AA, 1, 1, 1, 0, {"Frames (int)"}, {}, {} },
     { "Boost Forward", 0xFF3355AA, 1, 1, 1, 0, {"Speed (float)"}, {}, {} },
     { "Halt Momentum", 0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Start Grind",   0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Stop Grind",    0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Grinding",   0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Not Grinding", 0xFF885533, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -1125,6 +1133,7 @@ struct MidiFile {
     bool channelUsed[16] = {};  // whether channel has any notes
     bool channelMuted[16] = {}; // mute toggle per channel
     int channelVolume[16];      // per-channel volume 0-100 (default 100)
+    float masterDb = 0.0f;      // per-sequence master volume in dB (-20..+20)
 };
 
 static std::vector<SoundSample> sSoundBank;
@@ -2617,7 +2626,12 @@ static AudioVoice sVoices[kMaxVoices] = {};
 static bool sAudioOpen = false;
 
 // MIDI playback state
+// sMidiMasterDb is the LIVE playback master volume (the mixer reads it). It's
+// set from the currently-playing sequence's own masterDb when playback starts,
+// so each sequence slot has its own master level. It also doubles as the
+// legacy/global default for projects saved before per-sequence masterDb existed.
 static float sMidiMasterDb = 0.0f; // master volume in dB (-20 to +20)
+static int sMidiActiveChannel = 0; // channel new piano-roll notes are drawn on
 static bool sMidiPlaying = false;
 static int sMidiPlayIdx = -1;     // index into sMidiFiles
 static double sMidiPlayTime = 0;  // seconds elapsed
@@ -3279,6 +3293,9 @@ static void AudioPlayMidi(int midiIdx) {
     if (midiIdx < 0 || midiIdx >= (int)sMidiFiles.size()) return;
     AudioStopAll();
     sMidiPlayIdx = midiIdx;
+    // Drive the mixer's master volume from THIS sequence's own setting so each
+    // sequence slot plays back at its own master level.
+    sMidiMasterDb = sMidiFiles[midiIdx].masterDb;
     sMidiPlayTime = 0;
     sMidiPlayTick = 0;
     memset(sMidiPitchBend, 0, sizeof(sMidiPitchBend));
@@ -3933,28 +3950,41 @@ struct UndoEntry
 {
     int spriteIdx;
     float x, y, z, scale, rotation, rotationX, rotationZ;
+    // >=0 means this entry is a single rail-point move on sprite spriteIdx:
+    // x,y,z hold the point's saved position; scale/rotation* are unused.
+    int railPointIdx = -1;
 };
 static constexpr int kMaxUndo = 64;
 static UndoEntry sUndoStack[kMaxUndo];
 static int sUndoCount = 0;
 static int sUndoCursor = 0; // points to next write slot; redo goes forward
 
-static void UndoPush(int idx, const FloorSprite& sp)
+static void UndoPushEntry(const UndoEntry& e)
 {
     if (sUndoCursor < kMaxUndo)
     {
-        sUndoStack[sUndoCursor] = { idx, sp.x, sp.y, sp.z, sp.scale, sp.rotation, sp.rotationX, sp.rotationZ };
+        sUndoStack[sUndoCursor] = e;
         sUndoCursor++;
         sUndoCount = sUndoCursor; // discard redo history
     }
     else
     {
-        // Shift stack left by 1
         for (int i = 0; i < kMaxUndo - 1; i++)
             sUndoStack[i] = sUndoStack[i + 1];
-        sUndoStack[kMaxUndo - 1] = { idx, sp.x, sp.y, sp.z, sp.scale, sp.rotation, sp.rotationX, sp.rotationZ };
+        sUndoStack[kMaxUndo - 1] = e;
         sUndoCount = kMaxUndo;
     }
+}
+
+static void UndoPush(int idx, const FloorSprite& sp)
+{
+    UndoPushEntry({ idx, sp.x, sp.y, sp.z, sp.scale, sp.rotation, sp.rotationX, sp.rotationZ, -1 });
+}
+
+// Snapshot one rail point's position before it's moved (G-grab in the 3D tab).
+static void UndoPushRailPoint(int spriteIdx, int pointIdx, float x, float y, float z)
+{
+    UndoPushEntry({ spriteIdx, x, y, z, 0, 0, 0, 0, pointIdx });
 }
 
 static void UndoPop()
@@ -3962,6 +3992,18 @@ static void UndoPop()
     if (sUndoCursor <= 0) return;
     sUndoCursor--;
     UndoEntry& e = sUndoStack[sUndoCursor];
+    if (e.railPointIdx >= 0)
+    {
+        if (e.spriteIdx >= 0 && e.spriteIdx < sSpriteCount
+            && e.railPointIdx < sSprites[e.spriteIdx].railPointCount)
+        {
+            auto& rp = sSprites[e.spriteIdx].railPath[e.railPointIdx];
+            float cx = rp.x, cy = rp.y, cz = rp.z;
+            rp.x = e.x; rp.y = e.y; rp.z = e.z;
+            e.x = cx; e.y = cy; e.z = cz; // stash current for redo
+        }
+        return;
+    }
     if (e.spriteIdx >= 0 && e.spriteIdx < sSpriteCount)
     {
         FloorSprite& sp = sSprites[e.spriteIdx];
@@ -3969,7 +4011,7 @@ static void UndoPop()
         float cx = sp.x, cy = sp.y, cz = sp.z, cs = sp.scale, cr = sp.rotation, crx = sp.rotationX, crz = sp.rotationZ;
         sp.x = e.x; sp.y = e.y; sp.z = e.z; sp.scale = e.scale; sp.rotation = e.rotation; sp.rotationX = e.rotationX; sp.rotationZ = e.rotationZ;
         // Overwrite the entry with what we just replaced (for redo)
-        e = { e.spriteIdx, cx, cy, cz, cs, cr, crx, crz };
+        e = { e.spriteIdx, cx, cy, cz, cs, cr, crx, crz, -1 };
     }
 }
 
@@ -3977,12 +4019,25 @@ static void RedoPush()
 {
     if (sUndoCursor >= sUndoCount) return;
     UndoEntry& e = sUndoStack[sUndoCursor];
+    if (e.railPointIdx >= 0)
+    {
+        if (e.spriteIdx >= 0 && e.spriteIdx < sSpriteCount
+            && e.railPointIdx < sSprites[e.spriteIdx].railPointCount)
+        {
+            auto& rp = sSprites[e.spriteIdx].railPath[e.railPointIdx];
+            float cx = rp.x, cy = rp.y, cz = rp.z;
+            rp.x = e.x; rp.y = e.y; rp.z = e.z;
+            e.x = cx; e.y = cy; e.z = cz;
+        }
+        sUndoCursor++;
+        return;
+    }
     if (e.spriteIdx >= 0 && e.spriteIdx < sSpriteCount)
     {
         FloorSprite& sp = sSprites[e.spriteIdx];
         float cx = sp.x, cy = sp.y, cz = sp.z, cs = sp.scale, cr = sp.rotation, crx = sp.rotationX, crz = sp.rotationZ;
         sp.x = e.x; sp.y = e.y; sp.z = e.z; sp.scale = e.scale; sp.rotation = e.rotation; sp.rotationX = e.rotationX; sp.rotationZ = e.rotationZ;
-        e = { e.spriteIdx, cx, cy, cz, cs, cr, crx, crz };
+        e = { e.spriteIdx, cx, cy, cz, cs, cr, crx, crz, -1 };
     }
     sUndoCursor++;
 }
@@ -4321,6 +4376,12 @@ static char  s3DGrabAxis      = 0;        // 0 = free, 'X'/'Y'/'Z' = locked
 static ImVec2 s3DGrabStartMouse = {};
 struct s3DGrabSnap { int idx; float x, y, z; };
 static std::vector<s3DGrabSnap> s3DGrabOrig;
+// Rail-point editing: right-click a rail point to select it, then G/X/Y/Z grabs
+// just that point (Blender-style). -1 = no rail point selected.
+static int   s3DSelRailSprite   = -1;  // sprite index whose rail point is selected
+static int   s3DSelRailPoint    = -1;  // point index within that rail's railPath
+static bool  s3DGrabIsRailPoint = false; // current G grab moves a rail point, not sprites
+static float s3DRailGrabOrig[3] = { 0, 0, 0 };
 
 // Blender-style rotate mode (R). Each selected sprite spins around its
 // own anchor on the chosen axis. Stored angles feed sp.rotation /
@@ -4870,6 +4931,13 @@ static bool SaveProject(const std::string& path)
                     sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0);
             }
         }
+        // Grind rail path (per mesh object). One header + one line per point.
+        if (sp.isGrindRail || sp.railPointCount > 0) {
+            fprintf(f, "railPath=%d,%d,%d\n", sp.isGrindRail ? 1 : 0, sp.railPointCount, sp.railSpline ? 1 : 0);
+            for (int rp = 0; rp < sp.railPointCount; rp++)
+                fprintf(f, "railPt=%.6f,%.6f,%.6f\n",
+                    sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z);
+        }
     }
     fprintf(f, "\n");
 
@@ -5312,6 +5380,13 @@ static bool SaveProject(const std::string& path)
                         sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0);
                 }
             }
+            // Grind rail path (per mesh object) — 3D/Map scenes round-trip here.
+            if (sp.isGrindRail || sp.railPointCount > 0) {
+                fprintf(f, "msRailPath=%d,%d,%d\n", sp.isGrindRail ? 1 : 0, sp.railPointCount, sp.railSpline ? 1 : 0);
+                for (int rp = 0; rp < sp.railPointCount; rp++)
+                    fprintf(f, "msRailPt=%.6f,%.6f,%.6f\n",
+                        sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z);
+            }
         }
         // Camera
         fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d,%d,%.1f,%.1f,%.1f,%d\n",
@@ -5440,6 +5515,13 @@ static bool SaveProject(const std::string& path)
                         sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
                         sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0);
                 }
+            }
+            // Grind rail path (per mesh object) — M7 scenes round-trip here.
+            if (sp.isGrindRail || sp.railPointCount > 0) {
+                fprintf(f, "m7RailPath=%d,%d,%d\n", sp.isGrindRail ? 1 : 0, sp.railPointCount, sp.railSpline ? 1 : 0);
+                for (int rp = 0; rp < sp.railPointCount; rp++)
+                    fprintf(f, "m7RailPt=%.6f,%.6f,%.6f\n",
+                        sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z);
             }
         }
         fprintf(f, "m7Cam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d\n",
@@ -5645,6 +5727,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "midi_begin=%s\n", mf.name);
         fprintf(f, "tpb=%d\n", mf.ticksPerBeat);
         fprintf(f, "tempo=%d\n", mf.tempo);
+        fprintf(f, "masterDb=%.4f\n", mf.masterDb);
         // Channel config
         for (int ch = 0; ch < 16; ch++) {
             if (mf.channelUsed[ch])
@@ -5957,6 +6040,23 @@ static bool LoadProject(const std::string& path)
                     sub.scale = (m >= 8) ? sScale : 1.0f;
                     sub.forceStatic = (m >= 9) ? (fStatic != 0) : false;
                     sub.grounded = (m >= 10) ? (fGrounded != 0) : false;
+                }
+            }
+            else if (strncmp(line, "railPath=", 9) == 0 && sSpriteCount > 0) {
+                FloorSprite& sp2 = sSprites[sSpriteCount - 1];
+                int isr = 0, cnt = 0, spl = 0;
+                sscanf(line + 9, "%d,%d,%d", &isr, &cnt, &spl);
+                sp2.isGrindRail = (isr != 0);
+                sp2.railSpline = (spl != 0);
+                sp2.railPointCount = 0;   // railPt lines below fill up to cnt
+                (void)cnt;
+            }
+            else if (strncmp(line, "railPt=", 7) == 0 && sSpriteCount > 0) {
+                FloorSprite& sp2 = sSprites[sSpriteCount - 1];
+                if (sp2.railPointCount < FloorSprite::kMaxRailPoints) {
+                    auto& rp = sp2.railPath[sp2.railPointCount];
+                    if (sscanf(line + 7, "%f,%f,%f", &rp.x, &rp.y, &rp.z) == 3)
+                        sp2.railPointCount++;
                 }
             }
         }
@@ -7088,6 +7188,29 @@ static bool LoadProject(const std::string& path)
                     }
                 }
             }
+            else if (strncmp(line, "msRailPath=", 11) == 0 && !sMapScenes.empty()) {
+                MapScene& ms = sMapScenes.back();
+                if (ms.spriteCount > 0) {
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    int isr = 0, cnt = 0, spl = 0;
+                    sscanf(line + 11, "%d,%d,%d", &isr, &cnt, &spl);
+                    sp2.isGrindRail = (isr != 0);
+                    sp2.railSpline = (spl != 0);
+                    sp2.railPointCount = 0;
+                    (void)cnt;
+                }
+            }
+            else if (strncmp(line, "msRailPt=", 9) == 0 && !sMapScenes.empty()) {
+                MapScene& ms = sMapScenes.back();
+                if (ms.spriteCount > 0) {
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    if (sp2.railPointCount < FloorSprite::kMaxRailPoints) {
+                        auto& rp = sp2.railPath[sp2.railPointCount];
+                        if (sscanf(line + 9, "%f,%f,%f", &rp.x, &rp.y, &rp.z) == 3)
+                            sp2.railPointCount++;
+                    }
+                }
+            }
             else if (strncmp(line, "msCam=", 6) == 0 && !sMapScenes.empty())
             {
                 MapScene& ms = sMapScenes.back();
@@ -7493,6 +7616,29 @@ static bool LoadProject(const std::string& path)
                         sub.scale = (m >= 8) ? sScale : 1.0f;
                         sub.forceStatic = (m >= 9) ? (fStatic != 0) : false;
                         sub.grounded = (m >= 10) ? (fGrounded != 0) : false;
+                    }
+                }
+            }
+            else if (strncmp(line, "m7RailPath=", 11) == 0 && !sM7Scenes.empty()) {
+                MapScene& ms = sM7Scenes.back();
+                if (ms.spriteCount > 0) {
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    int isr = 0, cnt = 0, spl = 0;
+                    sscanf(line + 11, "%d,%d,%d", &isr, &cnt, &spl);
+                    sp2.isGrindRail = (isr != 0);
+                    sp2.railSpline = (spl != 0);
+                    sp2.railPointCount = 0;
+                    (void)cnt;
+                }
+            }
+            else if (strncmp(line, "m7RailPt=", 9) == 0 && !sM7Scenes.empty()) {
+                MapScene& ms = sM7Scenes.back();
+                if (ms.spriteCount > 0) {
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    if (sp2.railPointCount < FloorSprite::kMaxRailPoints) {
+                        auto& rp = sp2.railPath[sp2.railPointCount];
+                        if (sscanf(line + 9, "%f,%f,%f", &rp.x, &rp.y, &rp.z) == 3)
+                            sp2.railPointCount++;
                     }
                 }
             }
@@ -7969,6 +8115,10 @@ static bool LoadProject(const std::string& path)
                 curMidi = &sMidiFiles.back();
                 strncpy(curMidi->name, line + 11, sizeof(curMidi->name) - 1);
                 for (int ch = 0; ch < 16; ch++) curMidi->channelVolume[ch] = 100;
+                // Backward-compat: seed from the legacy global master dB (parsed
+                // earlier in the file). A per-sequence masterDb= line below will
+                // override this for projects saved after the per-sequence split.
+                curMidi->masterDb = sMidiMasterDb;
             }
             else if (strcmp(line, "midi_end") == 0) {
                 curMidi = nullptr;
@@ -7977,6 +8127,7 @@ static bool LoadProject(const std::string& path)
             else if (curMidi) {
                 if (sscanf(line, "tpb=%d", &ival) == 1) curMidi->ticksPerBeat = ival;
                 else if (sscanf(line, "tempo=%d", &ival) == 1) curMidi->tempo = ival;
+                else if (sscanf(line, "masterDb=%f", &fval) == 1) curMidi->masterDb = fval;
                 else if (strncmp(line, "ch=", 3) == 0) {
                     int ch, bank, muted, vol;
                     char chName[48] = {};
@@ -8527,7 +8678,69 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             sy_ = pos.y + (1.0f - ndcY) * 0.5f * size.y;
             return true;
         };
-        for (int i = 0; i < sSpriteCount; i++)
+        // ---- Rail-point pick (takes priority over mesh pick when close) ----
+        // Right-clicking near a drawn rail point selects THAT point so G/X/Y/Z
+        // grabs it alone. A fresh pick clears any prior point selection unless a
+        // point is hit. Keeps the parent rail sprite selected so its panel shows.
+        bool railHit = false;
+        s3DSelRailSprite = -1; s3DSelRailPoint = -1;
+        {
+            // Generous radius so dots are easy to grab; condition matches the
+            // wireframe render (railPointCount>0) so every VISIBLE dot is pickable.
+            // IMPORTANT: the dots are drawn by Render3DViewport's GL look-at, whose
+            // right/up basis differs from doSinglePick's worldToScreen (that one
+            // flips upRef to Z when pitched). Projecting with the wrong basis put
+            // the pick position off the visible dot when the camera looked down, so
+            // clicks fell through to the mesh. Replicate the GL projection here:
+            //   right = (-fz,0,fx) normalized in XZ; up = right x fwd.
+            float pcx = s3DTargetX + s3DOrbitDist * cosf(s3DOrbitPitch) * sinf(s3DOrbitYaw);
+            float pcy = s3DTargetY + s3DOrbitDist * sinf(s3DOrbitPitch);
+            float pcz = s3DTargetZ + s3DOrbitDist * cosf(s3DOrbitPitch) * cosf(s3DOrbitYaw);
+            float pfx = s3DTargetX - pcx, pfy = s3DTargetY - pcy, pfz = s3DTargetZ - pcz;
+            { float l = sqrtf(pfx*pfx+pfy*pfy+pfz*pfz); if (l>0){pfx/=l;pfy/=l;pfz/=l;} }
+            float psx = -pfz, psy = 0.0f, psz = pfx;
+            { float l = sqrtf(psx*psx+psz*psz); if (l>0){psx/=l;psz/=l;} }
+            float pux = psy*pfz - psz*pfy, puy = psz*pfx - psx*pfz, puz = psx*pfy - psy*pfx;
+            float pTanH = tanf(45.0f * 3.14159265f / 360.0f);
+            float pAsp  = vpAreaW / size.y;
+            auto railToScreen = [&](float wx, float wy, float wz, float& sx_, float& sy_) -> bool {
+                float ex = wx-pcx, ey = wy-pcy, ez = wz-pcz;
+                float vz = -(pfx*ex + pfy*ey + pfz*ez); // GL view z (visible: vz<0)
+                if (vz >= -0.01f) return false;
+                float vx = psx*ex + psy*ey + psz*ez;
+                float vy = pux*ex + puy*ey + puz*ez;
+                float ndcX = (vx / (-vz)) / (pTanH * pAsp);
+                float ndcY = (vy / (-vz)) / pTanH;
+                sx_ = pos.x + (ndcX + 1.0f) * 0.5f * vpAreaW;
+                sy_ = pos.y + (1.0f - ndcY) * 0.5f * size.y;
+                return true;
+            };
+            const float kRailPickPx = 22.0f;
+            float bestPx = kRailPickPx;
+            int   bestSp = -1, bestPt = -1;
+            for (int i = 0; i < sSpriteCount; i++) {
+                const FloorSprite& sp = sSprites[i];
+                if (sp.railPointCount <= 0) continue;
+                for (int rp = 0; rp < sp.railPointCount; rp++) {
+                    float sx_, sy_;
+                    if (!railToScreen(sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z, sx_, sy_))
+                        continue;
+                    float d = sqrtf((sx_-mpos.x)*(sx_-mpos.x) + (sy_-mpos.y)*(sy_-mpos.y));
+                    if (d < bestPx) { bestPx = d; bestSp = i; bestPt = rp; }
+                }
+            }
+            if (bestSp >= 0) {
+                railHit = true;
+                s3DSelRailSprite = bestSp; s3DSelRailPoint = bestPt;
+                for (int i = 0; i < sSpriteCount; i++) sSprites[i].selected = false;
+                sSprites[bestSp].selected = true;
+                sSelectedSprite = bestSp;
+                sSelectedObjType = SelectedObjType::Sprite;
+                if (sSprites[bestSp].meshIdx >= 0 && sSprites[bestSp].meshIdx < (int)sMeshAssets.size())
+                    sSelectedMesh = sSprites[bestSp].meshIdx;
+            }
+        }
+        for (int i = 0; !railHit && i < sSpriteCount; i++)
         {
             const FloorSprite& sp = sSprites[i];
             bool isMesh = (sp.type == SpriteType::Mesh
@@ -8654,7 +8867,7 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 }
             }
         }
-        if (bestIdx >= 0) {
+        if (!railHit && bestIdx >= 0) {
             if (singlePickCtrl) {
                 // Ctrl+RMB click: toggle that mesh in/out of the multi-selection
                 // without disturbing the others.
@@ -8681,7 +8894,7 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 if (sSprites[bestIdx].meshIdx >= 0 && sSprites[bestIdx].meshIdx < (int)sMeshAssets.size())
                     sSelectedMesh = sSprites[bestIdx].meshIdx;
             }
-        } else if (!singlePickCtrl) {
+        } else if (!railHit && !singlePickCtrl) {
             // Click on empty space (no Ctrl): clear selection.
             for (int i = 0; i < sSpriteCount; i++) sSprites[i].selected = false;
             sSelectedSprite = -1;
@@ -8739,23 +8952,48 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             && ImGui::IsKeyPressed(ImGuiKey_G, false)
             && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt)
         {
-            s3DGrabOrig.clear();
-            for (int i = 0; i < sSpriteCount; i++)
-                if (sSprites[i].selected)
-                    s3DGrabOrig.push_back({ i, sSprites[i].x, sSprites[i].y, sSprites[i].z });
-            if (!s3DGrabOrig.empty()) {
+            // A selected rail point takes priority: G grabs just that point.
+            if (s3DSelRailSprite >= 0 && s3DSelRailSprite < sSpriteCount
+                && s3DSelRailPoint >= 0 && s3DSelRailPoint < sSprites[s3DSelRailSprite].railPointCount)
+            {
+                const auto& p = sSprites[s3DSelRailSprite].railPath[s3DSelRailPoint];
+                s3DRailGrabOrig[0] = p.x; s3DRailGrabOrig[1] = p.y; s3DRailGrabOrig[2] = p.z;
+                // Snapshot for Ctrl+Z (restores this point's pre-grab position).
+                UndoPushRailPoint(s3DSelRailSprite, s3DSelRailPoint, p.x, p.y, p.z);
+                s3DGrabIsRailPoint = true;
                 s3DGrabMode = true;
                 s3DGrabAxis = 0;
                 s3DGrabStartMouse = mpos;
+            } else {
+                s3DGrabIsRailPoint = false;
+                s3DGrabOrig.clear();
+                for (int i = 0; i < sSpriteCount; i++)
+                    if (sSprites[i].selected)
+                        s3DGrabOrig.push_back({ i, sSprites[i].x, sSprites[i].y, sSprites[i].z });
+                if (!s3DGrabOrig.empty()) {
+                    s3DGrabMode = true;
+                    s3DGrabAxis = 0;
+                    s3DGrabStartMouse = mpos;
+                }
             }
         }
         if (s3DGrabMode)
         {
+            auto railPt = [&]() -> FloorSprite::RailPoint* {
+                if (s3DGrabIsRailPoint && s3DSelRailSprite >= 0 && s3DSelRailSprite < sSpriteCount
+                    && s3DSelRailPoint >= 0 && s3DSelRailPoint < sSprites[s3DSelRailSprite].railPointCount)
+                    return &sSprites[s3DSelRailSprite].railPath[s3DSelRailPoint];
+                return nullptr;
+            };
             auto resetAnchor = [&]() {
-                for (auto& g : s3DGrabOrig) {
-                    sSprites[g.idx].x = g.x;
-                    sSprites[g.idx].y = g.y;
-                    sSprites[g.idx].z = g.z;
+                if (auto* p = railPt()) {
+                    p->x = s3DRailGrabOrig[0]; p->y = s3DRailGrabOrig[1]; p->z = s3DRailGrabOrig[2];
+                } else {
+                    for (auto& g : s3DGrabOrig) {
+                        sSprites[g.idx].x = g.x;
+                        sSprites[g.idx].y = g.y;
+                        sSprites[g.idx].z = g.z;
+                    }
                 }
                 s3DGrabStartMouse = mpos;
             };
@@ -8790,23 +9028,35 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 dx = ( dpx * right_x + dpy * fwd_x) * scale;
                 dz = ( dpx * right_z + dpy * fwd_z) * scale;
             }
-            for (auto& g : s3DGrabOrig) {
-                sSprites[g.idx].x = g.x + dx;
-                sSprites[g.idx].y = g.y + dy;
-                sSprites[g.idx].z = g.z + dz;
+            if (auto* p = railPt()) {
+                p->x = s3DRailGrabOrig[0] + dx;
+                p->y = s3DRailGrabOrig[1] + dy;
+                p->z = s3DRailGrabOrig[2] + dz;
+            } else {
+                for (auto& g : s3DGrabOrig) {
+                    sSprites[g.idx].x = g.x + dx;
+                    sSprites[g.idx].y = g.y + dy;
+                    sSprites[g.idx].z = g.z + dz;
+                }
             }
             // Commit on LMB, revert on Escape.
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 s3DGrabMode = false;
+                s3DGrabIsRailPoint = false;
                 sProjectDirty = true;
             }
             if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-                for (auto& g : s3DGrabOrig) {
-                    sSprites[g.idx].x = g.x;
-                    sSprites[g.idx].y = g.y;
-                    sSprites[g.idx].z = g.z;
+                if (auto* p = railPt()) {
+                    p->x = s3DRailGrabOrig[0]; p->y = s3DRailGrabOrig[1]; p->z = s3DRailGrabOrig[2];
+                } else {
+                    for (auto& g : s3DGrabOrig) {
+                        sSprites[g.idx].x = g.x;
+                        sSprites[g.idx].y = g.y;
+                        sSprites[g.idx].z = g.z;
+                    }
                 }
                 s3DGrabMode = false;
+                s3DGrabIsRailPoint = false;
             }
         }
     }
@@ -8866,6 +9116,63 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 }
                 s3DRotMode = false;
             }
+        }
+    }
+
+    // ---- Grind rail path overlay (wireframe between rail points) ----
+    // Draw each grind rail's authored path as a polyline with a dot at every
+    // point, so the hand-placed points are visible while editing. The selected
+    // rail is drawn brighter with numbered handles. World->screen matches the
+    // click-pick projection above (same FOV / aspect / basis).
+    {
+        bool anyRail = false;
+        for (int i = 0; i < sSpriteCount; i++)
+            if (sSprites[i].isGrindRail && sSprites[i].railPointCount > 0) { anyRail = true; break; }
+        if (anyRail) {
+            float camX, camY, camZ, fxv, fyv, fzv, rxv, ryv, rzv, uxv, uyv, uzv;
+            computeCamBasis(camX, camY, camZ, fxv, fyv, fzv, rxv, ryv, rzv, uxv, uyv, uzv);
+            float vTanH = tanf(45.0f * 3.14159265f / 360.0f);
+            float vAsp  = vpAreaW / size.y;
+            auto w2s = [&](float wx, float wy, float wz, ImVec2& out) -> bool {
+                float dxc = wx - camX, dyc = wy - camY, dzc = wz - camZ;
+                float zc = dxc*fxv + dyc*fyv + dzc*fzv;
+                if (zc <= 0.01f) return false;
+                float xc = dxc*rxv + dyc*ryv + dzc*rzv;
+                float yc = dxc*uxv + dyc*uyv + dzc*uzv;
+                float nx = xc / (zc * vTanH * vAsp);
+                float ny = yc / (zc * vTanH);
+                out.x = pos.x + (nx + 1.0f) * 0.5f * vpAreaW;
+                out.y = pos.y + (1.0f - ny) * 0.5f * size.y;
+                return true;
+            };
+            ImDrawList* rdl = ImGui::GetWindowDrawList();
+            rdl->PushClipRect(ImVec2(pos.x, pos.y), ImVec2(pos.x + vpAreaW, pos.y + size.y), true);
+            for (int i = 0; i < sSpriteCount; i++) {
+                const FloorSprite& sp = sSprites[i];
+                if (!sp.isGrindRail || sp.railPointCount <= 0) continue;
+                bool sel = (i == sSelectedSprite);
+                ImU32 lineCol = sel ? IM_COL32(255, 200, 40, 255) : IM_COL32(120, 200, 255, 160);
+                ImU32 dotCol  = sel ? IM_COL32(255, 255, 120, 255) : IM_COL32(160, 220, 255, 200);
+                float lineW   = sel ? 2.5f : 1.5f;
+                float dotR    = sel ? 4.5f : 3.0f;
+                ImVec2 prev; bool prevOk = false;
+                for (int rp = 0; rp < sp.railPointCount; rp++) {
+                    ImVec2 cur;
+                    bool ok = w2s(sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z, cur);
+                    if (ok && prevOk)
+                        rdl->AddLine(prev, cur, lineCol, lineW);
+                    if (ok) {
+                        rdl->AddCircleFilled(cur, dotR, dotCol);
+                        if (sel) {
+                            rdl->AddCircle(cur, dotR + 1.5f, IM_COL32(0, 0, 0, 200), 0, 1.5f);
+                            char lbl[8]; snprintf(lbl, sizeof(lbl), "%d", rp);
+                            rdl->AddText(ImVec2(cur.x + 6, cur.y - 6), IM_COL32(255, 255, 255, 230), lbl);
+                        }
+                    }
+                    prev = cur; prevOk = ok;
+                }
+            }
+            rdl->PopClipRect();
         }
     }
 
@@ -9217,6 +9524,146 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         }
         ImGui::PopItemWidth();
+
+        // ---- Rail ----
+        if (sp.type == SpriteType::Mesh) {
+            ImGui::Separator();
+            if (ImGui::Checkbox("Rail##m3d", &sp.isGrindRail)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "Make this mesh a rail. Generate a centerline path\n"
+                "the player slides along (exact, follows curves/thin pipes).");
+            if (sp.isGrindRail) {
+                ImGui::Text("Path points: %d", sp.railPointCount);
+                if (s3DSelRailSprite == sSelectedSprite && s3DSelRailPoint >= 0)
+                    ImGui::TextColored(ImVec4(1.0f,0.4f,1.0f,1.0f),
+                        "Point %d selected — G to grab (X/Y/Z axis)", s3DSelRailPoint);
+                else
+                    ImGui::TextDisabled("Right-click a point, then G to move it");
+                if (ImGui::Checkbox("Spline Runtime##railspline", &sp.railSpline)) sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "ON: player follows a smooth Catmull-Rom curve through the points\n"
+                    "(rounded corners). OFF: straight segments between points.");
+                if (ImGui::Button("Generate From Mesh##railgen") &&
+                    sp.meshIdx >= 0 && sp.meshIdx < (int)sMeshAssets.size())
+                {
+                    // Build the rail centerline by greedy-walking the mesh's own
+                    // verts in WORLD space (scale + Y/X/Z rotation + translate),
+                    // same as the renderer. Start at the far end along the longest
+                    // axis, step forward, take the centroid of nearby verts ahead,
+                    // re-aim each step so the path bends through turns. Float math
+                    // here is reliable; the runtime just follows these points.
+                    const MeshAsset& ma = sMeshAssets[sp.meshIdx];
+                    float ry = sp.rotation   * 3.14159265f / 180.0f;
+                    float rx = sp.rotationX  * 3.14159265f / 180.0f;
+                    float rz = sp.rotationZ  * 3.14159265f / 180.0f;
+                    float cyr=cosf(ry), syr=sinf(ry), cxr=cosf(rx), sxr=sinf(rx), czr=cosf(rz), szr=sinf(rz);
+                    auto xform = [&](float lx, float ly, float lz, float& ox, float& oy, float& oz){
+                        lx*=sp.scale; ly*=sp.scale; lz*=sp.scale;
+                        // Y rotation
+                        float x1 =  lx*cyr + lz*syr, y1 = ly, z1 = -lx*syr + lz*cyr;
+                        // X rotation
+                        float x2 = x1, y2 = y1*cxr - z1*sxr, z2 = y1*sxr + z1*cxr;
+                        // Z rotation
+                        float x3 = x2*czr - y2*szr, y3 = x2*szr + y2*czr, z3 = z2;
+                        ox = x3 + sp.x; oy = y3 + sp.y; oz = z3 + sp.z;
+                    };
+                    int nv = (int)ma.vertices.size();
+                    if (nv >= 2) {
+                        // World-space verts.
+                        static std::vector<float> wx, wy, wz; wx.clear(); wy.clear(); wz.clear();
+                        wx.reserve(nv); wy.reserve(nv); wz.reserve(nv);
+                        float mnx=1e30f,mxx=-1e30f,mnz=1e30f,mxz=-1e30f;
+                        float ccx=0,ccz=0;
+                        for (int v=0; v<nv; v++) {
+                            float ox,oy,oz; xform(ma.vertices[v].px, ma.vertices[v].py, ma.vertices[v].pz, ox,oy,oz);
+                            wx.push_back(ox); wy.push_back(oy); wz.push_back(oz);
+                            if(ox<mnx)mnx=ox; if(ox>mxx)mxx=ox; if(oz<mnz)mnz=oz; if(oz>mxz)mxz=oz;
+                            ccx+=ox; ccz+=oz;
+                        }
+                        ccx/=nv; ccz/=nv;
+                        bool domX = (mxx-mnx) >= (mxz-mnz);
+                        // Start = vert minimizing the dominant axis.
+                        int si0=0; float bk=1e30f;
+                        for (int v=0; v<nv; v++){ float k = domX?wx[v]:wz[v]; if(k<bk){bk=k;si0=v;} }
+                        float curx=wx[si0], cury=wy[si0], curz=wz[si0];
+                        float dirx=ccx-curx, dirz=ccz-curz;
+                        float dl=sqrtf(dirx*dirx+dirz*dirz); if(dl<0.001f)dl=1; dirx/=dl; dirz/=dl;
+                        float diag = sqrtf((mxx-mnx)*(mxx-mnx)+(mxz-mnz)*(mxz-mnz));
+                        float STEP = diag/40.0f; if(STEP<1.0f)STEP=1.0f;
+                        float R = STEP*1.8f, R2=R*R;
+                        sp.railPointCount=0;
+                        { auto& _rp = sp.railPath[sp.railPointCount++]; _rp.x = curx; _rp.y = cury; _rp.z = curz; }
+                        for (int it=0; it<FloorSprite::kMaxRailPoints-1; it++) {
+                            float tx=curx+dirx*STEP, tz=curz+dirz*STEP;
+                            float sx2=0,sy2=0,sz2=0; int n2=0;
+                            for (int v=0; v<nv; v++){
+                                float rxd=wx[v]-tx, rzd=wz[v]-tz;
+                                if(rxd*rxd+rzd*rzd>R2) continue;
+                                float ahead=(wx[v]-curx)*dirx+(wz[v]-curz)*dirz;
+                                if(ahead<=0) continue;
+                                sx2+=wx[v]; sy2+=wy[v]; sz2+=wz[v]; n2++;
+                            }
+                            if(n2==0) break;
+                            float nx=sx2/n2, ny=sy2/n2, nz=sz2/n2;
+                            float ndx=nx-curx, ndz=nz-curz;
+                            float nl=sqrtf(ndx*ndx+ndz*ndz);
+                            if(nl<STEP*0.25f) break;
+                            dirx=ndx/nl; dirz=ndz/nl;
+                            curx=nx; cury=ny; curz=nz;
+                            { auto& _rp = sp.railPath[sp.railPointCount++]; _rp.x = curx; _rp.y = cury; _rp.z = curz; }
+                        }
+                        sProjectDirty = true;
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Clear##railclr")) { sp.railPointCount = 0; sProjectDirty = true; }
+
+                // ---- Manual rail points (no geometry needed) ----
+                // Add / edit / remove individual path points by hand. New points
+                // append at the last point (or the mesh origin if empty), so you
+                // can lay down a path point-by-point and drag each into place.
+                if (ImGui::Button("Add Point##railadd") &&
+                    sp.railPointCount < FloorSprite::kMaxRailPoints)
+                {
+                    auto& np = sp.railPath[sp.railPointCount];
+                    if (sp.railPointCount > 0) {
+                        const auto& pv = sp.railPath[sp.railPointCount - 1];
+                        np.x = pv.x; np.y = pv.y; np.z = pv.z + 8.0f; // nudge so it's visible
+                    } else {
+                        np.x = sp.x; np.y = sp.y; np.z = sp.z;
+                    }
+                    sp.railPointCount++;
+                    sProjectDirty = true;
+                }
+                if (sp.railPointCount > 0) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(drag XYZ to shape the path)");
+                }
+                int removeIdx = -1;
+                for (int rp = 0; rp < sp.railPointCount; rp++) {
+                    ImGui::PushID(rp);
+                    float v3[3] = { sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z };
+                    ImGui::PushItemWidth(-60.0f);
+                    if (ImGui::DragFloat3("##railpt", v3, 1.0f)) {
+                        sp.railPath[rp].x = v3[0];
+                        sp.railPath[rp].y = v3[1];
+                        sp.railPath[rp].z = v3[2];
+                        sProjectDirty = true;
+                    }
+                    ImGui::PopItemWidth();
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("X##railrm")) removeIdx = rp;
+                    ImGui::PopID();
+                }
+                if (removeIdx >= 0) {
+                    for (int j = removeIdx; j < sp.railPointCount - 1; j++)
+                        sp.railPath[j] = sp.railPath[j + 1];
+                    sp.railPointCount--;
+                    sProjectDirty = true;
+                }
+            }
+            ImGui::Separator();
+        }
 
         if (ImGui::Button("Duplicate##meshObjDup") && sSpriteCount < kMaxFloorSprites)
         {
@@ -13346,6 +13793,16 @@ void FrameTick(float dt)
                         se.drawBehindClipPlane = sSprites[i].drawBehindClipPlane;
                         se.spriteDrawPriority = sSprites[i].spriteDrawPriority;
                         se.blitSlot = sSprites[i].blitSlot;
+                        // Grind rail centerline (hand-authored in 3D tab). Copy the
+                        // world-space points + spline flag so nds_package can emit
+                        // afn_rail_pts / afn_rail_spline keyed by this sprite index.
+                        se.isGrindRail = sSprites[i].isGrindRail;
+                        se.railSpline  = sSprites[i].railSpline;
+                        se.railPath.clear();
+                        for (int rp = 0; rp < sSprites[i].railPointCount; rp++)
+                            se.railPath.push_back({ sSprites[i].railPath[rp].x,
+                                                    sSprites[i].railPath[rp].y,
+                                                    sSprites[i].railPath[rp].z });
                         exportSprites.push_back(se);
 
                         // Emit sub-sprites as separate sprite entries
@@ -14254,7 +14711,26 @@ void FrameTick(float dt)
                                 se.sampleRate = smp.sampleRate;
                                 se.rawSampleRate = smp.sampleRate;
                                 se.fineTuneCents = 0;
-                                se.loop = false;
+                                // Honor the sample's Sustain Loop so imported SFX loop
+                                // on hardware. NDS SCHANNEL loops from the data END
+                                // back to loopStart, so loopEnd must BE the data end:
+                                // truncate the exported PCM to loopEnd. A crossfade
+                                // (below, after the fade block) smooths the wrap.
+                                se.loop = smp.loop;
+                                if (se.loop) {
+                                    int ls = smp.loopStart;
+                                    int le = smp.loopEnd > 0 ? smp.loopEnd : (int)se.data.size();
+                                    if (le > (int)se.data.size()) le = (int)se.data.size();
+                                    if (ls < 0) ls = 0;
+                                    if (ls >= le) {
+                                        se.loop = false;  // degenerate range — fall back to one-shot
+                                    } else {
+                                        if (le < (int)se.data.size()) se.data.resize(le);
+                                        se.loopStart = ls;
+                                        se.loopEnd = le;
+                                    }
+                                }
+                                if (!se.loop) { se.loopStart = 0; se.loopEnd = 0; }
                                 se.releaseMs = 0;
                                 se.decayPct = 0;
                                 // Bake envelope curve into PCM data
@@ -14277,8 +14753,10 @@ void FrameTick(float dt)
                                         se.data[i] = (int8_t)(se.data[i] * level);
                                     }
                                 }
-                                // Bake soft fade: smooth fade-out over last 20% of sample
-                                if (inst.softFade) {
+                                // Bake soft fade: smooth fade-out over last 20% of
+                                // sample. Skip when looping — a sustained loop must
+                                // not fade to silence at the loop boundary.
+                                if (inst.softFade && !se.loop) {
                                     int len = (int)se.data.size();
                                     int fadeStart = len * 4 / 5; // last 20%
                                     int fadeLen = len - fadeStart;
@@ -14497,7 +14975,17 @@ void FrameTick(float dt)
                                 GBASoundNoteExport ne;
                                 ne.tick = n.tick;
                                 ne.channel = n.channel;
-                                ne.velocity = n.velocity * midi.channelVolume[n.channel] / 100;
+                                // Bake this sequence's own master dB into the note
+                                // velocity so each sequence slot exports at its own
+                                // master level (the global AFN_MIDI_MASTER_VOL_FIX
+                                // macro is unity now — see the 0.0f passed to
+                                // PackageNDS). 256 = unity in the fixed factor.
+                                int seqMasterFix = (int)(std::pow(10.0, (double)midi.masterDb / 20.0) * 256.0 + 0.5);
+                                int vel = n.velocity * midi.channelVolume[n.channel] / 100;
+                                vel = (vel * seqMasterFix) >> 8;
+                                if (vel > 127) vel = 127;
+                                if (vel < 0) vel = 0;
+                                ne.velocity = vel;
                                 ne.duration = n.duration;
                                 auto& smp = sSoundBank[bankIdx];
                                 // Look up correct sample index
@@ -14586,7 +15074,10 @@ void FrameTick(float dt)
                                         exportSkyFrames, exportNdsAa,
                                         exportScript, exportBlueprints, exportBpInstances,
                                         exportHudElements, exportTmScenes, exportStartMode,
-                                        sMidiMasterDb, err);
+                                        // Per-sequence master dB is baked into each
+                                        // note's velocity above, so the global macro
+                                        // stays at unity (0 dB).
+                                        0.0f, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,
@@ -14698,9 +15189,14 @@ void FrameTick(float dt)
             if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y))
                 RedoPush();
 
-            // G key: enter grab mode (Blender-style translate)
+            // G key: enter grab mode (Blender-style translate).
+            // Skip when a rail point is the active selection — the 3D tab's own
+            // grab handler moves just that point; without this guard THIS handler
+            // also fires (sSelectedSprite is the rail's parent mesh) and drags the
+            // whole mesh alongside the point.
             if (wantKeys && ImGui::IsKeyPressed(ImGuiKey_G) && !sGrabMode && !sScaleMode
-                && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
+                && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount
+                && s3DSelRailPoint < 0 && !s3DGrabIsRailPoint)
             {
                 UndoPush(sSelectedSprite, sSprites[sSelectedSprite]);
                 sGrabMode = true;
@@ -18002,6 +18498,10 @@ void FrameTick(float dt)
                 case VsNodeType::VelocityFalloff: desc = "Linearly decays current vx/vz to 0 over N frames. Set after Set Velocity X/Z to define how quickly the boost/push fades."; break;
                 case VsNodeType::BoostForward:   desc = "Pushes the player along their current view direction at the given speed. Runtime decomposes into world vx/vz using sin/cos(viewAngle). Pair with Velocity Falloff to decay."; break;
                 case VsNodeType::HaltMomentum:   desc = "Zeros all player velocity (vx, vz, vy, pending boost, falloff). Use after respawn so leftover boost-pad momentum doesn't carry over."; break;
+                case VsNodeType::StartGrind:     desc = "Begin rail grinding (Mode 4). The player locks to its entry direction and slides on momentum — accelerating downhill, slowing uphill. Wire it to On Collision(rail mesh). Jumping or running off the end ends the grind."; break;
+                case VsNodeType::StopGrind:      desc = "End rail grinding immediately (restores normal input movement)."; break;
+                case VsNodeType::IsGrinding:     desc = "Gate: passes exec while the player is currently grinding a rail. Use to play a grind animation or gate a jump-off."; break;
+                case VsNodeType::IsNotGrinding:  desc = "Gate: passes exec while the player is NOT grinding. Wire On Update -> Is Not Grinding -> On Rise -> Stop Sound to kill a looping grind SFX the instant you leave the rail."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -18247,6 +18747,10 @@ void FrameTick(float dt)
                         case VsNodeType::VelocityFalloff: return "_velocity_falloff";
                         case VsNodeType::BoostForward:  return "_boost_forward";
                         case VsNodeType::HaltMomentum:  return "_halt_momentum";
+                        case VsNodeType::StartGrind:    return "_start_grind";
+                        case VsNodeType::StopGrind:     return "_stop_grind";
+                        case VsNodeType::IsGrinding:    return "_is_grinding";
+                        case VsNodeType::IsNotGrinding: return "_is_not_grinding";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -19139,14 +19643,58 @@ void FrameTick(float dt)
                         "    // player_vy=0 also halts mid-air rise/fall.");
                     break;
                 }
+                case VsNodeType::StartGrind: {
+                    editorCode =
+                        "// Begin rail grinding — lock to entry direction, slide on momentum.";
+                    setActionFunc(infoNode, "_start_grind",
+                        "    afn_grinding = 1;\n"
+                        "    // --- Runtime (fps3d.c, Mode 4) ---\n"
+                        "    // On the first grind frame the runtime seeds the locked\n"
+                        "    // direction from the player's entry heading (s_lastMoveDX/DZ)\n"
+                        "    // and the grind speed from afn_move_speed. While afn_grinding:\n"
+                        "    //   player_x += grind_dx * grind_vel; player_z += grind_dz * grind_vel;\n"
+                        "    //   grind_vel += (prevFloorY - floorY) >> k;  // downhill = faster\n"
+                        "    //   player_y = floorY;                         // stick to rail\n"
+                        "    //   if (player_vy > 0 || no floor) afn_grinding = 0; // jump / ran off end");
+                    break;
+                }
+                case VsNodeType::StopGrind: {
+                    editorCode = "// End rail grinding (restore normal input movement).";
+                    setActionFunc(infoNode, "_stop_grind",
+                        "    afn_grinding = 0;\n"
+                        "    // --- Runtime (fps3d.c, Mode 4) ---\n"
+                        "    // Clears the grind state; input movement resumes next frame.\n"
+                        "    // Carried momentum (grind_vel) is released into the normal\n"
+                        "    // world velocity so you keep speed when stepping off.");
+                    break;
+                }
+                case VsNodeType::IsGrinding: {
+                    editorCode = "// Gate: true while grinding a rail.";
+                    setActionFunc(infoNode, "_is_grinding",
+                        "    if (afn_grinding) {\n"
+                        "    // --- Runtime --- gate; downstream runs only while grinding\n");
+                    break;
+                }
+                case VsNodeType::IsNotGrinding: {
+                    editorCode = "// Gate: true while NOT grinding a rail.";
+                    setActionFunc(infoNode, "_is_not_grinding",
+                        "    if (!afn_grinding) {\n"
+                        "    // --- Runtime --- gate; downstream runs only while not grinding.\n"
+                        "    // Pair with On Rise to fire once on the frame grinding ends\n"
+                        "    // (e.g. Stop Sound to kill a looping grind SFX).\n");
+                    break;
+                }
                 case VsNodeType::StopSound:
                     editorCode =
-                        "// Stop all sound channels";
+                        "// Stop sound. With a Sound Instance wired, stops ONLY\n"
+                        "// that SFX's voices; unwired, stops everything.";
                     setActionFunc(infoNode, "_stop_sound",
-                        "    afn_stop_sound();\n"
-                        "    // --- Runtime (main.c) ---\n"
-                        "    // snd_seq_active = -1;\n"
-                        "    // All voices deactivated, DMA continues silent");
+                        "    afn_stop_sfx_sample(<sfxSampleIdx>); // when a Sound Instance is wired\n"
+                        "    // afn_stop_sound();                // when nothing is wired\n"
+                        "    // --- Runtime (audio.c, NDS) ---\n"
+                        "    // afn_stop_sfx_sample: soundKill every hardware channel whose\n"
+                        "    //   voice is playing that sample's smpIdx (BGM untouched).\n"
+                        "    // afn_stop_sound: kills all voices, sequence stops.");
                     break;
                 case VsNodeType::AddMath:
                     editorCode = "// A + B";
@@ -21635,6 +22183,10 @@ void FrameTick(float dt)
                     case VsNodeType::VelocityFalloff: suffix = "_velocity_falloff"; break;
                     case VsNodeType::BoostForward:  suffix = "_boost_forward"; break;
                     case VsNodeType::HaltMomentum:  suffix = "_halt_momentum"; break;
+                    case VsNodeType::StartGrind:    suffix = "_start_grind"; break;
+                    case VsNodeType::StopGrind:     suffix = "_stop_grind"; break;
+                    case VsNodeType::IsGrinding:    suffix = "_is_grinding"; break;
+                    case VsNodeType::IsNotGrinding: suffix = "_is_not_grinding"; break;
                     case VsNodeType::StopSound:     suffix = "_stop_sound"; break;
                     case VsNodeType::AddMath:       suffix = "_add"; break;
                     case VsNodeType::SubtractMath:  suffix = "_sub"; break;
@@ -22178,6 +22730,10 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::VelocityFalloff].name)) addNodeAt(VsNodeType::VelocityFalloff);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::BoostForward].name)) addNodeAt(VsNodeType::BoostForward);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HaltMomentum].name)) addNodeAt(VsNodeType::HaltMomentum);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StartGrind].name)) addNodeAt(VsNodeType::StartGrind);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopGrind].name)) addNodeAt(VsNodeType::StopGrind);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsGrinding].name)) addNodeAt(VsNodeType::IsGrinding);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNotGrinding].name)) addNodeAt(VsNodeType::IsNotGrinding);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetPlayerHeight].name)) addNodeAt(VsNodeType::SetPlayerHeight);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopSound].name)) addNodeAt(VsNodeType::StopSound);
                     ImGui::Separator();
@@ -23753,13 +24309,15 @@ void FrameTick(float dt)
                 dl->AddRectFilled(ImVec2(leX, wp.y), ImVec2(wp.x + availW, wp.y + waveH), 0x60000000);
                 // Loop region tint
                 dl->AddRectFilled(ImVec2(lsX, wp.y), ImVec2(leX, wp.y + waveH), 0x1800FF88);
-                // Loop start line (green)
-                dl->AddLine(ImVec2(lsX, wp.y), ImVec2(lsX, wp.y + waveH), 0xFF00FF88, 2.0f);
-                // Loop end line (red)
-                dl->AddLine(ImVec2(leX, wp.y), ImVec2(leX, wp.y + waveH), 0xFF4466FF, 2.0f);
+                // Sequencer-style reticles: 2px vertical line + a triangle flag
+                // at the top for each end (green=start, red=end).
+                dl->AddLine(ImVec2(lsX, wp.y), ImVec2(lsX, wp.y + waveH), 0xFF00FF00, 2.0f);
+                dl->AddTriangleFilled(ImVec2(lsX, wp.y), ImVec2(lsX + 8, wp.y), ImVec2(lsX, wp.y + 8), 0xFF00FF00);
+                dl->AddLine(ImVec2(leX, wp.y), ImVec2(leX, wp.y + waveH), 0xFF4444FF, 2.0f);
+                dl->AddTriangleFilled(ImVec2(leX, wp.y), ImVec2(leX - 8, wp.y), ImVec2(leX, wp.y + 8), 0xFF4444FF);
                 // Labels
-                dl->AddText(ImVec2(lsX + 2, wp.y + 1), 0xFF00FF88, "S");
-                dl->AddText(ImVec2(leX - 10, wp.y + 1), 0xFF4466FF, "E");
+                dl->AddText(ImVec2(lsX + 10, wp.y + 1), 0xFF00FF88, "S");
+                dl->AddText(ImVec2(leX - 14, wp.y + 1), 0xFF4466FF, "E");
             }
             }
 
@@ -24598,7 +25156,13 @@ void FrameTick(float dt)
             ImGui::PopItemWidth();
 
             ImGui::PushItemWidth(-1);
-            ImGui::SliderFloat("##masterDb", &sMidiMasterDb, -20.0f, 20.0f, "Master: %.1f dB");
+            // Per-sequence master volume. Editing it also updates the live
+            // mixer level (sMidiMasterDb) so you hear the change immediately
+            // while this sequence is the selected/playing one.
+            if (ImGui::SliderFloat("##masterDb", &mf.masterDb, -20.0f, 20.0f, "Master: %.1f dB")) {
+                sMidiMasterDb = mf.masterDb;
+                sProjectDirty = true;
+            }
             ImGui::PopItemWidth();
 
             ImGui::Spacing();
@@ -24655,10 +25219,21 @@ void FrameTick(float dt)
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("LMB: Mute | RMB: Solo | Shift+LMB: Add to solo");
                 ImGui::SameLine();
 
-                // Channel name (dimmed if muted)
+                // Channel name — click to make this the ACTIVE channel that new
+                // piano-roll notes are drawn on. The active channel gets a
+                // ">" marker and a brighter tint.
+                bool isActive = (sMidiActiveChannel == ch);
                 if (mf.channelMuted[ch]) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
-                ImGui::Text("%s", mf.channelName[ch]);
-                if (mf.channelMuted[ch]) ImGui::PopStyleColor();
+                else if (isActive)       ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                else                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.75f, 0.75f, 0.8f, 1.0f));
+                char nameLbl[64];
+                snprintf(nameLbl, sizeof(nameLbl), "%s%s##chsel%d",
+                         isActive ? "> " : "  ", mf.channelName[ch], ch);
+                if (ImGui::Selectable(nameLbl, isActive, 0, ImVec2(Scaled(120), 0)))
+                    sMidiActiveChannel = ch;
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Click to draw new notes on this channel");
                 ImGui::SameLine();
 
                 // Sample bank dropdown
@@ -24707,6 +25282,31 @@ void FrameTick(float dt)
                 }
                 ImGui::PopStyleColor();
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete all notes on this channel");
+            }
+
+            // Add a fresh channel: claim the first unused slot (a deleted
+            // channel just clears channelUsed, so this also revives slots).
+            {
+                int freeCh = -1;
+                for (int c = 0; c < 16; c++) { if (!mf.channelUsed[c]) { freeCh = c; break; } }
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.4f, 0.15f, 1.0f));
+                if (freeCh < 0) ImGui::BeginDisabled();
+                if (ImGui::SmallButton("+ New Channel") && freeCh >= 0) {
+                    mf.channelUsed[freeCh]   = true;
+                    mf.channelMuted[freeCh]  = 0;
+                    mf.channelVolume[freeCh] = 100;
+                    mf.channelBank[freeCh]   = -1;   // None until assigned
+                    snprintf(mf.channelName[freeCh], sizeof(mf.channelName[freeCh]),
+                             "Channel %d", freeCh + 1);
+                    sMidiActiveChannel = freeCh;     // draw on it immediately
+                    sProjectDirty = true;
+                }
+                if (freeCh < 0) ImGui::EndDisabled();
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(freeCh < 0
+                        ? "All 16 MIDI channels are in use"
+                        : "Add an empty channel you can draw notes on in the piano roll");
             }
 
             // Piano roll preview
@@ -25001,16 +25601,24 @@ void FrameTick(float dt)
                             strncpy(t.name, "Track 1", sizeof(t.name));
                             mf.tracks.push_back(t);
                         }
+                        // New notes go on the active channel (defaults to a
+                        // used channel if the active one was deleted).
+                        int newCh = sMidiActiveChannel;
+                        if (newCh < 0 || newCh > 15 || !mf.channelUsed[newCh]) {
+                            newCh = 0;
+                            for (int c = 0; c < 16; c++) { if (mf.channelUsed[c]) { newCh = c; break; } }
+                            sMidiActiveChannel = newCh;
+                        }
                         MidiNote nn;
                         nn.tick = (int)mouseTick;
-                        nn.channel = 0;
+                        nn.channel = newCh;
                         nn.note = (int)(mouseNote + 0.5f);
                         if (nn.note < 0) nn.note = 0;
                         if (nn.note > 127) nn.note = 127;
                         nn.velocity = 100;
                         nn.duration = mf.ticksPerBeat;
                         mf.tracks[0].notes.push_back(nn);
-                        mf.channelUsed[0] = true;
+                        mf.channelUsed[newCh] = true;
                         sProjectDirty = true;
                     }
                 }
@@ -28328,6 +28936,76 @@ void Render3DViewport()
     glLineWidth(1.0f);
 
     // Restore
+    // ---- Grind rail path wireframe (GL, on top of the 3D scene). ImGui draw
+    // lists are painted BEFORE this pass, so they'd be hidden by the meshes;
+    // the rail path must be drawn here in GL. Rail points are WORLD coords, so
+    // the current modelview (world look-at) applies directly. Depth test off so
+    // the path shows through geometry while editing. Selected rail = yellow.
+    {
+        bool anyRail = false;
+        for (int i = 0; i < sSpriteCount; i++)
+            if (sSprites[i].railPointCount > 0) { anyRail = true; break; }
+        if (anyRail) {
+            glDisable(GL_TEXTURE_2D);
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+            glDisable(GL_LIGHTING);
+            for (int i = 0; i < sSpriteCount; i++) {
+                const FloorSprite& fs = sSprites[i];
+                if (fs.railPointCount <= 0) continue;
+                bool sel = (i == sSelectedSprite);
+                if (sel) glColor3f(1.0f, 0.8f, 0.15f);
+                else     glColor3f(0.45f, 0.8f, 1.0f);
+                glLineWidth(sel ? 3.5f : 2.5f);
+                glBegin(GL_LINE_STRIP);
+                if (fs.railSpline && fs.railPointCount >= 2) {
+                    // Catmull-Rom curve preview (matches runtime spline sampling).
+                    auto pt = [&](int k)->const FloorSprite::RailPoint& {
+                        if (k < 0) k = 0; if (k >= fs.railPointCount) k = fs.railPointCount - 1;
+                        return fs.railPath[k];
+                    };
+                    for (int i = 1; i < fs.railPointCount; i++) {
+                        const auto& P0 = pt(i-2); const auto& P1 = pt(i-1);
+                        const auto& P2 = pt(i);   const auto& P3 = pt(i+1);
+                        const int SUB = 12;
+                        for (int s = 0; s <= SUB; s++) {
+                            float t = (float)s / SUB, t2 = t*t, t3 = t2*t;
+                            float bx = 0.5f*((2*P1.x)+(-P0.x+P2.x)*t+(2*P0.x-5*P1.x+4*P2.x-P3.x)*t2+(-P0.x+3*P1.x-3*P2.x+P3.x)*t3);
+                            float by = 0.5f*((2*P1.y)+(-P0.y+P2.y)*t+(2*P0.y-5*P1.y+4*P2.y-P3.y)*t2+(-P0.y+3*P1.y-3*P2.y+P3.y)*t3);
+                            float bz = 0.5f*((2*P1.z)+(-P0.z+P2.z)*t+(2*P0.z-5*P1.z+4*P2.z-P3.z)*t2+(-P0.z+3*P1.z-3*P2.z+P3.z)*t3);
+                            glVertex3f(bx, by, bz);
+                        }
+                    }
+                } else {
+                    for (int rp = 0; rp < fs.railPointCount; rp++)
+                        glVertex3f(fs.railPath[rp].x, fs.railPath[rp].y, fs.railPath[rp].z);
+                }
+                glEnd();
+                // Point handles. The right-click-selected point is drawn bigger +
+                // magenta so you can see what G/X/Y/Z will move.
+                if (sel) glColor3f(1.0f, 1.0f, 0.4f);
+                else     glColor3f(0.7f, 0.9f, 1.0f);
+                glPointSize(sel ? 9.0f : 6.0f);
+                glBegin(GL_POINTS);
+                for (int rp = 0; rp < fs.railPointCount; rp++) {
+                    if (i == s3DSelRailSprite && rp == s3DSelRailPoint) continue;
+                    glVertex3f(fs.railPath[rp].x, fs.railPath[rp].y, fs.railPath[rp].z);
+                }
+                glEnd();
+                if (i == s3DSelRailSprite && s3DSelRailPoint >= 0 && s3DSelRailPoint < fs.railPointCount) {
+                    glColor3f(1.0f, 0.2f, 1.0f);
+                    glPointSize(13.0f);
+                    glBegin(GL_POINTS);
+                    glVertex3f(fs.railPath[s3DSelRailPoint].x, fs.railPath[s3DSelRailPoint].y, fs.railPath[s3DSelRailPoint].z);
+                    glEnd();
+                }
+            }
+            glLineWidth(1.0f);
+            glPointSize(1.0f);
+            glColor3f(1, 1, 1);
+        }
+    }
+
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_SCISSOR_TEST);
     glMatrixMode(GL_PROJECTION);

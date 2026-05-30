@@ -266,6 +266,18 @@ struct FloorSprite
     int   blueprintIdx = -1;         // index into sBlueprintAssets (-1 = none)
     struct { int paramIdx; int value; } instanceParams[8] = {};
     int   instanceParamCount = 0;
+
+    // Grind rail: when isGrindRail, this mesh object is a grindable rail and
+    // railPath holds the hand-authored centerline the player slides along (in
+    // world units, same space as x/y/z). Edited per-object in the 3D tab's mesh
+    // panel; exported into mapdata.h so the runtime follows it directly instead
+    // of deriving a centerline from faceted geometry at 60fps.
+    bool  isGrindRail = false;
+    bool  railSpline = false;   // runtime follows a smooth Catmull-Rom curve through the points
+    struct RailPoint { float x = 0.0f, y = 0.0f, z = 0.0f; };
+    static constexpr int kMaxRailPoints = 64;
+    RailPoint railPath[kMaxRailPoints];
+    int   railPointCount = 0;
 };
 
 static constexpr int kMaxFloorSprites = 256; // supports up to 256 objects per scene, nearest 32 rendered via OAM

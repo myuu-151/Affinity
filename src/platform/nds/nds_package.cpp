@@ -237,6 +237,46 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "};\n\n";
     }
 
+    // ---- Grind rail paths (hand-authored centerlines, keyed by sprite index) ----
+    // afn_rail_pts holds every rail's points concatenated in 16.8 fixed world
+    // coords; afn_rail_start/afn_rail_count index into it per sprite; afn_rail_spline
+    // is the per-rail "follow a smooth Catmull-Rom curve" flag. fps3d.c consumes
+    // these under AFN_HAS_RAIL_PATH.
+    {
+        int totalRailPts = 0;
+        for (size_t i = 0; i < sprites.size(); i++) totalRailPts += (int)sprites[i].railPath.size();
+        if (totalRailPts > 0) {
+            f << "#define AFN_HAS_RAIL_PATH 1\n";
+            f << "static const int afn_rail_pts[" << totalRailPts << "][3] = {\n";
+            std::vector<int> railStart(sprites.size(), 0), railCount(sprites.size(), 0);
+            int running = 0;
+            for (size_t i = 0; i < sprites.size(); i++) {
+                railStart[i] = running;
+                railCount[i] = (int)sprites[i].railPath.size();
+                for (auto& p : sprites[i].railPath) {
+                    f << "    { " << EditorToFixed(p[0]) << ", "
+                      << EditorHeightToFixed(p[1]) << ", "
+                      << EditorToFixed(p[2]) << " },\n";
+                    running++;
+                }
+            }
+            f << "};\n";
+            int sc = (int)sprites.size(); if (sc < 1) sc = 1;
+            f << "static const int afn_rail_start[" << sc << "] = {";
+            for (size_t i = 0; i < sprites.size(); i++) f << (i?",":"") << railStart[i];
+            if (sprites.empty()) f << "0";
+            f << "};\n";
+            f << "static const int afn_rail_count[" << sc << "] = {";
+            for (size_t i = 0; i < sprites.size(); i++) f << (i?",":"") << railCount[i];
+            if (sprites.empty()) f << "0";
+            f << "};\n";
+            f << "static const int afn_rail_spline[" << sc << "] = {";
+            for (size_t i = 0; i < sprites.size(); i++) f << (i?",":"") << (sprites[i].railSpline ? 1 : 0);
+            if (sprites.empty()) f << "0";
+            f << "};\n\n";
+        }
+    }
+
     // HUD piece tile blob — populated inside the asset block (we need
     // allTiles + frameRomU32Offset) and emitted later in the HUD block.
     // Declared at function scope so both blocks can see them.
@@ -2184,10 +2224,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int afn_player_vz_world;\n";
         f << "extern int afn_velocity_falloff;\n";
         f << "extern int afn_pending_boost_fwd;\n";
+        f << "extern int afn_grinding;\n";
+        f << "extern int afn_grind_rail;\n";
         // Audio entry points (audio.c) used by PlaySound / StopSound emit.
         f << "void afn_play_sound(int id);\n";
         f << "void afn_play_sfx(int smpIdx, int gain, int fifo);\n";
         f << "void afn_stop_sound(void);\n";
+        f << "void afn_stop_sfx_sample(int smpIdx);\n";
         // OnRise edge-detect state — one int per OnRise node, init -2 so first
         // rising edge fires. Static here means each TU that includes mapdata.h
         // gets a private copy; only script_glue.c's copy is ever mutated (it's
@@ -2462,7 +2505,17 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "    if (player_vy > 0) player_vy = (player_vy * " << (int)(factor*256.0f) << ") >> 8;\n";
                 break;
             }
+            case GBAScriptNodeType::StartGrind:
+                // Capture the rail we collided with — the runtime reads its
+                // mesh axis to lock the grind direction along the rail.
+                f << "    afn_grinding = 1; afn_grind_rail = afn_collided_sprite;\n"; break;
+            case GBAScriptNodeType::StopGrind:
+                f << "    afn_grinding = 0;\n"; break;
             // --- Gate nodes (open a brace; closed by the chain's tail logic) ---
+            case GBAScriptNodeType::IsGrinding:
+                f << "    if (afn_grinding) {\n"; break;
+            case GBAScriptNodeType::IsNotGrinding:
+                f << "    if (!afn_grinding) {\n"; break;
             case GBAScriptNodeType::IsMoving:
                 f << "    if (player_moving) {\n"; break;
             case GBAScriptNodeType::IsOnGround:
@@ -2577,9 +2630,22 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 }
                 break;
             }
-            case GBAScriptNodeType::StopSound:
-                f << "    afn_stop_sound();\n";
+            case GBAScriptNodeType::StopSound: {
+                // With a Sound Instance wired, stop ONLY that SFX's voices so
+                // BGM keeps playing (e.g. kill a looping grind SFX when you
+                // leave the rail). Unwired -> stop everything (legacy).
+                auto* sd = findDataIn(a->id, 0);
+                if (sd) {
+                    int sId = resolveInt(sd);
+                    if (sId >= 0 && sId < (int)soundInstances.size() && soundInstances[sId].isSfx)
+                        f << "    afn_stop_sfx_sample(" << soundInstances[sId].sfxSampleIdx << ");\n";
+                    else
+                        f << "    afn_stop_sound();\n";
+                } else {
+                    f << "    afn_stop_sound();\n";
+                }
                 break;
+            }
             case GBAScriptNodeType::Respawn:
                 f << "    player_x = afn_start_x; player_y = afn_start_y; player_z = afn_start_z;\n";
                 f << "    player_vy = 0;\n";
@@ -2769,7 +2835,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                            a->type == GBAScriptNodeType::IsJumping ||
                            a->type == GBAScriptNodeType::IsFalling ||
                            a->type == GBAScriptNodeType::IsNear2D ||
-                           a->type == GBAScriptNodeType::IsFollowMoving);
+                           a->type == GBAScriptNodeType::IsFollowMoving ||
+                           a->type == GBAScriptNodeType::IsGrinding ||
+                           a->type == GBAScriptNodeType::IsNotGrinding);
             if (isGate) {
                 bool wasJump = inJumpGate;
                 gateDepth++;

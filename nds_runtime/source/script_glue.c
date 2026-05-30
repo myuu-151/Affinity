@@ -75,10 +75,13 @@ int  afn_start_y;
 int  afn_start_z;
 int  afn_text_color = 0x7FFF;     // RGB15 white
 int  afn_timer_visible;
-// afn_wall_collided_sprite lives in collision.c when collision data exists.
+// afn_wall_collided_sprite / afn_floor_sprite live in collision.c when collision
+// data exists; define fallbacks here otherwise.
 #ifndef AFN_COL_FACE_COUNT
 int  afn_wall_collided_sprite = -1;
+int  afn_floor_sprite = -1;
 #endif
+extern int afn_floor_sprite;
 int  afn_fade_target;
 int  afn_fade_frames;
 int  afn_fade_counter;
@@ -100,6 +103,14 @@ int  afn_player_vx_world;
 int  afn_player_vz_world;
 int  afn_velocity_falloff;
 int  afn_pending_boost_fwd;
+// Rail grinding (StartGrind/StopGrind nodes). afn_grinding is the script-set
+// flag; the rest is runtime state owned by fps3d.c (locked rail direction +
+// momentum), seeded from the player's entry heading when grinding starts.
+int  afn_grinding;
+int  afn_grind_dx;
+int  afn_grind_dz;
+int  afn_grind_vel;
+int  afn_grind_rail = -1;   // sprite index of the rail being ground (its mesh axis = grind dir)
 
 // Mode 0 tilemap state — referenced by emitted scripts even on 3D scenes.
 int  tm_player_facing = 4;        // 4 = south, matches GBA default
@@ -183,6 +194,18 @@ static void afn_script_check_collisions(void)
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
     if (!s_mesh_bounds_ready) compute_mesh_bounds();
 #endif
+    // Vertical travel this frame, for a swept Y test against thin mesh
+    // triggers (deathplanes etc.). Without this, a fast fall steps player_y
+    // clean past a thin collider's Y slab in one frame and the trigger is
+    // missed (tunneling). We test the whole [yLo, yHi] segment the player
+    // moved through, so crossing the slab at any speed registers.
+    static int s_prevColPlayerY = 0;
+    static int s_prevColInit = 0;
+    if (!s_prevColInit) { s_prevColPlayerY = player_y; s_prevColInit = 1; }
+    int yLo = player_y, yHi = s_prevColPlayerY;
+    if (yLo > yHi) { int t = yLo; yLo = yHi; yHi = t; }
+    s_prevColPlayerY = player_y;
+
     int firstHit = -1;
     for (int i = 0; i < AFN_SPRITE_COUNT; i++) {
         if (i == AFN_PLAYER_IDX) continue;
@@ -205,8 +228,11 @@ static void afn_script_check_collisions(void)
             int mxY = sy + ((s_mesh_max[meshIdx][1] * s) >> 8);
             int mnZ = sz + ((s_mesh_min[meshIdx][2] * s) >> 8);
             int mxZ = sz + ((s_mesh_max[meshIdx][2] * s) >> 8);
+            // Swept Y: the player's vertical travel segment [yLo,yHi] this
+            // frame must overlap the slab [mnY,mxY] — so a fast fall through a
+            // thin deathplane still registers instead of tunneling past it.
             if (player_x >= mnX && player_x <= mxX &&
-                player_y >= mnY && player_y <= mxY &&
+                yHi >= mnY && yLo <= mxY &&
                 player_z >= mnZ && player_z <= mxZ) hit = 1;
         } else
 #endif
@@ -241,6 +267,18 @@ static void afn_script_check_collisions(void)
     // (e.g. a Mode-4 ChangeScene attached to a wall mesh).
     if (afn_wall_collided_sprite >= 0 && afn_frame_count > 10) {
         afn_collided_sprite = afn_wall_collided_sprite;
+        afn_bp_dispatch_collision();
+        afn_emitted_script_collision();
+    }
+    // Floor-collision path: afn_floor_sprite is the sprite whose floor face the
+    // player is STANDING on (set by collide_floor, which is rotation-correct
+    // unlike the AABB test above). Fire that sprite's BP so a mesh you stand on
+    // — e.g. a rotated/diagonal grind rail — triggers its On Collision even when
+    // its un-rotated bounding box wouldn't catch you. Uses last frame's value
+    // (collide_floor runs in fps3d after this), which is fine for a sustained
+    // contact like standing/grinding.
+    if (afn_floor_sprite >= 0 && afn_frame_count > 10) {
+        afn_collided_sprite = afn_floor_sprite;
         afn_bp_dispatch_collision();
         afn_emitted_script_collision();
     }

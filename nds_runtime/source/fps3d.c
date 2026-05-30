@@ -14,6 +14,12 @@ uint16_t cam_angle;
 int g_cosf, g_sinf;
 
 int player_x, player_z, player_y;
+// Render-smoothed player position. Physics (player_x/y/z) stays exactly on the
+// rail for collision + camera; sprites.c draws the player from these instead so
+// the sharp heading/Y kink at each hand-placed rail joint doesn't make the
+// sprite snap against the smoothly-eased camera. Off the rail these track the
+// exact position 1:1 (no input lag).
+int player_render_x, player_render_y, player_render_z;
 uint16_t orbit_angle;
 int orbit_dist;
 int player_sprite_idx = -1;
@@ -267,6 +273,120 @@ static void render_meshes(void)
 
 // ---------------------------------------------------------------------------
 // Input + camera tick (WASD = D-pad: W/S = walk fwd/back, A/D = turn)
+// Integer square root (for normalizing the rail-grind direction vector).
+static int afn_isqrt(int n) {
+    if (n <= 0) return 0;
+    int x = n, r = 0;
+    int b = 1 << 30;
+    while (b > x) b >>= 2;
+    while (b) {
+        if (x >= r + b) { x -= r + b; r = (r >> 1) + b; }
+        else r >>= 1;
+        b >>= 2;
+    }
+    return r;
+}
+
+#ifdef AFN_HAS_RAIL_PATH
+// 64-bit integer sqrt. Rail points are 16.8 fixed WORLD coords (~100k+), so a
+// squared segment length (dx*dx+dz*dz) easily exceeds 2^31 — and on ARM/NDS
+// `long` is 32-bit, so the only safe accumulator is `long long`. Using the
+// 32-bit afn_isqrt() here overflowed and fed garbage lengths into the grind
+// loop, which froze the runtime the moment you stepped onto a rail.
+static int afn_isqrt_ll(long long n) {
+    if (n <= 0) return 0;
+    long long x = n, r = 0, b = 1LL << 62;
+    while (b > x) b >>= 2;
+    while (b) {
+        if (x >= r + b) { x -= r + b; r = (r >> 1) + b; }
+        else r >>= 1;
+        b >>= 2;
+    }
+    return (int)r;
+}
+// Hand-authored grind rail path (exported per rail sprite). Deterministic slide
+// along the exported centerline so thin/curved rails grind cleanly (no probe).
+static int afn_railpath_len(int rail) {
+    if (rail < 0 || rail >= AFN_SPRITE_COUNT) return 0;
+    int n = afn_rail_count[rail]; if (n < 2) return 0;
+    int start = afn_rail_start[rail]; long long total = 0;
+    for (int i = 1; i < n; i++) {
+        long long dx = afn_rail_pts[start+i][0]-afn_rail_pts[start+i-1][0];
+        long long dz = afn_rail_pts[start+i][2]-afn_rail_pts[start+i-1][2];
+        total += afn_isqrt_ll(dx*dx+dz*dz);
+    }
+    if (total > 0x7fffffffLL) total = 0x7fffffffLL;
+    return (int)total;
+}
+// Set at engage from afn_rail_spline[rail]: 1 = sample along a smooth Catmull-Rom
+// curve through the points (rounded corners); 0 = straight segments.
+static int s_railSplineOn = 0;
+// Catmull-Rom position for one axis. tf/t2/t3 = t^1/t^2/t^3 in .8 fixed (0..256).
+static inline int afn_catmull(int P0,int P1,int P2,int P3,long long tf,long long t2,long long t3){
+    long long a1=(long long)P2-P0;
+    long long a2=2LL*P0-5LL*P1+4LL*P2-P3;
+    long long a3=-(long long)P0+3LL*P1-3LL*P2+P3;
+    long long term=a1*tf + a2*t2 + a3*t3;   // 256 * (a1 t + a2 t^2 + a3 t^3)
+    return (int)(P1 + (term>>9));            // >>8 undo .8, >>1 for the 0.5
+}
+static inline long long afn_catmull_tan(int P0,int P1,int P2,int P3,long long tf,long long t2){
+    long long a1=(long long)P2-P0;
+    long long a2=2LL*P0-5LL*P1+4LL*P2-P3;
+    long long a3=-(long long)P0+3LL*P1-3LL*P2+P3;
+    return a1 + ((2*a2*tf)>>8) + ((3*a3*t2)>>8);
+}
+static void afn_railpath_sample(int rail, int s, int* ox, int* oy, int* oz, int* tdx, int* tdz) {
+    int n = afn_rail_count[rail]; int start = afn_rail_start[rail];
+    if (n < 2) { *ox=*oy=*oz=0; *tdx=256; *tdz=0; return; }
+    if (s < 0) s = 0; int acc = 0;
+    for (int i = 1; i < n; i++) {
+        int ax=afn_rail_pts[start+i-1][0],ay=afn_rail_pts[start+i-1][1],az=afn_rail_pts[start+i-1][2];
+        int bx=afn_rail_pts[start+i][0],by=afn_rail_pts[start+i][1],bz=afn_rail_pts[start+i][2];
+        long long dx=bx-ax, dz=bz-az; int seg=afn_isqrt_ll(dx*dx+dz*dz); if(seg<1)seg=1;
+        if (s <= acc+seg || i==n-1) {
+            int t=(int)(((long long)(s-acc)<<8)/seg); if(t<0)t=0; if(t>256)t=256;
+            if (s_railSplineOn && n >= 2) {
+                // Smooth Catmull-Rom through P1=pt[i-1], P2=pt[i]; neighbours clamped at ends.
+                int i0 = (i-2 >= 0) ? i-2 : i-1;
+                int i3 = (i+1 < n)  ? i+1 : i;
+                int P0x=afn_rail_pts[start+i0][0], P3x=afn_rail_pts[start+i3][0];
+                int P0y=afn_rail_pts[start+i0][1], P3y=afn_rail_pts[start+i3][1];
+                int P0z=afn_rail_pts[start+i0][2], P3z=afn_rail_pts[start+i3][2];
+                long long tf=t, t2=(tf*tf)>>8, t3=(t2*tf)>>8;
+                *ox = afn_catmull(P0x, ax, bx, P3x, tf,t2,t3);
+                *oy = afn_catmull(P0y, ay, by, P3y, tf,t2,t3);
+                *oz = afn_catmull(P0z, az, bz, P3z, tf,t2,t3);
+                long long dtx = afn_catmull_tan(P0x, ax, bx, P3x, tf,t2);
+                long long dtz = afn_catmull_tan(P0z, az, bz, P3z, tf,t2);
+                int mag=afn_isqrt_ll(dtx*dtx+dtz*dtz); if(mag<1)mag=1;
+                *tdx=(int)((dtx*256)/mag); *tdz=(int)((dtz*256)/mag);
+                return;
+            }
+            *ox=ax+(int)(((bx-ax)*(long long)t)>>8); *oy=ay+(int)(((by-ay)*(long long)t)>>8); *oz=az+(int)(((bz-az)*(long long)t)>>8);
+            int l=afn_isqrt_ll(dx*dx+dz*dz); if(l<1)l=1; *tdx=(int)((dx*256)/l); *tdz=(int)((dz*256)/l); return;
+        }
+        acc+=seg;
+    }
+}
+static int afn_railpath_nearest(int rail, int px, int pz) {
+    int n=afn_rail_count[rail]; int start=afn_rail_start[rail];
+    if(n<2) return 0; long long bestD=0x7fffffffffffffffLL; int bestArc=0, acc=0;
+    for(int i=1;i<n;i++){
+        int ax=afn_rail_pts[start+i-1][0],az=afn_rail_pts[start+i-1][2];
+        int bx=afn_rail_pts[start+i][0],bz=afn_rail_pts[start+i][2];
+        long long ex=bx-ax,ez=bz-az; long long el2=ex*ex+ez*ez; if(el2<1)el2=1;
+        long long tn=(long long)(px-ax)*ex+(long long)(pz-az)*ez; int t=(int)((tn<<8)/el2);
+        if(t<0)t=0; if(t>256)t=256;
+        int cx=ax+(int)((ex*t)>>8),cz=az+(int)((ez*t)>>8);
+        long long dd=(long long)(px-cx)*(px-cx)+(long long)(pz-cz)*(pz-cz);
+        int seg=afn_isqrt_ll(ex*ex+ez*ez);
+        if(dd<bestD){bestD=dd; bestArc=acc+(int)(((long long)seg*t)>>8);}
+        acc+=seg;
+    }
+    return bestArc;
+}
+#endif
+
 // ---------------------------------------------------------------------------
 // Movement/jump state. Walk speed ramps with AFN_WALK_EASE_IN/OUT toward
 // the target (walk or sprint). player_y is a vertical offset added to the
@@ -373,13 +493,28 @@ static void update_camera(void)
     // the camera basis (forward = (sin,cos), right = (cos,-sin) for our
     // gluLookAt convention). script_tick ran before fps3d_update so the
     // values are fresh.
+    // Rail grinding: when afn_grinding, the player is locked to the rail
+    // direction and slides on momentum instead of taking input movement.
+    extern int afn_grinding, afn_grind_dx, afn_grind_dz, afn_grind_vel;
+    extern int afn_player_vx_world, afn_player_vz_world;
     int fwd = afn_input_fwd, right = afn_input_right;
     if (fwd && right) { fwd = (fwd * 181) >> 8; right = (right * 181) >> 8; }
     int spd = afn_move_speed;
     int dx = ((g_sinf * fwd + g_cosf * right) >> 8);
     int dz = ((g_cosf * fwd - g_sinf * right) >> 8);
-    int mvX = FX_MUL(dx, spd);
-    int mvZ = FX_MUL(dz, spd);
+    extern int afn_grind_rail;
+    int mvX, mvZ;
+    if (afn_grind_vel != 0) {
+        // Engaged grind: locked to the rail axis, sliding on momentum. Player
+        // input is FROZEN here (dx/dz ignored) — only the jump (handled below)
+        // gets you off. Engage + direction seeding happen in the floor block,
+        // once we confirm the player is actually standing on the rail's floor.
+        mvX = FX_MUL(afn_grind_dx, afn_grind_vel);
+        mvZ = FX_MUL(afn_grind_dz, afn_grind_vel);
+    } else {
+        mvX = FX_MUL(dx, spd);
+        mvZ = FX_MUL(dz, spd);
+    }
     player_x += mvX;
     player_z += mvZ;
     // Horizontal distance moved this frame (Manhattan) — used as the
@@ -491,28 +626,287 @@ static void update_camera(void)
     // Floor + wall collision against mesh data when the project exports it.
 #ifdef AFN_COL_FACE_COUNT
     {
+        extern int afn_floor_sprite;
         int wasGround = player_on_ground;
         int floorY;
         int onFloor = afn_collide_floor(player_x, player_z, player_y, &floorY);
-        if (onFloor && player_y <= floorY) {
-            // At or below the floor — land normally.
-            player_y = floorY;
-            player_vy = 0;
-            player_on_ground = 1;
-        } else if (onFloor && wasGround && player_vy <= 0
-                   && (player_y - floorY) <= s_groundSnapTol) {
-            // Walking down a slope: the floor dropped below us but only by a
-            // slope-step (within the horizontal distance moved this frame).
-            // Snap to it and stay grounded instead of going airborne for a
-            // frame, which would flicker Is Falling and stutter the anim.
-            player_y = floorY;
-            player_vy = 0;
-            player_on_ground = 1;
+        // "On the rail" = standing on a floor face that belongs to the rail
+        // sprite (afn_grind_rail), captured by StartGrind. This is what makes
+        // the grind follow JUST the pipe and end the instant you leave it.
+        int onRail = (onFloor && afn_grind_rail >= 0 && afn_floor_sprite == afn_grind_rail);
+        // Slope fix: collide_floor only accepts a floor within afn_player_height
+        // (~12px) of the player's feet, so a tilted rail's surface — which moves
+        // up or down by a whole horizontal grind step each frame — falls outside
+        // that window and the grind detaches (only a flat beam stayed in range).
+        // While grinding, re-query with the player Y biased UP by the horizontal
+        // step (+margin) so an uphill OR downhill rail surface stays in range.
+        // Gated on the rail sprite, so a non-rail floor that sneaks into the
+        // wider window won't be mistaken for the rail.
+        if (!onRail && (afn_grind_vel != 0 || afn_grinding) && afn_grind_rail >= 0) {
+            int stepMag = (mvX < 0 ? -mvX : mvX) + (mvZ < 0 ? -mvZ : mvZ);
+            int probeY = player_y + stepMag + stepMag / 2 + afn_player_height;
+            int fY2;
+            if (afn_collide_floor(player_x, player_z, probeY, &fY2) &&
+                afn_floor_sprite == afn_grind_rail) {
+                onFloor = 1; floorY = fY2; onRail = 1;
+            }
+        }
+        static int s_grindPrevFloorY = 0;
+#ifdef AFN_HAS_RAIL_PATH
+        static int s_railArc=0, s_railDir=1, s_railHas=0, s_railPrevY=0;
+        // Smoothed arc-advance speed. afn_grind_vel is the PHYSICS velocity
+        // (slope kicks + decay + cap), which jitters frame-to-frame on long
+        // hand-placed segments where the slope changes abruptly at each point.
+        // Advancing the arc by the raw value makes the step size oscillate; the
+        // camera lag then amplifies that into a visible side-to-side shake on
+        // the sprite (worse the faster you go). Advancing by a low-passed copy
+        // gives a steady step so the slide reads smooth. Generated-from-mesh
+        // rails never showed this because their many short segments already
+        // keep the slope gradual.
+        static int s_railVelSmooth = 0;
+#endif
+
+        if (afn_grind_vel != 0) {
+            // --- Currently grinding ---
+#ifdef AFN_HAS_RAIL_PATH
+            if (s_railHas) {
+                if (player_vy > 0) {
+                    afn_player_vx_world = FX_MUL(afn_grind_dx, afn_grind_vel);
+                    afn_player_vz_world = FX_MUL(afn_grind_dz, afn_grind_vel);
+                    if (afn_velocity_falloff <= 0) afn_velocity_falloff = 30;
+                    afn_grind_vel = 0; afn_grinding = 0; s_railHas = 0;
+                } else {
+                    int total = afn_railpath_len(afn_grind_rail);
+                    // Advance by the smoothed speed (see s_railVelSmooth note).
+                    s_railVelSmooth += (afn_grind_vel - s_railVelSmooth) >> 3;
+                    if (s_railVelSmooth < 1) s_railVelSmooth = 1;
+                    s_railArc += s_railDir * s_railVelSmooth;
+                    if (s_railArc <= 0 || s_railArc >= total) {
+                        afn_player_vx_world = FX_MUL(afn_grind_dx, afn_grind_vel);
+                        afn_player_vz_world = FX_MUL(afn_grind_dz, afn_grind_vel);
+                        if (afn_velocity_falloff <= 0) afn_velocity_falloff = 30;
+                        afn_grind_vel = 0; afn_grinding = 0; s_railHas = 0;
+                    } else {
+                        int gx,gy,gz,tdx,tdz;
+                        afn_railpath_sample(afn_grind_rail, s_railArc, &gx,&gy,&gz,&tdx,&tdz);
+                        // Accelerate by GRADE (Y drop per unit arc), not by the
+                        // raw per-frame Y delta. The per-frame delta scales with
+                        // velocity (faster -> longer step -> bigger drop), so
+                        // `vel += drop` was a positive-feedback loop that rang
+                        // and shook the sprite on undulating hand-drawn rails.
+                        // Dividing the drop by the arc step taken makes it a
+                        // velocity-independent slope, so velocity converges.
+                        int step = s_railVelSmooth; if (step < 1) step = 1;
+                        int grade = ((s_railPrevY - gy) << 8) / step; // .8: +down/-up
+                        s_railPrevY = gy;
+                        if (grade >  256) grade =  256;
+                        if (grade < -256) grade = -256;
+                        // Bounded gentle accel (<= ~6/frame) + slippery friction.
+                        if (grade > 0) afn_grind_vel += (grade * 6) >> 8;
+                        else           afn_grind_vel += (grade * 3) >> 8;
+                        afn_grind_vel -= afn_grind_vel >> 9;
+                        if (afn_grind_vel < (AFN_WALK_SPEED >> 3)) afn_grind_vel = (AFN_WALK_SPEED >> 3);
+                        if (afn_grind_vel > AFN_SPRINT_SPEED * 3) afn_grind_vel = AFN_SPRINT_SPEED * 3;
+                        player_x = gx; player_z = gz; player_y = gy;
+                        player_vy = 0; player_on_ground = 1;
+                        afn_grind_dx = tdx * s_railDir; afn_grind_dz = tdz * s_railDir;
+                    }
+                }
+            } else
+#endif
+
+            if (player_vy > 0) {
+                // Jump node fired → hop off, carry momentum into world velocity.
+                afn_player_vx_world = FX_MUL(afn_grind_dx, afn_grind_vel);
+                afn_player_vz_world = FX_MUL(afn_grind_dz, afn_grind_vel);
+                if (afn_velocity_falloff <= 0) afn_velocity_falloff = 30;
+                afn_grind_vel = 0; afn_grinding = 0;
+            } else if (!onRail) {
+                // Slid off the edge / end of the rail — release momentum and let
+                // it decay so you fly off keeping speed then ramp down (Sonic rail
+                // launch), instead of sliding forever. A VelocityFalloff node can
+                // override the 30-frame default.
+                afn_player_vx_world = FX_MUL(afn_grind_dx, afn_grind_vel);
+                afn_player_vz_world = FX_MUL(afn_grind_dz, afn_grind_vel);
+                if (afn_velocity_falloff <= 0) afn_velocity_falloff = 30;
+                afn_grind_vel = 0; afn_grinding = 0;
+            } else {
+                // Stick to the rail; slope drives momentum. slope > 0 means the
+                // floor dropped this frame (going DOWNHILL) → accelerate harder;
+                // slope < 0 is uphill → bleed speed. Asymmetric so a downhill
+                // run visibly ramps up like a Sonic rail.
+                int slope = s_grindPrevFloorY - floorY;
+                s_grindPrevFloorY = floorY;
+                if (slope > 0) afn_grind_vel += slope;       // downhill: full slope gain
+                else           afn_grind_vel += slope >> 1;  // uphill: lose half the climb
+                afn_grind_vel -= afn_grind_vel >> 9;         // tiny friction (very slippery)
+                if (afn_grind_vel < (AFN_WALK_SPEED >> 3)) afn_grind_vel = (AFN_WALK_SPEED >> 3);
+                // Cap so a long steep rail doesn't fling you uncontrollably.
+                if (afn_grind_vel > AFN_SPRINT_SPEED * 3) afn_grind_vel = AFN_SPRINT_SPEED * 3;
+
+                // --- Re-center between rail edges + steer to follow the curve ---
+                // The grind heading is frozen at entry, so on a CURVED rail going
+                // straight walks you off the side — that's why a long-turn rail
+                // drops you immediately. Fix both every frame by probing the rail
+                // surface itself:
+                //   1. Lateral re-center: scan perpendicular to the heading, find
+                //      how far the rail extends each way, snap to the midpoint.
+                //      This ALONE makes falling off the side impossible — you're
+                //      always pinned to the rail's middle, curve or not.
+                //   2. Steer: re-center a probe ~16px ahead; the vector from the
+                //      player to that ahead-center is the rail's local tangent.
+                //      Adopt it as the new heading so we round the bend.
+                // afn_collide_floor sets afn_floor_sprite as a side effect; the
+                // final height sample below is at the player center, so it leaves
+                // afn_floor_sprite correctly pointing at the rail for next frame.
+                {
+                    int probeBias = afn_player_height + 4096;   // search well above feet
+                    int perpx = -afn_grind_dz, perpz = afn_grind_dx; // 256-normalized
+                    int rfy;
+                    const int STEP = 512, MAXW = 20 * 256;       // 2px steps, 20px half-width
+                    // Helper inline: find rail-center offset (in +perp units) at (cx,cz).
+                    #define GRIND_CENTER_OFF(cx, cz, outOff) do {                       \
+                        int mp = 0, mn = 0;                                              \
+                        for (int s = STEP; s <= MAXW; s += STEP) {                       \
+                            int tx = (cx) + ((perpx * s) >> 8);                          \
+                            int tz = (cz) + ((perpz * s) >> 8);                          \
+                            if (afn_collide_floor(tx, tz, player_y + probeBias, &rfy)    \
+                                && afn_floor_sprite == afn_grind_rail) mp = s; else break;\
+                        }                                                                \
+                        for (int s = STEP; s <= MAXW; s += STEP) {                       \
+                            int tx = (cx) - ((perpx * s) >> 8);                          \
+                            int tz = (cz) - ((perpz * s) >> 8);                          \
+                            if (afn_collide_floor(tx, tz, player_y + probeBias, &rfy)    \
+                                && afn_floor_sprite == afn_grind_rail) mn = s; else break;\
+                        }                                                                \
+                        (outOff) = (mp - mn) / 2;                                        \
+                    } while (0)
+
+                    // 1. Lateral re-center at the player.
+                    int offHere;
+                    GRIND_CENTER_OFF(player_x, player_z, offHere);
+                    player_x += (perpx * offHere) >> 8;
+                    player_z += (perpz * offHere) >> 8;
+
+                    // 2. Steer toward the rail center ~16px ahead.
+                    int ahead = 16 * 256;
+                    int acx = player_x + ((afn_grind_dx * ahead) >> 8);
+                    int acz = player_z + ((afn_grind_dz * ahead) >> 8);
+                    int offAhead;
+                    GRIND_CENTER_OFF(acx, acz, offAhead);
+                    acx += (perpx * offAhead) >> 8;
+                    acz += (perpz * offAhead) >> 8;
+                    int ndx = acx - player_x, ndz = acz - player_z;
+                    int nlen = afn_isqrt(ndx * ndx + ndz * ndz);
+                    if (nlen > 0) {
+                        afn_grind_dx = (ndx * 256) / nlen;
+                        afn_grind_dz = (ndz * 256) / nlen;
+                    }
+                    #undef GRIND_CENTER_OFF
+
+                    // Height: sample at the centered position. The tube-top center
+                    // is the consistent crest, so this is far steadier than an
+                    // off-center read. Leaves afn_floor_sprite = rail for next frame.
+                    if (afn_collide_floor(player_x, player_z, player_y + probeBias, &rfy)
+                        && afn_floor_sprite == afn_grind_rail)
+                        floorY = rfy;
+                }
+                player_y = floorY; player_vy = 0; player_on_ground = 1;
+            }
+        } else if (afn_grinding && onRail && player_vy <= 0) {
+            // --- Engage: StartGrind fired AND we're standing on the rail ---
+            // Lock the slide to the rail's mesh axis (so you follow the pipe even
+            // if you landed at an angle), seed speed from current move speed.
+            int rdx = s_lastMoveDX, rdz = s_lastMoveDZ;
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+            if (afn_grind_rail < AFN_SPRITE_COUNT) {
+                int mi = afn_sprite_data[afn_grind_rail][9];
+                if (mi >= 0 && mi < AFN_MESH_COUNT) {
+                    const short* v = afn_mesh_vert_ptrs[mi];
+                    int vc = afn_mesh_desc[mi][0];
+                    if (v && vc > 0) {
+                        int mnx=v[0],mxx=v[0],mnz=v[2],mxz=v[2];
+                        for (int k = 1; k < vc; k++) {
+                            int x=v[k*3], z=v[k*3+2];
+                            if(x<mnx)mnx=x; if(x>mxx)mxx=x;
+                            if(z<mnz)mnz=z; if(z>mxz)mxz=z;
+                        }
+                        int ex = mxx-mnx, ez = mxz-mnz;
+                        long d1 = (long)ex*s_lastMoveDX + (long)ez*s_lastMoveDZ;
+                        long d2 = (long)ex*s_lastMoveDX - (long)ez*s_lastMoveDZ;
+                        int ddx = ex, ddz = (d1 >= d2) ? ez : -ez;
+                        long dot = (long)ddx*s_lastMoveDX + (long)ddz*s_lastMoveDZ;
+                        if (dot < 0) { ddx = -ddx; ddz = -ddz; }
+                        int len = afn_isqrt(ddx*ddx + ddz*ddz); if (len < 1) len = 1;
+                        rdx = (ddx * 256) / len;
+                        rdz = (ddz * 256) / len;
+                    }
+                }
+            }
+#endif
+#ifdef AFN_HAS_RAIL_PATH
+            s_railHas = (afn_grind_rail >= 0 && afn_railpath_len(afn_grind_rail) > 0);
+            if (s_railHas) {
+                s_railSplineOn = afn_rail_spline[afn_grind_rail];
+                s_railArc = afn_railpath_nearest(afn_grind_rail, player_x, player_z);
+                int gx,gy,gz,tdx,tdz;
+                afn_railpath_sample(afn_grind_rail, s_railArc, &gx,&gy,&gz,&tdx,&tdz);
+                long fdot = (long)s_lastMoveDX*tdx + (long)s_lastMoveDZ*tdz;
+                s_railDir = (fdot >= 0) ? 1 : -1;
+                rdx = tdx * s_railDir; rdz = tdz * s_railDir;
+                s_railPrevY = gy;
+                player_x = gx; player_z = gz; player_y = gy;
+            }
+#endif
+            afn_grind_dx = rdx; afn_grind_dz = rdz;
+            // Seed the grind speed from the player's ACTUAL momentum entering the
+            // rail (input movement + any boost-pad world velocity), projected
+            // onto the rail axis — so sprinting / boosting onto a rail carries
+            // that speed instead of snapping to a flat default. rdx/rdz are
+            // 256-normalized, so the >>8 yields displacement units (same as
+            // afn_grind_vel). Fold the world velocity in and clear it so it
+            // doesn't keep adding drift off the rail while grinding.
+            {
+                int tvx = mvX + afn_player_vx_world;
+                int tvz = mvZ + afn_player_vz_world;
+                int mom = (tvx * rdx + tvz * rdz) >> 8;
+                if (mom < 0) mom = -mom;
+                afn_grind_vel = mom;
+                if (afn_grind_vel < (AFN_WALK_SPEED >> 3))
+                    afn_grind_vel = (AFN_WALK_SPEED >> 3);
+                afn_player_vx_world = 0; afn_player_vz_world = 0;
+                afn_velocity_falloff = 0;
+#ifdef AFN_HAS_RAIL_PATH
+                // Seed the smoothed arc speed so the first frames don't ramp
+                // up from zero (which would look like a brief stall on engage).
+                s_railVelSmooth = afn_grind_vel;
+#endif
+            }
+            s_grindPrevFloorY = floorY;
+            // Initial heading is the rail axis (rdx/rdz, set above). From here the
+            // grind frames re-center + steer off the rail surface each frame, so
+            // no analytic anchor is needed — the curve is followed live.
+            player_y = floorY; player_vy = 0; player_on_ground = 1;
         } else {
-            player_on_ground = 0;
+            // --- Not grinding: normal floor resolution ---
+            if (onFloor && player_y <= floorY) {
+                player_y = floorY; player_vy = 0; player_on_ground = 1;
+            } else if (onFloor && wasGround && player_vy <= 0
+                       && (player_y - floorY) <= s_groundSnapTol) {
+                player_y = floorY; player_vy = 0; player_on_ground = 1;
+            } else {
+                player_on_ground = 0;
+            }
+            // Don't let a StartGrind intent linger when we're not on the rail
+            // (e.g. brushed the rail's bounding box from the side without
+            // standing on it) — otherwise IsGrinding would stay true.
+            if (!onRail) afn_grinding = 0;
         }
     }
-    afn_collide_walls(&player_x, &player_z, player_y);
+    // Skip wall collision WHILE grinding — a thin pipe's own side walls would
+    // shove the player off the rail. The grind already locks XZ to the axis.
+    if (afn_grind_vel == 0)
+        afn_collide_walls(&player_x, &player_z, player_y);
 #else
     {
         // No mesh collision data — fall back to flat ground at player init Y.
@@ -527,6 +921,30 @@ static void update_camera(void)
     }
 #endif
     s_playerY = player_y - AFN_PLAYER_BASE_Y;
+
+    // Render-smoothed player position. While grinding, low-pass toward the exact
+    // position so the sharp per-vertex kink in a straight-segment rail path
+    // doesn't snap the sprite against the eased camera. Off the rail, snap 1:1
+    // (full input responsiveness — no smoothing lag when walking/jumping).
+    {
+        extern int afn_grinding, afn_grind_vel;
+        int grinding = (afn_grinding || afn_grind_vel != 0);
+        static int inited = 0;
+        if (!inited) {
+            player_render_x = player_x; player_render_y = player_y; player_render_z = player_z;
+            inited = 1;
+        }
+        if (grinding) {
+            // ~1/4 catch-up per frame: smooths vertex kinks without visible lag.
+            player_render_x += (player_x - player_render_x) >> 2;
+            player_render_y += (player_y - player_render_y) >> 2;
+            player_render_z += (player_z - player_render_z) >> 2;
+        } else {
+            player_render_x = player_x;
+            player_render_y = player_y;
+            player_render_z = player_z;
+        }
+    }
 
     // 3rd-person camera: target = player - orbit_dist * view-forward. Lerp
     // cam_x/z toward target with the same ease rate as movement so the cam
@@ -686,11 +1104,20 @@ void afn_fps3d_init(void)
     bgSetPriority(m7_bg, 3);
     load_floor();
 #endif
-#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
-    load_mesh_textures();
-#endif
+    // Load the sky panorama FIRST. It's a single 256x256 texture (64KB) and
+    // needs one CONTIGUOUS 64KB block in texture VRAM bank A (128KB total).
+    // The mesh textures are small 4bpp tiles (~46KB total); if they load first
+    // they scatter across bank A and leave no contiguous 64KB hole, so the sky
+    // upload fails silently (glGenTextures succeeds but glTexImage2D can't
+    // place it) and the sky vanishes once a scene has enough meshes. Grabbing
+    // the big block first guarantees it; the small mesh textures then fill the
+    // remaining ~64KB. (Bank B is the Mode-7 floor, banks C/D fail as 3D
+    // texture banks, so we can't just add VRAM — order is what matters here.)
 #if defined(AFN_HAS_SKY) && AFN_HAS_SKY
     load_sky_texture();
+#endif
+#if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
+    load_mesh_textures();
 #endif
 
     cam_h     = AFN_CAM_H;

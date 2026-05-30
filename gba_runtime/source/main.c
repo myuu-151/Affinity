@@ -5648,6 +5648,8 @@ static int   afn_player_vx_world;
 static int   afn_player_vz_world;
 static int   afn_velocity_falloff;
 static int   afn_pending_boost_fwd;
+static int   afn_grinding;
+static int   afn_grind_rail = -1;
 #endif
 // Fallback for projects exported before Sprint-over-Walk priority existed.
 #ifndef AFN_HAS_SPEED_PRIO

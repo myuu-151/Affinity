@@ -33,6 +33,12 @@ struct GBASpriteExport
     uint32_t drawBehindClipPlane = 0; // bitmask: bit N = clip-by-plane for that mesh
     int spriteDrawPriority = 0; // OAM ordering tiebreaker (-8..+8)
     int blitSlot = -1;          // -1 = auto-assign, 0/1/2 = manual BG palette slot
+    // Grind rail centerline (hand-authored in the 3D tab). railPath holds world
+    // points (editor coords) the runtime slides the player along; empty = not a
+    // rail / no path. Exported into mapdata.h keyed by sprite index.
+    bool isGrindRail = false;
+    bool railSpline = false;    // runtime follows a smooth Catmull-Rom curve through railPath
+    std::vector<std::array<float,3>> railPath;
 };
 
 // Player direction sprite for GBA export (RGBA8 image)
@@ -385,6 +391,10 @@ enum class GBAScriptNodeType : int {
     VelocityFalloff,
     BoostForward,
     HaltMomentum,
+    StartGrind,
+    StopGrind,
+    IsGrinding,
+    IsNotGrinding,
     COUNT
 };
 
