@@ -282,18 +282,52 @@ static int afn_isqrt(int n) {
 }
 
 #ifdef AFN_HAS_RAIL_PATH
+// 64-bit integer sqrt. Rail points are 16.8 fixed WORLD coords (~100k+), so a
+// squared segment length (dx*dx+dz*dz) easily exceeds 2^31 — and on ARM/NDS
+// `long` is 32-bit, so the only safe accumulator is `long long`. Using the
+// 32-bit afn_isqrt() here overflowed and fed garbage lengths into the grind
+// loop, which froze the runtime the moment you stepped onto a rail.
+static int afn_isqrt_ll(long long n) {
+    if (n <= 0) return 0;
+    long long x = n, r = 0, b = 1LL << 62;
+    while (b > x) b >>= 2;
+    while (b) {
+        if (x >= r + b) { x -= r + b; r = (r >> 1) + b; }
+        else r >>= 1;
+        b >>= 2;
+    }
+    return (int)r;
+}
 // Hand-authored grind rail path (exported per rail sprite). Deterministic slide
 // along the exported centerline so thin/curved rails grind cleanly (no probe).
 static int afn_railpath_len(int rail) {
     if (rail < 0 || rail >= AFN_SPRITE_COUNT) return 0;
     int n = afn_rail_count[rail]; if (n < 2) return 0;
-    int start = afn_rail_start[rail]; long total = 0;
+    int start = afn_rail_start[rail]; long long total = 0;
     for (int i = 1; i < n; i++) {
-        int dx = afn_rail_pts[start+i][0]-afn_rail_pts[start+i-1][0];
-        int dz = afn_rail_pts[start+i][2]-afn_rail_pts[start+i-1][2];
-        total += afn_isqrt(dx*dx+dz*dz);
+        long long dx = afn_rail_pts[start+i][0]-afn_rail_pts[start+i-1][0];
+        long long dz = afn_rail_pts[start+i][2]-afn_rail_pts[start+i-1][2];
+        total += afn_isqrt_ll(dx*dx+dz*dz);
     }
+    if (total > 0x7fffffffLL) total = 0x7fffffffLL;
     return (int)total;
+}
+// Set at engage from afn_rail_spline[rail]: 1 = sample along a smooth Catmull-Rom
+// curve through the points (rounded corners); 0 = straight segments.
+static int s_railSplineOn = 0;
+// Catmull-Rom position for one axis. tf/t2/t3 = t^1/t^2/t^3 in .8 fixed (0..256).
+static inline int afn_catmull(int P0,int P1,int P2,int P3,long long tf,long long t2,long long t3){
+    long long a1=(long long)P2-P0;
+    long long a2=2LL*P0-5LL*P1+4LL*P2-P3;
+    long long a3=-(long long)P0+3LL*P1-3LL*P2+P3;
+    long long term=a1*tf + a2*t2 + a3*t3;   // 256 * (a1 t + a2 t^2 + a3 t^3)
+    return (int)(P1 + (term>>9));            // >>8 undo .8, >>1 for the 0.5
+}
+static inline long long afn_catmull_tan(int P0,int P1,int P2,int P3,long long tf,long long t2){
+    long long a1=(long long)P2-P0;
+    long long a2=2LL*P0-5LL*P1+4LL*P2-P3;
+    long long a3=-(long long)P0+3LL*P1-3LL*P2+P3;
+    return a1 + ((2*a2*tf)>>8) + ((3*a3*t2)>>8);
 }
 static void afn_railpath_sample(int rail, int s, int* ox, int* oy, int* oz, int* tdx, int* tdz) {
     int n = afn_rail_count[rail]; int start = afn_rail_start[rail];
@@ -302,28 +336,45 @@ static void afn_railpath_sample(int rail, int s, int* ox, int* oy, int* oz, int*
     for (int i = 1; i < n; i++) {
         int ax=afn_rail_pts[start+i-1][0],ay=afn_rail_pts[start+i-1][1],az=afn_rail_pts[start+i-1][2];
         int bx=afn_rail_pts[start+i][0],by=afn_rail_pts[start+i][1],bz=afn_rail_pts[start+i][2];
-        int dx=bx-ax, dz=bz-az; int seg=afn_isqrt(dx*dx+dz*dz); if(seg<1)seg=1;
+        long long dx=bx-ax, dz=bz-az; int seg=afn_isqrt_ll(dx*dx+dz*dz); if(seg<1)seg=1;
         if (s <= acc+seg || i==n-1) {
-            int t=((s-acc)<<8)/seg; if(t<0)t=0; if(t>256)t=256;
-            *ox=ax+(((bx-ax)*t)>>8); *oy=ay+(((by-ay)*t)>>8); *oz=az+(((bz-az)*t)>>8);
-            int l=afn_isqrt(dx*dx+dz*dz); if(l<1)l=1; *tdx=(dx*256)/l; *tdz=(dz*256)/l; return;
+            int t=(int)(((long long)(s-acc)<<8)/seg); if(t<0)t=0; if(t>256)t=256;
+            if (s_railSplineOn && n >= 2) {
+                // Smooth Catmull-Rom through P1=pt[i-1], P2=pt[i]; neighbours clamped at ends.
+                int i0 = (i-2 >= 0) ? i-2 : i-1;
+                int i3 = (i+1 < n)  ? i+1 : i;
+                int P0x=afn_rail_pts[start+i0][0], P3x=afn_rail_pts[start+i3][0];
+                int P0y=afn_rail_pts[start+i0][1], P3y=afn_rail_pts[start+i3][1];
+                int P0z=afn_rail_pts[start+i0][2], P3z=afn_rail_pts[start+i3][2];
+                long long tf=t, t2=(tf*tf)>>8, t3=(t2*tf)>>8;
+                *ox = afn_catmull(P0x, ax, bx, P3x, tf,t2,t3);
+                *oy = afn_catmull(P0y, ay, by, P3y, tf,t2,t3);
+                *oz = afn_catmull(P0z, az, bz, P3z, tf,t2,t3);
+                long long dtx = afn_catmull_tan(P0x, ax, bx, P3x, tf,t2);
+                long long dtz = afn_catmull_tan(P0z, az, bz, P3z, tf,t2);
+                int mag=afn_isqrt_ll(dtx*dtx+dtz*dtz); if(mag<1)mag=1;
+                *tdx=(int)((dtx*256)/mag); *tdz=(int)((dtz*256)/mag);
+                return;
+            }
+            *ox=ax+(int)(((bx-ax)*(long long)t)>>8); *oy=ay+(int)(((by-ay)*(long long)t)>>8); *oz=az+(int)(((bz-az)*(long long)t)>>8);
+            int l=afn_isqrt_ll(dx*dx+dz*dz); if(l<1)l=1; *tdx=(int)((dx*256)/l); *tdz=(int)((dz*256)/l); return;
         }
         acc+=seg;
     }
 }
 static int afn_railpath_nearest(int rail, int px, int pz) {
     int n=afn_rail_count[rail]; int start=afn_rail_start[rail];
-    if(n<2) return 0; long bestD=0x7fffffffffffLL; int bestArc=0, acc=0;
+    if(n<2) return 0; long long bestD=0x7fffffffffffffffLL; int bestArc=0, acc=0;
     for(int i=1;i<n;i++){
         int ax=afn_rail_pts[start+i-1][0],az=afn_rail_pts[start+i-1][2];
         int bx=afn_rail_pts[start+i][0],bz=afn_rail_pts[start+i][2];
-        int ex=bx-ax,ez=bz-az; long el2=(long)ex*ex+(long)ez*ez; if(el2<1)el2=1;
-        long tn=(long)(px-ax)*ex+(long)(pz-az)*ez; int t=(int)((tn<<8)/el2);
+        long long ex=bx-ax,ez=bz-az; long long el2=ex*ex+ez*ez; if(el2<1)el2=1;
+        long long tn=(long long)(px-ax)*ex+(long long)(pz-az)*ez; int t=(int)((tn<<8)/el2);
         if(t<0)t=0; if(t>256)t=256;
-        int cx=ax+((ex*t)>>8),cz=az+((ez*t)>>8);
-        long dd=(long)(px-cx)*(px-cx)+(long)(pz-cz)*(pz-cz);
-        int seg=afn_isqrt(ex*ex+ez*ez);
-        if(dd<bestD){bestD=dd; bestArc=acc+((seg*t)>>8);}
+        int cx=ax+(int)((ex*t)>>8),cz=az+(int)((ez*t)>>8);
+        long long dd=(long long)(px-cx)*(px-cx)+(long long)(pz-cz)*(pz-cz);
+        int seg=afn_isqrt_ll(ex*ex+ez*ez);
+        if(dd<bestD){bestD=dd; bestArc=acc+(int)(((long long)seg*t)>>8);}
         acc+=seg;
     }
     return bestArc;
@@ -764,6 +815,7 @@ static void update_camera(void)
 #ifdef AFN_HAS_RAIL_PATH
             s_railHas = (afn_grind_rail >= 0 && afn_railpath_len(afn_grind_rail) > 0);
             if (s_railHas) {
+                s_railSplineOn = afn_rail_spline[afn_grind_rail];
                 s_railArc = afn_railpath_nearest(afn_grind_rail, player_x, player_z);
                 int gx,gy,gz,tdx,tdz;
                 afn_railpath_sample(afn_grind_rail, s_railArc, &gx,&gy,&gz,&tdx,&tdz);

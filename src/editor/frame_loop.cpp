@@ -4889,7 +4889,7 @@ static bool SaveProject(const std::string& path)
         }
         // Grind rail path (per mesh object). One header + one line per point.
         if (sp.isGrindRail || sp.railPointCount > 0) {
-            fprintf(f, "railPath=%d,%d\n", sp.isGrindRail ? 1 : 0, sp.railPointCount);
+            fprintf(f, "railPath=%d,%d,%d\n", sp.isGrindRail ? 1 : 0, sp.railPointCount, sp.railSpline ? 1 : 0);
             for (int rp = 0; rp < sp.railPointCount; rp++)
                 fprintf(f, "railPt=%.6f,%.6f,%.6f\n",
                     sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z);
@@ -5986,9 +5986,10 @@ static bool LoadProject(const std::string& path)
             }
             else if (strncmp(line, "railPath=", 9) == 0 && sSpriteCount > 0) {
                 FloorSprite& sp2 = sSprites[sSpriteCount - 1];
-                int isr = 0, cnt = 0;
-                sscanf(line + 9, "%d,%d", &isr, &cnt);
+                int isr = 0, cnt = 0, spl = 0;
+                sscanf(line + 9, "%d,%d,%d", &isr, &cnt, &spl);
                 sp2.isGrindRail = (isr != 0);
+                sp2.railSpline = (spl != 0);
                 sp2.railPointCount = 0;   // railPt lines below fill up to cnt
                 (void)cnt;
             }
@@ -8915,6 +8916,63 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         }
     }
 
+    // ---- Grind rail path overlay (wireframe between rail points) ----
+    // Draw each grind rail's authored path as a polyline with a dot at every
+    // point, so the hand-placed points are visible while editing. The selected
+    // rail is drawn brighter with numbered handles. World->screen matches the
+    // click-pick projection above (same FOV / aspect / basis).
+    {
+        bool anyRail = false;
+        for (int i = 0; i < sSpriteCount; i++)
+            if (sSprites[i].isGrindRail && sSprites[i].railPointCount > 0) { anyRail = true; break; }
+        if (anyRail) {
+            float camX, camY, camZ, fxv, fyv, fzv, rxv, ryv, rzv, uxv, uyv, uzv;
+            computeCamBasis(camX, camY, camZ, fxv, fyv, fzv, rxv, ryv, rzv, uxv, uyv, uzv);
+            float vTanH = tanf(45.0f * 3.14159265f / 360.0f);
+            float vAsp  = vpAreaW / size.y;
+            auto w2s = [&](float wx, float wy, float wz, ImVec2& out) -> bool {
+                float dxc = wx - camX, dyc = wy - camY, dzc = wz - camZ;
+                float zc = dxc*fxv + dyc*fyv + dzc*fzv;
+                if (zc <= 0.01f) return false;
+                float xc = dxc*rxv + dyc*ryv + dzc*rzv;
+                float yc = dxc*uxv + dyc*uyv + dzc*uzv;
+                float nx = xc / (zc * vTanH * vAsp);
+                float ny = yc / (zc * vTanH);
+                out.x = pos.x + (nx + 1.0f) * 0.5f * vpAreaW;
+                out.y = pos.y + (1.0f - ny) * 0.5f * size.y;
+                return true;
+            };
+            ImDrawList* rdl = ImGui::GetWindowDrawList();
+            rdl->PushClipRect(ImVec2(pos.x, pos.y), ImVec2(pos.x + vpAreaW, pos.y + size.y), true);
+            for (int i = 0; i < sSpriteCount; i++) {
+                const FloorSprite& sp = sSprites[i];
+                if (!sp.isGrindRail || sp.railPointCount <= 0) continue;
+                bool sel = (i == sSelectedSprite);
+                ImU32 lineCol = sel ? IM_COL32(255, 200, 40, 255) : IM_COL32(120, 200, 255, 160);
+                ImU32 dotCol  = sel ? IM_COL32(255, 255, 120, 255) : IM_COL32(160, 220, 255, 200);
+                float lineW   = sel ? 2.5f : 1.5f;
+                float dotR    = sel ? 4.5f : 3.0f;
+                ImVec2 prev; bool prevOk = false;
+                for (int rp = 0; rp < sp.railPointCount; rp++) {
+                    ImVec2 cur;
+                    bool ok = w2s(sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z, cur);
+                    if (ok && prevOk)
+                        rdl->AddLine(prev, cur, lineCol, lineW);
+                    if (ok) {
+                        rdl->AddCircleFilled(cur, dotR, dotCol);
+                        if (sel) {
+                            rdl->AddCircle(cur, dotR + 1.5f, IM_COL32(0, 0, 0, 200), 0, 1.5f);
+                            char lbl[8]; snprintf(lbl, sizeof(lbl), "%d", rp);
+                            rdl->AddText(ImVec2(cur.x + 6, cur.y - 6), IM_COL32(255, 255, 255, 230), lbl);
+                        }
+                    }
+                    prev = cur; prevOk = ok;
+                }
+            }
+            rdl->PopClipRect();
+        }
+    }
+
     // Overlay info text
     ImGui::SetCursorPos(ImVec2(8, 8));
     if (s3DGrabMode) {
@@ -9273,6 +9331,10 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 "the player slides along (exact, follows curves/thin pipes).");
             if (sp.isGrindRail) {
                 ImGui::Text("Path points: %d", sp.railPointCount);
+                if (ImGui::Checkbox("Spline Runtime##railspline", &sp.railSpline)) sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "ON: player follows a smooth Catmull-Rom curve through the points\n"
+                    "(rounded corners). OFF: straight segments between points.");
                 if (ImGui::Button("Generate From Mesh##railgen") &&
                     sp.meshIdx >= 0 && sp.meshIdx < (int)sMeshAssets.size())
                 {
@@ -9347,6 +9409,50 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 }
                 ImGui::SameLine();
                 if (ImGui::Button("Clear##railclr")) { sp.railPointCount = 0; sProjectDirty = true; }
+
+                // ---- Manual rail points (no geometry needed) ----
+                // Add / edit / remove individual path points by hand. New points
+                // append at the last point (or the mesh origin if empty), so you
+                // can lay down a path point-by-point and drag each into place.
+                if (ImGui::Button("Add Point##railadd") &&
+                    sp.railPointCount < FloorSprite::kMaxRailPoints)
+                {
+                    auto& np = sp.railPath[sp.railPointCount];
+                    if (sp.railPointCount > 0) {
+                        const auto& pv = sp.railPath[sp.railPointCount - 1];
+                        np.x = pv.x; np.y = pv.y; np.z = pv.z + 8.0f; // nudge so it's visible
+                    } else {
+                        np.x = sp.x; np.y = sp.y; np.z = sp.z;
+                    }
+                    sp.railPointCount++;
+                    sProjectDirty = true;
+                }
+                if (sp.railPointCount > 0) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(drag XYZ to shape the path)");
+                }
+                int removeIdx = -1;
+                for (int rp = 0; rp < sp.railPointCount; rp++) {
+                    ImGui::PushID(rp);
+                    float v3[3] = { sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z };
+                    ImGui::PushItemWidth(-60.0f);
+                    if (ImGui::DragFloat3("##railpt", v3, 1.0f)) {
+                        sp.railPath[rp].x = v3[0];
+                        sp.railPath[rp].y = v3[1];
+                        sp.railPath[rp].z = v3[2];
+                        sProjectDirty = true;
+                    }
+                    ImGui::PopItemWidth();
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("X##railrm")) removeIdx = rp;
+                    ImGui::PopID();
+                }
+                if (removeIdx >= 0) {
+                    for (int j = removeIdx; j < sp.railPointCount - 1; j++)
+                        sp.railPath[j] = sp.railPath[j + 1];
+                    sp.railPointCount--;
+                    sProjectDirty = true;
+                }
             }
             ImGui::Separator();
         }
@@ -13479,6 +13585,16 @@ void FrameTick(float dt)
                         se.drawBehindClipPlane = sSprites[i].drawBehindClipPlane;
                         se.spriteDrawPriority = sSprites[i].spriteDrawPriority;
                         se.blitSlot = sSprites[i].blitSlot;
+                        // Grind rail centerline (hand-authored in 3D tab). Copy the
+                        // world-space points + spline flag so nds_package can emit
+                        // afn_rail_pts / afn_rail_spline keyed by this sprite index.
+                        se.isGrindRail = sSprites[i].isGrindRail;
+                        se.railSpline  = sSprites[i].railSpline;
+                        se.railPath.clear();
+                        for (int rp = 0; rp < sSprites[i].railPointCount; rp++)
+                            se.railPath.push_back({ sSprites[i].railPath[rp].x,
+                                                    sSprites[i].railPath[rp].y,
+                                                    sSprites[i].railPath[rp].z });
                         exportSprites.push_back(se);
 
                         // Emit sub-sprites as separate sprite entries
@@ -28607,6 +28723,65 @@ void Render3DViewport()
     glLineWidth(1.0f);
 
     // Restore
+    // ---- Grind rail path wireframe (GL, on top of the 3D scene). ImGui draw
+    // lists are painted BEFORE this pass, so they'd be hidden by the meshes;
+    // the rail path must be drawn here in GL. Rail points are WORLD coords, so
+    // the current modelview (world look-at) applies directly. Depth test off so
+    // the path shows through geometry while editing. Selected rail = yellow.
+    {
+        bool anyRail = false;
+        for (int i = 0; i < sSpriteCount; i++)
+            if (sSprites[i].railPointCount > 0) { anyRail = true; break; }
+        if (anyRail) {
+            glDisable(GL_TEXTURE_2D);
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+            glDisable(GL_LIGHTING);
+            for (int i = 0; i < sSpriteCount; i++) {
+                const FloorSprite& fs = sSprites[i];
+                if (fs.railPointCount <= 0) continue;
+                bool sel = (i == sSelectedSprite);
+                if (sel) glColor3f(1.0f, 0.8f, 0.15f);
+                else     glColor3f(0.45f, 0.8f, 1.0f);
+                glLineWidth(sel ? 3.5f : 2.5f);
+                glBegin(GL_LINE_STRIP);
+                if (fs.railSpline && fs.railPointCount >= 2) {
+                    // Catmull-Rom curve preview (matches runtime spline sampling).
+                    auto pt = [&](int k)->const FloorSprite::RailPoint& {
+                        if (k < 0) k = 0; if (k >= fs.railPointCount) k = fs.railPointCount - 1;
+                        return fs.railPath[k];
+                    };
+                    for (int i = 1; i < fs.railPointCount; i++) {
+                        const auto& P0 = pt(i-2); const auto& P1 = pt(i-1);
+                        const auto& P2 = pt(i);   const auto& P3 = pt(i+1);
+                        const int SUB = 12;
+                        for (int s = 0; s <= SUB; s++) {
+                            float t = (float)s / SUB, t2 = t*t, t3 = t2*t;
+                            float bx = 0.5f*((2*P1.x)+(-P0.x+P2.x)*t+(2*P0.x-5*P1.x+4*P2.x-P3.x)*t2+(-P0.x+3*P1.x-3*P2.x+P3.x)*t3);
+                            float by = 0.5f*((2*P1.y)+(-P0.y+P2.y)*t+(2*P0.y-5*P1.y+4*P2.y-P3.y)*t2+(-P0.y+3*P1.y-3*P2.y+P3.y)*t3);
+                            float bz = 0.5f*((2*P1.z)+(-P0.z+P2.z)*t+(2*P0.z-5*P1.z+4*P2.z-P3.z)*t2+(-P0.z+3*P1.z-3*P2.z+P3.z)*t3);
+                            glVertex3f(bx, by, bz);
+                        }
+                    }
+                } else {
+                    for (int rp = 0; rp < fs.railPointCount; rp++)
+                        glVertex3f(fs.railPath[rp].x, fs.railPath[rp].y, fs.railPath[rp].z);
+                }
+                glEnd();
+                if (sel) glColor3f(1.0f, 1.0f, 0.4f);
+                else     glColor3f(0.7f, 0.9f, 1.0f);
+                glPointSize(sel ? 9.0f : 6.0f);
+                glBegin(GL_POINTS);
+                for (int rp = 0; rp < fs.railPointCount; rp++)
+                    glVertex3f(fs.railPath[rp].x, fs.railPath[rp].y, fs.railPath[rp].z);
+                glEnd();
+            }
+            glLineWidth(1.0f);
+            glPointSize(1.0f);
+            glColor3f(1, 1, 1);
+        }
+    }
+
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_SCISSOR_TEST);
     glMatrixMode(GL_PROJECTION);

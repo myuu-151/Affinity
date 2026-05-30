@@ -37,6 +37,7 @@ struct GBASpriteExport
     // points (editor coords) the runtime slides the player along; empty = not a
     // rail / no path. Exported into mapdata.h keyed by sprite index.
     bool isGrindRail = false;
+    bool railSpline = false;    // runtime follows a smooth Catmull-Rom curve through railPath
     std::vector<std::array<float,3>> railPath;
 };
 

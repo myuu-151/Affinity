@@ -237,6 +237,46 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "};\n\n";
     }
 
+    // ---- Grind rail paths (hand-authored centerlines, keyed by sprite index) ----
+    // afn_rail_pts holds every rail's points concatenated in 16.8 fixed world
+    // coords; afn_rail_start/afn_rail_count index into it per sprite; afn_rail_spline
+    // is the per-rail "follow a smooth Catmull-Rom curve" flag. fps3d.c consumes
+    // these under AFN_HAS_RAIL_PATH.
+    {
+        int totalRailPts = 0;
+        for (size_t i = 0; i < sprites.size(); i++) totalRailPts += (int)sprites[i].railPath.size();
+        if (totalRailPts > 0) {
+            f << "#define AFN_HAS_RAIL_PATH 1\n";
+            f << "static const int afn_rail_pts[" << totalRailPts << "][3] = {\n";
+            std::vector<int> railStart(sprites.size(), 0), railCount(sprites.size(), 0);
+            int running = 0;
+            for (size_t i = 0; i < sprites.size(); i++) {
+                railStart[i] = running;
+                railCount[i] = (int)sprites[i].railPath.size();
+                for (auto& p : sprites[i].railPath) {
+                    f << "    { " << EditorToFixed(p[0]) << ", "
+                      << EditorHeightToFixed(p[1]) << ", "
+                      << EditorToFixed(p[2]) << " },\n";
+                    running++;
+                }
+            }
+            f << "};\n";
+            int sc = (int)sprites.size(); if (sc < 1) sc = 1;
+            f << "static const int afn_rail_start[" << sc << "] = {";
+            for (size_t i = 0; i < sprites.size(); i++) f << (i?",":"") << railStart[i];
+            if (sprites.empty()) f << "0";
+            f << "};\n";
+            f << "static const int afn_rail_count[" << sc << "] = {";
+            for (size_t i = 0; i < sprites.size(); i++) f << (i?",":"") << railCount[i];
+            if (sprites.empty()) f << "0";
+            f << "};\n";
+            f << "static const int afn_rail_spline[" << sc << "] = {";
+            for (size_t i = 0; i < sprites.size(); i++) f << (i?",":"") << (sprites[i].railSpline ? 1 : 0);
+            if (sprites.empty()) f << "0";
+            f << "};\n\n";
+        }
+    }
+
     // HUD piece tile blob — populated inside the asset block (we need
     // allTiles + frameRomU32Offset) and emitted later in the HUD block.
     // Declared at function scope so both blocks can see them.

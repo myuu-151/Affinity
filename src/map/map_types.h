@@ -273,6 +273,7 @@ struct FloorSprite
     // panel; exported into mapdata.h so the runtime follows it directly instead
     // of deriving a centerline from faceted geometry at 60fps.
     bool  isGrindRail = false;
+    bool  railSpline = false;   // runtime follows a smooth Catmull-Rom curve through the points
     struct RailPoint { float x = 0.0f, y = 0.0f, z = 0.0f; };
     static constexpr int kMaxRailPoints = 64;
     RailPoint railPath[kMaxRailPoints];
