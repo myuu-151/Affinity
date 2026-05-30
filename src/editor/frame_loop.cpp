@@ -9525,12 +9525,12 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         }
         ImGui::PopItemWidth();
 
-        // ---- Grind Rail ----
+        // ---- Rail ----
         if (sp.type == SpriteType::Mesh) {
             ImGui::Separator();
-            if (ImGui::Checkbox("Grind Rail##m3d", &sp.isGrindRail)) sProjectDirty = true;
+            if (ImGui::Checkbox("Rail##m3d", &sp.isGrindRail)) sProjectDirty = true;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                "Make this mesh a grindable rail. Generate a centerline path\n"
+                "Make this mesh a rail. Generate a centerline path\n"
                 "the player slides along (exact, follows curves/thin pipes).");
             if (sp.isGrindRail) {
                 ImGui::Text("Path points: %d", sp.railPointCount);
