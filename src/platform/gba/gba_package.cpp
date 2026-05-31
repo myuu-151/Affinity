@@ -1958,6 +1958,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static int   afn_velocity_falloff;\n";
         f << "static int   afn_grinding;  // rail grind state (Mode 4 runtime)\n";
         f << "static int   afn_grind_rail = -1;\n";
+        f << "static int   afn_grind_power = 0; // GrindPower node: base downhill gain (0 => default 24)\n";
+        f << "static int   afn_grind_boost = 0; // GrindBoost node: extra downhill gain this frame\n";
         // Pending forward-boost magnitude. BoostForward writes this; runtime
         // consumes it during the player update by decomposing into vx/vz via
         // sin/cos(viewAngle), then clears it. Lets the node be view-relative
@@ -2689,6 +2691,18 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 case GBAScriptNodeType::StopGrind:
                     f << "    afn_grinding = 0;\n";
                     break;
+                case GBAScriptNodeType::GrindPower: {
+                    auto* pData = findDataIn(action->id, 0);
+                    float v = pData ? resolveFloat(pData) : 24.0f;
+                    f << "    afn_grind_power = " << (int)v << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::GrindBoost: {
+                    auto* bData = findDataIn(action->id, 0);
+                    float v = bData ? resolveFloat(bData) : 0.0f;
+                    f << "    afn_grind_boost = " << (int)v << ";\n";
+                    break;
+                }
                 case GBAScriptNodeType::PlaySound: {
                     auto* sndData = findDataIn(action->id, 0);
                     int sndId = sndData ? resolveInt(sndData) : 0;
@@ -4276,6 +4290,18 @@ static bool GenerateMapData(const std::string& runtimeDir,
                 case GBAScriptNodeType::StopGrind:
                     f << "    afn_grinding = 0;\n";
                     break;
+                case GBAScriptNodeType::GrindPower: {
+                    auto* pData = bpFindDataIn(action->id, 0);
+                    std::string v = pData ? bpResolveFloat(pData) : "24";
+                    f << "    afn_grind_power = (int)(" << v << ");\n";
+                    break;
+                }
+                case GBAScriptNodeType::GrindBoost: {
+                    auto* bData = bpFindDataIn(action->id, 0);
+                    std::string v = bData ? bpResolveFloat(bData) : "0";
+                    f << "    afn_grind_boost = (int)(" << v << ");\n";
+                    break;
+                }
                 case GBAScriptNodeType::PlaySound: {
                     auto* sndData = bpFindDataIn(action->id, 0);
                     std::string sndId = sndData ? bpResolveInt(sndData) : "0";
