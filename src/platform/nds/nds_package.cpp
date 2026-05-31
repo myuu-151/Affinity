@@ -253,6 +253,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             f << "#define AFN_HAS_RAIL_PATH 1\n";
             f << "static const int afn_rail_pts[" << totalRailPts << "][3] = {\n";
             std::vector<int> railStart(sprites.size(), 0), railCount(sprites.size(), 0);
+            std::vector<int> railEnd, railBounce; railEnd.reserve(totalRailPts); railBounce.reserve(totalRailPts);
             int running = 0;
             for (size_t i = 0; i < sprites.size(); i++) {
                 railStart[i] = running;
@@ -261,9 +262,21 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                     f << "    { " << EditorToFixed(p[0]) << ", "
                       << EditorHeightToFixed(p[1]) << ", "
                       << EditorToFixed(p[2]) << " },\n";
+                    // End and Start both = "clean-exit terminus" (no-re-grab).
+                    railEnd.push_back((p[3] != 0.0f || p[5] != 0.0f) ? 1 : 0);
+                    railBounce.push_back(p[4] != 0.0f ? 1 : 0);
                     running++;
                 }
             }
+            f << "};\n";
+            // Per-point flags, parallel to afn_rail_pts. _end = clean-exit terminus
+            // (End or Start: width-catch won't re-grab when leaving). _bounce =
+            // bumper terminus (reaching it reverses the grind direction).
+            f << "static const unsigned char afn_rail_pt_end[" << totalRailPts << "] = {";
+            for (size_t k = 0; k < railEnd.size(); k++) f << (k?",":"") << railEnd[k];
+            f << "};\n";
+            f << "static const unsigned char afn_rail_pt_bounce[" << totalRailPts << "] = {";
+            for (size_t k = 0; k < railBounce.size(); k++) f << (k?",":"") << railBounce[k];
             f << "};\n";
             int sc = (int)sprites.size(); if (sc < 1) sc = 1;
             f << "static const int afn_rail_start[" << sc << "] = {";

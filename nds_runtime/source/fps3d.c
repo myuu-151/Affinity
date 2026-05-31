@@ -698,7 +698,33 @@ static void update_camera(void)
             long long r = afn_grind_catch_x;
             int dyAbs = player_y - gy; if (dyAbs < 0) dyAbs = -dyAbs;
             int vWin = afn_player_height + afn_grind_catch_y;
-            if (horiz2 <= r * r && dyAbs <= vWin) {
+            // If the NEAREST authored point is flagged "End" (launch-off terminus),
+            // only width-catch when moving TOWARD the rail — so you vault off a
+            // tip cleanly (no re-grab loop) but can still re-catch from the
+            // approach side. Non-End points catch unconditionally within range.
+            int nearIsEnd = 0;
+            {
+                int rstart = afn_rail_start[afn_grind_rail];
+                int rn = afn_rail_count[afn_grind_rail];
+                int nearIdx = 0; long long bestPD = 0x7fffffffffffffffLL;
+                for (int k = 0; k < rn; k++) {
+                    long long px = player_x - afn_rail_pts[rstart+k][0];
+                    long long pz = player_z - afn_rail_pts[rstart+k][2];
+                    long long pd = px*px + pz*pz;
+                    if (pd < bestPD) { bestPD = pd; nearIdx = k; }
+                }
+                nearIsEnd = afn_rail_pt_end[rstart + nearIdx];
+            }
+            int movingToward = 1;
+            if (nearIsEnd) {
+                // velocity (input + carried world momentum) dotted with the
+                // vector toward the path point; >= 0 means arriving, not leaving.
+                long long velX = mvX + afn_player_vx_world;
+                long long velZ = mvZ + afn_player_vz_world;
+                long long dot = velX * (-ddx) + velZ * (-ddz);
+                movingToward = (dot >= 0);
+            }
+            if (horiz2 <= r * r && dyAbs <= vWin && movingToward) {
                 onFloor = 1; floorY = gy; onRail = 1;
             }
         }
@@ -740,7 +766,22 @@ static void update_camera(void)
                     s_railVelSmooth += (afn_grind_vel - s_railVelSmooth) >> 3;
                     if (s_railVelSmooth < 1) s_railVelSmooth = 1;
                     s_railArc += s_railDir * s_railVelSmooth;
-                    if (s_railArc <= 0 || s_railArc >= total) {
+                    int s_atEnd = (s_railArc <= 0 || s_railArc >= total);
+                    if (s_atEnd) {
+                        // Bounce point at this terminus? Reverse direction and keep
+                        // grinding (bumper) instead of launching off. The jump-off
+                        // (player_vy > 0) branch above runs first, so you can still
+                        // jump off right before the bumper.
+                        int rn2 = afn_rail_count[afn_grind_rail];
+                        int rs2 = afn_rail_start[afn_grind_rail];
+                        int termIdx2 = (s_railArc <= 0) ? 0 : (rn2 - 1);
+                        if (rn2 > 0 && afn_rail_pt_bounce[rs2 + termIdx2]) {
+                            s_railDir = -s_railDir;
+                            s_railArc = (s_railArc <= 0) ? 0 : total;
+                            s_atEnd = 0;
+                        }
+                    }
+                    if (s_atEnd) {
                         afn_player_vx_world = FX_MUL(afn_grind_dx, afn_grind_vel);
                         afn_player_vz_world = FX_MUL(afn_grind_dz, afn_grind_vel);
                         if (afn_velocity_falloff <= 0) afn_velocity_falloff = 30;

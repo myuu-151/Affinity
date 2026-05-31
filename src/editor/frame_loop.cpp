@@ -5357,8 +5357,9 @@ static bool SaveProject(const std::string& path)
         if (sp.isGrindRail || sp.railPointCount > 0) {
             fprintf(f, "railPath=%d,%d,%d\n", sp.isGrindRail ? 1 : 0, sp.railPointCount, sp.railSpline ? 1 : 0);
             for (int rp = 0; rp < sp.railPointCount; rp++)
-                fprintf(f, "railPt=%.6f,%.6f,%.6f\n",
-                    sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z);
+                fprintf(f, "railPt=%.6f,%.6f,%.6f,%d,%d,%d\n",
+                    sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z,
+                    sp.railPath[rp].isEnd ? 1 : 0, sp.railPath[rp].isBounce ? 1 : 0, sp.railPath[rp].isStart ? 1 : 0);
         }
     }
     fprintf(f, "\n");
@@ -5806,8 +5807,9 @@ static bool SaveProject(const std::string& path)
             if (sp.isGrindRail || sp.railPointCount > 0) {
                 fprintf(f, "msRailPath=%d,%d,%d\n", sp.isGrindRail ? 1 : 0, sp.railPointCount, sp.railSpline ? 1 : 0);
                 for (int rp = 0; rp < sp.railPointCount; rp++)
-                    fprintf(f, "msRailPt=%.6f,%.6f,%.6f\n",
-                        sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z);
+                    fprintf(f, "msRailPt=%.6f,%.6f,%.6f,%d,%d,%d\n",
+                        sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z,
+                        sp.railPath[rp].isEnd ? 1 : 0, sp.railPath[rp].isBounce ? 1 : 0, sp.railPath[rp].isStart ? 1 : 0);
             }
         }
         // Camera
@@ -5942,8 +5944,9 @@ static bool SaveProject(const std::string& path)
             if (sp.isGrindRail || sp.railPointCount > 0) {
                 fprintf(f, "m7RailPath=%d,%d,%d\n", sp.isGrindRail ? 1 : 0, sp.railPointCount, sp.railSpline ? 1 : 0);
                 for (int rp = 0; rp < sp.railPointCount; rp++)
-                    fprintf(f, "m7RailPt=%.6f,%.6f,%.6f\n",
-                        sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z);
+                    fprintf(f, "m7RailPt=%.6f,%.6f,%.6f,%d,%d,%d\n",
+                        sp.railPath[rp].x, sp.railPath[rp].y, sp.railPath[rp].z,
+                        sp.railPath[rp].isEnd ? 1 : 0, sp.railPath[rp].isBounce ? 1 : 0, sp.railPath[rp].isStart ? 1 : 0);
             }
         }
         fprintf(f, "m7Cam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d\n",
@@ -6477,8 +6480,11 @@ static bool LoadProject(const std::string& path)
                 FloorSprite& sp2 = sSprites[sSpriteCount - 1];
                 if (sp2.railPointCount < FloorSprite::kMaxRailPoints) {
                     auto& rp = sp2.railPath[sp2.railPointCount];
-                    if (sscanf(line + 7, "%f,%f,%f", &rp.x, &rp.y, &rp.z) == 3)
+                    int isEnd = 0, isBounce = 0, isStart = 0;
+                    if (sscanf(line + 7, "%f,%f,%f,%d,%d,%d", &rp.x, &rp.y, &rp.z, &isEnd, &isBounce, &isStart) >= 3) {
+                        rp.isEnd = (isEnd != 0); rp.isBounce = (isBounce != 0); rp.isStart = (isStart != 0);
                         sp2.railPointCount++;
+                    }
                 }
             }
         }
@@ -7639,8 +7645,11 @@ static bool LoadProject(const std::string& path)
                     FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
                     if (sp2.railPointCount < FloorSprite::kMaxRailPoints) {
                         auto& rp = sp2.railPath[sp2.railPointCount];
-                        if (sscanf(line + 9, "%f,%f,%f", &rp.x, &rp.y, &rp.z) == 3)
+                        int isEnd = 0, isBounce = 0, isStart = 0;
+                        if (sscanf(line + 9, "%f,%f,%f,%d,%d,%d", &rp.x, &rp.y, &rp.z, &isEnd, &isBounce, &isStart) >= 3) {
+                            rp.isEnd = (isEnd != 0); rp.isBounce = (isBounce != 0); rp.isStart = (isStart != 0);
                             sp2.railPointCount++;
+                        }
                     }
                 }
             }
@@ -8070,8 +8079,11 @@ static bool LoadProject(const std::string& path)
                     FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
                     if (sp2.railPointCount < FloorSprite::kMaxRailPoints) {
                         auto& rp = sp2.railPath[sp2.railPointCount];
-                        if (sscanf(line + 9, "%f,%f,%f", &rp.x, &rp.y, &rp.z) == 3)
+                        int isEnd = 0, isBounce = 0, isStart = 0;
+                        if (sscanf(line + 9, "%f,%f,%f,%d,%d,%d", &rp.x, &rp.y, &rp.z, &isEnd, &isBounce, &isStart) >= 3) {
+                            rp.isEnd = (isEnd != 0); rp.isBounce = (isBounce != 0); rp.isStart = (isStart != 0);
                             sp2.railPointCount++;
+                        }
                     }
                 }
             }
@@ -10123,6 +10135,50 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                         (int)s3DSelRailPts.size());
                 else
                     ImGui::TextDisabled("Right-click a point (Shift = multi). G move, W subdivide, E extrude");
+                // Per-point "End" toggle (launch-off terminus, rainbow-rendered).
+                if (s3DSelRailSprite == sSelectedSprite && !s3DSelRailPts.empty()) {
+                    // Reflect the primary point's state; toggling applies to all selected.
+                    bool anyEnd = false;
+                    for (int pi : s3DSelRailPts)
+                        if (pi >= 0 && pi < sp.railPointCount && sp.railPath[pi].isEnd) { anyEnd = true; break; }
+                    bool endState = anyEnd;
+                    if (ImGui::Checkbox("End point (launch-off)##railend", &endState)) {
+                        for (int pi : s3DSelRailPts)
+                            if (pi >= 0 && pi < sp.railPointCount) sp.railPath[pi].isEnd = endState;
+                        sProjectDirty = true;
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                        "Mark this point as a rail terminus. Grind Catch's width snap\n"
+                        "won't re-grab you here when you're moving AWAY (clean vault off),\n"
+                        "but still catches when you approach from the other side.\n"
+                        "End points render as an animated rainbow dot.");
+                    bool anyBounce = false;
+                    for (int pi : s3DSelRailPts)
+                        if (pi >= 0 && pi < sp.railPointCount && sp.railPath[pi].isBounce) { anyBounce = true; break; }
+                    bool bounceState = anyBounce;
+                    if (ImGui::Checkbox("Bounce point (bumper)##railbounce", &bounceState)) {
+                        for (int pi : s3DSelRailPts)
+                            if (pi >= 0 && pi < sp.railPointCount) sp.railPath[pi].isBounce = bounceState;
+                        sProjectDirty = true;
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                        "Bumper terminus: reaching this end reverses your grind\n"
+                        "direction (bounce back) instead of launching off — unless\n"
+                        "you jump off right before it. Renders as a pulsing orange dot.");
+                    bool anyStart = false;
+                    for (int pi : s3DSelRailPts)
+                        if (pi >= 0 && pi < sp.railPointCount && sp.railPath[pi].isStart) { anyStart = true; break; }
+                    bool startState = anyStart;
+                    if (ImGui::Checkbox("Start point (clean exit)##railstart", &startState)) {
+                        for (int pi : s3DSelRailPts)
+                            if (pi >= 0 && pi < sp.railPointCount) sp.railPath[pi].isStart = startState;
+                        sProjectDirty = true;
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                        "Clean-exit terminus (same no-re-grab as End): when you come\n"
+                        "back from a bounce and reach this point, you slide off smoothly\n"
+                        "instead of teleporting/re-catching. Renders as a pulsing green dot.");
+                }
                 if (ImGui::Checkbox("Spline Runtime##railspline", &sp.railSpline)) sProjectDirty = true;
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip(
                     "ON: player follows a smooth Catmull-Rom curve through the points\n"
@@ -14386,7 +14442,10 @@ void FrameTick(float dt)
                         for (int rp = 0; rp < sSprites[i].railPointCount; rp++)
                             se.railPath.push_back({ sSprites[i].railPath[rp].x,
                                                     sSprites[i].railPath[rp].y,
-                                                    sSprites[i].railPath[rp].z });
+                                                    sSprites[i].railPath[rp].z,
+                                                    sSprites[i].railPath[rp].isEnd ? 1.0f : 0.0f,
+                                                    sSprites[i].railPath[rp].isBounce ? 1.0f : 0.0f,
+                                                    sSprites[i].railPath[rp].isStart ? 1.0f : 0.0f });
                         exportSprites.push_back(se);
 
                         // Emit sub-sprites as separate sprite entries
@@ -29670,25 +29729,55 @@ void Render3DViewport()
                 else     glColor3f(0.7f, 0.9f, 1.0f);
                 glPointSize(sel ? 9.0f : 6.0f);
                 glBegin(GL_POINTS);
+                auto isSpecialPt = [&](int rp){ return fs.railPath[rp].isEnd || fs.railPath[rp].isBounce || fs.railPath[rp].isStart; };
                 for (int rp = 0; rp < fs.railPointCount; rp++) {
-                    if (i == s3DSelRailSprite && s3DSelRailContains(rp)) continue; // drawn highlighted below
+                    if (isSpecialPt(rp)) continue;                                  // typed pass below
+                    if (i == s3DSelRailSprite && s3DSelRailContains(rp)) continue;  // highlighted below
                     glVertex3f(fs.railPath[rp].x, fs.railPath[rp].y, fs.railPath[rp].z);
                 }
                 glEnd();
                 // Multi-selected points: magenta. The primary (last clicked / what
-                // E continues from) is drawn a touch bigger.
+                // E continues from) is drawn a touch bigger. (Typed points skip
+                // this — they render their own color regardless of selection.)
                 if (i == s3DSelRailSprite && !s3DSelRailPts.empty()) {
                     glColor3f(1.0f, 0.2f, 1.0f);
                     glPointSize(11.0f);
                     glBegin(GL_POINTS);
                     for (int pi : s3DSelRailPts)
-                        if (pi >= 0 && pi < fs.railPointCount && pi != s3DSelRailPoint)
+                        if (pi >= 0 && pi < fs.railPointCount && pi != s3DSelRailPoint && !isSpecialPt(pi))
                             glVertex3f(fs.railPath[pi].x, fs.railPath[pi].y, fs.railPath[pi].z);
                     glEnd();
-                    if (s3DSelRailPoint >= 0 && s3DSelRailPoint < fs.railPointCount) {
+                    if (s3DSelRailPoint >= 0 && s3DSelRailPoint < fs.railPointCount && !isSpecialPt(s3DSelRailPoint)) {
                         glPointSize(14.0f);
                         glBegin(GL_POINTS);
                         glVertex3f(fs.railPath[s3DSelRailPoint].x, fs.railPath[s3DSelRailPoint].y, fs.railPath[s3DSelRailPoint].z);
+                        glEnd();
+                    }
+                }
+                // Typed terminus points (drawn on top): End = animated rainbow,
+                // Bounce = pulsing orange, Start = pulsing green. Bigger when
+                // selected. Bounce takes visual priority if combined.
+                {
+                    float t = (float)ImGui::GetTime();
+                    float pulse = 0.5f + 0.5f * sinf(t * 5.0f);   // 0..1 throb
+                    for (int rp = 0; rp < fs.railPointCount; rp++) {
+                        if (!isSpecialPt(rp)) continue;
+                        bool selPt = (i == s3DSelRailSprite && s3DSelRailContains(rp));
+                        float r, g, b, sz;
+                        if (fs.railPath[rp].isBounce) {
+                            r = 1.0f; g = 0.45f + 0.4f * pulse; b = 0.0f; // orange throb
+                            sz = (selPt ? 13.0f : 9.0f) + 4.0f * pulse;
+                        } else if (fs.railPath[rp].isStart) {
+                            r = 0.0f; g = 1.0f; b = 0.2f + 0.5f * pulse; // green throb
+                            sz = (selPt ? 13.0f : 9.0f) + 4.0f * pulse;
+                        } else { // isEnd → rainbow
+                            ImGui::ColorConvertHSVtoRGB(fmodf(t * 0.4f + rp * 0.08f, 1.0f), 0.9f, 1.0f, r, g, b);
+                            sz = selPt ? 15.0f : 10.0f;
+                        }
+                        glColor3f(r, g, b);
+                        glPointSize(sz);
+                        glBegin(GL_POINTS);
+                        glVertex3f(fs.railPath[rp].x, fs.railPath[rp].y, fs.railPath[rp].z);
                         glEnd();
                     }
                 }
