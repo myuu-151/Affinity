@@ -32407,6 +32407,8 @@ extern int afn_velocity_falloff;
 extern int afn_pending_boost_fwd;
 extern int afn_grinding;
 extern int afn_grind_rail;
+extern int afn_grind_power;
+extern int afn_grind_boost;
 void afn_play_sound(int id);
 void afn_play_sfx(int smpIdx, int gain, int fifo);
 void afn_stop_sound(void);
@@ -32689,6 +32691,7 @@ static void afn_bp7_update(void) {
     }
     if (afn_grinding) {
     if (!afn_player_frozen && 1 >= afn_anim_prio) { afn_play_anim = 5; afn_anim_prio = 1; }
+    afn_grind_boost = 600;
     if (afn_rise_12 >= afn_frame_count - 1) { afn_rise_12 = afn_frame_count; }
     else { afn_rise_12 = afn_frame_count;
     afn_play_sfx(28, 0, 0);
@@ -32696,6 +32699,9 @@ static void afn_bp7_update(void) {
     }
 }
 static void afn_bp7_key_held(void) {
+    if (key_is_down(KEY_B)) {
+    afn_grind_boost = 600;
+    }
 }
 static void afn_bp7_key_pressed(void) {
 }
@@ -32705,6 +32711,7 @@ static void afn_bp7_collision(void) {
     afn_grinding = 1; afn_grind_rail = afn_collided_sprite;
     if (afn_grinding) {
     if (!afn_player_frozen && 1 >= afn_anim_prio) { afn_play_anim = 5; afn_anim_prio = 1; }
+    afn_grind_boost = 600;
     if (afn_rise_12 >= afn_frame_count - 1) { afn_rise_12 = afn_frame_count; }
     else { afn_rise_12 = afn_frame_count;
     afn_play_sfx(28, 0, 0);

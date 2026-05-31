@@ -111,6 +111,11 @@ int  afn_grind_dx;
 int  afn_grind_dz;
 int  afn_grind_vel;
 int  afn_grind_rail = -1;   // sprite index of the rail being ground (its mesh axis = grind dir)
+// GrindPower / GrindBoost nodes. afn_grind_power = base downhill gain (0 => default
+// 24). afn_grind_boost = extra downhill gain THIS frame (cleared every frame in
+// fps3d.c, so a held-button gate re-sets it each frame for hold-to-boost).
+int  afn_grind_power = 0;
+int  afn_grind_boost = 0;
 
 // Mode 0 tilemap state — referenced by emitted scripts even on 3D scenes.
 int  tm_player_facing = 4;        // 4 = south, matches GBA default

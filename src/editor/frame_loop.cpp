@@ -579,6 +579,8 @@ enum class VsNodeType : int {
     StopGrind,       // action: end rail grinding
     IsGrinding,      // gate: passes exec while the player is grinding
     IsNotGrinding,   // gate: passes exec while the player is NOT grinding
+    GrindPower,      // action: set base downhill momentum gain for grinding (Mode 4)
+    GrindBoost,      // action: add extra downhill speed THIS frame (gate with Is Key Held for hold-to-boost)
     COUNT
 };
 
@@ -884,6 +886,8 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Stop Grind",    0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
     { "Is Grinding",   0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is Not Grinding", 0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Grind Power",   0xFF3355AA, 1, 1, 1, 0, {"Gain (float)"}, {}, {} },
+    { "Grind Boost",   0xFF3355AA, 1, 1, 1, 0, {"Extra (float)"}, {}, {} },
 };
 
 struct VsNode {
@@ -18502,6 +18506,8 @@ void FrameTick(float dt)
                 case VsNodeType::StopGrind:      desc = "End rail grinding immediately (restores normal input movement)."; break;
                 case VsNodeType::IsGrinding:     desc = "Gate: passes exec while the player is currently grinding a rail. Use to play a grind animation or gate a jump-off."; break;
                 case VsNodeType::IsNotGrinding:  desc = "Gate: passes exec while the player is NOT grinding. Wire On Update -> Is Not Grinding -> On Rise -> Stop Sound to kill a looping grind SFX the instant you leave the rail."; break;
+                case VsNodeType::GrindPower:    desc = "Set the BASE downhill momentum gain while grinding (default 24). Higher = a descent builds speed faster. Drop it under On Start to tune the whole rail system."; break;
+                case VsNodeType::GrindBoost:    desc = "Add EXTRA downhill grind speed for this frame (only applies while descending). Gate it with a held button: On Update -> Is Key Held(B) -> Grind Boost, so holding sprint on a downslope accelerates harder."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -18751,6 +18757,8 @@ void FrameTick(float dt)
                         case VsNodeType::StopGrind:     return "_stop_grind";
                         case VsNodeType::IsGrinding:    return "_is_grinding";
                         case VsNodeType::IsNotGrinding: return "_is_not_grinding";
+                        case VsNodeType::GrindPower:    return "_grind_power";
+                        case VsNodeType::GrindBoost:    return "_grind_boost";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -19682,6 +19690,41 @@ void FrameTick(float dt)
                         "    // --- Runtime --- gate; downstream runs only while not grinding.\n"
                         "    // Pair with On Rise to fire once on the frame grinding ends\n"
                         "    // (e.g. Stop Sound to kill a looping grind SFX).\n");
+                    break;
+                }
+                case VsNodeType::GrindPower: {
+                    editorCode = "// Set the base downhill grind momentum gain.";
+                    char bodyBuf[512];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_grind_power = (int)(%s);\n"
+                        "    // --- Runtime (fps3d.c, Mode 4) ---\n"
+                        "    // Per grind frame, on a downhill grade:\n"
+                        "    //   gpow = afn_grind_power ? afn_grind_power : 24; // default 24\n"
+                        "    //   afn_grind_vel += (grade * (gpow + afn_grind_boost)) >> 8;\n"
+                        "    // grade = Y-drop per unit arc, so a STEEPER slope multiplies the\n"
+                        "    // effect; a shallow slope barely changes speed.",
+                        fmtFloat(infoNode.id, 0, "<gain>"));
+                    setActionFunc(infoNode, "_grind_power", bodyBuf);
+                    break;
+                }
+                case VsNodeType::GrindBoost: {
+                    editorCode = "// Add extra downhill grind speed this frame (hold to boost).";
+                    char bodyBuf[640];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_grind_boost = (int)(%s);\n"
+                        "    // --- Runtime (fps3d.c, Mode 4) ---\n"
+                        "    // RAISES the grind speed ceiling while descending, scaled by\n"
+                        "    // slope steepness. The bonus RAMPS toward the target while\n"
+                        "    // boosting downhill and DECAYS gradually otherwise, so a flat\n"
+                        "    // dip mid-descent doesn't cut speed — it carries and bleeds off:\n"
+                        "    //   target = (grade>0 && boost) ? (grade*boost)>>8 : 0;\n"
+                        "    //   if (target>bonus) bonus += (target-bonus)>>2; // ramp up\n"
+                        "    //   else              bonus -= bonus>>6;          // slow bleed\n"
+                        "    //   gcap = SPRINT*5 + bonus;\n"
+                        "    // Cleared to 0 each frame -> gate with a held key\n"
+                        "    // (On Update -> Is Key Held -> Grind Boost) for hold-to-boost.",
+                        fmtFloat(infoNode.id, 0, "<extra>"));
+                    setActionFunc(infoNode, "_grind_boost", bodyBuf);
                     break;
                 }
                 case VsNodeType::StopSound:
@@ -22187,6 +22230,8 @@ void FrameTick(float dt)
                     case VsNodeType::StopGrind:     suffix = "_stop_grind"; break;
                     case VsNodeType::IsGrinding:    suffix = "_is_grinding"; break;
                     case VsNodeType::IsNotGrinding: suffix = "_is_not_grinding"; break;
+                    case VsNodeType::GrindPower:    suffix = "_grind_power"; break;
+                    case VsNodeType::GrindBoost:    suffix = "_grind_boost"; break;
                     case VsNodeType::StopSound:     suffix = "_stop_sound"; break;
                     case VsNodeType::AddMath:       suffix = "_add"; break;
                     case VsNodeType::SubtractMath:  suffix = "_sub"; break;
@@ -22734,6 +22779,8 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopGrind].name)) addNodeAt(VsNodeType::StopGrind);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsGrinding].name)) addNodeAt(VsNodeType::IsGrinding);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNotGrinding].name)) addNodeAt(VsNodeType::IsNotGrinding);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GrindPower].name)) addNodeAt(VsNodeType::GrindPower);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GrindBoost].name)) addNodeAt(VsNodeType::GrindBoost);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetPlayerHeight].name)) addNodeAt(VsNodeType::SetPlayerHeight);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopSound].name)) addNodeAt(VsNodeType::StopSound);
                     ImGui::Separator();

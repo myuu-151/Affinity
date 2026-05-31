@@ -395,6 +395,8 @@ enum class GBAScriptNodeType : int {
     StopGrind,
     IsGrinding,
     IsNotGrinding,
+    GrindPower,
+    GrindBoost,
     COUNT
 };
 

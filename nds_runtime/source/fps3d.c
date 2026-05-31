@@ -496,6 +496,7 @@ static void update_camera(void)
     // Rail grinding: when afn_grinding, the player is locked to the rail
     // direction and slides on momentum instead of taking input movement.
     extern int afn_grinding, afn_grind_dx, afn_grind_dz, afn_grind_vel;
+    extern int afn_grind_power, afn_grind_boost; // GrindPower / GrindBoost nodes
     extern int afn_player_vx_world, afn_player_vz_world;
     int fwd = afn_input_fwd, right = afn_input_right;
     if (fwd && right) { fwd = (fwd * 181) >> 8; right = (right * 181) >> 8; }
@@ -652,6 +653,13 @@ static void update_camera(void)
             }
         }
         static int s_grindPrevFloorY = 0;
+        // Persistent boosted-cap bonus. GrindBoost raises the grind speed
+        // ceiling while descending; rather than snapping the cap back the
+        // instant the rail levels out (a brief flat dip mid-descent would
+        // jolt you), this bonus RAMPS UP toward the steepness-scaled target
+        // while boosting downhill and DECAYS gradually otherwise — so speed
+        // earned on a drop carries across flats and only bleeds off slowly.
+        static int s_grindCapBonus = 0;
 #ifdef AFN_HAS_RAIL_PATH
         static int s_railArc=0, s_railDir=1, s_railHas=0, s_railPrevY=0;
         // Smoothed arc-advance speed. afn_grind_vel is the PHYSICS velocity
@@ -701,12 +709,32 @@ static void update_camera(void)
                         s_railPrevY = gy;
                         if (grade >  256) grade =  256;
                         if (grade < -256) grade = -256;
-                        // Bounded gentle accel (<= ~6/frame) + slippery friction.
-                        if (grade > 0) afn_grind_vel += (grade * 6) >> 8;
-                        else           afn_grind_vel += (grade * 3) >> 8;
-                        afn_grind_vel -= afn_grind_vel >> 9;
+                        // Downhill builds real momentum (Sonic rail launch): a
+                        // steep grade adds (power+boost)/frame and friction is
+                        // near-zero, so speed accumulates the longer the rail
+                        // descends. Uphill bleeds gently. Grade is velocity-
+                        // independent (drop per unit arc) so this stays stable.
+                        // afn_grind_power (GrindPower node) sets the base gain
+                        // (0 => default 24); afn_grind_boost (GrindBoost node,
+                        // gated by a held key) adds extra ONLY while descending.
+                        {
+                            int gpow = afn_grind_power ? afn_grind_power : 24;
+                            if (grade > 0) afn_grind_vel += (grade * gpow) >> 8;
+                            else           afn_grind_vel += (grade * 4) >> 8;
+                            // GrindBoost RAISES the speed ceiling while descending,
+                            // scaled by steepness. The bonus ramps toward the target
+                            // while boosting downhill and DECAYS gradually otherwise,
+                            // so a flat dip mid-descent doesn't instantly cut speed —
+                            // earned momentum carries across flats and bleeds slowly.
+                            int target = (grade > 0 && afn_grind_boost > 0)
+                                       ? ((grade * afn_grind_boost) >> 8) : 0;
+                            if (target > s_grindCapBonus) s_grindCapBonus += (target - s_grindCapBonus) >> 2; // quick ramp up
+                            else                          s_grindCapBonus -= s_grindCapBonus >> 6;            // slow bleed down
+                        }
+                        afn_grind_vel -= afn_grind_vel >> 10; // very slippery
                         if (afn_grind_vel < (AFN_WALK_SPEED >> 3)) afn_grind_vel = (AFN_WALK_SPEED >> 3);
-                        if (afn_grind_vel > AFN_SPRINT_SPEED * 3) afn_grind_vel = AFN_SPRINT_SPEED * 3;
+                        { int gcap = AFN_SPRINT_SPEED * 5 + s_grindCapBonus;
+                          if (afn_grind_vel > gcap) afn_grind_vel = gcap; }
                         player_x = gx; player_z = gz; player_y = gy;
                         player_vy = 0; player_on_ground = 1;
                         afn_grind_dx = tdx * s_railDir; afn_grind_dz = tdz * s_railDir;
@@ -737,12 +765,28 @@ static void update_camera(void)
                 // run visibly ramps up like a Sonic rail.
                 int slope = s_grindPrevFloorY - floorY;
                 s_grindPrevFloorY = floorY;
-                if (slope > 0) afn_grind_vel += slope;       // downhill: full slope gain
-                else           afn_grind_vel += slope >> 1;  // uphill: lose half the climb
+                // GrindPower scales the downhill slope gain (default 24 ~= 1x of
+                // the raw slope step). GrindBoost RAISES the speed ceiling while
+                // descending (scaled by slope), so holding the button lets you
+                // exceed the normal cap — steeper = more.
+                // Boosted-cap bonus ramps up while boosting downhill, decays
+                // gradually otherwise (so a flat dip doesn't instantly cut it).
+                {
+                    int target = (slope > 0 && afn_grind_boost > 0)
+                               ? ((slope * afn_grind_boost) / 24) : 0;
+                    if (target > s_grindCapBonus) s_grindCapBonus += (target - s_grindCapBonus) >> 2;
+                    else                          s_grindCapBonus -= s_grindCapBonus >> 6;
+                }
+                int gcap = AFN_SPRINT_SPEED * 3 + s_grindCapBonus;
+                if (slope > 0) {
+                    int gpow = afn_grind_power ? afn_grind_power : 24;
+                    afn_grind_vel += (slope * gpow) / 24;     // downhill
+                } else {
+                    afn_grind_vel += slope >> 1;             // uphill: lose half the climb
+                }
                 afn_grind_vel -= afn_grind_vel >> 9;         // tiny friction (very slippery)
                 if (afn_grind_vel < (AFN_WALK_SPEED >> 3)) afn_grind_vel = (AFN_WALK_SPEED >> 3);
-                // Cap so a long steep rail doesn't fling you uncontrollably.
-                if (afn_grind_vel > AFN_SPRINT_SPEED * 3) afn_grind_vel = AFN_SPRINT_SPEED * 3;
+                if (afn_grind_vel > gcap) afn_grind_vel = gcap;
 
                 // --- Re-center between rail edges + steer to follow the curve ---
                 // The grind heading is frozen at entry, so on a CURVED rail going
@@ -1014,6 +1058,11 @@ static void update_camera(void)
     // jumps instead of snapping. baseline = the player's spawn Y; adding the
     // smoothed delta gives the camera's tracked world Y.
     cam_h = AFN_PLAYER_BASE_Y + s_camYSmooth + AFN_CAM_H;
+
+    // GrindBoost is a one-frame request: clear it every frame so it only applies
+    // on frames the GrindBoost node actually fired. Gate the node with a held key
+    // (On Update -> Is Key Held -> Grind Boost) for continuous hold-to-boost.
+    { extern int afn_grind_boost; afn_grind_boost = 0; }
 }
 
 // ---------------------------------------------------------------------------
