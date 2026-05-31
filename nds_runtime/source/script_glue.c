@@ -116,6 +116,10 @@ int  afn_grind_rail = -1;   // sprite index of the rail being ground (its mesh a
 // fps3d.c, so a held-button gate re-sets it each frame for hold-to-boost).
 int  afn_grind_power = 0;
 int  afn_grind_boost = 0;
+// GrindBleed node: right-shift used to decay the boosted speed-cap bonus each
+// grind frame (default 6 ~= 64-frame bleed). Higher = momentum carries farther;
+// 0 = never bleeds. Persistent (NOT cleared per frame), so set it under On Start.
+int  afn_grind_bleed = 6;
 
 // Mode 0 tilemap state — referenced by emitted scripts even on 3D scenes.
 int  tm_player_facing = 4;        // 4 = south, matches GBA default

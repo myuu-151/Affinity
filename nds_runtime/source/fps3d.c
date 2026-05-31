@@ -500,6 +500,10 @@ static void update_camera(void)
     // direction and slides on momentum instead of taking input movement.
     extern int afn_grinding, afn_grind_dx, afn_grind_dz, afn_grind_vel;
     extern int afn_grind_power, afn_grind_boost; // GrindPower / GrindBoost nodes
+    extern int afn_grind_bleed;                  // GrindBleed node: cap-bonus decay shift
+    // Clamp to a safe shift range (0 = never bleeds, default 6). Done once so
+    // both grind paths below share it without re-validating in the hot loop.
+    int grindBleed = afn_grind_bleed; if (grindBleed < 0) grindBleed = 0; else if (grindBleed > 16) grindBleed = 16;
     extern int afn_player_vx_world, afn_player_vz_world;
     int fwd = afn_input_fwd, right = afn_input_right;
     if (fwd && right) { fwd = (fwd * 181) >> 8; right = (right * 181) >> 8; }
@@ -732,7 +736,7 @@ static void update_camera(void)
                             int target = (grade > 0 && afn_grind_boost > 0)
                                        ? ((grade * afn_grind_boost) >> 8) : 0;
                             if (target > s_grindCapBonus) s_grindCapBonus += (target - s_grindCapBonus) >> 2; // quick ramp up
-                            else                          s_grindCapBonus -= s_grindCapBonus >> 6;            // slow bleed down
+                            else                          s_grindCapBonus -= s_grindCapBonus >> grindBleed;    // slow bleed down (GrindBleed node)
                         }
                         afn_grind_vel -= afn_grind_vel >> 10; // very slippery
                         if (afn_grind_vel < (AFN_WALK_SPEED >> 3)) afn_grind_vel = (AFN_WALK_SPEED >> 3);
@@ -778,7 +782,7 @@ static void update_camera(void)
                     int target = (slope > 0 && afn_grind_boost > 0)
                                ? ((slope * afn_grind_boost) / 24) : 0;
                     if (target > s_grindCapBonus) s_grindCapBonus += (target - s_grindCapBonus) >> 2;
-                    else                          s_grindCapBonus -= s_grindCapBonus >> 6;
+                    else                          s_grindCapBonus -= s_grindCapBonus >> grindBleed; // GrindBleed node
                 }
                 int gcap = AFN_SPRINT_SPEED * 3 + s_grindCapBonus;
                 if (slope > 0) {

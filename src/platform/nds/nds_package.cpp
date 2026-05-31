@@ -2358,6 +2358,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int afn_grind_rail;\n";
         f << "extern int afn_grind_power;\n";
         f << "extern int afn_grind_boost;\n";
+        f << "extern int afn_grind_bleed;\n";
         // Audio entry points (audio.c) used by PlaySound / StopSound emit.
         f << "void afn_play_sound(int id);\n";
         f << "void afn_play_sfx(int smpIdx, int gain, int fifo);\n";
@@ -2652,6 +2653,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 auto* d = findDataIn(a->id, 0);
                 float v = d ? resolveFloat(d) : 0.0f;
                 f << "    afn_grind_boost = " << (int)v << ";\n"; break;
+            }
+            case GBAScriptNodeType::GrindBleed: {
+                auto* d = findDataIn(a->id, 0);
+                float v = d ? resolveFloat(d) : 6.0f;
+                f << "    afn_grind_bleed = " << (int)v << ";\n"; break;
             }
             // --- Gate nodes (open a brace; closed by the chain's tail logic) ---
             case GBAScriptNodeType::IsGrinding:

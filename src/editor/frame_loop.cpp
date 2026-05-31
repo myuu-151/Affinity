@@ -581,6 +581,7 @@ enum class VsNodeType : int {
     IsNotGrinding,   // gate: passes exec while the player is NOT grinding
     GrindPower,      // action: set base downhill momentum gain for grinding (Mode 4)
     GrindBoost,      // action: add extra downhill speed THIS frame (gate with Is Key Held for hold-to-boost)
+    GrindBleed,      // action: set how slowly the boosted speed cap bleeds back to normal (Mode 4)
     COUNT
 };
 
@@ -887,7 +888,8 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Is Grinding",   0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is Not Grinding", 0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Grind Power",   0xFF3355AA, 1, 1, 1, 0, {"Gain (float)"}, {}, {} },
-    { "Grind Boost",   0xFF3355AA, 1, 1, 1, 0, {"Extra (float)"}, {}, {} },
+    { "Grind Boost",   0xFF3355AA, 1, 1, 1, 0, {"Force (float)"}, {}, {} },
+    { "Grind Bleed",   0xFF3355AA, 1, 1, 1, 0, {"Slowness (float)"}, {}, {} },
 };
 
 struct VsNode {
@@ -4577,6 +4579,42 @@ static int ExportSceneOBJ(const std::string& objPath)
 
 static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh); // fwd (re-quantize clones)
 
+// Serialize a mesh asset's LOCAL geometry to Wavefront OBJ text — the inverse
+// of LoadOBJ (same no-flip UV / per-corner convention), so a reload reproduces
+// the same geometry. Used to persist reimported edits back onto the source.
+static std::string MeshAssetToOBJ(const MeshAsset& m)
+{
+    std::string s = "# Affinity edited mesh\n";
+    char buf[160];
+    for (const MeshVertex& v : m.vertices) { snprintf(buf, sizeof(buf), "v %.5f %.5f %.5f\n", v.px, v.py, v.pz); s += buf; }
+    for (const MeshVertex& v : m.vertices) { snprintf(buf, sizeof(buf), "vt %.5f %.5f\n", v.u, v.v); s += buf; }
+    for (const MeshVertex& v : m.vertices) { snprintf(buf, sizeof(buf), "vn %.5f %.5f %.5f\n", v.nx, v.ny, v.nz); s += buf; }
+    for (size_t t = 0; t + 3 <= m.indices.size(); t += 3) {
+        int a = (int)m.indices[t]+1, b = (int)m.indices[t+1]+1, c = (int)m.indices[t+2]+1;
+        snprintf(buf, sizeof(buf), "f %d/%d/%d %d/%d/%d %d/%d/%d\n", a,a,a, b,b,b, c,c,c); s += buf;
+    }
+    for (size_t q = 0; q + 4 <= m.quadIndices.size(); q += 4) {
+        int a = (int)m.quadIndices[q]+1, b = (int)m.quadIndices[q+1]+1, c = (int)m.quadIndices[q+2]+1, d = (int)m.quadIndices[q+3]+1;
+        snprintf(buf, sizeof(buf), "f %d/%d/%d %d/%d/%d %d/%d/%d %d/%d/%d\n", a,a,a, b,b,b, c,c,c, d,d,d); s += buf;
+    }
+    return s;
+}
+
+// Persist a mesh's (just-edited) geometry as the source LoadOBJ reads back, so
+// it survives save/reload with no project-format change. We point the mesh at a
+// synthetic "(edited:N)" key and stash the OBJ bytes in the packed-asset store
+// (which is serialized with the project). This is non-destructive — the user's
+// original .obj on disk is never overwritten — and Pack-all skips "(" keys so
+// it can't clobber the edit by re-reading the original file. `assetIdx` keys it.
+static void PersistMeshGeometry(MeshAsset& m, int assetIdx)
+{
+    std::string obj = MeshAssetToOBJ(m);
+    std::vector<uint8_t> bytes(obj.begin(), obj.end());
+    char key[64]; snprintf(key, sizeof(key), "(edited:%d)", assetIdx);
+    m.sourcePath = key;
+    sPackedAssets[key] = std::move(bytes);
+}
+
 // Reimport an OBJ previously written by ExportSceneOBJ, reapplying edited
 // geometry back onto the matching placed-mesh instances. Each exported object
 // is named "<meshname>_<instanceIndex>"; we parse that index, inverse-transform
@@ -4806,12 +4844,16 @@ static int ReimportSceneOBJ(const std::string& objPath,
             m.indices = std::move(tri);
             m.quadIndices = std::move(quad);
             recomputeBounds(m);
+            // Write the edit back onto the source so a save/reload keeps it.
+            PersistMeshGeometry(m, mi);
             if (outUpdated) (*outUpdated)++;
         }
         else
         {
             MeshAsset clone = sMeshAssets[mi];   // copies texture/flags/name
             clone.glTexID = 0;                   // don't share the GL handle
+            clone.sourcePath.clear();            // force a synthetic source so we
+                                                 // don't overwrite the shared original
             clone.vertices = std::move(verts);
             clone.indices = std::move(tri);
             clone.quadIndices = std::move(quad);
@@ -4819,7 +4861,9 @@ static int ReimportSceneOBJ(const std::string& objPath,
             if (clone.textured && !clone.texturePath.empty() && clone.texturePath[0] != '(')
                 LoadMeshTexture(clone.texturePath, clone); // own preview texture
             sMeshAssets.push_back(std::move(clone));
-            sSprites[inst].meshIdx = (int)sMeshAssets.size() - 1;
+            int newIdx = (int)sMeshAssets.size() - 1;
+            PersistMeshGeometry(sMeshAssets[newIdx], newIdx); // own (edited:N) source
+            sSprites[inst].meshIdx = newIdx;
             if (outCloned) (*outCloned)++;
         }
         applied++;
@@ -18929,6 +18973,7 @@ void FrameTick(float dt)
                 case VsNodeType::IsNotGrinding:  desc = "Gate: passes exec while the player is NOT grinding. Wire On Update -> Is Not Grinding -> On Rise -> Stop Sound to kill a looping grind SFX the instant you leave the rail."; break;
                 case VsNodeType::GrindPower:    desc = "Set the BASE downhill momentum gain while grinding (default 24). Higher = a descent builds speed faster. Drop it under On Start to tune the whole rail system."; break;
                 case VsNodeType::GrindBoost:    desc = "Add EXTRA downhill grind speed for this frame (only applies while descending). Gate it with a held button: On Update -> Is Key Held(B) -> Grind Boost, so holding sprint on a downslope accelerates harder."; break;
+                case VsNodeType::GrindBleed:    desc = "Set how slowly the Grind Boost's extra speed bleeds back to normal (default 6). Higher = momentum earned on a drop carries farther across flats before fading; lower = snaps back sooner; 0 = never bleeds. Persistent — fine under On Start or On Update."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -19180,6 +19225,7 @@ void FrameTick(float dt)
                         case VsNodeType::IsNotGrinding: return "_is_not_grinding";
                         case VsNodeType::GrindPower:    return "_grind_power";
                         case VsNodeType::GrindBoost:    return "_grind_boost";
+                        case VsNodeType::GrindBleed:    return "_grind_bleed";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -20140,12 +20186,29 @@ void FrameTick(float dt)
                         "    // dip mid-descent doesn't cut speed — it carries and bleeds off:\n"
                         "    //   target = (grade>0 && boost) ? (grade*boost)>>8 : 0;\n"
                         "    //   if (target>bonus) bonus += (target-bonus)>>2; // ramp up\n"
-                        "    //   else              bonus -= bonus>>6;          // slow bleed\n"
+                        "    //   else              bonus -= bonus>>afn_grind_bleed; // slow bleed\n"
                         "    //   gcap = SPRINT*5 + bonus;\n"
                         "    // Cleared to 0 each frame -> gate with a held key\n"
-                        "    // (On Update -> Is Key Held -> Grind Boost) for hold-to-boost.",
-                        fmtFloat(infoNode.id, 0, "<extra>"));
+                        "    // (On Update -> Is Key Held -> Grind Boost) for hold-to-boost.\n"
+                        "    // Bleed-off rate is set by the Grind Bleed node.",
+                        fmtFloat(infoNode.id, 0, "<force>"));
                     setActionFunc(infoNode, "_grind_boost", bodyBuf);
+                    break;
+                }
+                case VsNodeType::GrindBleed: {
+                    editorCode = "// Set how slowly the boosted grind-speed cap bleeds back to normal.";
+                    char bodyBuf[640];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_grind_bleed = (int)(%s);\n"
+                        "    // --- Runtime (fps3d.c, Mode 4) ---\n"
+                        "    // afn_grind_bleed is the right-shift used to decay the boosted\n"
+                        "    // speed-cap bonus each grind frame (default 6). HIGHER = the\n"
+                        "    // extra speed earned on a drop bleeds off SLOWER (carries farther\n"
+                        "    // across flats); LOWER = snaps back sooner; 0 = never bleeds.\n"
+                        "    //   else bonus -= bonus >> clamp(afn_grind_bleed, 0..16);\n"
+                        "    // Persistent (NOT cleared per frame) — On Start or On Update both work.",
+                        fmtFloat(infoNode.id, 0, "<slowness>"));
+                    setActionFunc(infoNode, "_grind_bleed", bodyBuf);
                     break;
                 }
                 case VsNodeType::StopSound:
@@ -22653,6 +22716,7 @@ void FrameTick(float dt)
                     case VsNodeType::IsNotGrinding: suffix = "_is_not_grinding"; break;
                     case VsNodeType::GrindPower:    suffix = "_grind_power"; break;
                     case VsNodeType::GrindBoost:    suffix = "_grind_boost"; break;
+                    case VsNodeType::GrindBleed:    suffix = "_grind_bleed"; break;
                     case VsNodeType::StopSound:     suffix = "_stop_sound"; break;
                     case VsNodeType::AddMath:       suffix = "_add"; break;
                     case VsNodeType::SubtractMath:  suffix = "_sub"; break;
@@ -23202,6 +23266,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNotGrinding].name)) addNodeAt(VsNodeType::IsNotGrinding);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GrindPower].name)) addNodeAt(VsNodeType::GrindPower);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GrindBoost].name)) addNodeAt(VsNodeType::GrindBoost);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GrindBleed].name)) addNodeAt(VsNodeType::GrindBleed);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetPlayerHeight].name)) addNodeAt(VsNodeType::SetPlayerHeight);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopSound].name)) addNodeAt(VsNodeType::StopSound);
                     ImGui::Separator();
