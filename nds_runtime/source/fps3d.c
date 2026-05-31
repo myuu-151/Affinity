@@ -653,6 +653,13 @@ static void update_camera(void)
             }
         }
         static int s_grindPrevFloorY = 0;
+        // Persistent boosted-cap bonus. GrindBoost raises the grind speed
+        // ceiling while descending; rather than snapping the cap back the
+        // instant the rail levels out (a brief flat dip mid-descent would
+        // jolt you), this bonus RAMPS UP toward the steepness-scaled target
+        // while boosting downhill and DECAYS gradually otherwise — so speed
+        // earned on a drop carries across flats and only bleeds off slowly.
+        static int s_grindCapBonus = 0;
 #ifdef AFN_HAS_RAIL_PATH
         static int s_railArc=0, s_railDir=1, s_railHas=0, s_railPrevY=0;
         // Smoothed arc-advance speed. afn_grind_vel is the PHYSICS velocity
@@ -710,22 +717,24 @@ static void update_camera(void)
                         // afn_grind_power (GrindPower node) sets the base gain
                         // (0 => default 24); afn_grind_boost (GrindBoost node,
                         // gated by a held key) adds extra ONLY while descending.
-                        int gcap = AFN_SPRINT_SPEED * 5;
                         {
                             int gpow = afn_grind_power ? afn_grind_power : 24;
                             if (grade > 0) afn_grind_vel += (grade * gpow) >> 8;
                             else           afn_grind_vel += (grade * 4) >> 8;
                             // GrindBoost RAISES the speed ceiling while descending,
-                            // scaled by steepness — the default gain alone already
-                            // reaches the base cap, so to be felt the boost must let
-                            // you exceed it. Steep slope + held button = much faster;
-                            // shallow slope = barely above normal.
-                            if (grade > 0 && afn_grind_boost > 0)
-                                gcap += (grade * afn_grind_boost) >> 8;
+                            // scaled by steepness. The bonus ramps toward the target
+                            // while boosting downhill and DECAYS gradually otherwise,
+                            // so a flat dip mid-descent doesn't instantly cut speed —
+                            // earned momentum carries across flats and bleeds slowly.
+                            int target = (grade > 0 && afn_grind_boost > 0)
+                                       ? ((grade * afn_grind_boost) >> 8) : 0;
+                            if (target > s_grindCapBonus) s_grindCapBonus += (target - s_grindCapBonus) >> 2; // quick ramp up
+                            else                          s_grindCapBonus -= s_grindCapBonus >> 6;            // slow bleed down
                         }
                         afn_grind_vel -= afn_grind_vel >> 10; // very slippery
                         if (afn_grind_vel < (AFN_WALK_SPEED >> 3)) afn_grind_vel = (AFN_WALK_SPEED >> 3);
-                        if (afn_grind_vel > gcap) afn_grind_vel = gcap;
+                        { int gcap = AFN_SPRINT_SPEED * 5 + s_grindCapBonus;
+                          if (afn_grind_vel > gcap) afn_grind_vel = gcap; }
                         player_x = gx; player_z = gz; player_y = gy;
                         player_vy = 0; player_on_ground = 1;
                         afn_grind_dx = tdx * s_railDir; afn_grind_dz = tdz * s_railDir;
@@ -760,11 +769,18 @@ static void update_camera(void)
                 // the raw slope step). GrindBoost RAISES the speed ceiling while
                 // descending (scaled by slope), so holding the button lets you
                 // exceed the normal cap — steeper = more.
-                int gcap = AFN_SPRINT_SPEED * 3;
+                // Boosted-cap bonus ramps up while boosting downhill, decays
+                // gradually otherwise (so a flat dip doesn't instantly cut it).
+                {
+                    int target = (slope > 0 && afn_grind_boost > 0)
+                               ? ((slope * afn_grind_boost) / 24) : 0;
+                    if (target > s_grindCapBonus) s_grindCapBonus += (target - s_grindCapBonus) >> 2;
+                    else                          s_grindCapBonus -= s_grindCapBonus >> 6;
+                }
+                int gcap = AFN_SPRINT_SPEED * 3 + s_grindCapBonus;
                 if (slope > 0) {
                     int gpow = afn_grind_power ? afn_grind_power : 24;
                     afn_grind_vel += (slope * gpow) / 24;     // downhill
-                    if (afn_grind_boost > 0) gcap += (slope * afn_grind_boost) / 24;
                 } else {
                     afn_grind_vel += slope >> 1;             // uphill: lose half the climb
                 }

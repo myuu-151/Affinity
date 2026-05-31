@@ -19713,11 +19713,14 @@ void FrameTick(float dt)
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    afn_grind_boost = (int)(%s);\n"
                         "    // --- Runtime (fps3d.c, Mode 4) ---\n"
-                        "    // RAISES the grind speed ceiling while descending, scaled\n"
-                        "    // by slope steepness (the base gain alone already reaches\n"
-                        "    // the normal cap, so the boost must lift the cap to be felt):\n"
-                        "    //   if (grade > 0) gcap += (grade * afn_grind_boost) >> 8;\n"
-                        "    // Steep drop + held = much faster; shallow = barely above normal.\n"
+                        "    // RAISES the grind speed ceiling while descending, scaled by\n"
+                        "    // slope steepness. The bonus RAMPS toward the target while\n"
+                        "    // boosting downhill and DECAYS gradually otherwise, so a flat\n"
+                        "    // dip mid-descent doesn't cut speed — it carries and bleeds off:\n"
+                        "    //   target = (grade>0 && boost) ? (grade*boost)>>8 : 0;\n"
+                        "    //   if (target>bonus) bonus += (target-bonus)>>2; // ramp up\n"
+                        "    //   else              bonus -= bonus>>6;          // slow bleed\n"
+                        "    //   gcap = SPRINT*5 + bonus;\n"
                         "    // Cleared to 0 each frame -> gate with a held key\n"
                         "    // (On Update -> Is Key Held -> Grind Boost) for hold-to-boost.",
                         fmtFloat(infoNode.id, 0, "<extra>"));
