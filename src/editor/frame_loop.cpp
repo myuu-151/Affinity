@@ -20260,17 +20260,21 @@ void FrameTick(float dt)
                 case VsNodeType::IsGrinding: {
                     editorCode = "// Gate: true while grinding a rail.";
                     setActionFunc(infoNode, "_is_grinding",
-                        "    if (afn_grinding) {\n"
-                        "    // --- Runtime --- gate; downstream runs only while grinding\n");
+                        "    if (afn_grinding_active) {\n"
+                        "    // --- Runtime --- gate; downstream runs only while grinding.\n"
+                        "    // Reads afn_grinding_active (the PHYSICS-validated grind flag),\n"
+                        "    // not the raw afn_grinding intent — so On Rise sees a clean edge\n"
+                        "    // on a fresh re-grind even after jumping off and landing back.\n");
                     break;
                 }
                 case VsNodeType::IsNotGrinding: {
                     editorCode = "// Gate: true while NOT grinding a rail.";
                     setActionFunc(infoNode, "_is_not_grinding",
-                        "    if (!afn_grinding) {\n"
+                        "    if (!afn_grinding_active) {\n"
                         "    // --- Runtime --- gate; downstream runs only while not grinding.\n"
                         "    // Pair with On Rise to fire once on the frame grinding ends\n"
-                        "    // (e.g. Stop Sound to kill a looping grind SFX).\n");
+                        "    // (e.g. Stop Sound to kill a looping grind SFX).\n"
+                        "    // Uses the validated flag so re-landing produces a clean edge.\n");
                     break;
                 }
                 case VsNodeType::GrindPower: {

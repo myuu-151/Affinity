@@ -2359,6 +2359,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int afn_velocity_falloff;\n";
         f << "extern int afn_pending_boost_fwd;\n";
         f << "extern int afn_grinding;\n";
+        f << "extern int afn_grinding_active;\n";
         f << "extern int afn_grind_rail;\n";
         f << "extern int afn_grind_power;\n";
         f << "extern int afn_grind_boost;\n";
@@ -2664,10 +2665,18 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "    afn_grind_bleed = " << (int)v << ";\n"; break;
             }
             // --- Gate nodes (open a brace; closed by the chain's tail logic) ---
+            // Read the physics-VALIDATED grind flag (afn_grinding_active), not
+            // the raw afn_grinding intent: StartGrind (On Collision) sets
+            // afn_grinding=1 in the script pass even while you're airborne over
+            // the rail, and the physics zeroes it later the same frame. Reading
+            // that intent makes On Rise see a spurious "grinding" during the
+            // approach so the real landing produces no fresh edge (grind SFX
+            // failing to retrigger). afn_grinding_active mirrors the validated
+            // state from the previous physics tick.
             case GBAScriptNodeType::IsGrinding:
-                f << "    if (afn_grinding) {\n"; break;
+                f << "    if (afn_grinding_active) {\n"; break;
             case GBAScriptNodeType::IsNotGrinding:
-                f << "    if (!afn_grinding) {\n"; break;
+                f << "    if (!afn_grinding_active) {\n"; break;
             case GBAScriptNodeType::IsMoving:
                 f << "    if (player_moving) {\n"; break;
             case GBAScriptNodeType::IsOnGround:

@@ -513,6 +513,7 @@ static void update_camera(void)
     // Rail grinding: when afn_grinding, the player is locked to the rail
     // direction and slides on momentum instead of taking input movement.
     extern int afn_grinding, afn_grind_dx, afn_grind_dz, afn_grind_vel;
+    extern int afn_grinding_active;
     extern int afn_grind_power, afn_grind_boost; // GrindPower / GrindBoost nodes
     extern int afn_grind_bleed;                  // GrindBleed node: cap-bonus decay shift
     // Clamp to a safe shift range (0 = never bleeds, default 6). Done once so
@@ -664,7 +665,13 @@ static void update_camera(void)
         // step (+margin) so an uphill OR downhill rail surface stays in range.
         // Gated on the rail sprite, so a non-rail floor that sneaks into the
         // wider window won't be mistaken for the rail.
-        if (!onRail && (afn_grind_vel != 0 || afn_grinding) && afn_grind_rail >= 0) {
+        // Gate on afn_grinding_active (VALIDATED grind), not afn_grinding: the
+        // latter is the StartGrind intent, set by On Collision while you're still
+        // airborne over the rail — using it here makes this widened probe detect
+        // the rail before you actually land, engaging (and playing the grind SFX)
+        // early. afn_grinding_active is only set once you're truly on the rail,
+        // so the probe only widens to track the surface once grinding for real.
+        if (!onRail && (afn_grind_vel != 0 || afn_grinding_active) && afn_grind_rail >= 0) {
             int stepMag = (mvX < 0 ? -mvX : mvX) + (mvZ < 0 ? -mvZ : mvZ);
             int probeY = player_y + stepMag + stepMag / 2 + afn_player_height;
             int fY2;
@@ -878,7 +885,13 @@ static void update_camera(void)
                 }
                 player_y = floorY; player_vy = 0; player_on_ground = 1;
             }
-        } else if (afn_grinding && onRail && player_vy <= 0) {
+        } else if (afn_grinding && onRail && player_vy <= 0 && player_y <= floorY) {
+            // NOTE: `player_y <= floorY` (actually reached the rail surface), not
+            // merely onRail (within the detection window). Without it, arcing a
+            // HIGH jump OVER the rail passes the feet through the window above the
+            // surface with vy<=0, engaging mid-jump and retriggering the grind SFX
+            // before you land. A real landing crosses floorY at the rail's XZ; a
+            // jump that clears the rail moves past in XZ before reaching it.
             // --- Engage: StartGrind fired AND we're standing on the rail ---
             // Lock the slide to the rail's mesh axis (so you follow the pipe even
             // if you landed at an angle), seed speed from current move speed.
@@ -985,6 +998,14 @@ static void update_camera(void)
         }
     }
 #endif
+    // Mirror the ACTUAL grind state for the script gates (Is Grinding / Is Not
+    // Grinding) to read next frame. Use afn_grind_vel != 0, NOT afn_grinding:
+    // afn_grinding is the StartGrind INTENT (set by On Collision) and lingers at
+    // 1 whenever onRail's detection window is satisfied — including while you arc
+    // a high jump OVER the rail without landing on it, which made the grind SFX
+    // retrigger early. afn_grind_vel is only non-zero once you've truly engaged
+    // and are sliding, so it cleanly means "grinding for real".
+    { extern int afn_grinding_active, afn_grind_vel; afn_grinding_active = (afn_grind_vel != 0); }
     s_playerY = player_y - AFN_PLAYER_BASE_Y;
 
     // Render-smoothed player position. While grinding, low-pass toward the exact

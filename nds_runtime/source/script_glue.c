@@ -116,6 +116,11 @@ int  afn_grind_rail = -1;   // sprite index of the rail being ground (its mesh a
 // fps3d.c, so a held-button gate re-sets it each frame for hold-to-boost).
 int  afn_grind_power = 0;
 int  afn_grind_boost = 0;
+// Physics-validated grind flag the script's Is Grinding / Is Not Grinding gates
+// read (mirrored from afn_grinding at the END of the fps3d physics tick, after
+// onRail is resolved). afn_grinding alone is the StartGrind INTENT and can be 1
+// for a frame while airborne over the rail, which broke grind-SFX retrigger.
+int  afn_grinding_active = 0;
 // GrindBleed node: right-shift used to decay the boosted speed-cap bonus each
 // grind frame (default 6 ~= 64-frame bleed). Higher = momentum carries farther;
 // 0 = never bleeds. Persistent (NOT cleared per frame), so set it under On Start.
