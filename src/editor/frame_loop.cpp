@@ -4460,6 +4460,375 @@ static std::string OpenFolderDialog()
 }
 #endif
 
+// Export the whole 3D-tab scene (every placed mesh instance) as a single
+// Wavefront OBJ + companion MTL, for loading into Blender. Vertices are
+// world-transformed with the exact same scale/Y/X/Z rotation order the 3D
+// preview uses (mode7_preview.cpp), so the OBJ matches what's on screen.
+// Returns the number of mesh instances written (0 = nothing/failure).
+static int ExportSceneOBJ(const std::string& objPath)
+{
+    FILE* f = fopen(objPath.c_str(), "wb");
+    if (!f) return 0;
+
+    // Companion .mtl (same basename, .mtl extension).
+    std::string mtlPath = objPath;
+    size_t dot = mtlPath.find_last_of('.');
+    if (dot != std::string::npos && dot > mtlPath.find_last_of("/\\") + 1)
+        mtlPath = mtlPath.substr(0, dot);
+    mtlPath += ".mtl";
+    std::string mtlName = mtlPath;
+    size_t slash = mtlName.find_last_of("/\\");
+    if (slash != std::string::npos) mtlName = mtlName.substr(slash + 1);
+
+    fprintf(f, "# Affinity scene export\n");
+    fprintf(f, "mtllib %s\n", mtlName.c_str());
+
+    // Same rotation pipeline as the 3D preview: scale → Y → X → Z → translate.
+    auto rotate = [](float lx, float ly, float lz,
+                     float cY, float sY, float cX, float sX, float cZ, float sZ,
+                     float& ox, float& oy, float& oz) {
+        float rx = lx * cY + lz * sY;
+        float rz = -lx * sY + lz * cY;
+        float ry = ly;
+        float ry2 = ry * cX - rz * sX;
+        float rz2 = ry * sX + rz * cX;
+        ox = rx * cZ - ry2 * sZ;   // rx2
+        oy = rx * sZ + ry2 * cZ;   // ry3
+        oz = rz2;
+    };
+
+    int vbase = 0;                       // running 1-based index offset (v/vt/vn share it)
+    int instances = 0;
+    std::vector<int> usedTexturedMesh;   // mesh-asset indices needing a material
+
+    for (int i = 0; i < sSpriteCount; i++)
+    {
+        const FloorSprite& fs = sSprites[i];
+        if (fs.type != SpriteType::Mesh) continue;
+        if (fs.meshIdx < 0 || fs.meshIdx >= (int)sMeshAssets.size()) continue;
+        const MeshAsset& ma = sMeshAssets[fs.meshIdx];
+        if (ma.vertices.empty()) continue;
+
+        float ms = fs.scale;
+        float rY = fs.rotation  * 3.14159265f / 180.0f;
+        float rX = fs.rotationX * 3.14159265f / 180.0f;
+        float rZ = fs.rotationZ * 3.14159265f / 180.0f;
+        float cY = cosf(rY), sY = sinf(rY);
+        float cX = cosf(rX), sX = sinf(rX);
+        float cZ = cosf(rZ), sZ = sinf(rZ);
+
+        fprintf(f, "o %s_%d\n", ma.name.c_str(), i);
+
+        for (const MeshVertex& mv : ma.vertices) {
+            float ox, oy, oz;
+            rotate(mv.px * ms, mv.py * ms, mv.pz * ms, cY, sY, cX, sX, cZ, sZ, ox, oy, oz);
+            fprintf(f, "v %.5f %.5f %.5f\n", fs.x + ox, fs.y + oy, fs.z + oz);
+        }
+        for (const MeshVertex& mv : ma.vertices)
+            fprintf(f, "vt %.5f %.5f\n", mv.u, 1.0f - mv.v); // OBJ V origin = bottom-left
+        for (const MeshVertex& mv : ma.vertices) {
+            float ox, oy, oz;
+            rotate(mv.nx, mv.ny, mv.nz, cY, sY, cX, sX, cZ, sZ, ox, oy, oz);
+            fprintf(f, "vn %.5f %.5f %.5f\n", ox, oy, oz);
+        }
+
+        bool textured = ma.textured && !ma.texturePath.empty() && ma.texturePath[0] != '(';
+        if (textured) {
+            fprintf(f, "usemtl mesh_%d\n", fs.meshIdx);
+            bool seen = false;
+            for (int u : usedTexturedMesh) if (u == fs.meshIdx) { seen = true; break; }
+            if (!seen) usedTexturedMesh.push_back(fs.meshIdx);
+        }
+
+        // Triangles then quads (1-based, offset by this object's vertex base).
+        for (size_t t = 0; t + 3 <= ma.indices.size(); t += 3) {
+            int a = vbase + (int)ma.indices[t+0] + 1;
+            int b = vbase + (int)ma.indices[t+1] + 1;
+            int c = vbase + (int)ma.indices[t+2] + 1;
+            fprintf(f, "f %d/%d/%d %d/%d/%d %d/%d/%d\n", a,a,a, b,b,b, c,c,c);
+        }
+        for (size_t q = 0; q + 4 <= ma.quadIndices.size(); q += 4) {
+            int a = vbase + (int)ma.quadIndices[q+0] + 1;
+            int b = vbase + (int)ma.quadIndices[q+1] + 1;
+            int c = vbase + (int)ma.quadIndices[q+2] + 1;
+            int d = vbase + (int)ma.quadIndices[q+3] + 1;
+            fprintf(f, "f %d/%d/%d %d/%d/%d %d/%d/%d %d/%d/%d\n", a,a,a, b,b,b, c,c,c, d,d,d);
+        }
+
+        vbase += (int)ma.vertices.size();
+        instances++;
+    }
+    fclose(f);
+
+    // Materials: one per textured mesh asset, map_Kd → its source PNG (absolute
+    // path so Blender on the same machine resolves it).
+    FILE* m = fopen(mtlPath.c_str(), "wb");
+    if (m) {
+        fprintf(m, "# Affinity scene materials\n");
+        for (int mi : usedTexturedMesh) {
+            fprintf(m, "newmtl mesh_%d\n", mi);
+            fprintf(m, "Ka 0 0 0\nKd 1 1 1\nillum 1\n");
+            fprintf(m, "map_Kd %s\n", sMeshAssets[mi].texturePath.c_str());
+        }
+        fclose(m);
+    }
+    return instances;
+}
+
+static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh); // fwd (re-quantize clones)
+
+// Reimport an OBJ previously written by ExportSceneOBJ, reapplying edited
+// geometry back onto the matching placed-mesh instances. Each exported object
+// is named "<meshname>_<instanceIndex>"; we parse that index, inverse-transform
+// the world-space verts back to local using that instance's exact transform,
+// and replace the referenced mesh asset's geometry.
+//
+// Rules (per the round-trip contract):
+//   * Only instances that were in the exported OBJ are touched. New objects
+//     added in Blender (no matching "_<i>" slot) are ignored — no new slots.
+//   * Export then immediate reimport is a no-op: unchanged geometry is detected
+//     and skipped, so nothing is cloned or perturbed.
+//   * If several instances share one mesh asset and one is edited differently,
+//     the edited instance gets its own cloned asset so each keeps its geometry.
+// Returns total objects applied; fills breakdown counters when non-null.
+static int ReimportSceneOBJ(const std::string& objPath,
+                            int* outUpdated, int* outCloned, int* outSkipped)
+{
+    if (outUpdated) *outUpdated = 0;
+    if (outCloned)  *outCloned  = 0;
+    if (outSkipped) *outSkipped = 0;
+
+    FILE* f = fopen(objPath.c_str(), "r");
+    if (!f) return 0;
+
+    struct V3 { float x, y, z; };
+    struct V2 { float u, v; };
+    struct Face { int n; int vi[16], ti[16], ni[16]; };
+    struct Obj  { std::string name; std::vector<Face> faces; };
+
+    std::vector<V3> positions, normals;
+    std::vector<V2> texcoords;
+    std::vector<Obj> objs;
+    Obj* cur = nullptr;
+
+    char line[512];
+    while (fgets(line, sizeof(line), f))
+    {
+        if (line[0] == 'o' && line[1] == ' ')
+        {
+            // Object name = rest of line, trimmed of trailing whitespace.
+            std::string nm = line + 2;
+            while (!nm.empty() && (nm.back() == '\n' || nm.back() == '\r' ||
+                                   nm.back() == ' '  || nm.back() == '\t'))
+                nm.pop_back();
+            objs.push_back(Obj{ nm, {} });
+            cur = &objs.back();
+        }
+        else if (line[0] == 'v' && line[1] == ' ')
+        {
+            V3 v; if (sscanf(line + 2, "%f %f %f", &v.x, &v.y, &v.z) == 3) positions.push_back(v);
+        }
+        else if (line[0] == 'v' && line[1] == 't')
+        {
+            V2 t; if (sscanf(line + 3, "%f %f", &t.u, &t.v) >= 2) texcoords.push_back(t);
+        }
+        else if (line[0] == 'v' && line[1] == 'n')
+        {
+            V3 n; if (sscanf(line + 3, "%f %f %f", &n.x, &n.y, &n.z) == 3) normals.push_back(n);
+        }
+        else if (line[0] == 'f' && line[1] == ' ')
+        {
+            if (!cur) { objs.push_back(Obj{ "", {} }); cur = &objs.back(); }
+            Face fc; fc.n = 0;
+            char* p = line + 2;
+            while (*p && fc.n < 16)
+            {
+                int v = 0, vt = 0, vn = 0, nread = 0;
+                if      (sscanf(p, "%d/%d/%d%n", &v, &vt, &vn, &nread) >= 3 && nread > 0) {}
+                else if (sscanf(p, "%d//%d%n",  &v, &vn, &nread)       >= 2 && nread > 0) {}
+                else if (sscanf(p, "%d/%d%n",   &v, &vt, &nread)       >= 2 && nread > 0) {}
+                else if (sscanf(p, "%d%n",      &v, &nread)            >= 1 && nread > 0) {}
+                else break;
+                // OBJ indices are 1-based; negative = relative to current count.
+                fc.vi[fc.n] = v > 0 ? v - 1 : (int)positions.size() + v;
+                fc.ti[fc.n] = vt > 0 ? vt - 1 : (vt < 0 ? (int)texcoords.size() + vt : -1);
+                fc.ni[fc.n] = vn > 0 ? vn - 1 : (vn < 0 ? (int)normals.size()  + vn : -1);
+                fc.n++;
+                p += nread;
+                while (*p == ' ' || *p == '\t') p++;
+            }
+            if (fc.n >= 3) cur->faces.push_back(fc);
+        }
+    }
+    fclose(f);
+
+    auto countRefs = [&](int meshIdx) {
+        int c = 0;
+        for (int k = 0; k < sSpriteCount; k++)
+            if (sSprites[k].type == SpriteType::Mesh && sSprites[k].meshIdx == meshIdx) c++;
+        return c;
+    };
+
+    int applied = 0;
+    for (auto& obj : objs)
+    {
+        if (obj.faces.empty()) continue;
+
+        // Parse trailing "_<int>" → instance index (strip a Blender ".NNN" dup
+        // suffix first). Anything that doesn't resolve to an existing mesh slot
+        // is ignored — we never create new instances on reimport.
+        std::string nm = obj.name;
+        size_t dotp = nm.find_last_of('.');
+        if (dotp != std::string::npos && dotp + 1 < nm.size() &&
+            nm.find_first_not_of("0123456789", dotp + 1) == std::string::npos)
+            nm = nm.substr(0, dotp);
+        size_t us = nm.find_last_of('_');
+        if (us == std::string::npos || us + 1 >= nm.size()) { if (outSkipped) (*outSkipped)++; continue; }
+        if (nm.find_first_not_of("0123456789", us + 1) != std::string::npos) { if (outSkipped) (*outSkipped)++; continue; }
+        int inst = atoi(nm.c_str() + us + 1);
+        if (inst < 0 || inst >= sSpriteCount ||
+            sSprites[inst].type != SpriteType::Mesh ||
+            sSprites[inst].meshIdx < 0 || sSprites[inst].meshIdx >= (int)sMeshAssets.size())
+        { if (outSkipped) (*outSkipped)++; continue; }
+
+        const FloorSprite& fs = sSprites[inst];
+        float ms = fs.scale != 0.0f ? fs.scale : 1.0f;
+        float rY = fs.rotation  * 3.14159265f / 180.0f;
+        float rX = fs.rotationX * 3.14159265f / 180.0f;
+        float rZ = fs.rotationZ * 3.14159265f / 180.0f;
+        float cY = cosf(rY), sY = sinf(rY);
+        float cX = cosf(rX), sX = sinf(rX);
+        float cZ = cosf(rZ), sZ = sinf(rZ);
+
+        // Inverse of the export transform: undo Z, then X, then Y rotation.
+        auto invRot = [&](float X, float Y, float Z, float& lx, float& ly, float& lz) {
+            float rx  =  X * cZ + Y * sZ;     // undo Z
+            float ry2 = -X * sZ + Y * cZ;
+            float rz2 =  Z;
+            float ry  =  ry2 * cX + rz2 * sX; // undo X
+            float rz  = -ry2 * sX + rz2 * cX;
+            lx = rx * cY - rz * sY;           // undo Y
+            lz = rx * sY + rz * cY;
+            ly = ry;
+        };
+
+        // Rebuild local-space geometry (per-corner verts, quads preserved —
+        // same unwelded layout LoadOBJ produces, so this is exactly 1:1).
+        std::vector<MeshVertex> verts;
+        std::vector<uint32_t> tri, quad;
+        for (auto& fc : obj.faces)
+        {
+            uint32_t base = (uint32_t)verts.size();
+            for (int i = 0; i < fc.n; i++)
+            {
+                MeshVertex mv = {};
+                int pi = fc.vi[i];
+                if (pi >= 0 && pi < (int)positions.size())
+                {
+                    float lx, ly, lz;
+                    invRot(positions[pi].x - fs.x, positions[pi].y - fs.y, positions[pi].z - fs.z, lx, ly, lz);
+                    mv.px = lx / ms; mv.py = ly / ms; mv.pz = lz / ms;
+                }
+                int ti = fc.ti[i];
+                if (ti >= 0 && ti < (int)texcoords.size())
+                { mv.u = texcoords[ti].u; mv.v = 1.0f - texcoords[ti].v; } // undo export V-flip
+                int ni = fc.ni[i];
+                if (ni >= 0 && ni < (int)normals.size())
+                {
+                    float lx, ly, lz;
+                    invRot(normals[ni].x, normals[ni].y, normals[ni].z, lx, ly, lz);
+                    mv.nx = lx; mv.ny = ly; mv.nz = lz;
+                }
+                mv.r = mv.g = mv.b = 1.0f;
+                mv.objPosIdx = pi;
+                verts.push_back(mv);
+            }
+            if (fc.n == 4) { quad.push_back(base); quad.push_back(base+1); quad.push_back(base+2); quad.push_back(base+3); }
+            else if (fc.n == 3) { tri.push_back(base); tri.push_back(base+1); tri.push_back(base+2); }
+            else for (int t = 1; t + 1 < fc.n; t++) { tri.push_back(base); tri.push_back(base+t); tri.push_back(base+t+1); }
+        }
+        if (verts.empty()) { if (outSkipped) (*outSkipped)++; continue; }
+
+        // Fill any missing normals with per-tri face normals (local space).
+        bool haveNormals = !normals.empty();
+        if (!haveNormals)
+        {
+            auto faceN = [&](uint32_t a, uint32_t b, uint32_t c) {
+                float ux = verts[b].px-verts[a].px, uy = verts[b].py-verts[a].py, uz = verts[b].pz-verts[a].pz;
+                float vx = verts[c].px-verts[a].px, vy = verts[c].py-verts[a].py, vz = verts[c].pz-verts[a].pz;
+                float nx = uy*vz-uz*vy, ny = uz*vx-ux*vz, nz = ux*vy-uy*vx;
+                float l = sqrtf(nx*nx+ny*ny+nz*nz); if (l < 1e-6f) l = 1.0f;
+                verts[a].nx=verts[b].nx=verts[c].nx=nx/l;
+                verts[a].ny=verts[b].ny=verts[c].ny=ny/l;
+                verts[a].nz=verts[b].nz=verts[c].nz=nz/l;
+            };
+            for (size_t t = 0; t + 3 <= tri.size(); t += 3) faceN(tri[t], tri[t+1], tri[t+2]);
+            for (size_t q = 0; q + 4 <= quad.size(); q += 4) faceN(quad[q], quad[q+1], quad[q+2]);
+        }
+
+        // Detect "unchanged" so an export→reimport round-trip is a true no-op.
+        int mi = fs.meshIdx;
+        const MeshAsset& curMesh = sMeshAssets[mi];
+        bool changed = verts.size() != curMesh.vertices.size() ||
+                       tri.size()   != curMesh.indices.size()  ||
+                       quad.size()  != curMesh.quadIndices.size();
+        if (!changed)
+        {
+            const float eps = 1e-3f;
+            for (size_t v = 0; v < verts.size() && !changed; v++)
+            {
+                const MeshVertex& a = verts[v]; const MeshVertex& b = curMesh.vertices[v];
+                if (fabsf(a.px-b.px) > eps || fabsf(a.py-b.py) > eps || fabsf(a.pz-b.pz) > eps ||
+                    fabsf(a.u-b.u) > eps   || fabsf(a.v-b.v) > eps) changed = true;
+            }
+        }
+        if (!changed) { if (outSkipped) (*outSkipped)++; continue; }
+
+        // Apply: in place if this asset is unique to one instance, else clone
+        // so the edited instance diverges without disturbing the others.
+        auto recomputeBounds = [](MeshAsset& m) {
+            m.boundsMin[0]=m.boundsMin[1]=m.boundsMin[2]= 1e30f;
+            m.boundsMax[0]=m.boundsMax[1]=m.boundsMax[2]=-1e30f;
+            for (const auto& v : m.vertices) {
+                if (v.px<m.boundsMin[0]) m.boundsMin[0]=v.px;
+                if (v.py<m.boundsMin[1]) m.boundsMin[1]=v.py;
+                if (v.pz<m.boundsMin[2]) m.boundsMin[2]=v.pz;
+                if (v.px>m.boundsMax[0]) m.boundsMax[0]=v.px;
+                if (v.py>m.boundsMax[1]) m.boundsMax[1]=v.py;
+                if (v.pz>m.boundsMax[2]) m.boundsMax[2]=v.pz;
+            }
+        };
+
+        if (countRefs(mi) <= 1 || (int)sMeshAssets.size() >= kMaxMeshAssets)
+        {
+            MeshAsset& m = sMeshAssets[mi];
+            m.vertices = std::move(verts);
+            m.indices = std::move(tri);
+            m.quadIndices = std::move(quad);
+            recomputeBounds(m);
+            if (outUpdated) (*outUpdated)++;
+        }
+        else
+        {
+            MeshAsset clone = sMeshAssets[mi];   // copies texture/flags/name
+            clone.glTexID = 0;                   // don't share the GL handle
+            clone.vertices = std::move(verts);
+            clone.indices = std::move(tri);
+            clone.quadIndices = std::move(quad);
+            recomputeBounds(clone);
+            if (clone.textured && !clone.texturePath.empty() && clone.texturePath[0] != '(')
+                LoadMeshTexture(clone.texturePath, clone); // own preview texture
+            sMeshAssets.push_back(std::move(clone));
+            sSprites[inst].meshIdx = (int)sMeshAssets.size() - 1;
+            if (outCloned) (*outCloned)++;
+        }
+        applied++;
+    }
+
+    if (applied > 0) sProjectDirty = true;
+    return applied;
+}
+
 // ---- OBJ mesh loader ----
 static bool LoadOBJ(const std::string& path, MeshAsset& out)
 {
@@ -9456,6 +9825,46 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
     else
     {
         ImGui::TextWrapped("Select a mesh asset above, then click Place Mesh.");
+    }
+
+    // Export the whole placed scene as a Blender-ready OBJ + MTL.
+    {
+        static int sSceneObjResult = 0;   // 0=idle, 1=ok, 2=fail
+        static int sSceneObjCount = 0;
+        if (sSpriteCount > 0 && ImGui::Button("Export Scene -> OBJ (Blender)##sceneobj", ImVec2(-1, 0))) {
+            std::string p = SaveFileDialog("Wavefront OBJ\0*.obj\0All Files\0*.*\0", "obj");
+            if (!p.empty()) {
+                if (p.size() < 4 || _stricmp(p.c_str() + p.size() - 4, ".obj") != 0) p += ".obj";
+                sSceneObjCount = ExportSceneOBJ(p);
+                sSceneObjResult = sSceneObjCount > 0 ? 1 : 2;
+            }
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Write every placed mesh (world-transformed to match this view)\n"
+                              "as one .obj + .mtl. Textures referenced by absolute path.");
+        if (sSceneObjResult == 1)
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Exported %d objects + .mtl", sSceneObjCount);
+        else if (sSceneObjResult == 2)
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Export failed");
+
+        // Reimport edited geometry back onto the existing instances.
+        static int sObjReUpd = 0, sObjReClone = 0, sObjReSkip = 0, sObjReResult = 0;
+        if (sSpriteCount > 0 && ImGui::Button("Reimport Scene OBJ##sceneobjre", ImVec2(-1, 0))) {
+            std::string p = OpenFileDialog("Wavefront OBJ\0*.obj\0All Files\0*.*\0", "obj");
+            if (!p.empty()) {
+                int n = ReimportSceneOBJ(p, &sObjReUpd, &sObjReClone, &sObjReSkip);
+                sObjReResult = n > 0 ? 1 : 2;
+            }
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Reapply edited geometry from an exported scene OBJ onto the\n"
+                              "matching placed meshes (by object name). Only updates existing\n"
+                              "slots; new Blender objects are ignored. Transforms/textures stay.");
+        if (sObjReResult == 1)
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Updated %d, +%d new, %d unchanged/skipped",
+                               sObjReUpd, sObjReClone, sObjReSkip);
+        else if (sObjReResult == 2)
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Nothing applied (no matching slots changed)");
     }
 
     // Mesh object list
