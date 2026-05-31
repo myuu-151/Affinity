@@ -1037,6 +1037,14 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     // ---- Mesh assets ----
     f << "#define AFN_MESH_COUNT " << (int)meshes.size() << "\n\n";
 
+    // Per-mesh vertex downscale shift. NDS vertex coords are s16; the stored
+    // value is (px/4*256), so a mesh whose local extent exceeds ~±512 units
+    // would wrap int16 and fold back on itself (e.g. a long grind rail). For
+    // those we right-shift every stored coord by N and emit afn_mesh_vshift[mi]
+    // = N; the runtime re-multiplies the modelview scale by 2^N so the drawn
+    // geometry is unchanged, and collision bounds shift back up by N too.
+    std::vector<int> meshVShift(meshes.size(), 0);
+
     if (!meshes.empty())
     {
         for (size_t mi = 0; mi < meshes.size(); mi++)
@@ -1046,7 +1054,19 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             int ic = (int)mesh.indices.size();
             int qic = (int)mesh.quadIndices.size();
 
-            // Vertex positions as s16 (8.8 fixed-point, same as GBA)
+            // Pick the smallest shift that keeps the largest coord inside s16.
+            float maxAbs = 0.0f;
+            for (int v = 0; v < vc * 3; v++) {
+                float c = std::fabs(mesh.positions[v] / 4.0f * 256.0f);
+                if (c > maxAbs) maxAbs = c;
+            }
+            int vshift = 0;
+            while (maxAbs > 32767.0f && vshift < 8) { maxAbs *= 0.5f; vshift++; }
+            meshVShift[mi] = vshift;
+            float vscale = 1.0f / (float)(1 << vshift);
+
+            // Vertex positions as s16 (8.8 fixed-point, same as GBA), optionally
+            // downscaled by 2^vshift so long meshes don't overflow int16.
             f << "static const s16 afn_mesh" << mi << "_verts[] = {\n";
             for (int v = 0; v < vc; v++)
             {
@@ -1054,9 +1074,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 float py = mesh.positions[v * 3 + 1];
                 float pz = mesh.positions[v * 3 + 2];
                 // Same scaling as GBA: /4 * 256 = 8.8 fixed
-                int16_t fx = (int16_t)(px / 4.0f * 256.0f);
-                int16_t fy = (int16_t)(py / 4.0f * 256.0f);
-                int16_t fz = (int16_t)(pz / 4.0f * 256.0f);
+                int16_t fx = (int16_t)lroundf(px / 4.0f * 256.0f * vscale);
+                int16_t fy = (int16_t)lroundf(py / 4.0f * 256.0f * vscale);
+                int16_t fz = (int16_t)lroundf(pz / 4.0f * 256.0f * vscale);
                 f << "    " << fx << ", " << fy << ", " << fz << ",\n";
             }
             f << "};\n";
@@ -1248,6 +1268,17 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
 
             f << "\n";
         }
+
+        // Per-mesh vertex downscale shift (see meshVShift computation above).
+        // render_meshes multiplies its scale by 2^shift; compute_mesh_bounds
+        // shifts the collision AABB back up by the same amount.
+        f << "static const u8 afn_mesh_vshift[] = { ";
+        for (size_t mi = 0; mi < meshes.size(); mi++)
+        {
+            f << meshVShift[mi];
+            if (mi + 1 < meshes.size()) f << ", ";
+        }
+        f << " };\n";
 
         // Pointer arrays
         f << "static const s16* afn_mesh_vert_ptrs[] = { ";

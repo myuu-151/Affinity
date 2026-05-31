@@ -184,9 +184,12 @@ static void compute_mesh_bounds(void)
             if (y < minY) minY = y; if (y > maxY) maxY = y;
             if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
         }
-        s_mesh_min[m][0] = minX; s_mesh_max[m][0] = maxX;
-        s_mesh_min[m][1] = minY; s_mesh_max[m][1] = maxY;
-        s_mesh_min[m][2] = minZ; s_mesh_max[m][2] = maxZ;
+        // Verts may be downscaled by 2^vshift to fit s16 (long meshes); shift
+        // the bounds back up so the collision AABB matches true world extent.
+        int vs = afn_mesh_vshift[m];
+        s_mesh_min[m][0] = minX << vs; s_mesh_max[m][0] = maxX << vs;
+        s_mesh_min[m][1] = minY << vs; s_mesh_max[m][1] = maxY << vs;
+        s_mesh_min[m][2] = minZ << vs; s_mesh_max[m][2] = maxZ << vs;
     }
     s_mesh_bounds_ready = 1;
 }

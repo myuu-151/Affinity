@@ -202,7 +202,10 @@ static void render_meshes(void)
         // Per-sprite scale (8.8 fixed, 256 = 1.0). gluPerspective + identity
         // fx8→v16 alone makes meshes microscopic — multiply by the sprite's
         // own scale field which the editor uses for the same purpose on GBA.
-        int s32 = spriteScale << 4;  // 8.8 → 20.12 f32
+        // The extra << vshift undoes the per-mesh vertex downscale the exporter
+        // applies to long meshes (afn_mesh_vshift) so they don't overflow s16.
+        int vshift = afn_mesh_vshift[meshIdx];
+        int s32 = (spriteScale << 4) << vshift;  // 8.8 → 20.12 f32, ×2^vshift
         glScalef32(s32, s32, s32);
 
         uint32_t polyFmt = POLY_ALPHA(31);
