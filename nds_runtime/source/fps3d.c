@@ -514,6 +514,7 @@ static void update_camera(void)
     // direction and slides on momentum instead of taking input movement.
     extern int afn_grinding, afn_grind_dx, afn_grind_dz, afn_grind_vel;
     extern int afn_grinding_active;
+    extern int afn_grind_catch_y, afn_grind_catch_x; // GrindCatch node: re-catch window
     extern int afn_grind_power, afn_grind_boost; // GrindPower / GrindBoost nodes
     extern int afn_grind_bleed;                  // GrindBleed node: cap-bonus decay shift
     // Clamp to a safe shift range (0 = never bleeds, default 6). Done once so
@@ -680,6 +681,28 @@ static void update_camera(void)
                 onFloor = 1; floorY = fY2; onRail = 1;
             }
         }
+#ifdef AFN_HAS_RAIL_PATH
+        // GrindCatch (Width): if you came down NEAR the rail path but not dead
+        // over the thin mesh floor, snap-catch onto it. Only while descending,
+        // with the rail captured, and within both the horizontal radius and the
+        // vertical window — then treat it as onRail (the engage below pulls you
+        // onto the path). Off when afn_grind_catch_x == 0.
+        if (!onRail && afn_grind_catch_x > 0 && afn_grinding && player_vy <= 0
+            && afn_grind_rail >= 0 && afn_grind_rail < AFN_SPRITE_COUNT
+            && afn_railpath_len(afn_grind_rail) > 0) {
+            int arc = afn_railpath_nearest(afn_grind_rail, player_x, player_z);
+            int gx, gy, gz, tdx, tdz;
+            afn_railpath_sample(afn_grind_rail, arc, &gx, &gy, &gz, &tdx, &tdz);
+            long long ddx = player_x - gx, ddz = player_z - gz;
+            long long horiz2 = ddx * ddx + ddz * ddz;
+            long long r = afn_grind_catch_x;
+            int dyAbs = player_y - gy; if (dyAbs < 0) dyAbs = -dyAbs;
+            int vWin = afn_player_height + afn_grind_catch_y;
+            if (horiz2 <= r * r && dyAbs <= vWin) {
+                onFloor = 1; floorY = gy; onRail = 1;
+            }
+        }
+#endif
         static int s_grindPrevFloorY = 0;
         // Persistent boosted-cap bonus. GrindBoost raises the grind speed
         // ceiling while descending; rather than snapping the cap back the
@@ -885,13 +908,15 @@ static void update_camera(void)
                 }
                 player_y = floorY; player_vy = 0; player_on_ground = 1;
             }
-        } else if (afn_grinding && onRail && player_vy <= 0 && player_y <= floorY) {
+        } else if (afn_grinding && onRail && player_vy <= 0 && player_y <= floorY + afn_grind_catch_y) {
             // NOTE: `player_y <= floorY` (actually reached the rail surface), not
             // merely onRail (within the detection window). Without it, arcing a
             // HIGH jump OVER the rail passes the feet through the window above the
             // surface with vy<=0, engaging mid-jump and retriggering the grind SFX
             // before you land. A real landing crosses floorY at the rail's XZ; a
             // jump that clears the rail moves past in XZ before reaching it.
+            // GrindCatch (Height) adds afn_grind_catch_y so you can snap on from a
+            // bit above the surface (0 = strict).
             // --- Engage: StartGrind fired AND we're standing on the rail ---
             // Lock the slide to the rail's mesh axis (so you follow the pipe even
             // if you landed at an angle), seed speed from current move speed.

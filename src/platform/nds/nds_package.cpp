@@ -2364,6 +2364,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int afn_grind_power;\n";
         f << "extern int afn_grind_boost;\n";
         f << "extern int afn_grind_bleed;\n";
+        f << "extern int afn_grind_catch_y;\n";
+        f << "extern int afn_grind_catch_x;\n";
         // Audio entry points (audio.c) used by PlaySound / StopSound emit.
         f << "void afn_play_sound(int id);\n";
         f << "void afn_play_sfx(int smpIdx, int gain, int fifo);\n";
@@ -2663,6 +2665,15 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 auto* d = findDataIn(a->id, 0);
                 float v = d ? resolveFloat(d) : 6.0f;
                 f << "    afn_grind_bleed = " << (int)v << ";\n"; break;
+            }
+            case GBAScriptNodeType::GrindCatch: {
+                auto* dy = findDataIn(a->id, 0);
+                auto* dx = findDataIn(a->id, 1);
+                float vy = dy ? resolveFloat(dy) : 0.0f;
+                float vx = dx ? resolveFloat(dx) : 0.0f;
+                // Editor px -> 16.8 fixed world units (256 = 1 px), matching positions.
+                f << "    afn_grind_catch_y = " << (int)(vy * 256.0f) << ";\n";
+                f << "    afn_grind_catch_x = " << (int)(vx * 256.0f) << ";\n"; break;
             }
             // --- Gate nodes (open a brace; closed by the chain's tail logic) ---
             // Read the physics-VALIDATED grind flag (afn_grinding_active), not

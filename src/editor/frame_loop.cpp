@@ -582,6 +582,7 @@ enum class VsNodeType : int {
     GrindPower,      // action: set base downhill momentum gain for grinding (Mode 4)
     GrindBoost,      // action: add extra downhill speed THIS frame (gate with Is Key Held for hold-to-boost)
     GrindBleed,      // action: set how slowly the boosted speed cap bleeds back to normal (Mode 4)
+    GrindCatch,      // action: set the grind catch window — Y (height) + X (width) tolerance (Mode 4)
     COUNT
 };
 
@@ -890,6 +891,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Grind Power",   0xFF3355AA, 1, 1, 1, 0, {"Gain (float)"}, {}, {} },
     { "Grind Boost",   0xFF3355AA, 1, 1, 1, 0, {"Force (float)"}, {}, {} },
     { "Grind Bleed",   0xFF3355AA, 1, 1, 1, 0, {"Slowness (float)"}, {}, {} },
+    { "Grind Catch",   0xFF3355AA, 1, 1, 2, 0, {"Height (float)", "Width (float)"}, {}, {} },
 };
 
 struct VsNode {
@@ -19088,6 +19090,7 @@ void FrameTick(float dt)
                 case VsNodeType::GrindPower:    desc = "Set the BASE downhill momentum gain while grinding (default 24). Higher = a descent builds speed faster. Drop it under On Start to tune the whole rail system."; break;
                 case VsNodeType::GrindBoost:    desc = "Add EXTRA downhill grind speed for this frame (only applies while descending). Gate it with a held button: On Update -> Is Key Held(B) -> Grind Boost, so holding sprint on a downslope accelerates harder."; break;
                 case VsNodeType::GrindBleed:    desc = "Set how slowly the Grind Boost's extra speed bleeds back to normal (default 6). Higher = momentum earned on a drop carries farther across flats before fading; lower = snaps back sooner; 0 = never bleeds. Persistent — fine under On Start or On Update."; break;
+                case VsNodeType::GrindCatch:    desc = "Loosen how easily you re-catch a rail. Height = extra vertical window above the rail surface; Width = horizontal snap radius to the rail path (lands you on a thin rail without being exactly over it). Both in editor pixels, 0 = strict/off. Set under On Start."; break;
                 case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
                 default: desc = "No description."; break;
                 }
@@ -19340,6 +19343,7 @@ void FrameTick(float dt)
                         case VsNodeType::GrindPower:    return "_grind_power";
                         case VsNodeType::GrindBoost:    return "_grind_boost";
                         case VsNodeType::GrindBleed:    return "_grind_bleed";
+                        case VsNodeType::GrindCatch:    return "_grind_catch";
                         case VsNodeType::ArraySet:      return "_array_set";
                         case VsNodeType::DrawNumber:    return "_draw_number";
                         case VsNodeType::DrawTextID:    return "_draw_text";
@@ -20327,6 +20331,25 @@ void FrameTick(float dt)
                         "    // Persistent (NOT cleared per frame) — On Start or On Update both work.",
                         fmtFloat(infoNode.id, 0, "<slowness>"));
                     setActionFunc(infoNode, "_grind_bleed", bodyBuf);
+                    break;
+                }
+                case VsNodeType::GrindCatch: {
+                    editorCode = "// Loosen the grind re-catch window (height + width).";
+                    char bodyBuf[768];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_grind_catch_y = (int)((%s) * 256);\n"
+                        "    afn_grind_catch_x = (int)((%s) * 256);\n"
+                        "    // --- Runtime (fps3d.c, Mode 4) ---\n"
+                        "    // Makes landing back on a rail more forgiving (both editor px):\n"
+                        "    //   Height: engage allows player_y <= floorY + afn_grind_catch_y\n"
+                        "    //           (snap on from a bit above the surface).\n"
+                        "    //   Width:  also catches if within afn_grind_catch_x of the rail\n"
+                        "    //           PATH in XZ, then snaps you onto it — so you don't have\n"
+                        "    //           to land dead-center on a thin rail.\n"
+                        "    // 0/0 = strict (default). Set under On Start.",
+                        fmtFloat(infoNode.id, 0, "<height>"),
+                        fmtFloat(infoNode.id, 1, "<width>"));
+                    setActionFunc(infoNode, "_grind_catch", bodyBuf);
                     break;
                 }
                 case VsNodeType::StopSound:
@@ -22835,6 +22858,7 @@ void FrameTick(float dt)
                     case VsNodeType::GrindPower:    suffix = "_grind_power"; break;
                     case VsNodeType::GrindBoost:    suffix = "_grind_boost"; break;
                     case VsNodeType::GrindBleed:    suffix = "_grind_bleed"; break;
+                    case VsNodeType::GrindCatch:    suffix = "_grind_catch"; break;
                     case VsNodeType::StopSound:     suffix = "_stop_sound"; break;
                     case VsNodeType::AddMath:       suffix = "_add"; break;
                     case VsNodeType::SubtractMath:  suffix = "_sub"; break;
@@ -23385,6 +23409,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GrindPower].name)) addNodeAt(VsNodeType::GrindPower);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GrindBoost].name)) addNodeAt(VsNodeType::GrindBoost);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GrindBleed].name)) addNodeAt(VsNodeType::GrindBleed);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GrindCatch].name)) addNodeAt(VsNodeType::GrindCatch);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetPlayerHeight].name)) addNodeAt(VsNodeType::SetPlayerHeight);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopSound].name)) addNodeAt(VsNodeType::StopSound);
                     ImGui::Separator();

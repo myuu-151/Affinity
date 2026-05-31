@@ -121,6 +121,11 @@ int  afn_grind_boost = 0;
 // onRail is resolved). afn_grinding alone is the StartGrind INTENT and can be 1
 // for a frame while airborne over the rail, which broke grind-SFX retrigger.
 int  afn_grinding_active = 0;
+// GrindCatch node: loosen rail re-catch. _y = extra vertical window above the
+// rail surface for engage; _x = horizontal snap radius to the rail path. Both
+// 16.8 fixed world units (256 = 1 editor px). 0 = strict (default).
+int  afn_grind_catch_y = 0;
+int  afn_grind_catch_x = 0;
 // GrindBleed node: right-shift used to decay the boosted speed-cap bonus each
 // grind frame (default 6 ~= 64-frame bleed). Higher = momentum carries farther;
 // 0 = never bleeds. Persistent (NOT cleared per frame), so set it under On Start.
