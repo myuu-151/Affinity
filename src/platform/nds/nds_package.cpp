@@ -1122,13 +1122,112 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             // pair them up here.
             if (mesh.textured && mesh.texW > 0 && mesh.texH > 0 && !mesh.texPixels.empty())
             {
+                int W = mesh.texW, H = mesh.texH;
+                int texPx = W * H;
+
+                // "Filtered" meshes are pre-blurred here at export time. The DS
+                // 3D GPU has no hardware bilinear filter, so we soften the
+                // texture in software: reconstruct RGB from the indexed source,
+                // 3x3 box-blur it (wrapping, since meshes tile via WRAP_S/T),
+                // then re-quantize to a fresh 16-color palette via median-cut so
+                // the new gradient shades survive the 4bpp format.
+                std::vector<uint8_t> effPixels = mesh.texPixels;
+                uint16_t effPal[16];
+                for (int i = 0; i < 16; i++) effPal[i] = mesh.texPalette[i];
+
+                if (mesh.texFiltered)
+                {
+                    bool hasAlpha = mesh.textureHasAlpha != 0;
+                    // 1. Reconstruct RGB888 (transparent index 0 excluded when hasAlpha).
+                    std::vector<int> rr(texPx), gg(texPx), bbv(texPx);
+                    std::vector<uint8_t> opaque(texPx, 1);
+                    for (int i = 0; i < texPx; i++) {
+                        int idx = (i < (int)mesh.texPixels.size()) ? (mesh.texPixels[i] & 0xF) : 0;
+                        if (hasAlpha && idx == 0) { opaque[i] = 0; rr[i] = gg[i] = bbv[i] = 0; continue; }
+                        uint16_t c = mesh.texPalette[idx];
+                        rr[i] = (c & 0x1F) << 3;
+                        gg[i] = ((c >> 5) & 0x1F) << 3;
+                        bbv[i] = ((c >> 10) & 0x1F) << 3;
+                    }
+                    // 2. 3x3 box blur with wrap; skip transparent contributors.
+                    std::vector<int> br(texPx), bg(texPx), bb2(texPx);
+                    for (int y = 0; y < H; y++)
+                    for (int x = 0; x < W; x++) {
+                        int i = y * W + x;
+                        if (hasAlpha && !opaque[i]) { br[i] = bg[i] = bb2[i] = 0; continue; }
+                        int sr = 0, sg = 0, sb = 0, cnt = 0;
+                        for (int dy = -1; dy <= 1; dy++)
+                        for (int dx = -1; dx <= 1; dx++) {
+                            int nx = (x + dx + W) % W, ny = (y + dy + H) % H, ni = ny * W + nx;
+                            if (hasAlpha && !opaque[ni]) continue;
+                            sr += rr[ni]; sg += gg[ni]; sb += bbv[ni]; cnt++;
+                        }
+                        if (cnt == 0) cnt = 1;
+                        br[i] = sr / cnt; bg[i] = sg / cnt; bb2[i] = sb / cnt;
+                    }
+                    // 3. Median-cut the blurred opaque pixels into N representative colors.
+                    int palStart = hasAlpha ? 1 : 0;
+                    int targetColors = hasAlpha ? 15 : 16;
+                    std::vector<int> allPx;
+                    for (int i = 0; i < texPx; i++) if (!hasAlpha || opaque[i]) allPx.push_back(i);
+                    std::vector<std::vector<int>> boxes;
+                    if (!allPx.empty()) boxes.push_back(std::move(allPx));
+                    auto axisVal = [&](int p, int ax) { return ax == 0 ? br[p] : ax == 1 ? bg[p] : bb2[p]; };
+                    while ((int)boxes.size() < targetColors) {
+                        int best = -1, bestRange = -1, bestAxis = 0;
+                        for (int bi = 0; bi < (int)boxes.size(); bi++) {
+                            if (boxes[bi].size() < 2) continue;
+                            int mn[3] = {256, 256, 256}, mx[3] = {-1, -1, -1};
+                            for (int p : boxes[bi]) for (int c = 0; c < 3; c++) {
+                                int v = axisVal(p, c);
+                                if (v < mn[c]) mn[c] = v;
+                                if (v > mx[c]) mx[c] = v;
+                            }
+                            for (int c = 0; c < 3; c++) {
+                                int rng = mx[c] - mn[c];
+                                if (rng > bestRange) { bestRange = rng; best = bi; bestAxis = c; }
+                            }
+                        }
+                        if (best < 0) break; // nothing left to split
+                        auto& bx = boxes[best];
+                        std::sort(bx.begin(), bx.end(), [&](int a, int b) { return axisVal(a, bestAxis) < axisVal(b, bestAxis); });
+                        int mid = (int)bx.size() / 2;
+                        std::vector<int> b2(bx.begin() + mid, bx.end());
+                        bx.resize(mid);
+                        boxes.push_back(std::move(b2));
+                    }
+                    // 4. Representative = average color of each box → RGB15 palette.
+                    for (int i = 0; i < 16; i++) effPal[i] = 0;
+                    if (hasAlpha) effPal[0] = mesh.texPalette[0];
+                    int numBoxes = (int)boxes.size();
+                    std::vector<int> repR(numBoxes), repG(numBoxes), repB(numBoxes);
+                    for (int bi = 0; bi < numBoxes; bi++) {
+                        long sr = 0, sg = 0, sb = 0; int n = (int)boxes[bi].size();
+                        for (int p : boxes[bi]) { sr += br[p]; sg += bg[p]; sb += bb2[p]; }
+                        if (n == 0) n = 1;
+                        repR[bi] = (int)(sr / n); repG[bi] = (int)(sg / n); repB[bi] = (int)(sb / n);
+                        effPal[palStart + bi] = (uint16_t)((repR[bi] >> 3) | ((repG[bi] >> 3) << 5) | ((repB[bi] >> 3) << 10));
+                    }
+                    // 5. Map every pixel to the nearest representative.
+                    effPixels.assign(texPx, 0);
+                    for (int i = 0; i < texPx; i++) {
+                        if (hasAlpha && !opaque[i]) { effPixels[i] = 0; continue; }
+                        int bestIdx = palStart, bestDist = 0x7FFFFFFF;
+                        for (int bi = 0; bi < numBoxes; bi++) {
+                            int dr = br[i] - repR[bi], dg = bg[i] - repG[bi], db = bb2[i] - repB[bi];
+                            int d = dr * dr + dg * dg + db * db;
+                            if (d < bestDist) { bestDist = d; bestIdx = palStart + bi; }
+                        }
+                        effPixels[i] = (uint8_t)bestIdx;
+                    }
+                }
+
                 f << "static const u8 afn_mesh" << mi << "_tex[] = {\n    ";
-                int texPx = mesh.texW * mesh.texH;
                 int packed = (texPx + 1) / 2;
                 for (int i = 0; i < packed; i++)
                 {
-                    int lo = (i * 2 + 0 < (int)mesh.texPixels.size()) ? (mesh.texPixels[i*2+0] & 0xF) : 0;
-                    int hi = (i * 2 + 1 < (int)mesh.texPixels.size()) ? (mesh.texPixels[i*2+1] & 0xF) : 0;
+                    int lo = (i * 2 + 0 < (int)effPixels.size()) ? (effPixels[i*2+0] & 0xF) : 0;
+                    int hi = (i * 2 + 1 < (int)effPixels.size()) ? (effPixels[i*2+1] & 0xF) : 0;
                     f << ((hi << 4) | lo);
                     if (i + 1 < packed) f << ", ";
                     if ((i + 1) % 16 == 0) f << "\n    ";
@@ -1140,7 +1239,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 for (int i = 0; i < 16; i++)
                 {
                     char hex[8];
-                    snprintf(hex, sizeof(hex), "0x%04X", mesh.texPalette[i]);
+                    snprintf(hex, sizeof(hex), "0x%04X", effPal[i]);
                     f << hex;
                     if (i < 15) f << ", ";
                 }

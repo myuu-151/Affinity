@@ -151,6 +151,7 @@ struct GBAMeshExport
     std::vector<uint8_t> texPixels;   // quantized indexed pixels (texW * texH)
     uint16_t texPalette[16] = {}; // RGB15 palette for this texture
     int textureHasAlpha = 0;      // 1 = palette[0] is transparent (NDS COLOR0_TRANSPARENT)
+    int texFiltered = 0;          // 1 = NDS export pre-blurs the texture (software smoothing; DS has no HW filter)
     int perspCorrect = 0;         // 1=perspective-corrected texture mapping
     int texInIwram = 0;           // 1 = copy texture into IWRAM cache at boot
     int clampAbove = 0;           // 1=clamp vertices to never project above horizon
