@@ -5,7 +5,7 @@
 <h1 align="center">Affinity Engine</h1>
 
 <p align="center">
-  A Game Boy Advance and Nintendo DS 3D engine with a Windows desktop editor.
+  A Nintendo DS 3D engine with a Windows desktop editor.
 </p>
 
 <p align="center">
