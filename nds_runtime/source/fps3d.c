@@ -665,13 +665,13 @@ static void update_camera(void)
         // step (+margin) so an uphill OR downhill rail surface stays in range.
         // Gated on the rail sprite, so a non-rail floor that sneaks into the
         // wider window won't be mistaken for the rail.
-        // Gate on afn_grinding_active (VALIDATED grind), not afn_grinding: the
-        // latter is the StartGrind intent, set by On Collision while you're still
-        // airborne over the rail — using it here makes this widened probe detect
-        // the rail before you actually land, engaging (and playing the grind SFX)
-        // early. afn_grinding_active is only set once you're truly on the rail,
-        // so the probe only widens to track the surface once grinding for real.
-        if (!onRail && (afn_grind_vel != 0 || afn_grinding_active) && afn_grind_rail >= 0) {
+        // Gate on the StartGrind INTENT (afn_grinding) so this widened probe is
+        // active during the APPROACH — needed to catch fast entries like a spring
+        // launch onto the rail, where the narrow floor window would tunnel past
+        // between frames. It does NOT cause an early grind/SFX on a fly-over: the
+        // engage below additionally requires player_y <= floorY (real surface
+        // contact), and the SFX gate reads afn_grind_vel (only set once sliding).
+        if (!onRail && (afn_grind_vel != 0 || afn_grinding) && afn_grind_rail >= 0) {
             int stepMag = (mvX < 0 ? -mvX : mvX) + (mvZ < 0 ? -mvZ : mvZ);
             int probeY = player_y + stepMag + stepMag / 2 + afn_player_height;
             int fY2;
