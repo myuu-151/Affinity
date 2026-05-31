@@ -701,12 +701,16 @@ static void update_camera(void)
                         s_railPrevY = gy;
                         if (grade >  256) grade =  256;
                         if (grade < -256) grade = -256;
-                        // Bounded gentle accel (<= ~6/frame) + slippery friction.
-                        if (grade > 0) afn_grind_vel += (grade * 6) >> 8;
-                        else           afn_grind_vel += (grade * 3) >> 8;
-                        afn_grind_vel -= afn_grind_vel >> 9;
+                        // Downhill builds real momentum (Sonic rail launch): a
+                        // steep grade adds ~24/frame and friction is near-zero, so
+                        // speed accumulates the longer the rail descends. Uphill
+                        // bleeds gently. Grade is velocity-independent (drop per
+                        // unit arc) so this stays stable — no feedback oscillation.
+                        if (grade > 0) afn_grind_vel += (grade * 24) >> 8;
+                        else           afn_grind_vel += (grade * 4)  >> 8;
+                        afn_grind_vel -= afn_grind_vel >> 10; // very slippery
                         if (afn_grind_vel < (AFN_WALK_SPEED >> 3)) afn_grind_vel = (AFN_WALK_SPEED >> 3);
-                        if (afn_grind_vel > AFN_SPRINT_SPEED * 3) afn_grind_vel = AFN_SPRINT_SPEED * 3;
+                        if (afn_grind_vel > AFN_SPRINT_SPEED * 5) afn_grind_vel = AFN_SPRINT_SPEED * 5;
                         player_x = gx; player_z = gz; player_y = gy;
                         player_vy = 0; player_on_ground = 1;
                         afn_grind_dx = tdx * s_railDir; afn_grind_dz = tdz * s_railDir;
