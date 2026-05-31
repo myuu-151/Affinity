@@ -28403,47 +28403,32 @@ void FrameTick(float dt)
         static int sPackedCount = 0;
         static int sExportResult = 0;
         static int sExportedCount = 0;
+        static std::string sExportDest;   // last folder written to (for status text)
+        // Every external file the project currently references. Shared by
+        // "Pack all assets" and "Export all assets" so export covers the whole
+        // project, not just whatever happened to be packed earlier.
+        auto collectReferencedPaths = [&]() {
+            std::vector<std::string> paths;
+            auto add = [&](const std::string& p) {
+                // Skip empties, internal pseudo-paths ("(sprite:NAME)", "(none)").
+                if (p.empty() || p[0] == '(') return;
+                for (auto& e : paths) if (e == p) return; // dedupe
+                paths.push_back(p);
+            };
+            for (auto& sa : sSpriteAssets)
+                for (auto& das : sa.dirAnimSets)
+                    for (int d = 0; d < 8; d++) add(das.dirPaths[d]);
+            add(sM7FloorPath);
+            for (auto& ma : sMeshAssets) { add(ma.sourcePath); add(ma.texturePath); }
+            for (auto& inst : sSkyboxInstances)
+                for (auto& panel : inst.panels) add(panel.path);
+            return paths;
+        };
         if (ImGui::Button("Pack all assets")) {
             sPackedAssets.clear();
-            // Sprite directional images
-            for (auto& sa : sSpriteAssets) {
-                for (auto& das : sa.dirAnimSets) {
-                    for (int d = 0; d < 8; d++) {
-                        const std::string& p = das.dirPaths[d];
-                        if (p.empty()) continue;
-                        if (sPackedAssets.count(p)) continue;
-                        auto bytes = readFileBytes(p);
-                        if (!bytes.empty()) sPackedAssets[p] = std::move(bytes);
-                    }
-                }
-            }
-            // Mode 7 floor texture
-            if (!sM7FloorPath.empty() && !sPackedAssets.count(sM7FloorPath)) {
-                auto bytes = readFileBytes(sM7FloorPath);
-                if (!bytes.empty()) sPackedAssets[sM7FloorPath] = std::move(bytes);
-            }
-            // Mesh OBJ + texture files
-            for (auto& ma : sMeshAssets) {
-                if (!ma.sourcePath.empty() && !sPackedAssets.count(ma.sourcePath)) {
-                    auto bytes = readFileBytes(ma.sourcePath);
-                    if (!bytes.empty()) sPackedAssets[ma.sourcePath] = std::move(bytes);
-                }
-                // Skip the internal "(sprite:NAME)" pseudo-paths and "(none)" sentinel.
-                if (!ma.texturePath.empty()
-                    && ma.texturePath[0] != '('
-                    && !sPackedAssets.count(ma.texturePath)) {
-                    auto bytes = readFileBytes(ma.texturePath);
-                    if (!bytes.empty()) sPackedAssets[ma.texturePath] = std::move(bytes);
-                }
-            }
-            // Skybox panel images
-            for (auto& inst : sSkyboxInstances) {
-                for (auto& panel : inst.panels) {
-                    if (panel.path.empty()) continue;
-                    if (sPackedAssets.count(panel.path)) continue;
-                    auto bytes = readFileBytes(panel.path);
-                    if (!bytes.empty()) sPackedAssets[panel.path] = std::move(bytes);
-                }
+            for (auto& p : collectReferencedPaths()) {
+                auto bytes = readFileBytes(p);
+                if (!bytes.empty()) sPackedAssets[p] = std::move(bytes);
             }
             sPackedCount = (int)sPackedAssets.size();
             sPackResult = sPackedCount > 0 ? 1 : 2;
@@ -28456,25 +28441,47 @@ void FrameTick(float dt)
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Nothing to pack");
         }
-        if (ImGui::Button("Export all assets")) {
-            sExportedCount = 0;
+        // Shared exporter: writes every asset the project references under
+        // `base` using the <parent>/<file> layout the external/ loader expects.
+        // Prefers already-packed bytes (the embedded snapshot) and falls back to
+        // reading the original file from disk, so un-packed assets are included.
+        auto exportAssetsTo = [&](const std::filesystem::path& base) {
             namespace fs = std::filesystem;
-            fs::path base = fs::current_path() / "external";
-            for (auto& kv : sPackedAssets) {
-                fs::path src(kv.first);
+            sExportedCount = 0;
+            for (auto& p : collectReferencedPaths()) {
+                std::vector<uint8_t> bytes;
+                auto it = sPackedAssets.find(p);
+                if (it != sPackedAssets.end()) bytes = it->second;
+                else                           bytes = readFileBytes(p);
+                if (bytes.empty()) continue;
+                fs::path src(p);
                 fs::path dst = base / src.parent_path().filename() / src.filename();
                 // If parent_path is empty or has no useful name, just use filename.
                 if (src.parent_path().filename().empty()) dst = base / src.filename();
-                if (writeFileBytes(dst.string(), kv.second.data(), kv.second.size())) sExportedCount++;
+                if (writeFileBytes(dst.string(), bytes.data(), bytes.size())) sExportedCount++;
             }
+            sExportDest = base.string();
             sExportResult = sExportedCount > 0 ? 1 : 2;
+        };
+        if (ImGui::Button("Export all assets...")) {
+            std::string folder = OpenFolderDialog();
+            if (!folder.empty())
+                exportAssetsTo(std::filesystem::path(folder));
         }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Pick a folder to write every asset the project references\n(<parent>/<file> layout). Includes un-packed assets too.");
+        ImGui::SameLine();
+        if (ImGui::Button("Export to external/")) {
+            // Quick path: the portable bundle next to the editor exe that the
+            // "Load from external/ folder" checkbox reads from.
+            exportAssetsTo(std::filesystem::current_path() / "external");
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Write to external/ next to the editor exe (for the\n\"Load from external/ folder\" portable-bundle workflow).");
         if (sExportResult == 1) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Wrote %d to external/", sExportedCount);
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Wrote %d to %s", sExportedCount, sExportDest.c_str());
         } else if (sExportResult == 2) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "No packed assets");
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Nothing to export");
         }
         if (!sPackedAssets.empty()) {
             ImGui::TextDisabled("%d asset(s) currently packed", (int)sPackedAssets.size());
