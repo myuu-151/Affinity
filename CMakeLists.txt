@@ -58,10 +58,12 @@ target_link_libraries(AffinityEditor PRIVATE
 # ImGui docking branch define
 target_compile_definitions(AffinityEditor PRIVATE IMGUI_ENABLE_DOCKING=1)
 
-# Bump stack reserve to 8 MB — LoadProject stack frame is large
-# (32 KB line buffer + multiple VsNode locals at ~20 KB each with 4096-byte
-# code fields) and File > Open's deep ImGui call stack pushes it close to
-# the 1 MB default.
+# Bump stack reserve to 256 MB. LoadProject's frame is large (32 KB line
+# buffer + VsNode locals), but the real driver is the many stack-local
+# MapScene values (each embeds FloorSprite[256], and FloorSprite now holds
+# RailPoint[512] = ~2.2 MB per MapScene). Several of those in the giant frame
+# function overflow an 8 MB stack. The reserve is virtual address space on
+# x64 (committed on demand), so a big number is essentially free.
 if(MSVC)
-    target_link_options(AffinityEditor PRIVATE /STACK:8388608)
+    target_link_options(AffinityEditor PRIVATE /STACK:268435456)
 endif()

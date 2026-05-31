@@ -4392,6 +4392,7 @@ static std::vector<int> s3DSelRailPts; // ALL selected point indices (shift-clic
 static bool  s3DGrabIsRailPoint = false; // current G grab moves a rail point, not sprites
 static float s3DRailGrabOrig[3] = { 0, 0, 0 };          // primary point's pre-grab pos
 static std::vector<s3DGrabSnap> s3DRailGrabOrigs;       // all selected points' pre-grab pos (idx = point index)
+static bool  s3DRailVertexSnap  = false; // while grabbing a rail point, snap it to the mesh vertex nearest the cursor
 static bool  s3DSelRailContains(int pt) { for (int p : s3DSelRailPts) if (p == pt) return true; return false; }
 
 // Blender-style rotate mode (R). Each selected sprite spins around its
@@ -9559,8 +9560,10 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 s3DGrabAxis = (s3DGrabAxis == 'Z') ? 0 : 'Z'; resetAnchor();
             }
             // Pixel-to-world scale tracks orbit distance so motion feels
-            // consistent when zoomed in vs out.
+            // consistent when zoomed in vs out. Hold Right Alt for a slow /
+            // precision drag (handy for nudging a rail point on an axis).
             float scale = s3DOrbitDist * 0.002f;
+            if (ImGui::IsKeyDown(ImGuiKey_RightAlt)) scale *= 0.12f;
             float dpx = mpos.x - s3DGrabStartMouse.x;
             float dpy = mpos.y - s3DGrabStartMouse.y;
             float dx = 0.0f, dy = 0.0f, dz = 0.0f;
@@ -9587,6 +9590,56 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                         auto& rp = sSprites[s3DSelRailSprite].railPath[g.idx];
                         rp.x = g.x + dx; rp.y = g.y + dy; rp.z = g.z + dz;
                     }
+                // Vertex snap: override the PRIMARY point's position with the mesh
+                // vertex nearest the mouse cursor on screen — point at a vertex and
+                // the rail point jumps to it. Uses the rail sprite's own mesh.
+                if (s3DRailVertexSnap && s3DSelRailSprite >= 0 && s3DSelRailSprite < sSpriteCount
+                    && s3DSelRailPoint >= 0 && s3DSelRailPoint < sSprites[s3DSelRailSprite].railPointCount) {
+                    const FloorSprite& rsp = sSprites[s3DSelRailSprite];
+                    if (rsp.meshIdx >= 0 && rsp.meshIdx < (int)sMeshAssets.size()) {
+                        const MeshAsset& ma = sMeshAssets[rsp.meshIdx];
+                        const float kPI2 = 3.14159265f;
+                        float ss = rsp.scale > 0.001f ? rsp.scale : 1.0f;
+                        float cY = cosf(rsp.rotation  * kPI2/180), sYr = sinf(rsp.rotation  * kPI2/180);
+                        float cX = cosf(rsp.rotationX * kPI2/180), sXr = sinf(rsp.rotationX * kPI2/180);
+                        float cZ = cosf(rsp.rotationZ * kPI2/180), sZr = sinf(rsp.rotationZ * kPI2/180);
+                        // GL-matching projection (same basis as the rail-dot pick).
+                        float pcx = s3DTargetX + s3DOrbitDist * cosf(s3DOrbitPitch) * sinf(s3DOrbitYaw);
+                        float pcy = s3DTargetY + s3DOrbitDist * sinf(s3DOrbitPitch);
+                        float pcz = s3DTargetZ + s3DOrbitDist * cosf(s3DOrbitPitch) * cosf(s3DOrbitYaw);
+                        float pfx = s3DTargetX-pcx, pfy = s3DTargetY-pcy, pfz = s3DTargetZ-pcz;
+                        { float l = sqrtf(pfx*pfx+pfy*pfy+pfz*pfz); if (l>0){pfx/=l;pfy/=l;pfz/=l;} }
+                        float psx = -pfz, psz = pfx;
+                        { float l = sqrtf(psx*psx+psz*psz); if (l>0){psx/=l;psz/=l;} }
+                        float pux = -psz*pfy, puy = psz*pfx - psx*pfz, puz = psx*pfy;
+                        float pTanH = tanf(45.0f * kPI2 / 360.0f);
+                        float pAsp  = vpAreaW / size.y;
+                        float bestD = 1e30f; bool found = false; float bvx=0,bvy=0,bvz=0;
+                        for (const auto& v : ma.vertices) {
+                            float lx = v.px*ss, ly = v.py*ss, lz = v.pz*ss;
+                            float r1x = lx*cY + lz*sYr,  r1z = -lx*sYr + lz*cY;
+                            float r2y = ly*cX - r1z*sXr, r2z = ly*sXr + r1z*cX;
+                            float wx = (r1x*cZ - r2y*sZr) + rsp.x;
+                            float wy = (r1x*sZr + r2y*cZ) + rsp.y;
+                            float wz = r2z + rsp.z;
+                            float ex = wx-pcx, ey = wy-pcy, ez = wz-pcz;
+                            float vz = -(pfx*ex + pfy*ey + pfz*ez);
+                            if (vz >= -0.01f) continue;            // behind camera
+                            float vx = psx*ex + psz*ez;
+                            float vy = pux*ex + puy*ey + puz*ez;
+                            float ndcX = (vx / (-vz)) / (pTanH * pAsp);
+                            float ndcY = (vy / (-vz)) / pTanH;
+                            float ssx = pos.x + (ndcX + 1.0f) * 0.5f * vpAreaW;
+                            float ssy = pos.y + (1.0f - ndcY) * 0.5f * size.y;
+                            float d = (ssx-mpos.x)*(ssx-mpos.x) + (ssy-mpos.y)*(ssy-mpos.y);
+                            if (d < bestD) { bestD = d; bvx = wx; bvy = wy; bvz = wz; found = true; }
+                        }
+                        if (found) {
+                            auto& rp = sSprites[s3DSelRailSprite].railPath[s3DSelRailPoint];
+                            rp.x = bvx; rp.y = bvy; rp.z = bvz;
+                        }
+                    }
+                }
             } else {
                 for (auto& g : s3DGrabOrig) {
                     sSprites[g.idx].x = g.x + dx;
@@ -10183,6 +10236,12 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip(
                     "ON: player follows a smooth Catmull-Rom curve through the points\n"
                     "(rounded corners). OFF: straight segments between points.");
+                ImGui::Checkbox("Vertex Snap##railvsnap", &s3DRailVertexSnap);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                    "While grabbing a rail point (G), snap it to the mesh vertex\n"
+                    "nearest your mouse cursor — point at a vertex and the point\n"
+                    "jumps onto it. Much faster than placing by hand.\n"
+                    "Tip: hold Right Alt during G for slow/precision dragging.");
                 if (ImGui::Button("Generate From Mesh##railgen") &&
                     sp.meshIdx >= 0 && sp.meshIdx < (int)sMeshAssets.size())
                 {

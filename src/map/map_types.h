@@ -282,7 +282,7 @@ struct FloorSprite
     // (bounce back) instead of launching off — unless you jump off just before.
     // isStart: a clean-exit terminus (same no-re-grab behavior as End) — where
     // you slide off smoothly after bouncing back, without the re-catch teleport.
-    static constexpr int kMaxRailPoints = 64;
+    static constexpr int kMaxRailPoints = 512;
     RailPoint railPath[kMaxRailPoints];
     int   railPointCount = 0;
 };
