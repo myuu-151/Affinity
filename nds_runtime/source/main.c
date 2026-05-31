@@ -19,14 +19,15 @@ static void init_video(void)
     vramSetBankC(VRAM_C_SUB_BG);
     consoleDemoInit();
 
-    // 3D textures must live on bank A — bank C and D both fail silently
-    // (glTexImage2D claims success but the GPU reads zeros). Likely a
-    // libnds internal assumption. Costs us bank A's 128KB of potential
-    // sprite VRAM, so main sprite stays at 128KB and knux/checkpoint
-    // tiles overflow when total emit > 128KB. Worth revisiting once we
-    // confirm whether libnds's texture allocator actually scans all
-    // mapped banks or just bank A.
+    // 3D textures live on banks A + D (128KB each = 256KB total). Bank D is
+    // otherwise unused; adding it as a second texture bank is what lets a
+    // project hold more than ~one 256x256 texture alongside the 64KB sky.
+    // (An earlier note claimed C/D "fail silently" — that was C, which is
+    // taken by the bottom-screen console, and D tested *instead of* A rather
+    // than *in addition*. A single texture still can't cross a 128KB bank,
+    // but each 256x256 4bpp tile is only 32KB so that's fine.)
     vramSetBankA(VRAM_A_TEXTURE);
+    vramSetBankD(VRAM_D_TEXTURE);
     vramSetBankE(VRAM_E_TEX_PALETTE);
 
     // OAM init + sprite VRAM moved to sprites.c (afn_sprite_init).

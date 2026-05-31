@@ -1300,6 +1300,7 @@ void afn_scene_tick(void)
                 // (3D output drew into only the first 192px wide region).
                 videoSetMode(MODE_0_3D | DISPLAY_SPR_ACTIVE | DISPLAY_SPR_1D_LAYOUT);
                 vramSetBankA(VRAM_A_TEXTURE);
+                vramSetBankD(VRAM_D_TEXTURE);
                 vramSetBankE(VRAM_E_TEX_PALETTE);
                 oamInit(&oamMain, SpriteMapping_1D_128, false);
                 REG_BG0CNT = (REG_BG0CNT & ~3) | 3;
