@@ -201,13 +201,14 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         // Empty stub so runtime files that include mapdata.h still see the
         // symbol — every iterating site is gated on AFN_SPRITE_COUNT > 0 so
         // the placeholder row never gets read.
-        f << "static const int afn_sprite_data[1][17] = { {0,0,0,0,-1,256,0,0,0,-1,0,0,-1,0,0,0,0} };\n\n";
+        f << "static const int afn_sprite_data[1][19] = { {0,0,0,0,-1,256,0,0,0,-1,0,0,-1,0,0,0,0,0,0} };\n\n";
     }
     if (!sprites.empty())
     {
-        // Sprite row: x, y, z, pal, asset, scale, type, rot, animEn, meshIdx,
-        //             forceStatic, oamPrio, parentIdx, offX, offY, offZ, grounded
-        f << "static const int afn_sprite_data[][17] = {\n";
+        // Sprite row: x, y, z, pal, asset, scale, type, rot(Y), animEn, meshIdx,
+        //             forceStatic, oamPrio, parentIdx, offX, offY, offZ, grounded,
+        //             rotX, rotZ   (rotX/rotZ are brad like rot, applied to meshes)
+        f << "static const int afn_sprite_data[][19] = {\n";
         for (size_t i = 0; i < sprites.size(); i++)
         {
             int gx = EditorToFixed(sprites[i].x);
@@ -218,6 +219,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             int scaleFixed = (int)(sprites[i].scale * 256.0f);
             int sType = sprites[i].spriteType;
             int rotBrad = (int)(sprites[i].rotation * 65536.0f / 360.0f) & 0xFFFF;
+            int rotXBrad = (int)(sprites[i].rotationX * 65536.0f / 360.0f) & 0xFFFF;
+            int rotZBrad = (int)(sprites[i].rotationZ * 65536.0f / 360.0f) & 0xFFFF;
             int animEn = sprites[i].animEnabled ? 1 : 0;
             int meshIdx2 = sprites[i].meshIdx;
             int fStatic = sprites[i].forceStatic ? 1 : 0;
@@ -232,7 +235,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
               << sType << ", " << rotBrad << ", " << animEn << ", "
               << meshIdx2 << ", " << fStatic << ", "
               << oamPrio << ", " << parentIdx << ", "
-              << offX << ", " << offY << ", " << offZ << ", " << fGrounded << " },\n";
+              << offX << ", " << offY << ", " << offZ << ", " << fGrounded << ", "
+              << rotXBrad << ", " << rotZBrad << " },\n";
         }
         f << "};\n\n";
     }

@@ -177,7 +177,9 @@ static void render_meshes(void)
         int wy = afn_sprite_data[si][1];
         int wz = afn_sprite_data[si][2];
         int spriteScale = afn_sprite_data[si][5];  // 256 = 1.0
-        int rot = afn_sprite_data[si][7];
+        int rot  = afn_sprite_data[si][7];   // Y rotation (brad)
+        int rotX = afn_sprite_data[si][17];  // X rotation (pitch, brad)
+        int rotZ = afn_sprite_data[si][18];  // Z rotation (roll, brad)
 
         const int16_t* verts = afn_mesh_vert_ptrs[meshIdx];
         const uint16_t* idx  = afn_mesh_idx_ptrs[meshIdx];
@@ -197,8 +199,20 @@ static void render_meshes(void)
         glTranslatef32(fx8_to_f32(wx),
                        fx8_to_f32(wy),
                        fx8_to_f32(wz));
+        // Apply in Z, X, Y call order so the matrix is Rz*Rx*Ry — i.e. Y is
+        // applied to the vertex first, then X, then Z, matching the editor's
+        // scale→Y→X→Z composition (mode7_preview.cpp / OBJ export).
+        // The exported value is a 16-bit brad (65536 = full circle). libnds
+        // glRotate*i feeds the angle to sinLerp(s16), and DEGREES_IN_CIRCLE is
+        // 32768 — so the correct angle is brad >> 1 (= degrees * 32768/360).
+        // The old `<< 10` shifted the meaningful bits out of the s16 range and
+        // aliased non-trivial angles (e.g. -88°) to ~0, leaving them unrotated.
+        if (rotZ != 0)
+            glRotateZi(rotZ >> 1);
+        if (rotX != 0)
+            glRotateXi(rotX >> 1);
         if (rot != 0)
-            glRotateYi(rot << 16 >> 6);
+            glRotateYi(rot >> 1);
         // Per-sprite scale (8.8 fixed, 256 = 1.0). gluPerspective + identity
         // fx8→v16 alone makes meshes microscopic — multiply by the sprite's
         // own scale field which the editor uses for the same purpose on GBA.
