@@ -253,6 +253,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             f << "#define AFN_HAS_RAIL_PATH 1\n";
             f << "static const int afn_rail_pts[" << totalRailPts << "][3] = {\n";
             std::vector<int> railStart(sprites.size(), 0), railCount(sprites.size(), 0);
+            std::vector<int> railEnd, railBounce; railEnd.reserve(totalRailPts); railBounce.reserve(totalRailPts);
             int running = 0;
             for (size_t i = 0; i < sprites.size(); i++) {
                 railStart[i] = running;
@@ -261,9 +262,21 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                     f << "    { " << EditorToFixed(p[0]) << ", "
                       << EditorHeightToFixed(p[1]) << ", "
                       << EditorToFixed(p[2]) << " },\n";
+                    // End and Start both = "clean-exit terminus" (no-re-grab).
+                    railEnd.push_back((p[3] != 0.0f || p[5] != 0.0f) ? 1 : 0);
+                    railBounce.push_back(p[4] != 0.0f ? 1 : 0);
                     running++;
                 }
             }
+            f << "};\n";
+            // Per-point flags, parallel to afn_rail_pts. _end = clean-exit terminus
+            // (End or Start: width-catch won't re-grab when leaving). _bounce =
+            // bumper terminus (reaching it reverses the grind direction).
+            f << "static const unsigned char afn_rail_pt_end[" << totalRailPts << "] = {";
+            for (size_t k = 0; k < railEnd.size(); k++) f << (k?",":"") << railEnd[k];
+            f << "};\n";
+            f << "static const unsigned char afn_rail_pt_bounce[" << totalRailPts << "] = {";
+            for (size_t k = 0; k < railBounce.size(); k++) f << (k?",":"") << railBounce[k];
             f << "};\n";
             int sc = (int)sprites.size(); if (sc < 1) sc = 1;
             f << "static const int afn_rail_start[" << sc << "] = {";
@@ -2359,10 +2372,13 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int afn_velocity_falloff;\n";
         f << "extern int afn_pending_boost_fwd;\n";
         f << "extern int afn_grinding;\n";
+        f << "extern int afn_grinding_active;\n";
         f << "extern int afn_grind_rail;\n";
         f << "extern int afn_grind_power;\n";
         f << "extern int afn_grind_boost;\n";
         f << "extern int afn_grind_bleed;\n";
+        f << "extern int afn_grind_catch_y;\n";
+        f << "extern int afn_grind_catch_x;\n";
         // Audio entry points (audio.c) used by PlaySound / StopSound emit.
         f << "void afn_play_sound(int id);\n";
         f << "void afn_play_sfx(int smpIdx, int gain, int fifo);\n";
@@ -2663,11 +2679,28 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 float v = d ? resolveFloat(d) : 6.0f;
                 f << "    afn_grind_bleed = " << (int)v << ";\n"; break;
             }
+            case GBAScriptNodeType::GrindCatch: {
+                auto* dy = findDataIn(a->id, 0);
+                auto* dx = findDataIn(a->id, 1);
+                float vy = dy ? resolveFloat(dy) : 0.0f;
+                float vx = dx ? resolveFloat(dx) : 0.0f;
+                // Editor px -> 16.8 fixed world units (256 = 1 px), matching positions.
+                f << "    afn_grind_catch_y = " << (int)(vy * 256.0f) << ";\n";
+                f << "    afn_grind_catch_x = " << (int)(vx * 256.0f) << ";\n"; break;
+            }
             // --- Gate nodes (open a brace; closed by the chain's tail logic) ---
+            // Read the physics-VALIDATED grind flag (afn_grinding_active), not
+            // the raw afn_grinding intent: StartGrind (On Collision) sets
+            // afn_grinding=1 in the script pass even while you're airborne over
+            // the rail, and the physics zeroes it later the same frame. Reading
+            // that intent makes On Rise see a spurious "grinding" during the
+            // approach so the real landing produces no fresh edge (grind SFX
+            // failing to retrigger). afn_grinding_active mirrors the validated
+            // state from the previous physics tick.
             case GBAScriptNodeType::IsGrinding:
-                f << "    if (afn_grinding) {\n"; break;
+                f << "    if (afn_grinding_active) {\n"; break;
             case GBAScriptNodeType::IsNotGrinding:
-                f << "    if (!afn_grinding) {\n"; break;
+                f << "    if (!afn_grinding_active) {\n"; break;
             case GBAScriptNodeType::IsMoving:
                 f << "    if (player_moving) {\n"; break;
             case GBAScriptNodeType::IsOnGround:

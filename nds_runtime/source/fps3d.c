@@ -513,6 +513,8 @@ static void update_camera(void)
     // Rail grinding: when afn_grinding, the player is locked to the rail
     // direction and slides on momentum instead of taking input movement.
     extern int afn_grinding, afn_grind_dx, afn_grind_dz, afn_grind_vel;
+    extern int afn_grinding_active;
+    extern int afn_grind_catch_y, afn_grind_catch_x; // GrindCatch node: re-catch window
     extern int afn_grind_power, afn_grind_boost; // GrindPower / GrindBoost nodes
     extern int afn_grind_bleed;                  // GrindBleed node: cap-bonus decay shift
     // Clamp to a safe shift range (0 = never bleeds, default 6). Done once so
@@ -664,6 +666,12 @@ static void update_camera(void)
         // step (+margin) so an uphill OR downhill rail surface stays in range.
         // Gated on the rail sprite, so a non-rail floor that sneaks into the
         // wider window won't be mistaken for the rail.
+        // Gate on the StartGrind INTENT (afn_grinding) so this widened probe is
+        // active during the APPROACH — needed to catch fast entries like a spring
+        // launch onto the rail, where the narrow floor window would tunnel past
+        // between frames. It does NOT cause an early grind/SFX on a fly-over: the
+        // engage below additionally requires player_y <= floorY (real surface
+        // contact), and the SFX gate reads afn_grind_vel (only set once sliding).
         if (!onRail && (afn_grind_vel != 0 || afn_grinding) && afn_grind_rail >= 0) {
             int stepMag = (mvX < 0 ? -mvX : mvX) + (mvZ < 0 ? -mvZ : mvZ);
             int probeY = player_y + stepMag + stepMag / 2 + afn_player_height;
@@ -673,6 +681,54 @@ static void update_camera(void)
                 onFloor = 1; floorY = fY2; onRail = 1;
             }
         }
+#ifdef AFN_HAS_RAIL_PATH
+        // GrindCatch (Width): if you came down NEAR the rail path but not dead
+        // over the thin mesh floor, snap-catch onto it. Only while descending,
+        // with the rail captured, and within both the horizontal radius and the
+        // vertical window — then treat it as onRail (the engage below pulls you
+        // onto the path). Off when afn_grind_catch_x == 0.
+        if (!onRail && afn_grind_catch_x > 0 && afn_grinding && player_vy <= 0
+            && afn_grind_rail >= 0 && afn_grind_rail < AFN_SPRITE_COUNT
+            && afn_railpath_len(afn_grind_rail) > 0) {
+            int arc = afn_railpath_nearest(afn_grind_rail, player_x, player_z);
+            int gx, gy, gz, tdx, tdz;
+            afn_railpath_sample(afn_grind_rail, arc, &gx, &gy, &gz, &tdx, &tdz);
+            long long ddx = player_x - gx, ddz = player_z - gz;
+            long long horiz2 = ddx * ddx + ddz * ddz;
+            long long r = afn_grind_catch_x;
+            int dyAbs = player_y - gy; if (dyAbs < 0) dyAbs = -dyAbs;
+            int vWin = afn_player_height + afn_grind_catch_y;
+            // If the NEAREST authored point is flagged "End" (launch-off terminus),
+            // only width-catch when moving TOWARD the rail — so you vault off a
+            // tip cleanly (no re-grab loop) but can still re-catch from the
+            // approach side. Non-End points catch unconditionally within range.
+            int nearIsEnd = 0;
+            {
+                int rstart = afn_rail_start[afn_grind_rail];
+                int rn = afn_rail_count[afn_grind_rail];
+                int nearIdx = 0; long long bestPD = 0x7fffffffffffffffLL;
+                for (int k = 0; k < rn; k++) {
+                    long long px = player_x - afn_rail_pts[rstart+k][0];
+                    long long pz = player_z - afn_rail_pts[rstart+k][2];
+                    long long pd = px*px + pz*pz;
+                    if (pd < bestPD) { bestPD = pd; nearIdx = k; }
+                }
+                nearIsEnd = afn_rail_pt_end[rstart + nearIdx];
+            }
+            int movingToward = 1;
+            if (nearIsEnd) {
+                // velocity (input + carried world momentum) dotted with the
+                // vector toward the path point; >= 0 means arriving, not leaving.
+                long long velX = mvX + afn_player_vx_world;
+                long long velZ = mvZ + afn_player_vz_world;
+                long long dot = velX * (-ddx) + velZ * (-ddz);
+                movingToward = (dot >= 0);
+            }
+            if (horiz2 <= r * r && dyAbs <= vWin && movingToward) {
+                onFloor = 1; floorY = gy; onRail = 1;
+            }
+        }
+#endif
         static int s_grindPrevFloorY = 0;
         // Persistent boosted-cap bonus. GrindBoost raises the grind speed
         // ceiling while descending; rather than snapping the cap back the
@@ -710,7 +766,22 @@ static void update_camera(void)
                     s_railVelSmooth += (afn_grind_vel - s_railVelSmooth) >> 3;
                     if (s_railVelSmooth < 1) s_railVelSmooth = 1;
                     s_railArc += s_railDir * s_railVelSmooth;
-                    if (s_railArc <= 0 || s_railArc >= total) {
+                    int s_atEnd = (s_railArc <= 0 || s_railArc >= total);
+                    if (s_atEnd) {
+                        // Bounce point at this terminus? Reverse direction and keep
+                        // grinding (bumper) instead of launching off. The jump-off
+                        // (player_vy > 0) branch above runs first, so you can still
+                        // jump off right before the bumper.
+                        int rn2 = afn_rail_count[afn_grind_rail];
+                        int rs2 = afn_rail_start[afn_grind_rail];
+                        int termIdx2 = (s_railArc <= 0) ? 0 : (rn2 - 1);
+                        if (rn2 > 0 && afn_rail_pt_bounce[rs2 + termIdx2]) {
+                            s_railDir = -s_railDir;
+                            s_railArc = (s_railArc <= 0) ? 0 : total;
+                            s_atEnd = 0;
+                        }
+                    }
+                    if (s_atEnd) {
                         afn_player_vx_world = FX_MUL(afn_grind_dx, afn_grind_vel);
                         afn_player_vz_world = FX_MUL(afn_grind_dz, afn_grind_vel);
                         if (afn_velocity_falloff <= 0) afn_velocity_falloff = 30;
@@ -878,7 +949,15 @@ static void update_camera(void)
                 }
                 player_y = floorY; player_vy = 0; player_on_ground = 1;
             }
-        } else if (afn_grinding && onRail && player_vy <= 0) {
+        } else if (afn_grinding && onRail && player_vy <= 0 && player_y <= floorY + afn_grind_catch_y) {
+            // NOTE: `player_y <= floorY` (actually reached the rail surface), not
+            // merely onRail (within the detection window). Without it, arcing a
+            // HIGH jump OVER the rail passes the feet through the window above the
+            // surface with vy<=0, engaging mid-jump and retriggering the grind SFX
+            // before you land. A real landing crosses floorY at the rail's XZ; a
+            // jump that clears the rail moves past in XZ before reaching it.
+            // GrindCatch (Height) adds afn_grind_catch_y so you can snap on from a
+            // bit above the surface (0 = strict).
             // --- Engage: StartGrind fired AND we're standing on the rail ---
             // Lock the slide to the rail's mesh axis (so you follow the pipe even
             // if you landed at an angle), seed speed from current move speed.
@@ -985,6 +1064,14 @@ static void update_camera(void)
         }
     }
 #endif
+    // Mirror the ACTUAL grind state for the script gates (Is Grinding / Is Not
+    // Grinding) to read next frame. Use afn_grind_vel != 0, NOT afn_grinding:
+    // afn_grinding is the StartGrind INTENT (set by On Collision) and lingers at
+    // 1 whenever onRail's detection window is satisfied — including while you arc
+    // a high jump OVER the rail without landing on it, which made the grind SFX
+    // retrigger early. afn_grind_vel is only non-zero once you've truly engaged
+    // and are sliding, so it cleanly means "grinding for real".
+    { extern int afn_grinding_active, afn_grind_vel; afn_grinding_active = (afn_grind_vel != 0); }
     s_playerY = player_y - AFN_PLAYER_BASE_Y;
 
     // Render-smoothed player position. While grinding, low-pass toward the exact

@@ -274,7 +274,14 @@ struct FloorSprite
     // of deriving a centerline from faceted geometry at 60fps.
     bool  isGrindRail = false;
     bool  railSpline = false;   // runtime follows a smooth Catmull-Rom curve through the points
-    struct RailPoint { float x = 0.0f, y = 0.0f, z = 0.0f; };
+    struct RailPoint { float x = 0.0f, y = 0.0f, z = 0.0f; bool isEnd = false; bool isBounce = false; bool isStart = false; };
+    // isEnd: a launch-off terminus. The runtime's width-catch only re-grabs an
+    // End point when you're moving TOWARD the rail, so you vault off cleanly but
+    // can still re-catch from the approach side.
+    // isBounce: a bumper terminus. Reaching it reverses the grind direction
+    // (bounce back) instead of launching off — unless you jump off just before.
+    // isStart: a clean-exit terminus (same no-re-grab behavior as End) — where
+    // you slide off smoothly after bouncing back, without the re-catch teleport.
     static constexpr int kMaxRailPoints = 64;
     RailPoint railPath[kMaxRailPoints];
     int   railPointCount = 0;

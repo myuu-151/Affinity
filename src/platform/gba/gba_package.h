@@ -38,7 +38,8 @@ struct GBASpriteExport
     // rail / no path. Exported into mapdata.h keyed by sprite index.
     bool isGrindRail = false;
     bool railSpline = false;    // runtime follows a smooth Catmull-Rom curve through railPath
-    std::vector<std::array<float,3>> railPath;
+    // [0..2] = world xyz, [3] = isEnd, [4] = isBounce, [5] = isStart (1/0 flags).
+    std::vector<std::array<float,6>> railPath;
 };
 
 // Player direction sprite for GBA export (RGBA8 image)
@@ -399,6 +400,7 @@ enum class GBAScriptNodeType : int {
     GrindPower,
     GrindBoost,
     GrindBleed,
+    GrindCatch,
     COUNT
 };
 
