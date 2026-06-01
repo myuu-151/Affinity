@@ -1182,10 +1182,13 @@ static void update_camera(void)
             // scripts we just use afn_move_speed as a heuristic.
             int moving, sprintLike;
 #ifdef AFN_HAS_SCRIPT
-            // GBA reads KEY_B directly for sprint here (afn_move_speed is
-            // sticky — Walk/Sprint nodes set it but nothing resets it).
+            // Node-driven sprint: the Sprint node sets afn_speed_prio = 1 when it
+            // runs (reset to 0 each script tick), so this is true exactly when the
+            // player is sprinting THIS frame — via whatever key the script wired
+            // into Sprint, not a hardcoded button. Script tick runs before this
+            // camera update, so the flag is current.
             moving = (afn_input_fwd != 0 || afn_input_right != 0);
-            sprintLike = (held & KEY_B) != 0;
+            sprintLike = afn_speed_prio != 0;
 #else
             int wantMove2   = (held & (KEY_UP | KEY_DOWN)) != 0;
             int wantSprint2 = (held & KEY_B) && wantMove2;
