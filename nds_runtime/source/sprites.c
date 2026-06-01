@@ -154,6 +154,12 @@ void afn_sprite_update(void)
         // -X at cam_angle=0). Depth = -view_z = sin*dx + cos*dz.
         int depth = (dx * g_sinf + dz * g_cosf) >> 8;
         if (depth <= 64) continue;
+#ifdef AFN_SPRITE_DRAW_DISTANCE
+        // Proximity Loading: cull sprites past the editor's Sprite Draw Distance.
+        // Same depth units + cull formula as GBA (gba_runtime/main.c). Global —
+        // per-sprite skipProximity isn't exported to NDS, so it applies to all.
+        if (depth > AFN_SPRITE_DRAW_DISTANCE) continue;
+#endif
 
         int viewX  = (-dx * g_cosf + dz * g_sinf) >> 8;
         int screenX = screenHalfX + (viewX * focalLen) / depth;
