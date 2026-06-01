@@ -321,17 +321,52 @@ static int afn_isqrt_ll(long long n) {
     }
     return (int)r;
 }
+// Per-rail-point cumulative arc length, precomputed ONCE. The path functions
+// below used to afn_isqrt_ll() every segment every call — with long rails that
+// was the grind-catch lag (the magnet runs every frame near a rail). With the
+// cache a segment length is a subtraction. NULL until built / on OOM, in which
+// case afn_seg_len() falls back to the live sqrt so results stay correct.
+static int* s_railCum = 0;
+static int  s_railArcReady = 0;
+static void afn_rail_arc_build(void) {
+    s_railArcReady = 1;
+    int total = 0;
+    for (int r = 0; r < AFN_SPRITE_COUNT; r++) {
+        int e = afn_rail_start[r] + afn_rail_count[r];
+        if (e > total) total = e;
+    }
+    if (total <= 0) return;
+    s_railCum = (int*)malloc(sizeof(int) * (unsigned)total);
+    if (!s_railCum) return;
+    for (int rail = 0; rail < AFN_SPRITE_COUNT; rail++) {
+        int n = afn_rail_count[rail], start = afn_rail_start[rail];
+        if (n < 1) continue;
+        long long cum = 0;
+        s_railCum[start] = 0;
+        for (int i = 1; i < n; i++) {
+            long long dx = afn_rail_pts[start+i][0]-afn_rail_pts[start+i-1][0];
+            long long dz = afn_rail_pts[start+i][2]-afn_rail_pts[start+i-1][2];
+            cum += afn_isqrt_ll(dx*dx+dz*dz);
+            s_railCum[start+i] = (cum > 0x7fffffffLL) ? 0x7fffffff : (int)cum;
+        }
+    }
+}
+static inline int afn_seg_len(int start, int i) {
+    if (s_railCum) return s_railCum[start+i] - s_railCum[start+i-1];
+    long long dx = afn_rail_pts[start+i][0]-afn_rail_pts[start+i-1][0];
+    long long dz = afn_rail_pts[start+i][2]-afn_rail_pts[start+i-1][2];
+    return afn_isqrt_ll(dx*dx+dz*dz);
+}
 // Hand-authored grind rail path (exported per rail sprite). Deterministic slide
 // along the exported centerline so thin/curved rails grind cleanly (no probe).
 static int afn_railpath_len(int rail) {
     if (rail < 0 || rail >= AFN_SPRITE_COUNT) return 0;
     int n = afn_rail_count[rail]; if (n < 2) return 0;
-    int start = afn_rail_start[rail]; long long total = 0;
-    for (int i = 1; i < n; i++) {
-        long long dx = afn_rail_pts[start+i][0]-afn_rail_pts[start+i-1][0];
-        long long dz = afn_rail_pts[start+i][2]-afn_rail_pts[start+i-1][2];
-        total += afn_isqrt_ll(dx*dx+dz*dz);
-    }
+    if (!s_railArcReady) afn_rail_arc_build();
+    int start = afn_rail_start[rail];
+    if (s_railCum) return s_railCum[start + n-1];
+    long long total = 0;
+    for (int i = 1; i < n; i++) total += afn_seg_len(start, i);
     if (total > 0x7fffffffLL) total = 0x7fffffffLL;
     return (int)total;
 }
@@ -355,11 +390,12 @@ static inline long long afn_catmull_tan(int P0,int P1,int P2,int P3,long long tf
 static void afn_railpath_sample(int rail, int s, int* ox, int* oy, int* oz, int* tdx, int* tdz) {
     int n = afn_rail_count[rail]; int start = afn_rail_start[rail];
     if (n < 2) { *ox=*oy=*oz=0; *tdx=256; *tdz=0; return; }
+    if (!s_railArcReady) afn_rail_arc_build();
     if (s < 0) s = 0; int acc = 0;
     for (int i = 1; i < n; i++) {
         int ax=afn_rail_pts[start+i-1][0],ay=afn_rail_pts[start+i-1][1],az=afn_rail_pts[start+i-1][2];
         int bx=afn_rail_pts[start+i][0],by=afn_rail_pts[start+i][1],bz=afn_rail_pts[start+i][2];
-        long long dx=bx-ax, dz=bz-az; int seg=afn_isqrt_ll(dx*dx+dz*dz); if(seg<1)seg=1;
+        long long dx=bx-ax, dz=bz-az; int seg=afn_seg_len(start,i); if(seg<1)seg=1;
         if (s <= acc+seg || i==n-1) {
             int t=(int)(((long long)(s-acc)<<8)/seg); if(t<0)t=0; if(t>256)t=256;
             if (s_railSplineOn && n >= 2) {
@@ -385,9 +421,15 @@ static void afn_railpath_sample(int rail, int s, int* ox, int* oy, int* oz, int*
         acc+=seg;
     }
 }
-static int afn_railpath_nearest(int rail, int px, int pz) {
+// Returns the arc position of the closest point on the path. Also outputs the
+// nearest authored POINT index (closer endpoint of the winning segment) and its
+// squared XZ distance when the pointers are non-NULL — so callers needing those
+// (the width-catch End check, range early-out) don't have to re-loop the path.
+static int afn_railpath_nearest_ex(int rail, int px, int pz, int* outPt, long long* outD2) {
     int n=afn_rail_count[rail]; int start=afn_rail_start[rail];
-    if(n<2) return 0; long long bestD=0x7fffffffffffffffLL; int bestArc=0, acc=0;
+    if(n<2){ if(outPt)*outPt=0; if(outD2)*outD2=0; return 0; }
+    if (!s_railArcReady) afn_rail_arc_build();
+    long long bestD=0x7fffffffffffffffLL; int bestArc=0, acc=0, bestPt=0;
     for(int i=1;i<n;i++){
         int ax=afn_rail_pts[start+i-1][0],az=afn_rail_pts[start+i-1][2];
         int bx=afn_rail_pts[start+i][0],bz=afn_rail_pts[start+i][2];
@@ -396,11 +438,15 @@ static int afn_railpath_nearest(int rail, int px, int pz) {
         if(t<0)t=0; if(t>256)t=256;
         int cx=ax+(int)((ex*t)>>8),cz=az+(int)((ez*t)>>8);
         long long dd=(long long)(px-cx)*(px-cx)+(long long)(pz-cz)*(pz-cz);
-        int seg=afn_isqrt_ll(ex*ex+ez*ez);
-        if(dd<bestD){bestD=dd; bestArc=acc+(int)(((long long)seg*t)>>8);}
+        int seg=afn_seg_len(start,i);
+        if(dd<bestD){bestD=dd; bestArc=acc+(int)(((long long)seg*t)>>8); bestPt=(t<128)?(i-1):i;}
         acc+=seg;
     }
+    if(outPt)*outPt=bestPt; if(outD2)*outD2=bestD;
     return bestArc;
+}
+static int afn_railpath_nearest(int rail, int px, int pz) {
+    return afn_railpath_nearest_ex(rail, px, pz, 0, 0);
 }
 #endif
 
@@ -687,45 +733,33 @@ static void update_camera(void)
         // with the rail captured, and within both the horizontal radius and the
         // vertical window — then treat it as onRail (the engage below pulls you
         // onto the path). Off when afn_grind_catch_x == 0.
+        // PERF: gate cheaply (count check, not afn_railpath_len which sqrts every
+        // segment), then ONE nearest pass that also yields the nearest point +
+        // its squared distance — so we early-out on horizontal range before the
+        // (also O(N)) sample, and the End check reuses the same point. This block
+        // runs every frame you're near a rail, so the extra loops were the lag.
         if (!onRail && afn_grind_catch_x > 0 && afn_grinding && player_vy <= 0
             && afn_grind_rail >= 0 && afn_grind_rail < AFN_SPRITE_COUNT
-            && afn_railpath_len(afn_grind_rail) > 0) {
-            int arc = afn_railpath_nearest(afn_grind_rail, player_x, player_z);
-            int gx, gy, gz, tdx, tdz;
-            afn_railpath_sample(afn_grind_rail, arc, &gx, &gy, &gz, &tdx, &tdz);
-            long long ddx = player_x - gx, ddz = player_z - gz;
-            long long horiz2 = ddx * ddx + ddz * ddz;
+            && afn_rail_count[afn_grind_rail] >= 2) {
+            int nearIdx = 0; long long horiz2 = 0;
             long long r = afn_grind_catch_x;
-            int dyAbs = player_y - gy; if (dyAbs < 0) dyAbs = -dyAbs;
-            int vWin = afn_player_height + afn_grind_catch_y;
-            // If the NEAREST authored point is flagged "End" (launch-off terminus),
-            // only width-catch when moving TOWARD the rail — so you vault off a
-            // tip cleanly (no re-grab loop) but can still re-catch from the
-            // approach side. Non-End points catch unconditionally within range.
-            int nearIsEnd = 0;
-            {
-                int rstart = afn_rail_start[afn_grind_rail];
-                int rn = afn_rail_count[afn_grind_rail];
-                int nearIdx = 0; long long bestPD = 0x7fffffffffffffffLL;
-                for (int k = 0; k < rn; k++) {
-                    long long px = player_x - afn_rail_pts[rstart+k][0];
-                    long long pz = player_z - afn_rail_pts[rstart+k][2];
-                    long long pd = px*px + pz*pz;
-                    if (pd < bestPD) { bestPD = pd; nearIdx = k; }
+            int arc = afn_railpath_nearest_ex(afn_grind_rail, player_x, player_z, &nearIdx, &horiz2);
+            if (horiz2 <= r * r) {                       // in horizontal range — now do the costlier bits
+                int gx, gy, gz, tdx, tdz;
+                afn_railpath_sample(afn_grind_rail, arc, &gx, &gy, &gz, &tdx, &tdz);
+                int dyAbs = player_y - gy; if (dyAbs < 0) dyAbs = -dyAbs;
+                int vWin = afn_player_height + afn_grind_catch_y;
+                // End tip → only catch when moving TOWARD the rail (clean vault off).
+                int movingToward = 1;
+                if (afn_rail_pt_end[afn_rail_start[afn_grind_rail] + nearIdx]) {
+                    long long ddx = player_x - gx, ddz = player_z - gz;
+                    long long velX = mvX + afn_player_vx_world;
+                    long long velZ = mvZ + afn_player_vz_world;
+                    movingToward = (velX * (-ddx) + velZ * (-ddz)) >= 0;
                 }
-                nearIsEnd = afn_rail_pt_end[rstart + nearIdx];
-            }
-            int movingToward = 1;
-            if (nearIsEnd) {
-                // velocity (input + carried world momentum) dotted with the
-                // vector toward the path point; >= 0 means arriving, not leaving.
-                long long velX = mvX + afn_player_vx_world;
-                long long velZ = mvZ + afn_player_vz_world;
-                long long dot = velX * (-ddx) + velZ * (-ddz);
-                movingToward = (dot >= 0);
-            }
-            if (horiz2 <= r * r && dyAbs <= vWin && movingToward) {
-                onFloor = 1; floorY = gy; onRail = 1;
+                if (dyAbs <= vWin && movingToward) {
+                    onFloor = 1; floorY = gy; onRail = 1;
+                }
             }
         }
 #endif

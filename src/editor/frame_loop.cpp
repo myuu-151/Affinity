@@ -14,6 +14,7 @@
 #include <cstring>
 #include <string>
 #include <map>
+#include <unordered_map>
 #include <set>
 #include <sstream>
 #include <filesystem>
@@ -4763,6 +4764,8 @@ static int ReimportSceneOBJ(const std::string& objPath,
 
         // Rebuild local-space geometry (per-corner verts, quads preserved —
         // same unwelded layout LoadOBJ produces, so this is exactly 1:1).
+        // Welding is handled separately by the per-mesh "Remove Doubles" export
+        // toggle, so reimport stays a faithful round-trip.
         std::vector<MeshVertex> verts;
         std::vector<uint32_t> tri, quad;
         for (auto& fc : obj.faces)
@@ -5438,7 +5441,7 @@ static bool SaveProject(const std::string& path)
     for (int mi = 0; mi < (int)sMeshAssets.size(); mi++)
     {
         const MeshAsset& ma = sMeshAssets[mi];
-        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide, ma.clampAbove ? 1 : 0, ma.nearClip ? 1 : 0, ma.faceCull ? 1 : 0, ma.texInIwram ? 1 : 0, ma.textureUseAlpha ? 1 : 0, ma.texFiltered ? 1 : 0);
+        fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide, ma.clampAbove ? 1 : 0, ma.nearClip ? 1 : 0, ma.faceCull ? 1 : 0, ma.texInIwram ? 1 : 0, ma.textureUseAlpha ? 1 : 0, ma.texFiltered ? 1 : 0, ma.removeDoubles ? 1 : 0);
     }
     fprintf(f, "\n");
 
@@ -6642,10 +6645,10 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "MeshAssets") == 0)
         {
             char mname[256], mpath[512], mtexpath[512] = {};
-            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1, mperspcorr = 0, msubdiv = 0, mclampabove = 0, mnearclip = 0, mfacecull = 0, mtexiwram = 0, mtexalpha = 0, mtexfiltered = 0;
+            int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1, mperspcorr = 0, msubdiv = 0, mclampabove = 0, mnearclip = 0, mfacecull = 0, mtexiwram = 0, mtexalpha = 0, mtexfiltered = 0, mremovedoubles = 0;
             float mdrawdist = 0.0f;
-            // Try newest format: ...|texInIwram|textureUseAlpha|texFiltered
-            int matched = sscanf(line, "mesh=%255[^|]|%4095[^|]|%d|%d|%d|%d|%d|%d|%d|%4095[^|\n]|%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha, &mtexfiltered);
+            // Try newest format: ...|texInIwram|textureUseAlpha|texFiltered|removeDoubles
+            int matched = sscanf(line, "mesh=%255[^|]|%4095[^|]|%d|%d|%d|%d|%d|%d|%d|%4095[^|\n]|%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", mname, mpath, &mcull, &mexport, &mlit, &mhalfres, &mtextured, &mwireframe, &mgrayscale, mtexpath, &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha, &mtexfiltered, &mremovedoubles);
             if (matched == 9) {
                 // Empty texture path — sscanf stopped at ||, skip it and parse remaining fields
                 mtexpath[0] = '\0';
@@ -6654,7 +6657,7 @@ static bool LoadProject(const std::string& path)
                 int pipes = 0;
                 while (*p && pipes < 9) { if (*p == '|') pipes++; p++; }
                 if (*p == '|') p++; // skip the empty field's trailing pipe
-                int m2 = sscanf(p, "%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha, &mtexfiltered);
+                int m2 = sscanf(p, "%d|%f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", &musequads, &mdrawdist, &mcollision, &mdrawpri, &mvisible, &mperspcorr, &msubdiv, &mclampabove, &mnearclip, &mfacecull, &mtexiwram, &mtexalpha, &mtexfiltered, &mremovedoubles);
                 matched = 9 + m2; // total fields parsed (skip texpath in count, add 1 for it)
                 if (m2 > 0) matched++; // account for the texpath slot
             }
@@ -6718,6 +6721,8 @@ static bool LoadProject(const std::string& path)
                     ma.textureUseAlpha = (mtexalpha != 0);
                 if (matched >= 23)
                     ma.texFiltered = (mtexfiltered != 0);
+                if (matched >= 24)
+                    ma.removeDoubles = (mremovedoubles != 0);
                 // Reload from source OBJ
                 if (!ma.sourcePath.empty())
                     LoadOBJ(ma.sourcePath, ma);
@@ -9995,6 +10000,11 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             ImGui::SameLine();
             ImGui::Checkbox("Edge Wrap 2##meshFC", &ma.faceCull);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mirror above-horizon vertices to below — smooth slope fold without bloat");
+            if (ImGui::Checkbox("Remove Doubles##meshRD", &ma.removeDoubles)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "At export, weld vertices that are identical in position, UV and\n"
+                "normal into one — fewer verts for the runtime to push. Lossless\n"
+                "(only merges truly-identical corners). Editor view is unchanged.");
         }
         if (ma.textured)
         {
@@ -14675,6 +14685,39 @@ void FrameTick(float dt)
                             me.indices.push_back(ma.quadIndices[qi + 2]);
                             me.indices.push_back(ma.quadIndices[qi + 3]);
                         }
+                    }
+                    // Remove Doubles: weld vertices that are identical in position,
+                    // UV and normal into one, remapping the index buffers — so the
+                    // runtime gets fewer vertices to push. Lossless (only merges
+                    // truly-identical corners; quantized to dodge float jitter).
+                    if (ma.removeDoubles && !me.positions.empty())
+                    {
+                        std::unordered_map<std::string, int> wmap;
+                        std::vector<float> nPos, nNorm, nUV;
+                        std::vector<int> nObj;
+                        int vc = (int)me.positions.size() / 3;
+                        std::vector<int> remap(vc, 0);
+                        char key[160];
+                        for (int v = 0; v < vc; v++) {
+                            float u = (v*2+1 < (int)me.uvs.size()) ? me.uvs[v*2+0] : 0.0f;
+                            float vv = (v*2+1 < (int)me.uvs.size()) ? me.uvs[v*2+1] : 0.0f;
+                            snprintf(key, sizeof(key), "%d_%d_%d_%d_%d_%d_%d_%d",
+                                (int)lroundf(me.positions[v*3+0]*1024), (int)lroundf(me.positions[v*3+1]*1024), (int)lroundf(me.positions[v*3+2]*1024),
+                                (int)lroundf(u*4096), (int)lroundf(vv*4096),
+                                (int)lroundf(me.normals[v*3+0]*127), (int)lroundf(me.normals[v*3+1]*127), (int)lroundf(me.normals[v*3+2]*127));
+                            auto it = wmap.find(key);
+                            if (it != wmap.end()) { remap[v] = it->second; continue; }
+                            int ni = (int)nPos.size() / 3;
+                            nPos.push_back(me.positions[v*3+0]); nPos.push_back(me.positions[v*3+1]); nPos.push_back(me.positions[v*3+2]);
+                            nNorm.push_back(me.normals[v*3+0]); nNorm.push_back(me.normals[v*3+1]); nNorm.push_back(me.normals[v*3+2]);
+                            nUV.push_back(u); nUV.push_back(vv);
+                            nObj.push_back(v < (int)me.objPosIdx.size() ? me.objPosIdx[v] : -1);
+                            wmap[key] = ni; remap[v] = ni;
+                        }
+                        for (auto& idx : me.indices)     idx = (uint32_t)remap[idx];
+                        for (auto& idx : me.quadIndices) idx = (uint32_t)remap[idx];
+                        me.positions = std::move(nPos); me.normals = std::move(nNorm);
+                        me.uvs = std::move(nUV); me.objPosIdx = std::move(nObj);
                     }
                     // Convert sprite color to RGB15 (use magenta as default)
                     me.colorRGB15 = 0x7C1F; // magenta

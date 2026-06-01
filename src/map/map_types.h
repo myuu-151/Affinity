@@ -213,6 +213,7 @@ struct MeshAsset
     bool clampAbove = false;                 // true = clamp vertices to never project above horizon (prevents "under mesh" warp)
     bool nearClip = false;                   // true = view-space near-plane clipping (fixes slope walling)
     bool faceCull = false;                   // true = skip faces with vertices above camera (hard cutoff)
+    bool removeDoubles = false;              // true = weld identical (pos+uv+normal) verts at export (fewer runtime verts)
 };
 
 static constexpr int kMaxMeshAssets = 32;
