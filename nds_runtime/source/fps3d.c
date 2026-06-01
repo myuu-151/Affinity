@@ -704,6 +704,16 @@ static void update_camera(void)
         // sprite (afn_grind_rail), captured by StartGrind. This is what makes
         // the grind follow JUST the pipe and end the instant you leave it.
         int onRail = (onFloor && afn_grind_rail >= 0 && afn_floor_sprite == afn_grind_rail);
+        // Re-catch suppression after launching off an End-flagged terminus.
+        // When you reach the rail end and launch off, the next frame you're still
+        // over the rail mesh, so afn_grinding (StartGrind intent, re-set by On
+        // Collision) is still true and the engage below — or the magnet — instantly
+        // re-grabs you: you "portal" and never actually leave. The End flag means
+        // "launch-off / clean release", so on launch (below) we set this window;
+        // while >0 both the magnet catch and the engage are suppressed so you fly
+        // off cleanly. Counts down each frame.
+        static int s_railLaunchCD = 0;
+        if (s_railLaunchCD > 0) s_railLaunchCD--;
         // Slope fix: collide_floor only accepts a floor within afn_player_height
         // (~12px) of the player's feet, so a tilted rail's surface — which moves
         // up or down by a whole horizontal grind step each frame — falls outside
@@ -739,6 +749,7 @@ static void update_camera(void)
         // (also O(N)) sample, and the End check reuses the same point. This block
         // runs every frame you're near a rail, so the extra loops were the lag.
         if (!onRail && afn_grind_catch_x > 0 && afn_grinding && player_vy <= 0
+            && s_railLaunchCD == 0
             && afn_grind_rail >= 0 && afn_grind_rail < AFN_SPRITE_COUNT
             && afn_rail_count[afn_grind_rail] >= 2) {
             int nearIdx = 0; long long horiz2 = 0;
@@ -820,6 +831,17 @@ static void update_camera(void)
                         afn_player_vz_world = FX_MUL(afn_grind_dz, afn_grind_vel);
                         if (afn_velocity_falloff <= 0) afn_velocity_falloff = 30;
                         afn_grind_vel = 0; afn_grinding = 0; s_railHas = 0;
+                        // If the terminus we reached is End-flagged ("launch-off"),
+                        // block re-catch/re-engage briefly so we actually leave the
+                        // rail instead of being instantly re-grabbed (the "won't
+                        // release" / portal bug). Non-flagged ends behave as before.
+                        {
+                            int rn3 = afn_rail_count[afn_grind_rail];
+                            int rs3 = afn_rail_start[afn_grind_rail];
+                            int termIdx3 = (s_railArc <= 0) ? 0 : (rn3 - 1);
+                            if (rn3 > 0 && afn_rail_pt_end[rs3 + termIdx3])
+                                s_railLaunchCD = 20;
+                        }
                     } else {
                         int gx,gy,gz,tdx,tdz;
                         afn_railpath_sample(afn_grind_rail, s_railArc, &gx,&gy,&gz,&tdx,&tdz);
@@ -983,7 +1005,8 @@ static void update_camera(void)
                 }
                 player_y = floorY; player_vy = 0; player_on_ground = 1;
             }
-        } else if (afn_grinding && onRail && player_vy <= 0 && player_y <= floorY + afn_grind_catch_y) {
+        } else if (afn_grinding && onRail && player_vy <= 0 && s_railLaunchCD == 0
+                   && player_y <= floorY + afn_grind_catch_y) {
             // NOTE: `player_y <= floorY` (actually reached the rail surface), not
             // merely onRail (within the detection window). Without it, arcing a
             // HIGH jump OVER the rail passes the feet through the window above the
