@@ -1018,6 +1018,16 @@ static void update_camera(void)
                 afn_grind_vel = mom;
                 if (afn_grind_vel < (AFN_WALK_SPEED >> 3))
                     afn_grind_vel = (AFN_WALK_SPEED >> 3);
+                // Carry high entry momentum (boost pad / downhill sprint) past the
+                // normal grind speed cap by seeding the boosted-cap bonus from it.
+                // Without this the continue branch clamps afn_grind_vel to
+                // SPRINT*N next frame and the boost is lost instantly; with it the
+                // speed RIDES then bleeds off (GrindBleed), so a boost-into-rail
+                // keeps its momentum.
+                {
+                    int overCap = mom - AFN_SPRINT_SPEED * 3;
+                    s_grindCapBonus = (overCap > 0) ? overCap : 0;
+                }
                 afn_player_vx_world = 0; afn_player_vz_world = 0;
                 afn_velocity_falloff = 0;
 #ifdef AFN_HAS_RAIL_PATH
