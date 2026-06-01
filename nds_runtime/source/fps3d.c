@@ -737,6 +737,9 @@ static void update_camera(void)
                 onFloor = 1; floorY = fY2; onRail = 1;
             }
         }
+        // Set when the deliberate Width-grab magnet (below) is what put us onRail,
+        // so the snap-up tightening doesn't undo an intentional catch.
+        int magnetCaught = 0;
 #ifdef AFN_HAS_RAIL_PATH
         // GrindCatch (Width): if you came down NEAR the rail path but not dead
         // over the thin mesh floor, snap-catch onto it. Only while descending,
@@ -769,7 +772,7 @@ static void update_camera(void)
                     movingToward = (velX * (-ddx) + velZ * (-ddz)) >= 0;
                 }
                 if (dyAbs <= vWin && movingToward) {
-                    onFloor = 1; floorY = gy; onRail = 1;
+                    onFloor = 1; floorY = gy; onRail = 1; magnetCaught = 1;
                 }
             }
         }
@@ -795,6 +798,20 @@ static void update_camera(void)
         // keep the slope gradual.
         static int s_railVelSmooth = 0;
 #endif
+
+        // Don't get SUCKED UP onto the grind rail from below. collide_floor
+        // accepts a floor up to a body-height (~12px) ABOVE the feet — fine for
+        // stepping up terrain, but for a grind rail it means leaving a ledge
+        // beside a slightly-higher rail snaps you straight up onto it the instant
+        // you step off ("immediate connection from above"). Tighten that window
+        // for the rail: only let it catch you when its top is at/just-below your
+        // feet (a real landing or level run-on), not while you're still under it.
+        // (Only when not already grinding, so following a rising rail mid-grind is
+        // untouched; and the deliberate Width-grab magnet is exempt via
+        // magnetCaught.) 256 = ~1px of upward slack.
+        if (afn_grind_vel == 0 && onRail && !magnetCaught && (floorY - player_y) > 256) {
+            onFloor = 0; onRail = 0;
+        }
 
         if (afn_grind_vel != 0) {
             // --- Currently grinding ---
