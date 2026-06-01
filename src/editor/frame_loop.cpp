@@ -6140,13 +6140,21 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "\n");
             }
             if (!ov.data.empty()) {
+                // Chunk like impData — a single unchunked line overflows the 32K
+                // load buffer for long samples, gets truncated by fgets, and the
+                // override then clobbers the full sample on load.
                 fprintf(f, "ovDataLen=%d\n", (int)ov.data.size());
-                fprintf(f, "ovData=");
-                for (int di = 0; di < (int)ov.data.size(); di++) {
-                    if (di > 0) fprintf(f, ",");
-                    fprintf(f, "%d", (int)ov.data[di]);
+                const int chunkSize = 4000;
+                for (int off = 0; off < (int)ov.data.size(); off += chunkSize) {
+                    int end = off + chunkSize;
+                    if (end > (int)ov.data.size()) end = (int)ov.data.size();
+                    fprintf(f, "ovData=");
+                    for (int di = off; di < end; di++) {
+                        if (di > off) fprintf(f, ",");
+                        fprintf(f, "%d", (int)ov.data[di]);
+                    }
+                    fprintf(f, "\n");
                 }
-                fprintf(f, "\n");
             }
             fprintf(f, "ov_end\n");
         }
@@ -8477,11 +8485,23 @@ static bool LoadProject(const std::string& path)
                     }
                 }
                 else if (sscanf(line, "ovDataLen=%d", &ival) == 1) {
+                    curOv->data.clear();
                     curOv->data.reserve(ival);
                 }
                 else if (strncmp(line, "ovData=", 7) == 0) {
-                    curOv->data.clear();
-                    const char* p = line + 7;
+                    // Accumulate the full logical line first. New saves chunk
+                    // ovData (each line fits, multiple lines append). OLD saves
+                    // wrote one huge line that fgets truncated at 32K — recover
+                    // those by reading continuation buffers until a newline;
+                    // concatenating the raw text rejoins any number split across
+                    // the boundary, so no sample is corrupted.
+                    std::string acc(line + 7);
+                    while (!acc.empty() && acc.back() != '\n'
+                           && acc.size() >= sizeof(line) - 8) {
+                        if (!fgets(line, sizeof(line), f)) break;
+                        acc += line;
+                    }
+                    const char* p = acc.c_str();
                     while (*p) {
                         int v = atoi(p);
                         curOv->data.push_back((int8_t)v);
