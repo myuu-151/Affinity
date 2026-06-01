@@ -47,12 +47,16 @@ static std::map<std::string, std::vector<unsigned char>> sPackedAssets;
 // by "Export all assets"). Lets a user ship editor + external/ instead of
 // the absolute paths burned into the project file.
 static bool sUseExternalAssets = false;
+// Folder to load external assets from. Empty = the legacy "external/" next to
+// the editor exe; otherwise an absolute folder the user picked.
+static std::string sExternalAssetDir;
 
 static std::string ResolveAssetPath(const std::string& path) {
     if (!sUseExternalAssets || path.empty()) return path;
     namespace fs = std::filesystem;
     fs::path src(path);
-    fs::path base = fs::current_path() / "external";
+    fs::path base = sExternalAssetDir.empty() ? (fs::current_path() / "external")
+                                              : fs::path(sExternalAssetDir);
     fs::path candidate = src.parent_path().filename().empty()
         ? (base / src.filename())
         : (base / src.parent_path().filename() / src.filename());
@@ -4393,6 +4397,7 @@ static bool  s3DGrabIsRailPoint = false; // current G grab moves a rail point, n
 static float s3DRailGrabOrig[3] = { 0, 0, 0 };          // primary point's pre-grab pos
 static std::vector<s3DGrabSnap> s3DRailGrabOrigs;       // all selected points' pre-grab pos (idx = point index)
 static bool  s3DRailVertexSnap  = false; // while grabbing a rail point, snap it to the mesh vertex nearest the cursor
+static bool  s3DWireframe       = false; // 3D tab: render placed meshes as wireframe
 static bool  s3DSelRailContains(int pt) { for (int p : s3DSelRailPts) if (p == pt) return true; return false; }
 
 // Blender-style rotate mode (R). Each selected sprite spins around its
@@ -8850,6 +8855,11 @@ void FrameInit(const char* openPath)
             else if (sscanf(line, "tl_range_end=%d", &ival) == 1) sHudTimelineRangeEnd = std::max(0, ival);
             else if (sscanf(line, "tl_label_w=%f", &fval) == 1) sHudTimelineLabelW = std::clamp(fval, 80.0f, 600.0f);
             else if (sscanf(line, "use_external_assets=%d", &ival) == 1) sUseExternalAssets = (ival != 0);
+            else if (strncmp(line, "external_asset_dir=", 19) == 0) {
+                std::string v = line + 19;
+                while (!v.empty() && (v.back()=='\n' || v.back()=='\r')) v.pop_back();
+                sExternalAssetDir = v;
+            }
         }
         fclose(pf);
     }
@@ -10050,6 +10060,11 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
     {
         ImGui::TextWrapped("Select a mesh asset above, then click Place Mesh.");
     }
+
+    // View toggle: render all placed meshes as wireframe in the 3D tab.
+    ImGui::Checkbox("Wireframe View##3dwire", &s3DWireframe);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Draw placed meshes as edges only (unlit/untextured)\nin the 3D viewport. Editor view only — doesn't affect export.");
 
     // Export the whole placed scene as a Blender-ready OBJ + MTL.
     {
@@ -29195,6 +29210,13 @@ void FrameTick(float dt)
                 if (src.parent_path().filename().empty()) dst = base / src.filename();
                 if (writeFileBytes(dst.string(), bytes.data(), bytes.size())) sExportedCount++;
             }
+            // Also bake the whole placed-mesh scene to scene.obj (+ scene.mtl) in
+            // the same folder, so one export gives both the source assets and the
+            // assembled scene for Blender.
+            if (sSpriteCount > 0) {
+                int sceneObjs = ExportSceneOBJ((base / "scene.obj").string());
+                if (sceneObjs > 0) sExportedCount++;
+            }
             sExportDest = base.string();
             sExportResult = sExportedCount > 0 ? 1 : 2;
         };
@@ -29204,7 +29226,7 @@ void FrameTick(float dt)
                 exportAssetsTo(std::filesystem::path(folder));
         }
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Pick a folder to write every asset the project references\n(<parent>/<file> layout). Includes un-packed assets too.");
+            ImGui::SetTooltip("Pick a folder to write every asset the project references\n(<parent>/<file> layout). Includes un-packed assets, plus a\nbaked scene.obj + scene.mtl of the whole placed-mesh scene.");
         ImGui::SameLine();
         if (ImGui::Button("Export to external/")) {
             // Quick path: the portable bundle next to the editor exe that the
@@ -29222,14 +29244,32 @@ void FrameTick(float dt)
             ImGui::TextDisabled("%d asset(s) currently packed", (int)sPackedAssets.size());
         }
         bool prevUseExternal = sUseExternalAssets;
-        ImGui::Checkbox("Load from external/ folder", &sUseExternalAssets);
+        ImGui::Checkbox("Load from external folder", &sUseExternalAssets);
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip(
-                "When on, asset loaders look for files under external/<parent>/<file>\n"
-                "next to the editor exe before falling back to the original absolute path.\n"
-                "Use this together with \"Export all assets\" to ship a portable bundle.");
+                "When on, asset loaders look for files under <folder>/<parent>/<file>\n"
+                "before falling back to the original absolute path. Pick the folder\n"
+                "below (defaults to external/ next to the exe). Use with\n"
+                "\"Export all assets\" to ship/relocate a portable bundle.");
         }
-        if (sUseExternalAssets != prevUseExternal) {
+        bool reloadAssets = (sUseExternalAssets != prevUseExternal);
+        if (sUseExternalAssets) {
+            ImGui::TextDisabled("Folder: %s",
+                sExternalAssetDir.empty() ? "(external/ next to exe)" : sExternalAssetDir.c_str());
+            if (ImGui::Button("Set Folder...##extdir")) {
+                std::string folder = OpenFolderDialog();
+                if (!folder.empty() && folder != sExternalAssetDir) {
+                    sExternalAssetDir = folder; reloadAssets = true;
+                }
+            }
+            if (!sExternalAssetDir.empty()) {
+                ImGui::SameLine();
+                if (ImGui::Button("Use default external/##extreset")) {
+                    sExternalAssetDir.clear(); reloadAssets = true;
+                }
+            }
+        }
+        if (reloadAssets) {
             // Reload every cached asset so the new resolution rule takes effect now.
             for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++) {
                 auto& sa = sSpriteAssets[ai];
@@ -29271,6 +29311,8 @@ void FrameTick(float dt)
                 fprintf(f, "tl_range_end=%d\n", sHudTimelineRangeEnd);
                 fprintf(f, "tl_label_w=%.0f\n", sHudTimelineLabelW);
                 fprintf(f, "use_external_assets=%d\n", sUseExternalAssets ? 1 : 0);
+                if (!sExternalAssetDir.empty())
+                    fprintf(f, "external_asset_dir=%s\n", sExternalAssetDir.c_str());
                 fclose(f);
                 sPrefsSaveTimer = 2.0f;
             }
@@ -29530,6 +29572,15 @@ void Render3DViewport()
                 glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, matDif);
             }
 
+            // Wireframe view: draw mesh edges only, unlit/untextured in a flat
+            // bright color so the topology reads clearly.
+            bool wf = s3DWireframe;
+            if (wf) {
+                glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+                glDisable(GL_TEXTURE_2D);
+                glDisable(GL_LIGHTING);
+                glColor3f(0.35f, 1.0f, 0.55f);
+            }
             // Draw triangles
             if (!ma.indices.empty())
             {
@@ -29537,7 +29588,7 @@ void Render3DViewport()
                 for (size_t ti = 0; ti < ma.indices.size(); ti++)
                 {
                     const MeshVertex& v = ma.vertices[ma.indices[ti]];
-                    if (useTex)
+                    if (useTex && !wf)
                         glTexCoord2f(v.u, 1.0f - v.v);
                     glNormal3f(v.nx, v.ny, v.nz);
                     glVertex3f(v.px, v.py, v.pz);
@@ -29566,11 +29617,12 @@ void Render3DViewport()
                     glNormal3f(v0.nx, v0.ny, v0.nz); glVertex3f(v0.px, v0.py, v0.pz);
                     if (useTex) glTexCoord2f(v2.u, 1.0f - v2.v);
                     glNormal3f(v2.nx, v2.ny, v2.nz); glVertex3f(v2.px, v2.py, v2.pz);
-                    if (useTex) glTexCoord2f(v3.u, 1.0f - v3.v);
+                    if (useTex && !wf) glTexCoord2f(v3.u, 1.0f - v3.v);
                     glNormal3f(v3.nx, v3.ny, v3.nz); glVertex3f(v3.px, v3.py, v3.pz);
                 }
                 glEnd();
             }
+            if (wf) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL); // restore fill for next mesh
 
             if (useTex)
             {
