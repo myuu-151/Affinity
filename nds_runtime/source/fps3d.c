@@ -296,8 +296,12 @@ static void render_meshes(void)
 // frozen (node-driven, per the FreezePlayer node). Clip defaults to the editor
 // selection; node-driven clip switching is a follow-up.
 #ifndef AFN_PLAYER_RIG_SCALE_F32
-#define AFN_PLAYER_RIG_SCALE_F32 4096   // fallback = 1.0 (older exports without scale)
+#define AFN_PLAYER_RIG_SCALE_F32 256    // fallback (older exports): 1 glTF unit = 1 editor px
 #endif
+// Yaw correction so the model's authored forward aligns with the runtime heading.
+// glTF/Blender forward and the engine heading differ by 90°. 16384 = 90° in the
+// 16-bit brad space of player_move_angle (flip the sign if the model faces backward).
+#define AFN_RIG_YAW_CORRECTION (-16384)
 extern int afn_player_frozen;
 static int32_t s_rig_frame = 0;          // 20.12 fixed animation frame
 static int     s_rig_clip  = AFN_PLAYER_RIG_DEFAULT_CLIP;
@@ -321,7 +325,8 @@ static void render_player_rig(void)
     glTranslatef32(fx8_to_f32(player_render_x),
                    fx8_to_f32(player_render_y),
                    fx8_to_f32(player_render_z));
-    glRotateYi(player_move_angle >> 1);  // face movement heading
+    glRotateYi(player_move_angle >> 1);              // face movement heading
+    glRotateYi(AFN_RIG_YAW_CORRECTION >> 1);         // align model forward to heading
     int s32 = AFN_PLAYER_RIG_SCALE_F32;
     glScalef32(s32, s32, s32);
 

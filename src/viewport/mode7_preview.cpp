@@ -976,9 +976,13 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
 
         // Check if this sprite has a linked asset with directional images
         bool drewSprite = false;
+        // A rigged (skinned) mesh on a parent sprite replaces its billboard
+        // entirely — suppress the sprite/dir/mesh draws so the rig block runs.
+        bool rigParent = (sp.subIdx < 0 && fs.riggedMeshIdx >= 0
+                          && riggedAssets && fs.riggedMeshIdx < riggedAssetCount);
         bool isForceStatic = (sp.subIdx < 0) ? fs.forceStatic
             : (sp.subIdx < fs.subSpriteCount && fs.subSprites[sp.subIdx].forceStatic);
-        if (effectiveAssetIdx >= 0 && effectiveAssetIdx < assetCount && assets
+        if (!rigParent && effectiveAssetIdx >= 0 && effectiveAssetIdx < assetCount && assets
             && assetDirImages && effectiveAssetIdx < assetDirCount
             && assets[effectiveAssetIdx].hasDirections)
         {
@@ -1037,7 +1041,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         }
 
         // Check if this sprite has a linked asset with frames
-        if (!drewSprite && effectiveAssetIdx >= 0 && effectiveAssetIdx < assetCount && assets)
+        if (!drewSprite && !rigParent && effectiveAssetIdx >= 0 && effectiveAssetIdx < assetCount && assets)
         {
             const SpriteAsset& asset = assets[effectiveAssetIdx];
             if (!asset.frames.empty())
@@ -1068,7 +1072,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             }
         }
         // Render mesh geometry for Mesh-type sprites (skip for sub-sprites)
-        if (!drewSprite && sp.subIdx < 0 && fs.type == SpriteType::Mesh
+        if (!drewSprite && !rigParent && sp.subIdx < 0 && fs.type == SpriteType::Mesh
             && fs.meshIdx >= 0 && fs.meshIdx < meshAssetCount && meshAssets)
         {
             const MeshAsset& ma = meshAssets[fs.meshIdx];
