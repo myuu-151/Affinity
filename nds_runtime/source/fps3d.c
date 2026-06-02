@@ -296,7 +296,7 @@ static void render_meshes(void)
 // frozen (node-driven, per the FreezePlayer node). Clip defaults to the editor
 // selection; node-driven clip switching is a follow-up.
 #ifndef AFN_PLAYER_RIG_SCALE_F32
-#define AFN_PLAYER_RIG_SCALE_F32 256    // fallback (older exports): 1 glTF unit = 1 editor px
+#define AFN_PLAYER_RIG_SCALE_F32 64     // fallback (older exports): matches OBJ scale/64 sizing
 #endif
 // Yaw correction so the model's authored forward aligns with the runtime heading.
 // glTF/Blender forward and the engine heading differ by 90°. 16384 = 90° in the

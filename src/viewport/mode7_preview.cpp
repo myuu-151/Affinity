@@ -1507,6 +1507,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 float rY = fs.rotation * 3.14159265f/180.0f, rX = fs.rotationX * 3.14159265f/180.0f, rZ = fs.rotationZ * 3.14159265f/180.0f;
                 float cY = cosf(rY), sY = sinf(rY), cX = cosf(rX), sX = sinf(rX), cZ = cosf(rZ), sZ = sinf(rZ);
                 std::vector<float> pSX(nv), pSY(nv), pDepth(nv);
+                std::vector<float> wX(nv), wY(nv), wZ(nv);   // world positions (for face normals)
                 std::vector<char> pVis(nv);
                 for (int v = 0; v < nv; v++) {
                     float lx = skX[v]*meshScale, ly = skY[v]*meshScale, lz = skZ[v]*meshScale;
@@ -1514,6 +1515,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                     float ry2 = ry*cX - rz*sX, rz2 = ry*sX + rz*cX;
                     float rx2 = rx*cZ - ry2*sZ, ry3 = rx*sZ + ry2*cZ;
                     float wx = fs.x + rx2, wy = fs.y + ry3, wz = fs.z + rz2;
+                    wX[v] = wx; wY[v] = wy; wZ[v] = wz;
                     float sx, sy; pVis[v] = ProjectPoint(wx, wy, wz, cam, cosA, sinA, sx, sy) ? 1 : 0;
                     pSX[v] = sx; pSY[v] = sy;
                     pDepth[v] = (wx - cam.x)*sinA - (wz - cam.z)*cosA;
@@ -1533,19 +1535,22 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
                 float lDx = 0.3f, lDy = -0.8f, lDz = 0.5f;
                 float lL = sqrtf(lDx*lDx + lDy*lDy + lDz*lDz); lDx/=lL; lDy/=lL; lDz/=lL;
 
+                float camWX = cam.x, camWY = cam.height, camWZ = cam.z;
                 float minSX = 9999, maxSX = -9999, minSY = 9999, maxSY = -9999;
                 for (int oi = 0; oi < nTri; oi++) {
                     int t = order[oi];
                     int i0 = rm.indices[t*3], i1 = rm.indices[t*3+1], i2 = rm.indices[t*3+2];
                     if (!pVis[i0] && !pVis[i1] && !pVis[i2]) continue;
-                    float fnx = (snX[i0]+snX[i1]+snX[i2])/3.0f;
-                    float fny = (snY[i0]+snY[i1]+snY[i2])/3.0f;
-                    float fnz = (snZ[i0]+snZ[i1]+snZ[i2])/3.0f;
-                    float nx1 = fnx*cY + fnz*sY, nz1 = -fnx*sY + fnz*cY, ny1 = fny;
-                    float ny2 = ny1*cX - nz1*sX, nz2 = ny1*sX + nz1*cX;
-                    float rnx = nx1*cZ - ny2*sZ, rny = nx1*sZ + ny2*cZ, rnz = nz2;
-                    float dot = -(rnx*lDx + rny*lDy + rnz*lDz);
-                    float shade = 0.3f + 0.7f * std::max(0.0f, dot);
+                    // Geometric face normal (world space) from the skinned positions —
+                    // independent of the loaded vertex normals, so shading always works.
+                    float ax = wX[i1]-wX[i0], ay = wY[i1]-wY[i0], az = wZ[i1]-wZ[i0];
+                    float bx = wX[i2]-wX[i0], by = wY[i2]-wY[i0], bz = wZ[i2]-wZ[i0];
+                    float rnx = ay*bz - az*by, rny = az*bx - ax*bz, rnz = ax*by - ay*bx;
+                    float nl = sqrtf(rnx*rnx+rny*rny+rnz*rnz); if (nl>0){rnx/=nl;rny/=nl;rnz/=nl;}
+                    // Orient toward camera (two-sided shading) so every visible face is lit.
+                    float fcx=(wX[i0]+wX[i1]+wX[i2])/3.0f, fcy=(wY[i0]+wY[i1]+wY[i2])/3.0f, fcz=(wZ[i0]+wZ[i1]+wZ[i2])/3.0f;
+                    if (rnx*(camWX-fcx) + rny*(camWY-fcy) + rnz*(camWZ-fcz) < 0) { rnx=-rnx; rny=-rny; rnz=-rnz; }
+                    float shade = 0.35f + 0.65f * std::max(0.0f, -(rnx*lDx + rny*lDy + rnz*lDz));
                     const MeshVertex& bv0 = rm.baseVerts[i0];
                     uint8_t tr = (uint8_t)(255.0f * bv0.r * shade);
                     uint8_t tg = (uint8_t)(255.0f * bv0.g * shade);

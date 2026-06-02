@@ -4358,6 +4358,7 @@ static std::vector<MeshAsset> sMeshAssets;
 // Rigged (skinned glTF) mesh assets — DSMA skeletal animation
 static std::vector<RiggedMeshAsset> sRiggedMeshAssets;
 static char sRigImportError[256] = "";
+static int sSelectedRig = -1;            // selected rigged-mesh asset (3D Objects panel)
 static int sSelectedMesh = -1;
 static std::set<int> sSelectedMeshes;       // multi-select set for mesh assets
 static bool sMeshDragSelecting = false;     // true while drag-selecting in mesh list
@@ -5820,6 +5821,8 @@ static bool SaveProject(const std::string& path)
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
+            if (sp.riggedMeshIdx >= 0)
+                fprintf(f, "msSpriteRig=%d,%d,%d\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0);
             if (sp.subSpriteCount > 0) {
                 fprintf(f, "msSubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si = 0; si < sp.subSpriteCount; si++) {
@@ -5957,6 +5960,8 @@ static bool SaveProject(const std::string& path)
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
+            if (sp.riggedMeshIdx >= 0)
+                fprintf(f, "m7SpriteRig=%d,%d,%d\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0);
             if (sp.subSpriteCount > 0) {
                 fprintf(f, "m7SubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si2 = 0; si2 < sp.subSpriteCount; si2++) {
@@ -6415,7 +6420,7 @@ static bool LoadProject(const std::string& path)
         else if (strcmp(section, "Sprites") == 0)
         {
             if (sscanf(line, "count=%d", &ival) == 1) { /* just informational */ }
-            else if (sSpriteCount < kMaxFloorSprites)
+            else if (strncmp(line, "sprite=", 7) == 0 && sSpriteCount < kMaxFloorSprites)
             {
                 int sid, aIdx = -1, anIdx = 0, typeVal = 0, animEn = 1, mIdx = -1;
                 float sx, sy, sz, sc;
@@ -6476,6 +6481,11 @@ static bool LoadProject(const std::string& path)
                     }
                     sp.subSpriteCount = 0;
                     sp.selected = false;
+                    // Reset rig link; a following spriteRig= line restores it.
+                    sp.riggedMeshIdx = -1;
+                    sp.rigAnimIdx = 0;
+                    sp.rigAnimPlay = true;
+                    sp.rigAnimClock = 0.0f;
                     sSpriteCount++;
                 }
             }
@@ -6788,8 +6798,8 @@ static bool LoadProject(const std::string& path)
             {
                 RiggedMeshAsset rm;
                 std::string err;
-                if (rpath[0] && LoadRiggedGLTF(std::string(rpath), rm, &err))
-                    rm.name = rname;
+                bool ok = (rpath[0] && LoadRiggedGLTF(std::string(rpath), rm, &err));
+                if (ok) rm.name = rname;
                 else { rm = RiggedMeshAsset(); rm.name = rname; rm.sourcePath = rpath; }
                 sRiggedMeshAssets.push_back(std::move(rm));
             }
@@ -7661,6 +7671,16 @@ static bool LoadProject(const std::string& path)
                         ms.sprites[ms.spriteCount++] = sp;
                 }
             }
+            else if (strncmp(line, "msSpriteRig=", 12) == 0 && !sMapScenes.empty()) {
+                MapScene& ms = sMapScenes.back();
+                if (ms.spriteCount > 0) {
+                    int rIdx = -1, aIdx = 0, play = 1;
+                    sscanf(line + 12, "%d,%d,%d", &rIdx, &aIdx, &play);
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    sp2.riggedMeshIdx = rIdx; sp2.rigAnimIdx = aIdx;
+                    sp2.rigAnimPlay = (play != 0); sp2.rigAnimClock = 0.0f;
+                }
+            }
             else if (strncmp(line, "msSubSpriteCount=", 17) == 0 && !sMapScenes.empty()) {
                 MapScene& ms = sMapScenes.back();
                 if (ms.spriteCount > 0) {
@@ -8093,6 +8113,16 @@ static bool LoadProject(const std::string& path)
                     }
                     if (ms.spriteCount < kMaxFloorSprites)
                         ms.sprites[ms.spriteCount++] = sp;
+                }
+            }
+            else if (strncmp(line, "m7SpriteRig=", 12) == 0 && !sM7Scenes.empty()) {
+                MapScene& ms = sM7Scenes.back();
+                if (ms.spriteCount > 0) {
+                    int rIdx = -1, aIdx = 0, play = 1;
+                    sscanf(line + 12, "%d,%d,%d", &rIdx, &aIdx, &play);
+                    FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
+                    sp2.riggedMeshIdx = rIdx; sp2.rigAnimIdx = aIdx;
+                    sp2.rigAnimPlay = (play != 0); sp2.rigAnimClock = 0.0f;
                 }
             }
             else if (strncmp(line, "m7SubSpriteCount=", 17) == 0 && !sM7Scenes.empty()) {
@@ -10230,6 +10260,80 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             sSelectedObjType = SelectedObjType::Sprite;
             sSprites[i].selected = true;
         }
+    }
+    ImGui::EndChild();
+
+    // ---- Rigged Meshes (glTF / DSMA skinned) ----
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Rigged Meshes (glTF)");
+    ImGui::BeginChild("##RigAssetList3D", ImVec2(0, listH3d), true);
+    for (int i = 0; i < (int)sRiggedMeshAssets.size(); i++) {
+        char label[96];
+        snprintf(label, sizeof(label), "%s (%d clips) [%d]##rigasset%d",
+                 sRiggedMeshAssets[i].name.c_str(), (int)sRiggedMeshAssets[i].clips.size(), i, i);
+        if (ImGui::Selectable(label, sSelectedRig == i))
+            sSelectedRig = i;
+    }
+    ImGui::EndChild();
+    if (ImGui::Button("Import glTF...##rigpanel")) {
+#ifdef _WIN32
+        std::string p = OpenFileDialog("glTF Files\0*.glb;*.gltf\0All Files\0*.*\0", "glb");
+        if (!p.empty()) {
+            RiggedMeshAsset rm; std::string err;
+            if (LoadRiggedGLTF(p, rm, &err)) {
+                size_t slash = p.find_last_of("/\\"); size_t base = (slash==std::string::npos)?0:slash+1;
+                size_t dot = p.find_last_of('.'); size_t end = (dot==std::string::npos||dot<base)?p.size():dot;
+                rm.name = p.substr(base, end-base);
+                sSelectedRig = (int)sRiggedMeshAssets.size();
+                sRiggedMeshAssets.push_back(std::move(rm));
+                sRigImportError[0]='\0'; sProjectDirty = true;
+            } else snprintf(sRigImportError, sizeof(sRigImportError), "Import failed: %s", err.c_str());
+        }
+#endif
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Delete##rigpanel") && sSelectedRig >= 0 && sSelectedRig < (int)sRiggedMeshAssets.size()) {
+        sRiggedMeshAssets.erase(sRiggedMeshAssets.begin() + sSelectedRig);
+        for (int i = 0; i < sSpriteCount; i++) {
+            if (sSprites[i].riggedMeshIdx == sSelectedRig) sSprites[i].riggedMeshIdx = -1;
+            else if (sSprites[i].riggedMeshIdx > sSelectedRig) sSprites[i].riggedMeshIdx--;
+        }
+        sSelectedRig = -1; sProjectDirty = true;
+    }
+    if (sRigImportError[0])
+        ImGui::TextColored(ImVec4(1,0.4f,0.4f,1), "%s", sRigImportError);
+    // Assign the selected rig to the selected placed sprite (e.g. the Player).
+    if (sSelectedRig >= 0 && sSelectedRig < (int)sRiggedMeshAssets.size()
+        && sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount) {
+        if (ImGui::Button("Assign to Selected Sprite##rigassign", ImVec2(-1, 0))) {
+            sSprites[sSelectedSprite].riggedMeshIdx = sSelectedRig;
+            sSprites[sSelectedSprite].rigAnimIdx = 0;
+            sSprites[sSelectedSprite].rigAnimPlay = true;
+            sSprites[sSelectedSprite].rigAnimClock = 0.0f;
+            sProjectDirty = true;
+        }
+    } else {
+        ImGui::TextColored(ImVec4(0.6f,0.6f,0.6f,1), "(pick a rig above + a Placed Sprite to assign)");
+    }
+
+    // ---- Placed glTF ----
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.7f, 1.0f), "Placed glTF");
+    ImGui::BeginChild("##PlacedRig3D", ImVec2(0, listH3d), true);
+    for (int i = 0; i < sSpriteCount; i++) {
+        if (sSprites[i].riggedMeshIdx < 0 || sSprites[i].riggedMeshIdx >= (int)sRiggedMeshAssets.size()) continue;
+        const char* rn = sRiggedMeshAssets[sSprites[i].riggedMeshIdx].name.c_str();
+        const char* tn = kSpriteTypeNames[(int)sSprites[i].type];
+        char label[96];
+        snprintf(label, sizeof(label), "%s on %s [%d]##placedrig%d", rn, tn, i, i);
+        if (ImGui::Selectable(label, sSelectedSprite == i)) {
+            if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount) sSprites[sSelectedSprite].selected = false;
+            sSelectedSprite = i; sSelectedObjType = SelectedObjType::Sprite; sSprites[i].selected = true;
+        }
+        ImGui::SameLine();
+        ImGui::PushID(20000 + i);
+        if (ImGui::SmallButton("x")) { sSprites[i].riggedMeshIdx = -1; sProjectDirty = true; }
+        ImGui::PopID();
     }
     ImGui::EndChild();
 
@@ -29934,6 +30038,77 @@ void Render3DViewport()
             glDisable(GL_CULL_FACE);
             glPopMatrix();
             continue;
+        }
+
+        // Rigged (skinned glTF) mesh — draw the real animated geometry in the 3D
+        // view instead of the billboard placeholder. CPU-skinned, lit like meshes.
+        if (fs.riggedMeshIdx >= 0 && fs.riggedMeshIdx < (int)sRiggedMeshAssets.size()) {
+            const RiggedMeshAsset& rm = sRiggedMeshAssets[fs.riggedMeshIdx];
+            if (!rm.baseVerts.empty() && !rm.indices.empty() && rm.boneCount > 0) {
+                int nb = rm.boneCount;
+                std::vector<BonePose> pose(nb);
+                bool hasClip = (fs.rigAnimIdx >= 0 && fs.rigAnimIdx < (int)rm.clips.size()
+                                && rm.clips[fs.rigAnimIdx].frameCount > 0);
+                if (hasClip) {
+                    const RigAnimClip& clip = rm.clips[fs.rigAnimIdx];
+                    int fc = clip.frameCount;
+                    float ff = fs.rigAnimClock < 0 ? 0 : fs.rigAnimClock;
+                    int f0 = (int)floorf(ff) % fc, f1 = (f0 + 1) % fc;
+                    float u = ff - floorf(ff);
+                    for (int bi = 0; bi < nb; bi++) {
+                        const BonePose& A = clip.frames[f0*nb + bi];
+                        const BonePose& B = clip.frames[f1*nb + bi];
+                        BonePose& P = pose[bi];
+                        P.px = A.px*(1-u)+B.px*u; P.py = A.py*(1-u)+B.py*u; P.pz = A.pz*(1-u)+B.pz*u;
+                        float dot = A.qw*B.qw+A.qx*B.qx+A.qy*B.qy+A.qz*B.qz; float s = (dot<0)?-1.f:1.f;
+                        float qw=A.qw*(1-u)+s*B.qw*u, qx=A.qx*(1-u)+s*B.qx*u, qy=A.qy*(1-u)+s*B.qy*u, qz=A.qz*(1-u)+s*B.qz*u;
+                        float m = sqrtf(qw*qw+qx*qx+qy*qy+qz*qz); if(m==0)m=1;
+                        P.qw=qw/m; P.qx=qx/m; P.qy=qy/m; P.qz=qz/m;
+                    }
+                } else {
+                    for (int bi = 0; bi < nb; bi++) pose[bi] = rm.bindPose[bi];
+                }
+                auto rotq = [](const BonePose& P, float vx, float vy, float vz, float& ox, float& oy, float& oz){
+                    float tx=2*(P.qy*vz-P.qz*vy), ty=2*(P.qz*vx-P.qx*vz), tz=2*(P.qx*vy-P.qy*vx);
+                    ox=vx+P.qw*tx+(P.qy*tz-P.qz*ty); oy=vy+P.qw*ty+(P.qz*tx-P.qx*tz); oz=vz+P.qw*tz+(P.qx*ty-P.qy*tx);
+                };
+                glPushMatrix();
+                glTranslatef(sx, sy, sz);
+                glRotatef(fs.rotation, 0,1,0);
+                glRotatef(fs.rotationX, 1,0,0);
+                glRotatef(fs.rotationZ, 0,0,1);
+                glScalef(fs.scale, fs.scale, fs.scale);
+                glEnable(GL_LIGHTING); glEnable(GL_LIGHT0);
+                float lDir[]={0.3f,1.0f,0.5f,0.0f}, lAmb[]={0.35f,0.35f,0.4f,1.0f}, lDif[]={0.85f,0.85f,0.82f,1.0f};
+                glLightfv(GL_LIGHT0,GL_POSITION,lDir); glLightfv(GL_LIGHT0,GL_AMBIENT,lAmb); glLightfv(GL_LIGHT0,GL_DIFFUSE,lDif);
+                float matCol[]={0.8f,0.8f,0.82f,1.0f};
+                glMaterialfv(GL_FRONT_AND_BACK,GL_DIFFUSE,matCol); glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT,matCol);
+                glDisable(GL_CULL_FACE);
+                glBegin(GL_TRIANGLES);
+                for (size_t ti = 0; ti + 3 <= rm.indices.size(); ti += 3) {
+                    for (int k = 0; k < 3; k++) {
+                        uint32_t vi = rm.indices[ti + k];
+                        const MeshVertex& bv = rm.baseVerts[vi];
+                        const BonePose& P = pose[rm.vertBone[vi]];
+                        float px,py,pz; rotq(P, bv.px,bv.py,bv.pz, px,py,pz);
+                        float nx,ny,nz; rotq(P, bv.nx,bv.ny,bv.nz, nx,ny,nz);
+                        glNormal3f(nx,ny,nz);
+                        glVertex3f(px+P.px, py+P.py, pz+P.pz);
+                    }
+                }
+                glEnd();
+                glDisable(GL_LIGHTING); glDisable(GL_LIGHT0);
+                if (fs.selected) {
+                    glColor3f(1,1,1); glLineWidth(2.0f);
+                    float x0=rm.boundsMin[0],y0=rm.boundsMin[1],z0=rm.boundsMin[2];
+                    float x1=rm.boundsMax[0],y1=rm.boundsMax[1],z1=rm.boundsMax[2];
+                    glBegin(GL_LINE_LOOP); glVertex3f(x0,y0,z0);glVertex3f(x1,y0,z0);glVertex3f(x1,y0,z1);glVertex3f(x0,y0,z1); glEnd();
+                    glBegin(GL_LINE_LOOP); glVertex3f(x0,y1,z0);glVertex3f(x1,y1,z0);glVertex3f(x1,y1,z1);glVertex3f(x0,y1,z1); glEnd();
+                    glLineWidth(1.0f);
+                }
+                glPopMatrix();
+                continue;
+            }
         }
 
         // Billboard sprites

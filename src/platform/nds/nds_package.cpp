@@ -1087,11 +1087,11 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             f << "#define AFN_PLAYER_RIG_CLIP_COUNT " << nclips << "\n";
             if (playerClip < 0 || playerClip >= nclips) playerClip = 0;
             f << "#define AFN_PLAYER_RIG_DEFAULT_CLIP " << playerClip << "\n";
-            // Scale as 20.12 f32. The runtime stores rig verts so 1 glTF unit =
-            // 1 DS world unit (16 editor px), while the editor preview uses
-            // 1 glTF unit = 1 editor px — so scale by playerScale/16 (×256) to
-            // match the editor 1:1. Tune via the player sprite's Scale field.
-            f << "#define AFN_PLAYER_RIG_SCALE_F32 " << (int)lroundf(playerScale * 256.0f) << "\n\n";
+            // Scale as 20.12 f32. OBJ meshes render on device at coord*scale/64 DS
+            // units; the rig's DSM stores coord*4096, so drawing it at scale*64
+            // gives coord*scale/64 too — matching OBJ sizing 1:1 with the editor's
+            // Scale field. Tune via the player sprite's Scale field.
+            f << "#define AFN_PLAYER_RIG_SCALE_F32 " << (int)lroundf(playerScale * 64.0f) << "\n\n";
         }
     }
 
