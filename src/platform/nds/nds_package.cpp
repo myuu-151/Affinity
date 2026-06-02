@@ -1096,6 +1096,17 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             // gives coord*scale/64 too — matching OBJ sizing 1:1 with the editor's
             // Scale field. Tune via the player sprite's Scale field.
             f << "#define AFN_PLAYER_RIG_SCALE_F32 " << (int)lroundf(playerScale * 64.0f) << "\n";
+            if (rig.cameraLight) {
+                f << "#define AFN_PLAYER_RIG_CAMLIGHT 1\n";
+                float ax = rig.lightX * 3.14159265f/180.0f, ay = rig.lightY * 3.14159265f/180.0f;
+                float cx = cosf(ax), sx = sinf(ax), cy = cosf(ay), sy = sinf(ay);
+                // DS light direction = direction light travels = -(direction to light).
+                // Always emit a decimal point so e.g. 0 doesn't become the invalid "0f".
+                char lbuf[80];
+                snprintf(lbuf, sizeof(lbuf), "#define AFN_PLAYER_RIG_LIGHT_DX (%.6ff)\n", -cx*sy); f << lbuf;
+                snprintf(lbuf, sizeof(lbuf), "#define AFN_PLAYER_RIG_LIGHT_DY (%.6ff)\n",  sx);    f << lbuf;
+                snprintf(lbuf, sizeof(lbuf), "#define AFN_PLAYER_RIG_LIGHT_DZ (%.6ff)\n", -cx*cy); f << lbuf;
+            }
             // Base-color texture (16-colour, 4bpp packed) + RGB15 palette, same
             // format as mesh textures so fps3d uploads it via GL_RGB16.
             if (rig.textured && !rig.texPixels.empty() && rig.texW > 0 && rig.texH > 0) {

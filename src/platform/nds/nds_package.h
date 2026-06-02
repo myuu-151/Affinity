@@ -22,6 +22,8 @@ struct GBARiggedMeshExport
         std::vector<uint32_t> dsa;    // DSA (animation)
     };
     std::vector<Clip> clips;
+    bool cameraLight = false;         // light follows the camera (headlamp)
+    float lightX = 0.0f, lightY = 0.0f; // headlamp aim (pitch/yaw degrees)
     // Base-color texture (16-colour indexed, up to 256x256), or textured=false.
     bool textured = false;
     int texW = 0, texH = 0;

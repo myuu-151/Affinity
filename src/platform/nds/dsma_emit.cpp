@@ -137,7 +137,7 @@ struct DisplayList {
 
 namespace DsmaEmit {
 
-std::vector<uint32_t> BuildDSM(const RiggedMeshAsset& rm, int texW, int texH)
+std::vector<uint32_t> BuildDSM(const RiggedMeshAsset& rm, int texW, int texH, bool smooth)
 {
     DisplayList dl;
     dl.switchVtxs(0); // triangles
@@ -179,13 +179,21 @@ std::vector<uint32_t> BuildDSM(const RiggedMeshAsset& rm, int texW, int texH)
 
             if (b != lastJoint) { dl.mtxRestore(baseMatrix + b); lastJoint = b; }
 
-            const BonePose& bp = rm.bindPose[b];
-            Q q{ bp.qw, bp.qx, bp.qy, bp.qz };
-            Q qt = qcomplement(q);
-            Q nq{ 0, fn.x, fn.y, fn.z };
-            Q r = qmul(qmul(qt, nq), q);
-            V3 n{ r.x, r.y, r.z };
-            if (len(n) > 0) n = norm(n);
+            V3 n;
+            if (smooth) {
+                // The vertex normal is already in this bone's local space.
+                n = V3{ mv.nx, mv.ny, mv.nz };
+                if (len(n) > 0) n = norm(n);
+            } else {
+                // Rotate the world face normal into the bone's local space.
+                const BonePose& bp = rm.bindPose[b];
+                Q q{ bp.qw, bp.qx, bp.qy, bp.qz };
+                Q qt = qcomplement(q);
+                Q nq{ 0, fn.x, fn.y, fn.z };
+                Q r = qmul(qmul(qt, nq), q);
+                n = V3{ r.x, r.y, r.z };
+                if (len(n) > 0) n = norm(n);
+            }
             dl.normal(n.x, n.y, n.z);
 
             dl.vtx(mv.px, mv.py, mv.pz);

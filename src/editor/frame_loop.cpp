@@ -5197,6 +5197,31 @@ static bool LoadRigTextureFromFile(RiggedMeshAsset& rm, const std::string& path)
     return true;
 }
 
+// Load a rigged glTF resolving packed/external assets: if the .glb/.gltf was
+// packed into the project it's extracted to a temp file; otherwise the path is
+// resolved through the external-asset folder. cgltf reads from a path, so a
+// packed blob is round-tripped via a temp file. The original project-referenced
+// path is kept on the asset for re-saving.
+static bool LoadRiggedGLTFResolved(const std::string& path, RiggedMeshAsset& rm, std::string* err)
+{
+    bool ok;
+    auto pit = sPackedAssets.find(path);
+    if (pit != sPackedAssets.end() && !pit->second.empty()) {
+        std::string ext = ".glb";
+        size_t dot = path.find_last_of('.');
+        if (dot != std::string::npos) ext = path.substr(dot);
+        std::filesystem::path tmpPath = std::filesystem::temp_directory_path() / ("affinity_rig_tmp" + ext);
+        FILE* tf = fopen(tmpPath.string().c_str(), "wb");
+        if (tf) { fwrite(pit->second.data(), 1, pit->second.size(), tf); fclose(tf); }
+        ok = LoadRiggedGLTF(tmpPath.string(), rm, err);
+        std::error_code ec; std::filesystem::remove(tmpPath, ec);
+    } else {
+        ok = LoadRiggedGLTF(ResolveAssetPath(path), rm, err);
+    }
+    if (ok) rm.sourcePath = path;   // keep the original path for re-save
+    return ok;
+}
+
 // Bake a sprite asset into a mesh asset's texture (overwrites texture)
 // Uses directional image (front-facing RGBA8) if available, else frames[0]
 static void LoadSpriteIntoMeshTexture(int spriteAssetIdx, MeshAsset& mesh)
@@ -5502,11 +5527,13 @@ static bool SaveProject(const std::string& path)
         // load so this user setting is serialized alongside name|path.
         std::string loopBits;
         for (const auto& cl : rmA.clips) loopBits += (cl.loop ? '1' : '0');
-        // 4th field = manually-assigned texture path ('-' = none / from glTF).
+        // 4th field = manually-assigned texture path ('-' = none / from glTF),
+        // 5th = flags bitmask (bit0 = smooth shading, bit1 = camera light).
         const char* texP = (rmA.textureManual && !rmA.texturePath.empty())
                            ? rmA.texturePath.c_str() : "-";
-        fprintf(f, "rig=%s|%s|%s|%s\n", rmA.name.c_str(), rmA.sourcePath.c_str(),
-                loopBits.empty() ? "-" : loopBits.c_str(), texP);
+        int rigFlags = (rmA.smoothShading ? 1 : 0) | (rmA.cameraLight ? 2 : 0);
+        fprintf(f, "rig=%s|%s|%s|%s|%d|%.2f|%.2f\n", rmA.name.c_str(), rmA.sourcePath.c_str(),
+                loopBits.empty() ? "-" : loopBits.c_str(), texP, rigFlags, rmA.lightX, rmA.lightY);
     }
     fprintf(f, "\n");
 
@@ -6840,13 +6867,15 @@ static bool LoadProject(const std::string& path)
             // count= is informational; rig= lines load sequentially. A failed
             // load still pushes a placeholder so sprite riggedMeshIdx stays aligned.
             char rname[256] = {}, rpath[512] = {}, rloop[64] = {}, rtex[512] = {};
-            // Format: name|path|loopbits|texpath. Older (name|path[|loop]) still parses.
-            int nf = sscanf(line, "rig=%255[^|]|%511[^|]|%63[^|]|%511[^\n]", rname, rpath, rloop, rtex);
+            int rflags = 0; float rlx = 0.0f, rly = 0.0f;
+            // Format: name|path|loopbits|texpath|flags|lightX|lightY. Older forms still parse.
+            int nf = sscanf(line, "rig=%255[^|]|%511[^|]|%63[^|]|%511[^|]|%d|%f|%f",
+                            rname, rpath, rloop, rtex, &rflags, &rlx, &rly);
             if (nf >= 2)
             {
                 RiggedMeshAsset rm;
                 std::string err;
-                bool ok = (rpath[0] && LoadRiggedGLTF(std::string(rpath), rm, &err));
+                bool ok = (rpath[0] && LoadRiggedGLTFResolved(std::string(rpath), rm, &err));
                 if (ok) rm.name = rname;
                 else { rm = RiggedMeshAsset(); rm.name = rname; rm.sourcePath = rpath; }
                 if (nf >= 3 && rloop[0] != '-') {
@@ -6856,6 +6885,8 @@ static bool LoadProject(const std::string& path)
                 // Re-apply a manually-assigned texture (overrides any glTF image).
                 if (nf >= 4 && rtex[0] && rtex[0] != '-')
                     LoadRigTextureFromFile(rm, std::string(rtex));
+                if (nf >= 5) { rm.smoothShading = (rflags & 1) != 0; rm.cameraLight = (rflags & 2) != 0; }
+                if (nf >= 7) { rm.lightX = rlx; rm.lightY = rly; }
                 UploadRigGLTexture(rm);
                 sRiggedMeshAssets.push_back(std::move(rm));
             }
@@ -12757,7 +12788,11 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
 #endif
                 }
                 if (rm.textured) {
-                    ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.7f, 1.0f), "Texture: %dx%d (16 col)", rm.texW, rm.texH);
+                    std::string texName = rm.texturePath;
+                    size_t tsl = texName.find_last_of("/\\");
+                    if (tsl != std::string::npos) texName = texName.substr(tsl + 1);
+                    if (texName.empty()) texName = "(embedded)";
+                    ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.7f, 1.0f), "Texture: %s (%dx%d)", texName.c_str(), rm.texW, rm.texH);
                     ImGui::SameLine();
                     if (ImGui::SmallButton("Clear##rigtexclr")) {
                         rm.textured = false; rm.texturePixels.clear(); rm.texturePath.clear();
@@ -12766,6 +12801,18 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                     }
                 } else {
                     ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Texture: (none — flat shaded)");
+                }
+                if (ImGui::Checkbox("Smooth shading##rigsmooth", &rm.smoothShading)) sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-vertex normals (smooth) vs per-face (flat). Affects the 3D tab and the exported device model.");
+                if (ImGui::Checkbox("Camera light##rigcamlight", &rm.cameraLight)) sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Light follows the camera (headlamp) so the model is always lit from the viewer.");
+                if (rm.cameraLight) {
+                    ImGui::PushItemWidth(Scaled(90));
+                    if (ImGui::DragFloat("Light X##riglx", &rm.lightX, 1.0f, -180.0f, 180.0f, "%.0f deg")) sProjectDirty = true;
+                    ImGui::SameLine();
+                    if (ImGui::DragFloat("Light Y##rigly", &rm.lightY, 1.0f, -180.0f, 180.0f, "%.0f deg")) sProjectDirty = true;
+                    ImGui::PopItemWidth();
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tilt the camera light: X = pitch (up/down), Y = yaw (left/right), in degrees off straight-from-camera.");
                 }
                 if (ImGui::Checkbox("Play##rigplay", &sp.rigAnimPlay)) sProjectDirty = true;
                 if (rm.clips.empty()) {
@@ -16178,7 +16225,9 @@ void FrameTick(float dt)
                     re.name = rm.name;
                     int tw = rm.texW > 0 ? rm.texW : 128;
                     int th = rm.texH > 0 ? rm.texH : 128;
-                    re.dsm = DsmaEmit::BuildDSM(rm, tw, th);
+                    re.dsm = DsmaEmit::BuildDSM(rm, tw, th, rm.smoothShading);
+                    re.cameraLight = rm.cameraLight;
+                    re.lightX = rm.lightX; re.lightY = rm.lightY;
                     re.textured = rm.textured;
                     re.texW = rm.texW; re.texH = rm.texH;
                     re.texPixels = rm.texturePixels;
@@ -29626,6 +29675,7 @@ void FrameTick(float dt)
                     for (int d = 0; d < 8; d++) add(das.dirPaths[d]);
             add(sM7FloorPath);
             for (auto& ma : sMeshAssets) { add(ma.sourcePath); add(ma.texturePath); }
+            for (auto& rm : sRiggedMeshAssets) { add(rm.sourcePath); add(rm.texturePath); }
             for (auto& inst : sSkyboxInstances)
                 for (auto& panel : inst.panels) add(panel.path);
             return paths;
@@ -30180,8 +30230,20 @@ void Render3DViewport()
                 glRotatef(fs.rotationZ, 0,0,1);
                 glScalef(fs.scale, fs.scale, fs.scale);
                 glEnable(GL_LIGHTING); glEnable(GL_LIGHT0);
-                float lDir[]={0.3f,1.0f,0.5f,0.0f}, lAmb[]={0.5f,0.5f,0.5f,1.0f}, lDif[]={0.85f,0.85f,0.82f,1.0f};
-                glLightfv(GL_LIGHT0,GL_POSITION,lDir); glLightfv(GL_LIGHT0,GL_AMBIENT,lAmb); glLightfv(GL_LIGHT0,GL_DIFFUSE,lDif);
+                float lAmb[]={0.5f,0.5f,0.5f,1.0f}, lDif[]={0.85f,0.85f,0.82f,1.0f};
+                glLightfv(GL_LIGHT0,GL_AMBIENT,lAmb); glLightfv(GL_LIGHT0,GL_DIFFUSE,lDif);
+                if (rm.cameraLight) {
+                    // Headlamp from the viewer, tilted by Light X (pitch) / Y (yaw).
+                    float ax = rm.lightX * 3.14159265f/180.0f, ay = rm.lightY * 3.14159265f/180.0f;
+                    float cx=cosf(ax), sx=sinf(ax), cy=cosf(ay), sy=sinf(ay);
+                    float head[]={ cx*sy, -sx, cx*cy, 0.0f };
+                    glPushMatrix(); glLoadIdentity();
+                    glLightfv(GL_LIGHT0,GL_POSITION,head);
+                    glPopMatrix();
+                } else {
+                    float lDir[]={0.3f,1.0f,0.5f,0.0f};
+                    glLightfv(GL_LIGHT0,GL_POSITION,lDir);
+                }
                 bool rigTex = (rm.textured && rm.glTexID != 0);
                 if (rigTex) {
                     glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, rm.glTexID);
@@ -30192,17 +30254,32 @@ void Render3DViewport()
                     glMaterialfv(GL_FRONT_AND_BACK,GL_DIFFUSE,matCol); glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT,matCol);
                 }
                 glDisable(GL_CULL_FACE);
+                bool rigSmooth = rm.smoothShading;
                 glBegin(GL_TRIANGLES);
                 for (size_t ti = 0; ti + 3 <= rm.indices.size(); ti += 3) {
+                    float wp[3][3], wn[3][3], uv[3][2];
                     for (int k = 0; k < 3; k++) {
                         uint32_t vi = rm.indices[ti + k];
                         const MeshVertex& bv = rm.baseVerts[vi];
                         const BonePose& P = pose[rm.vertBone[vi]];
                         float px,py,pz; rotq(P, bv.px,bv.py,bv.pz, px,py,pz);
+                        wp[k][0]=px+P.px; wp[k][1]=py+P.py; wp[k][2]=pz+P.pz;
                         float nx,ny,nz; rotq(P, bv.nx,bv.ny,bv.nz, nx,ny,nz);
-                        if (rigTex) glTexCoord2f(bv.u, bv.v);
-                        glNormal3f(nx,ny,nz);
-                        glVertex3f(px+P.px, py+P.py, pz+P.pz);
+                        wn[k][0]=nx; wn[k][1]=ny; wn[k][2]=nz;
+                        uv[k][0]=bv.u; uv[k][1]=bv.v;
+                    }
+                    float fnx=0,fny=0,fnz=0;
+                    if (!rigSmooth) {
+                        float ax=wp[1][0]-wp[0][0], ay=wp[1][1]-wp[0][1], az=wp[1][2]-wp[0][2];
+                        float bx=wp[2][0]-wp[0][0], by=wp[2][1]-wp[0][1], bz=wp[2][2]-wp[0][2];
+                        fnx=ay*bz-az*by; fny=az*bx-ax*bz; fnz=ax*by-ay*bx;
+                        float l=sqrtf(fnx*fnx+fny*fny+fnz*fnz); if(l>0){fnx/=l;fny/=l;fnz/=l;}
+                    }
+                    for (int k = 0; k < 3; k++) {
+                        if (rigTex) glTexCoord2f(uv[k][0], uv[k][1]);
+                        if (rigSmooth) glNormal3f(wn[k][0],wn[k][1],wn[k][2]);
+                        else glNormal3f(fnx,fny,fnz);
+                        glVertex3f(wp[k][0],wp[k][1],wp[k][2]);
                     }
                 }
                 glEnd();

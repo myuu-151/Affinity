@@ -12,7 +12,9 @@ namespace DsmaEmit {
 // Build the DSM display list (u32 words, leading word = size) for a rig's bind
 // geometry. texW/texH scale the 0..1 UVs into texel coordinates (DS has no
 // float texcoords), matching the converter's --texture argument.
-std::vector<uint32_t> BuildDSM(const RiggedMeshAsset& rm, int texW, int texH);
+// smooth=true emits per-vertex normals (smooth shading); false emits per-face
+// normals (flat, the DSMA default).
+std::vector<uint32_t> BuildDSM(const RiggedMeshAsset& rm, int texW, int texH, bool smooth = false);
 
 // Build the DSA animation blob (u32 words: version, frameCount, boneCount, then
 // per-frame per-bone pos.xyz + quat.wxyz in 20.12 fixed point) for one clip.

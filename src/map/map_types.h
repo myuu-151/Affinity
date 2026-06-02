@@ -253,6 +253,9 @@ struct RiggedMeshAsset
     std::vector<MeshVertex> baseVerts;       // pos/normal in their bone's LOCAL space, uv in 0..1
     std::vector<int>        vertBone;         // parallel to baseVerts: bone index per vertex
     std::vector<uint32_t>   indices;          // triangle index buffer into baseVerts
+    bool smoothShading = false;              // true = per-vertex normals (smooth), false = flat
+    bool cameraLight = false;                // true = light follows the camera (headlamp)
+    float lightX = 50.0f, lightY = 180.0f;   // headlamp aim: pitch/yaw in degrees off the camera
 
     std::vector<BonePose>   bindPose;         // boneCount entries, absolute bind transforms
     std::vector<int>        boneParent;       // boneCount entries, parent bone index (-1 = root)

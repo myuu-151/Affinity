@@ -348,8 +348,14 @@ static void render_player_rig(void)
     glTranslatef32(fx8_to_f32(player_render_x),
                    fx8_to_f32(player_render_y),
                    fx8_to_f32(player_render_z));
-    glRotateYi(player_move_angle >> 1);              // face movement heading
-    glRotateYi(AFN_RIG_YAW_CORRECTION >> 1);         // align model forward to heading
+    // player_move_angle is INPUT-space while moving and only baked to world-space
+    // on stop, so add the same orbit conversion here to face the right way during
+    // movement (otherwise the rig snaps ~90° until you let go).
+    uint16_t rig_face = player_moving
+        ? (uint16_t)(player_move_angle + (orbit_angle << 1))
+        : player_move_angle;
+    glRotateYi(rig_face >> 1);                        // face movement heading (world space)
+    glRotateYi(AFN_RIG_YAW_CORRECTION >> 1);          // align model forward to heading
     int s32 = AFN_PLAYER_RIG_SCALE_F32;
     glScalef32(s32, s32, s32);
 
@@ -360,9 +366,32 @@ static void render_player_rig(void)
 #else
     glBindTexture(0, 0);                  // untextured (flat shaded)
 #endif
+#ifdef AFN_PLAYER_RIG_CAMLIGHT
+#ifndef AFN_PLAYER_RIG_LIGHT_DX
+#define AFN_PLAYER_RIG_LIGHT_DX (0.0f)
+#define AFN_PLAYER_RIG_LIGHT_DY (0.0f)
+#define AFN_PLAYER_RIG_LIGHT_DZ (-0.99f)
+#endif
+    // Headlamp from the camera (Light X/Y aim baked into the direction), set in
+    // eye space (identity modelview) so the rig is always lit from the viewer.
+    glPushMatrix();
+    glLoadIdentity();
+    glLight(0, RGB15(31, 31, 31),
+            floattov10(AFN_PLAYER_RIG_LIGHT_DX),
+            floattov10(AFN_PLAYER_RIG_LIGHT_DY),
+            floattov10(AFN_PLAYER_RIG_LIGHT_DZ));
+    glPopMatrix(1);
+#endif
 
     DSMA_DrawModel(afn_player_rig_dsm, dsa, s_rig_frame);
     glPopMatrix(1);
+#ifdef AFN_PLAYER_RIG_CAMLIGHT
+    // Restore the scene's default directional light for the next frame's meshes.
+    glPushMatrix();
+    glLoadIdentity();
+    glLight(0, RGB15(31, 31, 31), floattov10(-0.5f), floattov10(-0.7f), floattov10(-0.5f));
+    glPopMatrix(1);
+#endif
 }
 #endif
 
