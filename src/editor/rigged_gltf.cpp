@@ -12,6 +12,9 @@
 
 #include "rigged_gltf.h"
 
+#include "stb_image.h"   // declarations only; impl lives in frame_loop.cpp
+
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -342,6 +345,81 @@ bool LoadRiggedGLTF(const std::string& path, RiggedMeshAsset& out, std::string* 
 
     if (out.baseVerts.empty()) { cgltf_free(data); return fail("Skinned mesh has no vertices"); }
 
+    // ---- Texture: one base-color image per glTF, up to 256x256 -------------
+    // Decode (embedded GLB chunk or external file) to RGBA, resize to a
+    // power-of-two <= 256, then median-cut to a 16-colour indexed DS texture.
+    {
+        cgltf_image* image = nullptr;
+        for (cgltf_size p = 0; p < mesh->primitives_count; p++) {
+            const cgltf_material* mat = mesh->primitives[p].material;
+            if (!mat) continue;
+            if (out.materialName.empty() && mat->name) out.materialName = mat->name;
+            if (!image && mat->has_pbr_metallic_roughness &&
+                mat->pbr_metallic_roughness.base_color_texture.texture &&
+                mat->pbr_metallic_roughness.base_color_texture.texture->image)
+                image = mat->pbr_metallic_roughness.base_color_texture.texture->image;
+        }
+        // Fall back to the first material in the file if the primitive had none.
+        if (out.materialName.empty() && data->materials_count > 0 && data->materials[0].name)
+            out.materialName = data->materials[0].name;
+        int iw = 0, ih = 0; unsigned char* rgba = nullptr;
+        if (image) {
+            if (image->buffer_view) {
+                const cgltf_buffer_view* bv = image->buffer_view;
+                const unsigned char* bytes = (const unsigned char*)bv->buffer->data + bv->offset;
+                rgba = stbi_load_from_memory(bytes, (int)bv->size, &iw, &ih, nullptr, 4);
+            } else if (image->uri && std::strncmp(image->uri, "data:", 5) != 0) {
+                std::string dir = path; size_t s = dir.find_last_of("/\\");
+                dir = (s == std::string::npos) ? "" : dir.substr(0, s + 1);
+                rgba = stbi_load((dir + image->uri).c_str(), &iw, &ih, nullptr, 4);
+                if (rgba) out.texturePath = image->uri;
+            }
+        }
+        if (rgba && iw > 0 && ih > 0) {
+            int tw = 1, th = 1;
+            while (tw < iw && tw < 256) tw <<= 1;
+            while (th < ih && th < 256) th <<= 1;
+            if (tw > 256) tw = 256; if (th > 256) th = 256;
+            std::vector<uint32_t> resized(tw * th);
+            for (int y = 0; y < th; y++)
+                for (int x = 0; x < tw; x++) {
+                    int sx = x * iw / tw, sy = y * ih / th;
+                    unsigned char* p = rgba + (sy * iw + sx) * 4;
+                    resized[y * tw + x] = p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
+                }
+            stbi_image_free(rgba);
+
+            struct CC { uint32_t rgb; int count; };
+            std::vector<CC> hist;
+            for (uint32_t px : resized) {
+                uint32_t c = px & 0xFFFFFF; bool f = false;
+                for (auto& hc : hist) if (hc.rgb == c) { hc.count++; f = true; break; }
+                if (!f) hist.push_back({ c, 1 });
+            }
+            std::sort(hist.begin(), hist.end(), [](const CC& a, const CC& b){ return a.count > b.count; });
+            int palCount = (int)std::min((size_t)16, hist.size());
+            uint32_t pal[16] = {};
+            for (int i = 0; i < palCount; i++) pal[i] = hist[i].rgb | 0xFF000000;
+
+            std::vector<uint8_t> indexed(tw * th);
+            for (int i = 0; i < tw * th; i++) {
+                uint32_t px = resized[i] & 0xFFFFFF; int best = 0, bd = 0x7FFFFFFF;
+                for (int c = 0; c < palCount; c++) {
+                    int dr = (int)(px & 0xFF) - (int)(pal[c] & 0xFF);
+                    int dg = (int)((px >> 8) & 0xFF) - (int)((pal[c] >> 8) & 0xFF);
+                    int db = (int)((px >> 16) & 0xFF) - (int)((pal[c] >> 16) & 0xFF);
+                    int d = dr*dr + dg*dg + db*db;
+                    if (d < bd) { bd = d; best = c; }
+                }
+                indexed[i] = (uint8_t)best;
+            }
+            out.texW = tw; out.texH = th;
+            out.texturePixels = std::move(indexed);
+            std::memcpy(out.texturePalette, pal, sizeof(pal));
+            out.textured = true;
+        }
+    }
+
     // ---- Animations: sample at keyframe times, compose hierarchy -----------
     // cgltf_node_transform_world walks node->parent using each node's TRS, so we
     // sample channels into the joint nodes' TRS, then read the world matrix.
@@ -415,6 +493,23 @@ bool LoadRiggedGLTF(const std::string& path, RiggedMeshAsset& out, std::string* 
         }
 
         out.clips.push_back(std::move(clip));
+    }
+
+    // Bake a 180° yaw (Y axis) into the absolute bone transforms so the model's
+    // authored forward matches the engine's. Vertices are bone-local and stay
+    // unchanged; only the bind/animation transforms (and the AABB) rotate.
+    {
+        auto bakeYaw180 = [](BonePose& p) {
+            float qw=p.qw, qx=p.qx, qy=p.qy, qz=p.qz;
+            p.qw = -qy; p.qx = qz; p.qy = qw; p.qz = -qx;   // (0,0,1,0) * q
+            p.px = -p.px; p.pz = -p.pz;                      // rotateY(180): x,z negate
+        };
+        for (auto& bp : out.bindPose) bakeYaw180(bp);
+        for (auto& cl : out.clips) for (auto& fr : cl.frames) bakeYaw180(fr);
+        float nminX = -out.boundsMax[0], nmaxX = -out.boundsMin[0];
+        float nminZ = -out.boundsMax[2], nmaxZ = -out.boundsMin[2];
+        out.boundsMin[0] = nminX; out.boundsMax[0] = nmaxX;
+        out.boundsMin[2] = nminZ; out.boundsMax[2] = nmaxZ;
     }
 
     cgltf_free(data);

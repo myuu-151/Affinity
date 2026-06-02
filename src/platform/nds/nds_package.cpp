@@ -1084,6 +1084,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             f << "static const u32* const afn_player_rig_dsa[] = {";
             for (int c = 0; c < nclips; c++) f << " afn_player_rig_dsa_" << c << ",";
             f << " };\n";
+            f << "static const u8 afn_player_rig_loop[] = {";
+            for (int c = 0; c < nclips; c++) f << " " << (rig.clips[c].loop ? 1 : 0) << ",";
+            f << " };\n";
+            f << "#define AFN_PLAYER_RIG_HAS_LOOP 1\n";
             f << "#define AFN_PLAYER_RIG_CLIP_COUNT " << nclips << "\n";
             if (playerClip < 0 || playerClip >= nclips) playerClip = 0;
             f << "#define AFN_PLAYER_RIG_DEFAULT_CLIP " << playerClip << "\n";
@@ -1091,7 +1095,35 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             // units; the rig's DSM stores coord*4096, so drawing it at scale*64
             // gives coord*scale/64 too — matching OBJ sizing 1:1 with the editor's
             // Scale field. Tune via the player sprite's Scale field.
-            f << "#define AFN_PLAYER_RIG_SCALE_F32 " << (int)lroundf(playerScale * 64.0f) << "\n\n";
+            f << "#define AFN_PLAYER_RIG_SCALE_F32 " << (int)lroundf(playerScale * 64.0f) << "\n";
+            // Base-color texture (16-colour, 4bpp packed) + RGB15 palette, same
+            // format as mesh textures so fps3d uploads it via GL_RGB16.
+            if (rig.textured && !rig.texPixels.empty() && rig.texW > 0 && rig.texH > 0) {
+                int texPx = rig.texW * rig.texH;
+                int packed = (texPx + 1) / 2;
+                f << "static const u8 afn_player_rig_tex[] = {";
+                for (int i = 0; i < packed; i++) {
+                    int lo = (i*2+0 < (int)rig.texPixels.size()) ? (rig.texPixels[i*2+0] & 0xF) : 0;
+                    int hi = (i*2+1 < (int)rig.texPixels.size()) ? (rig.texPixels[i*2+1] & 0xF) : 0;
+                    if (i % 16 == 0) f << "\n    ";
+                    f << ((hi << 4) | lo) << ",";
+                }
+                f << "\n};\n";
+                f << "static const u16 afn_player_rig_texpal[] = {";
+                for (int i = 0; i < 16; i++) {
+                    uint32_t c = rig.texPalette[i];
+                    uint16_t c15 = (uint16_t)((((c >> 0) & 0xFF) >> 3)
+                                            | ((((c >> 8) & 0xFF) >> 3) << 5)
+                                            | ((((c >> 16) & 0xFF) >> 3) << 10));
+                    char hex[8]; snprintf(hex, sizeof(hex), "0x%04X", c15);
+                    f << " " << hex << ",";
+                }
+                f << " };\n";
+                f << "#define AFN_PLAYER_RIG_TEXTURED 1\n";
+                f << "#define AFN_PLAYER_RIG_TEXW " << rig.texW << "\n";
+                f << "#define AFN_PLAYER_RIG_TEXH " << rig.texH << "\n";
+            }
+            f << "\n";
         }
     }
 

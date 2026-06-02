@@ -240,12 +240,14 @@ struct RigAnimClip
     std::string name = "anim";
     int frameCount = 0;
     std::vector<BonePose> frames;
+    bool loop = true;   // true = loop, false = play once then hold last frame
 };
 
 struct RiggedMeshAsset
 {
     std::string name = "Rig";
     std::string sourcePath;                  // original .glb/.gltf path (re-imported on load)
+    std::string materialName;                // glTF material slot name (for the import UI)
 
     int boneCount = 0;
     std::vector<MeshVertex> baseVerts;       // pos/normal in their bone's LOCAL space, uv in 0..1
@@ -262,6 +264,8 @@ struct RiggedMeshAsset
 
     // Optional base-color texture (palettized like MeshAsset, for preview + export).
     bool textured = false;
+    bool textureManual = false;              // true = user-assigned PNG (persisted by path);
+                                             // false = decoded from the glTF (re-imported on load)
     std::string texturePath;
     std::vector<uint8_t> texturePixels;      // indexed pixels (texW * texH)
     uint32_t texturePalette[16] = {};

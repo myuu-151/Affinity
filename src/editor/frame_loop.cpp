@@ -5160,6 +5160,43 @@ static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh)
     return true;
 }
 
+// Upload a rigged mesh's (already quantized) base-color texture as a GL texture
+// for the 3D-tab preview. Reconstructs RGBA from the 16-colour indexed pixels.
+static void UploadRigGLTexture(RiggedMeshAsset& rm)
+{
+    if (!rm.textured || rm.texturePixels.empty() || rm.texW <= 0 || rm.texH <= 0) return;
+    std::vector<uint32_t> rgba(rm.texW * rm.texH);
+    for (int i = 0; i < rm.texW * rm.texH; i++) rgba[i] = rm.texturePalette[rm.texturePixels[i]];
+    if (rm.glTexID) glDeleteTextures(1, &rm.glTexID);
+    glGenTextures(1, &rm.glTexID);
+    glBindTexture(GL_TEXTURE_2D, rm.glTexID);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rm.texW, rm.texH, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+// Manually assign a texture PNG to a rigged mesh (the glTF material slot had no
+// usable image). Reuses LoadMeshTexture's load+resize+quantize+GL upload via a
+// scratch MeshAsset, then steals its texture into the rig.
+static bool LoadRigTextureFromFile(RiggedMeshAsset& rm, const std::string& path)
+{
+    MeshAsset tmp;
+    if (!LoadMeshTexture(path, tmp)) return false;
+    rm.texW = tmp.texW; rm.texH = tmp.texH;
+    rm.texturePixels = std::move(tmp.texturePixels);
+    memcpy(rm.texturePalette, tmp.texturePalette, sizeof(rm.texturePalette));
+    rm.textured = true;
+    rm.textureManual = true;
+    rm.texturePath = path;
+    if (rm.glTexID) glDeleteTextures(1, &rm.glTexID);
+    rm.glTexID = tmp.glTexID;   // steal the GL texture LoadMeshTexture created
+    tmp.glTexID = 0;
+    return true;
+}
+
 // Bake a sprite asset into a mesh asset's texture (overwrites texture)
 // Uses directional image (front-facing RGBA8) if available, else frames[0]
 static void LoadSpriteIntoMeshTexture(int spriteAssetIdx, MeshAsset& mesh)
@@ -5459,9 +5496,18 @@ static bool SaveProject(const std::string& path)
     // sourcePath on load (like OBJ meshes), so only name + path are serialized.
     fprintf(f, "[RiggedMeshAssets]\n");
     fprintf(f, "count=%d\n", (int)sRiggedMeshAssets.size());
-    for (int ri = 0; ri < (int)sRiggedMeshAssets.size(); ri++)
-        fprintf(f, "rig=%s|%s\n", sRiggedMeshAssets[ri].name.c_str(),
-                sRiggedMeshAssets[ri].sourcePath.c_str());
+    for (int ri = 0; ri < (int)sRiggedMeshAssets.size(); ri++) {
+        const RiggedMeshAsset& rmA = sRiggedMeshAssets[ri];
+        // Per-clip loop flags ('1'=loop, '0'=once) — clips are re-imported on
+        // load so this user setting is serialized alongside name|path.
+        std::string loopBits;
+        for (const auto& cl : rmA.clips) loopBits += (cl.loop ? '1' : '0');
+        // 4th field = manually-assigned texture path ('-' = none / from glTF).
+        const char* texP = (rmA.textureManual && !rmA.texturePath.empty())
+                           ? rmA.texturePath.c_str() : "-";
+        fprintf(f, "rig=%s|%s|%s|%s\n", rmA.name.c_str(), rmA.sourcePath.c_str(),
+                loopBits.empty() ? "-" : loopBits.c_str(), texP);
+    }
     fprintf(f, "\n");
 
     // Blueprint assets
@@ -6793,14 +6839,24 @@ static bool LoadProject(const std::string& path)
         {
             // count= is informational; rig= lines load sequentially. A failed
             // load still pushes a placeholder so sprite riggedMeshIdx stays aligned.
-            char rname[256] = {}, rpath[512] = {};
-            if (sscanf(line, "rig=%255[^|]|%511[^\n]", rname, rpath) == 2)
+            char rname[256] = {}, rpath[512] = {}, rloop[64] = {}, rtex[512] = {};
+            // Format: name|path|loopbits|texpath. Older (name|path[|loop]) still parses.
+            int nf = sscanf(line, "rig=%255[^|]|%511[^|]|%63[^|]|%511[^\n]", rname, rpath, rloop, rtex);
+            if (nf >= 2)
             {
                 RiggedMeshAsset rm;
                 std::string err;
                 bool ok = (rpath[0] && LoadRiggedGLTF(std::string(rpath), rm, &err));
                 if (ok) rm.name = rname;
                 else { rm = RiggedMeshAsset(); rm.name = rname; rm.sourcePath = rpath; }
+                if (nf >= 3 && rloop[0] != '-') {
+                    for (size_t ci = 0; ci < rm.clips.size() && rloop[ci]; ci++)
+                        rm.clips[ci].loop = (rloop[ci] != '0');
+                }
+                // Re-apply a manually-assigned texture (overrides any glTF image).
+                if (nf >= 4 && rtex[0] && rtex[0] != '-')
+                    LoadRigTextureFromFile(rm, std::string(rtex));
+                UploadRigGLTexture(rm);
                 sRiggedMeshAssets.push_back(std::move(rm));
             }
         }
@@ -10285,6 +10341,7 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 size_t dot = p.find_last_of('.'); size_t end = (dot==std::string::npos||dot<base)?p.size():dot;
                 rm.name = p.substr(base, end-base);
                 sSelectedRig = (int)sRiggedMeshAssets.size();
+                UploadRigGLTexture(rm);
                 sRiggedMeshAssets.push_back(std::move(rm));
                 sRigImportError[0]='\0'; sProjectDirty = true;
             } else snprintf(sRigImportError, sizeof(sRigImportError), "Import failed: %s", err.c_str());
@@ -12668,6 +12725,7 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                         sp.riggedMeshIdx = (int)sRiggedMeshAssets.size();
                         sp.rigAnimIdx = 0;
                         sp.rigAnimClock = 0.0f;
+                        UploadRigGLTexture(rm);
                         sRiggedMeshAssets.push_back(std::move(rm));
                         sRigImportError[0] = '\0';
                         sProjectDirty = true;
@@ -12685,17 +12743,50 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                 RiggedMeshAsset& rm = sRiggedMeshAssets[sp.riggedMeshIdx];
                 ImGui::Text("Bones: %d  Verts: %d  Tris: %d", rm.boneCount,
                             (int)rm.baseVerts.size(), (int)rm.indices.size() / 3);
+                // Material slot + texture import. The glTF often has a material
+                // slot but no usable image, so the texture is assigned here.
+                ImGui::Text("Material: %s", rm.materialName.empty() ? "(unnamed)" : rm.materialName.c_str());
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Import Texture...##rigtex")) {
+#ifdef _WIN32
+                    std::string tp = OpenFileDialog("Image Files\0*.png;*.jpg;*.bmp;*.tga\0All Files\0*.*\0", "png");
+                    if (!tp.empty()) {
+                        if (LoadRigTextureFromFile(rm, tp)) sProjectDirty = true;
+                        else snprintf(sRigImportError, sizeof(sRigImportError), "Texture load failed: %s", tp.c_str());
+                    }
+#endif
+                }
+                if (rm.textured) {
+                    ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.7f, 1.0f), "Texture: %dx%d (16 col)", rm.texW, rm.texH);
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Clear##rigtexclr")) {
+                        rm.textured = false; rm.texturePixels.clear(); rm.texturePath.clear();
+                        if (rm.glTexID) { glDeleteTextures(1, &rm.glTexID); rm.glTexID = 0; }
+                        sProjectDirty = true;
+                    }
+                } else {
+                    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Texture: (none — flat shaded)");
+                }
                 if (ImGui::Checkbox("Play##rigplay", &sp.rigAnimPlay)) sProjectDirty = true;
                 if (rm.clips.empty()) {
                     ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "(no animation clips)");
                 } else {
                     if (sp.rigAnimIdx < 0 || sp.rigAnimIdx >= (int)rm.clips.size()) sp.rigAnimIdx = 0;
+                    ImGui::Separator();
+                    ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Animations");
                     for (int ci = 0; ci < (int)rm.clips.size(); ci++) {
                         ImGui::PushID(ci + 9000);
                         bool sel = (sp.rigAnimIdx == ci);
                         char lbl[96];
                         snprintf(lbl, sizeof(lbl), "%s (%d frames)##rigclip",
                                  rm.clips[ci].name.c_str(), rm.clips[ci].frameCount);
+                        // Loop/Once toggle sits to the left of the clip name.
+                        bool loop = rm.clips[ci].loop;
+                        if (ImGui::SmallButton(loop ? "Loop##rigloop" : "Once##rigloop")) {
+                            rm.clips[ci].loop = !loop;
+                            sProjectDirty = true;
+                        }
+                        ImGui::SameLine();
                         if (ImGui::Selectable(lbl, sel)) {
                             sp.rigAnimIdx = ci;
                             sp.rigAnimClock = 0.0f;
@@ -16088,10 +16179,15 @@ void FrameTick(float dt)
                     int tw = rm.texW > 0 ? rm.texW : 128;
                     int th = rm.texH > 0 ? rm.texH : 128;
                     re.dsm = DsmaEmit::BuildDSM(rm, tw, th);
+                    re.textured = rm.textured;
+                    re.texW = rm.texW; re.texH = rm.texH;
+                    re.texPixels = rm.texturePixels;
+                    memcpy(re.texPalette, rm.texturePalette, sizeof(re.texPalette));
                     for (int c = 0; c < (int)rm.clips.size(); c++) {
                         Affinity::GBARiggedMeshExport::Clip cl;
                         cl.name = rm.clips[c].name;
                         cl.frames = rm.clips[c].frameCount;
+                        cl.loop = rm.clips[c].loop;
                         cl.dsa = DsmaEmit::BuildDSA(rm, c);
                         re.clips.push_back(std::move(cl));
                     }
@@ -17710,10 +17806,15 @@ void FrameTick(float dt)
             if (!rsp.rigAnimPlay) continue;
             const RiggedMeshAsset& rm = sRiggedMeshAssets[rsp.riggedMeshIdx];
             if (rsp.rigAnimIdx < 0 || rsp.rigAnimIdx >= (int)rm.clips.size()) continue;
-            int fc = rm.clips[rsp.rigAnimIdx].frameCount;
+            const RigAnimClip& clip = rm.clips[rsp.rigAnimIdx];
+            int fc = clip.frameCount;
             if (fc <= 1) continue;
             rsp.rigAnimClock += dt * 24.0f;
-            while (rsp.rigAnimClock >= (float)fc) rsp.rigAnimClock -= (float)fc;
+            if (clip.loop) {
+                while (rsp.rigAnimClock >= (float)fc) rsp.rigAnimClock -= (float)fc;
+            } else if (rsp.rigAnimClock > (float)(fc - 1)) {
+                rsp.rigAnimClock = (float)(fc - 1);  // play once: hold last frame
+            }
         }
     }
 
@@ -30079,10 +30180,17 @@ void Render3DViewport()
                 glRotatef(fs.rotationZ, 0,0,1);
                 glScalef(fs.scale, fs.scale, fs.scale);
                 glEnable(GL_LIGHTING); glEnable(GL_LIGHT0);
-                float lDir[]={0.3f,1.0f,0.5f,0.0f}, lAmb[]={0.35f,0.35f,0.4f,1.0f}, lDif[]={0.85f,0.85f,0.82f,1.0f};
+                float lDir[]={0.3f,1.0f,0.5f,0.0f}, lAmb[]={0.5f,0.5f,0.5f,1.0f}, lDif[]={0.85f,0.85f,0.82f,1.0f};
                 glLightfv(GL_LIGHT0,GL_POSITION,lDir); glLightfv(GL_LIGHT0,GL_AMBIENT,lAmb); glLightfv(GL_LIGHT0,GL_DIFFUSE,lDif);
-                float matCol[]={0.8f,0.8f,0.82f,1.0f};
-                glMaterialfv(GL_FRONT_AND_BACK,GL_DIFFUSE,matCol); glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT,matCol);
+                bool rigTex = (rm.textured && rm.glTexID != 0);
+                if (rigTex) {
+                    glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, rm.glTexID);
+                    float white[]={1,1,1,1};
+                    glMaterialfv(GL_FRONT_AND_BACK,GL_DIFFUSE,white); glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT,white);
+                } else {
+                    float matCol[]={0.8f,0.8f,0.82f,1.0f};
+                    glMaterialfv(GL_FRONT_AND_BACK,GL_DIFFUSE,matCol); glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT,matCol);
+                }
                 glDisable(GL_CULL_FACE);
                 glBegin(GL_TRIANGLES);
                 for (size_t ti = 0; ti + 3 <= rm.indices.size(); ti += 3) {
@@ -30092,11 +30200,13 @@ void Render3DViewport()
                         const BonePose& P = pose[rm.vertBone[vi]];
                         float px,py,pz; rotq(P, bv.px,bv.py,bv.pz, px,py,pz);
                         float nx,ny,nz; rotq(P, bv.nx,bv.ny,bv.nz, nx,ny,nz);
+                        if (rigTex) glTexCoord2f(bv.u, bv.v);
                         glNormal3f(nx,ny,nz);
                         glVertex3f(px+P.px, py+P.py, pz+P.pz);
                     }
                 }
                 glEnd();
+                if (rigTex) { glDisable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, 0); }
                 glDisable(GL_LIGHTING); glDisable(GL_LIGHT0);
                 if (fs.selected) {
                     glColor3f(1,1,1); glLineWidth(2.0f);

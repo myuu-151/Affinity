@@ -18,9 +18,15 @@ struct GBARiggedMeshExport
     struct Clip {
         std::string name;
         int frames = 0;
+        bool loop = true;             // false = play once, hold last frame
         std::vector<uint32_t> dsa;    // DSA (animation)
     };
     std::vector<Clip> clips;
+    // Base-color texture (16-colour indexed, up to 256x256), or textured=false.
+    bool textured = false;
+    int texW = 0, texH = 0;
+    std::vector<uint8_t> texPixels;   // one byte per pixel, palette index 0..15
+    uint32_t texPalette[16] = {};     // RGBA8
 };
 
 // Package the current map into a .nds ROM.

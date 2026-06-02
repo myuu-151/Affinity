@@ -299,12 +299,27 @@ static void render_meshes(void)
 #define AFN_PLAYER_RIG_SCALE_F32 64     // fallback (older exports): matches OBJ scale/64 sizing
 #endif
 // Yaw correction so the model's authored forward aligns with the runtime heading.
-// glTF/Blender forward and the engine heading differ by 90°. 16384 = 90° in the
-// 16-bit brad space of player_move_angle (flip the sign if the model faces backward).
+//16384 = 90° in player_move_angle's 16-bit brad space; -16384 spins the player
+// another 180° vs the importer's baked orientation (adjust if facing is wrong).
 #define AFN_RIG_YAW_CORRECTION (-16384)
 extern int afn_player_frozen;
 static int32_t s_rig_frame = 0;          // 20.12 fixed animation frame
 static int     s_rig_clip  = AFN_PLAYER_RIG_DEFAULT_CLIP;
+
+#ifdef AFN_PLAYER_RIG_TEXTURED
+static int gl_rig_tex_id = 0;
+static void load_player_rig_texture(void)
+{
+    int sizeW = 0, tw = AFN_PLAYER_RIG_TEXW; while (tw > 8) { tw >>= 1; sizeW++; }
+    int sizeH = 0, th = AFN_PLAYER_RIG_TEXH; while (th > 8) { th >>= 1; sizeH++; }
+    glGenTextures(1, &gl_rig_tex_id);
+    glBindTexture(0, gl_rig_tex_id);
+    glTexImage2D(0, 0, GL_RGB16, sizeW, sizeH, 0,
+                 TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T,
+                 afn_player_rig_tex);
+    glColorTableEXT(0, 0, 16, 0, 0, afn_player_rig_texpal);
+}
+#endif
 
 static void render_player_rig(void)
 {
@@ -312,12 +327,20 @@ static void render_player_rig(void)
     if (clip < 0 || clip >= AFN_PLAYER_RIG_CLIP_COUNT) clip = 0;
     const u32* dsa = afn_player_rig_dsa[clip];
 
+    int do_loop = 1;
+#ifdef AFN_PLAYER_RIG_HAS_LOOP
+    do_loop = afn_player_rig_loop[clip];
+#endif
     uint32_t nframes = DSMA_GetNumFrames(dsa);
     if (!afn_player_frozen) {
         s_rig_frame += 1638;             // ~0.4 frame/tick = ~24 fps at 60 Hz
         if (nframes) {
             int32_t maxf = (int32_t)(nframes << 12);
-            while (s_rig_frame >= maxf) s_rig_frame -= maxf;
+            if (do_loop) {
+                while (s_rig_frame >= maxf) s_rig_frame -= maxf;
+            } else if (s_rig_frame > maxf - (1 << 12)) {
+                s_rig_frame = maxf - (1 << 12);   // play once: hold last frame
+            }
         }
     }
 
@@ -332,7 +355,11 @@ static void render_player_rig(void)
 
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_BACK | POLY_FORMAT_LIGHT0);
     glColor3b(255, 255, 255);
-    glBindTexture(0, 0);                  // untextured (flat shaded) for now
+#ifdef AFN_PLAYER_RIG_TEXTURED
+    glBindTexture(0, gl_rig_tex_id);      // base-color texture from the glTF
+#else
+    glBindTexture(0, 0);                  // untextured (flat shaded)
+#endif
 
     DSMA_DrawModel(afn_player_rig_dsm, dsa, s_rig_frame);
     glPopMatrix(1);
@@ -1413,6 +1440,9 @@ void afn_fps3d_init(void)
 #endif
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
     load_mesh_textures();
+#endif
+#ifdef AFN_PLAYER_RIG_TEXTURED
+    load_player_rig_texture();
 #endif
 
     cam_h     = AFN_CAM_H;
