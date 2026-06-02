@@ -3,6 +3,7 @@
 
 #include "affinity.h"
 #include "mapdata.h"
+#include "dsma.h"
 #include <nds/arm9/videoGL.h>
 #include <stdio.h>
 
@@ -285,6 +286,51 @@ static void render_meshes(void)
         glPopMatrix(1);
     }
 #endif
+}
+#endif
+
+#ifdef AFN_HAS_PLAYER_RIG
+// Player rendered as a DSMA skinned (rigged glTF) mesh — Mode 4. DSMA manages
+// the bone matrix stack internally; we only set the modelview to the player's
+// world transform. The animation frame advances each tick unless the player is
+// frozen (node-driven, per the FreezePlayer node). Clip defaults to the editor
+// selection; node-driven clip switching is a follow-up.
+#ifndef AFN_PLAYER_RIG_SCALE_F32
+#define AFN_PLAYER_RIG_SCALE_F32 4096   // fallback = 1.0 (older exports without scale)
+#endif
+extern int afn_player_frozen;
+static int32_t s_rig_frame = 0;          // 20.12 fixed animation frame
+static int     s_rig_clip  = AFN_PLAYER_RIG_DEFAULT_CLIP;
+
+static void render_player_rig(void)
+{
+    int clip = s_rig_clip;
+    if (clip < 0 || clip >= AFN_PLAYER_RIG_CLIP_COUNT) clip = 0;
+    const u32* dsa = afn_player_rig_dsa[clip];
+
+    uint32_t nframes = DSMA_GetNumFrames(dsa);
+    if (!afn_player_frozen) {
+        s_rig_frame += 1638;             // ~0.4 frame/tick = ~24 fps at 60 Hz
+        if (nframes) {
+            int32_t maxf = (int32_t)(nframes << 12);
+            while (s_rig_frame >= maxf) s_rig_frame -= maxf;
+        }
+    }
+
+    glPushMatrix();
+    glTranslatef32(fx8_to_f32(player_render_x),
+                   fx8_to_f32(player_render_y),
+                   fx8_to_f32(player_render_z));
+    glRotateYi(player_move_angle >> 1);  // face movement heading
+    int s32 = AFN_PLAYER_RIG_SCALE_F32;
+    glScalef32(s32, s32, s32);
+
+    glPolyFmt(POLY_ALPHA(31) | POLY_CULL_BACK | POLY_FORMAT_LIGHT0);
+    glColor3b(255, 255, 255);
+    glBindTexture(0, 0);                  // untextured (flat shaded) for now
+
+    DSMA_DrawModel(afn_player_rig_dsm, dsa, s_rig_frame);
+    glPopMatrix(1);
 }
 #endif
 
@@ -1606,6 +1652,9 @@ void afn_fps3d_update(void)
 #endif
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
     render_meshes();
+#endif
+#ifdef AFN_HAS_PLAYER_RIG
+    render_player_rig();
 #endif
 
     glFlush(0);

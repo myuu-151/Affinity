@@ -616,7 +616,8 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             const MeshAsset* meshAssets, int meshAssetCount,
             bool mode7Floor,
             const unsigned char* skyPixels, int skyW, int skyH,
-            const unsigned char* floorPixels, int floorW, int floorH)
+            const unsigned char* floorPixels, int floorW, int floorH,
+            const RiggedMeshAsset* riggedAssets, int riggedAssetCount)
 {
     float cosA = cosf(-cam.angle);
     float sinA = sinf(-cam.angle);
@@ -1428,6 +1429,138 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
 
                 if (nFaces > 512) { delete[] pSort; delete[] pFaceDepth; }
                 if (nv > 256) { delete[] pSX; delete[] pSY; delete[] pDepth; delete[] pVis; }
+                drewSprite = true;
+            }
+        }
+
+        // --- Rigged (skinned glTF) mesh — DSMA preview ---
+        // Pose the rig for the current frame (CPU skinning: each vertex is in its
+        // bone's local space, transformed by that bone's absolute pose), then run
+        // the same sprite transform + projection + depth sort + flat fill as the
+        // static mesh path. Untextured for now (flat shaded by glTF base color).
+        if (!drewSprite && sp.subIdx < 0
+            && fs.riggedMeshIdx >= 0 && fs.riggedMeshIdx < riggedAssetCount && riggedAssets)
+        {
+            const RiggedMeshAsset& rm = riggedAssets[fs.riggedMeshIdx];
+            int nb = rm.boneCount;
+            if (!rm.baseVerts.empty() && !rm.indices.empty() && nb > 0)
+            {
+                // Rotate a vector by a unit quaternion: v + 2*w*(q x v) + 2*(q x (q x v)).
+                auto rotq = [](float qw, float qx, float qy, float qz,
+                               float vx, float vy, float vz,
+                               float& ox, float& oy, float& oz) {
+                    float tx = 2.0f * (qy * vz - qz * vy);
+                    float ty = 2.0f * (qz * vx - qx * vz);
+                    float tz = 2.0f * (qx * vy - qy * vx);
+                    ox = vx + qw * tx + (qy * tz - qz * ty);
+                    oy = vy + qw * ty + (qz * tx - qx * tz);
+                    oz = vz + qw * tz + (qx * ty - qy * tx);
+                };
+
+                // Resolve absolute bone poses for the current playback frame.
+                std::vector<BonePose> pose(nb);
+                bool hasClip = (fs.rigAnimIdx >= 0 && fs.rigAnimIdx < (int)rm.clips.size()
+                                && rm.clips[fs.rigAnimIdx].frameCount > 0);
+                if (hasClip) {
+                    const RigAnimClip& clip = rm.clips[fs.rigAnimIdx];
+                    int fc = clip.frameCount;
+                    float ff = fs.rigAnimClock < 0 ? 0 : fs.rigAnimClock;
+                    int f0 = (int)floorf(ff) % fc;
+                    int f1 = (f0 + 1) % fc;
+                    float u = ff - floorf(ff);
+                    for (int b = 0; b < nb; b++) {
+                        const BonePose& A = clip.frames[f0 * nb + b];
+                        const BonePose& B = clip.frames[f1 * nb + b];
+                        BonePose& P = pose[b];
+                        P.px = A.px * (1 - u) + B.px * u;
+                        P.py = A.py * (1 - u) + B.py * u;
+                        P.pz = A.pz * (1 - u) + B.pz * u;
+                        float dot = A.qw*B.qw + A.qx*B.qx + A.qy*B.qy + A.qz*B.qz;
+                        float s = (dot < 0) ? -1.0f : 1.0f;
+                        float qw = A.qw*(1-u) + s*B.qw*u, qx = A.qx*(1-u) + s*B.qx*u;
+                        float qy = A.qy*(1-u) + s*B.qy*u, qz = A.qz*(1-u) + s*B.qz*u;
+                        float m = sqrtf(qw*qw + qx*qx + qy*qy + qz*qz); if (m == 0) m = 1;
+                        P.qw = qw/m; P.qx = qx/m; P.qy = qy/m; P.qz = qz/m;
+                    }
+                } else {
+                    for (int b = 0; b < nb; b++) pose[b] = rm.bindPose[b];
+                }
+
+                // Skin vertices + normals into rig-local space.
+                int nv = (int)rm.baseVerts.size();
+                std::vector<float> skX(nv), skY(nv), skZ(nv), snX(nv), snY(nv), snZ(nv);
+                for (int v = 0; v < nv; v++) {
+                    const MeshVertex& bv = rm.baseVerts[v];
+                    const BonePose& P = pose[rm.vertBone[v]];
+                    float px, py, pz; rotq(P.qw,P.qx,P.qy,P.qz, bv.px,bv.py,bv.pz, px,py,pz);
+                    skX[v] = px + P.px; skY[v] = py + P.py; skZ[v] = pz + P.pz;
+                    float nx, ny, nz; rotq(P.qw,P.qx,P.qy,P.qz, bv.nx,bv.ny,bv.nz, nx,ny,nz);
+                    snX[v] = nx; snY[v] = ny; snZ[v] = nz;
+                }
+
+                // Sprite transform (scale + Y/X/Z rotation + translate) and project.
+                float meshScale = fs.scale;
+                float rY = fs.rotation * 3.14159265f/180.0f, rX = fs.rotationX * 3.14159265f/180.0f, rZ = fs.rotationZ * 3.14159265f/180.0f;
+                float cY = cosf(rY), sY = sinf(rY), cX = cosf(rX), sX = sinf(rX), cZ = cosf(rZ), sZ = sinf(rZ);
+                std::vector<float> pSX(nv), pSY(nv), pDepth(nv);
+                std::vector<char> pVis(nv);
+                for (int v = 0; v < nv; v++) {
+                    float lx = skX[v]*meshScale, ly = skY[v]*meshScale, lz = skZ[v]*meshScale;
+                    float rx = lx*cY + lz*sY, rz = -lx*sY + lz*cY, ry = ly;
+                    float ry2 = ry*cX - rz*sX, rz2 = ry*sX + rz*cX;
+                    float rx2 = rx*cZ - ry2*sZ, ry3 = rx*sZ + ry2*cZ;
+                    float wx = fs.x + rx2, wy = fs.y + ry3, wz = fs.z + rz2;
+                    float sx, sy; pVis[v] = ProjectPoint(wx, wy, wz, cam, cosA, sinA, sx, sy) ? 1 : 0;
+                    pSX[v] = sx; pSY[v] = sy;
+                    pDepth[v] = (wx - cam.x)*sinA - (wz - cam.z)*cosA;
+                }
+
+                // Depth-sort triangles (far first) for painter's-order fill.
+                int nTri = (int)rm.indices.size() / 3;
+                std::vector<int> order(nTri);
+                std::vector<float> fdep(nTri);
+                for (int t = 0; t < nTri; t++) {
+                    int i0 = rm.indices[t*3], i1 = rm.indices[t*3+1], i2 = rm.indices[t*3+2];
+                    auto dF = [&](int i){ float d = pDepth[i]; return d > kNearPlane ? d : kNearPlane; };
+                    fdep[t] = dF(i0) + dF(i1) + dF(i2); order[t] = t;
+                }
+                std::sort(order.begin(), order.end(), [&](int a, int b){ return fdep[a] > fdep[b]; });
+
+                float lDx = 0.3f, lDy = -0.8f, lDz = 0.5f;
+                float lL = sqrtf(lDx*lDx + lDy*lDy + lDz*lDz); lDx/=lL; lDy/=lL; lDz/=lL;
+
+                float minSX = 9999, maxSX = -9999, minSY = 9999, maxSY = -9999;
+                for (int oi = 0; oi < nTri; oi++) {
+                    int t = order[oi];
+                    int i0 = rm.indices[t*3], i1 = rm.indices[t*3+1], i2 = rm.indices[t*3+2];
+                    if (!pVis[i0] && !pVis[i1] && !pVis[i2]) continue;
+                    float fnx = (snX[i0]+snX[i1]+snX[i2])/3.0f;
+                    float fny = (snY[i0]+snY[i1]+snY[i2])/3.0f;
+                    float fnz = (snZ[i0]+snZ[i1]+snZ[i2])/3.0f;
+                    float nx1 = fnx*cY + fnz*sY, nz1 = -fnx*sY + fnz*cY, ny1 = fny;
+                    float ny2 = ny1*cX - nz1*sX, nz2 = ny1*sX + nz1*cX;
+                    float rnx = nx1*cZ - ny2*sZ, rny = nx1*sZ + ny2*cZ, rnz = nz2;
+                    float dot = -(rnx*lDx + rny*lDy + rnz*lDz);
+                    float shade = 0.3f + 0.7f * std::max(0.0f, dot);
+                    const MeshVertex& bv0 = rm.baseVerts[i0];
+                    uint8_t tr = (uint8_t)(255.0f * bv0.r * shade);
+                    uint8_t tg = (uint8_t)(255.0f * bv0.g * shade);
+                    uint8_t tb = (uint8_t)(255.0f * bv0.b * shade);
+                    DrawTriangle(pSX[i0], pSY[i0], pSX[i1], pSY[i1], pSX[i2], pSY[i2], tr, tg, tb, sp.fog);
+                    for (int k : { i0, i1, i2 }) {
+                        if (!pVis[k]) continue;
+                        if (pSX[k] < minSX) minSX = pSX[k]; if (pSX[k] > maxSX) maxSX = pSX[k];
+                        if (pSY[k] < minSY) minSY = pSY[k]; if (pSY[k] > maxSY) maxSY = pSY[k];
+                    }
+                }
+                if (maxSX > minSX && maxSY > minSY) {
+                    meshSelCX = (int)((minSX + maxSX) * 0.5f);
+                    meshSelCY = (int)((minSY + maxSY) * 0.5f);
+                    halfW = (int)((maxSX - minSX) * 0.5f) + 2;
+                    halfH = (int)((maxSY - minSY) * 0.5f) + 2;
+                    drawCenterY = meshSelCY;
+                    hasMeshBounds = true;
+                }
                 drewSprite = true;
             }
         }

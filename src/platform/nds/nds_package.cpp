@@ -145,7 +145,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                                 const std::vector<GBAHudElementExport>& hudElements,
                                 const std::vector<GBATmSceneExport>& tmScenes,
                                 int startMode,
-                                float midiMasterDb)
+                                float midiMasterDb,
+                                const std::vector<GBARiggedMeshExport>& rigs)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
     std::ofstream f(outPath);
@@ -1048,6 +1049,47 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         for (const auto& he : hudElements) {
             for (const auto& pc : he.pieces)  bakeHudPiece(pc, bakedHudPieces);
             for (const auto& sp : he.sprites) bakeHudPiece(sp, bakedHudSprites);
+        }
+    }
+
+    // ---- Rigged (DSMA skinned) mesh — player ----
+    // The Mode 4 player can be a skinned glTF mesh. Emit its pre-built DSM
+    // (geometry) + per-clip DSA (animation) blobs; fps3d.c hands them to
+    // DSMA_DrawModel. Frame counts come from DSMA_GetNumFrames at runtime.
+    {
+        int playerRig = -1, playerClip = 0;
+        float playerScale = 1.0f;
+        for (const auto& s : sprites) {
+            if (s.spriteType == 1 && s.riggedMeshIdx >= 0 && s.riggedMeshIdx < (int)rigs.size()) {
+                playerRig = s.riggedMeshIdx; playerClip = s.rigAnimIdx; playerScale = s.scale; break;
+            }
+        }
+        if (playerRig >= 0 && !rigs[playerRig].dsm.empty() && !rigs[playerRig].clips.empty()) {
+            const auto& rig = rigs[playerRig];
+            auto emitWords = [&](const char* name, const std::vector<uint32_t>& w) {
+                f << "static const u32 " << name << "[] = {";
+                for (size_t i = 0; i < w.size(); i++) {
+                    if (i % 8 == 0) f << "\n    ";
+                    f << "0x" << std::hex << w[i] << std::dec << ",";
+                }
+                f << "\n};\n";
+            };
+            f << "#define AFN_HAS_PLAYER_RIG 1\n";
+            emitWords("afn_player_rig_dsm", rig.dsm);
+            int nclips = (int)rig.clips.size();
+            for (int c = 0; c < nclips; c++) {
+                std::string nm = "afn_player_rig_dsa_" + std::to_string(c);
+                emitWords(nm.c_str(), rig.clips[c].dsa);
+            }
+            f << "static const u32* const afn_player_rig_dsa[] = {";
+            for (int c = 0; c < nclips; c++) f << " afn_player_rig_dsa_" << c << ",";
+            f << " };\n";
+            f << "#define AFN_PLAYER_RIG_CLIP_COUNT " << nclips << "\n";
+            if (playerClip < 0 || playerClip >= nclips) playerClip = 0;
+            f << "#define AFN_PLAYER_RIG_DEFAULT_CLIP " << playerClip << "\n";
+            // Scale: the player sprite's Scale field, as 20.12 f32. glTF models are
+            // ~unit-sized so the editor Scale tunes the on-screen size.
+            f << "#define AFN_PLAYER_RIG_SCALE_F32 " << (int)lroundf(playerScale * 4096.0f) << "\n\n";
         }
     }
 
@@ -2099,6 +2141,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_friction;\n";
         f << "extern int  afn_last_key;\n";
         f << "extern int  afn_player_height;\n";
+        f << "#define AFN_HAS_PLAYER_WIDTH 1\n";
+        f << "extern int  afn_player_width;\n";
         f << "extern int  afn_hud_value[4];\n";
         f << "extern unsigned char afn_hud_visible[4];\n";
         // HUD cursor state — Cursor{Up,Down}/FollowLink nodes read/write these.
@@ -2766,6 +2810,12 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "    afn_player_height = " << (int)(v * 256.0f) << ";\n";
                 break;
             }
+            case GBAScriptNodeType::SetPlayerWidth: {
+                auto* d = findDataIn(a->id, 0);
+                float v = d ? resolveFloat(d) : 3.0f;
+                f << "    afn_player_width = " << (int)(v * 256.0f) << ";\n";
+                break;
+            }
             case GBAScriptNodeType::SetSpriteAnim: {
                 auto* objData  = findDataIn(a->id, 0);
                 auto* animData = findDataIn(a->id, 1);
@@ -3238,13 +3288,14 @@ bool PackageNDS(const std::string& runtimeDir,
                 const std::vector<GBATmSceneExport>& tmScenes,
                 int startMode,
                 float midiMasterDb,
+                const std::vector<GBARiggedMeshExport>& rigs,
                 std::string& errorMsg)
 {
     std::string buildOutput;
     std::string msysDir = ToMsysPath(runtimeDir);
 
     // Step 0: Generate mapdata.h
-    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames, ndsAntialiasing, script, blueprints, bpInstances, hudElements, tmScenes, startMode, midiMasterDb))
+    if (!GenerateNDSMapData(runtimeDir, sprites, assets, camera, meshes, orbitDist, soundSamples, soundInstances, skyFrames, ndsAntialiasing, script, blueprints, bpInstances, hudElements, tmScenes, startMode, midiMasterDb, rigs))
     {
         errorMsg = "Failed to write mapdata.h to " + runtimeDir + "/include/";
         return false;

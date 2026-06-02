@@ -218,6 +218,59 @@ struct MeshAsset
 
 static constexpr int kMaxMeshAssets = 32;
 
+// ---------------------------------------------------------------------------
+// Rigged (skinned) mesh — DSMA skeletal animation imported from glTF/GLB.
+// DSMA uses RIGID skinning: each vertex is bound to a single bone and the bone
+// matrix lives in the DS matrix stack (<=29 bones). Vertex positions are stored
+// in their bone's local space; bone transforms (bind pose + per-frame) are
+// absolute (hierarchy already composed), matching tools/gltf_to_dsma.py.
+// ---------------------------------------------------------------------------
+
+// A bone transform: translation + unit quaternion (no scale — DSMA has none).
+struct BonePose
+{
+    float px = 0, py = 0, pz = 0;            // translation
+    float qw = 1, qx = 0, qy = 0, qz = 0;   // orientation (quaternion)
+};
+
+// One animation clip: frameCount frames, each with boneCount BonePose entries.
+// frames is flattened: frame f, bone b -> frames[f * boneCount + b].
+struct RigAnimClip
+{
+    std::string name = "anim";
+    int frameCount = 0;
+    std::vector<BonePose> frames;
+};
+
+struct RiggedMeshAsset
+{
+    std::string name = "Rig";
+    std::string sourcePath;                  // original .glb/.gltf path (re-imported on load)
+
+    int boneCount = 0;
+    std::vector<MeshVertex> baseVerts;       // pos/normal in their bone's LOCAL space, uv in 0..1
+    std::vector<int>        vertBone;         // parallel to baseVerts: bone index per vertex
+    std::vector<uint32_t>   indices;          // triangle index buffer into baseVerts
+
+    std::vector<BonePose>   bindPose;         // boneCount entries, absolute bind transforms
+    std::vector<int>        boneParent;       // boneCount entries, parent bone index (-1 = root)
+
+    std::vector<RigAnimClip> clips;
+
+    float boundsMin[3] = {};                 // AABB of the bind pose (for framing/scale)
+    float boundsMax[3] = {};
+
+    // Optional base-color texture (palettized like MeshAsset, for preview + export).
+    bool textured = false;
+    std::string texturePath;
+    std::vector<uint8_t> texturePixels;      // indexed pixels (texW * texH)
+    uint32_t texturePalette[16] = {};
+    int texW = 0, texH = 0;
+    unsigned int glTexID = 0;                // OpenGL texture for editor preview
+};
+
+static constexpr int kMaxRiggedMeshAssets = 16;
+
 // A sprite object placed on the Mode 4 floor
 struct FloorSprite
 {
@@ -286,6 +339,14 @@ struct FloorSprite
     static constexpr int kMaxRailPoints = 512;
     RailPoint railPath[kMaxRailPoints];
     int   railPointCount = 0;
+
+    // Rigged (skinned glTF) mesh — DSMA skeletal animation. -1 = none.
+    // When set, this object renders as an animated skinned mesh (Mode 4) instead
+    // of (or in addition to) its sprite, both in the editor preview and on NDS.
+    int   riggedMeshIdx = -1;    // index into sRiggedMeshAssets
+    int   rigAnimIdx = 0;        // which animation clip to play
+    bool  rigAnimPlay = true;    // play the clip in the editor preview
+    float rigAnimClock = 0.0f;   // transient editor-only playback frame (NOT serialized)
 };
 
 static constexpr int kMaxFloorSprites = 256; // supports up to 256 objects per scene, nearest 32 rendered via OAM

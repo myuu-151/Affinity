@@ -1,6 +1,8 @@
 #include "frame_loop.h"
 #include "../viewport/mode7_preview.h"
 #include "../map/map_types.h"
+#include "rigged_gltf.h"
+#include "../platform/nds/dsma_emit.h"
 #include "../platform/gba/gba_package.h"
 #include "../platform/nds/nds_package.h"
 #include "imgui.h"
@@ -588,6 +590,7 @@ enum class VsNodeType : int {
     GrindBoost,      // action: add extra downhill speed THIS frame (gate with Is Key Held for hold-to-boost)
     GrindBleed,      // action: set how slowly the boosted speed cap bleeds back to normal (Mode 4)
     GrindCatch,      // action: set the grind catch window — Y (height) + X (width) tolerance (Mode 4)
+    SetPlayerWidth,  // action: set player collision width (horizontal radius)
     COUNT
 };
 
@@ -897,6 +900,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Grind Boost",   0xFF3355AA, 1, 1, 1, 0, {"Force (float)"}, {}, {} },
     { "Grind Bleed",   0xFF3355AA, 1, 1, 1, 0, {"Slowness (float)"}, {}, {} },
     { "Grind Catch",   0xFF3355AA, 1, 1, 2, 0, {"Height (float)", "Width (float)"}, {}, {} },
+    { "Set Player Width",0xFF3355AA, 1, 1, 1, 0, {"Value (float)"}, {}, {} },
 };
 
 struct VsNode {
@@ -4351,6 +4355,9 @@ static bool sProjectDirty = false; // unsaved changes
 
 // Mesh assets
 static std::vector<MeshAsset> sMeshAssets;
+// Rigged (skinned glTF) mesh assets — DSMA skeletal animation
+static std::vector<RiggedMeshAsset> sRiggedMeshAssets;
+static char sRigImportError[256] = "";
 static int sSelectedMesh = -1;
 static std::set<int> sSelectedMeshes;       // multi-select set for mesh assets
 static bool sMeshDragSelecting = false;     // true while drag-selecting in mesh list
@@ -5352,6 +5359,8 @@ static bool SaveProject(const std::string& path)
         for (int ip = 0; ip < sp.instanceParamCount; ip++)
             fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
         fprintf(f, "\n");
+        if (sp.riggedMeshIdx >= 0)
+            fprintf(f, "spriteRig=%d,%d,%d\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0);
         if (sp.subSpriteCount > 0) {
             fprintf(f, "subSpriteCount=%d\n", sp.subSpriteCount);
             for (int si = 0; si < sp.subSpriteCount; si++) {
@@ -5443,6 +5452,15 @@ static bool SaveProject(const std::string& path)
         const MeshAsset& ma = sMeshAssets[mi];
         fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide, ma.clampAbove ? 1 : 0, ma.nearClip ? 1 : 0, ma.faceCull ? 1 : 0, ma.texInIwram ? 1 : 0, ma.textureUseAlpha ? 1 : 0, ma.texFiltered ? 1 : 0, ma.removeDoubles ? 1 : 0);
     }
+    fprintf(f, "\n");
+
+    // Rigged (skinned glTF) mesh assets. Geometry/animation is re-imported from
+    // sourcePath on load (like OBJ meshes), so only name + path are serialized.
+    fprintf(f, "[RiggedMeshAssets]\n");
+    fprintf(f, "count=%d\n", (int)sRiggedMeshAssets.size());
+    for (int ri = 0; ri < (int)sRiggedMeshAssets.size(); ri++)
+        fprintf(f, "rig=%s|%s\n", sRiggedMeshAssets[ri].name.c_str(),
+                sRiggedMeshAssets[ri].sourcePath.c_str());
     fprintf(f, "\n");
 
     // Blueprint assets
@@ -6238,6 +6256,7 @@ static bool LoadProject(const std::string& path)
     sAssetDirSprites.clear();
     sSelectedAsset = -1;
     sMeshAssets.clear();
+    sRiggedMeshAssets.clear();
     sSelectedMesh = -1;
     sSelectedMeshes.clear();
     sBlueprintAssets.clear();
@@ -6464,6 +6483,15 @@ static bool LoadProject(const std::string& path)
                 int cnt = 0;
                 sscanf(line + 15, "%d", &cnt);
                 sSprites[sSpriteCount - 1].subSpriteCount = std::min(cnt, (int)FloorSprite::kMaxSubSprites);
+            }
+            else if (strncmp(line, "spriteRig=", 10) == 0 && sSpriteCount > 0) {
+                int rIdx = -1, aIdx = 0, play = 1;
+                sscanf(line + 10, "%d,%d,%d", &rIdx, &aIdx, &play);
+                FloorSprite& sp2 = sSprites[sSpriteCount - 1];
+                sp2.riggedMeshIdx = rIdx;
+                sp2.rigAnimIdx = aIdx;
+                sp2.rigAnimPlay = (play != 0);
+                sp2.rigAnimClock = 0.0f;
             }
             else if (strncmp(line, "subSprite=", 10) == 0 && sSpriteCount > 0) {
                 FloorSprite& sp2 = sSprites[sSpriteCount - 1];
@@ -6749,6 +6777,21 @@ static bool LoadProject(const std::string& path)
                     }
                 }
                 sMeshAssets.push_back(std::move(ma));
+            }
+        }
+        else if (strcmp(section, "RiggedMeshAssets") == 0)
+        {
+            // count= is informational; rig= lines load sequentially. A failed
+            // load still pushes a placeholder so sprite riggedMeshIdx stays aligned.
+            char rname[256] = {}, rpath[512] = {};
+            if (sscanf(line, "rig=%255[^|]|%511[^\n]", rname, rpath) == 2)
+            {
+                RiggedMeshAsset rm;
+                std::string err;
+                if (rpath[0] && LoadRiggedGLTF(std::string(rpath), rm, &err))
+                    rm.name = rname;
+                else { rm = RiggedMeshAsset(); rm.name = rname; rm.sourcePath = rpath; }
+                sRiggedMeshAssets.push_back(std::move(rm));
             }
         }
         else if (strcmp(section, "Blueprints") == 0)
@@ -8817,6 +8860,7 @@ static void CloseProject()
     sSelectedAnim = -1;
 
     sMeshAssets.clear();
+    sRiggedMeshAssets.clear();
     sSelectedMesh = -1;
 
     sBlueprintAssets.clear();
@@ -12481,6 +12525,92 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             }
         }
 
+        // Rigged (skinned glTF) mesh — DSMA skeletal animation. Imports a
+        // .glb/.gltf, lists its clips, and plays the selected clip in the 3D
+        // viewport (CPU-skinned). Exported as DSM/DSA for on-device DSMA.
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Rigged Mesh");
+        {
+            const char* rigPreview = (sp.riggedMeshIdx >= 0 && sp.riggedMeshIdx < (int)sRiggedMeshAssets.size())
+                ? sRiggedMeshAssets[sp.riggedMeshIdx].name.c_str() : "(none)";
+            if (ImGui::BeginCombo("Rig##riglink", rigPreview)) {
+                if (ImGui::Selectable("(none)##rignone", sp.riggedMeshIdx < 0)) {
+                    sp.riggedMeshIdx = -1;
+                    sProjectDirty = true;
+                }
+                for (int ri = 0; ri < (int)sRiggedMeshAssets.size(); ri++) {
+                    bool sel = (sp.riggedMeshIdx == ri);
+                    if (ImGui::Selectable(sRiggedMeshAssets[ri].name.c_str(), sel)) {
+                        sp.riggedMeshIdx = ri;
+                        sp.rigAnimIdx = 0;
+                        sp.rigAnimClock = 0.0f;
+                        sProjectDirty = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (ImGui::Button("Import glTF...##rig")) {
+#ifdef _WIN32
+                std::string gltfPath = OpenFileDialog("glTF Files\0*.glb;*.gltf\0All Files\0*.*\0", "glb");
+                if (!gltfPath.empty()) {
+                    RiggedMeshAsset rm;
+                    std::string err;
+                    if (LoadRiggedGLTF(gltfPath, rm, &err)) {
+                        size_t slash = gltfPath.find_last_of("/\\");
+                        size_t base = (slash == std::string::npos) ? 0 : slash + 1;
+                        size_t dot = gltfPath.find_last_of('.');
+                        size_t end = (dot == std::string::npos || dot < base) ? gltfPath.size() : dot;
+                        rm.name = gltfPath.substr(base, end - base);
+                        sp.riggedMeshIdx = (int)sRiggedMeshAssets.size();
+                        sp.rigAnimIdx = 0;
+                        sp.rigAnimClock = 0.0f;
+                        sRiggedMeshAssets.push_back(std::move(rm));
+                        sRigImportError[0] = '\0';
+                        sProjectDirty = true;
+                    } else {
+                        snprintf(sRigImportError, sizeof(sRigImportError), "Import failed: %s", err.c_str());
+                    }
+                }
+#endif
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Import a rigged/animated glTF or GLB (skinned mesh, <=29 bones)");
+            if (sRigImportError[0])
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", sRigImportError);
+
+            if (sp.riggedMeshIdx >= 0 && sp.riggedMeshIdx < (int)sRiggedMeshAssets.size()) {
+                RiggedMeshAsset& rm = sRiggedMeshAssets[sp.riggedMeshIdx];
+                ImGui::Text("Bones: %d  Verts: %d  Tris: %d", rm.boneCount,
+                            (int)rm.baseVerts.size(), (int)rm.indices.size() / 3);
+                if (ImGui::Checkbox("Play##rigplay", &sp.rigAnimPlay)) sProjectDirty = true;
+                if (rm.clips.empty()) {
+                    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "(no animation clips)");
+                } else {
+                    if (sp.rigAnimIdx < 0 || sp.rigAnimIdx >= (int)rm.clips.size()) sp.rigAnimIdx = 0;
+                    for (int ci = 0; ci < (int)rm.clips.size(); ci++) {
+                        ImGui::PushID(ci + 9000);
+                        bool sel = (sp.rigAnimIdx == ci);
+                        char lbl[96];
+                        snprintf(lbl, sizeof(lbl), "%s (%d frames)##rigclip",
+                                 rm.clips[ci].name.c_str(), rm.clips[ci].frameCount);
+                        if (ImGui::Selectable(lbl, sel)) {
+                            sp.rigAnimIdx = ci;
+                            sp.rigAnimClock = 0.0f;
+                            sProjectDirty = true;
+                        }
+                        ImGui::PopID();
+                    }
+                    RigAnimClip& clip = rm.clips[sp.rigAnimIdx];
+                    if (clip.frameCount > 1) {
+                        float fr = sp.rigAnimClock;
+                        if (ImGui::SliderFloat("Frame##rigscrub", &fr, 0.0f, (float)(clip.frameCount - 1), "%.1f")) {
+                            sp.rigAnimClock = fr;
+                            sp.rigAnimPlay = false;
+                        }
+                    }
+                }
+            }
+        }
+
         // Attached sub-sprites
         ImGui::Separator();
         ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.7f, 1.0f), "Attached Sprites");
@@ -14522,6 +14652,8 @@ void FrameTick(float dt)
                         se.animEnabled = sSprites[i].animEnabled;
                         se.spriteType = (int)sSprites[i].type;
                         se.meshIdx = (sSprites[i].type == SpriteType::Mesh) ? sSprites[i].meshIdx : -1;
+                        se.riggedMeshIdx = sSprites[i].riggedMeshIdx;
+                        se.rigAnimIdx = sSprites[i].rigAnimIdx;
                         if (se.assetIdx >= 0 && se.assetIdx < (int)sSpriteAssets.size())
                             se.palIdx = sSpriteAssets[se.assetIdx].palBank;
                         else
@@ -15843,9 +15975,28 @@ void FrameTick(float dt)
                 }
 
                 bool exportNdsAa = sNdsAntialiasing;
+                // Pre-build DSMA blobs (DSM geometry + per-clip DSA) for every
+                // rigged mesh, so the packager only writes static arrays.
+                std::vector<Affinity::GBARiggedMeshExport> exportRigs;
+                for (const auto& rm : sRiggedMeshAssets) {
+                    Affinity::GBARiggedMeshExport re;
+                    re.name = rm.name;
+                    int tw = rm.texW > 0 ? rm.texW : 128;
+                    int th = rm.texH > 0 ? rm.texH : 128;
+                    re.dsm = DsmaEmit::BuildDSM(rm, tw, th);
+                    for (int c = 0; c < (int)rm.clips.size(); c++) {
+                        Affinity::GBARiggedMeshExport::Clip cl;
+                        cl.name = rm.clips[c].name;
+                        cl.frames = rm.clips[c].frameCount;
+                        cl.dsa = DsmaEmit::BuildDSA(rm, c);
+                        re.clips.push_back(std::move(cl));
+                    }
+                    exportRigs.push_back(std::move(re));
+                }
+
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                              exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, target,
-                             exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportShowFps, exportSmoothSky, exportNdsAa]() {
+                             exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportShowFps, exportSmoothSky, exportNdsAa, exportRigs]() {
                     std::string err;
                     bool ok;
                     if (target == BuildTarget::NDS)
@@ -15858,7 +16009,7 @@ void FrameTick(float dt)
                                         // Per-sequence master dB is baked into each
                                         // note's velocity above, so the global macro
                                         // stays at unity (0 dB).
-                                        0.0f, err);
+                                        0.0f, exportRigs, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,
@@ -17445,6 +17596,23 @@ void FrameTick(float dt)
         }
     }
     bool useMode7Floor = (sActiveTab == EditorTab::Mode7);
+    // Advance rigged-mesh animation playback clocks for the 3D preview (~24 fps,
+    // wrapping per clip). The viewport renderer interpolates between frames.
+    {
+        float dt = ImGui::GetIO().DeltaTime;
+        for (int i = 0; i < sSpriteCount; i++) {
+            FloorSprite& rsp = sSprites[i];
+            if (rsp.riggedMeshIdx < 0 || rsp.riggedMeshIdx >= (int)sRiggedMeshAssets.size()) continue;
+            if (!rsp.rigAnimPlay) continue;
+            const RiggedMeshAsset& rm = sRiggedMeshAssets[rsp.riggedMeshIdx];
+            if (rsp.rigAnimIdx < 0 || rsp.rigAnimIdx >= (int)rm.clips.size()) continue;
+            int fc = rm.clips[rsp.rigAnimIdx].frameCount;
+            if (fc <= 1) continue;
+            rsp.rigAnimClock += dt * 24.0f;
+            while (rsp.rigAnimClock >= (float)fc) rsp.rigAnimClock -= (float)fc;
+        }
+    }
+
     Mode7::Render(sCamera, nullptr, sSprites, sSpriteCount, camObjPtr, sCamObjEditorScale,
                   assetsPtr, (int)sSpriteAssets.size(), sViewportAnimTime, isPlaying,
                   nullptr, spriteAngle,
@@ -17454,7 +17622,9 @@ void FrameTick(float dt)
                   useMode7Floor ? 0 : (int)sMeshAssets.size(),
                   useMode7Floor,
                   sM7SkyPixels, sM7SkyW, sM7SkyH,
-                  useMode7Floor ? sM7FloorPixels : nullptr, sM7FloorW, sM7FloorH);
+                  useMode7Floor ? sM7FloorPixels : nullptr, sM7FloorW, sM7FloorH,
+                  sRiggedMeshAssets.empty() ? nullptr : sRiggedMeshAssets.data(),
+                  (int)sRiggedMeshAssets.size());
 
     // Draw axis guide line when transforming a selected sprite
     if (sTransformAxis && sTransformAxis != 'S'
@@ -19273,6 +19443,7 @@ void FrameTick(float dt)
                 case VsNodeType::OnRise:        desc = "Rising-edge gate: only passes execution on the first frame the upstream condition becomes true. Blocks while it keeps firing. Resets when it stops."; break;
                 case VsNodeType::ResetScene:    desc = "Reloads the current scene. Player respawns at start position."; break;
                 case VsNodeType::SetPlayerHeight: desc = "Sets the player collision height (pixels). Controls wall Y-overlap and floor snap-up distance. Default 12."; break;
+                case VsNodeType::SetPlayerWidth: desc = "Sets the player collision width (horizontal radius, pixels). Controls how close you get to walls before being pushed out. Default 3."; break;
                 case VsNodeType::UpdateRespawnPos: desc = "Updates the Respawn start position to the given object's world position. Use on checkpoint trigger."; break;
                 case VsNodeType::SetVelocityX:  desc = "Adds a world-X velocity to the player every frame, independent of input. Pair with Velocity Falloff to decay it (boost pads, knockback, wind)."; break;
                 case VsNodeType::SetVelocityZ:  desc = "Adds a world-Z velocity to the player every frame, independent of input. Pair with Velocity Falloff to decay it."; break;
@@ -19525,6 +19696,7 @@ void FrameTick(float dt)
                         case VsNodeType::OnRise:        return "_on_rise";
                         case VsNodeType::ResetScene:    return "_reset_scene";
                         case VsNodeType::SetPlayerHeight: return "_set_player_height";
+                        case VsNodeType::SetPlayerWidth: return "_set_player_width";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -19971,6 +20143,20 @@ void FrameTick(float dt)
                         "    // collide_floor: skip floors above py + afn_player_height",
                         fmtFloat(infoNode.id, 0, "<height>"));
                     setActionFunc(infoNode, "_set_player_height", bodyBuf);
+                    break;
+                }
+                case VsNodeType::SetPlayerWidth: {
+                    editorCode =
+                        "// ---- 3D Scene ----\n"
+                        "// (no editor horizontal collision)";
+                    char bodyBuf[256];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_player_width = %s;\n"
+                        "    // --- Runtime (collision.c) ---\n"
+                        "    // Mode 4: collide_walls pushes out when |dist| < afn_player_width\n"
+                        "    //         (XZ wall radius); larger = wider body, stops further from walls",
+                        fmtFloat(infoNode.id, 0, "<width>"));
+                    setActionFunc(infoNode, "_set_player_width", bodyBuf);
                     break;
                 }
                 case VsNodeType::SetHudValue: {
@@ -23127,6 +23313,7 @@ void FrameTick(float dt)
                     case VsNodeType::OnRise:        suffix = "_on_rise"; break;
                     case VsNodeType::ResetScene:    suffix = "_reset_scene"; break;
                     case VsNodeType::SetPlayerHeight: suffix = "_set_player_height"; break;
+                    case VsNodeType::SetPlayerWidth: suffix = "_set_player_width"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -23607,6 +23794,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GrindBleed].name)) addNodeAt(VsNodeType::GrindBleed);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GrindCatch].name)) addNodeAt(VsNodeType::GrindCatch);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetPlayerHeight].name)) addNodeAt(VsNodeType::SetPlayerHeight);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetPlayerWidth].name)) addNodeAt(VsNodeType::SetPlayerWidth);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopSound].name)) addNodeAt(VsNodeType::StopSound);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetScale].name)) addNodeAt(VsNodeType::SetScale);

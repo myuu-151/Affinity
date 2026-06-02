@@ -21,6 +21,8 @@ struct GBASpriteExport
     int   spriteType;   // SpriteType enum (0=Prop, 1=Player, ...)
     bool  animEnabled;  // false = static, no animation cycling
     int   meshIdx = -1;   // mesh asset index (-1 = none)
+    int   riggedMeshIdx = -1; // rigged (DSMA skinned) mesh asset index (-1 = none)
+    int   rigAnimIdx = 0;     // default animation clip for the rigged mesh
     int   oamPrio = 0;    // OAM priority (0 = on top, 1 = behind)
     int   parentIdx = -1; // parent sprite index (-1 = standalone)
     float offsetX = 0, offsetY = 0, offsetZ = 0; // offset from parent
@@ -401,6 +403,7 @@ enum class GBAScriptNodeType : int {
     GrindBoost,
     GrindBleed,
     GrindCatch,
+    SetPlayerWidth,
     COUNT
 };
 

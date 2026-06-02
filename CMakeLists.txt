@@ -34,9 +34,11 @@ target_link_libraries(imgui PUBLIC glfw)
 add_executable(AffinityEditor WIN32
     src/editor/main.cpp
     src/editor/frame_loop.cpp
+    src/editor/rigged_gltf.cpp
     src/viewport/mode7_preview.cpp
     src/platform/gba/gba_package.cpp
     src/platform/nds/nds_package.cpp
+    src/platform/nds/dsma_emit.cpp
     affinity.rc
 )
 

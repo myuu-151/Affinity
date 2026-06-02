@@ -8,6 +8,21 @@
 namespace Affinity
 {
 
+// A rigged (DSMA skinned) mesh, pre-converted to DS display-list / animation
+// blobs by the editor (DsmaEmit). The packager only writes these as static
+// const u32 arrays into mapdata.h; the runtime hands them to DSMA_DrawModel.
+struct GBARiggedMeshExport
+{
+    std::string name;
+    std::vector<uint32_t> dsm;        // DSM (geometry display list)
+    struct Clip {
+        std::string name;
+        int frames = 0;
+        std::vector<uint32_t> dsa;    // DSA (animation)
+    };
+    std::vector<Clip> clips;
+};
+
 // Package the current map into a .nds ROM.
 // runtimeDir: path to nds_runtime/ directory
 // outputPath: where to write the final .nds
@@ -30,6 +45,7 @@ bool PackageNDS(const std::string& runtimeDir,
                 const std::vector<GBATmSceneExport>& tmScenes,
                 int startMode,
                 float midiMasterDb,
+                const std::vector<GBARiggedMeshExport>& rigs,
                 std::string& errorMsg);
 
 } // namespace Affinity
