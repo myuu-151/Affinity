@@ -591,6 +591,8 @@ enum class VsNodeType : int {
     GrindBleed,      // action: set how slowly the boosted speed cap bleeds back to normal (Mode 4)
     GrindCatch,      // action: set the grind catch window — Y (height) + X (width) tolerance (Mode 4)
     SetPlayerWidth,  // action: set player collision width (horizontal radius)
+    PlaySkelAnim,    // action: play a skeletal (glTF/DSMA) animation clip on the player rig (Mode 4)
+    SkelAnim,        // data: outputs a skeletal animation clip index (feeds Play Skeletal Animation)
     COUNT
 };
 
@@ -901,6 +903,8 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Grind Bleed",   0xFF3355AA, 1, 1, 1, 0, {"Slowness (float)"}, {}, {} },
     { "Grind Catch",   0xFF3355AA, 1, 1, 2, 0, {"Height (float)", "Width (float)"}, {}, {} },
     { "Set Player Width",0xFF3355AA, 1, 1, 1, 0, {"Value (float)"}, {}, {} },
+    { "Play Skeletal Anim",0xFF3355AA, 1, 1, 1, 0, {"Clip"}, {}, {} },
+    { "Skeletal Animation",0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
 };
 
 struct VsNode {
@@ -18372,7 +18376,7 @@ void FrameTick(float dt)
         auto isDataNodeType = [](VsNodeType t) {
             return t == VsNodeType::Integer || t == VsNodeType::Float ||
                    t == VsNodeType::Key || t == VsNodeType::Direction || t == VsNodeType::Animation ||
-                   t == VsNodeType::SoundInstance;
+                   t == VsNodeType::SoundInstance || t == VsNodeType::SkelAnim;
         };
         auto dataTypeFromNode = [](VsNodeType t) -> int {
             switch (t) {
@@ -18382,6 +18386,7 @@ void FrameTick(float dt)
                 case VsNodeType::Direction:     return 3;
                 case VsNodeType::Animation:     return 4;
                 case VsNodeType::SoundInstance: return 0; // outputs int (instance index)
+                case VsNodeType::SkelAnim:      return 0; // outputs int (clip index)
                 default: return 0;
             }
         };
@@ -19730,6 +19735,8 @@ void FrameTick(float dt)
                 case VsNodeType::Animation:     desc = "Outputs an animation index."; break;
                 case VsNodeType::Float:         desc = "Outputs a constant float value."; break;
                 case VsNodeType::SoundInstance: desc = "Outputs a sound instance index for PlaySound."; break;
+                case VsNodeType::SkelAnim:      desc = "Outputs a skeletal animation clip index (feeds Play Skeletal Anim). Pick a rigged mesh and one of its glTF clips."; break;
+                case VsNodeType::PlaySkelAnim:  desc = "Plays a skeletal (glTF/DSMA) animation clip on the player rig in Mode 4. Wire a Skeletal Animation node into Clip. Loop/Once is set per-clip on the rig."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
@@ -19990,6 +19997,7 @@ void FrameTick(float dt)
                         case VsNodeType::ResetScene:    return "_reset_scene";
                         case VsNodeType::SetPlayerHeight: return "_set_player_height";
                         case VsNodeType::SetPlayerWidth: return "_set_player_width";
+                        case VsNodeType::PlaySkelAnim:  return "_play_skel_anim";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -20450,6 +20458,24 @@ void FrameTick(float dt)
                         "    //         (XZ wall radius); larger = wider body, stops further from walls",
                         fmtFloat(infoNode.id, 0, "<width>"));
                     setActionFunc(infoNode, "_set_player_width", bodyBuf);
+                    break;
+                }
+                case VsNodeType::PlaySkelAnim: {
+                    editorCode =
+                        "// ---- 3D Scene (Mode 4) ----\n"
+                        "// (editor 3D tab plays the rig clip selected on the sprite)";
+                    auto* sd = resolveDataIn(infoNode.id, 0);
+                    int clipIdx = sd ? sd->paramInt[1] : 0;   // SkelAnim: paramInt[1] = clip
+                    char bodyBuf[512];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_rig_clip = %d;\n"
+                        "    // --- Runtime (fps3d.c) ---\n"
+                        "    // render_player_rig(): if (afn_rig_clip != s_rig_clip)\n"
+                        "    //   { s_rig_clip = afn_rig_clip; s_rig_frame = 0; } // restart clip\n"
+                        "    //   dsa = afn_player_rig_dsa[s_rig_clip];\n"
+                        "    //   DSMA_DrawModel(afn_player_rig_dsm, dsa, s_rig_frame);",
+                        clipIdx);
+                    setActionFunc(infoNode, "_play_skel_anim", bodyBuf);
                     break;
                 }
                 case VsNodeType::SetHudValue: {
@@ -23599,6 +23625,7 @@ void FrameTick(float dt)
                     case VsNodeType::Key:           suffix = "_key"; break;
                     case VsNodeType::Direction:     suffix = "_dir"; break;
                     case VsNodeType::Animation:     suffix = "_anim"; break;
+                    case VsNodeType::SkelAnim:      suffix = "_skel_anim"; break;
                     case VsNodeType::SoundInstance: suffix = "_snd_inst"; break;
                     case VsNodeType::PlayHudAnim: suffix = "_play_hud_anim"; break;
                     case VsNodeType::StopHudAnim: suffix = "_stop_hud_anim"; break;
@@ -23607,6 +23634,7 @@ void FrameTick(float dt)
                     case VsNodeType::ResetScene:    suffix = "_reset_scene"; break;
                     case VsNodeType::SetPlayerHeight: suffix = "_set_player_height"; break;
                     case VsNodeType::SetPlayerWidth: suffix = "_set_player_width"; break;
+                    case VsNodeType::PlaySkelAnim:  suffix = "_play_skel_anim"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -24088,6 +24116,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GrindCatch].name)) addNodeAt(VsNodeType::GrindCatch);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetPlayerHeight].name)) addNodeAt(VsNodeType::SetPlayerHeight);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetPlayerWidth].name)) addNodeAt(VsNodeType::SetPlayerWidth);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::PlaySkelAnim].name)) addNodeAt(VsNodeType::PlaySkelAnim);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopSound].name)) addNodeAt(VsNodeType::StopSound);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetScale].name)) addNodeAt(VsNodeType::SetScale);
@@ -24218,6 +24247,7 @@ void FrameTick(float dt)
                         if (ImGui::MenuItem(sVsNodeDefs[t].name)) addNodeAt((VsNodeType)t);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Object].name)) addNodeAt(VsNodeType::Object);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::BlueprintRef].name)) addNodeAt(VsNodeType::BlueprintRef);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SkelAnim].name)) addNodeAt(VsNodeType::SkelAnim);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::AddMath].name)) addNodeAt(VsNodeType::AddMath);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SubtractMath].name)) addNodeAt(VsNodeType::SubtractMath);
@@ -24326,7 +24356,7 @@ void FrameTick(float dt)
         // Properties panel overlay — as child window inside canvas (data nodes only)
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
-            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt || n.type == VsNodeType::SoundInstance || n.type == VsNodeType::PlayHudAnim || n.type == VsNodeType::StopHudAnim) {
+            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt || n.type == VsNodeType::SoundInstance || n.type == VsNodeType::SkelAnim || n.type == VsNodeType::PlayHudAnim || n.type == VsNodeType::StopHudAnim) {
             const auto& def = sVsNodeDefs[(int)n.type];
             float propW = 260, propH = 180;
             float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -24426,6 +24456,49 @@ void FrameTick(float dt)
                             if (sel) ImGui::SetItemDefaultFocus();
                         }
                         ImGui::EndCombo();
+                    }
+                }
+                break;
+            }
+            case VsNodeType::SkelAnim: {
+                // Skeletal clip selector: pick a rig asset, then a clip in it.
+                // paramInt[0] = rig asset index, paramInt[1] = clip index (output).
+                ImGui::Text("Rig");
+                if (sRiggedMeshAssets.empty()) {
+                    ImGui::Text("(no rigged meshes)");
+                    break;
+                }
+                {
+                    const char* rigPreview = (n.paramInt[0] >= 0 && n.paramInt[0] < (int)sRiggedMeshAssets.size())
+                        ? sRiggedMeshAssets[n.paramInt[0]].name.c_str() : "None";
+                    if (ImGui::BeginCombo("##SkelRig", rigPreview)) {
+                        for (int ri = 0; ri < (int)sRiggedMeshAssets.size(); ri++) {
+                            bool sel = (ri == n.paramInt[0]);
+                            if (ImGui::Selectable(sRiggedMeshAssets[ri].name.c_str(), sel)) {
+                                n.paramInt[0] = ri;
+                                n.paramInt[1] = 0; // reset clip when rig changes
+                            }
+                            if (sel) ImGui::SetItemDefaultFocus();
+                        }
+                        ImGui::EndCombo();
+                    }
+                    ImGui::Text("Clip");
+                    int ri = n.paramInt[0];
+                    if (ri >= 0 && ri < (int)sRiggedMeshAssets.size() && !sRiggedMeshAssets[ri].clips.empty()) {
+                        const auto& clips = sRiggedMeshAssets[ri].clips;
+                        const char* clipPreview = (n.paramInt[1] >= 0 && n.paramInt[1] < (int)clips.size())
+                            ? clips[n.paramInt[1]].name.c_str() : "None";
+                        if (ImGui::BeginCombo("##SkelClip", clipPreview)) {
+                            for (int c = 0; c < (int)clips.size(); c++) {
+                                bool sel2 = (c == n.paramInt[1]);
+                                if (ImGui::Selectable(clips[c].name.c_str(), sel2))
+                                    n.paramInt[1] = c;
+                                if (sel2) ImGui::SetItemDefaultFocus();
+                            }
+                            ImGui::EndCombo();
+                        }
+                    } else {
+                        ImGui::Text("(no clips)");
                     }
                 }
                 break;

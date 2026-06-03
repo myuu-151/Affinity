@@ -23,6 +23,7 @@ int  afn_input_right;
 int  afn_move_speed;
 int  afn_auto_orbit_speed;
 int  afn_play_anim;
+int  afn_rig_clip = -1;   // skeletal (glTF/DSMA) clip the player rig plays; -1 = leave default
 int  afn_sprite_anim_spr = -1;
 int  afn_sprite_anim_val = -1;
 int  afn_anim_prio;
@@ -58,6 +59,7 @@ int  afn_force_z;
 int  afn_friction;
 int  afn_last_key;
 int  afn_player_height = 3072;    // 12 editor px in 16.8 (matches GBA default)
+int  afn_player_width = 768;      // 3 editor px collision radius in 16.8 (SetPlayerWidth)
 int  afn_hud_value[4];            // counters; SetHudValue accumulates
 unsigned char afn_hud_visible[4]; // ShowHUD/HideHUD toggles
 

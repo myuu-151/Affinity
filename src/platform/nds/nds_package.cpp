@@ -2140,6 +2140,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_move_speed;\n";
         f << "extern int  afn_auto_orbit_speed;\n";
         f << "extern int  afn_play_anim;\n";
+        f << "extern int  afn_rig_clip;\n";
         f << "extern int  afn_sprite_anim_spr;\n";
         f << "extern int  afn_sprite_anim_val;\n";
         f << "extern int  afn_anim_prio;\n";
@@ -2513,6 +2514,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         auto resolveInt = [&](const GBAScriptNodeExport* dn) -> int {
             if (!dn) return 0;
             if (dn->type == GBAScriptNodeType::Animation) return dn->paramInt[1];
+            if (dn->type == GBAScriptNodeType::SkelAnim) return dn->paramInt[1]; // clip index
             return dn->paramInt[0];
         };
         auto resolveFloat = [&](const GBAScriptNodeExport* dn) -> float {
@@ -2678,6 +2680,14 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 int animLvl = inJumpGate ? 2 : (gateDepth > 0 ? 1 : 0);
                 f << "    if (!afn_player_frozen && " << animLvl << " >= afn_anim_prio) { afn_play_anim = "
                   << idx << "; afn_anim_prio = " << animLvl << "; }\n";
+                break;
+            }
+            case GBAScriptNodeType::PlaySkelAnim: {
+                // Set the skeletal (glTF/DSMA) clip the player rig plays in Mode 4.
+                // The clip index comes from a wired Skeletal Animation data node.
+                auto* d = findDataIn(a->id, 0);
+                int clip = d ? resolveInt(d) : 0;
+                f << "    afn_rig_clip = " << clip << ";\n";
                 break;
             }
             case GBAScriptNodeType::FreezePlayer:

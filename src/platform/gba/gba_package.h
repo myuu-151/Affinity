@@ -404,6 +404,8 @@ enum class GBAScriptNodeType : int {
     GrindBleed,
     GrindCatch,
     SetPlayerWidth,
+    PlaySkelAnim,
+    SkelAnim,
     COUNT
 };
 

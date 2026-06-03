@@ -303,6 +303,7 @@ static void render_meshes(void)
 // another 180° vs the importer's baked orientation (adjust if facing is wrong).
 #define AFN_RIG_YAW_CORRECTION (-16384)
 extern int afn_player_frozen;
+extern int afn_rig_clip;                 // script-set skeletal clip (PlaySkelAnim node); -1 = leave default
 static int32_t s_rig_frame = 0;          // 20.12 fixed animation frame
 static int     s_rig_clip  = AFN_PLAYER_RIG_DEFAULT_CLIP;
 
@@ -323,6 +324,12 @@ static void load_player_rig_texture(void)
 
 static void render_player_rig(void)
 {
+    // A PlaySkelAnim node sets afn_rig_clip; switching clips restarts the frame.
+    if (afn_rig_clip >= 0 && afn_rig_clip < AFN_PLAYER_RIG_CLIP_COUNT
+        && afn_rig_clip != s_rig_clip) {
+        s_rig_clip  = afn_rig_clip;
+        s_rig_frame = 0;
+    }
     int clip = s_rig_clip;
     if (clip < 0 || clip >= AFN_PLAYER_RIG_CLIP_COUNT) clip = 0;
     const u32* dsa = afn_player_rig_dsa[clip];
