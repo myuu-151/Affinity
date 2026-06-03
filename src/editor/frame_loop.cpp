@@ -5532,8 +5532,12 @@ static bool SaveProject(const std::string& path)
         const char* texP = (rmA.textureManual && !rmA.texturePath.empty())
                            ? rmA.texturePath.c_str() : "-";
         int rigFlags = (rmA.smoothShading ? 1 : 0) | (rmA.cameraLight ? 2 : 0);
-        fprintf(f, "rig=%s|%s|%s|%s|%d|%.2f|%.2f\n", rmA.name.c_str(), rmA.sourcePath.c_str(),
-                loopBits.empty() ? "-" : loopBits.c_str(), texP, rigFlags, rmA.lightX, rmA.lightY);
+        // Fields 8-14 = collision: type|cx|cy|cz|ex|ey|ez.
+        fprintf(f, "rig=%s|%s|%s|%s|%d|%.2f|%.2f|%d|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f\n",
+                rmA.name.c_str(), rmA.sourcePath.c_str(),
+                loopBits.empty() ? "-" : loopBits.c_str(), texP, rigFlags, rmA.lightX, rmA.lightY,
+                rmA.collisionType, rmA.colCenter[0], rmA.colCenter[1], rmA.colCenter[2],
+                rmA.colExtents[0], rmA.colExtents[1], rmA.colExtents[2]);
     }
     fprintf(f, "\n");
 
@@ -6868,9 +6872,12 @@ static bool LoadProject(const std::string& path)
             // load still pushes a placeholder so sprite riggedMeshIdx stays aligned.
             char rname[256] = {}, rpath[512] = {}, rloop[64] = {}, rtex[512] = {};
             int rflags = 0; float rlx = 0.0f, rly = 0.0f;
-            // Format: name|path|loopbits|texpath|flags|lightX|lightY. Older forms still parse.
-            int nf = sscanf(line, "rig=%255[^|]|%511[^|]|%63[^|]|%511[^|]|%d|%f|%f",
-                            rname, rpath, rloop, rtex, &rflags, &rlx, &rly);
+            int rcolType = 0; float rcc[3] = {0,0,0}, rce[3] = {0,0,0};
+            // Format: name|path|loopbits|texpath|flags|lightX|lightY|colType|cx|cy|cz|ex|ey|ez.
+            // Older forms (7 fields) still parse; collision then keeps the AABB seed.
+            int nf = sscanf(line, "rig=%255[^|]|%511[^|]|%63[^|]|%511[^|]|%d|%f|%f|%d|%f|%f|%f|%f|%f|%f",
+                            rname, rpath, rloop, rtex, &rflags, &rlx, &rly,
+                            &rcolType, &rcc[0], &rcc[1], &rcc[2], &rce[0], &rce[1], &rce[2]);
             if (nf >= 2)
             {
                 RiggedMeshAsset rm;
@@ -6887,6 +6894,11 @@ static bool LoadProject(const std::string& path)
                     LoadRigTextureFromFile(rm, std::string(rtex));
                 if (nf >= 5) { rm.smoothShading = (rflags & 1) != 0; rm.cameraLight = (rflags & 2) != 0; }
                 if (nf >= 7) { rm.lightX = rlx; rm.lightY = rly; }
+                if (nf >= 14) {
+                    rm.collisionType = rcolType;
+                    rm.colCenter[0] = rcc[0]; rm.colCenter[1] = rcc[1]; rm.colCenter[2] = rcc[2];
+                    rm.colExtents[0] = rce[0]; rm.colExtents[1] = rce[1]; rm.colExtents[2] = rce[2];
+                }
                 UploadRigGLTexture(rm);
                 sRiggedMeshAssets.push_back(std::move(rm));
             }
@@ -10453,6 +10465,33 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         }
         ImGui::PopItemWidth();
+
+        // ---- Collision (rigged glTF) ----
+        if (sp.riggedMeshIdx >= 0 && sp.riggedMeshIdx < (int)sRiggedMeshAssets.size()) {
+            RiggedMeshAsset& rm = sRiggedMeshAssets[sp.riggedMeshIdx];
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.6f, 1.0f), "Collision");
+            const char* colTypes[] = { "None", "Box" };
+            if (ImGui::Combo("Type##m3dcol", &rm.collisionType, colTypes, 2)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Box = an axis-aligned collision volume drawn in the 3D tab. Static (does not deform with the animation).");
+            if (rm.collisionType == 1) {
+                ImGui::PushItemWidth(-1);
+                if (ImGui::DragFloat3("Size##m3dcolext", rm.colExtents, 0.05f, 0.05f, 100.0f, "%.2f")) sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Half-extents of the collision box (X/Y/Z), in model units.");
+                if (ImGui::DragFloat3("Offset##m3dcoloff", rm.colCenter, 0.05f, -100.0f, 100.0f, "%.2f")) sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Box center offset from the model origin (X/Y/Z).");
+                ImGui::PopItemWidth();
+                if (ImGui::SmallButton("Fit to model##m3dcolfit")) {
+                    for (int i = 0; i < 3; i++) {
+                        rm.colCenter[i]  = (rm.boundsMin[i] + rm.boundsMax[i]) * 0.5f;
+                        rm.colExtents[i] = (rm.boundsMax[i] - rm.boundsMin[i]) * 0.5f;
+                        if (rm.colExtents[i] < 0.01f) rm.colExtents[i] = 0.5f;
+                    }
+                    sProjectDirty = true;
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset the box to wrap the model's bind-pose bounds.");
+            }
+        }
 
         // ---- Rail ----
         if (sp.type == SpriteType::Mesh) {
@@ -30291,6 +30330,23 @@ void Render3DViewport()
                     float x1=rm.boundsMax[0],y1=rm.boundsMax[1],z1=rm.boundsMax[2];
                     glBegin(GL_LINE_LOOP); glVertex3f(x0,y0,z0);glVertex3f(x1,y0,z0);glVertex3f(x1,y0,z1);glVertex3f(x0,y0,z1); glEnd();
                     glBegin(GL_LINE_LOOP); glVertex3f(x0,y1,z0);glVertex3f(x1,y1,z0);glVertex3f(x1,y1,z1);glVertex3f(x0,y1,z1); glEnd();
+                    glLineWidth(1.0f);
+                }
+                // Collision box gizmo (orange), in the rig's local space so it
+                // tracks the placed glTF's position/rotation/scale.
+                if (rm.collisionType == 1) {
+                    float bx0=rm.colCenter[0]-rm.colExtents[0], bx1=rm.colCenter[0]+rm.colExtents[0];
+                    float by0=rm.colCenter[1]-rm.colExtents[1], by1=rm.colCenter[1]+rm.colExtents[1];
+                    float bz0=rm.colCenter[2]-rm.colExtents[2], bz1=rm.colCenter[2]+rm.colExtents[2];
+                    glColor3f(1.0f, 0.6f, 0.1f); glLineWidth(1.5f);
+                    glBegin(GL_LINE_LOOP); glVertex3f(bx0,by0,bz0);glVertex3f(bx1,by0,bz0);glVertex3f(bx1,by0,bz1);glVertex3f(bx0,by0,bz1); glEnd();
+                    glBegin(GL_LINE_LOOP); glVertex3f(bx0,by1,bz0);glVertex3f(bx1,by1,bz0);glVertex3f(bx1,by1,bz1);glVertex3f(bx0,by1,bz1); glEnd();
+                    glBegin(GL_LINES);
+                    glVertex3f(bx0,by0,bz0);glVertex3f(bx0,by1,bz0);
+                    glVertex3f(bx1,by0,bz0);glVertex3f(bx1,by1,bz0);
+                    glVertex3f(bx1,by0,bz1);glVertex3f(bx1,by1,bz1);
+                    glVertex3f(bx0,by0,bz1);glVertex3f(bx0,by1,bz1);
+                    glEnd();
                     glLineWidth(1.0f);
                 }
                 glPopMatrix();

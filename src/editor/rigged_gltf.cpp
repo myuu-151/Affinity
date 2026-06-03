@@ -512,6 +512,15 @@ bool LoadRiggedGLTF(const std::string& path, RiggedMeshAsset& out, std::string* 
         out.boundsMin[2] = nminZ; out.boundsMax[2] = nmaxZ;
     }
 
+    // Seed the collision box to the (oriented) bind-pose AABB so a fresh import
+    // already wraps the model; the user scales it from there. A saved project
+    // overrides these from the rig= line after re-import.
+    for (int i = 0; i < 3; i++) {
+        out.colCenter[i]  = (out.boundsMin[i] + out.boundsMax[i]) * 0.5f;
+        out.colExtents[i] = (out.boundsMax[i] - out.boundsMin[i]) * 0.5f;
+        if (out.colExtents[i] < 0.01f) out.colExtents[i] = 0.5f;
+    }
+
     cgltf_free(data);
     return true;
 }

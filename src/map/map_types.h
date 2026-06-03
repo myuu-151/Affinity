@@ -274,6 +274,14 @@ struct RiggedMeshAsset
     uint32_t texturePalette[16] = {};
     int texW = 0, texH = 0;
     unsigned int glTexID = 0;                // OpenGL texture for editor preview
+
+    // Collision proxy box. Authored here, drawn as a wireframe in the 3D tab.
+    // Local-space (follows the placed glTF's transform); static — does not
+    // deform with the animation. collisionType: 0 = None, 1 = Box (AABB).
+    // (Use-mesh-as-collision stays a separate feature for static props.)
+    int   collisionType = 0;
+    float colCenter[3]  = {0.0f, 0.0f, 0.0f};   // box center, rig local space
+    float colExtents[3] = {1.0f, 1.0f, 1.0f};   // box half-extents
 };
 
 static constexpr int kMaxRiggedMeshAssets = 16;
