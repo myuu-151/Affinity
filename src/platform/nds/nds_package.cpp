@@ -1353,6 +1353,23 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             }
             f << "};\n";
 
+            // OBJ 2.0 per-vertex colors (r,g,b 0..255), one triple per vertex.
+            // Only emitted for meshes that carry them; fps3d draws those unlit
+            // with a per-vertex glColor3b so the paint shows on device.
+            if (mesh.hasVertexColor && !mesh.vertexColors.empty())
+            {
+                f << "static const u8 afn_mesh" << mi << "_vcol[] = {\n    ";
+                for (int v = 0; v < vc; v++)
+                {
+                    int r = (v * 3 + 0 < (int)mesh.vertexColors.size()) ? mesh.vertexColors[v * 3 + 0] : 255;
+                    int g = (v * 3 + 1 < (int)mesh.vertexColors.size()) ? mesh.vertexColors[v * 3 + 1] : 255;
+                    int b = (v * 3 + 2 < (int)mesh.vertexColors.size()) ? mesh.vertexColors[v * 3 + 2] : 255;
+                    f << r << "," << g << "," << b << ", ";
+                    if ((v + 1) % 8 == 0) f << "\n    ";
+                }
+                f << "\n};\n";
+            }
+
             // Triangle indices
             f << "static const u16 afn_mesh" << mi << "_idx[] = {\n    ";
             for (int i = 0; i < ic; i++)
@@ -1543,6 +1560,19 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             if (mi + 1 < meshes.size()) f << ", ";
         }
         f << " };\n";
+
+        // Per-vertex color pointers (0 = mesh has no OBJ 2.0 vertex colors).
+        f << "static const u8* afn_mesh_vcol_ptrs[] = { ";
+        for (size_t mi = 0; mi < meshes.size(); mi++)
+        {
+            if (meshes[mi].hasVertexColor && !meshes[mi].vertexColors.empty())
+                f << "afn_mesh" << mi << "_vcol";
+            else
+                f << "0";
+            if (mi + 1 < meshes.size()) f << ", ";
+        }
+        f << " };\n";
+        f << "#define AFN_MESH_HAS_VCOL_PTRS 1\n";
 
         f << "static const u16* afn_mesh_qidx_ptrs[] = { ";
         for (size_t mi = 0; mi < meshes.size(); mi++)

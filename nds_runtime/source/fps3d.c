@@ -185,6 +185,11 @@ static void render_meshes(void)
         const int16_t* verts = afn_mesh_vert_ptrs[meshIdx];
         const uint16_t* idx  = afn_mesh_idx_ptrs[meshIdx];
         const int16_t* uvs   = afn_mesh_uv_ptrs[meshIdx];
+#ifdef AFN_MESH_HAS_VCOL_PTRS
+        const u8* vcol = afn_mesh_vcol_ptrs[meshIdx]; // OBJ 2.0 per-vertex colors (0 = none)
+#else
+        const u8* vcol = 0;
+#endif
 
         int indexCount    = afn_mesh_desc[meshIdx][1];
         int quadIdxCount  = afn_mesh_desc[meshIdx][2];
@@ -227,7 +232,9 @@ static void render_meshes(void)
         if (cullMode == 0) polyFmt |= POLY_CULL_BACK;
         else if (cullMode == 1) polyFmt |= POLY_CULL_FRONT;
         else polyFmt |= POLY_CULL_NONE;
-        if (lit) polyFmt |= POLY_FORMAT_LIGHT0;
+        // Vertex-colored meshes draw unlit so the per-vertex glColor shows
+        // directly (DS lighting drives color from material regs, not glColor).
+        if (lit && !vcol) polyFmt |= POLY_FORMAT_LIGHT0;
         glPolyFmt(polyFmt);
 
         int r, g, b;
@@ -255,6 +262,7 @@ static void render_meshes(void)
         // exporter in t16 format (.4 fixed texel units) so we pass directly.
         #define EMIT(i) do { \
             if (textured) glTexCoord2t16(uvs[(i)*2+0], uvs[(i)*2+1]); \
+            if (vcol) glColor3b(vcol[(i)*3+0], vcol[(i)*3+1], vcol[(i)*3+2]); \
             glVertex3v16(fx8_to_v16(verts[(i)*3+0]), \
                          fx8_to_v16(verts[(i)*3+1]), \
                          fx8_to_v16(verts[(i)*3+2])); \

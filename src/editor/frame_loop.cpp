@@ -4612,7 +4612,16 @@ static std::string MeshAssetToOBJ(const MeshAsset& m)
 {
     std::string s = "# Affinity edited mesh\n";
     char buf[160];
-    for (const MeshVertex& v : m.vertices) { snprintf(buf, sizeof(buf), "v %.5f %.5f %.5f\n", v.px, v.py, v.pz); s += buf; }
+    // Carry per-vertex colors (OBJ 2.0 "v x y z r g b") only if the mesh has any,
+    // so colorless meshes persist byte-identically to before.
+    bool hasVcol = false;
+    for (const MeshVertex& v : m.vertices)
+        if (v.r != 1.0f || v.g != 1.0f || v.b != 1.0f) { hasVcol = true; break; }
+    for (const MeshVertex& v : m.vertices) {
+        if (hasVcol) snprintf(buf, sizeof(buf), "v %.5f %.5f %.5f %.5f %.5f %.5f\n", v.px, v.py, v.pz, v.r, v.g, v.b);
+        else         snprintf(buf, sizeof(buf), "v %.5f %.5f %.5f\n", v.px, v.py, v.pz);
+        s += buf;
+    }
     for (const MeshVertex& v : m.vertices) { snprintf(buf, sizeof(buf), "vt %.5f %.5f\n", v.u, v.v); s += buf; }
     for (const MeshVertex& v : m.vertices) { snprintf(buf, sizeof(buf), "vn %.5f %.5f %.5f\n", v.nx, v.ny, v.nz); s += buf; }
     for (size_t t = 0; t + 3 <= m.indices.size(); t += 3) {
@@ -4932,6 +4941,7 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
     struct V3 { float x, y, z; };
     struct V2 { float u, v; };
     std::vector<V3> positions;
+    std::vector<V3> colors;       // parallel to positions; OBJ 2.0 "v x y z r g b"
     std::vector<V3> normals;
     std::vector<V2> texcoords;
     std::vector<MeshVertex> verts;
@@ -4943,9 +4953,21 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
     {
         if (line[0] == 'v' && line[1] == ' ')
         {
-            V3 v;
-            if (sscanf(line + 2, "%f %f %f", &v.x, &v.y, &v.z) == 3)
+            // OBJ 2.0 extension: an optional r g b follows the position
+            // (see github.com/myuu-151/OBJ-2.0). 3 floats = position only;
+            // 6 floats = position + per-vertex color. Accepts 0..1 or 0..255.
+            V3 v; float c[3] = { 1.0f, 1.0f, 1.0f };
+            int n = sscanf(line + 2, "%f %f %f %f %f %f", &v.x, &v.y, &v.z, &c[0], &c[1], &c[2]);
+            if (n >= 3) {
                 positions.push_back(v);
+                if (n >= 6) {
+                    if (c[0] > 1.0f || c[1] > 1.0f || c[2] > 1.0f) {
+                        c[0] /= 255.0f; c[1] /= 255.0f; c[2] /= 255.0f; // 0..255 -> 0..1
+                    }
+                    out.hasVertexColor = true;
+                }
+                colors.push_back({ c[0], c[1], c[2] });
+            }
         }
         else if (line[0] == 'v' && line[1] == 't')
         {
@@ -4996,7 +5018,9 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
                 { mv.u = texcoords[tci].u; mv.v = texcoords[tci].v; }
                 if (nni >= 0 && nni < (int)normals.size())
                 { mv.nx = normals[nni].x; mv.ny = normals[nni].y; mv.nz = normals[nni].z; }
-                mv.r = mv.g = mv.b = 1.0f;
+                if (pi >= 0 && pi < (int)colors.size())
+                { mv.r = colors[pi].x; mv.g = colors[pi].y; mv.b = colors[pi].z; }
+                else mv.r = mv.g = mv.b = 1.0f;
                 mv.objPosIdx = pi;
                 verts.push_back(mv);
             }
@@ -15143,6 +15167,7 @@ void FrameTick(float dt)
                 for (const auto& ma : sMeshAssets)
                 {
                     GBAMeshExport me;
+                    me.hasVertexColor = ma.hasVertexColor ? 1 : 0;
                     for (const auto& v : ma.vertices)
                     {
                         me.positions.push_back(v.px);
@@ -15154,6 +15179,12 @@ void FrameTick(float dt)
                         me.objPosIdx.push_back(v.objPosIdx);
                         me.uvs.push_back(v.u);
                         me.uvs.push_back(v.v);
+                        if (ma.hasVertexColor) {
+                            auto to8 = [](float c){ int i = (int)lroundf(c * 255.0f); return (uint8_t)(i < 0 ? 0 : i > 255 ? 255 : i); };
+                            me.vertexColors.push_back(to8(v.r));
+                            me.vertexColors.push_back(to8(v.g));
+                            me.vertexColors.push_back(to8(v.b));
+                        }
                     }
                     me.indices = ma.indices;
                     if (ma.useQuads)
@@ -30283,6 +30314,13 @@ void Render3DViewport()
                 glDisable(GL_LIGHTING);
                 glColor3f(0.35f, 1.0f, 0.55f);
             }
+            // OBJ 2.0 per-vertex colors: when present and untextured, drive the
+            // lit color from each vertex instead of the per-mesh material color.
+            bool vcol = ma.hasVertexColor && !useTex && !wf;
+            if (vcol) {
+                glEnable(GL_COLOR_MATERIAL);
+                glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+            }
             // Draw triangles
             if (!ma.indices.empty())
             {
@@ -30292,6 +30330,7 @@ void Render3DViewport()
                     const MeshVertex& v = ma.vertices[ma.indices[ti]];
                     if (useTex && !wf)
                         glTexCoord2f(v.u, 1.0f - v.v);
+                    if (vcol) glColor3f(v.r, v.g, v.b);
                     glNormal3f(v.nx, v.ny, v.nz);
                     glVertex3f(v.px, v.py, v.pz);
                 }
@@ -30309,21 +30348,28 @@ void Render3DViewport()
                     const MeshVertex& v3 = ma.vertices[ma.quadIndices[qi+3]];
                     // tri 1: v0, v1, v2
                     if (useTex) glTexCoord2f(v0.u, 1.0f - v0.v);
+                    if (vcol) glColor3f(v0.r, v0.g, v0.b);
                     glNormal3f(v0.nx, v0.ny, v0.nz); glVertex3f(v0.px, v0.py, v0.pz);
                     if (useTex) glTexCoord2f(v1.u, 1.0f - v1.v);
+                    if (vcol) glColor3f(v1.r, v1.g, v1.b);
                     glNormal3f(v1.nx, v1.ny, v1.nz); glVertex3f(v1.px, v1.py, v1.pz);
                     if (useTex) glTexCoord2f(v2.u, 1.0f - v2.v);
+                    if (vcol) glColor3f(v2.r, v2.g, v2.b);
                     glNormal3f(v2.nx, v2.ny, v2.nz); glVertex3f(v2.px, v2.py, v2.pz);
                     // tri 2: v0, v2, v3
                     if (useTex) glTexCoord2f(v0.u, 1.0f - v0.v);
+                    if (vcol) glColor3f(v0.r, v0.g, v0.b);
                     glNormal3f(v0.nx, v0.ny, v0.nz); glVertex3f(v0.px, v0.py, v0.pz);
                     if (useTex) glTexCoord2f(v2.u, 1.0f - v2.v);
+                    if (vcol) glColor3f(v2.r, v2.g, v2.b);
                     glNormal3f(v2.nx, v2.ny, v2.nz); glVertex3f(v2.px, v2.py, v2.pz);
                     if (useTex && !wf) glTexCoord2f(v3.u, 1.0f - v3.v);
+                    if (vcol) glColor3f(v3.r, v3.g, v3.b);
                     glNormal3f(v3.nx, v3.ny, v3.nz); glVertex3f(v3.px, v3.py, v3.pz);
                 }
                 glEnd();
             }
+            if (vcol) glDisable(GL_COLOR_MATERIAL);
             if (wf) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL); // restore fill for next mesh
 
             if (useTex)

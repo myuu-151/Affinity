@@ -188,6 +188,7 @@ struct MeshAsset
     bool collision = true; // true = generate collision faces for this mesh
     int drawPriority = 0; // 0 = draws on top (last), higher = draws first (behind)
     bool visible = true; // false = invisible collision-only mesh (saves CPU on GBA)
+    bool hasVertexColor = false; // true = OBJ 2.0 per-vertex colors loaded (v x y z r g b)
 
     // Quad index buffer — 4 consecutive indices per quad face from OBJ
     // OBJ quads are preserved as-is, not force-triangulated
