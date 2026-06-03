@@ -14,7 +14,18 @@ namespace Affinity
 struct GBARiggedMeshExport
 {
     std::string name;
-    std::vector<uint32_t> dsm;        // DSM (geometry display list)
+    // One geometry group per material slot. Each group is its own DSM (only the
+    // triangles tagged with that material) plus its own base-color texture; the
+    // DS binds one texture per draw, so multi-material rigs draw group-by-group.
+    // All groups share the same bones, so they share the clips' DSA below.
+    struct MatGroup {
+        std::vector<uint32_t> dsm;    // DSM (geometry display list) for this slot
+        bool textured = false;
+        int texW = 0, texH = 0;
+        std::vector<uint8_t> texPixels;   // one byte per pixel, palette index 0..15
+        uint32_t texPalette[16] = {};     // RGBA8
+    };
+    std::vector<MatGroup> groups;
     struct Clip {
         std::string name;
         int frames = 0;
@@ -24,11 +35,9 @@ struct GBARiggedMeshExport
     std::vector<Clip> clips;
     bool cameraLight = false;         // light follows the camera (headlamp)
     float lightX = 0.0f, lightY = 0.0f; // headlamp aim (pitch/yaw degrees)
-    // Base-color texture (16-colour indexed, up to 256x256), or textured=false.
-    bool textured = false;
-    int texW = 0, texH = 0;
-    std::vector<uint8_t> texPixels;   // one byte per pixel, palette index 0..15
-    uint32_t texPalette[16] = {};     // RGBA8
+
+    // Convenience: a rig is renderable if it has at least one non-empty group.
+    bool hasGeometry() const { return !groups.empty() && !groups[0].dsm.empty(); }
 };
 
 // Package the current map into a .nds ROM.

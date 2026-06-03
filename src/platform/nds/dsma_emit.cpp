@@ -137,7 +137,7 @@ struct DisplayList {
 
 namespace DsmaEmit {
 
-std::vector<uint32_t> BuildDSM(const RiggedMeshAsset& rm, int texW, int texH, bool smooth)
+std::vector<uint32_t> BuildDSM(const RiggedMeshAsset& rm, int texW, int texH, bool smooth, int matSlot)
 {
     DisplayList dl;
     dl.switchVtxs(0); // triangles
@@ -169,6 +169,8 @@ std::vector<uint32_t> BuildDSM(const RiggedMeshAsset& rm, int texW, int texH, bo
     }
 
     for (int t = 0; t < nTri; t++) {
+        // Multi-material: only emit triangles tagged with the requested slot.
+        if (matSlot >= 0 && t < (int)rm.triMaterial.size() && rm.triMaterial[t] != matSlot) continue;
         V3 fn = triNormal[t];
         for (int k = 0; k < 3; k++) {
             uint32_t vi = rm.indices[t*3 + k];

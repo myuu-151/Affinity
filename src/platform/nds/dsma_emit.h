@@ -14,7 +14,9 @@ namespace DsmaEmit {
 // float texcoords), matching the converter's --texture argument.
 // smooth=true emits per-vertex normals (smooth shading); false emits per-face
 // normals (flat, the DSMA default).
-std::vector<uint32_t> BuildDSM(const RiggedMeshAsset& rm, int texW, int texH, bool smooth = false);
+// matSlot >= 0 emits only triangles tagged with that material slot (multi-
+// material rigs build one DSM per slot); -1 emits all triangles.
+std::vector<uint32_t> BuildDSM(const RiggedMeshAsset& rm, int texW, int texH, bool smooth = false, int matSlot = -1);
 
 // Build the DSA animation blob (u32 words: version, frameCount, boneCount, then
 // per-frame per-bone pos.xyz + quat.wxyz in 20.12 fixed point) for one clip.

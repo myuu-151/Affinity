@@ -258,6 +258,17 @@ bool LoadRiggedGLTF(const std::string& path, RiggedMeshAsset& out, std::string* 
     for (float& v : out.boundsMin) v =  1e30f;
     for (float& v : out.boundsMax) v = -1e30f;
 
+    // Distinct materials -> slots (cap 8). out.triMaterial records the slot per
+    // triangle so export/runtime can bind each material's texture and draw its
+    // group separately (the DS binds one texture per draw).
+    std::vector<const cgltf_material*> matSlots;
+    auto slotOf = [&](const cgltf_material* m) -> int {
+        if (!m) return 0;
+        for (size_t i = 0; i < matSlots.size(); i++) if (matSlots[i] == m) return (int)i;
+        if ((int)matSlots.size() < 8) { matSlots.push_back(m); return (int)matSlots.size() - 1; }
+        return 0; // more than 8 materials: fold the overflow into slot 0
+    };
+
     for (cgltf_size p = 0; p < mesh->primitives_count; p++) {
         const cgltf_primitive* prim = &mesh->primitives[p];
         int aPos = findAttr(prim, cgltf_attribute_type_position, 0);
@@ -280,6 +291,7 @@ bool LoadRiggedGLTF(const std::string& path, RiggedMeshAsset& out, std::string* 
             baseR = bc[0]; baseG = bc[1]; baseB = bc[2];
         }
 
+        int primSlot = slotOf(prim->material);
         uint32_t vbase = (uint32_t)out.baseVerts.size();
         cgltf_size vcount = accPos->count;
         for (cgltf_size v = 0; v < vcount; v++) {
@@ -333,49 +345,46 @@ bool LoadRiggedGLTF(const std::string& path, RiggedMeshAsset& out, std::string* 
                 out.indices.push_back(i2);
                 out.indices.push_back(i1);
                 out.indices.push_back(i0);
+                out.triMaterial.push_back((uint8_t)primSlot);
             }
         } else {
             for (cgltf_size i = 0; i + 3 <= vcount; i += 3) {
                 out.indices.push_back(vbase + (uint32_t)(i + 2));
                 out.indices.push_back(vbase + (uint32_t)(i + 1));
                 out.indices.push_back(vbase + (uint32_t)(i + 0));
+                out.triMaterial.push_back((uint8_t)primSlot);
             }
         }
     }
 
     if (out.baseVerts.empty()) { cgltf_free(data); return fail("Skinned mesh has no vertices"); }
 
-    // ---- Texture: one base-color image per glTF, up to 256x256 -------------
+    // ---- Textures: one base-color image per material slot, up to 256x256 ----
     // Decode (embedded GLB chunk or external file) to RGBA, resize to a
     // power-of-two <= 256, then median-cut to a 16-colour indexed DS texture.
+    // Slot 0 fills the inline fields; slots 1+ go to out.extraMaterials.
     {
-        cgltf_image* image = nullptr;
-        for (cgltf_size p = 0; p < mesh->primitives_count; p++) {
-            const cgltf_material* mat = mesh->primitives[p].material;
-            if (!mat) continue;
-            if (out.materialName.empty() && mat->name) out.materialName = mat->name;
-            if (!image && mat->has_pbr_metallic_roughness &&
+        auto decodeMat = [&](const cgltf_material* mat, RigMaterial& dst) {
+            if (mat && mat->name) dst.name = mat->name;
+            cgltf_image* image = nullptr;
+            if (mat && mat->has_pbr_metallic_roughness &&
                 mat->pbr_metallic_roughness.base_color_texture.texture &&
                 mat->pbr_metallic_roughness.base_color_texture.texture->image)
                 image = mat->pbr_metallic_roughness.base_color_texture.texture->image;
-        }
-        // Fall back to the first material in the file if the primitive had none.
-        if (out.materialName.empty() && data->materials_count > 0 && data->materials[0].name)
-            out.materialName = data->materials[0].name;
-        int iw = 0, ih = 0; unsigned char* rgba = nullptr;
-        if (image) {
-            if (image->buffer_view) {
-                const cgltf_buffer_view* bv = image->buffer_view;
-                const unsigned char* bytes = (const unsigned char*)bv->buffer->data + bv->offset;
-                rgba = stbi_load_from_memory(bytes, (int)bv->size, &iw, &ih, nullptr, 4);
-            } else if (image->uri && std::strncmp(image->uri, "data:", 5) != 0) {
-                std::string dir = path; size_t s = dir.find_last_of("/\\");
-                dir = (s == std::string::npos) ? "" : dir.substr(0, s + 1);
-                rgba = stbi_load((dir + image->uri).c_str(), &iw, &ih, nullptr, 4);
-                if (rgba) out.texturePath = image->uri;
+            int iw = 0, ih = 0; unsigned char* rgba = nullptr;
+            if (image) {
+                if (image->buffer_view) {
+                    const cgltf_buffer_view* bv = image->buffer_view;
+                    const unsigned char* bytes = (const unsigned char*)bv->buffer->data + bv->offset;
+                    rgba = stbi_load_from_memory(bytes, (int)bv->size, &iw, &ih, nullptr, 4);
+                } else if (image->uri && std::strncmp(image->uri, "data:", 5) != 0) {
+                    std::string dir = path; size_t s = dir.find_last_of("/\\");
+                    dir = (s == std::string::npos) ? "" : dir.substr(0, s + 1);
+                    rgba = stbi_load((dir + image->uri).c_str(), &iw, &ih, nullptr, 4);
+                    if (rgba) dst.texturePath = image->uri;
+                }
             }
-        }
-        if (rgba && iw > 0 && ih > 0) {
+            if (!(rgba && iw > 0 && ih > 0)) return;
             int tw = 1, th = 1;
             while (tw < iw && tw < 256) tw <<= 1;
             while (th < ih && th < 256) th <<= 1;
@@ -413,11 +422,30 @@ bool LoadRiggedGLTF(const std::string& path, RiggedMeshAsset& out, std::string* 
                 }
                 indexed[i] = (uint8_t)best;
             }
-            out.texW = tw; out.texH = th;
-            out.texturePixels = std::move(indexed);
-            std::memcpy(out.texturePalette, pal, sizeof(pal));
-            out.textured = true;
+            dst.texW = tw; dst.texH = th;
+            dst.texturePixels = std::move(indexed);
+            std::memcpy(dst.texturePalette, pal, sizeof(pal));
+            dst.textured = true;
+        };
+
+        for (size_t s = 0; s < matSlots.size(); s++) {
+            RigMaterial rmat;
+            decodeMat(matSlots[s], rmat);
+            if (s == 0) {
+                out.materialName  = rmat.name;
+                out.textured      = rmat.textured;
+                out.textureManual = false;
+                out.texturePath   = rmat.texturePath;
+                out.texturePixels = std::move(rmat.texturePixels);
+                std::memcpy(out.texturePalette, rmat.texturePalette, sizeof(out.texturePalette));
+                out.texW = rmat.texW; out.texH = rmat.texH;
+            } else {
+                out.extraMaterials.push_back(std::move(rmat));
+            }
         }
+        // Fall back to the file's first material name if slot 0 had none.
+        if (out.materialName.empty() && data->materials_count > 0 && data->materials[0].name)
+            out.materialName = data->materials[0].name;
     }
 
     // ---- Animations: sample at keyframe times, compose hierarchy -----------

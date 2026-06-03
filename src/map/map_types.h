@@ -243,6 +243,21 @@ struct RigAnimClip
     bool loop = true;   // true = loop, false = play once then hold last frame
 };
 
+// One material slot's base-color texture (palettized like MeshAsset). A rig's
+// slot 0 is stored inline on RiggedMeshAsset (legacy single-texture layout);
+// slots 1..N live in RiggedMeshAsset::extraMaterials.
+struct RigMaterial
+{
+    std::string name;                        // glTF material slot name
+    bool textured = false;
+    bool textureManual = false;              // true = user-assigned PNG (persisted by path)
+    std::string texturePath;
+    std::vector<uint8_t> texturePixels;      // indexed pixels (texW * texH)
+    uint32_t texturePalette[16] = {};
+    int texW = 0, texH = 0;
+    unsigned int glTexID = 0;                // OpenGL texture for editor preview
+};
+
 struct RiggedMeshAsset
 {
     std::string name = "Rig";
@@ -274,6 +289,23 @@ struct RiggedMeshAsset
     uint32_t texturePalette[16] = {};
     int texW = 0, texH = 0;
     unsigned int glTexID = 0;                // OpenGL texture for editor preview
+
+    // Multi-material: the fields above are material slot 0; additional glTF
+    // materials live here as slots 1..N. triMaterial holds the slot index per
+    // triangle (size = indices.size()/3); empty means every triangle is slot 0.
+    // On the DS each slot is drawn as its own group with its own texture bound.
+    std::vector<RigMaterial> extraMaterials;
+    std::vector<uint8_t>     triMaterial;
+    int matCount() const { return 1 + (int)extraMaterials.size(); }
+    // Uniform read access to a slot's texture data (slot 0 = inline fields).
+    bool matTextured(int s) const { return s == 0 ? textured : extraMaterials[s-1].textured; }
+    const std::vector<uint8_t>& matPixels(int s) const { return s == 0 ? texturePixels : extraMaterials[s-1].texturePixels; }
+    const uint32_t* matPalette(int s) const { return s == 0 ? texturePalette : extraMaterials[s-1].texturePalette; }
+    int matTexW(int s) const { return s == 0 ? texW : extraMaterials[s-1].texW; }
+    int matTexH(int s) const { return s == 0 ? texH : extraMaterials[s-1].texH; }
+    unsigned int matGlTexID(int s) const { return s == 0 ? glTexID : extraMaterials[s-1].glTexID; }
+    const std::string& matName(int s) const { return s == 0 ? materialName : extraMaterials[s-1].name; }
+    const std::string& matPath(int s) const { return s == 0 ? texturePath : extraMaterials[s-1].texturePath; }
 
     // Collision proxy box. Authored here, drawn as a wireframe in the 3D tab.
     // Local-space (follows the placed glTF's transform); static — does not

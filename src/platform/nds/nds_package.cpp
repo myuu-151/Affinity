@@ -1064,9 +1064,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 playerRig = s.riggedMeshIdx; playerClip = s.rigAnimIdx; playerScale = s.scale; break;
             }
         }
-        if (playerRig >= 0 && !rigs[playerRig].dsm.empty() && !rigs[playerRig].clips.empty()) {
+        if (playerRig >= 0 && rigs[playerRig].hasGeometry() && !rigs[playerRig].clips.empty()) {
             const auto& rig = rigs[playerRig];
-            auto emitWords = [&](const char* name, const std::vector<uint32_t>& w) {
+            auto emitWords = [&](const std::string& name, const std::vector<uint32_t>& w) {
                 f << "static const u32 " << name << "[] = {";
                 for (size_t i = 0; i < w.size(); i++) {
                     if (i % 8 == 0) f << "\n    ";
@@ -1074,13 +1074,68 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 }
                 f << "\n};\n";
             };
+            // 4bpp-packed 16-colour texture + RGB15 palette, named <base>.
+            auto emitTex = [&](const std::string& base, const GBARiggedMeshExport::MatGroup& g) {
+                int packed = (g.texW * g.texH + 1) / 2;
+                f << "static const u8 " << base << "_tex[] = {";
+                for (int i = 0; i < packed; i++) {
+                    int lo = (i*2+0 < (int)g.texPixels.size()) ? (g.texPixels[i*2+0] & 0xF) : 0;
+                    int hi = (i*2+1 < (int)g.texPixels.size()) ? (g.texPixels[i*2+1] & 0xF) : 0;
+                    if (i % 16 == 0) f << "\n    ";
+                    f << ((hi << 4) | lo) << ",";
+                }
+                f << "\n};\n";
+                f << "static const u16 " << base << "_texpal[] = {";
+                for (int i = 0; i < 16; i++) {
+                    uint32_t c = g.texPalette[i];
+                    uint16_t c15 = (uint16_t)((((c >> 0) & 0xFF) >> 3)
+                                            | ((((c >> 8) & 0xFF) >> 3) << 5)
+                                            | ((((c >> 16) & 0xFF) >> 3) << 10));
+                    char hex[8]; snprintf(hex, sizeof(hex), "0x%04X", c15);
+                    f << " " << hex << ",";
+                }
+                f << " };\n";
+            };
             f << "#define AFN_HAS_PLAYER_RIG 1\n";
-            emitWords("afn_player_rig_dsm", rig.dsm);
-            int nclips = (int)rig.clips.size();
-            for (int c = 0; c < nclips; c++) {
-                std::string nm = "afn_player_rig_dsa_" + std::to_string(c);
-                emitWords(nm.c_str(), rig.clips[c].dsa);
+            int ng = (int)rig.groups.size();
+            f << "#define AFN_PLAYER_RIG_MATCOUNT " << ng << "\n";
+            // Per-material-group geometry + texture.
+            for (int g = 0; g < ng; g++)
+                emitWords("afn_player_rig_dsm_" + std::to_string(g), rig.groups[g].dsm);
+            f << "static const u32* const afn_player_rig_dsm[] = {";
+            for (int g = 0; g < ng; g++) f << " afn_player_rig_dsm_" << g << ",";
+            f << " };\n";
+            for (int g = 0; g < ng; g++) {
+                const auto& grp = rig.groups[g];
+                if (grp.textured && !grp.texPixels.empty() && grp.texW > 0 && grp.texH > 0)
+                    emitTex("afn_player_rig_g" + std::to_string(g), grp);
             }
+            f << "static const u8* const afn_player_rig_tex[] = {";
+            for (int g = 0; g < ng; g++) {
+                const auto& grp = rig.groups[g];
+                if (grp.textured && !grp.texPixels.empty() && grp.texW > 0 && grp.texH > 0)
+                    f << " afn_player_rig_g" << g << "_tex,";
+                else f << " 0,";
+            }
+            f << " };\n";
+            f << "static const u16* const afn_player_rig_texpal[] = {";
+            for (int g = 0; g < ng; g++) {
+                const auto& grp = rig.groups[g];
+                if (grp.textured && !grp.texPixels.empty() && grp.texW > 0 && grp.texH > 0)
+                    f << " afn_player_rig_g" << g << "_texpal,";
+                else f << " 0,";
+            }
+            f << " };\n";
+            f << "static const u16 afn_player_rig_texw[] = {";
+            for (int g = 0; g < ng; g++) f << " " << rig.groups[g].texW << ",";
+            f << " };\n";
+            f << "static const u16 afn_player_rig_texh[] = {";
+            for (int g = 0; g < ng; g++) f << " " << rig.groups[g].texH << ",";
+            f << " };\n";
+            // Animation (shared across groups — same bones).
+            int nclips = (int)rig.clips.size();
+            for (int c = 0; c < nclips; c++)
+                emitWords("afn_player_rig_dsa_" + std::to_string(c), rig.clips[c].dsa);
             f << "static const u32* const afn_player_rig_dsa[] = {";
             for (int c = 0; c < nclips; c++) f << " afn_player_rig_dsa_" << c << ",";
             f << " };\n";
@@ -1091,48 +1146,16 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             f << "#define AFN_PLAYER_RIG_CLIP_COUNT " << nclips << "\n";
             if (playerClip < 0 || playerClip >= nclips) playerClip = 0;
             f << "#define AFN_PLAYER_RIG_DEFAULT_CLIP " << playerClip << "\n";
-            // Scale as 20.12 f32. OBJ meshes render on device at coord*scale/64 DS
-            // units; the rig's DSM stores coord*4096, so drawing it at scale*64
-            // gives coord*scale/64 too — matching OBJ sizing 1:1 with the editor's
-            // Scale field. Tune via the player sprite's Scale field.
+            // Scale as 20.12 f32 (scale*64 matches OBJ sizing — see editor).
             f << "#define AFN_PLAYER_RIG_SCALE_F32 " << (int)lroundf(playerScale * 64.0f) << "\n";
             if (rig.cameraLight) {
                 f << "#define AFN_PLAYER_RIG_CAMLIGHT 1\n";
                 float ax = rig.lightX * 3.14159265f/180.0f, ay = rig.lightY * 3.14159265f/180.0f;
                 float cx = cosf(ax), sx = sinf(ax), cy = cosf(ay), sy = sinf(ay);
-                // DS light direction = direction light travels = -(direction to light).
-                // Always emit a decimal point so e.g. 0 doesn't become the invalid "0f".
                 char lbuf[80];
                 snprintf(lbuf, sizeof(lbuf), "#define AFN_PLAYER_RIG_LIGHT_DX (%.6ff)\n", -cx*sy); f << lbuf;
                 snprintf(lbuf, sizeof(lbuf), "#define AFN_PLAYER_RIG_LIGHT_DY (%.6ff)\n",  sx);    f << lbuf;
                 snprintf(lbuf, sizeof(lbuf), "#define AFN_PLAYER_RIG_LIGHT_DZ (%.6ff)\n", -cx*cy); f << lbuf;
-            }
-            // Base-color texture (16-colour, 4bpp packed) + RGB15 palette, same
-            // format as mesh textures so fps3d uploads it via GL_RGB16.
-            if (rig.textured && !rig.texPixels.empty() && rig.texW > 0 && rig.texH > 0) {
-                int texPx = rig.texW * rig.texH;
-                int packed = (texPx + 1) / 2;
-                f << "static const u8 afn_player_rig_tex[] = {";
-                for (int i = 0; i < packed; i++) {
-                    int lo = (i*2+0 < (int)rig.texPixels.size()) ? (rig.texPixels[i*2+0] & 0xF) : 0;
-                    int hi = (i*2+1 < (int)rig.texPixels.size()) ? (rig.texPixels[i*2+1] & 0xF) : 0;
-                    if (i % 16 == 0) f << "\n    ";
-                    f << ((hi << 4) | lo) << ",";
-                }
-                f << "\n};\n";
-                f << "static const u16 afn_player_rig_texpal[] = {";
-                for (int i = 0; i < 16; i++) {
-                    uint32_t c = rig.texPalette[i];
-                    uint16_t c15 = (uint16_t)((((c >> 0) & 0xFF) >> 3)
-                                            | ((((c >> 8) & 0xFF) >> 3) << 5)
-                                            | ((((c >> 16) & 0xFF) >> 3) << 10));
-                    char hex[8]; snprintf(hex, sizeof(hex), "0x%04X", c15);
-                    f << " " << hex << ",";
-                }
-                f << " };\n";
-                f << "#define AFN_PLAYER_RIG_TEXTURED 1\n";
-                f << "#define AFN_PLAYER_RIG_TEXW " << rig.texW << "\n";
-                f << "#define AFN_PLAYER_RIG_TEXH " << rig.texH << "\n";
             }
             f << "\n";
         }
@@ -1150,7 +1173,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             const auto& s = sprites[si];
             if (s.spriteType == 1) continue; // the player rig is handled above
             if (s.riggedMeshIdx < 0 || s.riggedMeshIdx >= (int)rigs.size()) continue;
-            if (rigs[s.riggedMeshIdx].dsm.empty() || rigs[s.riggedMeshIdx].clips.empty()) continue;
+            if (!rigs[s.riggedMeshIdx].hasGeometry() || rigs[s.riggedMeshIdx].clips.empty()) continue;
             npc.push_back(si);
         }
         if (!npc.empty()) {
@@ -1162,12 +1185,57 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 }
                 f << "\n};\n";
             };
+            auto emitTex = [&](const std::string& base, const GBARiggedMeshExport::MatGroup& g) {
+                int packed = (g.texW * g.texH + 1) / 2;
+                f << "static const u8 " << base << "_tex[] = {";
+                for (int p = 0; p < packed; p++) {
+                    int lo = (p*2+0 < (int)g.texPixels.size()) ? (g.texPixels[p*2+0] & 0xF) : 0;
+                    int hi = (p*2+1 < (int)g.texPixels.size()) ? (g.texPixels[p*2+1] & 0xF) : 0;
+                    if (p % 16 == 0) f << "\n    ";
+                    f << ((hi << 4) | lo) << ",";
+                }
+                f << "\n};\n";
+                f << "static const u16 " << base << "_texpal[] = {";
+                for (int p = 0; p < 16; p++) {
+                    uint32_t c = g.texPalette[p];
+                    uint16_t c15 = (uint16_t)((((c >> 0) & 0xFF) >> 3)
+                                            | ((((c >> 8) & 0xFF) >> 3) << 5)
+                                            | ((((c >> 16) & 0xFF) >> 3) << 10));
+                    char hex[8]; snprintf(hex, sizeof(hex), "0x%04X", c15);
+                    f << " " << hex << ",";
+                }
+                f << " };\n";
+            };
+            auto grpTextured = [](const GBARiggedMeshExport::MatGroup& g) {
+                return g.textured && !g.texPixels.empty() && g.texW > 0 && g.texH > 0;
+            };
             int n = (int)npc.size();
             // Per-instance asset blobs (duplicated even if two NPCs share a rig).
             for (int i = 0; i < n; i++) {
                 const auto& rig = rigs[sprites[npc[i]].riggedMeshIdx];
                 std::string A = "afn_npc_A" + std::to_string(i);
-                emitWords(A + "_dsm", rig.dsm);
+                int ng = (int)rig.groups.size();
+                // Per-material-group geometry + texture.
+                for (int g = 0; g < ng; g++)
+                    emitWords(A + "_dsm_" + std::to_string(g), rig.groups[g].dsm);
+                f << "static const u32* const " << A << "_dsm[] = {";
+                for (int g = 0; g < ng; g++) f << " " << A << "_dsm_" << g << ",";
+                f << " };\n";
+                for (int g = 0; g < ng; g++)
+                    if (grpTextured(rig.groups[g])) emitTex(A + "_g" + std::to_string(g), rig.groups[g]);
+                f << "static const u8* const " << A << "_tex[] = {";
+                for (int g = 0; g < ng; g++) f << (grpTextured(rig.groups[g]) ? (" " + A + "_g" + std::to_string(g) + "_tex,") : " 0,");
+                f << " };\n";
+                f << "static const u16* const " << A << "_texpal[] = {";
+                for (int g = 0; g < ng; g++) f << (grpTextured(rig.groups[g]) ? (" " + A + "_g" + std::to_string(g) + "_texpal,") : " 0,");
+                f << " };\n";
+                f << "static const u16 " << A << "_texw[] = {";
+                for (int g = 0; g < ng; g++) f << " " << rig.groups[g].texW << ",";
+                f << " };\n";
+                f << "static const u16 " << A << "_texh[] = {";
+                for (int g = 0; g < ng; g++) f << " " << rig.groups[g].texH << ",";
+                f << " };\n";
+                // Animation (shared across the instance's material groups).
                 int nclips = (int)rig.clips.size();
                 for (int c = 0; c < nclips; c++)
                     emitWords(A + "_dsa_" + std::to_string(c), rig.clips[c].dsa);
@@ -1177,27 +1245,6 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "static const u8 " << A << "_loop[] = {";
                 for (int c = 0; c < nclips; c++) f << " " << (rig.clips[c].loop ? 1 : 0) << ",";
                 f << " };\n";
-                if (rig.textured && !rig.texPixels.empty() && rig.texW > 0 && rig.texH > 0) {
-                    int texPx = rig.texW * rig.texH, packed = (texPx + 1) / 2;
-                    f << "static const u8 " << A << "_tex[] = {";
-                    for (int p = 0; p < packed; p++) {
-                        int lo = (p*2+0 < (int)rig.texPixels.size()) ? (rig.texPixels[p*2+0] & 0xF) : 0;
-                        int hi = (p*2+1 < (int)rig.texPixels.size()) ? (rig.texPixels[p*2+1] & 0xF) : 0;
-                        if (p % 16 == 0) f << "\n    ";
-                        f << ((hi << 4) | lo) << ",";
-                    }
-                    f << "\n};\n";
-                    f << "static const u16 " << A << "_texpal[] = {";
-                    for (int p = 0; p < 16; p++) {
-                        uint32_t c = rig.texPalette[p];
-                        uint16_t c15 = (uint16_t)((((c >> 0) & 0xFF) >> 3)
-                                                | ((((c >> 8) & 0xFF) >> 3) << 5)
-                                                | ((((c >> 16) & 0xFF) >> 3) << 10));
-                        char hex[8]; snprintf(hex, sizeof(hex), "0x%04X", c15);
-                        f << " " << hex << ",";
-                    }
-                    f << " };\n";
-                }
             }
             // Per-instance index arrays.
             f << "#define AFN_HAS_NPC_RIGS 1\n";
@@ -1207,28 +1254,21 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 for (int i = 0; i < n; i++) { f << " "; valFn(i); f << ","; }
                 f << " };\n";
             };
-            perInst("u32* const", "dsm", [&](int i){ f << "afn_npc_A" << i << "_dsm"; });
-            perInst("u32* const*", "dsa", [&](int i){ f << "afn_npc_A" << i << "_dsa"; });
-            perInst("u8* const", "loop", [&](int i){ f << "afn_npc_A" << i << "_loop"; });
-            perInst("u8", "clipcount", [&](int i){ f << (int)rigs[sprites[npc[i]].riggedMeshIdx].clips.size(); });
-            perInst("u8", "defclip", [&](int i){
+            perInst("u32* const*", "dsm",    [&](int i){ f << "afn_npc_A" << i << "_dsm"; });    // [i][group]
+            perInst("u32* const*", "dsa",    [&](int i){ f << "afn_npc_A" << i << "_dsa"; });    // [i][clip]
+            perInst("u8* const",   "loop",   [&](int i){ f << "afn_npc_A" << i << "_loop"; });
+            perInst("u8",  "matcount",  [&](int i){ f << (int)rigs[sprites[npc[i]].riggedMeshIdx].groups.size(); });
+            perInst("u8",  "clipcount", [&](int i){ f << (int)rigs[sprites[npc[i]].riggedMeshIdx].clips.size(); });
+            perInst("u8",  "defclip", [&](int i){
                 const auto& s = sprites[npc[i]];
                 int dc = s.rigAnimIdx, nc = (int)rigs[s.riggedMeshIdx].clips.size();
                 f << ((dc < 0 || dc >= nc) ? 0 : dc);
             });
             perInst("int", "sprite", [&](int i){ f << npc[i]; });
-            perInst("u8* const", "tex", [&](int i){
-                const auto& rig = rigs[sprites[npc[i]].riggedMeshIdx];
-                if (rig.textured && !rig.texPixels.empty() && rig.texW > 0 && rig.texH > 0)
-                    f << "afn_npc_A" << i << "_tex"; else f << "0";
-            });
-            perInst("u16* const", "texpal", [&](int i){
-                const auto& rig = rigs[sprites[npc[i]].riggedMeshIdx];
-                if (rig.textured && !rig.texPixels.empty() && rig.texW > 0 && rig.texH > 0)
-                    f << "afn_npc_A" << i << "_texpal"; else f << "0";
-            });
-            perInst("u16", "texw", [&](int i){ f << rigs[sprites[npc[i]].riggedMeshIdx].texW; });
-            perInst("u16", "texh", [&](int i){ f << rigs[sprites[npc[i]].riggedMeshIdx].texH; });
+            perInst("u8* const*",  "tex",    [&](int i){ f << "afn_npc_A" << i << "_tex"; });     // [i][group]
+            perInst("u16* const*", "texpal", [&](int i){ f << "afn_npc_A" << i << "_texpal"; });
+            perInst("u16* const",  "texw",   [&](int i){ f << "afn_npc_A" << i << "_texw"; });    // [i][group]
+            perInst("u16* const",  "texh",   [&](int i){ f << "afn_npc_A" << i << "_texh"; });
             f << "\n";
         }
     }

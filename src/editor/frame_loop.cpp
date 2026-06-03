@@ -5166,40 +5166,59 @@ static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh)
     return true;
 }
 
-// Upload a rigged mesh's (already quantized) base-color texture as a GL texture
-// for the 3D-tab preview. Reconstructs RGBA from the 16-colour indexed pixels.
-static void UploadRigGLTexture(RiggedMeshAsset& rm)
+// Upload one quantized 16-colour texture as a GL texture (3D-tab preview),
+// reconstructing RGBA from the indexed pixels.
+static void UploadOneRigTex(unsigned int& glTexID, const std::vector<uint8_t>& pix,
+                            const uint32_t* pal, int tw, int th)
 {
-    if (!rm.textured || rm.texturePixels.empty() || rm.texW <= 0 || rm.texH <= 0) return;
-    std::vector<uint32_t> rgba(rm.texW * rm.texH);
-    for (int i = 0; i < rm.texW * rm.texH; i++) rgba[i] = rm.texturePalette[rm.texturePixels[i]];
-    if (rm.glTexID) glDeleteTextures(1, &rm.glTexID);
-    glGenTextures(1, &rm.glTexID);
-    glBindTexture(GL_TEXTURE_2D, rm.glTexID);
+    if (pix.empty() || tw <= 0 || th <= 0) return;
+    std::vector<uint32_t> rgba(tw * th);
+    for (int i = 0; i < tw * th; i++) rgba[i] = pal[pix[i] & 0xF];
+    if (glTexID) glDeleteTextures(1, &glTexID);
+    glGenTextures(1, &glTexID);
+    glBindTexture(GL_TEXTURE_2D, glTexID);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rm.texW, rm.texH, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
     glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+// Upload a rigged mesh's base-color texture(s) — one per material slot.
+static void UploadRigGLTexture(RiggedMeshAsset& rm)
+{
+    if (rm.textured) UploadOneRigTex(rm.glTexID, rm.texturePixels, rm.texturePalette, rm.texW, rm.texH);
+    for (auto& em : rm.extraMaterials)
+        if (em.textured) UploadOneRigTex(em.glTexID, em.texturePixels, em.texturePalette, em.texW, em.texH);
 }
 
 // Manually assign a texture PNG to a rigged mesh (the glTF material slot had no
 // usable image). Reuses LoadMeshTexture's load+resize+quantize+GL upload via a
 // scratch MeshAsset, then steals its texture into the rig.
-static bool LoadRigTextureFromFile(RiggedMeshAsset& rm, const std::string& path)
+static bool LoadRigTextureFromFile(RiggedMeshAsset& rm, int slot, const std::string& path)
 {
+    if (slot < 0 || slot >= rm.matCount()) return false;
     MeshAsset tmp;
     if (!LoadMeshTexture(path, tmp)) return false;
-    rm.texW = tmp.texW; rm.texH = tmp.texH;
-    rm.texturePixels = std::move(tmp.texturePixels);
-    memcpy(rm.texturePalette, tmp.texturePalette, sizeof(rm.texturePalette));
-    rm.textured = true;
-    rm.textureManual = true;
-    rm.texturePath = path;
-    if (rm.glTexID) glDeleteTextures(1, &rm.glTexID);
-    rm.glTexID = tmp.glTexID;   // steal the GL texture LoadMeshTexture created
-    tmp.glTexID = 0;
+    auto apply = [&](bool& textured, bool& manual, std::string& tpath,
+                     std::vector<uint8_t>& pix, uint32_t* pal, int& tw, int& th, unsigned int& gid) {
+        tw = tmp.texW; th = tmp.texH;
+        pix = std::move(tmp.texturePixels);
+        memcpy(pal, tmp.texturePalette, sizeof(uint32_t) * 16);
+        textured = true; manual = true; tpath = path;
+        if (gid) glDeleteTextures(1, &gid);
+        gid = tmp.glTexID;   // steal the GL texture LoadMeshTexture created
+        tmp.glTexID = 0;
+    };
+    if (slot == 0)
+        apply(rm.textured, rm.textureManual, rm.texturePath, rm.texturePixels,
+              rm.texturePalette, rm.texW, rm.texH, rm.glTexID);
+    else {
+        RigMaterial& em = rm.extraMaterials[slot - 1];
+        apply(em.textured, em.textureManual, em.texturePath, em.texturePixels,
+              em.texturePalette, em.texW, em.texH, em.glTexID);
+    }
     return true;
 }
 
@@ -5544,6 +5563,14 @@ static bool SaveProject(const std::string& path)
                 loopBits.empty() ? "-" : loopBits.c_str(), texP, rigFlags, rmA.lightX, rmA.lightY,
                 rmA.collisionType, rmA.colCenter[0], rmA.colCenter[1], rmA.colCenter[2],
                 rmA.colExtents[0], rmA.colExtents[1], rmA.colExtents[2]);
+        // Per-slot manual textures for material slots 1+ (slot 0 is field 4 above).
+        // Clips/materials are re-imported from the glTF, so only manual PNG paths
+        // need serializing. Format: rigMatTex=<rigIdx>|<slot>|<path>
+        for (int ms = 1; ms < rmA.matCount(); ms++) {
+            const RigMaterial& em = rmA.extraMaterials[ms - 1];
+            if (em.textureManual && !em.texturePath.empty())
+                fprintf(f, "rigMatTex=%d|%d|%s\n", ri, ms, em.texturePath.c_str());
+        }
     }
     fprintf(f, "\n");
 
@@ -6874,6 +6901,14 @@ static bool LoadProject(const std::string& path)
         }
         else if (strcmp(section, "RiggedMeshAssets") == 0)
         {
+            // Per-slot manual texture override for material slots 1+ (the rig was
+            // pushed by its rig= line just above; re-import already ran).
+            int mtRig = -1, mtSlot = 0; char mtPath[512] = {};
+            if (sscanf(line, "rigMatTex=%d|%d|%511[^\n]", &mtRig, &mtSlot, mtPath) == 3) {
+                if (mtRig >= 0 && mtRig < (int)sRiggedMeshAssets.size() && mtPath[0])
+                    LoadRigTextureFromFile(sRiggedMeshAssets[mtRig], mtSlot, std::string(mtPath));
+                continue;
+            }
             // count= is informational; rig= lines load sequentially. A failed
             // load still pushes a placeholder so sprite riggedMeshIdx stays aligned.
             char rname[256] = {}, rpath[512] = {}, rloop[64] = {}, rtex[512] = {};
@@ -6895,9 +6930,9 @@ static bool LoadProject(const std::string& path)
                     for (size_t ci = 0; ci < rm.clips.size() && rloop[ci]; ci++)
                         rm.clips[ci].loop = (rloop[ci] != '0');
                 }
-                // Re-apply a manually-assigned texture (overrides any glTF image).
+                // Re-apply a manually-assigned slot-0 texture (overrides glTF image).
                 if (nf >= 4 && rtex[0] && rtex[0] != '-')
-                    LoadRigTextureFromFile(rm, std::string(rtex));
+                    LoadRigTextureFromFile(rm, 0, std::string(rtex));
                 if (nf >= 5) { rm.smoothShading = (rflags & 1) != 0; rm.cameraLight = (rflags & 2) != 0; }
                 if (nf >= 7) { rm.lightX = rlx; rm.lightY = rly; }
                 if (nf >= 14) {
@@ -12819,33 +12854,46 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                 RiggedMeshAsset& rm = sRiggedMeshAssets[sp.riggedMeshIdx];
                 ImGui::Text("Bones: %d  Verts: %d  Tris: %d", rm.boneCount,
                             (int)rm.baseVerts.size(), (int)rm.indices.size() / 3);
-                // Material slot + texture import. The glTF often has a material
-                // slot but no usable image, so the texture is assigned here.
-                ImGui::Text("Material: %s", rm.materialName.empty() ? "(unnamed)" : rm.materialName.c_str());
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Import Texture...##rigtex")) {
-#ifdef _WIN32
-                    std::string tp = OpenFileDialog("Image Files\0*.png;*.jpg;*.bmp;*.tga\0All Files\0*.*\0", "png");
-                    if (!tp.empty()) {
-                        if (LoadRigTextureFromFile(rm, tp)) sProjectDirty = true;
-                        else snprintf(sRigImportError, sizeof(sRigImportError), "Texture load failed: %s", tp.c_str());
-                    }
-#endif
-                }
-                if (rm.textured) {
-                    std::string texName = rm.texturePath;
-                    size_t tsl = texName.find_last_of("/\\");
-                    if (tsl != std::string::npos) texName = texName.substr(tsl + 1);
-                    if (texName.empty()) texName = "(embedded)";
-                    ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.7f, 1.0f), "Texture: %s (%dx%d)", texName.c_str(), rm.texW, rm.texH);
+                // One row per material slot. The glTF often has a material slot
+                // but no usable image, so a texture can be assigned per slot.
+                if (rm.matCount() > 1)
+                    ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Materials (%d)", rm.matCount());
+                for (int ms = 0; ms < rm.matCount(); ms++) {
+                    ImGui::PushID(ms + 9500);
+                    const std::string& mname = rm.matName(ms);
+                    ImGui::Text("[%d] %s", ms, mname.empty() ? "(unnamed)" : mname.c_str());
                     ImGui::SameLine();
-                    if (ImGui::SmallButton("Clear##rigtexclr")) {
-                        rm.textured = false; rm.texturePixels.clear(); rm.texturePath.clear();
-                        if (rm.glTexID) { glDeleteTextures(1, &rm.glTexID); rm.glTexID = 0; }
-                        sProjectDirty = true;
+                    if (ImGui::SmallButton("Import Texture...##rigtex")) {
+#ifdef _WIN32
+                        std::string tp = OpenFileDialog("Image Files\0*.png;*.jpg;*.bmp;*.tga\0All Files\0*.*\0", "png");
+                        if (!tp.empty()) {
+                            if (LoadRigTextureFromFile(rm, ms, tp)) sProjectDirty = true;
+                            else snprintf(sRigImportError, sizeof(sRigImportError), "Texture load failed: %s", tp.c_str());
+                        }
+#endif
                     }
-                } else {
-                    ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Texture: (none — flat shaded)");
+                    if (rm.matTextured(ms)) {
+                        std::string texName = rm.matPath(ms);
+                        size_t tsl = texName.find_last_of("/\\");
+                        if (tsl != std::string::npos) texName = texName.substr(tsl + 1);
+                        if (texName.empty()) texName = "(embedded)";
+                        ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.7f, 1.0f), "    %s (%dx%d)", texName.c_str(), rm.matTexW(ms), rm.matTexH(ms));
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Clear##rigtexclr")) {
+                            if (ms == 0) {
+                                rm.textured = false; rm.texturePixels.clear(); rm.texturePath.clear();
+                                if (rm.glTexID) { glDeleteTextures(1, &rm.glTexID); rm.glTexID = 0; }
+                            } else {
+                                RigMaterial& em = rm.extraMaterials[ms - 1];
+                                em.textured = false; em.texturePixels.clear(); em.texturePath.clear();
+                                if (em.glTexID) { glDeleteTextures(1, &em.glTexID); em.glTexID = 0; }
+                            }
+                            sProjectDirty = true;
+                        }
+                    } else {
+                        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "    (none — flat shaded)");
+                    }
+                    ImGui::PopID();
                 }
                 if (ImGui::Checkbox("Smooth shading##rigsmooth", &rm.smoothShading)) sProjectDirty = true;
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Per-vertex normals (smooth) vs per-face (flat). Affects the 3D tab and the exported device model.");
@@ -16268,15 +16316,21 @@ void FrameTick(float dt)
                 for (const auto& rm : sRiggedMeshAssets) {
                     Affinity::GBARiggedMeshExport re;
                     re.name = rm.name;
-                    int tw = rm.texW > 0 ? rm.texW : 128;
-                    int th = rm.texH > 0 ? rm.texH : 128;
-                    re.dsm = DsmaEmit::BuildDSM(rm, tw, th, rm.smoothShading);
                     re.cameraLight = rm.cameraLight;
                     re.lightX = rm.lightX; re.lightY = rm.lightY;
-                    re.textured = rm.textured;
-                    re.texW = rm.texW; re.texH = rm.texH;
-                    re.texPixels = rm.texturePixels;
-                    memcpy(re.texPalette, rm.texturePalette, sizeof(re.texPalette));
+                    // One group per material slot: filter triangles by slot and
+                    // scale UVs by that slot's texture size.
+                    for (int ms = 0; ms < rm.matCount(); ms++) {
+                        Affinity::GBARiggedMeshExport::MatGroup g;
+                        int tw = rm.matTexW(ms) > 0 ? rm.matTexW(ms) : 128;
+                        int th = rm.matTexH(ms) > 0 ? rm.matTexH(ms) : 128;
+                        g.dsm = DsmaEmit::BuildDSM(rm, tw, th, rm.smoothShading, ms);
+                        g.textured = rm.matTextured(ms);
+                        g.texW = rm.matTexW(ms); g.texH = rm.matTexH(ms);
+                        g.texPixels = rm.matPixels(ms);
+                        memcpy(g.texPalette, rm.matPalette(ms), sizeof(g.texPalette));
+                        re.groups.push_back(std::move(g));
+                    }
                     for (int c = 0; c < (int)rm.clips.size(); c++) {
                         Affinity::GBARiggedMeshExport::Clip cl;
                         cl.name = rm.clips[c].name;
@@ -29814,7 +29868,10 @@ void FrameTick(float dt)
                     for (int d = 0; d < 8; d++) add(das.dirPaths[d]);
             add(sM7FloorPath);
             for (auto& ma : sMeshAssets) { add(ma.sourcePath); add(ma.texturePath); }
-            for (auto& rm : sRiggedMeshAssets) { add(rm.sourcePath); add(rm.texturePath); }
+            for (auto& rm : sRiggedMeshAssets) {
+                add(rm.sourcePath); add(rm.texturePath);
+                for (auto& em : rm.extraMaterials) add(em.texturePath);
+            }
             for (auto& inst : sSkyboxInstances)
                 for (auto& panel : inst.panels) add(panel.path);
             return paths;
@@ -30383,46 +30440,53 @@ void Render3DViewport()
                     float lDir[]={0.3f,1.0f,0.5f,0.0f};
                     glLightfv(GL_LIGHT0,GL_POSITION,lDir);
                 }
-                bool rigTex = (rm.textured && rm.glTexID != 0);
-                if (rigTex) {
-                    glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, rm.glTexID);
-                    float white[]={1,1,1,1};
-                    glMaterialfv(GL_FRONT_AND_BACK,GL_DIFFUSE,white); glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT,white);
-                } else {
-                    float matCol[]={0.8f,0.8f,0.82f,1.0f};
-                    glMaterialfv(GL_FRONT_AND_BACK,GL_DIFFUSE,matCol); glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT,matCol);
-                }
                 glDisable(GL_CULL_FACE);
                 bool rigSmooth = rm.smoothShading;
-                glBegin(GL_TRIANGLES);
-                for (size_t ti = 0; ti + 3 <= rm.indices.size(); ti += 3) {
-                    float wp[3][3], wn[3][3], uv[3][2];
-                    for (int k = 0; k < 3; k++) {
-                        uint32_t vi = rm.indices[ti + k];
-                        const MeshVertex& bv = rm.baseVerts[vi];
-                        const BonePose& P = pose[rm.vertBone[vi]];
-                        float px,py,pz; rotq(P, bv.px,bv.py,bv.pz, px,py,pz);
-                        wp[k][0]=px+P.px; wp[k][1]=py+P.py; wp[k][2]=pz+P.pz;
-                        float nx,ny,nz; rotq(P, bv.nx,bv.ny,bv.nz, nx,ny,nz);
-                        wn[k][0]=nx; wn[k][1]=ny; wn[k][2]=nz;
-                        uv[k][0]=bv.u; uv[k][1]=bv.v;
+                // Draw one group per material slot, binding that slot's texture.
+                for (int ms = 0; ms < rm.matCount(); ms++) {
+                    bool slotTex = (rm.matTextured(ms) && rm.matGlTexID(ms) != 0);
+                    if (slotTex) {
+                        glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, rm.matGlTexID(ms));
+                        float white[]={1,1,1,1};
+                        glMaterialfv(GL_FRONT_AND_BACK,GL_DIFFUSE,white); glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT,white);
+                    } else {
+                        glDisable(GL_TEXTURE_2D);
+                        float matCol[]={0.8f,0.8f,0.82f,1.0f};
+                        glMaterialfv(GL_FRONT_AND_BACK,GL_DIFFUSE,matCol); glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT,matCol);
                     }
-                    float fnx=0,fny=0,fnz=0;
-                    if (!rigSmooth) {
-                        float ax=wp[1][0]-wp[0][0], ay=wp[1][1]-wp[0][1], az=wp[1][2]-wp[0][2];
-                        float bx=wp[2][0]-wp[0][0], by=wp[2][1]-wp[0][1], bz=wp[2][2]-wp[0][2];
-                        fnx=ay*bz-az*by; fny=az*bx-ax*bz; fnz=ax*by-ay*bx;
-                        float l=sqrtf(fnx*fnx+fny*fny+fnz*fnz); if(l>0){fnx/=l;fny/=l;fnz/=l;}
+                    glBegin(GL_TRIANGLES);
+                    for (size_t ti = 0; ti + 3 <= rm.indices.size(); ti += 3) {
+                        size_t tri = ti / 3;
+                        int triSlot = (tri < rm.triMaterial.size()) ? rm.triMaterial[tri] : 0;
+                        if (triSlot != ms) continue;
+                        float wp[3][3], wn[3][3], uv[3][2];
+                        for (int k = 0; k < 3; k++) {
+                            uint32_t vi = rm.indices[ti + k];
+                            const MeshVertex& bv = rm.baseVerts[vi];
+                            const BonePose& P = pose[rm.vertBone[vi]];
+                            float px,py,pz; rotq(P, bv.px,bv.py,bv.pz, px,py,pz);
+                            wp[k][0]=px+P.px; wp[k][1]=py+P.py; wp[k][2]=pz+P.pz;
+                            float nx,ny,nz; rotq(P, bv.nx,bv.ny,bv.nz, nx,ny,nz);
+                            wn[k][0]=nx; wn[k][1]=ny; wn[k][2]=nz;
+                            uv[k][0]=bv.u; uv[k][1]=bv.v;
+                        }
+                        float fnx=0,fny=0,fnz=0;
+                        if (!rigSmooth) {
+                            float ax=wp[1][0]-wp[0][0], ay=wp[1][1]-wp[0][1], az=wp[1][2]-wp[0][2];
+                            float bx=wp[2][0]-wp[0][0], by=wp[2][1]-wp[0][1], bz=wp[2][2]-wp[0][2];
+                            fnx=ay*bz-az*by; fny=az*bx-ax*bz; fnz=ax*by-ay*bx;
+                            float l=sqrtf(fnx*fnx+fny*fny+fnz*fnz); if(l>0){fnx/=l;fny/=l;fnz/=l;}
+                        }
+                        for (int k = 0; k < 3; k++) {
+                            if (slotTex) glTexCoord2f(uv[k][0], uv[k][1]);
+                            if (rigSmooth) glNormal3f(wn[k][0],wn[k][1],wn[k][2]);
+                            else glNormal3f(fnx,fny,fnz);
+                            glVertex3f(wp[k][0],wp[k][1],wp[k][2]);
+                        }
                     }
-                    for (int k = 0; k < 3; k++) {
-                        if (rigTex) glTexCoord2f(uv[k][0], uv[k][1]);
-                        if (rigSmooth) glNormal3f(wn[k][0],wn[k][1],wn[k][2]);
-                        else glNormal3f(fnx,fny,fnz);
-                        glVertex3f(wp[k][0],wp[k][1],wp[k][2]);
-                    }
+                    glEnd();
+                    if (slotTex) { glDisable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, 0); }
                 }
-                glEnd();
-                if (rigTex) { glDisable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, 0); }
                 glDisable(GL_LIGHTING); glDisable(GL_LIGHT0);
                 if (fs.selected) {
                     glColor3f(1,1,1); glLineWidth(2.0f);

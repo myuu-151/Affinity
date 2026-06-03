@@ -309,20 +309,23 @@ extern int afn_skel_anim_clip;           // SetSkelAnim request: clip to set on 
 static int32_t s_rig_frame = 0;          // 20.12 fixed animation frame
 static int     s_rig_clip  = AFN_PLAYER_RIG_DEFAULT_CLIP;
 
-#ifdef AFN_PLAYER_RIG_TEXTURED
-static int gl_rig_tex_id = 0;
+// One GL texture id per material group (0 = untextured group).
+static int gl_rig_tex_id[AFN_PLAYER_RIG_MATCOUNT];
 static void load_player_rig_texture(void)
 {
-    int sizeW = 0, tw = AFN_PLAYER_RIG_TEXW; while (tw > 8) { tw >>= 1; sizeW++; }
-    int sizeH = 0, th = AFN_PLAYER_RIG_TEXH; while (th > 8) { th >>= 1; sizeH++; }
-    glGenTextures(1, &gl_rig_tex_id);
-    glBindTexture(0, gl_rig_tex_id);
-    glTexImage2D(0, 0, GL_RGB16, sizeW, sizeH, 0,
-                 TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T,
-                 afn_player_rig_tex);
-    glColorTableEXT(0, 0, 16, 0, 0, afn_player_rig_texpal);
+    for (int g = 0; g < AFN_PLAYER_RIG_MATCOUNT; g++) {
+        gl_rig_tex_id[g] = 0;
+        if (!afn_player_rig_tex[g]) continue;
+        int sizeW = 0, tw = afn_player_rig_texw[g]; while (tw > 8) { tw >>= 1; sizeW++; }
+        int sizeH = 0, th = afn_player_rig_texh[g]; while (th > 8) { th >>= 1; sizeH++; }
+        glGenTextures(1, &gl_rig_tex_id[g]);
+        glBindTexture(0, gl_rig_tex_id[g]);
+        glTexImage2D(0, 0, GL_RGB16, sizeW, sizeH, 0,
+                     TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T,
+                     afn_player_rig_tex[g]);
+        glColorTableEXT(0, 0, 16, 0, 0, afn_player_rig_texpal[g]);
+    }
 }
-#endif
 
 static void render_player_rig(void)
 {
@@ -370,11 +373,6 @@ static void render_player_rig(void)
 
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_BACK | POLY_FORMAT_LIGHT0);
     glColor3b(255, 255, 255);
-#ifdef AFN_PLAYER_RIG_TEXTURED
-    glBindTexture(0, gl_rig_tex_id);      // base-color texture from the glTF
-#else
-    glBindTexture(0, 0);                  // untextured (flat shaded)
-#endif
 #ifdef AFN_PLAYER_RIG_CAMLIGHT
 #ifndef AFN_PLAYER_RIG_LIGHT_DX
 #define AFN_PLAYER_RIG_LIGHT_DX (0.0f)
@@ -392,7 +390,11 @@ static void render_player_rig(void)
     glPopMatrix(1);
 #endif
 
-    DSMA_DrawModel(afn_player_rig_dsm, dsa, s_rig_frame);
+    // One draw per material group, binding that group's texture (0 = flat).
+    for (int g = 0; g < AFN_PLAYER_RIG_MATCOUNT; g++) {
+        glBindTexture(0, gl_rig_tex_id[g]);
+        DSMA_DrawModel(afn_player_rig_dsm[g], dsa, s_rig_frame);
+    }
     glPopMatrix(1);
 #ifdef AFN_PLAYER_RIG_CAMLIGHT
     // Restore the scene's default directional light for the next frame's meshes.
@@ -411,9 +413,10 @@ static void render_player_rig(void)
 // Per-instance s_npc_clip / s_npc_frame hold playback state; a SetSkelAnim node
 // (afn_skel_anim_obj/clip) switches the clip for the NPC with a matching sprite
 // index. Up to AFN_NPC_RIG_COUNT instances (editor caps this at 4).
+#define AFN_NPC_MAX_GROUPS 8
 static int32_t s_npc_frame[AFN_NPC_RIG_COUNT];
 static int     s_npc_clip[AFN_NPC_RIG_COUNT];
-static int     s_npc_tex_id[AFN_NPC_RIG_COUNT];
+static int     s_npc_tex_id[AFN_NPC_RIG_COUNT][AFN_NPC_MAX_GROUPS];
 static int     s_npc_inited = 0;
 
 static void load_npc_rig_textures(void)
@@ -421,16 +424,18 @@ static void load_npc_rig_textures(void)
     for (int i = 0; i < AFN_NPC_RIG_COUNT; i++) {
         s_npc_frame[i] = 0;
         s_npc_clip[i]  = afn_npc_defclip[i];
-        s_npc_tex_id[i] = 0;
-        if (afn_npc_tex[i]) {
-            int sizeW = 0, tw = afn_npc_texw[i]; while (tw > 8) { tw >>= 1; sizeW++; }
-            int sizeH = 0, th = afn_npc_texh[i]; while (th > 8) { th >>= 1; sizeH++; }
-            glGenTextures(1, &s_npc_tex_id[i]);
-            glBindTexture(0, s_npc_tex_id[i]);
+        int ng = afn_npc_matcount[i];
+        for (int g = 0; g < ng && g < AFN_NPC_MAX_GROUPS; g++) {
+            s_npc_tex_id[i][g] = 0;
+            if (!afn_npc_tex[i][g]) continue;
+            int sizeW = 0, tw = afn_npc_texw[i][g]; while (tw > 8) { tw >>= 1; sizeW++; }
+            int sizeH = 0, th = afn_npc_texh[i][g]; while (th > 8) { th >>= 1; sizeH++; }
+            glGenTextures(1, &s_npc_tex_id[i][g]);
+            glBindTexture(0, s_npc_tex_id[i][g]);
             glTexImage2D(0, 0, GL_RGB16, sizeW, sizeH, 0,
                          TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T,
-                         afn_npc_tex[i]);
-            glColorTableEXT(0, 0, 16, 0, 0, afn_npc_texpal[i]);
+                         afn_npc_tex[i][g]);
+            glColorTableEXT(0, 0, 16, 0, 0, afn_npc_texpal[i][g]);
         }
     }
     s_npc_inited = 1;
@@ -455,7 +460,6 @@ static void render_npc_rigs(void)
         int si   = afn_npc_sprite[i];
         int clip = s_npc_clip[i];
         if (clip < 0 || clip >= afn_npc_clipcount[i]) clip = 0;
-        const u32* dsm = afn_npc_dsm[i];
         const u32* dsa = afn_npc_dsa[i][clip];
 
         int do_loop = afn_npc_loop[i][clip];
@@ -483,8 +487,12 @@ static void render_npc_rigs(void)
 
         glPolyFmt(POLY_ALPHA(31) | POLY_CULL_BACK | POLY_FORMAT_LIGHT0);
         glColor3b(255, 255, 255);
-        glBindTexture(0, s_npc_tex_id[i]);           // 0 = untextured (flat shaded)
-        DSMA_DrawModel(dsm, dsa, s_npc_frame[i]);
+        // One draw per material group, binding that group's texture (0 = flat).
+        int ng = afn_npc_matcount[i];
+        for (int g = 0; g < ng && g < AFN_NPC_MAX_GROUPS; g++) {
+            glBindTexture(0, s_npc_tex_id[i][g]);
+            DSMA_DrawModel(afn_npc_dsm[i][g], dsa, s_npc_frame[i]);
+        }
         glPopMatrix(1);
     }
 }
@@ -1565,7 +1573,7 @@ void afn_fps3d_init(void)
 #if defined(AFN_MESH_COUNT) && AFN_MESH_COUNT > 0
     load_mesh_textures();
 #endif
-#ifdef AFN_PLAYER_RIG_TEXTURED
+#ifdef AFN_HAS_PLAYER_RIG
     load_player_rig_texture();
 #endif
 #ifdef AFN_HAS_NPC_RIGS
