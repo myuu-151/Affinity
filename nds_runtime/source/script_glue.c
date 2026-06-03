@@ -24,6 +24,8 @@ int  afn_move_speed;
 int  afn_auto_orbit_speed;
 int  afn_play_anim;
 int  afn_rig_clip = -1;   // skeletal (glTF/DSMA) clip the player rig plays; -1 = leave default
+int  afn_skel_anim_obj = -1;   // SetSkelAnim request: NPC sprite index (-1 = none this frame)
+int  afn_skel_anim_clip = 0;   // SetSkelAnim request: clip to set on that NPC
 int  afn_sprite_anim_spr = -1;
 int  afn_sprite_anim_val = -1;
 int  afn_anim_prio;

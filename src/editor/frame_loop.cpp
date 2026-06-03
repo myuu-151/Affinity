@@ -593,6 +593,7 @@ enum class VsNodeType : int {
     SetPlayerWidth,  // action: set player collision width (horizontal radius)
     PlaySkelAnim,    // action: play a skeletal (glTF/DSMA) animation clip on the player rig (Mode 4)
     SkelAnim,        // data: outputs a skeletal animation clip index (feeds Play Skeletal Animation)
+    SetSkelAnim,     // action: set the skeletal clip on a specific rigged NPC (Object + Clip, like Set Sprite Anim)
     COUNT
 };
 
@@ -905,6 +906,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Set Player Width",0xFF3355AA, 1, 1, 1, 0, {"Value (float)"}, {}, {} },
     { "Play Skeletal Anim",0xFF3355AA, 1, 1, 1, 0, {"Clip"}, {}, {} },
     { "Skeletal Animation",0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
+    { "Set Skel Anim",   0xFF3355AA, 1, 1, 2, 0, {"Object", "Clip"}, {}, {} },
 };
 
 struct VsNode {
@@ -19737,6 +19739,7 @@ void FrameTick(float dt)
                 case VsNodeType::SoundInstance: desc = "Outputs a sound instance index for PlaySound."; break;
                 case VsNodeType::SkelAnim:      desc = "Outputs a skeletal animation clip index (feeds Play Skeletal Anim). Pick a rigged mesh and one of its glTF clips."; break;
                 case VsNodeType::PlaySkelAnim:  desc = "Plays a skeletal (glTF/DSMA) animation clip on the player rig in Mode 4. Wire a Skeletal Animation node into Clip. Loop/Once is set per-clip on the rig."; break;
+                case VsNodeType::SetSkelAnim:   desc = "Sets the skeletal clip on a specific rigged NPC (like Set Sprite Anim, but for glTF rigs). Wire an Object (Instance) into Object and a Skeletal Animation into Clip."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
@@ -19998,6 +20001,7 @@ void FrameTick(float dt)
                         case VsNodeType::SetPlayerHeight: return "_set_player_height";
                         case VsNodeType::SetPlayerWidth: return "_set_player_width";
                         case VsNodeType::PlaySkelAnim:  return "_play_skel_anim";
+                        case VsNodeType::SetSkelAnim:   return "_set_skel_anim";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -20476,6 +20480,25 @@ void FrameTick(float dt)
                         "    //   DSMA_DrawModel(afn_player_rig_dsm, dsa, s_rig_frame);",
                         clipIdx);
                     setActionFunc(infoNode, "_play_skel_anim", bodyBuf);
+                    break;
+                }
+                case VsNodeType::SetSkelAnim: {
+                    editorCode =
+                        "// ---- 3D Scene (Mode 4) ----\n"
+                        "// Set the skeletal clip on a specific rigged NPC instance";
+                    auto* objData  = resolveDataIn(infoNode.id, 0);
+                    auto* clipData = resolveDataIn(infoNode.id, 1);
+                    int obj  = objData  ? objData->paramInt[0]  : 0;   // Object: instance index
+                    int clip = clipData ? clipData->paramInt[1] : 0;   // SkelAnim: clip index
+                    char bodyBuf[512];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_skel_anim_obj = %d; afn_skel_anim_clip = %d;\n"
+                        "    // --- Runtime (fps3d.c) ---\n"
+                        "    // render_npc_rigs(): for the NPC whose sprite index == afn_skel_anim_obj,\n"
+                        "    //   if (clip changed) { s_npc_clip[i] = afn_skel_anim_clip; s_npc_frame[i] = 0; }\n"
+                        "    //   DSMA_DrawModel(asset dsm, asset dsa[s_npc_clip[i]], s_npc_frame[i]);",
+                        obj, clip);
+                    setActionFunc(infoNode, "_set_skel_anim", bodyBuf);
                     break;
                 }
                 case VsNodeType::SetHudValue: {
@@ -23635,6 +23658,7 @@ void FrameTick(float dt)
                     case VsNodeType::SetPlayerHeight: suffix = "_set_player_height"; break;
                     case VsNodeType::SetPlayerWidth: suffix = "_set_player_width"; break;
                     case VsNodeType::PlaySkelAnim:  suffix = "_play_skel_anim"; break;
+                    case VsNodeType::SetSkelAnim:   suffix = "_set_skel_anim"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -24126,6 +24150,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::MoveToward].name)) addNodeAt(VsNodeType::MoveToward);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::LookAt].name)) addNodeAt(VsNodeType::LookAt);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetSpriteAnim].name)) addNodeAt(VsNodeType::SetSpriteAnim);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetSkelAnim].name)) addNodeAt(VsNodeType::SetSkelAnim);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP].name)) addNodeAt(VsNodeType::SetHP);
@@ -24599,6 +24624,8 @@ void FrameTick(float dt)
                     auto getInstanceName = [](int si) -> const char* {
                         if (si < 0 || si >= sSpriteCount) return "None";
                         const auto& sp = sSprites[si];
+                        if (sp.riggedMeshIdx >= 0 && sp.riggedMeshIdx < (int)sRiggedMeshAssets.size())
+                            return sRiggedMeshAssets[sp.riggedMeshIdx].name.c_str();
                         if (sp.assetIdx >= 0 && sp.assetIdx < (int)sSpriteAssets.size())
                             return sSpriteAssets[sp.assetIdx].name.c_str();
                         if (sp.meshIdx >= 0 && sp.meshIdx < (int)sMeshAssets.size())

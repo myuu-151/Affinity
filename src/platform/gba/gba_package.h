@@ -406,6 +406,7 @@ enum class GBAScriptNodeType : int {
     SetPlayerWidth,
     PlaySkelAnim,
     SkelAnim,
+    SetSkelAnim,
     COUNT
 };
 

@@ -304,6 +304,8 @@ static void render_meshes(void)
 #define AFN_RIG_YAW_CORRECTION (-16384)
 extern int afn_player_frozen;
 extern int afn_rig_clip;                 // script-set skeletal clip (PlaySkelAnim node); -1 = leave default
+extern int afn_skel_anim_obj;            // SetSkelAnim request: NPC sprite index (-1 = none)
+extern int afn_skel_anim_clip;           // SetSkelAnim request: clip to set on that NPC
 static int32_t s_rig_frame = 0;          // 20.12 fixed animation frame
 static int     s_rig_clip  = AFN_PLAYER_RIG_DEFAULT_CLIP;
 
@@ -399,6 +401,92 @@ static void render_player_rig(void)
     glLight(0, RGB15(31, 31, 31), floattov10(-0.5f), floattov10(-0.7f), floattov10(-0.5f));
     glPopMatrix(1);
 #endif
+}
+#endif
+
+#ifdef AFN_HAS_NPC_RIGS
+// Rigged (DSMA skinned) NPC instances. Each instance references a rig asset
+// blob (afn_npc_dsm/dsa/loop/tex...) and reads its world transform from the
+// matching afn_sprite_data row, so it sits exactly where the sprite is placed.
+// Per-instance s_npc_clip / s_npc_frame hold playback state; a SetSkelAnim node
+// (afn_skel_anim_obj/clip) switches the clip for the NPC with a matching sprite
+// index. Up to AFN_NPC_RIG_COUNT instances (editor caps this at 4).
+static int32_t s_npc_frame[AFN_NPC_RIG_COUNT];
+static int     s_npc_clip[AFN_NPC_RIG_COUNT];
+static int     s_npc_tex_id[AFN_NPC_RIG_COUNT];
+static int     s_npc_inited = 0;
+
+static void load_npc_rig_textures(void)
+{
+    for (int i = 0; i < AFN_NPC_RIG_COUNT; i++) {
+        s_npc_frame[i] = 0;
+        s_npc_clip[i]  = afn_npc_defclip[i];
+        s_npc_tex_id[i] = 0;
+        if (afn_npc_tex[i]) {
+            int sizeW = 0, tw = afn_npc_texw[i]; while (tw > 8) { tw >>= 1; sizeW++; }
+            int sizeH = 0, th = afn_npc_texh[i]; while (th > 8) { th >>= 1; sizeH++; }
+            glGenTextures(1, &s_npc_tex_id[i]);
+            glBindTexture(0, s_npc_tex_id[i]);
+            glTexImage2D(0, 0, GL_RGB16, sizeW, sizeH, 0,
+                         TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T,
+                         afn_npc_tex[i]);
+            glColorTableEXT(0, 0, 16, 0, 0, afn_npc_texpal[i]);
+        }
+    }
+    s_npc_inited = 1;
+}
+
+static void render_npc_rigs(void)
+{
+    if (!s_npc_inited) load_npc_rig_textures();
+
+    // Apply a pending SetSkelAnim request to the matching NPC, then consume it.
+    if (afn_skel_anim_obj >= 0) {
+        for (int i = 0; i < AFN_NPC_RIG_COUNT; i++) {
+            if (afn_npc_sprite[i] == afn_skel_anim_obj && s_npc_clip[i] != afn_skel_anim_clip) {
+                s_npc_clip[i]  = afn_skel_anim_clip;
+                s_npc_frame[i] = 0;
+            }
+        }
+        afn_skel_anim_obj = -1;
+    }
+
+    for (int i = 0; i < AFN_NPC_RIG_COUNT; i++) {
+        int si   = afn_npc_sprite[i];
+        int clip = s_npc_clip[i];
+        if (clip < 0 || clip >= afn_npc_clipcount[i]) clip = 0;
+        const u32* dsm = afn_npc_dsm[i];
+        const u32* dsa = afn_npc_dsa[i][clip];
+
+        int do_loop = afn_npc_loop[i][clip];
+        uint32_t nframes = DSMA_GetNumFrames(dsa);
+        s_npc_frame[i] += 1638;             // ~24 fps, matches the player rig
+        if (nframes) {
+            int32_t maxf = (int32_t)(nframes << 12);
+            if (do_loop) { while (s_npc_frame[i] >= maxf) s_npc_frame[i] -= maxf; }
+            else if (s_npc_frame[i] > maxf - (1 << 12)) s_npc_frame[i] = maxf - (1 << 12);
+        }
+
+        // World transform from the sprite's row (same as mesh sprites).
+        int wx = afn_sprite_data[si][0];
+        int wy = afn_sprite_data[si][1];
+        int wz = afn_sprite_data[si][2];
+        int spriteScale = afn_sprite_data[si][5];   // 256 = 1.0
+        int rot = afn_sprite_data[si][7];            // Y rotation (brad)
+
+        glPushMatrix();
+        glTranslatef32(fx8_to_f32(wx), fx8_to_f32(wy), fx8_to_f32(wz));
+        if (rot != 0) glRotateYi(rot >> 1);
+        glRotateYi(AFN_RIG_YAW_CORRECTION >> 1);     // align baked model forward
+        int s32 = spriteScale >> 2;                  // 8.8 (256=1.0) -> scale*64 f32
+        glScalef32(s32, s32, s32);
+
+        glPolyFmt(POLY_ALPHA(31) | POLY_CULL_BACK | POLY_FORMAT_LIGHT0);
+        glColor3b(255, 255, 255);
+        glBindTexture(0, s_npc_tex_id[i]);           // 0 = untextured (flat shaded)
+        DSMA_DrawModel(dsm, dsa, s_npc_frame[i]);
+        glPopMatrix(1);
+    }
 }
 #endif
 
@@ -1480,6 +1568,9 @@ void afn_fps3d_init(void)
 #ifdef AFN_PLAYER_RIG_TEXTURED
     load_player_rig_texture();
 #endif
+#ifdef AFN_HAS_NPC_RIGS
+    load_npc_rig_textures();
+#endif
 
     cam_h     = AFN_CAM_H;
     cam_angle = AFN_CAM_ANGLE;
@@ -1726,6 +1817,9 @@ void afn_fps3d_update(void)
 #endif
 #ifdef AFN_HAS_PLAYER_RIG
     render_player_rig();
+#endif
+#ifdef AFN_HAS_NPC_RIGS
+    render_npc_rigs();
 #endif
 
     glFlush(0);

@@ -1138,6 +1138,101 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         }
     }
 
+    // ---- Rigged (DSMA skinned) NPC instances (up to 4) ----
+    // Any non-player sprite with a rig becomes an animated NPC. Each instance
+    // emits its own copy of the rig asset blobs (DSM/DSA/loop/texture) plus the
+    // sprite index it tracks; fps3d.c reads position/rotation/scale from that
+    // sprite's afn_sprite_data row and per-instance s_npc_clip/frame drive
+    // playback (a SetSkelAnim node switches the clip at runtime).
+    {
+        std::vector<int> npc; // indices into `sprites`
+        for (int si = 0; si < (int)sprites.size() && (int)npc.size() < 4; si++) {
+            const auto& s = sprites[si];
+            if (s.spriteType == 1) continue; // the player rig is handled above
+            if (s.riggedMeshIdx < 0 || s.riggedMeshIdx >= (int)rigs.size()) continue;
+            if (rigs[s.riggedMeshIdx].dsm.empty() || rigs[s.riggedMeshIdx].clips.empty()) continue;
+            npc.push_back(si);
+        }
+        if (!npc.empty()) {
+            auto emitWords = [&](const std::string& name, const std::vector<uint32_t>& w) {
+                f << "static const u32 " << name << "[] = {";
+                for (size_t i = 0; i < w.size(); i++) {
+                    if (i % 8 == 0) f << "\n    ";
+                    f << "0x" << std::hex << w[i] << std::dec << ",";
+                }
+                f << "\n};\n";
+            };
+            int n = (int)npc.size();
+            // Per-instance asset blobs (duplicated even if two NPCs share a rig).
+            for (int i = 0; i < n; i++) {
+                const auto& rig = rigs[sprites[npc[i]].riggedMeshIdx];
+                std::string A = "afn_npc_A" + std::to_string(i);
+                emitWords(A + "_dsm", rig.dsm);
+                int nclips = (int)rig.clips.size();
+                for (int c = 0; c < nclips; c++)
+                    emitWords(A + "_dsa_" + std::to_string(c), rig.clips[c].dsa);
+                f << "static const u32* const " << A << "_dsa[] = {";
+                for (int c = 0; c < nclips; c++) f << " " << A << "_dsa_" << c << ",";
+                f << " };\n";
+                f << "static const u8 " << A << "_loop[] = {";
+                for (int c = 0; c < nclips; c++) f << " " << (rig.clips[c].loop ? 1 : 0) << ",";
+                f << " };\n";
+                if (rig.textured && !rig.texPixels.empty() && rig.texW > 0 && rig.texH > 0) {
+                    int texPx = rig.texW * rig.texH, packed = (texPx + 1) / 2;
+                    f << "static const u8 " << A << "_tex[] = {";
+                    for (int p = 0; p < packed; p++) {
+                        int lo = (p*2+0 < (int)rig.texPixels.size()) ? (rig.texPixels[p*2+0] & 0xF) : 0;
+                        int hi = (p*2+1 < (int)rig.texPixels.size()) ? (rig.texPixels[p*2+1] & 0xF) : 0;
+                        if (p % 16 == 0) f << "\n    ";
+                        f << ((hi << 4) | lo) << ",";
+                    }
+                    f << "\n};\n";
+                    f << "static const u16 " << A << "_texpal[] = {";
+                    for (int p = 0; p < 16; p++) {
+                        uint32_t c = rig.texPalette[p];
+                        uint16_t c15 = (uint16_t)((((c >> 0) & 0xFF) >> 3)
+                                                | ((((c >> 8) & 0xFF) >> 3) << 5)
+                                                | ((((c >> 16) & 0xFF) >> 3) << 10));
+                        char hex[8]; snprintf(hex, sizeof(hex), "0x%04X", c15);
+                        f << " " << hex << ",";
+                    }
+                    f << " };\n";
+                }
+            }
+            // Per-instance index arrays.
+            f << "#define AFN_HAS_NPC_RIGS 1\n";
+            f << "#define AFN_NPC_RIG_COUNT " << n << "\n";
+            auto perInst = [&](const char* type, const char* field, auto valFn) {
+                f << "static const " << type << " afn_npc_" << field << "[] = {";
+                for (int i = 0; i < n; i++) { f << " "; valFn(i); f << ","; }
+                f << " };\n";
+            };
+            perInst("u32* const", "dsm", [&](int i){ f << "afn_npc_A" << i << "_dsm"; });
+            perInst("u32* const*", "dsa", [&](int i){ f << "afn_npc_A" << i << "_dsa"; });
+            perInst("u8* const", "loop", [&](int i){ f << "afn_npc_A" << i << "_loop"; });
+            perInst("u8", "clipcount", [&](int i){ f << (int)rigs[sprites[npc[i]].riggedMeshIdx].clips.size(); });
+            perInst("u8", "defclip", [&](int i){
+                const auto& s = sprites[npc[i]];
+                int dc = s.rigAnimIdx, nc = (int)rigs[s.riggedMeshIdx].clips.size();
+                f << ((dc < 0 || dc >= nc) ? 0 : dc);
+            });
+            perInst("int", "sprite", [&](int i){ f << npc[i]; });
+            perInst("u8* const", "tex", [&](int i){
+                const auto& rig = rigs[sprites[npc[i]].riggedMeshIdx];
+                if (rig.textured && !rig.texPixels.empty() && rig.texW > 0 && rig.texH > 0)
+                    f << "afn_npc_A" << i << "_tex"; else f << "0";
+            });
+            perInst("u16* const", "texpal", [&](int i){
+                const auto& rig = rigs[sprites[npc[i]].riggedMeshIdx];
+                if (rig.textured && !rig.texPixels.empty() && rig.texW > 0 && rig.texH > 0)
+                    f << "afn_npc_A" << i << "_texpal"; else f << "0";
+            });
+            perInst("u16", "texw", [&](int i){ f << rigs[sprites[npc[i]].riggedMeshIdx].texW; });
+            perInst("u16", "texh", [&](int i){ f << rigs[sprites[npc[i]].riggedMeshIdx].texH; });
+            f << "\n";
+        }
+    }
+
     // ---- Mesh assets ----
     f << "#define AFN_MESH_COUNT " << (int)meshes.size() << "\n\n";
 
@@ -2141,6 +2236,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_auto_orbit_speed;\n";
         f << "extern int  afn_play_anim;\n";
         f << "extern int  afn_rig_clip;\n";
+        f << "extern int  afn_skel_anim_obj;\n";
+        f << "extern int  afn_skel_anim_clip;\n";
         f << "extern int  afn_sprite_anim_spr;\n";
         f << "extern int  afn_sprite_anim_val;\n";
         f << "extern int  afn_anim_prio;\n";
@@ -2688,6 +2785,17 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 auto* d = findDataIn(a->id, 0);
                 int clip = d ? resolveInt(d) : 0;
                 f << "    afn_rig_clip = " << clip << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::SetSkelAnim: {
+                // Set the skeletal clip on a specific rigged NPC (by sprite index).
+                // Mirrors SetSpriteAnim: a single per-frame override slot the
+                // NPC rig renderer applies to the matching instance.
+                auto* objData  = findDataIn(a->id, 0);
+                auto* clipData = findDataIn(a->id, 1);
+                int obj  = objData  ? resolveInt(objData)  : 0;
+                int clip = clipData ? resolveInt(clipData) : 0;
+                f << "    afn_skel_anim_obj = " << obj << "; afn_skel_anim_clip = " << clip << ";\n";
                 break;
             }
             case GBAScriptNodeType::FreezePlayer:
