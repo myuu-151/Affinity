@@ -39,6 +39,25 @@ textures — no fixed-point/palette packing like the GBA/NDS).
   as placeholders; the editor's **PSP → build** regenerates them. **Close PPSSPP
   before exporting** (it locks EBOOT.PBP). Exporter does `make clean; make`.
 
+## Nodes / visual scripts — runtime DONE, exporter codegen TODO
+- **Input**: ABXY → Cross/Circle/Square/Triangle, L/R triggers, d-pad +
+  Start/Select, analog → d-pad keys (`input.c`). `key_is_down/hit/released`.
+- **Runtime** (`script_glue.c` + `script.h`): defines the node variables the
+  emitted C reads/writes (core ones consumed, rest inert), runs OnStart /
+  OnUpdate / OnKey* + blueprint dispatch each frame. Controller (`scene.c`) is
+  now **node-driven**: movement = `afn_input_fwd/right`×`afn_move_speed`, camera
+  = `orbit_angle`, clip = `afn_rig_clip`. No-script scenes fall back to analog.
+- **`psp_script.h`**: currently **hand-ported** from the NDS codegen output for
+  SpyroDemo3a (same C the NDS runs). Works, but is NOT regenerated on export.
+- **TODO — exporter codegen**: port `nds_package.cpp`'s script section
+  (`emitAction` switch ~100 node types + `walkExec`/`emitDispatcher`/
+  `buildChains`, ~lines 2688–3530) so `PackagePSP` writes `psp_script.h`.
+  Cleanest: extract it to a shared `EmitScriptCode(ostream&, script, blueprints,
+  bpInstances, startMode)` called by both NDS and PSP (verify NDS still builds —
+  a pure cut keeps output identical). Then add every referenced symbol to
+  `script_glue.c` (most as inert ints; compiler tells you what's missing) and
+  port the consumers (sound, HUD, sprite manipulation, grind, scene change).
+
 ## Implemented, awaiting visual verification (re-export a scene that uses them)
 - **Sprites / billboards** (`billboard.c`, exporter `GeneratePSPSprites`).
   Camera-facing animated quads, alpha-blended. Frame pixels confirmed
