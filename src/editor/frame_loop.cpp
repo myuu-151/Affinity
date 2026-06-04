@@ -5217,29 +5217,6 @@ static void UploadRigGLTexture(RiggedMeshAsset& rm)
         if (em.textured) UploadOneRigTex(em.glTexID, em.texturePixels, em.texturePalette, em.texW, em.texH);
 }
 
-// Bleed opaque colors into transparent (alpha<8) texels so UV-island edges
-// don't sample empty/white padding (fixes white seams on the DS). 0xAABBGGRR.
-static void RigDilateEdges(std::vector<uint32_t>& px, int w, int h, int passes)
-{
-    for (int p = 0; p < passes; p++) {
-        std::vector<uint32_t> src = px;
-        bool changed = false;
-        for (int y = 0; y < h; y++)
-            for (int x = 0; x < w; x++) {
-                if ((src[y*w + x] >> 24) >= 8) continue;
-                for (int dy = -1; dy <= 1 && (px[y*w+x] >> 24) < 8; dy++)
-                    for (int dx = -1; dx <= 1; dx++) {
-                        if (!dx && !dy) continue;
-                        int nx = x + dx, ny = y + dy;
-                        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-                        uint32_t n = src[ny*w + nx];
-                        if ((n >> 24) >= 8) { px[y*w + x] = (n & 0x00FFFFFF) | 0xFF000000; changed = true; break; }
-                    }
-            }
-        if (!changed) break;
-    }
-}
-
 // Manually assign a texture image to a rig material slot, quantized to a
 // 256-colour (GL_RGB256) palette. useAlpha reserves palette[0] for transparent
 // (alpha=0) source pixels (cutout). Loads packed or external images.
@@ -5268,17 +5245,12 @@ static bool LoadRigTextureFromFile(RiggedMeshAsset& rm, int slot, const std::str
     stbi_image_free(img);
 
     bool useAlpha = rm.useAlpha;
-    // Snapshot transparency (for cutout), then bleed colors into padding so
-    // UV-island edges don't sample white (seam fix).
-    std::vector<uint8_t> wasTransparent(tw * th);
-    for (int i = 0; i < tw * th; i++) wasTransparent[i] = ((resized[i] >> 24) == 0) ? 1 : 0;
-    RigDilateEdges(resized, tw, th, 6);
     int palStart = useAlpha ? 1 : 0, palMax = useAlpha ? 255 : 256;
     struct CC { uint32_t rgb; int count; };
     std::vector<CC> hist;
-    for (int i = 0; i < tw * th; i++) {
-        if (useAlpha && wasTransparent[i]) continue;
-        uint32_t c = resized[i] & 0xFFFFFF; bool f = false;
+    for (uint32_t px : resized) {
+        if (useAlpha && (px >> 24) == 0) continue;
+        uint32_t c = px & 0xFFFFFF; bool f = false;
         for (auto& hc : hist) if (hc.rgb == c) { hc.count++; f = true; break; }
         if (!f) hist.push_back({ c, 1 });
     }
@@ -5289,7 +5261,7 @@ static bool LoadRigTextureFromFile(RiggedMeshAsset& rm, int slot, const std::str
     for (int i = 0; i < palCount; i++) pal[palStart + i] = hist[i].rgb | 0xFF000000;
     std::vector<uint8_t> indexed(tw * th);
     for (int i = 0; i < tw * th; i++) {
-        if (useAlpha && wasTransparent[i]) { indexed[i] = 0; continue; }
+        if (useAlpha && (resized[i] >> 24) == 0) { indexed[i] = 0; continue; }
         uint32_t px = resized[i] & 0xFFFFFF; int best = palStart, bd = 0x7FFFFFFF;
         for (int c = palStart; c < palStart + palCount; c++) {
             int dr = (int)(px & 0xFF) - (int)(pal[c] & 0xFF);

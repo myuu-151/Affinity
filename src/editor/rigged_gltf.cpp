@@ -23,34 +23,6 @@
 
 namespace {
 
-// Bleed opaque colors outward into transparent (alpha<8) texels so UV-island
-// edges don't sample empty/white padding. Fixes the white seams that show up
-// under the DS's nearest-neighbor texture sampling. RGBA in 0xAABBGGRR order.
-void dilateTransparentEdges(std::vector<uint32_t>& px, int w, int h, int passes)
-{
-    for (int p = 0; p < passes; p++) {
-        std::vector<uint32_t> src = px;
-        bool changed = false;
-        for (int y = 0; y < h; y++)
-            for (int x = 0; x < w; x++) {
-                if ((src[y*w + x] >> 24) >= 8) continue;   // already opaque
-                for (int dy = -1; dy <= 1 && (px[y*w+x] >> 24) < 8; dy++)
-                    for (int dx = -1; dx <= 1; dx++) {
-                        if (!dx && !dy) continue;
-                        int nx = x + dx, ny = y + dy;
-                        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-                        uint32_t n = src[ny*w + nx];
-                        if ((n >> 24) >= 8) {
-                            px[y*w + x] = (n & 0x00FFFFFF) | 0xFF000000;  // copy color, mark opaque
-                            changed = true;
-                            break;
-                        }
-                    }
-            }
-        if (!changed) break;
-    }
-}
-
 // ---- Column-major 4x4 matrix helpers (glTF / cgltf layout: m[col*4 + row]) --
 
 struct Mat4 { float m[16]; };
@@ -425,10 +397,6 @@ bool LoadRiggedGLTF(const std::string& path, RiggedMeshAsset& out, std::string* 
                     resized[y * tw + x] = p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
                 }
             stbi_image_free(rgba);
-
-            // Fill transparent padding with neighbouring island colour so edge
-            // texels don't sample white (UV-seam fix for low-res DS sampling).
-            dilateTransparentEdges(resized, tw, th, 6);
 
             struct CC { uint32_t rgb; int count; };
             std::vector<CC> hist;
