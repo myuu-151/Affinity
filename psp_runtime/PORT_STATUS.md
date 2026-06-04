@@ -39,16 +39,20 @@ textures — no fixed-point/palette packing like the GBA/NDS).
   as placeholders; the editor's **PSP → build** regenerates them. **Close PPSSPP
   before exporting** (it locks EBOOT.PBP). Exporter does `make clean; make`.
 
+## Implemented, awaiting visual verification (re-export a scene that uses them)
+- **Sprites / billboards** (`billboard.c`, exporter `GeneratePSPSprites`).
+  Camera-facing animated quads, alpha-blended. Frame pixels confirmed
+  `pixels[py*64+px]` → `palette[idx]` (idx 0 transparent). Pending tuning:
+  billboard **size** (`basesize*scale*0.25`, a guess), and **directional**
+  (8-facing) sprites currently use the default anim only — facing-pick TODO.
+
 ## TODO — needs export data + re-export to iterate (do WITH live screenshots)
-1. **Sprites / billboards** (enemies, pickups). NDS uses tiled-4bpp OAM + DMA
-   streaming — for PSP, camera-facing textured quads. Risk: the editor sprite-frame
-   pixel layout (linear vs tiled, stride) must be confirmed before converting to
-   RGBA8888. Directional (8-facing) sprites: pick facing from camera-vs-sprite angle.
-2. **HUD** — 2D overlay. Use the 3D-quad approach (2D transform path is broken on PSP).
-3. **Audio** — `sceAudio` + software mixing of exported samples; port `audio.c`.
-4. **Scripts** — `script_glue.c` visual-script runtime + the node variables.
-5. **Mode 0** — the separate 2D top-down adventure mode (`mode0.c`, big).
-6. **Mode 7 floor** — affine floor (if used by any scene).
+1. **HUD** — 2D overlay. The `GU_TRANSFORM_2D`/`GU_SPRITES` path rendered nothing
+   for the sky; use the **3D-quad approach** (worked) or debug 2D. Needs HUD export.
+2. **Audio** — `sceAudio` + software mixing of exported samples; port `audio.c`.
+3. **Scripts** — `script_glue.c` visual-script runtime + node variables.
+4. **Mode 0** — the separate 2D top-down adventure mode (`mode0.c`, big).
+5. **Mode 7 floor** — affine floor (if used by any scene).
 
 ## Tuning knobs (in code, may need adjusting once seen)
 - Rig: `AFN_RIG_YAW_OFFSET` (facing), `AFN_PLAYER_RIG_SCALE` (= playerScale×0.25).
