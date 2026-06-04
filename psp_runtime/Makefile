@@ -2,7 +2,7 @@
 # Build with the pspdev toolchain:  make   (produces EBOOT.PBP)
 
 TARGET = affinity
-OBJS   = main.o source/scene.o source/meshcull.o source/mapdata.o source/rig.o source/collision.o source/sky.o source/billboard.o
+OBJS   = main.o source/scene.o source/meshcull.o source/mapdata.o source/rig.o source/collision.o source/sky.o source/billboard.o source/input.o
 
 INCDIR   = include
 CFLAGS   = -O2 -G0 -Wall -Iinclude

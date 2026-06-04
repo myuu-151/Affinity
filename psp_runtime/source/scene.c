@@ -6,6 +6,7 @@
 #include "collision.h"
 #include "sky.h"
 #include "billboard.h"
+#include "input.h"
 
 #include <pspkernel.h>
 #include <pspgu.h>
@@ -59,11 +60,10 @@ void scene_init(void) {
 }
 
 void scene_update(void) {
-    SceCtrlData pad;
-    sceCtrlReadBufferPositive(&pad, 1);
+    input_update();
 
-    float ax = (pad.Lx - 128) / 128.0f;
-    float ay = (pad.Ly - 128) / 128.0f;
+    float ax = afn_input_right / 128.0f;
+    float ay = -afn_input_fwd  / 128.0f;
     if (ax < 0.15f && ax > -0.15f) ax = 0.0f;
     if (ay < 0.15f && ay > -0.15f) ay = 0.0f;
 
@@ -71,9 +71,9 @@ void scene_update(void) {
     float rgtX = cosf(camAngle), rgtZ = -sinf(camAngle);
 
     if (s_follow) {
-        // D-pad L/R orbits the camera around the player.
-        if (pad.Buttons & PSP_CTRL_LEFT)  camAngle -= 0.04f;
-        if (pad.Buttons & PSP_CTRL_RIGHT) camAngle += 0.04f;
+        // L/R triggers orbit the camera around the player.
+        if (key_is_down(KEY_L)) camAngle -= 0.04f;
+        if (key_is_down(KEY_R)) camAngle += 0.04f;
         // Analog moves the player in camera-relative space; face the movement.
         float mvX = -ay * fwdX + ax * rgtX;
         float mvZ = -ay * fwdZ + ax * rgtZ;
@@ -86,8 +86,8 @@ void scene_update(void) {
             playerZ += mvZ * speed;
             playerYaw = atan2f(mvX, mvZ) * RAD2DEG;
         }
-        // Jump.
-        if (grounded && (pad.Buttons & PSP_CTRL_CROSS)) { playerVY = JUMP_VEL; grounded = 0; }
+        // Jump (Cross = KEY_A).
+        if (grounded && key_is_down(KEY_A)) { playerVY = JUMP_VEL; grounded = 0; }
         // Wall pushback, then gravity + floor snap.
         collide_walls(&playerX, &playerZ, playerY);
         playerVY -= GRAVITY;
@@ -109,10 +109,10 @@ void scene_update(void) {
         }
     } else {
         // Free-fly debug camera.
-        if (pad.Buttons & PSP_CTRL_LEFT)  camAngle -= 0.04f;
-        if (pad.Buttons & PSP_CTRL_RIGHT) camAngle += 0.04f;
-        if (pad.Buttons & PSP_CTRL_UP)    camY += 4.0f;
-        if (pad.Buttons & PSP_CTRL_DOWN)  camY -= 4.0f;
+        if (key_is_down(KEY_L)) camAngle -= 0.04f;
+        if (key_is_down(KEY_R)) camAngle += 0.04f;
+        if (key_is_down(KEY_A)) camY += 4.0f;
+        if (key_is_down(KEY_B)) camY -= 4.0f;
         float speed = afn_walk_speed > 0.0f ? afn_walk_speed * 0.25f : 6.0f;
         camX += (-ay * fwdX + ax * rgtX) * speed;
         camZ += (-ay * fwdZ + ax * rgtZ) * speed;
