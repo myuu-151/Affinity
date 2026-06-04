@@ -404,9 +404,11 @@ static void render_player_rig(void)
     }
 #endif
     // Smooth the up-vector toward the target normal, then renormalize.
-    s_upx += (tnx - s_upx) * 0.2f;
-    s_upy += (tny - s_upy) * 0.2f;
-    s_upz += (tnz - s_upz) * 0.2f;
+    // (Higher factor = snappier slope response; floor is sub-pixel smooth so
+    // this won't reintroduce jitter.)
+    s_upx += (tnx - s_upx) * 0.4f;
+    s_upy += (tny - s_upy) * 0.4f;
+    s_upz += (tnz - s_upz) * 0.4f;
     { float l = sqrtf(s_upx*s_upx + s_upy*s_upy + s_upz*s_upz);
       if (l > 0.0001f) { s_upx/=l; s_upy/=l; s_upz/=l; } else { s_upx=0; s_upy=1; s_upz=0; } }
 
