@@ -7,6 +7,10 @@
 #include "sky.h"
 #include "billboard.h"
 #include "input.h"
+#include "script.h"
+
+extern int afn_move_speed;   // node-set movement speed
+extern int orbit_angle;      // node-set camera orbit (brad, 65536 = full circle)
 
 #include <pspkernel.h>
 #include <pspgu.h>
@@ -54,39 +58,42 @@ void scene_init(void) {
         float fy;
         if (collide_floor(playerX, playerZ, playerY + 200.0f, &fy, s_floorN)) playerY = fy;
         playerVY = 0.0f; grounded = 1;
+        orbit_angle = (int)(afn_cam_start_angle * (65536.0f / 6.2831853f));
     } else {
         camX = afn_cam_start_x; camY = afn_cam_start_h; camZ = afn_cam_start_z;
     }
+    script_start();   // OnStart + blueprint start
 }
 
 void scene_update(void) {
     input_update();
-
-    float ax = afn_input_right / 128.0f;
-    float ay = -afn_input_fwd  / 128.0f;
-    if (ax < 0.15f && ax > -0.15f) ax = 0.0f;
-    if (ay < 0.15f && ay > -0.15f) ay = 0.0f;
-
-    float fwdX = sinf(camAngle), fwdZ = cosf(camAngle);
-    float rgtX = cosf(camAngle), rgtZ = -sinf(camAngle);
+    script_tick();   // nodes set afn_input_fwd/right, afn_move_speed, orbit_angle, afn_rig_clip
 
     if (s_follow) {
-        // L/R triggers orbit the camera around the player.
-        if (key_is_down(KEY_L)) camAngle -= 0.04f;
-        if (key_is_down(KEY_R)) camAngle += 0.04f;
-        // Analog moves the player in camera-relative space; face the movement.
-        float mvX = -ay * fwdX + ax * rgtX;
-        float mvZ = -ay * fwdZ + ax * rgtZ;
+        // Camera orbit is node-driven (orbit_angle, e.g. OrbitCamera nodes).
+        camAngle = orbit_angle * (6.2831853f / 65536.0f);
+        float fwdX = sinf(camAngle), fwdZ = cosf(camAngle);
+        float rgtX = cosf(camAngle), rgtZ = -sinf(camAngle);
+
+        // Movement is node-driven: afn_input_fwd/right (256 = full) in camera
+        // space, scaled by afn_move_speed. With no script, afn_input_fwd is the
+        // raw analog (input.c) and we fall back to the walk-speed constant.
+        float fAmt = afn_input_fwd  / 256.0f;
+        float rAmt = afn_input_right / 256.0f;
+        float mvX = fAmt*fwdX + rAmt*rgtX;
+        float mvZ = fAmt*fwdZ + rAmt*rgtZ;
         float mag = mvX*mvX + mvZ*mvZ;
-        int moving = (mag > 0.0001f);
-        rig_set_moving(moving);
+        int scripted = script_present();
+        int moving = (mag > 0.0001f) && (afn_move_speed > 0 || !scripted);
+        if (!scripted) rig_set_moving(moving);   // node-less: clip from movement
         if (moving) {
-            float speed = afn_walk_speed > 0.0f ? afn_walk_speed * 0.25f : 6.0f;
+            float speed = scripted ? (afn_move_speed * 0.08f)
+                                   : (afn_walk_speed > 0.0f ? afn_walk_speed * 0.25f : 6.0f);
             playerX += mvX * speed;
             playerZ += mvZ * speed;
             playerYaw = atan2f(mvX, mvZ) * RAD2DEG;
         }
-        // Jump (Cross = KEY_A).
+        // Jump (Cross). (Jump nodes set player_vy when that path is ported.)
         if (grounded && key_is_down(KEY_A)) { playerVY = JUMP_VEL; grounded = 0; }
         // Wall pushback, then gravity + floor snap.
         collide_walls(&playerX, &playerZ, playerY);
@@ -108,11 +115,17 @@ void scene_update(void) {
             s_floorN[2] += (0.0f-s_floorN[2])*0.1f;
         }
     } else {
-        // Free-fly debug camera.
+        // Free-fly debug camera (no rig in this scene).
         if (key_is_down(KEY_L)) camAngle -= 0.04f;
         if (key_is_down(KEY_R)) camAngle += 0.04f;
         if (key_is_down(KEY_A)) camY += 4.0f;
         if (key_is_down(KEY_B)) camY -= 4.0f;
+        float ax = afn_input_right / 128.0f;
+        float ay = -afn_input_fwd  / 128.0f;
+        if (ax < 0.15f && ax > -0.15f) ax = 0.0f;
+        if (ay < 0.15f && ay > -0.15f) ay = 0.0f;
+        float fwdX = sinf(camAngle), fwdZ = cosf(camAngle);
+        float rgtX = cosf(camAngle), rgtZ = -sinf(camAngle);
         float speed = afn_walk_speed > 0.0f ? afn_walk_speed * 0.25f : 6.0f;
         camX += (-ay * fwdX + ax * rgtX) * speed;
         camZ += (-ay * fwdZ + ax * rgtZ) * speed;

@@ -28,6 +28,8 @@ static float      s_bonemat[AFN_RIG_BONES][12];  // 3x4 row-major per bone
 static float      s_frame = (float)AFN_PLAYER_DEFAULT_CLIP * 0.0f;
 static int        s_clip  = AFN_PLAYER_DEFAULT_CLIP;
 
+extern int afn_rig_clip;   // node-driven (script) or controller-set clip selector
+
 // pose {px,py,pz, qw,qx,qy,qz} -> 3x4 row-major (rot | translation)
 static void pose_to_mat(const float* p, float* m) {
     float px=p[0],py=p[1],pz=p[2], w=p[3],x=p[4],y=p[5],z=p[6];
@@ -92,17 +94,19 @@ void rig_player_start(float out[3]) {
     out[0] = AFN_PLAYER_START_X; out[1] = AFN_PLAYER_START_Y; out[2] = AFN_PLAYER_START_Z;
 }
 void rig_set_moving(int moving) {
-    // Two-clip rigs: default clip = idle, the other = walk. Restart on switch.
-    int want = AFN_PLAYER_DEFAULT_CLIP;
-    if (moving && AFN_RIG_CLIPS > 1)
-        want = (AFN_PLAYER_DEFAULT_CLIP == 0) ? 1 : 0;
-    if (want >= 0 && want < AFN_RIG_CLIPS && want != s_clip) {
-        s_clip = want; s_frame = 0.0f;
-    }
+    // No-script fallback: drive the clip selector from movement (default = idle,
+    // the other clip = walk). When a script is present it sets afn_rig_clip.
+    afn_rig_clip = (moving && AFN_RIG_CLIPS > 1) ? ((AFN_PLAYER_DEFAULT_CLIP == 0) ? 1 : 0)
+                                                 : AFN_PLAYER_DEFAULT_CLIP;
 }
 
 void rig_render(float px, float py, float pz, float yawDeg, const float* upN, int frozen) {
     if (!s_skinned) return;
+
+    // Clip selector is node-driven (afn_rig_clip): switch + restart on change.
+    if (afn_rig_clip >= 0 && afn_rig_clip < AFN_RIG_CLIPS && afn_rig_clip != s_clip) {
+        s_clip = afn_rig_clip; s_frame = 0.0f;
+    }
 
     if (!frozen) {
         s_frame += 0.4f;   // ~24 fps animation at 60 Hz
