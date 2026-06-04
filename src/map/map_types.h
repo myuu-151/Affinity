@@ -253,8 +253,8 @@ struct RigMaterial
     bool textured = false;
     bool textureManual = false;              // true = user-assigned PNG (persisted by path)
     std::string texturePath;
-    std::vector<uint8_t> texturePixels;      // indexed pixels (texW * texH)
-    uint32_t texturePalette[16] = {};
+    std::vector<uint8_t> texturePixels;      // indexed pixels (texW * texH), 0..255
+    uint32_t texturePalette[256] = {};       // 256-colour (GL_RGB256) palette
     int texW = 0, texH = 0;
     unsigned int glTexID = 0;                // OpenGL texture for editor preview
 };
@@ -270,6 +270,8 @@ struct RiggedMeshAsset
     std::vector<int>        vertBone;         // parallel to baseVerts: bone index per vertex
     std::vector<uint32_t>   indices;          // triangle index buffer into baseVerts
     bool smoothShading = false;              // true = per-vertex normals (smooth), false = flat
+    int  cullMode = 0;                       // backface culling: 0 = Back, 1 = Front, 2 = None
+    bool useAlpha = false;                    // true = palette index 0 (alpha=0 src) renders transparent
     bool cameraLight = false;                // true = light follows the camera (headlamp)
     float lightX = 50.0f, lightY = 180.0f;   // headlamp aim: pitch/yaw in degrees off the camera
 
@@ -286,8 +288,8 @@ struct RiggedMeshAsset
     bool textureManual = false;              // true = user-assigned PNG (persisted by path);
                                              // false = decoded from the glTF (re-imported on load)
     std::string texturePath;
-    std::vector<uint8_t> texturePixels;      // indexed pixels (texW * texH)
-    uint32_t texturePalette[16] = {};
+    std::vector<uint8_t> texturePixels;      // indexed pixels (texW * texH), 0..255
+    uint32_t texturePalette[256] = {};       // 256-colour (GL_RGB256) palette
     int texW = 0, texH = 0;
     unsigned int glTexID = 0;                // OpenGL texture for editor preview
 

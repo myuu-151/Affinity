@@ -306,6 +306,10 @@ static void render_meshes(void)
 #ifndef AFN_PLAYER_RIG_SCALE_F32
 #define AFN_PLAYER_RIG_SCALE_F32 64     // fallback (older exports): matches OBJ scale/64 sizing
 #endif
+#ifndef AFN_PLAYER_RIG_CULL
+#define AFN_PLAYER_RIG_CULL 0           // 0 Back / 1 Front / 2 None
+#endif
+#define AFN_RIG_CULLFMT(c) ((c) == 1 ? POLY_CULL_FRONT : (c) == 2 ? POLY_CULL_NONE : POLY_CULL_BACK)
 // Yaw correction so the model's authored forward aligns with the runtime heading.
 //16384 = 90° in player_move_angle's 16-bit brad space; -16384 spins the player
 // another 180° vs the importer's baked orientation (adjust if facing is wrong).
@@ -328,10 +332,12 @@ static void load_player_rig_texture(void)
         int sizeH = 0, th = afn_player_rig_texh[g]; while (th > 8) { th >>= 1; sizeH++; }
         glGenTextures(1, &gl_rig_tex_id[g]);
         glBindTexture(0, gl_rig_tex_id[g]);
-        glTexImage2D(0, 0, GL_RGB16, sizeW, sizeH, 0,
-                     TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T,
-                     afn_player_rig_tex[g]);
-        glColorTableEXT(0, 0, 16, 0, 0, afn_player_rig_texpal[g]);
+        int texflags = TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T;
+#ifdef AFN_PLAYER_RIG_ALPHA
+        texflags |= GL_TEXTURE_COLOR0_TRANSPARENT;   // palette[0] = transparent
+#endif
+        glTexImage2D(0, 0, GL_RGB256, sizeW, sizeH, 0, texflags, afn_player_rig_tex[g]);
+        glColorTableEXT(0, 0, 256, 0, 0, afn_player_rig_texpal[g]);
     }
 }
 
@@ -379,7 +385,7 @@ static void render_player_rig(void)
     int s32 = AFN_PLAYER_RIG_SCALE_F32;
     glScalef32(s32, s32, s32);
 
-    glPolyFmt(POLY_ALPHA(31) | POLY_CULL_BACK | POLY_FORMAT_LIGHT0);
+    glPolyFmt(POLY_ALPHA(31) | AFN_RIG_CULLFMT(AFN_PLAYER_RIG_CULL) | POLY_FORMAT_LIGHT0);
     glColor3b(255, 255, 255);
 #ifdef AFN_PLAYER_RIG_CAMLIGHT
 #ifndef AFN_PLAYER_RIG_LIGHT_DX
@@ -440,10 +446,10 @@ static void load_npc_rig_textures(void)
             int sizeH = 0, th = afn_npc_texh[i][g]; while (th > 8) { th >>= 1; sizeH++; }
             glGenTextures(1, &s_npc_tex_id[i][g]);
             glBindTexture(0, s_npc_tex_id[i][g]);
-            glTexImage2D(0, 0, GL_RGB16, sizeW, sizeH, 0,
-                         TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T,
-                         afn_npc_tex[i][g]);
-            glColorTableEXT(0, 0, 16, 0, 0, afn_npc_texpal[i][g]);
+            int npcflags = TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T;
+            if (afn_npc_alpha[i]) npcflags |= GL_TEXTURE_COLOR0_TRANSPARENT;
+            glTexImage2D(0, 0, GL_RGB256, sizeW, sizeH, 0, npcflags, afn_npc_tex[i][g]);
+            glColorTableEXT(0, 0, 256, 0, 0, afn_npc_texpal[i][g]);
         }
     }
     s_npc_inited = 1;
@@ -493,7 +499,7 @@ static void render_npc_rigs(void)
         int s32 = spriteScale >> 2;                  // 8.8 (256=1.0) -> scale*64 f32
         glScalef32(s32, s32, s32);
 
-        glPolyFmt(POLY_ALPHA(31) | POLY_CULL_BACK | POLY_FORMAT_LIGHT0);
+        glPolyFmt(POLY_ALPHA(31) | AFN_RIG_CULLFMT(afn_npc_cull[i]) | POLY_FORMAT_LIGHT0);
         glColor3b(255, 255, 255);
         // One draw per material group, binding that group's texture (0 = flat).
         int ng = afn_npc_matcount[i];

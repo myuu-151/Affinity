@@ -5197,7 +5197,7 @@ static void UploadOneRigTex(unsigned int& glTexID, const std::vector<uint8_t>& p
 {
     if (pix.empty() || tw <= 0 || th <= 0) return;
     std::vector<uint32_t> rgba(tw * th);
-    for (int i = 0; i < tw * th; i++) rgba[i] = pal[pix[i] & 0xF];
+    for (int i = 0; i < tw * th; i++) rgba[i] = pal[pix[i]];
     if (glTexID) glDeleteTextures(1, &glTexID);
     glGenTextures(1, &glTexID);
     glBindTexture(GL_TEXTURE_2D, glTexID);
@@ -5217,23 +5217,67 @@ static void UploadRigGLTexture(RiggedMeshAsset& rm)
         if (em.textured) UploadOneRigTex(em.glTexID, em.texturePixels, em.texturePalette, em.texW, em.texH);
 }
 
-// Manually assign a texture PNG to a rigged mesh (the glTF material slot had no
-// usable image). Reuses LoadMeshTexture's load+resize+quantize+GL upload via a
-// scratch MeshAsset, then steals its texture into the rig.
+// Manually assign a texture image to a rig material slot, quantized to a
+// 256-colour (GL_RGB256) palette. useAlpha reserves palette[0] for transparent
+// (alpha=0) source pixels (cutout). Loads packed or external images.
 static bool LoadRigTextureFromFile(RiggedMeshAsset& rm, int slot, const std::string& path)
 {
     if (slot < 0 || slot >= rm.matCount()) return false;
-    MeshAsset tmp;
-    if (!LoadMeshTexture(path, tmp)) return false;
+    int w = 0, h = 0, ch = 0; unsigned char* img = nullptr;
+    auto pit = sPackedAssets.find(path);
+    if (pit != sPackedAssets.end() && !pit->second.empty())
+        img = stbi_load_from_memory(pit->second.data(), (int)pit->second.size(), &w, &h, &ch, 4);
+    else
+        img = stbi_load(ResolveAssetPath(path).c_str(), &w, &h, &ch, 4);
+    if (!img) return false;
+
+    int tw = 1, th = 1;
+    while (tw < w && tw < 256) tw <<= 1;
+    while (th < h && th < 256) th <<= 1;
+    if (tw > 256) tw = 256; if (th > 256) th = 256;
+    std::vector<uint32_t> resized(tw * th);
+    for (int y = 0; y < th; y++)
+        for (int x = 0; x < tw; x++) {
+            int sx = x * w / tw, sy = y * h / th;
+            unsigned char* p = img + (sy * w + sx) * 4;
+            resized[y * tw + x] = p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
+        }
+    stbi_image_free(img);
+
+    bool useAlpha = rm.useAlpha;
+    int palStart = useAlpha ? 1 : 0, palMax = useAlpha ? 255 : 256;
+    struct CC { uint32_t rgb; int count; };
+    std::vector<CC> hist;
+    for (uint32_t px : resized) {
+        if (useAlpha && (px >> 24) == 0) continue;
+        uint32_t c = px & 0xFFFFFF; bool f = false;
+        for (auto& hc : hist) if (hc.rgb == c) { hc.count++; f = true; break; }
+        if (!f) hist.push_back({ c, 1 });
+    }
+    std::sort(hist.begin(), hist.end(), [](const CC& a, const CC& b){ return a.count > b.count; });
+    int palCount = std::min((int)hist.size(), palMax);
+    uint32_t pal[256] = {};
+    if (useAlpha) pal[0] = 0;
+    for (int i = 0; i < palCount; i++) pal[palStart + i] = hist[i].rgb | 0xFF000000;
+    std::vector<uint8_t> indexed(tw * th);
+    for (int i = 0; i < tw * th; i++) {
+        if (useAlpha && (resized[i] >> 24) == 0) { indexed[i] = 0; continue; }
+        uint32_t px = resized[i] & 0xFFFFFF; int best = palStart, bd = 0x7FFFFFFF;
+        for (int c = palStart; c < palStart + palCount; c++) {
+            int dr = (int)(px & 0xFF) - (int)(pal[c] & 0xFF);
+            int dg = (int)((px >> 8) & 0xFF) - (int)((pal[c] >> 8) & 0xFF);
+            int db = (int)((px >> 16) & 0xFF) - (int)((pal[c] >> 16) & 0xFF);
+            int d = dr*dr + dg*dg + db*db;
+            if (d < bd) { bd = d; best = c; }
+        }
+        indexed[i] = (uint8_t)best;
+    }
+
     auto apply = [&](bool& textured, bool& manual, std::string& tpath,
-                     std::vector<uint8_t>& pix, uint32_t* pal, int& tw, int& th, unsigned int& gid) {
-        tw = tmp.texW; th = tmp.texH;
-        pix = std::move(tmp.texturePixels);
-        memcpy(pal, tmp.texturePalette, sizeof(uint32_t) * 16);
+                     std::vector<uint8_t>& pix, uint32_t* p, int& ow, int& oh, unsigned int& gid) {
+        ow = tw; oh = th; pix = indexed; memcpy(p, pal, sizeof(pal));
         textured = true; manual = true; tpath = path;
-        if (gid) glDeleteTextures(1, &gid);
-        gid = tmp.glTexID;   // steal the GL texture LoadMeshTexture created
-        tmp.glTexID = 0;
+        UploadOneRigTex(gid, pix, p, ow, oh);
     };
     if (slot == 0)
         apply(rm.textured, rm.textureManual, rm.texturePath, rm.texturePixels,
@@ -5580,7 +5624,9 @@ static bool SaveProject(const std::string& path)
         // 5th = flags bitmask (bit0 = smooth shading, bit1 = camera light).
         const char* texP = (rmA.textureManual && !rmA.texturePath.empty())
                            ? rmA.texturePath.c_str() : "-";
-        int rigFlags = (rmA.smoothShading ? 1 : 0) | (rmA.cameraLight ? 2 : 0);
+        // flags: bit0 smooth, bit1 camera light, bits2-3 cull mode (0/1/2), bit4 use-alpha.
+        int rigFlags = (rmA.smoothShading ? 1 : 0) | (rmA.cameraLight ? 2 : 0)
+                     | ((rmA.cullMode & 3) << 2) | (rmA.useAlpha ? 16 : 0);
         // Fields 8-14 = collision: type|cx|cy|cz|ex|ey|ez.
         fprintf(f, "rig=%s|%s|%s|%s|%d|%.2f|%.2f|%d|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f\n",
                 rmA.name.c_str(), rmA.sourcePath.c_str(),
@@ -6957,7 +7003,7 @@ static bool LoadProject(const std::string& path)
                 // Re-apply a manually-assigned slot-0 texture (overrides glTF image).
                 if (nf >= 4 && rtex[0] && rtex[0] != '-')
                     LoadRigTextureFromFile(rm, 0, std::string(rtex));
-                if (nf >= 5) { rm.smoothShading = (rflags & 1) != 0; rm.cameraLight = (rflags & 2) != 0; }
+                if (nf >= 5) { rm.smoothShading = (rflags & 1) != 0; rm.cameraLight = (rflags & 2) != 0; rm.cullMode = (rflags >> 2) & 3; rm.useAlpha = (rflags & 16) != 0; }
                 if (nf >= 7) { rm.lightX = rlx; rm.lightY = rly; }
                 if (nf >= 14) {
                     rm.collisionType = rcolType;
@@ -10530,6 +10576,29 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
             if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         }
         ImGui::PopItemWidth();
+
+        // ---- Rendering (rigged glTF) ----
+        if (sp.riggedMeshIdx >= 0 && sp.riggedMeshIdx < (int)sRiggedMeshAssets.size()) {
+            RiggedMeshAsset& rmR = sRiggedMeshAssets[sp.riggedMeshIdx];
+            ImGui::Separator();
+            const char* cullModes[] = { "Back", "Front", "None" };
+            ImGui::PushItemWidth(Scaled(120));
+            if (ImGui::Combo("Cull##m3drigcull", &rmR.cullMode, cullModes, 3)) sProjectDirty = true;
+            ImGui::PopItemWidth();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Backface culling: Back (default) hides back faces, Front hides front faces, None draws both sides. Applies in the 3D tab and on device.");
+            ImGui::SameLine();
+            if (ImGui::Checkbox("Use Alpha##m3drigalpha", &rmR.useAlpha)) {
+                // Re-quantize each material's manual texture so palette[0] is
+                // reserved/freed for transparent (alpha=0) source pixels.
+                if (rmR.textureManual && !rmR.texturePath.empty())
+                    LoadRigTextureFromFile(rmR, 0, rmR.texturePath);
+                for (int em = 0; em < (int)rmR.extraMaterials.size(); em++)
+                    if (rmR.extraMaterials[em].textureManual && !rmR.extraMaterials[em].texturePath.empty())
+                        LoadRigTextureFromFile(rmR, em + 1, rmR.extraMaterials[em].texturePath);
+                sProjectDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reserve palette[0] for transparent (alpha=0) source pixels — cutout transparency. Re-imports each material texture. Leave off unless the texture has real cutout transparency.");
+        }
 
         // ---- Collision (rigged glTF) ----
         if (sp.riggedMeshIdx >= 0 && sp.riggedMeshIdx < (int)sRiggedMeshAssets.size()) {
@@ -16349,6 +16418,8 @@ void FrameTick(float dt)
                     re.name = rm.name;
                     re.cameraLight = rm.cameraLight;
                     re.lightX = rm.lightX; re.lightY = rm.lightY;
+                    re.cullMode = rm.cullMode;
+                    re.useAlpha = rm.useAlpha;
                     // One group per material slot: filter triangles by slot and
                     // scale UVs by that slot's texture size.
                     for (int ms = 0; ms < rm.matCount(); ms++) {
@@ -30486,7 +30557,11 @@ void Render3DViewport()
                     float lDir[]={0.3f,1.0f,0.5f,0.0f};
                     glLightfv(GL_LIGHT0,GL_POSITION,lDir);
                 }
-                glDisable(GL_CULL_FACE);
+                // Backface culling per the rig's Cull setting (0=Back,1=Front,2=None).
+                if (rm.cullMode == 2) glDisable(GL_CULL_FACE);
+                else { glEnable(GL_CULL_FACE); glCullFace(rm.cullMode == 1 ? GL_FRONT : GL_BACK); }
+                // Use Alpha: discard transparent (palette[0], alpha=0) texels.
+                if (rm.useAlpha) { glEnable(GL_ALPHA_TEST); glAlphaFunc(GL_GREATER, 0.5f); }
                 bool rigSmooth = rm.smoothShading;
                 // Draw one group per material slot, binding that slot's texture.
                 for (int ms = 0; ms < rm.matCount(); ms++) {
@@ -30533,6 +30608,7 @@ void Render3DViewport()
                     glEnd();
                     if (slotTex) { glDisable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, 0); }
                 }
+                if (rm.useAlpha) glDisable(GL_ALPHA_TEST);
                 glDisable(GL_LIGHTING); glDisable(GL_LIGHT0);
                 if (fs.selected) {
                     glColor3f(1,1,1); glLineWidth(2.0f);

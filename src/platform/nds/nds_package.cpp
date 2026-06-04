@@ -1074,27 +1074,27 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 }
                 f << "\n};\n";
             };
-            // 4bpp-packed 16-colour texture + RGB15 palette, named <base>.
+            // 8bpp 256-colour texture (1 byte/texel, GL_RGB256) + RGB15 palette.
             auto emitTex = [&](const std::string& base, const GBARiggedMeshExport::MatGroup& g) {
-                int packed = (g.texW * g.texH + 1) / 2;
+                int npx = g.texW * g.texH;
                 f << "static const u8 " << base << "_tex[] = {";
-                for (int i = 0; i < packed; i++) {
-                    int lo = (i*2+0 < (int)g.texPixels.size()) ? (g.texPixels[i*2+0] & 0xF) : 0;
-                    int hi = (i*2+1 < (int)g.texPixels.size()) ? (g.texPixels[i*2+1] & 0xF) : 0;
+                for (int i = 0; i < npx; i++) {
+                    int idx = (i < (int)g.texPixels.size()) ? g.texPixels[i] : 0;
                     if (i % 16 == 0) f << "\n    ";
-                    f << ((hi << 4) | lo) << ",";
+                    f << idx << ",";
                 }
                 f << "\n};\n";
                 f << "static const u16 " << base << "_texpal[] = {";
-                for (int i = 0; i < 16; i++) {
+                for (int i = 0; i < 256; i++) {
                     uint32_t c = g.texPalette[i];
                     uint16_t c15 = (uint16_t)((((c >> 0) & 0xFF) >> 3)
                                             | ((((c >> 8) & 0xFF) >> 3) << 5)
                                             | ((((c >> 16) & 0xFF) >> 3) << 10));
+                    if (i % 16 == 0) f << "\n    ";
                     char hex[8]; snprintf(hex, sizeof(hex), "0x%04X", c15);
-                    f << " " << hex << ",";
+                    f << hex << ",";
                 }
-                f << " };\n";
+                f << "\n};\n";
             };
             f << "#define AFN_HAS_PLAYER_RIG 1\n";
             int ng = (int)rig.groups.size();
@@ -1148,6 +1148,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             f << "#define AFN_PLAYER_RIG_DEFAULT_CLIP " << playerClip << "\n";
             // Scale as 20.12 f32 (scale*64 matches OBJ sizing — see editor).
             f << "#define AFN_PLAYER_RIG_SCALE_F32 " << (int)lroundf(playerScale * 64.0f) << "\n";
+            f << "#define AFN_PLAYER_RIG_CULL " << rig.cullMode << "\n";   // 0 Back / 1 Front / 2 None
+            if (rig.useAlpha) f << "#define AFN_PLAYER_RIG_ALPHA 1\n";     // palette[0] = transparent
             if (rig.cameraLight) {
                 f << "#define AFN_PLAYER_RIG_CAMLIGHT 1\n";
                 float ax = rig.lightX * 3.14159265f/180.0f, ay = rig.lightY * 3.14159265f/180.0f;
@@ -1265,6 +1267,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << ((dc < 0 || dc >= nc) ? 0 : dc);
             });
             perInst("int", "sprite", [&](int i){ f << npc[i]; });
+            perInst("u8",  "cull",  [&](int i){ f << rigs[sprites[npc[i]].riggedMeshIdx].cullMode; });
+            perInst("u8",  "alpha", [&](int i){ f << (rigs[sprites[npc[i]].riggedMeshIdx].useAlpha ? 1 : 0); });
             perInst("u8* const*",  "tex",    [&](int i){ f << "afn_npc_A" << i << "_tex"; });     // [i][group]
             perInst("u16* const*", "texpal", [&](int i){ f << "afn_npc_A" << i << "_texpal"; });
             perInst("u16* const",  "texw",   [&](int i){ f << "afn_npc_A" << i << "_texw"; });    // [i][group]

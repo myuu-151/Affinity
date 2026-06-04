@@ -406,8 +406,8 @@ bool LoadRiggedGLTF(const std::string& path, RiggedMeshAsset& out, std::string* 
                 if (!f) hist.push_back({ c, 1 });
             }
             std::sort(hist.begin(), hist.end(), [](const CC& a, const CC& b){ return a.count > b.count; });
-            int palCount = (int)std::min((size_t)16, hist.size());
-            uint32_t pal[16] = {};
+            int palCount = (int)std::min((size_t)256, hist.size());
+            uint32_t pal[256] = {};
             for (int i = 0; i < palCount; i++) pal[i] = hist[i].rgb | 0xFF000000;
 
             std::vector<uint8_t> indexed(tw * th);
