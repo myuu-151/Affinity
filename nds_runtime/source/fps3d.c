@@ -6,6 +6,7 @@
 #include "dsma.h"
 #include <nds/arm9/videoGL.h>
 #include <stdio.h>
+#include <stdlib.h> // malloc/calloc/free for mesh spatial buckets
 #include <math.h>   // sinf/cosf/sqrtf for slope-normal rig alignment
 
 // ---------------------------------------------------------------------------
@@ -169,9 +170,147 @@ static void load_mesh_textures(void)
     }
 }
 
+// --- Spatial bucketing for per-region mesh culling -------------------------
+// render_meshes submits every vertex in immediate mode (no batching), so an
+// off-screen triangle still costs full CPU. To cull WITHIN a single mesh (so a
+// whole level that's one giant subdivided mesh still only pays for what's on
+// screen), each mesh is partitioned once into a GN×GN×GN grid of buckets by
+// triangle centroid. Per frame we cull each bucket's bounding sphere against
+// the frustum and only submit the survivors. A single huge mesh thus self-
+// partitions into cullable chunks.
+#define MESH_GN       4
+#define MESH_NBUCKET  (MESH_GN * MESH_GN * MESH_GN)
+typedef struct {
+    int cx, cy, cz;            // local-space sphere center (fx8)
+    int radius;                // local-space sphere radius (fx8)
+    int triStart, triCount;    // span into s_tri_idx[mi]  (u16 indices, 3/tri)
+    int quadStart, quadCount;  // span into s_quad_idx[mi] (u16 indices, 4/quad)
+} MeshBucket;
+static MeshBucket* s_buckets[AFN_MESH_COUNT];
+static int         s_bucket_count[AFN_MESH_COUNT];
+static uint16_t*   s_tri_idx[AFN_MESH_COUNT];
+static uint16_t*   s_quad_idx[AFN_MESH_COUNT];
+static int         s_mesh_radius[AFN_MESH_COUNT];  // origin-based, whole-mesh reject
+
+static void mesh_buckets_build(void)
+{
+    for (int mi = 0; mi < AFN_MESH_COUNT; mi++) {
+        s_buckets[mi] = 0; s_bucket_count[mi] = 0;
+        s_tri_idx[mi] = 0; s_quad_idx[mi] = 0; s_mesh_radius[mi] = 1;
+
+        const int16_t* mv  = afn_mesh_vert_ptrs[mi];
+        const uint16_t* ti = afn_mesh_idx_ptrs[mi];
+        const uint16_t* qi = afn_mesh_qidx_ptrs[mi];
+        int ic = afn_mesh_desc[mi][1];
+        int qc = afn_mesh_desc[mi][2];
+        int ntri = ic / 3, nquad = qc / 4;
+        if (ntri <= 0 && nquad <= 0) continue;
+
+        // Origin-based radius (whole-mesh quick reject, sphere centered on the
+        // sprite origin) + mesh AABB for the grid.
+        float maxsq = 0.0f;
+        int mnx = 1<<30, mny = 1<<30, mnz = 1<<30;
+        int mxx = -(1<<30), mxy = -(1<<30), mxz = -(1<<30);
+        for (int k = 0; k < ic; k++) { int v = ti[k];
+            int x = mv[v*3], y = mv[v*3+1], z = mv[v*3+2];
+            float s = (float)x*x + (float)y*y + (float)z*z; if (s > maxsq) maxsq = s;
+            if (x<mnx)mnx=x; if (x>mxx)mxx=x; if (y<mny)mny=y; if (y>mxy)mxy=y; if (z<mnz)mnz=z; if (z>mxz)mxz=z; }
+        for (int k = 0; k < qc; k++) { int v = qi[k];
+            int x = mv[v*3], y = mv[v*3+1], z = mv[v*3+2];
+            float s = (float)x*x + (float)y*y + (float)z*z; if (s > maxsq) maxsq = s;
+            if (x<mnx)mnx=x; if (x>mxx)mxx=x; if (y<mny)mny=y; if (y>mxy)mxy=y; if (z<mnz)mnz=z; if (z>mxz)mxz=z; }
+        s_mesh_radius[mi] = (int)sqrtf(maxsq) + 1;
+
+        int exx = mxx-mnx; if (exx < 1) exx = 1;
+        int exy = mxy-mny; if (exy < 1) exy = 1;
+        int exz = mxz-mnz; if (exz < 1) exz = 1;
+        #define CELL_OF(cx,cy,cz) ({ \
+            int _gx=((cx)-mnx)*MESH_GN/(exx+1); if(_gx<0)_gx=0; if(_gx>=MESH_GN)_gx=MESH_GN-1; \
+            int _gy=((cy)-mny)*MESH_GN/(exy+1); if(_gy<0)_gy=0; if(_gy>=MESH_GN)_gy=MESH_GN-1; \
+            int _gz=((cz)-mnz)*MESH_GN/(exz+1); if(_gz<0)_gz=0; if(_gz>=MESH_GN)_gz=MESH_GN-1; \
+            (_gx*MESH_GN + _gy)*MESH_GN + _gz; })
+
+        MeshBucket* B = (MeshBucket*)calloc(MESH_NBUCKET, sizeof(MeshBucket));
+        if (!B) continue;   // OOM → leave bucket_count 0, fall back to full draw
+
+        // Pass A: count index entries per bucket (counts stored in index units).
+        for (int t = 0; t < ntri; t++) {
+            int a=ti[t*3], b=ti[t*3+1], c=ti[t*3+2];
+            int cx=(mv[a*3]+mv[b*3]+mv[c*3])/3;
+            int cy=(mv[a*3+1]+mv[b*3+1]+mv[c*3+1])/3;
+            int cz=(mv[a*3+2]+mv[b*3+2]+mv[c*3+2])/3;
+            B[CELL_OF(cx,cy,cz)].triCount += 3;
+        }
+        for (int q = 0; q < nquad; q++) {
+            int a=qi[q*4], b=qi[q*4+1], c=qi[q*4+2], d=qi[q*4+3];
+            int cx=(mv[a*3]+mv[b*3]+mv[c*3]+mv[d*3])/4;
+            int cy=(mv[a*3+1]+mv[b*3+1]+mv[c*3+1]+mv[d*3+1])/4;
+            int cz=(mv[a*3+2]+mv[b*3+2]+mv[c*3+2]+mv[d*3+2])/4;
+            B[CELL_OF(cx,cy,cz)].quadCount += 4;
+        }
+        // Prefix sums → start offsets; reset counts to use as fill cursors.
+        int triTotal=0, quadTotal=0;
+        for (int c = 0; c < MESH_NBUCKET; c++) {
+            B[c].triStart  = triTotal;  triTotal  += B[c].triCount;  B[c].triCount  = 0;
+            B[c].quadStart = quadTotal; quadTotal += B[c].quadCount; B[c].quadCount = 0;
+        }
+        uint16_t* TI = triTotal  ? (uint16_t*)malloc(triTotal  * sizeof(uint16_t)) : 0;
+        uint16_t* QI = quadTotal ? (uint16_t*)malloc(quadTotal * sizeof(uint16_t)) : 0;
+        if ((triTotal && !TI) || (quadTotal && !QI)) { free(TI); free(QI); free(B); continue; }
+
+        // Pass B: scatter indices into their buckets + accumulate bucket AABB.
+        int bmnx[MESH_NBUCKET], bmny[MESH_NBUCKET], bmnz[MESH_NBUCKET];
+        int bmxx[MESH_NBUCKET], bmxy[MESH_NBUCKET], bmxz[MESH_NBUCKET];
+        for (int c = 0; c < MESH_NBUCKET; c++) {
+            bmnx[c]=bmny[c]=bmnz[c]= 1<<30;
+            bmxx[c]=bmxy[c]=bmxz[c]=-(1<<30);
+        }
+        #define ACC(cell,v) do { int _v=(v); \
+            int _x=mv[_v*3],_y=mv[_v*3+1],_z=mv[_v*3+2]; \
+            if(_x<bmnx[cell])bmnx[cell]=_x; if(_x>bmxx[cell])bmxx[cell]=_x; \
+            if(_y<bmny[cell])bmny[cell]=_y; if(_y>bmxy[cell])bmxy[cell]=_y; \
+            if(_z<bmnz[cell])bmnz[cell]=_z; if(_z>bmxz[cell])bmxz[cell]=_z; } while(0)
+        for (int t = 0; t < ntri; t++) {
+            int a=ti[t*3], b=ti[t*3+1], c=ti[t*3+2];
+            int cx=(mv[a*3]+mv[b*3]+mv[c*3])/3;
+            int cy=(mv[a*3+1]+mv[b*3+1]+mv[c*3+1])/3;
+            int cz=(mv[a*3+2]+mv[b*3+2]+mv[c*3+2])/3;
+            int cell=CELL_OF(cx,cy,cz);
+            int p=B[cell].triStart + B[cell].triCount;
+            TI[p]=a; TI[p+1]=b; TI[p+2]=c; B[cell].triCount += 3;
+            ACC(cell,a); ACC(cell,b); ACC(cell,c);
+        }
+        for (int q = 0; q < nquad; q++) {
+            int a=qi[q*4], b=qi[q*4+1], c=qi[q*4+2], d=qi[q*4+3];
+            int cx=(mv[a*3]+mv[b*3]+mv[c*3]+mv[d*3])/4;
+            int cy=(mv[a*3+1]+mv[b*3+1]+mv[c*3+1]+mv[d*3+1])/4;
+            int cz=(mv[a*3+2]+mv[b*3+2]+mv[c*3+2]+mv[d*3+2])/4;
+            int cell=CELL_OF(cx,cy,cz);
+            int p=B[cell].quadStart + B[cell].quadCount;
+            QI[p]=a; QI[p+1]=b; QI[p+2]=c; QI[p+3]=d; B[cell].quadCount += 4;
+            ACC(cell,a); ACC(cell,b); ACC(cell,c); ACC(cell,d);
+        }
+        #undef ACC
+        // Pass C: per-bucket center + radius from its AABB.
+        for (int c = 0; c < MESH_NBUCKET; c++) {
+            if (B[c].triCount==0 && B[c].quadCount==0) continue;
+            int ccx=(bmnx[c]+bmxx[c])/2, ccy=(bmny[c]+bmxy[c])/2, ccz=(bmnz[c]+bmxz[c])/2;
+            long long dx=bmxx[c]-ccx, dy=bmxy[c]-ccy, dz=bmxz[c]-ccz;
+            B[c].cx=ccx; B[c].cy=ccy; B[c].cz=ccz;
+            B[c].radius=(int)sqrtf((float)(dx*dx+dy*dy+dz*dz)) + 1;
+        }
+        #undef CELL_OF
+        s_buckets[mi]=B; s_bucket_count[mi]=MESH_NBUCKET;
+        s_tri_idx[mi]=TI; s_quad_idx[mi]=QI;
+    }
+}
+
 static void render_meshes(void)
 {
 #if defined(AFN_SPRITE_COUNT) && AFN_SPRITE_COUNT > 0
+    static int s_buckets_ready = 0;
+    if (!s_buckets_ready) { s_buckets_ready = 1; mesh_buckets_build(); }
+
     for (int si = 0; si < AFN_SPRITE_COUNT; si++)
     {
         int meshIdx = afn_sprite_data[si][9];
@@ -204,6 +343,35 @@ static void render_meshes(void)
         int lit           = afn_mesh_desc[meshIdx][5];
         int textured      = afn_mesh_desc[meshIdx][8];
         int grayscale     = afn_mesh_desc[meshIdx][13];
+
+        // --- Whole-mesh frustum + distance cull --------------------------
+        // Reject meshes whose bounding sphere is behind the camera, beyond
+        // the draw distance, or outside the view cone before paying the
+        // immediate-mode vertex submission cost. Same camera-space math as
+        // the sprite cull (sprites.c): depth/viewX in fx8, 256 = 1 unit.
+        {
+            int vshift_c = afn_mesh_vshift[meshIdx];
+            int s32_c    = (spriteScale << 4) << vshift_c;   // 8.8 → 20.12, ×2^vshift
+            int radius   = (int)(((long long)s_mesh_radius[meshIdx] * s32_c) >> 12);
+            int dx = wx - cam_x;
+            int dy = wy - cam_h;
+            int dz = wz - cam_z;
+            int depth = (dx * g_sinf + dz * g_cosf) >> 8;   // forward (-view_z)
+            // Behind / right on top of the camera.
+            if (depth + radius <= 64) continue;
+#ifdef AFN_SPRITE_DRAW_DISTANCE
+            // Honor the editor's draw distance for meshes too.
+            if (depth - radius > AFN_SPRITE_DRAW_DISTANCE) continue;
+#endif
+            // Horizontal frustum: half-FOV ≈ 43° (70° vert × 4:3), tan ≈ 0.93.
+            // Pad to ~1.125·depth so visible meshes never pop at the edges.
+            int viewX = (-dx * g_cosf + dz * g_sinf) >> 8;
+            if (viewX < 0) viewX = -viewX;
+            if (viewX - radius > depth + (depth >> 3)) continue;
+            // Vertical frustum: half-FOV 35°, tan ≈ 0.70. Pad to ~0.875·depth.
+            int vy = dy < 0 ? -dy : dy;
+            if (vy - radius > depth - (depth >> 3)) continue;
+        }
 
         glPushMatrix();
         // Absolute world coords — gluLookAtf32 already applied the camera
@@ -274,26 +442,96 @@ static void render_meshes(void)
                          fx8_to_v16(verts[(i)*3+2])); \
         } while (0)
 
-        if (indexCount > 0)
+        if (s_bucket_count[meshIdx] > 0)
         {
-            glBegin(GL_TRIANGLES);
-            for (int t = 0; t + 3 <= indexCount; t += 3)
-            {
-                EMIT(idx[t + 0]); EMIT(idx[t + 1]); EMIT(idx[t + 2]);
+            // Per-bucket frustum cull: a single giant mesh self-partitions into
+            // GN³ chunks; we only submit chunks whose world-space sphere is in
+            // view. Bucket centers are local — transform each through the same
+            // scale→Ry→Rx→Rz→translate the verts get (brad_* return 8.8 sin/cos,
+            // so a ×→>>8; identity when the angle is 0).
+            const MeshBucket* B = s_buckets[meshIdx];
+            const uint16_t* TI = s_tri_idx[meshIdx];
+            const uint16_t* QI = s_quad_idx[meshIdx];
+            int nb = s_bucket_count[meshIdx];
+            int cY = brad_cos(rot),  sY = brad_sin(rot);
+            int cX = brad_cos(rotX), sX = brad_sin(rotX);
+            int cZ = brad_cos(rotZ), sZ = brad_sin(rotZ);
+            char vis[MESH_NBUCKET];
+            for (int c = 0; c < nb; c++) {
+                const MeshBucket* bk = &B[c];
+                if (bk->triCount == 0 && bk->quadCount == 0) { vis[c] = 0; continue; }
+                int lx = (int)(((long long)bk->cx * s32) >> 12);
+                int ly = (int)(((long long)bk->cy * s32) >> 12);
+                int lz = (int)(((long long)bk->cz * s32) >> 12);
+                int rx  = (lx*cY + lz*sY) >> 8;
+                int rz  = (-lx*sY + lz*cY) >> 8;
+                int ry  = ly;
+                int ry2 = (ry*cX - rz*sX) >> 8;
+                int rz2 = (ry*sX + rz*cX) >> 8;
+                int rx2 = (rx*cZ - ry2*sZ) >> 8;
+                int ry3 = (rx*sZ + ry2*cZ) >> 8;
+                int brad = (int)(((long long)bk->radius * s32) >> 12);
+                int dx = (wx + rx2) - cam_x;
+                int dy = (wy + ry3) - cam_h;
+                int dz = (wz + rz2) - cam_z;
+                int depth = (dx*g_sinf + dz*g_cosf) >> 8;
+                if (depth + brad <= 64) { vis[c] = 0; continue; }
+#ifdef AFN_SPRITE_DRAW_DISTANCE
+                if (depth - brad > AFN_SPRITE_DRAW_DISTANCE) { vis[c] = 0; continue; }
+#endif
+                int vX = (-dx*g_cosf + dz*g_sinf) >> 8; if (vX < 0) vX = -vX;
+                if (vX - brad > depth + (depth >> 3)) { vis[c] = 0; continue; }
+                int vY = dy < 0 ? -dy : dy;
+                if (vY - brad > depth - (depth >> 3)) { vis[c] = 0; continue; }
+                vis[c] = 1;
             }
-            glEnd();
-        }
 
-        if (quadIdxCount > 0)
-        {
-            const uint16_t* qidx = afn_mesh_qidx_ptrs[meshIdx];
-            glBegin(GL_QUADS);
-            for (int q = 0; q + 4 <= quadIdxCount; q += 4)
-            {
-                EMIT(qidx[q + 0]); EMIT(qidx[q + 1]);
-                EMIT(qidx[q + 2]); EMIT(qidx[q + 3]);
+            if (TI) {
+                glBegin(GL_TRIANGLES);
+                for (int c = 0; c < nb; c++) {
+                    if (!vis[c]) continue;
+                    int end = B[c].triStart + B[c].triCount;
+                    for (int t = B[c].triStart; t < end; t += 3) {
+                        EMIT(TI[t]); EMIT(TI[t+1]); EMIT(TI[t+2]);
+                    }
+                }
+                glEnd();
             }
-            glEnd();
+            if (QI) {
+                glBegin(GL_QUADS);
+                for (int c = 0; c < nb; c++) {
+                    if (!vis[c]) continue;
+                    int end = B[c].quadStart + B[c].quadCount;
+                    for (int q = B[c].quadStart; q < end; q += 4) {
+                        EMIT(QI[q]); EMIT(QI[q+1]); EMIT(QI[q+2]); EMIT(QI[q+3]);
+                    }
+                }
+                glEnd();
+            }
+        }
+        else
+        {
+            // Fallback (bucket build OOM'd): draw the whole mesh unculled.
+            if (indexCount > 0)
+            {
+                glBegin(GL_TRIANGLES);
+                for (int t = 0; t + 3 <= indexCount; t += 3)
+                {
+                    EMIT(idx[t + 0]); EMIT(idx[t + 1]); EMIT(idx[t + 2]);
+                }
+                glEnd();
+            }
+            if (quadIdxCount > 0)
+            {
+                const uint16_t* qidx = afn_mesh_qidx_ptrs[meshIdx];
+                glBegin(GL_QUADS);
+                for (int q = 0; q + 4 <= quadIdxCount; q += 4)
+                {
+                    EMIT(qidx[q + 0]); EMIT(qidx[q + 1]);
+                    EMIT(qidx[q + 2]); EMIT(qidx[q + 3]);
+                }
+                glEnd();
+            }
         }
         #undef EMIT
 
