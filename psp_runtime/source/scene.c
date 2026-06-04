@@ -3,6 +3,7 @@
 #include "affinity_psp.h"
 #include "meshcull.h"
 #include "rig.h"
+#include "collision.h"
 
 #include <pspkernel.h>
 #include <pspgu.h>
@@ -22,10 +23,17 @@ static float camX, camY, camZ;         // camera eye (world)
 static float camAngle;                 // camera yaw (radians); forward=(sin,0,cos)
 static float playerX, playerY, playerZ;
 static float playerYaw;                // degrees, facing of the rig
+static float playerVY;                 // vertical velocity (gravity/jump)
+static int   grounded;
 static float s_orbit;                  // orbit distance
+
+#define GRAVITY      0.8f
+#define JUMP_VEL     13.0f
+#define TERMINAL_VY  30.0f
 
 void scene_init(void) {
     meshcull_build();
+    collide_build();
     rig_init();
     // GE reads physical RAM; flush the CPU dcache so baked const data (textures,
     // bucket indices) is visible — otherwise textures render black.
@@ -38,6 +46,10 @@ void scene_init(void) {
         float st[3]; rig_player_start(st);
         playerX = st[0]; playerY = st[1]; playerZ = st[2];
         playerYaw = afn_cam_start_angle * RAD2DEG;
+        // Drop onto the floor at spawn so we don't start mid-air.
+        float fy;
+        if (collide_floor(playerX, playerZ, playerY + 200.0f, &fy)) playerY = fy;
+        playerVY = 0.0f; grounded = 1;
     } else {
         camX = afn_cam_start_x; camY = afn_cam_start_h; camZ = afn_cam_start_z;
     }
@@ -68,6 +80,19 @@ void scene_update(void) {
             playerX += mvX * speed;
             playerZ += mvZ * speed;
             playerYaw = atan2f(mvX, mvZ) * RAD2DEG;
+        }
+        // Jump.
+        if (grounded && (pad.Buttons & PSP_CTRL_CROSS)) { playerVY = JUMP_VEL; grounded = 0; }
+        // Wall pushback, then gravity + floor snap.
+        collide_walls(&playerX, &playerZ, playerY);
+        playerVY -= GRAVITY;
+        if (playerVY < -TERMINAL_VY) playerVY = -TERMINAL_VY;
+        playerY += playerVY;
+        float fy;
+        if (collide_floor(playerX, playerZ, playerY, &fy) && playerY <= fy) {
+            playerY = fy; playerVY = 0.0f; grounded = 1;
+        } else {
+            grounded = 0;
         }
     } else {
         // Free-fly debug camera.
