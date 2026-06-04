@@ -6,6 +6,7 @@
 #include "dsma.h"
 #include <nds/arm9/videoGL.h>
 #include <stdio.h>
+#include <math.h>   // sinf/cosf/sqrtf for slope-normal rig alignment
 
 // ---------------------------------------------------------------------------
 // Camera state — definitions (extern in affinity.h)
@@ -318,12 +319,8 @@ extern int afn_player_frozen;
 extern int afn_rig_clip;                 // script-set skeletal clip (PlaySkelAnim node); -1 = leave default
 extern int afn_skel_anim_obj;            // SetSkelAnim request: NPC sprite index (-1 = none)
 extern int afn_skel_anim_clip;           // SetSkelAnim request: clip to set on that NPC
-static int afn_isqrt(int n);             // defined below; used by the slope tilt
 static int32_t s_rig_frame = 0;          // 20.12 fixed animation frame
 static int     s_rig_clip  = AFN_PLAYER_RIG_DEFAULT_CLIP;
-// Rig-only slope handling (does not touch player_y / sprite collision):
-static int     s_slope_pitch  = 0;       // brad pitch along the travel direction
-static int     s_rig_dir_x = 0, s_rig_dir_z = 0;  // smoothed travel dir (unit*256)
 
 // One GL texture id per material group (0 = untextured group).
 static int gl_rig_tex_id[AFN_PLAYER_RIG_MATCOUNT];
@@ -382,50 +379,54 @@ static void render_player_rig(void)
     // orientation — easing the position just adds lag/bob, so we draw at
     // player_render_y directly and smooth only the tilt below.)
 
-    // Smooth the travel direction (unit*256) so the tilt axis doesn't wobble
-    // frame-to-frame — the raw per-frame movement delta jitters, which rocked
-    // the rig back and forth on slopes.
-    if (player_moving && (s_lastMoveDX || s_lastMoveDZ)) {
-        int mag = afn_isqrt(s_lastMoveDX*s_lastMoveDX + s_lastMoveDZ*s_lastMoveDZ);
-        if (mag >= 1) {
-            int nx = (s_lastMoveDX * 256) / mag, nz = (s_lastMoveDZ * 256) / mag;
-            s_rig_dir_x += (nx - s_rig_dir_x) >> 3;
-            s_rig_dir_z += (nz - s_rig_dir_z) >> 3;
-        }
-    }
-
-    // Pitch the rig along its travel direction so it sits on the slope (nose up
-    // going up, down going down) — pure pitch, never rolls. Sample the floor
-    // ahead vs behind along the smoothed direction.
-    int tgt_pitch = 0, dxn = s_rig_dir_x, dzn = s_rig_dir_z;
+    // --- Slope alignment: align the rig's up to the floor normal, then yaw
+    // (axis-angle via glRotatef32i — reliable, no matrix-layout guessing). The
+    // floor normal comes from sampling the height field in X and Z, so this does
+    // pitch AND roll. Per-axis pairs are independent so an edge miss on one axis
+    // doesn't drop the whole thing to upright.
+    static float s_upx = 0.0f, s_upy = 1.0f, s_upz = 0.0f;   // smoothed up vector
+    float tnx = 0.0f, tny = 1.0f, tnz = 0.0f;                // target floor normal
 #ifdef AFN_COL_FACE_COUNT
-    if (dxn || dzn) {
-        const int eps = 0x800;                        // ~8px — average the slope a bit
-        int ox = (dxn * eps) >> 8, oz = (dzn * eps) >> 8, run = eps << 1;
-        int fa, fb;
-        if (afn_collide_floor(player_render_x + ox, player_render_z + oz, player_render_y, &fa) &&
-            afn_collide_floor(player_render_x - ox, player_render_z - oz, player_render_y, &fb)) {
-            int d = fa - fb; if (d > run) d = run; if (d < -run) d = -run;  // cap ~45deg
-            tgt_pitch = (d * 10430) / run;            // brad ~= (dY/run) * (rad->brad)
+    {
+        const int eps = 0x800;                              // ~8px sample radius (16.8)
+        int run = eps << 1, fxp, fxm, fzp, fzm;
+        int okx = afn_collide_floor(player_render_x + eps, player_render_z, player_render_y, &fxp) &&
+                  afn_collide_floor(player_render_x - eps, player_render_z, player_render_y, &fxm);
+        int okz = afn_collide_floor(player_render_x, player_render_z + eps, player_render_y, &fzp) &&
+                  afn_collide_floor(player_render_x, player_render_z - eps, player_render_y, &fzm);
+        if (okx || okz) {
+            float dyx = okx ? (float)(fxp - fxm) / (float)run : 0.0f;
+            float dyz = okz ? (float)(fzp - fzm) / (float)run : 0.0f;
+            tnx = -dyx; tnz = -dyz;                         // N = (-dY/dx, 1, -dY/dz)
+            float l = sqrtf(tnx*tnx + 1.0f + tnz*tnz);
+            tnx /= l; tny = 1.0f / l; tnz /= l;
         }
     }
 #endif
-    s_slope_pitch += (tgt_pitch - s_slope_pitch) >> 2;   // smooth across triangle edges
+    // Smooth the up-vector toward the target normal, then renormalize.
+    s_upx += (tnx - s_upx) * 0.2f;
+    s_upy += (tny - s_upy) * 0.2f;
+    s_upz += (tnz - s_upz) * 0.2f;
+    { float l = sqrtf(s_upx*s_upx + s_upy*s_upy + s_upz*s_upz);
+      if (l > 0.0001f) { s_upx/=l; s_upy/=l; s_upz/=l; } else { s_upx=0; s_upy=1; s_upz=0; } }
+
+    uint16_t rig_face = player_moving
+        ? (uint16_t)(player_move_angle + (orbit_angle << 1))
+        : player_move_angle;
 
     glPushMatrix();
     glTranslatef32(fx8_to_f32(player_render_x),
                    fx8_to_f32(player_render_y),
                    fx8_to_f32(player_render_z));
-    // Pitch about the horizontal axis perpendicular to travel (world space),
-    // before the facing yaw.
-    if (dxn || dzn) glRotatef32i(s_slope_pitch >> 1, -dzn, 0, dxn);
-    // player_move_angle is INPUT-space while moving and only baked to world-space
-    // on stop, so add the same orbit conversion here to face the right way during
-    // movement (otherwise the rig snaps ~90° until you let go).
-    uint16_t rig_face = player_moving
-        ? (uint16_t)(player_move_angle + (orbit_angle << 1))
-        : player_move_angle;
-    glRotateYi(rig_face >> 1);                        // face movement heading (world space)
+    // Tilt the up-axis to the floor normal: rotate (0,1,0)->N about axis
+    // (0,1,0)xN = (Nz,0,-Nx) by the angle between them. Applied before the yaw
+    // (world space) so the yawed model lays onto the slope.
+    float horiz = sqrtf(s_upx*s_upx + s_upz*s_upz);
+    if (horiz > 0.0001f) {
+        int tiltDS = (int)(atan2f(horiz, s_upy) * (32768.0f / 6.28318531f));  // 32768 = full circle
+        glRotatef32i(tiltDS, floattof32(s_upz), 0, floattof32(-s_upx));
+    }
+    glRotateYi(rig_face >> 1);                        // face movement heading
     glRotateYi(AFN_RIG_YAW_CORRECTION >> 1);          // align model forward to heading
     int s32 = AFN_PLAYER_RIG_SCALE_F32;
     glScalef32(s32, s32, s32);
