@@ -5,6 +5,7 @@
 #include "rig.h"
 #include "collision.h"
 #include "sky.h"
+#include "billboard.h"
 
 #include <pspkernel.h>
 #include <pspgu.h>
@@ -198,6 +199,9 @@ void scene_render(void) {
     // the floor slope.
     if (s_follow)
         rig_render(playerX, playerY, playerZ, playerYaw, s_floorN, 0);
+
+    // Sprite billboards (enemies/pickups), camera-facing + animated.
+    billboards_render(camX, camY, camZ, camAngle);
 
     sceGuEnable(GU_CULL_FACE);
     sceGuFrontFace(GU_CW);
