@@ -1682,8 +1682,12 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 float lx = mesh.positions[v*3+0] * sprScale;
                 float ly = mesh.positions[v*3+1] * sprScale;
                 float lz = mesh.positions[v*3+2] * sprScale;
-                float rx = lx*cosY - lz*sinY;
-                float rz = lx*sinY + lz*cosY;
+                // Match the render's Y-rotation handedness (mode7_preview /
+                // glRotateYi): rx = lx*cosY + lz*sinY. The old `- lz*sinY` spun
+                // collision the opposite way, mirroring it at 90/-90 (0/180 are
+                // symmetric so looked fine) -> inverted collision on rotated meshes.
+                float rx = lx*cosY + lz*sinY;
+                float rz = -lx*sinY + lz*cosY;
                 float ry = ly;
                 float ry2 = ry*cosX - rz*sinX;
                 float rz2 = ry*sinX + rz*cosX;
