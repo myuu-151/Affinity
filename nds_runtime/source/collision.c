@@ -11,9 +11,13 @@
 
 #ifdef AFN_COL_FACE_COUNT
 
-#define COL_PLAYER_RADIUS 768   // 3 px in 16.8
-// afn_player_height moved to script-side afn_player_height (set by
-// SetPlayerHeight node). Default lives in script_glue.c at 3072.
+// Player collision radius (horizontal half-width) is script-driven via the
+// SetPlayerWidth node → afn_player_width (default 768 = 3px in 16.8, defined
+// in script_glue.c). afn_player_height (SetPlayerHeight) controls the vertical
+// band. Forward-decl the global when mapdata.h predates the SetPlayerWidth node.
+#ifndef AFN_HAS_PLAYER_WIDTH
+extern int afn_player_width;
+#endif
 
 int afn_wall_collided_sprite = -1;
 int afn_floor_sprite = -1;   // sprite index of the floor face under the player (-1 = none)
@@ -53,7 +57,7 @@ void afn_collide_walls(int *px, int *pz, int py)
         int dist = (((ppx - face->v0x) >> 4) * face->nx +
                     ((ppz - face->v0z) >> 4) * face->nz) >> 4;
         int absDist = dist < 0 ? -dist : dist;
-        if (absDist >= COL_PLAYER_RADIUS) continue;
+        if (absDist >= afn_player_width) continue;
 
         // Quick XZ AABB pre-check.
         int fx0 = face->v0x, fx1 = face->v1x, fx2 = face->v2x;
@@ -62,11 +66,11 @@ void afn_collide_walls(int *px, int *pz, int py)
         int fMaxX = fx0 > fx1 ? fx0 : fx1; if (fx2 > fMaxX) fMaxX = fx2;
         int fMinZ = fz0 < fz1 ? fz0 : fz1; if (fz2 < fMinZ) fMinZ = fz2;
         int fMaxZ = fz0 > fz1 ? fz0 : fz1; if (fz2 > fMaxZ) fMaxZ = fz2;
-        int pad = COL_PLAYER_RADIUS;
+        int pad = afn_player_width;
         if (ppx < fMinX - pad || ppx > fMaxX + pad ||
             ppz < fMinZ - pad || ppz > fMaxZ + pad) continue;
 
-        int push = COL_PLAYER_RADIUS - absDist;
+        int push = afn_player_width - absDist;
         if (dist >= 0) {
             ppx += (face->nx * push) >> 8;
             ppz += (face->nz * push) >> 8;
@@ -91,33 +95,33 @@ int afn_collide_floor(int px, int pz, int py, int *outY)
     int count = afn_col_grid_count[ci];
 
     int bestY = 0, found = 0, bestSpr = -1;
-    int ppx = px >> 8, ppz = pz >> 8;       // integer pixels for cross-product math
+    // Full-precision (sub-pixel) barycentric with 64-bit intermediates. The old
+    // code worked in integer pixels and >>4-truncated the weights, which made
+    // the interpolated floor height stair-step / round-jitter non-monotonically
+    // as the player moved — shaking the camera and rig on slopes. 16.8 coords
+    // kept at full resolution gives a smooth, continuous floor height.
+    long long ppx = px, ppz = pz;
 
     for (int i = 0; i < count; i++) {
         const CollFace *face = &afn_col_faces[afn_col_grid_faces[start + i]];
         if (!(face->flags & 1)) continue;   // floor faces only
 
-        int ax = face->v0x >> 8, az = face->v0z >> 8;
-        int bx = face->v1x >> 8, bz = face->v1z >> 8;
-        int cx = face->v2x >> 8, cz = face->v2z >> 8;
-        int c0 = (bx - ax) * (ppz - az) - (bz - az) * (ppx - ax);
-        int c1 = (cx - bx) * (ppz - bz) - (cz - bz) * (ppx - bx);
-        int c2 = (ax - cx) * (ppz - cz) - (az - cz) * (ppx - cx);
+        long long ax = face->v0x, az = face->v0z;
+        long long bx = face->v1x, bz = face->v1z;
+        long long cx = face->v2x, cz = face->v2z;
+        long long c0 = (bx - ax) * (ppz - az) - (bz - az) * (ppx - ax);
+        long long c1 = (cx - bx) * (ppz - bz) - (cz - bz) * (ppx - bx);
+        long long c2 = (ax - cx) * (ppz - cz) - (az - cz) * (ppx - cx);
         if (!((c0 >= 0 && c1 >= 0 && c2 >= 0) || (c0 <= 0 && c1 <= 0 && c2 <= 0)))
             continue;
 
         int floorY;
-        int cSum = c0 + c1 + c2;
-        if (cSum == 0) {
-            floorY = ((face->v0y + face->v1y + face->v2y) * 341) >> 10;
-        } else {
-            int c0s = c0 >> 4, c1s = c1 >> 4, c2s = c2 >> 4;
-            int cs = c0s + c1s + c2s;
-            if (cs == 0)
-                floorY = ((face->v0y + face->v1y + face->v2y) * 341) >> 10;
-            else
-                floorY = (c1s * face->v0y + c2s * face->v1y + c0s * face->v2y) / cs;
-        }
+        long long cs = c0 + c1 + c2;
+        if (cs == 0)
+            floorY = ((face->v0y + face->v1y + face->v2y) * 341) >> 10;  // ~/3 (degenerate)
+        else
+            floorY = (int)((c1 * (long long)face->v0y + c2 * (long long)face->v1y
+                          + c0 * (long long)face->v2y) / cs);
 
         if (floorY > py + afn_player_height) continue;
         if (!found || floorY > bestY) { bestY = floorY; found = 1; bestSpr = face->sprIdx; }

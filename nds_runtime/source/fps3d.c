@@ -322,9 +322,8 @@ static int afn_isqrt(int n);             // defined below; used by the slope til
 static int32_t s_rig_frame = 0;          // 20.12 fixed animation frame
 static int     s_rig_clip  = AFN_PLAYER_RIG_DEFAULT_CLIP;
 // Rig-only slope handling (does not touch player_y / sprite collision):
-static int32_t s_rig_render_y = 0;       // eased draw-Y, filters slope bob
-static int     s_rig_y_init   = 0;
 static int     s_slope_pitch  = 0;       // brad pitch along the travel direction
+static int     s_rig_dir_x = 0, s_rig_dir_z = 0;  // smoothed travel dir (unit*256)
 
 // One GL texture id per material group (0 = untextured group).
 static int gl_rig_tex_id[AFN_PLAYER_RIG_MATCOUNT];
@@ -379,26 +378,35 @@ static void render_player_rig(void)
 
     // Ease the drawn Y so per-frame floor-height noise doesn't make the rig bob
     // climbing a slope (rig-only — player_y and sprites are untouched).
-    if (!s_rig_y_init) { s_rig_render_y = player_render_y; s_rig_y_init = 1; }
-    s_rig_render_y += (player_render_y - s_rig_render_y) >> 2;
+    // (Nebula snaps Y to the precise ground each frame and only smooths the
+    // orientation — easing the position just adds lag/bob, so we draw at
+    // player_render_y directly and smooth only the tilt below.)
 
-    // Pitch the rig along its travel direction so it sits on the slope (nose
-    // up going up, down going down) — pure pitch, never rolls sideways. Sample
-    // the floor ahead vs behind along the last movement vector.
-    int tgt_pitch = 0;
-    int mvx = s_lastMoveDX, mvz = s_lastMoveDZ;
-#ifdef AFN_COL_FACE_COUNT
-    {
-        int mag = afn_isqrt(mvx*mvx + mvz*mvz);
+    // Smooth the travel direction (unit*256) so the tilt axis doesn't wobble
+    // frame-to-frame — the raw per-frame movement delta jitters, which rocked
+    // the rig back and forth on slopes.
+    if (player_moving && (s_lastMoveDX || s_lastMoveDZ)) {
+        int mag = afn_isqrt(s_lastMoveDX*s_lastMoveDX + s_lastMoveDZ*s_lastMoveDZ);
         if (mag >= 1) {
-            const int eps = 0x400;                    // ~4px sample radius (16.8)
-            int ox = (mvx * eps) / mag, oz = (mvz * eps) / mag, run = eps << 1;
-            int fa, fb;
-            if (afn_collide_floor(player_render_x + ox, player_render_z + oz, player_render_y, &fa) &&
-                afn_collide_floor(player_render_x - ox, player_render_z - oz, player_render_y, &fb)) {
-                int d = fa - fb; if (d > run) d = run; if (d < -run) d = -run;  // cap ~45deg
-                tgt_pitch = (d * 10430) / run;        // brad ~= (dY/run) * (rad->brad)
-            }
+            int nx = (s_lastMoveDX * 256) / mag, nz = (s_lastMoveDZ * 256) / mag;
+            s_rig_dir_x += (nx - s_rig_dir_x) >> 3;
+            s_rig_dir_z += (nz - s_rig_dir_z) >> 3;
+        }
+    }
+
+    // Pitch the rig along its travel direction so it sits on the slope (nose up
+    // going up, down going down) — pure pitch, never rolls. Sample the floor
+    // ahead vs behind along the smoothed direction.
+    int tgt_pitch = 0, dxn = s_rig_dir_x, dzn = s_rig_dir_z;
+#ifdef AFN_COL_FACE_COUNT
+    if (dxn || dzn) {
+        const int eps = 0x800;                        // ~8px — average the slope a bit
+        int ox = (dxn * eps) >> 8, oz = (dzn * eps) >> 8, run = eps << 1;
+        int fa, fb;
+        if (afn_collide_floor(player_render_x + ox, player_render_z + oz, player_render_y, &fa) &&
+            afn_collide_floor(player_render_x - ox, player_render_z - oz, player_render_y, &fb)) {
+            int d = fa - fb; if (d > run) d = run; if (d < -run) d = -run;  // cap ~45deg
+            tgt_pitch = (d * 10430) / run;            // brad ~= (dY/run) * (rad->brad)
         }
     }
 #endif
@@ -406,11 +414,11 @@ static void render_player_rig(void)
 
     glPushMatrix();
     glTranslatef32(fx8_to_f32(player_render_x),
-                   fx8_to_f32(s_rig_render_y),
+                   fx8_to_f32(player_render_y),
                    fx8_to_f32(player_render_z));
     // Pitch about the horizontal axis perpendicular to travel (world space),
-    // before the facing yaw. Sign may need flipping after seeing it on device.
-    if (mvx || mvz) glRotatef32i(s_slope_pitch >> 1, -mvz, 0, mvx);
+    // before the facing yaw.
+    if (dxn || dzn) glRotatef32i(s_slope_pitch >> 1, -dzn, 0, dxn);
     // player_move_angle is INPUT-space while moving and only baked to world-space
     // on stop, so add the same orbit conversion here to face the right way during
     // movement (otherwise the rig snaps ~90° until you let go).
