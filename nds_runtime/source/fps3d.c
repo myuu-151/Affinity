@@ -332,7 +332,9 @@ static void load_player_rig_texture(void)
         int sizeH = 0, th = afn_player_rig_texh[g]; while (th > 8) { th >>= 1; sizeH++; }
         glGenTextures(1, &gl_rig_tex_id[g]);
         glBindTexture(0, gl_rig_tex_id[g]);
-        int texflags = TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T;
+        // Clamp (no WRAP flags): UVs that overflow [0,1] grab the edge texel
+        // instead of wrapping to the opposite side of the atlas (white seams).
+        int texflags = TEXGEN_TEXCOORD;
 #ifdef AFN_PLAYER_RIG_ALPHA
         texflags |= GL_TEXTURE_COLOR0_TRANSPARENT;   // palette[0] = transparent
 #endif
@@ -446,7 +448,7 @@ static void load_npc_rig_textures(void)
             int sizeH = 0, th = afn_npc_texh[i][g]; while (th > 8) { th >>= 1; sizeH++; }
             glGenTextures(1, &s_npc_tex_id[i][g]);
             glBindTexture(0, s_npc_tex_id[i][g]);
-            int npcflags = TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T;
+            int npcflags = TEXGEN_TEXCOORD;   // clamp (no wrap) — avoids UV-overflow seams
             if (afn_npc_alpha[i]) npcflags |= GL_TEXTURE_COLOR0_TRANSPARENT;
             glTexImage2D(0, 0, GL_RGB256, sizeW, sizeH, 0, npcflags, afn_npc_tex[i][g]);
             glColorTableEXT(0, 0, 256, 0, 0, afn_npc_texpal[i][g]);
