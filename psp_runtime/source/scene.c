@@ -104,7 +104,11 @@ void scene_render(void) {
             sceGuTexMode(GU_PSM_8888, 0, 0, 0);
             sceGuTexImage(0, m->texW, m->texH, m->texW, m->texPixels);
             sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
-            sceGuTexFilter(GU_LINEAR, GU_LINEAR);
+            // Point sampling (no bilinear) — matches the DS, which has no texture
+            // filter. The level texture is an atlas/tileset; bilinear bleeds
+            // neighbouring tiles (and the black padding) across tile edges,
+            // showing as seams. NEAREST + CLAMP samples only the intended texel.
+            sceGuTexFilter(GU_NEAREST, GU_NEAREST);
             // Only level 0 is uploaded. Without this, minified (distant) tris make
             // the GE select a non-existent mip and sample black — force LOD 0.
             sceGuTexLevelMode(GU_TEXTURE_CONST, 0.0f);
