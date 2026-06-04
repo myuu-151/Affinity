@@ -75,7 +75,9 @@ void scene_update(void) {
         float mvX = -ay * fwdX + ax * rgtX;
         float mvZ = -ay * fwdZ + ax * rgtZ;
         float mag = mvX*mvX + mvZ*mvZ;
-        if (mag > 0.0001f) {
+        int moving = (mag > 0.0001f);
+        rig_set_moving(moving);
+        if (moving) {
             float speed = afn_walk_speed > 0.0f ? afn_walk_speed * 0.25f : 6.0f;
             playerX += mvX * speed;
             playerZ += mvZ * speed;

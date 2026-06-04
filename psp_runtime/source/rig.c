@@ -91,6 +91,15 @@ int  rig_present(void) { return 1; }
 void rig_player_start(float out[3]) {
     out[0] = AFN_PLAYER_START_X; out[1] = AFN_PLAYER_START_Y; out[2] = AFN_PLAYER_START_Z;
 }
+void rig_set_moving(int moving) {
+    // Two-clip rigs: default clip = idle, the other = walk. Restart on switch.
+    int want = AFN_PLAYER_DEFAULT_CLIP;
+    if (moving && AFN_RIG_CLIPS > 1)
+        want = (AFN_PLAYER_DEFAULT_CLIP == 0) ? 1 : 0;
+    if (want >= 0 && want < AFN_RIG_CLIPS && want != s_clip) {
+        s_clip = want; s_frame = 0.0f;
+    }
+}
 
 void rig_render(float px, float py, float pz, float yawDeg, int frozen) {
     if (!s_skinned) return;
@@ -148,6 +157,7 @@ void rig_render(float px, float py, float pz, float yawDeg, int frozen) {
 void rig_init(void) {}
 int  rig_present(void) { return 0; }
 void rig_player_start(float out[3]) { out[0] = out[1] = out[2] = 0.0f; }
+void rig_set_moving(int moving) { (void)moving; }
 void rig_render(float px, float py, float pz, float yawDeg, int frozen) {
     (void)px; (void)py; (void)pz; (void)yawDeg; (void)frozen;
 }

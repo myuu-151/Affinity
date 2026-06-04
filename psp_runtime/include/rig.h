@@ -5,6 +5,7 @@
 void rig_init(void);
 int  rig_present(void);                    // 1 if this build has a player rig
 void rig_player_start(float out[3]);       // start world position (0 if none)
+void rig_set_moving(int moving);           // switch idle/walk clip
 
 // Draw the player rig at world (px,py,pz), facing yawDeg, advancing the
 // animation unless frozen. No-op when there's no rig.
