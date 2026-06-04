@@ -154,14 +154,17 @@ void meshcull_draw(int meshIdx,
         float wx = ix + ax2, wy = iy + ay3, wz = iz + az2;
         float r = bk->radius * scale;
 
-        float dx = wx - camX, dy = wy - camY, dz = wz - camZ;
+        float dx = wx - camX, dz = wz - camZ;
         float depth = camSin*dx + camCos*dz;
         if (depth + r < NEAR_EPS) continue;
         if (drawDist > 0.0f && depth - r > drawDist) continue;
+        // Horizontal (yaw) frustum only. The left/right planes are vertical, so
+        // they're independent of camera pitch — safe. The vertical test is
+        // intentionally dropped: the follow-cam pitches down to look at the
+        // player, so a world-Y-vs-forward-depth check wrongly culled the floor
+        // beneath the camera (polygons popped out while moving).
         float viewX = -camCos*dx + camSin*dz; if (viewX < 0) viewX = -viewX;
         if (viewX - r > depth * TAN_H) continue;
-        float viewY = dy < 0 ? -dy : dy;
-        if (viewY - r > depth * TAN_V) continue;
 
         sceGumDrawArray(GU_TRIANGLES, AFN_VERTEX_FLAGS | GU_INDEX_16BIT,
                         bk->triCount, &OI[bk->triStart], m->verts);
