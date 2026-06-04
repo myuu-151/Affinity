@@ -39,6 +39,7 @@ add_executable(AffinityEditor WIN32
     src/platform/gba/gba_package.cpp
     src/platform/nds/nds_package.cpp
     src/platform/nds/dsma_emit.cpp
+    src/platform/psp/psp_package.cpp
     affinity.rc
 )
 

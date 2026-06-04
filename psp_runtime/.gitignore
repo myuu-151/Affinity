@@ -1,0 +1,10 @@
+# PSP build artifacts
+*.o
+source/*.o
+*.elf
+EBOOT.PBP
+PARAM.SFO
+# scratch / debug
+make_log.txt
+*_dump.png
+*_probe.txt

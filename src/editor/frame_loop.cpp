@@ -5,6 +5,7 @@
 #include "../platform/nds/dsma_emit.h"
 #include "../platform/gba/gba_package.h"
 #include "../platform/nds/nds_package.h"
+#include "../platform/psp/psp_package.h"
 #include "imgui.h"
 
 #include <array>
@@ -4350,7 +4351,7 @@ static bool sPackageSuccess = false;
 static std::string sPackageMsg;
 static std::string sPackageOutputPath;
 
-enum class BuildTarget { GBA = 0, NDS = 1 };
+enum class BuildTarget { GBA = 0, NDS = 1, PSP = 2 };
 static BuildTarget sBuildTarget = BuildTarget::NDS; // default to NDS
 static bool sNdsAntialiasing = false; // NDS-only — adds smooth mesh edges but fringes textures
 static bool sBuildRequested = false; // set by toolbar Build button
@@ -15023,6 +15024,9 @@ void FrameTick(float dt)
         ImGui::SameLine();
         if (ImGui::RadioButton("GBA", sBuildTarget == BuildTarget::GBA))
             sBuildTarget = BuildTarget::GBA;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("PSP", sBuildTarget == BuildTarget::PSP))
+            sBuildTarget = BuildTarget::PSP;
         if (sBuildTarget == BuildTarget::NDS) {
             ImGui::SameLine();
             if (ImGui::Checkbox("AA", &sNdsAntialiasing)) sProjectDirty = true;
@@ -15050,8 +15054,10 @@ void FrameTick(float dt)
             fs::path exeDir = fs::path(exeBuf).parent_path();
             fs::path cwdDir = fs::current_path();
 
-            const char* rtName = (sBuildTarget == BuildTarget::NDS) ? "nds_runtime" : "gba_runtime";
-            const char* rtExt  = (sBuildTarget == BuildTarget::NDS) ? "affinity.nds" : "affinity.gba";
+            const char* rtName = (sBuildTarget == BuildTarget::NDS) ? "nds_runtime"
+                               : (sBuildTarget == BuildTarget::PSP) ? "psp_runtime" : "gba_runtime";
+            const char* rtExt  = (sBuildTarget == BuildTarget::NDS) ? "affinity.nds"
+                               : (sBuildTarget == BuildTarget::PSP) ? "EBOOT.PBP"    : "affinity.gba";
 
             fs::path rtDir;
             for (auto& base : { exeDir, exeDir / "..", exeDir / ".." / "..", exeDir / ".." / ".." / "..", cwdDir, cwdDir / ".." })
@@ -16473,6 +16479,14 @@ void FrameTick(float dt)
                                         // Per-sequence master dB is baked into each
                                         // note's velocity above, so the global macro
                                         // stays at unity (0 dB).
+                                        0.0f, exportRigs, err);
+                    else if (target == BuildTarget::PSP)
+                        ok = PackagePSP(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
+                                        exportMeshes, exportOrbitDist,
+                                        exportSoundSamples, exportSoundInstances,
+                                        exportSkyFrames,
+                                        exportScript, exportBlueprints, exportBpInstances,
+                                        exportHudElements, exportTmScenes, exportStartMode,
                                         0.0f, exportRigs, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,

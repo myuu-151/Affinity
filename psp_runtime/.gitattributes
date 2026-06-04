@@ -1,0 +1,3 @@
+# psp_runtime is built under WSL/Linux (psp-gcc + make) — keep LF endings so
+# Makefile recipes and shell scripts don't break with stray CR characters.
+* text=auto eol=lf
