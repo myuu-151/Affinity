@@ -4,6 +4,7 @@
 #include "meshcull.h"
 #include "rig.h"
 #include "collision.h"
+#include "sky.h"
 
 #include <pspkernel.h>
 #include <pspgu.h>
@@ -109,6 +110,9 @@ void scene_update(void) {
 }
 
 void scene_render(void) {
+    // Sky panorama first (behind everything), scrolled by camera yaw.
+    sky_render(camAngle);
+
     // Follow-cam: place the eye behind/above the player, looking at them.
     if (s_follow) {
         camX = playerX - sinf(camAngle) * s_orbit;
