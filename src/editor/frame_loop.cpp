@@ -30230,13 +30230,16 @@ void FrameTick(float dt)
         ImGui::SetNextWindowSize(ImVec2(500, 0), ImGuiCond_Always);
         ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
             ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-        ImGui::Begin(sBuildTarget == BuildTarget::NDS ? "NDS Package" : "GBA Package", nullptr,
+        const char* pkgTitle = sBuildTarget == BuildTarget::NDS ? "NDS Package"
+                             : sBuildTarget == BuildTarget::PSP ? "PSP Package" : "GBA Package";
+        ImGui::Begin(pkgTitle, nullptr,
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
             ImGuiWindowFlags_AlwaysAutoResize);
 
         if (sPackaging)
         {
-            ImGui::Text(sBuildTarget == BuildTarget::NDS ? "Building NDS ROM..." : "Building GBA ROM...");
+            ImGui::Text(sBuildTarget == BuildTarget::NDS ? "Building NDS ROM..."
+                      : sBuildTarget == BuildTarget::PSP ? "Building PSP EBOOT..." : "Building GBA ROM...");
             // Simple spinner
             const char* spinner = "|/-\\";
             static int frame = 0;
@@ -30264,11 +30267,26 @@ void FrameTick(float dt)
             if (sPackageSuccess)
             {
                 ImGui::SameLine();
-                const char* openLabel = (sBuildTarget == BuildTarget::NDS) ? "  Open ROM  " : "  Open in mGBA  ";
+                const char* openLabel = (sBuildTarget == BuildTarget::NDS) ? "  Open ROM  "
+                                      : (sBuildTarget == BuildTarget::PSP) ? "  Open in PPSSPP  "
+                                      : "  Open in mGBA  ";
                 float mgbaW = std::max(140.0f * sUiScale, ImGui::CalcTextSize(openLabel).x + 20.0f);
                 if (ImGui::Button(openLabel, ImVec2(mgbaW, btnH)))
                 {
-                    if (sBuildTarget == BuildTarget::GBA && sMgbaPath[0])
+                    if (sBuildTarget == BuildTarget::PSP)
+                    {
+                        // Launch PPSSPP with the EBOOT. Standard install path; fall
+                        // back to the .pbp file association if it isn't there.
+                        const char* ppPath = "C:\\Program Files\\PPSSPP\\PPSSPPWindows64.exe";
+                        std::string cmd = "\"" + std::string(ppPath) + "\" \"" + sPackageOutputPath + "\"";
+                        STARTUPINFOA si = {}; si.cb = sizeof(si);
+                        PROCESS_INFORMATION pi = {};
+                        if (CreateProcessA(nullptr, (LPSTR)cmd.c_str(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+                        { CloseHandle(pi.hProcess); CloseHandle(pi.hThread); }
+                        else
+                            ShellExecuteA(nullptr, "open", sPackageOutputPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    }
+                    else if (sBuildTarget == BuildTarget::GBA && sMgbaPath[0])
                     {
                         std::string cmd = "\"" + std::string(sMgbaPath) + "\" \"" + sPackageOutputPath + "\"";
                         STARTUPINFOA si = {}; si.cb = sizeof(si);

@@ -17,7 +17,7 @@ int afn_move_speed = 0;
 int afn_speed_prio = 0;
 int afn_rig_clip = 0;
 int orbit_angle = 0;
-int afn_current_mode = 4;     // Mode 4 (3D)
+int afn_current_mode = 0;     // engine encoding: 0 = Mode 4 (3D), 1 = Mode 0 (tilemap)
 int afn_current_scene = 0;
 int afn_collided_sprite = -1;
 int afn_collided_tm_obj = -1;

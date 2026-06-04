@@ -45,22 +45,46 @@ static int RunWslCommand(const std::string& shellCmd, std::string& output) {
     if (!CreatePipe(&hRead, &hWrite, &sa, 0)) return -1;
     SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
 
+    // Give wsl.exe a real (NUL) stdin. The editor is a GUI app with no console,
+    // so GetStdHandle(STD_INPUT_HANDLE) is NULL and wsl.exe blocks on it forever
+    // (the "stuck building" hang). NUL returns EOF immediately.
+    HANDLE hNul = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              &sa, OPEN_EXISTING, 0, nullptr);
+
     STARTUPINFOA si = {}; si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = hWrite; si.hStdError = hWrite;
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdInput = hNul;
 
     PROCESS_INFORMATION pi = {};
     std::string cmdLine = "wsl.exe bash -lc \"" + shellCmd + "\"";
     BOOL ok = CreateProcessA(nullptr, (LPSTR)cmdLine.c_str(), nullptr, nullptr,
                              TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
     CloseHandle(hWrite);
+    if (hNul != INVALID_HANDLE_VALUE) CloseHandle(hNul);
     if (!ok) { CloseHandle(hRead); output = "Failed to launch WSL (is it installed?)"; return -1; }
 
+    // Drain stdout by POLLING, not by waiting for pipe EOF: wsl.exe leaves a
+    // relay/VM process holding the inherited write-handle open after the build
+    // finishes, so a plain ReadFile-until-EOF loop blocks forever (the "endless
+    // building" hang) even though make already exited. Instead, read whatever is
+    // available and stop once the wsl process itself has exited.
     output.clear();
-    char buf[512]; DWORD n;
-    while (ReadFile(hRead, buf, sizeof(buf) - 1, &n, nullptr) && n > 0) { buf[n] = 0; output += buf; }
-    WaitForSingleObject(pi.hProcess, INFINITE);
+    char buf[512];
+    for (;;) {
+        DWORD avail = 0;
+        if (PeekNamedPipe(hRead, nullptr, 0, nullptr, &avail, nullptr) && avail > 0) {
+            DWORD n = 0;
+            DWORD toRead = avail < (sizeof(buf) - 1) ? avail : (sizeof(buf) - 1);
+            if (ReadFile(hRead, buf, toRead, &n, nullptr) && n > 0) { buf[n] = 0; output += buf; }
+        } else if (WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0) {
+            // Process exited; one last peek to flush any final bytes, then done.
+            if (PeekNamedPipe(hRead, nullptr, 0, nullptr, &avail, nullptr) && avail > 0) continue;
+            break;
+        } else {
+            Sleep(15);
+        }
+    }
     DWORD code = 1; GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess); CloseHandle(pi.hThread); CloseHandle(hRead);
     return (int)code;
