@@ -16464,9 +16464,57 @@ void FrameTick(float dt)
                     exportRigs.push_back(std::move(re));
                 }
 
+                // Raw (un-baked) rig data for the PSP runtime — CPU-skinned on
+                // device. Parallel to exportRigs but keeps base verts + per-frame
+                // absolute bone poses instead of DS DSM/DSA blobs.
+                std::vector<Affinity::PSPRigExport> exportPspRigs;
+                for (const auto& rm : sRiggedMeshAssets) {
+                    Affinity::PSPRigExport pr;
+                    pr.name = rm.name;
+                    pr.boneCount = rm.boneCount;
+                    pr.cullMode = rm.cullMode;
+                    pr.useAlpha = rm.useAlpha;
+                    pr.verts.resize(rm.baseVerts.size());
+                    for (size_t v = 0; v < rm.baseVerts.size(); v++) {
+                        const auto& mv = rm.baseVerts[v];
+                        Affinity::PSPRigVertex pv;
+                        pv.px = mv.px; pv.py = mv.py; pv.pz = mv.pz;
+                        pv.u = mv.u; pv.v = mv.v;
+                        pv.bone = (v < rm.vertBone.size()) ? rm.vertBone[v] : 0;
+                        pr.verts[v] = pv;
+                    }
+                    pr.indices = rm.indices;
+                    pr.triMaterial = rm.triMaterial;
+                    for (int s = 0; s < rm.matCount(); s++) {
+                        Affinity::PSPRigMaterial m;
+                        m.textured = rm.matTextured(s);
+                        m.texW = rm.matTexW(s); m.texH = rm.matTexH(s);
+                        m.pixels = rm.matPixels(s);
+                        memcpy(m.palette, rm.matPalette(s), sizeof(m.palette));
+                        pr.materials.push_back(std::move(m));
+                    }
+                    for (const auto& c : rm.clips) {
+                        Affinity::PSPRigClip pc;
+                        pc.name = c.name; pc.frameCount = c.frameCount; pc.loop = c.loop;
+                        pc.frames.resize(c.frames.size());
+                        for (size_t i = 0; i < c.frames.size(); i++) {
+                            const auto& bp = c.frames[i];
+                            Affinity::PSPRigBonePose pp;
+                            pp.px = bp.px; pp.py = bp.py; pp.pz = bp.pz;
+                            pp.qw = bp.qw; pp.qx = bp.qx; pp.qy = bp.qy; pp.qz = bp.qz;
+                            pc.frames[i] = pp;
+                        }
+                        pr.clips.push_back(std::move(pc));
+                    }
+                    exportPspRigs.push_back(std::move(pr));
+                }
+                int playerPspRigIdx = -1;
+                for (const auto& s : exportSprites)
+                    if (s.spriteType == 1 && s.riggedMeshIdx >= 0) { playerPspRigIdx = s.riggedMeshIdx; break; }
+
                 std::thread([rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                              exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, target,
-                             exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportShowFps, exportSmoothSky, exportNdsAa, exportRigs]() {
+                             exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportShowFps, exportSmoothSky, exportNdsAa, exportRigs, exportPspRigs, playerPspRigIdx]() {
                     std::string err;
                     bool ok;
                     if (target == BuildTarget::NDS)
@@ -16487,7 +16535,7 @@ void FrameTick(float dt)
                                         exportSkyFrames,
                                         exportScript, exportBlueprints, exportBpInstances,
                                         exportHudElements, exportTmScenes, exportStartMode,
-                                        0.0f, exportRigs, err);
+                                        0.0f, exportRigs, exportPspRigs, playerPspRigIdx, err);
                     else
                         ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,

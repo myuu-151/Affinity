@@ -1,7 +1,8 @@
-// Affinity PSP runtime — Mode 4 scene (camera, input, mesh draw).
+// Affinity PSP runtime — Mode 4 scene (camera, input, mesh + rig draw).
 #include "scene.h"
 #include "affinity_psp.h"
 #include "meshcull.h"
+#include "rig.h"
 
 #include <pspkernel.h>
 #include <pspgu.h>
@@ -10,57 +11,93 @@
 #include <math.h>
 
 #define DEG2RAD (3.14159265f / 180.0f)
+#define RAD2DEG (180.0f / 3.14159265f)
 
-// ---- Camera state ---------------------------------------------------------
-static float camX, camY, camZ;   // eye world position
-static float camAngle;           // yaw (radians); forward = (sin, 0, cos)
+// ---- State ----------------------------------------------------------------
+// When a player rig exists we run a follow-cam: the camera orbits the player,
+// the analog stick moves the player in camera-relative space, and the rig faces
+// its movement. Without a rig we fall back to a free-fly debug camera.
+static int   s_follow;                 // 1 = follow player rig, 0 = free fly
+static float camX, camY, camZ;         // camera eye (world)
+static float camAngle;                 // camera yaw (radians); forward=(sin,0,cos)
+static float playerX, playerY, playerZ;
+static float playerYaw;                // degrees, facing of the rig
+static float s_orbit;                  // orbit distance
 
 void scene_init(void) {
     meshcull_build();
-    // Const mesh/texture data baked into the ELF is still in the CPU data cache
-    // after loading; the GE reads physical RAM, so without a writeback it sees
-    // stale/zero bytes — textures render black, bucket index arrays read garbage.
-    // Flush once now that all scene data (incl. meshcull's malloc'd indices) is set.
+    rig_init();
+    // GE reads physical RAM; flush the CPU dcache so baked const data (textures,
+    // bucket indices) is visible — otherwise textures render black.
     sceKernelDcacheWritebackAll();
-    camX = afn_cam_start_x;
-    camZ = afn_cam_start_z;
-    camY = afn_cam_start_h;
+
     camAngle = afn_cam_start_angle;
+    s_orbit  = afn_orbit_dist > 1.0f ? afn_orbit_dist : 200.0f;
+    s_follow = rig_present();
+    if (s_follow) {
+        float st[3]; rig_player_start(st);
+        playerX = st[0]; playerY = st[1]; playerZ = st[2];
+        playerYaw = afn_cam_start_angle * RAD2DEG;
+    } else {
+        camX = afn_cam_start_x; camY = afn_cam_start_h; camZ = afn_cam_start_z;
+    }
 }
 
 void scene_update(void) {
     SceCtrlData pad;
     sceCtrlReadBufferPositive(&pad, 1);
 
-    // D-pad L/R yaw, U/D height.
-    if (pad.Buttons & PSP_CTRL_LEFT)  camAngle -= 0.04f;
-    if (pad.Buttons & PSP_CTRL_RIGHT) camAngle += 0.04f;
-    if (pad.Buttons & PSP_CTRL_UP)    camY += 4.0f;
-    if (pad.Buttons & PSP_CTRL_DOWN)  camY -= 4.0f;
-
-    // Analog stick: forward/back + strafe in the look plane.
     float ax = (pad.Lx - 128) / 128.0f;
     float ay = (pad.Ly - 128) / 128.0f;
-    if (ax < 0.15f && ax > -0.15f) ax = 0.0f;   // deadzone
+    if (ax < 0.15f && ax > -0.15f) ax = 0.0f;
     if (ay < 0.15f && ay > -0.15f) ay = 0.0f;
 
     float fwdX = sinf(camAngle), fwdZ = cosf(camAngle);
     float rgtX = cosf(camAngle), rgtZ = -sinf(camAngle);
-    float speed = afn_walk_speed > 0.0f ? afn_walk_speed * 0.25f : 6.0f;
-    camX += (-ay * fwdX + ax * rgtX) * speed;
-    camZ += (-ay * fwdZ + ax * rgtZ) * speed;
+
+    if (s_follow) {
+        // D-pad L/R orbits the camera around the player.
+        if (pad.Buttons & PSP_CTRL_LEFT)  camAngle -= 0.04f;
+        if (pad.Buttons & PSP_CTRL_RIGHT) camAngle += 0.04f;
+        // Analog moves the player in camera-relative space; face the movement.
+        float mvX = -ay * fwdX + ax * rgtX;
+        float mvZ = -ay * fwdZ + ax * rgtZ;
+        float mag = mvX*mvX + mvZ*mvZ;
+        if (mag > 0.0001f) {
+            float speed = afn_walk_speed > 0.0f ? afn_walk_speed * 0.25f : 6.0f;
+            playerX += mvX * speed;
+            playerZ += mvZ * speed;
+            playerYaw = atan2f(mvX, mvZ) * RAD2DEG;
+        }
+    } else {
+        // Free-fly debug camera.
+        if (pad.Buttons & PSP_CTRL_LEFT)  camAngle -= 0.04f;
+        if (pad.Buttons & PSP_CTRL_RIGHT) camAngle += 0.04f;
+        if (pad.Buttons & PSP_CTRL_UP)    camY += 4.0f;
+        if (pad.Buttons & PSP_CTRL_DOWN)  camY -= 4.0f;
+        float speed = afn_walk_speed > 0.0f ? afn_walk_speed * 0.25f : 6.0f;
+        camX += (-ay * fwdX + ax * rgtX) * speed;
+        camZ += (-ay * fwdZ + ax * rgtZ) * speed;
+    }
 }
 
 void scene_render(void) {
-    // Projection.
+    // Follow-cam: place the eye behind/above the player, looking at them.
+    if (s_follow) {
+        camX = playerX - sinf(camAngle) * s_orbit;
+        camZ = playerZ - cosf(camAngle) * s_orbit;
+        camY = playerY + s_orbit * 0.45f;
+    }
+
     sceGumMatrixMode(GU_PROJECTION);
     sceGumLoadIdentity();
     sceGumPerspective(75.0f, 480.0f / 272.0f, 1.0f, 10000.0f);
 
-    // View (camera).
-    ScePspFVector3 eye    = { camX, camY, camZ };
-    ScePspFVector3 center = { camX + sinf(camAngle), camY, camZ + cosf(camAngle) };
-    ScePspFVector3 up     = { 0.0f, 1.0f, 0.0f };
+    ScePspFVector3 eye = { camX, camY, camZ };
+    ScePspFVector3 center = s_follow
+        ? (ScePspFVector3){ playerX, playerY + s_orbit * 0.12f, playerZ }
+        : (ScePspFVector3){ camX + sinf(camAngle), camY, camZ + cosf(camAngle) };
+    ScePspFVector3 up = { 0.0f, 1.0f, 0.0f };
     sceGumMatrixMode(GU_VIEW);
     sceGumLoadIdentity();
     sceGumLookAt(&eye, &center, &up);
@@ -78,7 +115,6 @@ void scene_render(void) {
 
         const AfnSpriteInst* sp = &afn_sprites[si];
 
-        // Model matrix: T * Rz * Rx * Ry * S (vertex sees scale first).
         sceGumLoadIdentity();
         ScePspFVector3 t = { sp->x, sp->y, sp->z };
         sceGumTranslate(&t);
@@ -88,9 +124,6 @@ void scene_render(void) {
         ScePspFVector3 s = { sp->scale, sp->scale, sp->scale };
         sceGumScale(&s);
 
-        // Face culling. The exported triangle winding matches the editor/NDS
-        // (DS back-cull shows the terrain top); the PSP's default front-face
-        // sense is the opposite, so back-cull (0) treats CCW as front here.
         if (m->cullMode == 2) {
             sceGuDisable(GU_CULL_FACE);
         } else {
@@ -98,19 +131,12 @@ void scene_render(void) {
             sceGuFrontFace(m->cullMode == 1 ? GU_CW : GU_CCW);
         }
 
-        // Texture / blend.
         if (m->textured && m->texPixels) {
             sceGuEnable(GU_TEXTURE_2D);
             sceGuTexMode(GU_PSM_8888, 0, 0, 0);
             sceGuTexImage(0, m->texW, m->texH, m->texW, m->texPixels);
             sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
-            // Point sampling (no bilinear) — matches the DS, which has no texture
-            // filter. The level texture is an atlas/tileset; bilinear bleeds
-            // neighbouring tiles (and the black padding) across tile edges,
-            // showing as seams. NEAREST + CLAMP samples only the intended texel.
-            sceGuTexFilter(GU_NEAREST, GU_NEAREST);
-            // Only level 0 is uploaded. Without this, minified (distant) tris make
-            // the GE select a non-existent mip and sample black — force LOD 0.
+            sceGuTexFilter(GU_NEAREST, GU_NEAREST);   // atlas: no bilinear (seams)
             sceGuTexLevelMode(GU_TEXTURE_CONST, 0.0f);
             sceGuTexWrap(GU_CLAMP, GU_CLAMP);
         } else {
@@ -128,7 +154,10 @@ void scene_render(void) {
                       camX, camY, camZ, camSin, camCos, drawDist);
     }
 
-    // Restore default cull state for next frame's clear, etc.
+    // Player rig (skinned) — draws at the player's world transform.
+    if (s_follow)
+        rig_render(playerX, playerY, playerZ, playerYaw, 0);
+
     sceGuEnable(GU_CULL_FACE);
     sceGuFrontFace(GU_CW);
     sceGuEnable(GU_TEXTURE_2D);

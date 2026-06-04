@@ -9,6 +9,46 @@
 namespace Affinity
 {
 
+// ---- Raw rig data for the PSP runtime (CPU-skinned each frame) -------------
+// GBARiggedMeshExport carries DS-specific DSM/DSA blobs that are useless on
+// PSP. These structs keep the un-baked rig so the PSP can skin on its FPU:
+// DSMA is rigid (1 bone/vertex), baseVerts are in their bone's local space,
+// and clip frames are ABSOLUTE bone transforms — so the skinned vertex is just
+//   skinned = animPose[bone] · baseVert
+// (no inverse-bind needed at runtime; that's already folded into baseVert).
+struct PSPRigVertex {
+    float px, py, pz;   // position in its bone's local space
+    float u, v;         // texcoord (0..1, V flipped at emit like meshes)
+    int   bone;         // bone index
+};
+struct PSPRigBonePose {
+    float px, py, pz;          // translation
+    float qw, qx, qy, qz;      // orientation quaternion (absolute)
+};
+struct PSPRigClip {
+    std::string name;
+    int  frameCount = 0;
+    bool loop = true;
+    std::vector<PSPRigBonePose> frames;   // flattened [frame*boneCount + bone]
+};
+struct PSPRigMaterial {
+    bool textured = false;
+    int  texW = 0, texH = 0;
+    std::vector<uint8_t> pixels;          // indexed 0..255 (texW*texH)
+    uint32_t palette[256] = {};           // RGBA8 (rig palettes are RGBA8)
+};
+struct PSPRigExport {
+    std::string name;
+    int  boneCount = 0;
+    int  cullMode  = 0;       // 0 Back, 1 Front, 2 None
+    bool useAlpha  = false;
+    std::vector<PSPRigVertex>   verts;
+    std::vector<uint32_t>       indices;       // triangle indices into verts
+    std::vector<uint8_t>        triMaterial;   // slot per triangle (empty = all 0)
+    std::vector<PSPRigMaterial> materials;     // material slots
+    std::vector<PSPRigClip>     clips;
+};
+
 // Package the current map into a PSP EBOOT.PBP.
 //
 // The PSP has a real FPU, 32 MB of RAM, and the sceGu/sceGum hardware T&L
@@ -42,6 +82,8 @@ bool PackagePSP(const std::string& runtimeDir,
                 int startMode,
                 float midiMasterDb,
                 const std::vector<GBARiggedMeshExport>& rigs,
+                const std::vector<PSPRigExport>& pspRigs,
+                int playerRigIdx,             // which rig is the player (-1 = none)
                 std::string& errorMsg);
 
 } // namespace Affinity
