@@ -126,10 +126,18 @@ void meshcull_draw(int meshIdx,
                    float camX, float camY, float camZ,
                    float camSin, float camCos, float drawDist) {
     const AfnMesh* m = &afn_meshes[meshIdx];
+
+    // Culling DISABLED for now (user request) — draw the whole mesh every frame.
+    (void)ix;(void)iy;(void)iz;(void)scale;(void)rotY;(void)rotX;(void)rotZ;
+    (void)camX;(void)camY;(void)camZ;(void)camSin;(void)camCos;(void)drawDist;
+    sceGumDrawArray(GU_TRIANGLES, AFN_VERTEX_FLAGS | GU_INDEX_16BIT,
+                    m->indexCount, m->indices, m->verts);
+    return;
+
+#if 0  // ---- bucket frustum culling (re-enable once the pitched-cam math is fixed) ----
     int nb = (meshIdx < 256) ? s_bucketCount[meshIdx] : 0;
 
     if (nb <= 0 || !s_buckets[meshIdx] || !s_idx[meshIdx]) {
-        // Fallback: no buckets (OOM) — draw the whole mesh.
         sceGumDrawArray(GU_TRIANGLES, AFN_VERTEX_FLAGS | GU_INDEX_16BIT,
                         m->indexCount, m->indices, m->verts);
         return;
@@ -156,17 +164,18 @@ void meshcull_draw(int meshIdx,
 
         float dx = wx - camX, dz = wz - camZ;
         float depth = camSin*dx + camCos*dz;
-        if (depth + r < NEAR_EPS) continue;
-        if (drawDist > 0.0f && depth - r > drawDist) continue;
-        // Horizontal (yaw) frustum only. The left/right planes are vertical, so
-        // they're independent of camera pitch — safe. The vertical test is
-        // intentionally dropped: the follow-cam pitches down to look at the
-        // player, so a world-Y-vs-forward-depth check wrongly culled the floor
-        // beneath the camera (polygons popped out while moving).
-        float viewX = -camCos*dx + camSin*dz; if (viewX < 0) viewX = -viewX;
-        if (viewX - r > depth * TAN_H) continue;
+        // Distance-only culling — the safe subset. A bucket is skipped ONLY when
+        // it's entirely behind the camera or entirely beyond the draw distance;
+        // both are pitch-independent and can never remove geometry in front of
+        // the camera. Lateral (cone) culling is intentionally NOT done: with the
+        // wide FOV + pitched follow-cam it mis-judged big floor buckets and made
+        // chunks (or the whole floor) pop out. Behind-culling is the main win for
+        // a forward-facing camera anyway.
+        if (depth + r < NEAR_EPS) continue;                       // behind camera
+        if (drawDist > 0.0f && depth - r > drawDist) continue;    // past draw distance
 
         sceGumDrawArray(GU_TRIANGLES, AFN_VERTEX_FLAGS | GU_INDEX_16BIT,
                         bk->triCount, &OI[bk->triStart], m->verts);
     }
+#endif  // bucket frustum culling
 }
