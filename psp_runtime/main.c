@@ -65,7 +65,7 @@ static void gu_init(void) {
     sceGuFrontFace(GU_CW);
     sceGuShadeModel(GU_SMOOTH);
     sceGuEnable(GU_CULL_FACE);
-    sceGuEnable(GU_CLIP_PLANES);
+    sceGuEnable(GU_CLIP_PLANES);   // clip-on is the lesser evil for big floor tris
     sceGuEnable(GU_TEXTURE_2D);
     sceGuFinish();
     sceGuSync(0, 0);

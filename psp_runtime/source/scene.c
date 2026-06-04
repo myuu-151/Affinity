@@ -156,7 +156,16 @@ void scene_render(void) {
     sceGumLoadIdentity();
     sceGumLookAt(&eye, &center, &up);
 
-    float camSin = sinf(camAngle), camCos = cosf(camAngle);
+    // True camera basis for view-space frustum culling (accounts for pitch).
+    float fwdX = center.x - eye.x, fwdY = center.y - eye.y, fwdZ = center.z - eye.z;
+    float fl = sqrtf(fwdX*fwdX + fwdY*fwdY + fwdZ*fwdZ);
+    if (fl > 1e-6f) { fwdX/=fl; fwdY/=fl; fwdZ/=fl; } else { fwdX=0; fwdY=0; fwdZ=1; }
+    float rX = -fwdZ, rY = 0.0f, rZ = fwdX;            // right = forward x worldUp
+    float rl = sqrtf(rX*rX + rZ*rZ); if (rl > 1e-6f) { rX/=rl; rZ/=rl; }
+    float uX = -rZ*fwdY, uY = rZ*fwdX - rX*fwdZ, uZ = rX*fwdY;   // up = right x forward
+    // Padded half-FOV tangents (vfov 75, 4:3 -> tanV~0.77, tanH~1.35). The pad
+    // covers the bucket-sphere approximation so on-screen chunks never pop.
+    float tanV = 0.95f, tanH = 1.70f;
     float drawDist = afn_draw_distance;
 
     sceGumMatrixMode(GU_MODEL);
@@ -205,7 +214,9 @@ void scene_render(void) {
 
         meshcull_draw(mi, sp->x, sp->y, sp->z, sp->scale,
                       sp->rotY, sp->rotX, sp->rotZ,
-                      camX, camY, camZ, camSin, camCos, drawDist);
+                      camX, camY, camZ,
+                      fwdX, fwdY, fwdZ, rX, rY, rZ, uX, uY, uZ,
+                      tanH, tanV, drawDist);
     }
 
     // Player rig (skinned) — draws at the player's world transform, tilted to

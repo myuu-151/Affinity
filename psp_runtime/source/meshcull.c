@@ -124,17 +124,11 @@ void meshcull_draw(int meshIdx,
                    float ix, float iy, float iz,
                    float scale, float rotY, float rotX, float rotZ,
                    float camX, float camY, float camZ,
-                   float camSin, float camCos, float drawDist) {
+                   float fwdX, float fwdY, float fwdZ,
+                   float rgtX, float rgtY, float rgtZ,
+                   float upX,  float upY,  float upZ,
+                   float tanH, float tanV, float drawDist) {
     const AfnMesh* m = &afn_meshes[meshIdx];
-
-    // Culling DISABLED for now (user request) — draw the whole mesh every frame.
-    (void)ix;(void)iy;(void)iz;(void)scale;(void)rotY;(void)rotX;(void)rotZ;
-    (void)camX;(void)camY;(void)camZ;(void)camSin;(void)camCos;(void)drawDist;
-    sceGumDrawArray(GU_TRIANGLES, AFN_VERTEX_FLAGS | GU_INDEX_16BIT,
-                    m->indexCount, m->indices, m->verts);
-    return;
-
-#if 0  // ---- bucket frustum culling (re-enable once the pitched-cam math is fixed) ----
     int nb = (meshIdx < 256) ? s_bucketCount[meshIdx] : 0;
 
     if (nb <= 0 || !s_buckets[meshIdx] || !s_idx[meshIdx]) {
@@ -162,20 +156,19 @@ void meshcull_draw(int meshIdx,
         float wx = ix + ax2, wy = iy + ay3, wz = iz + az2;
         float r = bk->radius * scale;
 
-        float dx = wx - camX, dz = wz - camZ;
-        float depth = camSin*dx + camCos*dz;
-        // Distance-only culling — the safe subset. A bucket is skipped ONLY when
-        // it's entirely behind the camera or entirely beyond the draw distance;
-        // both are pitch-independent and can never remove geometry in front of
-        // the camera. Lateral (cone) culling is intentionally NOT done: with the
-        // wide FOV + pitched follow-cam it mis-judged big floor buckets and made
-        // chunks (or the whole floor) pop out. Behind-culling is the main win for
-        // a forward-facing camera anyway.
+        // Project (bucket center - eye) onto the TRUE camera basis (handles
+        // pitch): depth = forward, vh = right, vv = up. Then it's a clean frustum
+        // sphere test against near/far + the four side planes.
+        float dx = wx - camX, dy = wy - camY, dz = wz - camZ;
+        float depth = dx*fwdX + dy*fwdY + dz*fwdZ;
         if (depth + r < NEAR_EPS) continue;                       // behind camera
         if (drawDist > 0.0f && depth - r > drawDist) continue;    // past draw distance
+        float vh = dx*rgtX + dy*rgtY + dz*rgtZ; if (vh < 0) vh = -vh;
+        if (vh - r > depth * tanH) continue;                      // left/right planes
+        float vv = dx*upX + dy*upY + dz*upZ; if (vv < 0) vv = -vv;
+        if (vv - r > depth * tanV) continue;                      // top/bottom planes
 
         sceGumDrawArray(GU_TRIANGLES, AFN_VERTEX_FLAGS | GU_INDEX_16BIT,
                         bk->triCount, &OI[bk->triStart], m->verts);
     }
-#endif  // bucket frustum culling
 }

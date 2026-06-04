@@ -8,12 +8,15 @@
 void meshcull_build(void);
 
 // Draw mesh `meshIdx` placed by the given instance transform, culling buckets
-// against the camera. The caller must have already set the gum MODEL matrix to
-// the SAME transform (scale -> rotY -> rotX -> rotZ -> translate) and bound the
-// texture; this routine only issues the sceGumDrawArray calls for visible
-// buckets. camSin/camCos are sin/cos of the camera yaw; drawDist 0 = unlimited.
+// against the camera in true VIEW space (handles camera pitch — fwd/right/up are
+// the camera basis vectors). The caller must have set the gum MODEL matrix to
+// the SAME transform and bound the texture; this only issues the draw calls for
+// visible buckets. tanH/tanV are the (padded) half-FOV tangents; drawDist 0 = unlimited.
 void meshcull_draw(int meshIdx,
                    float ix, float iy, float iz,
                    float scale, float rotY, float rotX, float rotZ,
                    float camX, float camY, float camZ,
-                   float camSin, float camCos, float drawDist);
+                   float fwdX, float fwdY, float fwdZ,
+                   float rgtX, float rgtY, float rgtZ,
+                   float upX,  float upY,  float upZ,
+                   float tanH, float tanV, float drawDist);
