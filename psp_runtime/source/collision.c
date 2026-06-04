@@ -13,8 +13,8 @@
 
 typedef struct {
     float ax, ay, az, bx, by, bz, cx, cy, cz;
-    float nx, nz;   // normalized XZ normal (for wall pushback)
-    int   flags;    // 1 = floor, 2 = ceiling, 4 = wall
+    float nx, ny, nz;   // full unit face normal
+    int   flags;        // 1 = floor, 2 = ceiling, 4 = wall
 } ColFace;
 
 static ColFace* s_faces = 0;
@@ -83,9 +83,7 @@ void collide_build(void) {
             F->bx=wp[3];F->by=wp[4];F->bz=wp[5];
             F->cx=wp[6];F->cy=wp[7];F->cz=wp[8];
             F->flags = (ny > 0.3f) ? 1 : (ny < -0.7f) ? 2 : 4;
-            float xzl = sqrtf(nx*nx + nz*nz);
-            F->nx = xzl > 1e-4f ? nx/xzl : 0.0f;
-            F->nz = xzl > 1e-4f ? nz/xzl : 0.0f;
+            F->nx = nx; F->ny = ny; F->nz = nz;   // full unit normal
             for (int k=0;k<3;k++){ float X=wp[k*3], Z=wp[k*3+2];
                 if(X<mnx)mnx=X; if(X>mxx)mxx=X; if(Z<mnz)mnz=Z; if(Z>mxz)mxz=Z; }
         }
@@ -133,11 +131,11 @@ void collide_build(void) {
 #define PLAYER_RADIUS 6.0f
 #define PLAYER_HEIGHT 24.0f
 
-int collide_floor(float x, float z, float py, float* outY) {
+int collide_floor(float x, float z, float py, float* outY, float* outN) {
     if (!s_cellFaces) return 0;
     int c = cell_z(z)*COL_GN + cell_x(x);
     int start = s_cellStart[c], count = s_cellCount[c];
-    float bestY = 0; int found = 0;
+    float bestY = 0; int found = 0; const ColFace* bestF = 0;
     for (int i = 0; i < count; i++) {
         const ColFace* F = &s_faces[s_cellFaces[start+i]];
         if (!(F->flags & 1)) continue;
@@ -150,9 +148,13 @@ int collide_floor(float x, float z, float py, float* outY) {
         float fy = (cs==0) ? (F->ay+F->by+F->cy)/3.0f
                            : (c1*F->ay + c2*F->by + c0*F->cy)/cs;
         if (fy > py + PLAYER_HEIGHT) continue;   // ignore floors above the head
-        if (!found || fy > bestY) { bestY = fy; found = 1; }
+        if (!found || fy > bestY) { bestY = fy; found = 1; bestF = F; }
     }
     *outY = bestY;
+    if (outN) {
+        if (bestF) { outN[0]=bestF->nx; outN[1]=bestF->ny; outN[2]=bestF->nz; }
+        else { outN[0]=0; outN[1]=1; outN[2]=0; }
+    }
     return found;
 }
 
@@ -167,7 +169,11 @@ void collide_walls(float* x, float* z, float py) {
         float fMinY = fminf(F->ay, fminf(F->by, F->cy));
         float fMaxY = fmaxf(F->ay, fmaxf(F->by, F->cy));
         if (py + PLAYER_HEIGHT < fMinY || py >= fMaxY) continue;
-        float dist = (ppx - F->ax)*F->nx + (ppz - F->az)*F->nz;
+        // XZ-normalized wall normal (face normal stored full).
+        float xl = sqrtf(F->nx*F->nx + F->nz*F->nz);
+        if (xl < 1e-4f) continue;
+        float wnx = F->nx/xl, wnz = F->nz/xl;
+        float dist = (ppx - F->ax)*wnx + (ppz - F->az)*wnz;
         float ad = dist < 0 ? -dist : dist;
         if (ad >= PLAYER_RADIUS) continue;
         // XZ AABB pad pre-check.
@@ -176,8 +182,8 @@ void collide_walls(float* x, float* z, float py) {
         if (ppx<mnX-PLAYER_RADIUS||ppx>mxX+PLAYER_RADIUS||ppz<mnZ-PLAYER_RADIUS||ppz>mxZ+PLAYER_RADIUS) continue;
         float push = PLAYER_RADIUS - ad;
         float s = dist >= 0 ? 1.0f : -1.0f;
-        ppx += F->nx * push * s;
-        ppz += F->nz * push * s;
+        ppx += wnx * push * s;
+        ppz += wnz * push * s;
     }
     *x = ppx; *z = ppz;
 }

@@ -101,7 +101,7 @@ void rig_set_moving(int moving) {
     }
 }
 
-void rig_render(float px, float py, float pz, float yawDeg, int frozen) {
+void rig_render(float px, float py, float pz, float yawDeg, const float* upN, int frozen) {
     if (!s_skinned) return;
 
     if (!frozen) {
@@ -116,13 +116,26 @@ void rig_render(float px, float py, float pz, float yawDeg, int frozen) {
     skin();
     sceKernelDcacheWritebackRange(s_skinned, sizeof(AfnVertex) * AFN_RIG_VERTS);
 
+    // Orient the rig with a basis matrix: up = floor normal (slope tilt),
+    // forward = the yaw heading projected onto the slope plane, right = up x fwd.
+    // Baking it into the model matrix avoids gum rotate-order/gimbal issues.
+    float ux = upN ? upN[0] : 0.0f, uy = upN ? upN[1] : 1.0f, uz = upN ? upN[2] : 0.0f;
+    float ul = sqrtf(ux*ux + uy*uy + uz*uz); if (ul > 1e-6f) { ux/=ul; uy/=ul; uz/=ul; }
+    float yr = yawDeg * (3.14159265f/180.0f) + AFN_RIG_YAW_OFFSET;
+    float ydx = sinf(yr), ydz = cosf(yr);
+    float d = ydx*ux + ydz*uz;                          // yawDir . up (ydy = 0)
+    float fx = ydx - ux*d, fy = -uy*d, fz = ydz - uz*d; // project onto slope plane
+    float fl = sqrtf(fx*fx + fy*fy + fz*fz);
+    if (fl > 1e-6f) { fx/=fl; fy/=fl; fz/=fl; } else { fx=0; fy=0; fz=1; }
+    float rx = uy*fz - uz*fy, ry = uz*fx - ux*fz, rz = ux*fy - uy*fx;  // right = up x fwd
+    float S = AFN_PLAYER_RIG_SCALE;
+    ScePspFMatrix4 m;
+    m.x.x = rx*S; m.x.y = ry*S; m.x.z = rz*S; m.x.w = 0.0f;   // local +X -> right
+    m.y.x = ux*S; m.y.y = uy*S; m.y.z = uz*S; m.y.w = 0.0f;   // local +Y -> up
+    m.z.x = fx*S; m.z.y = fy*S; m.z.z = fz*S; m.z.w = 0.0f;   // local +Z -> forward
+    m.w.x = px;   m.w.y = py;   m.w.z = pz;   m.w.w = 1.0f;
     sceGumMatrixMode(GU_MODEL);
-    sceGumLoadIdentity();
-    ScePspFVector3 t = { px, py, pz };
-    sceGumTranslate(&t);
-    sceGumRotateY(yawDeg * (3.14159265f/180.0f) + AFN_RIG_YAW_OFFSET);
-    ScePspFVector3 sc = { AFN_PLAYER_RIG_SCALE, AFN_PLAYER_RIG_SCALE, AFN_PLAYER_RIG_SCALE };
-    sceGumScale(&sc);
+    sceGumLoadMatrix(&m);
 
     if (AFN_RIG_CULL == 2) sceGuDisable(GU_CULL_FACE);
     else { sceGuEnable(GU_CULL_FACE); sceGuFrontFace(AFN_RIG_CULL == 1 ? GU_CW : GU_CCW); }
@@ -158,8 +171,8 @@ void rig_init(void) {}
 int  rig_present(void) { return 0; }
 void rig_player_start(float out[3]) { out[0] = out[1] = out[2] = 0.0f; }
 void rig_set_moving(int moving) { (void)moving; }
-void rig_render(float px, float py, float pz, float yawDeg, int frozen) {
-    (void)px; (void)py; (void)pz; (void)yawDeg; (void)frozen;
+void rig_render(float px, float py, float pz, float yawDeg, const float* upN, int frozen) {
+    (void)px; (void)py; (void)pz; (void)yawDeg; (void)upN; (void)frozen;
 }
 
 #endif

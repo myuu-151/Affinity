@@ -27,6 +27,7 @@ static float playerYaw;                // degrees, facing of the rig
 static float playerVY;                 // vertical velocity (gravity/jump)
 static int   grounded;
 static float s_orbit;                  // orbit distance
+static float s_floorN[3] = {0.0f, 1.0f, 0.0f};  // smoothed floor normal (slope tilt)
 
 #define GRAVITY      0.8f
 #define JUMP_VEL     13.0f
@@ -49,7 +50,7 @@ void scene_init(void) {
         playerYaw = afn_cam_start_angle * RAD2DEG;
         // Drop onto the floor at spawn so we don't start mid-air.
         float fy;
-        if (collide_floor(playerX, playerZ, playerY + 200.0f, &fy)) playerY = fy;
+        if (collide_floor(playerX, playerZ, playerY + 200.0f, &fy, s_floorN)) playerY = fy;
         playerVY = 0.0f; grounded = 1;
     } else {
         camX = afn_cam_start_x; camY = afn_cam_start_h; camZ = afn_cam_start_z;
@@ -91,11 +92,19 @@ void scene_update(void) {
         playerVY -= GRAVITY;
         if (playerVY < -TERMINAL_VY) playerVY = -TERMINAL_VY;
         playerY += playerVY;
-        float fy;
-        if (collide_floor(playerX, playerZ, playerY, &fy) && playerY <= fy) {
+        float fy, fn[3];
+        if (collide_floor(playerX, playerZ, playerY, &fy, fn) && playerY <= fy) {
             playerY = fy; playerVY = 0.0f; grounded = 1;
+            // Smooth the floor normal so the slope tilt eases (no popping).
+            s_floorN[0] += (fn[0]-s_floorN[0])*0.2f;
+            s_floorN[1] += (fn[1]-s_floorN[1])*0.2f;
+            s_floorN[2] += (fn[2]-s_floorN[2])*0.2f;
         } else {
             grounded = 0;
+            // Airborne: ease back upright.
+            s_floorN[0] += (0.0f-s_floorN[0])*0.1f;
+            s_floorN[1] += (1.0f-s_floorN[1])*0.1f;
+            s_floorN[2] += (0.0f-s_floorN[2])*0.1f;
         }
     } else {
         // Free-fly debug camera.
@@ -185,9 +194,10 @@ void scene_render(void) {
                       camX, camY, camZ, camSin, camCos, drawDist);
     }
 
-    // Player rig (skinned) — draws at the player's world transform.
+    // Player rig (skinned) — draws at the player's world transform, tilted to
+    // the floor slope.
     if (s_follow)
-        rig_render(playerX, playerY, playerZ, playerYaw, 0);
+        rig_render(playerX, playerY, playerZ, playerYaw, s_floorN, 0);
 
     sceGuEnable(GU_CULL_FACE);
     sceGuFrontFace(GU_CW);

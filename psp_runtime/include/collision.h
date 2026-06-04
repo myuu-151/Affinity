@@ -5,7 +5,8 @@
 #pragma once
 
 void collide_build(void);
-// Highest floor at/below (py + headroom) under (x,z). Returns 1 + sets *outY.
-int  collide_floor(float x, float z, float py, float* outY);
+// Highest floor at/below (py + headroom) under (x,z). Returns 1 + sets *outY,
+// and (if outN != 0) the unit normal of that floor face — for slope alignment.
+int  collide_floor(float x, float z, float py, float* outY, float* outN);
 // Push (x,z) out of nearby wall faces at height py.
 void collide_walls(float* x, float* z, float py);
