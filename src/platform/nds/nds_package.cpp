@@ -1412,10 +1412,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 // then re-quantize to a fresh 16-color palette via median-cut so
                 // the new gradient shades survive the 4bpp format.
                 std::vector<uint8_t> effPixels = mesh.texPixels;
-                uint16_t effPal[16];
-                for (int i = 0; i < 16; i++) effPal[i] = mesh.texPalette[i];
+                uint16_t effPal[256];
+                for (int i = 0; i < 256; i++) effPal[i] = mesh.texPalette[i];
 
-                if (mesh.texFiltered)
+                if (mesh.texFiltered && !mesh.texture256)
                 {
                     bool hasAlpha = mesh.textureHasAlpha != 0;
                     // 1. Reconstruct RGB888 (transparent index 0 excluded when hasAlpha).
@@ -1503,25 +1503,36 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 }
 
                 f << "static const u8 afn_mesh" << mi << "_tex[] = {\n    ";
-                int packed = (texPx + 1) / 2;
-                for (int i = 0; i < packed; i++)
-                {
-                    int lo = (i * 2 + 0 < (int)effPixels.size()) ? (effPixels[i*2+0] & 0xF) : 0;
-                    int hi = (i * 2 + 1 < (int)effPixels.size()) ? (effPixels[i*2+1] & 0xF) : 0;
-                    f << ((hi << 4) | lo);
-                    if (i + 1 < packed) f << ", ";
-                    if ((i + 1) % 16 == 0) f << "\n    ";
+                if (mesh.texture256) {
+                    // 8bpp: one palette index per byte (GL_RGB256).
+                    for (int i = 0; i < texPx; i++) {
+                        int idx = (i < (int)effPixels.size()) ? effPixels[i] : 0;
+                        f << idx;
+                        if (i + 1 < texPx) f << ", ";
+                        if ((i + 1) % 16 == 0) f << "\n    ";
+                    }
+                } else {
+                    // 4bpp: two indices per byte (GL_RGB16).
+                    int packed = (texPx + 1) / 2;
+                    for (int i = 0; i < packed; i++) {
+                        int lo = (i * 2 + 0 < (int)effPixels.size()) ? (effPixels[i*2+0] & 0xF) : 0;
+                        int hi = (i * 2 + 1 < (int)effPixels.size()) ? (effPixels[i*2+1] & 0xF) : 0;
+                        f << ((hi << 4) | lo);
+                        if (i + 1 < packed) f << ", ";
+                        if ((i + 1) % 16 == 0) f << "\n    ";
+                    }
                 }
                 f << "\n};\n";
 
-                // Texture palette (RGB15)
+                // Texture palette (RGB15) — 256 entries when 256-colour, else 16.
+                int palN = mesh.texture256 ? 256 : 16;
                 f << "static const u16 afn_mesh" << mi << "_texpal[] = { ";
-                for (int i = 0; i < 16; i++)
+                for (int i = 0; i < palN; i++)
                 {
                     char hex[8];
                     snprintf(hex, sizeof(hex), "0x%04X", effPal[i]);
                     f << hex;
-                    if (i < 15) f << ", ";
+                    if (i < palN - 1) f << ", ";
                 }
                 f << " };\n";
             }
@@ -1605,6 +1616,16 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             if (mi + 1 < meshes.size()) f << ", ";
         }
         f << " };\n";
+
+        // Per-mesh texture format: 1 = 256-colour (GL_RGB256, 8bpp), 0 = 16-colour.
+        f << "static const u8 afn_mesh_tex256[] = { ";
+        for (size_t mi = 0; mi < meshes.size(); mi++)
+        {
+            f << (meshes[mi].texture256 ? 1 : 0);
+            if (mi + 1 < meshes.size()) f << ", ";
+        }
+        f << " };\n";
+        f << "#define AFN_MESH_HAS_TEX256 1\n";
 
         f << "static const u16* afn_mesh_tex_pal_ptrs[] = { ";
         for (size_t mi = 0; mi < meshes.size(); mi++)

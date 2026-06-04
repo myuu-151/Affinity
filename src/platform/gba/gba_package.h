@@ -153,8 +153,9 @@ struct GBAMeshExport
     std::vector<float> uvs;       // u, v per vertex (flat, interleaved)
     int textured = 0;             // 1 = textured, 0 = flat shaded
     int texW = 0, texH = 0;      // texture dimensions
-    std::vector<uint8_t> texPixels;   // quantized indexed pixels (texW * texH)
-    uint16_t texPalette[16] = {}; // RGB15 palette for this texture
+    std::vector<uint8_t> texPixels;   // quantized indexed pixels (texW * texH), 0..255
+    uint16_t texPalette[256] = {}; // RGB15 palette (16 or 256 entries used)
+    int texture256 = 0;           // 1 = 256-colour (GL_RGB256, 8bpp), 0 = 16-colour (GL_RGB16, 4bpp)
     int textureHasAlpha = 0;      // 1 = palette[0] is transparent (NDS COLOR0_TRANSPARENT)
     int texFiltered = 0;          // 1 = NDS export pre-blurs the texture (software smoothing; DS has no HW filter)
     int perspCorrect = 0;         // 1=perspective-corrected texture mapping

@@ -197,9 +197,10 @@ struct MeshAsset
     // Texture mapping
     bool textured = false;                    // true = use texture, false = flat shaded
     std::string texturePath;                  // source PNG path
-    std::vector<uint8_t> texturePixels;       // quantized indexed pixels (texW * texH)
-    uint32_t texturePalette[16] = {};         // RGBA8 palette for the texture
-    int texW = 0, texH = 0;                  // texture dimensions (power of 2, max 256)
+    std::vector<uint8_t> texturePixels;       // quantized indexed pixels (texW * texH), 0..255
+    uint32_t texturePalette[256] = {};        // RGBA8 palette (16 or 256 entries used)
+    bool texture256 = false;                  // false = 16-colour (GL_RGB16), true = 256 (GL_RGB256)
+    int texW = 0, texH = 0;                  // texture dimensions (power of 2, max 512)
     bool textureUseAlpha = false;             // true = treat alpha=0 as transparent (NDS reserves
                                               // palette[0] and sets GL_TEXTURE_COLOR0_TRANSPARENT).
                                               // Off by default — leave it off unless you actually want

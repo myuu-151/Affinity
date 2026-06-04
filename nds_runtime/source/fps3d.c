@@ -158,9 +158,14 @@ static void load_mesh_textures(void)
         //   GL_TEXTURE_COLOR0_TRANSPARENT — palette index 0 = transparent
         int flags = TEXGEN_TEXCOORD | GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T;
         if (afn_mesh_desc[i][11]) flags |= GL_TEXTURE_COLOR0_TRANSPARENT;
-        glTexImage2D(0, 0, GL_RGB16, sizeW, sizeH, 0, flags,
+#ifdef AFN_MESH_HAS_TEX256
+        int is256 = afn_mesh_tex256[i];
+#else
+        int is256 = 0;
+#endif
+        glTexImage2D(0, 0, is256 ? GL_RGB256 : GL_RGB16, sizeW, sizeH, 0, flags,
                      afn_mesh_tex_ptrs[i]);
-        glColorTableEXT(0, 0, 16, 0, 0, afn_mesh_tex_pal_ptrs[i]);
+        glColorTableEXT(0, 0, is256 ? 256 : 16, 0, 0, afn_mesh_tex_pal_ptrs[i]);
     }
 }
 
@@ -406,9 +411,9 @@ static void render_player_rig(void)
     // Smooth the up-vector toward the target normal, then renormalize.
     // (Higher factor = snappier slope response; floor is sub-pixel smooth so
     // this won't reintroduce jitter.)
-    s_upx += (tnx - s_upx) * 0.4f;
-    s_upy += (tny - s_upy) * 0.4f;
-    s_upz += (tnz - s_upz) * 0.4f;
+    s_upx += (tnx - s_upx) * 1.0f;
+    s_upy += (tny - s_upy) * 1.0f;
+    s_upz += (tnz - s_upz) * 1.0f;
     { float l = sqrtf(s_upx*s_upx + s_upy*s_upy + s_upz*s_upz);
       if (l > 0.0001f) { s_upx/=l; s_upy/=l; s_upz/=l; } else { s_upx=0; s_upy=1; s_upz=0; } }
 
