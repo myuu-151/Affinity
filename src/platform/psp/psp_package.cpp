@@ -241,7 +241,11 @@ bool PackagePSP(const std::string& runtimeDir,
 
     // Build EBOOT.PBP via WSL/pspdev.
     std::string wslDir = ToWslPath(runtimeDir);
-    std::string buildCmd = "cd '" + wslDir + "' && make 2>&1";
+    // `make clean` first: only psp_mapdata.h changes between exports, and the
+    // pspsdk Makefile doesn't track header deps, so a plain `make` would leave
+    // mapdata.o (and the EBOOT) stale. Use `;` not `&&` so the build still runs
+    // if clean trips on a locked EBOOT (e.g. PPSSPP holding it open).
+    std::string buildCmd = "cd '" + wslDir + "' && make clean; make 2>&1";
     std::string out;
     int rc = RunWslCommand(buildCmd, out);
     if (rc != 0) {
