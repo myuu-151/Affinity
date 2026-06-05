@@ -1,17 +1,18 @@
-// Affinity PSP runtime — per-mesh spatial bucketing for frustum culling.
-// Each mesh is partitioned once into a 4x4x4 grid of buckets by triangle
-// centroid; at draw time only buckets whose world-space sphere is in view are
-// submitted to the GE. Lets one giant subdivided level mesh self-partition.
+// Affinity PSP runtime — load-time triangle tessellation for the scene meshes.
+// The PSP GE does NOT clip triangles that overflow the guard band — it DROPS
+// them (the DS clips, the PSP doesn't). A big floor triangle whose corner is
+// both near the camera and far off-axis overflows and the whole triangle
+// vanishes, leaving large wedges of missing floor at grazing angles. We fix it
+// by subdividing any oversized triangle once at load so the on-screen region is
+// always covered by small triangles that stay on-screen. No runtime culling.
 #pragma once
 
-// Build buckets for every mesh in afn_meshes (call once, after data is ready).
+// Tessellate oversized triangles in every mesh (call once, after data is ready).
 void meshcull_build(void);
 
-// Draw mesh `meshIdx` placed by the given instance transform, culling buckets
-// against the camera in true VIEW space (handles camera pitch — fwd/right/up are
-// the camera basis vectors). The caller must have set the gum MODEL matrix to
-// the SAME transform and bound the texture; this only issues the draw calls for
-// visible buckets. tanH/tanV are the (padded) half-FOV tangents; drawDist 0 = unlimited.
+// Draw mesh `meshIdx`. The caller has already set the gum MODEL matrix and bound
+// the texture. The transform/camera args are vestigial (kept so callers don't
+// change) — there is no culling, the whole (tessellated) mesh is always drawn.
 void meshcull_draw(int meshIdx,
                    float ix, float iy, float iz,
                    float scale, float rotY, float rotX, float rotZ,

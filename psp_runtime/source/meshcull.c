@@ -1,122 +1,130 @@
-// Affinity PSP runtime — spatial bucketing + frustum culling (see meshcull.h).
+// Affinity PSP runtime — load-time triangle tessellation (see meshcull.h).
+//
+// Why this exists: the PSP GE has no near-plane / guard-band CLIPPING. When a
+// triangle's projected vertex overflows the guard band — which happens for a
+// big triangle that has one corner near the camera AND far off the view axis —
+// the GE discards the WHOLE triangle rather than clipping it to the screen edge
+// (the DS hardware clips; the PSP doesn't). On a coarse floor that reads as
+// large wedges of missing geometry whenever you look across it at a grazing
+// angle. No amount of frustum culling fixes it (culling only ever made it
+// worse). The robust fix is to make the triangles small: subdivide any triangle
+// whose world-space edge exceeds MESH_MAX_EDGE. Then the on-screen part of the
+// floor is always tiled by small triangles whose vertices stay on-screen (no
+// overflow), and only the tiny slivers straddling the off-screen corner can
+// drop — and those are off-screen anyway, so nothing visible is lost.
+//
+// Done once at load (no per-frame cost). Already-fine meshes are left as their
+// original indexed buffers; only meshes that actually contain oversized
+// triangles are rebuilt into a flat (non-indexed) tessellated buffer.
 #include "meshcull.h"
 #include "affinity_psp.h"
+#include <pspkernel.h>
 #include <pspgu.h>
 #include <pspgum.h>
-#include <stdlib.h>
+#include <malloc.h>
 #include <math.h>
 
-#define MESH_GN      4
-#define MESH_NBUCKET (MESH_GN * MESH_GN * MESH_GN)
+// World-space edge length above which a triangle is subdivided. The scene spans
+// hundreds of units with the camera ~18 units from the player, so 20 keeps the
+// near floor finely tiled while leaving the already-dense detail untouched.
+// Raise it if fill/transform cost ever shows; lower it if any wedge survives.
+#define MESH_MAX_EDGE  20.0f
+#define MESH_MAX_DEPTH 4          // 4^4 = up to 256x per original triangle
 
-// Frustum half-angle tangents for sceGumPerspective(75, 480/272). Padded a
-// touch wider than the true cone so visible chunks never pop at the edges.
-#define TAN_H 1.50f   // horizontal (true ~1.35)
-#define TAN_V 0.90f   // vertical   (true ~0.77)
-#define NEAR_EPS 0.5f
+static AfnVertex* s_tess[256];    // flat (3 verts/tri) tessellated buffer, or 0
+static int        s_tessVc[256];  // vertex count in s_tess[mi]
+static int        s_ready = 0;
 
-typedef struct {
-    float cx, cy, cz, radius;   // local-space bounding sphere
-    int   triStart, triCount;   // span into s_idx[mi] (index units, 3 per tri)
-} PspBucket;
+// First instance scale that references this mesh (1.0 if none / unscaled).
+static float mesh_scale(int mi) {
+    for (int si = 0; si < afn_sprite_count; si++)
+        if (afn_sprites[si].meshIdx == mi) return afn_sprites[si].scale;
+    return 1.0f;
+}
 
-static PspBucket*      s_buckets[256];
-static int             s_bucketCount[256];
-static unsigned short* s_idx[256];          // reordered indices grouped by bucket
+// Midpoint vertex: pos/uv interpolate linearly (exact across a planar triangle),
+// color averaged per channel.
+static AfnVertex vmid(const AfnVertex* a, const AfnVertex* b) {
+    AfnVertex m;
+    m.u = (a->u + b->u) * 0.5f;
+    m.v = (a->v + b->v) * 0.5f;
+    unsigned ca = a->color, cb = b->color, mc = 0;
+    for (int s = 0; s < 32; s += 8)
+        mc |= ((((ca >> s) & 0xFF) + ((cb >> s) & 0xFF)) >> 1) << s;
+    m.color = mc;
+    m.x = (a->x + b->x) * 0.5f;
+    m.y = (a->y + b->y) * 0.5f;
+    m.z = (a->z + b->z) * 0.5f;
+    return m;
+}
 
-static int s_ready = 0;
+// True if any edge (squared) exceeds the local-space limit.
+static int tri_big(const AfnVertex* a, const AfnVertex* b, const AfnVertex* c, float s2max) {
+    float dx, dy, dz;
+    dx=a->x-b->x; dy=a->y-b->y; dz=a->z-b->z; if (dx*dx+dy*dy+dz*dz > s2max) return 1;
+    dx=b->x-c->x; dy=b->y-c->y; dz=b->z-c->z; if (dx*dx+dy*dy+dz*dz > s2max) return 1;
+    dx=c->x-a->x; dy=c->y-a->y; dz=c->z-a->z; if (dx*dx+dy*dy+dz*dz > s2max) return 1;
+    return 0;
+}
 
-static int cell_of(float cx, float cy, float cz,
-                   float mnx, float mny, float mnz,
-                   float ex, float ey, float ez) {
-    int gx = (int)((cx - mnx) / ex * MESH_GN); if (gx < 0) gx = 0; if (gx >= MESH_GN) gx = MESH_GN - 1;
-    int gy = (int)((cy - mny) / ey * MESH_GN); if (gy < 0) gy = 0; if (gy >= MESH_GN) gy = MESH_GN - 1;
-    int gz = (int)((cz - mnz) / ez * MESH_GN); if (gz < 0) gz = 0; if (gz >= MESH_GN) gz = MESH_GN - 1;
-    return (gx * MESH_GN + gy) * MESH_GN + gz;
+// Recurse: split into 4 until small enough or at depth cap. If out!=0, write 3
+// verts per leaf triangle at *oc; otherwise just advance *oc (counting pass).
+static void tess_rec(AfnVertex* out, int* oc,
+                     const AfnVertex* a, const AfnVertex* b, const AfnVertex* c,
+                     float s2max, int depth) {
+    if (depth >= MESH_MAX_DEPTH || !tri_big(a, b, c, s2max)) {
+        if (out) { out[*oc] = *a; out[*oc+1] = *b; out[*oc+2] = *c; }
+        *oc += 3;
+        return;
+    }
+    AfnVertex m0 = vmid(a, b), m1 = vmid(b, c), m2 = vmid(c, a);
+    tess_rec(out, oc, a,   &m0, &m2, s2max, depth+1);
+    tess_rec(out, oc, &m0, b,   &m1, s2max, depth+1);
+    tess_rec(out, oc, &m2, &m1, c,   s2max, depth+1);
+    tess_rec(out, oc, &m0, &m1, &m2, s2max, depth+1);
 }
 
 void meshcull_build(void) {
     if (s_ready) return;
     s_ready = 1;
-    int mc = afn_mesh_count;
-    if (mc > 256) mc = 256;
+    int mc = afn_mesh_count; if (mc > 256) mc = 256;
 
     for (int mi = 0; mi < mc; mi++) {
-        s_buckets[mi] = 0; s_bucketCount[mi] = 0; s_idx[mi] = 0;
+        s_tess[mi] = 0; s_tessVc[mi] = 0;
         const AfnMesh* m = &afn_meshes[mi];
         int ntri = m->indexCount / 3;
         if (ntri <= 0 || !m->verts || !m->indices) continue;
-        const AfnVertex* V = m->verts;
+
+        // Compare edges in local space (verts are pre-scale): the world edge is
+        // local*scale, so the local limit is MAX_EDGE/scale.
+        float scale = mesh_scale(mi);
+        float lim   = (scale > 1e-6f) ? (MESH_MAX_EDGE / scale) : MESH_MAX_EDGE;
+        float s2max = lim * lim;
+
+        const AfnVertex*      V = m->verts;
         const unsigned short* I = m->indices;
 
-        // Mesh AABB.
-        float mnx = 1e30f, mny = 1e30f, mnz = 1e30f;
-        float mxx = -1e30f, mxy = -1e30f, mxz = -1e30f;
-        for (int v = 0; v < m->vertCount; v++) {
-            float x = V[v].x, y = V[v].y, z = V[v].z;
-            if (x < mnx) mnx = x;
-            if (x > mxx) mxx = x;
-            if (y < mny) mny = y;
-            if (y > mxy) mxy = y;
-            if (z < mnz) mnz = z;
-            if (z > mxz) mxz = z;
-        }
-        float ex = mxx - mnx; if (ex < 1e-4f) ex = 1e-4f;
-        float ey = mxy - mny; if (ey < 1e-4f) ey = 1e-4f;
-        float ez = mxz - mnz; if (ez < 1e-4f) ez = 1e-4f;
+        // Already fine? Leave the original indexed buffer in place (no memory).
+        int anyBig = 0;
+        for (int t = 0; t < ntri && !anyBig; t++)
+            anyBig = tri_big(&V[I[t*3]], &V[I[t*3+1]], &V[I[t*3+2]], s2max);
+        if (!anyBig) continue;
 
-        PspBucket* B = (PspBucket*)calloc(MESH_NBUCKET, sizeof(PspBucket));
-        if (!B) continue;
+        // Pass 1: count output verts.
+        int oc = 0;
+        for (int t = 0; t < ntri; t++)
+            tess_rec(0, &oc, &V[I[t*3]], &V[I[t*3+1]], &V[I[t*3+2]], s2max, 0);
 
-        // Pass A: count indices per bucket.
-        for (int t = 0; t < ntri; t++) {
-            int a = I[t*3], b = I[t*3+1], c = I[t*3+2];
-            float cx = (V[a].x + V[b].x + V[c].x) / 3.0f;
-            float cy = (V[a].y + V[b].y + V[c].y) / 3.0f;
-            float cz = (V[a].z + V[b].z + V[c].z) / 3.0f;
-            B[cell_of(cx,cy,cz,mnx,mny,mnz,ex,ey,ez)].triCount += 3;
-        }
-        int total = 0;
-        for (int c = 0; c < MESH_NBUCKET; c++) {
-            B[c].triStart = total; total += B[c].triCount; B[c].triCount = 0;
-        }
-        unsigned short* OI = (unsigned short*)malloc(total * sizeof(unsigned short));
-        if (!OI) { free(B); continue; }
+        AfnVertex* out = (AfnVertex*)memalign(16, sizeof(AfnVertex) * oc);
+        if (!out) continue;   // OOM: fall back to the original (still drawable)
 
-        // Per-bucket AABB while scattering.
-        float bmnx[MESH_NBUCKET], bmny[MESH_NBUCKET], bmnz[MESH_NBUCKET];
-        float bmxx[MESH_NBUCKET], bmxy[MESH_NBUCKET], bmxz[MESH_NBUCKET];
-        for (int c = 0; c < MESH_NBUCKET; c++) {
-            bmnx[c]=bmny[c]=bmnz[c]= 1e30f;
-            bmxx[c]=bmxy[c]=bmxz[c]=-1e30f;
-        }
-        for (int t = 0; t < ntri; t++) {
-            int a = I[t*3], b = I[t*3+1], c = I[t*3+2];
-            float cx = (V[a].x + V[b].x + V[c].x) / 3.0f;
-            float cy = (V[a].y + V[b].y + V[c].y) / 3.0f;
-            float cz = (V[a].z + V[b].z + V[c].z) / 3.0f;
-            int cell = cell_of(cx,cy,cz,mnx,mny,mnz,ex,ey,ez);
-            int p = B[cell].triStart + B[cell].triCount;
-            OI[p] = a; OI[p+1] = b; OI[p+2] = c; B[cell].triCount += 3;
-            int ids[3] = { a, b, c };
-            for (int k = 0; k < 3; k++) {
-                float x = V[ids[k]].x, y = V[ids[k]].y, z = V[ids[k]].z;
-                if (x < bmnx[cell]) bmnx[cell] = x;
-                if (x > bmxx[cell]) bmxx[cell] = x;
-                if (y < bmny[cell]) bmny[cell] = y;
-                if (y > bmxy[cell]) bmxy[cell] = y;
-                if (z < bmnz[cell]) bmnz[cell] = z;
-                if (z > bmxz[cell]) bmxz[cell] = z;
-            }
-        }
-        for (int c = 0; c < MESH_NBUCKET; c++) {
-            if (B[c].triCount == 0) continue;
-            float ccx=(bmnx[c]+bmxx[c])*0.5f, ccy=(bmny[c]+bmxy[c])*0.5f, ccz=(bmnz[c]+bmxz[c])*0.5f;
-            float dx=bmxx[c]-ccx, dy=bmxy[c]-ccy, dz=bmxz[c]-ccz;
-            B[c].cx=ccx; B[c].cy=ccy; B[c].cz=ccz;
-            B[c].radius = sqrtf(dx*dx+dy*dy+dz*dz);
-        }
-        s_buckets[mi] = B; s_bucketCount[mi] = MESH_NBUCKET; s_idx[mi] = OI;
+        // Pass 2: fill.
+        int wc = 0;
+        for (int t = 0; t < ntri; t++)
+            tess_rec(out, &wc, &V[I[t*3]], &V[I[t*3+1]], &V[I[t*3+2]], s2max, 0);
+
+        sceKernelDcacheWritebackRange(out, sizeof(AfnVertex) * oc);
+        s_tess[mi] = out; s_tessVc[mi] = oc;
     }
 }
 
@@ -128,17 +136,25 @@ void meshcull_draw(int meshIdx,
                    float rgtX, float rgtY, float rgtZ,
                    float upX,  float upY,  float upZ,
                    float tanH, float tanV, float drawDist) {
-    // CULLING REMOVED. It only existed to save fill rate, but the real fill
-    // bottleneck was the 32-bit unswizzled textures (now fixed). With those
-    // gone the PSP draws the whole scene at 60fps, so per-bucket frustum culling
-    // is pure downside — it kept wrongly dropping visible geometry at certain
-    // angles. Draw the entire mesh, every frame, every angle. Nothing to cull,
-    // nothing to mis-cull.
-    const AfnMesh* m = &afn_meshes[meshIdx];
     (void)ix;(void)iy;(void)iz;(void)scale;(void)rotY;(void)rotX;(void)rotZ;
     (void)camX;(void)camY;(void)camZ;(void)fwdX;(void)fwdY;(void)fwdZ;
     (void)rgtX;(void)rgtY;(void)rgtZ;(void)upX;(void)upY;(void)upZ;
     (void)tanH;(void)tanV;(void)drawDist;
-    sceGumDrawArray(GU_TRIANGLES, AFN_VERTEX_FLAGS | GU_INDEX_16BIT,
-                    m->indexCount, m->indices, m->verts);
+
+    if (s_tess[meshIdx]) {
+        // Flat, non-indexed: oversized triangles were subdivided at load. The GE
+        // primitive count is 16-bit (max 65535), and tessellation easily blows
+        // past that, so submit in <=65532-vertex chunks (multiple of 3).
+        int total = s_tessVc[meshIdx];
+        AfnVertex* base = s_tess[meshIdx];
+        const int CHUNK = 65532;
+        for (int off = 0; off < total; off += CHUNK) {
+            int n = total - off; if (n > CHUNK) n = CHUNK;
+            sceGumDrawArray(GU_TRIANGLES, AFN_VERTEX_FLAGS, n, 0, base + off);
+        }
+    } else {
+        const AfnMesh* m = &afn_meshes[meshIdx];
+        sceGumDrawArray(GU_TRIANGLES, AFN_VERTEX_FLAGS | GU_INDEX_16BIT,
+                        m->indexCount, m->indices, m->verts);
+    }
 }
