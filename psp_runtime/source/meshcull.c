@@ -144,6 +144,13 @@ void meshcull_draw(int meshIdx,
     float rz = rotZ * (3.14159265f/180.0f);
     float cY=cosf(ry), sY=sinf(ry), cX=cosf(rx), sX=sinf(rx), cZ=cosf(rz), sZ=sinf(rz);
 
+    // Frustum side-plane normals (cos/sin of the half-FOV). The planes are
+    // tilted through the camera, so the sphere-to-plane distance is
+    // |v|*cos - depth*sin, NOT the flat (|v| - depth*tan) I used before — that
+    // over-culled by ~1/cos(fov/2) and dropped chunks at grazing angles.
+    float cosH = 1.0f / sqrtf(1.0f + tanH*tanH), sinH = tanH * cosH;
+    float cosV = 1.0f / sqrtf(1.0f + tanV*tanV), sinV = tanV * cosV;
+
     for (int c = 0; c < nb; c++) {
         const PspBucket* bk = &B[c];
         if (bk->triCount == 0) continue;
@@ -159,14 +166,15 @@ void meshcull_draw(int meshIdx,
         // Project (bucket center - eye) onto the TRUE camera basis (handles
         // pitch): depth = forward, vh = right, vv = up. Then it's a clean frustum
         // sphere test against near/far + the four side planes.
+        float rr = r * 1.15f;   // small safety margin on the bucket sphere
         float dx = wx - camX, dy = wy - camY, dz = wz - camZ;
         float depth = dx*fwdX + dy*fwdY + dz*fwdZ;
-        if (depth + r < NEAR_EPS) continue;                       // behind camera
-        if (drawDist > 0.0f && depth - r > drawDist) continue;    // past draw distance
+        if (depth + rr < NEAR_EPS) continue;                      // behind camera
+        if (drawDist > 0.0f && depth - rr > drawDist) continue;   // past draw distance
         float vh = dx*rgtX + dy*rgtY + dz*rgtZ; if (vh < 0) vh = -vh;
-        if (vh - r > depth * tanH) continue;                      // left/right planes
+        if (vh*cosH - depth*sinH > rr) continue;                  // left/right planes
         float vv = dx*upX + dy*upY + dz*upZ; if (vv < 0) vv = -vv;
-        if (vv - r > depth * tanV) continue;                      // top/bottom planes
+        if (vv*cosV - depth*sinV > rr) continue;                  // top/bottom planes
 
         sceGumDrawArray(GU_TRIANGLES, AFN_VERTEX_FLAGS | GU_INDEX_16BIT,
                         bk->triCount, &OI[bk->triStart], m->verts);

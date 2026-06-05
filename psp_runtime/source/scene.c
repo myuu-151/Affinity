@@ -145,7 +145,10 @@ void scene_render(void) {
 
     sceGumMatrixMode(GU_PROJECTION);
     sceGumLoadIdentity();
-    sceGumPerspective(75.0f, 480.0f / 272.0f, 1.0f, 10000.0f);
+    // Near/far packed tight to the scene so the PSP's 16-bit depth buffer has
+    // real precision (was 1..10000, wasting most of the range -> z-fighting
+    // flicker on the level's overlapping/coplanar faces).
+    sceGumPerspective(75.0f, 480.0f / 272.0f, 4.0f, 3000.0f);
 
     ScePspFVector3 eye = { camX, camY, camZ };
     ScePspFVector3 center = s_follow
