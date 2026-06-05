@@ -196,21 +196,40 @@ void collide_walls(float* x, float* z, float py) {
             float fMinY = fminf(F->ay, fminf(F->by, F->cy));
             float fMaxY = fmaxf(F->ay, fmaxf(F->by, F->cy));
             if (py + PLAYER_HEIGHT < fMinY || py >= fMaxY - WALL_TOP_TOL) continue;
-            // XZ-normalized wall normal (face normal stored full).
-            float xl = sqrtf(F->nx*F->nx + F->nz*F->nz);
-            if (xl < 1e-4f) continue;
-            float wnx = F->nx/xl, wnz = F->nz/xl;
-            float dist = (ppx - F->ax)*wnx + (ppz - F->az)*wnz;
-            float ad = dist < 0 ? -dist : dist;
-            if (ad >= PLAYER_RADIUS) continue;
-            // XZ AABB pad pre-check.
-            float mnX=fminf(F->ax,fminf(F->bx,F->cx)), mxX=fmaxf(F->ax,fmaxf(F->bx,F->cx));
-            float mnZ=fminf(F->az,fminf(F->bz,F->cz)), mxZ=fmaxf(F->az,fmaxf(F->bz,F->cz));
-            if (ppx<mnX-PLAYER_RADIUS||ppx>mxX+PLAYER_RADIUS||ppz<mnZ-PLAYER_RADIUS||ppz>mxZ+PLAYER_RADIUS) continue;
-            float push = PLAYER_RADIUS - ad;
-            float s = dist >= 0 ? 1.0f : -1.0f;
-            ppx += wnx * push * s;
-            ppz += wnz * push * s;
+            if (F->nx*F->nx + F->nz*F->nz < 1e-8f) continue;   // purely vertical normal
+
+            // Resolve the player as a CIRCLE vs the wall triangle's actual finite
+            // footprint in XZ (its edges), not an infinite plane. Find the closest
+            // point on any of the 3 edges and push radially away from it. Past the
+            // wall's end the closest point is a corner vertex, so the push rotates
+            // around the corner and the player slides off the edge — instead of
+            // being shoved straight out by an over-extended plane (the old AABB-pad
+            // method, which jittered at sharp edges).
+            float vx[3] = { F->ax, F->bx, F->cx };
+            float vz[3] = { F->az, F->bz, F->cz };
+            float bestPx = ppx, bestPz = ppz, bestD2 = 1e30f;
+            for (int e = 0; e < 3; e++) {
+                float x0 = vx[e], z0 = vz[e];
+                float sx = vx[(e+1)%3] - x0, sz = vz[(e+1)%3] - z0;
+                float L2 = sx*sx + sz*sz;
+                float t = (L2 > 1e-8f) ? ((ppx-x0)*sx + (ppz-z0)*sz) / L2 : 0.0f;
+                if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+                float Px = x0 + sx*t, Pz = z0 + sz*t;
+                float dx = ppx - Px, dz = ppz - Pz, d2 = dx*dx + dz*dz;
+                if (d2 < bestD2) { bestD2 = d2; bestPx = Px; bestPz = Pz; }
+            }
+            if (bestD2 >= PLAYER_RADIUS*PLAYER_RADIUS) continue;
+            float d = sqrtf(bestD2);
+            float push = PLAYER_RADIUS - d;
+            if (d > 1e-4f) {
+                ppx += (ppx - bestPx) / d * push;
+                ppz += (ppz - bestPz) / d * push;
+            } else {
+                // Player exactly on the wall line: shove out along the face normal.
+                float xl = sqrtf(F->nx*F->nx + F->nz*F->nz);
+                ppx += F->nx / xl * push;
+                ppz += F->nz / xl * push;
+            }
         }
     }
     *x = ppx; *z = ppz;
