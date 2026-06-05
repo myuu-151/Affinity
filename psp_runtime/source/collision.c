@@ -25,6 +25,11 @@ static int*     s_cellFaces = 0;
 static float    s_minX, s_minZ, s_cellSize;
 static int      s_ready = 0;
 
+// Per-face "seen this query" stamps so a face bucketed into several neighbouring
+// cells is only processed once per wall query (else it would be pushed twice).
+static unsigned* s_faceStamp = 0;
+static unsigned  s_queryStamp = 0;
+
 static int cell_x(float x) { int c = (int)((x - s_minX) / s_cellSize); return c < 0 ? 0 : (c >= COL_GN ? COL_GN-1 : c); }
 static int cell_z(float z) { int c = (int)((z - s_minZ) / s_cellSize); return c < 0 ? 0 : (c >= COL_GN ? COL_GN-1 : c); }
 
@@ -97,7 +102,8 @@ void collide_build(void) {
 
     s_cellStart = (int*)calloc(COL_NCELL, sizeof(int));
     s_cellCount = (int*)calloc(COL_NCELL, sizeof(int));
-    if (!s_cellStart || !s_cellCount) return;
+    s_faceStamp = (unsigned*)calloc(s_faceCount, sizeof(unsigned));
+    if (!s_cellStart || !s_cellCount || !s_faceStamp) return;
 
     // Pass A: count (a face goes in every cell its XZ AABB overlaps).
     for (int i = 0; i < s_faceCount; i++) {
@@ -159,31 +165,47 @@ int collide_floor(float x, float z, float py, float* outY, float* outN) {
 }
 
 void collide_walls(float* x, float* z, float py) {
-    if (!s_cellFaces) return;
+    if (!s_cellFaces || !s_faceStamp) return;
     float ppx = *x, ppz = *z;
-    int c = cell_z(ppz)*COL_GN + cell_x(ppx);
-    int start = s_cellStart[c], count = s_cellCount[c];
-    for (int i = 0; i < count; i++) {
-        const ColFace* F = &s_faces[s_cellFaces[start+i]];
-        if (!(F->flags & 4)) continue;
-        float fMinY = fminf(F->ay, fminf(F->by, F->cy));
-        float fMaxY = fmaxf(F->ay, fmaxf(F->by, F->cy));
-        if (py + PLAYER_HEIGHT < fMinY || py >= fMaxY) continue;
-        // XZ-normalized wall normal (face normal stored full).
-        float xl = sqrtf(F->nx*F->nx + F->nz*F->nz);
-        if (xl < 1e-4f) continue;
-        float wnx = F->nx/xl, wnz = F->nz/xl;
-        float dist = (ppx - F->ax)*wnx + (ppz - F->az)*wnz;
-        float ad = dist < 0 ? -dist : dist;
-        if (ad >= PLAYER_RADIUS) continue;
-        // XZ AABB pad pre-check.
-        float mnX=fminf(F->ax,fminf(F->bx,F->cx)), mxX=fmaxf(F->ax,fmaxf(F->bx,F->cx));
-        float mnZ=fminf(F->az,fminf(F->bz,F->cz)), mxZ=fmaxf(F->az,fmaxf(F->bz,F->cz));
-        if (ppx<mnX-PLAYER_RADIUS||ppx>mxX+PLAYER_RADIUS||ppz<mnZ-PLAYER_RADIUS||ppz>mxZ+PLAYER_RADIUS) continue;
-        float push = PLAYER_RADIUS - ad;
-        float s = dist >= 0 ? 1.0f : -1.0f;
-        ppx += wnx * push * s;
-        ppz += wnz * push * s;
+
+    // Sweep every cell the player's collision radius overlaps, not just the cell
+    // the player's centre is in. A wall sits up to PLAYER_RADIUS away, and with
+    // the fine collision grid that wall often lives in a neighbouring cell — if
+    // we only checked the centre cell we'd silently skip it and walk through the
+    // wall. The radius is smaller than a cell so this is at most a 2x2 sweep.
+    int gx0 = cell_x(ppx - PLAYER_RADIUS), gx1 = cell_x(ppx + PLAYER_RADIUS);
+    int gz0 = cell_z(ppz - PLAYER_RADIUS), gz1 = cell_z(ppz + PLAYER_RADIUS);
+    unsigned stamp = ++s_queryStamp;
+
+    for (int gz = gz0; gz <= gz1; gz++)
+    for (int gx = gx0; gx <= gx1; gx++) {
+        int c = gz*COL_GN + gx;
+        int start = s_cellStart[c], count = s_cellCount[c];
+        for (int i = 0; i < count; i++) {
+            int fi = s_cellFaces[start+i];
+            if (s_faceStamp[fi] == stamp) continue;   // already handled this query
+            s_faceStamp[fi] = stamp;
+            const ColFace* F = &s_faces[fi];
+            if (!(F->flags & 4)) continue;
+            float fMinY = fminf(F->ay, fminf(F->by, F->cy));
+            float fMaxY = fmaxf(F->ay, fmaxf(F->by, F->cy));
+            if (py + PLAYER_HEIGHT < fMinY || py >= fMaxY) continue;
+            // XZ-normalized wall normal (face normal stored full).
+            float xl = sqrtf(F->nx*F->nx + F->nz*F->nz);
+            if (xl < 1e-4f) continue;
+            float wnx = F->nx/xl, wnz = F->nz/xl;
+            float dist = (ppx - F->ax)*wnx + (ppz - F->az)*wnz;
+            float ad = dist < 0 ? -dist : dist;
+            if (ad >= PLAYER_RADIUS) continue;
+            // XZ AABB pad pre-check.
+            float mnX=fminf(F->ax,fminf(F->bx,F->cx)), mxX=fmaxf(F->ax,fmaxf(F->bx,F->cx));
+            float mnZ=fminf(F->az,fminf(F->bz,F->cz)), mxZ=fmaxf(F->az,fmaxf(F->bz,F->cz));
+            if (ppx<mnX-PLAYER_RADIUS||ppx>mxX+PLAYER_RADIUS||ppz<mnZ-PLAYER_RADIUS||ppz>mxZ+PLAYER_RADIUS) continue;
+            float push = PLAYER_RADIUS - ad;
+            float s = dist >= 0 ? 1.0f : -1.0f;
+            ppx += wnx * push * s;
+            ppz += wnz * push * s;
+        }
     }
     *x = ppx; *z = ppz;
 }

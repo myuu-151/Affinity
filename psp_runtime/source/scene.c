@@ -42,6 +42,7 @@ static float s_floorN[3] = {0.0f, 1.0f, 0.0f};  // smoothed floor normal (slope 
 #define GRAVITY      0.8f
 #define JUMP_VEL     13.0f
 #define TERMINAL_VY  30.0f
+#define MAX_MOVE_STEP 3.0f   // cap per-substep move so fast moves can't tunnel walls
 
 void scene_init(void) {
     meshcull_build();
@@ -102,13 +103,23 @@ void scene_update(void) {
         if (moving) {
             float speed = scripted ? (afn_move_speed * 0.08f)
                                    : (afn_walk_speed > 0.0f ? afn_walk_speed * 0.25f : 6.0f);
-            playerX += mvX * speed;
-            playerZ += mvZ * speed;
+            float dx = mvX * speed, dz = mvZ * speed;
+            // Sub-step the move so fast movement can't tunnel through a wall: a
+            // single big step can jump clean past the pushback band (±radius)
+            // and resolve no collision, so advance at most MAX_MOVE_STEP at a
+            // time and push out of walls after each increment.
+            float dlen = sqrtf(dx*dx + dz*dz);
+            int steps = (int)(dlen / MAX_MOVE_STEP) + 1;
+            float ix = dx / steps, iz = dz / steps;
+            for (int st = 0; st < steps; st++) {
+                playerX += ix; playerZ += iz;
+                collide_walls(&playerX, &playerZ, playerY);
+            }
             playerYaw = atan2f(mvX, mvZ) * RAD2DEG;
         }
         // Jump (Cross). (Jump nodes set player_vy when that path is ported.)
         if (grounded && key_is_down(KEY_A)) { playerVY = JUMP_VEL; grounded = 0; }
-        // Wall pushback, then gravity + floor snap.
+        // Final pushback (resolves residual overlap), then gravity + floor snap.
         collide_walls(&playerX, &playerZ, playerY);
         playerVY -= GRAVITY;
         if (playerVY < -TERMINAL_VY) playerVY = -TERMINAL_VY;

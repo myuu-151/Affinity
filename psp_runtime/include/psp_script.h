@@ -29,7 +29,7 @@ static void afn_bp0_key_held(void) {
     if (key_is_down(KEY_UP)) {
         if (!afn_player_frozen) afn_input_fwd += 256;
         afn_rig_clip = 1;
-        if (!afn_speed_prio) afn_move_speed = 105;
+        if (!afn_speed_prio) afn_move_speed = 20;
     }
     if (key_is_down(KEY_L)) { orbit_angle += 250; }
     if (key_is_down(KEY_R)) { orbit_angle -= 250; }
