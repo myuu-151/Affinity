@@ -136,6 +136,12 @@ void collide_build(void) {
 
 #define PLAYER_RADIUS 6.0f
 #define PLAYER_HEIGHT 24.0f
+// A wall whose top is within this far above the player's feet doesn't block —
+// lets you walk off the edge of a ledge you're standing on (the floor you're
+// snapped to can sit a hair below the wall's top vertex with float coords or an
+// unwelded floor/wall seam, which would otherwise leave the side wall active and
+// shove you back). Also acts as a gentle auto-step over tiny lips.
+#define WALL_TOP_TOL  5.0f
 
 int collide_floor(float x, float z, float py, float* outY, float* outN) {
     if (!s_cellFaces) return 0;
@@ -189,7 +195,7 @@ void collide_walls(float* x, float* z, float py) {
             if (!(F->flags & 4)) continue;
             float fMinY = fminf(F->ay, fminf(F->by, F->cy));
             float fMaxY = fmaxf(F->ay, fmaxf(F->by, F->cy));
-            if (py + PLAYER_HEIGHT < fMinY || py >= fMaxY) continue;
+            if (py + PLAYER_HEIGHT < fMinY || py >= fMaxY - WALL_TOP_TOL) continue;
             // XZ-normalized wall normal (face normal stored full).
             float xl = sqrtf(F->nx*F->nx + F->nz*F->nz);
             if (xl < 1e-4f) continue;
