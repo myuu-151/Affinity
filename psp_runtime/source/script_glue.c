@@ -24,7 +24,7 @@ int afn_collided_tm_obj = -1;
 int afn_bp_cur_spr_idx = -1;
 int afn_bp_cur_tm_obj = -1;
 
-void afn_play_sound(int smp) { (void)smp; }   // TODO: audio
+// afn_play_sound / afn_play_sfx are defined by source/audio.c (the software mixer).
 
 void script_start(void) {
     afn_emitted_script_start();

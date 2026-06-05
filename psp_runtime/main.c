@@ -10,6 +10,7 @@
 #include <stdlib.h>
 
 #include "scene.h"
+#include "audio.h"
 
 PSP_MODULE_INFO("Affinity", 0, 1, 0);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
@@ -84,6 +85,11 @@ int main(void) {
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
 
     gu_init();
+    // Audio BEFORE scene_init: scene_init() runs the start script (script_start ->
+    // blueprint OnStart), which can fire afn_play_sound. afn_audio_init() resets
+    // the voice table, so it must run first or the start SFX is wiped before the
+    // mixer thread ever sees it.
+    afn_audio_init();   // reserve sceAudio channel + spawn the software-mixer thread
     scene_init();
 
     while (!exit_requested) {
@@ -92,7 +98,8 @@ int main(void) {
         sceGuClearDepth(0);
         sceGuClear(GU_COLOR_BUFFER_BIT | GU_DEPTH_BUFFER_BIT);
 
-        scene_update();
+        scene_update();   // runs script_tick -> nodes may call afn_play_sound/sfx
+        afn_audio_tick(); // advance the sequence + envelopes for this frame
         scene_render();
 
         sceGuFinish();

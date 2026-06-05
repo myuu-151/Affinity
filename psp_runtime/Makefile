@@ -2,7 +2,7 @@
 # Build with the pspdev toolchain:  make   (produces EBOOT.PBP)
 
 TARGET = affinity
-OBJS   = main.o source/scene.o source/meshcull.o source/mapdata.o source/rig.o source/collision.o source/sky.o source/billboard.o source/input.o source/script_glue.o source/tex.o
+OBJS   = main.o source/scene.o source/meshcull.o source/mapdata.o source/rig.o source/collision.o source/sky.o source/billboard.o source/input.o source/script_glue.o source/tex.o source/audio.o
 
 INCDIR   = include
 CFLAGS   = -O2 -G0 -Wall -Iinclude
@@ -13,7 +13,7 @@ LIBDIR  =
 LDFLAGS =
 # pspgum = hardware T&L matrix helpers, pspgu = GE command list, vfpu for fast math
 # psppower = CPU/bus clock control (we run at 333MHz for the per-frame clip work)
-LIBS = -lpspgum -lpspgu -lpspvfpu -lpspdisplay -lpspge -lpspctrl -lpsppower -lm
+LIBS = -lpspgum -lpspgu -lpspvfpu -lpspdisplay -lpspge -lpspctrl -lpsppower -lpspaudio -lm
 
 EXTRA_TARGETS   = EBOOT.PBP
 PSP_EBOOT_TITLE = Affinity
