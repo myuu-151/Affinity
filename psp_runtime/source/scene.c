@@ -8,6 +8,7 @@
 #include "billboard.h"
 #include "input.h"
 #include "script.h"
+#include "psp_player.h"   // AFN_PLAYER_COL_BOTTOM (custom collision box)
 
 extern int afn_move_speed;   // node-set movement speed
 extern int orbit_angle;      // node-set camera orbit (brad, 65536 = full circle)
@@ -44,6 +45,15 @@ static float s_floorN[3] = {0.0f, 1.0f, 0.0f};  // smoothed floor normal (slope 
 #define TERMINAL_VY  30.0f
 #define MAX_MOVE_STEP 3.0f   // cap per-substep move so fast moves can't tunnel walls
 
+// The player rests with the collision box's BOTTOM on the floor (so the authored
+// box drives where Spyro sits — a box placed above him makes him sink under the
+// geometry, as expected). Without a custom box this is 0 (origin on the floor).
+#ifdef AFN_HAS_PLAYER_COL
+#define PLAYER_FLOOR_OFFSET AFN_PLAYER_COL_BOTTOM
+#else
+#define PLAYER_FLOOR_OFFSET 0.0f
+#endif
+
 void scene_init(void) {
     meshcull_build();
     collide_build();
@@ -70,7 +80,7 @@ void scene_init(void) {
         playerYaw = afn_cam_start_angle * RAD2DEG;
         // Drop onto the floor at spawn so we don't start mid-air.
         float fy;
-        if (collide_floor(playerX, playerZ, playerY + 200.0f, &fy, s_floorN)) playerY = fy;
+        if (collide_floor(playerX, playerZ, playerY + 200.0f, &fy, s_floorN)) playerY = fy - PLAYER_FLOOR_OFFSET;
         playerVY = 0.0f; grounded = 1;
         orbit_angle = (int)(afn_cam_start_angle * (65536.0f / 6.2831853f));
     } else {
@@ -125,8 +135,8 @@ void scene_update(void) {
         if (playerVY < -TERMINAL_VY) playerVY = -TERMINAL_VY;
         playerY += playerVY;
         float fy, fn[3];
-        if (collide_floor(playerX, playerZ, playerY, &fy, fn) && playerY <= fy) {
-            playerY = fy; playerVY = 0.0f; grounded = 1;
+        if (collide_floor(playerX, playerZ, playerY, &fy, fn) && playerY <= fy - PLAYER_FLOOR_OFFSET) {
+            playerY = fy - PLAYER_FLOOR_OFFSET; playerVY = 0.0f; grounded = 1;
             // Smooth the floor normal so the slope tilt eases (no popping).
             s_floorN[0] += (fn[0]-s_floorN[0])*0.2f;
             s_floorN[1] += (fn[1]-s_floorN[1])*0.2f;

@@ -163,8 +163,6 @@ void rig_render(float px, float py, float pz, float yawDeg, const float* upN,
     sceGumMatrixMode(GU_MODEL);
     sceGumLoadMatrix(&m);
 
-    if (AFN_RIG_CULL == 2) sceGuDisable(GU_CULL_FACE);
-    else { sceGuEnable(GU_CULL_FACE); sceGuFrontFace(AFN_RIG_CULL == 1 ? GU_CW : GU_CCW); }
 #if AFN_RIG_USE_ALPHA
     sceGuEnable(GU_BLEND);
     sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
@@ -177,39 +175,63 @@ void rig_render(float px, float py, float pz, float yawDeg, const float* upN,
     // space via the camera basis; the GE's view transform carries it back to eye
     // space, so the light stays fixed relative to the viewer. The white vertex
     // colour is the material, so the lit result modulates the texture.
-    {
-        ScePspFVector3 ld = {
-            AFN_PLAYER_RIG_LIGHT_DX*camR[0] + AFN_PLAYER_RIG_LIGHT_DY*camU[0] + AFN_PLAYER_RIG_LIGHT_DZ*camF[0],
-            AFN_PLAYER_RIG_LIGHT_DX*camR[1] + AFN_PLAYER_RIG_LIGHT_DY*camU[1] + AFN_PLAYER_RIG_LIGHT_DZ*camF[1],
-            AFN_PLAYER_RIG_LIGHT_DX*camR[2] + AFN_PLAYER_RIG_LIGHT_DY*camU[2] + AFN_PLAYER_RIG_LIGHT_DZ*camF[2]
-        };
-        sceGuLight(0, GU_DIRECTIONAL, GU_DIFFUSE, &ld);
-        sceGuLightColor(0, GU_DIFFUSE, 0xFFFFFFFF);
-        sceGuAmbient(0xFF404040);                    // base fill so the shadowed side isn't black
-        sceGuColorMaterial(GU_AMBIENT | GU_DIFFUSE); // vertex colour acts as the material
-        sceGuEnable(GU_LIGHTING);
-        sceGuEnable(GU_LIGHT0);
-    }
+    ScePspFVector3 ld = {
+        AFN_PLAYER_RIG_LIGHT_DX*camR[0] + AFN_PLAYER_RIG_LIGHT_DY*camU[0] + AFN_PLAYER_RIG_LIGHT_DZ*camF[0],
+        AFN_PLAYER_RIG_LIGHT_DX*camR[1] + AFN_PLAYER_RIG_LIGHT_DY*camU[1] + AFN_PLAYER_RIG_LIGHT_DZ*camF[1],
+        AFN_PLAYER_RIG_LIGHT_DX*camR[2] + AFN_PLAYER_RIG_LIGHT_DY*camU[2] + AFN_PLAYER_RIG_LIGHT_DZ*camF[2]
+    };
+    sceGuLightColor(0, GU_DIFFUSE, 0xFFFFFFFF);
+    sceGuAmbient(0xFF404040);                    // base fill so the shadowed side isn't black
+    sceGuColorMaterial(GU_AMBIENT | GU_DIFFUSE); // vertex colour acts as the material
+    sceGuEnable(GU_LIGHTING);
+    sceGuEnable(GU_LIGHT0);
+    // Cull=None + lighting: the GE has no two-sided light mode, so a backface
+    // (normal pointing away) would shade to black. Draw twice — front faces with
+    // the headlamp, back faces with the light negated (lighting them as if their
+    // normals were flipped). Back/Front cull only ever shows one side -> one pass.
+    int twoSided = (AFN_RIG_CULL == 2);
 #else
     (void)camR; (void)camU; (void)camF;
+    int twoSided = 0;
 #endif
 
-    for (int g = 0; g < AFN_RIG_MATS; g++) {
-        int ic = afn_rig_idx_counts[g];
-        if (ic <= 0) continue;
-        if (s_rigTexSw[g] && afn_rig_tex_w[g] > 0) {
-            sceGuEnable(GU_TEXTURE_2D);
-            sceGuTexMode(GU_PSM_5551, 0, 0, 1);   // swizzled 16-bit
-            sceGuTexImage(0, afn_rig_tex_w[g], afn_rig_tex_h[g], afn_rig_tex_w[g], s_rigTexSw[g]);
-            sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
-            sceGuTexFilter(GU_LINEAR, GU_LINEAR);
-            sceGuTexLevelMode(GU_TEXTURE_CONST, 0.0f);
-            sceGuTexWrap(GU_CLAMP, GU_CLAMP);
+    int npass = twoSided ? 2 : 1;
+    for (int pass = 0; pass < npass; pass++) {
+        if (twoSided) {
+            sceGuEnable(GU_CULL_FACE);
+            sceGuFrontFace(pass == 0 ? GU_CCW : GU_CW);   // pass 0 = front, pass 1 = back
+#ifdef AFN_PLAYER_RIG_CAMLIGHT
+            ScePspFVector3 l = ld;
+            if (pass == 1) { l.x = -l.x; l.y = -l.y; l.z = -l.z; }
+            sceGuLight(0, GU_DIRECTIONAL, GU_DIFFUSE, &l);
+#endif
+        } else if (AFN_RIG_CULL == 2) {
+            sceGuDisable(GU_CULL_FACE);                   // unlit None: both sides, one pass
         } else {
-            sceGuDisable(GU_TEXTURE_2D);
+            sceGuEnable(GU_CULL_FACE);
+            sceGuFrontFace(AFN_RIG_CULL == 1 ? GU_CW : GU_CCW);
+#ifdef AFN_PLAYER_RIG_CAMLIGHT
+            sceGuLight(0, GU_DIRECTIONAL, GU_DIFFUSE, &ld);
+#endif
         }
-        sceGumDrawArray(GU_TRIANGLES, AFN_RIG_VERTEX_FLAGS | GU_INDEX_16BIT,
-                        ic, afn_rig_idx_ptrs[g], s_skinned);
+
+        for (int g = 0; g < AFN_RIG_MATS; g++) {
+            int ic = afn_rig_idx_counts[g];
+            if (ic <= 0) continue;
+            if (s_rigTexSw[g] && afn_rig_tex_w[g] > 0) {
+                sceGuEnable(GU_TEXTURE_2D);
+                sceGuTexMode(GU_PSM_5551, 0, 0, 1);   // swizzled 16-bit
+                sceGuTexImage(0, afn_rig_tex_w[g], afn_rig_tex_h[g], afn_rig_tex_w[g], s_rigTexSw[g]);
+                sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+                sceGuTexFilter(GU_LINEAR, GU_LINEAR);
+                sceGuTexLevelMode(GU_TEXTURE_CONST, 0.0f);
+                sceGuTexWrap(GU_CLAMP, GU_CLAMP);
+            } else {
+                sceGuDisable(GU_TEXTURE_2D);
+            }
+            sceGumDrawArray(GU_TRIANGLES, AFN_RIG_VERTEX_FLAGS | GU_INDEX_16BIT,
+                            ic, afn_rig_idx_ptrs[g], s_skinned);
+        }
     }
 #ifdef AFN_PLAYER_RIG_CAMLIGHT
     sceGuDisable(GU_LIGHTING);   // leave lighting off for billboards/sky after the rig

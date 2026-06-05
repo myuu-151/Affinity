@@ -5,6 +5,7 @@
 // an XZ grid for cheap per-cell queries. Float port of nds_runtime/collision.c.
 #include "collision.h"
 #include "affinity_psp.h"
+#include "psp_player.h"   // AFN_PLAYER_COL_* (custom collision box, if authored)
 #include <math.h>
 #include <stdlib.h>
 
@@ -136,6 +137,21 @@ void collide_build(void) {
 
 #define PLAYER_RADIUS 6.0f
 #define PLAYER_HEIGHT 24.0f
+
+// Player collision dimensions: use the authored custom box (psp_player.h, baked
+// to world units at export) when present, else the default cylinder. COL_BOTTOM/
+// COL_TOP are the box's vertical extent as offsets from the floor-snapped player
+// Y; COL_RADIUS is the horizontal half-width.
+#ifdef AFN_HAS_PLAYER_COL
+#define COL_RADIUS AFN_PLAYER_COL_RADIUS
+#define COL_BOTTOM AFN_PLAYER_COL_BOTTOM
+#define COL_TOP    AFN_PLAYER_COL_TOP
+#else
+#define COL_RADIUS PLAYER_RADIUS
+#define COL_BOTTOM 0.0f
+#define COL_TOP    PLAYER_HEIGHT
+#endif
+
 // A wall whose top is within this far above the player's feet doesn't block —
 // lets you walk off the edge of a ledge you're standing on (the floor you're
 // snapped to can sit a hair below the wall's top vertex with float coords or an
@@ -159,7 +175,7 @@ int collide_floor(float x, float z, float py, float* outY, float* outN) {
         float cs = c0+c1+c2;
         float fy = (cs==0) ? (F->ay+F->by+F->cy)/3.0f
                            : (c1*F->ay + c2*F->by + c0*F->cy)/cs;
-        if (fy > py + PLAYER_HEIGHT) continue;   // ignore floors above the head
+        if (fy > py + COL_TOP) continue;   // ignore floors above the head
         if (!found || fy > bestY) { bestY = fy; found = 1; bestF = F; }
     }
     *outY = bestY;
@@ -179,8 +195,8 @@ void collide_walls(float* x, float* z, float py) {
     // the fine collision grid that wall often lives in a neighbouring cell — if
     // we only checked the centre cell we'd silently skip it and walk through the
     // wall. The radius is smaller than a cell so this is at most a 2x2 sweep.
-    int gx0 = cell_x(ppx - PLAYER_RADIUS), gx1 = cell_x(ppx + PLAYER_RADIUS);
-    int gz0 = cell_z(ppz - PLAYER_RADIUS), gz1 = cell_z(ppz + PLAYER_RADIUS);
+    int gx0 = cell_x(ppx - COL_RADIUS), gx1 = cell_x(ppx + COL_RADIUS);
+    int gz0 = cell_z(ppz - COL_RADIUS), gz1 = cell_z(ppz + COL_RADIUS);
     unsigned stamp = ++s_queryStamp;
 
     for (int gz = gz0; gz <= gz1; gz++)
@@ -195,7 +211,7 @@ void collide_walls(float* x, float* z, float py) {
             if (!(F->flags & 4)) continue;
             float fMinY = fminf(F->ay, fminf(F->by, F->cy));
             float fMaxY = fmaxf(F->ay, fmaxf(F->by, F->cy));
-            if (py + PLAYER_HEIGHT < fMinY || py >= fMaxY - WALL_TOP_TOL) continue;
+            if (py + COL_TOP < fMinY || py + COL_BOTTOM >= fMaxY - WALL_TOP_TOL) continue;
             if (F->nx*F->nx + F->nz*F->nz < 1e-8f) continue;   // purely vertical normal
 
             // Resolve the player as a CIRCLE vs the wall triangle's actual finite
@@ -218,9 +234,9 @@ void collide_walls(float* x, float* z, float py) {
                 float dx = ppx - Px, dz = ppz - Pz, d2 = dx*dx + dz*dz;
                 if (d2 < bestD2) { bestD2 = d2; bestPx = Px; bestPz = Pz; }
             }
-            if (bestD2 >= PLAYER_RADIUS*PLAYER_RADIUS) continue;
+            if (bestD2 >= COL_RADIUS*COL_RADIUS) continue;
             float d = sqrtf(bestD2);
-            float push = PLAYER_RADIUS - d;
+            float push = COL_RADIUS - d;
             if (d > 1e-4f) {
                 ppx += (ppx - bestPx) / d * push;
                 ppz += (ppz - bestPz) / d * push;

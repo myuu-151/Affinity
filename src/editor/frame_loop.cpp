@@ -16476,6 +16476,8 @@ void FrameTick(float dt)
                     pr.useAlpha = rm.useAlpha;
                     pr.cameraLight = rm.cameraLight;
                     pr.lightX = rm.lightX; pr.lightY = rm.lightY;
+                    pr.collisionType = rm.collisionType;
+                    for (int k = 0; k < 3; k++) { pr.colCenter[k] = rm.colCenter[k]; pr.colExtents[k] = rm.colExtents[k]; }
                     pr.verts.resize(rm.baseVerts.size());
                     for (size_t v = 0; v < rm.baseVerts.size(); v++) {
                         const auto& mv = rm.baseVerts[v];
