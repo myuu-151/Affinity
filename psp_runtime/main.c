@@ -6,6 +6,7 @@
 #include <pspgu.h>
 #include <pspgum.h>
 #include <pspctrl.h>
+#include <psppower.h>
 #include <stdlib.h>
 
 #include "scene.h"
@@ -75,6 +76,10 @@ static void gu_init(void) {
 
 int main(void) {
     setup_callbacks();
+    // Run the CPU/bus at full 333MHz (default is 222). The per-frame frustum
+    // clip in meshcull.c is CPU-bound when facing the scene; the extra ~50%
+    // throughput is what keeps it at 60fps there.
+    scePowerSetClockFrequency(333, 333, 166);
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
 

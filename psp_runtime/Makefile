@@ -12,7 +12,8 @@ ASFLAGS  = $(CFLAGS)
 LIBDIR  =
 LDFLAGS =
 # pspgum = hardware T&L matrix helpers, pspgu = GE command list, vfpu for fast math
-LIBS = -lpspgum -lpspgu -lpspvfpu -lpspdisplay -lpspge -lpspctrl -lm
+# psppower = CPU/bus clock control (we run at 333MHz for the per-frame clip work)
+LIBS = -lpspgum -lpspgu -lpspvfpu -lpspdisplay -lpspge -lpspctrl -lpsppower -lm
 
 EXTRA_TARGETS   = EBOOT.PBP
 PSP_EBOOT_TITLE = Affinity

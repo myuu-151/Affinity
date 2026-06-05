@@ -1,18 +1,19 @@
-// Affinity PSP runtime — load-time triangle tessellation for the scene meshes.
+// Affinity PSP runtime — bucketed frustum culling + boundary clipping.
 // The PSP GE does NOT clip triangles that overflow the guard band — it DROPS
-// them (the DS clips, the PSP doesn't). A big floor triangle whose corner is
-// both near the camera and far off-axis overflows and the whole triangle
-// vanishes, leaving large wedges of missing floor at grazing angles. We fix it
-// by subdividing any oversized triangle once at load so the on-screen region is
-// always covered by small triangles that stay on-screen. No runtime culling.
+// them (the DS clips, the PSP doesn't), leaving wedges of missing floor at
+// grazing angles. We tile each mesh into a spatial bucket grid: buckets fully
+// inside the frustum draw directly, buckets fully outside are skipped, and only
+// the few buckets straddling a frustum plane fall to exact per-triangle
+// Sutherland-Hodgman clipping. Cheap like culling, wedge-free like clipping,
+// and the accurate AABB test never false-culls. See meshcull.c for the rationale.
 #pragma once
 
-// Tessellate oversized triangles in every mesh (call once, after data is ready).
+// Build the per-mesh bucket grid + scratch buffers (call once, after mesh data).
 void meshcull_build(void);
 
-// Draw mesh `meshIdx`. The caller has already set the gum MODEL matrix and bound
-// the texture. The transform/camera args are vestigial (kept so callers don't
-// change) — there is no culling, the whole (tessellated) mesh is always drawn.
+// Draw mesh `meshIdx`, bucket-culled + boundary-clipped to the camera described
+// by the args. The caller has already set the gum MODEL matrix and bound the
+// texture; emitted verts/indices are in the mesh's LOCAL space so it applies.
 void meshcull_draw(int meshIdx,
                    float ix, float iy, float iz,
                    float scale, float rotY, float rotX, float rotZ,
