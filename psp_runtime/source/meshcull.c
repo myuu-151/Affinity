@@ -128,55 +128,17 @@ void meshcull_draw(int meshIdx,
                    float rgtX, float rgtY, float rgtZ,
                    float upX,  float upY,  float upZ,
                    float tanH, float tanV, float drawDist) {
+    // CULLING REMOVED. It only existed to save fill rate, but the real fill
+    // bottleneck was the 32-bit unswizzled textures (now fixed). With those
+    // gone the PSP draws the whole scene at 60fps, so per-bucket frustum culling
+    // is pure downside — it kept wrongly dropping visible geometry at certain
+    // angles. Draw the entire mesh, every frame, every angle. Nothing to cull,
+    // nothing to mis-cull.
     const AfnMesh* m = &afn_meshes[meshIdx];
-    int nb = (meshIdx < 256) ? s_bucketCount[meshIdx] : 0;
-
-    if (nb <= 0 || !s_buckets[meshIdx] || !s_idx[meshIdx]) {
-        sceGumDrawArray(GU_TRIANGLES, AFN_VERTEX_FLAGS | GU_INDEX_16BIT,
-                        m->indexCount, m->indices, m->verts);
-        return;
-    }
-
-    const PspBucket* B = s_buckets[meshIdx];
-    const unsigned short* OI = s_idx[meshIdx];
-    float ry = rotY * (3.14159265f/180.0f);
-    float rx = rotX * (3.14159265f/180.0f);
-    float rz = rotZ * (3.14159265f/180.0f);
-    float cY=cosf(ry), sY=sinf(ry), cX=cosf(rx), sX=sinf(rx), cZ=cosf(rz), sZ=sinf(rz);
-
-    // Frustum side-plane normals (cos/sin of the half-FOV). The planes are
-    // tilted through the camera, so the sphere-to-plane distance is
-    // |v|*cos - depth*sin, NOT the flat (|v| - depth*tan) I used before — that
-    // over-culled by ~1/cos(fov/2) and dropped chunks at grazing angles.
-    float cosH = 1.0f / sqrtf(1.0f + tanH*tanH), sinH = tanH * cosH;
-    float cosV = 1.0f / sqrtf(1.0f + tanV*tanV), sinV = tanV * cosV;
-
-    for (int c = 0; c < nb; c++) {
-        const PspBucket* bk = &B[c];
-        if (bk->triCount == 0) continue;
-
-        // Local center -> world (scale -> Ry -> Rx -> Rz -> translate).
-        float lx = bk->cx * scale, ly = bk->cy * scale, lz = bk->cz * scale;
-        float ax =  lx*cY + lz*sY,  az = -lx*sY + lz*cY,  ay = ly;
-        float ay2 = ay*cX - az*sX,  az2 = ay*sX + az*cX;
-        float ax2 = ax*cZ - ay2*sZ, ay3 = ax*sZ + ay2*cZ;
-        float wx = ix + ax2, wy = iy + ay3, wz = iz + az2;
-        float r = bk->radius * scale;
-
-        // Project (bucket center - eye) onto the TRUE camera basis (handles
-        // pitch): depth = forward, vh = right, vv = up. Then it's a clean frustum
-        // sphere test against near/far + the four side planes.
-        float rr = r * 1.15f;   // small safety margin on the bucket sphere
-        float dx = wx - camX, dy = wy - camY, dz = wz - camZ;
-        float depth = dx*fwdX + dy*fwdY + dz*fwdZ;
-        if (depth + rr < NEAR_EPS) continue;                      // behind camera
-        if (drawDist > 0.0f && depth - rr > drawDist) continue;   // past draw distance
-        float vh = dx*rgtX + dy*rgtY + dz*rgtZ; if (vh < 0) vh = -vh;
-        if (vh*cosH - depth*sinH > rr) continue;                  // left/right planes
-        float vv = dx*upX + dy*upY + dz*upZ; if (vv < 0) vv = -vv;
-        if (vv*cosV - depth*sinV > rr) continue;                  // top/bottom planes
-
-        sceGumDrawArray(GU_TRIANGLES, AFN_VERTEX_FLAGS | GU_INDEX_16BIT,
-                        bk->triCount, &OI[bk->triStart], m->verts);
-    }
+    (void)ix;(void)iy;(void)iz;(void)scale;(void)rotY;(void)rotX;(void)rotZ;
+    (void)camX;(void)camY;(void)camZ;(void)fwdX;(void)fwdY;(void)fwdZ;
+    (void)rgtX;(void)rgtY;(void)rgtZ;(void)upX;(void)upY;(void)upZ;
+    (void)tanH;(void)tanV;(void)drawDist;
+    sceGumDrawArray(GU_TRIANGLES, AFN_VERTEX_FLAGS | GU_INDEX_16BIT,
+                    m->indexCount, m->indices, m->verts);
 }
