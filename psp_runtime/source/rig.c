@@ -24,7 +24,7 @@
 #define AFN_RIG_YAW_OFFSET 0.0f
 #endif
 
-static AfnVertex* s_skinned = 0;                 // AFN_RIG_VERTS, recomputed/frame
+static AfnRigVertex* s_skinned = 0;              // AFN_RIG_VERTS, recomputed/frame
 static float      s_bonemat[AFN_RIG_BONES][12];  // 3x4 row-major per bone
 static float      s_frame = (float)AFN_PLAYER_DEFAULT_CLIP * 0.0f;
 static int        s_clip  = AFN_PLAYER_DEFAULT_CLIP;
@@ -79,11 +79,20 @@ static void skin(void) {
         s_skinned[v].x = m[0]*x + m[1]*y + m[2]*z + m[3];
         s_skinned[v].y = m[4]*x + m[5]*y + m[6]*z + m[7];
         s_skinned[v].z = m[8]*x + m[9]*y + m[10]*z + m[11];
+        // Skin the normal by the bone's rotation (no translation), renormalize.
+        // The GE then transforms it by the rig's model matrix for lighting.
+        float nx = afn_rig_vnorm[v*3+0], ny = afn_rig_vnorm[v*3+1], nz = afn_rig_vnorm[v*3+2];
+        float wx = m[0]*nx + m[1]*ny + m[2]*nz;
+        float wy = m[4]*nx + m[5]*ny + m[6]*nz;
+        float wz = m[8]*nx + m[9]*ny + m[10]*nz;
+        float nl = wx*wx + wy*wy + wz*wz;
+        if (nl > 1e-12f) { nl = 1.0f/sqrtf(nl); wx*=nl; wy*=nl; wz*=nl; }
+        s_skinned[v].nx = wx; s_skinned[v].ny = wy; s_skinned[v].nz = wz;
     }
 }
 
 void rig_init(void) {
-    s_skinned = (AfnVertex*)memalign(16, sizeof(AfnVertex) * AFN_RIG_VERTS);
+    s_skinned = (AfnRigVertex*)memalign(16, sizeof(AfnRigVertex) * AFN_RIG_VERTS);
     if (!s_skinned) return;
     for (int v = 0; v < AFN_RIG_VERTS; v++) {
         s_skinned[v].u = afn_rig_vuv[v*2+0];
@@ -112,7 +121,8 @@ void rig_set_moving(int moving) {
                                                  : AFN_PLAYER_DEFAULT_CLIP;
 }
 
-void rig_render(float px, float py, float pz, float yawDeg, const float* upN, int frozen) {
+void rig_render(float px, float py, float pz, float yawDeg, const float* upN,
+                const float* camR, const float* camU, const float* camF, int frozen) {
     if (!s_skinned) return;
 
     // Clip selector is node-driven (afn_rig_clip): switch + restart on change.
@@ -130,7 +140,7 @@ void rig_render(float px, float py, float pz, float yawDeg, const float* upN, in
     }
     build_bone_mats(s_clip, s_frame);
     skin();
-    sceKernelDcacheWritebackRange(s_skinned, sizeof(AfnVertex) * AFN_RIG_VERTS);
+    sceKernelDcacheWritebackRange(s_skinned, sizeof(AfnRigVertex) * AFN_RIG_VERTS);
 
     // Orient the rig with a basis matrix: up = floor normal (slope tilt),
     // forward = the yaw heading projected onto the slope plane, right = up x fwd.
@@ -162,6 +172,28 @@ void rig_render(float px, float py, float pz, float yawDeg, const float* upN, in
     sceGuDisable(GU_BLEND);
 #endif
 
+#ifdef AFN_PLAYER_RIG_CAMLIGHT
+    // Camera headlamp: the baked eye-space aim (DX/DY/DZ) reconstructed into world
+    // space via the camera basis; the GE's view transform carries it back to eye
+    // space, so the light stays fixed relative to the viewer. The white vertex
+    // colour is the material, so the lit result modulates the texture.
+    {
+        ScePspFVector3 ld = {
+            AFN_PLAYER_RIG_LIGHT_DX*camR[0] + AFN_PLAYER_RIG_LIGHT_DY*camU[0] + AFN_PLAYER_RIG_LIGHT_DZ*camF[0],
+            AFN_PLAYER_RIG_LIGHT_DX*camR[1] + AFN_PLAYER_RIG_LIGHT_DY*camU[1] + AFN_PLAYER_RIG_LIGHT_DZ*camF[1],
+            AFN_PLAYER_RIG_LIGHT_DX*camR[2] + AFN_PLAYER_RIG_LIGHT_DY*camU[2] + AFN_PLAYER_RIG_LIGHT_DZ*camF[2]
+        };
+        sceGuLight(0, GU_DIRECTIONAL, GU_DIFFUSE, &ld);
+        sceGuLightColor(0, GU_DIFFUSE, 0xFFFFFFFF);
+        sceGuAmbient(0xFF404040);                    // base fill so the shadowed side isn't black
+        sceGuColorMaterial(GU_AMBIENT | GU_DIFFUSE); // vertex colour acts as the material
+        sceGuEnable(GU_LIGHTING);
+        sceGuEnable(GU_LIGHT0);
+    }
+#else
+    (void)camR; (void)camU; (void)camF;
+#endif
+
     for (int g = 0; g < AFN_RIG_MATS; g++) {
         int ic = afn_rig_idx_counts[g];
         if (ic <= 0) continue;
@@ -176,9 +208,13 @@ void rig_render(float px, float py, float pz, float yawDeg, const float* upN, in
         } else {
             sceGuDisable(GU_TEXTURE_2D);
         }
-        sceGumDrawArray(GU_TRIANGLES, AFN_VERTEX_FLAGS | GU_INDEX_16BIT,
+        sceGumDrawArray(GU_TRIANGLES, AFN_RIG_VERTEX_FLAGS | GU_INDEX_16BIT,
                         ic, afn_rig_idx_ptrs[g], s_skinned);
     }
+#ifdef AFN_PLAYER_RIG_CAMLIGHT
+    sceGuDisable(GU_LIGHTING);   // leave lighting off for billboards/sky after the rig
+    sceGuDisable(GU_LIGHT0);
+#endif
 }
 
 #else  // no player rig in this build — stubs
@@ -187,8 +223,10 @@ void rig_init(void) {}
 int  rig_present(void) { return 0; }
 void rig_player_start(float out[3]) { out[0] = out[1] = out[2] = 0.0f; }
 void rig_set_moving(int moving) { (void)moving; }
-void rig_render(float px, float py, float pz, float yawDeg, const float* upN, int frozen) {
-    (void)px; (void)py; (void)pz; (void)yawDeg; (void)upN; (void)frozen;
+void rig_render(float px, float py, float pz, float yawDeg, const float* upN,
+                const float* camR, const float* camU, const float* camF, int frozen) {
+    (void)px; (void)py; (void)pz; (void)yawDeg; (void)upN;
+    (void)camR; (void)camU; (void)camF; (void)frozen;
 }
 
 #endif

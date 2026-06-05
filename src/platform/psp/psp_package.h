@@ -18,6 +18,7 @@ namespace Affinity
 // (no inverse-bind needed at runtime; that's already folded into baseVert).
 struct PSPRigVertex {
     float px, py, pz;   // position in its bone's local space
+    float nx, ny, nz;   // normal in its bone's local space (for camera-light shading)
     float u, v;         // texcoord (0..1, V flipped at emit like meshes)
     int   bone;         // bone index
 };
@@ -42,6 +43,8 @@ struct PSPRigExport {
     int  boneCount = 0;
     int  cullMode  = 0;       // 0 Back, 1 Front, 2 None
     bool useAlpha  = false;
+    bool cameraLight = false; // headlamp follows the camera (per-material toggle)
+    float lightX = 50.0f, lightY = 180.0f;   // headlamp aim: pitch/yaw deg off camera
     std::vector<PSPRigVertex>   verts;
     std::vector<uint32_t>       indices;       // triangle indices into verts
     std::vector<uint8_t>        triMaterial;   // slot per triangle (empty = all 0)

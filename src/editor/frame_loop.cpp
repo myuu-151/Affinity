@@ -16474,11 +16474,14 @@ void FrameTick(float dt)
                     pr.boneCount = rm.boneCount;
                     pr.cullMode = rm.cullMode;
                     pr.useAlpha = rm.useAlpha;
+                    pr.cameraLight = rm.cameraLight;
+                    pr.lightX = rm.lightX; pr.lightY = rm.lightY;
                     pr.verts.resize(rm.baseVerts.size());
                     for (size_t v = 0; v < rm.baseVerts.size(); v++) {
                         const auto& mv = rm.baseVerts[v];
                         Affinity::PSPRigVertex pv;
                         pv.px = mv.px; pv.py = mv.py; pv.pz = mv.pz;
+                        pv.nx = mv.nx; pv.ny = mv.ny; pv.nz = mv.nz;
                         pv.u = mv.u; pv.v = mv.v;
                         pv.bone = (v < rm.vertBone.size()) ? rm.vertBone[v] : 0;
                         pr.verts[v] = pv;

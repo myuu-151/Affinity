@@ -286,12 +286,28 @@ static bool GeneratePSPRigData(const std::string& runtimeDir,
     // Model-space -> world-px. Meshes use /4 * spriteScale; rigs are a separate
     // asset so this may need tuning, but /4*scale is the consistent default.
     f << "#define AFN_PLAYER_RIG_SCALE " << Flt(pscale * 0.25f) << "\n";
-    f << "#define AFN_PLAYER_DEFAULT_CLIP " << pclip << "\n\n";
+    f << "#define AFN_PLAYER_DEFAULT_CLIP " << pclip << "\n";
+    // Camera headlamp (per-material toggle): bake the lightX/lightY aim into an
+    // eye-space light direction, same math as the NDS exporter (nds_package.cpp).
+    if (rig.cameraLight) {
+        f << "#define AFN_PLAYER_RIG_CAMLIGHT 1\n";
+        float ax = rig.lightX * 3.14159265f/180.0f, ay = rig.lightY * 3.14159265f/180.0f;
+        float cx = cosf(ax), sx = sinf(ax), cy = cosf(ay), sy = sinf(ay);
+        char lbuf[96];
+        snprintf(lbuf, sizeof(lbuf), "#define AFN_PLAYER_RIG_LIGHT_DX (%.6ff)\n", -cx*sy); f << lbuf;
+        snprintf(lbuf, sizeof(lbuf), "#define AFN_PLAYER_RIG_LIGHT_DY (%.6ff)\n",  sx);    f << lbuf;
+        snprintf(lbuf, sizeof(lbuf), "#define AFN_PLAYER_RIG_LIGHT_DZ (%.6ff)\n", -cx*cy); f << lbuf;
+    }
+    f << "\n";
 
-    // Base verts (raw model space): position, uv (V flipped), bone index.
+    // Base verts (raw model space): position, normal, uv (V flipped), bone index.
     f << "static const float afn_rig_vpos[" << vc*3 << "] = {\n";
     for (int v = 0; v < vc; v++) { const auto& V = rig.verts[v];
         f << Flt(V.px) << "," << Flt(V.py) << "," << Flt(V.pz) << ","; if (v%4==3) f << "\n"; }
+    f << "\n};\n";
+    f << "static const float afn_rig_vnorm[" << vc*3 << "] = {\n";
+    for (int v = 0; v < vc; v++) { const auto& V = rig.verts[v];
+        f << Flt(V.nx) << "," << Flt(V.ny) << "," << Flt(V.nz) << ","; if (v%4==3) f << "\n"; }
     f << "\n};\n";
     // NOTE: rig UVs are NOT V-flipped (unlike the OBJ meshes). The glTF image
     // decode in the editor already lands the texture the right way up for the

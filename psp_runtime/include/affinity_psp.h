@@ -21,6 +21,19 @@ typedef struct {
 #define AFN_VERTEX_FLAGS \
     (GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_3D)
 
+// Rig vertex: like AfnVertex but carries a normal, so the player rig can be lit
+// by the GE's hardware lighting (camera headlamp). The GE field order is fixed:
+// texcoord -> color -> normal -> position.
+typedef struct {
+    float        u, v;        // GU_TEXTURE_32BITF
+    unsigned int color;       // GU_COLOR_8888
+    float        nx, ny, nz;  // GU_NORMAL_32BITF
+    float        x, y, z;     // GU_VERTEX_32BITF
+} AfnRigVertex;
+
+#define AFN_RIG_VERTEX_FLAGS \
+    (GU_TEXTURE_32BITF | GU_COLOR_8888 | GU_NORMAL_32BITF | GU_VERTEX_32BITF | GU_TRANSFORM_3D)
+
 // A static scene mesh (level chunk, prop, player placeholder). One draw per
 // sprite instance that references it.
 typedef struct {

@@ -255,9 +255,11 @@ void scene_render(void) {
     }
 
     // Player rig (skinned) — draws at the player's world transform, tilted to
-    // the floor slope.
-    if (s_follow)
-        rig_render(playerX, playerY, playerZ, playerYaw, s_floorN, 0);
+    // the floor slope. Pass the camera basis so the headlamp can aim eye-relative.
+    if (s_follow) {
+        float camR[3] = { rX, rY, rZ }, camU[3] = { uX, uY, uZ }, camF[3] = { fwdX, fwdY, fwdZ };
+        rig_render(playerX, playerY, playerZ, playerYaw, s_floorN, camR, camU, camF, 0);
+    }
 
     // Sprite billboards (enemies/pickups), camera-facing + animated.
     billboards_render(camX, camY, camZ, camAngle);
