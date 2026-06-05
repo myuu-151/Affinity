@@ -355,7 +355,16 @@ static void mix_buffer(short* out, int frames) {
                     pos = ls + (pos - ls) % loopLen;
                 } else { vc->playing = 0; break; }
             }
-            int s = is16 ? p16[pos] : (p8[pos] << 8);
+            // Linear interpolation between pos and pos+1 (weight = frac/65536).
+            // Nearest-neighbour resampling of a low-rate 8-bit sample up to 44.1k
+            // aliases badly and sounds tinny; lerping the sub-sample position
+            // smooths it out. At the tail, the next sample is the loop point
+            // (looping) or the current sample (one-shot).
+            int i1 = pos + 1;
+            if (i1 >= len) i1 = (loop && loopLen > 0) ? ls : pos;
+            int s0 = is16 ? p16[pos] : (p8[pos] << 8);
+            int s1 = is16 ? p16[i1]  : (p8[i1]  << 8);
+            int s  = s0 + (((s1 - s0) * (int)frac) >> 16);
             s = (s * vol) >> 7;
             s_acc[f*2]   += s;
             s_acc[f*2+1] += s;
