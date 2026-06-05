@@ -17,26 +17,10 @@ extern int orbit_angle;      // node-set camera orbit (brad, 65536 = full circle
 #include <pspgum.h>
 #include <pspctrl.h>
 #include <math.h>
-#include <malloc.h>
+#include "tex.h"
 
-// ---- Texture swizzling ----------------------------------------------------
-// The PSP texture cache reads SWIZZLED memory (16-byte x 8-row blocks); feeding
-// it linear textures thrashes the cache and makes textured fill bandwidth-bound
-// (the FPS dip when looking at the mesh). Swizzle each mesh texture once at load.
-static unsigned int* s_meshTexSw[256];
-
-static void swizzle_tex(unsigned int* out, const unsigned int* in, int w, int h) {
-    const unsigned char* src = (const unsigned char*)in;
-    unsigned char* dst = (unsigned char*)out;
-    int bw = w * 4;                 // bytes per row (RGBA8888)
-    int rowblocks = bw / 16;
-    for (int j = 0; j < h; j++)
-        for (int i = 0; i < bw; i++) {
-            int bx = i >> 4, by = j >> 3;
-            int blk = bx + by * rowblocks;
-            dst[blk * 128 + (j & 7) * 16 + (i & 15)] = src[j * bw + i];
-        }
-}
+// Per-mesh swizzled 16-bit textures (built once at load — see tex.h).
+static unsigned short* s_meshTexSw[256];
 
 #define DEG2RAD (3.14159265f / 180.0f)
 #define RAD2DEG (180.0f / 3.14159265f)
@@ -64,14 +48,12 @@ void scene_init(void) {
     collide_build();
     rig_init();
 
-    // Swizzle every mesh texture once for fast textured fill.
+    // Convert every mesh texture to swizzled 16-bit once for fast textured fill.
     for (int mi = 0; mi < afn_mesh_count && mi < 256; mi++) {
         s_meshTexSw[mi] = 0;
         const AfnMesh* m = &afn_meshes[mi];
-        if (m->textured && m->texPixels && m->texW > 0 && m->texH > 0) {
-            unsigned int* buf = (unsigned int*)memalign(16, m->texW * m->texH * 4);
-            if (buf) { swizzle_tex(buf, m->texPixels, m->texW, m->texH); s_meshTexSw[mi] = buf; }
-        }
+        if (m->textured && m->texPixels && m->texW > 0 && m->texH > 0)
+            s_meshTexSw[mi] = psp_make_tex16(m->texPixels, m->texW, m->texH);
     }
 
     // GE reads physical RAM; flush the CPU dcache so baked const data (textures,
@@ -228,14 +210,20 @@ void scene_render(void) {
             sceGuFrontFace(m->cullMode == 1 ? GU_CW : GU_CCW);
         }
 
-        if (m->textured && (s_meshTexSw[mi] || m->texPixels)) {
-            int swz = s_meshTexSw[mi] ? 1 : 0;
-            const void* tex = s_meshTexSw[mi] ? (const void*)s_meshTexSw[mi] : (const void*)m->texPixels;
+        if (m->textured && s_meshTexSw[mi]) {
             sceGuEnable(GU_TEXTURE_2D);
-            sceGuTexMode(GU_PSM_8888, 0, 0, swz);
-            sceGuTexImage(0, m->texW, m->texH, m->texW, tex);
+            sceGuTexMode(GU_PSM_5551, 0, 0, 1);   // swizzled 16-bit (half the fill bandwidth)
+            sceGuTexImage(0, m->texW, m->texH, m->texW, s_meshTexSw[mi]);
             sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
             sceGuTexFilter(GU_NEAREST, GU_NEAREST);   // atlas: no bilinear (seams)
+            sceGuTexLevelMode(GU_TEXTURE_CONST, 0.0f);
+            sceGuTexWrap(GU_CLAMP, GU_CLAMP);
+        } else if (m->textured && m->texPixels) {
+            sceGuEnable(GU_TEXTURE_2D);
+            sceGuTexMode(GU_PSM_8888, 0, 0, 0);   // fallback (alloc failed)
+            sceGuTexImage(0, m->texW, m->texH, m->texW, m->texPixels);
+            sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+            sceGuTexFilter(GU_NEAREST, GU_NEAREST);
             sceGuTexLevelMode(GU_TEXTURE_CONST, 0.0f);
             sceGuTexWrap(GU_CLAMP, GU_CLAMP);
         } else {

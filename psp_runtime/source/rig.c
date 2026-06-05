@@ -7,6 +7,7 @@
 #include "rig.h"
 #include "affinity_psp.h"
 #include "psp_rig.h"
+#include "tex.h"
 
 #include <pspkernel.h>
 #include <pspgu.h>
@@ -29,6 +30,9 @@ static float      s_frame = (float)AFN_PLAYER_DEFAULT_CLIP * 0.0f;
 static int        s_clip  = AFN_PLAYER_DEFAULT_CLIP;
 
 extern int afn_rig_clip;   // node-driven (script) or controller-set clip selector
+
+// Per-material swizzled 16-bit rig textures (built once in rig_init).
+static unsigned short* s_rigTexSw[AFN_RIG_MATS];
 
 // pose {px,py,pz, qw,qx,qy,qz} -> 3x4 row-major (rot | translation)
 static void pose_to_mat(const float* p, float* m) {
@@ -87,6 +91,14 @@ void rig_init(void) {
         s_skinned[v].color = 0xFFFFFFFF;   // modulate texture unchanged
     }
     if (s_clip < 0 || s_clip >= AFN_RIG_CLIPS) s_clip = 0;
+
+    // Convert each material's texture to swizzled 16-bit (same fill-rate win
+    // as the world meshes).
+    for (int g = 0; g < AFN_RIG_MATS; g++) {
+        s_rigTexSw[g] = 0;
+        if (afn_rig_tex_ptrs[g] && afn_rig_tex_w[g] > 0 && afn_rig_tex_h[g] > 0)
+            s_rigTexSw[g] = psp_make_tex16(afn_rig_tex_ptrs[g], afn_rig_tex_w[g], afn_rig_tex_h[g]);
+    }
 }
 
 int  rig_present(void) { return 1; }
@@ -153,10 +165,10 @@ void rig_render(float px, float py, float pz, float yawDeg, const float* upN, in
     for (int g = 0; g < AFN_RIG_MATS; g++) {
         int ic = afn_rig_idx_counts[g];
         if (ic <= 0) continue;
-        if (afn_rig_tex_ptrs[g] && afn_rig_tex_w[g] > 0) {
+        if (s_rigTexSw[g] && afn_rig_tex_w[g] > 0) {
             sceGuEnable(GU_TEXTURE_2D);
-            sceGuTexMode(GU_PSM_8888, 0, 0, 0);
-            sceGuTexImage(0, afn_rig_tex_w[g], afn_rig_tex_h[g], afn_rig_tex_w[g], afn_rig_tex_ptrs[g]);
+            sceGuTexMode(GU_PSM_5551, 0, 0, 1);   // swizzled 16-bit
+            sceGuTexImage(0, afn_rig_tex_w[g], afn_rig_tex_h[g], afn_rig_tex_w[g], s_rigTexSw[g]);
             sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
             sceGuTexFilter(GU_LINEAR, GU_LINEAR);
             sceGuTexLevelMode(GU_TEXTURE_CONST, 0.0f);
