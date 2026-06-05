@@ -136,11 +136,13 @@ void scene_render(void) {
     // Sky panorama first (behind everything), scrolled by camera yaw.
     sky_render(camAngle);
 
-    // Follow-cam: place the eye behind/above the player, looking at them.
+    // Follow-cam: place the eye behind/above the player, looking at them. A
+    // steeper look-down (higher eye) keeps the floor from foreshortening into
+    // the PSP guard-band overflow that drops floor triangles at grazing angles.
     if (s_follow) {
         camX = playerX - sinf(camAngle) * s_orbit;
         camZ = playerZ - cosf(camAngle) * s_orbit;
-        camY = playerY + s_orbit * 0.45f;
+        camY = playerY + s_orbit * 0.70f;
     }
 
     sceGumMatrixMode(GU_PROJECTION);
