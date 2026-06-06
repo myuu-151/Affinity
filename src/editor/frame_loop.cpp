@@ -16472,6 +16472,8 @@ void FrameTick(float dt)
                     re.lightX = rm.lightX; re.lightY = rm.lightY;
                     re.cullMode = rm.cullMode;
                     re.useAlpha = rm.useAlpha;
+                    re.collisionType = rm.collisionType;
+                    for (int k = 0; k < 3; k++) { re.colCenter[k] = rm.colCenter[k]; re.colExtents[k] = rm.colExtents[k]; }
                     // One group per material slot: filter triangles by slot and
                     // scale UVs by that slot's texture size.
                     for (int ms = 0; ms < rm.matCount(); ms++) {

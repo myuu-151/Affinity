@@ -137,3 +137,35 @@ int afn_collide_floor(int px, int pz, int py, int *outY)
 }
 
 #endif // AFN_COL_FACE_COUNT
+
+#ifdef AFN_HAS_NPC_RIGS
+#ifndef AFN_HAS_PLAYER_WIDTH
+extern int afn_player_width;
+#endif
+// Push the player out of each NPC's collision box. The player is treated as a
+// circle of radius afn_player_width; each box is an XZ AABB (center + extents in
+// 16.8 world units, baked by the exporter) gated by a vertical overlap so you
+// can jump over / duck under it. Minkowski-expanded AABB: expand the box by the
+// player radius and shove out along the shallower penetration axis.
+void afn_collide_npc_boxes(int *px, int *pz, int py)
+{
+    int pr = afn_player_width;
+    for (int i = 0; i < AFN_NPC_RIG_COUNT; i++) {
+        if (!afn_npc_coltype[i]) continue;
+        int si = afn_npc_sprite[i];
+        int cx = afn_sprite_data[si][0] + afn_npc_colcx[i];
+        int cy = afn_sprite_data[si][1] + afn_npc_colcy[i];
+        int cz = afn_sprite_data[si][2] + afn_npc_colcz[i];
+        int ex = afn_npc_colex[i], ey = afn_npc_coley[i], ez = afn_npc_colez[i];
+        // Vertical band: skip if the player isn't level with the box.
+        if (py + afn_player_height < cy - ey || py > cy + ey) continue;
+        int dx = *px - cx, dz = *pz - cz;
+        int adx = dx < 0 ? -dx : dx, adz = dz < 0 ? -dz : dz;
+        int ox = ex + pr - adx;   // X overlap once box is grown by player radius
+        int oz = ez + pr - adz;
+        if (ox <= 0 || oz <= 0) continue;   // not touching
+        if (ox < oz) *px += (dx < 0 ? -ox : ox);
+        else         *pz += (dz < 0 ? -oz : oz);
+    }
+}
+#endif // AFN_HAS_NPC_RIGS

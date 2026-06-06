@@ -38,6 +38,9 @@ struct GBARiggedMeshExport
     float lightX = 0.0f, lightY = 0.0f; // headlamp aim (pitch/yaw degrees)
     int  cullMode = 0;                // 0 = Back, 1 = Front, 2 = None
     bool useAlpha = false;            // palette index 0 = transparent (DS COLOR0_TRANSPARENT)
+    int   collisionType = 0;          // 0 = None, 1 = Box (AABB proxy for player bump)
+    float colCenter[3]  = {0,0,0};    // box center offset, rig-local units
+    float colExtents[3] = {1,1,1};    // box half-extents, rig-local units
 
     // Convenience: a rig is renderable if it has at least one non-empty group.
     bool hasGeometry() const { return !groups.empty() && !groups[0].dsm.empty(); }

@@ -1293,6 +1293,18 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             perInst("s16", "lightdx",  [&](int i){ f << npcLightV10(i, 0); });
             perInst("s16", "lightdy",  [&](int i){ f << npcLightV10(i, 1); });
             perInst("s16", "lightdz",  [&](int i){ f << npcLightV10(i, 2); });
+            // Player-bump collision box, baked to 16.8 world units (rig-local
+            // colCenter/colExtents * sprite scale * 64, the editor->fixed factor).
+            perInst("u8",  "coltype", [&](int i){ f << rigs[sprites[npc[i]].riggedMeshIdx].collisionType; });
+            auto npcBox16 = [&](int i, const float* v, int axis) {
+                return (int)lroundf(v[axis] * sprites[npc[i]].scale * 64.0f);
+            };
+            perInst("s16", "colcx", [&](int i){ f << npcBox16(i, rigs[sprites[npc[i]].riggedMeshIdx].colCenter, 0); });
+            perInst("s16", "colcy", [&](int i){ f << npcBox16(i, rigs[sprites[npc[i]].riggedMeshIdx].colCenter, 1); });
+            perInst("s16", "colcz", [&](int i){ f << npcBox16(i, rigs[sprites[npc[i]].riggedMeshIdx].colCenter, 2); });
+            perInst("s16", "colex", [&](int i){ f << npcBox16(i, rigs[sprites[npc[i]].riggedMeshIdx].colExtents, 0); });
+            perInst("s16", "coley", [&](int i){ f << npcBox16(i, rigs[sprites[npc[i]].riggedMeshIdx].colExtents, 1); });
+            perInst("s16", "colez", [&](int i){ f << npcBox16(i, rigs[sprites[npc[i]].riggedMeshIdx].colExtents, 2); });
             perInst("u8* const*",  "tex",    [&](int i){ f << "afn_npc_A" << i << "_tex"; });     // [i][group]
             perInst("u16* const*", "texpal", [&](int i){ f << "afn_npc_A" << i << "_texpal"; });
             perInst("u16* const",  "texw",   [&](int i){ f << "afn_npc_A" << i << "_texw"; });    // [i][group]

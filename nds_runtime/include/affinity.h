@@ -124,6 +124,8 @@ extern int  player_on_ground;
 // Mesh collision (collision.c). Both no-op if AFN_COL_FACE_COUNT undefined.
 void afn_collide_walls(int *px, int *pz, int py);
 int  afn_collide_floor(int px, int pz, int py, int *outY);
+// Player-vs-NPC bounding-box push-out (defined only when AFN_HAS_NPC_RIGS).
+void afn_collide_npc_boxes(int *px, int *pz, int py);
 extern int afn_wall_collided_sprite;
 
 #endif // AFFINITY_H

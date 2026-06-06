@@ -1654,6 +1654,10 @@ static void update_camera(void)
     // shove the player off the rail. The grind already locks XZ to the axis.
     if (afn_grind_vel == 0)
         afn_collide_walls(&player_x, &player_z, player_y);
+#ifdef AFN_HAS_NPC_RIGS
+    // Bump the player out of NPC collision boxes (enemies block movement).
+    afn_collide_npc_boxes(&player_x, &player_z, player_y);
+#endif
 #else
     {
         // No mesh collision data — fall back to flat ground at player init Y.
