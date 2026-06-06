@@ -1132,6 +1132,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             f << "static const u16 afn_player_rig_texh[] = {";
             for (int g = 0; g < ng; g++) f << " " << rig.groups[g].texH << ",";
             f << " };\n";
+            // UV wrap per group: 0=Clip(clamp) 1=Extend(tile) 2=Mirror.
+            f << "static const u8 afn_player_rig_texwrap[] = {";
+            for (int g = 0; g < ng; g++) f << " " << rig.groups[g].wrapMode << ",";
+            f << " };\n";
             // Animation (shared across groups — same bones).
             int nclips = (int)rig.clips.size();
             for (int c = 0; c < nclips; c++)
@@ -1237,6 +1241,9 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "static const u16 " << A << "_texh[] = {";
                 for (int g = 0; g < ng; g++) f << " " << rig.groups[g].texH << ",";
                 f << " };\n";
+                f << "static const u8 " << A << "_texwrap[] = {";
+                for (int g = 0; g < ng; g++) f << " " << rig.groups[g].wrapMode << ",";
+                f << " };\n";
                 // Animation (shared across the instance's material groups).
                 int nclips = (int)rig.clips.size();
                 for (int c = 0; c < nclips; c++)
@@ -1273,6 +1280,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             perInst("u16* const*", "texpal", [&](int i){ f << "afn_npc_A" << i << "_texpal"; });
             perInst("u16* const",  "texw",   [&](int i){ f << "afn_npc_A" << i << "_texw"; });    // [i][group]
             perInst("u16* const",  "texh",   [&](int i){ f << "afn_npc_A" << i << "_texh"; });
+            perInst("u8* const",   "texwrap",[&](int i){ f << "afn_npc_A" << i << "_texwrap"; }); // [i][group]
             f << "\n";
         }
     }

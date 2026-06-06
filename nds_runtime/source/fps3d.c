@@ -190,13 +190,12 @@ static MeshBucket* s_buckets[AFN_MESH_COUNT];
 static int         s_bucket_count[AFN_MESH_COUNT];
 static uint16_t*   s_tri_idx[AFN_MESH_COUNT];
 static uint16_t*   s_quad_idx[AFN_MESH_COUNT];
-static int         s_mesh_radius[AFN_MESH_COUNT];  // origin-based, whole-mesh reject
 
 static void mesh_buckets_build(void)
 {
     for (int mi = 0; mi < AFN_MESH_COUNT; mi++) {
         s_buckets[mi] = 0; s_bucket_count[mi] = 0;
-        s_tri_idx[mi] = 0; s_quad_idx[mi] = 0; s_mesh_radius[mi] = 1;
+        s_tri_idx[mi] = 0; s_quad_idx[mi] = 0;
 
         const int16_t* mv  = afn_mesh_vert_ptrs[mi];
         const uint16_t* ti = afn_mesh_idx_ptrs[mi];
@@ -206,20 +205,15 @@ static void mesh_buckets_build(void)
         int ntri = ic / 3, nquad = qc / 4;
         if (ntri <= 0 && nquad <= 0) continue;
 
-        // Origin-based radius (whole-mesh quick reject, sphere centered on the
-        // sprite origin) + mesh AABB for the grid.
-        float maxsq = 0.0f;
+        // Mesh AABB for the bucket grid.
         int mnx = 1<<30, mny = 1<<30, mnz = 1<<30;
         int mxx = -(1<<30), mxy = -(1<<30), mxz = -(1<<30);
         for (int k = 0; k < ic; k++) { int v = ti[k];
             int x = mv[v*3], y = mv[v*3+1], z = mv[v*3+2];
-            float s = (float)x*x + (float)y*y + (float)z*z; if (s > maxsq) maxsq = s;
             if (x<mnx)mnx=x; if (x>mxx)mxx=x; if (y<mny)mny=y; if (y>mxy)mxy=y; if (z<mnz)mnz=z; if (z>mxz)mxz=z; }
         for (int k = 0; k < qc; k++) { int v = qi[k];
             int x = mv[v*3], y = mv[v*3+1], z = mv[v*3+2];
-            float s = (float)x*x + (float)y*y + (float)z*z; if (s > maxsq) maxsq = s;
             if (x<mnx)mnx=x; if (x>mxx)mxx=x; if (y<mny)mny=y; if (y>mxy)mxy=y; if (z<mnz)mnz=z; if (z>mxz)mxz=z; }
-        s_mesh_radius[mi] = (int)sqrtf(maxsq) + 1;
 
         int exx = mxx-mnx; if (exx < 1) exx = 1;
         int exy = mxy-mny; if (exy < 1) exy = 1;
@@ -344,34 +338,9 @@ static void render_meshes(void)
         int textured      = afn_mesh_desc[meshIdx][8];
         int grayscale     = afn_mesh_desc[meshIdx][13];
 
-        // --- Whole-mesh frustum + distance cull --------------------------
-        // Reject meshes whose bounding sphere is behind the camera, beyond
-        // the draw distance, or outside the view cone before paying the
-        // immediate-mode vertex submission cost. Same camera-space math as
-        // the sprite cull (sprites.c): depth/viewX in fx8, 256 = 1 unit.
-        {
-            int vshift_c = afn_mesh_vshift[meshIdx];
-            int s32_c    = (spriteScale << 4) << vshift_c;   // 8.8 → 20.12, ×2^vshift
-            int radius   = (int)(((long long)s_mesh_radius[meshIdx] * s32_c) >> 12);
-            int dx = wx - cam_x;
-            int dy = wy - cam_h;
-            int dz = wz - cam_z;
-            int depth = (dx * g_sinf + dz * g_cosf) >> 8;   // forward (-view_z)
-            // Behind / right on top of the camera.
-            if (depth + radius <= 64) continue;
-#ifdef AFN_SPRITE_DRAW_DISTANCE
-            // Honor the editor's draw distance for meshes too.
-            if (depth - radius > AFN_SPRITE_DRAW_DISTANCE) continue;
-#endif
-            // Horizontal frustum: half-FOV ≈ 43° (70° vert × 4:3), tan ≈ 0.93.
-            // Pad to ~1.125·depth so visible meshes never pop at the edges.
-            int viewX = (-dx * g_cosf + dz * g_sinf) >> 8;
-            if (viewX < 0) viewX = -viewX;
-            if (viewX - radius > depth + (depth >> 3)) continue;
-            // Vertical frustum: half-FOV 35°, tan ≈ 0.70. Pad to ~0.875·depth.
-            int vy = dy < 0 ? -dy : dy;
-            if (vy - radius > depth - (depth >> 3)) continue;
-        }
+        // Frustum + distance culling removed: every mesh is always submitted
+        // regardless of camera position or the editor's draw distance. The DS
+        // hardware still clips geometry outside the view volume.
 
         glPushMatrix();
         // Absolute world coords — gluLookAtf32 already applied the camera
@@ -444,52 +413,18 @@ static void render_meshes(void)
 
         if (s_bucket_count[meshIdx] > 0)
         {
-            // Per-bucket frustum cull: a single giant mesh self-partitions into
-            // GN³ chunks; we only submit chunks whose world-space sphere is in
-            // view. Bucket centers are local — transform each through the same
-            // scale→Ry→Rx→Rz→translate the verts get (brad_* return 8.8 sin/cos,
-            // so a ×→>>8; identity when the angle is 0).
+            // Frustum culling removed: submit every bucket's geometry. Buckets
+            // still partition the mesh's triangles by centroid (the exporter's
+            // index reordering lives in TI/QI), so iterating all of them draws
+            // the whole mesh.
             const MeshBucket* B = s_buckets[meshIdx];
             const uint16_t* TI = s_tri_idx[meshIdx];
             const uint16_t* QI = s_quad_idx[meshIdx];
             int nb = s_bucket_count[meshIdx];
-            int cY = brad_cos(rot),  sY = brad_sin(rot);
-            int cX = brad_cos(rotX), sX = brad_sin(rotX);
-            int cZ = brad_cos(rotZ), sZ = brad_sin(rotZ);
-            char vis[MESH_NBUCKET];
-            for (int c = 0; c < nb; c++) {
-                const MeshBucket* bk = &B[c];
-                if (bk->triCount == 0 && bk->quadCount == 0) { vis[c] = 0; continue; }
-                int lx = (int)(((long long)bk->cx * s32) >> 12);
-                int ly = (int)(((long long)bk->cy * s32) >> 12);
-                int lz = (int)(((long long)bk->cz * s32) >> 12);
-                int rx  = (lx*cY + lz*sY) >> 8;
-                int rz  = (-lx*sY + lz*cY) >> 8;
-                int ry  = ly;
-                int ry2 = (ry*cX - rz*sX) >> 8;
-                int rz2 = (ry*sX + rz*cX) >> 8;
-                int rx2 = (rx*cZ - ry2*sZ) >> 8;
-                int ry3 = (rx*sZ + ry2*cZ) >> 8;
-                int brad = (int)(((long long)bk->radius * s32) >> 12);
-                int dx = (wx + rx2) - cam_x;
-                int dy = (wy + ry3) - cam_h;
-                int dz = (wz + rz2) - cam_z;
-                int depth = (dx*g_sinf + dz*g_cosf) >> 8;
-                if (depth + brad <= 64) { vis[c] = 0; continue; }
-#ifdef AFN_SPRITE_DRAW_DISTANCE
-                if (depth - brad > AFN_SPRITE_DRAW_DISTANCE) { vis[c] = 0; continue; }
-#endif
-                int vX = (-dx*g_cosf + dz*g_sinf) >> 8; if (vX < 0) vX = -vX;
-                if (vX - brad > depth + (depth >> 3)) { vis[c] = 0; continue; }
-                int vY = dy < 0 ? -dy : dy;
-                if (vY - brad > depth - (depth >> 3)) { vis[c] = 0; continue; }
-                vis[c] = 1;
-            }
 
             if (TI) {
                 glBegin(GL_TRIANGLES);
                 for (int c = 0; c < nb; c++) {
-                    if (!vis[c]) continue;
                     int end = B[c].triStart + B[c].triCount;
                     for (int t = B[c].triStart; t < end; t += 3) {
                         EMIT(TI[t]); EMIT(TI[t+1]); EMIT(TI[t+2]);
@@ -500,7 +435,6 @@ static void render_meshes(void)
             if (QI) {
                 glBegin(GL_QUADS);
                 for (int c = 0; c < nb; c++) {
-                    if (!vis[c]) continue;
                     int end = B[c].quadStart + B[c].quadCount;
                     for (int q = B[c].quadStart; q < end; q += 4) {
                         EMIT(QI[q]); EMIT(QI[q+1]); EMIT(QI[q+2]); EMIT(QI[q+3]);
@@ -576,9 +510,15 @@ static void load_player_rig_texture(void)
         int sizeH = 0, th = afn_player_rig_texh[g]; while (th > 8) { th >>= 1; sizeH++; }
         glGenTextures(1, &gl_rig_tex_id[g]);
         glBindTexture(0, gl_rig_tex_id[g]);
-        // Clamp (no WRAP flags): UVs that overflow [0,1] grab the edge texel
-        // instead of wrapping to the opposite side of the atlas (white seams).
+        // UV addressing per material group (editor rig material "Wrap" setting):
+        //   0 Clip   = clamp (no WRAP flags) — edge texel, no atlas-overflow seams
+        //   1 Extend = WRAP_S|WRAP_T (tile/repeat)
+        //   2 Mirror = WRAP|FLIP (mirrored repeat)
         int texflags = TEXGEN_TEXCOORD;
+        int rigwrap = afn_player_rig_texwrap[g];
+        if (rigwrap == 1) texflags |= GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T;
+        else if (rigwrap == 2) texflags |= GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T
+                                         | GL_TEXTURE_FLIP_S | GL_TEXTURE_FLIP_T;
 #ifdef AFN_PLAYER_RIG_ALPHA
         texflags |= GL_TEXTURE_COLOR0_TRANSPARENT;   // palette[0] = transparent
 #endif
@@ -622,36 +562,40 @@ static void render_player_rig(void)
     // orientation — easing the position just adds lag/bob, so we draw at
     // player_render_y directly and smooth only the tilt below.)
 
-    // --- Slope alignment: align the rig's up to the floor normal, then yaw
-    // (axis-angle via glRotatef32i — reliable, no matrix-layout guessing). The
-    // floor normal comes from sampling the height field in X and Z, so this does
-    // pitch AND roll. Per-axis pairs are independent so an edge miss on one axis
-    // doesn't drop the whole thing to upright.
+    // --- Slope alignment: tilt the rig's up-axis to the floor it stands on,
+    // then yaw (axis-angle via glRotatef32i — no matrix-layout guessing).
+    // The target up eases toward the *standing triangle's* true geometric normal
+    // (not a height-field finite difference, which sampled into adjacent vertical
+    // wall faces and slanted the rig sideways near walls). When airborne — jumping
+    // or walking off a slope edge — the target is straight up, so the rig rights
+    // itself instead of staying slanted. Mirrors the PSP runtime (scene.c).
     static float s_upx = 0.0f, s_upy = 1.0f, s_upz = 0.0f;   // smoothed up vector
-    float tnx = 0.0f, tny = 1.0f, tnz = 0.0f;                // target floor normal
+    float tnx = 0.0f, tny = 1.0f, tnz = 0.0f;                // target up (upright default)
+    float upEase = 0.1f;                                     // airborne: ease back upright
 #ifdef AFN_COL_FACE_COUNT
-    {
-        const int eps = 0x800;                              // ~8px sample radius (16.8)
-        int run = eps << 1, fxp, fxm, fzp, fzm;
-        int okx = afn_collide_floor(player_render_x + eps, player_render_z, player_render_y, &fxp) &&
-                  afn_collide_floor(player_render_x - eps, player_render_z, player_render_y, &fxm);
-        int okz = afn_collide_floor(player_render_x, player_render_z + eps, player_render_y, &fzp) &&
-                  afn_collide_floor(player_render_x, player_render_z - eps, player_render_y, &fzm);
-        if (okx || okz) {
-            float dyx = okx ? (float)(fxp - fxm) / (float)run : 0.0f;
-            float dyz = okz ? (float)(fzp - fzm) / (float)run : 0.0f;
-            tnx = -dyx; tnz = -dyz;                         // N = (-dY/dx, 1, -dY/dz)
-            float l = sqrtf(tnx*tnx + 1.0f + tnz*tnz);
-            tnx /= l; tny = 1.0f / l; tnz /= l;
+    if (player_on_ground) {
+        extern int afn_floor_face;
+        int fy;
+        // One sample at the footing records the standing floor face; use that
+        // triangle's normal (N = e1 x e2, forced +Y up) — robust against walls.
+        if (afn_collide_floor(player_render_x, player_render_z, player_render_y, &fy)
+            && afn_floor_face >= 0) {
+            const CollFace* F = &afn_col_faces[afn_floor_face];
+            float e1x = (float)(F->v1x - F->v0x), e1y = (float)(F->v1y - F->v0y), e1z = (float)(F->v1z - F->v0z);
+            float e2x = (float)(F->v2x - F->v0x), e2y = (float)(F->v2y - F->v0y), e2z = (float)(F->v2z - F->v0z);
+            float nx = e1y*e2z - e1z*e2y;
+            float ny = e1z*e2x - e1x*e2z;
+            float nz = e1x*e2y - e1y*e2x;
+            if (ny < 0.0f) { nx = -nx; ny = -ny; nz = -nz; }
+            float l = sqrtf(nx*nx + ny*ny + nz*nz);
+            if (l > 0.0001f) { tnx = nx/l; tny = ny/l; tnz = nz/l; upEase = 0.2f; }
         }
     }
 #endif
-    // Smooth the up-vector toward the target normal, then renormalize.
-    // (Higher factor = snappier slope response; floor is sub-pixel smooth so
-    // this won't reintroduce jitter.)
-    s_upx += (tnx - s_upx) * 1.0f;
-    s_upy += (tny - s_upy) * 1.0f;
-    s_upz += (tnz - s_upz) * 1.0f;
+    // Ease the up-vector toward the target (snappier when grounded), renormalize.
+    s_upx += (tnx - s_upx) * upEase;
+    s_upy += (tny - s_upy) * upEase;
+    s_upz += (tnz - s_upz) * upEase;
     { float l = sqrtf(s_upx*s_upx + s_upy*s_upy + s_upz*s_upz);
       if (l > 0.0001f) { s_upx/=l; s_upy/=l; s_upz/=l; } else { s_upx=0; s_upy=1; s_upz=0; } }
 
@@ -737,7 +681,12 @@ static void load_npc_rig_textures(void)
             int sizeH = 0, th = afn_npc_texh[i][g]; while (th > 8) { th >>= 1; sizeH++; }
             glGenTextures(1, &s_npc_tex_id[i][g]);
             glBindTexture(0, s_npc_tex_id[i][g]);
-            int npcflags = TEXGEN_TEXCOORD;   // clamp (no wrap) — avoids UV-overflow seams
+            // UV addressing per group: 0 Clip=clamp, 1 Extend=tile, 2 Mirror.
+            int npcflags = TEXGEN_TEXCOORD;
+            int npcwrap = afn_npc_texwrap[i][g];
+            if (npcwrap == 1) npcflags |= GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T;
+            else if (npcwrap == 2) npcflags |= GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T
+                                             | GL_TEXTURE_FLIP_S | GL_TEXTURE_FLIP_T;
             if (afn_npc_alpha[i]) npcflags |= GL_TEXTURE_COLOR0_TRANSPARENT;
             glTexImage2D(0, 0, GL_RGB256, sizeW, sizeH, 0, npcflags, afn_npc_tex[i][g]);
             glColorTableEXT(0, 0, 256, 0, 0, afn_npc_texpal[i][g]);

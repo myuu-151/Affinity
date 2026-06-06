@@ -32,6 +32,10 @@
 #pragma comment(lib, "winmm.lib")
 #endif
 #include <GL/gl.h>
+// Windows GL/gl.h is OpenGL 1.1; GL_MIRRORED_REPEAT (1.4) may be absent.
+#ifndef GL_MIRRORED_REPEAT
+#define GL_MIRRORED_REPEAT 0x8370
+#endif
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -5644,6 +5648,12 @@ static bool SaveProject(const std::string& path)
             if (em.textureManual && !em.texturePath.empty())
                 fprintf(f, "rigMatTex=%d|%d|%s\n", ri, ms, em.texturePath.c_str());
         }
+        // Per-slot UV wrap mode (0=Clip default; only persist non-default slots).
+        // Materials are re-imported on load, so this is re-applied afterward.
+        for (int ms = 0; ms < rmA.matCount(); ms++) {
+            if (rmA.matWrap(ms) != 0)
+                fprintf(f, "rigMatWrap=%d|%d|%d\n", ri, ms, rmA.matWrap(ms));
+        }
     }
     fprintf(f, "\n");
 
@@ -6982,6 +6992,14 @@ static bool LoadProject(const std::string& path)
             if (sscanf(line, "rigMatTex=%d|%d|%511[^\n]", &mtRig, &mtSlot, mtPath) == 3) {
                 if (mtRig >= 0 && mtRig < (int)sRiggedMeshAssets.size() && mtPath[0])
                     LoadRigTextureFromFile(sRiggedMeshAssets[mtRig], mtSlot, std::string(mtPath));
+                continue;
+            }
+            // Per-slot UV wrap mode override (rig already pushed + re-imported above).
+            int mwRig = -1, mwSlot = 0, mwMode = 0;
+            if (sscanf(line, "rigMatWrap=%d|%d|%d", &mwRig, &mwSlot, &mwMode) == 3) {
+                if (mwRig >= 0 && mwRig < (int)sRiggedMeshAssets.size() &&
+                    mwSlot >= 0 && mwSlot < sRiggedMeshAssets[mwRig].matCount())
+                    sRiggedMeshAssets[mwRig].setMatWrap(mwSlot, mwMode);
                 continue;
             }
             // count= is informational; rig= lines load sequentially. A failed
@@ -12985,6 +13003,20 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                         if (texName.empty()) texName = "(embedded)";
                         ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.7f, 1.0f), "    %s (%dx%d)", texName.c_str(), rm.matTexW(ms), rm.matTexH(ms));
                         ImGui::SameLine();
+                        // UV addressing for this slot: Clip (clamp to edge), Extend
+                        // (tile/repeat), or Mirror (mirrored repeat). Drives both the
+                        // 3D preview and the DS texture-unit flags on export.
+                        ImGui::TextUnformatted("Wrap"); ImGui::SameLine();
+                        ImGui::PushItemWidth(Scaled(78));
+                        const char* kRigWrapNames[] = { "Clip", "Extend", "Mirror" };
+                        int wmode = rm.matWrap(ms);
+                        if (ImGui::Combo("##rigwrap", &wmode, kRigWrapNames, 3)) {
+                            rm.setMatWrap(ms, wmode);
+                            sProjectDirty = true;
+                        }
+                        ImGui::PopItemWidth();
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("UV addressing when coords go outside 0..1:\nClip = clamp to edge texel\nExtend = tile/repeat\nMirror = mirrored repeat\nApplies in the 3D tab and on the NDS.");
+                        ImGui::SameLine();
                         if (ImGui::SmallButton("Clear##rigtexclr")) {
                             if (ms == 0) {
                                 rm.textured = false; rm.texturePixels.clear(); rm.texturePath.clear();
@@ -16451,6 +16483,7 @@ void FrameTick(float dt)
                         g.texW = rm.matTexW(ms); g.texH = rm.matTexH(ms);
                         g.texPixels = rm.matPixels(ms);
                         memcpy(g.texPalette, rm.matPalette(ms), sizeof(g.texPalette));
+                        g.wrapMode = rm.matWrap(ms);
                         re.groups.push_back(std::move(g));
                     }
                     for (int c = 0; c < (int)rm.clips.size(); c++) {
@@ -30667,6 +30700,11 @@ void Render3DViewport()
                     bool slotTex = (rm.matTextured(ms) && rm.matGlTexID(ms) != 0);
                     if (slotTex) {
                         glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, rm.matGlTexID(ms));
+                        // Per-slot UV addressing: Clip=clamp, Extend=repeat, Mirror=mirror.
+                        GLint rigWrap = (rm.matWrap(ms) == 1) ? GL_REPEAT
+                                      : (rm.matWrap(ms) == 2) ? GL_MIRRORED_REPEAT : GL_CLAMP;
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, rigWrap);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, rigWrap);
                         float white[]={1,1,1,1};
                         glMaterialfv(GL_FRONT_AND_BACK,GL_DIFFUSE,white); glMaterialfv(GL_FRONT_AND_BACK,GL_AMBIENT,white);
                     } else {

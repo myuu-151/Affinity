@@ -24,6 +24,7 @@ struct GBARiggedMeshExport
         int texW = 0, texH = 0;
         std::vector<uint8_t> texPixels;   // one byte per pixel, palette index 0..255
         uint32_t texPalette[256] = {};    // RGBA8 (256-colour, GL_RGB256)
+        int wrapMode = 0;                 // UV addressing: 0=Clip(clamp) 1=Extend(tile) 2=Mirror
     };
     std::vector<MatGroup> groups;
     struct Clip {

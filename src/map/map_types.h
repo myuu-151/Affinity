@@ -258,6 +258,7 @@ struct RigMaterial
     uint32_t texturePalette[256] = {};       // 256-colour (GL_RGB256) palette
     int texW = 0, texH = 0;
     unsigned int glTexID = 0;                // OpenGL texture for editor preview
+    int wrapMode = 0;                        // UV addressing: 0=Clip(clamp) 1=Extend(tile) 2=Mirror
 };
 
 struct RiggedMeshAsset
@@ -293,6 +294,7 @@ struct RiggedMeshAsset
     uint32_t texturePalette[256] = {};       // 256-colour (GL_RGB256) palette
     int texW = 0, texH = 0;
     unsigned int glTexID = 0;                // OpenGL texture for editor preview
+    int wrapMode = 0;                        // slot 0 UV addressing: 0=Clip 1=Extend 2=Mirror
 
     // Multi-material: the fields above are material slot 0; additional glTF
     // materials live here as slots 1..N. triMaterial holds the slot index per
@@ -310,6 +312,9 @@ struct RiggedMeshAsset
     unsigned int matGlTexID(int s) const { return s == 0 ? glTexID : extraMaterials[s-1].glTexID; }
     const std::string& matName(int s) const { return s == 0 ? materialName : extraMaterials[s-1].name; }
     const std::string& matPath(int s) const { return s == 0 ? texturePath : extraMaterials[s-1].texturePath; }
+    // UV wrap mode per slot (0=Clip/clamp, 1=Extend/tile, 2=Mirror).
+    int  matWrap(int s) const { return s == 0 ? wrapMode : extraMaterials[s-1].wrapMode; }
+    void setMatWrap(int s, int w) { if (s == 0) wrapMode = w; else extraMaterials[s-1].wrapMode = w; }
 
     // Collision proxy box. Authored here, drawn as a wireframe in the 3D tab.
     // Local-space (follows the placed glTF's transform); static — does not

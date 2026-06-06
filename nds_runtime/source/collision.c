@@ -21,6 +21,7 @@ extern int afn_player_width;
 
 int afn_wall_collided_sprite = -1;
 int afn_floor_sprite = -1;   // sprite index of the floor face under the player (-1 = none)
+int afn_floor_face   = -1;   // face index of the floor under the player (-1 = none; for slope normal)
 
 #ifndef AFN_COL_GRID_ORIGIN_X
 #define AFN_COL_GRID_ORIGIN_X 0
@@ -94,7 +95,7 @@ int afn_collide_floor(int px, int pz, int py, int *outY)
     int start = afn_col_grid_start[ci];
     int count = afn_col_grid_count[ci];
 
-    int bestY = 0, found = 0, bestSpr = -1;
+    int bestY = 0, found = 0, bestSpr = -1, bestFace = -1;
     // Full-precision (sub-pixel) barycentric with 64-bit intermediates. The old
     // code worked in integer pixels and >>4-truncated the weights, which made
     // the interpolated floor height stair-step / round-jitter non-monotonically
@@ -124,10 +125,14 @@ int afn_collide_floor(int px, int pz, int py, int *outY)
                           + c0 * (long long)face->v2y) / cs);
 
         if (floorY > py + afn_player_height) continue;
-        if (!found || floorY > bestY) { bestY = floorY; found = 1; bestSpr = face->sprIdx; }
+        if (!found || floorY > bestY) {
+            bestY = floorY; found = 1; bestSpr = face->sprIdx;
+            bestFace = afn_col_grid_faces[start + i];
+        }
     }
     *outY = bestY;
     afn_floor_sprite = found ? bestSpr : -1;   // which sprite's floor we're on (grind needs this)
+    afn_floor_face   = found ? bestFace : -1;  // standing floor triangle (rig slope normal)
     return found;
 }
 
