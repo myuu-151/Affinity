@@ -655,6 +655,15 @@ static void render_player_rig(void)
 }
 #endif
 
+// Gravity / terminal-fall fallbacks (used by NPC physics below and the player
+// update further down). Defined here so they precede the first use.
+#ifndef AFN_GRAVITY
+#define AFN_GRAVITY 23
+#endif
+#ifndef AFN_TERMINAL_VEL
+#define AFN_TERMINAL_VEL 1536
+#endif
+
 #ifdef AFN_HAS_NPC_RIGS
 // Rigged (DSMA skinned) NPC instances. Each instance references a rig asset
 // blob (afn_npc_dsm/dsa/loop/tex...) and reads its world transform from the
@@ -666,6 +675,9 @@ static void render_player_rig(void)
 static int32_t s_npc_frame[AFN_NPC_RIG_COUNT];
 static int     s_npc_clip[AFN_NPC_RIG_COUNT];
 static int     s_npc_tex_id[AFN_NPC_RIG_COUNT][AFN_NPC_MAX_GROUPS];
+static int     s_npc_y[AFN_NPC_RIG_COUNT];        // 16.8 dynamic Y (gravity-driven)
+static int     s_npc_vy[AFN_NPC_RIG_COUNT];       // 16.8 vertical velocity
+static int     s_npc_on_ground[AFN_NPC_RIG_COUNT];
 static int     s_npc_inited = 0;
 
 static void load_npc_rig_textures(void)
@@ -673,6 +685,10 @@ static void load_npc_rig_textures(void)
     for (int i = 0; i < AFN_NPC_RIG_COUNT; i++) {
         s_npc_frame[i] = 0;
         s_npc_clip[i]  = afn_npc_defclip[i];
+        // Seed physics from the placed Y; gravity settles it onto the floor.
+        s_npc_y[i]  = afn_sprite_data[afn_npc_sprite[i]][1];
+        s_npc_vy[i] = 0;
+        s_npc_on_ground[i] = 0;
         int ng = afn_npc_matcount[i];
         for (int g = 0; g < ng && g < AFN_NPC_MAX_GROUPS; g++) {
             s_npc_tex_id[i][g] = 0;
@@ -732,12 +748,23 @@ static void render_npc_rigs(void)
         int spriteScale = afn_sprite_data[si][5];   // 256 = 1.0
         int rot = afn_sprite_data[si][7];            // Y rotation (brad)
 #ifdef AFN_COL_FACE_COUNT
-        // Snap the NPC onto the floor beneath it instead of floating at its
-        // placed Y — same as the player (rig origin rests at the floor surface).
-        // Probe from above the placed Y so a floor lower than placement is found.
+        // Per-NPC gravity + floor landing: enemies fall, settle on the ground,
+        // and can be knocked airborne (set s_npc_vy[i] > 0 to launch one). Same
+        // gravity/terminal constants as the player; the rig origin rests at the
+        // floor surface. With no launch impulse an NPC just sits on the floor.
+        int npcG    = afn_gravity      ? afn_gravity      : AFN_GRAVITY;
+        int npcTerm = afn_terminal_vel ? afn_terminal_vel : AFN_TERMINAL_VEL;
+        s_npc_vy[i] -= npcG;
+        if (s_npc_vy[i] < -npcTerm) s_npc_vy[i] = -npcTerm;
+        s_npc_y[i] += s_npc_vy[i];
         int npcFloorY;
-        if (afn_collide_floor(wx, wz, wy + afn_player_height, &npcFloorY))
-            wy = npcFloorY;
+        if (afn_collide_floor(wx, wz, s_npc_y[i] + afn_player_height, &npcFloorY)
+            && s_npc_y[i] <= npcFloorY) {
+            s_npc_y[i] = npcFloorY; s_npc_vy[i] = 0; s_npc_on_ground[i] = 1;
+        } else {
+            s_npc_on_ground[i] = 0;
+        }
+        wy = s_npc_y[i];
 #endif
 
         glPushMatrix();
@@ -753,6 +780,17 @@ static void render_npc_rigs(void)
 
         glPolyFmt(POLY_ALPHA(31) | AFN_RIG_CULLFMT(afn_npc_cull[i]) | POLY_FORMAT_LIGHT0);
         glColor3b(255, 255, 255);
+        // Per-NPC lighting, set in eye space (identity modelview) like the player
+        // rig: a camera-light NPC uses its baked Light X/Y headlamp; otherwise the
+        // scene's default directional light. Set explicitly each NPC so order/
+        // a previous NPC's headlamp can't bleed into this one.
+        glPushMatrix();
+        glLoadIdentity();
+        if (afn_npc_camlight[i])
+            glLight(0, RGB15(31, 31, 31), afn_npc_lightdx[i], afn_npc_lightdy[i], afn_npc_lightdz[i]);
+        else
+            glLight(0, RGB15(31, 31, 31), floattov10(-0.5f), floattov10(-0.7f), floattov10(-0.5f));
+        glPopMatrix(1);
         // One draw per material group, binding that group's texture (0 = flat).
         int ng = afn_npc_matcount[i];
         for (int g = 0; g < ng && g < AFN_NPC_MAX_GROUPS; g++) {
@@ -761,6 +799,11 @@ static void render_npc_rigs(void)
         }
         glPopMatrix(1);
     }
+    // Restore the scene's default directional light for next frame's meshes.
+    glPushMatrix();
+    glLoadIdentity();
+    glLight(0, RGB15(31, 31, 31), floattov10(-0.5f), floattov10(-0.7f), floattov10(-0.5f));
+    glPopMatrix(1);
 }
 #endif
 

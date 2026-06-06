@@ -1266,6 +1266,16 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 for (int i = 0; i < n; i++) { f << " "; valFn(i); f << ","; }
                 f << " };\n";
             };
+            // Camera-headlamp direction per NPC, baked from Light X/Y (same math
+            // as the player rig) and converted to v10 (1.9 fixed) for glLight.
+            auto npcLightV10 = [&](int i, int axis) -> int {
+                const auto& rg = rigs[sprites[npc[i]].riggedMeshIdx];
+                float ax = rg.lightX * 3.14159265f/180.0f, ay = rg.lightY * 3.14159265f/180.0f;
+                float cx = cosf(ax), sx = sinf(ax), cy = cosf(ay), sy = sinf(ay);
+                float d = (axis == 0) ? -cx*sy : (axis == 1) ? sx : -cx*cy;
+                if (d > 0.998f) d = 0.998f; if (d < -1.0f) d = -1.0f;
+                return (int)lroundf(d * 512.0f);
+            };
             perInst("u32* const*", "dsm",    [&](int i){ f << "afn_npc_A" << i << "_dsm"; });    // [i][group]
             perInst("u32* const*", "dsa",    [&](int i){ f << "afn_npc_A" << i << "_dsa"; });    // [i][clip]
             perInst("u8* const",   "loop",   [&](int i){ f << "afn_npc_A" << i << "_loop"; });
@@ -1279,6 +1289,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             perInst("int", "sprite", [&](int i){ f << npc[i]; });
             perInst("u8",  "cull",  [&](int i){ f << rigs[sprites[npc[i]].riggedMeshIdx].cullMode; });
             perInst("u8",  "alpha", [&](int i){ f << (rigs[sprites[npc[i]].riggedMeshIdx].useAlpha ? 1 : 0); });
+            perInst("u8",  "camlight", [&](int i){ f << (rigs[sprites[npc[i]].riggedMeshIdx].cameraLight ? 1 : 0); });
+            perInst("s16", "lightdx",  [&](int i){ f << npcLightV10(i, 0); });
+            perInst("s16", "lightdy",  [&](int i){ f << npcLightV10(i, 1); });
+            perInst("s16", "lightdz",  [&](int i){ f << npcLightV10(i, 2); });
             perInst("u8* const*",  "tex",    [&](int i){ f << "afn_npc_A" << i << "_tex"; });     // [i][group]
             perInst("u16* const*", "texpal", [&](int i){ f << "afn_npc_A" << i << "_texpal"; });
             perInst("u16* const",  "texw",   [&](int i){ f << "afn_npc_A" << i << "_texw"; });    // [i][group]
