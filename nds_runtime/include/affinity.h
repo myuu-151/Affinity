@@ -126,6 +126,10 @@ void afn_collide_walls(int *px, int *pz, int py);
 int  afn_collide_floor(int px, int pz, int py, int *outY);
 // Player-vs-NPC bounding-box push-out (defined only when AFN_HAS_NPC_RIGS).
 void afn_collide_npc_boxes(int *px, int *pz, int py);
+
+// Active player camera slot (Mode 4). 0 = scene default; 1..N blend to a preset
+// from afn_cam_slots[]. A SetCamera node writes this; update_camera reads it.
+extern int afn_active_camera;
 extern int afn_wall_collided_sprite;
 
 #endif // AFFINITY_H

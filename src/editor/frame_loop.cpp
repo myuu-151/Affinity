@@ -599,6 +599,7 @@ enum class VsNodeType : int {
     PlaySkelAnim,    // action: play a skeletal (glTF/DSMA) animation clip on the player rig (Mode 4)
     SkelAnim,        // data: outputs a skeletal animation clip index (feeds Play Skeletal Animation)
     SetSkelAnim,     // action: set the skeletal clip on a specific rigged NPC (Object + Clip, like Set Sprite Anim)
+    SetCamera,       // action: switch the player camera to a preset slot (Mode 4), smoothly blended
     COUNT
 };
 
@@ -912,6 +913,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Play Skeletal Anim",0xFF3355AA, 1, 1, 1, 0, {"Clip"}, {}, {} },
     { "Skeletal Animation",0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Set Skel Anim",   0xFF3355AA, 1, 1, 2, 0, {"Object", "Clip"}, {}, {} },
+    { "Set Camera",      0xFF6644AA, 1, 1, 1, 0, {"Slot (int)"}, {}, {} },
 };
 
 struct VsNode {
@@ -5524,6 +5526,11 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "\n");
         if (sp.riggedMeshIdx >= 0)
             fprintf(f, "spriteRig=%d,%d,%d\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0);
+        // Player camera presets (Mode 4): one line per slot.
+        for (const auto& cs : sp.cameraSlots)
+            fprintf(f, "camSlot=%s|%.4f|%.4f|%.4f|%.4f\n",
+                    cs.name.empty() ? "Camera" : cs.name.c_str(),
+                    cs.angle, cs.horizon, cs.distance, cs.height);
         if (sp.subSpriteCount > 0) {
             fprintf(f, "subSpriteCount=%d\n", sp.subSpriteCount);
             for (int si = 0; si < sp.subSpriteCount; si++) {
@@ -6695,6 +6702,14 @@ static bool LoadProject(const std::string& path)
                 sp2.rigAnimIdx = aIdx;
                 sp2.rigAnimPlay = (play != 0);
                 sp2.rigAnimClock = 0.0f;
+            }
+            else if (strncmp(line, "camSlot=", 8) == 0 && sSpriteCount > 0) {
+                char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14;
+                if (sscanf(line + 8, "%63[^|]|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy) >= 1) {
+                    CameraSlot cs; cs.name = csName[0] ? csName : "Camera";
+                    cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy;
+                    sSprites[sSpriteCount - 1].cameraSlots.push_back(cs);
+                }
             }
             else if (strncmp(line, "subSprite=", 10) == 0 && sSpriteCount > 0) {
                 FloorSprite& sp2 = sSprites[sSpriteCount - 1];
@@ -12743,6 +12758,50 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             if (ImGui::IsItemActivated()) UndoPush(sSelectedSprite, sp);
         }
 
+        // ---- Player camera presets (Mode 4) ----
+        if (sp.type == SpriteType::Player) {
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Camera Presets (Mode 4)");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Slot 0 is always the scene default camera. These are extra angles a SetCamera node blends to on an event (SetCamera Slot = 1, 2, ...). The camera keeps orbit-following the player.");
+            for (int ci = 0; ci < (int)sp.cameraSlots.size(); ci++) {
+                CameraSlot& cs = sp.cameraSlots[ci];
+                ImGui::PushID(40000 + ci);
+                char hdr[80];
+                snprintf(hdr, sizeof(hdr), "Slot %d: %s###cs", ci + 1, cs.name.empty() ? "Camera" : cs.name.c_str());
+                if (ImGui::TreeNode(hdr)) {
+                    char nb[64]; snprintf(nb, sizeof(nb), "%s", cs.name.c_str());
+                    if (ImGui::InputText("Name##csn", nb, sizeof(nb))) { cs.name = nb; sProjectDirty = true; }
+                    if (ImGui::DragFloat("Yaw (deg)##csa", &cs.angle, 1.0f, 0.0f, 360.0f, "%.0f")) sProjectDirty = true;
+                    if (ImGui::DragFloat("Pitch##csp", &cs.horizon, 1.0f, 0.0f, 160.0f, "%.0f")) sProjectDirty = true;
+                    if (ImGui::DragFloat("Distance##csd", &cs.distance, 1.0f, 0.0f, 400.0f, "%.0f")) sProjectDirty = true;
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = keep the scene's orbit distance");
+                    if (ImGui::DragFloat("Height##csh", &cs.height, 0.5f, -50.0f, 200.0f, "%.1f")) sProjectDirty = true;
+                    if (ImGui::SmallButton("Remove Slot##csr")) {
+                        sp.cameraSlots.erase(sp.cameraSlots.begin() + ci);
+                        sProjectDirty = true;
+                        ImGui::TreePop(); ImGui::PopID();
+                        break;
+                    }
+                    ImGui::TreePop();
+                }
+                ImGui::PopID();
+            }
+            if (ImGui::Button("+ Add Camera Slot##csadd")) {
+                // Seed a new slot from the scene's current camera so it starts as
+                // a copy of what you're looking at (sCamObj.angle is radians).
+                CameraSlot ncs;
+                ncs.angle = sCamObj.angle * 180.0f / 3.14159265f;
+                if (ncs.angle < 0.0f) ncs.angle += 360.0f;
+                ncs.horizon  = sCamObj.horizon;
+                ncs.height   = sCamObj.height;
+                ncs.distance = 0.0f;   // 0 = keep the scene's orbit distance
+                char nm[32]; snprintf(nm, sizeof(nm), "Camera %d", (int)sp.cameraSlots.size() + 1);
+                ncs.name = nm;
+                sp.cameraSlots.push_back(ncs);
+                sProjectDirty = true;
+            }
+        }
+
         // Sprite asset link
         {
             const char* preview = (sp.assetIdx >= 0 && sp.assetIdx < (int)sSpriteAssets.size())
@@ -15199,6 +15258,13 @@ void FrameTick(float dt)
                 exportCam.height = sCamObj.height;
                 exportCam.angle = sCamObj.angle;
                 exportCam.horizon = sCamObj.horizon;
+                // Player camera presets (Mode 4): copy slots from the player object.
+                for (const auto& fsCam : sSprites) {
+                    if (fsCam.type != SpriteType::Player) continue;
+                    for (const auto& cs : fsCam.cameraSlots)
+                        exportCam.camSlots.push_back({ cs.angle, cs.horizon, cs.distance, cs.height });
+                    break;
+                }
                 exportCam.walkSpeed = sCamObj.walkSpeed;
                 exportCam.sprintSpeed = sCamObj.sprintSpeed;
                 exportCam.walkEaseIn = sCamObj.walkEaseIn;
@@ -20012,6 +20078,7 @@ void FrameTick(float dt)
                 case VsNodeType::SkelAnim:      desc = "Outputs a skeletal animation clip index (feeds Play Skeletal Anim). Pick a rigged mesh and one of its glTF clips."; break;
                 case VsNodeType::PlaySkelAnim:  desc = "Plays a skeletal (glTF/DSMA) animation clip on the player rig in Mode 4. Wire a Skeletal Animation node into Clip. Loop/Once is set per-clip on the rig."; break;
                 case VsNodeType::SetSkelAnim:   desc = "Sets the skeletal clip on a specific rigged NPC (like Set Sprite Anim, but for glTF rigs). Wire an Object (Instance) into Object and a Skeletal Animation into Clip."; break;
+                case VsNodeType::SetCamera:     desc = "Switches the player camera to a preset slot (Mode 4). Slot 0 = scene default; 1..N are the camera presets authored on the player object. Wire a number into Slot. The camera orbit-follows the player at the slot's angle/pitch/distance/height, smoothly blended."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
@@ -20274,6 +20341,7 @@ void FrameTick(float dt)
                         case VsNodeType::SetPlayerWidth: return "_set_player_width";
                         case VsNodeType::PlaySkelAnim:  return "_play_skel_anim";
                         case VsNodeType::SetSkelAnim:   return "_set_skel_anim";
+                        case VsNodeType::SetCamera:     return "_set_camera";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -21053,6 +21121,20 @@ void FrameTick(float dt)
                         "    // cam_y = player_y + cam_h; // camera height above player",
                         fmtInt(infoNode.id, 0, "<height>"));
                     setActionFunc(infoNode, "_set_cam_h", bodyBuf);
+                    break;
+                }
+                case VsNodeType::SetCamera: {
+                    editorCode =
+                        "// Switch the player camera to a preset slot (Mode 4)";
+                    char bodyBuf[320];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_active_camera = %s;   // 0 = scene default, 1..N = player slots\n"
+                        "    // --- Runtime (fps3d.c update_camera) ---\n"
+                        "    // each frame eases the live camera toward the active slot:\n"
+                        "    //   cam_angle/orbit_dist/cam_h/m7_horizon ->\n"
+                        "    //     afn_cam_slots[afn_active_camera][0..3] (orbit-follow, blended)",
+                        fmtInt(infoNode.id, 0, "<slot>"));
+                    setActionFunc(infoNode, "_set_camera", bodyBuf);
                     break;
                 }
                 case VsNodeType::SetHorizon: {
@@ -23931,6 +24013,7 @@ void FrameTick(float dt)
                     case VsNodeType::SetPlayerWidth: suffix = "_set_player_width"; break;
                     case VsNodeType::PlaySkelAnim:  suffix = "_play_skel_anim"; break;
                     case VsNodeType::SetSkelAnim:   suffix = "_set_skel_anim"; break;
+                    case VsNodeType::SetCamera:     suffix = "_set_camera"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -24423,6 +24506,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::LookAt].name)) addNodeAt(VsNodeType::LookAt);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetSpriteAnim].name)) addNodeAt(VsNodeType::SetSpriteAnim);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetSkelAnim].name)) addNodeAt(VsNodeType::SetSkelAnim);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetCamera].name)) addNodeAt(VsNodeType::SetCamera);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP].name)) addNodeAt(VsNodeType::SetHP);

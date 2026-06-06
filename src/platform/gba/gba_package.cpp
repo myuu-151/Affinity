@@ -1947,6 +1947,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static FIXED afn_gravity;\n";
         f << "static FIXED afn_terminal_vel;\n";
         f << "// afn_player_height declared in main.c (before mapdata.h include)\n";
+        f << "static int   afn_player_width = 768;  // 3 px collision radius in 16.8\n";
         f << "static FIXED player_vy;\n";
         f << "// World-axis push velocity (boost pads / knockback). Mode 4 only.\n";
         f << "// SetVelocityX/Z write these; main.c adds them to player_x/z every\n";
@@ -2097,6 +2098,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::FreezePlayer:  return "_freeze";
         case GBAScriptNodeType::UnfreezePlayer:return "_unfreeze";
         case GBAScriptNodeType::SetCameraHeight:return "_set_cam_h";
+        case GBAScriptNodeType::SetCamera:     return "_set_camera";
         case GBAScriptNodeType::SetHorizon:    return "_set_horizon";
         case GBAScriptNodeType::Teleport:      return "_teleport";
         case GBAScriptNodeType::SetVisible:    return "_set_visible";
@@ -2224,6 +2226,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::OnRise:        return "_on_rise";
         case GBAScriptNodeType::ResetScene:    return "_reset_scene";
         case GBAScriptNodeType::SetPlayerHeight: return "_set_player_height";
+        case GBAScriptNodeType::SetPlayerWidth: return "_set_player_width";
         case GBAScriptNodeType::SetHudValue:    return "_set_hud_value";
         case GBAScriptNodeType::UpdateRespawnPos: return "_update_respawn_pos";
         default: return "";
@@ -2531,6 +2534,13 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_player_height = " << valFixed << ";\n";
                     break;
                 }
+                case GBAScriptNodeType::SetPlayerWidth: {
+                    auto* valData = findDataIn(action->id, 0);
+                    float val = valData ? resolveFloat(valData) : 3.0f;
+                    int valFixed = (int)(val * 256.0f);
+                    f << "    afn_player_width = " << valFixed << ";\n";
+                    break;
+                }
                 case GBAScriptNodeType::SetHudValue: {
                     auto* valData = findDataIn(action->id, 0);
                     auto* slotData = findDataIn(action->id, 1);
@@ -2588,6 +2598,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* hData = findDataIn(action->id, 0);
                     int h = hData ? resolveInt(hData) : 64;
                     f << "    cam_h = " << h << " << 8;\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetCamera: {
+                    auto* sData = findDataIn(action->id, 0);
+                    int s = sData ? resolveInt(sData) : 0;
+                    f << "    afn_active_camera = " << s << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::SetHorizon: {
@@ -4134,6 +4150,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_player_height = " << val << ";\n";
                     break;
                 }
+                case GBAScriptNodeType::SetPlayerWidth: {
+                    auto* valData = bpFindDataIn(action->id, 0);
+                    std::string val = valData ? bpResolveFloat(valData) : std::to_string((int)(3.0f * 256.0f));
+                    f << "    afn_player_width = " << val << ";\n";
+                    break;
+                }
                 case GBAScriptNodeType::SetHudValue: {
                     auto* valData = bpFindDataIn(action->id, 0);
                     auto* slotData = bpFindDataIn(action->id, 1);
@@ -4192,6 +4214,12 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* hData = bpFindDataIn(action->id, 0);
                     std::string h = hData ? bpResolveInt(hData) : "64";
                     f << "    cam_h = " << h << " << 8;\n";
+                    break;
+                }
+                case GBAScriptNodeType::SetCamera: {
+                    auto* sData = bpFindDataIn(action->id, 0);
+                    std::string s = sData ? bpResolveInt(sData) : "0";
+                    f << "    afn_active_camera = " << s << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::SetHorizon: {

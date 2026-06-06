@@ -1023,6 +1023,38 @@ int player_on_ground = 1;
 #define AFN_JUMP_CAM_AIR 30
 #endif
 
+#ifdef AFN_CAM_SLOT_COUNT
+// Player camera presets (Mode 4). afn_active_camera (set by a SetCamera node) is
+// 0 = scene default or 1..N = a slot in afn_cam_slots. We don't hard-cut: a blend
+// weight ramps in/out and the slot target itself eases, so default<->slot and
+// slot<->slot transitions all glide (~0.3s). At weight 0 the live default camera
+// is used unchanged, so normal play feel is preserved.
+static int s_camW = 0;                 // 0..256 blend weight
+static int s_slotAngle, s_slotDist, s_slotHeightOff, s_slotHorizon;  // eased targets
+static int s_camSlotInit = 0;
+static void update_camera_slot(void)
+{
+    int active = afn_active_camera;
+    if (active < 0 || active >= AFN_CAM_SLOT_COUNT) active = 0;
+    int wt = (active > 0) ? 256 : 0;
+    s_camW += (wt - s_camW) >> 3;
+    if (wt == 0 && s_camW < 2) s_camW = 0;
+    if (wt == 256 && s_camW > 254) s_camW = 256;
+    const int* S = afn_cam_slots[active];
+    if (!s_camSlotInit) {
+        s_slotAngle = S[0]; s_slotDist = S[1]; s_slotHeightOff = S[2]; s_slotHorizon = S[3];
+        s_camSlotInit = 1;
+    }
+    s_slotAngle     += (int)(int16_t)(S[0] - s_slotAngle) >> 3;   // brad, wrap-safe
+    s_slotDist      += (S[1] - s_slotDist) >> 3;
+    s_slotHeightOff += (S[2] - s_slotHeightOff) >> 3;
+    s_slotHorizon   += (S[3] - s_slotHorizon) >> 3;
+}
+// Blend a default value toward the slot value by the ramp weight.
+static inline int cam_blend(int def, int slot)     { return def + (((slot - def) * s_camW) >> 8); }
+static inline int cam_blend_ang(int def, int slot) { return def + (((int)(int16_t)(slot - def) * s_camW) >> 8); }
+#endif
+
 static void update_camera(void)
 {
     scanKeys();
@@ -1044,6 +1076,27 @@ static void update_camera(void)
     if (held & KEY_R) cam_h -= AFN_WALK_SPEED;
     if (held & KEY_LEFT)  orbit_angle += 512;
     if (held & KEY_RIGHT) orbit_angle -= 512;
+#endif
+
+#ifdef AFN_CAM_SLOT_COUNT
+    // Camera slot. Distance/height/pitch are held at the slot while it's active
+    // (blended below — they don't fight orbit input). Yaw is a ONE-SHOT: when the
+    // active slot changes to a preset, we ease orbit_angle to that slot's yaw,
+    // then release so the player can orbit freely from the new angle. Because we
+    // move orbit_angle itself (the single camera+control angle), movement stays
+    // camera-relative and the rig faces correctly during the swing — no spin.
+    update_camera_slot();
+    {
+        static int s_prevCam = 0, s_yawEasing = 0;
+        int active = afn_active_camera;
+        if (active < 0 || active >= AFN_CAM_SLOT_COUNT) active = 0;
+        if (active != s_prevCam) { s_prevCam = active; s_yawEasing = (active > 0); }
+        if (s_yawEasing) {
+            int d = (int)(int16_t)(afn_cam_slots[active][0] - orbit_angle);
+            orbit_angle = (uint16_t)(orbit_angle + (d >> 3));
+            if (d > -300 && d < 300) { orbit_angle = (uint16_t)afn_cam_slots[active][0]; s_yawEasing = 0; }
+        }
+    }
 #endif
 
 #ifdef AFN_ORBIT_MAX_DELTA
@@ -1709,6 +1762,9 @@ static void update_camera(void)
     // cam_x/z toward target with the same ease rate as movement so the cam
     // glides into position rather than rubber-banding.
     {
+#ifdef AFN_CAM_SLOT_COUNT
+        orbit_dist = cam_blend(AFN_ORBIT_DIST, s_slotDist);   // blend zoom toward slot
+#endif
         int targetX = player_x - ((g_sinf * orbit_dist) >> 8);
         int targetZ = player_z - ((g_cosf * orbit_dist) >> 8);
         int ddx = targetX - cam_x;
@@ -1776,6 +1832,10 @@ static void update_camera(void)
     // jumps instead of snapping. baseline = the player's spawn Y; adding the
     // smoothed delta gives the camera's tracked world Y.
     cam_h = AFN_PLAYER_BASE_Y + s_camYSmooth + AFN_CAM_H;
+#ifdef AFN_CAM_SLOT_COUNT
+    // Blend the height OFFSET so the camera still follows the player's Y.
+    cam_h = AFN_PLAYER_BASE_Y + s_camYSmooth + cam_blend(AFN_CAM_H, s_slotHeightOff);
+#endif
 
     // GrindBoost is a one-frame request: clear it every frame so it only applies
     // on frames the GrindBoost node actually fired. Gate the node with a held key
@@ -2120,6 +2180,9 @@ void afn_fps3d_update(void)
     int lookY = cam_h;
     {
         m7_horizon = (AFN_CAM_HORIZON * 6) / 5;     // GBA px → NDS px
+#ifdef AFN_CAM_SLOT_COUNT
+        m7_horizon = cam_blend((AFN_CAM_HORIZON * 6) / 5, s_slotHorizon);  // blend pitch toward slot
+#endif
         int screenOffPx = 96 - m7_horizon;          // +ve = look down
         lookY -= screenOffPx * 7;
     }

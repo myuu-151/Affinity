@@ -328,6 +328,19 @@ struct RiggedMeshAsset
 static constexpr int kMaxRiggedMeshAssets = 16;
 
 // A sprite object placed on the Mode 4 floor
+// A named camera preset attached to the player object. Runtime slot 0 is always
+// the scene default (the CameraStartObject); these are the extra slots a
+// SetCamera node switches to on an event. The camera still orbit-follows the
+// player, but with the slot's angle/pitch/distance/height (smoothly blended).
+struct CameraSlot
+{
+    std::string name = "Camera";  // label shown in the player panel + node dropdown
+    float angle    = 0.0f;        // orbit yaw, degrees
+    float horizon  = 60.0f;       // pitch / horizon line (editor px, same as CameraStartObject)
+    float distance = 0.0f;        // orbit distance, editor units (0 = keep scene default)
+    float height   = 14.0f;       // camera height, editor units
+};
+
 struct FloorSprite
 {
     float x = 0.0f;          // world X
@@ -403,6 +416,11 @@ struct FloorSprite
     int   rigAnimIdx = 0;        // which animation clip to play
     bool  rigAnimPlay = true;    // play the clip in the editor preview
     float rigAnimClock = 0.0f;   // transient editor-only playback frame (NOT serialized)
+
+    // Player camera presets (Mode 4). Only meaningful on the player object
+    // (type == Player). Runtime slot 0 = scene default; these are slots 1..N a
+    // SetCamera node switches to. See CameraSlot.
+    std::vector<CameraSlot> cameraSlots;
 };
 
 static constexpr int kMaxFloorSprites = 256; // supports up to 256 objects per scene, nearest 32 rendered via OAM

@@ -194,7 +194,24 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
     for (size_t i = 0; i < sprites.size(); i++)
         if (sprites[i].spriteType == 1) { playerIdx = (int)i; break; }
     f << "#define AFN_PLAYER_IDX " << playerIdx << "\n";
-    f << "#define AFN_ORBIT_DIST " << (int)(orbitDist / 4.0f * 256.0f) << "\n\n";
+    f << "#define AFN_ORBIT_DIST " << (int)(orbitDist / 4.0f * 256.0f) << "\n";
+
+    // Player camera presets (Mode 4). Slot 0 = scene default (the macros above);
+    // slots 1..N are SetCamera targets. Columns: {orbit yaw brad, orbit dist 16.8,
+    // height-offset 16.8, horizon px}. The runtime orbit-follows the player and
+    // smoothly blends the live camera toward the active slot.
+    f << "#define AFN_CAM_SLOT_COUNT " << (1 + (int)camera.camSlots.size()) << "\n";
+    f << "static const int afn_cam_slots[][4] = {\n";
+    f << "    { AFN_CAM_ANGLE, AFN_ORBIT_DIST, AFN_CAM_H, (AFN_CAM_HORIZON*6)/5 },\n";
+    for (const auto& cs : camera.camSlots) {
+        int ab = (int)lroundf(cs.angle * 65536.0f / 360.0f) & 0xFFFF;
+        int di = (cs.distance > 0.0f) ? (int)(cs.distance / 4.0f * 256.0f)
+                                      : (int)(orbitDist / 4.0f * 256.0f);
+        int he = (int)(cs.height / 4.0f * 256.0f);
+        int ho = (int)lroundf(cs.horizon * 6.0f / 5.0f);
+        f << "    { " << ab << ", " << di << ", " << he << ", " << ho << " },\n";
+    }
+    f << "};\n\n";
 
     // Sprites
     f << "#define AFN_SPRITE_COUNT " << (int)sprites.size() << "\n\n";
@@ -2396,6 +2413,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  tm_player_ty;\n";
         f << "extern int  afn_gravity;\n";
         f << "extern int  afn_terminal_vel;\n";
+        f << "extern int  afn_active_camera;\n";
         f << "extern int  afn_player_frozen;\n";
         f << "extern int  afn_anim_speed;\n";
         f << "extern unsigned int afn_rng;\n";
@@ -3263,6 +3281,12 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "    afn_start_x = afn_sprite_data[" << obj << "][0];\n";
                 f << "    afn_start_y = afn_sprite_data[" << obj << "][1];\n";
                 f << "    afn_start_z = afn_sprite_data[" << obj << "][2];\n";
+                break;
+            }
+            case GBAScriptNodeType::SetCamera: {
+                auto* slotData = findDataIn(a->id, 0);
+                int slot = slotData ? resolveInt(slotData) : 0;
+                f << "    afn_active_camera = " << slot << ";\n";
                 break;
             }
             default:

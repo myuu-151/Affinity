@@ -139,6 +139,7 @@ int  afn_grind_bleed = 6;
 int  tm_player_facing = 4;        // 4 = south, matches GBA default
 int  tm_move_timer;
 int  player_on_ground = 1;
+int  afn_active_camera = 0;       // Mode 4 camera slot (0 = scene default)
 
 void afn_script_state_init(void)
 {

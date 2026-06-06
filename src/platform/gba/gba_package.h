@@ -126,6 +126,10 @@ struct GBACameraExport
     bool  horizonClamp  = false; // clamp vertices above camera to horizon
     bool  dynamicHorizon = false; // shift horizon line based on floor slope
     bool  faceCull       = false; // skip faces with any vertex above camera
+    // Player camera presets (Mode 4): extra slots a SetCamera node blends to.
+    // Runtime slot 0 = the scene default above; these are slots 1..N.
+    struct CamSlot { float angle = 0.0f, horizon = 60.0f, distance = 0.0f, height = 14.0f; };
+    std::vector<CamSlot> camSlots;
 };
 
 // Mesh asset for GBA export
@@ -410,6 +414,7 @@ enum class GBAScriptNodeType : int {
     PlaySkelAnim,
     SkelAnim,
     SetSkelAnim,
+    SetCamera,
     COUNT
 };
 
