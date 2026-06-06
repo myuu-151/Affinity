@@ -731,11 +731,23 @@ static void render_npc_rigs(void)
         int wz = afn_sprite_data[si][2];
         int spriteScale = afn_sprite_data[si][5];   // 256 = 1.0
         int rot = afn_sprite_data[si][7];            // Y rotation (brad)
+#ifdef AFN_COL_FACE_COUNT
+        // Snap the NPC onto the floor beneath it instead of floating at its
+        // placed Y — same as the player (rig origin rests at the floor surface).
+        // Probe from above the placed Y so a floor lower than placement is found.
+        int npcFloorY;
+        if (afn_collide_floor(wx, wz, wy + afn_player_height, &npcFloorY))
+            wy = npcFloorY;
+#endif
 
         glPushMatrix();
         glTranslatef32(fx8_to_f32(wx), fx8_to_f32(wy), fx8_to_f32(wz));
+        // NPCs face their placed sprite rotation, exactly like mesh sprites — NO
+        // AFN_RIG_YAW_CORRECTION. That -90° only exists to cancel the +0x4000
+        // baseline baked into the player's player_move_angle; the NPC's `rot` is
+        // the raw placement brad (no baseline), so applying the correction would
+        // spin it 90° off its authored/editor orientation.
         if (rot != 0) glRotateYi(rot >> 1);
-        glRotateYi(AFN_RIG_YAW_CORRECTION >> 1);     // align baked model forward
         int s32 = spriteScale >> 2;                  // 8.8 (256=1.0) -> scale*64 f32
         glScalef32(s32, s32, s32);
 

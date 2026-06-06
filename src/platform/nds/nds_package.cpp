@@ -1191,26 +1191,29 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 }
                 f << "\n};\n";
             };
+            // 8bpp 256-colour texture (1 byte/texel, GL_RGB256) + RGB15 palette —
+            // MUST match the player rig's emitTex: fps3d.c uploads NPC textures as
+            // GL_RGB256, so a 4bpp/16-colour pack here is read back as garbage.
             auto emitTex = [&](const std::string& base, const GBARiggedMeshExport::MatGroup& g) {
-                int packed = (g.texW * g.texH + 1) / 2;
+                int npx = g.texW * g.texH;
                 f << "static const u8 " << base << "_tex[] = {";
-                for (int p = 0; p < packed; p++) {
-                    int lo = (p*2+0 < (int)g.texPixels.size()) ? (g.texPixels[p*2+0] & 0xF) : 0;
-                    int hi = (p*2+1 < (int)g.texPixels.size()) ? (g.texPixels[p*2+1] & 0xF) : 0;
-                    if (p % 16 == 0) f << "\n    ";
-                    f << ((hi << 4) | lo) << ",";
+                for (int i = 0; i < npx; i++) {
+                    int idx = (i < (int)g.texPixels.size()) ? g.texPixels[i] : 0;
+                    if (i % 16 == 0) f << "\n    ";
+                    f << idx << ",";
                 }
                 f << "\n};\n";
                 f << "static const u16 " << base << "_texpal[] = {";
-                for (int p = 0; p < 16; p++) {
-                    uint32_t c = g.texPalette[p];
+                for (int i = 0; i < 256; i++) {
+                    uint32_t c = g.texPalette[i];
                     uint16_t c15 = (uint16_t)((((c >> 0) & 0xFF) >> 3)
                                             | ((((c >> 8) & 0xFF) >> 3) << 5)
                                             | ((((c >> 16) & 0xFF) >> 3) << 10));
+                    if (i % 16 == 0) f << "\n    ";
                     char hex[8]; snprintf(hex, sizeof(hex), "0x%04X", c15);
-                    f << " " << hex << ",";
+                    f << hex << ",";
                 }
-                f << " };\n";
+                f << "\n};\n";
             };
             auto grpTextured = [](const GBARiggedMeshExport::MatGroup& g) {
                 return g.textured && !g.texPixels.empty() && g.texW > 0 && g.texH > 0;
