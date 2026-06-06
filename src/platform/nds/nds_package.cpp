@@ -2414,6 +2414,8 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_gravity;\n";
         f << "extern int  afn_terminal_vel;\n";
         f << "extern int  afn_active_camera;\n";
+        f << "extern int  afn_tank_camera;\n";
+        f << "extern int  afn_player_heading;\n";
         f << "extern int  afn_player_frozen;\n";
         f << "extern int  afn_anim_speed;\n";
         f << "extern unsigned int afn_rng;\n";
@@ -3287,6 +3289,22 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 auto* slotData = findDataIn(a->id, 0);
                 int slot = slotData ? resolveInt(slotData) : 0;
                 f << "    afn_active_camera = " << slot << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::TankCamera: {
+                auto* onData = findDataIn(a->id, 0);
+                int on = onData ? resolveInt(onData) : 0;
+                f << "    afn_tank_camera = " << on << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::TurnPlayer: {
+                auto* dirData = findDataIn(a->id, 0);
+                auto* speedData = findDataIn(a->id, 1);
+                int dir   = dirData   ? dirData->paramInt[0] : 0;
+                int speed = speedData ? resolveInt(speedData) : 512;
+                const char* sign = (dir == 0) ? "+" : "-";   // Left=0 turns +, Right=1 turns -
+                f << "    afn_tank_camera = 1;\n";            // Turn Player implies tank controls
+                f << "    afn_player_heading " << sign << "= " << speed << ";\n";
                 break;
             }
             default:

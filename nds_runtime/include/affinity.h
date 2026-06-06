@@ -130,6 +130,11 @@ void afn_collide_npc_boxes(int *px, int *pz, int py);
 // Active player camera slot (Mode 4). 0 = scene default; 1..N blend to a preset
 // from afn_cam_slots[]. A SetCamera node writes this; update_camera reads it.
 extern int afn_active_camera;
+// Tank controls (Mode 4). 1 = movement + rig facing follow afn_player_heading
+// (turned by a Turn Player node on the D-pad) while the camera orbits freely
+// (L/R). A TankCamera node writes afn_tank_camera.
+extern int afn_tank_camera;
+extern int afn_player_heading;   // tank facing, brad (Turn Player rotates it)
 extern int afn_wall_collided_sprite;
 
 #endif // AFFINITY_H

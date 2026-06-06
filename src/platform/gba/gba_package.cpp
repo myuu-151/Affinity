@@ -2099,6 +2099,8 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::UnfreezePlayer:return "_unfreeze";
         case GBAScriptNodeType::SetCameraHeight:return "_set_cam_h";
         case GBAScriptNodeType::SetCamera:     return "_set_camera";
+        case GBAScriptNodeType::TankCamera:    return "_tank_camera";
+        case GBAScriptNodeType::TurnPlayer:    return "_turn_player";
         case GBAScriptNodeType::SetHorizon:    return "_set_horizon";
         case GBAScriptNodeType::Teleport:      return "_teleport";
         case GBAScriptNodeType::SetVisible:    return "_set_visible";
@@ -2604,6 +2606,22 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* sData = findDataIn(action->id, 0);
                     int s = sData ? resolveInt(sData) : 0;
                     f << "    afn_active_camera = " << s << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::TankCamera: {
+                    auto* oData = findDataIn(action->id, 0);
+                    int o = oData ? resolveInt(oData) : 0;
+                    f << "    afn_tank_camera = " << o << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::TurnPlayer: {
+                    auto* dData = findDataIn(action->id, 0);
+                    auto* spData = findDataIn(action->id, 1);
+                    int dir = dData ? dData->paramInt[0] : 0;
+                    int speed = spData ? resolveInt(spData) : 512;
+                    const char* sign = (dir == 0) ? "+" : "-";
+                    f << "    afn_tank_camera = 1;\n";
+                    f << "    afn_player_heading " << sign << "= " << speed << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::SetHorizon: {
@@ -4220,6 +4238,22 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     auto* sData = bpFindDataIn(action->id, 0);
                     std::string s = sData ? bpResolveInt(sData) : "0";
                     f << "    afn_active_camera = " << s << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::TankCamera: {
+                    auto* oData = bpFindDataIn(action->id, 0);
+                    std::string o = oData ? bpResolveInt(oData) : "0";
+                    f << "    afn_tank_camera = " << o << ";\n";
+                    break;
+                }
+                case GBAScriptNodeType::TurnPlayer: {
+                    auto* dData = bpFindDataIn(action->id, 0);
+                    auto* spData = bpFindDataIn(action->id, 1);
+                    int dir = dData ? dData->paramInt[0] : 0;
+                    std::string speed = spData ? bpResolveInt(spData) : "512";
+                    const char* sign = (dir == 0) ? "+" : "-";
+                    f << "    afn_tank_camera = 1;\n";
+                    f << "    afn_player_heading " << sign << "= " << speed << ";\n";
                     break;
                 }
                 case GBAScriptNodeType::SetHorizon: {

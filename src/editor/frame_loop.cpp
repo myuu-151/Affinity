@@ -600,6 +600,8 @@ enum class VsNodeType : int {
     SkelAnim,        // data: outputs a skeletal animation clip index (feeds Play Skeletal Animation)
     SetSkelAnim,     // action: set the skeletal clip on a specific rigged NPC (Object + Clip, like Set Sprite Anim)
     SetCamera,       // action: switch the player camera to a preset slot (Mode 4), smoothly blended
+    TankCamera,      // action: lock the camera angle so orbit input rotates the player in place (tank cam)
+    TurnPlayer,      // action: rotate the tank heading (Direction + Speed); used with Tank Camera on the D-pad
     COUNT
 };
 
@@ -914,6 +916,8 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Skeletal Animation",0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Set Skel Anim",   0xFF3355AA, 1, 1, 2, 0, {"Object", "Clip"}, {}, {} },
     { "Set Camera",      0xFF6644AA, 1, 1, 1, 0, {"Slot (int)"}, {}, {} },
+    { "Tank Camera",     0xFF6644AA, 1, 1, 1, 0, {"On (int)"}, {}, {} },
+    { "Turn Player",     0xFF6644AA, 1, 1, 2, 0, {"Direction", "Speed (int)"}, {}, {} },
 };
 
 struct VsNode {
@@ -20079,6 +20083,8 @@ void FrameTick(float dt)
                 case VsNodeType::PlaySkelAnim:  desc = "Plays a skeletal (glTF/DSMA) animation clip on the player rig in Mode 4. Wire a Skeletal Animation node into Clip. Loop/Once is set per-clip on the rig."; break;
                 case VsNodeType::SetSkelAnim:   desc = "Sets the skeletal clip on a specific rigged NPC (like Set Sprite Anim, but for glTF rigs). Wire an Object (Instance) into Object and a Skeletal Animation into Clip."; break;
                 case VsNodeType::SetCamera:     desc = "Switches the player camera to a preset slot (Mode 4). Slot 0 = scene default; 1..N are the camera presets authored on the player object. Wire a number into Slot. The camera orbit-follows the player at the slot's angle/pitch/distance/height, smoothly blended."; break;
+                case VsNodeType::TankCamera:    desc = "Tank controls (Mode 4). Wire 1 to make movement + facing follow the player heading (turned by Turn Player on the D-pad) instead of the camera, so forward/back go where the tank points while the camera still orbits freely (L/R). Wire 0 for normal camera-relative controls."; break;
+                case VsNodeType::TurnPlayer:    desc = "Rotates the tank heading (used with Tank Camera). Wire a Direction (Left/Right) and a Speed (brads/frame). Put it on On Key Held(Left)/(Right) so the D-pad turns the player in place while L/R still orbit the camera."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
@@ -20342,6 +20348,8 @@ void FrameTick(float dt)
                         case VsNodeType::PlaySkelAnim:  return "_play_skel_anim";
                         case VsNodeType::SetSkelAnim:   return "_set_skel_anim";
                         case VsNodeType::SetCamera:     return "_set_camera";
+                        case VsNodeType::TankCamera:    return "_tank_camera";
+                        case VsNodeType::TurnPlayer:    return "_turn_player";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -21135,6 +21143,32 @@ void FrameTick(float dt)
                         "    //     afn_cam_slots[afn_active_camera][0..3] (orbit-follow, blended)",
                         fmtInt(infoNode.id, 0, "<slot>"));
                     setActionFunc(infoNode, "_set_camera", bodyBuf);
+                    break;
+                }
+                case VsNodeType::TankCamera: {
+                    editorCode =
+                        "// Tank camera: lock the camera angle, rotate the player instead";
+                    char bodyBuf[300];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    afn_tank_camera = %s;   // 1 = lock camera angle (tank), 0 = follow\n"
+                        "    // --- Runtime (fps3d.c update_camera) ---\n"
+                        "    // on enable: freezes the camera's world yaw; orbit input then\n"
+                        "    //   turns the player (orbit_angle) while the camera holds still,\n"
+                        "    //   so forward/back move relative to the player's facing.",
+                        fmtInt(infoNode.id, 0, "<on>"));
+                    setActionFunc(infoNode, "_tank_camera", bodyBuf);
+                    break;
+                }
+                case VsNodeType::TurnPlayer: {
+                    editorCode =
+                        "// Rotate the tank heading (used with Tank Camera)";
+                    setActionFunc(infoNode, "_turn_player",
+                        "    afn_tank_camera = 1;   // using Turn Player auto-enables tank controls\n"
+                        "    // Direction Left -> afn_player_heading += Speed; Right -> -= Speed\n"
+                        "    afn_player_heading += <speed>;\n"
+                        "    // --- Runtime (fps3d.c) ---\n"
+                        "    // Tank mode: movement uses brad_sin/cos(afn_player_heading) and\n"
+                        "    //   the rig faces it, so the player turns while the camera orbits free.");
                     break;
                 }
                 case VsNodeType::SetHorizon: {
@@ -24014,6 +24048,8 @@ void FrameTick(float dt)
                     case VsNodeType::PlaySkelAnim:  suffix = "_play_skel_anim"; break;
                     case VsNodeType::SetSkelAnim:   suffix = "_set_skel_anim"; break;
                     case VsNodeType::SetCamera:     suffix = "_set_camera"; break;
+                    case VsNodeType::TankCamera:    suffix = "_tank_camera"; break;
+                    case VsNodeType::TurnPlayer:    suffix = "_turn_player"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -24507,6 +24543,8 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetSpriteAnim].name)) addNodeAt(VsNodeType::SetSpriteAnim);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetSkelAnim].name)) addNodeAt(VsNodeType::SetSkelAnim);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetCamera].name)) addNodeAt(VsNodeType::SetCamera);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::TankCamera].name)) addNodeAt(VsNodeType::TankCamera);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::TurnPlayer].name)) addNodeAt(VsNodeType::TurnPlayer);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP].name)) addNodeAt(VsNodeType::SetHP);

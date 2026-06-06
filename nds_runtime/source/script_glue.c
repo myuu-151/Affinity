@@ -140,6 +140,8 @@ int  tm_player_facing = 4;        // 4 = south, matches GBA default
 int  tm_move_timer;
 int  player_on_ground = 1;
 int  afn_active_camera = 0;       // Mode 4 camera slot (0 = scene default)
+int  afn_tank_camera   = 0;       // Mode 4 tank controls: 1 = move/face by afn_player_heading (camera stays free)
+int  afn_player_heading = 0;      // Mode 4 tank heading (brad); a TurnPlayer node rotates it
 
 void afn_script_state_init(void)
 {

@@ -415,6 +415,8 @@ enum class GBAScriptNodeType : int {
     SkelAnim,
     SetSkelAnim,
     SetCamera,
+    TankCamera,
+    TurnPlayer,
     COUNT
 };
 

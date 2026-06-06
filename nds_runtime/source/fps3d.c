@@ -602,6 +602,11 @@ static void render_player_rig(void)
     uint16_t rig_face = player_moving
         ? (uint16_t)(player_move_angle + (orbit_angle << 1))
         : player_move_angle;
+    // Tank controls: the rig always faces its heading (turned by Turn Player),
+    // independent of the free camera. 0x4000 + heading<<1 matches the encoding
+    // the formula above uses so movement direction and facing line up.
+    if (afn_tank_camera)
+        rig_face = (uint16_t)(0x4000 + ((uint16_t)afn_player_heading << 1));
 
     glPushMatrix();
     glTranslatef32(fx8_to_f32(player_render_x),
@@ -1142,8 +1147,12 @@ static void update_camera(void)
     int fwd = afn_input_fwd, right = afn_input_right;
     if (fwd && right) { fwd = (fwd * 181) >> 8; right = (right * 181) >> 8; }
     int spd = afn_move_speed;
-    int dx = ((g_sinf * fwd + g_cosf * right) >> 8);
-    int dz = ((g_cosf * fwd - g_sinf * right) >> 8);
+    // Tank controls: move relative to the player heading (turned by D-pad via a
+    // Turn Player node), not the camera, so the camera can orbit independently.
+    int bsin = g_sinf, bcos = g_cosf;
+    if (afn_tank_camera) { bsin = brad_sin((uint16_t)afn_player_heading); bcos = brad_cos((uint16_t)afn_player_heading); }
+    int dx = ((bsin * fwd + bcos * right) >> 8);
+    int dz = ((bcos * fwd - bsin * right) >> 8);
     extern int afn_grind_rail;
     int mvX, mvZ;
     if (afn_grind_vel != 0) {
@@ -1977,6 +1986,7 @@ void afn_fps3d_init(void)
     afn_start_z = player_z;
 #endif
     orbit_dist = AFN_ORBIT_DIST;
+    afn_player_heading = AFN_CAM_ANGLE;   // tank heading starts facing forward
     // Camera = player - orbit_dist along view forward. NDS convention:
     // forward = (sin, cos), so camera sits at -(sin, cos) * dist behind player.
     cam_x = player_x - ((g_sinf * orbit_dist) >> 8);
