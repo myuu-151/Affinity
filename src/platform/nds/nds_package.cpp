@@ -258,6 +258,12 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         }
         f << "};\n\n";
     }
+    // Per-sprite "starts hidden" flag (attached effect sprites). The runtime
+    // inits afn_sprite_visible from this and a Cast Effect node flips it on.
+    f << "static const unsigned char afn_sprite_start_hidden[] = {";
+    if (sprites.empty()) f << " 0,";
+    for (size_t i = 0; i < sprites.size(); i++) f << " " << (sprites[i].startHidden ? 1 : 0) << ",";
+    f << " };\n\n";
 
     // ---- Grind rail paths (hand-authored centerlines, keyed by sprite index) ----
     // afn_rail_pts holds every rail's points concatenated in 16.8 fixed world
@@ -3305,6 +3311,18 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 const char* sign = (dir == 0) ? "+" : "-";   // Left=0 turns +, Right=1 turns -
                 f << "    afn_tank_camera = 1;\n";            // Turn Player implies tank controls
                 f << "    afn_player_heading " << sign << "= " << speed << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::CastEffect: {
+                auto* objData = findDataIn(a->id, 0);
+                std::string obj;
+                if (objData) obj = std::to_string(resolveInt(objData));
+                else if (curScript != &script) obj = "afn_bp_cur_spr_idx";   // self (blueprint owner)
+                else obj = "0";
+                // Show every hidden attached sprite parented to the target; the
+                // runtime restarts its anim on show and auto-hides at one-shot end.
+                f << "    { int _i; for (_i = 0; _i < NUM_SPRITES; _i++)\n";
+                f << "        if (afn_sprite_data[_i][12] == " << obj << " && afn_sprite_start_hidden[_i]) afn_sprite_visible[_i] = 1; }\n";
                 break;
             }
             default:

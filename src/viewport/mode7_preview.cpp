@@ -832,6 +832,7 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             float wz = sprites[i].z;
             if (subPass >= 0) {
                 const auto& sub = sprites[i].subSprites[subPass];
+                if (sub.hidden) continue;   // effect sprite: hidden in editor (declutter)
                 wx += sub.offsetX;
                 wy += sub.offsetY;
                 wz += sub.offsetZ;

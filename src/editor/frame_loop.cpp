@@ -602,6 +602,7 @@ enum class VsNodeType : int {
     SetCamera,       // action: switch the player camera to a preset slot (Mode 4), smoothly blended
     TankCamera,      // action: lock the camera angle so orbit input rotates the player in place (tank cam)
     TurnPlayer,      // action: rotate the tank heading (Direction + Speed); used with Tank Camera on the D-pad
+    CastEffect,      // action: show a hidden attached effect sprite on an object, play once, auto-hide
     COUNT
 };
 
@@ -918,6 +919,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Set Camera",      0xFF6644AA, 1, 1, 1, 0, {"Slot (int)"}, {}, {} },
     { "Tank Camera",     0xFF6644AA, 1, 1, 1, 0, {"On (int)"}, {}, {} },
     { "Turn Player",     0xFF6644AA, 1, 1, 2, 0, {"Direction", "Speed (int)"}, {}, {} },
+    { "Cast Effect",     0xFF3355AA, 1, 1, 1, 0, {"Object (int)"}, {}, {} },
 };
 
 struct VsNode {
@@ -5539,10 +5541,10 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "subSpriteCount=%d\n", sp.subSpriteCount);
             for (int si = 0; si < sp.subSpriteCount; si++) {
                 const auto& sub = sp.subSprites[si];
-                fprintf(f, "subSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d\n",
+                fprintf(f, "subSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d\n",
                     sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
                     sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
-                    sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0);
+                    sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0, sub.hidden ? 1 : 0);
             }
         }
         // Grind rail path (per mesh object). One header + one line per point.
@@ -6723,15 +6725,16 @@ static bool LoadProject(const std::string& path)
                     if (sp2.subSprites[si].assetIdx != -1) loaded++;
                 if (loaded < sp2.subSpriteCount) {
                     auto& sub = sp2.subSprites[loaded];
-                    int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0; float sScale = 1.0f;
-                    int m = sscanf(line + 10, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d",
+                    int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0; float sScale = 1.0f;
+                    int m = sscanf(line + 10, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d",
                         &sub.assetIdx, &sub.animIdx, &aEn,
-                        &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded);
+                        &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden);
                     sub.animEnabled = (aEn != 0);
                     sub.drawOrder = (m >= 7) ? dOrder : 1;
                     sub.scale = (m >= 8) ? sScale : 1.0f;
                     sub.forceStatic = (m >= 9) ? (fStatic != 0) : false;
                     sub.grounded = (m >= 10) ? (fGrounded != 0) : false;
+                    sub.hidden = (m >= 11) ? (fHidden != 0) : false;
                 }
             }
             else if (strncmp(line, "railPath=", 9) == 0 && sSpriteCount > 0) {
@@ -13175,6 +13178,8 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Force static rendering (same frame at all angles)");
             ImGui::Checkbox("Grounded##sub", &sub.grounded);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stay on the ground (Y=0) instead of following parent height");
+            ImGui::Checkbox("Hidden (effect)##sub", &sub.hidden);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Start invisible (and hidden here so it doesn't clutter the view). A Cast Effect node shows it, plays its anim once, then auto-hides it. Set the anim to Once.");
             // Animation selector for sub-sprite
             if (sub.assetIdx >= 0 && sub.assetIdx < (int)sSpriteAssets.size()) {
                 SpriteAsset& subAsset = sSpriteAssets[sub.assetIdx];
@@ -15244,6 +15249,7 @@ void FrameTick(float dt)
                             subSe.oamPrio = (sub.drawOrder == 0) ? 1 : 0;
                             subSe.forceStatic = sub.forceStatic;
                             subSe.grounded = sub.grounded;
+                            subSe.startHidden = sub.hidden;
                             subSe.parentIdx = parentExportIdx;
                             subSe.offsetX = sub.offsetX;
                             subSe.offsetY = sub.offsetY;
@@ -20085,6 +20091,7 @@ void FrameTick(float dt)
                 case VsNodeType::SetCamera:     desc = "Switches the player camera to a preset slot (Mode 4). Slot 0 = scene default; 1..N are the camera presets authored on the player object. Wire a number into Slot. The camera orbit-follows the player at the slot's angle/pitch/distance/height, smoothly blended."; break;
                 case VsNodeType::TankCamera:    desc = "Tank controls (Mode 4). Wire 1 to make movement + facing follow the player heading (turned by Turn Player on the D-pad) instead of the camera, so forward/back go where the tank points while the camera still orbits freely (L/R). Wire 0 for normal camera-relative controls."; break;
                 case VsNodeType::TurnPlayer:    desc = "Rotates the tank heading (used with Tank Camera). Wire a Direction (Left/Right) and a Speed (brads/frame). Put it on On Key Held(Left)/(Right) so the D-pad turns the player in place while L/R still orbit the camera."; break;
+                case VsNodeType::CastEffect:    desc = "Plays a combat/spell effect on a target object. Attach a sprite to that object and tick its 'Hidden' box (it starts invisible). Wire the target into Object: on trigger the effect shows, plays its animation once, and auto-hides. Set the effect sprite's animation to Once so it cleans up."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
@@ -20350,6 +20357,7 @@ void FrameTick(float dt)
                         case VsNodeType::SetCamera:     return "_set_camera";
                         case VsNodeType::TankCamera:    return "_tank_camera";
                         case VsNodeType::TurnPlayer:    return "_turn_player";
+                        case VsNodeType::CastEffect:    return "_cast_effect";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -21157,6 +21165,22 @@ void FrameTick(float dt)
                         "    //   so forward/back move relative to the player's facing.",
                         fmtInt(infoNode.id, 0, "<on>"));
                     setActionFunc(infoNode, "_tank_camera", bodyBuf);
+                    break;
+                }
+                case VsNodeType::CastEffect: {
+                    editorCode =
+                        "// Show a hidden attached effect on an object, play once, auto-hide";
+                    char bodyBuf[360];
+                    snprintf(bodyBuf, sizeof(bodyBuf),
+                        "    // Show every hidden attached sprite parented to the target object.\n"
+                        "    { int _i; for (_i = 0; _i < NUM_SPRITES; _i++)\n"
+                        "        if (afn_sprite_data[_i][12] == %s && afn_sprite_start_hidden[_i])\n"
+                        "            afn_sprite_visible[_i] = 1; }\n"
+                        "    // --- Runtime (sprites.c) ---\n"
+                        "    // becoming visible restarts the anim at frame 0; a start-hidden\n"
+                        "    // sprite auto-hides (afn_sprite_visible=0) when its one-shot anim ends.",
+                        fmtInt(infoNode.id, 0, "<object>"));
+                    setActionFunc(infoNode, "_cast_effect", bodyBuf);
                     break;
                 }
                 case VsNodeType::TurnPlayer: {
@@ -24050,6 +24074,7 @@ void FrameTick(float dt)
                     case VsNodeType::SetCamera:     suffix = "_set_camera"; break;
                     case VsNodeType::TankCamera:    suffix = "_tank_camera"; break;
                     case VsNodeType::TurnPlayer:    suffix = "_turn_player"; break;
+                    case VsNodeType::CastEffect:    suffix = "_cast_effect"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -24545,6 +24570,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetCamera].name)) addNodeAt(VsNodeType::SetCamera);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::TankCamera].name)) addNodeAt(VsNodeType::TankCamera);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::TurnPlayer].name)) addNodeAt(VsNodeType::TurnPlayer);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CastEffect].name)) addNodeAt(VsNodeType::CastEffect);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP].name)) addNodeAt(VsNodeType::SetHP);

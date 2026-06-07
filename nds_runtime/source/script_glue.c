@@ -147,7 +147,8 @@ void afn_script_state_init(void)
 {
     int i;
     for (i = 0; i < NUM_SPRITES; i++) {
-        afn_sprite_visible[i]    = 1;
+        // Attached effect sprites start hidden; a Cast Effect node reveals them.
+        afn_sprite_visible[i]    = afn_sprite_start_hidden[i] ? 0 : 1;
         afn_sprite_flip[i]       = 0;
         afn_collision_enabled[i] = 1;
         afn_hp[i]                = 0;

@@ -101,8 +101,15 @@ void afn_sprite_update(void)
         int aIdx = afn_sprite_data[si][4];
         if (aIdx < 0 || aIdx >= AFN_ASSET_COUNT) continue;
 #if defined(AFN_HAS_SCRIPT) && defined(NUM_SPRITES)
-        // DestroyObject / SetVisible toggle this; skip rendering when hidden.
-        if (si < NUM_SPRITES && !afn_sprite_visible[si]) continue;
+        // DestroyObject / SetVisible / Cast Effect toggle this; skip when hidden.
+        // When an effect sprite becomes visible (0->1), restart its anim at frame
+        // 0 so a re-cast always plays from the start.
+        static unsigned char s_prevVis[AFN_SPRITE_COUNT];
+        if (si < NUM_SPRITES) {
+            if (afn_sprite_visible[si] && !s_prevVis[si]) s_animStart[si] = s_animTick;
+            s_prevVis[si] = afn_sprite_visible[si];
+            if (!afn_sprite_visible[si]) continue;
+        }
 #endif
 
         int wx = afn_sprite_data[si][0];
@@ -283,6 +290,12 @@ void afn_sprite_update(void)
             animFrame = frameStart + local;
         }
         if (animFrame >= frameCount) animFrame = frameCount - 1;
+#if defined(AFN_HAS_SCRIPT) && defined(NUM_SPRITES)
+        // Cast Effect sprites (started hidden) auto-hide when their one-shot
+        // animation finishes, so a thunder/hit-spark cleans itself up.
+        if (oneShotDone && si < NUM_SPRITES && afn_sprite_start_hidden[si])
+            afn_sprite_visible[si] = 0;
+#endif
         // SetSpriteAnim one-shot revert (mirrors GBA main.c:8028-8033):
         // when a script-driven override finishes its non-looping cycle, clear
         // the override and snap back to the asset's default anim so it

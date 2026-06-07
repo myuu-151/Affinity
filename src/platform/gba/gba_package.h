@@ -28,6 +28,7 @@ struct GBASpriteExport
     float offsetX = 0, offsetY = 0, offsetZ = 0; // offset from parent
     bool  forceStatic = false; // force static rendering (ignore directions)
     bool  grounded = false;    // stay on ground (Y=0) instead of following parent Y
+    bool  startHidden = false; // start invisible; a Cast Effect node shows + one-shots it
     uint32_t drawBehindExc = 0; // bitmask: bit N = mesh sprite[N] is exempt from draw-behind
     bool skipProximity = false; // true = always render regardless of draw distance
     bool billboard = false;     // mesh: always face camera (Y-axis billboard)
@@ -417,6 +418,7 @@ enum class GBAScriptNodeType : int {
     SetCamera,
     TankCamera,
     TurnPlayer,
+    CastEffect,
     COUNT
 };
 

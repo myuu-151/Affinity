@@ -381,6 +381,8 @@ struct FloorSprite
         float scale = 1.0f;  // size multiplier
         bool  forceStatic = false; // render as static (same frame at all angles)
         bool  grounded = false;    // stay on ground (Y=0) instead of following parent Y
+        bool  hidden = false;      // start invisible (editor + runtime); a Cast Effect node
+                                   // shows it, plays its anim once, then auto-hides it
     };
     static constexpr int kMaxSubSprites = 4;
     SubSprite subSprites[kMaxSubSprites];

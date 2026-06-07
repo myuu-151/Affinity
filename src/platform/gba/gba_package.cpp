@@ -2101,6 +2101,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         case GBAScriptNodeType::SetCamera:     return "_set_camera";
         case GBAScriptNodeType::TankCamera:    return "_tank_camera";
         case GBAScriptNodeType::TurnPlayer:    return "_turn_player";
+        case GBAScriptNodeType::CastEffect:    return "_cast_effect";
         case GBAScriptNodeType::SetHorizon:    return "_set_horizon";
         case GBAScriptNodeType::Teleport:      return "_teleport";
         case GBAScriptNodeType::SetVisible:    return "_set_visible";
@@ -2624,6 +2625,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_player_heading " << sign << "= " << speed << ";\n";
                     break;
                 }
+                case GBAScriptNodeType::CastEffect:
+                    f << "    /* Cast Effect: NDS-only */\n";
+                    break;
                 case GBAScriptNodeType::SetHorizon: {
                     auto* sData = findDataIn(action->id, 0);
                     int s = sData ? resolveInt(sData) : 60;
@@ -4256,6 +4260,9 @@ static bool GenerateMapData(const std::string& runtimeDir,
                     f << "    afn_player_heading " << sign << "= " << speed << ";\n";
                     break;
                 }
+                case GBAScriptNodeType::CastEffect:
+                    f << "    /* Cast Effect: NDS-only */\n";
+                    break;
                 case GBAScriptNodeType::SetHorizon: {
                     auto* sData = bpFindDataIn(action->id, 0);
                     std::string s = sData ? bpResolveInt(sData) : "60";
