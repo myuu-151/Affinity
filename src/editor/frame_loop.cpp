@@ -4113,7 +4113,10 @@ static int sMapSelectedScene = 0;
 
 static void SaveMapSceneState(MapScene& sc)
 {
-    memcpy(sc.sprites, sSprites, sizeof(sSprites));
+    // FloorSprite holds a std::vector (cameraSlots) now — a raw memcpy would
+    // bitwise-copy the vector's heap pointer, aliasing the buffer (slot loss +
+    // double-free crash on close). Assign element-wise for proper copy semantics.
+    for (int i = 0; i < kMaxFloorSprites; i++) sc.sprites[i] = sSprites[i];
     sc.spriteCount = sSpriteCount;
     sc.camera = sCamObj;
     sc.camEditorScale = sCamObjEditorScale;
@@ -4132,7 +4135,7 @@ static void SaveMapSceneState(MapScene& sc)
 
 static void LoadMapSceneState(const MapScene& sc)
 {
-    memcpy(sSprites, sc.sprites, sizeof(sSprites));
+    for (int i = 0; i < kMaxFloorSprites; i++) sSprites[i] = sc.sprites[i];   // element-wise (FloorSprite has a std::vector)
     sSpriteCount = sc.spriteCount;
     sSelectedSprite = -1;
     sCamObj = sc.camera;
@@ -4316,7 +4319,10 @@ static bool LoadM7FloorTexture(const std::string& path)
 
 static void SaveM7SceneState(MapScene& sc)
 {
-    memcpy(sc.sprites, sSprites, sizeof(sSprites));
+    // FloorSprite holds a std::vector (cameraSlots) now — a raw memcpy would
+    // bitwise-copy the vector's heap pointer, aliasing the buffer (slot loss +
+    // double-free crash on close). Assign element-wise for proper copy semantics.
+    for (int i = 0; i < kMaxFloorSprites; i++) sc.sprites[i] = sSprites[i];
     sc.spriteCount = sSpriteCount;
     sc.camera = sCamObj;
     sc.camEditorScale = sCamObjEditorScale;
@@ -4334,7 +4340,7 @@ static void SaveM7SceneState(MapScene& sc)
 
 static void LoadM7SceneState(const MapScene& sc)
 {
-    memcpy(sSprites, sc.sprites, sizeof(sSprites));
+    for (int i = 0; i < kMaxFloorSprites; i++) sSprites[i] = sc.sprites[i];   // element-wise (FloorSprite has a std::vector)
     sSpriteCount = sc.spriteCount;
     sSelectedSprite = -1;
     sCamObj = sc.camera;
@@ -6029,6 +6035,10 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "\n");
             if (sp.riggedMeshIdx >= 0)
                 fprintf(f, "msSpriteRig=%d,%d,%d\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0);
+            for (const auto& cs : sp.cameraSlots)
+                fprintf(f, "msCamSlot=%s|%.4f|%.4f|%.4f|%.4f\n",
+                        cs.name.empty() ? "Camera" : cs.name.c_str(),
+                        cs.angle, cs.horizon, cs.distance, cs.height);
             if (sp.subSpriteCount > 0) {
                 fprintf(f, "msSubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si = 0; si < sp.subSpriteCount; si++) {
@@ -6168,6 +6178,10 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "\n");
             if (sp.riggedMeshIdx >= 0)
                 fprintf(f, "m7SpriteRig=%d,%d,%d\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0);
+            for (const auto& cs : sp.cameraSlots)
+                fprintf(f, "m7CamSlot=%s|%.4f|%.4f|%.4f|%.4f\n",
+                        cs.name.empty() ? "Camera" : cs.name.c_str(),
+                        cs.angle, cs.horizon, cs.distance, cs.height);
             if (sp.subSpriteCount > 0) {
                 fprintf(f, "m7SubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si2 = 0; si2 < sp.subSpriteCount; si2++) {
@@ -6686,6 +6700,7 @@ static bool LoadProject(const std::string& path)
                         }
                     }
                     sp.subSpriteCount = 0;
+                    sp.cameraSlots.clear();   // following camSlot= lines refill it (no stale carryover on reload)
                     sp.selected = false;
                     // Reset rig link; a following spriteRig= line restores it.
                     sp.riggedMeshIdx = -1;
@@ -7936,6 +7951,17 @@ static bool LoadProject(const std::string& path)
                     sp2.rigAnimPlay = (play != 0); sp2.rigAnimClock = 0.0f;
                 }
             }
+            else if (strncmp(line, "msCamSlot=", 10) == 0 && !sMapScenes.empty()) {
+                MapScene& ms = sMapScenes.back();
+                if (ms.spriteCount > 0) {
+                    char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14;
+                    if (sscanf(line + 10, "%63[^|]|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy) >= 1) {
+                        CameraSlot cs; cs.name = csName[0] ? csName : "Camera";
+                        cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy;
+                        ms.sprites[ms.spriteCount - 1].cameraSlots.push_back(cs);
+                    }
+                }
+            }
             else if (strncmp(line, "msSubSpriteCount=", 17) == 0 && !sMapScenes.empty()) {
                 MapScene& ms = sMapScenes.back();
                 if (ms.spriteCount > 0) {
@@ -8378,6 +8404,17 @@ static bool LoadProject(const std::string& path)
                     FloorSprite& sp2 = ms.sprites[ms.spriteCount - 1];
                     sp2.riggedMeshIdx = rIdx; sp2.rigAnimIdx = aIdx;
                     sp2.rigAnimPlay = (play != 0); sp2.rigAnimClock = 0.0f;
+                }
+            }
+            else if (strncmp(line, "m7CamSlot=", 10) == 0 && !sM7Scenes.empty()) {
+                MapScene& ms = sM7Scenes.back();
+                if (ms.spriteCount > 0) {
+                    char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14;
+                    if (sscanf(line + 10, "%63[^|]|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy) >= 1) {
+                        CameraSlot cs; cs.name = csName[0] ? csName : "Camera";
+                        cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy;
+                        ms.sprites[ms.spriteCount - 1].cameraSlots.push_back(cs);
+                    }
                 }
             }
             else if (strncmp(line, "m7SubSpriteCount=", 17) == 0 && !sM7Scenes.empty()) {
