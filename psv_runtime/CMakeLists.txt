@@ -8,6 +8,7 @@ endif()
 
 project(affinity_psv C)
 include("$ENV{VITASDK}/share/vita.cmake")
+include_directories(${CMAKE_SOURCE_DIR}/include)
 
 set(VITA_APP_NAME "Affinity")
 set(VITA_TITLEID  "AFNT00002")
