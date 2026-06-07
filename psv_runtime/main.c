@@ -11,12 +11,153 @@
 #include <string.h>
 
 #include "psv_mapdata.h"   // defines afn_meshes / afn_sprites / camera start
+#include "psv_rig.h"       // player rig data (skinned glTF), if AFN_HAS_PLAYER_RIG
 
 #define SCR_W 960.0f
 #define SCR_H 544.0f
 #define DEG2RAD (3.14159265f / 180.0f)
 
 static GLuint s_meshTex[256];   // one GL texture per mesh (0 = none)
+
+// ---------------------------------------------------------------------------
+// Player rig: CPU rigid skinning (ported verbatim from psp_runtime/rig.c) +
+// vitaGL draw. baseVerts are bone-local; clip frames are absolute bone poses.
+// ---------------------------------------------------------------------------
+#ifdef AFN_HAS_PLAYER_RIG
+#ifndef AFN_RIG_YAW_OFFSET
+#define AFN_RIG_YAW_OFFSET 0.0f
+#endif
+int afn_rig_clip = AFN_PLAYER_DEFAULT_CLIP;   // clip selector (script-set; local for bring-up)
+static AfnRigVertex s_skinned[AFN_RIG_VERTS];
+static float  s_bonemat[AFN_RIG_BONES][12];   // 3x4 row-major per bone
+static float  s_rframe = 0.0f;
+static int    s_rclip  = AFN_PLAYER_DEFAULT_CLIP;
+static GLuint s_rigTex[AFN_RIG_MATS];
+
+static void pose_to_mat(const float* p, float* m) {
+    float px=p[0],py=p[1],pz=p[2], w=p[3],x=p[4],y=p[5],z=p[6];
+    float n = w*w+x*x+y*y+z*z;
+    if (n > 1e-8f) { n = 1.0f/sqrtf(n); w*=n; x*=n; y*=n; z*=n; }
+    float xx=x*x,yy=y*y,zz=z*z,xy=x*y,xz=x*z,yz=y*z,wx=w*x,wy=w*y,wz=w*z;
+    m[0]=1-2*(yy+zz); m[1]=2*(xy-wz);   m[2]=2*(xz+wy);   m[3]=px;
+    m[4]=2*(xy+wz);   m[5]=1-2*(xx+zz); m[6]=2*(yz-wx);   m[7]=py;
+    m[8]=2*(xz-wy);   m[9]=2*(yz+wx);   m[10]=1-2*(xx+yy);m[11]=pz;
+}
+static void build_bone_mats(int clip, float frame) {
+    const float* cd = afn_rig_clip_ptrs[clip];
+    int nf = afn_rig_clip_frames[clip]; if (nf < 1) nf = 1;
+    int f0 = (int)frame; if (f0 < 0) f0 = 0; if (f0 >= nf) f0 = nf - 1;
+    int f1 = f0 + 1; if (f1 >= nf) f1 = afn_rig_clip_loop[clip] ? 0 : nf - 1;
+    float t = frame - (float)((int)frame);
+    for (int b = 0; b < AFN_RIG_BONES; b++) {
+        const float* p0 = &cd[(f0 * AFN_RIG_BONES + b) * 7];
+        const float* p1 = &cd[(f1 * AFN_RIG_BONES + b) * 7];
+        float p[7];
+        p[0]=p0[0]+(p1[0]-p0[0])*t; p[1]=p0[1]+(p1[1]-p0[1])*t; p[2]=p0[2]+(p1[2]-p0[2])*t;
+        float d = p0[3]*p1[3]+p0[4]*p1[4]+p0[5]*p1[5]+p0[6]*p1[6];
+        float s = (d < 0.0f) ? -1.0f : 1.0f;
+        p[3]=p0[3]+(p1[3]*s-p0[3])*t; p[4]=p0[4]+(p1[4]*s-p0[4])*t;
+        p[5]=p0[5]+(p1[5]*s-p0[5])*t; p[6]=p0[6]+(p1[6]*s-p0[6])*t;
+        pose_to_mat(p, s_bonemat[b]);
+    }
+}
+static void skin(void) {
+    for (int v = 0; v < AFN_RIG_VERTS; v++) {
+        const float* m = s_bonemat[afn_rig_vbone[v]];
+        float x=afn_rig_vpos[v*3+0], y=afn_rig_vpos[v*3+1], z=afn_rig_vpos[v*3+2];
+        s_skinned[v].x = m[0]*x+m[1]*y+m[2]*z+m[3];
+        s_skinned[v].y = m[4]*x+m[5]*y+m[6]*z+m[7];
+        s_skinned[v].z = m[8]*x+m[9]*y+m[10]*z+m[11];
+        float nx=afn_rig_vnorm[v*3+0], ny=afn_rig_vnorm[v*3+1], nz=afn_rig_vnorm[v*3+2];
+        float wx=m[0]*nx+m[1]*ny+m[2]*nz, wy=m[4]*nx+m[5]*ny+m[6]*nz, wz=m[8]*nx+m[9]*ny+m[10]*nz;
+        float nl=wx*wx+wy*wy+wz*wz; if (nl>1e-12f){nl=1.0f/sqrtf(nl);wx*=nl;wy*=nl;wz*=nl;}
+        s_skinned[v].nx=wx; s_skinned[v].ny=wy; s_skinned[v].nz=wz;
+    }
+}
+static void rig_init(void) {
+    for (int v = 0; v < AFN_RIG_VERTS; v++) {
+        s_skinned[v].u = afn_rig_vuv[v*2+0]; s_skinned[v].v = afn_rig_vuv[v*2+1];
+        s_skinned[v].color = 0xFFFFFFFF;
+    }
+    for (int g = 0; g < AFN_RIG_MATS; g++) {
+        s_rigTex[g] = 0;
+        if (afn_rig_tex_ptrs[g] && afn_rig_tex_w[g] > 0 && afn_rig_tex_h[g] > 0) {
+            glGenTextures(1, &s_rigTex[g]);
+            glBindTexture(GL_TEXTURE_2D, s_rigTex[g]);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, afn_rig_tex_w[g], afn_rig_tex_h[g], 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, afn_rig_tex_ptrs[g]);
+        }
+    }
+}
+// Draw the rig at (px,py,pz) facing yawDeg. view = current view matrix (col-major).
+static void rig_render(const float* view, float px, float py, float pz, float yawDeg) {
+    if (afn_rig_clip >= 0 && afn_rig_clip < AFN_RIG_CLIPS && afn_rig_clip != s_rclip) {
+        s_rclip = afn_rig_clip; s_rframe = 0.0f;
+    }
+    s_rframe += 0.4f;
+    int nf = afn_rig_clip_frames[s_rclip];
+    if (nf > 1) {
+        if (afn_rig_clip_loop[s_rclip]) { while (s_rframe >= (float)nf) s_rframe -= (float)nf; }
+        else if (s_rframe > (float)(nf-1)) s_rframe = (float)(nf-1);
+    } else s_rframe = 0.0f;
+    build_bone_mats(s_rclip, s_rframe);
+    skin();
+
+    // Orient: up = world up (no slope tilt yet), forward = yaw heading.
+    float yr = yawDeg * DEG2RAD + AFN_RIG_YAW_OFFSET;
+    float fx = sinf(yr), fz = cosf(yr);
+    float S = AFN_PLAYER_RIG_SCALE;
+    float model[16] = {       // column-major: +X right, +Y up, +Z forward
+        fz*S, 0, -fx*S, 0,    // right = up x fwd = (cos, 0, -sin)
+        0,    S, 0,    0,     // up
+        fx*S, 0, fz*S, 0,     // forward
+        px,   py, pz,  1
+    };
+
+    glMatrixMode(GL_MODELVIEW);
+    // Headlamp: directional light fixed in eye space (set under identity MV).
+    glLoadIdentity();
+    GLfloat ldir[4] = { AFN_PLAYER_RIG_LIGHT_DX, AFN_PLAYER_RIG_LIGHT_DY, AFN_PLAYER_RIG_LIGHT_DZ, 0.0f };
+    GLfloat white[4] = { 1,1,1,1 }, amb[4] = { 0.28f,0.28f,0.28f,1 };
+    glLightfv(GL_LIGHT0, GL_POSITION, ldir);
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, white);
+    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, amb);
+    glEnable(GL_LIGHTING); glEnable(GL_LIGHT0); glEnable(GL_COLOR_MATERIAL);
+
+    glLoadMatrixf(view);
+    glMultMatrixf(model);
+
+    glDisable(GL_BLEND);
+    if (AFN_RIG_CULL == 2) glDisable(GL_CULL_FACE);
+    else { glEnable(GL_CULL_FACE); glFrontFace(AFN_RIG_CULL == 1 ? GL_CW : GL_CCW); }
+
+    AfnRigVertex* v = s_skinned;
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    glEnableClientState(GL_NORMAL_ARRAY);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glTexCoordPointer(2, GL_FLOAT,        sizeof(AfnRigVertex), &v->u);
+    glColorPointer  (4, GL_UNSIGNED_BYTE, sizeof(AfnRigVertex), &v->color);
+    glNormalPointer (   GL_FLOAT,         sizeof(AfnRigVertex), &v->nx);
+    glVertexPointer (3, GL_FLOAT,         sizeof(AfnRigVertex), &v->x);
+    for (int g = 0; g < AFN_RIG_MATS; g++) {
+        int ic = afn_rig_idx_counts[g];
+        if (ic <= 0) continue;
+        if (s_rigTex[g]) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, s_rigTex[g]); }
+        else glDisable(GL_TEXTURE_2D);
+        glDrawElements(GL_TRIANGLES, ic, GL_UNSIGNED_SHORT, afn_rig_idx_ptrs[g]);
+    }
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDisableClientState(GL_NORMAL_ARRAY);
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glDisable(GL_LIGHTING); glDisable(GL_LIGHT0); glDisable(GL_COLOR_MATERIAL);
+}
+#endif // AFN_HAS_PLAYER_RIG
 
 // Build a column-major 4x4 view matrix (gluLookAt equivalent — vitaGL has no GLU).
 static void look_at(float m[16],
@@ -98,9 +239,16 @@ int main(void)
     glDepthFunc(GL_LEQUAL);
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     upload_textures();
+#ifdef AFN_HAS_PLAYER_RIG
+    rig_init();
+#endif
 
-    // Free-orbit camera around the scene's start point.
+    // Free-orbit camera around the player (or scene start if no rig).
+#ifdef AFN_HAS_PLAYER_RIG
+    float targetX = AFN_PLAYER_START_X, targetY = AFN_PLAYER_START_Y + 6.0f, targetZ = AFN_PLAYER_START_Z;
+#else
     float targetX = afn_cam_start_x, targetY = afn_cam_start_h, targetZ = afn_cam_start_z;
+#endif
     float yaw = afn_cam_start_angle, pitch = 0.3f;
     float dist = afn_orbit_dist > 1.0f ? afn_orbit_dist * 2.0f : 120.0f;
 
@@ -159,6 +307,11 @@ int main(void)
             glScalef(sp->scale, sp->scale, sp->scale);
             draw_mesh(mi);
         }
+
+#ifdef AFN_HAS_PLAYER_RIG
+        // Player rig at its spawn (no movement/physics yet — that's the next port).
+        rig_render(view, AFN_PLAYER_START_X, AFN_PLAYER_START_Y, AFN_PLAYER_START_Z, 0.0f);
+#endif
 
         vglSwapBuffers(GL_FALSE);
     }
