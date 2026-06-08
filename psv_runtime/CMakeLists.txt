@@ -18,6 +18,7 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O2 -fno-strict-aliasing")
 
 add_executable(affinity_psv
   main.c
+  audio.c
 )
 
 # vitaGL + its dependencies, plus the Sce stubs the runtime uses.
@@ -39,6 +40,7 @@ target_link_libraries(affinity_psv
   SceAppMgr_stub
   ScePower_stub
   SceLibKernel_stub
+  SceAudio_stub
   taihen_stub
   m
 )

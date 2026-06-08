@@ -15,6 +15,8 @@
 #include "psv_mapdata.h"   // defines afn_meshes / afn_sprites / camera start
 #include "psv_rig.h"       // player rig data (skinned glTF), if AFN_HAS_PLAYER_RIG
 #include "psv_player.h"    // AFN_PLAYER_COL_* (custom collision box, if authored)
+#include "psv_sky.h"       // sky panorama texture (AFN_HAS_SKY)
+#include "psv_sprites.h"   // billboard sprites (AFN_HAS_SPRITES)
 
 #define SCR_W 960.0f
 #define SCR_H 544.0f
@@ -280,6 +282,104 @@ static void draw_mesh(int mi)
 }
 
 // ---------------------------------------------------------------------------
+// Sky panorama + sprite billboards (ported from psp_runtime/sky.c + billboard.c)
+// ---------------------------------------------------------------------------
+#ifdef AFN_HAS_SKY
+static GLuint s_skyTex = 0;
+static void sky_init(void) {
+    glGenTextures(1, &s_skyTex);
+    glBindTexture(GL_TEXTURE_2D, s_skyTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, AFN_SKY_W, AFN_SKY_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, afn_sky_tex);
+}
+// Far textured quad in eye space (identity modelview) so it tracks the camera;
+// U scrolls with yaw for the 360 wrap. No depth writes -> scene draws on top.
+static void sky_render(float camAngle) {
+    float u = camAngle / (2.0f * 3.14159265f);
+    const float D = 5000.0f, X = 7200.0f, Y = 4200.0f;
+    AfnVertex sky[4] = {
+        { u,      0.0f, 0xFFFFFFFFu, -X,  Y, -D },
+        { u+1.0f, 0.0f, 0xFFFFFFFFu,  X,  Y, -D },
+        { u+1.0f, 1.0f, 0xFFFFFFFFu,  X, -Y, -D },
+        { u,      1.0f, 0xFFFFFFFFu, -X, -Y, -D },
+    };
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);  glDisable(GL_BLEND); glDisable(GL_LIGHTING);
+    glEnable(GL_TEXTURE_2D);  glBindTexture(GL_TEXTURE_2D, s_skyTex);
+    AfnVertex* v = sky;
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glTexCoordPointer(2, GL_FLOAT,        sizeof(AfnVertex), &v->u);
+    glColorPointer  (4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &v->color);
+    glVertexPointer (3, GL_FLOAT,         sizeof(AfnVertex), &v->x);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glDepthMask(GL_TRUE); glEnable(GL_DEPTH_TEST);
+}
+#endif // AFN_HAS_SKY
+
+#ifdef AFN_HAS_SPRITES
+static float  s_sprFrame[AFN_SPR_INST_COUNT];
+static GLuint s_sprTex[sizeof(afn_spr_frame_ptrs)/sizeof(afn_spr_frame_ptrs[0])];
+static void billboards_init(void) {
+    int nf = (int)(sizeof(afn_spr_frame_ptrs)/sizeof(afn_spr_frame_ptrs[0]));
+    for (int f = 0; f < nf; f++) {
+        glGenTextures(1, &s_sprTex[f]);
+        glBindTexture(GL_TEXTURE_2D, s_sprTex[f]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, afn_spr_frame_w[f], afn_spr_frame_h[f], 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, afn_spr_frame_ptrs[f]);
+    }
+    for (int i = 0; i < AFN_SPR_INST_COUNT; i++) s_sprFrame[i] = (float)afn_spr_fstart[i];
+}
+// Camera-facing (Y-axis) textured quads in world space, drawn through the view.
+static void billboards_render(const float* view, float camAngle) {
+    float rx = cosf(camAngle), rz = -sinf(camAngle);   // camera right in XZ
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_CULL_FACE); glDisable(GL_LIGHTING); glEnable(GL_TEXTURE_2D);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    for (int i = 0; i < AFN_SPR_INST_COUNT; i++) {
+        int lo = afn_spr_fstart[i], hi = afn_spr_fend[i]; if (hi < lo) hi = lo;
+        s_sprFrame[i] += afn_spr_fps[i] / 60.0f;
+        if (s_sprFrame[i] >= (float)(hi+1)) s_sprFrame[i] = (float)lo;
+        int cf = (int)s_sprFrame[i]; if (cf < lo) cf = lo; if (cf > hi) cf = hi;
+        float sz = afn_spr_basesize[i] * afn_spr_scale[i] * 0.25f, hw = sz * 0.5f;
+        float px = afn_spr_x[i], py = afn_spr_y[i], pz = afn_spr_z[i];
+        float lx = px - rx*hw, lz = pz - rz*hw, Rx = px + rx*hw, Rz = pz + rz*hw;
+        float top = py + sz, bot = py;
+        AfnVertex q[4] = {
+            { 0,0, 0xFFFFFFFFu, lx, top, lz },
+            { 1,0, 0xFFFFFFFFu, Rx, top, Rz },
+            { 1,1, 0xFFFFFFFFu, Rx, bot, Rz },
+            { 0,1, 0xFFFFFFFFu, lx, bot, lz },
+        };
+        glTexCoordPointer(2, GL_FLOAT,        sizeof(AfnVertex), &q->u);
+        glColorPointer  (4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &q->color);
+        glVertexPointer (3, GL_FLOAT,         sizeof(AfnVertex), &q->x);
+        glBindTexture(GL_TEXTURE_2D, s_sprTex[cf]);
+        glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    }
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glEnable(GL_CULL_FACE);
+}
+#endif // AFN_HAS_SPRITES
+
+// ---------------------------------------------------------------------------
 // Mesh collision (floor/wall) — float port of psp_runtime/collision.c. Faces are
 // built once from the exported mesh geometry, transformed to world space, and
 // bucketed into an XZ grid for cheap per-cell floor/wall queries.
@@ -504,7 +604,10 @@ int player_vy=0, player_ground_y=0, afn_player_vx_world=0, afn_player_vz_world=0
 int afn_velocity_falloff=0, afn_pending_boost_fwd=0;
 int afn_grinding=0, afn_grinding_active=0, afn_grind_rail=-1, afn_grind_power=0;
 int afn_grind_boost=0, afn_grind_bleed=0, afn_grind_catch_y=0, afn_grind_catch_x=0;
-int afn_gravity=23, afn_terminal_vel=1536, afn_friction=0, afn_force_x=0, afn_force_z=0;
+// Gravity/terminal in 8.8 fixed (256 = 1 world unit/frame), so a SetGravity /
+// SetMaxFall node (which writes value*256) drives them. Seeded to the PSV
+// world defaults (0.8 / 30) rather than the weak editor-pixel defaults.
+int afn_gravity=205, afn_terminal_vel=7680, afn_friction=0, afn_force_x=0, afn_force_z=0;
 int afn_cam_locked=0, afn_cam_speed=0, afn_tank_camera=0, afn_player_heading=0;
 int afn_player_height=0, afn_player_width=0, afn_bg_color=0, afn_anim_speed_dummy=0;
 int afn_active_element=0, afn_elem_idx=0, afn_cursor_stop=0, afn_stop_count=0, afn_hud_value=0;
@@ -526,11 +629,13 @@ int afn_hud_layer_frame[8]={0}, afn_hud_layer_tick[8]={0};
 unsigned char afn_hud_layer_active[8]={0}, afn_hud_layer_speed_override[8]={0};
 int tm_fol_active=0, tm_fol_obj=-1, tm_fol_dist=0, tm_fol_facing=0, tm_fol_moving=0, tm_fol_speed=0;
 int tm_player_tx=0, tm_player_ty=0;
-// Audio entry points — no audio runtime on PSV yet, so these are no-ops.
-void afn_play_sound(int id){ (void)id; }
-void afn_play_sfx(int smpIdx, int gain, int fifo){ (void)smpIdx; (void)gain; (void)fifo; }
-void afn_stop_sound(void){}
-void afn_stop_sfx_sample(int smpIdx){ (void)smpIdx; }
+// Audio entry points — defined in audio.c (sceAudio software mixer + sequencer).
+void afn_play_sound(int id);
+void afn_play_sfx(int smpIdx, int gain, int fifo);
+void afn_stop_sound(void);
+void afn_stop_sfx_sample(int smpIdx);
+void afn_audio_init(void);
+void afn_audio_tick(void);
 
 // The emitted node graph. Included AFTER the variables/keys above so its static
 // functions can reference them (single translation unit). Defines AFN_HAS_SCRIPT
@@ -578,6 +683,13 @@ int main(void)
     glDepthFunc(GL_LEQUAL);
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     upload_textures();
+    afn_audio_init();   // software mixer thread (no-op if the scene has no sound)
+#ifdef AFN_HAS_SKY
+    sky_init();
+#endif
+#ifdef AFN_HAS_SPRITES
+    billboards_init();
+#endif
 #ifdef AFN_HAS_PLAYER_RIG
     rig_init();
 #endif
@@ -624,11 +736,26 @@ int main(void)
         sceCtrlPeekBufferPositive(0, &pad, 1);
         if (pad.buttons & SCE_CTRL_START) break;
 
+        // Expose engine state to the node graph BEFORE it ticks: player_on_ground
+        // (Jump/IsJumping gates), player_moving (IsMoving), and player_x/y/z
+        // (teleport/distance/checkpoint nodes read+write the world position).
+        player_on_ground = grounded;
+        int pteleX = player_x = (int)playerX;
+        int pteleY = player_y = (int)playerY;
+        int pteleZ = player_z = (int)playerZ;
+
         // Node-driven: input_update() sets the raw defaults, then the emitted
         // graph (script_tick) overrides afn_input_fwd/right, afn_move_speed,
         // orbit_angle and afn_rig_clip. The movement/camera below only READ them.
         input_update(&pad);
         script_tick();
+        afn_audio_tick();   // 60 Hz sequencer clock (envelopes / note scheduling)
+
+        // A teleport/checkpoint node wrote player_x/y/z — apply it to the float
+        // position (normal frames leave them unchanged, so no precision loss).
+        if (player_x != pteleX) playerX = (float)player_x;
+        if (player_y != pteleY) playerY = (float)player_y;
+        if (player_z != pteleZ) playerZ = (float)player_z;
 
         // Re-read the active slot each frame (a future SetCamera node retargets it).
         const float* S = afn_cam_slots[afn_active_camera];
@@ -678,10 +805,13 @@ int main(void)
         }
         // In tank mode the rig faces the heading even when standing still.
         if (afn_tank_camera) playerYaw = afn_player_heading * (360.0f/65536.0f);
-        if (grounded && (pad.buttons & SCE_CTRL_CROSS)) { playerVY = 13.0f; grounded = 0; }  // jump
+        player_moving = (afn_input_fwd != 0 || afn_input_right != 0);   // IsMoving gate
+        if (grounded && (pad.buttons & SCE_CTRL_CROSS)) { playerVY = 13.0f; grounded = 0; }  // debug jump
+        if (player_vy != 0) { playerVY = player_vy / 256.0f; player_vy = 0; grounded = 0; }  // Jump node
         collide_walls(&playerX, &playerZ, playerY);
-        playerVY -= 0.8f;                                  // gravity
-        if (playerVY < -30.0f) playerVY = -30.0f;          // terminal velocity
+        playerVY -= afn_gravity / 256.0f;                  // gravity (SetGravity node, 8.8)
+        float term = afn_terminal_vel / 256.0f;
+        if (playerVY < -term) playerVY = -term;            // terminal velocity (SetMaxFall node)
         playerY += playerVY;
         {
             float fy, fn[3];
@@ -724,6 +854,10 @@ int main(void)
         float view[16];
         look_at(view, ex, ey, ez, targetX, targetY, targetZ, 0.0f, 1.0f, 0.0f);
 
+#ifdef AFN_HAS_SKY
+        sky_render(camAngle);   // far panorama behind everything (no depth write)
+#endif
+
         for (int si = 0; si < afn_sprite_count; si++) {
             int mi = afn_sprites[si].meshIdx;
             if (mi < 0 || mi >= afn_mesh_count) continue;
@@ -741,6 +875,10 @@ int main(void)
         // Player rig + every NPC: each skinned from its own rig at its own
         // transform/clip (player follows the camera; NPCs at their world spots).
         rigs_render(view, playerX, playerY, playerZ, playerYaw, s_floorN);
+#endif
+
+#ifdef AFN_HAS_SPRITES
+        billboards_render(view, camAngle);   // camera-facing animated sprites
 #endif
 
         vglSwapBuffers(GL_FALSE);
