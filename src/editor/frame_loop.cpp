@@ -17193,7 +17193,9 @@ void FrameTick(float dt)
                     int dir = dd ? dd->paramInt[0] : 1;
                     int speed = sd ? resolveIntPlay(sd) : 512;
                     float radPerFrame = (float)speed / 65536.0f * 6.28318f;
-                    scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;
+                    if (dir == 2)      { s3DOrbitPitch += radPerFrame; if (s3DOrbitPitch > 1.5f)  s3DOrbitPitch = 1.5f; }
+                    else if (dir == 3) { s3DOrbitPitch -= radPerFrame; if (s3DOrbitPitch < 0.05f) s3DOrbitPitch = 0.05f; }
+                    else scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;
                 }
                 else if (t == VsNodeType::AutoOrbit) {
                     auto* sd = findDataInPlay(action->id, 0);
@@ -17533,7 +17535,9 @@ void FrameTick(float dt)
                         int dir = dd ? dd->paramInt[0] : 1;
                         int speed = sd ? sd->paramInt[0] : 512;
                         float radPerFrame = (float)speed / 65536.0f * 6.28318f;
-                        scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;
+                        if (dir == 2)      { s3DOrbitPitch += radPerFrame; if (s3DOrbitPitch > 1.5f)  s3DOrbitPitch = 1.5f; }
+                        else if (dir == 3) { s3DOrbitPitch -= radPerFrame; if (s3DOrbitPitch < 0.05f) s3DOrbitPitch = 0.05f; }
+                        else scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;
                     }
                     else if (t == VsNodeType::AutoOrbit) {
                         auto* sd = bpFindDataIn(action->id, 0);
@@ -17674,7 +17678,9 @@ void FrameTick(float dt)
                                 int dir = dd ? dd->paramInt[0] : 1;
                                 int speed = sd ? sd->paramInt[0] : 512;
                                 float radPerFrame = (float)speed / 65536.0f * 6.28318f;
-                                scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;
+                                if (dir == 2)      { s3DOrbitPitch += radPerFrame; if (s3DOrbitPitch > 1.5f)  s3DOrbitPitch = 1.5f; }
+                        else if (dir == 3) { s3DOrbitPitch -= radPerFrame; if (s3DOrbitPitch < 0.05f) s3DOrbitPitch = 0.05f; }
+                        else scOrbitDelta += (dir == 0) ? -radPerFrame : radPerFrame;
                             }
                             else if (t == VsNodeType::AutoOrbit) {
                                 auto* sd = bpFindDataIn(action->id, 0);
@@ -20824,16 +20830,20 @@ void FrameTick(float dt)
                     auto* sd = resolveDataIn(infoNode.id, 1);
                     int odir = dd ? dd->paramInt[0] : 1;
                     int ospeed = sd ? sd->paramInt[0] : 512;
-                    const char* osign = (odir == 0) ? "-" : "+";
-                    char bodyBuf[256];
+                    // Direction: Left=0/Right=1 rotate the yaw (orbit_angle);
+                    // Up=2/Down=3 tilt the pitch (orbit_pitch).
+                    const char* otgt  = (odir >= 2) ? "orbit_pitch" : "orbit_angle";
+                    const char* osign = (odir == 0 || odir == 2) ? "+" : "-";
+                    char bodyBuf[320];
                     snprintf(bodyBuf, sizeof(bodyBuf),
-                        "    orbit_angle %s= %d;\n"
+                        "    %s %s= %d;\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // Applied when exec runs; Direction picks the sign.\n"
+                        "    // Applied when exec runs; Direction picks axis+sign:\n"
+                        "    //   Left/Right -> orbit_angle (yaw), Up/Down -> orbit_pitch.\n"
                         "    // Gate with On Key Held(key) to bind orbiting to a button.\n"
-                        "    // viewAngle = orbit_angle;\n"
-                        "    // cam_x = player_x - (orbSin * AFN_ORBIT_DIST) >> 8;",
-                        osign, ospeed);
+                        "    // camAngle = orbit_angle * 2pi/65536; pitch = orbit_pitch * 2pi/65536;\n"
+                        "    // eye = target - (sin(camAngle)*cos(pitch)*dist, -sin(pitch)*dist, ...);",
+                        otgt, osign, ospeed);
                     setActionFunc(infoNode, "_orbit", bodyBuf);
                     break;
                 }

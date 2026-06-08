@@ -41,6 +41,7 @@ add_executable(AffinityEditor WIN32
     src/platform/nds/dsma_emit.cpp
     src/platform/psp/psp_package.cpp
     src/platform/psv/psv_package.cpp
+    src/platform/common/node_script_emit.cpp
     affinity.rc
 )
 

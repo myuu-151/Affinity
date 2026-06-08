@@ -35,6 +35,7 @@ int player_moving;
 // the camera (S sprite) until the first DPAD-UP snap.
 uint16_t player_move_angle = (uint16_t)(0x4000 + (AFN_CAM_ANGLE << 1));
 uint16_t orbit_angle = AFN_CAM_ANGLE;
+int orbit_pitch = 0;   // camera pitch (brad) set by the OrbitCamera Up/Down node
 // Last frame's world-space movement direction (un-normalized). The sprite
 // dir picker reads these to face the player in the direction of motion.
 int s_lastMoveDX, s_lastMoveDZ;

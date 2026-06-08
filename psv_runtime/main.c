@@ -10,9 +10,11 @@
 #include <psp2/power.h>
 #include <math.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "psv_mapdata.h"   // defines afn_meshes / afn_sprites / camera start
 #include "psv_rig.h"       // player rig data (skinned glTF), if AFN_HAS_PLAYER_RIG
+#include "psv_player.h"    // AFN_PLAYER_COL_* (custom collision box, if authored)
 
 #define SCR_W 960.0f
 #define SCR_H 544.0f
@@ -174,14 +176,14 @@ static void rig_draw(const AfnRig* R, GLuint* texArr, const float* view,
 }
 
 // Skin + draw the player and every NPC for this frame.
-static void rigs_render(const float* view, float playerX, float playerY, float playerZ) {
+static void rigs_render(const float* view, float playerX, float playerY, float playerZ, float playerYaw) {
     const AfnRig* PR = &afn_rigs[AFN_PLAYER_RIG_SLOT];
     if (afn_rig_clip >= 0 && afn_rig_clip < PR->clips && afn_rig_clip != s_pclip) {
         s_pclip = afn_rig_clip; s_pframe = 0.0f;
     }
     s_pframe = rig_advance(PR, s_pclip, s_pframe);
     build_bone_mats(PR, s_pclip, s_pframe); skin(PR);
-    rig_draw(PR, s_rigTex[AFN_PLAYER_RIG_SLOT], view, playerX, playerY, playerZ, 0.0f, AFN_PLAYER_SCALE);
+    rig_draw(PR, s_rigTex[AFN_PLAYER_RIG_SLOT], view, playerX, playerY, playerZ, playerYaw, AFN_PLAYER_SCALE);
 
     for (int i = 0; i < AFN_NPC_COUNT; i++) {
         const float* N = afn_npc_inst[i];
@@ -265,6 +267,286 @@ static void draw_mesh(int mi)
     glDisableClientState(GL_VERTEX_ARRAY);
 }
 
+// ---------------------------------------------------------------------------
+// Mesh collision (floor/wall) — float port of psp_runtime/collision.c. Faces are
+// built once from the exported mesh geometry, transformed to world space, and
+// bucketed into an XZ grid for cheap per-cell floor/wall queries.
+// ---------------------------------------------------------------------------
+#define COL_GN     16
+#define COL_NCELL  (COL_GN * COL_GN)
+typedef struct {
+    float ax, ay, az, bx, by, bz, cx, cy, cz;
+    float nx, ny, nz;
+    int   flags;   // 1 floor, 2 ceiling, 4 wall
+} ColFace;
+static ColFace* s_faces = 0;
+static int      s_faceCount = 0;
+static int*     s_cellStart = 0;
+static int*     s_cellCount = 0;
+static int*     s_cellFaces = 0;
+static float    s_minX, s_minZ, s_cellSize;
+static unsigned* s_faceStamp = 0;
+static unsigned  s_queryStamp = 0;
+
+static int cell_x(float x) { int c=(int)((x-s_minX)/s_cellSize); return c<0?0:(c>=COL_GN?COL_GN-1:c); }
+static int cell_z(float z) { int c=(int)((z-s_minZ)/s_cellSize); return c<0?0:(c>=COL_GN?COL_GN-1:c); }
+
+static void collide_build(void) {
+    int total = 0;
+    for (int si = 0; si < afn_sprite_count; si++) {
+        int mi = afn_sprites[si].meshIdx;
+        if (mi < 0 || mi >= afn_mesh_count) continue;
+        total += afn_meshes[mi].indexCount / 3;
+    }
+    if (total <= 0) return;
+    s_faces = (ColFace*)malloc(sizeof(ColFace) * total);
+    if (!s_faces) return;
+    float mnx=1e30f, mnz=1e30f, mxx=-1e30f, mxz=-1e30f;
+    for (int si = 0; si < afn_sprite_count; si++) {
+        const AfnSpriteInst* sp = &afn_sprites[si];
+        int mi = sp->meshIdx;
+        if (mi < 0 || mi >= afn_mesh_count) continue;
+        const AfnMesh* m = &afn_meshes[mi];
+        const AfnVertex* V = m->verts;
+        const unsigned short* I = m->indices;
+        float ry=sp->rotY*DEG2RAD, rx=sp->rotX*DEG2RAD, rz=sp->rotZ*DEG2RAD;
+        float cY=cosf(ry),sY=sinf(ry),cX=cosf(rx),sX=sinf(rx),cZ=cosf(rz),sZ=sinf(rz);
+        float scl=sp->scale;
+        for (int t = 0; t + 3 <= m->indexCount; t += 3) {
+            float wp[9];
+            for (int k=0;k<3;k++){
+                const AfnVertex* vv=&V[I[t+k]];
+                float lx=vv->x*scl, ly=vv->y*scl, lz=vv->z*scl;
+                float ax= lx*cY+lz*sY, az=-lx*sY+lz*cY, ay=ly;
+                float ay2=ay*cX-az*sX, az2=ay*sX+az*cX;
+                float ax2=ax*cZ-ay2*sZ, ay3=ax*sZ+ay2*cZ;
+                wp[k*3+0]=sp->x+ax2; wp[k*3+1]=sp->y+ay3; wp[k*3+2]=sp->z+az2;
+            }
+            float e1x=wp[3]-wp[0],e1y=wp[4]-wp[1],e1z=wp[5]-wp[2];
+            float e2x=wp[6]-wp[0],e2y=wp[7]-wp[1],e2z=wp[8]-wp[2];
+            float nx=e1y*e2z-e1z*e2y, ny=e1z*e2x-e1x*e2z, nz=e1x*e2y-e1y*e2x;
+            float len=sqrtf(nx*nx+ny*ny+nz*nz); if (len<1e-6f) continue;
+            nx/=len; ny/=len; nz/=len;
+            ColFace* F=&s_faces[s_faceCount++];
+            F->ax=wp[0];F->ay=wp[1];F->az=wp[2]; F->bx=wp[3];F->by=wp[4];F->bz=wp[5]; F->cx=wp[6];F->cy=wp[7];F->cz=wp[8];
+            F->flags=(ny>0.3f)?1:(ny<-0.7f)?2:4;
+            F->nx=nx; F->ny=ny; F->nz=nz;
+            for (int k=0;k<3;k++){ float X=wp[k*3],Z=wp[k*3+2]; if(X<mnx)mnx=X; if(X>mxx)mxx=X; if(Z<mnz)mnz=Z; if(Z>mxz)mxz=Z; }
+        }
+    }
+    if (s_faceCount<=0) return;
+    s_minX=mnx; s_minZ=mnz;
+    float span=(mxx-mnx)>(mxz-mnz)?(mxx-mnx):(mxz-mnz);
+    s_cellSize=span/COL_GN; if (s_cellSize<1.0f) s_cellSize=1.0f;
+    s_cellStart=(int*)calloc(COL_NCELL,sizeof(int));
+    s_cellCount=(int*)calloc(COL_NCELL,sizeof(int));
+    s_faceStamp=(unsigned*)calloc(s_faceCount,sizeof(unsigned));
+    if (!s_cellStart||!s_cellCount||!s_faceStamp) return;
+    for (int i=0;i<s_faceCount;i++){
+        const ColFace* F=&s_faces[i];
+        float mnX=fminf(F->ax,fminf(F->bx,F->cx)), mxX=fmaxf(F->ax,fmaxf(F->bx,F->cx));
+        float mnZ=fminf(F->az,fminf(F->bz,F->cz)), mxZ=fmaxf(F->az,fmaxf(F->bz,F->cz));
+        for (int gz=cell_z(mnZ);gz<=cell_z(mxZ);gz++) for (int gx=cell_x(mnX);gx<=cell_x(mxX);gx++) s_cellCount[gz*COL_GN+gx]++;
+    }
+    int te=0; for (int c=0;c<COL_NCELL;c++){ s_cellStart[c]=te; te+=s_cellCount[c]; s_cellCount[c]=0; }
+    s_cellFaces=(int*)malloc(sizeof(int)*(te>0?te:1)); if (!s_cellFaces) return;
+    for (int i=0;i<s_faceCount;i++){
+        const ColFace* F=&s_faces[i];
+        float mnX=fminf(F->ax,fminf(F->bx,F->cx)), mxX=fmaxf(F->ax,fmaxf(F->bx,F->cx));
+        float mnZ=fminf(F->az,fminf(F->bz,F->cz)), mxZ=fmaxf(F->az,fmaxf(F->bz,F->cz));
+        for (int gz=cell_z(mnZ);gz<=cell_z(mxZ);gz++) for (int gx=cell_x(mnX);gx<=cell_x(mxX);gx++){
+            int c=gz*COL_GN+gx; s_cellFaces[s_cellStart[c]+s_cellCount[c]++]=i; }
+    }
+}
+
+#ifdef AFN_HAS_PLAYER_COL
+#define COL_RADIUS AFN_PLAYER_COL_RADIUS
+#define COL_BOTTOM AFN_PLAYER_COL_BOTTOM
+#define COL_TOP    AFN_PLAYER_COL_TOP
+#else
+#define COL_RADIUS 6.0f
+#define COL_BOTTOM 0.0f
+#define COL_TOP    24.0f
+#endif
+#define WALL_TOP_TOL 5.0f
+
+static int collide_floor(float x, float z, float py, float* outY, float* outN) {
+    if (!s_cellFaces) return 0;
+    int c=cell_z(z)*COL_GN+cell_x(x);
+    int start=s_cellStart[c], count=s_cellCount[c];
+    float bestY=0; int found=0; const ColFace* bestF=0;
+    for (int i=0;i<count;i++){
+        const ColFace* F=&s_faces[s_cellFaces[start+i]];
+        if (!(F->flags&1)) continue;
+        float c0=(F->bx-F->ax)*(z-F->az)-(F->bz-F->az)*(x-F->ax);
+        float c1=(F->cx-F->bx)*(z-F->bz)-(F->cz-F->bz)*(x-F->bx);
+        float c2=(F->ax-F->cx)*(z-F->cz)-(F->az-F->cz)*(x-F->cx);
+        if (!((c0>=0&&c1>=0&&c2>=0)||(c0<=0&&c1<=0&&c2<=0))) continue;
+        float cs=c0+c1+c2;
+        float fy=(cs==0)?(F->ay+F->by+F->cy)/3.0f:(c1*F->ay+c2*F->by+c0*F->cy)/cs;
+        if (fy>py+COL_TOP) continue;
+        if (!found||fy>bestY){ bestY=fy; found=1; bestF=F; }
+    }
+    *outY=bestY;
+    if (outN){ if(bestF){outN[0]=bestF->nx;outN[1]=bestF->ny;outN[2]=bestF->nz;} else {outN[0]=0;outN[1]=1;outN[2]=0;} }
+    return found;
+}
+
+static void collide_walls(float* x, float* z, float py) {
+    if (!s_cellFaces||!s_faceStamp) return;
+    float ppx=*x, ppz=*z;
+    int gx0=cell_x(ppx-COL_RADIUS), gx1=cell_x(ppx+COL_RADIUS);
+    int gz0=cell_z(ppz-COL_RADIUS), gz1=cell_z(ppz+COL_RADIUS);
+    unsigned stamp=++s_queryStamp;
+    for (int gz=gz0;gz<=gz1;gz++) for (int gx=gx0;gx<=gx1;gx++){
+        int c=gz*COL_GN+gx; int start=s_cellStart[c], count=s_cellCount[c];
+        for (int i=0;i<count;i++){
+            int fi=s_cellFaces[start+i];
+            if (s_faceStamp[fi]==stamp) continue; s_faceStamp[fi]=stamp;
+            const ColFace* F=&s_faces[fi];
+            if (!(F->flags&4)) continue;
+            float fMinY=fminf(F->ay,fminf(F->by,F->cy)), fMaxY=fmaxf(F->ay,fmaxf(F->by,F->cy));
+            if (py+COL_TOP<fMinY || py+COL_BOTTOM>=fMaxY-WALL_TOP_TOL) continue;
+            if (F->nx*F->nx+F->nz*F->nz<1e-8f) continue;
+            float vx[3]={F->ax,F->bx,F->cx}, vz[3]={F->az,F->bz,F->cz};
+            float bestPx=ppx,bestPz=ppz,bestD2=1e30f;
+            for (int e=0;e<3;e++){
+                float x0=vx[e],z0=vz[e], sx=vx[(e+1)%3]-x0, sz=vz[(e+1)%3]-z0;
+                float L2=sx*sx+sz*sz;
+                float t=(L2>1e-8f)?((ppx-x0)*sx+(ppz-z0)*sz)/L2:0.0f;
+                if (t<0)t=0; else if (t>1)t=1;
+                float Px=x0+sx*t, Pz=z0+sz*t;
+                float dx=ppx-Px, dz=ppz-Pz, d2=dx*dx+dz*dz;
+                if (d2<bestD2){ bestD2=d2; bestPx=Px; bestPz=Pz; }
+            }
+            if (bestD2>=COL_RADIUS*COL_RADIUS) continue;
+            float d=sqrtf(bestD2), push=COL_RADIUS-d;
+            if (d>1e-4f){ ppx+=(ppx-bestPx)/d*push; ppz+=(ppz-bestPz)/d*push; }
+            else { float xl=sqrtf(F->nx*F->nx+F->nz*F->nz); ppx+=F->nx/xl*push; ppz+=F->nz/xl*push; }
+        }
+    }
+    *x=ppx; *z=ppz;
+}
+
+// ---------------------------------------------------------------------------
+// Input + node-script variable layer. Behaviour is node-driven, per the engine
+// convention: the emitted script (psv_script.h) sets these each frame and the
+// movement/camera/rig below only READ them. input_update() supplies the raw
+// analog/button defaults so the game is playable before/without a script
+// (mirrors psp_runtime input.c + script_glue.c).
+// ---------------------------------------------------------------------------
+int afn_input_fwd = 0, afn_input_right = 0;   // camera-space move intent (256 = full)
+int afn_move_speed = 0, afn_speed_prio = 0;   // node-set speed (0 = use walk default)
+int afn_player_frozen = 0;
+int orbit_angle = 0;                          // camera yaw, brad (65536 = full circle)
+int orbit_pitch = 0;                          // camera pitch, brad (node OrbitCamera Up/Down + right stick)
+
+enum { KEY_A=1,KEY_B=2,KEY_X=4,KEY_Y=8,KEY_L=16,KEY_R=32,KEY_START=64,KEY_SELECT=128,
+       KEY_UP=256,KEY_DOWN=512,KEY_LEFT=1024,KEY_RIGHT=2048 };
+unsigned afn_keys_held=0, afn_keys_pressed=0, afn_keys_released=0;
+static int key_is_down(unsigned k){ return (afn_keys_held & k)!=0; }
+static int key_hit(unsigned k){ return (afn_keys_pressed & k)!=0; }
+static int key_released(unsigned k){ return (afn_keys_released & k)!=0; }
+
+static void input_update(const SceCtrlData* pad) {
+    unsigned b = pad->buttons, k = 0;
+    if (b & SCE_CTRL_CROSS)    k|=KEY_A;
+    if (b & SCE_CTRL_CIRCLE)   k|=KEY_B;
+    if (b & SCE_CTRL_SQUARE)   k|=KEY_X;
+    if (b & SCE_CTRL_TRIANGLE) k|=KEY_Y;
+    if (b & SCE_CTRL_LTRIGGER) k|=KEY_L;
+    if (b & SCE_CTRL_RTRIGGER) k|=KEY_R;
+    if (b & SCE_CTRL_START)    k|=KEY_START;
+    if (b & SCE_CTRL_SELECT)   k|=KEY_SELECT;
+    if (b & SCE_CTRL_UP)       k|=KEY_UP;
+    if (b & SCE_CTRL_DOWN)     k|=KEY_DOWN;
+    if (b & SCE_CTRL_LEFT)     k|=KEY_LEFT;
+    if (b & SCE_CTRL_RIGHT)    k|=KEY_RIGHT;
+    int ax = (int)pad->lx - 128, ay = (int)pad->ly - 128;
+    if (ay<-48) k|=KEY_UP;   if (ay>48) k|=KEY_DOWN;
+    if (ax<-48) k|=KEY_LEFT; if (ax>48) k|=KEY_RIGHT;
+    afn_input_right = ax;       // raw analog default (±128); nodes use ±256
+    afn_input_fwd   = -ay;
+    afn_keys_pressed  = k & ~afn_keys_held;
+    afn_keys_released = ~k & afn_keys_held;
+    afn_keys_held     = k;
+}
+
+// ---- Script-glue variables ------------------------------------------------
+// The emitted node graph writes a LOT of variables that belong to subsystems
+// the PSV runtime hasn't ported yet (HUD, grind rails, fades, sprite manip,
+// Mode 0). They're defined here as inert globals — exactly like PSP's
+// script_glue.c — so the generated code links; only the movement/camera/anim
+// ones above are actually consumed. As each subsystem lands, its var stops
+// being inert.
+#ifndef NUM_SPRITES
+#define NUM_SPRITES 64
+#endif
+int afn_play_anim=0, afn_anim_prio=0, afn_anim_speed=0, afn_auto_orbit_speed=0;
+int afn_skel_anim_obj=-1, afn_skel_anim_clip=0, afn_sprite_anim_spr=-1, afn_sprite_anim_val=0;
+int afn_collided_sprite=-1, afn_collided_tm_obj=-1, afn_bp_cur_spr_idx=-1, afn_bp_cur_tm_obj=-1;
+int afn_current_mode=0, afn_current_scene=0, afn_scripts_stopped=0;
+int afn_start_x=0, afn_start_y=0, afn_start_z=0, afn_text_color=0, afn_timer_visible=0;
+int afn_wall_collided_sprite=-1, afn_fade_target=0, afn_fade_frames=0, afn_fade_counter=0, afn_fade_level=0;
+int player_vy=0, player_ground_y=0, afn_player_vx_world=0, afn_player_vz_world=0;
+int afn_velocity_falloff=0, afn_pending_boost_fwd=0;
+int afn_grinding=0, afn_grinding_active=0, afn_grind_rail=-1, afn_grind_power=0;
+int afn_grind_boost=0, afn_grind_bleed=0, afn_grind_catch_y=0, afn_grind_catch_x=0;
+int afn_gravity=23, afn_terminal_vel=1536, afn_friction=0, afn_force_x=0, afn_force_z=0;
+int afn_cam_locked=0, afn_cam_speed=0, afn_tank_camera=0, afn_player_heading=0;
+int afn_player_height=0, afn_player_width=0, afn_bg_color=0, afn_anim_speed_dummy=0;
+int afn_active_element=0, afn_elem_idx=0, afn_cursor_stop=0, afn_stop_count=0, afn_hud_value=0;
+int afn_checkpoint_set=0, afn_checkpoint_x=0, afn_checkpoint_y=0, afn_checkpoint_z=0;
+int afn_score=0, afn_shake_frames=0, afn_shake_intensity=0, afn_last_key=0;
+int afn_frame_count=0, afn_dt_tick=0;
+int afn_scene_start_transition=0;
+// Player physics vars the emitted code reads/writes (NDS defines these in
+// fps3d.c). Kept inert for now — the movement loop uses its own playerX/Y/Z;
+// wiring teleport/IsMoving/Jump nodes to these is a follow-up.
+int player_x=0, player_y=0, player_z=0, player_vy_unused=0;
+int player_on_ground=1, player_moving=0;
+unsigned int afn_flags=0, afn_rng=1;
+unsigned char afn_hud_visible[NUM_SPRITES]={0}, afn_sprite_visible[NUM_SPRITES]={0};
+unsigned char afn_sprite_flip[NUM_SPRITES]={0}, afn_collision_enabled[NUM_SPRITES]={0};
+int afn_hp[NUM_SPRITES]={0}, afn_state_timer[NUM_SPRITES]={0};
+int afn_stop_links[16]={0};
+int afn_hud_layer_frame[8]={0}, afn_hud_layer_tick[8]={0};
+unsigned char afn_hud_layer_active[8]={0}, afn_hud_layer_speed_override[8]={0};
+int tm_fol_active=0, tm_fol_obj=-1, tm_fol_dist=0, tm_fol_facing=0, tm_fol_moving=0, tm_fol_speed=0;
+int tm_player_tx=0, tm_player_ty=0;
+// Audio entry points — no audio runtime on PSV yet, so these are no-ops.
+void afn_play_sound(int id){ (void)id; }
+void afn_play_sfx(int smpIdx, int gain, int fifo){ (void)smpIdx; (void)gain; (void)fifo; }
+void afn_stop_sound(void){}
+void afn_stop_sfx_sample(int smpIdx){ (void)smpIdx; }
+
+// The emitted node graph. Included AFTER the variables/keys above so its static
+// functions can reference them (single translation unit). Defines AFN_HAS_SCRIPT
+// when the scene actually has nodes; otherwise this is an inert stub and the raw
+// stick input above drives movement.
+#include "psv_script.h"
+
+#ifdef AFN_HAS_SCRIPT
+static void script_start(void) { afn_emitted_script_start(); afn_bp_dispatch_start(); }
+static void script_tick(void) {
+    // Node-driven inputs are recomputed from scratch each frame by the graph.
+    afn_input_fwd = 0; afn_input_right = 0; afn_speed_prio = 0; afn_move_speed = 0;
+    afn_emitted_script_update();
+    afn_emitted_script_key_held();
+    afn_emitted_script_key_pressed();
+    afn_emitted_script_key_released();
+    afn_bp_dispatch_update();
+    afn_bp_dispatch_key_held();
+    afn_bp_dispatch_key_pressed();
+    afn_bp_dispatch_key_released();
+}
+static int script_present(void) { return 1; }
+#else
+static void script_start(void) {}
+static void script_tick(void)  {}
+static int  script_present(void){ return 0; }
+#endif
+
 int main(void)
 {
     // Max out the Vita clocks. 444 MHz is the hardware/API ceiling for the
@@ -288,13 +570,23 @@ int main(void)
     rig_init();
 #endif
 
-    // Player position (static until movement is ported; the follow camera and
-    // the NPCs read this).
+    // Player state. The follow camera and NPCs read playerX/Y/Z; the movement
+    // step below drives it (camera-relative left stick + gravity + floor/wall
+    // collision against the level mesh).
 #ifdef AFN_HAS_PLAYER_RIG
     float playerX = AFN_PLAYER_START_X, playerY = AFN_PLAYER_START_Y, playerZ = AFN_PLAYER_START_Z;
 #else
     float playerX = afn_cam_start_x, playerY = afn_cam_start_h, playerZ = afn_cam_start_z;
 #endif
+    float playerYaw = 0.0f;   // rig facing (degrees)
+    float playerVY  = 0.0f;   // vertical velocity (gravity / jump)
+    int   grounded  = 1;
+    collide_build();
+    {   // Drop onto the floor at spawn so we don't start mid-air.
+        float fy, fn[3];
+        if (collide_floor(playerX, playerZ, playerY + 200.0f, &fy, fn))
+            playerY = fy - COL_BOTTOM;
+    }
 
     // Orbit-follow camera, anchored to the active camera slot
     // (afn_cam_slots[afn_active_camera] = { yaw, dist, height, horizon }). The
@@ -303,39 +595,85 @@ int main(void)
     // has no scripts yet so afn_active_camera stays 0 (scene default), but the
     // runtime re-reads it each frame so a future SetCamera node just works.
     const float* slot0 = afn_cam_slots[afn_active_camera];
-    float orbit_angle = slot0[0];                            // radians
+    orbit_angle       = (int)(slot0[0] * (65536.0f / 6.2831853f));  // GLOBAL brad (node + manual)
     float camDist     = slot0[1] > 1.0f ? slot0[1] : 60.0f;  // world px
     float camHeight   = slot0[2];                            // world px
-    float pitch       = atan2f(camHeight > 0.0f ? camHeight : 8.0f, camDist);  // downward tilt from slot
+    // Pitch is also brad in the global orbit_pitch so the OrbitCamera Up/Down
+    // node and the right stick drive it together. Seed it from the slot's tilt.
+    orbit_pitch       = (int)(atan2f(camHeight > 0.0f ? camHeight : 8.0f, camDist) * (65536.0f / 6.2831853f));
 
     SceCtrlData pad;
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
+    script_start();   // OnStart + blueprint start hooks
 
     while (1) {
         sceCtrlPeekBufferPositive(0, &pad, 1);
         if (pad.buttons & SCE_CTRL_START) break;
+
+        // Node-driven: input_update() sets the raw defaults, then the emitted
+        // graph (script_tick) overrides afn_input_fwd/right, afn_move_speed,
+        // orbit_angle and afn_rig_clip. The movement/camera below only READ them.
+        input_update(&pad);
+        script_tick();
 
         // Re-read the active slot each frame (a future SetCamera node retargets it).
         const float* S = afn_cam_slots[afn_active_camera];
         camDist   = S[1] > 1.0f ? S[1] : camDist;   // keep manual zoom unless slot overrides
         camHeight = S[2];
 
-        // Right stick / L-R: orbit. Triggers: zoom.
+        // Right stick / L-R also orbit the camera (added to orbit_angle/pitch,
+        // which the OrbitCamera node may also drive). Triggers zoom.
         float rx = (pad.rx - 128) / 128.0f, ry = (pad.ry - 128) / 128.0f;
-        if (fabsf(rx) > 0.15f) orbit_angle += rx * 0.04f;
-        if (fabsf(ry) > 0.15f) pitch       += ry * 0.03f;
-        if (pad.buttons & SCE_CTRL_LEFT)  orbit_angle -= 0.04f;
-        if (pad.buttons & SCE_CTRL_RIGHT) orbit_angle += 0.04f;
+        if (fabsf(rx) > 0.15f) orbit_angle += (int)(rx * 600.0f);
+        if (fabsf(ry) > 0.15f) orbit_pitch += (int)(ry * 450.0f);
         if (pad.buttons & SCE_CTRL_LTRIGGER) camDist *= 1.03f;
         if (pad.buttons & SCE_CTRL_RTRIGGER) camDist *= 0.97f;
-        if (pitch >  1.4f) pitch = 1.4f; if (pitch < -1.4f) pitch = -1.4f;
+        // Clamp pitch to ~±80 deg in brad (65536 = 360 deg -> ±14563).
+        if (orbit_pitch >  14563) orbit_pitch =  14563;
+        if (orbit_pitch < -14563) orbit_pitch = -14563;
+
+        // Camera yaw + pitch (radians) from the node/manual orbit_angle/pitch (brad).
+        float camAngle = orbit_angle * (6.2831853f / 65536.0f);
+        float pitch    = orbit_pitch * (6.2831853f / 65536.0f);
+
+        // --- Player movement: reads the node-set move intent (afn_input_fwd/right,
+        //     256 = full) in camera space, scaled by afn_move_speed (or the walk
+        //     default when no script). Ported from PSP scene_update. ---
+        float fAmt = afn_input_fwd  / 256.0f;
+        float rAmt = afn_input_right / 256.0f;
+        float fwdX = sinf(camAngle), fwdZ = cosf(camAngle);
+        float rgtX = cosf(camAngle), rgtZ = -sinf(camAngle);
+        float mvX = fAmt*fwdX + rAmt*rgtX;
+        float mvZ = fAmt*fwdZ + rAmt*rgtZ;
+        int scripted = script_present();
+        if ((mvX*mvX + mvZ*mvZ > 0.0001f) && (!scripted || afn_move_speed > 0) && !afn_player_frozen) {
+            float speed = scripted ? (afn_move_speed * 0.08f)
+                                   : (afn_walk_speed > 0.0f ? afn_walk_speed * 0.25f : 6.0f);
+            float dx = mvX*speed, dz = mvZ*speed;
+            float dlen = sqrtf(dx*dx + dz*dz);
+            int steps = (int)(dlen / 3.0f) + 1;   // MAX_MOVE_STEP: don't tunnel walls
+            float ix = dx/steps, iz = dz/steps;
+            for (int st = 0; st < steps; st++) { playerX += ix; playerZ += iz; collide_walls(&playerX, &playerZ, playerY); }
+            playerYaw = atan2f(mvX, mvZ) * (180.0f/3.14159265f);
+        }
+        if (grounded && (pad.buttons & SCE_CTRL_CROSS)) { playerVY = 13.0f; grounded = 0; }  // jump
+        collide_walls(&playerX, &playerZ, playerY);
+        playerVY -= 0.8f;                                  // gravity
+        if (playerVY < -30.0f) playerVY = -30.0f;          // terminal velocity
+        playerY += playerVY;
+        {
+            float fy, fn[3];
+            if (collide_floor(playerX, playerZ, playerY, &fy, fn) && playerY <= fy - COL_BOTTOM) {
+                playerY = fy - COL_BOTTOM; playerVY = 0.0f; grounded = 1;
+            } else grounded = 0;
+        }
 
         // Follow the player, framed at ~half the camera height (torso, not feet).
         float targetX = playerX, targetY = playerY + camHeight * 0.5f, targetZ = playerZ;
 
         float cp = cosf(pitch);
-        float ex = targetX - sinf(orbit_angle)*cp*camDist;
-        float ez = targetZ - cosf(orbit_angle)*cp*camDist;
+        float ex = targetX - sinf(camAngle)*cp*camDist;
+        float ez = targetZ - cosf(camAngle)*cp*camDist;
         float ey = targetY + sinf(pitch)*camDist;
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -371,7 +709,7 @@ int main(void)
 #ifdef AFN_HAS_PLAYER_RIG
         // Player rig + every NPC: each skinned from its own rig at its own
         // transform/clip (player follows the camera; NPCs at their world spots).
-        rigs_render(view, playerX, playerY, playerZ);
+        rigs_render(view, playerX, playerY, playerZ, playerYaw);
 #endif
 
         vglSwapBuffers(GL_FALSE);

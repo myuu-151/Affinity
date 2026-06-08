@@ -42,6 +42,7 @@ extern int g_cosf, g_sinf;          // precomputed cam_angle sin/cos in .8
 // ---------------------------------------------------------------------------
 extern int player_x, player_z, player_y;
 extern uint16_t orbit_angle;
+extern int orbit_pitch;   // camera pitch (OrbitCamera Up/Down node); consumed by fps3d camera
 extern int orbit_dist;
 extern int player_sprite_idx;
 extern int player_moving;
