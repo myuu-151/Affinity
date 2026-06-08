@@ -129,7 +129,12 @@ static void rig_render(const float* view, float px, float py, float pz, float ya
     // scales by AFN_PLAYER_RIG_SCALE (~3.8), which would otherwise shrink the
     // skinned normals and crush the diffuse term (the "too dark" look).
     glLoadIdentity();
-    GLfloat ldir[4]   = { AFN_PLAYER_RIG_LIGHT_DX, AFN_PLAYER_RIG_LIGHT_DY, AFN_PLAYER_RIG_LIGHT_DZ, 0.0f };
+    // NEGATED vs the exported vector: the DS glLight() takes the direction the
+    // light *travels*, but GL's GL_POSITION (w=0) is the direction *toward* the
+    // light. Passing the raw vector lit the far side of the model (front dark,
+    // rim-lit) — the opposite of the NDS look. Negating makes diffuse hit the
+    // faces the headlamp actually points at, matching fps3d.c.
+    GLfloat ldir[4]   = { -AFN_PLAYER_RIG_LIGHT_DX, -AFN_PLAYER_RIG_LIGHT_DY, -AFN_PLAYER_RIG_LIGHT_DZ, 0.0f };
     GLfloat white[4]  = { 1, 1, 1, 1 };
     GLfloat matAmb[4] = { 8.0f/31.0f,  8.0f/31.0f,  8.0f/31.0f,  1 };  // NDS RGB15(8,8,8)
     GLfloat matDif[4] = { 28.0f/31.0f, 28.0f/31.0f, 28.0f/31.0f, 1 };  // NDS RGB15(28,28,28)
