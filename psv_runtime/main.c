@@ -373,7 +373,9 @@ static void billboards_init(void) {
     for (int i = 0; i < AFN_SPR_INST_COUNT; i++) s_sprFrame[i] = (float)afn_spr_fstart[i];
 }
 // Camera-facing (Y-axis) textured quads in world space, drawn through the view.
-static void billboards_render(const float* view, float camAngle) {
+// camEyeX/Z is the camera world position, used to pick an 8-facing direction for
+// directional sprites (N,NE,E,SE,S,SW,W,NW = dir 0..7).
+static void billboards_render(const float* view, float camAngle, float camEyeX, float camEyeZ) {
     float rx = cosf(camAngle), rz = -sinf(camAngle);   // camera right in XZ
     glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -387,13 +389,24 @@ static void billboards_render(const float* view, float camAngle) {
         if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;  // hidden/destroyed
 #endif
         int NF = (int)(sizeof(afn_spr_frame_ptrs)/sizeof(afn_spr_frame_ptrs[0]));
-        int lo = afn_spr_fstart[i], hi = afn_spr_fend[i]; if (hi < lo) hi = lo;
-        if (hi > NF-1) hi = NF-1; if (lo > NF-1) lo = NF-1; if (lo < 0) lo = 0;  // never index past the table
-        s_sprFrame[i] += afn_spr_fps[i] / 60.0f;
-        if (s_sprFrame[i] >= (float)(hi+1)) s_sprFrame[i] = (float)lo;
-        int cf = (int)s_sprFrame[i]; if (cf < lo) cf = lo; if (cf > hi) cf = hi;
         float sz = afn_spr_basesize[i] * afn_spr_scale[i] * 0.25f, hw = sz * 0.5f;
         float px = afn_spr_x[i], py = afn_spr_y[i], pz = afn_spr_z[i];
+        int cf;
+        if (afn_spr_directional[i]) {
+            // 8-facing: pick the art for the direction the camera views from.
+            // bearing 0 = camera at +Z (south) -> show S(4); +X(east) -> E(2).
+            float bearing = atan2f(camEyeX - px, camEyeZ - pz);
+            int n = (int)lroundf(bearing / (3.14159265f / 4.0f));
+            int dir = (4 - n) & 7;
+            cf = afn_spr_dir_base[i] + dir;
+        } else {
+            int lo = afn_spr_fstart[i], hi = afn_spr_fend[i]; if (hi < lo) hi = lo;
+            if (hi > NF-1) hi = NF-1; if (lo > NF-1) lo = NF-1; if (lo < 0) lo = 0;  // never index past the table
+            s_sprFrame[i] += afn_spr_fps[i] / 60.0f;
+            if (s_sprFrame[i] >= (float)(hi+1)) s_sprFrame[i] = (float)lo;
+            cf = (int)s_sprFrame[i]; if (cf < lo) cf = lo; if (cf > hi) cf = hi;
+        }
+        if (cf < 0) cf = 0; if (cf > NF-1) cf = NF-1;
         float lx = px - rx*hw, lz = pz - rz*hw, Rx = px + rx*hw, Rz = pz + rz*hw;
         float top = py + sz, bot = py;
         AfnVertex q[4] = {
@@ -1400,7 +1413,7 @@ int main(void)
 #endif
 
 #ifdef AFN_HAS_SPRITES
-        billboards_render(view, camAngle);   // camera-facing animated sprites
+        billboards_render(view, camAngle, ex, ez);   // camera-facing animated/directional sprites
 #endif
 
 #ifdef AFN_HAS_HUD

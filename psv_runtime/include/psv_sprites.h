@@ -524,8 +524,11 @@ static const float afn_spr_x[1] = {144.598f,};
 static const float afn_spr_y[1] = {7.62056f,};
 static const float afn_spr_z[1] = {165.078f,};
 static const float afn_spr_scale[1] = {1.534f,};
+static const int afn_spr_editor_idx[1] = {7,};
 static const int afn_spr_fstart[1] = {0,};
-static const int afn_spr_fend[1] = {1,};
+static const int afn_spr_fend[1] = {0,};
 static const int afn_spr_fps[1] = {8,};
 static const int afn_spr_basesize[1] = {64,};
+static const int afn_spr_directional[1] = {0,};
+static const int afn_spr_dir_base[1] = {0,};
 #define AFN_HAS_SPRITES 1

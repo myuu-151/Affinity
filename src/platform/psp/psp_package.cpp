@@ -526,13 +526,49 @@ static bool GeneratePSPSprites(const std::string& runtimeDir, const char* hdrPre
         return std::pair<int,int>{w, h};
     };
 
+    // Directional sprites (8-facing: N,NE,E,SE,S,SW,W,NW) keep their real art in
+    // dirAnimSets[set].dirImages[d] as RGBA8 — NOT in the palettized a.frames
+    // (which is blank for them). Emit each direction as an RGBA8 frame; an empty
+    // direction falls back to the first filled one so a partially-authored sprite
+    // (e.g. only N drawn) still shows from every angle. The runtime picks
+    // base + dirIdx by camera facing instead of animating.
+    auto emitDirFrame = [&](const GBASpriteAssetExport::DirAnimSetExport& set, int d) -> std::pair<int,int> {
+        int use = set.dirImages[d].pixels ? d : -1;
+        if (use < 0) for (int k = 0; k < 8; k++) if (set.dirImages[k].pixels) { use = k; break; }
+        int gi = globalFrames++;
+        if (use < 0) { f << "static const unsigned int afn_spr_f" << gi << "[1] = {0};\n"; return {1,1}; }
+        const auto& img = set.dirImages[use];
+        int w = img.width > 0 ? img.width : 1, h = img.height > 0 ? img.height : 1;
+        f << "static const unsigned int __attribute__((aligned(16))) afn_spr_f" << gi << "[" << (w*h) << "] = {";
+        for (int py = 0; py < h; py++)
+            for (int px = 0; px < w; px++) {
+                if ((py*w+px) % 8 == 0) f << "\n  ";
+                const unsigned char* p = &img.pixels[(py*w+px)*4];   // RGBA8 bytes
+                unsigned c = (p[3] < 128) ? 0u
+                    : (((unsigned)p[3]<<24)|((unsigned)p[2]<<16)|((unsigned)p[1]<<8)|(unsigned)p[0]);
+                f << "0x" << std::hex << c << std::dec << "u,";
+            }
+        f << "\n};\n";
+        return {w, h};
+    };
+
+    std::vector<int> assetIsDir(assets.size(), 0);   // 1 = emitted as 8-dir blocks
+    std::vector<int> assetSets(assets.size(), 0);    // # of dir-sets (for base calc)
     std::vector<std::pair<int,int>> frameWH;
     for (auto& in : inst) {
         if (assetFrame0[in.asset] >= 0) continue;
         assetFrame0[in.asset] = globalFrames;
         const auto& a = assets[in.asset];
-        for (int fi = 0; fi < (int)a.frames.size(); fi++)
-            frameWH.push_back(emitFrameTex(in.asset, fi));
+        if (a.hasDirections && !a.dirAnimSets.empty()) {
+            assetIsDir[in.asset] = 1;
+            assetSets[in.asset]  = (int)a.dirAnimSets.size();
+            for (const auto& set : a.dirAnimSets)
+                for (int d = 0; d < 8; d++)
+                    frameWH.push_back(emitDirFrame(set, d));
+        } else {
+            for (int fi = 0; fi < (int)a.frames.size(); fi++)
+                frameWH.push_back(emitFrameTex(in.asset, fi));
+        }
     }
 
     // Frame pointer + size tables.
@@ -570,7 +606,8 @@ static bool GeneratePSPSprites(const std::string& runtimeDir, const char* hdrPre
     // (the "flickering texture map" bug). Clamp to [0, frames-1].
     icol("fstart", [&](const Inst& in){
         const auto& a = assets[in.asset];
-        int nf = (int)a.frames.size();
+        if (assetIsDir[in.asset]) return assetFrame0[in.asset];   // unused for directional
+        int nf = (int)a.frames.size(); if (nf < 1) nf = 1;
         int s = 0;
         if (in.anim >= 0 && in.anim < (int)a.anims.size()) s = a.anims[in.anim].startFrame;
         else if (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size()) s = a.anims[a.defaultAnim].startFrame;
@@ -579,12 +616,26 @@ static bool GeneratePSPSprites(const std::string& runtimeDir, const char* hdrPre
     });
     icol("fend", [&](const Inst& in){
         const auto& a = assets[in.asset];
-        int nf = (int)a.frames.size();
+        if (assetIsDir[in.asset]) return assetFrame0[in.asset];   // unused for directional
+        int nf = (int)a.frames.size(); if (nf < 1) nf = 1;
         int e = nf - 1;
         if (in.anim >= 0 && in.anim < (int)a.anims.size()) e = a.anims[in.anim].endFrame;
         else if (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size()) e = a.anims[a.defaultAnim].endFrame;
         if (e < 0) e = 0; if (e > nf - 1) e = nf - 1;
         return assetFrame0[in.asset] + e;
+    });
+    // Directional flag + base frame: for an 8-facing sprite the runtime picks
+    // afn_spr_dir_base + dirIdx (by camera angle) instead of fps animation.
+    icol("directional", [&](const Inst& in){ return assetIsDir[in.asset]; });
+    icol("dir_base", [&](const Inst& in){
+        const auto& a = assets[in.asset];
+        if (!assetIsDir[in.asset]) return assetFrame0[in.asset];
+        int set = 0;
+        if (in.anim >= 0 && in.anim < (int)a.anims.size()) set = a.anims[in.anim].startFrame;
+        else if (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size()) set = a.anims[a.defaultAnim].startFrame;
+        int ns = assetSets[in.asset]; if (ns < 1) ns = 1;
+        if (set < 0) set = 0; if (set > ns - 1) set = ns - 1;
+        return assetFrame0[in.asset] + set * 8;
     });
     icol("fps", [&](const Inst& in){
         const auto& a = assets[in.asset];
