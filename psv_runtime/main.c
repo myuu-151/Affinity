@@ -779,6 +779,16 @@ int main(void)
         script_tick();
         afn_audio_tick();   // 60 Hz sequencer clock (envelopes / note scheduling)
 
+        // Screen-fade tick: ease afn_fade_level toward afn_fade_target over
+        // afn_fade_counter frames (set by ChangeScene / fade nodes). Rendered as
+        // a fullscreen overlay below (vitaGL has no REG_MASTER_BRIGHT).
+        if (afn_fade_counter > 0) {
+            afn_fade_counter--;
+            int span = afn_fade_frames > 0 ? afn_fade_frames : 1;
+            afn_fade_level = afn_fade_target * (span - afn_fade_counter) / span;
+            if (afn_fade_counter == 0) afn_fade_level = afn_fade_target;
+        }
+
         // A teleport/checkpoint node wrote player_x/y/z — apply it to the float
         // position (normal frames leave them unchanged, so no precision loss).
         if (player_x != pteleX) playerX = (float)player_x;
@@ -833,6 +843,27 @@ int main(void)
         }
         // In tank mode the rig faces the heading even when standing still.
         if (afn_tank_camera) playerYaw = afn_player_heading * (360.0f/65536.0f);
+
+        // Node-driven world-axis push velocity (boost pads / knockback). 8.8
+        // fixed. BoostForward wrote a pending magnitude -> decompose along the
+        // camera forward; SetVelocityX/Z write the globals directly. Linear
+        // VelocityFalloff(N) decay over N frames. (Mirrors fps3d.c:1190-1207.)
+        if (afn_pending_boost_fwd) {
+            afn_player_vx_world = (int)(sinf(camAngle) * afn_pending_boost_fwd);
+            afn_player_vz_world = (int)(cosf(camAngle) * afn_pending_boost_fwd);
+            afn_pending_boost_fwd = 0;
+        }
+        if (afn_player_vx_world || afn_player_vz_world) {
+            playerX += afn_player_vx_world / 256.0f;
+            playerZ += afn_player_vz_world / 256.0f;
+            collide_walls(&playerX, &playerZ, playerY);
+            if (afn_velocity_falloff > 0) {
+                afn_player_vx_world -= afn_player_vx_world / afn_velocity_falloff;
+                afn_player_vz_world -= afn_player_vz_world / afn_velocity_falloff;
+                if (--afn_velocity_falloff == 0) { afn_player_vx_world = 0; afn_player_vz_world = 0; }
+            }
+        }
+
         player_moving = (afn_input_fwd != 0 || afn_input_right != 0);   // IsMoving gate
         if (grounded && (pad.buttons & SCE_CTRL_CROSS)) { playerVY = 13.0f; grounded = 0; }  // debug jump
         if (player_vy != 0) { playerVY = player_vy / 256.0f; player_vy = 0; grounded = 0; }  // Jump node
@@ -856,6 +887,30 @@ int main(void)
                 s_floorN[2] += (0.0f-s_floorN[2])*0.1f;
             }
         }
+
+        // Sprite collision -> OnCollision chains. Player circle vs each NPC's
+        // position (proximity). Sets afn_collided_sprite to the NPC's editor
+        // sprite index, then fires the scene + blueprint collision dispatchers
+        // (a blueprint attached to that sprite reacts). 10-frame spawn grace.
+        afn_frame_count++;
+#ifdef AFN_HAS_SPRITE_IDX
+        if (afn_frame_count > 10) {
+            for (int i = 0; i < AFN_NPC_COUNT; i++) {
+                int sp = (int)afn_npc_inst[i][7];
+                if (sp < 0 || sp >= NUM_SPRITES) continue;
+                if (!afn_sprite_visible[sp] || !afn_collision_enabled[sp]) continue;
+                float dx = playerX - afn_npc_inst[i][0];
+                float dz = playerZ - afn_npc_inst[i][2];
+                float dy = playerY - afn_npc_inst[i][1];
+                float r = COL_RADIUS + COL_RADIUS * afn_npc_inst[i][4];   // player + NPC (scale) radius
+                if (dx*dx + dz*dz < r*r && dy > -COL_TOP*2.0f && dy < COL_TOP*2.0f) {
+                    afn_collided_sprite = sp;
+                    afn_emitted_script_collision();
+                    afn_bp_dispatch_collision();
+                }
+            }
+        }
+#endif
 
         // Follow the player, framed at ~half the camera height (torso, not feet).
         float targetX = playerX, targetY = playerY + camHeight * 0.5f, targetZ = playerZ;
@@ -912,6 +967,28 @@ int main(void)
 #ifdef AFN_HAS_SPRITES
         billboards_render(view, camAngle);   // camera-facing animated sprites
 #endif
+
+        // Fade overlay: a fullscreen quad over the scene. level<0 darkens (fade
+        // out to black), level>0 brightens (fade in from white). |level|/16 alpha.
+        if (afn_fade_level != 0) {
+            int lv = afn_fade_level; if (lv > 16) lv = 16; if (lv < -16) lv = -16;
+            unsigned int A = (unsigned int)((lv < 0 ? -lv : lv) * 255 / 16);
+            unsigned int col = (A << 24) | (lv > 0 ? 0x00FFFFFFu : 0u);   // 0xAABBGGRR
+            AfnVertex fq[4] = { {0,0,col,0,0,0}, {0,0,col,1,0,0}, {0,0,col,1,1,0}, {0,0,col,0,1,0} };
+            glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrthof(0,1,0,1,-1,1);
+            glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
+            glDisable(GL_DEPTH_TEST); glDisable(GL_TEXTURE_2D); glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE);
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            AfnVertex* v = fq;
+            glEnableClientState(GL_VERTEX_ARRAY);
+            glEnableClientState(GL_COLOR_ARRAY);
+            glColorPointer (4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &v->color);
+            glVertexPointer(3, GL_FLOAT,         sizeof(AfnVertex), &v->x);
+            glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+            glDisableClientState(GL_COLOR_ARRAY);
+            glDisableClientState(GL_VERTEX_ARRAY);
+            glEnable(GL_DEPTH_TEST);
+        }
 
         vglSwapBuffers(GL_FALSE);
     }
