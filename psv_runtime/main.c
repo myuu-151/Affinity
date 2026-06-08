@@ -17,6 +17,7 @@
 #include "psv_player.h"    // AFN_PLAYER_COL_* (custom collision box, if authored)
 #include "psv_sky.h"       // sky panorama texture (AFN_HAS_SKY)
 #include "psv_sprites.h"   // billboard sprites (AFN_HAS_SPRITES)
+#include "psv_rail.h"      // grind rail centerlines (AFN_HAS_RAIL_PATH)
 
 #define SCR_W 960.0f
 #define SCR_H 544.0f
@@ -413,7 +414,9 @@ typedef struct {
     float ax, ay, az, bx, by, bz, cx, cy, cz;
     float nx, ny, nz;
     int   flags;   // 1 floor, 2 ceiling, 4 wall
+    int   sprite;  // editor sprite index of the source instance (-1 = none)
 } ColFace;
+int afn_floor_sprite = -1;   // editor sprite index of the floor the player stands on (grind)
 static ColFace* s_faces = 0;
 static int      s_faceCount = 0;
 static int*     s_cellStart = 0;
@@ -466,6 +469,11 @@ static void collide_build(void) {
             F->ax=wp[0];F->ay=wp[1];F->az=wp[2]; F->bx=wp[3];F->by=wp[4];F->bz=wp[5]; F->cx=wp[6];F->cy=wp[7];F->cz=wp[8];
             F->flags=(ny>0.3f)?1:(ny<-0.7f)?2:4;
             F->nx=nx; F->ny=ny; F->nz=nz;
+#ifdef AFN_HAS_SPRITE_IDX
+            F->sprite = afn_mesh_inst_sprite[si];   // for afn_floor_sprite (grind rail detect)
+#else
+            F->sprite = -1;
+#endif
             for (int k=0;k<3;k++){ float X=wp[k*3],Z=wp[k*3+2]; if(X<mnx)mnx=X; if(X>mxx)mxx=X; if(Z<mnz)mnz=Z; if(Z>mxz)mxz=Z; }
         }
     }
@@ -524,6 +532,7 @@ static int collide_floor(float x, float z, float py, float* outY, float* outN) {
     }
     *outY=bestY;
     if (outN){ if(bestF){outN[0]=bestF->nx;outN[1]=bestF->ny;outN[2]=bestF->nz;} else {outN[0]=0;outN[1]=1;outN[2]=0;} }
+    afn_floor_sprite = bestF ? bestF->sprite : -1;   // which sprite's floor (grind rail detect)
     return found;
 }
 
@@ -562,6 +571,60 @@ static void collide_walls(float* x, float* z, float py) {
     }
     *x=ppx; *z=ppz;
 }
+
+// ---------------------------------------------------------------------------
+// Grind-rail path helpers — float port of fps3d.c afn_railpath_*. afn_rail_pts is
+// world-px float, arc-length parameterized. (psv_rail.h, AFN_HAS_RAIL_PATH.)
+// ---------------------------------------------------------------------------
+#ifdef AFN_HAS_RAIL_PATH
+static float rail_seg_len(int start, int i) {
+    float dx = afn_rail_pts[start+i][0]-afn_rail_pts[start+i-1][0];
+    float dz = afn_rail_pts[start+i][2]-afn_rail_pts[start+i-1][2];
+    return sqrtf(dx*dx+dz*dz);
+}
+static float rail_len(int rail) {
+    int n = afn_rail_count[rail]; if (n < 2) return 0;
+    int start = afn_rail_start[rail];
+    float total = 0;
+    for (int i = 1; i < n; i++) total += rail_seg_len(start, i);
+    return total;
+}
+static void rail_sample(int rail, float s, float* ox, float* oy, float* oz, float* tdx, float* tdz) {
+    int n = afn_rail_count[rail], start = afn_rail_start[rail];
+    if (n < 2) { *ox=*oy=*oz=0; *tdx=1; *tdz=0; return; }
+    if (s < 0) s = 0;
+    float acc = 0;
+    for (int i = 1; i < n; i++) {
+        float ax=afn_rail_pts[start+i-1][0],ay=afn_rail_pts[start+i-1][1],az=afn_rail_pts[start+i-1][2];
+        float bx=afn_rail_pts[start+i][0],by=afn_rail_pts[start+i][1],bz=afn_rail_pts[start+i][2];
+        float seg = rail_seg_len(start, i); if (seg < 0.0001f) seg = 0.0001f;
+        if (s <= acc+seg || i == n-1) {
+            float t = (s - acc)/seg; if (t<0) t=0; if (t>1) t=1;
+            *ox = ax+(bx-ax)*t; *oy = ay+(by-ay)*t; *oz = az+(bz-az)*t;
+            float dx=bx-ax, dz=bz-az, l=sqrtf(dx*dx+dz*dz); if (l<0.0001f) l=0.0001f;
+            *tdx = dx/l; *tdz = dz/l; return;
+        }
+        acc += seg;
+    }
+}
+static float rail_nearest(int rail, float px, float pz, float* outD2) {
+    int n = afn_rail_count[rail], start = afn_rail_start[rail];
+    if (n < 2) { if(outD2)*outD2=0; return 0; }
+    float bestD=1e30f, bestArc=0, acc=0;
+    for (int i = 1; i < n; i++) {
+        float ax=afn_rail_pts[start+i-1][0],az=afn_rail_pts[start+i-1][2];
+        float bx=afn_rail_pts[start+i][0],bz=afn_rail_pts[start+i][2];
+        float ex=bx-ax,ez=bz-az, el2=ex*ex+ez*ez; if(el2<0.0001f)el2=0.0001f;
+        float t=((px-ax)*ex+(pz-az)*ez)/el2; if(t<0)t=0; if(t>1)t=1;
+        float cx=ax+ex*t, cz=az+ez*t, dd=(px-cx)*(px-cx)+(pz-cz)*(pz-cz);
+        float seg=rail_seg_len(start,i);
+        if (dd<bestD){ bestD=dd; bestArc=acc+seg*t; }
+        acc += seg;
+    }
+    if(outD2)*outD2=bestD;
+    return bestArc;
+}
+#endif // AFN_HAS_RAIL_PATH
 
 // ---------------------------------------------------------------------------
 // Input + node-script variable layer. Behaviour is node-driven, per the engine
@@ -627,6 +690,7 @@ int player_vy=0, player_ground_y=0, afn_player_vx_world=0, afn_player_vz_world=0
 int afn_velocity_falloff=0, afn_pending_boost_fwd=0;
 int afn_grinding=0, afn_grinding_active=0, afn_grind_rail=-1, afn_grind_power=0;
 int afn_grind_boost=0, afn_grind_bleed=0, afn_grind_catch_y=0, afn_grind_catch_x=0;
+int afn_grind_vel=0, afn_grind_dx=0, afn_grind_dz=0;   // runtime grind state (IsGrinding reads vel)
 // Gravity/terminal in 8.8 fixed (256 = 1 world unit/frame), so a SetGravity /
 // SetMaxFall node (which writes value*256) drives them. Seeded to the PSV
 // world defaults (0.8 / 30) rather than the weak editor-pixel defaults.
@@ -729,6 +793,9 @@ int main(void)
     float playerVY  = 0.0f;   // vertical velocity (gravity / jump)
     int   grounded  = 1;
     float s_floorN[3] = {0.0f, 1.0f, 0.0f};   // smoothed floor normal (slope tilt)
+#ifdef AFN_HAS_RAIL_PATH
+    int   gr_on = 0; float gr_arc = 0.0f; int gr_dir = 1; float gr_speed = 0.0f, gr_prevY = 0.0f;
+#endif
     collide_build();
     {   // Drop onto the floor at spawn so we don't start mid-air.
         float fy, fn[3];
@@ -887,6 +954,65 @@ int main(void)
                 s_floorN[2] += (0.0f-s_floorN[2])*0.1f;
             }
         }
+
+#ifdef AFN_HAS_RAIL_PATH
+        // Grind rails: StartGrind sets afn_grinding + afn_grind_rail (a sprite
+        // index that matches afn_floor_sprite). Engage when on/near that rail's
+        // floor, then slide the centerline — faster downhill (grade), launch off
+        // the end / on jump with momentum. Float-spirit port of fps3d.c's grind.
+        {
+            int rail = afn_grind_rail;
+            if (!gr_on && afn_grinding && rail >= 0 && rail < NUM_SPRITES
+                && afn_rail_count[rail] >= 2 && playerVY <= 0.5f) {
+                float d2; float arc = rail_nearest(rail, playerX, playerZ, &d2);
+                float gx,gy,gz,tdx,tdz; rail_sample(rail, arc, &gx,&gy,&gz,&tdx,&tdz);
+                float catchR = afn_grind_catch_x > 0 ? (float)afn_grind_catch_x : COL_RADIUS*3.0f;
+                float vWin   = COL_TOP + (afn_grind_catch_y > 0 ? (float)afn_grind_catch_y : COL_TOP);
+                int onRailFloor = (grounded && afn_floor_sprite == rail);
+                if ((onRailFloor || d2 <= catchR*catchR) && fabsf(playerY - gy) <= vWin) {
+                    gr_on = 1; gr_arc = arc; gr_prevY = gy;
+                    float h = sinf(playerYaw*DEG2RAD)*tdx + cosf(playerYaw*DEG2RAD)*tdz;
+                    gr_dir = (h >= 0.0f) ? 1 : -1;
+                    gr_speed = 12.0f;          // initial slide speed (px/frame)
+                    afn_grind_vel = 1;         // flag: grinding (node SFX gates read this)
+                }
+            }
+            if (gr_on) {
+                int rs = afn_rail_start[rail], rn = afn_rail_count[rail];
+                float total = rail_len(rail);
+                if ((pad.buttons & SCE_CTRL_CROSS) || !afn_grinding) {
+                    float gx,gy,gz,tdx,tdz; rail_sample(rail, gr_arc, &gx,&gy,&gz,&tdx,&tdz);
+                    afn_player_vx_world = (int)(tdx * gr_dir * gr_speed * 256.0f);   // launch w/ momentum
+                    afn_player_vz_world = (int)(tdz * gr_dir * gr_speed * 256.0f);
+                    afn_velocity_falloff = 30;
+                    if (pad.buttons & SCE_CTRL_CROSS) playerVY = 13.0f;
+                    gr_on = 0; afn_grind_vel = 0; afn_grinding = 0;
+                } else {
+                    float gx,gy,gz,tdx,tdz; rail_sample(rail, gr_arc, &gx,&gy,&gz,&tdx,&tdz);
+                    playerX = gx; playerY = gy - COL_BOTTOM; playerZ = gz; playerVY = 0.0f; grounded = 1;
+                    playerYaw = atan2f(tdx*gr_dir, tdz*gr_dir) * (180.0f/3.14159265f);
+                    float grade = gr_prevY - gy; gr_prevY = gy;          // +down / -up
+                    float gpow = (afn_grind_power ? afn_grind_power : 24) / 256.0f;
+                    gr_speed += (grade > 0.0f ? grade * gpow : grade * 0.05f);
+                    if (gr_speed < 3.0f)  gr_speed = 3.0f;
+                    if (gr_speed > 45.0f) gr_speed = 45.0f;
+                    gr_arc += gr_dir * gr_speed;
+                    if (gr_arc <= 0.0f || gr_arc >= total) {
+                        int term = (gr_arc <= 0.0f) ? 0 : (rn-1);
+                        if (afn_rail_pt_bounce[rs+term]) {              // bumper -> reverse
+                            gr_dir = -gr_dir; gr_arc = (gr_arc <= 0.0f) ? 0.0f : total;
+                        } else {                                       // launch off end
+                            float lx,ly,lz,ltx,ltz; rail_sample(rail, gr_arc<=0.0f?0.0f:total, &lx,&ly,&lz,&ltx,&ltz);
+                            afn_player_vx_world = (int)(ltx * gr_dir * gr_speed * 256.0f);
+                            afn_player_vz_world = (int)(ltz * gr_dir * gr_speed * 256.0f);
+                            afn_velocity_falloff = 30;
+                            gr_on = 0; afn_grind_vel = 0; afn_grinding = 0;
+                        }
+                    }
+                }
+            }
+        }
+#endif // AFN_HAS_RAIL_PATH
 
         // Sprite collision -> OnCollision chains. Player circle vs each NPC's
         // position (proximity). Sets afn_collided_sprite to the NPC's editor
