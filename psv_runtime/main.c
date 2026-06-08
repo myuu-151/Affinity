@@ -115,7 +115,8 @@ static float rig_advance(const AfnRig* R, int clip, float frame) {
 // Draw one rig instance. s_skinned must already hold R's skinned pose. The
 // headlamp is the same NDS-matched setup as before, per rig's baked direction.
 static void rig_draw(const AfnRig* R, GLuint* texArr, const float* view,
-                     float px, float py, float pz, float yawDeg, float instScale) {
+                     float px, float py, float pz, float yawDeg, float instScale,
+                     const float* upN) {
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
     if (R->camlight) {
@@ -136,14 +137,24 @@ static void rig_draw(const AfnRig* R, GLuint* texArr, const float* view,
         glDisable(GL_LIGHTING);
     }
 
+    // Orient with a basis matrix: up = floor normal (slope tilt), forward = the
+    // yaw heading projected onto the slope plane, right = up x fwd. Ported from
+    // psp_runtime/rig.c. NPCs pass world-up so they stay vertical.
+    float ux = upN ? upN[0] : 0.0f, uy = upN ? upN[1] : 1.0f, uz = upN ? upN[2] : 0.0f;
+    float ul = sqrtf(ux*ux + uy*uy + uz*uz); if (ul > 1e-6f) { ux/=ul; uy/=ul; uz/=ul; }
     float yr = yawDeg * DEG2RAD + AFN_RIG_YAW_OFFSET;
-    float fx = sinf(yr), fz = cosf(yr);
+    float ydx = sinf(yr), ydz = cosf(yr);
+    float d = ydx*ux + ydz*uz;                              // yawDir . up (ydy = 0)
+    float fx = ydx - ux*d, fy = -uy*d, fz = ydz - uz*d;     // project onto slope plane
+    float fl = sqrtf(fx*fx + fy*fy + fz*fz);
+    if (fl > 1e-6f) { fx/=fl; fy/=fl; fz/=fl; } else { fx=0; fy=0; fz=1; }
+    float rgx = uy*fz - uz*fy, rgy = uz*fx - ux*fz, rgz = ux*fy - uy*fx;  // right = up x fwd
     float S = R->scale * instScale;
-    float model[16] = {
-        fz*S, 0, -fx*S, 0,
-        0,    S, 0,    0,
-        fx*S, 0, fz*S, 0,
-        px,   py, pz,  1
+    float model[16] = {     // column-major: col0=right, col1=up, col2=forward
+        rgx*S, rgy*S, rgz*S, 0,
+        ux*S,  uy*S,  uz*S,  0,
+        fx*S,  fy*S,  fz*S,  0,
+        px,    py,    pz,    1
     };
     glLoadMatrixf(view);
     glMultMatrixf(model);
@@ -176,14 +187,15 @@ static void rig_draw(const AfnRig* R, GLuint* texArr, const float* view,
 }
 
 // Skin + draw the player and every NPC for this frame.
-static void rigs_render(const float* view, float playerX, float playerY, float playerZ, float playerYaw) {
+static void rigs_render(const float* view, float playerX, float playerY, float playerZ,
+                        float playerYaw, const float* floorN) {
     const AfnRig* PR = &afn_rigs[AFN_PLAYER_RIG_SLOT];
     if (afn_rig_clip >= 0 && afn_rig_clip < PR->clips && afn_rig_clip != s_pclip) {
         s_pclip = afn_rig_clip; s_pframe = 0.0f;
     }
     s_pframe = rig_advance(PR, s_pclip, s_pframe);
     build_bone_mats(PR, s_pclip, s_pframe); skin(PR);
-    rig_draw(PR, s_rigTex[AFN_PLAYER_RIG_SLOT], view, playerX, playerY, playerZ, playerYaw, AFN_PLAYER_SCALE);
+    rig_draw(PR, s_rigTex[AFN_PLAYER_RIG_SLOT], view, playerX, playerY, playerZ, playerYaw, AFN_PLAYER_SCALE, floorN);
 
     for (int i = 0; i < AFN_NPC_COUNT; i++) {
         const float* N = afn_npc_inst[i];
@@ -192,7 +204,7 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
         int clip = (int)N[5]; if (clip < 0 || clip >= R->clips) clip = 0;
         s_npcFrame[i] = rig_advance(R, clip, s_npcFrame[i]);
         build_bone_mats(R, clip, s_npcFrame[i]); skin(R);
-        rig_draw(R, s_rigTex[slot], view, N[0], N[1], N[2], N[3], N[4]);
+        rig_draw(R, s_rigTex[slot], view, N[0], N[1], N[2], N[3], N[4], 0);  // NPCs: world up
     }
 }
 #endif // AFN_HAS_PLAYER_RIG
@@ -581,6 +593,7 @@ int main(void)
     float playerYaw = 0.0f;   // rig facing (degrees)
     float playerVY  = 0.0f;   // vertical velocity (gravity / jump)
     int   grounded  = 1;
+    float s_floorN[3] = {0.0f, 1.0f, 0.0f};   // smoothed floor normal (slope tilt)
     collide_build();
     {   // Drop onto the floor at spawn so we don't start mid-air.
         float fy, fn[3];
@@ -626,8 +639,10 @@ int main(void)
         float rx = (pad.rx - 128) / 128.0f, ry = (pad.ry - 128) / 128.0f;
         if (fabsf(rx) > 0.15f) orbit_angle += (int)(rx * 600.0f);
         if (fabsf(ry) > 0.15f) orbit_pitch += (int)(ry * 450.0f);
-        if (pad.buttons & SCE_CTRL_LTRIGGER) camDist *= 1.03f;
-        if (pad.buttons & SCE_CTRL_RTRIGGER) camDist *= 0.97f;
+        // NOTE: no trigger-zoom here — the triggers are KEY_L/KEY_R, which the
+        // node graph binds to orbit. A hardcoded zoom would double-bind them
+        // (R = orbit + zoom-in, L = orbit + zoom-out). Camera distance is slot/
+        // node driven only.
         // Clamp pitch to ~±80 deg in brad (65536 = 360 deg -> ±14563).
         if (orbit_pitch >  14563) orbit_pitch =  14563;
         if (orbit_pitch < -14563) orbit_pitch = -14563;
@@ -665,7 +680,16 @@ int main(void)
             float fy, fn[3];
             if (collide_floor(playerX, playerZ, playerY, &fy, fn) && playerY <= fy - COL_BOTTOM) {
                 playerY = fy - COL_BOTTOM; playerVY = 0.0f; grounded = 1;
-            } else grounded = 0;
+                // Ease the rig's up-axis toward the floor normal (slope tilt).
+                s_floorN[0] += (fn[0]-s_floorN[0])*0.2f;
+                s_floorN[1] += (fn[1]-s_floorN[1])*0.2f;
+                s_floorN[2] += (fn[2]-s_floorN[2])*0.2f;
+            } else {
+                grounded = 0;
+                s_floorN[0] += (0.0f-s_floorN[0])*0.1f;   // airborne: ease back upright
+                s_floorN[1] += (1.0f-s_floorN[1])*0.1f;
+                s_floorN[2] += (0.0f-s_floorN[2])*0.1f;
+            }
         }
 
         // Follow the player, framed at ~half the camera height (torso, not feet).
@@ -709,7 +733,7 @@ int main(void)
 #ifdef AFN_HAS_PLAYER_RIG
         // Player rig + every NPC: each skinned from its own rig at its own
         // transform/clip (player follows the camera; NPCs at their world spots).
-        rigs_render(view, playerX, playerY, playerZ, playerYaw);
+        rigs_render(view, playerX, playerY, playerZ, playerYaw, s_floorN);
 #endif
 
         vglSwapBuffers(GL_FALSE);
