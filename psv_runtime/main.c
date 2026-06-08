@@ -609,6 +609,7 @@ int main(void)
     // runtime re-reads it each frame so a future SetCamera node just works.
     const float* slot0 = afn_cam_slots[afn_active_camera];
     orbit_angle       = (int)(slot0[0] * (65536.0f / 6.2831853f));  // GLOBAL brad (node + manual)
+    afn_player_heading = orbit_angle;   // tank heading starts facing the camera-forward
     float camDist     = slot0[1] > 1.0f ? slot0[1] : 60.0f;  // world px
     float camHeight   = slot0[2];                            // world px
     // Pitch is also brad in the global orbit_pitch so the OrbitCamera Up/Down
@@ -656,8 +657,12 @@ int main(void)
         //     default when no script). Ported from PSP scene_update. ---
         float fAmt = afn_input_fwd  / 256.0f;
         float rAmt = afn_input_right / 256.0f;
-        float fwdX = sinf(camAngle), fwdZ = cosf(camAngle);
-        float rgtX = cosf(camAngle), rgtZ = -sinf(camAngle);
+        // Tank controls: when afn_tank_camera is set (a Turn Player / tank node),
+        // movement + facing follow afn_player_heading (D-pad turned), so the
+        // camera orbits independently. Otherwise movement is camera-relative.
+        float moveAngle = afn_tank_camera ? (afn_player_heading * (6.2831853f/65536.0f)) : camAngle;
+        float fwdX = sinf(moveAngle), fwdZ = cosf(moveAngle);
+        float rgtX = cosf(moveAngle), rgtZ = -sinf(moveAngle);
         float mvX = fAmt*fwdX + rAmt*rgtX;
         float mvZ = fAmt*fwdZ + rAmt*rgtZ;
         int scripted = script_present();
@@ -671,6 +676,8 @@ int main(void)
             for (int st = 0; st < steps; st++) { playerX += ix; playerZ += iz; collide_walls(&playerX, &playerZ, playerY); }
             playerYaw = atan2f(mvX, mvZ) * (180.0f/3.14159265f);
         }
+        // In tank mode the rig faces the heading even when standing still.
+        if (afn_tank_camera) playerYaw = afn_player_heading * (360.0f/65536.0f);
         if (grounded && (pad.buttons & SCE_CTRL_CROSS)) { playerVY = 13.0f; grounded = 0; }  // jump
         collide_walls(&playerX, &playerZ, playerY);
         playerVY -= 0.8f;                                  // gravity
