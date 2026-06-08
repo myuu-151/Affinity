@@ -1229,7 +1229,12 @@ int main(void)
             for (int i = 0; i < AFN_NPC_COUNT; i++) {
                 int eidx = (int)afn_npc_inst[i][7];
                 if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;
-                float nbottom = afn_npc_col[i][1];
+                // True box: half-extents (hx,hy,hz) + center offset (cx,cy,cz),
+                // all in world px relative to the NPC origin. Y rests the box
+                // bottom (cy-hy) on the floor.
+                float hx = afn_npc_col[i][0], hy = afn_npc_col[i][1], hz = afn_npc_col[i][2];
+                float cx = afn_npc_col[i][3], cy = afn_npc_col[i][4], cz = afn_npc_col[i][5];
+                float nbottom = cy - hy;
                 s_npcVY[i] -= ng;
                 if (s_npcVY[i] < -nterm) s_npcVY[i] = -nterm;
                 s_npcY[i] += s_npcVY[i];
@@ -1241,24 +1246,37 @@ int main(void)
                     s_npcGround[i] = 0;
                 }
 
-                // SOLID blocker: push the player out of the NPC's box so the
-                // enemy is impassable (not just an OnCollision trigger). The box
-                // is treated as a cylinder — XZ radius afn_npc_col[0], vertical
-                // band [bottom,top] relative to the NPC's settled feet Y. Only
-                // when collision is enabled for this sprite.
+                // SOLID blocker: push the player (a cylinder of COL_RADIUS) out
+                // of the NPC's AABB. True box — independent X/Z half-extents and
+                // the box's center offset are honored (circle-vs-AABB resolve).
                 if (eidx < 0 || afn_collision_enabled[eidx]) {
-                    float npcBot = s_npcY[i] + nbottom;
-                    float npcTop = s_npcY[i] + afn_npc_col[i][2];
+                    float bcx = afn_npc_inst[i][0] + cx, bcz = afn_npc_inst[i][2] + cz;
+                    float xmin = bcx - hx, xmax = bcx + hx, zmin = bcz - hz, zmax = bcz + hz;
+                    float npcBot = s_npcY[i] + cy - hy, npcTop = s_npcY[i] + cy + hy;
                     float plBot  = playerY + COL_BOTTOM, plTop = playerY + COL_TOP;
                     if (plTop > npcBot && plBot < npcTop) {            // vertical overlap
-                        float ox = afn_npc_inst[i][0], oz = afn_npc_inst[i][2];
-                        float dx = playerX - ox, dz = playerZ - oz;
-                        float minD = COL_RADIUS + afn_npc_col[i][0];   // player + NPC radius
-                        float d2 = dx*dx + dz*dz;
-                        if (d2 < minD*minD) {
-                            float d = sqrtf(d2);
-                            if (d > 1e-4f) { float k = minD / d; playerX = ox + dx*k; playerZ = oz + dz*k; }
-                            else           { playerX = ox + minD; }    // dead-center: shove +X
+                        float R = COL_RADIUS;
+                        if (playerX > xmin - R && playerX < xmax + R &&
+                            playerZ > zmin - R && playerZ < zmax + R) {
+                            if (playerX > xmin && playerX < xmax &&
+                                playerZ > zmin && playerZ < zmax) {
+                                // Center inside the core box: eject out the nearest face.
+                                float pxl = playerX - xmin, pxr = xmax - playerX;
+                                float pzl = playerZ - zmin, pzr = zmax - playerZ;
+                                float mx = pxl < pxr ? pxl : pxr, mz = pzl < pzr ? pzl : pzr;
+                                if (mx < mz) playerX = (pxl < pxr) ? xmin - R : xmax + R;
+                                else         playerZ = (pzl < pzr) ? zmin - R : zmax + R;
+                            } else {
+                                // Edge/corner: push to the circle boundary off the
+                                // closest point on the box.
+                                float qx = playerX < xmin ? xmin : (playerX > xmax ? xmax : playerX);
+                                float qz = playerZ < zmin ? zmin : (playerZ > zmax ? zmax : playerZ);
+                                float dx = playerX - qx, dz = playerZ - qz, d2 = dx*dx + dz*dz;
+                                if (d2 < R*R && d2 > 1e-8f) {
+                                    float d = sqrtf(d2), k = R / d;
+                                    playerX = qx + dx*k; playerZ = qz + dz*k;
+                                }
+                            }
                         }
                     }
                 }
@@ -1337,21 +1355,26 @@ int main(void)
                 int sp = (int)afn_npc_inst[i][7];
                 if (sp < 0 || sp >= NUM_SPRITES) continue;
                 if (!afn_sprite_visible[sp] || !afn_collision_enabled[sp]) continue;
-                float dx = playerX - afn_npc_inst[i][0];
-                float dz = playerZ - afn_npc_inst[i][2];
-                // Use the NPC's authored glTF box (radius + vertical band) and its
-                // gravity-settled Y, not a hardcoded radius.
-                float ncy = afn_npc_inst[i][1];   // box center reference: settled Y + band
-                float nr  = COL_RADIUS;
-                float band = COL_TOP;
+                // OnCollision trigger: player cylinder (COL_RADIUS) vs the NPC's
+                // true AABB (independent X/Z extents + center offset + settled Y),
+                // matching the solid-blocker test above.
 #ifdef AFN_HAS_PLAYER_RIG
-                ncy  = s_npcY[i] + (afn_npc_col[i][1] + afn_npc_col[i][2]) * 0.5f;
-                nr   = afn_npc_col[i][0];
-                band = (afn_npc_col[i][2] - afn_npc_col[i][1]) * 0.5f + COL_TOP;
+                float hx = afn_npc_col[i][0], hy = afn_npc_col[i][1], hz = afn_npc_col[i][2];
+                float cx = afn_npc_col[i][3], cy = afn_npc_col[i][4], cz = afn_npc_col[i][5];
+                float bcx = afn_npc_inst[i][0] + cx, bcz = afn_npc_inst[i][2] + cz;
+                float xmin = bcx - hx, xmax = bcx + hx, zmin = bcz - hz, zmax = bcz + hz;
+                float qx = playerX < xmin ? xmin : (playerX > xmax ? xmax : playerX);
+                float qz = playerZ < zmin ? zmin : (playerZ > zmax ? zmax : playerZ);
+                float ddx = playerX - qx, ddz = playerZ - qz;
+                float npcBot = s_npcY[i] + cy - hy, npcTop = s_npcY[i] + cy + hy;
+                float plBot = playerY + COL_BOTTOM, plTop = playerY + COL_TOP;
+                int hit = (ddx*ddx + ddz*ddz < COL_RADIUS*COL_RADIUS) && (plTop > npcBot && plBot < npcTop);
+#else
+                float dx = playerX - afn_npc_inst[i][0], dz = playerZ - afn_npc_inst[i][2];
+                float dy = playerY - afn_npc_inst[i][1];
+                int hit = (dx*dx + dz*dz < (COL_RADIUS*2)*(COL_RADIUS*2)) && (dy > -COL_TOP && dy < COL_TOP);
 #endif
-                float dy = playerY - ncy;
-                float r = COL_RADIUS + nr;                 // player + NPC box radius
-                if (dx*dx + dz*dz < r*r && dy > -band && dy < band) {
+                if (hit) {
                     afn_collided_sprite = sp;
                     afn_emitted_script_collision();
                     afn_bp_dispatch_collision();

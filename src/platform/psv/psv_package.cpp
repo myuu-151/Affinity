@@ -311,28 +311,27 @@ static bool GeneratePSVRigData(const std::string& runtimeDir,
     if (npcs.empty()) f << "  {0,0,0,0,0,0,0,0},\n";
     f << "};\n";
 
-    // Per-NPC collision box { radius, bottom, top } in WORLD px, from the rig's
-    // authored box (collisionType/colCenter/colExtents, half-extents in rig-local
-    // space) * the instance render scale (scale*0.25, matching rig_draw). This is
-    // the glTF bounding box the runtime uses for gravity floor-snap and the
-    // player-vs-NPC collision test. Rigs without an authored box fall back to a
-    // scale-relative default cylinder.
-    f << "static const float afn_npc_col[" << (npcs.empty()?1:npcs.size()) << "][3] = {\n";
+    // Per-NPC collision box: { hx,hy,hz, cx,cy,cz } in WORLD px — the full glTF
+    // bounding box. Half-extents (hx,hy,hz) + center offset (cx,cy,cz) from the
+    // rig's authored box (collisionType/colExtents/colCenter, rig-local) * the
+    // instance render scale (scale*0.25, matching rig_draw). The runtime uses the
+    // true AABB (independent X/Z, center offset honored) for gravity floor-snap
+    // and the player-vs-NPC collision/blocker. Default box if none authored.
+    f << "static const float afn_npc_col[" << (npcs.empty()?1:npcs.size()) << "][6] = {\n";
     for (const auto& n : npcs) {
         const PSPRigExport& rig = rigs[used[n.slot]];
         float Sc = n.scale * 0.25f;
-        float radius, bottom, top;
+        float hx, hy, hz, cx, cy, cz;
         if (rig.collisionType == 1) {
-            float exx = rig.colExtents[0], eyy = rig.colExtents[1], ezz = rig.colExtents[2];
-            radius = (exx > ezz ? exx : ezz) * Sc;
-            bottom = (rig.colCenter[1] - eyy) * Sc;
-            top    = (rig.colCenter[1] + eyy) * Sc;
+            hx = rig.colExtents[0] * Sc; hy = rig.colExtents[1] * Sc; hz = rig.colExtents[2] * Sc;
+            cx = rig.colCenter[0]  * Sc; cy = rig.colCenter[1]  * Sc; cz = rig.colCenter[2]  * Sc;
         } else {
-            radius = 3.0f * n.scale; bottom = 0.0f; top = 6.0f * n.scale;
+            hx = hz = 3.0f * n.scale; hy = 3.0f * n.scale; cx = cz = 0.0f; cy = 3.0f * n.scale;
         }
-        f << "  { " << PFlt(radius) << "," << PFlt(bottom) << "," << PFlt(top) << " },\n";
+        f << "  { " << PFlt(hx) << "," << PFlt(hy) << "," << PFlt(hz) << ","
+          << PFlt(cx) << "," << PFlt(cy) << "," << PFlt(cz) << " },\n";
     }
-    if (npcs.empty()) f << "  {3.0f,0.0f,6.0f},\n";
+    if (npcs.empty()) f << "  {3.0f,3.0f,3.0f,0.0f,3.0f,0.0f},\n";
     f << "};\n";
 
     f.close();

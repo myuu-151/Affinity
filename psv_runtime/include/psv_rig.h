@@ -3538,6 +3538,6 @@ static const AfnRig afn_rigs[AFN_RIG_COUNT] = {
 static const float afn_npc_inst[1][8] = {
   { 145.348f,2.62056f,156.703f,0.0f,15.34f,0,1,6 },
 };
-static const float afn_npc_col[1][3] = {
-  { 3.0f,0.0f,6.0f },
+static const float afn_npc_col[1][6] = {
+  { 1.99842f,1.77944f,1.99842f,0.0f,1.77944f,0.0f },
 };
