@@ -36,11 +36,15 @@ static GLuint s_meshTex[256];   // one GL texture per mesh (0 = none)
 #define AFN_RIG_YAW_OFFSET 0.0f
 #endif
 int afn_rig_clip = AFN_PLAYER_DEFAULT_CLIP;   // player clip selector (script-set; local for bring-up)
+// Script-glue globals rigs_render reads (defined later in the script-glue block).
+extern int afn_skel_anim_obj, afn_skel_anim_clip;   // SetSkelAnim: NPC sprite idx + clip
+extern unsigned char afn_sprite_visible[];          // SetVisible/DestroyObject per sprite
 static AfnRigVertex s_skinned[AFN_RIG_MAX_VERTS];
 static float  s_bonemat[AFN_RIG_MAX_BONES][12];   // 3x4 row-major per bone
 static GLuint s_rigTex[AFN_RIG_COUNT][AFN_RIG_MAX_MATS];
 static float  s_pframe = 0.0f;                     // player anim frame
 static int    s_pclip  = AFN_PLAYER_DEFAULT_CLIP;
+static int    s_npcClip[AFN_NPC_COUNT + 1];        // per-NPC clip override (-1 = use default)
 static float  s_npcFrame[AFN_NPC_COUNT + 1];       // per-NPC anim frame (+1 avoids zero-size)
 
 static void pose_to_mat(const float* p, float* m) {
@@ -87,6 +91,7 @@ static void skin(const AfnRig* R) {
     }
 }
 static void rig_init(void) {
+    for (int i = 0; i < AFN_NPC_COUNT; i++) s_npcClip[i] = -1;   // no SetSkelAnim override yet
     for (int r = 0; r < AFN_RIG_COUNT; r++) {
         const AfnRig* R = &afn_rigs[r];
         for (int g = 0; g < AFN_RIG_MAX_MATS; g++) {
@@ -199,11 +204,25 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
     build_bone_mats(PR, s_pclip, s_pframe); skin(PR);
     rig_draw(PR, s_rigTex[AFN_PLAYER_RIG_SLOT], view, playerX, playerY, playerZ, playerYaw, AFN_PLAYER_SCALE, floorN);
 
+    // SetSkelAnim: set the matching NPC's clip override (by editor sprite index).
+    // Needs the 8-wide afn_npc_inst (editor index in col 7) from the new export.
+#ifdef AFN_HAS_SPRITE_IDX
+    if (afn_skel_anim_obj >= 0) {
+        for (int i = 0; i < AFN_NPC_COUNT; i++)
+            if ((int)afn_npc_inst[i][7] == afn_skel_anim_obj) s_npcClip[i] = afn_skel_anim_clip;
+        afn_skel_anim_obj = -1;
+    }
+#endif
     for (int i = 0; i < AFN_NPC_COUNT; i++) {
         const float* N = afn_npc_inst[i];
         int slot = (int)N[6]; if (slot < 0 || slot >= AFN_RIG_COUNT) continue;
         const AfnRig* R = &afn_rigs[slot];
-        int clip = (int)N[5]; if (clip < 0 || clip >= R->clips) clip = 0;
+#ifdef AFN_HAS_SPRITE_IDX
+        int eidx = (int)N[7];
+        if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;   // hidden / destroyed
+#endif
+        int clip = s_npcClip[i] >= 0 ? s_npcClip[i] : (int)N[5];   // SetSkelAnim override
+        if (clip < 0 || clip >= R->clips) clip = 0;
         s_npcFrame[i] = rig_advance(R, clip, s_npcFrame[i]);
         build_bone_mats(R, clip, s_npcFrame[i]); skin(R);
         rig_draw(R, s_rigTex[slot], view, N[0], N[1], N[2], N[3], N[4], 0);  // NPCs: world up
@@ -352,6 +371,10 @@ static void billboards_render(const float* view, float camAngle) {
     glEnableClientState(GL_COLOR_ARRAY);
     glEnableClientState(GL_TEXTURE_COORD_ARRAY);
     for (int i = 0; i < AFN_SPR_INST_COUNT; i++) {
+#ifdef AFN_HAS_SPRITE_IDX
+        int eidx = afn_spr_editor_idx[i];
+        if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;  // hidden/destroyed
+#endif
         int lo = afn_spr_fstart[i], hi = afn_spr_fend[i]; if (hi < lo) hi = lo;
         s_sprFrame[i] += afn_spr_fps[i] / 60.0f;
         if (s_sprFrame[i] >= (float)(hi+1)) s_sprFrame[i] = (float)lo;
@@ -730,6 +753,11 @@ int main(void)
 
     SceCtrlData pad;
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
+#ifdef AFN_HAS_SPRITE_IDX
+    // All sprites start visible + collidable (the inert arrays default to 0 =
+    // hidden). DestroyObject/SetVisible nodes flip these at runtime.
+    for (int i = 0; i < NUM_SPRITES; i++) { afn_sprite_visible[i] = 1; afn_collision_enabled[i] = 1; }
+#endif
     script_start();   // OnStart + blueprint start hooks
 
     while (1) {
@@ -861,6 +889,10 @@ int main(void)
         for (int si = 0; si < afn_sprite_count; si++) {
             int mi = afn_sprites[si].meshIdx;
             if (mi < 0 || mi >= afn_mesh_count) continue;
+#ifdef AFN_HAS_SPRITE_IDX
+            int eidx = afn_mesh_inst_sprite[si];
+            if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;  // hidden/destroyed
+#endif
             const AfnSpriteInst* sp = &afn_sprites[si];
             glLoadMatrixf(view);
             glTranslatef(sp->x, sp->y, sp->z);

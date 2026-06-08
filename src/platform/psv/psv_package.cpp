@@ -234,20 +234,24 @@ static bool GeneratePSVRigData(const std::string& runtimeDir,
     };
     int playerSlot = useRig(playerRigIdx);
 
-    float psx=0, psy=0, psz=0, pscale=1.0f; int pclip=0;
-    for (const auto& s : sprites)
+    float psx=0, psy=0, psz=0, pscale=1.0f; int pclip=0, playerSprite=-1;
+    for (size_t i = 0; i < sprites.size(); i++) {
+        const auto& s = sprites[i];
         if (s.spriteType == 1 && s.riggedMeshIdx == playerRigIdx) {
-            psx=PVX(s.x); psy=PVY(s.y); psz=PVX(s.z); pscale=s.scale; pclip=s.rigAnimIdx; break;
+            psx=PVX(s.x); psy=PVY(s.y); psz=PVX(s.z); pscale=s.scale; pclip=s.rigAnimIdx;
+            playerSprite=(int)i; break;
         }
+    }
 
-    struct Inst { float x,y,z,rot,scale; int clip, slot; };
+    struct Inst { float x,y,z,rot,scale; int clip, slot, sprite; };
     std::vector<Inst> npcs;
-    for (const auto& s : sprites) {
+    for (size_t i = 0; i < sprites.size(); i++) {
+        const auto& s = sprites[i];
         if (s.spriteType == 1) continue;
         int slot = useRig(s.riggedMeshIdx);
         if (slot < 0) continue;
         int clip = (s.rigAnimIdx >= 0 && s.rigAnimIdx < (int)rigs[s.riggedMeshIdx].clips.size()) ? s.rigAnimIdx : 0;
-        npcs.push_back({ PVX(s.x), PVY(s.y), PVX(s.z), s.rotation, s.scale, clip, slot });
+        npcs.push_back({ PVX(s.x), PVY(s.y), PVX(s.z), s.rotation, s.scale, clip, slot, (int)i });
     }
 
     if (used.empty()) { f << "// (no rigs in this scene)\n"; return true; }
@@ -292,15 +296,18 @@ static bool GeneratePSVRigData(const std::string& runtimeDir,
         f << "#define AFN_PLAYER_START_Z "     << PFlt(psz) << "\n";
         f << "#define AFN_PLAYER_SCALE "       << PFlt(pscale) << "\n";
         f << "#define AFN_PLAYER_DEFAULT_CLIP " << pclip << "\n";
+        f << "#define AFN_PLAYER_SPRITE_IDX "   << playerSprite << "\n";
     }
 
-    // NPC instances: { x, y, z (world px), rotY (deg), scale, clip, rig slot }.
+    // NPC instances: { x, y, z (world px), rotY (deg), scale, clip, rig slot,
+    // editor sprite index }. The sprite index lets SetVisible/SetSkelAnim/
+    // collision nodes target this NPC.
     f << "#define AFN_NPC_COUNT " << npcs.size() << "\n";
-    f << "static const float afn_npc_inst[" << (npcs.empty()?1:npcs.size()) << "][7] = {\n";
+    f << "static const float afn_npc_inst[" << (npcs.empty()?1:npcs.size()) << "][8] = {\n";
     for (const auto& n : npcs)
         f << "  { " << PFlt(n.x) << "," << PFlt(n.y) << "," << PFlt(n.z) << "," << PFlt(n.rot)
-          << "," << PFlt(n.scale) << "," << n.clip << "," << n.slot << " },\n";
-    if (npcs.empty()) f << "  {0,0,0,0,0,0,0},\n";
+          << "," << PFlt(n.scale) << "," << n.clip << "," << n.slot << "," << n.sprite << " },\n";
+    if (npcs.empty()) f << "  {0,0,0,0,0,0,0,0},\n";
     f << "};\n";
 
     f.close();
