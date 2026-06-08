@@ -563,18 +563,27 @@ static bool GeneratePSPSprites(const std::string& runtimeDir, const char* hdrPre
         f << "static const int afn_spr_" << nm << "[" << inst.size() << "] = {";
         for (auto& in : inst) f << fn(in) << ","; f << "};\n";
     };
+    // Anim ranges are clamped to the asset's ACTUAL emitted frame count: an
+    // authored anim can name an endFrame past the last real frame (e.g. a
+    // 2-frame anim on a 1-frame asset), and the runtime indexes the global frame
+    // texture table directly — an out-of-range index reads a garbage texture
+    // (the "flickering texture map" bug). Clamp to [0, frames-1].
     icol("fstart", [&](const Inst& in){
         const auto& a = assets[in.asset];
+        int nf = (int)a.frames.size();
         int s = 0;
         if (in.anim >= 0 && in.anim < (int)a.anims.size()) s = a.anims[in.anim].startFrame;
         else if (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size()) s = a.anims[a.defaultAnim].startFrame;
+        if (s < 0) s = 0; if (s > nf - 1) s = nf - 1;
         return assetFrame0[in.asset] + s;
     });
     icol("fend", [&](const Inst& in){
         const auto& a = assets[in.asset];
-        int e = (int)a.frames.size() - 1;
+        int nf = (int)a.frames.size();
+        int e = nf - 1;
         if (in.anim >= 0 && in.anim < (int)a.anims.size()) e = a.anims[in.anim].endFrame;
         else if (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size()) e = a.anims[a.defaultAnim].endFrame;
+        if (e < 0) e = 0; if (e > nf - 1) e = nf - 1;
         return assetFrame0[in.asset] + e;
     });
     icol("fps", [&](const Inst& in){

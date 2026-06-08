@@ -3533,7 +3533,11 @@ static const AfnRig afn_rigs[AFN_RIG_COUNT] = {
 #define AFN_PLAYER_START_Z 146.215f
 #define AFN_PLAYER_SCALE 15.34f
 #define AFN_PLAYER_DEFAULT_CLIP 0
+#define AFN_PLAYER_SPRITE_IDX 0
 #define AFN_NPC_COUNT 1
-static const float afn_npc_inst[1][7] = {
-  { 145.348f,2.62056f,156.703f,0.0f,15.34f,0,1 },
+static const float afn_npc_inst[1][8] = {
+  { 145.348f,2.62056f,156.703f,0.0f,15.34f,0,1,6 },
+};
+static const float afn_npc_col[1][3] = {
+  { 3.0f,0.0f,6.0f },
 };

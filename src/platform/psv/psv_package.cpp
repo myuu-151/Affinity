@@ -311,6 +311,30 @@ static bool GeneratePSVRigData(const std::string& runtimeDir,
     if (npcs.empty()) f << "  {0,0,0,0,0,0,0,0},\n";
     f << "};\n";
 
+    // Per-NPC collision box { radius, bottom, top } in WORLD px, from the rig's
+    // authored box (collisionType/colCenter/colExtents, half-extents in rig-local
+    // space) * the instance render scale (scale*0.25, matching rig_draw). This is
+    // the glTF bounding box the runtime uses for gravity floor-snap and the
+    // player-vs-NPC collision test. Rigs without an authored box fall back to a
+    // scale-relative default cylinder.
+    f << "static const float afn_npc_col[" << (npcs.empty()?1:npcs.size()) << "][3] = {\n";
+    for (const auto& n : npcs) {
+        const PSPRigExport& rig = rigs[used[n.slot]];
+        float Sc = n.scale * 0.25f;
+        float radius, bottom, top;
+        if (rig.collisionType == 1) {
+            float exx = rig.colExtents[0], eyy = rig.colExtents[1], ezz = rig.colExtents[2];
+            radius = (exx > ezz ? exx : ezz) * Sc;
+            bottom = (rig.colCenter[1] - eyy) * Sc;
+            top    = (rig.colCenter[1] + eyy) * Sc;
+        } else {
+            radius = 3.0f * n.scale; bottom = 0.0f; top = 6.0f * n.scale;
+        }
+        f << "  { " << PFlt(radius) << "," << PFlt(bottom) << "," << PFlt(top) << " },\n";
+    }
+    if (npcs.empty()) f << "  {3.0f,0.0f,6.0f},\n";
+    f << "};\n";
+
     f.close();
     return true;
 }

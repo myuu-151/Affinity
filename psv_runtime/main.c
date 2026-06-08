@@ -48,6 +48,10 @@ static float  s_pframe = 0.0f;                     // player anim frame
 static int    s_pclip  = AFN_PLAYER_DEFAULT_CLIP;
 static int    s_npcClip[AFN_NPC_COUNT + 1];        // per-NPC clip override (-1 = use default)
 static float  s_npcFrame[AFN_NPC_COUNT + 1];       // per-NPC anim frame (+1 avoids zero-size)
+static float  s_npcY[AFN_NPC_COUNT + 1];           // gravity-driven dynamic Y (NDS s_npc_y parity)
+static float  s_npcVY[AFN_NPC_COUNT + 1];          // vertical velocity
+static unsigned char s_npcGround[AFN_NPC_COUNT + 1];
+extern int afn_gravity, afn_terminal_vel;          // SetGravity/SetMaxFall (8.8 fixed, shared with player)
 
 static void pose_to_mat(const float* p, float* m) {
     float px=p[0],py=p[1],pz=p[2], w=p[3],x=p[4],y=p[5],z=p[6];
@@ -93,7 +97,11 @@ static void skin(const AfnRig* R) {
     }
 }
 static void rig_init(void) {
-    for (int i = 0; i < AFN_NPC_COUNT; i++) s_npcClip[i] = -1;   // no SetSkelAnim override yet
+    for (int i = 0; i < AFN_NPC_COUNT; i++) {
+        s_npcClip[i] = -1;                       // no SetSkelAnim override yet
+        s_npcY[i]  = afn_npc_inst[i][1];         // start at the authored Y; gravity settles it
+        s_npcVY[i] = 0.0f; s_npcGround[i] = 0;
+    }
     for (int r = 0; r < AFN_RIG_COUNT; r++) {
         const AfnRig* R = &afn_rigs[r];
         for (int g = 0; g < AFN_RIG_MAX_MATS; g++) {
@@ -227,7 +235,8 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
         if (clip < 0 || clip >= R->clips) clip = 0;
         s_npcFrame[i] = rig_advance(R, clip, s_npcFrame[i]);
         build_bone_mats(R, clip, s_npcFrame[i]); skin(R);
-        rig_draw(R, s_rigTex[slot], view, N[0], N[1], N[2], N[3], N[4], 0);  // NPCs: world up
+        // Draw at the gravity-settled Y (npc_physics updates s_npcY each frame).
+        rig_draw(R, s_rigTex[slot], view, N[0], s_npcY[i], N[2], N[3], N[4], 0);  // NPCs: world up
     }
 }
 #endif // AFN_HAS_PLAYER_RIG
@@ -377,7 +386,9 @@ static void billboards_render(const float* view, float camAngle) {
         int eidx = afn_spr_editor_idx[i];
         if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;  // hidden/destroyed
 #endif
+        int NF = (int)(sizeof(afn_spr_frame_ptrs)/sizeof(afn_spr_frame_ptrs[0]));
         int lo = afn_spr_fstart[i], hi = afn_spr_fend[i]; if (hi < lo) hi = lo;
+        if (hi > NF-1) hi = NF-1; if (lo > NF-1) lo = NF-1; if (lo < 0) lo = 0;  // never index past the table
         s_sprFrame[i] += afn_spr_fps[i] / 60.0f;
         if (s_sprFrame[i] >= (float)(hi+1)) s_sprFrame[i] = (float)lo;
         int cf = (int)s_sprFrame[i]; if (cf < lo) cf = lo; if (cf > hi) cf = hi;
@@ -1192,6 +1203,35 @@ int main(void)
             }
         }
 
+#ifdef AFN_HAS_PLAYER_RIG
+        // Per-NPC gravity + floor landing (NDS render_npc_rigs parity): enemies
+        // fall, settle on the ground, and can be knocked airborne (set s_npcVY>0
+        // to launch). Same gravity/terminal as the player; each NPC rests with
+        // its authored collision-box bottom on the floor surface. collide_floor
+        // tags afn_floor_sprite as a side effect, so save/restore it — the
+        // player's grind floor-sprite must not be clobbered by NPC queries.
+        {
+            int savedFloorSpr = afn_floor_sprite;
+            float ng = afn_gravity / 256.0f, nterm = afn_terminal_vel / 256.0f;
+            for (int i = 0; i < AFN_NPC_COUNT; i++) {
+                int eidx = (int)afn_npc_inst[i][7];
+                if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;
+                float nbottom = afn_npc_col[i][1];
+                s_npcVY[i] -= ng;
+                if (s_npcVY[i] < -nterm) s_npcVY[i] = -nterm;
+                s_npcY[i] += s_npcVY[i];
+                float nfy, nfn[3];
+                if (collide_floor(afn_npc_inst[i][0], afn_npc_inst[i][2], s_npcY[i], &nfy, nfn)
+                    && s_npcY[i] <= nfy - nbottom) {
+                    s_npcY[i] = nfy - nbottom; s_npcVY[i] = 0.0f; s_npcGround[i] = 1;
+                } else {
+                    s_npcGround[i] = 0;
+                }
+            }
+            afn_floor_sprite = savedFloorSpr;
+        }
+#endif
+
 #ifdef AFN_HAS_RAIL_PATH
         // Grind rails: StartGrind sets afn_grinding + afn_grind_rail (a sprite
         // index that matches afn_floor_sprite). Engage when on/near that rail's
@@ -1264,9 +1304,19 @@ int main(void)
                 if (!afn_sprite_visible[sp] || !afn_collision_enabled[sp]) continue;
                 float dx = playerX - afn_npc_inst[i][0];
                 float dz = playerZ - afn_npc_inst[i][2];
-                float dy = playerY - afn_npc_inst[i][1];
-                float r = COL_RADIUS + COL_RADIUS * afn_npc_inst[i][4];   // player + NPC (scale) radius
-                if (dx*dx + dz*dz < r*r && dy > -COL_TOP*2.0f && dy < COL_TOP*2.0f) {
+                // Use the NPC's authored glTF box (radius + vertical band) and its
+                // gravity-settled Y, not a hardcoded radius.
+                float ncy = afn_npc_inst[i][1];   // box center reference: settled Y + band
+                float nr  = COL_RADIUS;
+                float band = COL_TOP;
+#ifdef AFN_HAS_PLAYER_RIG
+                ncy  = s_npcY[i] + (afn_npc_col[i][1] + afn_npc_col[i][2]) * 0.5f;
+                nr   = afn_npc_col[i][0];
+                band = (afn_npc_col[i][2] - afn_npc_col[i][1]) * 0.5f + COL_TOP;
+#endif
+                float dy = playerY - ncy;
+                float r = COL_RADIUS + nr;                 // player + NPC box radius
+                if (dx*dx + dz*dz < r*r && dy > -band && dy < band) {
                     afn_collided_sprite = sp;
                     afn_emitted_script_collision();
                     afn_bp_dispatch_collision();
