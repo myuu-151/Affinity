@@ -22,6 +22,28 @@ typedef struct {
     float        x, y, z;
 } AfnRigVertex;
 
+// A skinnable rig asset (player or NPC). The scene can carry several distinct
+// rigs (psv_rig.h emits one per used model). All geometry is raw model space;
+// the runtime CPU-skins (skinned = animPose[bone]·baseVert) per instance.
+typedef struct {
+    int   bones, verts, mats, clips, cull;   // counts + cull mode (0 back/1 front/2 none)
+    float scale;                             // model -> world base scale
+    int   camlight;                          // 1 = headlamp follows the camera
+    float ldx, ldy, ldz;                     // baked eye-space headlamp direction
+    const float*                 vpos;       // [verts*3] model-space positions
+    const float*                 vnorm;      // [verts*3] model-space normals
+    const float*                 vuv;        // [verts*2] texcoords
+    const unsigned char*         vbone;      // [verts] bone index per vertex
+    const unsigned short* const* idx;        // [mats] triangle indices per material
+    const int*                   idxcount;   // [mats] index count per material
+    const unsigned int*   const* tex;        // [mats] RGBA8888 texture per material (0 = flat)
+    const int*                   texw;       // [mats]
+    const int*                   texh;       // [mats]
+    const float*          const* clip;       // [clips] flattened {px,py,pz,qw,qx,qy,qz}
+    const int*                   clipframes; // [clips]
+    const unsigned char*         cliploop;   // [clips]
+} AfnRig;
+
 // A static scene mesh (level chunk, prop). One draw per referencing instance.
 typedef struct {
     int                   vertCount;

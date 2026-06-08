@@ -21,19 +21,23 @@
 static GLuint s_meshTex[256];   // one GL texture per mesh (0 = none)
 
 // ---------------------------------------------------------------------------
-// Player rig: CPU rigid skinning (ported verbatim from psp_runtime/rig.c) +
-// vitaGL draw. baseVerts are bone-local; clip frames are absolute bone poses.
+// Rigs: CPU rigid skinning (ported from psp_runtime/rig.c) + vitaGL draw.
+// Multi-rig: the scene can carry several distinct models (player + each NPC /
+// enemy type). afn_rigs[] holds one AfnRig descriptor per used model; each
+// instance (the player, and afn_npc_inst[]) names a rig slot, position, facing,
+// scale and clip, and is CPU-skinned into a shared buffer then drawn.
 // ---------------------------------------------------------------------------
 #ifdef AFN_HAS_PLAYER_RIG
 #ifndef AFN_RIG_YAW_OFFSET
 #define AFN_RIG_YAW_OFFSET 0.0f
 #endif
-int afn_rig_clip = AFN_PLAYER_DEFAULT_CLIP;   // clip selector (script-set; local for bring-up)
-static AfnRigVertex s_skinned[AFN_RIG_VERTS];
-static float  s_bonemat[AFN_RIG_BONES][12];   // 3x4 row-major per bone
-static float  s_rframe = 0.0f;
-static int    s_rclip  = AFN_PLAYER_DEFAULT_CLIP;
-static GLuint s_rigTex[AFN_RIG_MATS];
+int afn_rig_clip = AFN_PLAYER_DEFAULT_CLIP;   // player clip selector (script-set; local for bring-up)
+static AfnRigVertex s_skinned[AFN_RIG_MAX_VERTS];
+static float  s_bonemat[AFN_RIG_MAX_BONES][12];   // 3x4 row-major per bone
+static GLuint s_rigTex[AFN_RIG_COUNT][AFN_RIG_MAX_MATS];
+static float  s_pframe = 0.0f;                     // player anim frame
+static int    s_pclip  = AFN_PLAYER_DEFAULT_CLIP;
+static float  s_npcFrame[AFN_NPC_COUNT + 1];       // per-NPC anim frame (+1 avoids zero-size)
 
 static void pose_to_mat(const float* p, float* m) {
     float px=p[0],py=p[1],pz=p[2], w=p[3],x=p[4],y=p[5],z=p[6];
@@ -44,15 +48,15 @@ static void pose_to_mat(const float* p, float* m) {
     m[4]=2*(xy+wz);   m[5]=1-2*(xx+zz); m[6]=2*(yz-wx);   m[7]=py;
     m[8]=2*(xz-wy);   m[9]=2*(yz+wx);   m[10]=1-2*(xx+yy);m[11]=pz;
 }
-static void build_bone_mats(int clip, float frame) {
-    const float* cd = afn_rig_clip_ptrs[clip];
-    int nf = afn_rig_clip_frames[clip]; if (nf < 1) nf = 1;
+static void build_bone_mats(const AfnRig* R, int clip, float frame) {
+    const float* cd = R->clip[clip];
+    int nf = R->clipframes[clip]; if (nf < 1) nf = 1;
     int f0 = (int)frame; if (f0 < 0) f0 = 0; if (f0 >= nf) f0 = nf - 1;
-    int f1 = f0 + 1; if (f1 >= nf) f1 = afn_rig_clip_loop[clip] ? 0 : nf - 1;
+    int f1 = f0 + 1; if (f1 >= nf) f1 = R->cliploop[clip] ? 0 : nf - 1;
     float t = frame - (float)((int)frame);
-    for (int b = 0; b < AFN_RIG_BONES; b++) {
-        const float* p0 = &cd[(f0 * AFN_RIG_BONES + b) * 7];
-        const float* p1 = &cd[(f1 * AFN_RIG_BONES + b) * 7];
+    for (int b = 0; b < R->bones; b++) {
+        const float* p0 = &cd[(f0 * R->bones + b) * 7];
+        const float* p1 = &cd[(f1 * R->bones + b) * 7];
         float p[7];
         p[0]=p0[0]+(p1[0]-p0[0])*t; p[1]=p0[1]+(p1[1]-p0[1])*t; p[2]=p0[2]+(p1[2]-p0[2])*t;
         float d = p0[3]*p1[3]+p0[4]*p1[4]+p0[5]*p1[5]+p0[6]*p1[6];
@@ -62,98 +66,89 @@ static void build_bone_mats(int clip, float frame) {
         pose_to_mat(p, s_bonemat[b]);
     }
 }
-static void skin(void) {
-    for (int v = 0; v < AFN_RIG_VERTS; v++) {
-        const float* m = s_bonemat[afn_rig_vbone[v]];
-        float x=afn_rig_vpos[v*3+0], y=afn_rig_vpos[v*3+1], z=afn_rig_vpos[v*3+2];
+// Skin rig R into s_skinned (positions + normals + uv + white vertex color).
+static void skin(const AfnRig* R) {
+    for (int v = 0; v < R->verts; v++) {
+        const float* m = s_bonemat[R->vbone[v]];
+        float x=R->vpos[v*3+0], y=R->vpos[v*3+1], z=R->vpos[v*3+2];
         s_skinned[v].x = m[0]*x+m[1]*y+m[2]*z+m[3];
         s_skinned[v].y = m[4]*x+m[5]*y+m[6]*z+m[7];
         s_skinned[v].z = m[8]*x+m[9]*y+m[10]*z+m[11];
-        float nx=afn_rig_vnorm[v*3+0], ny=afn_rig_vnorm[v*3+1], nz=afn_rig_vnorm[v*3+2];
+        float nx=R->vnorm[v*3+0], ny=R->vnorm[v*3+1], nz=R->vnorm[v*3+2];
         float wx=m[0]*nx+m[1]*ny+m[2]*nz, wy=m[4]*nx+m[5]*ny+m[6]*nz, wz=m[8]*nx+m[9]*ny+m[10]*nz;
         float nl=wx*wx+wy*wy+wz*wz; if (nl>1e-12f){nl=1.0f/sqrtf(nl);wx*=nl;wy*=nl;wz*=nl;}
         s_skinned[v].nx=wx; s_skinned[v].ny=wy; s_skinned[v].nz=wz;
+        s_skinned[v].u = R->vuv[v*2+0]; s_skinned[v].v = R->vuv[v*2+1];
+        s_skinned[v].color = 0xFFFFFFFF;
     }
 }
 static void rig_init(void) {
-    for (int v = 0; v < AFN_RIG_VERTS; v++) {
-        s_skinned[v].u = afn_rig_vuv[v*2+0]; s_skinned[v].v = afn_rig_vuv[v*2+1];
-        s_skinned[v].color = 0xFFFFFFFF;
-    }
-    for (int g = 0; g < AFN_RIG_MATS; g++) {
-        s_rigTex[g] = 0;
-        if (afn_rig_tex_ptrs[g] && afn_rig_tex_w[g] > 0 && afn_rig_tex_h[g] > 0) {
-            glGenTextures(1, &s_rigTex[g]);
-            glBindTexture(GL_TEXTURE_2D, s_rigTex[g]);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, afn_rig_tex_w[g], afn_rig_tex_h[g], 0,
-                         GL_RGBA, GL_UNSIGNED_BYTE, afn_rig_tex_ptrs[g]);
+    for (int r = 0; r < AFN_RIG_COUNT; r++) {
+        const AfnRig* R = &afn_rigs[r];
+        for (int g = 0; g < AFN_RIG_MAX_MATS; g++) {
+            s_rigTex[r][g] = 0;
+            if (g < R->mats && R->tex[g] && R->texw[g] > 0 && R->texh[g] > 0) {
+                glGenTextures(1, &s_rigTex[r][g]);
+                glBindTexture(GL_TEXTURE_2D, s_rigTex[r][g]);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, R->texw[g], R->texh[g], 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, R->tex[g]);
+            }
         }
     }
 }
-// Draw the rig at (px,py,pz) facing yawDeg. view = current view matrix (col-major).
-static void rig_render(const float* view, float px, float py, float pz, float yawDeg) {
-    if (afn_rig_clip >= 0 && afn_rig_clip < AFN_RIG_CLIPS && afn_rig_clip != s_rclip) {
-        s_rclip = afn_rig_clip; s_rframe = 0.0f;
-    }
-    s_rframe += 0.4f;
-    int nf = afn_rig_clip_frames[s_rclip];
+// Advance an animation frame for rig R's clip.
+static float rig_advance(const AfnRig* R, int clip, float frame) {
+    frame += 0.4f;
+    int nf = R->clipframes[clip];
     if (nf > 1) {
-        if (afn_rig_clip_loop[s_rclip]) { while (s_rframe >= (float)nf) s_rframe -= (float)nf; }
-        else if (s_rframe > (float)(nf-1)) s_rframe = (float)(nf-1);
-    } else s_rframe = 0.0f;
-    build_bone_mats(s_rclip, s_rframe);
-    skin();
+        if (R->cliploop[clip]) { while (frame >= (float)nf) frame -= (float)nf; }
+        else if (frame > (float)(nf-1)) frame = (float)(nf-1);
+    } else frame = 0.0f;
+    return frame;
+}
+// Draw one rig instance. s_skinned must already hold R's skinned pose. The
+// headlamp is the same NDS-matched setup as before, per rig's baked direction.
+static void rig_draw(const AfnRig* R, GLuint* texArr, const float* view,
+                     float px, float py, float pz, float yawDeg, float instScale) {
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    if (R->camlight) {
+        GLfloat ldir[4]   = { -R->ldx, -R->ldy, -R->ldz, 0.0f };  // GL_POSITION = toward light (negated DS dir)
+        GLfloat white[4]  = { 1, 1, 1, 1 };
+        GLfloat matAmb[4] = { 8.0f/31.0f,  8.0f/31.0f,  8.0f/31.0f,  1 };
+        GLfloat matDif[4] = { 28.0f/31.0f, 28.0f/31.0f, 28.0f/31.0f, 1 };
+        GLfloat noAmb[4]  = { 0, 0, 0, 1 };
+        glLightfv(GL_LIGHT0, GL_POSITION, ldir);
+        glLightfv(GL_LIGHT0, GL_DIFFUSE,  white);
+        glLightfv(GL_LIGHT0, GL_AMBIENT,  white);
+        glLightModelfv(GL_LIGHT_MODEL_AMBIENT, noAmb);
+        glDisable(GL_COLOR_MATERIAL);
+        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, matAmb);
+        glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, matDif);
+        glEnable(GL_LIGHTING); glEnable(GL_LIGHT0); glEnable(GL_NORMALIZE);
+    } else {
+        glDisable(GL_LIGHTING);
+    }
 
-    // Orient: up = world up (no slope tilt yet), forward = yaw heading.
     float yr = yawDeg * DEG2RAD + AFN_RIG_YAW_OFFSET;
     float fx = sinf(yr), fz = cosf(yr);
-    float S = AFN_PLAYER_RIG_SCALE;
-    float model[16] = {       // column-major: +X right, +Y up, +Z forward
-        fz*S, 0, -fx*S, 0,    // right = up x fwd = (cos, 0, -sin)
-        0,    S, 0,    0,     // up
-        fx*S, 0, fz*S, 0,     // forward
+    float S = R->scale * instScale;
+    float model[16] = {
+        fz*S, 0, -fx*S, 0,
+        0,    S, 0,    0,
+        fx*S, 0, fz*S, 0,
         px,   py, pz,  1
     };
-
-    glMatrixMode(GL_MODELVIEW);
-    // Headlamp: directional light fixed in eye space (set under identity MV).
-    // Matched to the NDS runtime exactly (fps3d.c): full-white directional light,
-    // fixed material ambient 8/31 + diffuse 28/31, white vertex color. The
-    // ambient base is supplied as the light's GL_AMBIENT (so material_ambient *
-    // light_ambient = 8/31 flat), NOT via the global model ambient, mirroring the
-    // DS per-light ambient term. GL_NORMALIZE is essential: the model matrix
-    // scales by AFN_PLAYER_RIG_SCALE (~3.8), which would otherwise shrink the
-    // skinned normals and crush the diffuse term (the "too dark" look).
-    glLoadIdentity();
-    // NEGATED vs the exported vector: the DS glLight() takes the direction the
-    // light *travels*, but GL's GL_POSITION (w=0) is the direction *toward* the
-    // light. Passing the raw vector lit the far side of the model (front dark,
-    // rim-lit) — the opposite of the NDS look. Negating makes diffuse hit the
-    // faces the headlamp actually points at, matching fps3d.c.
-    GLfloat ldir[4]   = { -AFN_PLAYER_RIG_LIGHT_DX, -AFN_PLAYER_RIG_LIGHT_DY, -AFN_PLAYER_RIG_LIGHT_DZ, 0.0f };
-    GLfloat white[4]  = { 1, 1, 1, 1 };
-    GLfloat matAmb[4] = { 8.0f/31.0f,  8.0f/31.0f,  8.0f/31.0f,  1 };  // NDS RGB15(8,8,8)
-    GLfloat matDif[4] = { 28.0f/31.0f, 28.0f/31.0f, 28.0f/31.0f, 1 };  // NDS RGB15(28,28,28)
-    GLfloat noAmb[4]  = { 0, 0, 0, 1 };
-    glLightfv(GL_LIGHT0, GL_POSITION, ldir);
-    glLightfv(GL_LIGHT0, GL_DIFFUSE,  white);
-    glLightfv(GL_LIGHT0, GL_AMBIENT,  white);   // ambient term = matAmb*white = 8/31 flat base
-    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, noAmb);
-    glDisable(GL_COLOR_MATERIAL);               // explicit material like NDS (white vtx), not vertex color
-    glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, matAmb);
-    glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, matDif);
-    glEnable(GL_LIGHTING); glEnable(GL_LIGHT0); glEnable(GL_NORMALIZE);
-
     glLoadMatrixf(view);
     glMultMatrixf(model);
 
     glDisable(GL_BLEND);
-    if (AFN_RIG_CULL == 2) glDisable(GL_CULL_FACE);
-    else { glEnable(GL_CULL_FACE); glFrontFace(AFN_RIG_CULL == 1 ? GL_CW : GL_CCW); }
+    if (R->cull == 2) glDisable(GL_CULL_FACE);
+    else { glEnable(GL_CULL_FACE); glFrontFace(R->cull == 1 ? GL_CW : GL_CCW); }
 
     AfnRigVertex* v = s_skinned;
     glEnableClientState(GL_VERTEX_ARRAY);
@@ -164,18 +159,39 @@ static void rig_render(const float* view, float px, float py, float pz, float ya
     glColorPointer  (4, GL_UNSIGNED_BYTE, sizeof(AfnRigVertex), &v->color);
     glNormalPointer (   GL_FLOAT,         sizeof(AfnRigVertex), &v->nx);
     glVertexPointer (3, GL_FLOAT,         sizeof(AfnRigVertex), &v->x);
-    for (int g = 0; g < AFN_RIG_MATS; g++) {
-        int ic = afn_rig_idx_counts[g];
+    for (int g = 0; g < R->mats; g++) {
+        int ic = R->idxcount[g];
         if (ic <= 0) continue;
-        if (s_rigTex[g]) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, s_rigTex[g]); }
+        if (texArr[g]) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, texArr[g]); }
         else glDisable(GL_TEXTURE_2D);
-        glDrawElements(GL_TRIANGLES, ic, GL_UNSIGNED_SHORT, afn_rig_idx_ptrs[g]);
+        glDrawElements(GL_TRIANGLES, ic, GL_UNSIGNED_SHORT, R->idx[g]);
     }
     glDisableClientState(GL_TEXTURE_COORD_ARRAY);
     glDisableClientState(GL_NORMAL_ARRAY);
     glDisableClientState(GL_COLOR_ARRAY);
     glDisableClientState(GL_VERTEX_ARRAY);
-    glDisable(GL_LIGHTING); glDisable(GL_LIGHT0); glDisable(GL_NORMALIZE);
+    if (R->camlight) { glDisable(GL_LIGHTING); glDisable(GL_LIGHT0); glDisable(GL_NORMALIZE); }
+}
+
+// Skin + draw the player and every NPC for this frame.
+static void rigs_render(const float* view, float playerX, float playerY, float playerZ) {
+    const AfnRig* PR = &afn_rigs[AFN_PLAYER_RIG_SLOT];
+    if (afn_rig_clip >= 0 && afn_rig_clip < PR->clips && afn_rig_clip != s_pclip) {
+        s_pclip = afn_rig_clip; s_pframe = 0.0f;
+    }
+    s_pframe = rig_advance(PR, s_pclip, s_pframe);
+    build_bone_mats(PR, s_pclip, s_pframe); skin(PR);
+    rig_draw(PR, s_rigTex[AFN_PLAYER_RIG_SLOT], view, playerX, playerY, playerZ, 0.0f, AFN_PLAYER_SCALE);
+
+    for (int i = 0; i < AFN_NPC_COUNT; i++) {
+        const float* N = afn_npc_inst[i];
+        int slot = (int)N[6]; if (slot < 0 || slot >= AFN_RIG_COUNT) continue;
+        const AfnRig* R = &afn_rigs[slot];
+        int clip = (int)N[5]; if (clip < 0 || clip >= R->clips) clip = 0;
+        s_npcFrame[i] = rig_advance(R, clip, s_npcFrame[i]);
+        build_bone_mats(R, clip, s_npcFrame[i]); skin(R);
+        rig_draw(R, s_rigTex[slot], view, N[0], N[1], N[2], N[3], N[4]);
+    }
 }
 #endif // AFN_HAS_PLAYER_RIG
 
@@ -272,14 +288,25 @@ int main(void)
     rig_init();
 #endif
 
-    // Free-orbit camera around the player (or scene start if no rig).
+    // Player position (static until movement is ported; the follow camera and
+    // the NPCs read this).
 #ifdef AFN_HAS_PLAYER_RIG
-    float targetX = AFN_PLAYER_START_X, targetY = AFN_PLAYER_START_Y + 6.0f, targetZ = AFN_PLAYER_START_Z;
+    float playerX = AFN_PLAYER_START_X, playerY = AFN_PLAYER_START_Y, playerZ = AFN_PLAYER_START_Z;
 #else
-    float targetX = afn_cam_start_x, targetY = afn_cam_start_h, targetZ = afn_cam_start_z;
+    float playerX = afn_cam_start_x, playerY = afn_cam_start_h, playerZ = afn_cam_start_z;
 #endif
-    float yaw = afn_cam_start_angle, pitch = 0.3f;
-    float dist = afn_orbit_dist > 1.0f ? afn_orbit_dist * 2.0f : 120.0f;
+
+    // Orbit-follow camera, anchored to the active camera slot
+    // (afn_cam_slots[afn_active_camera] = { yaw, dist, height, horizon }). The
+    // player orbits freely with the right stick / L-R; triggers zoom. The slot's
+    // height sets the default downward tilt and the look-at target height. PSV
+    // has no scripts yet so afn_active_camera stays 0 (scene default), but the
+    // runtime re-reads it each frame so a future SetCamera node just works.
+    const float* slot0 = afn_cam_slots[afn_active_camera];
+    float orbit_angle = slot0[0];                            // radians
+    float camDist     = slot0[1] > 1.0f ? slot0[1] : 60.0f;  // world px
+    float camHeight   = slot0[2];                            // world px
+    float pitch       = atan2f(camHeight > 0.0f ? camHeight : 8.0f, camDist);  // downward tilt from slot
 
     SceCtrlData pad;
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
@@ -288,24 +315,28 @@ int main(void)
         sceCtrlPeekBufferPositive(0, &pad, 1);
         if (pad.buttons & SCE_CTRL_START) break;
 
-        // Right stick / dpad: orbit. Triggers: zoom. Left stick: pan target.
-        float lx = (pad.lx - 128) / 128.0f, ly = (pad.ly - 128) / 128.0f;
+        // Re-read the active slot each frame (a future SetCamera node retargets it).
+        const float* S = afn_cam_slots[afn_active_camera];
+        camDist   = S[1] > 1.0f ? S[1] : camDist;   // keep manual zoom unless slot overrides
+        camHeight = S[2];
+
+        // Right stick / L-R: orbit. Triggers: zoom.
         float rx = (pad.rx - 128) / 128.0f, ry = (pad.ry - 128) / 128.0f;
-        if (fabsf(rx) > 0.15f) yaw   += rx * 0.04f;
-        if (fabsf(ry) > 0.15f) pitch += ry * 0.03f;
-        if (pad.buttons & SCE_CTRL_LEFT)  yaw -= 0.04f;
-        if (pad.buttons & SCE_CTRL_RIGHT) yaw += 0.04f;
-        if (pad.buttons & SCE_CTRL_LTRIGGER) dist *= 1.03f;
-        if (pad.buttons & SCE_CTRL_RTRIGGER) dist *= 0.97f;
+        if (fabsf(rx) > 0.15f) orbit_angle += rx * 0.04f;
+        if (fabsf(ry) > 0.15f) pitch       += ry * 0.03f;
+        if (pad.buttons & SCE_CTRL_LEFT)  orbit_angle -= 0.04f;
+        if (pad.buttons & SCE_CTRL_RIGHT) orbit_angle += 0.04f;
+        if (pad.buttons & SCE_CTRL_LTRIGGER) camDist *= 1.03f;
+        if (pad.buttons & SCE_CTRL_RTRIGGER) camDist *= 0.97f;
         if (pitch >  1.4f) pitch = 1.4f; if (pitch < -1.4f) pitch = -1.4f;
-        float fwdX = sinf(yaw), fwdZ = cosf(yaw);
-        if (fabsf(ly) > 0.15f) { targetX -= ly*fwdX*3.0f; targetZ -= ly*fwdZ*3.0f; }
-        if (fabsf(lx) > 0.15f) { targetX += lx*fwdZ*3.0f; targetZ -= lx*fwdX*3.0f; }
+
+        // Follow the player, framed at ~half the camera height (torso, not feet).
+        float targetX = playerX, targetY = playerY + camHeight * 0.5f, targetZ = playerZ;
 
         float cp = cosf(pitch);
-        float ex = targetX - sinf(yaw)*cp*dist;
-        float ez = targetZ - cosf(yaw)*cp*dist;
-        float ey = targetY + sinf(pitch)*dist;
+        float ex = targetX - sinf(orbit_angle)*cp*camDist;
+        float ez = targetZ - cosf(orbit_angle)*cp*camDist;
+        float ey = targetY + sinf(pitch)*camDist;
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -338,8 +369,9 @@ int main(void)
         }
 
 #ifdef AFN_HAS_PLAYER_RIG
-        // Player rig at its spawn (no movement/physics yet — that's the next port).
-        rig_render(view, AFN_PLAYER_START_X, AFN_PLAYER_START_Y, AFN_PLAYER_START_Z, 0.0f);
+        // Player rig + every NPC: each skinned from its own rig at its own
+        // transform/clip (player follows the camera; NPCs at their world spots).
+        rigs_render(view, playerX, playerY, playerZ);
 #endif
 
         vglSwapBuffers(GL_FALSE);

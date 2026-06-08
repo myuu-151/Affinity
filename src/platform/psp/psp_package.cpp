@@ -237,6 +237,26 @@ static bool GeneratePSPMapData(const std::string& runtimeDir,
     f << "const float afn_walk_speed = " << Flt(camera.walkSpeed) << ";\n";
     f << "const float afn_sprint_speed = " << Flt(camera.sprintSpeed) << ";\n";
 
+    // ---- camera presets / slots (Mode 4) ----
+    // Slot 0 = scene default; slots 1..N are SetCamera targets. Columns:
+    //   { orbit yaw (radians), orbit dist (world px), camera height (world px),
+    //     horizon (editor px) }. The runtime orbit-follows the player and (once
+    //     scripts land on PSV) blends the live camera toward afn_active_camera.
+    f << "#define AFN_CAM_SLOT_COUNT " << (1 + (int)camera.camSlots.size()) << "\n";
+    f << "static const float afn_cam_slots[][4] = {\n";
+    f << "    { " << Flt(camera.angle) << ", " << Flt(orbitDist / 4.0f) << ", "
+                  << Flt(WY(camera.height)) << ", " << Flt(camera.horizon) << " },\n";
+    for (const auto& cs : camera.camSlots) {
+        float ang = cs.angle * 3.14159265f / 180.0f;                 // editor deg -> radians
+        float di  = (cs.distance > 0.0f) ? cs.distance / 4.0f : orbitDist / 4.0f;
+        float he  = WY(cs.height);
+        f << "    { " << Flt(ang) << ", " << Flt(di) << ", " << Flt(he) << ", " << Flt(cs.horizon) << " },\n";
+    }
+    f << "};\n";
+    // Active preset. PSV has no scripts yet, so this stays 0 (scene default); the
+    // SetCamera node will drive it once script_glue is ported.
+    f << "static int afn_active_camera = 0;\n";
+
     f.close();
     return true;
 }
@@ -398,6 +418,28 @@ static bool GeneratePSPRigData(const std::string& runtimeDir, const char* hdrPre
     f << "static const unsigned char afn_rig_clip_loop[" << cc << "] = {";
     for (int c = 0; c < cc; c++) f << (rig.clips[c].loop ? 1 : 0) << ",";
     f << "};\n";
+
+    // ---- NPC instances ----
+    // Rigged sprites that aren't the player and reuse THIS rig asset. Columns:
+    // { x, y, z (world px), rotY (deg), scale, default clip }. The runtime draws
+    // each through the player rig pipeline at its own transform. NPCs that use a
+    // DIFFERENT rig asset aren't supported yet (the export carries one rig).
+    {
+        std::ostringstream rows;
+        int n = 0;
+        for (const auto& s : sprites) {
+            if (s.spriteType == 1) continue;                 // the player
+            if (s.riggedMeshIdx != playerRigIdx) continue;   // no rig / different rig
+            int clip = (s.rigAnimIdx >= 0 && s.rigAnimIdx < cc) ? s.rigAnimIdx : 0;
+            rows << "    { " << Flt(WX(s.x)) << ", " << Flt(WY(s.y)) << ", " << Flt(WX(s.z))
+                 << ", " << Flt(s.rotation) << ", " << Flt(s.scale) << ", " << clip << " },\n";
+            n++;
+        }
+        f << "#define AFN_NPC_COUNT " << n << "\n";
+        f << "static const float afn_npc_inst[" << (n > 0 ? n : 1) << "][6] = {\n";
+        f << (n > 0 ? rows.str() : std::string("    {0,0,0,0,0,0},\n"));
+        f << "};\n";
+    }
 
     return true;
 }
@@ -738,10 +780,11 @@ bool GenerateAffinityHeaders(const std::string& runtimeDir,
                              const std::vector<GBASkyFrameExport>& skyFrames,
                              const std::vector<PSPRigExport>& pspRigs,
                              int playerRigIdx,
-                             std::string& errorMsg) {
+                             std::string& errorMsg,
+                             bool emitRig) {
     if (!GeneratePSPMapData(runtimeDir, hdrPrefix, dataInclude, sprites, camera, meshes, orbitDist, errorMsg))
         return false;
-    if (!GeneratePSPRigData(runtimeDir, hdrPrefix, pspRigs, playerRigIdx, sprites, errorMsg))
+    if (emitRig && !GeneratePSPRigData(runtimeDir, hdrPrefix, pspRigs, playerRigIdx, sprites, errorMsg))
         return false;
     if (!GeneratePSPSky(runtimeDir, hdrPrefix, skyFrames, errorMsg))
         return false;

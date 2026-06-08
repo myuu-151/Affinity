@@ -1678,3 +1678,10 @@ const float afn_orbit_dist = 18.215f;
 const float afn_draw_distance = 0.0f;
 const float afn_walk_speed = 35.0f;
 const float afn_sprint_speed = 53.0f;
+#define AFN_CAM_SLOT_COUNT 3
+static const float afn_cam_slots[][4] = {
+    { 0.0f, 18.215f, 12.5f, 60.0f },
+    { 0.0f, 18.215f, 5.0f, 60.0f },
+    { 0.0f, 18.215f, 5.0f, 60.0f },
+};
+static int afn_active_camera = 0;

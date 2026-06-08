@@ -72,7 +72,8 @@ bool GenerateAffinityHeaders(const std::string& runtimeDir,
                              const std::vector<GBASkyFrameExport>& skyFrames,
                              const std::vector<PSPRigExport>& pspRigs,
                              int playerRigIdx,
-                             std::string& errorMsg);
+                             std::string& errorMsg,
+                             bool emitRig = true);   // false: caller emits its own rig header (PSV multi-rig)
 
 // Package the current map into a PSP EBOOT.PBP.
 //
