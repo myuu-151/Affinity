@@ -121,13 +121,27 @@ static void rig_render(const float* view, float px, float py, float pz, float ya
 
     glMatrixMode(GL_MODELVIEW);
     // Headlamp: directional light fixed in eye space (set under identity MV).
+    // Matched to the NDS runtime exactly (fps3d.c): full-white directional light,
+    // fixed material ambient 8/31 + diffuse 28/31, white vertex color. The
+    // ambient base is supplied as the light's GL_AMBIENT (so material_ambient *
+    // light_ambient = 8/31 flat), NOT via the global model ambient, mirroring the
+    // DS per-light ambient term. GL_NORMALIZE is essential: the model matrix
+    // scales by AFN_PLAYER_RIG_SCALE (~3.8), which would otherwise shrink the
+    // skinned normals and crush the diffuse term (the "too dark" look).
     glLoadIdentity();
-    GLfloat ldir[4] = { AFN_PLAYER_RIG_LIGHT_DX, AFN_PLAYER_RIG_LIGHT_DY, AFN_PLAYER_RIG_LIGHT_DZ, 0.0f };
-    GLfloat white[4] = { 1,1,1,1 }, amb[4] = { 0.28f,0.28f,0.28f,1 };
+    GLfloat ldir[4]   = { AFN_PLAYER_RIG_LIGHT_DX, AFN_PLAYER_RIG_LIGHT_DY, AFN_PLAYER_RIG_LIGHT_DZ, 0.0f };
+    GLfloat white[4]  = { 1, 1, 1, 1 };
+    GLfloat matAmb[4] = { 8.0f/31.0f,  8.0f/31.0f,  8.0f/31.0f,  1 };  // NDS RGB15(8,8,8)
+    GLfloat matDif[4] = { 28.0f/31.0f, 28.0f/31.0f, 28.0f/31.0f, 1 };  // NDS RGB15(28,28,28)
+    GLfloat noAmb[4]  = { 0, 0, 0, 1 };
     glLightfv(GL_LIGHT0, GL_POSITION, ldir);
-    glLightfv(GL_LIGHT0, GL_DIFFUSE, white);
-    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, amb);
-    glEnable(GL_LIGHTING); glEnable(GL_LIGHT0); glEnable(GL_COLOR_MATERIAL);
+    glLightfv(GL_LIGHT0, GL_DIFFUSE,  white);
+    glLightfv(GL_LIGHT0, GL_AMBIENT,  white);   // ambient term = matAmb*white = 8/31 flat base
+    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, noAmb);
+    glDisable(GL_COLOR_MATERIAL);               // explicit material like NDS (white vtx), not vertex color
+    glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, matAmb);
+    glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, matDif);
+    glEnable(GL_LIGHTING); glEnable(GL_LIGHT0); glEnable(GL_NORMALIZE);
 
     glLoadMatrixf(view);
     glMultMatrixf(model);
@@ -156,7 +170,7 @@ static void rig_render(const float* view, float px, float py, float pz, float ya
     glDisableClientState(GL_NORMAL_ARRAY);
     glDisableClientState(GL_COLOR_ARRAY);
     glDisableClientState(GL_VERTEX_ARRAY);
-    glDisable(GL_LIGHTING); glDisable(GL_LIGHT0); glDisable(GL_COLOR_MATERIAL);
+    glDisable(GL_LIGHTING); glDisable(GL_LIGHT0); glDisable(GL_NORMALIZE);
 }
 #endif // AFN_HAS_PLAYER_RIG
 
