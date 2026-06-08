@@ -18,6 +18,7 @@
 #include "psv_sky.h"       // sky panorama texture (AFN_HAS_SKY)
 #include "psv_sprites.h"   // billboard sprites (AFN_HAS_SPRITES)
 #include "psv_rail.h"      // grind rail centerlines (AFN_HAS_RAIL_PATH)
+#include "psv_hud.h"       // 2D HUD overlay elements/pieces/text (AFN_HAS_HUD)
 
 #define SCR_W 960.0f
 #define SCR_H 544.0f
@@ -697,7 +698,8 @@ int afn_grind_vel=0, afn_grind_dx=0, afn_grind_dz=0;   // runtime grind state (I
 int afn_gravity=205, afn_terminal_vel=7680, afn_friction=0, afn_force_x=0, afn_force_z=0;
 int afn_cam_locked=0, afn_cam_speed=0, afn_tank_camera=0, afn_player_heading=0;
 int afn_player_height=0, afn_player_width=0, afn_bg_color=0, afn_anim_speed_dummy=0;
-int afn_active_element=0, afn_elem_idx=0, afn_cursor_stop=0, afn_stop_count=0, afn_hud_value=0;
+int afn_active_element=0, afn_elem_idx=0, afn_cursor_stop=0, afn_stop_count=0;
+int afn_hud_value[4]={0};   // SetHudValue counter slots (text rows bind to these)
 int afn_checkpoint_set=0, afn_checkpoint_x=0, afn_checkpoint_y=0, afn_checkpoint_z=0;
 int afn_score=0, afn_shake_frames=0, afn_shake_intensity=0, afn_last_key=0;
 int afn_frame_count=0, afn_dt_tick=0;
@@ -719,7 +721,15 @@ void afn_scene_start_transition(int scene, int mode, int frames) {
 int player_x=0, player_y=0, player_z=0, player_vy_unused=0;
 int player_on_ground=1, player_moving=0;
 unsigned int afn_flags=0, afn_rng=1;
-unsigned char afn_hud_visible[NUM_SPRITES]={0}, afn_sprite_visible[NUM_SPRITES]={0};
+// afn_hud_visible is indexed by HUD ELEMENT (not sprite); size to the larger of
+// the two so ShowHUD/CursorUp (element indices) and any sprite-keyed use both fit.
+#if defined(AFN_HAS_HUD) && (AFN_HUD_ELEM_COUNT > NUM_SPRITES)
+  #define AFN_HUD_VIS_N AFN_HUD_ELEM_COUNT
+#else
+  #define AFN_HUD_VIS_N NUM_SPRITES
+#endif
+unsigned char afn_hud_visible[AFN_HUD_VIS_N]={0};
+unsigned char afn_sprite_visible[NUM_SPRITES]={0};
 unsigned char afn_sprite_flip[NUM_SPRITES]={0}, afn_collision_enabled[NUM_SPRITES]={0};
 int afn_hp[NUM_SPRITES]={0}, afn_state_timer[NUM_SPRITES]={0};
 int afn_stop_links[16]={0};
@@ -762,6 +772,196 @@ static void script_tick(void)  {}
 static int  script_present(void){ return 0; }
 #endif
 
+// ---------------------------------------------------------------------------
+// HUD overlay (Phase 8). 2D screen-space pieces/text/cursor authored in
+// GBA-native 240x160 (CLAUDE.md), drawn in an ortho pass scaled to the Vita
+// 960x544 screen via the projection. Pieces/cursor are RGBA frame textures from
+// psv_hud.h; text uses an embedded 8x8 font (uppercase + digits + symbols).
+//
+// UNTESTED: no project exported during development carried HUD elements. The
+// code compiles inert (no AFN_HAS_HUD) and activates when a scene with HUD data
+// is re-exported. Author coords drive 240x160; glOrthof maps that to the screen.
+#ifdef AFN_HAS_HUD
+static GLuint s_hudTex[AFN_HUD_FRAME_COUNT];
+static GLuint s_hudFontTex;
+
+// Compact 8x8 font: space, 0-9, A-Z, then : / % - . x + !  (lowercase folds up).
+// 1 byte per row, bit7 = leftmost pixel. Index 0 is a blank cell.
+#define HUD_FONT_GLYPHS 45
+static const unsigned char s_hudFont[HUD_FONT_GLYPHS * 8] = {
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00, // ' '
+    0x3C,0x66,0x6E,0x76,0x66,0x66,0x3C,0x00, // 0
+    0x18,0x38,0x18,0x18,0x18,0x18,0x7E,0x00, // 1
+    0x3C,0x66,0x06,0x0C,0x18,0x30,0x7E,0x00, // 2
+    0x3C,0x66,0x06,0x1C,0x06,0x66,0x3C,0x00, // 3
+    0x0C,0x1C,0x3C,0x6C,0x7E,0x0C,0x0C,0x00, // 4
+    0x7E,0x60,0x7C,0x06,0x06,0x66,0x3C,0x00, // 5
+    0x1C,0x30,0x60,0x7C,0x66,0x66,0x3C,0x00, // 6
+    0x7E,0x06,0x0C,0x18,0x30,0x30,0x30,0x00, // 7
+    0x3C,0x66,0x66,0x3C,0x66,0x66,0x3C,0x00, // 8
+    0x3C,0x66,0x66,0x3E,0x06,0x0C,0x38,0x00, // 9
+    0x18,0x3C,0x66,0x66,0x7E,0x66,0x66,0x00, // A
+    0x7C,0x66,0x66,0x7C,0x66,0x66,0x7C,0x00, // B
+    0x3C,0x66,0x60,0x60,0x60,0x66,0x3C,0x00, // C
+    0x78,0x6C,0x66,0x66,0x66,0x6C,0x78,0x00, // D
+    0x7E,0x60,0x60,0x7C,0x60,0x60,0x7E,0x00, // E
+    0x7E,0x60,0x60,0x7C,0x60,0x60,0x60,0x00, // F
+    0x3C,0x66,0x60,0x6E,0x66,0x66,0x3C,0x00, // G
+    0x66,0x66,0x66,0x7E,0x66,0x66,0x66,0x00, // H
+    0x3C,0x18,0x18,0x18,0x18,0x18,0x3C,0x00, // I
+    0x1E,0x0C,0x0C,0x0C,0x0C,0x6C,0x38,0x00, // J
+    0x66,0x6C,0x78,0x70,0x78,0x6C,0x66,0x00, // K
+    0x60,0x60,0x60,0x60,0x60,0x60,0x7E,0x00, // L
+    0x63,0x77,0x7F,0x6B,0x63,0x63,0x63,0x00, // M
+    0x66,0x76,0x7E,0x7E,0x6E,0x66,0x66,0x00, // N
+    0x3C,0x66,0x66,0x66,0x66,0x66,0x3C,0x00, // O
+    0x7C,0x66,0x66,0x7C,0x60,0x60,0x60,0x00, // P
+    0x3C,0x66,0x66,0x66,0x6E,0x6C,0x36,0x00, // Q
+    0x7C,0x66,0x66,0x7C,0x78,0x6C,0x66,0x00, // R
+    0x3C,0x66,0x60,0x3C,0x06,0x66,0x3C,0x00, // S
+    0x7E,0x18,0x18,0x18,0x18,0x18,0x18,0x00, // T
+    0x66,0x66,0x66,0x66,0x66,0x66,0x3C,0x00, // U
+    0x66,0x66,0x66,0x66,0x66,0x3C,0x18,0x00, // V
+    0x63,0x63,0x63,0x6B,0x7F,0x77,0x63,0x00, // W
+    0x66,0x66,0x3C,0x18,0x3C,0x66,0x66,0x00, // X
+    0x66,0x66,0x66,0x3C,0x18,0x18,0x18,0x00, // Y
+    0x7E,0x06,0x0C,0x18,0x30,0x60,0x7E,0x00, // Z
+    0x00,0x18,0x18,0x00,0x18,0x18,0x00,0x00, // :
+    0x06,0x0C,0x0C,0x18,0x30,0x30,0x60,0x00, // /
+    0x62,0x66,0x0C,0x18,0x30,0x66,0x46,0x00, // %
+    0x00,0x00,0x00,0x7E,0x00,0x00,0x00,0x00, // -
+    0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x00, // .
+    0x00,0x00,0x66,0x3C,0x18,0x3C,0x66,0x00, // x
+    0x00,0x18,0x18,0x7E,0x18,0x18,0x00,0x00, // +
+    0x18,0x18,0x18,0x18,0x00,0x18,0x18,0x00, // !
+};
+// Map an ASCII char to a glyph slot (0 = blank for anything unknown).
+static int hud_glyph(char c) {
+    if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+    if (c >= '0' && c <= '9') return 1 + (c - '0');
+    if (c >= 'A' && c <= 'Z') return 11 + (c - 'A');
+    switch (c) { case ':': return 37; case '/': return 38; case '%': return 39;
+                 case '-': return 40; case '.': return 41; case 'x': return 11+('X'-'A');
+                 case '+': return 43; case '!': return 44; }
+    return 0;
+}
+
+static void hud_init(void) {
+    for (int i = 0; i < AFN_HUD_FRAME_COUNT; i++) {
+        glGenTextures(1, &s_hudTex[i]);
+        glBindTexture(GL_TEXTURE_2D, s_hudTex[i]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, afn_hud_frame_w[i], afn_hud_frame_h[i], 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, afn_hud_frames[i]);
+    }
+    // Build a font atlas: HUD_FONT_GLYPHS columns of 8x8, white where the bit is
+    // set (alpha 0 elsewhere) so glColor modulation tints the text.
+    static unsigned int atlas[HUD_FONT_GLYPHS * 8 * 8];
+    int aw = HUD_FONT_GLYPHS * 8;
+    for (int g = 0; g < HUD_FONT_GLYPHS; g++)
+        for (int row = 0; row < 8; row++) {
+            unsigned char bits = s_hudFont[g * 8 + row];
+            for (int col = 0; col < 8; col++) {
+                int on = (bits >> (7 - col)) & 1;
+                atlas[row * aw + g * 8 + col] = on ? 0xFFFFFFFFu : 0u;
+            }
+        }
+    glGenTextures(1, &s_hudFontTex);
+    glBindTexture(GL_TEXTURE_2D, s_hudFontTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, aw, 8, 0, GL_RGBA, GL_UNSIGNED_BYTE, atlas);
+}
+
+static void hud_quad(GLuint tex, float x0, float y0, float x1, float y1,
+                     float u0, float v0, float u1, float v1, unsigned int col) {
+    AfnVertex q[4] = {
+        { u0, v0, col, x0, y0, 0 }, { u1, v0, col, x1, y0, 0 },
+        { u1, v1, col, x1, y1, 0 }, { u0, v1, col, x0, y1, 0 },
+    };
+    AfnVertex* v = q;
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glTexCoordPointer(2, GL_FLOAT,         sizeof(AfnVertex), &v->u);
+    glColorPointer   (4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &v->color);
+    glVertexPointer  (3, GL_FLOAT,         sizeof(AfnVertex), &v->x);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+}
+
+// Draw a string at (x,y) in HUD coords; returns the pen x after the string.
+static float hud_text(const char* s, float x, float y, int scale, unsigned int col) {
+    const float aw = (float)(HUD_FONT_GLYPHS * 8);
+    float gw = 8.0f * scale, adv = 6.0f * scale;   // glyphs are 8 wide, 6 px advance
+    for (const char* p = s; *p; p++) {
+        int g = hud_glyph(*p);
+        if (g != 0) {   // skip drawing blanks, still advance
+            float u0 = (g * 8) / aw, u1 = (g * 8 + 8) / aw;
+            hud_quad(s_hudFontTex, x, y, x + gw, y + gw, u0, 0.0f, u1, 1.0f, col);
+        }
+        x += adv;
+    }
+    return x;
+}
+
+static void hud_render(void) {
+    // Ortho 240x160 with a top-left origin (y grows downward) to match the
+    // editor's authoring space. The viewport is the full Vita screen, so this
+    // stretches 240x160 -> 960x544 (same 1.5:1 letterbox the scene uses).
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrthof(0, 240, 160, 0, -1, 1);
+    glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
+    glDisable(GL_DEPTH_TEST); glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE);
+    glEnable(GL_TEXTURE_2D);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+
+    for (int e = 0; e < AFN_HUD_ELEM_COUNT; e++) {
+        const AfnHudElem* el = &afn_hud_elems[e];
+        if (!afn_hud_visible[e]) continue;
+        if (el->mode == 2) continue;                       // Mode-0-only element
+        if (!(el->sceneMask & (1u << afn_current_scene))) continue;
+        float bx = el->screenX, by = el->screenY;
+        // Pieces (graphics).
+        for (int k = 0; k < el->pieceCount; k++) {
+            const AfnHudPiece* pc = &afn_hud_piece[el->pieceStart + k];
+            hud_quad(s_hudTex[pc->tex], bx + pc->x, by + pc->y,
+                     bx + pc->x + pc->w, by + pc->y + pc->h, 0, 0, 1, 1, 0xFFFFFFFFu);
+        }
+        // Text rows (static label or counter bound to afn_hud_value[slot]).
+        for (int k = 0; k < el->textCount; k++) {
+            const AfnHudText* tr = &afn_hud_text[el->textStart + k];
+            char buf[40];
+            const char* str = tr->text;
+            if (tr->slot < 4 && tr->pad >= 0 && tr->text[0] == '\0') {
+                // pure counter row (no static text): render the slot value
+                int val = afn_hud_value[tr->slot];
+                int n = 0; char tmp[16];
+                if (val < 0) { buf[n++] = '-'; val = -val; }
+                int d = 0; do { tmp[d++] = (char)('0' + val % 10); val /= 10; } while (val && d < 15);
+                while (d < tr->pad && n + (tr->pad - d) < 39) buf[n++] = '0';   // zero-pad
+                while (d > 0) buf[n++] = tmp[--d];
+                buf[n] = '\0'; str = buf;
+            }
+            hud_text(str, bx + tr->x, by + tr->y, tr->scale < 1 ? 1 : tr->scale, tr->color);
+        }
+        // Cursor at the active stop (menu selection).
+        if (el->curTex >= 0 && afn_active_element == e && el->stopCount > 0) {
+            int sidx = afn_cursor_stop; if (sidx < 0) sidx = 0; if (sidx >= el->stopCount) sidx = el->stopCount - 1;
+            const AfnHudStop* st = &afn_hud_stops[el->stopStart + sidx];
+            float cw = afn_hud_frame_w[el->curTex], ch = afn_hud_frame_h[el->curTex];
+            hud_quad(s_hudTex[el->curTex], bx + st->x + el->curX, by + st->y + el->curY,
+                     bx + st->x + el->curX + cw, by + st->y + el->curY + ch, 0, 0, 1, 1, 0xFFFFFFFFu);
+        }
+    }
+    glEnable(GL_DEPTH_TEST);
+}
+#endif // AFN_HAS_HUD
+
 int main(void)
 {
     // Max out the Vita clocks. 444 MHz is the hardware/API ceiling for the
@@ -790,6 +990,12 @@ int main(void)
 #endif
 #ifdef AFN_HAS_PLAYER_RIG
     rig_init();
+#endif
+#ifdef AFN_HAS_HUD
+    hud_init();
+    // Seed per-element visibility from the authored "visible" flag (ShowHUD /
+    // CursorUp toggle it at runtime).
+    for (int i = 0; i < AFN_HUD_ELEM_COUNT; i++) afn_hud_visible[i] = afn_hud_elems[i].startVis;
 #endif
 
     // Player state. The follow camera and NPCs read playerX/Y/Z; the movement
@@ -1123,6 +1329,10 @@ int main(void)
 
 #ifdef AFN_HAS_SPRITES
         billboards_render(view, camAngle);   // camera-facing animated sprites
+#endif
+
+#ifdef AFN_HAS_HUD
+        hud_render();   // 2D overlay (pieces/text/cursor) on top of the scene
 #endif
 
         // Fade overlay: a fullscreen quad over the scene. level<0 darkens (fade
