@@ -1227,6 +1227,28 @@ int main(void)
                 } else {
                     s_npcGround[i] = 0;
                 }
+
+                // SOLID blocker: push the player out of the NPC's box so the
+                // enemy is impassable (not just an OnCollision trigger). The box
+                // is treated as a cylinder — XZ radius afn_npc_col[0], vertical
+                // band [bottom,top] relative to the NPC's settled feet Y. Only
+                // when collision is enabled for this sprite.
+                if (eidx < 0 || afn_collision_enabled[eidx]) {
+                    float npcBot = s_npcY[i] + nbottom;
+                    float npcTop = s_npcY[i] + afn_npc_col[i][2];
+                    float plBot  = playerY + COL_BOTTOM, plTop = playerY + COL_TOP;
+                    if (plTop > npcBot && plBot < npcTop) {            // vertical overlap
+                        float ox = afn_npc_inst[i][0], oz = afn_npc_inst[i][2];
+                        float dx = playerX - ox, dz = playerZ - oz;
+                        float minD = COL_RADIUS + afn_npc_col[i][0];   // player + NPC radius
+                        float d2 = dx*dx + dz*dz;
+                        if (d2 < minD*minD) {
+                            float d = sqrtf(d2);
+                            if (d > 1e-4f) { float k = minD / d; playerX = ox + dx*k; playerZ = oz + dz*k; }
+                            else           { playerX = ox + minD; }    // dead-center: shove +X
+                        }
+                    }
+                }
             }
             afn_floor_sprite = savedFloorSpr;
         }
