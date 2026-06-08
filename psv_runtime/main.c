@@ -7,6 +7,7 @@
 #include <vitaGL.h>
 #include <psp2/ctrl.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/power.h>
 #include <math.h>
 #include <string.h>
 
@@ -231,6 +232,15 @@ static void draw_mesh(int mi)
 
 int main(void)
 {
+    // Max out the Vita clocks. 444 MHz is the hardware/API ceiling for the
+    // Cortex-A9 cores (the default app clock is 333 MHz); scePower clamps
+    // anything higher, so a true 500 MHz needs a kernel overclock plugin and is
+    // not done here. Bus/GPU are pushed to their maxima too for headroom.
+    scePowerSetArmClockFrequency(444);
+    scePowerSetBusClockFrequency(222);
+    scePowerSetGpuClockFrequency(222);
+    scePowerSetGpuXbarClockFrequency(166);
+
     vglInit(0x800000);
     vglWaitVblankStart(GL_TRUE);
 

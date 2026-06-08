@@ -55,6 +55,25 @@ struct PSPRigExport {
     std::vector<PSPRigClip>     clips;
 };
 
+// Write the shared PSP/PS-Vita runtime headers (mapdata/rig/sky/sprites/sound/
+// player). `hdrPrefix` is the filename prefix ("psp_" or "psv_"); `dataInclude`
+// the scene-data contract header ("affinity_psp.h" / "affinity_psv.h"). The PSP
+// and Vita runtimes share an identical float/RGBA8888 data layout, so both the
+// PSP and PSV exporters call this and differ only in the build step that follows.
+bool GenerateAffinityHeaders(const std::string& runtimeDir,
+                             const char* hdrPrefix, const char* dataInclude,
+                             const std::vector<GBASpriteExport>& sprites,
+                             const std::vector<GBASpriteAssetExport>& assets,
+                             const GBACameraExport& camera,
+                             const std::vector<GBAMeshExport>& meshes,
+                             float orbitDist,
+                             const std::vector<GBASoundSampleExport>& soundSamples,
+                             const std::vector<GBASoundInstanceExport>& soundInstances,
+                             const std::vector<GBASkyFrameExport>& skyFrames,
+                             const std::vector<PSPRigExport>& pspRigs,
+                             int playerRigIdx,
+                             std::string& errorMsg);
+
 // Package the current map into a PSP EBOOT.PBP.
 //
 // The PSP has a real FPU, 32 MB of RAM, and the sceGu/sceGum hardware T&L

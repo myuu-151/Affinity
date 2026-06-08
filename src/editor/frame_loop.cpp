@@ -6,6 +6,7 @@
 #include "../platform/gba/gba_package.h"
 #include "../platform/nds/nds_package.h"
 #include "../platform/psp/psp_package.h"
+#include "../platform/psv/psv_package.h"
 #include "imgui.h"
 
 #include <array>
@@ -4369,7 +4370,7 @@ static bool sPackageSuccess = false;
 static std::string sPackageMsg;
 static std::string sPackageOutputPath;
 
-enum class BuildTarget { GBA = 0, NDS = 1, PSP = 2 };
+enum class BuildTarget { GBA = 0, NDS = 1, PSP = 2, PSV = 3 };
 static BuildTarget sBuildTarget = BuildTarget::NDS; // default to NDS
 static bool sNdsAntialiasing = false; // NDS-only — adds smooth mesh edges but fringes textures
 static bool sBuildRequested = false; // set by toolbar Build button
@@ -15164,6 +15165,9 @@ void FrameTick(float dt)
         ImGui::SameLine();
         if (ImGui::RadioButton("PSP", sBuildTarget == BuildTarget::PSP))
             sBuildTarget = BuildTarget::PSP;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("PSV", sBuildTarget == BuildTarget::PSV))
+            sBuildTarget = BuildTarget::PSV;
         if (sBuildTarget == BuildTarget::NDS) {
             ImGui::SameLine();
             if (ImGui::Checkbox("AA", &sNdsAntialiasing)) sProjectDirty = true;
@@ -15192,15 +15196,19 @@ void FrameTick(float dt)
             fs::path cwdDir = fs::current_path();
 
             const char* rtName = (sBuildTarget == BuildTarget::NDS) ? "nds_runtime"
-                               : (sBuildTarget == BuildTarget::PSP) ? "psp_runtime" : "gba_runtime";
+                               : (sBuildTarget == BuildTarget::PSP) ? "psp_runtime"
+                               : (sBuildTarget == BuildTarget::PSV) ? "psv_runtime" : "gba_runtime";
             const char* rtExt  = (sBuildTarget == BuildTarget::NDS) ? "affinity.nds"
-                               : (sBuildTarget == BuildTarget::PSP) ? "EBOOT.PBP"    : "affinity.gba";
+                               : (sBuildTarget == BuildTarget::PSP) ? "EBOOT.PBP"
+                               : (sBuildTarget == BuildTarget::PSV) ? "build\\affinity_psv.vpk" : "affinity.gba";
+            // PSV is CMake-based (no Makefile); every other target has a Makefile.
+            const char* rtMarker = (sBuildTarget == BuildTarget::PSV) ? "CMakeLists.txt" : "Makefile";
 
             fs::path rtDir;
             for (auto& base : { exeDir, exeDir / "..", exeDir / ".." / "..", exeDir / ".." / ".." / "..", cwdDir, cwdDir / ".." })
             {
                 fs::path candidate = base / rtName;
-                if (fs::exists(candidate / "Makefile"))
+                if (fs::exists(candidate / rtMarker))
                 { rtDir = fs::canonical(candidate); break; }
             }
 
@@ -15209,7 +15217,7 @@ void FrameTick(float dt)
                 sPackaging = false;
                 sPackageDone = true;
                 sPackageSuccess = false;
-                sPackageMsg = std::string("Cannot find ") + rtName + "/Makefile\n\nSearched from:\n  exe: " + exeDir.string() + "\n  cwd: " + cwdDir.string();
+                sPackageMsg = std::string("Cannot find ") + rtName + "/" + rtMarker + "\n\nSearched from:\n  exe: " + exeDir.string() + "\n  cwd: " + cwdDir.string();
             }
             else
             {
@@ -16683,6 +16691,14 @@ void FrameTick(float dt)
                                         0.0f, exportRigs, err);
                     else if (target == BuildTarget::PSP)
                         ok = PackagePSP(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
+                                        exportMeshes, exportOrbitDist,
+                                        exportSoundSamples, exportSoundInstances,
+                                        exportSkyFrames,
+                                        exportScript, exportBlueprints, exportBpInstances,
+                                        exportHudElements, exportTmScenes, exportStartMode,
+                                        0.0f, exportRigs, exportPspRigs, playerPspRigIdx, err);
+                    else if (target == BuildTarget::PSV)
+                        ok = PackagePSV(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist,
                                         exportSoundSamples, exportSoundInstances,
                                         exportSkyFrames,
@@ -30456,7 +30472,8 @@ void FrameTick(float dt)
         ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
             ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
         const char* pkgTitle = sBuildTarget == BuildTarget::NDS ? "NDS Package"
-                             : sBuildTarget == BuildTarget::PSP ? "PSP Package" : "GBA Package";
+                             : sBuildTarget == BuildTarget::PSP ? "PSP Package"
+                             : sBuildTarget == BuildTarget::PSV ? "PS Vita Package" : "GBA Package";
         ImGui::Begin(pkgTitle, nullptr,
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
             ImGuiWindowFlags_AlwaysAutoResize);
@@ -30464,7 +30481,8 @@ void FrameTick(float dt)
         if (sPackaging)
         {
             ImGui::Text(sBuildTarget == BuildTarget::NDS ? "Building NDS ROM..."
-                      : sBuildTarget == BuildTarget::PSP ? "Building PSP EBOOT..." : "Building GBA ROM...");
+                      : sBuildTarget == BuildTarget::PSP ? "Building PSP EBOOT..."
+                      : sBuildTarget == BuildTarget::PSV ? "Building PS Vita VPK (vitaGL)..." : "Building GBA ROM...");
             // Simple spinner
             const char* spinner = "|/-\\";
             static int frame = 0;
@@ -30494,6 +30512,7 @@ void FrameTick(float dt)
                 ImGui::SameLine();
                 const char* openLabel = (sBuildTarget == BuildTarget::NDS) ? "  Open ROM  "
                                       : (sBuildTarget == BuildTarget::PSP) ? "  Open in PPSSPP  "
+                                      : (sBuildTarget == BuildTarget::PSV) ? "  Open in Vita3K  "
                                       : "  Open in mGBA  ";
                 float mgbaW = std::max(140.0f * sUiScale, ImGui::CalcTextSize(openLabel).x + 20.0f);
                 if (ImGui::Button(openLabel, ImVec2(mgbaW, btnH)))
@@ -30509,6 +30528,29 @@ void FrameTick(float dt)
                         if (CreateProcessA(nullptr, (LPSTR)cmd.c_str(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
                         { CloseHandle(pi.hProcess); CloseHandle(pi.hThread); }
                         else
+                            ShellExecuteA(nullptr, "open", sPackageOutputPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    }
+                    else if (sBuildTarget == BuildTarget::PSV)
+                    {
+                        // Launch Vita3K with the freshly built vpk: passing the
+                        // .vpk path installs it (and the GUI lands on the bubble).
+                        // Try the known Vita3K locations; fall back to the file
+                        // association if none are found.
+                        const char* vita3kPaths[] = {
+                            "C:\\Users\\NoSig\\Documents\\gbadev\\vita3k\\Vita3K-new\\Vita3K.exe",
+                            "C:\\Users\\NoSig\\Documents\\gbadev\\vita3k\\Vita3K\\Vita3K.exe",
+                        };
+                        bool launched = false;
+                        for (const char* vp : vita3kPaths)
+                        {
+                            if (GetFileAttributesA(vp) == INVALID_FILE_ATTRIBUTES) continue;
+                            std::string cmd = "\"" + std::string(vp) + "\" \"" + sPackageOutputPath + "\"";
+                            STARTUPINFOA si = {}; si.cb = sizeof(si);
+                            PROCESS_INFORMATION pi = {};
+                            if (CreateProcessA(nullptr, (LPSTR)cmd.c_str(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+                            { CloseHandle(pi.hProcess); CloseHandle(pi.hThread); launched = true; break; }
+                        }
+                        if (!launched)
                             ShellExecuteA(nullptr, "open", sPackageOutputPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                     }
                     else if (sBuildTarget == BuildTarget::GBA && sMgbaPath[0])
