@@ -701,7 +701,18 @@ int afn_active_element=0, afn_elem_idx=0, afn_cursor_stop=0, afn_stop_count=0, a
 int afn_checkpoint_set=0, afn_checkpoint_x=0, afn_checkpoint_y=0, afn_checkpoint_z=0;
 int afn_score=0, afn_shake_frames=0, afn_shake_intensity=0, afn_last_key=0;
 int afn_frame_count=0, afn_dt_tick=0;
-int afn_scene_start_transition=0;
+// Scene transition (ChangeScene/ReloadScene call this as a FUNCTION). PSV exports
+// one scene, so a swap to a DIFFERENT scene index can only fade + reset to spawn
+// (full multi-scene needs an all-scenes export); ReloadScene (same index) is a
+// true respawn. Phase machine ticked in the main loop (it owns the player vars).
+int afn_scene_phase = 0;       // 0 idle, 1 fading out (awaiting swap), 2 fading in
+int afn_scene_pending = 0, afn_scene_pending_mode = 0;
+void afn_scene_start_transition(int scene, int mode, int frames) {
+    afn_scene_pending = scene; afn_scene_pending_mode = mode;
+    extern int afn_fade_target, afn_fade_frames, afn_fade_counter;
+    afn_fade_target = -16; afn_fade_frames = frames > 0 ? frames : 15; afn_fade_counter = afn_fade_frames;
+    afn_scene_phase = 1;
+}
 // Player physics vars the emitted code reads/writes (NDS defines these in
 // fps3d.c). Kept inert for now — the movement loop uses its own playerX/Y/Z;
 // wiring teleport/IsMoving/Jump nodes to these is a follow-up.
@@ -854,6 +865,26 @@ int main(void)
             int span = afn_fade_frames > 0 ? afn_fade_frames : 1;
             afn_fade_level = afn_fade_target * (span - afn_fade_counter) / span;
             if (afn_fade_counter == 0) afn_fade_level = afn_fade_target;
+        }
+        // Scene transition: at fade-out completion, swap scene index + respawn,
+        // then fade back in. ReloadScene = true respawn; ChangeScene to another
+        // index resets in the SAME geometry (full multi-scene needs an all-scenes
+        // export — only one scene's data is present).
+        if (afn_scene_phase == 1 && afn_fade_counter == 0) {
+            afn_current_scene = afn_scene_pending; afn_current_mode = afn_scene_pending_mode;
+#ifdef AFN_HAS_PLAYER_RIG
+            playerX = AFN_PLAYER_START_X; playerY = AFN_PLAYER_START_Y; playerZ = AFN_PLAYER_START_Z;
+#else
+            playerX = afn_cam_start_x; playerY = afn_cam_start_h; playerZ = afn_cam_start_z;
+#endif
+            playerVY = 0.0f; grounded = 1; afn_player_heading = orbit_angle;
+#ifdef AFN_HAS_SPRITE_IDX
+            for (int i = 0; i < NUM_SPRITES; i++) { afn_sprite_visible[i] = 1; afn_collision_enabled[i] = 1; }
+#endif
+            afn_fade_target = 0; afn_fade_frames = 15; afn_fade_counter = 15; afn_fade_level = -16;
+            afn_scene_phase = 2;
+        } else if (afn_scene_phase == 2 && afn_fade_counter == 0) {
+            afn_scene_phase = 0;
         }
 
         // A teleport/checkpoint node wrote player_x/y/z — apply it to the float
