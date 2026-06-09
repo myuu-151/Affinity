@@ -1002,7 +1002,15 @@ int main(void)
 
     glClearColor(0.06f, 0.07f, 0.10f, 1.0f);
     glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL);
+    // Reverse-Z: vitaGL's depth buffer is 32-bit FLOAT, whose values bunch near
+    // 0 — and standard perspective depth already bunches near the near plane, so
+    // the two stack and mid/far precision is poor (worse than the PSP's 16-bit
+    // FIXED buffer). Mapping far->0 / near->1 (glDepthRangef(1,0)) puts the
+    // float-dense region where 1/z is sparse, cancelling out to near-uniform
+    // precision. Clear to 0 (far) and test GEQUAL (closer = larger depth).
+    glClearDepthf(0.0f);
+    glDepthRangef(1.0f, 0.0f);
+    glDepthFunc(GL_GEQUAL);
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     upload_textures();
     afn_audio_init();   // software mixer thread (no-op if the scene has no sound)
@@ -1397,12 +1405,11 @@ int main(void)
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
         {
-            // Near/far packed tight to the scene (matches the PSP: 4.0 / 3000) so
-            // the depth buffer keeps precision. A near of 1.0 with far 5000 has a
-            // 5000:1 ratio that crushes depth resolution at scene distance, so
-            // stacked/coplanar meshes z-fight (underneath geometry flickers above).
-            // top scales with nearp, so the vfov (75 deg) is unchanged.
-            const float nearp = 4.0f, farp = 3000.0f, aspect = SCR_W / SCR_H;
+            // Reverse-Z (set up in main: glDepthRangef(1,0) + GEQUAL) keeps depth
+            // precision near-uniform across the whole range, so the near/far ratio
+            // no longer drives z-fighting — use a generous range that fits the
+            // skybox quad (z = -5000) without clipping it.
+            const float nearp = 1.0f, farp = 5000.0f, aspect = SCR_W / SCR_H;
             const float top = nearp * 0.767f;     // tan(37.5 deg) ~ vfov 75
             const float right = top * aspect;
             glFrustum(-right, right, -top, top, nearp, farp);
