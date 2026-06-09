@@ -1397,7 +1397,12 @@ int main(void)
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
         {
-            const float nearp = 1.0f, farp = 5000.0f, aspect = SCR_W / SCR_H;
+            // Near/far packed tight to the scene (matches the PSP: 4.0 / 3000) so
+            // the depth buffer keeps precision. A near of 1.0 with far 5000 has a
+            // 5000:1 ratio that crushes depth resolution at scene distance, so
+            // stacked/coplanar meshes z-fight (underneath geometry flickers above).
+            // top scales with nearp, so the vfov (75 deg) is unchanged.
+            const float nearp = 4.0f, farp = 3000.0f, aspect = SCR_W / SCR_H;
             const float top = nearp * 0.767f;     // tan(37.5 deg) ~ vfov 75
             const float right = top * aspect;
             glFrustum(-right, right, -top, top, nearp, farp);
