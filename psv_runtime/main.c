@@ -1011,7 +1011,14 @@ int main(void)
 
     glClearColor(0.06f, 0.07f, 0.10f, 1.0f);
     glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL);
+    // Reverse-Z (paired with the reversed PROJECTION matrix below): vitaGL's depth
+    // buffer is 32-bit FLOAT, and standard perspective depth bunches precision near
+    // the near plane, leaving a thin z-fighting band where the floor and slope
+    // intersect. Mapping far->0 (cleared) / near->1 lands far geometry in the
+    // float-dense range -> near-uniform precision, killing the intersection
+    // flicker. Done via the projection (not glDepthRangef, which GXM clips wrong).
+    glClearDepthf(0.0f);
+    glDepthFunc(GL_GEQUAL);
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     upload_textures();
     afn_audio_init();   // software mixer thread (no-op if the scene has no sound)
@@ -1406,10 +1413,20 @@ int main(void)
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
         {
-            const float nearp = 1.0f, farp = 5000.0f, aspect = SCR_W / SCR_H;
-            const float top = nearp * 0.767f;     // tan(37.5 deg) ~ vfov 75
-            const float right = top * aspect;
-            glFrustum(-right, right, -top, top, nearp, farp);
+            // Reversed-Z perspective: standard glFrustum with the z row negated so
+            // near->NDC +1, far->NDC -1 (default depth range -> window 1..0). Screen
+            // x/y and clipping are unchanged; only the depth mapping flips, giving
+            // near-uniform float-depth precision (see glDepthFunc GEQUAL above).
+            const float n = 1.0f, fp = 5000.0f, aspect = SCR_W / SCR_H;
+            const float t = n * 0.767f;          // tan(37.5 deg) ~ vfov 75
+            const float r = t * aspect;
+            float m[16] = {0};
+            m[0]  = n / r;
+            m[5]  = n / t;
+            m[10] =  (fp + n) / (fp - n);         // negated vs standard glFrustum
+            m[11] = -1.0f;
+            m[14] =  (2.0f * fp * n) / (fp - n);  // negated vs standard glFrustum
+            glLoadMatrixf(m);
         }
 
         // View.
