@@ -997,19 +997,20 @@ int main(void)
     scePowerSetGpuClockFrequency(222);
     scePowerSetGpuXbarClockFrequency(166);
 
+    // Force the GLSL/fixed-function pipeline to FULL precision. vitaGL can fold
+    // shader floats down to half (fp16); at world coords ~150 that quantizes
+    // positions to ~0.1 units, which z-fights and shifts as the view rotates
+    // (large floor/slope flicker while the small-coord rig stays clean).
+    vglUseLowPrecision(GL_FALSE);
     vglInit(0x800000);
     vglWaitVblankStart(GL_TRUE);
 
     glClearColor(0.06f, 0.07f, 0.10f, 1.0f);
     glEnable(GL_DEPTH_TEST);
-    // Reverse-Z: vitaGL's depth buffer is 32-bit FLOAT, whose values bunch near
-    // 0 — and standard perspective depth already bunches near the near plane, so
-    // the two stack and mid/far precision is poor (worse than the PSP's 16-bit
-    // FIXED buffer). Mapping far->0 / near->1 (glDepthRangef(1,0)) puts the
-    // float-dense region where 1/z is sparse, cancelling out to near-uniform
-    // precision. Clear to 0 (far) and test GEQUAL (closer = larger depth).
+    // Reverse-Z via a reversed PROJECTION matrix (built below), not glDepthRangef
+    // — GXM clips against the depth range, so a reversed range popped geometry.
+    // far maps to depth 0 (cleared), closer = larger depth, tested GEQUAL.
     glClearDepthf(0.0f);
-    glDepthRangef(1.0f, 0.0f);
     glDepthFunc(GL_GEQUAL);
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     upload_textures();
@@ -1405,14 +1406,22 @@ int main(void)
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
         {
-            // Reverse-Z (set up in main: glDepthRangef(1,0) + GEQUAL) keeps depth
-            // precision near-uniform across the whole range, so the near/far ratio
-            // no longer drives z-fighting — use a generous range that fits the
-            // skybox quad (z = -5000) without clipping it.
-            const float nearp = 1.0f, farp = 5000.0f, aspect = SCR_W / SCR_H;
-            const float top = nearp * 0.767f;     // tan(37.5 deg) ~ vfov 75
-            const float right = top * aspect;
-            glFrustum(-right, right, -top, top, nearp, farp);
+            // Reversed-Z perspective: same as glFrustum but with the z row negated
+            // so near->NDC +1, far->NDC -1 (default depth range maps that to window
+            // 1..0). With a float depth buffer this puts the dense float values at
+            // the far end, cancelling the 1/z bunching -> near-uniform precision,
+            // killing the slope/floor z-fighting. Clipping is unchanged (NDC still
+            // [-w,w]). Generous near/far fits the skybox quad (z = -5000).
+            const float n = 1.0f, fp = 5000.0f, aspect = SCR_W / SCR_H;
+            const float t = n * 0.767f;          // tan(37.5 deg) ~ vfov 75
+            const float r = t * aspect;
+            float m[16] = {0};
+            m[0]  = n / r;
+            m[5]  = n / t;
+            m[10] =  (fp + n) / (fp - n);         // negated vs standard glFrustum
+            m[11] = -1.0f;
+            m[14] =  (2.0f * fp * n) / (fp - n);  // negated vs standard glFrustum
+            glLoadMatrixf(m);
         }
 
         // View.
