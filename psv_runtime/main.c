@@ -690,11 +690,12 @@ static void input_update(const SceCtrlData* pad) {
     if (b & SCE_CTRL_DOWN)     k|=KEY_DOWN;
     if (b & SCE_CTRL_LEFT)     k|=KEY_LEFT;
     if (b & SCE_CTRL_RIGHT)    k|=KEY_RIGHT;
+    // Left stick reported as the d-pad so the node graph can read it as KEY_*;
+    // the runtime no longer sets afn_input_fwd/right itself — movement intent is
+    // produced solely by the node graph (purely node-driven).
     int ax = (int)pad->lx - 128, ay = (int)pad->ly - 128;
     if (ay<-48) k|=KEY_UP;   if (ay>48) k|=KEY_DOWN;
     if (ax<-48) k|=KEY_LEFT; if (ax>48) k|=KEY_RIGHT;
-    afn_input_right = ax;       // raw analog default (±128); nodes use ±256
-    afn_input_fwd   = -ay;
     afn_keys_pressed  = k & ~afn_keys_held;
     afn_keys_released = ~k & afn_keys_held;
     afn_keys_held     = k;
@@ -1138,15 +1139,9 @@ int main(void)
         camDist   = S[1] > 1.0f ? S[1] : camDist;   // keep manual zoom unless slot overrides
         camHeight = S[2];
 
-        // Right stick / L-R also orbit the camera (added to orbit_angle/pitch,
-        // which the OrbitCamera node may also drive). Triggers zoom.
-        float rx = (pad.rx - 128) / 128.0f, ry = (pad.ry - 128) / 128.0f;
-        if (fabsf(rx) > 0.15f) orbit_angle += (int)(rx * 600.0f);
-        if (fabsf(ry) > 0.15f) orbit_pitch += (int)(ry * 450.0f);
-        // NOTE: no trigger-zoom here — the triggers are KEY_L/KEY_R, which the
-        // node graph binds to orbit. A hardcoded zoom would double-bind them
-        // (R = orbit + zoom-in, L = orbit + zoom-out). Camera distance is slot/
-        // node driven only.
+        // Camera orbit is purely node-driven: the OrbitCamera node writes
+        // orbit_angle/orbit_pitch (reading KEY_L/KEY_R etc.). No hardcoded right
+        // stick or trigger control here.
         // Clamp pitch to ~±80 deg in brad (65536 = 360 deg -> ±14563).
         if (orbit_pitch >  14563) orbit_pitch =  14563;
         if (orbit_pitch < -14563) orbit_pitch = -14563;
@@ -1168,10 +1163,10 @@ int main(void)
         float rgtX = cosf(moveAngle), rgtZ = -sinf(moveAngle);
         float mvX = fAmt*fwdX + rAmt*rgtX;
         float mvZ = fAmt*fwdZ + rAmt*rgtZ;
-        int scripted = script_present();
-        if ((mvX*mvX + mvZ*mvZ > 0.0001f) && (!scripted || afn_move_speed > 0) && !afn_player_frozen) {
-            float speed = scripted ? (afn_move_speed * 0.08f)
-                                   : (afn_walk_speed > 0.0f ? afn_walk_speed * 0.25f : 6.0f);
+        // Move only when the node graph asks: a movement node sets afn_input_fwd/
+        // right AND afn_move_speed. No walk-speed fallback — purely node-driven.
+        if ((mvX*mvX + mvZ*mvZ > 0.0001f) && afn_move_speed > 0 && !afn_player_frozen) {
+            float speed = afn_move_speed * 0.08f;
             float dx = mvX*speed, dz = mvZ*speed;
             float dlen = sqrtf(dx*dx + dz*dz);
             int steps = (int)(dlen / 3.0f) + 1;   // MAX_MOVE_STEP: don't tunnel walls
@@ -1203,8 +1198,12 @@ int main(void)
         }
 
         player_moving = (afn_input_fwd != 0 || afn_input_right != 0);   // IsMoving gate
-        if (grounded && (pad.buttons & SCE_CTRL_CROSS)) { playerVY = 13.0f; grounded = 0; }  // debug jump
-        if (player_vy != 0) { playerVY = player_vy / 256.0f; player_vy = 0; grounded = 0; }  // Jump node
+        // Jump is node-driven: a Jump node sets player_vy (8.8). Capture it once
+        // here so both the normal jump and the grind exit (below) react to the
+        // same node event — no hardcoded jump button.
+        float jumpVel = 0.0f;
+        if (player_vy != 0) { jumpVel = player_vy / 256.0f; player_vy = 0; }
+        if (jumpVel != 0.0f) { playerVY = jumpVel; grounded = 0; }   // Jump node
         collide_walls(&playerX, &playerZ, playerY);
         playerVY -= afn_gravity / 256.0f;                  // gravity (SetGravity node, 8.8)
         float term = afn_terminal_vel / 256.0f;
@@ -1320,12 +1319,12 @@ int main(void)
             if (gr_on) {
                 int rs = afn_rail_start[rail], rn = afn_rail_count[rail];
                 float total = rail_len(rail);
-                if ((pad.buttons & SCE_CTRL_CROSS) || !afn_grinding) {
+                if ((jumpVel != 0.0f) || !afn_grinding) {   // jump off (node) or grind disabled
                     float gx,gy,gz,tdx,tdz; rail_sample(rail, gr_arc, &gx,&gy,&gz,&tdx,&tdz);
                     afn_player_vx_world = (int)(tdx * gr_dir * gr_speed * 256.0f);   // launch w/ momentum
                     afn_player_vz_world = (int)(tdz * gr_dir * gr_speed * 256.0f);
                     afn_velocity_falloff = 30;
-                    if (pad.buttons & SCE_CTRL_CROSS) playerVY = 13.0f;
+                    if (jumpVel != 0.0f) playerVY = jumpVel;
                     gr_on = 0; afn_grind_vel = 0; afn_grinding = 0;
                 } else {
                     float gx,gy,gz,tdx,tdz; rail_sample(rail, gr_arc, &gx,&gy,&gz,&tdx,&tdz);
