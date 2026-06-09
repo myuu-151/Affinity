@@ -293,13 +293,6 @@ static void draw_mesh(int mi)
     // exporter's cullMode (back/front/none) is intentionally ignored here.
     glDisable(GL_CULL_FACE);
 
-    // Polygon offset: vitaGL's 16-bit depth leaves a thin fight band where two
-    // meshes intersect (floor vs slope). The factor term biases each polygon by
-    // its depth slope, so the steep slope is nudged behind the flat floor at the
-    // seam and the fight resolves to a stable winner instead of flickering.
-    glEnable(GL_POLYGON_OFFSET_FILL);
-    glPolygonOffset(2.0f, 2.0f);
-
     if (m->textured && s_meshTex[mi]) {
         glEnable(GL_TEXTURE_2D);
         glBindTexture(GL_TEXTURE_2D, s_meshTex[mi]);
