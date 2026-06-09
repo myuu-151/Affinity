@@ -32,7 +32,7 @@
 | **SFX System** | Import WAV samples with waveform editor, trim, amplify, and one-shot playback via script nodes |
 | **Delta Time** | Decouple game speed from framerate — consistent gameplay at any FPS |
 | **Animated Skybox** | Panoramic sky with smooth scrolling and optional frame animation |
-| **One-Click Build** | Package a `.gba` or `.nds` ROM directly from the editor |
+| **One-Click Build** | Package a `.gba`/`.nds` ROM, PSP `EBOOT.PBP`, or Vita `.vpk` directly from the editor |
 | **mGBA Integration** | Launch ROMs directly in mGBA from the editor |
 | **Blender-style Tools** | G to grab, S to scale, X/Y/Z axis constraints with visual guides |
 | **Mode 7 Floor** | HBlank affine floor rendering for non-mesh projects |
@@ -46,13 +46,11 @@
 - **Windows 10/11**
 - **Visual Studio 2022+** (MSVC C++17)
 - **CMake 3.16+**
-- **devkitPro** with devkitARM + libtonc *(for GBA ROM packaging; the devkitPro MSYS2 shell is also used to build NDS and PS Vita)*
-- **mGBA** *(optional — for launching ROMs from the editor)*
-- **WSL + pspdev** *(optional — for PSP `EBOOT.PBP` packaging)*
-- **VitaSDK** *(optional — for PS Vita `.vpk` packaging)*
 - **Visual C++ Redistributable** *(required to run pre-built releases — [download](https://aka.ms/vs/17/release/vc_redist.x64.exe))*
 
-### 1. Build the Editor
+> Each build target needs its own toolchain — see **[Build Targets](#build-targets)** below. You can install only the ones you need.
+
+### Build the Editor
 
 ```bash
 git clone https://github.com/myuu-151/Affinity.git
@@ -66,59 +64,96 @@ Run the editor:
 build\Release\AffinityEditor.exe
 ```
 
-### 2. Install devkitPro (GBA Toolchain)
+---
 
-You need devkitPro to compile GBA ROMs. The editor handles the build process — you just need the toolchain installed.
+## Build Targets
 
-1. Download the installer from **[devkitpro.org](https://devkitpro.org/wiki/Getting_Started)**
-2. Run the installer
-3. Open the devkitPro MSYS2 terminal and install the GBA packages:
+Author your project once, then package it for any target. In the editor, pick a target and build — it exports that target's data headers and invokes the matching toolchain automatically.
+
+| Target | Output | Toolchain | Runs on |
+|--------|--------|-----------|---------|
+| [**GBA**](#gba) | `gba_runtime/affinity.gba` | devkitARM + libtonc | mGBA · real GBA |
+| [**NDS**](#nds) | `nds_runtime/affinity.nds` | devkitARM + libnds | melonDS · real DS |
+| [**PSP**](#psp) | `psp_runtime/EBOOT.PBP` | pspdev *(via WSL)* | PPSSPP · real PSP |
+| [**PS Vita**](#ps-vita) | `psv_runtime/build/affinity_psv.vpk` | VitaSDK | Vita3K · real Vita |
+
+GBA and NDS use the software/hardware 2D+3D path; PSP and PS Vita are **Mode 4 / 3D** targets.
+
+---
+
+### GBA
+
+**Toolchain** — install **devkitPro** from **[devkitpro.org](https://devkitpro.org/wiki/Getting_Started)**, then in the devkitPro MSYS2 terminal:
 
 ```bash
 pacman -S devkitARM libtonc
 ```
 
-4. Verify the environment variables are set *(the installer usually handles this)*:
+The installer usually sets `DEVKITPRO=/opt/devkitpro` and `DEVKITARM=/opt/devkitpro/devkitARM`.
 
-```
-DEVKITPRO=/opt/devkitpro
-DEVKITARM=/opt/devkitpro/devkitARM
-```
+**Build** — in the editor, click **GBA Build**. It exports `mapdata.h` and runs `make`. Output:
 
-### 3. Build a GBA ROM
-
-1. Open or create a project in the editor
-2. Add meshes, sprites, and set up your scene
-3. Click the **GBA Build** button
-
-The editor exports `mapdata.h` and runs `make` automatically. The output ROM is:
 ```
 gba_runtime/affinity.gba
 ```
 
-<details>
-<summary><b>Manual ROM build</b></summary>
+Open it in **mGBA** (the editor can launch it for you), or flash it to a real GBA.
 
-If you want to build the ROM from the command line (after exporting from the editor):
+<details>
+<summary><b>Manual build</b></summary>
 
 ```bash
+# after exporting mapdata.h from the editor
 cd gba_runtime
 make
 ```
 
-> `mapdata.h` must be exported from the editor first — it contains all mesh, sprite, map, and script data.
+</details>
+
+---
+
+### NDS
+
+**Toolchain** — install **devkitPro** (same installer as GBA), then add the NDS packages in the devkitPro MSYS2 terminal:
+
+```bash
+pacman -S nds-dev      # pulls devkitARM, libnds, calico, maxmod, etc.
+```
+
+**Build** — in the editor, click **NDS Build**. It exports the NDS data headers and runs `make` in `nds_runtime/`. Output:
+
+```
+nds_runtime/affinity.nds
+```
+
+Run it in **melonDS**.
+
+> **DeSmuME does not work** with modern libnds homebrew (the calico ARM7 core) — use **melonDS** for testing.
+
+<details>
+<summary><b>Manual build</b></summary>
+
+```bash
+# devkitPro MSYS2 shell, after exporting from the editor
+cd nds_runtime
+make
+```
 
 </details>
 
-### 4. Build a PSP EBOOT *(optional, Mode 4 / 3D)*
+---
+
+### PSP
 
 PSP packaging uses the **pspdev** toolchain. Because pspdev ships Linux binaries, the editor invokes it through **WSL**.
 
+**Toolchain**
+
 1. Install WSL (Ubuntu): run `wsl --install` in an elevated PowerShell, then reboot.
 2. Inside WSL, install **pspdev** — follow **[pspdev.github.io](https://pspdev.github.io/)** (or use the `pspdev` installer). Make sure `PSPDEV` is set and `psp-gcc` is on the PATH.
-3. In the editor, select the **PSP** build target and build. It exports the PSP data headers (`psp_mapdata.h`, `psp_rig.h`, `psp_sprites.h`, `psp_sound.h`, …) and runs `make` in `psp_runtime/`.
 
-The output is:
+**Build** — in the editor, select the **PSP** build target and build. It exports the PSP data headers (`psp_mapdata.h`, `psp_rig.h`, `psp_sprites.h`, `psp_sound.h`, …) and runs `make` in `psp_runtime/`. Output:
+
 ```
 psp_runtime/EBOOT.PBP
 ```
@@ -126,7 +161,7 @@ psp_runtime/EBOOT.PBP
 Run it in **PPSSPP**, or copy it to a real PSP under `PSP/GAME/<folder>/EBOOT.PBP`.
 
 <details>
-<summary><b>Manual EBOOT build</b></summary>
+<summary><b>Manual build</b></summary>
 
 ```bash
 # inside WSL, after exporting the PSP headers from the editor
@@ -134,18 +169,18 @@ cd psp_runtime
 make clean; make
 ```
 
-> The `psp_*.h` headers must be exported from the editor first.
-
 </details>
 
-### 5. Build a PS Vita VPK *(optional, Mode 4 / 3D)*
+---
+
+### PS Vita
 
 PS Vita packaging uses **VitaSDK**, invoked through the **devkitPro MSYS2** shell (CMake + make).
 
-1. Install **VitaSDK** to `C:\vitasdk` — follow **[vitasdk.org](https://vitasdk.org/)** (the `vdpm` bootstrap). The editor expects `VITASDK=/c/vitasdk`.
-2. In the editor, select the **PS Vita** build target and build. It exports the PSV data headers (`psv_mapdata.h`, `psv_rig.h`, `psv_sprites.h`, `psv_hud.h`, …) and runs `cmake .. && make` in `psv_runtime/build`.
+**Toolchain** — install **VitaSDK** to `C:\vitasdk` by following **[vitasdk.org](https://vitasdk.org/)** (the `vdpm` bootstrap). The editor expects `VITASDK=/c/vitasdk`.
 
-The output is:
+**Build** — in the editor, select the **PS Vita** build target and build. It exports the PSV data headers (`psv_mapdata.h`, `psv_rig.h`, `psv_sprites.h`, `psv_hud.h`, …) and runs `cmake .. && make` in `psv_runtime/build`. Output:
+
 ```
 psv_runtime/build/affinity_psv.vpk
 ```
@@ -155,7 +190,7 @@ Install it on a real Vita with **VitaShell**, or run it in **Vita3K**.
 > **Vita3K:** install `libshacccg.suprx` into `ur0:/data/` (Vita3K can't compile shaders without it). The runtime already builds with the Vita3K-support flags enabled.
 
 <details>
-<summary><b>Manual VPK build</b></summary>
+<summary><b>Manual build</b></summary>
 
 ```bash
 # devkitPro MSYS2 shell, after exporting the PSV headers from the editor
@@ -164,8 +199,6 @@ export PATH="$VITASDK/bin:$PATH"
 cd psv_runtime && mkdir -p build && cd build
 cmake .. && make
 ```
-
-> The `psv_*.h` headers must be exported from the editor first.
 
 </details>
 
