@@ -111,6 +111,19 @@ typedef int FIXED;
 static inline int key_is_down(int mask)  { return (keysHeld()     & mask) != 0; }
 static inline int key_hit(int mask)      { return (keysDown()     & mask) != 0; }
 static inline int key_released(int mask) { return (keysUp()       & mask) != 0; }
+// Analog-stick "keys" the editor's Key node can emit. The DS has no analog stick,
+// so these are defined as high bits that keysHeld()/Down()/Up() never set — the
+// emitted code compiles and the checks are simply always false here.
+#ifndef KEY_LSTICK_UP
+#define KEY_LSTICK_UP    (1<<16)
+#define KEY_LSTICK_DOWN  (1<<17)
+#define KEY_LSTICK_LEFT  (1<<18)
+#define KEY_LSTICK_RIGHT (1<<19)
+#define KEY_RSTICK_UP    (1<<20)
+#define KEY_RSTICK_DOWN  (1<<21)
+#define KEY_RSTICK_LEFT  (1<<22)
+#define KEY_RSTICK_RIGHT (1<<23)
+#endif
 // libtonc's lu_sin/lu_cos return 4.12 fixed (4096 = 1.0). libnds sinLerp
 // returns the same .12 format, so they're a direct match.
 static inline int lu_sin(unsigned short angle) { return sinLerp(angle); }

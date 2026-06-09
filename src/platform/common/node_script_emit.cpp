@@ -64,8 +64,10 @@ void EmitNodeScriptBodies(std::ostream& f,
             static const char* keys[] = { "KEY_A","KEY_B","KEY_L","KEY_R",
                                           "KEY_START","KEY_SELECT",
                                           "KEY_UP","KEY_DOWN","KEY_LEFT","KEY_RIGHT",
-                                          "KEY_X","KEY_Y" };
-            return (k >= 0 && k < 12) ? keys[k] : "KEY_A";
+                                          "KEY_X","KEY_Y",
+                                          "KEY_LSTICK_UP","KEY_LSTICK_DOWN","KEY_LSTICK_LEFT","KEY_LSTICK_RIGHT",
+                                          "KEY_RSTICK_UP","KEY_RSTICK_DOWN","KEY_RSTICK_LEFT","KEY_RSTICK_RIGHT" };
+            return (k >= 0 && k < 20) ? keys[k] : "KEY_A";
         };
 
         // Collect chains per event type (BFS from each event node through exec links).

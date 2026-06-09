@@ -670,7 +670,11 @@ int orbit_angle = 0;                          // camera yaw, brad (65536 = full 
 int orbit_pitch = 0;                          // camera pitch, brad (node OrbitCamera Up/Down + right stick)
 
 enum { KEY_A=1,KEY_B=2,KEY_X=4,KEY_Y=8,KEY_L=16,KEY_R=32,KEY_START=64,KEY_SELECT=128,
-       KEY_UP=256,KEY_DOWN=512,KEY_LEFT=1024,KEY_RIGHT=2048 };
+       KEY_UP=256,KEY_DOWN=512,KEY_LEFT=1024,KEY_RIGHT=2048,
+       // Analog directions, reported separately from the d-pad so a node can bind
+       // each stick independently (left stick != d-pad).
+       KEY_LSTICK_UP=4096,    KEY_LSTICK_DOWN=8192,    KEY_LSTICK_LEFT=16384,   KEY_LSTICK_RIGHT=32768,
+       KEY_RSTICK_UP=65536,   KEY_RSTICK_DOWN=131072,  KEY_RSTICK_LEFT=262144,  KEY_RSTICK_RIGHT=524288 };
 unsigned afn_keys_held=0, afn_keys_pressed=0, afn_keys_released=0;
 static int key_is_down(unsigned k){ return (afn_keys_held & k)!=0; }
 static int key_hit(unsigned k){ return (afn_keys_pressed & k)!=0; }
@@ -690,12 +694,14 @@ static void input_update(const SceCtrlData* pad) {
     if (b & SCE_CTRL_DOWN)     k|=KEY_DOWN;
     if (b & SCE_CTRL_LEFT)     k|=KEY_LEFT;
     if (b & SCE_CTRL_RIGHT)    k|=KEY_RIGHT;
-    // Left stick reported as the d-pad so the node graph can read it as KEY_*;
-    // the runtime no longer sets afn_input_fwd/right itself — movement intent is
-    // produced solely by the node graph (purely node-driven).
+    // Sticks reported as their OWN keys (NOT folded into the d-pad), so a node can
+    // bind the d-pad, left stick, and right stick independently. ±48 deadzone.
     int ax = (int)pad->lx - 128, ay = (int)pad->ly - 128;
-    if (ay<-48) k|=KEY_UP;   if (ay>48) k|=KEY_DOWN;
-    if (ax<-48) k|=KEY_LEFT; if (ax>48) k|=KEY_RIGHT;
+    if (ay<-48) k|=KEY_LSTICK_UP;   if (ay>48) k|=KEY_LSTICK_DOWN;
+    if (ax<-48) k|=KEY_LSTICK_LEFT; if (ax>48) k|=KEY_LSTICK_RIGHT;
+    int rx = (int)pad->rx - 128, ry = (int)pad->ry - 128;
+    if (ry<-48) k|=KEY_RSTICK_UP;   if (ry>48) k|=KEY_RSTICK_DOWN;
+    if (rx<-48) k|=KEY_RSTICK_LEFT; if (rx>48) k|=KEY_RSTICK_RIGHT;
     afn_keys_pressed  = k & ~afn_keys_held;
     afn_keys_released = ~k & afn_keys_held;
     afn_keys_held     = k;

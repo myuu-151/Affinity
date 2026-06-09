@@ -622,8 +622,10 @@ struct VsNodeTypeDef {
 // X and Y are NDS-only buttons (GBA has no X/Y — the exporter maps them to a
 // harmless fallback on that target). Order must stay stable: these indices are
 // serialized into project files and consumed by the runtime keyName() tables.
-static const char* sVsKeyNames[] = { "A", "B", "L", "R", "Start", "Select", "Up", "Down", "Left", "Right", "X", "Y" };
-static constexpr int kVsKeyCount = 12;
+static const char* sVsKeyNames[] = { "A", "B", "L", "R", "Start", "Select", "Up", "Down", "Left", "Right", "X", "Y",
+    "L-Stick Up", "L-Stick Down", "L-Stick Left", "L-Stick Right",
+    "R-Stick Up", "R-Stick Down", "R-Stick Left", "R-Stick Right" };
+static constexpr int kVsKeyCount = 20;   // 0-11 buttons/d-pad, 12-15 left stick, 16-19 right stick
 static const char* sVsAxisNames[] = { "Left", "Right", "Up", "Down" };
 static constexpr int kVsAxisCount = 4;
 
@@ -16990,6 +16992,14 @@ void FrameTick(float dt)
                 case 9: return ImGui::IsKeyDown(ImGuiKey_D);
                 case 10: return ImGui::IsKeyDown(ImGuiKey_X); // NDS X
                 case 11: return ImGui::IsKeyDown(ImGuiKey_C); // NDS Y (C key; Y is the up-axis)
+                case 12: return ImGui::IsKeyDown(ImGuiKey_UpArrow);    // L-Stick Up
+                case 13: return ImGui::IsKeyDown(ImGuiKey_DownArrow);  // L-Stick Down
+                case 14: return ImGui::IsKeyDown(ImGuiKey_LeftArrow);  // L-Stick Left
+                case 15: return ImGui::IsKeyDown(ImGuiKey_RightArrow); // L-Stick Right
+                case 16: return ImGui::IsKeyDown(ImGuiKey_Keypad8);    // R-Stick Up
+                case 17: return ImGui::IsKeyDown(ImGuiKey_Keypad2);    // R-Stick Down
+                case 18: return ImGui::IsKeyDown(ImGuiKey_Keypad4);    // R-Stick Left
+                case 19: return ImGui::IsKeyDown(ImGuiKey_Keypad6);    // R-Stick Right
                 default: return false;
                 }
             };
@@ -17007,6 +17017,14 @@ void FrameTick(float dt)
                 case 9: return ImGui::IsKeyPressed(ImGuiKey_D);
                 case 10: return ImGui::IsKeyPressed(ImGuiKey_X); // NDS X
                 case 11: return ImGui::IsKeyPressed(ImGuiKey_C); // NDS Y
+                case 12: return ImGui::IsKeyPressed(ImGuiKey_UpArrow);    // L-Stick Up
+                case 13: return ImGui::IsKeyPressed(ImGuiKey_DownArrow);  // L-Stick Down
+                case 14: return ImGui::IsKeyPressed(ImGuiKey_LeftArrow);  // L-Stick Left
+                case 15: return ImGui::IsKeyPressed(ImGuiKey_RightArrow); // L-Stick Right
+                case 16: return ImGui::IsKeyPressed(ImGuiKey_Keypad8);    // R-Stick Up
+                case 17: return ImGui::IsKeyPressed(ImGuiKey_Keypad2);    // R-Stick Down
+                case 18: return ImGui::IsKeyPressed(ImGuiKey_Keypad4);    // R-Stick Left
+                case 19: return ImGui::IsKeyPressed(ImGuiKey_Keypad6);    // R-Stick Right
                 default: return false;
                 }
             };
