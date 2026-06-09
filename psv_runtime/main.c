@@ -286,8 +286,12 @@ static void draw_mesh(int mi)
     const AfnMesh* m = &afn_meshes[mi];
     if (!m->visible || m->vertCount <= 0 || !m->verts || !m->indices) return;
 
-    if (m->cullMode == 2) { glDisable(GL_CULL_FACE); }
-    else { glEnable(GL_CULL_FACE); glFrontFace(m->cullMode == 1 ? GL_CW : GL_CCW); }
+    // Render level meshes TWO-SIDED. Single-sided meshes (a slope, a ramp) get
+    // back-face culled when you orbit around to their back, so they vanish — the
+    // disappearing-slope bug. The Vita GPU has the overdraw headroom and the depth
+    // buffer sorts everything, so there's no reason to cull; draw both faces. The
+    // exporter's cullMode (back/front/none) is intentionally ignored here.
+    glDisable(GL_CULL_FACE);
 
     if (m->textured && s_meshTex[mi]) {
         glEnable(GL_TEXTURE_2D);
@@ -1007,11 +1011,7 @@ int main(void)
 
     glClearColor(0.06f, 0.07f, 0.10f, 1.0f);
     glEnable(GL_DEPTH_TEST);
-    // Reverse-Z via a reversed PROJECTION matrix (built below), not glDepthRangef
-    // — GXM clips against the depth range, so a reversed range popped geometry.
-    // far maps to depth 0 (cleared), closer = larger depth, tested GEQUAL.
-    glClearDepthf(0.0f);
-    glDepthFunc(GL_GEQUAL);
+    glDepthFunc(GL_LEQUAL);
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     upload_textures();
     afn_audio_init();   // software mixer thread (no-op if the scene has no sound)
@@ -1406,22 +1406,10 @@ int main(void)
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
         {
-            // Reversed-Z perspective: same as glFrustum but with the z row negated
-            // so near->NDC +1, far->NDC -1 (default depth range maps that to window
-            // 1..0). With a float depth buffer this puts the dense float values at
-            // the far end, cancelling the 1/z bunching -> near-uniform precision,
-            // killing the slope/floor z-fighting. Clipping is unchanged (NDC still
-            // [-w,w]). Generous near/far fits the skybox quad (z = -5000).
-            const float n = 1.0f, fp = 5000.0f, aspect = SCR_W / SCR_H;
-            const float t = n * 0.767f;          // tan(37.5 deg) ~ vfov 75
-            const float r = t * aspect;
-            float m[16] = {0};
-            m[0]  = n / r;
-            m[5]  = n / t;
-            m[10] =  (fp + n) / (fp - n);         // negated vs standard glFrustum
-            m[11] = -1.0f;
-            m[14] =  (2.0f * fp * n) / (fp - n);  // negated vs standard glFrustum
-            glLoadMatrixf(m);
+            const float nearp = 1.0f, farp = 5000.0f, aspect = SCR_W / SCR_H;
+            const float top = nearp * 0.767f;     // tan(37.5 deg) ~ vfov 75
+            const float right = top * aspect;
+            glFrustum(-right, right, -top, top, nearp, farp);
         }
 
         // View.
