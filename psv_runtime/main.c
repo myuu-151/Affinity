@@ -1067,6 +1067,7 @@ int main(void)
     // height sets the default downward tilt and the look-at target height. PSV
     // has no scripts yet so afn_active_camera stays 0 (scene default), but the
     // runtime re-reads it each frame so a future SetCamera node just works.
+    if (afn_active_camera < 0 || afn_active_camera >= AFN_CAM_SLOT_COUNT) afn_active_camera = 0;
     const float* slot0 = afn_cam_slots[afn_active_camera];
     orbit_angle       = (int)(slot0[0] * (65536.0f / 6.2831853f));  // GLOBAL brad (node + manual)
     afn_player_heading = orbit_angle;   // tank heading starts facing the camera-forward
@@ -1140,7 +1141,11 @@ int main(void)
         if (player_y != pteleY) playerY = (float)player_y;
         if (player_z != pteleZ) playerZ = (float)player_z;
 
-        // Re-read the active slot each frame (a future SetCamera node retargets it).
+        // Re-read the active slot each frame (a SetCamera node retargets it).
+        // Clamp first (matches NDS fps3d.c): a Set Camera fed an out-of-range slot
+        // (e.g. an Integer >= AFN_CAM_SLOT_COUNT) would otherwise index past
+        // afn_cam_slots and crash. Out-of-range falls back to slot 0 (scene default).
+        if (afn_active_camera < 0 || afn_active_camera >= AFN_CAM_SLOT_COUNT) afn_active_camera = 0;
         const float* S = afn_cam_slots[afn_active_camera];
         camDist   = S[1] > 1.0f ? S[1] : camDist;   // keep manual zoom unless slot overrides
         camHeight = S[2];

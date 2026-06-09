@@ -21223,13 +21223,15 @@ void FrameTick(float dt)
                 case VsNodeType::SetCamera: {
                     editorCode =
                         "// Switch the player camera to a preset slot (Mode 4)";
-                    char bodyBuf[320];
+                    char bodyBuf[420];
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    afn_active_camera = %s;   // 0 = scene default, 1..N = player slots\n"
-                        "    // --- Runtime (fps3d.c update_camera) ---\n"
+                        "    // --- Runtime (fps3d.c / psv main.c update_camera) ---\n"
                         "    // each frame eases the live camera toward the active slot:\n"
                         "    //   cam_angle/orbit_dist/cam_h/m7_horizon ->\n"
-                        "    //     afn_cam_slots[afn_active_camera][0..3] (orbit-follow, blended)",
+                        "    //     afn_cam_slots[afn_active_camera][0..3] (orbit-follow, blended)\n"
+                        "    // The index is CLAMPED to [0, AFN_CAM_SLOT_COUNT-1] before use —\n"
+                        "    // an out-of-range slot would index past afn_cam_slots and crash.",
                         fmtInt(infoNode.id, 0, "<slot>"));
                     setActionFunc(infoNode, "_set_camera", bodyBuf);
                     break;
