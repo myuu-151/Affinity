@@ -333,8 +333,8 @@ static void sky_init(void) {
 // U scrolls with yaw for the 360 wrap. No depth writes -> scene draws on top.
 static void sky_render(float camAngle) {
     float u = camAngle / (2.0f * 3.14159265f);
-    // Inside far=3000; X/Y keep the same angular coverage (ratios to D) as before.
-    const float D = 2900.0f, X = 4176.0f, Y = 2436.0f;
+    // Inside far=1500; X/Y keep the same angular coverage (ratios to D) as before.
+    const float D = 1450.0f, X = 2088.0f, Y = 1218.0f;
     AfnVertex sky[4] = {
         { u,      0.0f, 0xFFFFFFFFu, -X,  Y, -D },
         { u+1.0f, 0.0f, 0xFFFFFFFFu,  X,  Y, -D },
@@ -1407,13 +1407,10 @@ int main(void)
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
         {
-            // vitaGL's default depth buffer is 16-bit INTEGER (inferred: reverse-Z
-            // made it worse, which only happens on an integer buffer). So depth
-            // precision is entirely set by the near/far range. Match the PSP, which
-            // is clean on this exact geometry with 4/3000 — the loose 1/5000 the
-            // port shipped with was ~4x coarser, hence the floor/slope fight band.
-            // (Skybox quad is pulled inside far=3000 in sky_render.)
-            const float nearp = 4.0f, farp = 3000.0f, aspect = SCR_W / SCR_H;
+            // near small (1.0) so the slope — which starts close to the camera —
+            // isn't near-clipped; far pulled in to 1500 for better 16-bit depth
+            // precision at the floor/slope intersection without touching near.
+            const float nearp = 1.0f, farp = 1500.0f, aspect = SCR_W / SCR_H;
             const float top = nearp * 0.767f;     // tan(37.5 deg) ~ vfov 75
             const float right = top * aspect;
             glFrustum(-right, right, -top, top, nearp, farp);
