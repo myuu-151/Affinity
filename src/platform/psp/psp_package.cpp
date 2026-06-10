@@ -246,6 +246,18 @@ static bool GeneratePSPMapData(const std::string& runtimeDir,
     f << "const float afn_draw_distance = " << Flt(camera.drawDistance > 0 ? camera.drawDistance / 4.0f : 0.0f) << ";\n";
     f << "const float afn_walk_speed = " << Flt(camera.walkSpeed) << ";\n";
     f << "const float afn_sprint_speed = " << Flt(camera.sprintSpeed) << ";\n";
+    // Camera-delay ease rates (x/256 catch-up per frame; editor sliders are %).
+    // Same emit as nds_package.cpp — the runtime camera chase / Y-follow reads
+    // these so walk/sprint/orbit/jump camera lag matches the NDS feel.
+    f << "#define AFN_WALK_EASE_IN "    << (int)(camera.walkEaseIn * 256.0f / 100.0f) << "\n";
+    f << "#define AFN_WALK_EASE_OUT "   << (int)(camera.walkEaseOut * 256.0f / 100.0f) << "\n";
+    f << "#define AFN_SPRINT_EASE_IN "  << (int)(camera.sprintEaseIn * 256.0f / 100.0f) << "\n";
+    f << "#define AFN_SPRINT_EASE_OUT " << (int)(camera.sprintEaseOut * 256.0f / 100.0f) << "\n";
+    f << "#define AFN_ORBIT_EASE_IN "   << (int)(camera.orbitCamEaseIn  * 256.0f / 100.0f) << "\n";
+    f << "#define AFN_ORBIT_EASE_OUT "  << (int)(camera.orbitCamEaseOut * 256.0f / 100.0f) << "\n";
+    if (camera.orbitMaxDelta > 0) f << "#define AFN_ORBIT_MAX_DELTA " << camera.orbitMaxDelta << "\n";
+    f << "#define AFN_JUMP_CAM_LAND "   << (int)(camera.jumpCamLand * 256.0f / 100.0f) << "\n";
+    f << "#define AFN_JUMP_CAM_AIR "    << (int)(camera.jumpCamAir  * 256.0f / 100.0f) << "\n";
 
     // ---- camera presets / slots (Mode 4) ----
     // Slot 0 = scene default; slots 1..N are SetCamera targets. Columns:

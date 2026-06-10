@@ -76,10 +76,32 @@ Output: `psv_runtime/build/affinity_psv.vpk` (also copied to
   bus/GPU maxima. 444 MHz is the API ceiling (default app clock is 333); a true
   500 MHz needs a kernel overclock plugin and is intentionally NOT done.
 
+## Done (verified on-device / Vita3K)
+- **Multi-rig NPCs**: every rig the scene uses (player + each distinct NPC/enemy
+  model) is emitted as an `AfnRig[]` table (`GeneratePSVRigData`, PSV-only); NPC
+  instances carry `{x,y,z,rotY,scale,clip,rigSlot}`. Runtime is data-driven over
+  `afn_rigs[]`: per-rig skinning/textures, per-NPC animation clips, per-rig
+  headlamp. NPCs render their OWN model.
+- **Follow camera + camera slots**: exporter emits `afn_cam_slots` (slot 0 =
+  scene default + SetCamera slots) + `afn_active_camera`; runtime orbit-follows
+  the player anchored to the active slot. SetCamera switching glides (NDS
+  parity): dist/height ease 1/8-per-frame toward the slot, yaw/pitch one-shot
+  swing then release to OrbitCamera nodes.
+- **Camera delay (NDS fps3d.c parity)**: the camera position CHASES its orbit
+  point with the editor's ease rates instead of sitting rigidly at it —
+  `AFN_WALK/SPRINT_EASE_IN/OUT` (Sprint node's `afn_speed_prio` picks the
+  sprint rates), `AFN_ORBIT_EASE_IN/OUT` (max'd in when orbit_angle moved this
+  frame), XZ re-projected onto the orbit circle so lag reads as angular glide
+  not zoom, smoothed Y follow (`AFN_JUMP_CAM_LAND/AIR` — lazy in the air, quick
+  on landing), and the optional `AFN_ORBIT_MAX_DELTA` per-frame orbit clamp.
+  The shared PSP/PSV exporter now emits all of these from the editor camera
+  settings (re-export needed; `main.c` has NDS-default fallbacks until then).
+
 ## Next (not started) — roughly in priority order
-1. **Movement/physics + follow camera**: port `scene.c`'s update (input ->
-   camera-relative move, gravity, floor snap) + `collision.c` (walls/floor, pure
-   logic, ports directly) + `input.c`. Then the rig follows the player.
+1. **Movement/physics**: port `scene.c`'s update (input -> camera-relative move,
+   gravity, floor snap) + `collision.c` (walls/floor, pure logic) + `input.c`.
+   The follow camera + rig are already wired to a `playerX/Y/Z` that movement can
+   drive. (Follow camera itself is DONE — see above.)
 2. **Sprite billboards**: `billboard.c` -> vitaGL quads (camera-facing, animated).
 3. **Sky panorama**: `sky.c` -> vitaGL.
 4. **Audio**: `audio.c` is a software mixer on `sceAudio`; the Vita has `sceAudio`,

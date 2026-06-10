@@ -11,6 +11,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 #include "psv_mapdata.h"   // defines afn_meshes / afn_sprites / camera start
 #include "psv_rig.h"       // player rig data (skinned glTF), if AFN_HAS_PLAYER_RIG
@@ -669,6 +670,36 @@ int afn_player_frozen = 0;
 int orbit_angle = 0;                          // camera yaw, brad (65536 = full circle)
 int orbit_pitch = 0;                          // camera pitch, brad (node OrbitCamera Up/Down + right stick)
 
+// Camera-delay ease rates (x/256 catch-up per frame), normally emitted into
+// psv_mapdata.h by the exporter from the editor's camera settings. Fallbacks
+// are the editor camera-panel defaults run through the same %*256/100
+// conversion the exporters use, so a pre-easing export already feels like a
+// default NDS export (re-export to pick up tuned values).
+#ifndef AFN_WALK_EASE_IN
+#define AFN_WALK_EASE_IN 48
+#endif
+#ifndef AFN_WALK_EASE_OUT
+#define AFN_WALK_EASE_OUT 48
+#endif
+#ifndef AFN_SPRINT_EASE_IN
+#define AFN_SPRINT_EASE_IN 15
+#endif
+#ifndef AFN_SPRINT_EASE_OUT
+#define AFN_SPRINT_EASE_OUT 30
+#endif
+#ifndef AFN_ORBIT_EASE_IN
+#define AFN_ORBIT_EASE_IN 64
+#endif
+#ifndef AFN_ORBIT_EASE_OUT
+#define AFN_ORBIT_EASE_OUT 128
+#endif
+#ifndef AFN_JUMP_CAM_LAND
+#define AFN_JUMP_CAM_LAND 94
+#endif
+#ifndef AFN_JUMP_CAM_AIR
+#define AFN_JUMP_CAM_AIR 30
+#endif
+
 enum { KEY_A=1,KEY_B=2,KEY_X=4,KEY_Y=8,KEY_L=16,KEY_R=32,KEY_START=64,KEY_SELECT=128,
        KEY_UP=256,KEY_DOWN=512,KEY_LEFT=1024,KEY_RIGHT=2048,
        // Analog directions, reported separately from the d-pad so a node can bind
@@ -1147,10 +1178,54 @@ int main(void)
         // Clamp first (matches NDS fps3d.c): a Set Camera fed an out-of-range slot
         // (e.g. an Integer >= AFN_CAM_SLOT_COUNT) would otherwise index past
         // afn_cam_slots and crash. Out-of-range falls back to slot 0 (scene default).
+        // NDS fps3d.c parity (update_camera_slot): don't hard-cut on SetCamera.
+        // Distance/height ease toward the slot every frame (1/8 step ~= the NDS
+        // ">> 3" ramp, ~0.3s glide). Yaw/pitch are a ONE-SHOT ease: when the
+        // active slot changes we swing orbit_angle/orbit_pitch to the slot's
+        // view, then release so OrbitCamera nodes orbit freely from the new
+        // angle — moving orbit_angle itself keeps movement camera-relative
+        // during the swing (no spin), same as the NDS.
         if (afn_active_camera < 0 || afn_active_camera >= AFN_CAM_SLOT_COUNT) afn_active_camera = 0;
         const float* S = afn_cam_slots[afn_active_camera];
-        camDist   = S[1] > 1.0f ? S[1] : camDist;   // keep manual zoom unless slot overrides
-        camHeight = S[2];
+        float camDistTgt   = S[1] > 1.0f ? S[1] : camDist;  // keep manual zoom unless slot overrides
+        float camHeightTgt = S[2];
+        camDist   += (camDistTgt   - camDist)   * 0.125f;
+        camHeight += (camHeightTgt - camHeight) * 0.125f;
+        {
+            static int s_prevCamSlot = 0, s_camYawEasing = 0;
+            if (afn_active_camera != s_prevCamSlot) { s_prevCamSlot = afn_active_camera; s_camYawEasing = 1; }
+            if (s_camYawEasing) {
+                int yawTgt = (int)(S[0] * (65536.0f / 6.2831853f));
+                int d = (int)(int16_t)(uint16_t)(yawTgt - orbit_angle);   // brad, wrap-safe
+                orbit_angle = (int)(uint16_t)(orbit_angle + (d >> 3));
+                int pitchTgt = (int)(atan2f(camHeightTgt > 0.0f ? camHeightTgt : 8.0f, camDistTgt) * (65536.0f / 6.2831853f));
+                int pd = pitchTgt - orbit_pitch;
+                orbit_pitch += pd >> 3;
+                if (d > -300 && d < 300 && pd > -300 && pd < 300) {
+                    orbit_angle = (int)(uint16_t)yawTgt; orbit_pitch = pitchTgt; s_camYawEasing = 0;
+                }
+            }
+        }
+
+        // Orbit-rate clamp + "orbiting?" detection (NDS fps3d.c:1108-1122).
+        // AFN_ORBIT_MAX_DELTA caps this frame's orbit_angle change so the
+        // camera-position chase below can keep up. PSV input is fully node-
+        // driven, so instead of NDS's held-L/R check we detect that something
+        // (an OrbitCamera node / the slot swing) actually moved orbit_angle
+        // this frame — that selects AFN_ORBIT_EASE_IN for the chase.
+        int orbitingNow;
+        {
+            static int s_prevOrbit = 0, s_prevOrbitInit = 0;
+            if (!s_prevOrbitInit) { s_prevOrbit = orbit_angle; s_prevOrbitInit = 1; }
+            int odelta = (int)(int16_t)(uint16_t)(orbit_angle - s_prevOrbit);
+            orbitingNow = (odelta != 0);
+#ifdef AFN_ORBIT_MAX_DELTA
+            if (odelta >  AFN_ORBIT_MAX_DELTA) odelta =  AFN_ORBIT_MAX_DELTA;
+            if (odelta < -AFN_ORBIT_MAX_DELTA) odelta = -AFN_ORBIT_MAX_DELTA;
+            orbit_angle = (int)(uint16_t)(s_prevOrbit + odelta);
+#endif
+            s_prevOrbit = orbit_angle;
+        }
 
         // Camera orbit is purely node-driven: the OrbitCamera node writes
         // orbit_angle/orbit_pitch (reading KEY_L/KEY_R etc.). No hardcoded right
@@ -1406,11 +1481,61 @@ int main(void)
 #endif
 
         // Follow the player, framed at ~half the camera height (torso, not feet).
-        float targetX = playerX, targetY = playerY + camHeight * 0.5f, targetZ = playerZ;
+        // NDS fps3d.c parity (1746-1863): the camera position CHASES its orbit
+        // point with the walk/sprint/orbit ease rates instead of sitting rigidly
+        // at it, the XZ radius is re-projected onto the orbit circle so the lag
+        // reads as an angular glide (not a zoom), and the Y follow is quick on
+        // the way down (landing) but lazy in the air so the camera trails a beat
+        // behind a jump's apex.
+        static float s_camEyeX, s_camEyeZ;     // eased camera XZ (NDS cam_x/cam_z)
+        static float s_camFollowY;             // smoothed player-Y follow (NDS s_camYSmooth)
+        static int   s_camEyeInit = 0;
+
+        {   // Smooth Y follow — AFN_JUMP_CAM_LAND grounded / AFN_JUMP_CAM_AIR airborne.
+            if (!s_camEyeInit) s_camFollowY = playerY;
+            float dy = playerY - s_camFollowY;
+            int yrate = grounded ? AFN_JUMP_CAM_LAND : AFN_JUMP_CAM_AIR;
+            s_camFollowY += dy * ((float)yrate / 256.0f);
+            if (dy > -0.05f && dy < 0.05f) s_camFollowY = playerY;
+        }
+        float targetX = playerX, targetY = s_camFollowY + camHeight * 0.5f, targetZ = playerZ;
 
         float cp = cosf(pitch);
-        float ex = targetX - sinf(camAngle)*cp*camDist;
-        float ez = targetZ - cosf(camAngle)*cp*camDist;
+        float horizR = cp * camDist;           // orbit-circle radius in XZ
+        {
+            float tgtEx = targetX - sinf(camAngle)*horizR;
+            float tgtEz = targetZ - cosf(camAngle)*horizR;
+            if (!s_camEyeInit) { s_camEyeX = tgtEx; s_camEyeZ = tgtEz; s_camEyeInit = 1; }
+            float ddx = tgtEx - s_camEyeX, ddz = tgtEz - s_camEyeZ;
+            if (ddx > -0.0625f && ddx < 0.0625f && ddz > -0.0625f && ddz < 0.0625f) {
+                s_camEyeX = tgtEx; s_camEyeZ = tgtEz;
+            } else {
+                // Ease rate from what the player is doing: Sprint node sets
+                // afn_speed_prio this tick (script ran above, so it's current);
+                // orbit input picks the max so the camera never lags behind.
+                int moving = (afn_input_fwd != 0 || afn_input_right != 0);
+                int ease = (afn_speed_prio != 0)
+                    ? (moving ? AFN_SPRINT_EASE_IN : AFN_SPRINT_EASE_OUT)
+                    : (moving ? AFN_WALK_EASE_IN   : AFN_WALK_EASE_OUT);
+                if (orbitingNow) { if (AFN_ORBIT_EASE_IN  > ease) ease = AFN_ORBIT_EASE_IN; }
+                else             { if (AFN_ORBIT_EASE_OUT > ease) ease = AFN_ORBIT_EASE_OUT; }
+                s_camEyeX += ddx * ((float)ease / 256.0f);
+                s_camEyeZ += ddz * ((float)ease / 256.0f);
+            }
+            // Re-project onto the orbit circle: the lerp cuts across the chord
+            // while the target sweeps the circle, which would pull the camera
+            // inward (reads as zoom-in, then zoom-out on settle). Snapping the
+            // radius back keeps the angular glide but holds distance constant.
+            float rdx = s_camEyeX - targetX, rdz = s_camEyeZ - targetZ;
+            float rlen = sqrtf(rdx*rdx + rdz*rdz);
+            if (rlen > 1.0f) {
+                float k = horizR / rlen;
+                s_camEyeX = targetX + rdx*k;
+                s_camEyeZ = targetZ + rdz*k;
+            }
+        }
+        float ex = s_camEyeX;
+        float ez = s_camEyeZ;
         float ey = targetY + sinf(pitch)*camDist;
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -1428,10 +1553,20 @@ int main(void)
             glFrustum(-right, right, -top, top, nearp, farp);
         }
 
-        // View.
+        // View. NDS parity: the view DIRECTION snaps with orbit_angle/pitch
+        // every frame (fps3d.c does cam_angle = orbit_angle) — only the camera
+        // POSITION lags. So aim along yaw/pitch from the eased eye instead of
+        // look-at-ing the player: under camera delay the player slides
+        // off-center on screen and re-centers as the chase catches up. (A
+        // look-at would re-aim at the player every frame and the whole view
+        // would just glide — no visible delay.) When fully caught up this is
+        // the exact same view as the old look-at(player).
         glMatrixMode(GL_MODELVIEW);
         float view[16];
-        look_at(view, ex, ey, ez, targetX, targetY, targetZ, 0.0f, 1.0f, 0.0f);
+        float fwdVX = sinf(camAngle) * cp;
+        float fwdVY = -sinf(pitch);
+        float fwdVZ = cosf(camAngle) * cp;
+        look_at(view, ex, ey, ez, ex + fwdVX, ey + fwdVY, ez + fwdVZ, 0.0f, 1.0f, 0.0f);
 
 #ifdef AFN_HAS_SKY
         sky_render(camAngle);   // far panorama behind everything (no depth write)
