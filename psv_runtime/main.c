@@ -1088,7 +1088,9 @@ int main(void)
 
     while (1) {
         sceCtrlPeekBufferPositive(0, &pad, 1);
-        if (pad.buttons & SCE_CTRL_START) break;
+        // No hardcoded quit: Start is a normal node-readable key (KEY_START).
+        // Exit the app via the PS/home menu. (Previously Start broke the loop,
+        // so binding Start to a node closed the app — looked like a crash.)
 
         // Expose engine state to the node graph BEFORE it ticks: player_on_ground
         // (Jump/IsJumping gates), player_moving (IsMoving), and player_x/y/z
