@@ -1215,16 +1215,20 @@ int main(void)
         // this frame — that selects AFN_ORBIT_EASE_IN for the chase.
         int orbitingNow;
         {
-            static int s_prevOrbit = 0, s_prevOrbitInit = 0;
-            if (!s_prevOrbitInit) { s_prevOrbit = orbit_angle; s_prevOrbitInit = 1; }
+            static int s_prevOrbit = 0, s_prevOrbitP = 0, s_prevOrbitInit = 0;
+            if (!s_prevOrbitInit) { s_prevOrbit = orbit_angle; s_prevOrbitP = orbit_pitch; s_prevOrbitInit = 1; }
             int odelta = (int)(int16_t)(uint16_t)(orbit_angle - s_prevOrbit);
-            orbitingNow = (odelta != 0);
+            int pdelta = orbit_pitch - s_prevOrbitP;
+            orbitingNow = (odelta != 0 || pdelta != 0);
 #ifdef AFN_ORBIT_MAX_DELTA
             if (odelta >  AFN_ORBIT_MAX_DELTA) odelta =  AFN_ORBIT_MAX_DELTA;
             if (odelta < -AFN_ORBIT_MAX_DELTA) odelta = -AFN_ORBIT_MAX_DELTA;
             orbit_angle = (int)(uint16_t)(s_prevOrbit + odelta);
+            if (pdelta >  AFN_ORBIT_MAX_DELTA) pdelta =  AFN_ORBIT_MAX_DELTA;
+            if (pdelta < -AFN_ORBIT_MAX_DELTA) pdelta = -AFN_ORBIT_MAX_DELTA;
+            orbit_pitch = s_prevOrbitP + pdelta;
 #endif
-            s_prevOrbit = orbit_angle;
+            s_prevOrbit = orbit_angle; s_prevOrbitP = orbit_pitch;
         }
 
         // Camera orbit is purely node-driven: the OrbitCamera node writes
@@ -1489,6 +1493,7 @@ int main(void)
         // behind a jump's apex.
         static float s_camEyeX, s_camEyeZ;     // eased camera XZ (NDS cam_x/cam_z)
         static float s_camFollowY;             // smoothed player-Y follow (NDS s_camYSmooth)
+        static float s_camPosPitch;            // eased POSITION pitch (rad) — view pitch snaps
         static int   s_camEyeInit = 0;
 
         {   // Smooth Y follow — AFN_JUMP_CAM_LAND grounded / AFN_JUMP_CAM_AIR airborne.
@@ -1500,8 +1505,28 @@ int main(void)
         }
         float targetX = playerX, targetY = s_camFollowY + camHeight * 0.5f, targetZ = playerZ;
 
-        float cp = cosf(pitch);
-        float horizR = cp * camDist;           // orbit-circle radius in XZ
+        // Ease rate from what the player is doing: Sprint node sets
+        // afn_speed_prio this tick (script ran above, so it's current);
+        // orbit input picks the max so the camera never lags behind.
+        int camMoving = (afn_input_fwd != 0 || afn_input_right != 0);
+        int camEase = (afn_speed_prio != 0)
+            ? (camMoving ? AFN_SPRINT_EASE_IN : AFN_SPRINT_EASE_OUT)
+            : (camMoving ? AFN_WALK_EASE_IN   : AFN_WALK_EASE_OUT);
+        if (orbitingNow) { if (AFN_ORBIT_EASE_IN  > camEase) camEase = AFN_ORBIT_EASE_IN; }
+        else             { if (AFN_ORBIT_EASE_OUT > camEase) camEase = AFN_ORBIT_EASE_OUT; }
+
+        float cp = cosf(pitch);                // VIEW pitch — snaps with orbit_pitch
+        {   // Pitch chase: orbit up/down gets the same delay as yaw. The eye's
+            // height/radius ease toward the target pitch while the VIEW pitch
+            // snaps, mirroring the yaw behavior (position lags, direction
+            // doesn't), so pitching slides the player off-center vertically
+            // and re-centers as the chase catches up.
+            if (!s_camEyeInit) s_camPosPitch = pitch;
+            float dp = pitch - s_camPosPitch;
+            s_camPosPitch += dp * ((float)camEase / 256.0f);
+            if (dp > -0.002f && dp < 0.002f) s_camPosPitch = pitch;
+        }
+        float horizR = cosf(s_camPosPitch) * camDist;   // orbit-circle radius in XZ
         {
             float tgtEx = targetX - sinf(camAngle)*horizR;
             float tgtEz = targetZ - cosf(camAngle)*horizR;
@@ -1510,15 +1535,7 @@ int main(void)
             if (ddx > -0.0625f && ddx < 0.0625f && ddz > -0.0625f && ddz < 0.0625f) {
                 s_camEyeX = tgtEx; s_camEyeZ = tgtEz;
             } else {
-                // Ease rate from what the player is doing: Sprint node sets
-                // afn_speed_prio this tick (script ran above, so it's current);
-                // orbit input picks the max so the camera never lags behind.
-                int moving = (afn_input_fwd != 0 || afn_input_right != 0);
-                int ease = (afn_speed_prio != 0)
-                    ? (moving ? AFN_SPRINT_EASE_IN : AFN_SPRINT_EASE_OUT)
-                    : (moving ? AFN_WALK_EASE_IN   : AFN_WALK_EASE_OUT);
-                if (orbitingNow) { if (AFN_ORBIT_EASE_IN  > ease) ease = AFN_ORBIT_EASE_IN; }
-                else             { if (AFN_ORBIT_EASE_OUT > ease) ease = AFN_ORBIT_EASE_OUT; }
+                int ease = camEase;
                 s_camEyeX += ddx * ((float)ease / 256.0f);
                 s_camEyeZ += ddz * ((float)ease / 256.0f);
             }
@@ -1536,7 +1553,7 @@ int main(void)
         }
         float ex = s_camEyeX;
         float ez = s_camEyeZ;
-        float ey = targetY + sinf(pitch)*camDist;
+        float ey = targetY + sinf(s_camPosPitch)*camDist;   // eased pitch: eye height lags too
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
