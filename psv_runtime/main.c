@@ -137,23 +137,14 @@ static void rig_draw(const AfnRig* R, GLuint* texArr, const float* view,
                      const float* upN) {
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
-    if (R->camlight) {
-        GLfloat ldir[4]   = { -R->ldx, -R->ldy, -R->ldz, 0.0f };  // GL_POSITION = toward light (negated DS dir)
-        GLfloat white[4]  = { 1, 1, 1, 1 };
-        GLfloat matAmb[4] = { 8.0f/31.0f,  8.0f/31.0f,  8.0f/31.0f,  1 };
-        GLfloat matDif[4] = { 28.0f/31.0f, 28.0f/31.0f, 28.0f/31.0f, 1 };
-        GLfloat noAmb[4]  = { 0, 0, 0, 1 };
-        glLightfv(GL_LIGHT0, GL_POSITION, ldir);
-        glLightfv(GL_LIGHT0, GL_DIFFUSE,  white);
-        glLightfv(GL_LIGHT0, GL_AMBIENT,  white);
-        glLightModelfv(GL_LIGHT_MODEL_AMBIENT, noAmb);
-        glDisable(GL_COLOR_MATERIAL);
-        glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, matAmb);
-        glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, matDif);
-        glEnable(GL_LIGHTING); glEnable(GL_LIGHT0); glEnable(GL_NORMALIZE);
-    } else {
-        glDisable(GL_LIGHTING);
-    }
+    // Camera light is computed on the CPU (below, after the basis is built) and
+    // baked into the vertex colors — the GPU draws UNLIT. vitaGL's fixed-
+    // function GL_LIGHTING shader shades correctly through Vita3K but on real
+    // SGX hardware the per-vertex lit values jitter/step while the camera
+    // orbits (USSE precision in the generated lighting path). CPU fp32 N.L is
+    // bit-identical on hardware and emulator, and we already touch every
+    // vertex per frame in skin() anyway.
+    glDisable(GL_LIGHTING);
 
     // Orient with a basis matrix: up = floor normal (slope tilt), forward = the
     // yaw heading projected onto the slope plane, right = up x fwd. Ported from
@@ -176,6 +167,36 @@ static void rig_draw(const AfnRig* R, GLuint* texArr, const float* view,
     };
     glLoadMatrixf(view);
     glMultMatrixf(model);
+
+    if (R->camlight) {
+        // CPU camera headlamp (NDS-matched: ambient 8/31 + diffuse 28/31 * N.L,
+        // clamped). The baked light dir (R->ldx/y/z) is the EYE-space aim, so
+        // "toward light" = -aim in eye space; carry it back through the view
+        // rotation (transpose) to world, then through the instance basis
+        // (transpose) to model space — where the skinned normals live — so one
+        // transformed vector serves the whole rig and the per-vertex work is a
+        // single dot product. Two-sided rigs light |N.L| (PSP's negated-light
+        // back pass, folded into the abs).
+        float lex = -R->ldx, ley = -R->ldy, lez = -R->ldz;
+        float lwx = view[0]*lex + view[1]*ley + view[2]*lez;   // eye -> world
+        float lwy = view[4]*lex + view[5]*ley + view[6]*lez;
+        float lwz = view[8]*lex + view[9]*ley + view[10]*lez;
+        float lmx = rgx*lwx + rgy*lwy + rgz*lwz;               // world -> model
+        float lmy = ux*lwx  + uy*lwy  + uz*lwz;
+        float lmz = fx*lwx  + fy*lwy  + fz*lwz;
+        float ll = sqrtf(lmx*lmx + lmy*lmy + lmz*lmz);
+        if (ll > 1e-6f) { lmx /= ll; lmy /= ll; lmz /= ll; }
+        int twoSided = (R->cull == 2);
+        for (int vi = 0; vi < R->verts; vi++) {
+            float d = s_skinned[vi].nx*lmx + s_skinned[vi].ny*lmy + s_skinned[vi].nz*lmz;
+            if (twoSided) { if (d < 0.0f) d = -d; }
+            else if (d < 0.0f) d = 0.0f;
+            float inten = (8.0f/31.0f) + (28.0f/31.0f)*d;
+            if (inten > 1.0f) inten = 1.0f;
+            unsigned int c = (unsigned int)(inten * 255.0f + 0.5f);
+            s_skinned[vi].color = 0xFF000000u | (c << 16) | (c << 8) | c;
+        }
+    }
 
     glDisable(GL_BLEND);
     if (R->cull == 2) glDisable(GL_CULL_FACE);
@@ -201,7 +222,6 @@ static void rig_draw(const AfnRig* R, GLuint* texArr, const float* view,
     glDisableClientState(GL_NORMAL_ARRAY);
     glDisableClientState(GL_COLOR_ARRAY);
     glDisableClientState(GL_VERTEX_ARRAY);
-    if (R->camlight) { glDisable(GL_LIGHTING); glDisable(GL_LIGHT0); glDisable(GL_NORMALIZE); }
 }
 
 // Skin + draw the player and every NPC for this frame.
