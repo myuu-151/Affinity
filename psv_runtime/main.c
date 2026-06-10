@@ -1589,6 +1589,18 @@ int main(void)
         sky_render(camAngle);   // far panorama behind everything (no depth write)
 #endif
 
+        // Intersecting/coplanar level meshes (floor vs slope) shimmer on PSV
+        // but not NDS/PSP: those consoles' coarse fixed-point depth quantizes
+        // two faces in the same plane to EQUAL values, so LEQUAL resolves to a
+        // stable winner — the Vita's float32 depth (vitaGL allocates DF32M)
+        // never quantizes equal, so the per-pixel winner flips as the camera
+        // glides. Fix: give each mesh INSTANCE its own constant depth bias
+        // (units only — a slope FACTOR rescales with camera angle and crawls,
+        // see reverted aa1b2e4; identical offsets on every mesh separate
+        // nothing). Near-equal-depth fights between two meshes then always
+        // resolve the same way. The per-instance step is far below visible
+        // displacement but far above interpolation noise.
+        glEnable(GL_POLYGON_OFFSET_FILL);
         for (int si = 0; si < afn_sprite_count; si++) {
             int mi = afn_sprites[si].meshIdx;
             if (mi < 0 || mi >= afn_mesh_count) continue;
@@ -1597,6 +1609,10 @@ int main(void)
             if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;  // hidden/destroyed
 #endif
             const AfnSpriteInst* sp = &afn_sprites[si];
+            // 128 units ~= one PSP D16 depth quantum (2^-16 ~= 128 float-depth
+            // ULPs near z=1) — the PSP proves that step is invisible yet big
+            // enough to separate these faces.
+            glPolygonOffset(0.0f, (float)((si + 1) * 128));   // later instances sit a hair deeper
             glLoadMatrixf(view);
             glTranslatef(sp->x, sp->y, sp->z);
             if (sp->rotZ != 0.0f) glRotatef(sp->rotZ, 0,0,1);
@@ -1605,6 +1621,8 @@ int main(void)
             glScalef(sp->scale, sp->scale, sp->scale);
             draw_mesh(mi);
         }
+        glPolygonOffset(0.0f, 0.0f);
+        glDisable(GL_POLYGON_OFFSET_FILL);
 
 #ifdef AFN_HAS_PLAYER_RIG
         // Player rig + every NPC: each skinned from its own rig at its own
