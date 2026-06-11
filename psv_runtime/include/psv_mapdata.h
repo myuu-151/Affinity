@@ -1672,7 +1672,7 @@ const AfnSpriteInst afn_sprites[5] = {
 #define AFN_HAS_SPRITE_IDX 1
 static const int afn_mesh_inst_sprite[5] = {1,2,3,4,5,};
 #ifndef NUM_SPRITES
-#define NUM_SPRITES 8
+#define NUM_SPRITES 7
 #endif
 
 const float afn_cam_start_x = 128.0f;
