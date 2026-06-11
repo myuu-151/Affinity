@@ -4418,17 +4418,19 @@ static void BuildNavMeshPreview()
     std::vector<int> tris;
     std::vector<unsigned char> triFlags;
     const float D2R = 3.14159265f / 180.0f;
-    // Nav bounds boxes (world space, {x0,y0,z0,x1,y1,z1} per slot): ADDITIVE —
-    // the whole scene always participates, and geometry inside a box is
-    // force-marked walkable (slope test overridden) so ramps/objects the
-    // auto-build rejects join the surface.
-    std::vector<std::array<float,6>> navBoxes;
+    // Nav bounds boxes (world space, {x0,y0,z0,x1,y1,z1,negate} per slot):
+    // ADDITIVE — the whole scene always participates. Geometry inside a
+    // walkable box is force-marked walkable (slope test overridden);
+    // geometry inside a NEGATOR box is force-marked non-walkable (carve
+    // holes / fence off areas). Negators win over walkable boxes.
+    std::vector<std::array<float,7>> navBoxes;
     for (int i = 0; i < sSpriteCount; i++) {
         const FloorSprite& s = sSprites[i];
         if (!s.isNavPlane) continue;
         float hw = s.navPlaneW * 0.5f, hh = s.navPlaneH * 0.5f, hd = s.navPlaneD * 0.5f;
         navBoxes.push_back({ (s.x - hw + 512.0f) / 4.0f, (s.y - hh) / 4.0f, (s.z - hd + 512.0f) / 4.0f,
-                             (s.x + hw + 512.0f) / 4.0f, (s.y + hh) / 4.0f, (s.z + hd + 512.0f) / 4.0f });
+                             (s.x + hw + 512.0f) / 4.0f, (s.y + hh) / 4.0f, (s.z + hd + 512.0f) / 4.0f,
+                             s.navNegate ? 1.0f : 0.0f });
     }
     for (int i = 0; i < sSpriteCount; i++) {
         const FloorSprite& s = sSprites[i];
@@ -4459,12 +4461,15 @@ static void BuildNavMeshPreview()
                 wp[k*3+0] = px + ax2; wp[k*3+1] = py + ay3; wp[k*3+2] = pz + az2;
             }
             if (bad) continue;
-            // Box test: a triangle with any vertex inside a nav bounds box is
-            // force-marked walkable (flag bit 1) so the surface extends over it.
+            // Box test: any vertex inside a WALKABLE box force-marks the tri
+            // walkable (flag 2). Negator boxes don't flag triangles — they
+            // carve per-voxel inside NavMeshBuild (rcMarkBoxArea), so small
+            // holes work even in the middle of huge floor triangles.
             unsigned char flag = 0;
             for (int k = 0; k < 3 && !flag; k++)
                 for (const auto& b : navBoxes)
-                    if (wp[k*3+0] >= b[0] && wp[k*3+0] <= b[3] &&
+                    if (b[6] == 0.0f &&
+                        wp[k*3+0] >= b[0] && wp[k*3+0] <= b[3] &&
                         wp[k*3+1] >= b[1] && wp[k*3+1] <= b[4] &&
                         wp[k*3+2] >= b[2] && wp[k*3+2] <= b[5]) { flag = 2; break; }
             int base = (int)verts.size() / 3;
@@ -4474,10 +4479,19 @@ static void BuildNavMeshPreview()
         }
     }
 
+    // Negator boxes, packed for the per-voxel carve.
+    std::vector<float> negBoxes;
+    for (const auto& b : navBoxes)
+        if (b[6] != 0.0f) {
+            negBoxes.push_back(b[0]); negBoxes.push_back(b[1]); negBoxes.push_back(b[2]);
+            negBoxes.push_back(b[3]); negBoxes.push_back(b[4]); negBoxes.push_back(b[5]);
+        }
+
     sNavPreviewTris.clear();
     if (tris.empty()) return;
     if (NavMeshBuild(verts.data(), (int)verts.size() / 3, tris.data(), (int)tris.size() / 3,
-                     NavMeshParams{}, triFlags.data())) {
+                     NavMeshParams{}, triFlags.data(),
+                     negBoxes.empty() ? nullptr : negBoxes.data(), (int)negBoxes.size() / 6)) {
         const std::vector<float>& dbg = NavMeshDebugTris();
         sNavPreviewTris.reserve(dbg.size());
         for (size_t v = 0; v + 3 <= dbg.size(); v += 3) {
@@ -4594,7 +4608,8 @@ static bool DrawNavigationSectionUI(FloorSprite& sp, std::vector<RiggedMeshAsset
         if (boxCount > 0) {
             char cur[64];
             if (sNavBoxEdit >= 0)
-                snprintf(cur, sizeof(cur), "Box [%d]  %.0fx%.0fx%.0f", sNavBoxEdit,
+                snprintf(cur, sizeof(cur), "%s [%d]  %.0fx%.0fx%.0f",
+                         sSprites[sNavBoxEdit].navNegate ? "Negator" : "Box", sNavBoxEdit,
                          sSprites[sNavBoxEdit].navPlaneW, sSprites[sNavBoxEdit].navPlaneH, sSprites[sNavBoxEdit].navPlaneD);
             else
                 snprintf(cur, sizeof(cur), "(pick a box)");
@@ -4603,7 +4618,8 @@ static bool DrawNavigationSectionUI(FloorSprite& sp, std::vector<RiggedMeshAsset
                 for (int i = 0; i < sSpriteCount; i++) {
                     if (!sSprites[i].isNavPlane) continue;
                     char lbl[80];
-                    snprintf(lbl, sizeof(lbl), "Box [%d]  %.0fx%.0fx%.0f  @ %.0f,%.0f,%.0f##navbox%d",
+                    snprintf(lbl, sizeof(lbl), "%s [%d]  %.0fx%.0fx%.0f  @ %.0f,%.0f,%.0f##navbox%d",
+                             sSprites[i].navNegate ? "Negator" : "Box",
                              i, sSprites[i].navPlaneW, sSprites[i].navPlaneH, sSprites[i].navPlaneD,
                              sSprites[i].x, sSprites[i].y, sSprites[i].z, i);
                     if (ImGui::Selectable(lbl, sNavBoxEdit == i)) {
@@ -4630,6 +4646,8 @@ static bool DrawNavigationSectionUI(FloorSprite& sp, std::vector<RiggedMeshAsset
                 if (ImGui::DragFloat("Height##navbh", &nb.navPlaneH, 1.0f, 4.0f, 1024.0f, "%.0f")) dirty = true;
                 if (ImGui::DragFloat("Depth##navbd", &nb.navPlaneD, 1.0f, 4.0f, 1024.0f, "%.0f")) dirty = true;
                 ImGui::PopItemWidth();
+                if (ImGui::Checkbox("Negator##navbneg", &nb.navNegate)) dirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Carve walkable area OUT of the navmesh inside this box (per-voxel — small holes work even mid-floor). Negators win over walkable boxes; shown red in the viewport.");
                 if (ImGui::SmallButton("Delete Box##navbdel")) {
                     for (int j = sNavBoxEdit; j < sSpriteCount - 1; j++)
                         sSprites[j] = sSprites[j + 1];
@@ -5789,13 +5807,13 @@ static bool SaveProject(const std::string& path)
     for (int i = 0; i < sSpriteCount; i++)
     {
         const FloorSprite& sp = sSprites[i];
-        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d,%d,%.6f,%.6f,%d,%d,%d,%.6f,%.6f,%.6f",
+        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d,%d,%.6f,%.6f,%d,%d,%d,%.6f,%.6f,%.6f,%d",
                 sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                 sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0,
                 sp.meshIdx, sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
                 sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane, sp.spriteDrawPriority, sp.blitSlot,
                 sp.navMode, sp.navSpeed, sp.navStopDist, sp.navRepath, sp.navMoveClip,
-                sp.isNavPlane ? 1 : 0, sp.navPlaneW, sp.navPlaneD, sp.navPlaneH);
+                sp.isNavPlane ? 1 : 0, sp.navPlaneW, sp.navPlaneD, sp.navPlaneH, sp.navNegate ? 1 : 0);
         for (int ip = 0; ip < sp.instanceParamCount; ip++)
             fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
         fprintf(f, "\n");
@@ -6288,13 +6306,13 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d,%d,%.6f,%.6f,%d,%d,%d,%.6f,%.6f,%.6f",
+            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d,%d,%.6f,%.6f,%d,%d,%d,%.6f,%.6f,%.6f,%d",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
                     sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
                     sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane, sp.spriteDrawPriority, sp.blitSlot,
                 sp.navMode, sp.navSpeed, sp.navStopDist, sp.navRepath, sp.navMoveClip,
-                sp.isNavPlane ? 1 : 0, sp.navPlaneW, sp.navPlaneD, sp.navPlaneH);
+                sp.isNavPlane ? 1 : 0, sp.navPlaneW, sp.navPlaneD, sp.navPlaneH, sp.navNegate ? 1 : 0);
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
@@ -6433,13 +6451,13 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d,%d,%.6f,%.6f,%d,%d,%d,%.6f,%.6f,%.6f",
+            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d,%d,%.6f,%.6f,%d,%d,%d,%.6f,%.6f,%.6f,%d",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
                     sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
                     sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane, sp.spriteDrawPriority, sp.blitSlot,
                 sp.navMode, sp.navSpeed, sp.navStopDist, sp.navRepath, sp.navMoveClip,
-                sp.isNavPlane ? 1 : 0, sp.navPlaneW, sp.navPlaneD, sp.navPlaneH);
+                sp.isNavPlane ? 1 : 0, sp.navPlaneW, sp.navPlaneD, sp.navPlaneH, sp.navNegate ? 1 : 0);
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
@@ -6924,9 +6942,9 @@ static bool LoadProject(const std::string& path)
                 int blitSl = -1;
                 int navMd = 0, navRep = 30, navClp = -1;
                 float navSpd = 5.0f, navStp = 32.0f;
-                int navPl = 0;
+                int navPl = 0, navNeg = 0;
                 float navPw = 64.0f, navPd = 64.0f, navPh = 64.0f;
-                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d,%d,%f,%f,%d,%d,%d,%f,%f,%f", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl, &navMd, &navSpd, &navStp, &navRep, &navClp, &navPl, &navPw, &navPd, &navPh);
+                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d,%d,%f,%f,%d,%d,%d,%f,%f,%f,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl, &navMd, &navSpd, &navStp, &navRep, &navClp, &navPl, &navPw, &navPd, &navPh, &navNeg);
                 if (matched >= 6)
                 {
                     FloorSprite& sp = sSprites[sSpriteCount];
@@ -6967,6 +6985,7 @@ static bool LoadProject(const std::string& path)
                     sp.navPlaneW = (matched >= 34) ? navPw : 64.0f;
                     sp.navPlaneD = (matched >= 35) ? navPd : 64.0f;
                     sp.navPlaneH = (matched >= 36) ? navPh : 64.0f;
+                    sp.navNegate = (matched >= 37) ? (navNeg != 0) : false;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line;
@@ -8184,12 +8203,12 @@ static bool LoadProject(const std::string& path)
                 int blitSl = -1;
                 int navMd = 0, navRep = 30, navClp = -1;
                 float navSpd = 5.0f, navStp = 32.0f;
-                int navPl = 0;
+                int navPl = 0, navNeg = 0;
                 float navPw = 64.0f, navPd = 64.0f, navPh = 64.0f;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d,%d,%f,%f,%d,%d,%d,%f,%f,%f",
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d,%d,%f,%f,%d,%d,%d,%f,%f,%f,%d",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl, &navMd, &navSpd, &navStp, &navRep, &navClp, &navPl, &navPw, &navPd, &navPh);
+                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl, &navMd, &navSpd, &navStp, &navRep, &navClp, &navPl, &navPw, &navPd, &navPh, &navNeg);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
@@ -8218,6 +8237,7 @@ static bool LoadProject(const std::string& path)
                     sp.navPlaneW = (matched >= 34) ? navPw : 64.0f;
                     sp.navPlaneD = (matched >= 35) ? navPd : 64.0f;
                     sp.navPlaneH = (matched >= 36) ? navPh : 64.0f;
+                    sp.navNegate = (matched >= 37) ? (navNeg != 0) : false;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
@@ -8653,12 +8673,12 @@ static bool LoadProject(const std::string& path)
                 int blitSl = -1;
                 int navMd = 0, navRep = 30, navClp = -1;
                 float navSpd = 5.0f, navStp = 32.0f;
-                int navPl = 0;
+                int navPl = 0, navNeg = 0;
                 float navPw = 64.0f, navPd = 64.0f, navPh = 64.0f;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d,%d,%f,%f,%d,%d,%d,%f,%f,%f",
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d,%d,%f,%f,%d,%d,%d,%f,%f,%f,%d",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl, &navMd, &navSpd, &navStp, &navRep, &navClp, &navPl, &navPw, &navPd, &navPh);
+                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl, &navMd, &navSpd, &navStp, &navRep, &navClp, &navPl, &navPw, &navPd, &navPh, &navNeg);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
@@ -8687,6 +8707,7 @@ static bool LoadProject(const std::string& path)
                     sp.navPlaneW = (matched >= 34) ? navPw : 64.0f;
                     sp.navPlaneD = (matched >= 35) ? navPd : 64.0f;
                     sp.navPlaneH = (matched >= 36) ? navPh : 64.0f;
+                    sp.navNegate = (matched >= 37) ? (navNeg != 0) : false;
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
                         for (int ip = 0; ip < sp.instanceParamCount; ip++) {
@@ -15608,6 +15629,7 @@ void FrameTick(float dt)
                         se.navPlaneW = sSprites[i].navPlaneW;
                         se.navPlaneD = sSprites[i].navPlaneD;
                         se.navPlaneH = sSprites[i].navPlaneH;
+                        se.navNegate = sSprites[i].navNegate;
                         se.railPath.clear();
                         for (int rp = 0; rp < sSprites[i].railPointCount; rp++)
                             se.railPath.push_back({ sSprites[i].railPath[rp].x,
@@ -31226,6 +31248,7 @@ void Render3DViewport()
             if (!fs.isNavPlane) continue;
             mix(fs.x); mix(fs.y); mix(fs.z);
             mix(fs.navPlaneW); mix(fs.navPlaneH); mix(fs.navPlaneD);
+            mix(fs.navNegate ? 1.0f : 0.0f);
         }
         h = (h ^ (unsigned)meshCount) * 16777619u;
         if (h != sNavLiveHash) {
@@ -31256,13 +31279,16 @@ void Render3DViewport()
             float z0 = fs.z - hd, z1 = fs.z + hd;
             bool sel = (i == sSelectedSprite || i == sNavBoxEdit);
             // Translucent top + bottom faces show the covered footprint.
-            glColor4f(0.25f, 0.95f, 0.55f, sel ? 0.30f : 0.14f);
+            // Green = walkable bounds, red = negator (carves area out).
+            if (fs.navNegate) glColor4f(0.95f, 0.30f, 0.25f, sel ? 0.30f : 0.14f);
+            else              glColor4f(0.25f, 0.95f, 0.55f, sel ? 0.30f : 0.14f);
             glBegin(GL_QUADS);
             glVertex3f(x0, y1, z0); glVertex3f(x1, y1, z0); glVertex3f(x1, y1, z1); glVertex3f(x0, y1, z1);
             glVertex3f(x0, y0, z0); glVertex3f(x1, y0, z0); glVertex3f(x1, y0, z1); glVertex3f(x0, y0, z1);
             glEnd();
-            if (sel) glColor4f(1.0f, 0.95f, 0.3f, 0.95f);
-            else     glColor4f(0.2f, 0.75f, 0.35f, 0.8f);
+            if (sel)               glColor4f(1.0f, 0.95f, 0.3f, 0.95f);
+            else if (fs.navNegate) glColor4f(0.8f, 0.25f, 0.2f, 0.8f);
+            else                   glColor4f(0.2f, 0.75f, 0.35f, 0.8f);
             glBegin(GL_LINE_LOOP);
             glVertex3f(x0, y1, z0); glVertex3f(x1, y1, z0); glVertex3f(x1, y1, z1); glVertex3f(x0, y1, z1);
             glEnd();

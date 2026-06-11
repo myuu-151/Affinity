@@ -384,16 +384,17 @@ static bool GeneratePSVNav(const std::string& runtimeDir,
     std::vector<int> tris;
     std::vector<unsigned char> triFlags;
     const float DEG2RAD = 3.14159265f / 180.0f;
-    // Nav bounds boxes (world space, {x0,y0,z0,x1,y1,z1} per slot): ADDITIVE —
-    // geometry inside a box is force-marked walkable (slope test overridden),
-    // the whole scene always participates. Same semantics as
-    // BuildNavMeshPreview in frame_loop.cpp.
-    std::vector<std::array<float,6>> navBoxes;
+    // Nav bounds boxes (world space, {x0,y0,z0,x1,y1,z1,negate} per slot):
+    // ADDITIVE — geometry inside a walkable box is force-marked walkable,
+    // inside a NEGATOR box force-marked non-walkable (negators win). Whole
+    // scene always participates. Same semantics as BuildNavMeshPreview.
+    std::vector<std::array<float,7>> navBoxes;
     for (const auto& s : sprites) {
         if (!s.isNavPlane) continue;
         float hw = s.navPlaneW * 0.5f, hh = s.navPlaneH * 0.5f, hd = s.navPlaneD * 0.5f;
         navBoxes.push_back({ PVX(s.x - hw), PVY(s.y - hh), PVX(s.z - hd),
-                             PVX(s.x + hw), PVY(s.y + hh), PVX(s.z + hd) });
+                             PVX(s.x + hw), PVY(s.y + hh), PVX(s.z + hd),
+                             s.navNegate ? 1.0f : 0.0f });
     }
     for (const auto& s : sprites) {
         if (s.meshIdx < 0 || s.meshIdx >= (int)meshes.size()) continue;
@@ -423,12 +424,13 @@ static bool GeneratePSVNav(const std::string& runtimeDir,
                 wp[k*3+0] = px + ax2; wp[k*3+1] = py + ay3; wp[k*3+2] = pz + az2;
             }
             if (bad) continue;
-            // Box test: any vertex inside a nav bounds box force-marks the
-            // triangle walkable (flag bit 1) so the surface extends over it.
+            // Box test: WALKABLE boxes flag the tri force-walkable; negator
+            // boxes carve per-voxel inside NavMeshBuild (rcMarkBoxArea).
             unsigned char flag = 0;
             for (int k = 0; k < 3 && !flag; k++)
                 for (const auto& b : navBoxes)
-                    if (wp[k*3+0] >= b[0] && wp[k*3+0] <= b[3] &&
+                    if (b[6] == 0.0f &&
+                        wp[k*3+0] >= b[0] && wp[k*3+0] <= b[3] &&
                         wp[k*3+1] >= b[1] && wp[k*3+1] <= b[4] &&
                         wp[k*3+2] >= b[2] && wp[k*3+2] <= b[5]) { flag = 2; break; }
             int base = (int)verts.size() / 3;
@@ -443,9 +445,19 @@ static bool GeneratePSVNav(const std::string& runtimeDir,
         return true;
     }
 
+    // Negator boxes, packed for the per-voxel carve.
+    std::vector<float> negBoxes;
+    for (const auto& b : navBoxes)
+        if (b[6] != 0.0f) {
+            negBoxes.push_back(b[0]); negBoxes.push_back(b[1]); negBoxes.push_back(b[2]);
+            negBoxes.push_back(b[3]); negBoxes.push_back(b[4]); negBoxes.push_back(b[5]);
+        }
+
     std::vector<uint8_t> blob;
     bool built = NavMeshBuild(verts.data(), (int)verts.size() / 3,
-                              tris.data(), (int)tris.size() / 3)
+                              tris.data(), (int)tris.size() / 3,
+                              NavMeshParams{}, triFlags.data(),
+                              negBoxes.empty() ? nullptr : negBoxes.data(), (int)negBoxes.size() / 6)
               && NavMeshSaveBinary(blob);
     NavMeshClear();
     if (!built || blob.empty()) {

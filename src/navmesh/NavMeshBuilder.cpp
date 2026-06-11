@@ -55,7 +55,8 @@ const std::vector<float>& NavMeshDebugTris()
 bool NavMeshBuild(const float* verts, int vertCount,
                   const int* tris, int triCount,
                   const NavMeshParams& p,
-                  const unsigned char* triFlags)
+                  const unsigned char* triFlags,
+                  const float* negBoxes, int negBoxCount)
 {
     NavMeshClear();
 
@@ -175,6 +176,11 @@ bool NavMeshBuild(const float* verts, int vertCount,
 
         if (!rcErodeWalkableArea(&ctx, cfg.walkableRadius, *chf))
         { printf("[NavMeshBuild] FAIL: rcErodeWalkableArea\n"); break; }
+
+        // Negator boxes: carve the walkable area per-voxel — exact holes for
+        // intricate path shaping, independent of source triangle size.
+        for (int nb = 0; nb < negBoxCount; ++nb)
+            rcMarkBoxArea(&ctx, &negBoxes[nb*6], &negBoxes[nb*6+3], RC_NULL_AREA, *chf);
 
         if (!rcBuildDistanceField(&ctx, *chf))
         { printf("[NavMeshBuild] FAIL: rcBuildDistanceField\n"); break; }

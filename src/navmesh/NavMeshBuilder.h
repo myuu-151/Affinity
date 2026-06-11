@@ -55,10 +55,15 @@ struct NavMeshParams
 //           this so ramps/objects inside a box join the walkable surface)
 //   Pass nullptr to use default slope-based walkability.
 // Returns true on success.
+// negBoxes: optional world-space negator AABBs (packed minx,miny,minz,
+//   maxx,maxy,maxz per box, negBoxCount boxes). Carved out of the walkable
+//   area per-voxel (rcMarkBoxArea) AFTER erosion — exact holes regardless of
+//   triangle size, for intricate path shaping.
 bool NavMeshBuild(const float* verts, int vertCount,
                   const int* tris, int triCount,
                   const NavMeshParams& params = NavMeshParams{},
-                  const unsigned char* triFlags = nullptr);
+                  const unsigned char* triFlags = nullptr,
+                  const float* negBoxes = nullptr, int negBoxCount = 0);
 
 // Free the current navmesh.
 void NavMeshClear();

@@ -385,6 +385,7 @@ struct FloorSprite
     float navPlaneW = 64.0f;      // box extent X, editor units
     float navPlaneD = 64.0f;      // box extent Z, editor units
     float navPlaneH = 64.0f;      // box extent Y, editor units
+    bool  navNegate = false;      // negator: carve walkable area OUT (wins over walkable boxes)
     uint32_t color = 0xFFFF00FF; // tint color (ABGR) — used for editor preview
     bool  selected = false;
     // Attached sub-sprites (extra sprite layers with local offsets)

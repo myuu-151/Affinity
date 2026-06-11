@@ -55,6 +55,7 @@ struct GBASpriteExport
     float navPlaneW = 64.0f;
     float navPlaneD = 64.0f;
     float navPlaneH = 64.0f;
+    bool  navNegate = false;    // negator box: force geometry inside NON-walkable
 };
 
 // Player direction sprite for GBA export (RGBA8 image)
