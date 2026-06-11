@@ -45,6 +45,7 @@ struct PSPRigExport {
     bool useAlpha  = false;
     bool cameraLight = false; // headlamp follows the camera (per-material toggle)
     float lightX = 50.0f, lightY = 180.0f;   // headlamp aim: pitch/yaw deg off camera
+    float yawOffset = 0.0f;   // model forward correction, degrees (added to all yaw)
     int   collisionType = 0;                 // 0 = none, 1 = box (AABB proxy)
     float colCenter[3]  = {0,0,0};           // box center, rig-local (model) space
     float colExtents[3] = {1,1,1};           // box half-extents, rig-local space

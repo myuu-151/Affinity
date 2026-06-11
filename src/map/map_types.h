@@ -276,6 +276,9 @@ struct RiggedMeshAsset
     bool useAlpha = false;                    // true = palette index 0 (alpha=0 src) renders transparent
     bool cameraLight = false;                // true = light follows the camera (headlamp)
     float lightX = 50.0f, lightY = 180.0f;   // headlamp aim: pitch/yaw in degrees off the camera
+    float yawOffset = 0.0f;                  // model forward correction, degrees — added to ALL
+                                             // instance yaw (set 180 for glTFs authored facing -Z,
+                                             // fixes movement-facing "moonwalk")
 
     std::vector<BonePose>   bindPose;         // boneCount entries, absolute bind transforms
     std::vector<int>        boneParent;       // boneCount entries, parent bone index (-1 = root)

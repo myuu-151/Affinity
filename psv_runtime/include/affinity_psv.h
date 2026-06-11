@@ -30,6 +30,7 @@ typedef struct {
     float scale;                             // model -> world base scale
     int   camlight;                          // 1 = headlamp follows the camera
     float ldx, ldy, ldz;                     // baked eye-space headlamp direction
+    float yawOff;                            // model forward correction (radians, added to all yaw)
     const float*                 vpos;       // [verts*3] model-space positions
     const float*                 vnorm;      // [verts*3] model-space normals
     const float*                 vuv;        // [verts*2] texcoords

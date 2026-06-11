@@ -21,6 +21,7 @@
 int  afn_input_fwd;
 int  afn_input_right;
 int  afn_key_mag = 256;   // gating key strength; always full-on (NDS has no analog stick)
+int  afn_face_lock = 0;   // MovePlayer "Consistent Facing": keep facing while moving
 int  afn_move_speed;
 int  afn_auto_orbit_speed;
 int  afn_play_anim;
@@ -142,6 +143,7 @@ int  tm_move_timer;
 int  player_on_ground = 1;
 int  afn_active_camera = 0;       // Mode 4 camera slot (0 = scene default)
 int  afn_tank_camera   = 0;       // Mode 4 tank controls: 1 = move/face by afn_player_heading (camera stays free)
+int  afn_tank_move     = 1;       // 1 = movement axes follow the heading; 0 = TurnPlayer(Camera Relative)
 int  afn_player_heading = 0;      // Mode 4 tank heading (brad); a TurnPlayer node rotates it
 
 void afn_script_state_init(void)
@@ -325,6 +327,7 @@ void afn_script_tick(void)
     afn_play_anim   = -1;
     afn_anim_prio   = 0;
     afn_speed_prio  = 0;
+    afn_face_lock   = 0;   // MovePlayer(Consistent Facing) re-sets it while held
 #endif
     afn_emitted_script_update();
     afn_emitted_script_key_held();

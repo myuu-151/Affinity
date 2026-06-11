@@ -284,6 +284,7 @@ static bool GeneratePSVRigData(const std::string& runtimeDir,
         f << "  { " << rig.boneCount << ", " << (int)rig.verts.size() << ", " << mc << ", "
           << (int)rig.clips.size() << ", " << rig.cullMode << ", 0.25f, " << cl << ", "
           << PFlt(ldx) << "," << PFlt(ldy) << "," << PFlt(ldz) << ", "
+          << PFlt(rig.yawOffset * 3.14159265f / 180.0f) << ", "   // model yaw correction (rad)
           << S << "vpos, " << S << "vnorm, " << S << "vuv, " << S << "vbone, "
           << S << "idx_ptrs, " << S << "idx_counts, " << S << "tex_ptrs, " << S << "tex_w, " << S << "tex_h, "
           << S << "clip_ptrs, " << S << "clip_frames, " << S << "clip_loop },\n";

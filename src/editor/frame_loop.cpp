@@ -3945,6 +3945,13 @@ static EditorMode sEditorMode = EditorMode::Edit;
 static float sOrbitAngle = 0.0f;  // play mode: angle from player to camera
 static float sOrbitDist = 60.0f; // play mode: distance from player to camera
 static float sPlayerMoveAngle = 0.0f; // player movement direction (camera-relative)
+// Play-mode rig facing (3D tab): world-space yaw the player glTF turns toward
+// while moving — mirrors the runtimes' playerYaw = atan2(mvX, mvZ). A fired
+// MovePlayer node with "Consistent Facing" sets s3DFaceLock for the frame and
+// the yaw update is skipped (strafe/moonwalk).
+static float s3DPlayerFaceYaw = 0.0f;
+static bool  s3DPlayerFaceValid = false;
+static bool  s3DFaceLock = false;
 static bool  sPlayerMoving = false;   // is the player moving this frame
 static bool  sPlayerSprinting = false; // is the player holding sprint
 static float sAutoOrbitCurrent = 0.0f; // smoothed auto-orbit speed
@@ -5909,12 +5916,12 @@ static bool SaveProject(const std::string& path)
         // flags: bit0 smooth, bit1 camera light, bits2-3 cull mode (0/1/2), bit4 use-alpha.
         int rigFlags = (rmA.smoothShading ? 1 : 0) | (rmA.cameraLight ? 2 : 0)
                      | ((rmA.cullMode & 3) << 2) | (rmA.useAlpha ? 16 : 0);
-        // Fields 8-14 = collision: type|cx|cy|cz|ex|ey|ez.
-        fprintf(f, "rig=%s|%s|%s|%s|%d|%.2f|%.2f|%d|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f\n",
+        // Fields 8-14 = collision: type|cx|cy|cz|ex|ey|ez. Field 15 = model yaw offset (deg).
+        fprintf(f, "rig=%s|%s|%s|%s|%d|%.2f|%.2f|%d|%.4f|%.4f|%.4f|%.4f|%.4f|%.4f|%.1f\n",
                 rmA.name.c_str(), rmA.sourcePath.c_str(),
                 loopBits.empty() ? "-" : loopBits.c_str(), texP, rigFlags, rmA.lightX, rmA.lightY,
                 rmA.collisionType, rmA.colCenter[0], rmA.colCenter[1], rmA.colCenter[2],
-                rmA.colExtents[0], rmA.colExtents[1], rmA.colExtents[2]);
+                rmA.colExtents[0], rmA.colExtents[1], rmA.colExtents[2], rmA.yawOffset);
         // Per-slot manual textures for material slots 1+ (slot 0 is field 4 above).
         // Clips/materials are re-imported from the glTF, so only manual PNG paths
         // need serializing. Format: rigMatTex=<rigIdx>|<slot>|<path>
@@ -7317,11 +7324,12 @@ static bool LoadProject(const std::string& path)
             char rname[256] = {}, rpath[512] = {}, rloop[64] = {}, rtex[512] = {};
             int rflags = 0; float rlx = 0.0f, rly = 0.0f;
             int rcolType = 0; float rcc[3] = {0,0,0}, rce[3] = {0,0,0};
-            // Format: name|path|loopbits|texpath|flags|lightX|lightY|colType|cx|cy|cz|ex|ey|ez.
+            float ryaw = 0.0f;
+            // Format: name|path|loopbits|texpath|flags|lightX|lightY|colType|cx|cy|cz|ex|ey|ez|yawOffset.
             // Older forms (7 fields) still parse; collision then keeps the AABB seed.
-            int nf = sscanf(line, "rig=%255[^|]|%511[^|]|%63[^|]|%511[^|]|%d|%f|%f|%d|%f|%f|%f|%f|%f|%f",
+            int nf = sscanf(line, "rig=%255[^|]|%511[^|]|%63[^|]|%511[^|]|%d|%f|%f|%d|%f|%f|%f|%f|%f|%f|%f",
                             rname, rpath, rloop, rtex, &rflags, &rlx, &rly,
-                            &rcolType, &rcc[0], &rcc[1], &rcc[2], &rce[0], &rce[1], &rce[2]);
+                            &rcolType, &rcc[0], &rcc[1], &rcc[2], &rce[0], &rce[1], &rce[2], &ryaw);
             if (nf >= 2)
             {
                 RiggedMeshAsset rm;
@@ -7343,6 +7351,7 @@ static bool LoadProject(const std::string& path)
                     rm.colCenter[0] = rcc[0]; rm.colCenter[1] = rcc[1]; rm.colCenter[2] = rcc[2];
                     rm.colExtents[0] = rce[0]; rm.colExtents[1] = rce[1]; rm.colExtents[2] = rce[2];
                 }
+                if (nf >= 15) rm.yawOffset = ryaw;
                 UploadRigGLTexture(rm);
                 sRiggedMeshAssets.push_back(std::move(rm));
             }
@@ -10988,6 +10997,13 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 sProjectDirty = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reserve palette[0] for transparent (alpha=0) source pixels — cutout transparency. Re-imports each material texture. Leave off unless the texture has real cutout transparency.");
+            // Model forward correction: glTF exporters disagree on which axis a
+            // character faces. Added to ALL yaw (authored + movement-facing) —
+            // set 180 if the rig walks backwards ("moonwalks") on device.
+            ImGui::PushItemWidth(Scaled(110));
+            if (ImGui::DragFloat("Model Yaw##rigyawoff", &rmR.yawOffset, 1.0f, -180.0f, 180.0f, "%.0f deg")) sProjectDirty = true;
+            ImGui::PopItemWidth();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Forward-axis correction added to every yaw this rig is drawn with (editor + device). If the model faces backwards while walking (moonwalk), set 180.");
         }
 
         // ---- Collision (rigged glTF) ----
@@ -16959,6 +16975,7 @@ void FrameTick(float dt)
                     pr.useAlpha = rm.useAlpha;
                     pr.cameraLight = rm.cameraLight;
                     pr.lightX = rm.lightX; pr.lightY = rm.lightY;
+                    pr.yawOffset = rm.yawOffset;
                     pr.collisionType = rm.collisionType;
                     for (int k = 0; k < 3; k++) { pr.colCenter[k] = rm.colCenter[k]; pr.colExtents[k] = rm.colExtents[k]; }
                     pr.verts.resize(rm.baseVerts.size());
@@ -17499,6 +17516,7 @@ void FrameTick(float dt)
             // Script state for this frame
             float scInputFwd = 0.0f, scInputRight = 0.0f;
             float scOrbitDelta = 0.0f;
+            s3DFaceLock = false;   // MovePlayer(Consistent Facing) re-sets it below
             // Mirror the runtime's afn_speed_prio: once a Sprint sets the speed
             // this frame, Walk can't overwrite it (so B+direction sprints).
             bool scSpeedPrio = false;
@@ -17517,6 +17535,7 @@ void FrameTick(float dt)
                     else if (dir == 1) scInputRight += 1.0f;
                     else if (dir == 2) scInputFwd   += 1.0f;
                     else if (dir == 3) scInputFwd   -= 1.0f;
+                    if (action->paramInt[0] == 1) s3DFaceLock = true;   // Consistent Facing
                 }
                 else if (t == VsNodeType::Walk) {
                     if (!scSpeedPrio) {
@@ -17860,6 +17879,7 @@ void FrameTick(float dt)
                         else if (dir == 1) scInputRight += 1.0f;
                         else if (dir == 2) scInputFwd   += 1.0f;
                         else if (dir == 3) scInputFwd   -= 1.0f;
+                        if (action->paramInt[0] == 1) s3DFaceLock = true;   // Consistent Facing
                     }
                     else if (t == VsNodeType::Walk) {
                         if (!scSpeedPrio) {
@@ -18190,6 +18210,15 @@ void FrameTick(float dt)
                     float rightX = -cosf(viewAngle), rightZ = sinf(viewAngle);
                     player.x += (fwdX * inputX + rightX * inputZ) * moveSpeed;
                     player.z += (fwdZ * inputX + rightZ * inputZ) * moveSpeed;
+                    // Rig facing: turn the player glTF toward the world-space
+                    // move vector (runtime parity: playerYaw = atan2(mvX,mvZ))
+                    // unless a fired MovePlayer chose Consistent Facing.
+                    if (!s3DFaceLock) {
+                        float mvX = fwdX * inputX + rightX * inputZ;
+                        float mvZ = fwdZ * inputX + rightZ * inputZ;
+                        s3DPlayerFaceYaw = atan2f(mvX, mvZ) * (180.0f / 3.14159265f);
+                        s3DPlayerFaceValid = true;
+                    }
                 }
                 else if (wasMoving)
                     sPlayerMoveAngle = sPlayerMoveAngle - sOrbitAngle;
@@ -19153,6 +19182,19 @@ void FrameTick(float dt)
 
         // Edit source indicator (small label at top-left of canvas)
         {
+            // Snap the view to the node graph's bounding box — rescue for a
+            // lost canvas (open a BP instance and the nodes are panned away).
+            auto recenterNodeView = [&]() {
+                if (sVsNodes.empty()) { sVsPanX = 0.0f; sVsPanY = 0.0f; return; }
+                float mnx = 1e9f, mny = 1e9f, mxx = -1e9f, mxy = -1e9f;
+                for (const auto& n : sVsNodes) {
+                    mnx = std::min(mnx, n.x); mny = std::min(mny, n.y);
+                    mxx = std::max(mxx, n.x + 180.0f);   // ~node width
+                    mxy = std::max(mxy, n.y + 120.0f);   // ~node height
+                }
+                sVsPanX = (totalW / sVsZoom) * 0.5f - (mnx + mxx) * 0.5f;
+                sVsPanY = (canvasH / sVsZoom) * 0.5f - (mny + mxy) * 0.5f;
+            };
             ImDrawList* barDl = ImGui::GetWindowDrawList();
             if (sVsEditSource == VsEditSource::Blueprint && sVsEditBlueprintIdx >= 0 && sVsEditBlueprintIdx < (int)sBlueprintAssets.size()) {
                 char lbl[64]; snprintf(lbl, sizeof(lbl), " Blueprint: %s ", sBlueprintAssets[sVsEditBlueprintIdx].name);
@@ -19175,9 +19217,15 @@ void FrameTick(float dt)
                     sVsSelected = -1;
                     sVsUndoStack.clear();
                 }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Recenter##bprecenter")) recenterNodeView();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Snap the view to this blueprint's nodes (lost-canvas rescue).");
             } else {
                 ImVec2 p0(vp->WorkPos.x + 4, bodyY + 4);
                 barDl->AddText(ImVec2(p0.x + 4, p0.y + 3), 0xFF99CC99, "Scene Script");
+                ImGui::SetCursorScreenPos(ImVec2(p0.x + ImGui::CalcTextSize("Scene Script").x + 16, p0.y));
+                if (ImGui::SmallButton("Recenter##screcenter")) recenterNodeView();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Snap the view to the scene's nodes (lost-canvas rescue).");
             }
         }
 
@@ -19826,6 +19874,23 @@ void FrameTick(float dt)
             }
         }
 
+        // Ctrl+I — invert the node selection: drop what's selected, select
+        // every node that wasn't (in the current canvas scope). Pairs with
+        // Del: select the nodes to KEEP, Ctrl+I, Del removes the rest.
+        if (ImGui::IsKeyPressed(ImGuiKey_I) && io.KeyCtrl) {
+            // Fold the single-click selection into the flags so it inverts too.
+            if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size())
+                sVsNodes[sVsSelected].selected = true;
+            sVsSelected = -1;
+            for (auto& nd : sVsNodes) {
+                if (nd.groupId != sVsEditingGroup) continue;   // same scope as box-select
+                nd.selected = !nd.selected;
+            }
+            // Don't let stale annotation selections ride into a Del.
+            for (auto& ann : sVsAnnotations) ann.selected = false;
+            sVsSelectedAnnotation = -1;
+        }
+
         // Delete selected nodes with Delete key (multi-select or single)
         if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
             // Collect all node IDs to delete (selected or sVsSelected)
@@ -20262,7 +20327,7 @@ void FrameTick(float dt)
                 case VsNodeType::OnUpdate:      desc = "Fires every frame."; break;
                 case VsNodeType::Branch:        desc = "If condition is true, execute True path; otherwise False."; break;
                 case VsNodeType::CompareVar:    desc = "Compares a variable slot against a value. Outputs 1 or 0."; break;
-                case VsNodeType::MovePlayer:    desc = "Moves the player in the given Direction whenever this runs. Wire it after On Key Held(key) to bind movement to that button — e.g. On Key Held(A) -> Move Player(Up) moves up while A is held (remappable)."; break;
+                case VsNodeType::MovePlayer:    desc = "Moves the player in the given Direction whenever this runs. Wire it after On Key Held(key) to bind movement to that button — e.g. On Key Held(A) -> Move Player(Up) moves up while A is held (remappable). Left-click for the Facing switch: Direction Facing (rig turns toward movement) or Consistent Facing (rig keeps its yaw — strafe/moonwalk)."; break;
                 case VsNodeType::LookDirection: desc = "Sets the player's facing direction."; break;
                 case VsNodeType::ChangeScene:   desc = "Loads a different scene by index."; break;
                 case VsNodeType::SetVariable:   desc = "Sets a variable slot to a value."; break;
@@ -20492,7 +20557,7 @@ void FrameTick(float dt)
                 case VsNodeType::SetSkelAnim:   desc = "Sets the skeletal clip on a specific rigged NPC (like Set Sprite Anim, but for glTF rigs). Wire an Object (Instance) into Object and a Skeletal Animation into Clip."; break;
                 case VsNodeType::SetCamera:     desc = "Switches the player camera to a preset slot (Mode 4). Slot 0 = scene default; 1..N are the camera presets authored on the player object. Wire a number into Slot. The camera orbit-follows the player at the slot's angle/pitch/distance/height, smoothly blended."; break;
                 case VsNodeType::TankCamera:    desc = "Tank controls (Mode 4). Wire 1 to make movement + facing follow the player heading (turned by Turn Player on the D-pad) instead of the camera, so forward/back go where the tank points while the camera still orbits freely (L/R). Wire 0 for normal camera-relative controls."; break;
-                case VsNodeType::TurnPlayer:    desc = "Rotates the tank heading (used with Tank Camera). Wire a Direction (Left/Right) and a Speed (brads/frame). Put it on On Key Held(Left)/(Right) so the D-pad turns the player in place while L/R still orbit the camera."; break;
+                case VsNodeType::TurnPlayer:    desc = "Rotates the tank heading (used with Tank Camera). Wire a Direction (Left/Right) and a Speed (brads/frame). Put it on On Key Held(Left)/(Right) so the D-pad turns the player in place while L/R still orbit the camera. Left-click for the Movement switch: Tank (Heading) makes movement follow the turned heading; Camera Relative keeps movement on camera axes and only steers the facing."; break;
                 case VsNodeType::CastEffect:    desc = "Plays a combat/spell effect on a target object. Attach a sprite to that object and tick its 'Hidden' box (it starts invisible). Wire the target into Object: on trigger the effect shows, plays its animation once, and auto-hides. Set the effect sprite's animation to Once so it cleans up."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
@@ -21022,20 +21087,32 @@ void FrameTick(float dt)
                     const char* dirVarsGba[] = { "afn_input_right -= afn_key_mag", "afn_input_right += afn_key_mag",
                                                  "afn_input_fwd += afn_key_mag", "afn_input_fwd -= afn_key_mag" };
                     const int dirFacingGba[] = { 6, 2, 0, 4 }; // L=W, R=E, U=N, D=S
-                    char bodyBuf[640];
+                    char bodyBuf[768];
                     if (dir >= 0 && dir < 4)
                         snprintf(bodyBuf, sizeof(bodyBuf),
                             "    if (!afn_player_frozen) {\n"
                             "        %s;\n"
                             "        if (tm_move_timer == 0) tm_player_facing = %d; }\n"
+                            "%s"
                             "    // --- Runtime (main.c) ---\n"
                             "    // Applied when this exec runs — gate it with\n"
                             "    // On Key Held(key). afn_key_mag = gating key's\n"
                             "    // strength: buttons 256; stick keys ramp 32..256\n"
                             "    // with deflection (PSV) — slight push = slow walk.\n"
+                            "    // Facing (left-click property): Direction Facing turns\n"
+                            "    // the rig toward movement; Consistent Facing sets\n"
+                            "    // afn_face_lock so the yaw update is skipped (strafe).\n"
                             "    // Mode 0: tap = turn in place, hold = walk\n"
-                            "    // Mode 4: player_x += (viewSin * moveFwd * mag/256) >> 8;",
-                            dirVarsGba[dir], dirFacingGba[dir]);
+                            "    // Mode 4: player_x += (viewSin * moveFwd * mag/256) >> 8;\n"
+                            "    //         if (!afn_face_lock) playerYaw = atan2(mvX, mvZ);\n"
+                            "    //         (Camera-relative: yaw follows the walk. Tank drive:\n"
+                            "    //          yaw = heading + input angle — Down turns the model\n"
+                            "    //          around on the same axis, steering reads on that side;\n"
+                            "    //          the heading itself never flips. Consistent Facing in\n"
+                            "    //          tank drive freezes only the RELATIVE facing, so\n"
+                            "    //          TurnPlayer still rotates the model with the axis.)",
+                            dirVarsGba[dir], dirFacingGba[dir],
+                            infoNode.paramInt[0] == 1 ? "    afn_face_lock = 1;   // Consistent Facing\n" : "");
                     else
                         snprintf(bodyBuf, sizeof(bodyBuf), "    // MovePlayer (no direction set)");
                     setActionFunc(infoNode, "_move", bodyBuf);
@@ -21611,15 +21688,24 @@ void FrameTick(float dt)
                 case VsNodeType::TurnPlayer: {
                     editorCode =
                         "// Rotate the tank heading (used with Tank Camera)";
-                    setActionFunc(infoNode, "_turn_player",
+                    char tpBuf[768];
+                    snprintf(tpBuf, sizeof(tpBuf),
                         "    afn_tank_camera = 1;   // using Turn Player auto-enables tank controls\n"
+                        "    afn_tank_move = %d;    // %s\n"
                         "    // Direction Left -> afn_player_heading += Speed; Right -> -= Speed\n"
                         "    afn_player_heading += (<speed> * afn_key_mag) >> 8;\n"
                         "    // afn_key_mag = gating key strength: buttons 256 = full rate;\n"
                         "    // stick keys ramp 32..256 with deflection (PSV analog turn).\n"
-                        "    // --- Runtime (fps3d.c) ---\n"
-                        "    // Tank mode: movement uses brad_sin/cos(afn_player_heading) and\n"
-                        "    //   the rig faces it, so the player turns while the camera orbits free.");
+                        "    // --- Runtime (fps3d.c / psv main.c) ---\n"
+                        "    // moveAngle = (afn_tank_camera && afn_tank_move) ? heading : camAngle;\n"
+                        "    // Tank (Heading): movement axes follow the heading; the model faces\n"
+                        "    //   heading + input angle (Down = turned around, steering mirrors).\n"
+                        "    // Camera Relative: heading only steers the idle facing; movement\n"
+                        "    //   stays on camera axes.",
+                        infoNode.paramInt[0] == 1 ? 0 : 1,
+                        infoNode.paramInt[0] == 1 ? "Camera Relative (left-click property)"
+                                                  : "Tank (Heading) (left-click property)");
+                    setActionFunc(infoNode, "_turn_player", tpBuf);
                     break;
                 }
                 case VsNodeType::SetHorizon: {
@@ -25256,7 +25342,7 @@ void FrameTick(float dt)
         // Properties panel overlay — as child window inside canvas (data nodes only)
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
-            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt || n.type == VsNodeType::SoundInstance || n.type == VsNodeType::SkelAnim || n.type == VsNodeType::PlayHudAnim || n.type == VsNodeType::StopHudAnim) {
+            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt || n.type == VsNodeType::SoundInstance || n.type == VsNodeType::SkelAnim || n.type == VsNodeType::PlayHudAnim || n.type == VsNodeType::StopHudAnim || n.type == VsNodeType::MovePlayer || n.type == VsNodeType::TurnPlayer) {
             const auto& def = sVsNodeDefs[(int)n.type];
             float propW = 260, propH = 180;
             float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -25282,6 +25368,27 @@ void FrameTick(float dt)
                 ImGui::Text("Direction");
                 ImGui::Combo("##Dir", &n.paramInt[0], sVsAxisNames, kVsAxisCount);
                 break;
+            case VsNodeType::MovePlayer: {
+                // Facing: turn the rig toward the movement (default), or keep
+                // its current yaw (strafe / moonwalk). Stored in paramInt[0];
+                // the Direction comes from the wired data pin, not a param.
+                ImGui::Text("Facing");
+                const char* faceModes[] = { "Direction Facing", "Consistent Facing" };
+                if (ImGui::Combo("##MpFace", &n.paramInt[0], faceModes, 2)) sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Direction Facing: the rig turns toward where it's moving. Consistent Facing: the rig keeps its current facing while moving (strafe/moonwalk).");
+                break;
+            }
+            case VsNodeType::TurnPlayer: {
+                // Movement: with tank steering (default), MovePlayer axes
+                // follow the turned heading — after turning around, "up"
+                // walks toward the camera. Camera Relative keeps movement on
+                // the camera axes; TurnPlayer only steers the facing.
+                ImGui::Text("Movement");
+                const char* turnModes[] = { "Tank (Heading)", "Camera Relative" };
+                if (ImGui::Combo("##TpMove", &n.paramInt[0], turnModes, 2)) sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tank (Heading): movement directions follow the turned heading (classic tank polarity — up can walk toward the camera). Camera Relative: movement stays on camera axes; Turn Player only rotates the facing.");
+                break;
+            }
             case VsNodeType::Integer:
                 ImGui::Text("Integer");
                 ImGui::DragInt("##Val", &n.paramInt[0], 0.5f);
@@ -31472,7 +31579,13 @@ void Render3DViewport()
                 };
                 glPushMatrix();
                 glTranslatef(sx, sy, sz);
-                glRotatef(fs.rotation, 0,1,0);
+                // Play mode: the player rig faces its movement (Direction
+                // Facing, runtime parity) — Consistent Facing keeps this at
+                // the last facing instead of the authored rotation snap.
+                float rigYawDeg = fs.rotation;
+                if (sEditorMode == EditorMode::Play && fs.type == SpriteType::Player && s3DPlayerFaceValid)
+                    rigYawDeg = s3DPlayerFaceYaw;
+                glRotatef(rigYawDeg + rm.yawOffset, 0,1,0);   // + Model Yaw forward correction
                 glRotatef(fs.rotationX, 1,0,0);
                 glRotatef(fs.rotationZ, 0,0,1);
                 glScalef(fs.scale, fs.scale, fs.scale);

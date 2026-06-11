@@ -197,6 +197,13 @@ void EmitNodeScriptBodies(std::ostream& f,
                                                  "afn_input_fwd += afn_key_mag","afn_input_fwd -= afn_key_mag" };
                 if (dir >= 0 && dir < 4)
                     f << "    if (!afn_player_frozen) " << dirVars[dir] << ";\n";
+                // Facing switch (node paramInt[0], left-click property):
+                // 1 = Consistent Facing — the rig keeps its current yaw while
+                // moving (strafe/moonwalk) instead of turning toward the
+                // movement direction. Reset each tick; runtimes skip their
+                // face-movement update while it's set.
+                if (a->paramInt[0] == 1)
+                    f << "    afn_face_lock = 1;\n";
                 break;
             }
             case GBAScriptNodeType::PlayAnim: {
@@ -588,6 +595,12 @@ void EmitNodeScriptBodies(std::ostream& f,
                 int speed = speedData ? resolveInt(speedData) : 512;
                 const char* sign = (dir == 0) ? "+" : "-";   // Left=0 turns +, Right=1 turns -
                 f << "    afn_tank_camera = 1;\n";            // Turn Player implies tank controls
+                // Movement toggle (node paramInt[0], left-click property):
+                // 0 = Tank (Heading) — MovePlayer axes follow the heading
+                // (classic tank: after turning around, "up" walks toward the
+                // camera). 1 = Camera Relative — TurnPlayer only steers the
+                // facing; movement stays camera-relative.
+                f << "    afn_tank_move = " << (a->paramInt[0] == 1 ? 0 : 1) << ";\n";
                 // Turn rate scales by afn_key_mag like OrbitCamera — stick-
                 // bound turning ramps with deflection, buttons stay full rate.
                 f << "    afn_player_heading " << sign << "= (" << speed << " * afn_key_mag) >> 8;\n";

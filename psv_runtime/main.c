@@ -173,7 +173,7 @@ static void rig_draw(const AfnRig* R, GLuint* texArr, const float* view,
     // psp_runtime/rig.c. NPCs pass world-up so they stay vertical.
     float ux = upN ? upN[0] : 0.0f, uy = upN ? upN[1] : 1.0f, uz = upN ? upN[2] : 0.0f;
     float ul = sqrtf(ux*ux + uy*uy + uz*uz); if (ul > 1e-6f) { ux/=ul; uy/=ul; uz/=ul; }
-    float yr = yawDeg * DEG2RAD + AFN_RIG_YAW_OFFSET;
+    float yr = yawDeg * DEG2RAD + AFN_RIG_YAW_OFFSET + R->yawOff;   // + per-rig Model Yaw correction
     float ydx = sinf(yr), ydz = cosf(yr);
     float d = ydx*ux + ydz*uz;                              // yawDir . up (ydy = 0)
     float fx = ydx - ux*d, fy = -uy*d, fz = ydz - uz*d;     // project onto slope plane
@@ -714,6 +714,8 @@ static float rail_nearest(int rail, float px, float pz, float* outD2) {
 int afn_input_fwd = 0, afn_input_right = 0;   // camera-space move intent (256 = full)
 int afn_move_speed = 0, afn_speed_prio = 0;   // node-set speed (0 = use walk default)
 int afn_player_frozen = 0;
+int afn_face_lock = 0;                        // MovePlayer "Consistent Facing": keep
+                                              // rig yaw while moving (strafe/moonwalk)
 int orbit_angle = 0;                          // camera yaw, brad (65536 = full circle)
 int orbit_pitch = 0;                          // camera pitch, brad (node OrbitCamera Up/Down + right stick)
 
@@ -853,6 +855,8 @@ int afn_grind_vel=0, afn_grind_dx=0, afn_grind_dz=0;   // runtime grind state (I
 // world defaults (0.8 / 30) rather than the weak editor-pixel defaults.
 int afn_gravity=205, afn_terminal_vel=7680, afn_friction=0, afn_force_x=0, afn_force_z=0;
 int afn_cam_locked=0, afn_cam_speed=0, afn_tank_camera=0, afn_player_heading=0;
+int afn_tank_move=1;   // 1 = movement axes follow the tank heading (classic tank);
+                       // 0 = TurnPlayer(Camera Relative): heading only steers facing
 int afn_player_height=0, afn_player_width=0, afn_bg_color=0, afn_anim_speed_dummy=0;
 int afn_active_element=0, afn_elem_idx=0, afn_cursor_stop=0, afn_stop_count=0;
 int afn_hud_value[4]={0};   // SetHudValue counter slots (text rows bind to these)
@@ -913,6 +917,7 @@ static void script_tick(void) {
     // Node-driven inputs are recomputed from scratch each frame by the graph.
     afn_input_fwd = 0; afn_input_right = 0; afn_speed_prio = 0; afn_move_speed = 0;
     afn_key_mag = 256;   // chains re-set it on entry; full-on outside key chains
+    afn_face_lock = 0;   // MovePlayer(Consistent Facing) re-sets it while held
     afn_emitted_script_update();
     afn_emitted_script_key_held();
     afn_emitted_script_key_pressed();
@@ -1345,13 +1350,16 @@ int main(void)
         // Tank controls: when afn_tank_camera is set (a Turn Player / tank node),
         // movement + facing follow afn_player_heading (D-pad turned), so the
         // camera orbits independently. Otherwise movement is camera-relative.
-        float moveAngle = afn_tank_camera ? (afn_player_heading * (6.2831853f/65536.0f)) : camAngle;
+        float moveAngle = (afn_tank_camera && afn_tank_move)
+                          ? (afn_player_heading * (6.2831853f/65536.0f)) : camAngle;
         float fwdX = sinf(moveAngle), fwdZ = cosf(moveAngle);
         float rgtX = cosf(moveAngle), rgtZ = -sinf(moveAngle);
         float mvX = fAmt*fwdX + rAmt*rgtX;
         float mvZ = fAmt*fwdZ + rAmt*rgtZ;
         // Move only when the node graph asks: a movement node sets afn_input_fwd/
         // right AND afn_move_speed. No walk-speed fallback — purely node-driven.
+        int facedByMove = 0;
+        static float sTankRelFace = 0.0f;   // tank drive: facing offset from the heading (deg)
         if ((mvX*mvX + mvZ*mvZ > 0.0001f) && afn_move_speed > 0 && !afn_player_frozen) {
             float speed = afn_move_speed * 0.08f;
             float dx = mvX*speed, dz = mvZ*speed;
@@ -1359,10 +1367,46 @@ int main(void)
             int steps = (int)(dlen / 3.0f) + 1;   // MAX_MOVE_STEP: don't tunnel walls
             float ix = dx/steps, iz = dz/steps;
             for (int st = 0; st < steps; st++) { playerX += ix; playerZ += iz; collide_walls(&playerX, &playerZ, playerY); }
-            playerYaw = atan2f(mvX, mvZ) * (180.0f/3.14159265f);
+            // Face the movement unless a MovePlayer node asked for Consistent
+            // Facing (afn_face_lock). Two flavors:
+            // - camera-relative movement: yaw = atan2 of the world move vector.
+            // - tank drive (heading-relative movement): the model faces
+            //   heading + the INPUT's relative angle — up drives forward
+            //   facing forward, down turns the model around and drives the
+            //   other way on the same axis (steering then reads mirrored,
+            //   "on that side"). The heading itself NEVER flips, so no
+            //   back-and-forth polarity churn.
+            if (!afn_face_lock) {
+                if (afn_tank_camera && afn_tank_move) {
+                    sTankRelFace = atan2f(rAmt, fAmt) * (180.0f/3.14159265f);
+                } else {
+                    playerYaw = atan2f(mvX, mvZ) * (180.0f/3.14159265f);
+                    facedByMove = 1;
+                }
+            }
         }
-        // In tank mode the rig faces the heading even when standing still.
-        if (afn_tank_camera) playerYaw = afn_player_heading * (360.0f/65536.0f);
+        // Tank heading owns the facing whenever camera-relative Direction
+        // Facing isn't steering it. In tank drive the persisted relative
+        // facing (sTankRelFace) rides on top — so after walking "down" the
+        // model stays turned around at idle (no release snap) and TurnPlayer
+        // visibly rotates the whole frame. When a camera-relative walk ENDS,
+        // bake its final facing into the heading (no snap there either).
+        static int sWasFacedByMove = 0;
+        if (afn_tank_camera) {
+            if (sWasFacedByMove && !facedByMove)
+                afn_player_heading = (int)(playerYaw * (65536.0f / 360.0f));
+            if (afn_tank_move) {
+                // Tank drive: the facing ALWAYS rides the heading frame —
+                // Consistent Facing only freezes the relative part
+                // (sTankRelFace stops updating), so strafing keeps its
+                // facing while TurnPlayer still rotates the model with the
+                // axis (no "stuck" yaw).
+                playerYaw = afn_player_heading * (360.0f/65536.0f) + sTankRelFace;
+            } else if (!facedByMove && !afn_face_lock) {
+                playerYaw = afn_player_heading * (360.0f/65536.0f);
+            }
+        }
+        sWasFacedByMove = facedByMove;
 
         // Node-driven world-axis push velocity (boost pads / knockback). 8.8
         // fixed. BoostForward wrote a pending magnitude -> decompose along the

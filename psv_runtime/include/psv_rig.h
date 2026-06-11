@@ -3522,8 +3522,8 @@ static const unsigned char afn_rig1_clip_loop[4] = {1,1,1,1,};
 #define AFN_RIG_MAX_BONES 2
 #define AFN_RIG_MAX_MATS 3
 static const AfnRig afn_rigs[AFN_RIG_COUNT] = {
-  { 2, 187, 2, 2, 0, 0.25f, 1, 7.92319e-08f,0.422618f,0.906308f, afn_rig0_vpos, afn_rig0_vnorm, afn_rig0_vuv, afn_rig0_vbone, afn_rig0_idx_ptrs, afn_rig0_idx_counts, afn_rig0_tex_ptrs, afn_rig0_tex_w, afn_rig0_tex_h, afn_rig0_clip_ptrs, afn_rig0_clip_frames, afn_rig0_clip_loop },
-  { 1, 200, 3, 4, 0, 0.25f, 1, 7.92319e-08f,0.422618f,0.906308f, afn_rig1_vpos, afn_rig1_vnorm, afn_rig1_vuv, afn_rig1_vbone, afn_rig1_idx_ptrs, afn_rig1_idx_counts, afn_rig1_tex_ptrs, afn_rig1_tex_w, afn_rig1_tex_h, afn_rig1_clip_ptrs, afn_rig1_clip_frames, afn_rig1_clip_loop },
+  { 2, 187, 2, 2, 0, 0.25f, 1, 7.92319e-08f,0.422618f,0.906308f, 0.0f, afn_rig0_vpos, afn_rig0_vnorm, afn_rig0_vuv, afn_rig0_vbone, afn_rig0_idx_ptrs, afn_rig0_idx_counts, afn_rig0_tex_ptrs, afn_rig0_tex_w, afn_rig0_tex_h, afn_rig0_clip_ptrs, afn_rig0_clip_frames, afn_rig0_clip_loop },
+  { 1, 200, 3, 4, 0, 0.25f, 1, 7.92319e-08f,0.422618f,0.906308f, 0.0f, afn_rig1_vpos, afn_rig1_vnorm, afn_rig1_vuv, afn_rig1_vbone, afn_rig1_idx_ptrs, afn_rig1_idx_counts, afn_rig1_tex_ptrs, afn_rig1_tex_w, afn_rig1_tex_h, afn_rig1_clip_ptrs, afn_rig1_clip_frames, afn_rig1_clip_loop },
 };
 
 #define AFN_HAS_PLAYER_RIG 1
@@ -3542,5 +3542,5 @@ static const float afn_npc_col[1][6] = {
   { 1.5225f,1.77944f,1.99842f,0.0f,1.77944f,-0.155318f },
 };
 static const float afn_npc_nav[1][5] = {
-  { 2, 0.325f, 8.0f, 30, -1 },
+  { 1, 0.35f, 8.0f, 30, -1 },
 };

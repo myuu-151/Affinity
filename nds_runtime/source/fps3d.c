@@ -494,6 +494,7 @@ static void render_meshes(void)
 // another 180° vs the importer's baked orientation (adjust if facing is wrong).
 #define AFN_RIG_YAW_CORRECTION (-16384)
 extern int afn_player_frozen;
+extern int afn_face_lock;                // MovePlayer "Consistent Facing": keep facing while moving
 extern int afn_rig_clip;                 // script-set skeletal clip (PlaySkelAnim node); -1 = leave default
 extern int afn_skel_anim_obj;            // SetSkelAnim request: NPC sprite index (-1 = none)
 extern int afn_skel_anim_clip;           // SetSkelAnim request: clip to set on that NPC
@@ -1151,7 +1152,10 @@ static void update_camera(void)
     // Tank controls: move relative to the player heading (turned by D-pad via a
     // Turn Player node), not the camera, so the camera can orbit independently.
     int bsin = g_sinf, bcos = g_cosf;
-    if (afn_tank_camera) { bsin = brad_sin((uint16_t)afn_player_heading); bcos = brad_cos((uint16_t)afn_player_heading); }
+    {
+        extern int afn_tank_move;   // TurnPlayer Movement toggle (Camera Relative skips this)
+        if (afn_tank_camera && afn_tank_move) { bsin = brad_sin((uint16_t)afn_player_heading); bcos = brad_cos((uint16_t)afn_player_heading); }
+    }
     int dx = ((bsin * fwd + bcos * right) >> 8);
     int dz = ((bcos * fwd - bsin * right) >> 8);
     extern int afn_grind_rail;
@@ -1212,7 +1216,9 @@ static void update_camera(void)
     // while moving (atan2 of dpad input), then converted to world-space
     // at the moment of stopping. orbit_angle stays fixed at AFN_CAM_ANGLE
     // (matches GBA — manual L/R orbit modifies cam_angle, not orbit_angle).
-    if (player_moving) {
+    if (player_moving && !afn_face_lock) {
+        // (afn_face_lock = MovePlayer "Consistent Facing": skip the facing
+        // update so the sprite/rig keeps its direction while moving.)
         // Brad ArcTan2(inputRight=x, inputFwd=y). GBA convention: angle
         // measured from +X axis, so atan2(0,+y) = 0x4000 (DPAD-up = N
         // brad). Picker formula then maps brad 0x4000 → dir 0 (N image).
@@ -1227,7 +1233,7 @@ static void update_camera(void)
         else if (afn_input_fwd == 0 && afn_input_right < 0) ang = 0x0000; // LEFT
         else if (afn_input_fwd > 0 && afn_input_right < 0)  ang = 0x2000; // UP+LEFT
         player_move_angle = ang;
-    } else if (s_wasMoving) {
+    } else if (!player_moving && s_wasMoving) {
         // On stop: bake current orbit into player_move_angle so the idle
         // formula `player_move_angle - 2*orbit_angle` gives the same dir
         // the moving picker just gave. Prevents a snap on key release.
