@@ -7,6 +7,7 @@
 #include "../platform/nds/nds_package.h"
 #include "../platform/psp/psp_package.h"
 #include "../platform/psv/psv_package.h"
+#include "../navmesh/NavMeshBuilder.h"
 #include "imgui.h"
 
 #include <array>
@@ -4391,6 +4392,256 @@ static int sSelectedMesh = -1;
 static std::set<int> sSelectedMeshes;       // multi-select set for mesh assets
 static bool sMeshDragSelecting = false;     // true while drag-selecting in mesh list
 
+// ---- NavMesh preview (PSV navigation) ----
+// Built on demand from the NPC properties' "Build NavMesh Preview" button.
+// The build runs in PSV world space — the EXACT triangle soup + transform
+// GeneratePSVNav exports — then the detail tris are mapped back to editor
+// coords (x*4-512, y*4) for the 3D viewport overlay, so what you see is what
+// the Vita paths on.
+static std::vector<float> sNavPreviewTris;  // editor-space xyz, 3 verts/tri
+static bool sNavPreviewShow = false;
+static bool sNavPreviewPaths = false;       // draw each nav NPC's path to the Player
+static int  sNavBoxEdit = -1;               // sprite index of the nav box being edited
+                                            // in the Navigation section (not the object
+                                            // selection — boxes are edited in-section)
+
+static void BuildNavMeshPreview()
+{
+    std::vector<float> verts;
+    std::vector<int> tris;
+    std::vector<unsigned char> triFlags;
+    const float D2R = 3.14159265f / 180.0f;
+    // Nav bounds boxes (world space, {x0,y0,z0,x1,y1,z1} per slot): ADDITIVE —
+    // the whole scene always participates, and geometry inside a box is
+    // force-marked walkable (slope test overridden) so ramps/objects the
+    // auto-build rejects join the surface.
+    std::vector<std::array<float,6>> navBoxes;
+    for (int i = 0; i < sSpriteCount; i++) {
+        const FloorSprite& s = sSprites[i];
+        if (!s.isNavPlane) continue;
+        float hw = s.navPlaneW * 0.5f, hh = s.navPlaneH * 0.5f, hd = s.navPlaneD * 0.5f;
+        navBoxes.push_back({ (s.x - hw + 512.0f) / 4.0f, (s.y - hh) / 4.0f, (s.z - hd + 512.0f) / 4.0f,
+                             (s.x + hw + 512.0f) / 4.0f, (s.y + hh) / 4.0f, (s.z + hd + 512.0f) / 4.0f });
+    }
+    for (int i = 0; i < sSpriteCount; i++) {
+        const FloorSprite& s = sSprites[i];
+        if (s.type != SpriteType::Mesh) continue;
+        if (s.meshIdx < 0 || s.meshIdx >= (int)sMeshAssets.size()) continue;
+        const MeshAsset& m = sMeshAssets[s.meshIdx];
+        std::vector<uint32_t> idx = m.indices;
+        for (size_t q = 0; q + 4 <= m.quadIndices.size(); q += 4) {
+            uint32_t a = m.quadIndices[q], b = m.quadIndices[q+1], c = m.quadIndices[q+2], d = m.quadIndices[q+3];
+            idx.push_back(a); idx.push_back(b); idx.push_back(c);
+            idx.push_back(a); idx.push_back(c); idx.push_back(d);
+        }
+        float ry = s.rotation * D2R, rx = s.rotationX * D2R, rz = s.rotationZ * D2R;
+        float cY = cosf(ry), sY = sinf(ry), cX = cosf(rx), sX = sinf(rx), cZ = cosf(rz), sZ = sinf(rz);
+        float px = (s.x + 512.0f) / 4.0f, py = s.y / 4.0f, pz = (s.z + 512.0f) / 4.0f;
+        for (size_t t = 0; t + 3 <= idx.size(); t += 3) {
+            float wp[9];
+            bool bad = false;
+            for (int k = 0; k < 3 && !bad; k++) {
+                uint32_t vi = idx[t + k];
+                if (vi >= m.vertices.size()) { bad = true; break; }
+                float lx = m.vertices[vi].px / 4.0f * s.scale;
+                float ly = m.vertices[vi].py / 4.0f * s.scale;
+                float lz = m.vertices[vi].pz / 4.0f * s.scale;
+                float ax = lx*cY + lz*sY, az = -lx*sY + lz*cY, ay = ly;
+                float ay2 = ay*cX - az*sX, az2 = ay*sX + az*cX;
+                float ax2 = ax*cZ - ay2*sZ, ay3 = ax*sZ + ay2*cZ;
+                wp[k*3+0] = px + ax2; wp[k*3+1] = py + ay3; wp[k*3+2] = pz + az2;
+            }
+            if (bad) continue;
+            // Box test: a triangle with any vertex inside a nav bounds box is
+            // force-marked walkable (flag bit 1) so the surface extends over it.
+            unsigned char flag = 0;
+            for (int k = 0; k < 3 && !flag; k++)
+                for (const auto& b : navBoxes)
+                    if (wp[k*3+0] >= b[0] && wp[k*3+0] <= b[3] &&
+                        wp[k*3+1] >= b[1] && wp[k*3+1] <= b[4] &&
+                        wp[k*3+2] >= b[2] && wp[k*3+2] <= b[5]) { flag = 2; break; }
+            int base = (int)verts.size() / 3;
+            for (int k = 0; k < 9; k++) verts.push_back(wp[k]);
+            tris.push_back(base); tris.push_back(base + 1); tris.push_back(base + 2);
+            triFlags.push_back(flag);
+        }
+    }
+
+    sNavPreviewTris.clear();
+    if (tris.empty()) return;
+    if (NavMeshBuild(verts.data(), (int)verts.size() / 3, tris.data(), (int)tris.size() / 3,
+                     NavMeshParams{}, triFlags.data())) {
+        const std::vector<float>& dbg = NavMeshDebugTris();
+        sNavPreviewTris.reserve(dbg.size());
+        for (size_t v = 0; v + 3 <= dbg.size(); v += 3) {
+            sNavPreviewTris.push_back(dbg[v + 0] * 4.0f - 512.0f);   // world -> editor
+            sNavPreviewTris.push_back(dbg[v + 1] * 4.0f);
+            sNavPreviewTris.push_back(dbg[v + 2] * 4.0f - 512.0f);
+        }
+    }
+    // Deliberately NOT NavMeshClear()'d: the navmesh stays loaded so the
+    // viewport's "Paths" overlay can run live NavMeshFindPath queries (they
+    // re-run every frame, so paths follow objects as you drag them). An
+    // Export PSV rebuilds+frees its own navmesh — hit Build Preview again
+    // after exporting if the path overlay goes dead.
+}
+
+static float Scaled(float base);   // UI-scale helper, defined with the UI globals
+
+// "Navigation (PSV)" properties for an NPC/Enemy sprite — shown in BOTH the
+// Mode 4 object properties panel and the 3D tab's Placed glTF panel, so the
+// nav layer is editable wherever the NPC is being worked on. Returns true if
+// anything changed (caller sets sProjectDirty).
+static bool DrawNavigationSectionUI(FloorSprite& sp, std::vector<RiggedMeshAsset>& rigAssets)
+{
+    bool dirty = false;
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.8f, 1.0f), "Navigation (PSV)");
+    const char* navModes[] = { "Off", "Follow Player", "Wander" };
+    // NPC pathing controls don't apply when the selected object IS a nav box
+    // (the section also shows for boxes so the box slots stay reachable).
+    if (!sp.isNavPlane) {
+    ImGui::PushItemWidth(Scaled(140));
+    if (ImGui::Combo("Nav Mode##navmode", &sp.navMode, navModes, 3)) dirty = true;
+    ImGui::PopItemWidth();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pathfind across the navmesh baked from the scene's collision meshes at PSV export. Follow Player chases the player; Wander roams between random navmesh points.");
+    }
+    if (!sp.isNavPlane && sp.navMode != 0)
+    {
+        ImGui::PushItemWidth(Scaled(140));
+        if (ImGui::DragFloat("Speed##navspd", &sp.navSpeed, 0.1f, 0.5f, 40.0f, "%.1f u/frame")) dirty = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Editor units per frame (5 ~= player walk speed).");
+        if (ImGui::DragFloat("Stop Distance##navstop", &sp.navStopDist, 0.5f, 0.0f, 512.0f, "%.0f")) dirty = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop pathing when this close to the goal (don't crowd the player).");
+        if (ImGui::DragInt("Repath Frames##navrep", &sp.navRepath, 1.0f, 5, 600)) dirty = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Frames between path recomputes (60 = once per second).");
+        ImGui::PopItemWidth();
+        // Move Clip: skeletal clip played while pathing, reverts to the
+        // authored clip when stopped (-1 = keep current clip throughout).
+        if (sp.riggedMeshIdx >= 0 && sp.riggedMeshIdx < (int)rigAssets.size()
+            && !rigAssets[sp.riggedMeshIdx].clips.empty())
+        {
+            RiggedMeshAsset& nrm = rigAssets[sp.riggedMeshIdx];
+            if (sp.navMoveClip >= (int)nrm.clips.size()) sp.navMoveClip = -1;
+            const char* curName = (sp.navMoveClip >= 0)
+                ? nrm.clips[sp.navMoveClip].name.c_str() : "(keep current)";
+            ImGui::PushItemWidth(Scaled(140));
+            if (ImGui::BeginCombo("Move Clip##navclip", curName)) {
+                if (ImGui::Selectable("(keep current)", sp.navMoveClip < 0)) { sp.navMoveClip = -1; dirty = true; }
+                for (int ci = 0; ci < (int)nrm.clips.size(); ci++)
+                    if (ImGui::Selectable(nrm.clips[ci].name.c_str(), sp.navMoveClip == ci)) { sp.navMoveClip = ci; dirty = true; }
+                ImGui::EndCombo();
+            }
+            ImGui::PopItemWidth();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Skeletal clip played while moving (e.g. a walk cycle); the authored clip resumes when the NPC stops.");
+        }
+    }
+    // Preview the navmesh the PSV export will bake — same triangle soup +
+    // Recast params, overlaid on the 3D viewport.
+    if (ImGui::Button("Build NavMesh Preview##navprev")) {
+        BuildNavMeshPreview();
+        sNavPreviewShow = !sNavPreviewTris.empty();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Bake the navmesh from the scene's meshes (what Export PSV will ship) and overlay it on the 3D view.");
+    if (!sNavPreviewTris.empty()) {
+        ImGui::SameLine();
+        ImGui::Checkbox("Show##navprevshow", &sNavPreviewShow);
+        ImGui::SameLine();
+        ImGui::Checkbox("Paths##navprevpaths", &sNavPreviewPaths);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Draw each nav NPC's Detour path to the Player (yellow = Follow Player, orange = Wander). Live — paths re-route as you drag objects.");
+        ImGui::TextColored(ImVec4(0.6f, 0.8f, 0.6f, 1.0f), "%d navmesh tris", (int)sNavPreviewTris.size() / 9);
+    }
+    // Nav bounds boxes: axis-aligned volumes whose covered geometry is forced
+    // walkable. Boxes live ENTIRELY in this section — they're hidden from the
+    // placed-object lists, picked from the dropdown below, and edited with the
+    // slots underneath it (the NPC stays the selected object throughout).
+    ImGui::Separator();
+    {
+        int boxCount = 0;
+        for (int i = 0; i < sSpriteCount; i++) if (sSprites[i].isNavPlane) boxCount++;
+        ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.65f, 1.0f), "Nav Boxes (%d)", boxCount);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Add##navaddbox")) {
+            if (sSpriteCount < kMaxFloorSprites) {
+                FloorSprite& np = sSprites[sSpriteCount];
+                np = FloorSprite{};
+                np.type = SpriteType::Prop;
+                np.isNavPlane = true;
+                np.assetIdx = -1;
+                np.x = sp.x + 48.0f; np.y = sp.y; np.z = sp.z;
+                sNavBoxEdit = sSpriteCount;
+                // Make the new box the ACTUAL selection so G-grab moves it
+                // immediately (the section stays visible for a selected box).
+                if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
+                    sSprites[sSelectedSprite].selected = false;
+                np.selected = true;
+                sSelectedSprite = sSpriteCount;
+                sSelectedObjType = SelectedObjType::Sprite;
+                sSpriteCount++;
+                dirty = true;
+            }
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Place a nav bounds box next to this NPC. Scene geometry inside the box is FORCED walkable (slopes/ramps the auto-build rejects), extending the navmesh over it. The preview rebuilds live as you move/resize boxes.");
+        if (sNavBoxEdit >= sSpriteCount || (sNavBoxEdit >= 0 && !sSprites[sNavBoxEdit].isNavPlane))
+            sNavBoxEdit = -1;
+        if (boxCount > 0) {
+            char cur[64];
+            if (sNavBoxEdit >= 0)
+                snprintf(cur, sizeof(cur), "Box [%d]  %.0fx%.0fx%.0f", sNavBoxEdit,
+                         sSprites[sNavBoxEdit].navPlaneW, sSprites[sNavBoxEdit].navPlaneH, sSprites[sNavBoxEdit].navPlaneD);
+            else
+                snprintf(cur, sizeof(cur), "(pick a box)");
+            ImGui::PushItemWidth(Scaled(170));
+            if (ImGui::BeginCombo("##navboxlist", cur)) {
+                for (int i = 0; i < sSpriteCount; i++) {
+                    if (!sSprites[i].isNavPlane) continue;
+                    char lbl[80];
+                    snprintf(lbl, sizeof(lbl), "Box [%d]  %.0fx%.0fx%.0f  @ %.0f,%.0f,%.0f##navbox%d",
+                             i, sSprites[i].navPlaneW, sSprites[i].navPlaneH, sSprites[i].navPlaneD,
+                             sSprites[i].x, sSprites[i].y, sSprites[i].z, i);
+                    if (ImGui::Selectable(lbl, sNavBoxEdit == i)) {
+                        sNavBoxEdit = i;
+                        // Also make it the selected object so G-grab moves it.
+                        if (sSelectedSprite >= 0 && sSelectedSprite < sSpriteCount)
+                            sSprites[sSelectedSprite].selected = false;
+                        sSelectedSprite = i;
+                        sSelectedObjType = SelectedObjType::Sprite;
+                        sSprites[i].selected = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopItemWidth();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Every nav bounds box in the scene — pick one to edit it below (highlighted yellow in the viewport).");
+            if (sNavBoxEdit >= 0) {
+                FloorSprite& nb = sSprites[sNavBoxEdit];
+                ImGui::PushItemWidth(Scaled(140));
+                if (ImGui::DragFloat("X##navbx", &nb.x, 1.0f, -512.0f, 512.0f, "%.0f")) dirty = true;
+                if (ImGui::DragFloat("Y##navby", &nb.y, 0.5f, -9999.0f, 9999.0f, "%.0f")) dirty = true;
+                if (ImGui::DragFloat("Z##navbz", &nb.z, 1.0f, -512.0f, 512.0f, "%.0f")) dirty = true;
+                if (ImGui::DragFloat("Width##navbw", &nb.navPlaneW, 1.0f, 4.0f, 1024.0f, "%.0f")) dirty = true;
+                if (ImGui::DragFloat("Height##navbh", &nb.navPlaneH, 1.0f, 4.0f, 1024.0f, "%.0f")) dirty = true;
+                if (ImGui::DragFloat("Depth##navbd", &nb.navPlaneD, 1.0f, 4.0f, 1024.0f, "%.0f")) dirty = true;
+                ImGui::PopItemWidth();
+                if (ImGui::SmallButton("Delete Box##navbdel")) {
+                    for (int j = sNavBoxEdit; j < sSpriteCount - 1; j++)
+                        sSprites[j] = sSprites[j + 1];
+                    sSpriteCount--;
+                    if (sSelectedSprite == sNavBoxEdit) {
+                        sSelectedSprite = -1;
+                        sSelectedObjType = SelectedObjType::None;
+                    } else if (sSelectedSprite > sNavBoxEdit) {
+                        sSelectedSprite--;
+                    }
+                    sNavBoxEdit = -1;
+                    dirty = true;
+                }
+            }
+        }
+    }
+    return dirty;
+}
+
 // ---- 3D View state ----
 static float s3DOrbitYaw   = 0.4f;   // radians
 static float s3DOrbitPitch = 0.6f;   // radians (clamped)
@@ -5531,11 +5782,13 @@ static bool SaveProject(const std::string& path)
     for (int i = 0; i < sSpriteCount; i++)
     {
         const FloorSprite& sp = sSprites[i];
-        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d",
+        fprintf(f, "sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d,%d,%.6f,%.6f,%d,%d,%d,%.6f,%.6f,%.6f",
                 sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                 sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0,
                 sp.meshIdx, sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
-                sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane, sp.spriteDrawPriority, sp.blitSlot);
+                sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane, sp.spriteDrawPriority, sp.blitSlot,
+                sp.navMode, sp.navSpeed, sp.navStopDist, sp.navRepath, sp.navMoveClip,
+                sp.isNavPlane ? 1 : 0, sp.navPlaneW, sp.navPlaneD, sp.navPlaneH);
         for (int ip = 0; ip < sp.instanceParamCount; ip++)
             fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
         fprintf(f, "\n");
@@ -6028,11 +6281,13 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d",
+            fprintf(f, "msSprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d,%d,%.6f,%.6f,%d,%d,%d,%.6f,%.6f,%.6f",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
                     sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
-                    sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane, sp.spriteDrawPriority, sp.blitSlot);
+                    sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane, sp.spriteDrawPriority, sp.blitSlot,
+                sp.navMode, sp.navSpeed, sp.navStopDist, sp.navRepath, sp.navMoveClip,
+                sp.isNavPlane ? 1 : 0, sp.navPlaneW, sp.navPlaneD, sp.navPlaneH);
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
@@ -6171,11 +6426,13 @@ static bool SaveProject(const std::string& path)
         for (int i = 0; i < ms.spriteCount; i++)
         {
             const FloorSprite& sp = ms.sprites[i];
-            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d",
+            fprintf(f, "m7Sprite=%d,%.6f,%.6f,%.6f,%.6f,%u,%d,%d,%d,%.6f,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%u,%d,%d,%d,%d,%.6f,%u,%d,%d,%d,%.6f,%.6f,%d,%d,%d,%.6f,%.6f,%.6f",
                     sp.spriteId, sp.x, sp.y, sp.z, sp.scale, sp.color,
                     sp.assetIdx, sp.animIdx, (int)sp.type, sp.rotation, sp.animEnabled ? 1 : 0, sp.meshIdx,
                     sp.blueprintIdx, sp.instanceParamCount, sp.forceStatic ? 1 : 0, sp.drawBehind ? 1 : 0,
-                    sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane, sp.spriteDrawPriority, sp.blitSlot);
+                    sp.rotationX, sp.rotationZ, sp.drawBehindExceptions, sp.drawBehindNoSky ? 1 : 0, sp.skipProximity ? 1 : 0, sp.billboard ? 1 : 0, sp.meshSpriteIdx, sp.drawBehindThreshold, sp.drawBehindClipPlane, sp.spriteDrawPriority, sp.blitSlot,
+                sp.navMode, sp.navSpeed, sp.navStopDist, sp.navRepath, sp.navMoveClip,
+                sp.isNavPlane ? 1 : 0, sp.navPlaneW, sp.navPlaneD, sp.navPlaneH);
             for (int ip = 0; ip < sp.instanceParamCount; ip++)
                 fprintf(f, "|%d:%d", sp.instanceParams[ip].paramIdx, sp.instanceParams[ip].value);
             fprintf(f, "\n");
@@ -6658,7 +6915,11 @@ static bool LoadProject(const std::string& path)
                 unsigned int dbClip = 0;
                 int sprPri = 0;
                 int blitSl = -1;
-                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl);
+                int navMd = 0, navRep = 30, navClp = -1;
+                float navSpd = 5.0f, navStp = 32.0f;
+                int navPl = 0;
+                float navPw = 64.0f, navPd = 64.0f, navPh = 64.0f;
+                int matched = sscanf(line, "sprite=%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d,%d,%f,%f,%d,%d,%d,%f,%f,%f", &sid, &sx, &sy, &sz, &sc, &col, &aIdx, &anIdx, &typeVal, &rot, &animEn, &mIdx, &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl, &navMd, &navSpd, &navStp, &navRep, &navClp, &navPl, &navPw, &navPd, &navPh);
                 if (matched >= 6)
                 {
                     FloorSprite& sp = sSprites[sSpriteCount];
@@ -6690,6 +6951,15 @@ static bool LoadProject(const std::string& path)
                     sp.drawBehindClipPlane = (matched >= 25) ? dbClip : 0;
                     sp.spriteDrawPriority = (matched >= 26) ? sprPri : 0;
                     sp.blitSlot = (matched >= 27) ? blitSl : -1;
+                    sp.navMode = (matched >= 28) ? navMd : 0;
+                    sp.navSpeed = (matched >= 29) ? navSpd : 5.0f;
+                    sp.navStopDist = (matched >= 30) ? navStp : 32.0f;
+                    sp.navRepath = (matched >= 31) ? navRep : 30;
+                    sp.navMoveClip = (matched >= 32) ? navClp : -1;
+                    sp.isNavPlane = (matched >= 33) ? (navPl != 0) : false;
+                    sp.navPlaneW = (matched >= 34) ? navPw : 64.0f;
+                    sp.navPlaneD = (matched >= 35) ? navPd : 64.0f;
+                    sp.navPlaneH = (matched >= 36) ? navPh : 64.0f;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line;
@@ -7903,10 +8173,14 @@ static bool LoadProject(const std::string& path)
                 unsigned int dbClip = 0;
                 int sprPri = 0;
                 int blitSl = -1;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d",
+                int navMd = 0, navRep = 30, navClp = -1;
+                float navSpd = 5.0f, navStp = 32.0f;
+                int navPl = 0;
+                float navPw = 64.0f, navPd = 64.0f, navPh = 64.0f;
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d,%d,%f,%f,%d,%d,%d,%f,%f,%f",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl);
+                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl, &navMd, &navSpd, &navStp, &navRep, &navClp, &navPl, &navPw, &navPd, &navPh);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
@@ -7926,6 +8200,15 @@ static bool LoadProject(const std::string& path)
                     sp.drawBehindClipPlane = (matched >= 25) ? dbClip : 0;
                     sp.spriteDrawPriority = (matched >= 26) ? sprPri : 0;
                     sp.blitSlot = (matched >= 27) ? blitSl : -1;
+                    sp.navMode = (matched >= 28) ? navMd : 0;
+                    sp.navSpeed = (matched >= 29) ? navSpd : 5.0f;
+                    sp.navStopDist = (matched >= 30) ? navStp : 32.0f;
+                    sp.navRepath = (matched >= 31) ? navRep : 30;
+                    sp.navMoveClip = (matched >= 32) ? navClp : -1;
+                    sp.isNavPlane = (matched >= 33) ? (navPl != 0) : false;
+                    sp.navPlaneW = (matched >= 34) ? navPw : 64.0f;
+                    sp.navPlaneD = (matched >= 35) ? navPd : 64.0f;
+                    sp.navPlaneH = (matched >= 36) ? navPh : 64.0f;
                     // Parse instance params from pipe-delimited suffix
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
@@ -8359,10 +8642,14 @@ static bool LoadProject(const std::string& path)
                 unsigned int dbClip = 0;
                 int sprPri = 0;
                 int blitSl = -1;
-                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d",
+                int navMd = 0, navRep = 30, navClp = -1;
+                float navSpd = 5.0f, navStp = 32.0f;
+                int navPl = 0;
+                float navPw = 64.0f, navPd = 64.0f, navPh = 64.0f;
+                int matched = sscanf(line + 9, "%d,%f,%f,%f,%f,%u,%d,%d,%d,%f,%d,%d,%d,%d,%d,%d,%f,%f,%u,%d,%d,%d,%d,%f,%u,%d,%d,%d,%f,%f,%d,%d,%d,%f,%f,%f",
                     &sp.spriteId, &sp.x, &sp.y, &sp.z, &sp.scale, &sp.color,
                     &sp.assetIdx, &sp.animIdx, &typeVal, &sp.rotation, &animEn, &sp.meshIdx,
-                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl);
+                    &bpIdx, &bpParamCnt, &fStatic, &dBehind, &rotX, &rotZ, &dbExc, &dbNoSky, &skipProx, &billb, &mSprIdx, &dbThresh, &dbClip, &sprPri, &blitSl, &navMd, &navSpd, &navStp, &navRep, &navClp, &navPl, &navPw, &navPd, &navPh);
                 if (matched >= 6)
                 {
                     sp.type = (SpriteType)typeVal;
@@ -8382,6 +8669,15 @@ static bool LoadProject(const std::string& path)
                     sp.drawBehindClipPlane = (matched >= 25) ? dbClip : 0;
                     sp.spriteDrawPriority = (matched >= 26) ? sprPri : 0;
                     sp.blitSlot = (matched >= 27) ? blitSl : -1;
+                    sp.navMode = (matched >= 28) ? navMd : 0;
+                    sp.navSpeed = (matched >= 29) ? navSpd : 5.0f;
+                    sp.navStopDist = (matched >= 30) ? navStp : 32.0f;
+                    sp.navRepath = (matched >= 31) ? navRep : 30;
+                    sp.navMoveClip = (matched >= 32) ? navClp : -1;
+                    sp.isNavPlane = (matched >= 33) ? (navPl != 0) : false;
+                    sp.navPlaneW = (matched >= 34) ? navPw : 64.0f;
+                    sp.navPlaneD = (matched >= 35) ? navPd : 64.0f;
+                    sp.navPlaneH = (matched >= 36) ? navPh : 64.0f;
                     if (sp.instanceParamCount > 0) {
                         const char* p = line + 9;
                         for (int ip = 0; ip < sp.instanceParamCount; ip++) {
@@ -10546,6 +10842,7 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
     for (int i = 0; i < sSpriteCount; i++)
     {
         if (sSprites[i].type == SpriteType::Mesh) continue;
+        if (sSprites[i].isNavPlane) continue;   // nav boxes live in the Navigation section
         char label[64];
         const char* tname = kSpriteTypeNames[(int)sSprites[i].type];
         const char* aname = (sSprites[i].assetIdx >= 0 && sSprites[i].assetIdx < (int)sSpriteAssets.size())
@@ -10718,6 +11015,16 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset the box to wrap the model's bind-pose bounds.");
             }
+        }
+
+        // ---- Navigation (PSV navmesh) ----
+        // Same section as the Mode 4 object properties — editable from the 3D
+        // tab too, since rigged NPCs are usually placed/tuned here. Also shown
+        // when the selected object IS a nav box (G-grab selects boxes), so the
+        // box slots stay reachable.
+        if (sp.type == SpriteType::NPC || sp.type == SpriteType::Enemy || sp.isNavPlane)
+        {
+            if (DrawNavigationSectionUI(sp, sRiggedMeshAssets)) sProjectDirty = true;
         }
 
         // ---- Rail ----
@@ -12668,6 +12975,7 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
     // Sprite entries
     for (int i = 0; i < sSpriteCount; i++)
     {
+        if (sSprites[i].isNavPlane) continue;   // nav boxes live in the Navigation section
         char label[64];
         const char* typeName = kSpriteTypeNames[(int)sSprites[i].type];
         snprintf(label, sizeof(label), "[%d] %s", i, typeName);
@@ -12962,6 +13270,13 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                 }
                 ImGui::Unindent();
             }
+        }
+        // Navigation (PSV navmesh) — NPC/Enemy, or a selected nav box. The PSV
+        // export bakes a Recast navmesh from the collision meshes; at runtime
+        // the NPC runs Detour queries across it (nav_bridge + npc_nav_update).
+        if (sp.type == SpriteType::NPC || sp.type == SpriteType::Enemy || sp.isNavPlane)
+        {
+            if (DrawNavigationSectionUI(sp, sRiggedMeshAssets)) sProjectDirty = true;
         }
         // Mesh asset link (only for Mesh type)
         if (sp.type == SpriteType::Mesh)
@@ -15267,6 +15582,16 @@ void FrameTick(float dt)
                         // afn_rail_pts / afn_rail_spline keyed by this sprite index.
                         se.isGrindRail = sSprites[i].isGrindRail;
                         se.railSpline  = sSprites[i].railSpline;
+                        // Navigation (PSV navmesh) — psv_package emits afn_npc_nav from these.
+                        se.navMode = sSprites[i].navMode;
+                        se.navSpeed = sSprites[i].navSpeed;
+                        se.navStopDist = sSprites[i].navStopDist;
+                        se.navRepath = sSprites[i].navRepath;
+                        se.navMoveClip = sSprites[i].navMoveClip;
+                        se.isNavPlane = sSprites[i].isNavPlane;
+                        se.navPlaneW = sSprites[i].navPlaneW;
+                        se.navPlaneD = sSprites[i].navPlaneD;
+                        se.navPlaneH = sSprites[i].navPlaneH;
                         se.railPath.clear();
                         for (int rp = 0; rp < sSprites[i].railPointCount; rp++)
                             se.railPath.push_back({ sSprites[i].railPath[rp].x,
@@ -30771,6 +31096,162 @@ void Render3DViewport()
     glVertex3f(512, -0.1f, 512);   glVertex3f(-512, -0.1f, 512);
     glEnd();
     glDisable(GL_BLEND);
+
+    // ---- NavMesh live rebuild ----
+    // Re-run the Recast build whenever nav-relevant scene state changes (a
+    // box moved/resized, a mesh dragged, ...). Hashed + throttled: while
+    // dragging it rebuilds every ~12 frames, and the final state always
+    // rebuilds once the hash mismatch is seen with an expired cooldown.
+    if (sNavPreviewShow)
+    {
+        static unsigned sNavLiveHash = 0;
+        static int sNavLiveCool = 0;
+        unsigned h = 2166136261u;
+        auto mix = [&](float v) { unsigned u; memcpy(&u, &v, 4); h = (h ^ u) * 16777619u; };
+        // Hash ONLY nav-box state + object counts — hashing mesh transforms
+        // caused a rebuild-every-12-frames loop (billboard meshes rewrite
+        // their rotation per frame). Mesh edits are picked up by the count
+        // change or the next manual Build click.
+        int meshCount = 0;
+        for (int i = 0; i < sSpriteCount; i++) {
+            const FloorSprite& fs = sSprites[i];
+            if (fs.type == SpriteType::Mesh && fs.meshIdx >= 0) meshCount++;
+            if (!fs.isNavPlane) continue;
+            mix(fs.x); mix(fs.y); mix(fs.z);
+            mix(fs.navPlaneW); mix(fs.navPlaneH); mix(fs.navPlaneD);
+        }
+        h = (h ^ (unsigned)meshCount) * 16777619u;
+        if (h != sNavLiveHash) {
+            if (--sNavLiveCool <= 0) {
+                sNavLiveHash = h;
+                sNavLiveCool = 12;
+                BuildNavMeshPreview();
+            }
+        } else {
+            sNavLiveCool = 0;
+        }
+    }
+
+    // ---- Nav bounds boxes ----
+    // Axis-aligned volumes that select which geometry joins the navmesh
+    // build. Always drawn so they can be placed/sized before a preview
+    // build; the selected box gets a brighter fill + yellow edges.
+    {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        for (int i = 0; i < sSpriteCount; i++)
+        {
+            const FloorSprite& fs = sSprites[i];
+            if (!fs.isNavPlane) continue;
+            float hw = fs.navPlaneW * 0.5f, hh = fs.navPlaneH * 0.5f, hd = fs.navPlaneD * 0.5f;
+            float x0 = fs.x - hw, x1 = fs.x + hw;
+            float y0 = fs.y - hh, y1 = fs.y + hh;
+            float z0 = fs.z - hd, z1 = fs.z + hd;
+            bool sel = (i == sSelectedSprite || i == sNavBoxEdit);
+            // Translucent top + bottom faces show the covered footprint.
+            glColor4f(0.25f, 0.95f, 0.55f, sel ? 0.30f : 0.14f);
+            glBegin(GL_QUADS);
+            glVertex3f(x0, y1, z0); glVertex3f(x1, y1, z0); glVertex3f(x1, y1, z1); glVertex3f(x0, y1, z1);
+            glVertex3f(x0, y0, z0); glVertex3f(x1, y0, z0); glVertex3f(x1, y0, z1); glVertex3f(x0, y0, z1);
+            glEnd();
+            if (sel) glColor4f(1.0f, 0.95f, 0.3f, 0.95f);
+            else     glColor4f(0.2f, 0.75f, 0.35f, 0.8f);
+            glBegin(GL_LINE_LOOP);
+            glVertex3f(x0, y1, z0); glVertex3f(x1, y1, z0); glVertex3f(x1, y1, z1); glVertex3f(x0, y1, z1);
+            glEnd();
+            glBegin(GL_LINE_LOOP);
+            glVertex3f(x0, y0, z0); glVertex3f(x1, y0, z0); glVertex3f(x1, y0, z1); glVertex3f(x0, y0, z1);
+            glEnd();
+            glBegin(GL_LINES);
+            glVertex3f(x0, y0, z0); glVertex3f(x0, y1, z0);
+            glVertex3f(x1, y0, z0); glVertex3f(x1, y1, z0);
+            glVertex3f(x1, y0, z1); glVertex3f(x1, y1, z1);
+            glVertex3f(x0, y0, z1); glVertex3f(x0, y1, z1);
+            glEnd();
+        }
+        glDisable(GL_BLEND);
+    }
+
+    // ---- NavMesh preview overlay (PSV navigation) ----
+    // Walkable surface Recast built from the scene meshes (BuildNavMeshPreview),
+    // lifted a hair above the geometry so it doesn't z-fight the floors.
+    if (sNavPreviewShow && !sNavPreviewTris.empty())
+    {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glColor4f(0.2f, 0.9f, 0.4f, 0.28f);
+        glBegin(GL_TRIANGLES);
+        for (size_t v = 0; v + 9 <= sNavPreviewTris.size(); v += 9)
+        {
+            glVertex3f(sNavPreviewTris[v+0], sNavPreviewTris[v+1] + 0.5f, sNavPreviewTris[v+2]);
+            glVertex3f(sNavPreviewTris[v+3], sNavPreviewTris[v+4] + 0.5f, sNavPreviewTris[v+5]);
+            glVertex3f(sNavPreviewTris[v+6], sNavPreviewTris[v+7] + 0.5f, sNavPreviewTris[v+8]);
+        }
+        glEnd();
+        glColor4f(0.1f, 0.5f, 0.2f, 0.6f);
+        for (size_t v = 0; v + 9 <= sNavPreviewTris.size(); v += 9)
+        {
+            glBegin(GL_LINE_LOOP);
+            glVertex3f(sNavPreviewTris[v+0], sNavPreviewTris[v+1] + 0.6f, sNavPreviewTris[v+2]);
+            glVertex3f(sNavPreviewTris[v+3], sNavPreviewTris[v+4] + 0.6f, sNavPreviewTris[v+5]);
+            glVertex3f(sNavPreviewTris[v+6], sNavPreviewTris[v+7] + 0.6f, sNavPreviewTris[v+8]);
+            glEnd();
+        }
+        glDisable(GL_BLEND);
+    }
+
+    // ---- NavMesh path preview ----
+    // Live Detour queries against the preview navmesh: each nav-enabled NPC's
+    // path to the Player, re-routed every frame so dragging objects updates
+    // the route immediately. Yellow = Follow Player, orange = Wander (drawn
+    // to the Player too — it shows reachability even though wander goals are
+    // random at runtime).
+    if (sNavPreviewPaths && NavMeshIsReady())
+    {
+        float plx = 0, ply = 0, plz = 0; bool hasPlayer = false;
+        for (int i = 0; i < sSpriteCount; i++)
+            if (sSprites[i].type == SpriteType::Player) {
+                plx = sSprites[i].x; ply = sSprites[i].y; plz = sSprites[i].z;
+                hasPlayer = true; break;
+            }
+        if (hasPlayer)
+        {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            // Gizmo-style: no depth test, so the route stays readable when it
+            // runs over/behind ramps and platforms instead of clipping into
+            // them (straight segments chord under inclined surfaces).
+            glDisable(GL_DEPTH_TEST);
+            glLineWidth(2.0f);
+            for (int i = 0; i < sSpriteCount; i++)
+            {
+                const FloorSprite& ns = sSprites[i];
+                if (ns.navMode == 0) continue;
+                if (ns.type != SpriteType::NPC && ns.type != SpriteType::Enemy) continue;
+                NavVec3 a = { (ns.x + 512.0f) / 4.0f, ns.y / 4.0f, (ns.z + 512.0f) / 4.0f };
+                NavVec3 b = { (plx + 512.0f) / 4.0f, ply / 4.0f, (plz + 512.0f) / 4.0f };
+                std::vector<NavVec3> path;
+                if (!NavMeshFindPath(a, b, path) || path.size() < 2) continue;
+                if (ns.navMode == 1) glColor4f(1.0f, 0.9f, 0.2f, 0.9f);   // follow: yellow
+                else                 glColor4f(1.0f, 0.6f, 0.2f, 0.9f);   // wander: orange
+                glBegin(GL_LINE_STRIP);
+                for (const NavVec3& p : path)
+                    glVertex3f(p.x * 4.0f - 512.0f, p.y * 4.0f + 1.5f, p.z * 4.0f - 512.0f);
+                glEnd();
+                // Waypoint ticks so corner points read at a glance.
+                glBegin(GL_LINES);
+                for (const NavVec3& p : path) {
+                    float ex = p.x * 4.0f - 512.0f, ey = p.y * 4.0f, ez = p.z * 4.0f - 512.0f;
+                    glVertex3f(ex, ey + 1.5f, ez);
+                    glVertex3f(ex, ey + 8.0f, ez);
+                }
+                glEnd();
+            }
+            glLineWidth(1.0f);
+            glEnable(GL_DEPTH_TEST);
+            glDisable(GL_BLEND);
+        }
+    }
 
     // ---- Sprites ----
     for (int i = 0; i < sSpriteCount; i++)

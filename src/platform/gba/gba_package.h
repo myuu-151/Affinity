@@ -43,6 +43,18 @@ struct GBASpriteExport
     bool railSpline = false;    // runtime follows a smooth Catmull-Rom curve through railPath
     // [0..2] = world xyz, [3] = isEnd, [4] = isBounce, [5] = isStart (1/0 flags).
     std::vector<std::array<float,6>> railPath;
+    // Navigation (PSV navmesh, NPC/Enemy): emitted into psv_nav.h afn_npc_nav.
+    int   navMode = 0;          // 0 = off, 1 = follow player, 2 = wander
+    float navSpeed = 5.0f;      // editor units per frame (exporter converts /4 to world)
+    float navStopDist = 32.0f;  // stop this close to the goal, editor units
+    int   navRepath = 30;       // frames between path recomputes
+    int   navMoveClip = -1;     // rig clip to play while moving (-1 = keep current)
+    // Nav bounds box: axis-aligned volume selecting which scene geometry
+    // participates in the PSV navmesh build (extents in editor units).
+    bool  isNavPlane = false;
+    float navPlaneW = 64.0f;
+    float navPlaneD = 64.0f;
+    float navPlaneH = 64.0f;
 };
 
 // Player direction sprite for GBA export (RGBA8 image)

@@ -367,6 +367,21 @@ struct FloorSprite
     int   meshSpriteIdx = -1;    // mesh only: sprite asset to display on top of the mesh (-1 = none)
     int   spriteDrawPriority = 0; // -8..+8: higher = drawn over other sprites (OAM order)
     int   blitSlot = -1;          // -1 = auto-assign, 0/1/2 = manual palette slot for blit
+    // Navigation (PSV navmesh, NPC/Enemy only): the exported NPC paths across
+    // the baked Recast navmesh at runtime.
+    int   navMode = 0;            // 0 = off, 1 = follow player, 2 = wander
+    float navSpeed = 5.0f;        // editor units per frame (5 ~= player walk speed)
+    float navStopDist = 32.0f;    // stop this close to the goal, editor units (follow mode)
+    int   navRepath = 30;         // frames between path recomputes
+    int   navMoveClip = -1;       // rig clip to play while moving (-1 = keep current)
+    // Nav bounds box (Nebula NavMesh3DNode semantics): an axis-aligned volume
+    // centered on x/y/z. When any exist, only scene geometry with a vertex
+    // inside a box participates in the navmesh build, so the walkable surface
+    // conforms over the actual objects inside it. No boxes = whole scene.
+    bool  isNavPlane = false;     // (field name kept for save compat)
+    float navPlaneW = 64.0f;      // box extent X, editor units
+    float navPlaneD = 64.0f;      // box extent Z, editor units
+    float navPlaneH = 64.0f;      // box extent Y, editor units
     uint32_t color = 0xFFFF00FF; // tint color (ABGR) — used for editor preview
     bool  selected = false;
     // Attached sub-sprites (extra sprite layers with local offsets)

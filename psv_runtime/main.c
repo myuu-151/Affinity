@@ -20,6 +20,8 @@
 #include "psv_sprites.h"   // billboard sprites (AFN_HAS_SPRITES)
 #include "psv_rail.h"      // grind rail centerlines (AFN_HAS_RAIL_PATH)
 #include "psv_hud.h"       // 2D HUD overlay elements/pieces/text (AFN_HAS_HUD)
+#include "psv_nav.h"       // baked Recast navmesh blob + afn_npc_nav (AFN_HAS_NAVMESH)
+#include "nav_bridge.h"    // Detour query wrapper (afn_nav_*)
 
 #define SCR_W 960.0f
 #define SCR_H 544.0f
@@ -52,6 +54,20 @@ static float  s_npcFrame[AFN_NPC_COUNT + 1];       // per-NPC anim frame (+1 avo
 static float  s_npcY[AFN_NPC_COUNT + 1];           // gravity-driven dynamic Y (NDS s_npc_y parity)
 static float  s_npcVY[AFN_NPC_COUNT + 1];          // vertical velocity
 static unsigned char s_npcGround[AFN_NPC_COUNT + 1];
+// Nav-driven dynamic X/Z/yaw (seeded from afn_npc_inst like s_npcY; the
+// navmesh stepping in the NPC physics loop moves them, everything else —
+// render, blocker, OnCollision — reads them instead of the const inst).
+static float  s_npcX[AFN_NPC_COUNT + 1];
+static float  s_npcZ[AFN_NPC_COUNT + 1];
+static float  s_npcYaw[AFN_NPC_COUNT + 1];
+#ifdef AFN_HAS_NAVMESH
+#define NAV_MAX_WP 32
+static float  s_npcPath[AFN_NPC_COUNT + 1][NAV_MAX_WP * 3];   // Detour waypoints
+static int    s_npcPathLen[AFN_NPC_COUNT + 1];
+static int    s_npcPathIdx[AFN_NPC_COUNT + 1];
+static int    s_npcRepathT[AFN_NPC_COUNT + 1];                // frames until repath
+static unsigned char s_npcNavMoving[AFN_NPC_COUNT + 1];       // moving this frame (move clip)
+#endif
 extern int afn_gravity, afn_terminal_vel;          // SetGravity/SetMaxFall (8.8 fixed, shared with player)
 
 static void pose_to_mat(const float* p, float* m) {
@@ -102,6 +118,12 @@ static void rig_init(void) {
         s_npcClip[i] = -1;                       // no SetSkelAnim override yet
         s_npcY[i]  = afn_npc_inst[i][1];         // start at the authored Y; gravity settles it
         s_npcVY[i] = 0.0f; s_npcGround[i] = 0;
+        s_npcX[i]  = afn_npc_inst[i][0];         // nav moves these; authored start
+        s_npcZ[i]  = afn_npc_inst[i][2];
+        s_npcYaw[i] = afn_npc_inst[i][3];
+#ifdef AFN_HAS_NAVMESH
+        s_npcPathLen[i] = 0; s_npcPathIdx[i] = 0; s_npcRepathT[i] = 0; s_npcNavMoving[i] = 0;
+#endif
     }
     for (int r = 0; r < AFN_RIG_COUNT; r++) {
         const AfnRig* R = &afn_rigs[r];
@@ -253,11 +275,16 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
         if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;   // hidden / destroyed
 #endif
         int clip = s_npcClip[i] >= 0 ? s_npcClip[i] : (int)N[5];   // SetSkelAnim override
+#ifdef AFN_HAS_NAVMESH
+        // Nav move clip (walk cycle) while pathing; SetSkelAnim still wins.
+        if (s_npcClip[i] < 0 && s_npcNavMoving[i] && (int)afn_npc_nav[i][4] >= 0)
+            clip = (int)afn_npc_nav[i][4];
+#endif
         if (clip < 0 || clip >= R->clips) clip = 0;
         s_npcFrame[i] = rig_advance(R, clip, s_npcFrame[i]);
         build_bone_mats(R, clip, s_npcFrame[i]); skin(R);
-        // Draw at the gravity-settled Y (npc_physics updates s_npcY each frame).
-        rig_draw(R, s_rigTex[slot], view, N[0], s_npcY[i], N[2], N[3], N[4], 0);  // NPCs: world up
+        // Draw at the nav-driven X/Z/yaw + gravity-settled Y (NPC physics loop).
+        rig_draw(R, s_rigTex[slot], view, s_npcX[i], s_npcY[i], s_npcZ[i], s_npcYaw[i], N[4], 0);  // NPCs: world up
     }
 }
 #endif // AFN_HAS_PLAYER_RIG
@@ -1149,6 +1176,11 @@ int main(void)
     int   gr_on = 0; float gr_arc = 0.0f; int gr_dir = 1; float gr_speed = 0.0f, gr_prevY = 0.0f;
 #endif
     collide_build();
+#ifdef AFN_HAS_NAVMESH
+    // Detour navmesh (baked by the editor's Recast build at export). NPCs with
+    // a Navigation mode path across it in the per-NPC physics loop.
+    afn_nav_init(afn_navmesh_bin, afn_navmesh_bin_size);
+#endif
     {   // Drop onto the floor at spawn so we don't start mid-air.
         float fy, fn[3];
         if (collide_floor(playerX, playerZ, playerY + 200.0f, &fy, fn))
@@ -1399,11 +1431,74 @@ int main(void)
                 float hx = afn_npc_col[i][0], hy = afn_npc_col[i][1], hz = afn_npc_col[i][2];
                 float cx = afn_npc_col[i][3], cy = afn_npc_col[i][4], cz = afn_npc_col[i][5];
                 float nbottom = cy - hy;
+
+#ifdef AFN_HAS_NAVMESH
+                // Navigation (editor NPC Navigation section): walk the Detour
+                // path toward the goal. Mode 1 = follow player (repath on a
+                // timer, stop inside stopDist), mode 2 = wander (new random
+                // navmesh goal whenever the current path is exhausted). Only
+                // X/Z move here — gravity below keeps the Y honest.
+                s_npcNavMoving[i] = 0;
+                {
+                    int   mode  = (int)afn_npc_nav[i][0];
+                    float speed = afn_npc_nav[i][1];
+                    float stopD = afn_npc_nav[i][2];
+                    int   repat = (int)afn_npc_nav[i][3];
+                    if (mode != 0 && afn_nav_is_ready() && !afn_player_frozen) {
+                        float pdx = playerX - s_npcX[i], pdz = playerZ - s_npcZ[i];
+                        float pd2 = pdx*pdx + pdz*pdz;
+                        if (mode == 1 && pd2 <= stopD*stopD) {
+                            s_npcPathLen[i] = 0;           // close enough — idle
+                            s_npcRepathT[i] = 0;           // re-engage instantly when player leaves
+                        } else if (--s_npcRepathT[i] <= 0 ||
+                                   (s_npcPathIdx[i] >= s_npcPathLen[i] && mode == 1)) {
+                            float gx = playerX, gy = playerY, gz = playerZ;
+                            int ok = 1;
+                            if (mode == 2 && (s_npcPathIdx[i] >= s_npcPathLen[i])) {
+                                float rp[3];
+                                ok = afn_nav_find_random_point(rp);
+                                if (ok) { gx = rp[0]; gy = rp[1]; gz = rp[2]; }
+                            } else if (mode == 2) {
+                                ok = 0;                    // wander: keep current leg until done
+                            }
+                            if (ok) {
+                                s_npcPathLen[i] = afn_nav_find_path(
+                                    s_npcX[i], s_npcY[i], s_npcZ[i], gx, gy, gz,
+                                    s_npcPath[i], NAV_MAX_WP);
+                                s_npcPathIdx[i] = (s_npcPathLen[i] > 1) ? 1 : 0;  // wp 0 = start
+                            }
+                            s_npcRepathT[i] = (repat > 0) ? repat : 30;
+                        }
+                        // Advance along the path at speed.
+                        while (s_npcPathIdx[i] < s_npcPathLen[i]) {
+                            float* wp = &s_npcPath[i][s_npcPathIdx[i] * 3];
+                            float dx = wp[0] - s_npcX[i], dz = wp[2] - s_npcZ[i];
+                            float d = sqrtf(dx*dx + dz*dz);
+                            if (d <= speed) {              // reached this waypoint
+                                s_npcX[i] = wp[0]; s_npcZ[i] = wp[2];
+                                s_npcPathIdx[i]++;
+                                continue;
+                            }
+                            s_npcX[i] += dx / d * speed;
+                            s_npcZ[i] += dz / d * speed;
+                            // Ease the facing toward the travel direction
+                            // (shortest arc; same deg convention as playerYaw).
+                            float want = atan2f(dx, dz) * (180.0f / 3.14159265f);
+                            float diff = want - s_npcYaw[i];
+                            while (diff > 180.0f) diff -= 360.0f;
+                            while (diff < -180.0f) diff += 360.0f;
+                            s_npcYaw[i] += diff * 0.25f;
+                            s_npcNavMoving[i] = 1;
+                            break;
+                        }
+                    }
+                }
+#endif
                 s_npcVY[i] -= ng;
                 if (s_npcVY[i] < -nterm) s_npcVY[i] = -nterm;
                 s_npcY[i] += s_npcVY[i];
                 float nfy, nfn[3];
-                if (collide_floor(afn_npc_inst[i][0], afn_npc_inst[i][2], s_npcY[i], &nfy, nfn)
+                if (collide_floor(s_npcX[i], s_npcZ[i], s_npcY[i], &nfy, nfn)
                     && s_npcY[i] <= nfy - nbottom) {
                     s_npcY[i] = nfy - nbottom; s_npcVY[i] = 0.0f; s_npcGround[i] = 1;
                 } else {
@@ -1414,7 +1509,7 @@ int main(void)
                 // of the NPC's AABB. True box — independent X/Z half-extents and
                 // the box's center offset are honored (circle-vs-AABB resolve).
                 if (eidx < 0 || afn_collision_enabled[eidx]) {
-                    float bcx = afn_npc_inst[i][0] + cx, bcz = afn_npc_inst[i][2] + cz;
+                    float bcx = s_npcX[i] + cx, bcz = s_npcZ[i] + cz;
                     float xmin = bcx - hx, xmax = bcx + hx, zmin = bcz - hz, zmax = bcz + hz;
                     float npcBot = s_npcY[i] + cy - hy, npcTop = s_npcY[i] + cy + hy;
                     float plBot  = playerY + COL_BOTTOM, plTop = playerY + COL_TOP;
@@ -1525,7 +1620,7 @@ int main(void)
 #ifdef AFN_HAS_PLAYER_RIG
                 float hx = afn_npc_col[i][0], hy = afn_npc_col[i][1], hz = afn_npc_col[i][2];
                 float cx = afn_npc_col[i][3], cy = afn_npc_col[i][4], cz = afn_npc_col[i][5];
-                float bcx = afn_npc_inst[i][0] + cx, bcz = afn_npc_inst[i][2] + cz;
+                float bcx = s_npcX[i] + cx, bcz = s_npcZ[i] + cz;
                 float xmin = bcx - hx, xmax = bcx + hx, zmin = bcz - hz, zmax = bcz + hz;
                 float qx = playerX < xmin ? xmin : (playerX > xmax ? xmax : playerX);
                 float qz = playerZ < zmin ? zmin : (playerZ > zmax ? zmax : playerZ);
@@ -1534,7 +1629,7 @@ int main(void)
                 float plBot = playerY + COL_BOTTOM, plTop = playerY + COL_TOP;
                 int hit = (ddx*ddx + ddz*ddz < COL_RADIUS*COL_RADIUS) && (plTop > npcBot && plBot < npcTop);
 #else
-                float dx = playerX - afn_npc_inst[i][0], dz = playerZ - afn_npc_inst[i][2];
+                float dx = playerX - afn_npc_inst[i][0], dz = playerZ - afn_npc_inst[i][2];   // no rig: static NPCs
                 float dy = playerY - afn_npc_inst[i][1];
                 int hit = (dx*dx + dz*dz < (COL_RADIUS*2)*(COL_RADIUS*2)) && (dy > -COL_TOP && dy < COL_TOP);
 #endif

@@ -30,12 +30,16 @@ target_include_directories(imgui PUBLIC
 )
 target_link_libraries(imgui PUBLIC glfw)
 
+# ---------- Recast/Detour (navmesh build + queries, editor side) ----------
+add_subdirectory(thirdparty/recastnavigation)
+
 # ---------- Affinity Editor ----------
 add_executable(AffinityEditor WIN32
     src/editor/main.cpp
     src/editor/frame_loop.cpp
     src/editor/rigged_gltf.cpp
     src/viewport/mode7_preview.cpp
+    src/navmesh/NavMeshBuilder.cpp
     src/platform/gba/gba_package.cpp
     src/platform/nds/nds_package.cpp
     src/platform/nds/dsma_emit.cpp
@@ -53,6 +57,8 @@ target_include_directories(AffinityEditor PRIVATE
 target_link_libraries(AffinityEditor PRIVATE
     imgui
     glfw
+    Recast
+    Detour
     opengl32
     gdi32
     user32
