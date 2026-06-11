@@ -9,11 +9,14 @@ static void afn_emitted_script_init(void)         {
     afn_stick_sens[6] = 8;   // KEY_RSTICK_LEFT sensitivity 100%
     afn_stick_sens[7] = 8;   // KEY_RSTICK_RIGHT sensitivity 100%
     afn_stick_sens[0] = 8;   // KEY_LSTICK_UP sensitivity 100%
-    afn_stick_sens[2] = 8;   // KEY_LSTICK_LEFT sensitivity 100%
-    afn_stick_sens[3] = 8;   // KEY_LSTICK_RIGHT sensitivity 100%
     afn_stick_sens[5] = 8;   // KEY_RSTICK_DOWN sensitivity 100%
     afn_stick_sens[4] = 8;   // KEY_RSTICK_UP sensitivity 100%
     afn_stick_sens[1] = 8;   // KEY_LSTICK_DOWN sensitivity 100%
+    afn_stick_sens[3] = 8;   // KEY_LSTICK_RIGHT sensitivity 100%
+    afn_stick_sens[2] = 8;   // KEY_LSTICK_LEFT sensitivity 100%
+    afn_stick_sens[1] = 8;   // KEY_LSTICK_DOWN sensitivity 100%
+    afn_stick_sens[3] = 8;   // KEY_LSTICK_RIGHT sensitivity 100%
+    afn_stick_sens[2] = 8;   // KEY_LSTICK_LEFT sensitivity 100%
 #endif
 }
 static void afn_emitted_script_start(void) {
@@ -32,7 +35,6 @@ static void afn_emitted_script_collision2d(void) {
 }
 static void afn_bp0_start(void) {
     afn_play_sound(0);
-    afn_tank_camera = 1;
 }
 static void afn_bp0_update(void) {
 }
@@ -49,47 +51,47 @@ static void afn_bp0_key_held(void) {
 #ifdef AFN_HAS_STICK_SENS
         afn_key_mag = afn_stick_mag[6];
 #endif
-    orbit_angle += (250 * afn_key_mag) >> 8;
+    orbit_angle += (500 * afn_key_mag) >> 8;
     }
     if (key_is_down(KEY_RSTICK_RIGHT)) {
 #ifdef AFN_HAS_STICK_SENS
         afn_key_mag = afn_stick_mag[7];
 #endif
-    orbit_angle -= (250 * afn_key_mag) >> 8;
-    }
-    if (key_is_down(KEY_LSTICK_LEFT)) {
-#ifdef AFN_HAS_STICK_SENS
-        afn_key_mag = afn_stick_mag[2];
-#endif
-    afn_tank_camera = 1;
-    afn_tank_move = 1;
-    afn_player_heading += (500 * afn_key_mag) >> 8;
-    }
-    if (key_is_down(KEY_LSTICK_RIGHT)) {
-#ifdef AFN_HAS_STICK_SENS
-        afn_key_mag = afn_stick_mag[3];
-#endif
-    afn_tank_camera = 1;
-    afn_tank_move = 1;
-    afn_player_heading -= (500 * afn_key_mag) >> 8;
+    orbit_angle -= (500 * afn_key_mag) >> 8;
     }
     if (key_is_down(KEY_RSTICK_DOWN)) {
 #ifdef AFN_HAS_STICK_SENS
         afn_key_mag = afn_stick_mag[5];
 #endif
-    orbit_pitch += (250 * afn_key_mag) >> 8;
+    orbit_pitch += (500 * afn_key_mag) >> 8;
     }
     if (key_is_down(KEY_RSTICK_UP)) {
 #ifdef AFN_HAS_STICK_SENS
         afn_key_mag = afn_stick_mag[4];
 #endif
-    orbit_pitch -= (250 * afn_key_mag) >> 8;
+    orbit_pitch -= (500 * afn_key_mag) >> 8;
     }
     if (key_is_down(KEY_LSTICK_DOWN)) {
 #ifdef AFN_HAS_STICK_SENS
         afn_key_mag = afn_stick_mag[1];
 #endif
     if (!afn_player_frozen) afn_input_fwd -= afn_key_mag;
+    afn_rig_clip = 1;
+    if (!afn_speed_prio) afn_move_speed = 10;
+    }
+    if (key_is_down(KEY_LSTICK_RIGHT)) {
+#ifdef AFN_HAS_STICK_SENS
+        afn_key_mag = afn_stick_mag[3];
+#endif
+    if (!afn_player_frozen) afn_input_right -= afn_key_mag;
+    afn_rig_clip = 1;
+    if (!afn_speed_prio) afn_move_speed = 10;
+    }
+    if (key_is_down(KEY_LSTICK_LEFT)) {
+#ifdef AFN_HAS_STICK_SENS
+        afn_key_mag = afn_stick_mag[2];
+#endif
+    if (!afn_player_frozen) afn_input_right += afn_key_mag;
     afn_rig_clip = 1;
     if (!afn_speed_prio) afn_move_speed = 10;
     }
@@ -102,6 +104,18 @@ static void afn_bp0_key_pressed(void) {
 }
 static void afn_bp0_key_released(void) {
     if (key_released(KEY_LSTICK_UP)) {
+        afn_key_mag = 256;
+    afn_rig_clip = 0;
+    }
+    if (key_released(KEY_LSTICK_DOWN)) {
+        afn_key_mag = 256;
+    afn_rig_clip = 0;
+    }
+    if (key_released(KEY_LSTICK_RIGHT)) {
+        afn_key_mag = 256;
+    afn_rig_clip = 0;
+    }
+    if (key_released(KEY_LSTICK_LEFT)) {
         afn_key_mag = 256;
     afn_rig_clip = 0;
     }

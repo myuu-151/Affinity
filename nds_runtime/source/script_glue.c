@@ -329,17 +329,21 @@ void afn_script_tick(void)
     afn_speed_prio  = 0;
     afn_face_lock   = 0;   // MovePlayer(Consistent Facing) re-sets it while held
 #endif
+    // RELEASED dispatches before HELD so ongoing held state wins ties within
+    // a tick (rolling a stick Up->Right releases Up while Right is held; a
+    // Released->idle chain must not stomp the Held->walk clip for one frame
+    // and reset the animation). Pressed stays last so one-shots override.
     afn_emitted_script_update();
+    afn_emitted_script_key_released();
     afn_emitted_script_key_held();
     afn_emitted_script_key_pressed();
-    afn_emitted_script_key_released();
 #ifdef AFN_HAS_SCRIPT
     // Blueprint instance dispatch — handlers per blueprint with the
     // current sprite slot in afn_bp_cur_spr_idx.
     afn_bp_dispatch_update();
+    afn_bp_dispatch_key_released();
     afn_bp_dispatch_key_held();
     afn_bp_dispatch_key_pressed();
-    afn_bp_dispatch_key_released();
     afn_script_check_collisions();
     afn_frame_count++;
 #endif

@@ -918,14 +918,19 @@ static void script_tick(void) {
     afn_input_fwd = 0; afn_input_right = 0; afn_speed_prio = 0; afn_move_speed = 0;
     afn_key_mag = 256;   // chains re-set it on entry; full-on outside key chains
     afn_face_lock = 0;   // MovePlayer(Consistent Facing) re-sets it while held
+    // Dispatch order: RELEASED before HELD, so ongoing held state wins ties
+    // within a tick. Rolling the stick from Up to Right releases Up while
+    // Right is still held — with released-last, a Released->idle chain
+    // stomped the Held->walk clip for one frame and reset the animation.
+    // Pressed stays last so one-shots (attack on press) override held walks.
     afn_emitted_script_update();
+    afn_emitted_script_key_released();
     afn_emitted_script_key_held();
     afn_emitted_script_key_pressed();
-    afn_emitted_script_key_released();
     afn_bp_dispatch_update();
+    afn_bp_dispatch_key_released();
     afn_bp_dispatch_key_held();
     afn_bp_dispatch_key_pressed();
-    afn_bp_dispatch_key_released();
 }
 static int script_present(void) { return 1; }
 #else
