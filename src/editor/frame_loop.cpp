@@ -20157,7 +20157,7 @@ void FrameTick(float dt)
                 case VsNodeType::GetCursorStop: desc = "Returns the current cursor stop index (0-based)."; break;
                 case VsNodeType::BlueprintRef:  desc = "Outputs a blueprint definition index. Use with Freeze/Unfreeze Player to disable a specific blueprint."; break;
                 case VsNodeType::Integer:       desc = "Outputs a constant integer value."; break;
-                case VsNodeType::Key:           desc = "Outputs a key constant (A, B, L, R, etc)."; break;
+                case VsNodeType::Key:           desc = "Outputs a key constant (A, B, L, R, etc). Stick directions add Sensitivity (where the analog ramp starts tripping) and Strength (how fast a full push moves — the ramp's top speed)."; break;
                 case VsNodeType::Direction:     desc = "Outputs a direction (Left, Right, Up, Down)."; break;
                 case VsNodeType::Animation:     desc = "Outputs an animation index."; break;
                 case VsNodeType::Float:         desc = "Outputs a constant float value."; break;
@@ -20274,9 +20274,14 @@ void FrameTick(float dt)
                     return -1; // no key or multiple keys
                 };
                 auto gbaKeyName = [](int key) -> const char* {
+                    // Must match keyName() in node_script_emit.cpp (X/Y + stick
+                    // directions are NDS/PSV-era additions).
                     const char* names[] = { "KEY_A","KEY_B","KEY_L","KEY_R","KEY_START","KEY_SELECT",
-                                            "KEY_UP","KEY_DOWN","KEY_LEFT","KEY_RIGHT" };
-                    return (key >= 0 && key < 10) ? names[key] : "0";
+                                            "KEY_UP","KEY_DOWN","KEY_LEFT","KEY_RIGHT",
+                                            "KEY_X","KEY_Y",
+                                            "KEY_LSTICK_UP","KEY_LSTICK_DOWN","KEY_LSTICK_LEFT","KEY_LSTICK_RIGHT",
+                                            "KEY_RSTICK_UP","KEY_RSTICK_DOWN","KEY_RSTICK_LEFT","KEY_RSTICK_RIGHT" };
+                    return (key >= 0 && key < 20) ? names[key] : "0";
                 };
 
                 // Build function prefix for blueprint vs scene
@@ -20588,9 +20593,18 @@ void FrameTick(float dt)
                         "    }";
                     int ek = resolveEventKeyForDisplay(infoNode);
                     std::string calls = buildActionCalls(infoNode, "        ");
-                    snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
-                        "    if (key_is_down(%s)) {\n%s    }",
-                        ek >= 0 ? gbaKeyName(ek) : "KEY_xxx", calls.c_str());
+                    if (ek >= 12 && ek < 20)
+                        // Stick key: the chain records the analog deflection
+                        // (0..256) so MovePlayer ramps with how far it's pushed.
+                        snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                            "    if (key_is_down(%s)) {\n"
+                            "        afn_key_mag = afn_stick_mag[%d]; // 32..256 analog ramp (PSV)\n"
+                            "%s    }",
+                            gbaKeyName(ek), ek - 12, calls.c_str());
+                    else
+                        snprintf(gbaBodyBuf, sizeof(gbaBodyBuf),
+                            "    if (key_is_down(%s)) {\n%s    }",
+                            ek >= 0 ? gbaKeyName(ek) : "KEY_xxx", calls.c_str());
                     break;
                 }
                 case VsNodeType::OnStart: {
@@ -20680,10 +20694,10 @@ void FrameTick(float dt)
                         "// player.z += (fwdZ*inputX + rightZ*inputZ) * moveSpeed;";
                     auto* dirData = resolveDataIn(infoNode.id, 0);
                     int dir = dirData ? dirData->paramInt[0] : 0;
-                    const char* dirVarsGba[] = { "afn_input_right -= 256", "afn_input_right += 256",
-                                                 "afn_input_fwd += 256", "afn_input_fwd -= 256" };
+                    const char* dirVarsGba[] = { "afn_input_right -= afn_key_mag", "afn_input_right += afn_key_mag",
+                                                 "afn_input_fwd += afn_key_mag", "afn_input_fwd -= afn_key_mag" };
                     const int dirFacingGba[] = { 6, 2, 0, 4 }; // L=W, R=E, U=N, D=S
-                    char bodyBuf[512];
+                    char bodyBuf[640];
                     if (dir >= 0 && dir < 4)
                         snprintf(bodyBuf, sizeof(bodyBuf),
                             "    if (!afn_player_frozen) {\n"
@@ -20691,10 +20705,11 @@ void FrameTick(float dt)
                             "        if (tm_move_timer == 0) tm_player_facing = %d; }\n"
                             "    // --- Runtime (main.c) ---\n"
                             "    // Applied when this exec runs — gate it with\n"
-                            "    // On Key Held(key). No DPAD re-check, so holding\n"
-                            "    // any bound key moves this Direction (remap-friendly).\n"
+                            "    // On Key Held(key). afn_key_mag = gating key's\n"
+                            "    // strength: buttons 256; stick keys ramp 32..256\n"
+                            "    // with deflection (PSV) — slight push = slow walk.\n"
                             "    // Mode 0: tap = turn in place, hold = walk\n"
-                            "    // Mode 4: player_x += (viewSin * moveFwd) >> 8;",
+                            "    // Mode 4: player_x += (viewSin * moveFwd * mag/256) >> 8;",
                             dirVarsGba[dir], dirFacingGba[dir]);
                     else
                         snprintf(bodyBuf, sizeof(bodyBuf), "    // MovePlayer (no direction set)");
@@ -20852,13 +20867,15 @@ void FrameTick(float dt)
                     // Up=2/Down=3 tilt the pitch (orbit_pitch).
                     const char* otgt  = (odir >= 2) ? "orbit_pitch" : "orbit_angle";
                     const char* osign = (odir == 0 || odir == 2) ? "+" : "-";
-                    char bodyBuf[320];
+                    char bodyBuf[448];
                     snprintf(bodyBuf, sizeof(bodyBuf),
-                        "    %s %s= %d;\n"
+                        "    %s %s= (%d * afn_key_mag) >> 8;\n"
                         "    // --- Runtime (main.c) ---\n"
                         "    // Applied when exec runs; Direction picks axis+sign:\n"
                         "    //   Left/Right -> orbit_angle (yaw), Up/Down -> orbit_pitch.\n"
-                        "    // Gate with On Key Held(key) to bind orbiting to a button.\n"
+                        "    // Gate with On Key Held(key); afn_key_mag = key strength\n"
+                        "    // (buttons 256 = full rate; stick keys ramp 32..256 with\n"
+                        "    // deflection on PSV, so a slight push orbits slowly).\n"
                         "    // camAngle = orbit_angle * 2pi/65536; pitch = orbit_pitch * 2pi/65536;\n"
                         "    // eye = target - (sin(camAngle)*cos(pitch)*dist, -sin(pitch)*dist, ...);",
                         otgt, osign, ospeed);
@@ -21272,7 +21289,9 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_turn_player",
                         "    afn_tank_camera = 1;   // using Turn Player auto-enables tank controls\n"
                         "    // Direction Left -> afn_player_heading += Speed; Right -> -= Speed\n"
-                        "    afn_player_heading += <speed>;\n"
+                        "    afn_player_heading += (<speed> * afn_key_mag) >> 8;\n"
+                        "    // afn_key_mag = gating key strength: buttons 256 = full rate;\n"
+                        "    // stick keys ramp 32..256 with deflection (PSV analog turn).\n"
                         "    // --- Runtime (fps3d.c) ---\n"
                         "    // Tank mode: movement uses brad_sin/cos(afn_player_heading) and\n"
                         "    //   the rig faces it, so the player turns while the camera orbits free.");
@@ -23550,8 +23569,36 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::Key: {
                     editorCode = "// Constant key value";
-                    char body[192];
-                    if (infoNode.paramInt[0] >= 0 && infoNode.paramInt[0] < kVsKeyCount)
+                    char body[768];
+                    if (infoNode.paramInt[0] >= 12 && infoNode.paramInt[0] < kVsKeyCount) {
+                        // Stick direction: also emits its Sensitivity threshold
+                        // and Strength ramp scale.
+                        static const char* stickMacros[8] = {
+                            "LSTICK_UP","LSTICK_DOWN","LSTICK_LEFT","LSTICK_RIGHT",
+                            "RSTICK_UP","RSTICK_DOWN","RSTICK_LEFT","RSTICK_RIGHT" };
+                        const char* mac = stickMacros[infoNode.paramInt[0] - 12];
+                        int sens = infoNode.paramInt[1] > 0 ? infoNode.paramInt[1] : 64;
+                        int thr  = 8 + ((100 - (sens > 100 ? 100 : sens)) * 112) / 100;
+                        int str  = infoNode.paramInt[2] > 0 ? infoNode.paramInt[2] : 100;
+                        if (str > 100) str = 100;
+                        snprintf(body, sizeof(body),
+                            "    return KEY_%s;\n"
+                            "    // afn_stick_sens[%d] = %d;      // Sensitivity %d%% (set in script init)\n"
+                            "    // afn_stick_strength[%d] = %d; // Strength %d%% (scales the ramp)\n"
+                            "    // --- Runtime (psv main.c input_update) ---\n"
+                            "    // axis = pad.stick - 128;             // -128..127 deflection\n"
+                            "    // if (axis > afn_stick_sens[%d]) afn_keys_held |= KEY_%s;\n"
+                            "    // ramp = 32 + (axis - %d) * 224 / (127 - %d); // cap 256\n"
+                            "    // afn_stick_mag[%d] = ramp * %d >> 8;\n"
+                            "    // key chain entry: afn_key_mag = afn_stick_mag[%d];\n"
+                            "    // -> MovePlayer adds afn_key_mag: slight push = slow, full = max",
+                            mac, infoNode.paramInt[0] - 12, thr, sens,
+                            infoNode.paramInt[0] - 12, (str * 256) / 100, str,
+                            infoNode.paramInt[0] - 12, mac,
+                            thr, thr,
+                            infoNode.paramInt[0] - 12, (str * 256) / 100,
+                            infoNode.paramInt[0] - 12);
+                    } else if (infoNode.paramInt[0] >= 0 && infoNode.paramInt[0] < kVsKeyCount)
                         snprintf(body, sizeof(body),
                             "    return KEY_%s;\n"
                             "    // --- Runtime --- inline data node, evaluated at call site (KEY_* macros from libgba)",
@@ -24925,6 +24972,22 @@ void FrameTick(float dt)
             case VsNodeType::Key:
                 ImGui::Text("Key");
                 ImGui::Combo("##Key2", &n.paramInt[0], sVsKeyNames, kVsKeyCount);
+                if (n.paramInt[0] >= 12) {
+                    // Stick directions: tunable analog trip point. Stored in
+                    // paramInt[1] (0 = unset -> default 64% = the old fixed
+                    // ±48 deadzone). Higher = trips earlier in the deflection.
+                    int sens = n.paramInt[1] > 0 ? n.paramInt[1] : 64;
+                    ImGui::Text("Sensitivity");
+                    if (ImGui::SliderInt("##KeySens", &sens, 1, 100, "%d%%"))
+                        n.paramInt[1] = sens;
+                    // Strength: scales the analog ramp's output (paramInt[2],
+                    // 0 = unset -> 100%). 50% = a full push moves at half the
+                    // node speed; slight pushes scale down proportionally.
+                    int str = n.paramInt[2] > 0 ? n.paramInt[2] : 100;
+                    ImGui::Text("Strength");
+                    if (ImGui::SliderInt("##KeyStr", &str, 1, 100, "%d%%"))
+                        n.paramInt[2] = str;
+                }
                 break;
             case VsNodeType::Animation: {
                 // Sprite asset selector
@@ -30567,8 +30630,7 @@ void FrameTick(float dt)
                         // Try the known Vita3K locations; fall back to the file
                         // association if none are found.
                         const char* vita3kPaths[] = {
-                            "C:\\Users\\NoSig\\Documents\\gbadev\\vita3k\\Vita3K-new\\Vita3K.exe",
-                            "C:\\Users\\NoSig\\Documents\\gbadev\\vita3k\\Vita3K\\Vita3K.exe",
+                            "C:\\Users\\NoSig\\Documents\\gbadev\\vita3k\\Vita3K.exe",
                         };
                         bool launched = false;
                         for (const char* vp : vita3kPaths)

@@ -2392,6 +2392,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "// Script state variables (defined in script_glue.c)\n";
         f << "extern int  afn_input_fwd;\n";
         f << "extern int  afn_input_right;\n";
+        f << "extern int  afn_key_mag;\n";
         f << "extern int  afn_move_speed;\n";
         f << "extern int  afn_auto_orbit_speed;\n";
         f << "extern int  afn_play_anim;\n";

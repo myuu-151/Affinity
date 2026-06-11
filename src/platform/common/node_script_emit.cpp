@@ -174,10 +174,12 @@ void EmitNodeScriptBodies(std::ostream& f,
                 // Orbit when this exec runs — the chain (e.g. On Key Held)
                 // decides when. Direction picks the axis/sign: Left/Right rotate
                 // the yaw (orbit_angle); Up/Down tilt the pitch (orbit_pitch).
-                if (dir == 0)      f << "    orbit_angle += " << speed << ";\n";  // Left
-                else if (dir == 1) f << "    orbit_angle -= " << speed << ";\n";  // Right
-                else if (dir == 2) f << "    orbit_pitch += " << speed << ";\n";  // Up
-                else if (dir == 3) f << "    orbit_pitch -= " << speed << ";\n";  // Down
+                // Speed scales by afn_key_mag (256 for buttons; 0..256 stick
+                // deflection on analog runtimes) so stick-bound orbit ramps.
+                if (dir == 0)      f << "    orbit_angle += (" << speed << " * afn_key_mag) >> 8;\n";  // Left
+                else if (dir == 1) f << "    orbit_angle -= (" << speed << " * afn_key_mag) >> 8;\n";  // Right
+                else if (dir == 2) f << "    orbit_pitch += (" << speed << " * afn_key_mag) >> 8;\n";  // Up
+                else if (dir == 3) f << "    orbit_pitch -= (" << speed << " * afn_key_mag) >> 8;\n";  // Down
                 break;
             }
             case GBAScriptNodeType::MovePlayer: {
@@ -188,8 +190,11 @@ void EmitNodeScriptBodies(std::ostream& f,
                 // On Key Held(key) to bind it to a button. The old code
                 // re-checked the matching DPAD key here, double-gating:
                 // On Key Held(A) -> Move Player(Up) required BOTH A and Up.
-                static const char* dirVars[] = { "afn_input_right -= 256","afn_input_right += 256",
-                                                 "afn_input_fwd += 256","afn_input_fwd -= 256" };
+                // afn_key_mag is the gating key's strength (256 for buttons;
+                // 0..256 stick deflection on analog runtimes), set by the key
+                // dispatcher at chain entry — slight push = slight move.
+                static const char* dirVars[] = { "afn_input_right -= afn_key_mag","afn_input_right += afn_key_mag",
+                                                 "afn_input_fwd += afn_key_mag","afn_input_fwd -= afn_key_mag" };
                 if (dir >= 0 && dir < 4)
                     f << "    if (!afn_player_frozen) " << dirVars[dir] << ";\n";
                 break;
@@ -583,7 +588,9 @@ void EmitNodeScriptBodies(std::ostream& f,
                 int speed = speedData ? resolveInt(speedData) : 512;
                 const char* sign = (dir == 0) ? "+" : "-";   // Left=0 turns +, Right=1 turns -
                 f << "    afn_tank_camera = 1;\n";            // Turn Player implies tank controls
-                f << "    afn_player_heading " << sign << "= " << speed << ";\n";
+                // Turn rate scales by afn_key_mag like OrbitCamera — stick-
+                // bound turning ramps with deflection, buttons stay full rate.
+                f << "    afn_player_heading " << sign << "= (" << speed << " * afn_key_mag) >> 8;\n";
                 break;
             }
             case GBAScriptNodeType::CastEffect: {
@@ -749,6 +756,35 @@ void EmitNodeScriptBodies(std::ostream& f,
                         f << keyCheck << "(" << keyName(keys[ki]) << ")";
                     }
                     f << ") {\n";
+                    // Chain-entry key magnitude: stick keys pass their analog
+                    // deflection (afn_stick_mag, 0..256) to MovePlayer et al;
+                    // buttons are full-on. Guarded like afn_stick_sens so
+                    // stick-less runtimes (NDS) compile the chain unchanged
+                    // (their afn_key_mag stays 256).
+                    // (Not for key_released: the stick is back under the
+                    // threshold by then, so its magnitude reads 0 — released
+                    // chains run full-on.)
+                    bool anyStick = false;
+                    for (int kk : keys) if (kk >= 12 && kk <= 19) anyStick = true;
+                    if (anyStick && strcmp(keyCheck, "key_released") != 0) {
+                        f << "#ifdef AFN_HAS_STICK_SENS\n";
+                        if (keys.size() == 1) {
+                            f << "        afn_key_mag = afn_stick_mag[" << (keys[0] - 12) << "];\n";
+                        } else {
+                            // Multiple keys OR'd: strongest held source wins.
+                            f << "        afn_key_mag = 0;\n";
+                            for (int kk : keys) {
+                                if (kk >= 12 && kk <= 19)
+                                    f << "        if (afn_stick_mag[" << (kk - 12)
+                                      << "] > afn_key_mag) afn_key_mag = afn_stick_mag[" << (kk - 12) << "];\n";
+                                else
+                                    f << "        if (key_is_down(" << keyName(kk) << ")) afn_key_mag = 256;\n";
+                            }
+                        }
+                        f << "#endif\n";
+                    } else {
+                        f << "        afn_key_mag = 256;\n";
+                    }
                     emitChain(c);
                     f << "    }\n";
                 } else if (evType == GBAScriptNodeType::OnCollision) {
@@ -776,7 +812,40 @@ void EmitNodeScriptBodies(std::ostream& f,
         };
 
         f << "\n// ---- Generated script code from visual node graph ----\n";
-        f << "static void afn_emitted_script_init(void)         {}\n";
+        // Stick-direction sensitivity (Key node "Sensitivity" slider, stored in
+        // paramInt[1]; 0 = unset -> runtime default 48). Collected across the
+        // scene script and all blueprints, emitted into the init hook guarded
+        // by AFN_HAS_STICK_SENS so only runtimes with analog sticks (PSV)
+        // compile it — NDS never defines the macro. The emitted value is the
+        // trip threshold on the 0..127 axis range (lower = more sensitive);
+        // if two Key nodes tune the same direction, the last one wins.
+        f << "static void afn_emitted_script_init(void)         {\n";
+        f << "#ifdef AFN_HAS_STICK_SENS\n";
+        {
+            auto emitSens = [&](const GBAScriptNodeExport& n) {
+                if (n.type != GBAScriptNodeType::Key) return;
+                int key = n.paramInt[0], sens = n.paramInt[1], str = n.paramInt[2];
+                if (key < 12 || key > 19) return;
+                if (sens > 0) {
+                    if (sens > 100) sens = 100;
+                    int thr = 8 + ((100 - sens) * 112) / 100;   // sens 64% -> 48 (old fixed deadzone)
+                    f << "    afn_stick_sens[" << (key - 12) << "] = " << thr
+                      << ";   // " << keyName(key) << " sensitivity " << sens << "%\n";
+                }
+                // Strength slider (paramInt[2], 0 = unset -> 100%): scales the
+                // analog ramp output, so a full push moves at strength% speed.
+                if (str > 0) {
+                    if (str > 100) str = 100;
+                    f << "    afn_stick_strength[" << (key - 12) << "] = " << (str * 256) / 100
+                      << ";   // " << keyName(key) << " strength " << str << "%\n";
+                }
+            };
+            for (const auto& n : script.nodes) emitSens(n);
+            for (const auto& bp : blueprints)
+                for (const auto& n : bp.script.nodes) emitSens(n);
+        }
+        f << "#endif\n";
+        f << "}\n";
         emitDispatcher("afn_emitted_script_start",        GBAScriptNodeType::OnStart,        nullptr);
         emitDispatcher("afn_emitted_script_update",       GBAScriptNodeType::OnUpdate,       nullptr);
         emitDispatcher("afn_emitted_script_key_held",     GBAScriptNodeType::OnKeyHeld,      "key_is_down");

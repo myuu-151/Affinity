@@ -16,3 +16,6 @@ CMakeCache.txt
 CMakeFiles/
 affinity_imgui.ini
 *.sav
+*.bak
+build_probe.txt
+probe_out.txt

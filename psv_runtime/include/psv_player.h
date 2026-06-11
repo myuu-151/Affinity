@@ -2,6 +2,6 @@
 #pragma once
 
 #define AFN_HAS_PLAYER_COL 1
-#define AFN_PLAYER_COL_RADIUS (1.2437f)
+#define AFN_PLAYER_COL_RADIUS (1.5340f)
 #define AFN_PLAYER_COL_BOTTOM (0.0000f)
-#define AFN_PLAYER_COL_TOP (2.9637f)
+#define AFN_PLAYER_COL_TOP (4.5253f)

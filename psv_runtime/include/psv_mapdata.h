@@ -1669,6 +1669,11 @@ const AfnSpriteInst afn_sprites[5] = {
   { 192.038f, 0.0f, 137.12f, 18.08f, -90.0f, 0.0f, 0.0f, 3 },
   { 68.4074f, 0.0f, 137.12f, 18.08f, 90.0f, 0.0f, 0.0f, 3 },
 };
+#define AFN_HAS_SPRITE_IDX 1
+static const int afn_mesh_inst_sprite[5] = {1,2,3,4,5,};
+#ifndef NUM_SPRITES
+#define NUM_SPRITES 8
+#endif
 
 const float afn_cam_start_x = 128.0f;
 const float afn_cam_start_z = 128.0f;
@@ -1678,6 +1683,14 @@ const float afn_orbit_dist = 18.215f;
 const float afn_draw_distance = 0.0f;
 const float afn_walk_speed = 35.0f;
 const float afn_sprint_speed = 53.0f;
+#define AFN_WALK_EASE_IN 48
+#define AFN_WALK_EASE_OUT 48
+#define AFN_SPRINT_EASE_IN 15
+#define AFN_SPRINT_EASE_OUT 30
+#define AFN_ORBIT_EASE_IN 64
+#define AFN_ORBIT_EASE_OUT 128
+#define AFN_JUMP_CAM_LAND 94
+#define AFN_JUMP_CAM_AIR 30
 #define AFN_CAM_SLOT_COUNT 3
 static const float afn_cam_slots[][4] = {
     { 0.0f, 18.215f, 12.5f, 60.0f },

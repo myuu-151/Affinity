@@ -20,6 +20,7 @@
 #ifdef AFN_HAS_SCRIPT
 int  afn_input_fwd;
 int  afn_input_right;
+int  afn_key_mag = 256;   // gating key strength; always full-on (NDS has no analog stick)
 int  afn_move_speed;
 int  afn_auto_orbit_speed;
 int  afn_play_anim;

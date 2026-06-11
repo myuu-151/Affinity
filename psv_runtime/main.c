@@ -727,9 +727,39 @@ enum { KEY_A=1,KEY_B=2,KEY_X=4,KEY_Y=8,KEY_L=16,KEY_R=32,KEY_START=64,KEY_SELECT
        KEY_LSTICK_UP=4096,    KEY_LSTICK_DOWN=8192,    KEY_LSTICK_LEFT=16384,   KEY_LSTICK_RIGHT=32768,
        KEY_RSTICK_UP=65536,   KEY_RSTICK_DOWN=131072,  KEY_RSTICK_LEFT=262144,  KEY_RSTICK_RIGHT=524288 };
 unsigned afn_keys_held=0, afn_keys_pressed=0, afn_keys_released=0;
+// Per-direction analog trip thresholds on the 0..127 axis range, ordered
+// LU,LD,LL,LR,RU,RD,RL,RR. 48 = default; a Key node's Sensitivity slider
+// retunes its direction via the emitted afn_emitted_script_init (the
+// AFN_HAS_STICK_SENS define below compiles those assignments in).
+int afn_stick_sens[8] = { 48, 48, 48, 48, 48, 48, 48, 48 };
+#define AFN_HAS_STICK_SENS 1
+// Per-direction analog deflection magnitude (same LU..RR order), 0..256.
+// 0 below the trip threshold, then ramps 32..256 from the threshold to full
+// deflection — a slight push moves slowly, a full push moves at node speed.
+int afn_stick_mag[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+// Per-direction ramp scale, 0..256 (Key node Strength slider, emitted in
+// script init like afn_stick_sens). 256 = full node speed at max deflection;
+// 128 = the whole ramp halved, so a full push moves at half speed.
+int afn_stick_strength[8] = { 256, 256, 256, 256, 256, 256, 256, 256 };
+// Magnitude of the key gating the currently-running emitted chain. The
+// emitted key dispatchers set it at chain entry (stick keys ->
+// afn_stick_mag[dir], buttons -> 256); MovePlayer adds afn_key_mag to
+// afn_input_fwd/right instead of a hardcoded 256.
+int afn_key_mag = 256;
 static int key_is_down(unsigned k){ return (afn_keys_held & k)!=0; }
 static int key_hit(unsigned k){ return (afn_keys_pressed & k)!=0; }
 static int key_released(unsigned k){ return (afn_keys_released & k)!=0; }
+
+// Ramp one stick direction's deflection (v, 0..128 toward that direction)
+// into a 0..256 magnitude: 0 until the trip threshold, then 32..256 linearly
+// up to full deflection (thr maxes at 120 so the divisor never hits zero),
+// finally scaled by the direction's Strength (256 = 100%).
+static int stick_mag(int v, int thr, int strength) {
+    if (v <= thr) return 0;
+    int m = 32 + ((v - thr) * 224) / (127 - thr);
+    if (m > 256) m = 256;
+    return (m * strength) >> 8;
+}
 
 static void input_update(const SceCtrlData* pad) {
     unsigned b = pad->buttons, k = 0;
@@ -746,13 +776,25 @@ static void input_update(const SceCtrlData* pad) {
     if (b & SCE_CTRL_LEFT)     k|=KEY_LEFT;
     if (b & SCE_CTRL_RIGHT)    k|=KEY_RIGHT;
     // Sticks reported as their OWN keys (NOT folded into the d-pad), so a node can
-    // bind the d-pad, left stick, and right stick independently. ±48 deadzone.
+    // bind the d-pad, left stick, and right stick independently. Each direction
+    // trips at its afn_stick_sens threshold (default 48; Key node Sensitivity).
     int ax = (int)pad->lx - 128, ay = (int)pad->ly - 128;
-    if (ay<-48) k|=KEY_LSTICK_UP;   if (ay>48) k|=KEY_LSTICK_DOWN;
-    if (ax<-48) k|=KEY_LSTICK_LEFT; if (ax>48) k|=KEY_LSTICK_RIGHT;
+    if (ay < -afn_stick_sens[0]) k|=KEY_LSTICK_UP;   if (ay > afn_stick_sens[1]) k|=KEY_LSTICK_DOWN;
+    if (ax < -afn_stick_sens[2]) k|=KEY_LSTICK_LEFT; if (ax > afn_stick_sens[3]) k|=KEY_LSTICK_RIGHT;
     int rx = (int)pad->rx - 128, ry = (int)pad->ry - 128;
-    if (ry<-48) k|=KEY_RSTICK_UP;   if (ry>48) k|=KEY_RSTICK_DOWN;
-    if (rx<-48) k|=KEY_RSTICK_LEFT; if (rx>48) k|=KEY_RSTICK_RIGHT;
+    if (ry < -afn_stick_sens[4]) k|=KEY_RSTICK_UP;   if (ry > afn_stick_sens[5]) k|=KEY_RSTICK_DOWN;
+    if (rx < -afn_stick_sens[6]) k|=KEY_RSTICK_LEFT; if (rx > afn_stick_sens[7]) k|=KEY_RSTICK_RIGHT;
+    // Analog ramp per direction: tripped keys also report HOW FAR the stick is
+    // pushed (0..256) so a stick-bound MovePlayer scales from a creep to full
+    // speed instead of snapping to max the moment the threshold trips.
+    afn_stick_mag[0] = stick_mag(-ay, afn_stick_sens[0], afn_stick_strength[0]);
+    afn_stick_mag[1] = stick_mag( ay, afn_stick_sens[1], afn_stick_strength[1]);
+    afn_stick_mag[2] = stick_mag(-ax, afn_stick_sens[2], afn_stick_strength[2]);
+    afn_stick_mag[3] = stick_mag( ax, afn_stick_sens[3], afn_stick_strength[3]);
+    afn_stick_mag[4] = stick_mag(-ry, afn_stick_sens[4], afn_stick_strength[4]);
+    afn_stick_mag[5] = stick_mag( ry, afn_stick_sens[5], afn_stick_strength[5]);
+    afn_stick_mag[6] = stick_mag(-rx, afn_stick_sens[6], afn_stick_strength[6]);
+    afn_stick_mag[7] = stick_mag( rx, afn_stick_sens[7], afn_stick_strength[7]);
     afn_keys_pressed  = k & ~afn_keys_held;
     afn_keys_released = ~k & afn_keys_held;
     afn_keys_held     = k;
@@ -839,10 +881,11 @@ void afn_audio_tick(void);
 #include "psv_script.h"
 
 #ifdef AFN_HAS_SCRIPT
-static void script_start(void) { afn_emitted_script_start(); afn_bp_dispatch_start(); }
+static void script_start(void) { afn_emitted_script_init(); afn_emitted_script_start(); afn_bp_dispatch_start(); }
 static void script_tick(void) {
     // Node-driven inputs are recomputed from scratch each frame by the graph.
     afn_input_fwd = 0; afn_input_right = 0; afn_speed_prio = 0; afn_move_speed = 0;
+    afn_key_mag = 256;   // chains re-set it on entry; full-on outside key chains
     afn_emitted_script_update();
     afn_emitted_script_key_held();
     afn_emitted_script_key_pressed();
