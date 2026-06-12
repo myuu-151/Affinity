@@ -929,12 +929,27 @@ unsigned int afn_flags=0, afn_rng=1;
   #define AFN_HUD_VIS_N NUM_SPRITES
 #endif
 unsigned char afn_hud_visible[AFN_HUD_VIS_N]={0};
+// HARDCODED (pre-node): world-anchored HUD elements. A blueprint's ShowHUD
+// records its owner sprite here (scene ShowHUD writes -1); hud_render then
+// projects that NPC's attached-sprite world position to screen and draws the
+// element's origin THERE instead of at the authored screenX/Y — so a target
+// element pops over the NPC the blueprint is attached to.
+#define AFN_HAS_HUD_ANCHOR 1
+int afn_hud_anchor_sprite[AFN_HUD_VIS_N];   // -1 = screen-space (init at boot)
 unsigned char afn_sprite_visible[NUM_SPRITES]={0};
 unsigned char afn_sprite_flip[NUM_SPRITES]={0}, afn_collision_enabled[NUM_SPRITES]={0};
 int afn_hp[NUM_SPRITES]={0}, afn_state_timer[NUM_SPRITES]={0};
 int afn_stop_links[16]={0};
-int afn_hud_layer_frame[8]={0}, afn_hud_layer_tick[8]={0};
-unsigned char afn_hud_layer_active[8]={0}, afn_hud_layer_speed_override[8]={0};
+// HUD anim layer state — node-driven (PlayHudAnim resets+activates,
+// StopHudAnim deactivates, SetHudAnimSpeed overrides). hud_render advances
+// active layers and evaluates the keyframe transform at the layer's frame.
+#if defined(AFN_HAS_HUD_ANIM) && (AFN_HUD_LAYER_COUNT > 8)
+  #define AFN_HUD_LAY_N AFN_HUD_LAYER_COUNT
+#else
+  #define AFN_HUD_LAY_N 8
+#endif
+int afn_hud_layer_frame[AFN_HUD_LAY_N]={0}, afn_hud_layer_tick[AFN_HUD_LAY_N]={0};
+unsigned char afn_hud_layer_active[AFN_HUD_LAY_N]={0}, afn_hud_layer_speed_override[AFN_HUD_LAY_N]={0};
 int tm_fol_active=0, tm_fol_obj=-1, tm_fol_dist=0, tm_fol_facing=0, tm_fol_moving=0, tm_fol_speed=0;
 int tm_player_tx=0, tm_player_ty=0;
 // Audio entry points — defined in audio.c (sceAudio software mixer + sequencer).
@@ -1146,6 +1161,29 @@ static float hud_text(const char* s, float x, float y, int scale, unsigned int c
     return x;
 }
 
+// Scene view matrix snapshot (set in the main loop after look_at) so HUD
+// anchoring can project world points into the 240x160 HUD space with the
+// scene's exact frustum (near 1.0, vfov ~75, Vita aspect).
+static float s_hudSceneView[16];
+static int   s_hudSceneViewValid = 0;
+
+// Project a world position into HUD coords. Returns 0 when behind the camera.
+static int hud_project(float wx, float wy, float wz, float* outX, float* outY) {
+    if (!s_hudSceneViewValid) return 0;
+    const float* v = s_hudSceneView;
+    float exq = v[0]*wx + v[4]*wy + v[8]*wz  + v[12];
+    float eyq = v[1]*wx + v[5]*wy + v[9]*wz  + v[13];
+    float ezq = v[2]*wx + v[6]*wy + v[10]*wz + v[14];
+    if (ezq > -0.1f) return 0;                       // behind / at the camera
+    const float nearp = 1.0f, top = nearp * 0.767f;  // matches the scene glFrustum
+    const float right = top * (SCR_W / SCR_H);
+    float ndcX = (exq * (nearp / right)) / -ezq;
+    float ndcY = (eyq * (nearp / top))  / -ezq;
+    *outX = (ndcX * 0.5f + 0.5f) * 240.0f;
+    *outY = (1.0f - (ndcY * 0.5f + 0.5f)) * 160.0f;
+    return 1;
+}
+
 static void hud_render(void) {
     // Ortho 240x160 with a top-left origin (y grows downward) to match the
     // editor's authoring space. The viewport is the full Vita screen, so this
@@ -1158,18 +1196,27 @@ static void hud_render(void) {
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 
 #ifdef AFN_HAS_HUD_ANIM
-    // Keyframe anim layers: evaluate each layer's transform once per frame.
-    // Playhead = vframes / speed (speed = 60/fps from the editor), looping or
-    // clamping at length; interpolate the surrounding keyframes (0=constant
-    // snap, 1=linear, 2=bezier smoothstep — matches the editor preview).
-    static unsigned s_hudVFrame = 0;
-    s_hudVFrame++;
+    // Keyframe anim layers — node-driven (NDS hud.c parity): PlayHudAnim
+    // resets frame/tick and activates; only ACTIVE layers advance (tick to
+    // speed = 60/fps, then frame++, wrapping at length when looping); an
+    // inactive layer holds its pose, so before any PlayHudAnim the pieces
+    // sit at keyframe 0. Interp: 0=constant snap, 1=linear, 2=bezier.
     float layOx[AFN_HUD_LAYER_COUNT], layOy[AFN_HUD_LAYER_COUNT];
     float layRot[AFN_HUD_LAYER_COUNT], laySx[AFN_HUD_LAYER_COUNT], laySy[AFN_HUD_LAYER_COUNT];
     for (int li = 0; li < AFN_HUD_LAYER_COUNT; li++) {
         const AfnHudLayer* L = &afn_hud_layer[li];
-        int t = (int)(s_hudVFrame / (unsigned)(L->speed > 0 ? L->speed : 1));
-        int ph = L->loop ? (t % L->length) : (t < L->length ? t : L->length);
+        if (afn_hud_layer_active[li]) {
+            int spd = afn_hud_layer_speed_override[li]
+                    ? afn_hud_layer_speed_override[li] : L->speed;
+            if (spd < 1) spd = 1;
+            if (++afn_hud_layer_tick[li] >= spd) {
+                afn_hud_layer_tick[li] = 0;
+                afn_hud_layer_frame[li]++;
+                if (L->loop && L->length > 0 && afn_hud_layer_frame[li] >= L->length)
+                    afn_hud_layer_frame[li] = 0;
+            }
+        }
+        int ph = afn_hud_layer_frame[li];
         int prevI = -1, nextI = -1;
         for (int ki = 0; ki < L->kfCount; ki++) {
             const AfnHudKf* k = &afn_hud_kf[L->kfStart + ki];
@@ -1201,6 +1248,53 @@ static void hud_render(void) {
         if (el->mode == 2) continue;                       // Mode-0-only element
         if (!(el->sceneMask & (1u << afn_current_scene))) continue;
         float bx = el->screenX, by = el->screenY;
+#ifdef AFN_HAS_HUD_ANCHOR
+        // World-anchored element (ShowHUD fired from a blueprint): origin =
+        // the owner NPC's attached-sprite world position projected to screen.
+        // Author piece offsets relative to (0,0) — e.g. -64,-64 centers a
+        // 128px ring on the anchor. Skipped while behind the camera.
+        if (afn_hud_anchor_sprite[e] >= 0) {
+            float wx = 0, wy = 0, wz = 0; int found = 0;
+#ifdef AFN_HAS_PLAYER_RIG
+            int anchor = afn_hud_anchor_sprite[e];
+            for (int n = 0; n < AFN_NPC_COUNT && !found; n++)
+                if ((int)afn_npc_inst[n][7] == anchor) {
+                    wx = s_npcX[n]; wy = s_npcY[n]; wz = s_npcZ[n];
+                    found = 1;
+#ifdef AFN_HAS_WORLD_ANCHORS
+                    // Attached-sprite offset — works with OR without an asset
+                    // (an asset-less attached sprite is a pure anchor point).
+                    for (int ai = 0; ai < AFN_ANCHOR_COUNT; ai++)
+                        if ((int)afn_anchors[ai][0] == anchor) {
+                            wx += afn_anchors[ai][1];
+                            wy += afn_anchors[ai][2];
+                            wz += afn_anchors[ai][3];
+                            break;
+                        }
+#endif
+                }
+#endif
+            if (found) {
+                float sxp, syp;
+                if (!hud_project(wx, wy, wz, &sxp, &syp)) continue;   // behind camera
+                // Center the element's piece-bounds on the anchor so the
+                // authored layout (any piece offsets) lands centered on the
+                // NPC — no special offsets needed in the editor.
+                float mnx = 1e9f, mny = 1e9f, mxx = -1e9f, mxy = -1e9f;
+                for (int k = 0; k < el->pieceCount; k++) {
+                    const AfnHudPiece* pp = &afn_hud_piece[el->pieceStart + k];
+                    if (pp->x < mnx) mnx = pp->x;
+                    if (pp->y < mny) mny = pp->y;
+                    if (pp->x + pp->w > mxx) mxx = pp->x + pp->w;
+                    if (pp->y + pp->h > mxy) mxy = pp->y + pp->h;
+                }
+                if (el->pieceCount > 0) {
+                    bx = sxp - (mnx + mxx) * 0.5f;
+                    by = syp - (mny + mxy) * 0.5f;
+                } else { bx = sxp; by = syp; }
+            }
+        }
+#endif
         // Pieces (graphics).
         for (int k = 0; k < el->pieceCount; k++) {
             int gpi = el->pieceStart + k;
@@ -1289,6 +1383,7 @@ int main(void)
     // Seed per-element visibility from the authored "visible" flag (ShowHUD /
     // CursorUp toggle it at runtime).
     for (int i = 0; i < AFN_HUD_ELEM_COUNT; i++) afn_hud_visible[i] = afn_hud_elems[i].startVis;
+    for (int i = 0; i < AFN_HUD_VIS_N; i++) afn_hud_anchor_sprite[i] = -1;   // screen-space default
 #endif
 
     // Player state. The follow camera and NPCs read playerX/Y/Z; the movement
@@ -1912,6 +2007,10 @@ int main(void)
         float fwdVY = -sinf(pitch);
         float fwdVZ = cosf(camAngle) * cp;
         look_at(view, ex, ey, ez, ex + fwdVX, ey + fwdVY, ez + fwdVZ, 0.0f, 1.0f, 0.0f);
+#ifdef AFN_HAS_HUD
+        memcpy(s_hudSceneView, view, sizeof(s_hudSceneView));   // for world-anchored HUD elements
+        s_hudSceneViewValid = 1;
+#endif
 
 #ifdef AFN_HAS_SKY
         sky_render(camAngle);   // far panorama behind everything (no depth write)

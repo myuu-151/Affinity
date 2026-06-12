@@ -517,6 +517,26 @@ static bool GeneratePSPSprites(const std::string& runtimeDir, const char* hdrPre
                              s.parentIdx, WL(s.offsetX), WL(s.offsetY), WL(s.offsetZ) });
     }
 
+    // World anchors: every attached (sub-)sprite — WITH OR WITHOUT an asset —
+    // exports {parent editor index, local offset}. An asset-less attached
+    // sprite is a pure invisible anchor: the PSV runtime projects parent live
+    // position + offset for HUD anchoring even though no billboard draws.
+    {
+        std::ostringstream rows; int n = 0;
+        for (const auto& s : sprites)
+            if (s.parentIdx >= 0) {
+                rows << "  { " << s.parentIdx << ", " << Flt(WL(s.offsetX)) << ", "
+                     << Flt(WL(s.offsetY)) << ", " << Flt(WL(s.offsetZ)) << " },\n";
+                n++;
+            }
+        if (n > 0) {
+            f << "#define AFN_HAS_WORLD_ANCHORS 1\n";
+            f << "#define AFN_ANCHOR_COUNT " << n << "\n";
+            f << "// {parent sprite idx, offX, offY, offZ (world px)}\n";
+            f << "static const float afn_anchors[" << n << "][4] = {\n" << rows.str() << "};\n";
+        }
+    }
+
     if (inst.empty()) { f << "// (no billboard sprites in this scene)\n"; return true; }
 
     // Global frame texture table; dedup by asset (each used asset emits its frames once).

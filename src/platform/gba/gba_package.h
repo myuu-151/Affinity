@@ -435,6 +435,7 @@ enum class GBAScriptNodeType : int {
     TankCamera,
     TurnPlayer,
     CastEffect,
+    AttachedSprite,  // data: the owning BP instance's sprite index ("self" anchor)
     COUNT
 };
 

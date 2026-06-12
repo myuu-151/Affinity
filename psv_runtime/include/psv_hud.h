@@ -2059,7 +2059,7 @@ static const short afn_hud_frame_h[1] = {128,};
 #define AFN_HUD_ELEM_COUNT 1
 typedef struct { short screenX,screenY; unsigned char mode; unsigned int sceneMask; short pieceStart,pieceCount,textStart,textCount,stopStart,stopCount; short curTex,curX,curY; unsigned char startVis; } AfnHudElem;
 static const AfnHudElem afn_hud_elems[1] = {
-  { 8,8,0,4294967295u,0,1,0,0,0,0,-1,-8,0,1 },
+  { 8,8,0,4294967295u,0,1,0,0,0,0,-1,-8,0,0 },
 };
 typedef struct { short x,y,w,h,tex; } AfnHudPiece;
 static const AfnHudPiece afn_hud_piece[1] = {

@@ -605,6 +605,7 @@ enum class VsNodeType : int {
     TankCamera,      // action: lock the camera angle so orbit input rotates the player in place (tank cam)
     TurnPlayer,      // action: rotate the tank heading (Direction + Speed); used with Tank Camera on the D-pad
     CastEffect,      // action: show a hidden attached effect sprite on an object, play once, auto-hide
+    AttachedSprite,  // data: the owning BP instance's sprite index ("self" — drives HUD anchoring)
     COUNT
 };
 
@@ -820,7 +821,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Set Tint",       0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Color (int)"}, {}, {} },
     { "Shake Sprite",   0xFF3355AA, 1, 1, 2, 0, {"Object (int)", "Frames (int)"}, {}, {} },
     { "Set Text",       0xFF3355AA, 1, 1, 2, 0, {"Slot (int)", "Value (int)"}, {}, {} },
-    { "Show HUD",       0xFF3355AA, 1, 1, 1, 0, {"Slot (int)"}, {}, {} },
+    { "Show HUD",       0xFF3355AA, 1, 1, 2, 0, {"Slot (int)", "Anchor (obj)"}, {}, {} },
     { "Hide HUD",       0xFF3355AA, 1, 1, 1, 0, {"Slot (int)"}, {}, {} },
     { "Get Random",     0xFF666688, 0, 0, 0, 1, {}, {"Value"}, {} },
     { "Array Get",      0xFF666688, 0, 0, 1, 1, {"Index (int)"}, {"Value"}, {} },
@@ -924,6 +925,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Tank Camera",     0xFF6644AA, 1, 1, 1, 0, {"On (int)"}, {}, {} },
     { "Turn Player",     0xFF6644AA, 1, 1, 2, 0, {"Direction", "Speed (int)"}, {}, {} },
     { "Cast Effect",     0xFF3355AA, 1, 1, 1, 0, {"Object (int)"}, {}, {} },
+    { "Attached Sprite", 0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
 };
 
 struct VsNode {
@@ -15663,11 +15665,14 @@ void FrameTick(float dt)
                                                     sSprites[i].railPath[rp].isStart ? 1.0f : 0.0f });
                         exportSprites.push_back(se);
 
-                        // Emit sub-sprites as separate sprite entries
+                        // Emit sub-sprites as separate sprite entries. Asset-less
+                        // subs (assetIdx -1) are emitted too: they draw nothing
+                        // but their parent+offset still export as pure world
+                        // ANCHORS (PSV HUD anchoring uses the offset even when
+                        // there's no billboard to show).
                         int parentExportIdx = (int)exportSprites.size() - 1;
                         for (int si = 0; si < sSprites[i].subSpriteCount; si++) {
                             const auto& sub = sSprites[i].subSprites[si];
-                            if (sub.assetIdx < 0) continue;
                             GBASpriteExport subSe;
                             subSe.x = sSprites[i].x + sub.offsetX;
                             subSe.y = sSprites[i].y + sub.offsetY;
@@ -20604,6 +20609,7 @@ void FrameTick(float dt)
                 case VsNodeType::TankCamera:    desc = "Tank controls (Mode 4). Wire 1 to make movement + facing follow the player heading (turned by Turn Player on the D-pad) instead of the camera, so forward/back go where the tank points while the camera still orbits freely (L/R). Wire 0 for normal camera-relative controls."; break;
                 case VsNodeType::TurnPlayer:    desc = "Rotates the tank heading (used with Tank Camera). Wire a Direction (Left/Right) and a Speed (brads/frame). Put it on On Key Held(Left)/(Right) so the D-pad turns the player in place while L/R still orbit the camera. Left-click for the Movement switch: Tank (Heading) makes movement follow the turned heading; Camera Relative keeps movement on camera axes and only steers the facing."; break;
                 case VsNodeType::CastEffect:    desc = "Plays a combat/spell effect on a target object. Attach a sprite to that object and tick its 'Hidden' box (it starts invisible). Wire the target into Object: on trigger the effect shows, plays its animation once, and auto-hides. Set the effect sprite's animation to Once so it cleans up."; break;
+                case VsNodeType::AttachedSprite:desc = "Outputs the sprite this blueprint instance is attached to (\"self\"). Wire into Show HUD's Anchor to pin the element to the owner's attached-sprite position in the world (PSV) — the element tracks the object on screen."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
@@ -20875,6 +20881,7 @@ void FrameTick(float dt)
                         case VsNodeType::TankCamera:    return "_tank_camera";
                         case VsNodeType::TurnPlayer:    return "_turn_player";
                         case VsNodeType::CastEffect:    return "_cast_effect";
+                        case VsNodeType::AttachedSprite:return "_attached_sprite";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -21728,6 +21735,17 @@ void FrameTick(float dt)
                         "    // sprite auto-hides (afn_sprite_visible=0) when its one-shot anim ends.",
                         fmtInt(infoNode.id, 0, "<object>"));
                     setActionFunc(infoNode, "_cast_effect", bodyBuf);
+                    break;
+                }
+                case VsNodeType::AttachedSprite: {
+                    editorCode = "// The sprite this blueprint instance is attached to (\"self\")";
+                    setActionFunc(infoNode, "_attached_sprite",
+                        "    return afn_bp_cur_spr_idx;\n"
+                        "    // --- Runtime --- inline data node, evaluated at call site.\n"
+                        "    // In a blueprint the dispatcher sets afn_bp_cur_spr_idx to the\n"
+                        "    // owning sprite before each handler runs; in the scene script\n"
+                        "    // it is -1 (no owner). Wire into Show HUD's Anchor to pin the\n"
+                        "    // element to the owner's attached-sprite world position (PSV).");
                     break;
                 }
                 case VsNodeType::TurnPlayer: {
@@ -23363,14 +23381,21 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::ShowHUD: {
                     editorCode = "// Show HUD element (freeze player only if interactive)";
-                    char b6[512];
+                    char b6[640];
                     snprintf(b6, sizeof(b6),
                         "    afn_hud_visible[%s] = 1;\n"
                         "    if (stopCount > 0) afn_player_frozen = 1;\n"
-                        "    // --- Runtime (main.c) ---\n"
-                        "    // DMA static HUD tiles to OBJ VRAM\n"
-                        "    // If element has cursor stops: freeze player, init cursor at stop 0\n"
-                        "    // Non-interactive elements (counters) don't freeze",
+                        "#ifdef AFN_HAS_HUD_ANCHOR // PSV\n"
+                        "    // In a BLUEPRINT: pin the element to the owner sprite —\n"
+                        "    afn_hud_anchor_sprite[%s] = afn_bp_cur_spr_idx; // (-1 in scene script)\n"
+                        "#endif\n"
+                        "    // --- Runtime (main.c / psv hud_render) ---\n"
+                        "    // NDS: DMA static HUD tiles to OBJ VRAM.\n"
+                        "    // PSV anchored: element origin = owner NPC's attached-sprite\n"
+                        "    //   world pos projected to screen (tracks the NPC; hidden\n"
+                        "    //   behind the camera). Author piece offsets around (0,0).\n"
+                        "    // If element has cursor stops: freeze player, init cursor at stop 0",
+                        fmtInt(infoNode.id, 0, "<slot>"),
                         fmtInt(infoNode.id, 0, "<slot>"));
                     setActionFunc(infoNode, "_show_hud", b6);
                     break;
@@ -23396,10 +23421,11 @@ void FrameTick(float dt)
                         "    afn_hud_layer_tick[%s] = 0;\n"
                         "    afn_hud_layer_active[%s] = 1;\n"
                         "#endif\n"
-                        "    // --- Runtime (main.c) ---\n"
+                        "    // --- Runtime (NDS hud.c / PSV main.c hud_render) ---\n"
                         "    // Tick: if (++tick >= speed) { frame++; tick=0; }\n"
                         "    // Interpolates keyframes (const/linear/bezier)\n"
-                        "    // Applies x,y offsets to layer items in OAM",
+                        "    // NDS: x,y offsets to layer items in OAM.\n"
+                        "    // PSV: offset + scale + ROTATION about the piece center.",
                         fmtInt(infoNode.id, 0, "<layer>"),
                         fmtInt(infoNode.id, 0, "<layer>"),
                         fmtInt(infoNode.id, 0, "<layer>"));
@@ -23413,8 +23439,8 @@ void FrameTick(float dt)
                         "#ifdef AFN_HUD_HAS_LAYERS\n"
                         "    afn_hud_layer_active[%s] = 0;\n"
                         "#endif\n"
-                        "    // --- Runtime (main.c) ---\n"
-                        "    // Layer stops ticking; items freeze at current offsets",
+                        "    // --- Runtime (NDS hud.c / PSV main.c hud_render) ---\n"
+                        "    // Layer stops ticking; items freeze at current pose",
                         fmtInt(infoNode.id, 0, "<layer>"));
                     setActionFunc(infoNode, "_stop_hud_anim", bSA);
                     break;
@@ -24661,6 +24687,7 @@ void FrameTick(float dt)
                     case VsNodeType::TankCamera:    suffix = "_tank_camera"; break;
                     case VsNodeType::TurnPlayer:    suffix = "_turn_player"; break;
                     case VsNodeType::CastEffect:    suffix = "_cast_effect"; break;
+                    case VsNodeType::AttachedSprite:suffix = "_attached_sprite"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -25157,6 +25184,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::TankCamera].name)) addNodeAt(VsNodeType::TankCamera);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::TurnPlayer].name)) addNodeAt(VsNodeType::TurnPlayer);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CastEffect].name)) addNodeAt(VsNodeType::CastEffect);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::AttachedSprite].name)) addNodeAt(VsNodeType::AttachedSprite);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP].name)) addNodeAt(VsNodeType::SetHP);

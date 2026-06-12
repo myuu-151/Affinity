@@ -132,6 +132,26 @@ static void afn_bp1_update(void) {
 static void afn_bp1_key_held(void) {
 }
 static void afn_bp1_key_pressed(void) {
+    if (key_hit(KEY_L)) {
+        afn_key_mag = 256;
+    afn_hud_visible[0] = 1;
+#ifdef AFN_HAS_HUD_ANCHOR
+    if (afn_bp_cur_spr_idx >= 0) afn_hud_anchor_sprite[0] = afn_bp_cur_spr_idx;
+#endif
+    afn_elem_idx = 0;
+    afn_active_element = 0;
+    afn_cursor_stop = 0;
+    afn_stop_count = afn_hud_elems[0].stopCount;
+    if (afn_stop_count > 0) {
+      afn_player_frozen = 1;
+      afn_play_anim = -1;
+      afn_move_speed = 0;
+      { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[0].stopStart + si].link; }
+    }
+    afn_hud_layer_frame[0] = 0;
+    afn_hud_layer_tick[0] = 0;
+    afn_hud_layer_active[0] = 1;
+    }
 }
 static void afn_bp1_key_released(void) {
 }

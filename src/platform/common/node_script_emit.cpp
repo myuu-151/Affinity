@@ -519,6 +519,26 @@ void EmitNodeScriptBodies(std::ostream& f,
                 int slot = slotData ? resolveInt(slotData) : a->paramInt[0];
                 if (slot < 0) slot = 0; if (slot > 3) slot = 3;
                 f << "    afn_hud_visible[" << slot << "] = 1;\n";
+                // World anchoring (PSV only, AFN_HAS_HUD_ANCHOR): the Anchor
+                // pin (data input 1) pins the element's content to that
+                // sprite's attached-sprite world position projected to screen.
+                // Wire an Attached Sprite node for the BP owner ("self"), or
+                // an Object node for a specific sprite. Unwired = the normal
+                // authored screen position.
+                f << "#ifdef AFN_HAS_HUD_ANCHOR\n";
+                {
+                    auto* anchorData = findDataIn(a->id, 1);
+                    if (anchorData && anchorData->type == GBAScriptNodeType::AttachedSprite)
+                        // Only instances that HAVE an owner anchor; ownerless
+                        // instances (element-linked BPs run with spr_idx -1)
+                        // must not stomp an anchor set by the sprite instance.
+                        f << "    if (afn_bp_cur_spr_idx >= 0) afn_hud_anchor_sprite[" << slot << "] = afn_bp_cur_spr_idx;\n";
+                    else if (anchorData)
+                        f << "    afn_hud_anchor_sprite[" << slot << "] = " << resolveInt(anchorData) << ";\n";
+                    else
+                        f << "    afn_hud_anchor_sprite[" << slot << "] = -1;\n";
+                }
+                f << "#endif\n";
                 // Mirror GBA: showing a menu element with cursor stops
                 // freezes the player + primes the cursor nav state so
                 // CursorUp/Down/FollowLink have something to walk.
