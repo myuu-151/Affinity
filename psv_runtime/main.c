@@ -1557,6 +1557,48 @@ int main(void)
         // AFN_ORBIT_MAX_DELTA caps this frame's orbit_angle change so the
         // camera-position chase below can keep up. PSV input is fully node-
         // driven, so instead of NDS's held-L/R check we detect that something
+        // HARDCODED (pre-node): lock-on camera assist. While a world-anchored
+        // HUD element is showing (the target lock), the orbit yaw EASES toward
+        // facing the locked NPC — riding the normal camera chase delay. When
+        // the target drifts outside the camera's horizontal field (player ran
+        // past it / fast NPC), the assist RELEASES and the camera behaves
+        // normally; it re-acquires only when a manual orbit brings the target
+        // back into view. HideHUD (or hiding the element) drops the lock.
+#if defined(AFN_HAS_HUD) && defined(AFN_HAS_HUD_ANCHOR) && defined(AFN_HAS_PLAYER_RIG)
+        {
+            static int s_lockCamEngaged = 0;
+            int lockSpr = -1;
+            for (int e = 0; e < AFN_HUD_ELEM_COUNT; e++)
+                if (afn_hud_visible[e] && afn_hud_anchor_sprite[e] >= 0) { lockSpr = afn_hud_anchor_sprite[e]; break; }
+            if (lockSpr >= 0) {
+                float tx = 0, tz = 0; int tFound = 0;
+                for (int n = 0; n < AFN_NPC_COUNT && !tFound; n++)
+                    if ((int)afn_npc_inst[n][7] == lockSpr) { tx = s_npcX[n]; tz = s_npcZ[n]; tFound = 1; }
+                float ldx = tx - playerX, ldz = tz - playerZ;
+                if (tFound && (ldx*ldx + ldz*ldz) > 4.0f) {
+                    // Camera forward is +(sin,cos)(camAngle) (see the look_at
+                    // aim in the render block); facing the target means
+                    // forward ∝ (target - player).
+                    float desired = atan2f(ldx, ldz);
+                    float cur = orbit_angle * (6.2831853f / 65536.0f);
+                    float diff = desired - cur;
+                    while (diff >  3.14159265f) diff -= 6.2831853f;
+                    while (diff < -3.14159265f) diff += 6.2831853f;
+                    const float lim = 55.0f * DEG2RAD;   // ~half the horizontal FOV
+                    if (s_lockCamEngaged) {
+                        if (diff > lim || diff < -lim) s_lockCamEngaged = 0;   // off camera: release
+                        else orbit_angle = (int)(uint16_t)(orbit_angle
+                                 + (int)(diff * (65536.0f / 6.2831853f) * 0.10f));   // ease toward
+                    } else if (diff > -lim * 0.9f && diff < lim * 0.9f) {
+                        s_lockCamEngaged = 1;   // re-acquired by orbiting back into view
+                    }
+                }
+            } else {
+                s_lockCamEngaged = 0;
+            }
+        }
+#endif
+
         // (an OrbitCamera node / the slot swing) actually moved orbit_angle
         // this frame — that selects AFN_ORBIT_EASE_IN for the chase.
         int orbitingNow;
