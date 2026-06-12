@@ -436,6 +436,8 @@ enum class GBAScriptNodeType : int {
     TurnPlayer,
     CastEffect,
     AttachedSprite,  // data: the owning BP instance's sprite index ("self" anchor)
+    LockOnTarget,    // action: lock-on camera assist — orbit eases toward facing the target
+    ReleaseLockOn,   // action: release the lock-on camera assist
     COUNT
 };
 

@@ -941,6 +941,11 @@ int afn_hud_anchor_sprite[AFN_HUD_VIS_N];   // -1 = screen-space (init at boot)
 // object (orbit distance = 100%), clamped to [min,max]; 100/100 pins the
 // scale to 1 = constant screen size (the original behavior).
 unsigned char afn_hud_anchor_min[AFN_HUD_VIS_N], afn_hud_anchor_max[AFN_HUD_VIS_N];
+// Lock-on camera assist target (Lock Camera / Unlock Camera nodes): the
+// editor sprite index the orbit eases toward facing, -1 = no lock. Consumed
+// by the assist block in the main loop (before the orbit-delta detection).
+#define AFN_HAS_CAM_LOCK 1
+int afn_cam_lock_target = -1;
 unsigned char afn_sprite_visible[NUM_SPRITES]={0};
 unsigned char afn_sprite_flip[NUM_SPRITES]={0}, afn_collision_enabled[NUM_SPRITES]={0};
 int afn_hp[NUM_SPRITES]={0}, afn_state_timer[NUM_SPRITES]={0};
@@ -1557,19 +1562,16 @@ int main(void)
         // AFN_ORBIT_MAX_DELTA caps this frame's orbit_angle change so the
         // camera-position chase below can keep up. PSV input is fully node-
         // driven, so instead of NDS's held-L/R check we detect that something
-        // HARDCODED (pre-node): lock-on camera assist. While a world-anchored
-        // HUD element is showing (the target lock), the orbit yaw EASES toward
-        // facing the locked NPC — riding the normal camera chase delay. When
-        // the target drifts outside the camera's horizontal field (player ran
-        // past it / fast NPC), the assist RELEASES and the camera behaves
-        // normally; it re-acquires only when a manual orbit brings the target
-        // back into view. HideHUD (or hiding the element) drops the lock.
-#if defined(AFN_HAS_HUD) && defined(AFN_HAS_HUD_ANCHOR) && defined(AFN_HAS_PLAYER_RIG)
+        // Lock-on camera assist — node-driven: a Lock Camera node sets
+        // afn_cam_lock_target (Unlock Camera resets it to -1). While the
+        // target is in the camera's horizontal field, the orbit yaw EASES
+        // toward facing it — riding the normal camera chase delay. When the
+        // target drifts off screen the assist RELEASES (camera back to normal)
+        // and re-acquires only when a manual orbit brings it back into view.
+#ifdef AFN_HAS_PLAYER_RIG
         {
             static int s_lockCamEngaged = 0;
-            int lockSpr = -1;
-            for (int e = 0; e < AFN_HUD_ELEM_COUNT; e++)
-                if (afn_hud_visible[e] && afn_hud_anchor_sprite[e] >= 0) { lockSpr = afn_hud_anchor_sprite[e]; break; }
+            int lockSpr = afn_cam_lock_target;
             if (lockSpr >= 0) {
                 float tx = 0, tz = 0; int tFound = 0;
                 for (int n = 0; n < AFN_NPC_COUNT && !tFound; n++)

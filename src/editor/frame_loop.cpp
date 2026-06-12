@@ -606,6 +606,8 @@ enum class VsNodeType : int {
     TurnPlayer,      // action: rotate the tank heading (Direction + Speed); used with Tank Camera on the D-pad
     CastEffect,      // action: show a hidden attached effect sprite on an object, play once, auto-hide
     AttachedSprite,  // data: the owning BP instance's sprite index ("self" — drives HUD anchoring)
+    LockOnTarget,    // action: lock-on camera assist toward a target object
+    ReleaseLockOn,   // action: release the lock-on camera assist
     COUNT
 };
 
@@ -926,6 +928,8 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Turn Player",     0xFF6644AA, 1, 1, 2, 0, {"Direction", "Speed (int)"}, {}, {} },
     { "Cast Effect",     0xFF3355AA, 1, 1, 1, 0, {"Object (int)"}, {}, {} },
     { "Attached Sprite", 0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
+    { "Lock On",         0xFF3355AA, 1, 1, 1, 0, {"Target (obj)"}, {}, {} },
+    { "Release Lock On", 0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -20610,6 +20614,8 @@ void FrameTick(float dt)
                 case VsNodeType::TurnPlayer:    desc = "Rotates the tank heading (used with Tank Camera). Wire a Direction (Left/Right) and a Speed (brads/frame). Put it on On Key Held(Left)/(Right) so the D-pad turns the player in place while L/R still orbit the camera. Left-click for the Movement switch: Tank (Heading) makes movement follow the turned heading; Camera Relative keeps movement on camera axes and only steers the facing."; break;
                 case VsNodeType::CastEffect:    desc = "Plays a combat/spell effect on a target object. Attach a sprite to that object and tick its 'Hidden' box (it starts invisible). Wire the target into Object: on trigger the effect shows, plays its animation once, and auto-hides. Set the effect sprite's animation to Once so it cleans up."; break;
                 case VsNodeType::AttachedSprite:desc = "Outputs the sprite this blueprint instance is attached to (\"self\"). Wire into Show HUD's Anchor to pin the element to the owner's attached-sprite position in the world (PSV) — the element tracks the object on screen."; break;
+                case VsNodeType::LockOnTarget:  desc = "Lock-on camera assist (PSV): the orbit eases toward facing the Target while it's in view (riding the camera delay), releases when it drifts off screen, and re-acquires when you orbit it back into view. Wire Attached Sprite (\"self\" in a blueprint) or an Object into Target. Stays locked until Unlock Camera."; break;
+                case VsNodeType::ReleaseLockOn: desc = "Releases the lock-on camera assist (pairs with Lock Camera — e.g. fire it next to Hide HUD when dropping the target)."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
@@ -20882,6 +20888,8 @@ void FrameTick(float dt)
                         case VsNodeType::TurnPlayer:    return "_turn_player";
                         case VsNodeType::CastEffect:    return "_cast_effect";
                         case VsNodeType::AttachedSprite:return "_attached_sprite";
+                        case VsNodeType::LockOnTarget:  return "_lock_on";
+                        case VsNodeType::ReleaseLockOn: return "_release_lock_on";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -21754,6 +21762,33 @@ void FrameTick(float dt)
                         "    // orbit distance), clamped [min,max]; 100/100 = constant size.",
                         asMn, asMx);
                     setActionFunc(infoNode, "_attached_sprite", asBuf);
+                    break;
+                }
+                case VsNodeType::LockOnTarget: {
+                    editorCode = "// Lock-on camera assist toward a target object";
+                    char lcBuf[640];
+                    snprintf(lcBuf, sizeof(lcBuf),
+                        "#ifdef AFN_HAS_CAM_LOCK // PSV\n"
+                        "    afn_cam_lock_target = %s;\n"
+                        "#endif\n"
+                        "    // --- Runtime (psv main.c, pre-orbit) ---\n"
+                        "    // While the target is in the horizontal FOV (~55 deg):\n"
+                        "    //   orbit_angle += yawDiffToTarget * 0.10;  // ease, rides chase delay\n"
+                        "    // Drifts off screen -> assist releases (camera back to normal);\n"
+                        "    // orbiting it back into view re-acquires (hysteresis).\n"
+                        "    // Stays locked until Unlock Camera sets the target to -1.",
+                        fmtInt(infoNode.id, 0, "<target>"));
+                    setActionFunc(infoNode, "_lock_on", lcBuf);
+                    break;
+                }
+                case VsNodeType::ReleaseLockOn: {
+                    editorCode = "// Release the lock-on camera assist";
+                    setActionFunc(infoNode, "_release_lock_on",
+                        "#ifdef AFN_HAS_CAM_LOCK // PSV\n"
+                        "    afn_cam_lock_target = -1;\n"
+                        "#endif\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // The orbit assist stops steering; normal camera control resumes.");
                     break;
                 }
                 case VsNodeType::TurnPlayer: {
@@ -24696,6 +24731,8 @@ void FrameTick(float dt)
                     case VsNodeType::TurnPlayer:    suffix = "_turn_player"; break;
                     case VsNodeType::CastEffect:    suffix = "_cast_effect"; break;
                     case VsNodeType::AttachedSprite:suffix = "_attached_sprite"; break;
+                    case VsNodeType::LockOnTarget:  suffix = "_lock_on"; break;
+                    case VsNodeType::ReleaseLockOn: suffix = "_release_lock_on"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -25193,6 +25230,8 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::TurnPlayer].name)) addNodeAt(VsNodeType::TurnPlayer);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CastEffect].name)) addNodeAt(VsNodeType::CastEffect);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::AttachedSprite].name)) addNodeAt(VsNodeType::AttachedSprite);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::LockOnTarget].name)) addNodeAt(VsNodeType::LockOnTarget);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ReleaseLockOn].name)) addNodeAt(VsNodeType::ReleaseLockOn);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP].name)) addNodeAt(VsNodeType::SetHP);
@@ -25211,8 +25250,8 @@ void FrameTick(float dt)
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetFOV].name)) addNodeAt(VsNodeType::SetFOV);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ShakeStop].name)) addNodeAt(VsNodeType::ShakeStop);
-                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::LockCamera].name)) addNodeAt(VsNodeType::LockCamera);
-                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::UnlockCamera].name)) addNodeAt(VsNodeType::UnlockCamera);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::LockOnTarget].name)) addNodeAt(VsNodeType::LockOnTarget);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ReleaseLockOn].name)) addNodeAt(VsNodeType::ReleaseLockOn);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetCamSpeed].name)) addNodeAt(VsNodeType::SetCamSpeed);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ApplyForce].name)) addNodeAt(VsNodeType::ApplyForce);

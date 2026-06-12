@@ -636,6 +636,29 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_player_heading " << sign << "= (" << speed << " * afn_key_mag) >> 8;\n";
                 break;
             }
+            case GBAScriptNodeType::LockOnTarget: {
+                // Lock-on camera assist (PSV, AFN_HAS_CAM_LOCK): the orbit
+                // eases toward facing the target while it's in view. Target
+                // pin: Attached Sprite = the BP owner ("self", guarded so
+                // ownerless instances don't stomp it), Object = a specific
+                // sprite; unwired in a BP also means self.
+                auto* tgt = findDataIn(a->id, 0);
+                f << "#ifdef AFN_HAS_CAM_LOCK\n";
+                if (tgt && tgt->type != GBAScriptNodeType::AttachedSprite)
+                    f << "    afn_cam_lock_target = " << resolveInt(tgt) << ";\n";
+                else if (curScript != &script || (tgt && tgt->type == GBAScriptNodeType::AttachedSprite))
+                    f << "    if (afn_bp_cur_spr_idx >= 0) afn_cam_lock_target = afn_bp_cur_spr_idx;\n";
+                else
+                    f << "    afn_cam_lock_target = -1;\n";   // scene script, no target wired
+                f << "#endif\n";
+                break;
+            }
+            case GBAScriptNodeType::ReleaseLockOn: {
+                f << "#ifdef AFN_HAS_CAM_LOCK\n";
+                f << "    afn_cam_lock_target = -1;\n";
+                f << "#endif\n";
+                break;
+            }
             case GBAScriptNodeType::CastEffect: {
                 auto* objData = findDataIn(a->id, 0);
                 std::string obj;

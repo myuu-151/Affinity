@@ -134,6 +134,9 @@ static void afn_bp1_key_held(void) {
 static void afn_bp1_key_pressed(void) {
     if (key_hit(KEY_L)) {
         afn_key_mag = 256;
+    { static int afn_ff_11 = 0;
+      afn_ff_11 = !afn_ff_11;
+      if (afn_ff_11) {
     afn_hud_visible[0] = 1;
 #ifdef AFN_HAS_HUD_ANCHOR
     if (afn_bp_cur_spr_idx >= 0) afn_hud_anchor_sprite[0] = afn_bp_cur_spr_idx;
@@ -153,6 +156,17 @@ static void afn_bp1_key_pressed(void) {
     afn_hud_layer_frame[0] = 0;
     afn_hud_layer_tick[0] = 0;
     afn_hud_layer_active[0] = 1;
+#ifdef AFN_HAS_CAM_LOCK
+    if (afn_bp_cur_spr_idx >= 0) afn_cam_lock_target = afn_bp_cur_spr_idx;
+#endif
+      } else {
+    afn_hud_visible[0] = 0;
+    afn_player_frozen = 0;
+    afn_play_anim = 0;
+#ifdef AFN_HAS_CAM_LOCK
+    afn_cam_lock_target = -1;
+#endif
+      } }
     }
 }
 static void afn_bp1_key_released(void) {
