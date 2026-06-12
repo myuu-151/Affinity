@@ -21739,13 +21739,21 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::AttachedSprite: {
                     editorCode = "// The sprite this blueprint instance is attached to (\"self\")";
-                    setActionFunc(infoNode, "_attached_sprite",
+                    char asBuf[640];
+                    int asMx = infoNode.paramInt[0] > 0 ? infoNode.paramInt[0] : 100;
+                    int asMn = infoNode.paramInt[1] > 0 ? infoNode.paramInt[1] : 100;
+                    snprintf(asBuf, sizeof(asBuf),
                         "    return afn_bp_cur_spr_idx;\n"
+                        "    // afn_hud_anchor_min[slot] = %d; afn_hud_anchor_max[slot] = %d;\n"
                         "    // --- Runtime --- inline data node, evaluated at call site.\n"
                         "    // In a blueprint the dispatcher sets afn_bp_cur_spr_idx to the\n"
                         "    // owning sprite before each handler runs; in the scene script\n"
                         "    // it is -1 (no owner). Wire into Show HUD's Anchor to pin the\n"
-                        "    // element to the owner's attached-sprite world position (PSV).");
+                        "    // element to the owner's attached-sprite world position (PSV).\n"
+                        "    // Size sliders: element scales with camera distance (100%% at\n"
+                        "    // orbit distance), clamped [min,max]; 100/100 = constant size.",
+                        asMn, asMx);
+                    setActionFunc(infoNode, "_attached_sprite", asBuf);
                     break;
                 }
                 case VsNodeType::TurnPlayer: {
@@ -25415,7 +25423,7 @@ void FrameTick(float dt)
         // Properties panel overlay — as child window inside canvas (data nodes only)
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
-            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt || n.type == VsNodeType::SoundInstance || n.type == VsNodeType::SkelAnim || n.type == VsNodeType::PlayHudAnim || n.type == VsNodeType::StopHudAnim || n.type == VsNodeType::MovePlayer || n.type == VsNodeType::TurnPlayer) {
+            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt || n.type == VsNodeType::SoundInstance || n.type == VsNodeType::SkelAnim || n.type == VsNodeType::PlayHudAnim || n.type == VsNodeType::StopHudAnim || n.type == VsNodeType::MovePlayer || n.type == VsNodeType::TurnPlayer || n.type == VsNodeType::AttachedSprite) {
             const auto& def = sVsNodeDefs[(int)n.type];
             float propW = 260, propH = 180;
             float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -25460,6 +25468,20 @@ void FrameTick(float dt)
                 const char* turnModes[] = { "Tank (Heading)", "Camera Relative" };
                 if (ImGui::Combo("##TpMove", &n.paramInt[0], turnModes, 2)) sProjectDirty = true;
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tank (Heading): movement directions follow the turned heading (classic tank polarity — up can walk toward the camera). Camera Relative: movement stays on camera axes; Turn Player only rotates the facing.");
+                break;
+            }
+            case VsNodeType::AttachedSprite: {
+                // Anchored-element distance scaling: the element scales with
+                // camera distance (100% at orbit distance) clamped between
+                // Min and Max. 100/100 = constant screen size (default).
+                int mx = n.paramInt[0] > 0 ? n.paramInt[0] : 100;
+                int mn = n.paramInt[1] > 0 ? n.paramInt[1] : 100;
+                ImGui::Text("Max Size");
+                if (ImGui::SliderInt("##AsMax", &mx, 10, 300, "%d%%")) { n.paramInt[0] = mx; sProjectDirty = true; }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cap on the anchored element's size as the camera gets close. 100%% of the authored size at orbit distance.");
+                ImGui::Text("Min Size");
+                if (ImGui::SliderInt("##AsMin", &mn, 10, 300, "%d%%")) { n.paramInt[1] = mn; sProjectDirty = true; }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Floor on the anchored element's size as the camera gets far. Keep BOTH at 100%% for constant screen size (no distance scaling).");
                 break;
             }
             case VsNodeType::Integer:

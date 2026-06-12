@@ -528,15 +528,25 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "#ifdef AFN_HAS_HUD_ANCHOR\n";
                 {
                     auto* anchorData = findDataIn(a->id, 1);
-                    if (anchorData && anchorData->type == GBAScriptNodeType::AttachedSprite)
+                    if (anchorData && anchorData->type == GBAScriptNodeType::AttachedSprite) {
                         // Only instances that HAVE an owner anchor; ownerless
                         // instances (element-linked BPs run with spr_idx -1)
                         // must not stomp an anchor set by the sprite instance.
                         f << "    if (afn_bp_cur_spr_idx >= 0) afn_hud_anchor_sprite[" << slot << "] = afn_bp_cur_spr_idx;\n";
-                    else if (anchorData)
+                        // Max/Min Size sliders (Attached Sprite node, percent;
+                        // 0 = unset -> 100). 100/100 = constant screen size;
+                        // otherwise the element scales with camera distance
+                        // clamped to [min,max].
+                        int mx = anchorData->paramInt[0] > 0 ? anchorData->paramInt[0] : 100;
+                        int mn = anchorData->paramInt[1] > 0 ? anchorData->paramInt[1] : 100;
+                        if (mn > mx) { int t = mn; mn = mx; mx = t; }
+                        f << "    afn_hud_anchor_min[" << slot << "] = " << mn << ";\n";
+                        f << "    afn_hud_anchor_max[" << slot << "] = " << mx << ";\n";
+                    } else if (anchorData) {
                         f << "    afn_hud_anchor_sprite[" << slot << "] = " << resolveInt(anchorData) << ";\n";
-                    else
+                    } else {
                         f << "    afn_hud_anchor_sprite[" << slot << "] = -1;\n";
+                    }
                 }
                 f << "#endif\n";
                 // Mirror GBA: showing a menu element with cursor stops

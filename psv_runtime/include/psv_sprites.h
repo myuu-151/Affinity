@@ -5,6 +5,6 @@
 #define AFN_ANCHOR_COUNT 1
 // {parent sprite idx, offX, offY, offZ (world px)}
 static const float afn_anchors[1][4] = {
-  { 6, 0.0f, -0.375f, 0.0f },
+  { 6, 0.0f, 2.125f, 0.0f },
 };
 // (no billboard sprites in this scene)

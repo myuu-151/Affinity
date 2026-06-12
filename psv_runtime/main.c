@@ -936,6 +936,11 @@ unsigned char afn_hud_visible[AFN_HUD_VIS_N]={0};
 // element pops over the NPC the blueprint is attached to.
 #define AFN_HAS_HUD_ANCHOR 1
 int afn_hud_anchor_sprite[AFN_HUD_VIS_N];   // -1 = screen-space (init at boot)
+// Anchored-element size clamps (percent, from the Attached Sprite node's
+// Max/Min Size sliders). The element scales with camera distance like a world
+// object (orbit distance = 100%), clamped to [min,max]; 100/100 pins the
+// scale to 1 = constant screen size (the original behavior).
+unsigned char afn_hud_anchor_min[AFN_HUD_VIS_N], afn_hud_anchor_max[AFN_HUD_VIS_N];
 unsigned char afn_sprite_visible[NUM_SPRITES]={0};
 unsigned char afn_sprite_flip[NUM_SPRITES]={0}, afn_collision_enabled[NUM_SPRITES]={0};
 int afn_hp[NUM_SPRITES]={0}, afn_state_timer[NUM_SPRITES]={0};
@@ -1166,9 +1171,11 @@ static float hud_text(const char* s, float x, float y, int scale, unsigned int c
 // scene's exact frustum (near 1.0, vfov ~75, Vita aspect).
 static float s_hudSceneView[16];
 static int   s_hudSceneViewValid = 0;
+static float s_hudCamDist = 60.0f;   // camera orbit distance (scale reference)
 
 // Project a world position into HUD coords. Returns 0 when behind the camera.
-static int hud_project(float wx, float wy, float wz, float* outX, float* outY) {
+// outDepth (optional) receives the eye-space distance along the view axis.
+static int hud_project(float wx, float wy, float wz, float* outX, float* outY, float* outDepth) {
     if (!s_hudSceneViewValid) return 0;
     const float* v = s_hudSceneView;
     float exq = v[0]*wx + v[4]*wy + v[8]*wz  + v[12];
@@ -1181,6 +1188,7 @@ static int hud_project(float wx, float wy, float wz, float* outX, float* outY) {
     float ndcY = (eyq * (nearp / top))  / -ezq;
     *outX = (ndcX * 0.5f + 0.5f) * 240.0f;
     *outY = (1.0f - (ndcY * 0.5f + 0.5f)) * 160.0f;
+    if (outDepth) *outDepth = -ezq;
     return 1;
 }
 
@@ -1248,6 +1256,7 @@ static void hud_render(void) {
         if (el->mode == 2) continue;                       // Mode-0-only element
         if (!(el->sceneMask & (1u << afn_current_scene))) continue;
         float bx = el->screenX, by = el->screenY;
+        float elScale = 1.0f;                              // anchored distance scale
 #ifdef AFN_HAS_HUD_ANCHOR
         // World-anchored element (ShowHUD fired from a blueprint): origin =
         // the owner NPC's attached-sprite world position projected to screen.
@@ -1275,8 +1284,19 @@ static void hud_render(void) {
                 }
 #endif
             if (found) {
-                float sxp, syp;
-                if (!hud_project(wx, wy, wz, &sxp, &syp)) continue;   // behind camera
+                float sxp, syp, depth = 1.0f;
+                if (!hud_project(wx, wy, wz, &sxp, &syp, &depth)) continue;   // behind camera
+                // Distance scale (Attached Sprite node Max/Min Size sliders):
+                // scale like a world object — 100% at the camera's orbit
+                // distance, growing when close, shrinking when far — clamped
+                // to [min,max]. 100/100 pins to 1.0 (constant screen size).
+                float smin = afn_hud_anchor_min[e] / 100.0f;
+                float smax = afn_hud_anchor_max[e] / 100.0f;
+                if (!(smin == 1.0f && smax == 1.0f)) {
+                    elScale = (depth > 0.01f) ? (s_hudCamDist / depth) : smax;
+                    if (elScale < smin) elScale = smin;
+                    if (elScale > smax) elScale = smax;
+                }
                 // Center the element's piece-bounds on the anchor so the
                 // authored layout (any piece offsets) lands centered on the
                 // NPC — no special offsets needed in the editor.
@@ -1289,8 +1309,8 @@ static void hud_render(void) {
                     if (pp->y + pp->h > mxy) mxy = pp->y + pp->h;
                 }
                 if (el->pieceCount > 0) {
-                    bx = sxp - (mnx + mxx) * 0.5f;
-                    by = syp - (mny + mxy) * 0.5f;
+                    bx = sxp - (mnx + mxx) * 0.5f * elScale;
+                    by = syp - (mny + mxy) * 0.5f * elScale;
                 } else { bx = sxp; by = syp; }
             }
         }
@@ -1302,17 +1322,19 @@ static void hud_render(void) {
 #ifdef AFN_HAS_HUD_ANIM
             int li = afn_hud_piece_layer[gpi];
             if (li >= 0) {
-                // Animated: keyframe offset + scale + rotation about center.
-                float w = pc->w * laySx[li], h = pc->h * laySy[li];
+                // Animated: keyframe offset + scale + rotation about center,
+                // all in element space scaled by the anchored distance scale.
+                float w = pc->w * laySx[li] * elScale, h = pc->h * laySy[li] * elScale;
                 hud_quad_xf(s_hudTex[pc->tex],
-                            bx + pc->x + layOx[li] + pc->w * 0.5f,
-                            by + pc->y + layOy[li] + pc->h * 0.5f,
+                            bx + (pc->x + layOx[li] + pc->w * 0.5f) * elScale,
+                            by + (pc->y + layOy[li] + pc->h * 0.5f) * elScale,
                             w, h, layRot[li], 0xFFFFFFFFu);
                 continue;
             }
 #endif
-            hud_quad(s_hudTex[pc->tex], bx + pc->x, by + pc->y,
-                     bx + pc->x + pc->w, by + pc->y + pc->h, 0, 0, 1, 1, 0xFFFFFFFFu);
+            hud_quad(s_hudTex[pc->tex], bx + pc->x * elScale, by + pc->y * elScale,
+                     bx + (pc->x + pc->w) * elScale, by + (pc->y + pc->h) * elScale,
+                     0, 0, 1, 1, 0xFFFFFFFFu);
         }
         // Text rows (static label or counter bound to afn_hud_value[slot]).
         for (int k = 0; k < el->textCount; k++) {
@@ -1383,7 +1405,10 @@ int main(void)
     // Seed per-element visibility from the authored "visible" flag (ShowHUD /
     // CursorUp toggle it at runtime).
     for (int i = 0; i < AFN_HUD_ELEM_COUNT; i++) afn_hud_visible[i] = afn_hud_elems[i].startVis;
-    for (int i = 0; i < AFN_HUD_VIS_N; i++) afn_hud_anchor_sprite[i] = -1;   // screen-space default
+    for (int i = 0; i < AFN_HUD_VIS_N; i++) {
+        afn_hud_anchor_sprite[i] = -1;                                   // screen-space default
+        afn_hud_anchor_min[i] = 100; afn_hud_anchor_max[i] = 100;        // constant size default
+    }
 #endif
 
     // Player state. The follow camera and NPCs read playerX/Y/Z; the movement
@@ -2010,6 +2035,7 @@ int main(void)
 #ifdef AFN_HAS_HUD
         memcpy(s_hudSceneView, view, sizeof(s_hudSceneView));   // for world-anchored HUD elements
         s_hudSceneViewValid = 1;
+        s_hudCamDist = camDist;                                 // distance-scale reference (100%)
 #endif
 
 #ifdef AFN_HAS_SKY

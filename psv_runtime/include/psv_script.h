@@ -137,6 +137,8 @@ static void afn_bp1_key_pressed(void) {
     afn_hud_visible[0] = 1;
 #ifdef AFN_HAS_HUD_ANCHOR
     if (afn_bp_cur_spr_idx >= 0) afn_hud_anchor_sprite[0] = afn_bp_cur_spr_idx;
+    afn_hud_anchor_min[0] = 28;
+    afn_hud_anchor_max[0] = 100;
 #endif
     afn_elem_idx = 0;
     afn_active_element = 0;
