@@ -17785,5 +17785,5 @@ static const float afn_npc_col[1][6] = {
   { 1.41729f,1.65648f,1.86033f,0.0f,1.65648f,-0.144585f },
 };
 static const float afn_npc_nav[1][5] = {
-  { 1, 0.35f, 8.0f, 30, -1 },
+  { 2, 0.35f, 8.0f, 30, -1 },
 };

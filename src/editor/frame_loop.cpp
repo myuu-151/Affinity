@@ -3370,7 +3370,7 @@ struct HudPiece {
     int spriteAssetIdx = -1; // which sprite asset
     int frame = 0;           // which frame of that asset
     int localX = 0, localY = 0; // offset within the element
-    int size = 16;           // POT size: 8, 16, 32, or 64
+    int size = 16;           // POT size: 8..64 (128 = PSV-only; NDS scales it into a 64 OBJ)
     bool blackTint = false;  // render as solid black silhouette
     int opacity = 16;        // 0-16 (GBA alpha blend, 16 = fully opaque)
     bool hidden = false;     // editor-only: hide from canvas (not exported)
@@ -6789,7 +6789,7 @@ static bool LoadProject(const std::string& path)
         sSoundBank.end());
     SnapshotCleanBank();
 
-    char line[32768]; // large buffer for frame pixel data lines (64x64 = ~16KB worst case)
+    char line[80000]; // large buffer for frame pixel data lines (128x128 = ~64KB worst case)
     char section[64] = {};
     int tmSubdivLevel = 0; // 0=old, 1=first 2x, 2=current 4x
     int projectVersion = 1; // v1 = pre-IsFalling enum, v2 = current
@@ -11857,12 +11857,15 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
         ImGui::SameLine();
         ImGui::PushItemWidth(Scaled(80));
         {
-            const char* sizes[] = { "8x8", "16x16", "32x32", "64x64" };
-            int sizeVals[] = { 8, 16, 32, 64 };
+            // 128x128 is PSV-only: PSV billboards are RGBA textures with no
+            // size cap; GBA/NDS OAM hardware tops out at 64x64 (their
+            // exporters downscale oversized frames to the largest OBJ size).
+            const char* sizes[] = { "8x8", "16x16", "32x32", "64x64", "128x128 (PSV)" };
+            int sizeVals[] = { 8, 16, 32, 64, 128 };
             int curIdx = 2; // default 32x32
-            for (int si = 0; si < 4; si++)
+            for (int si = 0; si < 5; si++)
                 if (sizeVals[si] == asset.baseSize) { curIdx = si; break; }
-            if (ImGui::Combo("##baseSize", &curIdx, sizes, 4))
+            if (ImGui::Combo("##baseSize", &curIdx, sizes, 5))
             {
                 int newSize = sizeVals[curIdx];
                 int oldSize = asset.baseSize;
@@ -12014,38 +12017,52 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             ImVec2 gridStart = ImGui::GetCursorScreenPos();
             ImDrawList* dl = ImGui::GetWindowDrawList();
 
-            // Draw pixels
-            for (int py = 0; py < fh; py++)
+            // Draw pixels through a cached texture, NOT one AddRectFilled per
+            // pixel: at 128x128 that's 16384 rects x 4 verts = 65536 vertices,
+            // exactly saturating ImGui's 16-bit index buffer — everything
+            // drawn after it corrupted (stray diagonals, vanishing UI).
+            // Re-uploaded every frame (64KB max — trivial) so painting shows
+            // immediately; nearest filtering keeps pixels crisp at any zoom.
             {
-                for (int px = 0; px < fw; px++)
+                static GLuint sFrameEditTex = 0;
+                static std::vector<uint32_t> sFrameEditRgba;
+                sFrameEditRgba.resize((size_t)fw * fh);
+                for (int py = 0; py < fh; py++)
+                    for (int px = 0; px < fw; px++)
+                    {
+                        uint8_t palIdx = frame.pixels[py * kMaxFrameSize + px];
+                        uint32_t col = asset.palette[palIdx & 0xF];
+                        uint32_t r = (col >> 0) & 0xFF;
+                        uint32_t g = (col >> 8) & 0xFF;
+                        uint32_t b = (col >> 16) & 0xFF;
+                        sFrameEditRgba[(size_t)py * fw + px] = (palIdx == 0)
+                            ? 0xFF1A1A1Au
+                            : (0xFF000000u | (b << 16) | (g << 8) | r);
+                    }
+                if (!sFrameEditTex) glGenTextures(1, &sFrameEditTex);
+                glBindTexture(GL_TEXTURE_2D, sFrameEditTex);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fw, fh, 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, sFrameEditRgba.data());
+                dl->AddImage((ImTextureID)(uintptr_t)sFrameEditTex,
+                             gridStart, ImVec2(gridStart.x + gridW, gridStart.y + gridH));
+            }
+
+            // Grid lines — skipped when cells get tiny (128x128): the overlay
+            // would just grey out the art, and 258 lines add clutter not value.
+            if (cellSize >= 6.0f)
+            {
+                for (int i = 0; i <= fw; i++)
                 {
-                    uint8_t palIdx = frame.pixels[py * kMaxFrameSize + px];
-                    uint32_t col = asset.palette[palIdx & 0xF];
-                    uint32_t r = (col >> 0) & 0xFF;
-                    uint32_t g = (col >> 8) & 0xFF;
-                    uint32_t b = (col >> 16) & 0xFF;
-                    uint32_t a = (col >> 24) & 0xFF;
-                    if (palIdx == 0) a = 0;
-                    uint32_t imCol = (a << 24) | (b << 16) | (g << 8) | r;
-                    if (palIdx == 0)
-                        imCol = 0xFF1A1A1A;
-
-                    ImVec2 p0(gridStart.x + px * cellSize, gridStart.y + py * cellSize);
-                    ImVec2 p1(p0.x + cellSize, p0.y + cellSize);
-                    dl->AddRectFilled(p0, p1, imCol);
+                    float x = gridStart.x + i * cellSize;
+                    dl->AddLine(ImVec2(x, gridStart.y), ImVec2(x, gridStart.y + gridH), 0x40FFFFFF);
                 }
-            }
-
-            // Grid lines
-            for (int i = 0; i <= fw; i++)
-            {
-                float x = gridStart.x + i * cellSize;
-                dl->AddLine(ImVec2(x, gridStart.y), ImVec2(x, gridStart.y + gridH), 0x40FFFFFF);
-            }
-            for (int i = 0; i <= fh; i++)
-            {
-                float y = gridStart.y + i * cellSize;
-                dl->AddLine(ImVec2(gridStart.x, y), ImVec2(gridStart.x + gridW, y), 0x40FFFFFF);
+                for (int i = 0; i <= fh; i++)
+                {
+                    float y = gridStart.y + i * cellSize;
+                    dl->AddLine(ImVec2(gridStart.x, y), ImVec2(gridStart.x + gridW, y), 0x40FFFFFF);
+                }
             }
 
             // Click to paint
@@ -12158,19 +12175,25 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                 ImDrawList* tdl = ImGui::GetWindowDrawList();
                 tdl->AddRect(thumbStart, ImVec2(thumbStart.x + thumbW, thumbStart.y + thumbH), borderCol);
 
-                // Mini preview of frame
-                for (int ty = 0; ty < tfh; ty++)
-                    for (int tx = 0; tx < tfw; tx++)
+                // Mini preview of frame — nearest-sampled to max 32x32 rects.
+                // Per-source-pixel rects at 128x128 = 16K rects per thumbnail,
+                // which saturates ImGui's 16-bit index buffer (the thumbnail
+                // is at most ~32px on screen anyway).
+                int outW = tfw > 32 ? 32 : tfw, outH = tfh > 32 ? 32 : tfh;
+                float outCW = thumbW / (float)outW, outCH = thumbH / (float)outH;
+                for (int oy = 0; oy < outH; oy++)
+                    for (int ox = 0; ox < outW; ox++)
                     {
-                        uint8_t pi = asset.frames[fi].pixels[ty * kMaxFrameSize + tx];
+                        int sx = ox * tfw / outW, sy = oy * tfh / outH;
+                        uint8_t pi = asset.frames[fi].pixels[sy * kMaxFrameSize + sx];
                         if (pi == 0) continue;
                         uint32_t col = asset.palette[pi & 0xF];
                         uint32_t cr = (col >> 0) & 0xFF;
                         uint32_t cg = (col >> 8) & 0xFF;
                         uint32_t cb = (col >> 16) & 0xFF;
                         uint32_t imCol = 0xFF000000 | (cb << 16) | (cg << 8) | cr;
-                        ImVec2 tp0(thumbStart.x + tx * thumbCell, thumbStart.y + ty * thumbCell);
-                        ImVec2 tp1(tp0.x + thumbCell, tp0.y + thumbCell);
+                        ImVec2 tp0(thumbStart.x + ox * outCW, thumbStart.y + oy * outCH);
+                        ImVec2 tp1(tp0.x + outCW, tp0.y + outCH);
                         tdl->AddRectFilled(tp0, tp1, imCol);
                     }
 
@@ -28424,7 +28447,7 @@ void FrameTick(float dt)
                 // Compute per-piece layer offsets from keyframes
                 // During playback: interpolate between keyframes based on playhead
                 // When stopped: use the manually selected keyframe
-                struct LayerTransform { float ox = 0, oy = 0; float sx = 1, sy = 1; };
+                struct LayerTransform { float ox = 0, oy = 0; float sx = 1, sy = 1; float rot = 0; };
                 auto getPieceLayerTransform = [&](HudElement::ItemType type, int idx) -> LayerTransform {
                     LayerTransform t;
                     for (auto& lay : el.animLayers) {
@@ -28454,6 +28477,7 @@ void FrameTick(float dt)
                                 // Constant or single keyframe — snap to prev
                                 t.ox += kfA.offsetX; t.oy += kfA.offsetY;
                                 t.sx *= kfA.scaleX / 256.0f; t.sy *= kfA.scaleY / 256.0f;
+                                t.rot += (float)kfA.rot;
                             } else {
                                 // Linear or Bezier interpolation
                                 float span = (float)(kfB.frame - kfA.frame);
@@ -28469,6 +28493,7 @@ void FrameTick(float dt)
                                 float syA = kfA.scaleY / 256.0f, syB = kfB.scaleY / 256.0f;
                                 t.sx *= sxA + (sxB - sxA) * frac;
                                 t.sy *= syA + (syB - syA) * frac;
+                                t.rot += kfA.rot + (kfB.rot - kfA.rot) * frac;
                             }
                         } else {
                             // Stopped — use selected keyframe
@@ -28476,6 +28501,7 @@ void FrameTick(float dt)
                                 auto& kf = lay.keyframes[lay.selectedKeyframe];
                                 t.ox += kf.offsetX; t.oy += kf.offsetY;
                                 t.sx *= kf.scaleX / 256.0f; t.sy *= kf.scaleY / 256.0f;
+                                t.rot += (float)kf.rot;
                             }
                         }
                     }
@@ -28505,16 +28531,28 @@ void FrameTick(float dt)
                         float py = cy + wrpY * zoom;
                         float drawW = pszW * zoom;
                         float drawH = pszH * zoom;
+                        // Rotated quad corners around the piece center (keyframe
+                        // Rotation, degrees clockwise). lt.rot == 0 falls through
+                        // to the same corners as the old axis-aligned draw.
+                        float rcx = px + drawW * 0.5f, rcy = py + drawH * 0.5f;
+                        float rr = lt.rot * (3.14159265f / 180.0f);
+                        float rc = cosf(rr), rs = sinf(rr);
+                        auto rotPt = [&](float dx, float dy) {
+                            return ImVec2(rcx + dx * rc - dy * rs, rcy + dx * rs + dy * rc);
+                        };
+                        ImVec2 q0 = rotPt(-drawW * 0.5f, -drawH * 0.5f);
+                        ImVec2 q1 = rotPt( drawW * 0.5f, -drawH * 0.5f);
+                        ImVec2 q2 = rotPt( drawW * 0.5f,  drawH * 0.5f);
+                        ImVec2 q3 = rotPt(-drawW * 0.5f,  drawH * 0.5f);
                         if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sTmSpriteTextures.size() &&
                             sTmSpriteTextures[pc.spriteAssetIdx]) {
                             int alpha = (pc.opacity * 255) / 16;
                             ImU32 tintCol = pc.blackTint ? IM_COL32(0, 0, 0, alpha) : IM_COL32(255, 255, 255, alpha);
-                            dl->AddImage((ImTextureID)(intptr_t)sTmSpriteTextures[pc.spriteAssetIdx],
-                                ImVec2(px, py), ImVec2(px + drawW, py + drawH),
-                                ImVec2(0,0), ImVec2(1,1), tintCol);
+                            dl->AddImageQuad((ImTextureID)(intptr_t)sTmSpriteTextures[pc.spriteAssetIdx],
+                                q0, q1, q2, q3,
+                                ImVec2(0,0), ImVec2(1,0), ImVec2(1,1), ImVec2(0,1), tintCol);
                         } else {
-                            dl->AddRectFilled(ImVec2(px, py), ImVec2(px + drawW, py + drawH),
-                                IM_COL32(80, 80, 120, 100));
+                            dl->AddQuadFilled(q0, q1, q2, q3, IM_COL32(80, 80, 120, 100));
                         }
                         if (wi == 0) {
                             bool pieceMultiSel = selected && pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi];
@@ -29364,18 +29402,18 @@ void FrameTick(float dt)
                 // Layer draw order
                 ImGui::Spacing();
                 ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.7f, 1.0f), "Layer Order (0=back, 3=front)");
-                if (ImGui::SliderInt("Background##layer", &el.layerPieces, 0, 3)) sProjectDirty = true;
+                if (ImGui::SliderInt("Pieces##layer", &el.layerPieces, 0, 3)) sProjectDirty = true;
                 if (ImGui::SliderInt("Sprites##layer", &el.layerSprites, 0, 3)) sProjectDirty = true;
                 if (ImGui::SliderInt("Text##layer", &el.layerText, 0, 3)) sProjectDirty = true;
                 if (ImGui::SliderInt("Cursor##layer", &el.layerCursor, 0, 3)) sProjectDirty = true;
 
-                // ============ BACKGROUND ============
+                // ============ PIECES ============
                 ImGui::Spacing();
                 ImGui::Separator();
                 if (ImGui::SmallButton(el.collapseBackground ? ">##bg" : "v##bg"))
                     el.collapseBackground = !el.collapseBackground;
                 ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "Background");
+                ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "Pieces");
                 ImGui::SameLine();
                 if (ImGui::SmallButton("+##addpiece")) {
                     HudPiece p;
@@ -29521,9 +29559,11 @@ void FrameTick(float dt)
                             int maxFr = std::max(0, (int)sSpriteAssets[pc.spriteAssetIdx].frames.size() - 1);
                             if (ImGui::SliderInt("Frame##pc", &pc.frame, 0, maxFr)) sProjectDirty = true;
                         }
-                        int sizeIdx = (pc.size == 8) ? 0 : (pc.size == 16) ? 1 : (pc.size == 32) ? 2 : 3;
-                        if (ImGui::Combo("Size##pc", &sizeIdx, "8\0" "16\0" "32\0" "64\0")) {
-                            const int sizes[] = {8, 16, 32, 64};
+                        // 128 is PSV-only (RGBA HUD pieces, no OBJ cap); the NDS
+                        // exporter scales oversized pieces into its largest OBJ.
+                        int sizeIdx = (pc.size == 8) ? 0 : (pc.size == 16) ? 1 : (pc.size == 32) ? 2 : (pc.size == 64) ? 3 : 4;
+                        if (ImGui::Combo("Size##pc", &sizeIdx, "8\0" "16\0" "32\0" "64\0" "128 (PSV)\0")) {
+                            const int sizes[] = {8, 16, 32, 64, 128};
                             pc.size = sizes[sizeIdx]; sProjectDirty = true;
                         }
                         if (ImGui::DragInt("X##pc", &pc.localX, 1)) sProjectDirty = true;
@@ -29599,9 +29639,9 @@ void FrameTick(float dt)
                             int maxFr = std::max(0, (int)sSpriteAssets[si.spriteAssetIdx].frames.size() - 1);
                             if (ImGui::SliderInt("Frame##spr", &si.frame, 0, maxFr)) sProjectDirty = true;
                         }
-                        int sizeIdx = (si.size == 8) ? 0 : (si.size == 16) ? 1 : (si.size == 32) ? 2 : 3;
-                        if (ImGui::Combo("Size##spr", &sizeIdx, "8\0" "16\0" "32\0" "64\0")) {
-                            const int sizes[] = {8, 16, 32, 64};
+                        int sizeIdx = (si.size == 8) ? 0 : (si.size == 16) ? 1 : (si.size == 32) ? 2 : (si.size == 64) ? 3 : 4;
+                        if (ImGui::Combo("Size##spr", &sizeIdx, "8\0" "16\0" "32\0" "64\0" "128 (PSV)\0")) {
+                            const int sizes[] = {8, 16, 32, 64, 128};
                             si.size = sizes[sizeIdx]; sProjectDirty = true;
                         }
                         if (ImGui::DragInt("X##spr", &si.localX, 1)) sProjectDirty = true;

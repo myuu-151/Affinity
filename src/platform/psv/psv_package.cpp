@@ -643,6 +643,61 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
     for (auto& s : stops) f << "  { " << s.x << "," << s.y << "," << s.link << " },\n";
     if (stops.empty()) f << "  {0,0,-1},\n";
     f << "};\n";
+
+    // ---- Keyframe anim layers (timeline animation on pieces) ----
+    // Each layer carries interp/loop/speed/length + keyframes (frame, offset,
+    // rotation deg, scale 8.8); afn_hud_piece_layer maps each GLOBAL piece
+    // index to its layer (-1 = static). The runtime advances a vframe counter,
+    // derives the playhead (vframes / speed, looped or clamped to length),
+    // interpolates the surrounding keyframes and draws the piece offset/
+    // scaled/rotated about its center. Piece items only for now (sprite/text/
+    // cursor items in a layer are ignored on PSV).
+    {
+        struct KF { int frame, ox, oy, rot, sx, sy; };
+        struct LY { int interp, loop, speed, length, kfStart, kfCount; };
+        std::vector<KF> kfs;
+        std::vector<LY> layers;
+        std::vector<int> pieceLayer(pieces.size(), -1);
+        for (size_t ei = 0; ei < elems.size(); ei++) {
+            for (const auto& lay : elems[ei].animLayers) {
+                if (lay.keyframes.empty()) continue;
+                LY L;
+                L.interp = lay.interp;
+                L.loop = lay.loop ? 1 : 0;
+                L.speed = lay.speed > 0 ? lay.speed : 1;
+                L.length = lay.length > 0 ? lay.length : 1;
+                L.kfStart = (int)kfs.size();
+                for (const auto& k : lay.keyframes)
+                    kfs.push_back({ k.frame, k.offX, k.offY, k.rot, k.scaleX, k.scaleY });
+                L.kfCount = (int)kfs.size() - L.kfStart;
+                int li = (int)layers.size();
+                layers.push_back(L);
+                for (const auto& it : lay.items)
+                    if (it.type == 0 && it.index >= 0 && it.index < es[ei].pC)
+                        pieceLayer[es[ei].pS + it.index] = li;
+            }
+        }
+        if (!layers.empty()) {
+            f << "#define AFN_HAS_HUD_ANIM 1\n";
+            f << "#define AFN_HUD_LAYER_COUNT " << layers.size() << "\n";
+            f << "typedef struct { short frame,ox,oy,rot,sx,sy; } AfnHudKf;\n";
+            f << "static const AfnHudKf afn_hud_kf[" << kfs.size() << "] = {\n";
+            for (auto& k : kfs)
+                f << "  { " << k.frame << "," << k.ox << "," << k.oy << "," << k.rot
+                  << "," << k.sx << "," << k.sy << " },\n";
+            f << "};\n";
+            f << "typedef struct { unsigned char interp,loop; short speed,length,kfStart,kfCount; } AfnHudLayer;\n";
+            f << "static const AfnHudLayer afn_hud_layer[" << layers.size() << "] = {\n";
+            for (auto& L : layers)
+                f << "  { " << L.interp << "," << L.loop << "," << L.speed << "," << L.length
+                  << "," << L.kfStart << "," << L.kfCount << " },\n";
+            f << "};\n";
+            f << "static const short afn_hud_piece_layer[" << (pieces.empty()?1:pieces.size()) << "] = {";
+            for (size_t i = 0; i < pieceLayer.size(); i++) f << pieceLayer[i] << ",";
+            if (pieces.empty()) f << "-1,";
+            f << "};\n";
+        }
+    }
     f.close();
     return true;
 }

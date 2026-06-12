@@ -444,6 +444,22 @@ static void billboards_render(const float* view, float camAngle, float camEyeX, 
         int NF = (int)(sizeof(afn_spr_frame_ptrs)/sizeof(afn_spr_frame_ptrs[0]));
         float sz = afn_spr_basesize[i] * afn_spr_scale[i] * 0.25f, hw = sz * 0.5f;
         float px = afn_spr_x[i], py = afn_spr_y[i], pz = afn_spr_z[i];
+#if defined(AFN_HAS_SPR_PARENT) && defined(AFN_HAS_PLAYER_RIG) && defined(AFN_HAS_SPRITE_IDX)
+        // HARDCODED (pre-node): attached sprites re-anchor to their parent
+        // NPC's LIVE position (nav/physics-moved s_npcX/Y/Z) + authored offset,
+        // so a target marker attached to an NPC follows it around the scene.
+        // The baked afn_spr_x/y/z only covers the authored spawn spot.
+        int isAttached = (afn_spr_parent[i] >= 0);
+        if (isAttached) {
+            for (int n = 0; n < AFN_NPC_COUNT; n++)
+                if ((int)afn_npc_inst[n][7] == afn_spr_parent[i]) {
+                    px = s_npcX[n] + afn_spr_poff_x[i];
+                    py = s_npcY[n] + afn_spr_poff_y[i];
+                    pz = s_npcZ[n] + afn_spr_poff_z[i];
+                    break;
+                }
+        }
+#endif
         int cf;
         if (afn_spr_directional[i]) {
             // 8-facing: pick the art for the direction the camera views from.
@@ -460,14 +476,38 @@ static void billboards_render(const float* view, float camAngle, float camEyeX, 
             cf = (int)s_sprFrame[i]; if (cf < lo) cf = lo; if (cf > hi) cf = hi;
         }
         if (cf < 0) cf = 0; if (cf > NF-1) cf = NF-1;
-        float lx = px - rx*hw, lz = pz - rz*hw, Rx = px + rx*hw, Rz = pz + rz*hw;
-        float top = py + sz, bot = py;
-        AfnVertex q[4] = {
-            { 0,0, 0xFFFFFFFFu, lx, top, lz },
-            { 1,0, 0xFFFFFFFFu, Rx, top, Rz },
-            { 1,1, 0xFFFFFFFFu, Rx, bot, Rz },
-            { 0,1, 0xFFFFFFFFu, lx, bot, lz },
-        };
+        AfnVertex q[4];
+#if defined(AFN_HAS_SPR_PARENT) && defined(AFN_HAS_PLAYER_RIG) && defined(AFN_HAS_SPRITE_IDX)
+        if (isAttached) {
+            // TRUE camera-facing (spherical) for attached markers: span the
+            // quad along the camera's right AND up axes (the view rotation's
+            // rows are the camera basis in world space), centered on the
+            // anchor. The Y-billboard below only yaws — it skews when the
+            // camera pitches, which reads as warping on a marker ring.
+            float Rwx = view[0], Rwy = view[4], Rwz = view[8];
+            float Uwx = view[1], Uwy = view[5], Uwz = view[9];
+            float cyq = py + sz * 0.5f;   // same vertical span as the Y-quad at level pitch
+            float hh = sz * 0.5f;
+            AfnVertex t[4] = {
+                { 0,0, 0xFFFFFFFFu, px - Rwx*hw + Uwx*hh, cyq - Rwy*hw + Uwy*hh, pz - Rwz*hw + Uwz*hh },
+                { 1,0, 0xFFFFFFFFu, px + Rwx*hw + Uwx*hh, cyq + Rwy*hw + Uwy*hh, pz + Rwz*hw + Uwz*hh },
+                { 1,1, 0xFFFFFFFFu, px + Rwx*hw - Uwx*hh, cyq + Rwy*hw - Uwy*hh, pz + Rwz*hw - Uwz*hh },
+                { 0,1, 0xFFFFFFFFu, px - Rwx*hw - Uwx*hh, cyq - Rwy*hw - Uwy*hh, pz - Rwz*hw - Uwz*hh },
+            };
+            q[0]=t[0]; q[1]=t[1]; q[2]=t[2]; q[3]=t[3];
+        } else
+#endif
+        {
+            float lx = px - rx*hw, lz = pz - rz*hw, Rx = px + rx*hw, Rz = pz + rz*hw;
+            float top = py + sz, bot = py;
+            AfnVertex t[4] = {
+                { 0,0, 0xFFFFFFFFu, lx, top, lz },
+                { 1,0, 0xFFFFFFFFu, Rx, top, Rz },
+                { 1,1, 0xFFFFFFFFu, Rx, bot, Rz },
+                { 0,1, 0xFFFFFFFFu, lx, bot, lz },
+            };
+            q[0]=t[0]; q[1]=t[1]; q[2]=t[2]; q[3]=t[3];
+        }
         glTexCoordPointer(2, GL_FLOAT,        sizeof(AfnVertex), &q->u);
         glColorPointer  (4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &q->color);
         glVertexPointer (3, GL_FLOAT,         sizeof(AfnVertex), &q->x);
@@ -1041,6 +1081,36 @@ static void hud_init(void) {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, aw, 8, 0, GL_RGBA, GL_UNSIGNED_BYTE, atlas);
 }
 
+// Draw a textured quad rotated rotDeg (clockwise) about its center, scaled to
+// w x h. rot 0 / scale 1 matches hud_quad exactly. Used by keyframe anim.
+static void hud_quad_xf(GLuint tex, float cxq, float cyq, float w, float h,
+                        float rotDeg, unsigned int col) {
+    float rr = rotDeg * (3.14159265f / 180.0f);
+    float c = cosf(rr), s = sinf(rr);
+    float hx = w * 0.5f, hy = h * 0.5f;
+    float px[4] = { -hx,  hx,  hx, -hx };
+    float py[4] = { -hy, -hy,  hy,  hy };
+    AfnVertex q[4];
+    const float us[4] = { 0, 1, 1, 0 }, vs[4] = { 0, 0, 1, 1 };
+    for (int i = 0; i < 4; i++) {
+        q[i].u = us[i]; q[i].v = vs[i]; q[i].color = col;
+        q[i].x = cxq + px[i] * c - py[i] * s;
+        q[i].y = cyq + px[i] * s + py[i] * c;
+        q[i].z = 0;
+    }
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glTexCoordPointer(2, GL_FLOAT,         sizeof(AfnVertex), &q[0].u);
+    glColorPointer   (4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &q[0].color);
+    glVertexPointer  (3, GL_FLOAT,         sizeof(AfnVertex), &q[0].x);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+}
+
 static void hud_quad(GLuint tex, float x0, float y0, float x1, float y1,
                      float u0, float v0, float u1, float v1, unsigned int col) {
     AfnVertex q[4] = {
@@ -1087,6 +1157,44 @@ static void hud_render(void) {
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 
+#ifdef AFN_HAS_HUD_ANIM
+    // Keyframe anim layers: evaluate each layer's transform once per frame.
+    // Playhead = vframes / speed (speed = 60/fps from the editor), looping or
+    // clamping at length; interpolate the surrounding keyframes (0=constant
+    // snap, 1=linear, 2=bezier smoothstep — matches the editor preview).
+    static unsigned s_hudVFrame = 0;
+    s_hudVFrame++;
+    float layOx[AFN_HUD_LAYER_COUNT], layOy[AFN_HUD_LAYER_COUNT];
+    float layRot[AFN_HUD_LAYER_COUNT], laySx[AFN_HUD_LAYER_COUNT], laySy[AFN_HUD_LAYER_COUNT];
+    for (int li = 0; li < AFN_HUD_LAYER_COUNT; li++) {
+        const AfnHudLayer* L = &afn_hud_layer[li];
+        int t = (int)(s_hudVFrame / (unsigned)(L->speed > 0 ? L->speed : 1));
+        int ph = L->loop ? (t % L->length) : (t < L->length ? t : L->length);
+        int prevI = -1, nextI = -1;
+        for (int ki = 0; ki < L->kfCount; ki++) {
+            const AfnHudKf* k = &afn_hud_kf[L->kfStart + ki];
+            if (k->frame <= ph) prevI = ki;
+            if (k->frame > ph && nextI < 0) nextI = ki;
+        }
+        if (prevI < 0) prevI = nextI;
+        if (nextI < 0) nextI = prevI;
+        const AfnHudKf* A = &afn_hud_kf[L->kfStart + (prevI < 0 ? 0 : prevI)];
+        const AfnHudKf* B = &afn_hud_kf[L->kfStart + (nextI < 0 ? 0 : nextI)];
+        float frac = 0.0f;
+        if (A != B && L->interp != 0) {
+            float span = (float)(B->frame - A->frame);
+            frac = span > 0 ? (float)(ph - A->frame) / span : 0.0f;
+            if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+            if (L->interp == 2) frac = frac * frac * (3.0f - 2.0f * frac);
+        }
+        layOx[li]  = A->ox + (B->ox - A->ox) * frac;
+        layOy[li]  = A->oy + (B->oy - A->oy) * frac;
+        layRot[li] = A->rot + (B->rot - A->rot) * frac;
+        laySx[li]  = (A->sx + (B->sx - A->sx) * frac) / 256.0f;
+        laySy[li]  = (A->sy + (B->sy - A->sy) * frac) / 256.0f;
+    }
+#endif
+
     for (int e = 0; e < AFN_HUD_ELEM_COUNT; e++) {
         const AfnHudElem* el = &afn_hud_elems[e];
         if (!afn_hud_visible[e]) continue;
@@ -1095,7 +1203,20 @@ static void hud_render(void) {
         float bx = el->screenX, by = el->screenY;
         // Pieces (graphics).
         for (int k = 0; k < el->pieceCount; k++) {
-            const AfnHudPiece* pc = &afn_hud_piece[el->pieceStart + k];
+            int gpi = el->pieceStart + k;
+            const AfnHudPiece* pc = &afn_hud_piece[gpi];
+#ifdef AFN_HAS_HUD_ANIM
+            int li = afn_hud_piece_layer[gpi];
+            if (li >= 0) {
+                // Animated: keyframe offset + scale + rotation about center.
+                float w = pc->w * laySx[li], h = pc->h * laySy[li];
+                hud_quad_xf(s_hudTex[pc->tex],
+                            bx + pc->x + layOx[li] + pc->w * 0.5f,
+                            by + pc->y + layOy[li] + pc->h * 0.5f,
+                            w, h, layRot[li], 0xFFFFFFFFu);
+                continue;
+            }
+#endif
             hud_quad(s_hudTex[pc->tex], bx + pc->x, by + pc->y,
                      bx + pc->x + pc->w, by + pc->y + pc->h, 0, 0, 1, 1, 0xFFFFFFFFu);
         }

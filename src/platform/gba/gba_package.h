@@ -65,8 +65,11 @@ struct GBAPlayerDirExport
     int width, height;
 };
 
-// Sprite asset frame for GBA export — 4bpp pixel data
-static constexpr int kExportMaxFrameSize = 64;
+// Sprite asset frame for GBA export — 4bpp pixel data. 128 supports the
+// PSV-only 128x128 asset size (PSV billboards are RGBA textures with no OBJ
+// hardware cap); GBA/NDS OAM sprites still top out at 64x64 — their
+// emitters nearest-neighbour scale down to the largest OBJ size.
+static constexpr int kExportMaxFrameSize = 128;
 
 struct GBASpriteFrameExport
 {
