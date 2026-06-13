@@ -38,6 +38,19 @@ static void afn_bp0_start(void) {
     afn_rig_clip = 10;
 }
 static void afn_bp0_update(void) {
+    if (afn_cam_lock_target >= 0) {
+#ifdef AFN_HAS_CAM_LOCK
+    afn_strafe_clip[0] = 12;
+    afn_strafe_clip[1] = 15;
+    afn_strafe_clip[2] = 13;
+    afn_strafe_clip[3] = 17;
+    afn_strafe_clip[4] = 5;
+    afn_strafe_clip[5] = 14;
+    afn_strafe_clip[6] = 16;
+    afn_strafe_clip[7] = 18;
+    afn_strafe_anim = 1;
+#endif
+    }
 }
 static void afn_bp0_key_held(void) {
     if (key_is_down(KEY_LSTICK_UP)) {
@@ -78,12 +91,7 @@ static void afn_bp0_key_held(void) {
 #endif
     if (!afn_player_frozen) afn_input_fwd -= afn_key_mag;
     if (!afn_speed_prio) afn_move_speed = 6;
-    if (afn_cam_lock_target < 0) {
     afn_rig_clip = 12;
-    }
-    if (afn_cam_lock_target >= 0) {
-    afn_rig_clip = 5;
-    }
     }
     if (key_is_down(KEY_LSTICK_RIGHT)) {
 #ifdef AFN_HAS_STICK_SENS
@@ -91,12 +99,7 @@ static void afn_bp0_key_held(void) {
 #endif
     if (!afn_player_frozen) afn_input_right -= afn_key_mag;
     if (!afn_speed_prio) afn_move_speed = 6;
-    if (afn_cam_lock_target >= 0) {
-    afn_rig_clip = 13;
-    }
-    if (afn_cam_lock_target < 0) {
     afn_rig_clip = 12;
-    }
     }
     if (key_is_down(KEY_LSTICK_LEFT)) {
 #ifdef AFN_HAS_STICK_SENS
@@ -104,12 +107,7 @@ static void afn_bp0_key_held(void) {
 #endif
     if (!afn_player_frozen) afn_input_right += afn_key_mag;
     if (!afn_speed_prio) afn_move_speed = 6;
-    if (afn_cam_lock_target < 0) {
     afn_rig_clip = 12;
-    }
-    if (afn_cam_lock_target >= 0) {
-    afn_rig_clip = 14;
-    }
     }
 }
 static void afn_bp0_key_pressed(void) {
@@ -157,7 +155,9 @@ static void afn_bp1_key_pressed(void) {
 #ifdef AFN_HAS_HUD_ANCHOR
     if (afn_bp_cur_spr_idx >= 0) afn_hud_anchor_sprite[0] = afn_bp_cur_spr_idx;
     afn_hud_anchor_min[0] = 10;
-    afn_hud_anchor_max[0] = 10;
+    afn_hud_anchor_max[0] = 11;
+    afn_hud_anchor_near[0] = 11;
+    afn_hud_anchor_far[0] = 97;
 #endif
     afn_elem_idx = 0;
     afn_active_element = 0;

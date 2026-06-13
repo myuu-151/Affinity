@@ -944,6 +944,8 @@ int afn_hud_anchor_sprite[AFN_HUD_VIS_N];   // -1 = screen-space (init at boot)
 // object (orbit distance = 100%), clamped to [min,max]; 100/100 pins the
 // scale to 1 = constant screen size (the original behavior).
 unsigned char afn_hud_anchor_min[AFN_HUD_VIS_N], afn_hud_anchor_max[AFN_HUD_VIS_N];
+// Proximity-scale distance range (world px): Min size at/under Near, Max at/over Far.
+short afn_hud_anchor_near[AFN_HUD_VIS_N], afn_hud_anchor_far[AFN_HUD_VIS_N];
 // Lock-on camera assist target (Lock Camera / Unlock Camera nodes): the
 // editor sprite index the orbit eases toward facing, -1 = no lock. Consumed
 // by the assist block in the main loop (before the orbit-delta detection).
@@ -956,6 +958,12 @@ int afn_lock_strafe = 0;
 // Dash To Target node (bullet-punch lunge): frames>0 = lunging toward
 // afn_dash_target's live position at afn_dash_speed*0.08 px/frame, facing it.
 int afn_dash_frames = 0, afn_dash_speed = 0, afn_dash_target = -1;
+// Strafe Anim node: a Lock-On 8-way directional clip picker. The node only
+// REGISTERS the 8 clips + a per-frame active flag during script_tick; the
+// movement block picks the octant AFTER input is finalized (the node runs on
+// OnUpdate, before MovePlayer has set afn_input_fwd/right, so it can't read
+// the stick itself). Octant order: Fwd,Fwd-R,Right,Back-R,Back,Back-L,Left,Fwd-L.
+int afn_strafe_anim = 0, afn_strafe_clip[8] = {0};
 unsigned char afn_sprite_visible[NUM_SPRITES]={0};
 unsigned char afn_sprite_flip[NUM_SPRITES]={0}, afn_collision_enabled[NUM_SPRITES]={0};
 int afn_hp[NUM_SPRITES]={0}, afn_state_timer[NUM_SPRITES]={0};
@@ -993,6 +1001,7 @@ static void script_tick(void) {
     afn_input_fwd = 0; afn_input_right = 0; afn_speed_prio = 0; afn_move_speed = 0;
     afn_key_mag = 256;   // chains re-set it on entry; full-on outside key chains
     afn_face_lock = 0;   // MovePlayer(Consistent Facing) re-sets it while held
+    afn_strafe_anim = 0; // Strafe Anim re-registers it each frame it runs
     // Dispatch order: RELEASED before HELD, so ongoing held state wins ties
     // within a tick. Rolling the stick from Up to Right releases Up while
     // Right is still held — with released-last, a Released->idle chain
@@ -1301,16 +1310,20 @@ static void hud_render(void) {
             if (found) {
                 float sxp, syp, depth = 1.0f;
                 if (!hud_project(wx, wy, wz, &sxp, &syp, &depth)) continue;   // behind camera
-                // Distance scale (Attached Sprite node Max/Min Size sliders):
-                // scale like a world object — 100% at the camera's orbit
-                // distance, growing when close, shrinking when far — clamped
-                // to [min,max]. 100/100 pins to 1.0 (constant screen size).
+                // Proximity scale (Attached Sprite node Min/Max Size + Near/Far):
+                // driven by the PLAYER->target distance, not camera depth —
+                // Min size at/under Near (close in), growing to Max at/over Far.
+                // So the marker shrinks as you approach. Min==Max = flat size.
                 float smin = afn_hud_anchor_min[e] / 100.0f;
                 float smax = afn_hud_anchor_max[e] / 100.0f;
-                if (!(smin == 1.0f && smax == 1.0f)) {
-                    elScale = (depth > 0.01f) ? (s_hudCamDist / depth) : smax;
-                    if (elScale < smin) elScale = smin;
-                    if (elScale > smax) elScale = smax;
+                if (smin != smax) {
+                    float pdx = (float)player_x - wx, pdz = (float)player_z - wz;
+                    float pd = sqrtf(pdx*pdx + pdz*pdz);
+                    float nearD = afn_hud_anchor_near[e] > 0 ? (float)afn_hud_anchor_near[e] : 12.0f;
+                    float farD  = afn_hud_anchor_far[e]  > nearD ? (float)afn_hud_anchor_far[e] : nearD + 88.0f;
+                    float t = (pd - nearD) / (farD - nearD);
+                    if (t < 0.0f) t = 0.0f; if (t > 1.0f) t = 1.0f;
+                    elScale = smin + (smax - smin) * t;
                 }
                 // Center the element's piece-bounds on the anchor so the
                 // authored layout (any piece offsets) lands centered on the
@@ -1423,6 +1436,7 @@ int main(void)
     for (int i = 0; i < AFN_HUD_VIS_N; i++) {
         afn_hud_anchor_sprite[i] = -1;                                   // screen-space default
         afn_hud_anchor_min[i] = 100; afn_hud_anchor_max[i] = 100;        // constant size default
+        afn_hud_anchor_near[i] = 0; afn_hud_anchor_far[i] = 0;           // runtime defaults if unset
     }
 #endif
 
@@ -1712,6 +1726,14 @@ int main(void)
         if (lockStrafing) {
             playerYaw = lockAngle * (180.0f/3.14159265f);
             facedByMove = 1;   // target facing wins over the tank heading
+        }
+        // Strafe Anim: now that afn_input_fwd/right are final (script ran), pick
+        // the 8-way directional clip the node registered. Only while moving, so
+        // a still lock-on leaves the clip to the idle chain.
+        if (afn_strafe_anim && (afn_input_fwd || afn_input_right)) {
+            float sa = atan2f((float)afn_input_right, (float)afn_input_fwd);
+            int so = ((int)lroundf(sa / 0.7853982f) + 8) & 7;
+            afn_rig_clip = afn_strafe_clip[so];
         }
         // Tank heading owns the facing whenever camera-relative Direction
         // Facing isn't steering it. In tank drive the persisted relative

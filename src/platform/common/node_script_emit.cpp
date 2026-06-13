@@ -376,6 +376,42 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "#endif\n";
                 break;
             }
+            case GBAScriptNodeType::StrafeAnim: {
+                // 8-way directional clip picker (PSV lock-strafe): pick the
+                // clip matching the stick direction relative to facing the
+                // target. Pins 0..7 = Fwd,Fwd-R,Right,Back-R,Back,Back-L,Left,Fwd-L.
+                int sc[8]; bool set[8]; int anySet = 0;
+                for (int k = 0; k < 8; k++) {
+                    auto* cd = findDataIn(a->id, k);
+                    set[k] = (cd != nullptr);
+                    sc[k] = cd ? resolveInt(cd) : 0;
+                    if (set[k]) anySet = 1;
+                }
+                // Fill unwired octants from the NEAREST wired one (circular
+                // search ±1,±2,...): wire just the 4 cardinals and diagonals
+                // lean to a neighbor; wire only Fwd and everything is Fwd.
+                if (anySet) {
+                    for (int k = 0; k < 8; k++) {
+                        if (set[k]) continue;
+                        for (int d = 1; d <= 4; d++) {
+                            int a1 = (k + d) & 7, a2 = (k - d + 8) & 7;
+                            if (set[a1]) { sc[k] = sc[a1]; break; }
+                            if (set[a2]) { sc[k] = sc[a2]; break; }
+                        }
+                    }
+                }
+                if (anySet) {
+                    // Register the clips + flag; the runtime movement block
+                    // picks the octant AFTER input is final (this runs on
+                    // OnUpdate, before MovePlayer sets afn_input_fwd/right).
+                    f << "#ifdef AFN_HAS_CAM_LOCK\n";
+                    for (int k = 0; k < 8; k++)
+                        f << "    afn_strafe_clip[" << k << "] = " << sc[k] << ";\n";
+                    f << "    afn_strafe_anim = 1;\n";
+                    f << "#endif\n";
+                }
+                break;
+            }
             case GBAScriptNodeType::IsOnGround:
                 f << "    if (player_on_ground) {\n"; break;
             case GBAScriptNodeType::IsJumping:
@@ -552,15 +588,19 @@ void EmitNodeScriptBodies(std::ostream& f,
                         // instances (element-linked BPs run with spr_idx -1)
                         // must not stomp an anchor set by the sprite instance.
                         f << "    if (afn_bp_cur_spr_idx >= 0) afn_hud_anchor_sprite[" << slot << "] = afn_bp_cur_spr_idx;\n";
-                        // Max/Min Size sliders (Attached Sprite node, percent;
-                        // 0 = unset -> 100). 100/100 = constant screen size;
-                        // otherwise the element scales with camera distance
-                        // clamped to [min,max].
+                        // Max/Min Size + Near/Far (Attached Sprite node). Size
+                        // percent; Near/Far in EDITOR units (->/4 world px).
+                        // Min at/under Near, Max at/over Far — proximity scale
+                        // by PLAYER->target distance (shrinks as you approach).
+                        // Min==Max = flat size, no scaling.
                         int mx = anchorData->paramInt[0] > 0 ? anchorData->paramInt[0] : 100;
                         int mn = anchorData->paramInt[1] > 0 ? anchorData->paramInt[1] : 100;
-                        if (mn > mx) { int t = mn; mn = mx; mx = t; }
+                        int nr = anchorData->paramInt[2];
+                        int fr = anchorData->paramInt[3];
                         f << "    afn_hud_anchor_min[" << slot << "] = " << mn << ";\n";
                         f << "    afn_hud_anchor_max[" << slot << "] = " << mx << ";\n";
+                        if (nr > 0) f << "    afn_hud_anchor_near[" << slot << "] = " << (nr / 4) << ";\n";
+                        if (fr > 0) f << "    afn_hud_anchor_far[" << slot << "] = " << (fr / 4) << ";\n";
                     } else if (anchorData) {
                         f << "    afn_hud_anchor_sprite[" << slot << "] = " << resolveInt(anchorData) << ";\n";
                     } else {

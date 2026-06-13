@@ -442,6 +442,7 @@ enum class GBAScriptNodeType : int {
     IsLockedOn,      // gate: passes exec only while a Lock On target is active
     IsNotLockedOn,   // gate: passes exec only while NO Lock On target is active
     DashToTarget,    // action: lunge the player toward the lock target (bullet-punch)
+    StrafeAnim,      // action: 8-way directional clip picker from lock-relative stick
     COUNT
 };
 

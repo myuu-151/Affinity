@@ -612,6 +612,7 @@ enum class VsNodeType : int {
     IsLockedOn,      // gate: passes exec only while a Lock On target is active
     IsNotLockedOn,   // gate: passes exec only while NO Lock On target is active
     DashToTarget,    // action: lunge the player toward the lock target
+    StrafeAnim,      // action: 8-way directional clip picker from lock-relative stick
     COUNT
 };
 
@@ -622,7 +623,7 @@ struct VsNodeTypeDef {
     int outExec;        // number of exec output pins
     int inData;         // number of data input pins
     int outData;        // number of data output pins
-    const char* inDataNames[4];
+    const char* inDataNames[8];
     const char* outDataNames[4];
     const char* outExecNames[4];
 };
@@ -938,6 +939,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Is Locked On",    0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is Not Locked On",0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Dash To Target",  0xFF3355AA, 1, 1, 2, 0, {"Speed (int)", "Frames (int)"}, {}, {} },
+    { "Strafe Anim",     0xFF3355AA, 1, 1, 8, 0, {"Fwd","Fwd-R","Right","Back-R","Back","Back-L","Left","Fwd-L"}, {}, {} },
 };
 
 struct VsNode {
@@ -20627,6 +20629,7 @@ void FrameTick(float dt)
                 case VsNodeType::LockStrafe:    desc = "Z-targeting movement (PSV): while a Lock On target is active, the player always FACES the target and movement becomes target-relative — Up closes in, Down backpedals, Left/Right circle-strafe around it. Fire it after Lock On; Release Lock On turns it off."; break;
                 case VsNodeType::IsLockedOn:    desc = "Gate: passes execution only while a Lock On target is active. Branch lock-specific behavior — e.g. On Key Held(Down) -> Is Locked On -> Play Skel Anim(backpeddle), with the normal walk wired in parallel."; break;
                 case VsNodeType::IsNotLockedOn: desc = "Gate: passes execution only while NO Lock On target is active — the inverse of Is Locked On. Use it to suppress the normal walk/face behavior while locked: On Key Held(Down) -> Is Not Locked On -> Play Skel Anim(walk)."; break;
+                case VsNodeType::StrafeAnim:    desc = "8-way directional animation picker (PSV lock-strafe): wire your clips (Forward, Fwd-Right, Right, Back-Right, Back, Back-Left, Left, Fwd-Left, relative to facing the target) and it plays the one matching the stick direction each frame. You DON'T need all 8 — any unwired direction falls back to the nearest wired one, so wiring just the 4 cardinals makes diagonals lean to a neighbor. One node replaces the per-direction gated Play Skel Anim chains; put it behind On Update -> Is Locked On."; break;
                 case VsNodeType::DashToTarget:  desc = "Lunges the player toward the Lock On target for a burst (PSV) — a homing dash for bullet-punch-style moves. Speed = world units/frame (like Walk/Sprint), Frames = lunge duration; stops early at melee range. No target locked -> dashes along current facing. Wire after the attack trigger; pair with Play Skel Anim(atk_phs)."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
@@ -20906,6 +20909,7 @@ void FrameTick(float dt)
                         case VsNodeType::IsLockedOn:    return "_is_locked_on";
                         case VsNodeType::IsNotLockedOn: return "_is_not_locked_on";
                         case VsNodeType::DashToTarget:  return "_dash_to_target";
+                        case VsNodeType::StrafeAnim:    return "_strafe_anim";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -21763,20 +21767,22 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::AttachedSprite: {
                     editorCode = "// The sprite this blueprint instance is attached to (\"self\")";
-                    char asBuf[640];
+                    char asBuf[700];
                     int asMx = infoNode.paramInt[0] > 0 ? infoNode.paramInt[0] : 100;
                     int asMn = infoNode.paramInt[1] > 0 ? infoNode.paramInt[1] : 100;
+                    int asNr = infoNode.paramInt[2] > 0 ? infoNode.paramInt[2] : 48;
+                    int asFr = infoNode.paramInt[3] > 0 ? infoNode.paramInt[3] : 400;
                     snprintf(asBuf, sizeof(asBuf),
                         "    return afn_bp_cur_spr_idx;\n"
-                        "    // afn_hud_anchor_min[slot] = %d; afn_hud_anchor_max[slot] = %d;\n"
+                        "    // anchor scale: min %d%% @ near %du, max %d%% @ far %du\n"
                         "    // --- Runtime --- inline data node, evaluated at call site.\n"
                         "    // In a blueprint the dispatcher sets afn_bp_cur_spr_idx to the\n"
                         "    // owning sprite before each handler runs; in the scene script\n"
                         "    // it is -1 (no owner). Wire into Show HUD's Anchor to pin the\n"
                         "    // element to the owner's attached-sprite world position (PSV).\n"
-                        "    // Size sliders: element scales with camera distance (100%% at\n"
-                        "    // orbit distance), clamped [min,max]; 100/100 = constant size.",
-                        asMn, asMx);
+                        "    // PROXIMITY scale by player->target distance: Min size at/under\n"
+                        "    // Near, Max at/over Far (shrinks as you approach). Min==Max=flat.",
+                        asMn, asNr, asMx, asFr);
                     setActionFunc(infoNode, "_attached_sprite", asBuf);
                     break;
                 }
@@ -21860,6 +21866,21 @@ void FrameTick(float dt)
                         fmtInt(infoNode.id, 0, "<speed>"),
                         fmtInt(infoNode.id, 1, "<frames>"));
                     setActionFunc(infoNode, "_dash_to_target", dtBuf);
+                    break;
+                }
+                case VsNodeType::StrafeAnim: {
+                    editorCode = "// 8-way directional clip picker from the lock-relative stick";
+                    setActionFunc(infoNode, "_strafe_anim",
+                        "#ifdef AFN_HAS_CAM_LOCK // PSV\n"
+                        "    afn_strafe_clip[0..7] = wired Fwd..Fwd-L clips;\n"
+                        "    afn_strafe_anim = 1;   // register; runtime picks the octant\n"
+                        "#endif\n"
+                        "    // --- Runtime (psv movement block, AFTER input is final) ---\n"
+                        "    // if (afn_strafe_anim && moving) {\n"
+                        "    //   octant = round(atan2(input_right, input_fwd) / 45 deg);\n"
+                        "    //   afn_rig_clip = afn_strafe_clip[octant]; }   // only while moving\n"
+                        "    // Deferred to the movement block because this node runs on\n"
+                        "    // OnUpdate, BEFORE MovePlayer sets the stick input this frame.");
                     break;
                 }
                 case VsNodeType::TurnPlayer: {
@@ -24808,6 +24829,7 @@ void FrameTick(float dt)
                     case VsNodeType::IsLockedOn:    suffix = "_is_locked_on"; break;
                     case VsNodeType::IsNotLockedOn: suffix = "_is_not_locked_on"; break;
                     case VsNodeType::DashToTarget:  suffix = "_dash_to_target"; break;
+                    case VsNodeType::StrafeAnim:    suffix = "_strafe_anim"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -25311,6 +25333,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsLockedOn].name)) addNodeAt(VsNodeType::IsLockedOn);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNotLockedOn].name)) addNodeAt(VsNodeType::IsNotLockedOn);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::DashToTarget].name)) addNodeAt(VsNodeType::DashToTarget);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StrafeAnim].name)) addNodeAt(VsNodeType::StrafeAnim);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP].name)) addNodeAt(VsNodeType::SetHP);
@@ -25589,17 +25612,25 @@ void FrameTick(float dt)
                 break;
             }
             case VsNodeType::AttachedSprite: {
-                // Anchored-element distance scaling: the element scales with
-                // camera distance (100% at orbit distance) clamped between
-                // Min and Max. 100/100 = constant screen size (default).
+                // Anchored-element proximity scaling, by PLAYER->target distance:
+                // Min size at/under Near, Max size at/over Far. So the marker
+                // shrinks as you approach. Min==Max = flat size (no scaling).
                 int mx = n.paramInt[0] > 0 ? n.paramInt[0] : 100;
                 int mn = n.paramInt[1] > 0 ? n.paramInt[1] : 100;
-                ImGui::Text("Max Size");
-                if (ImGui::SliderInt("##AsMax", &mx, 10, 300, "%d%%")) { n.paramInt[0] = mx; sProjectDirty = true; }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cap on the anchored element's size as the camera gets close. 100%% of the authored size at orbit distance.");
+                int nr = n.paramInt[2] > 0 ? n.paramInt[2] : 48;
+                int fr = n.paramInt[3] > 0 ? n.paramInt[3] : 400;
                 ImGui::Text("Min Size");
                 if (ImGui::SliderInt("##AsMin", &mn, 10, 300, "%d%%")) { n.paramInt[1] = mn; sProjectDirty = true; }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Floor on the anchored element's size as the camera gets far. Keep BOTH at 100%% for constant screen size (no distance scaling).");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Size when the player is at/within Near distance of the target (close in). Equal to Max = flat size, no scaling.");
+                ImGui::Text("Max Size");
+                if (ImGui::SliderInt("##AsMax", &mx, 10, 300, "%d%%")) { n.paramInt[0] = mx; sProjectDirty = true; }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Size when the player is at/beyond Far distance of the target.");
+                ImGui::Text("Near Dist");
+                if (ImGui::SliderInt("##AsNear", &nr, 8, 1024, "%d")) { n.paramInt[2] = nr; sProjectDirty = true; }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Player->target distance (editor units) at/under which the element is Min size.");
+                ImGui::Text("Far Dist");
+                if (ImGui::SliderInt("##AsFar", &fr, 8, 1024, "%d")) { n.paramInt[3] = fr; sProjectDirty = true; }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Player->target distance (editor units) at/beyond which the element is Max size.");
                 break;
             }
             case VsNodeType::Integer:
