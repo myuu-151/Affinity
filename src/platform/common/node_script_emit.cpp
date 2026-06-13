@@ -360,6 +360,16 @@ void EmitNodeScriptBodies(std::ostream& f,
             case GBAScriptNodeType::IsLockedOn:
                 // Lock On target active (PSV camera lock; inert -1 elsewhere).
                 f << "    if (afn_cam_lock_target >= 0) {\n"; break;
+            case GBAScriptNodeType::IsInView: {
+                // Gate: target on-screen (camera FOV). Target pin = Object
+                // or Attached Sprite (self).
+                auto* tv = findDataIn(a->id, 0);
+                if (tv && tv->type == GBAScriptNodeType::AttachedSprite)
+                    f << "    if (afn_in_view(afn_bp_cur_spr_idx)) {\n";
+                else
+                    f << "    if (afn_in_view(" << (tv ? resolveInt(tv) : -1) << ")) {\n";
+                break;
+            }
             case GBAScriptNodeType::IsNotLockedOn:
                 f << "    if (afn_cam_lock_target < 0) {\n"; break;
             case GBAScriptNodeType::DashToTarget: {
@@ -696,11 +706,11 @@ void EmitNodeScriptBodies(std::ostream& f,
                 break;
             }
             case GBAScriptNodeType::LockOnTarget: {
-                // Lock-on camera assist (PSV, AFN_HAS_CAM_LOCK): the orbit
-                // eases toward facing the target while it's in view. Target
-                // pin: Attached Sprite = the BP owner ("self", guarded so
-                // ownerless instances don't stomp it), Object = a specific
-                // sprite; unwired in a BP also means self.
+                // Lock-on camera assist (PSV, AFN_HAS_CAM_LOCK): sets the lock
+                // target. Gate with Is In View if you only want to lock things
+                // on-screen. Target pin: Attached Sprite = the BP owner ("self",
+                // guarded so ownerless instances don't stomp it), Object = a
+                // specific sprite; unwired in a BP also means self.
                 auto* tgt = findDataIn(a->id, 0);
                 f << "#ifdef AFN_HAS_CAM_LOCK\n";
                 if (tgt && tgt->type != GBAScriptNodeType::AttachedSprite)
@@ -771,7 +781,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                    t == GBAScriptNodeType::OnRise ||
                    t == GBAScriptNodeType::Countdown ||
                    t == GBAScriptNodeType::IsLockedOn ||
-                   t == GBAScriptNodeType::IsNotLockedOn;
+                   t == GBAScriptNodeType::IsNotLockedOn ||
+                   t == GBAScriptNodeType::IsInView;
         };
         auto walkExec = [&](int nodeId, int pinIdx) {
             auto targets = findExecOuts(nodeId, pinIdx);
@@ -849,7 +860,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                            a->type == GBAScriptNodeType::IsGrinding ||
                            a->type == GBAScriptNodeType::IsNotGrinding ||
                            a->type == GBAScriptNodeType::IsLockedOn ||
-                           a->type == GBAScriptNodeType::IsNotLockedOn);
+                           a->type == GBAScriptNodeType::IsNotLockedOn ||
+                           a->type == GBAScriptNodeType::IsInView);
             if (isGate) {
                 bool wasJump = inJumpGate;
                 gateDepth++;

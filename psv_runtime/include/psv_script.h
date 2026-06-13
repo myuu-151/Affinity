@@ -151,6 +151,7 @@ static void afn_bp1_key_pressed(void) {
     { static int afn_ff_11 = 0;
       afn_ff_11 = !afn_ff_11;
       if (afn_ff_11) {
+    if (afn_in_view(afn_bp_cur_spr_idx)) {
     afn_hud_visible[0] = 1;
 #ifdef AFN_HAS_HUD_ANCHOR
     if (afn_bp_cur_spr_idx >= 0) afn_hud_anchor_sprite[0] = afn_bp_cur_spr_idx;
@@ -178,6 +179,7 @@ static void afn_bp1_key_pressed(void) {
 #ifdef AFN_HAS_CAM_LOCK
     afn_lock_strafe = 1;
 #endif
+    }
       } else {
     afn_hud_visible[0] = 0;
     afn_player_frozen = 0;

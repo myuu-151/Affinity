@@ -988,6 +988,35 @@ void afn_stop_sfx_sample(int smpIdx);
 void afn_audio_init(void);
 void afn_audio_tick(void);
 
+// Camera eye position (XZ), updated each frame by the render block — the
+// true origin for the FOV test (the camera sits BEHIND the player, so an
+// edge target subtends a smaller angle from the eye than from the player).
+static float g_camEyeX = 0.0f, g_camEyeZ = 0.0f;
+static int   g_camEyeValid = 0;
+
+// Is In View gate (PSV): true if sprite `spr` is within the camera's
+// horizontal FOV right now — i.e. on-screen. Measures the angle from the
+// CAMERA EYE (last frame's) against the camera forward (orbit_angle). Defined
+// before the script include so the emitted `if (afn_in_view(target))` works.
+static int afn_in_view(int spr) {
+#ifdef AFN_HAS_PLAYER_RIG
+    if (spr < 0) return 0;
+    for (int n = 0; n < AFN_NPC_COUNT; n++)
+        if ((int)afn_npc_inst[n][7] == spr) {
+            float ox = g_camEyeValid ? g_camEyeX : (float)player_x;
+            float oz = g_camEyeValid ? g_camEyeZ : (float)player_z;
+            float dx = s_npcX[n] - ox, dz = s_npcZ[n] - oz;
+            if (dx*dx + dz*dz < 1.0f) return 1;       // on top of it = visible
+            float cur = orbit_angle * (6.2831853f / 65536.0f);
+            float dd = atan2f(dx, dz) - cur;
+            while (dd >  3.14159265f) dd -= 6.2831853f;
+            while (dd < -3.14159265f) dd += 6.2831853f;
+            return (dd > -1.0f && dd < 1.0f);         // ~57 deg half horizontal FOV (edge margin)
+        }
+#endif
+    (void)spr; return 0;
+}
+
 // The emitted node graph. Included AFTER the variables/keys above so its static
 // functions can reference them (single translation unit). Defines AFN_HAS_SCRIPT
 // when the scene actually has nodes; otherwise this is an inert stub and the raw
@@ -2185,6 +2214,7 @@ int main(void)
         }
         float ex = s_camEyeX;
         float ez = s_camEyeZ;
+        g_camEyeX = ex; g_camEyeZ = ez; g_camEyeValid = 1;   // origin for Is In View FOV test
         float ey = targetY + sinf(s_camPosPitch)*effDist;   // eased pitch: eye height lags too
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);

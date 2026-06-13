@@ -613,6 +613,7 @@ enum class VsNodeType : int {
     IsNotLockedOn,   // gate: passes exec only while NO Lock On target is active
     DashToTarget,    // action: lunge the player toward the lock target
     StrafeAnim,      // action: 8-way directional clip picker from lock-relative stick
+    IsInView,        // gate: passes only if the target object is on-screen
     COUNT
 };
 
@@ -940,6 +941,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Is Not Locked On",0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Dash To Target",  0xFF3355AA, 1, 1, 2, 0, {"Speed (int)", "Frames (int)"}, {}, {} },
     { "Strafe Anim",     0xFF3355AA, 1, 1, 8, 0, {"Fwd","Fwd-R","Right","Back-R","Back","Back-L","Left","Fwd-L"}, {}, {} },
+    { "Is In View",      0xFF885533, 1, 1, 1, 0, {"Target (obj)"}, {}, {} },
 };
 
 struct VsNode {
@@ -20624,11 +20626,12 @@ void FrameTick(float dt)
                 case VsNodeType::TurnPlayer:    desc = "Rotates the tank heading (used with Tank Camera). Wire a Direction (Left/Right) and a Speed (brads/frame). Put it on On Key Held(Left)/(Right) so the D-pad turns the player in place while L/R still orbit the camera. Left-click for the Movement switch: Tank (Heading) makes movement follow the turned heading; Camera Relative keeps movement on camera axes and only steers the facing."; break;
                 case VsNodeType::CastEffect:    desc = "Plays a combat/spell effect on a target object. Attach a sprite to that object and tick its 'Hidden' box (it starts invisible). Wire the target into Object: on trigger the effect shows, plays its animation once, and auto-hides. Set the effect sprite's animation to Once so it cleans up."; break;
                 case VsNodeType::AttachedSprite:desc = "Outputs the sprite this blueprint instance is attached to (\"self\"). Wire into Show HUD's Anchor to pin the element to the owner's attached-sprite position in the world (PSV) — the element tracks the object on screen."; break;
-                case VsNodeType::LockOnTarget:  desc = "Lock-on camera assist (PSV): the orbit eases toward facing the Target while it's in view (riding the camera delay), releases when it drifts off screen, and re-acquires when you orbit it back into view. Wire Attached Sprite (\"self\" in a blueprint) or an Object into Target. Stays locked until Unlock Camera."; break;
+                case VsNodeType::LockOnTarget:  desc = "Lock-on camera assist (PSV): locks onto the Target; once locked the orbit always eases to face it — even off-screen — so locking on swings the camera around to frame it. Gate with Is In View to only lock onto on-screen targets. Wire Attached Sprite (\"self\" in a blueprint) or an Object into Target. Stays locked until Release Lock On."; break;
                 case VsNodeType::ReleaseLockOn: desc = "Releases the lock-on camera assist (pairs with Lock On — e.g. fire it next to Hide HUD when dropping the target). Also turns off Lock Strafe."; break;
                 case VsNodeType::LockStrafe:    desc = "Z-targeting movement (PSV): while a Lock On target is active, the player always FACES the target and movement becomes target-relative — Up closes in, Down backpedals, Left/Right circle-strafe around it. Fire it after Lock On; Release Lock On turns it off."; break;
                 case VsNodeType::IsLockedOn:    desc = "Gate: passes execution only while a Lock On target is active. Branch lock-specific behavior — e.g. On Key Held(Down) -> Is Locked On -> Play Skel Anim(backpeddle), with the normal walk wired in parallel."; break;
                 case VsNodeType::IsNotLockedOn: desc = "Gate: passes execution only while NO Lock On target is active — the inverse of Is Locked On. Use it to suppress the normal walk/face behavior while locked: On Key Held(Down) -> Is Not Locked On -> Play Skel Anim(walk)."; break;
+                case VsNodeType::IsInView:      desc = "Gate (PSV): passes execution only if the Target object is within the camera's view (on-screen). Wire Attached Sprite (\"self\") or an Object into Target. Gate your Lock On + Show HUD chain with it so you can only lock onto / show the ring for something you can see."; break;
                 case VsNodeType::StrafeAnim:    desc = "8-way directional animation picker (PSV lock-strafe): wire your clips (Forward, Fwd-Right, Right, Back-Right, Back, Back-Left, Left, Fwd-Left, relative to facing the target) and it plays the one matching the stick direction each frame. You DON'T need all 8 — any unwired direction falls back to the nearest wired one, so wiring just the 4 cardinals makes diagonals lean to a neighbor. One node replaces the per-direction gated Play Skel Anim chains; put it behind On Update -> Is Locked On."; break;
                 case VsNodeType::DashToTarget:  desc = "Lunges the player toward the Lock On target for a burst (PSV) — a homing dash for bullet-punch-style moves. Speed = world units/frame (like Walk/Sprint), Frames = lunge duration; stops early at melee range. No target locked -> dashes along current facing. Wire after the attack trigger; pair with Play Skel Anim(atk_phs)."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
@@ -20910,6 +20913,7 @@ void FrameTick(float dt)
                         case VsNodeType::IsNotLockedOn: return "_is_not_locked_on";
                         case VsNodeType::DashToTarget:  return "_dash_to_target";
                         case VsNodeType::StrafeAnim:    return "_strafe_anim";
+                        case VsNodeType::IsInView:      return "_is_in_view";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -21794,11 +21798,10 @@ void FrameTick(float dt)
                         "    afn_cam_lock_target = %s;\n"
                         "#endif\n"
                         "    // --- Runtime (psv main.c, pre-orbit) ---\n"
-                        "    // While the target is in the horizontal FOV (~55 deg):\n"
-                        "    //   orbit_angle += yawDiffToTarget * 0.10;  // ease, rides chase delay\n"
-                        "    // Drifts off screen -> assist releases (camera back to normal);\n"
-                        "    // orbiting it back into view re-acquires (hysteresis).\n"
-                        "    // Stays locked until Unlock Camera sets the target to -1.",
+                        "    // Once locked, the orbit ALWAYS eases to face the target\n"
+                        "    // (even off-screen): orbit_angle += yawDiffToTarget * 0.10.\n"
+                        "    // Gate with Is In View to only lock onto something on-screen.\n"
+                        "    // Stays locked until Release Lock On.",
                         fmtInt(infoNode.id, 0, "<target>"));
                     setActionFunc(infoNode, "_lock_on", lcBuf);
                     break;
@@ -24830,6 +24833,7 @@ void FrameTick(float dt)
                     case VsNodeType::IsNotLockedOn: suffix = "_is_not_locked_on"; break;
                     case VsNodeType::DashToTarget:  suffix = "_dash_to_target"; break;
                     case VsNodeType::StrafeAnim:    suffix = "_strafe_anim"; break;
+                    case VsNodeType::IsInView:      suffix = "_is_in_view"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -25334,6 +25338,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNotLockedOn].name)) addNodeAt(VsNodeType::IsNotLockedOn);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::DashToTarget].name)) addNodeAt(VsNodeType::DashToTarget);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StrafeAnim].name)) addNodeAt(VsNodeType::StrafeAnim);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsInView].name)) addNodeAt(VsNodeType::IsInView);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP].name)) addNodeAt(VsNodeType::SetHP);
