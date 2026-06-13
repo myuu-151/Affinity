@@ -608,6 +608,10 @@ enum class VsNodeType : int {
     AttachedSprite,  // data: the owning BP instance's sprite index ("self" — drives HUD anchoring)
     LockOnTarget,    // action: lock-on camera assist toward a target object
     ReleaseLockOn,   // action: release the lock-on camera assist
+    LockStrafe,      // action: target-relative movement while locked on
+    IsLockedOn,      // gate: passes exec only while a Lock On target is active
+    IsNotLockedOn,   // gate: passes exec only while NO Lock On target is active
+    DashToTarget,    // action: lunge the player toward the lock target
     COUNT
 };
 
@@ -930,6 +934,10 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Attached Sprite", 0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "Lock On",         0xFF3355AA, 1, 1, 1, 0, {"Target (obj)"}, {}, {} },
     { "Release Lock On", 0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Lock Strafe",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Locked On",    0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Not Locked On",0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Dash To Target",  0xFF3355AA, 1, 1, 2, 0, {"Speed (int)", "Frames (int)"}, {}, {} },
 };
 
 struct VsNode {
@@ -20615,7 +20623,11 @@ void FrameTick(float dt)
                 case VsNodeType::CastEffect:    desc = "Plays a combat/spell effect on a target object. Attach a sprite to that object and tick its 'Hidden' box (it starts invisible). Wire the target into Object: on trigger the effect shows, plays its animation once, and auto-hides. Set the effect sprite's animation to Once so it cleans up."; break;
                 case VsNodeType::AttachedSprite:desc = "Outputs the sprite this blueprint instance is attached to (\"self\"). Wire into Show HUD's Anchor to pin the element to the owner's attached-sprite position in the world (PSV) — the element tracks the object on screen."; break;
                 case VsNodeType::LockOnTarget:  desc = "Lock-on camera assist (PSV): the orbit eases toward facing the Target while it's in view (riding the camera delay), releases when it drifts off screen, and re-acquires when you orbit it back into view. Wire Attached Sprite (\"self\" in a blueprint) or an Object into Target. Stays locked until Unlock Camera."; break;
-                case VsNodeType::ReleaseLockOn: desc = "Releases the lock-on camera assist (pairs with Lock Camera — e.g. fire it next to Hide HUD when dropping the target)."; break;
+                case VsNodeType::ReleaseLockOn: desc = "Releases the lock-on camera assist (pairs with Lock On — e.g. fire it next to Hide HUD when dropping the target). Also turns off Lock Strafe."; break;
+                case VsNodeType::LockStrafe:    desc = "Z-targeting movement (PSV): while a Lock On target is active, the player always FACES the target and movement becomes target-relative — Up closes in, Down backpedals, Left/Right circle-strafe around it. Fire it after Lock On; Release Lock On turns it off."; break;
+                case VsNodeType::IsLockedOn:    desc = "Gate: passes execution only while a Lock On target is active. Branch lock-specific behavior — e.g. On Key Held(Down) -> Is Locked On -> Play Skel Anim(backpeddle), with the normal walk wired in parallel."; break;
+                case VsNodeType::IsNotLockedOn: desc = "Gate: passes execution only while NO Lock On target is active — the inverse of Is Locked On. Use it to suppress the normal walk/face behavior while locked: On Key Held(Down) -> Is Not Locked On -> Play Skel Anim(walk)."; break;
+                case VsNodeType::DashToTarget:  desc = "Lunges the player toward the Lock On target for a burst (PSV) — a homing dash for bullet-punch-style moves. Speed = world units/frame (like Walk/Sprint), Frames = lunge duration; stops early at melee range. No target locked -> dashes along current facing. Wire after the attack trigger; pair with Play Skel Anim(atk_phs)."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
@@ -20890,6 +20902,10 @@ void FrameTick(float dt)
                         case VsNodeType::AttachedSprite:return "_attached_sprite";
                         case VsNodeType::LockOnTarget:  return "_lock_on";
                         case VsNodeType::ReleaseLockOn: return "_release_lock_on";
+                        case VsNodeType::LockStrafe:    return "_lock_strafe";
+                        case VsNodeType::IsLockedOn:    return "_is_locked_on";
+                        case VsNodeType::IsNotLockedOn: return "_is_not_locked_on";
+                        case VsNodeType::DashToTarget:  return "_dash_to_target";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -21786,9 +21802,64 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_release_lock_on",
                         "#ifdef AFN_HAS_CAM_LOCK // PSV\n"
                         "    afn_cam_lock_target = -1;\n"
+                        "    afn_lock_strafe = 0;\n"
                         "#endif\n"
                         "    // --- Runtime (psv main.c) ---\n"
-                        "    // The orbit assist stops steering; normal camera control resumes.");
+                        "    // The orbit assist stops steering; normal camera control +\n"
+                        "    // normal movement resume (Lock Strafe is dropped too).");
+                    break;
+                }
+                case VsNodeType::LockStrafe: {
+                    editorCode = "// Z-targeting movement while locked on";
+                    setActionFunc(infoNode, "_lock_strafe",
+                        "#ifdef AFN_HAS_CAM_LOCK // PSV\n"
+                        "    afn_lock_strafe = 1;\n"
+                        "#endif\n"
+                        "    // --- Runtime (psv main.c movement block) ---\n"
+                        "    // While afn_cam_lock_target >= 0:\n"
+                        "    //   moveAngle = atan2(target - player);  // target-relative axes\n"
+                        "    //   Up = close in, Down = backpedal, L/R = circle-strafe\n"
+                        "    //   playerYaw = moveAngle always (face the target, even idle)\n"
+                        "    // No target locked -> inert (normal movement).");
+                    break;
+                }
+                case VsNodeType::IsLockedOn: {
+                    editorCode = "// Gate: passes exec only while a Lock On target is active";
+                    setActionFunc(infoNode, "_is_locked_on",
+                        "    if (afn_cam_lock_target >= 0) {\n"
+                        "        // ... downstream actions ...\n"
+                        "    }\n"
+                        "    // --- Runtime --- gate evaluated inline; afn_cam_lock_target is\n"
+                        "    // set by Lock On / cleared by Release Lock On (always -1 on NDS).");
+                    break;
+                }
+                case VsNodeType::IsNotLockedOn: {
+                    editorCode = "// Gate: passes exec only while NO Lock On target is active";
+                    setActionFunc(infoNode, "_is_not_locked_on",
+                        "    if (afn_cam_lock_target < 0) {\n"
+                        "        // ... downstream actions ...\n"
+                        "    }\n"
+                        "    // --- Runtime --- gate evaluated inline; the inverse of\n"
+                        "    // Is Locked On (always passes on NDS, target is pinned -1).");
+                    break;
+                }
+                case VsNodeType::DashToTarget: {
+                    editorCode = "// Lunge the player toward the lock target (bullet-punch)";
+                    char dtBuf[640];
+                    snprintf(dtBuf, sizeof(dtBuf),
+                        "#ifdef AFN_HAS_CAM_LOCK // PSV\n"
+                        "    afn_dash_speed  = %s;\n"
+                        "    afn_dash_frames = %s;\n"
+                        "    afn_dash_target = afn_cam_lock_target;   // capture the locked enemy\n"
+                        "#endif\n"
+                        "    // --- Runtime (psv main.c movement block) ---\n"
+                        "    // For afn_dash_frames frames, move the player toward the\n"
+                        "    // captured target at afn_dash_speed * 0.08 world px/frame\n"
+                        "    // (same scale as Walk/Sprint), facing it, with wall collision;\n"
+                        "    // ends early at melee range. No target -> lunge along facing.",
+                        fmtInt(infoNode.id, 0, "<speed>"),
+                        fmtInt(infoNode.id, 1, "<frames>"));
+                    setActionFunc(infoNode, "_dash_to_target", dtBuf);
                     break;
                 }
                 case VsNodeType::TurnPlayer: {
@@ -24733,6 +24804,10 @@ void FrameTick(float dt)
                     case VsNodeType::AttachedSprite:suffix = "_attached_sprite"; break;
                     case VsNodeType::LockOnTarget:  suffix = "_lock_on"; break;
                     case VsNodeType::ReleaseLockOn: suffix = "_release_lock_on"; break;
+                    case VsNodeType::LockStrafe:    suffix = "_lock_strafe"; break;
+                    case VsNodeType::IsLockedOn:    suffix = "_is_locked_on"; break;
+                    case VsNodeType::IsNotLockedOn: suffix = "_is_not_locked_on"; break;
+                    case VsNodeType::DashToTarget:  suffix = "_dash_to_target"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -25232,6 +25307,10 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::AttachedSprite].name)) addNodeAt(VsNodeType::AttachedSprite);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::LockOnTarget].name)) addNodeAt(VsNodeType::LockOnTarget);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ReleaseLockOn].name)) addNodeAt(VsNodeType::ReleaseLockOn);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::LockStrafe].name)) addNodeAt(VsNodeType::LockStrafe);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsLockedOn].name)) addNodeAt(VsNodeType::IsLockedOn);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNotLockedOn].name)) addNodeAt(VsNodeType::IsNotLockedOn);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::DashToTarget].name)) addNodeAt(VsNodeType::DashToTarget);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP].name)) addNodeAt(VsNodeType::SetHP);

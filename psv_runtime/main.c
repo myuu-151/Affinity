@@ -60,6 +60,7 @@ static unsigned char s_npcGround[AFN_NPC_COUNT + 1];
 static float  s_npcX[AFN_NPC_COUNT + 1];
 static float  s_npcZ[AFN_NPC_COUNT + 1];
 static float  s_npcYaw[AFN_NPC_COUNT + 1];
+static float  s_npcFloorN[AFN_NPC_COUNT + 1][3];   // smoothed floor normal (slope tilt, player parity)
 #ifdef AFN_HAS_NAVMESH
 #define NAV_MAX_WP 32
 static float  s_npcPath[AFN_NPC_COUNT + 1][NAV_MAX_WP * 3];   // Detour waypoints
@@ -121,6 +122,7 @@ static void rig_init(void) {
         s_npcX[i]  = afn_npc_inst[i][0];         // nav moves these; authored start
         s_npcZ[i]  = afn_npc_inst[i][2];
         s_npcYaw[i] = afn_npc_inst[i][3];
+        s_npcFloorN[i][0] = 0.0f; s_npcFloorN[i][1] = 1.0f; s_npcFloorN[i][2] = 0.0f;
 #ifdef AFN_HAS_NAVMESH
         s_npcPathLen[i] = 0; s_npcPathIdx[i] = 0; s_npcRepathT[i] = 0; s_npcNavMoving[i] = 0;
 #endif
@@ -283,8 +285,9 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
         if (clip < 0 || clip >= R->clips) clip = 0;
         s_npcFrame[i] = rig_advance(R, clip, s_npcFrame[i]);
         build_bone_mats(R, clip, s_npcFrame[i]); skin(R);
-        // Draw at the nav-driven X/Z/yaw + gravity-settled Y (NPC physics loop).
-        rig_draw(R, s_rigTex[slot], view, s_npcX[i], s_npcY[i], s_npcZ[i], s_npcYaw[i], N[4], 0);  // NPCs: world up
+        // Draw at the nav-driven X/Z/yaw + gravity-settled Y (NPC physics loop),
+        // tilted to the smoothed floor normal like the player (slope snap).
+        rig_draw(R, s_rigTex[slot], view, s_npcX[i], s_npcY[i], s_npcZ[i], s_npcYaw[i], N[4], s_npcFloorN[i]);
     }
 }
 #endif // AFN_HAS_PLAYER_RIG
@@ -946,6 +949,13 @@ unsigned char afn_hud_anchor_min[AFN_HUD_VIS_N], afn_hud_anchor_max[AFN_HUD_VIS_
 // by the assist block in the main loop (before the orbit-delta detection).
 #define AFN_HAS_CAM_LOCK 1
 int afn_cam_lock_target = -1;
+// Lock Strafe node: while a lock target is active, movement is TARGET-
+// relative (Up closes in, Down backpedals, L/R circle-strafe) and the rig
+// always faces the target. Inert when no target is locked.
+int afn_lock_strafe = 0;
+// Dash To Target node (bullet-punch lunge): frames>0 = lunging toward
+// afn_dash_target's live position at afn_dash_speed*0.08 px/frame, facing it.
+int afn_dash_frames = 0, afn_dash_speed = 0, afn_dash_target = -1;
 unsigned char afn_sprite_visible[NUM_SPRITES]={0};
 unsigned char afn_sprite_flip[NUM_SPRITES]={0}, afn_collision_enabled[NUM_SPRITES]={0};
 int afn_hp[NUM_SPRITES]={0}, afn_state_timer[NUM_SPRITES]={0};
@@ -1637,10 +1647,30 @@ int main(void)
         //     default when no script). Ported from PSP scene_update. ---
         float fAmt = afn_input_fwd  / 256.0f;
         float rAmt = afn_input_right / 256.0f;
+        // Lock Strafe (Z-targeting): with an active Lock On target, movement
+        // axes become TARGET-relative (Up closes in, Down backpedals, L/R
+        // circle-strafe) and the rig always faces the target — see below.
+        int lockStrafing = 0;
+        float lockAngle = 0.0f;
+#ifdef AFN_HAS_PLAYER_RIG
+        if (afn_lock_strafe && afn_cam_lock_target >= 0) {
+            for (int n = 0; n < AFN_NPC_COUNT; n++)
+                if ((int)afn_npc_inst[n][7] == afn_cam_lock_target) {
+                    float tdx = s_npcX[n] - playerX, tdz = s_npcZ[n] - playerZ;
+                    if (tdx*tdx + tdz*tdz > 1.0f) {
+                        lockAngle = atan2f(tdx, tdz);   // +sin/+cos convention
+                        lockStrafing = 1;
+                    }
+                    break;
+                }
+        }
+#endif
         // Tank controls: when afn_tank_camera is set (a Turn Player / tank node),
         // movement + facing follow afn_player_heading (D-pad turned), so the
         // camera orbits independently. Otherwise movement is camera-relative.
-        float moveAngle = (afn_tank_camera && afn_tank_move)
+        // Lock Strafe overrides both: axes follow the player->target line.
+        float moveAngle = lockStrafing ? lockAngle
+                        : (afn_tank_camera && afn_tank_move)
                           ? (afn_player_heading * (6.2831853f/65536.0f)) : camAngle;
         float fwdX = sinf(moveAngle), fwdZ = cosf(moveAngle);
         float rgtX = cosf(moveAngle), rgtZ = -sinf(moveAngle);
@@ -1666,7 +1696,9 @@ int main(void)
             //   other way on the same axis (steering then reads mirrored,
             //   "on that side"). The heading itself NEVER flips, so no
             //   back-and-forth polarity churn.
-            if (!afn_face_lock) {
+            if (lockStrafing) {
+                // Z-targeting: facing is handled below (always face target).
+            } else if (!afn_face_lock) {
                 if (afn_tank_camera && afn_tank_move) {
                     sTankRelFace = atan2f(rAmt, fAmt) * (180.0f/3.14159265f);
                 } else {
@@ -1674,6 +1706,12 @@ int main(void)
                     facedByMove = 1;
                 }
             }
+        }
+        // Lock Strafe: the rig faces the target at all times — moving,
+        // backpedaling, circling, or standing still.
+        if (lockStrafing) {
+            playerYaw = lockAngle * (180.0f/3.14159265f);
+            facedByMove = 1;   // target facing wins over the tank heading
         }
         // Tank heading owns the facing whenever camera-relative Direction
         // Facing isn't steering it. In tank drive the persisted relative
@@ -1697,6 +1735,40 @@ int main(void)
             }
         }
         sWasFacedByMove = facedByMove;
+
+        // Dash To Target (bullet-punch): a committed lunge toward the captured
+        // target's LIVE position, facing it, with wall collision; ends at melee
+        // range or when the frame budget runs out. No target -> lunge along the
+        // current facing. Overrides input movement while active.
+#ifdef AFN_HAS_PLAYER_RIG
+        if (afn_dash_frames > 0 && !afn_player_frozen) {
+            float ddx, ddz; int homing = 0;
+            if (afn_dash_target >= 0) {
+                for (int n = 0; n < AFN_NPC_COUNT; n++)
+                    if ((int)afn_npc_inst[n][7] == afn_dash_target) {
+                        ddx = s_npcX[n] - playerX; ddz = s_npcZ[n] - playerZ; homing = 1; break;
+                    }
+            }
+            if (!homing) { ddx = sinf(playerYaw*DEG2RAD); ddz = cosf(playerYaw*DEG2RAD); }
+            float dl = sqrtf(ddx*ddx + ddz*ddz);
+            float melee = COL_RADIUS * 2.0f + 6.0f;
+            float sp = afn_dash_speed * 0.08f;
+            if (homing && dl <= melee) {
+                afn_dash_frames = 0;                       // reached the enemy
+            } else if (dl > 0.001f) {
+                float step = sp;
+                if (homing && dl - sp < melee) step = dl - melee;   // don't overshoot into it
+                if (step < 0.0f) step = 0.0f;
+                float ix = ddx/dl*step, iz = ddz/dl*step;
+                int sub = (int)(step/3.0f) + 1;            // wall-tunnel guard like normal move
+                for (int st = 0; st < sub; st++) { playerX += ix/sub; playerZ += iz/sub; collide_walls(&playerX, &playerZ, playerY); }
+                playerYaw = atan2f(ddx, ddz) * (180.0f/3.14159265f);   // face the lunge
+                if (--afn_dash_frames <= 0) afn_dash_frames = 0;
+            } else {
+                afn_dash_frames = 0;
+            }
+        }
+#endif
 
         // Node-driven world-axis push velocity (boost pads / knockback). 8.8
         // fixed. BoostForward wrote a pending magnitude -> decompose along the
@@ -1835,8 +1907,16 @@ int main(void)
                 if (collide_floor(s_npcX[i], s_npcZ[i], s_npcY[i], &nfy, nfn)
                     && s_npcY[i] <= nfy - nbottom) {
                     s_npcY[i] = nfy - nbottom; s_npcVY[i] = 0.0f; s_npcGround[i] = 1;
+                    // Ease the rig's up-axis toward the floor normal (slope
+                    // tilt) — same rates as the player (main player block).
+                    s_npcFloorN[i][0] += (nfn[0] - s_npcFloorN[i][0]) * 0.2f;
+                    s_npcFloorN[i][1] += (nfn[1] - s_npcFloorN[i][1]) * 0.2f;
+                    s_npcFloorN[i][2] += (nfn[2] - s_npcFloorN[i][2]) * 0.2f;
                 } else {
                     s_npcGround[i] = 0;
+                    s_npcFloorN[i][0] += (0.0f - s_npcFloorN[i][0]) * 0.1f;   // airborne: ease upright
+                    s_npcFloorN[i][1] += (1.0f - s_npcFloorN[i][1]) * 0.1f;
+                    s_npcFloorN[i][2] += (0.0f - s_npcFloorN[i][2]) * 0.1f;
                 }
 
                 // SOLID blocker: push the player (a cylinder of COL_RADIUS) out

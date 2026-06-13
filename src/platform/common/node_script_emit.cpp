@@ -357,6 +357,25 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    if (!afn_grinding_active) {\n"; break;
             case GBAScriptNodeType::IsMoving:
                 f << "    if (player_moving) {\n"; break;
+            case GBAScriptNodeType::IsLockedOn:
+                // Lock On target active (PSV camera lock; inert -1 elsewhere).
+                f << "    if (afn_cam_lock_target >= 0) {\n"; break;
+            case GBAScriptNodeType::IsNotLockedOn:
+                f << "    if (afn_cam_lock_target < 0) {\n"; break;
+            case GBAScriptNodeType::DashToTarget: {
+                // Bullet-punch lunge (PSV, AFN_HAS_CAM_LOCK): capture the
+                // current lock target and burst toward it for N frames.
+                auto* spD = findDataIn(a->id, 0);
+                auto* frD = findDataIn(a->id, 1);
+                int sp = spD ? resolveInt(spD) : 120;
+                int fr = frD ? resolveInt(frD) : 10;
+                f << "#ifdef AFN_HAS_CAM_LOCK\n";
+                f << "    afn_dash_speed = " << sp << ";\n";
+                f << "    afn_dash_frames = " << fr << ";\n";
+                f << "    afn_dash_target = afn_cam_lock_target;\n";
+                f << "#endif\n";
+                break;
+            }
             case GBAScriptNodeType::IsOnGround:
                 f << "    if (player_on_ground) {\n"; break;
             case GBAScriptNodeType::IsJumping:
@@ -656,6 +675,15 @@ void EmitNodeScriptBodies(std::ostream& f,
             case GBAScriptNodeType::ReleaseLockOn: {
                 f << "#ifdef AFN_HAS_CAM_LOCK\n";
                 f << "    afn_cam_lock_target = -1;\n";
+                f << "    afn_lock_strafe = 0;\n";   // dropping the lock drops Z-targeting movement
+                f << "#endif\n";
+                break;
+            }
+            case GBAScriptNodeType::LockStrafe: {
+                // Z-targeting movement: only does anything while a Lock On
+                // target is active (afn_cam_lock_target >= 0).
+                f << "#ifdef AFN_HAS_CAM_LOCK\n";
+                f << "    afn_lock_strafe = 1;\n";
                 f << "#endif\n";
                 break;
             }
@@ -701,7 +729,9 @@ void EmitNodeScriptBodies(std::ostream& f,
                    t == GBAScriptNodeType::IsFlagSet ||
                    t == GBAScriptNodeType::FlipFlop ||
                    t == GBAScriptNodeType::OnRise ||
-                   t == GBAScriptNodeType::Countdown;
+                   t == GBAScriptNodeType::Countdown ||
+                   t == GBAScriptNodeType::IsLockedOn ||
+                   t == GBAScriptNodeType::IsNotLockedOn;
         };
         auto walkExec = [&](int nodeId, int pinIdx) {
             auto targets = findExecOuts(nodeId, pinIdx);
@@ -777,7 +807,9 @@ void EmitNodeScriptBodies(std::ostream& f,
                            a->type == GBAScriptNodeType::IsNear2D ||
                            a->type == GBAScriptNodeType::IsFollowMoving ||
                            a->type == GBAScriptNodeType::IsGrinding ||
-                           a->type == GBAScriptNodeType::IsNotGrinding);
+                           a->type == GBAScriptNodeType::IsNotGrinding ||
+                           a->type == GBAScriptNodeType::IsLockedOn ||
+                           a->type == GBAScriptNodeType::IsNotLockedOn);
             if (isGate) {
                 bool wasJump = inJumpGate;
                 gateDepth++;

@@ -35,6 +35,7 @@ static void afn_emitted_script_collision2d(void) {
 }
 static void afn_bp0_start(void) {
     afn_play_sound(0);
+    afn_rig_clip = 10;
 }
 static void afn_bp0_update(void) {
 }
@@ -44,8 +45,8 @@ static void afn_bp0_key_held(void) {
         afn_key_mag = afn_stick_mag[0];
 #endif
     if (!afn_player_frozen) afn_input_fwd += afn_key_mag;
-    afn_rig_clip = 1;
-    if (!afn_speed_prio) afn_move_speed = 10;
+    afn_rig_clip = 12;
+    if (!afn_speed_prio) afn_move_speed = 6;
     }
     if (key_is_down(KEY_RSTICK_LEFT)) {
 #ifdef AFN_HAS_STICK_SENS
@@ -76,24 +77,39 @@ static void afn_bp0_key_held(void) {
         afn_key_mag = afn_stick_mag[1];
 #endif
     if (!afn_player_frozen) afn_input_fwd -= afn_key_mag;
-    afn_rig_clip = 1;
-    if (!afn_speed_prio) afn_move_speed = 10;
+    if (!afn_speed_prio) afn_move_speed = 6;
+    if (afn_cam_lock_target < 0) {
+    afn_rig_clip = 12;
+    }
+    if (afn_cam_lock_target >= 0) {
+    afn_rig_clip = 5;
+    }
     }
     if (key_is_down(KEY_LSTICK_RIGHT)) {
 #ifdef AFN_HAS_STICK_SENS
         afn_key_mag = afn_stick_mag[3];
 #endif
     if (!afn_player_frozen) afn_input_right -= afn_key_mag;
-    afn_rig_clip = 1;
-    if (!afn_speed_prio) afn_move_speed = 10;
+    if (!afn_speed_prio) afn_move_speed = 6;
+    if (afn_cam_lock_target >= 0) {
+    afn_rig_clip = 13;
+    }
+    if (afn_cam_lock_target < 0) {
+    afn_rig_clip = 12;
+    }
     }
     if (key_is_down(KEY_LSTICK_LEFT)) {
 #ifdef AFN_HAS_STICK_SENS
         afn_key_mag = afn_stick_mag[2];
 #endif
     if (!afn_player_frozen) afn_input_right += afn_key_mag;
-    afn_rig_clip = 1;
-    if (!afn_speed_prio) afn_move_speed = 10;
+    if (!afn_speed_prio) afn_move_speed = 6;
+    if (afn_cam_lock_target < 0) {
+    afn_rig_clip = 12;
+    }
+    if (afn_cam_lock_target >= 0) {
+    afn_rig_clip = 14;
+    }
     }
 }
 static void afn_bp0_key_pressed(void) {
@@ -105,19 +121,19 @@ static void afn_bp0_key_pressed(void) {
 static void afn_bp0_key_released(void) {
     if (key_released(KEY_LSTICK_UP)) {
         afn_key_mag = 256;
-    afn_rig_clip = 0;
+    afn_rig_clip = 10;
     }
     if (key_released(KEY_LSTICK_DOWN)) {
         afn_key_mag = 256;
-    afn_rig_clip = 0;
+    afn_rig_clip = 10;
     }
     if (key_released(KEY_LSTICK_RIGHT)) {
         afn_key_mag = 256;
-    afn_rig_clip = 0;
+    afn_rig_clip = 10;
     }
     if (key_released(KEY_LSTICK_LEFT)) {
         afn_key_mag = 256;
-    afn_rig_clip = 0;
+    afn_rig_clip = 10;
     }
 }
 static void afn_bp0_collision(void) {
@@ -159,12 +175,16 @@ static void afn_bp1_key_pressed(void) {
 #ifdef AFN_HAS_CAM_LOCK
     if (afn_bp_cur_spr_idx >= 0) afn_cam_lock_target = afn_bp_cur_spr_idx;
 #endif
+#ifdef AFN_HAS_CAM_LOCK
+    afn_lock_strafe = 1;
+#endif
       } else {
     afn_hud_visible[0] = 0;
     afn_player_frozen = 0;
     afn_play_anim = 0;
 #ifdef AFN_HAS_CAM_LOCK
     afn_cam_lock_target = -1;
+    afn_lock_strafe = 0;
 #endif
       } }
     }

@@ -2395,6 +2395,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_key_mag;\n";
         f << "extern int  afn_face_lock;\n";
         f << "extern int  afn_tank_move;\n";
+        f << "extern int  afn_cam_lock_target;\n";
         f << "extern int  afn_move_speed;\n";
         f << "extern int  afn_auto_orbit_speed;\n";
         f << "extern int  afn_play_anim;\n";

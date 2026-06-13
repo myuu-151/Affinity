@@ -438,6 +438,10 @@ enum class GBAScriptNodeType : int {
     AttachedSprite,  // data: the owning BP instance's sprite index ("self" anchor)
     LockOnTarget,    // action: lock-on camera assist — orbit eases toward facing the target
     ReleaseLockOn,   // action: release the lock-on camera assist
+    LockStrafe,      // action: target-relative movement while locked on (face target, backpedal/circle)
+    IsLockedOn,      // gate: passes exec only while a Lock On target is active
+    IsNotLockedOn,   // gate: passes exec only while NO Lock On target is active
+    DashToTarget,    // action: lunge the player toward the lock target (bullet-punch)
     COUNT
 };
 
