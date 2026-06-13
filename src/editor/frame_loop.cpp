@@ -21779,7 +21779,7 @@ void FrameTick(float dt)
                 case VsNodeType::SetCamera: {
                     editorCode =
                         "// Switch the player camera to a preset slot (Mode 4)";
-                    char bodyBuf[600];
+                    char bodyBuf[820];
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    afn_active_camera = %s;   // 0 = scene default, 1..N = player slots\n"
                         "    // --- Runtime (fps3d.c / psv main.c update_camera) ---\n"
@@ -21789,6 +21789,9 @@ void FrameTick(float dt)
                         "    // Pitch target (PSV): each slot's column 4 = Pitch (deg, slot 0\n"
                         "    //   = Camera Properties Pitch). Nonzero = that exact angle; 0 =\n"
                         "    //   auto, derive from the slot's height/distance (atan2).\n"
+                        "    // While LOCKED ON (PSV): the lock assist owns yaw+pitch, so a Set\n"
+                        "    //   Camera only blends distance/height (zoom) — the slot's yaw is\n"
+                        "    //   NOT forced (no snap toward the slot angle / the player's front).\n"
                         "    // The index is CLAMPED to [0, AFN_CAM_SLOT_COUNT-1] before use —\n"
                         "    // an out-of-range slot would index past afn_cam_slots and crash.",
                         fmtInt(infoNode.id, 0, "<slot>"));
@@ -21851,22 +21854,27 @@ void FrameTick(float dt)
                     char lcBuf[900];
                     int lkZoom = infoNode.paramInt[0] > 0 ? infoNode.paramInt[0] : 18;
                     int lkSide = infoNode.paramInt[1] > 0 ? infoNode.paramInt[1] : 32;
+                    int lkHeight = infoNode.paramInt[3] > 0 ? infoNode.paramInt[3] : 32;
                     snprintf(lcBuf, sizeof(lcBuf),
                         "#ifdef AFN_HAS_CAM_LOCK // PSV\n"
                         "    afn_cam_lock_target = %s;\n"
                         "    afn_lock_zoom = %d; afn_lock_side = %d; afn_lock_zoom_in = %d;\n"
+                        "    afn_lock_height = %d; afn_lock_no_lookdown = %d;\n"
                         "#endif\n"
                         "    // --- Runtime (psv main.c, pre-orbit + camera block) ---\n"
-                        "    // Once locked, the orbit yaw AND pitch ALWAYS ease to face the\n"
-                        "    // target (even off-screen): yaw -> atan2(dx,dz), pitch ->\n"
-                        "    // atan2(playerY-targetY, horiz), 10%%/frame. Manual L/R + up/down\n"
-                        "    // can nudge off-axis but the pull caps it (can't orbit past the\n"
-                        "    // target). Camera also eases into an over-the-shoulder frame:\n"
-                        "    // %d%% zoom-%s + %d-px lateral shift (auto side). Gate with Is In\n"
-                        "    // View to only lock on-screen targets. Until Release Lock On.",
+                        "    // Once locked, orbit yaw + pitch ALWAYS ease to face the target\n"
+                        "    // (even off-screen), 10%%/frame. pitch = heightP + trackP:\n"
+                        "    //   heightP = atan2(Height, orbitDist)  // constant elevation (%d px)\n"
+                        "    //   trackP  = atan2(playerY-targetY, horiz)  // up on jump / down if low\n"
+                        "    // No Look-Down (%d) clamps trackP's DOWN side only — Height's\n"
+                        "    // framing still applies and stays adjustable; jumps still pull up.\n"
+                        "    // Over-the-shoulder frame: %d%% zoom-%s + %d-px lateral shift.\n"
+                        "    // Gate with Is In View. Until Release Lock On.",
                         fmtInt(infoNode.id, 0, "<target>"),
-                        lkZoom, lkSide / 4, infoNode.paramInt[2] ? 1 : 0,
-                        lkZoom, infoNode.paramInt[2] ? "in" : "out", lkSide / 4);
+                        lkZoom, lkSide / 4, infoNode.paramInt[2] & 1, lkHeight / 4,
+                        (infoNode.paramInt[2] >> 1) & 1,
+                        lkHeight / 4, (infoNode.paramInt[2] >> 1) & 1,
+                        lkZoom, (infoNode.paramInt[2] & 1) ? "in" : "out", lkSide / 4);
                     setActionFunc(infoNode, "_lock_on", lcBuf);
                     break;
                 }
@@ -25723,15 +25731,23 @@ void FrameTick(float dt)
                 // Over-the-shoulder framing while locked (defaults = tuned values).
                 int zm = n.paramInt[0] > 0 ? n.paramInt[0] : 18;
                 int sd = n.paramInt[1] > 0 ? n.paramInt[1] : 32;
+                int ht = n.paramInt[3] > 0 ? n.paramInt[3] : 32;
                 ImGui::Text("Zoom %%");
                 if (ImGui::SliderInt("##LkZoom", &zm, 0, 100, "%d%%")) { n.paramInt[0] = zm; sProjectDirty = true; }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Zoom amount while locked on (18%% = default). 0 = no zoom.");
                 const char* zoomDir[] = { "Zoom Out", "Zoom In" };
-                if (ImGui::Combo("##LkZoomDir", &n.paramInt[2], zoomDir, 2)) sProjectDirty = true;
+                int zoomDirIdx = n.paramInt[2] & 1;   // bit0 = zoom dir, bit1 = no look-down
+                if (ImGui::Combo("##LkZoomDir", &zoomDirIdx, zoomDir, 2)) { n.paramInt[2] = (n.paramInt[2] & ~1) | (zoomDirIdx & 1); sProjectDirty = true; }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Out = pull the camera back (default); In = pull it closer to the player.");
+                bool noLookDown = (n.paramInt[2] >> 1) & 1;
+                if (ImGui::Checkbox("No Look-Down##LkNoDown", &noLookDown)) { n.paramInt[2] = (n.paramInt[2] & ~2) | (noLookDown ? 2 : 0); sProjectDirty = true; }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("While locked, target-tracking won't tilt the camera DOWN (closing in / a lower target).\nStill eases UP when the target jumps / rises. Height's resting framing still applies.");
                 ImGui::Text("Side Offset");
                 if (ImGui::SliderInt("##LkSide", &sd, 0, 256, "%d")) { n.paramInt[1] = sd; sProjectDirty = true; }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Over-the-shoulder lateral shift, editor units (32 = default ~8 world px). 0 = centered. Auto-switches to whichever side keeps the player off the target.");
+                ImGui::Text("Height");
+                if (ImGui::SliderInt("##LkHeight", &ht, 0, 256, "%d")) { n.paramInt[3] = ht; sProjectDirty = true; }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Constant elevated framing, editor units (32 = default ~8 world px): camera rides higher and looks down a bit.\nReferenced to orbit distance so it doesn't steepen on approach. Works with No Look-Down on.");
                 break;
             }
             case VsNodeType::Integer:

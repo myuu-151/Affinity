@@ -187,6 +187,8 @@ static void afn_bp1_key_pressed(void) {
     afn_lock_zoom = 18;
     afn_lock_side = 8;
     afn_lock_zoom_in = 1;
+    afn_lock_height = 4;
+    afn_lock_no_lookdown = 1;
 #endif
 #ifdef AFN_HAS_CAM_LOCK
     afn_lock_strafe = 1;

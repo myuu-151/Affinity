@@ -957,6 +957,10 @@ int afn_cam_lock_target = -1;
 // world-px lateral shift.
 int afn_lock_zoom = 18, afn_lock_side = 8;
 int afn_lock_zoom_in = 0;   // 0 = zoom OUT (pull back), 1 = zoom IN (pull closer)
+int afn_lock_height = 8;    // raises the locked pitch aim (world px): camera rides
+                            // higher and looks down a bit instead of dead level
+int afn_lock_no_lookdown = 0;  // 1 = clamp the locked pitch so it never looks DOWN
+                               // (on approach); still eases UP when the target rises
 // Lock Strafe node: while a lock target is active, movement is TARGET-
 // relative (Up closes in, Down backpedals, L/R circle-strafe) and the rig
 // always faces the target. Inert when no target is locked.
@@ -1609,6 +1613,13 @@ int main(void)
         {
             static int s_prevCamSlot = 0, s_camYawEasing = 0;
             if (afn_active_camera != s_prevCamSlot) { s_prevCamSlot = afn_active_camera; s_camYawEasing = 1; }
+            // While locked on, the lock assist (below) owns yaw + pitch — it eases
+            // the orbit to frame the target every frame. If the slot-switch ALSO
+            // eased yaw toward the slot's absolute S[0], a Set Camera would yank the
+            // camera toward that authored angle (sometimes the character's front)
+            // before the lock pulls it back — a visible snap. So when locked, drop
+            // the yaw/pitch ease and let Set Camera only blend distance/height (zoom).
+            if (afn_cam_lock_target >= 0) s_camYawEasing = 0;
             if (s_camYawEasing) {
                 int yawTgt = (int)(S[0] * (65536.0f / 6.2831853f));
                 int d = (int)(int16_t)(uint16_t)(yawTgt - orbit_angle);   // brad, wrap-safe
@@ -1668,7 +1679,19 @@ int main(void)
                     // can nudge off it but the pull caps the deviation — you can't
                     // flip over the top/bottom of the locked target.
                     float horiz = sqrtf(ldx*ldx + ldz*ldz);
-                    float desiredP = atan2f(playerY - ty, horiz);   // target below -> look down
+                    // Two independent pitch contributions:
+                    //  heightP = CONSTANT elevated look-down bias from Height. Referenced
+                    //    to the orbit distance (not the live horiz) so it frames the same
+                    //    at rest and doesn't steepen as you close in. Always applied.
+                    //  trackP  = ease up/down toward the target's actual height (negative
+                    //    = look up on a jump, positive = look down at a lower target).
+                    //  No Look-Down clamps ONLY trackP's DOWN side, so closing in / a low
+                    //    target adds no tilt — but Height still sets the framing (and is
+                    //    still adjustable) and a jump still pulls the view up.
+                    float heightP = atan2f((float)afn_lock_height, camDist > 1.0f ? camDist : 60.0f);
+                    float trackP  = atan2f(playerY - ty, horiz);
+                    if (afn_lock_no_lookdown && trackP > 0.0f) trackP = 0.0f;
+                    float desiredP = heightP + trackP;
                     float curP = orbit_pitch * (6.2831853f / 65536.0f);
                     float diffP = desiredP - curP;
                     orbit_pitch = orbit_pitch

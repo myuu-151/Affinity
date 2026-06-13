@@ -725,6 +725,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 // side offset in EDITOR units (->/4 world px). 0 = tuned default.
                 int lkZoom = a->paramInt[0] > 0 ? a->paramInt[0] : 18;
                 int lkSide = a->paramInt[1] > 0 ? a->paramInt[1] : 32;
+                int lkHeight = a->paramInt[3] > 0 ? a->paramInt[3] : 32;   // editor units (->/4 world px)
                 f << "#ifdef AFN_HAS_CAM_LOCK\n";
                 if (tgt && tgt->type != GBAScriptNodeType::AttachedSprite)
                     f << "    afn_cam_lock_target = " << resolveInt(tgt) << ";\n";
@@ -734,7 +735,10 @@ void EmitNodeScriptBodies(std::ostream& f,
                     f << "    afn_cam_lock_target = -1;\n";   // scene script, no target wired
                 f << "    afn_lock_zoom = " << lkZoom << ";\n";
                 f << "    afn_lock_side = " << (lkSide / 4) << ";\n";
-                f << "    afn_lock_zoom_in = " << (a->paramInt[2] ? 1 : 0) << ";\n";
+                // paramInt[2] is a bitfield: bit0 = zoom in/out, bit1 = no look-down.
+                f << "    afn_lock_zoom_in = " << (a->paramInt[2] & 1) << ";\n";
+                f << "    afn_lock_height = " << (lkHeight / 4) << ";\n";
+                f << "    afn_lock_no_lookdown = " << ((a->paramInt[2] >> 1) & 1) << ";\n";
                 f << "#endif\n";
                 break;
             }
