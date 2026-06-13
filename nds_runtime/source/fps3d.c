@@ -1832,21 +1832,11 @@ static void update_camera(void)
                             cam_x >> 8, cam_z >> 8);
             }
         }
-        // Re-project the camera onto the orbit circle. The XZ position lerp above
-        // chases a target that sweeps around the circle while orbiting; a straight
-        // lerp cuts across the chord, pulling the camera INSIDE the circle (smaller
-        // radius -> reads as a zoom-in), then it settles back out on release (zoom
-        // out). Snapping the radius back to orbit_dist keeps the angular glide but
-        // holds the distance constant, so orbiting no longer zooms.
-        {
-            int rdx = cam_x - player_x, rdz = cam_z - player_z;
-            float rlen = sqrtf((float)rdx*(float)rdx + (float)rdz*(float)rdz);
-            if (rlen > 1.0f) {
-                float k = (float)orbit_dist / rlen;
-                cam_x = player_x + (int)((float)rdx * k);
-                cam_z = player_z + (int)((float)rdz * k);
-            }
-        }
+        // (No orbit-circle radius re-projection here — it pinned |cam-player| to
+        // orbit_dist every frame, which erased the walk/sprint distance lag and
+        // snapped the camera when orbiting mid-walk. Matches v0.6.2, which never
+        // re-projected. The cost is the old chord-cut zoom-wobble during a long
+        // sustained orbit sweep, which is mild and was acceptable in v0.6.2.)
     }
 
     // Smooth cam_h Y follow — quick on the way down (landing), lazy in the
