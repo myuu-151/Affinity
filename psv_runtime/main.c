@@ -1612,7 +1612,16 @@ int main(void)
                 int yawTgt = (int)(S[0] * (65536.0f / 6.2831853f));
                 int d = (int)(int16_t)(uint16_t)(yawTgt - orbit_angle);   // brad, wrap-safe
                 orbit_angle = (int)(uint16_t)(orbit_angle + (d >> 3));
-                int pitchTgt = (int)(atan2f(camHeightTgt > 0.0f ? camHeightTgt : 8.0f, camDistTgt) * (65536.0f / 6.2831853f));
+                // Every slot carries an explicit orbit Pitch (deg) in column 4
+                // (slot 0 = afn_cam_start_pitch). Honor it uniformly so authoring
+                // matches Camera Properties > Pitch; 0 = auto, derive the tilt from
+                // the slot's height/distance (the legacy behavior).
+                float slotPitchDeg = S[4];
+                int pitchTgt;
+                if (slotPitchDeg != 0.0f)
+                    pitchTgt = (int)(slotPitchDeg * (65536.0f / 360.0f));
+                else
+                    pitchTgt = (int)(atan2f(camHeightTgt > 0.0f ? camHeightTgt : 8.0f, camDistTgt) * (65536.0f / 6.2831853f));
                 int pd = pitchTgt - orbit_pitch;
                 orbit_pitch += pd >> 3;
                 if (d > -300 && d < 300 && pd > -300 && pd < 300) {

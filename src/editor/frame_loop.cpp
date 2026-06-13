@@ -5840,9 +5840,9 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "spriteRig=%d,%d,%d\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0);
         // Player camera presets (Mode 4): one line per slot.
         for (const auto& cs : sp.cameraSlots)
-            fprintf(f, "camSlot=%s|%.4f|%.4f|%.4f|%.4f\n",
+            fprintf(f, "camSlot=%s|%.4f|%.4f|%.4f|%.4f|%.4f\n",
                     cs.name.empty() ? "Camera" : cs.name.c_str(),
-                    cs.angle, cs.horizon, cs.distance, cs.height);
+                    cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch);
         if (sp.subSpriteCount > 0) {
             fprintf(f, "subSpriteCount=%d\n", sp.subSpriteCount);
             for (int si = 0; si < sp.subSpriteCount; si++) {
@@ -6338,9 +6338,9 @@ static bool SaveProject(const std::string& path)
             if (sp.riggedMeshIdx >= 0)
                 fprintf(f, "msSpriteRig=%d,%d,%d\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0);
             for (const auto& cs : sp.cameraSlots)
-                fprintf(f, "msCamSlot=%s|%.4f|%.4f|%.4f|%.4f\n",
+                fprintf(f, "msCamSlot=%s|%.4f|%.4f|%.4f|%.4f|%.4f\n",
                         cs.name.empty() ? "Camera" : cs.name.c_str(),
-                        cs.angle, cs.horizon, cs.distance, cs.height);
+                        cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch);
             if (sp.subSpriteCount > 0) {
                 fprintf(f, "msSubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si = 0; si < sp.subSpriteCount; si++) {
@@ -6484,9 +6484,9 @@ static bool SaveProject(const std::string& path)
             if (sp.riggedMeshIdx >= 0)
                 fprintf(f, "m7SpriteRig=%d,%d,%d\n", sp.riggedMeshIdx, sp.rigAnimIdx, sp.rigAnimPlay ? 1 : 0);
             for (const auto& cs : sp.cameraSlots)
-                fprintf(f, "m7CamSlot=%s|%.4f|%.4f|%.4f|%.4f\n",
+                fprintf(f, "m7CamSlot=%s|%.4f|%.4f|%.4f|%.4f|%.4f\n",
                         cs.name.empty() ? "Camera" : cs.name.c_str(),
-                        cs.angle, cs.horizon, cs.distance, cs.height);
+                        cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch);
             if (sp.subSpriteCount > 0) {
                 fprintf(f, "m7SubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si2 = 0; si2 < sp.subSpriteCount; si2++) {
@@ -7045,10 +7045,10 @@ static bool LoadProject(const std::string& path)
                 sp2.rigAnimClock = 0.0f;
             }
             else if (strncmp(line, "camSlot=", 8) == 0 && sSpriteCount > 0) {
-                char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14;
-                if (sscanf(line + 8, "%63[^|]|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy) >= 1) {
+                char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14, cp = 0;
+                if (sscanf(line + 8, "%63[^|]|%f|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy, &cp) >= 1) {
                     CameraSlot cs; cs.name = csName[0] ? csName : "Camera";
-                    cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy;
+                    cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp;
                     sSprites[sSpriteCount - 1].cameraSlots.push_back(cs);
                 }
             }
@@ -8290,10 +8290,10 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "msCamSlot=", 10) == 0 && !sMapScenes.empty()) {
                 MapScene& ms = sMapScenes.back();
                 if (ms.spriteCount > 0) {
-                    char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14;
-                    if (sscanf(line + 10, "%63[^|]|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy) >= 1) {
+                    char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14, cp = 0;
+                    if (sscanf(line + 10, "%63[^|]|%f|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy, &cp) >= 1) {
                         CameraSlot cs; cs.name = csName[0] ? csName : "Camera";
-                        cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy;
+                        cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp;
                         ms.sprites[ms.spriteCount - 1].cameraSlots.push_back(cs);
                     }
                 }
@@ -8761,10 +8761,10 @@ static bool LoadProject(const std::string& path)
             else if (strncmp(line, "m7CamSlot=", 10) == 0 && !sM7Scenes.empty()) {
                 MapScene& ms = sM7Scenes.back();
                 if (ms.spriteCount > 0) {
-                    char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14;
-                    if (sscanf(line + 10, "%63[^|]|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy) >= 1) {
+                    char csName[64] = {}; float ca = 0, ch = 60, cd = 0, cy = 14, cp = 0;
+                    if (sscanf(line + 10, "%63[^|]|%f|%f|%f|%f|%f", csName, &ca, &ch, &cd, &cy, &cp) >= 1) {
                         CameraSlot cs; cs.name = csName[0] ? csName : "Camera";
-                        cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy;
+                        cs.angle = ca; cs.horizon = ch; cs.distance = cd; cs.height = cy; cs.orbitPitch = cp;
                         ms.sprites[ms.spriteCount - 1].cameraSlots.push_back(cs);
                     }
                 }
@@ -13215,7 +13215,8 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                     char nb[64]; snprintf(nb, sizeof(nb), "%s", cs.name.c_str());
                     if (ImGui::InputText("Name##csn", nb, sizeof(nb))) { cs.name = nb; sProjectDirty = true; }
                     if (ImGui::DragFloat("Yaw (deg)##csa", &cs.angle, 1.0f, 0.0f, 360.0f, "%.0f")) sProjectDirty = true;
-                    if (ImGui::DragFloat("Pitch##csp", &cs.horizon, 1.0f, 0.0f, 160.0f, "%.0f")) sProjectDirty = true;
+                    if (ImGui::DragFloat("Pitch##csp", &cs.orbitPitch, 0.5f, -80.0f, 80.0f, "%.0f deg")) sProjectDirty = true;
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Orbit pitch while this slot is active (PSV).\nPositive = look down, negative = look up.\n0 = auto (derive from Height / Distance).\nSame units as Camera Properties > Pitch.");
                     if (ImGui::DragFloat("Distance##csd", &cs.distance, 1.0f, 0.0f, 400.0f, "%.0f")) sProjectDirty = true;
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = keep the scene's orbit distance");
                     if (ImGui::DragFloat("Height##csh", &cs.height, 0.5f, -50.0f, 200.0f, "%.1f")) sProjectDirty = true;
@@ -13236,6 +13237,7 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                 ncs.angle = sCamObj.angle * 180.0f / 3.14159265f;
                 if (ncs.angle < 0.0f) ncs.angle += 360.0f;
                 ncs.horizon  = sCamObj.horizon;
+                ncs.orbitPitch = sCamObj.orbitPitch;   // inherit the scene-start pitch authoring
                 ncs.height   = sCamObj.height;
                 ncs.distance = 0.0f;   // 0 = keep the scene's orbit distance
                 char nm[32]; snprintf(nm, sizeof(nm), "Camera %d", (int)sp.cameraSlots.size() + 1);
@@ -15737,7 +15739,7 @@ void FrameTick(float dt)
                 for (const auto& fsCam : sSprites) {
                     if (fsCam.type != SpriteType::Player) continue;
                     for (const auto& cs : fsCam.cameraSlots)
-                        exportCam.camSlots.push_back({ cs.angle, cs.horizon, cs.distance, cs.height });
+                        exportCam.camSlots.push_back({ cs.angle, cs.horizon, cs.distance, cs.height, cs.orbitPitch });
                     break;
                 }
                 exportCam.walkSpeed = sCamObj.walkSpeed;
@@ -21737,13 +21739,16 @@ void FrameTick(float dt)
                 case VsNodeType::SetCamera: {
                     editorCode =
                         "// Switch the player camera to a preset slot (Mode 4)";
-                    char bodyBuf[420];
+                    char bodyBuf[600];
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    afn_active_camera = %s;   // 0 = scene default, 1..N = player slots\n"
                         "    // --- Runtime (fps3d.c / psv main.c update_camera) ---\n"
                         "    // each frame eases the live camera toward the active slot:\n"
                         "    //   cam_angle/orbit_dist/cam_h/m7_horizon ->\n"
-                        "    //     afn_cam_slots[afn_active_camera][0..3] (orbit-follow, blended)\n"
+                        "    //     afn_cam_slots[afn_active_camera][0..4] (orbit-follow, blended)\n"
+                        "    // Pitch target (PSV): each slot's column 4 = Pitch (deg, slot 0\n"
+                        "    //   = Camera Properties Pitch). Nonzero = that exact angle; 0 =\n"
+                        "    //   auto, derive from the slot's height/distance (atan2).\n"
                         "    // The index is CLAMPED to [0, AFN_CAM_SLOT_COUNT-1] before use —\n"
                         "    // an out-of-range slot would index past afn_cam_slots and crash.",
                         fmtInt(infoNode.id, 0, "<slot>"));

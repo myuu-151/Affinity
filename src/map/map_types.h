@@ -339,9 +339,11 @@ struct CameraSlot
 {
     std::string name = "Camera";  // label shown in the player panel + node dropdown
     float angle    = 0.0f;        // orbit yaw, degrees
-    float horizon  = 60.0f;       // pitch / horizon line (editor px, same as CameraStartObject)
+    float horizon  = 60.0f;       // NDS Mode-4 horizon line (editor px); PSV uses orbitPitch
     float distance = 0.0f;        // orbit distance, editor units (0 = keep scene default)
     float height   = 14.0f;       // camera height, editor units
+    float orbitPitch = 0.0f;      // orbit pitch in degrees (0 = auto from height/dist);
+                                  // PSV, identical authoring to CameraStartObject.orbitPitch
 };
 
 struct FloorSprite

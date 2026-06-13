@@ -265,17 +265,20 @@ static bool GeneratePSPMapData(const std::string& runtimeDir,
     // ---- camera presets / slots (Mode 4) ----
     // Slot 0 = scene default; slots 1..N are SetCamera targets. Columns:
     //   { orbit yaw (radians), orbit dist (world px), camera height (world px),
-    //     horizon (editor px) }. The runtime orbit-follows the player and (once
-    //     scripts land on PSV) blends the live camera toward afn_active_camera.
+    //     horizon (editor px), orbit pitch (deg, 0 = auto) }. The runtime orbit-
+    //     follows the player and blends the live camera toward afn_active_camera.
+    //     PSV honors column 4 (pitch) per slot; NDS still uses column 3 (horizon).
     f << "#define AFN_CAM_SLOT_COUNT " << (1 + (int)camera.camSlots.size()) << "\n";
-    f << "static const float afn_cam_slots[][4] = {\n";
+    f << "static const float afn_cam_slots[][5] = {\n";
     f << "    { " << Flt(camera.angle) << ", " << Flt(orbitDist / 4.0f) << ", "
-                  << Flt(WY(camera.height)) << ", " << Flt(camera.horizon) << " },\n";
+                  << Flt(WY(camera.height)) << ", " << Flt(camera.horizon) << ", "
+                  << Flt(camera.orbitPitch) << " },\n";
     for (const auto& cs : camera.camSlots) {
         float ang = cs.angle * 3.14159265f / 180.0f;                 // editor deg -> radians
         float di  = (cs.distance > 0.0f) ? cs.distance / 4.0f : orbitDist / 4.0f;
         float he  = WY(cs.height);
-        f << "    { " << Flt(ang) << ", " << Flt(di) << ", " << Flt(he) << ", " << Flt(cs.horizon) << " },\n";
+        f << "    { " << Flt(ang) << ", " << Flt(di) << ", " << Flt(he) << ", "
+                      << Flt(cs.horizon) << ", " << Flt(cs.orbitPitch) << " },\n";
     }
     f << "};\n";
     // Active preset. PSV has no scripts yet, so this stays 0 (scene default); the
