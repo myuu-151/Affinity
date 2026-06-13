@@ -2108,15 +2108,37 @@ int main(void)
         float effDist = camDist;
 #ifdef AFN_HAS_CAM_LOCK
         {
-            static float s_lockFrame = 0.0f;
-            const float LOCK_SIDE = 16.0f;   // world px lateral shift (negate to swap side)
+            static float s_lockFrame = 0.0f;     // 0..1 lock blend
+            static float s_lockSideEased = 0.0f; // eased signed lateral offset (smooths flips)
+            static float s_lockSideSign = 1.0f;  // which side the player sits on
+            const float LOCK_SIDE = 8.0f;    // world px lateral shift
             const float LOCK_ZOOM = 0.18f;   // +18% pull-back
             float want = (afn_cam_lock_target >= 0) ? 1.0f : 0.0f;
             s_lockFrame += (want - s_lockFrame) * 0.10f;
+#ifdef AFN_HAS_PLAYER_RIG
+            // Pick the side from where the target sits relative to camera
+            // forward: keep the player on the OPPOSITE side so it never blocks
+            // the target. Hysteresis (0.15 rad) stops jitter near center; the
+            // eased offset below smooths the actual switch. (Flip the two signs
+            // if the player ends up on the wrong side.)
+            if (afn_cam_lock_target >= 0) {
+                for (int n = 0; n < AFN_NPC_COUNT; n++)
+                    if ((int)afn_npc_inst[n][7] == afn_cam_lock_target) {
+                        float dd = atan2f(s_npcX[n] - playerX, s_npcZ[n] - playerZ) - camAngle;
+                        while (dd >  3.14159265f) dd -= 6.2831853f;
+                        while (dd < -3.14159265f) dd += 6.2831853f;
+                        if (dd >  0.15f) s_lockSideSign =  1.0f;
+                        else if (dd < -0.15f) s_lockSideSign = -1.0f;
+                        break;
+                    }
+            }
+#endif
+            float sideTgt = LOCK_SIDE * s_lockSideSign * s_lockFrame;
+            s_lockSideEased += (sideTgt - s_lockSideEased) * 0.08f;   // smooth shift + side switch
             if (s_lockFrame > 0.001f) {
                 float rX = cosf(camAngle), rZ = -sinf(camAngle);   // camera right in XZ
-                targetX += rX * LOCK_SIDE * s_lockFrame;
-                targetZ += rZ * LOCK_SIDE * s_lockFrame;
+                targetX += rX * s_lockSideEased;
+                targetZ += rZ * s_lockSideEased;
                 effDist  = camDist * (1.0f + LOCK_ZOOM * s_lockFrame);
             }
         }
