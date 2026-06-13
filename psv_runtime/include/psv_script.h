@@ -34,7 +34,7 @@ static void afn_emitted_script_collision(void) {
 static void afn_emitted_script_collision2d(void) {
 }
 static void afn_bp0_start(void) {
-    afn_play_sound(0);
+    afn_play_sfx(0, 0, 0);
     afn_rig_clip = 10;
 }
 static void afn_bp0_update(void) {
@@ -113,7 +113,13 @@ static void afn_bp0_key_held(void) {
 static void afn_bp0_key_pressed(void) {
     if (key_hit(KEY_START)) {
         afn_key_mag = 256;
+    { static int afn_ff_151 = 0;
+      afn_ff_151 = !afn_ff_151;
+      if (afn_ff_151) {
+    afn_active_camera = 0;
+      } else {
     afn_active_camera = 1;
+      } }
     }
 }
 static void afn_bp0_key_released(void) {

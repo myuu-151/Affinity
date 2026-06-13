@@ -454,6 +454,9 @@ struct CameraStartObject
     float height = 14.0f;
     float angle = 0.0f;
     float horizon = 60.0f;
+    // Initial orbit pitch in degrees (positive = look down). 0 = auto: derive
+    // from camera height/distance (the legacy behavior). PSV-consumed.
+    float orbitPitch = 0.0f;
     // Movement speeds
     float walkSpeed   = 35.0f;
     float sprintSpeed = 53.0f;

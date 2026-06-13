@@ -1514,8 +1514,13 @@ int main(void)
     float camDist     = slot0[1] > 1.0f ? slot0[1] : 60.0f;  // world px
     float camHeight   = slot0[2];                            // world px
     // Pitch is also brad in the global orbit_pitch so the OrbitCamera Up/Down
-    // node and the right stick drive it together. Seed it from the slot's tilt.
-    orbit_pitch       = (int)(atan2f(camHeight > 0.0f ? camHeight : 8.0f, camDist) * (65536.0f / 6.2831853f));
+    // node and the right stick drive it together. The Camera Properties "Pitch"
+    // field (afn_cam_start_pitch, degrees) sets a fixed starting angle; 0 = auto:
+    // derive the tilt from the slot's height/distance (the legacy behavior).
+    if (afn_cam_start_pitch != 0.0f)
+        orbit_pitch   = (int)(afn_cam_start_pitch * (65536.0f / 360.0f));   // explicit degrees -> brad
+    else
+        orbit_pitch   = (int)(atan2f(camHeight > 0.0f ? camHeight : 8.0f, camDist) * (65536.0f / 6.2831853f));
 
     SceCtrlData pad;
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);

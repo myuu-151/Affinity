@@ -242,6 +242,9 @@ static bool GeneratePSPMapData(const std::string& runtimeDir,
     f << "const float afn_cam_start_z = " << Flt(WX(camera.z)) << ";\n";
     f << "const float afn_cam_start_h = " << Flt(WY(camera.height)) << ";\n";
     f << "const float afn_cam_start_angle = " << Flt(camera.angle) << ";\n";
+    // Initial orbit pitch (degrees, 0 = auto: derive from height/dist). PSV seeds
+    // orbit_pitch from this so the scene starts at a fixed vertical angle.
+    f << "const float afn_cam_start_pitch = " << Flt(camera.orbitPitch) << ";\n";
     f << "const float afn_orbit_dist = " << Flt(orbitDist / 4.0f) << ";\n";
     f << "const float afn_draw_distance = " << Flt(camera.drawDistance > 0 ? camera.drawDistance / 4.0f : 0.0f) << ";\n";
     f << "const float afn_walk_speed = " << Flt(camera.walkSpeed) << ";\n";

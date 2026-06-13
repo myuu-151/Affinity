@@ -5780,6 +5780,7 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "z=%.6f\n", sCamObj.z);
     fprintf(f, "height=%.6f\n", sCamObj.height);
     fprintf(f, "angle=%.6f\n", sCamObj.angle);
+    fprintf(f, "orbit_pitch_deg=%.2f\n", sCamObj.orbitPitch);
     fprintf(f, "horizon=%.6f\n", sCamObj.horizon);
     fprintf(f, "walk_speed=%.1f\n", sCamObj.walkSpeed);
     fprintf(f, "sprint_speed=%.1f\n", sCamObj.sprintSpeed);
@@ -6360,7 +6361,7 @@ static bool SaveProject(const std::string& path)
             }
         }
         // Camera
-        fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d,%d,%.1f,%.1f,%.1f,%d\n",
+        fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d,%d,%.1f,%.1f,%.1f,%d,%.2f\n",
                 ms.camera.x, ms.camera.z, ms.camera.height, ms.camera.angle, ms.camera.horizon,
                 ms.camera.walkSpeed, ms.camera.sprintSpeed,
                 ms.camera.walkEaseIn, ms.camera.walkEaseOut, ms.camera.sprintEaseIn, ms.camera.sprintEaseOut,
@@ -6370,7 +6371,8 @@ static bool SaveProject(const std::string& path)
                 ms.camera.drawDistance, ms.camera.camPitch, ms.camera.autoPitch ? 1 : 0,
                 ms.camera.horizonClamp ? 1 : 0, ms.camera.dynamicHorizon ? 1 : 0, ms.camera.faceCull ? 1 : 0,
                 ms.camera.spriteDrawDistance,
-                ms.camera.orbitCamEaseIn, ms.camera.orbitCamEaseOut, ms.camera.orbitMaxDelta);
+                ms.camera.orbitCamEaseIn, ms.camera.orbitCamEaseOut, ms.camera.orbitMaxDelta,
+                ms.camera.orbitPitch);
         // Scene-level blueprint
         if (ms.blueprintIdx >= 0) {
             fprintf(f, "msSceneBp=%d,%d", ms.blueprintIdx, ms.instanceParamCount);
@@ -6901,6 +6903,7 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "z=%f", &fval) == 1) sCamObj.z = fval;
             else if (sscanf(line, "height=%f", &fval) == 1) sCamObj.height = fval;
             else if (sscanf(line, "angle=%f", &fval) == 1) sCamObj.angle = fval;
+            else if (sscanf(line, "orbit_pitch_deg=%f", &fval) == 1) sCamObj.orbitPitch = fval;
             else if (sscanf(line, "horizon=%f", &fval) == 1) sCamObj.horizon = fval;
             else if (sscanf(line, "walk_speed=%f", &fval) == 1) sCamObj.walkSpeed = fval;
             else if (sscanf(line, "sprint_speed=%f", &fval) == 1) sCamObj.sprintSpeed = fval;
@@ -8357,14 +8360,15 @@ static bool LoadProject(const std::string& path)
                 float sdd = 0.0f;
                 float oei = c.orbitCamEaseIn, oeo = c.orbitCamEaseOut;
                 int omd = c.orbitMaxDelta;
-                int matched = sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d,%f,%f,%f,%d",
+                float op = c.orbitPitch;
+                int matched = sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d,%f,%f,%f,%d,%f",
                     &c.x, &c.z, &c.height, &c.angle, &c.horizon,
                     &c.walkSpeed, &c.sprintSpeed,
                     &c.walkEaseIn, &c.walkEaseOut, &c.sprintEaseIn, &c.sprintEaseOut,
                     &c.jumpForce, &c.gravity, &c.maxFallSpeed,
                     &c.jumpCamLand, &c.jumpCamAir, &c.autoOrbitSpeed, &c.jumpDampen,
                     &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc, &sdd,
-                    &oei, &oeo, &omd);
+                    &oei, &oeo, &omd, &op);
                 c.smallTriCull = sti;
                 c.skipFloor = (sf != 0);
                 c.coverageBuf = (cb != 0);
@@ -8376,6 +8380,7 @@ static bool LoadProject(const std::string& path)
                 if (matched >= 29) c.orbitCamEaseIn  = oei;
                 if (matched >= 30) c.orbitCamEaseOut = oeo;
                 if (matched >= 31) c.orbitMaxDelta   = omd;
+                if (matched >= 32) c.orbitPitch      = op;
             }
             else if (strncmp(line, "msSceneBp=", 10) == 0 && !sMapScenes.empty())
             {
@@ -8826,14 +8831,15 @@ static bool LoadProject(const std::string& path)
                 float sdd = 0.0f;
                 float oei = c.orbitCamEaseIn, oeo = c.orbitCamEaseOut;
                 int omd = c.orbitMaxDelta;
-                int matched = sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d,%f,%f,%f,%d",
+                float op = c.orbitPitch;
+                int matched = sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d,%f,%f,%f,%d,%f",
                     &c.x, &c.z, &c.height, &c.angle, &c.horizon,
                     &c.walkSpeed, &c.sprintSpeed,
                     &c.walkEaseIn, &c.walkEaseOut, &c.sprintEaseIn, &c.sprintEaseOut,
                     &c.jumpForce, &c.gravity, &c.maxFallSpeed,
                     &c.jumpCamLand, &c.jumpCamAir, &c.autoOrbitSpeed, &c.jumpDampen,
                     &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc, &sdd,
-                    &oei, &oeo, &omd);
+                    &oei, &oeo, &omd, &op);
                 c.smallTriCull = sti;
                 c.skipFloor = (sf != 0);
                 c.coverageBuf = (cb != 0);
@@ -8845,6 +8851,7 @@ static bool LoadProject(const std::string& path)
                 if (matched >= 29) c.orbitCamEaseIn  = oei;
                 if (matched >= 30) c.orbitCamEaseOut = oeo;
                 if (matched >= 31) c.orbitMaxDelta   = omd;
+                if (matched >= 32) c.orbitPitch      = op;
             }
             else if (strncmp(line, "m7SceneBp=", 10) == 0 && !sM7Scenes.empty())
             {
@@ -13093,6 +13100,9 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::DragFloat("Z##cam", &sCamObj.z, 1.0f);
         ImGui::DragFloat("Height##cam", &sCamObj.height, 0.5f, 4.0f, 256.0f);
         ImGui::SliderAngle("Angle##cam", &sCamObj.angle, -180.0f, 180.0f);
+        if (ImGui::DragFloat("Pitch##cam", &sCamObj.orbitPitch, 0.5f, -80.0f, 80.0f, "%.0f deg")) sProjectDirty = true;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Initial orbit pitch the camera starts at (PSV).\nPositive = look down, negative = look up.\n0 = auto (derive from Height / orbit distance).");
         ImGui::DragFloat("Horizon##cam", &sCamObj.horizon, 0.5f, 10.0f, 120.0f);
         ImGui::Separator();
         ImGui::Text("Camera Delay");
@@ -15722,6 +15732,7 @@ void FrameTick(float dt)
                 exportCam.height = sCamObj.height;
                 exportCam.angle = sCamObj.angle;
                 exportCam.horizon = sCamObj.horizon;
+                exportCam.orbitPitch = sCamObj.orbitPitch;
                 // Player camera presets (Mode 4): copy slots from the player object.
                 for (const auto& fsCam : sSprites) {
                     if (fsCam.type != SpriteType::Player) continue;

@@ -1679,6 +1679,7 @@ const float afn_cam_start_x = 128.0f;
 const float afn_cam_start_z = 128.0f;
 const float afn_cam_start_h = 12.5f;
 const float afn_cam_start_angle = 0.0f;
+const float afn_cam_start_pitch = 10.0f;
 const float afn_orbit_dist = 18.215f;
 const float afn_draw_distance = 0.0f;
 const float afn_walk_speed = 35.0f;
@@ -1691,10 +1692,9 @@ const float afn_sprint_speed = 53.0f;
 #define AFN_ORBIT_EASE_OUT 128
 #define AFN_JUMP_CAM_LAND 94
 #define AFN_JUMP_CAM_AIR 30
-#define AFN_CAM_SLOT_COUNT 3
+#define AFN_CAM_SLOT_COUNT 2
 static const float afn_cam_slots[][4] = {
-    { 0.0f, 18.215f, 12.5f, 60.0f },
-    { 0.0f, 18.215f, 5.0f, 60.0f },
-    { 0.0f, 18.215f, 5.0f, 60.0f },
+    { 0.0f, 18.215f, 12.5f, 10.0f },
+    { 0.0f, 30.0f, 12.5f, 0.0f },
 };
 static int afn_active_camera = 0;

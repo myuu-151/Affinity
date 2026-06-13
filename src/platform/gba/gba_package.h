@@ -116,6 +116,7 @@ struct GBACameraExport
     float height;
     float angle;        // radians
     float horizon;
+    float orbitPitch = 0.0f;  // initial orbit pitch (deg, 0 = auto); PSV-consumed
     float walkSpeed   = 35.0f;
     float sprintSpeed = 53.0f;
     float walkEaseIn  = 19.0f;
