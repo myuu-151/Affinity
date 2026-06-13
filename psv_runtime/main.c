@@ -755,6 +755,7 @@ static float rail_nearest(int rail, float px, float pz, float* outD2) {
 // (mirrors psp_runtime input.c + script_glue.c).
 // ---------------------------------------------------------------------------
 int afn_input_fwd = 0, afn_input_right = 0;   // camera-space move intent (256 = full)
+int afn_stick_8way = 0;                       // 8-Way Stick node: snap move vector to 45 deg octants
 int afn_move_speed = 0, afn_speed_prio = 0;   // node-set speed (0 = use walk default)
 int afn_player_frozen = 0;
 int afn_face_lock = 0;                        // MovePlayer "Consistent Facing": keep
@@ -1644,9 +1645,9 @@ int main(void)
         {
             int lockSpr = afn_cam_lock_target;
             if (lockSpr >= 0) {
-                float tx = 0, tz = 0; int tFound = 0;
+                float tx = 0, ty = 0, tz = 0; int tFound = 0;
                 for (int n = 0; n < AFN_NPC_COUNT && !tFound; n++)
-                    if ((int)afn_npc_inst[n][7] == lockSpr) { tx = s_npcX[n]; tz = s_npcZ[n]; tFound = 1; }
+                    if ((int)afn_npc_inst[n][7] == lockSpr) { tx = s_npcX[n]; ty = s_npcY[n]; tz = s_npcZ[n]; tFound = 1; }
                 float ldx = tx - playerX, ldz = tz - playerZ;
                 if (tFound && (ldx*ldx + ldz*ldz) > 4.0f) {
                     // ALWAYS ease the orbit toward facing the target while
@@ -1661,6 +1662,17 @@ int main(void)
                     while (diff < -3.14159265f) diff += 6.2831853f;
                     orbit_angle = (int)(uint16_t)(orbit_angle
                                  + (int)(diff * (65536.0f / 6.2831853f) * 0.10f));   // ease toward
+                    // Up/down follows the same convention: ease orbit_pitch toward
+                    // the player->target VERTICAL angle (positive pitch = look down,
+                    // matching the boot seed atan2(camHeight,camDist)). Manual up/down
+                    // can nudge off it but the pull caps the deviation — you can't
+                    // flip over the top/bottom of the locked target.
+                    float horiz = sqrtf(ldx*ldx + ldz*ldz);
+                    float desiredP = atan2f(playerY - ty, horiz);   // target below -> look down
+                    float curP = orbit_pitch * (6.2831853f / 65536.0f);
+                    float diffP = desiredP - curP;
+                    orbit_pitch = orbit_pitch
+                                 + (int)(diffP * (65536.0f / 6.2831853f) * 0.10f);   // ease toward
                 }
             }
         }
@@ -1700,6 +1712,16 @@ int main(void)
         // --- Player movement: reads the node-set move intent (afn_input_fwd/right,
         //     256 = full) in camera space, scaled by afn_move_speed (or the walk
         //     default when no script). Ported from PSP scene_update. ---
+        // 8-Way Stick node: snap the analog move vector to the nearest 45 deg
+        // octant (magnitude preserved) so movement AND the Strafe Anim clip pick
+        // read a crisp 8-way direction instead of fighting analog drift.
+        if (afn_stick_8way && (afn_input_fwd || afn_input_right)) {
+            float m = sqrtf((float)afn_input_fwd*afn_input_fwd + (float)afn_input_right*afn_input_right);
+            float a = atan2f((float)afn_input_right, (float)afn_input_fwd);
+            a = lroundf(a / 0.7853982f) * 0.7853982f;   // snap to 45 deg
+            afn_input_fwd   = (int)lroundf(m * cosf(a));
+            afn_input_right = (int)lroundf(m * sinf(a));
+        }
         float fAmt = afn_input_fwd  / 256.0f;
         float rAmt = afn_input_right / 256.0f;
         // Lock Strafe (Z-targeting): with an active Lock On target, movement

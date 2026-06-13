@@ -445,6 +445,7 @@ enum class GBAScriptNodeType : int {
     DashToTarget,    // action: lunge the player toward the lock target (bullet-punch)
     StrafeAnim,      // action: 8-way directional clip picker from lock-relative stick
     IsInView,        // gate: passes only if the target object is within camera FOV
+    SnapStick8,      // action: gate the left stick to 8 directions (PSV); set on start
     COUNT
 };
 

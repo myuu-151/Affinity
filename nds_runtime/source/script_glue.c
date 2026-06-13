@@ -20,6 +20,7 @@
 #ifdef AFN_HAS_SCRIPT
 int  afn_input_fwd;
 int  afn_input_right;
+int  afn_stick_8way = 0;  // 8-Way Stick node: inert on NDS (no analog stick to snap)
 int  afn_key_mag = 256;   // gating key strength; always full-on (NDS has no analog stick)
 int  afn_face_lock = 0;   // MovePlayer "Consistent Facing": keep facing while moving
 int  afn_cam_lock_target = -1;   // Lock On target (PSV camera assist; inert on NDS - IsLockedOn gates never pass)

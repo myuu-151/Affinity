@@ -36,6 +36,9 @@ static void afn_emitted_script_collision2d(void) {
 static void afn_bp0_start(void) {
     afn_play_sfx(0, 0, 0);
     afn_rig_clip = 10;
+#ifdef AFN_HAS_PLAYER_RIG
+    afn_stick_8way = 1;
+#endif
 }
 static void afn_bp0_update(void) {
     if (afn_cam_lock_target >= 0) {

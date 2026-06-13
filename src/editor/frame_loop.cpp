@@ -614,6 +614,7 @@ enum class VsNodeType : int {
     DashToTarget,    // action: lunge the player toward the lock target
     StrafeAnim,      // action: 8-way directional clip picker from lock-relative stick
     IsInView,        // gate: passes only if the target object is on-screen
+    SnapStick8,      // action: gate the left stick to 8 directions (PSV); set on start
     COUNT
 };
 
@@ -942,6 +943,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Dash To Target",  0xFF3355AA, 1, 1, 2, 0, {"Speed (int)", "Frames (int)"}, {}, {} },
     { "Strafe Anim",     0xFF3355AA, 1, 1, 8, 0, {"Fwd","Fwd-R","Right","Back-R","Back","Back-L","Left","Fwd-L"}, {}, {} },
     { "Is In View",      0xFF885533, 1, 1, 1, 0, {"Target (obj)"}, {}, {} },
+    { "8-Way Stick",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -16649,10 +16651,33 @@ void FrameTick(float dt)
                                 auto& smp = sSoundBank[inst.sfxSampleIdx];
                                 GBASoundSampleExport se;
                                 se.name = smp.name;
-                                // Use 8-bit downsampled data (same as MIDI instruments) to save CPU
-                                se.data = smp.data;
-                                se.sampleRate = smp.sampleRate;
-                                se.rawSampleRate = smp.sampleRate;
+                                // SFX export: prefer the pristine hi-res 16-bit (srcData16 at
+                                // srcRate) so PSV/NDS get full quality; fall back to the 8-bit
+                                // 16384 Hz downsample when there's no hi-res source. The Amplify
+                                // slider only baked gain into the 8-bit preview (smp.data), so
+                                // apply the same dB gain to the 16-bit here or it'd be lost.
+                                float ampG = (smp.ampGainDb != 0.0f) ? powf(10.0f, smp.ampGainDb / 20.0f) : 1.0f;
+                                bool hiRes = (smp.srcRate > 0 && !smp.srcData16.empty());
+                                double loopScale = 1.0;   // 8-bit (16384 Hz) loop offsets -> export rate
+                                if (hiRes) {
+                                    se.data16 = smp.srcData16;
+                                    if (ampG != 1.0f)
+                                        for (auto& v16 : se.data16) {
+                                            int v = (int)(v16 * ampG + (v16 >= 0 ? 0.5f : -0.5f));
+                                            if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
+                                            v16 = (int16_t)v;
+                                        }
+                                    // 8-bit shadow at the same length so the exporter's use16
+                                    // check (data16.size() == data.size()) trips and emits 16-bit.
+                                    se.data.resize(se.data16.size());
+                                    for (size_t k = 0; k < se.data16.size(); k++) se.data[k] = (int8_t)(se.data16[k] >> 8);
+                                    se.sampleRate = smp.srcRate;
+                                    if (!smp.data.empty()) loopScale = (double)se.data16.size() / (double)smp.data.size();
+                                } else {
+                                    se.data = smp.data;   // already amplified in the 8-bit buffer
+                                    se.sampleRate = smp.sampleRate;
+                                }
+                                se.rawSampleRate = se.sampleRate;
                                 se.fineTuneCents = 0;
                                 // Honor the sample's Sustain Loop so imported SFX loop
                                 // on hardware. NDS SCHANNEL loops from the data END
@@ -16661,14 +16686,15 @@ void FrameTick(float dt)
                                 // (below, after the fade block) smooths the wrap.
                                 se.loop = smp.loop;
                                 if (se.loop) {
-                                    int ls = smp.loopStart;
-                                    int le = smp.loopEnd > 0 ? smp.loopEnd : (int)se.data.size();
+                                    int ls = (int)(smp.loopStart * loopScale);
+                                    int le = smp.loopEnd > 0 ? (int)(smp.loopEnd * loopScale) : (int)se.data.size();
                                     if (le > (int)se.data.size()) le = (int)se.data.size();
                                     if (ls < 0) ls = 0;
                                     if (ls >= le) {
                                         se.loop = false;  // degenerate range — fall back to one-shot
                                     } else {
                                         if (le < (int)se.data.size()) se.data.resize(le);
+                                        if (le < (int)se.data16.size()) se.data16.resize(le);
                                         se.loopStart = ls;
                                         se.loopEnd = le;
                                     }
@@ -16694,6 +16720,7 @@ void FrameTick(float dt)
                                         if (level < 0.0f) level = 0.0f;
                                         if (level > 1.0f) level = 1.0f;
                                         se.data[i] = (int8_t)(se.data[i] * level);
+                                        if (i < (int)se.data16.size()) se.data16[i] = (int16_t)(se.data16[i] * level);
                                     }
                                 }
                                 // Bake soft fade: smooth fade-out over last 20% of
@@ -16707,6 +16734,7 @@ void FrameTick(float dt)
                                         for (int i = fadeStart; i < len; i++) {
                                             float t = (float)(len - 1 - i) / (float)(fadeLen - 1);
                                             se.data[i] = (int8_t)(se.data[i] * t);
+                                            if (i < (int)se.data16.size()) se.data16[i] = (int16_t)(se.data16[i] * t);
                                         }
                                     }
                                 }
@@ -16768,6 +16796,16 @@ void FrameTick(float dt)
                                         se.name = std::string(smp.name) + "_" + std::to_string(best->baseNote);
                                         se.data = best->data;
                                         se.data16 = best->data16;
+                                        // Amplify (dB) lives only in the 8-bit preview; bake it into
+                                        // the pristine 16-bit too so it survives a 16-bit export.
+                                        if (smp.ampGainDb != 0.0f && !se.data16.empty()) {
+                                            float ampG = powf(10.0f, smp.ampGainDb / 20.0f);
+                                            for (auto& v16 : se.data16) {
+                                                int v = (int)(v16 * ampG + (v16 >= 0 ? 0.5f : -0.5f));
+                                                if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
+                                                v16 = (int16_t)v;
+                                            }
+                                        }
                                         // Bake fineTune into rate (baseNote already handled by note rebasing).
                                         // Round to nearest instead of truncating — `(int)x` was floor'ing
                                         // up to ~1 Hz off, audible as a few cents flat on busy instruments.
@@ -20646,6 +20684,7 @@ void FrameTick(float dt)
                 case VsNodeType::IsNotLockedOn: desc = "Gate: passes execution only while NO Lock On target is active — the inverse of Is Locked On. Use it to suppress the normal walk/face behavior while locked: On Key Held(Down) -> Is Not Locked On -> Play Skel Anim(walk)."; break;
                 case VsNodeType::IsInView:      desc = "Gate (PSV): passes execution only if the Target object is within the camera's view (on-screen). Wire Attached Sprite (\"self\") or an Object into Target. Gate your Lock On + Show HUD chain with it so you can only lock onto / show the ring for something you can see."; break;
                 case VsNodeType::StrafeAnim:    desc = "8-way directional animation picker (PSV lock-strafe): wire your clips (Forward, Fwd-Right, Right, Back-Right, Back, Back-Left, Left, Fwd-Left, relative to facing the target) and it plays the one matching the stick direction each frame. You DON'T need all 8 — any unwired direction falls back to the nearest wired one, so wiring just the 4 cardinals makes diagonals lean to a neighbor. One node replaces the per-direction gated Play Skel Anim chains; put it behind On Update -> Is Locked On."; break;
+                case VsNodeType::SnapStick8:    desc = "Gate the left thumbstick to 8 directions (PSV): snaps the analog move vector to the nearest 45 deg (N/NE/E/SE/S/SW/W/NW) before movement and the Strafe Anim clip pick read it, so diagonals are crisp and the directional clips don't flicker between neighbors. Magnitude (push amount) is preserved. Fire it once from On Start."; break;
                 case VsNodeType::DashToTarget:  desc = "Lunges the player toward the Lock On target for a burst (PSV) — a homing dash for bullet-punch-style moves. Speed = world units/frame (like Walk/Sprint), Frames = lunge duration; stops early at melee range. No target locked -> dashes along current facing. Wire after the attack trigger; pair with Play Skel Anim(atk_phs)."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
@@ -20927,6 +20966,7 @@ void FrameTick(float dt)
                         case VsNodeType::DashToTarget:  return "_dash_to_target";
                         case VsNodeType::StrafeAnim:    return "_strafe_anim";
                         case VsNodeType::IsInView:      return "_is_in_view";
+                        case VsNodeType::SnapStick8:    return "_snap_stick8";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -21808,7 +21848,7 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::LockOnTarget: {
                     editorCode = "// Lock-on camera assist toward a target object";
-                    char lcBuf[700];
+                    char lcBuf[900];
                     int lkZoom = infoNode.paramInt[0] > 0 ? infoNode.paramInt[0] : 18;
                     int lkSide = infoNode.paramInt[1] > 0 ? infoNode.paramInt[1] : 32;
                     snprintf(lcBuf, sizeof(lcBuf),
@@ -21817,11 +21857,13 @@ void FrameTick(float dt)
                         "    afn_lock_zoom = %d; afn_lock_side = %d; afn_lock_zoom_in = %d;\n"
                         "#endif\n"
                         "    // --- Runtime (psv main.c, pre-orbit + camera block) ---\n"
-                        "    // Once locked, the orbit ALWAYS eases to face the target\n"
-                        "    // (even off-screen). Camera also eases into an over-the-\n"
-                        "    // shoulder frame: %d%% zoom-%s + %d-px lateral shift (auto\n"
-                        "    // side). Gate with Is In View to only lock on-screen targets.\n"
-                        "    // Stays locked until Release Lock On.",
+                        "    // Once locked, the orbit yaw AND pitch ALWAYS ease to face the\n"
+                        "    // target (even off-screen): yaw -> atan2(dx,dz), pitch ->\n"
+                        "    // atan2(playerY-targetY, horiz), 10%%/frame. Manual L/R + up/down\n"
+                        "    // can nudge off-axis but the pull caps it (can't orbit past the\n"
+                        "    // target). Camera also eases into an over-the-shoulder frame:\n"
+                        "    // %d%% zoom-%s + %d-px lateral shift (auto side). Gate with Is In\n"
+                        "    // View to only lock on-screen targets. Until Release Lock On.",
                         fmtInt(infoNode.id, 0, "<target>"),
                         lkZoom, lkSide / 4, infoNode.paramInt[2] ? 1 : 0,
                         lkZoom, infoNode.paramInt[2] ? "in" : "out", lkSide / 4);
@@ -21906,6 +21948,21 @@ void FrameTick(float dt)
                         "    //   afn_rig_clip = afn_strafe_clip[octant]; }   // only while moving\n"
                         "    // Deferred to the movement block because this node runs on\n"
                         "    // OnUpdate, BEFORE MovePlayer sets the stick input this frame.");
+                    break;
+                }
+                case VsNodeType::SnapStick8: {
+                    editorCode = "// Gate the left stick to 8 directions (set on start)";
+                    setActionFunc(infoNode, "_snap_stick8",
+                        "#ifdef AFN_HAS_PLAYER_RIG // PSV\n"
+                        "    afn_stick_8way = 1;\n"
+                        "#endif\n"
+                        "    // --- Runtime (psv main.c movement block, before fAmt/rAmt) ---\n"
+                        "    // if (afn_stick_8way && (input_fwd || input_right)) {\n"
+                        "    //   m = hypot(input_right, input_fwd);            // keep push amount\n"
+                        "    //   a = round(atan2(input_right, input_fwd)/45deg)*45deg;\n"
+                        "    //   afn_input_fwd = m*cos(a); afn_input_right = m*sin(a); }\n"
+                        "    // Snaps the analog vector to the nearest octant so movement AND\n"
+                        "    // the Strafe Anim clip pick read a crisp 8-way direction.");
                     break;
                 }
                 case VsNodeType::TurnPlayer: {
@@ -24856,6 +24913,7 @@ void FrameTick(float dt)
                     case VsNodeType::DashToTarget:  suffix = "_dash_to_target"; break;
                     case VsNodeType::StrafeAnim:    suffix = "_strafe_anim"; break;
                     case VsNodeType::IsInView:      suffix = "_is_in_view"; break;
+                    case VsNodeType::SnapStick8:    suffix = "_snap_stick8"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -25361,6 +25419,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::DashToTarget].name)) addNodeAt(VsNodeType::DashToTarget);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StrafeAnim].name)) addNodeAt(VsNodeType::StrafeAnim);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsInView].name)) addNodeAt(VsNodeType::IsInView);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SnapStick8].name)) addNodeAt(VsNodeType::SnapStick8);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP].name)) addNodeAt(VsNodeType::SetHP);
@@ -27387,7 +27446,7 @@ void FrameTick(float dt)
             if (!s.data.empty()) {
                 ImGui::PushItemWidth(-1);
                 float prevGain = s.ampGainDb;
-                ImGui::SliderFloat("##ampDb", &s.ampGainDb, -12.0f, 24.0f, "Amplify: %.1f dB");
+                ImGui::SliderFloat("##ampDb", &s.ampGainDb, -30.0f, 24.0f, "Amplify: %.1f dB");
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Boost or cut waveform volume");
                 ImGui::PopItemWidth();
                 if (s.ampGainDb != prevGain) {

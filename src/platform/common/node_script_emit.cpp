@@ -422,6 +422,15 @@ void EmitNodeScriptBodies(std::ostream& f,
                 }
                 break;
             }
+            case GBAScriptNodeType::SnapStick8: {
+                // Gate the left stick to 8 directions (PSV). The runtime movement
+                // block snaps afn_input_fwd/right to the nearest octant; set once
+                // from On Start. NDS lacks the analog stick path -> compiled out.
+                f << "#ifdef AFN_HAS_PLAYER_RIG\n";
+                f << "    afn_stick_8way = 1;\n";
+                f << "#endif\n";
+                break;
+            }
             case GBAScriptNodeType::IsOnGround:
                 f << "    if (player_on_ground) {\n"; break;
             case GBAScriptNodeType::IsJumping:
