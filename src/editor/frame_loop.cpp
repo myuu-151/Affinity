@@ -21792,17 +21792,23 @@ void FrameTick(float dt)
                 }
                 case VsNodeType::LockOnTarget: {
                     editorCode = "// Lock-on camera assist toward a target object";
-                    char lcBuf[640];
+                    char lcBuf[700];
+                    int lkZoom = infoNode.paramInt[0] > 0 ? infoNode.paramInt[0] : 18;
+                    int lkSide = infoNode.paramInt[1] > 0 ? infoNode.paramInt[1] : 32;
                     snprintf(lcBuf, sizeof(lcBuf),
                         "#ifdef AFN_HAS_CAM_LOCK // PSV\n"
                         "    afn_cam_lock_target = %s;\n"
+                        "    afn_lock_zoom = %d; afn_lock_side = %d; afn_lock_zoom_in = %d;\n"
                         "#endif\n"
-                        "    // --- Runtime (psv main.c, pre-orbit) ---\n"
+                        "    // --- Runtime (psv main.c, pre-orbit + camera block) ---\n"
                         "    // Once locked, the orbit ALWAYS eases to face the target\n"
-                        "    // (even off-screen): orbit_angle += yawDiffToTarget * 0.10.\n"
-                        "    // Gate with Is In View to only lock onto something on-screen.\n"
+                        "    // (even off-screen). Camera also eases into an over-the-\n"
+                        "    // shoulder frame: %d%% zoom-%s + %d-px lateral shift (auto\n"
+                        "    // side). Gate with Is In View to only lock on-screen targets.\n"
                         "    // Stays locked until Release Lock On.",
-                        fmtInt(infoNode.id, 0, "<target>"));
+                        fmtInt(infoNode.id, 0, "<target>"),
+                        lkZoom, lkSide / 4, infoNode.paramInt[2] ? 1 : 0,
+                        lkZoom, infoNode.paramInt[2] ? "in" : "out", lkSide / 4);
                     setActionFunc(infoNode, "_lock_on", lcBuf);
                     break;
                 }
@@ -25569,7 +25575,7 @@ void FrameTick(float dt)
         // Properties panel overlay — as child window inside canvas (data nodes only)
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
-            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt || n.type == VsNodeType::SoundInstance || n.type == VsNodeType::SkelAnim || n.type == VsNodeType::PlayHudAnim || n.type == VsNodeType::StopHudAnim || n.type == VsNodeType::MovePlayer || n.type == VsNodeType::TurnPlayer || n.type == VsNodeType::AttachedSprite) {
+            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt || n.type == VsNodeType::SoundInstance || n.type == VsNodeType::SkelAnim || n.type == VsNodeType::PlayHudAnim || n.type == VsNodeType::StopHudAnim || n.type == VsNodeType::MovePlayer || n.type == VsNodeType::TurnPlayer || n.type == VsNodeType::AttachedSprite || n.type == VsNodeType::LockOnTarget) {
             const auto& def = sVsNodeDefs[(int)n.type];
             float propW = 260, propH = 180;
             float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -25636,6 +25642,21 @@ void FrameTick(float dt)
                 ImGui::Text("Far Dist");
                 if (ImGui::SliderInt("##AsFar", &fr, 8, 1024, "%d")) { n.paramInt[3] = fr; sProjectDirty = true; }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Player->target distance (editor units) at/beyond which the element is Max size.");
+                break;
+            }
+            case VsNodeType::LockOnTarget: {
+                // Over-the-shoulder framing while locked (defaults = tuned values).
+                int zm = n.paramInt[0] > 0 ? n.paramInt[0] : 18;
+                int sd = n.paramInt[1] > 0 ? n.paramInt[1] : 32;
+                ImGui::Text("Zoom %%");
+                if (ImGui::SliderInt("##LkZoom", &zm, 0, 100, "%d%%")) { n.paramInt[0] = zm; sProjectDirty = true; }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Zoom amount while locked on (18%% = default). 0 = no zoom.");
+                const char* zoomDir[] = { "Zoom Out", "Zoom In" };
+                if (ImGui::Combo("##LkZoomDir", &n.paramInt[2], zoomDir, 2)) sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Out = pull the camera back (default); In = pull it closer to the player.");
+                ImGui::Text("Side Offset");
+                if (ImGui::SliderInt("##LkSide", &sd, 0, 256, "%d")) { n.paramInt[1] = sd; sProjectDirty = true; }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Over-the-shoulder lateral shift, editor units (32 = default ~8 world px). 0 = centered. Auto-switches to whichever side keeps the player off the target.");
                 break;
             }
             case VsNodeType::Integer:

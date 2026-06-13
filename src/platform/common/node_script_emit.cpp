@@ -712,6 +712,10 @@ void EmitNodeScriptBodies(std::ostream& f,
                 // guarded so ownerless instances don't stomp it), Object = a
                 // specific sprite; unwired in a BP also means self.
                 auto* tgt = findDataIn(a->id, 0);
+                // Framing params (left-click): paramInt[0] zoom %, paramInt[1]
+                // side offset in EDITOR units (->/4 world px). 0 = tuned default.
+                int lkZoom = a->paramInt[0] > 0 ? a->paramInt[0] : 18;
+                int lkSide = a->paramInt[1] > 0 ? a->paramInt[1] : 32;
                 f << "#ifdef AFN_HAS_CAM_LOCK\n";
                 if (tgt && tgt->type != GBAScriptNodeType::AttachedSprite)
                     f << "    afn_cam_lock_target = " << resolveInt(tgt) << ";\n";
@@ -719,6 +723,9 @@ void EmitNodeScriptBodies(std::ostream& f,
                     f << "    if (afn_bp_cur_spr_idx >= 0) afn_cam_lock_target = afn_bp_cur_spr_idx;\n";
                 else
                     f << "    afn_cam_lock_target = -1;\n";   // scene script, no target wired
+                f << "    afn_lock_zoom = " << lkZoom << ";\n";
+                f << "    afn_lock_side = " << (lkSide / 4) << ";\n";
+                f << "    afn_lock_zoom_in = " << (a->paramInt[2] ? 1 : 0) << ";\n";
                 f << "#endif\n";
                 break;
             }

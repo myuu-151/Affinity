@@ -951,6 +951,11 @@ short afn_hud_anchor_near[AFN_HUD_VIS_N], afn_hud_anchor_far[AFN_HUD_VIS_N];
 // by the assist block in the main loop (before the orbit-delta detection).
 #define AFN_HAS_CAM_LOCK 1
 int afn_cam_lock_target = -1;
+// Over-the-shoulder framing params (Lock On node Zoom/Side sliders). Set at
+// lock time; defaults = the tuned values. zoom = percent pull-back, side =
+// world-px lateral shift.
+int afn_lock_zoom = 18, afn_lock_side = 8;
+int afn_lock_zoom_in = 0;   // 0 = zoom OUT (pull back), 1 = zoom IN (pull closer)
 // Lock Strafe node: while a lock target is active, movement is TARGET-
 // relative (Up closes in, Down backpedals, L/R circle-strafe) and the rig
 // always faces the target. Inert when no target is locked.
@@ -2133,8 +2138,9 @@ int main(void)
             static float s_lockFrame = 0.0f;     // 0..1 lock blend
             static float s_lockSideEased = 0.0f; // eased signed lateral offset (smooths flips)
             static float s_lockSideSign = 1.0f;  // which side the player sits on
-            const float LOCK_SIDE = 8.0f;    // world px lateral shift
-            const float LOCK_ZOOM = 0.18f;   // +18% pull-back
+            const float LOCK_SIDE = (float)afn_lock_side;   // world px lateral shift (Lock On slider)
+            // Signed zoom fraction: +out (pull back) / -in (pull closer).
+            const float LOCK_ZOOM = (afn_lock_zoom_in ? -afn_lock_zoom : afn_lock_zoom) / 100.0f;
             float want = (afn_cam_lock_target >= 0) ? 1.0f : 0.0f;
             s_lockFrame += (want - s_lockFrame) * 0.10f;
 #ifdef AFN_HAS_PLAYER_RIG
@@ -2162,6 +2168,7 @@ int main(void)
                 targetX += rX * s_lockSideEased;
                 targetZ += rZ * s_lockSideEased;
                 effDist  = camDist * (1.0f + LOCK_ZOOM * s_lockFrame);
+                if (effDist < camDist * 0.25f) effDist = camDist * 0.25f;   // don't collapse on big zoom-in
             }
         }
 #endif

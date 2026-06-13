@@ -175,6 +175,9 @@ static void afn_bp1_key_pressed(void) {
     afn_hud_layer_active[0] = 1;
 #ifdef AFN_HAS_CAM_LOCK
     if (afn_bp_cur_spr_idx >= 0) afn_cam_lock_target = afn_bp_cur_spr_idx;
+    afn_lock_zoom = 18;
+    afn_lock_side = 8;
+    afn_lock_zoom_in = 1;
 #endif
 #ifdef AFN_HAS_CAM_LOCK
     afn_lock_strafe = 1;
