@@ -19,3 +19,6 @@ affinity_imgui.ini
 *.bak
 build_probe.txt
 probe_out.txt
+
+# Release bundles — attached to GitHub releases, not committed
+affinity-v*.zip
