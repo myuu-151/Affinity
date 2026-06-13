@@ -2099,6 +2099,29 @@ int main(void)
         }
         float targetX = playerX, targetY = s_camFollowY + camHeight * 0.5f, targetZ = playerZ;
 
+        // Lock-on framing (over-the-shoulder): while a target is locked, ease
+        // in a slight zoom-out + lateral camera shift so the player sits to one
+        // side and the target frames toward center. Shifting the LOOK POINT
+        // sideways pans eye+target together (the eye eases to target - viewDir*R),
+        // so it's a pure lateral offset, not a rotation. Eased so it blends on
+        // lock/unlock. (HARDCODED pre-node; tune LOCK_SIDE / LOCK_ZOOM.)
+        float effDist = camDist;
+#ifdef AFN_HAS_CAM_LOCK
+        {
+            static float s_lockFrame = 0.0f;
+            const float LOCK_SIDE = 16.0f;   // world px lateral shift (negate to swap side)
+            const float LOCK_ZOOM = 0.18f;   // +18% pull-back
+            float want = (afn_cam_lock_target >= 0) ? 1.0f : 0.0f;
+            s_lockFrame += (want - s_lockFrame) * 0.10f;
+            if (s_lockFrame > 0.001f) {
+                float rX = cosf(camAngle), rZ = -sinf(camAngle);   // camera right in XZ
+                targetX += rX * LOCK_SIDE * s_lockFrame;
+                targetZ += rZ * LOCK_SIDE * s_lockFrame;
+                effDist  = camDist * (1.0f + LOCK_ZOOM * s_lockFrame);
+            }
+        }
+#endif
+
         // Ease rate from what the player is doing: Sprint node sets
         // afn_speed_prio this tick (script ran above, so it's current);
         // orbit input picks the max so the camera never lags behind.
@@ -2120,7 +2143,7 @@ int main(void)
             s_camPosPitch += dp * ((float)camEase / 256.0f);
             if (dp > -0.002f && dp < 0.002f) s_camPosPitch = pitch;
         }
-        float horizR = cosf(s_camPosPitch) * camDist;   // orbit-circle radius in XZ
+        float horizR = cosf(s_camPosPitch) * effDist;   // orbit-circle radius in XZ (effDist = lock zoom)
         {
             float tgtEx = targetX - sinf(camAngle)*horizR;
             float tgtEz = targetZ - cosf(camAngle)*horizR;
@@ -2147,7 +2170,7 @@ int main(void)
         }
         float ex = s_camEyeX;
         float ez = s_camEyeZ;
-        float ey = targetY + sinf(s_camPosPitch)*camDist;   // eased pitch: eye height lags too
+        float ey = targetY + sinf(s_camPosPitch)*effDist;   // eased pitch: eye height lags too
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
