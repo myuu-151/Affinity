@@ -2,7 +2,7 @@
 
 Every Visual Script node available in the editor's **Nodes** tab, grouped by category, with what it does and its pins. Auto-generated from `src/editor/frame_loop.cpp` (the `VsNodeType` enum, `sVsNodeDefs` table, and the description tooltips) — if a node is added or its tooltip changes, regenerate this doc so it stays in sync.
 
-**249 nodes total.**
+**275 nodes total.**
 
 Pin colors in the editor: **green = events**, **blue = actions**, **orange = gates/conditions**, **purple = data/math**. Exec pins are the white triangles that wire the order of operations; data pins are the round colored dots that carry values.
 
@@ -11,9 +11,9 @@ Pin colors in the editor: **green = events**, **blue = actions**, **orange = gat
 ## Categories
 
 - [Events](#events) — 15 nodes
-- [Actions](#actions) — 131 nodes
-- [Gates / Conditions](#gates--conditions) — 26 nodes
-- [Data / Math](#data--math) — 68 nodes
+- [Actions](#actions) — 150 nodes
+- [Gates / Conditions](#gates--conditions) — 31 nodes
+- [Data / Math](#data--math) — 70 nodes
 - [Other](#other) — 9 nodes
 
 ---
@@ -906,6 +906,120 @@ Zeros all player velocity (vx, vz, vy, pending boost, falloff). Use after respaw
 
 ---
 
+### Start Grind
+
+Begin rail grinding (Mode 4). The player locks to its entry direction and slides on momentum — accelerating downhill, slowing uphill. Wire it to On Collision(rail mesh). Jumping or running off the end ends the grind.
+
+*Pins:* 1 exec in, 1 exec out
+
+### Stop Grind
+
+End rail grinding immediately (restores normal input movement).
+
+*Pins:* 1 exec in, 1 exec out
+
+### Grind Power
+
+Set the BASE downhill momentum gain while grinding (default 24). Higher = a descent builds speed faster. Drop it under On Start to tune the whole rail system.
+
+*Pins:* 1 exec in, 1 exec out; inputs: `Gain (float)`
+
+### Grind Boost
+
+Add EXTRA downhill grind speed for this frame (only applies while descending). Gate it with a held button: On Update -> Is Key Held(B) -> Grind Boost, so holding sprint on a downslope accelerates harder.
+
+*Pins:* 1 exec in, 1 exec out; inputs: `Force (float)`
+
+### Grind Bleed
+
+Set how slowly the Grind Boost's extra speed bleeds back to normal (default 6). Higher = momentum earned on a drop carries farther across flats before fading; lower = snaps back sooner; 0 = never bleeds. Persistent — fine under On Start or On Update.
+
+*Pins:* 1 exec in, 1 exec out; inputs: `Slowness (float)`
+
+### Grind Catch
+
+Loosen how easily you re-catch a rail. Height = extra vertical window above the rail surface; Width = horizontal snap radius to the rail path (lands you on a thin rail without being exactly over it). Both in editor pixels, 0 = strict/off. Set under On Start.
+
+*Pins:* 1 exec in, 1 exec out; inputs: `Height (float)`, `Width (float)`
+
+### Set Player Width
+
+Sets the player collision width (horizontal radius, pixels). Controls how close you get to walls before being pushed out. Default 3.
+
+*Pins:* 1 exec in, 1 exec out; inputs: `Value (float)`
+
+### Play Skeletal Anim
+
+Plays a skeletal (glTF/DSMA) animation clip on the player rig in Mode 4. Wire a Skeletal Animation node into Clip. Loop/Once is set per-clip on the rig.
+
+*Pins:* 1 exec in, 1 exec out; inputs: `Clip`
+
+### Set Skel Anim
+
+Sets the skeletal clip on a specific rigged NPC (like Set Sprite Anim, but for glTF rigs). Wire an Object (Instance) into Object and a Skeletal Animation into Clip.
+
+*Pins:* 1 exec in, 1 exec out; inputs: `Object`, `Clip`
+
+### Set Camera
+
+Switches the player camera to a preset slot (Mode 4). Slot 0 = scene default; 1..N are the camera presets authored on the player object. Wire a number into Slot. The camera orbit-follows the player at the slot's angle/pitch/distance/height, smoothly blended.
+
+*Pins:* 1 exec in, 1 exec out; inputs: `Slot (int)`
+
+### Tank Camera
+
+Tank controls (Mode 4). Wire 1 to make movement + facing follow the player heading (turned by Turn Player on the D-pad) instead of the camera, so forward/back go where the tank points while the camera still orbits freely (L/R). Wire 0 for normal camera-relative controls.
+
+*Pins:* 1 exec in, 1 exec out; inputs: `On (int)`
+
+### Turn Player
+
+Rotates the tank heading (used with Tank Camera). Wire a Direction (Left/Right) and a Speed (brads/frame). Put it on On Key Held(Left)/(Right) so the D-pad turns the player in place while L/R still orbit the camera. Left-click for the Movement switch: Tank (Heading) makes movement follow the turned heading; Camera Relative keeps movement on camera axes and only steers the facing.
+
+*Pins:* 1 exec in, 1 exec out; inputs: `Direction`, `Speed (int)`
+
+### Cast Effect
+
+Plays a combat/spell effect on a target object. Attach a sprite to that object and tick its 'Hidden' box (it starts invisible). Wire the target into Object: on trigger the effect shows, plays its animation once, and auto-hides. Set the effect sprite's animation to Once so it cleans up.
+
+*Pins:* 1 exec in, 1 exec out; inputs: `Object (int)`
+
+### Lock On
+
+Lock-on camera assist (PSV): locks onto the Target; once locked the orbit always eases to face it — even off-screen — so locking on swings the camera around to frame it. Gate with Is In View to only lock onto on-screen targets. Wire Attached Sprite ("self" in a blueprint) or an Object into Target. Stays locked until Release Lock On.
+
+*Pins:* 1 exec in, 1 exec out; inputs: `Target (obj)`
+
+### Release Lock On
+
+Releases the lock-on camera assist (pairs with Lock On — e.g. fire it next to Hide HUD when dropping the target). Also turns off Lock Strafe.
+
+*Pins:* 1 exec in, 1 exec out
+
+### Lock Strafe
+
+Z-targeting movement (PSV): while a Lock On target is active, the player always FACES the target and movement becomes target-relative — Up closes in, Down backpedals, Left/Right circle-strafe around it. Fire it after Lock On; Release Lock On turns it off.
+
+*Pins:* 1 exec in, 1 exec out
+
+### Dash To Target
+
+Lunges the player toward the Lock On target for a burst (PSV) — a homing dash for bullet-punch-style moves. Speed = world units/frame (like Walk/Sprint), Frames = lunge duration; stops early at melee range. No target locked -> dashes along current facing. Wire after the attack trigger; pair with Play Skel Anim(atk_phs).
+
+*Pins:* 1 exec in, 1 exec out; inputs: `Speed (int)`, `Frames (int)`
+
+### Strafe Anim
+
+8-way directional animation picker (PSV lock-strafe): wire your clips (Forward, Fwd-Right, Right, Back-Right, Back, Back-Left, Left, Fwd-Left, relative to facing the target) and it plays the one matching the stick direction each frame. You DON'T need all 8 — any unwired direction falls back to the nearest wired one, so wiring just the 4 cardinals makes diagonals lean to a neighbor. One node replaces the per-direction gated Play Skel Anim chains; put it behind On Update -> Is Locked On.
+
+*Pins:* 1 exec in, 1 exec out; inputs: `Fwd`, `Fwd-R`, `Right`, `Back-R`, `Back`, `Back-L`, `Left`, `Fwd-L`
+
+### 8-Way Stick
+
+Gate the left thumbstick to 8 directions (PSV): snaps the analog move vector to the nearest 45 deg (N/NE/E/SE/S/SW/W/NW) before movement and the Strafe Anim clip pick read it, so diagonals are crisp and the directional clips don't flicker between neighbors. Magnitude (push amount) is preserved. Fire it once from On Start.
+
+*Pins:* 1 exec in, 1 exec out
+
 ## Gates / Conditions
 
 Orange nodes. They take exec in and only pass it on if a condition holds — e.g. `IsOnGround` only continues the chain when the player is grounded.
@@ -1067,6 +1181,36 @@ Rising-edge gate: only passes execution on the first frame the upstream conditio
 *Pins:* exec in; 1 exec out
 
 ---
+
+### Is Grinding
+
+Gate: passes exec while the player is currently grinding a rail. Use to play a grind animation or gate a jump-off.
+
+*Pins:* 1 exec in, 1 exec out
+
+### Is Not Grinding
+
+Gate: passes exec while the player is NOT grinding. Wire On Update -> Is Not Grinding -> On Rise -> Stop Sound to kill a looping grind SFX the instant you leave the rail.
+
+*Pins:* 1 exec in, 1 exec out
+
+### Is Locked On
+
+Gate: passes execution only while a Lock On target is active. Branch lock-specific behavior — e.g. On Key Held(Down) -> Is Locked On -> Play Skel Anim(backpeddle), with the normal walk wired in parallel.
+
+*Pins:* 1 exec in, 1 exec out
+
+### Is Not Locked On
+
+Gate: passes execution only while NO Lock On target is active — the inverse of Is Locked On. Use it to suppress the normal walk/face behavior while locked: On Key Held(Down) -> Is Not Locked On -> Play Skel Anim(walk).
+
+*Pins:* 1 exec in, 1 exec out
+
+### Is In View
+
+Gate (PSV): passes execution only if the Target object is within the camera's view (on-screen). Wire Attached Sprite ("self") or an Object into Target. Gate your Lock On + Show HUD chain with it so you can only lock onto / show the ring for something you can see.
+
+*Pins:* 1 exec in, 1 exec out; inputs: `Target (obj)`
 
 ## Data / Math
 
@@ -1481,6 +1625,18 @@ Outputs a blueprint definition index. Use with Freeze/Unfreeze Player to disable
 *Pins:* outputs: `Out`
 
 ---
+
+### Skeletal Animation
+
+Outputs a skeletal animation clip index (feeds Play Skeletal Anim). Pick a rigged mesh and one of its glTF clips.
+
+*Pins:* outputs: `Out`
+
+### Attached Sprite
+
+Outputs the sprite this blueprint instance is attached to ("self"). Wire into Show HUD's Anchor to pin the element to the owner's attached-sprite position in the world (PSV) — the element tracks the object on screen.
+
+*Pins:* outputs: `Out`
 
 ## Other
 
