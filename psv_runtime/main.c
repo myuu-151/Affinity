@@ -1594,7 +1594,6 @@ int main(void)
         // and re-acquires only when a manual orbit brings it back into view.
 #ifdef AFN_HAS_PLAYER_RIG
         {
-            static int s_lockCamEngaged = 0;
             int lockSpr = afn_cam_lock_target;
             if (lockSpr >= 0) {
                 float tx = 0, tz = 0; int tFound = 0;
@@ -1602,25 +1601,19 @@ int main(void)
                     if ((int)afn_npc_inst[n][7] == lockSpr) { tx = s_npcX[n]; tz = s_npcZ[n]; tFound = 1; }
                 float ldx = tx - playerX, ldz = tz - playerZ;
                 if (tFound && (ldx*ldx + ldz*ldz) > 4.0f) {
-                    // Camera forward is +(sin,cos)(camAngle) (see the look_at
-                    // aim in the render block); facing the target means
+                    // ALWAYS ease the orbit toward facing the target while
+                    // locked — even when it's off-screen / behind, so locking
+                    // on swings the camera around to frame it. Camera forward
+                    // is +(sin,cos)(camAngle), so facing the target means
                     // forward ∝ (target - player).
                     float desired = atan2f(ldx, ldz);
                     float cur = orbit_angle * (6.2831853f / 65536.0f);
                     float diff = desired - cur;
                     while (diff >  3.14159265f) diff -= 6.2831853f;
                     while (diff < -3.14159265f) diff += 6.2831853f;
-                    const float lim = 55.0f * DEG2RAD;   // ~half the horizontal FOV
-                    if (s_lockCamEngaged) {
-                        if (diff > lim || diff < -lim) s_lockCamEngaged = 0;   // off camera: release
-                        else orbit_angle = (int)(uint16_t)(orbit_angle
+                    orbit_angle = (int)(uint16_t)(orbit_angle
                                  + (int)(diff * (65536.0f / 6.2831853f) * 0.10f));   // ease toward
-                    } else if (diff > -lim * 0.9f && diff < lim * 0.9f) {
-                        s_lockCamEngaged = 1;   // re-acquired by orbiting back into view
-                    }
                 }
-            } else {
-                s_lockCamEngaged = 0;
             }
         }
 #endif
