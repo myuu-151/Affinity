@@ -982,6 +982,9 @@ int afn_strafe_anim = 0, afn_strafe_clip[8] = {0};
 // frames>0.
 int afn_dodge_frames = 0, afn_dodge_speed = 0, afn_dodge_trigger = 0, afn_dodge_clip_l = 0, afn_dodge_clip_r = 0;
 int afn_dodge_idle = -1;   // clip to snap back to when the roll ends (-1 = leave it; Strafe Anim/base layer reclaims)
+int afn_dodge_ramp = 0;    // frames to ease the roll speed in from 0 (quadratic; 0 = instant/stiff)
+int afn_dodge_falloff = 0; // frames to ease the roll speed back to 0 at the end (quadratic; 0 = hard stop)
+int afn_dodge_cd = 0;      // spam-gate lockout countdown; the node only fires when <= 0, set to Cooldown on a dodge
 unsigned char afn_sprite_visible[NUM_SPRITES]={0};
 unsigned char afn_sprite_flip[NUM_SPRITES]={0}, afn_collision_enabled[NUM_SPRITES]={0};
 int afn_hp[NUM_SPRITES]={0}, afn_state_timer[NUM_SPRITES]={0};
@@ -1899,6 +1902,7 @@ int main(void)
             static float s_dodgeDX = 0.0f, s_dodgeDZ = 0.0f;
             static int s_dodgeClip = 0;
             static int s_dodgeFlip = 1;                  // neutral-press alternator (starts right)
+            static int s_dodgeTotal = 0;                 // captured duration (for the ramp)
             if (afn_dodge_trigger) {
                 int left;
                 if (afn_input_right < 0)      left = 1;  // stick held left-ish: roll left
@@ -1906,10 +1910,31 @@ int main(void)
                 else { s_dodgeFlip ^= 1; left = s_dodgeFlip; } // neutral: ping-pong L/R each press
                 if (left) { s_dodgeDX = -rgtX; s_dodgeDZ = -rgtZ; s_dodgeClip = afn_dodge_clip_l; }
                 else      { s_dodgeDX =  rgtX; s_dodgeDZ =  rgtZ; s_dodgeClip = afn_dodge_clip_r; }
+                s_dodgeTotal = afn_dodge_frames;
                 afn_dodge_trigger = 0;
             }
             if (afn_dodge_frames > 0 && !afn_player_frozen) {
                 float sp = afn_dodge_speed * 0.08f;
+                // Speed envelope (quadratic): ease IN over the first afn_dodge_ramp
+                // frames and ease OUT over the last afn_dodge_falloff frames, so the
+                // roll accelerates out of a windup and decelerates into the end
+                // instead of snapping on/off — softens the stiff feel and the ramp
+                // gives a window to time. On overlap the smaller factor wins.
+                float env = 1.0f;
+                int ramp = afn_dodge_ramp, fall = afn_dodge_falloff;
+                if (ramp > s_dodgeTotal) ramp = s_dodgeTotal;
+                if (fall > s_dodgeTotal) fall = s_dodgeTotal;
+                if (ramp > 0) {
+                    float t = (float)(s_dodgeTotal - afn_dodge_frames + 1) / (float)ramp;
+                    if (t > 1.0f) t = 1.0f;
+                    if (t*t < env) env = t*t;
+                }
+                if (fall > 0) {
+                    float u = (float)afn_dodge_frames / (float)fall;   // remaining frames
+                    if (u > 1.0f) u = 1.0f;
+                    if (u*u < env) env = u*u;
+                }
+                sp *= env;
                 float ix = s_dodgeDX * sp, iz = s_dodgeDZ * sp;
                 int sub = (int)(sp / 3.0f) + 1;          // wall-tunnel guard like normal move
                 for (int st = 0; st < sub; st++) { playerX += ix/sub; playerZ += iz/sub; collide_walls(&playerX, &playerZ, playerY); }
@@ -1923,6 +1948,9 @@ int main(void)
                         afn_rig_clip = afn_dodge_idle;
                 }
             }
+            // Spam gate: the node only re-fires when afn_dodge_cd <= 0 (set to the
+            // node's Cooldown on a dodge); bleed it down one per frame.
+            if (afn_dodge_cd > 0) afn_dodge_cd--;
         }
 #endif
 

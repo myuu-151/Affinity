@@ -947,7 +947,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Strafe Anim",     0xFF3355AA, 1, 1, 8, 0, {"Fwd","Fwd-R","Right","Back-R","Back","Back-L","Left","Fwd-L"}, {}, {} },
     { "Is In View",      0xFF885533, 1, 1, 1, 0, {"Target (obj)"}, {}, {} },
     { "8-Way Stick",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
-    { "Dodge",           0xFF3355AA, 1, 1, 5, 0, {"Speed (int)","Frames (int)","Left Clip","Right Clip","Idle Clip"}, {}, {} },
+    { "Dodge",           0xFF3355AA, 1, 1, 8, 0, {"Speed (int)","Frames (int)","Left Clip","Right Clip","Idle Clip","Ramp (int)","Falloff (int)","Cooldown (int)"}, {}, {} },
     { "Is Dodging",      0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is Not Dodging",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
 };
@@ -20692,7 +20692,7 @@ void FrameTick(float dt)
                 case VsNodeType::StrafeAnim:    desc = "8-way directional animation picker (PSV lock-strafe): wire your clips (Forward, Fwd-Right, Right, Back-Right, Back, Back-Left, Left, Fwd-Left, relative to facing the target) and it plays the one matching the stick direction each frame. You DON'T need all 8 — any unwired direction falls back to the nearest wired one, so wiring just the 4 cardinals makes diagonals lean to a neighbor. One node replaces the per-direction gated Play Skel Anim chains; put it behind On Update -> Is Locked On."; break;
                 case VsNodeType::SnapStick8:    desc = "Gate the left thumbstick to 8 directions (PSV): snaps the analog move vector to the nearest 45 deg (N/NE/E/SE/S/SW/W/NW) before movement and the Strafe Anim clip pick read it, so diagonals are crisp and the directional clips don't flicker between neighbors. Magnitude (push amount) is preserved. Fire it once from On Start."; break;
                 case VsNodeType::DashToTarget:  desc = "Lunges the player toward the Lock On target for a burst (PSV) — a homing dash for bullet-punch-style moves. Speed = world units/frame (like Walk/Sprint), Frames = lunge duration; stops early at melee range. No target locked -> dashes along current facing. Wire after the attack trigger; pair with Play Skel Anim(atk_phs)."; break;
-                case VsNodeType::Dodge:         desc = "One-button side roll (PSV): a pure LEFT/RIGHT dodge — never forward or back. On trigger the left stick's horizontal component picks the side, so diagonals trigger it too (up-left/down-left = left dodge); a neutral or pure up/down stick ALTERNATES left/right each press (ping-pong) so tap-dodging doesn't roll the same way forever. While locked on, the roll is perpendicular to the player->target line (circle-strafe). Speed = world units/frame (like Walk/Sprint), Frames = roll duration. Wire Left Clip = DodgeL and Right Clip = DodgeR. Idle Clip (optional) = the clip to snap back to when the roll ends while standing still (e.g. Idle) so the rig doesn't freeze on the dodge pose; if you're moving when it ends, Strafe Anim takes over instead. Wall-collides. Put it on a single On Key Pressed; pair with Is Not Dodging on the damage path for i-frames."; break;
+                case VsNodeType::Dodge:         desc = "One-button side roll (PSV): a pure LEFT/RIGHT dodge — never forward or back. On trigger the left stick's horizontal component picks the side, so diagonals trigger it too (up-left/down-left = left dodge); a neutral or pure up/down stick ALTERNATES left/right each press (ping-pong) so tap-dodging doesn't roll the same way forever. While locked on, the roll is perpendicular to the player->target line (circle-strafe). Speed = world units/frame (like Walk/Sprint), Frames = roll duration. Wire Left Clip = DodgeL and Right Clip = DodgeR. Idle Clip (optional) = the clip to snap back to when the roll ends while standing still (e.g. Idle) so the rig doesn't freeze on the dodge pose; if you're moving when it ends, Strafe Anim takes over instead. Ramp (int) = frames to ease the speed in from 0 (quadratic) so the roll accelerates instead of snapping to full velocity — softens the stiff feel and gives a windup you can time (0 = instant). Falloff (int) = frames to ease the speed back down to 0 at the END so it decelerates instead of dead-stopping (0 = hard stop). Cooldown (int) = lockout frames after a dodge fires; presses during the lockout do nothing, so mashing the button can't re-fire it (measured from the start, so set it >= Frames to also block mid-roll cancels; 0 = no cooldown). Wall-collides. Put it on a single On Key Pressed; pair with Is Not Dodging on the damage path for i-frames."; break;
                 case VsNodeType::IsDodging:     desc = "Gate (PSV): passes exec only while a Dodge roll is active. Use it to suppress actions during a dodge (e.g. block re-triggering attacks)."; break;
                 case VsNodeType::IsNotDodging:  desc = "Gate (PSV): passes exec only while NO Dodge is active — the inverse of Is Dodging. Wire incoming damage through it for dodge i-frames: On Hit -> Is Not Dodging -> Damage HP."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
@@ -21993,15 +21993,20 @@ void FrameTick(float dt)
                     int lc = lClip ? lClip->paramInt[1] : 0;   // SkelAnim: paramInt[1] = clip
                     int rc = rClip ? rClip->paramInt[1] : 0;
                     int ic = iClip ? iClip->paramInt[1] : -1;  // -1 = no auto-return
-                    char dgBuf[1024];
+                    char dgBuf[1536];
                     snprintf(dgBuf, sizeof(dgBuf),
                         "#ifdef AFN_HAS_PLAYER_RIG // PSV\n"
-                        "    afn_dodge_speed   = %s;\n"
-                        "    afn_dodge_frames  = %s;\n"
-                        "    afn_dodge_clip_l  = %d; // DodgeL\n"
-                        "    afn_dodge_clip_r  = %d; // DodgeR\n"
-                        "    afn_dodge_idle    = %d; // snap back to this when done (-1 = none)\n"
-                        "    afn_dodge_trigger = 1;   // capture the side on the next frame\n"
+                        "    if (afn_dodge_cd <= 0) {            // spam gate: ignore presses while cooling down\n"
+                        "        afn_dodge_speed   = %s;\n"
+                        "        afn_dodge_frames  = %s;\n"
+                        "        afn_dodge_clip_l  = %d; // DodgeL\n"
+                        "        afn_dodge_clip_r  = %d; // DodgeR\n"
+                        "        afn_dodge_idle    = %d; // snap back to this when done (-1 = none)\n"
+                        "        afn_dodge_ramp    = %s; // frames to ease speed in (0 = instant)\n"
+                        "        afn_dodge_falloff = %s; // frames to ease speed out (0 = hard stop)\n"
+                        "        afn_dodge_cd      = %s; // lockout until the next dodge is allowed\n"
+                        "        afn_dodge_trigger = 1;  // capture the side on the next frame\n"
+                        "    }\n"
                         "#endif\n"
                         "    // --- Runtime (psv main.c movement block, AFTER input is final) ---\n"
                         "    // On trigger: stick right<0 -> LEFT, right>0 -> RIGHT (horizontal\n"
@@ -22009,14 +22014,22 @@ void FrameTick(float dt)
                         "    //   L/R each press so tapping dodge doesn't roll the same way forever.\n"
                         "    //   roll vector = +/- the move-basis RIGHT axis (pure lateral, never\n"
                         "    //   fwd/back); while locked that's perpendicular to player->target.\n"
-                        "    // For afn_dodge_frames frames, slide along it at afn_dodge_speed*0.08\n"
-                        "    //   px/frame (wall collision), holding afn_dodge_clip_l/_r on the rig.\n"
+                        "    // Speed envelope: ease-in over afn_dodge_ramp frames + ease-out over\n"
+                        "    //   the last afn_dodge_falloff frames (both quadratic; min wins on\n"
+                        "    //   overlap) so it accelerates then decelerates instead of snapping.\n"
+                        "    // For afn_dodge_frames frames, slide along the vector with wall\n"
+                        "    //   collision, holding afn_dodge_clip_l/_r on the rig.\n"
                         "    // On the LAST frame, if idle>=0 and the stick is neutral, set\n"
                         "    //   afn_rig_clip = afn_dodge_idle (else Strafe Anim reclaims it).\n"
+                        "    // afn_dodge_cd counts down 1/frame here; the gate above drops any\n"
+                        "    //   press while it's > 0, so mashing dodge can't re-fire early.\n"
                         "    // Is Dodging / Is Not Dodging gate on afn_dodge_frames > 0.",
                         fmtInt(infoNode.id, 0, "<speed>"),
                         fmtInt(infoNode.id, 1, "<frames>"),
-                        lc, rc, ic);
+                        lc, rc, ic,
+                        fmtInt(infoNode.id, 5, "6"),
+                        fmtInt(infoNode.id, 6, "6"),
+                        fmtInt(infoNode.id, 7, "0"));
                     setActionFunc(infoNode, "_dodge", dgBuf);
                     break;
                 }

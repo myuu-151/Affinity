@@ -441,18 +441,31 @@ void EmitNodeScriptBodies(std::ostream& f,
                 auto* lcD = findDataIn(a->id, 2);
                 auto* rcD = findDataIn(a->id, 3);
                 auto* icD = findDataIn(a->id, 4);
+                auto* rpD = findDataIn(a->id, 5);
+                auto* foD = findDataIn(a->id, 6);
+                auto* cdD = findDataIn(a->id, 7);
                 int sp = spD ? resolveInt(spD) : 70;
                 int fr = frD ? resolveInt(frD) : 14;
                 int lc = lcD ? resolveInt(lcD) : 0;
                 int rc = rcD ? resolveInt(rcD) : 0;
                 int ic = icD ? resolveInt(icD) : -1;   // -1 = no auto-return to idle
+                int rp = rpD ? resolveInt(rpD) : 6;    // speed ease-in frames (0 = instant)
+                int fo = foD ? resolveInt(foD) : 6;    // speed ease-out frames (0 = hard stop)
+                int cd = cdD ? resolveInt(cdD) : 0;    // spam-gate lockout frames (0 = none)
+                // Gate the whole trigger on the cooldown so a press during the
+                // lockout sets nothing (the runtime counts afn_dodge_cd down).
                 f << "#ifdef AFN_HAS_PLAYER_RIG\n";
-                f << "    afn_dodge_speed = " << sp << ";\n";
-                f << "    afn_dodge_frames = " << fr << ";\n";
-                f << "    afn_dodge_clip_l = " << lc << ";\n";
-                f << "    afn_dodge_clip_r = " << rc << ";\n";
-                f << "    afn_dodge_idle = " << ic << ";\n";
-                f << "    afn_dodge_trigger = 1;\n";
+                f << "    if (afn_dodge_cd <= 0) {\n";
+                f << "        afn_dodge_speed = " << sp << ";\n";
+                f << "        afn_dodge_frames = " << fr << ";\n";
+                f << "        afn_dodge_clip_l = " << lc << ";\n";
+                f << "        afn_dodge_clip_r = " << rc << ";\n";
+                f << "        afn_dodge_idle = " << ic << ";\n";
+                f << "        afn_dodge_ramp = " << rp << ";\n";
+                f << "        afn_dodge_falloff = " << fo << ";\n";
+                f << "        afn_dodge_cd = " << cd << ";\n";
+                f << "        afn_dodge_trigger = 1;\n";
+                f << "    }\n";
                 f << "#endif\n";
                 break;
             }
