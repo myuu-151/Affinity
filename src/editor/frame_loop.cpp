@@ -618,6 +618,7 @@ enum class VsNodeType : int {
     Dodge,           // action: timed directional roll burst (PSV) — side/back dodge with a clip
     IsDodging,       // gate: passes exec while a Dodge is active
     IsNotDodging,    // gate: passes exec while NO Dodge is active (i-frame guard for damage)
+    IsAirborne,      // gate: passes exec while the player is off the ground (inverse of Is On Ground)
     COUNT
 };
 
@@ -950,6 +951,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Dodge",           0xFF3355AA, 1, 1, 8, 0, {"Speed (int)","Frames (int)","Left Clip","Right Clip","Idle Clip","Ramp (int)","Falloff (int)","Cooldown (int)"}, {}, {} },
     { "Is Dodging",      0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is Not Dodging",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Airborne",     0xFF885533, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -20695,6 +20697,7 @@ void FrameTick(float dt)
                 case VsNodeType::Dodge:         desc = "One-button side roll (PSV): a pure LEFT/RIGHT dodge — never forward or back. On trigger the left stick's horizontal component picks the side, so diagonals trigger it too (up-left/down-left = left dodge); a neutral or pure up/down stick ALTERNATES left/right each press (ping-pong) so tap-dodging doesn't roll the same way forever. While locked on, the roll is perpendicular to the player->target line (circle-strafe). Speed = world units/frame (like Walk/Sprint), Frames = roll duration. Wire Left Clip = DodgeL and Right Clip = DodgeR. Idle Clip (optional) = the clip to snap back to when the roll ends while standing still (e.g. Idle) so the rig doesn't freeze on the dodge pose; if you're moving when it ends, Strafe Anim takes over instead. Ramp (int) = frames to ease the speed in from 0 (quadratic) so the roll accelerates instead of snapping to full velocity — softens the stiff feel and gives a windup you can time (0 = instant). Falloff (int) = frames to ease the speed back down to 0 at the END so it decelerates instead of dead-stopping (0 = hard stop). Cooldown (int) = lockout frames after a dodge fires; presses during the lockout do nothing, so mashing the button can't re-fire it (measured from the start, so set it >= Frames to also block mid-roll cancels; 0 = no cooldown). Wall-collides. Put it on a single On Key Pressed; pair with Is Not Dodging on the damage path for i-frames."; break;
                 case VsNodeType::IsDodging:     desc = "Gate (PSV): passes exec only while a Dodge roll is active. Use it to suppress actions during a dodge (e.g. block re-triggering attacks)."; break;
                 case VsNodeType::IsNotDodging:  desc = "Gate (PSV): passes exec only while NO Dodge is active — the inverse of Is Dodging. Wire incoming damage through it for dodge i-frames: On Hit -> Is Not Dodging -> Damage HP."; break;
+                case VsNodeType::IsAirborne:    desc = "Gate: passes exec only while the player is off the ground — the clean inverse of Is On Ground. Drive the jump/fall animation with it: On Update -> Is Airborne -> Play Skel Anim(jump). Unlike Is Jumping/Is Falling (which key off player_vy and only catch the launch/rising edge), this stays true the whole time you're in the air and flips back the instant you land, so the rig falls back to idle/strafe on touchdown."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
@@ -20979,6 +20982,7 @@ void FrameTick(float dt)
                         case VsNodeType::Dodge:         return "_dodge";
                         case VsNodeType::IsDodging:     return "_is_dodging";
                         case VsNodeType::IsNotDodging:  return "_is_not_dodging";
+                        case VsNodeType::IsAirborne:    return "_is_airborne";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -22051,6 +22055,17 @@ void FrameTick(float dt)
                         "    }\n"
                         "    // --- Runtime --- gate evaluated inline; the inverse of Is Dodging.\n"
                         "    // Wire incoming damage through it for dodge i-frames.");
+                    break;
+                }
+                case VsNodeType::IsAirborne: {
+                    editorCode = "// Gate: passes exec only while the player is off the ground";
+                    setActionFunc(infoNode, "_is_airborne",
+                        "    if (!player_on_ground) {\n"
+                        "        // ... downstream actions (e.g. Play Skel Anim(jump)) ...\n"
+                        "    }\n"
+                        "    // --- Runtime --- gate evaluated inline; player_on_ground mirrors the\n"
+                        "    // engine 'grounded' flag set each frame (true the instant you land),\n"
+                        "    // so this is the clean inverse of Is On Ground for jump/fall anims.");
                     break;
                 }
                 case VsNodeType::TurnPlayer: {
@@ -25005,6 +25020,7 @@ void FrameTick(float dt)
                     case VsNodeType::Dodge:         suffix = "_dodge"; break;
                     case VsNodeType::IsDodging:     suffix = "_is_dodging"; break;
                     case VsNodeType::IsNotDodging:  suffix = "_is_not_dodging"; break;
+                    case VsNodeType::IsAirborne:    suffix = "_is_airborne"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -25514,6 +25530,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Dodge].name)) addNodeAt(VsNodeType::Dodge);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsDodging].name)) addNodeAt(VsNodeType::IsDodging);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNotDodging].name)) addNodeAt(VsNodeType::IsNotDodging);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsAirborne].name)) addNodeAt(VsNodeType::IsAirborne);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP].name)) addNodeAt(VsNodeType::SetHP);

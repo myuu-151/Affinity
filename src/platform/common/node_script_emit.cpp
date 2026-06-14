@@ -475,6 +475,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    if (afn_dodge_frames <= 0) {\n"; break;
             case GBAScriptNodeType::IsOnGround:
                 f << "    if (player_on_ground) {\n"; break;
+            case GBAScriptNodeType::IsAirborne:
+                f << "    if (!player_on_ground) {\n"; break;
             case GBAScriptNodeType::IsJumping:
                 // Matches GBA: just "rising," no airborne guard. Sounds wrong
                 // vs the editor tooltip but the BP idioms (e.g. jump SFX on
@@ -846,6 +848,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                    t == GBAScriptNodeType::IsNotLockedOn ||
                    t == GBAScriptNodeType::IsDodging ||
                    t == GBAScriptNodeType::IsNotDodging ||
+                   t == GBAScriptNodeType::IsAirborne ||
                    t == GBAScriptNodeType::IsInView;
         };
         auto walkExec = [&](int nodeId, int pinIdx) {
@@ -927,6 +930,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                            a->type == GBAScriptNodeType::IsNotLockedOn ||
                            a->type == GBAScriptNodeType::IsDodging ||
                            a->type == GBAScriptNodeType::IsNotDodging ||
+                           a->type == GBAScriptNodeType::IsAirborne ||
                            a->type == GBAScriptNodeType::IsInView);
             if (isGate) {
                 bool wasJump = inJumpGate;

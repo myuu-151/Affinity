@@ -449,6 +449,7 @@ enum class GBAScriptNodeType : int {
     Dodge,           // action: timed directional roll burst (PSV) — side/back dodge with a clip
     IsDodging,       // gate: passes exec while a Dodge is active
     IsNotDodging,    // gate: passes exec while NO Dodge is active (i-frame guard for damage)
+    IsAirborne,      // gate: passes exec while the player is off the ground (inverse of Is On Ground)
     COUNT
 };
 
