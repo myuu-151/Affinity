@@ -615,6 +615,9 @@ enum class VsNodeType : int {
     StrafeAnim,      // action: 8-way directional clip picker from lock-relative stick
     IsInView,        // gate: passes only if the target object is on-screen
     SnapStick8,      // action: gate the left stick to 8 directions (PSV); set on start
+    Dodge,           // action: timed directional roll burst (PSV) — side/back dodge with a clip
+    IsDodging,       // gate: passes exec while a Dodge is active
+    IsNotDodging,    // gate: passes exec while NO Dodge is active (i-frame guard for damage)
     COUNT
 };
 
@@ -944,6 +947,9 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Strafe Anim",     0xFF3355AA, 1, 1, 8, 0, {"Fwd","Fwd-R","Right","Back-R","Back","Back-L","Left","Fwd-L"}, {}, {} },
     { "Is In View",      0xFF885533, 1, 1, 1, 0, {"Target (obj)"}, {}, {} },
     { "8-Way Stick",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Dodge",           0xFF3355AA, 1, 1, 5, 0, {"Speed (int)","Frames (int)","Left Clip","Right Clip","Idle Clip"}, {}, {} },
+    { "Is Dodging",      0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Not Dodging",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -20686,6 +20692,9 @@ void FrameTick(float dt)
                 case VsNodeType::StrafeAnim:    desc = "8-way directional animation picker (PSV lock-strafe): wire your clips (Forward, Fwd-Right, Right, Back-Right, Back, Back-Left, Left, Fwd-Left, relative to facing the target) and it plays the one matching the stick direction each frame. You DON'T need all 8 — any unwired direction falls back to the nearest wired one, so wiring just the 4 cardinals makes diagonals lean to a neighbor. One node replaces the per-direction gated Play Skel Anim chains; put it behind On Update -> Is Locked On."; break;
                 case VsNodeType::SnapStick8:    desc = "Gate the left thumbstick to 8 directions (PSV): snaps the analog move vector to the nearest 45 deg (N/NE/E/SE/S/SW/W/NW) before movement and the Strafe Anim clip pick read it, so diagonals are crisp and the directional clips don't flicker between neighbors. Magnitude (push amount) is preserved. Fire it once from On Start."; break;
                 case VsNodeType::DashToTarget:  desc = "Lunges the player toward the Lock On target for a burst (PSV) — a homing dash for bullet-punch-style moves. Speed = world units/frame (like Walk/Sprint), Frames = lunge duration; stops early at melee range. No target locked -> dashes along current facing. Wire after the attack trigger; pair with Play Skel Anim(atk_phs)."; break;
+                case VsNodeType::Dodge:         desc = "One-button side roll (PSV): a pure LEFT/RIGHT dodge — never forward or back. On trigger the left stick's horizontal component picks the side, so diagonals trigger it too (up-left/down-left = left dodge); a neutral or pure up/down stick ALTERNATES left/right each press (ping-pong) so tap-dodging doesn't roll the same way forever. While locked on, the roll is perpendicular to the player->target line (circle-strafe). Speed = world units/frame (like Walk/Sprint), Frames = roll duration. Wire Left Clip = DodgeL and Right Clip = DodgeR. Idle Clip (optional) = the clip to snap back to when the roll ends while standing still (e.g. Idle) so the rig doesn't freeze on the dodge pose; if you're moving when it ends, Strafe Anim takes over instead. Wall-collides. Put it on a single On Key Pressed; pair with Is Not Dodging on the damage path for i-frames."; break;
+                case VsNodeType::IsDodging:     desc = "Gate (PSV): passes exec only while a Dodge roll is active. Use it to suppress actions during a dodge (e.g. block re-triggering attacks)."; break;
+                case VsNodeType::IsNotDodging:  desc = "Gate (PSV): passes exec only while NO Dodge is active — the inverse of Is Dodging. Wire incoming damage through it for dodge i-frames: On Hit -> Is Not Dodging -> Damage HP."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
@@ -20967,6 +20976,9 @@ void FrameTick(float dt)
                         case VsNodeType::StrafeAnim:    return "_strafe_anim";
                         case VsNodeType::IsInView:      return "_is_in_view";
                         case VsNodeType::SnapStick8:    return "_snap_stick8";
+                        case VsNodeType::Dodge:         return "_dodge";
+                        case VsNodeType::IsDodging:     return "_is_dodging";
+                        case VsNodeType::IsNotDodging:  return "_is_not_dodging";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -21971,6 +21983,61 @@ void FrameTick(float dt)
                         "    //   afn_input_fwd = m*cos(a); afn_input_right = m*sin(a); }\n"
                         "    // Snaps the analog vector to the nearest octant so movement AND\n"
                         "    // the Strafe Anim clip pick read a crisp 8-way direction.");
+                    break;
+                }
+                case VsNodeType::Dodge: {
+                    editorCode = "// One-button pure left/right side roll";
+                    auto* lClip = resolveDataIn(infoNode.id, 2);
+                    auto* rClip = resolveDataIn(infoNode.id, 3);
+                    auto* iClip = resolveDataIn(infoNode.id, 4);
+                    int lc = lClip ? lClip->paramInt[1] : 0;   // SkelAnim: paramInt[1] = clip
+                    int rc = rClip ? rClip->paramInt[1] : 0;
+                    int ic = iClip ? iClip->paramInt[1] : -1;  // -1 = no auto-return
+                    char dgBuf[1024];
+                    snprintf(dgBuf, sizeof(dgBuf),
+                        "#ifdef AFN_HAS_PLAYER_RIG // PSV\n"
+                        "    afn_dodge_speed   = %s;\n"
+                        "    afn_dodge_frames  = %s;\n"
+                        "    afn_dodge_clip_l  = %d; // DodgeL\n"
+                        "    afn_dodge_clip_r  = %d; // DodgeR\n"
+                        "    afn_dodge_idle    = %d; // snap back to this when done (-1 = none)\n"
+                        "    afn_dodge_trigger = 1;   // capture the side on the next frame\n"
+                        "#endif\n"
+                        "    // --- Runtime (psv main.c movement block, AFTER input is final) ---\n"
+                        "    // On trigger: stick right<0 -> LEFT, right>0 -> RIGHT (horizontal\n"
+                        "    //   component only, so diagonals count); a NEUTRAL stick ping-pongs\n"
+                        "    //   L/R each press so tapping dodge doesn't roll the same way forever.\n"
+                        "    //   roll vector = +/- the move-basis RIGHT axis (pure lateral, never\n"
+                        "    //   fwd/back); while locked that's perpendicular to player->target.\n"
+                        "    // For afn_dodge_frames frames, slide along it at afn_dodge_speed*0.08\n"
+                        "    //   px/frame (wall collision), holding afn_dodge_clip_l/_r on the rig.\n"
+                        "    // On the LAST frame, if idle>=0 and the stick is neutral, set\n"
+                        "    //   afn_rig_clip = afn_dodge_idle (else Strafe Anim reclaims it).\n"
+                        "    // Is Dodging / Is Not Dodging gate on afn_dodge_frames > 0.",
+                        fmtInt(infoNode.id, 0, "<speed>"),
+                        fmtInt(infoNode.id, 1, "<frames>"),
+                        lc, rc, ic);
+                    setActionFunc(infoNode, "_dodge", dgBuf);
+                    break;
+                }
+                case VsNodeType::IsDodging: {
+                    editorCode = "// Gate: passes exec only while a Dodge roll is active";
+                    setActionFunc(infoNode, "_is_dodging",
+                        "    if (afn_dodge_frames > 0) {\n"
+                        "        // ... downstream actions ...\n"
+                        "    }\n"
+                        "    // --- Runtime --- gate evaluated inline; afn_dodge_frames is set by\n"
+                        "    // the Dodge node and counts down in the movement block (0 on NDS).");
+                    break;
+                }
+                case VsNodeType::IsNotDodging: {
+                    editorCode = "// Gate: passes exec only while NO Dodge is active";
+                    setActionFunc(infoNode, "_is_not_dodging",
+                        "    if (afn_dodge_frames <= 0) {\n"
+                        "        // ... downstream actions (e.g. Damage HP) ...\n"
+                        "    }\n"
+                        "    // --- Runtime --- gate evaluated inline; the inverse of Is Dodging.\n"
+                        "    // Wire incoming damage through it for dodge i-frames.");
                     break;
                 }
                 case VsNodeType::TurnPlayer: {
@@ -24922,6 +24989,9 @@ void FrameTick(float dt)
                     case VsNodeType::StrafeAnim:    suffix = "_strafe_anim"; break;
                     case VsNodeType::IsInView:      suffix = "_is_in_view"; break;
                     case VsNodeType::SnapStick8:    suffix = "_snap_stick8"; break;
+                    case VsNodeType::Dodge:         suffix = "_dodge"; break;
+                    case VsNodeType::IsDodging:     suffix = "_is_dodging"; break;
+                    case VsNodeType::IsNotDodging:  suffix = "_is_not_dodging"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -25428,6 +25498,9 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StrafeAnim].name)) addNodeAt(VsNodeType::StrafeAnim);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsInView].name)) addNodeAt(VsNodeType::IsInView);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SnapStick8].name)) addNodeAt(VsNodeType::SnapStick8);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Dodge].name)) addNodeAt(VsNodeType::Dodge);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsDodging].name)) addNodeAt(VsNodeType::IsDodging);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNotDodging].name)) addNodeAt(VsNodeType::IsNotDodging);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP].name)) addNodeAt(VsNodeType::SetHP);

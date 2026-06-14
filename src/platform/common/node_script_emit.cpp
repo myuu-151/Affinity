@@ -431,6 +431,35 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "#endif\n";
                 break;
             }
+            case GBAScriptNodeType::Dodge: {
+                // One-button pure left/right side roll (PSV, AFN_HAS_PLAYER_RIG):
+                // set speed/frames + the L/R clips and raise the trigger so the
+                // movement block picks the side from the live stick's horizontal
+                // component next frame (input is final there) and commits.
+                auto* spD = findDataIn(a->id, 0);
+                auto* frD = findDataIn(a->id, 1);
+                auto* lcD = findDataIn(a->id, 2);
+                auto* rcD = findDataIn(a->id, 3);
+                auto* icD = findDataIn(a->id, 4);
+                int sp = spD ? resolveInt(spD) : 70;
+                int fr = frD ? resolveInt(frD) : 14;
+                int lc = lcD ? resolveInt(lcD) : 0;
+                int rc = rcD ? resolveInt(rcD) : 0;
+                int ic = icD ? resolveInt(icD) : -1;   // -1 = no auto-return to idle
+                f << "#ifdef AFN_HAS_PLAYER_RIG\n";
+                f << "    afn_dodge_speed = " << sp << ";\n";
+                f << "    afn_dodge_frames = " << fr << ";\n";
+                f << "    afn_dodge_clip_l = " << lc << ";\n";
+                f << "    afn_dodge_clip_r = " << rc << ";\n";
+                f << "    afn_dodge_idle = " << ic << ";\n";
+                f << "    afn_dodge_trigger = 1;\n";
+                f << "#endif\n";
+                break;
+            }
+            case GBAScriptNodeType::IsDodging:
+                f << "    if (afn_dodge_frames > 0) {\n"; break;
+            case GBAScriptNodeType::IsNotDodging:
+                f << "    if (afn_dodge_frames <= 0) {\n"; break;
             case GBAScriptNodeType::IsOnGround:
                 f << "    if (player_on_ground) {\n"; break;
             case GBAScriptNodeType::IsJumping:
@@ -802,6 +831,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                    t == GBAScriptNodeType::Countdown ||
                    t == GBAScriptNodeType::IsLockedOn ||
                    t == GBAScriptNodeType::IsNotLockedOn ||
+                   t == GBAScriptNodeType::IsDodging ||
+                   t == GBAScriptNodeType::IsNotDodging ||
                    t == GBAScriptNodeType::IsInView;
         };
         auto walkExec = [&](int nodeId, int pinIdx) {
@@ -881,6 +912,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                            a->type == GBAScriptNodeType::IsNotGrinding ||
                            a->type == GBAScriptNodeType::IsLockedOn ||
                            a->type == GBAScriptNodeType::IsNotLockedOn ||
+                           a->type == GBAScriptNodeType::IsDodging ||
+                           a->type == GBAScriptNodeType::IsNotDodging ||
                            a->type == GBAScriptNodeType::IsInView);
             if (isGate) {
                 bool wasJump = inJumpGate;

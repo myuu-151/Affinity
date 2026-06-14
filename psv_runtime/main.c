@@ -974,6 +974,14 @@ int afn_dash_frames = 0, afn_dash_speed = 0, afn_dash_target = -1;
 // OnUpdate, before MovePlayer has set afn_input_fwd/right, so it can't read
 // the stick itself). Octant order: Fwd,Fwd-R,Right,Back-R,Back,Back-L,Left,Fwd-L.
 int afn_strafe_anim = 0, afn_strafe_clip[8] = {0};
+// Dodge node (one-button pure left/right side roll): frames>0 = rolling along
+// the move-basis RIGHT axis (never fwd/back), at afn_dodge_speed*0.08 px/frame,
+// holding afn_dodge_clip_l/_r on the rig. The node raises afn_dodge_trigger so
+// the movement block picks the side once from the live stick's horizontal
+// component (input is finalized there). Is Dodging / Is Not Dodging gate on
+// frames>0.
+int afn_dodge_frames = 0, afn_dodge_speed = 0, afn_dodge_trigger = 0, afn_dodge_clip_l = 0, afn_dodge_clip_r = 0;
+int afn_dodge_idle = -1;   // clip to snap back to when the roll ends (-1 = leave it; Strafe Anim/base layer reclaims)
 unsigned char afn_sprite_visible[NUM_SPRITES]={0};
 unsigned char afn_sprite_flip[NUM_SPRITES]={0}, afn_collision_enabled[NUM_SPRITES]={0};
 int afn_hp[NUM_SPRITES]={0}, afn_state_timer[NUM_SPRITES]={0};
@@ -1874,6 +1882,46 @@ int main(void)
                 if (--afn_dash_frames <= 0) afn_dash_frames = 0;
             } else {
                 afn_dash_frames = 0;
+            }
+        }
+#endif
+
+        // Dodge (one-button side roll): a committed PURE LEFT/RIGHT burst, never
+        // forward/back. Captured once when the node triggers (input is final
+        // here). Only the stick's horizontal component decides the side, so
+        // diagonals count (up-left/down-left = left); a neutral or pure-vertical
+        // stick defaults to a right dodge. The roll vector is +/- the move-basis
+        // RIGHT axis (camera/lock/tank relative — while locked that's
+        // perpendicular to player->target, a circle-strafe). Wall-collides; ends
+        // when the frame budget runs out.
+#ifdef AFN_HAS_PLAYER_RIG
+        {
+            static float s_dodgeDX = 0.0f, s_dodgeDZ = 0.0f;
+            static int s_dodgeClip = 0;
+            static int s_dodgeFlip = 1;                  // neutral-press alternator (starts right)
+            if (afn_dodge_trigger) {
+                int left;
+                if (afn_input_right < 0)      left = 1;  // stick held left-ish: roll left
+                else if (afn_input_right > 0) left = 0;  // right-ish: roll right
+                else { s_dodgeFlip ^= 1; left = s_dodgeFlip; } // neutral: ping-pong L/R each press
+                if (left) { s_dodgeDX = -rgtX; s_dodgeDZ = -rgtZ; s_dodgeClip = afn_dodge_clip_l; }
+                else      { s_dodgeDX =  rgtX; s_dodgeDZ =  rgtZ; s_dodgeClip = afn_dodge_clip_r; }
+                afn_dodge_trigger = 0;
+            }
+            if (afn_dodge_frames > 0 && !afn_player_frozen) {
+                float sp = afn_dodge_speed * 0.08f;
+                float ix = s_dodgeDX * sp, iz = s_dodgeDZ * sp;
+                int sub = (int)(sp / 3.0f) + 1;          // wall-tunnel guard like normal move
+                for (int st = 0; st < sub; st++) { playerX += ix/sub; playerZ += iz/sub; collide_walls(&playerX, &playerZ, playerY); }
+                afn_rig_clip = s_dodgeClip;              // hold the dodge clip while rolling
+                if (--afn_dodge_frames <= 0) {
+                    afn_dodge_frames = 0;
+                    // Roll over: hand the rig back to the idle clip so it doesn't
+                    // freeze on the dodge pose. Only when standing still — if the
+                    // stick is held, Strafe Anim (above) already set the walk clip.
+                    if (afn_dodge_idle >= 0 && afn_input_fwd == 0 && afn_input_right == 0)
+                        afn_rig_clip = afn_dodge_idle;
+                }
             }
         }
 #endif
