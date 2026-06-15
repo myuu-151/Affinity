@@ -450,6 +450,8 @@ enum class GBAScriptNodeType : int {
     IsDodging,       // gate: passes exec while a Dodge is active
     IsNotDodging,    // gate: passes exec while NO Dodge is active (i-frame guard for damage)
     IsAirborne,      // gate: passes exec while the player is off the ground (inverse of Is On Ground)
+    IsLanding,       // gate: passes exec for a short window right after touchdown (land anim)
+    IsNotLanding,    // gate: passes exec when NOT in the post-touchdown land window
     COUNT
 };
 

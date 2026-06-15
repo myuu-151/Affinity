@@ -619,6 +619,8 @@ enum class VsNodeType : int {
     IsDodging,       // gate: passes exec while a Dodge is active
     IsNotDodging,    // gate: passes exec while NO Dodge is active (i-frame guard for damage)
     IsAirborne,      // gate: passes exec while the player is off the ground (inverse of Is On Ground)
+    IsLanding,       // gate: passes exec for a short window right after touchdown (land anim)
+    IsNotLanding,    // gate: passes exec when NOT in the post-touchdown land window
     COUNT
 };
 
@@ -662,7 +664,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Add Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot (int)", "Amount"}, {}, {} },
     { "Play Sound",      0xFF3355AA, 1, 1, 1, 0, {"Sound Instance"}, {}, {} },
     { "Wait",            0xFF3355AA, 1, 1, 1, 0, {"Frames (int)"}, {}, {} },
-    { "Jump",            0xFF3355AA, 1, 1, 1, 0, {"Force (float)"}, {}, {} },
+    { "Jump",            0xFF3355AA, 1, 1, 2, 0, {"Force (float)", "Fall Force (float)"}, {}, {} },
     { "Walk",            0xFF3355AA, 1, 1, 1, 0, {"Speed (int)"}, {}, {} },
     { "Sprint",          0xFF3355AA, 1, 1, 1, 0, {"Speed (int)"}, {}, {} },
     { "Orbit Camera",    0xFF3355AA, 1, 1, 2, 0, {"Direction", "Speed (int)"}, {}, {} },
@@ -952,6 +954,8 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Is Dodging",      0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is Not Dodging",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is Airborne",     0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Landing",      0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Not Landing",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
 };
 
 struct VsNode {
@@ -974,6 +978,7 @@ struct VsNode {
     char funcName[64] = {};               // custom function name (empty = use default afn_ name)
     char ccPinNames[8][16] = {};          // custom data-in pin labels for CustomCode nodes
     char ccPinCode[8][128] = {};          // per-pin code snippets for CustomCode nodes
+    char clipName[64] = {};               // SkelAnim: clip name; re-resolved to paramInt[1] on load so reordering/adding glTF clips doesn't shift refs
 };
 
 // Pin address: which node, which pin type, which pin index
@@ -6036,6 +6041,8 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "bpVsRtM0Code=%d|%s\n", n.id, encNL(n.codeRtMode0));
             if (n.funcName[0])
                 fprintf(f, "bpVsNodeFunc=%d|%s\n", n.id, n.funcName);
+            if (n.type == VsNodeType::SkelAnim && n.clipName[0])
+                fprintf(f, "bpVsNodeClip=%d|%s\n", n.id, n.clipName);
         }
         fprintf(f, "bpVsLinkCount=%d\n", (int)bp.links.size());
         for (auto& lk : bp.links)
@@ -7526,6 +7533,15 @@ static bool LoadProject(const std::string& path)
                 if (sscanf(line + 13, "%d|%63[^\n]", &nid, nameBuf) >= 2) {
                     for (auto& n : sBlueprintAssets.back().nodes)
                         if (n.id == nid) { strncpy(n.funcName, nameBuf, sizeof(n.funcName) - 1); break; }
+                }
+            }
+            else if (strncmp(line, "bpVsNodeClip=", 13) == 0 && !sBlueprintAssets.empty())
+            {
+                int nid;
+                char nameBuf[64] = {};
+                if (sscanf(line + 13, "%d|%63[^\n]", &nid, nameBuf) >= 2) {
+                    for (auto& n : sBlueprintAssets.back().nodes)
+                        if (n.id == nid) { strncpy(n.clipName, nameBuf, sizeof(n.clipName) - 1); break; }
                 }
             }
             else if (strncmp(line, "bpVsCcPin=", 10) == 0 && !sBlueprintAssets.empty())
@@ -9514,6 +9530,34 @@ static bool LoadProject(const std::string& path)
     }
 
     StitchSkyPanels();
+
+    // Re-resolve SkelAnim clip indices by NAME (clips can shift when the glTF
+    // gains/reorders animations). If a node stored a clip name, look it up in
+    // its rig's current clip list and update paramInt[1]; if it has no name yet
+    // (older project), backfill the name from the current index so it's stable
+    // from here on. Runs after all rigs (with clips) and nodes are loaded.
+    {
+        auto resolveSkelClips = [](std::vector<VsNode>& nodes) {
+            for (auto& n : nodes) {
+                if (n.type != VsNodeType::SkelAnim) continue;
+                int ri = n.paramInt[0];
+                if (ri < 0 || ri >= (int)sRiggedMeshAssets.size()) continue;
+                const auto& clips = sRiggedMeshAssets[ri].clips;
+                if (clips.empty()) continue;
+                if (n.clipName[0]) {
+                    for (int c = 0; c < (int)clips.size(); c++)
+                        if (clips[c].name == n.clipName) { n.paramInt[1] = c; break; }
+                } else if (n.paramInt[1] >= 0 && n.paramInt[1] < (int)clips.size()) {
+                    strncpy(n.clipName, clips[n.paramInt[1]].name.c_str(), sizeof(n.clipName) - 1);
+                    n.clipName[sizeof(n.clipName) - 1] = '\0';
+                }
+            }
+        };
+        resolveSkelClips(sVsNodes);
+        for (auto& bp : sBlueprintAssets) resolveSkelClips(bp.nodes);
+        for (auto& sc : sMapScenes) resolveSkelClips(sc.vsNodes);
+        for (auto& sc : sM7Scenes)  resolveSkelClips(sc.vsNodes);
+    }
 
     fclose(f);
     sProjectPath = path;
@@ -20459,7 +20503,7 @@ void FrameTick(float dt)
                 case VsNodeType::AddVariable:   desc = "Adds an amount to a variable slot."; break;
                 case VsNodeType::PlaySound:     desc = "Plays a sound effect by ID."; break;
                 case VsNodeType::Wait:          desc = "Pauses execution for a number of frames."; break;
-                case VsNodeType::Jump:          desc = "Makes the player jump with the given force. Only works when grounded."; break;
+                case VsNodeType::Jump:          desc = "Makes the player jump with the given Force. Only works when grounded. Fall Force (PSV, optional) adds EXTRA downward acceleration once you're past the apex, for a heavier fall than the rise (unlike Set Max Fall, which only caps fall speed; they combine). Two node-body sliders (PSV) shape an 'anime' arc: Rise Float % reduces gravity WHILE RISING so you float up and hang at the apex (0 = normal, higher = floatier/longer hang); Fall Smooth (frames) eases the Fall Force in over N descent frames instead of snapping it on at the apex (0 = instant). Float up + hang + heavy fall = anime jump."; break;
                 case VsNodeType::Walk:          desc = "Sets the player's movement speed (walk)."; break;
                 case VsNodeType::Sprint:        desc = "Sets the player's movement speed (sprint)."; break;
                 case VsNodeType::OrbitCamera:   desc = "Rotates the orbit camera in a direction at a speed whenever this runs. Gate it with On Key Held(key) to bind orbiting to a button (any key, remappable)."; break;
@@ -20697,7 +20741,9 @@ void FrameTick(float dt)
                 case VsNodeType::Dodge:         desc = "One-button side roll (PSV): a pure LEFT/RIGHT dodge — never forward or back. On trigger the left stick's horizontal component picks the side, so diagonals trigger it too (up-left/down-left = left dodge); a neutral or pure up/down stick ALTERNATES left/right each press (ping-pong) so tap-dodging doesn't roll the same way forever. While locked on, the roll is perpendicular to the player->target line (circle-strafe). Speed = world units/frame (like Walk/Sprint), Frames = roll duration. Wire Left Clip = DodgeL and Right Clip = DodgeR. Idle Clip (optional) = the clip to snap back to when the roll ends while standing still (e.g. Idle) so the rig doesn't freeze on the dodge pose; if you're moving when it ends, Strafe Anim takes over instead. Ramp (int) = frames to ease the speed in from 0 (quadratic) so the roll accelerates instead of snapping to full velocity — softens the stiff feel and gives a windup you can time (0 = instant). Falloff (int) = frames to ease the speed back down to 0 at the END so it decelerates instead of dead-stopping (0 = hard stop). Cooldown (int) = lockout frames after a dodge fires; presses during the lockout do nothing, so mashing the button can't re-fire it (measured from the start, so set it >= Frames to also block mid-roll cancels; 0 = no cooldown). Wall-collides. Put it on a single On Key Pressed; pair with Is Not Dodging on the damage path for i-frames."; break;
                 case VsNodeType::IsDodging:     desc = "Gate (PSV): passes exec only while a Dodge roll is active. Use it to suppress actions during a dodge (e.g. block re-triggering attacks)."; break;
                 case VsNodeType::IsNotDodging:  desc = "Gate (PSV): passes exec only while NO Dodge is active — the inverse of Is Dodging. Wire incoming damage through it for dodge i-frames: On Hit -> Is Not Dodging -> Damage HP."; break;
-                case VsNodeType::IsAirborne:    desc = "Gate: passes exec only while the player is off the ground — the clean inverse of Is On Ground. Drive the jump/fall animation with it: On Update -> Is Airborne -> Play Skel Anim(jump). Unlike Is Jumping/Is Falling (which key off player_vy and only catch the launch/rising edge), this stays true the whole time you're in the air and flips back the instant you land, so the rig falls back to idle/strafe on touchdown."; break;
+                case VsNodeType::IsAirborne:    desc = "Gate: passes exec only while the player is off the ground — the clean inverse of Is On Ground. Drive the air animation with it: On Update -> Is Airborne -> Play Skel Anim(jump). For a rise/fall split use Is Jumping (rising) and Is Falling (descending) instead — on PSV those now read the real vertical velocity."; break;
+                case VsNodeType::IsLanding:     desc = "Gate (PSV): passes exec for a short window (~12 frames) right after the player touches down. Wire On Update -> Is Landing -> Play Skel Anim(land) for a landing/squash pose. Pair with Is Not Landing on the idle chain so idle doesn't override it during the window."; break;
+                case VsNodeType::IsNotLanding:  desc = "Gate (PSV): passes exec when the player is NOT in the post-touchdown land window — the inverse of Is Landing. Put it in front of your grounded idle (On Update -> ... -> Is On Ground -> Is Not Landing -> Play Idle) so the land anim plays first, then idle resumes."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
@@ -20983,6 +21029,8 @@ void FrameTick(float dt)
                         case VsNodeType::IsDodging:     return "_is_dodging";
                         case VsNodeType::IsNotDodging:  return "_is_not_dodging";
                         case VsNodeType::IsAirborne:    return "_is_airborne";
+                        case VsNodeType::IsLanding:     return "_is_landing";
+                        case VsNodeType::IsNotLanding:  return "_is_not_landing";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -21374,15 +21422,30 @@ void FrameTick(float dt)
                     float force = 2.0f;
                     if (fd) { memcpy(&force, &fd->paramInt[0], sizeof(float)); }
                     int forceFixed = (int)(force * 256.0f);
-                    char bodyBuf[512];
+                    auto* ffd = resolveDataIn(infoNode.id, 1);
+                    float fallForce = 0.0f;
+                    if (ffd) { memcpy(&fallForce, &ffd->paramInt[0], sizeof(float)); }
+                    int fallFixed = (int)(fallForce * 256.0f);
+                    int smooth = infoNode.paramInt[0];   // Fall Smooth (frames), node slider
+                    int riseFloat = infoNode.paramInt[1]; // Rise Float %, node slider
+                    char bodyBuf[896];
                     snprintf(bodyBuf, sizeof(bodyBuf),
                         "    if (player_on_ground) player_vy = %d;\n"
+                        "#ifdef AFN_HAS_PLAYER_RIG // PSV\n"
+                        "    afn_fall_force  = %d; // extra downward accel past the apex (8.8)\n"
+                        "    afn_rise_float  = %d; // %% gravity removed WHILE RISING (anime hang)\n"
+                        "    afn_fall_smooth = %d; // frames to ease the Fall Force in (0 = snap)\n"
+                        "#endif\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // player_vy -= afn_gravity; // each frame\n"
-                        "    // if (player_vy < -afn_terminal_vel) player_vy = -afn_terminal_vel;\n"
-                        "    // player_y += player_vy;\n"
-                        "    // if (player_y <= floor_y) { player_y = floor_y; player_on_ground = 1; player_vy = 0; }",
-                        forceFixed);
+                        "    // g = afn_gravity;\n"
+                        "    // if (player_vy > 0) g *= 1 - afn_rise_float/100; // floaty rise + hang\n"
+                        "    // player_vy -= g;\n"
+                        "    // if (player_vy < 0) { // past the apex: heavier fall\n"
+                        "    //   extra = afn_fall_force;\n"
+                        "    //   if (afn_fall_smooth) extra *= ease(descentFrames/afn_fall_smooth);\n"
+                        "    //   player_vy -= extra; }\n"
+                        "    // clamp to -afn_terminal_vel; player_y += player_vy; land -> vy=0",
+                        forceFixed, fallFixed, riseFloat, smooth);
                     setActionFunc(infoNode, "_jump", bodyBuf);
                     break;
                 }
@@ -22066,6 +22129,28 @@ void FrameTick(float dt)
                         "    // --- Runtime --- gate evaluated inline; player_on_ground mirrors the\n"
                         "    // engine 'grounded' flag set each frame (true the instant you land),\n"
                         "    // so this is the clean inverse of Is On Ground for jump/fall anims.");
+                    break;
+                }
+                case VsNodeType::IsLanding: {
+                    editorCode = "// Gate: passes exec for a short window after touchdown";
+                    setActionFunc(infoNode, "_is_landing",
+                        "    if (afn_land_timer > 0) {\n"
+                        "        // ... downstream actions (e.g. Play Skel Anim(land)) ...\n"
+                        "    }\n"
+                        "    // --- Runtime (psv main.c) --- afn_land_timer is set to ~12 the frame\n"
+                        "    // the player first touches the floor (grounded rising edge) and\n"
+                        "    // counts down 1/frame; gate the idle chain with Is Not Landing so\n"
+                        "    // the land pose isn't immediately overwritten by idle.");
+                    break;
+                }
+                case VsNodeType::IsNotLanding: {
+                    editorCode = "// Gate: passes exec when NOT in the land window";
+                    setActionFunc(infoNode, "_is_not_landing",
+                        "    if (afn_land_timer <= 0) {\n"
+                        "        // ... downstream actions (e.g. Play Idle) ...\n"
+                        "    }\n"
+                        "    // --- Runtime --- inverse of Is Landing; put it before grounded idle\n"
+                        "    // so the land anim owns the rig during its window, then idle resumes.");
                     break;
                 }
                 case VsNodeType::TurnPlayer: {
@@ -25021,6 +25106,8 @@ void FrameTick(float dt)
                     case VsNodeType::IsDodging:     suffix = "_is_dodging"; break;
                     case VsNodeType::IsNotDodging:  suffix = "_is_not_dodging"; break;
                     case VsNodeType::IsAirborne:    suffix = "_is_airborne"; break;
+                    case VsNodeType::IsLanding:     suffix = "_is_landing"; break;
+                    case VsNodeType::IsNotLanding:  suffix = "_is_not_landing"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -25531,6 +25618,8 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsDodging].name)) addNodeAt(VsNodeType::IsDodging);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNotDodging].name)) addNodeAt(VsNodeType::IsNotDodging);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsAirborne].name)) addNodeAt(VsNodeType::IsAirborne);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsLanding].name)) addNodeAt(VsNodeType::IsLanding);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNotLanding].name)) addNodeAt(VsNodeType::IsNotLanding);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP].name)) addNodeAt(VsNodeType::SetHP);
@@ -25761,7 +25850,7 @@ void FrameTick(float dt)
         // Properties panel overlay — as child window inside canvas (data nodes only)
         if (sVsSelected >= 0 && sVsSelected < (int)sVsNodes.size()) {
             VsNode& n = sVsNodes[sVsSelected];
-            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt || n.type == VsNodeType::SoundInstance || n.type == VsNodeType::SkelAnim || n.type == VsNodeType::PlayHudAnim || n.type == VsNodeType::StopHudAnim || n.type == VsNodeType::MovePlayer || n.type == VsNodeType::TurnPlayer || n.type == VsNodeType::AttachedSprite || n.type == VsNodeType::LockOnTarget) {
+            if (n.type == VsNodeType::Integer || n.type == VsNodeType::Key || n.type == VsNodeType::Direction || n.type == VsNodeType::Animation || n.type == VsNodeType::Float || n.type == VsNodeType::Group || n.type == VsNodeType::Object || n.type == VsNodeType::BlueprintRef || n.type == VsNodeType::ChangeScene || n.type == VsNodeType::CustomCode || n.type == VsNodeType::CompareInt || n.type == VsNodeType::SoundInstance || n.type == VsNodeType::SkelAnim || n.type == VsNodeType::PlayHudAnim || n.type == VsNodeType::StopHudAnim || n.type == VsNodeType::MovePlayer || n.type == VsNodeType::TurnPlayer || n.type == VsNodeType::AttachedSprite || n.type == VsNodeType::LockOnTarget || n.type == VsNodeType::Jump) {
             const auto& def = sVsNodeDefs[(int)n.type];
             float propW = 260, propH = 180;
             float nodeScreenX = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -25787,6 +25876,19 @@ void FrameTick(float dt)
                 ImGui::Text("Direction");
                 ImGui::Combo("##Dir", &n.paramInt[0], sVsAxisNames, kVsAxisCount);
                 break;
+            case VsNodeType::Jump: {
+                // Anime-jump shaping (PSV), stored in paramInt; Force/Fall Force
+                // come from the wired pins. Rise Float reduces gravity while
+                // rising (floaty hang at apex); Fall Smooth eases the Fall Force
+                // in over the descent instead of snapping it on at the apex.
+                ImGui::Text("Rise Float %");
+                if (ImGui::SliderInt("##JmpRise", &n.paramInt[1], 0, 90)) sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reduces gravity WHILE RISING so the jump floats up and hangs at the apex (anime jump). 0 = normal gravity, 90 = very floaty. PSV.");
+                ImGui::Text("Fall Smooth (frames)");
+                if (ImGui::SliderInt("##JmpSmooth", &n.paramInt[0], 0, 30)) sProjectDirty = true;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Eases the Fall Force in over N descent frames (quadratic) instead of snapping it on at the apex. 0 = instant. PSV.");
+                break;
+            }
             case VsNodeType::MovePlayer: {
                 // Facing: turn the rig toward the movement (default), or keep
                 // its current yaw (strafe / moonwalk). Stored in paramInt[0];
@@ -25964,6 +26066,7 @@ void FrameTick(float dt)
                             if (ImGui::Selectable(sRiggedMeshAssets[ri].name.c_str(), sel)) {
                                 n.paramInt[0] = ri;
                                 n.paramInt[1] = 0; // reset clip when rig changes
+                                n.clipName[0] = '\0';
                             }
                             if (sel) ImGui::SetItemDefaultFocus();
                         }
@@ -25978,8 +26081,12 @@ void FrameTick(float dt)
                         if (ImGui::BeginCombo("##SkelClip", clipPreview)) {
                             for (int c = 0; c < (int)clips.size(); c++) {
                                 bool sel2 = (c == n.paramInt[1]);
-                                if (ImGui::Selectable(clips[c].name.c_str(), sel2))
+                                if (ImGui::Selectable(clips[c].name.c_str(), sel2)) {
                                     n.paramInt[1] = c;
+                                    // Remember the name so the index re-resolves if clips reorder.
+                                    strncpy(n.clipName, clips[c].name.c_str(), sizeof(n.clipName) - 1);
+                                    n.clipName[sizeof(n.clipName) - 1] = '\0';
+                                }
                                 if (sel2) ImGui::SetItemDefaultFocus();
                             }
                             ImGui::EndCombo();

@@ -35,25 +35,53 @@ static void afn_emitted_script_collision2d(void) {
 }
 static void afn_bp0_start(void) {
     afn_play_sfx(0, 0, 0);
-    afn_rig_clip = 10;
+    afn_rig_clip = 16;
 #ifdef AFN_HAS_PLAYER_RIG
     afn_stick_8way = 1;
 #endif
 }
 static void afn_bp0_update(void) {
     if (afn_cam_lock_target >= 0) {
+    if (player_on_ground) {
 #ifdef AFN_HAS_CAM_LOCK
-    afn_strafe_clip[0] = 12;
-    afn_strafe_clip[1] = 15;
-    afn_strafe_clip[2] = 13;
-    afn_strafe_clip[3] = 17;
+    afn_strafe_clip[0] = 16;
+    afn_strafe_clip[1] = 19;
+    afn_strafe_clip[2] = 17;
+    afn_strafe_clip[3] = 21;
     afn_strafe_clip[4] = 5;
-    afn_strafe_clip[5] = 14;
-    afn_strafe_clip[6] = 16;
-    afn_strafe_clip[7] = 18;
+    afn_strafe_clip[5] = 18;
+    afn_strafe_clip[6] = 20;
+    afn_strafe_clip[7] = 22;
     afn_strafe_anim = 1;
 #endif
     }
+    }
+    if (afn_dodge_frames <= 0) {
+    if (player_on_ground) {
+    if (afn_land_timer <= 0) {
+    afn_rig_clip = 12;
+    }
+    }
+    }
+#ifdef AFN_HAS_PLAYER_RIG
+    if (player_vy_now > 0) {
+#else
+    if (player_vy > 0) {
+#endif
+    afn_rig_clip = 13;
+    }
+#ifdef AFN_HAS_PLAYER_RIG
+    if (!player_on_ground && player_vy_now < 0) {
+#else
+    if (!player_on_ground && player_vy <= 0) {
+#endif
+    afn_rig_clip = 14;
+    }
+    if (afn_land_timer > 0) {
+    afn_rig_clip = 15;
+    }
+    afn_gravity = 12;
+    afn_terminal_vel = 6144;
 }
 static void afn_bp0_key_held(void) {
     if (key_is_down(KEY_LSTICK_UP)) {
@@ -61,8 +89,10 @@ static void afn_bp0_key_held(void) {
         afn_key_mag = afn_stick_mag[0];
 #endif
     if (!afn_player_frozen) afn_input_fwd += afn_key_mag;
-    afn_rig_clip = 12;
     if (!afn_speed_prio) afn_move_speed = 6;
+    if (player_on_ground) {
+    afn_rig_clip = 16;
+    }
     }
     if (key_is_down(KEY_RSTICK_LEFT)) {
 #ifdef AFN_HAS_STICK_SENS
@@ -94,7 +124,9 @@ static void afn_bp0_key_held(void) {
 #endif
     if (!afn_player_frozen) afn_input_fwd -= afn_key_mag;
     if (!afn_speed_prio) afn_move_speed = 6;
-    afn_rig_clip = 12;
+    if (player_on_ground) {
+    afn_rig_clip = 16;
+    }
     }
     if (key_is_down(KEY_LSTICK_RIGHT)) {
 #ifdef AFN_HAS_STICK_SENS
@@ -102,7 +134,9 @@ static void afn_bp0_key_held(void) {
 #endif
     if (!afn_player_frozen) afn_input_right -= afn_key_mag;
     if (!afn_speed_prio) afn_move_speed = 6;
-    afn_rig_clip = 12;
+    if (player_on_ground) {
+    afn_rig_clip = 16;
+    }
     }
     if (key_is_down(KEY_LSTICK_LEFT)) {
 #ifdef AFN_HAS_STICK_SENS
@@ -110,7 +144,9 @@ static void afn_bp0_key_held(void) {
 #endif
     if (!afn_player_frozen) afn_input_right += afn_key_mag;
     if (!afn_speed_prio) afn_move_speed = 6;
-    afn_rig_clip = 12;
+    if (player_on_ground) {
+    afn_rig_clip = 16;
+    }
     }
 }
 static void afn_bp0_key_pressed(void) {
@@ -124,23 +160,56 @@ static void afn_bp0_key_pressed(void) {
     afn_active_camera = 1;
       } }
     }
+    if (key_hit(KEY_R)) {
+        afn_key_mag = 256;
+#ifdef AFN_HAS_PLAYER_RIG
+    if (afn_dodge_cd <= 0) {
+        afn_dodge_speed = 50;
+        afn_dodge_frames = 20;
+        afn_dodge_clip_l = 11;
+        afn_dodge_clip_r = 10;
+        afn_dodge_idle = -1;
+        afn_dodge_ramp = 6;
+        afn_dodge_falloff = 12;
+        afn_dodge_cd = 35;
+        afn_dodge_trigger = 1;
+    }
+#endif
+    }
+    if (key_hit(KEY_A)) {
+        afn_key_mag = 256;
+    if (player_on_ground) player_vy = 256;
+#ifdef AFN_HAS_PLAYER_RIG
+    afn_fall_force = 0;
+    afn_rise_float = 19;
+    afn_fall_smooth = 30;
+#endif
+    }
 }
 static void afn_bp0_key_released(void) {
     if (key_released(KEY_LSTICK_UP)) {
         afn_key_mag = 256;
-    afn_rig_clip = 10;
+    if (player_on_ground) {
+    afn_rig_clip = 12;
+    }
     }
     if (key_released(KEY_LSTICK_DOWN)) {
         afn_key_mag = 256;
-    afn_rig_clip = 10;
+    if (player_on_ground) {
+    afn_rig_clip = 12;
+    }
     }
     if (key_released(KEY_LSTICK_RIGHT)) {
         afn_key_mag = 256;
-    afn_rig_clip = 10;
+    if (player_on_ground) {
+    afn_rig_clip = 12;
+    }
     }
     if (key_released(KEY_LSTICK_LEFT)) {
         afn_key_mag = 256;
-    afn_rig_clip = 10;
+    if (player_on_ground) {
+    afn_rig_clip = 12;
+    }
     }
 }
 static void afn_bp0_collision(void) {

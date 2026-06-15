@@ -146,6 +146,21 @@ void EmitNodeScriptBodies(std::ostream& f,
                 auto* d = findDataIn(a->id, 0);
                 float force = d ? resolveFloat(d) : 2.0f;
                 f << "    if (player_on_ground) player_vy = " << (int)(force * 256.0f) << ";\n";
+                // Anime-jump shaping (PSV): Fall Force pin = extra downward accel
+                // past the apex; node sliders paramInt[1]=Rise Float % (gravity
+                // removed while rising) and paramInt[0]=Fall Smooth (ease-in
+                // frames). Guarded so NDS/PSP/GBA (no globals) are unaffected.
+                auto* ff = findDataIn(a->id, 1);
+                int fallForce = ff ? (int)(resolveFloat(ff) * 256.0f) : 0;
+                int smooth    = a->paramInt[0];
+                int riseFloat = a->paramInt[1];
+                if (fallForce || smooth || riseFloat) {
+                    f << "#ifdef AFN_HAS_PLAYER_RIG\n";
+                    f << "    afn_fall_force = " << fallForce << ";\n";
+                    f << "    afn_rise_float = " << riseFloat << ";\n";
+                    f << "    afn_fall_smooth = " << smooth << ";\n";
+                    f << "#endif\n";
+                }
                 break;
             }
             case GBAScriptNodeType::SetGravity: {
@@ -478,13 +493,26 @@ void EmitNodeScriptBodies(std::ostream& f,
             case GBAScriptNodeType::IsAirborne:
                 f << "    if (!player_on_ground) {\n"; break;
             case GBAScriptNodeType::IsJumping:
-                // Matches GBA: just "rising," no airborne guard. Sounds wrong
-                // vs the editor tooltip but the BP idioms (e.g. jump SFX on
-                // the same frame Jump sets player_vy while still grounded)
-                // depend on this looser check.
-                f << "    if (player_vy > 0) {\n"; inJumpGate = true; break;
+                // PSV exposes the ACTUAL vertical velocity (player_vy_now), so
+                // "rising" is accurate the whole ascent. Other targets keep the
+                // legacy look (player_vy, the Jump impulse) for the BP idioms
+                // (e.g. jump SFX on the same frame Jump sets player_vy).
+                f << "#ifdef AFN_HAS_PLAYER_RIG\n"
+                     "    if (player_vy_now > 0) {\n"
+                     "#else\n"
+                     "    if (player_vy > 0) {\n"
+                     "#endif\n"; inJumpGate = true; break;
             case GBAScriptNodeType::IsFalling:
-                f << "    if (!player_on_ground && player_vy <= 0) {\n"; inJumpGate = true; break;
+                // PSV: true only while genuinely descending (player_vy_now < 0).
+                f << "#ifdef AFN_HAS_PLAYER_RIG\n"
+                     "    if (!player_on_ground && player_vy_now < 0) {\n"
+                     "#else\n"
+                     "    if (!player_on_ground && player_vy <= 0) {\n"
+                     "#endif\n"; inJumpGate = true; break;
+            case GBAScriptNodeType::IsLanding:
+                f << "    if (afn_land_timer > 0) {\n"; break;
+            case GBAScriptNodeType::IsNotLanding:
+                f << "    if (afn_land_timer <= 0) {\n"; break;
             case GBAScriptNodeType::IsNear2D:
                 // Mirrors GBA: fires when the player just collided with
                 // THIS BP's tm_object. Combined with OnKeyPressed(A) this
@@ -849,6 +877,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                    t == GBAScriptNodeType::IsDodging ||
                    t == GBAScriptNodeType::IsNotDodging ||
                    t == GBAScriptNodeType::IsAirborne ||
+                   t == GBAScriptNodeType::IsLanding ||
+                   t == GBAScriptNodeType::IsNotLanding ||
                    t == GBAScriptNodeType::IsInView;
         };
         auto walkExec = [&](int nodeId, int pinIdx) {
@@ -931,6 +961,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                            a->type == GBAScriptNodeType::IsDodging ||
                            a->type == GBAScriptNodeType::IsNotDodging ||
                            a->type == GBAScriptNodeType::IsAirborne ||
+                           a->type == GBAScriptNodeType::IsLanding ||
+                           a->type == GBAScriptNodeType::IsNotLanding ||
                            a->type == GBAScriptNodeType::IsInView);
             if (isGate) {
                 bool wasJump = inJumpGate;

@@ -890,6 +890,10 @@ int afn_current_mode=0, afn_current_scene=0, afn_scripts_stopped=0;
 int afn_start_x=0, afn_start_y=0, afn_start_z=0, afn_text_color=0, afn_timer_visible=0;
 int afn_wall_collided_sprite=-1, afn_fade_target=0, afn_fade_frames=0, afn_fade_counter=0, afn_fade_level=0;
 int player_vy=0, player_ground_y=0, afn_player_vx_world=0, afn_player_vz_world=0;
+int player_vy_now=0;   // ACTUAL current vertical velocity (8.8) exposed to nodes each frame;
+                       // unlike player_vy (Jump-node impulse, zeroed after capture) this is
+                       // reliable for Is Jumping (>0 rising) / Is Falling (<0 descending) on PSV.
+int afn_land_timer=0;  // frames remaining in the post-touchdown "land" window (Is Landing gate)
 int afn_velocity_falloff=0, afn_pending_boost_fwd=0;
 int afn_grinding=0, afn_grinding_active=0, afn_grind_rail=-1, afn_grind_power=0;
 int afn_grind_boost=0, afn_grind_bleed=0, afn_grind_catch_y=0, afn_grind_catch_x=0;
@@ -898,6 +902,9 @@ int afn_grind_vel=0, afn_grind_dx=0, afn_grind_dz=0;   // runtime grind state (I
 // SetMaxFall node (which writes value*256) drives them. Seeded to the PSV
 // world defaults (0.8 / 30) rather than the weak editor-pixel defaults.
 int afn_gravity=205, afn_terminal_vel=7680, afn_friction=0, afn_force_x=0, afn_force_z=0;
+int afn_fall_force=0;   // Jump node Fall Force: extra downward accel (8.8) applied once past the apex
+int afn_rise_float=0;   // Jump Rise Float: % of gravity removed WHILE RISING (anime float/hang), 0..90
+int afn_fall_smooth=0;  // Jump Fall Smooth: frames to ease the Fall Force in past the apex (0 = snap)
 int afn_cam_locked=0, afn_cam_speed=0, afn_tank_camera=0, afn_player_heading=0;
 int afn_tank_move=1;   // 1 = movement axes follow the tank heading (classic tank);
                        // 0 = TurnPlayer(Camera Relative): heading only steers facing
@@ -1557,6 +1564,7 @@ int main(void)
         // (Jump/IsJumping gates), player_moving (IsMoving), and player_x/y/z
         // (teleport/distance/checkpoint nodes read+write the world position).
         player_on_ground = grounded;
+        player_vy_now = (int)(playerVY * 256.0f);   // last frame's real vy -> Is Jumping/Is Falling
         int pteleX = player_x = (int)playerX;
         int pteleY = player_y = (int)playerY;
         int pteleZ = player_z = (int)playerZ;
@@ -1982,14 +1990,34 @@ int main(void)
         if (player_vy != 0) { jumpVel = player_vy / 256.0f; player_vy = 0; }
         if (jumpVel != 0.0f) { playerVY = jumpVel; grounded = 0; }   // Jump node
         collide_walls(&playerX, &playerZ, playerY);
-        playerVY -= afn_gravity / 256.0f;                  // gravity (SetGravity node, 8.8)
+        {   // Anime-jump envelope: floaty rise (reduced gravity while rising,
+            // for hangtime at the apex) + heavier, optionally-eased fall past it.
+            static int s_fallFrames = 0;
+            float g = afn_gravity / 256.0f;                 // gravity (SetGravity node, 8.8)
+            if (playerVY > 0.0f && afn_rise_float > 0)      // Rise Float: float up / hang
+                g *= 1.0f - afn_rise_float * 0.01f;
+            playerVY -= g;
+            if (playerVY < 0.0f) {                          // past the apex: extra downward push
+                float extra = afn_fall_force / 256.0f;
+                if (afn_fall_smooth > 0) {                  // ease the Fall Force in (quadratic)
+                    if (++s_fallFrames > afn_fall_smooth) s_fallFrames = afn_fall_smooth;
+                    float t = (float)s_fallFrames / (float)afn_fall_smooth;
+                    extra *= t * t;
+                }
+                playerVY -= extra;
+            } else {
+                s_fallFrames = 0;
+            }
+        }
         float term = afn_terminal_vel / 256.0f;
         if (playerVY < -term) playerVY = -term;            // terminal velocity (SetMaxFall node)
         playerY += playerVY;
         {
+            int wasGrounded = grounded;
             float fy, fn[3];
             if (collide_floor(playerX, playerZ, playerY, &fy, fn) && playerY <= fy - COL_BOTTOM) {
                 playerY = fy - COL_BOTTOM; playerVY = 0.0f; grounded = 1;
+                if (!wasGrounded) afn_land_timer = 12;   // just touched down -> open the land-anim window
                 // Ease the rig's up-axis toward the floor normal (slope tilt).
                 s_floorN[0] += (fn[0]-s_floorN[0])*0.2f;
                 s_floorN[1] += (fn[1]-s_floorN[1])*0.2f;
@@ -2001,6 +2029,7 @@ int main(void)
                 s_floorN[2] += (0.0f-s_floorN[2])*0.1f;
             }
         }
+        if (afn_land_timer > 0) afn_land_timer--;   // bleed the land-anim window (Is Landing gate)
 
 #ifdef AFN_HAS_PLAYER_RIG
         // Per-NPC gravity + floor landing (NDS render_npc_rigs parity): enemies
