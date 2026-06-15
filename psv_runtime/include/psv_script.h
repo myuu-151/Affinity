@@ -178,7 +178,7 @@ static void afn_bp0_key_pressed(void) {
     }
     if (key_hit(KEY_A)) {
         afn_key_mag = 256;
-    if (player_on_ground) player_vy = 256;
+    if (player_on_ground) player_vy = 384;
 #ifdef AFN_HAS_PLAYER_RIG
     afn_fall_force = 0;
     afn_rise_float = 19;
