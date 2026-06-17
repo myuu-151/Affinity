@@ -235,8 +235,8 @@ static void afn_bp1_key_pressed(void) {
     afn_hud_visible[0] = 1;
 #ifdef AFN_HAS_HUD_ANCHOR
     if (afn_bp_cur_spr_idx >= 0) afn_hud_anchor_sprite[0] = afn_bp_cur_spr_idx;
-    afn_hud_anchor_min[0] = 10;
-    afn_hud_anchor_max[0] = 11;
+    afn_hud_anchor_min[0] = 30;
+    afn_hud_anchor_max[0] = 40;
     afn_hud_anchor_near[0] = 11;
     afn_hud_anchor_far[0] = 97;
 #endif
@@ -282,12 +282,41 @@ static void afn_bp1_collision(void) {
 }
 static void afn_bp1_collision2d(void) {
 }
+static void afn_bp2_start(void) {
+    afn_hud_visible[1] = 1;
+#ifdef AFN_HAS_HUD_ANCHOR
+    afn_hud_anchor_sprite[1] = -1;
+#endif
+    afn_elem_idx = 1;
+    afn_active_element = 1;
+    afn_cursor_stop = 0;
+    afn_stop_count = afn_hud_elems[1].stopCount;
+    if (afn_stop_count > 0) {
+      afn_player_frozen = 1;
+      afn_play_anim = -1;
+      afn_move_speed = 0;
+      { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[1].stopStart + si].link; }
+    }
+}
+static void afn_bp2_update(void) {
+}
+static void afn_bp2_key_held(void) {
+}
+static void afn_bp2_key_pressed(void) {
+}
+static void afn_bp2_key_released(void) {
+}
+static void afn_bp2_collision(void) {
+}
+static void afn_bp2_collision2d(void) {
+}
 
-#define AFN_BP_COUNT 2
-#define AFN_BP_INSTANCE_COUNT 2
-static const unsigned int afn_bp_instances[2][5] = {
+#define AFN_BP_COUNT 3
+#define AFN_BP_INSTANCE_COUNT 3
+static const unsigned int afn_bp_instances[3][5] = {
     { 0, 0, 4294967295, 0, 0xffffffffu },
     { 1, 6, 4294967295, 0, 0xffffffffu },
+    { 2, 4294967295, 4294967295, 1, 0x1u },
 };
 static void afn_bp_dispatch_start(void) {
     extern int afn_current_mode;
@@ -303,6 +332,7 @@ static void afn_bp_dispatch_start(void) {
         switch (bpIdx) {
             case 0: afn_bp0_start(); break;
             case 1: afn_bp1_start(); break;
+            case 2: afn_bp2_start(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -322,6 +352,7 @@ static void afn_bp_dispatch_update(void) {
         switch (bpIdx) {
             case 0: afn_bp0_update(); break;
             case 1: afn_bp1_update(); break;
+            case 2: afn_bp2_update(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -341,6 +372,7 @@ static void afn_bp_dispatch_key_held(void) {
         switch (bpIdx) {
             case 0: afn_bp0_key_held(); break;
             case 1: afn_bp1_key_held(); break;
+            case 2: afn_bp2_key_held(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -360,6 +392,7 @@ static void afn_bp_dispatch_key_pressed(void) {
         switch (bpIdx) {
             case 0: afn_bp0_key_pressed(); break;
             case 1: afn_bp1_key_pressed(); break;
+            case 2: afn_bp2_key_pressed(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -379,6 +412,7 @@ static void afn_bp_dispatch_key_released(void) {
         switch (bpIdx) {
             case 0: afn_bp0_key_released(); break;
             case 1: afn_bp1_key_released(); break;
+            case 2: afn_bp2_key_released(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -399,6 +433,7 @@ static void afn_bp_dispatch_collision(void) {
         switch (bpIdx) {
             case 0: afn_bp0_collision(); break;
             case 1: afn_bp1_collision(); break;
+            case 2: afn_bp2_collision(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -419,8 +454,11 @@ static void afn_bp_dispatch_collision2d(void) {
         switch (bpIdx) {
             case 0: afn_bp0_collision2d(); break;
             case 1: afn_bp1_collision2d(); break;
+            case 2: afn_bp2_collision2d(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
     afn_bp_cur_tm_obj  = -1;
 }
+#define AFN_START_MODE 1
+#define AFN_START_SCENE 0

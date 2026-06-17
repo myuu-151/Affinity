@@ -175,6 +175,10 @@ static bool sInitialized = false;
 enum class EditorTab { Map, Sprites, Tiles, Skybox, Player, ThreeD, Mode7, Tilemap, Events, Elements, Sound };
 static EditorTab sActiveTab = EditorTab::Map;
 static EditorTab sPlayTab = EditorTab::Map; // which tab Play was started on
+// Last SCENE tab visited (0 = 3D/Mode4, 1 = 2D/Mode0, 2 = Mode1). Drives the
+// exported boot mode so a build from a non-scene tab (Elements/Nodes/Graphics)
+// still boots into the scene the user was authoring.
+static int sLastSceneTabMode = 0;
 
 // Dummy tileset: 16 colors for the palette display
 static uint32_t sPalette[16] = {
@@ -4415,6 +4419,11 @@ static std::string sPackageOutputPath;
 
 enum class BuildTarget { GBA = 0, NDS = 1, PSP = 2, PSV = 3 };
 static BuildTarget sBuildTarget = BuildTarget::NDS; // default to NDS
+
+// PSV build target relabels the scene modes in the UI: Mode 0 -> "2D Scene",
+// Mode 4 -> "3D Scene". Other targets keep the GBA-era "Mode N" names.
+static const char* Mode0Label() { return sBuildTarget == BuildTarget::PSV ? "2D Scene" : "Mode 0"; }
+static const char* Mode4Label() { return sBuildTarget == BuildTarget::PSV ? "3D Scene" : "Mode 4"; }
 static bool sNdsAntialiasing = false; // NDS-only — adds smooth mesh edges but fringes textures
 static bool sBuildRequested = false; // set by toolbar Build button
 
@@ -5824,7 +5833,7 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "face_cull=%d\n", sCamObj.faceCull ? 1 : 0);
     fprintf(f, "dynamic_horizon=%d\n", sCamObj.dynamicHorizon ? 1 : 0);
     fprintf(f, "icon_scale=%.6f\n", sCamObjEditorScale);
-    fprintf(f, "build_target=%d\n\n", (int)sBuildTarget);
+    fprintf(f, "build_target=%d\nstart_scene_mode=%d\n\n", (int)sBuildTarget, sLastSceneTabMode);
 
     // Editor camera
     fprintf(f, "[EditorCamera]\n");
@@ -6826,7 +6835,7 @@ static bool LoadProject(const std::string& path)
         sSoundBank.end());
     SnapshotCleanBank();
 
-    char line[80000]; // large buffer for frame pixel data lines (128x128 = ~64KB worst case)
+    static char line[1 << 21]; // 2MB: a 512x512 frame's ",%d" pixel line is ~800KB (static, off the stack)
     char section[64] = {};
     int tmSubdivLevel = 0; // 0=old, 1=first 2x, 2=current 4x
     int projectVersion = 1; // v1 = pre-IsFalling enum, v2 = current
@@ -6950,6 +6959,7 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "dynamic_horizon=%d", &ival) == 1) sCamObj.dynamicHorizon = (ival != 0);
             else if (sscanf(line, "icon_scale=%f", &fval) == 1) sCamObjEditorScale = fval;
             else if (sscanf(line, "build_target=%d", &ival) == 1) sBuildTarget = (BuildTarget)ival;
+            else if (sscanf(line, "start_scene_mode=%d", &ival) == 1) sLastSceneTabMode = ival;
         }
         else if (strcmp(section, "EditorCamera") == 0)
         {
@@ -11432,15 +11442,23 @@ static void DrawTabBar()
         ImGui::SameLine();
     };
 
-    TabButton("Mode 4",  EditorTab::Map);
-    TabButton("Mode 1",  EditorTab::Mode7);
-    TabButton("Mode 0",  EditorTab::Tilemap);
-    TabButton("Sprites", EditorTab::Sprites);
+    TabButton(Mode4Label(), EditorTab::Map);
+    if (sBuildTarget != BuildTarget::PSV)
+        TabButton("Mode 1",  EditorTab::Mode7);
+    else if (sActiveTab == EditorTab::Mode7)
+        sActiveTab = EditorTab::Map;   // Mode 1 is hidden on PSV — fall back to the 3D Scene tab
+    TabButton(Mode0Label(), EditorTab::Tilemap);
+    TabButton(sBuildTarget == BuildTarget::PSV ? "Graphics" : "Sprites", EditorTab::Sprites);
     TabButton("Skybox",  EditorTab::Skybox);
     TabButton("3D",      EditorTab::ThreeD);
     TabButton("Nodes",    EditorTab::Events);
     TabButton("Elements", EditorTab::Elements);
     TabButton("Sound",    EditorTab::Sound);
+
+    // Track the last scene tab so a build from any tab boots into it.
+    if (sActiveTab == EditorTab::Map)          sLastSceneTabMode = 0;
+    else if (sActiveTab == EditorTab::Tilemap) sLastSceneTabMode = 1;
+    else if (sActiveTab == EditorTab::Mode7)   sLastSceneTabMode = 2;
 
     ImGui::SameLine(0, Scaled(20));
     // Play/Stop button
@@ -11939,12 +11957,13 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             // 128x128 is PSV-only: PSV billboards are RGBA textures with no
             // size cap; GBA/NDS OAM hardware tops out at 64x64 (their
             // exporters downscale oversized frames to the largest OBJ size).
-            const char* sizes[] = { "8x8", "16x16", "32x32", "64x64", "128x128 (PSV)" };
-            int sizeVals[] = { 8, 16, 32, 64, 128 };
+            const char* sizes[] = { "8x8", "16x16", "32x32", "64x64", "128x128 (PSV)", "256x256 (PSV)", "512x512 (PSV)" };
+            int sizeVals[] = { 8, 16, 32, 64, 128, 256, 512 };
+            const int kNumSizes = 7;
             int curIdx = 2; // default 32x32
-            for (int si = 0; si < 5; si++)
+            for (int si = 0; si < kNumSizes; si++)
                 if (sizeVals[si] == asset.baseSize) { curIdx = si; break; }
-            if (ImGui::Combo("##baseSize", &curIdx, sizes, 5))
+            if (ImGui::Combo("##baseSize", &curIdx, sizes, kNumSizes))
             {
                 int newSize = sizeVals[curIdx];
                 int oldSize = asset.baseSize;
@@ -12088,8 +12107,11 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
 
             // Draw pixel grid
             float gridAvail = std::min(colW2 - Scaled(20), size.y * 0.5f);
+            // Fit the whole frame in the canvas. No hard 4px floor: a 512x512
+            // import would otherwise be forced to 4px/cell = 2048px and overflow
+            // the panel. Big frames just scale down (NEAREST keeps them crisp).
             float cellSize = std::min(gridAvail / (float)fw, gridAvail / (float)fh);
-            cellSize = std::max(cellSize, 4.0f);
+            cellSize = std::max(cellSize, 0.25f);
             float gridW = cellSize * fw;
             float gridH = cellSize * fh;
 
@@ -13258,7 +13280,7 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         // ---- Player camera presets (Mode 4) ----
         if (sp.type == SpriteType::Player) {
             ImGui::Separator();
-            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Camera Presets (Mode 4)");
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), sBuildTarget == BuildTarget::PSV ? "Camera Presets (3D Scene)" : "Camera Presets (Mode 4)");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Slot 0 is always the scene default camera. These are extra angles a SetCamera node blends to on an event (SetCamera Slot = 1, 2, ...). The camera keeps orbit-following the player.");
             for (int ci = 0; ci < (int)sp.cameraSlots.size(); ci++) {
                 CameraSlot& cs = sp.cameraSlots[ci];
@@ -16673,9 +16695,9 @@ void FrameTick(float dt)
                     exportHudElements.push_back(std::move(he));
                 }
 
-                // Determine start mode from active tab: 0=Mode4/3D, 1=Mode0/Tilemap, 2=Mode1/Mode7
-                int exportStartMode = (sActiveTab == EditorTab::Tilemap) ? 1 :
-                                      (sActiveTab == EditorTab::Mode7)   ? 2 : 0;
+                // Boot mode = the last scene tab the user was on (persists across
+                // visits to Elements/Nodes/etc.): 0=3D/Mode4, 1=2D/Mode0, 2=Mode1.
+                int exportStartMode = sLastSceneTabMode;
                 bool exportDeltaTime = (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
                                        ? sMapScenes[sMapSelectedScene].deltaTime : false;
                 bool exportShowFps = (sMapSelectedScene >= 0 && sMapSelectedScene < (int)sMapScenes.size())
@@ -19008,7 +19030,7 @@ void FrameTick(float dt)
             ImGui::Spacing();
 
             // Mode filter dropdown
-            const char* modeLabels[] = { "All", "Mode 4", "Mode 1" };
+            const char* modeLabels[] = { "All", Mode4Label(), "Mode 1" };
             ImGui::PushItemWidth(100);
             if (ImGui::BeginCombo("Mode##skymode", modeLabels[sky.modeFilter])) {
                 for (int m = 0; m < 3; m++) {
@@ -19280,7 +19302,7 @@ void FrameTick(float dt)
             }
 
             if (showM4 && !sMapScenes.empty()) {
-                ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Mode 4 Scenes");
+                ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), sBuildTarget == BuildTarget::PSV ? "3D Scenes" : "Mode 4 Scenes");
                 for (int si = 0; si < (int)sMapScenes.size(); si++) {
                     char label[64];
                     snprintf(label, sizeof(label), "%s##m4sky%d", sMapScenes[si].name, si);
@@ -19664,7 +19686,7 @@ void FrameTick(float dt)
                     break;
                 }
                 case VsNodeType::ChangeScene: {
-                    sub = (n.paramInt[1] == 2) ? "Mode 1" : (n.paramInt[1] == 1) ? "Mode 0" : "Mode 4";
+                    sub = (n.paramInt[1] == 2) ? "Mode 1" : (n.paramInt[1] == 1) ? Mode0Label() : Mode4Label();
                     break;
                 }
                 case VsNodeType::BlueprintRef: {
@@ -24944,26 +24966,31 @@ void FrameTick(float dt)
                     ImGui::PopStyleColor(2);
                 };
 
-                // --- Mode 4 Editor ---
-                codeSection(cwNode.codeScene[0] ? "Mode 4 Editor (modified)" : "Mode 4 Editor",
+                char secTitle[48];
+                // --- Mode 4 / 3D Scene Editor ---
+                snprintf(secTitle, sizeof(secTitle), "%s Editor%s", Mode4Label(), cwNode.codeScene[0] ? " (modified)" : "");
+                codeSection(secTitle,
                             "##CodeScene", ImVec4(0.4f, 0.8f, 1.0f, 1.0f), ImVec4(0.5f, 0.85f, 0.9f, 1.0f),
                             sVsCodeWindowSceneBuf, sizeof(sVsCodeWindowSceneBuf));
                 ImGui::Spacing();
 
-                // --- Mode 0 Editor ---
-                codeSection(cwNode.codeTilemap[0] ? "Mode 0 Editor (modified)" : "Mode 0 Editor",
+                // --- Mode 0 / 2D Scene Editor ---
+                snprintf(secTitle, sizeof(secTitle), "%s Editor%s", Mode0Label(), cwNode.codeTilemap[0] ? " (modified)" : "");
+                codeSection(secTitle,
                             "##CodeTilemap", ImVec4(0.4f, 1.0f, 0.6f, 1.0f), ImVec4(0.5f, 0.9f, 0.6f, 1.0f),
                             sVsCodeWindowTilemapBuf, sizeof(sVsCodeWindowTilemapBuf));
                 ImGui::Spacing();
 
-                // --- Mode 4 Runtime ---
-                codeSection(cwNode.codeRtMode4[0] ? "Mode 4 Runtime (modified)" : "Mode 4 Runtime",
+                // --- Mode 4 / 3D Scene Runtime ---
+                snprintf(secTitle, sizeof(secTitle), "%s Runtime%s", Mode4Label(), cwNode.codeRtMode4[0] ? " (modified)" : "");
+                codeSection(secTitle,
                             "##CodeRtM4", ImVec4(1.0f, 0.8f, 0.5f, 1.0f), ImVec4(0.9f, 0.8f, 0.5f, 1.0f),
                             sVsCodeWindowRtM4Buf, sizeof(sVsCodeWindowRtM4Buf));
                 ImGui::Spacing();
 
-                // --- Mode 0 Runtime ---
-                codeSection(cwNode.codeRtMode0[0] ? "Mode 0 Runtime (modified)" : "Mode 0 Runtime",
+                // --- Mode 0 / 2D Scene Runtime ---
+                snprintf(secTitle, sizeof(secTitle), "%s Runtime%s", Mode0Label(), cwNode.codeRtMode0[0] ? " (modified)" : "");
+                codeSection(secTitle,
                             "##CodeRtM0", ImVec4(1.0f, 0.6f, 0.8f, 1.0f), ImVec4(0.9f, 0.6f, 0.8f, 1.0f),
                             sVsCodeWindowRtM0Buf, sizeof(sVsCodeWindowRtM0Buf));
                 ImGui::Spacing();
@@ -26138,11 +26165,11 @@ void FrameTick(float dt)
             }
             case VsNodeType::ChangeScene: {
                 ImGui::Text("Mode");
-                const char* modeNames[] = { "Mode 4", "Mode 0", "Mode 1" };
+                const char* modeNames[] = { Mode4Label(), Mode0Label(), "Mode 1" };
                 int mode = std::clamp(n.paramInt[1], 0, 2);
                 if (ImGui::BeginCombo("##ModeSel", modeNames[mode])) {
-                    if (ImGui::Selectable("Mode 4", mode == 0)) { n.paramInt[1] = 0; }
-                    if (ImGui::Selectable("Mode 0", mode == 1)) { n.paramInt[1] = 1; }
+                    if (ImGui::Selectable(Mode4Label(), mode == 0)) { n.paramInt[1] = 0; }
+                    if (ImGui::Selectable(Mode0Label(), mode == 1)) { n.paramInt[1] = 1; }
                     if (ImGui::Selectable("Mode 1", mode == 2)) { n.paramInt[1] = 2; }
                     ImGui::EndCombo();
                 }
@@ -28904,10 +28931,21 @@ void FrameTick(float dt)
             ImVec2 winPos = ImGui::GetCursorScreenPos();
             ImVec2 winSize = ImGui::GetContentRegionAvail();
 
-            // Center the 240x160 canvas in the available area
+            // Canvas = target screen: GBA-native 240x160, or PSV's native 960x544
+            // when building for PSV (menus authored at the real Vita resolution).
+            int baseW = sBuildTarget == BuildTarget::PSV ? 960 : 240;
+            int baseH = sBuildTarget == BuildTarget::PSV ? 544 : 160;
+            // Auto-fit when the target (hence base resolution) changes.
+            static BuildTarget sHudLastTarget = (BuildTarget)-1;
+            if (sHudLastTarget != sBuildTarget) {
+                sHudLastTarget = sBuildTarget;
+                float fitZ = std::min(winSize.x / (float)baseW, winSize.y / (float)baseH) * 0.9f;
+                sHudCanvasZoom = std::clamp(fitZ, 0.2f, 8.0f);
+                sHudCanvasPan = ImVec2(0.0f, 0.0f);
+            }
             float zoom = sHudCanvasZoom;
-            float canvasW = 240.0f * zoom;
-            float canvasH = 160.0f * zoom;
+            float canvasW = (float)baseW * zoom;
+            float canvasH = (float)baseH * zoom;
             float cx = winPos.x + (winSize.x - canvasW) * 0.5f + sHudCanvasPan.x;
             float cy = winPos.y + (winSize.y - canvasH) * 0.5f + sHudCanvasPan.y;
 
@@ -28920,13 +28958,13 @@ void FrameTick(float dt)
             // Draw pixel grid (every pixel when zoomed enough, else every 8px tile grid)
             if (zoom >= 2.0f) {
                 // Per-pixel grid
-                for (int gx = 0; gx <= 240; gx++) {
+                for (int gx = 0; gx <= baseW; gx++) {
                     float sx = cx + gx * zoom;
                     int alpha = (gx % 8 == 0) ? (gx % 32 == 0 ? 160 : 80) : 40;
                     dl->AddLine(ImVec2(sx, cy), ImVec2(sx, cy + canvasH),
                         IM_COL32(60, 60, 80, alpha));
                 }
-                for (int gy = 0; gy <= 160; gy++) {
+                for (int gy = 0; gy <= baseH; gy++) {
                     float sy = cy + gy * zoom;
                     int alpha = (gy % 8 == 0) ? (gy % 32 == 0 ? 160 : 80) : 40;
                     dl->AddLine(ImVec2(cx, sy), ImVec2(cx + canvasW, sy),
@@ -28934,12 +28972,12 @@ void FrameTick(float dt)
                 }
             } else {
                 // Tile grid only at low zoom
-                for (int gx = 0; gx <= 240; gx += 8) {
+                for (int gx = 0; gx <= baseW; gx += 8) {
                     float sx = cx + gx * zoom;
                     dl->AddLine(ImVec2(sx, cy), ImVec2(sx, cy + canvasH),
                         IM_COL32(40, 40, 50, gx % 32 == 0 ? 120 : 60));
                 }
-                for (int gy = 0; gy <= 160; gy += 8) {
+                for (int gy = 0; gy <= baseH; gy += 8) {
                     float sy = cy + gy * zoom;
                     dl->AddLine(ImVec2(cx, sy), ImVec2(cx + canvasW, sy),
                         IM_COL32(40, 40, 50, gy % 32 == 0 ? 120 : 60));
@@ -29054,13 +29092,13 @@ void FrameTick(float dt)
                     float pszH = pc.size * lt.sy;
                     float psz = pc.size * zoom; // for wrap check (unscaled)
                     // Wrap at screen edges: pieces sliding off one side appear on the other
-                    float wrapX[] = { 0, -240, 240 };
-                    float wrapY[] = { 0, -160, 160 };
+                    float wrapX[] = { 0, (float)-baseW, (float)baseW };
+                    float wrapY[] = { 0, (float)-baseH, (float)baseH };
                     for (int wy = 0; wy < 3; wy++) {
                     for (int wx = 0; wx < 3; wx++) {
                         float wrpX = baseX + wrapX[wx];
                         float wrpY = baseY + wrapY[wy];
-                        if (wrpX + pc.size <= 0 || wrpX >= 240 || wrpY + pc.size <= 0 || wrpY >= 160) continue;
+                        if (wrpX + pc.size <= 0 || wrpX >= baseW || wrpY + pc.size <= 0 || wrpY >= baseH) continue;
                         int wi = wy * 3 + wx;
                         float px = cx + wrpX * zoom;
                         float py = cy + wrpY * zoom;
@@ -29497,11 +29535,14 @@ void FrameTick(float dt)
 
             // Zoom with scroll
             if (canvasHovered && ImGui::GetIO().MouseWheel != 0) {
-                sHudCanvasZoom = std::clamp(sHudCanvasZoom + ImGui::GetIO().MouseWheel * 0.25f, 1.0f, 8.0f);
+                float zMin = sBuildTarget == BuildTarget::PSV ? 0.2f : 1.0f;
+                sHudCanvasZoom = std::clamp(sHudCanvasZoom + ImGui::GetIO().MouseWheel * 0.25f, zMin, 8.0f);
             }
 
             // Canvas label
-            dl->AddText(ImVec2(cx, cy - 16), IM_COL32(150, 150, 170, 200), "240 x 160");
+            char canvLbl[24];
+            snprintf(canvLbl, sizeof(canvLbl), "%d x %d", baseW, baseH);
+            dl->AddText(ImVec2(cx, cy - 16), IM_COL32(150, 150, 170, 200), canvLbl);
         }
         ImGui::End();
         ImGui::PopStyleColor();
@@ -29650,7 +29691,7 @@ void FrameTick(float dt)
                     snprintf(clipPath, sizeof(clipPath), "%s/affinity_elem_clipboard.txt", home ? home : ".");
                     FILE* cf = fopen(clipPath, "r");
                     if (cf) {
-                        char line[4096];
+                        static char line[1 << 21]; // 2MB: a 512x512 frame's hex pixel line is ~525KB (static, off the stack)
                         // Read sprite assets — build remap table (old index -> new index)
                         std::vector<std::pair<int,int>> assetRemap; // {oldIdx, newIdx}
                         int assetCount = 0;
@@ -29875,7 +29916,10 @@ void FrameTick(float dt)
 
                 // Runtime mode
                 {
-                    static const char* modeNames[] = { "Both", "Mode 4 Only", "Mode 0 Only" };
+                    char m4Only[32], m0Only[32];
+                    snprintf(m4Only, sizeof(m4Only), "%s Only", Mode4Label());
+                    snprintf(m0Only, sizeof(m0Only), "%s Only", Mode0Label());
+                    const char* modeNames[] = { "Both", m4Only, m0Only };
                     if (ImGui::Combo("Runtime Mode", &el.runtimeMode, modeNames, 3))
                         sProjectDirty = true;
                 }
@@ -29888,8 +29932,9 @@ void FrameTick(float dt)
                     int enabledCount = 0;
                     for (int si = 0; si < count; si++) if (el.mode0SceneMask & (1u << si)) enabledCount++;
                     char label0[64];
-                    if (allOn || enabledCount == count) snprintf(label0, sizeof(label0), "Mode 0 Scenes: All");
-                    else snprintf(label0, sizeof(label0), "Mode 0 Scenes: %d/%d", enabledCount, count);
+                    const char* m0Pfx = sBuildTarget == BuildTarget::PSV ? "2D" : "Mode 0";
+                    if (allOn || enabledCount == count) snprintf(label0, sizeof(label0), "%s Scenes: All", m0Pfx);
+                    else snprintf(label0, sizeof(label0), "%s Scenes: %d/%d", m0Pfx, enabledCount, count);
                     if (ImGui::TreeNode(label0)) {
                         for (int si = 0; si < count && si < 32; si++) {
                             bool on = (el.mode0SceneMask & (1u << si)) != 0;
@@ -29914,8 +29959,9 @@ void FrameTick(float dt)
                     int enabledCount4 = 0;
                     for (int si = 0; si < count4; si++) if (el.mode4SceneMask & (1u << si)) enabledCount4++;
                     char label4[64];
-                    if (allOn4 || enabledCount4 == count4) snprintf(label4, sizeof(label4), "Mode 4 Scenes: All");
-                    else snprintf(label4, sizeof(label4), "Mode 4 Scenes: %d/%d", enabledCount4, count4);
+                    const char* m4Pfx = sBuildTarget == BuildTarget::PSV ? "3D" : "Mode 4";
+                    if (allOn4 || enabledCount4 == count4) snprintf(label4, sizeof(label4), "%s Scenes: All", m4Pfx);
+                    else snprintf(label4, sizeof(label4), "%s Scenes: %d/%d", m4Pfx, enabledCount4, count4);
                     if (ImGui::TreeNode(label4)) {
                         for (int si = 0; si < count4 && si < 32; si++) {
                             bool on = (el.mode4SceneMask & (1u << si)) != 0;
@@ -30096,9 +30142,9 @@ void FrameTick(float dt)
                         }
                         // 128 is PSV-only (RGBA HUD pieces, no OBJ cap); the NDS
                         // exporter scales oversized pieces into its largest OBJ.
-                        int sizeIdx = (pc.size == 8) ? 0 : (pc.size == 16) ? 1 : (pc.size == 32) ? 2 : (pc.size == 64) ? 3 : 4;
-                        if (ImGui::Combo("Size##pc", &sizeIdx, "8\0" "16\0" "32\0" "64\0" "128 (PSV)\0")) {
-                            const int sizes[] = {8, 16, 32, 64, 128};
+                        int sizeIdx = (pc.size == 8) ? 0 : (pc.size == 16) ? 1 : (pc.size == 32) ? 2 : (pc.size == 64) ? 3 : (pc.size == 128) ? 4 : (pc.size == 256) ? 5 : 6;
+                        if (ImGui::Combo("Size##pc", &sizeIdx, "8\0" "16\0" "32\0" "64\0" "128 (PSV)\0" "256 (PSV)\0" "512 (PSV)\0")) {
+                            const int sizes[] = {8, 16, 32, 64, 128, 256, 512};
                             pc.size = sizes[sizeIdx]; sProjectDirty = true;
                         }
                         if (ImGui::DragInt("X##pc", &pc.localX, 1)) sProjectDirty = true;

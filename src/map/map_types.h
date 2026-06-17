@@ -35,7 +35,7 @@ struct TilemapLayer
 
 // ---- Sprite Asset System ----
 // A sprite frame: 4bpp pixel data at a specific size (8, 16, or 32 px square)
-static constexpr int kMaxFrameSize = 128; // max pixel dimension (up to 128x128 — PSV-only asset size)
+static constexpr int kMaxFrameSize = 512; // max pixel dimension (up to 512x512 — PSV-only asset sizes 256/512)
 
 struct SpriteFrame
 {

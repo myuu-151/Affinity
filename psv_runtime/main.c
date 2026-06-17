@@ -1082,14 +1082,13 @@ static int  script_present(void){ return 0; }
 #endif
 
 // ---------------------------------------------------------------------------
-// HUD overlay (Phase 8). 2D screen-space pieces/text/cursor authored in
-// GBA-native 240x160 (CLAUDE.md), drawn in an ortho pass scaled to the Vita
-// 960x544 screen via the projection. Pieces/cursor are RGBA frame textures from
+// HUD overlay (Phase 8). 2D screen-space pieces/text/cursor authored at the
+// PSV-native 960x544 (the Elements tab uses this canvas when the build target is
+// PSV), drawn 1:1 in an ortho pass. Pieces/cursor are RGBA frame textures from
 // psv_hud.h; text uses an embedded 8x8 font (uppercase + digits + symbols).
 //
-// UNTESTED: no project exported during development carried HUD elements. The
-// code compiles inert (no AFN_HAS_HUD) and activates when a scene with HUD data
-// is re-exported. Author coords drive 240x160; glOrthof maps that to the screen.
+// The code compiles inert (no AFN_HAS_HUD) and activates when a scene with HUD
+// data is re-exported. Author coords are 960x544; glOrthof maps that 1:1.
 #ifdef AFN_HAS_HUD
 static GLuint s_hudTex[AFN_HUD_FRAME_COUNT];
 static GLuint s_hudFontTex;
@@ -1268,17 +1267,17 @@ static int hud_project(float wx, float wy, float wz, float* outX, float* outY, f
     const float right = top * (SCR_W / SCR_H);
     float ndcX = (exq * (nearp / right)) / -ezq;
     float ndcY = (eyq * (nearp / top))  / -ezq;
-    *outX = (ndcX * 0.5f + 0.5f) * 240.0f;
-    *outY = (1.0f - (ndcY * 0.5f + 0.5f)) * 160.0f;
+    *outX = (ndcX * 0.5f + 0.5f) * 960.0f;
+    *outY = (1.0f - (ndcY * 0.5f + 0.5f)) * 544.0f;
     if (outDepth) *outDepth = -ezq;
     return 1;
 }
 
 static void hud_render(void) {
-    // Ortho 240x160 with a top-left origin (y grows downward) to match the
-    // editor's authoring space. The viewport is the full Vita screen, so this
-    // stretches 240x160 -> 960x544 (same 1.5:1 letterbox the scene uses).
-    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrthof(0, 240, 160, 0, -1, 1);
+    // Ortho 960x544 with a top-left origin (y grows downward) to match the
+    // editor's PSV authoring space (native Vita resolution). 1:1 with the screen
+    // — HUD pieces/text/cursor are authored directly in 960x544 pixels.
+    glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrthof(0, 960, 544, 0, -1, 1);
     glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
     glDisable(GL_DEPTH_TEST); glDisable(GL_LIGHTING); glDisable(GL_CULL_FACE);
     glEnable(GL_TEXTURE_2D);
@@ -1335,8 +1334,16 @@ static void hud_render(void) {
     for (int e = 0; e < AFN_HUD_ELEM_COUNT; e++) {
         const AfnHudElem* el = &afn_hud_elems[e];
         if (!afn_hud_visible[e]) continue;
-        if (el->mode == 2) continue;                       // Mode-0-only element
-        if (!(el->sceneMask & (1u << afn_current_scene))) continue;
+        // Mode gating: el->mode 0 = Both, 1 = 3D-only, 2 = 2D-only. In 2D (menu)
+        // mode draw Both + 2D-only; in 3D draw Both + 3D-only.
+        if (afn_current_mode == 1) { if (el->mode == 1) continue; }   // 2D: skip 3D-only
+        else                       { if (el->mode == 2) continue; }   // 3D: skip 2D-only
+#ifdef AFN_HUD_MODE0_MASK
+        unsigned int elemSceneMask = (afn_current_mode == 1) ? el->sceneMask2D : el->sceneMask;
+#else
+        unsigned int elemSceneMask = el->sceneMask;
+#endif
+        if (!(elemSceneMask & (1u << afn_current_scene))) continue;
         float bx = el->screenX, by = el->screenY;
         float elScale = 1.0f;                              // anchored distance scale
 #ifdef AFN_HAS_HUD_ANCHOR
@@ -1552,6 +1559,13 @@ int main(void)
     // All sprites start visible + collidable (the inert arrays default to 0 =
     // hidden). DestroyObject/SetVisible nodes flip these at runtime.
     for (int i = 0; i < NUM_SPRITES; i++) { afn_sprite_visible[i] = 1; afn_collision_enabled[i] = 1; }
+#endif
+    // Boot into the mode/scene the build was started from (Export PSV bakes
+    // AFN_START_MODE: 0 = 3D, 1 = 2D menu). Seed before script_start so OnStart
+    // and blueprint hooks see the right mode/scene.
+#ifdef AFN_START_MODE
+    afn_current_mode  = AFN_START_MODE;
+    afn_current_scene = AFN_START_SCENE;
 #endif
     script_start();   // OnStart + blueprint start hooks
 
@@ -2427,6 +2441,12 @@ int main(void)
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+        // 2D menu scene (afn_current_mode == 1): skip the entire 3D world
+        // (sky/meshes/rigs/billboards) and just draw the HUD over the clear
+        // color. Scripts + BP instances already ticked this frame, so cursor/
+        // menu logic and scene changes still run.
+        if (afn_current_mode != 1) {
+
         // Projection.
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
@@ -2509,8 +2529,10 @@ int main(void)
         billboards_render(view, camAngle, ex, ez);   // camera-facing animated/directional sprites
 #endif
 
+        }   // end 3D world (skipped in 2D menu mode)
+
 #ifdef AFN_HAS_HUD
-        hud_render();   // 2D overlay (pieces/text/cursor) on top of the scene
+        hud_render();   // 2D overlay (pieces/text/cursor) — always, on top of 3D or as the menu
 #endif
 
         // Fade overlay: a fullscreen quad over the scene. level<0 darkens (fade

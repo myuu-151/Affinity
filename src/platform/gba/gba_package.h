@@ -69,7 +69,9 @@ struct GBAPlayerDirExport
 // PSV-only 128x128 asset size (PSV billboards are RGBA textures with no OBJ
 // hardware cap); GBA/NDS OAM sprites still top out at 64x64 — their
 // emitters nearest-neighbour scale down to the largest OBJ size.
-static constexpr int kExportMaxFrameSize = 128;
+// Must match the editor's kMaxFrameSize so 256/512 (PSV) frames export at the
+// right stride — otherwise large frames are clamped to 128 and read back garbled.
+static constexpr int kExportMaxFrameSize = 512;
 
 struct GBASpriteFrameExport
 {
