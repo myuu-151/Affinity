@@ -586,8 +586,13 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
         e.startVis = he.visible;
         e.pS = (int)pieces.size();
         for (const auto& pc : he.pieces) {
-            auto wh = emitFrame(pc.spriteAssetIdx, pc.frame, pc.size);
-            pieces.push_back({ pc.localX, pc.localY, wh.first, wh.second, frameCount-1, pc.blackTint?1:0, pc.opacity });
+            emitFrame(pc.spriteAssetIdx, pc.frame, pc.size);   // texture stays native res
+            // Draw size = the piece's chosen size (matches the editor canvas), so a
+            // native-512 graphic set to 256 renders at 256 (GL scales the texture).
+            // 960 is the non-square full-screen background (960x544).
+            int dispW = (pc.size == 960) ? 960 : pc.size;
+            int dispH = (pc.size == 960) ? 544 : pc.size;
+            pieces.push_back({ pc.localX, pc.localY, dispW, dispH, frameCount-1, pc.blackTint?1:0, pc.opacity });
         }
         e.pC = (int)pieces.size() - e.pS;
         e.tS = (int)texts.size();
@@ -657,7 +662,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
     // scaled/rotated about its center. Piece items only for now (sprite/text/
     // cursor items in a layer are ignored on PSV).
     {
-        struct KF { int frame, ox, oy, rot, sx, sy; };
+        struct KF { int frame, ox, oy, rot, sx, sy, hidden; };
         struct LY { int interp, loop, speed, length, kfStart, kfCount; };
         std::vector<KF> kfs;
         std::vector<LY> layers;
@@ -672,7 +677,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
                 L.length = lay.length > 0 ? lay.length : 1;
                 L.kfStart = (int)kfs.size();
                 for (const auto& k : lay.keyframes)
-                    kfs.push_back({ k.frame, k.offX, k.offY, k.rot, k.scaleX, k.scaleY });
+                    kfs.push_back({ k.frame, k.offX, k.offY, k.rot, k.scaleX, k.scaleY, k.hidden });
                 L.kfCount = (int)kfs.size() - L.kfStart;
                 int li = (int)layers.size();
                 layers.push_back(L);
@@ -684,11 +689,12 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
         if (!layers.empty()) {
             f << "#define AFN_HAS_HUD_ANIM 1\n";
             f << "#define AFN_HUD_LAYER_COUNT " << layers.size() << "\n";
-            f << "typedef struct { short frame,ox,oy,rot,sx,sy; } AfnHudKf;\n";
+            f << "#define AFN_HUD_KF_HIDE 1\n";   // AfnHudKf carries the per-keyframe hide flag (blink)
+            f << "typedef struct { short frame,ox,oy,rot,sx,sy,hide; } AfnHudKf;\n";
             f << "static const AfnHudKf afn_hud_kf[" << kfs.size() << "] = {\n";
             for (auto& k : kfs)
                 f << "  { " << k.frame << "," << k.ox << "," << k.oy << "," << k.rot
-                  << "," << k.sx << "," << k.sy << " },\n";
+                  << "," << k.sx << "," << k.sy << "," << k.hidden << " },\n";
             f << "};\n";
             f << "typedef struct { unsigned char interp,loop; short speed,length,kfStart,kfCount; } AfnHudLayer;\n";
             f << "static const AfnHudLayer afn_hud_layer[" << layers.size() << "] = {\n";

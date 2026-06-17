@@ -569,6 +569,7 @@ struct GBAHudKeyframeExport {
     int offX, offY;
     int rot;           // degrees 0-359 (converted to brads at export)
     int scaleX, scaleY; // 8.8 fixed point (256 = 1.0x)
+    int hidden = 0;     // 1 = piece hidden from this keyframe onward (blink)
 };
 
 struct GBAHudAnimLayerItemExport {

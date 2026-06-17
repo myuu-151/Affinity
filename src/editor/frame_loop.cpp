@@ -3444,6 +3444,7 @@ struct HudKeyframe {
     int rot = 0;            // rotation in degrees (0-359)
     int scaleX = 256;       // 8.8 fixed point (256 = 1.0x)
     int scaleY = 256;
+    int hidden = 0;         // 1 = piece hidden from this keyframe onward (step, not interpolated) — for blinking
 };
 
 struct HudElement {
@@ -6118,7 +6119,7 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "elemKfCount=%d\n", (int)el.keyframes.size());
             fprintf(f, "elemKfLoop=%d\n", el.animLoop ? 1 : 0);
             for (auto& kf : el.keyframes)
-                fprintf(f, "elemKf=%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY);
+                fprintf(f, "elemKf=%d|%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY, kf.hidden);
         }
         if (!el.animLayers.empty()) {
             fprintf(f, "elemLayerCount=%d\n", (int)el.animLayers.size());
@@ -6133,7 +6134,7 @@ static bool SaveProject(const std::string& path)
                     fprintf(f, "elemLayerItem=%d|%d\n", (int)it.type, it.index);
                 fprintf(f, "elemLayerKfCount=%d\n", (int)lay.keyframes.size());
                 for (auto& kf : lay.keyframes)
-                        fprintf(f, "elemLayerKf=%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY);
+                        fprintf(f, "elemLayerKf=%d|%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY, kf.hidden);
             }
         }
     }
@@ -7786,8 +7787,8 @@ static bool LoadProject(const std::string& path)
             }
             else if (strncmp(line, "elemKf=", 7) == 0 && !sHudElements.empty()) {
                 HudKeyframe kf;
-                if (sscanf(line + 7, "%d|%d|%d|%d|%d|%d", &kf.frame, &kf.offsetX, &kf.offsetY,
-                    &kf.rot, &kf.scaleX, &kf.scaleY) >= 4)
+                if (sscanf(line + 7, "%d|%d|%d|%d|%d|%d|%d", &kf.frame, &kf.offsetX, &kf.offsetY,
+                    &kf.rot, &kf.scaleX, &kf.scaleY, &kf.hidden) >= 4)
                     sHudElements.back().keyframes.push_back(kf);
             }
             else if (sscanf(line, "elemLayerCount=%d", &ival) == 1 && !sHudElements.empty()) {
@@ -7828,8 +7829,8 @@ static bool LoadProject(const std::string& path)
             }
             else if (strncmp(line, "elemLayerKf=", 12) == 0 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
                 HudKeyframe kf;
-                if (sscanf(line + 12, "%d|%d|%d|%d|%d|%d", &kf.frame, &kf.offsetX, &kf.offsetY,
-                    &kf.rot, &kf.scaleX, &kf.scaleY) >= 4)
+                if (sscanf(line + 12, "%d|%d|%d|%d|%d|%d|%d", &kf.frame, &kf.offsetX, &kf.offsetY,
+                    &kf.rot, &kf.scaleX, &kf.scaleY, &kf.hidden) >= 4)
                     sHudElements.back().animLayers.back().keyframes.push_back(kf);
             }
         }
@@ -16680,6 +16681,7 @@ void FrameTick(float dt)
                         ke.rot = kf.rot;
                         ke.scaleX = kf.scaleX;
                         ke.scaleY = kf.scaleY;
+                        ke.hidden = kf.hidden;
                         he.keyframes.push_back(ke);
                     }
                     he.animLoop = el.animLoop;
@@ -16700,6 +16702,7 @@ void FrameTick(float dt)
                             ke.rot = kf.rot;
                             ke.scaleX = kf.scaleX;
                             ke.scaleY = kf.scaleY;
+                            ke.hidden = kf.hidden;
                             le.keyframes.push_back(ke);
                         }
                         he.animLayers.push_back(std::move(le));
@@ -29032,7 +29035,7 @@ void FrameTick(float dt)
                 // Compute per-piece layer offsets from keyframes
                 // During playback: interpolate between keyframes based on playhead
                 // When stopped: use the manually selected keyframe
-                struct LayerTransform { float ox = 0, oy = 0; float sx = 1, sy = 1; float rot = 0; };
+                struct LayerTransform { float ox = 0, oy = 0; float sx = 1, sy = 1; float rot = 0; bool hidden = false; };
                 auto getPieceLayerTransform = [&](HudElement::ItemType type, int idx) -> LayerTransform {
                     LayerTransform t;
                     for (auto& lay : el.animLayers) {
@@ -29057,6 +29060,7 @@ void FrameTick(float dt)
 
                             auto& kfA = lay.keyframes[prevIdx];
                             auto& kfB = lay.keyframes[nextIdx];
+                            if (kfA.hidden) t.hidden = true;   // hide is a step (use the active keyframe)
 
                             if (prevIdx == nextIdx || lay.interp == Interp_Constant) {
                                 // Constant or single keyframe — snap to prev
@@ -29087,6 +29091,7 @@ void FrameTick(float dt)
                                 t.ox += kf.offsetX; t.oy += kf.offsetY;
                                 t.sx *= kf.scaleX / 256.0f; t.sy *= kf.scaleY / 256.0f;
                                 t.rot += (float)kf.rot;
+                                if (kf.hidden) t.hidden = true;
                             }
                         }
                     }
@@ -29098,6 +29103,7 @@ void FrameTick(float dt)
                     auto& pc = el.pieces[pi];
                     if (pc.hidden) continue;
                     LayerTransform lt = getPieceLayerTransform(HudElement::It_Piece, pi);
+                    if (lt.hidden) continue;   // blink: keyframe Hide
                     float baseX = el.x + pc.localX + lt.ox;
                     float baseY = el.y + pc.localY + lt.oy;
                     // 960 = non-square full-screen background (960x544); else square.
@@ -29173,6 +29179,7 @@ void FrameTick(float dt)
                         }
                     }
                     LayerTransform slt = getPieceLayerTransform(HudElement::It_Sprite, si);
+                    if (slt.hidden) continue;   // blink: keyframe Hide
                     float finalScale = item.scale * modScale;
                     float baseX = el.x + item.localX + modOX + slt.ox;
                     float baseY = el.y + item.localY + modOY + slt.oy;
@@ -30594,9 +30601,9 @@ void FrameTick(float dt)
                             auto& kf = lay.keyframes[ki];
                             bool ksel = (ki == lay.selectedKeyframe);
                             char klabel[64];
-                            snprintf(klabel, sizeof(klabel), "%d: f%d (%+d,%+d) r%d s%.1f,%.1f",
+                            snprintf(klabel, sizeof(klabel), "%d: f%d (%+d,%+d) r%d s%.1f,%.1f%s",
                                 ki, kf.frame, kf.offsetX, kf.offsetY, kf.rot,
-                                kf.scaleX / 256.0f, kf.scaleY / 256.0f);
+                                kf.scaleX / 256.0f, kf.scaleY / 256.0f, kf.hidden ? " [hide]" : "");
                             if (ImGui::Selectable(klabel, ksel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
                                 lay.selectedKeyframe = ki;
                             ImGui::SameLine();
@@ -30622,6 +30629,8 @@ void FrameTick(float dt)
                             if (ImGui::DragFloat("Scale Y##kf", &sy, 0.01f, 0.1f, 4.0f, "%.2f")) {
                                 kf.scaleY = (int)(sy * 256.0f); sProjectDirty = true;
                             }
+                            bool kfHidden = kf.hidden != 0;
+                            if (ImGui::Checkbox("Hide##kf", &kfHidden)) { kf.hidden = kfHidden ? 1 : 0; sProjectDirty = true; }
                         }
                     }
                 }

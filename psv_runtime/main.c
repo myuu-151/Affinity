@@ -1292,6 +1292,7 @@ static void hud_render(void) {
     // sit at keyframe 0. Interp: 0=constant snap, 1=linear, 2=bezier.
     float layOx[AFN_HUD_LAYER_COUNT], layOy[AFN_HUD_LAYER_COUNT];
     float layRot[AFN_HUD_LAYER_COUNT], laySx[AFN_HUD_LAYER_COUNT], laySy[AFN_HUD_LAYER_COUNT];
+    unsigned char layHide[AFN_HUD_LAYER_COUNT] = {0};   // per-layer hide at the current frame (blink)
     for (int li = 0; li < AFN_HUD_LAYER_COUNT; li++) {
         const AfnHudLayer* L = &afn_hud_layer[li];
         if (afn_hud_layer_active[li]) {
@@ -1328,6 +1329,9 @@ static void hud_render(void) {
         layRot[li] = A->rot + (B->rot - A->rot) * frac;
         laySx[li]  = (A->sx + (B->sx - A->sx) * frac) / 256.0f;
         laySy[li]  = (A->sy + (B->sy - A->sy) * frac) / 256.0f;
+#ifdef AFN_HUD_KF_HIDE
+        layHide[li] = (unsigned char)(A->hide != 0);   // step (use the active keyframe)
+#endif
     }
 #endif
 
@@ -1423,6 +1427,7 @@ static void hud_render(void) {
 #ifdef AFN_HAS_HUD_ANIM
             int li = afn_hud_piece_layer[gpi];
             if (li >= 0) {
+                if (layHide[li]) continue;   // blink: keyframe Hide
                 // Animated: keyframe offset + scale + rotation about center,
                 // all in element space scaled by the anchored distance scale.
                 float w = pc->w * laySx[li] * elScale, h = pc->h * laySy[li] * elScale;

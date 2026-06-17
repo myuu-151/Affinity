@@ -297,6 +297,11 @@ static void afn_bp2_start(void) {
       afn_move_speed = 0;
       { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[1].stopStart + si].link; }
     }
+    afn_hud_layer_frame[1] = 0;
+    afn_hud_layer_tick[1] = 0;
+    afn_hud_layer_active[1] = 1;
+    /* TODO: emit node type 48 */
+    afn_play_sfx(1, 0, 0);
 }
 static void afn_bp2_update(void) {
 }
