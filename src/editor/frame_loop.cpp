@@ -180,11 +180,65 @@ static EditorTab sPlayTab = EditorTab::Map; // which tab Play was started on
 // still boots into the scene the user was authoring.
 static int sLastSceneTabMode = 0;
 
+// Fast comma-separated signed-int parse: advances p past the number, leaving it
+// on the following ',' (or NUL). Much faster than atoi/sscanf per value, which
+// dominated project load for the huge pixel + audio-sample lists.
+static inline int fastParseInt(const char*& p) {
+    while (*p == ' ' || *p == '\t') ++p;
+    bool neg = false;
+    if (*p == '-') { neg = true; ++p; } else if (*p == '+') ++p;
+    int v = 0;
+    while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); ++p; }
+    return neg ? -v : v;
+}
+
 // Pixel dimensions for a sprite-asset base size. 960 is the PSV-only non-square
 // full-screen background (960x544); every other size is square NxN.
 static void AssetFrameDims(int baseSize, int& w, int& h) {
     if (baseSize == 960) { w = 960; h = 544; }
     else { w = baseSize; h = baseSize; }
+}
+
+// Median-cut color reduction: reduce the unique colors (with pixel counts) to
+// <= target representative colors and build a color->index map. Fast (~O(n +
+// target*n)) vs a brute-force closest-pair merge (O(n^3)) which crawled on
+// gradient-heavy images. Returns the palette count; outPal gets the box-average
+// colors, colToIdx maps every input color to its palette index (0-based).
+static int MedianCutPalette(const std::vector<std::pair<uint32_t,int>>& uniq,
+                            int target, uint32_t* outPal,
+                            std::unordered_map<uint32_t,int>& colToIdx) {
+    colToIdx.clear();
+    if (uniq.empty() || target < 1) return 0;
+    std::vector<std::pair<uint32_t,int>> v = uniq;   // reordered into boxes
+    auto chan = [](uint32_t c, int k){ return (int)((c >> (k*8)) & 0xFF); };
+    struct Box { int lo, hi; };
+    std::vector<Box> boxes; boxes.push_back({ 0, (int)v.size() });
+    while ((int)boxes.size() < target) {
+        int bi = -1, bestRange = -1, bestCh = 0;
+        for (size_t b = 0; b < boxes.size(); b++) {
+            if (boxes[b].hi - boxes[b].lo <= 1) continue;
+            int mn[3] = {255,255,255}, mx[3] = {0,0,0};
+            for (int i = boxes[b].lo; i < boxes[b].hi; i++)
+                for (int k = 0; k < 3; k++) { int val = chan(v[i].first,k); if (val<mn[k])mn[k]=val; if (val>mx[k])mx[k]=val; }
+            for (int k = 0; k < 3; k++) { int rng = mx[k]-mn[k]; if (rng > bestRange) { bestRange = rng; bi = (int)b; bestCh = k; } }
+        }
+        if (bi < 0) break;   // every box is a single color
+        Box box = boxes[bi];
+        std::sort(v.begin()+box.lo, v.begin()+box.hi,
+                  [&](const std::pair<uint32_t,int>& a, const std::pair<uint32_t,int>& b){ return chan(a.first,bestCh) < chan(b.first,bestCh); });
+        int mid = box.lo + (box.hi - box.lo) / 2;
+        boxes[bi].hi = mid; boxes.push_back({ mid, box.hi });
+    }
+    int n = 0;
+    for (auto& box : boxes) {
+        long long sr=0, sg=0, sb=0, sw=0;
+        for (int i = box.lo; i < box.hi; i++) { uint32_t c = v[i].first; int w = v[i].second; sr += (long long)chan(c,0)*w; sg += (long long)chan(c,1)*w; sb += (long long)chan(c,2)*w; sw += w; }
+        if (sw == 0) sw = 1;
+        outPal[n] = (uint32_t)(sr/sw) | ((uint32_t)(sg/sw) << 8) | ((uint32_t)(sb/sw) << 16) | 0xFF000000;
+        for (int i = box.lo; i < box.hi; i++) colToIdx[v[i].first] = n;
+        n++;
+    }
+    return n;
 }
 
 // Re-quantize a sprite asset's source PNG into its PSV-only higher-color path
@@ -206,34 +260,21 @@ static void RequantizeAssetPSV(SpriteAsset& a) {
     if (framesX < 1) framesX = 1;
     if (framesY < 1) framesY = 1;
     int maxColors = a.psvColors - 1;   // index 0 reserved for transparent
-    // Collect unique opaque colors, then merge the closest pairs down to maxColors.
-    struct CE { uint32_t col; int count; };
-    std::vector<CE> cols;
+    // 1) Count unique opaque colors with a hash map (O(pixels)).
+    std::unordered_map<uint32_t,int> counts;
+    counts.reserve(8192);
     for (int py = 0; py < imgH; py++)
         for (int px = 0; px < imgW; px++) {
             const unsigned char* p = img + (py * imgW + px) * 4;
             if (p[3] < 128) continue;
-            uint32_t c = p[0] | (p[1] << 8) | (p[2] << 16) | 0xFF000000;
-            bool found = false;
-            for (auto& e : cols) if (e.col == c) { e.count++; found = true; break; }
-            if (!found) cols.push_back({ c, 1 });
+            counts[p[0] | (p[1] << 8) | (p[2] << 16) | 0xFF000000]++;
         }
-    while ((int)cols.size() > maxColors) {
-        int bi = 0, bj = 1, bd = INT_MAX;
-        for (size_t i = 0; i < cols.size(); i++)
-            for (size_t j = i + 1; j < cols.size(); j++) {
-                int dr = (int)(cols[i].col & 0xFF) - (int)(cols[j].col & 0xFF);
-                int dg = (int)((cols[i].col >> 8) & 0xFF) - (int)((cols[j].col >> 8) & 0xFF);
-                int db = (int)((cols[i].col >> 16) & 0xFF) - (int)((cols[j].col >> 16) & 0xFF);
-                int d = dr*dr + dg*dg + db*db;
-                if (d < bd) { bd = d; bi = (int)i; bj = (int)j; }
-            }
-        if (cols[bi].count < cols[bj].count) cols[bi].col = cols[bj].col;
-        cols[bi].count += cols[bj].count;
-        cols.erase(cols.begin() + bj);
-    }
-    int n = (int)cols.size();
-    for (int c = 0; c < n; c++) a.psvPalette[c + 1] = cols[c].col;
+    std::vector<std::pair<uint32_t,int>> uniq(counts.begin(), counts.end());
+    // 2) Median-cut to maxColors, with a color->index cache.
+    uint32_t pal[128]; std::unordered_map<uint32_t,int> colToIdx;
+    int n = MedianCutPalette(uniq, maxColors, pal, colToIdx);
+    for (int c = 0; c < n; c++) a.psvPalette[c + 1] = pal[c];
+    // 3) Slice frames; map each pixel through the cache (O(pixels)).
     for (int fy = 0; fy < framesY; fy++)
         for (int fx = 0; fx < framesX; fx++) {
             SpriteFrame f; f.width = fw; f.height = fh;
@@ -244,17 +285,8 @@ static void RequantizeAssetPSV(SpriteAsset& a) {
                     if (sx >= imgW || sy >= imgH) continue;
                     const unsigned char* p = img + (sy * imgW + sx) * 4;
                     if (p[3] < 128) { f.pixels[py * kMaxFrameSize + px] = 0; continue; }
-                    uint32_t c = p[0] | (p[1] << 8) | (p[2] << 16) | 0xFF000000;
-                    int best = 1, bd = INT_MAX;
-                    for (int k = 0; k < n; k++) {
-                        uint32_t pc = a.psvPalette[k + 1];
-                        int dr = (int)(c & 0xFF) - (int)(pc & 0xFF);
-                        int dg = (int)((c >> 8) & 0xFF) - (int)((pc >> 8) & 0xFF);
-                        int db = (int)((c >> 16) & 0xFF) - (int)((pc >> 16) & 0xFF);
-                        int d = dr*dr + dg*dg + db*db;
-                        if (d < bd) { bd = d; best = k + 1; }
-                    }
-                    f.pixels[py * kMaxFrameSize + px] = (uint8_t)best;
+                    auto it = colToIdx.find(p[0] | (p[1] << 8) | (p[2] << 16) | 0xFF000000);
+                    f.pixels[py * kMaxFrameSize + px] = (uint8_t)(it != colToIdx.end() ? it->second + 1 : 1);
                 }
             a.psvFrames.push_back(std::move(f));
         }
@@ -7311,11 +7343,7 @@ static bool LoadProject(const std::string& path)
                         for (int py = 0; py < h && *p; py++)
                             for (int px = 0; px < w && *p; px++)
                             {
-                                int pv = 0;
-                                sscanf(p, "%d", &pv);
-                                fr.pixels[py * kMaxFrameSize + px] = (uint8_t)pv;
-                                // Skip to next comma or end
-                                while (*p && *p != ',') p++;
+                                fr.pixels[py * kMaxFrameSize + px] = (uint8_t)fastParseInt(p);
                                 if (*p == ',') p++;
                             }
                         sa.frames.push_back(fr);
@@ -9314,10 +9342,8 @@ static bool LoadProject(const std::string& path)
                 else if (strncmp(line, "impData=", 8) == 0) {
                     const char* p = line + 8;
                     while (*p) {
-                        int v = atoi(p);
-                        curImp->data.push_back((int8_t)v);
-                        while (*p && *p != ',') p++;
-                        if (*p == ',') p++;
+                        curImp->data.push_back((int8_t)fastParseInt(p));
+                        if (*p == ',') p++; else break;
                     }
                 }
                 else if (sscanf(line, "impSrcRate=%d", &ival) == 1) curImp->srcRate = ival;
@@ -9328,10 +9354,8 @@ static bool LoadProject(const std::string& path)
                 else if (strncmp(line, "impSrc16=", 9) == 0) {
                     const char* p = line + 9;
                     while (*p) {
-                        int v = atoi(p);
-                        curImp->srcData16.push_back((int16_t)v);
-                        while (*p && *p != ',') p++;
-                        if (*p == ',') p++;
+                        curImp->srcData16.push_back((int16_t)fastParseInt(p));
+                        if (*p == ',') p++; else break;
                     }
                 }
             }
@@ -9403,10 +9427,8 @@ static bool LoadProject(const std::string& path)
                     }
                     const char* p = acc.c_str();
                     while (*p) {
-                        int v = atoi(p);
-                        curOv->data.push_back((int8_t)v);
-                        while (*p && *p != ',') p++;
-                        if (*p == ',') p++;
+                        curOv->data.push_back((int8_t)fastParseInt(p));
+                        if (*p == ',') p++; else break;
                     }
                 }
             }
@@ -12936,57 +12958,25 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                     int totalFrames = framesX * framesY;
                     if (totalFrames < 1) totalFrames = 1;
 
-                    // Extract unique colors for palette (index 0 = transparent)
-                    // Collect ALL unique colors, then merge closest pairs down to 15
+                    // Quantize to 15 colors (index 0 = transparent) with median-cut
+                    // — fast even on gradient-heavy images (the old brute-force
+                    // closest-pair merge was O(n^3) and crawled). Builds a
+                    // color->index cache for the slice below.
                     asset.palette[0] = 0x00000000;
-
-                    struct ColorEntry { uint32_t col; int count; };
-                    std::vector<ColorEntry> allColors;
+                    std::unordered_map<uint32_t,int> impCounts;
+                    impCounts.reserve(8192);
                     for (int py = 0; py < imgH; py++)
-                    {
                         for (int px = 0; px < imgW; px++)
                         {
                             const unsigned char* p = imgData + (py * imgW + px) * 4;
                             if (p[3] < 128) continue;
-                            uint32_t col = p[0] | (p[1] << 8) | (p[2] << 16) | 0xFF000000;
-                            bool found = false;
-                            for (size_t c = 0; c < allColors.size(); c++)
-                            {
-                                if (allColors[c].col == col) { allColors[c].count++; found = true; break; }
-                            }
-                            if (!found)
-                                allColors.push_back({col, 1});
+                            impCounts[p[0] | (p[1] << 8) | (p[2] << 16) | 0xFF000000]++;
                         }
-                    }
-
-                    // Merge closest color pairs until <= 15 remain
-                    while ((int)allColors.size() > 15)
-                    {
-                        int bestI = 0, bestJ = 1, bestDist = INT_MAX;
-                        for (size_t i = 0; i < allColors.size(); i++)
-                        {
-                            for (size_t j = i + 1; j < allColors.size(); j++)
-                            {
-                                int dr = (int)(allColors[i].col & 0xFF) - (int)(allColors[j].col & 0xFF);
-                                int dg = (int)((allColors[i].col >> 8) & 0xFF) - (int)((allColors[j].col >> 8) & 0xFF);
-                                int db = (int)((allColors[i].col >> 16) & 0xFF) - (int)((allColors[j].col >> 16) & 0xFF);
-                                int dist = dr*dr + dg*dg + db*db;
-                                if (dist < bestDist) { bestDist = dist; bestI = (int)i; bestJ = (int)j; }
-                            }
-                        }
-                        if (allColors[bestI].count < allColors[bestJ].count)
-                            allColors[bestI].col = allColors[bestJ].col;
-                        allColors[bestI].count += allColors[bestJ].count;
-                        allColors.erase(allColors.begin() + bestJ);
-                    }
-
-                    uint32_t uniqueColors[16] = {};
-                    int numUnique = (int)allColors.size();
+                    std::vector<std::pair<uint32_t,int>> impUniq(impCounts.begin(), impCounts.end());
+                    uint32_t impPal[16]; std::unordered_map<uint32_t,int> colToIdx;
+                    int numUnique = MedianCutPalette(impUniq, 15, impPal, colToIdx);
                     for (int c = 0; c < numUnique; c++)
-                    {
-                        uniqueColors[c] = allColors[c].col;
-                        asset.palette[c + 1] = allColors[c].col;
-                    }
+                        asset.palette[c + 1] = impPal[c];
 
                     // Slice into frames
                     asset.frames.clear();
@@ -13010,20 +13000,8 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                                     const unsigned char* p = imgData + (srcY * imgW + srcX) * 4;
                                     if (p[3] < 128) { frame.pixels[py * kMaxFrameSize + px] = 0; continue; }
 
-                                    uint32_t col = p[0] | (p[1] << 8) | (p[2] << 16) | 0xFF000000;
-                                    // Find closest palette entry
-                                    uint8_t bestIdx = 1;
-                                    int bestDist = INT_MAX;
-                                    for (int c = 0; c < numUnique; c++)
-                                    {
-                                        uint32_t pc = uniqueColors[c];
-                                        int dr = (int)(col & 0xFF) - (int)(pc & 0xFF);
-                                        int dg = (int)((col >> 8) & 0xFF) - (int)((pc >> 8) & 0xFF);
-                                        int db = (int)((col >> 16) & 0xFF) - (int)((pc >> 16) & 0xFF);
-                                        int dist = dr*dr + dg*dg + db*db;
-                                        if (dist < bestDist) { bestDist = dist; bestIdx = (uint8_t)(c + 1); }
-                                    }
-                                    frame.pixels[py * kMaxFrameSize + px] = bestIdx;
+                                    auto it = colToIdx.find(p[0] | (p[1] << 8) | (p[2] << 16) | 0xFF000000);
+                                    frame.pixels[py * kMaxFrameSize + px] = (uint8_t)(it != colToIdx.end() ? it->second + 1 : 1);
                                 }
                             }
                             asset.frames.push_back(frame);
