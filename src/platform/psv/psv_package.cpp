@@ -22,6 +22,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <mutex>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -29,6 +30,16 @@
 #endif
 
 namespace Affinity {
+
+// Live build-output log: RunMsysBash appends to it as the Vita toolchain runs,
+// and the editor's compile terminal renders it. Guarded — the build runs on a
+// worker thread while the UI reads this on the main thread.
+std::mutex g_psvBuildLogMtx;
+std::string g_psvBuildLog;
+static void PsvBuildLog(const char* msg) {
+    std::lock_guard<std::mutex> lk(g_psvBuildLogMtx);
+    g_psvBuildLog += msg; g_psvBuildLog += "\n";
+}
 
 // ---- helpers --------------------------------------------------------------
 // C:\a\b -> /c/a/b  (devkitPro MSYS2 mounts drives at /<letter>/, unlike WSL's
@@ -82,7 +93,10 @@ static int RunMsysBash(const std::string& shellCmd, std::string& output) {
         if (PeekNamedPipe(hRead, nullptr, 0, nullptr, &avail, nullptr) && avail > 0) {
             DWORD n = 0;
             DWORD toRead = avail < (sizeof(buf) - 1) ? avail : (sizeof(buf) - 1);
-            if (ReadFile(hRead, buf, toRead, &n, nullptr) && n > 0) { buf[n] = 0; output += buf; }
+            if (ReadFile(hRead, buf, toRead, &n, nullptr) && n > 0) {
+                buf[n] = 0; output += buf;
+                { std::lock_guard<std::mutex> lk(g_psvBuildLogMtx); g_psvBuildLog += buf; }   // live compile terminal
+            }
         } else if (WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0) {
             if (PeekNamedPipe(hRead, nullptr, 0, nullptr, &avail, nullptr) && avail > 0) continue;
             break;
@@ -748,23 +762,30 @@ bool PackagePSV(const std::string& runtimeDir,
                 const std::vector<PSPRigExport>& pspRigs,
                 int playerRigIdx,
                 std::string& errorMsg) {
+    { std::lock_guard<std::mutex> lk(g_psvBuildLogMtx); g_psvBuildLog.clear(); }   // reset the compile terminal
     // 1) Regenerate the shared headers (mapdata/sky/sprites/sound/player), but
     //    SKIP the single-rig generator (emitRig=false) — PSV emits its own
     //    multi-rig psv_rig.h so NPCs/enemies render their own models.
+    PsvBuildLog("Generating data headers (sprites, sound, sky)...");
     if (!GenerateAffinityHeaders(runtimeDir, "psv_", "affinity_psv.h",
                                  sprites, assets, camera, meshes, orbitDist,
                                  soundSamples, soundInstances, skyFrames,
                                  pspRigs, playerRigIdx, errorMsg, /*emitRig=*/false))
         return false;
+    PsvBuildLog("Generating rig data...");
     if (!GeneratePSVRigData(runtimeDir, pspRigs, playerRigIdx, sprites, errorMsg))
         return false;
+    PsvBuildLog("Generating grind rails...");
     if (!GeneratePSVRail(runtimeDir, sprites, errorMsg))
         return false;
+    PsvBuildLog("Baking navmesh...");
     if (!GeneratePSVNav(runtimeDir, sprites, meshes, errorMsg))
         return false;
+    PsvBuildLog("Generating HUD...");
     if (!GeneratePSVHud(runtimeDir, hudElements, assets, errorMsg))
         return false;
 
+    PsvBuildLog("Emitting script...");
     // 1b) Emit the visual-script node graph (shared NDS/PSV codegen) -> psv_script.h.
     {
         std::string sp = runtimeDir + "\\include\\psv_script.h";
@@ -780,6 +801,7 @@ bool PackagePSV(const std::string& runtimeDir,
         sf << "#define AFN_START_SCENE 0\n";
     }
 
+    PsvBuildLog("Compiling (cmake + make)...\n");
     // 2) Build affinity_psv.vpk via the VitaSDK CMake toolchain. cmake re-runs
     //    are cheap on an already-configured build dir, and CMake tracks header
     //    deps, so a regenerated psv_mapdata.h forces main.c to recompile.

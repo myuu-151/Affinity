@@ -20,6 +20,7 @@
 #include <string>
 #include <map>
 #include <unordered_map>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <filesystem>
@@ -175,6 +176,10 @@ static bool sInitialized = false;
 enum class EditorTab { Map, Sprites, Tiles, Skybox, Player, ThreeD, Mode7, Tilemap, Events, Elements, Sound };
 static EditorTab sActiveTab = EditorTab::Map;
 static EditorTab sPlayTab = EditorTab::Map; // which tab Play was started on
+// Live PSV compile log, streamed by the Vita build (psv_package.cpp) — shown in
+// the build popup's compile terminal.
+extern std::mutex g_psvBuildLogMtx;
+extern std::string g_psvBuildLog;
 // Last SCENE tab visited (0 = 3D/Mode4, 1 = 2D/Mode0, 2 = Mode1). Drives the
 // exported boot mode so a build from a non-scene tab (Elements/Nodes/Graphics)
 // still boots into the scene the user was authoring.
@@ -31852,15 +31857,19 @@ void FrameTick(float dt)
     // ---- Package status popup ----
     if (sPackaging || sPackageDone)
     {
-        ImGui::SetNextWindowSize(ImVec2(500, 0), ImGuiCond_Always);
+        bool psvPkg = (sBuildTarget == BuildTarget::PSV);
+        // PSV gets a resizable window so the live compile terminal can be dragged
+        // bigger; other targets keep the compact auto-sized popup.
+        if (psvPkg) ImGui::SetNextWindowSize(ImVec2(840, 600), ImGuiCond_Appearing);
+        else        ImGui::SetNextWindowSize(ImVec2(500, 0), ImGuiCond_Always);
         ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
             ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
         const char* pkgTitle = sBuildTarget == BuildTarget::NDS ? "NDS Package"
                              : sBuildTarget == BuildTarget::PSP ? "PSP Package"
                              : sBuildTarget == BuildTarget::PSV ? "PS Vita Package" : "GBA Package";
-        ImGui::Begin(pkgTitle, nullptr,
-            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
-            ImGuiWindowFlags_AlwaysAutoResize);
+        ImGuiWindowFlags pkgFlags = ImGuiWindowFlags_NoCollapse;
+        if (!psvPkg) pkgFlags |= ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize;
+        ImGui::Begin(pkgTitle, nullptr, pkgFlags);
 
         if (sPackaging)
         {
@@ -31872,6 +31881,22 @@ void FrameTick(float dt)
             static int frame = 0;
             ImGui::SameLine();
             ImGui::Text("%c", spinner[(frame++ / 8) % 4]);
+
+            // Live compile terminal (PSV): stream the toolchain output so you can
+            // watch which file the build is sitting on (the long pole stalls there).
+            if (sBuildTarget == BuildTarget::PSV)
+            {
+                std::string snapshot;
+                { std::lock_guard<std::mutex> lk(g_psvBuildLogMtx); snapshot = g_psvBuildLog; }
+                ImGui::Separator();
+                ImGui::BeginChild("##compileterm", ImVec2(-1.0f, -1.0f), true,
+                                  ImGuiWindowFlags_HorizontalScrollbar);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.78f, 0.85f, 0.78f, 1.0f));
+                ImGui::TextUnformatted(snapshot.empty() ? "(starting toolchain...)" : snapshot.c_str());
+                ImGui::PopStyleColor();
+                ImGui::SetScrollHereY(1.0f);   // pin to the newest output
+                ImGui::EndChild();
+            }
         }
         else
         {
@@ -31881,8 +31906,24 @@ void FrameTick(float dt)
                 ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Failed!");
 
             ImGui::Separator();
-            float logH = std::min(300.0f, std::max(80.0f, ImGui::CalcTextSize(sPackageMsg.c_str()).y + 20.0f));
-            ImGui::InputTextMultiline("##buildlog", (char*)sPackageMsg.c_str(), sPackageMsg.size() + 1,
+            // PSV: keep the FULL compile log visible (don't replace it with just
+            // the "ROM saved" line) so you can review what took longest. The live
+            // log is retained until the next build clears it; append the status.
+            std::string psvDoneLog;
+            const char* logText = sPackageMsg.c_str();
+            int logLen = (int)sPackageMsg.size();
+            if (psvPkg)
+            {
+                { std::lock_guard<std::mutex> lk(g_psvBuildLogMtx); psvDoneLog = g_psvBuildLog; }
+                if (!psvDoneLog.empty()) psvDoneLog += "\n---\n";
+                psvDoneLog += sPackageMsg;
+                logText = psvDoneLog.c_str();
+                logLen = (int)psvDoneLog.size();
+            }
+            float logH = psvPkg
+                ? std::max(120.0f, ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * 2.0f)
+                : std::min(300.0f, std::max(80.0f, ImGui::CalcTextSize(sPackageMsg.c_str()).y + 20.0f));
+            ImGui::InputTextMultiline("##buildlog", (char*)logText, logLen + 1,
                 ImVec2(-1, logH), ImGuiInputTextFlags_ReadOnly);
             ImGui::Separator();
 
