@@ -168,6 +168,8 @@ static void afn_bp0_key_pressed(void) {
         afn_dodge_frames = 20;
         afn_dodge_clip_l = 11;
         afn_dodge_clip_r = 10;
+        afn_dodge_clip_f = 9;
+        afn_dodge_clip_b = 8;
         afn_dodge_idle = -1;
         afn_dodge_ramp = 6;
         afn_dodge_falloff = 12;

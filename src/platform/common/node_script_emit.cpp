@@ -459,6 +459,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                 auto* rpD = findDataIn(a->id, 5);
                 auto* foD = findDataIn(a->id, 6);
                 auto* cdD = findDataIn(a->id, 7);
+                auto* fcD = findDataIn(a->id, 8);
+                auto* bcD = findDataIn(a->id, 9);
                 int sp = spD ? resolveInt(spD) : 70;
                 int fr = frD ? resolveInt(frD) : 14;
                 int lc = lcD ? resolveInt(lcD) : 0;
@@ -467,6 +469,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                 int rp = rpD ? resolveInt(rpD) : 6;    // speed ease-in frames (0 = instant)
                 int fo = foD ? resolveInt(foD) : 6;    // speed ease-out frames (0 = hard stop)
                 int cd = cdD ? resolveInt(cdD) : 0;    // spam-gate lockout frames (0 = none)
+                int fc = fcD ? resolveInt(fcD) : -1;   // forward clip (-1 = unwired -> lateral roll)
+                int bc = bcD ? resolveInt(bcD) : -1;   // back clip    (-1 = unwired -> lateral roll)
                 // Gate the whole trigger on the cooldown so a press during the
                 // lockout sets nothing (the runtime counts afn_dodge_cd down).
                 f << "#ifdef AFN_HAS_PLAYER_RIG\n";
@@ -475,6 +479,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "        afn_dodge_frames = " << fr << ";\n";
                 f << "        afn_dodge_clip_l = " << lc << ";\n";
                 f << "        afn_dodge_clip_r = " << rc << ";\n";
+                f << "        afn_dodge_clip_f = " << fc << ";\n";
+                f << "        afn_dodge_clip_b = " << bc << ";\n";
                 f << "        afn_dodge_idle = " << ic << ";\n";
                 f << "        afn_dodge_ramp = " << rp << ";\n";
                 f << "        afn_dodge_falloff = " << fo << ";\n";

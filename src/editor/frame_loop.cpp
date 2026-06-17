@@ -631,7 +631,7 @@ struct VsNodeTypeDef {
     int outExec;        // number of exec output pins
     int inData;         // number of data input pins
     int outData;        // number of data output pins
-    const char* inDataNames[8];
+    const char* inDataNames[10];
     const char* outDataNames[4];
     const char* outExecNames[4];
 };
@@ -950,7 +950,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Strafe Anim",     0xFF3355AA, 1, 1, 8, 0, {"Fwd","Fwd-R","Right","Back-R","Back","Back-L","Left","Fwd-L"}, {}, {} },
     { "Is In View",      0xFF885533, 1, 1, 1, 0, {"Target (obj)"}, {}, {} },
     { "8-Way Stick",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
-    { "Dodge",           0xFF3355AA, 1, 1, 8, 0, {"Speed (int)","Frames (int)","Left Clip","Right Clip","Idle Clip","Ramp (int)","Falloff (int)","Cooldown (int)"}, {}, {} },
+    { "Dodge",           0xFF3355AA, 1, 1, 10, 0, {"Speed (int)","Frames (int)","Left Clip","Right Clip","Idle Clip","Ramp (int)","Falloff (int)","Cooldown (int)","Forward Clip","Back Clip"}, {}, {} },
     { "Is Dodging",      0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is Not Dodging",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is Airborne",     0xFF885533, 1, 1, 0, 0, {}, {}, {} },
@@ -19769,7 +19769,7 @@ void FrameTick(float dt)
             // Zoom with scroll
             if (fabsf(io.MouseWheel) > 0.01f) {
                 float oldZoom = sVsZoom;
-                sVsZoom = std::clamp(sVsZoom + io.MouseWheel * 0.1f, 0.3f, 3.0f);
+                sVsZoom = std::clamp(sVsZoom + io.MouseWheel * 0.1f, 0.1f, 3.0f);
                 // Zoom toward mouse
                 float mx = (io.MousePos.x - canvasOrig.x) / oldZoom - sVsPanX;
                 float my = (io.MousePos.y - canvasOrig.y) / oldZoom - sVsPanY;
@@ -22057,10 +22057,14 @@ void FrameTick(float dt)
                     auto* lClip = resolveDataIn(infoNode.id, 2);
                     auto* rClip = resolveDataIn(infoNode.id, 3);
                     auto* iClip = resolveDataIn(infoNode.id, 4);
+                    auto* fClip = resolveDataIn(infoNode.id, 8);
+                    auto* bClip = resolveDataIn(infoNode.id, 9);
                     int lc = lClip ? lClip->paramInt[1] : 0;   // SkelAnim: paramInt[1] = clip
                     int rc = rClip ? rClip->paramInt[1] : 0;
                     int ic = iClip ? iClip->paramInt[1] : -1;  // -1 = no auto-return
-                    char dgBuf[1536];
+                    int fc = fClip ? fClip->paramInt[1] : -1;  // forward clip (-1 = unwired)
+                    int bc = bClip ? bClip->paramInt[1] : -1;  // back clip (-1 = unwired)
+                    char dgBuf[2048];
                     snprintf(dgBuf, sizeof(dgBuf),
                         "#ifdef AFN_HAS_PLAYER_RIG // PSV\n"
                         "    if (afn_dodge_cd <= 0) {            // spam gate: ignore presses while cooling down\n"
@@ -22068,6 +22072,8 @@ void FrameTick(float dt)
                         "        afn_dodge_frames  = %s;\n"
                         "        afn_dodge_clip_l  = %d; // DodgeL\n"
                         "        afn_dodge_clip_r  = %d; // DodgeR\n"
+                        "        afn_dodge_clip_f  = %d; // forward (-1 = unwired -> lateral)\n"
+                        "        afn_dodge_clip_b  = %d; // back    (-1 = unwired -> lateral)\n"
                         "        afn_dodge_idle    = %d; // snap back to this when done (-1 = none)\n"
                         "        afn_dodge_ramp    = %s; // frames to ease speed in (0 = instant)\n"
                         "        afn_dodge_falloff = %s; // frames to ease speed out (0 = hard stop)\n"
@@ -22076,16 +22082,16 @@ void FrameTick(float dt)
                         "    }\n"
                         "#endif\n"
                         "    // --- Runtime (psv main.c movement block, AFTER input is final) ---\n"
-                        "    // On trigger: stick right<0 -> LEFT, right>0 -> RIGHT (horizontal\n"
-                        "    //   component only, so diagonals count); a NEUTRAL stick ping-pongs\n"
-                        "    //   L/R each press so tapping dodge doesn't roll the same way forever.\n"
-                        "    //   roll vector = +/- the move-basis RIGHT axis (pure lateral, never\n"
-                        "    //   fwd/back); while locked that's perpendicular to player->target.\n"
+                        "    // On trigger, pick the roll direction from the final stick:\n"
+                        "    //   |fwd| > |right| & that clip wired -> FORWARD (fwd>0) / BACK\n"
+                        "    //   (fwd<0), roll vector = +/- the move-basis FORWARD axis; else\n"
+                        "    //   lateral: right<0 -> LEFT, right>0 -> RIGHT, NEUTRAL ping-pongs\n"
+                        "    //   L/R each press. Forward/Back default -1 (unwired) -> lateral roll.\n"
                         "    // Speed envelope: ease-in over afn_dodge_ramp frames + ease-out over\n"
                         "    //   the last afn_dodge_falloff frames (both quadratic; min wins on\n"
                         "    //   overlap) so it accelerates then decelerates instead of snapping.\n"
                         "    // For afn_dodge_frames frames, slide along the vector with wall\n"
-                        "    //   collision, holding afn_dodge_clip_l/_r on the rig.\n"
+                        "    //   collision, holding the chosen afn_dodge_clip_l/_r/_f/_b on the rig.\n"
                         "    // On the LAST frame, if idle>=0 and the stick is neutral, set\n"
                         "    //   afn_rig_clip = afn_dodge_idle (else Strafe Anim reclaims it).\n"
                         "    // afn_dodge_cd counts down 1/frame here; the gate above drops any\n"
@@ -22093,7 +22099,7 @@ void FrameTick(float dt)
                         "    // Is Dodging / Is Not Dodging gate on afn_dodge_frames > 0.",
                         fmtInt(infoNode.id, 0, "<speed>"),
                         fmtInt(infoNode.id, 1, "<frames>"),
-                        lc, rc, ic,
+                        lc, rc, fc, bc, ic,
                         fmtInt(infoNode.id, 5, "6"),
                         fmtInt(infoNode.id, 6, "6"),
                         fmtInt(infoNode.id, 7, "0"));

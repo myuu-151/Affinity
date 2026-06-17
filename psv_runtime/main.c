@@ -988,6 +988,7 @@ int afn_strafe_anim = 0, afn_strafe_clip[8] = {0};
 // component (input is finalized there). Is Dodging / Is Not Dodging gate on
 // frames>0.
 int afn_dodge_frames = 0, afn_dodge_speed = 0, afn_dodge_trigger = 0, afn_dodge_clip_l = 0, afn_dodge_clip_r = 0;
+int afn_dodge_clip_f = -1, afn_dodge_clip_b = -1;   // Dodge forward/back clips (-1 = unwired -> fall back to lateral L/R roll)
 int afn_dodge_idle = -1;   // clip to snap back to when the roll ends (-1 = leave it; Strafe Anim/base layer reclaims)
 int afn_dodge_ramp = 0;    // frames to ease the roll speed in from 0 (quadratic; 0 = instant/stiff)
 int afn_dodge_falloff = 0; // frames to ease the roll speed back to 0 at the end (quadratic; 0 = hard stop)
@@ -1912,12 +1913,24 @@ int main(void)
             static int s_dodgeFlip = 1;                  // neutral-press alternator (starts right)
             static int s_dodgeTotal = 0;                 // captured duration (for the ramp)
             if (afn_dodge_trigger) {
-                int left;
-                if (afn_input_right < 0)      left = 1;  // stick held left-ish: roll left
-                else if (afn_input_right > 0) left = 0;  // right-ish: roll right
-                else { s_dodgeFlip ^= 1; left = s_dodgeFlip; } // neutral: ping-pong L/R each press
-                if (left) { s_dodgeDX = -rgtX; s_dodgeDZ = -rgtZ; s_dodgeClip = afn_dodge_clip_l; }
-                else      { s_dodgeDX =  rgtX; s_dodgeDZ =  rgtZ; s_dodgeClip = afn_dodge_clip_r; }
+                int af = afn_input_fwd, ar = afn_input_right;
+                int afa = af < 0 ? -af : af, ara = ar < 0 ? -ar : ar;
+                // Forward/back roll when the stick leans more vertical than
+                // horizontal AND that clip is wired (>=0); roll vector = +/- the
+                // move-basis FORWARD axis. Otherwise the classic lateral roll:
+                // right<0 -> LEFT, right>0 -> RIGHT, neutral -> ping-pong L/R.
+                if (afa > ara && af > 0 && afn_dodge_clip_f >= 0) {
+                    s_dodgeDX =  fwdX; s_dodgeDZ =  fwdZ; s_dodgeClip = afn_dodge_clip_f;   // forward
+                } else if (afa > ara && af < 0 && afn_dodge_clip_b >= 0) {
+                    s_dodgeDX = -fwdX; s_dodgeDZ = -fwdZ; s_dodgeClip = afn_dodge_clip_b;   // back
+                } else {
+                    int left;
+                    if (ar < 0)      left = 1;  // stick held left-ish: roll left
+                    else if (ar > 0) left = 0;  // right-ish: roll right
+                    else { s_dodgeFlip ^= 1; left = s_dodgeFlip; } // neutral: ping-pong L/R each press
+                    if (left) { s_dodgeDX = -rgtX; s_dodgeDZ = -rgtZ; s_dodgeClip = afn_dodge_clip_l; }
+                    else      { s_dodgeDX =  rgtX; s_dodgeDZ =  rgtZ; s_dodgeClip = afn_dodge_clip_r; }
+                }
                 s_dodgeTotal = afn_dodge_frames;
                 afn_dodge_trigger = 0;
             }
