@@ -1912,24 +1912,44 @@ int main(void)
             static int s_dodgeClip = 0;
             static int s_dodgeFlip = 1;                  // neutral-press alternator (starts right)
             static int s_dodgeTotal = 0;                 // captured duration (for the ramp)
+            static float s_dodgeYaw = 0.0f;              // facing captured at trigger: hold it so directional clips match the roll
             if (afn_dodge_trigger) {
                 int af = afn_input_fwd, ar = afn_input_right;
                 int afa = af < 0 ? -af : af, ara = ar < 0 ? -ar : ar;
-                // Forward/back roll when the stick leans more vertical than
-                // horizontal AND that clip is wired (>=0); roll vector = +/- the
-                // move-basis FORWARD axis. Otherwise the classic lateral roll:
-                // right<0 -> LEFT, right>0 -> RIGHT, neutral -> ping-pong L/R.
-                if (afa > ara && af > 0 && afn_dodge_clip_f >= 0) {
-                    s_dodgeDX =  fwdX; s_dodgeDZ =  fwdZ; s_dodgeClip = afn_dodge_clip_f;   // forward
-                } else if (afa > ara && af < 0 && afn_dodge_clip_b >= 0) {
-                    s_dodgeDX = -fwdX; s_dodgeDZ = -fwdZ; s_dodgeClip = afn_dodge_clip_b;   // back
+                if (lockStrafing) {
+                    // --- Lock-on: target-relative directional roll. The rig faces
+                    // the target, so Up/Down/L-R map straight to fwd/back/left/right
+                    // clips (vector = +/- the target-relative move basis). ---
+                    if (afa > ara && af > 0 && afn_dodge_clip_f >= 0) {
+                        s_dodgeDX =  fwdX; s_dodgeDZ =  fwdZ; s_dodgeClip = afn_dodge_clip_f;   // forward
+                    } else if (afa > ara && af < 0 && afn_dodge_clip_b >= 0) {
+                        s_dodgeDX = -fwdX; s_dodgeDZ = -fwdZ; s_dodgeClip = afn_dodge_clip_b;   // back
+                    } else {
+                        int left;
+                        if (ar < 0)      left = 1;  // stick held left-ish: roll left
+                        else if (ar > 0) left = 0;  // right-ish: roll right
+                        else { s_dodgeFlip ^= 1; left = s_dodgeFlip; } // neutral: ping-pong L/R each press
+                        if (left) { s_dodgeDX = -rgtX; s_dodgeDZ = -rgtZ; s_dodgeClip = afn_dodge_clip_l; }
+                        else      { s_dodgeDX =  rgtX; s_dodgeDZ =  rgtZ; s_dodgeClip = afn_dodge_clip_r; }
+                    }
+                    s_dodgeYaw = moveAngle * (180.0f/3.14159265f);   // (lock holds live target facing below)
                 } else {
-                    int left;
-                    if (ar < 0)      left = 1;  // stick held left-ish: roll left
-                    else if (ar > 0) left = 0;  // right-ish: roll right
-                    else { s_dodgeFlip ^= 1; left = s_dodgeFlip; } // neutral: ping-pong L/R each press
-                    if (left) { s_dodgeDX = -rgtX; s_dodgeDZ = -rgtZ; s_dodgeClip = afn_dodge_clip_l; }
-                    else      { s_dodgeDX =  rgtX; s_dodgeDZ =  rgtZ; s_dodgeClip = afn_dodge_clip_r; }
+                    // --- Non-lock: a camera-relative controller turns the model to
+                    // FACE its movement, so it's always running forward. A dodge
+                    // while moving is therefore a FORWARD dash along the heading
+                    // (running ANY way, incl. toward the camera, rolls forward); a
+                    // NEUTRAL stick is a backstep (roll backward off the facing). ---
+                    if (af || ar) {
+                        float l = sqrtf((float)mvX*mvX + (float)mvZ*mvZ);
+                        s_dodgeDX = l > 0.0001f ? mvX/l : fwdX;
+                        s_dodgeDZ = l > 0.0001f ? mvZ/l : fwdZ;
+                        s_dodgeClip = afn_dodge_clip_f >= 0 ? afn_dodge_clip_f : afn_dodge_clip_r;
+                    } else {
+                        float fy = playerYaw * (3.14159265f/180.0f);
+                        s_dodgeDX = -sinf(fy); s_dodgeDZ = -cosf(fy);   // backstep
+                        s_dodgeClip = afn_dodge_clip_b >= 0 ? afn_dodge_clip_b : afn_dodge_clip_l;
+                    }
+                    s_dodgeYaw = playerYaw;   // hold the current heading (no snap; the run flows into the roll)
                 }
                 s_dodgeTotal = afn_dodge_frames;
                 afn_dodge_trigger = 0;
@@ -1960,6 +1980,10 @@ int main(void)
                 int sub = (int)(sp / 3.0f) + 1;          // wall-tunnel guard like normal move
                 for (int st = 0; st < sub; st++) { playerX += ix/sub; playerZ += iz/sub; collide_walls(&playerX, &playerZ, playerY); }
                 afn_rig_clip = s_dodgeClip;              // hold the dodge clip while rolling
+                // Hold facing = the captured roll basis so the directional clip
+                // matches the motion (movement above may have re-faced toward the
+                // stick). Lock-on keeps its live target facing, set earlier.
+                if (!lockStrafing) playerYaw = s_dodgeYaw;
                 if (--afn_dodge_frames <= 0) {
                     afn_dodge_frames = 0;
                     // Roll over: hand the rig back to the idle clip so it doesn't
