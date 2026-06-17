@@ -96,6 +96,11 @@ struct GBASpriteAssetExport
     int baseSize;          // 8, 16, or 32
     int palBank;           // GBA OBJ palette bank (0-15)
     uint32_t palette[16];  // RGBA8 colors (index 0 = transparent)
+    // PSV-only higher-color path (psvColors = 32/64/128). When > 16 the PSV
+    // exporter emits from psvPalette/psvFrames instead of the 16-color palette.
+    int psvColors = 16;
+    uint32_t psvPalette[128] = {};
+    std::vector<GBASpriteFrameExport> psvFrames;
     std::vector<GBASpriteFrameExport> frames;
     std::vector<GBASpriteAnimExport>  anims;
     int defaultAnim;

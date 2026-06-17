@@ -310,7 +310,11 @@ static void afn_bp2_key_held(void) {
 static void afn_bp2_key_pressed(void) {
     if (key_hit(KEY_A)) {
         afn_key_mag = 256;
+#ifdef AFN_HAS_SCENE_DELAY
+    if (afn_scene_delay <= 0 && afn_scene_phase == 0) { afn_scene_delay = 20; afn_scene_delay_scene = 1; afn_scene_delay_mode = 1; }
+#else
     afn_scene_start_transition(1, 1, 15);
+#endif
     afn_play_sfx(2, 0, 0);
     }
 }

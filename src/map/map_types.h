@@ -94,6 +94,14 @@ struct SpriteAsset
     int palBank = 1;               // GBA OBJ palette bank (0-15)
     int paletteSrc = -1;           // -1 = own palette, >= 0 = share palette from asset index
 
+    // PSV-only higher-color graphics. Parallel to the 16-color frames/palette
+    // above (which GBA/NDS keep using). psvColors = 16/32/64/128; when > 16 these
+    // hold a re-quantization of the source PNG that the PSV preview + exporter
+    // use. Index 0 = transparent. psvFrames pixels index into psvPalette.
+    int psvColors = 16;            // 16 = use the normal 16-color path (default)
+    uint32_t psvPalette[128] = {};
+    std::vector<SpriteFrame> psvFrames;
+
     std::vector<SpriteFrame> frames;
     std::vector<SpriteAnim>  anims;
 

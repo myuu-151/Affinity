@@ -566,7 +566,14 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
         // runtime uploads it straight to glTexImage2D (GL_RGBA, bytes [R,G,B,A]).
         if (ai < 0 || ai >= (int)assets.size() || frame < 0 || frame >= (int)assets[ai].frames.size())
             { f << "static const unsigned char afn_hud_f" << frameCount << "[] = \"\\000\\000\\000\\000\";\n"; frameCount++; frameW.push_back(1); frameH.push_back(1); return {1,1}; }
-        const auto& a = assets[ai]; const auto& fr = a.frames[frame];
+        const auto& a = assets[ai];
+        // PSV higher-color path: when the asset is >16 colors, emit from the
+        // re-quantized psvFrames/psvPalette (up to 128 colors) instead of the
+        // 16-color palette. Frame counts match (same source strip).
+        bool usePsv = (a.psvColors > 16 && frame < (int)a.psvFrames.size());
+        const auto& fr = usePsv ? a.psvFrames[frame] : a.frames[frame];
+        const uint32_t* pal = usePsv ? a.psvPalette : a.palette;
+        int palMask = usePsv ? 127 : 15;
         int w = fr.width > 0 ? fr.width : (sz>0?sz:a.baseSize);
         int h = fr.height > 0 ? fr.height : (sz>0?sz:a.baseSize);
         frameW.push_back(w); frameH.push_back(h);
@@ -574,7 +581,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
         int run = 0;
         for (int py = 0; py < h; py++) for (int px = 0; px < w; px++) {
             unsigned char idx = fr.pixels[py * kExportMaxFrameSize + px];
-            unsigned c = (idx == 0) ? 0u : a.palette[idx & 15];
+            unsigned c = (idx == 0) ? 0u : pal[idx & palMask];
             unsigned bb[4] = { c & 0xFF, (c>>8) & 0xFF, (c>>16) & 0xFF, (c>>24) & 0xFF };
             for (int k = 0; k < 4; k++)
                 f << '\\' << ((bb[k]>>6)&7) << ((bb[k]>>3)&7) << (bb[k]&7);  // \ooo octal byte

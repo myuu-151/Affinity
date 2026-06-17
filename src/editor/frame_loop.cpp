@@ -187,6 +187,80 @@ static void AssetFrameDims(int baseSize, int& w, int& h) {
     else { w = baseSize; h = baseSize; }
 }
 
+// Re-quantize a sprite asset's source PNG into its PSV-only higher-color path
+// (psvColors = 32/64/128). Fills psvPalette + psvFrames in parallel to the
+// 16-color frames the other targets use. Clears the psv data for psvColors<=16
+// or when there's no source image. Called when the PSV "Colors" toggle changes.
+static void RequantizeAssetPSV(SpriteAsset& a) {
+    a.psvFrames.clear();
+    for (int i = 0; i < 128; i++) a.psvPalette[i] = 0;
+    if (a.psvColors <= 16 || a.sourceImagePath.empty()) return;
+    int imgW, imgH, ch;
+    unsigned char* img = stbi_load(a.sourceImagePath.c_str(), &imgW, &imgH, &ch, 4);
+    if (!img) return;
+    int fw = a.stripFrameW > 0 ? a.stripFrameW : imgW;
+    int fh = a.stripFrameH > 0 ? a.stripFrameH : imgH;
+    if (fw > kMaxFrameSize) fw = kMaxFrameSize;
+    if (fh > kMaxFrameSize) fh = kMaxFrameSize;
+    int framesX = imgW / fw, framesY = imgH / fh;
+    if (framesX < 1) framesX = 1;
+    if (framesY < 1) framesY = 1;
+    int maxColors = a.psvColors - 1;   // index 0 reserved for transparent
+    // Collect unique opaque colors, then merge the closest pairs down to maxColors.
+    struct CE { uint32_t col; int count; };
+    std::vector<CE> cols;
+    for (int py = 0; py < imgH; py++)
+        for (int px = 0; px < imgW; px++) {
+            const unsigned char* p = img + (py * imgW + px) * 4;
+            if (p[3] < 128) continue;
+            uint32_t c = p[0] | (p[1] << 8) | (p[2] << 16) | 0xFF000000;
+            bool found = false;
+            for (auto& e : cols) if (e.col == c) { e.count++; found = true; break; }
+            if (!found) cols.push_back({ c, 1 });
+        }
+    while ((int)cols.size() > maxColors) {
+        int bi = 0, bj = 1, bd = INT_MAX;
+        for (size_t i = 0; i < cols.size(); i++)
+            for (size_t j = i + 1; j < cols.size(); j++) {
+                int dr = (int)(cols[i].col & 0xFF) - (int)(cols[j].col & 0xFF);
+                int dg = (int)((cols[i].col >> 8) & 0xFF) - (int)((cols[j].col >> 8) & 0xFF);
+                int db = (int)((cols[i].col >> 16) & 0xFF) - (int)((cols[j].col >> 16) & 0xFF);
+                int d = dr*dr + dg*dg + db*db;
+                if (d < bd) { bd = d; bi = (int)i; bj = (int)j; }
+            }
+        if (cols[bi].count < cols[bj].count) cols[bi].col = cols[bj].col;
+        cols[bi].count += cols[bj].count;
+        cols.erase(cols.begin() + bj);
+    }
+    int n = (int)cols.size();
+    for (int c = 0; c < n; c++) a.psvPalette[c + 1] = cols[c].col;
+    for (int fy = 0; fy < framesY; fy++)
+        for (int fx = 0; fx < framesX; fx++) {
+            SpriteFrame f; f.width = fw; f.height = fh;
+            memset(f.pixels, 0, sizeof(f.pixels));
+            for (int py = 0; py < fh; py++)
+                for (int px = 0; px < fw; px++) {
+                    int sx = fx * fw + px, sy = fy * fh + py;
+                    if (sx >= imgW || sy >= imgH) continue;
+                    const unsigned char* p = img + (sy * imgW + sx) * 4;
+                    if (p[3] < 128) { f.pixels[py * kMaxFrameSize + px] = 0; continue; }
+                    uint32_t c = p[0] | (p[1] << 8) | (p[2] << 16) | 0xFF000000;
+                    int best = 1, bd = INT_MAX;
+                    for (int k = 0; k < n; k++) {
+                        uint32_t pc = a.psvPalette[k + 1];
+                        int dr = (int)(c & 0xFF) - (int)(pc & 0xFF);
+                        int dg = (int)((c >> 8) & 0xFF) - (int)((pc >> 8) & 0xFF);
+                        int db = (int)((c >> 16) & 0xFF) - (int)((pc >> 16) & 0xFF);
+                        int d = dr*dr + dg*dg + db*db;
+                        if (d < bd) { bd = d; best = k + 1; }
+                    }
+                    f.pixels[py * kMaxFrameSize + px] = (uint8_t)best;
+                }
+            a.psvFrames.push_back(std::move(f));
+        }
+    stbi_image_free(img);
+}
+
 // Dummy tileset: 16 colors for the palette display
 static uint32_t sPalette[16] = {
     0xFF000000, 0xFF1D2B53, 0xFF7E2553, 0xFF008751,
@@ -670,7 +744,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     // Actions (orange)
     { "Move Player",     0xFF3355AA, 1, 1, 1, 0, {"Direction"}, {}, {} },
     { "Look Direction",  0xFF3355AA, 1, 1, 1, 0, {"Direction"}, {}, {} },
-    { "Change Scene",    0xFF3355AA, 1, 1, 1, 0, {"Scene (int)"}, {}, {} },
+    { "Change Scene",    0xFF3355AA, 1, 1, 2, 0, {"Scene (int)","Delay (frames)"}, {}, {} },
     { "Set Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot (int)", "Value"}, {}, {} },
     { "Add Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot (int)", "Amount"}, {}, {} },
     { "Play Sound",      0xFF3355AA, 1, 1, 1, 0, {"Sound Instance"}, {}, {} },
@@ -5964,6 +6038,7 @@ static bool SaveProject(const std::string& path)
         const SpriteAsset& sa = sSpriteAssets[ai];
         fprintf(f, "asset_begin=%s\n", sa.name.c_str());
         fprintf(f, "baseSize=%d\n", sa.baseSize);
+        fprintf(f, "psvColors=%d\n", sa.psvColors);
         if (!sa.sourceImagePath.empty())
             fprintf(f, "srcImg=%s\n", sa.sourceImagePath.c_str());
         fprintf(f, "palBank=%d\n", sa.palBank);
@@ -7215,6 +7290,7 @@ static bool LoadProject(const std::string& path)
 
                     int iv; unsigned int uv; float fv;
                     if (sscanf(line, "baseSize=%d", &iv) == 1) sa.baseSize = iv;
+                    else if (sscanf(line, "psvColors=%d", &iv) == 1) sa.psvColors = iv;
                     else if (strncmp(line, "srcImg=", 7) == 0) sa.sourceImagePath = line + 7;
                     else if (sscanf(line, "palBank=%d", &iv) == 1) sa.palBank = iv;
                     else if (sscanf(line, "paletteSrc=%d", &iv) == 1) sa.paletteSrc = iv;
@@ -7319,6 +7395,7 @@ static bool LoadProject(const std::string& path)
                         sa.dirAnimSets.push_back(das);
                     }
                 }
+                if (sa.psvColors > 16) RequantizeAssetPSV(sa);   // rebuild psvFrames from the source PNG
                 sSpriteAssets.push_back(sa);
                 sAssetDirSprites.push_back({});
                 // Load directional sprites for all sets
@@ -12203,11 +12280,18 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                 static GLuint sFrameEditTex = 0;
                 static std::vector<uint32_t> sFrameEditRgba;
                 sFrameEditRgba.resize((size_t)fw * fh);
+                // PSV >16-color preview: show the re-quantized psv frame/palette
+                // (updates live as the Colors toggle changes); else the 16-color frame.
+                bool usePsv = (sBuildTarget == BuildTarget::PSV && asset.psvColors > 16
+                               && sSelectedFrame < (int)asset.psvFrames.size());
+                const SpriteFrame& dispFrame = usePsv ? asset.psvFrames[sSelectedFrame] : frame;
+                const uint32_t* editPal = usePsv ? asset.psvPalette : asset.palette;
+                int palMask = usePsv ? 127 : 15;
                 for (int py = 0; py < fh; py++)
                     for (int px = 0; px < fw; px++)
                     {
-                        uint8_t palIdx = frame.pixels[py * kMaxFrameSize + px];
-                        uint32_t col = asset.palette[palIdx & 0xF];
+                        uint8_t palIdx = dispFrame.pixels[py * kMaxFrameSize + px];
+                        uint32_t col = editPal[palIdx & palMask];
                         uint32_t r = (col >> 0) & 0xFF;
                         uint32_t g = (col >> 8) & 0xFF;
                         uint32_t b = (col >> 16) & 0xFF;
@@ -12591,6 +12675,31 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
     {
         SpriteAsset& asset = sSpriteAssets[sSelectedAsset];
 
+        // ---- Colors (PSV) / LOD Tiers ----
+        if (sBuildTarget == BuildTarget::PSV)
+        {
+            // PSV higher-color graphics: re-quantize the source PNG to N colors
+            // (16 = the normal 4bpp path). Replaces the LOD tiers on PSV.
+            ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "Colors");
+            ImGui::Separator();
+            const char* colorOpts[] = { "16", "32", "64", "128" };
+            int colorVals[] = { 16, 32, 64, 128 };
+            int cidx = 0;
+            for (int i = 0; i < 4; i++) if (colorVals[i] == asset.psvColors) { cidx = i; break; }
+            ImGui::PushItemWidth(Scaled(90));
+            if (ImGui::Combo("##psvcolors", &cidx, colorOpts, 4))
+            {
+                asset.psvColors = colorVals[cidx];
+                RequantizeAssetPSV(asset);   // rebuild psvPalette/psvFrames from the source PNG
+                sTmSpriteTexCount = -1;      // refresh sprite thumbnails
+                sProjectDirty = true;
+            }
+            ImGui::PopItemWidth();
+            if (asset.psvColors > 16 && asset.sourceImagePath.empty())
+                ImGui::TextDisabled("Import a PNG to use >16 colors.");
+        }
+        else
+        {
         // ---- LOD Tiers ----
         ImGui::TextColored(ImVec4(0.7f, 0.8f, 1.0f, 1.0f), "LOD Tiers");
         ImGui::Separator();
@@ -12640,6 +12749,7 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             if (ImGui::SmallButton("-##dellod"))
                 asset.lodCount--;
         }
+        }   // end non-PSV LOD tiers
 
         ImGui::Spacing();
 
@@ -12932,6 +13042,7 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                         asset.anims.push_back(anim);
                     }
 
+                    if (asset.psvColors > 16) RequantizeAssetPSV(asset);   // refresh the PSV higher-color frames too
                     sProjectDirty = true;
                     stbi_image_free(imgData);
                 }
@@ -15939,6 +16050,20 @@ void FrameTick(float dt)
                         ef.width = fr.width;
                         ef.height = fr.height;
                         ea.frames.push_back(ef);
+                    }
+                    // PSV higher-color path (parallel to the 16-color frames).
+                    ea.psvColors = sa.psvColors;
+                    memcpy(ea.psvPalette, sa.psvPalette, sizeof(ea.psvPalette));
+                    for (const auto& fr : sa.psvFrames)
+                    {
+                        GBASpriteFrameExport ef;
+                        memset(ef.pixels, 0, sizeof(ef.pixels));
+                        for (int py = 0; py < fr.height && py < kExportMaxFrameSize; py++)
+                            for (int px = 0; px < fr.width && px < kExportMaxFrameSize; px++)
+                                ef.pixels[py * kExportMaxFrameSize + px] = fr.pixels[py * kMaxFrameSize + px];
+                        ef.width = fr.width;
+                        ef.height = fr.height;
+                        ea.psvFrames.push_back(ef);
                     }
                     for (const auto& an : sa.anims)
                     {
@@ -21708,13 +21833,16 @@ void FrameTick(float dt)
                         "//   SaveState -> switch scene index -> LoadState\n"
                         "//   sScriptStartRan = false; // re-run OnStart";
                     setActionFunc(infoNode, "_change_scene",
-                        "    afn_pending_scene = <scIdx>;\n"
-                        "    afn_pending_scene_mode = <mode>; // 0=Mode4, 1=Mode0, 2=Mode1\n"
+                        "    // Delay pin 0 (instant) -> transition now:\n"
+                        "    afn_scene_start_transition(<scIdx>, <mode>, 15); // mode 0=3D,1=2D,2=Mode1\n"
+                        "    // Delay pin > 0 (PSV) -> hold the scene N frames first (armed once):\n"
+                        "    //   if (afn_scene_delay<=0 && afn_scene_phase==0) {\n"
+                        "    //     afn_scene_delay=<delay>; afn_scene_delay_scene=<scIdx>;\n"
+                        "    //     afn_scene_delay_mode=<mode>; }\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // start_scene_transition() -> scene_load()\n"
-                        "    // mode 0: init Mode 4 (3D raycaster)\n"
-                        "    // mode 1: init Mode 0 (tilemap)\n"
-                        "    // mode 2: init Mode 1 (Mode 7 affine floor)");
+                        "    // delay counts down -> afn_scene_start_transition -> fade out,\n"
+                        "    //   swap scene+mode, re-run the entered scene's blueprint OnStart\n"
+                        "    //   (afn_stop_sound first), fade in.");
                     break;
                 case VsNodeType::SetGravity: {
                     editorCode =

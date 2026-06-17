@@ -651,7 +651,22 @@ void EmitNodeScriptBodies(std::ostream& f,
                 auto* scData = findDataIn(a->id, 0);
                 int scIdx = scData ? resolveInt(scData) : a->paramInt[0];
                 int scMode = a->paramInt[1]; // 0 = 3D / Mode 4
-                f << "    afn_scene_start_transition(" << scIdx << ", " << scMode << ", 15);\n";
+                // Optional Delay pin (frames): hold the current scene for N frames
+                // before the switch. Armed once (guarded so OnUpdate/Held re-fires
+                // don't restart the countdown). AFN_HAS_SCENE_DELAY targets (PSV)
+                // count it down; others fall back to an instant switch.
+                auto* dlData = findDataIn(a->id, 1);
+                int delay = dlData ? resolveInt(dlData) : 0;
+                if (delay > 0) {
+                    f << "#ifdef AFN_HAS_SCENE_DELAY\n";
+                    f << "    if (afn_scene_delay <= 0 && afn_scene_phase == 0) { afn_scene_delay = " << delay
+                      << "; afn_scene_delay_scene = " << scIdx << "; afn_scene_delay_mode = " << scMode << "; }\n";
+                    f << "#else\n";
+                    f << "    afn_scene_start_transition(" << scIdx << ", " << scMode << ", 15);\n";
+                    f << "#endif\n";
+                } else {
+                    f << "    afn_scene_start_transition(" << scIdx << ", " << scMode << ", 15);\n";
+                }
                 break;
             }
             case GBAScriptNodeType::ReloadScene:

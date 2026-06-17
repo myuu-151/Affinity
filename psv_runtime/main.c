@@ -920,6 +920,11 @@ int afn_frame_count=0, afn_dt_tick=0;
 // true respawn. Phase machine ticked in the main loop (it owns the player vars).
 int afn_scene_phase = 0;       // 0 idle, 1 fading out (awaiting swap), 2 fading in
 int afn_scene_pending = 0, afn_scene_pending_mode = 0;
+// ChangeScene "Delay" pin: hold the current scene for afn_scene_delay frames,
+// then start the transition to afn_scene_delay_scene/mode. The emitted script
+// (psv_script.h) arms these when AFN_HAS_SCENE_DELAY is defined (see below).
+#define AFN_HAS_SCENE_DELAY 1
+int afn_scene_delay = 0, afn_scene_delay_scene = 0, afn_scene_delay_mode = 0;
 void afn_scene_start_transition(int scene, int mode, int frames) {
     afn_scene_pending = scene; afn_scene_pending_mode = mode;
     extern int afn_fade_target, afn_fade_frames, afn_fade_counter;
@@ -1617,6 +1622,11 @@ int main(void)
         script_tick();
         afn_audio_tick();   // 60 Hz sequencer clock (envelopes / note scheduling)
 
+        // ChangeScene Delay pin: hold the current scene, then kick off the
+        // transition when the countdown elapses (the fade/swap below takes over).
+        if (afn_scene_delay > 0 && --afn_scene_delay == 0)
+            afn_scene_start_transition(afn_scene_delay_scene, afn_scene_delay_mode, 15);
+
         // Screen-fade tick: ease afn_fade_level toward afn_fade_target over
         // afn_fade_counter frames (set by ChangeScene / fade nodes). Rendered as
         // a fullscreen overlay below (vitaGL has no REG_MASTER_BRIGHT).
@@ -1641,6 +1651,14 @@ int main(void)
 #ifdef AFN_HAS_SPRITE_IDX
             for (int i = 0; i < NUM_SPRITES; i++) { afn_sprite_visible[i] = 1; afn_collision_enabled[i] = 1; }
 #endif
+            // Silence the previous scene's music/SFX so the entered scene starts
+            // clean (its OnStart Play Sound below starts fresh).
+            afn_stop_sound();
+            // Re-run the entered scene's blueprint OnStart hooks (ShowHUD, music,
+            // cursor init, ...). afn_bp_dispatch_start is scene-gated, so only the
+            // NEW scene's blueprints fire — boot only ran it for the start scene,
+            // so without this a ChangeScene swap left the next 2D scene dark/silent.
+            afn_bp_dispatch_start();
             afn_fade_target = 0; afn_fade_frames = 15; afn_fade_counter = 15; afn_fade_level = -16;
             afn_scene_phase = 2;
         } else if (afn_scene_phase == 2 && afn_fade_counter == 0) {
