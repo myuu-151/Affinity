@@ -552,7 +552,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
     f << "#define AFN_HAS_HUD 1\n";
 
     // Flatten pieces/texts/stops across elements; emit each piece's RGBA frame.
-    struct P { int x, y, w, h, tex; };
+    struct P { int x, y, w, h, tex, black, opacity; };
     struct T { int x, y; unsigned int color; int font, slot, pad, scale; std::string text; };
     struct S { int x, y, link; };
     std::vector<P> pieces; std::vector<T> texts; std::vector<S> stops;
@@ -587,7 +587,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
         e.pS = (int)pieces.size();
         for (const auto& pc : he.pieces) {
             auto wh = emitFrame(pc.spriteAssetIdx, pc.frame, pc.size);
-            pieces.push_back({ pc.localX, pc.localY, wh.first, wh.second, frameCount-1 });
+            pieces.push_back({ pc.localX, pc.localY, wh.first, wh.second, frameCount-1, pc.blackTint?1:0, pc.opacity });
         }
         e.pC = (int)pieces.size() - e.pS;
         e.tS = (int)texts.size();
@@ -627,10 +627,11 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
           << "," << e.tS << "," << e.tC << "," << e.sS << "," << e.sC << "," << e.curTex << "," << e.curX << "," << e.curY
           << "," << (e.startVis?1:0) << " },\n";
     f << "};\n";
-    f << "typedef struct { short x,y,w,h,tex; } AfnHudPiece;\n";
+    f << "#define AFN_HUD_PIECE_TINT 1\n";   // AfnHudPiece carries black + opacity (per-piece tint)
+    f << "typedef struct { short x,y,w,h,tex; unsigned char black; short opacity; } AfnHudPiece;\n";
     f << "static const AfnHudPiece afn_hud_piece[" << (pieces.empty()?1:pieces.size()) << "] = {\n";
-    for (auto& p : pieces) f << "  { " << p.x << "," << p.y << "," << p.w << "," << p.h << "," << p.tex << " },\n";
-    if (pieces.empty()) f << "  {0,0,0,0,0},\n";
+    for (auto& p : pieces) f << "  { " << p.x << "," << p.y << "," << p.w << "," << p.h << "," << p.tex << "," << p.black << "," << p.opacity << " },\n";
+    if (pieces.empty()) f << "  {0,0,0,0,0,0,16},\n";
     f << "};\n";
     f << "typedef struct { short x,y; unsigned int color; unsigned char font,slot,pad,scale; char text[32]; } AfnHudText;\n";
     f << "static const AfnHudText afn_hud_text[" << (texts.empty()?1:texts.size()) << "] = {\n";

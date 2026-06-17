@@ -1412,6 +1412,14 @@ static void hud_render(void) {
         for (int k = 0; k < el->pieceCount; k++) {
             int gpi = el->pieceStart + k;
             const AfnHudPiece* pc = &afn_hud_piece[gpi];
+            // Per-piece tint via the MODULATE color: Black toggle zeroes RGB (a
+            // black silhouette — used for drop shadows), Opacity (0-16) scales
+            // alpha. White+16 = the texture as-authored. (byte order: R,G,B,A)
+            unsigned pieceCol = 0xFFFFFFFFu;
+#ifdef AFN_HUD_PIECE_TINT
+            unsigned a8 = (unsigned)(pc->opacity * 255 / 16); if (a8 > 255) a8 = 255;
+            pieceCol = (a8 << 24) | (pc->black ? 0u : 0xFFFFFFu);
+#endif
 #ifdef AFN_HAS_HUD_ANIM
             int li = afn_hud_piece_layer[gpi];
             if (li >= 0) {
@@ -1421,13 +1429,26 @@ static void hud_render(void) {
                 hud_quad_xf(s_hudTex[pc->tex],
                             bx + (pc->x + layOx[li] + pc->w * 0.5f) * elScale,
                             by + (pc->y + layOy[li] + pc->h * 0.5f) * elScale,
-                            w, h, layRot[li], 0xFFFFFFFFu);
+                            w, h, layRot[li], pieceCol);
                 continue;
             }
 #endif
-            hud_quad(s_hudTex[pc->tex], bx + pc->x * elScale, by + pc->y * elScale,
-                     bx + (pc->x + pc->w) * elScale, by + (pc->y + pc->h) * elScale,
-                     0, 0, 1, 1, 0xFFFFFFFFu);
+            // Wrap at the screen edges to match the editor canvas: a piece whose
+            // stored position runs past one side (the editor lets you drag it off
+            // and shows it wrapped) appears on the other. Draw up to 3x3 wrapped
+            // copies; off-screen ones are culled, so on-screen pieces draw once.
+            {
+                float px0 = bx + pc->x * elScale, py0 = by + pc->y * elScale;
+                float pw = pc->w * elScale, ph = pc->h * elScale;
+                for (int wy = 0; wy < 3; wy++)
+                for (int wx = 0; wx < 3; wx++) {
+                    float ox = (wx == 1) ? -SCR_W : (wx == 2) ? SCR_W : 0.0f;
+                    float oy = (wy == 1) ? -SCR_H : (wy == 2) ? SCR_H : 0.0f;
+                    float x0 = px0 + ox, y0 = py0 + oy;
+                    if (x0 + pw <= 0.0f || x0 >= SCR_W || y0 + ph <= 0.0f || y0 >= SCR_H) continue;
+                    hud_quad(s_hudTex[pc->tex], x0, y0, x0 + pw, y0 + ph, 0, 0, 1, 1, pieceCol);
+                }
+            }
         }
         // Text rows (static label or counter bound to afn_hud_value[slot]).
         for (int k = 0; k < el->textCount; k++) {

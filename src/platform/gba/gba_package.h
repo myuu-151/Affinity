@@ -71,7 +71,7 @@ struct GBAPlayerDirExport
 // emitters nearest-neighbour scale down to the largest OBJ size.
 // Must match the editor's kMaxFrameSize so 256/512 (PSV) frames export at the
 // right stride — otherwise large frames are clamped to 128 and read back garbled.
-static constexpr int kExportMaxFrameSize = 512;
+static constexpr int kExportMaxFrameSize = 960;
 
 struct GBASpriteFrameExport
 {

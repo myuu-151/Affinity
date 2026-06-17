@@ -180,6 +180,13 @@ static EditorTab sPlayTab = EditorTab::Map; // which tab Play was started on
 // still boots into the scene the user was authoring.
 static int sLastSceneTabMode = 0;
 
+// Pixel dimensions for a sprite-asset base size. 960 is the PSV-only non-square
+// full-screen background (960x544); every other size is square NxN.
+static void AssetFrameDims(int baseSize, int& w, int& h) {
+    if (baseSize == 960) { w = 960; h = 544; }
+    else { w = baseSize; h = baseSize; }
+}
+
 // Dummy tileset: 16 colors for the palette display
 static uint32_t sPalette[16] = {
     0xFF000000, 0xFF1D2B53, 0xFF7E2553, 0xFF008751,
@@ -11957,9 +11964,9 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             // 128x128 is PSV-only: PSV billboards are RGBA textures with no
             // size cap; GBA/NDS OAM hardware tops out at 64x64 (their
             // exporters downscale oversized frames to the largest OBJ size).
-            const char* sizes[] = { "8x8", "16x16", "32x32", "64x64", "128x128 (PSV)", "256x256 (PSV)", "512x512 (PSV)" };
-            int sizeVals[] = { 8, 16, 32, 64, 128, 256, 512 };
-            const int kNumSizes = 7;
+            const char* sizes[] = { "8x8", "16x16", "32x32", "64x64", "128x128 (PSV)", "256x256 (PSV)", "512x512 (PSV)", "960x544 (PSV)" };
+            int sizeVals[] = { 8, 16, 32, 64, 128, 256, 512, 960 };
+            const int kNumSizes = 8;
             int curIdx = 2; // default 32x32
             for (int si = 0; si < kNumSizes; si++)
                 if (sizeVals[si] == asset.baseSize) { curIdx = si; break; }
@@ -11969,7 +11976,14 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                 int oldSize = asset.baseSize;
                 if (newSize != oldSize && !asset.frames.empty())
                 {
-                    if (newSize < oldSize)
+                    if (newSize == 960 || oldSize == 960)
+                    {
+                        // Non-square full-screen background (960x544): don't tile.
+                        // Just resize the frames; the user (re)imports a PNG to fill.
+                        int nw, nh; AssetFrameDims(newSize, nw, nh);
+                        for (auto& fr : asset.frames) { fr.width = nw; fr.height = nh; }
+                    }
+                    else if (newSize < oldSize)
                     {
                         // Downscale: split each frame into sub-frames
                         // e.g., 32x32 → 16x16 = 4 sub-frames per original frame
@@ -12231,8 +12245,7 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             {
                 SpriteFrame nf;
                 memset(nf.pixels, 0, sizeof(nf.pixels));
-                nf.width = asset.baseSize;
-                nf.height = asset.baseSize;
+                AssetFrameDims(asset.baseSize, nf.width, nf.height);
                 asset.frames.push_back(nf);
             }
             ImGui::SameLine();
@@ -12739,11 +12752,10 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                 {
                     asset.sourceImagePath = path;
 
-                    // Auto-detect frame size from baseSize
-                    asset.stripFrameW = asset.baseSize;
-                    asset.stripFrameH = asset.baseSize;
-                    int fw = asset.baseSize;
-                    int fh = asset.baseSize;
+                    // Auto-detect frame size from baseSize (960 = full-screen 960x544)
+                    int fw, fh; AssetFrameDims(asset.baseSize, fw, fh);
+                    asset.stripFrameW = fw;
+                    asset.stripFrameH = fh;
                     if (fw > kMaxFrameSize) fw = kMaxFrameSize;
                     if (fh > kMaxFrameSize) fh = kMaxFrameSize;
 
@@ -29088,8 +29100,11 @@ void FrameTick(float dt)
                     LayerTransform lt = getPieceLayerTransform(HudElement::It_Piece, pi);
                     float baseX = el.x + pc.localX + lt.ox;
                     float baseY = el.y + pc.localY + lt.oy;
-                    float pszW = pc.size * lt.sx;
-                    float pszH = pc.size * lt.sy;
+                    // 960 = non-square full-screen background (960x544); else square.
+                    int pcW = (pc.size == 960) ? 960 : pc.size;
+                    int pcH = (pc.size == 960) ? 544 : pc.size;
+                    float pszW = pcW * lt.sx;
+                    float pszH = pcH * lt.sy;
                     float psz = pc.size * zoom; // for wrap check (unscaled)
                     // Wrap at screen edges: pieces sliding off one side appear on the other
                     float wrapX[] = { 0, (float)-baseW, (float)baseW };
@@ -29098,7 +29113,7 @@ void FrameTick(float dt)
                     for (int wx = 0; wx < 3; wx++) {
                         float wrpX = baseX + wrapX[wx];
                         float wrpY = baseY + wrapY[wy];
-                        if (wrpX + pc.size <= 0 || wrpX >= baseW || wrpY + pc.size <= 0 || wrpY >= baseH) continue;
+                        if (wrpX + pcW <= 0 || wrpX >= baseW || wrpY + pcH <= 0 || wrpY >= baseH) continue;
                         int wi = wy * 3 + wx;
                         float px = cx + wrpX * zoom;
                         float py = cy + wrpY * zoom;
@@ -30142,9 +30157,9 @@ void FrameTick(float dt)
                         }
                         // 128 is PSV-only (RGBA HUD pieces, no OBJ cap); the NDS
                         // exporter scales oversized pieces into its largest OBJ.
-                        int sizeIdx = (pc.size == 8) ? 0 : (pc.size == 16) ? 1 : (pc.size == 32) ? 2 : (pc.size == 64) ? 3 : (pc.size == 128) ? 4 : (pc.size == 256) ? 5 : 6;
-                        if (ImGui::Combo("Size##pc", &sizeIdx, "8\0" "16\0" "32\0" "64\0" "128 (PSV)\0" "256 (PSV)\0" "512 (PSV)\0")) {
-                            const int sizes[] = {8, 16, 32, 64, 128, 256, 512};
+                        int sizeIdx = (pc.size == 8) ? 0 : (pc.size == 16) ? 1 : (pc.size == 32) ? 2 : (pc.size == 64) ? 3 : (pc.size == 128) ? 4 : (pc.size == 256) ? 5 : (pc.size == 512) ? 6 : 7;
+                        if (ImGui::Combo("Size##pc", &sizeIdx, "8\0" "16\0" "32\0" "64\0" "128 (PSV)\0" "256 (PSV)\0" "512 (PSV)\0" "960x544 (PSV)\0")) {
+                            const int sizes[] = {8, 16, 32, 64, 128, 256, 512, 960};
                             pc.size = sizes[sizeIdx]; sProjectDirty = true;
                         }
                         if (ImGui::DragInt("X##pc", &pc.localX, 1)) sProjectDirty = true;
