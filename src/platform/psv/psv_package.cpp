@@ -559,20 +559,28 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
     std::vector<int> frameW, frameH;
     int frameCount = 0;
     auto emitFrame = [&](int ai, int frame, int sz) -> std::pair<int,int> {
+        // RGBA frame data is emitted as a byte STRING LITERAL (octal-escaped),
+        // not a {0x..,..} initializer list: GCC parses a multi-MB string literal
+        // orders of magnitude faster than that many uint constant-expressions,
+        // which is what made the Vita build crawl for 512/960 HUD frames. The
+        // runtime uploads it straight to glTexImage2D (GL_RGBA, bytes [R,G,B,A]).
         if (ai < 0 || ai >= (int)assets.size() || frame < 0 || frame >= (int)assets[ai].frames.size())
-            { f << "static const unsigned int afn_hud_f" << frameCount << "[1] = {0};\n"; frameCount++; frameW.push_back(1); frameH.push_back(1); return {1,1}; }
+            { f << "static const unsigned char afn_hud_f" << frameCount << "[] = \"\\000\\000\\000\\000\";\n"; frameCount++; frameW.push_back(1); frameH.push_back(1); return {1,1}; }
         const auto& a = assets[ai]; const auto& fr = a.frames[frame];
         int w = fr.width > 0 ? fr.width : (sz>0?sz:a.baseSize);
         int h = fr.height > 0 ? fr.height : (sz>0?sz:a.baseSize);
         frameW.push_back(w); frameH.push_back(h);
-        f << "static const unsigned int __attribute__((aligned(16))) afn_hud_f" << frameCount << "[" << (w*h) << "] = {";
+        f << "static const unsigned char afn_hud_f" << frameCount << "[] =\n  \"";
+        int run = 0;
         for (int py = 0; py < h; py++) for (int px = 0; px < w; px++) {
-            if ((py*w+px)%8==0) f << "\n  ";
             unsigned char idx = fr.pixels[py * kExportMaxFrameSize + px];
             unsigned c = (idx == 0) ? 0u : a.palette[idx & 15];
-            f << "0x" << std::hex << c << std::dec << "u,";
+            unsigned bb[4] = { c & 0xFF, (c>>8) & 0xFF, (c>>16) & 0xFF, (c>>24) & 0xFF };
+            for (int k = 0; k < 4; k++)
+                f << '\\' << ((bb[k]>>6)&7) << ((bb[k]>>3)&7) << (bb[k]&7);  // \ooo octal byte
+            if (++run >= 64) { f << "\"\n  \""; run = 0; }   // split into concatenated literals
         }
-        f << "\n};\n";
+        f << "\";\n";
         frameCount++; return {w,h};
     };
 
@@ -612,7 +620,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
     }
 
     // Frame pointer + size tables.
-    f << "static const unsigned int* const afn_hud_frames[" << (frameCount?frameCount:1) << "] = {";
+    f << "static const unsigned char* const afn_hud_frames[" << (frameCount?frameCount:1) << "] = {";
     for (int i=0;i<frameCount;i++) f << "afn_hud_f" << i << ","; if(!frameCount) f << "0,"; f << "};\n";
     f << "#define AFN_HUD_FRAME_COUNT " << (frameCount?frameCount:1) << "\n";
     f << "static const short afn_hud_frame_w[" << (frameCount?frameCount:1) << "] = {";
@@ -772,7 +780,7 @@ bool PackagePSV(const std::string& runtimeDir,
     std::string buildCmd =
         "export VITASDK=/c/vitasdk; export PATH=\\\"$VITASDK/bin:$PATH\\\"; "
         "cd '" + msysDir + "' && mkdir -p build && cd build && "
-        "cmake .. && make 2>&1";
+        "cmake .. && make -j$(nproc) 2>&1";
     std::string out;
     int rc = RunMsysBash(buildCmd, out);
     if (rc != 0) {

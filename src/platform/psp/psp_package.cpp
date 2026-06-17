@@ -728,26 +728,38 @@ static bool GeneratePSPSound(const std::string& runtimeDir, const char* hdrPrefi
     for (int i = 0; i < (int)soundSamples.size(); i++) {
         auto& smp = soundSamples[i];
         bool use16 = !smp.data16.empty() && (int)smp.data16.size() == (int)smp.data.size();
+        // PCM emitted as a byte STRING LITERAL (octal-escaped), not a {..,..}
+        // initializer list: GCC parses a multi-MB string literal far faster than
+        // that many integer constant-expressions, which is what made long audio
+        // crawl the build. afn_pcm_ptrs is void* + a 16-bit flag and the runtime
+        // casts (short*/signed char*), so the stored type is transparent; 16-bit
+        // bytes are little-endian to match the target. aligned(4) keeps short
+        // access aligned.
+        auto emitByte = [&](unsigned v) { v &= 0xFF; f << '\\' << ((v>>6)&7) << ((v>>3)&7) << (v&7); };
         if (use16) {
-            f << "static const short afn_pcm_" << i << "[] __attribute__((aligned(4))) = {\n    ";
+            f << "static const unsigned char afn_pcm_" << i << "[] __attribute__((aligned(4))) =\n  \"";
+            int run = 0;
             for (int j = 0; j < (int)smp.data16.size(); j++) {
-                f << (int)smp.data16[j] << ",";
-                if ((j & 15) == 15) f << "\n    ";
+                int s = smp.data16[j]; emitByte(s & 0xFF); emitByte((s >> 8) & 0xFF);
+                if (++run >= 64) { f << "\"\n  \""; run = 0; }
             }
             int padVal = 0;
             if (smp.loop && smp.loopStart >= 0 && smp.loopStart < (int)smp.data16.size())
                 padVal = (int)smp.data16[smp.loopStart];
-            f << padVal << "\n};\n";
+            emitByte(padVal & 0xFF); emitByte((padVal >> 8) & 0xFF);
+            f << "\";\n";
         } else {
-            f << "static const signed char afn_pcm_" << i << "[] __attribute__((aligned(4))) = {\n    ";
+            f << "static const unsigned char afn_pcm_" << i << "[] __attribute__((aligned(4))) =\n  \"";
+            int run = 0;
             for (int j = 0; j < (int)smp.data.size(); j++) {
-                f << (int)smp.data[j] << ",";
-                if ((j & 31) == 31) f << "\n    ";
+                emitByte((unsigned)(unsigned char)smp.data[j]);
+                if (++run >= 96) { f << "\"\n  \""; run = 0; }
             }
             int padVal = 0;
             if (smp.loop && smp.loopStart >= 0 && smp.loopStart < (int)smp.data.size())
                 padVal = (int)smp.data[smp.loopStart];
-            f << padVal << "\n};\n";
+            emitByte((unsigned)(unsigned char)padVal);
+            f << "\";\n";
         }
         f << "#define AFN_PCM_" << i << "_LEN " << smp.data.size() << "\n";
         f << "#define AFN_PCM_" << i << "_RATE " << smp.sampleRate << "\n";
