@@ -11518,7 +11518,7 @@ static void DrawTabBar()
     TabButton(Mode0Label(), EditorTab::Tilemap);
     TabButton(sBuildTarget == BuildTarget::PSV ? "Graphics" : "Sprites", EditorTab::Sprites);
     TabButton("Skybox",  EditorTab::Skybox);
-    TabButton("3D",      EditorTab::ThreeD);
+    TabButton(sBuildTarget == BuildTarget::PSV ? "Meshes" : "3D", EditorTab::ThreeD);
     TabButton("Nodes",    EditorTab::Events);
     TabButton("Elements", EditorTab::Elements);
     TabButton("Sound",    EditorTab::Sound);
