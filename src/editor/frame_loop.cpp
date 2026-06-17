@@ -1225,6 +1225,66 @@ static std::vector<MidiFile> sMidiFiles;
 static int sSelectedSample = -1;
 static int sSelectedMidi = -1;
 
+// ---- Audio asset dump (for "Export all assets") ----
+// SFX/MIDI are embedded in the project (no source file on disk), so the asset
+// exporter serializes them back out: samples -> 16-bit mono WAV, sequences ->
+// Standard MIDI File (Type 0, all events merged onto one track).
+static bool WriteWavFile(const std::string& path, const int16_t* samples, size_t n, int rate) {
+    FILE* f = fopen(path.c_str(), "wb"); if (!f) return false;
+    uint32_t sr = (uint32_t)(rate > 0 ? rate : 16384);
+    uint16_t ch = 1, bits = 16, fmt = 1;
+    uint32_t dataBytes = (uint32_t)(n * sizeof(int16_t));
+    uint32_t byteRate = sr * ch * (bits / 8);
+    uint16_t blockAlign = (uint16_t)(ch * (bits / 8));
+    uint32_t riffSz = 36 + dataBytes, fmtSz = 16;
+    fwrite("RIFF", 1, 4, f); fwrite(&riffSz, 4, 1, f); fwrite("WAVE", 1, 4, f);
+    fwrite("fmt ", 1, 4, f); fwrite(&fmtSz, 4, 1, f);
+    fwrite(&fmt, 2, 1, f); fwrite(&ch, 2, 1, f); fwrite(&sr, 4, 1, f);
+    fwrite(&byteRate, 4, 1, f); fwrite(&blockAlign, 2, 1, f); fwrite(&bits, 2, 1, f);
+    fwrite("data", 1, 4, f); fwrite(&dataBytes, 4, 1, f);
+    if (n) fwrite(samples, sizeof(int16_t), n, f);
+    fclose(f); return true;
+}
+static void MidiPushVLQ(std::vector<uint8_t>& v, uint32_t value) {
+    uint8_t buf[5]; int i = 0;
+    buf[i++] = value & 0x7F;
+    while ((value >>= 7)) buf[i++] = (uint8_t)((value & 0x7F) | 0x80);
+    while (i) v.push_back(buf[--i]);
+}
+static bool WriteMidiFile(const std::string& path, const MidiFile& mf) {
+    struct Ev { int tick; int order; std::vector<uint8_t> bytes; };
+    std::vector<Ev> evs;
+    uint32_t usPerBeat = (uint32_t)(60000000.0 / (mf.tempo > 0 ? mf.tempo : 120));
+    evs.push_back({ 0, 0, { 0xFF, 0x51, 0x03,
+        (uint8_t)(usPerBeat >> 16), (uint8_t)(usPerBeat >> 8), (uint8_t)usPerBeat } });
+    for (int c = 0; c < 16; c++)
+        if (mf.channelProgram[c] >= 0 && mf.channelProgram[c] <= 127)
+            evs.push_back({ 0, 1, { (uint8_t)(0xC0 | c), (uint8_t)mf.channelProgram[c] } });
+    for (auto& tr : mf.tracks) {
+        for (auto& n : tr.notes) {
+            evs.push_back({ n.tick, 2, { (uint8_t)(0x90 | (n.channel & 15)), (uint8_t)(n.note & 0x7F), (uint8_t)(n.velocity & 0x7F) } });
+            evs.push_back({ n.tick + n.duration, 1, { (uint8_t)(0x80 | (n.channel & 15)), (uint8_t)(n.note & 0x7F), 0 } });
+        }
+        for (auto& b : tr.bends) { int v = b.value + 8192; if (v < 0) v = 0; if (v > 16383) v = 16383;
+            evs.push_back({ b.tick, 2, { (uint8_t)(0xE0 | (b.channel & 15)), (uint8_t)(v & 0x7F), (uint8_t)((v >> 7) & 0x7F) } }); }
+        for (auto& cc : tr.ccs)
+            evs.push_back({ cc.tick, 2, { (uint8_t)(0xB0 | (cc.channel & 15)), (uint8_t)(cc.cc & 0x7F), (uint8_t)(cc.value & 0x7F) } });
+    }
+    std::stable_sort(evs.begin(), evs.end(), [](const Ev& a, const Ev& b) {
+        return a.tick != b.tick ? a.tick < b.tick : a.order < b.order; });
+    std::vector<uint8_t> trk;
+    int last = 0;
+    for (auto& e : evs) { MidiPushVLQ(trk, (uint32_t)(e.tick - last)); last = e.tick;
+                          for (uint8_t by : e.bytes) trk.push_back(by); }
+    MidiPushVLQ(trk, 0); trk.push_back(0xFF); trk.push_back(0x2F); trk.push_back(0x00); // end of track
+    FILE* f = fopen(path.c_str(), "wb"); if (!f) return false;
+    auto w16 = [&](uint16_t v){ uint8_t b[2] = { (uint8_t)(v >> 8), (uint8_t)v }; fwrite(b, 1, 2, f); };
+    auto w32 = [&](uint32_t v){ uint8_t b[4] = { (uint8_t)(v >> 24), (uint8_t)(v >> 16), (uint8_t)(v >> 8), (uint8_t)v }; fwrite(b, 1, 4, f); };
+    fwrite("MThd", 1, 4, f); w32(6); w16(0); w16(1); w16((uint16_t)(mf.ticksPerBeat > 0 ? mf.ticksPerBeat : 480));
+    fwrite("MTrk", 1, 4, f); w32((uint32_t)trk.size()); if (!trk.empty()) fwrite(trk.data(), 1, trk.size(), f);
+    fclose(f); return true;
+}
+
 // Per-sample overrides (waveform edits + envelope) stored per-instance
 struct SampleOverride {
     int sampleIdx = -1;
@@ -31529,6 +31589,32 @@ void FrameTick(float dt)
             if (sSpriteCount > 0) {
                 int sceneObjs = ExportSceneOBJ((base / "scene.obj").string());
                 if (sceneObjs > 0) sExportedCount++;
+            }
+            // Dump embedded audio (SFX/MIDI have no source file on disk) into an
+            // audio/ subfolder: non-builtIn samples -> .wav, sequences -> .mid.
+            {
+                auto safeName = [](std::string s){
+                    for (char& c : s) if (!(isalnum((unsigned char)c) || c=='-' || c=='_' || c==' ')) c='_';
+                    if (s.empty()) s = "asset"; return s; };
+                fs::path audioDir = base / "audio";
+                std::error_code ec; fs::create_directories(audioDir, ec);
+                for (size_t i = 0; i < sMidiFiles.size(); i++) {
+                    std::string nm = safeName(sMidiFiles[i].name[0] ? sMidiFiles[i].name : ("midi_" + std::to_string(i)));
+                    if (WriteMidiFile((audioDir / (nm + ".mid")).string(), sMidiFiles[i])) sExportedCount++;
+                }
+                for (size_t i = 0; i < sSoundBank.size(); i++) {
+                    const SoundSample& smp = sSoundBank[i];
+                    if (smp.builtIn) continue;   // skip synthesized GM instruments
+                    std::string nm = safeName(smp.name[0] ? smp.name : ("sfx_" + std::to_string(i)));
+                    if (!smp.srcData16.empty()) {
+                        WriteWavFile((audioDir / (nm + ".wav")).string(), smp.srcData16.data(),
+                                     smp.srcData16.size(), smp.srcRate > 0 ? smp.srcRate : smp.sampleRate) && ++sExportedCount;
+                    } else if (!smp.data.empty()) {
+                        std::vector<int16_t> tmp(smp.data.size());
+                        for (size_t s = 0; s < smp.data.size(); s++) tmp[s] = (int16_t)(smp.data[s] << 8);
+                        WriteWavFile((audioDir / (nm + ".wav")).string(), tmp.data(), tmp.size(), smp.sampleRate) && ++sExportedCount;
+                    }
+                }
             }
             sExportDest = base.string();
             sExportResult = sExportedCount > 0 ? 1 : 2;
