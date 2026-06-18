@@ -274,7 +274,7 @@ void generateWorker(std::string userMsg) {
 
         { std::lock_guard<std::mutex> lk(g_mtx); g_partial.clear(); }
         std::string resp;
-        std::unordered_set<std::string> seenLines; std::string curLine; int dupLines = 0;
+        std::unordered_set<std::string> seenLines; std::string curLine; int dupLines = 0; bool sawGraph = false;
         const int budget = 2048;   // room for larger graphs / repair passes (n_ctx is 16k)
         for (int i = 0; i < budget && !g_stop.load(); i++) {
             llama_token id = llama_sampler_sample(smpl, g_ctx, -1);
@@ -289,7 +289,12 @@ void generateWorker(std::string userMsg) {
                 // unique), so several duplicate lines mean the model is stuck looping.
                 for (int k = 0; k < np; k++) {
                     if (piece[k] == '\n') {
-                        if (curLine.compare(0, 4, "bpVs") == 0 && !seenLines.insert(curLine).second && ++dupLines >= 4) looped = true;
+                        if (curLine.compare(0, 4, "bpVs") == 0) {
+                            sawGraph = true;
+                            if (!seenLines.insert(curLine).second && ++dupLines >= 4) looped = true;   // stuck repeating
+                        } else if (sawGraph && curLine.compare(0, 3, "```") == 0) {
+                            looped = true;   // closing fence after the graph — the model is done
+                        }
                         curLine.clear();
                     } else curLine.push_back(piece[k]);
                 }

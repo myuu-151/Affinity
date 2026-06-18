@@ -5195,8 +5195,9 @@ static std::string BuildLLMGrammar() {
     bool haveClips = !clipNames.empty();
 
     std::string g;
-    g += "root ::= ws (stmt ws)+\n";
+    g += "root ::= ws (stmt ws)+ fence?\n";   // optional closing ``` so the model can terminate
     g += "ws ::= [ \\t\\r\\n]*\n";
+    g += "fence ::= \"```\"\n";
     g += std::string("stmt ::= node | link | set | setbit") + (haveClips ? " | clip" : "") + "\n";
     g += "node ::= \"bpVsNode=\" int \",\" ntype \",\" int \",\" int \",\" int \",\" int \",\" int \",\" int \",\" int\n";
     g += "link ::= \"bpVsLink=\" int \",\" int \",\" int \"|\" int \",\" int \",\" int\n";
