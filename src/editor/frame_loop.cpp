@@ -20855,8 +20855,11 @@ void FrameTick(float dt)
 
         dl->PopClipRect();
 
-        // Space — open add-node menu at mouse cursor (Blender-style)
-        if (canvasHovered && ImGui::IsKeyPressed(ImGuiKey_Space) && !ImGui::IsPopupOpen("##AddNode")) {
+        // Space — open add-node menu at mouse cursor (Blender-style). Suppressed
+        // while a text field is being edited (annotation label, node text input,
+        // search box...) so Space types a space instead of summoning the menu.
+        if (canvasHovered && ImGui::IsKeyPressed(ImGuiKey_Space) && !ImGui::IsPopupOpen("##AddNode")
+            && !io.WantTextInput) {
             sVsShowContextMenu = true;
             sVsContextMenuPos = io.MousePos;
         }
