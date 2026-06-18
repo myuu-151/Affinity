@@ -472,8 +472,12 @@ void RenderPanel(bool* p_open) {
         { std::lock_guard<std::mutex> lk(g_mtx);
           if (!g_history.empty() && g_history.back().role == "assistant") lastReply = g_history.back().content;
           insStatus = g_insertStatus; haveHandler = (bool)g_insertHandler; }
-        if (haveHandler && lastReply.find("bpVsNode=") != std::string::npos && !busy) {
-            if (ImGui::Button("Insert nodes into open blueprint")) {
+        bool hasNodes = lastReply.find("bpVsNode=") != std::string::npos;
+        bool hasEdits = lastReply.find("bpVsSet=")  != std::string::npos;
+        if (haveHandler && (hasNodes || hasEdits) && !busy) {
+            const char* label = hasNodes ? "Insert nodes into open blueprint"
+                                         : "Apply edits to selected nodes";
+            if (ImGui::Button(label)) {
                 std::string r = g_insertHandler(lastReply);
                 std::lock_guard<std::mutex> lk(g_mtx);
                 g_insertStatus = r;
