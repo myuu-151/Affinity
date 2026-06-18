@@ -296,7 +296,12 @@ void generateWorker(std::string userMsg) {
                             looped = true;   // closing fence after the graph — the model is done
                         }
                         curLine.clear();
-                    } else { curLine.push_back(piece[k]); if (curLine.size() > 256) looped = true; }   // runaway single line (e.g. endless digits)
+                    } else {
+                        curLine.push_back(piece[k]);
+                        // Backstop for a runaway GRAPH line (e.g. endless digits) — never trips
+                        // on prose/reasoning, which legitimately has long lines.
+                        if (curLine.size() > 256 && curLine.compare(0, 4, "bpVs") == 0) looped = true;
+                    }
                 }
             }
             if (looped) break;
