@@ -1451,6 +1451,16 @@ static std::string BuildLLMSystemPrompt() {
                 s += d.inDataNames[p] ? d.inDataNames[p] : "?";
             }
         }
+        // One-line gist (first sentence of the node's description) so the model
+        // understands what each node does + picks the right one when building.
+        const char* full = VsNodeDesc((VsNodeType)i);
+        if (full && *full && strcmp(full, "No description.") != 0) {
+            std::string one(full);
+            size_t dot = one.find(". ");
+            if (dot != std::string::npos) one = one.substr(0, dot + 1);
+            else if (one.size() > 160) one = one.substr(0, 160) + "...";
+            s += " — " + one;
+        }
         s += "\n";
     }
     return s;
