@@ -48,6 +48,12 @@ std::atomic<bool>       g_backendInit{false};
 char g_modelPath[512] = "";
 char g_input[4096]    = "";
 
+// Compute setting (applied at Load). g_useGpu chooses CPU vs GPU; g_pct is the
+// level: CPU% = fraction of logical cores; GPU% = fraction of model layers
+// offloaded to the GPU. GPU only does anything with a GPU-enabled llama build.
+int  g_pct    = 50;     // 50 or 75
+bool g_useGpu = false;
+
 std::function<std::string(const std::string&)> g_insertHandler;   // [g] set once at startup
 std::string g_insertStatus;                                       // [g] feedback after an insert
 
@@ -99,15 +105,31 @@ bool decodeTokens(std::vector<llama_token>& toks) {
 
 void loadWorker(std::string path) {
     ensureBackend();
+    unsigned hc = std::thread::hardware_concurrency(); if (!hc) hc = 4;
+
+    // GPU offload: read the model's layer count cheaply (vocab-only) so we can
+    // offload g_pct% of the layers (the rest stay on CPU). Inert on a CPU-only
+    // llama build (no GPU device -> n_gpu_layers is ignored and it runs on CPU).
+    int ngl = 0;
+    if (g_useGpu) {
+        llama_model_params vp = llama_model_default_params();
+        vp.vocab_only = true; vp.n_gpu_layers = 0;
+        llama_model* vm = llama_model_load_from_file(path.c_str(), vp);
+        if (vm) { int nl = llama_model_n_layer(vm); ngl = (g_pct >= 100) ? -1 : (nl * g_pct) / 100; if (ngl < 1) ngl = 1; llama_model_free(vm); }
+        else ngl = -1;   // couldn't read the count; offload all
+    }
+
     llama_model_params mp = llama_model_default_params();
-    mp.n_gpu_layers = 0;   // CPU
+    mp.n_gpu_layers = ngl;
     llama_model* m = llama_model_load_from_file(path.c_str(), mp);
     if (!m) { setStatus("Failed to load model: " + path); g_loading = false; return; }
     llama_context_params cp = llama_context_default_params();
     cp.n_ctx   = 8192;     // room for the node-catalog system prompt + a chat
     cp.n_batch = 512;
-    unsigned hc = std::thread::hardware_concurrency(); if (!hc) hc = 4;
-    int nt = (int)(hc / 2); if (nt < 1) nt = 1;   // ~half the cores: keep the laptop responsive
+    // CPU mode: use g_pct% of the cores. GPU mode: GPU does most of the work, so
+    // keep CPU light (~half) for the non-offloaded layers + sampling. Always >=1.
+    int nt = g_useGpu ? (int)(hc / 2) : (int)(hc * g_pct / 100);
+    if (nt < 1) nt = 1;
     cp.n_threads = nt; cp.n_threads_batch = nt;
     llama_context* c = llama_init_from_model(m, cp);
     if (!c) { llama_model_free(m); setStatus("Failed to create context."); g_loading = false; return; }
@@ -216,11 +238,25 @@ void RenderPanel(bool* p_open) {
 
     bool busy = IsBusy();
     ImGui::BeginDisabled(busy);
-    ImGui::SetNextItemWidth(-70.0f);
+    ImGui::SetNextItemWidth(-160.0f);
     ImGui::InputText("##modelpath", g_modelPath, sizeof(g_modelPath));
+    ImGui::SameLine();
+    if (ImGui::Button("Settings", ImVec2(86, 0))) ImGui::OpenPopup("AsstSettings");
     ImGui::SameLine();
     if (ImGui::Button("Load", ImVec2(60, 0)) && g_modelPath[0]) startLoad(g_modelPath);
     ImGui::EndDisabled();
+    if (ImGui::BeginPopup("AsstSettings")) {
+        ImGui::TextDisabled("Compute (applies on next Load)");
+        ImGui::Separator();
+        if (ImGui::RadioButton("CPU 50%", !g_useGpu && g_pct == 50)) { g_useGpu = false; g_pct = 50; }
+        if (ImGui::RadioButton("CPU 75%", !g_useGpu && g_pct == 75)) { g_useGpu = false; g_pct = 75; }
+        if (ImGui::RadioButton("GPU 50%", g_useGpu && g_pct == 50)) { g_useGpu = true; g_pct = 50; }
+        if (ImGui::RadioButton("GPU 75%", g_useGpu && g_pct == 75)) { g_useGpu = true; g_pct = 75; }
+        if (ImGui::RadioButton("GPU 100% (full offload)", g_useGpu && g_pct >= 100)) { g_useGpu = true; g_pct = 100; }
+        ImGui::Separator();
+        ImGui::TextUnformatted("CPU = share of cores used.\nGPU = share of layers offloaded;\n100% = whole model on GPU (best if it\nfits in VRAM). Needs a GPU-enabled build.");
+        ImGui::EndPopup();
+    }
     { std::lock_guard<std::mutex> lk(g_mtx); ImGui::TextWrapped("%s", g_status.c_str()); }
     ImGui::Separator();
 

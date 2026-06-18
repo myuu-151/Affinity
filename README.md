@@ -222,7 +222,18 @@ The model isn't bundled (it's large and separately licensed) — download any **
 2. Put it in `models/` (e.g. `models/Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf`). The editor auto-detects the first `.gguf` there.
 3. Open **View ▸ Assistant**, click **Load** (first load digests the node catalog once — give it a moment on CPU), then chat once it says **Loaded … (ready)**.
 
-> CPU-only by default. It uses about half your cores to stay responsive, and caches the node catalog after the first load so replies stay fast.
+> CPU-only by default. It caches the node catalog after the first load so replies stay fast. The panel's **Settings** button picks compute: **CPU 50% / 75%** (share of cores) or **GPU 50% / 75% / 100%** (share of layers offloaded).
+
+#### GPU acceleration (optional)
+
+GPU offload only does something if llama.cpp is built with a GPU backend (the default build is CPU-only). On a machine with the toolkit installed, enable one at configure time — then the Settings ▸ GPU options run on the GPU (a full 7B fits in ~5 GB VRAM and runs ~20–50× faster than CPU):
+
+```bash
+cmake -B build -S . -DAFFINITY_LLM_CUDA=ON      # NVIDIA — needs the CUDA Toolkit
+# or
+cmake -B build -S . -DAFFINITY_LLM_VULKAN=ON    # any GPU — needs the Vulkan SDK
+cmake --build build --config Release
+```
 
 ---
 

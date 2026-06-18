@@ -45,6 +45,19 @@ set(LLAMA_CURL           OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP          OFF CACHE BOOL "" FORCE)   # avoid OpenMP runtime vs /MT mismatch
 set(GGML_BUILD_TESTS     OFF CACHE BOOL "" FORCE)
 set(GGML_BUILD_EXAMPLES  OFF CACHE BOOL "" FORCE)
+# Optional GPU backends for the assistant. OFF by default => CPU-only build
+# (works anywhere). On a machine WITH the toolkit installed, enable one at
+# configure time so the assistant's GPU offload options actually use the GPU:
+#   cmake -B build -S . -DAFFINITY_LLM_CUDA=ON     # NVIDIA (needs CUDA Toolkit)
+#   cmake -B build -S . -DAFFINITY_LLM_VULKAN=ON   # any GPU (needs Vulkan SDK)
+option(AFFINITY_LLM_CUDA   "Build llama.cpp with the CUDA GPU backend (NVIDIA; needs CUDA Toolkit)" OFF)
+option(AFFINITY_LLM_VULKAN "Build llama.cpp with the Vulkan GPU backend (needs Vulkan SDK)" OFF)
+if(AFFINITY_LLM_CUDA)
+    set(GGML_CUDA   ON CACHE BOOL "" FORCE)
+endif()
+if(AFFINITY_LLM_VULKAN)
+    set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+endif()
 FetchContent_Declare(llama_cpp
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
     GIT_TAG b9701
