@@ -1110,6 +1110,9 @@ static std::string BuildLLMSystemPrompt() {
     s += "IMPORTANT — keys: a key event (On Key Pressed/Held/Released) has a 'Key' data-in "
          "pin. To make it respond to a key you MUST add a separate 'Key' node, set its P0 to "
          "the key index, and link the Key node's data-out -> the event's Key data-in. "
+         "Each key event gets its OWN Key node: to react to two DIFFERENT keys (e.g. A->jump "
+         "AND Up->move), create TWO separate Key nodes — never wire one Key node into two "
+         "events, and when adding a new key do NOT change an existing Key node's index. "
          "Key indices: ";
     for (int k = 0; k < kVsKeyCount; k++) { if (k) s += ", "; s += sVsKeyNames[k]; s += "="; s += std::to_string(k); }
     s += ".\nExample — jump when A is pressed:\n"
