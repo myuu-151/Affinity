@@ -1420,6 +1420,13 @@ static std::string BuildLLMSystemPrompt() {
     for (int k = 0; k < kVsAxisCount; k++) { if (k) s += ", "; s += sVsAxisNames[k]; s += "="; s += std::to_string(k); }
     s += "). To send a value into another node's pin, add the data node and wire its "
          "data-out (pinType 2, idx 0) -> the target's data-in (pinType 3, the pin's index).\n"
+         "PINS vs PARAMS — important: a node's data-IN pins (e.g. Jump's 'Force (float)') are "
+         "fed by WIRING a data node into them, NOT by setting that node's params. bpVsSet changes "
+         "only a node's OWN P0..P3 settings — you can NEVER bpVsSet a value onto a pin. To give a "
+         "node's input pin a value, add the matching data node (Integer for a number, Float for a "
+         "'(float)' pin, Direction for a direction, Key for a key) and wire its data-out to the pin. "
+         "For a '(float)' pin use a Float node and put the plain number in its P0 (e.g. 12 = 12.0; the "
+         "editor encodes it) — e.g. a strong jump = Float(P0=12) wired into Jump's Force pin.\n"
          "Example — orbit the camera while R-stick Up(16) is held, direction Up(2), speed 1000:\n"
          "bpVsNode=1,Key,100,300,16,0,0,0,0\n"
          "bpVsNode=2,On Key Held,400,150,0,0,0,0,0\n"
@@ -1619,6 +1626,9 @@ static std::string InsertLLMNodes(const std::string& text) {
         v.type = (VsNodeType)p.type;
         v.x = p.x + dx; v.y = p.y + dy;
         v.paramInt[0] = p.p[0]; v.paramInt[1] = p.p[1]; v.paramInt[2] = p.p[2]; v.paramInt[3] = p.p[3];
+        // A Float node stores its value as the float's BIT PATTERN in P0; the model
+        // writes a plain number, so encode it (e.g. 12 -> bits of 12.0f).
+        if (v.type == VsNodeType::Float) { float f = (float)v.paramInt[0]; memcpy(&v.paramInt[0], &f, sizeof(float)); }
         v.groupId = sVsEditingGroup;   // insert into the group currently being edited (0 = top level)
         v.selected = true;
         for (auto& c : clips) if (c.first == p.id) { strncpy(v.clipName, c.second.c_str(), sizeof(v.clipName) - 1); break; }
@@ -1689,7 +1699,11 @@ static std::string InsertLLMNodes(const std::string& text) {
     for (auto& e : edits) {
         if (e.pi < 0 || e.pi > 3) { warn.push_back("bpVsSet: paramIndex " + std::to_string(e.pi) + " out of range (0-3)"); continue; }
         VsNode* n = resolveExisting(e.id);
-        if (n) { n->paramInt[e.pi] = e.val; edited++; }
+        if (n) {
+            if (n->type == VsNodeType::Float && e.pi == 0) { float f = (float)e.val; memcpy(&n->paramInt[0], &f, sizeof(float)); }
+            else n->paramInt[e.pi] = e.val;
+            edited++;
+        }
         else warn.push_back("bpVsSet: no node with id " + std::to_string(e.id) + " in the graph");
     }
     for (auto& b : bitedits) {
@@ -5304,6 +5318,7 @@ static std::string BuildLLMSelectionContext() {
         s += "  node " + std::to_string(n->id) + " = " + d.name
            + "  P0=" + std::to_string(n->paramInt[0]) + " P1=" + std::to_string(n->paramInt[1])
            + " P2=" + std::to_string(n->paramInt[2]) + " P3=" + std::to_string(n->paramInt[3]);
+        if (n->type == VsNodeType::Float) { float f; memcpy(&f, &n->paramInt[0], sizeof(float)); char b[32]; snprintf(b, sizeof(b), " floatValue=%g", f); s += b; }
         if (n->clipName[0]) { s += " clip=\""; s += n->clipName; s += "\""; }
         if (d.inData > 0) { s += "  (data pins:"; for (int p = 0; p < d.inData; p++) { s += p ? ", " : " "; s += d.inDataNames[p] ? d.inDataNames[p] : "?"; } s += ")"; }
         s += "\n      "; s += VsNodeDesc(n->type); s += "\n";   // behaviour/param semantics for targeting
@@ -5333,6 +5348,7 @@ static std::string BuildLLMEditContext() {
         s += "  node " + std::to_string(n->id) + " = " + d.name
            + " (P0=" + std::to_string(n->paramInt[0]) + " P1=" + std::to_string(n->paramInt[1])
            + " P2=" + std::to_string(n->paramInt[2]) + " P3=" + std::to_string(n->paramInt[3]) + ")";
+        if (n->type == VsNodeType::Float) { float f; memcpy(&f, &n->paramInt[0], sizeof(float)); char b[32]; snprintf(b, sizeof(b), " floatValue=%g", f); s += b; }
         if (n->clipName[0]) { s += " clip=\""; s += n->clipName; s += "\""; }
         s += "\n";
     }
