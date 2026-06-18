@@ -1104,8 +1104,38 @@ static std::string BuildLLMSystemPrompt() {
         "left-to-right ~300px apart in X. Exec links use FROM_PIN_TYPE=0 (exec out) -> "
         "TO_PIN_TYPE=1 (exec in); data links use 2 (data out) -> 3 (data in); PIN_IDX is the "
         "0-based pin position. [event] nodes have no exec input and start a chain. A node's "
-        "P0..P4 are its int params (e.g. a Key node's P0 is the key index).\n\n"
-        "NODES — name (type N)[event][exec in>out] data-in: pins\n";
+        "P0..P4 are its int params (e.g. a Key node's P0 is the key index).\n\n";
+    // Key events read WHICH key from a separate Key node wired into their Key pin —
+    // the model won't know this idiom, so spell it out with the index legend + an example.
+    s += "IMPORTANT — keys: a key event (On Key Pressed/Held/Released) has a 'Key' data-in "
+         "pin. To make it respond to a key you MUST add a separate 'Key' node, set its P0 to "
+         "the key index, and link the Key node's data-out -> the event's Key data-in. "
+         "Key indices: ";
+    for (int k = 0; k < kVsKeyCount; k++) { if (k) s += ", "; s += sVsKeyNames[k]; s += "="; s += std::to_string(k); }
+    s += ".\nExample — jump when A is pressed:\n"
+         "bpVsNode=1,Key,100,250,0,0,0,0,0\n"
+         "bpVsNode=2,On Key Pressed,400,150,0,0,0,0,0\n"
+         "bpVsNode=3,Jump,700,150,0,0,0,0,0\n"
+         "bpVsLink=1,2,0|2,3,0\n"
+         "bpVsLink=2,0,0|3,1,0\n\n";
+    s += "VALUES & DATA WIRING: X,Y are ONLY canvas position — NEVER put a value in X/Y "
+         "or inside a link. A node's settings live in its P0..P3 ints. An Integer node's "
+         "number is its P0 (bpVsNode=N,Integer,x,y,1000,0,0,0,0 means the value 1000). "
+         "A Direction node's P0 picks the direction (";
+    for (int k = 0; k < kVsAxisCount; k++) { if (k) s += ", "; s += sVsAxisNames[k]; s += "="; s += std::to_string(k); }
+    s += "). To send a value into another node's pin, add the data node and wire its "
+         "data-out (pinType 2, idx 0) -> the target's data-in (pinType 3, the pin's index).\n"
+         "Example — orbit the camera while R-stick Up(16) is held, direction Up(2), speed 1000:\n"
+         "bpVsNode=1,Key,100,300,16,0,0,0,0\n"
+         "bpVsNode=2,On Key Held,400,150,0,0,0,0,0\n"
+         "bpVsNode=3,Orbit Camera,700,150,0,0,0,0,0\n"
+         "bpVsNode=4,Direction,400,350,2,0,0,0,0\n"
+         "bpVsNode=5,Integer,400,500,1000,0,0,0,0\n"
+         "bpVsLink=1,2,0|2,3,0\n"     // Key -> On Key Held (Key pin)
+         "bpVsLink=2,0,0|3,1,0\n"     // On Key Held -> Orbit Camera (exec)
+         "bpVsLink=4,2,0|3,3,0\n"     // Direction -> Orbit Camera 'Direction' (data pin 0)
+         "bpVsLink=5,2,0|3,3,1\n\n"   // Integer 1000 -> Orbit Camera 'Speed' (data pin 1)
+         "NODES — name (type N)[event][exec in>out] data-in: pins\n";
     int count = (int)(sizeof(sVsNodeDefs) / sizeof(sVsNodeDefs[0]));
     for (int i = 0; i < count; i++) {
         const VsNodeTypeDef& d = sVsNodeDefs[i];
@@ -1187,13 +1217,15 @@ static int sVsEditingGroup = 0;        // 0 = top-level; >0 = inside group node 
 // Parse a node graph the LLM assistant generated (bpVsNode/bpVsLink/bpVsNodeClip
 // lines, fenced or inline) and insert it into the OPEN node graph (sVsNodes/
 // sVsLinks) with fresh ids, placed to the right of the existing nodes and
-// left selected so the user can drag the whole group into place. Returns the
-// number of nodes inserted. Registered as llm::SetInsertHandler at startup.
-static int InsertLLMNodes(const std::string& text) {
+// left selected so the user can drag the whole group into place. Lints the
+// graph (unknown types, duplicate ids, dangling/out-of-range links, unwired key
+// events) and returns a status + warning message. Registered via SetInsertHandler.
+static std::string InsertLLMNodes(const std::string& text) {
     struct PN { int id, type, p[5]; float x, y; };
     struct PL { int from, fpt, fpi, to, tpt, tpi; };
     std::vector<PN> pns; std::vector<PL> pls;
     std::vector<std::pair<int, std::string>> clips;
+    std::vector<std::string> warn;
 
     int typeCount = (int)(sizeof(sVsNodeDefs) / sizeof(sVsNodeDefs[0]));
     auto lc = [](std::string x){ for (auto& c : x) if (c >= 'A' && c <= 'Z') c += 32; return x; };
@@ -1224,6 +1256,7 @@ static int InsertLLMNodes(const std::string& text) {
                 n.y = (float)atof(f[3].c_str());
                 for (int k = 0; k < 5; k++) n.p[k] = (f.size() > (size_t)(4 + k)) ? atoi(f[4 + k].c_str()) : 0;
                 if (n.type >= 0) pns.push_back(n);
+                else warn.push_back("unknown node type \"" + trim(f[1]) + "\" (skipped)");
             }
         } else if ((a = line.find("bpVsLink=")) != std::string::npos) {
             PL l{};
@@ -1239,7 +1272,12 @@ static int InsertLLMNodes(const std::string& text) {
                 clips.push_back({ id, std::string(nm) });
         }
     }
-    if (pns.empty()) return 0;
+    if (pns.empty()) {
+        if (warn.empty()) return "No node lines (bpVsNode=...) found in the reply.";
+        std::string m = "No nodes inserted. Issues:";
+        for (auto& w : warn) m += "\n- " + w;
+        return m;
+    }
     float maxX = 0; bool any = false;
     for (auto& n : sVsNodes) { if (!any || n.x > maxX) maxX = n.x; any = true; }
     float minPX = 1e9f, minPY = 1e9f;
@@ -1247,11 +1285,12 @@ static int InsertLLMNodes(const std::string& text) {
     float dx = (any ? maxX + 360.0f : 0.0f) - minPX;   // place to the right of existing graph
     float dy = -minPY;
 
-    std::map<int, int> idmap;   // parsed id -> new editor id
+    std::map<int, int> idmap;    // parsed id -> new editor id
+    std::map<int, int> typeOf;   // new editor id -> type index (for link/pin validation)
     for (auto& n : sVsNodes) n.selected = false;
     int added = 0;
     for (auto& p : pns) {
-        if (p.type < 0 || p.type >= typeCount) continue;   // skip unknown node types
+        if (idmap.count(p.id)) { warn.push_back("duplicate node id " + std::to_string(p.id) + " — kept first"); continue; }
         VsNode v;
         v.id   = sVsNextId++;
         v.type = (VsNodeType)p.type;
@@ -1261,18 +1300,50 @@ static int InsertLLMNodes(const std::string& text) {
         v.selected = true;
         for (auto& c : clips) if (c.first == p.id) { strncpy(v.clipName, c.second.c_str(), sizeof(v.clipName) - 1); break; }
         idmap[p.id] = v.id;
+        typeOf[v.id] = p.type;
         sVsNodes.push_back(v);
         added++;
     }
+    // Links — validate both endpoints exist and the pin indices are in range
+    // before adding (the model often invents pins or references missing nodes).
+    auto pinCount = [&](int type, int pinType) -> int {
+        const VsNodeTypeDef& d = sVsNodeDefs[type];
+        switch (pinType) { case 0: return d.outExec; case 1: return d.inExec; case 2: return d.outData; case 3: return d.inData; }
+        return 0;
+    };
     for (auto& l : pls) {
         auto fIt = idmap.find(l.from), tIt = idmap.find(l.to);
-        if (fIt == idmap.end() || tIt == idmap.end()) continue;
+        if (fIt == idmap.end() || tIt == idmap.end()) { warn.push_back("dropped a link referencing a node not in the graph"); continue; }
+        int ft = typeOf[fIt->second], tt = typeOf[tIt->second];
+        if (l.fpi < 0 || l.fpi >= pinCount(ft, l.fpt) || l.tpi < 0 || l.tpi >= pinCount(tt, l.tpt)) {
+            warn.push_back(std::string("dropped an out-of-range link into ") + sVsNodeDefs[tt].name);
+            continue;
+        }
         VsLink lk;
         lk.from.nodeId = fIt->second; lk.from.pinType = l.fpt; lk.from.pinIdx = l.fpi;
         lk.to.nodeId   = tIt->second; lk.to.pinType   = l.tpt; lk.to.pinIdx   = l.tpi;
         sVsLinks.push_back(lk);
     }
-    return added;
+    // Lint: a key event with its "Key" pin unwired won't fire (the model commonly
+    // forgets the Key node) — flag it.
+    for (auto& kv : typeOf) {
+        const VsNodeTypeDef& d = sVsNodeDefs[kv.second];
+        if (d.inExec != 0) continue;   // events have no exec input
+        for (int p = 0; p < d.inData; p++) {
+            if (!d.inDataNames[p] || std::string(d.inDataNames[p]) != "Key") continue;
+            bool wired = false;
+            for (auto& lk : sVsLinks) if (lk.to.nodeId == kv.first && lk.to.pinType == 3 && lk.to.pinIdx == p) { wired = true; break; }
+            if (!wired) warn.push_back(std::string(d.name) + ": Key pin not wired — add a Key node so it responds to a key");
+        }
+    }
+
+    std::string msg = "Inserted " + std::to_string(added) + " node(s)";
+    if (warn.empty()) { msg += " — no issues. Drag them into place."; }
+    else {
+        msg += ", " + std::to_string((int)warn.size()) + " warning(s):";
+        for (auto& w : warn) msg += "\n- " + w;
+    }
+    return msg;
 }
 static float sVsParentPanX = 0, sVsParentPanY = 0;
 static float sVsParentZoom = 1.0f;

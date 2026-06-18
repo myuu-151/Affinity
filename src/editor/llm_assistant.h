@@ -12,10 +12,10 @@ namespace llm {
     void SetSystemPrompt(const std::string& sys);
 
     // Handler that inserts a generated node graph (the assistant's bpVsNode/
-    // bpVsLink text) into the open blueprint; returns the number of nodes
-    // inserted (0 = none found). When set, the panel shows an "Insert" button
-    // whenever the last reply contains node text.
-    void SetInsertHandler(std::function<int(const std::string&)> fn);
+    // bpVsLink text) into the open blueprint; returns a status + lint message to
+    // display (inserted count + any warnings). When set, the panel shows an
+    // "Insert" button whenever the last reply contains node text.
+    void SetInsertHandler(std::function<std::string(const std::string&)> fn);
 
     // Render the assistant panel (call once per frame from the editor UI).
     void RenderPanel(bool* p_open);

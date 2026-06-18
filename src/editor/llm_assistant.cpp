@@ -48,8 +48,8 @@ std::atomic<bool>       g_backendInit{false};
 char g_modelPath[512] = "";
 char g_input[4096]    = "";
 
-std::function<int(const std::string&)> g_insertHandler;   // [g] set once at startup
-std::string g_insertStatus;                                // [g] feedback after an insert
+std::function<std::string(const std::string&)> g_insertHandler;   // [g] set once at startup
+std::string g_insertStatus;                                       // [g] feedback after an insert
 
 void setStatus(const std::string& s) { std::lock_guard<std::mutex> lk(g_mtx); g_status = s; }
 
@@ -182,7 +182,7 @@ void startAsk(const std::string& userMsg) {
 
 void SetSystemPrompt(const std::string& sys) { std::lock_guard<std::mutex> lk(g_mtx); g_system = sys; }
 
-void SetInsertHandler(std::function<int(const std::string&)> fn) { std::lock_guard<std::mutex> lk(g_mtx); g_insertHandler = std::move(fn); }
+void SetInsertHandler(std::function<std::string(const std::string&)> fn) { std::lock_guard<std::mutex> lk(g_mtx); g_insertHandler = std::move(fn); }
 
 bool IsBusy() { return g_loading.load() || g_generating.load(); }
 
@@ -253,12 +253,11 @@ void RenderPanel(bool* p_open) {
           insStatus = g_insertStatus; haveHandler = (bool)g_insertHandler; }
         if (haveHandler && lastReply.find("bpVsNode=") != std::string::npos && !busy) {
             if (ImGui::Button("Insert nodes into open blueprint")) {
-                int n = g_insertHandler(lastReply);
+                std::string r = g_insertHandler(lastReply);
                 std::lock_guard<std::mutex> lk(g_mtx);
-                g_insertStatus = (n > 0) ? ("Inserted " + std::to_string(n) + " node(s) — drag them into place.")
-                                         : "No valid bpVsNode lines found in the reply.";
+                g_insertStatus = r;
             }
-            if (!insStatus.empty()) { ImGui::SameLine(); ImGui::TextDisabled("%s", insStatus.c_str()); }
+            if (!insStatus.empty()) { ImGui::TextWrapped("%s", insStatus.c_str()); }
         }
     }
 
