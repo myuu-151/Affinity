@@ -523,6 +523,19 @@ void RenderPanel(bool* p_open) {
                 std::lock_guard<std::mutex> lk(g_mtx);
                 g_insertStatus = r;
             }
+            ImGui::SameLine();
+            if (ImGui::Button("Repair")) {
+                // Re-lint the last graph and, if it has problems, ask the model to fix it.
+                std::string issues = g_lintHandler ? g_lintHandler(lastReply) : std::string();
+                if (issues.empty()) { std::lock_guard<std::mutex> lk(g_mtx); g_insertStatus = "Lint found no issues to repair."; }
+                else {
+                    if (g_useGrammar && g_grammarProvider) g_grammar = g_grammarProvider();
+                    std::string msg = "The node graph above has these problems:\n" + issues +
+                        "Output the COMPLETE corrected graph again — every bpVsNode / bpVsLink / bpVsSet line — with these fixed. Output only the graph.";
+                    startAsk("(repair the graph)", msg);
+                }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Re-check the graph and ask the model to fix any\nbroken links / out-of-range pins / unwired Key nodes.");
             if (!insStatus.empty()) { ImGui::TextWrapped("%s", insStatus.c_str()); }
         }
     }

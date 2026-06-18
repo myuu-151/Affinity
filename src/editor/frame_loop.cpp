@@ -1677,20 +1677,26 @@ static std::string InsertLLMNodes(const std::string& text) {
         }
     }
 
-    // Apply in-place edits (bpVsSet) to existing nodes by their real editor id.
+    // Apply edits. An id may refer to a node we just inserted (remapped via idmap)
+    // OR an existing node — resolve both so "create node 3 + bpVsSet=3,..." works.
+    auto resolveExisting = [&](int pid) -> VsNode* {
+        auto it = idmap.find(pid);
+        int realId = (it != idmap.end()) ? it->second : pid;
+        for (auto& n : sVsNodes) if (n.id == realId) return &n;
+        return nullptr;
+    };
     int edited = 0;
     for (auto& e : edits) {
         if (e.pi < 0 || e.pi > 3) { warn.push_back("bpVsSet: paramIndex " + std::to_string(e.pi) + " out of range (0-3)"); continue; }
-        bool found = false;
-        for (auto& n : sVsNodes) if (n.id == e.id) { n.paramInt[e.pi] = e.val; found = true; edited++; break; }
-        if (!found) warn.push_back("bpVsSet: no node with id " + std::to_string(e.id) + " in the graph");
+        VsNode* n = resolveExisting(e.id);
+        if (n) { n->paramInt[e.pi] = e.val; edited++; }
+        else warn.push_back("bpVsSet: no node with id " + std::to_string(e.id) + " in the graph");
     }
-    // Apply bit edits (bpVsSetBit) — flip one bit of a packed param without disturbing the rest.
     for (auto& b : bitedits) {
         if (b.pi < 0 || b.pi > 3 || b.bit < 0 || b.bit > 31) { warn.push_back("bpVsSetBit: param/bit out of range"); continue; }
-        bool found = false;
-        for (auto& n : sVsNodes) if (n.id == b.id) { n.paramInt[b.pi] = (n.paramInt[b.pi] & ~(1 << b.bit)) | (b.val ? (1 << b.bit) : 0); found = true; edited++; break; }
-        if (!found) warn.push_back("bpVsSetBit: no node with id " + std::to_string(b.id) + " in the graph");
+        VsNode* n = resolveExisting(b.id);
+        if (n) { n->paramInt[b.pi] = (n->paramInt[b.pi] & ~(1 << b.bit)) | (b.val ? (1 << b.bit) : 0); edited++; }
+        else warn.push_back("bpVsSetBit: no node with id " + std::to_string(b.id) + " in the graph");
     }
 
     std::string msg;
