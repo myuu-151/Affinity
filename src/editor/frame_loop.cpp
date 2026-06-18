@@ -8,6 +8,7 @@
 #include "../platform/psp/psp_package.h"
 #include "../platform/psv/psv_package.h"
 #include "../navmesh/NavMeshBuilder.h"
+#include "llm_assistant.h"
 #include "imgui.h"
 
 #include <array>
@@ -1086,6 +1087,42 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Fire Charge Shot",0xFF3355AA, 1, 1, 2, 0, {"Damage (int)","Speed (int)"}, {}, {} },
 };
 
+// Build the LLM assistant's system prompt: the engine's save-format rules + a
+// compact catalog of EVERY node (name, its VsNodeType id = index here, exec
+// pin counts, and data-input pin names) generated from sVsNodeDefs. This is the
+// grounding so the assistant answers with real nodes and can emit graphs.
+static std::string BuildLLMSystemPrompt() {
+    std::string s =
+        "You are the assistant inside Affinity, a visual-script game engine/editor "
+        "(targets GBA/NDS/PSP/PS Vita). Users build gameplay by wiring nodes in blueprints. "
+        "Be concise and use ONLY nodes from the list below.\n\n"
+        "To BUILD a graph, output it in Affinity's text save format inside a fenced ```afn block:\n"
+        "  bpVsNode=ID,TYPE,X,Y,P0,P1,P2,P3,P4\n"
+        "  bpVsLink=FROM_ID,FROM_PIN_TYPE,FROM_PIN_IDX|TO_ID,TO_PIN_TYPE,TO_PIN_IDX\n"
+        "  bpVsNodeClip=NODE_ID|ClipName   (only for Skel Anim nodes)\n"
+        "Rules: TYPE = the node's (type N) below. IDs are small ints from 1. Lay nodes "
+        "left-to-right ~300px apart in X. Exec links use FROM_PIN_TYPE=0 (exec out) -> "
+        "TO_PIN_TYPE=1 (exec in); data links use 2 (data out) -> 3 (data in); PIN_IDX is the "
+        "0-based pin position. [event] nodes have no exec input and start a chain. A node's "
+        "P0..P4 are its int params (e.g. a Key node's P0 is the key index).\n\n"
+        "NODES — name (type N)[event][exec in>out] data-in: pins\n";
+    int count = (int)(sizeof(sVsNodeDefs) / sizeof(sVsNodeDefs[0]));
+    for (int i = 0; i < count; i++) {
+        const VsNodeTypeDef& d = sVsNodeDefs[i];
+        s += "- "; s += d.name; s += " (type " + std::to_string(i) + ")";
+        if (d.inExec == 0) s += "[event]";
+        if (d.inData > 0) {
+            s += " in:";
+            for (int p = 0; p < d.inData && p < 10; p++) {
+                s += (p ? ", " : " ");
+                s += d.inDataNames[p] ? d.inDataNames[p] : "?";
+            }
+        }
+        s += "\n";
+    }
+    return s;
+}
+
 struct VsNode {
     int id = 0;
     VsNodeType type = VsNodeType::OnStart;
@@ -1146,6 +1183,97 @@ static bool sVsBoxSelecting = false;
 static ImVec2 sVsBoxStart = {};        // screen-space start of selection box
 // Group navigation
 static int sVsEditingGroup = 0;        // 0 = top-level; >0 = inside group node id
+
+// Parse a node graph the LLM assistant generated (bpVsNode/bpVsLink/bpVsNodeClip
+// lines, fenced or inline) and insert it into the OPEN node graph (sVsNodes/
+// sVsLinks) with fresh ids, placed to the right of the existing nodes and
+// left selected so the user can drag the whole group into place. Returns the
+// number of nodes inserted. Registered as llm::SetInsertHandler at startup.
+static int InsertLLMNodes(const std::string& text) {
+    struct PN { int id, type, p[5]; float x, y; };
+    struct PL { int from, fpt, fpi, to, tpt, tpi; };
+    std::vector<PN> pns; std::vector<PL> pls;
+    std::vector<std::pair<int, std::string>> clips;
+
+    int typeCount = (int)(sizeof(sVsNodeDefs) / sizeof(sVsNodeDefs[0]));
+    auto lc = [](std::string x){ for (auto& c : x) if (c >= 'A' && c <= 'Z') c += 32; return x; };
+    auto trim = [](std::string s){ size_t b = s.find_first_not_of(" \t"); size_t e = s.find_last_not_of(" \t\r\n"); return (b == std::string::npos) ? std::string() : s.substr(b, e - b + 1); };
+    // TYPE field may be the node's integer id OR its name (the model often writes
+    // the readable name from the catalog) — resolve either to a type index.
+    auto resolveType = [&](const std::string& raw) -> int {
+        std::string s = trim(raw);
+        if (s.empty()) return -1;
+        bool digits = true; for (char c : s) if (!((c >= '0' && c <= '9') || c == '-')) { digits = false; break; }
+        if (digits) { int t = atoi(s.c_str()); return (t >= 0 && t < typeCount) ? t : -1; }
+        std::string sl = lc(s);
+        for (int t = 0; t < typeCount; t++) if (lc(sVsNodeDefs[t].name) == sl) return t;
+        return -1;
+    };
+
+    std::stringstream ss(text); std::string line;
+    while (std::getline(ss, line)) {
+        size_t a;
+        if ((a = line.find("bpVsNode=")) != std::string::npos) {
+            std::vector<std::string> f; std::stringstream fs(line.substr(a + 9)); std::string tok;
+            while (std::getline(fs, tok, ',')) f.push_back(tok);
+            if (f.size() >= 4) {
+                PN n{};
+                n.id   = atoi(f[0].c_str());
+                n.type = resolveType(f[1]);
+                n.x = (float)atof(f[2].c_str());
+                n.y = (float)atof(f[3].c_str());
+                for (int k = 0; k < 5; k++) n.p[k] = (f.size() > (size_t)(4 + k)) ? atoi(f[4 + k].c_str()) : 0;
+                if (n.type >= 0) pns.push_back(n);
+            }
+        } else if ((a = line.find("bpVsLink=")) != std::string::npos) {
+            PL l{};
+            if (sscanf(line.c_str() + a + 9, "%d,%d,%d|%d,%d,%d",
+                       &l.from, &l.fpt, &l.fpi, &l.to, &l.tpt, &l.tpi) == 6) {
+                if (l.fpt & 1) l.fpt -= 1;      // source must be an OUT pin (0=exec, 2=data)
+                if (!(l.tpt & 1)) l.tpt += 1;   // target must be an IN pin (1=exec, 3=data)
+                pls.push_back(l);
+            }
+        } else if ((a = line.find("bpVsNodeClip=")) != std::string::npos) {
+            int id; char nm[64] = {};
+            if (sscanf(line.c_str() + a + 13, "%d|%63[^\r\n]", &id, nm) == 2)
+                clips.push_back({ id, std::string(nm) });
+        }
+    }
+    if (pns.empty()) return 0;
+    float maxX = 0; bool any = false;
+    for (auto& n : sVsNodes) { if (!any || n.x > maxX) maxX = n.x; any = true; }
+    float minPX = 1e9f, minPY = 1e9f;
+    for (auto& p : pns) { if (p.x < minPX) minPX = p.x; if (p.y < minPY) minPY = p.y; }
+    float dx = (any ? maxX + 360.0f : 0.0f) - minPX;   // place to the right of existing graph
+    float dy = -minPY;
+
+    std::map<int, int> idmap;   // parsed id -> new editor id
+    for (auto& n : sVsNodes) n.selected = false;
+    int added = 0;
+    for (auto& p : pns) {
+        if (p.type < 0 || p.type >= typeCount) continue;   // skip unknown node types
+        VsNode v;
+        v.id   = sVsNextId++;
+        v.type = (VsNodeType)p.type;
+        v.x = p.x + dx; v.y = p.y + dy;
+        v.paramInt[0] = p.p[0]; v.paramInt[1] = p.p[1]; v.paramInt[2] = p.p[2]; v.paramInt[3] = p.p[3];
+        v.groupId = sVsEditingGroup;   // insert into the group currently being edited (0 = top level)
+        v.selected = true;
+        for (auto& c : clips) if (c.first == p.id) { strncpy(v.clipName, c.second.c_str(), sizeof(v.clipName) - 1); break; }
+        idmap[p.id] = v.id;
+        sVsNodes.push_back(v);
+        added++;
+    }
+    for (auto& l : pls) {
+        auto fIt = idmap.find(l.from), tIt = idmap.find(l.to);
+        if (fIt == idmap.end() || tIt == idmap.end()) continue;
+        VsLink lk;
+        lk.from.nodeId = fIt->second; lk.from.pinType = l.fpt; lk.from.pinIdx = l.fpi;
+        lk.to.nodeId   = tIt->second; lk.to.pinType   = l.tpt; lk.to.pinIdx   = l.tpi;
+        sVsLinks.push_back(lk);
+    }
+    return added;
+}
 static float sVsParentPanX = 0, sVsParentPanY = 0;
 static float sVsParentZoom = 1.0f;
 // Group pin mappings: which internal pin maps to which group-node pin
@@ -4592,6 +4720,7 @@ static void LoadM7SceneState(const MapScene& sc)
 // Preferences
 static float sUiScale = 1.0f;
 static bool  sShowPrefs = false;
+static bool  sShowAssistant = false;   // local LLM assistant panel
 static char  sMgbaPath[512] = "";
 static bool  sMgbaFound = false;
 
@@ -15834,6 +15963,11 @@ void FrameTick(float dt)
             ImGui::MenuItem("Camera Bounds", nullptr, nullptr);
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("Assistant"))
+        {
+            ImGui::MenuItem("Show Assistant (local LLM)", nullptr, &sShowAssistant);
+            ImGui::EndMenu();
+        }
         ImGui::Separator();
         if (ImGui::RadioButton("NDS", sBuildTarget == BuildTarget::NDS))
             sBuildTarget = BuildTarget::NDS;
@@ -17480,6 +17614,16 @@ void FrameTick(float dt)
         }
         ImGui::EndMainMenuBar();
     }
+
+    // Local LLM assistant panel (View ▸ Assistant). Standalone window; renders
+    // only while toggled on. Build the node-catalog system prompt once.
+    static bool s_llmGrounded = false;
+    if (!s_llmGrounded) {
+        s_llmGrounded = true;
+        llm::SetSystemPrompt(BuildLLMSystemPrompt());
+        llm::SetInsertHandler(&InsertLLMNodes);
+    }
+    llm::RenderPanel(&sShowAssistant);
 
     // ---- Camera Controls (only when no ImGui widget has focus) ----
     if (!ImGui::GetIO().WantCaptureKeyboard)

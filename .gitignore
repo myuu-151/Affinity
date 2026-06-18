@@ -25,3 +25,4 @@ affinity-v*.zip
 
 # Built GBA ROMs (retired target)
 *.gba
+models/

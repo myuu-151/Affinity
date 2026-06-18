@@ -33,10 +33,30 @@ target_link_libraries(imgui PUBLIC glfw)
 # ---------- Recast/Detour (navmesh build + queries, editor side) ----------
 add_subdirectory(thirdparty/recastnavigation)
 
+# ---------- llama.cpp (local LLM assistant — CPU, static, no extras) ----------
+# Pulled at configure time; first build compiles ggml (slow once, then cached).
+include(FetchContent)
+set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE)   # common/ helpers (chat template, sampling)
+set(LLAMA_CURL           OFF CACHE BOOL "" FORCE)
+set(GGML_OPENMP          OFF CACHE BOOL "" FORCE)   # avoid OpenMP runtime vs /MT mismatch
+set(GGML_BUILD_TESTS     OFF CACHE BOOL "" FORCE)
+set(GGML_BUILD_EXAMPLES  OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(llama_cpp
+    GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
+    GIT_TAG b9701
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(llama_cpp)
+
 # ---------- Affinity Editor ----------
 add_executable(AffinityEditor WIN32
     src/editor/main.cpp
     src/editor/frame_loop.cpp
+    src/editor/llm_assistant.cpp
     src/editor/rigged_gltf.cpp
     src/viewport/mode7_preview.cpp
     src/navmesh/NavMeshBuilder.cpp
@@ -59,6 +79,7 @@ target_link_libraries(AffinityEditor PRIVATE
     glfw
     Recast
     Detour
+    llama
     opengl32
     gdi32
     user32

@@ -9,6 +9,7 @@
 #include <cstdio>
 
 #include "frame_loop.h"
+#include "llm_assistant.h"
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -122,6 +123,7 @@ int main(int argc, char** argv)
     }
 
     // ---- Cleanup ----
+    llm::Shutdown();   // stop any in-flight generation, free the model + llama backend
     ImGui_ImplOpenGL2_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
