@@ -5204,7 +5204,8 @@ static std::string BuildLLMGrammar() {
     g += "set ::= \"bpVsSet=\" int \",\" int \",\" int\n";   // in-place edit of an existing node's param
     g += "setbit ::= \"bpVsSetBit=\" int \",\" int \",\" int \",\" int\n";   // flip one bit of a packed param
     if (haveClips) g += "clip ::= \"bpVsNodeClip=\" int \"|\" clipname\n";
-    g += "int ::= \"-\"? [0-9]+\n";
+    g += "digit ::= [0-9]\n";
+    g += "int ::= \"-\"? digit digit? digit? digit? digit? digit? digit? digit? digit? digit?\n";   // 1-10 digits (caps runaway repeats; covers int32)
     g += "ntype ::= ";
     int typeCount = (int)(sizeof(sVsNodeDefs) / sizeof(sVsNodeDefs[0]));
     for (int t = 0; t < typeCount; t++) { if (t) g += " | "; g += "\"" + esc(sVsNodeDefs[t].name) + "\""; }
