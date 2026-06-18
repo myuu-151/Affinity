@@ -77,6 +77,12 @@ int                 g_gpuDevIdx = 0;
 std::function<std::string(const std::string&)> g_insertHandler;   // [g] set once at startup
 std::string g_insertStatus;                                       // [g] feedback after an insert
 
+std::function<std::string()> g_grammarProvider;                   // [g] builds GBNF from live project
+std::string g_grammar;                                            // refreshed UI-side before each generate
+std::function<std::string(const std::string&)> g_lintHandler;     // [g] read-only lint -> issues (thread-safe)
+bool g_useGrammar = false;   // constrain output to node-graph syntax (grammar)
+bool g_repair     = true;    // auto-repair graph lint errors by re-prompting
+
 void setStatus(const std::string& s) { std::lock_guard<std::mutex> lk(g_mtx); g_status = s; }
 
 void ensureBackend() {
@@ -111,7 +117,9 @@ void saveSettings() {
     if (!f) return;
     f << "useGpu=" << (g_useGpu ? 1 : 0) << "\n"
       << "pct="    << g_pct << "\n"
-      << "gpuDev=" << g_gpuDevIdx << "\n";
+      << "gpuDev=" << g_gpuDevIdx << "\n"
+      << "grammar=" << (g_useGrammar ? 1 : 0) << "\n"
+      << "repair="  << (g_repair ? 1 : 0) << "\n";
 }
 void loadSettings() {
     std::ifstream f(kSettingsFile);
@@ -121,9 +129,11 @@ void loadSettings() {
         auto eq = line.find('=');
         if (eq == std::string::npos) continue;
         std::string k = line.substr(0, eq), v = line.substr(eq + 1);
-        if      (k == "useGpu") g_useGpu = (v == "1");
-        else if (k == "pct")    g_pct = std::atoi(v.c_str());
-        else if (k == "gpuDev") g_gpuDevIdx = std::atoi(v.c_str());
+        if      (k == "useGpu")  g_useGpu = (v == "1");
+        else if (k == "pct")     g_pct = std::atoi(v.c_str());
+        else if (k == "gpuDev")  g_gpuDevIdx = std::atoi(v.c_str());
+        else if (k == "grammar") g_useGrammar = (v == "1");
+        else if (k == "repair")  g_repair = (v == "1");
     }
 }
 
@@ -201,7 +211,7 @@ void loadWorker(std::string path) {
     llama_model* m = llama_model_load_from_file(path.c_str(), mp);
     if (!m) { setStatus("Failed to load model: " + path); g_loading = false; return; }
     llama_context_params cp = llama_context_default_params();
-    cp.n_ctx   = 8192;     // room for the node-catalog system prompt + a chat
+    cp.n_ctx   = 16384;    // node-catalog prompt + chat + multi-pass repair of large graphs
     cp.n_batch = 512;
     // CPU mode: use g_pct% of the cores. GPU mode: GPU does most of the work, so
     // keep CPU light (~half) for the non-offloaded layers + sampling. Always >=1.
@@ -230,34 +240,62 @@ void loadWorker(std::string path) {
 }
 
 void generateWorker(std::string userMsg) {
-    g_convo.push_back({ "user", userMsg });
-    std::string formatted = applyTemplate(g_convo, true);
-    std::string delta = ((size_t)g_prevLen < formatted.size()) ? formatted.substr(g_prevLen) : formatted;
-    std::vector<llama_token> toks = tokenize(delta, g_prevLen == 0);   // BOS only if nothing decoded yet
-    if (!decodeTokens(toks)) { std::lock_guard<std::mutex> lk(g_mtx); g_partial += "\n[context full — reload the model to reset]"; }
+    std::string savedStatus; { std::lock_guard<std::mutex> lk(g_mtx); savedStatus = g_status; }
+    int maxRepairs = g_repair ? 2 : 0;
+    std::string pending = userMsg;
 
-    llama_sampler* smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    llama_sampler_chain_add(smpl, llama_sampler_init_top_k(40));
-    llama_sampler_chain_add(smpl, llama_sampler_init_top_p(0.95f, 1));
-    llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.4f));
-    llama_sampler_chain_add(smpl, llama_sampler_init_dist(0xFFFFFFFFu));
+    for (int attempt = 0; ; attempt++) {
+        g_convo.push_back({ "user", pending });
+        std::string formatted = applyTemplate(g_convo, true);
+        std::string delta = ((size_t)g_prevLen < formatted.size()) ? formatted.substr(g_prevLen) : formatted;
+        std::vector<llama_token> toks = tokenize(delta, g_prevLen == 0);   // BOS only if nothing decoded yet
+        if (!decodeTokens(toks)) { std::lock_guard<std::mutex> lk(g_mtx); g_partial += "\n[context full — reload the model to reset]"; }
 
-    std::string resp;
-    const int budget = 768;
-    for (int i = 0; i < budget && !g_stop.load(); i++) {
-        llama_token id = llama_sampler_sample(smpl, g_ctx, -1);
-        if (llama_vocab_is_eog(g_vocab, id)) break;
-        char piece[256];
-        int np = llama_token_to_piece(g_vocab, id, piece, sizeof(piece), 0, true);
-        if (np > 0) { resp.append(piece, np); std::lock_guard<std::mutex> lk(g_mtx); g_partial.append(piece, np); }
-        llama_batch b = llama_batch_get_one(&id, 1);
-        if (llama_decode(g_ctx, b) != 0) break;
+        llama_sampler* smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
+        // Grammar first so it masks invalid tokens before the distribution samplers pick.
+        if (g_useGrammar && !g_grammar.empty()) {
+            llama_sampler* gr = llama_sampler_init_grammar(g_vocab, g_grammar.c_str(), "root");
+            if (gr) llama_sampler_chain_add(smpl, gr);
+        }
+        llama_sampler_chain_add(smpl, llama_sampler_init_top_k(40));
+        llama_sampler_chain_add(smpl, llama_sampler_init_top_p(0.95f, 1));
+        llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.4f));
+        llama_sampler_chain_add(smpl, llama_sampler_init_dist(0xFFFFFFFFu));
+
+        { std::lock_guard<std::mutex> lk(g_mtx); g_partial.clear(); }
+        std::string resp;
+        const int budget = 2048;   // room for larger graphs / repair passes (n_ctx is 16k)
+        for (int i = 0; i < budget && !g_stop.load(); i++) {
+            llama_token id = llama_sampler_sample(smpl, g_ctx, -1);
+            if (llama_vocab_is_eog(g_vocab, id)) break;
+            char piece[256];
+            int np = llama_token_to_piece(g_vocab, id, piece, sizeof(piece), 0, true);
+            if (np > 0) { resp.append(piece, np); std::lock_guard<std::mutex> lk(g_mtx); g_partial.append(piece, np); }
+            llama_batch b = llama_batch_get_one(&id, 1);
+            if (llama_decode(g_ctx, b) != 0) break;
+        }
+        llama_sampler_free(smpl);
+
+        g_convo.push_back({ "assistant", resp });
+        g_prevLen = (int)applyTemplate(g_convo, false).size();   // next turn's delta starts after this
+        { std::lock_guard<std::mutex> lk(g_mtx); g_history.push_back({ "assistant", resp }); g_partial.clear(); }
+
+        // Auto-repair: lint the graph read-only; if it's broken and we still have
+        // passes left, feed the exact problems back and regenerate the full graph.
+        std::string issues;
+        if (maxRepairs > 0 && g_lintHandler && !g_stop.load() && resp.find("bpVsNode=") != std::string::npos)
+            issues = g_lintHandler(resp);
+        if (issues.empty() || attempt >= maxRepairs) break;
+
+        int n = 0; for (char c : issues) if (c == '\n') n++;
+        { std::lock_guard<std::mutex> lk(g_mtx); g_history.push_back({ "user", "auto-repair: fixing " + std::to_string(n) + " graph issue(s)..." }); }
+        setStatus("repairing graph (pass " + std::to_string(attempt + 1) + ")...");
+        pending = "The node graph you just produced has these problems:\n" + issues +
+                  "Output the COMPLETE corrected graph again — every bpVsNode / bpVsLink / bpVsNodeClip "
+                  "line — with these fixed. Keep node ids stable where you can. Output only the graph.";
     }
-    llama_sampler_free(smpl);
 
-    g_convo.push_back({ "assistant", resp });
-    g_prevLen = (int)applyTemplate(g_convo, false).size();   // next turn's delta starts after this
-    { std::lock_guard<std::mutex> lk(g_mtx); g_history.push_back({ "assistant", resp }); g_partial.clear(); }
+    setStatus(savedStatus);
     g_generating = false;
 }
 
@@ -305,6 +343,10 @@ void startAsk(const std::string& userMsg) {
 void SetSystemPrompt(const std::string& sys) { std::lock_guard<std::mutex> lk(g_mtx); g_system = sys; }
 
 void SetInsertHandler(std::function<std::string(const std::string&)> fn) { std::lock_guard<std::mutex> lk(g_mtx); g_insertHandler = std::move(fn); }
+
+void SetGrammarProvider(std::function<std::string()> fn) { std::lock_guard<std::mutex> lk(g_mtx); g_grammarProvider = std::move(fn); }
+
+void SetLintHandler(std::function<std::string(const std::string&)> fn) { std::lock_guard<std::mutex> lk(g_mtx); g_lintHandler = std::move(fn); }
 
 bool IsBusy() { return g_loading.load() || g_generating.load(); }
 
@@ -386,6 +428,12 @@ void RenderPanel(bool* p_open) {
             if (g_ctx && !IsBusy() && g_modelPath[0]) startLoad(g_modelPath);
         }
         ImGui::Separator();
+        ImGui::TextDisabled("Node-graph generation");
+        if (ImGui::Checkbox("Constrain output (grammar)", &g_useGrammar)) saveSettings();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Forces replies into valid node-graph syntax\n(real node types + clip names). Turn OFF for\nplain Q&A — it suppresses prose.");
+        if (ImGui::Checkbox("Auto-repair graph errors", &g_repair)) saveSettings();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("After generating, lint the graph and re-prompt\nthe model to fix any broken links / bad pins /\nunwired Key pins (up to 2 passes).");
+        ImGui::Separator();
         ImGui::TextUnformatted("CPU = share of cores used.\nGPU = share of layers offloaded;\n100% = whole model on GPU (best if it\nfits in VRAM). Needs a GPU-enabled build.");
         ImGui::EndPopup();
     }
@@ -436,7 +484,12 @@ void RenderPanel(bool* p_open) {
     ImGui::SameLine();
     bool send = ImGui::Button("Send", ImVec2(60, 0));
     ImGui::EndDisabled();
-    if ((enter || send) && canSend && g_input[0]) { startAsk(g_input); g_input[0] = 0; }
+    if ((enter || send) && canSend && g_input[0]) {
+        // Rebuild the grammar here (UI thread) so it reflects the current rig clips
+        // before the worker uses it; keeps live editor data off the worker thread.
+        if (g_useGrammar && g_grammarProvider) g_grammar = g_grammarProvider();
+        startAsk(g_input); g_input[0] = 0;
+    }
     if (g_generating.load()) { ImGui::SameLine(); if (ImGui::Button("Stop")) g_stop = true; }
 
     ImGui::End();

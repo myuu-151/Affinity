@@ -4823,6 +4823,106 @@ static bool sProjectDirty = false; // unsaved changes
 static std::vector<MeshAsset> sMeshAssets;
 // Rigged (skinned glTF) mesh assets — DSMA skeletal animation
 static std::vector<RiggedMeshAsset> sRiggedMeshAssets;
+
+// Build a GBNF grammar that forces the assistant's output into valid node-graph
+// syntax: real node-type names, integer params, and (when the rig has them) real
+// clip names. Rebuilt per generation so it tracks the current project. The model
+// then physically cannot emit a bad node type, a malformed line, or a clip that
+// doesn't exist — only the semantics (which node/value/clip) are left to it.
+static std::string BuildLLMGrammar() {
+    auto esc = [](const std::string& s){ std::string o; for (char c : s){ if (c=='\\'||c=='"') o += '\\'; o += c; } return o; };
+    std::vector<std::string> clipNames;   // unique clip names across all rigs
+    for (auto& rm : sRiggedMeshAssets)
+        for (auto& cl : rm.clips)
+            if (!cl.name.empty() && std::find(clipNames.begin(), clipNames.end(), cl.name) == clipNames.end())
+                clipNames.push_back(cl.name);
+    bool haveClips = !clipNames.empty();
+
+    std::string g;
+    g += "root ::= ws (stmt ws)+\n";
+    g += "ws ::= [ \\t\\r\\n]*\n";
+    g += std::string("stmt ::= node | link") + (haveClips ? " | clip" : "") + "\n";
+    g += "node ::= \"bpVsNode=\" int \",\" ntype \",\" int \",\" int \",\" int \",\" int \",\" int \",\" int \",\" int\n";
+    g += "link ::= \"bpVsLink=\" int \",\" int \",\" int \"|\" int \",\" int \",\" int\n";
+    if (haveClips) g += "clip ::= \"bpVsNodeClip=\" int \"|\" clipname\n";
+    g += "int ::= \"-\"? [0-9]+\n";
+    g += "ntype ::= ";
+    int typeCount = (int)(sizeof(sVsNodeDefs) / sizeof(sVsNodeDefs[0]));
+    for (int t = 0; t < typeCount; t++) { if (t) g += " | "; g += "\"" + esc(sVsNodeDefs[t].name) + "\""; }
+    g += "\n";
+    if (haveClips) {
+        g += "clipname ::= ";
+        for (size_t i = 0; i < clipNames.size(); i++) { if (i) g += " | "; g += "\"" + esc(clipNames[i]) + "\""; }
+        g += "\n";
+    }
+    return g;
+}
+
+// Lint a generated node-graph (READ-ONLY — never touches the editor graph), so the
+// auto-repair loop can feed problems back to the model. Returns "" if clean (or if
+// the reply isn't a graph), else a bullet list. Thread-safe: reads only the static
+// node catalog + the passed text.
+static std::string LintLLMGraph(const std::string& text) {
+    int typeCount = (int)(sizeof(sVsNodeDefs) / sizeof(sVsNodeDefs[0]));
+    auto lc = [](std::string x){ for (auto& c : x) if (c >= 'A' && c <= 'Z') c += 32; return x; };
+    auto trim = [](std::string s){ size_t b = s.find_first_not_of(" \t"); size_t e = s.find_last_not_of(" \t\r\n"); return (b == std::string::npos) ? std::string() : s.substr(b, e - b + 1); };
+    auto resolveType = [&](const std::string& raw) -> int {
+        std::string s = trim(raw); if (s.empty()) return -1;
+        bool digits = true; for (char c : s) if (!((c>='0'&&c<='9')||c=='-')) { digits=false; break; }
+        if (digits) { int t = atoi(s.c_str()); return (t>=0 && t<typeCount) ? t : -1; }
+        std::string sl = lc(s);
+        for (int t = 0; t < typeCount; t++) if (lc(sVsNodeDefs[t].name) == sl) return t;
+        return -1;
+    };
+    auto pinCount = [&](int type, int pinType) -> int {
+        const VsNodeTypeDef& d = sVsNodeDefs[type];
+        switch (pinType) { case 0: return d.outExec; case 1: return d.inExec; case 2: return d.outData; case 3: return d.inData; }
+        return 0;
+    };
+    struct PL { int from, fpt, fpi, to, tpt, tpi; };
+    std::map<int,int> idType; std::vector<PL> pls; std::vector<std::string> warn; int nodeLines = 0;
+    std::stringstream ss(text); std::string line;
+    while (std::getline(ss, line)) {
+        size_t a;
+        if ((a = line.find("bpVsNode=")) != std::string::npos) {
+            std::vector<std::string> f; std::stringstream fs(line.substr(a+9)); std::string tok;
+            while (std::getline(fs, tok, ',')) f.push_back(tok);
+            if (f.size() >= 4) {
+                nodeLines++;
+                int id = atoi(f[0].c_str()); int ty = resolveType(f[1]);
+                if (ty < 0) { warn.push_back("unknown node type \"" + trim(f[1]) + "\""); continue; }
+                if (idType.count(id)) { warn.push_back("duplicate node id " + std::to_string(id)); continue; }
+                idType[id] = ty;
+            }
+        } else if ((a = line.find("bpVsLink=")) != std::string::npos) {
+            PL l{};
+            if (sscanf(line.c_str()+a+9, "%d,%d,%d|%d,%d,%d", &l.from,&l.fpt,&l.fpi,&l.to,&l.tpt,&l.tpi) == 6) {
+                if (l.fpt & 1) l.fpt -= 1;
+                if (!(l.tpt & 1)) l.tpt += 1;
+                pls.push_back(l);
+            }
+        }
+    }
+    if (nodeLines == 0) return "";   // not a graph reply — nothing to repair
+    for (auto& l : pls) {
+        auto fIt = idType.find(l.from), tIt = idType.find(l.to);
+        if (fIt == idType.end() || tIt == idType.end()) { warn.push_back("a link references a node id that isn't defined (" + std::to_string(l.from) + "->" + std::to_string(l.to) + ")"); continue; }
+        if (l.fpi < 0 || l.fpi >= pinCount(fIt->second, l.fpt) || l.tpi < 0 || l.tpi >= pinCount(tIt->second, l.tpt))
+            warn.push_back(std::string("link into ") + sVsNodeDefs[tIt->second].name + " uses a pin that doesn't exist");
+    }
+    for (auto& kv : idType) {
+        const VsNodeTypeDef& d = sVsNodeDefs[kv.second];
+        if (d.inExec != 0) continue;
+        for (int p = 0; p < d.inData; p++) {
+            if (!d.inDataNames[p] || std::string(d.inDataNames[p]) != "Key") continue;
+            bool wired = false;
+            for (auto& l : pls) if (l.to == kv.first && l.tpt == 3 && l.tpi == p) { wired = true; break; }
+            if (!wired) warn.push_back(std::string(d.name) + " has an unwired Key pin — add a Key node and link it into the Key pin");
+        }
+    }
+    if (warn.empty()) return "";
+    std::string m; for (auto& w : warn) m += "- " + w + "\n"; return m;
+}
 static char sRigImportError[256] = "";
 static int sSelectedRig = -1;            // selected rigged-mesh asset (3D Objects panel)
 static int sSelectedMesh = -1;
@@ -17696,6 +17796,8 @@ void FrameTick(float dt)
         s_llmGrounded = true;
         llm::SetSystemPrompt(BuildLLMSystemPrompt());
         llm::SetInsertHandler(&InsertLLMNodes);
+        llm::SetGrammarProvider(&BuildLLMGrammar);   // constrains output to valid graph syntax
+        llm::SetLintHandler(&LintLLMGraph);          // feeds errors to the auto-repair loop
     }
     llm::RenderPanel(&sShowAssistant);
 

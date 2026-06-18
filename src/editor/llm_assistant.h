@@ -17,6 +17,17 @@ namespace llm {
     // "Insert" button whenever the last reply contains node text.
     void SetInsertHandler(std::function<std::string(const std::string&)> fn);
 
+    // Provide a GBNF grammar (built from the live node catalog + rig clips) that
+    // constrains generation to valid node-graph syntax. Called on the UI thread
+    // right before each generation (so it reflects the current project) when the
+    // "Constrain output (grammar)" setting is on.
+    void SetGrammarProvider(std::function<std::string()> fn);
+
+    // Handler that lints generated node-graph text WITHOUT inserting it, returning
+    // an empty string if clean or a bullet list of problems. Used by the auto-repair
+    // loop to feed errors back to the model. Must be thread-safe (read-only).
+    void SetLintHandler(std::function<std::string(const std::string&)> fn);
+
     // Render the assistant panel (call once per frame from the editor UI).
     void RenderPanel(bool* p_open);
 
