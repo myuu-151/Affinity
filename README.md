@@ -226,7 +226,7 @@ The model isn't bundled (it's large and separately licensed) — download any **
 
 #### GPU acceleration (optional)
 
-GPU offload only does something if llama.cpp is built with a GPU backend (the default build is CPU-only). On a machine with the toolkit installed, enable one at configure time — then the Settings ▸ GPU options run on the GPU (a full 7B fits in ~5 GB VRAM and runs ~20–50× faster than CPU):
+GPU offload only does something if llama.cpp is built with a GPU backend (the default build is CPU-only). On a machine with the toolkit installed, enable one at configure time — then the Settings ▸ GPU options run on the GPU (a full 7B fits in ~5 GB VRAM, a 14B in ~11 GB, running ~20–50× faster than CPU):
 
 ```bash
 cmake -B build -S . -DAFFINITY_LLM_CUDA=ON      # NVIDIA — needs the CUDA Toolkit
@@ -234,6 +234,33 @@ cmake -B build -S . -DAFFINITY_LLM_CUDA=ON      # NVIDIA — needs the CUDA Tool
 cmake -B build -S . -DAFFINITY_LLM_VULKAN=ON    # any GPU — needs the Vulkan SDK
 cmake --build build --config Release
 ```
+
+Once built, open **View ▸ Assistant ▸ Settings**, choose **GPU 100% (full offload)**, and pick your card in the **GPU device** dropdown. The choice is saved to `assistant_prefs.ini` and restored on the next launch.
+
+##### Vulkan build, step by step (Windows)
+
+Vulkan works on any modern GPU (NVIDIA/AMD/Intel) and needs no CUDA Toolkit — it's the quickest path on an NVIDIA card if you don't already have CUDA installed.
+
+1. **Install the [Vulkan SDK](https://vulkan.lunarg.com/sdk/home)** (LunarG). Your GPU driver already ships the runtime; the SDK provides the build-time headers + `glslc`.
+2. **Configure** with the Visual Studio generator and the Vulkan flag:
+   ```bash
+   cmake -B build -S . -G "Visual Studio 17 2022" -A x64 -DAFFINITY_LLM_VULKAN=ON
+   ```
+3. **If configure fails with `Could not find ... SPIRV-Headers`** (older SDKs, e.g. 1.3.275, don't ship its CMake package), install the header-only package and point CMake at it — no SDK re-download needed:
+   ```bash
+   git clone --depth 1 https://github.com/KhronosGroup/SPIRV-Headers.git
+   cmake -S SPIRV-Headers -B SPIRV-Headers/build -DCMAKE_INSTALL_PREFIX=SPIRV-Headers/out
+   cmake --build SPIRV-Headers/build --target install
+   # then re-run configure, adding:
+   #   -DSPIRV-Headers_DIR=<abs path>/SPIRV-Headers/out/share/cmake/SPIRV-Headers
+   ```
+   *(Or just update to a newer Vulkan SDK, which bundles the SPIRV-Headers CMake package.)*
+4. **Build:**
+   ```bash
+   cmake --build build --config Release --target AffinityEditor
+   ```
+
+To confirm offload is working, load a model with **GPU 100%** set and watch dedicated VRAM rise in Task Manager (or `nvidia-smi`) — a 14B should put ~10–11 GB on the card.
 
 ---
 
