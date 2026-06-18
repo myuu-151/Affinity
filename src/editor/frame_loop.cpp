@@ -1634,6 +1634,7 @@ static std::string InsertLLMNodes(const std::string& text) {
         switch (pinType) { case 0: return d.outExec; case 1: return d.inExec; case 2: return d.outData; case 3: return d.inData; }
         return 0;
     };
+    std::map<std::string, bool> seenLink;   // drop duplicate links (model repetition)
     for (auto& l : pls) {
         auto fIt = idmap.find(l.from), tIt = idmap.find(l.to);
         if (fIt == idmap.end() || tIt == idmap.end()) { warn.push_back("dropped a link referencing a node not in the graph"); continue; }
@@ -1642,6 +1643,8 @@ static std::string InsertLLMNodes(const std::string& text) {
             warn.push_back(std::string("dropped an out-of-range link into ") + sVsNodeDefs[tt].name);
             continue;
         }
+        char key[64]; snprintf(key, sizeof(key), "%d,%d,%d|%d,%d,%d", l.from, l.fpt, l.fpi, l.to, l.tpt, l.tpi);
+        if (!seenLink.emplace(key, true).second) continue;   // skip exact-duplicate link
         VsLink lk;
         lk.from.nodeId = fIt->second; lk.from.pinType = l.fpt; lk.from.pinIdx = l.fpi;
         lk.to.nodeId   = tIt->second; lk.to.pinType   = l.tpt; lk.to.pinIdx   = l.tpi;

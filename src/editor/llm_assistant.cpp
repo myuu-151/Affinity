@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <filesystem>
+#include <unordered_set>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -272,13 +273,27 @@ void generateWorker(std::string userMsg) {
 
         { std::lock_guard<std::mutex> lk(g_mtx); g_partial.clear(); }
         std::string resp;
+        std::unordered_set<std::string> seenLines; std::string curLine; int dupLines = 0;
         const int budget = 2048;   // room for larger graphs / repair passes (n_ctx is 16k)
         for (int i = 0; i < budget && !g_stop.load(); i++) {
             llama_token id = llama_sampler_sample(smpl, g_ctx, -1);
             if (llama_vocab_is_eog(g_vocab, id)) break;
             char piece[256];
             int np = llama_token_to_piece(g_vocab, id, piece, sizeof(piece), 0, true);
-            if (np > 0) { resp.append(piece, np); std::lock_guard<std::mutex> lk(g_mtx); g_partial.append(piece, np); }
+            bool looped = false;
+            if (np > 0) {
+                resp.append(piece, np);
+                { std::lock_guard<std::mutex> lk(g_mtx); g_partial.append(piece, np); }
+                // A valid graph never repeats an exact "bpVs..." line (ids/links are
+                // unique), so several duplicate lines mean the model is stuck looping.
+                for (int k = 0; k < np; k++) {
+                    if (piece[k] == '\n') {
+                        if (curLine.compare(0, 4, "bpVs") == 0 && !seenLines.insert(curLine).second && ++dupLines >= 4) looped = true;
+                        curLine.clear();
+                    } else curLine.push_back(piece[k]);
+                }
+            }
+            if (looped) break;
             llama_batch b = llama_batch_get_one(&id, 1);
             if (llama_decode(g_ctx, b) != 0) break;
         }
