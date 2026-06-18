@@ -1091,6 +1091,298 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
 // compact catalog of EVERY node (name, its VsNodeType id = index here, exec
 // pin counts, and data-input pin names) generated from sVsNodeDefs. This is the
 // grounding so the assistant answers with real nodes and can emit graphs.
+// Human-readable description of a node type. Single source — used by the node-info
+// popup AND fed to the local LLM assistant (per selected node) so it understands
+// each node's params/behaviour when editing them.
+static const char* VsNodeDesc(VsNodeType type) {
+    const char* desc = "";
+    switch (type) {
+    case VsNodeType::OnKeyPressed:  desc = "Fires once when a key is pressed down."; break;
+    case VsNodeType::OnKeyReleased: desc = "Fires once when a key is released."; break;
+    case VsNodeType::OnKeyHeld:     desc = "Fires every frame while a key is held."; break;
+    case VsNodeType::OnCollision:   desc = "Fires when the player collides with an object."; break;
+    case VsNodeType::OnStart:       desc = "Fires once when the scene starts."; break;
+    case VsNodeType::OnUpdate:      desc = "Fires every frame."; break;
+    case VsNodeType::Branch:        desc = "If condition is true, execute True path; otherwise False."; break;
+    case VsNodeType::CompareVar:    desc = "Compares a variable slot against a value. Outputs 1 or 0."; break;
+    case VsNodeType::MovePlayer:    desc = "Moves the player in the given Direction whenever this runs. Wire it after On Key Held(key) to bind movement to that button — e.g. On Key Held(A) -> Move Player(Up) moves up while A is held (remappable). Left-click for the Facing switch: Direction Facing (rig turns toward movement) or Consistent Facing (rig keeps its yaw — strafe/moonwalk)."; break;
+    case VsNodeType::LookDirection: desc = "Sets the player's facing direction."; break;
+    case VsNodeType::ChangeScene:   desc = "Loads a different scene by index."; break;
+    case VsNodeType::SetVariable:   desc = "Sets a variable slot to a value."; break;
+    case VsNodeType::AddVariable:   desc = "Adds an amount to a variable slot."; break;
+    case VsNodeType::PlaySound:     desc = "Plays a sound effect by ID."; break;
+    case VsNodeType::Wait:          desc = "Pauses execution for a number of frames."; break;
+    case VsNodeType::Jump:          desc = "Makes the player jump with the given Force. Only works when grounded. Fall Force (PSV, optional) adds EXTRA downward acceleration once you're past the apex, for a heavier fall than the rise (unlike Set Max Fall, which only caps fall speed; they combine). Two node-body sliders (PSV) shape an 'anime' arc: Rise Float % reduces gravity WHILE RISING so you float up and hang at the apex (0 = normal, higher = floatier/longer hang); Fall Smooth (frames) eases the Fall Force in over N descent frames instead of snapping it on at the apex (0 = instant). Float up + hang + heavy fall = anime jump."; break;
+    case VsNodeType::Walk:          desc = "Sets the player's movement speed (walk)."; break;
+    case VsNodeType::Sprint:        desc = "Sets the player's movement speed (sprint)."; break;
+    case VsNodeType::OrbitCamera:   desc = "Rotates the orbit camera in a direction at a speed whenever this runs. Gate it with On Key Held(key) to bind orbiting to a button (any key, remappable)."; break;
+    case VsNodeType::PlayAnim:      desc = "Plays an animation on the player sprite."; break;
+    case VsNodeType::SetGravity:    desc = "Sets gravity strength (pixels per frame^2)."; break;
+    case VsNodeType::SetMaxFall:    desc = "Sets the maximum fall speed (terminal velocity)."; break;
+    case VsNodeType::DestroyObject: desc = "Removes a sprite/object from the scene."; break;
+    case VsNodeType::AutoOrbit:     desc = "Enables auto-orbit camera when strafing. 0 = disabled."; break;
+    case VsNodeType::DampenJump:    desc = "Multiplies upward velocity by factor when fired. Use with On Key Released for variable jump height."; break;
+    case VsNodeType::IsMoving:      desc = "Gate: only passes execution through if the player is currently moving (d-pad held)."; break;
+    case VsNodeType::IsOnGround:    desc = "Gate: only passes execution through if the player is on the ground."; break;
+    case VsNodeType::IsJumping:     desc = "Gate: only passes execution through if the player is airborne and rising."; break;
+    case VsNodeType::IsFalling:     desc = "Gate: only passes execution through if the player is airborne and falling."; break;
+    case VsNodeType::CheckFlag:     desc = "Branches on whether a flag (0-31) is set or clear."; break;
+    case VsNodeType::SetFlag:       desc = "Sets a flag bit (0-31) to a value (0 or 1)."; break;
+    case VsNodeType::ToggleFlag:    desc = "Toggles a flag bit (0-31)."; break;
+    case VsNodeType::FreezePlayer:  desc = "Disables all player input until UnfreezePlayer is called."; break;
+    case VsNodeType::UnfreezePlayer:desc = "Re-enables player input after FreezePlayer."; break;
+    case VsNodeType::SetCameraHeight:desc = "Sets the camera height above the floor."; break;
+    case VsNodeType::SetHorizon:    desc = "Sets the horizon scanline (0-159). Higher = camera looks down."; break;
+    case VsNodeType::Teleport:      desc = "Teleports the player to an absolute X, Y, Z position."; break;
+    case VsNodeType::SetVisible:    desc = "Shows or hides a sprite. 0 = hidden, 1 = visible."; break;
+    case VsNodeType::SetPosition:   desc = "Sets a sprite's world position (X, Z)."; break;
+    case VsNodeType::StopAnim:      desc = "Stops the current animation playback."; break;
+    case VsNodeType::SetAnimSpeed:  desc = "Sets animation playback speed multiplier."; break;
+    case VsNodeType::SetVelocityY:  desc = "Sets the player's vertical velocity directly. Works airborne."; break;
+    case VsNodeType::StopSound:     desc = "Stops all sound channels."; break;
+    case VsNodeType::AddMath:       desc = "Outputs A + B."; break;
+    case VsNodeType::SubtractMath:  desc = "Outputs A - B."; break;
+    case VsNodeType::MultiplyMath:  desc = "Outputs (A * B) >> 8 (fixed-point multiply)."; break;
+    case VsNodeType::NegateMath:    desc = "Outputs -Value."; break;
+    case VsNodeType::RandomInt:     desc = "Outputs a random integer between Min and Max (inclusive)."; break;
+    case VsNodeType::GetFlag:       desc = "Reads a flag bit (0-31). Outputs 1 if set, 0 if clear."; break;
+    case VsNodeType::AbsMath:       desc = "Outputs the absolute value of the input."; break;
+    case VsNodeType::MinMath:       desc = "Outputs the smaller of A and B."; break;
+    case VsNodeType::MaxMath:       desc = "Outputs the larger of A and B."; break;
+    case VsNodeType::ModuloMath:    desc = "Outputs A modulo B (remainder)."; break;
+    case VsNodeType::ClampMath:     desc = "Clamps Value between Min and Max."; break;
+    case VsNodeType::SignMath:      desc = "Outputs -1 if negative, 0 if zero, 1 if positive."; break;
+    case VsNodeType::CompareInt:    desc = "Compares A and B. paramInt[0] selects operator: 0=Equal, 1=NotEqual, 2=Less, 3=Greater, 4=LessEq, 5=GreaterEq."; break;
+    case VsNodeType::AndLogic:      desc = "Outputs 1 if both A and B are nonzero."; break;
+    case VsNodeType::OrLogic:       desc = "Outputs 1 if either A or B is nonzero."; break;
+    case VsNodeType::NotLogic:      desc = "Outputs 1 if Value is zero, 0 otherwise."; break;
+    case VsNodeType::GetVariable:   desc = "Reads a variable slot and outputs its value."; break;
+    case VsNodeType::GetPlayerX:    desc = "Outputs the player's current X position."; break;
+    case VsNodeType::GetPlayerZ:    desc = "Outputs the player's current Z position."; break;
+    case VsNodeType::OnTimer:       desc = "Fires every N frames. Connect an Integer for the interval."; break;
+    case VsNodeType::SetScale:      desc = "Sets a sprite's scale. 256 = normal size."; break;
+    case VsNodeType::ScreenShake:   desc = "Shakes the camera for N frames at given intensity."; break;
+    case VsNodeType::FadeOut:       desc = "Fades the screen to black over N frames."; break;
+    case VsNodeType::FadeIn:        desc = "Fades the screen in from black over N frames."; break;
+    case VsNodeType::MoveToward:    desc = "Moves a sprite toward another sprite at a speed each frame."; break;
+    case VsNodeType::LookAt:        desc = "Rotates a sprite to face toward a target sprite."; break;
+    case VsNodeType::SetSpriteAnim: desc = "Sets the animation index on a specific sprite (not just the player)."; break;
+    case VsNodeType::SpawnEffect:   desc = "Triggers a visual effect at a position (effect ID, X, Z)."; break;
+    case VsNodeType::DoOnce:        desc = "Only passes execution through once. Subsequent triggers are ignored."; break;
+    case VsNodeType::FlipFlop:      desc = "Alternates between exec output A and B each time triggered."; break;
+    case VsNodeType::Gate:          desc = "Passes execution only if the Open input is nonzero. 0 = blocked."; break;
+    case VsNodeType::ForLoop:       desc = "Executes the downstream chain Count times in a row."; break;
+    case VsNodeType::Sequence:      desc = "Fires Then 0, then Then 1 in order each trigger."; break;
+    case VsNodeType::Select:        desc = "If Cond is nonzero, outputs A. Otherwise outputs B."; break;
+    case VsNodeType::Lerp:          desc = "Linearly interpolates from A to B by T (0-256 = 0.0-1.0 fixed-point)."; break;
+    case VsNodeType::Distance:      desc = "Outputs the approximate distance between two sprites."; break;
+    case VsNodeType::GetSpriteX:    desc = "Reads a sprite's X world position."; break;
+    case VsNodeType::GetSpriteZ:    desc = "Reads a sprite's Z world position."; break;
+    case VsNodeType::IsKeyDown:     desc = "Outputs 1 if the connected key is currently held, 0 otherwise."; break;
+    case VsNodeType::SinWave:       desc = "Outputs an oscillating value: amplitude * sin(frame * 2pi / period)."; break;
+    case VsNodeType::GetTime:       desc = "Outputs the current frame counter (increments every frame)."; break;
+    case VsNodeType::SetHP:         desc = "Sets a sprite's health points to a value."; break;
+    case VsNodeType::GetHP:         desc = "Reads a sprite's current health points."; break;
+    case VsNodeType::DamageHP:      desc = "Subtracts an amount from a sprite's HP. Clamps to 0."; break;
+    case VsNodeType::AddScore:      desc = "Adds an amount to the global score counter."; break;
+    case VsNodeType::GetScore:      desc = "Outputs the current score."; break;
+    case VsNodeType::Respawn:       desc = "Resets the player to their starting position and resets velocity."; break;
+    case VsNodeType::SaveData:      desc = "Saves all flags and score to SRAM (persistent across power cycles)."; break;
+    case VsNodeType::LoadData:      desc = "Loads flags and score from SRAM."; break;
+    case VsNodeType::FlipSprite:    desc = "Flips a sprite horizontally. 1 = flipped, 0 = normal."; break;
+    case VsNodeType::SetDrawDist:   desc = "Changes the mesh draw distance at runtime."; break;
+    case VsNodeType::EnableCollision:desc = "Enables or disables collision on a sprite. 0 = off, 1 = on."; break;
+    case VsNodeType::IsFlagSet:     desc = "Gate: only passes execution if the specified flag bit is set."; break;
+    case VsNodeType::IsHPZero:      desc = "Gate: only passes execution if the sprite's HP is zero."; break;
+    case VsNodeType::IsNear:        desc = "Gate: only passes execution if two sprites are within the given radius."; break;
+    case VsNodeType::Countdown:     desc = "Decrements an internal counter each trigger. Passes execution when it hits 0, then resets."; break;
+    case VsNodeType::ResetTimer:    desc = "Resets all countdown/timer counters on this object."; break;
+    case VsNodeType::Increment:     desc = "Adds 1 to a variable slot."; break;
+    case VsNodeType::Decrement:     desc = "Subtracts 1 from a variable slot."; break;
+    case VsNodeType::SetFOV:        desc = "Sets the camera field of view."; break;
+    case VsNodeType::ShakeStop:     desc = "Immediately stops any screen shake."; break;
+    case VsNodeType::LockCamera:    desc = "Locks the camera angle (stops orbit/rotation)."; break;
+    case VsNodeType::UnlockCamera:  desc = "Unlocks camera rotation."; break;
+    case VsNodeType::SetCamSpeed:   desc = "Sets how fast the camera follows the player."; break;
+    case VsNodeType::ApplyForce:    desc = "Adds a force to the player's velocity (X, Z components)."; break;
+    case VsNodeType::Bounce:        desc = "Reverses the player's Y velocity with damping. Use on landing for bounce pads."; break;
+    case VsNodeType::SetFriction:   desc = "Sets ground friction (how fast player decelerates). 256 = instant stop."; break;
+    case VsNodeType::CloneSprite:   desc = "Duplicates a sprite at its current position."; break;
+    case VsNodeType::HideAll:       desc = "Hides all sprites."; break;
+    case VsNodeType::ShowAll:       desc = "Shows all sprites."; break;
+    case VsNodeType::Divide:        desc = "Outputs A / B (integer division). Returns 0 if B is 0."; break;
+    case VsNodeType::Power:         desc = "Outputs Base raised to the Exp power (integer)."; break;
+    case VsNodeType::Remap:         desc = "Remaps Value from [0, InMax] to [0, OutMax]."; break;
+    case VsNodeType::Average:       desc = "Outputs (A + B) / 2."; break;
+    case VsNodeType::GetHP2:        desc = "Outputs 1 if sprite's HP > 0 (alive), 0 if dead."; break;
+    case VsNodeType::PingPong:      desc = "Outputs a value that bounces between 0 and Range based on time and Speed."; break;
+    case VsNodeType::Print:         desc = "Debug: prints an integer value to mGBA log output."; break;
+    case VsNodeType::SetColor:      desc = "Changes a sprite's palette color index at runtime."; break;
+    case VsNodeType::SwapSprite:    desc = "Swaps a sprite's asset/tileset to a different one at runtime."; break;
+    case VsNodeType::GetAngle:      desc = "Outputs the angle (in brads) between two sprites."; break;
+    case VsNodeType::GetPlayerY:    desc = "Outputs the player's Y position (height)."; break;
+    case VsNodeType::GetSpriteY:    desc = "Outputs a sprite's Y position (height)."; break;
+    case VsNodeType::SetSpriteY:    desc = "Sets a sprite's Y position (height)."; break;
+    case VsNodeType::WaitUntil:     desc = "Blocks execution until the connected condition becomes true."; break;
+    case VsNodeType::RepeatWhile:   desc = "Keeps firing downstream every frame while condition is true."; break;
+    case VsNodeType::StopAll:       desc = "Stops all running script chains immediately."; break;
+    case VsNodeType::SetLayer:      desc = "Sets a sprite's draw priority layer (0=back, 3=front)."; break;
+    case VsNodeType::GetLayer:      desc = "Outputs a sprite's current draw priority layer."; break;
+    case VsNodeType::SetAlpha:      desc = "Sets a sprite's alpha blend level (0=transparent, 16=opaque)."; break;
+    case VsNodeType::Flash:         desc = "Flashes a sprite white for the specified number of frames."; break;
+    case VsNodeType::Delay:         desc = "Delays downstream execution by N frames (non-blocking)."; break;
+    case VsNodeType::GetVelocityY:  desc = "Outputs the player's current vertical velocity."; break;
+    case VsNodeType::SetSpriteScale:desc = "Sets the scale of a specific sprite."; break;
+    case VsNodeType::RotateSprite:  desc = "Rotates a sprite by the given angle (brads)."; break;
+    case VsNodeType::GetRotation:   desc = "Outputs a sprite's current rotation angle."; break;
+    case VsNodeType::SetHP2:        desc = "Sets HP clamped to max HP (won't exceed maximum)."; break;
+    case VsNodeType::HealHP:        desc = "Adds HP to a sprite, clamped to max HP."; break;
+    case VsNodeType::GetMaxHP:      desc = "Outputs a sprite's maximum HP value."; break;
+    case VsNodeType::SetMaxHP:      desc = "Sets a sprite's maximum HP value."; break;
+    case VsNodeType::IsAlive:       desc = "Gate: only passes execution if the sprite's HP is greater than 0."; break;
+    case VsNodeType::SetBGColor:    desc = "Sets the background clear color (RGB15)."; break;
+    case VsNodeType::GetDeltaTime:  desc = "Outputs frame delta time (always 1 at fixed 60fps)."; break;
+    case VsNodeType::MapValue:      desc = "Maps Value from [InMin, InMax] to [OutMin, OutMax]."; break;
+    case VsNodeType::Wrap:          desc = "Wraps Value to stay within [Min, Max] range."; break;
+    case VsNodeType::SmoothStep:    desc = "Hermite smoothstep interpolation between A and B by T."; break;
+    case VsNodeType::EaseIn:        desc = "Quadratic ease-in: T*T (0-256 range)."; break;
+    case VsNodeType::EaseOut:       desc = "Quadratic ease-out: 1-(1-T)^2 (0-256 range)."; break;
+    case VsNodeType::DistToPlayer:  desc = "Outputs the distance from a sprite to the player."; break;
+    case VsNodeType::FacePlayer:    desc = "Rotates a sprite to face toward the player."; break;
+    case VsNodeType::MoveForward:   desc = "Moves a sprite forward in its facing direction at the given speed."; break;
+    case VsNodeType::Patrol:        desc = "Moves a sprite back and forth between its start and (X1,Z1)."; break;
+    case VsNodeType::ChasePlayer:   desc = "Moves a sprite toward the player at the given speed."; break;
+    case VsNodeType::FleePlayer:    desc = "Moves a sprite away from the player at the given speed."; break;
+    case VsNodeType::FollowPlayer:  desc = "Moves a sprite toward the player, stopping at the given distance (default = collision bounds)."; break;
+    case VsNodeType::IsNear2D:      desc = "Gate: passes exec only if the player is currently adjacent to this blueprint's tilemap object (Mode 0)."; break;
+    case VsNodeType::IsFollowMoving: desc = "Gate: passes exec only if the follow object is currently moving between tiles (Mode 0)."; break;
+    case VsNodeType::SetFollowFacing: desc = "Sets the follow object's facing direction from its movement direction (Mode 0)."; break;
+    case VsNodeType::SetAI:         desc = "Sets the AI behavior mode for a sprite (0=None, 1=Patrol, 2=Chase, 3=Flee)."; break;
+    case VsNodeType::GetAI:         desc = "Outputs the current AI behavior mode of a sprite."; break;
+    case VsNodeType::OnDeath:       desc = "Event: fires when the specified sprite's HP reaches 0."; break;
+    case VsNodeType::OnHit:         desc = "Event: fires when the specified sprite takes damage."; break;
+    case VsNodeType::EmitParticle:  desc = "Spawns a particle effect at the given world position."; break;
+    case VsNodeType::SetTint:       desc = "Sets a color tint on a sprite (RGB15)."; break;
+    case VsNodeType::Shake:         desc = "Shakes a specific sprite for N frames."; break;
+    case VsNodeType::SetText:       desc = "Sets a HUD text slot to display a numeric value."; break;
+    case VsNodeType::ShowHUD:       desc = "Makes a HUD element slot visible and freezes player movement."; break;
+    case VsNodeType::HideHUD:       desc = "Hides a HUD element slot and unfreezes player movement."; break;
+    case VsNodeType::GetRandom:     desc = "Outputs a random value between 0 and 255 (fixed-point 0.0-1.0)."; break;
+    case VsNodeType::ArrayGet:      desc = "Reads from the variable array at the given index."; break;
+    case VsNodeType::ArraySet:      desc = "Writes a value to the variable array at the given index."; break;
+    case VsNodeType::DrawNumber:    desc = "Draws an integer value at screen position (X, Y) using tile font."; break;
+    case VsNodeType::DrawTextID:    desc = "Draws a predefined text string (by ID) at screen position (X, Y)."; break;
+    case VsNodeType::ClearText:     desc = "Clears all rendered text from the screen."; break;
+    case VsNodeType::SetTextColor:  desc = "Sets the color used for subsequent text rendering (RGB15)."; break;
+    case VsNodeType::AddItem:       desc = "Adds the given amount to an inventory slot (0-15)."; break;
+    case VsNodeType::RemoveItem:    desc = "Removes the given amount from an inventory slot. Won't go below 0."; break;
+    case VsNodeType::HasItem:       desc = "Gate: only passes execution if the inventory slot has count > 0."; break;
+    case VsNodeType::GetItemCount:  desc = "Outputs the quantity of items in the given inventory slot."; break;
+    case VsNodeType::SetItemCount:  desc = "Sets the exact count of items in an inventory slot."; break;
+    case VsNodeType::UseItem:       desc = "Consumes one item from the given inventory slot if available."; break;
+    case VsNodeType::ShowDialogue:  desc = "Opens a dialogue box displaying the text with the given ID."; break;
+    case VsNodeType::HideDialogue:  desc = "Closes the currently open dialogue box."; break;
+    case VsNodeType::NextLine:      desc = "Advances the dialogue to the next line of text."; break;
+    case VsNodeType::IsDialogueOpen:desc = "Gate: only passes execution if a dialogue box is currently open."; break;
+    case VsNodeType::SetSpeaker:    desc = "Sets the current speaker index (controls portrait/name display)."; break;
+    case VsNodeType::DialogueChoice:desc = "Presents two choices to the player. Branches to A or B based on selection."; break;
+    case VsNodeType::SetState:      desc = "Sets a sprite's state machine to the given state ID."; break;
+    case VsNodeType::GetState:      desc = "Outputs a sprite's current state machine state ID."; break;
+    case VsNodeType::OnStateEnter:  desc = "Event: fires when the sprite enters the specified state."; break;
+    case VsNodeType::OnStateExit:   desc = "Event: fires when the sprite exits the specified state."; break;
+    case VsNodeType::IsInState:     desc = "Gate: only passes execution if the sprite is in the given state."; break;
+    case VsNodeType::TransitionState:desc = "Changes a sprite's state after an optional delay (in frames)."; break;
+    case VsNodeType::PrevState:     desc = "Outputs the sprite's previous state (before last transition)."; break;
+    case VsNodeType::StateTimer:    desc = "Outputs how many frames the sprite has been in its current state."; break;
+    case VsNodeType::OnTriggerEnter:desc = "Event: fires when a sprite enters a trigger zone."; break;
+    case VsNodeType::OnTriggerExit: desc = "Event: fires when a sprite exits a trigger zone."; break;
+    case VsNodeType::SetCollisionSize:desc = "Sets the collision radius of a sprite."; break;
+    case VsNodeType::IgnoreCollision:desc = "Disables collision between two specific sprites."; break;
+    case VsNodeType::IsColliding:   desc = "Gate: only passes execution if two sprites are overlapping."; break;
+    case VsNodeType::SpawnAt:       desc = "Spawns a new sprite at the given world position."; break;
+    case VsNodeType::DestroyAfter:  desc = "Destroys a sprite after a delay (in frames)."; break;
+    case VsNodeType::SpawnProjectile:desc = "Spawns a projectile from a sprite in its facing direction."; break;
+    case VsNodeType::SetLifetime:   desc = "Sets the remaining lifetime (in frames) for a sprite."; break;
+    case VsNodeType::GetLifetime:   desc = "Outputs the remaining lifetime of a sprite."; break;
+    case VsNodeType::DrawBar:       desc = "Draws a horizontal bar at screen position (X, Y) with fill amount."; break;
+    case VsNodeType::DrawSpriteIcon:desc = "Draws a sprite icon at screen position (X, Y)."; break;
+    case VsNodeType::ShowTimer:     desc = "Shows the on-screen countdown timer."; break;
+    case VsNodeType::HideTimer:     desc = "Hides the on-screen countdown timer."; break;
+    case VsNodeType::SetBarColor:   desc = "Sets the color of a HUD bar (RGB15)."; break;
+    case VsNodeType::SetBarMax:     desc = "Sets the maximum value for a HUD bar."; break;
+    case VsNodeType::ReloadScene:   desc = "Reloads the current scene from scratch."; break;
+    case VsNodeType::GetScene:      desc = "Outputs the current scene index."; break;
+    case VsNodeType::SetCheckpoint: desc = "Saves the current player position as a checkpoint."; break;
+    case VsNodeType::LoadCheckpoint:desc = "Teleports the player back to the last saved checkpoint."; break;
+    case VsNodeType::GetInputAxis:  desc = "Outputs the current D-pad axis value (-256 to 256)."; break;
+    case VsNodeType::OnAnyKey:      desc = "Event: fires when any button is pressed."; break;
+    case VsNodeType::GetLastKey:    desc = "Outputs the key code of the last button pressed."; break;
+    case VsNodeType::OnCollision2D: desc = "Event: fires when the player collides with this object in Mode 0 (tilemap)."; break;
+    case VsNodeType::IsTrue:        desc = "Gate: only passes execution through if the data input is non-zero (true)."; break;
+    case VsNodeType::CursorUp:      desc = "Moves the element's cursor to the previous stop (wraps to last)."; break;
+    case VsNodeType::CursorDown:    desc = "Moves the element's cursor to the next stop (wraps to first)."; break;
+    case VsNodeType::FollowLink:    desc = "Navigates to the linked element at the current cursor stop."; break;
+    case VsNodeType::GetCursorStop: desc = "Returns the current cursor stop index (0-based)."; break;
+    case VsNodeType::BlueprintRef:  desc = "Outputs a blueprint definition index. Use with Freeze/Unfreeze Player to disable a specific blueprint."; break;
+    case VsNodeType::Integer:       desc = "Outputs a constant integer value."; break;
+    case VsNodeType::Key:           desc = "Outputs a key constant (A, B, L, R, etc). Stick directions add Sensitivity (where the analog ramp starts tripping) and Strength (how fast a full push moves — the ramp's top speed)."; break;
+    case VsNodeType::Direction:     desc = "Outputs a direction (Left, Right, Up, Down)."; break;
+    case VsNodeType::Animation:     desc = "Outputs an animation index."; break;
+    case VsNodeType::Float:         desc = "Outputs a constant float value."; break;
+    case VsNodeType::SoundInstance: desc = "Outputs a sound instance index for PlaySound."; break;
+    case VsNodeType::SkelAnim:      desc = "Outputs a skeletal animation clip index (feeds Play Skeletal Anim). Pick a rigged mesh and one of its glTF clips."; break;
+    case VsNodeType::PlaySkelAnim:  desc = "Plays a skeletal (glTF/DSMA) animation clip on the player rig in Mode 4. Wire a Skeletal Animation node into Clip. Loop/Once is set per-clip on the rig."; break;
+    case VsNodeType::SetSkelAnim:   desc = "Sets the skeletal clip on a specific rigged NPC (like Set Sprite Anim, but for glTF rigs). Wire an Object (Instance) into Object and a Skeletal Animation into Clip."; break;
+    case VsNodeType::SetCamera:     desc = "Switches the player camera to a preset slot (Mode 4). Slot 0 = scene default; 1..N are the camera presets authored on the player object. Wire a number into Slot. The camera orbit-follows the player at the slot's angle/pitch/distance/height, smoothly blended."; break;
+    case VsNodeType::TankCamera:    desc = "Tank controls (Mode 4). Wire 1 to make movement + facing follow the player heading (turned by Turn Player on the D-pad) instead of the camera, so forward/back go where the tank points while the camera still orbits freely (L/R). Wire 0 for normal camera-relative controls."; break;
+    case VsNodeType::TurnPlayer:    desc = "Rotates the tank heading (used with Tank Camera). Wire a Direction (Left/Right) and a Speed (brads/frame). Put it on On Key Held(Left)/(Right) so the D-pad turns the player in place while L/R still orbit the camera. Left-click for the Movement switch: Tank (Heading) makes movement follow the turned heading; Camera Relative keeps movement on camera axes and only steers the facing."; break;
+    case VsNodeType::CastEffect:    desc = "Plays a combat/spell effect on a target object. Attach a sprite to that object and tick its 'Hidden' box (it starts invisible). Wire the target into Object: on trigger the effect shows, plays its animation once, and auto-hides. Set the effect sprite's animation to Once so it cleans up."; break;
+    case VsNodeType::AttachedSprite:desc = "Outputs the sprite this blueprint instance is attached to (\"self\"). Wire into Show HUD's Anchor to pin the element to the owner's attached-sprite position in the world (PSV) — the element tracks the object on screen."; break;
+    case VsNodeType::LockOnTarget:  desc = "Lock-on camera assist (PSV): locks onto the Target; once locked the orbit always eases to face it — even off-screen — so locking on swings the camera around to frame it. Gate with Is In View to only lock onto on-screen targets. Wire Attached Sprite (\"self\" in a blueprint) or an Object into Target. Stays locked until Release Lock On. Node-body settings: Zoom % = P0; Side Offset and Height are their own ints; P2 is a bitfield (bit0 = Zoom In/Out direction, bit1 = No Look-Down) — use bpVsSetBit to flip one without disturbing the other."; break;
+    case VsNodeType::ReleaseLockOn: desc = "Releases the lock-on camera assist (pairs with Lock On — e.g. fire it next to Hide HUD when dropping the target). Also turns off Lock Strafe."; break;
+    case VsNodeType::LockStrafe:    desc = "Z-targeting movement (PSV): while a Lock On target is active, the player always FACES the target and movement becomes target-relative — Up closes in, Down backpedals, Left/Right circle-strafe around it. Fire it after Lock On; Release Lock On turns it off."; break;
+    case VsNodeType::IsLockedOn:    desc = "Gate: passes execution only while a Lock On target is active. Branch lock-specific behavior — e.g. On Key Held(Down) -> Is Locked On -> Play Skel Anim(backpeddle), with the normal walk wired in parallel."; break;
+    case VsNodeType::IsNotLockedOn: desc = "Gate: passes execution only while NO Lock On target is active — the inverse of Is Locked On. Use it to suppress the normal walk/face behavior while locked: On Key Held(Down) -> Is Not Locked On -> Play Skel Anim(walk)."; break;
+    case VsNodeType::IsInView:      desc = "Gate (PSV): passes execution only if the Target object is within the camera's view (on-screen). Wire Attached Sprite (\"self\") or an Object into Target. Gate your Lock On + Show HUD chain with it so you can only lock onto / show the ring for something you can see."; break;
+    case VsNodeType::StrafeAnim:    desc = "8-way directional animation picker (PSV lock-strafe): wire your clips (Forward, Fwd-Right, Right, Back-Right, Back, Back-Left, Left, Fwd-Left, relative to facing the target) and it plays the one matching the stick direction each frame. You DON'T need all 8 — any unwired direction falls back to the nearest wired one, so wiring just the 4 cardinals makes diagonals lean to a neighbor. One node replaces the per-direction gated Play Skel Anim chains; put it behind On Update -> Is Locked On."; break;
+    case VsNodeType::SnapStick8:    desc = "Gate the left thumbstick to 8 directions (PSV): snaps the analog move vector to the nearest 45 deg (N/NE/E/SE/S/SW/W/NW) before movement and the Strafe Anim clip pick read it, so diagonals are crisp and the directional clips don't flicker between neighbors. Magnitude (push amount) is preserved. Fire it once from On Start."; break;
+    case VsNodeType::DashToTarget:  desc = "Lunges the player toward the Lock On target for a burst (PSV) — a homing dash for bullet-punch-style moves. Speed = world units/frame (like Walk/Sprint), Frames = lunge duration; stops early at melee range. No target locked -> dashes along current facing. Wire after the attack trigger; pair with Play Skel Anim(atk_phs)."; break;
+    case VsNodeType::Dodge:         desc = "One-button side roll (PSV): a pure LEFT/RIGHT dodge — never forward or back. On trigger the left stick's horizontal component picks the side, so diagonals trigger it too (up-left/down-left = left dodge); a neutral or pure up/down stick ALTERNATES left/right each press (ping-pong) so tap-dodging doesn't roll the same way forever. While locked on, the roll is perpendicular to the player->target line (circle-strafe). Speed = world units/frame (like Walk/Sprint), Frames = roll duration. Wire Left Clip = DodgeL and Right Clip = DodgeR. Idle Clip (optional) = the clip to snap back to when the roll ends while standing still (e.g. Idle) so the rig doesn't freeze on the dodge pose; if you're moving when it ends, Strafe Anim takes over instead. Ramp (int) = frames to ease the speed in from 0 (quadratic) so the roll accelerates instead of snapping to full velocity — softens the stiff feel and gives a windup you can time (0 = instant). Falloff (int) = frames to ease the speed back down to 0 at the END so it decelerates instead of dead-stopping (0 = hard stop). Cooldown (int) = lockout frames after a dodge fires; presses during the lockout do nothing, so mashing the button can't re-fire it (measured from the start, so set it >= Frames to also block mid-roll cancels; 0 = no cooldown). Wall-collides. Put it on a single On Key Pressed; pair with Is Not Dodging on the damage path for i-frames."; break;
+    case VsNodeType::IsDodging:     desc = "Gate (PSV): passes exec only while a Dodge roll is active. Use it to suppress actions during a dodge (e.g. block re-triggering attacks)."; break;
+    case VsNodeType::IsNotDodging:  desc = "Gate (PSV): passes exec only while NO Dodge is active — the inverse of Is Dodging. Wire incoming damage through it for dodge i-frames: On Hit -> Is Not Dodging -> Damage HP."; break;
+    case VsNodeType::IsAirborne:    desc = "Gate: passes exec only while the player is off the ground — the clean inverse of Is On Ground. Drive the air animation with it: On Update -> Is Airborne -> Play Skel Anim(jump). For a rise/fall split use Is Jumping (rising) and Is Falling (descending) instead — on PSV those now read the real vertical velocity."; break;
+    case VsNodeType::IsLanding:     desc = "Gate (PSV): passes exec for a short window (~12 frames) right after the player touches down. Wire On Update -> Is Landing -> Play Skel Anim(land) for a landing/squash pose. Pair with Is Not Landing on the idle chain so idle doesn't override it during the window."; break;
+    case VsNodeType::IsNotLanding:  desc = "Gate (PSV): passes exec when the player is NOT in the post-touchdown land window — the inverse of Is Landing. Put it in front of your grounded idle (On Update -> ... -> Is On Ground -> Is Not Landing -> Play Idle) so the land anim plays first, then idle resumes."; break;
+    case VsNodeType::ChargeShot:    desc = "Hold-to-charge focus blast (PSV): drive it from On Key Held. While held it shows the player's hidden \"effect\" sub-sprite (the focus ball) at chest height and grows it from Min Scale% to Max Scale% over Max Charge frames (180 = 3s). Sets the Is Charging gate so you can play the charge anim (atk_spc_chg, or atk_spc_chg_air behind Is Airborne). Release fires it — see Fire Charge Shot. The ball = the first hidden attached sub-sprite of the player rig (add it in the Meshes tab, tick \"Hidden (effect)\")."; break;
+    case VsNodeType::IsCharging:    desc = "Gate (PSV): passes exec only while a Charge Shot is charging (button held, not yet fired). Drive the charge pose with it: On Update -> Is Charging -> Play Skel Anim(atk_spc_chg). Behind Is Airborne use atk_spc_chg_air."; break;
+    case VsNodeType::FireChargeShot:desc = "Fire the charged focus blast (PSV): drive it from On Key Released (same button as Charge Shot). Snapshots the charged ball into a homing projectile aimed at the Lock On target (fires straight forward if nothing is locked), then clears the charge. Damage = damage at FULL charge and scales down with how long you actually held it (min 1); Speed = projectile world px/frame. On reaching the target it deals damage and despawns. Pair with Play Skel Anim(atk_spc_lnc / atk_spc_lnc_air)."; break;
+    case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
+    case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
+    case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
+    case VsNodeType::OnRise:        desc = "Rising-edge gate: only passes execution on the first frame the upstream condition becomes true. Blocks while it keeps firing. Resets when it stops."; break;
+    case VsNodeType::ResetScene:    desc = "Reloads the current scene. Player respawns at start position."; break;
+    case VsNodeType::SetPlayerHeight: desc = "Sets the player collision height (pixels). Controls wall Y-overlap and floor snap-up distance. Default 12."; break;
+    case VsNodeType::SetPlayerWidth: desc = "Sets the player collision width (horizontal radius, pixels). Controls how close you get to walls before being pushed out. Default 3."; break;
+    case VsNodeType::UpdateRespawnPos: desc = "Updates the Respawn start position to the given object's world position. Use on checkpoint trigger."; break;
+    case VsNodeType::SetVelocityX:  desc = "Adds a world-X velocity to the player every frame, independent of input. Pair with Velocity Falloff to decay it (boost pads, knockback, wind)."; break;
+    case VsNodeType::SetVelocityZ:  desc = "Adds a world-Z velocity to the player every frame, independent of input. Pair with Velocity Falloff to decay it."; break;
+    case VsNodeType::VelocityFalloff: desc = "Linearly decays current vx/vz to 0 over N frames. Set after Set Velocity X/Z to define how quickly the boost/push fades."; break;
+    case VsNodeType::BoostForward:   desc = "Pushes the player along their current view direction at the given speed. Runtime decomposes into world vx/vz using sin/cos(viewAngle). Pair with Velocity Falloff to decay."; break;
+    case VsNodeType::HaltMomentum:   desc = "Zeros all player velocity (vx, vz, vy, pending boost, falloff). Use after respawn so leftover boost-pad momentum doesn't carry over."; break;
+    case VsNodeType::StartGrind:     desc = "Begin rail grinding (Mode 4). The player locks to its entry direction and slides on momentum — accelerating downhill, slowing uphill. Wire it to On Collision(rail mesh). Jumping or running off the end ends the grind."; break;
+    case VsNodeType::StopGrind:      desc = "End rail grinding immediately (restores normal input movement)."; break;
+    case VsNodeType::IsGrinding:     desc = "Gate: passes exec while the player is currently grinding a rail. Use to play a grind animation or gate a jump-off."; break;
+    case VsNodeType::IsNotGrinding:  desc = "Gate: passes exec while the player is NOT grinding. Wire On Update -> Is Not Grinding -> On Rise -> Stop Sound to kill a looping grind SFX the instant you leave the rail."; break;
+    case VsNodeType::GrindPower:    desc = "Set the BASE downhill momentum gain while grinding (default 24). Higher = a descent builds speed faster. Drop it under On Start to tune the whole rail system."; break;
+    case VsNodeType::GrindBoost:    desc = "Add EXTRA downhill grind speed for this frame (only applies while descending). Gate it with a held button: On Update -> Is Key Held(B) -> Grind Boost, so holding sprint on a downslope accelerates harder."; break;
+    case VsNodeType::GrindBleed:    desc = "Set how slowly the Grind Boost's extra speed bleeds back to normal (default 6). Higher = momentum earned on a drop carries farther across flats before fading; lower = snaps back sooner; 0 = never bleeds. Persistent — fine under On Start or On Update."; break;
+    case VsNodeType::GrindCatch:    desc = "Loosen how easily you re-catch a rail. Height = extra vertical window above the rail surface; Width = horizontal snap radius to the rail path (lands you on a thin rail without being exactly over it). Both in editor pixels, 0 = strict/off. Set under On Start."; break;
+    case VsNodeType::Group:         desc = "Groups nodes into a reusable subgraph."; break;
+    default: desc = "No description."; break;
+    }
+    return desc;
+}
+
 static std::string BuildLLMSystemPrompt() {
     std::string s =
         "You are the assistant inside Affinity, a visual-script game engine/editor "
@@ -1142,7 +1434,10 @@ static std::string BuildLLMSystemPrompt() {
          "wants to CHANGE those nodes in place — do NOT build a new graph. Emit only bpVsSet lines: "
          "bpVsSet=<id>,<paramIndex 0-3>,<value>, using the exact ids shown and the node's known behaviour "
          "to pick the param (e.g. halve a speed shown as P0=200 -> bpVsSet=<id>,0,100; switch ChangeScene to "
-         "scene 2 -> bpVsSet=<id>,0,2). One line per change.\n\n"
+         "scene 2 -> bpVsSet=<id>,0,2). One line per change.\n"
+         "Some params pack several toggles into ONE int as bits (the node's description says so — e.g. Lock "
+         "On's P2: bit0 = Zoom In/Out, bit1 = No Look-Down). To change ONE such toggle, use "
+         "bpVsSetBit=<id>,<paramIndex>,<bit>,<0 or 1> so the other bits are preserved.\n\n"
          "NODES — name (type N)[event][exec in>out] data-in: pins\n";
     int count = (int)(sizeof(sVsNodeDefs) / sizeof(sVsNodeDefs[0]));
     for (int i = 0; i < count; i++) {
@@ -1231,10 +1526,12 @@ static int sVsEditingGroup = 0;        // 0 = top-level; >0 = inside group node 
 static std::string InsertLLMNodes(const std::string& text) {
     struct PN { int id, type, p[5]; float x, y; };
     struct PL { int from, fpt, fpi, to, tpt, tpi; };
-    struct PE { int id, pi, val; };   // bpVsSet: in-place edit of an existing node's param
+    struct PE { int id, pi, val; };        // bpVsSet: in-place edit of an existing node's param
+    struct PB { int id, pi, bit, val; };   // bpVsSetBit: flip one bit of a packed param
     std::vector<PN> pns; std::vector<PL> pls;
     std::vector<std::pair<int, std::string>> clips;
     std::vector<PE> edits;
+    std::vector<PB> bitedits;
     std::vector<std::string> warn;
 
     int typeCount = (int)(sizeof(sVsNodeDefs) / sizeof(sVsNodeDefs[0]));
@@ -1280,12 +1577,15 @@ static std::string InsertLLMNodes(const std::string& text) {
             int id; char nm[64] = {};
             if (sscanf(line.c_str() + a + 13, "%d|%63[^\r\n]", &id, nm) == 2)
                 clips.push_back({ id, std::string(nm) });
+        } else if ((a = line.find("bpVsSetBit=")) != std::string::npos) {
+            PB b{};
+            if (sscanf(line.c_str() + a + 11, "%d,%d,%d,%d", &b.id, &b.pi, &b.bit, &b.val) == 4) bitedits.push_back(b);
         } else if ((a = line.find("bpVsSet=")) != std::string::npos) {
             PE e{};
             if (sscanf(line.c_str() + a + 8, "%d,%d,%d", &e.id, &e.pi, &e.val) == 3) edits.push_back(e);
         }
     }
-    if (pns.empty() && edits.empty()) {
+    if (pns.empty() && edits.empty() && bitedits.empty()) {
         if (warn.empty()) return "No node lines (bpVsNode=...) or edits (bpVsSet=...) found in the reply.";
         std::string m = "Nothing applied. Issues:";
         for (auto& w : warn) m += "\n- " + w;
@@ -1357,6 +1657,13 @@ static std::string InsertLLMNodes(const std::string& text) {
         bool found = false;
         for (auto& n : sVsNodes) if (n.id == e.id) { n.paramInt[e.pi] = e.val; found = true; edited++; break; }
         if (!found) warn.push_back("bpVsSet: no node with id " + std::to_string(e.id) + " in the graph");
+    }
+    // Apply bit edits (bpVsSetBit) — flip one bit of a packed param without disturbing the rest.
+    for (auto& b : bitedits) {
+        if (b.pi < 0 || b.pi > 3 || b.bit < 0 || b.bit > 31) { warn.push_back("bpVsSetBit: param/bit out of range"); continue; }
+        bool found = false;
+        for (auto& n : sVsNodes) if (n.id == b.id) { n.paramInt[b.pi] = (n.paramInt[b.pi] & ~(1 << b.bit)) | (b.val ? (1 << b.bit) : 0); found = true; edited++; break; }
+        if (!found) warn.push_back("bpVsSetBit: no node with id " + std::to_string(b.id) + " in the graph");
     }
 
     std::string msg;
@@ -4863,10 +5170,11 @@ static std::string BuildLLMGrammar() {
     std::string g;
     g += "root ::= ws (stmt ws)+\n";
     g += "ws ::= [ \\t\\r\\n]*\n";
-    g += std::string("stmt ::= node | link | set") + (haveClips ? " | clip" : "") + "\n";
+    g += std::string("stmt ::= node | link | set | setbit") + (haveClips ? " | clip" : "") + "\n";
     g += "node ::= \"bpVsNode=\" int \",\" ntype \",\" int \",\" int \",\" int \",\" int \",\" int \",\" int \",\" int\n";
     g += "link ::= \"bpVsLink=\" int \",\" int \",\" int \"|\" int \",\" int \",\" int\n";
     g += "set ::= \"bpVsSet=\" int \",\" int \",\" int\n";   // in-place edit of an existing node's param
+    g += "setbit ::= \"bpVsSetBit=\" int \",\" int \",\" int \",\" int\n";   // flip one bit of a packed param
     if (haveClips) g += "clip ::= \"bpVsNodeClip=\" int \"|\" clipname\n";
     g += "int ::= \"-\"? [0-9]+\n";
     g += "ntype ::= ";
@@ -4963,7 +5271,7 @@ static std::string BuildLLMSelectionContext() {
            + " P2=" + std::to_string(n->paramInt[2]) + " P3=" + std::to_string(n->paramInt[3]);
         if (n->clipName[0]) { s += " clip=\""; s += n->clipName; s += "\""; }
         if (d.inData > 0) { s += "  (data pins:"; for (int p = 0; p < d.inData; p++) { s += p ? ", " : " "; s += d.inDataNames[p] ? d.inDataNames[p] : "?"; } s += ")"; }
-        s += "\n";
+        s += "\n      "; s += VsNodeDesc(n->type); s += "\n";   // behaviour/param semantics for targeting
     }
     if (!sSoundBank.empty()) {
         s += "Sound samples (index=name): ";
@@ -21107,9 +21415,9 @@ void FrameTick(float dt)
                 ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "%s", infoDef.name);
                 ImGui::Separator();
 
-                // Description
-                const char* desc = "";
-                switch (infoNode.type) {
+                // Description (single source — shared with the LLM assistant)
+                const char* desc = VsNodeDesc(infoNode.type);
+                if (false) switch (infoNode.type) {
                 case VsNodeType::OnKeyPressed:  desc = "Fires once when a key is pressed down."; break;
                 case VsNodeType::OnKeyReleased: desc = "Fires once when a key is released."; break;
                 case VsNodeType::OnKeyHeld:     desc = "Fires every frame while a key is held."; break;

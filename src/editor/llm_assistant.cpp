@@ -473,7 +473,7 @@ void RenderPanel(bool* p_open) {
           if (!g_history.empty() && g_history.back().role == "assistant") lastReply = g_history.back().content;
           insStatus = g_insertStatus; haveHandler = (bool)g_insertHandler; }
         bool hasNodes = lastReply.find("bpVsNode=") != std::string::npos;
-        bool hasEdits = lastReply.find("bpVsSet=")  != std::string::npos;
+        bool hasEdits = lastReply.find("bpVsSet=") != std::string::npos || lastReply.find("bpVsSetBit=") != std::string::npos;
         if (haveHandler && (hasNodes || hasEdits) && !busy) {
             const char* label = hasNodes ? "Insert nodes into open blueprint"
                                          : "Apply edits to selected nodes";
