@@ -89,7 +89,13 @@ void ensureBackend() {
             ggml_backend_dev_t d = ggml_backend_dev_get(i);
             if (ggml_backend_dev_type(d) == GGML_BACKEND_DEVICE_TYPE_GPU) {
                 const char* desc = ggml_backend_dev_description(d);
-                g_gpuDevs.push_back({ desc && *desc ? desc : "GPU", d });
+                std::string label = (desc && *desc) ? desc : "GPU";
+                // Tag the device with its driver/backend (Vulkan, CUDA, ...) so the
+                // dropdown doubles as a driver picker when several are compiled in.
+                ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(d);
+                const char* drv = reg ? ggml_backend_reg_name(reg) : nullptr;
+                if (drv && *drv) label += std::string(" (") + drv + ")";
+                g_gpuDevs.push_back({ label, d });
             }
         }
     }
