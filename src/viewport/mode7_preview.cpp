@@ -833,9 +833,54 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
             if (subPass >= 0) {
                 const auto& sub = sprites[i].subSprites[subPass];
                 if (sub.hidden) continue;   // effect sprite: hidden in editor (declutter)
-                wx += sub.offsetX;
-                wy += sub.offsetY;
-                wz += sub.offsetZ;
+                // Bone attach: snap the sub-sprite to the parent rig's animated bone
+                // (same as the runtime) so positioning in the editor is WYSIWYG —
+                // X/Y/Z offset FROM the bone, in the rig's LOCAL frame (so a +Z
+                // nudge is "in front of the character"). Falls back to origin.
+                bool boneSnapped = false;
+                if (sub.boneIdx >= 0 && sprites[i].riggedMeshIdx >= 0
+                    && sprites[i].riggedMeshIdx < riggedAssetCount && riggedAssets) {
+                    const RiggedMeshAsset& prm = riggedAssets[sprites[i].riggedMeshIdx];
+                    int nb = prm.boneCount;
+                    if (sub.boneIdx < nb && (int)prm.bindPose.size() == nb) {
+                        BonePose P = prm.bindPose[sub.boneIdx];   // rest pose default
+                        if (sprites[i].rigAnimIdx >= 0 && sprites[i].rigAnimIdx < (int)prm.clips.size()
+                            && prm.clips[sprites[i].rigAnimIdx].frameCount > 0) {
+                            const RigAnimClip& clip = prm.clips[sprites[i].rigAnimIdx];
+                            int fc = clip.frameCount;
+                            float ff = sprites[i].rigAnimClock < 0 ? 0 : sprites[i].rigAnimClock;
+                            int f0 = (int)floorf(ff) % fc, f1 = (f0 + 1) % fc;
+                            float u = ff - floorf(ff);
+                            const BonePose& A = clip.frames[f0 * nb + sub.boneIdx];
+                            const BonePose& B = clip.frames[f1 * nb + sub.boneIdx];
+                            P.px = A.px*(1-u)+B.px*u; P.py = A.py*(1-u)+B.py*u; P.pz = A.pz*(1-u)+B.pz*u;
+                        }
+                        // Same world transform as the rig draw below (scale, Y/X/Z rot, translate).
+                        float ms = sprites[i].scale;
+                        float rY = sprites[i].rotation  * 3.14159265f/180.0f;
+                        float rX = sprites[i].rotationX * 3.14159265f/180.0f;
+                        float rZ = sprites[i].rotationZ * 3.14159265f/180.0f;
+                        float cY=cosf(rY),sY=sinf(rY),cX=cosf(rX),sX=sinf(rX),cZ=cosf(rZ),sZ=sinf(rZ);
+                        // Apply the rig rotation to BOTH the bone position and the
+                        // offset (rig-local), so the nudge rotates with the character.
+                        auto rigRot = [&](float lx, float ly, float lz, float& ox, float& oy, float& oz){
+                            float rxx=lx*cY+lz*sY, rzz=-lx*sY+lz*cY, ryy=ly;
+                            float ry2=ryy*cX-rzz*sX, rz2=ryy*sX+rzz*cX;
+                            ox=rxx*cZ-ry2*sZ; oy=rxx*sZ+ry2*cZ; oz=rz2;
+                        };
+                        float bxo,byo,bzo; rigRot(P.px*ms, P.py*ms, P.pz*ms, bxo,byo,bzo);
+                        float oxo,oyo,ozo; rigRot(sub.offsetX, sub.offsetY, sub.offsetZ, oxo,oyo,ozo);
+                        wx = sprites[i].x + bxo + oxo;
+                        wy = sprites[i].y + byo + oyo;
+                        wz = sprites[i].z + bzo + ozo;
+                        boneSnapped = true;
+                    }
+                }
+                if (!boneSnapped) {
+                    wx += sub.offsetX;
+                    wy += sub.offsetY;
+                    wz += sub.offsetZ;
+                }
             }
 
             float dx = wx - cam.x;

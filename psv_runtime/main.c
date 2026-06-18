@@ -502,8 +502,11 @@ static void billboards_render(const float* view, float camAngle, float camEyeX, 
         // world transform (the player isn't an NPC, so the re-anchor above never
         // tracks it) — place + scale the orb at the charge spot or flight pos.
         if (i == afn_fb_inst && (afn_fb_charging || afn_fb_active)) {
-            px = afn_fb_x; py = afn_fb_y; pz = afn_fb_z;
             sz = afn_spr_basesize[i] * afn_fb_scale * 0.25f; hw = sz * 0.5f;
+            // Center the orb ON the spawn/bone point (the spherical quad below
+            // centers at py + sz/2), so charging grows it symmetrically instead
+            // of ballooning upward from the bottom edge.
+            px = afn_fb_x; py = afn_fb_y - sz * 0.5f; pz = afn_fb_z;
             isAttached = 1;   // draw as a camera-facing (spherical) orb
         }
 #endif
@@ -2057,19 +2060,33 @@ int main(void)
 #if defined(AFN_HAS_SPRITES) && defined(AFN_HAS_SPR_PARENT)
             if (afn_fb_inst >= 0) { fbOx = afn_spr_poff_x[afn_fb_inst]; fbOy = afn_spr_poff_y[afn_fb_inst]; fbOz = afn_spr_poff_z[afn_fb_inst]; }
 #endif
+            int fbBone = -1;
 #ifdef AFN_HAS_SPR_BONE
-            // Ride the live animated bone if one is assigned (bone world pos is
-            // absolute; the authored X/Y/Z become a facing-rotated nudge from it).
+            // Ride the live animated bone if one is assigned (bone world pos is absolute).
             if (afn_fb_inst >= 0 && afn_spr_bone[afn_fb_inst] >= 0) {
-                int fbBn = afn_spr_bone[afn_fb_inst];
-                fbBaseX = s_player_bone_world[fbBn][0];
-                fbBaseY = s_player_bone_world[fbBn][1];
-                fbBaseZ = s_player_bone_world[fbBn][2];
+                fbBone = afn_spr_bone[afn_fb_inst];
+                fbBaseX = s_player_bone_world[fbBone][0];
+                fbBaseY = s_player_bone_world[fbBone][1];
+                fbBaseZ = s_player_bone_world[fbBone][2];
             }
 #endif
-            float fbAttachX = fbBaseX + fbOx*fbRx + fbOz*fbFx;
-            float fbAttachY = fbBaseY + fbOy;
-            float fbAttachZ = fbBaseZ + fbOx*fbRz + fbOz*fbFz;
+            float fbAttachX, fbAttachY, fbAttachZ;
+            if (fbBone >= 0) {
+                // Offset in the rig's LOCAL frame (X=right, Z=forward), rotated by
+                // the rig's FULL orientation (facing + Model Yaw) — the exact yaw
+                // rig_draw uses — so a +Z nudge is "in front of the character" both
+                // in the editor preview and at runtime, regardless of facing.
+                float yr = playerYaw*DEG2RAD + AFN_RIG_YAW_OFFSET + afn_rigs[AFN_PLAYER_RIG_SLOT].yawOff;
+                float yc = cosf(yr), ys = sinf(yr);   // fwd=(sin,cos), right=(cos,-sin)
+                fbAttachX = fbBaseX + fbOx*yc + fbOz*ys;
+                fbAttachY = fbBaseY + fbOy;
+                fbAttachZ = fbBaseZ - fbOx*ys + fbOz*yc;
+            } else {
+                // No bone: offset is relative to the player's facing.
+                fbAttachX = fbBaseX + fbOx*fbRx + fbOz*fbFx;
+                fbAttachY = fbBaseY + fbOy;
+                fbAttachZ = fbBaseZ + fbOx*fbRz + fbOz*fbFz;
+            }
             if (afn_fb_active) {
                 // In flight: home toward the captured target's LIVE position
                 // (fly forward along the launch facing if nothing was locked).

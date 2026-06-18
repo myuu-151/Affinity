@@ -158,9 +158,9 @@ static void afn_bp0_key_held(void) {
 #ifdef AFN_HAS_PLAYER_RIG
     afn_fb_charge_req = 1;
     afn_fb_parent     = afn_bp_cur_spr_idx;
-    afn_fb_max        = 180;
-    afn_fb_min_scale  = 5 / 100.0f;
-    afn_fb_max_scale  = 70 / 100.0f;
+    afn_fb_max        = 50;
+    afn_fb_min_scale  = 1 / 100.0f;
+    afn_fb_max_scale  = 10 / 100.0f;
 #endif
     if (player_on_ground) {
     afn_rig_clip = 1;
