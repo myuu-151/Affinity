@@ -224,6 +224,17 @@ The model isn't bundled (it's large and separately licensed) — download any **
 
 > CPU-only by default. It caches the node catalog after the first load so replies stay fast. The panel's **Settings** button picks compute: **CPU 50% / 75%** (share of cores) or **GPU 50% / 75% / 100%** (share of layers offloaded).
 
+### Instruction vs. reasoning models
+
+Two kinds of GGUF work here, and they suit different jobs — you load **one at a time**, and switching is just a **Load** of the other file:
+
+- **Instruction models** (e.g. **Qwen2.5-Coder-Instruct**, 3B / 7B / 14B) answer *directly*. Fast, and the right default for everyday building and edits — bigger = sharper on complex graphs.
+- **Reasoning models** (e.g. **[DeepSeek-R1-Distill-Qwen-14B](https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF)**) *think* through the problem first — a long internal chain-of-thought — before answering. Slower, but they hold large, interdependent graphs together much better. Reach for one when an instruction model keeps fumbling a big (100+ node) graph.
+
+The **Constrain output (grammar)** toggle works with both: it's *lazy*, so a reasoning model can do its full thinking pass and **only the final graph** is locked to valid syntax (real node types, params, clip names) — plain Q&A and prose stay free, so you can leave it on. **Auto-repair** (also in Settings) then lints the result and re-prompts the model to fix any broken links / pins.
+
+Reasoning models generate a lot of think-tokens, so give them room: bump **Settings ▸ Context** to **32K** if your VRAM allows. (A 14B at 32K won't fully fit a 16 GB GPU — keep 16K, or use a smaller quant, if it spills to CPU and slows down.)
+
 #### GPU acceleration (optional)
 
 GPU offload only does something if llama.cpp is built with a GPU backend (the default build is CPU-only). On a machine with the toolkit installed, enable one at configure time — then the Settings ▸ GPU options run on the GPU (a full 7B fits in ~5 GB VRAM, a 14B in ~11 GB, running ~20–50× faster than CPU):
