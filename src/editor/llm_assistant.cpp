@@ -19,6 +19,17 @@
 #include <cstring>
 #include <filesystem>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <commdlg.h>
+#endif
+
 namespace llm {
 namespace {
 
@@ -184,6 +195,29 @@ void generateWorker(std::string userMsg) {
     g_generating = false;
 }
 
+#ifdef _WIN32
+// Native open-file dialog to pick a .gguf model (any folder). Returns true and
+// fills `out` with the chosen path; false if the user cancels.
+bool pickGguf(char* out, int outSize) {
+    char file[1024] = {};
+    if (out[0]) strncpy(file, out, sizeof(file) - 1);   // preselect the current path
+    std::error_code ec;
+    std::string initDir;
+    if (out[0]) initDir = std::filesystem::path(out).parent_path().string();
+    else if (std::filesystem::exists("models", ec)) initDir = (std::filesystem::current_path(ec) / "models").string();
+    OPENFILENAMEA ofn = {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = "GGUF models (*.gguf)\0*.gguf\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile   = file;
+    ofn.nMaxFile    = sizeof(file);
+    ofn.lpstrTitle  = "Select a GGUF model";
+    if (!initDir.empty()) ofn.lpstrInitialDir = initDir.c_str();
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (GetOpenFileNameA(&ofn)) { strncpy(out, file, outSize - 1); out[outSize - 1] = 0; return true; }
+    return false;
+}
+#endif
+
 void startLoad(const std::string& path) {
     if (g_loading || g_generating) return;
     joinWorker();
@@ -243,7 +277,13 @@ void RenderPanel(bool* p_open) {
     ImGui::SameLine();
     if (ImGui::Button("Settings", ImVec2(86, 0))) ImGui::OpenPopup("AsstSettings");
     ImGui::SameLine();
-    if (ImGui::Button("Load", ImVec2(60, 0)) && g_modelPath[0]) startLoad(g_modelPath);
+    if (ImGui::Button("Load", ImVec2(60, 0))) {
+#ifdef _WIN32
+        if (pickGguf(g_modelPath, sizeof(g_modelPath))) startLoad(g_modelPath);   // browse for a .gguf
+#else
+        if (g_modelPath[0]) startLoad(g_modelPath);
+#endif
+    }
     ImGui::EndDisabled();
     if (ImGui::BeginPopup("AsstSettings")) {
         ImGui::TextDisabled("Compute (applies on next Load)");
