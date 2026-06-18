@@ -82,6 +82,7 @@ std::function<std::string()> g_grammarProvider;                   // [g] builds 
 std::string g_grammar;                                            // refreshed UI-side before each generate
 std::function<std::string(const std::string&)> g_lintHandler;     // [g] read-only lint -> issues (thread-safe)
 std::function<std::string()> g_contextProvider;                   // [g] per-turn selection snapshot (UI thread)
+std::function<std::string()> g_editContextProvider;               // [g] whole-graph context for the Edit button
 bool g_useGrammar = false;   // constrain output to node-graph syntax (grammar)
 bool g_repair     = true;    // auto-repair graph lint errors by re-prompting
 int  g_ctxK       = 16;      // context window in K tokens (16 or 32); applied at load
@@ -375,6 +376,8 @@ void SetLintHandler(std::function<std::string(const std::string&)> fn) { std::lo
 
 void SetContextProvider(std::function<std::string()> fn) { std::lock_guard<std::mutex> lk(g_mtx); g_contextProvider = std::move(fn); }
 
+void SetEditContextProvider(std::function<std::string()> fn) { std::lock_guard<std::mutex> lk(g_mtx); g_editContextProvider = std::move(fn); }
+
 bool IsBusy() { return g_loading.load() || g_generating.load(); }
 
 void Shutdown() {
@@ -516,17 +519,23 @@ void RenderPanel(bool* p_open) {
 
     bool canSend = (g_ctx != nullptr) && !busy;
     ImGui::BeginDisabled(!canSend);
-    ImGui::SetNextItemWidth(-70.0f);
+    ImGui::SetNextItemWidth(-126.0f);
     bool enter = ImGui::InputText("##askinput", g_input, sizeof(g_input), ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::SameLine();
-    bool send = ImGui::Button("Send", ImVec2(60, 0));
+    bool edit = ImGui::Button("Edit", ImVec2(54, 0));
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Apply your request as a CHANGE to the existing graph\n(adds nodes, wires them to what's there, tweaks params)\ninstead of building a new graph from scratch.");
+    ImGui::SameLine();
+    bool send = ImGui::Button("Send", ImVec2(54, 0));
     ImGui::EndDisabled();
-    if ((enter || send) && canSend && g_input[0]) {
-        // Rebuild grammar + selection snapshot here (UI thread) so they reflect the
-        // current project before the worker uses them; keeps editor data off the worker.
+    if ((enter || send || edit) && canSend && g_input[0]) {
+        // Rebuild grammar here (UI thread) so it reflects the current project.
         if (g_useGrammar && g_grammarProvider) g_grammar = g_grammarProvider();
         std::string disp = g_input;
-        std::string ctx  = g_contextProvider ? g_contextProvider() : std::string();
+        // Edit => feed the WHOLE current graph (extend/modify it). Send => normal
+        // (selection snapshot if any nodes are selected, else just the prompt).
+        std::string ctx;
+        if (edit) { if (g_editContextProvider) ctx = g_editContextProvider(); }
+        else      { if (g_contextProvider)     ctx = g_contextProvider(); }
         std::string model = ctx.empty() ? disp : (ctx + "\nUser request: " + disp);
         startAsk(disp, model);
         g_input[0] = 0;

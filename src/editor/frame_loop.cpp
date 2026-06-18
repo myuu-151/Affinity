@@ -1635,19 +1635,33 @@ static std::string InsertLLMNodes(const std::string& text) {
         return 0;
     };
     std::map<std::string, bool> seenLink;   // drop duplicate links (model repetition)
+    // Resolve a parsed node id to an editor id + type: a freshly-inserted node (idmap)
+    // OR an existing node already in the graph (Edit/extend mode wires new -> existing).
+    auto resolveEnd = [&](int pid, int& outType) -> int {
+        auto it = idmap.find(pid);
+        if (it != idmap.end()) { outType = typeOf[it->second]; return it->second; }
+        for (auto& n : sVsNodes) if (n.id == pid) { outType = (int)n.type; return n.id; }
+        return -1;
+    };
     for (auto& l : pls) {
-        auto fIt = idmap.find(l.from), tIt = idmap.find(l.to);
-        if (fIt == idmap.end() || tIt == idmap.end()) { warn.push_back("dropped a link referencing a node not in the graph"); continue; }
-        int ft = typeOf[fIt->second], tt = typeOf[tIt->second];
+        int ft = -1, tt = -1;
+        int fromId = resolveEnd(l.from, ft);
+        int toId   = resolveEnd(l.to, tt);
+        if (fromId < 0 || toId < 0) { warn.push_back("dropped a link referencing a node not in the graph"); continue; }
         if (l.fpi < 0 || l.fpi >= pinCount(ft, l.fpt) || l.tpi < 0 || l.tpi >= pinCount(tt, l.tpt)) {
             warn.push_back(std::string("dropped an out-of-range link into ") + sVsNodeDefs[tt].name);
             continue;
         }
-        char key[64]; snprintf(key, sizeof(key), "%d,%d,%d|%d,%d,%d", l.from, l.fpt, l.fpi, l.to, l.tpt, l.tpi);
-        if (!seenLink.emplace(key, true).second) continue;   // skip exact-duplicate link
+        char key[64]; snprintf(key, sizeof(key), "%d,%d,%d|%d,%d,%d", fromId, l.fpt, l.fpi, toId, l.tpt, l.tpi);
+        if (!seenLink.emplace(key, true).second) continue;   // skip duplicate within this batch
+        bool exists = false;
+        for (auto& el : sVsLinks)
+            if (el.from.nodeId == fromId && el.from.pinType == l.fpt && el.from.pinIdx == l.fpi &&
+                el.to.nodeId == toId && el.to.pinType == l.tpt && el.to.pinIdx == l.tpi) { exists = true; break; }
+        if (exists) continue;   // link already present (Edit mode re-stated an existing wire)
         VsLink lk;
-        lk.from.nodeId = fIt->second; lk.from.pinType = l.fpt; lk.from.pinIdx = l.fpi;
-        lk.to.nodeId   = tIt->second; lk.to.pinType   = l.tpt; lk.to.pinIdx   = l.tpi;
+        lk.from.nodeId = fromId; lk.from.pinType = l.fpt; lk.from.pinIdx = l.fpi;
+        lk.to.nodeId   = toId;   lk.to.pinType   = l.tpt; lk.to.pinIdx   = l.tpi;
         sVsLinks.push_back(lk);
     }
     // Lint: a key event with its "Key" pin unwired won't fire (the model commonly
@@ -5294,6 +5308,41 @@ static std::string BuildLLMSelectionContext() {
     s += "To change a setting on a selected node, output ONLY bpVsSet lines — bpVsSet=<id>,<paramIndex 0-3>,<value> "
          "(one per change), using the node's known behaviour to pick the right paramIndex (a single-value node like "
          "ChangeScene / Wait / Walk uses P0). Do NOT create new nodes or links for an edit.\n";
+    return s;
+}
+
+// Whole current-group graph for the "Edit" button: lets the model EXTEND/modify the
+// graph (add nodes + wire them to existing ones, and/or change params) instead of
+// rebuilding from scratch. Returns "" when the graph is empty.
+static std::string BuildLLMEditContext() {
+    std::vector<const VsNode*> g;
+    for (auto& n : sVsNodes) if (n.groupId == sVsEditingGroup && n.type != VsNodeType::Group) g.push_back(&n);
+    if (g.empty()) return "";
+    std::string s = "EXTEND/MODIFY THE EXISTING GRAPH BELOW — do NOT rewrite or re-output the existing nodes.\n";
+    s += "Existing nodes (use these exact ids when wiring to or changing them):\n";
+    for (auto* n : g) {
+        const VsNodeTypeDef& d = sVsNodeDefs[(int)n->type];
+        s += "  node " + std::to_string(n->id) + " = " + d.name
+           + " (P0=" + std::to_string(n->paramInt[0]) + " P1=" + std::to_string(n->paramInt[1])
+           + " P2=" + std::to_string(n->paramInt[2]) + " P3=" + std::to_string(n->paramInt[3]) + ")";
+        if (n->clipName[0]) { s += " clip=\""; s += n->clipName; s += "\""; }
+        s += "\n";
+    }
+    bool anyL = false;
+    for (auto& lk : sVsLinks) {
+        bool fi = false, ti = false;
+        for (auto* n : g) { if (n->id == lk.from.nodeId) fi = true; if (n->id == lk.to.nodeId) ti = true; }
+        if (fi && ti) {
+            if (!anyL) { s += "Existing links (fromId.pinType.idx -> toId.pinType.idx):\n"; anyL = true; }
+            s += "  " + std::to_string(lk.from.nodeId) + "." + std::to_string(lk.from.pinType) + "." + std::to_string(lk.from.pinIdx)
+               + " -> " + std::to_string(lk.to.nodeId) + "." + std::to_string(lk.to.pinType) + "." + std::to_string(lk.to.pinIdx) + "\n";
+        }
+    }
+    s += "Output ONLY the changes:\n"
+         "- new nodes: bpVsNode lines, each with a NEW id starting at 9000 (so it can't clash with the ids above);\n"
+         "- new wires: bpVsLink lines (an endpoint may be an existing id above OR a new 9000+ id);\n"
+         "- changed settings: bpVsSet=<id>,<paramIndex 0-3>,<value> (or bpVsSetBit=<id>,<param>,<bit>,<0|1> for a packed toggle).\n"
+         "Do NOT re-output the existing nodes.\n";
     return s;
 }
 static char sRigImportError[256] = "";
@@ -18172,6 +18221,7 @@ void FrameTick(float dt)
         llm::SetGrammarProvider(&BuildLLMGrammar);   // constrains output to valid graph syntax
         llm::SetLintHandler(&LintLLMGraph);          // feeds errors to the auto-repair loop
         llm::SetContextProvider(&BuildLLMSelectionContext);   // selected-node snapshot for in-place edits
+        llm::SetEditContextProvider(&BuildLLMEditContext);    // whole-graph context for the Edit button
     }
     llm::RenderPanel(&sShowAssistant);
 

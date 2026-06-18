@@ -34,6 +34,11 @@ namespace llm {
     // there's nothing to add. Lets you select nodes and say "reduce the speed", etc.
     void SetContextProvider(std::function<std::string()> fn);
 
+    // Provider for the WHOLE current graph, used by the "Edit" button: lets the model
+    // EXTEND the existing graph (add nodes/links, change params) instead of rebuilding.
+    // Returns "" when the graph is empty.
+    void SetEditContextProvider(std::function<std::string()> fn);
+
     // Render the assistant panel (call once per frame from the editor UI).
     void RenderPanel(bool* p_open);
 
