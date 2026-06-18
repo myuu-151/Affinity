@@ -5300,6 +5300,16 @@ static std::string LintLLMGraph(const std::string& text) {
             if (!wired) warn.push_back(std::string(d.name) + " has an unwired Key pin — add a Key node and link it into the Key pin");
         }
     }
+    // Action nodes that never receive execution won't run — the model often forgets
+    // the exec wire (e.g. On Key Pressed -> Jump). Flag any non-event node whose
+    // exec-in pin has no incoming exec link.
+    for (auto& kv : idType) {
+        const VsNodeTypeDef& d = sVsNodeDefs[kv.second];
+        if (d.inExec == 0) continue;   // [event] nodes start a chain; no exec input
+        bool wired = false;
+        for (auto& l : pls) if (l.to == kv.first && l.tpt == 1 && l.tpi == 0) { wired = true; break; }
+        if (!wired) warn.push_back(std::string(d.name) + " never runs — wire a prior node's exec-out (e.g. an event) into its exec-in");
+    }
     if (warn.empty()) return "";
     std::string m; for (auto& w : warn) m += "- " + w + "\n"; return m;
 }

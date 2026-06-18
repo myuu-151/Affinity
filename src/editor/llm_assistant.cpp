@@ -248,6 +248,7 @@ void loadWorker(std::string path) {
 void generateWorker(std::string userMsg) {
     std::string savedStatus; { std::lock_guard<std::mutex> lk(g_mtx); savedStatus = g_status; }
     int maxRepairs = g_repair ? 2 : 0;
+    int prevIssues = 1 << 30;   // stop repairing once a pass stops reducing the problem count
     std::string pending = userMsg;
 
     for (int attempt = 0; ; attempt++) {
@@ -319,9 +320,11 @@ void generateWorker(std::string userMsg) {
         std::string issues;
         if (maxRepairs > 0 && g_lintHandler && !g_stop.load() && resp.find("bpVsNode=") != std::string::npos)
             issues = g_lintHandler(resp);
-        if (issues.empty() || attempt >= maxRepairs) break;
-
         int n = 0; for (char c : issues) if (c == '\n') n++;
+        // Stop if clean, out of passes, OR the last pass didn't reduce the problem count
+        // (a model that can't converge would otherwise churn — painfully slow with R1).
+        if (issues.empty() || attempt >= maxRepairs || n >= prevIssues) break;
+        prevIssues = n;
         { std::lock_guard<std::mutex> lk(g_mtx); g_history.push_back({ "user", "auto-repair: fixing " + std::to_string(n) + " graph issue(s)..." }); }
         setStatus("repairing graph (pass " + std::to_string(attempt + 1) + ")...");
         pending = "The node graph you just produced has these problems:\n" + issues +
