@@ -290,6 +290,7 @@ struct RiggedMeshAsset
 
     std::vector<BonePose>   bindPose;         // boneCount entries, absolute bind transforms
     std::vector<int>        boneParent;       // boneCount entries, parent bone index (-1 = root)
+    std::vector<std::string> boneNames;       // boneCount entries, joint names (bone-attach dropdown)
 
     std::vector<RigAnimClip> clips;
 
@@ -412,6 +413,8 @@ struct FloorSprite
         bool  grounded = false;    // stay on ground (Y=0) instead of following parent Y
         bool  hidden = false;      // start invisible (editor + runtime); a Cast Effect node
                                    // shows it, plays its anim once, then auto-hides it
+        int   boneIdx = -1;        // -1 = anchor to parent origin; >=0 = ride this rig bone
+                                   // (player rig only for now); offset X/Y/Z is bone-relative
     };
     static constexpr int kMaxSubSprites = 4;
     SubSprite subSprites[kMaxSubSprites];

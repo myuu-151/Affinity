@@ -1670,10 +1670,13 @@ const AfnSpriteInst afn_sprites[5] = {
   { 68.4074f, 0.0f, 137.12f, 18.08f, 90.0f, 0.0f, 0.0f, 3 },
 };
 #define AFN_HAS_SPRITE_IDX 1
-static const int afn_mesh_inst_sprite[5] = {1,2,3,4,5,};
+static const int afn_mesh_inst_sprite[5] = {2,3,4,5,6,};
 #ifndef NUM_SPRITES
-#define NUM_SPRITES 8
+#define NUM_SPRITES 9
 #endif
+
+#define AFN_HAS_SPRITE_START_HIDDEN 1
+static const unsigned char afn_sprite_start_hidden[NUM_SPRITES] = {0,1,0,0,0,0,0,0,0,};
 
 const float afn_cam_start_x = 128.0f;
 const float afn_cam_start_z = 128.0f;

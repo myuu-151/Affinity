@@ -26,6 +26,7 @@ struct GBASpriteExport
     int   oamPrio = 0;    // OAM priority (0 = on top, 1 = behind)
     int   parentIdx = -1; // parent sprite index (-1 = standalone)
     float offsetX = 0, offsetY = 0, offsetZ = 0; // offset from parent
+    int   boneIdx = -1;   // attached sub-sprite: ride this parent-rig bone (-1 = parent origin)
     bool  forceStatic = false; // force static rendering (ignore directions)
     bool  grounded = false;    // stay on ground (Y=0) instead of following parent Y
     bool  startHidden = false; // start invisible; a Cast Effect node shows + one-shots it
@@ -459,6 +460,9 @@ enum class GBAScriptNodeType : int {
     IsAirborne,      // gate: passes exec while the player is off the ground (inverse of Is On Ground)
     IsLanding,       // gate: passes exec for a short window right after touchdown (land anim)
     IsNotLanding,    // gate: passes exec when NOT in the post-touchdown land window
+    ChargeShot,      // action: hold-to-charge — grow the player's effect ball (focus blast) while held
+    IsCharging,      // gate: passes exec while a Charge Shot is charging
+    FireChargeShot,  // action: release — fire the charged ball as a homing projectile at the lock target
     COUNT
 };
 

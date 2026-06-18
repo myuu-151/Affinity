@@ -46,6 +46,7 @@ extern int afn_skel_anim_obj, afn_skel_anim_clip;   // SetSkelAnim: NPC sprite i
 extern unsigned char afn_sprite_visible[];          // SetVisible/DestroyObject per sprite
 static AfnRigVertex s_skinned[AFN_RIG_MAX_VERTS];
 static float  s_bonemat[AFN_RIG_MAX_BONES][12];   // 3x4 row-major per bone
+static float  s_player_bone_world[AFN_RIG_MAX_BONES][3] = {{0}};  // player bones in WORLD space (bone-attach)
 static GLuint s_rigTex[AFN_RIG_COUNT][AFN_RIG_MAX_MATS];
 static float  s_pframe = 0.0f;                     // player anim frame
 static int    s_pclip  = AFN_PLAYER_DEFAULT_CLIP;
@@ -191,6 +192,20 @@ static void rig_draw(const AfnRig* R, GLuint* texArr, const float* view,
     };
     glLoadMatrixf(view);
     glMultMatrixf(model);
+
+#ifdef AFN_HAS_SPR_BONE
+    // Bone attach: cache each PLAYER bone's WORLD position (model * bone origin)
+    // so attached sub-sprites can ride the live animated joint. s_bonemat is
+    // overwritten per rig during this pass, so we snapshot only the player.
+    if (R == &afn_rigs[AFN_PLAYER_RIG_SLOT]) {
+        for (int b = 0; b < R->bones; b++) {
+            float bx = s_bonemat[b][3], by = s_bonemat[b][7], bz = s_bonemat[b][11];
+            s_player_bone_world[b][0] = model[0]*bx + model[4]*by + model[8]*bz + model[12];
+            s_player_bone_world[b][1] = model[1]*bx + model[5]*by + model[9]*bz + model[13];
+            s_player_bone_world[b][2] = model[2]*bx + model[6]*by + model[10]*bz + model[14];
+        }
+    }
+#endif
 
     if (R->camlight) {
         // CPU camera headlamp (NDS-matched: ambient 8/31 + diffuse 28/31 * N.L,
@@ -428,6 +443,10 @@ static void billboards_init(void) {
     }
     for (int i = 0; i < AFN_SPR_INST_COUNT; i++) s_sprFrame[i] = (float)afn_spr_fstart[i];
 }
+// Focus Blast state (defined later in this file) — the charge/projectile machine
+// fully drives the player's "effect" ball billboard's visibility/pos/scale.
+extern int   afn_fb_inst, afn_fb_charging, afn_fb_active;
+extern float afn_fb_x, afn_fb_y, afn_fb_z, afn_fb_scale;
 // Camera-facing (Y-axis) textured quads in world space, drawn through the view.
 // camEyeX/Z is the camera world position, used to pick an 8-facing direction for
 // directional sprites (N,NE,E,SE,S,SW,W,NW = dir 0..7).
@@ -442,6 +461,13 @@ static void billboards_render(const float* view, float camAngle, float camEyeX, 
     for (int i = 0; i < AFN_SPR_INST_COUNT; i++) {
 #ifdef AFN_HAS_SPRITE_IDX
         int eidx = afn_spr_editor_idx[i];
+#ifdef AFN_HAS_PLAYER_RIG
+        if (i == afn_fb_inst) {
+            // Focus Blast owns this instance's visibility: drawn only while a
+            // shot is charging or in flight (otherwise its hidden-effect flag).
+            if (!afn_fb_charging && !afn_fb_active) continue;
+        } else
+#endif
         if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;  // hidden/destroyed
 #endif
         int NF = (int)(sizeof(afn_spr_frame_ptrs)/sizeof(afn_spr_frame_ptrs[0]));
@@ -461,6 +487,24 @@ static void billboards_render(const float* view, float camAngle, float camEyeX, 
                     pz = s_npcZ[n] + afn_spr_poff_z[i];
                     break;
                 }
+        }
+#if defined(AFN_HAS_SPR_BONE) && defined(AFN_HAS_PLAYER_RIG)
+        // Bone attach (player rig): ride the live animated joint cached during the
+        // player's rig_draw. Offset X/Y/Z is added in world axes from the bone.
+        if (afn_spr_bone[i] >= 0) {
+            int bbn = afn_spr_bone[i];
+            px = s_player_bone_world[bbn][0] + afn_spr_poff_x[i];
+            py = s_player_bone_world[bbn][1] + afn_spr_poff_y[i];
+            pz = s_player_bone_world[bbn][2] + afn_spr_poff_z[i];
+        }
+#endif
+        // Focus Blast: the charge/projectile machine fully drives this instance's
+        // world transform (the player isn't an NPC, so the re-anchor above never
+        // tracks it) — place + scale the orb at the charge spot or flight pos.
+        if (i == afn_fb_inst && (afn_fb_charging || afn_fb_active)) {
+            px = afn_fb_x; py = afn_fb_y; pz = afn_fb_z;
+            sz = afn_spr_basesize[i] * afn_fb_scale * 0.25f; hw = sz * 0.5f;
+            isAttached = 1;   // draw as a camera-facing (spherical) orb
         }
 #endif
         int cf;
@@ -998,6 +1042,30 @@ int afn_dodge_idle = -1;   // clip to snap back to when the roll ends (-1 = leav
 int afn_dodge_ramp = 0;    // frames to ease the roll speed in from 0 (quadratic; 0 = instant/stiff)
 int afn_dodge_falloff = 0; // frames to ease the roll speed back to 0 at the end (quadratic; 0 = hard stop)
 int afn_dodge_cd = 0;      // spam-gate lockout countdown; the node only fires when <= 0, set to Cooldown on a dodge
+// Focus Blast (Charge Shot / Is Charging / Fire Charge Shot nodes): hold-to-
+// charge homing projectile. The CHARGE node asserts afn_fb_charge_req each held
+// frame and the runtime grows the player's hidden effect sub-sprite (the ball);
+// FIRE snapshots it into a projectile that homes the lock target (or flies
+// forward) and damages it on contact. _req/_fire flags are cleared each frame
+// before blueprint dispatch so they reflect only what the nodes set THIS frame.
+int   afn_fb_charge_req = 0;          // ChargeShot: set =1 every held frame
+int   afn_fb_fire_req   = 0;          // FireChargeShot: set =1 on the release frame
+int   afn_fb_charging   = 0;          // Is Charging gate: 1 while charging (not yet fired)
+float afn_fb_level      = 0.0f;       // accumulated charge frames (0..afn_fb_max)
+int   afn_fb_max        = 180;        // frames to full charge (3s @60)
+float afn_fb_min_scale  = 0.05f, afn_fb_max_scale = 0.70f;  // ball size range (instance scale)
+int   afn_fb_parent     = -1;         // editor sprite idx the ball is attached to (player = self)
+int   afn_fb_inst       = -1;         // resolved billboard instance idx of the ball (cached)
+int   afn_fb_dmg_max    = 30;         // damage at full charge (scales down with level)
+float afn_fb_speed      = 6.0f;       // projectile world px/frame
+int   afn_fb_tgt        = -1;         // captured homing target (editor idx, -1 = forward)
+// Live projectile state.
+int   afn_fb_active     = 0;          // 1 = a shot is in flight
+float afn_fb_x, afn_fb_y, afn_fb_z;   // ball world position (charge spot, then flight)
+float afn_fb_scale      = 0.05f;      // current render scale of the ball
+float afn_fb_dirx = 0, afn_fb_dirz = 1;   // forward direction (no-lock fallback)
+int   afn_fb_cur_dmg    = 0;          // damage this shot will deal (locked at fire)
+int   afn_fb_life       = 0;          // forward-shot lifetime countdown (frames)
 unsigned char afn_sprite_visible[NUM_SPRITES]={0};
 unsigned char afn_sprite_flip[NUM_SPRITES]={0}, afn_collision_enabled[NUM_SPRITES]={0};
 int afn_hp[NUM_SPRITES]={0}, afn_state_timer[NUM_SPRITES]={0};
@@ -1065,6 +1133,7 @@ static void script_tick(void) {
     afn_key_mag = 256;   // chains re-set it on entry; full-on outside key chains
     afn_face_lock = 0;   // MovePlayer(Consistent Facing) re-sets it while held
     afn_strafe_anim = 0; // Strafe Anim re-registers it each frame it runs
+    afn_fb_charge_req = 0; afn_fb_fire_req = 0;  // Focus Blast: nodes re-assert each frame
     // Dispatch order: RELEASED before HELD, so ongoing held state wins ties
     // within a tick. Rolling the stick from Up to Right releases Up while
     // Right is still held — with released-last, a Released->idle chain
@@ -1587,9 +1656,10 @@ int main(void)
     SceCtrlData pad;
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
 #ifdef AFN_HAS_SPRITE_IDX
-    // All sprites start visible + collidable (the inert arrays default to 0 =
-    // hidden). DestroyObject/SetVisible nodes flip these at runtime.
-    for (int i = 0; i < NUM_SPRITES; i++) { afn_sprite_visible[i] = 1; afn_collision_enabled[i] = 1; }
+    // Sprites start visible + collidable UNLESS flagged "Hidden (effect)" — those
+    // (e.g. the Focus Blast orb) stay hidden until a node shows them.
+    // DestroyObject/SetVisible/Cast Effect nodes flip these at runtime.
+    for (int i = 0; i < NUM_SPRITES; i++) { afn_sprite_visible[i] = !afn_sprite_start_hidden[i]; afn_collision_enabled[i] = 1; }
 #endif
     // Boot into the mode/scene the build was started from (Export PSV bakes
     // AFN_START_MODE: 0 = 3D, 1 = 2D menu). Seed before script_start so OnStart
@@ -1649,7 +1719,7 @@ int main(void)
 #endif
             playerVY = 0.0f; grounded = 1; afn_player_heading = orbit_angle;
 #ifdef AFN_HAS_SPRITE_IDX
-            for (int i = 0; i < NUM_SPRITES; i++) { afn_sprite_visible[i] = 1; afn_collision_enabled[i] = 1; }
+            for (int i = 0; i < NUM_SPRITES; i++) { afn_sprite_visible[i] = !afn_sprite_start_hidden[i]; afn_collision_enabled[i] = 1; }
 #endif
             // Silence the previous scene's music/SFX so the entered scene starts
             // clean (its OnStart Play Sound below starts fresh).
@@ -1952,6 +2022,97 @@ int main(void)
                 if (--afn_dash_frames <= 0) afn_dash_frames = 0;
             } else {
                 afn_dash_frames = 0;
+            }
+        }
+#endif
+
+#ifdef AFN_HAS_PLAYER_RIG
+        // Focus Blast: hold-to-charge homing projectile. Charge Shot asserts
+        // afn_fb_charge_req each held frame; Fire Charge Shot raises fire_req on
+        // release. The ball is the player's hidden "effect" sub-sprite, whose
+        // billboard transform we drive here (charge spot, then flight).
+#if defined(AFN_HAS_SPRITES) && defined(AFN_HAS_SPR_PARENT)
+        if (afn_fb_inst < 0 && (afn_fb_charge_req || afn_fb_fire_req)) {
+            // Match the ball to the player's attached sub-sprite. Prefer the
+            // blueprint's self sprite, then the exported player sprite index,
+            // then ANY attached sub-sprite — the player carries exactly one
+            // (focus_gfx), so the orb resolves even if self came back unset.
+            int want = afn_fb_parent;
+#ifdef AFN_PLAYER_SPRITE_IDX
+            if (want < 0) want = AFN_PLAYER_SPRITE_IDX;
+#endif
+            for (int i = 0; i < AFN_SPR_INST_COUNT; i++)
+                if (afn_spr_parent[i] >= 0 && (want < 0 || afn_spr_parent[i] == want)) { afn_fb_inst = i; break; }
+        }
+#endif
+        {
+            float fbFx = sinf(playerYaw*DEG2RAD), fbFz = cosf(playerYaw*DEG2RAD);
+            float fbRx = cosf(playerYaw*DEG2RAD), fbRz = -sinf(playerYaw*DEG2RAD);  // player's right axis
+            // Carry the orb at its AUTHORED attached-sprite offset (the hand spot),
+            // rotated by facing and tracked to the live player position — the
+            // generic re-anchor never follows the player sprite. Falls back to a
+            // chest-front spot if the ball instance hasn't resolved.
+            float fbOx = 0.0f, fbOy = 14.0f, fbOz = 6.0f;
+            float fbBaseX = playerX, fbBaseY = playerY, fbBaseZ = playerZ;
+#if defined(AFN_HAS_SPRITES) && defined(AFN_HAS_SPR_PARENT)
+            if (afn_fb_inst >= 0) { fbOx = afn_spr_poff_x[afn_fb_inst]; fbOy = afn_spr_poff_y[afn_fb_inst]; fbOz = afn_spr_poff_z[afn_fb_inst]; }
+#endif
+#ifdef AFN_HAS_SPR_BONE
+            // Ride the live animated bone if one is assigned (bone world pos is
+            // absolute; the authored X/Y/Z become a facing-rotated nudge from it).
+            if (afn_fb_inst >= 0 && afn_spr_bone[afn_fb_inst] >= 0) {
+                int fbBn = afn_spr_bone[afn_fb_inst];
+                fbBaseX = s_player_bone_world[fbBn][0];
+                fbBaseY = s_player_bone_world[fbBn][1];
+                fbBaseZ = s_player_bone_world[fbBn][2];
+            }
+#endif
+            float fbAttachX = fbBaseX + fbOx*fbRx + fbOz*fbFx;
+            float fbAttachY = fbBaseY + fbOy;
+            float fbAttachZ = fbBaseZ + fbOx*fbRz + fbOz*fbFz;
+            if (afn_fb_active) {
+                // In flight: home toward the captured target's LIVE position
+                // (fly forward along the launch facing if nothing was locked).
+                float tx = 0, ty = 0, tz = 0; int homing = 0;
+                if (afn_fb_tgt >= 0) {
+                    for (int n = 0; n < AFN_NPC_COUNT; n++)
+                        if ((int)afn_npc_inst[n][7] == afn_fb_tgt) {
+                            tx = s_npcX[n]; tz = s_npcZ[n]; ty = s_npcY[n] + 12.0f; homing = 1; break;
+                        }
+                }
+                if (!homing) { tx = afn_fb_x + afn_fb_dirx*100.0f; tz = afn_fb_z + afn_fb_dirz*100.0f; ty = afn_fb_y; }
+                float dx = tx - afn_fb_x, dy = ty - afn_fb_y, dz = tz - afn_fb_z;
+                float dl = sqrtf(dx*dx + dy*dy + dz*dz);
+                float sp = afn_fb_speed;
+                if (homing && dl <= sp + 8.0f) {
+                    if (afn_fb_tgt >= 0 && afn_fb_tgt < NUM_SPRITES) {
+                        afn_hp[afn_fb_tgt] -= afn_fb_cur_dmg;
+                        if (afn_hp[afn_fb_tgt] < 0) afn_hp[afn_fb_tgt] = 0;
+                    }
+                    afn_fb_active = 0;          // contact: deal damage + despawn
+                } else if (dl > 0.001f) {
+                    afn_fb_x += dx/dl*sp; afn_fb_y += dy/dl*sp; afn_fb_z += dz/dl*sp;
+                }
+                if (--afn_fb_life <= 0) afn_fb_active = 0;   // lifetime safety / forward-shot range
+                afn_fb_charging = 0;
+            } else if (afn_fb_fire_req && afn_fb_level > 0.0f) {
+                // Release with a held charge: launch the ball as a projectile.
+                float frac = (afn_fb_max > 0) ? afn_fb_level / (float)afn_fb_max : 1.0f;
+                afn_fb_active  = 1;
+                afn_fb_dirx    = fbFx; afn_fb_dirz = fbFz;
+                afn_fb_cur_dmg = (int)(afn_fb_dmg_max * frac); if (afn_fb_cur_dmg < 1) afn_fb_cur_dmg = 1;
+                afn_fb_life    = (afn_fb_tgt >= 0) ? 240 : 90;   // homing gets longer to chase
+                afn_fb_charging = 0; afn_fb_level = 0.0f;        // keep afn_fb_x/y/z + scale from the charge
+            } else if (afn_fb_charge_req) {
+                // Charging: grow + carry the ball at chest height in front of the player.
+                afn_fb_charging = 1;
+                afn_fb_level += 1.0f; if (afn_fb_level > afn_fb_max) afn_fb_level = (float)afn_fb_max;
+                float frac = (afn_fb_max > 0) ? afn_fb_level / (float)afn_fb_max : 1.0f;
+                afn_fb_scale = afn_fb_min_scale + (afn_fb_max_scale - afn_fb_min_scale) * frac;
+                afn_fb_x = fbAttachX; afn_fb_y = fbAttachY; afn_fb_z = fbAttachZ;
+            } else {
+                // Released without a charge, or idle.
+                afn_fb_charging = 0; afn_fb_level = 0.0f;
             }
         }
 #endif

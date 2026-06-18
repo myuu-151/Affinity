@@ -243,6 +243,14 @@ bool LoadRiggedGLTF(const std::string& path, RiggedMeshAsset& out, std::string* 
     for (int j = 0; j < boneCount; j++)
         out.boneParent[j] = jointIndexOf(skin->joints[j]->parent);
 
+    // Bone names (for the editor's bone-attach dropdown). Fall back to "bone N"
+    // when a joint node has no name in the glTF.
+    out.boneNames.resize(boneCount);
+    for (int j = 0; j < boneCount; j++) {
+        const char* nm = skin->joints[j]->name;
+        out.boneNames[j] = (nm && nm[0]) ? std::string(nm) : ("bone " + std::to_string(j));
+    }
+
     // Inverse bind matrices and bind-pose absolute transforms = inverse(IBM).
     std::vector<Mat4> ibm(boneCount);
     out.bindPose.resize(boneCount);

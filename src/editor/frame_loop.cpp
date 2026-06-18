@@ -743,6 +743,9 @@ enum class VsNodeType : int {
     IsAirborne,      // gate: passes exec while the player is off the ground (inverse of Is On Ground)
     IsLanding,       // gate: passes exec for a short window right after touchdown (land anim)
     IsNotLanding,    // gate: passes exec when NOT in the post-touchdown land window
+    ChargeShot,      // action: hold-to-charge — grow the player's effect ball (focus blast) while held
+    IsCharging,      // gate: passes exec while a Charge Shot is charging
+    FireChargeShot,  // action: release — fire the charged ball as a homing projectile at the lock target
     COUNT
 };
 
@@ -1078,6 +1081,9 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Is Airborne",     0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is Landing",      0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is Not Landing",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Charge Shot",     0xFF3355AA, 1, 1, 3, 0, {"Max Charge (int)","Min Scale% (int)","Max Scale% (int)"}, {}, {} },
+    { "Is Charging",     0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Fire Charge Shot",0xFF3355AA, 1, 1, 2, 0, {"Damage (int)","Speed (int)"}, {}, {} },
 };
 
 struct VsNode {
@@ -6050,10 +6056,10 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "subSpriteCount=%d\n", sp.subSpriteCount);
             for (int si = 0; si < sp.subSpriteCount; si++) {
                 const auto& sub = sp.subSprites[si];
-                fprintf(f, "subSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d\n",
+                fprintf(f, "subSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d,%d\n",
                     sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
                     sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
-                    sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0, sub.hidden ? 1 : 0);
+                    sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0, sub.hidden ? 1 : 0, sub.boneIdx);
             }
         }
         // Grind rail path (per mesh object). One header + one line per point.
@@ -6551,10 +6557,10 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "msSubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si = 0; si < sp.subSpriteCount; si++) {
                     const auto& sub = sp.subSprites[si];
-                    fprintf(f, "msSubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d\n",
+                    fprintf(f, "msSubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d,%d\n",
                         sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
                         sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
-                        sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0);
+                        sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0, sub.hidden ? 1 : 0, sub.boneIdx);
                 }
             }
             // Grind rail path (per mesh object) — 3D/Map scenes round-trip here.
@@ -6697,10 +6703,10 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "m7SubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si2 = 0; si2 < sp.subSpriteCount; si2++) {
                     const auto& sub = sp.subSprites[si2];
-                    fprintf(f, "m7SubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d\n",
+                    fprintf(f, "m7SubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d,%d\n",
                         sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
                         sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
-                        sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0);
+                        sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0, sub.hidden ? 1 : 0, sub.boneIdx);
                 }
             }
             // Grind rail path (per mesh object) — M7 scenes round-trip here.
@@ -7267,16 +7273,17 @@ static bool LoadProject(const std::string& path)
                     if (sp2.subSprites[si].assetIdx != -1) loaded++;
                 if (loaded < sp2.subSpriteCount) {
                     auto& sub = sp2.subSprites[loaded];
-                    int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0; float sScale = 1.0f;
-                    int m = sscanf(line + 10, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d",
+                    int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0, fBone = -1; float sScale = 1.0f;
+                    int m = sscanf(line + 10, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d,%d",
                         &sub.assetIdx, &sub.animIdx, &aEn,
-                        &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden);
+                        &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden, &fBone);
                     sub.animEnabled = (aEn != 0);
                     sub.drawOrder = (m >= 7) ? dOrder : 1;
                     sub.scale = (m >= 8) ? sScale : 1.0f;
                     sub.forceStatic = (m >= 9) ? (fStatic != 0) : false;
                     sub.grounded = (m >= 10) ? (fGrounded != 0) : false;
                     sub.hidden = (m >= 11) ? (fHidden != 0) : false;
+                    sub.boneIdx = (m >= 12) ? fBone : -1;
                 }
             }
             else if (strncmp(line, "railPath=", 9) == 0 && sSpriteCount > 0) {
@@ -8528,15 +8535,17 @@ static bool LoadProject(const std::string& path)
                         if (sp2.subSprites[si].assetIdx != -1) loaded++;
                     if (loaded < sp2.subSpriteCount) {
                         auto& sub = sp2.subSprites[loaded];
-                        int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0; float sScale = 1.0f;
-                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d",
+                        int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0, fBone = -1; float sScale = 1.0f;
+                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d,%d",
                             &sub.assetIdx, &sub.animIdx, &aEn,
-                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded);
+                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden, &fBone);
                         sub.animEnabled = (aEn != 0);
                         sub.drawOrder = (m >= 7) ? dOrder : 1;
                         sub.scale = (m >= 8) ? sScale : 1.0f;
                         sub.forceStatic = (m >= 9) ? (fStatic != 0) : false;
                         sub.grounded = (m >= 10) ? (fGrounded != 0) : false;
+                        sub.hidden = (m >= 11) ? (fHidden != 0) : false;
+                        sub.boneIdx = (m >= 12) ? fBone : -1;
                     }
                 }
             }
@@ -8999,15 +9008,17 @@ static bool LoadProject(const std::string& path)
                         if (sp2.subSprites[si].assetIdx != -1) loaded++;
                     if (loaded < sp2.subSpriteCount) {
                         auto& sub = sp2.subSprites[loaded];
-                        int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0; float sScale = 1.0f;
-                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d",
+                        int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0, fBone = -1; float sScale = 1.0f;
+                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d,%d",
                             &sub.assetIdx, &sub.animIdx, &aEn,
-                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded);
+                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden, &fBone);
                         sub.animEnabled = (aEn != 0);
                         sub.drawOrder = (m >= 7) ? dOrder : 1;
                         sub.scale = (m >= 8) ? sScale : 1.0f;
                         sub.forceStatic = (m >= 9) ? (fStatic != 0) : false;
                         sub.grounded = (m >= 10) ? (fGrounded != 0) : false;
+                        sub.hidden = (m >= 11) ? (fHidden != 0) : false;
+                        sub.boneIdx = (m >= 12) ? fBone : -1;
                     }
                 }
             }
@@ -13868,6 +13879,23 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stay on the ground (Y=0) instead of following parent height");
             ImGui::Checkbox("Hidden (effect)##sub", &sub.hidden);
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Start invisible (and hidden here so it doesn't clutter the view). A Cast Effect node shows it, plays its anim once, then auto-hides it. Set the anim to Once.");
+            // Bone attach (player rig): pin this sub-sprite to a rig bone so it
+            // rides the animated joint; X/Y/Z become offsets relative to the bone.
+            if (sp.riggedMeshIdx >= 0 && sp.riggedMeshIdx < (int)sRiggedMeshAssets.size()
+                && !sRiggedMeshAssets[sp.riggedMeshIdx].boneNames.empty()) {
+                const auto& bn = sRiggedMeshAssets[sp.riggedMeshIdx].boneNames;
+                const char* bonePrev = (sub.boneIdx >= 0 && sub.boneIdx < (int)bn.size())
+                    ? bn[sub.boneIdx].c_str() : "(none - anchor to origin)";
+                if (ImGui::BeginCombo("Bone##sub", bonePrev)) {
+                    if (ImGui::Selectable("(none - anchor to origin)##sbnone", sub.boneIdx < 0)) sub.boneIdx = -1;
+                    for (int bi = 0; bi < (int)bn.size(); bi++) {
+                        std::string lbl = bn[bi] + "##sb";
+                        if (ImGui::Selectable(lbl.c_str(), sub.boneIdx == bi)) sub.boneIdx = bi;
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pin to a rig bone so the sprite rides that joint as it animates (e.g. a hand). X/Y/Z become offsets from the bone. Player rig only for now.");
+            }
             // Animation selector for sub-sprite
             if (sub.assetIdx >= 0 && sub.assetIdx < (int)sSpriteAssets.size()) {
                 SpriteAsset& subAsset = sSpriteAssets[sub.assetIdx];
@@ -15877,6 +15905,13 @@ void FrameTick(float dt)
 
                 // Always export 3D sprites — runtime can switch modes
                 std::vector<GBASpriteExport> exportSprites;
+                // Map each sSprites index -> its index in exportSprites. Sub-sprites
+                // are emitted INTERLEAVED (right after their parent), so a sub-sprite
+                // shifts every later main sprite's export index. Blueprint instances,
+                // however, reference sprites by sSprites index — without this remap
+                // afn_bp_cur_spr_idx (Lock On / Is In View / HUD anchor "self") would
+                // point one sprite off as soon as any sprite has a sub-sprite.
+                std::vector<int> sSpriteToExportIdx(sSpriteCount, -1);
                 {
                     for (int i = 0; i < sSpriteCount; i++)
                     {
@@ -15942,6 +15977,7 @@ void FrameTick(float dt)
                         // ANCHORS (PSV HUD anchoring uses the offset even when
                         // there's no billboard to show).
                         int parentExportIdx = (int)exportSprites.size() - 1;
+                        if (i >= 0 && i < (int)sSpriteToExportIdx.size()) sSpriteToExportIdx[i] = parentExportIdx;
                         for (int si = 0; si < sSprites[i].subSpriteCount; si++) {
                             const auto& sub = sSprites[i].subSprites[si];
                             GBASpriteExport subSe;
@@ -15963,6 +15999,7 @@ void FrameTick(float dt)
                             subSe.offsetX = sub.offsetX;
                             subSe.offsetY = sub.offsetY;
                             subSe.offsetZ = sub.offsetZ;
+                            subSe.boneIdx = sub.boneIdx;
                             if (sub.assetIdx >= 0 && sub.assetIdx < (int)sSpriteAssets.size())
                                 subSe.palIdx = sSpriteAssets[sub.assetIdx].palBank;
                             else
@@ -16485,7 +16522,11 @@ void FrameTick(float dt)
                     const BlueprintAsset& bp = sBlueprintAssets[sp.blueprintIdx];
                     GBABlueprintInstanceExport inst;
                     inst.blueprintIdx = sp.blueprintIdx;
-                    inst.spriteIdx = si;
+                    // Use the exportSprites index (sub-sprites shift it) so the
+                    // runtime's afn_bp_cur_spr_idx matches afn_npc_inst[][7] /
+                    // afn_sprite_visible / HUD anchors — all of which are export-indexed.
+                    inst.spriteIdx = (si < (int)sSpriteToExportIdx.size() && sSpriteToExportIdx[si] >= 0)
+                                     ? sSpriteToExportIdx[si] : si;
                     inst.tmObjIdx = -1;
                     inst.sceneMode = 0; // Mode 4
                     inst.sceneMask = 0xFFFFFFFF; // all Mode 4 scenes
@@ -20949,6 +20990,9 @@ void FrameTick(float dt)
                 case VsNodeType::IsAirborne:    desc = "Gate: passes exec only while the player is off the ground — the clean inverse of Is On Ground. Drive the air animation with it: On Update -> Is Airborne -> Play Skel Anim(jump). For a rise/fall split use Is Jumping (rising) and Is Falling (descending) instead — on PSV those now read the real vertical velocity."; break;
                 case VsNodeType::IsLanding:     desc = "Gate (PSV): passes exec for a short window (~12 frames) right after the player touches down. Wire On Update -> Is Landing -> Play Skel Anim(land) for a landing/squash pose. Pair with Is Not Landing on the idle chain so idle doesn't override it during the window."; break;
                 case VsNodeType::IsNotLanding:  desc = "Gate (PSV): passes exec when the player is NOT in the post-touchdown land window — the inverse of Is Landing. Put it in front of your grounded idle (On Update -> ... -> Is On Ground -> Is Not Landing -> Play Idle) so the land anim plays first, then idle resumes."; break;
+                case VsNodeType::ChargeShot:    desc = "Hold-to-charge focus blast (PSV): drive it from On Key Held. While held it shows the player's hidden \"effect\" sub-sprite (the focus ball) at chest height and grows it from Min Scale% to Max Scale% over Max Charge frames (180 = 3s). Sets the Is Charging gate so you can play the charge anim (atk_spc_chg, or atk_spc_chg_air behind Is Airborne). Release fires it — see Fire Charge Shot. The ball = the first hidden attached sub-sprite of the player rig (add it in the Meshes tab, tick \"Hidden (effect)\")."; break;
+                case VsNodeType::IsCharging:    desc = "Gate (PSV): passes exec only while a Charge Shot is charging (button held, not yet fired). Drive the charge pose with it: On Update -> Is Charging -> Play Skel Anim(atk_spc_chg). Behind Is Airborne use atk_spc_chg_air."; break;
+                case VsNodeType::FireChargeShot:desc = "Fire the charged focus blast (PSV): drive it from On Key Released (same button as Charge Shot). Snapshots the charged ball into a homing projectile aimed at the Lock On target (fires straight forward if nothing is locked), then clears the charge. Damage = damage at FULL charge and scales down with how long you actually held it (min 1); Speed = projectile world px/frame. On reaching the target it deals damage and despawns. Pair with Play Skel Anim(atk_spc_lnc / atk_spc_lnc_air)."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
@@ -21236,6 +21280,9 @@ void FrameTick(float dt)
                         case VsNodeType::IsAirborne:    return "_is_airborne";
                         case VsNodeType::IsLanding:     return "_is_landing";
                         case VsNodeType::IsNotLanding:  return "_is_not_landing";
+                        case VsNodeType::ChargeShot:    return "_charge_shot";
+                        case VsNodeType::IsCharging:    return "_is_charging";
+                        case VsNodeType::FireChargeShot:return "_fire_charge_shot";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -22368,6 +22415,63 @@ void FrameTick(float dt)
                         "    }\n"
                         "    // --- Runtime --- inverse of Is Landing; put it before grounded idle\n"
                         "    // so the land anim owns the rig during its window, then idle resumes.");
+                    break;
+                }
+                case VsNodeType::ChargeShot: {
+                    editorCode = "// Hold-to-charge: grow the player's focus-blast ball while held";
+                    char csBuf[1100];
+                    snprintf(csBuf, sizeof(csBuf),
+                        "#ifdef AFN_HAS_PLAYER_RIG // PSV\n"
+                        "    afn_fb_charge_req = 1;                 // assert each held frame\n"
+                        "    afn_fb_parent     = afn_bp_cur_spr_idx; // self: ball is a hidden effect sub-sprite of the player\n"
+                        "    afn_fb_max        = %s;                // frames to full charge (180 = 3s)\n"
+                        "    afn_fb_min_scale  = %s / 100.0f;        // start size (%% of base)\n"
+                        "    afn_fb_max_scale  = %s / 100.0f;        // full-charge size\n"
+                        "#endif\n"
+                        "    // --- Runtime (psv main.c focus-blast block) ---\n"
+                        "    // Drive from On Key Held. Each frame charge_req is set and no shot is\n"
+                        "    // in flight: afn_fb_charging = 1; afn_fb_level += 1 (clamped to max);\n"
+                        "    // the player's hidden effect sub-sprite is shown at chest height and\n"
+                        "    // scaled lerp(min,max, level/max). Releasing the key stops asserting\n"
+                        "    // charge_req, so the runtime clears charging (Fire Charge Shot launches).",
+                        fmtInt(infoNode.id, 0, "180"),
+                        fmtInt(infoNode.id, 1, "5"),
+                        fmtInt(infoNode.id, 2, "70"));
+                    setActionFunc(infoNode, "_charge_shot", csBuf);
+                    break;
+                }
+                case VsNodeType::IsCharging: {
+                    editorCode = "// Gate: passes exec while a Charge Shot is charging";
+                    setActionFunc(infoNode, "_is_charging",
+                        "    if (afn_fb_charging) {\n"
+                        "        // ... charge anim (e.g. Play Skel Anim(atk_spc_chg),\n"
+                        "        //     or atk_spc_chg_air behind an Is Airborne gate) ...\n"
+                        "    }\n"
+                        "    // --- Runtime --- afn_fb_charging is set true by Charge Shot on every\n"
+                        "    // held frame and cleared the frame the button is released or the shot\n"
+                        "    // fires; gate the charge pose with it so movement/idle don't override.");
+                    break;
+                }
+                case VsNodeType::FireChargeShot: {
+                    editorCode = "// Release: fire the charged ball as a homing projectile";
+                    char fcBuf[1100];
+                    snprintf(fcBuf, sizeof(fcBuf),
+                        "#ifdef AFN_HAS_PLAYER_RIG // PSV\n"
+                        "    afn_fb_fire_req = 1;                  // request launch this frame\n"
+                        "    afn_fb_dmg_max  = %s;                 // damage at FULL charge (scales with level)\n"
+                        "    afn_fb_speed    = %s;                 // projectile world px/frame\n"
+                        "    afn_fb_tgt      = afn_cam_lock_target; // homing target (-1 = fire straight forward)\n"
+                        "#endif\n"
+                        "    // --- Runtime (psv main.c focus-blast block) ---\n"
+                        "    // Drive from On Key Released. If a charge is held (level > 0) and no\n"
+                        "    // shot is in flight: snapshot the ball -> projectile at its charged\n"
+                        "    // size, capture target + facing, dmg = dmg_max * (level/max) (min 1),\n"
+                        "    // then clear charge. Each frame the projectile homes toward the\n"
+                        "    // target's live position (forward if none); on reaching it,\n"
+                        "    // afn_hp[target] -= dmg and the ball despawns.",
+                        fmtInt(infoNode.id, 0, "30"),
+                        fmtInt(infoNode.id, 1, "6"));
+                    setActionFunc(infoNode, "_fire_charge_shot", fcBuf);
                     break;
                 }
                 case VsNodeType::TurnPlayer: {
@@ -25330,6 +25434,9 @@ void FrameTick(float dt)
                     case VsNodeType::IsAirborne:    suffix = "_is_airborne"; break;
                     case VsNodeType::IsLanding:     suffix = "_is_landing"; break;
                     case VsNodeType::IsNotLanding:  suffix = "_is_not_landing"; break;
+                    case VsNodeType::ChargeShot:    suffix = "_charge_shot"; break;
+                    case VsNodeType::IsCharging:    suffix = "_is_charging"; break;
+                    case VsNodeType::FireChargeShot:suffix = "_fire_charge_shot"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -25842,6 +25949,9 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsAirborne].name)) addNodeAt(VsNodeType::IsAirborne);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsLanding].name)) addNodeAt(VsNodeType::IsLanding);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNotLanding].name)) addNodeAt(VsNodeType::IsNotLanding);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ChargeShot].name)) addNodeAt(VsNodeType::ChargeShot);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsCharging].name)) addNodeAt(VsNodeType::IsCharging);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FireChargeShot].name)) addNodeAt(VsNodeType::FireChargeShot);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP].name)) addNodeAt(VsNodeType::SetHP);

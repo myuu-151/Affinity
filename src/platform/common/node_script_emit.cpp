@@ -401,6 +401,44 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "#endif\n";
                 break;
             }
+            case GBAScriptNodeType::ChargeShot: {
+                // Focus blast charge (PSV): assert charge each held frame; the
+                // runtime grows the player's hidden effect sub-sprite (the ball).
+                auto* mxD = findDataIn(a->id, 0);
+                auto* mnsD = findDataIn(a->id, 1);
+                auto* mxsD = findDataIn(a->id, 2);
+                int mx  = mxD  ? resolveInt(mxD)  : 180;
+                int mns = mnsD ? resolveInt(mnsD) : 5;
+                int mxs = mxsD ? resolveInt(mxsD) : 70;
+                std::string self = (curScript != &script) ? "afn_bp_cur_spr_idx" : "0";
+                f << "#ifdef AFN_HAS_PLAYER_RIG\n";
+                f << "    afn_fb_charge_req = 1;\n";
+                f << "    afn_fb_parent     = " << self << ";\n";
+                f << "    afn_fb_max        = " << mx << ";\n";
+                f << "    afn_fb_min_scale  = " << mns << " / 100.0f;\n";
+                f << "    afn_fb_max_scale  = " << mxs << " / 100.0f;\n";
+                f << "#endif\n";
+                break;
+            }
+            case GBAScriptNodeType::FireChargeShot: {
+                // Focus blast release (PSV): request launch; runtime snapshots the
+                // charged ball into a homing projectile aimed at the lock target.
+                auto* dmgD = findDataIn(a->id, 0);
+                auto* spD  = findDataIn(a->id, 1);
+                int dmg = dmgD ? resolveInt(dmgD) : 30;
+                int sp  = spD  ? resolveInt(spD)  : 6;
+                f << "#ifdef AFN_HAS_PLAYER_RIG\n";
+                f << "    afn_fb_fire_req = 1;\n";
+                f << "    afn_fb_dmg_max  = " << dmg << ";\n";
+                f << "    afn_fb_speed    = " << sp << ";\n";
+                f << "#ifdef AFN_HAS_CAM_LOCK\n";
+                f << "    afn_fb_tgt      = afn_cam_lock_target;\n";
+                f << "#else\n";
+                f << "    afn_fb_tgt      = -1;\n";
+                f << "#endif\n";
+                f << "#endif\n";
+                break;
+            }
             case GBAScriptNodeType::StrafeAnim: {
                 // 8-way directional clip picker (PSV lock-strafe): pick the
                 // clip matching the stick direction relative to facing the
@@ -519,6 +557,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    if (afn_land_timer > 0) {\n"; break;
             case GBAScriptNodeType::IsNotLanding:
                 f << "    if (afn_land_timer <= 0) {\n"; break;
+            case GBAScriptNodeType::IsCharging:
+                f << "    if (afn_fb_charging) {\n"; break;
             case GBAScriptNodeType::IsNear2D:
                 // Mirrors GBA: fires when the player just collided with
                 // THIS BP's tm_object. Combined with OnKeyPressed(A) this
@@ -900,6 +940,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                    t == GBAScriptNodeType::IsAirborne ||
                    t == GBAScriptNodeType::IsLanding ||
                    t == GBAScriptNodeType::IsNotLanding ||
+                   t == GBAScriptNodeType::IsCharging ||
                    t == GBAScriptNodeType::IsInView;
         };
         auto walkExec = [&](int nodeId, int pinIdx) {
@@ -984,6 +1025,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                            a->type == GBAScriptNodeType::IsAirborne ||
                            a->type == GBAScriptNodeType::IsLanding ||
                            a->type == GBAScriptNodeType::IsNotLanding ||
+                           a->type == GBAScriptNodeType::IsCharging ||
                            a->type == GBAScriptNodeType::IsInView);
             if (isGate) {
                 bool wasJump = inJumpGate;
