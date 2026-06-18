@@ -1138,6 +1138,11 @@ static std::string BuildLLMSystemPrompt() {
          "bpVsLink=2,0,0|3,1,0\n"     // On Key Held -> Orbit Camera (exec)
          "bpVsLink=4,2,0|3,3,0\n"     // Direction -> Orbit Camera 'Direction' (data pin 0)
          "bpVsLink=5,2,0|3,3,1\n\n"   // Integer 1000 -> Orbit Camera 'Speed' (data pin 1)
+         "EDITING EXISTING NODES: if the message includes a 'CURRENTLY SELECTED NODES' block, the user "
+         "wants to CHANGE those nodes in place — do NOT build a new graph. Emit only bpVsSet lines: "
+         "bpVsSet=<id>,<paramIndex 0-3>,<value>, using the exact ids shown and the node's known behaviour "
+         "to pick the param (e.g. halve a speed shown as P0=200 -> bpVsSet=<id>,0,100; switch ChangeScene to "
+         "scene 2 -> bpVsSet=<id>,0,2). One line per change.\n\n"
          "NODES — name (type N)[event][exec in>out] data-in: pins\n";
     int count = (int)(sizeof(sVsNodeDefs) / sizeof(sVsNodeDefs[0]));
     for (int i = 0; i < count; i++) {
@@ -1226,8 +1231,10 @@ static int sVsEditingGroup = 0;        // 0 = top-level; >0 = inside group node 
 static std::string InsertLLMNodes(const std::string& text) {
     struct PN { int id, type, p[5]; float x, y; };
     struct PL { int from, fpt, fpi, to, tpt, tpi; };
+    struct PE { int id, pi, val; };   // bpVsSet: in-place edit of an existing node's param
     std::vector<PN> pns; std::vector<PL> pls;
     std::vector<std::pair<int, std::string>> clips;
+    std::vector<PE> edits;
     std::vector<std::string> warn;
 
     int typeCount = (int)(sizeof(sVsNodeDefs) / sizeof(sVsNodeDefs[0]));
@@ -1273,11 +1280,14 @@ static std::string InsertLLMNodes(const std::string& text) {
             int id; char nm[64] = {};
             if (sscanf(line.c_str() + a + 13, "%d|%63[^\r\n]", &id, nm) == 2)
                 clips.push_back({ id, std::string(nm) });
+        } else if ((a = line.find("bpVsSet=")) != std::string::npos) {
+            PE e{};
+            if (sscanf(line.c_str() + a + 8, "%d,%d,%d", &e.id, &e.pi, &e.val) == 3) edits.push_back(e);
         }
     }
-    if (pns.empty()) {
-        if (warn.empty()) return "No node lines (bpVsNode=...) found in the reply.";
-        std::string m = "No nodes inserted. Issues:";
+    if (pns.empty() && edits.empty()) {
+        if (warn.empty()) return "No node lines (bpVsNode=...) or edits (bpVsSet=...) found in the reply.";
+        std::string m = "Nothing applied. Issues:";
         for (auto& w : warn) m += "\n- " + w;
         return m;
     }
@@ -1340,8 +1350,20 @@ static std::string InsertLLMNodes(const std::string& text) {
         }
     }
 
-    std::string msg = "Inserted " + std::to_string(added) + " node(s)";
-    if (warn.empty()) { msg += " — no issues. Drag them into place."; }
+    // Apply in-place edits (bpVsSet) to existing nodes by their real editor id.
+    int edited = 0;
+    for (auto& e : edits) {
+        if (e.pi < 0 || e.pi > 3) { warn.push_back("bpVsSet: paramIndex " + std::to_string(e.pi) + " out of range (0-3)"); continue; }
+        bool found = false;
+        for (auto& n : sVsNodes) if (n.id == e.id) { n.paramInt[e.pi] = e.val; found = true; edited++; break; }
+        if (!found) warn.push_back("bpVsSet: no node with id " + std::to_string(e.id) + " in the graph");
+    }
+
+    std::string msg;
+    if (added)  msg += "Inserted " + std::to_string(added) + " node(s)";
+    if (edited) { if (!msg.empty()) msg += ", "; msg += "edited " + std::to_string(edited) + " node(s)"; }
+    if (msg.empty()) msg = "No changes applied";
+    if (warn.empty()) { msg += added ? " — no issues. Drag them into place." : "."; }
     else {
         msg += ", " + std::to_string((int)warn.size()) + " warning(s):";
         for (auto& w : warn) msg += "\n- " + w;
@@ -4841,9 +4863,10 @@ static std::string BuildLLMGrammar() {
     std::string g;
     g += "root ::= ws (stmt ws)+\n";
     g += "ws ::= [ \\t\\r\\n]*\n";
-    g += std::string("stmt ::= node | link") + (haveClips ? " | clip" : "") + "\n";
+    g += std::string("stmt ::= node | link | set") + (haveClips ? " | clip" : "") + "\n";
     g += "node ::= \"bpVsNode=\" int \",\" ntype \",\" int \",\" int \",\" int \",\" int \",\" int \",\" int \",\" int\n";
     g += "link ::= \"bpVsLink=\" int \",\" int \",\" int \"|\" int \",\" int \",\" int\n";
+    g += "set ::= \"bpVsSet=\" int \",\" int \",\" int\n";   // in-place edit of an existing node's param
     if (haveClips) g += "clip ::= \"bpVsNodeClip=\" int \"|\" clipname\n";
     g += "int ::= \"-\"? [0-9]+\n";
     g += "ntype ::= ";
@@ -4922,6 +4945,35 @@ static std::string LintLLMGraph(const std::string& text) {
     }
     if (warn.empty()) return "";
     std::string m; for (auto& w : warn) m += "- " + w + "\n"; return m;
+}
+
+// Snapshot the user's CURRENT node selection for in-place editing: the selected
+// nodes with their live param values (and a sound-sample legend), so the model can
+// change settings via bpVsSet ops on the real node ids instead of rebuilding the
+// graph. Returns "" when nothing is selected (so normal Q&A/generation is unaffected).
+static std::string BuildLLMSelectionContext() {
+    std::vector<const VsNode*> sel;
+    for (auto& n : sVsNodes) if (n.selected && n.groupId == sVsEditingGroup) sel.push_back(&n);
+    if (sel.empty()) return "";
+    std::string s = "CURRENTLY SELECTED NODES (the user wants to edit THESE — use these exact ids):\n";
+    for (auto* n : sel) {
+        const VsNodeTypeDef& d = sVsNodeDefs[(int)n->type];
+        s += "  node " + std::to_string(n->id) + " = " + d.name
+           + "  P0=" + std::to_string(n->paramInt[0]) + " P1=" + std::to_string(n->paramInt[1])
+           + " P2=" + std::to_string(n->paramInt[2]) + " P3=" + std::to_string(n->paramInt[3]);
+        if (n->clipName[0]) { s += " clip=\""; s += n->clipName; s += "\""; }
+        if (d.inData > 0) { s += "  (data pins:"; for (int p = 0; p < d.inData; p++) { s += p ? ", " : " "; s += d.inDataNames[p] ? d.inDataNames[p] : "?"; } s += ")"; }
+        s += "\n";
+    }
+    if (!sSoundBank.empty()) {
+        s += "Sound samples (index=name): ";
+        for (int i = 0; i < (int)sSoundBank.size() && i < 64; i++) { if (i) s += ", "; s += std::to_string(i) + "=" + sSoundBank[i].name; }
+        s += "\n";
+    }
+    s += "To change a setting on a selected node, output ONLY bpVsSet lines — bpVsSet=<id>,<paramIndex 0-3>,<value> "
+         "(one per change), using the node's known behaviour to pick the right paramIndex (a single-value node like "
+         "ChangeScene / Wait / Walk uses P0). Do NOT create new nodes or links for an edit.\n";
+    return s;
 }
 static char sRigImportError[256] = "";
 static int sSelectedRig = -1;            // selected rigged-mesh asset (3D Objects panel)
@@ -17798,6 +17850,7 @@ void FrameTick(float dt)
         llm::SetInsertHandler(&InsertLLMNodes);
         llm::SetGrammarProvider(&BuildLLMGrammar);   // constrains output to valid graph syntax
         llm::SetLintHandler(&LintLLMGraph);          // feeds errors to the auto-repair loop
+        llm::SetContextProvider(&BuildLLMSelectionContext);   // selected-node snapshot for in-place edits
     }
     llm::RenderPanel(&sShowAssistant);
 

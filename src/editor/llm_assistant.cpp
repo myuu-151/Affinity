@@ -80,6 +80,7 @@ std::string g_insertStatus;                                       // [g] feedbac
 std::function<std::string()> g_grammarProvider;                   // [g] builds GBNF from live project
 std::string g_grammar;                                            // refreshed UI-side before each generate
 std::function<std::string(const std::string&)> g_lintHandler;     // [g] read-only lint -> issues (thread-safe)
+std::function<std::string()> g_contextProvider;                   // [g] per-turn selection snapshot (UI thread)
 bool g_useGrammar = false;   // constrain output to node-graph syntax (grammar)
 bool g_repair     = true;    // auto-repair graph lint errors by re-prompting
 
@@ -330,12 +331,14 @@ void startLoad(const std::string& path) {
     g_worker = std::thread(loadWorker, path);
 }
 
-void startAsk(const std::string& userMsg) {
+// displayMsg is what the user typed (shown in the chat); modelMsg is what the model
+// actually receives (may have the selection snapshot prepended).
+void startAsk(const std::string& displayMsg, const std::string& modelMsg) {
     if (!g_ctx || g_loading || g_generating) return;
-    { std::lock_guard<std::mutex> lk(g_mtx); g_history.push_back({ "user", userMsg }); g_partial.clear(); }
+    { std::lock_guard<std::mutex> lk(g_mtx); g_history.push_back({ "user", displayMsg }); g_partial.clear(); }
     joinWorker();
     g_stop = false; g_generating = true;
-    g_worker = std::thread(generateWorker, userMsg);
+    g_worker = std::thread(generateWorker, modelMsg);
 }
 
 } // anon namespace
@@ -347,6 +350,8 @@ void SetInsertHandler(std::function<std::string(const std::string&)> fn) { std::
 void SetGrammarProvider(std::function<std::string()> fn) { std::lock_guard<std::mutex> lk(g_mtx); g_grammarProvider = std::move(fn); }
 
 void SetLintHandler(std::function<std::string(const std::string&)> fn) { std::lock_guard<std::mutex> lk(g_mtx); g_lintHandler = std::move(fn); }
+
+void SetContextProvider(std::function<std::string()> fn) { std::lock_guard<std::mutex> lk(g_mtx); g_contextProvider = std::move(fn); }
 
 bool IsBusy() { return g_loading.load() || g_generating.load(); }
 
@@ -485,10 +490,14 @@ void RenderPanel(bool* p_open) {
     bool send = ImGui::Button("Send", ImVec2(60, 0));
     ImGui::EndDisabled();
     if ((enter || send) && canSend && g_input[0]) {
-        // Rebuild the grammar here (UI thread) so it reflects the current rig clips
-        // before the worker uses it; keeps live editor data off the worker thread.
+        // Rebuild grammar + selection snapshot here (UI thread) so they reflect the
+        // current project before the worker uses them; keeps editor data off the worker.
         if (g_useGrammar && g_grammarProvider) g_grammar = g_grammarProvider();
-        startAsk(g_input); g_input[0] = 0;
+        std::string disp = g_input;
+        std::string ctx  = g_contextProvider ? g_contextProvider() : std::string();
+        std::string model = ctx.empty() ? disp : (ctx + "\nUser request: " + disp);
+        startAsk(disp, model);
+        g_input[0] = 0;
     }
     if (g_generating.load()) { ImGui::SameLine(); if (ImGui::Button("Stop")) g_stop = true; }
 

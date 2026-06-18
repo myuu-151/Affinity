@@ -28,6 +28,12 @@ namespace llm {
     // loop to feed errors back to the model. Must be thread-safe (read-only).
     void SetLintHandler(std::function<std::string(const std::string&)> fn);
 
+    // Provider for a per-turn context snapshot (e.g. the currently-selected nodes
+    // and their live params) prepended to the user's message so the model can edit
+    // them in place. Called on the UI thread before each generation; returns "" when
+    // there's nothing to add. Lets you select nodes and say "reduce the speed", etc.
+    void SetContextProvider(std::function<std::string()> fn);
+
     // Render the assistant panel (call once per frame from the editor UI).
     void RenderPanel(bool* p_open);
 
