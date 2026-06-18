@@ -254,8 +254,12 @@ void generateWorker(std::string userMsg) {
 
         llama_sampler* smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
         // Grammar first so it masks invalid tokens before the distribution samplers pick.
+        // LAZY grammar: the model generates freely (a reasoning model can THINK, any model
+        // can write a sentence first) until the first "bpVs..." token appears, then the
+        // grammar clamps the rest to valid graph syntax. Pure Q&A never triggers it.
         if (g_useGrammar && !g_grammar.empty()) {
-            llama_sampler* gr = llama_sampler_init_grammar(g_vocab, g_grammar.c_str(), "root");
+            const char* triggers[] = { "[\\s\\S]*?(bpVs[A-Za-z]+=)" };
+            llama_sampler* gr = llama_sampler_init_grammar_lazy_patterns(g_vocab, g_grammar.c_str(), "root", triggers, 1, nullptr, 0);
             if (gr) llama_sampler_chain_add(smpl, gr);
         }
         llama_sampler_chain_add(smpl, llama_sampler_init_top_k(40));
