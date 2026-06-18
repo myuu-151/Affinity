@@ -439,7 +439,7 @@ void RenderPanel(bool* p_open) {
         ImGui::Separator();
         ImGui::TextDisabled("Node-graph generation");
         if (ImGui::Checkbox("Constrain output (grammar)", &g_useGrammar)) saveSettings();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Forces replies into valid node-graph syntax\n(real node types + clip names). Turn OFF for\nplain Q&A — it suppresses prose.");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clamps the GRAPH part of a reply to valid syntax\n(real node types + clip names). Prose, reasoning,\nand plain Q&A stay free (the graph is only\nconstrained once it starts), so you can leave this on.");
         if (ImGui::Checkbox("Auto-repair graph errors", &g_repair)) saveSettings();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("After generating, lint the graph and re-prompt\nthe model to fix any broken links / bad pins /\nunwired Key pins (up to 2 passes).");
         ImGui::Separator();
