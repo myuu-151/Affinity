@@ -26,6 +26,7 @@
 | **Tilemap Editor** | Draggable grid with sprite tile painting, object placement, and save/load |
 | **Visual Script Nodes** | Event-driven node graph for game logic — key input, movement, animation, branching |
 | **Blueprint Scripts** | Reusable script assets with per-instance parameters, attachable to objects and scenes |
+| **Local AI Assistant** | Offline LLM (llama.cpp) that knows your node catalog — ask how to set things up, or have it generate node graphs and insert them into a blueprint |
 | **Collision System** | Pre-baked world-space collision with adaptive spatial grid, wall slide, barycentric floor height, and gravity |
 | **OAM Sprites** | 8-directional animated sprites with LOD, running alongside 3D meshes |
 | **MIDI Sound Engine** | DMA FIFO audio with SF2/DLS instruments, ARM ASM mixer, pitch bend, vibrato, and per-instance tuning |
@@ -201,6 +202,27 @@ cmake .. && make
 ```
 
 </details>
+
+---
+
+## Local AI Assistant
+
+A built-in chat assistant (**View ▸ Assistant**) powered by a **local** LLM via embedded [llama.cpp](https://github.com/ggml-org/llama.cpp) — it runs entirely on your machine, **no internet, no API keys, nothing leaves your PC**.
+
+It's grounded in the editor's actual node catalog (every node, its type, and its pins), so it can:
+
+- **Answer how to set things up** — *"which nodes make the player jump?"*, *"how do I do a lock-on camera?"*
+- **Generate node graphs** — *"build a graph: on Circle held, freeze the player and play a skel anim"* — then **one-click insert** the result straight into the open blueprint (placed and pre-selected so you can drag it into place).
+
+### Setup
+
+The model isn't bundled (it's large and separately licensed) — download any **GGUF** chat model and drop it in a `models/` folder at the repo root. A small **coder** model works best for node generation:
+
+1. Get a GGUF from **[bartowski on Hugging Face](https://huggingface.co/bartowski)** — e.g. [Qwen2.5-Coder-3B-Instruct-GGUF](https://huggingface.co/bartowski/Qwen2.5-Coder-3B-Instruct-GGUF) (grab a `*Q4_K_M.gguf`; the 3B is light on CPU, the 7B is sharper if you have the RAM/GPU).
+2. Put it in `models/` (e.g. `models/Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf`). The editor auto-detects the first `.gguf` there.
+3. Open **View ▸ Assistant**, click **Load** (first load digests the node catalog once — give it a moment on CPU), then chat once it says **Loaded … (ready)**.
+
+> CPU-only by default. It uses about half your cores to stay responsive, and caches the node catalog after the first load so replies stay fast.
 
 ---
 
