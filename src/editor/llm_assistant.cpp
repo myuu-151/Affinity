@@ -9,6 +9,7 @@
 // is what keeps it usable on a laptop CPU.
 #include "llm_assistant.h"
 #include "llama.h"
+#include "ggml-backend.h"   // GPU device enumeration (ggml_backend_dev_*)
 #include "imgui.h"
 
 #include <atomic>
@@ -17,6 +18,8 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#include <cstdlib>
+#include <fstream>
 #include <filesystem>
 
 #ifdef _WIN32
@@ -65,6 +68,12 @@ char g_input[4096]    = "";
 int  g_pct    = 50;     // 50 or 75
 bool g_useGpu = false;
 
+// Detected GPU devices (filled once in ensureBackend, on the UI thread). When GPU
+// mode is on, the model is pinned to g_gpuDevs[g_gpuDevIdx] via mp.devices.
+struct GpuDev { std::string name; ggml_backend_dev_t dev; };
+std::vector<GpuDev> g_gpuDevs;
+int                 g_gpuDevIdx = 0;
+
 std::function<std::string(const std::string&)> g_insertHandler;   // [g] set once at startup
 std::string g_insertStatus;                                       // [g] feedback after an insert
 
@@ -74,10 +83,43 @@ void ensureBackend() {
     if (!g_backendInit.exchange(true)) {
         llama_log_set([](enum ggml_log_level, const char*, void*){}, nullptr);  // silence llama spam
         llama_backend_init();
+        // Enumerate GPU devices once so Settings can offer a device picker.
+        size_t n = ggml_backend_dev_count();
+        for (size_t i = 0; i < n; ++i) {
+            ggml_backend_dev_t d = ggml_backend_dev_get(i);
+            if (ggml_backend_dev_type(d) == GGML_BACKEND_DEVICE_TYPE_GPU) {
+                const char* desc = ggml_backend_dev_description(d);
+                g_gpuDevs.push_back({ desc && *desc ? desc : "GPU", d });
+            }
+        }
     }
 }
 
 void joinWorker() { if (g_worker.joinable()) g_worker.join(); }
+
+// Compute settings persist in a small ini next to the editor so the GPU choice
+// survives restarts.
+const char* kSettingsFile = "assistant_prefs.ini";
+void saveSettings() {
+    std::ofstream f(kSettingsFile, std::ios::trunc);
+    if (!f) return;
+    f << "useGpu=" << (g_useGpu ? 1 : 0) << "\n"
+      << "pct="    << g_pct << "\n"
+      << "gpuDev=" << g_gpuDevIdx << "\n";
+}
+void loadSettings() {
+    std::ifstream f(kSettingsFile);
+    if (!f) return;
+    std::string line;
+    while (std::getline(f, line)) {
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string k = line.substr(0, eq), v = line.substr(eq + 1);
+        if      (k == "useGpu") g_useGpu = (v == "1");
+        else if (k == "pct")    g_pct = std::atoi(v.c_str());
+        else if (k == "gpuDev") g_gpuDevIdx = std::atoi(v.c_str());
+    }
+}
 
 std::string applyTemplate(const std::vector<Msg>& msgs, bool addAss) {
     std::vector<llama_chat_message> cm;
@@ -116,6 +158,13 @@ bool decodeTokens(std::vector<llama_token>& toks) {
 
 void loadWorker(std::string path) {
     ensureBackend();
+    // Free any previously loaded model first (this runs on a reload / device change).
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        if (g_ctx)   { llama_free(g_ctx); g_ctx = nullptr; }
+        if (g_model) { llama_model_free(g_model); g_model = nullptr; }
+        g_vocab = nullptr;
+    }
     unsigned hc = std::thread::hardware_concurrency(); if (!hc) hc = 4;
 
     // GPU offload: read the model's layer count cheaply (vocab-only) so we can
@@ -126,12 +175,23 @@ void loadWorker(std::string path) {
         llama_model_params vp = llama_model_default_params();
         vp.vocab_only = true; vp.n_gpu_layers = 0;
         llama_model* vm = llama_model_load_from_file(path.c_str(), vp);
-        if (vm) { int nl = llama_model_n_layer(vm); ngl = (g_pct >= 100) ? -1 : (nl * g_pct) / 100; if (ngl < 1) ngl = 1; llama_model_free(vm); }
+        if (vm) {
+            int nl = llama_model_n_layer(vm);
+            if (g_pct >= 100) ngl = -1;                          // -1 = offload ALL layers
+            else { ngl = (nl * g_pct) / 100; if (ngl < 1) ngl = 1; }  // clamp only the partial case
+            llama_model_free(vm);
+        }
         else ngl = -1;   // couldn't read the count; offload all
     }
 
     llama_model_params mp = llama_model_default_params();
     mp.n_gpu_layers = ngl;
+    // Pin offload to the GPU chosen in Settings (NULL-terminated device list).
+    ggml_backend_dev_t devsel[2] = { nullptr, nullptr };
+    if (g_useGpu && g_gpuDevIdx >= 0 && g_gpuDevIdx < (int)g_gpuDevs.size()) {
+        devsel[0] = g_gpuDevs[g_gpuDevIdx].dev;
+        mp.devices = devsel;
+    }
     llama_model* m = llama_model_load_from_file(path.c_str(), mp);
     if (!m) { setStatus("Failed to load model: " + path); g_loading = false; return; }
     llama_context_params cp = llama_context_default_params();
@@ -258,6 +318,8 @@ void RenderPanel(bool* p_open) {
     static bool s_scanned = false;
     if (!s_scanned) {
         s_scanned = true;
+        ensureBackend();   // registers backends + fills g_gpuDevs (on the UI thread)
+        loadSettings();    // restore saved compute choice (CPU/GPU, %, device)
         std::error_code ec;
         if (std::filesystem::exists("models", ec)) {
             for (auto& e : std::filesystem::directory_iterator("models", ec)) {
@@ -274,9 +336,13 @@ void RenderPanel(bool* p_open) {
     ImGui::BeginDisabled(busy);
     ImGui::SetNextItemWidth(-160.0f);
     ImGui::InputText("##modelpath", g_modelPath, sizeof(g_modelPath));
+    ImGui::EndDisabled();
     ImGui::SameLine();
+    // Settings stays enabled even while busy: the compute choice only applies on
+    // the next Load, and locking it during a slow load is what trapped users on CPU.
     if (ImGui::Button("Settings", ImVec2(86, 0))) ImGui::OpenPopup("AsstSettings");
     ImGui::SameLine();
+    ImGui::BeginDisabled(busy);
     if (ImGui::Button("Load", ImVec2(60, 0))) {
 #ifdef _WIN32
         if (pickGguf(g_modelPath, sizeof(g_modelPath))) startLoad(g_modelPath);   // browse for a .gguf
@@ -286,13 +352,33 @@ void RenderPanel(bool* p_open) {
     }
     ImGui::EndDisabled();
     if (ImGui::BeginPopup("AsstSettings")) {
-        ImGui::TextDisabled("Compute (applies on next Load)");
+        bool changed = false;
+        ImGui::TextDisabled("Compute (saved; reloads the model)");
         ImGui::Separator();
-        if (ImGui::RadioButton("CPU 50%", !g_useGpu && g_pct == 50)) { g_useGpu = false; g_pct = 50; }
-        if (ImGui::RadioButton("CPU 75%", !g_useGpu && g_pct == 75)) { g_useGpu = false; g_pct = 75; }
-        if (ImGui::RadioButton("GPU 50%", g_useGpu && g_pct == 50)) { g_useGpu = true; g_pct = 50; }
-        if (ImGui::RadioButton("GPU 75%", g_useGpu && g_pct == 75)) { g_useGpu = true; g_pct = 75; }
-        if (ImGui::RadioButton("GPU 100% (full offload)", g_useGpu && g_pct >= 100)) { g_useGpu = true; g_pct = 100; }
+        if (ImGui::RadioButton("CPU 50%", !g_useGpu && g_pct == 50)) { g_useGpu = false; g_pct = 50; changed = true; }
+        if (ImGui::RadioButton("CPU 75%", !g_useGpu && g_pct == 75)) { g_useGpu = false; g_pct = 75; changed = true; }
+        if (ImGui::RadioButton("GPU 50%", g_useGpu && g_pct == 50)) { g_useGpu = true; g_pct = 50; changed = true; }
+        if (ImGui::RadioButton("GPU 75%", g_useGpu && g_pct == 75)) { g_useGpu = true; g_pct = 75; changed = true; }
+        if (ImGui::RadioButton("GPU 100% (full offload)", g_useGpu && g_pct >= 100)) { g_useGpu = true; g_pct = 100; changed = true; }
+        ImGui::Separator();
+        ImGui::TextDisabled("GPU device");
+        if (g_gpuDevs.empty()) {
+            ImGui::TextDisabled("(no GPU detected — CPU-only build?)");
+        } else {
+            if (g_gpuDevIdx < 0 || g_gpuDevIdx >= (int)g_gpuDevs.size()) g_gpuDevIdx = 0;
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::BeginCombo("##gpudev", g_gpuDevs[g_gpuDevIdx].name.c_str())) {
+                for (int i = 0; i < (int)g_gpuDevs.size(); ++i)
+                    if (ImGui::Selectable(g_gpuDevs[i].name.c_str(), i == g_gpuDevIdx)) { g_gpuDevIdx = i; changed = true; }
+                ImGui::EndCombo();
+            }
+        }
+        // Persist the choice, and if a model is already loaded, restart it now so
+        // the new compute setting takes effect immediately.
+        if (changed) {
+            saveSettings();
+            if (g_ctx && !IsBusy() && g_modelPath[0]) startLoad(g_modelPath);
+        }
         ImGui::Separator();
         ImGui::TextUnformatted("CPU = share of cores used.\nGPU = share of layers offloaded;\n100% = whole model on GPU (best if it\nfits in VRAM). Needs a GPU-enabled build.");
         ImGui::EndPopup();
