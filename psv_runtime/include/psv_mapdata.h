@@ -1676,7 +1676,7 @@ static const int afn_mesh_inst_sprite[5] = {2,3,4,5,6,};
 #endif
 
 #define AFN_HAS_SPRITE_START_HIDDEN 1
-static const unsigned char afn_sprite_start_hidden[NUM_SPRITES] = {0,0,0,0,0,0,0,0,0,};
+static const unsigned char afn_sprite_start_hidden[NUM_SPRITES] = {0,1,0,0,0,0,0,0,0,};
 
 const float afn_cam_start_x = 128.0f;
 const float afn_cam_start_z = 128.0f;

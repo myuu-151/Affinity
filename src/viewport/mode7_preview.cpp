@@ -1017,8 +1017,13 @@ void Render(const Mode7Camera& cam, const Mode7Map* map,
         int meshSelCX = sp.screenX, meshSelCY = 0;
         bool hasMeshBounds = false;
 
-        // Sprite draws upward from its foot position
-        int drawCenterY = sp.screenY - halfH;
+        // Sprite draws upward from its foot position. A bone-attached effect
+        // sprite (e.g. the Focus Blast orb) is CENTERED on its point instead, to
+        // match the runtime (which scales the orb around the bone, not its foot) —
+        // otherwise the runtime orb sits half its height lower than the editor.
+        bool subBoneCentered = (sp.subIdx >= 0 && sp.subIdx < fs.subSpriteCount
+                                && fs.subSprites[sp.subIdx].boneIdx >= 0);
+        int drawCenterY = subBoneCentered ? sp.screenY : (sp.screenY - halfH);
 
         // Check if this sprite has a linked asset with directional images
         bool drewSprite = false;

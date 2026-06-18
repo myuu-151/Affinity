@@ -5,7 +5,7 @@
 #define AFN_ANCHOR_COUNT 2
 // {parent sprite idx, offX, offY, offZ (world px)}
 static const float afn_anchors[2][4] = {
-  { 0, 0.0f, 0.375f, 0.75f },
+  { 0, 0.0f, -0.125f, 0.75f },
   { 7, 0.0f, 2.5f, 0.0f },
 };
 static const unsigned int __attribute__((aligned(16))) afn_spr_f0[16384] = {
@@ -2064,7 +2064,7 @@ static const short afn_spr_frame_h[1] = {128,};
 
 #define AFN_SPR_INST_COUNT 1
 static const float afn_spr_x[1] = {128.0f,};
-static const float afn_spr_y[1] = {2.5f,};
+static const float afn_spr_y[1] = {2.0f,};
 static const float afn_spr_z[1] = {146.965f,};
 static const float afn_spr_scale[1] = {0.043f,};
 static const int afn_spr_editor_idx[1] = {1,};
@@ -2073,7 +2073,7 @@ static const int afn_spr_parent[1] = {0,};
 #define AFN_HAS_SPR_BONE 1
 static const int afn_spr_bone[1] = {17,};
 static const float afn_spr_poff_x[1] = {0.0f,};
-static const float afn_spr_poff_y[1] = {0.375f,};
+static const float afn_spr_poff_y[1] = {-0.125f,};
 static const float afn_spr_poff_z[1] = {0.75f,};
 static const int afn_spr_fstart[1] = {0,};
 static const int afn_spr_fend[1] = {0,};

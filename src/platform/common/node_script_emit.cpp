@@ -21,6 +21,22 @@ void EmitNodeScriptBodies(std::ostream& f,
                           const std::vector<GBASoundInstanceExport>& soundInstances) {
     bool hasAnyScript = !script.nodes.empty() || !blueprints.empty();
     if (hasAnyScript) {
+        // OnRise edge-detect state — one int per OnRise node across the scene
+        // script AND every blueprint (file-scope, persists between frames). Must be
+        // declared before the emitted functions reference afn_rise_<id>. The GBA/
+        // NDS exporters declare these in their own package files; the PSV/PSP path
+        // routes through this shared emitter, so declare them here.
+        {
+            std::set<int> riseIds;
+            for (auto& n : script.nodes)
+                if (n.type == GBAScriptNodeType::OnRise) riseIds.insert(n.id);
+            for (auto& bp : blueprints)
+                for (auto& n : bp.script.nodes)
+                    if (n.type == GBAScriptNodeType::OnRise) riseIds.insert(n.id);
+            for (int rid : riseIds)
+                f << "static int afn_rise_" << rid << " = -2;\n";
+            if (!riseIds.empty()) f << "\n";
+        }
         // curScript = which graph (inline scene or a blueprint) the lambdas
         // operate on; swapped before each blueprint emit pass below.
         const GBAScriptExport* curScript = &script;
