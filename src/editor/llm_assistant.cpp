@@ -83,6 +83,7 @@ std::function<std::string(const std::string&)> g_lintHandler;     // [g] read-on
 std::function<std::string()> g_contextProvider;                   // [g] per-turn selection snapshot (UI thread)
 bool g_useGrammar = false;   // constrain output to node-graph syntax (grammar)
 bool g_repair     = true;    // auto-repair graph lint errors by re-prompting
+int  g_ctxK       = 16;      // context window in K tokens (16 or 32); applied at load
 
 void setStatus(const std::string& s) { std::lock_guard<std::mutex> lk(g_mtx); g_status = s; }
 
@@ -120,7 +121,8 @@ void saveSettings() {
       << "pct="    << g_pct << "\n"
       << "gpuDev=" << g_gpuDevIdx << "\n"
       << "grammar=" << (g_useGrammar ? 1 : 0) << "\n"
-      << "repair="  << (g_repair ? 1 : 0) << "\n";
+      << "repair="  << (g_repair ? 1 : 0) << "\n"
+      << "ctxK="    << g_ctxK << "\n";
 }
 void loadSettings() {
     std::ifstream f(kSettingsFile);
@@ -135,6 +137,7 @@ void loadSettings() {
         else if (k == "gpuDev")  g_gpuDevIdx = std::atoi(v.c_str());
         else if (k == "grammar") g_useGrammar = (v == "1");
         else if (k == "repair")  g_repair = (v == "1");
+        else if (k == "ctxK")    { g_ctxK = std::atoi(v.c_str()); if (g_ctxK != 16 && g_ctxK != 32) g_ctxK = 16; }
     }
 }
 
@@ -212,7 +215,7 @@ void loadWorker(std::string path) {
     llama_model* m = llama_model_load_from_file(path.c_str(), mp);
     if (!m) { setStatus("Failed to load model: " + path); g_loading = false; return; }
     llama_context_params cp = llama_context_default_params();
-    cp.n_ctx   = 16384;    // node-catalog prompt + chat + multi-pass repair of large graphs
+    cp.n_ctx   = (uint32_t)g_ctxK * 1024;   // 16K/32K: catalog prompt + chat + repair of large graphs
     cp.n_batch = 512;
     // CPU mode: use g_pct% of the cores. GPU mode: GPU does most of the work, so
     // keep CPU light (~half) for the non-offloaded layers + sampling. Always >=1.
@@ -430,8 +433,14 @@ void RenderPanel(bool* p_open) {
                 ImGui::EndCombo();
             }
         }
+        ImGui::Separator();
+        ImGui::TextDisabled("Context window");
+        if (ImGui::RadioButton("16K", g_ctxK == 16)) { g_ctxK = 16; changed = true; }
+        ImGui::SameLine();
+        if (ImGui::RadioButton("32K", g_ctxK == 32)) { g_ctxK = 32; changed = true; }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Bigger window = larger graphs + more reasoning room,\nbut ~2x the VRAM for the KV cache. 32K may not fully\nfit a 14B on a 16GB GPU (spills to CPU = slower).");
         // Persist the choice, and if a model is already loaded, restart it now so
-        // the new compute setting takes effect immediately.
+        // the new compute/context setting takes effect immediately.
         if (changed) {
             saveSettings();
             if (g_ctx && !IsBusy() && g_modelPath[0]) startLoad(g_modelPath);
