@@ -600,7 +600,9 @@ void RenderPanel(bool* p_open) {
 
     // Enabled during generation too, so you can interject mid-reply and course-correct.
     bool canSend = (g_ctx != nullptr) && !g_loading;
+    static bool s_refocusInput = false;
     ImGui::BeginDisabled(!canSend);
+    if (s_refocusInput) { ImGui::SetKeyboardFocusHere(); s_refocusInput = false; }   // keep the box hot after a submit
     ImGui::SetNextItemWidth(-126.0f);
     bool enter = ImGui::InputText("##askinput", g_input, sizeof(g_input), ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::SameLine();
@@ -626,6 +628,7 @@ void RenderPanel(bool* p_open) {
         std::string model = ctx.empty() ? disp : (ctx + "\nUser request: " + disp);
         startAsk(disp, model, interject);   // interjection rebuilds context (delta is stale after a mid-turn stop)
         g_input[0] = 0;
+        s_refocusInput = true;   // re-focus the box so you can type the next prompt without clicking
     }
     if (g_generating.load()) { ImGui::SameLine(); if (ImGui::Button("Stop")) g_stop = true; }
 
