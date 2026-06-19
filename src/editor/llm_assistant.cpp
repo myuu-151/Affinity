@@ -245,7 +245,7 @@ void loadWorker(std::string path) {
     g_loading = false;
 }
 
-void generateWorker(std::string userMsg) {
+void generateWorker(std::string userMsg, bool rebuild) {
     std::string savedStatus; { std::lock_guard<std::mutex> lk(g_mtx); savedStatus = g_status; }
     int maxRepairs = g_repair ? 2 : 0;
     int prevIssues = 1 << 30;   // stop repairing once a pass stops reducing the problem count
@@ -253,6 +253,10 @@ void generateWorker(std::string userMsg) {
 
     for (int attempt = 0; ; attempt++) {
         g_convo.push_back({ "user", pending });
+        // After a mid-reply interjection the KV cache is out of sync with the delta
+        // tracker (the interrupted turn's closing tokens were never decoded), so rebuild
+        // the whole context from the conversation instead of trusting the delta.
+        if (attempt == 0 && rebuild) { llama_memory_clear(llama_get_memory(g_ctx), true); g_prevLen = 0; }
         std::string formatted = applyTemplate(g_convo, true);
         std::string delta = ((size_t)g_prevLen < formatted.size()) ? formatted.substr(g_prevLen) : formatted;
         std::vector<llama_token> toks = tokenize(delta, g_prevLen == 0);   // BOS only if nothing decoded yet
@@ -401,12 +405,12 @@ void startClearContext() {
 
 // displayMsg is what the user typed (shown in the chat); modelMsg is what the model
 // actually receives (may have the selection snapshot prepended).
-void startAsk(const std::string& displayMsg, const std::string& modelMsg) {
+void startAsk(const std::string& displayMsg, const std::string& modelMsg, bool rebuild = false) {
     if (!g_ctx || g_loading || g_generating) return;
     { std::lock_guard<std::mutex> lk(g_mtx); g_history.push_back({ "user", displayMsg }); g_partial.clear(); }
     joinWorker();
     g_stop = false; g_generating = true;
-    g_worker = std::thread(generateWorker, modelMsg);
+    g_worker = std::thread(generateWorker, modelMsg, rebuild);
 }
 
 } // anon namespace
@@ -609,7 +613,8 @@ void RenderPanel(bool* p_open) {
         // Interjection: if a reply is generating, stop it first. The worker commits its
         // partial output to the history, so the model sees what it was doing, then your
         // new message follows it and it course-corrects.
-        if (g_generating) { g_stop = true; joinWorker(); g_generating = false; g_stop = false; }
+        bool interject = g_generating;
+        if (interject) { g_stop = true; joinWorker(); g_generating = false; g_stop = false; }
         // Rebuild grammar here (UI thread) so it reflects the current project.
         if (g_useGrammar && g_grammarProvider) g_grammar = g_grammarProvider();
         std::string disp = g_input;
@@ -619,7 +624,7 @@ void RenderPanel(bool* p_open) {
         if (edit) { if (g_editContextProvider) ctx = g_editContextProvider(); }
         else      { if (g_contextProvider)     ctx = g_contextProvider(); }
         std::string model = ctx.empty() ? disp : (ctx + "\nUser request: " + disp);
-        startAsk(disp, model);
+        startAsk(disp, model, interject);   // interjection rebuilds context (delta is stale after a mid-turn stop)
         g_input[0] = 0;
     }
     if (g_generating.load()) { ImGui::SameLine(); if (ImGui::Button("Stop")) g_stop = true; }
