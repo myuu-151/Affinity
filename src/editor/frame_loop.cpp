@@ -1314,7 +1314,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::GetScene:      desc = "Outputs the current scene index."; break;
     case VsNodeType::SetCheckpoint: desc = "Saves the current player position as a checkpoint."; break;
     case VsNodeType::LoadCheckpoint:desc = "Teleports the player back to the last saved checkpoint."; break;
-    case VsNodeType::GetInputAxis:  desc = "Outputs the current D-pad axis value (-256 to 256)."; break;
+    case VsNodeType::GetInputAxis:  desc = "Outputs the raw D-pad analog axis value (-256..256) — NOT for analog stick directions; for left/right-stick Up/Down/Left/Right use a Key node (R-Stick Up=16, etc.) into On Key Held, not this node."; break;
     case VsNodeType::OnAnyKey:      desc = "Event: fires when any button is pressed."; break;
     case VsNodeType::GetLastKey:    desc = "Outputs the key code of the last button pressed."; break;
     case VsNodeType::OnCollision2D: desc = "Event: fires when the player collides with this object in Mode 0 (tilemap)."; break;
@@ -21842,7 +21842,7 @@ void FrameTick(float dt)
                 case VsNodeType::GetScene:      desc = "Outputs the current scene index."; break;
                 case VsNodeType::SetCheckpoint: desc = "Saves the current player position as a checkpoint."; break;
                 case VsNodeType::LoadCheckpoint:desc = "Teleports the player back to the last saved checkpoint."; break;
-                case VsNodeType::GetInputAxis:  desc = "Outputs the current D-pad axis value (-256 to 256)."; break;
+                case VsNodeType::GetInputAxis:  desc = "Outputs the raw D-pad analog axis value (-256..256) — NOT for analog stick directions; for left/right-stick Up/Down/Left/Right use a Key node (R-Stick Up=16, etc.) into On Key Held, not this node."; break;
                 case VsNodeType::OnAnyKey:      desc = "Event: fires when any button is pressed."; break;
                 case VsNodeType::GetLastKey:    desc = "Outputs the key code of the last button pressed."; break;
                 case VsNodeType::OnCollision2D: desc = "Event: fires when the player collides with this object in Mode 0 (tilemap)."; break;
