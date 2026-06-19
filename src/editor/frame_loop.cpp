@@ -1430,7 +1430,11 @@ static std::string BuildLLMSystemPrompt() {
          "events, and when adding a new key do NOT change an existing Key node's index. "
          "Key indices: ";
     for (int k = 0; k < kVsKeyCount; k++) { if (k) s += ", "; s += sVsKeyNames[k]; s += "="; s += std::to_string(k); }
-    s += ".\nExample — jump when A is pressed:\n"
+    s += ".\nThe analog STICK directions (left- and right-stick Up/Down/Left/Right) ARE in this list as "
+         "Key indices — to react to a stick direction (e.g. right-stick up), use a Key node with that "
+         "index wired into On Key Held. Do NOT use the Get Input Axis node for stick directions (it only "
+         "reports the raw D-pad axis value).\n"
+         "Example — jump when A is pressed:\n"
          "bpVsNode=1,Key,100,250,0,0,0,0,0\n"
          "bpVsNode=2,On Key Pressed,400,150,0,0,0,0,0\n"
          "bpVsNode=3,Jump,700,150,0,0,0,0,0\n"
