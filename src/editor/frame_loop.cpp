@@ -1390,13 +1390,20 @@ static std::string BuildLLMSystemPrompt() {
         "Be concise and use ONLY nodes from the list below.\n\n"
         "To BUILD a graph, output it in Affinity's text save format inside a fenced ```afn block:\n"
         "  bpVsNode=ID,TYPE,X,Y,P0,P1,P2,P3,P4\n"
-        "  bpVsLink=FROM_ID,FROM_PIN_TYPE,FROM_PIN_IDX|TO_ID,TO_PIN_TYPE,TO_PIN_IDX\n"
+        "  bpVsConnect=FROM_ID,TO_ID   (PREFERRED for wiring — the editor auto-picks the pins)\n"
+        "  bpVsLink=FROM_ID,FROM_PIN_TYPE,FROM_PIN_IDX|TO_ID,TO_PIN_TYPE,TO_PIN_IDX   (advanced; only if you need an exact pin)\n"
         "  bpVsNodeClip=NODE_ID|ClipName   (only for Skel Anim nodes)\n"
         "Rules: TYPE = the node's (type N) below. IDs are small ints from 1. Lay nodes "
         "left-to-right ~300px apart in X. Exec links use FROM_PIN_TYPE=0 (exec out) -> "
         "TO_PIN_TYPE=1 (exec in); data links use 2 (data out) -> 3 (data in); PIN_IDX is the "
         "0-based pin position. [event] nodes have no exec input and start a chain. A node's "
         "P0..P4 are its int params (e.g. a Key node's P0 is the key index).\n\n";
+    s += "WIRING — do it the easy way: connect two nodes with bpVsConnect=fromId,toId and the editor "
+         "auto-picks the correct pins. A data node (Key/Integer/Float/Direction) wires to the target's "
+         "matching input pin; an event/action wires its EXECUTION to the next node. You do NOT specify pin "
+         "numbers. Example — Key(1)->On Key Held(2)->Jump(3), with Direction(4)+Integer(5) into Orbit Camera(6):\n"
+         "bpVsConnect=1,2\nbpVsConnect=2,3\nbpVsConnect=4,6\nbpVsConnect=5,6\n"
+         "PREFER bpVsConnect for ALL wiring. Only use the raw bpVsLink below if you truly need a specific pin.\n\n";
     s += "CRITICAL — each bpVsLink is ONE wire between TWO pins. The '|' splits that SINGLE wire into "
          "its SOURCE (left of |) and DESTINATION (right of |): "
          "bpVsLink=srcNode,srcPinType,srcPinIdx|dstNode,dstPinType,dstPinIdx. The '|' does NOT separate "
@@ -1547,6 +1554,44 @@ static int sVsEditingGroup = 0;        // 0 = top-level; >0 = inside group node 
 
 // Parse a node graph the LLM assistant generated (bpVsNode/bpVsLink/bpVsNodeClip
 // lines, fenced or inline) and insert it into the OPEN node graph (sVsNodes/
+// Resolve a high-level bpVsConnect (fromId -> toId) into concrete pins, so models
+// don't have to encode pin coordinates: a DATA source (Key/Integer/Float/Direction)
+// wires its data-out to the best-matching data-in on the target (by pin-name keyword,
+// else the first data-in); an EXEC source (event/action) wires exec-out -> exec-in.
+// Returns false if it can't be resolved. Used by both insert and lint so they agree.
+static bool ResolveVsConnect(int fromType, int toType, int& fpt, int& fpi, int& tpt, int& tpi) {
+    int typeCount = (int)(sizeof(sVsNodeDefs) / sizeof(sVsNodeDefs[0]));
+    if (fromType < 0 || toType < 0 || fromType >= typeCount || toType >= typeCount) return false;
+    const VsNodeTypeDef& fd = sVsNodeDefs[fromType];
+    const VsNodeTypeDef& td = sVsNodeDefs[toType];
+    if (fd.outData > 0 && fd.outExec == 0) {
+        // Data source -> matching data-in pin on the target.
+        const char* kw = nullptr;
+        switch ((VsNodeType)fromType) {
+            case VsNodeType::Key:       kw = "key"; break;
+            case VsNodeType::Direction: kw = "direction"; break;
+            case VsNodeType::Float:     kw = "(float)"; break;
+            case VsNodeType::Integer:   kw = "(int)"; break;
+            default: break;
+        }
+        int pin = -1;
+        if (kw) {
+            for (int p = 0; p < td.inData; p++) {
+                if (!td.inDataNames[p]) continue;
+                std::string nm = td.inDataNames[p];
+                for (auto& c : nm) if (c >= 'A' && c <= 'Z') c += 32;
+                if (nm.find(kw) != std::string::npos) { pin = p; break; }
+            }
+        }
+        if (pin < 0) pin = (td.inData > 0) ? 0 : -1;
+        if (pin < 0) return false;
+        fpt = 2; fpi = 0; tpt = 3; tpi = pin;
+        return true;
+    }
+    if (fd.outExec > 0 && td.inExec > 0) { fpt = 0; fpi = 0; tpt = 1; tpi = 0; return true; }
+    return false;
+}
+
 // sVsLinks) with fresh ids, placed to the right of the existing nodes and
 // left selected so the user can drag the whole group into place. Lints the
 // graph (unknown types, duplicate ids, dangling/out-of-range links, unwired key
@@ -1556,10 +1601,12 @@ static std::string InsertLLMNodes(const std::string& text) {
     struct PL { int from, fpt, fpi, to, tpt, tpi; };
     struct PE { int id, pi, val; };        // bpVsSet: in-place edit of an existing node's param
     struct PB { int id, pi, bit, val; };   // bpVsSetBit: flip one bit of a packed param
+    struct PC { int from, to; };           // bpVsConnect: high-level wire (pins auto-resolved)
     std::vector<PN> pns; std::vector<PL> pls;
     std::vector<std::pair<int, std::string>> clips;
     std::vector<PE> edits;
     std::vector<PB> bitedits;
+    std::vector<PC> connects;
     std::vector<std::string> warn;
 
     int typeCount = (int)(sizeof(sVsNodeDefs) / sizeof(sVsNodeDefs[0]));
@@ -1601,6 +1648,9 @@ static std::string InsertLLMNodes(const std::string& text) {
                 if (!(l.tpt & 1)) l.tpt += 1;   // target must be an IN pin (1=exec, 3=data)
                 pls.push_back(l);
             }
+        } else if ((a = line.find("bpVsConnect=")) != std::string::npos) {
+            PC c{};
+            if (sscanf(line.c_str() + a + 12, "%d,%d", &c.from, &c.to) == 2) connects.push_back(c);
         } else if ((a = line.find("bpVsNodeClip=")) != std::string::npos) {
             int id; char nm[64] = {};
             if (sscanf(line.c_str() + a + 13, "%d|%63[^\r\n]", &id, nm) == 2)
@@ -1613,7 +1663,7 @@ static std::string InsertLLMNodes(const std::string& text) {
             if (sscanf(line.c_str() + a + 8, "%d,%d,%d", &e.id, &e.pi, &e.val) == 3) edits.push_back(e);
         }
     }
-    if (pns.empty() && edits.empty() && bitedits.empty()) {
+    if (pns.empty() && edits.empty() && bitedits.empty() && connects.empty()) {
         if (warn.empty()) return "No node lines (bpVsNode=...) or edits (bpVsSet=...) found in the reply.";
         std::string m = "Nothing applied. Issues:";
         for (auto& w : warn) m += "\n- " + w;
@@ -1656,6 +1706,7 @@ static std::string InsertLLMNodes(const std::string& text) {
         return 0;
     };
     std::map<std::string, bool> seenLink;   // drop duplicate links (model repetition)
+    int linked = 0;
     // Resolve a parsed node id to an editor id + type: a freshly-inserted node (idmap)
     // OR an existing node already in the graph (Edit/extend mode wires new -> existing).
     auto resolveEnd = [&](int pid, int& outType) -> int {
@@ -1683,7 +1734,30 @@ static std::string InsertLLMNodes(const std::string& text) {
         VsLink lk;
         lk.from.nodeId = fromId; lk.from.pinType = l.fpt; lk.from.pinIdx = l.fpi;
         lk.to.nodeId   = toId;   lk.to.pinType   = l.tpt; lk.to.pinIdx   = l.tpi;
-        sVsLinks.push_back(lk);
+        sVsLinks.push_back(lk); linked++;
+    }
+    // High-level connects (bpVsConnect): auto-resolve the pins, then add like a link.
+    for (auto& c : connects) {
+        int ft = -1, tt = -1;
+        int fromId = resolveEnd(c.from, ft);
+        int toId   = resolveEnd(c.to, tt);
+        if (fromId < 0 || toId < 0) { warn.push_back("bpVsConnect: references a node not in the graph"); continue; }
+        int fpt, fpi, tpt, tpi;
+        if (!ResolveVsConnect(ft, tt, fpt, fpi, tpt, tpi)) {
+            warn.push_back(std::string("bpVsConnect: couldn't auto-wire ") + sVsNodeDefs[ft].name + " -> " + sVsNodeDefs[tt].name);
+            continue;
+        }
+        char ck[64]; snprintf(ck, sizeof(ck), "%d,%d,%d|%d,%d,%d", fromId, fpt, fpi, toId, tpt, tpi);
+        if (!seenLink.emplace(ck, true).second) continue;
+        bool exists = false;
+        for (auto& el : sVsLinks)
+            if (el.from.nodeId == fromId && el.from.pinType == fpt && el.from.pinIdx == fpi &&
+                el.to.nodeId == toId && el.to.pinType == tpt && el.to.pinIdx == tpi) { exists = true; break; }
+        if (exists) continue;
+        VsLink lk;
+        lk.from.nodeId = fromId; lk.from.pinType = fpt; lk.from.pinIdx = fpi;
+        lk.to.nodeId   = toId;   lk.to.pinType   = tpt; lk.to.pinIdx   = tpi;
+        sVsLinks.push_back(lk); linked++;
     }
     // Lint: a key event with its "Key" pin unwired won't fire (the model commonly
     // forgets the Key node) — flag it.
@@ -1727,6 +1801,7 @@ static std::string InsertLLMNodes(const std::string& text) {
     std::string msg;
     if (added)  msg += "Inserted " + std::to_string(added) + " node(s)";
     if (edited) { if (!msg.empty()) msg += ", "; msg += "edited " + std::to_string(edited) + " node(s)"; }
+    if (linked) { if (!msg.empty()) msg += ", "; msg += "wired " + std::to_string(linked) + " link(s)"; }
     if (msg.empty()) msg = "No changes applied";
     if (warn.empty()) { msg += added ? " — no issues. Drag them into place." : "."; }
     else {
@@ -5229,7 +5304,8 @@ static std::string BuildLLMGrammar() {
     g += "root ::= ws (stmt ws)+ fence?\n";   // optional closing ``` so the model can terminate
     g += "ws ::= [ \\t\\r\\n]*\n";
     g += "fence ::= \"```\"\n";
-    g += std::string("stmt ::= node | link | set | setbit") + (haveClips ? " | clip" : "") + "\n";
+    g += std::string("stmt ::= node | link | connect | set | setbit") + (haveClips ? " | clip" : "") + "\n";
+    g += "connect ::= \"bpVsConnect=\" int \",\" int\n";   // high-level wire; pins auto-resolved on insert
     g += "node ::= \"bpVsNode=\" int \",\" ntype \",\" int \",\" int \",\" int \",\" int \",\" int \",\" int \",\" int\n";
     g += "link ::= \"bpVsLink=\" int \",\" pintype \",\" int \"|\" int \",\" pintype \",\" int\n";
     g += "pintype ::= \"0\" | \"1\" | \"2\" | \"3\"\n";   // pin TYPE must be 0=execOut 1=execIn 2=dataOut 3=dataIn (not a node id)
@@ -5272,7 +5348,8 @@ static std::string LintLLMGraph(const std::string& text) {
         return 0;
     };
     struct PL { int from, fpt, fpi, to, tpt, tpi; };
-    std::map<int,int> idType; std::vector<PL> pls; std::vector<std::string> warn; int nodeLines = 0;
+    struct PC { int from, to; };
+    std::map<int,int> idType; std::vector<PL> pls; std::vector<PC> connects; std::vector<std::string> warn; int nodeLines = 0;
     std::stringstream ss(text); std::string line;
     while (std::getline(ss, line)) {
         size_t a;
@@ -5293,9 +5370,21 @@ static std::string LintLLMGraph(const std::string& text) {
                 if (!(l.tpt & 1)) l.tpt += 1;
                 pls.push_back(l);
             }
+        } else if ((a = line.find("bpVsConnect=")) != std::string::npos) {
+            PC c{};
+            if (sscanf(line.c_str()+a+12, "%d,%d", &c.from, &c.to) == 2) connects.push_back(c);
         }
     }
     if (nodeLines == 0) return "";   // not a graph reply — nothing to repair
+    // Treat each bpVsConnect as the link it will resolve to, so the wiring checks
+    // below see it (and don't false-flag a pin that bpVsConnect actually wires).
+    for (auto& c : connects) {
+        auto fIt = idType.find(c.from), tIt = idType.find(c.to);
+        if (fIt == idType.end() || tIt == idType.end()) continue;
+        int fpt, fpi, tpt, tpi;
+        if (ResolveVsConnect(fIt->second, tIt->second, fpt, fpi, tpt, tpi))
+            pls.push_back({ c.from, fpt, fpi, c.to, tpt, tpi });
+    }
     for (auto& l : pls) {
         auto fIt = idType.find(l.from), tIt = idType.find(l.to);
         if (fIt == idType.end() || tIt == idType.end()) { warn.push_back("a link references a node id that isn't defined (" + std::to_string(l.from) + "->" + std::to_string(l.to) + ")"); continue; }
