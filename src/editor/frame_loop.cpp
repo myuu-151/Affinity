@@ -1397,6 +1397,17 @@ static std::string BuildLLMSystemPrompt() {
         "TO_PIN_TYPE=1 (exec in); data links use 2 (data out) -> 3 (data in); PIN_IDX is the "
         "0-based pin position. [event] nodes have no exec input and start a chain. A node's "
         "P0..P4 are its int params (e.g. a Key node's P0 is the key index).\n\n";
+    s += "CRITICAL — each bpVsLink is ONE wire between TWO pins. The '|' splits that SINGLE wire into "
+         "its SOURCE (left of |) and DESTINATION (right of |): "
+         "bpVsLink=srcNode,srcPinType,srcPinIdx|dstNode,dstPinType,dstPinIdx. The '|' does NOT separate "
+         "two links. A 2-hop chain like Key -> On Key Held -> Orbit Camera is TWO separate lines:\n"
+         "bpVsLink=1,2,0|2,3,0   (Key node 1 data-out -> On Key Held node 2's Key data-in)\n"
+         "bpVsLink=2,0,0|3,1,0   (On Key Held node 2 exec-out -> Orbit Camera node 3 exec-in)\n"
+         "One connection = one line; N connections = N lines.\n"
+         "CRITICAL — a node's INPUT PINS are filled by WIRING a data node into them, NOT by the consuming "
+         "node's params. Orbit Camera's 'Direction' and 'Speed' are PINS: you MUST add a Direction node "
+         "(P0 = the direction) and an Integer node (P0 = the speed) and wire each into Orbit Camera's "
+         "data-in pins. Setting Orbit Camera's own P0/P1 does NOTHING for Direction/Speed.\n\n";
     // Key events read WHICH key from a separate Key node wired into their Key pin —
     // the model won't know this idiom, so spell it out with the index legend + an example.
     s += "IMPORTANT — keys: a key event (On Key Pressed/Held/Released) has a 'Key' data-in "
