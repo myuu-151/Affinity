@@ -518,7 +518,8 @@ void RenderPanel(bool* p_open) {
           insStatus = g_insertStatus; haveHandler = (bool)g_insertHandler; }
         bool hasNodes = lastReply.find("bpVsNode=") != std::string::npos;
         bool hasEdits = lastReply.find("bpVsSet=") != std::string::npos || lastReply.find("bpVsSetBit=") != std::string::npos;
-        if (haveHandler && (hasNodes || hasEdits) && !busy) {
+        if (!lastReply.empty() && !busy) {
+          if (haveHandler && (hasNodes || hasEdits)) {
             const char* label = hasNodes ? "Insert nodes into open blueprint"
                                          : "Apply edits to selected nodes";
             if (ImGui::Button(label)) {
@@ -539,7 +540,11 @@ void RenderPanel(bool* p_open) {
                 }
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Re-check the graph and ask the model to fix any\nbroken links / out-of-range pins / unwired Key nodes.");
-            if (!insStatus.empty()) { ImGui::TextWrapped("%s", insStatus.c_str()); }
+            ImGui::SameLine();
+          }
+          if (ImGui::Button("Copy reply")) ImGui::SetClipboardText(lastReply.c_str());
+          if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy the assistant's full reply (reasoning + graph) to the clipboard.");
+          if (!insStatus.empty()) { ImGui::TextWrapped("%s", insStatus.c_str()); }
         }
     }
 
