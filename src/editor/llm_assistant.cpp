@@ -526,10 +526,9 @@ void RenderPanel(bool* p_open) {
     { std::lock_guard<std::mutex> lk(g_mtx); ImGui::TextWrapped("%s", g_status.c_str()); }
     ImGui::Separator();
 
-    // Reserve room for everything BELOW the history: the Insert/Repair/Copy buttons row,
-    // a few lines of status, and the input/Send row — otherwise the input row spills off
-    // the bottom of the window.
-    float histReserve = ImGui::GetFrameHeightWithSpacing() * 2.0f + ImGui::GetTextLineHeightWithSpacing() * 3.0f + 8.0f;
+    // Reserve exactly the two rows below the history (the buttons row + the input/Send
+    // row) so the input sits flush at the bottom. Status now scrolls inside the chat.
+    float histReserve = ImGui::GetFrameHeightWithSpacing() * 2.0f + 10.0f;
     ImGui::BeginChild("hist", ImVec2(0, -histReserve), true);
     {
         std::lock_guard<std::mutex> lk(g_mtx);
@@ -547,16 +546,22 @@ void RenderPanel(bool* p_open) {
             ImGui::PopStyleColor();
             ImGui::TextWrapped("%s", g_partial.empty() ? "..." : g_partial.c_str());
         }
+        if (!g_insertStatus.empty()) {   // insert/repair feedback scrolls with the chat
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+            ImGui::TextWrapped("%s", g_insertStatus.c_str());
+            ImGui::PopStyleColor();
+        }
     }
     if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 40.0f) ImGui::SetScrollHereY(1.0f);
     ImGui::EndChild();
 
     // If the latest reply contains a node graph, offer to insert it.
     {
-        std::string lastReply, insStatus; bool haveHandler;
+        std::string lastReply; bool haveHandler;
         { std::lock_guard<std::mutex> lk(g_mtx);
           if (!g_history.empty() && g_history.back().role == "assistant") lastReply = g_history.back().content;
-          insStatus = g_insertStatus; haveHandler = (bool)g_insertHandler; }
+          haveHandler = (bool)g_insertHandler; }
         bool hasNodes = lastReply.find("bpVsNode=") != std::string::npos;
         bool hasEdits = lastReply.find("bpVsSet=") != std::string::npos || lastReply.find("bpVsSetBit=") != std::string::npos;
         if (!lastReply.empty() && !busy) {
@@ -585,7 +590,6 @@ void RenderPanel(bool* p_open) {
           }
           if (ImGui::Button("Copy reply")) ImGui::SetClipboardText(lastReply.c_str());
           if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy the assistant's full reply (reasoning + graph) to the clipboard.");
-          if (!insStatus.empty()) { ImGui::TextWrapped("%s", insStatus.c_str()); }
         }
     }
 
