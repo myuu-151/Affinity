@@ -594,7 +594,8 @@ void RenderPanel(bool* p_open) {
         }
     }
 
-    bool canSend = (g_ctx != nullptr) && !busy;
+    // Enabled during generation too, so you can interject mid-reply and course-correct.
+    bool canSend = (g_ctx != nullptr) && !g_loading;
     ImGui::BeginDisabled(!canSend);
     ImGui::SetNextItemWidth(-126.0f);
     bool enter = ImGui::InputText("##askinput", g_input, sizeof(g_input), ImGuiInputTextFlags_EnterReturnsTrue);
@@ -605,6 +606,10 @@ void RenderPanel(bool* p_open) {
     bool send = ImGui::Button("Send", ImVec2(54, 0));
     ImGui::EndDisabled();
     if ((enter || send || edit) && canSend && g_input[0]) {
+        // Interjection: if a reply is generating, stop it first. The worker commits its
+        // partial output to the history, so the model sees what it was doing, then your
+        // new message follows it and it course-corrects.
+        if (g_generating) { g_stop = true; joinWorker(); g_generating = false; g_stop = false; }
         // Rebuild grammar here (UI thread) so it reflects the current project.
         if (g_useGrammar && g_grammarProvider) g_grammar = g_grammarProvider();
         std::string disp = g_input;
