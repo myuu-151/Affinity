@@ -390,8 +390,10 @@ void clearContextWorker() {
 }
 
 void startClearContext() {
-    if (!g_ctx || g_loading || g_generating) return;
-    joinWorker();
+    if (!g_ctx || g_loading) return;     // can't clear mid-load
+    if (g_generating) g_stop = true;     // interrupt a running generation first
+    joinWorker();                        // wait for the worker to finish unwinding
+    g_generating = false; g_stop = false;
     g_loading = true;
     setStatus("Clearing context...");
     g_worker = std::thread(clearContextWorker);
@@ -463,10 +465,10 @@ void RenderPanel(bool* p_open) {
     // the next Load, and locking it during a slow load is what trapped users on CPU.
     if (ImGui::Button("Settings", ImVec2(80, 0))) ImGui::OpenPopup("AsstSettings");
     ImGui::SameLine();
-    ImGui::BeginDisabled(busy || g_ctx == nullptr);
+    ImGui::BeginDisabled(g_loading || g_ctx == nullptr);   // enabled while generating, so it can interrupt
     if (ImGui::Button("Clear", ImVec2(54, 0))) startClearContext();   // reset chat + context, keep model
     ImGui::EndDisabled();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clear the conversation and reset the model's context\n(keeps the model loaded + its engine knowledge).");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clear the conversation and reset the model's context\n(keeps the model loaded). Interrupts a running reply.");
     ImGui::SameLine();
     ImGui::BeginDisabled(busy);
     if (ImGui::Button("Load", ImVec2(54, 0))) {
