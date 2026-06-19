@@ -435,7 +435,7 @@ void Shutdown() {
 
 void RenderPanel(bool* p_open) {
     if (!*p_open) return;
-    ImGui::SetNextWindowSize(ImVec2(500, 620), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(520, 720), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Assistant (local LLM)", p_open)) { ImGui::End(); return; }
 
     static bool s_scanned = false;
@@ -526,7 +526,11 @@ void RenderPanel(bool* p_open) {
     { std::lock_guard<std::mutex> lk(g_mtx); ImGui::TextWrapped("%s", g_status.c_str()); }
     ImGui::Separator();
 
-    ImGui::BeginChild("hist", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 4), true);
+    // Reserve room for everything BELOW the history: the Insert/Repair/Copy buttons row,
+    // a few lines of status, and the input/Send row — otherwise the input row spills off
+    // the bottom of the window.
+    float histReserve = ImGui::GetFrameHeightWithSpacing() * 2.0f + ImGui::GetTextLineHeightWithSpacing() * 3.0f + 8.0f;
+    ImGui::BeginChild("hist", ImVec2(0, -histReserve), true);
     {
         std::lock_guard<std::mutex> lk(g_mtx);
         for (auto& m : g_history) {
