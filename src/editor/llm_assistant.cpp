@@ -526,9 +526,10 @@ void RenderPanel(bool* p_open) {
     { std::lock_guard<std::mutex> lk(g_mtx); ImGui::TextWrapped("%s", g_status.c_str()); }
     ImGui::Separator();
 
-    // Reserve exactly the two rows below the history (the buttons row + the input/Send
-    // row) so the input sits flush at the bottom. Status now scrolls inside the chat.
-    float histReserve = ImGui::GetFrameHeightWithSpacing() * 2.0f + 10.0f;
+    // Reserve exactly the rows below the history so the input sits flush at the bottom:
+    // the input/Send row always, plus the buttons row only when it'll actually show.
+    bool bottomButtons; { std::lock_guard<std::mutex> lk(g_mtx); bottomButtons = (!g_history.empty() && g_history.back().role == "assistant") && !busy; }
+    float histReserve = ImGui::GetFrameHeight() + (bottomButtons ? ImGui::GetFrameHeightWithSpacing() : 0.0f) + 4.0f;
     ImGui::BeginChild("hist", ImVec2(0, -histReserve), true);
     {
         std::lock_guard<std::mutex> lk(g_mtx);
