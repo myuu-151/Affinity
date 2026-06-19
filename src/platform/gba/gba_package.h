@@ -463,6 +463,11 @@ enum class GBAScriptNodeType : int {
     ChargeShot,      // action: hold-to-charge — grow the player's effect ball (focus blast) while held
     IsCharging,      // gate: passes exec while a Charge Shot is charging
     FireChargeShot,  // action: release — fire the charged ball as a homing projectile at the lock target
+    IsFiring,        // gate: passes exec for a short window after a Charge Shot is fired (hold the launch anim)
+    IsFalse,         // gate: passes exec while a condition data input is ZERO (if-not)
+    SwitchInt,       // flow: route exec to case 0..3 by integer value, else Default
+    Bool,            // data: constant true/false (1/0)
+    Xor,             // data: logical exclusive-or of two inputs
     COUNT
 };
 

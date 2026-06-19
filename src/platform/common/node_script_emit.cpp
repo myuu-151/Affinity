@@ -86,6 +86,73 @@ void EmitNodeScriptBodies(std::ostream& f,
             return (k >= 0 && k < 20) ? keys[k] : "KEY_A";
         };
 
+        // Recursive runtime-expression generator for the logic/flow nodes
+        // (Branch, Is True, Is False, Switch on Int). Turns a data-node subtree
+        // into a C expression string referencing LIVE runtime globals — unlike
+        // resolveInt, which bakes a constant data node to a single int at export
+        // time. Only the PSV/PSP runtime globals listed below are referenceable;
+        // any unknown data source falls back to its stored constant. This is
+        // what makes Compare / And / Or / Not / Select actually do something on
+        // PSV (they were GBA-era data nodes with no runtime consumer here).
+        std::function<std::string(const GBAScriptNodeExport*)> emitIntExpr;
+        // Expression for a data INPUT pin: the wired child subtree if connected,
+        // else the node's own inline literal stored in paramInt[pin].
+        auto argExpr = [&](const GBAScriptNodeExport* n, int pin) -> std::string {
+            const GBAScriptNodeExport* c = findDataIn(n->id, pin);
+            if (c) return emitIntExpr(c);
+            return "(" + std::to_string(n->paramInt[pin]) + ")";
+        };
+        emitIntExpr = [&](const GBAScriptNodeExport* dn) -> std::string {
+            if (!dn) return "0";
+            using T = GBAScriptNodeType;
+            switch (dn->type) {
+                // constant leaves
+                case T::Integer: return "(" + std::to_string(dn->paramInt[0]) + ")";
+                case T::Bool:    return dn->paramInt[0] ? "1" : "0";
+                case T::Float:   return "(" + std::to_string((int)resolveFloat(dn)) + ")";
+                // runtime value sources (PSV/PSP globals)
+                case T::GetPlayerX: return "player_x";
+                case T::GetPlayerY: return "player_y";
+                case T::GetPlayerZ: return "player_z";
+                case T::GetScore:   return "afn_score";
+                case T::GetTime:    return "afn_frame_count";
+                case T::GetLastKey: return "afn_last_key";
+                case T::GetRandom:  return "((int)(afn_rng & 0xFF))";
+                case T::GetHP:
+                case T::GetHP2:     return "afn_hp[" + argExpr(dn, 0) + "]";
+                case T::GetFlag:    return "((afn_flags >> " + argExpr(dn, 0) + ") & 1u)";
+                case T::IsKeyDown: {
+                    const GBAScriptNodeExport* kc = findDataIn(dn->id, 0);
+                    int ki = kc ? kc->paramInt[0] : dn->paramInt[0];
+                    return std::string("key_is_down(") + keyName(ki) + ")";
+                }
+                // math operators
+                case T::AddMath:      return "(" + argExpr(dn,0) + " + " + argExpr(dn,1) + ")";
+                case T::SubtractMath: return "(" + argExpr(dn,0) + " - " + argExpr(dn,1) + ")";
+                case T::MultiplyMath: return "(" + argExpr(dn,0) + " * " + argExpr(dn,1) + ")";
+                case T::Divide:    { std::string b=argExpr(dn,1); return "((" + b + ")!=0 ? " + argExpr(dn,0) + "/" + b + " : 0)"; }
+                case T::ModuloMath:{ std::string b=argExpr(dn,1); return "((" + b + ")!=0 ? " + argExpr(dn,0) + "%" + b + " : 0)"; }
+                case T::NegateMath:  return "(-" + argExpr(dn,0) + ")";
+                case T::AbsMath:   { std::string a=argExpr(dn,0); return "((" + a + ")<0 ? -" + a + " : " + a + ")"; }
+                case T::MinMath:   { std::string a=argExpr(dn,0),b=argExpr(dn,1); return "((" + a + ")<(" + b + ") ? " + a + " : " + b + ")"; }
+                case T::MaxMath:   { std::string a=argExpr(dn,0),b=argExpr(dn,1); return "((" + a + ")>(" + b + ") ? " + a + " : " + b + ")"; }
+                case T::Average:     return "((" + argExpr(dn,0) + " + " + argExpr(dn,1) + ")/2)";
+                case T::SignMath:  { std::string a=argExpr(dn,0); return "((" + a + ")>0 ? 1 : ((" + a + ")<0 ? -1 : 0))"; }
+                case T::ClampMath: { std::string v=argExpr(dn,0),lo=argExpr(dn,1),hi=argExpr(dn,2);
+                                     return "((" + v + ")<(" + lo + ") ? " + lo + " : ((" + v + ")>(" + hi + ") ? " + hi + " : " + v + "))"; }
+                // comparison / boolean logic
+                case T::CompareInt: { const char* ops[] = { "==","!=","<",">","<=",">=" };
+                                      int op = dn->paramInt[0]; if (op < 0 || op > 5) op = 0;
+                                      return "((" + argExpr(dn,0) + ") " + ops[op] + " (" + argExpr(dn,1) + "))"; }
+                case T::AndLogic:  return "((" + argExpr(dn,0) + ") && (" + argExpr(dn,1) + "))";
+                case T::OrLogic:   return "((" + argExpr(dn,0) + ") || (" + argExpr(dn,1) + "))";
+                case T::NotLogic:  return "(!(" + argExpr(dn,0) + "))";
+                case T::Xor:       return "((!!(" + argExpr(dn,0) + ")) ^ (!!(" + argExpr(dn,1) + ")))";
+                case T::Select:    return "((" + argExpr(dn,0) + ") ? (" + argExpr(dn,1) + ") : (" + argExpr(dn,2) + "))";
+                default:           return "(" + std::to_string(resolveInt(dn)) + ")";
+            }
+        };
+
         // Collect chains per event type (BFS from each event node through exec links).
         // Re-runnable: blueprint emit passes call buildChains() after pointing
         // curScript at the blueprint's graph.
@@ -124,7 +191,11 @@ void EmitNodeScriptBodies(std::ostream& f,
                     if (an->type == GBAScriptNodeType::CheckFlag ||
                         an->type == GBAScriptNodeType::OnRise ||
                         an->type == GBAScriptNodeType::FlipFlop ||
-                        an->type == GBAScriptNodeType::IsFlagSet) continue;
+                        an->type == GBAScriptNodeType::IsFlagSet ||
+                        an->type == GBAScriptNodeType::Branch ||
+                        an->type == GBAScriptNodeType::IsTrue ||
+                        an->type == GBAScriptNodeType::IsFalse ||
+                        an->type == GBAScriptNodeType::SwitchInt) continue;
                     for (int t : findExecOuts(an->id, 0)) frontier.push_back(t);
                 }
                 if (!ch.actions.empty()) chains.push_back(ch);
@@ -575,6 +646,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    if (afn_land_timer <= 0) {\n"; break;
             case GBAScriptNodeType::IsCharging:
                 f << "    if (afn_fb_charging) {\n"; break;
+            case GBAScriptNodeType::IsFiring:
+                f << "    if (afn_fb_fire_timer > 0) {\n"; break;
             case GBAScriptNodeType::IsNear2D:
                 // Mirrors GBA: fires when the player just collided with
                 // THIS BP's tm_object. Combined with OnKeyPressed(A) this
@@ -957,6 +1030,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                    t == GBAScriptNodeType::IsLanding ||
                    t == GBAScriptNodeType::IsNotLanding ||
                    t == GBAScriptNodeType::IsCharging ||
+                   t == GBAScriptNodeType::IsFiring ||
                    t == GBAScriptNodeType::IsInView;
         };
         auto walkExec = [&](int nodeId, int pinIdx) {
@@ -1026,6 +1100,56 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    } }\n";
                 return;
             }
+            if (a->type == GBAScriptNodeType::Branch) {
+                // If/Else: condition data input -> True (pin 0) / False (pin 1).
+                auto* cd = findDataIn(a->id, 0);
+                std::string cond = cd ? emitIntExpr(cd) : (a->paramInt[0] ? "1" : "0");
+                f << "    if (" << cond << ") {\n";
+                walkExec(a->id, 0);
+                if (!findExecOuts(a->id, 1).empty()) {
+                    f << "    } else {\n";
+                    walkExec(a->id, 1);
+                }
+                f << "    }\n";
+                return;
+            }
+            if (a->type == GBAScriptNodeType::IsTrue) {
+                // Gate: pass exec while the condition data input is non-zero.
+                auto* cd = findDataIn(a->id, 0);
+                std::string cond = cd ? emitIntExpr(cd) : (a->paramInt[0] ? "1" : "0");
+                f << "    if (" << cond << ") {\n";
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            if (a->type == GBAScriptNodeType::IsFalse) {
+                // Gate: pass exec while the condition data input is zero (if-not).
+                auto* cd = findDataIn(a->id, 0);
+                std::string cond = cd ? emitIntExpr(cd) : (a->paramInt[0] ? "1" : "0");
+                f << "    if (!(" << cond << ")) {\n";
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            if (a->type == GBAScriptNodeType::SwitchInt) {
+                // Route exec by integer value: pins 0..3 = cases 0..3, pin 4 = default.
+                auto* vd = findDataIn(a->id, 0);
+                std::string val = vd ? emitIntExpr(vd) : std::to_string(a->paramInt[0]);
+                f << "    switch (" << val << ") {\n";
+                for (int cse = 0; cse < 4; cse++) {
+                    if (findExecOuts(a->id, cse).empty()) continue;
+                    f << "    case " << cse << ": {\n";
+                    walkExec(a->id, cse);
+                    f << "    } break;\n";
+                }
+                if (!findExecOuts(a->id, 4).empty()) {
+                    f << "    default: {\n";
+                    walkExec(a->id, 4);
+                    f << "    } break;\n";
+                }
+                f << "    }\n";
+                return;
+            }
             bool isGate = (a->type == GBAScriptNodeType::IsMoving ||
                            a->type == GBAScriptNodeType::IsOnGround ||
                            a->type == GBAScriptNodeType::IsJumping ||
@@ -1042,6 +1166,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                            a->type == GBAScriptNodeType::IsLanding ||
                            a->type == GBAScriptNodeType::IsNotLanding ||
                            a->type == GBAScriptNodeType::IsCharging ||
+                           a->type == GBAScriptNodeType::IsFiring ||
                            a->type == GBAScriptNodeType::IsInView);
             if (isGate) {
                 bool wasJump = inJumpGate;

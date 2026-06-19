@@ -747,6 +747,11 @@ enum class VsNodeType : int {
     ChargeShot,      // action: hold-to-charge — grow the player's effect ball (focus blast) while held
     IsCharging,      // gate: passes exec while a Charge Shot is charging
     FireChargeShot,  // action: release — fire the charged ball as a homing projectile at the lock target
+    IsFiring,        // gate: passes exec for a short window after a Charge Shot is fired (hold the launch anim)
+    IsFalse,         // gate: passes exec while a condition data input is ZERO (if-not)
+    SwitchInt,       // flow: route exec to case 0..3 by integer value, else Default
+    Bool,            // data: constant true/false (1/0)
+    Xor,             // data: logical exclusive-or of two inputs
     COUNT
 };
 
@@ -759,7 +764,7 @@ struct VsNodeTypeDef {
     int outData;        // number of data output pins
     const char* inDataNames[10];
     const char* outDataNames[4];
-    const char* outExecNames[4];
+    const char* outExecNames[5];
 };
 
 // X and Y are NDS-only buttons (GBA has no X/Y — the exporter maps them to a
@@ -1085,6 +1090,11 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Charge Shot",     0xFF3355AA, 1, 1, 3, 0, {"Max Charge (int)","Min Scale% (int)","Max Scale% (int)"}, {}, {} },
     { "Is Charging",     0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Fire Charge Shot",0xFF3355AA, 1, 1, 2, 0, {"Damage (int)","Speed (int)"}, {}, {} },
+    { "Is Firing",       0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Is False",        0xFF885533, 1, 1, 1, 0, {"Condition"}, {}, {} },
+    { "Switch on Int",   0xFF885533, 1, 5, 1, 0, {"Value"}, {}, {"= 0","= 1","= 2","= 3","Default"} },
+    { "Bool",            0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
+    { "XOR",             0xFF666688, 0, 0, 2, 1, {"A","B"}, {"Result"}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -21631,7 +21641,7 @@ void FrameTick(float dt)
                 case VsNodeType::OnCollision:   desc = "Fires when the player collides with an object."; break;
                 case VsNodeType::OnStart:       desc = "Fires once when the scene starts."; break;
                 case VsNodeType::OnUpdate:      desc = "Fires every frame."; break;
-                case VsNodeType::Branch:        desc = "If condition is true, execute True path; otherwise False."; break;
+                case VsNodeType::Branch:        desc = "If/Else: runs the True exec when the Condition data input is non-zero, otherwise the False exec. Wire a boolean expression into Condition — Compare, And/Or/Not/Xor, Select, Get HP, Get Flag, Is Key Down, Get Player X/Y/Z, Get Score, Get Time, or arithmetic on them. Example: Compare(Get HP, 0, '>') -> Branch: True=alive, False=dead."; break;
                 case VsNodeType::CompareVar:    desc = "Compares a variable slot against a value. Outputs 1 or 0."; break;
                 case VsNodeType::MovePlayer:    desc = "Moves the player in the given Direction whenever this runs. Wire it after On Key Held(key) to bind movement to that button — e.g. On Key Held(A) -> Move Player(Up) moves up while A is held (remappable). Left-click for the Facing switch: Direction Facing (rig turns toward movement) or Consistent Facing (rig keeps its yaw — strafe/moonwalk)."; break;
                 case VsNodeType::LookDirection: desc = "Sets the player's facing direction."; break;
@@ -21846,7 +21856,7 @@ void FrameTick(float dt)
                 case VsNodeType::OnAnyKey:      desc = "Event: fires when any button is pressed."; break;
                 case VsNodeType::GetLastKey:    desc = "Outputs the key code of the last button pressed."; break;
                 case VsNodeType::OnCollision2D: desc = "Event: fires when the player collides with this object in Mode 0 (tilemap)."; break;
-                case VsNodeType::IsTrue:        desc = "Gate: only passes execution through if the data input is non-zero (true)."; break;
+                case VsNodeType::IsTrue:        desc = "Gate: passes exec only while the Condition data input is non-zero (true). Feed it a boolean expression — Compare, And/Or/Not/Xor, Get HP, Get Flag, Is Key Down, Get Player X/Y/Z, etc. The inverse is Is False."; break;
                 case VsNodeType::CursorUp:      desc = "Moves the element's cursor to the previous stop (wraps to last)."; break;
                 case VsNodeType::CursorDown:    desc = "Moves the element's cursor to the next stop (wraps to first)."; break;
                 case VsNodeType::FollowLink:    desc = "Navigates to the linked element at the current cursor stop."; break;
@@ -21883,7 +21893,12 @@ void FrameTick(float dt)
                 case VsNodeType::IsNotLanding:  desc = "Gate (PSV): passes exec when the player is NOT in the post-touchdown land window — the inverse of Is Landing. Put it in front of your grounded idle (On Update -> ... -> Is On Ground -> Is Not Landing -> Play Idle) so the land anim plays first, then idle resumes."; break;
                 case VsNodeType::ChargeShot:    desc = "Hold-to-charge focus blast (PSV): drive it from On Key Held. While held it shows the player's hidden \"effect\" sub-sprite (the focus ball) at chest height and grows it from Min Scale% to Max Scale% over Max Charge frames (180 = 3s). Sets the Is Charging gate so you can play the charge anim (atk_spc_chg, or atk_spc_chg_air behind Is Airborne). Release fires it — see Fire Charge Shot. The ball = the first hidden attached sub-sprite of the player rig (add it in the Meshes tab, tick \"Hidden (effect)\")."; break;
                 case VsNodeType::IsCharging:    desc = "Gate (PSV): passes exec only while a Charge Shot is charging (button held, not yet fired). Drive the charge pose with it: On Update -> Is Charging -> Play Skel Anim(atk_spc_chg). Behind Is Airborne use atk_spc_chg_air."; break;
-                case VsNodeType::FireChargeShot:desc = "Fire the charged focus blast (PSV): drive it from On Key Released (same button as Charge Shot). Snapshots the charged ball into a homing projectile aimed at the Lock On target (fires straight forward if nothing is locked), then clears the charge. Damage = damage at FULL charge and scales down with how long you actually held it (min 1); Speed = projectile world px/frame. On reaching the target it deals damage and despawns. Pair with Play Skel Anim(atk_spc_lnc / atk_spc_lnc_air)."; break;
+                case VsNodeType::FireChargeShot:desc = "Fire the charged focus blast (PSV): drive it from On Key Released (same button as Charge Shot). Snapshots the charged ball into a homing projectile aimed at the Lock On target (fires straight forward if nothing is locked), then clears the charge. Damage = damage at FULL charge and scales down with how long you actually held it (min 1); Speed = projectile world px/frame. On reaching the target it deals damage and despawns. Pair with Play Skel Anim(atk_spc_lnc / atk_spc_lnc_air) behind Is Firing so the launch pose holds."; break;
+                case VsNodeType::IsFiring:      desc = "Gate (PSV): passes exec for a short window (~0.5s / 30 frames) right after a Charge Shot is fired — the mirror of Is Charging for the launch side. Without it the launch anim only flashes for one frame because Fire Charge Shot runs once on release. Wire On Update -> Is Firing -> Is On Ground -> Play(atk_spc_lnc), and behind Is Airborne use atk_spc_lnc_air, so the launch pose holds while the blast leaves."; break;
+                case VsNodeType::IsFalse:       desc = "Gate: passes exec only when the Condition data input is ZERO — the inverse of Is True ('if not'). Wire a boolean expression into Condition: Compare, And/Or/Not, Get HP, Get Flag, Is Key Down, Get Player X/Y/Z, etc. Example: Get Flag(3) -> Is False -> (runs while flag 3 is clear)."; break;
+                case VsNodeType::SwitchInt:     desc = "Routes exec to one of five outputs by an integer Value: '= 0'..'= 3' fire when Value equals that case, 'Default' fires for anything else. Great for state machines: Get Variable/Get State -> Switch on Int -> per-state branches. Feed Value from any data expression (Get*, Compare, math)."; break;
+                case VsNodeType::Bool:          desc = "Constant boolean data node — outputs 1 (true) or 0 (false). Feed it into a Branch / Is True / Is False condition, or any data pin. Toggle the value in the node."; break;
+                case VsNodeType::Xor:           desc = "Logical exclusive-or: outputs 1 when exactly ONE of A/B is non-zero, else 0. Pure data node — wire into a condition (Branch / Is True) alongside And / Or / Not."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
@@ -22174,6 +22189,11 @@ void FrameTick(float dt)
                         case VsNodeType::ChargeShot:    return "_charge_shot";
                         case VsNodeType::IsCharging:    return "_is_charging";
                         case VsNodeType::FireChargeShot:return "_fire_charge_shot";
+                        case VsNodeType::IsFiring:      return "_is_firing";
+                        case VsNodeType::IsFalse:       return "_is_false";
+                        case VsNodeType::SwitchInt:     return "_switch_int";
+                        case VsNodeType::Bool:          return "_bool";
+                        case VsNodeType::Xor:           return "_xor";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -23359,10 +23379,60 @@ void FrameTick(float dt)
                         "    // size, capture target + facing, dmg = dmg_max * (level/max) (min 1),\n"
                         "    // then clear charge. Each frame the projectile homes toward the\n"
                         "    // target's live position (forward if none); on reaching it,\n"
-                        "    // afn_hp[target] -= dmg and the ball despawns.",
+                        "    // afn_hp[target] -= dmg and the ball despawns. On launch it also\n"
+                        "    // sets afn_fb_fire_timer = 30 to open the Is Firing window.",
                         fmtInt(infoNode.id, 0, "30"),
                         fmtInt(infoNode.id, 1, "6"));
                     setActionFunc(infoNode, "_fire_charge_shot", fcBuf);
+                    break;
+                }
+                case VsNodeType::IsFiring: {
+                    editorCode = "// Gate: passes exec for a short window after a Charge Shot fires";
+                    setActionFunc(infoNode, "_is_firing",
+                        "    if (afn_fb_fire_timer > 0) {\n"
+                        "        // ... launch anim (e.g. Play Skel Anim(atk_spc_lnc),\n"
+                        "        //     or atk_spc_lnc_air behind an Is Airborne gate) ...\n"
+                        "    }\n"
+                        "    // --- Runtime (psv main.c focus-blast block) ---\n"
+                        "    // Fire Charge Shot sets afn_fb_fire_timer = 30 on launch; it counts\n"
+                        "    // down one per frame. Gate the launch pose with it (off On Update, the\n"
+                        "    // mirror of Is Charging) so it holds ~0.5s instead of flashing 1 frame.");
+                    break;
+                }
+                case VsNodeType::IsFalse: {
+                    editorCode = "// Gate: pass exec while a runtime boolean expression is FALSE";
+                    setActionFunc(infoNode, "_is_false",
+                        "    if (!(<condition expr>)) {\n"
+                        "        // ... downstream exec ...\n"
+                        "    }\n"
+                        "    // --- Runtime --- Condition compiled by emitIntExpr (see Branch).\n"
+                        "    // The 'if not' companion to Is True.");
+                    break;
+                }
+                case VsNodeType::SwitchInt: {
+                    editorCode = "// Route exec to one of 4 cases by integer value (+ Default)";
+                    setActionFunc(infoNode, "_switch_int",
+                        "    switch (<value expr>) {\n"
+                        "    case 0: { /* = 0 exec */ } break;\n"
+                        "    case 1: { /* = 1 exec */ } break;\n"
+                        "    case 2: { /* = 2 exec */ } break;\n"
+                        "    case 3: { /* = 3 exec */ } break;\n"
+                        "    default: { /* Default exec */ } break;\n"
+                        "    }\n"
+                        "    // --- Runtime --- Value data pin compiled by emitIntExpr (see Branch);\n"
+                        "    // an unconnected case pin emits no case label.");
+                    break;
+                }
+                case VsNodeType::Bool: {
+                    editorCode = "// Constant boolean (1/0)";
+                    setActionFunc(infoNode, "_bool",
+                        "    // --- Runtime --- inline data node, evaluated at call site as 1 or 0.");
+                    break;
+                }
+                case VsNodeType::Xor: {
+                    editorCode = "// Logical exclusive-or of A and B";
+                    setActionFunc(infoNode, "_xor",
+                        "    // --- Runtime --- inline data node: ((!!A) ^ (!!B)), evaluated at call site.");
                     break;
                 }
                 case VsNodeType::TurnPlayer: {
@@ -24215,12 +24285,13 @@ void FrameTick(float dt)
                         "    // --- Runtime --- gate node, Manhattan approx distance evaluated inline (3D scene)");
                     break;
                 case VsNodeType::IsTrue:
-                    editorCode = "// Gate: passes if value != 0";
+                    editorCode = "// Gate: passes if the condition expression != 0";
                     setActionFunc(infoNode, "_is_true",
-                        "    if ($0) {\n"
-                        "        /* downstream */\n"
+                        "    if (<condition expr>) {\n"
+                        "        // ... downstream exec ...\n"
                         "    }\n"
-                        "    // --- Runtime --- gate node, truthy data input gates downstream chain");
+                        "    // --- Runtime --- Condition data pin compiled by emitIntExpr (see\n"
+                        "    // Branch). Inverse is Is False -> if (!(<condition expr>)).");
                     break;
                 case VsNodeType::CursorUp:
                     editorCode = "// Move cursor to previous stop (wraps)";
@@ -25757,14 +25828,19 @@ void FrameTick(float dt)
                 // Logic
                 case VsNodeType::Branch:
                     editorCode =
-                        "// Conditional execution\n"
-                        "if (cond) execChain(truePin);\n"
-                        "else execChain(falsePin);";
+                        "// Conditional execution (If/Else)\n"
+                        "if (<condition expr>) True-chain; else False-chain;";
                     setActionFunc(infoNode, "_branch",
-                        "    int cond = findDataIn(0)->paramInt[0];\n"
-                        "    if (cond) { /* true chain */ }\n"
-                        "    else { /* false chain */ }\n"
-                        "    // --- Runtime --- gate node, exec routed to True/False output at codegen time");
+                        "    if (<condition expr>) {\n"
+                        "        // ... True exec (pin 0) ...\n"
+                        "    } else {\n"
+                        "        // ... False exec (pin 1) ...\n"
+                        "    }\n"
+                        "    // --- Runtime (node_script_emit emitIntExpr) ---\n"
+                        "    // The Condition data pin is compiled to a LIVE C expression:\n"
+                        "    // Compare -> (a OP b), And/Or/Not/Xor, Select, Get HP -> afn_hp[i],\n"
+                        "    // Get Flag -> flag bit, Is Key Down -> key_is_down(KEY_x),\n"
+                        "    // Get Player X/Y/Z, Get Score, Get Time, and arithmetic on them.");
                     break;
                 case VsNodeType::CompareVar:
                     editorCode =
@@ -26328,6 +26404,11 @@ void FrameTick(float dt)
                     case VsNodeType::ChargeShot:    suffix = "_charge_shot"; break;
                     case VsNodeType::IsCharging:    suffix = "_is_charging"; break;
                     case VsNodeType::FireChargeShot:suffix = "_fire_charge_shot"; break;
+                    case VsNodeType::IsFiring:      suffix = "_is_firing"; break;
+                    case VsNodeType::IsFalse:       suffix = "_is_false"; break;
+                    case VsNodeType::SwitchInt:     suffix = "_switch_int"; break;
+                    case VsNodeType::Bool:          suffix = "_bool"; break;
+                    case VsNodeType::Xor:           suffix = "_xor"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -26843,6 +26924,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ChargeShot].name)) addNodeAt(VsNodeType::ChargeShot);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsCharging].name)) addNodeAt(VsNodeType::IsCharging);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FireChargeShot].name)) addNodeAt(VsNodeType::FireChargeShot);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsFiring].name)) addNodeAt(VsNodeType::IsFiring);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP].name)) addNodeAt(VsNodeType::SetHP);
@@ -26986,8 +27068,13 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::AndLogic].name)) addNodeAt(VsNodeType::AndLogic);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::OrLogic].name)) addNodeAt(VsNodeType::OrLogic);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::NotLogic].name)) addNodeAt(VsNodeType::NotLogic);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Xor].name)) addNodeAt(VsNodeType::Xor);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Bool].name)) addNodeAt(VsNodeType::Bool);
                     ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Branch].name)) addNodeAt(VsNodeType::Branch);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsTrue].name)) addNodeAt(VsNodeType::IsTrue);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsFalse].name)) addNodeAt(VsNodeType::IsFalse);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SwitchInt].name)) addNodeAt(VsNodeType::SwitchInt);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsFlagSet].name)) addNodeAt(VsNodeType::IsFlagSet);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsHPZero].name)) addNodeAt(VsNodeType::IsHPZero);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNear].name)) addNodeAt(VsNodeType::IsNear);
@@ -27182,6 +27269,14 @@ void FrameTick(float dt)
                 ImGui::Text("Integer");
                 ImGui::DragInt("##Val", &n.paramInt[0], 0.5f);
                 break;
+            case VsNodeType::Bool: {
+                ImGui::Text("Bool");
+                bool bv = n.paramInt[0] != 0;
+                if (ImGui::Checkbox(bv ? "true##boolval" : "false##boolval", &bv)) {
+                    n.paramInt[0] = bv ? 1 : 0; sProjectDirty = true;
+                }
+                break;
+            }
             case VsNodeType::Float: {
                 ImGui::Text("Float");
                 float fv;

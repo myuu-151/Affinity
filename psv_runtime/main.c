@@ -1069,6 +1069,9 @@ float afn_fb_scale      = 0.05f;      // current render scale of the ball
 float afn_fb_dirx = 0, afn_fb_dirz = 1;   // forward direction (no-lock fallback)
 int   afn_fb_cur_dmg    = 0;          // damage this shot will deal (locked at fire)
 int   afn_fb_life       = 0;          // forward-shot lifetime countdown (frames)
+int   afn_fb_fire_timer = 0;          // Is Firing gate: frames remaining in the post-launch
+                                      // window (set on fire, counts down) so the launch anim
+                                      // can hold instead of flashing for one frame
 unsigned char afn_sprite_visible[NUM_SPRITES]={0};
 unsigned char afn_sprite_flip[NUM_SPRITES]={0}, afn_collision_enabled[NUM_SPRITES]={0};
 int afn_hp[NUM_SPRITES]={0}, afn_state_timer[NUM_SPRITES]={0};
@@ -2087,6 +2090,7 @@ int main(void)
                 fbAttachY = fbBaseY + fbOy;
                 fbAttachZ = fbBaseZ + fbOx*fbRz + fbOz*fbFz;
             }
+            if (afn_fb_fire_timer > 0) afn_fb_fire_timer--;   // Is Firing window counts down each frame
             if (afn_fb_active) {
                 // In flight: home toward the captured target's LIVE position
                 // (fly forward along the launch facing if nothing was locked).
@@ -2119,6 +2123,7 @@ int main(void)
                 afn_fb_dirx    = fbFx; afn_fb_dirz = fbFz;
                 afn_fb_cur_dmg = (int)(afn_fb_dmg_max * frac); if (afn_fb_cur_dmg < 1) afn_fb_cur_dmg = 1;
                 afn_fb_life    = (afn_fb_tgt >= 0) ? 240 : 90;   // homing gets longer to chase
+                afn_fb_fire_timer = 30;                          // Is Firing window: hold the launch anim ~0.5s
                 afn_fb_charging = 0; afn_fb_level = 0.0f;        // keep afn_fb_x/y/z + scale from the charge
             } else if (afn_fb_charge_req) {
                 // Charging: grow + carry the ball at chest height in front of the player.
