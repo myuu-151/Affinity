@@ -367,6 +367,36 @@ void startLoad(const std::string& path) {
     g_worker = std::thread(loadWorker, path);
 }
 
+// Reset the conversation WITHOUT reloading the model: wipe the KV cache and
+// re-decode just the system prompt (engine catalog), so grounding is kept but the
+// chat + accumulated context are gone. Re-decoding the catalog runs on the worker.
+void clearContextWorker() {
+    if (g_ctx) {
+        llama_memory_clear(llama_get_memory(g_ctx), true);
+        { std::lock_guard<std::mutex> lk(g_mtx); g_history.clear(); g_partial.clear(); g_insertStatus.clear(); }
+        g_convo.clear(); g_prevLen = 0;
+        std::string sys; { std::lock_guard<std::mutex> lk(g_mtx); sys = g_system; }
+        if (!sys.empty()) {
+            setStatus("Clearing context — reprocessing engine knowledge...");
+            g_convo.push_back({ "system", sys });
+            std::string formatted = applyTemplate(g_convo, false);
+            std::vector<llama_token> t = tokenize(formatted, true);
+            decodeTokens(t);
+            g_prevLen = (int)formatted.size();
+        }
+        setStatus("Context cleared (ready)");
+    }
+    g_loading = false;
+}
+
+void startClearContext() {
+    if (!g_ctx || g_loading || g_generating) return;
+    joinWorker();
+    g_loading = true;
+    setStatus("Clearing context...");
+    g_worker = std::thread(clearContextWorker);
+}
+
 // displayMsg is what the user typed (shown in the chat); modelMsg is what the model
 // actually receives (may have the selection snapshot prepended).
 void startAsk(const std::string& displayMsg, const std::string& modelMsg) {
@@ -425,16 +455,21 @@ void RenderPanel(bool* p_open) {
 
     bool busy = IsBusy();
     ImGui::BeginDisabled(busy);
-    ImGui::SetNextItemWidth(-160.0f);
+    ImGui::SetNextItemWidth(-218.0f);
     ImGui::InputText("##modelpath", g_modelPath, sizeof(g_modelPath));
     ImGui::EndDisabled();
     ImGui::SameLine();
     // Settings stays enabled even while busy: the compute choice only applies on
     // the next Load, and locking it during a slow load is what trapped users on CPU.
-    if (ImGui::Button("Settings", ImVec2(86, 0))) ImGui::OpenPopup("AsstSettings");
+    if (ImGui::Button("Settings", ImVec2(80, 0))) ImGui::OpenPopup("AsstSettings");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(busy || g_ctx == nullptr);
+    if (ImGui::Button("Clear", ImVec2(54, 0))) startClearContext();   // reset chat + context, keep model
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clear the conversation and reset the model's context\n(keeps the model loaded + its engine knowledge).");
     ImGui::SameLine();
     ImGui::BeginDisabled(busy);
-    if (ImGui::Button("Load", ImVec2(60, 0))) {
+    if (ImGui::Button("Load", ImVec2(54, 0))) {
 #ifdef _WIN32
         if (pickGguf(g_modelPath, sizeof(g_modelPath))) startLoad(g_modelPath);   // browse for a .gguf
 #else
