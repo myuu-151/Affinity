@@ -5220,7 +5220,8 @@ static std::string BuildLLMGrammar() {
     g += "fence ::= \"```\"\n";
     g += std::string("stmt ::= node | link | set | setbit") + (haveClips ? " | clip" : "") + "\n";
     g += "node ::= \"bpVsNode=\" int \",\" ntype \",\" int \",\" int \",\" int \",\" int \",\" int \",\" int \",\" int\n";
-    g += "link ::= \"bpVsLink=\" int \",\" int \",\" int \"|\" int \",\" int \",\" int\n";
+    g += "link ::= \"bpVsLink=\" int \",\" pintype \",\" int \"|\" int \",\" pintype \",\" int\n";
+    g += "pintype ::= \"0\" | \"1\" | \"2\" | \"3\"\n";   // pin TYPE must be 0=execOut 1=execIn 2=dataOut 3=dataIn (not a node id)
     g += "set ::= \"bpVsSet=\" int \",\" int \",\" int\n";   // in-place edit of an existing node's param
     g += "setbit ::= \"bpVsSetBit=\" int \",\" int \",\" int \",\" int\n";   // flip one bit of a packed param
     if (haveClips) g += "clip ::= \"bpVsNodeClip=\" int \"|\" clipname\n";
