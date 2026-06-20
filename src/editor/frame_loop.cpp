@@ -4560,6 +4560,16 @@ static int VsFindNode(int id) {
     return -1;
 }
 
+// Self-heal a stale sVsNextId: ensure the next allocated node id is past
+// every existing node, so a freshly placed node can never collide with one
+// already in the graph. A stale stored nextId (e.g. a hand-edited project, or
+// nodes appended without bumping it) otherwise hands out a duplicate id, and
+// delete-by-id then removes BOTH nodes. Call after loading any graph.
+static void VsClampNextId() {
+    for (auto& nd : sVsNodes)
+        if (nd.id >= sVsNextId) sVsNextId = nd.id + 1;
+}
+
 // Get pin screen position given canvas origin and zoom
 static ImVec2 VsPinPos(const VsNode& n, int pinType, int pinIdx, ImVec2 canvasOrig, float zoom) {
     float nx = canvasOrig.x + (n.x + sVsPanX) * zoom;
@@ -5061,6 +5071,7 @@ static void LoadMapSceneState(const MapScene& sc)
     sVsAnnotations = sc.vsAnnotations;
     sVsGroupPins = sc.vsGroupPins;
     sVsNextId = sc.vsNextId;
+    VsClampNextId();
     sVsPanX = sc.vsPanX;
     sVsPanY = sc.vsPanY;
     sVsZoom = sc.vsZoom;
@@ -5266,6 +5277,7 @@ static void LoadM7SceneState(const MapScene& sc)
     sVsAnnotations = sc.vsAnnotations;
     sVsGroupPins = sc.vsGroupPins;
     sVsNextId = sc.vsNextId;
+    VsClampNextId();
     sVsPanX = sc.vsPanX;
     sVsPanY = sc.vsPanY;
     sVsZoom = sc.vsZoom;
@@ -26740,6 +26752,13 @@ void FrameTick(float dt)
                 n.x = (sVsContextMenuPos.x - canvasOrig.x) / zoom - sVsPanX;
                 n.y = (sVsContextMenuPos.y - canvasOrig.y) / zoom - sVsPanY;
                 n.groupId = sVsEditingGroup;
+                // Make the freshly placed node the SOLE selection. Without this,
+                // a previously clicked node keeps its nd.selected flag, and the
+                // Delete handler (which unions nd.selected with sVsSelected)
+                // would then delete that earlier node too.
+                for (auto& nd : sVsNodes) nd.selected = false;
+                for (auto& ann : sVsAnnotations) ann.selected = false;
+                n.selected = true;
                 sVsNodes.push_back(n);
                 sVsSelected = (int)sVsNodes.size() - 1;
                 // Auto-wire if we have a pending pin from link drag
@@ -27666,7 +27685,7 @@ void FrameTick(float dt)
                     }
                     BlueprintAsset& bp = sBlueprintAssets[sSelectedBlueprint];
                     sVsNodes = bp.nodes; sVsLinks = bp.links; sVsAnnotations = bp.annotations;
-                    sVsGroupPins = bp.groupPins; sVsNextId = bp.nextId;
+                    sVsGroupPins = bp.groupPins; sVsNextId = bp.nextId; VsClampNextId();
                     sVsPanX = bp.panX; sVsPanY = bp.panY; sVsZoom = bp.zoom;
                     sVsEditSource = VsEditSource::Blueprint;
                     sVsEditBlueprintIdx = sSelectedBlueprint;
@@ -27743,7 +27762,7 @@ void FrameTick(float dt)
                                 SaveMapSceneState(sMapScenes[sMapSelectedScene]);
                         }
                         sVsNodes = bp.nodes; sVsLinks = bp.links; sVsAnnotations = bp.annotations;
-                        sVsGroupPins = bp.groupPins; sVsNextId = bp.nextId;
+                        sVsGroupPins = bp.groupPins; sVsNextId = bp.nextId; VsClampNextId();
                         sVsPanX = bp.panX; sVsPanY = bp.panY; sVsZoom = bp.zoom;
                         sVsEditSource = VsEditSource::Blueprint;
                         sVsEditBlueprintIdx = bi;
