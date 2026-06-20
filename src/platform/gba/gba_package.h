@@ -27,6 +27,8 @@ struct GBASpriteExport
     int   parentIdx = -1; // parent sprite index (-1 = standalone)
     float offsetX = 0, offsetY = 0, offsetZ = 0; // offset from parent
     int   boneIdx = -1;   // attached sub-sprite: ride this parent-rig bone (-1 = parent origin)
+    int   driveElementIdx = -1; // attached sub-sprite: run this HUD element's keyframe animation
+                                // (rotation/scale) on the sub-sprite's own graphic (-1 = none)
     bool  forceStatic = false; // force static rendering (ignore directions)
     bool  grounded = false;    // stay on ground (Y=0) instead of following parent Y
     bool  startHidden = false; // start invisible; a Cast Effect node shows + one-shots it
@@ -78,6 +80,7 @@ struct GBASpriteFrameExport
 {
     uint8_t pixels[kExportMaxFrameSize * kExportMaxFrameSize]; // palette indices 0-15
     int width, height;
+    std::vector<uint8_t> alpha; // optional per-pixel alpha (w*h); empty = binary cutout (PSV soft alpha)
 };
 
 // Sprite asset animation for GBA export
@@ -100,6 +103,7 @@ struct GBASpriteAssetExport
     // PSV-only higher-color path (psvColors = 32/64/128). When > 16 the PSV
     // exporter emits from psvPalette/psvFrames instead of the 16-color palette.
     int psvColors = 16;
+    bool useAlpha = false;   // PSV: emit per-pixel alpha from frames[].alpha (soft edges)
     uint32_t psvPalette[128] = {};
     std::vector<GBASpriteFrameExport> psvFrames;
     std::vector<GBASpriteFrameExport> frames;

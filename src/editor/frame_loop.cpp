@@ -299,6 +299,73 @@ static void RequantizeAssetPSV(SpriteAsset& a) {
     stbi_image_free(img);
 }
 
+// Rebuild each frame's pixels + per-pixel alpha from the source PNG to match the
+// asset's Use Alpha setting (PSV soft edges). ON: keep EVERY non-transparent
+// pixel (nearest palette color + its real alpha) so a feathered/glow falloff
+// survives — the normal import's 50% cut would have dropped the faint edge and
+// left a jagged disc. OFF: restore the binary look (alpha<128 -> transparent)
+// and clear the alpha plane. Re-indexes against the frame's existing palette via
+// nearest match; rebuilds both the 16-color frames and the psvFrames.
+static void RecaptureSpriteAlpha(SpriteAsset& a) {
+    if (a.sourceImagePath.empty()) {
+        for (auto& f : a.frames)    f.alpha.clear();
+        for (auto& f : a.psvFrames) f.alpha.clear();
+        return;
+    }
+    int imgW, imgH, ch;
+    unsigned char* img = stbi_load(a.sourceImagePath.c_str(), &imgW, &imgH, &ch, 4);
+    if (!img) return;
+    int fw = a.stripFrameW > 0 ? a.stripFrameW : imgW;
+    int fh = a.stripFrameH > 0 ? a.stripFrameH : imgH;
+    if (fw > kMaxFrameSize) fw = kMaxFrameSize;
+    if (fh > kMaxFrameSize) fh = kMaxFrameSize;
+    int framesX = imgW / fw, framesY = imgH / fh;
+    if (framesX < 1) framesX = 1;
+    if (framesY < 1) framesY = 1;
+    int cut = a.useAlpha ? 1 : 128;   // <cut alpha -> fully transparent (index 0)
+    auto fill = [&](std::vector<SpriteFrame>& frames, const uint32_t* pal, int palN) {
+        for (int fy = 0; fy < framesY; fy++)
+            for (int fx = 0; fx < framesX; fx++) {
+                int fi = fy * framesX + fx;
+                if (fi >= (int)frames.size()) continue;
+                SpriteFrame& f = frames[fi];
+                int w = f.width, h = f.height;
+                if (a.useAlpha) f.alpha.assign((size_t)w * h, 255); else f.alpha.clear();
+                for (int py = 0; py < h; py++)
+                    for (int px = 0; px < w; px++) {
+                        int sx = fx * fw + px, sy = fy * fh + py;
+                        if (sx >= imgW || sy >= imgH) {
+                            f.pixels[py * kMaxFrameSize + px] = 0;
+                            if (a.useAlpha) f.alpha[py * w + px] = 0;
+                            continue;
+                        }
+                        const unsigned char* p = img + (sy * imgW + sx) * 4;
+                        if (p[3] < cut) {   // transparent
+                            f.pixels[py * kMaxFrameSize + px] = 0;
+                            if (a.useAlpha) f.alpha[py * w + px] = 0;
+                            continue;
+                        }
+                        // Nearest opaque palette entry (index 0 reserved for transparent).
+                        int best = 1, bestd = 0x7FFFFFFF;
+                        for (int c = 1; c < palN; c++) {
+                            uint32_t pc = pal[c];
+                            if ((pc >> 24) == 0) continue;   // unused slot
+                            int dr = (int)p[0] - (int)(pc & 0xFF);
+                            int dg = (int)p[1] - (int)((pc >> 8) & 0xFF);
+                            int db = (int)p[2] - (int)((pc >> 16) & 0xFF);
+                            int d = dr*dr + dg*dg + db*db;
+                            if (d < bestd) { bestd = d; best = c; }
+                        }
+                        f.pixels[py * kMaxFrameSize + px] = (uint8_t)best;
+                        if (a.useAlpha) f.alpha[py * w + px] = p[3];
+                    }
+            }
+    };
+    fill(a.frames,    a.palette,    16);
+    fill(a.psvFrames, a.psvPalette, 128);
+    stbi_image_free(img);
+}
+
 // Dummy tileset: 16 colors for the palette display
 static uint32_t sPalette[16] = {
     0xFF000000, 0xFF1D2B53, 0xFF7E2553, 0xFF008751,
@@ -4706,6 +4773,7 @@ static void RebuildTmSpriteTextures()
         {
             const SpriteFrame& frame = sa.frames[0];
             int fw = frame.width, fh = frame.height;
+            bool softAlpha = sa.useAlpha && (int)frame.alpha.size() >= fw * fh;
             std::vector<uint32_t> rgba(fw * fh, 0);
             for (int py = 0; py < fh; py++)
                 for (int px = 0; px < fw; px++)
@@ -4713,7 +4781,10 @@ static void RebuildTmSpriteTextures()
                     uint8_t palIdx = frame.pixels[py * kMaxFrameSize + px];
                     if (palIdx == 0) continue;
                     uint32_t c = sa.palette[palIdx & 0xF];
-                    rgba[py * fw + px] = c | 0xFF000000;
+                    // PSV soft alpha preview (WYSIWYG): use the per-pixel alpha
+                    // so the thumbnail/canvas shows the feathered edge, not a disc.
+                    uint32_t av = softAlpha ? (uint32_t)frame.alpha[py * fw + px] : 0xFFu;
+                    rgba[py * fw + px] = (c & 0x00FFFFFFu) | (av << 24);
                 }
             unsigned int tex = 0;
             glGenTextures(1, &tex);
@@ -6947,10 +7018,11 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "subSpriteCount=%d\n", sp.subSpriteCount);
             for (int si = 0; si < sp.subSpriteCount; si++) {
                 const auto& sub = sp.subSprites[si];
-                fprintf(f, "subSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d,%d\n",
+                fprintf(f, "subSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d,%d,%d,%d\n",
                     sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
                     sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
-                    sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0, sub.hidden ? 1 : 0, sub.boneIdx);
+                    sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0, sub.hidden ? 1 : 0, sub.boneIdx,
+                    sub.driveThroughElement ? 1 : 0, sub.driveElementIdx);
             }
         }
         // Grind rail path (per mesh object). One header + one line per point.
@@ -6973,6 +7045,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "asset_begin=%s\n", sa.name.c_str());
         fprintf(f, "baseSize=%d\n", sa.baseSize);
         fprintf(f, "psvColors=%d\n", sa.psvColors);
+        fprintf(f, "useAlpha=%d\n", sa.useAlpha ? 1 : 0);
         if (!sa.sourceImagePath.empty())
             fprintf(f, "srcImg=%s\n", sa.sourceImagePath.c_str());
         fprintf(f, "palBank=%d\n", sa.palBank);
@@ -7448,10 +7521,11 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "msSubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si = 0; si < sp.subSpriteCount; si++) {
                     const auto& sub = sp.subSprites[si];
-                    fprintf(f, "msSubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d,%d\n",
+                    fprintf(f, "msSubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d,%d,%d,%d\n",
                         sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
                         sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
-                        sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0, sub.hidden ? 1 : 0, sub.boneIdx);
+                        sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0, sub.hidden ? 1 : 0, sub.boneIdx,
+                        sub.driveThroughElement ? 1 : 0, sub.driveElementIdx);
                 }
             }
             // Grind rail path (per mesh object) — 3D/Map scenes round-trip here.
@@ -7594,10 +7668,11 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "m7SubSpriteCount=%d\n", sp.subSpriteCount);
                 for (int si2 = 0; si2 < sp.subSpriteCount; si2++) {
                     const auto& sub = sp.subSprites[si2];
-                    fprintf(f, "m7SubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d,%d\n",
+                    fprintf(f, "m7SubSprite=%d,%d,%d,%.6f,%.6f,%.6f,%d,%.6f,%d,%d,%d,%d,%d,%d\n",
                         sub.assetIdx, sub.animIdx, sub.animEnabled ? 1 : 0,
                         sub.offsetX, sub.offsetY, sub.offsetZ, sub.drawOrder, sub.scale,
-                        sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0, sub.hidden ? 1 : 0, sub.boneIdx);
+                        sub.forceStatic ? 1 : 0, sub.grounded ? 1 : 0, sub.hidden ? 1 : 0, sub.boneIdx,
+                        sub.driveThroughElement ? 1 : 0, sub.driveElementIdx);
                 }
             }
             // Grind rail path (per mesh object) — M7 scenes round-trip here.
@@ -8164,10 +8239,10 @@ static bool LoadProject(const std::string& path)
                     if (sp2.subSprites[si].assetIdx != -1) loaded++;
                 if (loaded < sp2.subSpriteCount) {
                     auto& sub = sp2.subSprites[loaded];
-                    int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0, fBone = -1; float sScale = 1.0f;
-                    int m = sscanf(line + 10, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d,%d",
+                    int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0, fBone = -1, fDrive = 0, fDriveElem = -1; float sScale = 1.0f;
+                    int m = sscanf(line + 10, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d,%d",
                         &sub.assetIdx, &sub.animIdx, &aEn,
-                        &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden, &fBone);
+                        &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden, &fBone, &fDrive, &fDriveElem);
                     sub.animEnabled = (aEn != 0);
                     sub.drawOrder = (m >= 7) ? dOrder : 1;
                     sub.scale = (m >= 8) ? sScale : 1.0f;
@@ -8175,6 +8250,8 @@ static bool LoadProject(const std::string& path)
                     sub.grounded = (m >= 10) ? (fGrounded != 0) : false;
                     sub.hidden = (m >= 11) ? (fHidden != 0) : false;
                     sub.boneIdx = (m >= 12) ? fBone : -1;
+                    sub.driveThroughElement = (m >= 13) ? (fDrive != 0) : false;
+                    sub.driveElementIdx = (m >= 14) ? fDriveElem : -1;
                 }
             }
             else if (strncmp(line, "railPath=", 9) == 0 && sSpriteCount > 0) {
@@ -8226,6 +8303,7 @@ static bool LoadProject(const std::string& path)
                     int iv; unsigned int uv; float fv;
                     if (sscanf(line, "baseSize=%d", &iv) == 1) sa.baseSize = iv;
                     else if (sscanf(line, "psvColors=%d", &iv) == 1) sa.psvColors = iv;
+                    else if (sscanf(line, "useAlpha=%d", &iv) == 1) sa.useAlpha = (iv != 0);
                     else if (strncmp(line, "srcImg=", 7) == 0) sa.sourceImagePath = line + 7;
                     else if (sscanf(line, "palBank=%d", &iv) == 1) sa.palBank = iv;
                     else if (sscanf(line, "paletteSrc=%d", &iv) == 1) sa.paletteSrc = iv;
@@ -8327,6 +8405,7 @@ static bool LoadProject(const std::string& path)
                     }
                 }
                 if (sa.psvColors > 16) RequantizeAssetPSV(sa);   // rebuild psvFrames from the source PNG
+                if (sa.useAlpha) RecaptureSpriteAlpha(sa);        // re-derive per-pixel alpha from the source PNG
                 sSpriteAssets.push_back(sa);
                 sAssetDirSprites.push_back({});
                 // Load directional sprites for all sets
@@ -9426,10 +9505,10 @@ static bool LoadProject(const std::string& path)
                         if (sp2.subSprites[si].assetIdx != -1) loaded++;
                     if (loaded < sp2.subSpriteCount) {
                         auto& sub = sp2.subSprites[loaded];
-                        int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0, fBone = -1; float sScale = 1.0f;
-                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d,%d",
+                        int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0, fBone = -1, fDrive = 0, fDriveElem = -1; float sScale = 1.0f;
+                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d,%d",
                             &sub.assetIdx, &sub.animIdx, &aEn,
-                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden, &fBone);
+                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden, &fBone, &fDrive, &fDriveElem);
                         sub.animEnabled = (aEn != 0);
                         sub.drawOrder = (m >= 7) ? dOrder : 1;
                         sub.scale = (m >= 8) ? sScale : 1.0f;
@@ -9437,6 +9516,8 @@ static bool LoadProject(const std::string& path)
                         sub.grounded = (m >= 10) ? (fGrounded != 0) : false;
                         sub.hidden = (m >= 11) ? (fHidden != 0) : false;
                         sub.boneIdx = (m >= 12) ? fBone : -1;
+                        sub.driveThroughElement = (m >= 13) ? (fDrive != 0) : false;
+                        sub.driveElementIdx = (m >= 14) ? fDriveElem : -1;
                     }
                 }
             }
@@ -9899,10 +9980,10 @@ static bool LoadProject(const std::string& path)
                         if (sp2.subSprites[si].assetIdx != -1) loaded++;
                     if (loaded < sp2.subSpriteCount) {
                         auto& sub = sp2.subSprites[loaded];
-                        int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0, fBone = -1; float sScale = 1.0f;
-                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d,%d",
+                        int aEn = 1, dOrder = 1, fStatic = 0, fGrounded = 0, fHidden = 0, fBone = -1, fDrive = 0, fDriveElem = -1; float sScale = 1.0f;
+                        int m = sscanf(line + 12, "%d,%d,%d,%f,%f,%f,%d,%f,%d,%d,%d,%d,%d,%d",
                             &sub.assetIdx, &sub.animIdx, &aEn,
-                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden, &fBone);
+                            &sub.offsetX, &sub.offsetY, &sub.offsetZ, &dOrder, &sScale, &fStatic, &fGrounded, &fHidden, &fBone, &fDrive, &fDriveElem);
                         sub.animEnabled = (aEn != 0);
                         sub.drawOrder = (m >= 7) ? dOrder : 1;
                         sub.scale = (m >= 8) ? sScale : 1.0f;
@@ -9910,6 +9991,8 @@ static bool LoadProject(const std::string& path)
                         sub.grounded = (m >= 10) ? (fGrounded != 0) : false;
                         sub.hidden = (m >= 11) ? (fHidden != 0) : false;
                         sub.boneIdx = (m >= 12) ? fBone : -1;
+                        sub.driveThroughElement = (m >= 13) ? (fDrive != 0) : false;
+                        sub.driveElementIdx = (m >= 14) ? fDriveElem : -1;
                     }
                 }
             }
@@ -13216,6 +13299,9 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                 const SpriteFrame& dispFrame = usePsv ? asset.psvFrames[sSelectedFrame] : frame;
                 const uint32_t* editPal = usePsv ? asset.psvPalette : asset.palette;
                 int palMask = usePsv ? 127 : 15;
+                // PSV soft alpha preview: blend the per-pixel alpha so the canvas
+                // shows the feathered edge fading out (over the dark grid), WYSIWYG.
+                bool softA = asset.useAlpha && (int)dispFrame.alpha.size() >= fw * fh;
                 for (int py = 0; py < fh; py++)
                     for (int px = 0; px < fw; px++)
                     {
@@ -13224,9 +13310,10 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                         uint32_t r = (col >> 0) & 0xFF;
                         uint32_t g = (col >> 8) & 0xFF;
                         uint32_t b = (col >> 16) & 0xFF;
+                        uint32_t a8 = (softA && palIdx != 0) ? (uint32_t)dispFrame.alpha[(size_t)py * fw + px] : 0xFFu;
                         sFrameEditRgba[(size_t)py * fw + px] = (palIdx == 0)
                             ? 0xFF1A1A1Au
-                            : (0xFF000000u | (b << 16) | (g << 8) | r);
+                            : ((a8 << 24) | (b << 16) | (g << 8) | r);
                     }
                 if (!sFrameEditTex) glGenTextures(1, &sFrameEditTex);
                 glBindTexture(GL_TEXTURE_2D, sFrameEditTex);
@@ -13626,6 +13713,16 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             ImGui::PopItemWidth();
             if (asset.psvColors > 16 && asset.sourceImagePath.empty())
                 ImGui::TextDisabled("Import a PNG to use >16 colors.");
+            // PSV soft alpha: preserve the PNG's per-pixel alpha (feathered/glow
+            // edges blend) instead of the hard 50% cutout. Off = crisp pixel art.
+            if (ImGui::Checkbox("Use Alpha##psvAlpha", &asset.useAlpha)) {
+                RecaptureSpriteAlpha(asset);   // capture (or clear) per-pixel alpha from the source PNG
+                sTmSpriteTexCount = -1;        // refresh sprite thumbnails
+                sProjectDirty = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Preserve the source PNG's per-pixel alpha so soft/feathered edges (glows, auras) blend on the Vita, instead of the binary 50%% transparency cutout. Needs the source PNG available (re-import if missing).");
+            if (asset.useAlpha && asset.sourceImagePath.empty())
+                ImGui::TextDisabled("Import a PNG to capture alpha.");
         }
         else
         {
@@ -13914,6 +14011,10 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                             asset.frames.push_back(frame);
                         }
                     }
+                    // PSV soft alpha: if this asset opted in, re-process the
+                    // frames to keep the feathered edge + per-pixel alpha (a
+                    // re-import of an alpha sprite stays soft).
+                    if (asset.useAlpha) RecaptureSpriteAlpha(asset);
 
                     // Add default animation if none exist
                     if (asset.anims.empty())
@@ -14786,6 +14887,24 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
                     ImGui::EndCombo();
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pin to a rig bone so the sprite rides that joint as it animates (e.g. a hand). X/Y/Z become offsets from the bone. Player rig only for now.");
+            }
+            // Drive through element: keep this sub-sprite's own graphic + exact 3D
+            // (bone) position, but run a HUD element's keyframe animation
+            // (rotation/scale) on it — e.g. a spin authored as r0->r360 keyframes.
+            if (ImGui::Checkbox("Drive through element##sub", &sub.driveThroughElement)) sProjectDirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Run a HUD element's keyframe animation (rotation/scale) on this sub-sprite, keeping its own graphic and exact 3D/bone position. Author the spin as element rotation keyframes (e.g. r0 -> r360, Loop).");
+            if (sub.driveThroughElement) {
+                const char* elPrev = (sub.driveElementIdx >= 0 && sub.driveElementIdx < (int)sHudElements.size())
+                    ? sHudElements[sub.driveElementIdx].name : "(pick element)";
+                if (ImGui::BeginCombo("Element##subdrive", elPrev)) {
+                    if (ImGui::Selectable("(none)##sdrvnone", sub.driveElementIdx < 0)) { sub.driveElementIdx = -1; sProjectDirty = true; }
+                    for (int ei = 0; ei < (int)sHudElements.size(); ei++) {
+                        std::string lbl = std::string(sHudElements[ei].name) + "##sdrv";
+                        if (ImGui::Selectable(lbl.c_str(), sub.driveElementIdx == ei)) { sub.driveElementIdx = ei; sProjectDirty = true; }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("The element whose first animation layer (rotation/scale keyframes) drives this sub-sprite. The element itself need not be shown — only its animation is used.");
             }
             // Animation selector for sub-sprite
             if (sub.assetIdx >= 0 && sub.assetIdx < (int)sSpriteAssets.size()) {
@@ -16896,6 +17015,8 @@ void FrameTick(float dt)
                             subSe.offsetY = sub.offsetY;
                             subSe.offsetZ = sub.offsetZ;
                             subSe.boneIdx = sub.boneIdx;
+                            subSe.driveElementIdx = (sub.driveThroughElement && sub.driveElementIdx >= 0)
+                                                  ? sub.driveElementIdx : -1;
                             if (sub.assetIdx >= 0 && sub.assetIdx < (int)sSpriteAssets.size())
                                 subSe.palIdx = sSpriteAssets[sub.assetIdx].palBank;
                             else
@@ -16965,10 +17086,12 @@ void FrameTick(float dt)
                                 ef.pixels[py * kExportMaxFrameSize + px] = fr.pixels[py * kMaxFrameSize + px];
                         ef.width = fr.width;
                         ef.height = fr.height;
+                        if (sa.useAlpha) ef.alpha = fr.alpha;   // PSV soft alpha (per-pixel)
                         ea.frames.push_back(ef);
                     }
                     // PSV higher-color path (parallel to the 16-color frames).
                     ea.psvColors = sa.psvColors;
+                    ea.useAlpha = sa.useAlpha;
                     memcpy(ea.psvPalette, sa.psvPalette, sizeof(ea.psvPalette));
                     for (const auto& fr : sa.psvFrames)
                     {
@@ -16979,6 +17102,7 @@ void FrameTick(float dt)
                                 ef.pixels[py * kExportMaxFrameSize + px] = fr.pixels[py * kMaxFrameSize + px];
                         ef.width = fr.width;
                         ef.height = fr.height;
+                        if (sa.useAlpha) ef.alpha = fr.alpha;   // PSV soft alpha (per-pixel)
                         ea.psvFrames.push_back(ef);
                     }
                     for (const auto& an : sa.anims)

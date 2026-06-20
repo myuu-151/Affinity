@@ -42,6 +42,10 @@ struct SpriteFrame
     uint8_t pixels[kMaxFrameSize * kMaxFrameSize] = {}; // palette indices 0-15
     int width  = 8;
     int height = 8;
+    // Optional per-pixel alpha (row-major width*height, 0-255), captured at
+    // import when the asset's Use Alpha is on. Empty = no soft alpha: the pixel
+    // is fully opaque unless its palette index is 0 (the binary cutout).
+    std::vector<uint8_t> alpha;
 };
 
 // Game states that can be assigned to animation slots
@@ -101,6 +105,12 @@ struct SpriteAsset
     int psvColors = 16;            // 16 = use the normal 16-color path (default)
     uint32_t psvPalette[128] = {};
     std::vector<SpriteFrame> psvFrames;
+
+    // PSV soft alpha: when on, import captures the source PNG's per-pixel alpha
+    // into each frame's alpha[] and the PSV exporter emits it (the runtime alpha-
+    // blends), so feathered/glowing edges fade smoothly instead of the binary
+    // 50% cutout. Off = today's crisp pixel-art behavior (no alpha plane).
+    bool useAlpha = false;
 
     std::vector<SpriteFrame> frames;
     std::vector<SpriteAnim>  anims;
@@ -415,6 +425,10 @@ struct FloorSprite
                                    // shows it, plays its anim once, then auto-hides it
         int   boneIdx = -1;        // -1 = anchor to parent origin; >=0 = ride this rig bone
                                    // (player rig only for now); offset X/Y/Z is bone-relative
+        bool  driveThroughElement = false; // run a HUD element's keyframe animation
+                                   // (rotation/scale) on this sub-sprite's own graphic,
+                                   // keeping its exact 3D/bone position
+        int   driveElementIdx = -1;        // which HUD element supplies the animation (-1 = none)
     };
     static constexpr int kMaxSubSprites = 4;
     SubSprite subSprites[kMaxSubSprites];

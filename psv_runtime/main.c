@@ -428,6 +428,10 @@ static void sky_render(float camAngle) {
 
 #ifdef AFN_HAS_SPRITES
 static float  s_sprFrame[AFN_SPR_INST_COUNT];
+#if defined(AFN_HAS_SPR_DRIVE_ELEM) && defined(AFN_HAS_HUD_ANIM)
+static int    s_driveFrame[AFN_SPR_INST_COUNT] = {0};   // drive-through-element: per-instance anim frame
+static int    s_driveTick[AFN_SPR_INST_COUNT]  = {0};   // and sub-frame tick
+#endif
 static GLuint s_sprTex[sizeof(afn_spr_frame_ptrs)/sizeof(afn_spr_frame_ptrs[0])];
 static void billboards_init(void) {
     int nf = (int)(sizeof(afn_spr_frame_ptrs)/sizeof(afn_spr_frame_ptrs[0]));
@@ -538,6 +542,53 @@ static void billboards_render(const float* view, float camAngle, float camEyeX, 
             float Uwx = view[1], Uwy = view[5], Uwz = view[9];
             float cyq = py + sz * 0.5f;   // same vertical span as the Y-quad at level pitch
             float hh = sz * 0.5f;
+#if defined(AFN_HAS_SPR_DRIVE_ELEM) && defined(AFN_HAS_HUD_ANIM)
+            // Drive through element: run the linked HUD element's first anim layer
+            // (rotation + scale keyframes) on this sub-sprite, keeping its own
+            // graphic + exact position. Spin = roll the right/up basis; scale = grow hw/hh.
+            if (afn_spr_drive_elem[i] >= 0) {
+                int de = afn_spr_drive_elem[i];
+                int dl = (de < (int)(sizeof(afn_hud_elem_first_layer)/sizeof(afn_hud_elem_first_layer[0])))
+                       ? afn_hud_elem_first_layer[de] : -1;
+                if (dl >= 0) {
+                    const AfnHudLayer* L = &afn_hud_layer[dl];
+                    int dspd = L->speed < 1 ? 1 : L->speed;
+                    if (++s_driveTick[i] >= dspd) {
+                        s_driveTick[i] = 0;
+                        s_driveFrame[i]++;
+                        if (L->length > 0 && s_driveFrame[i] >= L->length)
+                            s_driveFrame[i] = L->loop ? 0 : (L->length - 1);
+                    }
+                    int ph = s_driveFrame[i], pI = -1, nI = -1;
+                    for (int ki = 0; ki < L->kfCount; ki++) {
+                        const AfnHudKf* k = &afn_hud_kf[L->kfStart + ki];
+                        if (k->frame <= ph) pI = ki;
+                        if (k->frame > ph && nI < 0) nI = ki;
+                    }
+                    if (pI < 0) pI = (nI < 0 ? 0 : nI);
+                    if (nI < 0) nI = pI;
+                    const AfnHudKf* A = &afn_hud_kf[L->kfStart + pI];
+                    const AfnHudKf* B = &afn_hud_kf[L->kfStart + nI];
+                    float frac = 0.0f;
+                    if (A != B && L->interp != 0) {
+                        float span = (float)(B->frame - A->frame);
+                        frac = span > 0 ? (float)(ph - A->frame) / span : 0.0f;
+                        if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+                        if (L->interp == 2) frac = frac * frac * (3.0f - 2.0f * frac);
+                    }
+                    float rotRad = (A->rot + (B->rot - A->rot) * frac) * 0.01745329f;
+                    float dsc = ((A->sx + (B->sx - A->sx) * frac) + (A->sy + (B->sy - A->sy) * frac)) / 512.0f;
+                    if (dsc > 0.0f) { hw *= dsc; hh *= dsc; }
+                    if (rotRad != 0.0f) {
+                        float ca = cosf(rotRad), sa = sinf(rotRad);
+                        float nRx = Rwx*ca + Uwx*sa, nRy = Rwy*ca + Uwy*sa, nRz = Rwz*ca + Uwz*sa;
+                        float nUx = Uwx*ca - Rwx*sa, nUy = Uwy*ca - Rwy*sa, nUz = Uwz*ca - Rwz*sa;
+                        Rwx = nRx; Rwy = nRy; Rwz = nRz;
+                        Uwx = nUx; Uwy = nUy; Uwz = nUz;
+                    }
+                }
+            }
+#endif
             AfnVertex t[4] = {
                 { 0,0, 0xFFFFFFFFu, px - Rwx*hw + Uwx*hh, cyq - Rwy*hw + Uwy*hh, pz - Rwz*hw + Uwz*hh },
                 { 1,0, 0xFFFFFFFFu, px + Rwx*hw + Uwx*hh, cyq + Rwy*hw + Uwy*hh, pz + Rwz*hw + Uwz*hh },

@@ -696,6 +696,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
         std::vector<KF> kfs;
         std::vector<LY> layers;
         std::vector<int> pieceLayer(pieces.size(), -1);
+        std::vector<int> elemFirstLayer(elems.size(), -1);  // element idx -> its first global anim layer (drive-through)
         for (size_t ei = 0; ei < elems.size(); ei++) {
             for (const auto& lay : elems[ei].animLayers) {
                 if (lay.keyframes.empty()) continue;
@@ -710,6 +711,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
                 L.kfCount = (int)kfs.size() - L.kfStart;
                 int li = (int)layers.size();
                 layers.push_back(L);
+                if (elemFirstLayer[ei] < 0) elemFirstLayer[ei] = li;   // first anim layer of this element
                 for (const auto& it : lay.items)
                     if (it.type == 0 && it.index >= 0 && it.index < es[ei].pC)
                         pieceLayer[es[ei].pS + it.index] = li;
@@ -734,6 +736,12 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
             f << "static const short afn_hud_piece_layer[" << (pieces.empty()?1:pieces.size()) << "] = {";
             for (size_t i = 0; i < pieceLayer.size(); i++) f << pieceLayer[i] << ",";
             if (pieces.empty()) f << "-1,";
+            f << "};\n";
+            // Element -> first anim layer, for attached sub-sprites that "drive through
+            // element" (run an element's rotation/scale keyframes on their own graphic).
+            f << "static const short afn_hud_elem_first_layer[" << (elemFirstLayer.empty()?1:elemFirstLayer.size()) << "] = {";
+            for (size_t i = 0; i < elemFirstLayer.size(); i++) f << elemFirstLayer[i] << ",";
+            if (elemFirstLayer.empty()) f << "-1,";
             f << "};\n";
         }
     }
