@@ -832,6 +832,7 @@ enum class VsNodeType : int {
     GetHealth,       // data: outputs the current health value
     GetChargePct,    // data: outputs the Charge Shot charge level as 0-100% (live, read at release)
     SpendChargeEnergy, // action: subtract energy scaled by charge level (Min%..Max% over 0..100% charge)
+    IsNotCharging,   // gate: passes exec while NO Charge Shot is charging (inverse of Is Charging)
     COUNT
 };
 
@@ -1188,6 +1189,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Get Health",      0xFF666688, 0, 0, 0, 1, {}, {"Health"}, {} },
     { "Get Charge %",    0xFF666688, 0, 0, 0, 1, {}, {"Charge %"}, {} },
     { "Spend Charge Energy", 0xFF3355AA, 1, 1, 2, 0, {"Min % (int)", "Max % (int)"}, {}, {} },
+    { "Is Not Charging", 0xFF885533, 1, 1, 0, 0, {}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1368,8 +1370,8 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::SetTint:       desc = "Sets a color tint on a sprite (RGB15)."; break;
     case VsNodeType::Shake:         desc = "Shakes a specific sprite for N frames."; break;
     case VsNodeType::SetText:       desc = "Sets a HUD text slot to display a numeric value."; break;
-    case VsNodeType::ShowHUD:       desc = "Makes a HUD element slot visible and freezes player movement."; break;
-    case VsNodeType::HideHUD:       desc = "Hides a HUD element slot and unfreezes player movement."; break;
+    case VsNodeType::ShowHUD:       desc = "Makes a HUD element visible (afn_hud_visible[slot]=1). Slot = the element's index in the Elements list (top = 0). Only freezes the player if the element has cursor stops (a menu) — plain gameplay elements (bars, icons, effects) just appear. The companion to hiding an element in the editor (Visible off) so it starts off-screen and is revealed by a node, e.g. On Start -> Show HUD for a persistent bar."; break;
+    case VsNodeType::HideHUD:       desc = "Hides a HUD element (afn_hud_visible[slot]=0) and clears the menu freeze (unfreezes the player). Slot = the element's index in the Elements list."; break;
     case VsNodeType::GetRandom:     desc = "Outputs a random value between 0 and 255 (fixed-point 0.0-1.0)."; break;
     case VsNodeType::ArrayGet:      desc = "Reads from the variable array at the given index."; break;
     case VsNodeType::ArraySet:      desc = "Writes a value to the variable array at the given index."; break;
@@ -1458,6 +1460,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::IsNotLanding:  desc = "Gate (PSV): passes exec when the player is NOT in the post-touchdown land window — the inverse of Is Landing. Put it in front of your grounded idle (On Update -> ... -> Is On Ground -> Is Not Landing -> Play Idle) so the land anim plays first, then idle resumes."; break;
     case VsNodeType::ChargeShot:    desc = "Hold-to-charge focus blast (PSV): drive it from On Key Held. While held it shows the player's hidden \"effect\" sub-sprite (the focus ball) at chest height and grows it from Min Scale% to Max Scale% over Max Charge frames (180 = 3s). Sets the Is Charging gate so you can play the charge anim (atk_spc_chg, or atk_spc_chg_air behind Is Airborne). Release fires it — see Fire Charge Shot. The ball = the first hidden attached sub-sprite of the player rig (add it in the Meshes tab, tick \"Hidden (effect)\")."; break;
     case VsNodeType::IsCharging:    desc = "Gate (PSV): passes exec only while a Charge Shot is charging (button held, not yet fired). Drive the charge pose with it: On Update -> Is Charging -> Play Skel Anim(atk_spc_chg). Behind Is Airborne use atk_spc_chg_air."; break;
+    case VsNodeType::IsNotCharging: desc = "Gate (PSV): passes exec only while NO Charge Shot is charging — the inverse of Is Charging. Pair them off one On Key Pressed to fork an action: Is Not Charging -> normal move/dodge, Is Charging -> the charge-variant. Keeps the two mutually exclusive (e.g. so a charge-dodge and a normal dodge don't fight over the same cooldown)."; break;
     case VsNodeType::FireChargeShot:desc = "Fire the charged focus blast (PSV): drive it from On Key Released (same button as Charge Shot). Snapshots the charged ball into a homing projectile aimed at the Lock On target (fires straight forward if nothing is locked), then clears the charge. Damage = damage at FULL charge and scales down with how long you actually held it (min 1); Speed = projectile world px/frame. On reaching the target it deals damage and despawns. Pair with Play Skel Anim(atk_spc_lnc / atk_spc_lnc_air)."; break;
     case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
     case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
@@ -22111,8 +22114,8 @@ void FrameTick(float dt)
                 case VsNodeType::SetTint:       desc = "Sets a color tint on a sprite (RGB15)."; break;
                 case VsNodeType::Shake:         desc = "Shakes a specific sprite for N frames."; break;
                 case VsNodeType::SetText:       desc = "Sets a HUD text slot to display a numeric value."; break;
-                case VsNodeType::ShowHUD:       desc = "Makes a HUD element slot visible and freezes player movement."; break;
-                case VsNodeType::HideHUD:       desc = "Hides a HUD element slot and unfreezes player movement."; break;
+                case VsNodeType::ShowHUD:       desc = "Makes a HUD element visible (afn_hud_visible[slot]=1). Slot = the element's index in the Elements list (top = 0). Only freezes the player if the element has cursor stops (a menu) — plain gameplay elements (bars, icons, effects) just appear. The companion to hiding an element in the editor (Visible off) so it starts off-screen and is revealed by a node, e.g. On Start -> Show HUD for a persistent bar."; break;
+                case VsNodeType::HideHUD:       desc = "Hides a HUD element (afn_hud_visible[slot]=0) and clears the menu freeze (unfreezes the player). Slot = the element's index in the Elements list."; break;
                 case VsNodeType::GetRandom:     desc = "Outputs a random value between 0 and 255 (fixed-point 0.0-1.0)."; break;
                 case VsNodeType::ArrayGet:      desc = "Reads from the variable array at the given index."; break;
                 case VsNodeType::ArraySet:      desc = "Writes a value to the variable array at the given index."; break;
@@ -22201,6 +22204,7 @@ void FrameTick(float dt)
                 case VsNodeType::IsNotLanding:  desc = "Gate (PSV): passes exec when the player is NOT in the post-touchdown land window — the inverse of Is Landing. Put it in front of your grounded idle (On Update -> ... -> Is On Ground -> Is Not Landing -> Play Idle) so the land anim plays first, then idle resumes."; break;
                 case VsNodeType::ChargeShot:    desc = "Hold-to-charge focus blast (PSV): drive it from On Key Held. While held it shows the player's hidden \"effect\" sub-sprite (the focus ball) at chest height and grows it from Min Scale% to Max Scale% over Max Charge frames (180 = 3s). Sets the Is Charging gate so you can play the charge anim (atk_spc_chg, or atk_spc_chg_air behind Is Airborne). Release fires it — see Fire Charge Shot. The ball = the first hidden attached sub-sprite of the player rig (add it in the Meshes tab, tick \"Hidden (effect)\")."; break;
                 case VsNodeType::IsCharging:    desc = "Gate (PSV): passes exec only while a Charge Shot is charging (button held, not yet fired). Drive the charge pose with it: On Update -> Is Charging -> Play Skel Anim(atk_spc_chg). Behind Is Airborne use atk_spc_chg_air."; break;
+    case VsNodeType::IsNotCharging: desc = "Gate (PSV): passes exec only while NO Charge Shot is charging — the inverse of Is Charging. Pair them off one On Key Pressed to fork an action: Is Not Charging -> normal move/dodge, Is Charging -> the charge-variant. Keeps the two mutually exclusive (e.g. so a charge-dodge and a normal dodge don't fight over the same cooldown)."; break;
                 case VsNodeType::FireChargeShot:desc = "Fire the charged focus blast (PSV): drive it from On Key Released (same button as Charge Shot). Snapshots the charged ball into a homing projectile aimed at the Lock On target (fires straight forward if nothing is locked), then clears the charge. Damage = damage at FULL charge and scales down with how long you actually held it (min 1); Speed = projectile world px/frame. On reaching the target it deals damage and despawns. Pair with Play Skel Anim(atk_spc_lnc / atk_spc_lnc_air) behind Is Firing so the launch pose holds."; break;
                 case VsNodeType::IsFiring:      desc = "Gate (PSV): passes exec for a short window (~0.5s / 30 frames) right after a Charge Shot is fired — the mirror of Is Charging for the launch side. Without it the launch anim only flashes for one frame because Fire Charge Shot runs once on release. Wire On Update -> Is Firing -> Is On Ground -> Play(atk_spc_lnc), and behind Is Airborne use atk_spc_lnc_air, so the launch pose holds while the blast leaves."; break;
                 case VsNodeType::IsFalse:       desc = "Gate: passes exec only when the Condition data input is ZERO — the inverse of Is True ('if not'). Wire a boolean expression into Condition: Compare, And/Or/Not, Get HP, Get Flag, Is Key Down, Get Player X/Y/Z, etc. Example: Get Flag(3) -> Is False -> (runs while flag 3 is clear)."; break;
@@ -22509,6 +22513,7 @@ void FrameTick(float dt)
                         case VsNodeType::IsNotLanding:  return "_is_not_landing";
                         case VsNodeType::ChargeShot:    return "_charge_shot";
                         case VsNodeType::IsCharging:    return "_is_charging";
+                        case VsNodeType::IsNotCharging: return "_is_not_charging";
                         case VsNodeType::FireChargeShot:return "_fire_charge_shot";
                         case VsNodeType::IsFiring:      return "_is_firing";
                         case VsNodeType::IsFalse:       return "_is_false";
@@ -23698,6 +23703,17 @@ void FrameTick(float dt)
                         "    // --- Runtime --- afn_fb_charging is set true by Charge Shot on every\n"
                         "    // held frame and cleared the frame the button is released or the shot\n"
                         "    // fires; gate the charge pose with it so movement/idle don't override.");
+                    break;
+                }
+                case VsNodeType::IsNotCharging: {
+                    editorCode = "// Gate: passes exec while NO Charge Shot is charging";
+                    setActionFunc(infoNode, "_is_not_charging",
+                        "    if (!afn_fb_charging) {\n"
+                        "        // ... the not-charging branch (e.g. the normal Dodge) ...\n"
+                        "    }\n"
+                        "    // --- Runtime --- inverse of Is Charging. Fork one On Key Pressed:\n"
+                        "    // Is Not Charging -> normal dodge, Is Charging -> charge-dodge, so the\n"
+                        "    // two are mutually exclusive and don't fight over the dodge cooldown.");
                     break;
                 }
                 case VsNodeType::FireChargeShot: {
@@ -26849,6 +26865,7 @@ void FrameTick(float dt)
                     case VsNodeType::IsNotLanding:  suffix = "_is_not_landing"; break;
                     case VsNodeType::ChargeShot:    suffix = "_charge_shot"; break;
                     case VsNodeType::IsCharging:    suffix = "_is_charging"; break;
+                    case VsNodeType::IsNotCharging: suffix = "_is_not_charging"; break;
                     case VsNodeType::FireChargeShot:suffix = "_fire_charge_shot"; break;
                     case VsNodeType::IsFiring:      suffix = "_is_firing"; break;
                     case VsNodeType::IsFalse:       suffix = "_is_false"; break;
@@ -27389,6 +27406,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNotLanding].name)) addNodeAt(VsNodeType::IsNotLanding);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::ChargeShot].name)) addNodeAt(VsNodeType::ChargeShot);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsCharging].name)) addNodeAt(VsNodeType::IsCharging);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsNotCharging].name)) addNodeAt(VsNodeType::IsNotCharging);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::FireChargeShot].name)) addNodeAt(VsNodeType::FireChargeShot);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::IsFiring].name)) addNodeAt(VsNodeType::IsFiring);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpawnEffect].name)) addNodeAt(VsNodeType::SpawnEffect);

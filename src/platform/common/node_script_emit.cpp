@@ -717,6 +717,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    if (afn_land_timer <= 0) {\n"; break;
             case GBAScriptNodeType::IsCharging:
                 f << "    if (afn_fb_charging) {\n"; break;
+            case GBAScriptNodeType::IsNotCharging:
+                f << "    if (!afn_fb_charging) {\n"; break;
             case GBAScriptNodeType::IsFiring:
                 f << "    if (afn_fb_fire_timer > 0) {\n"; break;
             case GBAScriptNodeType::IsNear2D:
@@ -877,14 +879,14 @@ void EmitNodeScriptBodies(std::ostream& f,
                 auto* slotData = findDataIn(a->id, 1);
                 int val  = valData  ? resolveInt(valData)  : 0;
                 int slot = slotData ? resolveInt(slotData) : 0;
-                if (slot < 0) slot = 0; if (slot > 3) slot = 3;
+                if (slot < 0) slot = 0;   // element index (afn_hud_visible/elems are ELEM_COUNT-sized)
                 f << "    afn_hud_value[" << slot << "] += " << val << ";\n";
                 break;
             }
             case GBAScriptNodeType::ShowHUD: {
                 auto* slotData = findDataIn(a->id, 0);
                 int slot = slotData ? resolveInt(slotData) : a->paramInt[0];
-                if (slot < 0) slot = 0; if (slot > 3) slot = 3;
+                if (slot < 0) slot = 0;   // element index (afn_hud_visible/elems are ELEM_COUNT-sized)
                 f << "    afn_hud_visible[" << slot << "] = 1;\n";
                 // World anchoring (PSV only, AFN_HAS_HUD_ANCHOR): the Anchor
                 // pin (data input 1) pins the element's content to that
@@ -938,7 +940,7 @@ void EmitNodeScriptBodies(std::ostream& f,
             case GBAScriptNodeType::HideHUD: {
                 auto* slotData = findDataIn(a->id, 0);
                 int slot = slotData ? resolveInt(slotData) : a->paramInt[0];
-                if (slot < 0) slot = 0; if (slot > 3) slot = 3;
+                if (slot < 0) slot = 0;   // element index (afn_hud_visible/elems are ELEM_COUNT-sized)
                 f << "    afn_hud_visible[" << slot << "] = 0;\n";
                 // Hiding a menu auto-unfreezes / clears the anim hold so
                 // gameplay resumes without needing an explicit UnfreezePlayer
@@ -1101,6 +1103,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                    t == GBAScriptNodeType::IsLanding ||
                    t == GBAScriptNodeType::IsNotLanding ||
                    t == GBAScriptNodeType::IsCharging ||
+                   t == GBAScriptNodeType::IsNotCharging ||
                    t == GBAScriptNodeType::IsFiring ||
                    t == GBAScriptNodeType::HasEnergy ||
                    t == GBAScriptNodeType::IsInView;
@@ -1238,6 +1241,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                            a->type == GBAScriptNodeType::IsLanding ||
                            a->type == GBAScriptNodeType::IsNotLanding ||
                            a->type == GBAScriptNodeType::IsCharging ||
+                           a->type == GBAScriptNodeType::IsNotCharging ||
                            a->type == GBAScriptNodeType::IsFiring ||
                            a->type == GBAScriptNodeType::HasEnergy ||
                            a->type == GBAScriptNodeType::IsInView);

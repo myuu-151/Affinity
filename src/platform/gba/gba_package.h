@@ -485,6 +485,7 @@ enum class GBAScriptNodeType : int {
     GetHealth,       // data: outputs the current health value
     GetChargePct,    // data: outputs the Charge Shot charge level as 0-100% (live, read at release)
     SpendChargeEnergy, // action: subtract energy scaled by charge level (Min%..Max% over 0..100% charge)
+    IsNotCharging,   // gate: passes exec while NO Charge Shot is charging (inverse of Is Charging)
     COUNT
 };
 
