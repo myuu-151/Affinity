@@ -819,6 +819,17 @@ enum class VsNodeType : int {
     SwitchInt,       // flow: route exec to case 0..3 by integer value, else Default
     Bool,            // data: constant true/false (1/0)
     Xor,             // data: logical exclusive-or of two inputs
+    SetEnergy,       // action: set the player's energy resource (clamped 0..max)
+    AddEnergy,       // action: accumulate energy (clamped to max)
+    SpendEnergy,     // action: subtract energy (clamped to 0)
+    SetMaxEnergy,    // action: set the energy capacity
+    GetEnergy,       // data: outputs the current energy value
+    HasEnergy,       // gate: passes exec while energy >= Amount
+    SetHealth,       // action: set player health (clamped 0..max)
+    DamageHealth,    // action: subtract health (clamped to 0)
+    HealHealth,      // action: add health (clamped to max)
+    SetMaxHealth,    // action: set health capacity
+    GetHealth,       // data: outputs the current health value
     COUNT
 };
 
@@ -1162,6 +1173,17 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Switch on Int",   0xFF885533, 1, 5, 1, 0, {"Value"}, {}, {"= 0","= 1","= 2","= 3","Default"} },
     { "Bool",            0xFF666688, 0, 0, 0, 1, {}, {"Out"}, {} },
     { "XOR",             0xFF666688, 0, 0, 2, 1, {"A","B"}, {"Result"}, {} },
+    { "Set Energy",      0xFF3355AA, 1, 1, 1, 0, {"Energy (int)"}, {}, {} },
+    { "Add Energy",      0xFF3355AA, 1, 1, 1, 0, {"Amount (int)"}, {}, {} },
+    { "Spend Energy",    0xFF3355AA, 1, 1, 1, 0, {"Amount (int)"}, {}, {} },
+    { "Set Max Energy",  0xFF3355AA, 1, 1, 1, 0, {"Max (int)"}, {}, {} },
+    { "Get Energy",      0xFF666688, 0, 0, 0, 1, {}, {"Energy"}, {} },
+    { "Has Energy",      0xFF885533, 1, 1, 1, 0, {"Amount (int)"}, {}, {} },
+    { "Set Health",      0xFF3355AA, 1, 1, 1, 0, {"Health (int)"}, {}, {} },
+    { "Damage Health",   0xFF3355AA, 1, 1, 1, 0, {"Amount (int)"}, {}, {} },
+    { "Heal Health",     0xFF3355AA, 1, 1, 1, 0, {"Amount (int)"}, {}, {} },
+    { "Set Max Health",  0xFF3355AA, 1, 1, 1, 0, {"Max (int)"}, {}, {} },
+    { "Get Health",      0xFF666688, 0, 0, 0, 1, {}, {"Health"}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -4345,6 +4367,14 @@ struct HudPiece {
     bool blackTint = false;  // render as solid black silhouette
     int opacity = 16;        // 0-16 (GBA alpha blend, 16 = fully opaque)
     bool hidden = false;     // editor-only: hide from canvas (not exported)
+    // Bar fill (PSV): when barSource != 0, the piece is clipped to value/max so
+    // it drains. The fill edge travels from barStart (full) to barEnd (empty)
+    // along barAxis; only the region between the edge and barEnd is drawn (the
+    // rest is "eaten"). Markers are piece-local pixels along the axis.
+    int barSource = 0;       // 0 = static, 1 = Health, 2 = Energy
+    int barAxis = 0;         // 0 = horizontal (X), 1 = vertical (Y)
+    int barStart = 0;        // edge position at FULL (px along axis)
+    int barEnd = 0;          // edge/anchor position at EMPTY (px along axis)
 };
 
 struct StopModifier {
@@ -4371,6 +4401,8 @@ struct HudKeyframe {
     int rot = 0;            // rotation in degrees (0-359)
     int scaleX = 256;       // 8.8 fixed point (256 = 1.0x)
     int scaleY = 256;
+    int opacity = 16;       // 0-16 opacity MULTIPLIER on the piece's base opacity
+                            // (16 = no change). Interpolated — use it to pulse a glow.
     int hidden = 0;         // 1 = piece hidden from this keyframe onward (step, not interpolated) — for blinking
 };
 
@@ -4474,6 +4506,7 @@ static int sHudNextId = 1;
 static int sHudSelectedIdx = -1;
 static float sHudCanvasZoom = 3.0f;
 static ImVec2 sHudCanvasPan = {0, 0};
+static float sHudBarPreview = 1.0f;   // 0..1 preview fill for bar pieces (canvas WYSIWYG)
 static float sHudTimelineH = 200.0f;
 static int sHudTimelinePlayhead = 0;
 static float sHudTimelineScroll = 0.0f;
@@ -7361,7 +7394,7 @@ static bool SaveProject(const std::string& path)
             el.visible ? 1 : 0, el.layer);
         fprintf(f, "elemPieceCount=%d\n", (int)el.pieces.size());
         for (auto& pc : el.pieces)
-            fprintf(f, "elemPiece=%d|%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity, pc.hidden ? 1 : 0);
+            fprintf(f, "elemPiece=%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity, pc.hidden ? 1 : 0, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd);
         fprintf(f, "elemStopCount=%d\n", (int)el.stops.size());
         for (auto& st : el.stops) {
             fprintf(f, "elemStop=%d|%d|%d\n", st.localX, st.localY, st.linkedElement);
@@ -7390,7 +7423,7 @@ static bool SaveProject(const std::string& path)
             fprintf(f, "elemKfCount=%d\n", (int)el.keyframes.size());
             fprintf(f, "elemKfLoop=%d\n", el.animLoop ? 1 : 0);
             for (auto& kf : el.keyframes)
-                fprintf(f, "elemKf=%d|%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY, kf.hidden);
+                fprintf(f, "elemKf=%d|%d|%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY, kf.hidden, kf.opacity);
         }
         if (!el.animLayers.empty()) {
             fprintf(f, "elemLayerCount=%d\n", (int)el.animLayers.size());
@@ -7405,7 +7438,7 @@ static bool SaveProject(const std::string& path)
                     fprintf(f, "elemLayerItem=%d|%d\n", (int)it.type, it.index);
                 fprintf(f, "elemLayerKfCount=%d\n", (int)lay.keyframes.size());
                 for (auto& kf : lay.keyframes)
-                        fprintf(f, "elemLayerKf=%d|%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY, kf.hidden);
+                        fprintf(f, "elemLayerKf=%d|%d|%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY, kf.hidden, kf.opacity);
             }
         }
     }
@@ -8934,8 +8967,9 @@ static bool LoadProject(const std::string& path)
             }
             else if (strncmp(line, "elemPiece=", 10) == 0 && !sHudElements.empty()) {
                 HudPiece pc; int bt = 0, opa = 16, hid = 0;
-                int n = sscanf(line + 10, "%d|%d|%d|%d|%d|%d|%d|%d",
-                    &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size, &bt, &opa, &hid);
+                int n = sscanf(line + 10, "%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d",
+                    &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size, &bt, &opa, &hid,
+                    &pc.barSource, &pc.barAxis, &pc.barStart, &pc.barEnd);
                 if (n >= 5) { pc.blackTint = (bt != 0); pc.opacity = std::clamp(opa, 0, 16); pc.hidden = (hid != 0); sHudElements.back().pieces.push_back(pc); }
             }
             else if (sscanf(line, "elemStopCount=%d", &ival) == 1 && !sHudElements.empty()) {
@@ -9063,8 +9097,8 @@ static bool LoadProject(const std::string& path)
             }
             else if (strncmp(line, "elemKf=", 7) == 0 && !sHudElements.empty()) {
                 HudKeyframe kf;
-                if (sscanf(line + 7, "%d|%d|%d|%d|%d|%d|%d", &kf.frame, &kf.offsetX, &kf.offsetY,
-                    &kf.rot, &kf.scaleX, &kf.scaleY, &kf.hidden) >= 4)
+                if (sscanf(line + 7, "%d|%d|%d|%d|%d|%d|%d|%d", &kf.frame, &kf.offsetX, &kf.offsetY,
+                    &kf.rot, &kf.scaleX, &kf.scaleY, &kf.hidden, &kf.opacity) >= 4)
                     sHudElements.back().keyframes.push_back(kf);
             }
             else if (sscanf(line, "elemLayerCount=%d", &ival) == 1 && !sHudElements.empty()) {
@@ -9105,8 +9139,8 @@ static bool LoadProject(const std::string& path)
             }
             else if (strncmp(line, "elemLayerKf=", 12) == 0 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
                 HudKeyframe kf;
-                if (sscanf(line + 12, "%d|%d|%d|%d|%d|%d|%d", &kf.frame, &kf.offsetX, &kf.offsetY,
-                    &kf.rot, &kf.scaleX, &kf.scaleY, &kf.hidden) >= 4)
+                if (sscanf(line + 12, "%d|%d|%d|%d|%d|%d|%d|%d", &kf.frame, &kf.offsetX, &kf.offsetY,
+                    &kf.rot, &kf.scaleX, &kf.scaleY, &kf.hidden, &kf.opacity) >= 4)
                     sHudElements.back().animLayers.back().keyframes.push_back(kf);
             }
         }
@@ -17985,6 +18019,10 @@ void FrameTick(float dt)
                         pe.size = pc.size;
                         pe.blackTint = pc.blackTint;
                         pe.opacity = pc.opacity;
+                        pe.barSource = pc.barSource;
+                        pe.barAxis = pc.barAxis;
+                        pe.barStart = pc.barStart;
+                        pe.barEnd = pc.barEnd;
                         he.pieces.push_back(pe);
                     }
                     for (auto& st : el.stops) {
@@ -18038,6 +18076,7 @@ void FrameTick(float dt)
                         ke.scaleX = kf.scaleX;
                         ke.scaleY = kf.scaleY;
                         ke.hidden = kf.hidden;
+                        ke.opacity = kf.opacity;
                         he.keyframes.push_back(ke);
                     }
                     he.animLoop = el.animLoop;
@@ -18059,6 +18098,7 @@ void FrameTick(float dt)
                             ke.scaleX = kf.scaleX;
                             ke.scaleY = kf.scaleY;
                             ke.hidden = kf.hidden;
+                            ke.opacity = kf.opacity;
                             le.keyframes.push_back(ke);
                         }
                         he.animLayers.push_back(std::move(le));
@@ -22162,6 +22202,17 @@ void FrameTick(float dt)
                 case VsNodeType::SwitchInt:     desc = "Routes exec to one of five outputs by an integer Value: '= 0'..'= 3' fire when Value equals that case, 'Default' fires for anything else. Great for state machines: Get Variable/Get State -> Switch on Int -> per-state branches. Feed Value from any data expression (Get*, Compare, math)."; break;
                 case VsNodeType::Bool:          desc = "Constant boolean data node — outputs 1 (true) or 0 (false). Feed it into a Branch / Is True / Is False condition, or any data pin. Toggle the value in the node."; break;
                 case VsNodeType::Xor:           desc = "Logical exclusive-or: outputs 1 when exactly ONE of A/B is non-zero, else 0. Pure data node — wire into a condition (Branch / Is True) alongside And / Or / Not."; break;
+                case VsNodeType::SetEnergy:     desc = "Set the player's Energy resource to a value (clamped 0..max). Energy is the engine's second player resource (alongside HP) — drive a bar with it and gate abilities on it."; break;
+                case VsNodeType::AddEnergy:     desc = "Accumulate Energy by Amount (clamped to max). Use it to regenerate over time (On Update -> Add Energy(1)) or grant on pickup/hit."; break;
+                case VsNodeType::SpendEnergy:   desc = "Subtract Amount from Energy (clamped to 0) — the negation side. Gate it with Has Energy so an ability only fires (and only spends) when there's enough."; break;
+                case VsNodeType::SetMaxEnergy:  desc = "Set the Energy capacity (max). Energy is clamped to it; the energy bar reads current/max."; break;
+                case VsNodeType::GetEnergy:     desc = "Outputs the current Energy value. Wire it into a condition (Compare / Branch / Is True) or a bar's source — e.g. Compare(Get Energy, cost, >=) to gate an ability or pulse a glow."; break;
+                case VsNodeType::HasEnergy:     desc = "Gate: passes exec only while Energy >= Amount. Shorthand for Compare(Get Energy, Amount, >=) -> Is True. Put it before Spend Energy + the ability so it only fires when affordable."; break;
+                case VsNodeType::SetHealth:     desc = "Set the player's Health to a value (clamped 0..max). The clean player Health resource (afn_health) that a health bar binds to — distinct from the per-sprite HP array."; break;
+                case VsNodeType::DamageHealth:  desc = "Subtract Amount from Health (clamped to 0). Drive it from On Hit / a hazard. The health bar drains automatically as Health drops."; break;
+                case VsNodeType::HealHealth:    desc = "Add Amount to Health (clamped to max). Pickups, regen (On Update -> Heal Health(1)), etc."; break;
+                case VsNodeType::SetMaxHealth:  desc = "Set the Health capacity (max). The health bar reads current/max."; break;
+                case VsNodeType::GetHealth:     desc = "Outputs the current Health value. Wire into a condition (Compare / Branch / Is True) — e.g. Compare(Get Health, 0, <=) -> Branch for death."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
@@ -22457,6 +22508,17 @@ void FrameTick(float dt)
                         case VsNodeType::SwitchInt:     return "_switch_int";
                         case VsNodeType::Bool:          return "_bool";
                         case VsNodeType::Xor:           return "_xor";
+                        case VsNodeType::SetEnergy:     return "_set_energy";
+                        case VsNodeType::AddEnergy:     return "_add_energy";
+                        case VsNodeType::SpendEnergy:   return "_spend_energy";
+                        case VsNodeType::SetMaxEnergy:  return "_set_max_energy";
+                        case VsNodeType::GetEnergy:     return "_get_energy";
+                        case VsNodeType::HasEnergy:     return "_has_energy";
+                        case VsNodeType::SetHealth:     return "_set_health";
+                        case VsNodeType::DamageHealth:  return "_damage_health";
+                        case VsNodeType::HealHealth:    return "_heal_health";
+                        case VsNodeType::SetMaxHealth:  return "_set_max_health";
+                        case VsNodeType::GetHealth:     return "_get_health";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -23696,6 +23758,95 @@ void FrameTick(float dt)
                     editorCode = "// Logical exclusive-or of A and B";
                     setActionFunc(infoNode, "_xor",
                         "    // --- Runtime --- inline data node: ((!!A) ^ (!!B)), evaluated at call site.");
+                    break;
+                }
+                case VsNodeType::SetEnergy: {
+                    editorCode = "// Set the player's energy (clamped 0..max)";
+                    setActionFunc(infoNode, "_set_energy",
+                        "    afn_energy = <value>;\n"
+                        "    if (afn_energy < 0) afn_energy = 0;\n"
+                        "    if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;\n"
+                        "    // --- Runtime (psv main.c) --- afn_energy is the player energy resource;\n"
+                        "    // Get Energy / Has Energy read it, the energy bar shows afn_energy/afn_energy_max.");
+                    break;
+                }
+                case VsNodeType::AddEnergy: {
+                    editorCode = "// Accumulate energy (clamped to max)";
+                    setActionFunc(infoNode, "_add_energy",
+                        "    afn_energy += <amount>;\n"
+                        "    if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;\n"
+                        "    // --- Runtime --- e.g. On Update -> Add Energy(1) regenerates over time.");
+                    break;
+                }
+                case VsNodeType::SpendEnergy: {
+                    editorCode = "// Subtract energy (clamped to 0)";
+                    setActionFunc(infoNode, "_spend_energy",
+                        "    afn_energy -= <amount>;\n"
+                        "    if (afn_energy < 0) afn_energy = 0;\n"
+                        "    // --- Runtime --- gate with Has Energy so it only spends when affordable.");
+                    break;
+                }
+                case VsNodeType::SetMaxEnergy: {
+                    editorCode = "// Set the energy capacity";
+                    setActionFunc(infoNode, "_set_max_energy",
+                        "    afn_energy_max = <max>;\n"
+                        "    if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;\n"
+                        "    // --- Runtime --- the energy bar reads afn_energy / afn_energy_max.");
+                    break;
+                }
+                case VsNodeType::GetEnergy: {
+                    editorCode = "// Read the current energy value";
+                    setActionFunc(infoNode, "_get_energy",
+                        "    // --- Runtime --- inline data node: returns afn_energy (compiled by\n"
+                        "    // emitIntExpr, usable in Compare / Branch / Is True conditions).");
+                    break;
+                }
+                case VsNodeType::HasEnergy: {
+                    editorCode = "// Gate: pass while energy >= Amount";
+                    setActionFunc(infoNode, "_has_energy",
+                        "    if (afn_energy >= <amount>) {\n"
+                        "        // ... downstream exec (e.g. Spend Energy + fire the ability) ...\n"
+                        "    }\n"
+                        "    // --- Runtime --- shorthand for Compare(Get Energy, Amount, >=) -> Is True.");
+                    break;
+                }
+                case VsNodeType::SetHealth: {
+                    editorCode = "// Set player health (clamped 0..max)";
+                    setActionFunc(infoNode, "_set_health",
+                        "    afn_health = <value>;\n"
+                        "    if (afn_health < 0) afn_health = 0;\n"
+                        "    if (afn_health > afn_health_max) afn_health = afn_health_max;\n"
+                        "    // --- Runtime (psv main.c) --- afn_health is the player health resource;\n"
+                        "    // a health bar piece (Bar Fill = Health) clips to afn_health / afn_health_max.");
+                    break;
+                }
+                case VsNodeType::DamageHealth: {
+                    editorCode = "// Subtract health (clamped to 0)";
+                    setActionFunc(infoNode, "_damage_health",
+                        "    afn_health -= <amount>; if (afn_health < 0) afn_health = 0;\n"
+                        "    // --- Runtime --- the health bar drains automatically as afn_health drops.");
+                    break;
+                }
+                case VsNodeType::HealHealth: {
+                    editorCode = "// Add health (clamped to max)";
+                    setActionFunc(infoNode, "_heal_health",
+                        "    afn_health += <amount>; if (afn_health > afn_health_max) afn_health = afn_health_max;\n"
+                        "    // --- Runtime --- pickups / regen (On Update -> Heal Health(1)).");
+                    break;
+                }
+                case VsNodeType::SetMaxHealth: {
+                    editorCode = "// Set health capacity";
+                    setActionFunc(infoNode, "_set_max_health",
+                        "    afn_health_max = <max>;\n"
+                        "    if (afn_health > afn_health_max) afn_health = afn_health_max;\n"
+                        "    // --- Runtime --- the bar reads afn_health / afn_health_max.");
+                    break;
+                }
+                case VsNodeType::GetHealth: {
+                    editorCode = "// Read the current health value";
+                    setActionFunc(infoNode, "_get_health",
+                        "    // --- Runtime --- inline data node: returns afn_health (compiled by\n"
+                        "    // emitIntExpr, usable in Compare / Branch / Is True conditions).");
                     break;
                 }
                 case VsNodeType::TurnPlayer: {
@@ -26672,6 +26823,17 @@ void FrameTick(float dt)
                     case VsNodeType::SwitchInt:     suffix = "_switch_int"; break;
                     case VsNodeType::Bool:          suffix = "_bool"; break;
                     case VsNodeType::Xor:           suffix = "_xor"; break;
+                    case VsNodeType::SetEnergy:     suffix = "_set_energy"; break;
+                    case VsNodeType::AddEnergy:     suffix = "_add_energy"; break;
+                    case VsNodeType::SpendEnergy:   suffix = "_spend_energy"; break;
+                    case VsNodeType::SetMaxEnergy:  suffix = "_set_max_energy"; break;
+                    case VsNodeType::GetEnergy:     suffix = "_get_energy"; break;
+                    case VsNodeType::HasEnergy:     suffix = "_has_energy"; break;
+                    case VsNodeType::SetHealth:     suffix = "_set_health"; break;
+                    case VsNodeType::DamageHealth:  suffix = "_damage_health"; break;
+                    case VsNodeType::HealHealth:    suffix = "_heal_health"; break;
+                    case VsNodeType::SetMaxHealth:  suffix = "_set_max_health"; break;
+                    case VsNodeType::GetHealth:     suffix = "_get_health"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -27237,6 +27399,19 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHP2].name)) addNodeAt(VsNodeType::SetHP2);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HealHP].name)) addNodeAt(VsNodeType::HealHP);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetMaxHP].name)) addNodeAt(VsNodeType::SetMaxHP);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::AddEnergy].name)) addNodeAt(VsNodeType::AddEnergy);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpendEnergy].name)) addNodeAt(VsNodeType::SpendEnergy);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetEnergy].name)) addNodeAt(VsNodeType::SetEnergy);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetMaxEnergy].name)) addNodeAt(VsNodeType::SetMaxEnergy);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetEnergy].name)) addNodeAt(VsNodeType::GetEnergy);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HasEnergy].name)) addNodeAt(VsNodeType::HasEnergy);
+                    ImGui::Separator();
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::DamageHealth].name)) addNodeAt(VsNodeType::DamageHealth);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HealHealth].name)) addNodeAt(VsNodeType::HealHealth);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHealth].name)) addNodeAt(VsNodeType::SetHealth);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetMaxHealth].name)) addNodeAt(VsNodeType::SetMaxHealth);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetHealth].name)) addNodeAt(VsNodeType::GetHealth);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopAll].name)) addNodeAt(VsNodeType::StopAll);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Print].name)) addNodeAt(VsNodeType::Print);
@@ -30572,7 +30747,7 @@ void FrameTick(float dt)
                 // Compute per-piece layer offsets from keyframes
                 // During playback: interpolate between keyframes based on playhead
                 // When stopped: use the manually selected keyframe
-                struct LayerTransform { float ox = 0, oy = 0; float sx = 1, sy = 1; float rot = 0; bool hidden = false; };
+                struct LayerTransform { float ox = 0, oy = 0; float sx = 1, sy = 1; float rot = 0; bool hidden = false; float alpha = 1.0f; };
                 auto getPieceLayerTransform = [&](HudElement::ItemType type, int idx) -> LayerTransform {
                     LayerTransform t;
                     for (auto& lay : el.animLayers) {
@@ -30604,6 +30779,7 @@ void FrameTick(float dt)
                                 t.ox += kfA.offsetX; t.oy += kfA.offsetY;
                                 t.sx *= kfA.scaleX / 256.0f; t.sy *= kfA.scaleY / 256.0f;
                                 t.rot += (float)kfA.rot;
+                                t.alpha *= kfA.opacity / 16.0f;
                             } else {
                                 // Linear or Bezier interpolation
                                 float span = (float)(kfB.frame - kfA.frame);
@@ -30620,6 +30796,7 @@ void FrameTick(float dt)
                                 t.sx *= sxA + (sxB - sxA) * frac;
                                 t.sy *= syA + (syB - syA) * frac;
                                 t.rot += kfA.rot + (kfB.rot - kfA.rot) * frac;
+                                t.alpha *= (kfA.opacity + (kfB.opacity - kfA.opacity) * frac) / 16.0f;
                             }
                         } else {
                             // Stopped — use selected keyframe
@@ -30628,6 +30805,7 @@ void FrameTick(float dt)
                                 t.ox += kf.offsetX; t.oy += kf.offsetY;
                                 t.sx *= kf.scaleX / 256.0f; t.sy *= kf.scaleY / 256.0f;
                                 t.rot += (float)kf.rot;
+                                t.alpha *= kf.opacity / 16.0f;
                                 if (kf.hidden) t.hidden = true;
                             }
                         }
@@ -30675,13 +30853,36 @@ void FrameTick(float dt)
                         ImVec2 q1 = rotPt( drawW * 0.5f, -drawH * 0.5f);
                         ImVec2 q2 = rotPt( drawW * 0.5f,  drawH * 0.5f);
                         ImVec2 q3 = rotPt(-drawW * 0.5f,  drawH * 0.5f);
+                        // Bar fill (PSV): preview the clip at sHudBarPreview so the
+                        // user sees the graphic get eaten along the Start/End markers,
+                        // plus draw the marker lines. uLo/uHi/vLo/vHi default to the
+                        // full quad; for a bar piece they clip to the drawn span.
+                        float uLo = 0, uHi = 1, vLo = 0, vHi = 1;
+                        bool isBar = (pc.barSource != 0);
+                        if (isBar) {
+                            int dimA = pc.barAxis ? pcH : pcW;
+                            float fr = std::clamp(sHudBarPreview, 0.0f, 1.0f);
+                            float edge = pc.barEnd + (pc.barStart - pc.barEnd) * fr;
+                            float lo = std::min(edge, (float)pc.barEnd), hi = std::max(edge, (float)pc.barEnd);
+                            lo = std::clamp(lo, 0.0f, (float)dimA); hi = std::clamp(hi, 0.0f, (float)dimA);
+                            if (dimA > 0) {
+                                if (pc.barAxis == 0) { uLo = lo / dimA; uHi = hi / dimA; }
+                                else                 { vLo = lo / dimA; vHi = hi / dimA; }
+                            }
+                        }
                         if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sTmSpriteTextures.size() &&
                             sTmSpriteTextures[pc.spriteAssetIdx]) {
                             int alpha = (pc.opacity * 255) / 16;
+                            alpha = std::clamp((int)(alpha * lt.alpha), 0, 255);   // keyframe opacity pulse
                             ImU32 tintCol = pc.blackTint ? IM_COL32(0, 0, 0, alpha) : IM_COL32(255, 255, 255, alpha);
+                            // Clip the quad corners to [uLo,uHi]x[vLo,vHi] of the piece (local space, then rotate).
+                            ImVec2 c0 = rotPt(-drawW*0.5f + uLo*drawW, -drawH*0.5f + vLo*drawH);
+                            ImVec2 c1 = rotPt(-drawW*0.5f + uHi*drawW, -drawH*0.5f + vLo*drawH);
+                            ImVec2 c2 = rotPt(-drawW*0.5f + uHi*drawW, -drawH*0.5f + vHi*drawH);
+                            ImVec2 c3 = rotPt(-drawW*0.5f + uLo*drawW, -drawH*0.5f + vHi*drawH);
                             dl->AddImageQuad((ImTextureID)(intptr_t)sTmSpriteTextures[pc.spriteAssetIdx],
-                                q0, q1, q2, q3,
-                                ImVec2(0,0), ImVec2(1,0), ImVec2(1,1), ImVec2(0,1), tintCol);
+                                c0, c1, c2, c3,
+                                ImVec2(uLo,vLo), ImVec2(uHi,vLo), ImVec2(uHi,vHi), ImVec2(uLo,vHi), tintCol);
                         } else {
                             dl->AddQuadFilled(q0, q1, q2, q3, IM_COL32(80, 80, 120, 100));
                         }
@@ -30691,6 +30892,23 @@ void FrameTick(float dt)
                             if (selected && pi == el.selectedPiece) outlineCol = IM_COL32(100, 255, 100, 255);
                             else if (pieceMultiSel) outlineCol = IM_COL32(100, 200, 255, 255);
                             dl->AddRect(ImVec2(px, py), ImVec2(px + drawW, py + drawH), outlineCol);
+                            // Bar markers: Start (cyan, full) and End (orange, empty),
+                            // drawn as lines across the piece along the chosen axis.
+                            if (isBar) {
+                                int dimA = pc.barAxis ? pcH : pcW;
+                                if (dimA > 0) {
+                                    auto marker = [&](int m, ImU32 col, const char* lbl){
+                                        float t = std::clamp((float)m / dimA, 0.0f, 1.0f);
+                                        ImVec2 a, b;
+                                        if (pc.barAxis == 0) { a = rotPt(-drawW*0.5f + t*drawW, -drawH*0.5f); b = rotPt(-drawW*0.5f + t*drawW, drawH*0.5f); }
+                                        else                 { a = rotPt(-drawW*0.5f, -drawH*0.5f + t*drawH); b = rotPt(drawW*0.5f, -drawH*0.5f + t*drawH); }
+                                        dl->AddLine(a, b, col, 2.0f);
+                                        dl->AddText(ImVec2(a.x + 2, a.y + 2), col, lbl);
+                                    };
+                                    marker(pc.barStart, IM_COL32(80, 230, 255, 255), "S");
+                                    marker(pc.barEnd,   IM_COL32(255, 170, 60, 255), "E");
+                                }
+                            }
                         }
                     }}
                 }
@@ -31218,7 +31436,7 @@ void FrameTick(float dt)
                         // Pieces
                         fprintf(cf, "elemPieceCount=%d\n", (int)el.pieces.size());
                         for (auto& pc : el.pieces)
-                            fprintf(cf, "elemPiece=%d|%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity, pc.hidden ? 1 : 0);
+                            fprintf(cf, "elemPiece=%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity, pc.hidden ? 1 : 0, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd);
                         // Stops
                         fprintf(cf, "elemStopCount=%d\n", (int)el.stops.size());
                         for (auto& st : el.stops) {
@@ -31369,7 +31587,8 @@ void FrameTick(float dt)
                             }
                             else if (strncmp(line, "elemPiece=", 10) == 0) {
                                 HudPiece pc; int bt2 = 0, opa2 = 16, hid2 = 0;
-                                int n2 = sscanf(line + 10, "%d|%d|%d|%d|%d|%d|%d|%d", &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size, &bt2, &opa2, &hid2);
+                                int n2 = sscanf(line + 10, "%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size, &bt2, &opa2, &hid2,
+                                    &pc.barSource, &pc.barAxis, &pc.barStart, &pc.barEnd);
                                 if (n2 >= 5) {
                                     pc.blackTint = (bt2 != 0); pc.opacity = std::clamp(opa2, 0, 16); pc.hidden = (hid2 != 0);
                                     pc.spriteAssetIdx = remapAsset(pc.spriteAssetIdx);
@@ -31712,6 +31931,27 @@ void FrameTick(float dt)
                         ImGui::SameLine();
                         ImGui::SetNextItemWidth(80);
                         if (ImGui::SliderInt("Opacity##pc", &pc.opacity, 0, 16)) sProjectDirty = true;
+                        // Bar fill (PSV): clip this piece to a value/max so it drains.
+                        {
+                            const char* barSrc[] = { "None (static)", "Health", "Energy" };
+                            int dimAxis = (pc.size == 960 && pc.barAxis == 1) ? 544 : pc.size;
+                            if (ImGui::Combo("Bar Fill##pc", &pc.barSource, barSrc, 3)) {
+                                if (pc.barSource != 0 && pc.barStart == 0 && pc.barEnd == 0) {
+                                    pc.barStart = dimAxis; pc.barEnd = 0;   // sensible default: full -> empty
+                                }
+                                sProjectDirty = true;
+                            }
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Make this piece a bar that drains with a value. The fill edge travels from Start (full) to End (empty) along the axis; only the part toward End is drawn (the rest is eaten). Health/Energy use afn_health / afn_energy vs their max.");
+                            if (pc.barSource != 0) {
+                                ImGui::Combo("Axis##pcbar", &pc.barAxis, "Horizontal\0Vertical\0");
+                                if (ImGui::DragInt("Start (full)##pcbar", &pc.barStart, 1, 0, dimAxis)) sProjectDirty = true;
+                                if (ImGui::DragInt("End (empty)##pcbar", &pc.barEnd, 1, 0, dimAxis)) sProjectDirty = true;
+                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Piece-local pixels along the axis (0 = left/top edge, size = right/bottom). Full health draws to Start; empty recedes to End. Swap them to flip the drain direction.");
+                                float prevPct = sHudBarPreview * 100.0f;
+                                if (ImGui::SliderFloat("Preview Fill##pcbar", &prevPct, 0.0f, 100.0f, "%.0f%%")) sHudBarPreview = prevPct / 100.0f;
+                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Editor-only: scrub this to see the graphic get culled between the Start (cyan S) and End (orange E) markers on the canvas. Doesn't affect the runtime.");
+                            }
+                        }
                         if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sTmSpriteTextures.size() && sTmSpriteTextures[pc.spriteAssetIdx]) {
                             float prevSz = std::min(elemRightW * 0.4f, 64.0f);
                             ImGui::Image((ImTextureID)(intptr_t)sTmSpriteTextures[pc.spriteAssetIdx],
@@ -32166,6 +32406,8 @@ void FrameTick(float dt)
                             if (ImGui::DragFloat("Scale Y##kf", &sy, 0.01f, 0.1f, 4.0f, "%.2f")) {
                                 kf.scaleY = (int)(sy * 256.0f); sProjectDirty = true;
                             }
+                            if (ImGui::SliderInt("Opacity##kf", &kf.opacity, 0, 16)) sProjectDirty = true;
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("0-16 opacity at this keyframe (16 = the piece's full base opacity, 0 = invisible). Interpolated between keyframes — pulse it (e.g. 16 -> 4 -> 16, Loop) for a glow.");
                             bool kfHidden = kf.hidden != 0;
                             if (ImGui::Checkbox("Hide##kf", &kfHidden)) { kf.hidden = kfHidden ? 1 : 0; sProjectDirty = true; }
                         }

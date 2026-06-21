@@ -1126,6 +1126,8 @@ int   afn_fb_fire_timer = 0;          // Is Firing gate: frames remaining in the
 unsigned char afn_sprite_visible[NUM_SPRITES]={0};
 unsigned char afn_sprite_flip[NUM_SPRITES]={0}, afn_collision_enabled[NUM_SPRITES]={0};
 int afn_hp[NUM_SPRITES]={0}, afn_state_timer[NUM_SPRITES]={0};
+int afn_energy=0, afn_energy_max=100;   // player energy resource (node-driven: Add/Spend/Set/SetMax Energy)
+int afn_health=100, afn_health_max=100; // player health resource (node-driven: Damage/Heal/Set/SetMax Health)
 int afn_stop_links[16]={0};
 // HUD anim layer state — node-driven (PlayHudAnim resets+activates,
 // StopHudAnim deactivates, SetHudAnimSpeed overrides). hud_render advances
@@ -1423,6 +1425,8 @@ static void hud_render(void) {
     // sit at keyframe 0. Interp: 0=constant snap, 1=linear, 2=bezier.
     float layOx[AFN_HUD_LAYER_COUNT], layOy[AFN_HUD_LAYER_COUNT];
     float layRot[AFN_HUD_LAYER_COUNT], laySx[AFN_HUD_LAYER_COUNT], laySy[AFN_HUD_LAYER_COUNT];
+    float layAlpha[AFN_HUD_LAYER_COUNT];                 // per-layer opacity multiplier (0..1; glow pulse)
+    for (int li = 0; li < AFN_HUD_LAYER_COUNT; li++) layAlpha[li] = 1.0f;
     unsigned char layHide[AFN_HUD_LAYER_COUNT] = {0};   // per-layer hide at the current frame (blink)
     for (int li = 0; li < AFN_HUD_LAYER_COUNT; li++) {
         const AfnHudLayer* L = &afn_hud_layer[li];
@@ -1460,6 +1464,10 @@ static void hud_render(void) {
         layRot[li] = A->rot + (B->rot - A->rot) * frac;
         laySx[li]  = (A->sx + (B->sx - A->sx) * frac) / 256.0f;
         laySy[li]  = (A->sy + (B->sy - A->sy) * frac) / 256.0f;
+#ifdef AFN_HUD_KF_OPACITY
+        layAlpha[li] = (A->op + (B->op - A->op) * frac) / 16.0f;   // 0-16 keyframe opacity -> multiplier
+        if (layAlpha[li] < 0.0f) layAlpha[li] = 0.0f; if (layAlpha[li] > 1.0f) layAlpha[li] = 1.0f;
+#endif
 #ifdef AFN_HUD_KF_HIDE
         layHide[li] = (unsigned char)(A->hide != 0);   // step (use the active keyframe)
 #endif
@@ -1559,6 +1567,14 @@ static void hud_render(void) {
             int li = afn_hud_piece_layer[gpi];
             if (li >= 0) {
                 if (layHide[li]) continue;   // blink: keyframe Hide
+                // Keyframe opacity pulse: scale the modulate alpha by the layer's
+                // animated opacity multiplier (glow fade), on top of the piece's base.
+                {
+                    unsigned baseA = (pieceCol >> 24) & 0xFFu;
+                    unsigned newA = (unsigned)(baseA * layAlpha[li]);
+                    if (newA > 255) newA = 255;
+                    pieceCol = (newA << 24) | (pieceCol & 0x00FFFFFFu);
+                }
                 // Animated: keyframe offset + scale + rotation about center,
                 // all in element space scaled by the anchored distance scale.
                 float w = pc->w * laySx[li] * elScale, h = pc->h * laySy[li] * elScale;
@@ -1566,6 +1582,30 @@ static void hud_render(void) {
                             bx + (pc->x + layOx[li] + pc->w * 0.5f) * elScale,
                             by + (pc->y + layOy[li] + pc->h * 0.5f) * elScale,
                             w, h, layRot[li], pieceCol);
+                continue;
+            }
+#endif
+#ifdef AFN_HUD_PIECE_BAR
+            // Bar fill: clip the piece to value/max so it drains. The fill edge
+            // travels barStart (full) -> barEnd (empty) along the axis; only the
+            // span between the edge and barEnd is drawn (UV-clipped, no stretch).
+            if (pc->barSrc) {
+                int cur = (pc->barSrc == 1) ? afn_health : afn_energy;
+                int mx  = (pc->barSrc == 1) ? afn_health_max : afn_energy_max;
+                float fr = (mx > 0) ? (float)cur / (float)mx : 0.0f;
+                if (fr < 0.0f) fr = 0.0f; if (fr > 1.0f) fr = 1.0f;
+                float edge = pc->barEnd + (pc->barStart - pc->barEnd) * fr;
+                float lo = edge < pc->barEnd ? edge : pc->barEnd;
+                float hi = edge > pc->barEnd ? edge : pc->barEnd;
+                float px0 = bx + pc->x * elScale, py0 = by + pc->y * elScale;
+                float pw = pc->w * elScale, ph = pc->h * elScale;
+                if (pc->barAxis == 0 && pc->w > 0 && hi > lo) {
+                    hud_quad(s_hudTex[pc->tex], px0 + lo * elScale, py0, px0 + hi * elScale, py0 + ph,
+                             lo / pc->w, 0, hi / pc->w, 1, pieceCol);
+                } else if (pc->barAxis != 0 && pc->h > 0 && hi > lo) {
+                    hud_quad(s_hudTex[pc->tex], px0, py0 + lo * elScale, px0 + pw, py0 + hi * elScale,
+                             0, lo / pc->h, 1, hi / pc->h, pieceCol);
+                }
                 continue;
             }
 #endif

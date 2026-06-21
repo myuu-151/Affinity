@@ -472,6 +472,17 @@ enum class GBAScriptNodeType : int {
     SwitchInt,       // flow: route exec to case 0..3 by integer value, else Default
     Bool,            // data: constant true/false (1/0)
     Xor,             // data: logical exclusive-or of two inputs
+    SetEnergy,       // action: set the player's energy resource (clamped 0..max)
+    AddEnergy,       // action: accumulate energy (clamped to max)
+    SpendEnergy,     // action: subtract energy (clamped to 0)
+    SetMaxEnergy,    // action: set the energy capacity
+    GetEnergy,       // data: outputs the current energy value
+    HasEnergy,       // gate: passes exec while energy >= Amount
+    SetHealth,       // action: set player health (clamped 0..max)
+    DamageHealth,    // action: subtract health (clamped to 0)
+    HealHealth,      // action: add health (clamped to max)
+    SetMaxHealth,    // action: set health capacity
+    GetHealth,       // data: outputs the current health value
     COUNT
 };
 
@@ -564,6 +575,9 @@ struct GBAHudPieceExport {
     int size;   // 8, 16, 32, 64
     bool blackTint = false;
     int opacity = 16;
+    int barSource = 0;   // 0=static, 1=Health, 2=Energy (PSV bar fill)
+    int barAxis = 0;     // 0=horizontal, 1=vertical
+    int barStart = 0, barEnd = 0;   // fill-edge travel (piece-local px along axis)
 };
 
 struct GBAHudStopExport {
@@ -588,6 +602,7 @@ struct GBAHudKeyframeExport {
     int rot;           // degrees 0-359 (converted to brads at export)
     int scaleX, scaleY; // 8.8 fixed point (256 = 1.0x)
     int hidden = 0;     // 1 = piece hidden from this keyframe onward (blink)
+    int opacity = 16;   // 0-16 opacity multiplier on the piece base opacity (16 = no change)
 };
 
 struct GBAHudAnimLayerItemExport {

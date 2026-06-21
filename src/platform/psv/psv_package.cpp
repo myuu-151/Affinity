@@ -566,7 +566,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
     f << "#define AFN_HAS_HUD 1\n";
 
     // Flatten pieces/texts/stops across elements; emit each piece's RGBA frame.
-    struct P { int x, y, w, h, tex, black, opacity; };
+    struct P { int x, y, w, h, tex, black, opacity, barSrc, barAxis, barStart, barEnd; };
     struct T { int x, y; unsigned int color; int font, slot, pad, scale; std::string text; };
     struct S { int x, y, link; };
     std::vector<P> pieces; std::vector<T> texts; std::vector<S> stops;
@@ -591,11 +591,17 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
         int w = fr.width > 0 ? fr.width : (sz>0?sz:a.baseSize);
         int h = fr.height > 0 ? fr.height : (sz>0?sz:a.baseSize);
         frameW.push_back(w); frameH.push_back(h);
+        // Soft alpha: when the asset opted into Use Alpha, carry the source PNG's
+        // per-pixel alpha so a HUD piece's feathered edges blend instead of the
+        // hard 50% cutout (jagged edges). Else binary (idx 0 = transparent).
+        bool softAlpha = a.useAlpha && (int)fr.alpha.size() >= w * h;
         f << "static const unsigned char afn_hud_f" << frameCount << "[] =\n  \"";
         int run = 0;
         for (int py = 0; py < h; py++) for (int px = 0; px < w; px++) {
             unsigned char idx = fr.pixels[py * kExportMaxFrameSize + px];
             unsigned c = (idx == 0) ? 0u : pal[idx & palMask];
+            if (softAlpha && idx != 0)
+                c = (c & 0x00FFFFFFu) | ((unsigned)fr.alpha[py * w + px] << 24);
             unsigned bb[4] = { c & 0xFF, (c>>8) & 0xFF, (c>>16) & 0xFF, (c>>24) & 0xFF };
             for (int k = 0; k < 4; k++)
                 f << '\\' << ((bb[k]>>6)&7) << ((bb[k]>>3)&7) << (bb[k]&7);  // \ooo octal byte
@@ -621,7 +627,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
             // 960 is the non-square full-screen background (960x544).
             int dispW = (pc.size == 960) ? 960 : pc.size;
             int dispH = (pc.size == 960) ? 544 : pc.size;
-            pieces.push_back({ pc.localX, pc.localY, dispW, dispH, frameCount-1, pc.blackTint?1:0, pc.opacity });
+            pieces.push_back({ pc.localX, pc.localY, dispW, dispH, frameCount-1, pc.blackTint?1:0, pc.opacity, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd });
         }
         e.pC = (int)pieces.size() - e.pS;
         e.tS = (int)texts.size();
@@ -662,10 +668,12 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
           << "," << (e.startVis?1:0) << " },\n";
     f << "};\n";
     f << "#define AFN_HUD_PIECE_TINT 1\n";   // AfnHudPiece carries black + opacity (per-piece tint)
-    f << "typedef struct { short x,y,w,h,tex; unsigned char black; short opacity; } AfnHudPiece;\n";
+    f << "#define AFN_HUD_PIECE_BAR 1\n";    // ...and the bar-fill drain fields (barSrc/axis/start/end)
+    f << "typedef struct { short x,y,w,h,tex; unsigned char black; short opacity; short barSrc,barAxis,barStart,barEnd; } AfnHudPiece;\n";
     f << "static const AfnHudPiece afn_hud_piece[" << (pieces.empty()?1:pieces.size()) << "] = {\n";
-    for (auto& p : pieces) f << "  { " << p.x << "," << p.y << "," << p.w << "," << p.h << "," << p.tex << "," << p.black << "," << p.opacity << " },\n";
-    if (pieces.empty()) f << "  {0,0,0,0,0,0,16},\n";
+    for (auto& p : pieces) f << "  { " << p.x << "," << p.y << "," << p.w << "," << p.h << "," << p.tex << "," << p.black << "," << p.opacity
+                              << "," << p.barSrc << "," << p.barAxis << "," << p.barStart << "," << p.barEnd << " },\n";
+    if (pieces.empty()) f << "  {0,0,0,0,0,0,16,0,0,0,0},\n";
     f << "};\n";
     f << "typedef struct { short x,y; unsigned int color; unsigned char font,slot,pad,scale; char text[32]; } AfnHudText;\n";
     f << "static const AfnHudText afn_hud_text[" << (texts.empty()?1:texts.size()) << "] = {\n";
@@ -691,7 +699,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
     // scaled/rotated about its center. Piece items only for now (sprite/text/
     // cursor items in a layer are ignored on PSV).
     {
-        struct KF { int frame, ox, oy, rot, sx, sy, hidden; };
+        struct KF { int frame, ox, oy, rot, sx, sy, hidden, op; };
         struct LY { int interp, loop, speed, length, kfStart, kfCount; };
         std::vector<KF> kfs;
         std::vector<LY> layers;
@@ -707,7 +715,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
                 L.length = lay.length > 0 ? lay.length : 1;
                 L.kfStart = (int)kfs.size();
                 for (const auto& k : lay.keyframes)
-                    kfs.push_back({ k.frame, k.offX, k.offY, k.rot, k.scaleX, k.scaleY, k.hidden });
+                    kfs.push_back({ k.frame, k.offX, k.offY, k.rot, k.scaleX, k.scaleY, k.hidden, k.opacity });
                 L.kfCount = (int)kfs.size() - L.kfStart;
                 int li = (int)layers.size();
                 layers.push_back(L);
@@ -721,11 +729,12 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
             f << "#define AFN_HAS_HUD_ANIM 1\n";
             f << "#define AFN_HUD_LAYER_COUNT " << layers.size() << "\n";
             f << "#define AFN_HUD_KF_HIDE 1\n";   // AfnHudKf carries the per-keyframe hide flag (blink)
-            f << "typedef struct { short frame,ox,oy,rot,sx,sy,hide; } AfnHudKf;\n";
+            f << "#define AFN_HUD_KF_OPACITY 1\n"; // ...and the per-keyframe opacity multiplier (glow pulse)
+            f << "typedef struct { short frame,ox,oy,rot,sx,sy,hide,op; } AfnHudKf;\n";
             f << "static const AfnHudKf afn_hud_kf[" << kfs.size() << "] = {\n";
             for (auto& k : kfs)
                 f << "  { " << k.frame << "," << k.ox << "," << k.oy << "," << k.rot
-                  << "," << k.sx << "," << k.sy << "," << k.hidden << " },\n";
+                  << "," << k.sx << "," << k.sy << "," << k.hidden << "," << k.op << " },\n";
             f << "};\n";
             f << "typedef struct { unsigned char interp,loop; short speed,length,kfStart,kfCount; } AfnHudLayer;\n";
             f << "static const AfnHudLayer afn_hud_layer[" << layers.size() << "] = {\n";

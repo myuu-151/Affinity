@@ -115,6 +115,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                 case T::GetPlayerY: return "player_y";
                 case T::GetPlayerZ: return "player_z";
                 case T::GetScore:   return "afn_score";
+                case T::GetEnergy:  return "afn_energy";
+                case T::GetHealth:  return "afn_health";
                 case T::GetTime:    return "afn_frame_count";
                 case T::GetLastKey: return "afn_last_key";
                 case T::GetRandom:  return "((int)(afn_rng & 0xFF))";
@@ -524,6 +526,58 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_fb_tgt      = -1;\n";
                 f << "#endif\n";
                 f << "#endif\n";
+                break;
+            }
+            // ---- Energy resource (player) ----
+            case GBAScriptNodeType::SetEnergy: {
+                auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "0";
+                f << "    afn_energy = " << v << ";\n";
+                f << "    if (afn_energy < 0) afn_energy = 0; if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;\n";
+                break;
+            }
+            case GBAScriptNodeType::AddEnergy: {
+                auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "1";
+                f << "    afn_energy += " << v << "; if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;\n";
+                break;
+            }
+            case GBAScriptNodeType::SpendEnergy: {
+                auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "1";
+                f << "    afn_energy -= " << v << "; if (afn_energy < 0) afn_energy = 0;\n";
+                break;
+            }
+            case GBAScriptNodeType::SetMaxEnergy: {
+                auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "100";
+                f << "    afn_energy_max = " << v << "; if (afn_energy_max < 0) afn_energy_max = 0;\n";
+                f << "    if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;\n";
+                break;
+            }
+            case GBAScriptNodeType::HasEnergy: {
+                // Gate: opens the brace; the isGate path closes it.
+                auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "1";
+                f << "    if (afn_energy >= " << v << ") {\n";
+                break;
+            }
+            // ---- Player Health resource ----
+            case GBAScriptNodeType::SetHealth: {
+                auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "0";
+                f << "    afn_health = " << v << ";\n";
+                f << "    if (afn_health < 0) afn_health = 0; if (afn_health > afn_health_max) afn_health = afn_health_max;\n";
+                break;
+            }
+            case GBAScriptNodeType::DamageHealth: {
+                auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "1";
+                f << "    afn_health -= " << v << "; if (afn_health < 0) afn_health = 0;\n";
+                break;
+            }
+            case GBAScriptNodeType::HealHealth: {
+                auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "1";
+                f << "    afn_health += " << v << "; if (afn_health > afn_health_max) afn_health = afn_health_max;\n";
+                break;
+            }
+            case GBAScriptNodeType::SetMaxHealth: {
+                auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "100";
+                f << "    afn_health_max = " << v << "; if (afn_health_max < 0) afn_health_max = 0;\n";
+                f << "    if (afn_health > afn_health_max) afn_health = afn_health_max;\n";
                 break;
             }
             case GBAScriptNodeType::StrafeAnim: {
@@ -1031,6 +1085,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                    t == GBAScriptNodeType::IsNotLanding ||
                    t == GBAScriptNodeType::IsCharging ||
                    t == GBAScriptNodeType::IsFiring ||
+                   t == GBAScriptNodeType::HasEnergy ||
                    t == GBAScriptNodeType::IsInView;
         };
         auto walkExec = [&](int nodeId, int pinIdx) {
@@ -1167,6 +1222,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                            a->type == GBAScriptNodeType::IsNotLanding ||
                            a->type == GBAScriptNodeType::IsCharging ||
                            a->type == GBAScriptNodeType::IsFiring ||
+                           a->type == GBAScriptNodeType::HasEnergy ||
                            a->type == GBAScriptNodeType::IsInView);
             if (isGate) {
                 bool wasJump = inJumpGate;
