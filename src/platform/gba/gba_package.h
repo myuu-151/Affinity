@@ -483,6 +483,7 @@ enum class GBAScriptNodeType : int {
     HealHealth,      // action: add health (clamped to max)
     SetMaxHealth,    // action: set health capacity
     GetHealth,       // data: outputs the current health value
+    GetChargePct,    // data: outputs the Charge Shot charge level as 0-100% (live, read at release)
     COUNT
 };
 

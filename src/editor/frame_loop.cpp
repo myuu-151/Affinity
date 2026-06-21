@@ -830,6 +830,7 @@ enum class VsNodeType : int {
     HealHealth,      // action: add health (clamped to max)
     SetMaxHealth,    // action: set health capacity
     GetHealth,       // data: outputs the current health value
+    GetChargePct,    // data: outputs the Charge Shot charge level as 0-100% (live, read at release)
     COUNT
 };
 
@@ -1184,6 +1185,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Heal Health",     0xFF3355AA, 1, 1, 1, 0, {"Amount (int)"}, {}, {} },
     { "Set Max Health",  0xFF3355AA, 1, 1, 1, 0, {"Max (int)"}, {}, {} },
     { "Get Health",      0xFF666688, 0, 0, 0, 1, {}, {"Health"}, {} },
+    { "Get Charge %",    0xFF666688, 0, 0, 0, 1, {}, {"Charge %"}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -4507,6 +4509,7 @@ static int sHudSelectedIdx = -1;
 static float sHudCanvasZoom = 3.0f;
 static ImVec2 sHudCanvasPan = {0, 0};
 static float sHudBarPreview = 1.0f;   // 0..1 preview fill for bar pieces (canvas WYSIWYG)
+static std::set<int> sHudViewExtra;   // Ctrl-clicked elements ALSO shown on canvas (position-matching reference; not edited)
 static float sHudTimelineH = 200.0f;
 static int sHudTimelinePlayhead = 0;
 static float sHudTimelineScroll = 0.0f;
@@ -22213,6 +22216,7 @@ void FrameTick(float dt)
                 case VsNodeType::HealHealth:    desc = "Add Amount to Health (clamped to max). Pickups, regen (On Update -> Heal Health(1)), etc."; break;
                 case VsNodeType::SetMaxHealth:  desc = "Set the Health capacity (max). The health bar reads current/max."; break;
                 case VsNodeType::GetHealth:     desc = "Outputs the current Health value. Wire into a condition (Compare / Branch / Is True) — e.g. Compare(Get Health, 0, <=) -> Branch for death."; break;
+                case VsNodeType::GetChargePct:  desc = "Outputs the Charge Shot's current charge as 0-100% (afn_fb_level / afn_fb_max). Read it on On Key Released (before the shot resets) to branch the fire by charge — e.g. Branch[Compare(Get Charge %, 99, >=)]: full = big blast, else = a tap/small shot."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
@@ -22519,6 +22523,7 @@ void FrameTick(float dt)
                         case VsNodeType::HealHealth:    return "_heal_health";
                         case VsNodeType::SetMaxHealth:  return "_set_max_health";
                         case VsNodeType::GetHealth:     return "_get_health";
+                        case VsNodeType::GetChargePct:  return "_get_charge_pct";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -23847,6 +23852,14 @@ void FrameTick(float dt)
                     setActionFunc(infoNode, "_get_health",
                         "    // --- Runtime --- inline data node: returns afn_health (compiled by\n"
                         "    // emitIntExpr, usable in Compare / Branch / Is True conditions).");
+                    break;
+                }
+                case VsNodeType::GetChargePct: {
+                    editorCode = "// Read the Charge Shot charge level (0-100%)";
+                    setActionFunc(infoNode, "_get_charge_pct",
+                        "    // --- Runtime --- inline data node: (afn_fb_level * 100 / afn_fb_max).\n"
+                        "    // Read on On Key Released (script_tick runs before the focus-blast tick\n"
+                        "    // resets afn_fb_level) to branch the fire/SFX by charge.");
                     break;
                 }
                 case VsNodeType::TurnPlayer: {
@@ -26834,6 +26847,7 @@ void FrameTick(float dt)
                     case VsNodeType::HealHealth:    suffix = "_heal_health"; break;
                     case VsNodeType::SetMaxHealth:  suffix = "_set_max_health"; break;
                     case VsNodeType::GetHealth:     suffix = "_get_health"; break;
+                    case VsNodeType::GetChargePct:  suffix = "_get_charge_pct"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -27412,6 +27426,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHealth].name)) addNodeAt(VsNodeType::SetHealth);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetMaxHealth].name)) addNodeAt(VsNodeType::SetMaxHealth);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetHealth].name)) addNodeAt(VsNodeType::GetHealth);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetChargePct].name)) addNodeAt(VsNodeType::GetChargePct);
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopAll].name)) addNodeAt(VsNodeType::StopAll);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::Print].name)) addNodeAt(VsNodeType::Print);
@@ -30714,11 +30729,14 @@ void FrameTick(float dt)
             // Clip to canvas bounds so elements don't bleed outside
             dl->PushClipRect(ImVec2(cx, cy), ImVec2(cx + canvasW, cy + canvasH), true);
 
-            // Draw only the selected element on canvas
+            // Draw the selected element, plus any Ctrl-clicked "also-view" elements
+            // (reference overlays for matching positions). Extras draw even if the
+            // element is invisible so you can line up a not-yet-enabled overlay.
             for (int i = 0; i < (int)sHudElements.size(); i++) {
-                if (i != sHudSelectedIdx) continue;
+                bool isExtra = sHudViewExtra.count(i) > 0;
+                if (i != sHudSelectedIdx && !isExtra) continue;
                 auto& el = sHudElements[i];
-                if (!el.visible) continue;
+                if (!el.visible && !isExtra) continue;
                 float ex = cx + el.x * zoom;
                 float ey = cy + el.y * zoom;
                 float ew = el.w * zoom;
@@ -31367,8 +31385,19 @@ void FrameTick(float dt)
                 } else {
                     char label[64];
                     snprintf(label, sizeof(label), "%s", el.name);
-                    if (ImGui::Selectable(label, selected))
-                        sHudSelectedIdx = i;
+                    // Ctrl+click = also show this element on the canvas (reference,
+                    // for matching positions) without changing which one you edit.
+                    if (ImGui::Selectable(label, selected || sHudViewExtra.count(i) > 0)) {
+                        if (ImGui::GetIO().KeyCtrl) {
+                            if (i != sHudSelectedIdx) {
+                                if (sHudViewExtra.count(i)) sHudViewExtra.erase(i);
+                                else sHudViewExtra.insert(i);
+                            }
+                        } else {
+                            sHudSelectedIdx = i;
+                            sHudViewExtra.clear();
+                        }
+                    }
                     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
                         sHudRenamingIdx = i;
                 }
@@ -31652,6 +31681,7 @@ void FrameTick(float dt)
                 if (ImGui::SmallButton("Delete##delelem")) {
                     sHudElements.erase(sHudElements.begin() + sHudSelectedIdx);
                     sHudSelectedIdx = -1;
+                    sHudViewExtra.clear();   // indices shift on delete
                     sProjectDirty = true;
                 }
             }
@@ -32359,7 +32389,45 @@ void FrameTick(float dt)
                             case HudElement::It_Cursor:
                                 snprintf(ilabel, sizeof(ilabel), "Cursor"); break;
                             }
-                            ImGui::BulletText("%s", ilabel);
+                            // Reassignable: a dropdown to re-point this item at a
+                            // different piece/sprite/text, plus a remove button.
+                            ImGui::PushID(7100 + ii);
+                            if (it.type == HudElement::It_Cursor) {
+                                ImGui::BulletText("%s", ilabel);
+                            } else {
+                                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - Scaled(26));
+                                if (ImGui::BeginCombo("##itemreassign", ilabel)) {
+                                    if (it.type == HudElement::It_Piece) {
+                                        for (int pj = 0; pj < (int)el.pieces.size(); pj++) {
+                                            const char* nm = (el.pieces[pj].spriteAssetIdx >= 0 && el.pieces[pj].spriteAssetIdx < (int)sSpriteAssets.size())
+                                                ? sSpriteAssets[el.pieces[pj].spriteAssetIdx].name.c_str() : "empty";
+                                            char opt[48]; snprintf(opt, sizeof(opt), "Piece %d: %s", pj, nm);
+                                            if (ImGui::Selectable(opt, pj == it.index)) { it.index = pj; sProjectDirty = true; }
+                                        }
+                                    } else if (it.type == HudElement::It_Sprite) {
+                                        for (int sj = 0; sj < (int)el.spriteItems.size(); sj++) {
+                                            const char* nm = (el.spriteItems[sj].spriteAssetIdx >= 0 && el.spriteItems[sj].spriteAssetIdx < (int)sSpriteAssets.size())
+                                                ? sSpriteAssets[el.spriteItems[sj].spriteAssetIdx].name.c_str() : "empty";
+                                            char opt[48]; snprintf(opt, sizeof(opt), "Sprite %d: %s", sj, nm);
+                                            if (ImGui::Selectable(opt, sj == it.index)) { it.index = sj; sProjectDirty = true; }
+                                        }
+                                    } else if (it.type == HudElement::It_Text) {
+                                        for (int tj = 0; tj < (int)el.textRows.size(); tj++) {
+                                            char opt[48]; snprintf(opt, sizeof(opt), "Text %d: %s", tj, el.textRows[tj].label);
+                                            if (ImGui::Selectable(opt, tj == it.index)) { it.index = tj; sProjectDirty = true; }
+                                        }
+                                    }
+                                    ImGui::EndCombo();
+                                }
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("-##delitem")) {
+                                    lay.items.erase(lay.items.begin() + ii);
+                                    sProjectDirty = true;
+                                    ImGui::PopID();
+                                    break;
+                                }
+                            }
+                            ImGui::PopID();
                         }
 
                         // Keyframes for this layer
@@ -32378,9 +32446,9 @@ void FrameTick(float dt)
                             auto& kf = lay.keyframes[ki];
                             bool ksel = (ki == lay.selectedKeyframe);
                             char klabel[64];
-                            snprintf(klabel, sizeof(klabel), "%d: f%d (%+d,%+d) r%d s%.1f,%.1f%s",
+                            snprintf(klabel, sizeof(klabel), "%d: f%d (%+d,%+d) r%d s%.1f,%.1f o%d%s",
                                 ki, kf.frame, kf.offsetX, kf.offsetY, kf.rot,
-                                kf.scaleX / 256.0f, kf.scaleY / 256.0f, kf.hidden ? " [hide]" : "");
+                                kf.scaleX / 256.0f, kf.scaleY / 256.0f, kf.opacity, kf.hidden ? " [hide]" : "");
                             if (ImGui::Selectable(klabel, ksel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
                                 lay.selectedKeyframe = ki;
                             ImGui::SameLine();

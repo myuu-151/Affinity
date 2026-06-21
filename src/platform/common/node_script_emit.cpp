@@ -117,6 +117,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 case T::GetScore:   return "afn_score";
                 case T::GetEnergy:  return "afn_energy";
                 case T::GetHealth:  return "afn_health";
+                case T::GetChargePct: return "((afn_fb_max > 0) ? (int)(afn_fb_level * 100.0f / afn_fb_max) : 0)";
                 case T::GetTime:    return "afn_frame_count";
                 case T::GetLastKey: return "afn_last_key";
                 case T::GetRandom:  return "((int)(afn_rng & 0xFF))";
