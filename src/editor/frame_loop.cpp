@@ -6804,6 +6804,36 @@ static bool LoadRiggedGLTFResolved(const std::string& path, RiggedMeshAsset& rm,
     return ok;
 }
 
+// Re-resolve every Skeletal Animation (SkelAnim) node's clip index from its
+// stored clip NAME against its rig's current clip list. Clip indices shift when
+// a glTF gains/reorders animations (clips are kept name-sorted, so inserting one
+// renumbers the rest) — a node that cached an index would then play the wrong
+// clip. Matching by name keeps each node's slot pointing at the same clip;
+// backfills the name from the index for older nodes that have none.
+static void ResolveSkelAnimClipIndices()
+{
+    auto resolve = [](std::vector<VsNode>& nodes) {
+        for (auto& n : nodes) {
+            if (n.type != VsNodeType::SkelAnim) continue;
+            int ri = n.paramInt[0];
+            if (ri < 0 || ri >= (int)sRiggedMeshAssets.size()) continue;
+            const auto& clips = sRiggedMeshAssets[ri].clips;
+            if (clips.empty()) continue;
+            if (n.clipName[0]) {
+                for (int c = 0; c < (int)clips.size(); c++)
+                    if (clips[c].name == n.clipName) { n.paramInt[1] = c; break; }
+            } else if (n.paramInt[1] >= 0 && n.paramInt[1] < (int)clips.size()) {
+                strncpy(n.clipName, clips[n.paramInt[1]].name.c_str(), sizeof(n.clipName) - 1);
+                n.clipName[sizeof(n.clipName) - 1] = '\0';
+            }
+        }
+    };
+    resolve(sVsNodes);
+    for (auto& bp : sBlueprintAssets) resolve(bp.nodes);
+    for (auto& sc : sMapScenes) resolve(sc.vsNodes);
+    for (auto& sc : sM7Scenes)  resolve(sc.vsNodes);
+}
+
 // Re-import a rigged glTF from its source path (picking up new/changed geometry,
 // skeleton, and ANIMATIONS) while preserving every editor-side setting, so the
 // user doesn't have to redo render flags, materials, textures, collision, yaw,
@@ -6827,6 +6857,9 @@ static bool ReloadRiggedMeshKeepSettings(RiggedMeshAsset& rm, std::string* err,
     float colE[3] = { rm.colExtents[0], rm.colExtents[1], rm.colExtents[2] };
     std::map<std::string, bool> clipLoop;            // by clip name
     for (const auto& c : rm.clips) clipLoop[c.name] = c.loop;
+    std::vector<std::string> oldClipNames;           // by OLD index (for sprite clip-slot remap)
+    for (const auto& c : rm.clips) oldClipNames.push_back(c.name);
+    int rigIdx = (int)(&rm - sRiggedMeshAssets.data());   // this rig's slot index
     struct MatSnap { int wrap; bool manual; std::string path; };
     std::map<std::string, MatSnap> matByName;        // by material name
     matByName[rm.materialName] = { rm.wrapMode, rm.textureManual, rm.texturePath };
@@ -6880,6 +6913,23 @@ static bool ReloadRiggedMeshKeepSettings(RiggedMeshAsset& rm, std::string* err,
     if (rm.glTexID) glDeleteTextures(1, &rm.glTexID);
     for (auto& em : rm.extraMaterials) if (em.glTexID) glDeleteTextures(1, &em.glTexID);
     rm = std::move(tmp);
+
+    // Retain animation SLOTS even though clip indices shifted (clips are
+    // name-sorted, so a new clip renumbers the rest). Remap every clip-index
+    // reference by its OLD name to the new index: SkelAnim nodes (the node
+    // graph "animation slots") and each sprite's default/nav clip on this rig.
+    auto remapClip = [&](int& idx) {
+        if (idx < 0 || idx >= (int)oldClipNames.size()) return;
+        const std::string& nm = oldClipNames[idx];
+        for (int c = 0; c < (int)rm.clips.size(); c++)
+            if (rm.clips[c].name == nm) { idx = c; return; }
+    };
+    for (int i = 0; i < sSpriteCount; i++) {
+        if (sSprites[i].riggedMeshIdx != rigIdx) continue;
+        remapClip(sSprites[i].rigAnimIdx);
+        remapClip(sSprites[i].navMoveClip);
+    }
+    ResolveSkelAnimClipIndices();   // re-point Skeletal Animation nodes by name
     return true;
 }
 
@@ -10778,32 +10828,9 @@ static bool LoadProject(const std::string& path)
     StitchSkyPanels();
 
     // Re-resolve SkelAnim clip indices by NAME (clips can shift when the glTF
-    // gains/reorders animations). If a node stored a clip name, look it up in
-    // its rig's current clip list and update paramInt[1]; if it has no name yet
-    // (older project), backfill the name from the current index so it's stable
-    // from here on. Runs after all rigs (with clips) and nodes are loaded.
-    {
-        auto resolveSkelClips = [](std::vector<VsNode>& nodes) {
-            for (auto& n : nodes) {
-                if (n.type != VsNodeType::SkelAnim) continue;
-                int ri = n.paramInt[0];
-                if (ri < 0 || ri >= (int)sRiggedMeshAssets.size()) continue;
-                const auto& clips = sRiggedMeshAssets[ri].clips;
-                if (clips.empty()) continue;
-                if (n.clipName[0]) {
-                    for (int c = 0; c < (int)clips.size(); c++)
-                        if (clips[c].name == n.clipName) { n.paramInt[1] = c; break; }
-                } else if (n.paramInt[1] >= 0 && n.paramInt[1] < (int)clips.size()) {
-                    strncpy(n.clipName, clips[n.paramInt[1]].name.c_str(), sizeof(n.clipName) - 1);
-                    n.clipName[sizeof(n.clipName) - 1] = '\0';
-                }
-            }
-        };
-        resolveSkelClips(sVsNodes);
-        for (auto& bp : sBlueprintAssets) resolveSkelClips(bp.nodes);
-        for (auto& sc : sMapScenes) resolveSkelClips(sc.vsNodes);
-        for (auto& sc : sM7Scenes)  resolveSkelClips(sc.vsNodes);
-    }
+    // gains/reorders animations). Runs after all rigs (with clips) and nodes
+    // are loaded. Same routine the Reload glTF button uses.
+    ResolveSkelAnimClipIndices();
 
     fclose(f);
     sProjectPath = path;
