@@ -831,6 +831,7 @@ enum class VsNodeType : int {
     SetMaxHealth,    // action: set health capacity
     GetHealth,       // data: outputs the current health value
     GetChargePct,    // data: outputs the Charge Shot charge level as 0-100% (live, read at release)
+    SpendChargeEnergy, // action: subtract energy scaled by charge level (Min%..Max% over 0..100% charge)
     COUNT
 };
 
@@ -841,7 +842,7 @@ struct VsNodeTypeDef {
     int outExec;        // number of exec output pins
     int inData;         // number of data input pins
     int outData;        // number of data output pins
-    const char* inDataNames[10];
+    const char* inDataNames[12];
     const char* outDataNames[4];
     const char* outExecNames[5];
 };
@@ -1160,7 +1161,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Strafe Anim",     0xFF3355AA, 1, 1, 8, 0, {"Fwd","Fwd-R","Right","Back-R","Back","Back-L","Left","Fwd-L"}, {}, {} },
     { "Is In View",      0xFF885533, 1, 1, 1, 0, {"Target (obj)"}, {}, {} },
     { "8-Way Stick",     0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
-    { "Dodge",           0xFF3355AA, 1, 1, 10, 0, {"Speed (int)","Frames (int)","Left Clip","Right Clip","Idle Clip","Ramp (int)","Falloff (int)","Cooldown (int)","Forward Clip","Back Clip"}, {}, {} },
+    { "Dodge",           0xFF3355AA, 1, 1, 11, 0, {"Speed (int)","Frames (int)","Left Clip","Right Clip","Idle Clip","Ramp (int)","Falloff (int)","Cooldown (int)","Forward Clip","Back Clip","Energy Cost (int)"}, {}, {} },
     { "Is Dodging",      0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is Not Dodging",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Is Airborne",     0xFF885533, 1, 1, 0, 0, {}, {}, {} },
@@ -1186,6 +1187,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Set Max Health",  0xFF3355AA, 1, 1, 1, 0, {"Max (int)"}, {}, {} },
     { "Get Health",      0xFF666688, 0, 0, 0, 1, {}, {"Health"}, {} },
     { "Get Charge %",    0xFF666688, 0, 0, 0, 1, {}, {"Charge %"}, {} },
+    { "Spend Charge Energy", 0xFF3355AA, 1, 1, 2, 0, {"Min % (int)", "Max % (int)"}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1448,7 +1450,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::StrafeAnim:    desc = "8-way directional animation picker (PSV lock-strafe): wire your clips (Forward, Fwd-Right, Right, Back-Right, Back, Back-Left, Left, Fwd-Left, relative to facing the target) and it plays the one matching the stick direction each frame. You DON'T need all 8 — any unwired direction falls back to the nearest wired one, so wiring just the 4 cardinals makes diagonals lean to a neighbor. One node replaces the per-direction gated Play Skel Anim chains; put it behind On Update -> Is Locked On."; break;
     case VsNodeType::SnapStick8:    desc = "Gate the left thumbstick to 8 directions (PSV): snaps the analog move vector to the nearest 45 deg (N/NE/E/SE/S/SW/W/NW) before movement and the Strafe Anim clip pick read it, so diagonals are crisp and the directional clips don't flicker between neighbors. Magnitude (push amount) is preserved. Fire it once from On Start."; break;
     case VsNodeType::DashToTarget:  desc = "Lunges the player toward the Lock On target for a burst (PSV) — a homing dash for bullet-punch-style moves. Speed = world units/frame (like Walk/Sprint), Frames = lunge duration; stops early at melee range. No target locked -> dashes along current facing. Wire after the attack trigger; pair with Play Skel Anim(atk_phs)."; break;
-    case VsNodeType::Dodge:         desc = "One-button side roll (PSV): a pure LEFT/RIGHT dodge — never forward or back. On trigger the left stick's horizontal component picks the side, so diagonals trigger it too (up-left/down-left = left dodge); a neutral or pure up/down stick ALTERNATES left/right each press (ping-pong) so tap-dodging doesn't roll the same way forever. While locked on, the roll is perpendicular to the player->target line (circle-strafe). Speed = world units/frame (like Walk/Sprint), Frames = roll duration. Wire Left Clip = DodgeL and Right Clip = DodgeR. Idle Clip (optional) = the clip to snap back to when the roll ends while standing still (e.g. Idle) so the rig doesn't freeze on the dodge pose; if you're moving when it ends, Strafe Anim takes over instead. Ramp (int) = frames to ease the speed in from 0 (quadratic) so the roll accelerates instead of snapping to full velocity — softens the stiff feel and gives a windup you can time (0 = instant). Falloff (int) = frames to ease the speed back down to 0 at the END so it decelerates instead of dead-stopping (0 = hard stop). Cooldown (int) = lockout frames after a dodge fires; presses during the lockout do nothing, so mashing the button can't re-fire it (measured from the start, so set it >= Frames to also block mid-roll cancels; 0 = no cooldown). Wall-collides. Put it on a single On Key Pressed; pair with Is Not Dodging on the damage path for i-frames."; break;
+    case VsNodeType::Dodge:         desc = "One-button side roll (PSV): a pure LEFT/RIGHT dodge — never forward or back. On trigger the left stick's horizontal component picks the side, so diagonals trigger it too (up-left/down-left = left dodge); a neutral or pure up/down stick ALTERNATES left/right each press (ping-pong) so tap-dodging doesn't roll the same way forever. While locked on, the roll is perpendicular to the player->target line (circle-strafe). Speed = world units/frame (like Walk/Sprint), Frames = roll duration. Wire Left Clip = DodgeL and Right Clip = DodgeR. Idle Clip (optional) = the clip to snap back to when the roll ends while standing still (e.g. Idle) so the rig doesn't freeze on the dodge pose; if you're moving when it ends, Strafe Anim takes over instead. Ramp (int) = frames to ease the speed in from 0 (quadratic) so the roll accelerates instead of snapping to full velocity — softens the stiff feel and gives a windup you can time (0 = instant). Falloff (int) = frames to ease the speed back down to 0 at the END so it decelerates instead of dead-stopping (0 = hard stop). Cooldown (int) = lockout frames after a dodge fires; presses during the lockout do nothing, so mashing the button can't re-fire it (measured from the start, so set it >= Frames to also block mid-roll cancels; 0 = no cooldown). Wall-collides. Energy Cost (int) = energy spent per dodge (0 = free); it's atomic with the roll firing — a press that's blocked by the cooldown costs nothing, and the dodge won't fire at all if you can't afford it (so it doubles as an energy gate). Put it on a single On Key Pressed; pair with Is Not Dodging on the damage path for i-frames."; break;
     case VsNodeType::IsDodging:     desc = "Gate (PSV): passes exec only while a Dodge roll is active. Use it to suppress actions during a dodge (e.g. block re-triggering attacks)."; break;
     case VsNodeType::IsNotDodging:  desc = "Gate (PSV): passes exec only while NO Dodge is active — the inverse of Is Dodging. Wire incoming damage through it for dodge i-frames: On Hit -> Is Not Dodging -> Damage HP."; break;
     case VsNodeType::IsAirborne:    desc = "Gate: passes exec only while the player is off the ground — the clean inverse of Is On Ground. Drive the air animation with it: On Update -> Is Airborne -> Play Skel Anim(jump). For a rise/fall split use Is Jumping (rising) and Is Falling (descending) instead — on PSV those now read the real vertical velocity."; break;
@@ -22191,7 +22193,7 @@ void FrameTick(float dt)
                 case VsNodeType::StrafeAnim:    desc = "8-way directional animation picker (PSV lock-strafe): wire your clips (Forward, Fwd-Right, Right, Back-Right, Back, Back-Left, Left, Fwd-Left, relative to facing the target) and it plays the one matching the stick direction each frame. You DON'T need all 8 — any unwired direction falls back to the nearest wired one, so wiring just the 4 cardinals makes diagonals lean to a neighbor. One node replaces the per-direction gated Play Skel Anim chains; put it behind On Update -> Is Locked On."; break;
                 case VsNodeType::SnapStick8:    desc = "Gate the left thumbstick to 8 directions (PSV): snaps the analog move vector to the nearest 45 deg (N/NE/E/SE/S/SW/W/NW) before movement and the Strafe Anim clip pick read it, so diagonals are crisp and the directional clips don't flicker between neighbors. Magnitude (push amount) is preserved. Fire it once from On Start."; break;
                 case VsNodeType::DashToTarget:  desc = "Lunges the player toward the Lock On target for a burst (PSV) — a homing dash for bullet-punch-style moves. Speed = world units/frame (like Walk/Sprint), Frames = lunge duration; stops early at melee range. No target locked -> dashes along current facing. Wire after the attack trigger; pair with Play Skel Anim(atk_phs)."; break;
-                case VsNodeType::Dodge:         desc = "One-button side roll (PSV): a pure LEFT/RIGHT dodge — never forward or back. On trigger the left stick's horizontal component picks the side, so diagonals trigger it too (up-left/down-left = left dodge); a neutral or pure up/down stick ALTERNATES left/right each press (ping-pong) so tap-dodging doesn't roll the same way forever. While locked on, the roll is perpendicular to the player->target line (circle-strafe). Speed = world units/frame (like Walk/Sprint), Frames = roll duration. Wire Left Clip = DodgeL and Right Clip = DodgeR. Idle Clip (optional) = the clip to snap back to when the roll ends while standing still (e.g. Idle) so the rig doesn't freeze on the dodge pose; if you're moving when it ends, Strafe Anim takes over instead. Ramp (int) = frames to ease the speed in from 0 (quadratic) so the roll accelerates instead of snapping to full velocity — softens the stiff feel and gives a windup you can time (0 = instant). Falloff (int) = frames to ease the speed back down to 0 at the END so it decelerates instead of dead-stopping (0 = hard stop). Cooldown (int) = lockout frames after a dodge fires; presses during the lockout do nothing, so mashing the button can't re-fire it (measured from the start, so set it >= Frames to also block mid-roll cancels; 0 = no cooldown). Wall-collides. Put it on a single On Key Pressed; pair with Is Not Dodging on the damage path for i-frames."; break;
+                case VsNodeType::Dodge:         desc = "One-button side roll (PSV): a pure LEFT/RIGHT dodge — never forward or back. On trigger the left stick's horizontal component picks the side, so diagonals trigger it too (up-left/down-left = left dodge); a neutral or pure up/down stick ALTERNATES left/right each press (ping-pong) so tap-dodging doesn't roll the same way forever. While locked on, the roll is perpendicular to the player->target line (circle-strafe). Speed = world units/frame (like Walk/Sprint), Frames = roll duration. Wire Left Clip = DodgeL and Right Clip = DodgeR. Idle Clip (optional) = the clip to snap back to when the roll ends while standing still (e.g. Idle) so the rig doesn't freeze on the dodge pose; if you're moving when it ends, Strafe Anim takes over instead. Ramp (int) = frames to ease the speed in from 0 (quadratic) so the roll accelerates instead of snapping to full velocity — softens the stiff feel and gives a windup you can time (0 = instant). Falloff (int) = frames to ease the speed back down to 0 at the END so it decelerates instead of dead-stopping (0 = hard stop). Cooldown (int) = lockout frames after a dodge fires; presses during the lockout do nothing, so mashing the button can't re-fire it (measured from the start, so set it >= Frames to also block mid-roll cancels; 0 = no cooldown). Wall-collides. Energy Cost (int) = energy spent per dodge (0 = free); it's atomic with the roll firing — a press that's blocked by the cooldown costs nothing, and the dodge won't fire at all if you can't afford it (so it doubles as an energy gate). Put it on a single On Key Pressed; pair with Is Not Dodging on the damage path for i-frames."; break;
                 case VsNodeType::IsDodging:     desc = "Gate (PSV): passes exec only while a Dodge roll is active. Use it to suppress actions during a dodge (e.g. block re-triggering attacks)."; break;
                 case VsNodeType::IsNotDodging:  desc = "Gate (PSV): passes exec only while NO Dodge is active — the inverse of Is Dodging. Wire incoming damage through it for dodge i-frames: On Hit -> Is Not Dodging -> Damage HP."; break;
                 case VsNodeType::IsAirborne:    desc = "Gate: passes exec only while the player is off the ground — the clean inverse of Is On Ground. Drive the air animation with it: On Update -> Is Airborne -> Play Skel Anim(jump). For a rise/fall split use Is Jumping (rising) and Is Falling (descending) instead — on PSV those now read the real vertical velocity."; break;
@@ -22217,6 +22219,7 @@ void FrameTick(float dt)
                 case VsNodeType::SetMaxHealth:  desc = "Set the Health capacity (max). The health bar reads current/max."; break;
                 case VsNodeType::GetHealth:     desc = "Outputs the current Health value. Wire into a condition (Compare / Branch / Is True) — e.g. Compare(Get Health, 0, <=) -> Branch for death."; break;
                 case VsNodeType::GetChargePct:  desc = "Outputs the Charge Shot's current charge as 0-100% (afn_fb_level / afn_fb_max). Read it on On Key Released (before the shot resets) to branch the fire by charge — e.g. Branch[Compare(Get Charge %, 99, >=)]: full = big blast, else = a tap/small shot."; break;
+                case VsNodeType::SpendChargeEnergy: desc = "Subtract Energy scaled by how long the Charge Shot was held: Min % at a quick tap up to Max % at full charge (linear over Get Charge %). Defaults 4..33. Put it on On Key Released in place of a fixed Spend Energy so a tap costs little and a full charge costs the most. Min/Max are inputs (wire Integers to tune)."; break;
                 case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
                 case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
                 case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
@@ -22524,6 +22527,7 @@ void FrameTick(float dt)
                         case VsNodeType::SetMaxHealth:  return "_set_max_health";
                         case VsNodeType::GetHealth:     return "_get_health";
                         case VsNodeType::GetChargePct:  return "_get_charge_pct";
+                        case VsNodeType::SpendChargeEnergy: return "_spend_charge_energy";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
@@ -23563,7 +23567,7 @@ void FrameTick(float dt)
                     char dgBuf[2048];
                     snprintf(dgBuf, sizeof(dgBuf),
                         "#ifdef AFN_HAS_PLAYER_RIG // PSV\n"
-                        "    if (afn_dodge_cd <= 0) {            // spam gate: ignore presses while cooling down\n"
+                        "    if (afn_dodge_cd <= 0 && afn_energy >= %s) { // spam gate + must afford the cost\n"
                         "        afn_dodge_speed   = %s;\n"
                         "        afn_dodge_frames  = %s;\n"
                         "        afn_dodge_clip_l  = %d; // DodgeL\n"
@@ -23575,6 +23579,7 @@ void FrameTick(float dt)
                         "        afn_dodge_falloff = %s; // frames to ease speed out (0 = hard stop)\n"
                         "        afn_dodge_cd      = %s; // lockout until the next dodge is allowed\n"
                         "        afn_dodge_trigger = 1;  // capture the side on the next frame\n"
+                        "        afn_energy -= %s; if (afn_energy < 0) afn_energy = 0; // dodge energy cost (0 = free)\n"
                         "    }\n"
                         "#endif\n"
                         "    // --- Runtime (psv main.c movement block, AFTER input is final) ---\n"
@@ -23596,12 +23601,14 @@ void FrameTick(float dt)
                         "    // afn_dodge_cd counts down 1/frame here; the gate above drops any\n"
                         "    //   press while it's > 0, so mashing dodge can't re-fire early.\n"
                         "    // Is Dodging / Is Not Dodging gate on afn_dodge_frames > 0.",
+                        fmtInt(infoNode.id, 10, "0"),  // gate: must afford the energy cost
                         fmtInt(infoNode.id, 0, "<speed>"),
                         fmtInt(infoNode.id, 1, "<frames>"),
                         lc, rc, fc, bc, ic,
                         fmtInt(infoNode.id, 5, "6"),
                         fmtInt(infoNode.id, 6, "6"),
-                        fmtInt(infoNode.id, 7, "0"));
+                        fmtInt(infoNode.id, 7, "0"),
+                        fmtInt(infoNode.id, 10, "0")); // spend: dodge energy cost
                     setActionFunc(infoNode, "_dodge", dgBuf);
                     break;
                 }
@@ -23860,6 +23867,18 @@ void FrameTick(float dt)
                         "    // --- Runtime --- inline data node: (afn_fb_level * 100 / afn_fb_max).\n"
                         "    // Read on On Key Released (script_tick runs before the focus-blast tick\n"
                         "    // resets afn_fb_level) to branch the fire/SFX by charge.");
+                    break;
+                }
+                case VsNodeType::SpendChargeEnergy: {
+                    editorCode = "// Spend energy scaled by charge level (Min%..Max%)";
+                    setActionFunc(infoNode, "_spend_charge_energy",
+                        "    { int _mn = <min>, _mx = <max>;   // defaults 4, 33 (wire Integers to tune)\n"
+                        "      int _cp = (afn_fb_max > 0) ? (int)(afn_fb_level * 100.0f / afn_fb_max) : 0;\n"
+                        "      int _amt = _mn + (_mx - _mn) * _cp / 100;  // lerp Min..Max over 0..100% charge\n"
+                        "      afn_energy -= _amt; if (afn_energy < 0) afn_energy = 0; }\n"
+                        "    // --- Runtime --- put on On Key Released in place of a fixed Spend Energy:\n"
+                        "    // a tap costs ~Min%, a full charge costs Max%. afn_fb_level is the live charge\n"
+                        "    // (read before the focus-blast tick resets it, same as Get Charge %).");
                     break;
                 }
                 case VsNodeType::TurnPlayer: {
@@ -26848,6 +26867,7 @@ void FrameTick(float dt)
                     case VsNodeType::SetMaxHealth:  suffix = "_set_max_health"; break;
                     case VsNodeType::GetHealth:     suffix = "_get_health"; break;
                     case VsNodeType::GetChargePct:  suffix = "_get_charge_pct"; break;
+                    case VsNodeType::SpendChargeEnergy: suffix = "_spend_charge_energy"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
@@ -27416,6 +27436,7 @@ void FrameTick(float dt)
                     ImGui::Separator();
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::AddEnergy].name)) addNodeAt(VsNodeType::AddEnergy);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpendEnergy].name)) addNodeAt(VsNodeType::SpendEnergy);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SpendChargeEnergy].name)) addNodeAt(VsNodeType::SpendChargeEnergy);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetEnergy].name)) addNodeAt(VsNodeType::SetEnergy);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetMaxEnergy].name)) addNodeAt(VsNodeType::SetMaxEnergy);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::GetEnergy].name)) addNodeAt(VsNodeType::GetEnergy);

@@ -546,6 +546,16 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_energy -= " << v << "; if (afn_energy < 0) afn_energy = 0;\n";
                 break;
             }
+            case GBAScriptNodeType::SpendChargeEnergy: {
+                // Spend energy scaled by charge level: Min% at a tap, Max% at full charge.
+                auto* dmn = findDataIn(a->id, 0); std::string mn = dmn ? emitIntExpr(dmn) : "4";
+                auto* dmx = findDataIn(a->id, 1); std::string mx = dmx ? emitIntExpr(dmx) : "33";
+                f << "    { int _mn = " << mn << ", _mx = " << mx << ";\n";
+                f << "      int _cp = (afn_fb_max > 0) ? (int)(afn_fb_level * 100.0f / afn_fb_max) : 0;\n";
+                f << "      int _amt = _mn + (_mx - _mn) * _cp / 100;\n";
+                f << "      afn_energy -= _amt; if (afn_energy < 0) afn_energy = 0; }\n";
+                break;
+            }
             case GBAScriptNodeType::SetMaxEnergy: {
                 auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "100";
                 f << "    afn_energy_max = " << v << "; if (afn_energy_max < 0) afn_energy_max = 0;\n";
@@ -641,6 +651,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 auto* cdD = findDataIn(a->id, 7);
                 auto* fcD = findDataIn(a->id, 8);
                 auto* bcD = findDataIn(a->id, 9);
+                auto* ecD = findDataIn(a->id, 10);
                 int sp = spD ? resolveInt(spD) : 70;
                 int fr = frD ? resolveInt(frD) : 14;
                 int lc = lcD ? resolveInt(lcD) : 0;
@@ -651,10 +662,12 @@ void EmitNodeScriptBodies(std::ostream& f,
                 int cd = cdD ? resolveInt(cdD) : 0;    // spam-gate lockout frames (0 = none)
                 int fc = fcD ? resolveInt(fcD) : -1;   // forward clip (-1 = unwired -> lateral roll)
                 int bc = bcD ? resolveInt(bcD) : -1;   // back clip    (-1 = unwired -> lateral roll)
-                // Gate the whole trigger on the cooldown so a press during the
-                // lockout sets nothing (the runtime counts afn_dodge_cd down).
+                int ec = ecD ? resolveInt(ecD) : 0;    // energy cost (0 = free); also gates the fire on affording it
+                // Gate the whole trigger on the cooldown AND on affording the
+                // energy cost, so a press during the lockout (or with too little
+                // energy) sets nothing. The runtime counts afn_dodge_cd down.
                 f << "#ifdef AFN_HAS_PLAYER_RIG\n";
-                f << "    if (afn_dodge_cd <= 0) {\n";
+                f << "    if (afn_dodge_cd <= 0 && afn_energy >= " << ec << ") {\n";
                 f << "        afn_dodge_speed = " << sp << ";\n";
                 f << "        afn_dodge_frames = " << fr << ";\n";
                 f << "        afn_dodge_clip_l = " << lc << ";\n";
@@ -666,6 +679,9 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "        afn_dodge_falloff = " << fo << ";\n";
                 f << "        afn_dodge_cd = " << cd << ";\n";
                 f << "        afn_dodge_trigger = 1;\n";
+                if (ec != 0) {
+                    f << "        afn_energy -= " << ec << "; if (afn_energy < 0) afn_energy = 0; // dodge cost\n";
+                }
                 f << "    }\n";
                 f << "#endif\n";
                 break;
