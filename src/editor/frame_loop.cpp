@@ -6804,6 +6804,85 @@ static bool LoadRiggedGLTFResolved(const std::string& path, RiggedMeshAsset& rm,
     return ok;
 }
 
+// Re-import a rigged glTF from its source path (picking up new/changed geometry,
+// skeleton, and ANIMATIONS) while preserving every editor-side setting, so the
+// user doesn't have to redo render flags, materials, textures, collision, yaw,
+// per-clip loop, etc. Mirrors how project-load reconstructs a rig: load fresh,
+// then re-apply the saved settings. Materials and clips are matched by NAME so
+// adding/reordering clips or materials in the glTF keeps the right settings.
+static bool ReloadRiggedMeshKeepSettings(RiggedMeshAsset& rm, std::string* err,
+                                         const std::string& pathOverride = "")
+{
+    std::string srcPath = pathOverride.empty() ? rm.sourcePath : pathOverride;
+    if (srcPath.empty()) { if (err) *err = "pick a .glb/.gltf file"; return false; }
+    std::string oldKey = rm.sourcePath;   // prior packed-asset key (may differ from the new pick)
+
+    // --- snapshot user settings from the current asset ---
+    std::string name = rm.name;
+    bool  smooth = rm.smoothShading, useAlpha = rm.useAlpha, camLight = rm.cameraLight;
+    int   cullMode = rm.cullMode;
+    float lightX = rm.lightX, lightY = rm.lightY, yawOffset = rm.yawOffset;
+    int   colType = rm.collisionType;
+    float colC[3] = { rm.colCenter[0], rm.colCenter[1], rm.colCenter[2] };
+    float colE[3] = { rm.colExtents[0], rm.colExtents[1], rm.colExtents[2] };
+    std::map<std::string, bool> clipLoop;            // by clip name
+    for (const auto& c : rm.clips) clipLoop[c.name] = c.loop;
+    struct MatSnap { int wrap; bool manual; std::string path; };
+    std::map<std::string, MatSnap> matByName;        // by material name
+    matByName[rm.materialName] = { rm.wrapMode, rm.textureManual, rm.texturePath };
+    for (const auto& em : rm.extraMaterials)
+        matByName[em.name] = { em.wrapMode, em.textureManual, em.texturePath };
+
+    // --- load fresh into a temp ---
+    RiggedMeshAsset tmp;
+    std::vector<unsigned char> diskBytes;
+    if (!pathOverride.empty()) {
+        // Explicit file pick: read the file from DISK directly. Never go through
+        // LoadRiggedGLTFResolved here — if the glTF is packed into the project,
+        // that returns the stale embedded copy and the new animations never show.
+        FILE* gf = fopen(srcPath.c_str(), "rb");
+        if (!gf) { if (err) *err = "cannot open " + srcPath; return false; }
+        fseek(gf, 0, SEEK_END); long gsz = ftell(gf); fseek(gf, 0, SEEK_SET);
+        if (gsz > 0) { diskBytes.resize((size_t)gsz); if (fread(diskBytes.data(), 1, (size_t)gsz, gf) != (size_t)gsz) diskBytes.clear(); }
+        fclose(gf);
+        if (!LoadRiggedGLTF(srcPath, tmp, err)) return false;
+        tmp.sourcePath = srcPath;
+    } else {
+        // No pick: re-read the stored source (packed-aware, for embedded-only rigs).
+        if (!LoadRiggedGLTFResolved(srcPath, tmp, err)) return false;
+    }
+
+    // --- restore scalar settings ---
+    tmp.name = name;
+    tmp.smoothShading = smooth; tmp.useAlpha = useAlpha; tmp.cameraLight = camLight;
+    tmp.cullMode = cullMode; tmp.lightX = lightX; tmp.lightY = lightY; tmp.yawOffset = yawOffset;
+    tmp.collisionType = colType;
+    for (int i = 0; i < 3; i++) { tmp.colCenter[i] = colC[i]; tmp.colExtents[i] = colE[i]; }
+    // restore per-clip loop (by name; new clips keep the glTF default)
+    for (auto& c : tmp.clips) { auto it = clipLoop.find(c.name); if (it != clipLoop.end()) c.loop = it->second; }
+    // restore per-material wrap + manually-assigned textures (by name)
+    for (int s = 0; s < tmp.matCount(); s++) {
+        auto it = matByName.find(tmp.matName(s));
+        if (it == matByName.end()) continue;
+        tmp.setMatWrap(s, it->second.wrap);
+        if (it->second.manual && !it->second.path.empty())
+            LoadRigTextureFromFile(tmp, s, it->second.path);   // re-decodes + uploads that slot
+    }
+    UploadRigGLTexture(tmp);   // (re)upload glTF-decoded textures for preview
+
+    // If this rig was PACKED into the project (embedded bytes), refresh that copy
+    // with the freshly-picked file so the new geometry/animations survive save +
+    // export instead of reverting to the stale embedded glTF on next load.
+    if (!diskBytes.empty() && (sPackedAssets.count(srcPath) || sPackedAssets.count(oldKey)))
+        sPackedAssets[srcPath] = diskBytes;
+
+    // free the old asset's GL textures before we overwrite it
+    if (rm.glTexID) glDeleteTextures(1, &rm.glTexID);
+    for (auto& em : rm.extraMaterials) if (em.glTexID) glDeleteTextures(1, &em.glTexID);
+    rm = std::move(tmp);
+    return true;
+}
+
 // Bake a sprite asset into a mesh asset's texture (overwrites texture)
 // Uses directional image (front-facing RGBA8) if available, else frames[0]
 static void LoadSpriteIntoMeshTexture(int spriteAssetIdx, MeshAsset& mesh)
@@ -12177,6 +12256,27 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         }
         sSelectedRig = -1; sProjectDirty = true;
     }
+    // Re-import the selected rig (new geometry/skeleton/ANIMATIONS) while keeping
+    // all its settings — pick the .glb/.gltf so adding clips to the file doesn't
+    // mean redoing materials/flags/yaw/collision/etc.
+    bool canReload = sSelectedRig >= 0 && sSelectedRig < (int)sRiggedMeshAssets.size();
+    if (!canReload) ImGui::BeginDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Reload glTF...##rigpanel") && canReload) {
+#ifdef _WIN32
+        // Default the picker to the rig's last source path if it has one.
+        std::string p = OpenFileDialog("glTF Files\0*.glb;*.gltf\0All Files\0*.*\0", "glb");
+        if (!p.empty()) {
+            std::string err;
+            if (ReloadRiggedMeshKeepSettings(sRiggedMeshAssets[sSelectedRig], &err, p)) {
+                sRigImportError[0] = '\0';   // success: the refreshed clip list is the confirmation
+                sProjectDirty = true;
+            } else snprintf(sRigImportError, sizeof(sRigImportError), "Reload failed: %s", err.c_str());
+        }
+#endif
+    }
+    if (!canReload) ImGui::EndDisabled();
+    if (ImGui::IsItemHovered() && canReload) ImGui::SetTooltip("Pick the source .glb/.gltf to re-read — picks up new/changed geometry, skeleton, and animations — while keeping this rig's materials, textures, render flags, Model Yaw, collision, and per-clip loop settings.");
     if (sRigImportError[0])
         ImGui::TextColored(ImVec4(1,0.4f,0.4f,1), "%s", sRigImportError);
     // Assign the selected rig to the selected placed sprite (e.g. the Player).
