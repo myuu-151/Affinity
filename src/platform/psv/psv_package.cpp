@@ -566,7 +566,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
     f << "#define AFN_HAS_HUD 1\n";
 
     // Flatten pieces/texts/stops across elements; emit each piece's RGBA frame.
-    struct P { int x, y, w, h, tex, black, opacity, barSrc, barAxis, barStart, barEnd; };
+    struct P { int x, y, w, h, tex, black, opacity, barSrc, barAxis, barStart, barEnd, cycleSlot, cycleCount; };
     struct T { int x, y; unsigned int color; int font, slot, pad, scale; std::string text; };
     struct S { int x, y, link; };
     std::vector<P> pieces; std::vector<T> texts; std::vector<S> stops;
@@ -621,13 +621,22 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
         e.startVis = he.visible;
         e.pS = (int)pieces.size();
         for (const auto& pc : he.pieces) {
-            emitFrame(pc.spriteAssetIdx, pc.frame, pc.size);   // texture stays native res
             // Draw size = the piece's chosen size (matches the editor canvas), so a
             // native-512 graphic set to 256 renders at 256 (GL scales the texture).
             // 960 is the non-square full-screen background (960x544).
             int dispW = (pc.size == 960) ? 960 : pc.size;
             int dispH = (pc.size == 960) ? 544 : pc.size;
-            pieces.push_back({ pc.localX, pc.localY, dispW, dispH, frameCount-1, pc.blackTint?1:0, pc.opacity, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd });
+            // Cycle ← Value: bake each staged frame-slot asset so the runtime can
+            // pick tex = base + hud_value[slot]. A static piece bakes just one.
+            int cyc, baseTex = frameCount;
+            if (pc.cycleSlot >= 0 && !pc.cycleAssets.empty()) {
+                for (int a : pc.cycleAssets) emitFrame(a >= 0 ? a : pc.spriteAssetIdx, pc.frame, pc.size);
+                cyc = (int)pc.cycleAssets.size();
+            } else {
+                emitFrame(pc.spriteAssetIdx, pc.frame, pc.size);   // texture stays native res
+                cyc = 1;
+            }
+            pieces.push_back({ pc.localX, pc.localY, dispW, dispH, baseTex, pc.blackTint?1:0, pc.opacity, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd, pc.cycleSlot >= 0 && !pc.cycleAssets.empty() ? pc.cycleSlot : -1, cyc });
         }
         e.pC = (int)pieces.size() - e.pS;
         e.tS = (int)texts.size();
@@ -679,11 +688,12 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
     f << "};\n";
     f << "#define AFN_HUD_PIECE_TINT 1\n";   // AfnHudPiece carries black + opacity (per-piece tint)
     f << "#define AFN_HUD_PIECE_BAR 1\n";    // ...and the bar-fill drain fields (barSrc/axis/start/end)
-    f << "typedef struct { short x,y,w,h,tex; unsigned char black; short opacity; short barSrc,barAxis,barStart,barEnd; } AfnHudPiece;\n";
+    f << "typedef struct { short x,y,w,h,tex; unsigned char black; short opacity; short barSrc,barAxis,barStart,barEnd,cycleSlot,cycleCount; } AfnHudPiece;\n";
+    f << "#define AFN_HUD_PIECE_CYCLE 1\n";   // AfnHudPiece carries cycleSlot/cycleCount (asset ← hud_value)
     f << "static const AfnHudPiece afn_hud_piece[" << (pieces.empty()?1:pieces.size()) << "] = {\n";
     for (auto& p : pieces) f << "  { " << p.x << "," << p.y << "," << p.w << "," << p.h << "," << p.tex << "," << p.black << "," << p.opacity
-                              << "," << p.barSrc << "," << p.barAxis << "," << p.barStart << "," << p.barEnd << " },\n";
-    if (pieces.empty()) f << "  {0,0,0,0,0,0,16,0,0,0,0},\n";
+                              << "," << p.barSrc << "," << p.barAxis << "," << p.barStart << "," << p.barEnd << "," << p.cycleSlot << "," << p.cycleCount << " },\n";
+    if (pieces.empty()) f << "  {0,0,0,0,0,0,16,0,0,0,0,-1,1},\n";
     f << "};\n";
     f << "typedef struct { short x,y; unsigned int color; unsigned char font,slot,pad,scale; char text[32]; } AfnHudText;\n";
     f << "static const AfnHudText afn_hud_text[" << (texts.empty()?1:texts.size()) << "] = {\n";

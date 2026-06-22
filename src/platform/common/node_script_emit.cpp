@@ -118,6 +118,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 case T::GetEnergy:  return "afn_energy";
                 case T::GetHealth:  return "afn_health";
                 case T::GetChargePct: return "((afn_fb_max > 0) ? (int)(afn_fb_level * 100.0f / afn_fb_max) : 0)";
+                case T::GetCursorStop: return "afn_cursor_stop";
                 case T::GetTime:    return "afn_frame_count";
                 case T::GetLastKey: return "afn_last_key";
                 case T::GetRandom:  return "((int)(afn_rng & 0xFF))";
@@ -881,6 +882,20 @@ void EmitNodeScriptBodies(std::ostream& f,
                 int slot = slotData ? resolveInt(slotData) : 0;
                 if (slot < 0) slot = 0;   // element index (afn_hud_visible/elems are ELEM_COUNT-sized)
                 f << "    afn_hud_value[" << slot << "] += " << val << ";\n";
+                break;
+            }
+            case GBAScriptNodeType::CycleHudValue: {
+                // Slot/Delta/Count are live expressions (so Slot can be Get Cursor Stop,
+                // i.e. cycle whichever player the cursor is on). Wrap to [0,Count).
+                auto* slotData  = findDataIn(a->id, 0);
+                auto* deltaData = findDataIn(a->id, 1);
+                auto* cntData   = findDataIn(a->id, 2);
+                std::string slotE  = slotData  ? emitIntExpr(slotData)  : "0";
+                std::string deltaE = deltaData ? emitIntExpr(deltaData) : "1";
+                std::string cntE   = cntData   ? emitIntExpr(cntData)   : "1";
+                f << "    { int _s = (" << slotE << "); if (_s < 0) _s = 0; if (_s > 3) _s = 3;\n";
+                f << "      int _c = (" << cntE << "); if (_c > 0) { int _v = (afn_hud_value[_s] + (" << deltaE << ")) % _c;"
+                  << " if (_v < 0) _v += _c; afn_hud_value[_s] = _v; } }\n";
                 break;
             }
             case GBAScriptNodeType::ShowHUD: {

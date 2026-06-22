@@ -1491,6 +1491,23 @@ static void hud_render(void) {
             const AfnHudStop* cst = &afn_hud_stops[mel->stopStart + sidx];
             bx = mel->screenX + cst->x + mel->curX;
             by = mel->screenY + cst->y + mel->curY;
+#ifdef AFN_HAS_HUD_ANIM
+            // A cursor-element's keyframe layers (e.g. a blink) aren't started by any
+            // node, so auto-play them while it's shown — otherwise the layer sticks at
+            // frame 0 and a frame-0 Hide keyframe would blank the cursor out entirely.
+            // Also keep them LOOPING even if the layer isn't flagged loop: a one-shot
+            // blink would otherwise play once and stick on its last frame (often an
+            // invisible op=0 keyframe), making the cursor vanish for good. A cursor
+            // should animate the whole time it's shown.
+            for (int k = 0; k < el->pieceCount; k++) {
+                int _li = afn_hud_piece_layer[el->pieceStart + k];
+                if (_li >= 0) {
+                    afn_hud_layer_active[_li] = 1;
+                    if (afn_hud_layer[_li].length > 0 && afn_hud_layer_frame[_li] >= afn_hud_layer[_li].length)
+                        afn_hud_layer_frame[_li] = 0;
+                }
+            }
+#endif
         } else
 #endif
         {
@@ -1574,6 +1591,16 @@ static void hud_render(void) {
         for (int k = 0; k < el->pieceCount; k++) {
             int gpi = el->pieceStart + k;
             const AfnHudPiece* pc = &afn_hud_piece[gpi];
+            int ptex = pc->tex;   // displayed texture (may be cycled by a HUD value)
+#ifdef AFN_HUD_PIECE_CYCLE
+            // Cycle ← Value: pick the asset by hud_value[slot] over cycleCount consecutive
+            // baked textures (e.g. a character-select portrait driven by the selection).
+            if (pc->cycleSlot >= 0) {
+                int cv = afn_hud_value[pc->cycleSlot];
+                if (cv < 0) cv = 0; if (cv >= pc->cycleCount) cv = pc->cycleCount - 1;
+                ptex = pc->tex + cv;
+            }
+#endif
             // Per-piece tint via the MODULATE color: Black toggle zeroes RGB (a
             // black silhouette — used for drop shadows), Opacity (0-16) scales
             // alpha. White+16 = the texture as-authored. (byte order: R,G,B,A)
@@ -1597,7 +1624,7 @@ static void hud_render(void) {
                 // Animated: keyframe offset + scale + rotation about center,
                 // all in element space scaled by the anchored distance scale.
                 float w = pc->w * laySx[li] * elScale, h = pc->h * laySy[li] * elScale;
-                hud_quad_xf(s_hudTex[pc->tex],
+                hud_quad_xf(s_hudTex[ptex],
                             bx + (pc->x + layOx[li] + pc->w * 0.5f) * elScale,
                             by + (pc->y + layOy[li] + pc->h * 0.5f) * elScale,
                             w, h, layRot[li], pieceCol);
@@ -1619,10 +1646,10 @@ static void hud_render(void) {
                 float px0 = bx + pc->x * elScale, py0 = by + pc->y * elScale;
                 float pw = pc->w * elScale, ph = pc->h * elScale;
                 if (pc->barAxis == 0 && pc->w > 0 && hi > lo) {
-                    hud_quad(s_hudTex[pc->tex], px0 + lo * elScale, py0, px0 + hi * elScale, py0 + ph,
+                    hud_quad(s_hudTex[ptex], px0 + lo * elScale, py0, px0 + hi * elScale, py0 + ph,
                              lo / pc->w, 0, hi / pc->w, 1, pieceCol);
                 } else if (pc->barAxis != 0 && pc->h > 0 && hi > lo) {
-                    hud_quad(s_hudTex[pc->tex], px0, py0 + lo * elScale, px0 + pw, py0 + hi * elScale,
+                    hud_quad(s_hudTex[ptex], px0, py0 + lo * elScale, px0 + pw, py0 + hi * elScale,
                              0, lo / pc->h, 1, hi / pc->h, pieceCol);
                 }
                 continue;
@@ -1641,7 +1668,7 @@ static void hud_render(void) {
                     float oy = (wy == 1) ? -SCR_H : (wy == 2) ? SCR_H : 0.0f;
                     float x0 = px0 + ox, y0 = py0 + oy;
                     if (x0 + pw <= 0.0f || x0 >= SCR_W || y0 + ph <= 0.0f || y0 >= SCR_H) continue;
-                    hud_quad(s_hudTex[pc->tex], x0, y0, x0 + pw, y0 + ph, 0, 0, 1, 1, pieceCol);
+                    hud_quad(s_hudTex[ptex], x0, y0, x0 + pw, y0 + ph, 0, 0, 1, 1, pieceCol);
                 }
             }
         }

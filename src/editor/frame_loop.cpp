@@ -833,6 +833,7 @@ enum class VsNodeType : int {
     GetChargePct,    // data: outputs the Charge Shot charge level as 0-100% (live, read at release)
     SpendChargeEnergy, // action: subtract energy scaled by charge level (Min%..Max% over 0..100% charge)
     IsNotCharging,   // gate: passes exec while NO Charge Shot is charging (inverse of Is Charging)
+    CycleHudValue,   // action: afn_hud_value[slot] = (val + delta) wrapped to [0,count) — for cycling pickers
     COUNT
 };
 
@@ -1190,6 +1191,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Get Charge %",    0xFF666688, 0, 0, 0, 1, {}, {"Charge %"}, {} },
     { "Spend Charge Energy", 0xFF3355AA, 1, 1, 2, 0, {"Min % (int)", "Max % (int)"}, {}, {} },
     { "Is Not Charging", 0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Cycle Value",     0xFF3355AA, 1, 1, 3, 0, {"Slot (int)", "Delta (int)", "Count (int)"}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -4382,6 +4384,11 @@ struct HudPiece {
     int barAxis = 0;         // 0 = horizontal (X), 1 = vertical (Y)
     int barStart = 0;        // edge position at FULL (px along axis)
     int barEnd = 0;          // edge/anchor position at EMPTY (px along axis)
+    // Cycle ← Value: when cycleSlot >= 0, the displayed sprite asset is picked
+    // from cycleAssets[ afn_hud_value[cycleSlot] ] — a list of per-frame-slot
+    // asset pickers (e.g. a character-select portrait). -1 = static.
+    int cycleSlot = -1;            // HUD value slot (0-3) driving the cycle, -1 = off
+    std::vector<int> cycleAssets;  // staged sprite asset per frame slot (-1 = empty)
 };
 
 struct StopModifier {
@@ -7403,8 +7410,10 @@ static bool SaveProject(const std::string& path)
             el.spriteAssetIdx, el.spriteFrame,
             el.visible ? 1 : 0, el.layer);
         fprintf(f, "elemPieceCount=%d\n", (int)el.pieces.size());
-        for (auto& pc : el.pieces)
+        for (auto& pc : el.pieces) {
             fprintf(f, "elemPiece=%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity, pc.hidden ? 1 : 0, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd);
+            if (pc.cycleSlot >= 0) { fprintf(f, "elemPieceCycle=%d", pc.cycleSlot); for (int a : pc.cycleAssets) fprintf(f, "|%d", a); fprintf(f, "\n"); }
+        }
         fprintf(f, "elemStopCount=%d\n", (int)el.stops.size());
         for (auto& st : el.stops) {
             fprintf(f, "elemStop=%d|%d|%d\n", st.localX, st.localY, st.linkedElement);
@@ -8981,6 +8990,12 @@ static bool LoadProject(const std::string& path)
                     &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size, &bt, &opa, &hid,
                     &pc.barSource, &pc.barAxis, &pc.barStart, &pc.barEnd);
                 if (n >= 5) { pc.blackTint = (bt != 0); pc.opacity = std::clamp(opa, 0, 16); pc.hidden = (hid != 0); sHudElements.back().pieces.push_back(pc); }
+            }
+            else if (strncmp(line, "elemPieceCycle=", 15) == 0 && !sHudElements.empty() && !sHudElements.back().pieces.empty()) {
+                HudPiece& pc = sHudElements.back().pieces.back();
+                pc.cycleAssets.clear();
+                const char* p = line + 15; pc.cycleSlot = atoi(p);
+                while ((p = strchr(p, '|')) != nullptr) { p++; pc.cycleAssets.push_back(atoi(p)); }
             }
             else if (sscanf(line, "elemStopCount=%d", &ival) == 1 && !sHudElements.empty()) {
                 sHudElements.back().stops.clear();
@@ -18035,6 +18050,8 @@ void FrameTick(float dt)
                         pe.barAxis = pc.barAxis;
                         pe.barStart = pc.barStart;
                         pe.barEnd = pc.barEnd;
+                        pe.cycleSlot = pc.cycleSlot;
+                        pe.cycleAssets = pc.cycleAssets;
                         he.pieces.push_back(pe);
                     }
                     for (auto& st : el.stops) {
@@ -22540,6 +22557,7 @@ void FrameTick(float dt)
                         case VsNodeType::GetChargePct:  return "_get_charge_pct";
                         case VsNodeType::SpendChargeEnergy: return "_spend_charge_energy";
                         case VsNodeType::SetHudValue:   return "_set_hud_value";
+                        case VsNodeType::CycleHudValue: return "_cycle_hud_value";
                         case VsNodeType::UpdateRespawnPos: return "_update_respawn_pos";
                         case VsNodeType::SetVelocityX:  return "_set_vel_x";
                         case VsNodeType::SetVelocityZ:  return "_set_vel_z";
@@ -23091,6 +23109,16 @@ void FrameTick(float dt)
                         fmtInt(infoNode.id, 1, "<slot>"),
                         fmtInt(infoNode.id, 0, "<value>"));
                     setActionFunc(infoNode, "_set_hud_value", bodyBuf);
+                    break;
+                }
+                case VsNodeType::CycleHudValue: {
+                    setActionFunc(infoNode, "_cycle_hud_value",
+                        "    { int _s = <slot>; if (_s < 0) _s = 0; if (_s > 3) _s = 3;\n"
+                        "      int _c = <count>; if (_c > 0) { int _v = (afn_hud_value[_s] + <delta>) % _c;\n"
+                        "        if (_v < 0) _v += _c; afn_hud_value[_s] = _v; } }\n"
+                        "    // --- Runtime --- wraps a HUD value slot in [0,Count). Slot can be a\n"
+                        "    // live expr (e.g. Get Cursor Stop) to cycle whichever player is active;\n"
+                        "    // a piece with Cycle ← Value(slot) then shows the picked frame slot.");
                     break;
                 }
                 case VsNodeType::UpdateRespawnPos: {
@@ -26892,6 +26920,7 @@ void FrameTick(float dt)
                     case VsNodeType::GetChargePct:  suffix = "_get_charge_pct"; break;
                     case VsNodeType::SpendChargeEnergy: suffix = "_spend_charge_energy"; break;
                     case VsNodeType::SetHudValue:   suffix = "_set_hud_value"; break;
+                    case VsNodeType::CycleHudValue: suffix = "_cycle_hud_value"; break;
                     case VsNodeType::UpdateRespawnPos: suffix = "_update_respawn_pos"; break;
                     case VsNodeType::Object:        suffix = "_obj"; break;
                     case VsNodeType::Branch:        suffix = "_branch"; break;
@@ -27496,6 +27525,7 @@ void FrameTick(float dt)
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::HideHUD].name)) addNodeAt(VsNodeType::HideHUD);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CursorUp].name)) addNodeAt(VsNodeType::CursorUp);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CursorDown].name)) addNodeAt(VsNodeType::CursorDown);
+                    if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::CycleHudValue].name)) addNodeAt(VsNodeType::CycleHudValue);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::PlayHudAnim].name)) addNodeAt(VsNodeType::PlayHudAnim);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::StopHudAnim].name)) addNodeAt(VsNodeType::StopHudAnim);
                     if (ImGui::MenuItem(sVsNodeDefs[(int)VsNodeType::SetHudAnimSpeed].name)) addNodeAt(VsNodeType::SetHudAnimSpeed);
@@ -31052,9 +31082,14 @@ void FrameTick(float dt)
                         const auto& pc = pe.pieces[pci];
                         if (pc.hidden) continue;
                         // Animate with the referenced element's keyframes (blink / offset
-                        // / scale / opacity) during timeline playback, same as in-game.
-                        LayerTransform lt = computeLayerTransform(pe, HudElement::It_Piece, pci);
-                        if (lt.hidden) continue;   // keyframe Hide (blink)
+                        // / scale / opacity) only during timeline playback; when stopped,
+                        // always show the pointer (at base) so it stays visible while you
+                        // author the menu — otherwise a Hide keyframe would blank it out.
+                        LayerTransform lt;
+                        if (sHudTimelinePlaying) {
+                            lt = computeLayerTransform(pe, HudElement::It_Piece, pci);
+                            if (lt.hidden) continue;   // keyframe Hide (blink)
+                        }
                         float pw = pc.size * lt.sx * zoom, ph = pc.size * lt.sy * zoom;
                         float ppx = ox + (pc.localX + lt.ox) * zoom, ppy = oy + (pc.localY + lt.oy) * zoom;
                         int a = std::clamp((int)((pc.opacity * 255 / 16) * lt.alpha), 0, 255);
@@ -31538,8 +31573,10 @@ void FrameTick(float dt)
                             fprintf(cf, "elemLayers=%d|%d|%d|%d\n", el.layerPieces, el.layerSprites, el.layerText, el.layerCursor);
                         // Pieces
                         fprintf(cf, "elemPieceCount=%d\n", (int)el.pieces.size());
-                        for (auto& pc : el.pieces)
+                        for (auto& pc : el.pieces) {
                             fprintf(cf, "elemPiece=%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity, pc.hidden ? 1 : 0, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd);
+                            if (pc.cycleSlot >= 0) { fprintf(cf, "elemPieceCycle=%d", pc.cycleSlot); for (int a : pc.cycleAssets) fprintf(cf, "|%d", a); fprintf(cf, "\n"); }
+                        }
                         // Stops
                         fprintf(cf, "elemStopCount=%d\n", (int)el.stops.size());
                         for (auto& st : el.stops) {
@@ -31697,6 +31734,12 @@ void FrameTick(float dt)
                                     pc.spriteAssetIdx = remapAsset(pc.spriteAssetIdx);
                                     nel.pieces.push_back(pc);
                                 }
+                            }
+                            else if (strncmp(line, "elemPieceCycle=", 15) == 0 && !nel.pieces.empty()) {
+                                HudPiece& pc = nel.pieces.back();
+                                pc.cycleAssets.clear();
+                                const char* p = line + 15; pc.cycleSlot = atoi(p);
+                                while ((p = strchr(p, '|')) != nullptr) { p++; pc.cycleAssets.push_back(remapAsset(atoi(p))); }
                             }
                             else if (sscanf(line, "elemStopCount=%d", &ival2) == 1) {
                                 nel.stops.clear(); nel.stops.reserve(ival2);
@@ -32023,6 +32066,40 @@ void FrameTick(float dt)
                         if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sSpriteAssets.size()) {
                             int maxFr = std::max(0, (int)sSpriteAssets[pc.spriteAssetIdx].frames.size() - 1);
                             if (ImGui::SliderInt("Frame##pc", &pc.frame, 0, maxFr)) sProjectDirty = true;
+                        }
+                        // Cycle ← Value: pick the asset at runtime by a HUD value (e.g. a
+                        // character-select portrait). The picked asset above is the base
+                        // (value 0); the next Count-1 assets in the list are values 1..N-1.
+                        {
+                            const char* cycName[] = { "None (static)", "Value 0", "Value 1", "Value 2", "Value 3" };
+                            int cycIdx = (pc.cycleSlot < 0 || pc.cycleSlot > 3) ? 0 : pc.cycleSlot + 1;
+                            if (ImGui::Combo("Cycle##pc", &cycIdx, cycName, 5)) {
+                                pc.cycleSlot = cycIdx - 1; sProjectDirty = true;
+                            }
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Drive the displayed graphic from a HUD value: the value picks one of the frame slots below.\nEach slot stages its own sprite asset (any asset, any order).");
+                            if (pc.cycleSlot >= 0) {
+                                ImGui::Indent();
+                                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Frame slots (value %d picks one)", pc.cycleSlot);
+                                for (int fs = 0; fs < (int)pc.cycleAssets.size(); fs++) {
+                                    ImGui::PushID(fs);
+                                    const char* fsPrev = (pc.cycleAssets[fs] >= 0 && pc.cycleAssets[fs] < (int)sSpriteAssets.size())
+                                        ? sSpriteAssets[pc.cycleAssets[fs]].name.c_str() : "(empty)";
+                                    char lbl[24]; snprintf(lbl, sizeof(lbl), "%d##fsslot", fs);
+                                    if (ImGui::BeginCombo(lbl, fsPrev)) {
+                                        if (ImGui::Selectable("(empty)", pc.cycleAssets[fs] < 0)) { pc.cycleAssets[fs] = -1; sProjectDirty = true; }
+                                        for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++) {
+                                            char il[64]; snprintf(il, sizeof(il), "%d: %s", ai, sSpriteAssets[ai].name.c_str());
+                                            if (ImGui::Selectable(il, ai == pc.cycleAssets[fs])) { pc.cycleAssets[fs] = ai; sProjectDirty = true; }
+                                        }
+                                        ImGui::EndCombo();
+                                    }
+                                    ImGui::SameLine();
+                                    if (ImGui::SmallButton("x##fsdel")) { pc.cycleAssets.erase(pc.cycleAssets.begin() + fs); sProjectDirty = true; ImGui::PopID(); break; }
+                                    ImGui::PopID();
+                                }
+                                if (ImGui::SmallButton("+ slot##fsadd")) { pc.cycleAssets.push_back(pc.spriteAssetIdx); sProjectDirty = true; }
+                                ImGui::Unindent();
+                            }
                         }
                         // 128 is PSV-only (RGBA HUD pieces, no OBJ cap); the NDS
                         // exporter scales oversized pieces into its largest OBJ.

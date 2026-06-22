@@ -486,6 +486,7 @@ enum class GBAScriptNodeType : int {
     GetChargePct,    // data: outputs the Charge Shot charge level as 0-100% (live, read at release)
     SpendChargeEnergy, // action: subtract energy scaled by charge level (Min%..Max% over 0..100% charge)
     IsNotCharging,   // gate: passes exec while NO Charge Shot is charging (inverse of Is Charging)
+    CycleHudValue,   // action: afn_hud_value[slot] = (val + delta) wrapped to [0,count)
     COUNT
 };
 
@@ -581,6 +582,8 @@ struct GBAHudPieceExport {
     int barSource = 0;   // 0=static, 1=Health, 2=Energy (PSV bar fill)
     int barAxis = 0;     // 0=horizontal, 1=vertical
     int barStart = 0, barEnd = 0;   // fill-edge travel (piece-local px along axis)
+    int cycleSlot = -1;  // HUD value slot driving asset cycle (-1 = static)
+    std::vector<int> cycleAssets;  // staged sprite asset per frame slot
 };
 
 struct GBAHudStopExport {
