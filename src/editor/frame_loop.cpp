@@ -875,7 +875,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Change Scene",    0xFF3355AA, 1, 1, 3, 0, {"Scene (int)","Delay (frames)","Transition (frames)"}, {}, {} },
     { "Set Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot (int)", "Value"}, {}, {} },
     { "Add Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot (int)", "Amount"}, {}, {} },
-    { "Play Sound",      0xFF3355AA, 1, 1, 1, 0, {"Sound Instance"}, {}, {} },
+    { "Play Sound",      0xFF3355AA, 1, 1, 2, 0, {"Sound Instance", "Persist Link"}, {}, {} },
     { "Wait",            0xFF3355AA, 1, 1, 1, 0, {"Frames (int)"}, {}, {} },
     { "Jump",            0xFF3355AA, 1, 1, 2, 0, {"Force (float)", "Fall Force (float)"}, {}, {} },
     { "Walk",            0xFF3355AA, 1, 1, 1, 0, {"Speed (int)"}, {}, {} },
@@ -1217,7 +1217,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::ChangeScene:   desc = "Loads a different scene by index. Delay (frames) holds the current scene before switching; Transition (frames) sets the fade/crossfade duration (default 15) — raise it (e.g. 45-60) to slow a piece Crossfade."; break;
     case VsNodeType::SetVariable:   desc = "Sets a variable slot to a value."; break;
     case VsNodeType::AddVariable:   desc = "Adds an amount to a variable slot."; break;
-    case VsNodeType::PlaySound:     desc = "Plays a sound effect by ID."; break;
+    case VsNodeType::PlaySound:     desc = "Plays a sound instance. Persist Link >0 keeps it alive across scene changes, sharing music only between scenes that play it with the same link; a different link swaps the held track."; break;
     case VsNodeType::Wait:          desc = "Pauses execution for a number of frames."; break;
     case VsNodeType::Jump:          desc = "Makes the player jump with the given Force. Only works when grounded. Fall Force (PSV, optional) adds EXTRA downward acceleration once you're past the apex, for a heavier fall than the rise (unlike Set Max Fall, which only caps fall speed; they combine). Two node-body sliders (PSV) shape an 'anime' arc: Rise Float % reduces gravity WHILE RISING so you float up and hang at the apex (0 = normal, higher = floatier/longer hang); Fall Smooth (frames) eases the Fall Force in over N descent frames instead of snapping it on at the apex (0 = instant). Float up + hang + heavy fall = anime jump."; break;
     case VsNodeType::Walk:          desc = "Sets the player's movement speed (walk)."; break;
@@ -18448,6 +18448,7 @@ void FrameTick(float dt)
                             ie.mixerGain = inst.mixerGain;
                             ie.fifoChannel = inst.fifoChannel;
                             ie.bufferScale = inst.bufferScale;
+                            ie.persist = inst.persist;
                             exportSoundInstances.push_back(std::move(ie));
                             continue;
                         }
@@ -21997,7 +21998,7 @@ void FrameTick(float dt)
                 case VsNodeType::ChangeScene:   desc = "Loads a different scene by index. Delay (frames) holds the current scene before switching; Transition (frames) sets the fade/crossfade duration (default 15) — raise it (e.g. 45-60) to slow a piece Crossfade."; break;
                 case VsNodeType::SetVariable:   desc = "Sets a variable slot to a value."; break;
                 case VsNodeType::AddVariable:   desc = "Adds an amount to a variable slot."; break;
-                case VsNodeType::PlaySound:     desc = "Plays a sound effect by ID."; break;
+                case VsNodeType::PlaySound:     desc = "Plays a sound instance. Persist Link >0 keeps it alive across scene changes, sharing music only between scenes that play it with the same link; a different link swaps the held track."; break;
                 case VsNodeType::Wait:          desc = "Pauses execution for a number of frames."; break;
                 case VsNodeType::Jump:          desc = "Makes the player jump with the given Force. Only works when grounded. Fall Force (PSV, optional) adds EXTRA downward acceleration once you're past the apex, for a heavier fall than the rise (unlike Set Max Fall, which only caps fall speed; they combine). Two node-body sliders (PSV) shape an 'anime' arc: Rise Float % reduces gravity WHILE RISING so you float up and hang at the apex (0 = normal, higher = floatier/longer hang); Fall Smooth (frames) eases the Fall Force in over N descent frames instead of snapping it on at the apex (0 = instant). Float up + hang + heavy fall = anime jump."; break;
                 case VsNodeType::Walk:          desc = "Sets the player's movement speed (walk)."; break;
@@ -26377,13 +26378,14 @@ void FrameTick(float dt)
                     editorCode =
                         "// Trigger sound instance playback via DMA audio";
                     setActionFunc(infoNode, "_play_sound",
-                        "    afn_play_sound(instanceId);\n"
-                        "    // --- Runtime (main.c) ---\n"
-                        "    // snd_seq_active = instanceId;\n"
-                        "    // snd_seq_tick = 0; snd_seq_next = 0;\n"
-                        "    // Each frame: afn_sound_tick() advances sequence,\n"
-                        "    //   triggers afn_trigger_sample() for each note,\n"
-                        "    //   afn_sound_mix() renders 4-voice PCM to DMA buffer");
+                        "    afn_play_sound(instanceId, persistLink);\n"
+                        "    // --- Runtime (audio.c) ---\n"
+                        "    // link 0  -> normal play (SFX = afn_play_sfx fast path; MIDI = sequencer).\n"
+                        "    // link >0 -> persistent music: carries seamlessly between scenes that\n"
+                        "    //   play it with the SAME link. A persistent play with a DIFFERENT link\n"
+                        "    //   stops the held track first (afn_stop_persist_locked) then starts this.\n"
+                        "    //   afn_stop_sound() (called on every scene change) spares the held\n"
+                        "    //   track while afn_persist_link != 0, so it survives the transition.");
                     break;
                 case VsNodeType::Wait:
                     editorCode =

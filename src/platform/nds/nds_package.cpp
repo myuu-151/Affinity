@@ -2735,7 +2735,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int afn_grind_catch_y;\n";
         f << "extern int afn_grind_catch_x;\n";
         // Audio entry points (audio.c) used by PlaySound / StopSound emit.
-        f << "void afn_play_sound(int id);\n";
+        f << "void afn_play_sound(int id, int link);\n";
         f << "void afn_play_sfx(int smpIdx, int gain, int fifo);\n";
         f << "void afn_stop_sound(void);\n";
         f << "void afn_stop_sfx_sample(int smpIdx);\n";

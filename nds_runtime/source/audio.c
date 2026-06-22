@@ -12,7 +12,7 @@
 // Project has no sound — keep symbols defined so script bodies / main.c link.
 void afn_audio_init(void) {}
 void afn_audio_tick(void) {}
-void afn_play_sound(int id) { (void)id; }
+void afn_play_sound(int id, int link) { (void)id; (void)link; }
 void afn_stop_sound(void) {}
 void afn_stop_sfx_sample(int smpIdx) { (void)smpIdx; }
 void afn_play_sfx(int smpIdx, int gain, int fifo) { (void)smpIdx; (void)gain; (void)fifo; }
@@ -274,8 +274,9 @@ void afn_play_sfx(int smpIdx, int gain, int fifo)
 // ---------------------------------------------------------------------------
 // Start an instance's MIDI sequence.
 // ---------------------------------------------------------------------------
-void afn_play_sound(int instanceId)
+void afn_play_sound(int instanceId, int link)
 {
+    (void)link;  // NDS has no linked-persistence path yet; link is honored on PSV.
     if (instanceId < 0 || instanceId >= AFN_SOUND_INSTANCE_COUNT) return;
     if (!afn_snd_note_ptrs[instanceId] || afn_snd_note_counts[instanceId] == 0) return;
     snd_seq_active = instanceId;

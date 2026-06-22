@@ -2,6 +2,7 @@
 #pragma once
 #define AFN_HAS_SCRIPT 1
 static int afn_rise_248 = -2;
+static int afn_rise_303 = -2;
 
 
 // ---- Generated script code from visual node graph ----
@@ -37,23 +38,78 @@ static void afn_emitted_script_collision2d(void) {
 }
 static void afn_bp0_start(void) {
     afn_play_sfx(0, 0, 0);
-    afn_rig_clip = 16;
+    afn_rig_clip = 29;
 #ifdef AFN_HAS_PLAYER_RIG
     afn_stick_8way = 1;
 #endif
+    afn_health_max = (100); if (afn_health_max < 0) afn_health_max = 0;
+    if (afn_health > afn_health_max) afn_health = afn_health_max;
+    afn_health = (100);
+    if (afn_health < 0) afn_health = 0; if (afn_health > afn_health_max) afn_health = afn_health_max;
+    afn_energy_max = (100); if (afn_energy_max < 0) afn_energy_max = 0;
+    if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;
+    afn_energy = (100);
+    if (afn_energy < 0) afn_energy = 0; if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;
+    if (afn_energy >= (33)) {
+    afn_hud_layer_frame[2] = 0;
+    afn_hud_layer_tick[2] = 0;
+    afn_hud_layer_active[2] = 1;
+    }
+    afn_hud_visible[3] = 1;
+#ifdef AFN_HAS_HUD_ANCHOR
+    afn_hud_anchor_sprite[3] = -1;
+#endif
+    afn_elem_idx = 3;
+    afn_active_element = 3;
+    afn_cursor_stop = 0;
+    afn_stop_count = afn_hud_elems[3].stopCount;
+    if (afn_stop_count > 0) {
+      afn_player_frozen = 1;
+      afn_play_anim = -1;
+      afn_move_speed = 0;
+      { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[3].stopStart + si].link; }
+    }
+    afn_hud_visible[5] = 1;
+#ifdef AFN_HAS_HUD_ANCHOR
+    afn_hud_anchor_sprite[5] = -1;
+#endif
+    afn_elem_idx = 5;
+    afn_active_element = 5;
+    afn_cursor_stop = 0;
+    afn_stop_count = afn_hud_elems[5].stopCount;
+    if (afn_stop_count > 0) {
+      afn_player_frozen = 1;
+      afn_play_anim = -1;
+      afn_move_speed = 0;
+      { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[5].stopStart + si].link; }
+    }
+    afn_hud_visible[6] = 1;
+#ifdef AFN_HAS_HUD_ANCHOR
+    afn_hud_anchor_sprite[6] = -1;
+#endif
+    afn_elem_idx = 6;
+    afn_active_element = 6;
+    afn_cursor_stop = 0;
+    afn_stop_count = afn_hud_elems[6].stopCount;
+    if (afn_stop_count > 0) {
+      afn_player_frozen = 1;
+      afn_play_anim = -1;
+      afn_move_speed = 0;
+      { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[6].stopStart + si].link; }
+    }
 }
 static void afn_bp0_update(void) {
     if (afn_cam_lock_target >= 0) {
     if (player_on_ground) {
 #ifdef AFN_HAS_CAM_LOCK
-    afn_strafe_clip[0] = 16;
-    afn_strafe_clip[1] = 19;
-    afn_strafe_clip[2] = 17;
-    afn_strafe_clip[3] = 21;
-    afn_strafe_clip[4] = 5;
-    afn_strafe_clip[5] = 18;
-    afn_strafe_clip[6] = 20;
-    afn_strafe_clip[7] = 22;
+    afn_strafe_clip[0] = 29;
+    afn_strafe_clip[1] = 32;
+    afn_strafe_clip[2] = 30;
+    afn_strafe_clip[3] = 34;
+    afn_strafe_clip[4] = 18;
+    afn_strafe_clip[5] = 31;
+    afn_strafe_clip[6] = 33;
+    afn_strafe_clip[7] = 35;
     afn_strafe_anim = 1;
 #endif
     }
@@ -61,7 +117,7 @@ static void afn_bp0_update(void) {
     if (afn_dodge_frames <= 0) {
     if (player_on_ground) {
     if (afn_land_timer <= 0) {
-    afn_rig_clip = 12;
+    afn_rig_clip = 25;
     }
     }
     }
@@ -70,20 +126,77 @@ static void afn_bp0_update(void) {
 #else
     if (player_vy > 0) {
 #endif
-    afn_rig_clip = 13;
+    afn_rig_clip = 26;
     }
 #ifdef AFN_HAS_PLAYER_RIG
     if (!player_on_ground && player_vy_now < 0) {
 #else
     if (!player_on_ground && player_vy <= 0) {
 #endif
-    afn_rig_clip = 14;
+    afn_rig_clip = 27;
     }
     if (afn_land_timer > 0) {
-    afn_rig_clip = 15;
+    afn_rig_clip = 28;
     }
     afn_gravity = 12;
     afn_terminal_vel = 6144;
+    if (afn_fb_fire_timer > 0) {
+    if (player_on_ground) {
+    afn_rig_clip = 16;
+    }
+    if (!player_on_ground) {
+    afn_rig_clip = 17;
+    }
+    }
+    if (afn_fb_charging) {
+    if (afn_cam_lock_target >= 0) {
+    if (player_on_ground) {
+#ifdef AFN_HAS_CAM_LOCK
+    afn_strafe_clip[0] = 9;
+    afn_strafe_clip[1] = 12;
+    afn_strafe_clip[2] = 10;
+    afn_strafe_clip[3] = 14;
+    afn_strafe_clip[4] = 3;
+    afn_strafe_clip[5] = 11;
+    afn_strafe_clip[6] = 13;
+    afn_strafe_clip[7] = 15;
+    afn_strafe_anim = 1;
+#endif
+    }
+    }
+    if (afn_cam_lock_target < 0) {
+    if (player_on_ground) {
+#ifdef AFN_HAS_CAM_LOCK
+    afn_strafe_clip[0] = 9;
+    afn_strafe_clip[1] = 9;
+    afn_strafe_clip[2] = 9;
+    afn_strafe_clip[3] = 9;
+    afn_strafe_clip[4] = 9;
+    afn_strafe_clip[5] = 9;
+    afn_strafe_clip[6] = 9;
+    afn_strafe_clip[7] = 9;
+    afn_strafe_anim = 1;
+#endif
+    }
+    }
+    }
+    { static int afn_cd_292 = 12;
+      if (--afn_cd_292 <= 0) { afn_cd_292 = 12;
+    afn_energy += (1); if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;
+    } }
+    if (afn_energy >= (33)) {
+    if (afn_rise_303 >= afn_frame_count - 1) { afn_rise_303 = afn_frame_count; }
+    else { afn_rise_303 = afn_frame_count;
+    afn_hud_layer_frame[2] = 0;
+    afn_hud_layer_tick[2] = 0;
+    afn_hud_layer_active[2] = 1;
+    }
+    }
+    if (((afn_energy) < ((33)))) {
+    afn_hud_layer_frame[2] = 0;
+    afn_hud_layer_tick[2] = 0;
+    afn_hud_layer_active[2] = 1;
+    }
 }
 static void afn_bp0_key_held(void) {
     if (key_is_down(KEY_LSTICK_UP)) {
@@ -93,7 +206,7 @@ static void afn_bp0_key_held(void) {
     if (!afn_player_frozen) afn_input_fwd += afn_key_mag;
     if (!afn_speed_prio) afn_move_speed = 6;
     if (player_on_ground) {
-    afn_rig_clip = 16;
+    afn_rig_clip = 29;
     }
     }
     if (key_is_down(KEY_RSTICK_LEFT)) {
@@ -127,7 +240,7 @@ static void afn_bp0_key_held(void) {
     if (!afn_player_frozen) afn_input_fwd -= afn_key_mag;
     if (!afn_speed_prio) afn_move_speed = 6;
     if (player_on_ground) {
-    afn_rig_clip = 16;
+    afn_rig_clip = 29;
     }
     }
     if (key_is_down(KEY_LSTICK_RIGHT)) {
@@ -137,7 +250,7 @@ static void afn_bp0_key_held(void) {
     if (!afn_player_frozen) afn_input_right -= afn_key_mag;
     if (!afn_speed_prio) afn_move_speed = 6;
     if (player_on_ground) {
-    afn_rig_clip = 16;
+    afn_rig_clip = 29;
     }
     }
     if (key_is_down(KEY_LSTICK_LEFT)) {
@@ -147,22 +260,23 @@ static void afn_bp0_key_held(void) {
     if (!afn_player_frozen) afn_input_right += afn_key_mag;
     if (!afn_speed_prio) afn_move_speed = 6;
     if (player_on_ground) {
-    afn_rig_clip = 16;
+    afn_rig_clip = 29;
     }
     }
     if (key_is_down(KEY_X)) {
         afn_key_mag = 256;
     afn_player_frozen = 1; afn_play_anim = -1;
-    afn_rig_clip = 6;
+    afn_rig_clip = 19;
     }
     if (key_is_down(KEY_B)) {
         afn_key_mag = 256;
+    if (afn_energy >= (33)) {
 #ifdef AFN_HAS_PLAYER_RIG
     afn_fb_charge_req = 1;
     afn_fb_parent     = afn_bp_cur_spr_idx;
-    afn_fb_max        = 50;
-    afn_fb_min_scale  = 1 / 100.0f;
-    afn_fb_max_scale  = 10 / 100.0f;
+    afn_fb_max        = 125;
+    afn_fb_min_scale  = 3 / 100.0f;
+    afn_fb_max_scale  = 20 / 100.0f;
 #endif
     if (player_on_ground) {
     afn_rig_clip = 1;
@@ -173,6 +287,7 @@ static void afn_bp0_key_held(void) {
     if (afn_rise_248 >= afn_frame_count - 1) { afn_rise_248 = afn_frame_count; }
     else { afn_rise_248 = afn_frame_count;
     afn_play_sfx(4, 0, 0);
+    }
     }
     }
 }
@@ -189,21 +304,42 @@ static void afn_bp0_key_pressed(void) {
     }
     if (key_hit(KEY_R)) {
         afn_key_mag = 256;
+    if (!afn_fb_charging) {
 #ifdef AFN_HAS_PLAYER_RIG
-    if (afn_dodge_cd <= 0) {
+    if (afn_dodge_cd <= 0 && afn_energy >= 5) {
         afn_dodge_speed = 50;
         afn_dodge_frames = 20;
-        afn_dodge_clip_l = 11;
-        afn_dodge_clip_r = 10;
-        afn_dodge_clip_f = 9;
-        afn_dodge_clip_b = 8;
+        afn_dodge_clip_l = 24;
+        afn_dodge_clip_r = 23;
+        afn_dodge_clip_f = 22;
+        afn_dodge_clip_b = 21;
         afn_dodge_idle = -1;
         afn_dodge_ramp = 6;
         afn_dodge_falloff = 12;
         afn_dodge_cd = 35;
         afn_dodge_trigger = 1;
+        afn_energy -= 5; if (afn_energy < 0) afn_energy = 0; // dodge cost
     }
 #endif
+    }
+    if (afn_fb_charging) {
+#ifdef AFN_HAS_PLAYER_RIG
+    if (afn_dodge_cd <= 0 && afn_energy >= 5) {
+        afn_dodge_speed = 50;
+        afn_dodge_frames = 20;
+        afn_dodge_clip_l = 7;
+        afn_dodge_clip_r = 6;
+        afn_dodge_clip_f = 5;
+        afn_dodge_clip_b = 4;
+        afn_dodge_idle = -1;
+        afn_dodge_ramp = 6;
+        afn_dodge_falloff = 12;
+        afn_dodge_cd = 35;
+        afn_dodge_trigger = 1;
+        afn_energy -= 5; if (afn_energy < 0) afn_energy = 0; // dodge cost
+    }
+#endif
+    }
     }
     if (key_hit(KEY_A)) {
         afn_key_mag = 256;
@@ -214,30 +350,38 @@ static void afn_bp0_key_pressed(void) {
     afn_fall_smooth = 30;
 #endif
     }
+    if (key_hit(KEY_SELECT)) {
+        afn_key_mag = 256;
+    afn_health -= (20); if (afn_health < 0) afn_health = 0;
+    }
+    if (key_hit(KEY_START)) {
+        afn_key_mag = 256;
+    afn_health += (20); if (afn_health > afn_health_max) afn_health = afn_health_max;
+    }
 }
 static void afn_bp0_key_released(void) {
     if (key_released(KEY_LSTICK_UP)) {
         afn_key_mag = 256;
     if (player_on_ground) {
-    afn_rig_clip = 12;
+    afn_rig_clip = 25;
     }
     }
     if (key_released(KEY_LSTICK_DOWN)) {
         afn_key_mag = 256;
     if (player_on_ground) {
-    afn_rig_clip = 12;
+    afn_rig_clip = 25;
     }
     }
     if (key_released(KEY_LSTICK_RIGHT)) {
         afn_key_mag = 256;
     if (player_on_ground) {
-    afn_rig_clip = 12;
+    afn_rig_clip = 25;
     }
     }
     if (key_released(KEY_LSTICK_LEFT)) {
         afn_key_mag = 256;
     if (player_on_ground) {
-    afn_rig_clip = 12;
+    afn_rig_clip = 25;
     }
     }
     if (key_released(KEY_X)) {
@@ -246,6 +390,12 @@ static void afn_bp0_key_released(void) {
     }
     if (key_released(KEY_B)) {
         afn_key_mag = 256;
+    afn_stop_sfx_sample(4);
+    if (afn_energy >= (33)) {
+    { int _mn = 4, _mx = (33);
+      int _cp = (afn_fb_max > 0) ? (int)(afn_fb_level * 100.0f / afn_fb_max) : 0;
+      int _amt = _mn + (_mx - _mn) * _cp / 100;
+      afn_energy -= _amt; if (afn_energy < 0) afn_energy = 0; }
 #ifdef AFN_HAS_PLAYER_RIG
     afn_fb_fire_req = 1;
     afn_fb_dmg_max  = 30;
@@ -256,14 +406,17 @@ static void afn_bp0_key_released(void) {
     afn_fb_tgt      = -1;
 #endif
 #endif
-    if (player_on_ground) {
-    afn_rig_clip = 3;
-    }
-    if (!player_on_ground) {
-    afn_rig_clip = 4;
-    }
-    afn_stop_sfx_sample(4);
+    if (((((afn_fb_max > 0) ? (int)(afn_fb_level * 100.0f / afn_fb_max) : 0)) >= ((96)))) {
     afn_play_sfx(5, 0, 0);
+    }
+    if (((((afn_fb_max > 0) ? (int)(afn_fb_level * 100.0f / afn_fb_max) : 0)) < ((96)))) {
+    if (((((afn_fb_max > 0) ? (int)(afn_fb_level * 100.0f / afn_fb_max) : 0)) >= ((50)))) {
+    afn_play_sfx(7, 0, 0);
+    } else {
+    afn_play_sfx(6, 0, 0);
+    }
+    }
+    }
     }
 }
 static void afn_bp0_collision(void) {
@@ -287,8 +440,8 @@ static void afn_bp1_key_pressed(void) {
     afn_hud_visible[0] = 1;
 #ifdef AFN_HAS_HUD_ANCHOR
     if (afn_bp_cur_spr_idx >= 0) afn_hud_anchor_sprite[0] = afn_bp_cur_spr_idx;
-    afn_hud_anchor_min[0] = 30;
-    afn_hud_anchor_max[0] = 40;
+    afn_hud_anchor_min[0] = 20;
+    afn_hud_anchor_max[0] = 25;
     afn_hud_anchor_near[0] = 11;
     afn_hud_anchor_far[0] = 97;
 #endif
@@ -353,7 +506,7 @@ static void afn_bp2_start(void) {
     afn_hud_layer_tick[1] = 0;
     afn_hud_layer_active[1] = 1;
     /* TODO: emit node type 48 */
-    afn_play_sfx(1, 0, 0);
+    afn_play_sound(1, 2);
 }
 static void afn_bp2_update(void) {
 }
@@ -363,7 +516,7 @@ static void afn_bp2_key_pressed(void) {
     if (key_hit(KEY_A)) {
         afn_key_mag = 256;
 #ifdef AFN_HAS_SCENE_DELAY
-    if (afn_scene_delay <= 0 && afn_scene_phase == 0) { afn_scene_delay = 20; afn_scene_delay_scene = 1; afn_scene_delay_mode = 1; }
+    if (afn_scene_delay <= 0 && afn_scene_phase == 0) { afn_scene_delay = 20; afn_scene_delay_scene = 1; afn_scene_delay_mode = 1; afn_scene_delay_frames = 15; }
 #else
     afn_scene_start_transition(1, 1, 15);
 #endif
@@ -391,13 +544,49 @@ static void afn_bp3_start(void) {
       afn_move_speed = 0;
       { int si; for (si = 0; si < afn_stop_count && si < 8; si++) afn_stop_links[si] = afn_hud_stops[afn_hud_elems[2].stopStart + si].link; }
     }
-    afn_play_sfx(3, 0, 0);
+    afn_play_sound(3, 1);
 }
 static void afn_bp3_update(void) {
 }
 static void afn_bp3_key_held(void) {
 }
 static void afn_bp3_key_pressed(void) {
+    if (key_hit(KEY_LEFT)) {
+        afn_key_mag = 256;
+    { int _s = (afn_cursor_stop); if (_s < 0) _s = 0; if (_s > 3) _s = 3;
+      int _c = ((2)); if (_c > 0) { int _v = (afn_hud_value[_s] + ((-1))) % _c; if (_v < 0) _v += _c; afn_hud_value[_s] = _v; } }
+    afn_play_sfx(8, 0, 0);
+    }
+    if (key_hit(KEY_RIGHT)) {
+        afn_key_mag = 256;
+    { int _s = (afn_cursor_stop); if (_s < 0) _s = 0; if (_s > 3) _s = 3;
+      int _c = ((2)); if (_c > 0) { int _v = (afn_hud_value[_s] + ((1))) % _c; if (_v < 0) _v += _c; afn_hud_value[_s] = _v; } }
+    afn_play_sfx(8, 0, 0);
+    }
+    if (key_hit(KEY_A)) {
+        afn_key_mag = 256;
+    afn_play_sfx(2, 0, 0);
+    if (afn_cursor_stop) {
+#ifdef AFN_HAS_SCENE_DELAY
+    if (afn_scene_delay <= 0 && afn_scene_phase == 0) { afn_scene_delay = 20; afn_scene_delay_scene = 2; afn_scene_delay_mode = 1; afn_scene_delay_frames = 45; }
+#else
+    afn_scene_start_transition(2, 1, 45);
+#endif
+    } else {
+    afn_cursor_stop++;
+    if (afn_cursor_stop >= afn_stop_count) afn_cursor_stop = 0;
+    }
+    }
+    if (key_hit(KEY_X)) {
+        afn_key_mag = 256;
+    afn_play_sfx(9, 0, 0);
+    if (afn_cursor_stop) {
+    if (afn_cursor_stop > 0) afn_cursor_stop--;
+    else afn_cursor_stop = afn_stop_count - 1;
+    } else {
+    afn_scene_start_transition(0, 1, 15);
+    }
+    }
 }
 static void afn_bp3_key_released(void) {
 }
@@ -405,14 +594,39 @@ static void afn_bp3_collision(void) {
 }
 static void afn_bp3_collision2d(void) {
 }
+static void afn_bp4_start(void) {
+    afn_play_sound(3, 1);
+}
+static void afn_bp4_update(void) {
+}
+static void afn_bp4_key_held(void) {
+}
+static void afn_bp4_key_pressed(void) {
+    if (key_hit(KEY_X)) {
+        afn_key_mag = 256;
+    afn_play_sfx(9, 0, 0);
+#ifdef AFN_HAS_SCENE_DELAY
+    if (afn_scene_delay <= 0 && afn_scene_phase == 0) { afn_scene_delay = 20; afn_scene_delay_scene = 1; afn_scene_delay_mode = 1; afn_scene_delay_frames = 45; }
+#else
+    afn_scene_start_transition(1, 1, 45);
+#endif
+    }
+}
+static void afn_bp4_key_released(void) {
+}
+static void afn_bp4_collision(void) {
+}
+static void afn_bp4_collision2d(void) {
+}
 
-#define AFN_BP_COUNT 4
-#define AFN_BP_INSTANCE_COUNT 4
-static const unsigned int afn_bp_instances[4][5] = {
+#define AFN_BP_COUNT 5
+#define AFN_BP_INSTANCE_COUNT 5
+static const unsigned int afn_bp_instances[5][5] = {
     { 0, 0, 4294967295, 0, 0xffffffffu },
     { 1, 7, 4294967295, 0, 0xffffffffu },
     { 2, 4294967295, 4294967295, 1, 0x1u },
     { 3, 4294967295, 4294967295, 1, 0x2u },
+    { 4, 4294967295, 4294967295, 1, 0x4u },
 };
 static void afn_bp_dispatch_start(void) {
     extern int afn_current_mode;
@@ -430,6 +644,7 @@ static void afn_bp_dispatch_start(void) {
             case 1: afn_bp1_start(); break;
             case 2: afn_bp2_start(); break;
             case 3: afn_bp3_start(); break;
+            case 4: afn_bp4_start(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -451,6 +666,7 @@ static void afn_bp_dispatch_update(void) {
             case 1: afn_bp1_update(); break;
             case 2: afn_bp2_update(); break;
             case 3: afn_bp3_update(); break;
+            case 4: afn_bp4_update(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -472,6 +688,7 @@ static void afn_bp_dispatch_key_held(void) {
             case 1: afn_bp1_key_held(); break;
             case 2: afn_bp2_key_held(); break;
             case 3: afn_bp3_key_held(); break;
+            case 4: afn_bp4_key_held(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -493,6 +710,7 @@ static void afn_bp_dispatch_key_pressed(void) {
             case 1: afn_bp1_key_pressed(); break;
             case 2: afn_bp2_key_pressed(); break;
             case 3: afn_bp3_key_pressed(); break;
+            case 4: afn_bp4_key_pressed(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -514,6 +732,7 @@ static void afn_bp_dispatch_key_released(void) {
             case 1: afn_bp1_key_released(); break;
             case 2: afn_bp2_key_released(); break;
             case 3: afn_bp3_key_released(); break;
+            case 4: afn_bp4_key_released(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -536,6 +755,7 @@ static void afn_bp_dispatch_collision(void) {
             case 1: afn_bp1_collision(); break;
             case 2: afn_bp2_collision(); break;
             case 3: afn_bp3_collision(); break;
+            case 4: afn_bp4_collision(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
@@ -558,10 +778,11 @@ static void afn_bp_dispatch_collision2d(void) {
             case 1: afn_bp1_collision2d(); break;
             case 2: afn_bp2_collision2d(); break;
             case 3: afn_bp3_collision2d(); break;
+            case 4: afn_bp4_collision2d(); break;
         }
     }
     afn_bp_cur_spr_idx = -1;
     afn_bp_cur_tm_obj  = -1;
 }
-#define AFN_START_MODE 0
+#define AFN_START_MODE 1
 #define AFN_START_SCENE 0

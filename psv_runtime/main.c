@@ -1159,7 +1159,7 @@ unsigned char afn_hud_layer_active[AFN_HUD_LAY_N]={0}, afn_hud_layer_speed_overr
 int tm_fol_active=0, tm_fol_obj=-1, tm_fol_dist=0, tm_fol_facing=0, tm_fol_moving=0, tm_fol_speed=0;
 int tm_player_tx=0, tm_player_ty=0;
 // Audio entry points — defined in audio.c (sceAudio software mixer + sequencer).
-void afn_play_sound(int id);
+void afn_play_sound(int id, int link);
 void afn_play_sfx(int smpIdx, int gain, int fifo);
 void afn_stop_sound(void);
 void afn_stop_sfx_sample(int smpIdx);

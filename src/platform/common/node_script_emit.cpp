@@ -821,12 +821,19 @@ void EmitNodeScriptBodies(std::ostream& f,
             case GBAScriptNodeType::PlaySound: {
                 auto* d = findDataIn(a->id, 0);
                 int sId = d ? resolveInt(d) : 0;
-                if (sId >= 0 && sId < (int)soundInstances.size() && soundInstances[sId].isSfx) {
+                auto* lk = findDataIn(a->id, 1);
+                int link = lk ? resolveInt(lk) : 0;
+                // Persist Link > 0 => persistent music: route through afn_play_sound
+                // (the link-gated carry/swap logic lives there) for SFX *and* MIDI.
+                // Link 0 => normal play: SFX takes the direct fast path.
+                if (link > 0) {
+                    f << "    afn_play_sound(" << sId << ", " << link << ");\n";
+                } else if (sId >= 0 && sId < (int)soundInstances.size() && soundInstances[sId].isSfx) {
                     f << "    afn_play_sfx(" << soundInstances[sId].sfxSampleIdx
                       << ", " << soundInstances[sId].mixerGain
                       << ", " << soundInstances[sId].fifoChannel << ");\n";
                 } else {
-                    f << "    afn_play_sound(" << sId << ");\n";
+                    f << "    afn_play_sound(" << sId << ", 0);\n";
                 }
                 break;
             }
