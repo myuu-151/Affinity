@@ -872,7 +872,7 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     // Actions (orange)
     { "Move Player",     0xFF3355AA, 1, 1, 1, 0, {"Direction"}, {}, {} },
     { "Look Direction",  0xFF3355AA, 1, 1, 1, 0, {"Direction"}, {}, {} },
-    { "Change Scene",    0xFF3355AA, 1, 1, 2, 0, {"Scene (int)","Delay (frames)"}, {}, {} },
+    { "Change Scene",    0xFF3355AA, 1, 1, 3, 0, {"Scene (int)","Delay (frames)","Transition (frames)"}, {}, {} },
     { "Set Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot (int)", "Value"}, {}, {} },
     { "Add Variable",    0xFF3355AA, 1, 1, 2, 0, {"Var Slot (int)", "Amount"}, {}, {} },
     { "Play Sound",      0xFF3355AA, 1, 1, 1, 0, {"Sound Instance"}, {}, {} },
@@ -1214,7 +1214,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::CompareVar:    desc = "Compares a variable slot against a value. Outputs 1 or 0."; break;
     case VsNodeType::MovePlayer:    desc = "Moves the player in the given Direction whenever this runs. Wire it after On Key Held(key) to bind movement to that button — e.g. On Key Held(A) -> Move Player(Up) moves up while A is held (remappable). Left-click for the Facing switch: Direction Facing (rig turns toward movement) or Consistent Facing (rig keeps its yaw — strafe/moonwalk)."; break;
     case VsNodeType::LookDirection: desc = "Sets the player's facing direction."; break;
-    case VsNodeType::ChangeScene:   desc = "Loads a different scene by index."; break;
+    case VsNodeType::ChangeScene:   desc = "Loads a different scene by index. Delay (frames) holds the current scene before switching; Transition (frames) sets the fade/crossfade duration (default 15) — raise it (e.g. 45-60) to slow a piece Crossfade."; break;
     case VsNodeType::SetVariable:   desc = "Sets a variable slot to a value."; break;
     case VsNodeType::AddVariable:   desc = "Adds an amount to a variable slot."; break;
     case VsNodeType::PlaySound:     desc = "Plays a sound effect by ID."; break;
@@ -2223,6 +2223,7 @@ struct SoundInstance {
     bool loop = false;          // loop playback between loopStart and loopEnd ticks
     int loopStartTick = 0;      // loop region start (MIDI ticks)
     int loopEndTick = 0;        // loop region end (MIDI ticks, 0 = end of sequence)
+    bool persist = false;       // keep playing across scene changes (don't stop/restart on transition)
     std::vector<SampleOverride> overrides; // per-sample edits
 };
 static std::vector<SoundInstance> sSoundInstances;
@@ -4389,6 +4390,11 @@ struct HudPiece {
     // asset pickers (e.g. a character-select portrait). -1 = static.
     int cycleSlot = -1;            // HUD value slot (0-3) driving the cycle, -1 = off
     std::vector<int> cycleAssets;  // staged sprite asset per frame slot (-1 = empty)
+    // Crossfade: on the change to xfToScene, this piece dissolves into the target
+    // piece (xfToElem -> piece xfToPiece) in that scene, instead of fading to
+    // black — e.g. a bg that recolors between menus. From = this piece.
+    bool crossfade = false;
+    int xfToScene = -1, xfToElem = -1, xfToPiece = -1;
 };
 
 struct StopModifier {
@@ -7411,8 +7417,9 @@ static bool SaveProject(const std::string& path)
             el.visible ? 1 : 0, el.layer);
         fprintf(f, "elemPieceCount=%d\n", (int)el.pieces.size());
         for (auto& pc : el.pieces) {
-            fprintf(f, "elemPiece=%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity, pc.hidden ? 1 : 0, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd);
+            fprintf(f, "elemPiece=%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity, pc.hidden ? 1 : 0, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd, pc.crossfade ? 1 : 0);
             if (pc.cycleSlot >= 0) { fprintf(f, "elemPieceCycle=%d", pc.cycleSlot); for (int a : pc.cycleAssets) fprintf(f, "|%d", a); fprintf(f, "\n"); }
+            if (pc.crossfade) fprintf(f, "elemPieceXfade=%d|%d|%d\n", pc.xfToScene, pc.xfToElem, pc.xfToPiece);
         }
         fprintf(f, "elemStopCount=%d\n", (int)el.stops.size());
         for (auto& st : el.stops) {
@@ -8025,6 +8032,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "instLoop=%d\n", si.loop ? 1 : 0);
         fprintf(f, "instLoopStart=%d\n", si.loopStartTick);
         fprintf(f, "instLoopEnd=%d\n", si.loopEndTick);
+        fprintf(f, "instPersist=%d\n", si.persist ? 1 : 0);
         fprintf(f, "instBanks=");
         for (int ch = 0; ch < 16; ch++) {
             if (ch > 0) fprintf(f, ",");
@@ -8985,17 +8993,21 @@ static bool LoadProject(const std::string& path)
                 sHudElements.back().pieces.reserve(ival);
             }
             else if (strncmp(line, "elemPiece=", 10) == 0 && !sHudElements.empty()) {
-                HudPiece pc; int bt = 0, opa = 16, hid = 0;
-                int n = sscanf(line + 10, "%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d",
+                HudPiece pc; int bt = 0, opa = 16, hid = 0, xf = 0;
+                int n = sscanf(line + 10, "%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d",
                     &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size, &bt, &opa, &hid,
-                    &pc.barSource, &pc.barAxis, &pc.barStart, &pc.barEnd);
-                if (n >= 5) { pc.blackTint = (bt != 0); pc.opacity = std::clamp(opa, 0, 16); pc.hidden = (hid != 0); sHudElements.back().pieces.push_back(pc); }
+                    &pc.barSource, &pc.barAxis, &pc.barStart, &pc.barEnd, &xf);
+                if (n >= 5) { pc.blackTint = (bt != 0); pc.opacity = std::clamp(opa, 0, 16); pc.hidden = (hid != 0); pc.crossfade = (xf != 0); sHudElements.back().pieces.push_back(pc); }
             }
             else if (strncmp(line, "elemPieceCycle=", 15) == 0 && !sHudElements.empty() && !sHudElements.back().pieces.empty()) {
                 HudPiece& pc = sHudElements.back().pieces.back();
                 pc.cycleAssets.clear();
                 const char* p = line + 15; pc.cycleSlot = atoi(p);
                 while ((p = strchr(p, '|')) != nullptr) { p++; pc.cycleAssets.push_back(atoi(p)); }
+            }
+            else if (strncmp(line, "elemPieceXfade=", 15) == 0 && !sHudElements.empty() && !sHudElements.back().pieces.empty()) {
+                HudPiece& pc = sHudElements.back().pieces.back();
+                sscanf(line + 15, "%d|%d|%d", &pc.xfToScene, &pc.xfToElem, &pc.xfToPiece);
             }
             else if (sscanf(line, "elemStopCount=%d", &ival) == 1 && !sHudElements.empty()) {
                 sHudElements.back().stops.clear();
@@ -10641,6 +10653,7 @@ static bool LoadProject(const std::string& path)
                 else if (sscanf(line, "instLoop=%d", &ival) == 1) curInst->loop = (ival != 0);
                 else if (sscanf(line, "instLoopStart=%d", &ival) == 1) curInst->loopStartTick = ival;
                 else if (sscanf(line, "instLoopEnd=%d", &ival) == 1) curInst->loopEndTick = ival;
+                else if (sscanf(line, "instPersist=%d", &ival) == 1) curInst->persist = (ival != 0);
                 else if (strncmp(line, "instBanks=", 10) == 0) {
                     sscanf(line + 10, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
                         &curInst->channelBank[0], &curInst->channelBank[1], &curInst->channelBank[2], &curInst->channelBank[3],
@@ -18052,6 +18065,7 @@ void FrameTick(float dt)
                         pe.barEnd = pc.barEnd;
                         pe.cycleSlot = pc.cycleSlot;
                         pe.cycleAssets = pc.cycleAssets;
+                        if (pc.crossfade) { pe.xfToScene = pc.xfToScene; pe.xfToElem = pc.xfToElem; pe.xfToPiece = pc.xfToPiece; }
                         he.pieces.push_back(pe);
                     }
                     for (auto& st : el.stops) {
@@ -18451,6 +18465,7 @@ void FrameTick(float dt)
                         ie.softFade = inst.softFade;
                         ie.softFadeA = inst.softFadeA;
                         ie.softFadeB = inst.softFadeB;
+                        ie.persist = inst.persist;
                         ie.attenuateFifoA = inst.attenuateFifoA;
                         ie.longRelease = inst.longRelease;
                         ie.hifiMode = inst.hifiMode;
@@ -21979,7 +21994,7 @@ void FrameTick(float dt)
                 case VsNodeType::CompareVar:    desc = "Compares a variable slot against a value. Outputs 1 or 0."; break;
                 case VsNodeType::MovePlayer:    desc = "Moves the player in the given Direction whenever this runs. Wire it after On Key Held(key) to bind movement to that button — e.g. On Key Held(A) -> Move Player(Up) moves up while A is held (remappable). Left-click for the Facing switch: Direction Facing (rig turns toward movement) or Consistent Facing (rig keeps its yaw — strafe/moonwalk)."; break;
                 case VsNodeType::LookDirection: desc = "Sets the player's facing direction."; break;
-                case VsNodeType::ChangeScene:   desc = "Loads a different scene by index."; break;
+                case VsNodeType::ChangeScene:   desc = "Loads a different scene by index. Delay (frames) holds the current scene before switching; Transition (frames) sets the fade/crossfade duration (default 15) — raise it (e.g. 45-60) to slow a piece Crossfade."; break;
                 case VsNodeType::SetVariable:   desc = "Sets a variable slot to a value."; break;
                 case VsNodeType::AddVariable:   desc = "Adds an amount to a variable slot."; break;
                 case VsNodeType::PlaySound:     desc = "Plays a sound effect by ID."; break;
@@ -23147,16 +23162,17 @@ void FrameTick(float dt)
                         "//   SaveState -> switch scene index -> LoadState\n"
                         "//   sScriptStartRan = false; // re-run OnStart";
                     setActionFunc(infoNode, "_change_scene",
-                        "    // Delay pin 0 (instant) -> transition now:\n"
-                        "    afn_scene_start_transition(<scIdx>, <mode>, 15); // mode 0=3D,1=2D,2=Mode1\n"
+                        "    // Delay pin 0 (instant) -> transition now, over <transition> frames\n"
+                        "    // (default 15). Transition pin sets the fade/crossfade duration:\n"
+                        "    afn_scene_start_transition(<scIdx>, <mode>, <transition>); // mode 0=3D,1=2D,2=Mode1\n"
                         "    // Delay pin > 0 (PSV) -> hold the scene N frames first (armed once):\n"
                         "    //   if (afn_scene_delay<=0 && afn_scene_phase==0) {\n"
                         "    //     afn_scene_delay=<delay>; afn_scene_delay_scene=<scIdx>;\n"
-                        "    //     afn_scene_delay_mode=<mode>; }\n"
+                        "    //     afn_scene_delay_mode=<mode>; afn_scene_delay_frames=<transition>; }\n"
                         "    // --- Runtime (main.c) ---\n"
-                        "    // delay counts down -> afn_scene_start_transition -> fade out,\n"
-                        "    //   swap scene+mode, re-run the entered scene's blueprint OnStart\n"
-                        "    //   (afn_stop_sound first), fade in.");
+                        "    // delay counts down -> afn_scene_start_transition -> fade (or, if a\n"
+                        "    //   piece is flagged Crossfade to this scene, dissolve it) over\n"
+                        "    //   <transition> frames, swap scene+mode, re-run OnStart, fade in.");
                     break;
                 case VsNodeType::SetGravity: {
                     editorCode =
@@ -29847,6 +29863,9 @@ void FrameTick(float dt)
                 sProjectDirty = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Soft fade applied when this voice routes to FIFO B (flat-volume release tail, no polyphony attenuation)");
+            bool persistSnd = inst.persist;
+            if (ImGui::Checkbox("Persist across scenes", &persistSnd)) { inst.persist = persistSnd; sProjectDirty = true; }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Keep this track playing across scene changes instead of stopping/restarting it — for menu music that should continue seamlessly (PSV). SFX and other music are unaffected.");
             bool atten = inst.attenuateFifoA != 0;
             if (ImGui::Checkbox("Attenuate FIFO A", &atten)) {
                 inst.attenuateFifoA = atten ? 1 : 0;
@@ -31574,8 +31593,9 @@ void FrameTick(float dt)
                         // Pieces
                         fprintf(cf, "elemPieceCount=%d\n", (int)el.pieces.size());
                         for (auto& pc : el.pieces) {
-                            fprintf(cf, "elemPiece=%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity, pc.hidden ? 1 : 0, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd);
+                            fprintf(cf, "elemPiece=%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity, pc.hidden ? 1 : 0, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd, pc.crossfade ? 1 : 0);
                             if (pc.cycleSlot >= 0) { fprintf(cf, "elemPieceCycle=%d", pc.cycleSlot); for (int a : pc.cycleAssets) fprintf(cf, "|%d", a); fprintf(cf, "\n"); }
+                            if (pc.crossfade) fprintf(cf, "elemPieceXfade=%d|%d|%d\n", pc.xfToScene, pc.xfToElem, pc.xfToPiece);
                         }
                         // Stops
                         fprintf(cf, "elemStopCount=%d\n", (int)el.stops.size());
@@ -31726,11 +31746,11 @@ void FrameTick(float dt)
                                 nel.pieces.clear(); nel.pieces.reserve(ival2);
                             }
                             else if (strncmp(line, "elemPiece=", 10) == 0) {
-                                HudPiece pc; int bt2 = 0, opa2 = 16, hid2 = 0;
-                                int n2 = sscanf(line + 10, "%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size, &bt2, &opa2, &hid2,
-                                    &pc.barSource, &pc.barAxis, &pc.barStart, &pc.barEnd);
+                                HudPiece pc; int bt2 = 0, opa2 = 16, hid2 = 0, xf2 = 0;
+                                int n2 = sscanf(line + 10, "%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size, &bt2, &opa2, &hid2,
+                                    &pc.barSource, &pc.barAxis, &pc.barStart, &pc.barEnd, &xf2);
                                 if (n2 >= 5) {
-                                    pc.blackTint = (bt2 != 0); pc.opacity = std::clamp(opa2, 0, 16); pc.hidden = (hid2 != 0);
+                                    pc.blackTint = (bt2 != 0); pc.opacity = std::clamp(opa2, 0, 16); pc.hidden = (hid2 != 0); pc.crossfade = (xf2 != 0);
                                     pc.spriteAssetIdx = remapAsset(pc.spriteAssetIdx);
                                     nel.pieces.push_back(pc);
                                 }
@@ -31740,6 +31760,10 @@ void FrameTick(float dt)
                                 pc.cycleAssets.clear();
                                 const char* p = line + 15; pc.cycleSlot = atoi(p);
                                 while ((p = strchr(p, '|')) != nullptr) { p++; pc.cycleAssets.push_back(remapAsset(atoi(p))); }
+                            }
+                            else if (strncmp(line, "elemPieceXfade=", 15) == 0 && !nel.pieces.empty()) {
+                                HudPiece& pc = nel.pieces.back();
+                                sscanf(line + 15, "%d|%d|%d", &pc.xfToScene, &pc.xfToElem, &pc.xfToPiece);
                             }
                             else if (sscanf(line, "elemStopCount=%d", &ival2) == 1) {
                                 nel.stops.clear(); nel.stops.reserve(ival2);
@@ -32111,6 +32135,38 @@ void FrameTick(float dt)
                         if (ImGui::DragInt("X##pc", &pc.localX, 1)) sProjectDirty = true;
                         if (ImGui::DragInt("Y##pc", &pc.localY, 1)) sProjectDirty = true;
                         if (ImGui::Checkbox("Black##pc", &pc.blackTint)) sProjectDirty = true;
+                        ImGui::SameLine();
+                        if (ImGui::Checkbox("Crossfade##pc", &pc.crossfade)) sProjectDirty = true;
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("On the change to 'To Scene', this piece dissolves into the target piece there (instead of the screen fading to black) — e.g. a bg that recolors between menus. Off = normal.");
+                        if (pc.crossfade) {
+                            ImGui::Indent();
+                            const char* tsPrev = (pc.xfToScene >= 0 && pc.xfToScene < (int)sTmScenes.size()) ? sTmScenes[pc.xfToScene].name : "(none)";
+                            if (ImGui::BeginCombo("To Scene##xf", tsPrev)) {
+                                for (int si = 0; si < (int)sTmScenes.size(); si++)
+                                    if (ImGui::Selectable(sTmScenes[si].name, si == pc.xfToScene)) { pc.xfToScene = si; sProjectDirty = true; }
+                                ImGui::EndCombo();
+                            }
+                            const char* tePrev = (pc.xfToElem >= 0 && pc.xfToElem < (int)sHudElements.size()) ? sHudElements[pc.xfToElem].name : "(none)";
+                            if (ImGui::BeginCombo("To Element##xf", tePrev)) {
+                                for (int ei = 0; ei < (int)sHudElements.size(); ei++) {
+                                    char il[80]; snprintf(il, sizeof(il), "%d: %s", ei, sHudElements[ei].name);
+                                    if (ImGui::Selectable(il, ei == pc.xfToElem)) { pc.xfToElem = ei; pc.xfToPiece = 0; sProjectDirty = true; }
+                                }
+                                ImGui::EndCombo();
+                            }
+                            if (pc.xfToElem >= 0 && pc.xfToElem < (int)sHudElements.size()) {
+                                int npj = (int)sHudElements[pc.xfToElem].pieces.size();
+                                char tpPrev[24]; snprintf(tpPrev, sizeof(tpPrev), "Piece %d", pc.xfToPiece);
+                                if (ImGui::BeginCombo("To Piece##xf", tpPrev)) {
+                                    for (int pj = 0; pj < npj; pj++) {
+                                        char il[24]; snprintf(il, sizeof(il), "Piece %d", pj);
+                                        if (ImGui::Selectable(il, pj == pc.xfToPiece)) { pc.xfToPiece = pj; sProjectDirty = true; }
+                                    }
+                                    ImGui::EndCombo();
+                                }
+                            }
+                            ImGui::Unindent();
+                        }
                         ImGui::SameLine();
                         ImGui::SetNextItemWidth(80);
                         if (ImGui::SliderInt("Opacity##pc", &pc.opacity, 0, 16)) sProjectDirty = true;

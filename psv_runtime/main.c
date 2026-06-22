@@ -1022,11 +1022,28 @@ int afn_scene_pending = 0, afn_scene_pending_mode = 0;
 // then start the transition to afn_scene_delay_scene/mode. The emitted script
 // (psv_script.h) arms these when AFN_HAS_SCENE_DELAY is defined (see below).
 #define AFN_HAS_SCENE_DELAY 1
-int afn_scene_delay = 0, afn_scene_delay_scene = 0, afn_scene_delay_mode = 0;
+int afn_scene_delay = 0, afn_scene_delay_scene = 0, afn_scene_delay_mode = 0, afn_scene_delay_frames = 15;
+// --- Scene-change crossfade (per-piece "xfade" flag): snapshot the outgoing
+// scene's flagged pieces and dissolve them out over the incoming scene, instead
+// of fading to black. ---
+typedef struct { int tex; float x, y, w, h, tox, toy, tow, toh; } AfnXfadePiece;
+#define AFN_XFADE_MAX 12
+AfnXfadePiece afn_xfade[AFN_XFADE_MAX];
+int afn_xfade_count = 0, afn_xfade_counter = 0, afn_xfade_frames = 0;
+static int afn_snapshot_xfade(void);   // defined below (needs HUD globals)
+
 void afn_scene_start_transition(int scene, int mode, int frames) {
     afn_scene_pending = scene; afn_scene_pending_mode = mode;
     extern int afn_fade_target, afn_fade_frames, afn_fade_counter;
-    afn_fade_target = -16; afn_fade_frames = frames > 0 ? frames : 15; afn_fade_counter = afn_fade_frames;
+    int nf = frames > 0 ? frames : 15;
+    afn_xfade_count = afn_snapshot_xfade();
+    if (afn_xfade_count > 0) {
+        // Crossfade: swap instantly (no black), dissolve the flagged pieces out.
+        afn_xfade_frames = nf; afn_xfade_counter = nf;
+        afn_fade_target = 0; afn_fade_frames = 1; afn_fade_counter = 1;
+    } else {
+        afn_fade_target = -16; afn_fade_frames = nf; afn_fade_counter = nf;
+    }
     afn_scene_phase = 1;
 }
 // Player physics vars the emitted code reads/writes (NDS defines these in
@@ -1406,6 +1423,53 @@ static int hud_project(float wx, float wy, float wz, float* outX, float* outY, f
     return 1;
 }
 
+// Capture the current scene's crossfade-flagged visible pieces (texture + screen
+// rect) so the transition can dissolve them out over the incoming scene.
+static int afn_snapshot_xfade(void) {
+#if defined(AFN_HAS_HUD) && defined(AFN_HUD_PIECE_XFADE)
+    int n = 0;
+    for (int e = 0; e < AFN_HUD_ELEM_COUNT && n < AFN_XFADE_MAX; e++) {
+        const AfnHudElem* el = &afn_hud_elems[e];
+        if (!afn_hud_visible[e]) continue;
+        if (afn_current_mode == 1) { if (el->mode == 1) continue; } else { if (el->mode == 2) continue; }
+#ifdef AFN_HUD_MODE0_MASK
+        unsigned int m = (afn_current_mode == 1) ? el->sceneMask2D : el->sceneMask;
+#else
+        unsigned int m = el->sceneMask;
+#endif
+        if (!(m & (1u << afn_current_scene))) continue;
+        for (int k = 0; k < el->pieceCount && n < AFN_XFADE_MAX; k++) {
+            const AfnHudPiece* pc = &afn_hud_piece[el->pieceStart + k];
+            if (pc->xfToScene < 0 || pc->xfToScene != afn_scene_pending) continue;   // only this transition
+            int ptex = pc->tex;
+#ifdef AFN_HUD_PIECE_CYCLE
+            if (pc->cycleSlot >= 0) { int cv = afn_hud_value[pc->cycleSlot]; if (cv < 0) cv = 0; if (cv >= pc->cycleCount) cv = pc->cycleCount - 1; ptex = pc->tex + cv; }
+#endif
+            afn_xfade[n].tex = ptex;
+            afn_xfade[n].x = el->screenX + pc->x;
+            afn_xfade[n].y = el->screenY + pc->y;
+            afn_xfade[n].w = pc->w; afn_xfade[n].h = pc->h;
+            // Target rect = the To piece in the incoming scene (for the morph). Defaults
+            // to the From rect (pure dissolve in place) if unset/invalid.
+            afn_xfade[n].tox = afn_xfade[n].x; afn_xfade[n].toy = afn_xfade[n].y;
+            afn_xfade[n].tow = afn_xfade[n].w; afn_xfade[n].toh = afn_xfade[n].h;
+            if (pc->xfToElem >= 0 && pc->xfToElem < AFN_HUD_ELEM_COUNT) {
+                const AfnHudElem* te = &afn_hud_elems[pc->xfToElem];
+                if (pc->xfToPiece >= 0 && pc->xfToPiece < te->pieceCount) {
+                    const AfnHudPiece* tp = &afn_hud_piece[te->pieceStart + pc->xfToPiece];
+                    afn_xfade[n].tox = te->screenX + tp->x; afn_xfade[n].toy = te->screenY + tp->y;
+                    afn_xfade[n].tow = tp->w; afn_xfade[n].toh = tp->h;
+                }
+            }
+            n++;
+        }
+    }
+    return n;
+#else
+    return 0;
+#endif
+}
+
 static void hud_render(void) {
     // Ortho 960x544 with a top-left origin (y grows downward) to match the
     // editor's PSV authoring space (native Vita resolution). 1:1 with the screen
@@ -1701,6 +1765,24 @@ static void hud_render(void) {
                      bx + st->x + el->curX + cw, by + st->y + el->curY + ch, 0, 0, 1, 1, 0xFFFFFFFFu);
         }
     }
+#ifdef AFN_HUD_PIECE_XFADE
+    // Scene-change crossfade: dissolve the snapshotted outgoing pieces out over the
+    // (already-drawn) new scene — alpha falls full -> 0 across afn_xfade_frames.
+    if (afn_xfade_count > 0 && afn_xfade_counter > 0 && afn_xfade_frames > 0) {
+        float prog = 1.0f - (float)afn_xfade_counter / (float)afn_xfade_frames;   // 0 -> 1
+        unsigned a8 = (unsigned)(255u * (unsigned)afn_xfade_counter / (unsigned)afn_xfade_frames);
+        if (a8 > 255) a8 = 255;
+        unsigned col = (a8 << 24) | 0x00FFFFFFu;
+        for (int i = 0; i < afn_xfade_count; i++) {
+            const AfnXfadePiece* xp = &afn_xfade[i];
+            // Morph the From rect toward the To piece's rect as it dissolves (a
+            // pure in-place dissolve when they match, e.g. full-screen bg -> bg).
+            float x = xp->x + (xp->tox - xp->x) * prog, y = xp->y + (xp->toy - xp->y) * prog;
+            float w = xp->w + (xp->tow - xp->w) * prog, h = xp->h + (xp->toh - xp->h) * prog;
+            hud_quad(s_hudTex[xp->tex], x, y, x + w, y + h, 0, 0, 1, 1, col);
+        }
+    }
+#endif
     glEnable(GL_DEPTH_TEST);
 }
 #endif // AFN_HAS_HUD
@@ -1841,7 +1923,7 @@ int main(void)
         // ChangeScene Delay pin: hold the current scene, then kick off the
         // transition when the countdown elapses (the fade/swap below takes over).
         if (afn_scene_delay > 0 && --afn_scene_delay == 0)
-            afn_scene_start_transition(afn_scene_delay_scene, afn_scene_delay_mode, 15);
+            afn_scene_start_transition(afn_scene_delay_scene, afn_scene_delay_mode, afn_scene_delay_frames);
 
         // Screen-fade tick: ease afn_fade_level toward afn_fade_target over
         // afn_fade_counter frames (set by ChangeScene / fade nodes). Rendered as
@@ -1852,6 +1934,7 @@ int main(void)
             afn_fade_level = afn_fade_target * (span - afn_fade_counter) / span;
             if (afn_fade_counter == 0) afn_fade_level = afn_fade_target;
         }
+        if (afn_xfade_counter > 0) afn_xfade_counter--;   // scene-change crossfade dissolve
         // Scene transition: at fade-out completion, swap scene index + respawn,
         // then fade back in. ReloadScene = true respawn; ChangeScene to another
         // index resets in the SAME geometry (full multi-scene needs an all-scenes
@@ -1875,7 +1958,12 @@ int main(void)
             // NEW scene's blueprints fire — boot only ran it for the start scene,
             // so without this a ChangeScene swap left the next 2D scene dark/silent.
             afn_bp_dispatch_start();
-            afn_fade_target = 0; afn_fade_frames = 15; afn_fade_counter = 15; afn_fade_level = -16;
+            if (afn_xfade_count > 0) {
+                // Crossfade swap: no black fade-in — the dissolve overlay carries the visual.
+                afn_fade_target = 0; afn_fade_frames = 1; afn_fade_counter = 0; afn_fade_level = 0;
+            } else {
+                afn_fade_target = 0; afn_fade_frames = 15; afn_fade_counter = 15; afn_fade_level = -16;
+            }
             afn_scene_phase = 2;
         } else if (afn_scene_phase == 2 && afn_fade_counter == 0) {
             afn_scene_phase = 0;

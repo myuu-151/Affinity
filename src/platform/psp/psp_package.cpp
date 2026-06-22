@@ -879,6 +879,8 @@ static bool GeneratePSPSound(const std::string& runtimeDir, const char* hdrPrefi
         return tpf < 1 ? 1 : tpf; });
     u8inst("afn_snd_voices",    [&](int i){ return soundInstances[i].voiceCount; });
     u8inst("afn_snd_soft_fade", [&](int i){ return soundInstances[i].softFadeA ? 1 : 0; });
+    u8inst("afn_snd_persist",   [&](int i){ return soundInstances[i].persist ? 1 : 0; });
+    f << "#define AFN_HAS_SND_PERSIST 1\n";   // afn_snd_persist[] present (keep music across scene changes)
     u8inst("afn_snd_loop",      [&](int i){ return soundInstances[i].loop ? 1 : 0; });
     iinst("afn_snd_loop_start", [&](int i){ return soundInstances[i].loopStartTick; });
     iinst("afn_snd_loop_end",   [&](int i){

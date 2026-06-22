@@ -566,7 +566,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
     f << "#define AFN_HAS_HUD 1\n";
 
     // Flatten pieces/texts/stops across elements; emit each piece's RGBA frame.
-    struct P { int x, y, w, h, tex, black, opacity, barSrc, barAxis, barStart, barEnd, cycleSlot, cycleCount; };
+    struct P { int x, y, w, h, tex, black, opacity, barSrc, barAxis, barStart, barEnd, cycleSlot, cycleCount, xfToScene, xfToElem, xfToPiece; };
     struct T { int x, y; unsigned int color; int font, slot, pad, scale; std::string text; };
     struct S { int x, y, link; };
     std::vector<P> pieces; std::vector<T> texts; std::vector<S> stops;
@@ -636,7 +636,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
                 emitFrame(pc.spriteAssetIdx, pc.frame, pc.size);   // texture stays native res
                 cyc = 1;
             }
-            pieces.push_back({ pc.localX, pc.localY, dispW, dispH, baseTex, pc.blackTint?1:0, pc.opacity, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd, pc.cycleSlot >= 0 && !pc.cycleAssets.empty() ? pc.cycleSlot : -1, cyc });
+            pieces.push_back({ pc.localX, pc.localY, dispW, dispH, baseTex, pc.blackTint?1:0, pc.opacity, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd, pc.cycleSlot >= 0 && !pc.cycleAssets.empty() ? pc.cycleSlot : -1, cyc, pc.xfToScene, pc.xfToElem, pc.xfToPiece });
         }
         e.pC = (int)pieces.size() - e.pS;
         e.tS = (int)texts.size();
@@ -688,12 +688,13 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
     f << "};\n";
     f << "#define AFN_HUD_PIECE_TINT 1\n";   // AfnHudPiece carries black + opacity (per-piece tint)
     f << "#define AFN_HUD_PIECE_BAR 1\n";    // ...and the bar-fill drain fields (barSrc/axis/start/end)
-    f << "typedef struct { short x,y,w,h,tex; unsigned char black; short opacity; short barSrc,barAxis,barStart,barEnd,cycleSlot,cycleCount; } AfnHudPiece;\n";
+    f << "typedef struct { short x,y,w,h,tex; unsigned char black; short opacity; short barSrc,barAxis,barStart,barEnd,cycleSlot,cycleCount,xfToScene,xfToElem,xfToPiece; } AfnHudPiece;\n";
     f << "#define AFN_HUD_PIECE_CYCLE 1\n";   // AfnHudPiece carries cycleSlot/cycleCount (asset ← hud_value)
+    f << "#define AFN_HUD_PIECE_XFADE 1\n";   // ...and xfTo* (crossfade into element xfToElem's piece xfToPiece on the change to xfToScene)
     f << "static const AfnHudPiece afn_hud_piece[" << (pieces.empty()?1:pieces.size()) << "] = {\n";
     for (auto& p : pieces) f << "  { " << p.x << "," << p.y << "," << p.w << "," << p.h << "," << p.tex << "," << p.black << "," << p.opacity
-                              << "," << p.barSrc << "," << p.barAxis << "," << p.barStart << "," << p.barEnd << "," << p.cycleSlot << "," << p.cycleCount << " },\n";
-    if (pieces.empty()) f << "  {0,0,0,0,0,0,16,0,0,0,0,-1,1},\n";
+                              << "," << p.barSrc << "," << p.barAxis << "," << p.barStart << "," << p.barEnd << "," << p.cycleSlot << "," << p.cycleCount << "," << p.xfToScene << "," << p.xfToElem << "," << p.xfToPiece << " },\n";
+    if (pieces.empty()) f << "  {0,0,0,0,0,0,16,0,0,0,0,-1,1,-1,-1,-1},\n";
     f << "};\n";
     f << "typedef struct { short x,y; unsigned int color; unsigned char font,slot,pad,scale; char text[32]; } AfnHudText;\n";
     f << "static const AfnHudText afn_hud_text[" << (texts.empty()?1:texts.size()) << "] = {\n";

@@ -860,15 +860,19 @@ void EmitNodeScriptBodies(std::ostream& f,
                 // count it down; others fall back to an instant switch.
                 auto* dlData = findDataIn(a->id, 1);
                 int delay = dlData ? resolveInt(dlData) : 0;
+                // Transition (frames) pin: duration of the fade / crossfade (default 15).
+                auto* tfData = findDataIn(a->id, 2);
+                int tf = tfData ? resolveInt(tfData) : 15; if (tf < 1) tf = 15;
                 if (delay > 0) {
                     f << "#ifdef AFN_HAS_SCENE_DELAY\n";
                     f << "    if (afn_scene_delay <= 0 && afn_scene_phase == 0) { afn_scene_delay = " << delay
-                      << "; afn_scene_delay_scene = " << scIdx << "; afn_scene_delay_mode = " << scMode << "; }\n";
+                      << "; afn_scene_delay_scene = " << scIdx << "; afn_scene_delay_mode = " << scMode
+                      << "; afn_scene_delay_frames = " << tf << "; }\n";
                     f << "#else\n";
-                    f << "    afn_scene_start_transition(" << scIdx << ", " << scMode << ", 15);\n";
+                    f << "    afn_scene_start_transition(" << scIdx << ", " << scMode << ", " << tf << ");\n";
                     f << "#endif\n";
                 } else {
-                    f << "    afn_scene_start_transition(" << scIdx << ", " << scMode << ", 15);\n";
+                    f << "    afn_scene_start_transition(" << scIdx << ", " << scMode << ", " << tf << ");\n";
                 }
                 break;
             }

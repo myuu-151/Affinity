@@ -584,6 +584,9 @@ struct GBAHudPieceExport {
     int barStart = 0, barEnd = 0;   // fill-edge travel (piece-local px along axis)
     int cycleSlot = -1;  // HUD value slot driving asset cycle (-1 = static)
     std::vector<int> cycleAssets;  // staged sprite asset per frame slot
+    // Crossfade: on the change to xfToScene, dissolve into element xfToElem's
+    // piece xfToPiece in that scene (-1 = no crossfade).
+    int xfToScene = -1, xfToElem = -1, xfToPiece = -1;
 };
 
 struct GBAHudStopExport {
@@ -708,6 +711,7 @@ struct GBASoundInstanceExport {
     bool isSfx = false;                    // true = one-shot SFX (uses afn_play_sfx)
     int sfxSampleIdx = -1;                 // exported sample index for SFX mode
     int fifoChannel = 0;                   // 0 = FIFO A, 1 = FIFO B
+    bool persist = false;                  // keep playing across scene changes (don't stop/restart)
 };
 
 // Sky animation frame for export

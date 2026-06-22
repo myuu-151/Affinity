@@ -50,6 +50,7 @@ static int snd_voice_count = SND_MAX_VOICES;
 static int snd_seq_active = -1;
 static int snd_seq_tick   = 0;
 static int snd_seq_next   = 0;
+static int afn_persist_sfx_smp = -1;   // sample index of a persistent (looping) music-SFX, -1 = none
 static int snd_pitch_bend[16];
 
 static SceUID s_mutex = -1;
@@ -169,12 +170,29 @@ void afn_play_sound(int instanceId) {
     if (instanceId < 0 || instanceId >= AFN_SOUND_INSTANCE_COUNT) return;
     lock();
     if (afn_snd_is_sfx[instanceId]) {
-        play_sfx_locked(afn_snd_sfx_sample[instanceId],
-                        afn_snd_sfx_gain[instanceId],
-                        afn_snd_sfx_fifo[instanceId]);
+        int smp = afn_snd_sfx_sample[instanceId];
+#ifdef AFN_HAS_SND_PERSIST
+        // Persistent (looping) SFX used as music: if it's already playing, don't
+        // restart it — so it carries seamlessly across a scene change.
+        if (afn_snd_persist[instanceId]) {
+            int already = 0;
+            for (int i = 0; i < SND_MAX_VOICES; i++)
+                if (snd_voices[i].playing && snd_voices[i].smpIdx == smp) { already = 1; break; }
+            if (afn_persist_sfx_smp == smp && already) { unlock(); return; }
+            play_sfx_locked(smp, afn_snd_sfx_gain[instanceId], afn_snd_sfx_fifo[instanceId]);
+            afn_persist_sfx_smp = smp;
+            unlock();
+            return;
+        }
+#endif
+        play_sfx_locked(smp, afn_snd_sfx_gain[instanceId], afn_snd_sfx_fifo[instanceId]);
         unlock();
         return;
     }
+#ifdef AFN_HAS_SND_PERSIST
+    // A persistent sequencer track already playing isn't restarted either.
+    if (afn_snd_persist[instanceId] && snd_seq_active == instanceId) { unlock(); return; }
+#endif
     if (afn_snd_note_ptrs[instanceId] && afn_snd_note_counts[instanceId] > 0) {
         snd_seq_active = instanceId;
         snd_seq_tick   = 0;
@@ -190,6 +208,20 @@ void afn_play_sound(int instanceId) {
 
 void afn_stop_sound(void) {
     lock();
+#ifdef AFN_HAS_SND_PERSIST
+    // Persistent sequencer track active: keep everything running (its music + voices).
+    if (snd_seq_active >= 0 && snd_seq_active < AFN_SOUND_INSTANCE_COUNT && afn_snd_persist[snd_seq_active]) {
+        unlock();
+        return;
+    }
+    // Otherwise stop the sequencer and all voices EXCEPT a persistent SFX's (so a
+    // looping music-SFX keeps playing across the scene change).
+    snd_seq_active = -1;
+    for (int i = 0; i < SND_MAX_VOICES; i++)
+        if (!(afn_persist_sfx_smp >= 0 && snd_voices[i].smpIdx == afn_persist_sfx_smp)) snd_voices[i].playing = 0;
+    unlock();
+    return;
+#endif
     snd_seq_active = -1;
     for (int i = 0; i < SND_MAX_VOICES; i++) snd_voices[i].playing = 0;
     unlock();
