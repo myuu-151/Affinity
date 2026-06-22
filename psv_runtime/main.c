@@ -1476,18 +1476,37 @@ static void hud_render(void) {
 
     for (int e = 0; e < AFN_HUD_ELEM_COUNT; e++) {
         const AfnHudElem* el = &afn_hud_elems[e];
-        if (!afn_hud_visible[e]) continue;
-        // Mode gating: el->mode 0 = Both, 1 = 3D-only, 2 = 2D-only. In 2D (menu)
-        // mode draw Both + 2D-only; in 3D draw Both + 3D-only.
-        if (afn_current_mode == 1) { if (el->mode == 1) continue; }   // 2D: skip 3D-only
-        else                       { if (el->mode == 2) continue; }   // 3D: skip 2D-only
-#ifdef AFN_HUD_MODE0_MASK
-        unsigned int elemSceneMask = (afn_current_mode == 1) ? el->sceneMask2D : el->sceneMask;
-#else
-        unsigned int elemSceneMask = el->sceneMask;
+        float bx, by;
+#ifdef AFN_HUD_CURSOR_ELEM
+        if (el->trackCursor >= 0) {
+            // Cursor-element (a pointer): render this whole element (its pieces +
+            // keyframe blink) at the OWNING menu's active cursor stop. Gated by
+            // that menu being the active, visible element with stops — so it only
+            // appears as the cursor and moves with it. Its own visibility/scene/
+            // mode gating is bypassed (driven by the menu instead).
+            int m = el->trackCursor;
+            const AfnHudElem* mel = &afn_hud_elems[m];
+            if (afn_active_element != m || !afn_hud_visible[m] || mel->stopCount <= 0) continue;
+            int sidx = afn_cursor_stop; if (sidx < 0) sidx = 0; if (sidx >= mel->stopCount) sidx = mel->stopCount - 1;
+            const AfnHudStop* cst = &afn_hud_stops[mel->stopStart + sidx];
+            bx = mel->screenX + cst->x + mel->curX;
+            by = mel->screenY + cst->y + mel->curY;
+        } else
 #endif
-        if (!(elemSceneMask & (1u << afn_current_scene))) continue;
-        float bx = el->screenX, by = el->screenY;
+        {
+            if (!afn_hud_visible[e]) continue;
+            // Mode gating: el->mode 0 = Both, 1 = 3D-only, 2 = 2D-only. In 2D (menu)
+            // mode draw Both + 2D-only; in 3D draw Both + 3D-only.
+            if (afn_current_mode == 1) { if (el->mode == 1) continue; }   // 2D: skip 3D-only
+            else                       { if (el->mode == 2) continue; }   // 3D: skip 2D-only
+#ifdef AFN_HUD_MODE0_MASK
+            unsigned int elemSceneMask = (afn_current_mode == 1) ? el->sceneMask2D : el->sceneMask;
+#else
+            unsigned int elemSceneMask = el->sceneMask;
+#endif
+            if (!(elemSceneMask & (1u << afn_current_scene))) continue;
+            bx = el->screenX; by = el->screenY;
+        }
         float elScale = 1.0f;                              // anchored distance scale
 #ifdef AFN_HAS_HUD_ANCHOR
         // World-anchored element (ShowHUD fired from a blueprint): origin =
@@ -1648,6 +1667,9 @@ static void hud_render(void) {
             int sidx = afn_cursor_stop; if (sidx < 0) sidx = 0; if (sidx >= el->stopCount) sidx = el->stopCount - 1;
             const AfnHudStop* st = &afn_hud_stops[el->stopStart + sidx];
             float cw = afn_hud_frame_w[el->curTex], ch = afn_hud_frame_h[el->curTex];
+#ifdef AFN_HUD_CURSOR_SIZE
+            if (el->curSize > 0) { cw = ch = (float)el->curSize; }  // authored cursor draw square
+#endif
             hud_quad(s_hudTex[el->curTex], bx + st->x + el->curX, by + st->y + el->curY,
                      bx + st->x + el->curX + cw, by + st->y + el->curY + ch, 0, 0, 1, 1, 0xFFFFFFFFu);
         }

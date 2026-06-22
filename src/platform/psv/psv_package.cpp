@@ -612,7 +612,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
     };
 
     // Per-element ranges.
-    struct E { int x,y,mode; unsigned int sceneMask, sceneMask2D; int pS,pC,tS,tC,sS,sC,curTex,curX,curY; bool startVis; };
+    struct E { int x,y,mode; unsigned int sceneMask, sceneMask2D; int pS,pC,tS,tC,sS,sC,curTex,curX,curY,curSize,trackCursor,curElemRef; bool startVis; };
     std::vector<E> es;
     for (const auto& he : elems) {
         E e; e.x = he.screenX; e.y = he.screenY; e.mode = he.runtimeMode;
@@ -641,9 +641,17 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
         e.sS = (int)stops.size();
         for (const auto& st : he.stops) stops.push_back({ st.localX, st.localY, st.linkedElement });
         e.sC = (int)stops.size() - e.sS;
-        e.curTex = -1; e.curX = he.cursorOffX; e.curY = he.cursorOffY;
-        if (he.cursorAssetIdx >= 0) { emitFrame(he.cursorAssetIdx, he.cursorFrame, 0); e.curTex = frameCount-1; }
+        e.curTex = -1; e.curX = he.cursorOffX; e.curY = he.cursorOffY; e.curSize = he.cursorSize;
+        e.curElemRef = he.cursorElementIdx; e.trackCursor = -1;
+        // An element-cursor suppresses this (menu) element's single-sprite cursor.
+        if (he.cursorAssetIdx >= 0 && he.cursorElementIdx < 0) { emitFrame(he.cursorAssetIdx, he.cursorFrame, 0); e.curTex = frameCount-1; }
         es.push_back(e);
+    }
+    // Resolve cursor-element references: the referenced (pointer) element tracks
+    // the menu element's active cursor stop, rendered there with its own keyframes.
+    for (int mi = 0; mi < (int)es.size(); mi++) {
+        int ref = es[mi].curElemRef;
+        if (ref >= 0 && ref < (int)es.size()) es[ref].trackCursor = mi;
     }
 
     // Frame pointer + size tables.
@@ -660,11 +668,13 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
     // nodes compile against this header.
     f << "#define AFN_HUD_ELEM_COUNT " << es.size() << "\n";
     f << "#define AFN_HUD_MODE0_MASK 1\n";   // AfnHudElem carries sceneMask2D (Mode 0 / 2D scene gate)
-    f << "typedef struct { short screenX,screenY; unsigned char mode; unsigned int sceneMask,sceneMask2D; short pieceStart,pieceCount,textStart,textCount,stopStart,stopCount; short curTex,curX,curY; unsigned char startVis; } AfnHudElem;\n";
+    f << "typedef struct { short screenX,screenY; unsigned char mode; unsigned int sceneMask,sceneMask2D; short pieceStart,pieceCount,textStart,textCount,stopStart,stopCount; short curTex,curX,curY,curSize,trackCursor; unsigned char startVis; } AfnHudElem;\n";
+    f << "#define AFN_HUD_CURSOR_SIZE 1\n";   // AfnHudElem carries curSize (cursor draw square)
+    f << "#define AFN_HUD_CURSOR_ELEM 1\n";   // ...and trackCursor (render this element at menu N's cursor stop)
     f << "static const AfnHudElem afn_hud_elems[" << es.size() << "] = {\n";
     for (auto& e : es)
         f << "  { " << e.x << "," << e.y << "," << e.mode << "," << e.sceneMask << "u," << e.sceneMask2D << "u," << e.pS << "," << e.pC
-          << "," << e.tS << "," << e.tC << "," << e.sS << "," << e.sC << "," << e.curTex << "," << e.curX << "," << e.curY
+          << "," << e.tS << "," << e.tC << "," << e.sS << "," << e.sC << "," << e.curTex << "," << e.curX << "," << e.curY << "," << e.curSize << "," << e.trackCursor
           << "," << (e.startVis?1:0) << " },\n";
     f << "};\n";
     f << "#define AFN_HUD_PIECE_TINT 1\n";   // AfnHudPiece carries black + opacity (per-piece tint)

@@ -636,6 +636,8 @@ struct GBAHudElementExport {
     int cursorAssetIdx;
     int cursorFrame;
     int cursorOffX, cursorOffY;
+    int cursorSize = 16;   // cursor draw square (editor/GBA units); 0 = native frame size
+    int cursorElementIdx = -1;   // use another element as the cursor (its pieces + keyframes); -1 = sprite
     int layerPieces, layerSprites, layerText, layerCursor;
     std::vector<GBAHudKeyframeExport> keyframes;
     bool animLoop = false;

@@ -4448,6 +4448,8 @@ struct HudElement {
     int cursorAssetIdx = -1;
     int cursorFrame = 0;
     int cursorOffX = -8, cursorOffY = 0; // offset from stop position
+    int cursorSize = 16;                 // cursor draw square in editor (GBA) units; 0 = native frame size
+    int cursorElementIdx = -1;           // use another element (its pieces + keyframes) as the cursor; -1 = single sprite
     // Menu text rows
     struct TextRow {
         char label[32] = "";
@@ -7411,7 +7413,7 @@ static bool SaveProject(const std::string& path)
                     st.modifiers[mi].offsetX, st.modifiers[mi].offsetY,
                     st.modifiers[mi].scale, st.modifiers[mi].rotation, st.modifiers[mi].color);
         }
-        fprintf(f, "elemCursor=%d|%d|%d|%d\n", el.cursorAssetIdx, el.cursorFrame, el.cursorOffX, el.cursorOffY);
+        fprintf(f, "elemCursor=%d|%d|%d|%d|%d|%d\n", el.cursorAssetIdx, el.cursorFrame, el.cursorOffX, el.cursorOffY, el.cursorSize, el.cursorElementIdx);
         fprintf(f, "elemTextCount=%d\n", (int)el.textRows.size());
         for (auto& tr : el.textRows)
             fprintf(f, "elemText=%d|%d|%u|%d|%d|%d|%d|%d|%s\n", tr.localX, tr.localY, tr.color, tr.font, tr.sourceSlot, tr.pad, tr.spacing, tr.scale, tr.label);
@@ -9003,7 +9005,9 @@ static bool LoadProject(const std::string& path)
             }
             else if (strncmp(line, "elemCursor=", 11) == 0 && !sHudElements.empty()) {
                 auto& el = sHudElements.back();
-                sscanf(line + 11, "%d|%d|%d|%d", &el.cursorAssetIdx, &el.cursorFrame, &el.cursorOffX, &el.cursorOffY);
+                el.cursorSize = 16;   // default for projects saved before cursor size existed
+                el.cursorElementIdx = -1;
+                sscanf(line + 11, "%d|%d|%d|%d|%d|%d", &el.cursorAssetIdx, &el.cursorFrame, &el.cursorOffX, &el.cursorOffY, &el.cursorSize, &el.cursorElementIdx);
             }
             else if (sscanf(line, "elemTextCount=%d", &ival) == 1 && !sHudElements.empty()) {
                 sHudElements.back().textRows.clear();
@@ -18062,6 +18066,8 @@ void FrameTick(float dt)
                     he.cursorFrame = el.cursorFrame;
                     he.cursorOffX = el.cursorOffX;
                     he.cursorOffY = el.cursorOffY;
+                    he.cursorSize = el.cursorSize;
+                    he.cursorElementIdx = el.cursorElementIdx;
                     for (auto& si : el.spriteItems) {
                         GBAHudPieceExport pe;
                         pe.spriteAssetIdx = si.spriteAssetIdx;
@@ -30805,9 +30811,9 @@ void FrameTick(float dt)
                 // During playback: interpolate between keyframes based on playhead
                 // When stopped: use the manually selected keyframe
                 struct LayerTransform { float ox = 0, oy = 0; float sx = 1, sy = 1; float rot = 0; bool hidden = false; float alpha = 1.0f; };
-                auto getPieceLayerTransform = [&](HudElement::ItemType type, int idx) -> LayerTransform {
+                auto computeLayerTransform = [&](const HudElement& src, HudElement::ItemType type, int idx) -> LayerTransform {
                     LayerTransform t;
-                    for (auto& lay : el.animLayers) {
+                    for (auto& lay : src.animLayers) {
                         bool inLayer = false;
                         for (auto& it : lay.items)
                             if (it.type == type && it.index == idx) { inLayer = true; break; }
@@ -30868,6 +30874,9 @@ void FrameTick(float dt)
                         }
                     }
                     return t;
+                };
+                auto getPieceLayerTransform = [&](HudElement::ItemType type, int idx) -> LayerTransform {
+                    return computeLayerTransform(el, type, idx);
                 };
 
                 // Draw composite pieces (with screen wrapping)
@@ -31031,6 +31040,32 @@ void FrameTick(float dt)
                         ImVec2(tx, ty), tcol, tr.label);
                 }
 
+                // Cursor = another element: preview its pieces (static) at the active stop.
+                if (el.cursorElementIdx >= 0 && el.cursorElementIdx < (int)sHudElements.size()) {
+                    int csi = (selected && el.selectedStop >= 0 && el.selectedStop < (int)el.stops.size()) ? el.selectedStop : 0;
+                    float ax = 0, ay = 0;
+                    if (!el.stops.empty()) { ax = (float)el.stops[csi].localX; ay = (float)el.stops[csi].localY; }
+                    float ox = cx + (el.x + ax + el.cursorOffX) * zoom;
+                    float oy = cy + (el.y + ay + el.cursorOffY) * zoom;
+                    const auto& pe = sHudElements[el.cursorElementIdx];
+                    for (int pci = 0; pci < (int)pe.pieces.size(); pci++) {
+                        const auto& pc = pe.pieces[pci];
+                        if (pc.hidden) continue;
+                        // Animate with the referenced element's keyframes (blink / offset
+                        // / scale / opacity) during timeline playback, same as in-game.
+                        LayerTransform lt = computeLayerTransform(pe, HudElement::It_Piece, pci);
+                        if (lt.hidden) continue;   // keyframe Hide (blink)
+                        float pw = pc.size * lt.sx * zoom, ph = pc.size * lt.sy * zoom;
+                        float ppx = ox + (pc.localX + lt.ox) * zoom, ppy = oy + (pc.localY + lt.oy) * zoom;
+                        int a = std::clamp((int)((pc.opacity * 255 / 16) * lt.alpha), 0, 255);
+                        if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sTmSpriteTextures.size() && sTmSpriteTextures[pc.spriteAssetIdx]) {
+                            ImU32 tint = pc.blackTint ? IM_COL32(0, 0, 0, a) : IM_COL32(255, 255, 255, a);
+                            dl->AddImage((ImTextureID)(intptr_t)sTmSpriteTextures[pc.spriteAssetIdx],
+                                ImVec2(ppx, ppy), ImVec2(ppx + pw, ppy + ph), ImVec2(0, 0), ImVec2(1, 1), tint);
+                        } else
+                            dl->AddRectFilled(ImVec2(ppx, ppy), ImVec2(ppx + pw, ppy + ph), IM_COL32(120, 120, 180, 140));
+                    }
+                } else
                 // Draw cursor preview at selected stop (clicks between stops to preview)
                 if (el.cursorAssetIdx >= 0 && !el.stops.empty()) {
                     int csi = (selected && el.selectedStop >= 0 && el.selectedStop < (int)el.stops.size())
@@ -31038,7 +31073,7 @@ void FrameTick(float dt)
                     auto& cst = el.stops[csi];
                     float curX = cx + (el.x + cst.localX + el.cursorOffX) * zoom;
                     float curY = cy + (el.y + cst.localY + el.cursorOffY) * zoom;
-                    float csz = 8 * zoom;
+                    float csz = (el.cursorSize > 0 ? el.cursorSize : 8) * zoom;
                     if (el.cursorAssetIdx < (int)sTmSpriteTextures.size() && sTmSpriteTextures[el.cursorAssetIdx])
                         dl->AddImage((ImTextureID)(intptr_t)sTmSpriteTextures[el.cursorAssetIdx],
                             ImVec2(curX, curY), ImVec2(curX + csz, curY + csz));
@@ -31050,7 +31085,7 @@ void FrameTick(float dt)
                     // No stops yet — show cursor at element origin
                     float curX = cx + (el.x + el.cursorOffX) * zoom;
                     float curY = cy + (el.y + el.cursorOffY) * zoom;
-                    float csz = 8 * zoom;
+                    float csz = (el.cursorSize > 0 ? el.cursorSize : 8) * zoom;
                     if (el.cursorAssetIdx < (int)sTmSpriteTextures.size() && sTmSpriteTextures[el.cursorAssetIdx])
                         dl->AddImage((ImTextureID)(intptr_t)sTmSpriteTextures[el.cursorAssetIdx],
                             ImVec2(curX, curY), ImVec2(curX + csz, curY + csz));
@@ -31515,7 +31550,7 @@ void FrameTick(float dt)
                                     st.modifiers[mi].scale, st.modifiers[mi].rotation, st.modifiers[mi].color);
                         }
                         // Cursor
-                        fprintf(cf, "elemCursor=%d|%d|%d|%d\n", el.cursorAssetIdx, el.cursorFrame, el.cursorOffX, el.cursorOffY);
+                        fprintf(cf, "elemCursor=%d|%d|%d|%d|%d|%d\n", el.cursorAssetIdx, el.cursorFrame, el.cursorOffX, el.cursorOffY, el.cursorSize, el.cursorElementIdx);
                         // Text rows
                         fprintf(cf, "elemTextCount=%d\n", (int)el.textRows.size());
                         for (auto& tr : el.textRows)
@@ -31684,7 +31719,9 @@ void FrameTick(float dt)
                                     nel.stops.push_back(st);
                             }
                             else if (strncmp(line, "elemCursor=", 11) == 0) {
-                                sscanf(line + 11, "%d|%d|%d|%d", &nel.cursorAssetIdx, &nel.cursorFrame, &nel.cursorOffX, &nel.cursorOffY);
+                                nel.cursorSize = 16;
+                                nel.cursorElementIdx = -1;
+                                sscanf(line + 11, "%d|%d|%d|%d|%d|%d", &nel.cursorAssetIdx, &nel.cursorFrame, &nel.cursorOffX, &nel.cursorOffY, &nel.cursorSize, &nel.cursorElementIdx);
                                 nel.cursorAssetIdx = remapAsset(nel.cursorAssetIdx);
                             }
                             else if (sscanf(line, "elemTextCount=%d", &ival2) == 1) {
@@ -32187,25 +32224,60 @@ void FrameTick(float dt)
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add cursor stop");
 
                 if (!el.collapseCursor) {
-                    // Cursor sprite
-                    const char* curPrev = (el.cursorAssetIdx >= 0 && el.cursorAssetIdx < (int)sSpriteAssets.size())
-                        ? sSpriteAssets[el.cursorAssetIdx].name.c_str() : "(none)";
-                    if (ImGui::BeginCombo("Asset##cur", curPrev)) {
-                        if (ImGui::Selectable("(none)##cur", el.cursorAssetIdx < 0)) {
-                            el.cursorAssetIdx = -1; sProjectDirty = true;
-                        }
-                        for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++) {
-                            char il[64];
-                            snprintf(il, sizeof(il), "%d: %s", ai, sSpriteAssets[ai].name.c_str());
-                            if (ImGui::Selectable(il, ai == el.cursorAssetIdx)) {
-                                el.cursorAssetIdx = ai; sProjectDirty = true;
+                    // Cursor source: another element (its pieces + keyframe blink) or a single sprite.
+                    {
+                        const char* cePrev = (el.cursorElementIdx >= 0 && el.cursorElementIdx < (int)sHudElements.size())
+                            ? sHudElements[el.cursorElementIdx].name : "(single sprite)";
+                        if (ImGui::BeginCombo("Use Element##cur", cePrev)) {
+                            if (ImGui::Selectable("(single sprite)##cure", el.cursorElementIdx < 0)) {
+                                el.cursorElementIdx = -1; sProjectDirty = true;
                             }
+                            for (int ei = 0; ei < (int)sHudElements.size(); ei++) {
+                                if (ei == sHudSelectedIdx) continue;   // can't reference itself
+                                char il[80]; snprintf(il, sizeof(il), "%d: %s", ei, sHudElements[ei].name);
+                                if (ImGui::Selectable(il, ei == el.cursorElementIdx)) {
+                                    el.cursorElementIdx = ei; sProjectDirty = true;
+                                }
+                            }
+                            ImGui::EndCombo();
                         }
-                        ImGui::EndCombo();
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Use another HUD element as the cursor pointer — its pieces + keyframe blink, drawn at the active stop. Keep that element hidden (Visible off); it only appears as the cursor.");
                     }
-                    if (el.cursorAssetIdx >= 0 && el.cursorAssetIdx < (int)sSpriteAssets.size()) {
-                        int maxFr = std::max(0, (int)sSpriteAssets[el.cursorAssetIdx].frames.size() - 1);
-                        if (ImGui::SliderInt("Frame##cur", &el.cursorFrame, 0, maxFr)) sProjectDirty = true;
+                    if (el.cursorElementIdx < 0) {
+                        // Single-sprite cursor
+                        const char* curPrev = (el.cursorAssetIdx >= 0 && el.cursorAssetIdx < (int)sSpriteAssets.size())
+                            ? sSpriteAssets[el.cursorAssetIdx].name.c_str() : "(none)";
+                        if (ImGui::BeginCombo("Asset##cur", curPrev)) {
+                            if (ImGui::Selectable("(none)##cur", el.cursorAssetIdx < 0)) {
+                                el.cursorAssetIdx = -1; sProjectDirty = true;
+                            }
+                            for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++) {
+                                char il[64];
+                                snprintf(il, sizeof(il), "%d: %s", ai, sSpriteAssets[ai].name.c_str());
+                                if (ImGui::Selectable(il, ai == el.cursorAssetIdx)) {
+                                    el.cursorAssetIdx = ai; sProjectDirty = true;
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+                        if (el.cursorAssetIdx >= 0 && el.cursorAssetIdx < (int)sSpriteAssets.size()) {
+                            int maxFr = std::max(0, (int)sSpriteAssets[el.cursorAssetIdx].frames.size() - 1);
+                            if (ImGui::SliderInt("Frame##cur", &el.cursorFrame, 0, maxFr)) sProjectDirty = true;
+                        }
+                        {
+                            static const int kCursorSizes[] = { 16, 32, 64, 128, 256, 512 };
+                            char curSzPrev[16]; snprintf(curSzPrev, sizeof(curSzPrev), "%d px", el.cursorSize);
+                            if (ImGui::BeginCombo("Size##cur", curSzPrev)) {
+                                for (int si = 0; si < 6; si++) {
+                                    char sl[16]; snprintf(sl, sizeof(sl), "%d", kCursorSizes[si]);
+                                    if (ImGui::Selectable(sl, el.cursorSize == kCursorSizes[si])) {
+                                        el.cursorSize = kCursorSizes[si]; sProjectDirty = true;
+                                    }
+                                }
+                                ImGui::EndCombo();
+                            }
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cursor draw size (square, editor/GBA units). Shown 1:1 in the canvas and exported to the runtime.");
+                        }
                     }
                     if (ImGui::DragInt("Offset X##cur", &el.cursorOffX, 1)) sProjectDirty = true;
                     if (ImGui::DragInt("Offset Y##cur", &el.cursorOffY, 1)) sProjectDirty = true;
