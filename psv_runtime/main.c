@@ -28,6 +28,8 @@
 #define DEG2RAD (3.14159265f / 180.0f)
 
 static GLuint s_meshTex[256];   // one GL texture per mesh (0 = none)
+#define AFN_MESH_MAX_MATS 8
+static GLuint s_meshSlotTex[256][AFN_MESH_MAX_MATS];  // per-material-slot textures (multi-tex OBJ)
 
 // ---------------------------------------------------------------------------
 // Rigs: CPU rigid skinning (ported from psp_runtime/rig.c) + vitaGL draw.
@@ -332,7 +334,23 @@ static void upload_textures(void)
 {
     for (int mi = 0; mi < afn_mesh_count && mi < 256; mi++) {
         s_meshTex[mi] = 0;
+        for (int g = 0; g < AFN_MESH_MAX_MATS; g++) s_meshSlotTex[mi][g] = 0;
         const AfnMesh* m = &afn_meshes[mi];
+        // Multi-material (OBJ usemtl): one GL texture per slot.
+        if (m->mats > 0) {
+            for (int g = 0; g < m->mats && g < AFN_MESH_MAX_MATS; g++) {
+                if (!m->slotTex || !m->slotTex[g] || m->slotTexW[g] <= 0 || m->slotTexH[g] <= 0) continue;
+                glGenTextures(1, &s_meshSlotTex[mi][g]);
+                glBindTexture(GL_TEXTURE_2D, s_meshSlotTex[mi][g]);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m->slotTexW[g], m->slotTexH[g], 0,
+                             GL_RGBA, GL_UNSIGNED_BYTE, m->slotTex[g]);
+            }
+            continue;
+        }
         if (m->textured && m->texPixels && m->texW > 0 && m->texH > 0) {
             glGenTextures(1, &s_meshTex[mi]);
             glBindTexture(GL_TEXTURE_2D, s_meshTex[mi]);
@@ -359,12 +377,6 @@ static void draw_mesh(int mi)
     // exporter's cullMode (back/front/none) is intentionally ignored here.
     glDisable(GL_CULL_FACE);
 
-    if (m->textured && s_meshTex[mi]) {
-        glEnable(GL_TEXTURE_2D);
-        glBindTexture(GL_TEXTURE_2D, s_meshTex[mi]);
-    } else {
-        glDisable(GL_TEXTURE_2D);
-    }
     if (m->texHasAlpha) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); }
     else glDisable(GL_BLEND);
 
@@ -375,7 +387,25 @@ static void draw_mesh(int mi)
     glTexCoordPointer(2, GL_FLOAT,        sizeof(AfnVertex), &v->u);
     glColorPointer  (4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &v->color);
     glVertexPointer (3, GL_FLOAT,        sizeof(AfnVertex), &v->x);
-    glDrawElements(GL_TRIANGLES, m->indexCount, GL_UNSIGNED_SHORT, m->indices);
+
+    if (m->mats > 0) {
+        // Multi-material (OBJ usemtl): bind + draw each slot's triangle group.
+        for (int g = 0; g < m->mats && g < AFN_MESH_MAX_MATS; g++) {
+            int ic = m->slotIdxCount ? m->slotIdxCount[g] : 0;
+            if (ic <= 0 || !m->slotIdx || !m->slotIdx[g]) continue;
+            if (s_meshSlotTex[mi][g]) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, s_meshSlotTex[mi][g]); }
+            else glDisable(GL_TEXTURE_2D);
+            glDrawElements(GL_TRIANGLES, ic, GL_UNSIGNED_SHORT, m->slotIdx[g]);
+        }
+    } else {
+        if (m->textured && s_meshTex[mi]) {
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, s_meshTex[mi]);
+        } else {
+            glDisable(GL_TEXTURE_2D);
+        }
+        glDrawElements(GL_TRIANGLES, m->indexCount, GL_UNSIGNED_SHORT, m->indices);
+    }
     glDisableClientState(GL_TEXTURE_COORD_ARRAY);
     glDisableClientState(GL_COLOR_ARRAY);
     glDisableClientState(GL_VERTEX_ARRAY);

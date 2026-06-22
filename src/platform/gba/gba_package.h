@@ -197,6 +197,22 @@ struct GBAMeshExport
     int clampAbove = 0;           // 1=clamp vertices to never project above horizon
     int nearClip = 0;             // 1=view-space near-plane clipping (fixes slope walling)
     int faceCull = 0;             // 1=skip faces with vertices above camera (hard cutoff)
+
+    // Multi-material (OBJ usemtl) — PSV only. When `materials` is non-empty the
+    // PSV exporter draws this mesh group-per-slot (one texture bound per slot),
+    // selecting each triangle's slot via triMaterial/quadMaterial. Other targets
+    // ignore these and use the single texture above (slot 0). Empty = single-tex.
+    struct MatSlot {
+        int textured = 0;
+        int texW = 0, texH = 0;
+        std::vector<uint8_t> texPixels;   // indexed pixels (texW*texH)
+        uint16_t texPalette[256] = {};    // RGB15
+        int texture256 = 0;
+        int wrap = 0;                     // 0=Clip 1=Extend 2=Mirror
+    };
+    std::vector<MatSlot> materials;       // slots 0..N (includes slot 0); empty = single-texture
+    std::vector<uint8_t> triMaterial;     // slot per triangle (parallel to indices/3)
+    std::vector<uint8_t> quadMaterial;    // slot per quad (parallel to quadIndices/4)
 };
 
 // ---- Visual Script Export ----

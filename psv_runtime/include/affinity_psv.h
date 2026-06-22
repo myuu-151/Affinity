@@ -58,6 +58,14 @@ typedef struct {
     int                   cullMode;     // 0 back, 1 front, 2 none
     int                   lit;          // 1 = lit, 0 = unlit
     int                   visible;      // 0 = collision-only
+    // Multi-material (OBJ usemtl): mats>0 => draw group-per-slot (each slot binds
+    // its own texture), ignoring the single texture fields above. 0 => single-tex.
+    int                          mats;
+    const unsigned short* const* slotIdx;      // [mats] indices per slot
+    const int*                   slotIdxCount; // [mats]
+    const unsigned int*   const* slotTex;      // [mats] RGBA8888 per slot (0 = flat)
+    const int*                   slotTexW;      // [mats]
+    const int*                   slotTexH;      // [mats]
 } AfnMesh;
 
 // A placed instance of a mesh in the world.

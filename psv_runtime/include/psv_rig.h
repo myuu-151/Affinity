@@ -20175,7 +20175,7 @@ static const AfnRig afn_rigs[AFN_RIG_COUNT] = {
 #define AFN_PLAYER_SPRITE_IDX 0
 #define AFN_NPC_COUNT 1
 static const float afn_npc_inst[1][8] = {
-  { 145.348f,2.62056f,156.703f,0.0f,17.08f,0,1,7 },
+  { 145.348f,2.62056f,156.703f,0.0f,17.08f,0,1,3 },
 };
 static const float afn_npc_col[1][6] = {
   { 1.69519f,1.98128f,2.2251f,0.0f,1.98128f,-0.172935f },

@@ -4393,6 +4393,7 @@ struct HudPiece {
     std::vector<int> cycleX;       // per-frame-slot X offset (added to localX when shown)
     std::vector<int> cycleY;       // per-frame-slot Y offset (added to localY when shown)
     int cycleEditSlot = -1;        // editor-only: frame slot being previewed/positioned (-1 = none)
+    std::string name;              // editor-only label for this piece (blank = use asset name)
     // Crossfade: on the change to xfToScene, this piece dissolves into the target
     // piece (xfToElem -> piece xfToPiece) in that scene, instead of fading to
     // black — e.g. a bg that recolors between menus. From = this piece.
@@ -6457,6 +6458,8 @@ static int ReimportSceneOBJ(const std::string& objPath,
 }
 
 // ---- OBJ mesh loader ----
+static bool LoadMeshTextureSlot(MeshAsset& mesh, int slot, const std::string& path);
+
 static bool LoadOBJ(const std::string& path, MeshAsset& out)
 {
     FILE* f = nullptr;
@@ -6494,9 +6497,77 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
     std::vector<uint32_t> idxs;
     std::vector<uint32_t> quadIdxs;
 
+    // Multi-material: usemtl groups become texture slots (first-seen order, capped;
+    // overflow folds into slot 0). mtllib -> .mtl supplies each material's map_Kd.
+    const int kMaxMeshMats = 8;
+    std::vector<std::string> matNames;            // slot -> material name
+    std::map<std::string,int> matSlot;            // name -> slot
+    std::map<std::string,std::string> mtlTex;     // material name -> resolved texture path
+    std::vector<uint8_t> triMat, quadMat;         // slot per tri / per quad (parallel to idxs/3, quadIdxs/4)
+    int curSlot = 0;
+    std::string objDir;
+    { size_t s = path.find_last_of("/\\"); if (s != std::string::npos) objDir = path.substr(0, s + 1); }
+    auto resolveRel = [&](const std::string& p) -> std::string {
+        if (p.empty()) return p;
+        bool absolute = (p[0] == '/' || p[0] == '\\' || (p.size() > 1 && p[1] == ':'));
+        return absolute ? p : objDir + p;
+    };
+    // Parse a .mtl file: newmtl <name> + map_Kd <path> -> mtlTex[name] = resolved path.
+    auto parseMtl = [&](const std::string& mtlRel) {
+        std::string mtlPath = resolveRel(mtlRel);
+        FILE* mf = nullptr; std::string mtmp;
+        auto mp = sPackedAssets.find(mtlPath);
+        if (mp == sPackedAssets.end()) mp = sPackedAssets.find(mtlRel);
+        if (mp != sPackedAssets.end() && !mp->second.empty()) {
+            namespace fs = std::filesystem;
+            fs::path tp = fs::temp_directory_path() / ("affn_packed_mtl_" + std::to_string((uintptr_t)mp->second.data()) + ".mtl");
+            mtmp = tp.string();
+            FILE* tf = fopen(mtmp.c_str(), "wb");
+            if (tf) { fwrite(mp->second.data(), 1, mp->second.size(), tf); fclose(tf); mf = fopen(mtmp.c_str(), "r"); }
+        } else {
+            mf = fopen(ResolveAssetPath(mtlPath).c_str(), "r");
+        }
+        if (!mf) return;
+        char ml[512]; std::string cur;
+        while (fgets(ml, sizeof(ml), mf)) {
+            char tok[256] = {0};
+            if (sscanf(ml, "newmtl %255s", tok) == 1) { cur = tok; }
+            else if (strncmp(ml, "map_Kd", 6) == 0 && !cur.empty()) {
+                // last whitespace token = the file (skips -o/-s options)
+                std::string s = ml + 6, last;
+                size_t i = 0;
+                while (i < s.size()) {
+                    while (i < s.size() && (s[i]==' '||s[i]=='\t'||s[i]=='\r'||s[i]=='\n')) i++;
+                    size_t j = i; while (j < s.size() && s[j]!=' ' && s[j]!='\t' && s[j]!='\r' && s[j]!='\n') j++;
+                    if (j > i) last = s.substr(i, j - i);
+                    i = j;
+                }
+                if (!last.empty()) mtlTex[cur] = resolveRel(last);
+            }
+        }
+        fclose(mf);
+        if (!mtmp.empty()) std::remove(mtmp.c_str());
+    };
+
     char line[512];
     while (fgets(line, sizeof(line), f))
     {
+        if (strncmp(line, "mtllib", 6) == 0 && (line[6]==' '||line[6]=='\t')) {
+            char mn[256] = {0};
+            if (sscanf(line + 6, "%255s", mn) == 1) parseMtl(mn);
+            continue;
+        }
+        if (strncmp(line, "usemtl", 6) == 0 && (line[6]==' '||line[6]=='\t')) {
+            char mn[256] = {0};
+            if (sscanf(line + 6, "%255s", mn) == 1) {
+                std::string nm = mn;
+                auto it = matSlot.find(nm);
+                if (it != matSlot.end()) curSlot = it->second;
+                else if ((int)matNames.size() < kMaxMeshMats) { curSlot = (int)matNames.size(); matSlot[nm] = curSlot; matNames.push_back(nm); }
+                else curSlot = 0;   // over the slot cap -> fold into slot 0
+            }
+            continue;
+        }
         if (line[0] == 'v' && line[1] == ' ')
         {
             // OBJ 2.0 extension: an optional r g b follows the position
@@ -6570,19 +6641,22 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
                 mv.objPosIdx = pi;
                 verts.push_back(mv);
             }
-            // Respect OBJ topology: quads stay quads, tris stay tris
+            // Respect OBJ topology: quads stay quads, tris stay tris.
+            // Tag each emitted tri/quad with the active usemtl slot.
             if (count == 4)
             {
                 quadIdxs.push_back(faceBaseIdx);
                 quadIdxs.push_back(faceBaseIdx + 1);
                 quadIdxs.push_back(faceBaseIdx + 2);
                 quadIdxs.push_back(faceBaseIdx + 3);
+                quadMat.push_back((uint8_t)curSlot);
             }
             else if (count == 3)
             {
                 idxs.push_back(faceBaseIdx);
                 idxs.push_back(faceBaseIdx + 1);
                 idxs.push_back(faceBaseIdx + 2);
+                triMat.push_back((uint8_t)curSlot);
             }
             else
             {
@@ -6592,6 +6666,7 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
                     idxs.push_back(faceBaseIdx);
                     idxs.push_back(faceBaseIdx + t);
                     idxs.push_back(faceBaseIdx + t + 1);
+                    triMat.push_back((uint8_t)curSlot);
                 }
             }
         }
@@ -6605,6 +6680,25 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
     out.indices = std::move(idxs);
     out.quadIndices = std::move(quadIdxs);
     out.sourcePath = path;
+
+    // Build texture slots from usemtl. >1 material => real slots + per-face index;
+    // a single material just names slot 0 (stays single-texture, triMaterial empty).
+    out.extraMaterials.clear();
+    out.triMaterial.clear();
+    out.quadMaterial.clear();
+    if (matNames.size() > 1) {
+        out.materialName = matNames[0];
+        for (int s = 1; s < (int)matNames.size(); s++) { RigMaterial rm; rm.name = matNames[s]; out.extraMaterials.push_back(rm); }
+        out.triMaterial = std::move(triMat);
+        out.quadMaterial = std::move(quadMat);
+    } else if (!matNames.empty()) {
+        out.materialName = matNames[0];
+    }
+    // Auto-load each slot's map_Kd texture (resolved relative to the OBJ/.mtl).
+    for (int s = 0; s < out.matCount(); s++) {
+        auto it = mtlTex.find(out.matName(s));
+        if (it != mtlTex.end() && !it->second.empty()) LoadMeshTextureSlot(out, s, it->second);
+    }
 
     // Extract filename as name
     size_t slash = path.find_last_of("/\\");
@@ -6631,8 +6725,11 @@ static bool LoadOBJ(const std::string& path, MeshAsset& out)
 }
 
 // Load and quantize a texture PNG for a mesh (max 64x64, 16 colors)
-static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh)
+// Load + quantize a PNG into one material slot of a static mesh (slot 0 = inline
+// fields, slots 1..N = extraMaterials). Mirrors the rig per-slot loader.
+static bool LoadMeshTextureSlot(MeshAsset& mesh, int slot, const std::string& path)
 {
+    if (slot < 0 || slot >= mesh.matCount()) return false;
     int w, h, ch;
     unsigned char* img = nullptr;
     auto pit = sPackedAssets.find(path);
@@ -6669,7 +6766,7 @@ static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh)
     // padding around opaque content (faces near the texture edge sampled
     // padding and rendered transparent). Keep this off by default.
     bool useAlpha = mesh.textureUseAlpha;
-    int maxColors = mesh.texture256 ? 256 : 16;     // 16-colour (GL_RGB16) or 256 (GL_RGB256)
+    int maxColors = (slot == 0 && !mesh.texture256) ? 16 : 256;  // slot 0 honors texture256; extra slots 256
     int palStart = useAlpha ? 1 : 0;
     int palMax   = useAlpha ? (maxColors - 1) : maxColors;
 
@@ -6714,28 +6811,39 @@ static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh)
         indexed[i] = (uint8_t)bestIdx;
     }
 
-    mesh.texturePath = path;
-    mesh.texW = tw;
-    mesh.texH = th;
-    mesh.texturePixels = std::move(indexed);
-    memcpy(mesh.texturePalette, pal, sizeof(pal));
-    mesh.textured = true;
+    // Target the chosen slot (slot 0 = inline fields, slots 1+ = extraMaterials[slot-1]).
+    bool is0 = (slot == 0);
+    RigMaterial* em = is0 ? nullptr : &mesh.extraMaterials[slot - 1];
+    std::string&          sPath = is0 ? mesh.texturePath    : em->texturePath;
+    int&                  sW    = is0 ? mesh.texW           : em->texW;
+    int&                  sH    = is0 ? mesh.texH           : em->texH;
+    std::vector<uint8_t>& sPix  = is0 ? mesh.texturePixels  : em->texturePixels;
+    uint32_t*             sPal  = is0 ? mesh.texturePalette : em->texturePalette;
+    bool&                 sTex  = is0 ? mesh.textured       : em->textured;
+    unsigned int&         sGl   = is0 ? mesh.glTexID        : em->glTexID;
+    sPath = path; sW = tw; sH = th; sPix = std::move(indexed);
+    memcpy(sPal, pal, sizeof(pal)); sTex = true;
+    if (!is0) em->textureManual = true;
 
     // Upload GL texture for editor preview (reconstruct RGBA from indexed + palette)
     std::vector<uint32_t> rgba(tw * th);
-    for (int i = 0; i < tw * th; i++)
-        rgba[i] = mesh.texturePalette[mesh.texturePixels[i]];
-    if (mesh.glTexID) glDeleteTextures(1, &mesh.glTexID);
-    glGenTextures(1, &mesh.glTexID);
-    glBindTexture(GL_TEXTURE_2D, mesh.glTexID);
+    for (int i = 0; i < tw * th; i++) rgba[i] = sPal[sPix[i]];
+    if (sGl) glDeleteTextures(1, &sGl);
+    glGenTextures(1, &sGl);
+    glBindTexture(GL_TEXTURE_2D, sGl);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
     glBindTexture(GL_TEXTURE_2D, 0);
-
     return true;
+}
+
+// Back-compat wrapper: load a texture into the mesh's inline slot 0.
+static bool LoadMeshTexture(const std::string& path, MeshAsset& mesh)
+{
+    return LoadMeshTextureSlot(mesh, 0, path);
 }
 
 // Upload one quantized 16-colour texture as a GL texture (3D-tab preview),
@@ -7295,6 +7403,13 @@ static bool SaveProject(const std::string& path)
     {
         const MeshAsset& ma = sMeshAssets[mi];
         fprintf(f, "mesh=%s|%s|%d|%d|%d|%d|%d|%d|%d|%s|%d|%.1f|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", ma.name.c_str(), ma.sourcePath.c_str(), (int)ma.cullMode, (int)ma.exportMode, ma.lit ? 1 : 0, ma.halfRes ? 1 : 0, ma.textured ? 1 : 0, ma.wireframe ? 1 : 0, ma.grayscale ? 1 : 0, ma.texturePath.empty() ? "(none)" : ma.texturePath.c_str(), ma.useQuads ? 1 : 0, ma.drawDistance, ma.collision ? 1 : 0, ma.drawPriority, ma.visible ? 1 : 0, ma.perspCorrect ? 1 : 0, ma.subdivide, ma.clampAbove ? 1 : 0, ma.nearClip ? 1 : 0, ma.faceCull ? 1 : 0, ma.texInIwram ? 1 : 0, ma.textureUseAlpha ? 1 : 0, ma.texFiltered ? 1 : 0, ma.removeDoubles ? 1 : 0, ma.texture256 ? 1 : 0);
+        // Manual per-slot texture overrides (extraMaterials). usemtl/.mtl auto-loads
+        // on re-import, so only user-replaced slot textures need persisting.
+        for (int s = 1; s < ma.matCount(); s++) {
+            const RigMaterial& em = ma.extraMaterials[s - 1];
+            if (em.textureManual && !em.texturePath.empty())
+                fprintf(f, "meshMat=%d|%s\n", s, em.texturePath.c_str());
+        }
     }
     fprintf(f, "\n");
 
@@ -7421,6 +7536,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "elemPieceCount=%d\n", (int)el.pieces.size());
         for (auto& pc : el.pieces) {
             fprintf(f, "elemPiece=%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity, pc.hidden ? 1 : 0, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd, pc.crossfade ? 1 : 0);
+            if (!pc.name.empty()) fprintf(f, "elemPieceName=%s\n", pc.name.c_str());
             if (pc.cycleSlot >= 0) { fprintf(f, "elemPieceCycle=%d", pc.cycleSlot); for (size_t i = 0; i < pc.cycleAssets.size(); i++) { int x = i < pc.cycleX.size() ? pc.cycleX[i] : 0; int y = i < pc.cycleY.size() ? pc.cycleY[i] : 0; fprintf(f, "|%d,%d,%d", pc.cycleAssets[i], x, y); } fprintf(f, "\n"); }
             if (pc.crossfade) fprintf(f, "elemPieceXfade=%d|%d|%d\n", pc.xfToScene, pc.xfToElem, pc.xfToPiece);
         }
@@ -8614,6 +8730,13 @@ static bool LoadProject(const std::string& path)
         }
         else if (strcmp(section, "MeshAssets") == 0)
         {
+            // Manual per-slot texture override (mesh was pushed + re-imported above).
+            { int mtSlot = -1; char mtPath[4096] = {};
+              if (sscanf(line, "meshMat=%d|%4095[^\n]", &mtSlot, mtPath) == 2 && !sMeshAssets.empty() && mtPath[0]) {
+                  MeshAsset& lm = sMeshAssets.back();
+                  if (mtSlot > 0 && mtSlot < lm.matCount()) { LoadMeshTextureSlot(lm, mtSlot, std::string(mtPath)); lm.extraMaterials[mtSlot - 1].textureManual = true; }
+                  continue;
+              } }
             char mname[256], mpath[512], mtexpath[512] = {};
             int mcull = 0, mexport = 0, mlit = 1, mhalfres = 0, mtextured = 0, mwireframe = 0, mgrayscale = 0, musequads = 1, mcollision = 1, mdrawpri = 0, mvisible = 1, mperspcorr = 0, msubdiv = 0, mclampabove = 0, mnearclip = 0, mfacecull = 0, mtexiwram = 0, mtexalpha = 0, mtexfiltered = 0, mremovedoubles = 0, mtex256 = 0;
             float mdrawdist = 0.0f;
@@ -9001,6 +9124,11 @@ static bool LoadProject(const std::string& path)
                     &pc.spriteAssetIdx, &pc.frame, &pc.localX, &pc.localY, &pc.size, &bt, &opa, &hid,
                     &pc.barSource, &pc.barAxis, &pc.barStart, &pc.barEnd, &xf);
                 if (n >= 5) { pc.blackTint = (bt != 0); pc.opacity = std::clamp(opa, 0, 16); pc.hidden = (hid != 0); pc.crossfade = (xf != 0); sHudElements.back().pieces.push_back(pc); }
+            }
+            else if (strncmp(line, "elemPieceName=", 14) == 0 && !sHudElements.empty() && !sHudElements.back().pieces.empty()) {
+                std::string nm = line + 14;
+                while (!nm.empty() && (nm.back() == '\n' || nm.back() == '\r')) nm.pop_back();
+                sHudElements.back().pieces.back().name = nm;
             }
             else if (strncmp(line, "elemPieceCycle=", 15) == 0 && !sHudElements.empty() && !sHudElements.back().pieces.empty()) {
                 HudPiece& pc = sHudElements.back().pieces.back();
@@ -12195,6 +12323,29 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 }
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("Export this texture as 256-colour (GL_RGB256, 8bpp) instead of 16-colour (GL_RGB16, 4bpp).\nBetter gradients/detail; 2x the VRAM.");
+            }
+        }
+        // Multi-material slots (from the OBJ's usemtl groups). Each slot binds its
+        // own texture on PSV, drawn as a separate group. (PSV target.)
+        if (ma.matCount() > 1) {
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Texture Slots (%d) — from usemtl", ma.matCount());
+            for (int s = 0; s < ma.matCount(); s++) {
+                ImGui::PushID(s);
+                const std::string& mn = ma.matName(s);
+                ImGui::Text("[%d] %s", s, mn.empty() ? "(unnamed)" : mn.c_str());
+                if (ma.matTexW(s) > 0) { ImGui::SameLine(); ImGui::TextDisabled("%dx%d", ma.matTexW(s), ma.matTexH(s)); }
+                if (ImGui::SmallButton("Import...##slotimp")) {
+                    std::string tp = OpenFileDialog("PNG Files\0*.png\0All Files\0*.*\0", "png");
+                    if (!tp.empty()) { LoadMeshTextureSlot(ma, s, tp); sProjectDirty = true; }
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Clear##slotclr")) {
+                    if (s == 0) { ma.textured = false; ma.texturePixels.clear(); ma.texW = ma.texH = 0; ma.texturePath.clear(); }
+                    else { auto& em = ma.extraMaterials[s - 1]; em.textured = false; em.texturePixels.clear(); em.texW = em.texH = 0; em.texturePath.clear(); }
+                    sProjectDirty = true;
+                }
+                ImGui::PopID();
             }
         }
     }
@@ -17456,6 +17607,37 @@ void FrameTick(float dt)
                         int g = ((c >> 8) & 0xFF) >> 3;
                         int b = ((c >> 16) & 0xFF) >> 3;
                         me.texPalette[pi] = (uint16_t)(r | (g << 5) | (b << 10));
+                    }
+                    // Multi-material (PSV): build per-slot textures + a per-triangle
+                    // slot index. Subdivide changes face counts, so skip it there
+                    // (the mesh falls back to its single slot-0 texture).
+                    if (ma.matCount() > 1 && !(ma.subdivide >= 2 && ma.subdivide <= 4))
+                    {
+                        me.triMaterial = ma.triMaterial;
+                        if (ma.useQuads) {
+                            me.quadMaterial = ma.quadMaterial;
+                        } else {
+                            // quads were fan-triangulated into me.indices as 2 tris each
+                            for (size_t q = 0; q < ma.quadMaterial.size(); q++) {
+                                me.triMaterial.push_back(ma.quadMaterial[q]);
+                                me.triMaterial.push_back(ma.quadMaterial[q]);
+                            }
+                        }
+                        for (int s = 0; s < ma.matCount(); s++) {
+                            GBAMeshExport::MatSlot ms;
+                            ms.textured = ma.matTextured(s) ? 1 : 0;
+                            ms.texW = ma.matTexW(s); ms.texH = ma.matTexH(s);
+                            ms.texPixels = ma.matPixels(s);
+                            ms.texture256 = (s == 0) ? (ma.texture256 ? 1 : 0) : 1;
+                            ms.wrap = ma.matWrap(s);
+                            const uint32_t* mp = ma.matPalette(s);
+                            for (int pi = 0; pi < 256; pi++) {
+                                uint32_t c = mp[pi];
+                                int r = (c & 0xFF) >> 3, g = ((c >> 8) & 0xFF) >> 3, b = ((c >> 16) & 0xFF) >> 3;
+                                ms.texPalette[pi] = (uint16_t)(r | (g << 5) | (b << 10));
+                            }
+                            me.materials.push_back(std::move(ms));
+                        }
                     }
                     // Subdivide faces if requested
                     if (ma.subdivide >= 2 && ma.subdivide <= 4)
@@ -31636,6 +31818,7 @@ void FrameTick(float dt)
                         fprintf(cf, "elemPieceCount=%d\n", (int)el.pieces.size());
                         for (auto& pc : el.pieces) {
                             fprintf(cf, "elemPiece=%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity, pc.hidden ? 1 : 0, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd, pc.crossfade ? 1 : 0);
+                            if (!pc.name.empty()) fprintf(cf, "elemPieceName=%s\n", pc.name.c_str());
                             if (pc.cycleSlot >= 0) { fprintf(cf, "elemPieceCycle=%d", pc.cycleSlot); for (size_t i = 0; i < pc.cycleAssets.size(); i++) { int x = i < pc.cycleX.size() ? pc.cycleX[i] : 0; int y = i < pc.cycleY.size() ? pc.cycleY[i] : 0; fprintf(cf, "|%d,%d,%d", pc.cycleAssets[i], x, y); } fprintf(cf, "\n"); }
                             if (pc.crossfade) fprintf(cf, "elemPieceXfade=%d|%d|%d\n", pc.xfToScene, pc.xfToElem, pc.xfToPiece);
                         }
@@ -31796,6 +31979,11 @@ void FrameTick(float dt)
                                     pc.spriteAssetIdx = remapAsset(pc.spriteAssetIdx);
                                     nel.pieces.push_back(pc);
                                 }
+                            }
+                            else if (strncmp(line, "elemPieceName=", 14) == 0 && !nel.pieces.empty()) {
+                                std::string nm = line + 14;
+                                while (!nm.empty() && (nm.back() == '\n' || nm.back() == '\r')) nm.pop_back();
+                                nel.pieces.back().name = nm;
                             }
                             else if (strncmp(line, "elemPieceCycle=", 15) == 0 && !nel.pieces.empty()) {
                                 HudPiece& pc = nel.pieces.back();
@@ -32011,8 +32199,10 @@ void FrameTick(float dt)
                         bool psel = (pi == el.selectedPiece);
                         bool multiSel = (pi < (int)sHudPieceSelected.size() && sHudPieceSelected[pi]);
                         char plabel[64];
-                        const char* pname = (el.pieces[pi].spriteAssetIdx >= 0 && el.pieces[pi].spriteAssetIdx < (int)sSpriteAssets.size())
-                            ? sSpriteAssets[el.pieces[pi].spriteAssetIdx].name.c_str() : "empty";
+                        const char* pname = !el.pieces[pi].name.empty()
+                            ? el.pieces[pi].name.c_str()
+                            : ((el.pieces[pi].spriteAssetIdx >= 0 && el.pieces[pi].spriteAssetIdx < (int)sSpriteAssets.size())
+                                ? sSpriteAssets[el.pieces[pi].spriteAssetIdx].name.c_str() : "empty");
                         snprintf(plabel, sizeof(plabel), "%s%d: %s (%dpx)", el.pieces[pi].hidden ? "[H] " : "", pi, pname, el.pieces[pi].size);
                         if (el.pieces[pi].hidden)
                             ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.4f);
@@ -32121,6 +32311,10 @@ void FrameTick(float dt)
                     if (el.selectedPiece >= 0 && el.selectedPiece < (int)el.pieces.size()) {
                         auto& pc = el.pieces[el.selectedPiece];
                         ImGui::Spacing();
+                        // Editor-only label (blank = fall back to the asset name in the list).
+                        char pcNameBuf[64];
+                        snprintf(pcNameBuf, sizeof(pcNameBuf), "%s", pc.name.c_str());
+                        if (ImGui::InputText("Name##pc", pcNameBuf, sizeof(pcNameBuf))) { pc.name = pcNameBuf; sProjectDirty = true; }
                         const char* pcPreview = (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sSpriteAssets.size())
                             ? sSpriteAssets[pc.spriteAssetIdx].name.c_str() : "(none)";
                         if (ImGui::BeginCombo("Asset##pc", pcPreview)) {
@@ -34332,13 +34526,53 @@ void Render3DViewport()
                 glDisable(GL_LIGHTING);
                 glColor3f(0.35f, 1.0f, 0.55f);
             }
-            // OBJ 2.0 per-vertex colors: when present and untextured, drive the
-            // lit color from each vertex instead of the per-mesh material color.
-            bool vcol = ma.hasVertexColor && !useTex && !wf;
+            // OBJ 2.0 per-vertex colors: when present, drive the color from each
+            // vertex (untextured = lit vertex color; textured = modulates the
+            // texture, matching the runtime which always emits vertex color).
+            bool vcol = ma.hasVertexColor && !wf;
             if (vcol) {
                 glEnable(GL_COLOR_MATERIAL);
                 glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
             }
+            // Multi-material (OBJ usemtl): draw each slot's triangles/quads with its
+            // own texture bound — mirrors the runtime's per-slot grouping.
+            if (ma.matCount() > 1 && !wf)
+            {
+                int triCount  = (int)ma.indices.size() / 3;
+                int quadCount = (int)ma.quadIndices.size() / 4;
+                for (int s = 0; s < ma.matCount(); s++) {
+                    bool sTex = ma.matTextured(s) && ma.matGlTexID(s) != 0;
+                    if (sTex) { glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, ma.matGlTexID(s)); glColor3f(1, 1, 1); glDisable(GL_LIGHTING); glDisable(GL_LIGHT0); }
+                    else      { glDisable(GL_TEXTURE_2D); if (!vcol) { glEnable(GL_LIGHTING); glEnable(GL_LIGHT0); } }
+                    glBegin(GL_TRIANGLES);
+                    for (int t = 0; t < triCount; t++) {
+                        int slot = t < (int)ma.triMaterial.size() ? ma.triMaterial[t] : 0;
+                        if (slot != s) continue;
+                        for (int k = 0; k < 3; k++) {
+                            const MeshVertex& v = ma.vertices[ma.indices[t*3+k]];
+                            if (sTex) glTexCoord2f(v.u, 1.0f - v.v);
+                            if (vcol) glColor3f(v.r, v.g, v.b);
+                            glNormal3f(v.nx, v.ny, v.nz); glVertex3f(v.px, v.py, v.pz);
+                        }
+                    }
+                    for (int q = 0; q < quadCount; q++) {
+                        int slot = q < (int)ma.quadMaterial.size() ? ma.quadMaterial[q] : 0;
+                        if (slot != s) continue;
+                        const MeshVertex* tv[6] = {
+                            &ma.vertices[ma.quadIndices[q*4+0]], &ma.vertices[ma.quadIndices[q*4+1]], &ma.vertices[ma.quadIndices[q*4+2]],
+                            &ma.vertices[ma.quadIndices[q*4+0]], &ma.vertices[ma.quadIndices[q*4+2]], &ma.vertices[ma.quadIndices[q*4+3]] };
+                        for (int k = 0; k < 6; k++) {
+                            const MeshVertex& v = *tv[k];
+                            if (sTex) glTexCoord2f(v.u, 1.0f - v.v);
+                            if (vcol) glColor3f(v.r, v.g, v.b);
+                            glNormal3f(v.nx, v.ny, v.nz); glVertex3f(v.px, v.py, v.pz);
+                        }
+                    }
+                    glEnd();
+                }
+                glDisable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            else {
             // Draw triangles
             if (!ma.indices.empty())
             {
@@ -34387,6 +34621,7 @@ void Render3DViewport()
                 }
                 glEnd();
             }
+            }   // end single-material draw branch
             if (vcol) glDisable(GL_COLOR_MATERIAL);
             if (wf) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL); // restore fill for next mesh
 

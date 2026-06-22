@@ -187,6 +187,22 @@ enum class MeshExportMode : int
 
 static const char* const kMeshExportModeNames[] = { "Quality", "Performance", "Barebones" };
 
+// One material slot's base-color texture (palettized). Used for both rig slots
+// (glTF) and static-mesh slots (OBJ usemtl). Slot 0 is stored inline on the
+// owning asset (legacy single-texture layout); slots 1..N live in extraMaterials.
+struct RigMaterial
+{
+    std::string name;                        // material slot name (glTF material / OBJ usemtl)
+    bool textured = false;
+    bool textureManual = false;              // true = user-assigned PNG (persisted by path)
+    std::string texturePath;
+    std::vector<uint8_t> texturePixels;      // indexed pixels (texW * texH), 0..255
+    uint32_t texturePalette[256] = {};       // 256-colour (GL_RGB256) palette
+    int texW = 0, texH = 0;
+    unsigned int glTexID = 0;                // OpenGL texture for editor preview
+    int wrapMode = 0;                        // UV addressing: 0=Clip(clamp) 1=Extend(tile) 2=Mirror
+};
+
 struct MeshAsset
 {
     std::string name = "Mesh";
@@ -234,6 +250,27 @@ struct MeshAsset
     bool nearClip = false;                   // true = view-space near-plane clipping (fixes slope walling)
     bool faceCull = false;                   // true = skip faces with vertices above camera (hard cutoff)
     bool removeDoubles = false;              // true = weld identical (pos+uv+normal) verts at export (fewer runtime verts)
+
+    // Multi-material (OBJ usemtl): the inline texture fields above are slot 0;
+    // additional usemtl materials live here as slots 1..N. triMaterial holds the
+    // slot index per triangle (size = indices.size()/3); empty = all slot 0.
+    // PSV draws each slot as its own group with its own texture bound.
+    std::string materialName;                // slot 0 material name (from usemtl)
+    int wrapMode = 0;                        // slot 0 UV addressing: 0=Clip 1=Extend 2=Mirror
+    std::vector<RigMaterial> extraMaterials; // slots 1..N
+    std::vector<uint8_t>     triMaterial;    // slot index per triangle (parallel to indices/3; empty = all slot 0)
+    std::vector<uint8_t>     quadMaterial;   // slot index per quad (parallel to quadIndices/4; empty = all slot 0)
+    int matCount() const { return 1 + (int)extraMaterials.size(); }
+    bool matTextured(int s) const { return s == 0 ? textured : extraMaterials[s-1].textured; }
+    const std::vector<uint8_t>& matPixels(int s) const { return s == 0 ? texturePixels : extraMaterials[s-1].texturePixels; }
+    const uint32_t* matPalette(int s) const { return s == 0 ? texturePalette : extraMaterials[s-1].texturePalette; }
+    int matTexW(int s) const { return s == 0 ? texW : extraMaterials[s-1].texW; }
+    int matTexH(int s) const { return s == 0 ? texH : extraMaterials[s-1].texH; }
+    unsigned int matGlTexID(int s) const { return s == 0 ? glTexID : extraMaterials[s-1].glTexID; }
+    const std::string& matName(int s) const { return s == 0 ? materialName : extraMaterials[s-1].name; }
+    const std::string& matPath(int s) const { return s == 0 ? texturePath : extraMaterials[s-1].texturePath; }
+    int  matWrap(int s) const { return s == 0 ? wrapMode : extraMaterials[s-1].wrapMode; }
+    void setMatWrap(int s, int w) { if (s == 0) wrapMode = w; else extraMaterials[s-1].wrapMode = w; }
 };
 
 static constexpr int kMaxMeshAssets = 32;
@@ -261,22 +298,6 @@ struct RigAnimClip
     int frameCount = 0;
     std::vector<BonePose> frames;
     bool loop = true;   // true = loop, false = play once then hold last frame
-};
-
-// One material slot's base-color texture (palettized like MeshAsset). A rig's
-// slot 0 is stored inline on RiggedMeshAsset (legacy single-texture layout);
-// slots 1..N live in RiggedMeshAsset::extraMaterials.
-struct RigMaterial
-{
-    std::string name;                        // glTF material slot name
-    bool textured = false;
-    bool textureManual = false;              // true = user-assigned PNG (persisted by path)
-    std::string texturePath;
-    std::vector<uint8_t> texturePixels;      // indexed pixels (texW * texH), 0..255
-    uint32_t texturePalette[256] = {};       // 256-colour (GL_RGB256) palette
-    int texW = 0, texH = 0;
-    unsigned int glTexID = 0;                // OpenGL texture for editor preview
-    int wrapMode = 0;                        // UV addressing: 0=Clip(clamp) 1=Extend(tile) 2=Mirror
 };
 
 struct RiggedMeshAsset

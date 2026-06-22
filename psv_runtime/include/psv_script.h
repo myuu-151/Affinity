@@ -623,7 +623,7 @@ static void afn_bp4_collision2d(void) {
 #define AFN_BP_INSTANCE_COUNT 5
 static const unsigned int afn_bp_instances[5][5] = {
     { 0, 0, 4294967295, 0, 0xffffffffu },
-    { 1, 7, 4294967295, 0, 0xffffffffu },
+    { 1, 3, 4294967295, 0, 0xffffffffu },
     { 2, 4294967295, 4294967295, 1, 0x1u },
     { 3, 4294967295, 4294967295, 1, 0x2u },
     { 4, 4294967295, 4294967295, 1, 0x4u },
@@ -784,5 +784,5 @@ static void afn_bp_dispatch_collision2d(void) {
     afn_bp_cur_spr_idx = -1;
     afn_bp_cur_tm_obj  = -1;
 }
-#define AFN_START_MODE 1
+#define AFN_START_MODE 0
 #define AFN_START_SCENE 0
