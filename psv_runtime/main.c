@@ -344,8 +344,11 @@ static void upload_textures(void)
                 glBindTexture(GL_TEXTURE_2D, s_meshSlotTex[mi][g]);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                // Level geometry commonly authors UVs outside [0,1] to tile a small
+                // texture across a large surface — REPEAT so it tiles instead of
+                // clamping (which stretches one edge texel and looks like a blur).
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m->slotTexW[g], m->slotTexH[g], 0,
                              GL_RGBA, GL_UNSIGNED_BYTE, m->slotTex[g]);
             }
@@ -356,8 +359,9 @@ static void upload_textures(void)
             glBindTexture(GL_TEXTURE_2D, s_meshTex[mi]);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            // REPEAT so tiling level UVs (outside [0,1]) tile instead of clamp-stretch.
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
             // texPixels are 0xAABBGGRR == RGBA byte order in memory.
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m->texW, m->texH, 0,
                          GL_RGBA, GL_UNSIGNED_BYTE, m->texPixels);
