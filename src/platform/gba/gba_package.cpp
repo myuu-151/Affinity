@@ -2003,7 +2003,7 @@ static bool GenerateMapData(const std::string& runtimeDir,
         f << "static u8    afn_ai_mode[NUM_SPRITES];\n";
         f << "static u16   afn_sprite_tint[NUM_SPRITES];\n";
         f << "static u8    afn_sprite_shake[NUM_SPRITES];\n";
-        f << "static int   afn_hud_value[4];\n";
+        f << "static int   afn_hud_value[128];\n";
         f << "static u8    afn_hud_visible[4];\n";
         f << "static int   afn_cursor_stop;\n";
         f << "static int   afn_stop_count;\n";

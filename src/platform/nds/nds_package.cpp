@@ -2454,7 +2454,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         f << "extern int  afn_player_height;\n";
         f << "#define AFN_HAS_PLAYER_WIDTH 1\n";
         f << "extern int  afn_player_width;\n";
-        f << "extern int  afn_hud_value[4];\n";
+        f << "extern int  afn_hud_value[128];\n";
         f << "extern unsigned char afn_hud_visible[4];\n";
         // HUD cursor state — Cursor{Up,Down}/FollowLink nodes read/write these.
         f << "extern int  afn_cursor_stop;\n";

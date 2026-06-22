@@ -1008,7 +1008,7 @@ int afn_tank_move=1;   // 1 = movement axes follow the tank heading (classic tan
                        // 0 = TurnPlayer(Camera Relative): heading only steers facing
 int afn_player_height=0, afn_player_width=0, afn_bg_color=0, afn_anim_speed_dummy=0;
 int afn_active_element=0, afn_elem_idx=0, afn_cursor_stop=0, afn_stop_count=0;
-int afn_hud_value[4]={0};   // SetHudValue counter slots (text rows bind to these)
+int afn_hud_value[128]={0}; // SetHudValue counter slots (text rows bind to these)
 int afn_checkpoint_set=0, afn_checkpoint_x=0, afn_checkpoint_y=0, afn_checkpoint_z=0;
 int afn_score=0, afn_shake_frames=0, afn_shake_intensity=0, afn_last_key=0;
 int afn_frame_count=0, afn_dt_tick=0;
@@ -1665,6 +1665,12 @@ static void hud_render(void) {
                 ptex = pc->tex + cv;
             }
 #endif
+            // Per-frame position offset: a cycled frame slot can carry its own X/Y
+            // so each staged graphic (e.g. a portrait) aligns independently.
+            int cofx = 0, cofy = 0;
+#ifdef AFN_HUD_PIECE_CYCLE_OFF
+            cofx = afn_hud_cycle_off_x[ptex]; cofy = afn_hud_cycle_off_y[ptex];
+#endif
             // Per-piece tint via the MODULATE color: Black toggle zeroes RGB (a
             // black silhouette — used for drop shadows), Opacity (0-16) scales
             // alpha. White+16 = the texture as-authored. (byte order: R,G,B,A)
@@ -1689,8 +1695,8 @@ static void hud_render(void) {
                 // all in element space scaled by the anchored distance scale.
                 float w = pc->w * laySx[li] * elScale, h = pc->h * laySy[li] * elScale;
                 hud_quad_xf(s_hudTex[ptex],
-                            bx + (pc->x + layOx[li] + pc->w * 0.5f) * elScale,
-                            by + (pc->y + layOy[li] + pc->h * 0.5f) * elScale,
+                            bx + (pc->x + cofx + layOx[li] + pc->w * 0.5f) * elScale,
+                            by + (pc->y + cofy + layOy[li] + pc->h * 0.5f) * elScale,
                             w, h, layRot[li], pieceCol);
                 continue;
             }
@@ -1707,7 +1713,7 @@ static void hud_render(void) {
                 float edge = pc->barEnd + (pc->barStart - pc->barEnd) * fr;
                 float lo = edge < pc->barEnd ? edge : pc->barEnd;
                 float hi = edge > pc->barEnd ? edge : pc->barEnd;
-                float px0 = bx + pc->x * elScale, py0 = by + pc->y * elScale;
+                float px0 = bx + (pc->x + cofx) * elScale, py0 = by + (pc->y + cofy) * elScale;
                 float pw = pc->w * elScale, ph = pc->h * elScale;
                 if (pc->barAxis == 0 && pc->w > 0 && hi > lo) {
                     hud_quad(s_hudTex[ptex], px0 + lo * elScale, py0, px0 + hi * elScale, py0 + ph,
@@ -1724,7 +1730,7 @@ static void hud_render(void) {
             // and shows it wrapped) appears on the other. Draw up to 3x3 wrapped
             // copies; off-screen ones are culled, so on-screen pieces draw once.
             {
-                float px0 = bx + pc->x * elScale, py0 = by + pc->y * elScale;
+                float px0 = bx + (pc->x + cofx) * elScale, py0 = by + (pc->y + cofy) * elScale;
                 float pw = pc->w * elScale, ph = pc->h * elScale;
                 for (int wy = 0; wy < 3; wy++)
                 for (int wx = 0; wx < 3; wx++) {

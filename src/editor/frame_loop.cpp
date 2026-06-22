@@ -4388,8 +4388,11 @@ struct HudPiece {
     // Cycle ← Value: when cycleSlot >= 0, the displayed sprite asset is picked
     // from cycleAssets[ afn_hud_value[cycleSlot] ] — a list of per-frame-slot
     // asset pickers (e.g. a character-select portrait). -1 = static.
-    int cycleSlot = -1;            // HUD value slot (0-3) driving the cycle, -1 = off
+    int cycleSlot = -1;            // HUD value slot (0-127) driving the cycle, -1 = off
     std::vector<int> cycleAssets;  // staged sprite asset per frame slot (-1 = empty)
+    std::vector<int> cycleX;       // per-frame-slot X offset (added to localX when shown)
+    std::vector<int> cycleY;       // per-frame-slot Y offset (added to localY when shown)
+    int cycleEditSlot = -1;        // editor-only: frame slot being previewed/positioned (-1 = none)
     // Crossfade: on the change to xfToScene, this piece dissolves into the target
     // piece (xfToElem -> piece xfToPiece) in that scene, instead of fading to
     // black — e.g. a bg that recolors between menus. From = this piece.
@@ -7418,7 +7421,7 @@ static bool SaveProject(const std::string& path)
         fprintf(f, "elemPieceCount=%d\n", (int)el.pieces.size());
         for (auto& pc : el.pieces) {
             fprintf(f, "elemPiece=%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity, pc.hidden ? 1 : 0, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd, pc.crossfade ? 1 : 0);
-            if (pc.cycleSlot >= 0) { fprintf(f, "elemPieceCycle=%d", pc.cycleSlot); for (int a : pc.cycleAssets) fprintf(f, "|%d", a); fprintf(f, "\n"); }
+            if (pc.cycleSlot >= 0) { fprintf(f, "elemPieceCycle=%d", pc.cycleSlot); for (size_t i = 0; i < pc.cycleAssets.size(); i++) { int x = i < pc.cycleX.size() ? pc.cycleX[i] : 0; int y = i < pc.cycleY.size() ? pc.cycleY[i] : 0; fprintf(f, "|%d,%d,%d", pc.cycleAssets[i], x, y); } fprintf(f, "\n"); }
             if (pc.crossfade) fprintf(f, "elemPieceXfade=%d|%d|%d\n", pc.xfToScene, pc.xfToElem, pc.xfToPiece);
         }
         fprintf(f, "elemStopCount=%d\n", (int)el.stops.size());
@@ -9001,9 +9004,16 @@ static bool LoadProject(const std::string& path)
             }
             else if (strncmp(line, "elemPieceCycle=", 15) == 0 && !sHudElements.empty() && !sHudElements.back().pieces.empty()) {
                 HudPiece& pc = sHudElements.back().pieces.back();
-                pc.cycleAssets.clear();
+                pc.cycleAssets.clear(); pc.cycleX.clear(); pc.cycleY.clear();
                 const char* p = line + 15; pc.cycleSlot = atoi(p);
-                while ((p = strchr(p, '|')) != nullptr) { p++; pc.cycleAssets.push_back(atoi(p)); }
+                while ((p = strchr(p, '|')) != nullptr) {
+                    p++;
+                    const char* nx = strchr(p, '|');
+                    int a = atoi(p), x = 0, y = 0;
+                    const char* c1 = strchr(p, ',');
+                    if (c1 && (!nx || c1 < nx)) { x = atoi(c1 + 1); const char* c2 = strchr(c1 + 1, ','); if (c2 && (!nx || c2 < nx)) y = atoi(c2 + 1); }
+                    pc.cycleAssets.push_back(a); pc.cycleX.push_back(x); pc.cycleY.push_back(y);
+                }
             }
             else if (strncmp(line, "elemPieceXfade=", 15) == 0 && !sHudElements.empty() && !sHudElements.back().pieces.empty()) {
                 HudPiece& pc = sHudElements.back().pieces.back();
@@ -18065,6 +18075,8 @@ void FrameTick(float dt)
                         pe.barEnd = pc.barEnd;
                         pe.cycleSlot = pc.cycleSlot;
                         pe.cycleAssets = pc.cycleAssets;
+                        pe.cycleX = pc.cycleX;
+                        pe.cycleY = pc.cycleY;
                         if (pc.crossfade) { pe.xfToScene = pc.xfToScene; pe.xfToElem = pc.xfToElem; pe.xfToPiece = pc.xfToPiece; }
                         he.pieces.push_back(pe);
                     }
@@ -30938,6 +30950,15 @@ void FrameTick(float dt)
                     if (lt.hidden) continue;   // blink: keyframe Hide
                     float baseX = el.x + pc.localX + lt.ox;
                     float baseY = el.y + pc.localY + lt.oy;
+                    int pieceAsset = pc.spriteAssetIdx;
+                    // Cycle edit: when a frame slot is selected for positioning, preview
+                    // THAT frame's asset at its per-slot offset (so WASD/drag aligns it).
+                    if (selected && pc.cycleSlot >= 0 && pc.cycleEditSlot >= 0 &&
+                        pc.cycleEditSlot < (int)pc.cycleAssets.size()) {
+                        if (pc.cycleAssets[pc.cycleEditSlot] >= 0) pieceAsset = pc.cycleAssets[pc.cycleEditSlot];
+                        if (pc.cycleEditSlot < (int)pc.cycleX.size()) baseX += pc.cycleX[pc.cycleEditSlot];
+                        if (pc.cycleEditSlot < (int)pc.cycleY.size()) baseY += pc.cycleY[pc.cycleEditSlot];
+                    }
                     // 960 = non-square full-screen background (960x544); else square.
                     int pcW = (pc.size == 960) ? 960 : pc.size;
                     int pcH = (pc.size == 960) ? 544 : pc.size;
@@ -30987,8 +31008,8 @@ void FrameTick(float dt)
                                 else                 { vLo = lo / dimA; vHi = hi / dimA; }
                             }
                         }
-                        if (pc.spriteAssetIdx >= 0 && pc.spriteAssetIdx < (int)sTmSpriteTextures.size() &&
-                            sTmSpriteTextures[pc.spriteAssetIdx]) {
+                        if (pieceAsset >= 0 && pieceAsset < (int)sTmSpriteTextures.size() &&
+                            sTmSpriteTextures[pieceAsset]) {
                             int alpha = (pc.opacity * 255) / 16;
                             alpha = std::clamp((int)(alpha * lt.alpha), 0, 255);   // keyframe opacity pulse
                             ImU32 tintCol = pc.blackTint ? IM_COL32(0, 0, 0, alpha) : IM_COL32(255, 255, 255, alpha);
@@ -30997,7 +31018,7 @@ void FrameTick(float dt)
                             ImVec2 c1 = rotPt(-drawW*0.5f + uHi*drawW, -drawH*0.5f + vLo*drawH);
                             ImVec2 c2 = rotPt(-drawW*0.5f + uHi*drawW, -drawH*0.5f + vHi*drawH);
                             ImVec2 c3 = rotPt(-drawW*0.5f + uLo*drawW, -drawH*0.5f + vHi*drawH);
-                            dl->AddImageQuad((ImTextureID)(intptr_t)sTmSpriteTextures[pc.spriteAssetIdx],
+                            dl->AddImageQuad((ImTextureID)(intptr_t)sTmSpriteTextures[pieceAsset],
                                 c0, c1, c2, c3,
                                 ImVec2(uLo,vLo), ImVec2(uHi,vLo), ImVec2(uHi,vHi), ImVec2(uLo,vHi), tintCol);
                         } else {
@@ -31343,8 +31364,15 @@ void FrameTick(float dt)
                     int moveX = (int)sHudPieceDragAccX;
                     int moveY = (int)sHudPieceDragAccY;
                     if (moveX != 0 || moveY != 0) {
-                        pc.localX += moveX;
-                        pc.localY += moveY;
+                        // Editing a cycle frame slot? drag its per-slot offset instead.
+                        if (pc.cycleEditSlot >= 0 && pc.cycleEditSlot < (int)pc.cycleX.size()
+                                                  && pc.cycleEditSlot < (int)pc.cycleY.size()) {
+                            pc.cycleX[pc.cycleEditSlot] += moveX;
+                            pc.cycleY[pc.cycleEditSlot] += moveY;
+                        } else {
+                            pc.localX += moveX;
+                            pc.localY += moveY;
+                        }
                         sHudPieceDragAccX -= moveX;
                         sHudPieceDragAccY -= moveY;
                         sProjectDirty = true;
@@ -31372,19 +31400,31 @@ void FrameTick(float dt)
                 if (ImGui::IsKeyPressed(ImGuiKey_D, true)) dx =  1;
                 if (dx != 0 || dy != 0) {
                     HudUndoPush(sHudSelectedIdx);
-                    bool anySelected = false;
-                    for (int pi = 0; pi < (int)el.pieces.size() && pi < (int)sHudPieceSelected.size(); pi++)
-                        if (sHudPieceSelected[pi]) { anySelected = true; break; }
-                    if (anySelected) {
-                        for (int pi = 0; pi < (int)el.pieces.size() && pi < (int)sHudPieceSelected.size(); pi++) {
-                            if (!sHudPieceSelected[pi]) continue;
-                            el.pieces[pi].localX += dx;
-                            el.pieces[pi].localY += dy;
+                    // A cycle frame slot selected for editing takes priority: nudge ITS offset.
+                    int editPc = -1;
+                    for (int pi = 0; pi < (int)el.pieces.size(); pi++)
+                        if (el.pieces[pi].cycleEditSlot >= 0) { editPc = pi; break; }
+                    if (editPc >= 0) {
+                        auto& pc = el.pieces[editPc];
+                        if (pc.cycleEditSlot < (int)pc.cycleX.size() && pc.cycleEditSlot < (int)pc.cycleY.size()) {
+                            pc.cycleX[pc.cycleEditSlot] += dx;
+                            pc.cycleY[pc.cycleEditSlot] += dy;
                         }
                     } else {
-                        for (auto& pc : el.pieces) {
-                            pc.localX += dx;
-                            pc.localY += dy;
+                        bool anySelected = false;
+                        for (int pi = 0; pi < (int)el.pieces.size() && pi < (int)sHudPieceSelected.size(); pi++)
+                            if (sHudPieceSelected[pi]) { anySelected = true; break; }
+                        if (anySelected) {
+                            for (int pi = 0; pi < (int)el.pieces.size() && pi < (int)sHudPieceSelected.size(); pi++) {
+                                if (!sHudPieceSelected[pi]) continue;
+                                el.pieces[pi].localX += dx;
+                                el.pieces[pi].localY += dy;
+                            }
+                        } else {
+                            for (auto& pc : el.pieces) {
+                                pc.localX += dx;
+                                pc.localY += dy;
+                            }
                         }
                     }
                     sProjectDirty = true;
@@ -31596,7 +31636,7 @@ void FrameTick(float dt)
                         fprintf(cf, "elemPieceCount=%d\n", (int)el.pieces.size());
                         for (auto& pc : el.pieces) {
                             fprintf(cf, "elemPiece=%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d\n", pc.spriteAssetIdx, pc.frame, pc.localX, pc.localY, pc.size, pc.blackTint ? 1 : 0, pc.opacity, pc.hidden ? 1 : 0, pc.barSource, pc.barAxis, pc.barStart, pc.barEnd, pc.crossfade ? 1 : 0);
-                            if (pc.cycleSlot >= 0) { fprintf(cf, "elemPieceCycle=%d", pc.cycleSlot); for (int a : pc.cycleAssets) fprintf(cf, "|%d", a); fprintf(cf, "\n"); }
+                            if (pc.cycleSlot >= 0) { fprintf(cf, "elemPieceCycle=%d", pc.cycleSlot); for (size_t i = 0; i < pc.cycleAssets.size(); i++) { int x = i < pc.cycleX.size() ? pc.cycleX[i] : 0; int y = i < pc.cycleY.size() ? pc.cycleY[i] : 0; fprintf(cf, "|%d,%d,%d", pc.cycleAssets[i], x, y); } fprintf(cf, "\n"); }
                             if (pc.crossfade) fprintf(cf, "elemPieceXfade=%d|%d|%d\n", pc.xfToScene, pc.xfToElem, pc.xfToPiece);
                         }
                         // Stops
@@ -31759,9 +31799,16 @@ void FrameTick(float dt)
                             }
                             else if (strncmp(line, "elemPieceCycle=", 15) == 0 && !nel.pieces.empty()) {
                                 HudPiece& pc = nel.pieces.back();
-                                pc.cycleAssets.clear();
+                                pc.cycleAssets.clear(); pc.cycleX.clear(); pc.cycleY.clear();
                                 const char* p = line + 15; pc.cycleSlot = atoi(p);
-                                while ((p = strchr(p, '|')) != nullptr) { p++; pc.cycleAssets.push_back(remapAsset(atoi(p))); }
+                                while ((p = strchr(p, '|')) != nullptr) {
+                                    p++;
+                                    const char* nx = strchr(p, '|');
+                                    int a = atoi(p), x = 0, y = 0;
+                                    const char* c1 = strchr(p, ',');
+                                    if (c1 && (!nx || c1 < nx)) { x = atoi(c1 + 1); const char* c2 = strchr(c1 + 1, ','); if (c2 && (!nx || c2 < nx)) y = atoi(c2 + 1); }
+                                    pc.cycleAssets.push_back(remapAsset(a)); pc.cycleX.push_back(x); pc.cycleY.push_back(y);
+                                }
                             }
                             else if (strncmp(line, "elemPieceXfade=", 15) == 0 && !nel.pieces.empty()) {
                                 HudPiece& pc = nel.pieces.back();
@@ -32097,20 +32144,36 @@ void FrameTick(float dt)
                         // character-select portrait). The picked asset above is the base
                         // (value 0); the next Count-1 assets in the list are values 1..N-1.
                         {
-                            const char* cycName[] = { "None (static)", "Value 0", "Value 1", "Value 2", "Value 3" };
-                            int cycIdx = (pc.cycleSlot < 0 || pc.cycleSlot > 3) ? 0 : pc.cycleSlot + 1;
-                            if (ImGui::Combo("Cycle##pc", &cycIdx, cycName, 5)) {
-                                pc.cycleSlot = cycIdx - 1; sProjectDirty = true;
+                            // -1 = static (no cycle); 0..127 = HUD value slot
+                            // (afn_hud_value[N]) whose value picks a frame slot below.
+                            int cyc = pc.cycleSlot;
+                            ImGui::SetNextItemWidth(120);
+                            if (ImGui::InputInt("Cycle##pc", &cyc)) {
+                                if (cyc < -1) cyc = -1; if (cyc > 127) cyc = 127;
+                                pc.cycleSlot = cyc; sProjectDirty = true;
                             }
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Drive the displayed graphic from a HUD value: the value picks one of the frame slots below.\nEach slot stages its own sprite asset (any asset, any order).");
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("HUD value slot (afn_hud_value[N], 0-127) that picks the frame slot below.\n-1 = static (no cycle). Each frame slot stages its own sprite asset (any asset, any order).");
                             if (pc.cycleSlot >= 0) {
                                 ImGui::Indent();
-                                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Frame slots (value %d picks one)", pc.cycleSlot);
+                                // Per-slot X/Y offset arrays ride in lockstep with the asset list.
+                                if ((int)pc.cycleX.size() != (int)pc.cycleAssets.size()) pc.cycleX.resize(pc.cycleAssets.size(), 0);
+                                if ((int)pc.cycleY.size() != (int)pc.cycleAssets.size()) pc.cycleY.resize(pc.cycleAssets.size(), 0);
+                                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Frame slots (value %d picks one) — [*] to position", pc.cycleSlot);
                                 for (int fs = 0; fs < (int)pc.cycleAssets.size(); fs++) {
                                     ImGui::PushID(fs);
+                                    // [*]/[ ] edit toggle: previews this frame in the canvas and
+                                    // routes WASD nudge / mouse drag to ITS X/Y offset.
+                                    bool editing = (pc.cycleEditSlot == fs);
+                                    if (ImGui::SmallButton(editing ? "[*]##fsedit" : "[ ]##fsedit"))
+                                        pc.cycleEditSlot = editing ? -1 : fs;
+                                    if (ImGui::IsItemHovered()) ImGui::SetTooltip(editing
+                                        ? "Editing this frame — WASD / drag moves it. Click to stop."
+                                        : "Click to preview + position this frame with WASD / drag.");
+                                    ImGui::SameLine();
                                     const char* fsPrev = (pc.cycleAssets[fs] >= 0 && pc.cycleAssets[fs] < (int)sSpriteAssets.size())
                                         ? sSpriteAssets[pc.cycleAssets[fs]].name.c_str() : "(empty)";
                                     char lbl[24]; snprintf(lbl, sizeof(lbl), "%d##fsslot", fs);
+                                    ImGui::SetNextItemWidth(120);
                                     if (ImGui::BeginCombo(lbl, fsPrev)) {
                                         if (ImGui::Selectable("(empty)", pc.cycleAssets[fs] < 0)) { pc.cycleAssets[fs] = -1; sProjectDirty = true; }
                                         for (int ai = 0; ai < (int)sSpriteAssets.size(); ai++) {
@@ -32119,12 +32182,29 @@ void FrameTick(float dt)
                                         }
                                         ImGui::EndCombo();
                                     }
+                                    ImGui::SameLine(); ImGui::SetNextItemWidth(44);
+                                    if (ImGui::DragInt("x##fsx", &pc.cycleX[fs], 1)) sProjectDirty = true;
+                                    ImGui::SameLine(); ImGui::SetNextItemWidth(44);
+                                    if (ImGui::DragInt("y##fsy", &pc.cycleY[fs], 1)) sProjectDirty = true;
                                     ImGui::SameLine();
-                                    if (ImGui::SmallButton("x##fsdel")) { pc.cycleAssets.erase(pc.cycleAssets.begin() + fs); sProjectDirty = true; ImGui::PopID(); break; }
+                                    if (ImGui::SmallButton("-##fsdel")) {
+                                        pc.cycleAssets.erase(pc.cycleAssets.begin() + fs);
+                                        if (fs < (int)pc.cycleX.size()) pc.cycleX.erase(pc.cycleX.begin() + fs);
+                                        if (fs < (int)pc.cycleY.size()) pc.cycleY.erase(pc.cycleY.begin() + fs);
+                                        if (pc.cycleEditSlot == fs) pc.cycleEditSlot = -1;
+                                        else if (pc.cycleEditSlot > fs) pc.cycleEditSlot--;
+                                        sProjectDirty = true; ImGui::PopID(); break;
+                                    }
                                     ImGui::PopID();
                                 }
-                                if (ImGui::SmallButton("+ slot##fsadd")) { pc.cycleAssets.push_back(pc.spriteAssetIdx); sProjectDirty = true; }
+                                if (ImGui::SmallButton("+ slot##fsadd")) {
+                                    pc.cycleAssets.push_back(pc.spriteAssetIdx);
+                                    pc.cycleX.push_back(0); pc.cycleY.push_back(0);
+                                    sProjectDirty = true;
+                                }
                                 ImGui::Unindent();
+                            } else {
+                                pc.cycleEditSlot = -1;
                             }
                         }
                         // 128 is PSV-only (RGBA HUD pieces, no OBJ cap); the NDS

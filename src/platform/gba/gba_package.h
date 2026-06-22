@@ -584,6 +584,7 @@ struct GBAHudPieceExport {
     int barStart = 0, barEnd = 0;   // fill-edge travel (piece-local px along axis)
     int cycleSlot = -1;  // HUD value slot driving asset cycle (-1 = static)
     std::vector<int> cycleAssets;  // staged sprite asset per frame slot
+    std::vector<int> cycleX, cycleY;  // per-frame-slot position offset
     // Crossfade: on the change to xfToScene, dissolve into element xfToElem's
     // piece xfToPiece in that scene (-1 = no crossfade).
     int xfToScene = -1, xfToElem = -1, xfToPiece = -1;

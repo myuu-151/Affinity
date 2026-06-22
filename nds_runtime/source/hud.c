@@ -16,7 +16,7 @@
 #include <string.h>
 
 #ifdef AFN_HAS_SCRIPT
-extern int afn_hud_value[4];
+extern int afn_hud_value[128];
 extern int afn_cursor_stop;
 extern int afn_active_element;
 extern unsigned char afn_hud_visible[4];

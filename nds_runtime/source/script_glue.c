@@ -66,7 +66,7 @@ int  afn_friction;
 int  afn_last_key;
 int  afn_player_height = 3072;    // 12 editor px in 16.8 (matches GBA default)
 int  afn_player_width = 768;      // 3 editor px collision radius in 16.8 (SetPlayerWidth)
-int  afn_hud_value[4];            // counters; SetHudValue accumulates
+int  afn_hud_value[128];          // counters; SetHudValue accumulates
 unsigned char afn_hud_visible[4]; // ShowHUD/HideHUD toggles
 
 // HUD cursor navigation — CursorUp/Down/FollowLink nodes index into the

@@ -571,6 +571,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
     struct S { int x, y, link; };
     std::vector<P> pieces; std::vector<T> texts; std::vector<S> stops;
     std::vector<int> frameW, frameH;
+    std::vector<int> cycleOffX, cycleOffY;  // per-frame position offset (cycle frame slots; 0 otherwise)
     int frameCount = 0;
     auto emitFrame = [&](int ai, int frame, int sz) -> std::pair<int,int> {
         // RGBA frame data is emitted as a byte STRING LITERAL (octal-escaped),
@@ -579,7 +580,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
         // which is what made the Vita build crawl for 512/960 HUD frames. The
         // runtime uploads it straight to glTexImage2D (GL_RGBA, bytes [R,G,B,A]).
         if (ai < 0 || ai >= (int)assets.size() || frame < 0 || frame >= (int)assets[ai].frames.size())
-            { f << "static const unsigned char afn_hud_f" << frameCount << "[] = \"\\000\\000\\000\\000\";\n"; frameCount++; frameW.push_back(1); frameH.push_back(1); return {1,1}; }
+            { f << "static const unsigned char afn_hud_f" << frameCount << "[] = \"\\000\\000\\000\\000\";\n"; frameCount++; frameW.push_back(1); frameH.push_back(1); cycleOffX.push_back(0); cycleOffY.push_back(0); return {1,1}; }
         const auto& a = assets[ai];
         // PSV higher-color path: when the asset is >16 colors, emit from the
         // re-quantized psvFrames/psvPalette (up to 128 colors) instead of the
@@ -590,7 +591,7 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
         int palMask = usePsv ? 127 : 15;
         int w = fr.width > 0 ? fr.width : (sz>0?sz:a.baseSize);
         int h = fr.height > 0 ? fr.height : (sz>0?sz:a.baseSize);
-        frameW.push_back(w); frameH.push_back(h);
+        frameW.push_back(w); frameH.push_back(h); cycleOffX.push_back(0); cycleOffY.push_back(0);
         // Soft alpha: when the asset opted into Use Alpha, carry the source PNG's
         // per-pixel alpha so a HUD piece's feathered edges blend instead of the
         // hard 50% cutout (jagged edges). Else binary (idx 0 = transparent).
@@ -630,7 +631,12 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
             // pick tex = base + hud_value[slot]. A static piece bakes just one.
             int cyc, baseTex = frameCount;
             if (pc.cycleSlot >= 0 && !pc.cycleAssets.empty()) {
-                for (int a : pc.cycleAssets) emitFrame(a >= 0 ? a : pc.spriteAssetIdx, pc.frame, pc.size);
+                for (size_t k = 0; k < pc.cycleAssets.size(); k++) {
+                    int a = pc.cycleAssets[k];
+                    emitFrame(a >= 0 ? a : pc.spriteAssetIdx, pc.frame, pc.size);
+                    if (k < pc.cycleX.size()) cycleOffX.back() = pc.cycleX[k];   // attach per-slot offset
+                    if (k < pc.cycleY.size()) cycleOffY.back() = pc.cycleY[k];
+                }
                 cyc = (int)pc.cycleAssets.size();
             } else {
                 emitFrame(pc.spriteAssetIdx, pc.frame, pc.size);   // texture stays native res
@@ -671,6 +677,13 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
     for (int i=0;i<frameCount;i++) f << frameW[i] << ","; if(!frameCount) f << "1,"; f << "};\n";
     f << "static const short afn_hud_frame_h[" << (frameCount?frameCount:1) << "] = {";
     for (int i=0;i<frameCount;i++) f << frameH[i] << ","; if(!frameCount) f << "1,"; f << "};\n";
+    // Per-frame position offset (set on cycle frame slots; 0 elsewhere). Indexed by
+    // texture so the runtime can shift a cycled piece by the active frame's offset.
+    f << "#define AFN_HUD_PIECE_CYCLE_OFF 1\n";
+    f << "static const short afn_hud_cycle_off_x[" << (frameCount?frameCount:1) << "] = {";
+    for (int i=0;i<frameCount;i++) f << cycleOffX[i] << ","; if(!frameCount) f << "0,"; f << "};\n";
+    f << "static const short afn_hud_cycle_off_y[" << (frameCount?frameCount:1) << "] = {";
+    for (int i=0;i<frameCount;i++) f << cycleOffY[i] << ","; if(!frameCount) f << "0,"; f << "};\n";
     // NOTE: struct/array names (afn_hud_elems[].stopStart/.stopCount,
     // afn_hud_stops[].link) match what the shared node emitter (node_script_emit
     // .cpp) writes into psv_script.h for ShowHUD/CursorUp/CursorDown, so those
