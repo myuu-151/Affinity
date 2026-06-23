@@ -128,7 +128,7 @@ static std::string PFlt(float v) {
     return s + "f";
 }
 
-static void EmitRigArrays(std::ofstream& f, int ru, const PSPRigExport& rig) {
+static void EmitRigArrays(std::ofstream& f, int ru, const AfnRigExport& rig) {
     int bc = rig.boneCount;
     int vc = (int)rig.verts.size();
     int mc = (int)rig.materials.size(); if (mc < 1) mc = 1;
@@ -167,7 +167,7 @@ static void EmitRigArrays(std::ofstream& f, int ru, const PSPRigExport& rig) {
         f << "\n};\n";
         f << "#define " << D << "IDX" << g << "_COUNT " << gi.size() << "\n";
 
-        const PSPRigMaterial& M = (g < (int)rig.materials.size()) ? rig.materials[g] : PSPRigMaterial{};
+        const AfnRigMaterial& M = (g < (int)rig.materials.size()) ? rig.materials[g] : AfnRigMaterial{};
         bool tex = M.textured && M.texW > 0 && !M.pixels.empty();
         if (tex) {
             int n = M.texW * M.texH;
@@ -192,7 +192,7 @@ static void EmitRigArrays(std::ofstream& f, int ru, const PSPRigExport& rig) {
     f << "};\n";
     f << "static const unsigned int* const " << S << "tex_ptrs[" << mc << "] = {";
     for (int g = 0; g < mc; g++) {
-        const PSPRigMaterial& M = (g < (int)rig.materials.size()) ? rig.materials[g] : PSPRigMaterial{};
+        const AfnRigMaterial& M = (g < (int)rig.materials.size()) ? rig.materials[g] : AfnRigMaterial{};
         bool tex = M.textured && M.texW > 0 && !M.pixels.empty();
         f << (tex ? (S + "tex" + std::to_string(g)) : std::string("0")) << ",";
     }
@@ -205,12 +205,12 @@ static void EmitRigArrays(std::ofstream& f, int ru, const PSPRigExport& rig) {
     f << "};\n";
 
     for (int c = 0; c < cc; c++) {
-        const PSPRigClip& cl = rig.clips[c];
+        const AfnRigClip& cl = rig.clips[c];
         int nf = cl.frameCount;
         f << "static const float " << S << "clip" << c << "[" << (nf*bc*7) << "] = {\n";
         for (int fr = 0; fr < nf; fr++)
             for (int b = 0; b < bc; b++) {
-                const PSPRigBonePose& P = cl.frames[fr*bc + b];
+                const AfnRigBonePose& P = cl.frames[fr*bc + b];
                 f << PFlt(P.px) << "," << PFlt(P.py) << "," << PFlt(P.pz) << ","
                   << PFlt(P.qw) << "," << PFlt(P.qx) << "," << PFlt(P.qy) << "," << PFlt(P.qz) << ",\n";
             }
@@ -228,7 +228,7 @@ static void EmitRigArrays(std::ofstream& f, int ru, const PSPRigExport& rig) {
 }
 
 static bool GeneratePSVRigData(const std::string& runtimeDir,
-                               const std::vector<PSPRigExport>& rigs,
+                               const std::vector<AfnRigExport>& rigs,
                                int playerRigIdx,
                                const std::vector<AfnSpriteExport>& sprites,
                                std::string& errorMsg) {
@@ -335,7 +335,7 @@ static bool GeneratePSVRigData(const std::string& runtimeDir,
     // and the player-vs-NPC collision/blocker. Default box if none authored.
     f << "static const float afn_npc_col[" << (npcs.empty()?1:npcs.size()) << "][6] = {\n";
     for (const auto& n : npcs) {
-        const PSPRigExport& rig = rigs[used[n.slot]];
+        const AfnRigExport& rig = rigs[used[n.slot]];
         float Sc = n.scale * 0.25f;
         float hx, hy, hz, cx, cy, cz;
         if (rig.collisionType == 1) {
@@ -810,7 +810,7 @@ bool PackagePSV(const std::string& runtimeDir,
                 int startMode,
                 float /*midiMasterDb*/,
                 const std::vector<AfnRiggedMeshExport>& /*rigs*/,
-                const std::vector<PSPRigExport>& pspRigs,
+                const std::vector<AfnRigExport>& pspRigs,
                 int playerRigIdx,
                 std::string& errorMsg) {
     { std::lock_guard<std::mutex> lk(g_psvBuildLogMtx); g_psvBuildLog.clear(); }   // reset the compile terminal

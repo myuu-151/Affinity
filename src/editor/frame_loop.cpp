@@ -5,7 +5,7 @@
 #include "../platform/nds/dsma_emit.h"
 #include "../platform/gba/gba_package.h"
 #include "../platform/nds/nds_package.h"
-#include "../platform/psp/psp_package.h"
+#include "../platform/psv/psv_export_common.h"
 #include "../platform/psv/psv_package.h"
 #include "../navmesh/NavMeshBuilder.h"
 #include "llm_assistant.h"
@@ -18771,9 +18771,9 @@ void FrameTick(float dt)
                 // Raw (un-baked) rig data for the PSP runtime — CPU-skinned on
                 // device. Parallel to exportRigs but keeps base verts + per-frame
                 // absolute bone poses instead of DS DSM/DSA blobs.
-                std::vector<Affinity::PSPRigExport> exportPspRigs;
+                std::vector<Affinity::AfnRigExport> exportPspRigs;
                 for (const auto& rm : sRiggedMeshAssets) {
-                    Affinity::PSPRigExport pr;
+                    Affinity::AfnRigExport pr;
                     pr.name = rm.name;
                     pr.boneCount = rm.boneCount;
                     pr.cullMode = rm.cullMode;
@@ -18786,7 +18786,7 @@ void FrameTick(float dt)
                     pr.verts.resize(rm.baseVerts.size());
                     for (size_t v = 0; v < rm.baseVerts.size(); v++) {
                         const auto& mv = rm.baseVerts[v];
-                        Affinity::PSPRigVertex pv;
+                        Affinity::AfnRigVertex pv;
                         pv.px = mv.px; pv.py = mv.py; pv.pz = mv.pz;
                         pv.nx = mv.nx; pv.ny = mv.ny; pv.nz = mv.nz;
                         pv.u = mv.u; pv.v = mv.v;
@@ -18796,7 +18796,7 @@ void FrameTick(float dt)
                     pr.indices = rm.indices;
                     pr.triMaterial = rm.triMaterial;
                     for (int s = 0; s < rm.matCount(); s++) {
-                        Affinity::PSPRigMaterial m;
+                        Affinity::AfnRigMaterial m;
                         m.textured = rm.matTextured(s);
                         m.texW = rm.matTexW(s); m.texH = rm.matTexH(s);
                         m.pixels = rm.matPixels(s);
@@ -18804,12 +18804,12 @@ void FrameTick(float dt)
                         pr.materials.push_back(std::move(m));
                     }
                     for (const auto& c : rm.clips) {
-                        Affinity::PSPRigClip pc;
+                        Affinity::AfnRigClip pc;
                         pc.name = c.name; pc.frameCount = c.frameCount; pc.loop = c.loop;
                         pc.frames.resize(c.frames.size());
                         for (size_t i = 0; i < c.frames.size(); i++) {
                             const auto& bp = c.frames[i];
-                            Affinity::PSPRigBonePose pp;
+                            Affinity::AfnRigBonePose pp;
                             pp.px = bp.px; pp.py = bp.py; pp.pz = bp.pz;
                             pp.qw = bp.qw; pp.qx = bp.qx; pp.qy = bp.qy; pp.qz = bp.qz;
                             pc.frames[i] = pp;

@@ -2,7 +2,7 @@
 
 #include <string>
 #include <vector>
-#include "../psp/psp_package.h"   // Reuses the PSP export structs + GenerateAffinityHeaders
+#include "psv_export_common.h"   // Reuses the PSP export structs + GenerateAffinityHeaders
 
 namespace Affinity
 {
@@ -40,7 +40,7 @@ bool PackagePSV(const std::string& runtimeDir,
                 int startMode,
                 float midiMasterDb,
                 const std::vector<AfnRiggedMeshExport>& rigs,
-                const std::vector<PSPRigExport>& pspRigs,
+                const std::vector<AfnRigExport>& pspRigs,
                 int playerRigIdx,
                 std::string& errorMsg);
 

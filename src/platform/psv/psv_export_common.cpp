@@ -10,7 +10,7 @@
 // the NDS exporter's EditorToFixed minus the 8.8 fixed-point shift), so the PSP
 // scene proportions line up with what the editor/NDS show.
 
-#include "psp_package.h"
+#include "psv_export_common.h"
 
 #include <fstream>
 #include <sstream>
@@ -36,62 +36,6 @@ static std::string ToWslPath(const std::string& winPath) {
     return p;
 }
 
-#ifdef _WIN32
-// Run a command inside WSL, capturing stdout+stderr. Returns exit code, or -1
-// if WSL itself couldn't be launched.
-static int RunWslCommand(const std::string& shellCmd, std::string& output) {
-    HANDLE hRead, hWrite;
-    SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
-    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) return -1;
-    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
-
-    // Give wsl.exe a real (NUL) stdin. The editor is a GUI app with no console,
-    // so GetStdHandle(STD_INPUT_HANDLE) is NULL and wsl.exe blocks on it forever
-    // (the "stuck building" hang). NUL returns EOF immediately.
-    HANDLE hNul = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                              &sa, OPEN_EXISTING, 0, nullptr);
-
-    STARTUPINFOA si = {}; si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdOutput = hWrite; si.hStdError = hWrite;
-    si.hStdInput = hNul;
-
-    PROCESS_INFORMATION pi = {};
-    std::string cmdLine = "wsl.exe bash -lc \"" + shellCmd + "\"";
-    BOOL ok = CreateProcessA(nullptr, (LPSTR)cmdLine.c_str(), nullptr, nullptr,
-                             TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
-    CloseHandle(hWrite);
-    if (hNul != INVALID_HANDLE_VALUE) CloseHandle(hNul);
-    if (!ok) { CloseHandle(hRead); output = "Failed to launch WSL (is it installed?)"; return -1; }
-
-    // Drain stdout by POLLING, not by waiting for pipe EOF: wsl.exe leaves a
-    // relay/VM process holding the inherited write-handle open after the build
-    // finishes, so a plain ReadFile-until-EOF loop blocks forever (the "endless
-    // building" hang) even though make already exited. Instead, read whatever is
-    // available and stop once the wsl process itself has exited.
-    output.clear();
-    char buf[512];
-    for (;;) {
-        DWORD avail = 0;
-        if (PeekNamedPipe(hRead, nullptr, 0, nullptr, &avail, nullptr) && avail > 0) {
-            DWORD n = 0;
-            DWORD toRead = avail < (sizeof(buf) - 1) ? avail : (sizeof(buf) - 1);
-            if (ReadFile(hRead, buf, toRead, &n, nullptr) && n > 0) { buf[n] = 0; output += buf; }
-        } else if (WaitForSingleObject(pi.hProcess, 0) == WAIT_OBJECT_0) {
-            // Process exited; one last peek to flush any final bytes, then done.
-            if (PeekNamedPipe(hRead, nullptr, 0, nullptr, &avail, nullptr) && avail > 0) continue;
-            break;
-        } else {
-            Sleep(15);
-        }
-    }
-    DWORD code = 1; GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hProcess); CloseHandle(pi.hThread); CloseHandle(hRead);
-    return (int)code;
-}
-#else
-static int RunWslCommand(const std::string&, std::string& output) { output = "WSL build only supported on Windows host"; return -1; }
-#endif
 
 // editor coords -> PSP world px
 static float WX(float e) { return (e + 512.0f) / 4.0f; }   // X/Z
@@ -120,7 +64,7 @@ static unsigned int Rgb15ToAbgr(unsigned short c, bool opaque) {
 }
 
 // ---- header generation ----------------------------------------------------
-static bool GeneratePSPMapData(const std::string& runtimeDir,
+static bool GenerateSharedMapData(const std::string& runtimeDir,
                                const char* hdrPrefix, const char* dataInclude,
                                const std::vector<AfnSpriteExport>& sprites,
                                const AfnCameraExport& camera,
@@ -381,8 +325,8 @@ static bool GeneratePSPMapData(const std::string& runtimeDir,
 // Emitted as its own header (compiled by rig.c) so the bulky animation data
 // stays out of mapdata.c. Geometry is raw model-space; the runtime CPU-skins
 // (skinned = animPose[bone]·baseVert) then scales/translates to the player.
-static bool GeneratePSPRigData(const std::string& runtimeDir, const char* hdrPrefix,
-                               const std::vector<PSPRigExport>& pspRigs,
+static bool GenerateSharedRigData(const std::string& runtimeDir, const char* hdrPrefix,
+                               const std::vector<AfnRigExport>& pspRigs,
                                int playerRigIdx,
                                const std::vector<AfnSpriteExport>& sprites,
                                std::string& errorMsg) {
@@ -396,7 +340,7 @@ static bool GeneratePSPRigData(const std::string& runtimeDir, const char* hdrPre
               && pspRigs[playerRigIdx].boneCount > 0;
     if (!ok) { f << "// (no player rig in this scene)\n"; return true; }
 
-    const PSPRigExport& rig = pspRigs[playerRigIdx];
+    const AfnRigExport& rig = pspRigs[playerRigIdx];
     int bc = rig.boneCount;
     int vc = (int)rig.verts.size();
     int mc = (int)rig.materials.size(); if (mc < 1) mc = 1;
@@ -479,7 +423,7 @@ static bool GeneratePSPRigData(const std::string& runtimeDir, const char* hdrPre
         f << "#define AFN_RIG_IDX" << g << "_COUNT " << gi.size() << "\n";
 
         // Material texture (RGBA8 palette -> ABGR8888).
-        const PSPRigMaterial& M = (g < (int)rig.materials.size()) ? rig.materials[g] : PSPRigMaterial{};
+        const AfnRigMaterial& M = (g < (int)rig.materials.size()) ? rig.materials[g] : AfnRigMaterial{};
         bool tex = M.textured && M.texW > 0 && !M.pixels.empty();
         if (tex) {
             int n = M.texW * M.texH;
@@ -505,7 +449,7 @@ static bool GeneratePSPRigData(const std::string& runtimeDir, const char* hdrPre
     f << "};\n";
     f << "static const unsigned int* const afn_rig_tex_ptrs[" << mc << "] = {";
     for (int g = 0; g < mc; g++) {
-        const PSPRigMaterial& M = (g < (int)rig.materials.size()) ? rig.materials[g] : PSPRigMaterial{};
+        const AfnRigMaterial& M = (g < (int)rig.materials.size()) ? rig.materials[g] : AfnRigMaterial{};
         bool tex = M.textured && M.texW > 0 && !M.pixels.empty();
         f << (tex ? (std::string("afn_rig_tex")+std::to_string(g)) : std::string("0")) << ",";
     }
@@ -519,12 +463,12 @@ static bool GeneratePSPRigData(const std::string& runtimeDir, const char* hdrPre
 
     // Clips: per clip frameCount*boneCount poses {px,py,pz,qw,qx,qy,qz}.
     for (int c = 0; c < cc; c++) {
-        const PSPRigClip& cl = rig.clips[c];
+        const AfnRigClip& cl = rig.clips[c];
         int nf = cl.frameCount;
         f << "static const float afn_rig_clip" << c << "[" << (nf*bc*7) << "] = {\n";
         for (int fr = 0; fr < nf; fr++) {
             for (int b = 0; b < bc; b++) {
-                const PSPRigBonePose& P = cl.frames[fr*bc + b];
+                const AfnRigBonePose& P = cl.frames[fr*bc + b];
                 f << Flt(P.px) << "," << Flt(P.py) << "," << Flt(P.pz) << ","
                   << Flt(P.qw) << "," << Flt(P.qx) << "," << Flt(P.qy) << "," << Flt(P.qz) << ",\n";
             }
@@ -567,7 +511,7 @@ static bool GeneratePSPRigData(const std::string& runtimeDir, const char* hdrPre
 }
 
 // ---- sky panorama (psp_sky.h) ---------------------------------------------
-static bool GeneratePSPSky(const std::string& runtimeDir, const char* hdrPrefix,
+static bool GenerateSharedSky(const std::string& runtimeDir, const char* hdrPrefix,
                            const std::vector<AfnSkyFrameExport>& skyFrames,
                            std::string& errorMsg) {
     std::string path = runtimeDir + "\\include\\" + hdrPrefix + "sky.h";
@@ -597,7 +541,7 @@ static bool GeneratePSPSky(const std::string& runtimeDir, const char* hdrPrefix,
 // Frame pixels are pixels[py*64+px] = palette index (0 = transparent); palette
 // is RGBA8 (same byte order the rig palettes use). Directional/8-facing sprites
 // are simplified to their default anim here (facing-pick is a follow-up).
-static bool GeneratePSPSprites(const std::string& runtimeDir, const char* hdrPrefix,
+static bool GenerateSharedSprites(const std::string& runtimeDir, const char* hdrPrefix,
                                const std::vector<AfnSpriteExport>& sprites,
                                const std::vector<AfnSpriteAssetExport>& assets,
                                std::string& errorMsg) {
@@ -826,7 +770,7 @@ static bool GeneratePSPSprites(const std::string& runtimeDir, const char* hdrPre
 // but with plain C types (NDS s8/s16/u8 -> signed char/short/unsigned char) and
 // adds per-instance SFX routing (afn_snd_is_sfx/sfx_sample/sfx_gain/sfx_fifo) so
 // afn_play_sound() on an SFX-type instance fires the one-shot sample directly.
-static bool GeneratePSPSound(const std::string& runtimeDir, const char* hdrPrefix,
+static bool GenerateSharedSound(const std::string& runtimeDir, const char* hdrPrefix,
                              const std::vector<AfnSoundSampleExport>& soundSamples,
                              const std::vector<AfnSoundInstanceExport>& soundInstances,
                              std::string& errorMsg) {
@@ -986,8 +930,8 @@ static bool GeneratePSPSound(const std::string& runtimeDir, const char* hdrPrefi
 // Horizontal radius = the larger XZ half-extent; vertical band = center +/- Y
 // half-extent (offset from the floor-snapped player Y). Always written so
 // collision.c can #include it; emits nothing when there's no box.
-static bool GeneratePSPPlayerCol(const std::string& runtimeDir, const char* hdrPrefix,
-                                 const std::vector<PSPRigExport>& pspRigs,
+static bool GenerateSharedPlayerCol(const std::string& runtimeDir, const char* hdrPrefix,
+                                 const std::vector<AfnRigExport>& pspRigs,
                                  int playerRigIdx,
                                  const std::vector<AfnSpriteExport>& sprites,
                                  std::string& errorMsg) {
@@ -1001,7 +945,7 @@ static bool GeneratePSPPlayerCol(const std::string& runtimeDir, const char* hdrP
         f << "// (no custom collision box — runtime uses its default cylinder)\n";
         return true;
     }
-    const PSPRigExport& rig = pspRigs[playerRigIdx];
+    const AfnRigExport& rig = pspRigs[playerRigIdx];
 
     float pscale = 1.0f;
     for (const auto& s : sprites)
@@ -1038,75 +982,22 @@ bool GenerateAffinityHeaders(const std::string& runtimeDir,
                              const std::vector<AfnSoundSampleExport>& soundSamples,
                              const std::vector<AfnSoundInstanceExport>& soundInstances,
                              const std::vector<AfnSkyFrameExport>& skyFrames,
-                             const std::vector<PSPRigExport>& pspRigs,
+                             const std::vector<AfnRigExport>& pspRigs,
                              int playerRigIdx,
                              std::string& errorMsg,
                              bool emitRig) {
-    if (!GeneratePSPMapData(runtimeDir, hdrPrefix, dataInclude, sprites, camera, meshes, orbitDist, errorMsg))
+    if (!GenerateSharedMapData(runtimeDir, hdrPrefix, dataInclude, sprites, camera, meshes, orbitDist, errorMsg))
         return false;
-    if (emitRig && !GeneratePSPRigData(runtimeDir, hdrPrefix, pspRigs, playerRigIdx, sprites, errorMsg))
+    if (emitRig && !GenerateSharedRigData(runtimeDir, hdrPrefix, pspRigs, playerRigIdx, sprites, errorMsg))
         return false;
-    if (!GeneratePSPSky(runtimeDir, hdrPrefix, skyFrames, errorMsg))
+    if (!GenerateSharedSky(runtimeDir, hdrPrefix, skyFrames, errorMsg))
         return false;
-    if (!GeneratePSPSprites(runtimeDir, hdrPrefix, sprites, assets, errorMsg))
+    if (!GenerateSharedSprites(runtimeDir, hdrPrefix, sprites, assets, errorMsg))
         return false;
-    if (!GeneratePSPSound(runtimeDir, hdrPrefix, soundSamples, soundInstances, errorMsg))
+    if (!GenerateSharedSound(runtimeDir, hdrPrefix, soundSamples, soundInstances, errorMsg))
         return false;
-    if (!GeneratePSPPlayerCol(runtimeDir, hdrPrefix, pspRigs, playerRigIdx, sprites, errorMsg))
+    if (!GenerateSharedPlayerCol(runtimeDir, hdrPrefix, pspRigs, playerRigIdx, sprites, errorMsg))
         return false;
-    return true;
-}
-
-bool PackagePSP(const std::string& runtimeDir,
-                const std::string& outputPath,
-                const std::vector<AfnSpriteExport>& sprites,
-                const std::vector<AfnSpriteAssetExport>& assets,
-                const AfnCameraExport& camera,
-                const std::vector<AfnMeshExport>& meshes,
-                float orbitDist,
-                const std::vector<AfnSoundSampleExport>& soundSamples,
-                const std::vector<AfnSoundInstanceExport>& soundInstances,
-                const std::vector<AfnSkyFrameExport>& skyFrames,
-                const AfnScriptExport& /*script*/,
-                const std::vector<AfnBlueprintExport>& /*blueprints*/,
-                const std::vector<AfnBlueprintInstanceExport>& /*bpInstances*/,
-                const std::vector<AfnHudElementExport>& /*hudElements*/,
-                const std::vector<AfnTmSceneExport>& /*tmScenes*/,
-                int /*startMode*/,
-                float /*midiMasterDb*/,
-                const std::vector<AfnRiggedMeshExport>& /*rigs*/,
-                const std::vector<PSPRigExport>& pspRigs,
-                int playerRigIdx,
-                std::string& errorMsg) {
-    if (!GenerateAffinityHeaders(runtimeDir, "psp_", "affinity_psp.h",
-                                 sprites, assets, camera, meshes, orbitDist,
-                                 soundSamples, soundInstances, skyFrames,
-                                 pspRigs, playerRigIdx, errorMsg))
-        return false;
-
-    // Build EBOOT.PBP via WSL/pspdev.
-    std::string wslDir = ToWslPath(runtimeDir);
-    // `make clean` first: only psp_mapdata.h changes between exports, and the
-    // pspsdk Makefile doesn't track header deps, so a plain `make` would leave
-    // mapdata.o (and the EBOOT) stale. Use `;` not `&&` so the build still runs
-    // if clean trips on a locked EBOOT (e.g. PPSSPP holding it open).
-    std::string buildCmd = "cd '" + wslDir + "' && make clean; make 2>&1";
-    std::string out;
-    int rc = RunWslCommand(buildCmd, out);
-    if (rc != 0) {
-        errorMsg = "psp_mapdata.h generated, but the PSP build failed (rc=" + std::to_string(rc) + "):\n" + out
-                 + "\n\nIf pspdev/WSL isn't set up yet, the header is still written — build manually with `make` in psp_runtime.";
-        return false;
-    }
-
-    // Copy EBOOT.PBP to the requested output if a path was given.
-    if (!outputPath.empty()) {
-        std::string src = wslDir + "/EBOOT.PBP";
-        std::string dst = ToWslPath(outputPath);
-        std::string cp = "cp '" + src + "' '" + dst + "' 2>&1";
-        std::string cpout;
-        RunWslCommand(cp, cpout);   // best-effort
-    }
     return true;
 }
 

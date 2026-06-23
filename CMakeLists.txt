@@ -73,10 +73,10 @@ add_executable(AffinityEditor WIN32
     src/editor/rigged_gltf.cpp
     src/viewport/mode7_preview.cpp
     src/navmesh/NavMeshBuilder.cpp
-    # PSV-only engine: GBA/NDS exporters retired. psp_package.cpp is kept only for
-    # the shared GenerateAffinityHeaders the PSV exporter calls (to be folded into
-    # psv_package). gba_package.h stays as the platform-neutral export IR.
-    src/platform/psp/psp_package.cpp
+    # PSV-only engine: GBA/NDS/PSP exporters retired. psv_export_common.cpp holds
+    # the shared header generator (GenerateAffinityHeaders); gba_package.h stays as
+    # the platform-neutral export IR (Afn* types).
+    src/platform/psv/psv_export_common.cpp
     src/platform/psv/psv_package.cpp
     src/platform/common/node_script_emit.cpp
     affinity.rc
