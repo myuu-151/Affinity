@@ -1626,23 +1626,12 @@ static void hud_render(void) {
             const AfnHudStop* cst = &afn_hud_stops[mel->stopStart + sidx];
             bx = mel->screenX + cst->x + mel->curX;
             by = mel->screenY + cst->y + mel->curY;
-#ifdef AFN_HAS_HUD_ANIM
-            // A cursor-element's keyframe layers (e.g. a blink) aren't started by any
-            // node, so auto-play them while it's shown — otherwise the layer sticks at
-            // frame 0 and a frame-0 Hide keyframe would blank the cursor out entirely.
-            // Also keep them LOOPING even if the layer isn't flagged loop: a one-shot
-            // blink would otherwise play once and stick on its last frame (often an
-            // invisible op=0 keyframe), making the cursor vanish for good. A cursor
-            // should animate the whole time it's shown.
-            for (int k = 0; k < el->pieceCount; k++) {
-                int _li = afn_hud_piece_layer[el->pieceStart + k];
-                if (_li >= 0) {
-                    afn_hud_layer_active[_li] = 1;
-                    if (afn_hud_layer[_li].length > 0 && afn_hud_layer_frame[_li] >= afn_hud_layer[_li].length)
-                        afn_hud_layer_frame[_li] = 0;
-                }
-            }
-#endif
+            // NOTE: a cursor-element's keyframe layers (e.g. a blink) are NOT
+            // auto-played here — that was a runtime override that broke the
+            // "purely node-driven" rule. Drive the cursor's blink explicitly with
+            // a Play Hud Anim node (on the menu's OnStart). The layer must be
+            // flagged Loop in the editor so it doesn't stick on a frame-0/op=0
+            // keyframe and blank the cursor out.
         } else
 #endif
         {
@@ -2030,6 +2019,13 @@ int main(void)
             // Silence the previous scene's music/SFX so the entered scene starts
             // clean (its OnStart Play Sound below starts fresh).
             afn_stop_sound();
+            // Clear any transient menu freeze before re-running OnStart. A 2D
+            // cursor menu's ShowHUD sets afn_player_frozen=1 (+ afn_play_anim=-1),
+            // and those are globals that otherwise LEAK across the scene swap —
+            // loading from the char-select menu into the 3D gameplay scene would
+            // leave the player stuck until something happened to UnfreezePlayer.
+            // A menu scene re-freezes itself in afn_bp_dispatch_start() below.
+            afn_player_frozen = 0; afn_play_anim = 0;
             // Re-run the entered scene's blueprint OnStart hooks (ShowHUD, music,
             // cursor init, ...). afn_bp_dispatch_start is scene-gated, so only the
             // NEW scene's blueprints fire — boot only ran it for the start scene,
@@ -2646,7 +2642,11 @@ int main(void)
                     float speed = afn_npc_nav[i][1];
                     float stopD = afn_npc_nav[i][2];
                     int   repat = (int)afn_npc_nav[i][3];
-                    if (mode != 0 && afn_nav_is_ready() && !afn_player_frozen) {
+                    // NOTE: do NOT gate on afn_player_frozen here. That flag is a
+                    // player-INPUT freeze (FreezePlayer node — used for block
+                    // stances, hit-stun, etc.); enemies are world entities and
+                    // must keep navigating while the player is locked in place.
+                    if (mode != 0 && afn_nav_is_ready()) {
                         float pdx = playerX - s_npcX[i], pdz = playerZ - s_npcZ[i];
                         float pd2 = pdx*pdx + pdz*pdz;
                         if (mode == 1 && pd2 <= stopD*stopD) {
