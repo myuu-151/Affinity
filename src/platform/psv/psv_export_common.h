@@ -3,8 +3,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
-#include "../gba/gba_package.h"  // Reuse export structs — they're platform-neutral
-#include "../nds/nds_package.h"  // AfnRiggedMeshExport lives here
+#include "../common/afn_export_ir.h"  // Reuse export structs — they're platform-neutral
 
 namespace Affinity
 {

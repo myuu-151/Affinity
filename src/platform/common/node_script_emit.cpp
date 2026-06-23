@@ -3,7 +3,7 @@
 // SAME C). The emitted code is platform-neutral (afn_* vars, KEY_*); each
 // runtime defines the variables it consumes and leaves the rest inert.
 #include "node_script_emit.h"
-#include "../gba/gba_package.h"
+#include "afn_export_ir.h"
 #include <vector>
 #include <set>
 #include <string>

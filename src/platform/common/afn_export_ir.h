@@ -767,4 +767,43 @@ bool PackageGBA(const std::string& runtimeDir,
                 bool showFps = false,
                 bool smoothSky = false);
 
+// A rigged (DSMA skinned) mesh, pre-converted to DS display-list / animation
+// blobs (DsmaEmit). Part of the export IR: the shared PSV header generator
+// accepts it (PSV ignores it and CPU-skins from AfnRigExport instead); the
+// dormant NDS packager wrote these as static u32 arrays for DSMA_DrawModel.
+struct AfnRiggedMeshExport
+{
+    std::string name;
+    // One geometry group per material slot. Each group is its own DSM (only the
+    // triangles tagged with that material) plus its own base-color texture; the
+    // DS binds one texture per draw, so multi-material rigs draw group-by-group.
+    // All groups share the same bones, so they share the clips' DSA below.
+    struct MatGroup {
+        std::vector<uint32_t> dsm;    // DSM (geometry display list) for this slot
+        bool textured = false;
+        int texW = 0, texH = 0;
+        std::vector<uint8_t> texPixels;   // one byte per pixel, palette index 0..255
+        uint32_t texPalette[256] = {};    // RGBA8 (256-colour, GL_RGB256)
+        int wrapMode = 0;                 // UV addressing: 0=Clip(clamp) 1=Extend(tile) 2=Mirror
+    };
+    std::vector<MatGroup> groups;
+    struct Clip {
+        std::string name;
+        int frames = 0;
+        bool loop = true;             // false = play once, hold last frame
+        std::vector<uint32_t> dsa;    // DSA (animation)
+    };
+    std::vector<Clip> clips;
+    bool cameraLight = false;         // light follows the camera (headlamp)
+    float lightX = 0.0f, lightY = 0.0f; // headlamp aim (pitch/yaw degrees)
+    int  cullMode = 0;                // 0 = Back, 1 = Front, 2 = None
+    bool useAlpha = false;            // palette index 0 = transparent (DS COLOR0_TRANSPARENT)
+    int   collisionType = 0;          // 0 = None, 1 = Box (AABB proxy for player bump)
+    float colCenter[3]  = {0,0,0};    // box center offset, rig-local units
+    float colExtents[3] = {1,1,1};    // box half-extents, rig-local units
+
+    // Convenience: a rig is renderable if it has at least one non-empty group.
+    bool hasGeometry() const { return !groups.empty() && !groups[0].dsm.empty(); }
+};
+
 } // namespace Affinity

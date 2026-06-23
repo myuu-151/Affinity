@@ -1,7 +1,7 @@
 #pragma once
 #include <ostream>
 #include <vector>
-#include "../gba/gba_package.h"
+#include "afn_export_ir.h"
 
 namespace Affinity {
 

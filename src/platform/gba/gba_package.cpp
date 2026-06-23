@@ -1,4 +1,4 @@
-#include "gba_package.h"
+#include "../common/afn_export_ir.h"
 
 #include <fstream>
 #include <sstream>
