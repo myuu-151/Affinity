@@ -17219,24 +17219,10 @@ void FrameTick(float dt)
             ImGui::EndMenu();
         }
         ImGui::Separator();
-        if (ImGui::RadioButton("NDS", sBuildTarget == BuildTarget::NDS))
-            sBuildTarget = BuildTarget::NDS;
-        ImGui::SameLine();
-        if (ImGui::RadioButton("GBA", sBuildTarget == BuildTarget::GBA))
-            sBuildTarget = BuildTarget::GBA;
-        ImGui::SameLine();
-        if (ImGui::RadioButton("PSP", sBuildTarget == BuildTarget::PSP))
-            sBuildTarget = BuildTarget::PSP;
-        ImGui::SameLine();
-        if (ImGui::RadioButton("PSV", sBuildTarget == BuildTarget::PSV))
-            sBuildTarget = BuildTarget::PSV;
-        if (sBuildTarget == BuildTarget::NDS) {
-            ImGui::SameLine();
-            if (ImGui::Checkbox("AA", &sNdsAntialiasing)) sProjectDirty = true;
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
-                "NDS hardware anti-alias: smooths mesh edges but fringes\n"
-                "textured polys (incl. sky panorama).");
-        }
+        // PSV-only engine: GBA/NDS/PSP targets retired (see ASSET_PIPELINE_ROADMAP /
+        // PSV consolidation). The build always targets the Vita.
+        sBuildTarget = BuildTarget::PSV;
+        ImGui::TextDisabled("Target: PSV");
         bool buildFromMenu = false;
         if (buildFromMenu || sBuildRequested)
         {
@@ -18777,42 +18763,10 @@ void FrameTick(float dt)
                 }
 
                 bool exportNdsAa = sNdsAntialiasing;
-                // Pre-build DSMA blobs (DSM geometry + per-clip DSA) for every
-                // rigged mesh, so the packager only writes static arrays.
+                // PSV CPU-skins rigs from exportPspRigs (below); the DS-baked
+                // DSM/DSA rig blobs retired with the NDS target. Kept empty so the
+                // shared header generator's signature is satisfied (PSV ignores it).
                 std::vector<Affinity::GBARiggedMeshExport> exportRigs;
-                for (const auto& rm : sRiggedMeshAssets) {
-                    Affinity::GBARiggedMeshExport re;
-                    re.name = rm.name;
-                    re.cameraLight = rm.cameraLight;
-                    re.lightX = rm.lightX; re.lightY = rm.lightY;
-                    re.cullMode = rm.cullMode;
-                    re.useAlpha = rm.useAlpha;
-                    re.collisionType = rm.collisionType;
-                    for (int k = 0; k < 3; k++) { re.colCenter[k] = rm.colCenter[k]; re.colExtents[k] = rm.colExtents[k]; }
-                    // One group per material slot: filter triangles by slot and
-                    // scale UVs by that slot's texture size.
-                    for (int ms = 0; ms < rm.matCount(); ms++) {
-                        Affinity::GBARiggedMeshExport::MatGroup g;
-                        int tw = rm.matTexW(ms) > 0 ? rm.matTexW(ms) : 128;
-                        int th = rm.matTexH(ms) > 0 ? rm.matTexH(ms) : 128;
-                        g.dsm = DsmaEmit::BuildDSM(rm, tw, th, rm.smoothShading, ms);
-                        g.textured = rm.matTextured(ms);
-                        g.texW = rm.matTexW(ms); g.texH = rm.matTexH(ms);
-                        g.texPixels = rm.matPixels(ms);
-                        memcpy(g.texPalette, rm.matPalette(ms), sizeof(g.texPalette));
-                        g.wrapMode = rm.matWrap(ms);
-                        re.groups.push_back(std::move(g));
-                    }
-                    for (int c = 0; c < (int)rm.clips.size(); c++) {
-                        Affinity::GBARiggedMeshExport::Clip cl;
-                        cl.name = rm.clips[c].name;
-                        cl.frames = rm.clips[c].frameCount;
-                        cl.loop = rm.clips[c].loop;
-                        cl.dsa = DsmaEmit::BuildDSA(rm, c);
-                        re.clips.push_back(std::move(cl));
-                    }
-                    exportRigs.push_back(std::move(re));
-                }
 
                 // Raw (un-baked) rig data for the PSP runtime — CPU-skinned on
                 // device. Parallel to exportRigs but keeps base verts + per-frame
@@ -18872,39 +18826,14 @@ void FrameTick(float dt)
                              exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, target,
                              exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportShowFps, exportSmoothSky, exportNdsAa, exportRigs, exportPspRigs, playerPspRigIdx]() {
                     std::string err;
-                    bool ok;
-                    if (target == BuildTarget::NDS)
-                        ok = PackageNDS(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                                        exportMeshes, exportOrbitDist,
-                                        exportSoundSamples, exportSoundInstances,
-                                        exportSkyFrames, exportNdsAa,
-                                        exportScript, exportBlueprints, exportBpInstances,
-                                        exportHudElements, exportTmScenes, exportStartMode,
-                                        // Per-sequence master dB is baked into each
-                                        // note's velocity above, so the global macro
-                                        // stays at unity (0 dB).
-                                        0.0f, exportRigs, err);
-                    else if (target == BuildTarget::PSP)
-                        ok = PackagePSP(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
+                    (void)target;   // PSV-only engine
+                    bool ok = PackagePSV(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
                                         exportMeshes, exportOrbitDist,
                                         exportSoundSamples, exportSoundInstances,
                                         exportSkyFrames,
                                         exportScript, exportBlueprints, exportBpInstances,
                                         exportHudElements, exportTmScenes, exportStartMode,
                                         0.0f, exportRigs, exportPspRigs, playerPspRigIdx, err);
-                    else if (target == BuildTarget::PSV)
-                        ok = PackagePSV(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                                        exportMeshes, exportOrbitDist,
-                                        exportSoundSamples, exportSoundInstances,
-                                        exportSkyFrames,
-                                        exportScript, exportBlueprints, exportBpInstances,
-                                        exportHudElements, exportTmScenes, exportStartMode,
-                                        0.0f, exportRigs, exportPspRigs, playerPspRigIdx, err);
-                    else
-                        ok = PackageGBA(rtDirStr, outPath, exportSprites, exportAssets, exportCam,
-                                        exportMeshes, exportOrbitDist, exportScript, exportBlueprints, exportBpInstances, exportTmScenes, exportHudElements, exportSoundSamples, exportSoundInstances, exportStartMode, err,
-                                        sM7FloorPixels, sM7FloorW, sM7FloorH, sM7FloorSize,
-                                        exportSkyFrames, exportSkyAnimSpeed, exportDeltaTime, exportShowFps, exportSmoothSky);
                     sPackageSuccess = ok;
                     sPackageMsg = ok
                         ? ("ROM saved: " + outPath + "\n\n" + err)
