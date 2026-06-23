@@ -26,3 +26,14 @@ affinity-v*.zip
 # Built GBA ROMs (retired target)
 *.gba
 models/
+
+# Dormant runtimes — PSV is the active target. Kept on disk (still bundled
+# into releases from the working tree) but no longer tracked in git.
+nds_runtime/
+psp_runtime/
+
+# Generated PSV data headers — huge texture/audio arrays (60-80 MB each) that
+# are regenerated on every editor export. Tracking them churned the repo and
+# OOM'd pushes. Kept on disk for local builds; regenerate by exporting.
+psv_runtime/include/psv_hud.h
+psv_runtime/include/psv_sound.h
