@@ -550,6 +550,7 @@ struct CameraStartObject
     bool horizonClamp = false; // clamp vertices above camera to horizon
     bool faceCull = false;     // skip faces with any vertex above camera
     bool dynamicHorizon = false; // shift horizon line based on floor slope
+    bool wallAware = false;    // PSV: pull the orbit camera in when a wall is between it and the player (no clip-through)
 };
 
 // Map data — the floor plane rendered by Mode 4

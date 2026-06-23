@@ -8046,6 +8046,8 @@ const float afn_cam_start_z = 128.0f;
 const float afn_cam_start_h = 12.5f;
 const float afn_cam_start_angle = 0.0f;
 const float afn_cam_start_pitch = 10.0f;
+#define AFN_HAS_CAM_WALL 1
+const int afn_cam_wall_aware = 1;
 const float afn_orbit_dist = 18.215f;
 const float afn_draw_distance = 0.0f;
 const float afn_walk_speed = 35.0f;

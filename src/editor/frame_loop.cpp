@@ -7275,6 +7275,7 @@ static bool SaveProject(const std::string& path)
     fprintf(f, "horizon_clamp=%d\n", sCamObj.horizonClamp ? 1 : 0);
     fprintf(f, "face_cull=%d\n", sCamObj.faceCull ? 1 : 0);
     fprintf(f, "dynamic_horizon=%d\n", sCamObj.dynamicHorizon ? 1 : 0);
+    fprintf(f, "wall_aware=%d\n", sCamObj.wallAware ? 1 : 0);
     fprintf(f, "icon_scale=%.6f\n", sCamObjEditorScale);
     fprintf(f, "build_target=%d\nstart_scene_mode=%d\n\n", (int)sBuildTarget, sLastSceneTabMode);
 
@@ -7845,7 +7846,7 @@ static bool SaveProject(const std::string& path)
             }
         }
         // Camera
-        fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d,%d,%.1f,%.1f,%.1f,%d,%.2f\n",
+        fprintf(f, "msCam=%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%.6f,%.1f,%d,%d,%d,%d,%.1f,%.1f,%.1f,%d,%.2f,%d\n",
                 ms.camera.x, ms.camera.z, ms.camera.height, ms.camera.angle, ms.camera.horizon,
                 ms.camera.walkSpeed, ms.camera.sprintSpeed,
                 ms.camera.walkEaseIn, ms.camera.walkEaseOut, ms.camera.sprintEaseIn, ms.camera.sprintEaseOut,
@@ -7856,7 +7857,7 @@ static bool SaveProject(const std::string& path)
                 ms.camera.horizonClamp ? 1 : 0, ms.camera.dynamicHorizon ? 1 : 0, ms.camera.faceCull ? 1 : 0,
                 ms.camera.spriteDrawDistance,
                 ms.camera.orbitCamEaseIn, ms.camera.orbitCamEaseOut, ms.camera.orbitMaxDelta,
-                ms.camera.orbitPitch);
+                ms.camera.orbitPitch, ms.camera.wallAware ? 1 : 0);
         // Scene-level blueprint
         if (ms.blueprintIdx >= 0) {
             fprintf(f, "msSceneBp=%d,%d", ms.blueprintIdx, ms.instanceParamCount);
@@ -8417,6 +8418,7 @@ static bool LoadProject(const std::string& path)
             else if (sscanf(line, "horizon_clamp=%d", &ival) == 1) sCamObj.horizonClamp = (ival != 0);
             else if (sscanf(line, "face_cull=%d", &ival) == 1) sCamObj.faceCull = (ival != 0);
             else if (sscanf(line, "dynamic_horizon=%d", &ival) == 1) sCamObj.dynamicHorizon = (ival != 0);
+            else if (sscanf(line, "wall_aware=%d", &ival) == 1) sCamObj.wallAware = (ival != 0);
             else if (sscanf(line, "icon_scale=%f", &fval) == 1) sCamObjEditorScale = fval;
             else if (sscanf(line, "build_target=%d", &ival) == 1) sBuildTarget = (BuildTarget)ival;
             else if (sscanf(line, "start_scene_mode=%d", &ival) == 1) sLastSceneTabMode = ival;
@@ -9891,19 +9893,19 @@ static bool LoadProject(const std::string& path)
             {
                 MapScene& ms = sMapScenes.back();
                 CameraStartObject& c = ms.camera;
-                int sti = 0, sf = 0, cb = 0, ap = 0, hc = 0, dh = 0, fc = 0;
+                int sti = 0, sf = 0, cb = 0, ap = 0, hc = 0, dh = 0, fc = 0, wa = 0;
                 float sdd = 0.0f;
                 float oei = c.orbitCamEaseIn, oeo = c.orbitCamEaseOut;
                 int omd = c.orbitMaxDelta;
                 float op = c.orbitPitch;
-                int matched = sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d,%f,%f,%f,%d,%f",
+                int matched = sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d,%f,%f,%f,%d,%f,%d",
                     &c.x, &c.z, &c.height, &c.angle, &c.horizon,
                     &c.walkSpeed, &c.sprintSpeed,
                     &c.walkEaseIn, &c.walkEaseOut, &c.sprintEaseIn, &c.sprintEaseOut,
                     &c.jumpForce, &c.gravity, &c.maxFallSpeed,
                     &c.jumpCamLand, &c.jumpCamAir, &c.autoOrbitSpeed, &c.jumpDampen,
                     &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc, &sdd,
-                    &oei, &oeo, &omd, &op);
+                    &oei, &oeo, &omd, &op, &wa);
                 c.smallTriCull = sti;
                 c.skipFloor = (sf != 0);
                 c.coverageBuf = (cb != 0);
@@ -9916,6 +9918,7 @@ static bool LoadProject(const std::string& path)
                 if (matched >= 30) c.orbitCamEaseOut = oeo;
                 if (matched >= 31) c.orbitMaxDelta   = omd;
                 if (matched >= 32) c.orbitPitch      = op;
+                if (matched >= 33) c.wallAware       = (wa != 0);
             }
             else if (strncmp(line, "msSceneBp=", 10) == 0 && !sMapScenes.empty())
             {
@@ -10366,19 +10369,19 @@ static bool LoadProject(const std::string& path)
             {
                 MapScene& ms = sM7Scenes.back();
                 CameraStartObject& c = ms.camera;
-                int sti = 0, sf = 0, cb = 0, ap = 0, hc = 0, dh = 0, fc = 0;
+                int sti = 0, sf = 0, cb = 0, ap = 0, hc = 0, dh = 0, fc = 0, wa = 0;
                 float sdd = 0.0f;
                 float oei = c.orbitCamEaseIn, oeo = c.orbitCamEaseOut;
                 int omd = c.orbitMaxDelta;
                 float op = c.orbitPitch;
-                int matched = sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d,%f,%f,%f,%d,%f",
+                int matched = sscanf(line + 6, "%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%f,%d,%d,%d,%f,%f,%d,%d,%d,%d,%f,%f,%f,%d,%f,%d",
                     &c.x, &c.z, &c.height, &c.angle, &c.horizon,
                     &c.walkSpeed, &c.sprintSpeed,
                     &c.walkEaseIn, &c.walkEaseOut, &c.sprintEaseIn, &c.sprintEaseOut,
                     &c.jumpForce, &c.gravity, &c.maxFallSpeed,
                     &c.jumpCamLand, &c.jumpCamAir, &c.autoOrbitSpeed, &c.jumpDampen,
                     &sti, &sf, &cb, &c.drawDistance, &c.camPitch, &ap, &hc, &dh, &fc, &sdd,
-                    &oei, &oeo, &omd, &op);
+                    &oei, &oeo, &omd, &op, &wa);
                 c.smallTriCull = sti;
                 c.skipFloor = (sf != 0);
                 c.coverageBuf = (cb != 0);
@@ -10391,6 +10394,7 @@ static bool LoadProject(const std::string& path)
                 if (matched >= 30) c.orbitCamEaseOut = oeo;
                 if (matched >= 31) c.orbitMaxDelta   = omd;
                 if (matched >= 32) c.orbitPitch      = op;
+                if (matched >= 33) c.wallAware       = (wa != 0);
             }
             else if (strncmp(line, "m7SceneBp=", 10) == 0 && !sM7Scenes.empty())
             {
@@ -14766,6 +14770,9 @@ static void DrawObjectEditorPanel(ImVec2 pos, ImVec2 size)
         ImGui::Checkbox("Dynamic Horizon##cam", &sCamObj.dynamicHorizon);
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Shift the horizon line based on floor slope.\nTilts the entire viewport on slopes.");
+        ImGui::Checkbox("Wall-Aware Camera##cam", &sCamObj.wallAware);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("PSV: when a wall comes between the orbit camera and the player,\npull the camera in so it doesn't clip through the wall (you keep seeing the player).");
         ImGui::Separator();
         ImGui::DragFloat("Icon Size##cam", &sCamObjEditorScale, 0.01f, 0.1f, 2.0f, "%.2f");
         ImGui::PopItemWidth();
@@ -17427,6 +17434,7 @@ void FrameTick(float dt)
                 exportCam.horizonClamp = sCamObj.horizonClamp;
                 exportCam.dynamicHorizon = sCamObj.dynamicHorizon;
                 exportCam.faceCull = sCamObj.faceCull;
+                exportCam.wallAware = sCamObj.wallAware;
 
                 // Collect sprite assets for export
                 std::vector<GBASpriteAssetExport> exportAssets;

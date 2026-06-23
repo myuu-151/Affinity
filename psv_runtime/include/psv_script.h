@@ -51,9 +51,9 @@ static void afn_bp0_start(void) {
     afn_energy = (100);
     if (afn_energy < 0) afn_energy = 0; if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;
     if (afn_energy >= (33)) {
-    afn_hud_layer_frame[2] = 0;
-    afn_hud_layer_tick[2] = 0;
-    afn_hud_layer_active[2] = 1;
+    afn_hud_layer_frame[3] = 0;
+    afn_hud_layer_tick[3] = 0;
+    afn_hud_layer_active[3] = 1;
     }
     afn_hud_visible[3] = 1;
 #ifdef AFN_HAS_HUD_ANCHOR
@@ -187,15 +187,15 @@ static void afn_bp0_update(void) {
     if (afn_energy >= (33)) {
     if (afn_rise_303 >= afn_frame_count - 1) { afn_rise_303 = afn_frame_count; }
     else { afn_rise_303 = afn_frame_count;
-    afn_hud_layer_frame[2] = 0;
-    afn_hud_layer_tick[2] = 0;
-    afn_hud_layer_active[2] = 1;
+    afn_hud_layer_frame[3] = 0;
+    afn_hud_layer_tick[3] = 0;
+    afn_hud_layer_active[3] = 1;
     }
     }
     if (((afn_energy) < ((33)))) {
-    afn_hud_layer_frame[2] = 0;
-    afn_hud_layer_tick[2] = 0;
-    afn_hud_layer_active[2] = 1;
+    afn_hud_layer_frame[3] = 0;
+    afn_hud_layer_tick[3] = 0;
+    afn_hud_layer_active[3] = 1;
     }
 }
 static void afn_bp0_key_held(void) {

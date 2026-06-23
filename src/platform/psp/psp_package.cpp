@@ -330,6 +330,9 @@ static bool GeneratePSPMapData(const std::string& runtimeDir,
     // Initial orbit pitch (degrees, 0 = auto: derive from height/dist). PSV seeds
     // orbit_pitch from this so the scene starts at a fixed vertical angle.
     f << "const float afn_cam_start_pitch = " << Flt(camera.orbitPitch) << ";\n";
+    // Wall-aware camera (PSV): pull the orbit eye in off walls (no clip-through).
+    f << "#define AFN_HAS_CAM_WALL 1\n";
+    f << "const int afn_cam_wall_aware = " << (camera.wallAware ? 1 : 0) << ";\n";
     f << "const float afn_orbit_dist = " << Flt(orbitDist / 4.0f) << ";\n";
     f << "const float afn_draw_distance = " << Flt(camera.drawDistance > 0 ? camera.drawDistance / 4.0f : 0.0f) << ";\n";
     f << "const float afn_walk_speed = " << Flt(camera.walkSpeed) << ";\n";

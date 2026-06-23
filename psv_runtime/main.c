@@ -825,6 +825,43 @@ static void collide_walls(float* x, float* z, float py) {
     *x=ppx; *z=ppz;
 }
 
+// Nearest wall/ceiling hit along the segment p0 -> p1 (camera-vs-wall test).
+// Returns the hit fraction t in (0,1], or -1 if clear. Floors (flag 1) are
+// ignored so a low eye doesn't snap onto the ground. Möller–Trumbore over the
+// faces in the cells the segment's XZ bbox covers.
+static float collide_ray_walls(float x0,float y0,float z0, float x1,float y1,float z1) {
+    if (!s_cellFaces || !s_faceStamp) return -1.0f;
+    float dx=x1-x0, dy=y1-y0, dz=z1-z0;
+    float bestT = 1.0f; int found = 0;
+    unsigned stamp = ++s_queryStamp;
+    int gx0=cell_x(fminf(x0,x1)), gx1=cell_x(fmaxf(x0,x1));
+    int gz0=cell_z(fminf(z0,z1)), gz1=cell_z(fmaxf(z0,z1));
+    for (int gz=gz0; gz<=gz1; gz++) for (int gx=gx0; gx<=gx1; gx++) {
+        int c=gz*COL_GN+gx; int start=s_cellStart[c], count=s_cellCount[c];
+        for (int i=0;i<count;i++){
+            int fi=s_cellFaces[start+i];
+            if (s_faceStamp[fi]==stamp) continue; s_faceStamp[fi]=stamp;
+            const ColFace* F=&s_faces[fi];
+            if (!(F->flags & (2|4))) continue;   // walls + ceilings block the camera
+            float e1x=F->bx-F->ax, e1y=F->by-F->ay, e1z=F->bz-F->az;
+            float e2x=F->cx-F->ax, e2y=F->cy-F->ay, e2z=F->cz-F->az;
+            float px=dy*e2z-dz*e2y, py=dz*e2x-dx*e2z, pz=dx*e2y-dy*e2x;
+            float det=e1x*px+e1y*py+e1z*pz;
+            if (det>-1e-6f && det<1e-6f) continue;
+            float inv=1.0f/det;
+            float tx=x0-F->ax, ty=y0-F->ay, tz=z0-F->az;
+            float u=(tx*px+ty*py+tz*pz)*inv;
+            if (u<0.0f||u>1.0f) continue;
+            float qx=ty*e1z-tz*e1y, qy=tz*e1x-tx*e1z, qz=tx*e1y-ty*e1x;
+            float v=(dx*qx+dy*qy+dz*qz)*inv;
+            if (v<0.0f||u+v>1.0f) continue;
+            float t=(e2x*qx+e2y*qy+e2z*qz)*inv;
+            if (t>0.002f && t<bestT){ bestT=t; found=1; }
+        }
+    }
+    return found ? bestT : -1.0f;
+}
+
 // ---------------------------------------------------------------------------
 // Grind-rail path helpers — float port of fps3d.c afn_railpath_*. afn_rail_pts is
 // world-px float, arc-length parameterized. (psv_rail.h, AFN_HAS_RAIL_PATH.)
@@ -2931,8 +2968,29 @@ int main(void)
         }
         float ex = s_camEyeX;
         float ez = s_camEyeZ;
-        g_camEyeX = ex; g_camEyeZ = ez; g_camEyeValid = 1;   // origin for Is In View FOV test
         float ey = targetY + sinf(s_camPosPitch)*effDist;   // eased pitch: eye height lags too
+#ifdef AFN_HAS_CAM_WALL
+        // Wall-aware: if a wall/ceiling is between the player and the orbit eye,
+        // pull the eye in to just in front of it so the camera doesn't clip
+        // through (you keep seeing the player). Per-frame only — the eased orbit
+        // state is untouched, so the camera springs back out when the wall clears.
+        if (afn_cam_wall_aware && afn_current_mode != 1) {
+            // Ray from the PLAYER (not the look point) to the eye, so it keeps the
+            // player visible even in lock-on — which shifts the look point sideways
+            // (over-the-shoulder), leaving the player off the look-point->eye ray.
+            // In free-orbit the look point == player, so this is unchanged there.
+            float ox = playerX, oy = targetY, oz = playerZ;
+            float t = collide_ray_walls(ox, oy, oz, ex, ey, ez);
+            if (t > 0.0f && t < 1.0f) {
+                float dxw=ex-ox, dyw=ey-oy, dzw=ez-oz;
+                float segLen = sqrtf(dxw*dxw+dyw*dyw+dzw*dzw);
+                float ft = t - (segLen > 1.0f ? 8.0f / segLen : 0.0f);   // 8px in front of the wall
+                if (ft < 0.12f) ft = 0.12f;                              // never collapse onto the player
+                ex = ox + dxw*ft; ey = oy + dyw*ft; ez = oz + dzw*ft;
+            }
+        }
+#endif
+        g_camEyeX = ex; g_camEyeZ = ez; g_camEyeValid = 1;   // origin for Is In View FOV test
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
