@@ -14,11 +14,11 @@
 namespace Affinity {
 
 void EmitNodeScriptBodies(std::ostream& f,
-                          const GBAScriptExport& script,
-                          const std::vector<GBABlueprintExport>& blueprints,
-                          const std::vector<GBABlueprintInstanceExport>& bpInstances,
-                          const std::vector<GBASpriteExport>& sprites,
-                          const std::vector<GBASoundInstanceExport>& soundInstances) {
+                          const AfnScriptExport& script,
+                          const std::vector<AfnBlueprintExport>& blueprints,
+                          const std::vector<AfnBlueprintInstanceExport>& bpInstances,
+                          const std::vector<AfnSpriteExport>& sprites,
+                          const std::vector<AfnSoundInstanceExport>& soundInstances) {
     bool hasAnyScript = !script.nodes.empty() || !blueprints.empty();
     if (hasAnyScript) {
         // OnRise edge-detect state — one int per OnRise node across the scene
@@ -29,18 +29,18 @@ void EmitNodeScriptBodies(std::ostream& f,
         {
             std::set<int> riseIds;
             for (auto& n : script.nodes)
-                if (n.type == GBAScriptNodeType::OnRise) riseIds.insert(n.id);
+                if (n.type == AfnScriptNodeType::OnRise) riseIds.insert(n.id);
             for (auto& bp : blueprints)
                 for (auto& n : bp.script.nodes)
-                    if (n.type == GBAScriptNodeType::OnRise) riseIds.insert(n.id);
+                    if (n.type == AfnScriptNodeType::OnRise) riseIds.insert(n.id);
             for (int rid : riseIds)
                 f << "static int afn_rise_" << rid << " = -2;\n";
             if (!riseIds.empty()) f << "\n";
         }
         // curScript = which graph (inline scene or a blueprint) the lambdas
         // operate on; swapped before each blueprint emit pass below.
-        const GBAScriptExport* curScript = &script;
-        auto findNode = [&](int id) -> const GBAScriptNodeExport* {
+        const AfnScriptExport* curScript = &script;
+        auto findNode = [&](int id) -> const AfnScriptNodeExport* {
             for (auto& n : curScript->nodes) if (n.id == id) return &n;
             return nullptr;
         };
@@ -51,26 +51,26 @@ void EmitNodeScriptBodies(std::ostream& f,
                     targets.push_back(l.toNodeId);
             return targets;
         };
-        auto findDataIn = [&](int nodeId, int pinIdx) -> const GBAScriptNodeExport* {
+        auto findDataIn = [&](int nodeId, int pinIdx) -> const AfnScriptNodeExport* {
             for (auto& l : curScript->links)
                 if (l.toNodeId == nodeId && l.toPinType == 3 && l.toPinIdx == pinIdx)
                     return findNode(l.fromNodeId);
             return nullptr;
         };
-        auto resolveInt = [&](const GBAScriptNodeExport* dn) -> int {
+        auto resolveInt = [&](const AfnScriptNodeExport* dn) -> int {
             if (!dn) return 0;
-            if (dn->type == GBAScriptNodeType::Animation) return dn->paramInt[1];
-            if (dn->type == GBAScriptNodeType::SkelAnim) return dn->paramInt[1]; // clip index
+            if (dn->type == AfnScriptNodeType::Animation) return dn->paramInt[1];
+            if (dn->type == AfnScriptNodeType::SkelAnim) return dn->paramInt[1]; // clip index
             return dn->paramInt[0];
         };
-        auto resolveFloat = [&](const GBAScriptNodeExport* dn) -> float {
+        auto resolveFloat = [&](const AfnScriptNodeExport* dn) -> float {
             if (!dn) return 0.0f;
             // Integer nodes store their value in paramInt[0] as a raw int.
             // Bit-casting that as float gives a denormal (≈ 0), so when the
             // user wires an Integer literal to a Float pin we must convert
             // rather than reinterpret. Float nodes already stored their
             // value bit-cast in paramInt[0] so the memcpy path is correct.
-            if (dn->type == GBAScriptNodeType::Integer)
+            if (dn->type == AfnScriptNodeType::Integer)
                 return (float)dn->paramInt[0];
             float fv;
             memcpy(&fv, &dn->paramInt[0], sizeof(float));
@@ -94,17 +94,17 @@ void EmitNodeScriptBodies(std::ostream& f,
         // any unknown data source falls back to its stored constant. This is
         // what makes Compare / And / Or / Not / Select actually do something on
         // PSV (they were GBA-era data nodes with no runtime consumer here).
-        std::function<std::string(const GBAScriptNodeExport*)> emitIntExpr;
+        std::function<std::string(const AfnScriptNodeExport*)> emitIntExpr;
         // Expression for a data INPUT pin: the wired child subtree if connected,
         // else the node's own inline literal stored in paramInt[pin].
-        auto argExpr = [&](const GBAScriptNodeExport* n, int pin) -> std::string {
-            const GBAScriptNodeExport* c = findDataIn(n->id, pin);
+        auto argExpr = [&](const AfnScriptNodeExport* n, int pin) -> std::string {
+            const AfnScriptNodeExport* c = findDataIn(n->id, pin);
             if (c) return emitIntExpr(c);
             return "(" + std::to_string(n->paramInt[pin]) + ")";
         };
-        emitIntExpr = [&](const GBAScriptNodeExport* dn) -> std::string {
+        emitIntExpr = [&](const AfnScriptNodeExport* dn) -> std::string {
             if (!dn) return "0";
-            using T = GBAScriptNodeType;
+            using T = AfnScriptNodeType;
             switch (dn->type) {
                 // constant leaves
                 case T::Integer: return "(" + std::to_string(dn->paramInt[0]) + ")";
@@ -126,7 +126,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 case T::GetHP2:     return "afn_hp[" + argExpr(dn, 0) + "]";
                 case T::GetFlag:    return "((afn_flags >> " + argExpr(dn, 0) + ") & 1u)";
                 case T::IsKeyDown: {
-                    const GBAScriptNodeExport* kc = findDataIn(dn->id, 0);
+                    const AfnScriptNodeExport* kc = findDataIn(dn->id, 0);
                     int ki = kc ? kc->paramInt[0] : dn->paramInt[0];
                     return std::string("key_is_down(") + keyName(ki) + ")";
                 }
@@ -160,19 +160,19 @@ void EmitNodeScriptBodies(std::ostream& f,
         // Collect chains per event type (BFS from each event node through exec links).
         // Re-runnable: blueprint emit passes call buildChains() after pointing
         // curScript at the blueprint's graph.
-        struct Chain { const GBAScriptNodeExport* event; std::vector<const GBAScriptNodeExport*> actions; };
+        struct Chain { const AfnScriptNodeExport* event; std::vector<const AfnScriptNodeExport*> actions; };
         std::vector<Chain> chains;
         auto buildChains = [&]() {
             chains.clear();
             for (auto& n : curScript->nodes) {
                 auto et = n.type;
-                if (et != GBAScriptNodeType::OnUpdate &&
-                    et != GBAScriptNodeType::OnStart &&
-                    et != GBAScriptNodeType::OnKeyHeld &&
-                    et != GBAScriptNodeType::OnKeyPressed &&
-                    et != GBAScriptNodeType::OnKeyReleased &&
-                    et != GBAScriptNodeType::OnCollision &&
-                    et != GBAScriptNodeType::OnCollision2D)
+                if (et != AfnScriptNodeType::OnUpdate &&
+                    et != AfnScriptNodeType::OnStart &&
+                    et != AfnScriptNodeType::OnKeyHeld &&
+                    et != AfnScriptNodeType::OnKeyPressed &&
+                    et != AfnScriptNodeType::OnKeyReleased &&
+                    et != AfnScriptNodeType::OnCollision &&
+                    et != AfnScriptNodeType::OnCollision2D)
                     continue;
                 Chain ch; ch.event = &n;
                 std::vector<int> frontier = findExecOuts(n.id, 0);
@@ -192,14 +192,14 @@ void EmitNodeScriptBodies(std::ostream& f,
                     // exec pins), or IsFlagSet (single-pin gate) — those
                     // recurse into their own branches inside emitOne so
                     // siblings don't bleed across pins.
-                    if (an->type == GBAScriptNodeType::CheckFlag ||
-                        an->type == GBAScriptNodeType::OnRise ||
-                        an->type == GBAScriptNodeType::FlipFlop ||
-                        an->type == GBAScriptNodeType::IsFlagSet ||
-                        an->type == GBAScriptNodeType::Branch ||
-                        an->type == GBAScriptNodeType::IsTrue ||
-                        an->type == GBAScriptNodeType::IsFalse ||
-                        an->type == GBAScriptNodeType::SwitchInt) continue;
+                    if (an->type == AfnScriptNodeType::CheckFlag ||
+                        an->type == AfnScriptNodeType::OnRise ||
+                        an->type == AfnScriptNodeType::FlipFlop ||
+                        an->type == AfnScriptNodeType::IsFlagSet ||
+                        an->type == AfnScriptNodeType::Branch ||
+                        an->type == AfnScriptNodeType::IsTrue ||
+                        an->type == AfnScriptNodeType::IsFalse ||
+                        an->type == AfnScriptNodeType::SwitchInt) continue;
                     for (int t : findExecOuts(an->id, 0)) frontier.push_back(t);
                 }
                 if (!ch.actions.empty()) chains.push_back(ch);
@@ -215,9 +215,9 @@ void EmitNodeScriptBodies(std::ostream& f,
         // Per-action emit. Subset of GBA's switch — covers the common
         // movement / animation / state nodes. Unsupported types fall through
         // to a comment so we know what's missing on NDS.
-        auto emitAction = [&](const GBAScriptNodeExport* a) {
+        auto emitAction = [&](const AfnScriptNodeExport* a) {
             switch (a->type) {
-            case GBAScriptNodeType::Walk: {
+            case AfnScriptNodeType::Walk: {
                 // Walk is the LOW-priority speed. If a Sprint already set the
                 // speed this frame (afn_speed_prio), don't clobber it — so
                 // holding B (sprint) while also holding a direction (which
@@ -226,14 +226,14 @@ void EmitNodeScriptBodies(std::ostream& f,
                 if (d) f << "    if (!afn_speed_prio) afn_move_speed = " << (int)(resolveInt(d) * 37.0f / 35.0f) << ";\n";
                 break;
             }
-            case GBAScriptNodeType::Sprint: {
+            case AfnScriptNodeType::Sprint: {
                 // Sprint is HIGH priority — sets the speed and locks out Walk
                 // for the rest of this frame.
                 auto* d = findDataIn(a->id, 0);
                 if (d) f << "    afn_move_speed = " << (int)(resolveInt(d) * 37.0f / 35.0f) << "; afn_speed_prio = 1;\n";
                 break;
             }
-            case GBAScriptNodeType::Jump: {
+            case AfnScriptNodeType::Jump: {
                 auto* d = findDataIn(a->id, 0);
                 float force = d ? resolveFloat(d) : 2.0f;
                 f << "    if (player_on_ground) player_vy = " << (int)(force * 256.0f) << ";\n";
@@ -254,24 +254,24 @@ void EmitNodeScriptBodies(std::ostream& f,
                 }
                 break;
             }
-            case GBAScriptNodeType::SetGravity: {
+            case AfnScriptNodeType::SetGravity: {
                 auto* d = findDataIn(a->id, 0);
                 float v = d ? resolveFloat(d) : 0.09f;
                 f << "    afn_gravity = " << (int)(v * 256.0f) << ";\n";
                 break;
             }
-            case GBAScriptNodeType::SetMaxFall: {
+            case AfnScriptNodeType::SetMaxFall: {
                 auto* d = findDataIn(a->id, 0);
                 float v = d ? resolveFloat(d) : 6.0f;
                 f << "    afn_terminal_vel = " << (int)(v * 256.0f) << ";\n";
                 break;
             }
-            case GBAScriptNodeType::AutoOrbit: {
+            case AfnScriptNodeType::AutoOrbit: {
                 auto* d = findDataIn(a->id, 0);
                 f << "    afn_auto_orbit_speed = " << (d ? resolveInt(d) : 205) << ";\n";
                 break;
             }
-            case GBAScriptNodeType::OrbitCamera: {
+            case AfnScriptNodeType::OrbitCamera: {
                 auto* dirData = findDataIn(a->id, 0);
                 auto* speedData = findDataIn(a->id, 1);
                 int dir   = dirData   ? dirData->paramInt[0] : 1;
@@ -288,7 +288,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 else if (dir == 3) f << "    orbit_pitch -= (" << speed << " * afn_key_mag) >> 8;\n";  // Down
                 break;
             }
-            case GBAScriptNodeType::MovePlayer: {
+            case AfnScriptNodeType::MovePlayer: {
                 auto* dirData = findDataIn(a->id, 0);
                 int dir = dirData ? dirData->paramInt[0] : 0;
                 // Apply the movement in the chosen Direction when this exec
@@ -312,7 +312,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                     f << "    afn_face_lock = 1;\n";
                 break;
             }
-            case GBAScriptNodeType::PlayAnim: {
+            case AfnScriptNodeType::PlayAnim: {
                 auto* d = findDataIn(a->id, 0);
                 int idx = d ? resolveInt(d) : 0;
                 // Inside an IsJumping/IsFalling gate, PlayAnim wins and
@@ -332,7 +332,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                   << idx << "; afn_anim_prio = " << animLvl << "; }\n";
                 break;
             }
-            case GBAScriptNodeType::PlaySkelAnim: {
+            case AfnScriptNodeType::PlaySkelAnim: {
                 // Set the skeletal (glTF/DSMA) clip the player rig plays in Mode 4.
                 // The clip index comes from a wired Skeletal Animation data node.
                 auto* d = findDataIn(a->id, 0);
@@ -340,7 +340,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_rig_clip = " << clip << ";\n";
                 break;
             }
-            case GBAScriptNodeType::SetSkelAnim: {
+            case AfnScriptNodeType::SetSkelAnim: {
                 // Set the skeletal clip on a specific rigged NPC (by sprite index).
                 // Mirrors SetSpriteAnim: a single per-frame override slot the
                 // NPC rig renderer applies to the matching instance.
@@ -351,25 +351,25 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_skel_anim_obj = " << obj << "; afn_skel_anim_clip = " << clip << ";\n";
                 break;
             }
-            case GBAScriptNodeType::FreezePlayer:
+            case AfnScriptNodeType::FreezePlayer:
                 f << "    afn_player_frozen = 1; afn_play_anim = -1;\n";
                 break;
-            case GBAScriptNodeType::UnfreezePlayer:
+            case AfnScriptNodeType::UnfreezePlayer:
                 f << "    afn_player_frozen = 0;\n";
                 break;
-            case GBAScriptNodeType::CursorUp:
+            case AfnScriptNodeType::CursorUp:
                 f << "    if (afn_cursor_stop > 0) afn_cursor_stop--;\n";
                 f << "    else afn_cursor_stop = afn_stop_count - 1;\n";
                 break;
-            case GBAScriptNodeType::CursorDown:
+            case AfnScriptNodeType::CursorDown:
                 f << "    afn_cursor_stop++;\n";
                 f << "    if (afn_cursor_stop >= afn_stop_count) afn_cursor_stop = 0;\n";
                 break;
-            case GBAScriptNodeType::FollowLink:
+            case AfnScriptNodeType::FollowLink:
                 f << "    { int link = afn_stop_links[afn_cursor_stop];\n";
                 f << "      if (link >= 0) { afn_hud_visible[afn_elem_idx] = 0; afn_hud_visible[link] = 1; afn_active_element = link; } }\n";
                 break;
-            case GBAScriptNodeType::SetVisible: {
+            case AfnScriptNodeType::SetVisible: {
                 auto* sprData = findDataIn(a->id, 0);
                 auto* visData = findDataIn(a->id, 1);
                 int sIdx = sprData ? resolveInt(sprData) : a->paramInt[0];
@@ -378,7 +378,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                   << sIdx << "] = " << (vis ? 1 : 0) << ";\n";
                 break;
             }
-            case GBAScriptNodeType::DestroyObject: {
+            case AfnScriptNodeType::DestroyObject: {
                 auto* d = findDataIn(a->id, 0);
                 // In BP context with no Object wired, default to the instance's
                 // own sprite (afn_bp_cur_spr_idx). Scene scripts fall back to
@@ -393,7 +393,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    }\n";
                 break;
             }
-            case GBAScriptNodeType::SetFlag: {
+            case AfnScriptNodeType::SetFlag: {
                 auto* flagData = findDataIn(a->id, 0);
                 auto* valData  = findDataIn(a->id, 1);
                 int flag = flagData ? resolveInt(flagData) : a->paramInt[0];
@@ -402,44 +402,44 @@ void EmitNodeScriptBodies(std::ostream& f,
                 else     f << "    afn_flags &= ~(1u << " << flag << ");\n";
                 break;
             }
-            case GBAScriptNodeType::ToggleFlag:
+            case AfnScriptNodeType::ToggleFlag:
                 f << "    afn_flags ^= (1u << " << a->paramInt[0] << ");\n";
                 break;
-            case GBAScriptNodeType::ScreenShake: {
+            case AfnScriptNodeType::ScreenShake: {
                 auto* d0 = findDataIn(a->id, 0);
                 auto* d1 = findDataIn(a->id, 1);
                 f << "    afn_shake_intensity = " << (d0 ? resolveInt(d0) : 4) << ";\n";
                 f << "    afn_shake_frames    = " << (d1 ? resolveInt(d1) : 20) << ";\n";
                 break;
             }
-            case GBAScriptNodeType::DampenJump: {
+            case AfnScriptNodeType::DampenJump: {
                 auto* d = findDataIn(a->id, 0);
                 float factor = d ? resolveFloat(d) : 0.75f;
                 f << "    if (player_vy > 0) player_vy = (player_vy * " << (int)(factor*256.0f) << ") >> 8;\n";
                 break;
             }
-            case GBAScriptNodeType::StartGrind:
+            case AfnScriptNodeType::StartGrind:
                 // Capture the rail we collided with — the runtime reads its
                 // mesh axis to lock the grind direction along the rail.
                 f << "    afn_grinding = 1; afn_grind_rail = afn_collided_sprite;\n"; break;
-            case GBAScriptNodeType::StopGrind:
+            case AfnScriptNodeType::StopGrind:
                 f << "    afn_grinding = 0;\n"; break;
-            case GBAScriptNodeType::GrindPower: {
+            case AfnScriptNodeType::GrindPower: {
                 auto* d = findDataIn(a->id, 0);
                 float v = d ? resolveFloat(d) : 24.0f;
                 f << "    afn_grind_power = " << (int)v << ";\n"; break;
             }
-            case GBAScriptNodeType::GrindBoost: {
+            case AfnScriptNodeType::GrindBoost: {
                 auto* d = findDataIn(a->id, 0);
                 float v = d ? resolveFloat(d) : 0.0f;
                 f << "    afn_grind_boost = " << (int)v << ";\n"; break;
             }
-            case GBAScriptNodeType::GrindBleed: {
+            case AfnScriptNodeType::GrindBleed: {
                 auto* d = findDataIn(a->id, 0);
                 float v = d ? resolveFloat(d) : 6.0f;
                 f << "    afn_grind_bleed = " << (int)v << ";\n"; break;
             }
-            case GBAScriptNodeType::GrindCatch: {
+            case AfnScriptNodeType::GrindCatch: {
                 auto* dy = findDataIn(a->id, 0);
                 auto* dx = findDataIn(a->id, 1);
                 float vy = dy ? resolveFloat(dy) : 0.0f;
@@ -457,28 +457,28 @@ void EmitNodeScriptBodies(std::ostream& f,
             // approach so the real landing produces no fresh edge (grind SFX
             // failing to retrigger). afn_grinding_active mirrors the validated
             // state from the previous physics tick.
-            case GBAScriptNodeType::IsGrinding:
+            case AfnScriptNodeType::IsGrinding:
                 f << "    if (afn_grinding_active) {\n"; break;
-            case GBAScriptNodeType::IsNotGrinding:
+            case AfnScriptNodeType::IsNotGrinding:
                 f << "    if (!afn_grinding_active) {\n"; break;
-            case GBAScriptNodeType::IsMoving:
+            case AfnScriptNodeType::IsMoving:
                 f << "    if (player_moving) {\n"; break;
-            case GBAScriptNodeType::IsLockedOn:
+            case AfnScriptNodeType::IsLockedOn:
                 // Lock On target active (PSV camera lock; inert -1 elsewhere).
                 f << "    if (afn_cam_lock_target >= 0) {\n"; break;
-            case GBAScriptNodeType::IsInView: {
+            case AfnScriptNodeType::IsInView: {
                 // Gate: target on-screen (camera FOV). Target pin = Object
                 // or Attached Sprite (self).
                 auto* tv = findDataIn(a->id, 0);
-                if (tv && tv->type == GBAScriptNodeType::AttachedSprite)
+                if (tv && tv->type == AfnScriptNodeType::AttachedSprite)
                     f << "    if (afn_in_view(afn_bp_cur_spr_idx)) {\n";
                 else
                     f << "    if (afn_in_view(" << (tv ? resolveInt(tv) : -1) << ")) {\n";
                 break;
             }
-            case GBAScriptNodeType::IsNotLockedOn:
+            case AfnScriptNodeType::IsNotLockedOn:
                 f << "    if (afn_cam_lock_target < 0) {\n"; break;
-            case GBAScriptNodeType::DashToTarget: {
+            case AfnScriptNodeType::DashToTarget: {
                 // Bullet-punch lunge (PSV, AFN_HAS_CAM_LOCK): capture the
                 // current lock target and burst toward it for N frames.
                 auto* spD = findDataIn(a->id, 0);
@@ -492,7 +492,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "#endif\n";
                 break;
             }
-            case GBAScriptNodeType::ChargeShot: {
+            case AfnScriptNodeType::ChargeShot: {
                 // Focus blast charge (PSV): assert charge each held frame; the
                 // runtime grows the player's hidden effect sub-sprite (the ball).
                 auto* mxD = findDataIn(a->id, 0);
@@ -511,7 +511,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "#endif\n";
                 break;
             }
-            case GBAScriptNodeType::FireChargeShot: {
+            case AfnScriptNodeType::FireChargeShot: {
                 // Focus blast release (PSV): request launch; runtime snapshots the
                 // charged ball into a homing projectile aimed at the lock target.
                 auto* dmgD = findDataIn(a->id, 0);
@@ -531,23 +531,23 @@ void EmitNodeScriptBodies(std::ostream& f,
                 break;
             }
             // ---- Energy resource (player) ----
-            case GBAScriptNodeType::SetEnergy: {
+            case AfnScriptNodeType::SetEnergy: {
                 auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "0";
                 f << "    afn_energy = " << v << ";\n";
                 f << "    if (afn_energy < 0) afn_energy = 0; if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;\n";
                 break;
             }
-            case GBAScriptNodeType::AddEnergy: {
+            case AfnScriptNodeType::AddEnergy: {
                 auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "1";
                 f << "    afn_energy += " << v << "; if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;\n";
                 break;
             }
-            case GBAScriptNodeType::SpendEnergy: {
+            case AfnScriptNodeType::SpendEnergy: {
                 auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "1";
                 f << "    afn_energy -= " << v << "; if (afn_energy < 0) afn_energy = 0;\n";
                 break;
             }
-            case GBAScriptNodeType::SpendChargeEnergy: {
+            case AfnScriptNodeType::SpendChargeEnergy: {
                 // Spend energy scaled by charge level: Min% at a tap, Max% at full charge.
                 auto* dmn = findDataIn(a->id, 0); std::string mn = dmn ? emitIntExpr(dmn) : "4";
                 auto* dmx = findDataIn(a->id, 1); std::string mx = dmx ? emitIntExpr(dmx) : "33";
@@ -557,42 +557,42 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "      afn_energy -= _amt; if (afn_energy < 0) afn_energy = 0; }\n";
                 break;
             }
-            case GBAScriptNodeType::SetMaxEnergy: {
+            case AfnScriptNodeType::SetMaxEnergy: {
                 auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "100";
                 f << "    afn_energy_max = " << v << "; if (afn_energy_max < 0) afn_energy_max = 0;\n";
                 f << "    if (afn_energy > afn_energy_max) afn_energy = afn_energy_max;\n";
                 break;
             }
-            case GBAScriptNodeType::HasEnergy: {
+            case AfnScriptNodeType::HasEnergy: {
                 // Gate: opens the brace; the isGate path closes it.
                 auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "1";
                 f << "    if (afn_energy >= " << v << ") {\n";
                 break;
             }
             // ---- Player Health resource ----
-            case GBAScriptNodeType::SetHealth: {
+            case AfnScriptNodeType::SetHealth: {
                 auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "0";
                 f << "    afn_health = " << v << ";\n";
                 f << "    if (afn_health < 0) afn_health = 0; if (afn_health > afn_health_max) afn_health = afn_health_max;\n";
                 break;
             }
-            case GBAScriptNodeType::DamageHealth: {
+            case AfnScriptNodeType::DamageHealth: {
                 auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "1";
                 f << "    afn_health -= " << v << "; if (afn_health < 0) afn_health = 0;\n";
                 break;
             }
-            case GBAScriptNodeType::HealHealth: {
+            case AfnScriptNodeType::HealHealth: {
                 auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "1";
                 f << "    afn_health += " << v << "; if (afn_health > afn_health_max) afn_health = afn_health_max;\n";
                 break;
             }
-            case GBAScriptNodeType::SetMaxHealth: {
+            case AfnScriptNodeType::SetMaxHealth: {
                 auto* d = findDataIn(a->id, 0); std::string v = d ? emitIntExpr(d) : "100";
                 f << "    afn_health_max = " << v << "; if (afn_health_max < 0) afn_health_max = 0;\n";
                 f << "    if (afn_health > afn_health_max) afn_health = afn_health_max;\n";
                 break;
             }
-            case GBAScriptNodeType::StrafeAnim: {
+            case AfnScriptNodeType::StrafeAnim: {
                 // 8-way directional clip picker (PSV lock-strafe): pick the
                 // clip matching the stick direction relative to facing the
                 // target. Pins 0..7 = Fwd,Fwd-R,Right,Back-R,Back,Back-L,Left,Fwd-L.
@@ -628,7 +628,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 }
                 break;
             }
-            case GBAScriptNodeType::SnapStick8: {
+            case AfnScriptNodeType::SnapStick8: {
                 // Gate the left stick to 8 directions (PSV). The runtime movement
                 // block snaps afn_input_fwd/right to the nearest octant; set once
                 // from On Start. NDS lacks the analog stick path -> compiled out.
@@ -637,7 +637,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "#endif\n";
                 break;
             }
-            case GBAScriptNodeType::Dodge: {
+            case AfnScriptNodeType::Dodge: {
                 // One-button pure left/right side roll (PSV, AFN_HAS_PLAYER_RIG):
                 // set speed/frames + the L/R clips and raise the trigger so the
                 // movement block picks the side from the live stick's horizontal
@@ -687,15 +687,15 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "#endif\n";
                 break;
             }
-            case GBAScriptNodeType::IsDodging:
+            case AfnScriptNodeType::IsDodging:
                 f << "    if (afn_dodge_frames > 0) {\n"; break;
-            case GBAScriptNodeType::IsNotDodging:
+            case AfnScriptNodeType::IsNotDodging:
                 f << "    if (afn_dodge_frames <= 0) {\n"; break;
-            case GBAScriptNodeType::IsOnGround:
+            case AfnScriptNodeType::IsOnGround:
                 f << "    if (player_on_ground) {\n"; break;
-            case GBAScriptNodeType::IsAirborne:
+            case AfnScriptNodeType::IsAirborne:
                 f << "    if (!player_on_ground) {\n"; break;
-            case GBAScriptNodeType::IsJumping:
+            case AfnScriptNodeType::IsJumping:
                 // PSV exposes the ACTUAL vertical velocity (player_vy_now), so
                 // "rising" is accurate the whole ascent. Other targets keep the
                 // legacy look (player_vy, the Jump impulse) for the BP idioms
@@ -705,63 +705,63 @@ void EmitNodeScriptBodies(std::ostream& f,
                      "#else\n"
                      "    if (player_vy > 0) {\n"
                      "#endif\n"; inJumpGate = true; break;
-            case GBAScriptNodeType::IsFalling:
+            case AfnScriptNodeType::IsFalling:
                 // PSV: true only while genuinely descending (player_vy_now < 0).
                 f << "#ifdef AFN_HAS_PLAYER_RIG\n"
                      "    if (!player_on_ground && player_vy_now < 0) {\n"
                      "#else\n"
                      "    if (!player_on_ground && player_vy <= 0) {\n"
                      "#endif\n"; inJumpGate = true; break;
-            case GBAScriptNodeType::IsLanding:
+            case AfnScriptNodeType::IsLanding:
                 f << "    if (afn_land_timer > 0) {\n"; break;
-            case GBAScriptNodeType::IsNotLanding:
+            case AfnScriptNodeType::IsNotLanding:
                 f << "    if (afn_land_timer <= 0) {\n"; break;
-            case GBAScriptNodeType::IsCharging:
+            case AfnScriptNodeType::IsCharging:
                 f << "    if (afn_fb_charging) {\n"; break;
-            case GBAScriptNodeType::IsNotCharging:
+            case AfnScriptNodeType::IsNotCharging:
                 f << "    if (!afn_fb_charging) {\n"; break;
-            case GBAScriptNodeType::IsFiring:
+            case AfnScriptNodeType::IsFiring:
                 f << "    if (afn_fb_fire_timer > 0) {\n"; break;
-            case GBAScriptNodeType::IsNear2D:
+            case AfnScriptNodeType::IsNear2D:
                 // Mirrors GBA: fires when the player just collided with
                 // THIS BP's tm_object. Combined with OnKeyPressed(A) this
                 // is the "press A near NPC" idiom.
                 f << "    if (afn_collided_tm_obj == afn_bp_cur_tm_obj && afn_bp_cur_tm_obj >= 0) {\n"; break;
-            case GBAScriptNodeType::IsFollowMoving:
+            case AfnScriptNodeType::IsFollowMoving:
                 f << "    if (tm_fol_moving) {\n"; break;
             // CheckFlag is handled specially in emitChain (dual-pin Set/Clear branches).
-            case GBAScriptNodeType::SetVelocityY: {
+            case AfnScriptNodeType::SetVelocityY: {
                 auto* d = findDataIn(a->id, 0);
                 float v = d ? resolveFloat(d) : 0.0f;
                 f << "    player_vy = " << (int)(v * 256.0f) << ";\n";
                 break;
             }
-            case GBAScriptNodeType::SetVelocityX: {
+            case AfnScriptNodeType::SetVelocityX: {
                 auto* d = findDataIn(a->id, 0);
                 float v = d ? resolveFloat(d) : 0.0f;
                 f << "    afn_player_vx_world = " << (int)(v * 256.0f) << ";\n";
                 break;
             }
-            case GBAScriptNodeType::SetVelocityZ: {
+            case AfnScriptNodeType::SetVelocityZ: {
                 auto* d = findDataIn(a->id, 0);
                 float v = d ? resolveFloat(d) : 0.0f;
                 f << "    afn_player_vz_world = " << (int)(v * 256.0f) << ";\n";
                 break;
             }
-            case GBAScriptNodeType::VelocityFalloff: {
+            case AfnScriptNodeType::VelocityFalloff: {
                 auto* d = findDataIn(a->id, 0);
                 int frames = d ? resolveInt(d) : 0;
                 if (frames < 1) frames = 1;
                 f << "    afn_velocity_falloff = " << frames << ";\n";
                 break;
             }
-            case GBAScriptNodeType::BoostForward: {
+            case AfnScriptNodeType::BoostForward: {
                 auto* d = findDataIn(a->id, 0);
                 float v = d ? resolveFloat(d) : 0.0f;
                 f << "    afn_pending_boost_fwd = " << (int)(v * 256.0f) << ";\n";
                 break;
             }
-            case GBAScriptNodeType::HaltMomentum: {
+            case AfnScriptNodeType::HaltMomentum: {
                 f << "    afn_player_vx_world = 0;\n";
                 f << "    afn_player_vz_world = 0;\n";
                 f << "    afn_pending_boost_fwd = 0;\n";
@@ -769,19 +769,19 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    player_vy = 0;\n";
                 break;
             }
-            case GBAScriptNodeType::SetPlayerHeight: {
+            case AfnScriptNodeType::SetPlayerHeight: {
                 auto* d = findDataIn(a->id, 0);
                 float v = d ? resolveFloat(d) : 1.0f;
                 f << "    afn_player_height = " << (int)(v * 256.0f) << ";\n";
                 break;
             }
-            case GBAScriptNodeType::SetPlayerWidth: {
+            case AfnScriptNodeType::SetPlayerWidth: {
                 auto* d = findDataIn(a->id, 0);
                 float v = d ? resolveFloat(d) : 3.0f;
                 f << "    afn_player_width = " << (int)(v * 256.0f) << ";\n";
                 break;
             }
-            case GBAScriptNodeType::SetSpriteAnim: {
+            case AfnScriptNodeType::SetSpriteAnim: {
                 auto* objData  = findDataIn(a->id, 0);
                 auto* animData = findDataIn(a->id, 1);
                 int obj  = objData  ? resolveInt(objData)  : 0;
@@ -794,7 +794,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    else { afn_sprite_anim_spr = " << obj << "; afn_sprite_anim_val = " << anim << "; }\n";
                 break;
             }
-            case GBAScriptNodeType::FollowPlayer: {
+            case AfnScriptNodeType::FollowPlayer: {
                 auto* objData   = findDataIn(a->id, 0);
                 auto* distData  = findDataIn(a->id, 1);
                 auto* speedData = findDataIn(a->id, 2);
@@ -814,11 +814,11 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    tm_fol_speed = " << speed << ";\n";
                 break;
             }
-            case GBAScriptNodeType::SetFollowFacing:
+            case AfnScriptNodeType::SetFollowFacing:
                 f << "    if (tm_fol_active && tm_fol_obj >= 0)\n";
                 f << "      tm_obj_facing[tm_fol_obj] = tm_fol_facing;\n";
                 break;
-            case GBAScriptNodeType::PlaySound: {
+            case AfnScriptNodeType::PlaySound: {
                 auto* d = findDataIn(a->id, 0);
                 int sId = d ? resolveInt(d) : 0;
                 auto* lk = findDataIn(a->id, 1);
@@ -837,7 +837,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 }
                 break;
             }
-            case GBAScriptNodeType::StopSound: {
+            case AfnScriptNodeType::StopSound: {
                 // With a Sound Instance wired, stop ONLY that SFX's voices so
                 // BGM keeps playing (e.g. kill a looping grind SFX when you
                 // leave the rail). Unwired -> stop everything (legacy).
@@ -853,11 +853,11 @@ void EmitNodeScriptBodies(std::ostream& f,
                 }
                 break;
             }
-            case GBAScriptNodeType::Respawn:
+            case AfnScriptNodeType::Respawn:
                 f << "    player_x = afn_start_x; player_y = afn_start_y; player_z = afn_start_z;\n";
                 f << "    player_vy = 0;\n";
                 break;
-            case GBAScriptNodeType::ChangeScene: {
+            case AfnScriptNodeType::ChangeScene: {
                 auto* scData = findDataIn(a->id, 0);
                 int scIdx = scData ? resolveInt(scData) : a->paramInt[0];
                 int scMode = a->paramInt[1]; // 0 = 3D / Mode 4
@@ -883,10 +883,10 @@ void EmitNodeScriptBodies(std::ostream& f,
                 }
                 break;
             }
-            case GBAScriptNodeType::ReloadScene:
+            case AfnScriptNodeType::ReloadScene:
                 f << "    afn_scene_start_transition(afn_current_scene, afn_current_mode, 15);\n";
                 break;
-            case GBAScriptNodeType::SetHudValue: {
+            case AfnScriptNodeType::SetHudValue: {
                 auto* valData  = findDataIn(a->id, 0);
                 auto* slotData = findDataIn(a->id, 1);
                 int val  = valData  ? resolveInt(valData)  : 0;
@@ -895,7 +895,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_hud_value[" << slot << "] += " << val << ";\n";
                 break;
             }
-            case GBAScriptNodeType::CycleHudValue: {
+            case AfnScriptNodeType::CycleHudValue: {
                 // Slot/Delta/Count are live expressions (so Slot can be Get Cursor Stop,
                 // i.e. cycle whichever player the cursor is on). Wrap to [0,Count).
                 auto* slotData  = findDataIn(a->id, 0);
@@ -909,7 +909,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                   << " if (_v < 0) _v += _c; afn_hud_value[_s] = _v; } }\n";
                 break;
             }
-            case GBAScriptNodeType::ShowHUD: {
+            case AfnScriptNodeType::ShowHUD: {
                 auto* slotData = findDataIn(a->id, 0);
                 int slot = slotData ? resolveInt(slotData) : a->paramInt[0];
                 if (slot < 0) slot = 0;   // element index (afn_hud_visible/elems are ELEM_COUNT-sized)
@@ -923,7 +923,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "#ifdef AFN_HAS_HUD_ANCHOR\n";
                 {
                     auto* anchorData = findDataIn(a->id, 1);
-                    if (anchorData && anchorData->type == GBAScriptNodeType::AttachedSprite) {
+                    if (anchorData && anchorData->type == AfnScriptNodeType::AttachedSprite) {
                         // Only instances that HAVE an owner anchor; ownerless
                         // instances (element-linked BPs run with spr_idx -1)
                         // must not stomp an anchor set by the sprite instance.
@@ -963,7 +963,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    }\n";
                 break;
             }
-            case GBAScriptNodeType::HideHUD: {
+            case AfnScriptNodeType::HideHUD: {
                 auto* slotData = findDataIn(a->id, 0);
                 int slot = slotData ? resolveInt(slotData) : a->paramInt[0];
                 if (slot < 0) slot = 0;   // element index (afn_hud_visible/elems are ELEM_COUNT-sized)
@@ -975,26 +975,26 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_play_anim = 0;\n";
                 break;
             }
-            case GBAScriptNodeType::PlayHudAnim: {
+            case AfnScriptNodeType::PlayHudAnim: {
                 int li = a->paramInt[0];
                 f << "    afn_hud_layer_frame[" << li << "] = 0;\n";
                 f << "    afn_hud_layer_tick[" << li << "] = 0;\n";
                 f << "    afn_hud_layer_active[" << li << "] = 1;\n";
                 break;
             }
-            case GBAScriptNodeType::StopHudAnim: {
+            case AfnScriptNodeType::StopHudAnim: {
                 int li = a->paramInt[0];
                 f << "    afn_hud_layer_active[" << li << "] = 0;\n";
                 break;
             }
-            case GBAScriptNodeType::SetHudAnimSpeed: {
+            case AfnScriptNodeType::SetHudAnimSpeed: {
                 int li = a->paramInt[0];
                 auto* sd = findDataIn(a->id, 0);
                 int spd = sd ? resolveInt(sd) : 1;
                 f << "    afn_hud_layer_speed_override[" << li << "] = " << spd << ";\n";
                 break;
             }
-            case GBAScriptNodeType::UpdateRespawnPos: {
+            case AfnScriptNodeType::UpdateRespawnPos: {
                 auto* objData = findDataIn(a->id, 0);
                 std::string obj;
                 if (objData) obj = std::to_string(resolveInt(objData));
@@ -1005,19 +1005,19 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_start_z = afn_sprite_data[" << obj << "][2];\n";
                 break;
             }
-            case GBAScriptNodeType::SetCamera: {
+            case AfnScriptNodeType::SetCamera: {
                 auto* slotData = findDataIn(a->id, 0);
                 int slot = slotData ? resolveInt(slotData) : 0;
                 f << "    afn_active_camera = " << slot << ";\n";
                 break;
             }
-            case GBAScriptNodeType::TankCamera: {
+            case AfnScriptNodeType::TankCamera: {
                 auto* onData = findDataIn(a->id, 0);
                 int on = onData ? resolveInt(onData) : 0;
                 f << "    afn_tank_camera = " << on << ";\n";
                 break;
             }
-            case GBAScriptNodeType::TurnPlayer: {
+            case AfnScriptNodeType::TurnPlayer: {
                 auto* dirData = findDataIn(a->id, 0);
                 auto* speedData = findDataIn(a->id, 1);
                 int dir   = dirData   ? dirData->paramInt[0] : 0;
@@ -1035,7 +1035,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_player_heading " << sign << "= (" << speed << " * afn_key_mag) >> 8;\n";
                 break;
             }
-            case GBAScriptNodeType::LockOnTarget: {
+            case AfnScriptNodeType::LockOnTarget: {
                 // Lock-on camera assist (PSV, AFN_HAS_CAM_LOCK): sets the lock
                 // target. Gate with Is In View if you only want to lock things
                 // on-screen. Target pin: Attached Sprite = the BP owner ("self",
@@ -1048,9 +1048,9 @@ void EmitNodeScriptBodies(std::ostream& f,
                 int lkSide = a->paramInt[1] > 0 ? a->paramInt[1] : 32;
                 int lkHeight = a->paramInt[3] > 0 ? a->paramInt[3] : 32;   // editor units (->/4 world px)
                 f << "#ifdef AFN_HAS_CAM_LOCK\n";
-                if (tgt && tgt->type != GBAScriptNodeType::AttachedSprite)
+                if (tgt && tgt->type != AfnScriptNodeType::AttachedSprite)
                     f << "    afn_cam_lock_target = " << resolveInt(tgt) << ";\n";
-                else if (curScript != &script || (tgt && tgt->type == GBAScriptNodeType::AttachedSprite))
+                else if (curScript != &script || (tgt && tgt->type == AfnScriptNodeType::AttachedSprite))
                     f << "    if (afn_bp_cur_spr_idx >= 0) afn_cam_lock_target = afn_bp_cur_spr_idx;\n";
                 else
                     f << "    afn_cam_lock_target = -1;\n";   // scene script, no target wired
@@ -1063,14 +1063,14 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "#endif\n";
                 break;
             }
-            case GBAScriptNodeType::ReleaseLockOn: {
+            case AfnScriptNodeType::ReleaseLockOn: {
                 f << "#ifdef AFN_HAS_CAM_LOCK\n";
                 f << "    afn_cam_lock_target = -1;\n";
                 f << "    afn_lock_strafe = 0;\n";   // dropping the lock drops Z-targeting movement
                 f << "#endif\n";
                 break;
             }
-            case GBAScriptNodeType::LockStrafe: {
+            case AfnScriptNodeType::LockStrafe: {
                 // Z-targeting movement: only does anything while a Lock On
                 // target is active (afn_cam_lock_target >= 0).
                 f << "#ifdef AFN_HAS_CAM_LOCK\n";
@@ -1078,7 +1078,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "#endif\n";
                 break;
             }
-            case GBAScriptNodeType::CastEffect: {
+            case AfnScriptNodeType::CastEffect: {
                 auto* objData = findDataIn(a->id, 0);
                 std::string obj;
                 if (objData) obj = std::to_string(resolveInt(objData));
@@ -1102,37 +1102,37 @@ void EmitNodeScriptBodies(std::ostream& f,
         // top-level blocks. Visited-set prevents repeat emission when two
         // parents wire to the same action.
         std::set<int> emitVisited;
-        std::function<void(const GBAScriptNodeExport*)> emitOne;
+        std::function<void(const AfnScriptNodeExport*)> emitOne;
         // Sibling exec targets fan out in link declaration order, but gates
         // (IsJumping, IsOnGround, ...) READ state that sibling action nodes
         // (Jump, SetVelocityY, ...) WRITE on the same frame. Walking gates
         // first means they see stale state — jump SFX gated by IsJumping
         // never fires because Jump hasn't run yet. Sort action nodes before
         // gate nodes so writers run before readers.
-        auto isGateType = [](GBAScriptNodeType t) -> bool {
-            return t == GBAScriptNodeType::IsMoving ||
-                   t == GBAScriptNodeType::IsOnGround ||
-                   t == GBAScriptNodeType::IsJumping ||
-                   t == GBAScriptNodeType::IsFalling ||
-                   t == GBAScriptNodeType::IsNear2D ||
-                   t == GBAScriptNodeType::IsFollowMoving ||
-                   t == GBAScriptNodeType::CheckFlag ||
-                   t == GBAScriptNodeType::IsFlagSet ||
-                   t == GBAScriptNodeType::FlipFlop ||
-                   t == GBAScriptNodeType::OnRise ||
-                   t == GBAScriptNodeType::Countdown ||
-                   t == GBAScriptNodeType::IsLockedOn ||
-                   t == GBAScriptNodeType::IsNotLockedOn ||
-                   t == GBAScriptNodeType::IsDodging ||
-                   t == GBAScriptNodeType::IsNotDodging ||
-                   t == GBAScriptNodeType::IsAirborne ||
-                   t == GBAScriptNodeType::IsLanding ||
-                   t == GBAScriptNodeType::IsNotLanding ||
-                   t == GBAScriptNodeType::IsCharging ||
-                   t == GBAScriptNodeType::IsNotCharging ||
-                   t == GBAScriptNodeType::IsFiring ||
-                   t == GBAScriptNodeType::HasEnergy ||
-                   t == GBAScriptNodeType::IsInView;
+        auto isGateType = [](AfnScriptNodeType t) -> bool {
+            return t == AfnScriptNodeType::IsMoving ||
+                   t == AfnScriptNodeType::IsOnGround ||
+                   t == AfnScriptNodeType::IsJumping ||
+                   t == AfnScriptNodeType::IsFalling ||
+                   t == AfnScriptNodeType::IsNear2D ||
+                   t == AfnScriptNodeType::IsFollowMoving ||
+                   t == AfnScriptNodeType::CheckFlag ||
+                   t == AfnScriptNodeType::IsFlagSet ||
+                   t == AfnScriptNodeType::FlipFlop ||
+                   t == AfnScriptNodeType::OnRise ||
+                   t == AfnScriptNodeType::Countdown ||
+                   t == AfnScriptNodeType::IsLockedOn ||
+                   t == AfnScriptNodeType::IsNotLockedOn ||
+                   t == AfnScriptNodeType::IsDodging ||
+                   t == AfnScriptNodeType::IsNotDodging ||
+                   t == AfnScriptNodeType::IsAirborne ||
+                   t == AfnScriptNodeType::IsLanding ||
+                   t == AfnScriptNodeType::IsNotLanding ||
+                   t == AfnScriptNodeType::IsCharging ||
+                   t == AfnScriptNodeType::IsNotCharging ||
+                   t == AfnScriptNodeType::IsFiring ||
+                   t == AfnScriptNodeType::HasEnergy ||
+                   t == AfnScriptNodeType::IsInView;
         };
         auto walkExec = [&](int nodeId, int pinIdx) {
             auto targets = findExecOuts(nodeId, pinIdx);
@@ -1147,8 +1147,8 @@ void EmitNodeScriptBodies(std::ostream& f,
                 if (n) emitOne(n);
             }
         };
-        emitOne = [&](const GBAScriptNodeExport* a) {
-            if (a->type == GBAScriptNodeType::CheckFlag) {
+        emitOne = [&](const AfnScriptNodeExport* a) {
+            if (a->type == AfnScriptNodeType::CheckFlag) {
                 auto* fd = findDataIn(a->id, 0);
                 int flag = fd ? resolveInt(fd) : a->paramInt[0];
                 f << "    if (afn_flags & (1u << " << flag << ")) {\n";
@@ -1161,7 +1161,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    }\n";
                 return;
             }
-            if (a->type == GBAScriptNodeType::IsFlagSet) {
+            if (a->type == AfnScriptNodeType::IsFlagSet) {
                 // Gate-only (single exec out). True branch walks pin 0.
                 auto* fd = findDataIn(a->id, 0);
                 int flag = fd ? resolveInt(fd) : a->paramInt[0];
@@ -1170,7 +1170,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    }\n";
                 return;
             }
-            if (a->type == GBAScriptNodeType::FlipFlop) {
+            if (a->type == AfnScriptNodeType::FlipFlop) {
                 // Per-node static toggle: alternates A/B exec on each call.
                 // Without this the editor's "toggle menu open/close" pattern
                 // never reaches the B (HideHUD/UnfreezePlayer) branch.
@@ -1183,14 +1183,14 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "      } }\n";
                 return;
             }
-            if (a->type == GBAScriptNodeType::OnRise) {
+            if (a->type == AfnScriptNodeType::OnRise) {
                 f << "    if (afn_rise_" << a->id << " >= afn_frame_count - 1) { afn_rise_" << a->id << " = afn_frame_count; }\n";
                 f << "    else { afn_rise_" << a->id << " = afn_frame_count;\n";
                 walkExec(a->id, 0);
                 f << "    }\n";
                 return;
             }
-            if (a->type == GBAScriptNodeType::Countdown) {
+            if (a->type == AfnScriptNodeType::Countdown) {
                 // Per-node static counter; downstream fires when it hits 0
                 // (then auto-resets so the gate repeats).
                 auto* cntData = findDataIn(a->id, 0);
@@ -1201,7 +1201,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    } }\n";
                 return;
             }
-            if (a->type == GBAScriptNodeType::Branch) {
+            if (a->type == AfnScriptNodeType::Branch) {
                 // If/Else: condition data input -> True (pin 0) / False (pin 1).
                 auto* cd = findDataIn(a->id, 0);
                 std::string cond = cd ? emitIntExpr(cd) : (a->paramInt[0] ? "1" : "0");
@@ -1214,7 +1214,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    }\n";
                 return;
             }
-            if (a->type == GBAScriptNodeType::IsTrue) {
+            if (a->type == AfnScriptNodeType::IsTrue) {
                 // Gate: pass exec while the condition data input is non-zero.
                 auto* cd = findDataIn(a->id, 0);
                 std::string cond = cd ? emitIntExpr(cd) : (a->paramInt[0] ? "1" : "0");
@@ -1223,7 +1223,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    }\n";
                 return;
             }
-            if (a->type == GBAScriptNodeType::IsFalse) {
+            if (a->type == AfnScriptNodeType::IsFalse) {
                 // Gate: pass exec while the condition data input is zero (if-not).
                 auto* cd = findDataIn(a->id, 0);
                 std::string cond = cd ? emitIntExpr(cd) : (a->paramInt[0] ? "1" : "0");
@@ -1232,7 +1232,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    }\n";
                 return;
             }
-            if (a->type == GBAScriptNodeType::SwitchInt) {
+            if (a->type == AfnScriptNodeType::SwitchInt) {
                 // Route exec by integer value: pins 0..3 = cases 0..3, pin 4 = default.
                 auto* vd = findDataIn(a->id, 0);
                 std::string val = vd ? emitIntExpr(vd) : std::to_string(a->paramInt[0]);
@@ -1251,26 +1251,26 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    }\n";
                 return;
             }
-            bool isGate = (a->type == GBAScriptNodeType::IsMoving ||
-                           a->type == GBAScriptNodeType::IsOnGround ||
-                           a->type == GBAScriptNodeType::IsJumping ||
-                           a->type == GBAScriptNodeType::IsFalling ||
-                           a->type == GBAScriptNodeType::IsNear2D ||
-                           a->type == GBAScriptNodeType::IsFollowMoving ||
-                           a->type == GBAScriptNodeType::IsGrinding ||
-                           a->type == GBAScriptNodeType::IsNotGrinding ||
-                           a->type == GBAScriptNodeType::IsLockedOn ||
-                           a->type == GBAScriptNodeType::IsNotLockedOn ||
-                           a->type == GBAScriptNodeType::IsDodging ||
-                           a->type == GBAScriptNodeType::IsNotDodging ||
-                           a->type == GBAScriptNodeType::IsAirborne ||
-                           a->type == GBAScriptNodeType::IsLanding ||
-                           a->type == GBAScriptNodeType::IsNotLanding ||
-                           a->type == GBAScriptNodeType::IsCharging ||
-                           a->type == GBAScriptNodeType::IsNotCharging ||
-                           a->type == GBAScriptNodeType::IsFiring ||
-                           a->type == GBAScriptNodeType::HasEnergy ||
-                           a->type == GBAScriptNodeType::IsInView);
+            bool isGate = (a->type == AfnScriptNodeType::IsMoving ||
+                           a->type == AfnScriptNodeType::IsOnGround ||
+                           a->type == AfnScriptNodeType::IsJumping ||
+                           a->type == AfnScriptNodeType::IsFalling ||
+                           a->type == AfnScriptNodeType::IsNear2D ||
+                           a->type == AfnScriptNodeType::IsFollowMoving ||
+                           a->type == AfnScriptNodeType::IsGrinding ||
+                           a->type == AfnScriptNodeType::IsNotGrinding ||
+                           a->type == AfnScriptNodeType::IsLockedOn ||
+                           a->type == AfnScriptNodeType::IsNotLockedOn ||
+                           a->type == AfnScriptNodeType::IsDodging ||
+                           a->type == AfnScriptNodeType::IsNotDodging ||
+                           a->type == AfnScriptNodeType::IsAirborne ||
+                           a->type == AfnScriptNodeType::IsLanding ||
+                           a->type == AfnScriptNodeType::IsNotLanding ||
+                           a->type == AfnScriptNodeType::IsCharging ||
+                           a->type == AfnScriptNodeType::IsNotCharging ||
+                           a->type == AfnScriptNodeType::IsFiring ||
+                           a->type == AfnScriptNodeType::HasEnergy ||
+                           a->type == AfnScriptNodeType::IsInView);
             if (isGate) {
                 bool wasJump = inJumpGate;
                 gateDepth++;
@@ -1296,7 +1296,7 @@ void EmitNodeScriptBodies(std::ostream& f,
         // Key events may have multiple key data inputs wired (e.g. "any of
         // LEFT/RIGHT/UP/DOWN"); OR them together when present, fall back to
         // event->paramInt[0] otherwise. Mirrors gba_package.cpp resolveEventKey.
-        auto emitDispatcher = [&](const char* fname, GBAScriptNodeType evType,
+        auto emitDispatcher = [&](const char* fname, AfnScriptNodeType evType,
                                   const char* keyCheck) {
             f << "static void " << fname << "(void) {\n";
             for (auto& c : chains) {
@@ -1346,7 +1346,7 @@ void EmitNodeScriptBodies(std::ostream& f,
                     }
                     emitChain(c);
                     f << "    }\n";
-                } else if (evType == GBAScriptNodeType::OnCollision) {
+                } else if (evType == AfnScriptNodeType::OnCollision) {
                     // Optional Radius pin (pin 0): per-bp axis-aligned gate
                     // tighter than the outer 24px afn_collided_sprite trigger.
                     auto* radData = findDataIn(c.event->id, 0);
@@ -1381,8 +1381,8 @@ void EmitNodeScriptBodies(std::ostream& f,
         f << "static void afn_emitted_script_init(void)         {\n";
         f << "#ifdef AFN_HAS_STICK_SENS\n";
         {
-            auto emitSens = [&](const GBAScriptNodeExport& n) {
-                if (n.type != GBAScriptNodeType::Key) return;
+            auto emitSens = [&](const AfnScriptNodeExport& n) {
+                if (n.type != AfnScriptNodeType::Key) return;
                 int key = n.paramInt[0], sens = n.paramInt[1], str = n.paramInt[2];
                 if (key < 12 || key > 19) return;
                 if (sens > 0) {
@@ -1405,13 +1405,13 @@ void EmitNodeScriptBodies(std::ostream& f,
         }
         f << "#endif\n";
         f << "}\n";
-        emitDispatcher("afn_emitted_script_start",        GBAScriptNodeType::OnStart,        nullptr);
-        emitDispatcher("afn_emitted_script_update",       GBAScriptNodeType::OnUpdate,       nullptr);
-        emitDispatcher("afn_emitted_script_key_held",     GBAScriptNodeType::OnKeyHeld,      "key_is_down");
-        emitDispatcher("afn_emitted_script_key_pressed",  GBAScriptNodeType::OnKeyPressed,   "key_hit");
-        emitDispatcher("afn_emitted_script_key_released", GBAScriptNodeType::OnKeyReleased,  "key_released");
-        emitDispatcher("afn_emitted_script_collision",    GBAScriptNodeType::OnCollision,    nullptr);
-        emitDispatcher("afn_emitted_script_collision2d",  GBAScriptNodeType::OnCollision2D,  nullptr);
+        emitDispatcher("afn_emitted_script_start",        AfnScriptNodeType::OnStart,        nullptr);
+        emitDispatcher("afn_emitted_script_update",       AfnScriptNodeType::OnUpdate,       nullptr);
+        emitDispatcher("afn_emitted_script_key_held",     AfnScriptNodeType::OnKeyHeld,      "key_is_down");
+        emitDispatcher("afn_emitted_script_key_pressed",  AfnScriptNodeType::OnKeyPressed,   "key_hit");
+        emitDispatcher("afn_emitted_script_key_released", AfnScriptNodeType::OnKeyReleased,  "key_released");
+        emitDispatcher("afn_emitted_script_collision",    AfnScriptNodeType::OnCollision,    nullptr);
+        emitDispatcher("afn_emitted_script_collision2d",  AfnScriptNodeType::OnCollision2D,  nullptr);
 
         // Blueprint event handlers — one set of named functions per blueprint.
         // Per-instance state (current sprite/tm-obj) lives in afn_bp_cur_*.
@@ -1420,19 +1420,19 @@ void EmitNodeScriptBodies(std::ostream& f,
             buildChains();
             char fn[64];
             snprintf(fn, sizeof(fn), "afn_bp%zu_start",        bi);
-            emitDispatcher(fn, GBAScriptNodeType::OnStart, nullptr);
+            emitDispatcher(fn, AfnScriptNodeType::OnStart, nullptr);
             snprintf(fn, sizeof(fn), "afn_bp%zu_update",       bi);
-            emitDispatcher(fn, GBAScriptNodeType::OnUpdate, nullptr);
+            emitDispatcher(fn, AfnScriptNodeType::OnUpdate, nullptr);
             snprintf(fn, sizeof(fn), "afn_bp%zu_key_held",     bi);
-            emitDispatcher(fn, GBAScriptNodeType::OnKeyHeld, "key_is_down");
+            emitDispatcher(fn, AfnScriptNodeType::OnKeyHeld, "key_is_down");
             snprintf(fn, sizeof(fn), "afn_bp%zu_key_pressed",  bi);
-            emitDispatcher(fn, GBAScriptNodeType::OnKeyPressed, "key_hit");
+            emitDispatcher(fn, AfnScriptNodeType::OnKeyPressed, "key_hit");
             snprintf(fn, sizeof(fn), "afn_bp%zu_key_released", bi);
-            emitDispatcher(fn, GBAScriptNodeType::OnKeyReleased, "key_released");
+            emitDispatcher(fn, AfnScriptNodeType::OnKeyReleased, "key_released");
             snprintf(fn, sizeof(fn), "afn_bp%zu_collision",    bi);
-            emitDispatcher(fn, GBAScriptNodeType::OnCollision, nullptr);
+            emitDispatcher(fn, AfnScriptNodeType::OnCollision, nullptr);
             snprintf(fn, sizeof(fn), "afn_bp%zu_collision2d",  bi);
-            emitDispatcher(fn, GBAScriptNodeType::OnCollision2D, nullptr);
+            emitDispatcher(fn, AfnScriptNodeType::OnCollision2D, nullptr);
         }
         curScript = &script;  // restore so any later helpers behave
 

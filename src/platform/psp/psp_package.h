@@ -4,13 +4,13 @@
 #include <vector>
 #include <cstdint>
 #include "../gba/gba_package.h"  // Reuse export structs — they're platform-neutral
-#include "../nds/nds_package.h"  // GBARiggedMeshExport lives here
+#include "../nds/nds_package.h"  // AfnRiggedMeshExport lives here
 
 namespace Affinity
 {
 
 // ---- Raw rig data for the PSP runtime (CPU-skinned each frame) -------------
-// GBARiggedMeshExport carries DS-specific DSM/DSA blobs that are useless on
+// AfnRiggedMeshExport carries DS-specific DSM/DSA blobs that are useless on
 // PSP. These structs keep the un-baked rig so the PSP can skin on its FPU:
 // DSMA is rigid (1 bone/vertex), baseVerts are in their bone's local space,
 // and clip frames are ABSOLUTE bone transforms — so the skinned vertex is just
@@ -63,14 +63,14 @@ struct PSPRigExport {
 // PSP and PSV exporters call this and differ only in the build step that follows.
 bool GenerateAffinityHeaders(const std::string& runtimeDir,
                              const char* hdrPrefix, const char* dataInclude,
-                             const std::vector<GBASpriteExport>& sprites,
-                             const std::vector<GBASpriteAssetExport>& assets,
-                             const GBACameraExport& camera,
-                             const std::vector<GBAMeshExport>& meshes,
+                             const std::vector<AfnSpriteExport>& sprites,
+                             const std::vector<AfnSpriteAssetExport>& assets,
+                             const AfnCameraExport& camera,
+                             const std::vector<AfnMeshExport>& meshes,
                              float orbitDist,
-                             const std::vector<GBASoundSampleExport>& soundSamples,
-                             const std::vector<GBASoundInstanceExport>& soundInstances,
-                             const std::vector<GBASkyFrameExport>& skyFrames,
+                             const std::vector<AfnSoundSampleExport>& soundSamples,
+                             const std::vector<AfnSoundInstanceExport>& soundInstances,
+                             const std::vector<AfnSkyFrameExport>& skyFrames,
                              const std::vector<PSPRigExport>& pspRigs,
                              int playerRigIdx,
                              std::string& errorMsg,
@@ -93,22 +93,22 @@ bool GenerateAffinityHeaders(const std::string& runtimeDir,
 // and ignored (HUD/script/sound are filled in over subsequent passes).
 bool PackagePSP(const std::string& runtimeDir,
                 const std::string& outputPath,
-                const std::vector<GBASpriteExport>& sprites,
-                const std::vector<GBASpriteAssetExport>& assets,
-                const GBACameraExport& camera,
-                const std::vector<GBAMeshExport>& meshes,
+                const std::vector<AfnSpriteExport>& sprites,
+                const std::vector<AfnSpriteAssetExport>& assets,
+                const AfnCameraExport& camera,
+                const std::vector<AfnMeshExport>& meshes,
                 float orbitDist,
-                const std::vector<GBASoundSampleExport>& soundSamples,
-                const std::vector<GBASoundInstanceExport>& soundInstances,
-                const std::vector<GBASkyFrameExport>& skyFrames,
-                const GBAScriptExport& script,
-                const std::vector<GBABlueprintExport>& blueprints,
-                const std::vector<GBABlueprintInstanceExport>& bpInstances,
-                const std::vector<GBAHudElementExport>& hudElements,
-                const std::vector<GBATmSceneExport>& tmScenes,
+                const std::vector<AfnSoundSampleExport>& soundSamples,
+                const std::vector<AfnSoundInstanceExport>& soundInstances,
+                const std::vector<AfnSkyFrameExport>& skyFrames,
+                const AfnScriptExport& script,
+                const std::vector<AfnBlueprintExport>& blueprints,
+                const std::vector<AfnBlueprintInstanceExport>& bpInstances,
+                const std::vector<AfnHudElementExport>& hudElements,
+                const std::vector<AfnTmSceneExport>& tmScenes,
                 int startMode,
                 float midiMasterDb,
-                const std::vector<GBARiggedMeshExport>& rigs,
+                const std::vector<AfnRiggedMeshExport>& rigs,
                 const std::vector<PSPRigExport>& pspRigs,
                 int playerRigIdx,             // which rig is the player (-1 = none)
                 std::string& errorMsg);

@@ -131,23 +131,23 @@ static unsigned short EditorColorToRGB15(uint32_t rgba)
 // Generate mapdata.h for NDS
 // ---------------------------------------------------------------------------
 static bool GenerateNDSMapData(const std::string& runtimeDir,
-                                const std::vector<GBASpriteExport>& sprites,
-                                const std::vector<GBASpriteAssetExport>& assets,
-                                const GBACameraExport& camera,
-                                const std::vector<GBAMeshExport>& meshes,
+                                const std::vector<AfnSpriteExport>& sprites,
+                                const std::vector<AfnSpriteAssetExport>& assets,
+                                const AfnCameraExport& camera,
+                                const std::vector<AfnMeshExport>& meshes,
                                 float orbitDist,
-                                const std::vector<GBASoundSampleExport>& soundSamples,
-                                const std::vector<GBASoundInstanceExport>& soundInstances,
-                                const std::vector<GBASkyFrameExport>& skyFrames,
+                                const std::vector<AfnSoundSampleExport>& soundSamples,
+                                const std::vector<AfnSoundInstanceExport>& soundInstances,
+                                const std::vector<AfnSkyFrameExport>& skyFrames,
                                 bool ndsAntialiasing,
-                                const GBAScriptExport& script,
-                                const std::vector<GBABlueprintExport>& blueprints,
-                                const std::vector<GBABlueprintInstanceExport>& bpInstances,
-                                const std::vector<GBAHudElementExport>& hudElements,
-                                const std::vector<GBATmSceneExport>& tmScenes,
+                                const AfnScriptExport& script,
+                                const std::vector<AfnBlueprintExport>& blueprints,
+                                const std::vector<AfnBlueprintInstanceExport>& bpInstances,
+                                const std::vector<AfnHudElementExport>& hudElements,
+                                const std::vector<AfnTmSceneExport>& tmScenes,
                                 int startMode,
                                 float midiMasterDb,
-                                const std::vector<GBARiggedMeshExport>& rigs)
+                                const std::vector<AfnRiggedMeshExport>& rigs)
 {
     fs::path outPath = fs::path(runtimeDir) / "include" / "mapdata.h";
     std::ofstream f(outPath);
@@ -1026,7 +1026,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                     return hudPieceKeyVramTile[i];
             return -1;
         };
-        auto bakeHudPiece = [&](const GBAHudPieceExport& pc, std::vector<AfnBakedHudPiece>& out) {
+        auto bakeHudPiece = [&](const AfnHudPieceExport& pc, std::vector<AfnBakedHudPiece>& out) {
             int ai = pc.spriteAssetIdx;
             int sz = pc.size; if (sz < 8) sz = 8; if (sz > 64) sz = 64;
             int tilesNeeded;
@@ -1099,7 +1099,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 f << "\n};\n";
             };
             // 8bpp 256-colour texture (1 byte/texel, GL_RGB256) + RGB15 palette.
-            auto emitTex = [&](const std::string& base, const GBARiggedMeshExport::MatGroup& g) {
+            auto emitTex = [&](const std::string& base, const AfnRiggedMeshExport::MatGroup& g) {
                 int npx = g.texW * g.texH;
                 f << "static const u8 " << base << "_tex[] = {";
                 for (int i = 0; i < npx; i++) {
@@ -1218,7 +1218,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
             // 8bpp 256-colour texture (1 byte/texel, GL_RGB256) + RGB15 palette —
             // MUST match the player rig's emitTex: fps3d.c uploads NPC textures as
             // GL_RGB256, so a 4bpp/16-colour pack here is read back as garbage.
-            auto emitTex = [&](const std::string& base, const GBARiggedMeshExport::MatGroup& g) {
+            auto emitTex = [&](const std::string& base, const AfnRiggedMeshExport::MatGroup& g) {
                 int npx = g.texW * g.texH;
                 f << "static const u8 " << base << "_tex[] = {";
                 for (int i = 0; i < npx; i++) {
@@ -1239,7 +1239,7 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
                 }
                 f << "\n};\n";
             };
-            auto grpTextured = [](const GBARiggedMeshExport::MatGroup& g) {
+            auto grpTextured = [](const AfnRiggedMeshExport::MatGroup& g) {
                 return g.textured && !g.texPixels.empty() && g.texW > 0 && g.texH > 0;
             };
             int n = (int)npc.size();
@@ -2746,10 +2746,10 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
         {
             std::set<int> riseIds;
             for (auto& n : script.nodes)
-                if (n.type == GBAScriptNodeType::OnRise) riseIds.insert(n.id);
+                if (n.type == AfnScriptNodeType::OnRise) riseIds.insert(n.id);
             for (auto& bp : blueprints)
                 for (auto& n : bp.script.nodes)
-                    if (n.type == GBAScriptNodeType::OnRise) riseIds.insert(n.id);
+                    if (n.type == AfnScriptNodeType::OnRise) riseIds.insert(n.id);
             for (int rid : riseIds)
                 f << "static int afn_rise_" << rid << " = -2;\n";
         }
@@ -2767,23 +2767,23 @@ static bool GenerateNDSMapData(const std::string& runtimeDir,
 // ---------------------------------------------------------------------------
 bool PackageNDS(const std::string& runtimeDir,
                 const std::string& outputPath,
-                const std::vector<GBASpriteExport>& sprites,
-                const std::vector<GBASpriteAssetExport>& assets,
-                const GBACameraExport& camera,
-                const std::vector<GBAMeshExport>& meshes,
+                const std::vector<AfnSpriteExport>& sprites,
+                const std::vector<AfnSpriteAssetExport>& assets,
+                const AfnCameraExport& camera,
+                const std::vector<AfnMeshExport>& meshes,
                 float orbitDist,
-                const std::vector<GBASoundSampleExport>& soundSamples,
-                const std::vector<GBASoundInstanceExport>& soundInstances,
-                const std::vector<GBASkyFrameExport>& skyFrames,
+                const std::vector<AfnSoundSampleExport>& soundSamples,
+                const std::vector<AfnSoundInstanceExport>& soundInstances,
+                const std::vector<AfnSkyFrameExport>& skyFrames,
                 bool ndsAntialiasing,
-                const GBAScriptExport& script,
-                const std::vector<GBABlueprintExport>& blueprints,
-                const std::vector<GBABlueprintInstanceExport>& bpInstances,
-                const std::vector<GBAHudElementExport>& hudElements,
-                const std::vector<GBATmSceneExport>& tmScenes,
+                const AfnScriptExport& script,
+                const std::vector<AfnBlueprintExport>& blueprints,
+                const std::vector<AfnBlueprintInstanceExport>& bpInstances,
+                const std::vector<AfnHudElementExport>& hudElements,
+                const std::vector<AfnTmSceneExport>& tmScenes,
                 int startMode,
                 float midiMasterDb,
-                const std::vector<GBARiggedMeshExport>& rigs,
+                const std::vector<AfnRiggedMeshExport>& rigs,
                 std::string& errorMsg)
 {
     std::string buildOutput;

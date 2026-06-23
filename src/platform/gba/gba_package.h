@@ -8,7 +8,7 @@ namespace Affinity
 {
 
 // Sprite data for GBA export
-struct GBASpriteExport
+struct AfnSpriteExport
 {
     float x, y, z;     // world position (editor coords, ±512)
     float scale;
@@ -62,7 +62,7 @@ struct GBASpriteExport
 };
 
 // Player direction sprite for GBA export (RGBA8 image)
-struct GBAPlayerDirExport
+struct AfnPlayerDirExport
 {
     const unsigned char* pixels;  // RGBA8 data (nullptr if empty)
     int width, height;
@@ -76,7 +76,7 @@ struct GBAPlayerDirExport
 // right stride — otherwise large frames are clamped to 128 and read back garbled.
 static constexpr int kExportMaxFrameSize = 960;
 
-struct GBASpriteFrameExport
+struct AfnSpriteFrameExport
 {
     uint8_t pixels[kExportMaxFrameSize * kExportMaxFrameSize]; // palette indices 0-15
     int width, height;
@@ -84,7 +84,7 @@ struct GBASpriteFrameExport
 };
 
 // Sprite asset animation for GBA export
-struct GBASpriteAnimExport
+struct AfnSpriteAnimExport
 {
     int startFrame, endFrame;
     int fps;
@@ -94,7 +94,7 @@ struct GBASpriteAnimExport
 };
 
 // Sprite asset for GBA export — tile data + palette + animations
-struct GBASpriteAssetExport
+struct AfnSpriteAssetExport
 {
     std::string name;
     int baseSize;          // 8, 16, or 32
@@ -105,16 +105,16 @@ struct GBASpriteAssetExport
     int psvColors = 16;
     bool useAlpha = false;   // PSV: emit per-pixel alpha from frames[].alpha (soft edges)
     uint32_t psvPalette[128] = {};
-    std::vector<GBASpriteFrameExport> psvFrames;
-    std::vector<GBASpriteFrameExport> frames;
-    std::vector<GBASpriteAnimExport>  anims;
+    std::vector<AfnSpriteFrameExport> psvFrames;
+    std::vector<AfnSpriteFrameExport> frames;
+    std::vector<AfnSpriteAnimExport>  anims;
     int defaultAnim;
 
     // Directional sprite animation sets (each set = 8 direction RGBA8 images)
     struct DirAnimSetExport
     {
         std::string name;
-        GBAPlayerDirExport dirImages[8] = {};
+        AfnPlayerDirExport dirImages[8] = {};
     };
     bool hasDirections = false;
     int paletteSrc = -1;       // -1 = own palette, >= 0 = share from asset index
@@ -122,7 +122,7 @@ struct GBASpriteAssetExport
 };
 
 // Camera start data for GBA export
-struct GBACameraExport
+struct AfnCameraExport
 {
     float x, z;
     float height;
@@ -164,7 +164,7 @@ struct GBACameraExport
 };
 
 // Mesh asset for GBA export
-struct GBAMeshExport
+struct AfnMeshExport
 {
     std::vector<float> positions; // px, py, pz per vertex (flat)
     std::vector<float> normals;   // nx, ny, nz per vertex (flat)
@@ -219,7 +219,7 @@ struct GBAMeshExport
 // ---- Visual Script Export ----
 
 // Node types matching editor VsNodeType enum
-enum class GBAScriptNodeType : int {
+enum class AfnScriptNodeType : int {
     OnKeyPressed = 0, OnKeyReleased, OnKeyHeld,
     OnCollision, OnStart,
     Branch, CompareVar,
@@ -507,9 +507,9 @@ enum class GBAScriptNodeType : int {
     COUNT
 };
 
-struct GBAScriptNodeExport {
+struct AfnScriptNodeExport {
     int id;
-    GBAScriptNodeType type;
+    AfnScriptNodeType type;
     int paramInt[4];  // per-node params (key index, value, IEEE754 float bits, etc.)
     char customCode[4096] = {};  // user-editable code override (empty = use default)
     char funcName[64] = {};     // custom function name (empty = use default)
@@ -520,7 +520,7 @@ struct GBAScriptNodeExport {
     int ccDataOut = 0;            // number of data-out pins
 };
 
-struct GBAScriptLinkExport {
+struct AfnScriptLinkExport {
     int fromNodeId;
     int fromPinType;  // 0=execOut, 2=dataOut
     int fromPinIdx;
@@ -529,27 +529,27 @@ struct GBAScriptLinkExport {
     int toPinIdx;
 };
 
-struct GBAScriptExport {
-    std::vector<GBAScriptNodeExport> nodes;
-    std::vector<GBAScriptLinkExport> links;
+struct AfnScriptExport {
+    std::vector<AfnScriptNodeExport> nodes;
+    std::vector<AfnScriptLinkExport> links;
     std::vector<bool> m4SceneSkyEnabled;  // per Mode 4 scene sky enable
     std::vector<bool> m1SceneSkyEnabled;  // per Mode 1 scene sky enable
 };
 
 // ---- Blueprint Export ----
 
-struct GBABlueprintParamExport {
+struct AfnBlueprintParamExport {
     int dataType;      // 0=int, 1=float, 2=key, 3=direction, 4=animation
     int defaultValue;
 };
 
-struct GBABlueprintExport {
+struct AfnBlueprintExport {
     std::string name;
-    GBAScriptExport script;  // nodes + links
-    std::vector<GBABlueprintParamExport> params;
+    AfnScriptExport script;  // nodes + links
+    std::vector<AfnBlueprintParamExport> params;
 };
 
-struct GBABlueprintInstanceExport {
+struct AfnBlueprintInstanceExport {
     int blueprintIdx;
     int spriteIdx;      // -1 if tilemap object
     int tmObjIdx;       // -1 if 3D sprite
@@ -561,7 +561,7 @@ struct GBABlueprintInstanceExport {
 
 // ---- Mode 0 Tilemap Export ----
 
-struct GBATmObjectExport {
+struct AfnTmObjectExport {
     int tileX, tileY;       // grid position
     int type;               // TmObjType enum
     int spriteAssetIdx;     // -1 = none
@@ -576,12 +576,12 @@ struct GBATmObjectExport {
     char name[32];
 };
 
-struct GBATmSceneExport {
+struct AfnTmSceneExport {
     int mapW, mapH;                          // grid dimensions in tiles
     float zoom;                              // camera zoom (1.0 = 8px per tile)
     int pixelScale = 1;                      // pixel scale (1=normal, 2=2x zoom)
     std::vector<uint16_t> tileIndices;       // mapW * mapH tile indices
-    std::vector<GBATmObjectExport> objects;
+    std::vector<AfnTmObjectExport> objects;
     uint32_t palette[256];                   // tileset palette (RGBA8)
     std::vector<uint8_t> tilePixels;         // 8bpp tile pixel data (nTiles * 64 bytes)
     int tileCount;                           // number of unique tiles
@@ -589,7 +589,7 @@ struct GBATmSceneExport {
 
 // ---- HUD Element Export ----
 
-struct GBAHudPieceExport {
+struct AfnHudPieceExport {
     int spriteAssetIdx;
     int frame;
     int localX, localY;
@@ -607,12 +607,12 @@ struct GBAHudPieceExport {
     int xfToScene = -1, xfToElem = -1, xfToPiece = -1;
 };
 
-struct GBAHudStopExport {
+struct AfnHudStopExport {
     int localX, localY;
     int linkedElement;  // -1 = none
 };
 
-struct GBAHudTextRowExport {
+struct AfnHudTextRowExport {
     char text[32];
     int localX, localY;
     uint16_t colorRGB15;
@@ -623,7 +623,7 @@ struct GBAHudTextRowExport {
     int scale;   // 1=normal, 2=double size
 };
 
-struct GBAHudKeyframeExport {
+struct AfnHudKeyframeExport {
     int frame;
     int offX, offY;
     int rot;           // degrees 0-359 (converted to brads at export)
@@ -632,44 +632,44 @@ struct GBAHudKeyframeExport {
     int opacity = 16;   // 0-16 opacity multiplier on the piece base opacity (16 = no change)
 };
 
-struct GBAHudAnimLayerItemExport {
+struct AfnHudAnimLayerItemExport {
     int type;   // 0=piece, 1=sprite, 2=text, 3=cursor
     int index;
 };
 
-struct GBAHudAnimLayerExport {
+struct AfnHudAnimLayerExport {
     std::string name;
     int interp = 1;     // 0=constant, 1=linear, 2=bezier
     bool loop = false;
     int speed = 5;      // frames-per-tick (60/fps), e.g. 5 = 12fps
     int length = 60;    // total animation length in frames (from timeline range)
-    std::vector<GBAHudAnimLayerItemExport> items;
-    std::vector<GBAHudKeyframeExport> keyframes;
+    std::vector<AfnHudAnimLayerItemExport> items;
+    std::vector<AfnHudKeyframeExport> keyframes;
 };
 
-struct GBAHudElementExport {
+struct AfnHudElementExport {
     int screenX, screenY;
     bool visible;
     int runtimeMode;     // 0=Both, 1=Mode4, 2=Mode0
     uint32_t mode0SceneMask = 0xFFFFFFFF; // which Mode 0 scenes the element shows in
     uint32_t mode4SceneMask = 0xFFFFFFFF; // which Mode 4 scenes the element shows in
-    std::vector<GBAHudPieceExport> pieces;
-    std::vector<GBAHudPieceExport> sprites;
-    std::vector<GBAHudStopExport> stops;
-    std::vector<GBAHudTextRowExport> textRows;
+    std::vector<AfnHudPieceExport> pieces;
+    std::vector<AfnHudPieceExport> sprites;
+    std::vector<AfnHudStopExport> stops;
+    std::vector<AfnHudTextRowExport> textRows;
     int cursorAssetIdx;
     int cursorFrame;
     int cursorOffX, cursorOffY;
     int cursorSize = 16;   // cursor draw square (editor/GBA units); 0 = native frame size
     int cursorElementIdx = -1;   // use another element as the cursor (its pieces + keyframes); -1 = sprite
     int layerPieces, layerSprites, layerText, layerCursor;
-    std::vector<GBAHudKeyframeExport> keyframes;
+    std::vector<AfnHudKeyframeExport> keyframes;
     bool animLoop = false;
-    std::vector<GBAHudAnimLayerExport> animLayers;
+    std::vector<AfnHudAnimLayerExport> animLayers;
 };
 
 // Sound export: a single PCM sample (8-bit signed, 16384 Hz)
-struct GBASoundSampleExport {
+struct AfnSoundSampleExport {
     std::string name;
     std::vector<int8_t> data;
     std::vector<int16_t> data16; // 16-bit source for high-quality export
@@ -691,7 +691,7 @@ struct GBASoundSampleExport {
 };
 
 // Sound export: a note event in a sequence
-struct GBASoundNoteExport {
+struct AfnSoundNoteExport {
     int tick;       // absolute tick position
     int channel;    // channel 0-15
     int note;       // MIDI note 0-127
@@ -701,7 +701,7 @@ struct GBASoundNoteExport {
 };
 
 // Sound export: a complete sound instance (sequence + sample refs)
-struct GBASoundInstanceExport {
+struct AfnSoundInstanceExport {
     std::string name;
     int ticksPerBeat = 480;
     int tempo = 120;
@@ -724,7 +724,7 @@ struct GBASoundInstanceExport {
     bool loop = false;                     // loop between loopStartTick and loopEndTick
     int loopStartTick = 0;                 // MIDI tick to jump back to
     int loopEndTick = 0;                   // MIDI tick to trigger loop (0 = end of sequence)
-    std::vector<GBASoundNoteExport> notes; // all notes merged
+    std::vector<AfnSoundNoteExport> notes; // all notes merged
     std::vector<int> sampleIndices;        // which samples this instance uses
     bool isSfx = false;                    // true = one-shot SFX (uses afn_play_sfx)
     int sfxSampleIdx = -1;                 // exported sample index for SFX mode
@@ -733,7 +733,7 @@ struct GBASoundInstanceExport {
 };
 
 // Sky animation frame for export
-struct GBASkyFrameExport {
+struct AfnSkyFrameExport {
     const unsigned char* pixels = nullptr; // RGBA pixels
     int w = 0, h = 0;
 };
@@ -744,24 +744,24 @@ struct GBASkyFrameExport {
 // Returns true on success. errorMsg receives details on failure.
 bool PackageGBA(const std::string& runtimeDir,
                 const std::string& outputPath,
-                const std::vector<GBASpriteExport>& sprites,
-                const std::vector<GBASpriteAssetExport>& assets,
-                const GBACameraExport& camera,
-                const std::vector<GBAMeshExport>& meshes,
+                const std::vector<AfnSpriteExport>& sprites,
+                const std::vector<AfnSpriteAssetExport>& assets,
+                const AfnCameraExport& camera,
+                const std::vector<AfnMeshExport>& meshes,
                 float orbitDist,
-                const GBAScriptExport& script,
-                const std::vector<GBABlueprintExport>& blueprints,
-                const std::vector<GBABlueprintInstanceExport>& bpInstances,
-                const std::vector<GBATmSceneExport>& tmScenes,
-                const std::vector<GBAHudElementExport>& hudElements,
-                const std::vector<GBASoundSampleExport>& soundSamples,
-                const std::vector<GBASoundInstanceExport>& soundInstances,
+                const AfnScriptExport& script,
+                const std::vector<AfnBlueprintExport>& blueprints,
+                const std::vector<AfnBlueprintInstanceExport>& bpInstances,
+                const std::vector<AfnTmSceneExport>& tmScenes,
+                const std::vector<AfnHudElementExport>& hudElements,
+                const std::vector<AfnSoundSampleExport>& soundSamples,
+                const std::vector<AfnSoundInstanceExport>& soundInstances,
                 int startMode,
                 std::string& errorMsg,
                 const unsigned char* m7FloorPixels = nullptr,
                 int m7FloorW = 0, int m7FloorH = 0,
                 int m7FloorSize = 3,
-                const std::vector<GBASkyFrameExport>& skyFrames = {},
+                const std::vector<AfnSkyFrameExport>& skyFrames = {},
                 int skyAnimSpeed = 8,
                 bool deltaTime = false,
                 bool showFps = false,

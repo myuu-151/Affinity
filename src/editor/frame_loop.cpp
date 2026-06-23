@@ -17274,7 +17274,7 @@ void FrameTick(float dt)
                 std::string outPath = sPackageOutputPath;
 
                 // Always export 3D sprites — runtime can switch modes
-                std::vector<GBASpriteExport> exportSprites;
+                std::vector<AfnSpriteExport> exportSprites;
                 // Map each sSprites index -> its index in exportSprites. Sub-sprites
                 // are emitted INTERLEAVED (right after their parent), so a sub-sprite
                 // shifts every later main sprite's export index. Blueprint instances,
@@ -17285,7 +17285,7 @@ void FrameTick(float dt)
                 {
                     for (int i = 0; i < sSpriteCount; i++)
                     {
-                        GBASpriteExport se;
+                        AfnSpriteExport se;
                         se.x = sSprites[i].x;
                         se.y = sSprites[i].y;
                         se.z = sSprites[i].z;
@@ -17350,7 +17350,7 @@ void FrameTick(float dt)
                         if (i >= 0 && i < (int)sSpriteToExportIdx.size()) sSpriteToExportIdx[i] = parentExportIdx;
                         for (int si = 0; si < sSprites[i].subSpriteCount; si++) {
                             const auto& sub = sSprites[i].subSprites[si];
-                            GBASpriteExport subSe;
+                            AfnSpriteExport subSe;
                             subSe.x = sSprites[i].x + sub.offsetX;
                             subSe.y = sSprites[i].y + sub.offsetY;
                             subSe.z = sSprites[i].z + sub.offsetZ;
@@ -17380,7 +17380,7 @@ void FrameTick(float dt)
                         }
                     }
                 }
-                GBACameraExport exportCam;
+                AfnCameraExport exportCam;
                 exportCam.x = sCamObj.x;
                 exportCam.z = sCamObj.z;
                 exportCam.height = sCamObj.height;
@@ -17423,10 +17423,10 @@ void FrameTick(float dt)
                 exportCam.wallAware = sCamObj.wallAware;
 
                 // Collect sprite assets for export
-                std::vector<GBASpriteAssetExport> exportAssets;
+                std::vector<AfnSpriteAssetExport> exportAssets;
                 for (const auto& sa : sSpriteAssets)
                 {
-                    GBASpriteAssetExport ea;
+                    AfnSpriteAssetExport ea;
                     ea.name = sa.name;
                     ea.baseSize = sa.baseSize;
                     ea.palBank = sa.palBank;
@@ -17435,7 +17435,7 @@ void FrameTick(float dt)
                     memcpy(ea.palette, sa.palette, sizeof(ea.palette));
                     for (const auto& fr : sa.frames)
                     {
-                        GBASpriteFrameExport ef;
+                        AfnSpriteFrameExport ef;
                         memset(ef.pixels, 0, sizeof(ef.pixels));
                         for (int py = 0; py < fr.height && py < kExportMaxFrameSize; py++)
                             for (int px = 0; px < fr.width && px < kExportMaxFrameSize; px++)
@@ -17451,7 +17451,7 @@ void FrameTick(float dt)
                     memcpy(ea.psvPalette, sa.psvPalette, sizeof(ea.psvPalette));
                     for (const auto& fr : sa.psvFrames)
                     {
-                        GBASpriteFrameExport ef;
+                        AfnSpriteFrameExport ef;
                         memset(ef.pixels, 0, sizeof(ef.pixels));
                         for (int py = 0; py < fr.height && py < kExportMaxFrameSize; py++)
                             for (int px = 0; px < fr.width && px < kExportMaxFrameSize; px++)
@@ -17463,7 +17463,7 @@ void FrameTick(float dt)
                     }
                     for (const auto& an : sa.anims)
                     {
-                        GBASpriteAnimExport ean;
+                        AfnSpriteAnimExport ean;
                         ean.startFrame = an.startFrame;
                         ean.endFrame = an.endFrame;
                         ean.fps = an.fps;
@@ -17479,7 +17479,7 @@ void FrameTick(float dt)
                         ea.hasDirections = true;
                         for (int si = 0; si < (int)sAssetDirSprites[saIdx].size(); si++)
                         {
-                            GBASpriteAssetExport::DirAnimSetExport dase;
+                            AfnSpriteAssetExport::DirAnimSetExport dase;
                             if (si < (int)sa.dirAnimSets.size())
                                 dase.name = sa.dirAnimSets[si].name;
                             for (int d = 0; d < 8; d++)
@@ -17495,10 +17495,10 @@ void FrameTick(float dt)
                 }
 
                 // Collect mesh assets for export (always include — runtime can switch modes)
-                std::vector<GBAMeshExport> exportMeshes;
+                std::vector<AfnMeshExport> exportMeshes;
                 for (const auto& ma : sMeshAssets)
                 {
-                    GBAMeshExport me;
+                    AfnMeshExport me;
                     me.hasVertexColor = ma.hasVertexColor ? 1 : 0;
                     for (const auto& v : ma.vertices)
                     {
@@ -17618,7 +17618,7 @@ void FrameTick(float dt)
                             }
                         }
                         for (int s = 0; s < ma.matCount(); s++) {
-                            GBAMeshExport::MatSlot ms;
+                            AfnMeshExport::MatSlot ms;
                             ms.textured = ma.matTextured(s) ? 1 : 0;
                             ms.texW = ma.matTexW(s); ms.texH = ma.matTexH(s);
                             ms.texPixels = ma.matPixels(s);
@@ -17821,12 +17821,12 @@ void FrameTick(float dt)
                     out[len] = '\0';
                     return len > 0;
                 };
-                GBAScriptExport exportScript;
+                AfnScriptExport exportScript;
                 for (auto& n : *sceneNodes)
                 {
-                    GBAScriptNodeExport sn;
+                    AfnScriptNodeExport sn;
                     sn.id = n.id;
-                    sn.type = (GBAScriptNodeType)(int)n.type;
+                    sn.type = (AfnScriptNodeType)(int)n.type;
                     for (int pi = 0; pi < 4; pi++) sn.paramInt[pi] = n.paramInt[pi];
                     memcpy(sn.customCode, n.customCode, sizeof(sn.customCode));
                     memcpy(sn.funcName, n.funcName, sizeof(sn.funcName));
@@ -17846,7 +17846,7 @@ void FrameTick(float dt)
                 }
                 for (auto& l : *sceneLinks)
                 {
-                    GBAScriptLinkExport sl;
+                    AfnScriptLinkExport sl;
                     sl.fromNodeId  = l.from.nodeId;
                     sl.fromPinType = l.from.pinType;
                     sl.fromPinIdx  = l.from.pinIdx;
@@ -17877,16 +17877,16 @@ void FrameTick(float dt)
                 }
 
                 // Build blueprint exports
-                std::vector<GBABlueprintExport> exportBlueprints;
-                std::vector<GBABlueprintInstanceExport> exportBpInstances;
+                std::vector<AfnBlueprintExport> exportBlueprints;
+                std::vector<AfnBlueprintInstanceExport> exportBpInstances;
                 for (int bi = 0; bi < (int)sBlueprintAssets.size(); bi++) {
                     const BlueprintAsset& bp = sBlueprintAssets[bi];
-                    GBABlueprintExport bpEx;
+                    AfnBlueprintExport bpEx;
                     bpEx.name = bp.name;
                     for (auto& n : bp.nodes) {
-                        GBAScriptNodeExport sn;
+                        AfnScriptNodeExport sn;
                         sn.id = n.id;
-                        sn.type = (GBAScriptNodeType)(int)n.type;
+                        sn.type = (AfnScriptNodeType)(int)n.type;
                         for (int pi = 0; pi < 4; pi++) sn.paramInt[pi] = n.paramInt[pi];
                         memcpy(sn.customCode, n.customCode, sizeof(sn.customCode));
                     memcpy(sn.funcName, n.funcName, sizeof(sn.funcName));
@@ -17909,13 +17909,13 @@ void FrameTick(float dt)
                         bpEx.script.nodes.push_back(sn);
                     }
                     for (auto& l : bp.links) {
-                        GBAScriptLinkExport sl;
+                        AfnScriptLinkExport sl;
                         sl.fromNodeId = l.from.nodeId; sl.fromPinType = l.from.pinType; sl.fromPinIdx = l.from.pinIdx;
                         sl.toNodeId = l.to.nodeId; sl.toPinType = l.to.pinType; sl.toPinIdx = l.to.pinIdx;
                         bpEx.script.links.push_back(sl);
                     }
                     for (int pi = 0; pi < bp.paramCount; pi++) {
-                        GBABlueprintParamExport pe;
+                        AfnBlueprintParamExport pe;
                         pe.dataType = bp.params[pi].dataType;
                         pe.defaultValue = bp.params[pi].defaultInt;
                         bpEx.params.push_back(pe);
@@ -17927,7 +17927,7 @@ void FrameTick(float dt)
                     const FloorSprite& sp = sSprites[si];
                     if (sp.blueprintIdx < 0 || sp.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
                     const BlueprintAsset& bp = sBlueprintAssets[sp.blueprintIdx];
-                    GBABlueprintInstanceExport inst;
+                    AfnBlueprintInstanceExport inst;
                     inst.blueprintIdx = sp.blueprintIdx;
                     // Use the exportSprites index (sub-sprites shift it) so the
                     // runtime's afn_bp_cur_spr_idx matches afn_npc_inst[][7] /
@@ -17953,7 +17953,7 @@ void FrameTick(float dt)
                         const TmObject& obj = sc.objects[oi];
                         if (obj.blueprintIdx < 0 || obj.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
                         const BlueprintAsset& bp = sBlueprintAssets[obj.blueprintIdx];
-                        GBABlueprintInstanceExport inst;
+                        AfnBlueprintInstanceExport inst;
                         inst.blueprintIdx = obj.blueprintIdx;
                         inst.spriteIdx = -1;
                         inst.tmObjIdx = oi;
@@ -17974,7 +17974,7 @@ void FrameTick(float dt)
                     const MapScene& ms = sMapScenes[si];
                     if (ms.blueprintIdx < 0 || ms.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
                     const BlueprintAsset& bp = sBlueprintAssets[ms.blueprintIdx];
-                    GBABlueprintInstanceExport inst;
+                    AfnBlueprintInstanceExport inst;
                     inst.blueprintIdx = ms.blueprintIdx;
                     inst.spriteIdx = -1;
                     inst.tmObjIdx = -1;
@@ -17995,7 +17995,7 @@ void FrameTick(float dt)
                     const MapScene& ms = sM7Scenes[si];
                     if (ms.blueprintIdx < 0 || ms.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
                     const BlueprintAsset& bp = sBlueprintAssets[ms.blueprintIdx];
-                    GBABlueprintInstanceExport inst;
+                    AfnBlueprintInstanceExport inst;
                     inst.blueprintIdx = ms.blueprintIdx;
                     inst.spriteIdx = -1;
                     inst.tmObjIdx = -1;
@@ -18017,7 +18017,7 @@ void FrameTick(float dt)
                     if (el.blueprintIdx < 0 || el.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
                     const BlueprintAsset& bp = sBlueprintAssets[el.blueprintIdx];
                     auto addElemInst = [&](int mode, uint32_t mask) {
-                        GBABlueprintInstanceExport inst;
+                        AfnBlueprintInstanceExport inst;
                         inst.blueprintIdx = el.blueprintIdx;
                         inst.spriteIdx = -1;
                         inst.tmObjIdx = -1;
@@ -18038,7 +18038,7 @@ void FrameTick(float dt)
                     const TmScene& sc = sTmScenes[si2];
                     if (sc.blueprintIdx < 0 || sc.blueprintIdx >= (int)sBlueprintAssets.size()) continue;
                     const BlueprintAsset& bp = sBlueprintAssets[sc.blueprintIdx];
-                    GBABlueprintInstanceExport inst;
+                    AfnBlueprintInstanceExport inst;
                     inst.blueprintIdx = sc.blueprintIdx;
                     inst.spriteIdx = -1;
                     inst.tmObjIdx = -1;
@@ -18056,7 +18056,7 @@ void FrameTick(float dt)
 
                 // Collect tilemap scene data for Mode 0 export
                 // Always export tilemap data when scenes exist (needed for runtime scene switching)
-                std::vector<GBATmSceneExport> exportTmScenes;
+                std::vector<AfnTmSceneExport> exportTmScenes;
                 if (!sTmScenes.empty())
                 {
                     // Save current scene state first
@@ -18066,7 +18066,7 @@ void FrameTick(float dt)
                     for (int si2 = 0; si2 < (int)sTmScenes.size(); si2++)
                     {
                         const TmScene& sc = sTmScenes[si2];
-                        GBATmSceneExport tse;
+                        AfnTmSceneExport tse;
                         tse.mapW = sc.mapW;
                         tse.mapH = sc.mapH;
                         tse.zoom = sc.zoom;
@@ -18204,7 +18204,7 @@ void FrameTick(float dt)
                         // Copy objects
                         for (const auto& obj : sc.objects)
                         {
-                            GBATmObjectExport oe;
+                            AfnTmObjectExport oe;
                             oe.tileX = obj.tileX;
                             oe.tileY = obj.tileY;
                             oe.type = (int)obj.type;
@@ -18226,10 +18226,10 @@ void FrameTick(float dt)
                 }
 
                 // Collect HUD element data for export
-                std::vector<GBAHudElementExport> exportHudElements;
+                std::vector<AfnHudElementExport> exportHudElements;
                 for (int ei = 0; ei < (int)sHudElements.size(); ei++) {
                     const HudElement& el = sHudElements[ei];
-                    GBAHudElementExport he;
+                    AfnHudElementExport he;
                     he.screenX = el.x;
                     he.screenY = el.y;
                     he.visible = el.visible;
@@ -18237,7 +18237,7 @@ void FrameTick(float dt)
                     he.mode0SceneMask = el.mode0SceneMask;
                     he.mode4SceneMask = el.mode4SceneMask;
                     for (auto& pc : el.pieces) {
-                        GBAHudPieceExport pe;
+                        AfnHudPieceExport pe;
                         pe.spriteAssetIdx = pc.spriteAssetIdx;
                         pe.frame = pc.frame;
                         pe.localX = pc.localX;
@@ -18257,14 +18257,14 @@ void FrameTick(float dt)
                         he.pieces.push_back(pe);
                     }
                     for (auto& st : el.stops) {
-                        GBAHudStopExport se;
+                        AfnHudStopExport se;
                         se.localX = st.localX;
                         se.localY = st.localY;
                         se.linkedElement = st.linkedElement;
                         he.stops.push_back(se);
                     }
                     for (auto& tr : el.textRows) {
-                        GBAHudTextRowExport te;
+                        AfnHudTextRowExport te;
                         memcpy(te.text, tr.label, sizeof(te.text));
                         te.text[31] = '\0';
                         te.localX = tr.localX;
@@ -18288,7 +18288,7 @@ void FrameTick(float dt)
                     he.cursorSize = el.cursorSize;
                     he.cursorElementIdx = el.cursorElementIdx;
                     for (auto& si : el.spriteItems) {
-                        GBAHudPieceExport pe;
+                        AfnHudPieceExport pe;
                         pe.spriteAssetIdx = si.spriteAssetIdx;
                         pe.frame = si.frame;
                         pe.localX = si.localX;
@@ -18301,7 +18301,7 @@ void FrameTick(float dt)
                     he.layerText = el.layerText;
                     he.layerCursor = el.layerCursor;
                     for (auto& kf : el.keyframes) {
-                        GBAHudKeyframeExport ke;
+                        AfnHudKeyframeExport ke;
                         ke.frame = kf.frame;
                         ke.offX = kf.offsetX;
                         ke.offY = kf.offsetY;
@@ -18314,7 +18314,7 @@ void FrameTick(float dt)
                     }
                     he.animLoop = el.animLoop;
                     for (auto& lay : el.animLayers) {
-                        GBAHudAnimLayerExport le;
+                        AfnHudAnimLayerExport le;
                         le.name = lay.name;
                         le.interp = (int)lay.interp;
                         le.loop = lay.loop;
@@ -18323,7 +18323,7 @@ void FrameTick(float dt)
                         for (auto& it : lay.items)
                             le.items.push_back({ (int)it.type, it.index });
                         for (auto& kf : lay.keyframes) {
-                            GBAHudKeyframeExport ke;
+                            AfnHudKeyframeExport ke;
                             ke.frame = kf.frame;
                             ke.offX = kf.offsetX;
                             ke.offY = kf.offsetY;
@@ -18352,8 +18352,8 @@ void FrameTick(float dt)
                 }
 
                 // --- Gather sound data for export ---
-                std::vector<GBASoundSampleExport> exportSoundSamples;
-                std::vector<GBASoundInstanceExport> exportSoundInstances;
+                std::vector<AfnSoundSampleExport> exportSoundSamples;
+                std::vector<AfnSoundInstanceExport> exportSoundInstances;
                 {
                     // Remap: for normal banks, bankIdx -> exportIdx
                     // For drum kits: (bankIdx << 8 | note) -> exportIdx
@@ -18367,7 +18367,7 @@ void FrameTick(float dt)
                                 int exportIdx = (int)exportSoundSamples.size();
                                 sampleRemap[inst.sfxSampleIdx] = exportIdx;
                                 auto& smp = sSoundBank[inst.sfxSampleIdx];
-                                GBASoundSampleExport se;
+                                AfnSoundSampleExport se;
                                 se.name = smp.name;
                                 // SFX export: prefer the pristine hi-res 16-bit (srcData16 at
                                 // srcRate) so PSV/NDS get full quality; fall back to the 8-bit
@@ -18476,7 +18476,7 @@ void FrameTick(float dt)
                                     if (hit.data.empty()) continue;
                                     int exportIdx = (int)exportSoundSamples.size();
                                     sampleRemap[key] = exportIdx;
-                                    GBASoundSampleExport se;
+                                    AfnSoundSampleExport se;
                                     se.name = std::string(smp.name) + "_" + std::to_string(n.note);
                                     se.data = hit.data;
                                     // Calibrate rate so pitch-shift at this note cancels to native rate
@@ -18510,7 +18510,7 @@ void FrameTick(float dt)
                                     if (!sampleRemap.count(key)) {
                                         int exportIdx = (int)exportSoundSamples.size();
                                         sampleRemap[key] = exportIdx;
-                                        GBASoundSampleExport se;
+                                        AfnSoundSampleExport se;
                                         se.name = std::string(smp.name) + "_" + std::to_string(best->baseNote);
                                         se.data = best->data;
                                         se.data16 = best->data16;
@@ -18582,7 +18582,7 @@ void FrameTick(float dt)
                                     if (sampleRemap.count(bankIdx)) continue;
                                     int exportIdx = (int)exportSoundSamples.size();
                                     sampleRemap[bankIdx] = exportIdx;
-                                    GBASoundSampleExport se;
+                                    AfnSoundSampleExport se;
                                     se.name = smp.name;
                                     se.data = smp.data;
                                     if ((int)se.data.size() <= 64 && !se.data.empty()) {
@@ -18629,7 +18629,7 @@ void FrameTick(float dt)
                         if (inst.sfxSampleIdx >= 0 && inst.sfxSampleIdx < (int)sSoundBank.size()) {
                             auto it = sampleRemap.find(inst.sfxSampleIdx);
                             if (it == sampleRemap.end()) continue;
-                            GBASoundInstanceExport ie;
+                            AfnSoundInstanceExport ie;
                             ie.name = inst.name;
                             ie.isSfx = true;
                             ie.sfxSampleIdx = it->second;
@@ -18643,7 +18643,7 @@ void FrameTick(float dt)
 
                         if (inst.midiIdx < 0 || inst.midiIdx >= (int)sMidiFiles.size()) continue;
                         auto& midi = sMidiFiles[inst.midiIdx];
-                        GBASoundInstanceExport ie;
+                        AfnSoundInstanceExport ie;
                         ie.name = inst.name;
                         ie.ticksPerBeat = midi.ticksPerBeat;
                         ie.tempo = midi.tempo;
@@ -18673,7 +18673,7 @@ void FrameTick(float dt)
                                 if (midi.channelMuted[n.channel]) continue;
                                 int bankIdx = midi.channelBank[n.channel];
                                 if (bankIdx < 0 || bankIdx >= (int)sSoundBank.size()) continue;
-                                GBASoundNoteExport ne;
+                                AfnSoundNoteExport ne;
                                 ne.tick = n.tick;
                                 ne.channel = n.channel;
                                 // Bake this sequence's own master dB into the note
@@ -18721,7 +18721,7 @@ void FrameTick(float dt)
                             // Export pitch bend events (smpIdx=255 sentinel)
                             for (auto& pb : track.bends) {
                                 if (midi.channelMuted[pb.channel]) continue;
-                                GBASoundNoteExport ne;
+                                AfnSoundNoteExport ne;
                                 ne.tick = pb.tick;
                                 ne.channel = pb.channel;
                                 // Encode bend value (-8192..+8191) as note(hi) + vel(lo)
@@ -18734,7 +18734,7 @@ void FrameTick(float dt)
                             }
                         }
                         std::sort(ie.notes.begin(), ie.notes.end(),
-                            [](const GBASoundNoteExport& a, const GBASoundNoteExport& b) { return a.tick < b.tick; });
+                            [](const AfnSoundNoteExport& a, const AfnSoundNoteExport& b) { return a.tick < b.tick; });
                         std::set<int> instSamples;
                         for (auto& n : ie.notes) if (n.sampleIdx != 255) instSamples.insert(n.sampleIdx);
                         for (int si : instSamples) ie.sampleIndices.push_back(si);
@@ -18743,7 +18743,7 @@ void FrameTick(float dt)
                 }
 
                 // Build per-frame sky data for export
-                std::vector<GBASkyFrameExport> exportSkyFrames;
+                std::vector<AfnSkyFrameExport> exportSkyFrames;
                 int exportSkyAnimSpeed = 8;
                 for (auto& sky : sSkyboxInstances) {
                     bool hasPanels = false;
@@ -18752,7 +18752,7 @@ void FrameTick(float dt)
                     exportSkyAnimSpeed = sky.animSpeed;
                     for (auto& p : sky.panels) {
                         if (p.pixels) {
-                            GBASkyFrameExport frame;
+                            AfnSkyFrameExport frame;
                             frame.pixels = p.pixels;
                             frame.w = p.w;
                             frame.h = p.h;
@@ -18766,7 +18766,7 @@ void FrameTick(float dt)
                 // PSV CPU-skins rigs from exportPspRigs (below); the DS-baked
                 // DSM/DSA rig blobs retired with the NDS target. Kept empty so the
                 // shared header generator's signature is satisfied (PSV ignores it).
-                std::vector<Affinity::GBARiggedMeshExport> exportRigs;
+                std::vector<Affinity::AfnRiggedMeshExport> exportRigs;
 
                 // Raw (un-baked) rig data for the PSP runtime — CPU-skinned on
                 // device. Parallel to exportRigs but keeps base verts + per-frame

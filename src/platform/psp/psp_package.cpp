@@ -122,9 +122,9 @@ static unsigned int Rgb15ToAbgr(unsigned short c, bool opaque) {
 // ---- header generation ----------------------------------------------------
 static bool GeneratePSPMapData(const std::string& runtimeDir,
                                const char* hdrPrefix, const char* dataInclude,
-                               const std::vector<GBASpriteExport>& sprites,
-                               const GBACameraExport& camera,
-                               const std::vector<GBAMeshExport>& meshes,
+                               const std::vector<AfnSpriteExport>& sprites,
+                               const AfnCameraExport& camera,
+                               const std::vector<AfnMeshExport>& meshes,
                                float orbitDist,
                                std::string& errorMsg) {
     std::string path = runtimeDir + "\\include\\" + hdrPrefix + "mapdata.h";
@@ -384,7 +384,7 @@ static bool GeneratePSPMapData(const std::string& runtimeDir,
 static bool GeneratePSPRigData(const std::string& runtimeDir, const char* hdrPrefix,
                                const std::vector<PSPRigExport>& pspRigs,
                                int playerRigIdx,
-                               const std::vector<GBASpriteExport>& sprites,
+                               const std::vector<AfnSpriteExport>& sprites,
                                std::string& errorMsg) {
     std::string path = runtimeDir + "\\include\\" + hdrPrefix + "rig.h";
     std::ofstream f(path);
@@ -568,7 +568,7 @@ static bool GeneratePSPRigData(const std::string& runtimeDir, const char* hdrPre
 
 // ---- sky panorama (psp_sky.h) ---------------------------------------------
 static bool GeneratePSPSky(const std::string& runtimeDir, const char* hdrPrefix,
-                           const std::vector<GBASkyFrameExport>& skyFrames,
+                           const std::vector<AfnSkyFrameExport>& skyFrames,
                            std::string& errorMsg) {
     std::string path = runtimeDir + "\\include\\" + hdrPrefix + "sky.h";
     std::ofstream f(path);
@@ -598,8 +598,8 @@ static bool GeneratePSPSky(const std::string& runtimeDir, const char* hdrPrefix,
 // is RGBA8 (same byte order the rig palettes use). Directional/8-facing sprites
 // are simplified to their default anim here (facing-pick is a follow-up).
 static bool GeneratePSPSprites(const std::string& runtimeDir, const char* hdrPrefix,
-                               const std::vector<GBASpriteExport>& sprites,
-                               const std::vector<GBASpriteAssetExport>& assets,
+                               const std::vector<AfnSpriteExport>& sprites,
+                               const std::vector<AfnSpriteAssetExport>& assets,
                                std::string& errorMsg) {
     std::string path = runtimeDir + "\\include\\" + hdrPrefix + "sprites.h";
     std::ofstream f(path);
@@ -671,7 +671,7 @@ static bool GeneratePSPSprites(const std::string& runtimeDir, const char* hdrPre
     // direction falls back to the first filled one so a partially-authored sprite
     // (e.g. only N drawn) still shows from every angle. The runtime picks
     // base + dirIdx by camera facing instead of animating.
-    auto emitDirFrame = [&](const GBASpriteAssetExport::DirAnimSetExport& set, int d) -> std::pair<int,int> {
+    auto emitDirFrame = [&](const AfnSpriteAssetExport::DirAnimSetExport& set, int d) -> std::pair<int,int> {
         int use = set.dirImages[d].pixels ? d : -1;
         if (use < 0) for (int k = 0; k < 8; k++) if (set.dirImages[k].pixels) { use = k; break; }
         int gi = globalFrames++;
@@ -827,8 +827,8 @@ static bool GeneratePSPSprites(const std::string& runtimeDir, const char* hdrPre
 // adds per-instance SFX routing (afn_snd_is_sfx/sfx_sample/sfx_gain/sfx_fifo) so
 // afn_play_sound() on an SFX-type instance fires the one-shot sample directly.
 static bool GeneratePSPSound(const std::string& runtimeDir, const char* hdrPrefix,
-                             const std::vector<GBASoundSampleExport>& soundSamples,
-                             const std::vector<GBASoundInstanceExport>& soundInstances,
+                             const std::vector<AfnSoundSampleExport>& soundSamples,
+                             const std::vector<AfnSoundInstanceExport>& soundInstances,
                              std::string& errorMsg) {
     std::string path = runtimeDir + "\\include\\" + hdrPrefix + "sound.h";
     std::ofstream f(path);
@@ -989,7 +989,7 @@ static bool GeneratePSPSound(const std::string& runtimeDir, const char* hdrPrefi
 static bool GeneratePSPPlayerCol(const std::string& runtimeDir, const char* hdrPrefix,
                                  const std::vector<PSPRigExport>& pspRigs,
                                  int playerRigIdx,
-                                 const std::vector<GBASpriteExport>& sprites,
+                                 const std::vector<AfnSpriteExport>& sprites,
                                  std::string& errorMsg) {
     std::string path = runtimeDir + "\\include\\" + hdrPrefix + "player.h";
     std::ofstream f(path);
@@ -1030,14 +1030,14 @@ static bool GeneratePSPPlayerCol(const std::string& runtimeDir, const char* hdrP
 // downstream build step (pspdev vs vitasdk) differs.
 bool GenerateAffinityHeaders(const std::string& runtimeDir,
                              const char* hdrPrefix, const char* dataInclude,
-                             const std::vector<GBASpriteExport>& sprites,
-                             const std::vector<GBASpriteAssetExport>& assets,
-                             const GBACameraExport& camera,
-                             const std::vector<GBAMeshExport>& meshes,
+                             const std::vector<AfnSpriteExport>& sprites,
+                             const std::vector<AfnSpriteAssetExport>& assets,
+                             const AfnCameraExport& camera,
+                             const std::vector<AfnMeshExport>& meshes,
                              float orbitDist,
-                             const std::vector<GBASoundSampleExport>& soundSamples,
-                             const std::vector<GBASoundInstanceExport>& soundInstances,
-                             const std::vector<GBASkyFrameExport>& skyFrames,
+                             const std::vector<AfnSoundSampleExport>& soundSamples,
+                             const std::vector<AfnSoundInstanceExport>& soundInstances,
+                             const std::vector<AfnSkyFrameExport>& skyFrames,
                              const std::vector<PSPRigExport>& pspRigs,
                              int playerRigIdx,
                              std::string& errorMsg,
@@ -1059,22 +1059,22 @@ bool GenerateAffinityHeaders(const std::string& runtimeDir,
 
 bool PackagePSP(const std::string& runtimeDir,
                 const std::string& outputPath,
-                const std::vector<GBASpriteExport>& sprites,
-                const std::vector<GBASpriteAssetExport>& assets,
-                const GBACameraExport& camera,
-                const std::vector<GBAMeshExport>& meshes,
+                const std::vector<AfnSpriteExport>& sprites,
+                const std::vector<AfnSpriteAssetExport>& assets,
+                const AfnCameraExport& camera,
+                const std::vector<AfnMeshExport>& meshes,
                 float orbitDist,
-                const std::vector<GBASoundSampleExport>& soundSamples,
-                const std::vector<GBASoundInstanceExport>& soundInstances,
-                const std::vector<GBASkyFrameExport>& skyFrames,
-                const GBAScriptExport& /*script*/,
-                const std::vector<GBABlueprintExport>& /*blueprints*/,
-                const std::vector<GBABlueprintInstanceExport>& /*bpInstances*/,
-                const std::vector<GBAHudElementExport>& /*hudElements*/,
-                const std::vector<GBATmSceneExport>& /*tmScenes*/,
+                const std::vector<AfnSoundSampleExport>& soundSamples,
+                const std::vector<AfnSoundInstanceExport>& soundInstances,
+                const std::vector<AfnSkyFrameExport>& skyFrames,
+                const AfnScriptExport& /*script*/,
+                const std::vector<AfnBlueprintExport>& /*blueprints*/,
+                const std::vector<AfnBlueprintInstanceExport>& /*bpInstances*/,
+                const std::vector<AfnHudElementExport>& /*hudElements*/,
+                const std::vector<AfnTmSceneExport>& /*tmScenes*/,
                 int /*startMode*/,
                 float /*midiMasterDb*/,
-                const std::vector<GBARiggedMeshExport>& /*rigs*/,
+                const std::vector<AfnRiggedMeshExport>& /*rigs*/,
                 const std::vector<PSPRigExport>& pspRigs,
                 int playerRigIdx,
                 std::string& errorMsg) {

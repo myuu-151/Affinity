@@ -230,7 +230,7 @@ static void EmitRigArrays(std::ofstream& f, int ru, const PSPRigExport& rig) {
 static bool GeneratePSVRigData(const std::string& runtimeDir,
                                const std::vector<PSPRigExport>& rigs,
                                int playerRigIdx,
-                               const std::vector<GBASpriteExport>& sprites,
+                               const std::vector<AfnSpriteExport>& sprites,
                                std::string& errorMsg) {
     std::string path = runtimeDir + "\\include\\psv_rig.h";
     std::ofstream f(path);
@@ -381,8 +381,8 @@ static bool GeneratePSVRigData(const std::string& runtimeDir,
 // Navigation mode path across it. Skipped (no AFN_HAS_NAVMESH) when no NPC
 // has navigation enabled, so scenes without nav pay nothing.
 static bool GeneratePSVNav(const std::string& runtimeDir,
-                           const std::vector<GBASpriteExport>& sprites,
-                           const std::vector<GBAMeshExport>& meshes,
+                           const std::vector<AfnSpriteExport>& sprites,
+                           const std::vector<AfnMeshExport>& meshes,
                            std::string& errorMsg) {
     std::string path = runtimeDir + "\\include\\psv_nav.h";
     std::ofstream f(path);
@@ -498,7 +498,7 @@ static bool GeneratePSVNav(const std::string& runtimeDir,
 // px; afn_rail_start/count index per editor sprite; *_end/_bounce are per-point
 // terminus flags; afn_rail_spline = follow a smooth Catmull-Rom curve.
 static bool GeneratePSVRail(const std::string& runtimeDir,
-                            const std::vector<GBASpriteExport>& sprites,
+                            const std::vector<AfnSpriteExport>& sprites,
                             std::string& errorMsg) {
     std::string path = runtimeDir + "\\include\\psv_rail.h";
     std::ofstream f(path);
@@ -555,8 +555,8 @@ static bool GeneratePSVRail(const std::string& runtimeDir,
 // (psv_hud renderer in main.c) draws them in an ortho pass scaled to the Vita
 // screen. Static positions (keyframe/anim-layer animation is not ported).
 static bool GeneratePSVHud(const std::string& runtimeDir,
-                           const std::vector<GBAHudElementExport>& elems,
-                           const std::vector<GBASpriteAssetExport>& assets,
+                           const std::vector<AfnHudElementExport>& elems,
+                           const std::vector<AfnSpriteAssetExport>& assets,
                            std::string& errorMsg) {
     std::string path = runtimeDir + "\\include\\psv_hud.h";
     std::ofstream f(path);
@@ -794,22 +794,22 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
 
 bool PackagePSV(const std::string& runtimeDir,
                 const std::string& outputPath,
-                const std::vector<GBASpriteExport>& sprites,
-                const std::vector<GBASpriteAssetExport>& assets,
-                const GBACameraExport& camera,
-                const std::vector<GBAMeshExport>& meshes,
+                const std::vector<AfnSpriteExport>& sprites,
+                const std::vector<AfnSpriteAssetExport>& assets,
+                const AfnCameraExport& camera,
+                const std::vector<AfnMeshExport>& meshes,
                 float orbitDist,
-                const std::vector<GBASoundSampleExport>& soundSamples,
-                const std::vector<GBASoundInstanceExport>& soundInstances,
-                const std::vector<GBASkyFrameExport>& skyFrames,
-                const GBAScriptExport& script,
-                const std::vector<GBABlueprintExport>& blueprints,
-                const std::vector<GBABlueprintInstanceExport>& bpInstances,
-                const std::vector<GBAHudElementExport>& hudElements,
-                const std::vector<GBATmSceneExport>& /*tmScenes*/,
+                const std::vector<AfnSoundSampleExport>& soundSamples,
+                const std::vector<AfnSoundInstanceExport>& soundInstances,
+                const std::vector<AfnSkyFrameExport>& skyFrames,
+                const AfnScriptExport& script,
+                const std::vector<AfnBlueprintExport>& blueprints,
+                const std::vector<AfnBlueprintInstanceExport>& bpInstances,
+                const std::vector<AfnHudElementExport>& hudElements,
+                const std::vector<AfnTmSceneExport>& /*tmScenes*/,
                 int startMode,
                 float /*midiMasterDb*/,
-                const std::vector<GBARiggedMeshExport>& /*rigs*/,
+                const std::vector<AfnRiggedMeshExport>& /*rigs*/,
                 const std::vector<PSPRigExport>& pspRigs,
                 int playerRigIdx,
                 std::string& errorMsg) {

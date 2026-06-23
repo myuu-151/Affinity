@@ -11,7 +11,7 @@ namespace Affinity
 // A rigged (DSMA skinned) mesh, pre-converted to DS display-list / animation
 // blobs by the editor (DsmaEmit). The packager only writes these as static
 // const u32 arrays into mapdata.h; the runtime hands them to DSMA_DrawModel.
-struct GBARiggedMeshExport
+struct AfnRiggedMeshExport
 {
     std::string name;
     // One geometry group per material slot. Each group is its own DSM (only the
@@ -52,23 +52,23 @@ struct GBARiggedMeshExport
 // Returns true on success. errorMsg receives details on failure.
 bool PackageNDS(const std::string& runtimeDir,
                 const std::string& outputPath,
-                const std::vector<GBASpriteExport>& sprites,
-                const std::vector<GBASpriteAssetExport>& assets,
-                const GBACameraExport& camera,
-                const std::vector<GBAMeshExport>& meshes,
+                const std::vector<AfnSpriteExport>& sprites,
+                const std::vector<AfnSpriteAssetExport>& assets,
+                const AfnCameraExport& camera,
+                const std::vector<AfnMeshExport>& meshes,
                 float orbitDist,
-                const std::vector<GBASoundSampleExport>& soundSamples,
-                const std::vector<GBASoundInstanceExport>& soundInstances,
-                const std::vector<GBASkyFrameExport>& skyFrames,
+                const std::vector<AfnSoundSampleExport>& soundSamples,
+                const std::vector<AfnSoundInstanceExport>& soundInstances,
+                const std::vector<AfnSkyFrameExport>& skyFrames,
                 bool ndsAntialiasing,
-                const GBAScriptExport& script,
-                const std::vector<GBABlueprintExport>& blueprints,
-                const std::vector<GBABlueprintInstanceExport>& bpInstances,
-                const std::vector<GBAHudElementExport>& hudElements,
-                const std::vector<GBATmSceneExport>& tmScenes,
+                const AfnScriptExport& script,
+                const std::vector<AfnBlueprintExport>& blueprints,
+                const std::vector<AfnBlueprintInstanceExport>& bpInstances,
+                const std::vector<AfnHudElementExport>& hudElements,
+                const std::vector<AfnTmSceneExport>& tmScenes,
                 int startMode,
                 float midiMasterDb,
-                const std::vector<GBARiggedMeshExport>& rigs,
+                const std::vector<AfnRiggedMeshExport>& rigs,
                 std::string& errorMsg);
 
 } // namespace Affinity
