@@ -5964,6 +5964,40 @@ static float s3DRailGrabOrig[3] = { 0, 0, 0 };          // primary point's pre-g
 static std::vector<s3DGrabSnap> s3DRailGrabOrigs;       // all selected points' pre-grab pos (idx = point index)
 static bool  s3DRailVertexSnap  = false; // while grabbing a rail point, snap it to the mesh vertex nearest the cursor
 static bool  s3DWireframe       = false; // 3D tab: render placed meshes as wireframe
+static bool  s3DHideVertexColors = false; // 3D tab: stop showing painted vertex colors (view only; export unaffected)
+
+// ---- Vertex paint (mesh tab): brush per-vertex colors onto placed OBJ meshes ----
+// Colors live on the shared MeshAsset (so all placed instances update together),
+// blend with falloff+strength toward the brush color, and persist as a separate
+// (vcol:N) packed blob — decoupled from geometry so materials/textures stay intact.
+static bool  s3DVtxPaint        = false;                 // paint mode active (intercepts LMB over the viewport)
+static int   s3DVtxPaintTool    = 0;                     // 0 = Brush, 1 = Eraser (blends toward white)
+static float s3DVtxPaintColor[3]= { 0.85f, 0.15f, 0.15f };
+static float s3DVtxPaintRadius  = 28.0f;                 // brush radius in screen pixels
+static float s3DVtxPaintStrength= 0.75f;                 // per-frame blend strength (0..1)
+static bool  s3DVtxStroking     = false;                 // a stroke is in progress (persist once on release)
+static bool  s3DVtxBrushShow    = false;                 // draw the brush ring this frame (GL, in Render3DViewport)
+static float s3DVtxBrushSX = 0.0f, s3DVtxBrushSY = 0.0f; // brush ring center, screen px
+static float s3DVtxPaintBright  = 1.0f;                  // brightness multiplier on the brush color (1=full, 0=black)
+static float s3DVtxLastX = 0.0f, s3DVtxLastY = 0.0f;     // previous cursor pos — gap-free stroke interpolation
+static bool  s3DVtxStrokeActive = false;                 // LMB stroke latched (keeps painting while held, even off-viewport)
+static bool  s3DVtxFResizing    = false;                 // holding F to resize the brush by horizontal mouse motion
+static float s3DVtxFStartX = 0.0f, s3DVtxFStartY = 0.0f, s3DVtxFStartRad = 0.0f; // F-resize anchor (mouse pos + radius at F-press)
+static float s3DVtxMulLight = 0.97f, s3DVtxMulDark = 0.85f; // Multiply popup: per-tone darken multipliers (light vs dark)
+static bool  s3DVtxMulOpen = false;        // Multiply popup open last frame (open/close edge detect)
+static int   s3DVtxMulMesh = -1;           // mesh the live-preview baseline belongs to
+static std::vector<float> s3DVtxMulBase;   // baseline rgb per vertex captured when the popup opened
+// Live-preview tonal-adjustment popups (Photoshop-style slider sets).
+static float s3DHueShift = 0.0f, s3DHueSat = 0.0f, s3DHueLight = 0.0f;        // deg(-180..180), -100..100, -100..100
+static float s3DExpExposure = 0.0f, s3DExpOffset = 0.0f, s3DExpGamma = 1.0f;  // stops, -0.5..0.5, 0.1..3
+static float s3DExpBright = 0.0f, s3DExpContrast = 0.0f;                      // -100..100 each
+static float s3DVibVib = 0.0f, s3DVibSat = 0.0f;                              // -100..100 each
+// Sun / directional light bake.
+static float s3DSunYaw = 0.6f, s3DSunPitch = 0.8f; // radians (azimuth / elevation)
+static float s3DSunRamp = 0.5f;                    // terminator softness: 0 = hard, 1 = soft (wrap)
+static float s3DSunShadow = 0.6f;                  // shadow darkness 0..1
+static bool  s3DSunGizmo = false;                  // draw the sun direction line this frame
+static float s3DSunLx = 0.0f, s3DSunLy = 1.0f, s3DSunLz = 0.0f; // computed unit dir toward the sun
 static bool  s3DSelRailContains(int pt) { for (int p : s3DSelRailPts) if (p == pt) return true; return false; }
 
 // Blender-style rotate mode (R). Each selected sprite spins around its
@@ -6199,6 +6233,114 @@ static void PersistMeshGeometry(MeshAsset& m, int assetIdx)
     char key[64]; snprintf(key, sizeof(key), "(edited:%d)", assetIdx);
     m.sourcePath = key;
     sPackedAssets[key] = std::move(bytes);
+}
+
+// Persist painted per-vertex colors as a compact RGB byte blob in the packed-asset
+// store, keyed "(vcol:N)" by mesh index. Kept SEPARATE from geometry on purpose:
+// the mesh still re-imports its original OBJ on load (usemtl grouping + auto-loaded
+// slot textures intact), then these colors overlay by index — so painting a
+// multi-material mesh never collapses its texture slots. Empty/cleared = key erased.
+static void PersistMeshVertexColors(const MeshAsset& m, int assetIdx)
+{
+    char key[64]; snprintf(key, sizeof(key), "(vcol:%d)", assetIdx);
+    if (!m.hasVertexColor) { sPackedAssets.erase(key); return; }
+    auto to8 = [](float c){ int i = (int)lroundf(c * 255.0f); return (uint8_t)(i < 0 ? 0 : i > 255 ? 255 : i); };
+    std::vector<uint8_t> bytes; bytes.reserve(m.vertices.size() * 3);
+    for (const MeshVertex& v : m.vertices) { bytes.push_back(to8(v.r)); bytes.push_back(to8(v.g)); bytes.push_back(to8(v.b)); }
+    sPackedAssets[key] = std::move(bytes);
+}
+
+// Vertex-paint undo: snapshot a mesh's colors before each stroke (or Clear) so
+// Ctrl+Z in the 3D tab can restore the previous state. Bounded ring of snapshots.
+struct VtxPaintUndo { int meshIdx; bool hadColor; std::vector<uint8_t> rgb; };
+static std::vector<VtxPaintUndo> s3DVtxUndoStack;
+static void VtxPaintPushUndo(const MeshAsset& m, int idx)
+{
+    auto to8 = [](float c){ int i=(int)lroundf(c*255.0f); return (uint8_t)(i<0?0:i>255?255:i); };
+    VtxPaintUndo u; u.meshIdx = idx; u.hadColor = m.hasVertexColor;
+    u.rgb.reserve(m.vertices.size() * 3);
+    for (const MeshVertex& v : m.vertices) { u.rgb.push_back(to8(v.r)); u.rgb.push_back(to8(v.g)); u.rgb.push_back(to8(v.b)); }
+    s3DVtxUndoStack.push_back(std::move(u));
+    const int kVtxUndoMax = 32;
+    if ((int)s3DVtxUndoStack.size() > kVtxUndoMax) s3DVtxUndoStack.erase(s3DVtxUndoStack.begin());
+}
+
+// One pass of Laplacian color smoothing over the whole mesh: each position's color
+// moves a fraction toward the average of its edge-connected neighbors. Welds verts
+// by objPosIdx so duplicated face-corners stay in sync. Spammable for more blur.
+static void SmoothMeshVertexColors(MeshAsset& m, float amount)
+{
+    if (m.vertices.empty()) return;
+    int n = (int)m.vertices.size();
+    auto pidx = [&](uint32_t vi)->int { int p = m.vertices[vi].objPosIdx; return (p >= 0 && p < n) ? p : (int)vi; };
+    // Average color per shared position.
+    std::vector<float> cr(n,0), cg(n,0), cb(n,0); std::vector<int> cnt(n,0);
+    for (int i = 0; i < n; i++) { int p = pidx(i); cr[p]+=m.vertices[i].r; cg[p]+=m.vertices[i].g; cb[p]+=m.vertices[i].b; cnt[p]++; }
+    for (int p = 0; p < n; p++) if (cnt[p] > 0) { cr[p]/=cnt[p]; cg[p]/=cnt[p]; cb[p]/=cnt[p]; }
+    // Neighbor color sums per position from tri + quad edges.
+    std::vector<float> nr(n,0), ng(n,0), nb(n,0); std::vector<int> deg(n,0);
+    auto edge = [&](int a, int b){ if (a==b) return; nr[a]+=cr[b]; ng[a]+=cg[b]; nb[a]+=cb[b]; deg[a]++; nr[b]+=cr[a]; ng[b]+=cg[a]; nb[b]+=cb[a]; deg[b]++; };
+    for (size_t t = 0; t+3 <= m.indices.size(); t += 3)  { int a=pidx(m.indices[t]),b=pidx(m.indices[t+1]),c=pidx(m.indices[t+2]); edge(a,b); edge(b,c); edge(c,a); }
+    for (size_t q = 0; q+4 <= m.quadIndices.size(); q+=4){ int a=pidx(m.quadIndices[q]),b=pidx(m.quadIndices[q+1]),c=pidx(m.quadIndices[q+2]),d=pidx(m.quadIndices[q+3]); edge(a,b); edge(b,c); edge(c,d); edge(d,a); }
+    // Blend toward neighbor average, then write back to every vert sharing a position.
+    std::vector<float> rr(cr), rg(cg), rb(cb);
+    for (int p = 0; p < n; p++) if (deg[p] > 0) { rr[p]=cr[p]+(nr[p]/deg[p]-cr[p])*amount; rg[p]=cg[p]+(ng[p]/deg[p]-cg[p])*amount; rb[p]=cb[p]+(nb[p]/deg[p]-cb[p])*amount; }
+    for (int i = 0; i < n; i++) { int p = pidx(i); m.vertices[i].r=rr[p]; m.vertices[i].g=rg[p]; m.vertices[i].b=rb[p]; }
+    m.hasVertexColor = true;
+}
+
+// Shared baseline for the live-preview color-adjustment popups (only one is open at
+// a time). drawSliders() draws the controls; xform(r,g,b) maps a baseline color to
+// the adjusted one using the current slider state; resetNeutral() returns the
+// sliders to no-op after an Apply. Handles baseline capture, per-frame live preview,
+// Apply (undo + bake + rebase), and revert-on-close.
+static std::vector<float> s3DAdjBase;
+static int  s3DAdjMesh = -1;
+static const void* s3DAdjId = nullptr;
+template<class DrawFn, class XformFn, class ResetFn>
+static void VtxAdjustPopup(const char* id, MeshAsset& ma, int meshIdx,
+                           DrawFn drawSliders, XformFn xform, ResetFn resetNeutral)
+{
+    bool isThis = (s3DAdjId == (const void*)id);
+    bool open   = ImGui::IsPopupOpen(id);
+    if (open && !isThis) { // popup just opened: capture baseline
+        s3DAdjBase.clear(); s3DAdjBase.reserve(ma.vertices.size()*3);
+        for (const MeshVertex& v : ma.vertices) { s3DAdjBase.push_back(v.r); s3DAdjBase.push_back(v.g); s3DAdjBase.push_back(v.b); }
+        s3DAdjMesh = meshIdx; s3DAdjId = (const void*)id; isThis = true;
+    }
+    if (ImGui::BeginPopup(id)) {
+        drawSliders();
+        bool haveBase = (s3DAdjMesh == meshIdx && s3DAdjBase.size() == ma.vertices.size()*3);
+        if (haveBase) { // live preview from baseline every frame
+            for (size_t i = 0; i < ma.vertices.size(); i++) {
+                float r = s3DAdjBase[i*3], g = s3DAdjBase[i*3+1], b = s3DAdjBase[i*3+2];
+                xform(ma.vertices[i], r, g, b);
+                ma.vertices[i].r = r; ma.vertices[i].g = g; ma.vertices[i].b = b;
+            }
+            ma.hasVertexColor = true; s3DRenderNeeded = true;
+        }
+        if (ImGui::Button("Apply") && haveBase) {
+            for (size_t i = 0; i < ma.vertices.size(); i++) { ma.vertices[i].r = s3DAdjBase[i*3]; ma.vertices[i].g = s3DAdjBase[i*3+1]; ma.vertices[i].b = s3DAdjBase[i*3+2]; }
+            VtxPaintPushUndo(ma, meshIdx);
+            for (size_t i = 0; i < ma.vertices.size(); i++) {
+                float r = s3DAdjBase[i*3], g = s3DAdjBase[i*3+1], b = s3DAdjBase[i*3+2];
+                xform(ma.vertices[i], r, g, b);
+                ma.vertices[i].r = r; ma.vertices[i].g = g; ma.vertices[i].b = b;
+                s3DAdjBase[i*3] = r; s3DAdjBase[i*3+1] = g; s3DAdjBase[i*3+2] = b;
+            }
+            ma.hasVertexColor = true; PersistMeshVertexColors(ma, meshIdx);
+            sProjectDirty = true; s3DRenderNeeded = true;
+            resetNeutral();
+        }
+        ImGui::SameLine(); ImGui::TextDisabled("(live)");
+        ImGui::EndPopup();
+    } else if (isThis) { // popup just closed without Apply: revert preview
+        if (s3DAdjMesh == meshIdx && s3DAdjBase.size() == ma.vertices.size()*3) {
+            for (size_t i = 0; i < ma.vertices.size(); i++) { ma.vertices[i].r = s3DAdjBase[i*3]; ma.vertices[i].g = s3DAdjBase[i*3+1]; ma.vertices[i].b = s3DAdjBase[i*3+2]; }
+            s3DRenderNeeded = true;
+        }
+        s3DAdjBase.clear(); s3DAdjMesh = -1; s3DAdjId = nullptr;
+    }
 }
 
 // Reimport an OBJ previously written by ExportSceneOBJ, reapplying edited
@@ -8841,6 +8983,23 @@ static bool LoadProject(const std::string& path)
                         glBindTexture(GL_TEXTURE_2D, 0);
                     }
                 }
+                // Overlay painted per-vertex colors (kept separate from geometry; see
+                // PersistMeshVertexColors). Index = this mesh's slot, which equals the
+                // current size since meshes load in save order.
+                {
+                    char vk[64]; snprintf(vk, sizeof(vk), "(vcol:%d)", (int)sMeshAssets.size());
+                    auto vit = sPackedAssets.find(vk);
+                    if (vit != sPackedAssets.end() && !ma.vertices.empty() &&
+                        vit->second.size() == ma.vertices.size() * 3) {
+                        const std::vector<uint8_t>& cb = vit->second;
+                        for (size_t vi = 0; vi < ma.vertices.size(); vi++) {
+                            ma.vertices[vi].r = cb[vi*3+0] / 255.0f;
+                            ma.vertices[vi].g = cb[vi*3+1] / 255.0f;
+                            ma.vertices[vi].b = cb[vi*3+2] / 255.0f;
+                        }
+                        ma.hasVertexColor = true;
+                    }
+                }
                 sMeshAssets.push_back(std::move(ma));
             }
         }
@@ -11200,7 +11359,36 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
     bool hovered = (mpos.x >= pos.x && mpos.x < pos.x + vpAreaW &&
                     mpos.y >= pos.y && mpos.y < pos.y + size.y);
 
-    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::GetIO().WantCaptureKeyboard)
+    // Vertex paint mode hijacks left-drag for painting (see below), so don't let it
+    // start a camera orbit. Middle-drag pan and wheel zoom still work while painting.
+    bool paintActive = s3DVtxPaint && sSelectedMesh >= 0 && sSelectedMesh < (int)sMeshAssets.size();
+
+    // Ctrl+Z undoes the last vertex-paint stroke (or a Clear) while paint mode is on.
+    if (s3DVtxPaint && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)
+        && !s3DVtxUndoStack.empty())
+    {
+        VtxPaintUndo u = std::move(s3DVtxUndoStack.back());
+        s3DVtxUndoStack.pop_back();
+        if (u.meshIdx >= 0 && u.meshIdx < (int)sMeshAssets.size())
+        {
+            MeshAsset& m = sMeshAssets[u.meshIdx];
+            if (u.rgb.size() == m.vertices.size() * 3)
+                for (size_t vi = 0; vi < m.vertices.size(); vi++) {
+                    m.vertices[vi].r = u.rgb[vi*3+0] / 255.0f;
+                    m.vertices[vi].g = u.rgb[vi*3+1] / 255.0f;
+                    m.vertices[vi].b = u.rgb[vi*3+2] / 255.0f;
+                }
+            m.hasVertexColor = u.hadColor;
+            PersistMeshVertexColors(m, u.meshIdx);
+            sProjectDirty = true;
+            s3DRenderNeeded = true;
+        }
+    }
+
+    // Orbit button: normally LMB, but in vertex-paint mode LMB paints, so the
+    // camera orbits with RMB instead (matches the usual paint-tool convention).
+    int orbitBtn = paintActive ? ImGuiMouseButton_Right : ImGuiMouseButton_Left;
+    if (hovered && ImGui::IsMouseClicked(orbitBtn) && !ImGui::GetIO().WantCaptureKeyboard)
     {
         s3DDragging = true;
         s3DDragStart = mpos;
@@ -11212,14 +11400,17 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
     }
     if (s3DDragging)
     {
-        if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        if (ImGui::IsMouseDown(orbitBtn))
         {
             float dx = mpos.x - s3DDragStart.x;
             float dy = mpos.y - s3DDragStart.y;
-            s3DOrbitYaw   -= dx * 0.005f;
+            if (!ImGui::GetIO().KeyAlt) s3DOrbitYaw -= dx * 0.005f; // Alt = vertical-only (pitch) rotation
             s3DOrbitPitch -= dy * 0.005f;
-            if (s3DOrbitPitch < 0.05f) s3DOrbitPitch = 0.05f;
-            if (s3DOrbitPitch > 1.5f)  s3DOrbitPitch = 1.5f;
+            // Wide pitch range so the camera can drop BELOW the model to look up at the
+            // underside / ceiling for better painting angles. Stay just shy of ±90° so
+            // the world-up look-at doesn't gimbal-flip.
+            if (s3DOrbitPitch < -1.5f) s3DOrbitPitch = -1.5f;
+            if (s3DOrbitPitch >  1.5f) s3DOrbitPitch =  1.5f;
             s3DDragStart = mpos;
         }
         else
@@ -11254,6 +11445,183 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
         }
     }
 
+    // ---- Vertex paint: left-drag colors mesh vertices under the brush ----
+    // [ / ] resize the brush. Painting projects every vertex of every placed
+    // instance of the selected mesh to screen (camera basis matches
+    // Render3DViewport) and blends those within the pixel radius, front-facing
+    // only, with smoothstep falloff * strength. Alt or I = eyedropper.
+    if (paintActive && hovered)
+    {
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftBracket, false))
+            s3DVtxPaintRadius = std::max(4.0f, s3DVtxPaintRadius - 4.0f);
+        if (ImGui::IsKeyPressed(ImGuiKey_RightBracket, false))
+            s3DVtxPaintRadius = std::min(200.0f, s3DVtxPaintRadius + 4.0f);
+    }
+    // Hold F and slide the mouse left/right to resize the brush (Blender-style).
+    if (paintActive && hovered && ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+        s3DVtxFResizing = true; s3DVtxFStartX = mpos.x; s3DVtxFStartY = mpos.y; s3DVtxFStartRad = s3DVtxPaintRadius;
+    }
+    if (s3DVtxFResizing) {
+        if (ImGui::IsKeyDown(ImGuiKey_F)) {
+            float nr = s3DVtxFStartRad + (mpos.x - s3DVtxFStartX) * 0.5f;
+            s3DVtxPaintRadius = std::max(4.0f, std::min(200.0f, nr));
+        } else {
+            s3DVtxFResizing = false;
+        }
+    }
+    // Eyedropper samples the vertex color under the cursor while Alt or I is held —
+    // no mouse click required (sampling on hover is the expected feel).
+    bool vpEyedrop = paintActive && hovered
+        && (ImGui::GetIO().KeyAlt || ImGui::IsKeyDown(ImGuiKey_I))
+        && !ImGui::IsMouseDown(ImGuiMouseButton_Right)   // Alt+RMB rotates the camera, doesn't eyedrop
+        && !s3DVtxFResizing
+        && !ImGui::GetIO().WantCaptureKeyboard;
+    // Latch the stroke on LMB-down over the viewport and keep it active until the
+    // button is released — even if the cursor briefly leaves the viewport rect —
+    // so a swipe to a different area never cuts out mid-stroke (like orbit latches).
+    if (paintActive && hovered && !s3DVtxStrokeActive && !vpEyedrop && !s3DVtxFResizing
+        && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !ImGui::GetIO().WantCaptureKeyboard)
+    {
+        s3DVtxStrokeActive = true;
+        s3DVtxLastX = mpos.x; s3DVtxLastY = mpos.y;
+        VtxPaintPushUndo(sMeshAssets[sSelectedMesh], sSelectedMesh);
+    }
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) s3DVtxStrokeActive = false;
+    if (paintActive
+        && ((s3DVtxStrokeActive && ImGui::IsMouseDown(ImGuiMouseButton_Left) && !vpEyedrop) || vpEyedrop))
+    {
+        MeshAsset& pma = sMeshAssets[sSelectedMesh];
+        const float kPIp = 3.14159265f;
+        bool alt = vpEyedrop; // eyedropper when Alt or I held; otherwise LMB paints
+        // Camera + projection basis (same look-at the renderer uses).
+        float pcx = s3DTargetX + s3DOrbitDist * cosf(s3DOrbitPitch) * sinf(s3DOrbitYaw);
+        float pcy = s3DTargetY + s3DOrbitDist * sinf(s3DOrbitPitch);
+        float pcz = s3DTargetZ + s3DOrbitDist * cosf(s3DOrbitPitch) * cosf(s3DOrbitYaw);
+        float pfx = s3DTargetX - pcx, pfy = s3DTargetY - pcy, pfz = s3DTargetZ - pcz;
+        { float l = sqrtf(pfx*pfx+pfy*pfy+pfz*pfz); if (l > 0) { pfx/=l; pfy/=l; pfz/=l; } }
+        float psx = -pfz, psz = pfx;
+        { float l = sqrtf(psx*psx+psz*psz); if (l > 0) { psx/=l; psz/=l; } }
+        float pux = -psz*pfy, puy = psz*pfx - psx*pfz, puz = psx*pfy;
+        float pTanH = tanf(45.0f * kPIp / 360.0f);
+        float pAsp  = vpAreaW / size.y;
+        float radPx2 = s3DVtxPaintRadius * s3DVtxPaintRadius;
+        // Local->world matching the renderer's T * Ry * Rx * Rz * S order
+        // (scale skipped for normals). Returns world position (or rotated normal).
+        auto xformPN = [&](const FloorSprite& sp, float lx, float ly, float lz, bool isNormal,
+                           float& ox, float& oy, float& oz)
+        {
+            float s = isNormal ? 1.0f : (sp.scale > 0.0001f ? sp.scale : 1.0f);
+            float x = lx*s, y = ly*s, z = lz*s;
+            float cZ=cosf(sp.rotationZ*kPIp/180), sZ=sinf(sp.rotationZ*kPIp/180);
+            float cX=cosf(sp.rotationX*kPIp/180), sX=sinf(sp.rotationX*kPIp/180);
+            float cY=cosf(sp.rotation *kPIp/180), sY=sinf(sp.rotation *kPIp/180);
+            float x1 = x*cZ - y*sZ, y1 = x*sZ + y*cZ, z1 = z;          // Rz
+            float x2 = x1,          y2 = y1*cX - z1*sX, z2 = y1*sX + z1*cX; // Rx
+            ox = x2*cY + z2*sY; oy = y2; oz = -x2*sY + z2*cY;          // Ry
+            if (!isNormal) { ox += sp.x; oy += sp.y; oz += sp.z; }
+        };
+        bool painted = false;
+        float bestEyeD = 1e30f; bool eyeGot = false; float eyeR=0, eyeG=0, eyeB=0; // eyedrop: nearest vertex, no radius cap
+        // Brush color is darkened by the brightness slider (eraser always -> white).
+        float tr = (s3DVtxPaintTool == 1) ? 1.0f : s3DVtxPaintColor[0] * s3DVtxPaintBright;
+        float tg = (s3DVtxPaintTool == 1) ? 1.0f : s3DVtxPaintColor[1] * s3DVtxPaintBright;
+        float tb = (s3DVtxPaintTool == 1) ? 1.0f : s3DVtxPaintColor[2] * s3DVtxPaintBright;
+        // Smooth tool (2): collect in-brush verts and blend them toward their shared
+        // average instead of toward a fixed color.
+        std::vector<MeshVertex*> smPtr; std::vector<float> smWt; float smSr=0, smSg=0, smSb=0;
+        // Gap-free stroke: paint along the SEGMENT from the stroke's previous cursor
+        // position (set at stroke start) to the current one, so fast motion has no holes.
+        float segAx = s3DVtxLastX, segAy = s3DVtxLastY, segBx = mpos.x, segBy = mpos.y;
+        float segABx = segBx - segAx, segABy = segBy - segAy;
+        float segLen2 = segABx*segABx + segABy*segABy;
+        for (int i = 0; i < sSpriteCount; i++)
+        {
+            const FloorSprite& sp = sSprites[i];
+            if (sp.type != SpriteType::Mesh || sp.meshIdx != sSelectedMesh) continue;
+            for (MeshVertex& v : pma.vertices)
+            {
+                float wx, wy, wz; xformPN(sp, v.px, v.py, v.pz, false, wx, wy, wz);
+                float ex = wx-pcx, ey = wy-pcy, ez = wz-pcz;
+                float vz = -(pfx*ex + pfy*ey + pfz*ez);
+                if (vz >= -0.01f) continue;                          // behind camera
+                float vx = psx*ex + psz*ez;
+                float vy = pux*ex + puy*ey + puz*ez;
+                float ndcX = (vx/(-vz)) / (pTanH * pAsp);
+                float ndcY = (vy/(-vz)) / pTanH;
+                float ssx = pos.x + (ndcX + 1.0f) * 0.5f * vpAreaW;
+                float ssy = pos.y + (1.0f - ndcY) * 0.5f * size.y;
+                if (alt) {                                           // eyedropper: nearest vertex under cursor (no radius cap)
+                    float dp2 = (ssx-mpos.x)*(ssx-mpos.x) + (ssy-mpos.y)*(ssy-mpos.y);
+                    if (dp2 < bestEyeD) { bestEyeD = dp2; eyeR = v.r; eyeG = v.g; eyeB = v.b; eyeGot = true; }
+                    continue;
+                }
+                // Distance from the vertex to the stroke segment (point if no motion).
+                float tt = segLen2 > 0.0f ? ((ssx-segAx)*segABx + (ssy-segAy)*segABy) / segLen2 : 0.0f;
+                if (tt < 0.0f) tt = 0.0f; else if (tt > 1.0f) tt = 1.0f;
+                float qx = segAx + segABx*tt, qy = segAy + segABy*tt;
+                float d2 = (ssx-qx)*(ssx-qx) + (ssy-qy)*(ssy-qy);
+                if (d2 > radPx2) continue;
+                // Reject only CLEARLY back-facing vertices (cos < ~-0.25 vs the view
+                // direction), so a stroke stays continuous right up to and just past the
+                // silhouette instead of gapping out where a curved surface turns away.
+                // Meshes with no normals (zero) are never culled (many OBJs omit 'vn').
+                float nwx, nwy, nwz; xformPN(sp, v.nx, v.ny, v.nz, true, nwx, nwy, nwz);
+                float nlen2 = nwx*nwx + nwy*nwy + nwz*nwz;
+                if (nlen2 > 1e-8f) {
+                    float tcx = pcx-wx, tcy = pcy-wy, tcz = pcz-wz;
+                    float denom = sqrtf(nlen2) * sqrtf(tcx*tcx + tcy*tcy + tcz*tcz);
+                    if (denom > 1e-6f && (nwx*tcx + nwy*tcy + nwz*tcz) / denom < -0.25f) continue;
+                }
+                float fall = 1.0f - sqrtf(d2) / s3DVtxPaintRadius;
+                if (fall < 0.0f) fall = 0.0f;
+                fall = fall * fall * (3.0f - 2.0f * fall);            // smoothstep
+                float w = fall * s3DVtxPaintStrength;
+                if (w > 1.0f) w = 1.0f;
+                if (s3DVtxPaintTool == 2) { smPtr.push_back(&v); smWt.push_back(w); smSr += v.r; smSg += v.g; smSb += v.b; }
+                else { v.r += (tr - v.r) * w; v.g += (tg - v.g) * w; v.b += (tb - v.b) * w; }
+                painted = true;
+            }
+        }
+        // Smooth tool: pull every collected vertex toward the brushed area's average.
+        if (!alt && s3DVtxPaintTool == 2 && !smPtr.empty()) {
+            float nv = (float)smPtr.size();
+            float ar = smSr/nv, ag = smSg/nv, ab = smSb/nv;
+            for (size_t k = 0; k < smPtr.size(); k++) {
+                float w = smWt[k];
+                smPtr[k]->r += (ar - smPtr[k]->r) * w;
+                smPtr[k]->g += (ag - smPtr[k]->g) * w;
+                smPtr[k]->b += (ab - smPtr[k]->b) * w;
+            }
+        }
+        if (alt) {
+            // Eyedropper: take the sampled color at full brightness so the preview and
+            // subsequent paint match exactly what was picked.
+            if (eyeGot) { s3DVtxPaintColor[0] = eyeR; s3DVtxPaintColor[1] = eyeG; s3DVtxPaintColor[2] = eyeB; s3DVtxPaintBright = 1.0f; }
+        } else {
+            // Advance the stroke anchor every painting frame so segments stay short.
+            s3DVtxLastX = mpos.x; s3DVtxLastY = mpos.y;
+            if (painted) {
+                pma.hasVertexColor = true;
+                s3DVtxStroking = true;
+                sProjectDirty = true;
+                s3DRenderNeeded = true;
+            }
+        }
+    }
+    // Persist the painted colors once when the stroke ends.
+    if (s3DVtxStroking && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
+    {
+        if (sSelectedMesh >= 0 && sSelectedMesh < (int)sMeshAssets.size())
+            PersistMeshVertexColors(sMeshAssets[sSelectedMesh], sSelectedMesh);
+        s3DVtxStroking = false;
+    }
+    // Brush cursor: stash screen position + visibility here; the ring itself is
+    // drawn in GL by Render3DViewport (which composites OVER ImGui, so a draw-list
+    // ring would be hidden behind the 3D render).
+    s3DVtxBrushShow = paintActive && (hovered || s3DVtxFResizing);
+    if (s3DVtxFResizing) { s3DVtxBrushSX = s3DVtxFStartX; s3DVtxBrushSY = s3DVtxFStartY; } // ring locked in place while F-resizing
+    else                 { s3DVtxBrushSX = mpos.x;        s3DVtxBrushSY = mpos.y; }
+
     // ---- Right-mouse selection: click for single pick, drag for box select ----
     // Camera position + basis (shared by ray pick AND screen projection
     // for box select).
@@ -11279,7 +11647,7 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
     };
 
     // Track right-mouse down.
-    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+    if (hovered && !paintActive && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         s3DRMBDown  = true;
         s3DRMBStart = mpos;
         s3DRMBCtrlAtDown = ImGui::GetIO().KeyCtrl;
@@ -12293,6 +12661,10 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 "normal into one — fewer verts for the runtime to push. Lossless\n"
                 "(only merges truly-identical corners). Editor view is unchanged.");
         }
+        // View-only toggle: hide painted vertex colors so the bare texture/mesh shows.
+        if (ImGui::Checkbox("Hide Vertex Colors##meshHideVcol", &s3DHideVertexColors))
+            s3DRenderNeeded = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Editor view only — stop showing per-vertex paint so you can see the bare texture/mesh.\nDoes not affect the stored colors or export.");
         if (ma.textured)
         {
             if (ma.texW > 0)
@@ -12355,6 +12727,238 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 }
                 ImGui::PopID();
             }
+        }
+
+        // ---- Vertex Paint ----
+        // Brush per-vertex colors onto placed instances of this mesh. Colors are
+        // shared on the asset (all instances update together) and exported as the
+        // runtime's per-vertex color. Left-drag paints; Alt+click eyedrops.
+        ImGui::Separator();
+        ImGui::Checkbox("Vertex Paint##vpaint", &s3DVtxPaint);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Paint per-vertex colors onto placed instances of this mesh.\n"
+                              "Left-drag = paint   RMB = orbit (Alt+RMB = vertical only)\n"
+                              "Alt or I = eyedropper   F-drag or [ / ] = brush size");
+        if (s3DVtxPaint)
+        {
+            ImGui::Indent();
+            ImGui::RadioButton("Brush##vptool", &s3DVtxPaintTool, 0);
+            ImGui::SameLine();
+            ImGui::RadioButton("Eraser##vptool", &s3DVtxPaintTool, 1);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Eraser blends vertices back toward white.");
+            ImGui::SameLine();
+            ImGui::RadioButton("Smooth##vptool", &s3DVtxPaintTool, 2);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Smooth brush: blends the colors under the cursor toward their average.");
+            ImGui::ColorEdit3("Color##vpcol", s3DVtxPaintColor, ImGuiColorEditFlags_NoInputs);
+            ImGui::SameLine();
+            // Vertical brightness slider — darkens the paint color toward black.
+            ImGui::PushStyleColor(ImGuiCol_FrameBg,        ImVec4(0.04f, 0.04f, 0.04f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.09f, 0.09f, 0.09f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  ImVec4(0.12f, 0.12f, 0.12f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_SliderGrab,     ImVec4(0.75f, 0.75f, 0.75f, 1.0f));
+            ImGui::VSliderFloat("##vpbright", ImVec2(Scaled(18), Scaled(40)), &s3DVtxPaintBright, 0.0f, 1.0f, "");
+            ImGui::PopStyleColor(4);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brightness: darkens the paint color toward black (%.0f%%)", s3DVtxPaintBright * 100.0f);
+            ImGui::SameLine();
+            // Preview of the actual paint color (color x brightness).
+            ImVec4 vpPrev(s3DVtxPaintColor[0]*s3DVtxPaintBright, s3DVtxPaintColor[1]*s3DVtxPaintBright, s3DVtxPaintColor[2]*s3DVtxPaintBright, 1.0f);
+            ImGui::ColorButton("##vppreview", vpPrev,
+                ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker | ImGuiColorEditFlags_NoDragDrop,
+                ImVec2(Scaled(18), Scaled(40)));
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Paint color preview (color x brightness)");
+            ImGui::SetNextItemWidth(Scaled(130));
+            ImGui::SliderFloat("Radius##vprad", &s3DVtxPaintRadius, 4.0f, 200.0f, "%.0f px");
+            ImGui::SetNextItemWidth(Scaled(130));
+            ImGui::SliderFloat("Strength##vpstr", &s3DVtxPaintStrength, 0.02f, 1.0f, "%.2f");
+            int placedCount = 0;
+            for (int i = 0; i < sSpriteCount; i++)
+                if (sSprites[i].type == SpriteType::Mesh && sSprites[i].meshIdx == sSelectedMesh) placedCount++;
+            if (placedCount == 0)
+                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Place this mesh in the scene to paint it.");
+            if (ImGui::SmallButton("Smooth Out##vpsmoothall"))
+            {
+                VtxPaintPushUndo(ma, sSelectedMesh); // each press is one undo step
+                SmoothMeshVertexColors(ma, 0.35f);
+                PersistMeshVertexColors(ma, sSelectedMesh);
+                sProjectDirty = true;
+                s3DRenderNeeded = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Blend every vertex a little toward its neighbors. Spam to smooth more and more.");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Multiply##vpmul"))
+                ImGui::OpenPopup("vpDarkenPopup");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Darken by multiplying — opens Light/Dark sliders with a live preview.");
+            {
+                bool mulOpen = ImGui::IsPopupOpen("vpDarkenPopup");
+                if (mulOpen && !s3DVtxMulOpen) {
+                    // Popup just opened: snapshot the current colors as the preview baseline.
+                    s3DVtxMulBase.clear(); s3DVtxMulBase.reserve(ma.vertices.size()*3);
+                    for (const MeshVertex& v : ma.vertices) { s3DVtxMulBase.push_back(v.r); s3DVtxMulBase.push_back(v.g); s3DVtxMulBase.push_back(v.b); }
+                    s3DVtxMulMesh = sSelectedMesh;
+                    s3DVtxMulLight = 0.97f; s3DVtxMulDark = 0.85f;
+                } else if (!mulOpen && s3DVtxMulOpen) {
+                    // Closed without Apply: revert the live preview back to the baseline.
+                    if (s3DVtxMulMesh == sSelectedMesh && s3DVtxMulBase.size() == ma.vertices.size()*3) {
+                        for (size_t i = 0; i < ma.vertices.size(); i++) { ma.vertices[i].r = s3DVtxMulBase[i*3]; ma.vertices[i].g = s3DVtxMulBase[i*3+1]; ma.vertices[i].b = s3DVtxMulBase[i*3+2]; }
+                        s3DRenderNeeded = true;
+                    }
+                    s3DVtxMulBase.clear(); s3DVtxMulMesh = -1;
+                }
+                s3DVtxMulOpen = mulOpen;
+            }
+            if (ImGui::BeginPopup("vpDarkenPopup"))
+            {
+                ImGui::TextUnformatted("Darken (multiply by tone)");
+                ImGui::SetNextItemWidth(Scaled(150));
+                ImGui::SliderFloat("Light##vpml", &s3DVtxMulLight, 0.5f, 1.0f, "%.2f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Multiplier for lighter vertices (1.00 = unchanged).");
+                ImGui::SetNextItemWidth(Scaled(150));
+                ImGui::SliderFloat("Dark##vpmd", &s3DVtxMulDark, 0.5f, 1.0f, "%.2f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Multiplier for darker vertices (lower = more darkening).");
+                // Live preview: recompute mesh colors from the baseline every frame.
+                bool haveBase = (s3DVtxMulMesh == sSelectedMesh && s3DVtxMulBase.size() == ma.vertices.size()*3);
+                if (haveBase) {
+                    for (size_t i = 0; i < ma.vertices.size(); i++) {
+                        float br = s3DVtxMulBase[i*3], bg = s3DVtxMulBase[i*3+1], bb = s3DVtxMulBase[i*3+2];
+                        float L = 0.299f*br + 0.587f*bg + 0.114f*bb; if (L>1.0f) L=1.0f; else if (L<0.0f) L=0.0f;
+                        float f = s3DVtxMulDark + (s3DVtxMulLight - s3DVtxMulDark) * L;
+                        ma.vertices[i].r = br*f; ma.vertices[i].g = bg*f; ma.vertices[i].b = bb*f;
+                    }
+                    ma.hasVertexColor = true;
+                    s3DRenderNeeded = true;
+                }
+                if (ImGui::Button("Apply##vpmapply") && haveBase)
+                {
+                    // Commit: undo-snapshot the baseline, bake the preview as the new
+                    // baseline, then reset sliders so the preview returns to neutral.
+                    for (size_t i = 0; i < ma.vertices.size(); i++) { ma.vertices[i].r = s3DVtxMulBase[i*3]; ma.vertices[i].g = s3DVtxMulBase[i*3+1]; ma.vertices[i].b = s3DVtxMulBase[i*3+2]; }
+                    VtxPaintPushUndo(ma, sSelectedMesh);
+                    for (size_t i = 0; i < ma.vertices.size(); i++) {
+                        float br = s3DVtxMulBase[i*3], bg = s3DVtxMulBase[i*3+1], bb = s3DVtxMulBase[i*3+2];
+                        float L = 0.299f*br + 0.587f*bg + 0.114f*bb; if (L>1.0f) L=1.0f; else if (L<0.0f) L=0.0f;
+                        float f = s3DVtxMulDark + (s3DVtxMulLight - s3DVtxMulDark) * L;
+                        float rr = br*f, rg = bg*f, rb = bb*f;
+                        ma.vertices[i].r = rr; ma.vertices[i].g = rg; ma.vertices[i].b = rb;
+                        s3DVtxMulBase[i*3] = rr; s3DVtxMulBase[i*3+1] = rg; s3DVtxMulBase[i*3+2] = rb;
+                    }
+                    ma.hasVertexColor = true;
+                    PersistMeshVertexColors(ma, sSelectedMesh);
+                    sProjectDirty = true; s3DRenderNeeded = true;
+                    s3DVtxMulLight = 1.0f; s3DVtxMulDark = 1.0f; // neutral after apply
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("(live preview)");
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Clear Paint##vpclear"))
+            {
+                VtxPaintPushUndo(ma, sSelectedMesh); // so Ctrl+Z can restore the paint
+                for (MeshVertex& v : ma.vertices) { v.r = v.g = v.b = 1.0f; }
+                ma.hasVertexColor = false;
+                PersistMeshVertexColors(ma, sSelectedMesh);
+                sProjectDirty = true;
+                s3DRenderNeeded = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset every vertex to white (removes all paint).");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset Cam##vpresetcam"))
+            {
+                s3DOrbitYaw = 0.4f; s3DOrbitPitch = 0.6f; s3DOrbitDist = 400.0f;
+                s3DTargetX = 0.0f; s3DTargetY = 0.0f; s3DTargetZ = 0.0f;
+                s3DRenderNeeded = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset the 3D camera to its default view.");
+
+            // --- Tonal adjustments (Photoshop-style live-preview popups) ---
+            if (ImGui::SmallButton("Hue##vphue")) ImGui::OpenPopup("vpHuePopup");
+            VtxAdjustPopup("vpHuePopup", ma, sSelectedMesh,
+                [](){
+                    ImGui::TextUnformatted("Hue / Saturation");
+                    ImGui::SetNextItemWidth(Scaled(160)); ImGui::SliderFloat("Hue##vph",        &s3DHueShift, -180.0f, 180.0f, "%.0f\xc2\xb0");
+                    ImGui::SetNextItemWidth(Scaled(160)); ImGui::SliderFloat("Saturation##vphs",&s3DHueSat,   -100.0f, 100.0f, "%.0f");
+                    ImGui::SetNextItemWidth(Scaled(160)); ImGui::SliderFloat("Lightness##vphl", &s3DHueLight, -100.0f, 100.0f, "%.0f");
+                },
+                [](const MeshVertex&, float& r, float& g, float& b){
+                    float h, s, v; ImGui::ColorConvertRGBtoHSV(r, g, b, h, s, v);
+                    h += s3DHueShift / 360.0f; h -= floorf(h);
+                    s *= (1.0f + s3DHueSat / 100.0f); if (s < 0) s = 0; else if (s > 1) s = 1;
+                    ImGui::ColorConvertHSVtoRGB(h, s, v, r, g, b);
+                    float L = s3DHueLight / 100.0f;            // +1 -> white, -1 -> black
+                    if (L > 0)      { r += (1.0f - r) * L; g += (1.0f - g) * L; b += (1.0f - b) * L; }
+                    else if (L < 0) { float k = 1.0f + L; r *= k; g *= k; b *= k; }
+                },
+                [](){ s3DHueShift = 0.0f; s3DHueSat = 0.0f; s3DHueLight = 0.0f; });
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Exposure##vpexp")) ImGui::OpenPopup("vpExpPopup");
+            VtxAdjustPopup("vpExpPopup", ma, sSelectedMesh,
+                [](){
+                    ImGui::TextUnformatted("Exposure");
+                    ImGui::SetNextItemWidth(Scaled(160)); ImGui::SliderFloat("Exposure##vpe", &s3DExpExposure, -5.0f, 5.0f, "%.2f");
+                    ImGui::SetNextItemWidth(Scaled(160)); ImGui::SliderFloat("Offset##vpo",   &s3DExpOffset,   -0.5f, 0.5f, "%.3f");
+                    ImGui::SetNextItemWidth(Scaled(160)); ImGui::SliderFloat("Gamma##vpg",    &s3DExpGamma,     0.1f, 3.0f, "%.2f");
+                    ImGui::SetNextItemWidth(Scaled(160)); ImGui::SliderFloat("Brightness##vpb",&s3DExpBright,  -100.0f, 100.0f, "%.0f");
+                    ImGui::SetNextItemWidth(Scaled(160)); ImGui::SliderFloat("Contrast##vpc", &s3DExpContrast, -100.0f, 100.0f, "%.0f");
+                },
+                [](const MeshVertex&, float& r, float& g, float& b){
+                    float ex  = powf(2.0f, s3DExpExposure);
+                    float bri = s3DExpBright / 100.0f;
+                    float con = 1.0f + s3DExpContrast / 100.0f;
+                    auto ad = [&](float c){
+                        c = c * ex + s3DExpOffset + bri;
+                        c = (c - 0.5f) * con + 0.5f;
+                        if (c < 0) c = 0; else if (c > 1) c = 1;
+                        return powf(c, 1.0f / s3DExpGamma);
+                    };
+                    r = ad(r); g = ad(g); b = ad(b);
+                },
+                [](){ s3DExpExposure = 0.0f; s3DExpOffset = 0.0f; s3DExpGamma = 1.0f; s3DExpBright = 0.0f; s3DExpContrast = 0.0f; });
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Vibrance##vpvib")) ImGui::OpenPopup("vpVibPopup");
+            VtxAdjustPopup("vpVibPopup", ma, sSelectedMesh,
+                [](){
+                    ImGui::TextUnformatted("Vibrance");
+                    ImGui::SetNextItemWidth(Scaled(160)); ImGui::SliderFloat("Vibrance##vpv",   &s3DVibVib, -100.0f, 100.0f, "%.0f");
+                    ImGui::SetNextItemWidth(Scaled(160)); ImGui::SliderFloat("Saturation##vpvs",&s3DVibSat, -100.0f, 100.0f, "%.0f");
+                },
+                [](const MeshVertex&, float& r, float& g, float& b){
+                    float h, s, v; ImGui::ColorConvertRGBtoHSV(r, g, b, h, s, v);
+                    s += (s3DVibVib / 100.0f) * (1.0f - s);   // vibrance: lift low-saturation colors more
+                    s *= (1.0f + s3DVibSat / 100.0f);
+                    if (s < 0) s = 0; else if (s > 1) s = 1;
+                    ImGui::ColorConvertHSVtoRGB(h, s, v, r, g, b);
+                },
+                [](){ s3DVibVib = 0.0f; s3DVibSat = 0.0f; });
+            ImGui::SameLine();
+            // --- Sun: directional light bake (N·L into vertex colors) ---
+            s3DSunGizmo = false; // only shown while the Sun popup is open (drawSliders sets it true)
+            if (ImGui::SmallButton("Sun##vpsun")) ImGui::OpenPopup("vpSunPopup");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Bake a directional 'sun' into the vertex colors. A line in the viewport shows the light direction.");
+            VtxAdjustPopup("vpSunPopup", ma, sSelectedMesh,
+                [](){
+                    ImGui::TextUnformatted("Sun (directional light bake)");
+                    ImGui::SetNextItemWidth(Scaled(160)); ImGui::SliderAngle("Yaw##vpsy",   &s3DSunYaw,   0.0f,   360.0f);
+                    ImGui::SetNextItemWidth(Scaled(160)); ImGui::SliderAngle("Pitch##vpsp",  &s3DSunPitch, -89.0f,  89.0f);
+                    ImGui::SetNextItemWidth(Scaled(160)); ImGui::SliderFloat("Softness##vpsr",&s3DSunRamp,  0.0f, 1.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = hard terminator (crisp shadow edge), 1 = soft wrap-around light.");
+                    ImGui::SetNextItemWidth(Scaled(160)); ImGui::SliderFloat("Shadow##vpss", &s3DSunShadow, 0.0f, 1.0f, "%.2f");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("How dark the unlit side gets (0 = none, 1 = black).");
+                    // Compute the unit direction toward the sun + enable the viewport gizmo.
+                    float cp = cosf(s3DSunPitch), sp = sinf(s3DSunPitch);
+                    s3DSunLx = cp * sinf(s3DSunYaw); s3DSunLy = sp; s3DSunLz = cp * cosf(s3DSunYaw);
+                    s3DSunGizmo = true;
+                },
+                [](const MeshVertex& v, float& r, float& g, float& b){
+                    float nl   = v.nx*s3DSunLx + v.ny*s3DSunLy + v.nz*s3DSunLz; // -1..1
+                    float hard = nl < 0.0f ? 0.0f : nl;                          // clamped lambert
+                    float wrap = nl * 0.5f + 0.5f;                               // half-lambert (soft)
+                    float t = hard + (wrap - hard) * s3DSunRamp;                 // blend hard..soft
+                    if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+                    float shade = (1.0f - s3DSunShadow) + s3DSunShadow * t;      // shadow side darkens
+                    r *= shade; g *= shade; b *= shade;
+                },
+                [](){ s3DSunShadow = 0.0f; }); // after Apply, neutralize so it doesn't re-darken
+            ImGui::Unindent();
         }
     }
 
@@ -12437,7 +13041,10 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
     // Mesh object list
     ImGui::Separator();
     ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.7f, 1.0f), "Placed Meshes");
-    float listH3d = ImGui::GetContentRegionAvail().y * 0.3f;
+    // Size the placed-object lists off the panel height (not the dwindling remaining
+    // space) so they stay usable no matter how tall the mesh-properties section grows;
+    // the panel scrolls if everything doesn't fit.
+    float listH3d = std::max(Scaled(100.0f), size.y * 0.16f);
     ImGui::BeginChild("##MeshObjList", ImVec2(0, listH3d), true);
     for (int i = 0; i < sSpriteCount; i++)
     {
@@ -34211,7 +34818,8 @@ void Render3DViewport()
         glTranslatef(-camX, -camY, -camZ);
     }
 
-    // ---- Ground grid ----
+    // ---- Ground grid + bounds + floor (hidden while vertex painting for a clean view) ----
+    if (!s3DVtxPaint) {
     glDisable(GL_TEXTURE_2D);
     glBegin(GL_LINES);
     for (int i = -8; i <= 8; i++)
@@ -34240,6 +34848,7 @@ void Render3DViewport()
     glVertex3f(512, -0.1f, 512);   glVertex3f(-512, -0.1f, 512);
     glEnd();
     glDisable(GL_BLEND);
+    } // end ground grid/bounds/floor (hidden during vertex paint)
 
     // ---- NavMesh live rebuild ----
     // Re-run the Recast build whenever nav-relevant scene state changes (a
@@ -34470,7 +35079,7 @@ void Render3DViewport()
             // OBJ 2.0 per-vertex colors: when present, drive the color from each
             // vertex (untextured = lit vertex color; textured = modulates the
             // texture, matching the runtime which always emits vertex color).
-            bool vcol = ma.hasVertexColor && !wf;
+            bool vcol = ma.hasVertexColor && !wf && !s3DHideVertexColors;
             if (vcol) {
                 glEnable(GL_COLOR_MATERIAL);
                 glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
@@ -34986,6 +35595,65 @@ void Render3DViewport()
             glPointSize(1.0f);
             glColor3f(1, 1, 1);
         }
+    }
+
+    // Sun bake gizmo — a world-space line from the model toward the light, shown
+    // while the Sun popup is open (still in the perspective/look-at matrices here).
+    if (s3DSunGizmo)
+    {
+        glDisable(GL_TEXTURE_2D);
+        glDisable(GL_LIGHTING);
+        glDisable(GL_DEPTH_TEST);
+        float Llen = 320.0f;
+        float ox = s3DTargetX, oy = s3DTargetY + 48.0f, oz = s3DTargetZ;
+        float ex = ox + s3DSunLx*Llen, ey = oy + s3DSunLy*Llen, ez = oz + s3DSunLz*Llen;
+        glLineWidth(2.5f);
+        glBegin(GL_LINES);
+        glColor3f(1.0f, 0.82f, 0.18f);
+        glVertex3f(ox, oy, oz); glVertex3f(ex, ey, ez);                                   // shaft toward the sun
+        glColor3f(0.35f, 0.30f, 0.12f);
+        glVertex3f(ox, oy, oz); glVertex3f(ox - s3DSunLx*Llen*0.5f, oy - s3DSunLy*Llen*0.5f, oz - s3DSunLz*Llen*0.5f); // dim ray dir
+        glEnd();
+        glPointSize(9.0f);
+        glColor3f(1.0f, 0.9f, 0.3f);
+        glBegin(GL_POINTS); glVertex3f(ex, ey, ez); glEnd();                              // sun marker
+        glPointSize(1.0f);
+        glLineWidth(1.0f);
+    }
+
+    // Vertex-paint brush cursor — a screen-space ring at the mouse showing the
+    // pixel radius. Drawn here in GL (not via ImGui) because this viewport renders
+    // OVER the ImGui draw lists, so an ImGui ring would be painted over.
+    if (s3DVtxBrushShow)
+    {
+        ImVec2 disp = ImGui::GetIO().DisplaySize;
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_TEXTURE_2D);
+        glDisable(GL_LIGHTING);
+        glDisable(GL_SCISSOR_TEST);
+        glViewport(0, 0, (int)disp.x, (int)disp.y);
+        glMatrixMode(GL_PROJECTION); glLoadIdentity();
+        glOrtho(0.0, disp.x, disp.y, 0.0, -1.0, 1.0); // top-left origin, y-down (matches ImGui screen space)
+        glMatrixMode(GL_MODELVIEW);  glLoadIdentity();
+        float cx = s3DVtxBrushSX, cy = s3DVtxBrushSY, rr = s3DVtxPaintRadius;
+        bool eraser = (s3DVtxPaintTool == 1);
+        float br = eraser ? 1.0f : s3DVtxPaintColor[0] * s3DVtxPaintBright;
+        float bg = eraser ? 1.0f : s3DVtxPaintColor[1] * s3DVtxPaintBright;
+        float bb = eraser ? 1.0f : s3DVtxPaintColor[2] * s3DVtxPaintBright;
+        const int kSeg = 48;
+        // Dark halo first (thicker), then the tool-colored ring on top.
+        for (int pass = 0; pass < 2; pass++) {
+            if (pass == 0) { glLineWidth(3.0f); glColor3f(0.0f, 0.0f, 0.0f); }
+            else           { glLineWidth(1.5f); glColor3f(br, bg, bb); }
+            glBegin(GL_LINE_LOOP);
+            for (int s = 0; s < kSeg; s++) {
+                float a = s * (2.0f * 3.14159265f / kSeg);
+                glVertex2f(cx + cosf(a) * rr, cy + sinf(a) * rr);
+            }
+            glEnd();
+        }
+        glLineWidth(1.0f);
+        glColor3f(1.0f, 1.0f, 1.0f);
     }
 
     glDisable(GL_DEPTH_TEST);
