@@ -5,7 +5,7 @@
 <h1 align="center">Affinity Engine</h1>
 
 <p align="center">
-   An NDS/PSV 3D engine with a Windows desktop editor.
+   PS Vita 3D engine with a Windows desktop editor.
 </p>
 
 <p align="center">
