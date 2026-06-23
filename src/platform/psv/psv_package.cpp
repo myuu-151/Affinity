@@ -624,9 +624,9 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
         for (const auto& pc : he.pieces) {
             // Draw size = the piece's chosen size (matches the editor canvas), so a
             // native-512 graphic set to 256 renders at 256 (GL scales the texture).
-            // 960 is the non-square full-screen background (960x544).
-            int dispW = (pc.size == 960) ? 960 : pc.size;
-            int dispH = (pc.size == 960) ? 544 : pc.size;
+            // Non-square presets: 960=960x544, 640=512x256, 384=256x128, 192=128x64.
+            int dispW = (pc.size == 960) ? 960 : (pc.size == 640) ? 512 : (pc.size == 384) ? 256 : (pc.size == 192) ? 128 : pc.size;
+            int dispH = (pc.size == 960) ? 544 : (pc.size == 640) ? 256 : (pc.size == 384) ? 128 : (pc.size == 192) ?  64 : pc.size;
             // Cycle ← Value: bake each staged frame-slot asset so the runtime can
             // pick tex = base + hud_value[slot]. A static piece bakes just one.
             int cyc, baseTex = frameCount;

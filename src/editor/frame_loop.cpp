@@ -196,12 +196,18 @@ static inline int fastParseInt(const char*& p) {
     return neg ? -v : v;
 }
 
-// Pixel dimensions for a sprite-asset base size. 960 is the PSV-only non-square
-// full-screen background (960x544); every other size is square NxN.
+// Pixel dimensions for a sprite-asset / HUD-piece size. PSV non-square presets:
+// 960 = full-screen background (960x544), 640 = wide banner (512x256). Every
+// other size is square NxN.
 static void AssetFrameDims(int baseSize, int& w, int& h) {
-    if (baseSize == 960) { w = 960; h = 544; }
+    if      (baseSize == 960) { w = 960; h = 544; }
+    else if (baseSize == 640) { w = 512; h = 256; }
+    else if (baseSize == 384) { w = 256; h = 128; }
+    else if (baseSize == 192) { w = 128; h =  64; }
     else { w = baseSize; h = baseSize; }
 }
+// True for the PSV non-square presets (resize-don't-tile; billboard uses width).
+static bool IsNonSquareSize(int s) { return s == 960 || s == 640 || s == 384 || s == 192; }
 
 // Median-cut color reduction: reduce the unique colors (with pixel counts) to
 // <= target representative colors and build a color->index map. Fast (~O(n +
@@ -13478,9 +13484,9 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
             // 128x128 is PSV-only: PSV billboards are RGBA textures with no
             // size cap; GBA/NDS OAM hardware tops out at 64x64 (their
             // exporters downscale oversized frames to the largest OBJ size).
-            const char* sizes[] = { "8x8", "16x16", "32x32", "64x64", "128x128 (PSV)", "256x256 (PSV)", "512x512 (PSV)", "960x544 (PSV)" };
-            int sizeVals[] = { 8, 16, 32, 64, 128, 256, 512, 960 };
-            const int kNumSizes = 8;
+            const char* sizes[] = { "8x8", "16x16", "32x32", "64x64", "128x128 (PSV)", "256x256 (PSV)", "512x512 (PSV)", "512x256 (PSV)", "256x128 (PSV)", "128x64 (PSV)", "960x544 (PSV)" };
+            int sizeVals[] = { 8, 16, 32, 64, 128, 256, 512, 640, 384, 192, 960 };
+            const int kNumSizes = 11;
             int curIdx = 2; // default 32x32
             for (int si = 0; si < kNumSizes; si++)
                 if (sizeVals[si] == asset.baseSize) { curIdx = si; break; }
@@ -13490,9 +13496,9 @@ static void DrawSpritesTab(ImVec2 pos, ImVec2 size, float dt)
                 int oldSize = asset.baseSize;
                 if (newSize != oldSize && !asset.frames.empty())
                 {
-                    if (newSize == 960 || oldSize == 960)
+                    if (IsNonSquareSize(newSize) || IsNonSquareSize(oldSize))
                     {
-                        // Non-square full-screen background (960x544): don't tile.
+                        // Non-square preset (960x544 / 512x256): don't tile.
                         // Just resize the frames; the user (re)imports a PNG to fill.
                         int nw, nh; AssetFrameDims(newSize, nw, nh);
                         for (auto& fr : asset.frames) { fr.width = nw; fr.height = nh; }
@@ -31076,9 +31082,8 @@ void FrameTick(float dt)
                         if (pc.cycleEditSlot < (int)pc.cycleX.size()) baseX += pc.cycleX[pc.cycleEditSlot];
                         if (pc.cycleEditSlot < (int)pc.cycleY.size()) baseY += pc.cycleY[pc.cycleEditSlot];
                     }
-                    // 960 = non-square full-screen background (960x544); else square.
-                    int pcW = (pc.size == 960) ? 960 : pc.size;
-                    int pcH = (pc.size == 960) ? 544 : pc.size;
+                    // Non-square presets (960x544 / 512x256) via the shared helper; else square.
+                    int pcW, pcH; AssetFrameDims(pc.size, pcW, pcH);
                     float pszW = pcW * lt.sx;
                     float pszH = pcH * lt.sy;
                     float psz = pc.size * zoom; // for wrap check (unscaled)
@@ -32338,9 +32343,9 @@ void FrameTick(float dt)
                         }
                         // 128 is PSV-only (RGBA HUD pieces, no OBJ cap); the NDS
                         // exporter scales oversized pieces into its largest OBJ.
-                        int sizeIdx = (pc.size == 8) ? 0 : (pc.size == 16) ? 1 : (pc.size == 32) ? 2 : (pc.size == 64) ? 3 : (pc.size == 128) ? 4 : (pc.size == 256) ? 5 : (pc.size == 512) ? 6 : 7;
-                        if (ImGui::Combo("Size##pc", &sizeIdx, "8\0" "16\0" "32\0" "64\0" "128 (PSV)\0" "256 (PSV)\0" "512 (PSV)\0" "960x544 (PSV)\0")) {
-                            const int sizes[] = {8, 16, 32, 64, 128, 256, 512, 960};
+                        int sizeIdx = (pc.size == 8) ? 0 : (pc.size == 16) ? 1 : (pc.size == 32) ? 2 : (pc.size == 64) ? 3 : (pc.size == 128) ? 4 : (pc.size == 256) ? 5 : (pc.size == 512) ? 6 : (pc.size == 640) ? 7 : (pc.size == 384) ? 8 : (pc.size == 192) ? 9 : 10;
+                        if (ImGui::Combo("Size##pc", &sizeIdx, "8\0" "16\0" "32\0" "64\0" "128 (PSV)\0" "256 (PSV)\0" "512 (PSV)\0" "512x256 (PSV)\0" "256x128 (PSV)\0" "128x64 (PSV)\0" "960x544 (PSV)\0")) {
+                            const int sizes[] = {8, 16, 32, 64, 128, 256, 512, 640, 384, 192, 960};
                             pc.size = sizes[sizeIdx]; sProjectDirty = true;
                         }
                         if (ImGui::DragInt("X##pc", &pc.localX, 1)) sProjectDirty = true;
@@ -32384,7 +32389,8 @@ void FrameTick(float dt)
                         // Bar fill (PSV): clip this piece to a value/max so it drains.
                         {
                             const char* barSrc[] = { "None (static)", "Health", "Energy" };
-                            int dimAxis = (pc.size == 960 && pc.barAxis == 1) ? 544 : pc.size;
+                            int pbW, pbH; AssetFrameDims(pc.size, pbW, pbH);
+                            int dimAxis = (pc.barAxis == 1) ? pbH : pbW;
                             if (ImGui::Combo("Bar Fill##pc", &pc.barSource, barSrc, 3)) {
                                 if (pc.barSource != 0 && pc.barStart == 0 && pc.barEnd == 0) {
                                     pc.barStart = dimAxis; pc.barEnd = 0;   // sensible default: full -> empty

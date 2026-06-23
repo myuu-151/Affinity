@@ -759,7 +759,7 @@ static bool GenerateSharedSprites(const std::string& runtimeDir, const char* hdr
         else if (a.defaultAnim >= 0 && a.defaultAnim < (int)a.anims.size()) fps = a.anims[a.defaultAnim].fps;
         return fps > 0 ? fps : 8;
     });
-    icol("basesize", [&](const Inst& in){ return assets[in.asset].baseSize > 0 ? assets[in.asset].baseSize : 16; });
+    icol("basesize", [&](const Inst& in){ int bs = assets[in.asset].baseSize; if (bs == 640) bs = 512; else if (bs == 384) bs = 256; else if (bs == 192) bs = 128; /* non-square -> square billboard at width */ return bs > 0 ? bs : 16; });
     f << "#define AFN_HAS_SPRITES 1\n";
     return true;
 }
