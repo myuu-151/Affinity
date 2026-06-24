@@ -159,14 +159,20 @@ static int s_resultCursorLayer = -1;   // die_slct's HUD anim layer (blink); res
 #define AFN_MASH_ELEM          13   // 'mash' Cross-button prompt element
 #define AFN_CLASH_PC_PRESSED   35   // global HUD piece index: button_pressed
 #define AFN_CLASH_PC_UNPRESSED 36   // global HUD piece index: button_unpressed
-#define AFN_CLASH_FRAMES      300   // ~5s @60 struggle cap (timeout decides by who's ahead)
 #define AFN_CLASH_WINDOW       12   // both full-charge releases must land within this many frames
 #define AFN_CLASH_FULL_FRAC  0.85f  // "fully charged" = >= this fraction of max charge
 #define AFN_CLASH_PUSH       0.060f // balance gained per player Cross tap
-#define AFN_CLASH_AI_PUSH    0.0022f// balance the AI drains back each frame (auto-mash)
+// AI masher tuned to a mid-skilled human: it "presses" on a varying interval (not
+// a constant drain), ~5-10 presses/sec with the occasional fumble pause. Beatable
+// by out-mashing it, but it'll grind you down if you slack.
+#define AFN_CLASH_AI_TAP     0.050f // balance removed per AI press (vs the player's 0.060 tap)
+#define AFN_CLASH_AI_MIN        6   // min frames between AI presses
+#define AFN_CLASH_AI_JIT        7   // + 0..6 random frames -> avg ~6.7 presses/sec
+#define AFN_CLASH_AI_FUMBLE  0.08f  // chance a press is followed by a human "fumble" pause
+#define AFN_CLASH_AI_FUMBLE_LEN 16  // extra frames for a fumble pause
 #define AFN_CLASH_MEET_R       18.0f// beams "meet" when their centers are within this (world units) — must be nearly touching
 #define AFN_CLASH_AIR_FALLBACK   90 // ...or clash anyway after both beams have been airborne this long (~1.5s)
-static int   s_clashActive = 0, s_clashTimer = 0, s_clashSlot = -1, s_clashAirT = 0, s_clashResolveSfx = 0;
+static int   s_clashActive = 0, s_clashTimer = 0, s_clashSlot = -1, s_clashAirT = 0, s_clashResolveSfx = 0, s_clashAiTap = 0;
 static float s_clashBalance = 0.5f;     // 0 = player pushed back (loss), 1 = enemy pushed back (win)
 static int   s_clashPressed = 0, s_clashPressTimer = 0;   // mash-press flash (button_pressed vs _unpressed)
 static int   s_pbBeamFull = 0, s_ebBeamFull = 0;          // 1 while each side's IN-FLIGHT beam is a full charge
@@ -1630,6 +1636,7 @@ void afn_stop_all(void);
 void afn_stop_sfx_sample(int smpIdx);   // stop every voice playing this sample (for stopping a looped SFX)
 void afn_stop_music(void);              // stop only the persistent battle music, leaving one-shot SFX ringing
 void afn_set_sfx_pitch(int smpIdx, int pitchPct);   // repitch a playing (looped) SFX: 100 = natural, 200 = +oct
+int  afn_sfx_active(int smpIdx);                    // 1 if any voice is currently playing this sample
 void afn_stop_sfx_sample(int smpIdx);
 void afn_audio_init(void);
 void afn_audio_tick(void);
@@ -2407,18 +2414,18 @@ static void results_tick(void) {
         int lose = (afn_health <= 0);                         // player down
         if (win || lose) {
             s_resultState = 1; s_resultTimer = 0; s_resultWin = win;
-            // Kill the battle music before the fanfare. A clash resolve already fired
-            // the 'shoot' SFX, so stop ONLY the music (afn_stop_music) so the blast
-            // keeps ringing; afn_stop_all would cut it, afn_stop_sound would keep the
-            // music and cut the blast.
+            // Kill the battle music, then play the victory fanfare. On a clash resolve
+            // win_clash already rang at the resolve, so use afn_stop_music (which keeps
+            // that one-shot SFX ringing) instead of afn_stop_all — but still play the
+            // fanfare. Non-clash wins/losses stop everything first.
             if (s_clashResolveSfx) { afn_stop_music(); s_clashResolveSfx = 0; }
-            else afn_stop_all();
+            else                   { afn_stop_all(); }
+            afn_play_sound(AFN_SND_VICTORY, 0);   // win / battle-over fanfare
             if (lose) {   // player death cinematic: die clip + camera orbit (mirror the enemy KO)
                 s_pkoActive = 1; s_pkoTimer = 0;
                 s_pkoAngle0 = orbit_angle * (6.2831853f / 65536.0f);   // latch current yaw to orbit from
                 afn_rig_clip = 21; afn_player_frozen = 1;
             }
-            afn_play_sound(AFN_SND_VICTORY, 0);   // fanfare (win or battle-over)
         }
         return;
     }
@@ -2526,6 +2533,7 @@ static void clash_tick(void) {
             if (slot < 0) return;
             s_clashActive = 1; s_clashTimer = 0; s_clashSlot = slot;
             s_clashBalance = 0.5f; s_clashPressed = 0; s_clashPressTimer = 0;
+            s_clashAiTap = AFN_CLASH_AI_MIN;             // AI's first mash press
             s_pbBeamFull = s_ebBeamFull = 0; s_clashAirT = 0;
             // Suppress BOTH projectiles (one may have fired a frame or two early).
             afn_fb_active = 0; afn_fb_level = 0.0f; afn_fb_fire_timer = 0;
@@ -2551,19 +2559,27 @@ static void clash_tick(void) {
     // frames), independent of input — the player's real Cross taps drive the
     // balance toward the enemy while the AI drains it back.
     if (++s_clashPressTimer >= 8) { s_clashPressTimer = 0; s_clashPressed = !s_clashPressed; }
-    if (key_hit(KEY_A)) s_clashBalance += AFN_CLASH_PUSH;
-    s_clashBalance -= AFN_CLASH_AI_PUSH;
+    if (key_hit(KEY_A)) s_clashBalance += AFN_CLASH_PUSH;     // your Cross taps push toward the enemy
+    // The AI mashes like a mid-skilled human: a press on a varying interval (not a
+    // constant drain), with the occasional longer "fumble" pause that opens a window.
+    if (--s_clashAiTap <= 0) {
+        s_clashBalance -= AFN_CLASH_AI_TAP;
+        s_clashAiTap = AFN_CLASH_AI_MIN + (int)(ai_rand01() * AFN_CLASH_AI_JIT);
+        if (ai_chance(AFN_CLASH_AI_FUMBLE)) s_clashAiTap += AFN_CLASH_AI_FUMBLE_LEN;
+    }
     if (s_clashBalance < 0.0f) s_clashBalance = 0.0f;
     if (s_clashBalance > 1.0f) s_clashBalance = 1.0f;
-    // Mash sound pitch rides the balance: higher toward the enemy/goal (1.0 -> 150%),
-    // lower as it falls into your zone (0.0 -> 50%).
+    // Keep the mash sound going even if its sample isn't loop-flagged (re-trigger
+    // when the voice ends), then ride its pitch with the balance: higher toward the
+    // enemy/goal (1.0 -> 150%), lower as it falls into your zone (0.0 -> 50%).
+    if (!afn_sfx_active(AFN_SND_MASH)) afn_play_sfx(AFN_SND_MASH, 0, 0);
     afn_set_sfx_pitch(AFN_SND_MASH, 50 + (int)(s_clashBalance * 100.0f));
 
-    // Resolve: balance extreme, or timeout (whoever's ahead at the cap wins).
+    // Resolve only when the balance is pushed fully to one side — no timeout, the
+    // struggle runs indefinitely until someone wins.
     int win = 0, lose = 0;
-    if (s_clashBalance >= 1.0f) win = 1;
-    else if (s_clashBalance <= 0.0f) lose = 1;
-    else if (s_clashTimer >= AFN_CLASH_FRAMES) { if (s_clashBalance >= 0.5f) win = 1; else lose = 1; }
+    if (s_clashBalance >= 1.0f) win = 1;          // pushed to the enemy -> you win
+    else if (s_clashBalance <= 0.0f) lose = 1;    // pushed into your zone -> you lose
     if (win || lose) {
         afn_hud_visible[AFN_CLASH_ELEM] = 0;
         afn_hud_visible[AFN_MASH_ELEM]  = 0;

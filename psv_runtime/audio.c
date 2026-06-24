@@ -23,6 +23,7 @@ void afn_stop_all(void) {}
 void afn_stop_sfx_sample(int s) { (void)s; }
 void afn_stop_music(void) {}
 void afn_set_sfx_pitch(int s, int p) { (void)s; (void)p; }
+int  afn_sfx_active(int s) { (void)s; return 0; }
 #else
 
 // ---- Output config --------------------------------------------------------
@@ -283,6 +284,17 @@ void afn_stop_music(void) {
     lock();
     afn_stop_persist_locked();
     unlock();
+}
+
+// True if any voice is currently playing this sample (e.g. to keep a non-loop
+// SFX going by re-triggering it when it ends).
+int afn_sfx_active(int smpIdx) {
+    int r = 0;
+    lock();
+    for (int i = 0; i < SND_MAX_VOICES; i++)
+        if (snd_voices[i].playing && snd_voices[i].smpIdx == smpIdx) { r = 1; break; }
+    unlock();
+    return r;
 }
 
 // Repitch every voice currently playing this sample. pitchPct: 100 = natural,
