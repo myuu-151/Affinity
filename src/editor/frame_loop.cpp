@@ -5997,6 +5997,7 @@ static float s3DVtxMulLight = 0.97f, s3DVtxMulDark = 0.85f; // Multiply popup: p
 static bool  s3DVtxMulOpen = false;        // Multiply popup open last frame (open/close edge detect)
 static int   s3DVtxMulMesh = -1;           // mesh the live-preview baseline belongs to
 static std::vector<float> s3DVtxMulBase;   // baseline rgb per vertex captured when the popup opened
+static std::string s3DVtxXferMsg;          // Copy/Paste Colors status line (clipboard transfer feedback)
 // Live-preview tonal-adjustment popups (Photoshop-style slider sets).
 static float s3DHueShift = 0.0f, s3DHueSat = 0.0f, s3DHueLight = 0.0f;        // deg(-180..180), -100..100, -100..100
 static float s3DExpExposure = 0.0f, s3DExpOffset = 0.0f, s3DExpGamma = 1.0f;  // stops, -0.5..0.5, 0.1..3
@@ -6258,6 +6259,59 @@ static void PersistMeshVertexColors(const MeshAsset& m, int assetIdx)
     std::vector<uint8_t> bytes; bytes.reserve(m.vertices.size() * 3);
     for (const MeshVertex& v : m.vertices) { bytes.push_back(to8(v.r)); bytes.push_back(to8(v.g)); bytes.push_back(to8(v.b)); }
     sPackedAssets[key] = std::move(bytes);
+}
+
+// Cross-project vertex-color transfer via the OS clipboard. Serialized as a text
+// blob "AFNVCOL1 <nverts> <hex RGB bytes>" so it survives an editor restart and a
+// different project load. Paste applies by vertex index (best on same-topology
+// meshes — i.e. another instance of the same model).
+static std::string VtxColorsToClipboard(const MeshAsset& m)
+{
+    auto to8 = [](float c){ int i = (int)lroundf(c * 255.0f); return i < 0 ? 0 : i > 255 ? 255 : i; };
+    static const char* hx = "0123456789abcdef";
+    std::string s = "AFNVCOL1 " + std::to_string(m.vertices.size()) + " ";
+    s.reserve(s.size() + m.vertices.size() * 6);
+    for (const MeshVertex& v : m.vertices) {
+        int rgb[3] = { to8(v.r), to8(v.g), to8(v.b) };
+        for (int c = 0; c < 3; c++) { s.push_back(hx[(rgb[c] >> 4) & 0xF]); s.push_back(hx[rgb[c] & 0xF]); }
+    }
+    return s;
+}
+
+// Parse a clipboard blob from VtxColorsToClipboard and overwrite m's per-vertex
+// colors by index, up to min(blob count, mesh verts). Returns the number applied
+// (0 = not a valid Affinity color blob). Caller persists/undo-snapshots.
+static int VtxColorsFromClipboard(const char* txt, MeshAsset& m)
+{
+    if (!txt || strncmp(txt, "AFNVCOL1", 8) != 0) return 0;
+    const char* p = txt + 8;
+    char* end = nullptr;
+    long n = strtol(p, &end, 10);
+    if (end == p || n <= 0) return 0;
+    p = end;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    auto hexv = [](char c)->int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    int applied = 0;
+    const size_t mv = m.vertices.size();
+    for (long i = 0; i < n; i++) {
+        int rgb[3];
+        for (int c = 0; c < 3; c++) {
+            int hi = hexv(*p); if (hi < 0) return applied; p++;
+            int lo = hexv(*p); if (lo < 0) return applied; p++;
+            rgb[c] = (hi << 4) | lo;
+        }
+        if ((size_t)i < mv) {
+            m.vertices[i].r = rgb[0] / 255.0f; m.vertices[i].g = rgb[1] / 255.0f; m.vertices[i].b = rgb[2] / 255.0f;
+            applied++;
+        }
+    }
+    if (applied > 0) m.hasVertexColor = true;
+    return applied;
 }
 
 // Vertex-paint undo: snapshot a mesh's colors before each stroke (or Clear) so
@@ -12900,6 +12954,36 @@ static void Draw3DView(ImVec2 pos, ImVec2 size)
                 s3DRenderNeeded = true;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset the 3D camera to its default view.");
+
+            // --- Cross-project transfer: copy this mesh's painted colors to the OS
+            //     clipboard, paste them onto another mesh (by vertex index). The
+            //     clipboard persists across a project load / editor restart. ---
+            if (ImGui::SmallButton("Copy Colors##vpcopy"))
+            {
+                ImGui::SetClipboardText(VtxColorsToClipboard(ma).c_str());
+                s3DVtxXferMsg = "Copied " + std::to_string(ma.vertices.size()) + " vertex colors to clipboard.";
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy this mesh's per-vertex colors to the clipboard.\nPaste them onto another mesh — even in a different project.");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Paste Colors##vppaste"))
+            {
+                VtxPaintPushUndo(ma, sSelectedMesh);   // so Ctrl+Z restores the prior paint
+                int applied = VtxColorsFromClipboard(ImGui::GetClipboardText(), ma);
+                if (applied > 0)
+                {
+                    PersistMeshVertexColors(ma, sSelectedMesh);
+                    sProjectDirty = true; s3DRenderNeeded = true;
+                    s3DVtxXferMsg = "Pasted " + std::to_string(applied) + " vertex colors"
+                                  + (applied < (int)ma.vertices.size() ? " (mesh has more verts; rest unchanged)." : ".");
+                }
+                else
+                {
+                    if (!s3DVtxUndoStack.empty()) s3DVtxUndoStack.pop_back();   // nothing applied — drop the snapshot
+                    s3DVtxXferMsg = "Clipboard has no Affinity vertex colors (use Copy Colors first).";
+                }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Overwrite this mesh's vertex colors from the clipboard (by vertex index).\nUse on the same model you copied from — e.g. recolor one instance from another project.");
+            if (!s3DVtxXferMsg.empty()) { ImGui::SameLine(); ImGui::TextDisabled("%s", s3DVtxXferMsg.c_str()); }
 
             // --- Tonal adjustments (Photoshop-style live-preview popups) ---
             if (ImGui::SmallButton("Hue##vphue")) ImGui::OpenPopup("vpHuePopup");
