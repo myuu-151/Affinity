@@ -204,6 +204,23 @@ int findAttr(const cgltf_primitive* prim, cgltf_attribute_type type, int setInde
 
 } // namespace
 
+bool GLTFExternalURIs(const void* data, size_t size, std::vector<std::string>& out)
+{
+    cgltf_options options = {};
+    cgltf_data* d = nullptr;
+    if (cgltf_parse(&options, data, size, &d) != cgltf_result_success) return false;
+    auto addUri = [&](const char* uri) {
+        if (!uri || !uri[0]) return;                       // embedded (GLB) -> no uri
+        if (std::strncmp(uri, "data:", 5) == 0) return;    // inline data URI -> nothing external
+        for (auto& e : out) if (e == uri) return;          // dedupe
+        out.push_back(uri);
+    };
+    for (cgltf_size i = 0; i < d->buffers_count; i++) addUri(d->buffers[i].uri);
+    for (cgltf_size i = 0; i < d->images_count;  i++) addUri(d->images[i].uri);
+    cgltf_free(d);
+    return true;
+}
+
 bool LoadRiggedGLTF(const std::string& path, RiggedMeshAsset& out, std::string* err)
 {
     auto fail = [&](const char* msg) { if (err) *err = msg; return false; };

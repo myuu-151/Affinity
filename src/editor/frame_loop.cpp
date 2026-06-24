@@ -255,12 +255,22 @@ static int MedianCutPalette(const std::vector<std::pair<uint32_t,int>>& uniq,
 // (psvColors = 32/64/128). Fills psvPalette + psvFrames in parallel to the
 // 16-color frames the other targets use. Clears the psv data for psvColors<=16
 // or when there's no source image. Called when the PSV "Colors" toggle changes.
+// Load an RGBA image resolving the packed-asset store first (so a packed source
+// survives even if the on-disk file is gone), else from disk via ResolveAssetPath.
+static unsigned char* LoadImagePackAware(const std::string& path, int* w, int* h) {
+    int ch;
+    auto pit = sPackedAssets.find(path);
+    if (pit != sPackedAssets.end() && !pit->second.empty())
+        return stbi_load_from_memory(pit->second.data(), (int)pit->second.size(), w, h, &ch, 4);
+    return stbi_load(ResolveAssetPath(path).c_str(), w, h, &ch, 4);
+}
+
 static void RequantizeAssetPSV(SpriteAsset& a) {
     a.psvFrames.clear();
     for (int i = 0; i < 128; i++) a.psvPalette[i] = 0;
     if (a.psvColors <= 16 || a.sourceImagePath.empty()) return;
-    int imgW, imgH, ch;
-    unsigned char* img = stbi_load(a.sourceImagePath.c_str(), &imgW, &imgH, &ch, 4);
+    int imgW, imgH;
+    unsigned char* img = LoadImagePackAware(a.sourceImagePath, &imgW, &imgH);
     if (!img) return;
     int fw = a.stripFrameW > 0 ? a.stripFrameW : imgW;
     int fh = a.stripFrameH > 0 ? a.stripFrameH : imgH;
@@ -316,8 +326,8 @@ static void RecaptureSpriteAlpha(SpriteAsset& a) {
         for (auto& f : a.psvFrames) f.alpha.clear();
         return;
     }
-    int imgW, imgH, ch;
-    unsigned char* img = stbi_load(a.sourceImagePath.c_str(), &imgW, &imgH, &ch, 4);
+    int imgW, imgH;
+    unsigned char* img = LoadImagePackAware(a.sourceImagePath, &imgW, &imgH);
     if (!img) return;
     int fw = a.stripFrameW > 0 ? a.stripFrameW : imgW;
     int fh = a.stripFrameH > 0 ? a.stripFrameH : imgH;
@@ -7105,11 +7115,32 @@ static bool LoadRiggedGLTFResolved(const std::string& path, RiggedMeshAsset& rm,
         std::string ext = ".glb";
         size_t dot = path.find_last_of('.');
         if (dot != std::string::npos) ext = path.substr(dot);
-        std::filesystem::path tmpPath = std::filesystem::temp_directory_path() / ("affinity_rig_tmp" + ext);
+        std::filesystem::path tdir = std::filesystem::temp_directory_path();
+        std::filesystem::path tmpPath = tdir / ("affinity_rig_tmp" + ext);
         FILE* tf = fopen(tmpPath.string().c_str(), "wb");
         if (tf) { fwrite(pit->second.data(), 1, pit->second.size(), tf); fclose(tf); }
+        // A packed non-GLB .gltf also needs its external buffers/images dropped next
+        // to the temp file so cgltf/stbi resolve them by their relative URIs.
+        std::vector<std::string> sidecars;
+        std::string el = ext; for (auto& c : el) if (c >= 'A' && c <= 'Z') c += 32;
+        if (el == ".gltf") {
+            std::vector<std::string> uris;
+            if (GLTFExternalURIs(pit->second.data(), pit->second.size(), uris)) {
+                std::string odir; { size_t s = path.find_last_of("/\\"); if (s != std::string::npos) odir = path.substr(0, s + 1); }
+                for (auto& u : uris) {
+                    bool a = (!u.empty() && (u[0]=='/'||u[0]=='\\'||(u.size()>1&&u[1]==':')));
+                    auto sp = sPackedAssets.find(a ? u : odir + u);
+                    if (sp == sPackedAssets.end() || sp->second.empty()) continue;
+                    std::filesystem::path dst = tdir / u;
+                    std::error_code dec; std::filesystem::create_directories(dst.parent_path(), dec);
+                    FILE* sf = fopen(dst.string().c_str(), "wb");
+                    if (sf) { fwrite(sp->second.data(), 1, sp->second.size(), sf); fclose(sf); sidecars.push_back(dst.string()); }
+                }
+            }
+        }
         ok = LoadRiggedGLTF(tmpPath.string(), rm, err);
         std::error_code ec; std::filesystem::remove(tmpPath, ec);
+        for (auto& s : sidecars) { std::error_code e2; std::filesystem::remove(s, e2); }
     } else {
         ok = LoadRiggedGLTF(ResolveAssetPath(path), rm, err);
     }
@@ -34389,14 +34420,67 @@ void FrameTick(float dt)
                 for (auto& e : paths) if (e == p) return; // dedupe
                 paths.push_back(p);
             };
-            for (auto& sa : sSpriteAssets)
+            // GAP 3: pack an OBJ's .mtl sidecar(s) (referenced via mtllib) so a
+            // multi-material re-import resolves materials/textures from the store.
+            auto addObjMtl = [&](const std::string& objPath) {
+                if (objPath.empty() || objPath[0] == '(') return;
+                std::vector<unsigned char> bytes;
+                auto op = sPackedAssets.find(objPath);
+                if (op != sPackedAssets.end() && !op->second.empty()) bytes.assign(op->second.begin(), op->second.end());
+                else bytes = readFileBytes(ResolveAssetPath(objPath));
+                if (bytes.empty()) return;
+                std::string dir; { size_t s = objPath.find_last_of("/\\"); if (s != std::string::npos) dir = objPath.substr(0, s + 1); }
+                std::string text(bytes.begin(), bytes.end());
+                size_t pos = 0;
+                while (pos < text.size()) {
+                    size_t nl = text.find('\n', pos);
+                    std::string ln = text.substr(pos, (nl == std::string::npos ? text.size() : nl) - pos);
+                    pos = (nl == std::string::npos) ? text.size() : nl + 1;
+                    if (ln.compare(0, 6, "mtllib") == 0 && ln.size() > 6 && (ln[6] == ' ' || ln[6] == '\t')) {
+                        char mn[256] = {0};
+                        if (sscanf(ln.c_str() + 6, "%255s", mn) == 1) {
+                            std::string m = mn;
+                            bool a = (!m.empty() && (m[0]=='/'||m[0]=='\\'||(m.size()>1&&m[1]==':')));
+                            add(a ? m : dir + m);
+                        }
+                    }
+                }
+            };
+            // GAP 4: pack a non-GLB glTF's external buffers/images (.glb embeds them).
+            auto addGltfDeps = [&](const std::string& gltfPath) {
+                if (gltfPath.empty() || gltfPath[0] == '(') return;
+                size_t dot = gltfPath.find_last_of('.');
+                std::string ext = (dot != std::string::npos) ? gltfPath.substr(dot) : "";
+                for (auto& c : ext) if (c >= 'A' && c <= 'Z') c += 32;
+                if (ext != ".gltf") return;
+                std::vector<unsigned char> bytes;
+                auto gp = sPackedAssets.find(gltfPath);
+                if (gp != sPackedAssets.end() && !gp->second.empty()) bytes.assign(gp->second.begin(), gp->second.end());
+                else bytes = readFileBytes(ResolveAssetPath(gltfPath));
+                if (bytes.empty()) return;
+                std::vector<std::string> uris;
+                if (!GLTFExternalURIs(bytes.data(), bytes.size(), uris)) return;
+                std::string dir; { size_t s = gltfPath.find_last_of("/\\"); if (s != std::string::npos) dir = gltfPath.substr(0, s + 1); }
+                for (auto& u : uris) {
+                    bool a = (!u.empty() && (u[0]=='/'||u[0]=='\\'||(u.size()>1&&u[1]==':')));
+                    add(a ? u : dir + u);
+                }
+            };
+            for (auto& sa : sSpriteAssets) {
+                add(sa.sourceImagePath);   // GAP 2: PSV requant / soft-alpha re-read this on load
                 for (auto& das : sa.dirAnimSets)
                     for (int d = 0; d < 8; d++) add(das.dirPaths[d]);
+            }
             add(sM7FloorPath);
-            for (auto& ma : sMeshAssets) { add(ma.sourcePath); add(ma.texturePath); }
+            for (auto& ma : sMeshAssets) {
+                add(ma.sourcePath); add(ma.texturePath);
+                for (auto& em : ma.extraMaterials) add(em.texturePath);   // GAP 1: multi-material OBJ slot textures
+                addObjMtl(ma.sourcePath);                                 // GAP 3
+            }
             for (auto& rm : sRiggedMeshAssets) {
                 add(rm.sourcePath); add(rm.texturePath);
                 for (auto& em : rm.extraMaterials) add(em.texturePath);
+                addGltfDeps(rm.sourcePath);                               // GAP 4
             }
             for (auto& inst : sSkyboxInstances)
                 for (auto& panel : inst.panels) add(panel.path);
