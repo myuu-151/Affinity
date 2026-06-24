@@ -19,12 +19,17 @@ void EmitNodeScriptBodies(std::ostream& f,
                           const std::vector<AfnBlueprintInstanceExport>& bpInstances,
                           const std::vector<AfnSpriteExport>& sprites,
                           const std::vector<AfnSoundInstanceExport>& soundInstances,
-                          const std::vector<int>& hudLayerRemap) {
+                          const std::vector<int>& hudLayerRemap,
+                          const std::vector<int>& hudLayerCount) {
     // Translate a node's flat editor-layer index to the runtime afn_hud_layer[]
-    // index (PSV per-item-track numbering). Identity when no remap is supplied.
-    auto remapLayer = [&](int li) -> int {
-        if (li >= 0 && li < (int)hudLayerRemap.size()) return hudLayerRemap[li];
-        return li;
+    // range [first, first+count). Identity (count 1) when no remap is supplied.
+    auto remapLayer = [&](int F) -> int {
+        if (F >= 0 && F < (int)hudLayerRemap.size()) return hudLayerRemap[F];
+        return F;
+    };
+    auto remapCount = [&](int F) -> int {
+        if (F >= 0 && F < (int)hudLayerCount.size()) return hudLayerCount[F];
+        return 1;
     };
     bool hasAnyScript = !script.nodes.empty() || !blueprints.empty();
     if (hasAnyScript) {
@@ -983,25 +988,29 @@ void EmitNodeScriptBodies(std::ostream& f,
                 break;
             }
             case AfnScriptNodeType::PlayHudAnim: {
-                int li = remapLayer(a->paramInt[0]);
+                int li = remapLayer(a->paramInt[0]), cnt = remapCount(a->paramInt[0]);
                 if (li < 0) break;   // target editor-layer has no runtime track
-                f << "    afn_hud_layer_frame[" << li << "] = 0;\n";
-                f << "    afn_hud_layer_tick[" << li << "] = 0;\n";
-                f << "    afn_hud_layer_active[" << li << "] = 1;\n";
+                for (int k = 0; k < cnt; k++) {   // drive every per-item track of the layer
+                    f << "    afn_hud_layer_frame[" << (li + k) << "] = 0;\n";
+                    f << "    afn_hud_layer_tick[" << (li + k) << "] = 0;\n";
+                    f << "    afn_hud_layer_active[" << (li + k) << "] = 1;\n";
+                }
                 break;
             }
             case AfnScriptNodeType::StopHudAnim: {
-                int li = remapLayer(a->paramInt[0]);
+                int li = remapLayer(a->paramInt[0]), cnt = remapCount(a->paramInt[0]);
                 if (li < 0) break;
-                f << "    afn_hud_layer_active[" << li << "] = 0;\n";
+                for (int k = 0; k < cnt; k++)
+                    f << "    afn_hud_layer_active[" << (li + k) << "] = 0;\n";
                 break;
             }
             case AfnScriptNodeType::SetHudAnimSpeed: {
-                int li = remapLayer(a->paramInt[0]);
+                int li = remapLayer(a->paramInt[0]), cnt = remapCount(a->paramInt[0]);
                 if (li < 0) break;
                 auto* sd = findDataIn(a->id, 0);
                 int spd = sd ? resolveInt(sd) : 1;
-                f << "    afn_hud_layer_speed_override[" << li << "] = " << spd << ";\n";
+                for (int k = 0; k < cnt; k++)
+                    f << "    afn_hud_layer_speed_override[" << (li + k) << "] = " << spd << ";\n";
                 break;
             }
             case AfnScriptNodeType::UpdateRespawnPos: {
