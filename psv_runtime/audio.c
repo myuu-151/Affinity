@@ -19,7 +19,10 @@ void afn_audio_tick(void) {}
 void afn_play_sound(int id, int link) { (void)id; (void)link; }
 void afn_play_sfx(int s, int g, int f) { (void)s; (void)g; (void)f; }
 void afn_stop_sound(void) {}
+void afn_stop_all(void) {}
 void afn_stop_sfx_sample(int s) { (void)s; }
+void afn_stop_music(void) {}
+void afn_set_sfx_pitch(int s, int p) { (void)s; (void)p; }
 #else
 
 // ---- Output config --------------------------------------------------------
@@ -269,6 +272,42 @@ void afn_stop_sfx_sample(int smpIdx) {
     for (int i = 0; i < SND_MAX_VOICES; i++)
         if (snd_voices[i].playing && snd_voices[i].smpIdx == smpIdx)
             snd_voices[i].playing = 0;
+    unlock();
+}
+
+// Stop ONLY the linked-persistent track (battle music) and clear the persist
+// slot, leaving one-shot SFX (e.g. the clash 'shoot' blast) ringing. Note the
+// other two don't fit a clash resolve: afn_stop_all also kills those SFX, and
+// afn_stop_sound PRESERVES the music (keeps it alive across scene changes).
+void afn_stop_music(void) {
+    lock();
+    afn_stop_persist_locked();
+    unlock();
+}
+
+// Repitch every voice currently playing this sample. pitchPct: 100 = natural,
+// 200 = +1 octave (2x speed), 50 = -1 octave. Used to ride a looping SFX's pitch
+// (e.g. the clash mash sound rising/falling with the struggle balance).
+void afn_set_sfx_pitch(int smpIdx, int pitchPct) {
+    if (pitchPct < 1) pitchPct = 1;
+    lock();
+    for (int i = 0; i < SND_MAX_VOICES; i++)
+        if (snd_voices[i].playing && snd_voices[i].smpIdx == smpIdx) {
+            int hz = (int)(((long long)snd_voices[i].baseHz * pitchPct) / 100);
+            if (hz < 1) hz = 1;
+            snd_voices[i].phaseInc = hz_to_inc(hz);
+        }
+    unlock();
+}
+
+// Hard stop: silence the sequencer AND every voice, and clear the persist slot —
+// unlike afn_stop_sound (which keeps a linked-persistent track alive across scene
+// changes). Used to kill battle music outright before the victory jingle.
+void afn_stop_all(void) {
+    lock();
+    snd_seq_active = -1;
+    for (int i = 0; i < SND_MAX_VOICES; i++) snd_voices[i].playing = 0;
+    afn_persist_link = 0; afn_persist_inst = -1; afn_persist_sfx_smp = -1;
     unlock();
 }
 

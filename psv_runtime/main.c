@@ -123,6 +123,53 @@ static int   s_efbActive = 0, s_efbCharging = 0, s_efbDmg = 0, s_efbLife = 0;   
 static float s_efbX, s_efbY, s_efbZ, s_efbDirX = 0, s_efbDirZ = 1, s_efbScale = 0.05f, s_efbSpeed = 0, s_efbHoming = 0;
 static int   s_eDodgeFrames = 0, s_eDodgeTotal = 0, s_eDodgeClip = 24;          // enemy dodge roll
 static float s_eDodgeDX = 0, s_eDodgeDZ = 0;
+static int   s_koActive = 0, s_koTimer = 0, s_koSlot = -1;   // enemy KO death cinematic (visible while dying)
+static float s_koAngle0 = 0.0f;                              // orbit yaw (rad) latched at death
+static int   s_pkoActive = 0, s_pkoTimer = 0;                // player death cinematic (die clip + orbit on a loss)
+static float s_pkoAngle0 = 0.0f;                             // orbit yaw (rad) latched at the player's death
+// HARDCODED: post-battle results menu. ~3s after a win (enemy KO) or a loss
+// (player HP 0) the 'die' HUD menu crossfades in (~1s). Up/Down pick
+// Title (cursor stop 0) / Restart (stop 1); Cross (KEY_A) confirms. Sounds:
+// beep on cursor move, select on confirm, victory jingle on a win. Indices are
+// the exported HUD-element / sound-instance indices for the pokemon_arena scene.
+#define AFN_TARGET_ELEM     0    // 'target' lock-on reticle element (hidden when the enemy dies)
+#define AFN_RESULT_ELEM    10    // 'die' menu element (exported HUD index)
+#define AFN_RESULT_CURSOR  11    // 'die_slct' cursor element
+#define AFN_RESULT_DELAY  180    // ~3s @ 60fps before the menu appears
+#define AFN_RESULT_FADE    60    // ~1s crossfade-in
+#define AFN_SND_BEEP        8    // beep sound instance (cursor move)
+#define AFN_SND_SELECT      2    // 'select' sound instance (confirm) — the menu-select blip
+#define AFN_SND_VICTORY    10    // victory sound instance (win / battle over)
+#define AFN_SND_SHOOT       5    // 'shoot' instance — decisive blast on clash resolve
+#define AFN_SND_STRUGGLE   11    // 'struggle' instance — looping while the mash struggle runs
+#define AFN_SND_CLASH      12    // 'clash' instance — one-shot when the beams meet
+#define AFN_SND_WIN_CLASH  13    // 'win_clash' instance — played when the clash resolves (win or lose)
+#define AFN_SND_MASH       14    // 'mashsound' instance — looping during the struggle, pitched by the balance
+static int s_resultState = 0;    // 0 idle, 1 delay, 2 fade-in, 3 active
+static int s_resultTimer = 0, s_resultWin = 0;
+static int s_resultCursorLayer = -1;   // die_slct's HUD anim layer (blink); resolved when the menu shows
+// HARDCODED: beam clash (beam struggle). When the player AND the enemy BOTH
+// release a FULL charge within AFN_CLASH_WINDOW frames of each other, both
+// projectiles are suppressed and a ~5s side-view struggle begins: the 'clash'
+// speed-line backdrop + 'mash' Cross prompt come up, the player taps Cross to
+// push the meeting point toward the enemy while the AI auto-mashes back. Balance
+// reaching the enemy side wins (enemy KO); reaching the player side — or being
+// behind at the timeout — means the player takes the hit (lose menu).
+#define AFN_CLASH_ELEM         12   // 'clash' speed-line backdrop element (exported HUD index)
+#define AFN_MASH_ELEM          13   // 'mash' Cross-button prompt element
+#define AFN_CLASH_PC_PRESSED   35   // global HUD piece index: button_pressed
+#define AFN_CLASH_PC_UNPRESSED 36   // global HUD piece index: button_unpressed
+#define AFN_CLASH_FRAMES      300   // ~5s @60 struggle cap (timeout decides by who's ahead)
+#define AFN_CLASH_WINDOW       12   // both full-charge releases must land within this many frames
+#define AFN_CLASH_FULL_FRAC  0.85f  // "fully charged" = >= this fraction of max charge
+#define AFN_CLASH_PUSH       0.060f // balance gained per player Cross tap
+#define AFN_CLASH_AI_PUSH    0.0022f// balance the AI drains back each frame (auto-mash)
+#define AFN_CLASH_MEET_R       18.0f// beams "meet" when their centers are within this (world units) — must be nearly touching
+#define AFN_CLASH_AIR_FALLBACK   90 // ...or clash anyway after both beams have been airborne this long (~1.5s)
+static int   s_clashActive = 0, s_clashTimer = 0, s_clashSlot = -1, s_clashAirT = 0, s_clashResolveSfx = 0;
+static float s_clashBalance = 0.5f;     // 0 = player pushed back (loss), 1 = enemy pushed back (win)
+static int   s_clashPressed = 0, s_clashPressTimer = 0;   // mash-press flash (button_pressed vs _unpressed)
+static int   s_pbBeamFull = 0, s_ebBeamFull = 0;          // 1 while each side's IN-FLIGHT beam is a full charge
 static float s_enemyBoneW[AFN_RIG_MAX_BONES][3] = {{0}};   // enemy NPC bones in WORLD (orb muzzle anchor)
 static int   s_cacheEnemyBones = 0;                        // set true during the enemy's rig_draw pass
 static int   s_drawingPlayer = 0;                          // set true ONLY during the player's own rig_draw
@@ -342,7 +389,14 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
     if (afn_rig_clip >= 0 && afn_rig_clip < PR->clips && afn_rig_clip != s_pclip) {
         s_pclip = afn_rig_clip; s_pframe = 0.0f;
     }
-    s_pframe = rig_advance(PR, s_pclip, s_pframe);
+    // HARDCODED: player death cinematic — play the die clip ONCE and hold the last
+    // frame (collapsed), same as the enemy KO freeze.
+    if (s_pkoActive && s_pclip == 21) {
+        float last = (float)(PR->clipframes[21] - 1);
+        s_pframe += 0.4f; if (s_pframe > last) s_pframe = last;
+    } else {
+        s_pframe = rig_advance(PR, s_pclip, s_pframe);
+    }
     build_bone_mats(PR, s_pclip, s_pframe); skin(PR);
     s_drawingPlayer = 1;   // HARDCODED: snapshot ONLY the player's bones (enemy shares the rig)
     rig_draw(PR, s_rigTex[AFN_PLAYER_RIG_SLOT], view, playerX, playerY, playerZ, playerYaw, AFN_PLAYER_SCALE, floorN);
@@ -372,7 +426,15 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
             clip = (int)afn_npc_nav[i][4];
 #endif
         if (clip < 0 || clip >= R->clips) clip = 0;
-        s_npcFrame[i] = rig_advance(R, clip, s_npcFrame[i]);
+#ifdef AFN_HAS_SPRITE_IDX
+        if (s_koActive && i == s_koSlot && clip == 21) {
+            // KO: die (clip 21) is flagged Loop in the export, but for the collapse
+            // we play it once and hold the final frame (ignore the loop wrap).
+            float last = (float)(R->clipframes[clip] - 1);
+            s_npcFrame[i] += 0.4f; if (s_npcFrame[i] > last) s_npcFrame[i] = last;
+        } else
+#endif
+            s_npcFrame[i] = rig_advance(R, clip, s_npcFrame[i]);
         build_bone_mats(R, clip, s_npcFrame[i]); skin(R);
         // Draw at the nav-driven X/Z/yaw + gravity-settled Y (NPC physics loop),
         // tilted to the smoothed floor normal like the player (slope snap).
@@ -1207,6 +1269,10 @@ unsigned int afn_flags=0, afn_rng=1;
   #define AFN_HUD_VIS_N NUM_SPRITES
 #endif
 unsigned char afn_hud_visible[AFN_HUD_VIS_N]={0};
+// Per-element opacity multiplier (0-256, 256 = opaque). hud_render scales each
+// element's piece + cursor alpha by this, on top of the per-piece/keyframe alpha.
+// Seeded to 256 at init; the results-menu controller ramps it for the fade-in.
+int afn_hud_elem_fade[AFN_HUD_VIS_N];
 // HARDCODED (pre-node): world-anchored HUD elements. A blueprint's ShowHUD
 // records its owner sprite here (scene ShowHUD writes -1); hud_render then
 // projects that NPC's attached-sprite world position to screen and draws the
@@ -1351,7 +1417,7 @@ static void enemy_orb_render(const float* view) {
         if (dl >= 0) {
             const AfnHudLayer* L = &afn_hud_layer[dl];
             int dspd = L->speed < 1 ? 1 : L->speed;
-            if (++s_efbDriveTick >= dspd) { s_efbDriveTick = 0; s_efbDriveFrame++; if (L->length > 0 && s_efbDriveFrame >= L->length) s_efbDriveFrame = L->loop ? 0 : (L->length - 1); }
+            if (++s_efbDriveTick >= dspd) { s_efbDriveTick = 0; s_efbDriveFrame += (L->step > 0 ? L->step : 1); if (L->length > 0 && s_efbDriveFrame >= L->length) s_efbDriveFrame = L->loop ? (s_efbDriveFrame % L->length) : (L->length - 1); }
             int ph = s_efbDriveFrame, pI = -1, nI = -1;
             for (int ki = 0; ki < L->kfCount; ki++) { const AfnHudKf* k = &afn_hud_kf[L->kfStart + ki]; if (k->frame <= ph) pI = ki; if (k->frame > ph && nI < 0) nI = ki; }
             if (pI < 0) pI = (nI < 0 ? 0 : nI); if (nI < 0) nI = pI;
@@ -1426,10 +1492,29 @@ static void npc_ai_tick(int i, float px, float py, float pz) {
     // (The fired projectile flies in enemy_projectile_tick(), called every frame
     //  independent of the enemy — so a shot completes even if the enemy dies.)
 
-    // Death: despawn at 0 HP (player Focus Blast already subtracts afn_hp[eidx]).
-    // Cancel a CHARGING orb, but let an already-fired ball finish its flight.
-    if (s_aiState != AI_DEAD && afn_hp[eidx] <= 0) { s_aiState = AI_DEAD; afn_sprite_visible[eidx] = 0; s_efbCharging = 0; return; }
-    if (s_aiState == AI_DEAD) return;
+    // Death (KO cinematic): at 0 HP (player Focus Blast already subtracts
+    // afn_hp[eidx]) start the die clip + camera zoom/orbit, then despawn. Cancel a
+    // CHARGING orb but let an already-fired ball finish its flight (enemy_projectile_tick).
+    if (s_aiState != AI_DEAD && afn_hp[eidx] <= 0) {
+        s_aiState = AI_DEAD; s_efbCharging = 0; s_efbActive = 0;
+        s_koActive = 1; s_koTimer = 0; s_koSlot = i;                   // keep visible; drive the cinematic
+        s_koAngle0 = orbit_angle * (6.2831853f / 65536.0f);           // latch current yaw to orbit from
+        s_npcClip[i] = 21; s_npcFrame[i] = 0.0f;                       // die, from the first frame
+        return;
+    }
+    if (s_aiState == AI_DEAD) {
+        // No live target: drop the lock-on reticle (HUD elem 0) and the camera
+        // lock every frame, overriding the node-driven LockOn toggle (which runs
+        // earlier in the frame and would otherwise keep showing it on the corpse).
+        afn_hud_visible[AFN_TARGET_ELEM] = 0;
+        afn_cam_lock_target = -1; afn_lock_strafe = 0;
+        if (s_koActive) {
+            s_npcClip[i] = 21;     // hold the die clip (collapsed)
+            s_koTimer++;           // keep the slow KO orbit + the body on screen until an
+                                   // option is picked; the scene swap (Restart/Title) clears s_koActive.
+        }
+        return;
+    }
 
     float dx = px - s_npcX[i], dz = pz - s_npcZ[i];
     float dist = sqrtf(dx*dx + dz*dz);
@@ -1440,7 +1525,7 @@ static void npc_ai_tick(int i, float px, float py, float pz) {
         if (dist <= ENEMY_DETECT_RANGE) { s_aiState = AI_CHASE; s_aiLoseT = 0; s_aiAtkCD = ENEMY_ATK_CD / 2; }
         else {
 #ifdef AFN_HAS_NAVMESH
-            s_npcClip[i] = s_npcNavMoving[i] ? 29 : 25;   // walk (Move) while wandering, else Idle
+            s_npcClip[i] = s_npcNavMoving[i] ? 30 : 26;   // walk (Move) while wandering, else Idle
 #endif
             return;   // keep wandering — nav drives motion
         }
@@ -1459,7 +1544,7 @@ static void npc_ai_tick(int i, float px, float py, float pz) {
             float pl = dist > 1e-3f ? dist : 1.0f, fx = dx/pl, fz = dz/pl, rx = fz, rz = -fx;
             int side = ai_chance(0.5f) ? 1 : -1;
             s_eDodgeDX = rx * side; s_eDodgeDZ = rz * side;
-            s_eDodgeClip = side > 0 ? 24 : 23;   // DodgeL / DodgeR
+            s_eDodgeClip = side > 0 ? 25 : 24;   // DodgeR / DodgeL (rig now exports die@21, glb-order indices)
             s_eDodgeFrames = s_eDodgeTotal = ENEMY_DODGE_FRAMES; s_aiDodgeCD = ENEMY_DODGE_CD; s_aiState = AI_DODGE;
         }
     }
@@ -1478,14 +1563,14 @@ static void npc_ai_tick(int i, float px, float py, float pz) {
     }
 
     if (s_aiState == AI_CHASE) {
-        s_npcClip[i] = 29;   // Move
+        s_npcClip[i] = 30;   // Move
         float pl = dist > 1e-3f ? dist : 1.0f, sp = ENEMY_MOVE_SPEED;
         s_npcX[i] += dx/pl * sp; s_npcZ[i] += dz/pl * sp;
         collide_walls(&s_npcX[i], &s_npcZ[i], s_npcY[i]);
         if (dist <= ENEMY_PREF_DIST + 30.0f) { s_aiState = AI_STRAFE; s_aiStrafeLeg = ENEMY_STRAFE_LEG; }
     }
     else if (s_aiState == AI_STRAFE) {
-        static const int eStrafe[8] = { 29,32,30,34,18,31,33,35 };   // {Fwd,FwdR,R,BackR,Back,BackL,L,FwdL}
+        static const int eStrafe[8] = { 30,33,31,35,18,32,34,36 };   // {Fwd,FwdR,R,BackR,Back,BackL,L,FwdL}
         if (--s_aiStrafeLeg <= 0) { s_aiStrafeDir = ai_chance(0.5f) ? 1 : -1; s_aiStrafeLeg = ENEMY_STRAFE_LEG; }
         float ey = s_npcYaw[i] * DEG2RAD;
         float efx = sinf(ey), efz = cosf(ey), erx = cosf(ey), erz = -sinf(ey);
@@ -1514,8 +1599,8 @@ static void npc_ai_tick(int i, float px, float py, float pz) {
             float ddx = px - mx, ddz = pz - mz, dl = sqrtf(ddx*ddx + ddz*ddz); if (dl < 1e-3f) dl = 1.0f;
             s_efbDirX = ddx/dl; s_efbDirZ = ddz/dl;
             s_efbX = mx + s_efbDirX*8.0f; s_efbZ = mz + s_efbDirZ*8.0f; s_efbY = my;
-            if (s_aiChargeShot) { s_efbDmg = ENEMY_CHG_DMG; s_efbSpeed = ENEMY_CHG_SPEED; s_efbScale = ENEMY_CHG_SCALE; s_efbHoming = ENEMY_CHG_HOMING; }
-            else                { s_efbDmg = ENEMY_TAP_DMG; s_efbSpeed = ENEMY_TAP_SPEED; s_efbScale = ENEMY_TAP_SCALE; s_efbHoming = 0.0f; }
+            if (s_aiChargeShot) { s_efbDmg = ENEMY_CHG_DMG; s_efbSpeed = ENEMY_CHG_SPEED; s_efbScale = ENEMY_CHG_SCALE; s_efbHoming = ENEMY_CHG_HOMING; s_ebBeamFull = 1; }   // HARDCODED: in-flight beam is a full charge (beam-clash)
+            else                { s_efbDmg = ENEMY_TAP_DMG; s_efbSpeed = ENEMY_TAP_SPEED; s_efbScale = ENEMY_TAP_SCALE; s_efbHoming = 0.0f; s_ebBeamFull = 0; }
             s_efbActive = 1; s_efbCharging = 0; s_efbLife = ENEMY_SHOT_LIFE;
             s_aiAtkCD = ENEMY_ATK_CD; s_aiState = AI_FIRE; s_aiTimer = ENEMY_FIRE_RECOVER;
         }
@@ -1541,6 +1626,10 @@ int tm_player_tx=0, tm_player_ty=0;
 void afn_play_sound(int id, int link);
 void afn_play_sfx(int smpIdx, int gain, int fifo);
 void afn_stop_sound(void);
+void afn_stop_all(void);
+void afn_stop_sfx_sample(int smpIdx);   // stop every voice playing this sample (for stopping a looped SFX)
+void afn_stop_music(void);              // stop only the persistent battle music, leaving one-shot SFX ringing
+void afn_set_sfx_pitch(int smpIdx, int pitchPct);   // repitch a playing (looped) SFX: 100 = natural, 200 = +oct
 void afn_stop_sfx_sample(int smpIdx);
 void afn_audio_init(void);
 void afn_audio_tick(void);
@@ -1867,6 +1956,68 @@ static int afn_snapshot_xfade(void) {
 #endif
 }
 
+// HARDCODED: beam-clash 2D render. The clash is a flat overlay (the backdrop art
+// is opaque), so the whole thing draws in HUD/ortho space: the speed-line
+// backdrop forced fullscreen (its dot layer scrolling + wrap-tiled to hide the
+// seam), then two energy beams meeting at a point that slides with the mash
+// balance, plus a clash ball. Called from hud_render in place of the 'clash'
+// element so the mash prompt still draws on top.
+static void clash_render_2d(void) {
+#if defined(AFN_HAS_HUD)
+    const AfnHudElem* el = &afn_hud_elems[AFN_CLASH_ELEM];
+    for (int k = 0; k < el->pieceCount; k++) {
+        int gpi = el->pieceStart + k;
+        const AfnHudPiece* pc = &afn_hud_piece[gpi];
+        float ox = 0.0f;
+#ifdef AFN_HAS_HUD_ANIM
+        int li = afn_hud_piece_layer[gpi];
+        if (li >= 0) {
+            const AfnHudLayer* L = &afn_hud_layer[li];
+            int ph = afn_hud_layer_frame[li], pI = -1, nI = -1;
+            for (int ki = 0; ki < L->kfCount; ki++) {
+                const AfnHudKf* kk = &afn_hud_kf[L->kfStart + ki];
+                if (kk->frame <= ph) pI = ki;
+                if (kk->frame > ph && nI < 0) nI = ki;
+            }
+            if (pI < 0) pI = (nI < 0 ? 0 : nI); if (nI < 0) nI = pI;
+            const AfnHudKf* A = &afn_hud_kf[L->kfStart + pI]; const AfnHudKf* B = &afn_hud_kf[L->kfStart + nI];
+            float frac = 0.0f;
+            if (A != B && L->interp != 0) { float span = (float)(B->frame - A->frame); frac = span > 0 ? (float)(ph - A->frame) / span : 0.0f; if (frac < 0) frac = 0; if (frac > 1) frac = 1; }
+            ox = A->ox + (B->ox - A->ox) * frac;
+        }
+#endif
+        const float W = 960.0f, H = 544.0f;   // force fullscreen (ignore the authored 8px element origin)
+        if (ox != 0.0f)
+            for (int t = -1; t <= 1; t++)      // 3-wide tile so the scroll wraps seamlessly
+                hud_quad(s_hudTex[pc->tex], ox + t*W, 0, ox + t*W + W, H, 0,0,1,1, 0xFFFFFFFFu);
+        else
+            hud_quad(s_hudTex[pc->tex], 0, 0, W, H, 0,0,1,1, 0xFFFFFFFFu);
+    }
+    // Beams + ball (additive energy). Player left, enemy right; meeting point slides with the balance.
+    {
+        float cy = 250.0f, lX = 70.0f, rX = 890.0f;
+        float mX = lX + (rX - lX) * s_clashBalance;
+        float th = 64.0f;
+        GLuint tex = 0; int useTex = 0;
+#if defined(AFN_HAS_SPRITES) && defined(AFN_HAS_SPR_PARENT)
+        int fb = resolve_focus_inst();
+        if (fb >= 0) { int NF = (int)(sizeof(afn_spr_frame_ptrs)/sizeof(afn_spr_frame_ptrs[0])); int cf = afn_spr_fstart[fb]; if (cf < 0) cf = 0; if (cf > NF-1) cf = NF-1; tex = s_sprTex[cf]; useTex = 1; }
+#endif
+        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);   // additive
+        if (useTex) {
+            hud_quad(tex, lX, cy - th*0.5f, mX, cy + th*0.5f, 0,0,1,1, 0xFFFFFFFFu);   // player beam
+            hud_quad(tex, mX, cy - th*0.5f, rX, cy + th*0.5f, 0,0,1,1, 0xFFFFFFFFu);   // enemy beam
+            float r = 60.0f;
+            hud_quad(tex, mX - r, cy - r, mX + r, cy + r, 0,0,1,1, 0xFFFFFFFFu);       // clash ball
+        } else {
+            hud_solid_quad(lX, cy - th*0.5f, rX, cy + th*0.5f, 0x88FFFFFFu);
+            hud_solid_quad(mX - 60, cy - 60, mX + 60, cy + 60, 0xCCFFFFFFu);
+        }
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);       // restore alpha for the mash UI
+    }
+#endif
+}
+
 static void hud_render(void) {
     // Ortho 960x544 with a top-left origin (y grows downward) to match the
     // editor's PSV authoring space (native Vita resolution). 1:1 with the screen
@@ -1897,9 +2048,9 @@ static void hud_render(void) {
             if (spd < 1) spd = 1;
             if (++afn_hud_layer_tick[li] >= spd) {
                 afn_hud_layer_tick[li] = 0;
-                afn_hud_layer_frame[li]++;
-                if (L->loop && L->length > 0 && afn_hud_layer_frame[li] >= L->length)
-                    afn_hud_layer_frame[li] = 0;
+                afn_hud_layer_frame[li] += (L->step > 0 ? L->step : 1);   // step>1 = fps>60 (advance N frames/tick)
+                if (L->loop && L->length > 0)
+                    while (afn_hud_layer_frame[li] >= L->length) afn_hud_layer_frame[li] -= L->length;
             }
         }
         int ph = afn_hud_layer_frame[li];
@@ -1937,6 +2088,11 @@ static void hud_render(void) {
 
     for (int e = 0; e < AFN_HUD_ELEM_COUNT; e++) {
         const AfnHudElem* el = &afn_hud_elems[e];
+#ifdef AFN_HAS_SPRITE_IDX
+        // HARDCODED: the 'clash' backdrop draws via the custom 2D clash renderer
+        // (fullscreen + beams) in place of the normal element draw.
+        if (s_clashActive && e == AFN_CLASH_ELEM) { clash_render_2d(); continue; }
+#endif
         float bx, by;
 #ifdef AFN_HUD_CURSOR_ELEM
         if (el->trackCursor >= 0) {
@@ -2040,6 +2196,14 @@ static void hud_render(void) {
         // Pieces (graphics).
         for (int k = 0; k < el->pieceCount; k++) {
             int gpi = el->pieceStart + k;
+#ifdef AFN_HAS_SPRITE_IDX
+            // HARDCODED: beam-clash mash prompt — show button_pressed only on a
+            // mash-press frame, button_unpressed otherwise (overrides the authored blink).
+            if (s_clashActive) {
+                if (gpi == AFN_CLASH_PC_PRESSED   && !s_clashPressed) continue;
+                if (gpi == AFN_CLASH_PC_UNPRESSED &&  s_clashPressed) continue;
+            }
+#endif
             const AfnHudPiece* pc = &afn_hud_piece[gpi];
             int ptex = pc->tex;   // displayed texture (may be cycled by a HUD value)
 #ifdef AFN_HUD_PIECE_CYCLE
@@ -2065,6 +2229,11 @@ static void hud_render(void) {
             unsigned a8 = (unsigned)(pc->opacity * 255 / 16); if (a8 > 255) a8 = 255;
             pieceCol = (a8 << 24) | (pc->black ? 0u : 0xFFFFFFu);
 #endif
+            // Per-element opacity multiplier (results-menu crossfade-in).
+            if (afn_hud_elem_fade[e] < 256) {
+                unsigned ba = (pieceCol >> 24) & 0xFFu;
+                pieceCol = ((ba * (unsigned)afn_hud_elem_fade[e] / 256u) << 24) | (pieceCol & 0x00FFFFFFu);
+            }
 #ifdef AFN_HAS_HUD_ANIM
             int li = afn_hud_piece_layer[gpi];
             if (li >= 0) {
@@ -2153,8 +2322,10 @@ static void hud_render(void) {
 #ifdef AFN_HUD_CURSOR_SIZE
             if (el->curSize > 0) { cw = ch = (float)el->curSize; }  // authored cursor draw square
 #endif
+            unsigned curCol = 0xFFFFFFFFu;
+            if (afn_hud_elem_fade[e] < 256) curCol = ((255u * (unsigned)afn_hud_elem_fade[e] / 256u) << 24) | 0x00FFFFFFu;
             hud_quad(s_hudTex[el->curTex], bx + st->x + el->curX, by + st->y + el->curY,
-                     bx + st->x + el->curX + cw, by + st->y + el->curY + ch, 0, 0, 1, 1, 0xFFFFFFFFu);
+                     bx + st->x + el->curX + cw, by + st->y + el->curY + ch, 0, 0, 1, 1, curCol);
         }
     }
 #ifdef AFN_HUD_PIECE_XFADE
@@ -2176,8 +2347,9 @@ static void hud_render(void) {
     }
 #endif
 #if defined(AFN_HAS_PLAYER_RIG) && defined(AFN_HAS_NAVMESH)
-    // HARDCODED: floating HP bar above the living enemy NPC.
-    if (afn_sprite_visible[AFN_ENEMY_EIDX] && afn_hp[AFN_ENEMY_EIDX] > 0) {
+    // HARDCODED: floating HP bar above the living enemy NPC. 3D gameplay only —
+    // gate out the 2D menu/title scenes (the enemy sprite stays "visible" there).
+    if (afn_current_mode != 1 && afn_sprite_visible[AFN_ENEMY_EIDX] && afn_hp[AFN_ENEMY_EIDX] > 0) {
         for (int n = 0; n < AFN_NPC_COUNT; n++) {
             if ((int)afn_npc_inst[n][7] != AFN_ENEMY_EIDX) continue;
             float sx, sy, depth;
@@ -2195,6 +2367,222 @@ static void hud_render(void) {
     glEnable(GL_DEPTH_TEST);
 }
 #endif // AFN_HAS_HUD
+
+#if defined(AFN_HAS_HUD) && defined(AFN_HAS_PLAYER_RIG)
+// HARDCODED: post-battle results menu controller. Watches for a win (enemy KO)
+// or a loss (player HP 0) in the 3D battle, then after AFN_RESULT_DELAY frames
+// crossfades the 'die' menu in over AFN_RESULT_FADE frames and runs cursor
+// navigation (Title / Restart). Called once per frame from the main loop.
+static void results_tick(void) {
+    // Only active in 3D gameplay; menu/2D scenes never raise the results screen.
+    if (afn_current_mode == 1) return;
+
+    // HARDCODED: player death cinematic — while it runs, keep the player on the die
+    // clip, frozen, advance the orbit timer (camera override reads s_pkoTimer), and
+    // drop the lock-on so the collapsed body stops turning to face the enemy.
+    if (s_pkoActive) {
+        afn_rig_clip = 21; afn_player_frozen = 1; s_pkoTimer++;
+        afn_cam_lock_target = -1; afn_lock_strafe = 0; afn_tank_camera = 0;
+        afn_hud_visible[AFN_TARGET_ELEM] = 0;
+    }
+
+#ifdef AFN_HAS_HUD_ANIM
+    // Keep the cursor blink looping while the menu is up, even if the authored
+    // layer isn't flagged Loop (its opacity keyframes end at 0 = invisible).
+    if (s_resultState >= 2 && s_resultCursorLayer >= 0) {
+        const AfnHudLayer* L = &afn_hud_layer[s_resultCursorLayer];
+        if (L->length > 0 && afn_hud_layer_frame[s_resultCursorLayer] >= L->length) {
+            afn_hud_layer_frame[s_resultCursorLayer] = 0;
+            afn_hud_layer_tick[s_resultCursorLayer] = 0;
+        }
+    }
+#endif
+
+    if (s_resultState == 0) {                                  // watch for the outcome
+        // Don't (re)trigger mid-transition: after confirming, the enemy stays
+        // AI_DEAD until the scene actually swaps (~fade later), which would
+        // otherwise re-detect the win and replay victory over the fade-out.
+        if (afn_scene_phase != 0) return;
+        int win  = (s_aiInited && s_aiState == AI_DEAD);      // enemy beaten
+        int lose = (afn_health <= 0);                         // player down
+        if (win || lose) {
+            s_resultState = 1; s_resultTimer = 0; s_resultWin = win;
+            // Kill the battle music before the fanfare. A clash resolve already fired
+            // the 'shoot' SFX, so stop ONLY the music (afn_stop_music) so the blast
+            // keeps ringing; afn_stop_all would cut it, afn_stop_sound would keep the
+            // music and cut the blast.
+            if (s_clashResolveSfx) { afn_stop_music(); s_clashResolveSfx = 0; }
+            else afn_stop_all();
+            if (lose) {   // player death cinematic: die clip + camera orbit (mirror the enemy KO)
+                s_pkoActive = 1; s_pkoTimer = 0;
+                s_pkoAngle0 = orbit_angle * (6.2831853f / 65536.0f);   // latch current yaw to orbit from
+                afn_rig_clip = 21; afn_player_frozen = 1;
+            }
+            afn_play_sound(AFN_SND_VICTORY, 0);   // fanfare (win or battle-over)
+        }
+        return;
+    }
+
+    if (s_resultState == 1) {                                 // ~3s hold before the menu
+        if (++s_resultTimer >= AFN_RESULT_DELAY) {
+            s_resultState = 2; s_resultTimer = 0;
+            afn_hud_visible[AFN_RESULT_ELEM]   = 1;
+            afn_hud_visible[AFN_RESULT_CURSOR] = 1;
+            afn_hud_elem_fade[AFN_RESULT_ELEM]   = 0;         // start transparent
+            afn_hud_elem_fade[AFN_RESULT_CURSOR] = 0;
+            afn_active_element = AFN_RESULT_ELEM;             // own the cursor
+            afn_cursor_stop = 0;                              // Title on top
+            afn_stop_count = afn_hud_elems[AFN_RESULT_ELEM].stopCount;
+            afn_player_frozen = 1;                            // lock the player during the menu
+#ifdef AFN_HAS_HUD_ANIM
+            // Start the cursor's keyframe blink (die_slct's opacity layer). Find its
+            // layer via the cursor element's pieces so there's no hardcoded index.
+            s_resultCursorLayer = -1;
+            {
+                const AfnHudElem* cel = &afn_hud_elems[AFN_RESULT_CURSOR];
+                for (int k = 0; k < cel->pieceCount; k++) {
+                    int lyr = afn_hud_piece_layer[cel->pieceStart + k];
+                    if (lyr >= 0) {
+                        afn_hud_layer_frame[lyr] = 0; afn_hud_layer_tick[lyr] = 0;
+                        afn_hud_layer_active[lyr] = 1; s_resultCursorLayer = lyr; break;
+                    }
+                }
+            }
+#endif
+        }
+        return;
+    }
+
+    if (s_resultState == 2) {                                 // ~1s opacity crossfade-in
+        int a = 256 * (++s_resultTimer) / AFN_RESULT_FADE; if (a > 256) a = 256;
+        afn_hud_elem_fade[AFN_RESULT_ELEM]   = a;
+        afn_hud_elem_fade[AFN_RESULT_CURSOR] = a;
+        if (s_resultTimer >= AFN_RESULT_FADE) s_resultState = 3;
+        return;
+    }
+
+    // s_resultState == 3: interactive.
+    afn_active_element = AFN_RESULT_ELEM;                     // hold cursor ownership
+    int n = afn_hud_elems[AFN_RESULT_ELEM].stopCount; if (n < 1) n = 1;
+    if (key_hit(KEY_DOWN)) { afn_cursor_stop = (afn_cursor_stop + 1) % n;     afn_play_sfx(AFN_SND_BEEP, 0, 0); }
+    if (key_hit(KEY_UP))   { afn_cursor_stop = (afn_cursor_stop + n - 1) % n; afn_play_sfx(AFN_SND_BEEP, 0, 0); }
+    if (key_hit(KEY_A)) {                                     // Cross confirms
+        afn_stop_all();                                       // cut any lingering victory jingle first
+        afn_play_sfx(AFN_SND_SELECT, 0, 0);                   // menu-select confirm blip (instance 2)
+        if (afn_cursor_stop == 0) afn_scene_start_transition(0, 1, 45);                              // Title: scene 0, 2D
+        else                      afn_scene_start_transition(afn_current_scene, afn_current_mode, 45); // Restart this battle
+        // The scene swap re-seeds combat/results state (see the swap block); clear
+        // the menu here so it doesn't linger over the outgoing-scene fade.
+        afn_hud_visible[AFN_RESULT_ELEM] = 0; afn_hud_visible[AFN_RESULT_CURSOR] = 0;
+#ifdef AFN_HAS_HUD_ANIM
+        if (s_resultCursorLayer >= 0) afn_hud_layer_active[s_resultCursorLayer] = 0;
+#endif
+        s_resultState = 0; s_resultTimer = 0; s_resultCursorLayer = -1;
+    }
+}
+#endif
+
+#if defined(AFN_HAS_HUD) && defined(AFN_HAS_PLAYER_RIG) && defined(AFN_HAS_SPRITE_IDX)
+// HARDCODED: activate/deactivate the clash backdrop's scroll layer (the dot
+// layer that rushes across). Resolves layers via the element's pieces so there's
+// no hardcoded layer index. The mash button's pressed/unpressed pieces are NOT
+// driven by their layers here — clash_tick auto-cycles them instead, so they sit
+// at keyframe 0 (no authored blink) and the cycle alone toggles visibility.
+static void clash_set_layers(int on) {
+#ifdef AFN_HAS_HUD_ANIM
+    const AfnHudElem* el = &afn_hud_elems[AFN_CLASH_ELEM];
+    for (int k = 0; k < el->pieceCount; k++) {
+        int lyr = afn_hud_piece_layer[el->pieceStart + k];
+        if (lyr < 0) continue;
+        afn_hud_layer_active[lyr] = on ? 1 : 0;
+        if (on) { afn_hud_layer_frame[lyr] = 0; afn_hud_layer_tick[lyr] = 0; }
+    }
+#endif
+}
+
+// HARDCODED: beam-clash driver. Called once per frame AFTER the player Focus
+// Blast tick and the enemy AI tick, so both beam-in-flight flags reflect this
+// frame. Clashes when both full-charge beams are airborne and either meet
+// (proximity) or have both been up a beat (fallback), runs the ~5s mash
+// struggle, and resolves to a win (enemy KO) or a loss (player hit).
+static void clash_tick(void) {
+    // The "full beam in flight" flags only hold while each beam is actually active.
+    if (!afn_fb_active) s_pbBeamFull = 0;
+    if (!s_efbActive)   s_ebBeamFull = 0;
+
+    if (!s_clashActive) {
+        // Both full-charge beams airborne? Clash when their positions actually MEET
+        // (a real collision), or — as a fallback so it never just fizzles — once
+        // they've both been in the air a beat. No release-timing window either way.
+        int bothUp = (afn_fb_active && s_pbBeamFull && s_efbActive && s_ebBeamFull && s_aiState != AI_DEAD && afn_scene_phase == 0);
+        if (!bothUp) { s_clashAirT = 0; return; }
+        s_clashAirT++;
+        float dx = afn_fb_x - s_efbX, dy = afn_fb_y - s_efbY, dz = afn_fb_z - s_efbZ;
+        int meet = (dx*dx + dy*dy + dz*dz) <= (AFN_CLASH_MEET_R * AFN_CLASH_MEET_R);
+        if (meet || s_clashAirT >= AFN_CLASH_AIR_FALLBACK) {
+            int slot = -1;
+            for (int i = 0; i < AFN_NPC_COUNT; i++)
+                if ((int)afn_npc_inst[i][7] == AFN_ENEMY_EIDX) { slot = i; break; }
+            if (slot < 0) return;
+            s_clashActive = 1; s_clashTimer = 0; s_clashSlot = slot;
+            s_clashBalance = 0.5f; s_clashPressed = 0; s_clashPressTimer = 0;
+            s_pbBeamFull = s_ebBeamFull = 0; s_clashAirT = 0;
+            // Suppress BOTH projectiles (one may have fired a frame or two early).
+            afn_fb_active = 0; afn_fb_level = 0.0f; afn_fb_fire_timer = 0;
+            s_efbActive = 0; s_efbCharging = 0;
+            afn_player_frozen = 1;                       // lock movement; input drives the mash
+            afn_hud_visible[AFN_CLASH_ELEM] = 1;         // speed-line backdrop
+            afn_hud_visible[AFN_MASH_ELEM]  = 1;         // Cross prompt
+            clash_set_layers(1);                         // start the looping scroll + blink
+            afn_play_sfx(AFN_SND_CLASH, 0, 0);       // impact when the beams meet
+            afn_play_sfx(AFN_SND_STRUGGLE, 0, 0);     // looping struggle SFX, layered OVER the battle music (loop the sample in the editor); stopped at resolve
+            afn_play_sfx(AFN_SND_MASH, 0, 0);         // looping mash sound; its pitch rides the balance (loop the sample in the editor)
+        }
+        return;
+    }
+
+    // --- Active struggle ---
+    s_clashTimer++;
+    afn_player_frozen = 1;
+    afn_fb_active = 0; afn_fb_charging = 0; afn_fb_level = 0.0f;   // keep both orbs suppressed
+    s_efbActive = 0; s_efbCharging = 0;
+
+    // Mash button auto-cycles pressed<->unpressed as a "mash me!" prompt (every 8
+    // frames), independent of input — the player's real Cross taps drive the
+    // balance toward the enemy while the AI drains it back.
+    if (++s_clashPressTimer >= 8) { s_clashPressTimer = 0; s_clashPressed = !s_clashPressed; }
+    if (key_hit(KEY_A)) s_clashBalance += AFN_CLASH_PUSH;
+    s_clashBalance -= AFN_CLASH_AI_PUSH;
+    if (s_clashBalance < 0.0f) s_clashBalance = 0.0f;
+    if (s_clashBalance > 1.0f) s_clashBalance = 1.0f;
+    // Mash sound pitch rides the balance: higher toward the enemy/goal (1.0 -> 150%),
+    // lower as it falls into your zone (0.0 -> 50%).
+    afn_set_sfx_pitch(AFN_SND_MASH, 50 + (int)(s_clashBalance * 100.0f));
+
+    // Resolve: balance extreme, or timeout (whoever's ahead at the cap wins).
+    int win = 0, lose = 0;
+    if (s_clashBalance >= 1.0f) win = 1;
+    else if (s_clashBalance <= 0.0f) lose = 1;
+    else if (s_clashTimer >= AFN_CLASH_FRAMES) { if (s_clashBalance >= 0.5f) win = 1; else lose = 1; }
+    if (win || lose) {
+        afn_hud_visible[AFN_CLASH_ELEM] = 0;
+        afn_hud_visible[AFN_MASH_ELEM]  = 0;
+        clash_set_layers(0);
+        afn_stop_sfx_sample(AFN_SND_STRUGGLE);            // stop the looping struggle SFX
+        afn_stop_sfx_sample(AFN_SND_MASH);                // stop the pitched mash sound
+        afn_play_sfx(AFN_SND_WIN_CLASH, 0, 0);            // clash resolved (win or lose)
+        s_clashResolveSfx = 1;                            // tell results_tick to use afn_stop_music (keep this SFX ringing)
+        afn_player_frozen = 0;                            // KO cinematic / results menu re-freeze as needed
+        if (win) {
+            int es = (int)afn_npc_inst[s_clashSlot][7];   // enemy editor sprite -> next npc_ai_tick triggers the KO cinematic + results
+            if (es >= 0 && es < NUM_SPRITES) afn_hp[es] = 0;
+        } else {
+            afn_health = 0;                               // results_tick raises the lose menu
+        }
+        s_clashActive = 0; s_clashPressed = 0; s_clashSlot = -1;
+    }
+}
+#endif
 
 int main(void)
 {
@@ -2235,6 +2623,7 @@ int main(void)
     // Seed per-element visibility from the authored "visible" flag (ShowHUD /
     // CursorUp toggle it at runtime).
     for (int i = 0; i < AFN_HUD_ELEM_COUNT; i++) afn_hud_visible[i] = afn_hud_elems[i].startVis;
+    for (int i = 0; i < AFN_HUD_VIS_N; i++) afn_hud_elem_fade[i] = 256;   // opaque until a fade ramps it
     for (int i = 0; i < AFN_HUD_VIS_N; i++) {
         afn_hud_anchor_sprite[i] = -1;                                   // screen-space default
         afn_hud_anchor_min[i] = 100; afn_hud_anchor_max[i] = 100;        // constant size default
@@ -2327,6 +2716,9 @@ int main(void)
         // orbit_angle and afn_rig_clip. The movement/camera below only READ them.
         input_update(&pad);
         script_tick();
+#if defined(AFN_HAS_HUD) && defined(AFN_HAS_PLAYER_RIG)
+        results_tick();     // HARDCODED: post-battle win/lose results menu
+#endif
         afn_audio_tick();   // 60 Hz sequencer clock (envelopes / note scheduling)
 
         // ChangeScene Delay pin: hold the current scene, then kick off the
@@ -2369,6 +2761,26 @@ int main(void)
             // leave the player stuck until something happened to UnfreezePlayer.
             // A menu scene re-freezes itself in afn_bp_dispatch_start() below.
             afn_player_frozen = 0; afn_play_anim = 0;
+#ifdef AFN_HAS_PLAYER_RIG
+            // HARDCODED: re-seed combat + results state on every scene (re)entry so
+            // Restart/Title from the results menu starts a clean battle (rig_init's
+            // reset only runs at boot, not on a scene swap).
+            s_aiInited = 0; s_aiState = AI_ROAM; s_efbActive = 0; s_efbCharging = 0; s_eDodgeFrames = 0;
+            s_koActive = 0; s_koTimer = 0; s_koSlot = -1;
+            s_pkoActive = 0; s_pkoTimer = 0;
+            afn_health = afn_health_max;
+            s_resultState = 0; s_resultTimer = 0; s_resultCursorLayer = -1;
+            afn_hud_elem_fade[AFN_RESULT_ELEM] = 256; afn_hud_elem_fade[AFN_RESULT_CURSOR] = 256;
+            // Beam-clash: clear state + hide its HUD so a clash never leaks across a scene swap.
+            s_clashActive = 0; s_clashTimer = 0; s_clashSlot = -1; s_clashPressed = 0;
+            s_pbBeamFull = 0; s_ebBeamFull = 0; s_clashAirT = 0; s_clashResolveSfx = 0;
+#if defined(AFN_HAS_HUD) && defined(AFN_HAS_SPRITE_IDX)
+            afn_hud_visible[AFN_CLASH_ELEM] = 0; afn_hud_visible[AFN_MASH_ELEM] = 0;
+            clash_set_layers(0);
+            afn_stop_sfx_sample(AFN_SND_STRUGGLE);   // never leave the struggle/mash loops ringing across a swap
+            afn_stop_sfx_sample(AFN_SND_MASH);
+#endif
+#endif
             // Re-run the entered scene's blueprint OnStart hooks (ShowHUD, music,
             // cursor init, ...). afn_bp_dispatch_start is scene-gated, so only the
             // NEW scene's blueprints fire — boot only ran it for the start scene,
@@ -2768,6 +3180,7 @@ int main(void)
             } else if (afn_fb_fire_req && afn_fb_level > 0.0f) {
                 // Release with a held charge: launch the ball as a projectile.
                 float frac = (afn_fb_max > 0) ? afn_fb_level / (float)afn_fb_max : 1.0f;
+                s_pbBeamFull = (frac >= AFN_CLASH_FULL_FRAC) ? 1 : 0;   // HARDCODED: this in-flight beam is a full charge (beam-clash)
                 afn_fb_active  = 1;
                 afn_fb_dirx    = fbFx; afn_fb_dirz = fbFz;
                 afn_fb_cur_dmg = (int)(afn_fb_dmg_max * frac); if (afn_fb_cur_dmg < 1) afn_fb_cur_dmg = 1;
@@ -2972,7 +3385,7 @@ int main(void)
             for (int i = 0; i < AFN_NPC_COUNT; i++) {
                 int eidx = (int)afn_npc_inst[i][7];
                 if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;
-                npc_ai_tick(i, playerX, playerY, playerZ);   // HARDCODED: enemy combat AI
+                if (!s_clashActive) npc_ai_tick(i, playerX, playerY, playerZ);   // HARDCODED: enemy combat AI (frozen during a beam clash)
                 // True box: half-extents (hx,hy,hz) + center offset (cx,cy,cz),
                 // all in world px relative to the NPC origin. Y rests the box
                 // bottom (cy-hy) on the floor.
@@ -3103,6 +3516,10 @@ int main(void)
             }
             afn_floor_sprite = savedFloorSpr;
         }
+#endif
+
+#if defined(AFN_HAS_HUD) && defined(AFN_HAS_PLAYER_RIG) && defined(AFN_HAS_SPRITE_IDX)
+        clash_tick();   // HARDCODED: beam-clash trigger/struggle (after the AI tick so both release latches are current)
 #endif
 
 #ifdef AFN_HAS_RAIL_PATH
@@ -3270,6 +3687,31 @@ int main(void)
             }
         }
 #endif
+
+#ifdef AFN_HAS_SPRITE_IDX
+        // HARDCODED: enemy KO cinematic. While the enemy is dying, override the
+        // player-follow framing — look at the enemy's box center, zoom in, and slowly
+        // orbit. The eye/effDist/pitch easers below glide into and out of this, so the
+        // transition (and the snap-back when s_koActive clears) is smooth.
+        if (s_koActive && s_koSlot >= 0) {
+            targetX = s_npcX[s_koSlot];
+            targetZ = s_npcZ[s_koSlot];
+            targetY = s_npcY[s_koSlot] + afn_npc_col[s_koSlot][4];   // enemy AABB center
+            camAngle = s_koAngle0 + 0.012f * (float)s_koTimer;       // slow orbit (~0.012 rad/frame)
+            effDist += (camDist * 0.45f - effDist) * 0.06f;          // ease toward a zoomed-in distance
+            pitch = 0.32f;                                           // fixed gentle downward look
+        }
+#endif
+        // HARDCODED: player death cinematic — same zoom-in slow orbit, but around
+        // the player (mirror of the enemy KO above). Runs on a loss until the scene swaps.
+        if (s_pkoActive) {
+            targetX = playerX;
+            targetZ = playerZ;
+            targetY = playerY + camHeight * 0.5f;
+            camAngle = s_pkoAngle0 + 0.012f * (float)s_pkoTimer;
+            effDist += (camDist * 0.45f - effDist) * 0.06f;
+            pitch = 0.32f;
+        }
 
         // Ease rate from what the player is doing: Sprint node sets
         // afn_speed_prio this tick (script ran above, so it's current);
