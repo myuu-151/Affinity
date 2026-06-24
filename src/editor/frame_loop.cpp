@@ -4520,13 +4520,16 @@ struct HudElement {
     struct LayerItem {
         ItemType type;
         int index; // piece/sprite/text index (-1 for cursor)
+        std::vector<HudKeyframe> keyframes;  // per-item keyframe track — each item in a layer animates independently
+        int selectedKeyframe = -1;
     };
     struct AnimLayer {
         char name[32] = "Layer";
         std::vector<LayerItem> items;
-        std::vector<HudKeyframe> keyframes;
+        std::vector<HudKeyframe> keyframes;  // LEGACY shared track — only used to migrate pre-v3 projects into per-item tracks; unused afterward
         bool loop = false;
-        int selectedKeyframe = -1;
+        int selectedKeyframe = -1;           // LEGACY (paired with keyframes above)
+        int selectedItem = 0;                // which item's track the keyframe editor edits
         HudInterpMode interp = Interp_Linear;
         int fps = 24;       // direct fps value
         int length = 60;    // animation length in frames
@@ -7468,7 +7471,7 @@ static bool SaveProject(const std::string& path)
     if (!f) return false;
 
     fprintf(f, "[Affinity Project]\n");
-    fprintf(f, "version=2\n");
+    fprintf(f, "version=3\n");   // v3: HUD anim-layer keyframes are per-item tracks (elemLayerItemKf), not a single shared layer track
     fprintf(f, "activeTab=%d\n", (int)sActiveTab);
     fprintf(f, "midiMasterDb=%.4f\n\n", sMidiMasterDb);
 
@@ -7811,11 +7814,12 @@ static bool SaveProject(const std::string& path)
                 fprintf(f, "elemLayerFps=%d\n", lay.fps);
                 fprintf(f, "elemLayerLength=%d\n", lay.length);
                 fprintf(f, "elemLayerItemCount=%d\n", (int)lay.items.size());
-                for (auto& it : lay.items)
+                for (auto& it : lay.items) {
                     fprintf(f, "elemLayerItem=%d|%d\n", (int)it.type, it.index);
-                fprintf(f, "elemLayerKfCount=%d\n", (int)lay.keyframes.size());
-                for (auto& kf : lay.keyframes)
-                        fprintf(f, "elemLayerKf=%d|%d|%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY, kf.hidden, kf.opacity);
+                    fprintf(f, "elemLayerItemKfCount=%d\n", (int)it.keyframes.size());
+                    for (auto& kf : it.keyframes)
+                        fprintf(f, "elemLayerItemKf=%d|%d|%d|%d|%d|%d|%d|%d\n", kf.frame, kf.offsetX, kf.offsetY, kf.rot, kf.scaleX, kf.scaleY, kf.hidden, kf.opacity);
+                }
             }
         }
     }
@@ -9561,6 +9565,20 @@ static bool LoadProject(const std::string& path)
                 if (sscanf(line + 14, "%d|%d", &t, &idx) == 2)
                     sHudElements.back().animLayers.back().items.push_back({ (HudElement::ItemType)t, idx });
             }
+            // v3+: per-item keyframe tracks (each track attaches to the most recent item).
+            else if (sscanf(line, "elemLayerItemKfCount=%d", &ival) == 1 && !sHudElements.empty()
+                     && !sHudElements.back().animLayers.empty() && !sHudElements.back().animLayers.back().items.empty()) {
+                sHudElements.back().animLayers.back().items.back().keyframes.reserve(ival);
+            }
+            else if (strncmp(line, "elemLayerItemKf=", 16) == 0 && !sHudElements.empty()
+                     && !sHudElements.back().animLayers.empty() && !sHudElements.back().animLayers.back().items.empty()) {
+                HudKeyframe kf;
+                if (sscanf(line + 16, "%d|%d|%d|%d|%d|%d|%d|%d", &kf.frame, &kf.offsetX, &kf.offsetY,
+                    &kf.rot, &kf.scaleX, &kf.scaleY, &kf.hidden, &kf.opacity) >= 4)
+                    sHudElements.back().animLayers.back().items.back().keyframes.push_back(kf);
+            }
+            // Legacy (pre-v3): a single shared track per layer. Parsed here, then
+            // copied into every item's per-item track by the post-load migration.
             else if (sscanf(line, "elemLayerKfCount=%d", &ival) == 1 && !sHudElements.empty() && !sHudElements.back().animLayers.empty()) {
                 sHudElements.back().animLayers.back().keyframes.reserve(ival);
             }
@@ -11295,6 +11313,27 @@ static bool LoadProject(const std::string& path)
     // gains/reorders animations). Runs after all rigs (with clips) and nodes
     // are loaded. Same routine the Reload glTF button uses.
     ResolveSkelAnimClipIndices();
+
+    // Migrate pre-v3 HUD anim layers: older projects stored ONE shared keyframe
+    // track per layer (lay.keyframes) that drove every item together. v3 gives
+    // each item its own track. If a layer loaded a shared track but its items have
+    // no per-item track yet, copy the shared track into every item so the layer
+    // animates identically to before, then clear the legacy field.
+    for (auto& el : sHudElements) {
+        for (auto& lay : el.animLayers) {
+            if (lay.keyframes.empty()) continue;
+            bool anyItemTrack = false;
+            for (auto& it : lay.items) if (!it.keyframes.empty()) { anyItemTrack = true; break; }
+            if (!anyItemTrack) {
+                for (auto& it : lay.items) {
+                    it.keyframes = lay.keyframes;
+                    it.selectedKeyframe = lay.selectedKeyframe;
+                }
+            }
+            lay.keyframes.clear();
+            lay.selectedKeyframe = -1;
+        }
+    }
 
     fclose(f);
     sProjectPath = path;
@@ -19044,22 +19083,31 @@ void FrameTick(float dt)
                         le.name = lay.name;
                         le.interp = (int)lay.interp;
                         le.loop = lay.loop;
-                        le.speed = (lay.fps > 0) ? std::max(1, (int)(60.0f / lay.fps)) : 1;
+                        // FPS -> 60 Hz playback: <=60 fps advances 1 frame every
+                        // `speed` ticks (speed = 60/fps); >60 fps advances `step`
+                        // frames every tick (step = fps/60). They're mutually
+                        // exclusive — one is >1, the other is 1.
+                        le.speed = (lay.fps > 0) ? std::max(1, (int)(60.0f / lay.fps + 0.5f)) : 1;
+                        le.step  = (lay.fps > 0) ? std::max(1, (int)(lay.fps / 60.0f + 0.5f)) : 1;
                         le.length = std::max(1, lay.length);
-                        for (auto& it : lay.items)
-                            le.items.push_back({ (int)it.type, it.index });
-                        for (auto& kf : lay.keyframes) {
+                        auto cvtKf = [](const HudKeyframe& kf) {
                             AfnHudKeyframeExport ke;
-                            ke.frame = kf.frame;
-                            ke.offX = kf.offsetX;
-                            ke.offY = kf.offsetY;
-                            ke.rot = kf.rot;
-                            ke.scaleX = kf.scaleX;
-                            ke.scaleY = kf.scaleY;
-                            ke.hidden = kf.hidden;
-                            ke.opacity = kf.opacity;
-                            le.keyframes.push_back(ke);
+                            ke.frame = kf.frame; ke.offX = kf.offsetX; ke.offY = kf.offsetY;
+                            ke.rot = kf.rot; ke.scaleX = kf.scaleX; ke.scaleY = kf.scaleY;
+                            ke.hidden = kf.hidden; ke.opacity = kf.opacity;
+                            return ke;
+                        };
+                        // Per-item tracks (PSV consumes these).
+                        for (auto& it : lay.items) {
+                            AfnHudAnimLayerItemExport ie;
+                            ie.type = (int)it.type; ie.index = it.index;
+                            for (auto& kf : it.keyframes) ie.keyframes.push_back(cvtKf(kf));
+                            le.items.push_back(std::move(ie));
                         }
+                        // Representative layer-level track for NDS/GBA (one track per
+                        // layer): use the first item that actually has keyframes.
+                        for (auto& it : lay.items)
+                            if (!it.keyframes.empty()) { for (auto& kf : it.keyframes) le.keyframes.push_back(cvtKf(kf)); break; }
                         he.animLayers.push_back(std::move(le));
                     }
                     exportHudElements.push_back(std::move(he));
@@ -31722,27 +31770,28 @@ void FrameTick(float dt)
                 auto computeLayerTransform = [&](const HudElement& src, HudElement::ItemType type, int idx) -> LayerTransform {
                     LayerTransform t;
                     for (auto& lay : src.animLayers) {
-                        bool inLayer = false;
+                        // Per-item track: find the item matching (type,idx) and use ITS keyframes.
+                        const std::vector<HudKeyframe>* kfsPtr = nullptr; int kfSel = -1;
                         for (auto& it : lay.items)
-                            if (it.type == type && it.index == idx) { inLayer = true; break; }
-                        if (!inLayer) continue;
-                        if (lay.keyframes.empty()) continue;
+                            if (it.type == type && it.index == idx) { kfsPtr = &it.keyframes; kfSel = it.selectedKeyframe; break; }
+                        if (!kfsPtr || kfsPtr->empty()) continue;
+                        const std::vector<HudKeyframe>& kfList = *kfsPtr;
 
-                        if (sHudTimelinePlaying && lay.keyframes.size() >= 1) {
+                        if (sHudTimelinePlaying && kfList.size() >= 1) {
                             // Find surrounding keyframes for playhead
                             int ph = sHudTimelinePlayhead;
                             // Find last kf at or before playhead, and first kf after
                             int prevIdx = -1, nextIdx = -1;
-                            for (int ki = 0; ki < (int)lay.keyframes.size(); ki++) {
-                                if (lay.keyframes[ki].frame <= ph) prevIdx = ki;
-                                if (lay.keyframes[ki].frame > ph && nextIdx < 0) nextIdx = ki;
+                            for (int ki = 0; ki < (int)kfList.size(); ki++) {
+                                if (kfList[ki].frame <= ph) prevIdx = ki;
+                                if (kfList[ki].frame > ph && nextIdx < 0) nextIdx = ki;
                             }
                             if (prevIdx < 0 && nextIdx < 0) continue;
                             if (prevIdx < 0) prevIdx = nextIdx; // before first kf
                             if (nextIdx < 0) nextIdx = prevIdx; // after last kf
 
-                            auto& kfA = lay.keyframes[prevIdx];
-                            auto& kfB = lay.keyframes[nextIdx];
+                            const HudKeyframe& kfA = kfList[prevIdx];
+                            const HudKeyframe& kfB = kfList[nextIdx];
                             if (kfA.hidden) t.hidden = true;   // hide is a step (use the active keyframe)
 
                             if (prevIdx == nextIdx || lay.interp == Interp_Constant) {
@@ -31771,8 +31820,8 @@ void FrameTick(float dt)
                             }
                         } else {
                             // Stopped — use selected keyframe
-                            if (lay.selectedKeyframe >= 0 && lay.selectedKeyframe < (int)lay.keyframes.size()) {
-                                auto& kf = lay.keyframes[lay.selectedKeyframe];
+                            if (kfSel >= 0 && kfSel < (int)kfList.size()) {
+                                const HudKeyframe& kf = kfList[kfSel];
                                 t.ox += kf.offsetX; t.oy += kf.offsetY;
                                 t.sx *= kf.scaleX / 256.0f; t.sy *= kf.scaleY / 256.0f;
                                 t.rot += (float)kf.rot;
@@ -33613,38 +33662,72 @@ void FrameTick(float dt)
                             ImGui::PopID();
                         }
 
-                        // Keyframes for this layer
+                        // Per-item keyframe tracks: pick which item in this layer to
+                        // animate, then edit that item's OWN keyframes. Each item
+                        // (piece/sprite/text) carries an independent track, so e.g. a
+                        // button_pressed piece and a button_unpressed piece in the same
+                        // group can be keyframed (and hidden) separately.
                         ImGui::Spacing();
-                        ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.8f, 1.0f), "Keyframes:");
-                        ImGui::SameLine();
-                        if (ImGui::SmallButton("+##addkf")) {
-                            HudKeyframe kf;
-                            kf.frame = lay.keyframes.empty() ? 0 : (lay.keyframes.back().frame + 15);
-                            lay.keyframes.push_back(kf);
-                            lay.selectedKeyframe = (int)lay.keyframes.size() - 1;
-                            sProjectDirty = true;
+                        if (!lay.items.empty()) {
+                            if (lay.selectedItem < 0 || lay.selectedItem >= (int)lay.items.size()) lay.selectedItem = 0;
+                            auto itemLabel = [&](int ii, char* out, size_t n) {
+                                auto& it = lay.items[ii];
+                                const char* nm = "?";
+                                if (it.type == HudElement::It_Piece)
+                                    nm = (it.index >= 0 && it.index < (int)el.pieces.size() && el.pieces[it.index].spriteAssetIdx >= 0 && el.pieces[it.index].spriteAssetIdx < (int)sSpriteAssets.size())
+                                        ? sSpriteAssets[el.pieces[it.index].spriteAssetIdx].name.c_str() : "empty";
+                                else if (it.type == HudElement::It_Sprite) nm = "sprite";
+                                else if (it.type == HudElement::It_Text) nm = "text";
+                                else nm = "cursor";
+                                const char* tn = (it.type == HudElement::It_Piece) ? "Piece" : (it.type == HudElement::It_Sprite) ? "Sprite" : (it.type == HudElement::It_Text) ? "Text" : "Cursor";
+                                snprintf(out, n, "%s %d: %s (%d kf)", tn, it.index, nm, (int)it.keyframes.size());
+                            };
+                            char curLbl[64]; itemLabel(lay.selectedItem, curLbl, sizeof(curLbl));
+                            ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.8f, 1.0f), "Edit track:");
+                            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                            if (ImGui::BeginCombo("##trackitem", curLbl)) {
+                                for (int ii = 0; ii < (int)lay.items.size(); ii++) {
+                                    char lbl[64]; itemLabel(ii, lbl, sizeof(lbl));
+                                    if (ImGui::Selectable(lbl, ii == lay.selectedItem)) lay.selectedItem = ii;
+                                }
+                                ImGui::EndCombo();
+                            }
                         }
-                        for (int ki = 0; ki < (int)lay.keyframes.size(); ki++) {
+
+                        // Keyframes for the selected item's track
+                        if (lay.selectedItem >= 0 && lay.selectedItem < (int)lay.items.size()) {
+                          auto& trk = lay.items[lay.selectedItem];
+                          ImGui::Spacing();
+                          ImGui::TextColored(ImVec4(0.6f, 0.7f, 0.8f, 1.0f), "Keyframes:");
+                          ImGui::SameLine();
+                          if (ImGui::SmallButton("+##addkf")) {
+                            HudKeyframe kf;
+                            kf.frame = trk.keyframes.empty() ? 0 : (trk.keyframes.back().frame + 15);
+                            trk.keyframes.push_back(kf);
+                            trk.selectedKeyframe = (int)trk.keyframes.size() - 1;
+                            sProjectDirty = true;
+                          }
+                          for (int ki = 0; ki < (int)trk.keyframes.size(); ki++) {
                             ImGui::PushID(6000 + ki);
-                            auto& kf = lay.keyframes[ki];
-                            bool ksel = (ki == lay.selectedKeyframe);
+                            auto& kf = trk.keyframes[ki];
+                            bool ksel = (ki == trk.selectedKeyframe);
                             char klabel[64];
                             snprintf(klabel, sizeof(klabel), "%d: f%d (%+d,%+d) r%d s%.1f,%.1f o%d%s",
                                 ki, kf.frame, kf.offsetX, kf.offsetY, kf.rot,
                                 kf.scaleX / 256.0f, kf.scaleY / 256.0f, kf.opacity, kf.hidden ? " [hide]" : "");
                             if (ImGui::Selectable(klabel, ksel, 0, ImVec2(ImGui::GetContentRegionAvail().x - 25, 0)))
-                                lay.selectedKeyframe = ki;
+                                trk.selectedKeyframe = ki;
                             ImGui::SameLine();
                             if (ImGui::SmallButton("-##delkf")) {
-                                lay.keyframes.erase(lay.keyframes.begin() + ki);
-                                if (lay.selectedKeyframe >= (int)lay.keyframes.size()) lay.selectedKeyframe = -1;
+                                trk.keyframes.erase(trk.keyframes.begin() + ki);
+                                if (trk.selectedKeyframe >= (int)trk.keyframes.size()) trk.selectedKeyframe = -1;
                                 sProjectDirty = true;
                                 ImGui::PopID(); break;
                             }
                             ImGui::PopID();
-                        }
-                        if (lay.selectedKeyframe >= 0 && lay.selectedKeyframe < (int)lay.keyframes.size()) {
-                            auto& kf = lay.keyframes[lay.selectedKeyframe];
+                          }
+                          if (trk.selectedKeyframe >= 0 && trk.selectedKeyframe < (int)trk.keyframes.size()) {
+                            auto& kf = trk.keyframes[trk.selectedKeyframe];
                             ImGui::Spacing();
                             if (ImGui::DragInt("Frame##kf", &kf.frame, 1, 0, 600)) sProjectDirty = true;
                             if (ImGui::DragInt("Offset X##kf", &kf.offsetX, 1)) sProjectDirty = true;
@@ -33661,6 +33744,7 @@ void FrameTick(float dt)
                             if (ImGui::IsItemHovered()) ImGui::SetTooltip("0-16 opacity at this keyframe (16 = the piece's full base opacity, 0 = invisible). Interpolated between keyframes — pulse it (e.g. 16 -> 4 -> 16, Loop) for a glow.");
                             bool kfHidden = kf.hidden != 0;
                             if (ImGui::Checkbox("Hide##kf", &kfHidden)) { kf.hidden = kfHidden ? 1 : 0; sProjectDirty = true; }
+                          }
                         }
                     }
                 }
@@ -34186,14 +34270,19 @@ void FrameTick(float dt)
                 float sTextY = sry + (subRowH - ImGui::GetFontSize()) * 0.5f;
                 dl->AddText(ImVec2(tlX + 6, sTextY), subRows[ri].color, subRows[ri].buf);
 
-                // Draw keyframe diamonds for this layer
+                // Draw keyframe diamonds for the selected item's track in this layer
                 auto& lay = el.animLayers[li];
-                for (int ki = 0; ki < (int)lay.keyframes.size(); ki++) {
-                    float kx = trackX + lay.keyframes[ki].frame * sHudTimelineZoom - sHudTimelineScroll;
+                const std::vector<HudKeyframe>* trk = nullptr; int trkSel = -1;
+                if (lay.selectedItem >= 0 && lay.selectedItem < (int)lay.items.size()) {
+                    trk = &lay.items[lay.selectedItem].keyframes;
+                    trkSel = lay.items[lay.selectedItem].selectedKeyframe;
+                }
+                for (int ki = 0; trk && ki < (int)trk->size(); ki++) {
+                    float kx = trackX + (*trk)[ki].frame * sHudTimelineZoom - sHudTimelineScroll;
                     if (kx < trackX - 10 || kx > trackX + trackW + 10) continue;
                     float ky = sry + subRowH * 0.5f;
                     float ds = 5.0f;
-                    bool kfSel = (lsel && ki == lay.selectedKeyframe);
+                    bool kfSel = (lsel && ki == trkSel);
                     ImU32 fill = kfSel ? IM_COL32(255, 255, 255, 255) : IM_COL32(240, 170, 40, 255);
                     ImU32 outline = kfSel ? IM_COL32(70, 150, 255, 255) : IM_COL32(200, 130, 20, 255);
                     dl->AddQuadFilled(ImVec2(kx, ky - ds), ImVec2(kx + ds, ky), ImVec2(kx, ky + ds), ImVec2(kx - ds, ky), fill);

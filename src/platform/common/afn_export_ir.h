@@ -635,16 +635,18 @@ struct AfnHudKeyframeExport {
 struct AfnHudAnimLayerItemExport {
     int type;   // 0=piece, 1=sprite, 2=text, 3=cursor
     int index;
+    std::vector<AfnHudKeyframeExport> keyframes;  // this item's own animation track (PSV per-item tracks)
 };
 
 struct AfnHudAnimLayerExport {
     std::string name;
     int interp = 1;     // 0=constant, 1=linear, 2=bezier
     bool loop = false;
-    int speed = 5;      // frames-per-tick (60/fps), e.g. 5 = 12fps
+    int speed = 5;      // ticks-per-frame-advance for fps<=60 (60/fps), e.g. 5 = 12fps
+    int step  = 1;      // frames advanced per tick for fps>60 (fps/60), e.g. 4 = 240fps; 1 otherwise
     int length = 60;    // total animation length in frames (from timeline range)
     std::vector<AfnHudAnimLayerItemExport> items;
-    std::vector<AfnHudKeyframeExport> keyframes;
+    std::vector<AfnHudKeyframeExport> keyframes;  // LEGACY/representative track for NDS/GBA (= first item's track); PSV uses per-item items[].keyframes
 };
 
 struct AfnHudElementExport {

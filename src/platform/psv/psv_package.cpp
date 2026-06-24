@@ -734,29 +734,35 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
     // cursor items in a layer are ignored on PSV).
     {
         struct KF { int frame, ox, oy, rot, sx, sy, hidden, op; };
-        struct LY { int interp, loop, speed, length, kfStart, kfCount; };
+        struct LY { int interp, loop, speed, step, length, kfStart, kfCount; };
         std::vector<KF> kfs;
         std::vector<LY> layers;
         std::vector<int> pieceLayer(pieces.size(), -1);
         std::vector<int> elemFirstLayer(elems.size(), -1);  // element idx -> its first global anim layer (drive-through)
         for (size_t ei = 0; ei < elems.size(); ei++) {
             for (const auto& lay : elems[ei].animLayers) {
-                if (lay.keyframes.empty()) continue;
-                LY L;
-                L.interp = lay.interp;
-                L.loop = lay.loop ? 1 : 0;
-                L.speed = lay.speed > 0 ? lay.speed : 1;
-                L.length = lay.length > 0 ? lay.length : 1;
-                L.kfStart = (int)kfs.size();
-                for (const auto& k : lay.keyframes)
-                    kfs.push_back({ k.frame, k.offX, k.offY, k.rot, k.scaleX, k.scaleY, k.hidden, k.opacity });
-                L.kfCount = (int)kfs.size() - L.kfStart;
-                int li = (int)layers.size();
-                layers.push_back(L);
-                if (elemFirstLayer[ei] < 0) elemFirstLayer[ei] = li;   // first anim layer of this element
-                for (const auto& it : lay.items)
-                    if (it.type == 0 && it.index >= 0 && it.index < es[ei].pC)
-                        pieceLayer[es[ei].pS + it.index] = li;
+                // Each item in a layer carries its OWN keyframe track; emit one
+                // runtime layer (track) per animated PIECE item and point that
+                // piece at it. Layer timing (interp/loop/speed/length) is shared
+                // across the group. Sprite/text/cursor items are ignored on PSV.
+                for (const auto& it : lay.items) {
+                    if (it.keyframes.empty()) continue;
+                    if (it.type != 0 || it.index < 0 || it.index >= es[ei].pC) continue;
+                    LY L;
+                    L.interp = lay.interp;
+                    L.loop = lay.loop ? 1 : 0;
+                    L.speed = lay.speed > 0 ? lay.speed : 1;
+                    L.step  = lay.step  > 0 ? lay.step  : 1;   // frames/tick for fps>60
+                    L.length = lay.length > 0 ? lay.length : 1;
+                    L.kfStart = (int)kfs.size();
+                    for (const auto& k : it.keyframes)
+                        kfs.push_back({ k.frame, k.offX, k.offY, k.rot, k.scaleX, k.scaleY, k.hidden, k.opacity });
+                    L.kfCount = (int)kfs.size() - L.kfStart;
+                    int li = (int)layers.size();
+                    layers.push_back(L);
+                    if (elemFirstLayer[ei] < 0) elemFirstLayer[ei] = li;   // first anim track of this element (drive-through)
+                    pieceLayer[es[ei].pS + it.index] = li;
+                }
             }
         }
         if (!layers.empty()) {
@@ -770,10 +776,10 @@ static bool GeneratePSVHud(const std::string& runtimeDir,
                 f << "  { " << k.frame << "," << k.ox << "," << k.oy << "," << k.rot
                   << "," << k.sx << "," << k.sy << "," << k.hidden << "," << k.op << " },\n";
             f << "};\n";
-            f << "typedef struct { unsigned char interp,loop; short speed,length,kfStart,kfCount; } AfnHudLayer;\n";
+            f << "typedef struct { unsigned char interp,loop; short speed,step,length,kfStart,kfCount; } AfnHudLayer;\n";
             f << "static const AfnHudLayer afn_hud_layer[" << layers.size() << "] = {\n";
             for (auto& L : layers)
-                f << "  { " << L.interp << "," << L.loop << "," << L.speed << "," << L.length
+                f << "  { " << L.interp << "," << L.loop << "," << L.speed << "," << L.step << "," << L.length
                   << "," << L.kfStart << "," << L.kfCount << " },\n";
             f << "};\n";
             f << "static const short afn_hud_piece_layer[" << (pieces.empty()?1:pieces.size()) << "] = {";
