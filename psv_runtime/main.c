@@ -918,7 +918,7 @@ static float collide_ray_walls(float x0,float y0,float z0, float x1,float y1,flo
             int fi=s_cellFaces[start+i];
             if (s_faceStamp[fi]==stamp) continue; s_faceStamp[fi]=stamp;
             const ColFace* F=&s_faces[fi];
-            if (!(F->flags & (2|4))) continue;   // walls + ceilings block the camera
+            if (!(F->flags & (1|2|4))) continue;   // floors + walls + ceilings block the camera
             float e1x=F->bx-F->ax, e1y=F->by-F->ay, e1z=F->bz-F->az;
             float e2x=F->cx-F->ax, e2y=F->cy-F->ay, e2z=F->cz-F->az;
             float px=dy*e2z-dz*e2y, py=dz*e2x-dx*e2z, pz=dx*e2y-dy*e2x;
@@ -3321,10 +3321,11 @@ int main(void)
         float ez = s_camEyeZ;
         float ey = targetY + sinf(s_camPosPitch)*effDist;   // eased pitch: eye height lags too
 #ifdef AFN_HAS_CAM_WALL
-        // Wall-aware: if a wall/ceiling is between the player and the orbit eye,
-        // pull the eye in to just in front of it so the camera doesn't clip
-        // through (you keep seeing the player). Per-frame only — the eased orbit
-        // state is untouched, so the camera springs back out when the wall clears.
+        // Wall-aware: if a wall, ceiling OR floor is between the player and the
+        // orbit eye, pull the eye in to just in front of it so the camera doesn't
+        // clip through (you keep seeing the player) — incl. the ground when the
+        // camera pitches low. Per-frame only — the eased orbit state is untouched,
+        // so the camera springs back out when the obstruction clears.
         if (afn_cam_wall_aware && afn_current_mode != 1) {
             // Ray from the PLAYER (not the look point) to the eye, so it keeps the
             // player visible even in lock-on — which shifts the look point sideways
