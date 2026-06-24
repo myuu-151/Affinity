@@ -74,6 +74,65 @@ static unsigned char s_npcNavMoving[AFN_NPC_COUNT + 1];       // moving this fra
 #endif
 extern int afn_gravity, afn_terminal_vel;          // SetGravity/SetMaxFall (8.8 fixed, shared with player)
 
+// ===================== HARDCODED: enemy NPC combat AI =====================
+// Prototype enemy that mirrors the player controller (lock-on strafe + charge/tap
+// projectiles + dodge) AI-driven. Gated to one NPC (editor sprite AFN_ENEMY_EIDX).
+// Migrate to nodes later (the AI node-verbs are currently stubs). Tunable below.
+#define AFN_ENEMY_EIDX        3        // exported editor sprite index of the NPC (afn_npc_inst col 7)
+#define ENEMY_HP_MAX          100
+// NOTE: this scene uses small world coords (~128-156, nav walk 0.35/frame), so all
+// distances/speeds are in those units. Tune to taste.
+#define ENEMY_DETECT_RANGE    60.0f    // start combat within this distance
+#define ENEMY_LOSE_RANGE      95.0f    // outside this for LOSE_FRAMES -> back to roam
+#define ENEMY_LOSE_FRAMES     150
+#define ENEMY_PREF_DIST       22.0f    // preferred combat distance (strafe radius)
+#define ENEMY_RANGE_K         0.06f    // how hard it corrects toward PREF_DIST
+#define ENEMY_MOVE_SPEED      0.8f
+#define ENEMY_STRAFE_LEG      90       // frames before re-rolling strafe direction
+#define ENEMY_YAW_EASE        0.35f
+#define ENEMY_ATK_CD          80       // frames between shots
+#define ENEMY_CHARGE_PROB     0.40f    // chance a shot is a full charge vs a tap
+#define ENEMY_TAP_WINDUP      12
+#define ENEMY_TAP_DMG         4
+#define ENEMY_TAP_SPEED       2.5f
+#define ENEMY_TAP_SCALE       0.18f    // orb scale (relative to focus_gfx base, like the player)
+#define ENEMY_CHARGE_WINDUP   55
+#define ENEMY_CHG_DMG         20
+#define ENEMY_CHG_SPEED       2.0f
+#define ENEMY_CHG_SCALE       0.55f
+#define ENEMY_CHG_HOMING      0.02f    // tiny so a sidestep still clears it (dodgeable)
+#define ENEMY_FIRE_RECOVER    18
+#define ENEMY_SHOT_LIFE       200
+#define ENEMY_MUZZLE_FWD      3.0f      // chest-front muzzle (fallback only; bone is used)
+#define ENEMY_MUZZLE_UP       12.0f
+#define ENEMY_AIM_UP          12.0f     // aim at the player's chest (matches the player FB's +12)
+#define ENEMY_HIT_R           6.0f
+#define ENEMY_DODGE_TRIGGER_D 14.0f
+#define ENEMY_DODGE_CHANCE    0.70f
+#define ENEMY_DODGE_FRAMES    20
+#define ENEMY_DODGE_RAMP      6
+#define ENEMY_DODGE_SPEED     9.0f
+#define ENEMY_DODGE_CD        45
+#define ENEMY_BAR_HEIGHT      18.0f     // world units above the NPC origin
+#define ENEMY_BAR_W           64.0f     // HUD pixels (960x544 space)
+#define ENEMY_BAR_H           7.0f
+enum { AI_ROAM = 0, AI_CHASE, AI_STRAFE, AI_CHARGE, AI_FIRE, AI_DODGE, AI_DEAD };
+static int   s_aiState = AI_ROAM, s_aiTimer = 0, s_aiLoseT = 0, s_aiInited = 0;
+static int   s_aiStrafeDir = 1, s_aiStrafeLeg = 0, s_aiAtkCD = 0, s_aiDodgeCD = 0, s_aiChargeShot = 0;
+static int   s_efbActive = 0, s_efbCharging = 0, s_efbDmg = 0, s_efbLife = 0;   // enemy projectile
+static float s_efbX, s_efbY, s_efbZ, s_efbDirX = 0, s_efbDirZ = 1, s_efbScale = 0.05f, s_efbSpeed = 0, s_efbHoming = 0;
+static int   s_eDodgeFrames = 0, s_eDodgeTotal = 0, s_eDodgeClip = 24;          // enemy dodge roll
+static float s_eDodgeDX = 0, s_eDodgeDZ = 0;
+static float s_enemyBoneW[AFN_RIG_MAX_BONES][3] = {{0}};   // enemy NPC bones in WORLD (orb muzzle anchor)
+static int   s_cacheEnemyBones = 0;                        // set true during the enemy's rig_draw pass
+static int   s_drawingPlayer = 0;                          // set true ONLY during the player's own rig_draw
+static int   s_efbDriveFrame = 0, s_efbDriveTick = 0;      // fbspin drive-element animation for the enemy orb
+static int   s_fbInstCache = -2;                           // resolved focus_gfx sub-sprite instance (-2 = unresolved)
+static unsigned s_aiRng = 0x1234567u;
+static float ai_rand01(void) { s_aiRng ^= s_aiRng << 13; s_aiRng ^= s_aiRng >> 17; s_aiRng ^= s_aiRng << 5; return (s_aiRng & 0xFFFFFFu) / (float)0x1000000; }
+static int   ai_chance(float p) { return ai_rand01() < p; }
+// ==========================================================================
+
 static void pose_to_mat(const float* p, float* m) {
     float px=p[0],py=p[1],pz=p[2], w=p[3],x=p[4],y=p[5],z=p[6];
     float n = w*w+x*x+y*y+z*z;
@@ -130,6 +189,8 @@ static void rig_init(void) {
         s_npcPathLen[i] = 0; s_npcPathIdx[i] = 0; s_npcRepathT[i] = 0; s_npcNavMoving[i] = 0;
 #endif
     }
+    // HARDCODED: reset enemy combat AI on (re)init so a scene restart re-seeds HP/state.
+    s_aiInited = 0; s_efbActive = 0; s_efbCharging = 0; s_eDodgeFrames = 0; s_aiState = AI_ROAM;
     for (int r = 0; r < AFN_RIG_COUNT; r++) {
         const AfnRig* R = &afn_rigs[r];
         for (int g = 0; g < AFN_RIG_MAX_MATS; g++) {
@@ -199,12 +260,21 @@ static void rig_draw(const AfnRig* R, GLuint* texArr, const float* view,
     // Bone attach: cache each PLAYER bone's WORLD position (model * bone origin)
     // so attached sub-sprites can ride the live animated joint. s_bonemat is
     // overwritten per rig during this pass, so we snapshot only the player.
-    if (R == &afn_rigs[AFN_PLAYER_RIG_SLOT]) {
+    if (s_drawingPlayer) {   // ONLY the player's own draw — NOT the same-rig enemy NPC
         for (int b = 0; b < R->bones; b++) {
             float bx = s_bonemat[b][3], by = s_bonemat[b][7], bz = s_bonemat[b][11];
             s_player_bone_world[b][0] = model[0]*bx + model[4]*by + model[8]*bz + model[12];
             s_player_bone_world[b][1] = model[1]*bx + model[5]*by + model[9]*bz + model[13];
             s_player_bone_world[b][2] = model[2]*bx + model[6]*by + model[10]*bz + model[14];
+        }
+    }
+    // HARDCODED: also snapshot the enemy NPC's bones (for its projectile orb muzzle).
+    if (s_cacheEnemyBones) {
+        for (int b = 0; b < R->bones; b++) {
+            float bx = s_bonemat[b][3], by = s_bonemat[b][7], bz = s_bonemat[b][11];
+            s_enemyBoneW[b][0] = model[0]*bx + model[4]*by + model[8]*bz + model[12];
+            s_enemyBoneW[b][1] = model[1]*bx + model[5]*by + model[9]*bz + model[13];
+            s_enemyBoneW[b][2] = model[2]*bx + model[6]*by + model[10]*bz + model[14];
         }
     }
 #endif
@@ -274,7 +344,9 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
     }
     s_pframe = rig_advance(PR, s_pclip, s_pframe);
     build_bone_mats(PR, s_pclip, s_pframe); skin(PR);
+    s_drawingPlayer = 1;   // HARDCODED: snapshot ONLY the player's bones (enemy shares the rig)
     rig_draw(PR, s_rigTex[AFN_PLAYER_RIG_SLOT], view, playerX, playerY, playerZ, playerYaw, AFN_PLAYER_SCALE, floorN);
+    s_drawingPlayer = 0;
 
     // SetSkelAnim: set the matching NPC's clip override (by editor sprite index).
     // Needs the 8-wide afn_npc_inst (editor index in col 7) from the new export.
@@ -304,7 +376,11 @@ static void rigs_render(const float* view, float playerX, float playerY, float p
         build_bone_mats(R, clip, s_npcFrame[i]); skin(R);
         // Draw at the nav-driven X/Z/yaw + gravity-settled Y (NPC physics loop),
         // tilted to the smoothed floor normal like the player (slope snap).
+#ifdef AFN_HAS_SPRITE_IDX
+        s_cacheEnemyBones = ((int)N[7] == AFN_ENEMY_EIDX);   // HARDCODED: snapshot enemy bones for its orb muzzle
+#endif
         rig_draw(R, s_rigTex[slot], view, s_npcX[i], s_npcY[i], s_npcZ[i], s_npcYaw[i], N[4], s_npcFloorN[i]);
+        s_cacheEnemyBones = 0;
     }
 }
 #endif // AFN_HAS_PLAYER_RIG
@@ -1217,6 +1293,238 @@ int afn_hp[NUM_SPRITES]={0}, afn_state_timer[NUM_SPRITES]={0};
 int afn_energy=0, afn_energy_max=100;   // player energy resource (node-driven: Add/Spend/Set/SetMax Energy)
 int afn_health=100, afn_health_max=100; // player health resource (node-driven: Damage/Heal/Set/SetMax Health)
 int afn_stop_links[16]={0};
+
+// HARDCODED: resolve the player's lone attached sub-sprite = the focus_gfx orb
+// (cached). The enemy reuses its texture / bone / fbspin element to look identical.
+static int resolve_focus_inst(void) {
+    if (s_fbInstCache != -2) return s_fbInstCache;
+    int found = -1;
+#if defined(AFN_HAS_SPRITES) && defined(AFN_HAS_SPR_PARENT)
+    if (afn_fb_inst >= 0) found = afn_fb_inst;
+    else for (int i = 0; i < AFN_SPR_INST_COUNT; i++)
+        if (afn_spr_parent[i] >= 0) { found = i; break; }
+#endif
+    s_fbInstCache = found;
+    return found;
+}
+
+// HARDCODED: enemy projectile muzzle = the focus_gfx bone on the NPC (true bone
+// anchor) with the authored attach offset, rotated by the NPC's facing. Falls
+// back to a chest-front point if the bone/sprite can't be resolved.
+static void enemy_muzzle(int i, float* ox, float* oy, float* oz) {
+#if defined(AFN_HAS_SPR_BONE) && defined(AFN_HAS_SPRITES) && defined(AFN_HAS_SPR_PARENT)
+    int fb = resolve_focus_inst();
+    int fbBone = (fb >= 0) ? afn_spr_bone[fb] : -1;
+    if (fbBone >= 0 && fbBone < AFN_RIG_MAX_BONES) {
+        float ax = afn_spr_poff_x[fb], ay = afn_spr_poff_y[fb], az = afn_spr_poff_z[fb];
+        int slot = (int)afn_npc_inst[i][6];
+        float yr = s_npcYaw[i]*DEG2RAD + AFN_RIG_YAW_OFFSET + afn_rigs[slot].yawOff;
+        float yc = cosf(yr), ys = sinf(yr);   // fwd=(sin,cos), right=(cos,-sin) — matches rig_draw
+        *ox = s_enemyBoneW[fbBone][0] + ax*yc + az*ys;
+        *oy = s_enemyBoneW[fbBone][1] + ay;
+        *oz = s_enemyBoneW[fbBone][2] - ax*ys + az*yc;
+        return;
+    }
+#endif
+    float ey = s_npcYaw[i]*DEG2RAD, efx = sinf(ey), efz = cosf(ey);
+    *ox = s_npcX[i] + efx*ENEMY_MUZZLE_FWD; *oy = s_npcY[i] + ENEMY_MUZZLE_UP; *oz = s_npcZ[i] + efz*ENEMY_MUZZLE_FWD;
+}
+
+// HARDCODED: draw the enemy's projectile orb with the player's focus_gfx graphic +
+// fbspin spin — a spherical camera-facing textured quad, mirroring billboards_render.
+static void enemy_orb_render(const float* view) {
+    if (!s_efbActive && !s_efbCharging) return;
+#if defined(AFN_HAS_SPRITES) && defined(AFN_HAS_SPR_PARENT)
+    int fb = resolve_focus_inst();
+    if (fb < 0) return;
+    int NF = (int)(sizeof(afn_spr_frame_ptrs)/sizeof(afn_spr_frame_ptrs[0]));
+    int cf = afn_spr_fstart[fb]; if (cf < 0) cf = 0; if (cf > NF-1) cf = NF-1;
+    float sz = afn_spr_basesize[fb] * s_efbScale * 0.25f;
+    float hw = sz * 0.5f, hh = sz * 0.5f;
+    float Rwx = view[0], Rwy = view[4], Rwz = view[8];   // camera right (world)
+    float Uwx = view[1], Uwy = view[5], Uwz = view[9];   // camera up (world)
+#if defined(AFN_HAS_SPR_DRIVE_ELEM) && defined(AFN_HAS_HUD_ANIM)
+    // fbspin: run the linked element's first anim layer (rotation + scale) like the player orb.
+    if (afn_spr_drive_elem[fb] >= 0) {
+        int de = afn_spr_drive_elem[fb];
+        int dl = (de < (int)(sizeof(afn_hud_elem_first_layer)/sizeof(afn_hud_elem_first_layer[0]))) ? afn_hud_elem_first_layer[de] : -1;
+        if (dl >= 0) {
+            const AfnHudLayer* L = &afn_hud_layer[dl];
+            int dspd = L->speed < 1 ? 1 : L->speed;
+            if (++s_efbDriveTick >= dspd) { s_efbDriveTick = 0; s_efbDriveFrame++; if (L->length > 0 && s_efbDriveFrame >= L->length) s_efbDriveFrame = L->loop ? 0 : (L->length - 1); }
+            int ph = s_efbDriveFrame, pI = -1, nI = -1;
+            for (int ki = 0; ki < L->kfCount; ki++) { const AfnHudKf* k = &afn_hud_kf[L->kfStart + ki]; if (k->frame <= ph) pI = ki; if (k->frame > ph && nI < 0) nI = ki; }
+            if (pI < 0) pI = (nI < 0 ? 0 : nI); if (nI < 0) nI = pI;
+            const AfnHudKf* A = &afn_hud_kf[L->kfStart + pI]; const AfnHudKf* B = &afn_hud_kf[L->kfStart + nI];
+            float frac = 0.0f;
+            if (A != B && L->interp != 0) { float span=(float)(B->frame-A->frame); frac=span>0?(float)(ph-A->frame)/span:0.0f; if(frac<0)frac=0; if(frac>1)frac=1; if(L->interp==2) frac=frac*frac*(3.0f-2.0f*frac); }
+            float rotRad = (A->rot + (B->rot - A->rot)*frac) * 0.01745329f;
+            float dsc = ((A->sx + (B->sx - A->sx)*frac) + (A->sy + (B->sy - A->sy)*frac)) / 512.0f;
+            if (dsc > 0.0f) { hw *= dsc; hh *= dsc; }
+            if (rotRad != 0.0f) {
+                float ca = cosf(rotRad), sa = sinf(rotRad);
+                float nRx = Rwx*ca + Uwx*sa, nRy = Rwy*ca + Uwy*sa, nRz = Rwz*ca + Uwz*sa;
+                float nUx = Uwx*ca - Rwx*sa, nUy = Uwy*ca - Rwy*sa, nUz = Uwz*ca - Rwz*sa;
+                Rwx = nRx; Rwy = nRy; Rwz = nRz; Uwx = nUx; Uwy = nUy; Uwz = nUz;
+            }
+        }
+    }
+#endif
+    float cx = s_efbX, cy = s_efbY, cz = s_efbZ;
+    AfnVertex q[4] = {
+        { 0,0, 0xFFFFFFFFu, cx - Rwx*hw + Uwx*hh, cy - Rwy*hw + Uwy*hh, cz - Rwz*hw + Uwz*hh },
+        { 1,0, 0xFFFFFFFFu, cx + Rwx*hw + Uwx*hh, cy + Rwy*hw + Uwy*hh, cz + Rwz*hw + Uwz*hh },
+        { 1,1, 0xFFFFFFFFu, cx + Rwx*hw - Uwx*hh, cy + Rwy*hw - Uwy*hh, cz + Rwz*hw - Uwz*hh },
+        { 0,1, 0xFFFFFFFFu, cx - Rwx*hw - Uwx*hh, cy - Rwy*hw - Uwy*hh, cz - Rwz*hw - Uwz*hh },
+    };
+    AfnVertex* v = q;
+    glMatrixMode(GL_MODELVIEW); glLoadMatrixf(view);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_LIGHTING); glEnable(GL_TEXTURE_2D); glDisable(GL_CULL_FACE);
+    glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_COLOR_ARRAY); glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glTexCoordPointer(2, GL_FLOAT,        sizeof(AfnVertex), &v->u);
+    glColorPointer   (4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &v->color);
+    glVertexPointer  (3, GL_FLOAT,        sizeof(AfnVertex), &v->x);
+    glBindTexture(GL_TEXTURE_2D, s_sprTex[cf]);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glDisableClientState(GL_TEXTURE_COORD_ARRAY); glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_VERTEX_ARRAY);
+    glDisable(GL_BLEND);
+#endif
+}
+
+// HARDCODED: advance the enemy's fired projectile. Runs every frame, independent of
+// the enemy's life/visibility, so a shot always completes (hits the player or
+// expires) even if the enemy dies mid-flight — otherwise the ball freezes forever.
+static void enemy_projectile_tick(float px, float py, float pz) {
+    if (!s_efbActive) return;
+    float tx = px, ty = py + (COL_BOTTOM + COL_TOP) * 0.5f, tz = pz;   // player collision-box center
+    if (s_efbHoming > 0.0f) {
+        float ax = tx - s_efbX, az = tz - s_efbZ, al = sqrtf(ax*ax + az*az); if (al < 1e-3f) al = 1.0f;
+        s_efbDirX += (ax/al - s_efbDirX) * s_efbHoming;
+        s_efbDirZ += (az/al - s_efbDirZ) * s_efbHoming;
+        float nl = sqrtf(s_efbDirX*s_efbDirX + s_efbDirZ*s_efbDirZ); if (nl > 1e-3f) { s_efbDirX/=nl; s_efbDirZ/=nl; }
+    }
+    s_efbX += s_efbDirX * s_efbSpeed; s_efbZ += s_efbDirZ * s_efbSpeed; s_efbY += (ty - s_efbY) * 0.15f;
+    float hx = s_efbX - px, hz = s_efbZ - pz;
+    if (hx*hx + hz*hz <= ENEMY_HIT_R*ENEMY_HIT_R) { afn_health -= s_efbDmg; if (afn_health < 0) afn_health = 0; s_efbActive = 0; }
+    else if (--s_efbLife <= 0) s_efbActive = 0;
+}
+
+// HARDCODED: enemy combat AI state machine. Drives NPC slot i only if it's the enemy.
+static void npc_ai_tick(int i, float px, float py, float pz) {
+    int eidx = (int)afn_npc_inst[i][7];
+    if (eidx != AFN_ENEMY_EIDX) return;
+    if (!s_aiInited) { afn_hp[eidx] = ENEMY_HP_MAX; afn_sprite_visible[eidx] = 1; s_aiState = AI_ROAM; s_aiInited = 1; }
+
+    if (s_aiAtkCD > 0) s_aiAtkCD--;
+    if (s_aiDodgeCD > 0) s_aiDodgeCD--;
+    // Never leave a charge orb hanging: if we're not in CHARGE (e.g. a dodge/de-aggro
+    // interrupted the wind-up), clear it so it stops rendering AND the attack gate
+    // (!s_efbCharging) can fire again. The CHARGE state re-asserts it each frame.
+    if (s_aiState != AI_CHARGE) s_efbCharging = 0;
+
+    // (The fired projectile flies in enemy_projectile_tick(), called every frame
+    //  independent of the enemy — so a shot completes even if the enemy dies.)
+
+    // Death: despawn at 0 HP (player Focus Blast already subtracts afn_hp[eidx]).
+    // Cancel a CHARGING orb, but let an already-fired ball finish its flight.
+    if (s_aiState != AI_DEAD && afn_hp[eidx] <= 0) { s_aiState = AI_DEAD; afn_sprite_visible[eidx] = 0; s_efbCharging = 0; return; }
+    if (s_aiState == AI_DEAD) return;
+
+    float dx = px - s_npcX[i], dz = pz - s_npcZ[i];
+    float dist = sqrtf(dx*dx + dz*dz);
+    float toYaw = atan2f(dx, dz) * (180.0f / 3.14159265f);
+
+    // Detect / de-aggro.
+    if (s_aiState == AI_ROAM) {
+        if (dist <= ENEMY_DETECT_RANGE) { s_aiState = AI_CHASE; s_aiLoseT = 0; s_aiAtkCD = ENEMY_ATK_CD / 2; }
+        else {
+#ifdef AFN_HAS_NAVMESH
+            s_npcClip[i] = s_npcNavMoving[i] ? 29 : 25;   // walk (Move) while wandering, else Idle
+#endif
+            return;   // keep wandering — nav drives motion
+        }
+    } else {
+        if (dist > ENEMY_LOSE_RANGE) { if (++s_aiLoseT >= ENEMY_LOSE_FRAMES) { s_aiState = AI_ROAM; s_npcClip[i] = -1; return; } }
+        else s_aiLoseT = 0;
+    }
+
+    // Face the player every combat frame (the "lock-on", no reticle).
+    { float diff = toYaw - s_npcYaw[i]; while (diff > 180.0f) diff -= 360.0f; while (diff < -180.0f) diff += 360.0f; s_npcYaw[i] += diff * ENEMY_YAW_EASE; }
+
+    // Dodge interrupt: the player's Focus Blast is homing this NPC and getting close.
+    if (s_eDodgeFrames == 0 && s_aiDodgeCD == 0 && afn_fb_active && afn_fb_tgt == eidx) {
+        float fdx = s_npcX[i] - afn_fb_x, fdz = s_npcZ[i] - afn_fb_z;
+        if (fdx*fdx + fdz*fdz <= ENEMY_DODGE_TRIGGER_D*ENEMY_DODGE_TRIGGER_D && ai_chance(ENEMY_DODGE_CHANCE)) {
+            float pl = dist > 1e-3f ? dist : 1.0f, fx = dx/pl, fz = dz/pl, rx = fz, rz = -fx;
+            int side = ai_chance(0.5f) ? 1 : -1;
+            s_eDodgeDX = rx * side; s_eDodgeDZ = rz * side;
+            s_eDodgeClip = side > 0 ? 24 : 23;   // DodgeL / DodgeR
+            s_eDodgeFrames = s_eDodgeTotal = ENEMY_DODGE_FRAMES; s_aiDodgeCD = ENEMY_DODGE_CD; s_aiState = AI_DODGE;
+        }
+    }
+
+    // Dodge roll integration (owns the frame while rolling).
+    if (s_eDodgeFrames > 0) {
+        int el = s_eDodgeTotal - s_eDodgeFrames; float env = 1.0f;
+        if (el < ENEMY_DODGE_RAMP) { float t = (float)el / ENEMY_DODGE_RAMP; env = t*t; }
+        else if (s_eDodgeFrames < ENEMY_DODGE_RAMP) { float t = (float)s_eDodgeFrames / ENEMY_DODGE_RAMP; env = t*t; }
+        float sp = ENEMY_DODGE_SPEED * 0.08f * env;
+        s_npcX[i] += s_eDodgeDX * sp; s_npcZ[i] += s_eDodgeDZ * sp;
+        collide_walls(&s_npcX[i], &s_npcZ[i], s_npcY[i]);
+        s_npcClip[i] = s_eDodgeClip;
+        if (--s_eDodgeFrames == 0 && s_aiState == AI_DODGE) { s_aiState = AI_STRAFE; s_aiStrafeLeg = ENEMY_STRAFE_LEG; }
+        return;
+    }
+
+    if (s_aiState == AI_CHASE) {
+        s_npcClip[i] = 29;   // Move
+        float pl = dist > 1e-3f ? dist : 1.0f, sp = ENEMY_MOVE_SPEED;
+        s_npcX[i] += dx/pl * sp; s_npcZ[i] += dz/pl * sp;
+        collide_walls(&s_npcX[i], &s_npcZ[i], s_npcY[i]);
+        if (dist <= ENEMY_PREF_DIST + 30.0f) { s_aiState = AI_STRAFE; s_aiStrafeLeg = ENEMY_STRAFE_LEG; }
+    }
+    else if (s_aiState == AI_STRAFE) {
+        static const int eStrafe[8] = { 29,32,30,34,18,31,33,35 };   // {Fwd,FwdR,R,BackR,Back,BackL,L,FwdL}
+        if (--s_aiStrafeLeg <= 0) { s_aiStrafeDir = ai_chance(0.5f) ? 1 : -1; s_aiStrafeLeg = ENEMY_STRAFE_LEG; }
+        float ey = s_npcYaw[i] * DEG2RAD;
+        float efx = sinf(ey), efz = cosf(ey), erx = cosf(ey), erz = -sinf(ey);
+        float radial = (dist - ENEMY_PREF_DIST) * ENEMY_RANGE_K; if (radial > 1.0f) radial = 1.0f; if (radial < -1.0f) radial = -1.0f;
+        float wdx = erx * (float)s_aiStrafeDir + efx * radial;
+        float wdz = erz * (float)s_aiStrafeDir + efz * radial;
+        float inF = wdx*efx + wdz*efz, inR = wdx*erx + wdz*erz;
+        int so = ((int)lroundf(atan2f(inR, inF) / 0.7853982f) + 8) & 7;
+        s_npcClip[i] = eStrafe[so];
+        float ml = sqrtf(wdx*wdx + wdz*wdz);
+        if (ml > 1e-3f) { float sp = ENEMY_MOVE_SPEED; s_npcX[i] += wdx/ml*sp; s_npcZ[i] += wdz/ml*sp; collide_walls(&s_npcX[i], &s_npcZ[i], s_npcY[i]); }
+        if (s_aiAtkCD == 0 && !s_efbActive && !s_efbCharging) {
+            s_aiChargeShot = ai_chance(ENEMY_CHARGE_PROB);
+            s_aiTimer = s_aiChargeShot ? ENEMY_CHARGE_WINDUP : ENEMY_TAP_WINDUP;
+            s_efbScale = ENEMY_TAP_SCALE; s_efbCharging = 1; s_aiState = AI_CHARGE;
+        }
+    }
+    else if (s_aiState == AI_CHARGE) {
+        s_npcClip[i] = 1;   // atk_spc_chg (charge pose)
+        s_efbCharging = 1;
+        float mx, my, mz; enemy_muzzle(i, &mx, &my, &mz);   // true bone anchor (focus_gfx bone)
+        s_efbX = mx; s_efbY = my; s_efbZ = mz;
+        float tgt = s_aiChargeShot ? ENEMY_CHG_SCALE : ENEMY_TAP_SCALE;
+        s_efbScale += (tgt - s_efbScale) * 0.2f;
+        if (--s_aiTimer <= 0) {
+            float ddx = px - mx, ddz = pz - mz, dl = sqrtf(ddx*ddx + ddz*ddz); if (dl < 1e-3f) dl = 1.0f;
+            s_efbDirX = ddx/dl; s_efbDirZ = ddz/dl;
+            s_efbX = mx + s_efbDirX*8.0f; s_efbZ = mz + s_efbDirZ*8.0f; s_efbY = my;
+            if (s_aiChargeShot) { s_efbDmg = ENEMY_CHG_DMG; s_efbSpeed = ENEMY_CHG_SPEED; s_efbScale = ENEMY_CHG_SCALE; s_efbHoming = ENEMY_CHG_HOMING; }
+            else                { s_efbDmg = ENEMY_TAP_DMG; s_efbSpeed = ENEMY_TAP_SPEED; s_efbScale = ENEMY_TAP_SCALE; s_efbHoming = 0.0f; }
+            s_efbActive = 1; s_efbCharging = 0; s_efbLife = ENEMY_SHOT_LIFE;
+            s_aiAtkCD = ENEMY_ATK_CD; s_aiState = AI_FIRE; s_aiTimer = ENEMY_FIRE_RECOVER;
+        }
+    }
+    else if (s_aiState == AI_FIRE) {
+        s_npcClip[i] = 16;   // atk_spc_lnc (fire/recover)
+        if (--s_aiTimer <= 0) { s_aiState = AI_STRAFE; s_aiStrafeLeg = ENEMY_STRAFE_LEG; }
+    }
+}
 // HUD anim layer state — node-driven (PlayHudAnim resets+activates,
 // StopHudAnim deactivates, SetHudAnimSpeed overrides). hud_render advances
 // active layers and evaluates the keyframe transform at the layer's frame.
@@ -1451,6 +1759,24 @@ static void hud_quad(GLuint tex, float x0, float y0, float x1, float y1,
     glDisableClientState(GL_TEXTURE_COORD_ARRAY);
     glDisableClientState(GL_COLOR_ARRAY);
     glDisableClientState(GL_VERTEX_ARRAY);
+}
+
+// HARDCODED: untextured solid-color quad in HUD coords (for the enemy HP bar).
+static void hud_solid_quad(float x0, float y0, float x1, float y1, unsigned int col) {
+    AfnVertex q[4] = {
+        { 0,0, col, x0, y0, 0 }, { 0,0, col, x1, y0, 0 },
+        { 0,0, col, x1, y1, 0 }, { 0,0, col, x0, y1, 0 },
+    };
+    AfnVertex* v = q;
+    glDisable(GL_TEXTURE_2D);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    glColorPointer (4, GL_UNSIGNED_BYTE, sizeof(AfnVertex), &v->color);
+    glVertexPointer(3, GL_FLOAT,         sizeof(AfnVertex), &v->x);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+    glDisableClientState(GL_COLOR_ARRAY);
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glEnable(GL_TEXTURE_2D);
 }
 
 // Draw a string at (x,y) in HUD coords; returns the pen x after the string.
@@ -1846,6 +2172,23 @@ static void hud_render(void) {
             float x = xp->x + (xp->tox - xp->x) * prog, y = xp->y + (xp->toy - xp->y) * prog;
             float w = xp->w + (xp->tow - xp->w) * prog, h = xp->h + (xp->toh - xp->h) * prog;
             hud_quad(s_hudTex[xp->tex], x, y, x + w, y + h, 0, 0, 1, 1, col);
+        }
+    }
+#endif
+#if defined(AFN_HAS_PLAYER_RIG) && defined(AFN_HAS_NAVMESH)
+    // HARDCODED: floating HP bar above the living enemy NPC.
+    if (afn_sprite_visible[AFN_ENEMY_EIDX] && afn_hp[AFN_ENEMY_EIDX] > 0) {
+        for (int n = 0; n < AFN_NPC_COUNT; n++) {
+            if ((int)afn_npc_inst[n][7] != AFN_ENEMY_EIDX) continue;
+            float sx, sy, depth;
+            if (hud_project(s_npcX[n], s_npcY[n] + ENEMY_BAR_HEIGHT, s_npcZ[n], &sx, &sy, &depth)) {
+                float w = ENEMY_BAR_W, h = ENEMY_BAR_H, x0 = sx - w*0.5f, y0 = sy - h*0.5f;
+                float fr = (float)afn_hp[AFN_ENEMY_EIDX] / (float)ENEMY_HP_MAX; if (fr < 0) fr = 0; if (fr > 1) fr = 1;
+                hud_solid_quad(x0 - 2, y0 - 2, x0 + w + 2, y0 + h + 2, 0xE0000000u);  // border/bg
+                hud_solid_quad(x0, y0, x0 + w, y0 + h, 0xFF202020u);                  // empty track
+                hud_solid_quad(x0, y0, x0 + w * fr, y0 + h, 0xFF2828E6u);             // red fill
+            }
+            break;
         }
     }
 #endif
@@ -2399,7 +2742,12 @@ int main(void)
                 if (afn_fb_tgt >= 0) {
                     for (int n = 0; n < AFN_NPC_COUNT; n++)
                         if ((int)afn_npc_inst[n][7] == afn_fb_tgt) {
-                            tx = s_npcX[n]; tz = s_npcZ[n]; ty = s_npcY[n] + 12.0f; homing = 1; break;
+                            // Aim at the collision-box CENTER (origin + authored offset),
+                            // not the origin/feet — so the orb tracks the model's middle.
+                            tx = s_npcX[n] + afn_npc_col[n][3];
+                            ty = s_npcY[n] + afn_npc_col[n][4];
+                            tz = s_npcZ[n] + afn_npc_col[n][5];
+                            homing = 1; break;
                         }
                 }
                 if (!homing) { tx = afn_fb_x + afn_fb_dirx*100.0f; tz = afn_fb_z + afn_fb_dirz*100.0f; ty = afn_fb_y; }
@@ -2620,9 +2968,11 @@ int main(void)
         {
             int savedFloorSpr = afn_floor_sprite;
             float ng = afn_gravity / 256.0f, nterm = afn_terminal_vel / 256.0f;
+            enemy_projectile_tick(playerX, playerY, playerZ);   // HARDCODED: fired ball flies even if the enemy is gone
             for (int i = 0; i < AFN_NPC_COUNT; i++) {
                 int eidx = (int)afn_npc_inst[i][7];
                 if (eidx >= 0 && eidx < NUM_SPRITES && !afn_sprite_visible[eidx]) continue;
+                npc_ai_tick(i, playerX, playerY, playerZ);   // HARDCODED: enemy combat AI
                 // True box: half-extents (hx,hy,hz) + center offset (cx,cy,cz),
                 // all in world px relative to the NPC origin. Y rests the box
                 // bottom (cy-hy) on the floor.
@@ -2639,6 +2989,7 @@ int main(void)
                 s_npcNavMoving[i] = 0;
                 {
                     int   mode  = (int)afn_npc_nav[i][0];
+                    if (eidx == AFN_ENEMY_EIDX && s_aiState != AI_ROAM) mode = 0;   // HARDCODED: AI drives motion in combat
                     float speed = afn_npc_nav[i][1];
                     float stopD = afn_npc_nav[i][2];
                     int   repat = (int)afn_npc_nav[i][3];
@@ -3080,6 +3431,9 @@ int main(void)
 
 #ifdef AFN_HAS_SPRITES
         billboards_render(view, camAngle, ex, ez);   // camera-facing animated/directional sprites
+#endif
+#ifdef AFN_HAS_PLAYER_RIG
+        enemy_orb_render(view);   // HARDCODED: enemy projectile orb (charge spot / in flight)
 #endif
 
         }   // end 3D world (skipped in 2D menu mode)
