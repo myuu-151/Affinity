@@ -504,6 +504,43 @@ enum class AfnScriptNodeType : int {
     SpendChargeEnergy, // action: subtract energy scaled by charge level (Min%..Max% over 0..100% charge)
     IsNotCharging,   // gate: passes exec while NO Charge Shot is charging (inverse of Is Charging)
     CycleHudValue,   // action: afn_hud_value[slot] = (val + delta) wrapped to [0,count)
+    OrbitCameraOnObject, // action: orbit the camera around a target object (KO/death cinematic)
+    HoldSkelClip,    // action: play a rig clip on an NPC once and freeze the last frame (die collapse)
+    IsHealthZero,    // gate: passes exec while the player's health resource is <= 0
+    FadeInHudElement, // action: show a HUD element + crossfade its alpha 0->full over N frames
+    IsHudVisible,    // gate: passes exec while a given HUD element slot is visible
+    StopMusic,       // action: stop ONLY the persistent music track, leaving SFX ringing
+    LoopHudAnim,     // action: keep a HUD element's anim layers active + looping (re-arm per frame)
+    BeamClash,       // action: enable the beam-clash mechanic + set its tunables (runtime clash_sense)
+    IsClashReady,    // gate: passes exec while the runtime senses both full beams meeting
+    SuppressBeams,   // action: kill both in-flight projectiles (player + enemy)
+    ClashBegin,      // action: start a clash — centre the balance, reset, suppress beams
+    ClashPush,       // action: player's Cross tap pushes the clash balance toward the enemy
+    ClashAiStep,     // action: one struggle step — AI mash, clamp, mash-SFX pitch, button flash
+    IsClashWon,      // gate: clash balance pushed fully to the enemy (>= 1.0)
+    IsClashLost,     // gate: clash balance pushed fully into the player's zone (<= 0.0)
+    // --- Enemy combat AI (enemy BP) ---
+    IsAiState,       // gate: enemy AI state == param
+    IsPlayerWithin,  // gate: distance to player <= Range
+    IsPlayerBeyond,  // gate: distance to player > Range
+    IsAiFlag,        // gate: an enemy-AI per-frame flag (param selects which) is set
+    SetAiState,      // action: set the enemy AI state = param
+    AiSense,         // action: per-frame sense (slot/death/dist/face/cooldowns/flags)
+    AiRoam,          // action: ROAM clip (nav drives motion)
+    AiChase,         // action: close toward the player
+    AiStrafe,        // action: orbit the player at preferred distance
+    AiDodgeBegin,    // action: start a side-roll dodge
+    AiDodgeStep,     // action: integrate the dodge roll
+    AiChargeBegin,   // action: start a shot wind-up (charge vs tap)
+    AiChargeStep,    // action: grow the charge orb at the muzzle
+    AiFireBeam,      // action: launch the projectile
+    AiFireRecover,   // action: fire-recovery clip + timer
+    EnemyAI,         // action: enable the enemy AI + set its tunables
+    OrbitCamStep,    // action: advance the orbit-cam timer one frame (node-driven orbit)
+    StopOrbitCam,    // action: end the orbit cam (afn_cam_orbit_active = 0)
+    StepEnemyBeam,   // action: advance the enemy's in-flight projectile (flight + hit)
+    StepFocusBlast,  // action: advance the player's in-flight Focus Blast (flight + hit)
+    ShowHPBar,       // action: raise the floating HP bar for an object this frame
     COUNT
 };
 

@@ -363,6 +363,20 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    afn_skel_anim_obj = " << obj << "; afn_skel_anim_clip = " << clip << ";\n";
                 break;
             }
+            case AfnScriptNodeType::HoldSkelClip: {
+                // Like SetSkelAnim, but the NPC plays the clip ONCE and freezes the
+                // last frame (a die-collapse). Object = an Object, or Attached Sprite
+                // (self). Wire On Update + Is HP Zero(self) to it.
+                auto* objData  = findDataIn(a->id, 0);
+                auto* clipData = findDataIn(a->id, 1);
+                int clip = clipData ? resolveInt(clipData) : 0;
+                if (objData && objData->type == AfnScriptNodeType::AttachedSprite)
+                    f << "    afn_skel_anim_obj = afn_bp_cur_spr_idx;";
+                else
+                    f << "    afn_skel_anim_obj = " << (objData ? resolveInt(objData) : 0) << ";";
+                f << " afn_skel_anim_clip = " << clip << "; afn_skel_anim_hold = 1;\n";
+                break;
+            }
             case AfnScriptNodeType::FreezePlayer:
                 f << "    afn_player_frozen = 1; afn_play_anim = -1;\n";
                 break;
@@ -490,6 +504,38 @@ void EmitNodeScriptBodies(std::ostream& f,
             }
             case AfnScriptNodeType::IsNotLockedOn:
                 f << "    if (afn_cam_lock_target < 0) {\n"; break;
+            case AfnScriptNodeType::DoOnce:
+                // Fire downstream only the FIRST time exec reaches here this session.
+                // A per-node static latch (zero-initialized at program start), set on
+                // the first pass; the isGate path closes the brace after the downstream.
+                f << "    static int afn_do_" << a->id << " = 0;\n";
+                f << "    if (!afn_do_" << a->id << " && (afn_do_" << a->id << " = 1)) {\n";
+                break;
+            case AfnScriptNodeType::IsHealthZero:
+                f << "    if (afn_health <= 0) {\n"; break;
+            case AfnScriptNodeType::FadeInHudElement: {
+                // Show a HUD element and crossfade its alpha in over N frames.
+                auto* elemD = findDataIn(a->id, 0);
+                auto* frD   = findDataIn(a->id, 1);
+                int elem = elemD ? resolveInt(elemD) : 0;
+                int fr   = frD   ? resolveInt(frD)   : 60;
+                f << "    afn_hud_visible[" << elem << "] = 1; afn_hud_elem_fade[" << elem << "] = 0;\n";
+                f << "    afn_hud_fade_len[" << elem << "] = " << fr << "; afn_hud_fade_dur[" << elem << "] = " << fr << ";\n";
+                break;
+            }
+            case AfnScriptNodeType::IsHPZero: {
+                // Gate: the target sprite's HP <= 0. Object pin = an Object, or
+                // Attached Sprite (self) — guarded so an unresolved self never
+                // indexes afn_hp[-1].
+                auto* tv = findDataIn(a->id, 0);
+                if (tv && tv->type == AfnScriptNodeType::AttachedSprite)
+                    f << "    if (afn_bp_cur_spr_idx >= 0 && afn_hp[afn_bp_cur_spr_idx] <= 0) {\n";
+                else {
+                    int o = tv ? resolveInt(tv) : -1;
+                    f << "    if (" << o << " >= 0 && afn_hp[" << o << "] <= 0) {\n";
+                }
+                break;
+            }
             case AfnScriptNodeType::DashToTarget: {
                 // Bullet-punch lunge (PSV, AFN_HAS_CAM_LOCK): capture the
                 // current lock target and burst toward it for N frames.
@@ -997,6 +1043,125 @@ void EmitNodeScriptBodies(std::ostream& f,
                 }
                 break;
             }
+            case AfnScriptNodeType::SuppressBeams:
+                f << "    afn_clash_suppress_beams();\n";
+                break;
+            case AfnScriptNodeType::SetAiState: {
+                auto* sd = findDataIn(a->id, 0); int st = sd ? resolveInt(sd) : 0;
+                f << "    afn_ai_state = " << st << ";\n";
+                break;
+            }
+            case AfnScriptNodeType::AiSense:       f << "    afn_ai_sense();\n"; break;
+            case AfnScriptNodeType::AiRoam:        f << "    afn_ai_roam();\n"; break;
+            case AfnScriptNodeType::AiChase:       f << "    afn_ai_chase();\n"; break;
+            case AfnScriptNodeType::AiStrafe:      f << "    afn_ai_strafe();\n"; break;
+            case AfnScriptNodeType::AiDodgeBegin:  f << "    afn_ai_dodge_begin();\n"; break;
+            case AfnScriptNodeType::AiDodgeStep:   f << "    afn_ai_dodge_step();\n"; break;
+            case AfnScriptNodeType::AiChargeBegin: f << "    afn_ai_charge_begin();\n"; break;
+            case AfnScriptNodeType::AiChargeStep:  f << "    afn_ai_charge_step();\n"; break;
+            case AfnScriptNodeType::AiFireBeam:    f << "    afn_ai_fire_beam();\n"; break;
+            case AfnScriptNodeType::AiFireRecover: f << "    afn_ai_fire_recover();\n"; break;
+            case AfnScriptNodeType::OrbitCamStep:
+                f << "    afn_cam_orbit_timer++;   // advance the node-driven orbit\n";
+                break;
+            case AfnScriptNodeType::StopOrbitCam:
+                f << "    afn_cam_orbit_active = 0;   // end the orbit cam\n";
+                break;
+            case AfnScriptNodeType::StepEnemyBeam:
+                f << "    afn_enemy_beam_step();   // advance the enemy projectile (flight + hit)\n";
+                break;
+            case AfnScriptNodeType::StepFocusBlast:
+                f << "    afn_focus_blast_step();  // advance the player Focus Blast (flight + hit)\n";
+                break;
+            case AfnScriptNodeType::ShowHPBar: {
+                // Raise the floating HP bar for an object this frame (per-frame flag).
+                auto* od = findDataIn(a->id, 0); auto* md = findDataIn(a->id, 1);
+                int mx = md ? resolveInt(md) : 100;
+                f << "    afn_hpbar_active = 1; afn_hpbar_max = " << mx << ";\n";
+                if (od && od->type == AfnScriptNodeType::AttachedSprite)
+                    f << "    afn_hpbar_obj = afn_bp_cur_spr_idx;\n";
+                else
+                    f << "    afn_hpbar_obj = " << (od ? resolveInt(od) : -1) << ";\n";
+                break;
+            }
+            case AfnScriptNodeType::EnemyAI: {
+                // Enable the enemy AI + feed tunables. Defaults match the #defines.
+                auto* d0=findDataIn(a->id,0); auto* d1=findDataIn(a->id,1); auto* d2=findDataIn(a->id,2);
+                auto* d3=findDataIn(a->id,3); auto* d4=findDataIn(a->id,4); auto* d5=findDataIn(a->id,5);
+                auto* d6=findDataIn(a->id,6);
+                f << "    afn_ai_enabled = 1;\n";
+                f << "    afn_ai_detect_r = " << (d0?resolveInt(d0):60) << "; afn_ai_lose_r = " << (d1?resolveInt(d1):95)
+                  << "; afn_ai_pref_r = " << (d2?resolveInt(d2):22) << ";\n";
+                f << "    afn_ai_atkcd = " << (d3?resolveInt(d3):80) << "; afn_ai_chargeprob = " << (d4?resolveInt(d4):40)
+                  << "; afn_ai_dodgeprob = " << (d5?resolveInt(d5):70) << "; afn_ai_movespd_m = " << (d6?resolveInt(d6):800) << ";\n";
+                break;
+            }
+            case AfnScriptNodeType::ClashBegin:
+                f << "    afn_clash_begin();\n";
+                break;
+            case AfnScriptNodeType::ClashPush:
+                // Player Cross tap -> push the balance toward the enemy. Uses the
+                // Beam Clash node's Player Push tunable (afn_clash_push_m, x1000).
+                f << "    afn_clash_balance += afn_clash_push_m * 0.001f;\n";
+                break;
+            case AfnScriptNodeType::ClashAiStep:
+                f << "    afn_clash_ai_step();\n";
+                break;
+            case AfnScriptNodeType::SetHP: {
+                // afn_hp[obj] = HP. Object pin = an Object or Attached Sprite (self).
+                auto* tv = findDataIn(a->id, 0);
+                auto* hv = findDataIn(a->id, 1);
+                std::string hp = hv ? emitIntExpr(hv) : "0";
+                if (tv && tv->type == AfnScriptNodeType::AttachedSprite)
+                    f << "    if (afn_bp_cur_spr_idx >= 0) afn_hp[afn_bp_cur_spr_idx] = " << hp << ";\n";
+                else {
+                    int o = tv ? resolveInt(tv) : -1;
+                    f << "    if (" << o << " >= 0) afn_hp[" << o << "] = " << hp << ";\n";
+                }
+                break;
+            }
+            case AfnScriptNodeType::BeamClash: {
+                // Enable the beam-clash mechanic and feed its tunables. The mechanic
+                // (detect both full beams meeting -> 2D struggle -> mash vs AI ->
+                // resolve to enemy KO / player death) stays in the runtime clash_tick;
+                // this just flips it on + sets the feel knobs each frame. Push values
+                // are x1000, Full Charge is a %, so the int data pins carry fractions.
+                auto* d0 = findDataIn(a->id, 0); auto* d1 = findDataIn(a->id, 1);
+                auto* d2 = findDataIn(a->id, 2); auto* d3 = findDataIn(a->id, 3);
+                auto* d4 = findDataIn(a->id, 4);
+                int fullPct = d0 ? resolveInt(d0) : 85;
+                int pPush   = d1 ? resolveInt(d1) : 60;
+                int aiPush  = d2 ? resolveInt(d2) : 50;
+                int aiMin   = d3 ? resolveInt(d3) : 6;
+                int meetR   = d4 ? resolveInt(d4) : 18;
+                f << "    afn_clash_enabled = 1;\n";
+                f << "    afn_clash_full_pct = " << fullPct << "; afn_clash_push_m = " << pPush
+                  << "; afn_clash_ai_push_m = " << aiPush << ";\n";
+                f << "    afn_clash_ai_min = " << aiMin << "; afn_clash_meet_r = " << meetR << ";\n";
+                break;
+            }
+            case AfnScriptNodeType::StopMusic:
+                // Stop ONLY the persistent music track; one-shot SFX keep ringing
+                // (e.g. a clash 'win_clash' under the victory fanfare).
+                f << "    afn_stop_music();\n";
+                break;
+            case AfnScriptNodeType::LoopHudAnim: {
+                // Keep a HUD element's anim layers active + looping. Driven every
+                // frame (On Update -> Is Hud Visible -> Loop Hud Anim): re-arms each
+                // layer and rewinds it once it passes its length, so an authored
+                // layer that isn't flagged Loop still blinks continuously (menu cursor).
+                auto* ed = findDataIn(a->id, 0);
+                int elem = ed ? resolveInt(ed) : 0;
+                f << "#ifdef AFN_HAS_HUD_ANIM\n";
+                f << "    { const AfnHudElem* _le = &afn_hud_elems[" << elem << "];\n";
+                f << "      for (int _lk = 0; _lk < _le->pieceCount; _lk++) {\n";
+                f << "        int _ll = afn_hud_piece_layer[_le->pieceStart + _lk]; if (_ll < 0) continue;\n";
+                f << "        afn_hud_layer_active[_ll] = 1;\n";
+                f << "        if (afn_hud_layer[_ll].length > 0 && afn_hud_layer_frame[_ll] >= afn_hud_layer[_ll].length) {\n";
+                f << "          afn_hud_layer_frame[_ll] = 0; afn_hud_layer_tick[_ll] = 0; } } }\n";
+                f << "#endif\n";
+                break;
+            }
             case AfnScriptNodeType::StopHudAnim: {
                 int li = remapLayer(a->paramInt[0]), cnt = remapCount(a->paramInt[0]);
                 if (li < 0) break;
@@ -1089,6 +1254,33 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "#endif\n";
                 break;
             }
+            case AfnScriptNodeType::OrbitCameraOnObject: {
+                // KO/death cinematic: orbit the camera around the Target (an Object,
+                // or Attached Sprite = the BP owner "self"; unwired in a BP = self).
+                // Runs until the scene swaps (or a future Release Camera node).
+                auto* tgt = findDataIn(a->id, 0);
+                f << "#ifdef AFN_HAS_SPRITE_IDX\n";
+                if (tgt && tgt->type != AfnScriptNodeType::AttachedSprite)
+                    f << "    afn_cam_orbit_obj = " << resolveInt(tgt) << ";\n";
+                else if (curScript != &script || (tgt && tgt->type == AfnScriptNodeType::AttachedSprite))
+                    f << "    afn_cam_orbit_obj = afn_bp_cur_spr_idx;\n";
+                else
+                    f << "    afn_cam_orbit_obj = -1;\n";   // no target -> orbit the player
+                f << "    afn_cam_orbit_angle0 = orbit_angle * (6.2831853f / 65536.0f);\n";
+                f << "    afn_cam_orbit_timer = 0;\n";
+                f << "    afn_cam_orbit_active = 1;\n";
+                // Tunable data pins (defaults preserve the KO feel): Zoom % of cam
+                // distance, Orbit Speed (milli-rad/frame), Pitch (centi-rad).
+                { auto* z = findDataIn(a->id, 1); auto* sp = findDataIn(a->id, 2); auto* pi = findDataIn(a->id, 3);
+                  auto* ez = findDataIn(a->id, 4); auto* lh = findDataIn(a->id, 5);
+                  f << "    afn_cam_orbit_zoom_pct = " << (z  ? resolveInt(z)  : 45) << ";\n";
+                  f << "    afn_cam_orbit_rate_mr  = " << (sp ? resolveInt(sp) : 12) << ";\n";
+                  f << "    afn_cam_orbit_pitch_cr = " << (pi ? resolveInt(pi) : 32) << ";\n";
+                  f << "    afn_cam_orbit_ease_pm  = " << (ez ? resolveInt(ez) : 60) << ";\n";
+                  f << "    afn_cam_orbit_lookh    = " << (lh ? resolveInt(lh) : 0)  << ";\n"; }
+                f << "#endif\n";
+                break;
+            }
             case AfnScriptNodeType::LockStrafe: {
                 // Z-targeting movement: only does anything while a Lock On
                 // target is active (afn_cam_lock_target >= 0).
@@ -1151,6 +1343,9 @@ void EmitNodeScriptBodies(std::ostream& f,
                    t == AfnScriptNodeType::IsNotCharging ||
                    t == AfnScriptNodeType::IsFiring ||
                    t == AfnScriptNodeType::HasEnergy ||
+                   t == AfnScriptNodeType::IsHPZero ||
+                   t == AfnScriptNodeType::IsHealthZero ||
+                   t == AfnScriptNodeType::DoOnce ||
                    t == AfnScriptNodeType::IsInView;
         };
         auto walkExec = [&](int nodeId, int pinIdx) {
@@ -1220,6 +1415,30 @@ void EmitNodeScriptBodies(std::ostream& f,
                 f << "    } }\n";
                 return;
             }
+            if (a->type == AfnScriptNodeType::Delay) {
+                // Non-blocking one-shot: fires downstream once, <Frames> frames after
+                // the upstream gate (re)opens. Self-rearming via frame-count latching
+                // (same idiom as OnRise) so it needs NO external reset — while the gate
+                // keeps exec reaching it the start stays latched; when the gate closes
+                // for >1 frame and later reopens (e.g. the next battle) it relatches and
+                // fires fresh. Drive it from a persistent gate (IsTrue/IsHPZero/...), not
+                // a one-frame edge like OnRise.
+                auto* dData = findDataIn(a->id, 0);
+                int frames = dData ? resolveInt(dData) : 60;
+                // _last = last frame this node was reached, _start = frame the current
+                // open-streak began, _fired = one-shot latch. A gap of >1 frame since
+                // the last reach means the gate closed and reopened (next battle) -> new
+                // streak + re-arm. Fires once when the streak reaches <frames> (>=, so a
+                // dropped frame can't skip past it). NOTE: _start must be SEPARATE from
+                // _last — a single var conflates them and the count never accumulates.
+                f << "    { static int afn_dll_" << a->id << " = -1000000; static int afn_dls_" << a->id << " = 0; static int afn_dlf_" << a->id << " = 0;\n";
+                f << "      if (afn_frame_count - afn_dll_" << a->id << " > 1) { afn_dls_" << a->id << " = afn_frame_count; afn_dlf_" << a->id << " = 0; }\n";
+                f << "      afn_dll_" << a->id << " = afn_frame_count;\n";
+                f << "      if (!afn_dlf_" << a->id << " && afn_frame_count - afn_dls_" << a->id << " >= " << frames << ") { afn_dlf_" << a->id << " = 1;\n";
+                walkExec(a->id, 0);
+                f << "    } }\n";
+                return;
+            }
             if (a->type == AfnScriptNodeType::Branch) {
                 // If/Else: condition data input -> True (pin 0) / False (pin 1).
                 auto* cd = findDataIn(a->id, 0);
@@ -1238,6 +1457,65 @@ void EmitNodeScriptBodies(std::ostream& f,
                 auto* cd = findDataIn(a->id, 0);
                 std::string cond = cd ? emitIntExpr(cd) : (a->paramInt[0] ? "1" : "0");
                 f << "    if (" << cond << ") {\n";
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            if (a->type == AfnScriptNodeType::IsClashReady) {
+                f << "    if (afn_clash_ready) {\n";   // runtime clash_sense set this
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            if (a->type == AfnScriptNodeType::IsClashWon) {
+                f << "    if (afn_clash_balance >= 1.0f) {\n";   // pushed to the enemy
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            if (a->type == AfnScriptNodeType::IsClashLost) {
+                f << "    if (afn_clash_balance <= 0.0f) {\n";   // pushed into your zone
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            if (a->type == AfnScriptNodeType::IsAiState) {
+                auto* sd = findDataIn(a->id, 0); int st = sd ? resolveInt(sd) : 0;
+                f << "    if (afn_ai_state == " << st << ") {\n";
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            if (a->type == AfnScriptNodeType::IsPlayerWithin) {
+                auto* rd = findDataIn(a->id, 0); int r = rd ? resolveInt(rd) : 60;
+                f << "    if (afn_ai_dist <= " << r << ".0f) {\n";
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            if (a->type == AfnScriptNodeType::IsPlayerBeyond) {
+                auto* rd = findDataIn(a->id, 0); int r = rd ? resolveInt(rd) : 95;
+                f << "    if (afn_ai_dist > " << r << ".0f) {\n";
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            if (a->type == AfnScriptNodeType::IsAiFlag) {
+                // Flag selector (wired Int): 0=lose_ready 1=dodge_ready 2=can_fire
+                // 3=charge_done 4=dodge_done 5=fire_done 6=reached.
+                static const char* flagN[7] = { "lose_ready","dodge_ready","can_fire","charge_done","dodge_done","fire_done","reached" };
+                auto* fd = findDataIn(a->id, 0); int fi = fd ? resolveInt(fd) : 0; if (fi < 0 || fi > 6) fi = 0;
+                f << "    if (afn_ai_" << flagN[fi] << ") {\n";
+                walkExec(a->id, 0);
+                f << "    }\n";
+                return;
+            }
+            if (a->type == AfnScriptNodeType::IsHudVisible) {
+                // Gate: pass exec while the given HUD element slot is visible. Used to
+                // scope menu cursor-nav/confirm to the frames the menu is actually up.
+                auto* sd = findDataIn(a->id, 0);
+                int slot = sd ? resolveInt(sd) : 0;
+                f << "    if (afn_hud_visible[" << slot << "]) {\n";
                 walkExec(a->id, 0);
                 f << "    }\n";
                 return;
@@ -1289,6 +1567,9 @@ void EmitNodeScriptBodies(std::ostream& f,
                            a->type == AfnScriptNodeType::IsNotCharging ||
                            a->type == AfnScriptNodeType::IsFiring ||
                            a->type == AfnScriptNodeType::HasEnergy ||
+                           a->type == AfnScriptNodeType::IsHPZero ||
+                           a->type == AfnScriptNodeType::IsHealthZero ||
+                           a->type == AfnScriptNodeType::DoOnce ||
                            a->type == AfnScriptNodeType::IsInView);
             if (isGate) {
                 bool wasJump = inJumpGate;

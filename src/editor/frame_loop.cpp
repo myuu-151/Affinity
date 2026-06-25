@@ -848,6 +848,43 @@ enum class VsNodeType : int {
     SpendChargeEnergy, // action: subtract energy scaled by charge level (Min%..Max% over 0..100% charge)
     IsNotCharging,   // gate: passes exec while NO Charge Shot is charging (inverse of Is Charging)
     CycleHudValue,   // action: afn_hud_value[slot] = (val + delta) wrapped to [0,count) — for cycling pickers
+    OrbitCameraOnObject, // action: orbit the camera around a target object (KO/death cinematic)
+    HoldSkelClip,    // action: play a rig clip on an NPC once and freeze the last frame (die collapse)
+    IsHealthZero,    // gate: passes exec while the player's health resource is <= 0
+    FadeInHudElement, // action: show a HUD element + crossfade its alpha 0->full over N frames
+    IsHudVisible,    // gate: passes exec while a given HUD element slot is visible
+    StopMusic,       // action: stop ONLY the persistent music track, leaving SFX ringing
+    LoopHudAnim,     // action: keep a HUD element's anim layers active + looping (re-arm per frame)
+    BeamClash,       // action: enable the beam-clash mechanic + set its tunables (runtime clash_sense)
+    IsClashReady,    // gate: passes exec while the runtime senses both full beams meeting
+    SuppressBeams,   // action: kill both in-flight projectiles (player + enemy)
+    ClashBegin,      // action: start a clash — centre the balance, reset, suppress beams
+    ClashPush,       // action: player's Cross tap pushes the clash balance toward the enemy
+    ClashAiStep,     // action: one struggle step — AI mash, clamp, mash-SFX pitch, button flash
+    IsClashWon,      // gate: clash balance pushed fully to the enemy (>= 1.0)
+    IsClashLost,     // gate: clash balance pushed fully into the player's zone (<= 0.0)
+    // --- Enemy combat AI (enemy BP) ---
+    IsAiState,       // gate: enemy AI state == param
+    IsPlayerWithin,  // gate: distance to player <= Range
+    IsPlayerBeyond,  // gate: distance to player > Range
+    IsAiFlag,        // gate: an enemy-AI per-frame flag (param selects which) is set
+    SetAiState,      // action: set the enemy AI state = param
+    AiSense,         // action: per-frame sense (slot/death/dist/face/cooldowns/flags)
+    AiRoam,          // action: ROAM clip (nav drives motion)
+    AiChase,         // action: close toward the player
+    AiStrafe,        // action: orbit the player at preferred distance
+    AiDodgeBegin,    // action: start a side-roll dodge
+    AiDodgeStep,     // action: integrate the dodge roll
+    AiChargeBegin,   // action: start a shot wind-up (charge vs tap)
+    AiChargeStep,    // action: grow the charge orb at the muzzle
+    AiFireBeam,      // action: launch the projectile
+    AiFireRecover,   // action: fire-recovery clip + timer
+    EnemyAI,         // action: enable the enemy AI + set its tunables
+    OrbitCamStep,    // action: advance the orbit-cam timer one frame (node-driven orbit)
+    StopOrbitCam,    // action: end the orbit cam (afn_cam_orbit_active = 0)
+    StepEnemyBeam,   // action: advance the enemy's in-flight projectile (flight + hit)
+    StepFocusBlast,  // action: advance the player's in-flight Focus Blast (flight + hit)
+    ShowHPBar,       // action: raise the floating HP bar for an object this frame
     COUNT
 };
 
@@ -1206,6 +1243,42 @@ static const VsNodeTypeDef sVsNodeDefs[] = {
     { "Spend Charge Energy", 0xFF3355AA, 1, 1, 2, 0, {"Min % (int)", "Max % (int)"}, {}, {} },
     { "Is Not Charging", 0xFF885533, 1, 1, 0, 0, {}, {}, {} },
     { "Cycle Value",     0xFF3355AA, 1, 1, 3, 0, {"Slot (int)", "Delta (int)", "Count (int)"}, {}, {} },
+    { "Orbit Cam On Obj", 0xFF3355AA, 1, 1, 6, 0, {"Target (obj)", "Zoom %", "Orbit Speed", "Pitch", "Zoom Ease", "Look Height"}, {}, {} },
+    { "Hold Skel Clip",  0xFF3355AA, 1, 1, 2, 0, {"Object", "Clip"}, {}, {} },
+    { "Is Health Zero",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Fade In Hud",     0xFF3355AA, 1, 1, 2, 0, {"Element", "Frames"}, {}, {} },
+    { "Is Hud Visible",  0xFF885533, 1, 1, 1, 0, {"Slot (int)"}, {}, {} },
+    { "Stop Music",      0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Loop Hud Anim",   0xFF3355AA, 1, 1, 1, 0, {"Element"}, {}, {} },
+    { "Beam Clash",      0xFFAA4422, 1, 1, 5, 0, {"Full Charge %", "Player Push", "AI Push", "AI Interval", "Meet Radius"}, {}, {} },
+    { "Is Clash Ready",  0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Suppress Beams",  0xFFAA4422, 1, 1, 0, 0, {}, {}, {} },
+    { "Clash Begin",     0xFFAA4422, 1, 1, 0, 0, {}, {}, {} },
+    { "Clash Push",      0xFFAA4422, 1, 1, 0, 0, {}, {}, {} },
+    { "Clash AI Step",   0xFFAA4422, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Clash Won",    0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Is Clash Lost",   0xFF885533, 1, 1, 0, 0, {}, {}, {} },
+    { "Is AI State",     0xFF885533, 1, 1, 1, 0, {"State"}, {}, {} },
+    { "Is Player Within",0xFF885533, 1, 1, 1, 0, {"Range"}, {}, {} },
+    { "Is Player Beyond",0xFF885533, 1, 1, 1, 0, {"Range"}, {}, {} },
+    { "Is AI Flag",      0xFF885533, 1, 1, 1, 0, {"Flag"}, {}, {} },
+    { "Set AI State",    0xFF55AA66, 1, 1, 1, 0, {"State"}, {}, {} },
+    { "AI Sense",        0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
+    { "AI Roam",         0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
+    { "AI Chase",        0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
+    { "AI Strafe",       0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
+    { "AI Dodge Begin",  0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
+    { "AI Dodge Step",   0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
+    { "AI Charge Begin", 0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
+    { "AI Charge Step",  0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
+    { "AI Fire Beam",    0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
+    { "AI Fire Recover", 0xFF55AA66, 1, 1, 0, 0, {}, {}, {} },
+    { "Enemy AI",        0xFF55AA66, 1, 1, 7, 0, {"Detect Range", "Lose Range", "Pref Dist", "Atk Cooldown", "Charge %", "Dodge %", "Move Speed"}, {}, {} },
+    { "Orbit Cam Step",  0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Stop Orbit Cam",  0xFF3355AA, 1, 1, 0, 0, {}, {}, {} },
+    { "Step Enemy Beam", 0xFFAA4422, 1, 1, 0, 0, {}, {}, {} },
+    { "Step Focus Blast",0xFFAA4422, 1, 1, 0, 0, {}, {}, {} },
+    { "Show HP Bar",     0xFF3355AA, 1, 1, 2, 0, {"Object", "Max HP"}, {}, {} },
 };
 
 // Build the LLM assistant's system prompt: the engine's save-format rules + a
@@ -1351,7 +1424,7 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::GetLayer:      desc = "Outputs a sprite's current draw priority layer."; break;
     case VsNodeType::SetAlpha:      desc = "Sets a sprite's alpha blend level (0=transparent, 16=opaque)."; break;
     case VsNodeType::Flash:         desc = "Flashes a sprite white for the specified number of frames."; break;
-    case VsNodeType::Delay:         desc = "Delays downstream execution by N frames (non-blocking)."; break;
+    case VsNodeType::Delay:         desc = "Fires downstream ONCE, N frames after the upstream gate opens (non-blocking, self-rearming). Drive it from a persistent gate (Is True / Is HP Zero / Is Health Zero), not a one-frame edge like On Rise. Re-fires fresh the next time the gate reopens (e.g. each battle)."; break;
     case VsNodeType::GetVelocityY:  desc = "Outputs the player's current vertical velocity."; break;
     case VsNodeType::SetSpriteScale:desc = "Sets the scale of a specific sprite."; break;
     case VsNodeType::RotateSprite:  desc = "Rotates a sprite by the given angle (brads)."; break;
@@ -1480,6 +1553,42 @@ static const char* VsNodeDesc(VsNodeType type) {
     case VsNodeType::FireChargeShot:desc = "Fire the charged focus blast (PSV): drive it from On Key Released (same button as Charge Shot). Snapshots the charged ball into a homing projectile aimed at the Lock On target (fires straight forward if nothing is locked), then clears the charge. Damage = damage at FULL charge and scales down with how long you actually held it (min 1); Speed = projectile world px/frame. On reaching the target it deals damage and despawns. Pair with Play Skel Anim(atk_spc_lnc / atk_spc_lnc_air)."; break;
     case VsNodeType::PlayHudAnim: desc = "Starts a HUD animation layer (resets frame to 0)."; break;
     case VsNodeType::StopHudAnim: desc = "Stops a HUD animation layer."; break;
+    case VsNodeType::IsClashReady: desc = "Gate: passes exec while the runtime senses a clash is ready (both sides' full-charge beams airborne and meeting). Pair with On Rise to fire the start sequence once: On Update -> Is Clash Ready -> On Rise -> Clash Begin + Show HUD + Play Sound + Freeze Player."; break;
+    case VsNodeType::SuppressBeams: desc = "Kills both in-flight projectiles (player + enemy orbs). Drive it every frame while the clash HUD is up so a late-fired beam can't reappear mid-struggle."; break;
+    case VsNodeType::ClashBegin: desc = "Starts a clash: centres the balance (0.5), resets the AI press timer + button flash, and suppresses the beams. Fire ONCE on the On Rise of Is Clash Ready."; break;
+    case VsNodeType::ClashPush: desc = "The player's Cross tap pushes the clash balance toward the enemy by Player Push/1000 (the Beam Clash tunable). Wire from On Key Pressed(Cross) -> Is Hud Visible(clash) so it only counts during the struggle."; break;
+    case VsNodeType::ClashAiStep: desc = "One struggle step: the mid-skilled-human AI mashes back (drains the balance on a jittered interval with occasional fumbles), clamps the balance to [0,1], keeps the mash SFX looping + pitched by the balance, and cycles the Cross button flash. Drive every frame while the clash HUD is visible."; break;
+    case VsNodeType::IsAiState: desc = "Gate: passes while the enemy AI state == State (0 Roam, 1 Chase, 2 Strafe, 3 Charge, 4 Fire, 5 Dodge, 6 Dead). Wire an Int into State. Dispatch each state's action node under it."; break;
+    case VsNodeType::IsPlayerWithin: desc = "Gate: passes while the distance from the enemy to the player is <= Range (world px). AI Sense computes the distance each frame. Use for detection (Range = Detect) and chase-reached (Range = Pref+30)."; break;
+    case VsNodeType::IsPlayerBeyond: desc = "Gate: passes while the distance to the player is > Range (world px). Pair with the lose-timer / Is AI Flag(lose_ready) for de-aggro."; break;
+    case VsNodeType::IsAiFlag: desc = "Gate: passes while an enemy-AI per-frame flag is set. Flag: 0 lose_ready, 1 dodge_ready, 2 can_fire, 3 charge_done, 4 dodge_done, 5 fire_done, 6 reached. AI Sense and the step nodes set these. Wire an Int into Flag."; break;
+    case VsNodeType::SetAiState: desc = "Sets the enemy AI state (0 Roam..6 Dead), which decides what Is AI State dispatches. The transition actions of the state machine."; break;
+    case VsNodeType::AiSense: desc = "Per-frame enemy sense: caches the enemy slot, handles death (-> Dead, KO cinematic via the BP), computes distance to the player, faces the player, ticks cooldowns, and sets the gate flags (lose/dodge/can-fire). Run it FIRST each frame: On Update -> AI Sense -> the state dispatch. Frozen during a beam clash."; break;
+    case VsNodeType::AiRoam: desc = "ROAM action: picks walk/idle clip while the navmesh drives the wander motion. Run under Is AI State(Roam)."; break;
+    case VsNodeType::AiChase: desc = "CHASE action: moves the enemy toward the player at Move Speed and sets the 'reached' flag at the strafe radius (Pref+30). Run under Is AI State(Chase)."; break;
+    case VsNodeType::AiStrafe: desc = "STRAFE action: circle-strafes the player, correcting toward the preferred distance, with an 8-direction clip. Run under Is AI State(Strafe)."; break;
+    case VsNodeType::AiDodgeBegin: desc = "Starts a side-roll dodge (picks a side, sets the roll vector/frames/cooldown). Fire once on the dodge-ready edge: Is AI Flag(dodge_ready) -> On Rise -> AI Dodge Begin + Set AI State(Dodge)."; break;
+    case VsNodeType::AiDodgeStep: desc = "Integrates the dodge roll (ease-in/out, wall collision) and sets 'dodge_done' when finished. Run under Is AI State(Dodge); on dodge_done -> Set AI State(Strafe)."; break;
+    case VsNodeType::AiChargeBegin: desc = "Starts a shot wind-up: rolls Charge % (full charge vs quick tap) and sets the wind-up length. Fire once on entering Charge."; break;
+    case VsNodeType::AiChargeStep: desc = "Holds the charge pose and grows the orb at the muzzle bone; sets 'charge_done' when the wind-up elapses. Run under Is AI State(Charge); on charge_done -> AI Fire Beam + Set AI State(Fire)."; break;
+    case VsNodeType::AiFireBeam: desc = "Launches the enemy projectile from the muzzle toward the player (sets damage/speed/homing and the full-beam flag for clashes), and starts the recovery + attack cooldown."; break;
+    case VsNodeType::AiFireRecover: desc = "Holds the launch clip and sets 'fire_done' when the recovery timer elapses. Run under Is AI State(Fire); on fire_done -> Set AI State(Strafe)."; break;
+    case VsNodeType::EnemyAI: desc = "Enables the enemy combat AI and sets its tunables: Detect/Lose/Pref ranges (world px), Atk Cooldown (frames), Charge % (full-shot chance), Dodge % (dodge chance), Move Speed (x1000). Drive from On Update in the enemy BP. The state machine lives in the AI nodes; this just turns it on + feeds the runtime primitives. Defaults 60/95/22/80/40/70/800."; break;
+    case VsNodeType::IsClashWon: desc = "Gate: passes when the clash balance is pushed fully to the enemy (>= 1.0). Use to resolve a win: hide the clash HUD, stop the struggle/mash SFX, play win_clash, and Set HP(enemy, 0)."; break;
+    case VsNodeType::IsClashLost: desc = "Gate: passes when the clash balance is pushed fully into the player's zone (<= 0.0). Use to resolve a loss: hide the clash HUD, stop the SFX, play win_clash, and Set Health(0)."; break;
+    case VsNodeType::BeamClash: desc = "Enables the beam-clash mechanic and sets its feel tunables (drive from On Update). When both sides' FULL-charge beams meet, the runtime raises the 2D mash struggle; Cross taps push the balance toward the enemy (Player Push/1000 each) while the AI drains it (AI Push/1000 every ~AI Interval frames). Full Charge % sets the charge threshold, Meet Radius the collision distance. Balance to 1 = enemy KO, to 0 = player death — both flow into the node results menu. Delete the node to disable clashing. Defaults: 85/60/50/6/18."; break;
+    case VsNodeType::StopMusic: desc = "Stops ONLY the persistent music track (battle music), leaving one-shot SFX ringing. Differs from Stop Sound (kills SFX, keeps music) and Stop All (kills both). Use on a win/lose so a clash 'win_clash' SFX survives under the victory fanfare."; break;
+    case VsNodeType::LoopHudAnim: desc = "Keeps a HUD element's anim layers active and looping — re-arms them and rewinds once they pass their length, so a layer that wasn't authored with Loop still blinks continuously. Drive it every frame: On Update -> Is Hud Visible(menu) -> Loop Hud Anim(cursor element)."; break;
+    case VsNodeType::IsHudVisible: desc = "Gate: passes exec only while the given HUD element slot is visible (afn_hud_visible[slot]). Use it to scope a menu's cursor-nav/confirm chain to the frames the menu is actually on screen — e.g. On Update -> Is Hud Visible(menu) -> On Key Pressed(Cross) -> Change Scene."; break;
+    case VsNodeType::FadeInHudElement: desc = "Show a HUD element and crossfade its alpha from 0 to full over Frames frames (the element-level fade, on top of any piece keyframes). Wire an element index into Element and a frame count into Frames (default 60 = ~1s). Use for a results-menu / dialog fade-in: pair On Rise (win/lose) -> Delay -> Fade In Hud."; break;
+    case VsNodeType::IsHealthZero: desc = "Gate: passes exec while the player's health resource (Damage Health / Set Health) is <= 0 — the player is defeated. Wire On Update -> Is Health Zero -> On Rise to fire a death cinematic / results screen once per death (On Rise re-arms when health refills on respawn)."; break;
+    case VsNodeType::HoldSkelClip: desc = "Play a skeletal clip on a rigged NPC ONCE and freeze its last frame — the death collapse. Wire an Object (Instance) into Object and a Skeletal Animation (e.g. die) into Clip. Like Set Skel Anim but it holds the final pose instead of looping; a later Set Skel Anim on the same NPC clears the hold. Pair with On Update -> Is HP Zero(self) + Do Once, and Orbit Cam On Obj(self), for a KO cinematic."; break;
+    case VsNodeType::OrbitCameraOnObject: desc = "BEGIN an orbit around a target object — the KO / death cinematic. Latches the anchor (angle + timer=0) and the params; pair with Orbit Cam Step (advances it each frame) and Stop Orbit Cam (ends it). Wire Attached Sprite (\"self\" in a blueprint) or an Object into Target; empty/-1 orbits the player. Tunable data pins (default to the KO feel when unwired): Zoom %% of camera distance (45), Orbit Speed milli-rad/frame (12), Pitch centi-rad (32), Zoom Ease per-mille/frame (60 = 0.06), Look Height added world-px (0). Fire once on the trigger (On Rise)."; break;
+    case VsNodeType::OrbitCamStep: desc = "Advances the orbit camera one frame (the runtime no longer auto-advances it). Drive once per frame while orbiting: On Update -> Orbit Cam Step. Harmless when not orbiting (the timer resets on each Orbit Cam On Obj). Put it in ONE per-frame chain so the orbit advances once per frame."; break;
+    case VsNodeType::StopOrbitCam: desc = "Ends the orbit camera (afn_cam_orbit_active = 0) so the normal follow/lock camera eases back in. Use to stop the orbit on demand instead of waiting for a scene swap."; break;
+    case VsNodeType::StepEnemyBeam: desc = "Advances the enemy's in-flight projectile one frame — homes toward the player, deals damage + despawns on contact, expires on lifetime. Drive every frame (On Update -> Step Enemy Beam) so a shot completes even after the enemy dies. Firing is the AI Fire Beam node."; break;
+    case VsNodeType::StepFocusBlast: desc = "Advances the player's in-flight Focus Blast one frame — homes toward the captured target, deals damage to its HP + despawns on contact, expires on lifetime. Drive every frame (On Update -> Step Focus Blast). Charge/release are the Charge Shot / Fire Charge Shot nodes."; break;
+    case VsNodeType::ShowHPBar: desc = "Raises the floating 3D-anchored HP bar above an object this frame (fill = HP / Max HP). Per-frame: drive from On Update so it shows continuously; it auto-hides when the object's HP hits 0. Wire Attached Sprite(self) or an Object into Object; Max HP sets the full-bar value (default 100)."; break;
     case VsNodeType::SetHudAnimSpeed: desc = "Sets the tick speed of a HUD animation layer (1=fastest, higher=slower)."; break;
     case VsNodeType::OnRise:        desc = "Rising-edge gate: only passes execution on the first frame the upstream condition becomes true. Blocks while it keeps firing. Resets when it stops."; break;
     case VsNodeType::ResetScene:    desc = "Reloads the current scene. Player respawns at start position."; break;
@@ -23023,7 +23132,7 @@ void FrameTick(float dt)
                 case VsNodeType::GetLayer:      desc = "Outputs a sprite's current draw priority layer."; break;
                 case VsNodeType::SetAlpha:      desc = "Sets a sprite's alpha blend level (0=transparent, 16=opaque)."; break;
                 case VsNodeType::Flash:         desc = "Flashes a sprite white for the specified number of frames."; break;
-                case VsNodeType::Delay:         desc = "Delays downstream execution by N frames (non-blocking)."; break;
+                case VsNodeType::Delay:         desc = "Fires downstream ONCE, N frames after the upstream gate opens (non-blocking, self-rearming). Drive it from a persistent gate (Is True / Is HP Zero / Is Health Zero), not a one-frame edge like On Rise. Re-fires fresh the next time the gate reopens (e.g. each battle)."; break;
                 case VsNodeType::GetVelocityY:  desc = "Outputs the player's current vertical velocity."; break;
                 case VsNodeType::SetSpriteScale:desc = "Sets the scale of a specific sprite."; break;
                 case VsNodeType::RotateSprite:  desc = "Rotates a sprite by the given angle (brads)."; break;
@@ -24416,6 +24525,324 @@ void FrameTick(float dt)
                         lkHeight / 4, (infoNode.paramInt[2] >> 1) & 1,
                         lkZoom, (infoNode.paramInt[2] & 1) ? "in" : "out", lkSide / 4);
                     setActionFunc(infoNode, "_lock_on", lcBuf);
+                    break;
+                }
+                case VsNodeType::FadeInHudElement: {
+                    editorCode = "// Show a HUD element + crossfade its alpha 0 -> full over N frames";
+                    setActionFunc(infoNode, "_fade_in_hud",
+                        "    afn_hud_visible[<Element>] = 1; afn_hud_elem_fade[<Element>] = 0;\n"
+                        "    afn_hud_fade_len[<Element>] = <Frames>; afn_hud_fade_dur[<Element>] = <Frames>;\n"
+                        "    // --- Runtime (psv main.c hud_render) ---\n"
+                        "    // Per-element fade: each frame hud_render ramps afn_hud_elem_fade[e]\n"
+                        "    // from 0 to 256 over <Frames>, for EVERY element with a live fade (so\n"
+                        "    // menu + cursor crossfade together). The draw multiplies piece alpha by\n"
+                        "    // afn_hud_elem_fade[e]/256 — a crossfade-in.");
+                    break;
+                }
+                case VsNodeType::IsClashReady: {
+                    editorCode = "// Gate: passes while the runtime senses both full beams meeting";
+                    setActionFunc(infoNode, "_is_clash_ready",
+                        "    if (afn_clash_ready) { /* downstream */ }\n"
+                        "    // --- Runtime (psv main.c clash_sense) ---\n"
+                        "    // clash_sense() sets afn_clash_ready=1 when BOTH sides' full-charge\n"
+                        "    // beams are airborne and either meet (within Meet Radius) or have both\n"
+                        "    // been up past the air fallback. Pair with On Rise to start once.");
+                    break;
+                }
+                case VsNodeType::SuppressBeams: {
+                    editorCode = "// Kill both in-flight projectiles (player + enemy)";
+                    setActionFunc(infoNode, "_suppress_beams",
+                        "    afn_clash_suppress_beams();\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_fb_active = afn_fb_charging = afn_fb_fire_timer = 0; afn_fb_level = 0;\n"
+                        "    // s_efbActive = s_efbCharging = 0;  // both orbs gone — drive each struggle\n"
+                        "    // frame so a late-fired beam can't reappear mid-clash.");
+                    break;
+                }
+                case VsNodeType::ClashBegin: {
+                    editorCode = "// Start a clash: centre balance, reset, suppress beams";
+                    setActionFunc(infoNode, "_clash_begin",
+                        "    afn_clash_begin();\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_clash_balance = 0.5; s_clashAiTap = afn_clash_ai_min; reset flash +\n"
+                        "    // air timer; afn_clash_suppress_beams();  // fire ONCE on the On Rise of\n"
+                        "    // Is Clash Ready, then Show HUD + Play Sound(clash/struggle/mash) + Freeze.");
+                    break;
+                }
+                case VsNodeType::ClashPush: {
+                    editorCode = "// Player Cross tap -> push balance toward the enemy";
+                    setActionFunc(infoNode, "_clash_push",
+                        "    afn_clash_balance += afn_clash_push_m * 0.001f;\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // Uses the Beam Clash node's Player Push tunable (x1000). Wire from On\n"
+                        "    // Key Pressed(Cross) -> Is Hud Visible(clash) so it only counts mid-struggle.\n"
+                        "    // afn_clash_ai_step() clamps the balance to [0,1] each frame.");
+                    break;
+                }
+                case VsNodeType::ClashAiStep: {
+                    editorCode = "// One struggle step: AI mash, clamp, mash pitch, button flash";
+                    setActionFunc(infoNode, "_clash_ai_step",
+                        "    afn_clash_ai_step();\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // Mid-skilled-human AI: a press every ~AI Interval frames (jitter +\n"
+                        "    // occasional fumble) drains AI Push/1000; clamps balance to [0,1]; keeps\n"
+                        "    // the mash SFX looping + pitched (50..150%) by balance; cycles the Cross\n"
+                        "    // button flash. Drive every frame while the clash HUD is visible.");
+                    break;
+                }
+                case VsNodeType::IsClashWon: {
+                    editorCode = "// Gate: clash balance pushed fully to the enemy (>= 1.0)";
+                    setActionFunc(infoNode, "_is_clash_won",
+                        "    if (afn_clash_balance >= 1.0f) { /* downstream */ }\n"
+                        "    // --- Runtime ---\n"
+                        "    // Win resolve: hide clash/mash HUD, Stop Sound(struggle/mash), Play\n"
+                        "    // Sound(win_clash), Set HP(enemy, 0) -> enemy KO + node results menu.");
+                    break;
+                }
+                case VsNodeType::IsClashLost: {
+                    editorCode = "// Gate: clash balance pushed into your zone (<= 0.0)";
+                    setActionFunc(infoNode, "_is_clash_lost",
+                        "    if (afn_clash_balance <= 0.0f) { /* downstream */ }\n"
+                        "    // --- Runtime ---\n"
+                        "    // Lose resolve: hide clash/mash HUD, Stop Sound(struggle/mash), Play\n"
+                        "    // Sound(win_clash), Set Health(0) -> player death cinematic + results menu.");
+                    break;
+                }
+                case VsNodeType::IsAiState: {
+                    editorCode = "// Gate: enemy AI state == State (0 Roam 1 Chase 2 Strafe 3 Charge 4 Fire 5 Dodge 6 Dead)";
+                    setActionFunc(infoNode, "_is_ai_state",
+                        "    if (afn_ai_state == <State>) { /* downstream */ }\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_ai_state is node-managed (Set AI State). 0 Roam 1 Chase 2 Strafe\n"
+                        "    // 3 Charge 4 Fire 5 Dodge 6 Dead. Dispatch each state's action under it.");
+                    break;
+                }
+                case VsNodeType::IsPlayerWithin: {
+                    editorCode = "// Gate: distance to player <= Range (world px)";
+                    setActionFunc(infoNode, "_is_player_within",
+                        "    if (afn_ai_dist <= <Range>) { /* downstream */ }\n"
+                        "    // afn_ai_dist set by AI Sense each frame. Use for detect / reached-distance.");
+                    break;
+                }
+                case VsNodeType::IsPlayerBeyond: {
+                    editorCode = "// Gate: distance to player > Range (world px)";
+                    setActionFunc(infoNode, "_is_player_beyond",
+                        "    if (afn_ai_dist > <Range>) { /* downstream */ }\n"
+                        "    // Use for de-aggro (pair with the AI Sense lose-timer / Is AI Flag lose_ready).");
+                    break;
+                }
+                case VsNodeType::IsAiFlag: {
+                    editorCode = "// Gate: an AI per-frame flag (Flag: 0 lose 1 dodge 2 canfire 3 chgDone 4 dodgeDone 5 fireDone 6 reached)";
+                    setActionFunc(infoNode, "_is_ai_flag",
+                        "    if (afn_ai_<flag>) { /* downstream */ }\n"
+                        "    // --- Runtime ---\n"
+                        "    // 0 lose_ready 1 dodge_ready 2 can_fire 3 charge_done 4 dodge_done\n"
+                        "    // 5 fire_done 6 reached. AI Sense / the step nodes set these each frame.");
+                    break;
+                }
+                case VsNodeType::SetAiState: {
+                    editorCode = "// Set the enemy AI state (drives which state dispatches)";
+                    setActionFunc(infoNode, "_set_ai_state", "    afn_ai_state = <State>;\n");
+                    break;
+                }
+                case VsNodeType::AiSense: {
+                    editorCode = "// Per-frame enemy sense: slot, death, distance, facing, cooldowns, flags";
+                    setActionFunc(infoNode, "_ai_sense",
+                        "    afn_ai_sense();\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // Caches the enemy slot, handles death (-> state Dead + KO cinematic via\n"
+                        "    // the BP), sets afn_ai_dist, faces the player, ticks cooldowns, and sets\n"
+                        "    // the gate flags (lose_ready/dodge_ready/can_fire). Frozen during a clash.\n"
+                        "    // Run FIRST every frame (On Update -> AI Sense -> state dispatch).");
+                    break;
+                }
+                case VsNodeType::AiRoam: {
+                    editorCode = "// ROAM: nav drives motion; pick walk/idle clip";
+                    setActionFunc(infoNode, "_ai_roam", "    afn_ai_roam();   // s_npcClip = nav-moving ? Move : Idle");
+                    break;
+                }
+                case VsNodeType::AiChase: {
+                    editorCode = "// CHASE: close toward the player (sets the 'reached' flag at strafe radius)";
+                    setActionFunc(infoNode, "_ai_chase", "    afn_ai_chase();   // move toward player at Move Speed; afn_ai_reached at pref+30");
+                    break;
+                }
+                case VsNodeType::AiStrafe: {
+                    editorCode = "// STRAFE: orbit the player at the preferred distance (8-dir clip)";
+                    setActionFunc(infoNode, "_ai_strafe", "    afn_ai_strafe();   // circle-strafe; radial correction toward Pref Dist");
+                    break;
+                }
+                case VsNodeType::AiDodgeBegin: {
+                    editorCode = "// Start a side-roll dodge (once, on the dodge-ready edge)";
+                    setActionFunc(infoNode, "_ai_dodge_begin", "    afn_ai_dodge_begin();   // pick a side, set roll vector + frames + cooldown");
+                    break;
+                }
+                case VsNodeType::AiDodgeStep: {
+                    editorCode = "// Integrate the dodge roll (sets 'dodge_done' when finished)";
+                    setActionFunc(infoNode, "_ai_dodge_step", "    afn_ai_dodge_step();   // ease-in/out roll + wall collide; afn_ai_dodge_done at end");
+                    break;
+                }
+                case VsNodeType::AiChargeBegin: {
+                    editorCode = "// Start a shot wind-up (rolls charge vs tap)";
+                    setActionFunc(infoNode, "_ai_charge_begin", "    afn_ai_charge_begin();   // Charge % roll -> windup length; s_efbCharging = 1");
+                    break;
+                }
+                case VsNodeType::AiChargeStep: {
+                    editorCode = "// Grow the charge orb at the muzzle (sets 'charge_done' when wound up)";
+                    setActionFunc(infoNode, "_ai_charge_step", "    afn_ai_charge_step();   // charge pose + orb at muzzle bone; afn_ai_charge_done at 0");
+                    break;
+                }
+                case VsNodeType::AiFireBeam: {
+                    editorCode = "// Launch the projectile toward the player";
+                    setActionFunc(infoNode, "_ai_fire_beam", "    afn_ai_fire_beam();   // aim from muzzle, set dmg/speed/homing/full-beam, start recover + atk cooldown");
+                    break;
+                }
+                case VsNodeType::AiFireRecover: {
+                    editorCode = "// Fire-recovery clip + timer (sets 'fire_done' when done)";
+                    setActionFunc(infoNode, "_ai_fire_recover", "    afn_ai_fire_recover();   // launch clip; afn_ai_fire_done when the recover timer elapses");
+                    break;
+                }
+                case VsNodeType::EnemyAI: {
+                    editorCode = "// Enable the enemy AI + set its tunables";
+                    setActionFunc(infoNode, "_enemy_ai",
+                        "    afn_ai_enabled = 1;\n"
+                        "    afn_ai_detect_r = <Detect Range>; afn_ai_lose_r = <Lose Range>; afn_ai_pref_r = <Pref Dist>;\n"
+                        "    afn_ai_atkcd = <Atk Cooldown>; afn_ai_chargeprob = <Charge %>; afn_ai_dodgeprob = <Dodge %>;\n"
+                        "    afn_ai_movespd_m = <Move Speed>;   // x1000 (800 = 0.8 px/frame)\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // The state machine lives in the AI helper nodes; this just enables it +\n"
+                        "    // feeds the knobs the runtime sense/move/charge primitives read.");
+                    break;
+                }
+                case VsNodeType::BeamClash: {
+                    editorCode = "// Enable the beam-clash mechanic + set its tunables";
+                    setActionFunc(infoNode, "_beam_clash",
+                        "    afn_clash_enabled = 1;\n"
+                        "    afn_clash_full_pct = <Full Charge %>; afn_clash_push_m = <Player Push>;\n"
+                        "    afn_clash_ai_push_m = <AI Push>; afn_clash_ai_min = <AI Interval>;\n"
+                        "    afn_clash_meet_r = <Meet Radius>;\n"
+                        "    // --- Runtime (psv main.c clash_tick) ---\n"
+                        "    // Gated by afn_clash_enabled. When the player's AND enemy's FULL-charge\n"
+                        "    // beams (>= Full Charge % of max) are both airborne and meet (within\n"
+                        "    // Meet Radius), it suppresses both, raises the 2D struggle (clash + mash\n"
+                        "    // HUD), and runs the mash: your Cross taps add Player Push/1000 to the\n"
+                        "    // balance, the AI drains AI Push/1000 every ~AI Interval frames. Balance\n"
+                        "    // to 1.0 -> enemy KO; to 0.0 -> afn_health=0. Both resolve into the\n"
+                        "    // node results menu (Is HP Zero / Is Health Zero).");
+                    break;
+                }
+                case VsNodeType::StopMusic: {
+                    editorCode = "// Stop only the persistent music track (SFX keep ringing)";
+                    setActionFunc(infoNode, "_stop_music",
+                        "    afn_stop_music();\n"
+                        "    // --- Runtime (psv audio.c) ---\n"
+                        "    // Stops ONLY the linked-persistent track (battle music) and clears the\n"
+                        "    // persist slot, leaving one-shot SFX ringing. Unlike Stop Sound (which\n"
+                        "    // kills SFX but KEEPS music) and Stop All (kills both) — use this on a\n"
+                        "    // win/lose so a clash 'win_clash' SFX survives under the victory fanfare.");
+                    break;
+                }
+                case VsNodeType::LoopHudAnim: {
+                    editorCode = "// Keep a HUD element's anim layers active + looping";
+                    setActionFunc(infoNode, "_loop_hud_anim",
+                        "    // for each anim layer of element <Element>:\n"
+                        "    //   afn_hud_layer_active[L] = 1;\n"
+                        "    //   if (frame >= length) { frame = 0; tick = 0; }  // rewind = loop\n"
+                        "    // --- Runtime (psv main.c hud anim) ---\n"
+                        "    // Drive it every frame (On Update -> Is Hud Visible -> Loop Hud Anim) so\n"
+                        "    // a layer that isn't flagged Loop still blinks continuously — e.g. the\n"
+                        "    // results-menu cursor. Resolves layers via the element's pieces, no index.");
+                    break;
+                }
+                case VsNodeType::IsHudVisible: {
+                    editorCode = "// Gate: passes exec only while HUD element <Slot> is visible";
+                    setActionFunc(infoNode, "_is_hud_visible",
+                        "    if (afn_hud_visible[<Slot>]) {\n"
+                        "        // ...downstream...\n"
+                        "    }\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // afn_hud_visible[] is set by Show HUD / Fade In Hud and cleared by\n"
+                        "    // Hide HUD. Use this to scope a menu's cursor nav + confirm so they\n"
+                        "    // only run on frames the menu is actually on screen.");
+                    break;
+                }
+                case VsNodeType::HoldSkelClip: {
+                    editorCode = "// Play a rig clip on an NPC once and freeze the last frame";
+                    setActionFunc(infoNode, "_hold_skel_clip",
+                        "    afn_skel_anim_obj = <object>; afn_skel_anim_clip = <clip>; afn_skel_anim_hold = 1;\n"
+                        "    // --- Runtime (psv main.c rigs_render) ---\n"
+                        "    // s_npcClip[i] = <clip>; s_npcClipHold[i] = 1; s_npcFrame[i] = 0;\n"
+                        "    // Then the rig advance plays the clip to its last frame and\n"
+                        "    // holds (no loop wrap) — the death collapse. A plain Set Skel\n"
+                        "    // Anim on the same NPC clears the hold and resumes normal play.");
+                    break;
+                }
+                case VsNodeType::OrbitCameraOnObject: {
+                    editorCode = "// BEGIN an orbit around a target (anchor + params). Pair with Orbit Cam Step.";
+                    setActionFunc(infoNode, "_orbit_cam_obj",
+                        "#ifdef AFN_HAS_SPRITE_IDX // PSV\n"
+                        "    afn_cam_orbit_obj = <target>;   // editor sprite idx, or -1 = player\n"
+                        "    afn_cam_orbit_angle0 = orbit_angle * (6.2831853f / 65536.0f);\n"
+                        "    afn_cam_orbit_timer = 0; afn_cam_orbit_active = 1;\n"
+                        "    afn_cam_orbit_zoom_pct = <Zoom %>;   // default 45 (% of cam distance)\n"
+                        "    afn_cam_orbit_rate_mr  = <Orbit Speed>; // default 12 (milli-rad/frame)\n"
+                        "    afn_cam_orbit_pitch_cr = <Pitch>;    // default 32 (centi-rad)\n"
+                        "    afn_cam_orbit_ease_pm  = <Zoom Ease>; // default 60 (per-mille/frame)\n"
+                        "    afn_cam_orbit_lookh    = <Look Height>; // default 0 (added world-px)\n"
+                        "#endif\n"
+                        "    // --- Runtime (psv main.c camera block) ---\n"
+                        "    // BEGIN only (latches angle0 + timer=0 + the params). The orbit ADVANCES\n"
+                        "    // via the Orbit Cam Step node (timer++ each frame) and ENDS via Stop Orbit\n"
+                        "    // Cam (or a scene swap). While active: look at the object box center +\n"
+                        "    // Look Height; camAngle = angle0 + (rate/1000)*timer; effDist eases toward\n"
+                        "    // camDist*(zoom/100) by ease/1000; pitch = pitch_cr/100.");
+                    break;
+                }
+                case VsNodeType::OrbitCamStep: {
+                    editorCode = "// Advance the orbit one frame (drive every frame while orbiting)";
+                    setActionFunc(infoNode, "_orbit_cam_step",
+                        "    afn_cam_orbit_timer++;\n"
+                        "    // --- Runtime ---\n"
+                        "    // The runtime no longer auto-advances the orbit; this node does. Drive it\n"
+                        "    // once per frame (On Update -> Orbit Cam Step) — harmless when not orbiting\n"
+                        "    // (the timer resets on each Orbit Cam On Obj). One step per frame total.");
+                    break;
+                }
+                case VsNodeType::StopOrbitCam: {
+                    editorCode = "// End the orbit cam (camera springs back to normal follow)";
+                    setActionFunc(infoNode, "_stop_orbit_cam",
+                        "    afn_cam_orbit_active = 0;\n"
+                        "    // --- Runtime ---\n"
+                        "    // Clears the orbit override; the normal follow/lock camera eases back in.");
+                    break;
+                }
+                case VsNodeType::StepEnemyBeam: {
+                    editorCode = "// Advance the enemy's in-flight projectile (flight + hit)";
+                    setActionFunc(infoNode, "_step_enemy_beam",
+                        "    afn_enemy_beam_step();\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // Homes the fired orb toward the player, deals s_efbDmg + despawns on\n"
+                        "    // contact (afn_health -= dmg), expires on lifetime. Drive every frame so\n"
+                        "    // a shot completes even after the enemy dies. Firing = the AI Fire Beam node.");
+                    break;
+                }
+                case VsNodeType::StepFocusBlast: {
+                    editorCode = "// Advance the player's in-flight Focus Blast (flight + hit)";
+                    setActionFunc(infoNode, "_step_focus_blast",
+                        "    afn_focus_blast_step();\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // Homes the launched orb toward the captured target, deals afn_fb_cur_dmg\n"
+                        "    // to afn_hp[target] + despawns on contact, expires on lifetime. Drive every\n"
+                        "    // frame. Charge/release = the Charge Shot / Fire Charge Shot nodes.");
+                    break;
+                }
+                case VsNodeType::ShowHPBar: {
+                    editorCode = "// Raise the floating HP bar for an object this frame";
+                    setActionFunc(infoNode, "_show_hp_bar",
+                        "    afn_hpbar_active = 1; afn_hpbar_obj = <Object>; afn_hpbar_max = <Max HP>;\n"
+                        "    // --- Runtime (psv main.c HUD render) ---\n"
+                        "    // Per-frame flag: the runtime draws a 3D-anchored HP bar above the object\n"
+                        "    // (fill = afn_hp[obj]/Max HP), then clears the flag. Drive every frame\n"
+                        "    // (On Update -> Show HP Bar). Object = Attached Sprite(self) or an Object.");
                     break;
                 }
                 case VsNodeType::ReleaseLockOn: {
@@ -26076,16 +26503,21 @@ void FrameTick(float dt)
                     break;
                 }
                 case VsNodeType::Delay: {
-                    editorCode = "// Delay downstream by N frames";
-                    char bodyBuf5[384];
+                    editorCode = "// Fire downstream once, N frames after the upstream gate opens";
+                    char bodyBuf5[640];
                     snprintf(bodyBuf5, sizeof(bodyBuf5),
-                        "    static int afn_delay_%d = 0;\n"
-                        "    if (afn_delay_%d > 0) { afn_delay_%d--; return; }\n"
-                        "    afn_delay_%d = %s;\n"
-                        "    // --- Runtime (main.c) ---\n"
-                        "    // Static counter ticks each frame; downstream gated until counter reaches 0",
-                        infoNode.id, infoNode.id, infoNode.id,
-                        infoNode.id, fmtInt(infoNode.id, 0, "<frames>"));
+                        "    static int last=-1000000, start=0, fired=0;\n"
+                        "    if (afn_frame_count - last > 1) { start = afn_frame_count; fired = 0; } // gap = reopened\n"
+                        "    last = afn_frame_count;\n"
+                        "    if (!fired && afn_frame_count - start >= %s) { fired = 1; /* downstream */ }\n"
+                        "    // --- Runtime (psv main.c) ---\n"
+                        "    // Self-rearming one-shot. 'last' tracks the last frame reached, 'start'\n"
+                        "    // the current open-streak (kept SEPARATE so the count accumulates),\n"
+                        "    // 'fired' a one-shot latch. Fires downstream once %s frames after a\n"
+                        "    // PERSISTENT gate (IsTrue/IsHPZero/IsHealthZero) opens; a >1-frame gap\n"
+                        "    // (gate closed, next battle) re-arms it. Drive from a persistent gate,\n"
+                        "    // NOT a one-frame edge (On Rise).",
+                        fmtInt(infoNode.id, 0, "<frames>"), fmtInt(infoNode.id, 0, "<frames>"));
                     setActionFunc(infoNode, "_delay", bodyBuf5);
                     break;
                 }
